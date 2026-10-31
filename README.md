@@ -316,7 +316,8 @@ auth service signs in by OpenID Connect, and an omnishell that draws a
 provider's way in (the `feat/auth-oidc` forks).
 
 ```sh
-<this repo>/bin/pronto-identity . [broker=<url>] [brokerInternal=<url>] [providers=<a,b>]
+<this repo>/bin/pronto-identity . frontImage=<registry>/pronto-identity:<version>@sha256:<digest> [providers=<a,b>]
+# or, signing in through a broker elsewhere, with no frontImage: broker=https://… [brokerInternal=<url>]
 ./saytw generate && ./saytw lint
 ```
 
