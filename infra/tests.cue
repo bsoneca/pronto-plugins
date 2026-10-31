@@ -269,3 +269,26 @@ invokerGrantWaitsForAccount: _n.google_cloud_run_v2_service_iam_binding.example_
 
 // Every plan file the verbs write is ignored.
 ignoresPlans: strings.Contains(_host.files[".gitignore"].text, "tofu/*.tfplan*") & true
+
+// An account made in one project is waited for by a grant in another.
+_two: #Plan & {
+	backend: _plan.backend
+	state: projects: {
+		"example-project-123": {
+			billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+			adoptAll: true
+			serviceAccounts: "my-app-run": displayName: "my-app"
+		}
+		"example-project-456": {
+			billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+			adoptAll: true
+			repositories: pronto: {location: "us-central1", format: "DOCKER", iam: "roles/artifactregistry.reader": (_acct): true}
+			iam: "roles/viewer": (_acct):     true
+			members: "roles/editor": (_acct): true
+		}
+	}
+}
+_x: _two.tofu.resource
+crossRepositoryGrantWaits: _x.google_artifact_registry_repository_iam_binding.example_project_456_pronto_roles_artifactregistry_reader.depends_on & ["google_artifact_registry_repository.example_project_456_pronto", "google_service_account.example_project_123_my_app_run"]
+crossProjectGrantWaits: _x.google_project_iam_binding.example_project_456_roles_viewer.depends_on & _waitsAccount
+crossProjectMemberWaits: [for k, r in _x.google_project_iam_member if r.role == "roles/editor" {r.depends_on}] & [_waitsAccount]

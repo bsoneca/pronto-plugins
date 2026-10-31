@@ -35,6 +35,14 @@ import (
 	// resources all new, so its imports are left out.
 	_imports: [Address=string]: {to: Address, id: string, project: string}
 
+	// The accounts this state keeps in any project, by the member that names them: a grant naming
+	// one waits for it, whichever project the grant is in.
+	let accounts = {
+		for _, Q in state.projects for nm, sa in Q.serviceAccounts if Q.adoptAll || list.Contains(*Q.adopt["serviceAccounts"] | [], nm) {
+			("serviceAccount:\(sa.email)"): "google_service_account.\((#name & {in: "\(Q.id)_\(nm)"}).out)"
+		}
+	}
+
 	for P in state.projects {
 		let adopted = {
 			for kind in ["apis", "iam", "members", "serviceAccounts", "repositories", "repositoryIam", "buckets", "secrets", "runJobs", "runServices", "databases"] {
@@ -51,13 +59,6 @@ import (
 
 		// What a resource waits for: the project if this state makes it, and the services it enables.
 		let deps = list.Concat([proj, [for svc, _ in P.apis if P.adoptAll || adopted.apis[svc] != _|_ {"google_project_service.\((#name & {in: "\(P.id)_\(svc)"}).out)"}]])
-
-		// The accounts this state keeps, by the member that names them: a grant naming one waits for it.
-		let accounts = {
-			for nm, sa in P.serviceAccounts if P.adoptAll || adopted.serviceAccounts[nm] != _|_ {
-				("serviceAccount:\(sa.email)"): "google_service_account.\((#name & {in: "\(P.id)_\(nm)"}).out)"
-			}
-		}
 
 		// A project grant may name an account made beside it.
 		let iamDeps = list.Concat([deps, [for nm, _ in P.serviceAccounts if P.adoptAll || adopted.serviceAccounts[nm] != _|_ {"google_service_account.\((#name & {in: "\(P.id)_\(nm)"}).out)"}]])
@@ -100,14 +101,14 @@ import (
 
 		for rl, ms in P.iam if P.adoptAll || adopted.iam[rl] != _|_ {
 			let k = (#name & {in: "\(P.id)_\(rl)"}).out
-			tofu: resource: google_project_iam_binding: (k): {depends_on: iamDeps, project: P.id, role: rl, members: (#members & {in: ms}).out}
+			tofu: resource: google_project_iam_binding: (k): {depends_on: list.Concat([iamDeps, [for m, _ in ms if accounts[m] != _|_ if !list.Contains(iamDeps, accounts[m]) {accounts[m]}]]), project: P.id, role: rl, members: (#members & {in: ms}).out}
 			if fresh.iam[rl] == _|_ {_imports: "google_project_iam_binding.\(k)": {id: "\(P.id) \(rl)", project: P.id}}
 		}
 
 		for rl, ms in P.members if P.adoptAll || adopted.members[rl] != _|_ {
 			for m, _ in ms {
 				let k = (#name & {in: "\(P.id)_\(rl)_\(m)"}).out
-				tofu: resource: google_project_iam_member: (k): {depends_on: iamDeps, project: P.id, role: rl, member: m}
+				tofu: resource: google_project_iam_member: (k): {depends_on: list.Concat([iamDeps, [if accounts[m] != _|_ if !list.Contains(iamDeps, accounts[m]) {accounts[m]}]]), project: P.id, role: rl, member: m}
 				if fresh.members[rl] == _|_ {_imports: "google_project_iam_member.\(k)": {id: "\(P.id) \(rl) \(m)", project: P.id}}
 			}
 		}

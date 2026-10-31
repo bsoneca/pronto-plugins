@@ -599,6 +599,7 @@ its own lists replaced whole and other hosts' rules kept.
 ./saytw --script tools.nu cue vet -c ./infra
 ./saytw --script tools.nu cue vet -c ./examples/infra
 ./saytw --script tools.nu cue vet -c -t module=example.com/infra@v0 -t bucket=my-org-infra-tfstate -t project=check-project ./infra/export
+./saytw --script tools.nu nu infra/test.nu
 ./saytw --script tools.nu cue vet -c ./journeys
 ./saytw --script tools.nu cue vet -c -t package=check ./journeys/export
 ./saytw --script tools.nu nu journeys/test.nu

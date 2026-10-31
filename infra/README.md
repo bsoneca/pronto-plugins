@@ -14,6 +14,7 @@ infra/
   say.cue.txt   the verbs written there: setup, generate, lint, verify@infra, release@infra
   export/       the host's files by tag, for bin/pronto-infra
   tests.cue     the schema's constraints and the export's output, checked by cue vet
+  test.nu       every plan of tests.cue and the example, exported whole and run through tofu validate
 ```
 
 ## Set up a folder
@@ -87,4 +88,5 @@ revision.
 ./saytw --script tools.nu cue vet -c ./infra
 ./saytw --script tools.nu cue vet -c ./examples/infra
 ./saytw --script tools.nu cue vet -c -t module=example.com/infra@v0 -t bucket=my-org-infra-tfstate -t project=my-admin-project ./infra/export
+./saytw --script tools.nu nu infra/test.nu     # each plan exported in its own folder, tofu init and validate
 ```
