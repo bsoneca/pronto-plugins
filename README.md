@@ -13,6 +13,7 @@ beyond the browser, and beside them, on unmodified pronto. Why and how they are 
 - [flags](flags/README.md): feature flags on OpenFeature and flagd.
 - [gcp](gcp/README.md): release to Cloud Run.
 - [identity](identity/README.md): social sign-in through a shared broker.
+- [infra](infra/README.md): a Google Cloud state kept in CUE, applied by OpenTofu.
 - [intents](intents/README.md): one-command plumbing behind `bin/pronto`.
 - [journeys](journeys/README.md): user-journey SLOs from the terminal's telemetry.
 - [perf](perf/README.md): frame, interaction and paint timings on readers' devices.
