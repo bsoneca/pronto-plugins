@@ -4,10 +4,23 @@ Host plugins for [pronto](https://github.com/bonisoft3/pronto) terminals
 beyond the browser, and beside them, on unmodified pronto. Why and how they are shaped:
 [a native terminal](docs/native-terminal.md).
 
+## Plugins
+
+- [ads](ads/README.md): rewarded ads a player chooses to watch.
+- [android](android/README.md): a native Android host, no WebView.
+- [billing](billing/README.md): paid plans through a shared Stripe broker.
+- [firebase](firebase/README.md): release to Firebase Hosting.
+- [flags](flags/README.md): feature flags on OpenFeature and flagd.
+- [gcp](gcp/README.md): release to Cloud Run.
+- [identity](identity/README.md): social sign-in through a shared broker.
+- [intents](intents/README.md): one-command plumbing behind `bin/pronto`.
+- [journeys](journeys/README.md): user-journey SLOs from the terminal's telemetry.
+- [perf](perf/README.md): frame, interaction and paint timings on readers' devices.
+
 ## pronto-intents
 
-Say what you want for an app, and it is done: "release prontoweeper", "connect stripe to
-reclaim-clone", "what's left before prontoweeper can sell?". The skill
+Say what you want for an app, and it is done: "release my-app", "connect stripe to
+my-shop", "what's left before my-app can sell?". The skill
 (`skills/pronto-intents`) runs pronto's intents (`bin/pronto`, docs/intents.md), which check
 every step, apply what is the program's, and stop only where a person must act: a price to
 choose, Stripe's form to fill.
@@ -303,7 +316,8 @@ auth service signs in by OpenID Connect, and an omnishell that draws a
 provider's way in (the `feat/auth-oidc` forks).
 
 ```sh
-<this repo>/bin/pronto-identity . [broker=<url>] [brokerInternal=<url>] [providers=<a,b>]
+<this repo>/bin/pronto-identity . frontImage=<registry>/pronto-identity:<version>@sha256:<digest> [providers=<a,b>]
+# or, signing in through a broker elsewhere, with no frontImage: broker=https://… [brokerInternal=<url>]
 ./saytw generate && ./saytw lint
 ```
 
@@ -401,11 +415,11 @@ the operator's to add.
 ### An app
 
 ```sh
-deno run billing/owner.ts new                    # the author's secret, and its hash
+deno run <this repo>/billing/owner.ts new                    # the author's secret, and its hash
 <this repo>/bin/pronto-billing <app-dir> <hash>  # writes the files below
 # say what the app sells in billing_spec.cue, and gate the paid feature
 ./saytw generate && ./saytw lint
-PRONTO_BILLING_OWNER=<secret> deno run --allow-net --allow-env billing/owner.ts onboard <broker> <origin> <email>
+PRONTO_BILLING_OWNER=<secret> deno run --allow-net --allow-env <this repo>/billing/owner.ts onboard <broker> <origin> <email>
 ```
 
 | Path in the app | |
@@ -552,12 +566,12 @@ end, `"dismissed"` when it was closed before, and `"none"` with no ad to show.
 | `pronto/ads.cue`, `ads/ads.nu` | the generate step giving the door `/ads.txt` again after pronto's writer, the publisher's line, which AdSense reads to verify the site |
 | `ads_spec.cue` | written once, then the app's: its publisher, `""` for none |
 
-For now the ad is a stand-in that plays at a press, as billing's stand-in
-Stripe pays at one. Google's ads (the Ad Placement API, H5 Games Ads) take its
-place once the app names its AdSense publisher and the door's policy admits
-Google's scripts and frames. Google's ads for the web tell no server an ad was
-watched, so the page alone knows: whatever a reward gives away, the app's
-database bounds (one a day an account, say, in the app's own migration).
+The ad is always a stand-in that plays at a press, as billing's stand-in Stripe
+pays at one. Real ads are not implemented: naming an AdSense publisher only
+writes its line in `/ads.txt`, and `rewarded()` still shows the stand-in.
+Google's ads for the web tell no server an ad was watched, so the page alone
+knows: whatever a reward gives away, the app's database bounds (one a day an
+account, say, in the app's own migration).
 
 ## Hosts share `.say.json`
 
@@ -582,8 +596,8 @@ its own lists replaced whole and other hosts' rules kept.
 ./saytw --script tools.nu nu perf/test.nu
 ./saytw --script tools.nu nu flags/test/live_test.nu
 ./saytw --script tools.nu cue vet -c ./identity
-./saytw --script tools.nu cue vet -c -t package=check ./identity/export
-deno test --no-config --allow-net identity/oidc_test.ts identity/broker identity/app/identity_core_test.ts
+./saytw --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
+deno test --no-config --allow-net identity/oidc_test.ts identity/broker
 deno lint --no-config billing && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
 deno lint --no-config flags && FLAGD=$(mise where http:flagd)/flagd deno test --no-config --allow-read --allow-write --allow-run --allow-env --allow-net flags  # cue on PATH
 deno lint --no-config ads && deno test --no-config --allow-read --allow-write --allow-run ads

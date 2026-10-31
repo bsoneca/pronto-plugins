@@ -29,7 +29,7 @@ testPackage: strings.HasPrefix(_t.files["android/app/src/test/kotlin/dev/pronto/
 _manifest: _t.files["android/app/src/main/AndroidManifest.xml"].text
 fillBound: strings.Contains(_manifest, "android:permission=\"android.permission.BIND_AUTOFILL_SERVICE\"") & true
 noBackup: strings.Contains(_manifest, "android:allowBackup=\"false\"") & true
-labelled: strings.Contains((#Host & {app: "prontokeep", label: "ProntoKeep"}).files["android/app/src/main/AndroidManifest.xml"].text, "android:label=\"ProntoKeep\"") & true
+labelled: strings.Contains((#Host & {app: "myvault", label: "MyVault"}).files["android/app/src/main/AndroidManifest.xml"].text, "android:label=\"MyVault\"") & true
 
 // Android refuses a hyphen in an application id, and an app's name admits one.
 idFromHyphen: (#Host & {app: "pass-vault"}).applicationId & "dev.pronto.pass_vault"

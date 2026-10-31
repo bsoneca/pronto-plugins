@@ -4,7 +4,7 @@
 //     [--country BR] [--project <secrets-project>] [--secrets-file <path>]
 //     [--studio | --before-release | --after-release] [--json]
 // --secrets-file keeps the secret in a file instead, for a trial on a developer's machine.
-// A host that releases apps itself (Pronto Studio) runs it in three places: in a turn with --studio,
+// A host that releases apps itself (a hosted builder) runs it in three places: in a turn with --studio,
 // the app's own files alone, its payout secret left to the release; before a release it makes with
 // --before-release (the secret, the broker); after it, with --after-release and the origin, for
 // Stripe's link. --json prints the outcomes as one JSON array, for a program to read.
@@ -47,6 +47,6 @@ if (flags.json) {
   for (const o of await plan(all)) console.log(line(o));
 } else {
   const out = await connect(all, (o) => console.log(line(o)));
-  const done = options.studio ? " in the app: Studio sets its payouts up once it is released" : options.origin ? "" : " for test mode: with --origin, the live steps run once the app is released";
+  const done = options.studio ? " in the app: the builder sets its payouts up once it is released" : options.origin ? "" : " for test mode: with --origin, the live steps run once the app is released";
   console.log(finished(out, all) ? `\nStripe is connected${done}.` : waitingOn(out));
 }

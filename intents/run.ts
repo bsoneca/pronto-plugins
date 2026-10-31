@@ -75,7 +75,7 @@ export function waitingOn(out: readonly Outcome[]): string {
   return url ? `\n${last!.step}: open this, then run the same command again.\n\n  ${url}\n` : "\nRun the same command again once the step above is done: it goes on from there.";
 }
 
-/** One line an outcome, as a terminal or Studio's conversation shows it. */
+/** One line an outcome, as a terminal or the builder's conversation shows it. */
 export function line(o: Outcome): string {
   const mark = { done: "✓", applied: "✓", todo: "·", gate: "→", failed: "✗" }[o.state];
   const verb = { done: "", applied: " (done now)", todo: "", gate: " — waiting on you", failed: " — failed" }[o.state];

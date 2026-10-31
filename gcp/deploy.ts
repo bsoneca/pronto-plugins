@@ -57,7 +57,7 @@ export interface Options {
   region: string;
   /** Whether to release: without it the intent stops at a gate, every check passed. */
   release?: boolean;
-  /** A project shared with other apps, as a host that releases apps (Pronto Studio) names it: a
+  /** A project shared with other apps, as a host that releases apps (a hosted builder) names it: a
    * release there goes out without a warm preview, only with a pronto that keeps each app's
    * secrets its own, and only from that host. None by default. */
   shared?: string;
@@ -96,7 +96,7 @@ export function steps(d: Deps, o: Options): Step[] {
         return listed ? { done: true, note: /project:\s*"([^"]+)"/.exec(rel)?.[1] ?? "" } : { todo: `the program lists no "gcp" among its targets` };
       },
       apply: async () => {
-        // As Pronto Studio writes it too: gcp among the program's targets where it lists
+        // As a hosted builder writes it too: gcp among the program's targets where it lists
         // them, else in release.cue; an existing release.cue only gains the target.
         const src = await program();
         const listed = withTarget(src, "gcp");
@@ -146,16 +146,16 @@ export function steps(d: Deps, o: Options): Step[] {
         if (released) return { done: true };
         const at = planned && await d.address(planned);
         if (o.release && !o.studio && o.shared && planned?.project === o.shared) {
-          return { gate: `${d.app} runs in ${o.shared}, beside Studio's apps: release it from Studio.` };
+          return { gate: `${d.app} runs in ${o.shared}, beside the builder's apps: release it from the builder.` };
         }
         if (o.release) return { todo: at ? `a new version of ${at}` : "its first release" };
         if (at) return { done: true, note: `${at} (--release puts out a new version)` };
-        return { gate: `every check passed: run again with --release to make its service and database${o.shared ? `, or release it from Studio when it is one of Studio's apps` : ""}.` };
+        return { gate: `every check passed: run again with --release to make its service and database${o.shared ? `, or release it from the builder when it is one of the builder's apps` : ""}.` };
       },
       apply: async () => {
         const rel = (await d.read(`${d.dir}/${RELEASE}`)) ?? "";
         // An app in the shared project goes out without the warm preview a release otherwise tests
-        // first, as Pronto Studio releases it.
+        // first, as a hosted builder releases it.
         const r = await d.saytw(`release@${target}`, target === "gcp" && inShared(rel, sharedCloud) ? { SAY_RELEASE_ARGS_NO_GATE: "true" } : {});
         if (!r.ok) throw new Error(`./saytw release@${target}: ${r.out}`);
         released = true;

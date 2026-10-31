@@ -11,12 +11,12 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 mode=${1:?release, connect, deploy or plan}
 if [ "$mode" = release ] || { [ "$mode" = plan ] && [ "${2:-}" = release ]; }; then
 	[ "$mode" = plan ] && shift
-	app=${2:?the app, such as prontoweeper}
+	app=${2:?the app, such as my-app}
 	shift 2
 	intent=release
 else
 	intent=${2:?the intent, such as stripe}
-	app=${3:?the app, such as prontoweeper}
+	app=${3:?the app, such as my-app}
 	shift 3
 fi
 # An app's name is its folder under the repository's apps/.

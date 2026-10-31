@@ -1,5 +1,5 @@
 // `deploy gcp` (gcp/deploy.ts, docs/intents.md) on a stand-in shop that keeps rows on a server:
-// its release target written as Studio writes it, generated, its plan rendered as the dry run, its
+// its release target written as the builder writes it, generated, its plan rendered as the dry run, its
 // checks passed, and only when asked released and answering.
 package unit
 
@@ -21,7 +21,7 @@ cases: {
 		{call: "probe.includes", args: ["$", "targets: [\"gcp\"]"], expect: true, why: "gcp among the program's targets"},
 		{call: "shop.verbs", args: ["$shop"], expect: ["generate", "lint", "test"], why: "nothing released"},
 		{call: "shop.deployed", args: ["$shop", _apps & {release: true, studio: true}]},
-		{pick: ["finished", "notes.6"], expect: [true, "https://shop-1.us-central1.run.app"], why: "released from Studio, it answers"},
+		{pick: ["finished", "notes.6"], expect: [true, "https://shop-1.us-central1.run.app"], why: "released from the builder, it answers"},
 		{call: "shop.verbs", args: ["$shop"]},
 		{call: "probe.from", args: ["$", 3], expect: ["lint", "test", "release@gcp (no gate)"], why: "in the shared project, without the warm preview"},
 		{call: "shop.deployed", args: ["$shop", _apps, "plan"]}, {get: "states"},
@@ -42,11 +42,11 @@ cases: {
 		{call: "shop.verbs", args: ["$shop"], expect: ["lint", "test", "release@k8s"]},
 		{call: "shop.file", args: ["$shop", "program.cue"], expect: _server, why: "the author's program untouched"},
 	]}
-	"an app in Studio's shared project is released from Studio, not from a terminal": {suite: "deploy", steps: [
+	"an app in the builder's shared project is released from the builder, not from a terminal": {suite: "deploy", steps: [
 		{call: "shop.deploy"}, {keep: "shop"},
 		{call: "shop.deployed", args: ["$shop", _apps & {release: true, studio: false}]}, {keep: "out"},
 		{pick: ["names.5", "states.5"], expect: ["released", "gate"]},
-		{use: "out"}, {get: "notes.5", matches: "from Studio"},
+		{use: "out"}, {get: "notes.5", matches: "from the builder"},
 		{call: "shop.verbs", args: ["$shop"], expect: ["generate", "lint", "test"], why: "nothing released"},
 	]}
 	"a web app needs no Cloud Run, and nothing is touched": {suite: "deploy", steps: [

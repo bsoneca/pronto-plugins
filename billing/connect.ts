@@ -37,10 +37,10 @@ export interface Options {
   /** Where Stripe reaches the author about payouts, and the country they are paid in. */
   email?: string;
   country?: string;
-  /** In a Studio turn: the payout secret is left to Studio's release, which holds Secret Manager
-   * and a turn does not (Pronto Studio's builder). */
+  /** In a builder turn: the payout secret is left to the builder's release, which holds Secret Manager
+   * and a turn does not (a hosted builder). */
   studio?: boolean;
-  /** Which side of a release this run is, for a release made by something else (Studio): what must
+  /** Which side of a release this run is, for a release made by something else (the builder): what must
    * go out with it (the secret, the broker), or what is checked once it is out (needs origin). */
   release?: "before" | "after";
 }
@@ -148,7 +148,7 @@ export function takesHostPeers(pin: string): boolean {
 
 export function steps(d: Deps, o: Options): Step[] {
   // A turn's run is the app's files alone: never a side of a release, which holds the secret.
-  if (o.studio && o.release) throw new Error("--studio runs on the app's own files: a release's side is Studio's own to run");
+  if (o.studio && o.release) throw new Error("--studio runs on the app's own files: a release's side is the builder's own to run");
   const spec = () => d.read(`${d.dir}/${SPEC}`);
   const local: Step[] = [
     {

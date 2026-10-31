@@ -8,7 +8,7 @@ _pro: _broker & {plan: {id: "pro", name: "Shop Pro", usd: 499, brl: 1990}}
 _unbrokered: {origin: "https://shop.example", email: "author@example.com", country: "BR"}
 _live: _broker & _unbrokered
 _gcpRelease: "package shop\n\nGCP: schema.#Release & {\n\tname: \"shop\"\n\tproject: \"p-apps\"\n}\n"
-_k8sRelease: "App: schema.#ReleaseSpec & {\n\tname: \"prontoweeper\"\n}\n"
+_k8sRelease: "App: schema.#ReleaseSpec & {\n\tname: \"my-app\"\n}\n"
 
 cases: {
 	"a new app: billing installed, its secret kept and its hash published, then it asks what to sell": {suite: "stripe", steps: [
@@ -111,15 +111,15 @@ cases: {
 		{call: "stripe.withBroker", args: [_k8sRelease, "https://broker.example"]},
 		{call: "probe.holdsEach", args: ["$", ["App: services: billing: {\n\tport: 8688\n", "BILLING_BROKER:          \"https://broker.example\"", "GCP:"]], expect: [true, true, false], why: "a cluster's service of the app's own, not a Cloud Run sidecar"},
 	]}
-	"in a Studio turn: the app's own files alone, its payout secret left to Studio's release": {suite: "stripe", steps: [
+	"in a builder turn: the app's own files alone, its payout secret left to the builder's release": {suite: "stripe", steps: [
 		{call: "shop.stripe"}, {keep: "shop"},
 		{call: "shop.connectStripe", args: ["$shop", _pro & {studio: true}]},
 		{pick: ["states", "finished"], expect: [["done", "applied", "applied", "done", "done", "applied"], true], why: "installed, the plan, generated: no secret step"},
 		{call: "shop.kept", args: ["$shop"], expect: null, why: "a turn holds no Secret Manager"},
 		{call: "shop.file", args: ["$shop", "billing_spec.cue"]}, {call: "stripe.specOwner", args: ["$"], expect: "", why: "no owner published until the release makes the secret"},
-		{call: "shop.connectStripe", args: ["$shop", _broker & {studio: true, release: "before"}], throws: "a release's side is Studio's own", why: "a turn never runs a side of a release, which holds the secret"},
+		{call: "shop.connectStripe", args: ["$shop", _broker & {studio: true, release: "before"}], throws: "a release's side is the builder's own", why: "a turn never runs a side of a release, which holds the secret"},
 	]}
-	"before a release Studio makes: the secret kept and its hash published, the broker named, then generated": {suite: "stripe", steps: [
+	"before a release the builder makes: the secret kept and its hash published, the broker named, then generated": {suite: "stripe", steps: [
 		{call: "shop.stripe"}, {keep: "shop"},
 		{call: "shop.connectStripe", args: ["$shop", _pro & {studio: true}]},
 		{call: "shop.written", args: ["$shop", "release.cue", _gcpRelease]},
@@ -133,7 +133,7 @@ cases: {
 		{call: "shop.connectStripe", args: ["$shop", _broker & {release: "before"}, "plan"]}, {get: "states"},
 		{call: "probe.every", args: ["$", "done"], expect: true, why: "again, nothing to do: the next release changes nothing"},
 	]}
-	"after a release Studio made: the origin's plans checked, then Stripe's link, then verified": {suite: "stripe", steps: [
+	"after a release the builder made: the origin's plans checked, then Stripe's link, then verified": {suite: "stripe", steps: [
 		{call: "shop.stripe"}, {keep: "shop"},
 		{call: "shop.connectStripe", args: ["$shop", _pro & {studio: true}]},
 		{call: "shop.written", args: ["$shop", "release.cue", _gcpRelease]},

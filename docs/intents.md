@@ -3,7 +3,7 @@
 Status: designed, 2026-10-29; the first intent, `connect stripe`, is being built
 (`billing/connect.ts`).
 
-Studio need not be a second Claude Code. What a person building an app asks for most is plumbing:
+A hosted builder need not be a second Claude Code. What a person building an app asks for most is plumbing:
 take payments, put it online, read its data in BigQuery. Each of those took a day of steps the first
 time (an app's Stripe: a broker, a key, a webhook, an owner secret, onboarding, a budget, flags),
 and nearly every step that went wrong was one nobody had written down as code. An **intent** is that
@@ -39,15 +39,15 @@ holds Google's. An intent that needs a third party's account looks for that shap
 | intent | its gates | the rest, the program's |
 |---|---|---|
 | `connect stripe` | the plan's price, if not given; Stripe's onboarding (identity, bank) once, through the broker's link | billing installed, the owner's secret made and kept in Secret Manager, its hash published, the broker named in the release, payouts checked, the live document verified |
-| `deploy gcp` | a billing account, for a project of the person's own (none in Studio's shared project) | release target, project setup, database, secrets each the app's alone, the deploy, its address answering |
+| `deploy gcp` | a billing account, for a project of the person's own (none in the builder's shared project) | release target, project setup, database, secrets each the app's alone, the deploy, its address answering |
 | `connect bigquery` | consent to the person's data (OAuth), or none for a dataset the operator keeps | dataset and grants in the infra state (OpenTofu), the app's reader, a row read back |
 
 ## Where it runs
 
 - **From a terminal or Claude Code**: `bin/pronto plan|connect <intent> <app-dir> [flags]`,
   and a skill per intent that runs it.
-- **In Studio**: a turn's Claude Code has the same plugin (`pronto-studio`) and runs the intent with
-  `--studio`, on the app's own files alone; what needs the cloud is Studio's own code's, at the
+- **In a hosted builder**: a turn's Claude Code has the same plugin (`pronto-studio`) and runs the intent with
+  `--studio`, on the app's own files alone; what needs the cloud is the builder's own code's, at the
   release the author presses (`connect stripe` below).
 - The steps' decisions are pure functions with tests; what they touch (files, Secret Manager, the
   broker, gcloud) is passed in, so each intent is tested against stand-ins before it touches anything.
@@ -65,7 +65,7 @@ target on Cloud Run in the project it is told (`--project`, which has no default
 writes it. It takes `deploy gcp`'s steps (its release rule, its
 plan rendered as the dry run, `./saytw lint` and `test`), then releases with the app's own
 `release@<target>`, and checks it answers where its release says (Cloud Run's address, the cluster
-gateway's host). An app in a project shared with other apps (`--shared`, as Pronto Studio names
+gateway's host). An app in a project shared with other apps (`--shared`, as a hosted builder names
 its own) is released from that host, so there it stops at a gate.
 
 An app that sells through pronto-billing has its broker named in its release before it goes out
@@ -116,19 +116,19 @@ the intent stops after step 6, with the app ready to sell in test mode on a deve
 (launch@local runs a broker whose Stripe is a stand-in). `--secrets-file <path>` keeps the secret in
 a file instead of Secret Manager, for a trial.
 
-In Pronto Studio, a host that releases apps itself, the same steps are split across a turn and a release:
+In a hosted builder, a host that releases apps itself, the same steps are split across a turn and a release:
 
 - **In a turn**, `pronto connect stripe . --studio --plan … --name "…" --usd …` takes steps 1, 2, 4,
   5 and 6, the app's own files, which is all a turn may touch: it holds no Secret Manager.
-- **Before a release** Studio makes, `--before-release` takes steps 3 and 7 in a checkout of main, the
-  secret kept in the project Studio names (`--project`), the broker it names (`--broker`), then
+- **Before a release** the builder makes, `--before-release` takes steps 3 and 7 in a checkout of main, the
+  secret kept in the project the builder names (`--project`), the broker it names (`--broker`), then
   generated; what changed lands on main as its own pull
   request, so the release's tag holds it.
-- **After it**, `--after-release --origin <where it went live>` takes steps 8 to 10. Studio's
-  conversation gives the author a link of Studio's own (`/builder/payouts/<app>`), which asks the
+- **After it**, `--after-release --origin <where it went live>` takes steps 8 to 10. The builder's
+  conversation gives the author a link of the builder's own (`/builder/payouts/<app>`), which asks the
   broker for a new Stripe link each time it is opened, so it never expires.
 
-`--json` prints the outcomes as one JSON array, which is how Studio reads them.
+`--json` prints the outcomes as one JSON array, which is how the builder reads them.
 
 ## `deploy gcp`
 
@@ -151,7 +151,7 @@ Steps, in order (`gcp/deploy.ts`):
    its own.
 5. **checks**: `./saytw lint` and `./saytw test` pass.
 6. **released**: with `--release true`, `./saytw release@gcp`, without the warm preview in the
-   shared project (as Pronto Studio releases there); without it, a gate once every check passes.
+   shared project (as a hosted builder releases there); without it, a gate once every check passes.
 7. **answers**: the service's address answers.
 
 An app in a shared project is released from the host that shares it, never from a developer's
@@ -163,6 +163,6 @@ machine: there, `deploy gcp` without `--release` is the local dry run.
 
 - `connect stripe`'s verify buys the plan in test mode against the stand-in (`launch@local`), as
   an app's own browser test can.
-- Studio's release runs `deploy gcp` from its workspace's clone, instead of its own steps, and the
+- The builder's release runs `deploy gcp` from its workspace's clone, instead of its own steps, and the
   per-person limit becomes a step of it.
-- Studio shows intents as commands.
+- The builder shows intents as commands.
