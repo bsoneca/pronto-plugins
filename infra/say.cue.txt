@@ -1,0 +1,51 @@
+// The infra verbs (README.md): the state in CUE, applied by OpenTofu.
+//   ./saytw setup          the tools, the bucket OpenTofu keeps its state in, and tofu init
+//   ./saytw generate       tofu/main.tf.json from the state (cue export -e plan.tofu)
+//   ./saytw lint           cue vet, cue fmt, and tofu validate
+//   ./saytw verify@infra   the plan: what applying would change, kept for release; fails when
+//                          the live projects differ from the state
+//   ./saytw release@infra  applies the plan verify@infra kept, and nothing else
+// Each runs as the operator's own gcloud login, the gcloud on their PATH.
+package say
+
+_tofu: "use tools.nu [run-mise]; with-env {GOOGLE_OAUTH_ACCESS_TOKEN: (^gcloud auth print-access-token | str trim)} { run-mise exec -- tofu -chdir=tofu"
+_backend: "(run-mise exec -- cue export . -e plan.backend --out json | from json)"
+
+say: {
+	setup: rulemap: tofu: {
+		// Before sayt's own setup, which ends the verb once it has installed the tools.
+		priority: -1
+		stop:     true
+		cmds: [
+			{do: "use tools.nu [run-mise]; run-mise install"},
+			{do: "use tools.nu [run-mise]; let s = \(_backend); let b = $\"gs://($s.bucket)\"; if (^gcloud storage buckets describe $b | complete).exit_code != 0 { ^gcloud storage buckets create $b --project $s.project --location $s.location --uniform-bucket-level-access --public-access-prevention; ^gcloud storage buckets update $b --versioning }"},
+			{do: "use tools.nu [run-mise]; mkdir tofu; run-mise exec -- cue export . -e plan.tofu --out json | save -f tofu/main.tf.json"},
+			{do: "\(_tofu) init -input=false }"},
+		]
+	}
+	// sayt's own CUE generation would write over the tofu folder: this one exports plan.tofu.
+	generate: rulemap: "auto-cue": null
+	generate: rulemap: tofu: cmds: [{do: "use tools.nu [run-mise]; mkdir tofu; run-mise exec -- cue export . -e plan.tofu --out json | save -f tofu/main.tf.json"}]
+	// sayt's own CUE lint would take the state for a schema of the tofu folder: this one vets the package.
+	lint: rulemap: "auto-cue": null
+	lint: rulemap: tofu: cmds: [
+		{do: "use tools.nu [run-mise]; run-mise exec -- cue vet -c ."},
+		{do: "use tools.nu [run-mise]; run-mise exec -- cue fmt --check ."},
+		{do: "use tools.nu [run-mise]; run-mise exec -- tofu -chdir=tofu init -backend=false -input=false | ignore; run-mise exec -- tofu -chdir=tofu validate"},
+	]
+	// The plan is always of the state as it is now: exported afresh, never a main.tf.json an
+	// older checkout left. It changes nothing: -detailed-exitcode says 2 when it would.
+	verify: rulemap: infra: {
+		platform: "infra"
+		stop:     true
+		cmds: [
+			{do: "use tools.nu [run-mise]; mkdir tofu; run-mise exec -- cue export . -e plan.tofu --out json | save -f tofu/main.tf.json"},
+			{do: "\(_tofu) plan -input=false -detailed-exitcode -out=infra.tfplan }"},
+		]
+	}
+	release: rulemap: infra: {
+		platform: "infra"
+		stop:     true
+		cmds: [{do: "if not (\"tofu/infra.tfplan\" | path exists) { error make {msg: \"no plan: run ./saytw verify@infra first, and read it\"} }; \(_tofu) apply -input=false infra.tfplan }; rm tofu/infra.tfplan"}]
+	}
+}

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Adds or refreshes the infra folder (OpenTofu applying a Google Cloud state kept in CUE):
+#   bin/pronto-infra <folder> <module> <state-bucket> <project>
+# <module> is the folder's CUE module path (example.com/infra@v0); <project> holds the bucket.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+mkdir -p "$1"
+dest=$(cd "$1" && pwd)
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+./saytw --script tools.nu cue export ./infra/export -t "module=$2" -t "bucket=$3" -t "project=$4" -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$dest"
