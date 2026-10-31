@@ -414,11 +414,11 @@ the operator's to add.
 ### An app
 
 ```sh
-deno run billing/owner.ts new                    # the author's secret, and its hash
+deno run <this repo>/billing/owner.ts new                    # the author's secret, and its hash
 <this repo>/bin/pronto-billing <app-dir> <hash>  # writes the files below
 # say what the app sells in billing_spec.cue, and gate the paid feature
 ./saytw generate && ./saytw lint
-PRONTO_BILLING_OWNER=<secret> deno run --allow-net --allow-env billing/owner.ts onboard <broker> <origin> <email>
+PRONTO_BILLING_OWNER=<secret> deno run --allow-net --allow-env <this repo>/billing/owner.ts onboard <broker> <origin> <email>
 ```
 
 | Path in the app | |
@@ -595,8 +595,8 @@ its own lists replaced whole and other hosts' rules kept.
 ./saytw --script tools.nu nu perf/test.nu
 ./saytw --script tools.nu nu flags/test/live_test.nu
 ./saytw --script tools.nu cue vet -c ./identity
-./saytw --script tools.nu cue vet -c -t package=check ./identity/export
-deno test --no-config --allow-net identity/oidc_test.ts identity/broker identity/app/identity_core_test.ts
+./saytw --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
+deno test --no-config --allow-net identity/oidc_test.ts identity/broker
 deno lint --no-config billing && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
 deno lint --no-config flags && FLAGD=$(mise where http:flagd)/flagd deno test --no-config --allow-read --allow-write --allow-run --allow-env --allow-net flags  # cue on PATH
 deno lint --no-config ads && deno test --no-config --allow-read --allow-write --allow-run ads
