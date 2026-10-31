@@ -61,13 +61,18 @@ package infra
 	adoptAll: *false | bool
 	adopt: [#Adoptable]: [...string]
 	// Of what is adopted, what is not there yet, by kind and name: it is made, never imported
-	// (an import of a binding that does not exist fails). Buckets and secrets say so with `made`.
-	fresh: [#Adoptable]: [...string]
+	// (an import of one that does not exist fails). A binding is its own entry, so an existing
+	// parent can get a new binding: a role for iam and members; `account/role`, `repository/role`
+	// and `bucket/role` for those parents' grants; a service's name for its invokers. Buckets
+	// and secrets, and the grants of a secret, say so with `made` and `newGrants` instead.
+	fresh: [#Fresh]: [...string]
 	// A project this state makes rather than finds: OpenTofu creates it and everything in it,
 	// with nothing to import, so it is adopted whole.
 	create: *false | bool
 	if create {adoptAll: true}
 }
+
+#Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases"
 
 #Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases"
 

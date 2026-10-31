@@ -50,7 +50,7 @@ projects. A project says its `id`, its `billing` account and the rest of what it
 | `iam` | authoritative for each role named: its members are exactly these; roles not named are left as they are |
 | `members` | single grants of a role whose other members someone else keeps |
 | `secrets` | the secret and who may read or add versions; a value is never written, `source` says who puts it. `file` adds a file of your repository, beside the state folder, as a new version whenever it changes |
-| `fresh` | of what is adopted, what does not exist yet, by kind and name: made, never imported (a binding that is not there cannot be imported). Buckets and secrets say so with `made` |
+| `fresh` | of what is adopted, what does not exist yet, by kind and name: made, never imported (one that is not there cannot be imported). A binding has its own entry, so an existing parent can get a new one: `serviceAccountIam: ["account/role"]`, `repositoryIam: ["repository/role"]`, `bucketIam: ["bucket/role"]`, `runServiceIam: ["service"]`. Buckets and secrets say so with `made`, and a secret's grants with `newGrants` |
 | `runJobs` | the image is the one it is made with; OpenTofu leaves a later image as it finds it |
 
 What the project already has is imported, never made again, so a first plan of a live project
@@ -69,14 +69,17 @@ All run as your own `gcloud` login (a short-lived token handed to OpenTofu), nev
 ./saytw release@infra  # applies the plan verify@infra kept, and nothing else
 ```
 
-`verify@infra` removes the plan it kept before, exports the state afresh and plans, keeping a
-new plan only when planning succeeds, so a failed verify leaves nothing to release. A plan that
-deletes anything is refused unless `INFRA_ALLOW_DESTROY=1` is set for that run: a resource
-dropped from the state is not a reason to delete it from the project. Declared accounts,
-repositories, secrets and buckets also carry `prevent_destroy`. `release@infra` refuses when no
-plan was kept, and removes the plan once it is applied. A secret's `file` is added as a new
-version before the old one is left behind, and a service reads that version, so a change to the
-file rolls a new revision.
+`verify@infra` removes the plan it kept before, vets the whole state (`cue vet -c`, which an
+export alone skips), exports it afresh and plans into a temporary file. It reads that plan with
+`tofu show -json`, and keeps it as `infra.tfplan` only when it reads as a plan and deletes
+nothing; on any failure the temporary plan is removed, so a failed verify leaves nothing to
+release. A plan that deletes anything is refused unless `INFRA_ALLOW_DESTROY=1` (exactly) is set
+for that run: a resource dropped from the state is not a reason to delete it from the project.
+`release@infra` reads the kept plan again by the same rule before it applies, refuses when none
+was kept, and removes the plan once it is applied. Declared accounts, repositories, secrets and
+buckets also carry `prevent_destroy`. A secret's `file` is added as a new version before the old
+one is left behind, and a service reads that version, so a change to the file rolls a new
+revision.
 
 ## Checks
 

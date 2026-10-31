@@ -42,7 +42,7 @@ import (
 			}
 		}
 		let fresh = {
-			for kind in ["apis", "iam", "members", "serviceAccounts", "repositories", "repositoryIam", "runJobs", "runServices", "databases"] {
+			for kind in ["apis", "iam", "members", "serviceAccounts", "serviceAccountIam", "repositories", "repositoryIam", "bucketIam", "runJobs", "runServices", "runServiceIam", "databases"] {
 				(kind): {for n in *P.fresh[kind] | [] {(n): true}}
 			}
 		}
@@ -52,10 +52,15 @@ import (
 		// What a resource waits for: the project if this state makes it, and the services it enables.
 		let deps = list.Concat([proj, [for svc, _ in P.apis if P.adoptAll || adopted.apis[svc] != _|_ {"google_project_service.\((#name & {in: "\(P.id)_\(svc)"}).out)"}]])
 
+		// A project grant may name an account made beside it.
+		let iamDeps = list.Concat([deps, [for nm, _ in P.serviceAccounts if P.adoptAll || adopted.serviceAccounts[nm] != _|_ {"google_service_account.\((#name & {in: "\(P.id)_\(nm)"}).out)"}]])
+
 		// A Cloud Run job or service also waits for the accounts and secrets made beside it.
 		let ownDeps = list.Concat([deps,
 			[for nm, _ in P.serviceAccounts if P.adoptAll || adopted.serviceAccounts[nm] != _|_ {"google_service_account.\((#name & {in: "\(P.id)_\(nm)"}).out)"}],
 			[for nm, _ in P.secrets if P.adoptAll || adopted.secrets[nm] != _|_ {"google_secret_manager_secret.\((#name & {in: "\(P.id)_\(nm)"}).out)"}],
+			[for nm, sc in P.secrets if P.adoptAll || adopted.secrets[nm] != _|_ if len(sc.accessors) > 0 {"google_secret_manager_secret_iam_binding.\((#name & {in: "\(P.id)_\(nm)"}).out)"}],
+			[for nm, sc in P.secrets if P.adoptAll || adopted.secrets[nm] != _|_ if len(sc.adders) > 0 {"google_secret_manager_secret_iam_binding.\((#name & {in: "\(P.id)_\(nm)"}).out)_adders"}],
 			[for nm, sc in P.secrets if sc.file != _|_ if P.adoptAll || adopted.secrets[nm] != _|_ {"google_secret_manager_secret_version.\((#name & {in: "\(P.id)_\(nm)"}).out)"}],
 		])
 
@@ -88,14 +93,14 @@ import (
 
 		for rl, ms in P.iam if P.adoptAll || adopted.iam[rl] != _|_ {
 			let k = (#name & {in: "\(P.id)_\(rl)"}).out
-			tofu: resource: google_project_iam_binding: (k): {depends_on: deps, project: P.id, role: rl, members: (#members & {in: ms}).out}
+			tofu: resource: google_project_iam_binding: (k): {depends_on: iamDeps, project: P.id, role: rl, members: (#members & {in: ms}).out}
 			if fresh.iam[rl] == _|_ {_imports: "google_project_iam_binding.\(k)": {id: "\(P.id) \(rl)", project: P.id}}
 		}
 
 		for rl, ms in P.members if P.adoptAll || adopted.members[rl] != _|_ {
 			for m, _ in ms {
 				let k = (#name & {in: "\(P.id)_\(rl)_\(m)"}).out
-				tofu: resource: google_project_iam_member: (k): {depends_on: deps, project: P.id, role: rl, member: m}
+				tofu: resource: google_project_iam_member: (k): {depends_on: iamDeps, project: P.id, role: rl, member: m}
 				if fresh.members[rl] == _|_ {_imports: "google_project_iam_member.\(k)": {id: "\(P.id) \(rl) \(m)", project: P.id}}
 			}
 		}
@@ -108,7 +113,7 @@ import (
 			for rl, ms in sa.iam {
 				let r = (#name & {in: "\(P.id)_\(nm)_\(rl)"}).out
 				tofu: resource: google_service_account_iam_binding: (r): {depends_on: deps, service_account_id: "${google_service_account.\(k).name}", role: rl, members: (#members & {in: ms}).out}
-				if fresh.serviceAccounts[nm] == _|_ {_imports: "google_service_account_iam_binding.\(r)": {id: "\(at) \(rl)", project: P.id}}
+				if fresh.serviceAccountIam["\(nm)/\(rl)"] == _|_ {_imports: "google_service_account_iam_binding.\(r)": {id: "\(at) \(rl)", project: P.id}}
 			}
 		}
 
@@ -121,8 +126,8 @@ import (
 			}
 			for rl, ms in repo.iam {
 				let r = (#name & {in: "\(P.id)_\(nm)_\(rl)"}).out
-				tofu: resource: google_artifact_registry_repository_iam_binding: (r): {depends_on: deps, project: P.id, location: repo.location, repository: nm, role: rl, members: (#members & {in: ms}).out}
-				if fresh.repositoryIam[nm] == _|_ {_imports: "google_artifact_registry_repository_iam_binding.\(r)": {id: "\(at) \(rl)", project: P.id}}
+				tofu: resource: google_artifact_registry_repository_iam_binding: (r): {depends_on: list.Concat([deps, if P.adoptAll || adopted.repositories[nm] != _|_ {["google_artifact_registry_repository.\((#name & {in: "\(P.id)_\(nm)"}).out)"]}, if !(P.adoptAll || adopted.repositories[nm] != _|_) {[]}]), project: P.id, location: repo.location, repository: nm, role: rl, members: (#members & {in: ms}).out}
+				if fresh.repositoryIam["\(nm)/\(rl)"] == _|_ {_imports: "google_artifact_registry_repository_iam_binding.\(r)": {id: "\(at) \(rl)", project: P.id}}
 			}
 		}
 
@@ -149,7 +154,7 @@ import (
 
 				// Its grants name it by reference, so OpenTofu makes the bucket before granting on it.
 				tofu: resource: google_storage_bucket_iam_binding: (r): {depends_on: deps, bucket: "${google_storage_bucket.\(k).name}", role: rl, members: (#members & {in: ms}).out}
-				if !b.made {
+				if !b.made && fresh.bucketIam["\(nm)/\(rl)"] == _|_ {
 					_imports: "google_storage_bucket_iam_binding.\(r)": {id: "b/\(nm) \(rl)", project: P.id}
 				}
 			}
@@ -255,7 +260,7 @@ import (
 			}
 			if fresh.runServices[nm] == _|_ {_imports: "google_cloud_run_v2_service.\(k)": {id: at, project: P.id}}
 			tofu: resource: google_cloud_run_v2_service_iam_binding: (k): {project: P.id, location: svc.location, name: "${google_cloud_run_v2_service.\(k).name}", role: "roles/run.invoker", members: (#members & {in: svc.invokers}).out}
-			if fresh.runServices[nm] == _|_ {_imports: "google_cloud_run_v2_service_iam_binding.\(k)": {id: "\(at) roles/run.invoker", project: P.id}}
+			if fresh.runServiceIam[nm] == _|_ {_imports: "google_cloud_run_v2_service_iam_binding.\(k)": {id: "\(at) roles/run.invoker", project: P.id}}
 		}
 
 		for inst, dbs in P.databases if P.adoptAll || adopted.databases[inst] != _|_ {

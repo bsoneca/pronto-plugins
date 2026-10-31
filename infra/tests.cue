@@ -111,7 +111,7 @@ accountKept:        _s.google_service_account.example_project_123_my_app_run.lif
 bucketKept:         _tofu.resource.google_storage_bucket.my_app_assets.lifecycle.prevent_destroy & true
 secretKept:         _tofu.resource.google_secret_manager_secret.example_project_456_my_app_token.lifecycle.prevent_destroy & true
 verbsRefuseDeletes: strings.Contains(_host.files[".say.cue"].text, "INFRA_ALLOW_DESTROY") & true
-verbsDropOldPlan:   strings.Contains(_host.files[".say.cue"].text, "{do: \"rm -f tofu/infra.tfplan\"}") & true
+verbsDropOldPlan:   strings.Contains(_host.files[".say.cue"].text, "{do: \"rm -f tofu/infra.tfplan tofu/infra.tfplan.tmp\"}") & true
 
 // A grant that is new is made, not imported; one that is there is imported.
 _new: #Plan & {
@@ -153,6 +153,8 @@ serviceWaits: _s.google_cloud_run_v2_service.example_project_123_my_app.depends_
 	"google_service_account.example_project_123_my_app_run",
 	"google_secret_manager_secret.example_project_123_my_app_token",
 	"google_secret_manager_secret.example_project_123_other",
+	"google_secret_manager_secret_iam_binding.example_project_123_my_app_token",
+	"google_secret_manager_secret_iam_binding.example_project_123_other",
 	"google_secret_manager_secret_version.example_project_123_my_app_token",
 ]
 accountGrantByReference: _s.google_service_account_iam_binding.example_project_123_my_app_run_roles_iam_serviceAccountUser.service_account_id & "${google_service_account.example_project_123_my_app_run.name}"
@@ -172,3 +174,65 @@ _draft: #Plan & {
 }
 draftReadsLatest: _draft.tofu.resource.google_cloud_run_v2_service.example_project_123_my_app.template.containers[0].env[0].value_source.secret_key_ref.version & "latest"
 draftNoVersion: [for k, _ in _draft.tofu.resource if k == "google_secret_manager_secret_version" {k}] & []
+
+// The verbs: the destroy flag is exactly "1"; a plan is made apart and kept only once read; the
+// whole state is vetted before it is exported; release reads the plan again before applying.
+_verbs:                _host.files[".say.cue"].text
+_verify:               strings.Split(strings.Split(_verbs, "verify: rulemap: infra")[1], "release: rulemap: infra")[0]
+_release:              strings.Split(_verbs, "release: rulemap: infra")[1]
+destroyFlagExact:      strings.Contains(_verbs, "$env.INFRA_ALLOW_DESTROY? != '1'") & true
+planMadeApart:         strings.Contains(_verify, "-out=infra.tfplan.tmp") & true
+planKeptAfterCheck:    strings.Index(_verify, "check-plan infra.tfplan.tmp") < strings.Index(_verify, "mv tofu/infra.tfplan.tmp tofu/infra.tfplan") & true
+tmpRemovedOnFailure:   strings.Count(_verify, "rm -f tofu/infra.tfplan.tmp") & 2
+planMustBeReadable:    strings.Contains(_verbs, "get -o format_version") & true
+vetsBeforeExport:      strings.Index(_verify, "cue vet -c .") < strings.Index(_verify, "cue export . -e plan.tofu") & true
+releaseReadsPlanAgain: strings.Index(_release, "check-plan infra.tfplan;") < strings.Index(_release, "apply -input=false infra.tfplan") & true
+
+// fresh marks a binding on its own, so a parent that exists can be given a new binding; and it
+// has no entry for a kind it cannot honour.
+_binding: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adoptAll: true
+		serviceAccounts: "my-app-run": {displayName: "my-app", iam: "roles/iam.serviceAccountUser": "user:a@example.com": true}
+		repositories: pronto: {location: "us-central1", format: "DOCKER", iam: "roles/artifactregistry.reader": "user:a@example.com": true}
+		buckets: "my-app-assets": {location: "us-central1", uniformAccess: true, publicPrevention: "enforced", iam: "roles/storage.objectAdmin": "user:a@example.com": true}
+		runServices: "my-app": {
+			location:       "us-central1", image:                                          "us-docker.pkg.dev/example-project-123/pronto/my-app:1", port: 8080
+			serviceAccount: "my-app-run@example-project-123.iam.gserviceaccount.com", cpu: "1", memory:                                                   "512Mi", timeout: "300s", maxInstances: 2
+			invokers: "user:a@example.com": true
+		}
+		fresh: {
+			serviceAccountIam: ["my-app-run/roles/iam.serviceAccountUser"]
+			repositoryIam: ["pronto/roles/artifactregistry.reader"]
+			bucketIam: ["my-app-assets/roles/storage.objectAdmin"]
+			runServiceIam: ["my-app"]
+		}
+	}
+}
+_ims: [for i in _binding.tofu.import {i.to}]
+parentsStillImported: [for a in _ims if a == "google_service_account.example_project_123_my_app_run" || a == "google_artifact_registry_repository.example_project_123_pronto" || a == "google_storage_bucket.my_app_assets" || a == "google_cloud_run_v2_service.example_project_123_my_app" {a}] & [
+	"google_service_account.example_project_123_my_app_run",
+	"google_storage_bucket.my_app_assets",
+	"google_cloud_run_v2_service.example_project_123_my_app",
+	"google_artifact_registry_repository.example_project_123_pronto",
+]
+bindingsNotImported: [for a in _ims if strings.Contains(a, "_iam_binding") {a}] & []
+freshBucketsRefused: _ok & {fresh: buckets: ["my-app-assets"]} & matchN(0, [#Project])
+freshSecretsRefused: _ok & {fresh: secrets: ["my-app-token"]} & matchN(0, [#Project])
+
+// Ordering: a project grant waits for the accounts made beside it; a repository's grant for the
+// repository; a service for its secrets' grants (above).
+_order: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adoptAll: true
+		iam: "roles/viewer": "serviceAccount:my-app-run@example-project-123.iam.gserviceaccount.com": true
+		serviceAccounts: "my-app-run": displayName:                                                   "my-app"
+		repositories: pronto: {location: "us-central1", format: "DOCKER", iam: "roles/artifactregistry.reader": "user:a@example.com": true}
+	}
+}
+projectGrantWaitsForAccount: _order.tofu.resource.google_project_iam_binding.example_project_123_roles_viewer.depends_on & ["google_service_account.example_project_123_my_app_run"]
+repositoryGrantWaitsForRepository: _order.tofu.resource.google_artifact_registry_repository_iam_binding.example_project_123_pronto_roles_artifactregistry_reader.depends_on & ["google_artifact_registry_repository.example_project_123_pronto"]
