@@ -6,3 +6,38 @@ lockfile_version = 1
 version = "0.16.1"
 backend = "github:cue-lang/cue"
 specifiers = ["0.16.1"]
+
+[tools."github:cue-lang/cue"."platforms.linux-arm64"]
+checksum = "sha256:3cc715a9e969f87b93c4fa34cfaef5388b93e96efa20b248e8ad6826abd25a83"
+url = "https://github.com/cue-lang/cue/releases/download/v0.16.1/cue_v0.16.1_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/cue-lang/cue/releases/assets/391635253"
+
+[tools."github:cue-lang/cue"."platforms.linux-arm64-musl"]
+checksum = "sha256:3cc715a9e969f87b93c4fa34cfaef5388b93e96efa20b248e8ad6826abd25a83"
+url = "https://github.com/cue-lang/cue/releases/download/v0.16.1/cue_v0.16.1_linux_arm64.tar.gz"
+url_api = "https://api.github.com/repos/cue-lang/cue/releases/assets/391635253"
+
+[tools."github:cue-lang/cue"."platforms.linux-x64"]
+checksum = "sha256:5d644c1305a2b86504c8dcd2ec829cf5b4999efc2cf51ee375624e0455f774ae"
+url = "https://github.com/cue-lang/cue/releases/download/v0.16.1/cue_v0.16.1_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/cue-lang/cue/releases/assets/391635258"
+
+[tools."github:cue-lang/cue"."platforms.linux-x64-musl"]
+checksum = "sha256:5d644c1305a2b86504c8dcd2ec829cf5b4999efc2cf51ee375624e0455f774ae"
+url = "https://github.com/cue-lang/cue/releases/download/v0.16.1/cue_v0.16.1_linux_amd64.tar.gz"
+url_api = "https://api.github.com/repos/cue-lang/cue/releases/assets/391635258"
+
+[tools."github:cue-lang/cue"."platforms.macos-arm64"]
+checksum = "sha256:a72b0cddb377c52d1b003bed9a335d893b70cd75a182cd5e3fee8bae30ddb6d6"
+url = "https://github.com/cue-lang/cue/releases/download/v0.16.1/cue_v0.16.1_darwin_arm64.tar.gz"
+url_api = "https://api.github.com/repos/cue-lang/cue/releases/assets/391635257"
+
+[tools."github:cue-lang/cue"."platforms.macos-x64"]
+checksum = "sha256:97b0d78e4c5ee49ff72145fd6ef4f4bab0bb332d55f29660de3fec2af5ec96a9"
+url = "https://github.com/cue-lang/cue/releases/download/v0.16.1/cue_v0.16.1_darwin_amd64.tar.gz"
+url_api = "https://api.github.com/repos/cue-lang/cue/releases/assets/391635256"
+
+[tools."github:cue-lang/cue"."platforms.windows-x64"]
+checksum = "sha256:2f24123f458229fcf283db534bd86692ad1074da806defee0f0cc62976c0397c"
+url = "https://github.com/cue-lang/cue/releases/download/v0.16.1/cue_v0.16.1_windows_amd64.zip"
+url_api = "https://api.github.com/repos/cue-lang/cue/releases/assets/391635255"

@@ -619,3 +619,34 @@ deno test --allow-read --allow-env android/test/host_test.ts
 
 `test@android` in an app runs the template's JVM tests: which requests are a
 site, which an app, and which fields take the username and the password.
+
+## CI trust
+
+[`ci.yml`](.github/workflows/ci.yml) runs on `pull_request` only, holds no secrets, and has a
+read-only token (`permissions: contents: read`, no persisted checkout credentials). Everything it
+runs is pinned by digest, except the items listed below:
+
+- the actions it uses are pinned by commit, and sayt is installed by the repository's own
+  [`install-sayt`](.github/actions/install-sayt/action.yml) rather than by its third-party action;
+- the binaries it downloads are checked against sha256 values written in the workflow: sayt, the
+  mise its launcher runs, sayt's distribution (through a tool stub that carries the checksum), Deno,
+  and flagd (the version the flags plugin pins); the nu and cue the launcher installs carry
+  checksums in their own stubs and lockfiles;
+- the Android job installs only the JDK, the Android SDK and Gradle, against the example's
+  lockfile (`examples/hello-android/.config/mise/mise.lock`), not the example's other tools;
+- the pull request's own code runs the checks, so a change to the workflow or to what it runs is
+  reviewed like any other.
+
+Still not pinned by digest, and why:
+
+- **Android SDK packages**: mise installs the SDK's command-line tools from Google, whose download
+  has no published checksum for mise to lock, and `sdkmanager` then fetches platform packages
+  that Google's own manifest verifies.
+- **Gradle plugins and Maven dependencies** (the Android Gradle plugin, Kotlin, JUnit): they have
+  version coordinates, but the example has no `gradle/verification-metadata.xml`, so Gradle does
+  not check their checksums.
+- **The `vfox:mise-plugins/vfox-android-sdk` installer plugin** itself, which mise fetches with no
+  commit or digest pin.
+- **What the sayt v0.44.1 release itself carries**: its launcher's tool stubs (nu, cue) and what
+  those fetch are as trustworthy as that release, whose binary and distribution are pinned above.
+- **GitHub-hosted runner images** (`ubuntu-24.04`) and the `jq`, `curl` and `unzip` they carry.

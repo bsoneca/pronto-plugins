@@ -3,6 +3,7 @@
 // measures of probes.js, and shop the stand-in apps the intents run on, as shops.js sets them up.
 import * as stripe from '../../billing/connect.ts';
 import * as deploy from '../../gcp/deploy.ts';
+import * as targets from '../../gcp/release_target.ts';
 import * as identity from './identity.js';
 import * as run from '../../intents/run.ts';
 import * as shell from '../../intents/shell.ts';
@@ -10,5 +11,5 @@ import * as probe from './probes.js';
 import * as shop from './shops.js';
 
 export function registry(_suite) {
-  return { stripe, deploy, identity, run, shell, probe, shop };
+  return { stripe, deploy, targets, identity, run, shell, probe, shop };
 }
