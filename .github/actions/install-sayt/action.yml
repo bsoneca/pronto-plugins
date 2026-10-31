@@ -1,0 +1,47 @@
+name: install-sayt
+description: |
+  Install sayt without a third-party action, and with nothing its launcher (saytw) fetches left
+  unchecked: sayt's binary, the mise the launcher runs, and sayt's distribution (the tool stub the
+  launcher would write without a checksum) are each checked against a checksum pinned here. The
+  nu the launcher installs is checked by the checksum its own stub carries. Run it after checkout.
+runs:
+  using: composite
+  steps:
+    - name: Install sayt
+      shell: bash
+      env:
+        SAYT_VERSION: v0.44.1
+        SAYT_SHA256: 384d24e9c3426eeee8fc9ddad38c4a3745cb4159feab3ffe8b8e38d3e25e765e
+        SAYT_DIST_SHA256: 3921d95138ff9ab5a1c0880a2146f2bb49a5a777e8781bf62a9edae82399a06e
+        MISE_VERSION: v2026.8.11
+        MISE_SHA256: 68d2281461d8000ccbe944493b10bcbd0aa1b75318cdad553a50a2f715524d0f
+      run: |
+        cache="$HOME/.cache/sayt"
+        mkdir -p "$cache/$SAYT_VERSION" "$cache/mise-$MISE_VERSION" "$RUNNER_TEMP/sayt-tool"
+        fetch() { # url, path, sha256
+          curl -fsSL -o "$2" "$1"
+          echo "$3  $2" | sha256sum -c -
+        }
+        fetch "https://github.com/bonisoft3/sayt/releases/download/$SAYT_VERSION/sayt-linux-x64" "$cache/$SAYT_VERSION/sayt-linux-x64" "$SAYT_SHA256"
+        fetch "https://github.com/jdx/mise/releases/download/$MISE_VERSION/mise-$MISE_VERSION-linux-x64-musl" "$cache/mise-$MISE_VERSION/mise" "$MISE_SHA256"
+        chmod +x "$cache/$SAYT_VERSION/sayt-linux-x64" "$cache/mise-$MISE_VERSION/mise"
+        # The launcher keeps the stub it finds, so mise checks sayt's distribution against this.
+        {
+          echo "version = \"$SAYT_VERSION\""
+          echo 'bin = "sayt"'
+          echo
+          echo '[platforms.linux-amd64]'
+          echo "url = \"https://github.com/bonisoft3/sayt/releases/download/$SAYT_VERSION/sayt-linux-x64.tar.gz\""
+          echo "checksum = \"sha256:$SAYT_DIST_SHA256\""
+        } > "$cache/sayt-full-$SAYT_VERSION.toml"
+        ./saytw --help > "$RUNNER_TEMP/saytw.log" 2>&1 || { cat "$RUNNER_TEMP/saytw.log"; exit 1; }
+        cat "$RUNNER_TEMP/saytw.log"
+        # Nothing it fetched is unchecked: no download of its own for what is pinned above, and a
+        # checksum on every tarball mise took.
+        if grep -q '^Downloading:' "$RUNNER_TEMP/saytw.log"; then echo "the launcher downloaded something itself" >&2; exit 1; fi
+        for m in "$HOME"/.local/share/mise/http-tarballs/*/metadata.json; do
+          grep -q '"checksum": "sha256:' "$m" || { echo "no checksum on $m" >&2; cat "$m" >&2; exit 1; }
+        done
+        cp -f "$cache/$SAYT_VERSION/sayt-linux-x64" "$RUNNER_TEMP/sayt-tool/sayt"
+        cp -f ./saytw ./saytw.ps1 "$RUNNER_TEMP/sayt-tool/"
+        echo "$RUNNER_TEMP/sayt-tool" >> "$GITHUB_PATH"

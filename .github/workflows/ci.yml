@@ -1,0 +1,133 @@
+# Checks for a pull request: each host's CUE and its export vetted, the journeys and perf modules'
+# tests, the intents' cases (tests/unit/*.cue), the deno tests of the brokers and installers, and
+# the Android host's Kotlin unit tests.
+#
+# It holds no secrets and runs on pull_request only, with a read-only token; every action is
+# pinned by commit.
+name: ci
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-sayt
+      - run: sayt setup
+      # The cases and tests below run cue themselves: the one this repository pins.
+      - name: Put the pinned cue on the PATH
+        run: |
+          cue=$(sayt --script tools.nu mise which cue | tail -n 1)
+          case "$cue" in /*/cue) ;; *) echo "not the path of cue: $cue" >&2; exit 1 ;; esac
+          test -x "$cue"
+          dirname "$cue" >> "$GITHUB_PATH"
+      - name: Vet each host
+        run: |
+          sayt --script tools.nu cue vet -c ./android
+          sayt --script tools.nu cue vet -c -t app=check ./android/export
+          sayt --script tools.nu cue vet -c ./firebase
+          sayt --script tools.nu cue vet -c -t app=check -t project=check-project ./firebase/export
+          sayt --script tools.nu cue vet -c ./gcp
+          sayt --script tools.nu cue vet -c -t app=check -t project=check-project ./gcp/export
+          sayt --script tools.nu cue vet -c ./journeys
+          sayt --script tools.nu cue vet -c -t package=check ./journeys/export
+          sayt --script tools.nu cue vet -c ./perf
+          sayt --script tools.nu cue vet -c -t package=check ./perf/export
+          sayt --script tools.nu cue vet -c ./identity
+          sayt --script tools.nu cue vet -c -t package=check -t frontImage=registry.example.com/pronto-identity:0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000 ./identity/export
+          sayt --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
+          sayt --script tools.nu cue vet -c ./infra
+          sayt --script tools.nu cue vet -c ./examples/infra
+          sayt --script tools.nu cue vet -c -t module=example.com/infra@v0 -t bucket=my-org-infra-tfstate -t project=my-admin-project ./infra/export
+      - name: Check CUE formatting of infra
+        run: sayt --script tools.nu cue fmt --check ./infra ./examples/infra ./infra/export
+      - name: Test journeys
+        run: sayt --script tools.nu nu journeys/test.nu
+      - name: Test perf
+        run: sayt --script tools.nu nu perf/test.nu
+      # Deno, the release binary checked against a pinned checksum rather than fetched by an action.
+      - name: Install Deno
+        env:
+          DENO_VERSION: v2.5.0
+          DENO_SHA256: 4561adb06b13f287a3785276cb29f377b7ffb49d54290178223b037e161446d3
+        run: |
+          dir="$RUNNER_TEMP/deno"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/deno.zip" "https://github.com/denoland/deno/releases/download/$DENO_VERSION/deno-x86_64-unknown-linux-gnu.zip"
+          echo "$DENO_SHA256  $dir/deno.zip" | sha256sum -c -
+          unzip -q "$dir/deno.zip" -d "$dir"
+          echo "$dir" >> "$GITHUB_PATH"
+      - name: Test the Android host
+        run: deno test --allow-read --allow-env android/test/host_test.ts
+      - name: Test the identity broker
+        run: deno test --no-config --allow-net identity/oidc_test.ts identity/broker
+      - name: Test the billing broker
+        run: deno lint --no-config billing intents gcp tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
+      - name: Test the intents (tests/unit/*.cue)
+        run: for s in stripe deploy release runner identity targets; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
+      # flagd, the version the flags plugin pins, checked against its release's digest.
+      - name: Install flagd
+        env:
+          FLAGD_VERSION: 0.18.0
+          FLAGD_SHA256: 1ca548e85815db1fc66fae1ff3dfc969264a4578c89f1c18e2ad05b69f7d36e5
+        run: |
+          dir="$RUNNER_TEMP/flagd"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/flagd.tar.gz" "https://github.com/open-feature/flagd/releases/download/flagd%2Fv${FLAGD_VERSION}/flagd_${FLAGD_VERSION}_Linux_x86_64.tar.gz"
+          echo "$FLAGD_SHA256  $dir/flagd.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/flagd.tar.gz" -C "$dir"
+          echo "FLAGD=$dir/flagd_linux_x86_64" >> "$GITHUB_ENV"
+      - name: Test the flags installer
+        run: deno lint --no-config flags && deno test --no-config --allow-read --allow-write --allow-run --allow-env --allow-net flags
+      - name: Test the flags live commands
+        run: sayt --script tools.nu nu flags/test/live_test.nu
+      - name: Test the ads installer
+        run: deno lint --no-config ads && deno test --no-config --allow-read --allow-write --allow-run ads
+      - name: Test infra
+        run: sayt --script tools.nu nu infra/test.nu
+
+  # The Android host's Kotlin unit tests, android/template's src/test, run the way an app gets
+  # them: bin/pronto-android writes the current host into hello-android, whose own pinned toolchain
+  # then runs Gradle's unit tests. The example's committed android/ predates parts of the host, so
+  # this checks what the template writes today, not what the example holds.
+  android-host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-sayt
+      - name: Write the current host into hello-android
+        run: ./bin/pronto-android examples/hello-android hello-android
+      # Only what the Kotlin tests need (the JDK, the Android SDK and Gradle), installed against the
+      # example's lockfile (.config/mise/mise.lock); its other tools (mkcert, Caddy, DuckDB, ...) are not.
+      - name: Install the Android toolchain
+        working-directory: examples/hello-android
+        run: |
+          sayt --script tools.nu mise trust .config/mise/conf.d/android.toml
+          sayt --script tools.nu mise install java android-sdk gradle
+          sayt setup@android
+      - name: Run the Kotlin unit tests
+        working-directory: examples/hello-android
+        run: |
+          sayt test@android
+          grep -ho 'tests="[0-9]*" skipped="[0-9]*" failures="[0-9]*" errors="[0-9]*"' android/app/build/test-results/testDebugUnitTest/*.xml
+
+  # The one check main requires: it passes only when each job above passed.
+  ci:
+    needs: [check, android-host]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s' "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s' "$NEEDS" | jq -e 'all(.[]; .result == "success")' >/dev/null
