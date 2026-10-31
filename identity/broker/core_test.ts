@@ -9,10 +9,10 @@ function assertEquals(a: unknown, b: unknown, m = "") {
 }
 
 Deno.test("a tenant is a bare https origin, and nothing else", () => {
-  assertEquals(tenantOf("https://brawl.example.com"), "https://brawl.example.com");
+  assertEquals(tenantOf("https://app.example.com"), "https://app.example.com");
   assertEquals(tenantOf("https://localhost:28102"), "https://localhost:28102");
-  for (const bad of ["http://localhost:28102", "https://brawl.example.com/", "https://brawl.example.com/app", "https://a@b.example",
-    "https://Brawl.Example.com", "https://x.example?y", "https://x.example#z", "brawl.example.com", "", null, 3]) {
+  for (const bad of ["http://localhost:28102", "https://app.example.com/", "https://app.example.com/app", "https://a@b.example",
+    "https://App.Example.com", "https://x.example?y", "https://x.example#z", "app.example.com", "", null, 3]) {
     assertEquals(tenantOf(bad), null, String(bad));
   }
 });

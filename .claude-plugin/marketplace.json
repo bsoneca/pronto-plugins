@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "bsoneca-pronto-plugins",
-  "description": "pronto-studio: pronto's skills beyond its own plugin, for apps and for Studio: intents, hosts, releases, sign-in and monitoring",
+  "description": "pronto-studio: pronto's skills beyond its own plugin, for apps and for a hosted builder: intents, hosts, releases, sign-in and monitoring",
   "owner": {
     "name": "bsoneca",
     "url": "https://github.com/bsoneca"

@@ -16,7 +16,7 @@ function fileSecrets(path: string): Deps["secrets"] {
   };
 }
 
-// Secret Manager over its API, as the machine's own service account (Studio's builder, on Cloud
+// Secret Manager over its API, as the machine's own service account (a hosted builder, on Cloud
 // Run, which has no gcloud) or else the operator's gcloud login.
 async function token(): Promise<string> {
   const meta = await fetch("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token", { headers: { "Metadata-Flavor": "Google" }, signal: AbortSignal.timeout(1000) }).catch(() => null);

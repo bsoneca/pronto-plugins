@@ -3,7 +3,7 @@
 //     [--shared <project>]
 // A new release target names --project, a Google Cloud project of yours, which has no default,
 // and --region (default us-central1). --shared names a project shared with other apps, where a
-// release goes out from the host that releases them (Pronto Studio) alone. Without --release true
+// release goes out from the host that releases them (a hosted builder) alone. Without --release true
 // every step but the release is taken, and it stops there; the release runs with your own gcloud
 // login.
 import { resolve } from "jsr:@std/path@1.1.2";

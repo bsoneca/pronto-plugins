@@ -1,7 +1,7 @@
 #!/bin/sh
 # Sets pronto up in Claude Code, once (run it again any time: it changes only what is missing):
 # the plugins marketplace read from this checkout, pronto's plugin installed or updated, and the
-# intents allowed in your user settings, so that saying "release prontoweeper" runs with no prompt
+# intents allowed in your user settings, so that saying "release my-app" runs with no prompt
 # (skills/pronto-intents). Claude Code lets only you grant that, so this is yours to run.
 #   plugins/setup.sh
 set -eu
@@ -42,4 +42,4 @@ open(path, "a").write("\n")
 print(f"setup: {len(added)} of pronto's intents allowed in {path}" if added else f"setup: pronto's intents were allowed already in {path}")
 PY
 
-echo 'setup: done. Start a new Claude Code session and say what you want, such as "release prontoweeper".'
+echo 'setup: done. Start a new Claude Code session and say what you want, such as "release my-app".'

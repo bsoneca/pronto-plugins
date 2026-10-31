@@ -6,7 +6,7 @@
 // its author is the author's git email, or --email where git has none. Nothing has a default: an
 // app with no release.cue is told its project (--project), one that sells its broker where its
 // release.cue names none (--broker), and the author's secret is kept in --project, else in the
-// project its release names. --shared names a project shared with other apps (Pronto Studio's).
+// project its release names. --shared names a project shared with other apps (a hosted builder's).
 import { join, resolve } from "jsr:@std/path@1.1.2";
 import { secretsProject, steps as stripeSteps } from "../billing/connect.ts";
 import { stripeDeps } from "../billing/connect_deps.ts";
