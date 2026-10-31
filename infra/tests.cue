@@ -246,7 +246,7 @@ _named: #Plan & {
 		adoptAll: true
 		serviceAccounts: {
 			"my-app-run": displayName: "my-app"
-			"other": iam: "roles/iam.serviceAccountUser": (_acct): true
+			"other": {displayName: "other", iam: "roles/iam.serviceAccountUser": (_acct): true}
 		}
 		repositories: pronto: {location: "us-central1", format: "DOCKER", iam: "roles/artifactregistry.reader": (_acct): true}
 		buckets: "my-app-assets": {location: "us-central1", uniformAccess: true, publicPrevention: "enforced", iam: "roles/storage.objectAdmin": (_acct): true}
