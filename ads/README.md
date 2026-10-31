@@ -8,7 +8,7 @@ Rewarded ads for a pronto app: an ad a player chooses to watch for something the
 - A generate step that gives the door `/ads.txt` again after pronto's writer, carrying the AdSense publisher's line.
 - `ads_spec.cue`, written once and then the app's: `adsense: publisher: "pub-…"`, or `""` for none.
 
-For now the ad is a stand-in that plays at a press. Google's ads take its place once the app names a publisher and the door's policy admits Google's scripts and frames. The page alone knows an ad was watched, so whatever a reward gives away, the app's database bounds.
+The ad is always a stand-in that plays at a press. Real ads are not implemented: naming a publisher in `ads_spec.cue` only writes the line in `/ads.txt`, and `rewarded()` still shows the stand-in. The page alone knows an ad was watched, so whatever a reward gives away, the app's database bounds.
 
 ## Use
 

@@ -1,6 +1,6 @@
 ---
 name: pronto-intents
-description: "Do what the user names in plain words for a pronto app, end to end: \"release my-app\", \"connect stripe to reclaim-clone\", \"deploy my-app to gcp\", \"what's left before my-app can sell?\". Runs pronto's intents (bin/pronto release|connect stripe|deploy gcp, docs/intents.md), which check every step, apply what is the program's, and stop only where a person must act. Use whenever the user asks to release, deploy, ship, publish or put online an app, or to connect it to Stripe or take payments, or asks what such a step still needs."
+description: "Do what the user names in plain words for a pronto app, end to end: \"release my-app\", \"connect stripe to my-shop\", \"deploy my-app to gcp\", \"what's left before my-app can sell?\". Runs pronto's intents (bin/pronto release|connect stripe|deploy gcp, docs/intents.md), which check every step, apply what is the program's, and stop only where a person must act. Use whenever the user asks to release, deploy, ship, publish or put online an app, or to connect it to Stripe or take payments, or asks what such a step still needs."
 ---
 
 # pronto-intents

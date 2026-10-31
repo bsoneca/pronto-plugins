@@ -16,9 +16,11 @@ Each app is its own tenant, never merged with another. The subject the broker vo
 From a pronto app:
 
 ```sh
-<this repo>/bin/pronto-identity . [broker=<url>] [brokerInternal=<url>] [providers=<a,b>]
+<this repo>/bin/pronto-identity . frontImage=<registry>/pronto-identity:<version>@sha256:<digest> [providers=<a,b>]
 ./saytw generate && ./saytw lint
 ```
+
+`frontImage` is required for a local launch, which runs the broker from the front's image. It has no default: publish your own with [`publish.sh`](publish.sh), which prints it. A refresh keeps the one the app already runs. An app that signs in through a broker elsewhere needs none, and names it instead: `broker=https://… [brokerInternal=<url>]`.
 
 The operator runs the broker once:
 
@@ -35,6 +37,6 @@ The env file is never committed. It holds `BROKER_ISSUER`, `BROKER_SECRET` and e
 
 ```sh
 ./saytw --script tools.nu cue vet -c ./identity
-./saytw --script tools.nu cue vet -c -t package=check ./identity/export
+./saytw --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
 deno test --no-config --allow-net identity/oidc_test.ts identity/broker
 ```

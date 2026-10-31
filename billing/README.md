@@ -22,7 +22,7 @@ Say it in a sentence through the [`pronto-intents` skill](../skills/pronto-inten
 By hand, from a pronto app:
 
 ```sh
-deno run billing/owner.ts new                    # the author's secret, and its hash
+deno run <this repo>/billing/owner.ts new                    # the author's secret, and its hash
 <this repo>/bin/pronto-billing <app-dir> <hash>  # writes billing_plugin.cue and the rest
 # say what the app sells in billing_spec.cue
 ./saytw generate && ./saytw lint

@@ -20,7 +20,7 @@ beyond the browser, and beside them, on unmodified pronto. Why and how they are 
 ## pronto-intents
 
 Say what you want for an app, and it is done: "release my-app", "connect stripe to
-reclaim-clone", "what's left before my-app can sell?". The skill
+my-shop", "what's left before my-app can sell?". The skill
 (`skills/pronto-intents`) runs pronto's intents (`bin/pronto`, docs/intents.md), which check
 every step, apply what is the program's, and stop only where a person must act: a price to
 choose, Stripe's form to fill.
