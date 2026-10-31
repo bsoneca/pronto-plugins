@@ -40,7 +40,7 @@ holds Google's. An intent that needs a third party's account looks for that shap
 |---|---|---|
 | `connect stripe` | the plan's price, if not given; Stripe's onboarding (identity, bank) once, through the broker's link | billing installed, the owner's secret made and kept in Secret Manager, its hash published, the broker named in the release, payouts checked, the live document verified |
 | `deploy gcp` | a billing account, for a project of the person's own (none in the builder's shared project) | release target, project setup, database, secrets each the app's alone, the deploy, its address answering |
-| `connect bigquery` | consent to the person's data (OAuth), or none for a dataset the operator keeps | dataset and grants in the infra state (OpenTofu), the app's reader, a row read back |
+| `connect bigquery` | consent to the person's data (OAuth), or none for a dataset the operator keeps | dataset and grants in the infra state ([`infra/`](../infra/README.md), OpenTofu), the app's reader, a row read back |
 
 ## Where it runs
 

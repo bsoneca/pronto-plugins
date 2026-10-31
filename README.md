@@ -13,6 +13,7 @@ beyond the browser, and beside them, on unmodified pronto. Why and how they are 
 - [flags](flags/README.md): feature flags on OpenFeature and flagd.
 - [gcp](gcp/README.md): release to Cloud Run.
 - [identity](identity/README.md): social sign-in through a shared broker.
+- [infra](infra/README.md): a Google Cloud state kept in CUE, applied by OpenTofu.
 - [intents](intents/README.md): one-command plumbing behind `bin/pronto`.
 - [journeys](journeys/README.md): user-journey SLOs from the terminal's telemetry.
 - [perf](perf/README.md): frame, interaction and paint timings on readers' devices.
@@ -164,6 +165,14 @@ build yet.
 
 The [`pronto-gcp` skill](skills/pronto-gcp/SKILL.md) covers releasing and its
 limits.
+
+## pronto-infra
+
+Keeps an operator's Google Cloud state in CUE (projects, IAM, service accounts, repositories,
+buckets, secrets, Cloud Run jobs and services) and applies it with OpenTofu, as the operator's
+own `gcloud` login: `verify@infra` plans and changes nothing, `release@infra` applies the plan
+it kept. The schema and the OpenTofu export live here; the state itself is the operator's.
+[`infra/README.md`](infra/README.md) sets it up.
 
 ## pronto-journeys
 
@@ -588,6 +597,10 @@ its own lists replaced whole and other hosts' rules kept.
 ./saytw --script tools.nu cue vet -c -t app=check -t project=check-project ./firebase/export
 ./saytw --script tools.nu cue vet -c ./gcp
 ./saytw --script tools.nu cue vet -c -t app=check -t project=check-project ./gcp/export
+./saytw --script tools.nu cue vet -c ./infra
+./saytw --script tools.nu cue vet -c ./examples/infra
+./saytw --script tools.nu cue vet -c -t module=example.com/infra@v0 -t bucket=my-org-infra-tfstate -t project=check-project ./infra/export
+./saytw --script tools.nu nu infra/test.nu
 ./saytw --script tools.nu cue vet -c ./journeys
 ./saytw --script tools.nu cue vet -c -t package=check ./journeys/export
 ./saytw --script tools.nu nu journeys/test.nu
