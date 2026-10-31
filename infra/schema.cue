@@ -3,13 +3,13 @@
 // file says it (`plan: #Plan & {...}`), and tofu.cue exports it as OpenTofu JSON.
 package infra
 
-#Member: =~"^(user|serviceAccount|group|domain|principalSet|principal|allUsers|allAuthenticatedUsers)(:.+)?$"
+#Member: =~"^((user|serviceAccount|group|domain|principalSet|principal):.+|allUsers|allAuthenticatedUsers)$"
 
 // Members are a set, so that the same grant from two sources unifies into one.
 #Members: [#Member]: true
 
 #ProjectID:  =~"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
-#Billing:    =~"^billingAccounts/[0-9A-F-]+$"
+#Billing:    =~"^billingAccounts/[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}$"
 #BucketName: string & =~"^[a-z0-9][a-z0-9._-]{2,61}[a-z0-9]$"
 
 // Where OpenTofu keeps its own state: a bucket `setup` makes the first time (say.cue.txt).
@@ -40,6 +40,10 @@ package infra
 	// Single grants of a role whose other members someone else keeps: each is added beside
 	// them, never in their place.
 	members: [Role=string]: #Members
+	// A role is authoritative or additive, never both: the binding would remove what the grant adds.
+	for r, _ in members if iam[r] != _|_ {
+		"\(r) is in both iam and members": _|_
+	}
 
 	serviceAccounts: [Name=string]: #ServiceAccount & {email: "\(Name)@\(P.id).iam.gserviceaccount.com"}
 	runJobs: [Name=string]:     #RunJob
@@ -47,7 +51,7 @@ package infra
 	// Databases on an instance another owner keeps, by instance and name.
 	databases: [Instance=string]: [Name=string]: true
 	repositories: [Name=string]: #Repository
-	buckets: [Name=string]:      #Bucket
+	buckets: [Name=#BucketName]: #Bucket
 	secrets: [Name=string]:      #Secret
 
 	// What OpenTofu applies: the whole project, or, while the rest is still a draft the live
@@ -56,6 +60,9 @@ package infra
 	// Everything else here is description alone until it is adopted.
 	adoptAll: *false | bool
 	adopt: [#Adoptable]: [...string]
+	// Of what is adopted, what is not there yet, by kind and name: it is made, never imported
+	// (an import of a binding that does not exist fails). Buckets and secrets say so with `made`.
+	fresh: [#Adoptable]: [...string]
 	// A project this state makes rather than finds: OpenTofu creates it and everything in it,
 	// with nothing to import, so it is adopted whole.
 	create: *false | bool
@@ -124,8 +131,9 @@ package infra
 	iam: [Role=string]: #Members
 	// Made here rather than adopted: it was not there to import.
 	made: *false | bool
-	// A bucket anyone may read says so.
-	if iam["roles/storage.objectViewer"]["allUsers"] != _|_ {public: string & !=""}
+	// A bucket any role is granted to everyone (allUsers, allAuthenticatedUsers) says why.
+	public?: string
+	if len([for _, ms in iam for m, _ in ms if m == "allUsers" || m == "allAuthenticatedUsers" {m}]) > 0 {public!: string & !=""}
 }
 
 #Secret: {

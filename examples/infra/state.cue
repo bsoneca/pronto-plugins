@@ -16,7 +16,7 @@ plan: infra.#Plan & {
 				"secretmanager.googleapis.com":    true
 			}
 			adoptAll: true
-			iam: "roles/owner": "user:admin@example.com": true
+			iam: "roles/owner": "user:admin@example.com":                                                              true
 			members: "roles/cloudsql.client": "serviceAccount:my-app-run@example-project-123.iam.gserviceaccount.com": true
 			serviceAccounts: "my-app-run": {
 				displayName: "my-app's Cloud Run account"
@@ -35,7 +35,7 @@ plan: infra.#Plan & {
 				iam: "roles/storage.objectAdmin": "serviceAccount:my-app-run@example-project-123.iam.gserviceaccount.com": true
 			}
 			secrets: "my-app-token": {
-				source:    "put by the operator: gcloud secrets versions add my-app-token --data-file=-"
+				source: "put by the operator: gcloud secrets versions add my-app-token --data-file=-"
 				accessors: "serviceAccount:my-app-run@example-project-123.iam.gserviceaccount.com": true
 			}
 			runServices: "my-app": {
@@ -47,8 +47,8 @@ plan: infra.#Plan & {
 				memory:         "512Mi"
 				timeout:        "300s"
 				maxInstances:   3
-				env: LOG_LEVEL: "info"
-				secretEnv: TOKEN: "my-app-token"
+				env: LOG_LEVEL:     "info"
+				secretEnv: TOKEN:   "my-app-token"
 				invokers: allUsers: true
 			}
 		}

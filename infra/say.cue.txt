@@ -3,7 +3,7 @@
 //   ./saytw generate       tofu/main.tf.json from the state (cue export -e plan.tofu)
 //   ./saytw lint           cue vet, cue fmt, and tofu validate
 //   ./saytw verify@infra   the plan: what applying would change, kept for release; fails when
-//                          the live projects differ from the state
+//                          the live projects differ from the state, and refuses a plan that deletes
 //   ./saytw release@infra  applies the plan verify@infra kept, and nothing else
 // Each runs as the operator's own gcloud login, the gcloud on their PATH.
 package say
@@ -33,14 +33,18 @@ say: {
 		{do: "use tools.nu [run-mise]; run-mise exec -- cue fmt --check ."},
 		{do: "use tools.nu [run-mise]; run-mise exec -- tofu -chdir=tofu init -backend=false -input=false | ignore; run-mise exec -- tofu -chdir=tofu validate"},
 	]
-	// The plan is always of the state as it is now: exported afresh, never a main.tf.json an
-	// older checkout left. It changes nothing: -detailed-exitcode says 2 when it would.
+	// The plan is always of the state as it is now: the plan a verify kept is removed first and a
+	// new one kept only once planning succeeds, so a failed verify never leaves one to release; the
+	// state is exported afresh, never a main.tf.json an older checkout left. It changes nothing.
+	// A plan that deletes something is refused, unless INFRA_ALLOW_DESTROY is set for that run:
+	// dropping a resource from the state is no reason to delete it from the project.
 	verify: rulemap: infra: {
 		platform: "infra"
 		stop:     true
 		cmds: [
+			{do: "rm -f tofu/infra.tfplan"},
 			{do: "use tools.nu [run-mise]; mkdir tofu; run-mise exec -- cue export . -e plan.tofu --out json | save -f tofu/main.tf.json"},
-			{do: "\(_tofu) plan -input=false -detailed-exitcode -out=infra.tfplan }"},
+			{do: "use tools.nu [run-mise]; with-env {GOOGLE_OAUTH_ACCESS_TOKEN: (^gcloud auth print-access-token | str trim)} { let r = (run-mise exec -- tofu -chdir=tofu plan -input=false -detailed-exitcode -out=infra.tfplan | complete); print $r.stdout; if $r.exit_code == 1 { rm -f tofu/infra.tfplan; error make {msg: $r.stderr} }; let gone = (run-mise exec -- tofu -chdir=tofu show -json infra.tfplan | from json | get -o resource_changes | default [] | where {|c| 'delete' in $c.change.actions} | get address); if ($gone | is-not-empty) and ($env.INFRA_ALLOW_DESTROY? | is-empty) { rm -f tofu/infra.tfplan; error make {msg: $\"the plan deletes ($gone | str join ', '): set INFRA_ALLOW_DESTROY=1 to plan it anyway\"} }; if $r.exit_code == 2 { error make {msg: 'the live projects differ from the state: read the plan, then release@infra'} } }"},
 		]
 	}
 	release: rulemap: infra: {

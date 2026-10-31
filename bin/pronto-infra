@@ -11,3 +11,5 @@ trap 'rm -f "$files"' EXIT
 cd "$here"
 ./saytw --script tools.nu cue export ./infra/export -t "module=$2" -t "bucket=$3" -t "project=$4" -e files --out json > "$files"
 ./saytw --script tools.nu nu bin/write.nu "$files" "$dest"
+# The verbs run as ./saytw in the folder: its launcher, written once and then the folder's own.
+for f in saytw saytw.ps1; do [ -e "$dest/$f" ] || cp -p "$here/$f" "$dest/$f"; done

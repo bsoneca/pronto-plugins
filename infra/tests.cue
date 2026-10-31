@@ -91,3 +91,84 @@ hostPins:           strings.Contains(_host.files[".mise.toml"].text, "opentofu =
 hostVerbs:          strings.Contains(_host.files[".say.cue"].text, "verify: rulemap: infra:") & true
 hostPlanReadsFresh: strings.Contains(_host.files[".say.cue"].text, "plan -input=false -detailed-exitcode") & true
 hostStateBucket:    strings.Contains(_host.files["state.cue"].text, "bucket: \"my-org-infra-tfstate\"") & true
+
+// Validation on real state values, not only on the patterns: each bad project is refused whole.
+_ok: {id: "example-project-123", billing: "billingAccounts/AAAAAA-BBBBBB-CCCCCC"}
+okProject: _ok & matchN(1, [#Project])
+bareMember: _ok & {iam: "roles/viewer": user: true} & matchN(0, [#Project])
+badBucketKey: _ok & {buckets: A: {location: "us-central1", uniformAccess: true, publicPrevention: "enforced"}} & matchN(0, [#Project])
+shortBilling: {id: "example-project-123", billing: "billingAccounts/A"} & matchN(0, [#Project])
+bothIamAndMembers: _ok & {iam: "roles/viewer": "user:a@example.com": true, members: "roles/viewer": "user:b@example.com": true} & matchN(0, [#Project])
+iamAndMembersApart: _ok & {iam: "roles/viewer": "user:a@example.com": true, members: "roles/editor": "user:b@example.com": true} & matchN(1, [#Project])
+_bucket: {location: "us-central1", uniformAccess: true, publicPrevention: "inherited"}
+publicAuthenticated: _ok & {buckets: "my-app-assets": _bucket & {iam: "roles/storage.objectViewer": allAuthenticatedUsers: true}} & matchN(0, [#Project])
+publicAdmin: _ok & {buckets: "my-app-assets": _bucket & {iam: "roles/storage.objectAdmin": allUsers: true}} & matchN(0, [#Project])
+publicExplained: _ok & {buckets: "my-app-assets": _bucket & {iam: "roles/storage.objectAdmin": allUsers: true, public: "a static site"}} & matchN(1, [#Project])
+
+// What the plugin did not create is not destroyed by a plan of this state, and what it removes
+// from the state is held by the verbs (say.cue.txt).
+accountKept:        _s.google_service_account.example_project_123_my_app_run.lifecycle.prevent_destroy & true
+bucketKept:         _tofu.resource.google_storage_bucket.my_app_assets.lifecycle.prevent_destroy & true
+secretKept:         _tofu.resource.google_secret_manager_secret.example_project_456_my_app_token.lifecycle.prevent_destroy & true
+verbsRefuseDeletes: strings.Contains(_host.files[".say.cue"].text, "INFRA_ALLOW_DESTROY") & true
+verbsDropOldPlan:   strings.Contains(_host.files[".say.cue"].text, "{do: \"rm -f tofu/infra.tfplan\"}") & true
+
+// A grant that is new is made, not imported; one that is there is imported.
+_new: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adoptAll: true
+		members: {"roles/viewer": "user:a@example.com": true, "roles/editor": "user:b@example.com": true}
+		fresh: members: ["roles/editor"]
+	}
+}
+freshNotImported: [for i in _new.tofu.import if strings.Contains(i.id, "roles/editor") {i}] & []
+existingImported: [for i in _new.tofu.import if strings.Contains(i.id, "roles/viewer") {i.id}] & ["example-project-123 roles/viewer user:a@example.com"]
+
+// A new service waits for its account, its secrets and the services it needs; its account's grants
+// name the account by reference.
+_svc: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adoptAll: true
+		apis: "run.googleapis.com": true
+		serviceAccounts: "my-app-run": {displayName: "my-app", iam: "roles/iam.serviceAccountUser": "user:a@example.com": true}
+		secrets: {
+			"my-app-token": {source: "operator", accessors: "user:a@example.com": true, file: "config/token.txt"}
+			"other": {source: "operator", accessors: "user:a@example.com": true}
+		}
+		runServices: "my-app": {
+			location:       "us-central1", image:                                          "us-docker.pkg.dev/example-project-123/pronto/my-app:1", port: 8080
+			serviceAccount: "my-app-run@example-project-123.iam.gserviceaccount.com", cpu: "1", memory:                                                   "512Mi", timeout: "300s", maxInstances: 2
+			secretEnv: {TOKEN: "my-app-token", OTHER: "other"}
+			invokers: "user:a@example.com": true
+		}
+	}
+}
+_s: _svc.tofu.resource
+serviceWaits: _s.google_cloud_run_v2_service.example_project_123_my_app.depends_on & [
+	"google_project_service.example_project_123_run_googleapis_com",
+	"google_service_account.example_project_123_my_app_run",
+	"google_secret_manager_secret.example_project_123_my_app_token",
+	"google_secret_manager_secret.example_project_123_other",
+	"google_secret_manager_secret_version.example_project_123_my_app_token",
+]
+accountGrantByReference: _s.google_service_account_iam_binding.example_project_123_my_app_run_roles_iam_serviceAccountUser.service_account_id & "${google_service_account.example_project_123_my_app_run.name}"
+managedEnvVersion:       _s.google_cloud_run_v2_service.example_project_123_my_app.template.containers[0].env[1].value_source.secret_key_ref.version & "${google_secret_manager_secret_version.example_project_123_my_app_token.version}"
+unmanagedEnvLatest:      _s.google_cloud_run_v2_service.example_project_123_my_app.template.containers[0].env[0].value_source.secret_key_ref.version & "latest"
+rotationKeepsOld: _s.google_secret_manager_secret_version.example_project_123_my_app_token & {deletion_policy: "ABANDON", lifecycle: create_before_destroy: true}
+
+// A secret described with a file but not adopted is not referenced: its reader takes the latest.
+_draft: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing: "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adopt: runServices: ["my-app"]
+		secrets: "my-app-token": {source: "operator", accessors: "user:a@example.com": true, file: "config/token.txt"}
+		runServices: "my-app": _svc.state.projects["example-project-123"].runServices["my-app"]
+	}
+}
+draftReadsLatest: _draft.tofu.resource.google_cloud_run_v2_service.example_project_123_my_app.template.containers[0].env[0].value_source.secret_key_ref.version & "latest"
+draftNoVersion: [for k, _ in _draft.tofu.resource if k == "google_secret_manager_secret_version" {k}] & []
