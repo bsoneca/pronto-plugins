@@ -246,7 +246,7 @@ _named: #Plan & {
 		adoptAll: true
 		serviceAccounts: {
 			"my-app-run": displayName: "my-app"
-			"other": {displayName: "other", iam: "roles/iam.serviceAccountUser": (_acct): true}
+			"other-account": {displayName: "other", iam: "roles/iam.serviceAccountUser": (_acct): true}
 		}
 		repositories: pronto: {location: "us-central1", format: "DOCKER", iam: "roles/artifactregistry.reader": (_acct): true}
 		buckets: "my-app-assets": {location: "us-central1", uniformAccess: true, publicPrevention: "enforced", iam: "roles/storage.objectAdmin": (_acct): true}
@@ -260,7 +260,7 @@ _named: #Plan & {
 }
 _n: _named.tofu.resource
 _waitsAccount: ["google_service_account.example_project_123_my_app_run"]
-accountGrantWaits: _n.google_service_account_iam_binding.example_project_123_other_roles_iam_serviceAccountUser.depends_on & _waitsAccount
+accountGrantWaits: _n.google_service_account_iam_binding.example_project_123_other_account_roles_iam_serviceAccountUser.depends_on & _waitsAccount
 repositoryGrantWaitsForAccount: _n.google_artifact_registry_repository_iam_binding.example_project_123_pronto_roles_artifactregistry_reader.depends_on & ["google_artifact_registry_repository.example_project_123_pronto", "google_service_account.example_project_123_my_app_run"]
 bucketGrantWaitsForAccount:  _n.google_storage_bucket_iam_binding.my_app_assets_roles_storage_objectAdmin.depends_on & _waitsAccount
 secretGrantWaitsForAccount:  _n.google_secret_manager_secret_iam_binding.example_project_123_my_app_token.depends_on & _waitsAccount
