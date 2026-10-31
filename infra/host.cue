@@ -38,7 +38,7 @@ _verbs: _ @embed(file="say.cue.txt", type=text)
 			text: """
 				# Written by generate (cue export -e plan.tofu) and by verify@infra (the plan release@infra applies).
 				tofu/main.tf.json
-				tofu/*.tfplan
+				tofu/*.tfplan*
 				tofu/.terraform/
 
 				"""

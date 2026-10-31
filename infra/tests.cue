@@ -236,3 +236,36 @@ _order: #Plan & {
 }
 projectGrantWaitsForAccount: _order.tofu.resource.google_project_iam_binding.example_project_123_roles_viewer.depends_on & ["google_service_account.example_project_123_my_app_run"]
 repositoryGrantWaitsForRepository: _order.tofu.resource.google_artifact_registry_repository_iam_binding.example_project_123_pronto_roles_artifactregistry_reader.depends_on & ["google_artifact_registry_repository.example_project_123_pronto"]
+
+// A grant that names an account this state keeps waits for it, whatever it is a grant on.
+_acct: "serviceAccount:my-app-run@example-project-123.iam.gserviceaccount.com"
+_named: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adoptAll: true
+		serviceAccounts: {
+			"my-app-run": displayName: "my-app"
+			"other": iam: "roles/iam.serviceAccountUser": (_acct): true
+		}
+		repositories: pronto: {location: "us-central1", format: "DOCKER", iam: "roles/artifactregistry.reader": (_acct): true}
+		buckets: "my-app-assets": {location: "us-central1", uniformAccess: true, publicPrevention: "enforced", iam: "roles/storage.objectAdmin": (_acct): true}
+		secrets: "my-app-token": {source: "operator", accessors: (_acct): true, adders: (_acct): true}
+		runServices: "my-app": {
+			location:       "us-central1", image:                                          "us-docker.pkg.dev/example-project-123/pronto/my-app:1", port: 8080
+			serviceAccount: "my-app-run@example-project-123.iam.gserviceaccount.com", cpu: "1", memory:                                                   "512Mi", timeout: "300s", maxInstances: 2
+			invokers: (_acct): true
+		}
+	}
+}
+_n: _named.tofu.resource
+_waitsAccount: ["google_service_account.example_project_123_my_app_run"]
+accountGrantWaits: _n.google_service_account_iam_binding.example_project_123_other_roles_iam_serviceAccountUser.depends_on & _waitsAccount
+repositoryGrantWaitsForAccount: _n.google_artifact_registry_repository_iam_binding.example_project_123_pronto_roles_artifactregistry_reader.depends_on & ["google_artifact_registry_repository.example_project_123_pronto", "google_service_account.example_project_123_my_app_run"]
+bucketGrantWaitsForAccount:  _n.google_storage_bucket_iam_binding.my_app_assets_roles_storage_objectAdmin.depends_on & _waitsAccount
+secretGrantWaitsForAccount:  _n.google_secret_manager_secret_iam_binding.example_project_123_my_app_token.depends_on & _waitsAccount
+secretAddersWaitForAccount:  _n.google_secret_manager_secret_iam_binding.example_project_123_my_app_token_adders.depends_on & _waitsAccount
+invokerGrantWaitsForAccount: _n.google_cloud_run_v2_service_iam_binding.example_project_123_my_app.depends_on & _waitsAccount
+
+// Every plan file the verbs write is ignored.
+ignoresPlans: strings.Contains(_host.files[".gitignore"].text, "tofu/*.tfplan*") & true
