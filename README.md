@@ -565,12 +565,12 @@ end, `"dismissed"` when it was closed before, and `"none"` with no ad to show.
 | `pronto/ads.cue`, `ads/ads.nu` | the generate step giving the door `/ads.txt` again after pronto's writer, the publisher's line, which AdSense reads to verify the site |
 | `ads_spec.cue` | written once, then the app's: its publisher, `""` for none |
 
-For now the ad is a stand-in that plays at a press, as billing's stand-in
-Stripe pays at one. Google's ads (the Ad Placement API, H5 Games Ads) take its
-place once the app names its AdSense publisher and the door's policy admits
-Google's scripts and frames. Google's ads for the web tell no server an ad was
-watched, so the page alone knows: whatever a reward gives away, the app's
-database bounds (one a day an account, say, in the app's own migration).
+The ad is always a stand-in that plays at a press, as billing's stand-in Stripe
+pays at one. Real ads are not implemented: naming an AdSense publisher only
+writes its line in `/ads.txt`, and `rewarded()` still shows the stand-in.
+Google's ads for the web tell no server an ad was watched, so the page alone
+knows: whatever a reward gives away, the app's database bounds (one a day an
+account, say, in the app's own migration).
 
 ## Hosts share `.say.json`
 
