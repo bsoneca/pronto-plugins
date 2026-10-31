@@ -1,0 +1,11 @@
+#!/bin/sh
+# Adds or refreshes pronto-billing in a pronto app:
+#   bin/pronto-billing <app-dir> [owner-hash]
+# owner-hash: what `billing/owner.ts new` prints for the author's payout secret.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+shift
+cd "$here"
+# Deno as CI pins it for the plugins tree (.github/workflows/ci.yml).
+exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write billing/install.ts "$app" "$@"

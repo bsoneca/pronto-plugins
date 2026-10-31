@@ -1,0 +1,34 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "bsoneca-pronto-plugins",
+  "description": "pronto-studio: pronto's skills beyond its own plugin, for apps and for Studio: intents, hosts, releases, sign-in and monitoring",
+  "owner": {
+    "name": "bsoneca",
+    "url": "https://github.com/bsoneca"
+  },
+  "plugins": [
+    {
+      "name": "pronto-studio",
+      "description": "pronto's skills beyond its own plugin: intents (release, connect stripe, deploy), the Android host, Firebase Hosting, Google Cloud Run, social sign-in, journey monitoring and performance measurement.",
+      "version": "0.4.0",
+      "author": {
+        "name": "bsoneca",
+        "url": "https://github.com/bsoneca"
+      },
+      "source": "./",
+      "category": "development",
+      "tags": [
+        "pronto",
+        "sayt",
+        "intents",
+        "release",
+        "billing",
+        "android",
+        "firebase",
+        "gcp",
+        "identity",
+        "observability"
+      ]
+    }
+  ]
+}

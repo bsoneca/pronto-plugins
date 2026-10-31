@@ -1,0 +1,178 @@
+sources:
+  collector:
+    type: internal_metrics
+    scrape_interval_secs: 15
+  telemetry:
+    type: http_server
+    address: 0.0.0.0:8686
+    path: /telemetry
+    method: POST
+    framing:
+      method: bytes
+    decoding:
+      codec: bytes
+transforms:
+  events:
+    type: remap
+    inputs:
+    - telemetry
+    source: . = parse_json!(string!(.message))
+  per_session:
+    type: throttle
+    inputs:
+    - events
+    key_field: "{{ session }}"
+    threshold: 600
+    window_secs: 60
+  once:
+    type: dedupe
+    inputs:
+    - per_session
+    fields:
+      match:
+      - session
+      - trace
+      - type
+      - outcome
+  moments:
+    type: remap
+    inputs:
+    - once
+    drop_on_abort: true
+    source: |-
+      if .type != "gesture" && .type != "refusal" { abort }
+      m = (string(.screen) ?? "") + "." + (string(.gesture) ?? "")
+      bad = .outcome == "refused" || .outcome == "failed"
+      base = { "session": .session, "trace": .trace, "moment": m, "outcome": .outcome, "bad": bad, "late": .type == "refusal" }
+      if is_integer(.ms) || is_float(.ms) { base.seconds = to_float!(.ms) / 1000.0 }
+      out = []
+      if m == "todo.create-todo" { out = push(out, merge(base, { "journey": "first-task", "step": 0, "started": true, "closed": bad || (true && .outcome == "ok") })) }
+      if m == "counter.count" { out = push(out, merge(base, { "journey": "play", "step": 0, "started": true, "closed": bad || (false && .outcome == "ok") })) }
+      if m == "grid.press" { out = push(out, merge(base, { "journey": "play", "step": 1, "started": false, "closed": bad || (true && .outcome == "ok") })) }
+      if length(out) == 0 { abort }
+      . = out
+  ended:
+    type: remap
+    inputs:
+    - reduce-first-task
+    - reduce-play
+    drop_on_abort: true
+    source: |-
+      if .late == true { abort }
+      .run = if .started != true { "unstarted" } else if .closed != true { "abandoned" } else if .bad == true { "bad" } else { "good" }
+  run_metrics:
+    type: log_to_metric
+    inputs:
+    - ended
+    metrics:
+    - type: counter
+      field: run
+      name: journey_runs_total
+      tags:
+        journey: "{{ journey }}"
+        outcome: "{{ run }}"
+  moment_metrics:
+    type: log_to_metric
+    inputs:
+    - moments
+    metrics:
+    - type: counter
+      field: outcome
+      name: journey_moments_total
+      tags:
+        journey: "{{ journey }}"
+        moment: "{{ moment }}"
+        outcome: "{{ outcome }}"
+  throttled:
+    type: filter
+    inputs:
+    - collector
+    condition: >-
+      .name == "component_discarded_events_total" && .tags.component_id ==
+      "per_session"
+  throttled_named:
+    type: remap
+    inputs:
+    - throttled
+    source: |-
+      .name = "journey_telemetry_throttled_total"
+      del(.namespace)
+      .tags = {}
+  timed:
+    type: filter
+    inputs:
+    - moments
+    condition: exists(.seconds)
+  latency_metrics:
+    type: log_to_metric
+    inputs:
+    - timed
+    metrics:
+    - type: histogram
+      field: seconds
+      name: journey_moment_seconds
+      tags:
+        journey: "{{ journey }}"
+        moment: "{{ moment }}"
+  runs-first-task:
+    type: filter
+    inputs:
+    - moments
+    condition: .journey == "first-task" && .outcome != "invalid"
+  reduce-first-task:
+    type: reduce
+    inputs:
+    - runs-first-task
+    group_by:
+    - session
+    ends_when: .closed == true
+    expire_after_ms: 1800000
+    merge_strategies:
+      journey: retain
+      closed: retain
+      bad: retain
+      outcome: retain
+      step: max
+      late: discard
+      started: discard
+  runs-play:
+    type: filter
+    inputs:
+    - moments
+    condition: .journey == "play" && .outcome != "invalid"
+  reduce-play:
+    type: reduce
+    inputs:
+    - runs-play
+    group_by:
+    - session
+    ends_when: .closed == true
+    expire_after_ms: 1800000
+    merge_strategies:
+      journey: retain
+      closed: retain
+      bad: retain
+      outcome: retain
+      step: max
+      late: discard
+      started: discard
+sinks:
+  metrics:
+    type: prometheus_exporter
+    inputs:
+    - run_metrics
+    - moment_metrics
+    - latency_metrics
+    - throttled_named
+    address: 0.0.0.0:9598
+    flush_period_secs: 2419200
+    buckets:
+    - 0.05
+    - 0.1
+    - 0.25
+    - 0.3
+    - 0.5
+    - 1.0
+    - 2.5
+    - 5.0
+    - 10.0

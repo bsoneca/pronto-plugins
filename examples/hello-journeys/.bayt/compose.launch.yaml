@@ -1,0 +1,44 @@
+# generated from bayt.cue — do not edit
+services:
+  hello-journeys-launch:
+    build:
+      additional_contexts:
+        hello-journeys-caddy: service:hello-journeys-caddy
+      context: ..
+      dockerfile: .bayt/Dockerfile.launch
+      target: launch
+      tags:
+      - bayt-hello-journeys-launch:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-hello-journeys-launch:latest
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    depends_on:
+      hello-journeys-caddy:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test:
+      - CMD
+      - echo
+      - hello-journeys is healthy
+      interval: 5s
+      timeout: 2s
+      retries: 3
+    image: bayt-hello-journeys-launch:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+    networks:
+      default:
+        aliases:
+        - launch
+  hello-journeys-launch_bayt:
+    build:
+      additional_contexts:
+        hello-journeys-caddy_bayt: service:hello-journeys-caddy_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.launch
+      target: launch_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-journeys-launch_bayt:latest
+    scale: 0

@@ -1,0 +1,25 @@
+#!/bin/sh
+# Adds or refreshes pronto-flags in a pronto app:
+#   bin/pronto-flags <app-dir>
+# Or changes the released app's live flags, with no deploy (flags/live.nu):
+#   bin/pronto-flags setup <app-dir>               # once: the bucket, its readers, the first push
+#   bin/pronto-flags push <app-dir>                # the flags as flags_spec.cue says them now
+#   bin/pronto-flags history <app-dir>             # every version, newest first
+#   bin/pronto-flags rollback <app-dir> [version]  # the version before the live one, or the one named
+#   bin/pronto-flags show <app-dir>                # what a push would write, and where: nothing written
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+case "${1:-}" in
+setup|push|history|rollback|show)
+	cmd=$1
+	app=$(cd "$2" && pwd)
+	shift 2
+	cd "$here"
+	exec ./saytw --script tools.nu nu flags/live.nu "$cmd" "$app" "$@"
+	;;
+esac
+app=$(cd "$1" && pwd)
+shift
+cd "$here"
+# Deno as CI pins it for the plugins tree (.github/workflows/ci.yml).
+exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write flags/install.ts "$app" "$@"

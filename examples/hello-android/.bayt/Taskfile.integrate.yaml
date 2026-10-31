@@ -1,0 +1,11 @@
+# generated from bayt.cue — do not edit
+tasks:
+  default:
+    deps:
+    - "::bayt:launch"
+    run: once
+    status:
+    - >-
+      mise x -- bayt fingerprint --manifest '{{.TASKFILE_DIR}}/bayt.integrate.json'
+      --stamp-file .task/bayt/integrate.hash
+version: "3"

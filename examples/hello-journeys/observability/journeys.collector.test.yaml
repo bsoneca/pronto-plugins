@@ -1,0 +1,144 @@
+tests:
+- name: todo.create-todo is step 0 of first-task
+  inputs:
+  - insert_at: moments
+    type: log
+    log_fields:
+      screen: todo
+      gesture: create-todo
+      session: s
+      trace: 00-t-s-01
+      type: gesture
+      outcome: ok
+      ms: 40
+  outputs:
+  - extract_from: moments
+    conditions:
+    - type: vrl
+      source: >-
+        .journey == "first-task" && .step == 0 && .started == true && .closed == true
+        && .seconds == 0.04
+- name: counter.count is step 0 of play
+  inputs:
+  - insert_at: moments
+    type: log
+    log_fields:
+      screen: counter
+      gesture: count
+      session: s
+      trace: 00-t-s-01
+      type: gesture
+      outcome: ok
+      ms: 40
+  outputs:
+  - extract_from: moments
+    conditions:
+    - type: vrl
+      source: >-
+        .journey == "play" && .step == 0 && .started == true && .closed == false &&
+        .seconds == 0.04
+- name: grid.press is step 1 of play
+  inputs:
+  - insert_at: moments
+    type: log
+    log_fields:
+      screen: grid
+      gesture: press
+      session: s
+      trace: 00-t-s-01
+      type: gesture
+      outcome: ok
+      ms: 40
+  outputs:
+  - extract_from: moments
+    conditions:
+    - type: vrl
+      source: >-
+        .journey == "play" && .step == 1 && .started == false && .closed == true &&
+        .seconds == 0.04
+- name: a run from its first moment to its last ok is good
+  inputs:
+  - insert_at: ended
+    type: log
+    log_fields:
+      journey: j
+      late: false
+      started: true
+      closed: true
+      bad: false
+  outputs:
+  - extract_from: ended
+    conditions:
+    - type: vrl
+      source: .run == "good"
+- name: a run closed by a refused or failed moment is bad
+  inputs:
+  - insert_at: ended
+    type: log
+    log_fields:
+      journey: j
+      late: false
+      started: true
+      closed: true
+      bad: true
+  outputs:
+  - extract_from: ended
+    conditions:
+    - type: vrl
+      source: .run == "bad"
+- name: a run idle past its window is abandoned
+  inputs:
+  - insert_at: ended
+    type: log
+    log_fields:
+      journey: j
+      late: false
+      started: true
+      closed: false
+      bad: false
+  outputs:
+  - extract_from: ended
+    conditions:
+    - type: vrl
+      source: .run == "abandoned"
+- name: a run begun past its first moment is unstarted
+  inputs:
+  - insert_at: ended
+    type: log
+    log_fields:
+      journey: j
+      late: false
+      started: false
+      closed: true
+      bad: false
+  outputs:
+  - extract_from: ended
+    conditions:
+    - type: vrl
+      source: .run == "unstarted"
+- name: a run a late refusal opened is no run
+  inputs:
+  - insert_at: ended
+    type: log
+    log_fields:
+      journey: j
+      late: true
+      started: false
+      closed: true
+      bad: true
+  no_outputs_from:
+  - ended
+- name: a gesture that is no moment of any journey is dropped
+  inputs:
+  - insert_at: moments
+    type: log
+    log_fields:
+      screen: nowhere
+      gesture: nothing
+      session: s
+      trace: 00-t-s-01
+      type: gesture
+      outcome: ok
+      ms: 40
+  no_outputs_from:
+  - moments

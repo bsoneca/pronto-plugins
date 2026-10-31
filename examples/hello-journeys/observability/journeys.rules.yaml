@@ -1,0 +1,256 @@
+groups:
+- name: journey-first-task
+  interval: 30s
+  rules:
+  - record: journey:availability_budget
+    expr: vector(0.005)
+    labels:
+      journey: first-task
+  - record: journey:latency_budget
+    expr: vector(0.05)
+    labels:
+      journey: first-task
+  - record: journey:availability_errors:ratio_rate5m
+    expr: >-
+      (sum(increase(journey_runs_total{journey="first-task",outcome="bad"}[5m])) or
+      vector(0)) /
+      sum(increase(journey_runs_total{journey="first-task",outcome=~"good|bad"}[5m]))
+    labels:
+      journey: first-task
+  - record: journey:availability_errors:ratio_rate1h
+    expr: >-
+      (sum(increase(journey_runs_total{journey="first-task",outcome="bad"}[1h])) or
+      vector(0)) /
+      sum(increase(journey_runs_total{journey="first-task",outcome=~"good|bad"}[1h]))
+    labels:
+      journey: first-task
+  - record: journey:availability_errors:ratio_rate30m
+    expr: >-
+      (sum(increase(journey_runs_total{journey="first-task",outcome="bad"}[30m])) or
+      vector(0)) /
+      sum(increase(journey_runs_total{journey="first-task",outcome=~"good|bad"}[30m]))
+    labels:
+      journey: first-task
+  - record: journey:availability_errors:ratio_rate6h
+    expr: >-
+      (sum(increase(journey_runs_total{journey="first-task",outcome="bad"}[6h])) or
+      vector(0)) /
+      sum(increase(journey_runs_total{journey="first-task",outcome=~"good|bad"}[6h]))
+    labels:
+      journey: first-task
+  - record: journey:availability_errors:ratio_rate3d
+    expr: >-
+      (sum(increase(journey_runs_total{journey="first-task",outcome="bad"}[3d])) or
+      vector(0)) /
+      sum(increase(journey_runs_total{journey="first-task",outcome=~"good|bad"}[3d]))
+    labels:
+      journey: first-task
+  - record: journey:availability_errors:ratio_rate28d
+    expr: >-
+      (sum(increase(journey_runs_total{journey="first-task",outcome="bad"}[28d])) or
+      vector(0)) /
+      sum(increase(journey_runs_total{journey="first-task",outcome=~"good|bad"}[28d]))
+    labels:
+      journey: first-task
+  - record: journey:latency_errors:ratio_rate5m
+    expr: >-
+      1 -
+      sum(increase(journey_moment_seconds_bucket{journey="first-task",le=~"0[.]3([.]0)?"}[5m])) /
+      sum(increase(journey_moment_seconds_count{journey="first-task"}[5m]))
+    labels:
+      journey: first-task
+  - record: journey:latency_errors:ratio_rate1h
+    expr: >-
+      1 -
+      sum(increase(journey_moment_seconds_bucket{journey="first-task",le=~"0[.]3([.]0)?"}[1h])) /
+      sum(increase(journey_moment_seconds_count{journey="first-task"}[1h]))
+    labels:
+      journey: first-task
+  - record: journey:latency_errors:ratio_rate30m
+    expr: >-
+      1 -
+      sum(increase(journey_moment_seconds_bucket{journey="first-task",le=~"0[.]3([.]0)?"}[30m])) /
+      sum(increase(journey_moment_seconds_count{journey="first-task"}[30m]))
+    labels:
+      journey: first-task
+  - record: journey:latency_errors:ratio_rate6h
+    expr: >-
+      1 -
+      sum(increase(journey_moment_seconds_bucket{journey="first-task",le=~"0[.]3([.]0)?"}[6h])) /
+      sum(increase(journey_moment_seconds_count{journey="first-task"}[6h]))
+    labels:
+      journey: first-task
+  - record: journey:latency_errors:ratio_rate3d
+    expr: >-
+      1 -
+      sum(increase(journey_moment_seconds_bucket{journey="first-task",le=~"0[.]3([.]0)?"}[3d])) /
+      sum(increase(journey_moment_seconds_count{journey="first-task"}[3d]))
+    labels:
+      journey: first-task
+  - record: journey:latency_errors:ratio_rate28d
+    expr: >-
+      1 -
+      sum(increase(journey_moment_seconds_bucket{journey="first-task",le=~"0[.]3([.]0)?"}[28d])) /
+      sum(increase(journey_moment_seconds_count{journey="first-task"}[28d]))
+    labels:
+      journey: first-task
+  - alert: JourneyAvailabilityBurnFast
+    expr: >-
+      journey:availability_errors:ratio_rate1h{journey="first-task"} > 13.44 * 0.005
+      and journey:availability_errors:ratio_rate5m{journey="first-task"} > 13.44 * 0.005
+    for: 2m
+    labels:
+      journey: first-task
+      owner: fixture
+      severity: page
+    annotations:
+      summary: first-task is spending its availability budget at 13.44× (2% of 28d in 1h)
+  - alert: JourneyAvailabilityBurnMedium
+    expr: >-
+      journey:availability_errors:ratio_rate6h{journey="first-task"} > 5.6 * 0.005
+      and journey:availability_errors:ratio_rate30m{journey="first-task"} > 5.6 * 0.005
+    for: 2m
+    labels:
+      journey: first-task
+      owner: fixture
+      severity: page
+    annotations:
+      summary: first-task is spending its availability budget at 5.6× (5% of 28d in 6h)
+  - alert: JourneyAvailabilityBurnSlow
+    expr: >-
+      journey:availability_errors:ratio_rate3d{journey="first-task"} > 0.933 * 0.005
+      and journey:availability_errors:ratio_rate6h{journey="first-task"} > 0.933 * 0.005
+    for: 2m
+    labels:
+      journey: first-task
+      owner: fixture
+      severity: ticket
+    annotations:
+      summary: first-task is spending its availability budget at 0.933× (10% of 28d in 3d)
+  - alert: JourneyLatencyBurnFast
+    expr: >-
+      journey:latency_errors:ratio_rate1h{journey="first-task"} > 13.44 * 0.05 and
+      journey:latency_errors:ratio_rate5m{journey="first-task"} > 13.44 * 0.05
+    for: 2m
+    labels:
+      journey: first-task
+      owner: fixture
+      severity: page
+    annotations:
+      summary: first-task is spending its latency budget at 13.44× (2% of 28d in 1h)
+  - alert: JourneyLatencyBurnMedium
+    expr: >-
+      journey:latency_errors:ratio_rate6h{journey="first-task"} > 5.6 * 0.05 and
+      journey:latency_errors:ratio_rate30m{journey="first-task"} > 5.6 * 0.05
+    for: 2m
+    labels:
+      journey: first-task
+      owner: fixture
+      severity: page
+    annotations:
+      summary: first-task is spending its latency budget at 5.6× (5% of 28d in 6h)
+  - alert: JourneyLatencyBurnSlow
+    expr: >-
+      journey:latency_errors:ratio_rate3d{journey="first-task"} > 0.933 * 0.05 and
+      journey:latency_errors:ratio_rate6h{journey="first-task"} > 0.933 * 0.05
+    for: 2m
+    labels:
+      journey: first-task
+      owner: fixture
+      severity: ticket
+    annotations:
+      summary: first-task is spending its latency budget at 0.933× (10% of 28d in 3d)
+  - alert: JourneyNoData
+    expr: (sum(increase(journey_runs_total{journey="first-task"}[1h])) or vector(0)) == 0
+    for: 15m
+    labels:
+      journey: first-task
+      owner: fixture
+      severity: ticket
+    annotations:
+      summary: "first-task has reported no run for an hour: its SLO is measuring nothing"
+- name: journey-play
+  interval: 30s
+  rules:
+  - record: journey:availability_budget
+    expr: vector(0.001)
+    labels:
+      journey: play
+  - record: journey:availability_errors:ratio_rate5m
+    expr: >-
+      (sum(increase(journey_runs_total{journey="play",outcome="bad"}[5m])) or
+      vector(0)) / sum(increase(journey_runs_total{journey="play",outcome=~"good|bad"}[5m]))
+    labels:
+      journey: play
+  - record: journey:availability_errors:ratio_rate1h
+    expr: >-
+      (sum(increase(journey_runs_total{journey="play",outcome="bad"}[1h])) or
+      vector(0)) / sum(increase(journey_runs_total{journey="play",outcome=~"good|bad"}[1h]))
+    labels:
+      journey: play
+  - record: journey:availability_errors:ratio_rate30m
+    expr: >-
+      (sum(increase(journey_runs_total{journey="play",outcome="bad"}[30m])) or
+      vector(0)) / sum(increase(journey_runs_total{journey="play",outcome=~"good|bad"}[30m]))
+    labels:
+      journey: play
+  - record: journey:availability_errors:ratio_rate6h
+    expr: >-
+      (sum(increase(journey_runs_total{journey="play",outcome="bad"}[6h])) or
+      vector(0)) / sum(increase(journey_runs_total{journey="play",outcome=~"good|bad"}[6h]))
+    labels:
+      journey: play
+  - record: journey:availability_errors:ratio_rate3d
+    expr: >-
+      (sum(increase(journey_runs_total{journey="play",outcome="bad"}[3d])) or
+      vector(0)) / sum(increase(journey_runs_total{journey="play",outcome=~"good|bad"}[3d]))
+    labels:
+      journey: play
+  - record: journey:availability_errors:ratio_rate28d
+    expr: >-
+      (sum(increase(journey_runs_total{journey="play",outcome="bad"}[28d])) or
+      vector(0)) / sum(increase(journey_runs_total{journey="play",outcome=~"good|bad"}[28d]))
+    labels:
+      journey: play
+  - alert: JourneyAvailabilityBurnFast
+    expr: >-
+      journey:availability_errors:ratio_rate1h{journey="play"} > 13.44 * 0.001 and
+      journey:availability_errors:ratio_rate5m{journey="play"} > 13.44 * 0.001
+    for: 2m
+    labels:
+      journey: play
+      owner: fixture
+      severity: page
+    annotations:
+      summary: play is spending its availability budget at 13.44× (2% of 28d in 1h)
+  - alert: JourneyAvailabilityBurnMedium
+    expr: >-
+      journey:availability_errors:ratio_rate6h{journey="play"} > 5.6 * 0.001 and
+      journey:availability_errors:ratio_rate30m{journey="play"} > 5.6 * 0.001
+    for: 2m
+    labels:
+      journey: play
+      owner: fixture
+      severity: page
+    annotations:
+      summary: play is spending its availability budget at 5.6× (5% of 28d in 6h)
+  - alert: JourneyAvailabilityBurnSlow
+    expr: >-
+      journey:availability_errors:ratio_rate3d{journey="play"} > 0.933 * 0.001 and
+      journey:availability_errors:ratio_rate6h{journey="play"} > 0.933 * 0.001
+    for: 2m
+    labels:
+      journey: play
+      owner: fixture
+      severity: ticket
+    annotations:
+      summary: play is spending its availability budget at 0.933× (10% of 28d in 3d)
+  - alert: JourneyNoData
+    expr: (sum(increase(journey_runs_total{journey="play"}[1h])) or vector(0)) == 0
+    for: 15m
+    labels:
+      journey: play
+      owner: fixture
+      severity: ticket
+    annotations:
+      summary: "play has reported no run for an hour: its SLO is measuring nothing"

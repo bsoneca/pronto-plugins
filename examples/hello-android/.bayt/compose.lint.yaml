@@ -1,0 +1,43 @@
+# generated from bayt.cue — do not edit
+services:
+  hello-android-lint:
+    build:
+      additional_contexts:
+        hello-android-generate: service:hello-android-generate
+      context: ..
+      dockerfile: .bayt/Dockerfile.lint
+      target: lint
+      tags:
+      - bayt-hello-android-lint:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-hello-android-lint:latest
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-android-lint:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+    scale: 0
+  hello-android-lint_bayt:
+    build:
+      additional_contexts:
+        hello-android-generate_bayt: service:hello-android-generate_bayt
+        hello-android-setup_bayt: service:hello-android-setup_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.lint
+      target: lint_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-android-lint_bayt:latest
+    scale: 0
+  hello-android-lint_srcs:
+    build:
+      additional_contexts:
+        hello-android-generate_srcs: service:hello-android-generate_srcs
+        hello-android-setup_srcs: service:hello-android-setup_srcs
+      context: ..
+      dockerfile: .bayt/Dockerfile.lint
+      target: lint_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-android-lint_srcs:latest
+    scale: 0

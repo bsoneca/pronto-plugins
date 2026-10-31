@@ -1,0 +1,37 @@
+#!/bin/sh
+# Intents (docs/intents.md): one command a piece of plumbing, run until it is done and proven,
+# stopping only where a person must act; run again, it goes on from there. An app is its name
+# (apps/<app> in this repository) or its folder: `.` in a repository that is one app.
+#   bin/pronto release <app>                         its checks, its release, and what it sells through
+#   bin/pronto connect stripe <app> [flags]          pronto-billing set up (billing/connect_cli.ts)
+#   bin/pronto deploy gcp <app> [flags]              Cloud Run, its release target written (gcp/deploy_cli.ts)
+#   bin/pronto plan release|stripe|gcp <app> [flags] what is done, what is next, changing nothing
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+mode=${1:?release, connect, deploy or plan}
+if [ "$mode" = release ] || { [ "$mode" = plan ] && [ "${2:-}" = release ]; }; then
+	[ "$mode" = plan ] && shift
+	app=${2:?the app, such as prontoweeper}
+	shift 2
+	intent=release
+else
+	intent=${2:?the intent, such as stripe}
+	app=${3:?the app, such as prontoweeper}
+	shift 3
+fi
+# An app's name is its folder under the repository's apps/.
+if [ ! -d "$app" ]; then
+	top=$(git rev-parse --show-toplevel 2>/dev/null || (cd "$here/.." && pwd))
+	[ -d "$top/apps/$app" ] || { echo "pronto: no app $app (no folder $top/apps/$app)" >&2; exit 2; }
+	app="$top/apps/$app"
+fi
+app=$(cd "$app" && pwd)
+case "$intent" in
+	release) script=intents/release_cli.ts; set -- "$mode" "$app" "$@" ;;
+	stripe) script=billing/connect_cli.ts; set -- "$mode" "$intent" "$app" "$@" ;;
+	gcp) script=gcp/deploy_cli.ts; set -- "$mode" "$intent" "$app" "$@" ;;
+	*) echo "pronto: no intent $intent (release, stripe, gcp)" >&2; exit 2 ;;
+esac
+cd "$here"
+# Deno as CI pins it for the plugins tree (.github/workflows/ci.yml).
+exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config -A "$script" "$@"

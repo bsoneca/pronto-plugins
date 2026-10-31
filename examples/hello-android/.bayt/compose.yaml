@@ -1,0 +1,64 @@
+# generated from bayt.cue — do not edit
+include:
+- path:
+  - ./compose.bayt.yaml
+  - ./compose.bayt.ports.yaml
+  required: false
+services:
+  caddy:
+    extends:
+      file: ./compose.caddy.yaml
+      service: hello-android-caddy
+    profiles:
+    - caddy
+    scale: 1
+  setup:
+    extends:
+      file: ./compose.setup.yaml
+      service: hello-android-setup
+    profiles:
+    - setup
+  lint:
+    extends:
+      file: ./compose.lint.yaml
+      service: hello-android-lint
+    profiles:
+    - lint
+  generate:
+    extends:
+      file: ./compose.generate.yaml
+      service: hello-android-generate
+    profiles:
+    - generate
+  build:
+    extends:
+      file: ./compose.build.yaml
+      service: hello-android-build
+    profiles:
+    - build
+  test:
+    extends:
+      file: ./compose.test.yaml
+      service: hello-android-test
+    profiles:
+    - test
+  launch:
+    extends:
+      file: ./compose.launch.yaml
+      service: hello-android-launch
+    profiles:
+    - launch
+    scale: 1
+  integrate:
+    extends:
+      file: ./compose.integrate.yaml
+      service: hello-android-integrate
+    profiles:
+    - integrate
+    scale: 1
+  ci-visual:
+    extends:
+      file: ./compose.ci-visual.yaml
+      service: hello-android-ci-visual
+    profiles:
+    - ci-visual

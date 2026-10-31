@@ -1,0 +1,25 @@
+#!/bin/sh
+# Adds or refreshes the Cloud Run host in a pronto app:
+#   bin/pronto-gcp <app-dir> <project> [key=value ...]
+# keys: name (default: the app directory's), region, service, repository,
+#       origin, maxScale, memory.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+project=$2
+shift 2
+name=$(basename "$app")
+tags="-t project=$project"
+for kv in "$@"; do
+	case "$kv" in
+	name=*) name=${kv#name=} ;;
+	region=* | service=* | repository=* | origin=* | maxScale=* | memory=*) tags="$tags -t $kv" ;;
+	*) echo "pronto-gcp: unknown argument $kv" >&2; exit 2 ;;
+	esac
+done
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+# shellcheck disable=SC2086
+./saytw --script tools.nu cue export ./gcp/export -t "app=$name" $tags -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"

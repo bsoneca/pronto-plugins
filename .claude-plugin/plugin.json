@@ -1,0 +1,22 @@
+{
+  "name": "pronto-studio",
+  "version": "0.4.0",
+  "description": "pronto's skills beyond its own plugin: intents (release, connect stripe, deploy), the Android host, Firebase Hosting, Google Cloud Run, social sign-in, journey monitoring and performance measurement.",
+  "author": {
+    "name": "bsoneca",
+    "url": "https://github.com/bsoneca"
+  },
+  "repository": "https://github.com/bsoneca/pronto-plugins",
+  "keywords": [
+    "pronto",
+    "sayt",
+    "intents",
+    "release",
+    "billing",
+    "android",
+    "firebase",
+    "gcp",
+    "identity",
+    "observability"
+  ]
+}

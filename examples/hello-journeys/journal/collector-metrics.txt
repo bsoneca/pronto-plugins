@@ -1,0 +1,6 @@
+journey_moment_seconds_count{journey="first-task",moment="todo.create-todo"} 1 1792335452308
+journey_moments_total{journey="first-task",moment="todo.create-todo",outcome="ok"} 1 1792335452307
+journey_moments_total{journey="play",moment="counter.count",outcome="ok"} 3 1792335456663
+journey_moments_total{journey="play",moment="grid.press",outcome="ok"} 1 1792335459832
+journey_runs_total{journey="first-task",outcome="good"} 1 1792335452308
+journey_runs_total{journey="play",outcome="good"} 1 1792335459832

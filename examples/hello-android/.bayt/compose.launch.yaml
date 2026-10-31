@@ -1,0 +1,44 @@
+# generated from bayt.cue — do not edit
+services:
+  hello-android-launch:
+    build:
+      additional_contexts:
+        hello-android-caddy: service:hello-android-caddy
+      context: ..
+      dockerfile: .bayt/Dockerfile.launch
+      target: launch
+      tags:
+      - bayt-hello-android-launch:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-hello-android-launch:latest
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    depends_on:
+      hello-android-caddy:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test:
+      - CMD
+      - echo
+      - hello-android is healthy
+      interval: 5s
+      timeout: 2s
+      retries: 3
+    image: bayt-hello-android-launch:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+    networks:
+      default:
+        aliases:
+        - launch
+  hello-android-launch_bayt:
+    build:
+      additional_contexts:
+        hello-android-caddy_bayt: service:hello-android-caddy_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.launch
+      target: launch_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-android-launch_bayt:latest
+    scale: 0

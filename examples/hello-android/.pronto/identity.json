@@ -1,0 +1,17 @@
+{
+  "0xa5ae24603b8b974f": {
+    "name": "counter",
+    "fields": {
+      "1": {
+        "name": "id",
+        "type": "string",
+        "retired": false
+      },
+      "2": {
+        "name": "n",
+        "type": "int32",
+        "retired": false
+      }
+    }
+  }
+}

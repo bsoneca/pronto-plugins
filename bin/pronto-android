@@ -1,0 +1,15 @@
+#!/bin/sh
+# Adds or refreshes the Android host in a pronto app:
+#   bin/pronto-android <app-dir> [app-name] [label]
+# The name defaults to the app directory's, as pronto's meta.name does.
+# The label, what the launcher and the autofill picker show, defaults to the name.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+name=${2:-$(basename "$app")}
+label=${3:-$name}
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+./saytw --script tools.nu cue export ./android/export -t "app=$name" -t "label=$label" -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"

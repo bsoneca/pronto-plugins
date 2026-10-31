@@ -1,0 +1,41 @@
+# generated from bayt.cue — do not edit
+services:
+  hello-journeys-generate:
+    build:
+      additional_contexts:
+        hello-journeys-setup: service:hello-journeys-setup
+      context: ..
+      dockerfile: .bayt/Dockerfile.generate
+      target: generate
+      tags:
+      - bayt-hello-journeys-generate:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-hello-journeys-generate:latest
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-journeys-generate:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+    scale: 0
+  hello-journeys-generate_bayt:
+    build:
+      additional_contexts:
+        hello-journeys-setup_bayt: service:hello-journeys-setup_bayt
+      context: ..
+      dockerfile: .bayt/Dockerfile.generate
+      target: generate_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-journeys-generate_bayt:latest
+    scale: 0
+  hello-journeys-generate_srcs:
+    build:
+      additional_contexts:
+        hello-journeys-setup_srcs: service:hello-journeys-setup_srcs
+      context: ..
+      dockerfile: .bayt/Dockerfile.generate
+      target: generate_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-journeys-generate_srcs:latest
+    scale: 0

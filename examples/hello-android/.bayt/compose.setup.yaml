@@ -1,0 +1,35 @@
+# generated from bayt.cue — do not edit
+services:
+  hello-android-setup:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.setup
+      target: setup
+      tags:
+      - bayt-hello-android-setup:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-hello-android-setup:latest
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-android-setup:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+    scale: 0
+  hello-android-setup_bayt:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.setup
+      target: setup_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-android-setup_bayt:latest
+    scale: 0
+  hello-android-setup_srcs:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.setup
+      target: setup_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-android-setup_srcs:latest
+    scale: 0

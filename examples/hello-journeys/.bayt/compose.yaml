@@ -1,0 +1,71 @@
+# generated from bayt.cue — do not edit
+include:
+- path:
+  - ./compose.bayt.yaml
+  - ./compose.bayt.ports.yaml
+  required: false
+services:
+  caddy:
+    extends:
+      file: ./compose.caddy.yaml
+      service: hello-journeys-caddy
+    profiles:
+    - caddy
+    scale: 1
+  setup:
+    extends:
+      file: ./compose.setup.yaml
+      service: hello-journeys-setup
+    profiles:
+    - setup
+  lint:
+    extends:
+      file: ./compose.lint.yaml
+      service: hello-journeys-lint
+    profiles:
+    - lint
+  generate:
+    extends:
+      file: ./compose.generate.yaml
+      service: hello-journeys-generate
+    profiles:
+    - generate
+  build:
+    extends:
+      file: ./compose.build.yaml
+      service: hello-journeys-build
+    profiles:
+    - build
+  test:
+    extends:
+      file: ./compose.test.yaml
+      service: hello-journeys-test
+    profiles:
+    - test
+  launch:
+    extends:
+      file: ./compose.launch.yaml
+      service: hello-journeys-launch
+    profiles:
+    - launch
+    scale: 1
+  integrate:
+    extends:
+      file: ./compose.integrate.yaml
+      service: hello-journeys-integrate
+    profiles:
+    - integrate
+    scale: 1
+  ci-visual:
+    extends:
+      file: ./compose.ci-visual.yaml
+      service: hello-journeys-ci-visual
+    profiles:
+    - ci-visual
+  journeys-collector:
+    extends:
+      file: ./compose.journeys-collector.yaml
+      service: hello-journeys-journeys-collector
+    profiles:
+    - journeys-collector
+    scale: 1

@@ -1,0 +1,25 @@
+#!/bin/sh
+# Adds or refreshes the Firebase Hosting host in a pronto app:
+#   bin/pronto-firebase <app-dir> <project> [key=value ...]
+# keys: name (default: the app directory's), site, channel, expires,
+#       ciProvider and ciAccount (both, for a keyless deploy on the tag).
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+project=$2
+shift 2
+name=$(basename "$app")
+tags="-t project=$project"
+for kv in "$@"; do
+	case "$kv" in
+	name=*) name=${kv#name=} ;;
+	site=* | channel=* | expires=* | ciProvider=* | ciAccount=*) tags="$tags -t $kv" ;;
+	*) echo "pronto-firebase: unknown argument $kv" >&2; exit 2 ;;
+	esac
+done
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+# shellcheck disable=SC2086
+./saytw --script tools.nu cue export ./firebase/export -t "app=$name" $tags -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"

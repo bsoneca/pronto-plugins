@@ -1,0 +1,41 @@
+# generated from bayt.cue — do not edit
+services:
+  hello-journeys-journeys-collector:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.journeys-collector
+      target: journeys-collector
+      tags:
+      - >-
+        bayt-hello-journeys-journeys-collector:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+      - bayt-hello-journeys-journeys-collector:latest
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: >-
+      bayt-hello-journeys-journeys-collector:${BAYT_IMAGE_TAG:-${COMPOSE_PROJECT_NAME}}
+    networks:
+      default:
+        aliases:
+        - journeys-collector
+    restart: on-failure
+  hello-journeys-journeys-collector_bayt:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.journeys-collector
+      target: journeys-collector_bayt
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-journeys-journeys-collector_bayt:latest
+    scale: 0
+  hello-journeys-journeys-collector_srcs:
+    build:
+      context: ..
+      dockerfile: .bayt/Dockerfile.journeys-collector
+      target: journeys-collector_srcs
+      args:
+        BUILDKIT_SYNTAX: >-
+          docker/dockerfile:1.26@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+    image: bayt-hello-journeys-journeys-collector_srcs:latest
+    scale: 0

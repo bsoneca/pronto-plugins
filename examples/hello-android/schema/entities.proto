@@ -1,0 +1,11 @@
+syntax = "proto3";
+package pronto.entities;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+
+message Counter {
+  optional string id = 1 [json_name = "id"];
+  optional int32 n = 2 [json_name = "n"];
+}

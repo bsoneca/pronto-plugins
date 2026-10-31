@@ -1,0 +1,61 @@
+{
+  "say": {
+    "setup": {
+      "rulemap": {
+        "android-sdk": {
+          "platform": "android",
+          "cmds": [
+            {
+              "do": "use tools.nu [run-mise]; 1..30 | each { \"y\" } | str join \"\\n\" | run-mise exec -- sdkmanager --licenses | ignore"
+            },
+            {
+              "do": "use tools.nu [run-mise]; run-mise exec -- sdkmanager --install \"platform-tools\" \"platforms;android-36\" \"build-tools;36.0.0\""
+            }
+          ]
+        }
+      }
+    },
+    "build": {
+      "rulemap": {
+        "android": {
+          "platform": "android",
+          "cmds": [
+            {
+              "do": "cd android; use tools.nu [run-mise]; run-mise exec -- gradle --console=plain :app:assembleDebug"
+            }
+          ]
+        }
+      }
+    },
+    "test": {
+      "rulemap": {
+        "android": {
+          "platform": "android",
+          "cmds": [
+            {
+              "do": "cd android; use tools.nu [run-mise]; run-mise exec -- gradle --console=plain :app:testDebugUnitTest"
+            }
+          ]
+        }
+      }
+    },
+    "launch": {
+      "rulemap": {
+        "android": {
+          "platform": "android",
+          "cmds": [
+            {
+              "do": "cd android; use tools.nu [run-mise]; run-mise exec -- gradle --console=plain :app:assembleDebug"
+            },
+            {
+              "do": "use tools.nu [run-mise]; run-mise exec -- sh -c \"$ANDROID_HOME/platform-tools/adb install -r android/app/build/outputs/apk/debug/app-debug.apk\""
+            },
+            {
+              "do": "use tools.nu [run-mise]; run-mise exec -- sh -c \"$ANDROID_HOME/platform-tools/adb shell am start -S -n dev.pronto.hello_android/.MainActivity\""
+            }
+          ]
+        }
+      }
+    }
+  }
+}

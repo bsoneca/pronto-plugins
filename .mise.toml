@@ -1,0 +1,6 @@
+[settings]
+lockfile = true
+
+[tools]
+# The CUE pronto pins; exports must be byte-identical everywhere.
+"github:cue-lang/cue" = "0.16.1"

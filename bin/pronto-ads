@@ -1,0 +1,11 @@
+#!/bin/sh
+# Adds or refreshes pronto-ads in a pronto app: the page's rewarded-ad module, at
+# ads/ads.js in the app unless a path inside it is named.
+#   bin/pronto-ads <app-dir> [<module-path>]
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+shift
+cd "$here"
+# Deno as CI pins it for the plugins tree (.github/workflows/ci.yml).
+exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write ads/install.ts "$app" "$@"

@@ -1,0 +1,5 @@
+# generated from bayt.cue — do not edit
+services:
+  hello-android-caddy:
+    ports:
+    - ${CADDY_TLS_HOST_PORT:-16223}:8443

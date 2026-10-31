@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hello-journeys — journal</title>
+<style>
+:root{--bg:#F6F7F9;--ink:#14161A;--muted:#5A6270;--line:#DDE1E7;--card:#FFFFFF;--ok:#2F6B3A}
+@media (prefers-color-scheme: dark){:root{--bg:#111317;--ink:#E8EAED;--muted:#9AA1AC;--line:#2A2E35;--card:#181B20;--ok:#7CC48A}}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,sans-serif}
+main{max-width:920px;margin:0 auto;padding:32px 16px 64px}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:18px;margin:28px 0 8px}
+p.lead{color:var(--muted);margin:0 0 20px}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:24px}
+table{border-collapse:collapse;width:100%;font-size:14px}td,th{text-align:left;padding:8px;border-top:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:500;border-top:0}
+code,pre{font:13px ui-monospace,SFMono-Regular,Menlo,monospace}pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px;overflow-x:auto}
+.ok{color:var(--ok);font-weight:600}.scroll{overflow-x:auto}
+.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+figure{margin:0}figure img{width:100%;border:1px solid var(--line);border-radius:6px}figcaption{color:var(--muted);font-size:14px;margin-top:6px}
+</style>
+</head>
+<body>
+<main>
+<h1>hello-journeys</h1>
+<p class="lead">Pronto's idioms app with journey monitoring added from pronto-plugins, on the released pronto 0.14.0 and omnishell 0.12.1.</p>
+
+<section>
+<h2 style="margin-top:0">2026-10-18 · journeys added, one run measured</h2>
+<p>The app is pronto's <code>idioms</code> fixture under its own name and module. <code>bin/pronto-journeys .</code> wrote the host's files. Two journeys went into <code>journeys_spec.cue</code>, both hatches into <code>ir.html</code>, and nothing else changed.</p>
+
+<h2>Gates (exit codes seen)</h2>
+<div class="scroll"><table>
+<tr><th>Verb</th><th>Result</th><th>Includes</th></tr>
+<tr><td><code>generate</code></td><td class="ok">0</td><td>gestures derived from the screens; the door's <code>/telemetry</code> route; <code>observability/</code></td></tr>
+<tr><td><code>lint</code></td><td class="ok">0</td><td><code>promtool check rules</code> on the SLO rules</td></tr>
+<tr><td><code>test</code></td><td class="ok">0</td><td>the program refusing an undeclared gesture; promtool rule tests on synthetic burns</td></tr>
+<tr><td><code>integrate</code></td><td class="ok">0</td><td><code>vector test</code> on the collector's run assembly; visual lint</td></tr>
+</table></div>
+
+<h2>Using it</h2>
+<p>The app was launched with <code>sayt launch</code> and <code>sayt launch@journeys</code>. Headless Chrome, at the door's own address, added a todo, pressed + + − on the counter and pressed one light. The reporter hatch posted each gesture through the door to the collector.</p>
+<div class="shots">
+<figure><img src="todo.png" alt="Todo screen with buy milk added"><figcaption><code>todo.create-todo</code>: the form's write succeeded, and the <code>first-task</code> run closed good.</figcaption></figure>
+<figure><img src="grid.png" alt="Lights out after one press, moves 1, lit 12"><figcaption><code>grid.press</code> after three <code>counter.count</code>: the <code>play</code> run closed good.</figcaption></figure>
+</div>
+<p>What the collector exported afterwards (<a href="collector-metrics.txt">as read</a>):</p>
+<pre>journey_runs_total{journey="first-task",outcome="good"} 1
+journey_runs_total{journey="play",outcome="good"} 1
+journey_moments_total{journey="play",moment="counter.count",outcome="ok"} 3
+journey_moments_total{journey="play",moment="grid.press",outcome="ok"} 1
+journey_moments_total{journey="first-task",moment="todo.create-todo",outcome="ok"} 1
+journey_moment_seconds_count{journey="first-task",moment="todo.create-todo"} 1</pre>
+<p>The app keeps its rows in the tab and device, so none of its writes can fail. The failure switch below gives it a failure that does.</p>
+</section>
+
+<section style="margin-top:20px">
+<h2 style="margin-top:0">2026-10-18 · watching it: a local dashboard and the failure switch</h2>
+<p><code>sayt launch@journeys</code> now starts VictoriaMetrics, vmalert and Grafana beside the collector, fed the generated rules and dashboard, and prints the app, Grafana and alert addresses. The counter gained a <strong>Fail</strong> button: the same <code>count</code> handler, made to throw.</p>
+<div class="shots">
+<figure><img src="counter-failed.png" alt="Counter screen with the Fail button beside minus and plus"><figcaption>The failure switch. A press puts the screen in <code>network-error</code>; this app's stylesheet does not draw that state, but the reporter reads it, and <code>counter.count</code> is a failed moment.</figcaption></figure>
+<figure><img src="alerts.png" alt="vmalert alerts page with the journey-play group showing three firing alerts"><figcaption>vmalert: fast, medium and slow burn all firing for <code>play</code>.</figcaption></figure>
+</div>
+<figure style="margin-top:12px"><img src="dashboard.png" alt="Grafana Journeys dashboard: first-task 100% with 0x burn; play heavily burned with failed counter.count moments"><figcaption>Grafana. <code>first-task</code> is untouched. <code>play</code> is far past its budget, because the many probe failures sent while finding the bugs below count against it. A fresh <code>launch@journeys</code> starts clean.</figcaption></figure>
+
+<h2>Found by watching it, fixed</h2>
+<ul>
+<li>The terminal moves between screens without unloading the page, so a batch waiting for 20 events or a <code>pagehide</code> could sit in the tab indefinitely. The reporter now also flushes 2 s after a batch's first event.</li>
+<li>Chrome dropped the batch sent at <code>pagehide</code> when the page reloaded its own address. Three Fail presses with reloads counted 1. What a page holds as it goes is now kept in the tab and sent by the next load, and the collector's dedupe drops any repeat: 3 of 3.</li>
+<li>Each outcome's counter is born at its first run, and <code>rate()</code> over a series that has not moved since is 0, so a fresh journey read 0/0: "No data". The rules and the dashboard now take ratios of <code>increase()</code>, which VictoriaMetrics counts from a series' first sample.</li>
+<li>Pressing Fail again on a screen already in <code>network-error</code> counted as ok: the terminal writes the state again, but the reporter only read changes. It now settles on every write: five presses on one screen, five failures. The local stack no longer holds back the newest 30 s (VictoriaMetrics' latency offset) or backdates evaluations by 30 s (vmalert's eval delay), so a press shows within about 40 s.</li>
+</ul>
+</section>
+</main>
+</body>
+</html>

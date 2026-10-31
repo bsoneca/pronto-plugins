@@ -1,0 +1,32 @@
+#!/bin/sh
+# Runs the billing broker an operator serves for every pronto-billing app:
+#   bin/pronto-billing-broker [env-file]
+# The env file (default ~/.config/pronto-billing/broker.env, never committed)
+# holds BROKER_ISSUER, BROKER_SECRET, BILLING_SIGNING_KEY, STRIPE_SECRET_KEY
+# and STRIPE_WEBHOOK_SECRET, and BILLING_FEE_PERCENT, the platform's share;
+# PORT defaults to 28463. Without STRIPE_SECRET_KEY, on a localhost issuer, a
+# stand-in for Stripe takes payments at /fake/stripe. Once per operator:
+#   bin/pronto-billing-broker keygen [env-file]    # prints BILLING_SIGNING_KEY=…
+#   bin/pronto-billing-broker webhook [env-file]   # prints STRIPE_WEBHOOK_SECRET=…
+# Or releases it to Cloud Run, as billing/release.nu says:
+#   bin/pronto-billing-broker release --project P --domain D [--fee N] [--webhook]
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+cd "$here"
+if [ "${1:-}" = release ]; then
+	shift
+	exec ./saytw --script tools.nu nu billing/release.nu "$@"
+fi
+cmd=
+case "${1:-}" in keygen|webhook) cmd=$1; shift ;; esac
+env_file=${1:-$HOME/.config/pronto-billing/broker.env}
+deno() {
+	# Deno as CI pins it for the plugins tree (.github/workflows/ci.yml).
+	exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config --allow-net --allow-env "$@"
+}
+if [ "$cmd" = keygen ]; then
+	printf 'BILLING_SIGNING_KEY='
+	deno billing/broker/main.ts keygen
+fi
+[ -f "$env_file" ] || { echo "pronto-billing-broker: no $env_file" >&2; exit 2; }
+deno --env-file="$env_file" billing/broker/main.ts $cmd

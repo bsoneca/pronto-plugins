@@ -1,0 +1,16 @@
+{
+  "say": {
+    "launch": {
+      "rulemap": {
+        "journeys": {
+          "platform": "journeys",
+          "cmds": [
+            {
+              "do": "use ./journeys/journeys.nu; journeys up"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

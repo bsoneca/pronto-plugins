@@ -1,0 +1,66 @@
+# The generated rules against synthetic browser counters: `play` (99.9%, 28d)
+# pages at both fast and medium burn when 2% of its runs fail, only tickets at
+# 0.2%, and stays quiet when runs are only abandoned.
+rule_files:
+  - ../observability/journeys.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: 2% bad runs page fast and medium and ticket slow
+    interval: 1m
+    input_series:
+      - series: 'journey_runs_total{journey="play",outcome="good"}'
+        values: '0+98x120'
+      - series: 'journey_runs_total{journey="play",outcome="bad"}'
+        values: '0+2x120'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: JourneyAvailabilityBurnFast
+        exp_alerts:
+          - exp_labels: {journey: play, owner: fixture, severity: page}
+            exp_annotations: {summary: "play is spending its availability budget at 13.44× (2% of 28d in 1h)"}
+      - eval_time: 70m
+        alertname: JourneyAvailabilityBurnMedium
+        exp_alerts:
+          - exp_labels: {journey: play, owner: fixture, severity: page}
+            exp_annotations: {summary: "play is spending its availability budget at 5.6× (5% of 28d in 6h)"}
+      - eval_time: 70m
+        alertname: JourneyAvailabilityBurnSlow
+        exp_alerts:
+          - exp_labels: {journey: play, owner: fixture, severity: ticket}
+            exp_annotations: {summary: "play is spending its availability budget at 0.933× (10% of 28d in 3d)"}
+  - name: 0.2% bad runs only ticket
+    interval: 1m
+    input_series:
+      - series: 'journey_runs_total{journey="play",outcome="good"}'
+        values: '0+998x120'
+      - series: 'journey_runs_total{journey="play",outcome="bad"}'
+        values: '0+2x120'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: JourneyAvailabilityBurnFast
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: JourneyAvailabilityBurnMedium
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: JourneyAvailabilityBurnSlow
+        exp_alerts:
+          - exp_labels: {journey: play, owner: fixture, severity: ticket}
+            exp_annotations: {summary: "play is spending its availability budget at 0.933× (10% of 28d in 3d)"}
+  - name: abandoned runs spend no budget
+    interval: 1m
+    input_series:
+      - series: 'journey_runs_total{journey="play",outcome="good"}'
+        values: '0+90x120'
+      - series: 'journey_runs_total{journey="play",outcome="abandoned"}'
+        values: '0+50x120'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: JourneyAvailabilityBurnSlow
+        exp_alerts: []
+    promql_expr_test:
+      - expr: 'journey:availability_errors:ratio_rate1h{journey="play"}'
+        eval_time: 70m
+        exp_samples:
+          - labels: 'journey:availability_errors:ratio_rate1h{journey="play"}'
+            value: 0

@@ -1,0 +1,23 @@
+#!/bin/sh
+# Adds or refreshes the journeys host in a pronto app:
+#   bin/pronto-journeys <app-dir> [key=value ...]
+# keys: endpoint (default /telemetry).
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+shift
+package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" | head -n 1)
+[ -n "$package" ] || { echo "pronto-journeys: $app/program.cue names no package" >&2; exit 2; }
+tags=""
+for kv in "$@"; do
+	case "$kv" in
+	endpoint=*) tags="$tags -t $kv" ;;
+	*) echo "pronto-journeys: unknown argument $kv" >&2; exit 2 ;;
+	esac
+done
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+# shellcheck disable=SC2086
+./saytw --script tools.nu cue export ./journeys/export -t "package=$package" $tags -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"

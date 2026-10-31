@@ -1,0 +1,12 @@
+{
+  "handler": "match",
+  "reads": ["login", "probe", "candidate"],
+  "probe": "probe",
+  "candidate": "candidate",
+  "vault": "login",
+  "title": "title",
+  "username": "username",
+  "secret": "secret",
+  "signer": "signer",
+  "signers": "signers"
+}
