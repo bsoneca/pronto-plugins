@@ -4,6 +4,19 @@ Host plugins for [pronto](https://github.com/bonisoft3/pronto) terminals
 beyond the browser, and beside them, on unmodified pronto. Why and how they are shaped:
 [a native terminal](docs/native-terminal.md).
 
+## Plugins
+
+- [ads](ads/README.md): rewarded ads a player chooses to watch.
+- [android](android/README.md): a native Android host, no WebView.
+- [billing](billing/README.md): paid plans through a shared Stripe broker.
+- [firebase](firebase/README.md): release to Firebase Hosting.
+- [flags](flags/README.md): feature flags on OpenFeature and flagd.
+- [gcp](gcp/README.md): release to Cloud Run.
+- [identity](identity/README.md): social sign-in through a shared broker.
+- [intents](intents/README.md): one-command plumbing behind `bin/pronto`.
+- [journeys](journeys/README.md): user-journey SLOs from the terminal's telemetry.
+- [perf](perf/README.md): frame, interaction and paint timings on readers' devices.
+
 ## pronto-intents
 
 Say what you want for an app, and it is done: "release prontoweeper", "connect stripe to
