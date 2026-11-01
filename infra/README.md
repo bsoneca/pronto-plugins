@@ -2,7 +2,8 @@
 
 An operator's Google Cloud state, kept in CUE and applied by OpenTofu with the operator's own
 `gcloud` login. The state says what a project holds (its services, IAM, service accounts,
-Artifact Registry repositories, buckets, secrets, Cloud Run jobs and services, databases);
+Artifact Registry repositories, buckets, secrets, Cloud Run jobs and services, databases, API
+keys, Identity Platform, budgets and Firebase Hosting sites);
 `cue export` turns it into OpenTofu JSON; two verbs plan and apply it. Nothing about any one
 account is in this plugin: projects, billing and members are all the operator's own state.
 
@@ -53,6 +54,15 @@ projects. A project says its `id`, its `billing` account and the rest of what it
 | `secrets` | the secret and who may read or add versions; a value is never written, `source` says who puts it. `file` adds a file of your repository, beside the state folder, as a new version whenever it changes |
 | `fresh` | of what is adopted, what does not exist yet, by kind and name: made, never imported (one that is not there cannot be imported). A binding has its own entry, so an existing parent can get a new one: `serviceAccountIam: ["account/role"]`, `repositoryIam: ["repository/role"]`, `bucketIam: ["bucket/role"]`, `runServiceIam: ["service"]`. Buckets and secrets say so with `made`, and a secret's grants with `newGrants` |
 | `runJobs` | the image is the one it is made with; OpenTofu leaves a later image as it finds it |
+| `found` | of a project this state makes (`create`), what someone else made in it first: `serviceAccounts` by name, `members` by role. Imported, not made |
+| `apiKeys` | a key by its id: its display name, the services it may call and a browser key's referrers. The key string is never in the state |
+| `identityPlatform` | the project's config (adopt it as `identityPlatform: ["config"]`): phone sign-in, the SMS regions allowed, authorised domains and blocking functions. What it does not name, such as reCAPTCHA's SMS defence, is left as it is |
+| `budgets` | a budget on the project's billing account, by a name of your own, imported by its `id`: amount, period, the projects and services it watches, and its alert thresholds of current and forecast spend |
+| `hostingSites` | a Firebase Hosting site by its id; what it serves is deployed elsewhere. It brings in the `google-beta` provider |
+
+Identity Platform, Billing Budgets and Firebase refuse a user's login without a quota project, so
+their resources use a provider alias per project (`google.<project>`, `google-beta.<project>`)
+that bills that project (`user_project_override`).
 
 What the project already has is imported, never made again, so a first plan of a live project
 shows only the difference between it and the state. `cue vet` refuses a project id, a billing

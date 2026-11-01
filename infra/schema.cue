@@ -3,6 +3,8 @@
 // file says it (`plan: #Plan & {...}`), and tofu.cue exports it as OpenTofu JSON.
 package infra
 
+import "list"
+
 #Member: =~"^((user|serviceAccount|group|domain|principalSet|principal):.+|allUsers|allAuthenticatedUsers)$"
 
 // Members are a set, so that the same grant from two sources unifies into one.
@@ -53,6 +55,14 @@ package infra
 	repositories: [Name=string]: #Repository
 	buckets: [Name=#BucketName]: #Bucket
 	secrets: [Name=string]:      #Secret
+	// Firebase and Identity Platform, and the budgets that watch the project's spend. Their APIs
+	// are called with this project as the quota project (tofu.cue), as Google asks of a user's login.
+	apiKeys: [Key=string]: #ApiKey
+	identityPlatform?: #IdentityPlatform
+	budgets: [Name=string]: #Budget
+	// A budget there already is imported by its id.
+	for nm, _ in budgets if !list.Contains(*fresh["budgets"] | [], nm) {budgets: (nm): id!: _}
+	hostingSites: [Site=string]: #HostingSite
 
 	// What OpenTofu applies: the whole project, or, while the rest is still a draft the live
 	// project has not been checked against, these resources by kind and name (a role for iam;
@@ -66,15 +76,71 @@ package infra
 	// and `bucket/role` for those parents' grants; a service's name for its invokers. Buckets
 	// and secrets, and the grants of a secret, say so with `made` and `newGrants` instead.
 	fresh: [#Fresh]: [...string]
+	// Of a project this state makes (create), what someone else made in it first, by kind and
+	// name: it is imported, as in a project the state finds. A grant is `role/member`. A budget
+	// with an id is always imported: the id is Google's, so it is there.
+	found: [#Found]: [...string]
+	// A project has one Identity Platform config, adopted by this name alone.
+	adopt: identityPlatform?: [..."config"]
 	// A project this state makes rather than finds: OpenTofu creates it and everything in it,
 	// with nothing to import, so it is adopted whole.
 	create: *false | bool
 	if create {adoptAll: true}
 }
 
-#Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases"
+#Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases" | "apiKeys" | "budgets" | "hostingSites"
 
-#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases"
+// identityPlatform is adopted by naming "config": a project has one.
+#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites"
+
+#Found: "serviceAccounts" | "members"
+
+// An API key, by its id (the key's uid, as `gcloud services api-keys list` shows it). The key's
+// string is Google's and never here; what it may call, and from where, is.
+#ApiKey: {
+	displayName: string
+	// The services it may call, as api targets.
+	services: [...=~"^[a-z0-9-]+\\.googleapis\\.com$"]
+	// A browser key's referrers, in the order the key keeps them.
+	referrers: [...string & !=""]
+}
+
+// Identity Platform's project config. Only what this schema names is OpenTofu's; the rest of the
+// config (its templates, hash, reCAPTCHA) is left as it is, since the provider sends a field only
+// when it changes.
+#IdentityPlatform: {
+	// Sign-in by phone number, and by e-mail (with a password, when it is on).
+	phone: *false | bool
+	email: *false | bool
+	// SMS is sent only to these regions (ISO 3166 alpha-2), when any are named.
+	smsRegions: [...=~"^[A-Z]{2}$"]
+	// The domains a sign-in may start from, in the order the config keeps them.
+	authorizedDomains: [...string & !=""]
+	// Blocking functions, by event (beforeSendSms, beforeCreate, beforeSignIn): the URI each calls.
+	// None is handed the user's tokens.
+	blockingFunctions: [Event=string]: =~"^https://"
+}
+
+// A budget on the project's billing account, by a name of the state's own. It watches what its
+// filter names; its alerts go to the billing account's admins.
+#Budget: {
+	// Google's id for it, which an import needs: a budget made here (fresh) has none until it is.
+	id?:         =~"^[0-9a-f-]+$"
+	displayName: string & !=""
+	amount: {units: int & >0, currency: =~"^[A-Z]{3}$"}
+	period:               *"MONTH" | "QUARTER" | "YEAR"
+	creditTypesTreatment: *"INCLUDE_ALL_CREDITS" | "EXCLUDE_ALL_CREDITS"
+	// What it watches: projects by number, and services by their billing id.
+	projects: [...=~"^projects/[0-9]+$"]
+	services: [...=~"^services/[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$"]
+	// Alerts at these fractions of the amount, of what is spent and of what is forecast.
+	current: [...number & >0]
+	forecasted: [...number & >0]
+}
+
+// A Firebase Hosting site, by its id (its default address is <id>.web.app). What it serves is
+// deployed by its app (firebase deploy), not here.
+#HostingSite: {}
 
 // A Cloud Run job. Its image is the one it is made with: what runs it later may set another,
 // so OpenTofu leaves the image as it finds it.

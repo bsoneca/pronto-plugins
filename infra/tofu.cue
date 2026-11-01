@@ -23,17 +23,28 @@ import (
 		terraform: {
 			required_version: ">= 1.13.0"
 			required_providers: google: {source: "hashicorp/google", version: "~> 7.0"}
+			if len(beta) > 0 {
+				required_providers: "google-beta": {source: "hashicorp/google-beta", version: "~> 7.0"}
+			}
 			backend: gcs: {bucket: Plan.backend.bucket, prefix: Plan.backend.prefix}
 		}
 		// The operator's own gcloud login, as a token in GOOGLE_OAUTH_ACCESS_TOKEN (say.cue.txt).
-		provider: google: {}
+		// Some APIs (Identity Platform, Billing Budgets, Firebase) refuse a user's login without a
+		// quota project: their resources use the alias named for their project, which bills it.
+		provider: google: [{}, for P in state.projects {alias: (#name & {in: P.id}).out, billing_project: P.id, user_project_override: true}]
+		if len(beta) > 0 {
+			provider: "google-beta": [for id in beta {alias: (#name & {in: id}).out, billing_project: id, user_project_override: true}]
+		}
 		resource: {}
-		import: [for i in _imports if !state.projects[i.project].create {to: i.to, id: i.id}]
+		import: [for i in _imports if !state.projects[i.project].create || i.found {to: i.to, id: i.id}]
 	}
 
 	// Each import names its project: one this state makes (create) has nothing to import, its
-	// resources all new, so its imports are left out.
-	_imports: [Address=string]: {to: Address, id: string, project: string}
+	// resources all new, so its imports are left out, but for what the project says it found.
+	_imports: [Address=string]: {to: Address, id: string, project: string, found: *false | bool}
+
+	// The projects with a Firebase Hosting site, which only the google-beta provider holds.
+	let beta = [for P in state.projects if len([for s, _ in P.hostingSites if P.adoptAll || list.Contains(*P.adopt["hostingSites"] | [], s) {s}]) > 0 {P.id}]
 
 	// The accounts this state keeps in any project, by the member that names them: a grant naming
 	// one waits for it, whichever project the grant is in.
@@ -45,12 +56,12 @@ import (
 
 	for P in state.projects {
 		let adopted = {
-			for kind in ["apis", "iam", "members", "serviceAccounts", "repositories", "repositoryIam", "buckets", "secrets", "runJobs", "runServices", "databases"] {
+			for kind in ["apis", "iam", "members", "serviceAccounts", "repositories", "repositoryIam", "buckets", "secrets", "runJobs", "runServices", "databases", "apiKeys", "identityPlatform", "budgets", "hostingSites"] {
 				(kind): {for n in *P.adopt[kind] | [] {(n): true}}
 			}
 		}
 		let fresh = {
-			for kind in ["apis", "iam", "members", "serviceAccounts", "serviceAccountIam", "repositories", "repositoryIam", "bucketIam", "runJobs", "runServices", "runServiceIam", "databases"] {
+			for kind in ["apis", "iam", "members", "serviceAccounts", "serviceAccountIam", "repositories", "repositoryIam", "bucketIam", "runJobs", "runServices", "runServiceIam", "databases", "apiKeys", "budgets", "hostingSites"] {
 				(kind): {for n in *P.fresh[kind] | [] {(n): true}}
 			}
 		}
@@ -109,7 +120,7 @@ import (
 			for m, _ in ms {
 				let k = (#name & {in: "\(P.id)_\(rl)_\(m)"}).out
 				tofu: resource: google_project_iam_member: (k): {depends_on: list.Concat([iamDeps, [if accounts[m] != _|_ if !list.Contains(iamDeps, accounts[m]) {accounts[m]}]]), project: P.id, role: rl, member: m}
-				if fresh.members[rl] == _|_ {_imports: "google_project_iam_member.\(k)": {id: "\(P.id) \(rl) \(m)", project: P.id}}
+				if fresh.members[rl] == _|_ {_imports: "google_project_iam_member.\(k)": {id: "\(P.id) \(rl) \(m)", project: P.id, found: list.Contains(*P.found["members"] | [], "\(rl)/\(m)")}}
 			}
 		}
 
@@ -117,7 +128,7 @@ import (
 			let k = (#name & {in: "\(P.id)_\(nm)"}).out
 			let at = "projects/\(P.id)/serviceAccounts/\(sa.email)"
 			tofu: resource: google_service_account: (k): {depends_on: deps, project: P.id, account_id: nm, display_name: sa.displayName, lifecycle: prevent_destroy: true}
-			if fresh.serviceAccounts[nm] == _|_ {_imports: "google_service_account.\(k)": {id: at, project: P.id}}
+			if fresh.serviceAccounts[nm] == _|_ {_imports: "google_service_account.\(k)": {id: at, project: P.id, found: list.Contains(*P.found["serviceAccounts"] | [], nm)}}
 			for rl, ms in sa.iam {
 				let r = (#name & {in: "\(P.id)_\(nm)_\(rl)"}).out
 				tofu: resource: google_service_account_iam_binding: (r): {depends_on: list.Concat([deps, [for m, _ in ms if accounts[m] != _|_ {accounts[m]}]]), service_account_id: "${google_service_account.\(k).name}", role: rl, members: (#members & {in: ms}).out}
@@ -269,6 +280,83 @@ import (
 			if fresh.runServices[nm] == _|_ {_imports: "google_cloud_run_v2_service.\(k)": {id: at, project: P.id}}
 			tofu: resource: google_cloud_run_v2_service_iam_binding: (k): {depends_on: list.Concat([deps, [for m, _ in svc.invokers if accounts[m] != _|_ {accounts[m]}]]), project: P.id, location: svc.location, name: "${google_cloud_run_v2_service.\(k).name}", role: "roles/run.invoker", members: (#members & {in: svc.invokers}).out}
 			if fresh.runServiceIam[nm] == _|_ {_imports: "google_cloud_run_v2_service_iam_binding.\(k)": {id: "\(at) roles/run.invoker", project: P.id}}
+		}
+
+		// The provider that bills this project for the APIs that ask a quota project of a user's login.
+		let q = "google.\(p)"
+
+		for key, ak in P.apiKeys if P.adoptAll || adopted.apiKeys[key] != _|_ {
+			let k = (#name & {in: "\(P.id)_\(key)"}).out
+			tofu: resource: google_apikeys_key: (k): {
+				provider:     q
+				depends_on:   deps
+				project:      P.id
+				name:         key
+				display_name: ak.displayName
+				if len(ak.services) > 0 || len(ak.referrers) > 0 {
+					restrictions: {
+						if len(ak.services) > 0 {api_targets: [for svc in ak.services {service: svc}]}
+						if len(ak.referrers) > 0 {browser_key_restrictions: allowed_referrers: ak.referrers}
+					}
+				}
+				lifecycle: prevent_destroy: true
+			}
+			if fresh.apiKeys[key] == _|_ {_imports: "google_apikeys_key.\(k)": {id: "projects/\(P.id)/locations/global/keys/\(key)", project: P.id}}
+		}
+
+		if P.identityPlatform != _|_ if P.adoptAll || adopted.identityPlatform.config != _|_ {
+			let c = P.identityPlatform
+			tofu: resource: google_identity_platform_config: (p): {
+				provider:           q
+				depends_on:         deps
+				project:            P.id
+				authorized_domains: c.authorizedDomains
+				// Written whole, off as well as on, since Google reads back both providers.
+				sign_in: {
+					phone_number: enabled: c.phone
+					email: {enabled: c.email, password_required: c.email}
+				}
+				if len(c.smsRegions) > 0 {sms_region_config: allowlist_only: allowed_regions: c.smsRegions}
+				if len(c.blockingFunctions) > 0 {
+					blocking_functions: {
+						triggers: [for e in list.SortStrings([for e, _ in c.blockingFunctions {e}]) {event_type: e, function_uri: c.blockingFunctions[e]}]
+						forward_inbound_credentials: {access_token: false, id_token: false, refresh_token: false}
+					}
+				}
+				lifecycle: prevent_destroy: true
+			}
+			// Identity Platform is turned on before it is adopted: its config is always there to import.
+			_imports: "google_identity_platform_config.\(p)": {id: "projects/\(P.id)/config", project: P.id}
+		}
+
+		for nm, b in P.budgets if P.adoptAll || adopted.budgets[nm] != _|_ {
+			let k = (#name & {in: "\(P.id)_\(nm)"}).out
+			let account = strings.TrimPrefix(P.billing, "billingAccounts/")
+			tofu: resource: google_billing_budget: (k): {
+				provider:        q
+				depends_on:      deps
+				billing_account: account
+				display_name:    b.displayName
+				budget_filter: {
+					if len(b.projects) > 0 {projects: b.projects}
+					if len(b.services) > 0 {services: b.services}
+					credit_types_treatment: b.creditTypesTreatment
+					calendar_period:        b.period
+				}
+				amount: specified_amount: {currency_code: b.amount.currency, units: "\(b.amount.units)"}
+				threshold_rules: list.Concat([
+					[for t in b.current {threshold_percent: t, spend_basis: "CURRENT_SPEND"}],
+					[for t in b.forecasted {threshold_percent: t, spend_basis: "FORECASTED_SPEND"}],
+				])
+				lifecycle: prevent_destroy: true
+			}
+			if fresh.budgets[nm] == _|_ {_imports: "google_billing_budget.\(k)": {id: "billingAccounts/\(account)/budgets/\(b.id)", project: P.id, found: true}}
+		}
+
+		for site, _ in P.hostingSites if P.adoptAll || adopted.hostingSites[site] != _|_ {
+			let k = (#name & {in: "\(P.id)_\(site)"}).out
+			tofu: resource: google_firebase_hosting_site: (k): {provider: "google-beta.\(p)", depends_on: deps, project: P.id, site_id: site, lifecycle: prevent_destroy: true}
+			if fresh.hostingSites[site] == _|_ {_imports: "google_firebase_hosting_site.\(k)": {id: "projects/\(P.id)/sites/\(site)", project: P.id}}
 		}
 
 		for inst, dbs in P.databases if P.adoptAll || adopted.databases[inst] != _|_ {
