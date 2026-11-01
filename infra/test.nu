@@ -23,6 +23,9 @@ const plans = [
 	[./infra _order.tofu]
 	[./infra _named.tofu]
 	[./infra _two.tofu]
+	[./infra _fire.tofu]
+	[./infra _found.tofu]
+	[./infra _foundGrant.tofu]
 	[./examples/infra plan.tofu]
 ]
 

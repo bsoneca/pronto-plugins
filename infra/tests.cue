@@ -292,3 +292,98 @@ _x: _two.tofu.resource
 crossRepositoryGrantWaits: _x.google_artifact_registry_repository_iam_binding.example_project_456_pronto_roles_artifactregistry_reader.depends_on & ["google_artifact_registry_repository.example_project_456_pronto", "google_service_account.example_project_123_my_app_run"]
 crossProjectGrantWaits: _x.google_project_iam_binding.example_project_456_roles_viewer.depends_on & _waitsAccount
 crossProjectMemberWaits: [for k, r in _x.google_project_iam_member if r.role == "roles/editor" {r.depends_on}] & [_waitsAccount]
+
+// Firebase and Identity Platform, and a budget: each through the alias that bills its project,
+// imported by Google's id, and kept from deletion; Hosting needs the beta provider.
+_fire: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing: "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		apiKeys: "0a1b2c3d-0000-4000-8000-000000000001": {
+			displayName: "Browser key"
+			services: ["identitytoolkit.googleapis.com", "securetoken.googleapis.com"]
+			referrers: ["https://my-app.web.app/*"]
+		}
+		identityPlatform: {
+			phone: true
+			smsRegions: ["BR"]
+			authorizedDomains: ["my-app.web.app", "example.com"]
+			blockingFunctions: beforeSendSms: "https://my-app-abc-uc.a.run.app"
+		}
+		budgets: sms: {
+			id:          "7b32846b-0000-4000-8000-000000000002"
+			displayName: "SMS"
+			amount: {units: 200, currency: "BRL"}
+			projects: ["projects/123456789"]
+			services: ["services/DC5D-D207-FD2F"]
+			current: [0.5, 1.0]
+			forecasted: [1.0]
+		}
+		hostingSites: "my-app": {}
+		adopt: {
+			apiKeys: ["0a1b2c3d-0000-4000-8000-000000000001"]
+			identityPlatform: ["config"]
+			budgets: ["sms"]
+			hostingSites: ["my-app"]
+		}
+	}
+}
+_f: _fire.tofu.resource
+_fi: {for i in _fire.tofu.import {(i.to): i.id}}
+quotaAlias: [for c in _fire.tofu.provider.google if c.alias != _|_ {c}] & [{alias: "example_project_123", billing_project: "example-project-123", user_project_override: true}]
+betaOnlyForHosting: _fire.tofu.terraform.required_providers["google-beta"].source & "hashicorp/google-beta"
+noBetaWithoutHosting: [for k, _ in _plan.tofu.terraform.required_providers {k}] & ["google"]
+keyBilled: _f.google_apikeys_key.example_project_123_0a1b2c3d_0000_4000_8000_000000000001.provider & "google.example_project_123"
+keyRestricted: _f.google_apikeys_key.example_project_123_0a1b2c3d_0000_4000_8000_000000000001.restrictions & {api_targets: [{service: "identitytoolkit.googleapis.com"}, {service: "securetoken.googleapis.com"}], browser_key_restrictions: allowed_referrers: ["https://my-app.web.app/*"]}
+keyImported: _fi["google_apikeys_key.example_project_123_0a1b2c3d_0000_4000_8000_000000000001"] & "projects/example-project-123/locations/global/keys/0a1b2c3d-0000-4000-8000-000000000001"
+keyKept:     _f.google_apikeys_key.example_project_123_0a1b2c3d_0000_4000_8000_000000000001.lifecycle.prevent_destroy & true
+smsOnlyTo: _f.google_identity_platform_config.example_project_123.sms_region_config.allowlist_only.allowed_regions & ["BR"]
+smsHook: _f.google_identity_platform_config.example_project_123.blocking_functions.triggers & [{event_type: "beforeSendSms", function_uri: "https://my-app-abc-uc.a.run.app"}]
+domainsInOrder: _f.google_identity_platform_config.example_project_123.authorized_domains & ["my-app.web.app", "example.com"]
+configImported:  _fi["google_identity_platform_config.example_project_123"] & "projects/example-project-123/config"
+budgetOnAccount: _f.google_billing_budget.example_project_123_sms.billing_account & "AAAAAA-BBBBBB-CCCCCC"
+budgetAmount: _f.google_billing_budget.example_project_123_sms.amount.specified_amount & {currency_code: "BRL", units: "200"}
+budgetThresholds: _f.google_billing_budget.example_project_123_sms.threshold_rules & [{threshold_percent: 0.5, spend_basis: "CURRENT_SPEND"}, {threshold_percent: 1.0, spend_basis: "CURRENT_SPEND"}, {threshold_percent: 1.0, spend_basis: "FORECASTED_SPEND"}]
+budgetImported: _fi["google_billing_budget.example_project_123_sms"] & "billingAccounts/AAAAAA-BBBBBB-CCCCCC/budgets/7b32846b-0000-4000-8000-000000000002"
+siteOnBeta:     _f.google_firebase_hosting_site.example_project_123_my_app.provider & "google-beta.example_project_123"
+siteImported:   _fi["google_firebase_hosting_site.example_project_123_my_app"] & "projects/example-project-123/sites/my-app"
+budgetNeedsId: _ok & {budgets: sms: {displayName: "SMS", amount: {units: 1, currency: "BRL"}}} & matchN(0, [#Project])
+freshBudgetNoId: _ok & {budgets: sms: {displayName: "SMS", amount: {units: 1, currency: "BRL"}}, fresh: budgets: ["sms"]} & matchN(1, [#Project])
+
+// In a project this state makes, what was found there is imported; the rest is still made.
+_found: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-456": {
+		create:  true
+		billing: "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		serviceAccounts: {"my-app-preview": displayName: "previews", "my-app-new": displayName: "new"}
+		members: "roles/cloudsql.client": "serviceAccount:my-app-preview@example-project-456.iam.gserviceaccount.com": true
+		found: {serviceAccounts: ["my-app-preview"], members: ["roles/cloudsql.client/serviceAccount:my-app-preview@example-project-456.iam.gserviceaccount.com"]}
+	}
+}
+foundOnly: [for i in _found.tofu.import {i.id}] & [
+	"projects/example-project-456/serviceAccounts/my-app-preview@example-project-456.iam.gserviceaccount.com",
+	"example-project-456 roles/cloudsql.client serviceAccount:my-app-preview@example-project-456.iam.gserviceaccount.com",
+]
+
+// Identity Platform's providers and its hook's tokens are written off as well as on, as Google
+// reads them back, so an import of a config that has them off changes nothing.
+hookGetsNoTokens: _f.google_identity_platform_config.example_project_123.blocking_functions.forward_inbound_credentials & {access_token: false, id_token: false, refresh_token: false}
+emailOffWritten: _f.google_identity_platform_config.example_project_123.sign_in & {phone_number: enabled: true, email: {enabled: false, password_required: false}}
+
+// In a made project, a grant found is imported by role and member: another member of the role is made.
+_foundGrant: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-456": {
+		create:  true
+		billing: "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		members: "roles/viewer": {"user:a@example.com": true, "user:b@example.com": true}
+		found: members: ["roles/viewer/user:a@example.com"]
+		budgets: sms: {id: "7b32846b-0000-4000-8000-000000000002", displayName: "SMS", amount: {units: 1, currency: "BRL"}}
+	}
+}
+foundGrantOnly: [for i in _foundGrant.tofu.import {i.id}] & [
+	"billingAccounts/AAAAAA-BBBBBB-CCCCCC/budgets/7b32846b-0000-4000-8000-000000000002",
+	"example-project-456 roles/viewer user:a@example.com",
+]
+identityPlatformAdoptName: _ok & {adopt: identityPlatform: ["cfg"]} & matchN(0, [#Project])
