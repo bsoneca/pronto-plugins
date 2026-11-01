@@ -46,8 +46,10 @@ still carries its generated header, and names any the app has edited.
 
 ## The local broker
 
-With the default broker (`http://localhost:28443`), the app's own launch brings
-it up: `identity-hydra` (Ory Hydra, in memory) and `identity` (the front), two
+With the default broker (`http://localhost:<port>`, a port of the app's own, hashed
+from its package, so two apps' launches never share one; Hydra's two ports move
+by `IDENTITY_HYDRA_PUBLIC_PORT` and `IDENTITY_HYDRA_ADMIN_PORT` as every other port
+of a launch), the app's own launch brings it up: `identity-hydra` (Ory Hydra, in memory) and `identity` (the front), two
 services of its cluster from the front's image the app names (`frontImage`, the operator's
 own: there is no default).
 

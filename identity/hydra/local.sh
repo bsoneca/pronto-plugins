@@ -2,7 +2,9 @@
 # The broker on Hydra as two of an app's own processes under launch@local, so
 # a local test brings up everything sign-in needs:
 #   local.sh hydra   Hydra in memory, its public and admin APIs on loopback
-#   local.sh front   the front, at http://localhost:28443, the broker's issuer
+#   local.sh front   the front, at the broker's issuer (http://localhost:28443 unless
+#                    the launch names its own: BROKER_ISSUER and PORT, or Hydra's
+#                    URLS_SELF_ISSUER, SERVE_PUBLIC_PORT and SERVE_ADMIN_PORT)
 # Run from the files of the front's image (the app's frontImage),
 # which the app's launch@local takes into the user's cache, under the app's own
 # toolchain (deno, mise). With the operator's broker env file
@@ -12,6 +14,15 @@
 # names, so the port is the operator's standalone broker's: run one or the other.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
+# The launch's own issuer and ports, which an app's launch names per app so two
+# apps' brokers never share one: taken before the operator's env file, which
+# names the operator's standalone broker.
+issuer=${BROKER_ISSUER:-${URLS_SELF_ISSUER:-http://localhost:28443}}
+port=${PORT:-28443}
+public_port=${SERVE_PUBLIC_PORT:-28453}
+admin_port=${SERVE_ADMIN_PORT:-28455}
+hydra_public=${HYDRA_PUBLIC:-http://127.0.0.1:$public_port}
+hydra_admin=${HYDRA_ADMIN:-http://127.0.0.1:$admin_port}
 env_file=${PRONTO_IDENTITY_ENV:-$HOME/.config/pronto-identity/broker.env}
 if [ -f "$env_file" ]; then
 	set -a
@@ -19,13 +30,14 @@ if [ -f "$env_file" ]; then
 	set +a
 fi
 if [ -z "${GOOGLE_CLIENT_ID:-}" ]; then BROKER_FAKE_GOOGLE=1; fi
-BROKER_ISSUER=http://localhost:28443
+BROKER_ISSUER=$issuer
+PORT=$port
 # A launch's own secrets: a subject it vouches for is a test's, and Hydra's
 # keys live as long as the process.
 BROKER_SECRET=${BROKER_SECRET:-pronto-identity-local-launch-secret-0000}
-export BROKER_ISSUER BROKER_SECRET BROKER_FAKE_GOOGLE
-HYDRA_PUBLIC=http://127.0.0.1:28453
-HYDRA_ADMIN=http://127.0.0.1:28455
+export BROKER_ISSUER PORT BROKER_SECRET BROKER_FAKE_GOOGLE
+HYDRA_PUBLIC=$hydra_public
+HYDRA_ADMIN=$hydra_admin
 export HYDRA_PUBLIC HYDRA_ADMIN
 
 case "${1:-}" in
@@ -40,7 +52,7 @@ hydra)
 	esac
 	DSN=memory SECRETS_SYSTEM=pronto-identity-local-launch-hydra-0000 LOG_LEVEL=warn \
 		URLS_SELF_ISSUER=$BROKER_ISSUER URLS_LOGIN=$BROKER_ISSUER/login URLS_CONSENT=$BROKER_ISSUER/consent \
-		SERVE_PUBLIC_HOST=127.0.0.1 SERVE_PUBLIC_PORT=28453 SERVE_ADMIN_HOST=127.0.0.1 SERVE_ADMIN_PORT=28455 \
+		SERVE_PUBLIC_HOST=127.0.0.1 SERVE_PUBLIC_PORT=$public_port SERVE_ADMIN_HOST=127.0.0.1 SERVE_ADMIN_PORT=$admin_port \
 		OAUTH2_PKCE_ENFORCED_FOR_PUBLIC_CLIENTS=true TTL_ID_TOKEN=5m \
 		exec mise x "github:ory/hydra[asset_pattern=hydra_*-$asset.tar.gz]@26.2.0" -- hydra serve all --dev
 	;;

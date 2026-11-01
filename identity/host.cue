@@ -18,7 +18,10 @@
 package identity
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -27,14 +30,20 @@ import (
 #Host: H={
 	// The app's CUE package, which identity_signin.cue joins.
 	package!: string & =~"^[a-z][a-z0-9_]*$"
+	// The port of the broker a local launch runs, which is its issuer's: one
+	// per app, hashed from its package as bayt hashes a launch's other ports
+	// (below 32768, out of the ephemeral range), so one app's launch never
+	// holds another's. Fixed rather than moved by a variable, since the
+	// issuer is a literal to mecha's auth service; Hydra's own ports move.
+	localPort: *(10000 + mod(strconv.ParseInt(strings.SliceRunes(hex.Encode(sha256.Sum256("pronto-identity/\(H.package)")), 0, 8), 16, 64), 22768)) | int & >=1024 & <65536
 	// The broker as readers reach it, which is also its issuer: the
-	// operator's, so an application names nothing.
-	broker: *"http://localhost:28443" | #Url
+	// local one by default, so an application names nothing.
+	broker: *"http://localhost:\(H.localPort)" | #Url
 	// The broker as the cluster reaches it: the local broker's service (the
 	// targets below) by its name in compose, which the host projection reads as loopback. The
 	// slash ends the port where bayt's rewrite looks for an end (the auth
 	// service drops it): inside a `${VAR:-…}` default, `}` would follow.
-	brokerInternal: *[if H._local {"http://identity:28443/"}, H.broker][0] | #Url | =~"^https?://[A-Za-z0-9.-]+(:[0-9]+)?/$"
+	brokerInternal: *[if H._local {"http://identity:\(H.localPort)/"}, H.broker][0] | #Url | =~"^https?://[A-Za-z0-9.-]+(:[0-9]+)?/$"
 	// The broker's release: the front's image, the operator's own, pinned by
 	// digest as publish.sh prints it, which a docker launch runs and from which
 	// a local launch takes the files it runs on the host (hydra/local.sh); its
@@ -53,7 +62,7 @@ import (
 	// The local broker's targets, when the app signs in through the broker a
 	// local launch runs (the default broker): an operator's broker elsewhere
 	// is that operator's to run.
-	_local: H.broker == "http://localhost:28443"
+	_local: H.broker == "http://localhost:\(H.localPort)"
 	// On the host, each of the two takes the image's /app once per release
 	// into the user's cache (crane), then runs
 	// hydra/local.sh from there. Quoted for the generated file's strings.
@@ -79,8 +88,9 @@ import (
 				cmd: builtin: null
 				activate: ""
 				healthcheck: url: "http://127.0.0.1:28453/health/ready"
-				// Fixed on the host as in a container: the front reaches them so.
-				expose: {public: port: 28453, admin: port: 28455}
+				// Per app on the host, each moved by its variable, as every
+				// other port of a launch: the front names them as its peer's.
+				expose: {public: {port: 28453, env: "SERVE_PUBLIC_PORT"}, admin: {port: 28455, env: "SERVE_ADMIN_PORT"}}
 				"process-compose": activate: "\(H._crane)"
 				entrypoint: {
 					do:    "\(H._fromImage["hydra"])"
@@ -96,8 +106,6 @@ import (
 					URLS_SELF_ISSUER: "\(H.broker)"
 					URLS_LOGIN:       "\(H.broker)/login"
 					URLS_CONSENT:     "\(H.broker)/consent"
-					SERVE_PUBLIC_PORT: "28453"
-					SERVE_ADMIN_PORT:  "28455"
 					OAUTH2_PKCE_ENFORCED_FOR_PUBLIC_CLIENTS: "true"
 					TTL_ID_TOKEN: "5m"
 				}
@@ -105,9 +113,9 @@ import (
 			identity: bayt.healthcheck.http & {
 				cmd: builtin: null
 				activate: ""
-				healthcheck: url: "http://127.0.0.1:28443/health"
+				healthcheck: url: "http://127.0.0.1:\(H.localPort)/health"
 				// The broker's issuer, which the browser and Google's redirect name.
-				expose: http: port: 28443
+				expose: http: port: \(H.localPort)
 				"process-compose": activate: "\(H._crane)"
 				entrypoint: {
 					do:    "\(H._fromImage["front"])"
@@ -118,7 +126,7 @@ import (
 				}
 				dockerfile: from: name: "\(H.frontImage)"
 				compose: {
-					ports: ["28443:28443"]
+					ports: ["\(H.localPort):\(H.localPort)"]
 					environment: {
 						BROKER_ISSUER:        "\(H.broker)"
 						BROKER_SECRET:        "${BROKER_SECRET:-pronto-identity-local-launch-secret-0000}"
@@ -127,7 +135,7 @@ import (
 						GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
 						HYDRA_PUBLIC:         "http://identity-hydra:28453"
 						HYDRA_ADMIN:          "http://identity-hydra:28455"
-						PORT:                 "28443"
+						PORT:                 "\(H.localPort)"
 					}
 				}
 			}
