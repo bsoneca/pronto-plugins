@@ -571,13 +571,17 @@ end, `"dismissed"` when it was closed before, and `"none"` with no ad to show.
 
 | Path in the app | |
 | --- | --- |
-| `ads/ads.js`, or the path named | the page's module: `rewarded()` |
-| `pronto/ads.cue`, `ads/ads.nu` | the generate step giving the door `/ads.txt` again after pronto's writer, the publisher's line, which AdSense reads to verify the site |
+| `ads/ads.js`, or the path named | the page's module: `rewarded()`, and `prepare()` to load Google's script ahead |
+| `ads_spec.js` beside it | the module's publisher, rewritten by every generate |
+| `pronto/ads.cue`, `ads/ads.nu` | the generate step giving the door `/ads.txt` again after pronto's writer, the publisher's line, which AdSense reads to verify the site, and writing `ads_spec.js` |
 | `ads_spec.cue` | written once, then the app's: its publisher, `""` for none |
 
-The ad is always a stand-in that plays at a press, as billing's stand-in Stripe
-pays at one. Real ads are not implemented: naming an AdSense publisher only
-writes its line in `/ads.txt`, and `rewarded()` still shows the stand-in.
+With a publisher named, `rewarded()` plays Google's rewarded ad (the Ad
+Placement API, H5 Games Ads), in test mode on `localhost`; with none, a
+stand-in that plays at a press, as billing's stand-in Stripe pays at one.
+Google's script loads at the first `rewarded()` or `prepare()`, never before,
+so a page that offers no ad (a subscriber's) never loads it. The door must
+admit Google: see [ads/README.md](ads/README.md#the-door).
 Google's ads for the web tell no server an ad was watched, so the page alone
 knows: whatever a reward gives away, the app's database bounds (one a day an
 account, say, in the app's own migration).

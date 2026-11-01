@@ -14,6 +14,18 @@ def save-changed [path: path] {
 	}
 }
 
+# The page module's spec (ads_spec.js beside ads.js) from the app's `adsense`:
+# its publisher, "" for none, which ads.js reads to choose Google's ads or the
+# stand-in.
+export def page [path: path] {
+	let adsense = $in | from json
+	[
+		"// The app's AdSense publisher, from ads_spec.cue. Written by pronto-ads' generate step; regenerated, do not edit."
+		$"export const publisher = ($adsense.publisher | to json);"
+		""
+	] | str join "\n" | save-changed $path
+}
+
 # The door's /ads.txt from the app's `adsense` (ads_spec.cue), which pronto's
 # writer regenerates without it; none while the app names no publisher. An
 # earlier run's goes first.
