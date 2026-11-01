@@ -17,7 +17,8 @@ local=true
 for kv in "$@"; do
 	case "$kv" in
 	frontImage=*) image=${kv#frontImage=} ;;
-	broker=http://localhost:28443) tags="$tags -t $kv" ;;
+	# The old default: the local broker, which now listens on a port of the app's own.
+	broker=http://localhost:28443) ;;
 	broker=*) tags="$tags -t $kv"; local=false ;;
 	brokerInternal=* | providers=*) tags="$tags -t $kv" ;;
 	*) echo "pronto-identity: unknown argument $kv" >&2; exit 2 ;;

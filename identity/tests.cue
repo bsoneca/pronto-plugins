@@ -40,7 +40,7 @@ providers: strings.Contains(_decl, "code: capabilities: auth: providers: [\"goog
 // service beside the auth service by its name, the app a public client named
 // by its own origin, asking for a subject with the person's name and picture
 // and naming the provider the broker leaves for.
-brokerSettings: strings.Contains(_decl, "code: capabilities: auth: provider: google: {issuer: \"http://localhost:28443\", internal: \"http://identity:28443/\", client: \"origin\", scope: \"openid profile\", params: \"provider=google\"}") & true
+brokerSettings: strings.Contains(_decl, "code: capabilities: auth: provider: google: {issuer: \"http://localhost:19543\", internal: \"http://identity:19543/\", client: \"origin\", scope: \"openid profile\", params: \"provider=google\"}") & true
 _p: #Host & {package: "myapp", broker: "https://id.example.com"}
 brokerSame: strings.Contains(_p.files["identity_signin.cue"].text, "google: {issuer: \"https://id.example.com\", internal: \"https://id.example.com\",") & true
 // An operator's broker elsewhere is theirs to run: no local broker, nor its import.
@@ -51,7 +51,7 @@ brokerElsewhere: (strings.Contains(_p.files["identity_signin.cue"].text, "identi
 _two: _two_host.files["identity_signin.cue"].text
 _two_host: #Host & {package: "myapp", frontImage: _image, providers: ["google", "github"]}
 twoDecl: strings.Contains(_two, "code: capabilities: auth: providers: [\"google\", \"github\"]") & true
-twoSettings: strings.Contains(_two, "github: {issuer: \"http://localhost:28443\", internal: \"http://identity:28443/\", client: \"origin\", scope: \"openid profile\", params: \"provider=github\"}") & true
+twoSettings: strings.Contains(_two, "github: {issuer: \"http://localhost:19543\", internal: \"http://identity:19543/\", client: \"origin\", scope: \"openid profile\", params: \"provider=github\"}") & true
 
 // A local launch brings the broker up with the app: Hydra, then the front
 // waiting on it, each on the host from the pinned image's files.
@@ -69,3 +69,14 @@ cachedApartDecl: strings.Contains(_other.files["identity_signin.cue"].text, "/pr
 // elsewhere needs none (_p names no image).
 runtimeOfImage: _t.runtime & "0.1.0"
 noOwnerImage: strings.Contains(_decl, "ghcr.io/") & false
+
+// Each app's local broker is its own: its issuer's port hashed from the package, as bayt
+// hashes a launch's other ports, so two apps' launches never share it; Hydra's ports move
+// by their variables, per app as every other port, and the front finds them as its peer's.
+localPortOfPackage: _t.localPort & 19543
+_b: #Host & {package: "otherapp", frontImage: _image}
+localPortApart: (_b.localPort != _t.localPort) & true
+localFrontPort: strings.Contains(_decl, "expose: http: port: 19543") & strings.Contains(_decl, "ports: [\"19543:19543\"]") & strings.Contains(_decl, "PORT:                 \"19543\"") & true
+localHydraMoves: strings.Contains(_decl, "expose: {public: {port: 28453, env: \"SERVE_PUBLIC_PORT\"}, admin: {port: 28455, env: \"SERVE_ADMIN_PORT\"}}") & true
+localHydraIssuer: strings.Contains(_decl, "URLS_SELF_ISSUER: \"http://localhost:19543\"") & true
+noSharedPort: strings.Contains(_decl, "28443") & false

@@ -12,14 +12,14 @@ import (
 )
 
 _package:        string                             @tag(package)
-_broker:         *"http://localhost:28443" | string @tag(broker)
+_broker:         *"" | string                       @tag(broker)
 _brokerInternal: *"" | string                       @tag(brokerInternal)
 _providers:      *"" | string                       @tag(providers)
 _frontImage:     *"" | string                       @tag(frontImage)
 
 _host: identity.#Host & {
 	package: _package
-	broker:  _broker
+	if _broker != "" {broker: _broker}
 	if _brokerInternal != "" {brokerInternal: _brokerInternal}
 	if _providers != "" {providers: strings.Split(_providers, ",")}
 	if _frontImage != "" {frontImage: _frontImage}
