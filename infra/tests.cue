@@ -422,3 +422,57 @@ unknownChannel: _ok & {alertPolicies: x: {file: "a.json", channels: ["nobody"]}}
 
 // A file's secret version replaced is abandoned, not deleted: the verbs let it through.
 abandonNoDeletion: strings.Contains(_verbs, "$c.change.before?.deletion_policy? == 'ABANDON'") & true
+
+// A service kept running with its CPU, a domain, a user whose password OpenTofu makes, and a
+// sidecar that reads a secret file (a Managed Prometheus collector's scrape configuration).
+_always: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adoptAll: true
+		apis: "run.googleapis.com": true
+		serviceAccounts: "app-svc": displayName: "app-svc"
+		secrets: {
+			"db-password": {source: "OpenTofu", made: true, accessors: "serviceAccount:app-svc@example-project-123.iam.gserviceaccount.com": true}
+			"db-url": {source: "OpenTofu", made: true, accessors: "serviceAccount:app-svc@example-project-123.iam.gserviceaccount.com": true}
+			"scrape": {source: "the repository", file: "config/token.txt", accessors: "serviceAccount:app-svc@example-project-123.iam.gserviceaccount.com": true}
+			"cfg": {source: "the state", made: true, text: "a: 1\n", accessors: "serviceAccount:app-svc@example-project-123.iam.gserviceaccount.com": true}
+			"key": {source: "OpenTofu", made: true, random: true, accessors: "serviceAccount:app-svc@example-project-123.iam.gserviceaccount.com": true}
+			"client-id": {source: "the operator", made: true, placeholder: "unset", accessors: "serviceAccount:app-svc@example-project-123.iam.gserviceaccount.com": true}
+		}
+		sqlUsers: "db-1": app: {password: "db-password", url: "db-url", database: "app", query: "&options=-c%20role%3Dviewer"}
+		runServices: always: {
+			location:       "us-central1", image:                                       "registry.example.com/exporter:1", port: 9399
+			serviceAccount: "app-svc@example-project-123.iam.gserviceaccount.com", cpu: "250m", memory:                          "128Mi", timeout: "60s", maxInstances: 1
+			minInstances:   1
+			concurrency:    1
+			cpuIdle:        false
+			domain:         "metrics.example.com"
+			secretEnv: DSN: "db-url"
+			sqlInstances: ["example-project-123:us-central1:db-1"]
+			sidecars: gmp: {image: "registry.example.com/gmp:1", args: [], cpu: "100m", memory: "128Mi", secretFiles: "/etc/rungmp": {secret: "scrape", path: "config.yaml"}}
+		}
+	}
+}
+_al: _always.tofu.resource
+alwaysOn: _al.google_cloud_run_v2_service.example_project_123_always.template.scaling & {min_instance_count: 1, max_instance_count: 1}
+alwaysConcurrency: _al.google_cloud_run_v2_service.example_project_123_always.template.max_instance_request_concurrency & 1
+alwaysCpu: [for c in _al.google_cloud_run_v2_service.example_project_123_always.template.containers {c.resources.cpu_idle}] & [false, false]
+alwaysDomain: _al.google_cloud_run_domain_mapping.example_project_123_always & {name: "metrics.example.com", metadata: namespace: "example-project-123"}
+alwaysSidecarMount: [for c in _al.google_cloud_run_v2_service.example_project_123_always.template.containers if c.name == "gmp" {c.volume_mounts}][0] & [{name: "scrape", mount_path: "/etc/rungmp"}]
+alwaysScrapeVolume: [for v in _al.google_cloud_run_v2_service.example_project_123_always.template.volumes if v.name == "scrape" {v.secret.items[0].path}] & ["config.yaml"]
+alwaysUserPassword: _al.google_sql_user.example_project_123_db_1_app.password & "$"+"{random_password.example_project_123_db_1_app.result}"
+alwaysUserUrl:      _al.google_secret_manager_secret_version.example_project_123_db_1_app_url.secret_data & "postgresql://app:$"+"{random_password.example_project_123_db_1_app.result}@localhost/app?host=/cloudsql/example-project-123:us-central1:db-1&options=-c%20role%3Dviewer"
+alwaysUserWaits:    list.Contains(_al.google_cloud_run_v2_service.example_project_123_always.depends_on, "google_secret_manager_secret_version.example_project_123_db_1_app_url") & true
+alwaysRandom:       _always.tofu.terraform.required_providers.random.source & "hashicorp/random"
+alwaysNoImport: [for i in _always.tofu.import if strings.HasPrefix(i.to, "google_sql_user") || strings.HasPrefix(i.to, "google_cloud_run_domain_mapping") {i}] & []
+// A service that keeps no instance and its CPU idle (the default) writes neither.
+defaultScaling: _s.google_cloud_run_v2_service.example_project_123_my_app.template.scaling & {max_instance_count: 2}
+defaultNoMin: [for k, _ in _s.google_cloud_run_v2_service.example_project_123_my_app.template.scaling if k == "min_instance_count" {k}] & []
+alwaysText: _al.google_secret_manager_secret_version.example_project_123_cfg & {secret_data: "a: 1\n", deletion_policy: "ABANDON"}
+alwaysRandomKey: _al.google_secret_manager_secret_version.example_project_123_key.secret_data & "$"+"{random_password.example_project_123_key.result}"
+// A secret has one source of value.
+twoSources: _ok & {secrets: x: {source: "s", accessors: {}, file: "a", text: "b"}} & matchN(0, [#Project])
+alwaysPlaceholder: _al.google_secret_manager_secret_version.example_project_123_client_id & {secret_data: "unset", lifecycle: ignore_changes: ["secret_data", "enabled"]}
+// A user's credentials are read at the version OpenTofu made, so a new password is a new revision.
+alwaysUserPinned: [for e in _al.google_cloud_run_v2_service.example_project_123_always.template.containers[0].env if e.name == "DSN" {e.value_source.secret_key_ref.version}] & ["$" + "{google_secret_manager_secret_version.example_project_123_db_1_app_url.version}"]

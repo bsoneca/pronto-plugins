@@ -40,6 +40,8 @@ jobs:
           sayt --script tools.nu cue vet -c -t package=check ./journeys/export
           sayt --script tools.nu cue vet -c ./perf
           sayt --script tools.nu cue vet -c -t package=check ./perf/export
+          sayt --script tools.nu cue vet -c ./analytics
+          sayt --script tools.nu cue vet -c -t package=check ./analytics/export
           sayt --script tools.nu cue vet -c ./identity
           sayt --script tools.nu cue vet -c -t package=check -t frontImage=registry.example.com/pronto-identity:0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000 ./identity/export
           sayt --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
@@ -64,6 +66,8 @@ jobs:
         run: sayt --script tools.nu nu journeys/test.nu
       - name: Test perf
         run: sayt --script tools.nu nu perf/test.nu
+      - name: Test analytics
+        run: sayt --script tools.nu nu analytics/test.nu
       # Deno, the release binary checked against a pinned checksum rather than fetched by an action.
       - name: Install Deno
         env:
