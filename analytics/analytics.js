@@ -43,8 +43,12 @@ const follow = () => {
 	addEventListener("popstate", view);
 };
 
+// A host-DOM hatch is mounted on each screen and must answer with its cleanup. The tracker is the
+// page's, not the screen's: it is added once and stays, so there is nothing to undo.
+const nothing = () => {};
+
 export default function mount() {
-	if (added || optedOut || !config.website) return;
+	if (added || optedOut || !config.website) return nothing;
 	added = true;
 	const tag = document.createElement("script");
 	tag.defer = true;
@@ -62,4 +66,5 @@ export default function mount() {
 		follow();
 	});
 	document.head.append(tag);
+	return nothing;
 }

@@ -68,3 +68,13 @@ _j: journeys.#Journeys & {
 	spec: buy: {owner: "shop", moments: ["cart.add"], slo: availability: 99}
 }
 journeysClear: (#AnalyticsUnalerted & {alerts: _j.alerts}).offending & []
+
+// The loader: a host-DOM hatch answers every mount with its cleanup (the terminal refuses one that
+// does not, and stops the hatches before it), on the early exits too.
+_h: #Host & {package: "shop"}
+_loader:            _h.files["shell/hatches/analytics/analytics.js"].text
+loaderCleanup:      strings.Contains(_loader, "if (added || optedOut || !config.website) return nothing;") & true
+loaderCleanupAtEnd: strings.Contains(_loader, "document.head.append(tag);\n\treturn nothing;\n}") & true
+loaderSameOrigin:   strings.Contains(_loader, "tag.src = scriptURL(config.script);") & true
+loaderHost:         strings.Contains(_loader, "tag.dataset.hostUrl = location.origin;") & true
+loaderPrivacy:      strings.Contains(_loader, "navigator.globalPrivacyControl === true || navigator.doNotTrack === \"1\"") & true
