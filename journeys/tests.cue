@@ -139,3 +139,9 @@ vectorTool: strings.Contains(_h.files["pronto/journeys.cue"].text, "\"aqua:vecto
 collectShipped: strings.Contains(_h.files["journeys/journeys.nu"].text, "export def collect []") & true
 // The collector's tests run on the host's Vector: no container on a developer's machine.
 collectorTestsNative: _j.checks["journeys-collector"] & {verb: "lint", cmds: ["vector test observability/journeys.collector.yaml observability/journeys.collector.test.yaml"]}
+// Cloud Monitoring takes no `for` past 25 hours of lookback: the slow burn and
+// a long quiet fire on their first holding evaluation.
+policySlowNoFor: _policy["shop-checkout-availabilityburnslow"].duration & "0s"
+policyMediumFor: _policy["shop-checkout-availabilityburnmedium"].duration & "120s"
+_rarePolicy: {for p in (_rare & {app: "shop"}).alertPolicies {(p.name): p}}
+policyRareNoData: _rarePolicy["shop-first-nodata"].duration & "0s"

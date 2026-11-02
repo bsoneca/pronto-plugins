@@ -75,6 +75,17 @@ _journeysLe: {
 
 _journeysTitle: {availability: "Availability", latency: "Latency"}
 
+// A `quiet` in hours: "30m" → 0.5, "1d" → 24.
+_journeysHours: {
+	in: string
+	let n = strconv.Atoi(strings.TrimRight(in, "mhd"))
+	out: [
+		if strings.HasSuffix(in, "m") {n / 60},
+		if strings.HasSuffix(in, "h") {n},
+		if strings.HasSuffix(in, "d") {n * 24},
+	][0]
+}
+
 #Journeys: J={
 	// The app, as its alerts and dashboard are named where several apps'
 	// share one Grafana and one Cloud Monitoring: the program's package,
@@ -163,6 +174,7 @@ _journeysTitle: {availability: "Availability", latency: "Latency"}
 			let factor = strconv.FormatFloat(math.Round(b.spend*_days*24/b.hours*1000)/1000, 103, -1, 64)
 			let limit = "\(factor) * \(s.budget)" {
 			alert:    "Journey\(_journeysTitle[s.kind])Burn\(b.name)"
+			hours:    b.hours
 			journey:  s.journey
 			owner:    s.owner
 			severity: b.severity
@@ -179,6 +191,7 @@ _journeysTitle: {availability: "Availability", latency: "Latency"}
 		// (`quiet`), so its silence is no false alarm.
 		[for n, j in J.spec {
 			alert:    "JourneyNoData"
+			hours:    (_journeysHours & {in: j.quiet}).out
 			journey:  n
 			owner:    j.owner
 			severity: "ticket"
@@ -202,13 +215,16 @@ _journeysTitle: {availability: "Availability", latency: "Latency"}
 	}]
 
 	// The same alerts as Cloud Monitoring takes them: one PromQL alerting
-	// policy each, named for its journey and alert, its `for` in seconds.
+	// policy each, named for its journey and alert, its `for` in seconds. Cloud
+	// Monitoring holds no `for` on a query that looks back past 25 hours (the
+	// slow burn's 3 days, a rare journey's quiet), so those fire on the first
+	// evaluation that holds, their long window being slow to move anyway.
 	_seconds: {"2m": "120s", "15m": "900s"}
 	alertPolicies: [for a in alerts {
 		name:          "\(J.app)-\(a.journey)-\(strings.ToLower(strings.TrimPrefix(a.alert, "Journey")))"
 		displayName:   "\(J.title): \(a.journey) \(a.alert)"
 		expr:          a.expr
-		duration:      _seconds[a.for]
+		duration:      [if a.hours > 25 {"0s"}, _seconds[a.for]][0]
 		severity:      a.severity
 		documentation: "\(a.summary) (owner: \(a.owner))"
 		labels: {journey: a.journey, owner: a.owner, severity: a.severity, app: J.app}
