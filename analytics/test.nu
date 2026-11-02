@@ -32,7 +32,7 @@ def main [] {
 	check "a second patch changes nothing" ((open --raw docker/Caddyfile) == $caddy)
 	check "the tracker and its collector are the only routes" (($caddy | str contains "handle /a/s.js {") and ($caddy | str contains "handle /a/e {"))
 	check "the door caps an event's size" ($caddy | str contains "    request_body {\n      max_size 16KB\n    }")
-	check "a request for localhost reaches the peer the host door rewrites" (($caddy | str contains "@local host localhost 127.0.0.1") and ($caddy | str contains "reverse_proxy @local umami:8696"))
+	check "a request for localhost reaches the peer the host door rewrites" (($caddy | str contains "@local host localhost 127.0.0.1") and ($caddy | str contains "reverse_proxy @local umami:8697"))
 	check "any other request reaches Umami's address" ($caddy | str contains "      reverse_proxy https://umami.example.com {")
 	check "neither upstream is sent the app's cookies, authorization or referrer" (($caddy | split row "header_up -Cookie" | length) == 5 and ($caddy | split row "header_up -Authorization" | length) == 5 and ($caddy | split row "header_up -Referer" | length) == 5)
 	check "the proxy sends the upstream's own Host" ($caddy | str contains "header_up Host {upstream_hostport}")
