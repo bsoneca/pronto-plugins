@@ -11,6 +11,10 @@
 # the app a hatch reads; android, links, fingerprints: the https hosts whose links open the app's Android player
 # (an intent filter), verified by the assetlinks.json the door serves for those signing certificates. An argument not given keeps what the app's unity/unity.json declares; an empty
 # one (hatches=) clears it. Writes unity_surface.cue and unity/unity.json, both regenerated.
+# A hatch the app binds (unity/hatches/<name>/binding.cue, the app's own module and what it may read and
+# submit: github.com/bsoneca/pronto-csharp/blob/main/docs/pronto-unity-hatch-contract.md) is listed even
+# when hatches= does not name it, checked against the #HatchBinding schema, its module file required to
+# exist, and written as unity/hatches/<name>/binding.json (regenerated, never edited).
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 app=$(cd "$1" && pwd)
@@ -30,6 +34,21 @@ for kv in "$@"; do
 	esac
 done
 cd "$here"
+# Each hatch binding the app wrote, exported as JSON into one object {name: binding}; its module must exist.
+bound="{"
+for b in "$app"/unity/hatches/*/binding.cue; do
+	[ -f "$b" ] || continue
+	name=$(basename "$(dirname "$b")")
+	./saytw --script tools.nu cue export "$b" --out json > "$files" || { echo "pronto-unity: $b does not export" >&2; exit 2; }
+	json=$(tr -d '\n\t' < "$files")
+	module=$(printf '%s' "$json" | sed -n 's/.*"module": *"\([^"]*\)".*/\1/p')
+	[ -n "$module" ] || { echo "pronto-unity: $b names no module" >&2; exit 2; }
+	[ -f "$app/$module" ] || { echo "pronto-unity: $b names module $module, which is not a file in the app" >&2; exit 2; }
+	[ "$bound" = "{" ] || bound="$bound,"
+	bound="$bound\"$name\": $json"
+done
+bound="$bound}"
+printf '%s\n' "bindings=$bound" >> "$tags"
 # One -t per argument, each kept whole.
 set --
 while IFS= read -r t; do set -- "$@" -t "$t"; done < "$tags"

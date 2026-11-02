@@ -66,6 +66,15 @@ jobs:
           jq -e '.android.links == ["example.com"] and .scenarios == ["tests/scenarios/table.cue"]' "$app/unity/unity.json"
           grep -q 'wellKnown: "assetlinks.json"' "$app/unity_surface.cue"
           ! ./bin/pronto-unity "$app" fingerprints=
+      - name: Bind a Unity hatch, then refuse a missing module
+        run: |
+          app=$(mktemp -d)/app && mkdir -p "$app/unity/hatches/battle" && printf 'package demo\n' > "$app/program.cue"
+          printf 'package demo\n\nmodule: "unity/hatches/battle/board.js"\nreads: games: {select: "[data-row]", attrs: ["data-row"]}\nsubmits: ["form[data-intent]"]\n' > "$app/unity/hatches/battle/binding.cue"
+          ! ./bin/pronto-unity "$app" screens=play hatches=battle
+          touch "$app/unity/hatches/battle/board.js"
+          ./bin/pronto-unity "$app" screens=play hatches=battle
+          jq -e '.hatches.battle.binding == "unity/hatches/battle/binding.json"' "$app/unity/unity.json"
+          jq -e '.module == "unity/hatches/battle/board.js" and .clicks == []' "$app/unity/hatches/battle/binding.json"
       - name: Check CUE formatting of infra
         run: sayt --script tools.nu cue fmt --check ./infra ./examples/infra ./infra/export
       - name: Test journeys

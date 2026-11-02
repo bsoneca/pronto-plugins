@@ -3,14 +3,16 @@
 // which this writes. Without it the app has no Unity file and the host stages nothing of it.
 //
 // The declaration says, as data: which of the program's screens get a Unity surface and the look
-// (USS) of each; which of its hostDom hatches the host draws, by name (their C# is the host's, never
-// the app's); which scenarios the host runs; and which of its unit suites run there (the rest are the server's, with the reason) and whether its scenarios
+// (USS) of each; which of its hostDom hatches the host draws, by name, each bound to the app's own
+// JavaScript module (unity/hatches/<name>/binding.cue), never C#; which scenarios the host runs; and which of its unit suites run there (the rest are the server's, with the reason) and whether its scenarios
 // need its stack. The host reads only what it lists, from unity/unity.json, the same declaration as
 // JSON, written beside it: it never finds a file by its name.
 package unity
 
 import (
 	"encoding/json"
+	"list"
+	"strings"
 	"struct"
 )
 
@@ -25,6 +27,27 @@ import (
 // The SHA-256 of a signing certificate, as Android prints it: 32 bytes in colon-separated upper-case hex.
 #Fingerprint: string & =~"^[0-9A-F]{2}(:[0-9A-F]{2}){31}$"
 
+// A hatch's binding (the app's unity/hatches/<name>/binding.cue, exported to binding.json): the app's own pure
+// JavaScript module and what the hatch may see of its screen and do to it. The contract:
+// github.com/bsoneca/pronto-csharp/blob/main/docs/pronto-unity-hatch-contract.md
+#HatchBinding: {
+	// The app's module (ES module; imports allowed), from the app's root.
+	module: #Path & =~"\\.m?js$"
+	// What the hatch sees of its screen, re-read before every call: rows of the elements a selector matches.
+	reads: {[=~"^[A-Za-z_][A-Za-z0-9_]*$"]: {
+		select: string & !=""
+		attrs: [...string & !=""]
+	}}
+	// The only forms it may fill and submit (selectors of the screen's forms), and the only elements it may click.
+	submits: [...string & !=""]
+	clicks: *[] | [...string & !=""]
+	// Present: the host calls tick() at this rate while the screen is open.
+	tick?: {hz: int & >0 & <=120}
+	// With tick: the held controls the host passes in.
+	input?: [...string & !=""]
+	if input != _|_ if tick == _|_ {input: _|_}
+}
+
 // What an app declares.
 #Surface: {
 	// The screens drawn on Unity, each a screen of the program, with its look: the screen's own
@@ -33,9 +56,10 @@ import (
 		uss: #Path & =~"\\.uss$"
 		shared: [...#Path & =~"\\.uss$"]
 	}}
-	// The program's hostDom hatches the host draws, by name. The host carries their C#; a hatch not
-	// named here is never mounted, so a screen falls back to its markup.
-	hatches: [...#Name]
+	// The program's hostDom hatches the host draws, by name. A map gives each its binding (the generated
+	// binding.json beside the app's binding.cue); the older list of names, or a name with no binding, is
+	// not mounted: the screen falls back to its markup.
+	hatches: [...#Name] | {[#Name]: {binding?: #Path & =~"\\.json$"}}
 	// The scenarios the host runs, each a CUE file of the shared scenario schema: the app's own
 	// (tests/scenarios/…) or ones written for Unity (unity/scenarios/…).
 	scenarios: [...#Path & =~"\\.cue$"]
@@ -66,6 +90,13 @@ import (
 #Host: H={
 	// The app's CUE package, which unity_surface.cue joins.
 	package!: string & =~"^[a-z][a-z0-9_]*$"
+	// The bindings the app wrote (unity/hatches/<name>/binding.cue), each checked here and written as binding.json.
+	bindings: {[#Name]: #HatchBinding}
+	// A binding belongs to a hatch the declaration maps to its binding.json.
+	for n, _ in H.bindings {
+		if H.surface.hatches[n].binding == _|_ {_unmapped: (n): _|_}
+		_bound: (n): H.surface.hatches[n].binding & "unity/hatches/\(n)/binding.json"
+	}
 	// The declaration, from the installer's arguments over the one the app already has.
 	surface: #Surface & {
 		screens: {[S=_]: {uss: *"unity/screens/\(S).uss" | _, shared: *[] | _}}
@@ -100,6 +131,17 @@ import (
 			"""},
 		"",
 	][0]
+	// The map form when any hatch is bound: a name with no binding is listed and not mounted.
+	_mapForm: len(H.bindings) > 0
+	_boundNames: list.SortStrings([for n, _ in H.bindings {n}])
+	_import: [if H._mapForm {"\nimport \"list\"\n"}, ""][0]
+	_iter: [if H._mapForm {"h, _"}, "h"][0]
+	// What `cue vet` (lint) can say of a binding: its hatch is drawn on a screen Unity draws, and no submits
+	// selector is empty. Whether the module file exists is for pronto-unity to refuse when it writes, as CUE cannot stat.
+	_boundLines: [for h in H._boundNames {
+		"\t\t\"\(h)\": {screens: [for s, _ in unity.screens if code.surface.screens[s].hatches != _|_ if list.Contains(code.surface.screens[s].hatches, \"\(h)\") {s}] & [_, ...], submits: \(json.Marshal(H.bindings[h].submits)) & [...string & !=\"\"]}"
+	}]
+	_boundBlock: [if H._mapForm {"\n\t// Each bound hatch is on a screen drawn on Unity and names no empty form selector.\n\tbound: {\n" + strings.Join(H._boundLines, "\n") + "\n\t}"}, ""][0]
 
 	_header: "generated by pronto-unity from unity/host.cue — do not edit"
 	_manifest: json.Indent(json.Marshal({generated: H._header, for k, v in H.surface {(k): v}}), "", "  ")
@@ -110,7 +152,7 @@ import (
 			text: """
 				// \(H._header)
 				package \(H.package)
-
+				\(H._import)
 				// The app's Unity surface: what pronto-csharp's host draws of it, and nothing else. The
 				// host reads unity/unity.json, this declaration as JSON. Refresh both with pronto-unity.
 				unity: \(json.Indent(json.Marshal(H.surface), "", "\t"))
@@ -118,12 +160,16 @@ import (
 				// Each screen and hatch it names is the program's own: one it lacks fails `cue vet` (lint).
 				unityOfProgram: {
 					routes: {for s, _ in unity.screens {(s): code.surface.screens[s].route}}
-					hatches: [for h in unity.hatches {code.capabilities.hatches[h].kind & "host-dom"}]
+					hatches: [for \(H._iter) in unity.hatches {code.capabilities.hatches[h].kind & "host-dom"}]\(H._boundBlock)
 				}
 				\(H._wellKnown)
 				"""
 		}
 		"unity/unity.json": {seed: false, text: H._manifest + "\n"}
+		// Each binding as JSON for the host, generated from the app's binding.cue: never edited.
+		for n, b in H.bindings {
+			"unity/hatches/\(n)/binding.json": {seed: false, text: json.Indent(json.Marshal({generated: "generated by pronto-unity from unity/hatches/\(n)/binding.cue — do not edit", for k, v in b {(k): v}}), "", "  ") + "\n"}
+		}
 		// Each sheet named, seeded once, then the app's look.
 		for s, v in H.surface.screens {
 			(v.uss): {seed: true, text: "/* The Unity look of a screen: USS over its markup (data-x=\"v\" is class x--v). */\n"}
