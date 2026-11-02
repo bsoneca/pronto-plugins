@@ -101,7 +101,7 @@ cases.push(["a tenant that asks for profile is told the person's name and pictur
   const offHttps = await claimsOf("mallory", "openid profile");
   assertEquals([offHttps.name, offHttps.picture], ["mallory Example", undefined], "a picture off https is dropped");
   const d = await (await call(`${ISSUER}/.well-known/openid-configuration`)).json();
-  assertEquals(d.scopes_supported, ["openid", "profile"]);
+  assertEquals(d.scopes_supported, ["openid", "profile", "email"]);
 }]);
 
 cases.push(["the same person is a stranger to another tenant, and the same to the same tenant", async () => {

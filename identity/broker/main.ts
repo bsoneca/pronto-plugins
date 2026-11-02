@@ -9,7 +9,7 @@
 // start and never stored, since its tokens live five minutes and tenants
 // fetch a key they do not know.
 import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, signEs256, verifyIdToken } from "../oidc.ts";
-import { type AuthRequest, Codes, idTokenClaims, pairwiseKey, pairwiseSubject, parseAuthorize, profileOf, redeem } from "./core.ts";
+import { type AuthRequest, Codes, emailOf, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, profileOf, providerScope, redeem } from "./core.ts";
 
 const enc = new TextEncoder();
 
@@ -111,7 +111,7 @@ export async function broker(p: { issuer: string; secret: string; providers: Pro
     const leg = await seal(stateKey, { r, pn: randomToken(16), exp: Math.floor(Date.now() / 1000) + 600 });
     const host = new URL(r.tenant).host;
     return page(`Sign in to ${host}`, `<h1>Sign in to <span class="origin">${esc(host)}</span></h1>
-<p>You'll continue with ${esc(provider.label)}. Only <span class="origin">${esc(r.tenant)}</span> learns that it's you, and it can't tell you apart in any other app.</p>
+<p>You'll continue with ${esc(provider.label)}. Only <span class="origin">${esc(r.tenant)}</span> learns that it's you, and it can't tell you apart in any other app.${r.email ? ` ${esc(learnsMore(r))}` : ""}</p>
 <p><a class="go" href="${esc(`${issuer}/authorize/continue?leg=${encodeURIComponent(leg)}`)}">Continue with ${esc(provider.label)}</a></p>
 <p><small>If you didn't start this from ${esc(host)}, close this page.</small></p>`);
   }
@@ -124,7 +124,7 @@ export async function broker(p: { issuer: string; secret: string; providers: Pro
     const to = new URL(provider.authUrl);
     to.search = new URLSearchParams({
       client_id: provider.clientId, redirect_uri: callback(provider.name), response_type: "code",
-      scope: r.profile ? "openid profile" : "openid", state: url.searchParams.get("leg")!, nonce: leg.pn as string, prompt: "select_account",
+      scope: providerScope(r), state: url.searchParams.get("leg")!, nonce: leg.pn as string, prompt: "select_account",
     }).toString();
     return new Response(null, { status: 302, headers: { location: to.toString(), "cache-control": "no-store" } });
   }
@@ -165,8 +165,12 @@ export async function broker(p: { issuer: string; secret: string; providers: Pro
       return back(r.redirectUri, { error: "access_denied", state: r.state });
     }
     const sub = await pairwiseSubject(pairwise, r.tenant, provider.name, claims.sub);
-    // The name and picture only to a tenant that asked for them, which the provider then showed the person.
-    const code = codes.issue({ tenant: r.tenant, redirectUri: r.redirectUri, challenge: r.challenge, nonce: r.nonce, sub, provider: provider.name, ...(r.profile ? profileOf(claims) : {}) });
+    // The name and picture, and the verified e-mail, only to a tenant that asked for them, which the
+    // provider then showed the person.
+    const code = codes.issue({
+      tenant: r.tenant, redirectUri: r.redirectUri, challenge: r.challenge, nonce: r.nonce, sub, provider: provider.name,
+      ...(r.profile ? profileOf(claims) : {}), ...(r.email ? emailOf(claims) : {}),
+    });
     return back(r.redirectUri, { code, state: r.state });
   }
 
@@ -188,7 +192,7 @@ export async function broker(p: { issuer: string; secret: string; providers: Pro
     id_token_signing_alg_values_supported: ["ES256"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
-    scopes_supported: ["openid", "profile"],
+    scopes_supported: ["openid", "profile", "email"],
     providers: [...providers.values()].map((x) => ({ name: x.name, label: x.label })),
   };
 

@@ -75,7 +75,8 @@ export def main [
 		gc artifacts repositories create $repository --repository-format docker --location $region --project $p --description "pronto images" | ignore
 	}
 
-	# The broker's own files, on Deno as the plugin pins it, for Cloud Run's linux/amd64.
+	# The broker's own files, on Deno as the plugin pins it, for Cloud Run's linux/amd64, built by
+	# Cloud Build in the project: no Docker on the operator's machine.
 	let work = (mktemp -d)
 	mkdir $"($work)/broker"
 	cp $"($here)/oidc.ts" $work
@@ -83,10 +84,10 @@ export def main [
 	$"FROM ($deno)\nWORKDIR /app\nCOPY oidc.ts /app/\nCOPY broker /app/broker\nRUN [\"deno\", \"cache\", \"/app/broker/main.ts\"]\nENV PORT=8080\nCMD [\"run\", \"--allow-net\", \"--allow-env\", \"/app/broker/main.ts\"]\n" | save $"($work)/Dockerfile"
 	let host = $"($region)-docker.pkg.dev"
 	let image = $"($host)/($p)/($repository)/($service)"
-	gc auth print-access-token | ^docker login --username oauth2accesstoken --password-stdin $"https://($host)"
-	with-env {SOURCE_DATE_EPOCH: "0"} { ^docker buildx build --platform linux/amd64 --provenance=false -t $"($image):release" --push -q $work | ignore }
+	gc builds submit $work --project $p --region $region --tag $"($image):release" --suppress-logs | ignore
 	rm -rf $work
-	let digest = (^docker buildx imagetools inspect $"($image):release" --format '{{json .Manifest}}' | from json | get digest)
+	let digest = (gc artifacts docker images describe $"($image):release" --format "value(image_summary.digest)" | str trim)
+	if not ($digest | str starts-with "sha256:") { error make {msg: $"($image):release has no digest: ($digest)"} }
 
 	# Each secret by its version now, not `latest`: a version stored since is a new revision,
 	# where `latest` would reach only instances started after it.

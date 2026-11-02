@@ -1,10 +1,12 @@
 #!/bin/sh
 # Adds or refreshes sign-in through the identity broker in a pronto app:
-#   bin/pronto-identity <app-dir> [frontImage=<image>] [broker=<url>] [brokerInternal=<url>] [providers=<a,b>]
+#   bin/pronto-identity <app-dir> [frontImage=<image>] [broker=<url>] [brokerInternal=<url>] [providers=<a,b>] [scope=<openid,profile,email>]
 # frontImage: the broker front's image, your own, as identity/publish.sh prints it
 # (<registry>/pronto-identity:<version>@sha256:…), which a local launch's broker runs. It has
 # no default; a refresh keeps the one the app's identity_signin.cue already runs, and an app
 # signing in through a broker elsewhere (broker=https://…) needs none.
+# scope: what the app asks the broker for, `openid` and any of `profile` and `email`, comma- or
+# space-separated (default openid profile); a refresh keeps the one the app already asks for.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 app=$(cd "$1" && pwd)
@@ -13,10 +15,12 @@ package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1
 [ -n "$package" ] || { echo "pronto-identity: $app/program.cue names no package" >&2; exit 2; }
 tags=""
 image=""
+scope=""
 local=true
 for kv in "$@"; do
 	case "$kv" in
 	frontImage=*) image=${kv#frontImage=} ;;
+	scope=*) scope=$(printf '%s' "${kv#scope=}" | tr ',' ' ') ;;
 	# The old default: the local broker, which now listens on a port of the app's own.
 	broker=http://localhost:28443) ;;
 	broker=*) tags="$tags -t $kv"; local=false ;;
@@ -31,13 +35,15 @@ if [ -z "$image" ] && [ "$local" = true ]; then
 	exit 2
 fi
 [ -z "$image" ] || tags="$tags -t frontImage=$image"
+# The scope the app already asks for, on a refresh.
+[ -n "$scope" ] || scope=$(sed -n 's/.*client: "origin", scope: "\([a-z ]*\)".*/\1/p' "$app/identity_signin.cue" 2>/dev/null | head -n 1)
 files=$(mktemp)
 removed=$(mktemp)
 trap 'rm -f "$files" "$removed"' EXIT
 cd "$here"
 # shellcheck disable=SC2086
-./saytw --script tools.nu cue export ./identity/export -t "package=$package" $tags -e files --out json > "$files"
+./saytw --script tools.nu cue export ./identity/export -t "package=$package" ${scope:+-t "scope=$scope"} $tags -e files --out json > "$files"
 # shellcheck disable=SC2086
-./saytw --script tools.nu cue export ./identity/export -t "package=$package" $tags -e cleanup --out json > "$removed"
+./saytw --script tools.nu cue export ./identity/export -t "package=$package" ${scope:+-t "scope=$scope"} $tags -e cleanup --out json > "$removed"
 ./saytw --script tools.nu nu bin/write.nu "$files" "$app"
 ./saytw --script tools.nu nu bin/remove.nu "$removed" "$app"
