@@ -49,6 +49,11 @@ export def main [
 	--project: string             # The Google Cloud project
 	--domain: string              # Where the broker answers, its issuer: id.example.com
 	--google-client-id: string    # The operator's Google client, registered for https://<domain>/callback/google
+	--phone-project: string = ""     # The Firebase project whose Identity Platform texts the phone's codes; none, no phone
+	--phone-api-key: string = ""     # Its Web app's public key, which must admit https://<domain>/* as a referrer
+	--phone-app-id: string = ""      # Its Web app's id
+	--phone-admit: string = ""       # Where the page asks for a code: the owner of the project's beforeSendSms gate
+	--phone-tenants: string = ""     # The origins that may offer the phone, comma-separated
 	--region: string = "us-central1"
 	--service: string = "identity-broker"
 	--repository: string = "pronto"
@@ -80,7 +85,7 @@ export def main [
 	let work = (mktemp -d)
 	mkdir $"($work)/broker"
 	cp $"($here)/oidc.ts" $work
-	cp $"($here)/broker/main.ts" $"($here)/broker/core.ts" $"($work)/broker/"
+	cp $"($here)/broker/main.ts" $"($here)/broker/core.ts" $"($here)/broker/phone.ts" $"($work)/broker/"
 	$"FROM ($deno)\nWORKDIR /app\nCOPY oidc.ts /app/\nCOPY broker /app/broker\nRUN [\"deno\", \"cache\", \"/app/broker/main.ts\"]\nENV PORT=8080\nCMD [\"run\", \"--allow-net\", \"--allow-env\", \"/app/broker/main.ts\"]\n" | save $"($work)/Dockerfile"
 	let host = $"($region)-docker.pkg.dev"
 	let image = $"($host)/($p)/($repository)/($service)"
@@ -94,6 +99,19 @@ export def main [
 	let version = {|name| gc secrets versions describe latest --secret $name --project $p --format "value(name)" | str trim | path basename }
 	let broker_version = (do $version $"($service)-secret")
 	let google_version = (do $version $google_secret)
+	# The phone, when its project is named: each setting public (the page shows them), so plain env.
+	let phone = if ($phone_project | is-empty) { [] } else {
+		if ([$phone_api_key $phone_app_id $phone_admit $phone_tenants] | any { is-empty }) {
+			error make {msg: "--phone-project needs --phone-api-key, --phone-app-id, --phone-admit and --phone-tenants"}
+		}
+		[
+			{name: "PHONE_PROJECT", value: $phone_project}
+			{name: "PHONE_API_KEY", value: $phone_api_key}
+			{name: "PHONE_APP_ID", value: $phone_app_id}
+			{name: "PHONE_ADMIT", value: $phone_admit}
+			{name: "PHONE_TENANTS", value: $phone_tenants}
+		]
+	}
 	let spec = {
 		apiVersion: "serving.knative.dev/v1", kind: "Service"
 		metadata: {name: $service, labels: {"cloud.googleapis.com/location": $region}, annotations: {"run.googleapis.com/ingress": "all"}}
@@ -113,7 +131,7 @@ export def main [
 						{name: "GOOGLE_CLIENT_ID", value: $google_client_id}
 						{name: "BROKER_SECRET", valueFrom: {secretKeyRef: {name: $"($service)-secret", key: $broker_version}}}
 						{name: "GOOGLE_CLIENT_SECRET", valueFrom: {secretKeyRef: {name: $google_secret, key: $google_version}}}
-					]
+					] ++ $phone
 					startupProbe: {httpGet: {path: "/health", port: 8080}, periodSeconds: 1, failureThreshold: 30}
 				}]
 			}

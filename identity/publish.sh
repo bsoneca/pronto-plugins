@@ -23,13 +23,14 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/src/broker" "$work/src/hydra"
 cp "$here/oidc.ts" "$work/src/"
-cp "$here/broker/core.ts" "$here/broker/main.ts" "$work/src/broker/"
+cp "$here/broker/core.ts" "$here/broker/main.ts" "$here/broker/phone.ts" "$work/src/broker/"
 cp "$here/hydra/front.ts" "$here/hydra/fake.ts" "$here/hydra/local.sh" "$work/src/hydra/"
 cat > "$work/src/README.md" <<EOF
 # pronto-identity $V
 
 The identity broker's runtime: Ory Hydra behind a front that signs people in
-through Google (or, on a developer's machine, a stand-in for it) and gives each
+through Google (or, on a developer's machine, a stand-in for it) and a phone
+number texted a code (Identity Platform, or its emulator on a developer's machine) and gives each
 application its own subject for them. Published from bsoneca/pronto-plugins
 identity/ at $rev; its source, tests and docs live there.
 

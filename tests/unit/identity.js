@@ -6,6 +6,7 @@ import { base64url, fromBase64url, randomToken, sha256url } from '../../identity
 import { broker } from '../../identity/broker/main.ts';
 import { front } from '../../identity/hydra/front.ts';
 import { fakeGoogle } from '../../identity/hydra/fake.ts';
+import { phoneConfig, phoneUpstream } from '../../identity/broker/phone.ts';
 
 const bin = new URL('../../bin/pronto-identity', import.meta.url).pathname;
 
@@ -137,4 +138,86 @@ export async function fakeSignsIn(scope, who) {
   const form = new URLSearchParams({ code: back.searchParams.get('code'), client_id: 'fake-google-client', client_secret: 'fake-google-secret', redirect_uri: 'http://localhost:19000/callback/google' });
   const { id_token } = await (await at('http://localhost:19000/fake/google/token', { method: 'POST', body: form })).json();
   return { status: res.status, listed, learned: learned(claimsOf(id_token)) };
+}
+
+// The phone (broker/phone.ts): a stand-in for Firebase's signing key, and the settings a broker
+// offering the phone is started with.
+const firebaseKey = await crypto.subtle.generateKey(
+  { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
+const firebaseJwk = { ...(await crypto.subtle.exportKey('jwk', firebaseKey.publicKey)), kid: 'f1' };
+const PHONE_ENV = {
+  PHONE_PROJECT: 'brawl-chess', PHONE_API_KEY: 'AIza-public', PHONE_APP_ID: '1:1:web:1',
+  PHONE_ADMIT: 'https://app.example.com/rental/phone/admit', PHONE_TENANTS: 'https://app.example.com,https://localhost:*',
+};
+
+/** A Firebase ID token for a phone sign-in on `project`, as Firebase signs it (RS256, its key `f1`),
+ * `over` replacing or adding claims; `unsigned` makes it the emulator's (alg none). */
+async function firebaseToken(over = {}, unsigned = false, project = 'brawl-chess') {
+  const now = Math.floor(Date.now() / 1000);
+  const claims = { iss: `https://securetoken.google.com/${project}`, aud: project, sub: 'fb-uid-1', auth_time: now, iat: now, exp: now + 3600, phone_number: '+5511912345678', firebase: { sign_in_provider: 'phone' }, ...over };
+  const body = base64url(enc.encode(JSON.stringify(claims)));
+  if (unsigned) return `${base64url(enc.encode(JSON.stringify({ alg: 'none', typ: 'JWT' })))}.${body}.`;
+  const head = base64url(enc.encode(JSON.stringify({ alg: 'RS256', kid: 'f1' })));
+  const sig = new Uint8Array(await crypto.subtle.sign('RSASSA-PKCS1-v1_5', firebaseKey.privateKey, enc.encode(`${head}.${body}`)));
+  return `${head}.${body}.${base64url(sig)}`;
+}
+
+/** The phone's settings from an environment (`over` on PHONE_ENV, a null value removing one), for a
+ * broker at `issuer`: what phoneConfig makes of them. */
+export function phoneSettings(over = {}, issuer = 'https://id.example.com') {
+  const env = { ...PHONE_ENV, ...over };
+  return phoneConfig((k) => env[k] ?? undefined, issuer);
+}
+
+/** The production broker (broker/main.ts) signing a person in by phone for `tenant`, Firebase's
+ * token made with `over` (`unsigned` for the emulator's): the phone page's language, title, CSP and
+ * whether it names a number; the page's answer to the token; and what the tenant's ID token says,
+ * with whether its subject is the Firebase user's. `env` changes the broker's phone settings. */
+export async function phoneBrokered(p = {}) {
+  const { tenant = TENANT, over = {}, unsigned = false, lang = 'pt-BR,pt;q=0.9', env = {}, issuer = 'https://id.example.com', project = 'brawl-chess' } = p;
+  const cfg = phoneSettings(env, issuer);
+  const phone = await phoneUpstream(issuer, cfg, { keys: (kid) => Promise.resolve(kid === 'f1' ? firebaseJwk : undefined) });
+  const handle = await broker({ issuer, secret: 's'.repeat(40), providers: [phone.provider], extra: phone.handle });
+  const callback = `${tenant}/auth/oidc/phone/callback`;
+  const verifier = randomToken(32);
+  const q = new URLSearchParams({ client_id: tenant, provider: 'phone', redirect_uri: callback, state: 'S1', response_type: 'code', scope: 'openid profile', code_challenge: await sha256url(verifier), code_challenge_method: 'S256', nonce: 'N1' });
+  const first = await handle(new Request(`${issuer}/authorize?${q}`));
+  if (first.status === 302) return { refused: new URL(first.headers.get('location')).searchParams.get('error') };
+  const consent = await first.text();
+  const toPhone = new URL((await handle(new Request(linkOf(consent, '/authorize/continue')))).headers.get('location'));
+  const pageRes = await handle(new Request(toPhone, { headers: { 'accept-language': lang } }));
+  const page = await pageRes.text();
+  const config = JSON.parse(/<script type="application\/json" id="phone-config">([^<]*)<\/script>/.exec(page)[1]);
+  const approved = await handle(new Request(`${issuer}/phone/approve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: config.id, token: await firebaseToken(over, unsigned, project) }) }));
+  const answer = await approved.json();
+  const out = {
+    says: sayOf(consent), lang: /<html lang="([^"]+)"/.exec(page)[1], title: config.strings.title, csp: pageRes.headers.get('content-security-policy'),
+    asks: /id="phone-number"/.test(page) && /data-e164/.test(page), admit: config.admit, emulator: config.emulator, approved: approved.status, error: answer.error ?? null,
+  };
+  if (!answer.to) return out;
+  const back = new URL((await handle(new Request(answer.to))).headers.get('location'));
+  const form = new URLSearchParams({ grant_type: 'authorization_code', code: back.searchParams.get('code') ?? '', client_id: tenant, redirect_uri: callback, code_verifier: verifier });
+  const { id_token } = await (await handle(new Request(`${issuer}/token`, { method: 'POST', body: form }))).json();
+  const c = claimsOf(id_token);
+  return { ...out, provider: c.provider ?? c.idp ?? null, sub: c.sub, firebaseSub: c.sub === 'fb-uid-1', aud: c.aud, claims: Object.keys(c).sort(), hasNumber: JSON.stringify(c).includes('912345678') };
+}
+
+/** The local broker on Hydra (hydra/front.ts) asked to sign `tenant` in by phone: how Hydra's login
+ * is answered (accepted, or rejected with its error). */
+export async function hydraPhoneLogin(tenant) {
+  const issuer = 'http://localhost:19000';
+  let rejected = null;
+  const fetcher = (input, init = {}) => Promise.resolve((() => {
+    const url = new URL(String(input));
+    if (url.pathname === '/admin/oauth2/auth/requests/login') {
+      return Response.json({ client: { client_id: tenant }, request_url: `${issuer}/oauth2/auth?provider=phone`, requested_scope: ['openid'] });
+    }
+    if (url.pathname === '/admin/oauth2/auth/requests/login/reject') { rejected = JSON.parse(String(init.body)).error; return Response.json({ redirect_to: `${tenant}/auth/oidc/phone/callback?error=${rejected}` }); }
+    return new Response('not found', { status: 404 });
+  })());
+  const cfg = phoneSettings({}, issuer);
+  const phone = await phoneUpstream(issuer, cfg);
+  const handle = await front({ issuer, secret: 's'.repeat(40), providers: [phone.provider], hydra: { public: 'http://hydra', admin: 'http://hydra' }, fetcher, extra: phone.handle });
+  const res = await handle(new Request(`${issuer}/login?login_challenge=C1`));
+  return { status: res.status, rejected };
 }

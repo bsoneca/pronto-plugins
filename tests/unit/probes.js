@@ -18,3 +18,5 @@ export const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 export const replaced = (text, pattern, by) => String(text).replace(new RegExp(pattern, 'm'), by);
 /** A text repeated. */
 export const repeat = (text, n) => String(text).repeat(n);
+/** How many distinct values a list holds. */
+export const distinct = (list) => new Set(list.map((x) => JSON.stringify(x))).size;

@@ -111,6 +111,18 @@ in each app. A new ghcr package is private: make it public once under its owner'
 3. `${CLAUDE_PLUGIN_ROOT}/bin/pronto-identity-broker` serves it on `PORT`
    (28443). It speaks plain HTTP; TLS is the platform's.
 
+## The phone
+
+`providers=google,phone` offers a phone number texted a code (Identity Platform)
+beside Google, through the same broker: the subject is pairwise, and the app
+never learns the number. The operator's broker must name a Firebase project, the
+`beforeSendSms` gate's owner as `PHONE_ADMIT` and the app among `PHONE_TENANTS`
+(identity/README.md, "The phone"). A local launch's broker signs in against the
+Firebase Auth emulator: the app sets the `identity` service's `PHONE_PROJECT`,
+`PHONE_EMULATOR`, `PHONE_ADMIT` and `PHONE_TENANTS` in a file of its own, as it
+sets `PRONTO_IDENTITY_ENV`. The terminal labels the strip's link with the app's
+`chrome_signin_phone` message.
+
 ## Limits
 
 - Codes live in the broker's memory: it runs as one instance, and a code it
