@@ -42,13 +42,18 @@ _configPath: "shell/hatches/analytics/config.js"
 	if !H.journeys {_unalerted: "// (no journeys: nothing here to alert)"}
 	_step: "use ./analytics/analytics.nu"
 
-	// The generate rule, after pronto's writer (priority 1) and the journeys' and perf's (2),
-	// whose older route step takes a block just before the auth route's comment for its own
-	// comment and would nest inside this one: the door it just rewrote is given the routes
-	// again, and the program's `analytics.out` is written out.
-	_generate: {
+	// The generate rules. The program's `analytics.out` is written out before pronto's writer
+	// (priority -1, as the spec step of an app's own facts is), since the views are a raw migration
+	// that writer copies. The door it rewrites is given the routes after it and after the journeys'
+	// and perf's (3), whose older route step takes a block just above the auth route for its own
+	// comment and would nest inside this one.
+	_write: {
+		priority: -1
+		cmds: [{do: "use tools.nu [run-mise]; \(H._step); run-mise exec -- cue export . -e analytics.out --out json | analytics write"}]
+	}
+	_route: {
 		priority: 3
-		cmds: [{do: "use tools.nu [run-mise]; \(H._step); let u = (run-mise exec -- cue export . -e analytics.umami --out json | from json); analytics route $u.script $u.collect $u.upstream; run-mise exec -- cue export . -e analytics.out --out json | analytics write"}]
+		cmds: [{do: "use tools.nu [run-mise]; \(H._step); let u = (run-mise exec -- cue export . -e analytics.umami --out json | from json); analytics route $u.script $u.collect $u.upstream"}]
 	}
 
 	files: {
@@ -59,7 +64,10 @@ _configPath: "shell/hatches/analytics/config.js"
 
 				pronto: {
 					tools: \(json.Marshal(#Tools))
-					say: say: generate: rulemap: analytics: \(json.Marshal(H._generate))
+					say: say: generate: rulemap: {
+						"analytics-write": \(json.Marshal(H._write))
+						"analytics-route": \(json.Marshal(H._route))
+					}
 				}
 
 				"""

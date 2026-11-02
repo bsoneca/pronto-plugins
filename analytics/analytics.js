@@ -13,6 +13,35 @@ import { scriptURL } from "/omnishell/interpreter/script-url.js";
 
 const optedOut = navigator.globalPrivacyControl === true || navigator.doNotTrack === "1";
 let added = false;
+let last = null;
+
+// A pageview for the screen the reader is on, once for each address (its path alone: the query
+// and the hash may hold a token or an ad's parameters). The terminal moves between screens by the
+// Navigation API, which Umami's own watch of the History API does not see, so the pageviews are
+// sent from here (data-auto-pageview is off) when the script has loaded and on each navigation.
+const view = () => {
+	const url = location.pathname;
+	if (url === last || typeof globalThis.umami?.track !== "function") return;
+	const from = last;
+	last = url;
+	globalThis.umami.track((props) => ({ ...props, url, referrer: from === null ? props.referrer : location.origin + from }));
+};
+
+const follow = () => {
+	if (globalThis.navigation) {
+		navigation.addEventListener("navigatesuccess", view);
+		return;
+	}
+	for (const name of ["pushState", "replaceState"]) {
+		const original = history[name];
+		history[name] = function (...args) {
+			const result = original.apply(this, args);
+			queueMicrotask(view);
+			return result;
+		};
+	}
+	addEventListener("popstate", view);
+};
 
 export default function mount() {
 	if (added || optedOut || !config.website) return;
@@ -24,8 +53,13 @@ export default function mount() {
 	// Its reports go to the page's own origin, at the address Umami was configured to take them at,
 	// not to one derived from the tracker's path.
 	tag.dataset.hostUrl = location.origin;
+	tag.dataset.autoPageview = "false";
 	tag.dataset.doNotTrack = "true";
 	tag.dataset.excludeSearch = "true";
 	tag.dataset.excludeHash = "true";
+	tag.addEventListener("load", () => {
+		view();
+		follow();
+	});
 	document.head.append(tag);
 }

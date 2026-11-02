@@ -93,13 +93,18 @@ import (
 			[for inst, us in P.sqlUsers if P.adoptAll || adopted.sqlUsers[inst] != _|_ for u, c in us for part in ["password", if c.url != _|_ {"url"}] {"google_secret_manager_secret_version.\((#name & {in: "\(P.id)_\(inst)_\(u)_\(part)"}).out)"}],
 		])
 
-		// A secret this state keeps a version of is read at that version; any other at its latest.
+		// A secret this state keeps a version of is read at that version; any other at its latest. A SQL
+		// user's credentials are such a secret too: a new password or address is a new revision.
 		let readAt = {
 			for nm, sc in P.secrets {
 				(nm): *"latest" | string
 				if sc.file != _|_ || sc.text != _|_ || sc.random if P.adoptAll || adopted.secrets[nm] != _|_ {
 					(nm): "${google_secret_manager_secret_version.\((#name & {in: "\(P.id)_\(nm)"}).out).version}"
 				}
+			}
+			for inst, us in P.sqlUsers if P.adoptAll || adopted.sqlUsers[inst] != _|_ for u, c in us {
+				(c.password): "${google_secret_manager_secret_version.\((#name & {in: "\(P.id)_\(inst)_\(u)"}).out)_password.version}"
+				if c.url != _|_ {(c.url): "${google_secret_manager_secret_version.\((#name & {in: "\(P.id)_\(inst)_\(u)"}).out)_url.version}"}
 			}
 		}
 
@@ -323,6 +328,7 @@ import (
 			if svc.domain != _|_ {
 				tofu: resource: google_cloud_run_domain_mapping: (k): {
 					depends_on: ["google_cloud_run_v2_service.\(k)"]
+					project:  P.id
 					location: svc.location
 					name:     svc.domain
 					metadata: namespace: P.id

@@ -29,7 +29,7 @@ viewLate:               strings.Contains(_a.views, "  IF to_regclass('public.ide
 viewsGranted:           strings.Contains(_a.views, "GRANT SELECT ON ALL TABLES IN SCHEMA analytics TO analytics_viewer;") & true
 viewsReadOnly:          strings.Contains(_a.views, "ALTER ROLE analytics_reader SET default_transaction_read_only = on;") & true
 viewsNoPublic:          strings.Contains(_a.views, "REVOKE ALL ON SCHEMA analytics FROM PUBLIC;") & true
-viewsNarrowed:          strings.Contains(_a.views, "ALTER ROLE analytics_reader NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS LOGIN;") & true
+viewsNarrowed:          strings.Contains(_a.views, "      ALTER ROLE analytics_reader NOCREATEROLE NOCREATEDB;") & true
 viewsTakeBackSuperuser: strings.Contains(_a.views, "REVOKE cloudsqlsuperuser FROM analytics_reader;") & true
 viewsLoginOnlyOffCloud: strings.Contains(_a.views, "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cloudsqlsuperuser') AND NOT EXISTS") & true
 

@@ -474,3 +474,5 @@ alwaysRandomKey: _al.google_secret_manager_secret_version.example_project_123_ke
 // A secret has one source of value.
 twoSources: _ok & {secrets: x: {source: "s", accessors: {}, file: "a", text: "b"}} & matchN(0, [#Project])
 alwaysPlaceholder: _al.google_secret_manager_secret_version.example_project_123_client_id & {secret_data: "unset", lifecycle: ignore_changes: ["secret_data", "enabled"]}
+// A user's credentials are read at the version OpenTofu made, so a new password is a new revision.
+alwaysUserPinned: [for e in _al.google_cloud_run_v2_service.example_project_123_always.template.containers[0].env if e.name == "DSN" {e.value_source.secret_key_ref.version}] & ["$" + "{google_secret_manager_secret_version.example_project_123_db_1_app_url.version}"]
