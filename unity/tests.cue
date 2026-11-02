@@ -18,7 +18,7 @@ seeded: [for p, f in _t.files if f.seed {p}] & ["unity/screens/table.uss"]
 // and each hatch's kind are read from the program, so `cue vet` refuses an unknown one.
 inPackage:        strings.Contains(_decl, "\npackage myapp\n") & true
 screensOfProgram: strings.Contains(_decl, "routes: {for s, _ in unity.screens {(s): code.surface.screens[s].route}}") & true
-hatchesOfProgram: strings.Contains(_decl, "code.surface.hatches[h].kind & \"host-dom\"") & true
+hatchesOfProgram: strings.Contains(_decl, "code.capabilities.hatches[h].kind & \"host-dom\"") & true
 
 // The defaults: a screen's look beside its name, no hatch, no scenario, its unit cases run, no stack.
 defaults: _manifest & {

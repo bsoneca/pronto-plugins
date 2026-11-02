@@ -72,7 +72,7 @@ import (
 				// Each screen and hatch it names is the program's own: one it lacks fails `cue vet` (lint).
 				unityOfProgram: {
 					routes: {for s, _ in unity.screens {(s): code.surface.screens[s].route}}
-					hatches: [for h in unity.hatches {code.surface.hatches[h].kind & "host-dom"}]
+					hatches: [for h in unity.hatches {code.capabilities.hatches[h].kind & "host-dom"}]
 				}
 
 				"""
