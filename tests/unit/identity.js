@@ -249,6 +249,9 @@ export async function pageSends() {
     defines: js.startsWith('async function sendCode('),
     sendsThrough: /sendCode\(\(\) => \{ freshVerifier\(\); return auth\.signInWithPhoneNumber\(firebase, e164, verifier\); \}, !!config\.emulator,/.test(js),
     sendsOtherwise: (js.match(/signInWithPhoneNumber\(/g) ?? []).length,
+    // The SDK's load is started once and a send waits for it, before the gate is asked.
+    startedOnce: (js.match(/(?<!function )\bstart\(\)/g) ?? []).length === 1 && /const started = start\(\);/.test(js),
+    sendWaits: /async function ask\(\) \{[^}]*try \{ await started; \} catch \{ return t\.down; \}[\s\S]*?fetch\(config\.admit/.test(js),
   };
 }
 

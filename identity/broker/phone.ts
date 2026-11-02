@@ -428,6 +428,9 @@ function countdown(seconds) {
 
 // The gate's word on a code for this number ('' to go), then Firebase sends it.
 async function ask() {
+  // The SDK is loaded once the page starts; a tap before it has waits for it rather than failing on
+  // an SDK not there yet (bsoneca/ume's phone-signin under load: "reading 'RecaptchaVerifier'" of undefined).
+  try { await started; } catch { return t.down; }
   let said;
   try {
     const res = await fetch(config.admit, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone: e164 }), credentials: 'omit' });
@@ -519,8 +522,9 @@ $('#phone-check').addEventListener('submit', async (ev) => {
   confirm.disabled = false;
 });
 
+const started = start();
 try {
-  await start();
+  await started;
 } catch (e) {
   // The SDK did not load (a network that blocks gstatic, an outage): said in words, the way back kept.
   console.warn('phone: Firebase did not start: ' + (e && e.message));
