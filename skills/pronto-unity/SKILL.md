@@ -26,14 +26,14 @@ What the declaration says:
   `hatches/`), never a loose file in the app; a hatch not listed is never mounted.
 - `scenarios`: scenario files (shared schema, as solitaire's `tests/scenarios/schema.cue`) the host
   runs: the app's own `tests/scenarios/…` or ones written for Unity, `unity/scenarios/…`.
-- `cases` (default true): the app's `tests/unit/*.cue` run on the host. `cluster` (default false):
+- `suites` (default `all`): which of the app's unit suites (`tests/unit/suites.cue`) run on the host, through its `tests/unit/registry.js`; `server` is a map of the suites left to the server with the reason (SQL on PGlite or a database): every suite the app has is in one or the other, and a server suite is counted, never failed. (`cases=true|false`, the older flag, is all or none.) `cluster` (default false):
   its scenarios need the running stack. `stage`: more of the app a hatch reads.
 
 ## Adding it to an app
 
 From a pronto app whose four verbs are green:
 
-1. `${CLAUDE_PLUGIN_ROOT}/bin/pronto-unity . screens=<a,b> [shared=…] [hatches=…] [scenarios=…] [cases=false] [cluster=true] [stage=…]`.
+1. `${CLAUDE_PLUGIN_ROOT}/bin/pronto-unity . screens=<a,b> [shared=…] [hatches=…] [scenarios=…] [suites=<a,b>] [server=<suite>=<why>;…] [cluster=true] [stage=…]`.
    An argument not given keeps what `unity/unity.json` declares; `hatches=` clears one.
 2. Write the look in the seeded `.uss` files.
 3. `./saytw generate`, `lint`, `test`, `integrate@local`: none changes for the opt-in, and `lint`

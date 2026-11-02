@@ -4,7 +4,7 @@
 //
 // The declaration says, as data: which of the program's screens get a Unity surface and the look
 // (USS) of each; which of its hostDom hatches the host draws, by name (their C# is the host's, never
-// the app's); which scenarios the host runs; and whether its unit cases run there and its scenarios
+// the app's); which scenarios the host runs; and which of its unit suites run there (the rest are the server's, with the reason) and whether its scenarios
 // need its stack. The host reads only what it lists, from unity/unity.json, the same declaration as
 // JSON, written beside it: it never finds a file by its name.
 package unity
@@ -15,7 +15,8 @@ import (
 )
 
 // A path in the app, from its root, never out of it.
-#Path: string & =~"^[A-Za-z0-9_][A-Za-z0-9_./-]*$" & !~"(^|/)\\.\\.(/|$)"
+// A leading dot is a dot-folder of the app (.pronto/), not a way out of it.
+#Path: string & =~"^[A-Za-z0-9_.][A-Za-z0-9_./-]*$" & !~"(^|/)\\.\\.(/|$)" & !~"^\\.$"
 #Name: string & =~"^[a-z][a-z0-9_-]*$"
 
 // What an app declares.
@@ -32,8 +33,16 @@ import (
 	// The scenarios the host runs, each a CUE file of the shared scenario schema: the app's own
 	// (tests/scenarios/…) or ones written for Unity (unity/scenarios/…).
 	scenarios: [...#Path & =~"\\.cue$"]
-	// Whether the app's unit cases (tests/unit/*.cue) run on the host.
-	cases: bool
+	// The app's unit suites (tests/unit/suites.cue) and where each runs. A suite is not all-or-nothing: the ones that
+	// call the app's modules or a pronto machine run on the host, through tests/unit/registry.js; one that runs SQL on a
+	// database (PGlite, Postgres) or reaches a server is left to it, named here with the reason, so the host counts it
+	// as server-only and never as a failure. Every suite the app has is in one list or the other.
+	suites: {
+		// The suites run on the host: "all" of them, or the ones named.
+		host: "all" | [...#Name]
+		// The suites left to the server, each with why.
+		server: {[#Name]: string & !=""}
+	}
 	// Whether its scenarios need its running stack (a door).
 	cluster: bool
 	// More of the app a hatch reads, beyond shell/, messages/ and tests/unit/.
@@ -48,7 +57,7 @@ import (
 		screens: {[S=_]: {uss: *"unity/screens/\(S).uss" | _, shared: *[] | _}}
 		hatches: *[] | _
 		scenarios: *[] | _
-		cases:   *true | _
+		suites: {host: *"all" | _, server: *{} | _}
 		cluster: *false | _
 		stage: *[] | _
 	}
