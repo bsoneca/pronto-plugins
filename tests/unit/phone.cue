@@ -95,6 +95,9 @@ cases: {
 		{call: "identity.sendTries", args: [false, 0], expect: {sent: true, tries: 1, lines: []}},
 	]}
 	"the phone page sends through sendCode, its source served with the page": {suite: "identity", steps: [
-		{call: "identity.pageSends", expect: {defines: true, sendsThrough: true, sendsOtherwise: 1}, why: "the retry runs in the browser; a send past it would not be retried or logged"},
+		{call: "identity.pageSends", holds: {defines: true, sendsThrough: true, sendsOtherwise: 1}, why: "the retry runs in the browser; a send past it would not be retried or logged"},
+	]}
+	"a tap before Firebase's SDK has loaded waits for it, and is never sent to an SDK not there": {suite: "identity", steps: [
+		{call: "identity.pageSends", holds: {startedOnce: true, sendWaits: true}, why: "bsoneca/ume's phone-signin under load: 'Cannot read properties of undefined (reading RecaptchaVerifier)', twice, the retry included (2026-11-02)"},
 	]}
 }
