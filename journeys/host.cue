@@ -102,8 +102,10 @@ _dashboardCompose: """
 #GestureEvents: ["click", "dblclick", "change", "submit", "keydown", "drop"]
 
 #Tools: {
-	// promtool lints the rules the program's `journeys` check names.
+	// promtool lints the rules the program's `journeys` check names; Vector
+	// runs the collector on a host launch and its unit tests.
 	"github:prometheus/prometheus": "v3.5.0"
+	"aqua:vectordotdev/vector":     #JourneysVectorVersion
 }
 
 
@@ -229,8 +231,26 @@ _dashboardCompose: """
 					note: "pronto-journeys' collector: Vector assembling the terminal's telemetry into journey runs"
 				}
 
+				// The app the alerts and the dashboard are named for.
+				journeys: app: "\(H.package)"
+
+				// The door proxies to it on a host launch too: pronto runs the
+				// program's host peers (code.meta.hostPeers, pronto 0.24.1-gcp.26)
+				// beside its own renderer. With no collector there, every page's
+				// telemetry would answer 502.
+				code: meta: hostPeers: "journeys-collector": 8686
 				cluster: surface: targets: "journeys-collector": {
-					srcs: globs: ["observability/journeys.collector.yaml"]
+					srcs: globs: ["observability/journeys.collector.yaml", "journeys/journeys.nu"]
+					expose: {
+						http: {port: 8686, env: "JOURNEYS_HTTP_PORT"}
+						metrics: {port: 9598, env: "JOURNEYS_METRICS_PORT"}
+					}
+					"process-compose": activate: "mise x --"
+					entrypoint: {
+						do:    "exec nu -c 'use journeys/journeys.nu; journeys collect'"
+						shell: "sh"
+						dockerfile: {do: "vector --config /etc/vector/vector.yaml", shell: "exec"}
+					}
 					dockerfile: {
 						from: name: "\(#JourneysVector)"
 						copy: [{srcs: ["observability/journeys.collector.yaml"], dst: "/etc/vector/vector.yaml"}]

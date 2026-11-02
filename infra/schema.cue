@@ -63,6 +63,15 @@ import "list"
 	// A budget there already is imported by its id.
 	for nm, _ in budgets if !list.Contains(*fresh["budgets"] | [], nm) {budgets: (nm): id!: _}
 	hostingSites: [Site=string]: #HostingSite
+	// Cloud Monitoring: where an alert goes, by a name of your own, and PromQL alerting policies
+	// a plugin generates into a file (pronto-journeys' observability/journeys.alerts.json), each
+	// sent to the channels named. Both are made here, never imported: a policy is the file's,
+	// and a change to the file is a change of the policies at the next apply.
+	notificationChannels: [Name=string]: #NotificationChannel
+	alertPolicies: [Name=string]:        #AlertPolicies
+	for nm, a in alertPolicies for c in a.channels if notificationChannels[c] == _|_ {
+		"alert policies \(nm) name no channel \(c)": _|_
+	}
 
 	// What OpenTofu applies: the whole project, or, while the rest is still a draft the live
 	// project has not been checked against, these resources by kind and name (a role for iam;
@@ -91,7 +100,7 @@ import "list"
 #Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases" | "apiKeys" | "budgets" | "hostingSites"
 
 // identityPlatform is adopted by naming "config": a project has one.
-#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites"
+#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies"
 
 #Found: "serviceAccounts" | "members"
 
@@ -175,8 +184,31 @@ import "list"
 	secretEnv: [Var=string]: string
 	secretFiles: [Dir=string]: {secret: string, path: string}
 	sqlInstances: [...string]
+	// Containers beside the one serving the port, each by its name: a proxy the server reaches on
+	// localhost, say. With any, every container is named, the serving one by the service's name.
+	sidecars: [Name=string]: {
+		image: string
+		args: [...string]
+		cpu:    *"500m" | string
+		memory: *"256Mi" | string
+		env: [string]: string
+	}
 	// Who may call it: roles/run.invoker, authoritative.
 	invokers: #Members
+}
+
+// A Cloud Monitoring notification channel: mail to one address.
+#NotificationChannel: {
+	email!: =~"^[^@\\s]+@[^@\\s]+$"
+}
+
+// PromQL alerting policies, one per entry of a JSON file of the operator's repository, beside the
+// state folder (as #Secret.file): a list of {name, displayName, expr, duration, severity
+// ("page" is CRITICAL, any other WARNING), documentation, labels}, which is what
+// pronto-journeys writes. Each goes to every channel named.
+#AlertPolicies: {
+	file!: string & =~"\\.json$"
+	channels: [...string]
 }
 
 #ServiceAccount: {

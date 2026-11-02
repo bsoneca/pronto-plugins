@@ -26,6 +26,7 @@ const plans = [
 	[./infra _fire.tofu]
 	[./infra _found.tofu]
 	[./infra _foundGrant.tofu]
+	[./infra _watch.tofu]
 	[./examples/infra plan.tofu]
 ]
 
@@ -40,6 +41,7 @@ def main [] {
 		let dir = $work | path join $name
 		mkdir ($dir | path join config) ($dir | path join tofu)
 		"x" | save ($dir | path join config token.txt)
+		[{name: "a", displayName: "A", expr: "vector(1) > 0", duration: "120s", severity: "page", documentation: "a", labels: {app: "a"}}] | to json | save ($dir | path join config alerts.json)
 		let exported = ^mise ...$cue export $p.0 -e $p.1 --out json | complete
 		check $"($p.0) ($p.1) exports whole" ($exported.exit_code == 0) --said $exported.stderr
 		$exported.stdout | save ($dir | path join tofu main.tf.json)

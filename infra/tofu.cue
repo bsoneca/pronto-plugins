@@ -249,7 +249,8 @@ import (
 					service_account: svc.serviceAccount
 					timeout:         svc.timeout
 					scaling: max_instance_count: svc.maxInstances
-					containers: [{
+					containers: list.Concat([[{
+						if len(svc.sidecars) > 0 {name: nm}
 						image: svc.image
 						args:  svc.args
 						ports: {container_port: svc.port, name: "http1"}
@@ -263,7 +264,14 @@ import (
 							if len(svc.sqlInstances) > 0 {[{name: "cloudsql", mount_path: "/cloudsql"}]},
 							if len(svc.sqlInstances) == 0 {[]},
 						])
-					}]
+					}], [for sn in list.SortStrings([for sn, _ in svc.sidecars {sn}]) {
+						let sc = svc.sidecars[sn]
+						name:  sn
+						image: sc.image
+						args:  sc.args
+						resources: {limits: {cpu: sc.cpu, memory: sc.memory}, cpu_idle: true}
+						env: [for n in list.SortStrings([for n, _ in sc.env {n}]) {name: n, value: sc.env[n]}]
+					}]])
 					volumes: list.Concat([
 						[for d in list.SortStrings([for d, _ in svc.secretFiles {d}]) {
 							let f = svc.secretFiles[d]
@@ -357,6 +365,44 @@ import (
 			let k = (#name & {in: "\(P.id)_\(site)"}).out
 			tofu: resource: google_firebase_hosting_site: (k): {provider: "google-beta.\(p)", depends_on: deps, project: P.id, site_id: site, lifecycle: prevent_destroy: true}
 			if fresh.hostingSites[site] == _|_ {_imports: "google_firebase_hosting_site.\(k)": {id: "projects/\(P.id)/sites/\(site)", project: P.id}}
+		}
+
+		for nm, c in P.notificationChannels if P.adoptAll || list.Contains(*P.adopt["notificationChannels"] | [], nm) {
+			let k = (#name & {in: "\(P.id)_\(nm)"}).out
+			tofu: resource: google_monitoring_notification_channel: (k): {
+				depends_on:   deps
+				project:      P.id
+				display_name: nm
+				type:         "email"
+				labels: email_address: c.email
+			}
+		}
+
+		// One policy per entry of the file: OpenTofu reads it at plan time, so the policies follow
+		// the file with no export of this state's.
+		for nm, a in P.alertPolicies if P.adoptAll || list.Contains(*P.adopt["alertPolicies"] | [], nm) {
+			let k = (#name & {in: "\(P.id)_\(nm)"}).out
+			tofu: resource: google_monitoring_alert_policy: (k): {
+				depends_on: list.Concat([deps, [for c in a.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
+				for_each:     "${{for p in jsondecode(file(\"${path.module}/../\(a.file)\")) : p.name => p}}"
+				project:      P.id
+				display_name: "${each.value.displayName}"
+				combiner:     "OR"
+				severity:     "${each.value.severity == \"page\" ? \"CRITICAL\" : \"WARNING\"}"
+				user_labels:  "${each.value.labels}"
+				notification_channels: [for c in a.channels {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
+				documentation: {content: "${each.value.documentation}", mime_type: "text/markdown"}
+				conditions: [{
+					display_name: "${each.value.displayName}"
+					condition_prometheus_query_language: {
+						query:               "${each.value.expr}"
+						duration:            "${each.value.duration}"
+						evaluation_interval: "60s"
+					}
+				}]
+				// A burn that stops resolves the incident; one that never fires again closes in a day.
+				alert_strategy: auto_close: "86400s"
+			}
 		}
 
 		for inst, dbs in P.databases if P.adoptAll || adopted.databases[inst] != _|_ {

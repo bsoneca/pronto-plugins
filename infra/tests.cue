@@ -1,6 +1,7 @@
 package infra
 
 import (
+	"list"
 	"strings"
 )
 
@@ -387,3 +388,34 @@ foundGrantOnly: [for i in _foundGrant.tofu.import {i.id}] & [
 	"example-project-456 roles/viewer user:a@example.com",
 ]
 identityPlatformAdoptName: _ok & {adopt: identityPlatform: ["cfg"]} & matchN(0, [#Project])
+
+// Monitoring: an email channel, the policies of a generated file sent to it, and a service with a
+// container beside the one that serves (a dashboard and the proxy it queries).
+_watch: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adoptAll: true
+		apis: "monitoring.googleapis.com": true
+		notificationChannels: oncall: email: "oncall@example.com"
+		alertPolicies: "my-app-journeys": {file: "config/alerts.json", channels: ["oncall"]}
+		runServices: dashboards: _svc.state.projects["example-project-123"].runServices["my-app"] & {
+			secretEnv: {}
+			sidecars: proxy: {image: "registry.example.com/proxy:1", args: ["--listen=:9090"]}
+		}
+	}
+}
+_w: _watch.tofu.resource
+channelEmail: _w.google_monitoring_notification_channel.example_project_123_oncall & {type: "email", labels: email_address: "oncall@example.com"}
+_policies:        _w.google_monitoring_alert_policy.example_project_123_my_app_journeys
+policiesFromFile: _policies.for_each & "$"+"{{for p in jsondecode(file(\"$"+"{path.module}/../config/alerts.json\")) : p.name => p}}"
+policiesPromQL:   _policies.conditions[0].condition_prometheus_query_language.query & "$"+"{each.value.expr}"
+policiesToChannel: _policies.notification_channels & ["$" + "{google_monitoring_notification_channel.example_project_123_oncall.id}"]
+policiesAfterChannel: list.Contains(_policies.depends_on, "google_monitoring_notification_channel.example_project_123_oncall") & true
+policiesNeverImported: [for i in _watch.tofu.import if strings.HasPrefix(i.to, "google_monitoring") {i}] & []
+_containers: _w.google_cloud_run_v2_service.example_project_123_dashboards.template.containers
+sidecarsNamed: [for c in _containers {c.name}] & ["dashboards", "proxy"]
+sidecarNoPort: [for c in _containers if c.ports != _|_ {c.name}] & ["dashboards"]
+loneContainerUnnamed: [for c in _s.google_cloud_run_v2_service.example_project_123_my_app.template.containers if c.name != _|_ {c}] & []
+// A policy naming a channel the project lacks is refused.
+unknownChannel: _ok & {alertPolicies: x: {file: "a.json", channels: ["nobody"]}} & matchN(0, [#Project])

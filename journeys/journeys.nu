@@ -81,6 +81,20 @@ export def write [] {
 	}
 }
 
+# The collector on a host, as process-compose runs it (journeys_hatch.cue): its
+# config with the ports the launch gave it, which Vector will not read from the
+# environment. The .yaml name stays, since Vector reads its format from it.
+export def collect [] {
+	let http = $env.JOURNEYS_HTTP_PORT? | default "8686"
+	let metrics = $env.JOURNEYS_METRICS_PORT? | default "9598"
+	let config = mktemp --suffix .yaml
+	open --raw observability/journeys.collector.yaml
+		| str replace '0.0.0.0:8686' $"127.0.0.1:($http)"
+		| str replace '0.0.0.0:9598' $"127.0.0.1:($metrics)"
+		| save --force --raw $config
+	exec vector --quiet --config $config
+}
+
 # The collector and the local dashboard beside it, on the app's network: what
 # `sayt launch@journeys` runs after `sayt launch`. Prints where to look.
 export def up [] {
