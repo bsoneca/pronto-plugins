@@ -15,7 +15,7 @@ Deno.test("an app gets the module, at ads/ads.js or where it names, regenerated"
   eq(await Deno.readTextFile(`${app}/ads/ads.js`), module, "the host's file regenerated");
   await install(app, "web/src/ads.js");
   eq(await Deno.readTextFile(`${app}/web/src/ads.js`), module, "where the app names");
-  for (const f of ["pronto/ads.cue", "ads/ads.nu"]) await Deno.stat(`${app}/${f}`);
+  for (const f of ["pronto/ads.cue", "ads/ads.nu", "pronto/exports.nu"]) await Deno.stat(`${app}/${f}`);
   const spec = await Deno.readTextFile(`${app}/ads_spec.cue`);
   eq(spec.split("\n")[0], "package shop", "the spec in the program's package");
   await Deno.writeTextFile(`${app}/ads_spec.cue`, spec + "// the app's own\n");

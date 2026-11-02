@@ -26,4 +26,6 @@ const template = async (name: string) => (await Deno.readTextFile(`${here}app/${
 await write(at, await template("ads.js"));
 await write("pronto/ads.cue", await template("pronto_ads.cue"));
 await write("ads/ads.nu", await template("ads.nu"));
+// One copy of the program's exports for all the plugins that read them (common/exports.nu).
+await write("pronto/exports.nu", await Deno.readTextFile(`${here}../common/exports.nu`));
 await write("ads_spec.cue", await template("ads_spec.cue"), true);

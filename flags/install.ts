@@ -25,4 +25,6 @@ const template = async (name: string) => (await Deno.readTextFile(`${here}app/${
 await write("flags_plugin.cue", await template("flags_plugin.cue"));
 await write("pronto/flags.cue", await template("pronto_flags.cue"));
 await write("flags/flags.nu", await template("flags.nu"));
+// One copy of the program's exports for all the plugins that read them (common/exports.nu).
+await write("pronto/exports.nu", await Deno.readTextFile(`${here}../common/exports.nu`));
 await write("flags_spec.cue", await template("flags_spec.cue"), true);

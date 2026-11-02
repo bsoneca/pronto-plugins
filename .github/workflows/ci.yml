@@ -68,6 +68,10 @@ jobs:
         run: sayt --script tools.nu nu perf/test.nu
       - name: Test analytics
         run: sayt --script tools.nu nu analytics/test.nu
+      - name: Test the shared export (pronto/exports.nu)
+        run: sayt --script tools.nu nu common/test.nu
+      - name: Vet the shared package
+        run: sayt --script tools.nu cue vet -c ./common
       # Deno, the release binary checked against a pinned checksum rather than fetched by an action.
       - name: Install Deno
         env:

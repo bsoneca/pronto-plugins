@@ -20,6 +20,20 @@ beyond the browser, and beside them, on unmodified pronto. Why and how they are 
 - [perf](perf/README.md): frame, interaction and paint timings on readers' devices.
 - [unity](unity/README.md): an app's opt-in to pronto-csharp's Unity host.
 
+## One evaluation for the plugins' generate rules
+
+`cue export .` costs seconds whatever it exports, because it evaluates the whole program. The
+plugins whose generate rule reads a value of the program (journeys, perf, flags, ads, and
+analytics' door route) say `exports of <name>` through `pronto/exports.nu`, which each of their
+installers writes from one source, [`common/exports.nu`](common/exports.nu). The first such rule
+evaluates every export the app's installed plugins name in one `cue export` and keeps the result in
+sayt's per-run directory (`SAYT_LOG_DIR`), under a key of the files the evaluation reads; the others
+read their slice. A rule that finds the tree changed since (journeys' derive writes a `.cue` file
+before its own export), or no run directory, or a batch that does not evaluate, runs its own export as
+it did before. An app takes the change by running each installer again (`bin/pronto-journeys <app>`,
+`-perf`, `-flags`, `-ads`, `-analytics`) and committing `pronto/*.cue` and `pronto/exports.nu`.
+`nu common/test.nu` counts the evaluations.
+
 ## pronto-intents
 
 Say what you want for an app, and it is done: "release my-app", "connect stripe to

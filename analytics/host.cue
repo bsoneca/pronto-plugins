@@ -15,6 +15,8 @@ package analytics
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/bsoneca/pronto-plugins/common"
 )
 
 _schema:      _ @embed(file="schema.cue", type=text)
@@ -56,7 +58,7 @@ _configPath: "shell/hatches/analytics/config.js"
 	}
 	_route: {
 		priority: 3
-		cmds: [{do: "use tools.nu [run-mise]; \(H._step); let u = (run-mise exec -- cue export . -e analytics.umami --out json | from json); analytics route $u.script $u.collect $u.upstream"}]
+		cmds: [{do: "\(H._step); use ./pronto/exports.nu; let u = (exports of umami | from json); analytics route $u.script $u.collect $u.upstream"}]
 	}
 
 	files: {
@@ -100,6 +102,7 @@ _configPath: "shell/hatches/analytics/config.js"
 				"""
 		}
 		"analytics/analytics.nu": {seed: false, text: _analyticsNu}
+		"pronto/exports.nu":      {seed: false, text: common.exportsNu}
 		"analytics/standin.ts": {seed: false, text: _standinTs}
 		// The views and role as a raw migration (list it in code: state: rawMigrations), empty until
 		// the first generate writes the app's.

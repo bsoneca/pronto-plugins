@@ -16,6 +16,8 @@ package journeys
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/bsoneca/pronto-plugins/common"
 )
 
 _schema:     _ @embed(file="schema.cue", type=text)
@@ -127,7 +129,7 @@ _dashboardCompose: """
 	// `journeys` is exported last, so it validates against this run's gestures.
 	_generate: {
 		priority: 2
-		cmds: [{do: "use tools.nu [run-mise]; \(H._step); journeys derive \(H.package) \(H._events); journeys route \(H.endpoint); run-mise exec -- cue export . -e journeys.out --out json | journeys write"}]
+		cmds: [{do: "\(H._step); journeys derive \(H.package) \(H._events); journeys route \(H.endpoint); use ./pronto/exports.nu; exports of journeys | journeys write"}]
 	}
 
 	// sayt's platform rule: the collector, and beside it a local dashboard to
@@ -192,6 +194,7 @@ _dashboardCompose: """
 				"""
 		}
 		"journeys/journeys.nu": {seed: false, text: _journeysNu}
+		"pronto/exports.nu":    {seed: false, text: common.exportsNu}
 		// The local dashboard `journeys up` starts on the app's network:
 		// VictoriaMetrics scraping the collector, vmalert burning the budget
 		// with the generated rules, Grafana drawing the generated dashboard.

@@ -15,6 +15,8 @@ package perf
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/bsoneca/pronto-plugins/common"
 )
 
 _schema: _ @embed(file="schema.cue", type=text)
@@ -46,7 +48,7 @@ _configPath:   "shell/hatches/perf/config.js"
 	// into observability/ and the reporter's settings.
 	_generate: {
 		priority: 2
-		cmds: [{do: "use tools.nu [run-mise]; \(H._step); perf route \(H.endpoint); run-mise exec -- cue export . -e perf.out --out json | perf write"}]
+		cmds: [{do: "\(H._step); perf route \(H.endpoint); use ./pronto/exports.nu; exports of perf | perf write"}]
 	}
 
 	files: {
@@ -86,7 +88,8 @@ _configPath:   "shell/hatches/perf/config.js"
 
 				"""
 		}
-		"perf/perf.nu": {seed: false, text: _perfNu}
+		"perf/perf.nu":     {seed: false, text: _perfNu}
+		"pronto/exports.nu": {seed: false, text: common.exportsNu}
 		(_reporterPath): {seed: false, text: strings.Replace(_perfJs, "__ENDPOINT__", H.endpoint, 1)}
 		// Until the first generate writes the app's, the defaults.
 		(_configPath): {
