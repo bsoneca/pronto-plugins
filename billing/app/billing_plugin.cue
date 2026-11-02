@@ -2,7 +2,10 @@
 package __PACKAGE__
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,15 +31,15 @@ import (
 	// of here is no row either, once the service reads the set again: with
 	// pronto-flags (_billingFlags), within a minute of `pronto-flags push`; else
 	// once the release that carries it starts.
-	grants:[=~"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"]: close({
+	grants: [=~"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"]: close({
 		[or([for p, _ in plans {p}])]: time.Format("2006-01-02")
 	})
 }
 billing: #Billing
 // Inside the billing target, `billing` is the target: the spec is _billing there.
-_billing:         billing
+_billing: billing
 _billingDocument: json.Marshal({owner: _billing.owner, plans: _billing.plans})
-_billingGrants:   (#billingGrants & {grants: _billing.grants}).out
+_billingGrants: (#billingGrants & {grants: _billing.grants}).out
 
 // Where the service reads the grants live, when the app has pronto-flags: the
 // origin of a flagd that serves OFREP, or "origin" for the app's own door, which
@@ -58,17 +61,17 @@ if _billingFlags != "" {
 // the day's last second.
 #billingGrants: {
 	grants: _
-	out:    json.Marshal([for a, g in grants for p, d in g {account: a, plan: p, through: "\(d)T23:59:59Z"}])
+	out: json.Marshal([for a, g in grants for p, d in g {account: a, plan: p, through: "\(d)T23:59:59Z"}])
 }
 _billingGrantsChecks: {
 	none: (#billingGrants & {grants: {}}).out & "[]"
-	two:  (#billingGrants & {grants: "00000000-0000-4000-8000-00000000000a": {analysis: "2027-01-31", coach: "2026-12-24"}}).out &
+	two: (#billingGrants & {grants: "00000000-0000-4000-8000-00000000000a": {analysis: "2027-01-31", coach: "2026-12-24"}}).out &
 		"[{\"account\":\"00000000-0000-4000-8000-00000000000a\",\"plan\":\"analysis\",\"through\":\"2027-01-31T23:59:59Z\"},{\"account\":\"00000000-0000-4000-8000-00000000000a\",\"plan\":\"coach\",\"through\":\"2026-12-24T23:59:59Z\"}]"
 	// Refused: a plan the app does not sell, a day that is no day, an account that is no uuid.
 	_spec: {owner: "o" * 43, broker: "http://localhost:28463", plans: analysis: {name: "A", prices: usd: 499}}
-	unsold:   (#Billing & _spec & {grants: "00000000-0000-4000-8000-00000000000a": coach: "2027-01-31"}) == _|_ & true
-	noDay:    (#Billing & _spec & {grants: "00000000-0000-4000-8000-00000000000a": analysis: "2027-02-30"}) == _|_ & true
-	noUuid:   (#Billing & _spec & {grants: "ana": analysis: "2027-01-31"}) == _|_ & true
+	unsold: (#Billing & _spec & {grants: "00000000-0000-4000-8000-00000000000a": coach: "2027-01-31"}) == _|_ & true
+	noDay: (#Billing & _spec & {grants: "00000000-0000-4000-8000-00000000000a": analysis: "2027-02-30"}) == _|_ & true
+	noUuid: (#Billing & _spec & {grants: "ana": analysis: "2027-01-31"}) == _|_ & true
 	accepted: (#Billing & _spec & {grants: "00000000-0000-4000-8000-00000000000a": analysis: "2027-01-31"}) != _|_ & true
 }
 
@@ -191,18 +194,28 @@ code: capabilities: hatches: billing: {
 // (code.meta.hostPeers, pronto 0.24.1-gcp.26) beside its own renderer.
 code: meta: hostPeers: billing: 8688
 
-_billingBrokerInternal: *_billing.broker | string
+// The broker on this machine listens on a port of the app's own, hashed from its package as
+// bayt hashes a launch's other ports (and pronto-identity its broker's), so two apps' launches
+// never share it. billing_spec.cue names it as "http://localhost:28463", the address every
+// spec was seeded with, or by its own address.
+_billingLocalPort:   10000 + mod(strconv.ParseInt(strings.SliceRunes(hex.Encode(sha256.Sum256("pronto-billing/__PACKAGE__")), 0, 8), 16, 64), 22768)
+_billingLocalBroker: "http://localhost:\(_billingLocalPort)"
+_billingLocal:       _billing.broker == "http://localhost:28463" || _billing.broker == _billingLocalBroker
+_billingBroker: [if _billingLocal {_billingLocalBroker}, _billing.broker][0]
+_billingBrokerInternal: *_billingBroker | string
+// The app's origin, as the renderer finds it: ORIGIN where a launch sets it, else the door as a
+// person reaches it, the door's port the host projection gives BILLING_DOOR (caddy:8443).
+_billingOrigin: "export ORIGIN=\"${ORIGIN:-https://localhost:${BILLING_DOOR##*:}}\"; "
 if _billing.brokerInternal != _|_ {_billingBrokerInternal: _billing.brokerInternal}
-_billingLocal: _billing.broker == "http://localhost:28463"
 
 cluster: surface: targets: billing: {
 	srcs: globs: ["billing/*.ts", "billing/broker/*.ts"]
 	expose: http: {port: 8688, env: "BILLING_PORT"}
 	"process-compose": activate: "mise x --"
 	entrypoint: {
-		do:    "exec deno run --no-config --allow-net --allow-env billing/service.ts"
+		do:    "\(_billingOrigin)exec deno run --no-config --allow-net --allow-env billing/service.ts"
 		shell: "sh"
-		dockerfile: {do: "deno run --no-config --allow-net --allow-env /app/billing/service.ts", shell: "exec"}
+		dockerfile: {do: "\(_billingOrigin)exec deno run --no-config --allow-net --allow-env /app/billing/service.ts", shell: "sh"}
 		env: compose.environment
 		after: {crud: "healthy", migrate: "completed"}
 		if _billingLocal {after: "billing-broker": "healthy"}
@@ -214,8 +227,8 @@ cluster: surface: targets: billing: {
 	compose: {
 		restart: "on-failure"
 		environment: {
-			ORIGIN:                  "${ORIGIN:-https://localhost:${CADDY_TLS_HOST_PORT:-28102}}"
-			BILLING_BROKER:          _billing.broker
+			BILLING_DOOR:            "caddy:8443"
+			BILLING_BROKER:          _billingBroker
 			BILLING_BROKER_INTERNAL: _billingBrokerInternal
 			BILLING_DOCUMENT:        _billingDocument
 			BILLING_GRANTS:          _billingGrants
@@ -233,14 +246,14 @@ if _billingLocal {
 		cmd: builtin: null
 		activate: ""
 		srcs: globs: ["billing/*.ts", "billing/broker/*.ts"]
-		healthcheck: url: "http://127.0.0.1:28463/health"
-		expose: http: port: 28463
+		healthcheck: url: "http://127.0.0.1:\(_billingLocalPort)/health"
+		expose: http: port: _billingLocalPort
 		"process-compose": activate: "mise x --"
 		entrypoint: {
 			// It pushes to the door, whose certificate is the developer's own.
-			do:    "exec deno run --no-config --allow-net --allow-env --unsafely-ignore-certificate-errors=localhost billing/broker/main.ts"
+			do:    "\(_billingOrigin)BILLING_FAKE_TENANTS=\"$ORIGIN\" exec deno run --no-config --allow-net --allow-env --unsafely-ignore-certificate-errors=localhost billing/broker/main.ts"
 			shell: "sh"
-			dockerfile: {do: "deno run --no-config --allow-net --allow-env --unsafely-ignore-certificate-errors=localhost /app/billing/broker/main.ts", shell: "exec"}
+			dockerfile: {do: "\(_billingOrigin)BILLING_FAKE_TENANTS=\"$ORIGIN\" exec deno run --no-config --allow-net --allow-env --unsafely-ignore-certificate-errors=localhost /app/billing/broker/main.ts", shell: "sh"}
 			env: compose.environment
 		}
 		dockerfile: {
@@ -251,12 +264,12 @@ if _billingLocal {
 			]
 		}
 		compose: {
-			ports: ["28463:28463"]
+			ports: ["\(_billingLocalPort):\(_billingLocalPort)"]
 			environment: {
-				BROKER_ISSUER:        "http://localhost:28463"
-				BROKER_SECRET:        "pronto-billing-local-launch-secret-000000"
-				BILLING_FAKE_TENANTS: "${ORIGIN:-https://localhost:${CADDY_TLS_HOST_PORT:-28102}}"
-				PORT:                 "28463"
+				BROKER_ISSUER: _billingLocalBroker
+				BROKER_SECRET: "pronto-billing-local-launch-secret-000000"
+				BILLING_DOOR:  "caddy:8443"
+				PORT:          "\(_billingLocalPort)"
 			}
 		}
 	}
