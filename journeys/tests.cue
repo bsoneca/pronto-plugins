@@ -141,7 +141,8 @@ collectShipped: strings.Contains(_h.files["journeys/journeys.nu"].text, "export 
 collectorTestsNative: _j.checks["journeys-collector"] & {verb: "lint", cmds: ["vector test observability/journeys.collector.yaml observability/journeys.collector.test.yaml"]}
 // Cloud Monitoring takes no `for` past 25 hours of lookback: the slow burn and
 // a long quiet fire on their first holding evaluation.
-policySlowNoFor: _policy["shop-checkout-availabilityburnslow"].duration & "0s"
+policySlowNoFor: _policy["shop-checkout-availabilityburnslow"] & {duration: "0s", interval: "300s"}
+policyFastEveryMinute: _policy["shop-checkout-availabilityburnfast"].interval & "60s"
 policyMediumFor: _policy["shop-checkout-availabilityburnmedium"].duration & "120s"
 _rarePolicy: {for p in (_rare & {app: "shop"}).alertPolicies {(p.name): p}}
 policyRareNoData: _rarePolicy["shop-first-nodata"].duration & "0s"

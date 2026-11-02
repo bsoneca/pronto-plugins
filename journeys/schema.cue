@@ -218,13 +218,15 @@ _journeysHours: {
 	// policy each, named for its journey and alert, its `for` in seconds. Cloud
 	// Monitoring holds no `for` on a query that looks back past 25 hours (the
 	// slow burn's 3 days, a rare journey's quiet), so those fire on the first
-	// evaluation that holds, their long window being slow to move anyway.
+	// evaluation that holds, their long window being slow to move anyway, and
+	// evaluates them every 5 minutes, the least it allows a look back of days.
 	_seconds: {"2m": "120s", "15m": "900s"}
 	alertPolicies: [for a in alerts {
 		name:          "\(J.app)-\(a.journey)-\(strings.ToLower(strings.TrimPrefix(a.alert, "Journey")))"
 		displayName:   "\(J.title): \(a.journey) \(a.alert)"
 		expr:          a.expr
 		duration:      [if a.hours > 25 {"0s"}, _seconds[a.for]][0]
+		interval:      [if a.hours > 25 {"300s"}, "60s"][0]
 		severity:      a.severity
 		documentation: "\(a.summary) (owner: \(a.owner))"
 		labels: {journey: a.journey, owner: a.owner, severity: a.severity, app: J.app}

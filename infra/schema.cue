@@ -204,8 +204,8 @@ import "list"
 
 // PromQL alerting policies, one per entry of a JSON file of the operator's repository, beside the
 // state folder (as #Secret.file): a list of {name, displayName, expr, duration, severity
-// ("page" is CRITICAL, any other WARNING), documentation, labels}, which is what
-// pronto-journeys writes. Each goes to every channel named.
+// ("page" is CRITICAL, any other WARNING), documentation, labels, and optionally interval, the
+// evaluation interval, 60s by default}, which is what pronto-journeys writes. Each goes to every channel named.
 #AlertPolicies: {
 	file!: string & =~"\\.json$"
 	channels: [...string]

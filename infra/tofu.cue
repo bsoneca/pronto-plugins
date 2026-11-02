@@ -397,7 +397,7 @@ import (
 					condition_prometheus_query_language: {
 						query:               "${each.value.expr}"
 						duration:            "${each.value.duration}"
-						evaluation_interval: "60s"
+						evaluation_interval: "${try(each.value.interval, \"60s\")}"
 					}
 				}]
 				// A burn that stops resolves the incident; one that never fires again closes in a day.
