@@ -100,4 +100,7 @@ cases: {
 	"a tap before Firebase's SDK has loaded waits for it, and is never sent to an SDK not there": {suite: "identity", steps: [
 		{call: "identity.pageSends", holds: {startedOnce: true, sendWaits: true}, why: "bsoneca/ume's phone-signin under load: 'Cannot read properties of undefined (reading RecaptchaVerifier)', twice, the retry included (2026-11-02)"},
 	]}
+	"the local broker's Hydra keeps its rows in a file whose writers wait, so two sign-ins at once both go through": {suite: "identity", steps: [
+		{call: "identity.hydraLocalStore", expect: {memory: false, file: true, waits: true, migratedFirst: true}, why: "Hydra in memory answered a sign-in 500, 'Unable to serialize access due to a concurrent update', when another wrote at once (bsoneca/ume's phone-signin, 2026-11-02); pronto-verify's Hydra met the same (bsoneca/ume#20)"},
+	]}
 }

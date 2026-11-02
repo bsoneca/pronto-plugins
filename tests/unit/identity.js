@@ -255,6 +255,20 @@ export async function pageSends() {
   };
 }
 
+/** The store local.sh starts the local broker's Hydra on: in memory, or a SQLite file whose writers
+ * wait for each other (busy timeout, WAL, the write lock taken as a transaction begins), migrated
+ * before Hydra serves. */
+export async function hydraLocalStore() {
+  const sh = await Deno.readTextFile(new URL('../../identity/hydra/local.sh', import.meta.url));
+  const dsn = /DSN="([^"]+)"/.exec(sh)?.[1] ?? '';
+  return {
+    memory: /DSN=memory/.test(sh),
+    file: dsn.startsWith('sqlite://$(mktemp -d)/'),
+    waits: ['_busy_timeout=15000', '_journal_mode=WAL', '_txlock=immediate'].every((p) => dsn.includes(p)),
+    migratedFirst: sh.indexOf('hydra migrate sql -e --yes') > -1 && sh.indexOf('hydra migrate sql -e --yes') < sh.indexOf('hydra serve all'),
+  };
+}
+
 /** The local broker on Hydra (hydra/front.ts) asked to sign `tenant` in by phone: how Hydra's login
  * is answered (accepted, or rejected with its error). */
 export async function hydraPhoneLogin(tenant) {
