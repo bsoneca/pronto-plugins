@@ -77,11 +77,15 @@ export async function front(p: {
       scope: "openid profile email",
     };
     const path = `/clients/${encodeURIComponent(tenant)}`;
-    const held = await admin("GET", path);
+    let held = await admin("GET", path);
     if (held.status === 404) {
       await held.body?.cancel();
-      await adminJson("POST", "/clients", client);
-      return;
+      const made = await admin("POST", "/clients", client);
+      if (made.ok) return void await made.body?.cancel();
+      // Two first sign-ins at once both find no client: the second's 409 means the first registered it.
+      if (made.status !== 409) throw new Error(`hydra POST /clients: ${made.status} ${await made.text()}`);
+      await made.body?.cancel();
+      held = await admin("GET", path);
     }
     if (!held.ok) throw new Error(`hydra GET client: ${held.status}`);
     const was = await held.json();

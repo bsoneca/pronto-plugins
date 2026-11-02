@@ -114,6 +114,27 @@ export async function hydraBrokered(scope, claims = {}) {
   return { asked: toGoogle.searchParams.get('scope'), says: sayOf(page), granted: consented?.grant_scope, learned: learned(consented?.session?.id_token ?? {}), registered: registered?.scope };
 }
 
+/** The local broker (hydra/front.ts) registering a tenant that another sign-in registered a moment
+ * before: Hydra finds no client, refuses the POST as a duplicate (409), then holds the client. What
+ * the tenant's /oauth2/auth is answered, and how many POSTs and PUTs the front sent. */
+export async function hydraRegisterRace() {
+  const issuer = 'http://localhost:19000';
+  let gets = 0, posted = 0, put = 0;
+  const held = { client_id: TENANT, redirect_uris: [CALLBACK], scope: 'openid profile email' };
+  const fetcher = (input, init = {}) => {
+    const url = new URL(String(input));
+    const method = init.method ?? 'GET';
+    if (url.pathname === `/admin/clients/${encodeURIComponent(TENANT)}` && method === 'GET') return ++gets === 1 ? new Response('{}', { status: 404 }) : Response.json(held);
+    if (url.pathname === '/admin/clients' && method === 'POST') { posted++; return new Response('{"error":"exists"}', { status: 409 }); }
+    if (url.pathname.startsWith('/admin/clients/') && method === 'PUT') { put++; return Response.json(held); }
+    if (url.pathname === '/oauth2/auth') return new Response(null, { status: 302, headers: { location: `${issuer}/login?login_challenge=C1` } });
+    return new Response('not found', { status: 404 });
+  };
+  const handle = await front({ issuer, secret: 's'.repeat(40), providers: [google('http://google.example/token')], hydra: { public: 'http://hydra', admin: 'http://hydra' }, fetcher });
+  const res = await handle(new Request(`${issuer}/oauth2/auth?${new URLSearchParams({ client_id: TENANT, provider: 'google', redirect_uri: CALLBACK })}`));
+  return { status: res.status, posted, put };
+}
+
 /** The stand-in for Google (hydra/fake.ts) asked for `scope`, signing in `who`: what its ID token
  * says of the person. */
 export async function fakeAnswers(scope, who = 'tester') {
