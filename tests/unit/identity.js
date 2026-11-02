@@ -6,7 +6,7 @@ import { base64url, fromBase64url, randomToken, sha256url } from '../../identity
 import { broker } from '../../identity/broker/main.ts';
 import { front } from '../../identity/hydra/front.ts';
 import { fakeGoogle } from '../../identity/hydra/fake.ts';
-import { phoneConfig, phoneUpstream } from '../../identity/broker/phone.ts';
+import { phoneConfig, phoneUpstream, sendCode } from '../../identity/broker/phone.ts';
 
 const bin = new URL('../../bin/pronto-identity', import.meta.url).pathname;
 
@@ -221,6 +221,35 @@ export async function phoneBrokered(p = {}) {
   const { id_token } = await (await handle(new Request(`${issuer}/token`, { method: 'POST', body: form }))).json();
   const c = claimsOf(id_token);
   return { ...out, provider: c.provider ?? c.idp ?? null, sub: c.sub, firebaseSub: c.sub === 'fb-uid-1', aud: c.aud, claims: Object.keys(c).sort(), hasNumber: JSON.stringify(c).includes('912345678') };
+}
+
+/** The phone page's send (broker/phone.ts sendCode) against an `emulator` or not, whose first
+ * `failures` sends fail (with Firebase's `code`, or none, as a dropped request has none): whether a
+ * code went, how many sends were made, and the lines it logged. */
+export async function sendTries(emulator, failures, code = '') {
+  let tries = 0;
+  const lines = [];
+  const send = () => {
+    tries++;
+    if (tries > failures) return Promise.resolve('sent');
+    return Promise.reject(Object.assign(new Error('request dropped'), code ? { code } : {}));
+  };
+  const sent = await sendCode(send, emulator, (l) => lines.push(l)).then(() => true, () => false);
+  return { sent, tries, lines };
+}
+
+/** The phone page's script as the broker serves it (/phone/page.js): whether it carries sendCode and
+ * sends through it, on the emulator only when the config names one. */
+export async function pageSends() {
+  const cfg = phoneSettings({}, 'https://id.example.com');
+  const phone = await phoneUpstream('https://id.example.com', cfg);
+  const handle = await broker({ issuer: 'https://id.example.com', secret: 's'.repeat(40), providers: [phone.provider], extra: phone.handle });
+  const js = await (await handle(new Request('https://id.example.com/phone/page.js'))).text();
+  return {
+    defines: js.startsWith('async function sendCode('),
+    sendsThrough: /sendCode\(\(\) => \{ freshVerifier\(\); return auth\.signInWithPhoneNumber\(firebase, e164, verifier\); \}, !!config\.emulator,/.test(js),
+    sendsOtherwise: (js.match(/signInWithPhoneNumber\(/g) ?? []).length,
+  };
 }
 
 /** The local broker on Hydra (hydra/front.ts) asked to sign `tenant` in by phone: how Hydra's login

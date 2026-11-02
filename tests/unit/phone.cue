@@ -88,4 +88,13 @@ cases: {
 		{call: "identity.started", expect: ["google", "phone"], why: "phone.ts once imported main.ts, which loads it with a top-level await: the cycle never resolved and Cloud Run's revision exited"},
 		{call: "identity.started", args: [false], expect: ["google"]},
 	]}
+	"a send that fails is logged with Firebase's code and message, and tried once more against the emulator alone": {suite: "identity", steps: [
+		{call: "identity.sendTries", args: [true, 1], expect: {sent: true, tries: 2, lines: ["phone: no code sent (try 1): request dropped"]}, why: "a loaded machine's emulator dropped a send with no code: bsoneca/ume's gates failed phone-signin on it (2026-11-02)"},
+		{call: "identity.sendTries", args: [true, 2], expect: {sent: false, tries: 2, lines: ["phone: no code sent (try 1): request dropped", "phone: no code sent (try 2): request dropped"]}, why: "once more, never a loop"},
+		{call: "identity.sendTries", args: [false, 1, "auth/network-request-failed"], expect: {sent: false, tries: 1, lines: ["phone: no code sent (try 1): auth/network-request-failed request dropped"]}, why: "against Firebase a tap sends one SMS at most, so the operator's SMS limits count every one"},
+		{call: "identity.sendTries", args: [false, 0], expect: {sent: true, tries: 1, lines: []}},
+	]}
+	"the phone page sends through sendCode, its source served with the page": {suite: "identity", steps: [
+		{call: "identity.pageSends", expect: {defines: true, sendsThrough: true, sendsOtherwise: 1}, why: "the retry runs in the browser; a send past it would not be retried or logged"},
+	]}
 }

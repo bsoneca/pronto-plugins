@@ -342,6 +342,24 @@ export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { ke
   };
 }
 
+// One send of the code, by `send` (Firebase's signInWithPhoneNumber on a fresh verifier), as the page
+// runs it (SCRIPT embeds this function's source). A failure is logged with Firebase's code and its
+// message, which a code-less error (a dropped request) carries alone. Against the emulator only, a
+// failed send is tried once more: a loaded developer's machine drops one now and then (bsoneca/ume's
+// gates, 2026-11-02). Against Firebase itself a tap sends one SMS at most, so the SMS limits stay
+// the operator's.
+export async function sendCode<T>(send: () => Promise<T>, emulator: boolean, warn: (line: string) => void): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await send();
+    } catch (e) {
+      const err = (e ?? {}) as { code?: string; message?: string };
+      warn("phone: no code sent (try " + attempt + "): " + [err.code, err.message].filter(Boolean).join(" "));
+      if (!emulator || attempt >= 2) throw e;
+    }
+  }
+}
+
 // 390 px first: one column, 16 px type (a phone does not zoom a field), targets of at least 48 px.
 const STYLE = `:root{color-scheme:light dark;--ink:#1d1b20;--muted:#5a4d6e;--line:#c9c9d3;--accent:#1f4f9e;--danger:#a3331f;--bg:#fafaf7;--field:#fff}
 @media (prefers-color-scheme:dark){:root{--ink:#ece7ef;--muted:#b8adc6;--line:#4a4552;--accent:#8fb3ff;--danger:#f0a06b;--bg:#141316;--field:#1e1c21}}
@@ -363,7 +381,8 @@ button:disabled{opacity:.55;cursor:default}button:focus-visible,input:focus-visi
 // block, asks the gate for a code, has Firebase send it, and hands the broker the ID token Firebase
 // gives back. Nothing is kept: Firebase's persistence is in memory, and it signs out once it has the
 // token.
-const SCRIPT = `const $ = (s) => document.querySelector(s);
+const SCRIPT = `${sendCode.toString()}
+const $ = (s) => document.querySelector(s);
 const config = JSON.parse($('#phone-config').textContent);
 const t = config.strings;
 const pattern = new RegExp(config.pattern);
@@ -423,11 +442,9 @@ async function ask() {
   if (said === 'phone-region') return t.region;
   if (said !== '') return t.down;
   try {
-    freshVerifier();
-    sent = await auth.signInWithPhoneNumber(firebase, e164, verifier);
+    sent = await sendCode(() => { freshVerifier(); return auth.signInWithPhoneNumber(firebase, e164, verifier); }, !!config.emulator, (line) => console.warn(line));
   } catch (e) {
     const code = (e && e.code) || '';
-    console.warn('phone: no code sent: ' + code);
     return code === 'auth/too-many-requests' || code === 'auth/quota-exceeded' ? t.too_many : code === 'auth/invalid-phone-number' ? t.wrong_number : t.down;
   }
   return '';
