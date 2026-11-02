@@ -17,6 +17,8 @@ Unity file and the host stages nothing of it.
 | `unity_surface.cue` | regenerated: the declaration (`unity:`), in the app's package, and `unityOfProgram`, which reads each named screen's route and hatch's kind from the program so `lint` (`cue vet`) refuses a name the program lacks |
 | `unity/unity.json` | regenerated: the same declaration as JSON, the only thing the host reads |
 | `unity/hatches/<hatch>/binding.json` | regenerated from the app's `binding.cue` (a `generated` key marks it): never edited |
+| `.say.json` (merged) | the `unity` verb: `say.self.verbs` and the rule `unity.local`; keys of other hosts are kept |
+| `.config/mise/conf.d/unity.toml` | regenerated: the pinned host, mise tool `github:bsoneca/pronto-csharp` |
 | `unity/screens/<screen>.uss`, each `shared` sheet | seeded once, then the app's: the Unity look, USS over the same markup the web draws (`data-x="v"` is class `x--v`) |
 
 What the declaration says:
@@ -41,7 +43,10 @@ From a pronto app whose four verbs are green:
 2. Write the look in the seeded `.uss` files.
 3. `./saytw generate`, `lint`, `test`, `integrate@local`: none changes for the opt-in, and `lint`
    refuses a screen or hatch the program lacks.
-4. On the host: `<pronto-csharp>/tools/unity-check.sh .` runs the cases and scenarios through it.
+4. `./saytw unity@local` (the verb the generator adds: `.say.json` `say.self.verbs`, and the rule `unity.local`) stages the app into the
+   released host (mise tool `github:bsoneca/pronto-csharp`, pinned in `.config/mise/conf.d/unity.toml`; the repository is private, so mise
+   needs `GITHUB_TOKEN`), runs the cases and the scenarios, and exits non-zero on a failure. A scenario that needs the app's stack is
+   skipped unless `PRONTO_DOOR_<APP>` names its door. Without sayt: `<pronto-csharp>/tools/unity-check.sh .` does the same.
 
 ## Binding a hatch
 
