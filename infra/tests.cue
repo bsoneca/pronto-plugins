@@ -449,6 +449,7 @@ _always: #Plan & {
 			cpuIdle:        false
 			domain:         "metrics.example.com"
 			secretEnv: DSN: "db-url"
+			secretFiles: "/z": {secret: "cfg", path: "c.yml"}
 			sqlInstances: ["example-project-123:us-central1:db-1"]
 			sidecars: gmp: {image: "registry.example.com/gmp:1", args: [], cpu: "100m", memory: "128Mi", secretFiles: "/etc/rungmp": {secret: "scrape", path: "config.yaml"}}
 		}
@@ -476,3 +477,6 @@ twoSources: _ok & {secrets: x: {source: "s", accessors: {}, file: "a", text: "b"
 alwaysPlaceholder: _al.google_secret_manager_secret_version.example_project_123_client_id & {secret_data: "unset", lifecycle: ignore_changes: ["secret_data", "enabled"]}
 // A user's credentials are read at the version OpenTofu made, so a new password is a new revision.
 alwaysUserPinned: [for e in _al.google_cloud_run_v2_service.example_project_123_always.template.containers[0].env if e.name == "DSN" {e.value_source.secret_key_ref.version}] & ["$" + "{google_secret_manager_secret_version.example_project_123_db_1_app_url.version}"]
+// The service's own secret files come first, in the order of their directories, as they always did;
+// a sidecar-only one follows (an existing service's volumes are not reordered by a sidecar's).
+alwaysVolumeOrder: [for v in _al.google_cloud_run_v2_service.example_project_123_always.template.volumes {v.name}] & ["cfg", "scrape", "cloudsql"]

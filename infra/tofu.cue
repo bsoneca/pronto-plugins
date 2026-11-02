@@ -265,11 +265,10 @@ import (
 			let k = (#name & {in: "\(P.id)_\(nm)"}).out
 			let at = "projects/\(P.id)/locations/\(svc.location)/services/\(nm)"
 
-			// Every secret a file of the service or of a sidecar reads, once.
-			let files = {
-				for _, f in svc.secretFiles {(f.secret): f}
-				for _, sc in svc.sidecars for _, f in sc.secretFiles {(f.secret): f}
-			}
+			// Every secret a file of a sidecar reads that the service's own files do not, once: its
+			// volumes follow the service's, which stay in the order of their directories.
+			let own = {for _, f in svc.secretFiles {(f.secret): true}}
+			let extra = {for _, sc in svc.sidecars for _, f in sc.secretFiles if own[f.secret] == _|_ {(f.secret): f}}
 
 			tofu: resource: google_cloud_run_v2_service: (k): {depends_on: ownDeps
 				name:                nm
@@ -308,8 +307,13 @@ import (
 						}
 					}]])
 					volumes: list.Concat([
-						[for sname in list.SortStrings([for sname, _ in files {sname}]) {
-							let f = files[sname]
+						[for d in list.SortStrings([for d, _ in svc.secretFiles {d}]) {
+							let f = svc.secretFiles[d]
+							name: f.secret
+							secret: {secret: f.secret, items: [{version: [if readAt[f.secret] != _|_ {readAt[f.secret]}, "latest"][0], path: f.path}]}
+						}],
+						[for sname in list.SortStrings([for sname, _ in extra {sname}]) {
+							let f = extra[sname]
 							name: f.secret
 							secret: {secret: f.secret, items: [{version: [if readAt[f.secret] != _|_ {readAt[f.secret]}, "latest"][0], path: f.path}]}
 						}],
