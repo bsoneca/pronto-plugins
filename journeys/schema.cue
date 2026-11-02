@@ -45,8 +45,13 @@ import (
 	idle: *"30m" | =~"^[1-9][0-9]*(m|h)$"
 	// How long without a single run reads as the journey measuring nothing
 	// (JourneyNoData): an hour for a journey readers take all day, longer for
-	// one they take rarely.
-	quiet: *"1h" | =~"^[1-9][0-9]*(m|h|d)$"
+	// one they take rarely. `false` is for a journey too rare to say: one a
+	// handful of readers take a few times a month (a Premium review, a Shop
+	// purchase) has no quiet spell that is not just its normal, and a journey
+	// never run is silent on the first evaluation however long the window, so
+	// its NoData would mail the operator at once and stay open. Its SLO still
+	// burns on the runs it does get.
+	quiet: *"1h" | false | =~"^[1-9][0-9]*(m|h|d)$"
 }
 
 // The burn-rate pairs of the SRE workbook, as fractions of the budget spent
@@ -198,8 +203,9 @@ _journeysHours: {
 		// keeps a quiet counter for the whole window, so absence alone would
 		// miss a collector that is up and hears nothing: no increase is no run.
 		// A journey readers take rarely says how long a quiet spell may be
-		// (`quiet`), so its silence is no false alarm.
-		[for n, j in J.spec {
+		// (`quiet`), so its silence is no false alarm, and one too rare to say
+		// has none (`quiet: false`).
+		[for n, j in J.spec if j.quiet != false {
 			alert:    "JourneyNoData"
 			hours:    (_journeysHours & {in: j.quiet}).out
 			journey:  n

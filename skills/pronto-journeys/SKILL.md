@@ -54,7 +54,7 @@ Then:
    that reach the last moment), optionally `slo.latency: {percent, under}`,
    `idle` (how long before a run is abandoned, default 30m) and `quiet` (how
    long without a run before JourneyNoData, default 1h; longer for a journey
-   readers take rarely). Optionally `journeys: title: "…"` names the
+   readers take rarely, or `false` for one too rare to say). Optionally `journeys: title: "…"` names the
    dashboard. Ask which journeys are critical and what they promise; never
    invent targets.
 3. Add both hatches to `ir.html`'s Decisions — `<p id="journeys-telemetry"

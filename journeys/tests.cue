@@ -38,6 +38,11 @@ noData: _alert["journey-first/JourneyNoData"].expr & "(sum(increase(journey_runs
 // A journey readers take rarely waits longer before its silence alerts.
 _rare: #Journeys & {app: "shop", gestures: _j.gestures, spec: first: _j.spec.first & {quiet: "3d"}}
 quietRare: strings.Contains([for a in _rare.alerts if a.alert == "JourneyNoData" {a.expr}][0], "[3d]") & true
+// A journey too rare to say has no NoData alert (and no rule for one), its other alerts kept.
+_never: #Journeys & {app: "shop", gestures: _j.gestures, spec: first: _j.spec.first & {quiet: false}}
+quietOffNoAlert: len([for a in _never.alerts if a.alert == "JourneyNoData" {a}]) & 0
+quietOffNoRule: len([for g in _never.rules.groups for r in g.rules if r.alert == "JourneyNoData" {r}]) & 0
+quietOffBurns: len([for a in _never.alerts if a.alert == "JourneyAvailabilityBurnFast" {a}]) & 1
 
 // The latency SLI reads a bucket the collector exports, as either exporter
 // spells a boundary.
