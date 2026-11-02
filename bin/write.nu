@@ -7,6 +7,8 @@
 def main [files: path, app: path] {
 	open --raw $files | from json | transpose path spec | each {|f|
 		let dest = $app | path join $f.path
+		# A symlink inside the app must not carry a write out of it.
+		if not (($dest | path dirname | path expand) | str starts-with ($app | path expand)) { error make {msg: $"($f.path) resolves outside the app"} }
 		if $f.spec.seed and ($dest | path exists) {
 			print $"kept    ($f.path)"
 		} else if ($f.spec.merge? | default false) and ($dest | path exists) {

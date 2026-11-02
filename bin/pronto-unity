@@ -1,0 +1,35 @@
+#!/bin/sh
+# Opts a pronto app into pronto-csharp's Unity host, or refreshes its opt-in:
+#   bin/pronto-unity <app-dir> [screens=<a,b>] [shared=<uss,…>] [hatches=<a,b>] [scenarios=<cue,…>]
+#                    [suites=all|<a,b>] [server=<suite>=<why>;…] [cluster=true|false] [stage=<path,…>]
+# screens: the program's screens drawn on Unity, each looking as unity/screens/<screen>.uss (seeded once);
+# shared: sheets every screen given shares; hatches: hostDom hatches the host draws (its C#, not the
+# app's); scenarios: scenario files the host runs (tests/scenarios/… or unity/scenarios/…); suites: the
+# unit suites run on the host, "all" (default) or the ones named, and server: the ones left to the server (SQL on
+# a database), each with its reason, `gold=SQL on PGlite;chat=SQL on PGlite` (cases=true|false, the older flag, is all or none); cluster: its scenarios need its stack; stage: more of
+# the app a hatch reads. An argument not given keeps what the app's unity/unity.json declares; an empty
+# one (hatches=) clears it. Writes unity_surface.cue and unity/unity.json, both regenerated.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+shift
+package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" | head -n 1)
+[ -n "$package" ] || { echo "pronto-unity: $app/program.cue names no package" >&2; exit 2; }
+previous="{}"
+[ -f "$app/unity/unity.json" ] && previous=$(tr -d '\n\t' < "$app/unity/unity.json")
+tags=$(mktemp)
+files=$(mktemp)
+trap 'rm -f "$tags" "$files"' EXIT
+printf '%s\n%s\n' "package=$package" "previous=$previous" > "$tags"
+for kv in "$@"; do
+	case "$kv" in
+	screens=* | shared=* | hatches=* | scenarios=* | suites=* | server=* | cases=true | cases=false | cluster=true | cluster=false | stage=*) printf '%s\n' "$kv" >> "$tags" ;;
+	*) echo "pronto-unity: unknown argument $kv" >&2; exit 2 ;;
+	esac
+done
+cd "$here"
+# One -t per argument, each kept whole.
+set --
+while IFS= read -r t; do set -- "$@" -t "$t"; done < "$tags"
+./saytw --script tools.nu cue export ./unity/export "$@" -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"
