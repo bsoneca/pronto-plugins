@@ -15,13 +15,15 @@ import (
 )
 
 // A moment is a gesture the terminal reports on a screen: "<screen>.<gesture>",
-// a handler by its module or a form by its id, else its action and entity
+// a handler by its module or a form by its id, else its data-gesture, else its action and entity
 // (omnishell's docs/telemetry.md).
 // The gesture keeps a form id's own case: `id="newTodo"` reports `newTodo`.
 #JourneyMoment: =~"^[a-z][a-z0-9_-]*\\.[A-Za-z0-9_-]+$"
 
-// The collector's image, as pronto's observability stack pins Vector.
-#JourneysVector: "timberio/vector:0.43.0-alpine"
+// The collector's image, and the same Vector as a host tool (mise's aqua
+// backend) for a host launch and the unit tests, as pronto-perf pins it.
+#JourneysVector:        "timberio/vector:0.59.0-alpine"
+#JourneysVectorVersion: "0.59.0"
 
 #JourneyDuration: =~"^[0-9]+(\\.[0-9]+)?(ms|s)$"
 
@@ -41,6 +43,10 @@ import (
 	// How long a run waits for its next moment before it is abandoned: the
 	// reader left, which is no failure of the app's.
 	idle: *"30m" | =~"^[1-9][0-9]*(m|h)$"
+	// How long without a single run reads as the journey measuring nothing
+	// (JourneyNoData): an hour for a journey readers take all day, longer for
+	// one they take rarely.
+	quiet: *"1h" | =~"^[1-9][0-9]*(m|h|d)$"
 }
 
 // The burn-rate pairs of the SRE workbook, as fractions of the budget spent
@@ -69,10 +75,36 @@ _journeysLe: {
 
 _journeysTitle: {availability: "Availability", latency: "Latency"}
 
+// A `quiet` in hours: "30m" → 0.5, "1d" → 24.
+_journeysHours: {
+	in: string
+	let n = strconv.Atoi(strings.TrimRight(in, "mhd"))
+	out: [
+		if strings.HasSuffix(in, "m") {n / 60},
+		if strings.HasSuffix(in, "h") {n},
+		if strings.HasSuffix(in, "d") {n * 24},
+	][0]
+}
+
 #Journeys: J={
+	// The app, as its alerts and dashboard are named where several apps'
+	// share one Grafana and one Cloud Monitoring: the program's package,
+	// which the host fills in (journeys_hatch.cue), and a title for people.
+	app!:  =~"^[a-z][a-z0-9_-]*$"
+	title: *app | string & !=""
 	// Each screen's gestures, derived from its markup by the plugin's generate
 	// step (journeys_gestures.cue): what a moment must name.
 	gestures: [string]: [...string]
+	// Gestures a hatch reports itself (a "journeys:gesture" event, telemetry.js),
+	// by screen: work the terminal never sees as a submit, such as a form a
+	// hatch holds while it calls a service, or a token it hands over by fetch.
+	reported: [string]: [...=~"^[A-Za-z0-9_-]+$"]
+	// What a moment may name: the markup's gestures and the reported ones.
+	_known: {
+		for s, _ in {for s, _ in gestures {(s): _}, for s, _ in reported {(s): _}} {
+			(s): list.Concat([[if gestures[s] != _|_ for g in gestures[s] {g}], [if reported[s] != _|_ for g in reported[s] {g}]])
+		}
+	}
 	spec: [Name=string & =~"^[a-z][a-z0-9-]*$"]: #Journey
 	// One budget window for the app's journeys, so the dashboard reads one
 	// series per journey.
@@ -86,21 +118,21 @@ _journeysTitle: {availability: "Availability", latency: "Latency"}
 		seconds: *60 | int & >0
 	}
 	_days: strconv.Atoi(strings.TrimSuffix(J.window, "d"))
-	// The ratio windows, the budget window once even where it is one of the
-	// burn windows, so no record is declared twice.
+	// The ratio windows: every burn window, and the budget window once even
+	// where it is one of them.
 	_ratioWindows: list.Concat([_journeysWindows, [if !list.Contains(_journeysWindows, J.window) {J.window}]])
 
 	_violations: list.Concat([
 		[for n, j in J.spec for m in j.moments
 			let p = strings.Split(m, ".")
-			if J.gestures[p[0]] == _|_ {
+			if J._known[p[0]] == _|_ {
 				"journey \(n) moment \(m) names no screen \(p[0])"
 			}],
 		[for n, j in J.spec for m in j.moments
 			let p = strings.Split(m, ".")
-			if J.gestures[p[0]] != _|_
-			if !list.Contains(J.gestures[p[0]], p[1]) {
-				"journey \(n) moment \(m) names no gesture \(p[1]) on screen \(p[0]); it has \(strings.Join(J.gestures[p[0]], ", "))"
+			if J._known[p[0]] != _|_
+			if !list.Contains(J._known[p[0]], p[1]) {
+				"journey \(n) moment \(m) names no gesture \(p[1]) on screen \(p[0]); it has \(strings.Join(J._known[p[0]], ", "))"
 			}],
 		[for n, j in J.spec if len({for m in j.moments {(m): true}}) != len(j.moments) {
 			"journey \(n) repeats a moment"
@@ -138,42 +170,76 @@ _journeysTitle: {availability: "Availability", latency: "Latency"}
 	buckets: list.Sort([for le, _ in {for s in _slis if s.kind == "latency" {(s.le): true}} {le}],
 		{x: string, y: string, less: strconv.ParseFloat(x, 64) < strconv.ParseFloat(y, 64)})
 
+	// Each SLI's error ratio over a window, as plain PromQL on the collector's
+	// own series: no recording rule stands between them, so the same
+	// expression reads a local VictoriaMetrics and Google Cloud Managed Service
+	// for Prometheus, where nothing evaluates recording rules.
+	_ratio: {for s in _slis for w in _ratioWindows {"\(s.journey)/\(s.kind)/\(w)": (s.errors & {"w": w}).expr}}
+
+	// The alerts, once: vmalert's rule file reads them locally, and
+	// journeys.alerts.json carries them to Cloud Monitoring's PromQL alerting
+	// policies in production (pronto-plugins' infra, `alerts`).
+	alerts: list.Concat([
+		[for s in _slis for b in _journeysBurns
+			let factor = strconv.FormatFloat(math.Round(b.spend*_days*24/b.hours*1000)/1000, 103, -1, 64)
+			let limit = "\(factor) * \(s.budget)" {
+			alert:    "Journey\(_journeysTitle[s.kind])Burn\(b.name)"
+			hours:    b.hours
+			journey:  s.journey
+			owner:    s.owner
+			severity: b.severity
+			for:      "2m"
+			expr:     "(\(_ratio["\(s.journey)/\(s.kind)/\(b.long)"])) > \(limit) and (\(_ratio["\(s.journey)/\(s.kind)/\(b.short)"])) > \(limit)"
+			summary:  "\(s.journey) is spending its \(s.kind) budget at \(factor)× (\(strconv.FormatFloat(b.spend*100, 103, -1, 64))% of \(J.window) in \(b.long))"
+		}],
+		// A journey no run reaches reads as no data, never as healthy: a
+		// collector down, a release without telemetry, an app with nowhere to
+		// post all say so here rather than in a green dashboard. The exporter
+		// keeps a quiet counter for the whole window, so absence alone would
+		// miss a collector that is up and hears nothing: no increase is no run.
+		// A journey readers take rarely says how long a quiet spell may be
+		// (`quiet`), so its silence is no false alarm.
+		[for n, j in J.spec {
+			alert:    "JourneyNoData"
+			hours:    (_journeysHours & {in: j.quiet}).out
+			journey:  n
+			owner:    j.owner
+			severity: "ticket"
+			for:      "15m"
+			expr:     "(sum(increase(journey_runs_total{journey=\"\(n)\"}[\(j.quiet)])) or vector(0)) == 0"
+			summary:  "\(n) has reported no run for \(j.quiet): its SLO is measuring nothing"
+		}],
+	])
+
 	// vmalert's rule file, one group per journey.
 	rules: groups: [for n, j in J.spec {
 		name:     "journey-\(n)"
 		interval: "30s"
-		rules: list.Concat([
-			[for s in _slis if s.journey == n {
-				record: "journey:\(s.kind)_budget"
-				expr:   "vector(\(s.budget))"
-				labels: journey: n
-			}],
-			[for s in _slis if s.journey == n for w in _ratioWindows {
-				record: "journey:\(s.kind)_errors:ratio_rate\(w)"
-				expr:   (s.errors & {"w": w}).expr
-				labels: journey: n
-			}],
-			[for s in _slis if s.journey == n for b in _journeysBurns
-				let factor = strconv.FormatFloat(math.Round(b.spend*_days*24/b.hours*1000)/1000, 103, -1, 64) {
-				alert: "Journey\(_journeysTitle[s.kind])Burn\(b.name)"
-				expr:  "journey:\(s.kind)_errors:ratio_rate\(b.long){journey=\"\(n)\"} > \(factor) * \(s.budget) and journey:\(s.kind)_errors:ratio_rate\(b.short){journey=\"\(n)\"} > \(factor) * \(s.budget)"
-				for:   "2m"
-				labels: {journey: n, owner: s.owner, severity: b.severity}
-				annotations: summary: "\(n) is spending its \(s.kind) budget at \(factor)× (\(strconv.FormatFloat(b.spend*100, 103, -1, 64))% of \(J.window) in \(b.long))"
-			}],
-			// A journey no run reaches reads as no data, never as healthy: a
-			// collector down, a release without telemetry, an app with nowhere to
-			// post all say so here rather than in a green dashboard. The exporter
-			// keeps a quiet counter for the whole window, so absence alone would
-			// miss a collector that is up and hears nothing: no increase is no run.
-			[{
-				alert: "JourneyNoData"
-				expr:  "(sum(increase(journey_runs_total{journey=\"\(n)\"}[1h])) or vector(0)) == 0"
-				for:   "15m"
-				labels: {journey: n, owner: j.owner, severity: "ticket"}
-				annotations: summary: "\(n) has reported no run for an hour: its SLO is measuring nothing"
-			}],
-		])
+		rules: [for a in alerts if a.journey == n {
+			alert: a.alert
+			expr:  a.expr
+			for:   a.for
+			labels: {journey: n, owner: a.owner, severity: a.severity}
+			annotations: summary: a.summary
+		}]
+	}]
+
+	// The same alerts as Cloud Monitoring takes them: one PromQL alerting
+	// policy each, named for its journey and alert, its `for` in seconds. Cloud
+	// Monitoring holds no `for` on a query that looks back past 25 hours (the
+	// slow burn's 3 days, a rare journey's quiet), so those fire on the first
+	// evaluation that holds, their long window being slow to move anyway, and
+	// evaluates them every 5 minutes, the least it allows a look back of days.
+	_seconds: {"2m": "120s", "15m": "900s"}
+	alertPolicies: [for a in alerts {
+		name:          "\(J.app)-\(a.journey)-\(strings.ToLower(strings.TrimPrefix(a.alert, "Journey")))"
+		displayName:   "\(J.title): \(a.journey) \(a.alert)"
+		expr:          a.expr
+		duration:      [if a.hours > 25 {"0s"}, _seconds[a.for]][0]
+		interval:      [if a.hours > 25 {"300s"}, "60s"][0]
+		severity:      a.severity
+		documentation: "\(a.summary) (owner: \(a.owner))"
+		labels: {journey: a.journey, owner: a.owner, severity: a.severity, app: J.app}
 	}]
 
 	// The collector: Vector, reading the terminal's telemetry batches and
@@ -379,64 +445,99 @@ _journeysTitle: {availability: "Availability", latency: "Latency"}
 		}],
 	])
 
-	// One Grafana row per journey, repeated over the `journey` variable.
+	// One Grafana row per journey, each panel its journey's own PromQL with its
+	// own budget in it: no variable or recording rule to resolve, so the
+	// dashboard reads the same in a local VictoriaMetrics and in Managed
+	// Service for Prometheus. Named for the app, as several apps' dashboards
+	// share one Grafana.
+	_names: list.SortStrings([for n, _ in J.spec {n}])
+	_rowHeight: 14
 	dashboard: {
-		uid:           "pronto-journeys"
-		title:         "Journeys"
+		uid:           "journeys-\(J.app)"
+		title:         "\(J.title) journeys"
+		tags: ["journeys", J.app]
 		schemaVersion: 39
-		time: {from: "now-6h", to: "now"}
-		refresh: "10s"
+		time: {from: "now-24h", to: "now"}
+		refresh: "1m"
 		templating: list: [{
 			name:  "datasource"
 			type:  "datasource"
 			query: "prometheus"
-		}, {
-			name:       "journey"
-			type:       "query"
-			datasource: {type: "prometheus", uid: "${datasource}"}
-			query:      "label_values(journey:availability_budget, journey)"
-			multi:      true
-			includeAll: true
-			current: {text: "All", value: "$__all"}
 		}]
 		let ds = {type: "prometheus", uid: "${datasource}"}
 		// Grafana colours a panel's noValue with the base step, so the base is
 		// neutral and red starts below any budget a journey can overspend.
 		let budgetSteps = {mode: "absolute", steps: [{color: "text", value: null}, {color: "red", value: -1e9}, {color: "orange", value: 0.2}, {color: "green", value: 0.5}]}
-		panels: [
-			{id: 1, type: "row", title: "$journey", repeat: "journey", gridPos: {x: 0, y: 0, w: 24, h: 1}, collapsed: false, panels: []},
-			{
-				id: 2, type: "stat", title: "Availability (\(J.window))", datasource: ds
-				gridPos: {x: 0, y: 1, w: 6, h: 5}
-				// Neutral: each journey has its own target, so the budget beside it
-				// carries the colour.
-				fieldConfig: defaults: {unit: "percentunit", decimals: 3, color: {mode: "fixed", fixedColor: "text"}}
-				targets: [{refId: "A", expr: "1 - journey:availability_errors:ratio_rate\(J.window){journey=\"$journey\"}"}]
-			},
-			{
-				id: 3, type: "stat", title: "Error budget left", datasource: ds
-				gridPos: {x: 6, y: 1, w: 6, h: 5}
-				fieldConfig: defaults: {unit: "percentunit", min: 0, max: 1, thresholds: budgetSteps}
-				targets: [{refId: "A", expr: "1 - journey:availability_errors:ratio_rate\(J.window){journey=\"$journey\"} / on(journey) journey:availability_budget"}]
-			},
-			{
-				id: 4, type: "stat", title: "Burn rate 1h", datasource: ds
-				gridPos: {x: 12, y: 1, w: 6, h: 5}
-				fieldConfig: defaults: {unit: "x", thresholds: {mode: "absolute", steps: [{color: "green", value: null}, {color: "orange", value: 1}, {color: "red", value: 6}]}}
-				targets: [{refId: "A", expr: "journey:availability_errors:ratio_rate1h{journey=\"$journey\"} / on(journey) journey:availability_budget"}]
-			},
-			{
-				id: 5, type: "stat", title: "Latency budget left", datasource: ds
-				gridPos: {x: 18, y: 1, w: 6, h: 5}
-				fieldConfig: defaults: {unit: "percentunit", min: 0, max: 1, noValue: "no latency SLO", thresholds: budgetSteps}
-				targets: [{refId: "A", expr: "1 - journey:latency_errors:ratio_rate\(J.window){journey=\"$journey\"} / on(journey) journey:latency_budget"}]
-			},
-			{
-				id: 6, type: "timeseries", title: "Failed moments", datasource: ds
-				gridPos: {x: 0, y: 6, w: 24, h: 8}
-				targets: [{refId: "A", expr: "sum by (moment) (increase(journey_moments_total{journey=\"$journey\",outcome=~\"refused|failed\"}[5m]))", legendFormat: "{{moment}}"}]
-			},
-		]
+		panels: list.Concat([for i, n in _names
+			let j = J.spec[n]
+			let top = i * _rowHeight
+			let base = i * 10
+			let avail = [for s in _slis if s.journey == n if s.kind == "availability" {s}][0]
+			let lat = [for s in _slis if s.journey == n if s.kind == "latency" {s}]
+			let sel = "journey=\"\(n)\"" {
+			[
+				{id: base + 1, type: "row", title: "\(n) — \(j.moments[0]) → \(j.moments[len(j.moments)-1]) (SLO \(j.slo.availability)%)", gridPos: {x: 0, y: top, w: 24, h: 1}, collapsed: false, panels: []},
+				{
+					id: base + 2, type: "stat", title: "Success rate (\(J.window))", datasource: ds
+					gridPos: {x: 0, y: top + 1, w: 5, h: 5}
+					description: "Runs that reached \(j.moments[len(j.moments)-1]) of the runs the reader finished or the app failed; the target is \(j.slo.availability)%."
+					fieldConfig: defaults: {unit: "percentunit", decimals: 3, noValue: "no runs", thresholds: {mode: "absolute", steps: [{color: "red", value: null}, {color: "green", value: j.slo.availability / 100}]}}
+					targets: [{refId: "A", expr: "1 - (\(_ratio["\(n)/availability/\(J.window)"]))"}]
+				},
+				{
+					id: base + 3, type: "stat", title: "Error budget left", datasource: ds
+					gridPos: {x: 5, y: top + 1, w: 5, h: 5}
+					fieldConfig: defaults: {unit: "percentunit", min: 0, max: 1, noValue: "no runs", thresholds: budgetSteps}
+					targets: [{refId: "A", expr: "1 - (\(_ratio["\(n)/availability/\(J.window)"])) / \(avail.budget)"}]
+				},
+				{
+					id: base + 4, type: "stat", title: "Burn rate 1h", datasource: ds
+					gridPos: {x: 10, y: top + 1, w: 4, h: 5}
+					fieldConfig: defaults: {unit: "x", noValue: "no runs", thresholds: {mode: "absolute", steps: [{color: "green", value: null}, {color: "orange", value: 1}, {color: "red", value: 6}]}}
+					targets: [{refId: "A", expr: "(\(_ratio["\(n)/availability/1h"])) / \(avail.budget)"}]
+				},
+				{
+					id: base + 5, type: "stat", title: "Moment latency p95 (\(J.window))", datasource: ds
+					gridPos: {x: 14, y: top + 1, w: 5, h: 5}
+					fieldConfig: defaults: {unit: "s", decimals: 2, noValue: "no timings"}
+					targets: [{refId: "A", expr: "histogram_quantile(0.95, sum by (le) (increase(journey_moment_seconds_bucket{\(sel)}[\(J.window)])))"}]
+				},
+				{
+					id: base + 6, type: "stat", title: "Latency budget left", datasource: ds
+					gridPos: {x: 19, y: top + 1, w: 5, h: 5}
+					if len(lat) > 0 {
+						description: "Moments under \(j.slo.latency.under): the target is \(j.slo.latency.percent)%."
+						fieldConfig: defaults: {unit: "percentunit", min: 0, max: 1, noValue: "no timings", thresholds: budgetSteps}
+						targets: [{refId: "A", expr: "1 - (\(_ratio["\(n)/latency/\(J.window)"])) / \(lat[0].budget)"}]
+					}
+					if len(lat) == 0 {
+						fieldConfig: defaults: {noValue: "no latency SLO", color: {mode: "fixed", fixedColor: "text"}}
+						targets: []
+					}
+				},
+				{
+					id: base + 7, type: "timeseries", title: "Runs by outcome", datasource: ds
+					gridPos: {x: 0, y: top + 6, w: 8, h: 8}
+					fieldConfig: defaults: {unit: "short", custom: {drawStyle: "bars", stacking: mode: "normal"}}
+					targets: [{refId: "A", expr: "sum by (outcome) (increase(journey_runs_total{\(sel)}[1h]))", legendFormat: "{{outcome}}", interval: "1h"}]
+				},
+				{
+					id: base + 8, type: "timeseries", title: "Moment latency p50 / p95", datasource: ds
+					gridPos: {x: 8, y: top + 6, w: 8, h: 8}
+					fieldConfig: defaults: unit: "s"
+					targets: [
+						{refId: "A", expr: "histogram_quantile(0.5, sum by (le) (increase(journey_moment_seconds_bucket{\(sel)}[1h])))", legendFormat: "p50", interval: "1h"},
+						{refId: "B", expr: "histogram_quantile(0.95, sum by (le) (increase(journey_moment_seconds_bucket{\(sel)}[1h])))", legendFormat: "p95", interval: "1h"},
+					]
+				},
+				{
+					id: base + 9, type: "timeseries", title: "Failed moments", datasource: ds
+					gridPos: {x: 16, y: top + 6, w: 8, h: 8}
+					fieldConfig: defaults: unit: "short"
+					targets: [{refId: "A", expr: "sum by (moment, outcome) (increase(journey_moments_total{\(sel),outcome=~\"refused|failed\"}[1h]))", legendFormat: "{{moment}} {{outcome}}", interval: "1h"}]
+				},
+			]
+		}])
 	}
 
 	// The program's own checks, unified as `loop: surface: checks:
@@ -447,10 +548,10 @@ _journeysTitle: {availability: "Availability", latency: "Latency"}
 			cmds: ["promtool check rules observability/journeys.rules.yaml"]
 			note: "the journeys' SLO rules parse as Prometheus rules, every expression included"
 		}
-		// Vector ships no binary for every host, so its own image runs them.
+		// Vector's own binary, a host tool, executes the run assembly.
 		"journeys-collector": {
-			verb: "integrate"
-			cmds: ["docker run --rm --volume ($env.PWD | path join observability):/etc/vector:ro \(#JourneysVector) test /etc/vector/journeys.collector.yaml /etc/vector/journeys.collector.test.yaml"]
+			verb: "lint"
+			cmds: ["vector test observability/journeys.collector.yaml observability/journeys.collector.test.yaml"]
 			note: "the collector's run assembly, executed by Vector against its own unit tests"
 		}
 	}
@@ -460,5 +561,6 @@ _journeysTitle: {availability: "Availability", latency: "Latency"}
 		"journeys.collector.yaml": collector
 		"journeys.collector.test.yaml": collectorTests
 		"journeys.dashboard.json": dashboard
+		"journeys.alerts.json":    alertPolicies
 	}
 }

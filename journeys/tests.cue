@@ -8,6 +8,7 @@ import (
 )
 
 _j: #Journeys & {
+	app:      "shop"
 	gestures: {cart: ["pay", "view"], done: ["confirm"], todo: ["create-todo"]}
 	spec: {
 		checkout: {owner: "payments", moments: ["cart.view", "cart.pay", "done.confirm"], slo: {availability: 99.9, latency: {percent: 95, under: "250ms"}}}
@@ -19,23 +20,30 @@ _alert: {for n, rs in _rules for r in rs if r.alert != _|_ {"\(n)/\(r.alert)": r
 
 // The workbook's three pairs at 28 days, each long window and its short one
 // over the same budget.
-fastPages: _alert["journey-checkout/JourneyAvailabilityBurnFast"].expr & "journey:availability_errors:ratio_rate1h{journey=\"checkout\"} > 13.44 * 0.001 and journey:availability_errors:ratio_rate5m{journey=\"checkout\"} > 13.44 * 0.001"
-mediumPages: _alert["journey-checkout/JourneyAvailabilityBurnMedium"].expr & "journey:availability_errors:ratio_rate6h{journey=\"checkout\"} > 5.6 * 0.001 and journey:availability_errors:ratio_rate30m{journey=\"checkout\"} > 5.6 * 0.001"
+// Each a plain ratio of the collector's series, no recording rule between:
+// Managed Service for Prometheus evaluates none.
+_bad: {w: string, out: "(sum(increase(journey_runs_total{journey=\"checkout\",outcome=\"bad\"}[\(w)])) or vector(0)) / sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[\(w)]))"}
+fastPages: _alert["journey-checkout/JourneyAvailabilityBurnFast"].expr & "(\((_bad & {w: "1h"}).out)) > 13.44 * 0.001 and (\((_bad & {w: "5m"}).out)) > 13.44 * 0.001"
+mediumPages: _alert["journey-checkout/JourneyAvailabilityBurnMedium"].expr & "(\((_bad & {w: "6h"}).out)) > 5.6 * 0.001 and (\((_bad & {w: "30m"}).out)) > 5.6 * 0.001"
+noRecords: [for _, rs in _rules for r in rs if r.record != _|_ {r}] & []
 slowTickets: _alert["journey-checkout/JourneyAvailabilityBurnSlow"] & {labels: {severity: "ticket", owner: "payments"}}
 // 30 days is the workbook's own 14.4×.
-_thirty: #Journeys & {gestures: _j.gestures, spec: first: _j.spec.first, window: "30d"}
+_thirty: #Journeys & {app: "shop", gestures: _j.gestures, spec: first: _j.spec.first, window: "30d"}
 thirtyFast: strings.Contains([for g in _thirty.rules.groups for r in g.rules if r.alert != _|_ if r.alert == "JourneyAvailabilityBurnFast" {r.expr}][0], "> 14.4 * 0.01") & true
 
 // A journey with no latency target has no latency series; every journey has
 // the alert that says it is measuring nothing.
-firstAvailabilityOnly: len([for r in _rules["journey-first"] if r.record != _|_ if strings.HasPrefix(r.record, "journey:latency") {r}]) & 0
+firstAvailabilityOnly: len([for r in _rules["journey-first"] if strings.HasPrefix(r.alert, "JourneyLatency") {r}]) & 0
 noData: _alert["journey-first/JourneyNoData"].expr & "(sum(increase(journey_runs_total{journey=\"first\"}[1h])) or vector(0)) == 0"
+// A journey readers take rarely waits longer before its silence alerts.
+_rare: #Journeys & {app: "shop", gestures: _j.gestures, spec: first: _j.spec.first & {quiet: "3d"}}
+quietRare: strings.Contains([for a in _rare.alerts if a.alert == "JourneyNoData" {a.expr}][0], "[3d]") & true
 
 // The latency SLI reads a bucket the collector exports, as either exporter
 // spells a boundary.
-latencyLe: strings.Contains([for r in _rules["journey-checkout"] if r.record != _|_ if r.record == "journey:latency_errors:ratio_rate5m" {r.expr}][0], "le=~\"0[.]25([.]0)?\"") & true
+latencyLe: strings.Contains(_alert["journey-checkout/JourneyLatencyBurnFast"].expr, "le=~\"0[.]25([.]0)?\"") & true
 // A whole-second target is one boundary, not the spread's 1 beside its 1.0.
-_whole: #Journeys & {gestures: _j.gestures, spec: first: _j.spec.first & {slo: latency: {percent: 95, under: "1s"}}}
+_whole: #Journeys & {app: "shop", gestures: _j.gestures, spec: first: _j.spec.first & {slo: latency: {percent: 95, under: "1s"}}}
 bucketsOnce: len([for b in _whole.collector.sinks.metrics.buckets if b == 1 {b}]) & 1
 seriesKept: _j.collector.sinks.metrics.flush_period_secs & 2419200
 
@@ -73,7 +81,7 @@ startKept: _j.collector.transforms["reduce-checkout"].merge_strategies.started &
 deduped: _j.collector.transforms.once & {type: "dedupe", fields: match: ["session", "trace", "type", "outcome"]}
 // The SLI reads good and bad alone: unstarted and abandoned runs are counted
 // apart.
-sliValid: strings.Contains(_rules["journey-checkout"][2].expr, "outcome=~\"good|bad\"") & true
+sliValid: strings.Contains(_rules["journey-checkout"][0].expr, "outcome=~\"good|bad\"") & true
 // The reporter: a host-DOM hatch on every screen, posting to the endpoint.
 reporterHatch: strings.Contains(_h.files["journeys_hatch.cue"].text, "kind:  \"host-dom\"") & true
 reporterEverywhere: strings.Contains(_h.files["journeys_hatch.cue"].text, "code: surface: screens: [!~\"^(\\(strings.Join(_journeysOwnHatches, \"|\")))$\"]: hatches: [\"journeys-telemetry\"]") & true
@@ -97,3 +105,51 @@ launchUp: json.Unmarshal(_h.files[".say.json"].text).say.launch.rulemap.journeys
 reporterFlushesOnTime: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "else timer ??= setTimeout(flush, FLUSH_MS);") & true
 // What a page holds as it goes is kept for the tab's next load.
 reporterKeepsUnsent: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "sessionStorage.setItem(UNSENT, JSON.stringify([...kept, ...queue]));") & true
+
+// Production: each alert a Cloud Monitoring PromQL policy, named for the app
+// and journey, its `for` in seconds, the same expression vmalert reads.
+_policy: {for p in _j.alertPolicies {(p.name): p}}
+policyPerAlert: len(_j.alertPolicies) & len(_j.alerts)
+policyFast: _policy["shop-checkout-availabilityburnfast"] & {
+	duration: "120s"
+	severity: "page"
+	expr:     _alert["journey-checkout/JourneyAvailabilityBurnFast"].expr
+	labels: {app: "shop", journey: "checkout"}
+}
+policyNoData: _policy["shop-first-nodata"].duration & "900s"
+policiesOut: _j.out["journeys.alerts.json"] & _j.alertPolicies
+// The dashboard: the app's own, a row per journey with its own budget, no
+// variable but the datasource.
+dashboardUid: _j.dashboard.uid & "journeys-shop"
+dashboardRows: [for p in _j.dashboard.panels if p.type == "row" {p.title}] & ["checkout — cart.view → done.confirm (SLO 99.9%)", "first — todo.create-todo → todo.create-todo (SLO 99%)"]
+dashboardOnlyDatasource: [for v in _j.dashboard.templating.list {v.name}] & ["datasource"]
+_panel: {for p in _j.dashboard.panels {(p.title + "/\(p.gridPos.y)"): p}}
+budgetInline: _panel["Error budget left/1"].targets[0].expr & "1 - (\((_bad & {w: "28d"}).out)) / 0.001"
+latencyBudget: strings.HasSuffix(_panel["Latency budget left/1"].targets[0].expr, "/ 0.05") & true
+noLatencySlo: _panel["Latency budget left/15"].fieldConfig.defaults.noValue & "no latency SLO"
+panelIdsUnique: len({for p in _j.dashboard.panels {"\(p.id)": true}}) & len(_j.dashboard.panels)
+// A host launch runs the collector too, as a host peer the door reaches, with
+// Vector from mise; the alerts and dashboard carry the program's package.
+_hatch: _h.files["journeys_hatch.cue"].text
+hostPeer: strings.Contains(_hatch, "code: meta: hostPeers: \"journeys-collector\": 8686") & true
+hostCollects: strings.Contains(_hatch, "do:    \"exec nu -c 'use journeys/journeys.nu; journeys collect'\"") & true
+hostPorts: strings.Contains(_hatch, "metrics: {port: 9598, env: \"JOURNEYS_METRICS_PORT\"}") & true
+appNamed: strings.Contains(_hatch, "journeys: app: \"shop\"") & true
+vectorTool: strings.Contains(_h.files["pronto/journeys.cue"].text, "\"aqua:vectordotdev/vector\":\"0.59.0\"") & true
+collectShipped: strings.Contains(_h.files["journeys/journeys.nu"].text, "export def collect []") & true
+// The collector's tests run on the host's Vector: no container on a developer's machine.
+collectorTestsNative: _j.checks["journeys-collector"] & {verb: "lint", cmds: ["vector test observability/journeys.collector.yaml observability/journeys.collector.test.yaml"]}
+// Cloud Monitoring takes no `for` past 25 hours of lookback: the slow burn and
+// a long quiet fire on their first holding evaluation.
+policySlowNoFor: _policy["shop-checkout-availabilityburnslow"] & {duration: "0s", interval: "300s"}
+policyFastEveryMinute: _policy["shop-checkout-availabilityburnfast"].interval & "60s"
+policyMediumFor: _policy["shop-checkout-availabilityburnmedium"].duration & "120s"
+_rarePolicy: {for p in (_rare & {app: "shop"}).alertPolicies {(p.name): p}}
+policyRareNoData: _rarePolicy["shop-first-nodata"].duration & "0s"
+// A hatch's own gesture: declared by screen, a moment may name it, and the
+// reporter takes it from the screen.
+_reported: #Journeys & {app: "shop", gestures: _j.gestures, reported: cart: ["coupon-check"], spec: c: {owner: "payments", moments: ["cart.coupon-check", "cart.pay"], slo: availability: 99}}
+reportedMoment: _reported.collector.transforms["reduce-c"].type & "reduce"
+reportedKnown: _reported._known.cart & ["pay", "view", "coupon-check"]
+reportedOnlyThere: _reported._known.done & ["confirm"]
+reporterTakesHatchGestures: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "screen.addEventListener(\"journeys:gesture\"") & true

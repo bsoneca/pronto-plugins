@@ -203,9 +203,9 @@ for the app and writes them:
 
 | Path in the app | |
 | --- | --- |
-| `pronto/journeys.cue` | a seat beside `pronto/config.cue`'s: promtool pinned, and a `generate` rule after pronto's writer |
+| `pronto/journeys.cue` | a seat beside `pronto/config.cue`'s: promtool and Vector pinned, and a `generate` rule after pronto's writer |
 | `journeys_plugin.cue` | the schema, in the program's package |
-| `journeys_hatch.cue` | the reporter, a `host-dom` hatch on every screen, and the collector, a `container` hatch and its cluster target: Vector with the run assembly baked in |
+| `journeys_hatch.cue` | the reporter, a `host-dom` hatch on every screen, and the collector, a `container` hatch and its cluster target: Vector with the run assembly baked in, and on a host launch a host peer the door reaches (`journeys collect`) |
 | `shell/hatches/journeys/telemetry.js` | the reporter: gestures, their outcomes and the screens' states, posted to the endpoint |
 | `journeys/journeys.nu` | the generate step: derives gestures, gives the door its route to the collector, writes `observability/` |
 | `.say.json` | the `launch` rule `journeys`, answering `@journeys` |
@@ -216,9 +216,22 @@ for the app and writes them:
 A moment that names no gesture refuses at `cue vet`. The `journeys-telemetry`
 and `journeys-collector` hatches each owe the app's `ir.html` a
 `data-kind="hatch"` element. `observability/`
-holds the collector's config, the rules (multi-window burn rates, 2% of the
-budget in 1 h, 5% in 6 h, 10% in 3 d, and a no-data alert per journey) and the
-dashboard.
+holds the collector's config, the alerts (multi-window burn rates, 2% of the
+budget in 1 h, 5% in 6 h, 10% in 3 d, and a no-data alert per journey after
+its `quiet`, an hour by default) as vmalert rules and as Cloud Monitoring
+policies (`journeys.alerts.json`), and the dashboard, a row per journey: success
+rate, error budget left, burn rate, moment latency and its budget, runs by
+outcome and failed moments. Every expression reads the collector's own series,
+with no recording rule between, so the rules and the dashboard read the same in
+the local VictoriaMetrics and in Google Cloud Managed Service for Prometheus.
+
+In production (pronto's `release@gcp`), the app's `release.cue` runs the
+collector as a sidecar apart with its metrics port
+(`sidecars: "journeys-collector": {port: 8686, metrics: port: 9598, apart: {}}`),
+which Managed Prometheus scrapes. pronto-infra's `alertPolicies` turns
+`journeys.alerts.json` into PromQL alerting policies sent to a notification
+channel, and the dashboard JSON loads into a Grafana whose Prometheus data
+source is Managed Prometheus's query frontend (a `runServices` sidecar).
 
 On unmodified pronto the generate step re-applies the door's route in
 `docker/Caddyfile`, which pronto's writer regenerates without it. The door

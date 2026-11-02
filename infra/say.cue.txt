@@ -13,8 +13,9 @@ _backend: "(run-mise exec -- cue export . -e plan.backend --out json | from json
 
 // Reads a kept plan and refuses one that cannot be read or that deletes anything. Dropping a
 // resource from the state is no reason to delete it from the project: INFRA_ALLOW_DESTROY=1, for
-// that run alone, says it is.
-_check: "def check-plan [f: string] { let j = (run-mise exec -- tofu -chdir=tofu show -json $f | from json); if ($j | get -o format_version) == null { error make {msg: 'the plan could not be read'} }; let rc = ($j | get -o resource_changes | default []); if ($rc | describe) !~ '^(list|table)' { error make {msg: 'the plan lists its changes as no list'} }; let gone = ($rc | where {|c| 'delete' in $c.change.actions} | get address); if ($gone | is-not-empty) and ($env.INFRA_ALLOW_DESTROY? != '1') { error make {msg: $\"the plan deletes ($gone | str join ', '): set INFRA_ALLOW_DESTROY=1 to allow it\"} } }"
+// that run alone, says it is. A file's secret version replaced is no deletion: its policy is
+// ABANDON, so the old version stays in Secret Manager.
+_check: "def check-plan [f: string] { let j = (run-mise exec -- tofu -chdir=tofu show -json $f | from json); if ($j | get -o format_version) == null { error make {msg: 'the plan could not be read'} }; let rc = ($j | get -o resource_changes | default []); if ($rc | describe) !~ '^(list|table)' { error make {msg: 'the plan lists its changes as no list'} }; let gone = ($rc | where {|c| ('delete' in $c.change.actions) and not ($c.type == 'google_secret_manager_secret_version' and ($c.change.before?.deletion_policy? == 'ABANDON'))} | get address); if ($gone | is-not-empty) and ($env.INFRA_ALLOW_DESTROY? != '1') { error make {msg: $\"the plan deletes ($gone | str join ', '): set INFRA_ALLOW_DESTROY=1 to allow it\"} } }"
 
 say: {
 	setup: rulemap: tofu: {

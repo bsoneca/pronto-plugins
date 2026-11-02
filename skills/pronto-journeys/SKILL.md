@@ -5,7 +5,7 @@ description: "Add journey monitoring to a pronto app, or refresh it: critical us
 
 # pronto-journeys
 
-A plugin beside pronto, not part of it: pronto 0.14.0 has no journeys, so the
+A plugin beside pronto, not part of it: pronto has no journeys, so the
 app holds the host's files and its generate step re-applies the door's route
 pronto's writer regenerates. The terminal is unchanged: a host-DOM hatch on
 every screen reports each gesture, naming it as the markup does, and reads
@@ -15,9 +15,9 @@ its outcome from the screen's `data-state`.
 
 | Path | Owner |
 | --- | --- |
-| `pronto/journeys.cue` | regenerated: promtool pinned, the `generate` rule after pronto's writer |
+| `pronto/journeys.cue` | regenerated: promtool and Vector pinned, the `generate` rule after pronto's writer |
 | `journeys_plugin.cue` | regenerated: the schema (`#Journeys`, `#Journey`), in the program's package |
-| `journeys_hatch.cue` | regenerated: the `journeys-telemetry` host-DOM hatch on every screen, and the `journeys-collector` container hatch with its cluster target |
+| `journeys_hatch.cue` | regenerated: the `journeys-telemetry` host-DOM hatch on every screen, the `journeys-collector` container hatch with its cluster target and its host peer (a host launch runs `journeys collect`), and `journeys.app` |
 | `shell/hatches/journeys/telemetry.js` | regenerated: the reporter |
 | `journeys/journeys.nu` | regenerated: the generate step |
 | `.say.json` | merged: `launch@journeys` |
@@ -41,14 +41,22 @@ ${CLAUDE_PLUGIN_ROOT}/bin/pronto-journeys .
 Then:
 
 1. Read `journeys_gestures.cue`: each screen's gestures, a handler by its
-   module, a form by its id else `action-entity`. Only reader events count
+   module, a form by its id, else its `data-gesture`, else `action-entity`. Only reader events count
    (click, dblclick, change, submit, keydown, drop); a `data-on-mutation`
-   reduce or a machine transition is no gesture.
+   reduce or a machine transition is no gesture. Work a hatch carries out
+   itself (a form it holds while it calls a service, a token it hands over by
+   fetch) is no submit the reporter sees: the hatch dispatches a
+   `journeys:gesture` event on the screen, detail `{gesture, outcome, ms}`
+   (outcome ok, failed, refused or invalid), and `journeys_spec.cue` declares
+   the name in `reported: <screen>: [...]`.
 2. Write the journeys into `journeys_spec.cue` with the user: an owner, the
    ordered `screen.gesture` moments, `slo.availability` (percent of valid runs
    that reach the last moment), optionally `slo.latency: {percent, under}`,
-   and `idle` (how long before a run is abandoned, default 30m). Ask which
-   journeys are critical and what they promise; never invent targets.
+   `idle` (how long before a run is abandoned, default 30m) and `quiet` (how
+   long without a run before JourneyNoData, default 1h; longer for a journey
+   readers take rarely). Optionally `journeys: title: "…"` names the
+   dashboard. Ask which journeys are critical and what they promise; never
+   invent targets.
 3. Add both hatches to `ir.html`'s Decisions — `<p id="journeys-telemetry"
    data-kind="hatch">…</p>` and `<p id="journeys-collector"
    data-kind="hatch">…</p>`, saying what each is — and re-pin
@@ -70,6 +78,22 @@ the app's, Grafana's and vmalert's addresses. Use the app and watch the
 journeys move; `journeys down` (in `journeys/journeys.nu`) stops it all. In a
 deployed cluster the same files go to its own VictoriaMetrics, vmalert and
 Grafana.
+
+## Production
+
+`observability/` holds what production reads: `journeys.alerts.json` (one
+Cloud Monitoring PromQL policy per alert) and `journeys.dashboard.json`
+(Grafana, a Prometheus data source). Every expression is plain PromQL on the
+collector's series, so Managed Service for Prometheus, which evaluates no
+recording rules, reads them as they are.
+
+1. In `release.cue`: `sidecars: "journeys-collector": {port: 8686, metrics:
+   port: 9598, apart: {}}`; Managed Prometheus scrapes it.
+2. In the operator's pronto-infra state: a `notificationChannels` entry and
+   `alertPolicies: "<app>-journeys": {file:
+   "<path to the app>/observability/journeys.alerts.json", channels: [...]}`;
+   the dashboard as a `#Secret.file` mounted into a Grafana `runServices`
+   entry whose `sidecars` hold Managed Prometheus's query frontend.
 
 ## Limits
 
