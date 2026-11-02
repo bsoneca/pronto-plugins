@@ -9,7 +9,11 @@
 // start and never stored, since its tokens live five minutes and tenants
 // fetch a key they do not know.
 import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, signEs256, verifyIdToken } from "../oidc.ts";
-import { type AuthRequest, Codes, emailOf, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, profileOf, providerScope, redeem } from "./core.ts";
+import { type AuthRequest, Codes, emailOf, esc, json, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, profileOf, providerScope, redeem } from "./core.ts";
+
+// Kept where phone.ts takes them (core.ts), so the phone imports nothing of this module at run time:
+// a cycle with its top-level await would never resolve, and the broker would never start.
+export { esc, json };
 
 const enc = new TextEncoder();
 
@@ -70,7 +74,6 @@ export async function unseal(key: CryptoKey, token: unknown): Promise<Record<str
   }
 }
 
-export const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
 
 export function page(title: string, body: string, status = 200): Response {
@@ -84,9 +87,6 @@ a.go{display:inline-flex;align-items:center;min-height:48px;padding:0 20px;borde
 <body><main>${body}</main></body></html>
 `, { status, headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": PAGE_CSP, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
 }
-
-export const json = (status: number, body: unknown) =>
-  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 
 export function back(redirectUri: string, params: Record<string, string>): Response {
   const url = new URL(redirectUri);

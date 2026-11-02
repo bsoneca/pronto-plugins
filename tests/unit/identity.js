@@ -242,3 +242,26 @@ export async function hydraPhoneLogin(tenant) {
   const res = await handle(new Request(`${issuer}/login?login_challenge=C1`));
   return { status: res.status, rejected };
 }
+
+/** The production broker started as Cloud Run starts it (`deno run broker/main.ts`), with Google and,
+ * unless `phone` is false, the phone configured: the providers its discovery names once it answers,
+ * or what it said if it never did. */
+export async function started(phone = true) {
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const env = { PORT: String(port), BROKER_ISSUER: 'https://id.example.com', BROKER_SECRET: 'a-secret-of-thirty-two-characters!', GOOGLE_CLIENT_ID: 'op-client', GOOGLE_CLIENT_SECRET: 'op-secret', ...(phone ? PHONE_ENV : {}) };
+  const main = new URL('../../identity/broker/main.ts', import.meta.url).pathname;
+  const child = new Deno.Command(Deno.execPath(), { args: ['run', '--no-config', '--allow-net', '--allow-env', main], env, stdout: 'null', stderr: 'piped' }).spawn();
+  try {
+    for (let i = 0; i < 100; i++) {
+      const r = await fetch(`http://127.0.0.1:${port}/.well-known/openid-configuration`).catch(() => null);
+      if (r?.ok) return (await r.json()).providers.map((p) => p.name);
+      await r?.body?.cancel();
+      await new Promise((ok) => setTimeout(ok, 100));
+    }
+    return { never: 'answered' };
+  } finally {
+    child.kill();
+    await child.stderr.cancel();
+    await child.status;
+  }
+}

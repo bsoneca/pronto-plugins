@@ -191,3 +191,10 @@ export function idTokenClaims(p: { issuer: string; grant: Grant; now?: number })
     exp: now + 300,
   };
 }
+
+// A page's text, escaped; and a JSON answer no cache keeps. Here, apart from the network, so the
+// phone (phone.ts) shares them with main.ts without importing main.ts.
+export const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+export const json = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
