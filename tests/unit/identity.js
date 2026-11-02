@@ -191,7 +191,7 @@ export async function phoneBrokered(p = {}) {
   const approved = await handle(new Request(`${issuer}/phone/approve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: config.id, token: await firebaseToken(over, unsigned, project) }) }));
   const answer = await approved.json();
   const out = {
-    says: sayOf(consent), lang: /<html lang="([^"]+)"/.exec(page)[1], title: config.strings.title, csp: pageRes.headers.get('content-security-policy'),
+    says: sayOf(consent), lang: /<html lang="([^"]+)"/.exec(page)[1], title: config.strings.title, csp: pageRes.headers.get('content-security-policy'), referrer: pageRes.headers.get('referrer-policy'),
     asks: /id="phone-number"/.test(page) && /data-e164/.test(page), admit: config.admit, emulator: config.emulator, approved: approved.status, error: answer.error ?? null,
   };
   if (!answer.to) return out;

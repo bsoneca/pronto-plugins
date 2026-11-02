@@ -38,6 +38,7 @@ cases: {
 		{use: "out"}, {get: "csp", matches: "connect-src 'self' https://app\\.example\\.com https://identitytoolkit\\.googleapis\\.com"},
 		{use: "out"}, {get: "csp", matches: "frame-ancestors 'none'"},
 		{use: "out"}, {get: "emulator", expect: null},
+		{use: "out"}, {get: "referrer", expect: "strict-origin", why: "the API key admits the broker's origin as a referrer, which no-referrer would withhold"},
 		{call: "identity.phoneBrokered", args: [{lang: "en-US,en;q=0.8"}]}, {get: "title", expect: "Sign in with your phone"},
 		{call: "identity.phoneBrokered", args: [{lang: "fr"}]}, {get: "lang", expect: "en", why: "English for a language the page does not speak"},
 	]}

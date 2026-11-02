@@ -177,8 +177,10 @@ export function firebaseProblem(claims: Record<string, unknown>, cfg: PhoneConfi
   return "";
 }
 
+// The page's referrer is its origin alone, never its address (which holds no secret, but the visit's
+// id): Firebase's API key admits the broker's origin as a referrer, and a request with none is refused.
 const html = (body: string, csp: string, status = 200) =>
-  new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": csp, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+  new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": csp, "cache-control": "no-store", "referrer-policy": "strict-origin" } });
 
 export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { keys?: KeySource; now?: () => number } = {}): Promise<{
   provider: Provider;
@@ -224,7 +226,7 @@ export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { ke
     const data = JSON.stringify(config).replace(/</g, "\\u003c");
     return html(`<!doctype html>
 <html lang="${lang}">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="strict-origin">
 <title>${esc(s.title)}</title>
 <style>${STYLE}</style></head>
 <body><main>
