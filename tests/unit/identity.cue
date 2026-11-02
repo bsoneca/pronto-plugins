@@ -116,4 +116,10 @@ cases: {
 		{call: "identity.fakeSignsIn", args: ["openid", "tester-Bad_Name"]},
 		{get: "status", expect: 400},
 	]}
+	"two first sign-ins at once: the second's 409 is the first's client, passed on, not a 500": {suite: "identity", steps: [
+		{call: "identity.hydraRegisterRace"}, {keep: "out"},
+		{get: "status", expect: 302, why: "on to Hydra's login, as a registered client goes"},
+		{use: "out"}, {get: "posted", expect: 1},
+		{use: "out"}, {get: "put", expect: 0, why: "the client the other sign-in made is already the tenant's"},
+	]}
 }
