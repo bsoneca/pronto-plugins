@@ -5,8 +5,8 @@ package __PACKAGE__
 // billing/owner.ts new); the secret stays with the author. Prices are in
 // minor units, the first the default.
 billing: {
-	// The broker on this machine, with a stand-in for Stripe; a release names
-	// the operator's.
+	// The broker on this machine, with a stand-in for Stripe, on a port of
+	// this app's own (billing_plugin.cue); a release names the operator's.
 	broker: "http://localhost:28463"
 	owner:  "__OWNER__"
 	plans: {}
@@ -25,6 +25,5 @@ _billingGrantsMigration: "billing_02"
 // The Subscription table's identity, which pronto's mint stamps here: the
 // rest of it is pronto-billing's (billing_plugin.cue).
 code: state: entities: {
-	Subscription: {
-	}
+	Subscription: {}
 }
