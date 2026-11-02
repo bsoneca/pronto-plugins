@@ -126,12 +126,12 @@ export def main [
 				containers: [{
 					image: $"($image)@($digest)"
 					ports: [{name: "http1", containerPort: 8080}]
-					env: [
+					env: ([
 						{name: "BROKER_ISSUER", value: $issuer}
 						{name: "GOOGLE_CLIENT_ID", value: $google_client_id}
 						{name: "BROKER_SECRET", valueFrom: {secretKeyRef: {name: $"($service)-secret", key: $broker_version}}}
 						{name: "GOOGLE_CLIENT_SECRET", valueFrom: {secretKeyRef: {name: $google_secret, key: $google_version}}}
-					] ++ $phone
+					] ++ $phone)
 					startupProbe: {httpGet: {path: "/health", port: 8080}, periodSeconds: 1, failureThreshold: 30}
 				}]
 			}

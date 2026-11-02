@@ -70,6 +70,10 @@ jobs:
         run: deno test --no-config --allow-net identity/oidc_test.ts identity/broker
       - name: Test the billing broker
         run: deno lint --no-config billing intents gcp tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
+      # A script that does not parse fails only when it is run, and a release script runs rarely
+      # (identity/release.nu shipped `env: [...] ++ $phone`, a record field nu cannot parse).
+      - name: Parse each nushell script
+        run: sayt --script tools.nu nu -c 'let bad = (glob **/*.nu | where {|f| not (nu-check $f) }); if ($bad | is-not-empty) { print $bad; exit 1 }'
       - name: Test the intents (tests/unit/*.cue)
         run: for s in stripe deploy release runner identity targets; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
       # flagd, the version the flags plugin pins, checked against its release's digest.
