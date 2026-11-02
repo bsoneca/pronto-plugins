@@ -56,6 +56,10 @@ import (
 	// image of the same version (another registry's, or republished) is taken afresh.
 	cacheKey: "\(runtime)-\(regexp.FindSubmatch("@sha256:([0-9a-f]{16})", frontImage)[1])"
 	hydraImage: "oryd/hydra:v26.2.0@sha256:ff67c7fb5f95074fa53374d41151713554960504b340cd3f95b09e65deaea2a9"
+	// What the app asks the broker for, each provider alike: a subject
+	// (openid), the person's name and picture (profile) and their verified
+	// e-mail (email); only what it asks for arrives.
+	scope: *"openid profile" | string & =~"^openid( (profile|email))*$"
 	// The providers the app offers, each one the broker offers.
 	providers: *["google"] | [string & =~"^[a-z][a-z0-9]*$", ...string & =~"^[a-z][a-z0-9]*$"]
 
@@ -157,7 +161,7 @@ import (
 				// without it. Each provider's settings put the broker in its place.
 				_identityNeedsAuth: code.capabilities.auth.service & "/auth"
 				code: capabilities: auth: providers: [\(strings.Join([for p in H.providers {"\"\(p)\""}], ", "))]
-				\(strings.Join([for p in H.providers {"code: capabilities: auth: provider: \(p): {issuer: \"\(H.broker)\", internal: \"\(H.brokerInternal)\", client: \"origin\", scope: \"openid profile\", params: \"provider=\(p)\"}"}], "\n"))
+				\(strings.Join([for p in H.providers {"code: capabilities: auth: provider: \(p): {issuer: \"\(H.broker)\", internal: \"\(H.brokerInternal)\", client: \"origin\", scope: \"\(H.scope)\", params: \"provider=\(p)\"}"}], "\n"))
 
 				\(H._localTargets)
 				"""

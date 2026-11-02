@@ -16,7 +16,7 @@
 // broker's pairwise one, under the same secret, so a person keeps the subject
 // each application already linked.
 import { Refused, randomToken, verifyIdToken } from "../oidc.ts";
-import { callbackOf, pairwiseKey, pairwiseSubject, profileOf, tenantOf } from "../broker/core.ts";
+import { callbackOf, emailOf, learnsMore, pairwiseKey, pairwiseSubject, profileOf, providerScope, tenantOf } from "../broker/core.ts";
 import { esc, google, hmacKey, json, page, type Provider, seal, unseal } from "../broker/main.ts";
 import { fakeGoogle } from "./fake.ts";
 
@@ -73,7 +73,7 @@ export async function front(p: {
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code"],
       response_types: ["code"],
-      scope: "openid profile",
+      scope: "openid profile email",
     };
     const path = `/clients/${encodeURIComponent(tenant)}`;
     const held = await admin("GET", path);
@@ -122,11 +122,14 @@ export async function front(p: {
       return go(redirect_to as string);
     }
     // Whether the tenant asked for the person's name and picture, which only then the provider is asked for.
-    const sp = ((r.requested_scope as string[]) ?? []).includes("profile");
-    const leg = await seal(stateKey, { c: challenge, t: tenant, p: name, sp, pn: randomToken(16), exp: Math.floor(Date.now() / 1000) + 600 });
+    const asked = (r.requested_scope as string[]) ?? [];
+    const sp = asked.includes("profile");
+    // And whether it asked for the person's e-mail, which likewise only then the provider is asked for.
+    const se = asked.includes("email");
+    const leg = await seal(stateKey, { c: challenge, t: tenant, p: name, sp, se, pn: randomToken(16), exp: Math.floor(Date.now() / 1000) + 600 });
     const host = new URL(tenant).host;
     return page(`Sign in to ${host}`, `<h1>Sign in to <span class="origin">${esc(host)}</span></h1>
-<p>You'll continue with ${esc(provider.label)}. Only <span class="origin">${esc(tenant)}</span> learns that it's you, and it can't tell you apart in any other app.</p>
+<p>You'll continue with ${esc(provider.label)}. Only <span class="origin">${esc(tenant)}</span> learns that it's you, and it can't tell you apart in any other app.${se ? ` ${esc(learnsMore({ profile: sp, email: se }))}` : ""}</p>
 <p><a class="go" href="${esc(`${issuer}/login/continue?leg=${encodeURIComponent(leg)}`)}">Continue with ${esc(provider.label)}</a></p>
 <p><small>If you didn't start this from ${esc(host)}, close this page.</small></p>`);
   }
@@ -138,7 +141,7 @@ export async function front(p: {
     const to = new URL(provider.authUrl);
     to.search = new URLSearchParams({
       client_id: provider.clientId, redirect_uri: callback(provider.name), response_type: "code",
-      scope: leg.sp ? "openid profile" : "openid", state: url.searchParams.get("leg")!, nonce: leg.pn as string, prompt: "select_account",
+      scope: providerScope({ profile: leg.sp === true, email: leg.se === true }), state: url.searchParams.get("leg")!, nonce: leg.pn as string, prompt: "select_account",
     }).toString();
     return go(to.toString());
   }
@@ -180,25 +183,28 @@ export async function front(p: {
     // is derived for that tenant and no other.
     const sub = await pairwiseSubject(pairwise, leg.t as string, provider.name, claims.sub);
     const { redirect_to } = await adminJson("PUT", `/oauth2/auth/requests/login/accept?login_challenge=${challenge}`, {
-      subject: sub, remember: false, context: { idp: provider.name, ...(leg.sp ? profileOf(claims) : {}) },
+      subject: sub, remember: false, context: { idp: provider.name, ...(leg.sp ? profileOf(claims) : {}), ...(leg.se ? emailOf(claims) : {}) },
     });
     return go(redirect_to as string);
   }
 
   // Consent is the page the reader already saw: a subject, and the name and
-  // picture where the tenant asked for them and the provider showed the person
-  // so, for the tenant that asked, granted without a second question.
+  // picture, and the verified e-mail, where the tenant asked for them and the
+  // provider showed the person so, for the tenant that asked, granted without
+  // a second question.
   async function consent(url: URL): Promise<Response> {
     const challenge = encodeURIComponent(url.searchParams.get("consent_challenge") ?? "");
     const r = await adminJson("GET", `/oauth2/auth/requests/consent?consent_challenge=${challenge}`);
-    const context = (r.context as { idp?: string; name?: string; picture?: string } | null) ?? {};
-    const granted = ((r.requested_scope as string[]) ?? []).filter((s) => s === "openid" || s === "profile");
+    const context = (r.context as { idp?: string; name?: string; picture?: string; email?: string } | null) ?? {};
+    const granted = ((r.requested_scope as string[]) ?? []).filter((s) => s === "openid" || s === "profile" || s === "email");
     const profile = granted.includes("profile") ? profileOf(context) : {};
+    // The context holds an e-mail only where the provider verified it (arrive).
+    const email = granted.includes("email") ? emailOf({ ...context, email_verified: typeof context.email === "string" }) : {};
     const { redirect_to } = await adminJson("PUT", `/oauth2/auth/requests/consent/accept?consent_challenge=${challenge}`, {
       grant_scope: granted,
       grant_access_token_audience: [],
       remember: false,
-      session: { id_token: context.idp ? { idp: context.idp, ...profile } : {} },
+      session: { id_token: context.idp ? { idp: context.idp, ...profile, ...(email.email ? { email: email.email, email_verified: true } : {}) } : {} },
     });
     return go(redirect_to as string);
   }

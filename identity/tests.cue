@@ -80,3 +80,10 @@ localFrontPort: strings.Contains(_decl, "expose: http: port: 19543") & strings.C
 localHydraMoves: strings.Contains(_decl, "expose: {public: {port: 28453, env: \"SERVE_PUBLIC_PORT\"}, admin: {port: 28455, env: \"SERVE_ADMIN_PORT\"}}") & true
 localHydraIssuer: strings.Contains(_decl, "URLS_SELF_ISSUER: \"http://localhost:19543\"") & true
 noSharedPort: strings.Contains(_decl, "28443") & false
+
+// What the app asks the broker for is its own: openid and profile unless it says, and the
+// verified e-mail too where it names email, each provider alike; nothing else is admitted.
+scopeDefault: _t.scope & "openid profile"
+_e: #Host & {package: "myapp", frontImage: _image, scope: "openid profile email"}
+scopeEmail: strings.Contains(_e.files["identity_signin.cue"].text, "client: \"origin\", scope: \"openid profile email\", params: \"provider=google\"}") & true
+scopeOpenidOnly: (#Host & {package: "myapp", frontImage: _image, scope: "openid"}).scope & "openid"

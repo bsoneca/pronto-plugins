@@ -1,0 +1,42 @@
+# Publishes the identity broker's runtime (identity/publish.sh) from Actions, so no developer's
+# machine runs Docker: ghcr.io/bsoneca/pronto-identity:<version> for linux/amd64 and linux/arm64,
+# the broker's code at the pushed commit, composed exactly as publish.sh composes it (it runs
+# publish.sh itself). A version once published never changes: publish.sh reuses what is there.
+#
+# Push the commit to publish as a branch named `publish-identity/v<version>`:
+#   git push origin <sha>:refs/heads/publish-identity/v0.1.2
+# The run's summary prints the image and its digest, which an app names as bin/pronto-identity's
+# frontImage=ghcr.io/bsoneca/pronto-identity:<version>@sha256:…
+name: publish-identity
+on:
+  push:
+    branches: ['publish-identity/v*']
+permissions:
+  contents: read
+  packages: write
+env:
+  IMAGE: ghcr.io/bsoneca/pronto-identity
+  # QEMU for the arm64 half of the build, pinned by digest.
+  BINFMT: tonistiigi/binfmt:qemu-v9.2.2@sha256:1b804311fe87047a4c96d38b4b3ef6f62fca8cd125265917a9e3dc3c996c39e6
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: version
+        run: |
+          v="${GITHUB_REF_NAME#publish-identity/v}"
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "not a version: $v" >&2; exit 1; }
+          echo "V=$v" >> "$GITHUB_ENV"
+      # GHCR_TOKEN, a token with write:packages, when the package doesn't grant this repository's
+      # Actions write.
+      - name: registry
+        env:
+          TOKEN: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+      - name: arm64 emulation
+        run: docker run --privileged --rm "$BINFMT" --install arm64
+      - name: publish
+        run: sh identity/publish.sh "$V" | tee -a "$GITHUB_STEP_SUMMARY"

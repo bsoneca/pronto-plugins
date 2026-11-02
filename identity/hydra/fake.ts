@@ -14,14 +14,16 @@ const SECRET = "fake-google-secret";
 /** The test people a reader may sign in as: two, so "a stranger to another
  * person" can be tried by hand. */
 export const PEOPLE = ["tester", "tester-2"];
+/** Any other test person a scenario names, so each run may sign in someone new: never listed. */
+export const FRESH = /^tester-[a-z0-9-]{1,40}$/;
 
 export async function fakeGoogle(issuer: string): Promise<{ provider: Provider; handle: (req: Request, url: URL) => Promise<Response> | null }> {
   const base = `${issuer.replace(/\/$/, "")}/fake/google`;
   const pair = await crypto.subtle.generateKey(
     { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
   const jwk = { ...(await crypto.subtle.exportKey("jwk", pair.publicKey)), kid: "fake-1" };
-  const asked = new Map<string, { nonce: string; state: string; redirect: string; profile: boolean; expires: number }>();
-  const codes = new Map<string, { nonce: string; sub: string; redirect: string; profile: boolean; expires: number }>();
+  const asked = new Map<string, { nonce: string; state: string; redirect: string; profile: boolean; email: boolean; expires: number }>();
+  const codes = new Map<string, { nonce: string; sub: string; redirect: string; profile: boolean; email: boolean; expires: number }>();
   const live = <T extends { expires: number }>(m: Map<string, T>, k: string | null) => {
     const v = k === null ? undefined : m.get(k);
     if (k !== null) m.delete(k);
@@ -34,8 +36,8 @@ export async function fakeGoogle(issuer: string): Promise<{ provider: Provider; 
       return page("Test sign-in refused", `<h1>This test sign-in can't continue</h1>`, 400);
     }
     const id = randomToken(16);
-    const profile = (q.get("scope") ?? "").split(" ").includes("profile");
-    asked.set(id, { nonce: q.get("nonce")!, state: q.get("state")!, redirect: q.get("redirect_uri")!, profile, expires: Date.now() + 600_000 });
+    const scopes = (q.get("scope") ?? "").split(" ");
+    asked.set(id, { nonce: q.get("nonce")!, state: q.get("state")!, redirect: q.get("redirect_uri")!, profile: scopes.includes("profile"), email: scopes.includes("email"), expires: Date.now() + 600_000 });
     const links = PEOPLE.map((who) => `<p><a class="go" href="${esc(`${base}/approve?id=${id}&who=${who}`)}">Continue as ${esc(who)}</a></p>`).join("\n");
     return page("Test sign-in", `<h1>Test sign-in</h1>
 <p>This is not Google: the broker on this machine has no Google client, so it signs in a test person instead.</p>
@@ -45,9 +47,9 @@ ${links}`);
   function approve(url: URL): Response {
     const a = live(asked, url.searchParams.get("id"));
     const who = url.searchParams.get("who") ?? "";
-    if (!a || !PEOPLE.includes(who)) return page("Test sign-in expired", `<h1>This test sign-in expired</h1><p>Go back to the app and start again.</p>`, 400);
+    if (!a || !(PEOPLE.includes(who) || FRESH.test(who))) return page("Test sign-in expired", `<h1>This test sign-in expired</h1><p>Go back to the app and start again.</p>`, 400);
     const code = randomToken(16);
-    codes.set(code, { nonce: a.nonce, sub: who, redirect: a.redirect, profile: a.profile, expires: Date.now() + 60_000 });
+    codes.set(code, { nonce: a.nonce, sub: who, redirect: a.redirect, profile: a.profile, email: a.email, expires: Date.now() + 60_000 });
     const to = new URL(a.redirect);
     to.searchParams.set("code", code);
     to.searchParams.set("state", a.state);
@@ -64,7 +66,9 @@ ${links}`);
     const head = base64url(enc.encode(JSON.stringify({ alg: "RS256", kid: jwk.kid })));
     // Asked for `profile`, Google answers a name and a picture on its own host: so does this.
     const profile = c.profile ? { name: `Test ${c.sub}`, picture: `https://lh3.googleusercontent.com/a/fake-${c.sub}=s96-c` } : {};
-    const body = base64url(enc.encode(JSON.stringify({ iss: ISSUER, aud: CLIENT, sub: c.sub, nonce: c.nonce, ...profile, iat: now, exp: now + 300 })));
+    // Asked for `email`, Google answers the address it verified: so does this, on a domain no one receives mail at.
+    const email = c.email ? { email: `${c.sub}@example.com`, email_verified: true } : {};
+    const body = base64url(enc.encode(JSON.stringify({ iss: ISSUER, aud: CLIENT, sub: c.sub, nonce: c.nonce, ...profile, ...email, iat: now, exp: now + 300 })));
     const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", pair.privateKey, enc.encode(`${head}.${body}`)));
     return json(200, { id_token: `${head}.${body}.${base64url(sig)}`, token_type: "Bearer", expires_in: 300 });
   }

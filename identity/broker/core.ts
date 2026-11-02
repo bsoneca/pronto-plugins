@@ -58,6 +58,8 @@ export interface AuthRequest {
   challenge: string;
   /** Whether the tenant asked for the person's name and picture (`profile`). */
   profile: boolean;
+  /** Whether the tenant asked for the person's verified e-mail address (`email`). */
+  email: boolean;
 }
 
 /**
@@ -85,7 +87,7 @@ export function parseAuthorize(q: URLSearchParams, providers: readonly string[])
   if (q.get("code_challenge_method") !== "S256" || !/^[A-Za-z0-9_-]{43}$/.test(q.get("code_challenge") ?? "")) return fail("invalid_request");
   const nonce = q.get("nonce") ?? "";
   if (nonce === "" || nonce.length > 256) return fail("invalid_request");
-  return { ok: true, request: { tenant, redirectUri: redirect, provider, state, nonce, challenge: q.get("code_challenge")!, profile: scopes.includes("profile") } };
+  return { ok: true, request: { tenant, redirectUri: redirect, provider, state, nonce, challenge: q.get("code_challenge")!, profile: scopes.includes("profile"), email: scopes.includes("email") } };
 }
 
 export const pkceMatches = async (verifier: unknown, challenge: string) =>
@@ -102,7 +104,31 @@ export interface Grant {
   /** The provider's name and picture for the person, where the tenant asked for them. */
   name?: string;
   picture?: string;
+  /** The provider's verified e-mail for the person, where the tenant asked for it. */
+  email?: string;
 }
+
+/** The scope the broker asks the provider for: `openid`, and `profile` and
+ * `email` only where the tenant asked for them. */
+export const providerScope = (asked: { profile?: boolean; email?: boolean }) =>
+  ["openid", ...(asked.profile ? ["profile"] : []), ...(asked.email ? ["email"] : [])].join(" ");
+
+/**
+ * What a tenant that asked for `email` is told of the person, from the
+ * provider's verified claims: the address, only where the provider says it
+ * verified it (`email_verified` true), of a plain shape and at most 254
+ * characters; else nothing.
+ */
+export function emailOf(claims: Record<string, unknown>): { email?: string } {
+  if (claims.email_verified !== true || typeof claims.email !== "string") return {};
+  const email = claims.email.trim();
+  return email.length <= 254 && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? { email } : {};
+}
+
+/** The sentence the broker's page adds for a tenant that asked for the
+ * person's e-mail: what else it learns. None for any other tenant. */
+export const learnsMore = (asked: { profile?: boolean; email?: boolean }) =>
+  asked.email ? `It also learns your ${asked.profile ? "name and " : ""}e-mail address.` : "";
 
 /**
  * What a tenant that asked for `profile` is told of the person, from the
@@ -160,6 +186,7 @@ export function idTokenClaims(p: { issuer: string; grant: Grant; now?: number })
     idp: p.grant.provider,
     ...(p.grant.name ? { name: p.grant.name } : {}),
     ...(p.grant.picture ? { picture: p.grant.picture } : {}),
+    ...(p.grant.email ? { email: p.grant.email, email_verified: true } : {}),
     iat: now,
     exp: now + 300,
   };

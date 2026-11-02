@@ -30,7 +30,11 @@ Each application is its own tenant, and tenants are never merged:
   only once the redirect is known to be the tenant's.
 - The subject the broker vouches for is pairwise: a keyed hash of tenant,
   provider and the provider's subject. One person is a stranger to every other
-  app, and nothing else about them arrives (scope `openid`).
+  app, and only what the tenant asked for arrives: `openid` alone gives the
+  subject; `profile` adds the name and picture; `email` adds the e-mail address,
+  and only one the provider says it verified (`email_verified` true), with
+  `email_verified: true` beside it. The provider is asked only for what the
+  tenant asked, and the broker's page names the e-mail when it was asked.
 - A code is single-use and redeemable only by the tenant and redirect it was
   issued to; the ID token's audience is that tenant alone.
 
@@ -57,7 +61,9 @@ own: there is no default).
   image's files, taken once per release into `~/.cache/pronto-identity`). With the
   operator's `~/.config/pronto-identity/broker.env` it signs in through Google;
   without it, through a stand-in that says it is not Google and signs in a test
-  person (`tester`, `tester-2`).
+  person (`tester`, `tester-2`, or any `tester-<a-z0-9->` a scenario names
+  at `/fake/google/approve`, so each run may sign in someone new), with the name
+  `Test <who>` and, asked for `email`, the verified address `<who>@example.com`.
 - `launch` runs their images: Hydra's, and the front's (`frontImage`), the
   stand-in unless `GOOGLE_CLIENT_ID`
   and `GOOGLE_CLIENT_SECRET` are set.
@@ -73,7 +79,9 @@ verbs are green:
 
 1. `${CLAUDE_PLUGIN_ROOT}/bin/pronto-identity . frontImage=<image>` (the front's image the
    operator published, below; a refresh keeps the one the app has), or `broker=<url>` for an
-   operator's broker elsewhere, which needs no image; `providers=<a,b>` for more than Google.
+   operator's broker elsewhere, which needs no image; `providers=<a,b>` for more than Google;
+   `scope=openid,profile,email` for what the app asks the broker for (default `openid profile`;
+   a refresh keeps the app's).
 2. Add a decision for the sign-in to `ir.html`, then re-pin `meta.ir.sha256`.
 3. The terminal's strip offers each provider to a guest. An app that hides the
    strip presses its `.shell-provider[data-provider=<name>]` link from its own

@@ -9,14 +9,14 @@ Two halves:
 - **The identity broker** ([`broker/`](broker)), run once by the framework's operator: an OpenID Connect provider in front of the social providers (Google first).
 - **The app side**, configuration alone: `identity_signin.cue` names the providers (`auth.providers`) and puts the broker in each one's place (`auth.provider.<name>`). No code of this plugin runs in the app.
 
-Each app is its own tenant, never merged with another. The subject the broker vouches for is pairwise, so a person is a stranger to every other app. It needs a pronto with `auth.providers`, a mecha whose auth service signs in by OpenID Connect, and an omnishell that draws a provider's way in.
+Each app is its own tenant, never merged with another. The subject the broker vouches for is pairwise, so a person is a stranger to every other app. Only what the tenant asks for arrives: `profile` adds the person's name and picture, `email` an e-mail address the provider says it verified; the installer's `scope=` (default `openid profile`) says which. It needs a pronto with `auth.providers`, a mecha whose auth service signs in by OpenID Connect, and an omnishell that draws a provider's way in.
 
 ## Use
 
 From a pronto app:
 
 ```sh
-<this repo>/bin/pronto-identity . frontImage=<registry>/pronto-identity:<version>@sha256:<digest> [providers=<a,b>]
+<this repo>/bin/pronto-identity . frontImage=<registry>/pronto-identity:<version>@sha256:<digest> [providers=<a,b>] [scope=openid,profile,email]
 ./saytw generate && ./saytw lint
 ```
 
