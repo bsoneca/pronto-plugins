@@ -7,6 +7,7 @@ beyond the browser, and beside them, on unmodified pronto. Why and how they are 
 ## Plugins
 
 - [ads](ads/README.md): rewarded ads a player chooses to watch.
+- [analytics](analytics/README.md): business numbers (users, paying users, games, funnels) and visits, read not alerted.
 - [android](android/README.md): a native Android host, no WebView.
 - [billing](billing/README.md): paid plans through a shared Stripe broker.
 - [firebase](firebase/README.md): release to Firebase Hosting.

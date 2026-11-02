@@ -52,6 +52,9 @@ import "list"
 	runServices: [Name=string]: #RunService
 	// Databases on an instance another owner keeps, by instance and name.
 	databases: [Instance=string]: [Name=string]: true
+	// Users of such an instance, by instance and name, each with a password OpenTofu makes and
+	// puts in the secrets named (never in this state, always in its own).
+	sqlUsers: [Instance=string]: [Name=string]: #SqlUser
 	repositories: [Name=string]: #Repository
 	buckets: [Name=#BucketName]: #Bucket
 	secrets: [Name=string]:      #Secret
@@ -81,7 +84,7 @@ import "list"
 	adopt: [#Adoptable]: [...string]
 	// Of what is adopted, what is not there yet, by kind and name: it is made, never imported
 	// (an import of one that does not exist fails). A binding is its own entry, so an existing
-	// parent can get a new binding: a role for iam and members; `account/role`, `repository/role`
+	// parent can get a new binding: a role for iam, and a role or `role/member` for members, `instance/name` for databases; `account/role`, `repository/role`
 	// and `bucket/role` for those parents' grants; a service's name for its invokers. Buckets
 	// and secrets, and the grants of a secret, say so with `made` and `newGrants` instead.
 	fresh: [#Fresh]: [...string]
@@ -97,10 +100,10 @@ import "list"
 	if create {adoptAll: true}
 }
 
-#Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases" | "apiKeys" | "budgets" | "hostingSites"
+#Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases" | "sqlUsers" | "apiKeys" | "budgets" | "hostingSites"
 
 // identityPlatform is adopted by naming "config": a project has one.
-#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies"
+#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "sqlUsers" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies"
 
 #Found: "serviceAccounts" | "members"
 
@@ -180,6 +183,17 @@ import "list"
 	memory:         string
 	timeout:        =~"^[0-9]+s$"
 	maxInstances:   int & >0
+	// Instances kept running with no request, and whether the CPU is held back between requests
+	// (the default) or kept (false): a service that works between requests, such as one scraped for
+	// metrics, is billed by the instance instead.
+	minInstances: *0 | int & >=0
+	cpuIdle:      *true | bool
+	// Requests one instance serves at once (Cloud Run requires 1 where the instance has less than
+	// one CPU in all); absent, Cloud Run's own.
+	concurrency?: int & >=1
+	// A custom domain mapped to the service, made here and never imported (its DNS record is the
+	// registrar's): a mapping that exists already is the registrar's to move.
+	domain?: =~"^[a-z0-9.-]+$"
 	env: [string]:           string
 	secretEnv: [Var=string]: string
 	secretFiles: [Dir=string]: {secret: string, path: string}
@@ -192,9 +206,24 @@ import "list"
 		cpu:    *"500m" | string
 		memory: *"256Mi" | string
 		env: [string]: string
+		secretFiles: [Dir=string]: {secret: string, path: string}
 	}
 	// Who may call it: roles/run.invoker, authoritative.
 	invokers: #Members
+}
+
+// A user of a Cloud SQL instance. OpenTofu makes its password (alphanumeric, 32 characters) and
+// writes it as a version of `password`, and, if `url` is named, as the postgres URL of `database`
+// over the instance's socket as a Cloud Run service reaches it (`query`, if any, is added to it:
+// "&options=-c%20role%3Dx"). Both are secrets of this project, declared like any (made: true).
+// Cloud SQL puts a user made through its API in cloudsqlsuperuser: what the user may do is the
+// database's to narrow.
+#SqlUser: {
+	password!: string
+	url?:      string
+	database:  string
+	region:    *"us-central1" | string
+	query:     *"" | =~"^&"
 }
 
 // A Cloud Monitoring notification channel: mail to one address.
@@ -252,4 +281,18 @@ import "list"
 	// A secret whose one value is a file of the operator's repository, beside the state
 	// folder: applying adds the file as a new version whenever it changes.
 	file?: string
+	// A secret whose one value is this text, written by the state itself (a configuration file
+	// built from the state's other facts): a new version whenever the text changes.
+	text?: string
+	// A secret whose one value OpenTofu makes at random (alphanumeric, 48 characters) the first
+	// time and keeps: a key nobody needs to know.
+	random: *false | bool
+	// A secret the operator puts the value of, which a service reading it needs to exist before
+	// it does: this text is its first version, made once and never changed again (the operator's
+	// versions follow it, and readers take the latest).
+	placeholder?: string
+	// A secret has one source of value.
+	if (file != _|_ && text != _|_) || (random && (file != _|_ || text != _|_)) || (placeholder != _|_ && (file != _|_ || text != _|_ || random)) {
+		"a secret has one source of value": _|_
+	}
 }

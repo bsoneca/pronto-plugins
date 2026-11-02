@@ -26,6 +26,9 @@ import (
 			if len(beta) > 0 {
 				required_providers: "google-beta": {source: "hashicorp/google-beta", version: "~> 7.0"}
 			}
+			if len(randoms) > 0 {
+				required_providers: random: {source: "hashicorp/random", version: "~> 3.6"}
+			}
 			backend: gcs: {bucket: Plan.backend.bucket, prefix: Plan.backend.prefix}
 		}
 		// The operator's own gcloud login, as a token in GOOGLE_OAUTH_ACCESS_TOKEN (say.cue.txt).
@@ -46,6 +49,12 @@ import (
 	// The projects with a Firebase Hosting site, which only the google-beta provider holds.
 	let beta = [for P in state.projects if len([for s, _ in P.hostingSites if P.adoptAll || list.Contains(*P.adopt["hostingSites"] | [], s) {s}]) > 0 {P.id}]
 
+	// The SQL users whose passwords OpenTofu makes: random needs its provider.
+	let randoms = list.Concat([
+		[for P in state.projects for inst, us in P.sqlUsers if P.adoptAll || list.Contains(*P.adopt["sqlUsers"] | [], inst) for u, _ in us {u}],
+		[for P in state.projects for nm, sc in P.secrets if sc.random if P.adoptAll || list.Contains(*P.adopt["secrets"] | [], nm) {nm}],
+	])
+
 	// The accounts this state keeps in any project, by the member that names them: a grant naming
 	// one waits for it, whichever project the grant is in.
 	let accounts = {
@@ -56,12 +65,12 @@ import (
 
 	for P in state.projects {
 		let adopted = {
-			for kind in ["apis", "iam", "members", "serviceAccounts", "repositories", "repositoryIam", "buckets", "secrets", "runJobs", "runServices", "databases", "apiKeys", "identityPlatform", "budgets", "hostingSites"] {
+			for kind in ["apis", "iam", "members", "serviceAccounts", "repositories", "repositoryIam", "buckets", "secrets", "runJobs", "runServices", "databases", "sqlUsers", "apiKeys", "identityPlatform", "budgets", "hostingSites"] {
 				(kind): {for n in *P.adopt[kind] | [] {(n): true}}
 			}
 		}
 		let fresh = {
-			for kind in ["apis", "iam", "members", "serviceAccounts", "serviceAccountIam", "repositories", "repositoryIam", "bucketIam", "runJobs", "runServices", "runServiceIam", "databases", "apiKeys", "budgets", "hostingSites"] {
+			for kind in ["apis", "iam", "members", "serviceAccounts", "serviceAccountIam", "repositories", "repositoryIam", "bucketIam", "runJobs", "runServices", "runServiceIam", "databases", "sqlUsers", "apiKeys", "budgets", "hostingSites"] {
 				(kind): {for n in *P.fresh[kind] | [] {(n): true}}
 			}
 		}
@@ -80,14 +89,15 @@ import (
 			[for nm, _ in P.secrets if P.adoptAll || adopted.secrets[nm] != _|_ {"google_secret_manager_secret.\((#name & {in: "\(P.id)_\(nm)"}).out)"}],
 			[for nm, sc in P.secrets if P.adoptAll || adopted.secrets[nm] != _|_ if len(sc.accessors) > 0 {"google_secret_manager_secret_iam_binding.\((#name & {in: "\(P.id)_\(nm)"}).out)"}],
 			[for nm, sc in P.secrets if P.adoptAll || adopted.secrets[nm] != _|_ if len(sc.adders) > 0 {"google_secret_manager_secret_iam_binding.\((#name & {in: "\(P.id)_\(nm)"}).out)_adders"}],
-			[for nm, sc in P.secrets if sc.file != _|_ if P.adoptAll || adopted.secrets[nm] != _|_ {"google_secret_manager_secret_version.\((#name & {in: "\(P.id)_\(nm)"}).out)"}],
+			[for nm, sc in P.secrets if sc.file != _|_ || sc.text != _|_ || sc.random || sc.placeholder != _|_ if P.adoptAll || adopted.secrets[nm] != _|_ {"google_secret_manager_secret_version.\((#name & {in: "\(P.id)_\(nm)"}).out)"}],
+			[for inst, us in P.sqlUsers if P.adoptAll || adopted.sqlUsers[inst] != _|_ for u, c in us for part in ["password", if c.url != _|_ {"url"}] {"google_secret_manager_secret_version.\((#name & {in: "\(P.id)_\(inst)_\(u)_\(part)"}).out)"}],
 		])
 
 		// A secret this state keeps a version of is read at that version; any other at its latest.
 		let readAt = {
 			for nm, sc in P.secrets {
 				(nm): *"latest" | string
-				if sc.file != _|_ if P.adoptAll || adopted.secrets[nm] != _|_ {
+				if sc.file != _|_ || sc.text != _|_ || sc.random if P.adoptAll || adopted.secrets[nm] != _|_ {
 					(nm): "${google_secret_manager_secret_version.\((#name & {in: "\(P.id)_\(nm)"}).out).version}"
 				}
 			}
@@ -120,7 +130,7 @@ import (
 			for m, _ in ms {
 				let k = (#name & {in: "\(P.id)_\(rl)_\(m)"}).out
 				tofu: resource: google_project_iam_member: (k): {depends_on: list.Concat([iamDeps, [if accounts[m] != _|_ if !list.Contains(iamDeps, accounts[m]) {accounts[m]}]]), project: P.id, role: rl, member: m}
-				if fresh.members[rl] == _|_ {_imports: "google_project_iam_member.\(k)": {id: "\(P.id) \(rl) \(m)", project: P.id, found: list.Contains(*P.found["members"] | [], "\(rl)/\(m)")}}
+				if fresh.members[rl] == _|_ if fresh.members["\(rl)/\(m)"] == _|_ {_imports: "google_project_iam_member.\(k)": {id: "\(P.id) \(rl) \(m)", project: P.id, found: list.Contains(*P.found["members"] | [], "\(rl)/\(m)")}}
 			}
 		}
 
@@ -194,6 +204,16 @@ import (
 			if s.file != _|_ {
 				tofu: resource: google_secret_manager_secret_version: (k): {secret: "${google_secret_manager_secret.\(k).id}", secret_data: "${file(\"${path.module}/../\(s.file)\")}", deletion_policy: "ABANDON", lifecycle: create_before_destroy: true}
 			}
+			if s.text != _|_ {
+				tofu: resource: google_secret_manager_secret_version: (k): {secret: "${google_secret_manager_secret.\(k).id}", secret_data: s.text, deletion_policy: "ABANDON", lifecycle: create_before_destroy: true}
+			}
+			if s.placeholder != _|_ {
+				tofu: resource: google_secret_manager_secret_version: (k): {secret: "${google_secret_manager_secret.\(k).id}", secret_data: s.placeholder, deletion_policy: "ABANDON", lifecycle: ignore_changes: ["secret_data", "enabled"]}
+			}
+			if s.random {
+				tofu: resource: random_password: (k): {length: 48, special: false}
+				tofu: resource: google_secret_manager_secret_version: (k): {secret: "${google_secret_manager_secret.\(k).id}", secret_data: "${random_password.\(k).result}", deletion_policy: "ABANDON"}
+			}
 			if len(s.adders) > 0 {
 				let r = "\(k)_adders"
 				tofu: resource: google_secret_manager_secret_iam_binding: (r): {depends_on: list.Concat([deps, [for m, _ in s.adders if accounts[m] != _|_ {accounts[m]}]]), project: P.id, secret_id: sid, role: "roles/secretmanager.secretVersionAdder", members: (#members & {in: s.adders}).out}
@@ -240,6 +260,12 @@ import (
 			let k = (#name & {in: "\(P.id)_\(nm)"}).out
 			let at = "projects/\(P.id)/locations/\(svc.location)/services/\(nm)"
 
+			// Every secret a file of the service or of a sidecar reads, once.
+			let files = {
+				for _, f in svc.secretFiles {(f.secret): f}
+				for _, sc in svc.sidecars for _, f in sc.secretFiles {(f.secret): f}
+			}
+
 			tofu: resource: google_cloud_run_v2_service: (k): {depends_on: ownDeps
 				name:                nm
 				project:             P.id
@@ -248,13 +274,14 @@ import (
 				template: {
 					service_account: svc.serviceAccount
 					timeout:         svc.timeout
-					scaling: max_instance_count: svc.maxInstances
+					scaling: {max_instance_count: svc.maxInstances, if svc.minInstances > 0 {min_instance_count: svc.minInstances}}
+					if svc.concurrency != _|_ {max_instance_request_concurrency: svc.concurrency}
 					containers: list.Concat([[{
 						if len(svc.sidecars) > 0 {name: nm}
 						image: svc.image
 						args:  svc.args
 						ports: {container_port: svc.port, name: "http1"}
-						resources: {limits: {cpu: svc.cpu, memory: svc.memory}, cpu_idle: true, startup_cpu_boost: true}
+						resources: {limits: {cpu: svc.cpu, memory: svc.memory}, cpu_idle: svc.cpuIdle, startup_cpu_boost: true}
 						env: list.Concat([
 							[for n in list.SortStrings([for n, _ in svc.env {n}]) {name: n, value: svc.env[n]}],
 							[for n in list.SortStrings([for n, _ in svc.secretEnv {n}]) {name: n, value_source: secret_key_ref: {secret: svc.secretEnv[n], version: [if readAt[svc.secretEnv[n]] != _|_ {readAt[svc.secretEnv[n]]}, "latest"][0]}}],
@@ -269,12 +296,15 @@ import (
 						name:  sn
 						image: sc.image
 						args:  sc.args
-						resources: {limits: {cpu: sc.cpu, memory: sc.memory}, cpu_idle: true}
+						resources: {limits: {cpu: sc.cpu, memory: sc.memory}, cpu_idle: svc.cpuIdle}
 						env: [for n in list.SortStrings([for n, _ in sc.env {n}]) {name: n, value: sc.env[n]}]
+						if len(sc.secretFiles) > 0 {
+							volume_mounts: [for d in list.SortStrings([for d, _ in sc.secretFiles {d}]) {name: sc.secretFiles[d].secret, mount_path: d}]
+						}
 					}]])
 					volumes: list.Concat([
-						[for d in list.SortStrings([for d, _ in svc.secretFiles {d}]) {
-							let f = svc.secretFiles[d]
+						[for sname in list.SortStrings([for sname, _ in files {sname}]) {
+							let f = files[sname]
 							name: f.secret
 							secret: {secret: f.secret, items: [{version: [if readAt[f.secret] != _|_ {readAt[f.secret]}, "latest"][0], path: f.path}]}
 						}],
@@ -288,6 +318,17 @@ import (
 			if fresh.runServices[nm] == _|_ {_imports: "google_cloud_run_v2_service.\(k)": {id: at, project: P.id}}
 			tofu: resource: google_cloud_run_v2_service_iam_binding: (k): {depends_on: list.Concat([deps, [for m, _ in svc.invokers if accounts[m] != _|_ {accounts[m]}]]), project: P.id, location: svc.location, name: "${google_cloud_run_v2_service.\(k).name}", role: "roles/run.invoker", members: (#members & {in: svc.invokers}).out}
 			if fresh.runServiceIam[nm] == _|_ {_imports: "google_cloud_run_v2_service_iam_binding.\(k)": {id: "\(at) roles/run.invoker", project: P.id}}
+
+			// A domain is mapped here, never imported: the DNS record to it is the registrar's.
+			if svc.domain != _|_ {
+				tofu: resource: google_cloud_run_domain_mapping: (k): {
+					depends_on: ["google_cloud_run_v2_service.\(k)"]
+					location: svc.location
+					name:     svc.domain
+					metadata: namespace: P.id
+					spec: route_name:    "${google_cloud_run_v2_service.\(k).name}"
+				}
+			}
 		}
 
 		// The provider that bills this project for the APIs that ask a quota project of a user's login.
@@ -409,7 +450,32 @@ import (
 			for nm, _ in dbs {
 				let k = (#name & {in: "\(P.id)_\(inst)_\(nm)"}).out
 				tofu: resource: google_sql_database: (k): {project: P.id, instance: inst, name: nm, deletion_policy: "ABANDON"}
-				if fresh.databases[inst] == _|_ {_imports: "google_sql_database.\(k)": {id: "projects/\(P.id)/instances/\(inst)/databases/\(nm)", project: P.id}}
+				if fresh.databases[inst] == _|_ if fresh.databases["\(inst)/\(nm)"] == _|_ {_imports: "google_sql_database.\(k)": {id: "projects/\(P.id)/instances/\(inst)/databases/\(nm)", project: P.id}}
+			}
+		}
+
+		// A user's password is made by OpenTofu (random_password) and written as a version of the
+		// secrets named, so it is in OpenTofu's state (a private, versioned bucket) and in Secret
+		// Manager, never in this one. A user is always made here, never imported.
+		for inst, us in P.sqlUsers if P.adoptAll || adopted.sqlUsers[inst] != _|_ {
+			for nm, c in us {
+				let k = (#name & {in: "\(P.id)_\(inst)_\(nm)"}).out
+				tofu: resource: random_password: (k): {length: 32, special: false}
+				tofu: resource: google_sql_user: (k): {project: P.id, instance: inst, name: nm, password: "${random_password.\(k).result}", deletion_policy: "ABANDON"}
+				tofu: resource: google_secret_manager_secret_version: "\(k)_password": {
+					depends_on: ["google_sql_user.\(k)"]
+					secret:          "${google_secret_manager_secret.\((#name & {in: "\(P.id)_\(c.password)"}).out).id}"
+					secret_data:     "${random_password.\(k).result}"
+					deletion_policy: "ABANDON"
+				}
+				if c.url != _|_ {
+					tofu: resource: google_secret_manager_secret_version: "\(k)_url": {
+						depends_on: ["google_sql_user.\(k)"]
+						secret:          "${google_secret_manager_secret.\((#name & {in: "\(P.id)_\(c.url)"}).out).id}"
+						secret_data:     "postgresql://\(nm):${random_password.\(k).result}@localhost/\(c.database)?host=/cloudsql/\(P.id):\(c.region):\(inst)\(c.query)"
+						deletion_policy: "ABANDON"
+					}
+				}
 			}
 		}
 	}
