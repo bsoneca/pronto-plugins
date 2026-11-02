@@ -22,6 +22,12 @@ export interface Provider {
   keys: KeySource;
   clientId: string;
   clientSecret: string;
+  /** Whether a tenant may sign in through this provider; any, when absent. The phone's tenants are
+   * the operator's list, since each of its sign-ins is an SMS the operator pays for. */
+  admits?: (tenant: string) => boolean;
+  /** The token exchange in-process, for a provider the broker serves itself (the phone), instead
+   * of a request to tokenUrl. */
+  exchange?: (form: URLSearchParams) => Promise<Response>;
 }
 
 export function google(env: (k: string) => string | undefined): Provider | null {
@@ -88,7 +94,14 @@ export function back(redirectUri: string, params: Record<string, string>): Respo
   return new Response(null, { status: 302, headers: { location: url.toString(), "cache-control": "no-store", "referrer-policy": "no-referrer" } });
 }
 
-export async function broker(p: { issuer: string; secret: string; providers: Provider[]; codes?: Codes }) {
+export async function broker(p: {
+  issuer: string;
+  secret: string;
+  providers: Provider[];
+  codes?: Codes;
+  /** Routes served beside the broker's own: the phone's (phone.ts). */
+  extra?: (req: Request, url: URL) => Promise<Response> | null;
+}) {
   if (p.secret.length < 32) throw new Error("BROKER_SECRET is at least 32 characters");
   const issuer = p.issuer.replace(/\/$/, "");
   const providers = new Map(p.providers.map((x) => [x.name, x]));
@@ -108,6 +121,7 @@ export async function broker(p: { issuer: string; secret: string; providers: Pro
     }
     const r = parsed.request;
     const provider = providers.get(r.provider)!;
+    if (provider.admits && !provider.admits(r.tenant)) return back(r.redirectUri, { error: "unauthorized_client", state: r.state });
     const leg = await seal(stateKey, { r, pn: randomToken(16), exp: Math.floor(Date.now() / 1000) + 600 });
     const host = new URL(r.tenant).host;
     return page(`Sign in to ${host}`, `<h1>Sign in to <span class="origin">${esc(host)}</span></h1>
@@ -141,13 +155,12 @@ export async function broker(p: { issuer: string; secret: string; providers: Pro
       console.error(`broker: ${name} refused: ${url.searchParams.get("error")}`);
       return back(r.redirectUri, { error: "access_denied", state: r.state });
     }
-    const exchanged = await fetch(provider.tokenUrl, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "authorization_code", code: url.searchParams.get("code") ?? "", client_id: provider.clientId,
-        client_secret: provider.clientSecret, redirect_uri: callback(provider.name),
-      }),
+    const form = new URLSearchParams({
+      grant_type: "authorization_code", code: url.searchParams.get("code") ?? "", client_id: provider.clientId,
+      client_secret: provider.clientSecret, redirect_uri: callback(provider.name),
+    });
+    const exchanged = provider.exchange ? await provider.exchange(form) : await fetch(provider.tokenUrl, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form,
     });
     if (!exchanged.ok) {
       console.error(`broker: ${name}'s token exchange answered ${exchanged.status}: ${await exchanged.text()}`);
@@ -200,6 +213,8 @@ export async function broker(p: { issuer: string; secret: string; providers: Pro
     const url = new URL(req.url);
     const path = url.pathname;
     try {
+      const extra = p.extra?.(req, url);
+      if (extra) return await extra;
       if (req.method === "GET" && path === "/.well-known/openid-configuration") return json(200, discovery);
       if (req.method === "GET" && path === "/jwks") return json(200, { keys: [publicJwk] });
       if (req.method === "GET" && path === "/authorize") return await authorize(url);
@@ -221,6 +236,11 @@ if (import.meta.main) {
   const secret = env("BROKER_SECRET");
   if (!issuer || !secret) throw new Error("BROKER_ISSUER and BROKER_SECRET are required");
   const providers = [google(env)].filter((x): x is Provider => x !== null);
-  if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET");
-  Deno.serve({ port: Number(env("PORT") ?? 28443) }, await broker({ issuer, secret, providers }));
+  // The phone, where the operator configured it (phone.ts): its page and token endpoint beside the broker's own.
+  const { phoneConfig, phoneUpstream } = await import("./phone.ts");
+  const phoneCfg = phoneConfig(env, issuer);
+  const phone = phoneCfg ? await phoneUpstream(issuer, phoneCfg) : null;
+  if (phone) providers.push(phone.provider);
+  if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT");
+  Deno.serve({ port: Number(env("PORT") ?? 28443) }, await broker({ issuer, secret, providers, extra: phone?.handle }));
 }

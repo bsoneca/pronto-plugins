@@ -63,7 +63,9 @@ export async function verifyIdToken(token: string, p: {
   alg: Alg;
   issuers: readonly string[];
   audience: string;
-  nonce: string;
+  /** The nonce this sign-in sent, or null for a provider that sends none (Firebase's ID tokens),
+   * whose token must then carry none. */
+  nonce: string | null;
   keys: KeySource;
   now?: number;
 }): Promise<Record<string, unknown> & { sub: string }> {
@@ -90,7 +92,7 @@ export async function verifyIdToken(token: string, p: {
   const aud = claims.aud;
   if (!(aud === p.audience || (Array.isArray(aud) && aud.includes(p.audience)))) throw new Refused("id token audience");
   if (typeof claims.exp !== "number" || claims.exp < now - 60) throw new Refused("id token expired");
-  if (claims.nonce !== p.nonce) throw new Refused("id token nonce");
+  if (claims.nonce !== (p.nonce ?? undefined)) throw new Refused("id token nonce");
   if (typeof claims.sub !== "string" || claims.sub === "") throw new Refused("id token subject");
   return claims as Record<string, unknown> & { sub: string };
 }

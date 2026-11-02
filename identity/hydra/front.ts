@@ -19,6 +19,7 @@ import { Refused, randomToken, verifyIdToken } from "../oidc.ts";
 import { callbackOf, emailOf, learnsMore, pairwiseKey, pairwiseSubject, profileOf, providerScope, tenantOf } from "../broker/core.ts";
 import { esc, google, hmacKey, json, page, type Provider, seal, unseal } from "../broker/main.ts";
 import { fakeGoogle } from "./fake.ts";
+import { phoneConfig, phoneUpstream } from "../broker/phone.ts";
 
 export interface Hydra {
   /** Hydra's public API, as the front reaches it. */
@@ -121,6 +122,13 @@ export async function front(p: {
       });
       return go(redirect_to as string);
     }
+    // A provider that admits only some tenants (the phone: each sign-in an SMS the operator pays for).
+    if (provider.admits && !provider.admits(tenant)) {
+      const { redirect_to } = await adminJson("PUT", `/oauth2/auth/requests/login/reject?login_challenge=${encodeURIComponent(challenge)}`, {
+        error: "unauthorized_client", error_description: `${name} is not offered to ${tenant}`,
+      });
+      return go(redirect_to as string);
+    }
     // Whether the tenant asked for the person's name and picture, which only then the provider is asked for.
     const asked = (r.requested_scope as string[]) ?? [];
     const sp = asked.includes("profile");
@@ -160,13 +168,12 @@ export async function front(p: {
       return go(redirect_to as string);
     };
     if (url.searchParams.get("error")) return await refuse(`${name} refused: ${url.searchParams.get("error")}`);
-    const exchanged = await fetcher(provider.tokenUrl, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "authorization_code", code: url.searchParams.get("code") ?? "", client_id: provider.clientId,
-        client_secret: provider.clientSecret, redirect_uri: callback(provider.name),
-      }),
+    const form = new URLSearchParams({
+      grant_type: "authorization_code", code: url.searchParams.get("code") ?? "", client_id: provider.clientId,
+      client_secret: provider.clientSecret, redirect_uri: callback(provider.name),
+    });
+    const exchanged = provider.exchange ? await provider.exchange(form) : await fetcher(provider.tokenUrl, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form,
     });
     if (!exchanged.ok) return await refuse(`${name}'s token exchange answered ${exchanged.status}: ${await exchanged.text()}`);
     let claims: Record<string, unknown> & { sub: string };
@@ -242,15 +249,24 @@ if (import.meta.main) {
   const providers = [google(env)].filter((x): x is Provider => x !== null);
   // The stand-in for Google, asked for by name and only on the developer's
   // own machine: a broker anyone else reaches never signs in a test person.
-  let extra;
+  const routes: ((req: Request, url: URL) => Promise<Response> | null)[] = [];
   if (providers.length === 0 && env("BROKER_FAKE_GOOGLE") === "1") {
     if (new URL(issuer).hostname !== "localhost") throw new Error(`BROKER_FAKE_GOOGLE is for a localhost broker, not ${issuer}`);
     const fake = await fakeGoogle(issuer);
     providers.push(fake.provider);
-    extra = fake.handle;
+    routes.push(fake.handle);
     console.error("broker: no Google client, so it signs in test people (hydra/fake.ts)");
   }
-  if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET");
+  // The phone, where the launch configured it (broker/phone.ts), against the Firebase Auth emulator
+  // on a developer's machine (PHONE_EMULATOR) or the operator's project.
+  const phoneCfg = phoneConfig(env, issuer);
+  if (phoneCfg) {
+    const phone = await phoneUpstream(issuer, phoneCfg);
+    providers.push(phone.provider);
+    routes.push(phone.handle);
+  }
+  if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT");
+  const extra = (req: Request, url: URL) => routes.reduce<Promise<Response> | null>((got, r) => got ?? r(req, url), null);
   const hydra = { public: env("HYDRA_PUBLIC") ?? "http://127.0.0.1:28453", admin: env("HYDRA_ADMIN") ?? "http://127.0.0.1:28455" };
   Deno.serve({ port: Number(env("PORT") ?? 28443) }, await front({ issuer, secret, providers, hydra, extra }));
 }
