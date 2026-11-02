@@ -1,7 +1,7 @@
 // One app's Unity host files, by tag: `cue export ./unity/export -t package=<pkg> [-t previous=<the
 // app's unity/unity.json>] [-t screens=a,b -t shared=<uss>,… -t hatches=a,b -t scenarios=<cue>,…
 // -t suites=all|<a,b> -t server=<suite>=<why>;<suite>=<why> -t cases=true|false (older: all or none) -t cluster=true|false
-// -t stage=<path>,…] -e files --out json`, each path from
+// -t stage=<path>,… -t android=<application id> -t links=<host>,… -t fingerprints=<sha256>,…] -e files --out json`, each path from
 // the app's root to {seed, text}. An argument not given keeps what `previous` declared.
 package export
 
@@ -23,6 +23,9 @@ _suites:    *"" | string   @tag(suites)
 _server:    *"-" | string  @tag(server)
 _cluster:   *"" | string   @tag(cluster)
 _stage:     *"-" | string  @tag(stage)
+_android:   *"" | string   @tag(android)
+_links:     *"-" | string  @tag(links)
+_prints:    *"-" | string  @tag(fingerprints)
 
 _prev: json.Unmarshal(_previous)
 _list: {
@@ -61,6 +64,12 @@ _host: unity.#Host & {
 		if _server == "-" && _prev.suites != _|_ {suites: server: _prev.suites.server}
 		if _cluster != "" {cluster: _cluster == "true"}
 		if _cluster == "" && _prev.cluster != _|_ {cluster: _prev.cluster}
+		if _android != "" {android: package: _android}
+		if _android == "" && _prev.android != _|_ {android: package: _prev.android.package}
+		if _links != "-" {android: links: (_list & {in: _links}).out}
+		if _links == "-" && _prev.android != _|_ {android: links: _prev.android.links}
+		if _prints != "-" {android: fingerprints: (_list & {in: _prints}).out}
+		if _prints == "-" && _prev.android != _|_ {android: fingerprints: _prev.android.fingerprints}
 	}
 }
 files: _host.files
