@@ -146,3 +146,10 @@ policyFastEveryMinute: _policy["shop-checkout-availabilityburnfast"].interval & 
 policyMediumFor: _policy["shop-checkout-availabilityburnmedium"].duration & "120s"
 _rarePolicy: {for p in (_rare & {app: "shop"}).alertPolicies {(p.name): p}}
 policyRareNoData: _rarePolicy["shop-first-nodata"].duration & "0s"
+// A hatch's own gesture: declared by screen, a moment may name it, and the
+// reporter takes it from the screen.
+_reported: #Journeys & {app: "shop", gestures: _j.gestures, reported: cart: ["coupon-check"], spec: c: {owner: "payments", moments: ["cart.coupon-check", "cart.pay"], slo: availability: 99}}
+reportedMoment: _reported.collector.transforms["reduce-c"].type & "reduce"
+reportedKnown: _reported._known.cart & ["pay", "view", "coupon-check"]
+reportedOnlyThere: _reported._known.done & ["confirm"]
+reporterTakesHatchGestures: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "screen.addEventListener(\"journeys:gesture\"") & true

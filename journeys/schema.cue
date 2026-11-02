@@ -95,6 +95,16 @@ _journeysHours: {
 	// Each screen's gestures, derived from its markup by the plugin's generate
 	// step (journeys_gestures.cue): what a moment must name.
 	gestures: [string]: [...string]
+	// Gestures a hatch reports itself (a "journeys:gesture" event, telemetry.js),
+	// by screen: work the terminal never sees as a submit, such as a form a
+	// hatch holds while it calls a service, or a token it hands over by fetch.
+	reported: [string]: [...=~"^[A-Za-z0-9_-]+$"]
+	// What a moment may name: the markup's gestures and the reported ones.
+	_known: {
+		for s, _ in {for s, _ in gestures {(s): _}, for s, _ in reported {(s): _}} {
+			(s): list.Concat([[if gestures[s] != _|_ for g in gestures[s] {g}], [if reported[s] != _|_ for g in reported[s] {g}]])
+		}
+	}
 	spec: [Name=string & =~"^[a-z][a-z0-9-]*$"]: #Journey
 	// One budget window for the app's journeys, so the dashboard reads one
 	// series per journey.
@@ -115,14 +125,14 @@ _journeysHours: {
 	_violations: list.Concat([
 		[for n, j in J.spec for m in j.moments
 			let p = strings.Split(m, ".")
-			if J.gestures[p[0]] == _|_ {
+			if J._known[p[0]] == _|_ {
 				"journey \(n) moment \(m) names no screen \(p[0])"
 			}],
 		[for n, j in J.spec for m in j.moments
 			let p = strings.Split(m, ".")
-			if J.gestures[p[0]] != _|_
-			if !list.Contains(J.gestures[p[0]], p[1]) {
-				"journey \(n) moment \(m) names no gesture \(p[1]) on screen \(p[0]); it has \(strings.Join(J.gestures[p[0]], ", "))"
+			if J._known[p[0]] != _|_
+			if !list.Contains(J._known[p[0]], p[1]) {
+				"journey \(n) moment \(m) names no gesture \(p[1]) on screen \(p[0]); it has \(strings.Join(J._known[p[0]], ", "))"
 			}],
 		[for n, j in J.spec if len({for m in j.moments {(m): true}}) != len(j.moments) {
 			"journey \(n) repeats a moment"

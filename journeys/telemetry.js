@@ -115,6 +115,9 @@ if (!globalThis.__prontoJourneys) {
 
 // A form by its id, else the name its data-gesture gives it (forms of one action and entity on a
 // screen, or repeated in a list, told apart), else its action and entity.
+// The outcomes a hatch may report, the reporter's own.
+const OUTCOMES = new Set(["ok", "failed", "refused", "invalid"]);
+
 const formName = (form) => form.id || form.dataset.gesture || [form.dataset.action, form.dataset.entity].filter(Boolean).join("-") || "form";
 
 export default function mount(screen, { signal }) {
@@ -186,6 +189,17 @@ export default function mount(screen, { signal }) {
 		begin(bound.getAttribute(`data-on-${e.type}`), "handler", HANDLER_MS, "ok");
 	};
 	for (const type of READER) screen.addEventListener(type, onEvent, { capture: true, signal });
+	// A gesture a hatch carries out itself, which the terminal never sees as a submit (a form the
+	// hatch holds while it calls a service, a token it hands over by fetch): the hatch reports it
+	// whole, as a "journeys:gesture" event on the screen, detail {gesture, outcome, ms?}, and the
+	// app's journeys_spec.cue declares its name (`reported`). A hatch on an app without this
+	// reporter dispatches it to no one.
+	screen.addEventListener("journeys:gesture", (e) => {
+		const d = e.detail ?? {};
+		if (typeof d.gesture !== "string" || !OUTCOMES.has(d.outcome)) return;
+		const ms = Number.isFinite(d.ms) ? Math.round(d.ms) : undefined;
+		emit({ type: "gesture", screen: name, gesture: d.gesture, kind: "hatch", outcome: d.outcome, ...(ms === undefined ? {} : { ms }), trace: `00-${hex(16)}-${hex(8)}-01` });
+	}, { signal });
 	// Leaving the screen with nothing gone wrong is how many gestures end.
 	const end = () => {
 		for (const g of [...pending]) settle(g, "ok");

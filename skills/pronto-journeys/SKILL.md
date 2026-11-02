@@ -43,7 +43,12 @@ Then:
 1. Read `journeys_gestures.cue`: each screen's gestures, a handler by its
    module, a form by its id, else its `data-gesture`, else `action-entity`. Only reader events count
    (click, dblclick, change, submit, keydown, drop); a `data-on-mutation`
-   reduce or a machine transition is no gesture.
+   reduce or a machine transition is no gesture. Work a hatch carries out
+   itself (a form it holds while it calls a service, a token it hands over by
+   fetch) is no submit the reporter sees: the hatch dispatches a
+   `journeys:gesture` event on the screen, detail `{gesture, outcome, ms}`
+   (outcome ok, failed, refused or invalid), and `journeys_spec.cue` declares
+   the name in `reported: <screen>: [...]`.
 2. Write the journeys into `journeys_spec.cue` with the user: an owner, the
    ordered `screen.gesture` moments, `slo.availability` (percent of valid runs
    that reach the last moment), optionally `slo.latency: {percent, under}`,
