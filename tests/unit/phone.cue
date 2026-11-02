@@ -84,4 +84,8 @@ cases: {
 		{call: "phone.langOf", args: ["en-GB,pt;q=0.5"], expect: "en"},
 		{call: "phone.langOf", args: [null], expect: "en"},
 	]}
+	"the broker starts as a program with the phone configured, and offers it beside Google": {suite: "identity", steps: [
+		{call: "identity.started", expect: ["google", "phone"], why: "phone.ts once imported main.ts, which loads it with a top-level await: the cycle never resolved and Cloud Run's revision exited"},
+		{call: "identity.started", args: [false], expect: ["google"]},
+	]}
 }

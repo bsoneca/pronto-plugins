@@ -19,7 +19,8 @@
 // Locally (PHONE_EMULATOR, a localhost broker only) the page signs in against the Firebase Auth
 // emulator, which sends no SMS and whose tokens are unsigned.
 import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, verifyIdToken } from "../oidc.ts";
-import { esc, json, type Provider } from "./main.ts";
+import { esc, json } from "./core.ts";
+import type { Provider } from "./main.ts";
 
 const enc = new TextEncoder();
 
