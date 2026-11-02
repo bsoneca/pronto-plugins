@@ -1,12 +1,13 @@
 // One app's Unity host files, by tag: `cue export ./unity/export -t package=<pkg> [-t previous=<the
 // app's unity/unity.json>] [-t screens=a,b -t shared=<uss>,… -t hatches=a,b -t scenarios=<cue>,…
 // -t suites=all|<a,b> -t server=<suite>=<why>;<suite>=<why> -t cases=true|false (older: all or none) -t cluster=true|false
-// -t stage=<path>,… -t android=<application id> -t links=<host>,… -t fingerprints=<sha256>,…] -e files --out json`, each path from
+// -t stage=<path>,… -t android=<application id> -t links=<host>,… -t fingerprints=<sha256>,… -t bindings=<{name: the exported binding.cue}>] -e files --out json`, each path from
 // the app's root to {seed, text}. An argument not given keeps what `previous` declared.
 package export
 
 import (
 	"encoding/json"
+	"list"
 	"strings"
 
 	"github.com/bsoneca/pronto-plugins/unity"
@@ -26,6 +27,7 @@ _stage:     *"-" | string  @tag(stage)
 _android:   *"" | string   @tag(android)
 _links:     *"-" | string  @tag(links)
 _prints:    *"-" | string  @tag(fingerprints)
+_bindings:  *"{}" | string @tag(bindings)
 
 _prev: json.Unmarshal(_previous)
 _list: {
@@ -33,8 +35,14 @@ _list: {
 	out: [for x in strings.Split(strings.Replace(in, " ", ",", -1), ",") if x != "" {x}]
 }
 
+// The hatches named: given, else the app's as declared (a list, or the keys of a map), and every one that has a binding.
+_given: [if _hatches != "-" {(_list & {in: _hatches}).out}, if _prev.hatches != _|_ {[if (_prev.hatches & [...]) != _|_ {_prev.hatches}, [for n, _ in _prev.hatches {n}]][0]}, []][0]
+_bound: json.Unmarshal(_bindings)
+_names: list.Concat([_given, [for n, _ in _bound if !list.Contains(_given, n) {n}]])
+
 _host: unity.#Host & {
-	package: _package
+	package:  _package
+	bindings: _bound
 	surface: {
 		// Screens given: each with the shared sheets given (or none); else the app's as declared.
 		if _screens != "" {
@@ -48,8 +56,9 @@ _host: unity.#Host & {
 			if _shared != "-" for p in (_list & {in: _shared}).out {p},
 			if _shared == "-" for p in v.shared {p},
 		]}}}}
-		if _hatches != "-" {hatches: (_list & {in: _hatches}).out}
-		if _hatches == "-" && _prev.hatches != _|_ {hatches: _prev.hatches}
+		// The map form once any hatch is bound, a name with no binding mapped to nothing (not mounted); else the list.
+		if len(_bound) > 0 {hatches: {for n in _names {(n): {if _bound[n] != _|_ {binding: "unity/hatches/\(n)/binding.json"}}}}}
+		if len(_bound) == 0 {hatches: _names}
 		if _scenarios != "-" {scenarios: (_list & {in: _scenarios}).out}
 		if _scenarios == "-" && _prev.scenarios != _|_ {scenarios: _prev.scenarios}
 		if _stage != "-" {stage: (_list & {in: _stage}).out}
