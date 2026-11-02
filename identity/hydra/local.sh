@@ -1,7 +1,7 @@
 #!/bin/sh
 # The broker on Hydra as two of an app's own processes under launch@local, so
 # a local test brings up everything sign-in needs:
-#   local.sh hydra   Hydra in memory, its public and admin APIs on loopback
+#   local.sh hydra   Hydra on a SQLite file of its own, its public and admin APIs on loopback
 #   local.sh front   the front, at the broker's issuer (http://localhost:28443 unless
 #                    the launch names its own: BROKER_ISSUER and PORT, or Hydra's
 #                    URLS_SELF_ISSUER, SERVE_PUBLIC_PORT and SERVE_ADMIN_PORT)
@@ -50,11 +50,19 @@ hydra)
 		Linux-x86_64) asset=linux_sqlite_64bit ;;
 		*) echo "pronto-identity: no Hydra release for $(uname -sm)" >&2; exit 2 ;;
 	esac
-	DSN=memory SECRETS_SYSTEM=pronto-identity-local-launch-hydra-0000 LOG_LEVEL=warn \
+	# A file, not memory: Hydra's in-memory store refuses a write that meets another's ("Unable to
+	# serialize access due to a concurrent update"), so two sign-ins at once failed one with a 500
+	# (bsoneca/ume's phone-signin, 2026-11-02). The file waits for the other writer and takes its
+	# write lock as a transaction begins, as pronto-verify's Hydra does (bsoneca/ume#20).
+	hydra="github:ory/hydra[asset_pattern=hydra_*-$asset.tar.gz]@26.2.0"
+	DSN="sqlite://$(mktemp -d)/hydra.sqlite?_fk=true&_busy_timeout=15000&_journal_mode=WAL&_txlock=immediate"
+	export DSN
+	mise x "$hydra" -- hydra migrate sql -e --yes >/dev/null
+	SECRETS_SYSTEM=pronto-identity-local-launch-hydra-0000 LOG_LEVEL=warn \
 		URLS_SELF_ISSUER=$BROKER_ISSUER URLS_LOGIN=$BROKER_ISSUER/login URLS_CONSENT=$BROKER_ISSUER/consent \
 		SERVE_PUBLIC_HOST=127.0.0.1 SERVE_PUBLIC_PORT=$public_port SERVE_ADMIN_HOST=127.0.0.1 SERVE_ADMIN_PORT=$admin_port \
 		OAUTH2_PKCE_ENFORCED_FOR_PUBLIC_CLIENTS=true TTL_ID_TOKEN=5m \
-		exec mise x "github:ory/hydra[asset_pattern=hydra_*-$asset.tar.gz]@26.2.0" -- hydra serve all --dev
+		exec mise x "$hydra" -- hydra serve all --dev
 	;;
 front)
 	exec deno run --no-config --allow-net --allow-env "$here/hydra/front.ts"

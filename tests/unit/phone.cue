@@ -97,4 +97,7 @@ cases: {
 	"the phone page sends through sendCode, its source served with the page": {suite: "identity", steps: [
 		{call: "identity.pageSends", expect: {defines: true, sendsThrough: true, sendsOtherwise: 1}, why: "the retry runs in the browser; a send past it would not be retried or logged"},
 	]}
+	"the local broker's Hydra keeps its rows in a file whose writers wait, so two sign-ins at once both go through": {suite: "identity", steps: [
+		{call: "identity.hydraLocalStore", expect: {memory: false, file: true, waits: true, migratedFirst: true}, why: "Hydra in memory answered a sign-in 500, 'Unable to serialize access due to a concurrent update', when another wrote at once (bsoneca/ume's phone-signin, 2026-11-02); pronto-verify's Hydra met the same (bsoneca/ume#20)"},
+	]}
 }
