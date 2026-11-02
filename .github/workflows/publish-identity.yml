@@ -39,4 +39,6 @@ jobs:
       - name: arm64 emulation
         run: docker run --privileged --rm "$BINFMT" --install arm64
       - name: publish
+        # bash, not the default bash -e: pipefail, so a refused push fails the run rather than tee hiding it.
+        shell: bash
         run: sh identity/publish.sh "$V" | tee -a "$GITHUB_STEP_SUMMARY"
