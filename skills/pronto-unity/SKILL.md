@@ -20,8 +20,8 @@ Unity file and the host stages nothing of it.
 
 What the declaration says:
 
-- `screens.<s>`: `uss` (default `unity/screens/<s>.uss`) and `shared` sheets. A screen not listed is
-  not drawn on Unity.
+- `screens.<s>`: `uss` (default `unity/screens/<s>.uss`) and `shared` sheets. A screen not listed still
+  runs (the program is unchanged) but gets no Unity look and no hatch.
 - `hatches`: hostDom hatches the host draws, by name. Their C# is the host's (pronto-csharp
   `hatches/`), never a loose file in the app; a hatch not listed is never mounted.
 - `scenarios`: scenario files (shared schema, as solitaire's `tests/scenarios/schema.cue`) the host
