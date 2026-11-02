@@ -21,6 +21,8 @@ def main [] {
 </ul>
 <form id="coupon" data-entity="coupon" data-action="create"></form>
 <form data-entity="order" data-action="create"></form>
+<form class="pay" data-gesture="pay" data-entity="order" data-action="create"></form>
+<form id="coupon2" data-gesture="ignored" data-entity="coupon" data-action="create"></form>
 <form data-action="navigate" data-route="done"></form>
 <form id="" class="x"></form>' | save shell/screens/cart.html
 	'<p>{msg.thanks}</p>' | save shell/screens/done.html
@@ -33,9 +35,9 @@ def main [] {
 	let gestures = $derived | str substring ($derived | str index-of "_journeyGestures: ")..
 		| str replace "_journeyGestures: " "" | from json
 	# Handlers for reader events by module, once each (keydown counts; a mutation
-	# or input reduce does not); forms by id, else action-entity, else action,
-	# else "form" (an empty id is no id).
-	check "each screen's gestures" ($gestures.cart == ["coupon" "create-order" "form" "navigate" "nudge" "pick"])
+	# or input reduce does not); forms by id, else data-gesture, else
+	# action-entity, else action, else "form" (an empty id is no id).
+	check "each screen's gestures" ($gestures.cart == ["coupon" "coupon2" "create-order" "form" "navigate" "nudge" "pay" "pick"])
 	check "a screen with no gesture has an empty list" ($gestures.done == [])
 
 	journeys route "/t"

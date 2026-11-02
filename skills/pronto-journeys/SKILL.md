@@ -41,7 +41,7 @@ ${CLAUDE_PLUGIN_ROOT}/bin/pronto-journeys .
 Then:
 
 1. Read `journeys_gestures.cue`: each screen's gestures, a handler by its
-   module, a form by its id else `action-entity`. Only reader events count
+   module, a form by its id, else its `data-gesture`, else `action-entity`. Only reader events count
    (click, dblclick, change, submit, keydown, drop); a `data-on-mutation`
    reduce or a machine transition is no gesture.
 2. Write the journeys into `journeys_spec.cue` with the user: an owner, the

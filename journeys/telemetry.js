@@ -113,7 +113,9 @@ if (!globalThis.__prontoJourneys) {
 	addEventListener("unhandledrejection", (e) => emit({ type: "error", kind: "rejection", name: nameOf(e.reason) }));
 }
 
-const formName = (form) => form.id || [form.dataset.action, form.dataset.entity].filter(Boolean).join("-") || "form";
+// A form by its id, else the name its data-gesture gives it (forms of one action and entity on a
+// screen, or repeated in a list, told apart), else its action and entity.
+const formName = (form) => form.id || form.dataset.gesture || [form.dataset.action, form.dataset.entity].filter(Boolean).join("-") || "form";
 
 export default function mount(screen, { signal }) {
 	const name = screen.dataset.screen ?? location.pathname;

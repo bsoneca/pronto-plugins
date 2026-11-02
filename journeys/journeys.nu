@@ -17,7 +17,7 @@ def save-changed [path: path] {
 
 # Each screen's gestures, from the markup pronto just emitted: a data-on-*
 # handler for an event the terminal reports, by its module; a form by its id,
-# else its action and entity joined by "-", else "form". The rule is the
+# else its data-gesture, else its action and entity joined by "-", else "form". The rule is the
 # terminal's (omnishell's docs/telemetry.md); this reads it off the same files
 # the terminal interprets, into journeys_gestures.cue.
 export def derive [package: string, events: string] {
@@ -29,9 +29,9 @@ export def derive [package: string, events: string] {
 			| where event in $reader
 			| get name
 		let forms = $html | parse --regex '<form\b(?<attrs>[^>]*)>' | get attrs | each {|attrs|
-			let attr = $attrs | parse --regex '(?:^|\s)(?<k>id|data-action|data-entity)="(?<v>[^"]*)"' | reduce --fold {} {|kv, acc| $acc | upsert $kv.k $kv.v }
+			let attr = $attrs | parse --regex '(?:^|\s)(?<k>id|data-gesture|data-action|data-entity)="(?<v>[^"]*)"' | reduce --fold {} {|kv, acc| $acc | upsert $kv.k $kv.v }
 			let named = [($attr | get --optional data-action) ($attr | get --optional data-entity)] | compact --empty | str join "-"
-			[($attr | get --optional id) $named "form"] | compact --empty | first
+			[($attr | get --optional id) ($attr | get --optional data-gesture) $named "form"] | compact --empty | first
 		}
 		{screen: $route.screen, names: ($handlers | append $forms)}
 	} | reduce --fold {} {|it, acc| $acc | upsert $it.screen (($acc | get --optional $it.screen | default []) | append $it.names | uniq | sort)}

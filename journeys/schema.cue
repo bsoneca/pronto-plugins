@@ -15,7 +15,7 @@ import (
 )
 
 // A moment is a gesture the terminal reports on a screen: "<screen>.<gesture>",
-// a handler by its module or a form by its id, else its action and entity
+// a handler by its module or a form by its id, else its data-gesture, else its action and entity
 // (omnishell's docs/telemetry.md).
 // The gesture keeps a form id's own case: `id="newTodo"` reports `newTodo`.
 #JourneyMoment: =~"^[a-z][a-z0-9_-]*\\.[A-Za-z0-9_-]+$"
