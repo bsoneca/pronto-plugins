@@ -56,7 +56,7 @@ jobs:
           cp "$app/unity/unity.json" "$app/before.json"
           ./bin/pronto-unity "$app" cases=false
           grep -q "the app's own" "$app/unity/screens/table.uss"
-          jq -e '.scenarios == ["tests/scenarios/table.cue"] and .cases == false and (.screens | keys) == ["table"]' "$app/unity/unity.json"
+          jq -e '.scenarios == ["tests/scenarios/table.cue"] and .suites.host == [] and (.screens | keys) == ["table"]' "$app/unity/unity.json"
           ! ./bin/pronto-unity "$app" nope=1
       - name: Check CUE formatting of infra
         run: sayt --script tools.nu cue fmt --check ./infra ./examples/infra ./infra/export
