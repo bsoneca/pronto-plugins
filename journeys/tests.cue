@@ -65,7 +65,7 @@ endedFromEveryJourney: list.SortStrings(_j.collector.transforms.ended.inputs) & 
 _h: #Host & {package: "shop"}
 seat: strings.HasPrefix(strings.Split(_h.files["pronto/journeys.cue"].text, "\n")[1], "package prontoproject") & true
 seatAfterWriter: strings.Contains(_h.files["pronto/journeys.cue"].text, "\"priority\":2") & true
-seatOneStep: strings.Contains(_h.files["pronto/journeys.cue"].text, "journeys derive shop click,dblclick,change,submit,keydown,drop; journeys route /telemetry; run-mise exec -- cue export . -e journeys.out --out json | journeys write") & true
+seatOneStep: strings.Contains(_h.files["pronto/journeys.cue"].text, "journeys derive shop click,dblclick,change,submit,keydown,drop; journeys route /telemetry; use ./pronto/exports.nu; exports of journeys | journeys write") & true
 schemaInPackage: strings.Contains(_h.files["journeys_plugin.cue"].text, "\npackage shop\n") & true
 seeded: list.SortStrings([for p, f in _h.files if f.seed {p}]) & ["journeys_gestures.cue", "journeys_spec.cue"]
 // No X.cue the host writes beside a path X it writes: sayt's lint would vet

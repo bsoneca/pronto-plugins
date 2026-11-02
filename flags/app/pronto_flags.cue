@@ -20,5 +20,5 @@ pronto: {
 			}
 		}
 	}
-	say: say: generate: rulemap: flags: {"priority":4,"cmds":[{"do":"use tools.nu [run-mise]; use ./flags/flags.nu; flags route; run-mise exec -- cue export . -e flagd.document --out json | flags write"}]}
+	say: say: generate: rulemap: flags: {"priority":4,"cmds":[{"do":"use ./flags/flags.nu; flags route; use ./pronto/exports.nu; exports of flagd | flags write"}]}
 }

@@ -44,7 +44,7 @@ throttleExported: list.Contains(_p.collector.sinks.metrics.inputs, "throttled_na
 // app's spec and reporter settings written once.
 _h: #Host & {package: "shop"}
 seat: strings.HasPrefix(strings.Split(_h.files["pronto/perf.cue"].text, "\n")[1], "package prontoproject") & true
-seatOneStep: strings.Contains(_h.files["pronto/perf.cue"].text, "perf route /perf; run-mise exec -- cue export . -e perf.out --out json | perf write") & true
+seatOneStep: strings.Contains(_h.files["pronto/perf.cue"].text, "perf route /perf; use ./pronto/exports.nu; exports of perf | perf write") & true
 seatTools: strings.Contains(_h.files["pronto/perf.cue"].text, "\"aqua:vectordotdev/vector\":\"0.59.0\"") & true
 schemaInPackage: strings.Contains(_h.files["perf_plugin.cue"].text, "\npackage shop\n") & true
 seeded: list.SortStrings([for p, f in _h.files if f.seed {p}]) & ["perf_spec.cue", "shell/hatches/perf/config.js"]
