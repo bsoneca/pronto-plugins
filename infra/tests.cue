@@ -419,3 +419,6 @@ sidecarNoPort: [for c in _containers if c.ports != _|_ {c.name}] & ["dashboards"
 loneContainerUnnamed: [for c in _s.google_cloud_run_v2_service.example_project_123_my_app.template.containers if c.name != _|_ {c}] & []
 // A policy naming a channel the project lacks is refused.
 unknownChannel: _ok & {alertPolicies: x: {file: "a.json", channels: ["nobody"]}} & matchN(0, [#Project])
+
+// A file's secret version replaced is abandoned, not deleted: the verbs let it through.
+abandonNoDeletion: strings.Contains(_verbs, "$c.change.before?.deletion_policy? == 'ABANDON'") & true
