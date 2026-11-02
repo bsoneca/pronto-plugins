@@ -91,7 +91,10 @@ import (
 			"identity-hydra": bayt.healthcheck.http & {
 				cmd: builtin: null
 				activate: ""
-				healthcheck: url: "http://127.0.0.1:28453/health/ready"
+				// Its key set, not /health/ready: Hydra makes the ID-token key on the first ask for it,
+				// which on a loaded machine outlasts a sign-in's wait. Asked here, the key is made before
+				// anything that waits on Hydra starts, and every later ask is answered at once.
+				healthcheck: url: "http://127.0.0.1:28453/.well-known/jwks.json"
 				// Per app on the host, each moved by its variable, as every
 				// other port of a launch: the front names them as its peer's.
 				expose: {public: {port: 28453, env: "SERVE_PUBLIC_PORT"}, admin: {port: 28455, env: "SERVE_ADMIN_PORT"}}

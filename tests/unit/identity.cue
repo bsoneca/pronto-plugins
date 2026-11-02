@@ -15,6 +15,11 @@ cases: {
 		{get: "exit", expect: 2},
 		{use: "out"}, {get: "said", matches: "there is no default"},
 	]}
+	"the local Hydra counts as up once it has its ID-token key, not before": {suite: "identity", steps: [
+		{call: "identity.installed", args: [["frontImage=ghcr.io/example/pronto-identity:1.0.0@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]]}, {keep: "out"},
+		{get: "exit", expect: 0},
+		{use: "out"}, {get: "signin", matches: "healthcheck: url: \"http://127\\.0\\.0\\.1:28453/\\.well-known/jwks\\.json\"", why: "Hydra makes the key on the first ask; asked by /health/ready, the first sign-in waits for it, past a loaded machine's 60 s"},
+	]}
 }
 
 // The brokers release a person's e-mail only to a tenant that asked for `email`, and only an address
