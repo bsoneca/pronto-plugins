@@ -16,7 +16,7 @@
 // steps, and inside them the rehearsal's and the release's phases, for `report`.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { base, changed, detail, due, holds, line, plist, probe, report, served, spaced, whole } from "./cron.js";
+import { base, changed, detail, due, holds, line, plist, probe, report, served, spaced, retry, whole } from "./cron.js";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -137,7 +137,8 @@ const end = (outcome: string, why = "", code = 0) => {
   const l = line(run);
   Deno.writeTextFileSync(`${state}/release-cron.log`, l + "\n", { append: true });
   Deno.writeTextFileSync(`${state}/runs.jsonl`, JSON.stringify(run) + "\n", { append: true });
-  if (spaced(outcome)) Deno.writeTextFileSync(`${state}/last`, `${Date.now()} ${(run.gap as number | undefined) ?? 60}`);
+  // `last`: the end, the gap, and for a failed run the commit it failed on (retry, cron.js).
+  if (spaced(outcome)) Deno.writeTextFileSync(`${state}/last`, `${Date.now()} ${(run.gap as number | undefined) ?? 60}${outcome === "failed" && run.commit ? ` ${run.commit}` : ""}`);
   say(l);
   // The last 50 runs' output kept.
   const logs = [...Deno.readDirSync(`${state}/runs`)].map((e) => e.name).sort();
@@ -166,8 +167,11 @@ Deno.writeTextFileSync(`${state}/lock/pid`, String(Deno.pid));
 // Not due: the wake ends here, with no line (it was no run). The gap is the config of the tree last
 // run, kept beside its end; the first run has none.
 {
-  const [at, gap] = (() => { try { return Deno.readTextFileSync(`${state}/last`).split(" ").map(Number); } catch { return [NaN, NaN]; } })();
-  if (!Number.isNaN(at) && !due(Date.now(), at, Number.isNaN(gap) ? 60 : gap)) {
+  const [at, gap, failed] = (() => { try { const [a, g, f] = Deno.readTextFileSync(`${state}/last`).trim().split(" "); return [Number(a), Number(g), f]; } catch { return [NaN, NaN, undefined]; } })();
+  // After a failed run, main as the remote has it now (git ls-remote, no fetch): moved past the
+  // failed commit, the run starts without the gap.
+  const moved = () => { const r = sh("git", ["ls-remote", "origin", "refs/heads/main"], wt, {}, 60); return r.ok ? r.out.split(/\s/)[0] || null : null; };
+  if (!Number.isNaN(at) && !due(Date.now(), at, Number.isNaN(gap) ? 60 : gap) && !(failed && retry(failed, moved()))) {
     try { Deno.removeSync(`${state}/lock`, { recursive: true }); } catch { /* ours, just made */ }
     Deno.exit(0);
   }

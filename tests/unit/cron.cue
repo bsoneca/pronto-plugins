@@ -22,6 +22,12 @@ cases: {
 		{call: "cron.spaced", args: ["skipped"], expect: false},
 		{call: "cron.spaced", args: [""], expect: false},
 	]}
+	"after a failed run, the next starts without the gap once main has moved past the commit it failed on": {suite: "cron", steps: [
+		{call: "cron.retry", args: ["291a52a9", "0b2206c3"], expect: true, why: "a new commit on main: the fix may be in"},
+		{call: "cron.retry", args: ["291a52a9", "291a52a9"], expect: false, why: "the same commit waits the gap"},
+		{call: "cron.retry", args: ["291a52a9", null], expect: false, why: "main unreadable: the gap holds"},
+		{call: "cron.retry", args: [null, "0b2206c3"], expect: false, why: "the last spaced run released"},
+	]}
 	"a change is the app's when the path is a watched one or lies beneath it": {suite: "cron", steps: [
 		{call: "cron.changed", args: [["apps/brawl-chess/a.js", "apps/brawl-chess/sub/dir/b.js", "apps/brawl-chess", "README.md"], ["apps/brawl-chess"]], expect: ["apps/brawl-chess/a.js", "apps/brawl-chess/sub/dir/b.js", "apps/brawl-chess"]},
 		{call: "cron.changed", args: [["apps/brawl-chess-x/a.js", "apps/brawl-chess2"], ["apps/brawl-chess"]], expect: [], why: "a sibling that only shares the prefix is another folder"},
