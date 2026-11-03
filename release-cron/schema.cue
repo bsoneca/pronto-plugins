@@ -15,6 +15,12 @@ releaseCron: #Cron
 	// The paths whose change since the last run that released makes a release, relative to the
 	// repository; the app's own folder when not named. Nothing changed: the run skips.
 	watch: [...string]
+	// Cloud Run services, besides GCP.service, that must be Ready in confirm (Bonk Chess: its renderer).
+	ready: [...string]
+	// The `what` of a slot's owner line (tests/slot.ts) that marks the rehearsal's main slot: what the
+	// app's ./saytw verify@local claims its slot as. The Ume apps' verify@local runs generate, lint and
+	// test, then `./saytw integrate@local`, which claims it.
+	holder: *"verify@local" | string
 	// Each step's limit, in minutes: a guard against a wedged step, far above what each takes
 	// (measured per run in runs.jsonl). A step that outlasts its limit is stopped and the run fails.
 	minutes: {

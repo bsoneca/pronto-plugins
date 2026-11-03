@@ -124,7 +124,7 @@ const enc = new TextEncoder();
 const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() - t0) / 1000)}s ${s}\n`; log(enc.encode(l)); Deno.stdout.writeSync(enc.encode(l)); };
 let head = "";
 let gcp: Record<string, string> | undefined;
-let cron: { gap: number; poll: number; watch: string[]; minutes: Record<string, number>; probes: Record<string, { path: string; agent?: string; status: number; has: string[] }> };
+let cron: { gap: number; poll: number; watch: string[]; ready: string[]; holder: string; minutes: Record<string, number>; probes: Record<string, { path: string; agent?: string; status: number; has: string[] }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
 let mark = Date.now();
@@ -274,7 +274,7 @@ try {
       const pid = (() => { try { return Deno.readTextFileSync(`${pool}/${e.name}/pid`).trim(); } catch { return ""; } })();
       // The holder alive and started by this run: not a slot a dead or stray rehearsal left.
       const ours = pid && current && tree(current.pgid).pids.includes(Number(pid));
-      if (ours && holds(owner, dir) && owner.startsWith(`${pid} `)) { got = true; step("slot"); say(`slot taken: ${e.name}`); return; }
+      if (ours && holds(owner, dir, cron.holder) && owner.startsWith(`${pid} `)) { got = true; step("slot"); say(`slot taken: ${e.name}`); return; }
     }
   }, 5000);
   const gate = await child("./saytw", ["verify@local"], dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: String(cron.minutes.slot + 5) }, cron.minutes.slot + cron.minutes.rehearse);
@@ -292,7 +292,7 @@ try {
   step("release");
   if (rel.code !== 0) end("failed", rel.late ? "release@gcp outlasted its limit" : `release@gcp failed (exit ${rel.code})`, 1);
 
-  // 4. Production: the revision taking every request is the one this tree's live record names, the renderer is
+  // 4. Production: the revision taking every request is the one this tree's live record names, the `ready` services are
   // ready, the probes answer. Retried within cron.minutes.confirm, as a cache or a cold start settles.
   const until = Date.now() + cron.minutes.confirm * 60_000;
   let wrong: string[] = [];
@@ -305,10 +305,12 @@ try {
       run.revision = now;
       wrong.push(...served(now, jsonl(`${home}/.cache/pronto/releases/${gcp!.name}.jsonl`), head));
     } catch (e) { wrong.push(`traffic unread: ${(e as Error).message.split("\n")[0]}`); }
-    try {
-      const render = JSON.parse(gcloud(["run", "services", "describe", `${gcp!.service}-render`], 60)).status?.conditions?.find((c: { type: string }) => c.type === "Ready");
-      if (render?.status !== "True") wrong.push(`${gcp!.service}-render not ready`);
-    } catch (e) { wrong.push(`${gcp!.service}-render unread: ${(e as Error).message.split("\n")[0]}`); }
+    for (const svc of cron.ready) {
+      try {
+        const c = JSON.parse(gcloud(["run", "services", "describe", svc], 60)).status?.conditions?.find((c: { type: string }) => c.type === "Ready");
+        if (c?.status !== "True") wrong.push(`${svc} not ready`);
+      } catch (e) { wrong.push(`${svc} unread: ${(e as Error).message.split("\n")[0]}`); }
+    }
     for (const [name, p] of Object.entries(cron.probes)) {
       try {
         const r = await fetch(`https://${gcp!.domain}${p.path}`, { headers: p.agent ? { "User-Agent": p.agent } : {}, signal: AbortSignal.timeout(30_000) });

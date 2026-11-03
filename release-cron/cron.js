@@ -53,11 +53,11 @@ export const served = (now, records, head) => {
 };
 
 // Whether a slot's owner line (tests/slot.ts writes "<pid> <ISO> <app dir> <what> (weight <w>)" to
-// <pool>/slot-<n>/owner) is the rehearsal of the app at `dir`: its main slot, not a lane. A slot's
+// <pool>/slot-<n>/owner) is the rehearsal of the app at `dir`: its main slot (`what`, the app's `holder`), not a lane. A slot's
 // owner is how the run learns the rehearsal got its slot, since ./saytw keeps its output to itself.
-export const holds = (owner, dir) => {
+export const holds = (owner, dir, what = "verify@local") => {
   const m = owner.trim().match(/^\d+ \S+ (\S+) (.*) \(weight \d+\)$/);
-  return !!m && m[1].replace(/\/+$/, "") === dir.replace(/\/+$/, "") && m[2] === "verify@local";
+  return !!m && m[1].replace(/\/+$/, "") === dir.replace(/\/+$/, "") && m[2] === what;
 };
 
 // A probe's verdict: null when the answer is what it expects, else what was wrong.

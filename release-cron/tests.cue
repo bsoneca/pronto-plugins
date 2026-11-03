@@ -15,8 +15,13 @@ seedPackage: strings.HasPrefix(_t.files["release_cron.cue"].text, "package myapp
 
 // The defaults: an hour after a release, a wake every ten minutes, each step's limit.
 _defaults: #Cron & {watch: ["x"], probes: {}}
-defaults: {gap: _defaults.gap, poll: _defaults.poll, minutes: _defaults.minutes} & {gap: 60, poll: 10, minutes: {prepare: 5, slot: 20, rehearse: 35, release: 35, confirm: 5}}
+defaults: {gap: _defaults.gap, poll: _defaults.poll, ready: _defaults.ready, holder: _defaults.holder, minutes: _defaults.minutes} & {gap: 60, poll: 10, ready: [], holder: "verify@local", minutes: {prepare: 5, slot: 20, rehearse: 35, release: 35, confirm: 5}}
 
 // An app may shorten the gap, widen the wake and lengthen a limit.
 _own: #Cron & {gap: 30, poll: 5, watch: ["x"], probes: {}, minutes: release: 60}
 own: {gap: _own.gap, poll: _own.poll, release: _own.minutes.release} & {gap: 30, poll: 5, release: 60}
+
+
+// An app may name its slot holder and the services besides its own that must be ready.
+_ume: #Cron & {watch: ["x"], probes: {}, ready: ["a-render"], holder: "./saytw integrate@local"}
+ume: {ready: _ume.ready, holder: _ume.holder} & {ready: ["a-render"], holder: "./saytw integrate@local"}
