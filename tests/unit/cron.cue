@@ -100,6 +100,12 @@ cases: {
 		{call: "cron.probe", args: [{path: "/", has: ["Brawl", "Chess"]}, 200, "Brawl only"], expect: "/: 200 without \"Chess\""},
 		{call: "cron.probe", args: [{path: "/", has: ["a", "b"]}, 200, ""], expect: "/: 200 without \"a\", \"b\""},
 	]}
+	"a time a person reads is Brasília's with its offset, whatever the machine's zone": {suite: "cron", steps: [
+		{call: "cron.local", args: [1793748492000], expect: "2026-11-03T20:28:12-03:00"},
+		{call: "cron.local", args: [1793748492999], expect: "2026-11-03T20:28:12-03:00", why: "to the second"},
+		{call: "cron.local", args: [1793761199000], expect: "2026-11-03T23:59:59-03:00", why: "already the 4th in UTC, still the 3rd there"},
+		{call: "cron.local", args: [1793748492000, "UTC"], expect: "2026-11-03T23:28:12+00:00", why: "another zone, named"},
+	]}
 	"the log line names when, the app, the outcome, the commit and each step in minutes": {suite: "cron", steps: [
 		{call: "cron.line", args: [{started: "2026-11-03T02:00:00Z", app: "brawl-chess", outcome: "released", commit: "0123456789abcdef", revision: "bonk-chess-00061-abc", steps: {prepare: 30, rehearse: 1050, release: 560}}], expect: "2026-11-03T02:00:00Z brawl-chess released 01234567 bonk-chess-00061-abc: 27.3 min = prepare 0.5, rehearse 17.5, release 9.3"},
 		{call: "cron.line", args: [{started: "t", app: "a", outcome: "skipped", why: "nothing changed", steps: {prepare: 30}}], expect: "t a skipped (nothing changed): 0.5 min = prepare 0.5"},

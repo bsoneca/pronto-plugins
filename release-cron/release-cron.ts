@@ -23,7 +23,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { activeLine, base, changed, detail, due, holds, line, plist, probe, report, served, spaced, retry, whole } from "./cron.js";
+import { activeLine, base, changed, detail, due, holds, line, local, plist, probe, report, served, spaced, retry, whole } from "./cron.js";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -57,7 +57,7 @@ const must = (cmd: string, args: string[], cwd?: string, env: Record<string, str
 // the PATH still finds the app's tools through it.
 const mise = sh("sh", ["-c", "command -v mise"]).out || `${home}/Library/Caches/sayt/mise-v2026.8.11/mise`;
 
-if (verb === "pause") { Deno.writeTextFileSync(`${state}/paused`, new Date().toISOString() + "\n"); console.log(`${app}: paused; runs skip until \`resume\``); Deno.exit(0); }
+if (verb === "pause") { Deno.writeTextFileSync(`${state}/paused`, local(Date.now()) + "\n"); console.log(`${app}: paused; runs skip until \`resume\``); Deno.exit(0); }
 if (verb === "resume") { Deno.removeSync(`${state}/paused`); console.log(`${app}: resumed`); Deno.exit(0); }
 if (verb === "status") {
   const job = sh("launchctl", ["print", `gui/${uid}/${label}`]);
@@ -124,7 +124,7 @@ if (verb !== "run") throw new Error(`${verb}: run, install, uninstall, pause, re
 const here_ = (f: string) => { try { return Deno.readTextFileSync(`${here}${f}`); } catch { return ""; } };
 const loaded = ["release-cron.ts", "cron.js"].map(here_).join("\0");
 const t0 = Date.now();
-const started = new Date(t0).toISOString().replace(/\.\d+Z$/, "Z");
+const started = local(t0);
 let out: Deno.FsFile | undefined;
 const log = (b: Uint8Array) => (out ??= Deno.openSync(`${state}/runs/${started}.log`, { write: true, create: true, append: true })).writeSync(b);
 const enc = new TextEncoder();
@@ -153,7 +153,7 @@ const active = (phase: string) => {
 const end = (outcome: string, why = "", code = 0) => {
   // The machine is given back first, whatever the outcome; only a file this run wrote is removed.
   try { if (JSON.parse(Deno.readTextFileSync(activePath)).pid === Deno.pid) Deno.removeSync(activePath); } catch { /* none, or not ours */ }
-  Object.assign(run, { outcome, why: why || undefined, ended: new Date().toISOString() });
+  Object.assign(run, { outcome, why: why || undefined, ended: local(Date.now()) });
   // Inside the steps: the rehearsal's and the release's own records of this commit, since this run began.
   if (run.commit && ("rehearse" in steps || "release" in steps) && gcp) {
     const d = detail(jsonl(`${home}/.cache/pronto/rehearsals/${app}.jsonl`), jsonl(`${home}/.cache/pronto/releases/${gcp.name}.jsonl`), run.commit, new Date(t0).toISOString());

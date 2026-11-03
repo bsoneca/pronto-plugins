@@ -8,6 +8,17 @@
 // a new merge is not held back.
 export const due = (now, last, gap) => last === null || now >= last + gap * 60_000;
 
+// A time a person reads (the run's log line, its log's name, the pause file), in the operator's
+// zone with its offset, to the second: 2026-11-03T17:28:12-03:00. `ms` is since the epoch. What the
+// code compares with other tools' records (detail's `since`) stays in UTC.
+export const zone = "America/Sao_Paulo";
+export const local = (ms, tz = zone) => {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(ms).map((x) => [x.type, x.value]));
+  const off = Math.round((Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(ms / 1000) * 1000) / 60_000);
+  const a = Math.abs(off), pad = (n) => String(n).padStart(2, "0");
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${off < 0 ? "-" : "+"}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
+};
+
 // The release-active file's line: the app, the run's pid, when it started and its phase (slot,
 // rehearse, release or confirm). One line of JSON, written whole and renamed into place.
 export const activeLine = (app, pid, started, phase) => JSON.stringify({ app, pid, started, phase }) + "\n";
