@@ -11,6 +11,11 @@ export const due = (now, last, gap) => last === null || now >= last + gap * 60_0
 // The outcomes after which the next run waits the gap.
 export const spaced = (outcome) => outcome === "released" || outcome === "failed";
 
+// A failed run's gap is waived once main has moved past the commit it failed on (`failed`; `head`
+// main now, null when it could not be read): the fix may be in, and an hour's wait on top of the
+// failed run's own would leave the app unreleased past its period. The same commit waits the gap.
+export const retry = (failed, head) => !!failed && !!head && head !== failed;
+
 // The files of a diff (`git diff --name-only`) under the watched paths: a path is watched when it
 // is one of them or lies beneath one.
 export const changed = (files, watch) =>

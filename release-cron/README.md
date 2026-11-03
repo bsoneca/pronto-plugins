@@ -3,7 +3,9 @@
 Releases a pronto app to production from `main` on the operator's Mac, so nobody has to ask for a
 release: it releases, waits an hour, then releases again. launchd wakes it every 10 minutes
 (`poll`), and a wake starts a run once `gap` (60 min) has passed since the last run that released
-or failed. A skipped run leaves no gap, so a new merge doesn't wait an hour.
+or failed. A skipped run leaves no gap, so a new merge doesn't wait an hour. Nor does one after a
+failure: once main has moved past the commit a run failed on, the next wake starts a run; a
+retry of the same commit waits the gap.
 
 ## What it adds
 
