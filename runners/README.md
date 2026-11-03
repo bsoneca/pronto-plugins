@@ -35,7 +35,8 @@ The rest have defaults:
 - **scaleSets**: each one's `min` (0) and `max` (3) runner pods, and its `arch` (`arm64`, the
   `kubernetes.io/arch` its pods land on).
 - **buildkit**: the `cache` volume (60 GiB) and what BuildKit prunes it down to, `keep` (40 GiB).
-  `emulate` lists foreign platforms built under QEMU. binfmt is registered in the node's kernel by an
+  `emulate` lists foreign platforms built under QEMU, on a `context` cluster only (a Colima setup
+  builds amd64 in Cloud Build instead). binfmt is registered in the node's kernel by an
   init container before BuildKit starts, and the list is empty by default.
 - **secret**: the Kubernetes secret's `name` (`gha-token`) and `kind`. A `pat` is a fine-grained token
   under the key `github_token`. An `app` is a GitHub App's id, installation id and private key. The
@@ -78,10 +79,10 @@ Each runner pod has `$BUILDKIT_HOST`, the address of the shared BuildKit
 ## On a Mac (caveats)
 
 - **Runners are linux/arm64.** They run Linux jobs in the VM, not macOS ones. A gate that runs host
-  processes on macOS (`./saytw integrate@local`) is not theirs to run. An amd64 image needs
-  `buildkit: emulate: ["linux/amd64"]` (bsoneca-mac has it) and `--platform linux/amd64`. Its `RUN`
-  steps run under QEMU, several times slower than native, so a Dockerfile that cross-compiles
-  (`FROM --platform=$BUILDPLATFORM`) is faster when the toolchain allows it.
+  processes on macOS (`./saytw integrate@local`) is not theirs to run. An amd64 image (Cloud Run's)
+  builds in Cloud Build (`gcloud builds submit --tag`, as `billing/release.nu` does), never under
+  QEMU here: a Colima setup can't `emulate`, since amd64 steps under QEMU took about 2 cores and
+  10 GB on the Mac Studio and starved its release rehearsals.
 - **The VM shares the Mac's cores.** Colima doesn't reserve its CPUs, but jobs use them while they
   run. bsoneca/pronto's `tests/slot.ts` budgets every core (`STACK_BUDGET`, 18 on the Mac Studio) for
   local stacks, so lower it by the VM's `cpus` (6) when runners and rehearsals run at once.
