@@ -109,6 +109,37 @@ every claim without `STACK_PRIORITY=release`; the run's own rehearsal and releas
 are admitted as before. Work already running keeps its slots. There is one file for the machine: when
 releases of two apps overlap, the first run keeps it and the other takes it at its next phase.
 
+## A failed run is bisected
+
+A run that **failed** names the commit that broke it. As it ends (after giving the machine back) it
+starts `release-cron.ts <app> bisect` as a process of its own, one at a time (`bisect/lock`), in its
+own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>]` does it by hand,
+and `--dry` runs nothing, tells nobody and writes nothing.
+
+1. The range is the first-parent merges of `main` between the newest run that released and the
+   failed run's commit. The failure's signature is its kind (`release`: release@gcp or its confirm;
+   else `rehearsal`) and the scenarios its output marks `✗ <name> (…s) at step`.
+2. Each merge is read from the records first, as good, bad or unknown: pronto's release records
+   (`~/.cache/pronto/releases/`: live is good, a failed rc test run bad) for a release failure, the
+   rehearsal records (`~/.cache/pronto/rehearsals/`: passed, failed) for a rehearsal failure, a dirty
+   tree none, plus the verdicts earlier bisects ran (`bisect/verdicts.jsonl`).
+3. For the middle merge the records leave unknown, `#Cron.bisect.command` (`./saytw integrate@local`)
+   runs in that commit's tree with `ONLY=<the failed scenarios>` and `SLOW=1`, as a plain claim on the
+   machine's slots (the app's `tests/slot.ts`): it waits for release-active like any job, never holds
+   it, never carries `STACK_PRIORITY=release`. The check is limited to `bisect.check` minutes, the
+   whole bisect to `bisect.minutes` (past it: the range it reached is told). A cloud-only failure (the
+   rc preview) is approximated by the same scenarios run locally.
+4. The culprit is mapped to its pull request (`Merge pull request #N from …`). The pull request gets a
+   comment; a notes file goes to the author session when the PR body names one (`local_<uuid>`) and
+   its notes folder exists, else to `bisect.lead`'s
+   (`~/Library/Application Support/Claude/side-session-notes/<session>/`); a macOS notification is
+   shown. Once per culprit.
+5. When a later failed run is bisected to the same culprit, a revert PR is opened: branch
+   `revert/<pr>`, `git revert -m1 <merge>` on main. It is never merged here; its gate decides.
+
+Each bisect is a line of `bisect/bisects.jsonl` and a `bisect` line of `runs.jsonl` (`detail.bisect`),
+and `report` ends with them. It never releases and never calls `release@gcp`.
+
 ## Install, pause, remove
 
 ```sh

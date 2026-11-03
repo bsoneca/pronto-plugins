@@ -37,6 +37,23 @@ releaseCron: #Cron
 		// production confirmed: the new revision serving, the probes below.
 		confirm: *5 | (number & >0)
 	}
+	// A failed run is bisected (README.md, "A failed run is bisected"): main between the last run that
+	// released and the failing commit, by the records first, else by running the failing check on
+	// the commits left. It runs apart from the run, as a low-priority claim on the machine's slots
+	// (tests/slot.ts, waiting for release-active like any job); it never releases.
+	bisect: {
+		// The whole bisect's limit, in minutes. Past it the bisect stops and tells the range it reached.
+		minutes: *120 | (number & >0)
+		// One check's limit, in minutes (a scenarios pass takes 6-17 at SLOW=1).
+		check: *30 | (number & >0)
+		// The check run in a commit's tree, in the app's folder, with ONLY=<the failed scenarios>
+		// and SLOW=1 set; its exit says good or bad.
+		command: *"./saytw integrate@local" | string
+		// The Claude Desktop session told of the culprit when its pull request names no author
+		// session (a `local_<uuid>` in its body), and the folder (under HOME) session notes go in.
+		lead:  *"local_7c6084eb-07de-487a-b8e6-689748accaaa" | string
+		notes: *"Library/Application Support/Claude/side-session-notes" | string
+	}
 	// What production must answer once the release is serving, each fetched from the release's domain.
 	probes: [Name=string]: #Probe
 }

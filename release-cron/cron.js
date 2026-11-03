@@ -125,7 +125,9 @@ export const report = (runs) => {
   const min = (s) => (Math.round(s / 6) / 10).toFixed(1);
   const median = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? (s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : null; };
   const released = runs.filter((r) => r.outcome === "released");
-  if (!released.length) return "no released run yet";
+  // The bisects of failed runs (runs.jsonl lines of their own), after the releases.
+  const bisected = runs.filter((r) => r.outcome === "bisect" && r.detail?.bisect).map((r) => `bisect ${bisectLine(r.detail.bisect)}`);
+  if (!released.length) return ["no released run yet", ...bisected].join("\n");
   const total = (r) => Object.values(r.steps).reduce((a, b) => a + b, 0);
   const rows = released.map((r) => `${r.started} ${r.commit?.slice(0, 8) ?? ""} ${min(total(r))} min = ${Object.entries(r.steps).map(([k, s]) => `${k} ${min(s)}`).join(", ")}`);
   const last = released.at(-1), before = released.slice(0, -1);
@@ -139,7 +141,7 @@ export const report = (runs) => {
   const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
   const cost = paid.length ? [`cloud rehearsal: ${paid.length} runs, mean ${min(mean(paid.map((x) => x.seconds)))} min and $${mean(paid.map((x) => x.usd)).toFixed(4)}, $${paid.reduce((a, x) => a + x.usd, 0).toFixed(2)} in all; at ${perDay} a day, $${(mean(paid.map((x) => x.usd)) * perDay * 30).toFixed(2)} a month`] : [];
   return [...rows, `newest: ${min(total(last))} min${m === null ? "" : `, median before ${min(m)}`}; its phases, slowest first:`, ...phases,
-    ...(last.detail?.flaked?.length ? [`  flaked, passed on retry: ${last.detail.flaked.join(", ")}`] : []), ...cost].join("\n");
+    ...(last.detail?.flaked?.length ? [`  flaked, passed on retry: ${last.detail.flaked.join(", ")}`] : []), ...cost, ...bisected].join("\n");
 };
 
 // The launchd job (a LaunchAgent's plist): `program` with `args`, every `poll` minutes (launchd
@@ -165,3 +167,64 @@ export const plist = ({ label, program, args, poll, log, env }) => {
 </plist>
 `;
 };
+
+// --- Bisect: a failed run names the commit that broke it. ---
+
+// What a failed run failed on, from its `why` and its output: the kind ("release" when release@gcp
+// or its confirm failed, else "rehearsal") and the scenarios the output marks failed (`✗ <name> (12s) at step`).
+export const signature = (why, text) => ({
+  kind: /^release@gcp|^released, production/.test(why ?? "") ? "release" : "rehearsal",
+  names: [...new Set([...(text ?? "").matchAll(/✗ (\S+) \(\d+s\) at step/g)].map((m) => m[1]))],
+});
+
+// The merges of `git log --first-parent --format='%H %s'` lines, oldest first, each with its pull
+// request and branch when the subject is a GitHub merge ("Merge pull request #1 from o/b"); other
+// commits (squashes, direct pushes) have pr null.
+export const merges = (lines) => lines.filter(Boolean).map((l) => {
+  const [sha, ...s] = l.split(" "), subject = s.join(" "), m = subject.match(/^Merge pull request #(\d+) from [^/\s]+\/(\S+)/);
+  return { sha, subject, pr: m ? Number(m[1]) : null, branch: m ? m[2] : null };
+}).reverse();
+
+// What the records already say of `commit` for this failure: "good", "bad" or "unknown". A release
+// failure reads the release records (pronto's, per name): live is good, a failed rc test run is bad.
+// A rehearsal failure reads the rehearsal records (passed good, failed bad). A dirty tree proves
+// nothing. `ledger` holds the verdicts earlier bisects ran themselves ({commit, kind, verdict, at});
+// the newest evidence counts.
+export const verdict = (commit, sig, ev) => {
+  const rehearsals = ev.rehearsals ?? [], releases = ev.releases ?? [], ledger = ev.ledger ?? [];
+  const from = sig.kind === "release"
+    ? releases.filter((r) => r.commit === commit && !r.dirty).map((r) => [r.started, r.outcome === "live" ? "good" : r.outcome === "failed" && /^the tests failed against/.test(r.failure ?? "") ? "bad" : "unknown"])
+    : rehearsals.filter((r) => r.commit === commit && !r.dirty).map((r) => [r.queued, r.outcome === "passed" ? "good" : r.outcome === "failed" ? "bad" : "unknown"]);
+  const own = ledger.filter((r) => r.commit === commit && r.kind === sig.kind).map((r) => [r.at, r.verdict]);
+  const seen = [...from, ...own].filter(([, v]) => v !== "unknown").sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  return seen.length ? seen.at(-1)[1] : "unknown";
+};
+
+// The next step of the search over `commits` (oldest first; the commit before them is good, the
+// last is bad), given each one's verdict (`known`: sha -> good|bad|unknown). Done: the first bad
+// commit after the last good one before it, when they are adjacent; else the commit in the middle
+// of those whose verdict is unknown; `range` when none is left to test.
+export const next = (commits, known) => {
+  const v = (i) => known[commits[i].sha] ?? "unknown";
+  let bad = commits.findIndex((_, i) => v(i) === "bad");
+  if (bad < 0) bad = commits.length - 1;
+  let good = -1;
+  for (let i = 0; i < bad; i++) if (v(i) === "good") good = i;
+  if (good + 1 === bad) return { culprit: commits[bad] };
+  const open = [];
+  for (let i = good + 1; i < bad; i++) if (v(i) === "unknown") open.push(i);
+  if (!open.length) return { range: commits.slice(good + 1, bad + 1) };
+  return { test: commits[open[Math.floor((open.length - 1) / 2)]] };
+};
+
+// The author session a pull request names in its body: a Claude Desktop session id (local_<uuid>).
+export const sessionOf = (body) => (body ?? "").match(/local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)?.[0] ?? null;
+
+// A revert is due when this bisect names the culprit an earlier bisect named, for a later failed
+// run, and nothing was reverted for it yet: the run after the notice failed on the same commit.
+export const revertDue = (bisects, now) =>
+  !!now.culprit && bisects.some((b) => b.culprit === now.culprit && b.of !== now.of) && !bisects.some((b) => b.culprit === now.culprit && b.revert);
+
+// The bisect's one line, for the run's detail and `report`.
+export const bisectLine = (b) =>
+  `${b.of}: ${b.culprit ? `culprit ${b.culprit.slice(0, 8)}${b.pr ? ` (PR #${b.pr}, ${b.branch})` : ""}` : b.range ? `narrowed to ${b.range.map((s) => s.slice(0, 8)).join(" ")}` : b.why ?? "undecided"}; checks run ${b.ran ?? 0}, from records ${b.fromRecords ?? 0}${b.notified ? `; told ${b.notified}` : ""}${b.revert ? `; revert ${b.revert}` : ""}`;
