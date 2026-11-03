@@ -133,6 +133,21 @@ cases: {
 		{call: "cron.detail", args: [[], [], "c1", "2026-11-03T02:00:00Z"], expect: {phases: {}, flaked: [], rc: null}, why: "nothing recorded for the commit"},
 		{call: "cron.detail", args: [[{commit: "c1", queued: "2026-11-03T01:59:59Z", waited: 5}], [], "c1", "2026-11-03T02:00:00Z"], expect: {phases: {}, flaked: [], rc: null}, why: "a record before the run began is an earlier run's"},
 	]}
+	"a cloud rehearsal is named in the log line with its minutes and cost": {suite: "cron", steps: [
+		{call: "cron.line", args: [{started: "t", app: "a", outcome: "released", steps: {prepare: 30, release: 1500}, rehearsal: {ok: true, seconds: 672, usd: 0.1183}}], expect: "t a released: 25.5 min = prepare 0.5, release 25.0; cloud rehearsal 11.2 min, $0.1183"},
+	]}
+	"a release record's cloud rehearsal is carried in the run's detail": {suite: "cron", steps: [
+		{call: "cron.detail", args: [[], [{commit: "c1", started: "2026-11-03T02:30:00Z", phases: {rc: 600}, rc: "ran", rehearsal: {ok: true, seconds: 600, usd: 0.1}}], "c1", "2026-11-03T02:00:00Z"],
+			expect: {phases: {"release.rc": 600}, flaked: [], rc: "ran", rehearsal: {ok: true, seconds: 600, usd: 0.1}}},
+	]}
+	"the report prices the cloud rehearsal per run and per month at 16 releases a day": {suite: "cron", steps: [
+		{call: "cron.report", args: [[
+			{started: "2026-11-02", outcome: "failed", commit: "aaaaaaaa11", steps: {release: 600}, detail: {phases: {}, rehearsal: {ok: false, seconds: 600, usd: 0.1}}},
+			{started: "2026-11-03", outcome: "released", commit: "bbbbbbbb22", steps: {release: 900}, detail: {phases: {}, rehearsal: {ok: true, seconds: 900, usd: 0.2}}},
+		]]},
+		{keep: "r"},
+		{use: "r", matches: "\\ncloud rehearsal: 2 runs, mean 12\\.5 min and \\$0\\.1500, \\$0\\.30 in all; at 16 a day, \\$72\\.00 a month$"},
+	]}
 	"the report is empty with no released run": {suite: "cron", steps: [
 		{call: "cron.report", args: [[]], expect: "no released run yet"},
 		{call: "cron.report", args: [[{started: "t", outcome: "skipped", steps: {prepare: 30}}]], expect: "no released run yet"},

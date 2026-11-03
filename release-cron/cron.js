@@ -83,13 +83,15 @@ export const line = (run) => {
   const total = Object.values(run.steps).reduce((a, b) => a + b, 0);
   const steps = Object.entries(run.steps).map(([k, s]) => `${k} ${min(s)}`).join(", ");
   const what = [run.commit?.slice(0, 8), run.revision].filter(Boolean).join(" ");
-  return `${run.started} ${run.app} ${run.outcome}${what ? ` ${what}` : ""}${run.why ? ` (${run.why})` : ""}: ${min(total)} min${steps ? ` = ${steps}` : ""}`;
+  const cloud = run.rehearsal ? `; cloud rehearsal ${min(run.rehearsal.seconds)} min, $${run.rehearsal.usd.toFixed(4)}` : "";
+  return `${run.started} ${run.app} ${run.outcome}${what ? ` ${what}` : ""}${run.why ? ` (${run.why})` : ""}: ${min(total)} min${steps ? ` = ${steps}` : ""}${cloud}`;
 };
 
 // Where a run's time went inside its steps, from the records the rehearsal and the release write
 // for the run's commit (~/.cache/pronto/rehearsals/<app>.jsonl, ~/.cache/pronto/releases/<name>.jsonl):
 // seconds by phase, flat, the rehearsal's prefixed "rehearse.", the release's "release.". The
 // newest record of the commit that started after `since` (ISO) counts; a phase not run is left out.
+// A release with a cloud rehearsal (GCP.rehearsal) carries it in its record: ok, seconds and usd.
 export const detail = (rehearsals, releases, commit, since) => {
   const newest = (rs, at) => rs.filter((r) => r.commit === commit && (r[at] ?? "") >= since).at(-1);
   const out = {};
@@ -101,12 +103,13 @@ export const detail = (rehearsals, releases, commit, since) => {
   const g = newest(releases, "started");
   if (g) for (const [k, v] of Object.entries(g.phases ?? {})) if (typeof v === "number" && k !== "total") out[`release.${k}`] = Math.round(v);
   const flaked = Object.entries(r?.checks ?? {}).flatMap(([k, c]) => (c.flaked ?? []).map((f) => `${f} (${k})`));
-  return { phases: out, flaked, rc: g?.rc ?? null };
+  return { phases: out, flaked, rc: g?.rc ?? null, ...(g?.rehearsal ? { rehearsal: g.rehearsal } : {}) };
 };
 
 // The released runs side by side, the newest last: each one's total and steps in minutes, then for
 // the newest, every phase against the median of those before it, the slowest first, so the next
 // change goes where the time is.
+export const perDay = 16;
 export const report = (runs) => {
   const min = (s) => (Math.round(s / 6) / 10).toFixed(1);
   const median = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? (s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : null; };
@@ -120,8 +123,12 @@ export const report = (runs) => {
     return `  ${k} ${min(s)} min${m === null ? "" : ` (median before ${min(m)}, ${s - m >= 0 ? "+" : ""}${min(s - m)})`}`;
   });
   const m = median(before.map(total));
+  // The cloud rehearsal's cost: every run that ran one, failed too, since each was paid for.
+  const paid = runs.map((r) => r.detail?.rehearsal ?? r.rehearsal).filter((x) => x && typeof x.usd === "number");
+  const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  const cost = paid.length ? [`cloud rehearsal: ${paid.length} runs, mean ${min(mean(paid.map((x) => x.seconds)))} min and $${mean(paid.map((x) => x.usd)).toFixed(4)}, $${paid.reduce((a, x) => a + x.usd, 0).toFixed(2)} in all; at ${perDay} a day, $${(mean(paid.map((x) => x.usd)) * perDay * 30).toFixed(2)} a month`] : [];
   return [...rows, `newest: ${min(total(last))} min${m === null ? "" : `, median before ${min(m)}`}; its phases, slowest first:`, ...phases,
-    ...(last.detail?.flaked?.length ? [`  flaked, passed on retry: ${last.detail.flaked.join(", ")}`] : [])].join("\n");
+    ...(last.detail?.flaked?.length ? [`  flaked, passed on retry: ${last.detail.flaked.join(", ")}`] : []), ...cost].join("\n");
 };
 
 // The launchd job (a LaunchAgent's plist): `program` with `args`, every `poll` minutes (launchd

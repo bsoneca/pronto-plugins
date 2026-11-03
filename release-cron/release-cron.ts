@@ -11,7 +11,9 @@
 // launchd wakes it every few minutes; a wake starts a run only once the gap since the last run
 // that released or failed is over (release, wait an hour, release again). A run: main fetched into the run's own worktree; skipped when nothing the app's releaseCron
 // watches changed since the last run that released; else `./saytw verify@local`, then `./saytw release@gcp`
-// on that tree, then production confirmed; one line in the log. Each step has its limit and the run
+// on that tree, then production confirmed; one line in the log. An app whose release.cue names
+// GCP.rehearsal has its rehearsal in the cloud, inside release@gcp (a Cloud Run job against the rc
+// preview): the run then takes no slot and runs nothing heavy here, and records the job's minutes and cost. Each step has its limit and the run
 // a limit (#Cron, release_cron_plugin.cue) against a wedge; a lock keeps two from overlapping. Every run is measured: its
 // steps, and inside them the rehearsal's and the release's phases, for `report`.
 // A run holds the machine while it works: ~/.cache/pronto/release-active (RELEASE_ACTIVE names another),
@@ -128,7 +130,7 @@ const log = (b: Uint8Array) => (out ??= Deno.openSync(`${state}/runs/${started}.
 const enc = new TextEncoder();
 const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() - t0) / 1000)}s ${s}\n`; log(enc.encode(l)); Deno.stdout.writeSync(enc.encode(l)); };
 let head = "";
-let gcp: Record<string, string> | undefined;
+let gcp: { name: string; service: string; project: string; region: string; domain: string; rehearsal?: { job: string } } | undefined;
 let cron: { gap: number; poll: number; watch: string[]; ready: string[]; holder: string; minutes: Record<string, number>; probes: Record<string, { path: string; agent?: string; status: number; has: string[] }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
@@ -153,7 +155,11 @@ const end = (outcome: string, why = "", code = 0) => {
   try { if (JSON.parse(Deno.readTextFileSync(activePath)).pid === Deno.pid) Deno.removeSync(activePath); } catch { /* none, or not ours */ }
   Object.assign(run, { outcome, why: why || undefined, ended: new Date().toISOString() });
   // Inside the steps: the rehearsal's and the release's own records of this commit, since this run began.
-  if (run.commit && "rehearse" in steps && gcp) run.detail = detail(jsonl(`${home}/.cache/pronto/rehearsals/${app}.jsonl`), jsonl(`${home}/.cache/pronto/releases/${gcp.name}.jsonl`), run.commit, new Date(t0).toISOString());
+  if (run.commit && ("rehearse" in steps || "release" in steps) && gcp) {
+    const d = detail(jsonl(`${home}/.cache/pronto/rehearsals/${app}.jsonl`), jsonl(`${home}/.cache/pronto/releases/${gcp.name}.jsonl`), run.commit, new Date(t0).toISOString());
+    run.detail = d;
+    if (d.rehearsal) run.rehearsal = d.rehearsal;
+  }
   const l = line(run);
   Deno.writeTextFileSync(`${state}/release-cron.log`, l + "\n", { append: true });
   Deno.writeTextFileSync(`${state}/runs.jsonl`, JSON.stringify(run) + "\n", { append: true });
@@ -285,8 +291,11 @@ try {
 
   // 2. The rehearsal: its slot within cron.minutes.slot, its run within cron.minutes.rehearse.
   const dir = `${wt}/${appRel}`;
-  let got = false, busy = false;
-  active("slot");
+  // With GCP.rehearsal the rehearsal is release@gcp's own, in the cloud: no slot, nothing run here.
+  const cloud = !!gcp!.rehearsal;
+  if (cloud) say(`GCP.rehearsal: the rehearsal runs in the cloud, job ${gcp!.rehearsal!.job}, inside release@gcp`);
+  let got = cloud, busy = false;
+  if (!cloud) active("slot");
   const queue = setTimeout(() => { if (!got && current) { busy = true; say(`no slot within ${cron.minutes.slot} min: skipping`); stop(current.pgid); } }, cron.minutes.slot * 60_000);
   // slot.ts's own wait outlasts this one, so the run's limit is the one that ends a wait.
   // The slot is taken once a live slot of the pool names this rehearsal as its owner.
@@ -304,14 +313,14 @@ try {
   }, 5000);
   // STACK_PRIORITY=release puts its claim at the head of the pool's line, ahead of every claim a
   // pull request's gate or a launch is waiting with (tests/slot.ts).
-  const gate = await child("./saytw", ["verify@local"], dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: String(cron.minutes.slot + 5), STACK_PRIORITY: "release" }, cron.minutes.slot + cron.minutes.rehearse);
+  const gate = cloud ? { code: 0, late: false } : await child("./saytw", ["verify@local"], dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: String(cron.minutes.slot + 5), STACK_PRIORITY: "release" }, cron.minutes.slot + cron.minutes.rehearse);
   clearTimeout(queue);
   clearInterval(look);
   // Every check passed already for this tree: the rehearsal took no slot and waited for none.
   if (!got && !busy && gate.code === 0) { got = true; step("slot"); active("rehearse"); }
   if (busy) { step("slot"); end("skipped", `the slot queue was busy for ${cron.minutes.slot} min; the next run asks again`); }
   if (!got) { step("slot"); end("failed", `verify@local ended before its slot (exit ${gate.code}): nothing released`, 1); }
-  step("rehearse");
+  if (!cloud) step("rehearse");
   if (gate.code !== 0) end("failed", gate.late ? `the rehearsal outlasted its limit` : `the rehearsal failed (exit ${gate.code}): nothing released`, 1);
 
   // 3. The release, on the tree the rehearsal passed.
