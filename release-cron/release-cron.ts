@@ -104,19 +104,23 @@ if (verb === "bisect") {
   if (!green) { say(`no run released before ${failed.started}: no good commit to start from`); Deno.exit(0); }
   // One bisect at a time: a lock directory holding the pid, a dead holder's taken over.
   if (!dry) {
-    // mkdir is atomic. A lock held by a live pid, or made a minute ago and not yet holding one, is
-    // another bisect's; a dead holder's is removed and taken with one more mkdir, which only one wins.
-    const mine = () => { try { Deno.mkdirSync(`${dir}/lock`); return true; } catch { return false; } };
-    if (!mine()) {
-      const pid = Number((() => { try { return Deno.readTextFileSync(`${dir}/lock/pid`); } catch { return "0"; } })());
-      const age = (() => { try { return Date.now() - (Deno.statSync(`${dir}/lock`).mtime?.getTime() ?? 0); } catch { return Infinity; } })();
-      if ((pid && sh("kill", ["-0", String(pid)]).ok) || (!pid && age < 60_000)) { say(`bisect ${pid || "starting"} still going`); Deno.exit(0); }
-      try { Deno.removeSync(`${dir}/lock`, { recursive: true }); } catch { /* another took it */ }
-      if (!mine()) { say("another bisect took the lock"); Deno.exit(0); }
+    // The lock is a file holding the pid, made whole by link(2) (it exists with its content or not at
+    // all). A live holder's keeps; a dead holder's is removed only if it is still that pid's, then taken.
+    const lock = `${dir}/lock`, tmp = `${dir}/lock.${Deno.pid}`;
+    Deno.writeTextFileSync(tmp, String(Deno.pid));
+    const take = () => { try { Deno.linkSync(tmp, lock); return true; } catch { return false; } };
+    const holder = () => { try { return Number(Deno.readTextFileSync(lock)); } catch { return 0; } };
+    let ok = take();
+    if (!ok) {
+      const pid = holder();
+      if (pid && sh("kill", ["-0", String(pid)]).ok) { Deno.removeSync(tmp); say(`bisect ${pid} still going`); Deno.exit(0); }
+      if (holder() === pid) { try { Deno.removeSync(lock); } catch { /* another took it */ } }
+      ok = take();
     }
-    Deno.writeTextFileSync(`${dir}/lock/pid`, String(Deno.pid));
+    Deno.removeSync(tmp);
+    if (!ok) { say("another bisect took the lock"); Deno.exit(0); }
   }
-  const unlock = () => { try { if (Deno.readTextFileSync(`${dir}/lock/pid`) === String(Deno.pid)) Deno.removeSync(`${dir}/lock`, { recursive: true }); } catch { /* none, or not ours */ } };
+  const unlock = () => { try { if (Deno.readTextFileSync(`${dir}/lock`) === String(Deno.pid)) Deno.removeSync(`${dir}/lock`); } catch { /* none, or not ours */ } };
   const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], here);
   must("git", ["--git-dir", repo, "fetch", "-q", "origin"]);
   const slug = must("git", ["--git-dir", repo, "remote", "get-url", "origin"]).replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1");
@@ -140,6 +144,20 @@ if (verb === "bisect") {
   const verdicts = (sha: string, v: string) => Deno.writeTextFileSync(`${dir}/verdicts.jsonl`, JSON.stringify({ commit: sha, kind: sig.kind, names: sig.names, verdict: v, at: new Date().toISOString() }) + "\n", { append: true });
   // The failing check on a commit's tree: ONLY the failed scenarios, slowed as the rehearsal runs
   // them, in its own process group, stopped with its group past b.check (and the bisect's own limit).
+  // A signal stops the check's group (TERM, then KILL after 30 s) and gives the lock back first, so a
+  // later bisect never finds the checkout under a check still running.
+  let group = 0;
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    Deno.addSignalListener(signal, async () => {
+      if (group) {
+        sh("kill", ["-TERM", "--", `-${group}`], undefined, {}, 10);
+        for (const t = Date.now(); sh("kill", ["-0", "--", `-${group}`], undefined, {}, 10).ok && Date.now() - t < 30_000;) await new Promise((r) => setTimeout(r, 1000));
+        sh("kill", ["-KILL", "--", `-${group}`], undefined, {}, 10);
+      }
+      unlock();
+      Deno.exit(130);
+    });
+  }
   const check = async (sha: string) => {
     const repoWt = exists(`${bwt}/.git`);
     if (!repoWt) must("git", ["--git-dir", repo, "worktree", "add", "-q", "--detach", bwt, sha]);
@@ -150,7 +168,8 @@ if (verb === "bisect") {
     const env: Record<string, string> = { ...Deno.env.toObject(), SLOW: "1", INTEGRATE_LOCAL_DRIVERS: "all", STACK_WAIT_MINUTES: String(Math.ceil(minutes)), ...(sig.names.length ? { ONLY: sig.names.join(",") } : {}) };
     delete env.STACK_PRIORITY;
     const logf = `${dir}/${sha.slice(0, 8)}.log`;
-    const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", "sh", "-c", b.command], cwd: `${bwt}/${appRel}`, env, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
+    const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", "sh", "-c", b.command], cwd: `${bwt}/${appRel}`, env, clearEnv: true, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
+    group = p.pid;
     let late = false;
     const timer = setTimeout(() => { late = true; sh("kill", ["-TERM", "--", `-${p.pid}`], undefined, {}, 10); setTimeout(() => sh("kill", ["-KILL", "--", `-${p.pid}`], undefined, {}, 10), 60_000); }, minutes * 60_000);
     const f = Deno.openSync(logf, { write: true, create: true, truncate: true });
@@ -158,6 +177,7 @@ if (verb === "bisect") {
     f.close();
     const { code } = await p.status;
     clearTimeout(timer);
+    group = 0;
     return late ? "unknown" : code === 0 ? "good" : "bad";
   };
   // A release failure shows in the cloud (the rc preview): the check must fail here on the failing
