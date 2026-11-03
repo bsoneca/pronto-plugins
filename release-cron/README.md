@@ -72,10 +72,11 @@ Bonk Chess (bsoneca/pronto's `apps/brawl-chess`) is the first: its `release_cron
    nothing served changed`.
 
 Each step's output goes to `runs/<start>.log`. Each run appends one line to `release-cron.log`
-(and the same as JSON to `runs.jsonl`):
+(and the same as JSON to `runs.jsonl`). Every time a person reads there (the line, the log's name,
+the `paused` file) is Brasília's, with its offset (`cron.js`'s `local`):
 
 ```
-2026-11-03T10:00:00Z brawl-chess released 93d3ea73 bonk-chess-00065-abc: 29.4 min = prepare 0.3, slot 0.0, rehearse 17.6, release 9.4, confirm 0.4
+2026-11-03T07:00:00-03:00 brawl-chess released 93d3ea73 bonk-chess-00065-abc: 29.4 min = prepare 0.3, slot 0.0, rehearse 17.6, release 9.4, confirm 0.4
 ```
 
 ## Measured, every release
