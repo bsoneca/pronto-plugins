@@ -391,7 +391,7 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 		outputs: [{
 			extract_from: "process_start"
 			conditions: [{type: "vrl", source: """
-				.name == "process_start_time_seconds" && !exists(.namespace) && (.tags == null || length(object!(.tags)) == 0) && .gauge.value > 1.7e9 && abs(.gauge.value - to_unix_timestamp(now())) < 600.0
+				.name == "process_start_time_seconds" && .type == "gauge" && .kind == "absolute" && !exists(.namespace) && (.tags == null || .tags == {})
 				"""}]
 		}]
 	}, {
