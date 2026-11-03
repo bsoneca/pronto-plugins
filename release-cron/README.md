@@ -88,6 +88,20 @@ its whole process group and the run fails. There's no overall budget. Runs never
 launchd never starts a job while it's still running, and a lock (`<state>/lock`, with the
 run's pid) skips a run started by hand while another is going.
 
+## The release holds the machine
+
+While a run works it keeps `~/.cache/pronto/release-active` (`RELEASE_ACTIVE` names another), one
+line of JSON: `{"app":"<app>","pid":<the run's pid>,"started":"<ISO>","phase":"slot|rehearse|release|confirm"}`.
+The run writes it (to a temporary file, then renamed) as it enters `slot`, updates `phase` at each
+step and removes it when it ends, on every outcome and on a signal. A file whose pid is not alive
+(`kill -0`) is stale: a reader ignores it and may delete it.
+
+A job on this Mac checks the file before it starts heavy work and between units of work, and while
+it is live starts nothing new: it waits, polling every 30 s. An app's `tests/slot.ts` does this for
+every claim without `STACK_PRIORITY=release`; the run's own rehearsal and release carry it, so they
+are admitted as before. Work already running keeps its slots. There is one file for the machine: when
+releases of two apps overlap, the first run keeps it and the other takes it at its next phase.
+
 ## Install, pause, remove
 
 ```sh
