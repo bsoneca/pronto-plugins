@@ -104,9 +104,15 @@ if (verb === "bisect") {
   if (!green) { say(`no run released before ${failed.started}: no good commit to start from`); Deno.exit(0); }
   // One bisect at a time: a lock directory holding the pid, a dead holder's taken over.
   if (!dry) {
-    try { Deno.mkdirSync(`${dir}/lock`); } catch {
+    // mkdir is atomic. A lock held by a live pid, or made a minute ago and not yet holding one, is
+    // another bisect's; a dead holder's is removed and taken with one more mkdir, which only one wins.
+    const mine = () => { try { Deno.mkdirSync(`${dir}/lock`); return true; } catch { return false; } };
+    if (!mine()) {
       const pid = Number((() => { try { return Deno.readTextFileSync(`${dir}/lock/pid`); } catch { return "0"; } })());
-      if (pid && sh("kill", ["-0", String(pid)]).ok) { say(`bisect ${pid} still going`); Deno.exit(0); }
+      const age = (() => { try { return Date.now() - (Deno.statSync(`${dir}/lock`).mtime?.getTime() ?? 0); } catch { return Infinity; } })();
+      if ((pid && sh("kill", ["-0", String(pid)]).ok) || (!pid && age < 60_000)) { say(`bisect ${pid || "starting"} still going`); Deno.exit(0); }
+      try { Deno.removeSync(`${dir}/lock`, { recursive: true }); } catch { /* another took it */ }
+      if (!mine()) { say("another bisect took the lock"); Deno.exit(0); }
     }
     Deno.writeTextFileSync(`${dir}/lock/pid`, String(Deno.pid));
   }
@@ -131,7 +137,7 @@ if (verb === "bisect") {
   const fromRecords = list.filter((c) => known[c.sha] !== "unknown").length;
   const deadline = Date.now() + b.minutes * 60_000;
   let ran = 0, step = next(list, known), why = "";
-  const verdicts = (sha: string, v: string) => Deno.writeTextFileSync(`${dir}/verdicts.jsonl`, JSON.stringify({ commit: sha, kind: sig.kind, verdict: v, at: new Date().toISOString() }) + "\n", { append: true });
+  const verdicts = (sha: string, v: string) => Deno.writeTextFileSync(`${dir}/verdicts.jsonl`, JSON.stringify({ commit: sha, kind: sig.kind, names: sig.names, verdict: v, at: new Date().toISOString() }) + "\n", { append: true });
   // The failing check on a commit's tree: ONLY the failed scenarios, slowed as the rehearsal runs
   // them, in its own process group, stopped with its group past b.check (and the bisect's own limit).
   const check = async (sha: string) => {
@@ -155,13 +161,22 @@ if (verb === "bisect") {
     return late ? "unknown" : code === 0 ? "good" : "bad";
   };
   // A release failure shows in the cloud (the rc preview): the check must fail here on the failing
-  // commit too, or there is nothing to bisect with, and the range is told as it stands.
+  // commit too (an explicit failure: a pass or a timeout is not), or there is nothing to bisect
+  // with, and the range is told as it stands. The failing commit's own ledger verdict stands for it.
   let reproduced = true;
-  if (!dry && sig.kind === "release" && "test" in step) {
-    say(`running the failing commit ${list.at(-1)!.sha.slice(0, 8)} first: the check must fail here too`);
-    reproduced = await check(list.at(-1)!.sha) !== "good";
-    ran++;
-    if (!reproduced) { why = "the check passes here on the failing commit: a failure only the cloud shows, not bisected"; step = { range: list }; }
+  if (!dry && sig.kind === "release") {
+    const failing = list.at(-1)!.sha;
+    const same = (r: { commit: string; kind: string; names?: string[] }) => r.commit === failing && r.kind === sig.kind && (r.names ?? []).join(",") === sig.names.join(",");
+    const mine = jsonl(`${dir}/verdicts.jsonl`).filter(same).at(-1)?.verdict;
+    let v = mine;
+    if (!v) {
+      say(`running the failing commit ${failing.slice(0, 8)} first: the check must fail here too`);
+      v = await check(failing);
+      ran++;
+      if (v !== "unknown") verdicts(failing, v);
+    }
+    reproduced = v === "bad";
+    if (!reproduced) { why = `the check ${v === "good" ? "passes" : "did not finish"} here on the failing commit: a failure only the cloud shows, not bisected`; step = { range: list }; }
   }
   if (!dry && reproduced) {
     for (; "test" in step && Date.now() < deadline; step = next(list, known)) {

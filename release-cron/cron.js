@@ -188,14 +188,14 @@ export const merges = (lines) => lines.filter(Boolean).map((l) => {
 // What the records already say of `commit` for this failure: "good", "bad" or "unknown". A release
 // failure reads the release records (pronto's, per name): live is good, a failed rc test run is bad.
 // A rehearsal failure reads the rehearsal records (passed good, failed bad). A dirty tree proves
-// nothing. `ledger` holds the verdicts earlier bisects ran themselves ({commit, kind, verdict, at});
+// nothing. `ledger` holds the verdicts earlier bisects ran themselves ({commit, kind, names, verdict, at});
 // the newest evidence counts.
 export const verdict = (commit, sig, ev) => {
   const rehearsals = ev.rehearsals ?? [], releases = ev.releases ?? [], ledger = ev.ledger ?? [];
   const from = sig.kind === "release"
     ? releases.filter((r) => r.commit === commit && !r.dirty).map((r) => [r.started, r.outcome === "live" ? "good" : r.outcome === "failed" && /^the tests failed against/.test(r.failure ?? "") ? "bad" : "unknown"])
     : rehearsals.filter((r) => r.commit === commit && !r.dirty).map((r) => [r.queued, r.outcome === "passed" ? "good" : r.outcome === "failed" ? "bad" : "unknown"]);
-  const own = ledger.filter((r) => r.commit === commit && r.kind === sig.kind).map((r) => [r.at, r.verdict]);
+  const own = ledger.filter((r) => r.commit === commit && r.kind === sig.kind && (r.names ?? []).join(",") === (sig.names ?? []).join(",")).map((r) => [r.at, r.verdict]);
   const seen = [...from, ...own].filter(([, v]) => v !== "unknown").sort((a, b) => String(a[0]).localeCompare(String(b[0])));
   return seen.length ? seen.at(-1)[1] : "unknown";
 };

@@ -189,7 +189,8 @@ cases: {
 		{call: "cron.verdict", args: ["c1", {kind: "release", names: []}, {rehearsals: [{commit: "c1", dirty: false, outcome: "passed", queued: "1"}]}], expect: "unknown", why: "a local rehearsal pass says nothing of the cloud's rc"},
 		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: []}, {rehearsals: [{commit: "c1", dirty: false, outcome: "failed", queued: "1"}, {commit: "c1", dirty: false, outcome: "passed", queued: "2"}]}], expect: "good", why: "the newer pass"},
 		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: []}, {rehearsals: [{commit: "c1", dirty: true, outcome: "passed", queued: "1"}]}], expect: "unknown"},
-		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: []}, {ledger: [{commit: "c1", kind: "rehearsal", verdict: "bad", at: "1"}]}], expect: "bad", why: "a verdict an earlier bisect ran"},
+		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: ["a"]}, {ledger: [{commit: "c1", kind: "rehearsal", names: ["a"], verdict: "bad", at: "1"}]}], expect: "bad", why: "a verdict an earlier bisect ran for the same scenarios"},
+		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: ["b"]}, {ledger: [{commit: "c1", kind: "rehearsal", names: ["a"], verdict: "good", at: "1"}]}], expect: "unknown", why: "a pass of other scenarios proves nothing of these"},
 	]}
 	"the search tests the middle of what the verdicts leave and names the first bad commit after the last good": {suite: "cron", steps: [
 		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}, {sha: "c"}, {sha: "d"}, {sha: "e"}], {e: "bad"}], expect: {test: {sha: "b"}}},
