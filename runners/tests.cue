@@ -19,7 +19,18 @@ setups: {
 		}
 		buildkit: emulate: ["linux/amd64", "linux/riscv64"]
 	}
+	"check-host": {
+		cluster: host: {}
+		github: owner: "acme"
+		hostRunners: {
+			"shop-mac": repo: "shop"
+			"web-mac": {repo: "web", labels: ["web-mac", "xcode"], nice: 0}
+		}
+	}
 }
+
+// The checks' home; runners.ts exports a plan with the person's.
+plans: [string]: home: "/Users/check"
 
 _mac: plans["check-mac"]
 _org: plans["check-org"]
@@ -49,3 +60,31 @@ emulation: {mac: _deploy.mac.spec.template.spec.initContainers == _|_, org: _dep
 
 // The cache BuildKit keeps is what the setup says, in bytes.
 keep: strings.Contains([for o in _mac.buildkit if o.kind == "ConfigMap" {o}][0].data["buildkitd.toml"], "keepBytes = 42949672960") & true
+
+// A host runner: GitHub's osx-arm64 runner under the home, registered to its repository, run by a
+// launchd agent at a lower priority, with no cluster at all.
+_host: plans["check-host"]
+_shop: _host.host["shop-mac"]
+host: {
+	cluster: _host.context == _|_ && _host.scaleSets == _|_
+	url:     _shop.url
+	api:     _shop.api
+	dir:     _shop.dir
+	labels:  _host.host["web-mac"].labels
+	tarball: strings.HasSuffix(_shop.download.url, "/v2.338.2/actions-runner-osx-arm64-2.338.2.tar.gz")
+	agent:   _shop.service.path
+	program: _shop.service.plist.ProgramArguments
+	path:    strings.HasPrefix(_shop.path, "/Users/check/.deno/bin:/Users/check/.local/bin:/opt/homebrew/bin:")
+	nice: {shop: _shop.service.plist.Nice, web: _host.host["web-mac"].service.plist.Nice}
+} & {
+	cluster: true
+	url:     "https://github.com/acme/shop"
+	api:     "repos/acme/shop/actions/runners"
+	dir:     "/Users/check/actions-runners/shop-mac"
+	labels: ["web-mac", "xcode"]
+	tarball: true
+	path:    true
+	agent:   "/Users/check/Library/LaunchAgents/actions.runner.acme-shop.shop-mac.plist"
+	program: ["/bin/bash", "/Users/check/actions-runners/shop-mac/bin/runsvc.sh"]
+	nice: {shop: 10, web: 0}
+}

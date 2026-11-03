@@ -1,6 +1,7 @@
 // What a runners setup (README.md) is, written as data: where the cluster is, whose GitHub jobs it
 // takes, its runner scale sets, the BuildKit they share and the secret they register with (named,
-// never its values). A setup is one field of `setups` (setups.cue); host.cue renders it into what
+// never its values); or, on a `host` setup, GitHub's runner itself on this machine, each runner a
+// launchd agent. A setup is one field of `setups` (setups.cue); host.cue renders it into what
 // runners.ts applies.
 package runners
 
@@ -10,8 +11,9 @@ setups: [Name=string]: #Setup & {name: Name}
 	name!: =~"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
 
 	// The cluster the controller, BuildKit and the runners run in: a Colima k3s VM this machine
-	// starts, or a cluster a kubeconfig context already reaches (a remote k3s, a cloud one).
-	cluster: #Colima | #Context
+	// starts, or a cluster a kubeconfig context already reaches (a remote k3s, a cloud one). Or
+	// `host`: no cluster, the runners are this Mac's own processes (hostRunners).
+	cluster: #Colima | #Context | #Host
 
 	github: {
 		owner!: =~"^[A-Za-z0-9-]+$"
@@ -40,6 +42,31 @@ setups: [Name=string]: #Setup & {name: Name}
 		arch: *"arm64" | "amd64"
 	}
 
+	// A host setup's runners: GitHub's actions/runner for macOS, installed under the home and run
+	// by a launchd agent, so it comes back at every login. Each takes one job at a time, on the Mac
+	// itself (its tools, its caches, no container). What runs-on says: self-hosted, macOS, ARM64
+	// (GitHub's own labels) and the runner's `labels`.
+	hostRunners: [Name=#DNS]: {
+		if github.kind == "user" {repo!: string}
+		repo?: =~"^[A-Za-z0-9_.-]+$"
+		labels: *[Name] | [...=~"^[A-Za-z0-9._-]+$"]
+		// The runner's folder, under the home; its jobs' checkouts go in `work`, under it.
+		dir:  *"actions-runners/\(Name)" | (string & !~"^/")
+		work: *"_work" | (string & !~"^/")
+		// The PATH its jobs run with (config.sh records it in .path), ~ the home: not the PATH of
+		// whoever ran apply.
+		path: *["~/.deno/bin", "~/.local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"] | [...(=~"^(/|~/)")]
+		// The service's CPU priority (launchd's Nice): its jobs yield to the person's own work.
+		nice: *10 | (int & >=0 & <=20)
+	}
+	// A setup is one or the other: host runners on this Mac, or scale sets on a cluster.
+	if cluster.host == _|_ {
+		hostRunners: [string]: _|_
+	}
+	if cluster.host != _|_ {
+		scaleSets: [string]: _|_
+	}
+
 	buildkit: {
 		// The layer cache kept across jobs, and what BuildKit prunes it down to, in GiB.
 		cache: *60 | (int & >0)
@@ -60,6 +87,11 @@ setups: [Name=string]: #Setup & {name: Name}
 		runnerImage: *"ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232" | string
 		buildkit:    *"moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe" | string
 		binfmt:      *"tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0" | string
+		// A host runner's first install; it updates itself afterwards, as GitHub requires.
+		hostRunner: {
+			version: *"2.338.2" | string
+			sha256:  *"25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388" | =~"^[0-9a-f]{64}$"
+		}
 	}
 }
 
@@ -74,6 +106,11 @@ setups: [Name=string]: #Setup & {name: Name}
 		memory: *12 | (int & >=4)   // GiB
 		disk:   *100 | (int & >=20) // GiB
 	}
+}
+
+#Host: {
+	// This machine, a Mac (osx-arm64): nothing to start, no cluster.
+	host: {}
 }
 
 #Context: {

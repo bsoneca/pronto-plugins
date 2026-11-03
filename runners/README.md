@@ -12,15 +12,25 @@ set's chart values. [`runners.ts`](runners.ts) applies the plan as it is, so not
 written by hand. What an apply does, given what it finds, is [`plan.js`](plan.js)'s, held by the
 cases in [`tests/unit/runners.cue`](../tests/unit/runners.cue).
 
+A setup can instead be a **host** setup: no cluster, GitHub's own [actions/runner] for macOS on the
+Mac itself, each runner a launchd agent. Its jobs run on the Mac's own tools and caches, with no VM
+and no docker, one job at a time per runner.
+
 [Actions Runner Controller]: https://github.com/actions/actions-runner-controller
+[actions/runner]: https://github.com/actions/runner
 
 ## A setup
 
 ```cue
-setups: "bsoneca-mac": {
+setups: "shop-k3s": {
 	cluster: colima: profile: "arc"               // or: cluster: context: "<kubeconfig context>"
-	github: {owner: "bsoneca", kind: "user"}      // "org": a scale set without a repo serves them all
-	scaleSets: "pronto-arc": repo: "pronto"       // runs-on: pronto-arc
+	github: {owner: "acme", kind: "user"}         // "org": a scale set without a repo serves them all
+	scaleSets: "shop-arc": repo: "shop"           // runs-on: shop-arc
+}
+setups: "bsoneca-mac": {
+	cluster: host: {}                             // this Mac: no cluster
+	github: {owner: "bsoneca", kind: "user"}
+	hostRunners: "pronto-mac": repo: "pronto"     // runs-on: [self-hosted, macOS, pronto-mac]
 }
 ```
 
@@ -41,7 +51,13 @@ The rest have defaults:
 - **secret**: the Kubernetes secret's `name` (`gha-token`) and `kind`. A `pat` is a fine-grained token
   under the key `github_token`. An `app` is a GitHub App's id, installation id and private key. The
   values are never written in the setup. `apply` prints the command that creates the secret.
-- **versions**: the ARC charts and the runner, BuildKit and binfmt images, each pinned by digest.
+- **hostRunners** (a host setup's, instead of scaleSets): each runner's `repo`, its `labels` (its
+  name by default; GitHub adds `self-hosted`, `macOS` and `ARM64`), its folder `dir` under the home
+  (`actions-runners/<name>`) and `work` under that (`_work`), the `path` its jobs run with, and
+  `nice` (10), the agent's CPU priority, so jobs yield to the person's own work. The schema refuses
+  a setup with both scale sets and host runners.
+- **versions**: the ARC charts and the runner, BuildKit and binfmt images, each pinned by digest;
+  the macOS runner's first download, by version and sha256 (it updates itself afterwards).
 
 ## Use
 
@@ -58,6 +74,14 @@ deno run -A runners/runners.ts bsoneca-mac remove   # the scale sets (the VM, co
 On its first run, `apply` stops after BuildKit because the secret is missing, and prints what to
 create. Starting Colima makes its VM the current kubectl and docker context, so `apply` switches both
 back afterwards. Every kubectl and helm call names the plan's context and never uses the current one.
+
+For a host setup, `apply` downloads the runner (checked against its sha256) into its folder,
+registers it, and writes and loads its launchd agent (`~/Library/LaunchAgents/actions.runner.<owner>-<repo>.<name>.plist`,
+logs in `~/Library/Logs/` under the same name), each only when missing or changed. Registering
+takes a short-lived token that `apply` fetches with `gh api` (admin on the repository) and hands to
+`config.sh`, never to a file or the screen. When gh can't fetch it, `apply` prints the command for
+someone who can. `status` shows the agent's state and GitHub's view of the runner (online, busy);
+`remove` unloads the agent and unregisters the runner, keeping its folder.
 
 ## In a workflow
 
@@ -76,7 +100,28 @@ Each runner pod has `$BUILDKIT_HOST`, the address of the shared BuildKit
 `driver: remote` and `endpoint` set to that address. To get the image out of BuildKit, push it
 (`--push`) or export it (`--output`). No local daemon holds it.
 
+A host runner's job runs on the Mac:
+
+```yaml
+jobs:
+  check:
+    runs-on: [self-hosted, macOS, pronto-mac]
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./saytw test
+```
+
 ## On a Mac (caveats)
+
+- **A host runner is the person's own account.** Its jobs read their home (gh's login, gcloud's,
+  the keychain's), so it serves private repositories whose writers they trust, never a public one,
+  where a fork's pull request would run on the Mac. A step that changes global state (`git config
+  --global`, an install) changes theirs: a job keeps it in `$RUNNER_TEMP` (`GIT_CONFIG_GLOBAL`).
+- **A host runner's heavy jobs claim the machine.** A stack, `integrate@local` or a rehearsal on
+  a host runner runs through the repository's `tests/slot.ts` (`--weight <n> -- <command>`), so CI
+  shares the stack budget with the person's own stacks and waits for a release.
+- **Its agent starts at login.** A LaunchAgent runs in the person's session: after a reboot, the
+  runner is back once they log in (automatic login keeps it unattended).
 
 - **Runners are linux/arm64.** They run Linux jobs in the VM, not macOS ones. A gate that runs host
   processes on macOS (`./saytw integrate@local`) is not theirs to run. An amd64 image (Cloud Run's)
@@ -93,8 +138,8 @@ Each runner pod has `$BUILDKIT_HOST`, the address of the shared BuildKit
 
 ## Tests
 
-[`tests.cue`](tests.cue) renders a user's setup on a Mac and an organization's setup on a cluster it
-reaches, and checks the plans with `cue vet`. The apply rules' cases are suite `runners`.
+[`tests.cue`](tests.cue) renders a user's setup on a Mac, an organization's setup on a cluster it
+reaches and a host setup, and checks the plans with `cue vet`. The apply rules' cases are suite `runners`.
 
 ```sh
 ./saytw --script tools.nu cue vet -c ./runners

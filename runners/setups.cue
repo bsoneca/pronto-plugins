@@ -1,9 +1,10 @@
 package runners
 
-// bsoneca's Mac Studio: a Colima VM of its own (profile arc) beside the default one, runners for
-// bsoneca/pronto first (Bonk Chess's repository). Cloud Run's amd64 images build in Cloud Build.
+// bsoneca's Mac Studio: GitHub's runner on the Mac itself, no VM and no docker, for bsoneca/pronto
+// (Bonk Chess's repository). Its jobs claim the machine's stack budget (pronto's tests/slot.ts).
+// Images build in Cloud Build. The `arc` Colima VM it ran first stays stopped.
 setups: "bsoneca-mac": {
-	cluster: colima: profile: "arc"
+	cluster: host: {}
 	github: {owner: "bsoneca", kind: "user"}
-	scaleSets: "pronto-arc": repo: "pronto"
+	hostRunners: "pronto-mac": repo: "pronto"
 }

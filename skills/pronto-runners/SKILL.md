@@ -1,6 +1,6 @@
 ---
 name: pronto-runners
-description: "Give a GitHub account or organization self-hosted GitHub Actions runners on a cluster it runs: an ARC (Actions Runner Controller) runner scale set per repository or organization, in a local Colima k3s VM or an existing Kubernetes cluster, whose runners all build images through one shared BuildKit with a warm layer cache. Written as a setup in CUE and applied by one idempotent command. Use when the user wants their own GitHub runners, ARC, runner scale sets, a shared BuildKit or build cache for CI, or says someone else's runner setup should be copied for them."
+description: "Give a GitHub account or organization self-hosted GitHub Actions runners: an ARC (Actions Runner Controller) runner scale set per repository or organization, in a local Colima k3s VM or an existing Kubernetes cluster, whose runners all build images through one shared BuildKit with a warm layer cache; or GitHub's own runner directly on a Mac, as a launchd agent with no VM or docker. Written as a setup in CUE and applied by one idempotent command. Use when the user wants their own GitHub runners, a macOS self-hosted runner, ARC, runner scale sets, a shared BuildKit or build cache for CI, or says someone else's runner setup should be copied for them."
 ---
 
 # pronto-runners
@@ -11,7 +11,10 @@ machine and ask them for only what you can't find. Then `runners.ts <setup> appl
 
 ## Filling in a setup
 
-1. **Cluster.** Run `kubectl config get-contexts` and `colima list`.
+1. **Cluster.** Ask whether the jobs must run on the Mac itself (its tools, macOS steps, no
+   containers): then use `cluster: host: {}` and `hostRunners` instead of `scaleSets`, and skip
+   BuildKit and the secret (see **A host setup** below). Otherwise run `kubectl config get-contexts`
+   and `colima list`.
    - The person names a cluster they run (a remote k3s, a cloud cluster): use `cluster: context: "<name>"`.
      Check that `kubectl --context <name> get nodes` answers, and read the nodes' `kubernetes.io/arch`
      for each scale set's `arch`.
@@ -31,6 +34,18 @@ machine and ask them for only what you can't find. Then `runners.ts <setup> appl
    Never ask for the token's value, never write it anywhere, and never create the secret yourself.
    `apply` prints the command, and the person runs it.
 
+### A host setup
+
+- Only for a private repository whose writers they trust: the jobs run as them, with their logins.
+- Each runner: `repo`, `labels` (what runs-on adds after `self-hosted, macOS`), and `nice` if their
+  own work must win by more than the default.
+- `apply` registers the runner with a token it fetches through `gh` (admin on the repository). If
+  gh can't, it prints the command; pass it on and wait. Installing a launchd agent may need the
+  person's own approval: if your permissions refuse it, give them the `apply` command to run.
+- A workflow moved to it: `runs-on: [self-hosted, macOS, <label>]`; any step that writes global
+  state (`git config --global`) points at `$RUNNER_TEMP` instead; a stack, `integrate@local` or a
+  rehearsal runs through the repository's `tests/slot.ts --weight <n> --`.
+
 Then check the setup and apply it:
 
 ```sh
@@ -43,7 +58,8 @@ say the secret exists, and apply again.
 
 ## Checking it
 
-- `runners.ts <setup> status` shows the controller, BuildKit and a listener pod per scale set running.
+- `runners.ts <setup> status` shows the controller, BuildKit and a listener pod per scale set running;
+  for a host setup, each agent's state and the runner `online` on GitHub.
 - Under the repository's Settings → Actions → Runners, the scale set appears by name.
 - Push a branch with a workflow on `runs-on: <scale set>` that runs
   `docker buildx create --driver remote "$BUILDKIT_HOST" --use` and then builds an image twice. The
@@ -51,6 +67,7 @@ say the secret exists, and apply again.
 
 ## Tell them
 
-- The runners are Linux pods (arm64 on a Mac). They can't run macOS-only steps.
+- ARC runners are Linux pods (arm64 on a Mac). They can't run macOS-only steps; a host runner can.
+- A host runner comes back at login (a LaunchAgent), not at boot before anyone logs in.
 - On a Mac, the runners work only while it is awake, and their jobs share its cores.
 - `remove` takes the scale sets away, and `colima delete -p arc` removes the whole VM.
