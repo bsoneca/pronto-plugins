@@ -130,7 +130,7 @@ const log = (b: Uint8Array) => (out ??= Deno.openSync(`${state}/runs/${started}.
 const enc = new TextEncoder();
 const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() - t0) / 1000)}s ${s}\n`; log(enc.encode(l)); Deno.stdout.writeSync(enc.encode(l)); };
 let head = "";
-let gcp: { name: string; service: string; project: string; region: string; domain: string; rehearsal?: { job: string } } | undefined;
+let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
 let cron: { gap: number; poll: number; watch: string[]; ready: string[]; holder: string; minutes: Record<string, number>; probes: Record<string, { path: string; agent?: string; status: number; has: string[] }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
@@ -334,12 +334,16 @@ try {
   active("confirm");
   const until = Date.now() + cron.minutes.confirm * 60_000;
   let wrong: string[] = [];
+  let origin = gcp!.domain ? `https://${gcp!.domain}` : "";
   for (;;) {
     wrong = [];
     // A gcloud call that fails is one more thing wrong this round, retried with the rest: the release
     // has happened, and a flake must not log it failed.
     try {
-      const now = whole(JSON.parse(gcloud(["run", "services", "describe", gcp!.service], 60)).status?.traffic);
+      const svc = JSON.parse(gcloud(["run", "services", "describe", gcp!.service], 60));
+      const now = whole(svc.status?.traffic);
+      // The probes' address: the domain mapped onto the service, else its run.app one (GCP.domain absent).
+      origin = gcp!.domain ? `https://${gcp!.domain}` : svc.status?.url ?? origin;
       run.revision = now;
       wrong.push(...served(now, jsonl(`${home}/.cache/pronto/releases/${gcp!.name}.jsonl`), head));
     } catch (e) { wrong.push(`traffic unread: ${(e as Error).message.split("\n")[0]}`); }
@@ -351,7 +355,7 @@ try {
     }
     for (const [name, p] of Object.entries(cron.probes)) {
       try {
-        const r = await fetch(`https://${gcp!.domain}${p.path}`, { headers: p.agent ? { "User-Agent": p.agent } : {}, signal: AbortSignal.timeout(30_000) });
+        const r = await fetch(`${origin}${p.path}`, { headers: p.agent ? { "User-Agent": p.agent } : {}, signal: AbortSignal.timeout(30_000) });
         const v = probe(p, r.status, await r.text());
         if (v) wrong.push(`${name} ${v}`);
       } catch (e) { wrong.push(`${name} ${p.path}: ${(e as Error).message}`); }

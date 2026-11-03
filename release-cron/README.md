@@ -17,7 +17,7 @@ retry of the same commit waits the gap.
   answer.
 
 The app needs what a run calls: `./saytw verify@local` (its rehearsal) and `./saytw release@gcp`
-([gcp](../gcp/README.md)), with `GCP` (project, region, service, domain, name) in its `release.cue`.
+([gcp](../gcp/README.md)), with `GCP` (project, region, service, name, and domain when one is mapped: without it the probes ask the service's run.app address) in its `release.cue`.
 
 ## Use
 
