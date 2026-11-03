@@ -10,7 +10,7 @@
     {
       "name": "pronto-studio",
       "description": "pronto's skills beyond its own plugin: intents (release, connect stripe, deploy), the Android host, Firebase Hosting, Google Cloud Run, social sign-in, the Unity host opt-in, journey monitoring, performance measurement and self-hosted GitHub Actions runners.",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "author": {
         "name": "bsoneca",
         "url": "https://github.com/bsoneca"
