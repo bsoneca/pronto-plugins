@@ -8,6 +8,10 @@
 // a new merge is not held back.
 export const due = (now, last, gap) => last === null || now >= last + gap * 60_000;
 
+// The release-active file's line: the app, the run's pid, when it started and its phase (slot,
+// rehearse, release or confirm). One line of JSON, written whole and renamed into place.
+export const activeLine = (app, pid, started, phase) => JSON.stringify({ app, pid, started, phase }) + "\n";
+
 // The outcomes after which the next run waits the gap.
 export const spaced = (outcome) => outcome === "released" || outcome === "failed";
 

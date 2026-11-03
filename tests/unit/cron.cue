@@ -16,6 +16,10 @@ cases: {
 		{call: "cron.due", args: [5000000, 1000000, 60], expect: true},
 		{call: "cron.due", args: [1000, 1000, 0], expect: true, why: "no gap"},
 	]}
+	"a run holds the machine as one line of JSON: its app, pid, start and phase": {suite: "cron", steps: [
+		{call: "cron.activeLine", args: ["brawl-chess", 4242, "2026-11-03T20:00:00Z", "slot"], expect: "{\"app\":\"brawl-chess\",\"pid\":4242,\"started\":\"2026-11-03T20:00:00Z\",\"phase\":\"slot\"}\n"},
+		{call: "cron.activeLine", args: ["brawl-chess", 4242, "2026-11-03T20:00:00Z", "confirm"], expect: "{\"app\":\"brawl-chess\",\"pid\":4242,\"started\":\"2026-11-03T20:00:00Z\",\"phase\":\"confirm\"}\n", why: "the phase is the only field that moves"},
+	]}
 	"only a run that released or failed makes the next one wait": {suite: "cron", steps: [
 		{call: "cron.spaced", args: ["released"], expect: true},
 		{call: "cron.spaced", args: ["failed"], expect: true},

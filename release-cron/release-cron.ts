@@ -16,9 +16,14 @@
 // preview): the run then takes no slot and runs nothing heavy here, and records the job's minutes and cost. Each step has its limit and the run
 // a limit (#Cron, release_cron_plugin.cue) against a wedge; a lock keeps two from overlapping. Every run is measured: its
 // steps, and inside them the rehearsal's and the release's phases, for `report`.
+// A run holds the machine while it works: ~/.cache/pronto/release-active (RELEASE_ACTIVE names another),
+// one line of JSON {"app","pid","started","phase"} with phase slot, rehearse, release or confirm, written
+// as the run enters its slot, updated at each step and removed when the run ends, on every outcome and
+// on a signal. A file whose pid is gone (kill -0) is stale: readers ignore it and may delete it. A reader
+// (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { base, changed, detail, due, holds, line, plist, probe, report, served, spaced, retry, whole } from "./cron.js";
+import { activeLine, base, changed, detail, due, holds, line, plist, probe, report, served, spaced, retry, whole } from "./cron.js";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -132,7 +137,22 @@ const steps: Record<string, number> = {};
 let mark = Date.now();
 const step = (name: string) => { steps[name] = Math.round((Date.now() - mark) / 1000); mark = Date.now(); };
 const run: Record<string, unknown> = { app, started, steps };
+// The release-active file: written whole to a temporary file then renamed, so a reader never sees half.
+const activePath = Deno.env.get("RELEASE_ACTIVE") ?? `${home}/.cache/pronto/release-active`;
+const active = (phase: string) => {
+  try {
+    // One file for the machine: another app's live run keeps it (releases of different apps run in
+    // parallel); this run takes it at its next phase once that run is gone.
+    const other = (() => { try { return Number(JSON.parse(Deno.readTextFileSync(activePath)).pid); } catch { return 0; } })();
+    if (other > 0 && other !== Deno.pid && sh("kill", ["-0", String(other)]).ok) return;
+    Deno.mkdirSync(activePath.replace(/\/[^/]*$/, ""), { recursive: true });
+    Deno.writeTextFileSync(`${activePath}.${Deno.pid}.tmp`, activeLine(app, Deno.pid, started, phase));
+    Deno.renameSync(`${activePath}.${Deno.pid}.tmp`, activePath);
+  } catch (e) { say(`release-active not written: ${(e as Error).message}`); }
+};
 const end = (outcome: string, why = "", code = 0) => {
+  // The machine is given back first, whatever the outcome; only a file this run wrote is removed.
+  try { if (JSON.parse(Deno.readTextFileSync(activePath)).pid === Deno.pid) Deno.removeSync(activePath); } catch { /* none, or not ours */ }
   Object.assign(run, { outcome, why: why || undefined, ended: new Date().toISOString() });
   // Inside the steps: the rehearsal's and the release's own records of this commit, since this run began.
   if (run.commit && ("rehearse" in steps || "release" in steps) && gcp) {
@@ -186,7 +206,7 @@ Deno.writeTextFileSync(`${state}/lock/pid`, String(Deno.pid));
 let current: { pgid: number } | undefined;
 // Stopped: the child's group stopped and gone (killed after a minute) before the run ends and its
 // lock goes, so the next run never starts beside what this one started.
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   Deno.addSignalListener(signal, async () => {
     if (current) {
       const pgid = current.pgid;
@@ -275,6 +295,7 @@ try {
   const cloud = !!gcp!.rehearsal;
   if (cloud) say(`GCP.rehearsal: the rehearsal runs in the cloud, job ${gcp!.rehearsal!.job}, inside release@gcp`);
   let got = cloud, busy = false;
+  if (!cloud) active("slot");
   const queue = setTimeout(() => { if (!got && current) { busy = true; say(`no slot within ${cron.minutes.slot} min: skipping`); stop(current.pgid); } }, cron.minutes.slot * 60_000);
   // slot.ts's own wait outlasts this one, so the run's limit is the one that ends a wait.
   // The slot is taken once a live slot of the pool names this rehearsal as its owner.
@@ -287,7 +308,7 @@ try {
       const pid = (() => { try { return Deno.readTextFileSync(`${pool}/${e.name}/pid`).trim(); } catch { return ""; } })();
       // The holder alive and started by this run: not a slot a dead or stray rehearsal left.
       const ours = pid && current && tree(current.pgid).pids.includes(Number(pid));
-      if (ours && holds(owner, dir, cron.holder) && owner.startsWith(`${pid} `)) { got = true; step("slot"); say(`slot taken: ${e.name}`); return; }
+      if (ours && holds(owner, dir, cron.holder) && owner.startsWith(`${pid} `)) { got = true; step("slot"); active("rehearse"); say(`slot taken: ${e.name}`); return; }
     }
   }, 5000);
   // STACK_PRIORITY=release puts its claim at the head of the pool's line, ahead of every claim a
@@ -296,19 +317,21 @@ try {
   clearTimeout(queue);
   clearInterval(look);
   // Every check passed already for this tree: the rehearsal took no slot and waited for none.
-  if (!got && !busy && gate.code === 0) { got = true; step("slot"); }
+  if (!got && !busy && gate.code === 0) { got = true; step("slot"); active("rehearse"); }
   if (busy) { step("slot"); end("skipped", `the slot queue was busy for ${cron.minutes.slot} min; the next run asks again`); }
   if (!got) { step("slot"); end("failed", `verify@local ended before its slot (exit ${gate.code}): nothing released`, 1); }
   if (!cloud) step("rehearse");
   if (gate.code !== 0) end("failed", gate.late ? `the rehearsal outlasted its limit` : `the rehearsal failed (exit ${gate.code}): nothing released`, 1);
 
   // 3. The release, on the tree the rehearsal passed.
-  const rel = await child("./saytw", ["release@gcp"], dir, Deno.env.toObject(), cron.minutes.release);
+  active("release");
+  const rel = await child("./saytw", ["release@gcp"], dir, { ...Deno.env.toObject(), STACK_PRIORITY: "release" }, cron.minutes.release);
   step("release");
   if (rel.code !== 0) end("failed", rel.late ? "release@gcp outlasted its limit" : `release@gcp failed (exit ${rel.code})`, 1);
 
   // 4. Production: the revision taking every request is the one this tree's live record names, the `ready` services are
   // ready, the probes answer. Retried within cron.minutes.confirm, as a cache or a cold start settles.
+  active("confirm");
   const until = Date.now() + cron.minutes.confirm * 60_000;
   let wrong: string[] = [];
   for (;;) {
