@@ -45,7 +45,9 @@ Bonk Chess (bsoneca/pronto's `apps/brawl-chess`) is the first: its `release_cron
    paths (the app's folder by default) changed since that commit, the run **skips**. A failed
    run is never that commit, even when its release went live: its change is released again. With
    no such run, or another revision serving (a rollback, a release from elsewhere), it releases.
-2. **slot**: `./saytw verify@local` waits for its slot in the machine's pool (`tests/slot.ts`).
+2. **slot**: `./saytw verify@local` waits for its slot in the machine's pool (`tests/slot.ts`),
+   with `STACK_PRIORITY=release`: its claim goes to the head of the line, ahead of every waiting
+   gate or launch (an app's `slot.ts` without priorities keeps it first come, first served).
    After `minutes.slot` (20) with no slot, the run stops it and **skips**; the next run asks again.
 3. **rehearse**: the rehearsal, at most `minutes.rehearse` (35). A failed scenario gets the
    rehearsal's own retry, once (Bonk Chess's `tests/rehearse.ts` runs it again beside the rest of

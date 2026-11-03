@@ -277,7 +277,9 @@ try {
       if (ours && holds(owner, dir, cron.holder) && owner.startsWith(`${pid} `)) { got = true; step("slot"); say(`slot taken: ${e.name}`); return; }
     }
   }, 5000);
-  const gate = await child("./saytw", ["verify@local"], dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: String(cron.minutes.slot + 5) }, cron.minutes.slot + cron.minutes.rehearse);
+  // STACK_PRIORITY=release puts its claim at the head of the pool's line, ahead of every claim a
+  // pull request's gate or a launch is waiting with (tests/slot.ts).
+  const gate = await child("./saytw", ["verify@local"], dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: String(cron.minutes.slot + 5), STACK_PRIORITY: "release" }, cron.minutes.slot + cron.minutes.rehearse);
   clearTimeout(queue);
   clearInterval(look);
   // Every check passed already for this tree: the rehearsal took no slot and waited for none.
