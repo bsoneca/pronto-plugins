@@ -20,3 +20,5 @@ export const replaced = (text, pattern, by) => String(text).replace(new RegExp(p
 export const repeat = (text, n) => String(text).repeat(n);
 /** How many distinct values a list holds. */
 export const distinct = (list) => new Set(list.map((x) => JSON.stringify(x))).size;
+/** How many <dict> entries a launchd plist holds, the job's own and its environment's. */
+export const dictEntries = (plist) => (plist.match(/<dict>/g) ?? []).length;

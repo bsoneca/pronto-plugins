@@ -45,6 +45,8 @@ jobs:
           sayt --script tools.nu cue vet -c ./identity
           sayt --script tools.nu cue vet -c -t package=check -t frontImage=registry.example.com/pronto-identity:0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000 ./identity/export
           sayt --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
+          sayt --script tools.nu cue vet -c ./release-cron
+          sayt --script tools.nu cue vet -c -t package=check ./release-cron/export
           sayt --script tools.nu cue vet -c ./unity
           sayt --script tools.nu cue vet -c -t package=check -t screens=table ./unity/export
           sayt --script tools.nu cue vet -c ./infra
@@ -66,6 +68,15 @@ jobs:
           jq -e '.android.links == ["example.com"] and .scenarios == ["tests/scenarios/table.cue"]' "$app/unity/unity.json"
           grep -q 'wellKnown: "assetlinks.json"' "$app/unity_surface.cue"
           ! ./bin/pronto-unity "$app" fingerprints=
+      - name: Opt an app into release-cron, then refresh it keeping its own opt-in
+        run: |
+          app=$(mktemp -d)/app && mkdir -p "$app" && printf 'package demo\n' > "$app/program.cue"
+          ./bin/pronto-release-cron "$app"
+          echo "// the app's own" >> "$app/release_cron.cue"
+          ./bin/pronto-release-cron "$app"
+          grep -q "the app's own" "$app/release_cron.cue"
+          (cd "$app" && cue export release_cron.cue release_cron_plugin.cue -e releaseCron.gap) | grep -qx 60
+          ! ./bin/pronto-release-cron "$app" nope=1
       - name: Bind a Unity hatch, then refuse a missing module
         run: |
           app=$(mktemp -d)/app && mkdir -p "$app/unity/hatches/battle" && printf 'package demo\n' > "$app/program.cue"
@@ -104,13 +115,13 @@ jobs:
       - name: Test the identity broker
         run: deno test --no-config --allow-net identity/oidc_test.ts identity/broker
       - name: Test the billing broker
-        run: deno lint --no-config billing intents gcp tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
+        run: deno lint --no-config billing intents gcp release-cron tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
       # A script that does not parse fails only when it is run, and a release script runs rarely
       # (identity/release.nu shipped `env: [...] ++ $phone`, a record field nu cannot parse).
       - name: Parse each nushell script
         run: sayt --script tools.nu nu -c 'let bad = (glob **/*.nu | where {|f| not (nu-check $f) }); if ($bad | is-not-empty) { print $bad; exit 1 }'
       - name: Test the intents (tests/unit/*.cue)
-        run: for s in stripe deploy release runner identity targets; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
+        run: for s in stripe deploy release runner identity targets cron; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
       # flagd, the version the flags plugin pins, checked against its release's digest.
       - name: Install flagd
         env:

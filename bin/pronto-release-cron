@@ -1,0 +1,18 @@
+#!/bin/sh
+# Adds or refreshes release-cron in a pronto app: the app released to production on a schedule by
+# launchd on this Mac, from main (release-cron/README.md).
+#   bin/pronto-release-cron <app-dir>
+# Writes release-cron/ (the driver and its rules) and release_cron_plugin.cue (the schema, in the
+# app's package), both regenerated, and seeds release_cron.cue, the app's own opt-in.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+shift
+[ $# -eq 0 ] || { echo "pronto-release-cron: unknown argument $1" >&2; exit 2; }
+package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" | head -n 1)
+[ -n "$package" ] || { echo "pronto-release-cron: $app/program.cue names no package" >&2; exit 2; }
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+./saytw --script tools.nu cue export ./release-cron/export -t "package=$package" -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"
