@@ -40,7 +40,15 @@ queryLabels: [for q in _c.queries if q.query_name == "business_orders" {q.query}
 metricKeys: [for m in _c.metrics if m.metric_name == "business_orders" {m.key_labels}] & [["app", "state"]]
 counterType: [for m in _c.metrics if m.metric_name == "business_signups_total" {m.type}] & ["counter"]
 targetDsnFromEnv: _a._exporter.target.data_source_name & "postgres://analytics_reader@localhost/placeholder"
-targetUsesIt: _a._exporter.target.collectors & ["business"]
+targetUsesIt: _a._exporter.target.collectors & ["business", "process"]
+
+// The Managed Prometheus sidecar adjusts start times by a gauge named process_start_time_seconds
+// and warns on every scrape that has none: the file carries one, no labels, a constant (the same
+// whatever the app or the scrape).
+_p: _a._exporter.collectors[1]
+startTimeMetric: [for m in _p.metrics {{name: m.metric_name, type: m.type, labels: m.key_labels | *[]}}] & [{name: "process_start_time_seconds", type: "gauge", labels: []}]
+startTimeQuery: [for q in _p.queries if q.query_name == "process_start_time_seconds" {q.query}] & ["SELECT 1735689600::double precision AS value"]
+startTimeRef: [for m in _p.metrics {m.query_ref}] & [for q in _p.queries {q.query_name}]
 
 // The dashboard: an app variable, a row a group of panels, laid left to right.
 dashApp: [for t in _a.dashboard.templating.list if t.name == "app" {t.query}] & ["label_values(business_accounts, app)"]
