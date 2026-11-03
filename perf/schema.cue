@@ -294,6 +294,22 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 				inputs: ["throttled"]
 				source: ".name = \"perf_reports_throttled_total\"\ndel(.namespace)\n.tags = {}"
 			}
+			// The process's start, once, as process_start_time_seconds: the gauge
+			// Managed Prometheus' sidecar reads to date each counter's start, or it
+			// warns on every scrape. Vector exports none; the Lua hook takes the
+			// clock when the process starts and rewrites the uptime heartbeat to it.
+			uptime: {
+				type:      "filter"
+				inputs:    ["collector"]
+				condition: ".name == \"uptime_seconds\""
+			}
+			process_start: {
+				type:    "lua"
+				version: "2"
+				inputs:  ["uptime"]
+				hooks: {init: "init", process: "process"}
+				source: "function init() started = os.time() end\nfunction process(event, emit)\n  event.metric.name = \"process_start_time_seconds\"\n  event.metric.namespace = nil\n  event.metric.tags = nil\n  event.metric.gauge.value = started\n  emit(event)\nend"
+			}
 		}
 		sources: collector: {
 			type:                 "internal_metrics"
@@ -301,7 +317,7 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 		}
 		sinks: metrics: {
 			type:    "prometheus_exporter"
-			inputs:  ["counters", "throttled_named"]
+			inputs:  ["counters", "throttled_named", "process_start"]
 			address: "0.0.0.0:9599"
 			// A quiet series stays exported across the budget window, so a
 			// burn reads it rather than a gap.
@@ -368,6 +384,15 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 		outputs: [{
 			extract_from: "reports"
 			conditions: [{type: "vrl", source: ".tags.source == \"other\""}]
+		}]
+	}, {
+		name: "the process's start is exported as process_start_time_seconds, untagged"
+		inputs: [{insert_at: "uptime", type: "metric", metric: {name: "uptime_seconds", namespace: "vector", kind: "absolute", gauge: value: 7.0}}]
+		outputs: [{
+			extract_from: "process_start"
+			conditions: [{type: "vrl", source: """
+				.name == "process_start_time_seconds" && .type == "gauge" && .kind == "absolute" && !exists(.namespace) && (.tags == null || .tags == {})
+				"""}]
 		}]
 	}, {
 		name: "an unknown report is dropped"

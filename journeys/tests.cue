@@ -97,6 +97,8 @@ reporterMounts: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"]
 throttled: _j.collector.transforms.per_session & {type: "throttle", key_field: "{{ session }}", threshold: 600, window_secs: 60}
 dedupeAfterThrottle: _j.collector.transforms.once.inputs & ["per_session"]
 throttleExported: list.Contains(_j.collector.sinks.metrics.inputs, "throttled_named") & true
+// The sidecar dates counters by process_start_time_seconds, which Vector does not export.
+startExported: list.Contains(_j.collector.sinks.metrics.inputs, "process_start") & true
 // The local dashboard: parses, scrapes the collector, loads the rules and the
 // dashboard, on the app's network.
 _dash: yaml.Unmarshal(_h.files["journeys/dashboard.compose.yaml"].text)

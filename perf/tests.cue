@@ -39,6 +39,8 @@ familiesOnly: strings.Contains(_p.collector.transforms.reports.source, "d.gpu = 
 wholeBody: _p.collector.sources.perf.framing.method & "bytes"
 seriesKept: _p.collector.sinks.metrics.flush_period_secs & 2419200
 throttleExported: list.Contains(_p.collector.sinks.metrics.inputs, "throttled_named") & true
+// The sidecar dates counters by process_start_time_seconds, which Vector does not export.
+startExported: list.Contains(_p.collector.sinks.metrics.inputs, "process_start") & true
 
 // The host: a seat beside pronto's, the schema in the program's package, the
 // app's spec and reporter settings written once.
