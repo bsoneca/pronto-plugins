@@ -21,6 +21,16 @@ import (
 #AnalyticsExporter:        "burningalchemist/sql_exporter:0.24.13@sha256:befda03e0eae3f0c9b9dd0e5e5b968152f50e44dbdc04c1b68370c6fcbda2b7d"
 #AnalyticsExporterVersion: "0.24.13"
 
+// The exporter publishes no process_start_time_seconds (sql_exporter 0.24 has no flag for its own
+// process metrics: its /metrics is only the collectors' answers), and the Managed Prometheus
+// sidecar warns on every scrape that finds none, which it needs to adjust the start time of
+// cumulative series. So the file carries one: a gauge, no labels, a constant. The series are gauges
+// and database totals that no restart of the exporter resets, so the honest start of a total is
+// the data's, not the instance's: any instant before the first row, fixed, so it does not move on a
+// scrape, a new revision or a restart (a start that did would read as a counter reset). This one is
+// 2025-01-01T00:00:00Z.
+#AnalyticsStartTime: 1735689600
+
 #AnalyticsLabel: =~"^[a-z][a-z0-9_]*$" & !="app" & !="value"
 
 // A business metric: `business_` and a name. It shares nothing with journeys' (`journey_`), which
@@ -162,7 +172,7 @@ import (
 		}
 		target: {
 			data_source_name: "postgres://analytics_reader@localhost/placeholder"
-			collectors: ["business"]
+			collectors: ["business", "process"]
 		}
 		collectors: [{
 			collector_name: "business"
@@ -178,6 +188,21 @@ import (
 			queries: [for n in _names let m = A.metrics[n] {
 				query_name: n
 				query:      "SELECT \(strings.Join(list.Concat([["app"], [for l in m.labels {"\"\(l)\""}], ["value"]]), ", ")) FROM analytics.\(strings.TrimPrefix(n, "business_"))"
+			}]
+		}, {
+			// The start time the sidecar looks for (#AnalyticsStartTime): one gauge, no labels.
+			collector_name: "process"
+			min_interval:   A.interval
+			metrics: [{
+				metric_name: "process_start_time_seconds"
+				type:        "gauge"
+				help:        "When the totals begin, in unix seconds: a fixed instant before the first row (the exporter publishes no process metrics of its own)."
+				values: ["value"]
+				query_ref: "process_start_time_seconds"
+			}]
+			queries: [{
+				query_name: "process_start_time_seconds"
+				query:      "SELECT \(#AnalyticsStartTime)::double precision AS value"
 			}]
 		}]
 	}
