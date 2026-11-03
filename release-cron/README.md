@@ -56,6 +56,12 @@ Bonk Chess (bsoneca/pronto's `apps/brawl-chess`) is the first: its `release_cron
    its pass).
    A failed rehearsal never releases: the run is **failed**. The next run on the same tree
    reruns only the checks that failed, because the rehearsal keeps the ones that passed per tree.
+   **Cloud rehearsal**: when the app's `release.cue` names `GCP.rehearsal` (a Cloud Run job, see
+   pronto's docs/release-targets.md#gcp), steps 2 and 3 are one: nothing heavy runs here, no slot is
+   taken, and `release@gcp` runs the rehearsal in the cloud against the rc preview. The run's
+   record then carries the job's minutes and its cost (vCPU- and GiB-seconds at Cloud Run's
+   prices), shown in the log line and by `report`, which prices it per run and per month at 16
+   releases a day.
 4. **release**: `./saytw release@gcp` on the same tree, which reuses the rehearsal's local-gate
    pass and skips the rc preview unless a deploy-shaped file changed.
 5. **confirm**: the new revision takes 100% of the traffic and its live record is this tree's,

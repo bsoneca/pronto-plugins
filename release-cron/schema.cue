@@ -31,8 +31,9 @@ releaseCron: #Cron
 		slot: *20 | (number & >0)
 		// verify@local from its slot to its verdict: measured 17.5 (lanes, one flake retried).
 		rehearse: *35 | (number & >0)
-		// release@gcp: measured 9.3 with the rc preview skipped, 17-18 with it.
-		release: *35 | (number & >0)
+		// release@gcp: measured 9.3 with the rc preview skipped, 17-18 with it; with the rehearsal
+		// in the cloud (GCP.rehearsal) it holds the rehearsal too, beside the stage.
+		release: *45 | (number & >0)
 		// production confirmed: the new revision serving, the probes below.
 		confirm: *5 | (number & >0)
 	}
