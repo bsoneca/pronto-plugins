@@ -388,9 +388,25 @@ _journeysHours: {
 			inputs: ["throttled"]
 			source: ".name = \"journey_telemetry_throttled_total\"\ndel(.namespace)\n.tags = {}"
 		}
+		// The process's start, as process_start_time_seconds: the gauge Managed
+		// Prometheus' sidecar reads to date each counter's start, or it warns on
+		// every scrape. Vector exports none; the Lua hook takes the clock when the
+		// process starts and rewrites the uptime heartbeat to it.
+		transforms: uptime: {
+			type:      "filter"
+			inputs:    ["collector"]
+			condition: ".name == \"uptime_seconds\""
+		}
+		transforms: process_start: {
+			type:    "lua"
+			version: "2"
+			inputs:  ["uptime"]
+			hooks: {init: "init", process: "process"}
+			source: "function init() started = os.time() end\nfunction process(event, emit)\n  event.metric.name = \"process_start_time_seconds\"\n  event.metric.namespace = nil\n  event.metric.tags = nil\n  event.metric.gauge.value = started\n  emit(event)\nend"
+		}
 		sinks: metrics: {
 			type:    "prometheus_exporter"
-			inputs:  ["run_metrics", "moment_metrics", "latency_metrics", "throttled_named"]
+			inputs:  ["run_metrics", "moment_metrics", "latency_metrics", "throttled_named", "process_start"]
 			address: "0.0.0.0:9598"
 			// A series not updated within this is dropped from the export, which
 			// would read a quiet journey's counters as gaps across its budget
@@ -448,6 +464,15 @@ _journeysHours: {
 			name: "a gesture that is no moment of any journey is dropped"
 			inputs: [{insert_at: "moments", type: "log", log_fields: _event & {screen: "nowhere", gesture: "nothing"}}]
 			no_outputs_from: ["moments"]
+		}, {
+			name: "the process's start is exported as process_start_time_seconds, untagged"
+			inputs: [{insert_at: "uptime", type: "metric", metric: {name: "uptime_seconds", namespace: "vector", kind: "absolute", gauge: value: 7.0}}]
+			outputs: [{
+				extract_from: "process_start"
+				conditions: [{type: "vrl", source: """
+					.name == "process_start_time_seconds" && !exists(.namespace) && (.tags == null || length(object!(.tags)) == 0) && .gauge.value > 1.7e9 && abs(.gauge.value - to_unix_timestamp(now())) < 600.0
+					"""}]
+			}]
 		}],
 	])
 
