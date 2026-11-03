@@ -76,6 +76,8 @@ cases: {
 		{call: "cron.holds", args: ["64280 2026-11-02T19:14:01.539Z /other/apps/brawl-chess verify@local (weight 10)", "/w/apps/brawl-chess"], expect: false, why: "another checkout's rehearsal"},
 		{call: "cron.holds", args: ["55266 2026-11-02T19:13:22.102Z /w/apps/brawl-chess ./saytw launch@local (weight 1)", "/w/apps/brawl-chess"], expect: false},
 		{call: "cron.holds", args: ["", "/w/apps/brawl-chess"], expect: false},
+		{call: "cron.holds", args: ["70813 2026-11-03T09:19:37.701Z /w/apps/ume-rental ./saytw integrate@local (weight 10)", "/w/apps/ume-rental", "./saytw integrate@local"], expect: true, why: "an app's own holder"},
+		{call: "cron.holds", args: ["70813 2026-11-03T09:19:37.701Z /w/apps/ume-rental verify@local (weight 10)", "/w/apps/ume-rental", "./saytw integrate@local"], expect: false, why: "not the holder it names"},
 	]}
 	"a probe is fine when the status and the text are what it expects": {suite: "cron", steps: [
 		{call: "cron.probe", args: [{path: "/health"}, 200, "ok"], expect: null, why: "status defaults to 200"},
