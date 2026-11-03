@@ -23,8 +23,10 @@ machine and ask them for only what you can't find. Then `runners.ts <setup> appl
    every repository.
 3. **Scale sets.** Name each one for what `runs-on` will say (`<repo>-arc` by convention). `max` is
    bounded by what the cluster can run at once.
-4. **BuildKit.** Use `emulate: ["linux/amd64"]` only if they must build amd64 images on arm64 nodes
-   (or the reverse) and accept QEMU's slowness.
+4. **BuildKit.** On a Colima setup, `emulate` stays empty (the schema refuses it): amd64 images,
+   Cloud Run's, build in Cloud Build (`gcloud builds submit --tag`), since QEMU on a Mac takes cores
+   the machine's own work needs. On a `context` cluster, `emulate: ["linux/amd64"]` is allowed if
+   they must build amd64 on arm64 nodes and accept QEMU's slowness.
 5. **Secret.** Ask whether they want a fine-grained token (`pat`, the default) or a GitHub App (`app`).
    Never ask for the token's value, never write it anywhere, and never create the secret yourself.
    `apply` prints the command, and the person runs it.

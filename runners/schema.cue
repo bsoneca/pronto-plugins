@@ -48,6 +48,11 @@ setups: [Name=string]: #Setup & {name: Name}
 		// the cluster's kernel before BuildKit starts). Empty: the node's own platform only.
 		emulate: [...("linux/amd64" | "linux/arm64" | "linux/riscv64" | "linux/ppc64le" | "linux/s390x" | "linux/386" | "linux/arm/v7")]
 	}
+	// A Colima VM shares the machine's cores with everything else it runs, and QEMU starves them:
+	// its amd64 images build in Cloud Build (`gcloud builds submit`) instead.
+	if cluster.colima != _|_ {
+		buildkit: emulate: []
+	}
 
 	// Pinned: the charts of GitHub's Actions Runner Controller and the images, by digest.
 	versions: {
