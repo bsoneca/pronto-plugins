@@ -46,6 +46,10 @@ const must = (cmd: string, args: string[], cwd?: string, env: Record<string, str
   return r.out;
 };
 
+// mise, as the shell finds it or sayt's own (which ./saytw installs): a shell or launchd without it on
+// the PATH still finds the app's tools through it.
+const mise = sh("sh", ["-c", "command -v mise"]).out || `${home}/Library/Caches/sayt/mise-v2026.8.11/mise`;
+
 if (verb === "pause") { Deno.writeTextFileSync(`${state}/paused`, new Date().toISOString() + "\n"); console.log(`${app}: paused; runs skip until \`resume\``); Deno.exit(0); }
 if (verb === "resume") { Deno.removeSync(`${state}/paused`); console.log(`${app}: resumed`); Deno.exit(0); }
 if (verb === "status") {
@@ -72,7 +76,7 @@ function worktree() {
   must("git", ["checkout", "-q", "--detach", "-f", ref], wt);
   // Clean as main is; what git ignores (builds, caches) is kept, as in any checkout.
   must("git", ["clean", "-ffdq"], wt);
-  sh("mise", ["trust", "-q", `${wt}/${appRel}/.mise.toml`]);
+  sh(mise, ["trust", "-q", `${wt}/${appRel}/.mise.toml`]);
   return must("git", ["rev-parse", "HEAD"], wt);
 }
 
@@ -81,7 +85,7 @@ function worktree() {
 function config(dir: string) {
   const appDir = `${dir}/${appRel}`;
   // The app's own cue, as mise finds it there: a shim run from elsewhere finds no version.
-  const cue = Deno.env.get("CUE") || sh("mise", ["which", "cue"], appDir, {}, 60).out || "cue";
+  const cue = Deno.env.get("CUE") || sh(mise, ["which", "cue"], appDir, {}, 60).out || "cue";
   const registry = Deno.readTextFileSync(`${appDir}/.mise.toml`).match(/^CUE_REGISTRY\s*=\s*['"]([^'"]+)['"]/m)?.[1];
   const { gcp, cron } = JSON.parse(must(cue, ["export", "release.cue", "release_cron.cue", "release_cron_plugin.cue", "-e", "{gcp: GCP, cron: releaseCron}", "--out", "json"], appDir, registry ? { CUE_REGISTRY: registry } : {}));
   return { gcp, cron: { ...cron, watch: cron.watch?.length ? cron.watch : [appRel] } };
@@ -93,10 +97,12 @@ if (verb === "install") {
   // launchd's environment is bare: the tools the run calls by name are found as the app's mise finds
   // them, and sayt's own mise (which ./saytw installs) is on its PATH for `mise trust`.
   const appDir = `${wt}/${appRel}`;
-  const which = (t: string) => sh("mise", ["which", t], appDir).out;
-  const mise = sh("sh", ["-c", "command -v mise"]).out || `${home}/Library/Caches/sayt/mise-v2026.8.11/mise`;
+  const which = (t: string) => sh(mise, ["which", t], appDir).out;
   const path = [...new Set([mise.replace(/\/mise$/, ""), `${home}/.local/share/mise/shims`, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])].join(":");
-  const env = { PATH: path, HOME: home, CUE: which("cue") || "cue", CLOUDSDK_PYTHON: Deno.env.get("CLOUDSDK_PYTHON") ?? "/opt/homebrew/bin/python3.13" };
+  // The job's cue by its path: a bare name would leave launchd's runs to whichever cue a shim finds.
+  const cue = which("cue") || Deno.env.get("CUE") || "";
+  if (!cue.startsWith("/")) throw new Error(`install: no path for cue (mise which cue in ${appDir} found none): set CUE to it`);
+  const env = { PATH: path, HOME: home, CUE: cue, CLOUDSDK_PYTHON: Deno.env.get("CLOUDSDK_PYTHON") ?? "/opt/homebrew/bin/python3.13" };
   Deno.mkdirSync(`${home}/Library/LaunchAgents`, { recursive: true });
   Deno.writeTextFileSync(agent, plist({ label, program: Deno.execPath(), args: ["run", "-A", `${wt}/${appRel}/release-cron/release-cron.ts`, app, "run"], poll: cron.poll, log: `${state}/launchd.log`, env }));
   sh("launchctl", ["bootout", `gui/${uid}/${label}`]);
