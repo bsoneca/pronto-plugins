@@ -114,7 +114,7 @@ releases of two apps overlap, the first run keeps it and the other takes it at i
 A run that **failed** names the commit that broke it. As it ends (after giving the machine back) it
 starts `release-cron.ts <app> bisect` as a process of its own, one at a time (`bisect/lock`), in its
 own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>]` does it by hand,
-and `--dry` runs nothing, tells nobody and writes nothing.
+`--dry` runs nothing, tells nobody and writes nothing, and `--no-notify` runs the checks and records them but tells nobody and opens no revert.
 
 1. The range is the first-parent merges of `main` between the newest run that released and the
    failed run's commit. The failure's signature is its kind (`release`: release@gcp or its confirm;
@@ -127,7 +127,7 @@ and `--dry` runs nothing, tells nobody and writes nothing.
    runs in that commit's tree with `ONLY=<the failed scenarios>` and `SLOW=1`, as a plain claim on the
    machine's slots (the app's `tests/slot.ts`): it waits for release-active like any job, never holds
    it, never carries `STACK_PRIORITY=release`. The check is limited to `bisect.check` minutes, the
-   whole bisect to `bisect.minutes` (past it: the range it reached is told). A cloud-only failure (the
+   whole bisect to `bisect.minutes` (past it: the range it reached is told). A release failure first runs it on the failing commit: passing there, the failure shows only in the cloud, nothing is bisected and the range is told to the lead. A cloud-only failure (the
    rc preview) is approximated by the same scenarios run locally.
 4. The culprit is mapped to its pull request (`Merge pull request #N from …`). The pull request gets a
    comment; a notes file goes to the author session when the PR body names one (`local_<uuid>`) and

@@ -6,7 +6,7 @@
 //   deno run -A release-cron/release-cron.ts <app> pause|resume  runs skip while paused
 //   deno run -A release-cron/release-cron.ts <app> status      the job, the pause, the last runs
 //   deno run -A release-cron/release-cron.ts <app> report      every release measured, the newest's phases against those before
-//   deno run -A release-cron/release-cron.ts <app> bisect [--dry]  the commit that broke the last failed run (a failed run starts it as it ends)
+//   deno run -A release-cron/release-cron.ts <app> bisect [--dry|--no-notify]  the commit that broke the last failed run (a failed run starts it as it ends)
 // RELEASE_CRON_REF names the ref a run takes in place of origin/main (a branch's, to try a change to
 // this script); RELEASE_CRON_DRY=1 ends a run once it knows whether it would rehearse.
 // launchd wakes it every few minutes; a wake starts a run only once the gap since the last run
@@ -85,6 +85,7 @@ if (verb === "uninstall") {
 // `--dry` reads the records and says what it would run, running nothing and writing nothing.
 if (verb === "bisect") {
   const dry = Deno.args.includes("--dry");
+  const quiet = Deno.args.includes("--no-notify"); // checks run and recorded, nobody told, no revert (to try it)
   const only = Deno.args.slice(2).find((a) => !a.startsWith("--"));
   const dir = `${state}/bisect`;
   const bwt = `${dir}/wt`;
@@ -92,7 +93,10 @@ if (verb === "bisect") {
   const say = (s: string) => console.log(`bisect: ${s}`);
   const runs = jsonl(`${state}/runs.jsonl`);
   const bisects = jsonl(`${dir}/bisects.jsonl`);
-  const failed = only ? runs.find((r) => r.started === only) : runs.filter((r) => r.outcome === "failed" && r.commit && !bisects.some((b) => b.of === r.started)).at(-1);
+  // The oldest failed run since the last release not yet bisected: each failed run of a streak is
+  // bisected in its turn, on the verdicts the ones before it settled, so a culprit the next run fails on too shows twice.
+  const since = runs.slice(runs.findLastIndex((r) => r.outcome === "released") + 1);
+  const failed = only ? runs.find((r) => r.started === only) : since.find((r) => r.outcome === "failed" && r.commit && !bisects.some((b) => b.of === r.started));
   if (!failed) { say("no failed run unbisected"); Deno.exit(0); }
   const at = runs.indexOf(failed);
   const green = runs.slice(0, at).filter((r) => r.outcome === "released" && r.commit).at(-1);
@@ -150,7 +154,16 @@ if (verb === "bisect") {
     clearTimeout(timer);
     return late ? "unknown" : code === 0 ? "good" : "bad";
   };
-  if (!dry) {
+  // A release failure shows in the cloud (the rc preview): the check must fail here on the failing
+  // commit too, or there is nothing to bisect with, and the range is told as it stands.
+  let reproduced = true;
+  if (!dry && sig.kind === "release" && "test" in step) {
+    say(`running the failing commit ${list.at(-1)!.sha.slice(0, 8)} first: the check must fail here too`);
+    reproduced = await check(list.at(-1)!.sha) !== "good";
+    ran++;
+    if (!reproduced) { why = "the check passes here on the failing commit: a failure only the cloud shows, not bisected"; step = { range: list }; }
+  }
+  if (!dry && reproduced) {
     for (; "test" in step && Date.now() < deadline; step = next(list, known)) {
       say(`running ${(step.test as { sha: string }).sha.slice(0, 8)} (${sig.names.length ? `ONLY=${sig.names.join(",")}` : "the whole check"})`);
       const v = await check((step.test as { sha: string }).sha);
@@ -182,7 +195,15 @@ if (verb === "bisect") {
   // reads: the author's when the PR body names one, else the lead's), and a macOS notification.
   const prior = bisects;
   const said = prior.some((x) => x.culprit && x.culprit === result.culprit && x.notified);
-  if (result.culprit && result.pr && !said) {
+  if (!result.culprit && result.range && !quiet) {
+    const folder = `${home}/${b.notes}/${b.lead}`;
+    try {
+      Deno.mkdirSync(folder, { recursive: true });
+      Deno.writeTextFileSync(`${folder}/release-cron-bisect-${failed.started.replace(/[^0-9A-Za-z-]/g, "")}.md`, `# release-cron bisect\n\nrelease-cron (${app}) failed ${failed.started} on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}). Bisect: ${why || "no commit left to test"}. The culprit is one of: ${list.filter((c) => (result.range as string[]).includes(c.sha)).map((c) => `${c.sha.slice(0, 8)}${c.pr ? ` #${c.pr} ${c.branch}` : ""}`).join(", ")}. Log: ${state}/runs/${failed.started}.log\n`);
+      result.notified = `notes of ${b.lead}`;
+    } catch { /* a folder that cannot be written is one channel less */ }
+  }
+  if (result.culprit && result.pr && !said && !quiet) {
     const gh = (...a: string[]) => sh("gh", [...a, "-R", slug], undefined, {}, 120);
     const info = (() => { try { return JSON.parse(gh("pr", "view", String(result.pr), "--json", "body,url,title").out); } catch { return { body: "", url: "", title: "" }; } })();
     const sess = sessionOf(info.body) ?? b.lead;
@@ -199,7 +220,7 @@ if (verb === "bisect") {
     result.notified = told.join(", ");
   }
   // A culprit the run after the notice failed on again: a revert PR, gated like any (never merged here).
-  if (result.culprit && result.pr && revertDue(prior, result as { culprit: string; of: string })) {
+  if (result.culprit && result.pr && !quiet && revertDue(prior, result as { culprit: string; of: string })) {
     const branch = `revert/${result.pr}`;
     try {
       if (must("git", ["--git-dir", repo, "ls-remote", "--heads", "origin", branch]).trim()) throw new Error(`${branch} already pushed`);
