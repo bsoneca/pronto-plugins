@@ -79,7 +79,9 @@ Each runner pod has `$BUILDKIT_HOST`, the address of the shared BuildKit
 
 - **Runners are linux/arm64.** They run Linux jobs in the VM, not macOS ones. A gate that runs host
   processes on macOS (`./saytw integrate@local`) is not theirs to run. An amd64 image needs
-  `buildkit: emulate: ["linux/amd64"]`, which is slow under QEMU, or a Dockerfile that cross-compiles.
+  `buildkit: emulate: ["linux/amd64"]` (bsoneca-mac has it) and `--platform linux/amd64`. Its `RUN`
+  steps run under QEMU, several times slower than native, so a Dockerfile that cross-compiles
+  (`FROM --platform=$BUILDPLATFORM`) is faster when the toolchain allows it.
 - **The VM shares the Mac's cores.** Colima doesn't reserve its CPUs, but jobs use them while they
   run. bsoneca/pronto's `tests/slot.ts` budgets every core (`STACK_BUDGET`, 18 on the Mac Studio) for
   local stacks, so lower it by the VM's `cpus` (6) when runners and rehearsals run at once.
