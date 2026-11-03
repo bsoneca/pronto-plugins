@@ -99,7 +99,8 @@ step and removes it when it ends, on every outcome and on a signal. A file whose
 A job on this Mac checks the file before it starts heavy work and between units of work, and while
 it is live starts nothing new: it waits, polling every 30 s. An app's `tests/slot.ts` does this for
 every claim without `STACK_PRIORITY=release`; the run's own rehearsal and release carry it, so they
-are admitted as before. Work already running keeps its slots.
+are admitted as before. Work already running keeps its slots. There is one file for the machine: when
+releases of two apps overlap, the first run keeps it and the other takes it at its next phase.
 
 ## Install, pause, remove
 

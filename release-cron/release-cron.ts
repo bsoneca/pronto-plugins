@@ -139,6 +139,10 @@ const run: Record<string, unknown> = { app, started, steps };
 const activePath = Deno.env.get("RELEASE_ACTIVE") ?? `${home}/.cache/pronto/release-active`;
 const active = (phase: string) => {
   try {
+    // One file for the machine: another app's live run keeps it (releases of different apps run in
+    // parallel); this run takes it at its next phase once that run is gone.
+    const other = (() => { try { return Number(JSON.parse(Deno.readTextFileSync(activePath)).pid); } catch { return 0; } })();
+    if (other > 0 && other !== Deno.pid && sh("kill", ["-0", String(other)]).ok) return;
     Deno.mkdirSync(activePath.replace(/\/[^/]*$/, ""), { recursive: true });
     Deno.writeTextFileSync(`${activePath}.${Deno.pid}.tmp`, activeLine(app, Deno.pid, started, phase));
     Deno.renameSync(`${activePath}.${Deno.pid}.tmp`, activePath);
