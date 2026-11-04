@@ -21,22 +21,10 @@ releaseCron: #Cron
 	// app's ./saytw verify@local claims its slot as. The Ume apps' verify@local runs generate, lint and
 	// test, then `./saytw integrate@local`, which claims it.
 	holder: *"verify@local" | string
-	// Each step's limit, in minutes: a guard against a wedged step, far above what each takes
-	// (measured per run in runs.jsonl). A step that outlasts its limit is stopped and the run fails.
-	minutes: {
-		// fetch main, the run's worktree reset to it, what serves read.
-		prepare: *5 | (number & >0)
-		// verify@local waiting for its slot (tests/slot.ts): past this, the run skips and the next
-		// one asks again. A run never waits the slot queue's own two hours.
-		slot: *20 | (number & >0)
-		// verify@local from its slot to its verdict: measured 17.5 (lanes, one flake retried).
-		rehearse: *35 | (number & >0)
-		// release@gcp: measured 9.3 with the rc preview skipped, 17-18 with it; with the rehearsal
-		// in the cloud (GCP.rehearsal) it holds the rehearsal too, beside the stage.
-		release: *45 | (number & >0)
-		// production confirmed: the new revision serving, the probes below.
-		confirm: *5 | (number & >0)
-	}
+	// There is no per-step limit: no step is stopped for its time. A step that runs long shows in the
+	// run's log (a line every 5 minutes while it runs); its minutes are in runs.jsonl and `report`.
+	// Accepted and ignored, so an app that still sets its old step limits keeps loading; delete them.
+	minutes?: {...}
 	// What production must answer once the release is serving, each fetched from the release's domain.
 	probes: [Name=string]: #Probe
 }

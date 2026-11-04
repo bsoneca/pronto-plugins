@@ -34,7 +34,7 @@ _rules:  _ @embed(file="cron.js", type=text)
 
 				// What release-cron releases of this app and how it checks production: the app's folder
 				// watched (watch: [...] names others), each probe fetched from the release's domain once
-				// it serves. The gap, the wake and each step's limit are #Cron's defaults.
+				// it serves. The gap and the wake are #Cron's defaults.
 				releaseCron: probes: home: {path: "/"}
 
 				"""
