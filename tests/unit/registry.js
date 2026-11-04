@@ -1,6 +1,6 @@
 // What the plugins' cases call (tests/unit.ts): each namespace a module of an intent or of their
 // runner (run) or its shell (flagsOf), identity pronto-identity's installer and brokers (identity.js), phone the broker's phone (identity/broker/phone.ts), probe the
-// measures of probes.js, cron release-cron's rules (release-cron/cron.js), runners runners' (runners/plan.js), and shop the stand-in apps the intents run on, as shops.js sets them up.
+// measures of probes.js, cron release-cron's rules (release-cron/cron.js), notes release-notes' (release-notes/notes.js), runners runners' (runners/plan.js), and shop the stand-in apps the intents run on, as shops.js sets them up.
 import * as stripe from '../../billing/connect.ts';
 import * as billing from '../../billing/service.ts';
 import * as deploy from '../../gcp/deploy.ts';
@@ -11,9 +11,10 @@ import * as run from '../../intents/run.ts';
 import * as shell from '../../intents/shell.ts';
 import * as probe from './probes.js';
 import * as cron from '../../release-cron/cron.js';
+import * as notes from '../../release-notes/notes.js';
 import * as runners from '../../runners/plan.js';
 import * as shop from './shops.js';
 
 export function registry(_suite) {
-  return { stripe, billing, deploy, targets, identity, phone, run, shell, probe, shop, cron, runners };
+  return { stripe, billing, deploy, targets, identity, phone, run, shell, probe, shop, cron, notes, runners };
 }
