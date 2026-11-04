@@ -223,6 +223,8 @@ cases: {
 	]}
 	"a release line names the new-feature scenarios that failed": {suite: "cron", steps: [
 		{call: "cron.newFeatureNames", args: ["gcp: 2026-11-04T10:00:00-03:00 new-feature scenarios failed, released anyway: a, b (absent from 0123abcd, live release)"], expect: ["a", "b"]},
+		{call: "cron.newFeatureNames", args: ["gcp: 2026-11-04T10:00:00-03:00 released on stable features; new-feature scenarios failed: a, b (absent from 0123abcd, live release)"], expect: ["a", "b"], why: "the rule's name since the rename"},
+		{call: "cron.newFeatureNames", args: ["released on stable features; new-feature scenarios failed: solo"], expect: ["solo"], why: "new line, no tail"},
 		{call: "cron.newFeatureNames", args: ["new-feature scenarios failed, released anyway: solo"], expect: ["solo"], why: "no tail, one name"},
 		{call: "cron.newFeatureNames", args: ["gcp: released"], expect: []},
 		{call: "cron.newFeatureNames", args: [null], expect: []},

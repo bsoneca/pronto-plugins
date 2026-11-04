@@ -231,10 +231,11 @@ export const bisectLine = (b) =>
 
 // --- New-feature scenarios: pronto's gcp release ships when only they fail. ---
 
-// The scenarios a release's output line names: `gcp: <stamp> new-feature scenarios failed, released
-// anyway: a, b (absent from <commit8>, live release)`; none for any other text.
+// The scenarios a release's output line names: `released on stable features; new-feature scenarios
+// failed: a, b (absent from <commit8>, live release)`, or the same rule's older line (gcp.85-87)
+// `new-feature scenarios failed, released anyway: a, b (absent from ...)`; none for any other text.
 export const newFeatureNames = (text) => {
-  const m = (text ?? "").match(/new-feature scenarios failed, released anyway: (.+?)(?: \(absent from|$)/m);
+  const m = (text ?? "").match(/(?:released on stable features; new-feature scenarios failed|new-feature scenarios failed, released anyway): (.+?)(?: \(absent from|$)/m);
   return m ? [...new Set(m[1].split(",").map((x) => x.trim()).filter(Boolean))] : [];
 };
 
