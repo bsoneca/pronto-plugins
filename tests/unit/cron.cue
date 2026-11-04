@@ -170,4 +170,57 @@ cases: {
 		{use: "r", matches: "newest: 18\\.3 min, median before 15\\.8; its phases, slowest first:\n  rehearse\\.scenarios 8\\.3 min\n  release\\.build 3\\.3 min \\(median before 2\\.0, \\+1\\.3\\)", why: "a phase with nothing before it has no median"},
 		{use: "r", matches: "\n  flaked, passed on retry: a\\.cue \\(scenarios\\)$"},
 	]}
+	"a failed run's signature is its kind and the scenarios its output marks failed": {suite: "cron", steps: [
+		{call: "cron.signature", args: ["release@gcp failed (exit 1)", "[pass 2]   ✗ guest (202s) at step 39: {}\n[pass 1] ✗ seek (0s) at step 1: {}\n✗ guest (3s) at step 2"], expect: {kind: "release", names: ["guest", "seek"]}},
+		{call: "cron.signature", args: ["the rehearsal failed (exit 1): nothing released", "verify: failed: integrate"], expect: {kind: "rehearsal", names: []}},
+		{call: "cron.signature", args: ["released, production not confirmed: home 500", ""], expect: {kind: "release", names: []}},
+	]}
+	"merges are read oldest first with their pull request and branch": {suite: "cron", steps: [
+		{call: "cron.merges", args: [["ccc Merge pull request #12 from bsoneca/fix/x", "bbb Direct push", "aaa Merge pull request #11 from o/feat/y z", ""]], expect: [
+			{sha: "aaa", subject: "Merge pull request #11 from o/feat/y z", pr: 11, branch: "feat/y"},
+			{sha: "bbb", subject: "Direct push", pr: null, branch: null},
+			{sha: "ccc", subject: "Merge pull request #12 from bsoneca/fix/x", pr: 12, branch: "fix/x"},
+		]},
+	]}
+	"the records say whether a commit is good or bad for the failure's kind, the newest evidence counting, a dirty tree none": {suite: "cron", steps: [
+		{call: "cron.verdict", args: ["c1", {kind: "release", names: []}, {releases: [{commit: "c1", dirty: false, outcome: "live", started: "1"}]}], expect: "good"},
+		{call: "cron.verdict", args: ["c1", {kind: "release", names: []}, {releases: [{commit: "c1", dirty: false, outcome: "failed", failure: "the tests failed against https://x", started: "1"}]}], expect: "bad"},
+		{call: "cron.verdict", args: ["c1", {kind: "release", names: ["a"]}, {releases: [{commit: "c1", dirty: false, outcome: "failed", failure: "the tests failed against https://x", started: "1"}]}], expect: "unknown", why: "a failed rc names no scenario: it may be another one"},
+		{call: "cron.verdict", args: ["c1", {kind: "release", names: ["a"]}, {releases: [{commit: "c1", dirty: false, outcome: "live", started: "1"}]}], expect: "good"},
+		{call: "cron.verdict", args: ["c1", {kind: "release", names: []}, {releases: [{commit: "c1", dirty: false, outcome: "failed", failure: "gcloud run services replace died", started: "1"}]}], expect: "unknown", why: "another failure is no evidence about this one"},
+		{call: "cron.verdict", args: ["c1", {kind: "release", names: []}, {rehearsals: [{commit: "c1", dirty: false, outcome: "passed", queued: "1"}]}], expect: "unknown", why: "a local rehearsal pass says nothing of the cloud's rc"},
+		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: []}, {rehearsals: [{commit: "c1", dirty: false, outcome: "failed", queued: "1"}, {commit: "c1", dirty: false, outcome: "passed", queued: "2"}]}], expect: "good", why: "the newer pass"},
+		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: []}, {rehearsals: [{commit: "c1", dirty: true, outcome: "passed", queued: "1"}]}], expect: "unknown"},
+		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: ["a"]}, {ledger: [{commit: "c1", kind: "rehearsal", names: ["a"], verdict: "bad", at: "1"}]}], expect: "bad", why: "a verdict an earlier bisect ran for the same scenarios"},
+		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: ["b"]}, {ledger: [{commit: "c1", kind: "rehearsal", names: ["a"], verdict: "good", at: "1"}]}], expect: "unknown", why: "a pass of other scenarios proves nothing of these"},
+	]}
+	"the search tests the middle of what the verdicts leave and names the first bad commit after the last good": {suite: "cron", steps: [
+		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}, {sha: "c"}, {sha: "d"}, {sha: "e"}], {e: "bad"}], expect: {test: {sha: "b"}}},
+		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}, {sha: "c"}, {sha: "d"}, {sha: "e"}], {b: "good", e: "bad"}], expect: {test: {sha: "c"}}},
+		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}, {sha: "c"}, {sha: "d"}, {sha: "e"}], {b: "good", d: "bad", e: "bad"}], expect: {test: {sha: "c"}}},
+		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}, {sha: "c"}, {sha: "d"}, {sha: "e"}], {c: "good", d: "bad", e: "bad"}], expect: {culprit: {sha: "d"}}},
+		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}], {a: "bad", b: "bad"}], expect: {culprit: {sha: "a"}}, why: "nothing good in between: the first of them"},
+		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}, {sha: "c"}], {a: "unknown", b: "unknown", c: "bad"}], expect: {test: {sha: "a"}}},
+		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}, {sha: "c"}], {a: "good", b: "unknown", c: "bad"}], expect: {test: {sha: "b"}}},
+		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}, {sha: "c"}], {a: "good", b: "unknown", c: "bad"}], expect: {test: {sha: "b"}}},
+		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}, {sha: "c"}], {a: "good", c: "bad", b: "good"}], expect: {culprit: {sha: "c"}}},
+	]}
+	"a pull request names its author session by a Claude Desktop session id": {suite: "cron", steps: [
+		{call: "cron.sessionOf", args: ["Opened by local_ac4f76fa-5c86-4a47-96d1-e2d01cf8bf95, gate green"], expect: "local_ac4f76fa-5c86-4a47-96d1-e2d01cf8bf95"},
+		{call: "cron.sessionOf", args: ["no session here"], expect: null},
+		{call: "cron.sessionOf", args: [null], expect: null},
+	]}
+	"a revert is due at the first bisect that names a culprit, once per culprit": {suite: "cron", steps: [
+		{call: "cron.revertDue", args: [[], {culprit: "abc", of: "r1"}], expect: true},
+		{call: "cron.revertDue", args: [[{culprit: "xyz", of: "r1", revert: "https://x/pull/9"}], {culprit: "abc", of: "r2"}], expect: true, why: "another culprit's revert is no bar"},
+		{call: "cron.revertDue", args: [[{culprit: "abc", of: "r1", revert: "https://x/pull/9", revertState: "check failed, left open"}], {culprit: "abc", of: "r2"}], expect: false, why: "already reverted"},
+		{call: "cron.revertDue", args: [[{culprit: "abc", of: "r1", revertFailed: "gh: no"}], {culprit: "abc", of: "r2"}], expect: false, why: "already tried"},
+		{call: "cron.revertDue", args: [[], {range: ["a"], of: "r2"}], expect: false, why: "no culprit named"},
+	]}
+	"a bisect reads as one line": {suite: "cron", steps: [
+		{call: "cron.bisectLine", args: [{of: "r1", culprit: "0123456789ab", pr: 5, branch: "fix/x", ran: 2, fromRecords: 3, notified: "PR #5 comment"}], expect: "r1: culprit 01234567 (PR #5, fix/x); checks run 2, from records 3; told PR #5 comment"},
+		{call: "cron.bisectLine", args: [{of: "r1", range: ["aaaaaaaa11", "bbbbbbbb22"], ran: 0, fromRecords: 1}], expect: "r1: narrowed to aaaaaaaa bbbbbbbb; checks run 0, from records 1"},
+		{call: "cron.bisectLine", args: [{of: "r1", culprit: "0123456789ab", pr: 5, branch: "fix/x", ran: 3, fromRecords: 0, revert: "https://x/pull/9", revertState: "checked good, merged"}], expect: "r1: culprit 01234567 (PR #5, fix/x); checks run 3, from records 0; revert https://x/pull/9 checked good, merged"},
+		{call: "cron.bisectLine", args: [{of: "r1", culprit: "0123456789ab", pr: 5, branch: "fix/x", ran: 3, fromRecords: 0, revertFailed: "push refused"}], expect: "r1: culprit 01234567 (PR #5, fix/x); checks run 3, from records 0; revert not opened: push refused"},
+	]}
 }

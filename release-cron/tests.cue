@@ -25,3 +25,6 @@ own: {gap: _own.gap, poll: _own.poll} & {gap: 30, poll: 5}
 // An app may name its slot holder and the services besides its own that must be ready.
 _ume: #Cron & {watch: ["x"], probes: {}, ready: ["a-render"], holder: "./saytw integrate@local"}
 ume: {ready: _ume.ready, holder: _ume.holder} & {ready: ["a-render"], holder: "./saytw integrate@local"}
+
+// A failed run is bisected within these limits, and the lead is told when no author session is named.
+bisectDefaults: _defaults.bisect & {command: "./saytw integrate@local", lead: "local_7c6084eb-07de-487a-b8e6-689748accaaa"}
