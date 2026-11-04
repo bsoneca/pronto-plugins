@@ -43,8 +43,11 @@ const name = JSON.parse((() => {
   return r.out;
 })());
 const records = jsonl(`${home}/.cache/pronto/releases/${name}.jsonl`);
-const repo = sh("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], appDir).out;
-if (!repo) usage("no GitHub repository for the app's folder (gh repo view)");
+// The repository from origin's URL (git@github.com:o/n.git, https://github.com/o/n): no gh call, which
+// would need a login before anything is read.
+const origin = sh("git", ["remote", "get-url", "origin"], appDir);
+const repo = origin.out.match(/github\.com[:/]([^/]+\/[^/]+?)(\.git)?\/?$/)?.[1] ?? "";
+if (!repo) usage(`no GitHub repository in origin's URL (${origin.out || origin.err})`);
 
 // A pull request in plain words, once: the cache first, then the local model, then the rules.
 const cacheFile = `${home}/.cache/pronto/release-notes/${app}/prs.json`;
@@ -62,7 +65,7 @@ async function ask(pr: { title: string; body: string; files: { path: string }[] 
 async function words(n: number) {
   if (cache[n]) return cache[n];
   const v = sh("gh", ["pr", "view", String(n), "-R", repo, "--json", "number,title,body,url,files"], appDir);
-  if (!v.ok) return { summary: `Pull request #${n}`, players: true, unread: true };
+  if (!v.ok) { console.log(`#${n} unread (gh pr view): ${v.err.split("\n")[0]}`); return { summary: `Pull request #${n}`, players: true, unread: true }; }
   const pr = JSON.parse(v.out);
   const said = await ask(pr);
   const rules = fallback(pr, appRel);

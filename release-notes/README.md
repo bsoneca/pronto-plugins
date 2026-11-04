@@ -75,3 +75,9 @@ try. Times are Brasília's.
 [release-cron](../release-cron/README.md) runs `publish <revision>` as the last step of a run that
 released a new revision, when the app has `release-notes/release-notes.ts`, and records `notes` in
 its run. Its failure never changes the run's outcome.
+
+`gh` needs a login that may read the app's pull requests and write its Releases. Run by launchd or
+by hand, that is the machine owner's gh login. Under a CI/CD job it is the job's `GH_TOKEN`, which
+the hook passes on: a runner started with `SessionCreate` (a launchd service) cannot reach the
+owner's login in the keychain. So the job's token needs `contents: write` and `pull-requests: read`
+(bsoneca/pronto's `cd.yml`). The repository itself is read from origin's URL.
