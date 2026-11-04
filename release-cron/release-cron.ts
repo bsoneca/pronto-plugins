@@ -77,16 +77,17 @@ if (verb === "uninstall") {
 }
 
 // Telling a pull request's author: the PR (a comment), a notes file for a session (the author's when the PR
-// body names one and its notes folder exists, else the lead's) and a macOS notification, `gh` with the
-// machine owner's own login (no GH_TOKEN, GITHUB_TOKEN: under CD the CI job's expiring token). Bisect and the
-// new-feature notice both use it.
+// body names one and its notes folder exists, else the lead's) and a macOS notification, `gh` with the run's own
+// login: under CD the release job's GH_TOKEN (bsoneca/pronto's cd.yml: pull-requests write), which a runner started
+// with SessionCreate needs, since it cannot reach the owner's gh login in the keychain; under launchd the owner's.
+// Bisect and the new-feature and flaked notices all use it.
 type Bisect = { lead: string; notes: string };
-const prInfo = (slug: string, pr: number) => { try { return JSON.parse(must("env", ["-u", "GH_TOKEN", "-u", "GITHUB_TOKEN", "gh", "pr", "view", String(pr), "-R", slug, "--json", "body,url,title"], undefined, {}, 120)); } catch { return { body: "", url: "", title: "" }; } };
+const prInfo = (slug: string, pr: number) => { try { return JSON.parse(must("gh", ["pr", "view", String(pr), "-R", slug, "--json", "body,url,title"], undefined, {}, 120)); } catch { return { body: "", url: "", title: "" }; } };
 const tellPr = (slug: string, b: Bisect, pr: number, info: { body: string }, msg: string, note: string, toast: string) => {
   const sess = sessionOf(info.body) ?? b.lead;
   const folder = `${home}/${b.notes}/${exists(`${home}/${b.notes}/${sess}`) ? sess : b.lead}`;
   const told: string[] = [];
-  if (sh("env", ["-u", "GH_TOKEN", "-u", "GITHUB_TOKEN", "gh", "pr", "comment", String(pr), "--body", `${msg}\n\nPosted by release-cron.`, "-R", slug], undefined, {}, 120).ok) told.push(`PR #${pr} comment`);
+  if (sh("gh", ["pr", "comment", String(pr), "--body", `${msg}\n\nPosted by release-cron.`, "-R", slug], undefined, {}, 120).ok) told.push(`PR #${pr} comment`);
   try {
     Deno.mkdirSync(folder, { recursive: true });
     Deno.writeTextFileSync(`${folder}/${note}`, `# release-cron\n\n${msg}\n`);
@@ -361,18 +362,23 @@ const end = (outcome: string, why = "", code = 0) => {
   // `last`: the end, the gap, the commit it failed on or "-" (retry, cron.js) and the commit it tried (behind, cron.js).
   if (spaced(outcome)) Deno.writeTextFileSync(`${state}/last`, `${Date.now()} ${(run.gap as number | undefined) ?? 60} ${outcome === "failed" && run.commit ? run.commit : "-"}${run.commit ? ` ${run.commit}` : ""}`);
   say(l);
-  // A failed run starts its bisect as it ends: its own process in its own session (launchd stops a job's
-  // process group), after the machine was given back above, so it never holds release-active.
-  // Without GH_TOKEN and GITHUB_TOKEN: under CD they are the CI job's read-only token, which expires with
-  // the job, and bisect outlives it; `gh` and `git push` then use the machine owner's own gh login.
-  const bisectEnv = () => { const e: Record<string, string> = { ...Deno.env.toObject(), RELEASE_CRON_NO_BISECT: "1" }; delete e.GH_TOKEN; delete e.GITHUB_TOKEN; return e; };
-  if (outcome === "failed" && run.commit && !Deno.env.get("RELEASE_CRON_NO_BISECT")) {
+  // A failed run starts its bisect as it ends, after the machine was given back above, so it never holds
+  // release-active. Under launchd: its own process in its own session (launchd stops a job's process group),
+  // `gh` with the owner's login. Under CD (GITHUB_ACTIONS): in the foreground once the lock is let go below,
+  // so the job, and the GH_TOKEN bisect's `gh` and push use, last until it ends (the token dies with the job).
+  const bisects = outcome === "failed" && !!run.commit && !Deno.env.get("RELEASE_CRON_NO_BISECT");
+  const underCd = Deno.env.get("GITHUB_ACTIONS") === "true";
+  const bisectEnv = () => ({ ...Deno.env.toObject(), RELEASE_CRON_NO_BISECT: "1" });
+  if (bisects && !underCd) {
     try { new Deno.Command("perl", { args: ["-e", "use POSIX; setsid(); exec @ARGV or die $!", "--", Deno.execPath(), "run", "-A", `${here}release-cron.ts`, app, "bisect"], env: bisectEnv(), clearEnv: true, stdin: "null", stdout: "null", stderr: "null" }).spawn().unref(); } catch (e) { say(`bisect not started: ${(e as Error).message}`); }
   }
   // The last 50 runs' output kept.
   const logs = [...Deno.readDirSync(`${state}/runs`)].map((e) => e.name).sort();
   for (const old of logs.slice(0, -50)) Deno.removeSync(`${state}/runs/${old}`);
   try { if (Deno.readTextFileSync(`${state}/lock/pid`) === String(Deno.pid)) Deno.removeSync(`${state}/lock`, { recursive: true }); } catch { /* none, or not ours */ }
+  if (bisects && underCd) {
+    try { new Deno.Command(Deno.execPath(), { args: ["run", "-A", `${here}release-cron.ts`, app, "bisect"], env: bisectEnv(), stdin: "null", stdout: "inherit", stderr: "inherit" }).outputSync(); } catch (e) { say(`bisect not run: ${(e as Error).message}`); }
+  }
   Deno.exit(code);
 };
 
