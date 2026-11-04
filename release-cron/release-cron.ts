@@ -603,7 +603,9 @@ try {
   // tagged <app>/<revision>. Its output is in the run's log; whatever it does, the run's outcome stays.
   if (run.revision !== before && exists(`${dir}/release-notes/release-notes.ts`)) {
     try {
-      const n = await child(Deno.execPath(), ["run", "-A", "release-notes/release-notes.ts", app, "publish", String(run.revision)], dir, Deno.env.toObject());
+      // Without GH_TOKEN and GITHUB_TOKEN (env -u: child keeps the run's environment): under CD they are
+      // the CI job's read-only token, and a Release is written with the machine owner's own gh login.
+      const n = await child("env", ["-u", "GH_TOKEN", "-u", "GITHUB_TOKEN", Deno.execPath(), "run", "-A", "release-notes/release-notes.ts", app, "publish", String(run.revision)], dir, Deno.env.toObject());
       run.notes = n.code === 0 ? "published" : `failed (exit ${n.code})`;
     } catch (e) { run.notes = `failed (${(e as Error).message.split("\n")[0]})`; }
     say(`release notes ${run.notes}`);
