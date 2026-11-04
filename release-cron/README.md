@@ -124,7 +124,7 @@ A run that **failed** names the commit that broke it and reports it; bisect neve
 pull request (the user decided against automatic reverts). As it ends (after giving the machine back) it
 starts `release-cron.ts <app> bisect` as a process of its own, one at a time (`bisect/lock`), in its
 own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>]` does it by hand,
-`--dry` runs nothing, tells nobody and writes nothing, and `--no-notify` runs the checks and records them but tells nobody. Bisect is started without `GH_TOKEN` and `GITHUB_TOKEN` (under CD they are the CI job's read-only token, which expires with the job): `gh` uses the machine owner's own gh login.
+`--dry` runs nothing, tells nobody and writes nothing, and `--no-notify` runs the checks and records them but tells nobody. `gh` (and the push) use the run's own login. Under launchd that is the machine owner's gh login, and bisect is detached. Under CD (`GITHUB_ACTIONS`) it is the release job's `GH_TOKEN`: a runner started with `SessionCreate` cannot reach the owner's login in the keychain, and the token dies with the job. So there bisect runs in the foreground once the run's lock is let go, and the job lasts until bisect ends.
 
 1. The range is the first-parent merges of `main` between the newest run that released and the
    failed run's commit. The failure's signature is its kind (`release`: release@gcp or its confirm;
