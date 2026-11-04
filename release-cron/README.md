@@ -148,6 +148,17 @@ own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>
 Each bisect is a line of `bisect/bisects.jsonl` and a `bisect` line of `runs.jsonl` (`detail.bisect`),
 and `report` ends with them; it never reverts, never releases and never calls `release@gcp`.
 
+## New-feature scenario failures do not block a release
+
+pronto's gcp release decides this, not release-cron: when only scenarios a release adds fail, it ships
+anyway and prints `new-feature scenarios failed, released anyway: a, b (absent from <commit8>, live release)`.
+When a run's release output has that line, the run's log line and `report` name the scenarios
+(`released; new-feature scenarios failing: a, b`), and the pull request that added each is told once
+(`new-feature.jsonl`), through the same path as a bisect's culprit: a comment, and the notes file of
+the author session its body names (`local_<uuid>`), else of `bisect.lead`. That PR is the first merge
+on main's first-parent history since the last released run whose tree has the scenario's file
+(`tests/scenarios/<name>.cue`, else a mention of the name in `tests/scenarios/`).
+
 ## Install, pause, remove
 
 ```sh

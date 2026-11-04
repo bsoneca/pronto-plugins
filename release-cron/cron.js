@@ -95,7 +95,7 @@ export const line = (run) => {
   const steps = Object.entries(run.steps).map(([k, s]) => `${k} ${min(s)}`).join(", ");
   const what = [run.commit?.slice(0, 8), run.revision].filter(Boolean).join(" ");
   const cloud = run.rehearsal ? `; cloud rehearsal ${min(run.rehearsal.seconds)} min, $${run.rehearsal.usd.toFixed(4)}` : "";
-  return `${run.started} ${run.app} ${run.outcome}${what ? ` ${what}` : ""}${run.why ? ` (${run.why})` : ""}: ${min(total)} min${steps ? ` = ${steps}` : ""}${cloud}`;
+  return `${run.started} ${run.app} ${run.outcome}${run.newFailing?.length ? `; new-feature scenarios failing: ${run.newFailing.join(", ")}` : ""}${what ? ` ${what}` : ""}${run.why ? ` (${run.why})` : ""}: ${min(total)} min${steps ? ` = ${steps}` : ""}${cloud}`;
 };
 
 // Where a run's time went inside its steps, from the records the rehearsal and the release write
@@ -129,7 +129,7 @@ export const report = (runs) => {
   const bisected = runs.filter((r) => r.outcome === "bisect" && r.detail?.bisect).map((r) => `bisect ${bisectLine(r.detail.bisect)}`);
   if (!released.length) return ["no released run yet", ...bisected].join("\n");
   const total = (r) => Object.values(r.steps).reduce((a, b) => a + b, 0);
-  const rows = released.map((r) => `${r.started} ${r.commit?.slice(0, 8) ?? ""} ${min(total(r))} min = ${Object.entries(r.steps).map(([k, s]) => `${k} ${min(s)}`).join(", ")}`);
+  const rows = released.map((r) => `${r.started} ${r.commit?.slice(0, 8) ?? ""} ${min(total(r))} min = ${Object.entries(r.steps).map(([k, s]) => `${k} ${min(s)}`).join(", ")}${r.newFailing?.length ? `; new-feature scenarios failing: ${r.newFailing.join(", ")}` : ""}`);
   const last = released.at(-1), before = released.slice(0, -1);
   const phases = Object.entries(last.detail?.phases ?? {}).sort((a, b) => b[1] - a[1]).map(([k, s]) => {
     const m = median(before.map((r) => r.detail?.phases?.[k]).filter((x) => typeof x === "number"));
@@ -223,3 +223,19 @@ export const sessionOf = (body) => (body ?? "").match(/local_[0-9a-f]{8}-[0-9a-f
 // The bisect's one line, for the run's detail and `report`.
 export const bisectLine = (b) =>
   `${b.of}: ${b.culprit ? `culprit ${b.culprit.slice(0, 8)}${b.pr ? ` (PR #${b.pr}, ${b.branch})` : ""}` : b.range ? `narrowed to ${b.range.map((s) => s.slice(0, 8)).join(" ")}` : b.why ?? "undecided"}; checks run ${b.ran ?? 0}, from records ${b.fromRecords ?? 0}${b.notified ? `; told ${b.notified}` : ""}`;
+
+// --- New-feature scenarios: pronto's gcp release ships when only they fail. ---
+
+// The scenarios a release's output line names: `gcp: <stamp> new-feature scenarios failed, released
+// anyway: a, b (absent from <commit8>, live release)`; none for any other text.
+export const newFeatureNames = (text) => {
+  const m = (text ?? "").match(/new-feature scenarios failed, released anyway: (.+?)(?: \(absent from|$)/m);
+  return m ? [...new Set(m[1].split(",").map((x) => x.trim()).filter(Boolean))] : [];
+};
+
+// The merge that added a scenario: the first of `list` (merges(), oldest first, since the last released
+// run) whose tree has its file (`has`: sha -> bool); none when the last released run's tree already had it.
+export const introducedBy = (list, has, hadBefore) => hadBefore ? null : list.find((c) => has[c.sha]) ?? null;
+
+// The {scenario, pr} found that the ledger of those told does not hold yet: each is told once.
+export const untold = (found, told) => found.filter((f) => !told.some((t) => t.scenario === f.scenario && t.pr === f.pr));

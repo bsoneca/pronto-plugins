@@ -25,7 +25,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { activeLine, base, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole } from "./cron.js";
+import { activeLine, base, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, introducedBy, untold, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole } from "./cron.js";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -75,6 +75,26 @@ if (verb === "uninstall") {
   console.log(`${label}: removed (the worktree ${wt} kept)`);
   Deno.exit(0);
 }
+
+// Telling a pull request's author: the PR (a comment), a notes file for a session (the author's when the PR
+// body names one and its notes folder exists, else the lead's) and a macOS notification, `gh` with the
+// machine owner's own login (no GH_TOKEN, GITHUB_TOKEN: under CD the CI job's expiring token). Bisect and the
+// new-feature notice both use it.
+type Bisect = { lead: string; notes: string };
+const prInfo = (slug: string, pr: number) => { try { return JSON.parse(must("env", ["-u", "GH_TOKEN", "-u", "GITHUB_TOKEN", "gh", "pr", "view", String(pr), "-R", slug, "--json", "body,url,title"], undefined, {}, 120)); } catch { return { body: "", url: "", title: "" }; } };
+const tellPr = (slug: string, b: Bisect, pr: number, info: { body: string }, msg: string, note: string, toast: string) => {
+  const sess = sessionOf(info.body) ?? b.lead;
+  const folder = `${home}/${b.notes}/${exists(`${home}/${b.notes}/${sess}`) ? sess : b.lead}`;
+  const told: string[] = [];
+  if (sh("env", ["-u", "GH_TOKEN", "-u", "GITHUB_TOKEN", "gh", "pr", "comment", String(pr), "--body", `${msg}\n\nPosted by release-cron.`, "-R", slug], undefined, {}, 120).ok) told.push(`PR #${pr} comment`);
+  try {
+    Deno.mkdirSync(folder, { recursive: true });
+    Deno.writeTextFileSync(`${folder}/${note}`, `# release-cron\n\n${msg}\n`);
+    told.push(`notes of ${folder.split("/").at(-1)}`);
+  } catch { /* a folder that cannot be written is one channel less */ }
+  sh("osascript", ["-e", `display notification ${JSON.stringify(toast)} with title "release-cron"`], undefined, {}, 10);
+  return told.join(", ");
+};
 
 // --- Bisect: `bisect [--dry] [<run's start>]` names the commit that broke a failed run. ---
 // Apart from the run and its hold on the machine: its own process (started by a failed run as it
@@ -237,20 +257,9 @@ if (verb === "bisect") {
     } catch { /* a folder that cannot be written is one channel less */ }
   }
   if (result.culprit && result.pr && !said && !quiet) {
-    const gh = (...a: string[]) => sh("gh", [...a, "-R", slug], undefined, {}, 120);
-    const info = (() => { try { return JSON.parse(gh("pr", "view", String(result.pr), "--json", "body,url,title").out); } catch { return { body: "", url: "", title: "" }; } })();
-    const sess = sessionOf(info.body) ?? b.lead;
-    const folder = `${home}/${b.notes}/${exists(`${home}/${b.notes}/${sess}`) ? sess : b.lead}`;
+    const info = prInfo(slug, result.pr as number);
     const msg = `release-cron (${app}) failed ${failed.started} on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}). Bisecting main since the last release ${green.commit.slice(0, 8)} names ${(result.culprit as string).slice(0, 8)}, PR #${result.pr} (${result.branch}) ${info.title}. ${ran} checks run, ${fromRecords} commits settled by records. Bisect only reports; nothing is reverted. Log: ${state}/runs/${failed.started}.log`;
-    const told: string[] = [];
-    if (gh("pr", "comment", String(result.pr), "--body", `${msg}\n\nPosted by release-cron's bisect.`).ok) told.push(`PR #${result.pr} comment`);
-    try {
-      Deno.mkdirSync(folder, { recursive: true });
-      Deno.writeTextFileSync(`${folder}/release-cron-bisect-${failed.started.replace(/[^0-9A-Za-z-]/g, "")}.md`, `# release-cron bisect\n\n${msg}\n`);
-      told.push(`notes of ${folder.split("/").at(-1)}`);
-    } catch { /* a folder that cannot be written is one channel less */ }
-    sh("osascript", ["-e", `display notification ${JSON.stringify(`PR #${result.pr} (${result.branch}) broke release-cron ${app}`)} with title "release-cron bisect"`], undefined, {}, 10);
-    result.notified = told.join(", ");
+    result.notified = tellPr(slug, b, result.pr as number, info, msg, `release-cron-bisect-${failed.started.replace(/[^0-9A-Za-z-]/g, "")}.md`, `PR #${result.pr} (${result.branch}) broke release-cron ${app}`);
   }
   Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify(result) + "\n", { append: true });
   // In runs.jsonl beside the runs, for `report`; its own outcome, which no rule of the schedule reads.
@@ -317,7 +326,7 @@ const enc = new TextEncoder();
 const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() - t0) / 1000)}s ${s}\n`; log(enc.encode(l)); Deno.stdout.writeSync(enc.encode(l)); };
 let head = "";
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
-let cron: { gap: number; poll: number; watch: string[]; ready: string[]; holder: string; probes: Record<string, { path: string; agent?: string; status: number; has: string[] }> };
+let cron: { gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { lead: string; notes: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[] }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
 let mark = Date.now();
@@ -517,9 +526,32 @@ try {
 
   // 3. The release, on the tree the rehearsal passed.
   active("release");
-  const rel = await child("./saytw", ["release@gcp"], dir, { ...Deno.env.toObject(), STACK_PRIORITY: "release" });
+  let newFailing: string[] = [];
+  const rel = await child("./saytw", ["release@gcp"], dir, { ...Deno.env.toObject(), STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; });
   step("release");
   if (rel.code !== 0) end("failed", `release@gcp failed (exit ${rel.code})`, 1);
+  // pronto's release ships when only new-feature scenarios fail: the run names them, and the PR that added each is told once.
+  if (newFailing.length) {
+    run.newFailing = newFailing;
+    try {
+      const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], wt);
+      const slug = must("git", ["--git-dir", repo, "remote", "get-url", "origin"]).replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1");
+      const green = jsonl(`${state}/runs.jsonl`).filter((r) => r.outcome === "released" && r.commit).at(-1)?.commit as string | undefined;
+      const list = merges(must("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H %s", `${green ?? head}..${head}`]).split("\n"));
+      const has = (sha: string, name: string) => sh("git", ["--git-dir", repo, "ls-tree", "--name-only", sha, `${appRel}/tests/scenarios/${name}.cue`]).out !== "" || sh("git", ["--git-dir", repo, "grep", "-q", "-F", "-e", name, sha, "--", `${appRel}/tests/scenarios`]).ok;
+      const ledger = `${state}/new-feature.jsonl`;
+      const found = green ? newFailing.flatMap((name) => {
+        const c = introducedBy(list, Object.fromEntries(list.map((m: { sha: string }) => [m.sha, has(m.sha, name)])), has(green, name));
+        return c?.pr ? [{ scenario: name, pr: c.pr, branch: c.branch }] : [];
+      }) : [];
+      for (const f of untold(found, jsonl(ledger))) {
+        const info = prInfo(slug, f.pr);
+        const msg = `release-cron (${app}) released ${head.slice(0, 8)} although the new scenario ${f.scenario} (added by PR #${f.pr}, ${f.branch}) fails: a release is not held by a new feature's own scenarios. Fix it or take it out. Log: ${state}/runs/${started}.log`;
+        const told = tellPr(slug, cron.bisect, f.pr, info, msg, `release-cron-new-feature-${f.scenario.replace(/[^0-9A-Za-z-]/g, "")}.md`, `new scenario ${f.scenario} (PR #${f.pr}) fails in release-cron ${app}`);
+        if (told.includes("comment")) Deno.writeTextFileSync(ledger, JSON.stringify({ ...f, told, at: local(Date.now()) }) + "\n", { append: true });
+      }
+    } catch (e) { say(`new-feature scenarios not told: ${(e as Error).message.split("\n")[0]}`); }
+  }
 
   // 4. Production: the revision taking every request is the one this tree's live record names, the `ready` services are
   // ready, the probes answer. Retried until it is confirmed, as a cache or a cold start settles; no limit, a line every few minutes says what is still wrong.
