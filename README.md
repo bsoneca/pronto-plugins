@@ -18,6 +18,7 @@ beyond the browser, and beside them, on unmodified pronto. Why and how they are 
 - [intents](intents/README.md): one-command plumbing behind `bin/pronto`.
 - [journeys](journeys/README.md): user-journey SLOs from the terminal's telemetry.
 - [perf](perf/README.md): frame, interaction and paint timings on readers' devices.
+- [prod-watch](prod-watch/README.md): what production logged that may be a bug, triaged by an agent on a loop.
 - [release-cron](release-cron/README.md): an app released to production on a schedule, from main, by launchd.
 - [runners](runners/README.md): GitHub Actions runners on your own cluster, an ARC scale set per repository sharing one BuildKit.
 - [unity](unity/README.md): an app's opt-in to pronto-csharp's Unity host, and its `./saytw unity@local` check.
