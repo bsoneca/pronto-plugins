@@ -2,8 +2,8 @@
 
 Releases a pronto app to production from `main` on the operator's Mac, so nobody has to ask for a
 release: it releases, waits an hour, then releases again. launchd wakes it every 10 minutes
-(`poll`), and a wake starts a run once `gap` (60 min) has passed since the last run that released
-or failed. A skipped run leaves no gap, so a new merge doesn't wait an hour. Nor does one after a
+(`poll`), and a wake starts a run once `gap` (60 min by default; an app sets its own in
+release_cron.cue) has passed since the end of the last run that released or failed. A skipped run leaves no gap, so a new merge doesn't wait an hour. Nor does one after a
 failure: once main has moved past the commit a run failed on, the next wake starts a run; a
 retry of the same commit waits the gap.
 
@@ -50,8 +50,9 @@ Bonk Chess (bsoneca/pronto's `apps/brawl-chess`) is the first: its `release_cron
 2. **slot**: `./saytw verify@local` waits for its slot in the machine's pool (`tests/slot.ts`),
    with `STACK_PRIORITY=release`: its claim goes to the head of the line, ahead of every waiting
    gate or launch (an app's `slot.ts` without priorities keeps it first come, first served).
-   After `minutes.slot` (20) with no slot, the run stops it and **skips**; the next run asks again.
-3. **rehearse**: the rehearsal, at most `minutes.rehearse` (35). A failed scenario gets the
+   It waits for the slot as long as it takes (no limit); the run's lock keeps another run from
+   starting meanwhile, and the log says it is still waiting every 5 minutes.
+3. **rehearse**: the rehearsal, to its verdict (no limit). A failed scenario gets the
    rehearsal's own retry, once (Bonk Chess's `tests/rehearse.ts` runs it again beside the rest of
    its pass).
    A failed rehearsal never releases: the run is **failed**. The next run on the same tree
@@ -67,7 +68,7 @@ Bonk Chess (bsoneca/pronto's `apps/brawl-chess`) is the first: its `release_cron
 5. **confirm**: the new revision takes 100% of the traffic and its live record is this tree's,
    each service in `ready` (Bonk Chess: `<service>-render`) is Ready, and the app's `probes` answer as expected (Bonk Chess: `/`, a
    `/player/<id>` link preview with `WhatsApp/2.23`, and `/table/<unknown room>`, which the
-   renderer answers with 404). Retried for up to `minutes.confirm` (5). A release that changed
+   renderer answers with 404). Retried until it is confirmed (no limit); every 5 minutes the log says what is still wrong. A release that changed
    nothing Cloud Run runs (tests, config) keeps the revision, and the log says so: `same image,
    nothing served changed`.
 
@@ -89,9 +90,13 @@ compares the newest's phases with the median of the ones before, slowest first. 
 change to the release goes where the time is, and the next run's report shows whether it
 helped.
 
-Each step has a limit (`minutes` in `#Cron`, release_cron_plugin.cue, far above what it takes)
-only so a wedged step can't hold the schedule. When a step hits its limit, it's killed with
-its whole process group and the run fails. There's no overall budget. Runs never overlap:
+No step has a time limit, and none is ever killed for its time: a stuck step must be seen, not
+stopped. While a step runs, the run's log (`<state>/runs/<start>.log`) gets a line every 5 minutes
+saying it is still running and how long into the run it is (confirm says what is still wrong), and
+each step's minutes stay in `runs.jsonl` and `report`, so the slowest phase still shows. Only the
+short calls inside prepare (`git fetch`, `gcloud describe`) keep their own hang guards of a few
+minutes; a signal (launchd's, `kill`) still stops the run's children. Because nothing ends a stuck
+run, stop it by hand (`kill <pid in <state>/lock/pid>`). There's no overall budget. Runs never overlap:
 launchd never starts a job while it's still running, and a lock (`<state>/lock`, with the
 run's pid) skips a run started by hand while another is going.
 
