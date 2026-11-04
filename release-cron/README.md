@@ -185,7 +185,8 @@ A CI/CD job can start the run itself, for the commit its push carried, in place 
 `RELEASE_CRON_REF=<commit> RELEASE_CRON_NOW=1 deno run -A release-cron/release-cron.ts <app> run`.
 `RELEASE_CRON_NOW` skips the gap (the push is the schedule). Everything else is the same run:
 the pause, the lock, the skip when nothing watched changed, the release, confirm and the measured
-record. bsoneca/pronto's `cd` workflow releases Bonk Chess this way, on its Mac's own runner, so
+record. A run never goes backwards: a ref that is a strict ancestor of the commit the last run
+tried (released or failed) ends as `skipped`, leaving `last` and the gap as they were. bsoneca/pronto's `cd` workflow releases Bonk Chess this way, on its Mac's own runner, so
 that app has no launchd job.
 
 ## Why launchd

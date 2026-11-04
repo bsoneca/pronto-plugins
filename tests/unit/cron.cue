@@ -16,6 +16,13 @@ cases: {
 		{call: "cron.due", args: [5000000, 1000000, 60], expect: true},
 		{call: "cron.due", args: [1000, 1000, 0], expect: true, why: "no gap"},
 	]}
+	"a run never releases a commit that is a strict ancestor of the one the last run tried": {suite: "cron", steps: [
+		{call: "cron.behind", args: [true, "665bad95", "dc909b53"], expect: true, why: "an older ci-finished commit: skipped"},
+		{call: "cron.behind", args: [true, "dc909b53", "dc909b53"], expect: false, why: "the same commit follows today's rules"},
+		{call: "cron.behind", args: [false, "0b2206c3", "dc909b53"], expect: false, why: "newer or unrelated"},
+		{call: "cron.behind", args: [false, "dc909b53", null], expect: false, why: "no run has tried one"},
+		{call: "cron.behind", args: [true, "665bad95", null], expect: false, why: "no last commit to be behind"},
+	]}
 	"a run holds the machine as one line of JSON: its app, pid, start and phase": {suite: "cron", steps: [
 		{call: "cron.activeLine", args: ["brawl-chess", 4242, "2026-11-03T20:00:00Z", "slot"], expect: "{\"app\":\"brawl-chess\",\"pid\":4242,\"started\":\"2026-11-03T20:00:00Z\",\"phase\":\"slot\"}\n"},
 		{call: "cron.activeLine", args: ["brawl-chess", 4242, "2026-11-03T20:00:00Z", "confirm"], expect: "{\"app\":\"brawl-chess\",\"pid\":4242,\"started\":\"2026-11-03T20:00:00Z\",\"phase\":\"confirm\"}\n", why: "the phase is the only field that moves"},
