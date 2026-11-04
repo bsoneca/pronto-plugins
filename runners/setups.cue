@@ -7,4 +7,8 @@ setups: "bsoneca-mac": {
 	cluster: host: {}
 	github: {owner: "bsoneca", kind: "user"}
 	hostRunners: "pronto-mac": repo: "pronto"
+	// Releases only (cd.yml's release job runs on this label): a release never waits behind ci,
+	// whose queue on pronto-mac can be long. Same Mac; release-cron's own slot (STACK_PRIORITY=release)
+	// already puts its rehearsal first on the machine.
+	hostRunners: "pronto-release": repo: "pronto"
 }
