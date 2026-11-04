@@ -100,7 +100,7 @@ export const line = (run) => {
   const steps = Object.entries(run.steps).map(([k, s]) => `${k} ${min(s)}`).join(", ");
   const what = [run.commit?.slice(0, 8), run.revision].filter(Boolean).join(" ");
   const cloud = run.rehearsal ? `; cloud rehearsal ${min(run.rehearsal.seconds)} min, $${run.rehearsal.usd.toFixed(4)}` : "";
-  return `${run.started} ${run.app} ${run.outcome}${run.newFailing?.length ? `; new-feature scenarios failing: ${run.newFailing.join(", ")}` : ""}${what ? ` ${what}` : ""}${run.why ? ` (${run.why})` : ""}: ${min(total)} min${steps ? ` = ${steps}` : ""}${cloud}`;
+  return `${run.started} ${run.app} ${run.outcome}${run.newFailing?.length ? `; new-feature scenarios failing: ${run.newFailing.join(", ")}` : ""}${run.flaked?.length ? `; flaked: ${run.flaked.join(", ")}` : ""}${what ? ` ${what}` : ""}${run.why ? ` (${run.why})` : ""}: ${min(total)} min${steps ? ` = ${steps}` : ""}${cloud}`;
 };
 
 // Where a run's time went inside its steps, from the records the rehearsal and the release write
@@ -245,3 +245,14 @@ export const introducedBy = (list, has, hadBefore) => hadBefore ? null : list.fi
 
 // The {scenario, pr} found that the ledger of those told does not hold yet: each is told once.
 export const untold = (found, told) => found.filter((f) => !told.some((t) => t.scenario === f.scenario && t.pr === f.pr));
+
+// The scenarios the rehearsal's output names as flaked: `(flaked, passed on its one retry: a, b)` in its
+// per-check line, or `⚠ flaked, passed on its one retry: a, b (scenarios)` in its summary; none for other text.
+export const flakedNames = (text) => {
+  const names = [...(text ?? "").matchAll(/flaked, passed on its one retry: ([^()\n]+)/g)].flatMap((m) => m[1].split(",").map((x) => x.trim()).filter(Boolean));
+  return [...new Set(names)];
+};
+
+// The merge that last changed a scenario's file: the newest of `list` (merges(), oldest first) whose diff
+// touched it (`touched`: sha -> bool); none when no merge of the list did.
+export const changedBy = (list, touched) => [...list].reverse().find((c) => touched[c.sha]) ?? null;

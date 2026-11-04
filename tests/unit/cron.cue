@@ -238,6 +238,21 @@ cases: {
 		{call: "cron.untold", args: [[{scenario: "a", pr: 2}, {scenario: "b", pr: 3}], [{scenario: "a", pr: 2, told: "PR #2 comment"}]], expect: [{scenario: "b", pr: 3}]},
 		{call: "cron.untold", args: [[{scenario: "a", pr: 4}], [{scenario: "a", pr: 2}]], expect: [{scenario: "a", pr: 4}], why: "another PR re-adding it is told"},
 	]}
+	"a rehearsal's output names the scenarios that flaked": {suite: "cron", steps: [
+		{call: "cron.flakedNames", args: ["rehearse: 1011s scenarios, pass 2: passed (flaked, passed on its one retry: seek_notify, gold)"], expect: ["seek_notify", "gold"], why: "the per-check line"},
+		{call: "cron.flakedNames", args: ["  ⚠ flaked, passed on its one retry: seek_notify (scenarios)"], expect: ["seek_notify"], why: "the summary line, a name the real 15:34 BRT run flaked"},
+		{call: "cron.flakedNames", args: ["rehearse: passed (flaked, passed on its one retry: a)\n  ⚠ flaked, passed on its one retry: a, b (scenarios)"], expect: ["a", "b"], why: "both lines, once each"},
+		{call: "cron.flakedNames", args: ["rehearse: 12s scenarios: passed"], expect: []},
+		{call: "cron.flakedNames", args: [null], expect: []},
+		{call: "cron.newFeatureNames", args: ["rehearse: released on stable features; new-feature scenarios failed: a, b (absent from 0123abcd, live release)"], expect: ["a", "b"], why: "the rehearsal's line reads as the release's"},
+	]}
+	"the merge that last changed a scenario is the newest whose diff touched it": {suite: "cron", steps: [
+		{call: "cron.changedBy", args: [[{sha: "a", pr: 1}, {sha: "b", pr: 2}, {sha: "c", pr: 3}], {a: true, b: true, c: false}], expect: {sha: "b", pr: 2}},
+		{call: "cron.changedBy", args: [[{sha: "a", pr: 1}], {a: false}], expect: null},
+	]}
+	"a run line names the scenarios that flaked": {suite: "cron", steps: [
+		{call: "cron.line", args: [{app: "x", started: "t", outcome: "released", steps: {release: 60}, newFailing: ["a"], flaked: ["b", "c"]}], expect: "t x released; new-feature scenarios failing: a; flaked: b, c: 1.0 min = release 1.0"},
+	]}
 	"a release that shipped past new-feature failures says so in its line": {suite: "cron", steps: [
 		{call: "cron.line", args: [{app: "x", started: "t", outcome: "released", steps: {release: 60}, newFailing: ["a", "b"]}], expect: "t x released; new-feature scenarios failing: a, b: 1.0 min = release 1.0"},
 	]}
