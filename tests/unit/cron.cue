@@ -210,17 +210,8 @@ cases: {
 		{call: "cron.sessionOf", args: ["no session here"], expect: null},
 		{call: "cron.sessionOf", args: [null], expect: null},
 	]}
-	"a revert is due at the first bisect that names a culprit, once per culprit": {suite: "cron", steps: [
-		{call: "cron.revertDue", args: [[], {culprit: "abc", of: "r1"}], expect: true},
-		{call: "cron.revertDue", args: [[{culprit: "xyz", of: "r1", revert: "https://x/pull/9"}], {culprit: "abc", of: "r2"}], expect: true, why: "another culprit's revert is no bar"},
-		{call: "cron.revertDue", args: [[{culprit: "abc", of: "r1", revert: "https://x/pull/9", revertState: "check failed, left open"}], {culprit: "abc", of: "r2"}], expect: false, why: "already reverted"},
-		{call: "cron.revertDue", args: [[{culprit: "abc", of: "r1", revertFailed: "gh: no"}], {culprit: "abc", of: "r2"}], expect: false, why: "already tried"},
-		{call: "cron.revertDue", args: [[], {range: ["a"], of: "r2"}], expect: false, why: "no culprit named"},
-	]}
 	"a bisect reads as one line": {suite: "cron", steps: [
 		{call: "cron.bisectLine", args: [{of: "r1", culprit: "0123456789ab", pr: 5, branch: "fix/x", ran: 2, fromRecords: 3, notified: "PR #5 comment"}], expect: "r1: culprit 01234567 (PR #5, fix/x); checks run 2, from records 3; told PR #5 comment"},
 		{call: "cron.bisectLine", args: [{of: "r1", range: ["aaaaaaaa11", "bbbbbbbb22"], ran: 0, fromRecords: 1}], expect: "r1: narrowed to aaaaaaaa bbbbbbbb; checks run 0, from records 1"},
-		{call: "cron.bisectLine", args: [{of: "r1", culprit: "0123456789ab", pr: 5, branch: "fix/x", ran: 3, fromRecords: 0, revert: "https://x/pull/9", revertState: "checked good, merged"}], expect: "r1: culprit 01234567 (PR #5, fix/x); checks run 3, from records 0; revert https://x/pull/9 checked good, merged"},
-		{call: "cron.bisectLine", args: [{of: "r1", culprit: "0123456789ab", pr: 5, branch: "fix/x", ran: 3, fromRecords: 0, revertFailed: "push refused"}], expect: "r1: culprit 01234567 (PR #5, fix/x); checks run 3, from records 0; revert not opened: push refused"},
 	]}
 }
