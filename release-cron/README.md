@@ -210,3 +210,5 @@ cases are suite `cron` of the plugins' unit cases.
 ./saytw --script tools.nu cue vet -c -t package=check ./release-cron/export
 deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- cron
 ```
+
+`deno run -A tests/unit.ts cron` runs the same cases (the runner starts the `deno test` itself); a suite with no cases fails with "no cases ran".
