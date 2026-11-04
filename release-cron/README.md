@@ -150,8 +150,9 @@ and `report` ends with them; it never reverts, never releases and never calls `r
 
 ## New-feature scenario failures do not block a release
 
-pronto's gcp release decides this, not release-cron: when only scenarios a release adds fail, it ships
-anyway and prints `new-feature scenarios failed, released anyway: a, b (absent from <commit8>, live release)`.
+pronto's gcp release decides this, not release-cron: when only scenarios a release adds fail, it releases
+on stable features and prints `released on stable features; new-feature scenarios failed: a, b (absent from <commit8>, live release)`
+(gcp.85-87 printed `new-feature scenarios failed, released anyway: a, b ...`; both are read).
 When a run's release output has that line, the run's log line and `report` name the scenarios
 (`released; new-feature scenarios failing: a, b`), and the pull request that added each is told once
 (`new-feature.jsonl`), through the same path as a bisect's culprit: a comment, and the notes file of
