@@ -247,10 +247,13 @@ export const introducedBy = (list, has, hadBefore) => hadBefore ? null : list.fi
 export const untold = (found, told) => found.filter((f) => !told.some((t) => t.scenario === f.scenario && t.pr === f.pr));
 
 // The scenarios the rehearsal's output names as flaked: `(flaked, passed on its one retry: a, b)` in its
-// per-check line, or `⚠ flaked, passed on its one retry: a, b (scenarios)` in its summary; none for other text.
+// per-check line, or `⚠ flaked, passed on its one retry: a, b (scenarios)` in its summary; and release@gcp's cloud
+// tests' `⚠ online flaked, passed on its one retry`, one name per line; none for other text.
 export const flakedNames = (text) => {
-  const names = [...(text ?? "").matchAll(/flaked, passed on its one retry: ([^()\n]+)/g)].flatMap((m) => m[1].split(",").map((x) => x.trim()).filter(Boolean));
-  return [...new Set(names)];
+  const t = text ?? "";
+  const names = [...t.matchAll(/flaked, passed on its one retry: ([^()\n]+)/g)].flatMap((m) => m[1].split(",").map((x) => x.trim()).filter(Boolean));
+  const cloud = [...t.matchAll(/^\s*⚠ (\S+) flaked, passed on its one retry\s*$/gm)].map((m) => m[1]);
+  return [...new Set([...names, ...cloud])];
 };
 
 // The merge that last changed a scenario's file: the newest of `list` (merges(), oldest first) whose diff
