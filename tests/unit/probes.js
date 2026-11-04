@@ -22,3 +22,7 @@ export const repeat = (text, n) => String(text).repeat(n);
 export const distinct = (list) => new Set(list.map((x) => JSON.stringify(x))).size;
 /** How many <dict> entries a launchd plist holds, the job's own and its environment's. */
 export const dictEntries = (plist) => (plist.match(/<dict>/g) ?? []).length;
+/** Whether two values differ, as JSON. */
+export const differs = (a, b) => JSON.stringify(a) !== JSON.stringify(b);
+/** A prod-watch run's groups as what the noise cases check: how many and which rule, in the order first seen. */
+export const verdicts = (groups) => Object.values(groups).sort((a, b) => (a.first < b.first ? -1 : a.first > b.first ? 1 : 0)).map((g) => ({ count: g.count, noise: g.noise }));
