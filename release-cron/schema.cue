@@ -23,6 +23,8 @@ releaseCron: #Cron
 	holder: *"verify@local" | string
 	// There is no per-step limit: no step is stopped for its time. A step that runs long shows in the
 	// run's log (a line every 5 minutes while it runs); its minutes are in runs.jsonl and `report`.
+	// Accepted and ignored, so an app that still sets its old step limits keeps loading; delete them.
+	minutes?: {...}
 	// What production must answer once the release is serving, each fetched from the release's domain.
 	probes: [Name=string]: #Probe
 }

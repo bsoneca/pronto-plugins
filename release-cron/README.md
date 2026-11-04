@@ -96,7 +96,7 @@ saying it is still running and how long into the run it is (confirm says what is
 each step's minutes stay in `runs.jsonl` and `report`, so the slowest phase still shows. Only the
 short calls inside prepare (`git fetch`, `gcloud describe`) keep their own hang guards of a few
 minutes; a signal (launchd's, `kill`) still stops the run's children. Because nothing ends a stuck
-run, stop it by hand (`kill <pid in <state>/lock/pid>`). There's no overall budget. Runs never overlap:
+run, stop it by hand (`kill <pid in <state>/lock/pid>`). An app's old `minutes` in release_cron.cue is still accepted but ignored; delete it. There's no overall budget. Runs never overlap:
 launchd never starts a job while it's still running, and a lock (`<state>/lock`, with the
 run's pid) skips a run started by hand while another is going.
 
