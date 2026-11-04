@@ -214,4 +214,22 @@ cases: {
 		{call: "cron.bisectLine", args: [{of: "r1", culprit: "0123456789ab", pr: 5, branch: "fix/x", ran: 2, fromRecords: 3, notified: "PR #5 comment"}], expect: "r1: culprit 01234567 (PR #5, fix/x); checks run 2, from records 3; told PR #5 comment"},
 		{call: "cron.bisectLine", args: [{of: "r1", range: ["aaaaaaaa11", "bbbbbbbb22"], ran: 0, fromRecords: 1}], expect: "r1: narrowed to aaaaaaaa bbbbbbbb; checks run 0, from records 1"},
 	]}
+	"a release line names the new-feature scenarios that failed": {suite: "cron", steps: [
+		{call: "cron.newFeatureNames", args: ["gcp: 2026-11-04T10:00:00-03:00 new-feature scenarios failed, released anyway: a, b (absent from 0123abcd, live release)"], expect: ["a", "b"]},
+		{call: "cron.newFeatureNames", args: ["new-feature scenarios failed, released anyway: solo"], expect: ["solo"], why: "no tail, one name"},
+		{call: "cron.newFeatureNames", args: ["gcp: released"], expect: []},
+		{call: "cron.newFeatureNames", args: [null], expect: []},
+	]}
+	"the merge that added a scenario is the first whose tree has it": {suite: "cron", steps: [
+		{call: "cron.introducedBy", args: [[{sha: "a", pr: 1}, {sha: "b", pr: 2}, {sha: "c", pr: 3}], {a: false, b: true, c: true}, false], expect: {sha: "b", pr: 2}},
+		{call: "cron.introducedBy", args: [[{sha: "a", pr: 1}], {a: true}, true], expect: null, why: "the last release already had it"},
+		{call: "cron.introducedBy", args: [[{sha: "a", pr: 1}], {a: false}, false], expect: null, why: "no merge has it"},
+	]}
+	"a new-feature scenario's PR is told once": {suite: "cron", steps: [
+		{call: "cron.untold", args: [[{scenario: "a", pr: 2}, {scenario: "b", pr: 3}], [{scenario: "a", pr: 2, told: "PR #2 comment"}]], expect: [{scenario: "b", pr: 3}]},
+		{call: "cron.untold", args: [[{scenario: "a", pr: 4}], [{scenario: "a", pr: 2}]], expect: [{scenario: "a", pr: 4}], why: "another PR re-adding it is told"},
+	]}
+	"a release that shipped past new-feature failures says so in its line": {suite: "cron", steps: [
+		{call: "cron.line", args: [{app: "x", started: "t", outcome: "released", steps: {release: 60}, newFailing: ["a", "b"]}], expect: "t x released; new-feature scenarios failing: a, b: 1.0 min = release 1.0"},
+	]}
 }
