@@ -241,7 +241,7 @@ if (verb === "bisect") {
     const info = (() => { try { return JSON.parse(gh("pr", "view", String(result.pr), "--json", "body,url,title").out); } catch { return { body: "", url: "", title: "" }; } })();
     const sess = sessionOf(info.body) ?? b.lead;
     const folder = `${home}/${b.notes}/${exists(`${home}/${b.notes}/${sess}`) ? sess : b.lead}`;
-    const msg = `release-cron (${app}) failed ${failed.started} on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}). Bisecting main since the last release ${green.commit.slice(0, 8)} names ${(result.culprit as string).slice(0, 8)}, PR #${result.pr} (${result.branch}) ${info.title}. ${ran} checks run, ${fromRecords} commits settled by records. If the next run fails on it too, release-cron opens a revert PR (revert/${result.pr}). Log: ${state}/runs/${failed.started}.log`;
+    const msg = `release-cron (${app}) failed ${failed.started} on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}). Bisecting main since the last release ${green.commit.slice(0, 8)} names ${(result.culprit as string).slice(0, 8)}, PR #${result.pr} (${result.branch}) ${info.title}. ${ran} checks run, ${fromRecords} commits settled by records. release-cron reverts it now (revert/${result.pr}), checks the revert and merges it when the check passes, so the next release goes out without it. Log: ${state}/runs/${failed.started}.log`;
     const told: string[] = [];
     if (gh("pr", "comment", String(result.pr), "--body", `${msg}\n\nPosted by release-cron's bisect.`).ok) told.push(`PR #${result.pr} comment`);
     try {
@@ -252,20 +252,45 @@ if (verb === "bisect") {
     sh("osascript", ["-e", `display notification ${JSON.stringify(`PR #${result.pr} (${result.branch}) broke release-cron ${app}`)} with title "release-cron bisect"`], undefined, {}, 10);
     result.notified = told.join(", ");
   }
-  // A culprit the run after the notice failed on again: a revert PR, gated like any (never merged here).
+  // A culprit is reverted at once, so a feature never holds the release: the revert is pushed and opened
+  // as a PR, checked as a bisect check is (same command, ONLY, SLOW), and merged when the check passes.
+  // Failing, it stays open: a culprit a revert cannot remove needs a person.
   if (result.culprit && result.pr && !quiet && revertDue(prior, result as { culprit: string; of: string })) {
     const branch = `revert/${result.pr}`;
+    const gh = (...a: string[]) => sh("gh", [...a, "-R", slug], undefined, {}, 120);
     try {
       if (must("git", ["--git-dir", repo, "ls-remote", "--heads", "origin", branch]).trim()) throw new Error(`${branch} already pushed`);
       if (!exists(`${bwt}/.git`)) must("git", ["--git-dir", repo, "worktree", "add", "-q", "--detach", bwt, "origin/main"]);
       must("git", ["checkout", "-q", "-f", "-B", branch, "origin/main"], bwt);
       must("git", ["clean", "-ffdq"], bwt);
       must("git", ["revert", "-m1", "--no-edit", result.culprit as string], bwt);
-      must("git", ["push", "-q", "-u", "origin", branch], bwt, {}, 120);
-      const url = must("gh", ["pr", "create", "-R", slug, "--base", "main", "--head", branch, "--title", `Revert #${result.pr}: release-cron's runs keep failing on it`,
-        "--body", `release-cron's bisect named #${result.pr} (${result.branch}, ${(result.culprit as string).slice(0, 8)}) as the commit that broke ${app}'s release, and the next run failed on it again (${failed.started}, ${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}).\n\nThis reverts its merge (\`git revert -m1\`). It merges like any pull request: when its gate passes, or it is closed with the reason when the fix lands first. release-cron does not merge it.`], undefined, {}, 120);
+      // Over HTTPS with the machine owner's own gh login (gh's credential helper: no token in argv or output).
+      must("git", ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential", "push", "-q", `https://github.com/${slug}.git`, `HEAD:refs/heads/${branch}`], bwt, {}, 120);
+      const url = must("gh", ["pr", "create", "-R", slug, "--base", "main", "--head", branch, "--title", `Revert #${result.pr}: it broke release-cron's run ${failed.started}`,
+        "--body", `release-cron's bisect named #${result.pr} (${result.branch}, ${(result.culprit as string).slice(0, 8)}) as the commit that broke ${app}'s release (run ${failed.started}, ${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}).\n\nThis reverts its merge (\`git revert -m1\`). A release is never held by a new feature: release-cron checks this revert with the failing check and merges it when the check passes; a fix re-lands the feature. If the check fails it stays open and needs a person.`], undefined, {}, 120);
       result.revert = url;
-      sh("osascript", ["-e", `display notification ${JSON.stringify(`revert PR for #${result.pr} opened`)} with title "release-cron bisect"`], undefined, {}, 10);
+      const num = url.match(/\/pull\/(\d+)/)?.[1] ?? "";
+      const revertSha = must("git", ["rev-parse", "HEAD"], bwt);
+      say(`checking the revert ${revertSha.slice(0, 8)} (${url})`);
+      const v = await check(revertSha);
+      ran++;
+      result.ran = ran;
+      if (v === "good") {
+        const merged = !!num && gh("pr", "merge", num, "--merge", "--admin").ok;
+        result.revertState = merged ? "checked good, merged" : "checked good, merge failed";
+        const note = merged ? `Merged by release-cron: the revert's check (${b.command}${sig.names.length ? `, ONLY=${sig.names.join(",")}` : ""}, SLOW=1) passed. Main moves past the failed commit and the next run releases without #${result.pr}; a fix re-lands the feature.` : `The revert's check passed but the merge failed; ${url} is left open.`;
+        gh("pr", "comment", String(result.pr), "--body", `${note} Revert: ${url}\n\nPosted by release-cron's bisect.`);
+        if (num) gh("pr", "comment", num, "--body", `${note}\n\nPosted by release-cron's bisect.`);
+      } else {
+        result.revertState = "check failed, left open";
+        const note = `The revert's check ${v === "bad" ? "failed" : "did not finish"}: this culprit cannot be removed by reverting it, so ${url} is left open and needs a person.`;
+        gh("pr", "comment", String(result.pr), "--body", `${note}\n\nPosted by release-cron's bisect.`);
+        if (num) gh("pr", "comment", num, "--body", `${note}\n\nPosted by release-cron's bisect.`);
+        const folder = `${home}/${b.notes}/${b.lead}`;
+        try { Deno.mkdirSync(folder, { recursive: true }); Deno.writeTextFileSync(`${folder}/release-cron-revert-${failed.started.replace(/[^0-9A-Za-z-]/g, "")}.md`, `# release-cron bisect\n\n${note}\n`); } catch { /* one channel less */ }
+      }
+      say(`revert ${url}: ${result.revertState}`);
+      sh("osascript", ["-e", `display notification ${JSON.stringify(`revert of #${result.pr}: ${result.revertState}`)} with title "release-cron bisect"`], undefined, {}, 10);
     } catch (e) { result.revertFailed = (e as Error).message.split("\n")[0]; }
   }
   Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify(result) + "\n", { append: true });
@@ -370,8 +395,11 @@ const end = (outcome: string, why = "", code = 0) => {
   say(l);
   // A failed run starts its bisect as it ends: its own process in its own session (launchd stops a job's
   // process group), after the machine was given back above, so it never holds release-active.
+  // Without GH_TOKEN and GITHUB_TOKEN: under CD they are the CI job's read-only token, which expires with
+  // the job, and bisect outlives it; `gh` and `git push` then use the machine owner's own gh login.
+  const bisectEnv = () => { const e = { ...Deno.env.toObject(), RELEASE_CRON_NO_BISECT: "1" }; delete e.GH_TOKEN; delete e.GITHUB_TOKEN; return e; };
   if (outcome === "failed" && run.commit && !Deno.env.get("RELEASE_CRON_NO_BISECT")) {
-    try { new Deno.Command("perl", { args: ["-e", "use POSIX; setsid(); exec @ARGV or die $!", "--", Deno.execPath(), "run", "-A", `${here}release-cron.ts`, app, "bisect"], env: { ...Deno.env.toObject(), RELEASE_CRON_NO_BISECT: "1" }, stdin: "null", stdout: "null", stderr: "null" }).spawn().unref(); } catch (e) { say(`bisect not started: ${(e as Error).message}`); }
+    try { new Deno.Command("perl", { args: ["-e", "use POSIX; setsid(); exec @ARGV or die $!", "--", Deno.execPath(), "run", "-A", `${here}release-cron.ts`, app, "bisect"], env: bisectEnv(), stdin: "null", stdout: "null", stderr: "null" }).spawn().unref(); } catch (e) { say(`bisect not started: ${(e as Error).message}`); }
   }
   // The last 50 runs' output kept.
   const logs = [...Deno.readDirSync(`${state}/runs`)].map((e) => e.name).sort();

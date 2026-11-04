@@ -116,10 +116,13 @@ releases of two apps overlap, the first run keeps it and the other takes it at i
 
 ## A failed run is bisected
 
-A run that **failed** names the commit that broke it. As it ends (after giving the machine back) it
+A run that **failed** names the commit that broke it, and its pull request is reverted at once: a
+release is never held by a new feature, and a fix re-lands the feature. The revert is checked, and
+merged when the check passes, so main moves past the failed commit and the next run releases without
+it. As it ends (after giving the machine back) it
 starts `release-cron.ts <app> bisect` as a process of its own, one at a time (`bisect/lock`), in its
 own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>]` does it by hand,
-`--dry` runs nothing, tells nobody and writes nothing, and `--no-notify` runs the checks and records them but tells nobody and opens no revert.
+`--dry` runs nothing, tells nobody and writes nothing, and `--no-notify` runs the checks and records them but tells nobody and opens no revert. Bisect is started without `GH_TOKEN` and `GITHUB_TOKEN` (under CD they are the CI job's read-only token, which expires with the job): `gh` and `git push` use the machine owner's own gh login.
 
 1. The range is the first-parent merges of `main` between the newest run that released and the
    failed run's commit. The failure's signature is its kind (`release`: release@gcp or its confirm;
@@ -139,11 +142,19 @@ own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>
    its notes folder exists, else to `bisect.lead`'s
    (`~/Library/Application Support/Claude/side-session-notes/<session>/`); a macOS notification is
    shown. Once per culprit.
-5. When a later failed run is bisected to the same culprit, a revert PR is opened: branch
-   `revert/<pr>`, `git revert -m1 <merge>` on main. It is never merged here; its gate decides.
+5. The first bisect that names a culprit pull request reverts it, once per culprit: branch
+   `revert/<pr>`, `git revert -m1 <merge>` on main, pushed over HTTPS with the owner's gh login
+   (`gh auth git-credential`; no token is printed) and opened as a PR. The revert is then checked as in
+   step 3 (`#Cron.bisect.command` in the revert's tree, same `ONLY` and `SLOW=1`, same slot handling;
+   a release failure with no scenario names is checked as a bisect check of that kind is).
+   - The check passes: the revert PR is merged (`gh pr merge --merge --admin`) and the result is
+     commented on the culprit PR and the revert PR. Main has moved past the failed commit, so the next
+     wake starts a run without the gap, and it releases without the feature.
+   - The check fails: the revert PR stays open, and the bisect log, the culprit PR's comment and the
+     lead's note say so. That culprit cannot be removed by reverting; it needs a person.
 
 Each bisect is a line of `bisect/bisects.jsonl` and a `bisect` line of `runs.jsonl` (`detail.bisect`),
-and `report` ends with them. It never releases and never calls `release@gcp`.
+and `report` ends with them; the revert (its PR and what became of it: merged, check failed, merge failed, or why it was not opened) is part of the record and of the line `report` shows. It never releases and never calls `release@gcp`.
 
 ## Install, pause, remove
 

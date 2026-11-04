@@ -220,11 +220,11 @@ export const next = (commits, known) => {
 // The author session a pull request names in its body: a Claude Desktop session id (local_<uuid>).
 export const sessionOf = (body) => (body ?? "").match(/local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)?.[0] ?? null;
 
-// A revert is due when this bisect names the culprit an earlier bisect named, for a later failed
-// run, and nothing was reverted for it yet: the run after the notice failed on the same commit.
+// A revert is due as soon as a bisect names a culprit pull request, once per culprit: nothing was
+// reverted (or tried) for it yet. A feature never holds the release.
 export const revertDue = (bisects, now) =>
-  !!now.culprit && bisects.some((b) => b.culprit === now.culprit && b.of !== now.of) && !bisects.some((b) => b.culprit === now.culprit && b.revert);
+  !!now.culprit && !bisects.some((b) => b.culprit === now.culprit && (b.revert || b.revertFailed));
 
 // The bisect's one line, for the run's detail and `report`.
 export const bisectLine = (b) =>
-  `${b.of}: ${b.culprit ? `culprit ${b.culprit.slice(0, 8)}${b.pr ? ` (PR #${b.pr}, ${b.branch})` : ""}` : b.range ? `narrowed to ${b.range.map((s) => s.slice(0, 8)).join(" ")}` : b.why ?? "undecided"}; checks run ${b.ran ?? 0}, from records ${b.fromRecords ?? 0}${b.notified ? `; told ${b.notified}` : ""}${b.revert ? `; revert ${b.revert}` : ""}`;
+  `${b.of}: ${b.culprit ? `culprit ${b.culprit.slice(0, 8)}${b.pr ? ` (PR #${b.pr}, ${b.branch})` : ""}` : b.range ? `narrowed to ${b.range.map((s) => s.slice(0, 8)).join(" ")}` : b.why ?? "undecided"}; checks run ${b.ran ?? 0}, from records ${b.fromRecords ?? 0}${b.notified ? `; told ${b.notified}` : ""}${b.revert ? `; revert ${b.revert}${b.revertState ? ` ${b.revertState}` : ""}` : ""}${b.revertFailed ? `; revert not opened: ${b.revertFailed}` : ""}`;
