@@ -30,6 +30,14 @@ export interface Settings {
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 
+/** A failed answer's body on one line: an HTML page by its <title>, else its text with the tags
+ * stripped and the whitespace collapsed, at most `max` characters. */
+export function brief(body: string, max = 120): string {
+  const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(body)?.[1];
+  const text = (title ?? body).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
 export function service(s: Settings) {
   const fetcher = s.fetcher ?? fetch;
   const origin = s.origin.replace(/\/$/, "");
@@ -69,7 +77,7 @@ export function service(s: Settings) {
     const set = s.flags ? await flagged() : s.grants ?? "[]";
     if (set === granted) return;
     const res = await asService("billing_grant", { grants: JSON.parse(set) });
-    if (!res.ok) throw new Error(`billing_grant answered ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(`billing_grant answered ${res.status}: ${brief(await res.text())}`);
     await res.body?.cancel();
     granted = set;
   }
@@ -80,7 +88,7 @@ export function service(s: Settings) {
     const res = await fetcher(`${at}/ofrep/v1/evaluate/flags/billing_grants`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ context: {} }), signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) throw new Error(`flag billing_grants answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    if (!res.ok) throw new Error(`flag billing_grants answered ${res.status}: ${brief(await res.text())}`);
     const { value } = await res.json() as { value?: unknown };
     if (typeof value !== "string" || !Array.isArray(JSON.parse(value))) throw new Error("flag billing_grants holds no list of grants");
     return value;
@@ -97,7 +105,7 @@ export function service(s: Settings) {
     const res = await asService("billing_entitle", {
       account: e.account, plan: e.plan, active: e.active, through: new Date(e.through * 1000).toISOString(), manage: e.manage, ver: e.ver,
     });
-    if (!res.ok) throw new Error(`billing_entitle answered ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(`billing_entitle answered ${res.status}: ${brief(await res.text())}`);
     await res.body?.cancel();
     return new Response(null, { status: 204 });
   }
@@ -176,14 +184,19 @@ if (import.meta.main) {
   Deno.serve({ port: Number(Deno.env.get("BILLING_PORT") ?? 8688) }, billing);
   // Until the gateway serves billing_grant, as it does once it has reloaded its schema; with
   // flags, every minute after, so a push reaches the database with no deploy.
+  let served = false;
   for (let wait = 1; ; ) {
     try {
       await billing.grant();
+      served = true;
       if (!Deno.env.get("BILLING_FLAGS")) break;
       wait = 60;
     } catch (e) {
-      console.error(`billing: grants not written: ${(e as Error).message}`);
       wait = Math.min(wait * 2, 60);
+      // Before the first success it is the startup race (the door, the gateway not ready yet): a
+      // warning that says it will retry. After one, it is real trouble.
+      if (served) console.error(`billing: grants not written: ${(e as Error).message}`);
+      else console.warn(`billing: grants not written yet, retrying in ${wait} s: ${(e as Error).message}`);
     }
     await new Promise((r) => setTimeout(r, wait * 1000));
   }

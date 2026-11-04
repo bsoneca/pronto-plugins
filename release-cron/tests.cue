@@ -13,13 +13,13 @@ inPackage:   strings.Contains(_t.files["release_cron_plugin.cue"].text, "\npacka
 heldToCron:  strings.Contains(_t.files["release_cron_plugin.cue"].text, "\nreleaseCron: #Cron\n") & true
 seedPackage: strings.HasPrefix(_t.files["release_cron.cue"].text, "package myapp\n") & true
 
-// The defaults: an hour after a release, a wake every ten minutes, each step's limit.
+// The defaults: an hour after a release, a wake every ten minutes.
 _defaults: #Cron & {watch: ["x"], probes: {}}
-defaults: {gap: _defaults.gap, poll: _defaults.poll, ready: _defaults.ready, holder: _defaults.holder, minutes: _defaults.minutes} & {gap: 60, poll: 10, ready: [], holder: "verify@local", minutes: {prepare: 5, slot: 20, rehearse: 35, release: 45, confirm: 5}}
+defaults: {gap: _defaults.gap, poll: _defaults.poll, ready: _defaults.ready, holder: _defaults.holder} & {gap: 60, poll: 10, ready: [], holder: "verify@local"}
 
-// An app may shorten the gap, widen the wake and lengthen a limit.
-_own: #Cron & {gap: 30, poll: 5, watch: ["x"], probes: {}, minutes: release: 60}
-own: {gap: _own.gap, poll: _own.poll, release: _own.minutes.release} & {gap: 30, poll: 5, release: 60}
+// An app may shorten the gap, widen the wake.
+_own: #Cron & {gap: 30, poll: 5, watch: ["x"], probes: {}}
+own: {gap: _own.gap, poll: _own.poll} & {gap: 30, poll: 5}
 
 
 // An app may name its slot holder and the services besides its own that must be ready.
@@ -27,4 +27,4 @@ _ume: #Cron & {watch: ["x"], probes: {}, ready: ["a-render"], holder: "./saytw i
 ume: {ready: _ume.ready, holder: _ume.holder} & {ready: ["a-render"], holder: "./saytw integrate@local"}
 
 // A failed run is bisected within these limits, and the lead is told when no author session is named.
-bisectDefaults: _defaults.bisect & {minutes: 120, check: 30, command: "./saytw integrate@local", lead: "local_7c6084eb-07de-487a-b8e6-689748accaaa"}
+bisectDefaults: _defaults.bisect & {command: "./saytw integrate@local", lead: "local_7c6084eb-07de-487a-b8e6-689748accaaa"}

@@ -21,31 +21,20 @@ releaseCron: #Cron
 	// app's ./saytw verify@local claims its slot as. The Ume apps' verify@local runs generate, lint and
 	// test, then `./saytw integrate@local`, which claims it.
 	holder: *"verify@local" | string
-	// Each step's limit, in minutes: a guard against a wedged step, far above what each takes
-	// (measured per run in runs.jsonl). A step that outlasts its limit is stopped and the run fails.
-	minutes: {
-		// fetch main, the run's worktree reset to it, what serves read.
-		prepare: *5 | (number & >0)
-		// verify@local waiting for its slot (tests/slot.ts): past this, the run skips and the next
-		// one asks again. A run never waits the slot queue's own two hours.
-		slot: *20 | (number & >0)
-		// verify@local from its slot to its verdict: measured 17.5 (lanes, one flake retried).
-		rehearse: *35 | (number & >0)
-		// release@gcp: measured 9.3 with the rc preview skipped, 17-18 with it; with the rehearsal
-		// in the cloud (GCP.rehearsal) it holds the rehearsal too, beside the stage.
-		release: *45 | (number & >0)
-		// production confirmed: the new revision serving, the probes below.
-		confirm: *5 | (number & >0)
-	}
+	// There is no per-step limit: no step is stopped for its time. A step that runs long shows in the
+	// run's log (a line every 5 minutes while it runs); its minutes are in runs.jsonl and `report`.
+	// Accepted and ignored, so an app that still sets its old step limits keeps loading; delete them.
+	minutes?: {...}
 	// A failed run is bisected (README.md, "A failed run is bisected"): main between the last run that
 	// released and the failing commit, by the records first, else by running the failing check on
 	// the commits left. It runs apart from the run, as a low-priority claim on the machine's slots
 	// (tests/slot.ts, waiting for release-active like any job); it never releases.
 	bisect: {
-		// The whole bisect's limit, in minutes. Past it the bisect stops and tells the range it reached.
-		minutes: *120 | (number & >0)
-		// One check's limit, in minutes (a scenarios pass takes 6-17 at SLOW=1).
-		check: *30 | (number & >0)
+		// There is no limit on the bisect or on one check: nothing is stopped for its time, a line every
+		// 5 minutes in the bisect's log says a check is still running. Accepted and ignored, so an app
+		// that still sets its old bisect limits (minutes, check) keeps loading; delete them.
+		minutes?: number
+		check?:   number
 		// The check run in a commit's tree, in the app's folder, with ONLY=<the failed scenarios>
 		// and SLOW=1 set; its exit says good or bad.
 		command: *"./saytw integrate@local" | string
