@@ -25,7 +25,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, introducedBy, untold, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole } from "./cron.js";
+import { activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole } from "./cron.js";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -523,7 +523,10 @@ try {
   }, 5000);
   // STACK_PRIORITY=release puts its claim at the head of the pool's line, ahead of every claim a
   // pull request's gate or a launch is waiting with (tests/slot.ts).
-  const gate = cloud ? { code: 0 } : await child("./saytw", ["verify@local"], dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" });
+  // The rehearsal's own output names the new-feature scenarios it passed on and the ones that flaked on their one retry.
+  let newFailing: string[] = [];
+  let flaked: string[] = [];
+  const gate = cloud ? { code: 0 } : await child("./saytw", ["verify@local"], dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
   clearInterval(look);
   // Every check passed already for this tree: the rehearsal took no slot and waited for none.
   if (!got && gate.code === 0) { got = true; step("slot"); active("rehearse"); }
@@ -531,9 +534,31 @@ try {
   if (!cloud) step("rehearse");
   if (gate.code !== 0) end("failed", `the rehearsal failed (exit ${gate.code}): nothing released`, 1);
 
+  // A scenario that flaked and passed only on the rehearsal's rerun is told to the PR that added or last changed it, once per scenario
+  // (its own ledger, apart from the new-feature one): the rerun is never a fix.
+  if (flaked.length) {
+    run.flaked = flaked;
+    try {
+      const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], wt);
+      const slug = must("git", ["--git-dir", repo, "remote", "get-url", "origin"]).replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1");
+      const ledger = `${state}/flaked.jsonl`;
+      const found = flaked.flatMap((name) => {
+        const touched = (sha: string) => sh("git", ["--git-dir", repo, "diff", "--name-only", `${sha}^1`, sha, "--", `${appRel}/tests/scenarios/${name}.cue`]).out !== "";
+        const merged = merges(must("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H %s", "-200", head]).split("\n"));
+        const c = changedBy(merged, Object.fromEntries(merged.map((m: { sha: string }) => [m.sha, touched(m.sha)])));
+        return c?.pr ? [{ scenario: name, pr: c.pr, branch: c.branch }] : [];
+      });
+      for (const f of untold(found, jsonl(ledger))) {
+        const info = prInfo(slug, f.pr);
+        const msg = `release-cron (${app}) rehearsal: the scenario ${f.scenario} (added or last changed by PR #${f.pr}, ${f.branch}) flaked, and passed only on the rehearsal's one rerun. Fix it at its cause: the rerun is never a fix. Log: ${state}/runs/${started}.log`;
+        const told = tellPr(slug, cron.bisect, f.pr, info, msg, `release-cron-flaked-${f.scenario.replace(/[^0-9A-Za-z-]/g, "")}.md`, `scenario ${f.scenario} (PR #${f.pr}) flaked in release-cron ${app}`);
+        if (told.includes("comment")) Deno.writeTextFileSync(ledger, JSON.stringify({ ...f, told, at: local(Date.now()) }) + "\n", { append: true });
+      }
+    } catch (e) { say(`flaked scenarios not told: ${(e as Error).message.split("\n")[0]}`); }
+  }
+
   // 3. The release, on the tree the rehearsal passed.
   active("release");
-  let newFailing: string[] = [];
   const rel = await child("./saytw", ["release@gcp"], dir, { ...Deno.env.toObject(), STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; });
   step("release");
   if (rel.code !== 0) end("failed", `release@gcp failed (exit ${rel.code})`, 1);
