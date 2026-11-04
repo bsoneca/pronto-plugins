@@ -7,7 +7,8 @@
 //   deno run -A release-cron/release-cron.ts <app> status      the job, the pause, the last runs
 //   deno run -A release-cron/release-cron.ts <app> report      every release measured, the newest's phases against those before
 // RELEASE_CRON_REF names the ref a run takes in place of origin/main (a branch's, to try a change to
-// this script); RELEASE_CRON_DRY=1 ends a run once it knows whether it would rehearse.
+// this script); RELEASE_CRON_DRY=1 ends a run once it knows whether it would rehearse;
+// RELEASE_CRON_NOW=1 starts the run without waiting the gap (a CD job's run for the commit it was pushed for).
 // launchd wakes it every few minutes; a wake starts a run only once the gap since the last run
 // that released or failed is over (release, wait an hour, release again). A run: main fetched into the run's own worktree; skipped when nothing the app's releaseCron
 // watches changed since the last run that released; else `./saytw verify@local`, then `./saytw release@gcp`
@@ -197,7 +198,8 @@ Deno.writeTextFileSync(`${state}/lock/pid`, String(Deno.pid));
   // After a failed run, main as the remote has it now (git ls-remote, no fetch): moved past the
   // failed commit, the run starts without the gap.
   const moved = () => { const r = sh("git", ["ls-remote", "origin", "refs/heads/main"], wt, {}, 60); return r.ok ? r.out.split(/\s/)[0] || null : null; };
-  if (!Number.isNaN(at) && !due(Date.now(), at, Number.isNaN(gap) ? 60 : gap) && !(failed && retry(failed, moved()))) {
+  // A run a CD job starts for a commit (RELEASE_CRON_NOW=1) has no gap to wait: the commit's push is its schedule.
+  if (!Deno.env.get("RELEASE_CRON_NOW") && !Number.isNaN(at) && !due(Date.now(), at, Number.isNaN(gap) ? 60 : gap) && !(failed && retry(failed, moved()))) {
     try { Deno.removeSync(`${state}/lock`, { recursive: true }); } catch { /* ours, just made */ }
     Deno.exit(0);
   }
