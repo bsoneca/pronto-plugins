@@ -276,7 +276,7 @@ if (verb === "bisect") {
       ran++;
       result.ran = ran;
       if (v === "good") {
-        const merged = !!num && gh("pr", "merge", num, "--merge", "--admin").ok;
+        const merged = !!num && gh("pr", "merge", num, "--merge", "--admin", "--match-head-commit", revertSha).ok;
         result.revertState = merged ? "checked good, merged" : "checked good, merge failed";
         const note = merged ? `Merged by release-cron: the revert's check (${b.command}${sig.names.length ? `, ONLY=${sig.names.join(",")}` : ""}, SLOW=1) passed. Main moves past the failed commit and the next run releases without #${result.pr}; a fix re-lands the feature.` : `The revert's check passed but the merge failed; ${url} is left open.`;
         gh("pr", "comment", String(result.pr), "--body", `${note} Revert: ${url}\n\nPosted by release-cron's bisect.`);
@@ -397,9 +397,9 @@ const end = (outcome: string, why = "", code = 0) => {
   // process group), after the machine was given back above, so it never holds release-active.
   // Without GH_TOKEN and GITHUB_TOKEN: under CD they are the CI job's read-only token, which expires with
   // the job, and bisect outlives it; `gh` and `git push` then use the machine owner's own gh login.
-  const bisectEnv = () => { const e = { ...Deno.env.toObject(), RELEASE_CRON_NO_BISECT: "1" }; delete e.GH_TOKEN; delete e.GITHUB_TOKEN; return e; };
+  const bisectEnv = () => { const e: Record<string, string> = { ...Deno.env.toObject(), RELEASE_CRON_NO_BISECT: "1" }; delete e.GH_TOKEN; delete e.GITHUB_TOKEN; return e; };
   if (outcome === "failed" && run.commit && !Deno.env.get("RELEASE_CRON_NO_BISECT")) {
-    try { new Deno.Command("perl", { args: ["-e", "use POSIX; setsid(); exec @ARGV or die $!", "--", Deno.execPath(), "run", "-A", `${here}release-cron.ts`, app, "bisect"], env: bisectEnv(), stdin: "null", stdout: "null", stderr: "null" }).spawn().unref(); } catch (e) { say(`bisect not started: ${(e as Error).message}`); }
+    try { new Deno.Command("perl", { args: ["-e", "use POSIX; setsid(); exec @ARGV or die $!", "--", Deno.execPath(), "run", "-A", `${here}release-cron.ts`, app, "bisect"], env: bisectEnv(), clearEnv: true, stdin: "null", stdout: "null", stderr: "null" }).spawn().unref(); } catch (e) { say(`bisect not started: ${(e as Error).message}`); }
   }
   // The last 50 runs' output kept.
   const logs = [...Deno.readDirSync(`${state}/runs`)].map((e) => e.name).sort();
