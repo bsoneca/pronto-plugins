@@ -25,7 +25,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { activeLine, base, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, introducedBy, untold, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole } from "./cron.js";
+import { activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, introducedBy, untold, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole } from "./cron.js";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -358,8 +358,8 @@ const end = (outcome: string, why = "", code = 0) => {
   const l = line(run);
   Deno.writeTextFileSync(`${state}/release-cron.log`, l + "\n", { append: true });
   Deno.writeTextFileSync(`${state}/runs.jsonl`, JSON.stringify(run) + "\n", { append: true });
-  // `last`: the end, the gap, and for a failed run the commit it failed on (retry, cron.js).
-  if (spaced(outcome)) Deno.writeTextFileSync(`${state}/last`, `${Date.now()} ${(run.gap as number | undefined) ?? 60}${outcome === "failed" && run.commit ? ` ${run.commit}` : ""}`);
+  // `last`: the end, the gap, the commit it failed on or "-" (retry, cron.js) and the commit it tried (behind, cron.js).
+  if (spaced(outcome)) Deno.writeTextFileSync(`${state}/last`, `${Date.now()} ${(run.gap as number | undefined) ?? 60} ${outcome === "failed" && run.commit ? run.commit : "-"}${run.commit ? ` ${run.commit}` : ""}`);
   say(l);
   // A failed run starts its bisect as it ends: its own process in its own session (launchd stops a job's
   // process group), after the machine was given back above, so it never holds release-active.
@@ -393,10 +393,12 @@ try { Deno.mkdirSync(`${state}/lock`); } catch {
 }
 Deno.writeTextFileSync(`${state}/lock/pid`, String(Deno.pid));
 
+const [lastAt, lastGap, lastFailed, lastTried] = (() => { try { const [a, g, f, t] = Deno.readTextFileSync(`${state}/last`).trim().split(" "); return [Number(a), Number(g), f === "-" ? undefined : f, t ?? (f === "-" ? undefined : f)]; } catch { return [NaN, NaN, undefined, undefined]; } })();
+
 // Not due: the wake ends here, with no line (it was no run). The gap is the config of the tree last
 // run, kept beside its end; the first run has none.
 {
-  const [at, gap, failed] = (() => { try { const [a, g, f] = Deno.readTextFileSync(`${state}/last`).trim().split(" "); return [Number(a), Number(g), f]; } catch { return [NaN, NaN, undefined]; } })();
+  const [at, gap, failed] = [lastAt, lastGap, lastFailed];
   // After a failed run, main as the remote has it now (git ls-remote, no fetch): moved past the
   // failed commit, the run starts without the gap.
   const moved = () => { const r = sh("git", ["ls-remote", "origin", "refs/heads/main"], wt, {}, 60); return r.ok ? r.out.split(/\s/)[0] || null : null; };
@@ -471,6 +473,12 @@ const gcloud = (args: string[], seconds = 120) => must("gcloud", [...args, "--pr
 try {
   // 1. Main, its config, the commit serving.
   head = worktree();
+  run.commit = head;
+  // Never backwards: a ref older than the commit the last run tried (CD's newest finished ci can be
+  // one, when newer runs were cancelled) would meet again what main has since fixed. Not a spaced run.
+  // A `last` from before this field names it only for a failed run: runs.jsonl has the other.
+  const tried = lastTried ?? jsonl(`${state}/runs.jsonl`).filter((x) => spaced(x.outcome)).at(-1)?.commit;
+  if (tried && behind(sh("git", ["merge-base", "--is-ancestor", head, tried], wt).ok, head, tried)) end("skipped", `${head.slice(0, 8)} is behind ${tried.slice(0, 8)}, which the last run tried`);
   // launchd runs the worktree's script, loaded before the worktree moved to main: when main changed
   // it, this run hands over to main's, which takes the lock and goes on, so a merged fix applies to
   // the next run, not the one after. RELEASE_CRON_AGAIN keeps it to one hand-over.
@@ -480,7 +488,6 @@ try {
     const again = await new Deno.Command(Deno.execPath(), { args: ["run", "-A", `${here}release-cron.ts`, ...Deno.args], env: { RELEASE_CRON_AGAIN: "1" }, stdin: "null", stdout: "inherit", stderr: "inherit" }).spawn().status;
     Deno.exit(again.code);
   }
-  run.commit = head;
   ({ gcp, cron } = config(wt));
   run.gap = cron.gap;
   before = whole(JSON.parse(gcloud(["run", "services", "describe", gcp!.service])).status?.traffic);

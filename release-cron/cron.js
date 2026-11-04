@@ -31,6 +31,11 @@ export const spaced = (outcome) => outcome === "released" || outcome === "failed
 // failed run's own would leave the app unreleased past its period. The same commit waits the gap.
 export const retry = (failed, head) => !!failed && !!head && head !== failed;
 
+// Whether a run's commit `ref` is a strict ancestor of `last`, the commit the last run (released or
+// failed) tried (`isAncestor`: git merge-base --is-ancestor ref last): the run skips, for a ref
+// older than that would meet again what main has since fixed. The same commit is not behind.
+export const behind = (isAncestor, ref, last) => !!isAncestor && !!last && ref !== last;
+
 // The files of a diff (`git diff --name-only`) under the watched paths: a path is watched when it
 // is one of them or lies beneath one.
 export const changed = (files, watch) =>
