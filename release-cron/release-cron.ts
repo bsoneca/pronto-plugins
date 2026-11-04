@@ -540,7 +540,11 @@ try {
   if (!cloud) step("rehearse");
   if (gate.code !== 0) end("failed", `the rehearsal failed (exit ${gate.code}): nothing released`, 1);
 
-  // A scenario that flaked and passed only on the rehearsal's rerun is told to the PR that added or last changed it, once per scenario
+  // 3. The release, on the tree the rehearsal passed.
+  active("release");
+  const rel = await child("./saytw", ["release@gcp"], dir, { ...Deno.env.toObject(), STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
+  step("release");
+  // A scenario that flaked and passed only on a rerun (the rehearsal's, or the cloud tests' in release@gcp) is told to the PR that added or last changed it, once per scenario
   // (its own ledger, apart from the new-feature one): the rerun is never a fix.
   if (flaked.length) {
     run.flaked = flaked;
@@ -556,17 +560,14 @@ try {
       });
       for (const f of untold(found, jsonl(ledger))) {
         const info = prInfo(slug, f.pr);
-        const msg = `release-cron (${app}) rehearsal: the scenario ${f.scenario} (added or last changed by PR #${f.pr}, ${f.branch}) flaked, and passed only on the rehearsal's one rerun. Fix it at its cause: the rerun is never a fix. Log: ${state}/runs/${started}.log`;
+        const msg = `release-cron (${app}): the scenario ${f.scenario} (added or last changed by PR #${f.pr}, ${f.branch}) flaked, and passed only on its one rerun. Fix it at its cause: the rerun is never a fix. Log: ${state}/runs/${started}.log`;
         const told = tellPr(slug, cron.bisect, f.pr, info, msg, `release-cron-flaked-${f.scenario.replace(/[^0-9A-Za-z-]/g, "")}.md`, `scenario ${f.scenario} (PR #${f.pr}) flaked in release-cron ${app}`);
         if (told.includes("comment")) Deno.writeTextFileSync(ledger, JSON.stringify({ ...f, told, at: local(Date.now()) }) + "\n", { append: true });
       }
     } catch (e) { say(`flaked scenarios not told: ${(e as Error).message.split("\n")[0]}`); }
   }
 
-  // 3. The release, on the tree the rehearsal passed.
-  active("release");
-  const rel = await child("./saytw", ["release@gcp"], dir, { ...Deno.env.toObject(), STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; });
-  step("release");
+  // (told above even when the release failed: the flakes happened)
   if (rel.code !== 0) end("failed", `release@gcp failed (exit ${rel.code})`, 1);
   // pronto's release ships when only new-feature scenarios fail: the run names them, and the PR that added each is told once.
   if (newFailing.length) {

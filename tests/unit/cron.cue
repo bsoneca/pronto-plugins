@@ -242,6 +242,8 @@ cases: {
 		{call: "cron.flakedNames", args: ["rehearse: 1011s scenarios, pass 2: passed (flaked, passed on its one retry: seek_notify, gold)"], expect: ["seek_notify", "gold"], why: "the per-check line"},
 		{call: "cron.flakedNames", args: ["  ⚠ flaked, passed on its one retry: seek_notify (scenarios)"], expect: ["seek_notify"], why: "the summary line, a name the real 15:34 BRT run flaked"},
 		{call: "cron.flakedNames", args: ["rehearse: passed (flaked, passed on its one retry: a)\n  ⚠ flaked, passed on its one retry: a, b (scenarios)"], expect: ["a", "b"], why: "both lines, once each"},
+		{call: "cron.flakedNames", args: ["✓ online (198s): accept-online-challenge\n⚠ online flaked, passed on its one retry\n✓ table-link (16s): accept-online-guest"], expect: ["online"], why: "release@gcp's rc test line, the real 19:15 BRT run's"},
+		{call: "cron.flakedNames", args: ["⚠ online flaked, passed on its one retry\n⚠ online flaked, passed on its one retry\n  ⚠ flaked, passed on its one retry: online, gold (scenarios)"], expect: ["online", "gold"], why: "the same scenario in both formats, once"},
 		{call: "cron.flakedNames", args: ["rehearse: 12s scenarios: passed"], expect: []},
 		{call: "cron.flakedNames", args: [null], expect: []},
 		{call: "cron.newFeatureNames", args: ["rehearse: released on stable features; new-feature scenarios failed: a, b (absent from 0123abcd, live release)"], expect: ["a", "b"], why: "the rehearsal's line reads as the release's"},
