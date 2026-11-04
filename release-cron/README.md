@@ -72,6 +72,10 @@ Bonk Chess (bsoneca/pronto's `apps/brawl-chess`) is the first: its `release_cron
    nothing Cloud Run runs (tests, config) keeps the revision, and the log says so: `same image,
    nothing served changed`.
 
+6. **notes**: when the revision is new and the app has [release-notes](../release-notes/README.md),
+   its GitHub Release is made (`release-notes/release-notes.ts <app> publish <revision>`). The run
+   records `notes` (`published` or `failed (exit N)`) and its outcome never changes with it.
+
 Each step's output goes to `runs/<start>.log`. Each run appends one line to `release-cron.log`
 (and the same as JSON to `runs.jsonl`). Every time a person reads there (the line, the log's name,
 the `paused` file) is Brasília's, with its offset (`cron.js`'s `local`):

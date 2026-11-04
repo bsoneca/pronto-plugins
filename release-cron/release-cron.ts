@@ -365,6 +365,15 @@ try {
   }
   step("confirm");
   if (wrong.length) end("failed", `released, production not confirmed: ${wrong.join("; ")}`, 1);
+  // 6. The release's notes (release-notes/release-notes.ts), when the app has them and the revision is new: a GitHub Release
+  // tagged <app>/<revision>. Its output is in the run's log; whatever it does, the run's outcome stays.
+  if (run.revision !== before && exists(`${dir}/release-notes/release-notes.ts`)) {
+    try {
+      const n = await child(Deno.execPath(), ["run", "-A", "release-notes/release-notes.ts", app, "publish", String(run.revision)], dir, Deno.env.toObject());
+      run.notes = n.code === 0 ? "published" : `failed (exit ${n.code})`;
+    } catch (e) { run.notes = `failed (${(e as Error).message.split("\n")[0]})`; }
+    say(`release notes ${run.notes}`);
+  }
   // A release that changed nothing Cloud Run runs (tests, config) keeps the revision: said, so it
   // does not read as a deploy that never went out.
   end("released", run.revision === before ? `same image, nothing served changed: ${before} kept` : "");

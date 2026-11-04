@@ -1,0 +1,15 @@
+#!/bin/sh
+# Adds or refreshes release-notes in a pronto app: after a release goes live, a GitHub Release on
+# the app's repo, tagged <app>/<revision> (release-notes/README.md).
+#   bin/pronto-release-notes <app-dir>
+# Writes release-notes/ (the driver and its rules), regenerated; the app keeps nothing of its own.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+shift
+[ $# -eq 0 ] || { echo "pronto-release-notes: unknown argument $1" >&2; exit 2; }
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+./saytw --script tools.nu cue export ./release-notes/export -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"

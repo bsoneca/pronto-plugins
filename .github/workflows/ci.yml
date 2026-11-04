@@ -47,6 +47,8 @@ jobs:
           sayt --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
           sayt --script tools.nu cue vet -c ./release-cron
           sayt --script tools.nu cue vet -c -t package=check ./release-cron/export
+          sayt --script tools.nu cue vet -c ./release-notes
+          sayt --script tools.nu cue vet -c ./release-notes/export
           sayt --script tools.nu cue vet -c ./runners
           sayt --script tools.nu cue vet -c -t setup=check-org ./runners/export
           sayt --script tools.nu cue vet -c ./unity
@@ -79,6 +81,12 @@ jobs:
           grep -q "the app's own" "$app/release_cron.cue"
           (cd "$app" && cue export release_cron.cue release_cron_plugin.cue -e releaseCron.gap) | grep -qx 60
           ! ./bin/pronto-release-cron "$app" nope=1
+      - name: Opt an app into release-notes
+        run: |
+          app=$(mktemp -d)/app && mkdir -p "$app" && printf 'package demo\n' > "$app/program.cue"
+          ./bin/pronto-release-notes "$app"
+          test -f "$app/release-notes/release-notes.ts" && test -f "$app/release-notes/notes.js"
+          ! ./bin/pronto-release-notes "$app" nope=1
       - name: Bind a Unity hatch, then refuse a missing module
         run: |
           app=$(mktemp -d)/app && mkdir -p "$app/unity/hatches/battle" && printf 'package demo\n' > "$app/program.cue"
@@ -117,13 +125,13 @@ jobs:
       - name: Test the identity broker
         run: deno test --no-config --allow-net identity/oidc_test.ts identity/broker
       - name: Test the billing broker
-        run: deno lint --no-config billing intents gcp release-cron runners tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
+        run: deno lint --no-config billing intents gcp release-cron release-notes runners tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
       # A script that does not parse fails only when it is run, and a release script runs rarely
       # (identity/release.nu shipped `env: [...] ++ $phone`, a record field nu cannot parse).
       - name: Parse each nushell script
         run: sayt --script tools.nu nu -c 'let bad = (glob **/*.nu | where {|f| not (nu-check $f) }); if ($bad | is-not-empty) { print $bad; exit 1 }'
       - name: Test the intents (tests/unit/*.cue)
-        run: for s in stripe billing deploy release runner identity targets cron runners; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
+        run: for s in stripe billing deploy release runner identity targets cron notes runners; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
       # flagd, the version the flags plugin pins, checked against its release's digest.
       - name: Install flagd
         env:
