@@ -51,6 +51,13 @@ _module: _ @embed(file="gcp.nu", type=text)
 			python = "\(#Tools.python)"
 			gcloud = { version = "\(#Tools.gcloud)", depends = ["python"] }
 
+			# gcloud runs on the Python pinned above, never on the virtualenv it shares with every
+			# other gcloud on the machine (~/.config/gcloud/virtenv), which another gcloud may
+			# rebuild on a Python this one crashes on (3.14: no ssl.PROTOCOL_TLSv1).
+			[env]
+			CLOUDSDK_PYTHON = { value = "python3.12", tools = true }
+			CLOUDSDK_PYTHON_SITEPACKAGES = "0"
+
 			"""
 		rules: release: {
 			// sayt's own `release` rule runs its version ceremony on the verb's
