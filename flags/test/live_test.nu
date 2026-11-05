@@ -200,5 +200,19 @@ let n5 = (object | length)
 let norun = (livex [push $app])
 check (($norun.stderr | str contains "flagsLive.runAs") and (object | length) == $n5) "no runAs: the live stage is refused"
 
+# A flag new to the live object and off: nothing flips, so no cases are asked for and none run.
+full-spec false "light"
+"flags: shy: {default: false, local: true}\n" | save -a $"($app)/flags_spec.cue"
+let n6 = (object | length)
+let ran6 = (ran | length)
+live push $app | ignore
+check ((object | length) == $n6 + 1 and (ran | length) == $ran6 and ((newest 0).data | from json | get flags | columns | any {|c| $c == "shy" })) "a new flag that is off: written with no cases run"
+
+# The cases run under the app's own saytw pin, not the SAYT_VERSION this tool runs under.
+full-spec true "light"
+open --raw $"($app)/flags_spec.cue" | str replace 'echo local $FLAG' 'echo sayt=${SAYT_VERSION:-none} local $FLAG' | save -f $"($app)/flags_spec.cue"
+let pinned = (livex [push $app --skip-live "no tester yet"] {SAYT_VERSION: "v0.0.1"})
+check ($pinned.exit_code == 0 and ((ran | last) | str starts-with "sayt=none")) "the cases don't inherit this tool's SAYT_VERSION"
+
 rm -rf $dir
 print "flags: live commands pass"
