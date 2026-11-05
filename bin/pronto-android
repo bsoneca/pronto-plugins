@@ -1,15 +1,21 @@
 #!/bin/sh
 # Adds or refreshes the Android host in a pronto app:
-#   bin/pronto-android <app-dir> [app-name] [label]
+#   bin/pronto-android <app-dir> [app-name] [label] [base-url]
 # The name defaults to the app directory's, as pronto's meta.name does.
-# The label, what the launcher and the autofill picker show, defaults to the name.
+# The label, what the launcher shows, defaults to the name. The base is where a
+# release build finds the app's cluster. An app that already drew its own phone
+# screen (android/app/src/main/assets/screen.js) stays in the vault mode; any
+# other is drawn by the terminal, omnishell's interpreter over its own screens.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 app=$(cd "$1" && pwd)
 name=${2:-$(basename "$app")}
 label=${3:-$name}
+base=${4:-https://$name.invalid}
+mode=terminal
+[ -f "$app/android/app/src/main/assets/screen.js" ] && mode=vault
 files=$(mktemp)
 trap 'rm -f "$files"' EXIT
 cd "$here"
-./saytw --script tools.nu cue export ./android/export -t "app=$name" -t "label=$label" -e files --out json > "$files"
+./saytw --script tools.nu cue export ./android/export -t "app=$name" -t "label=$label" -t "mode=$mode" -t "base=$base" -e files --out json > "$files"
 ./saytw --script tools.nu nu bin/write.nu "$files" "$app"
