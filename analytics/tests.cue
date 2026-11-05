@@ -16,7 +16,10 @@ _a: #Analytics & {
 		business_signups_total: {type: "counter", help: "Accounts made.", labels: [], select: "SELECT count(*) AS value FROM users"}
 		business_logins: {help: "Logins by provider.", labels: ["provider"], needs: ["identity_link"], select: "SELECT provider, count(*) AS value FROM identity_link GROUP BY provider"}
 	}
-	rows: [{title: "Orders", panels: [{title: "Orders", expr: "business_orders{app=\"$app\"}"}, {title: "Signups a day", kind: "timeseries", w: 18, expr: "increase(business_signups_total{app=\"$app\"}[1d])"}]}]
+	rows: [{title: "Orders", panels: [{title: "Orders", expr: "business_orders{app=\"$app\"}"}, {title: "Signups a day", kind: "timeseries", w: 18, expr: "increase(business_signups_total{app=\"$app\"}[1d])"}]}, {title: "Orders a day", panels: [
+		{title: "By state", kind: "barchart", x: "state", series: "provider", stack: true, expr: "business_orders{app=\"$app\"}"},
+		{title: "Plain", kind: "barchart", x: "day", series: "mode", expr: "business_orders{app=\"$app\"}"},
+	]}]
 }
 
 // The views: one a metric, the app first, in the analytics schema, read by a role that sees
@@ -52,8 +55,22 @@ startTimeRef: [for m in _p.metrics {m.query_ref}] & [for q in _p.queries {q.quer
 
 // The dashboard: an app variable, a row a group of panels, laid left to right.
 dashApp: [for t in _a.dashboard.templating.list if t.name == "app" {t.query}] & ["label_values(business_accounts, app)"]
-rowThenPanels: [for p in _a.dashboard.panels {p.type}] & ["row", "stat", "timeseries"]
+rowThenPanels: [for p in _a.dashboard.panels {p.type}] & ["row", "stat", "timeseries", "row", "barchart", "barchart"]
 secondPanelRight: _a.dashboard.panels[2].gridPos & {x: 6, y: 1, w: 18, h: 5}
+
+// A barchart reads an instant table, sorted by its axis then pivoted by its split; it stacks only
+// when asked.
+_bar: _a.dashboard.panels[4]
+_plain: _a.dashboard.panels[5]
+barchartTarget: _bar.targets & [{refId: "A", expr: "business_orders{app=\"$app\"}", legendFormat: "", format: "table", instant: true}]
+barchartSorted: _bar.transformations[0] & {id: "sortBy", options: {sort: [{field: "state"}]}}
+barchartMatrix: _bar.transformations[1] & {id: "groupingToMatrix", options: {rowField: "state", columnField: "provider", valueField: "Value", emptyValue: "zero"}}
+barchartTwoSteps: len(_bar.transformations) & 2
+barchartStacked: _bar.options.stacking & "normal"
+barchartUnstacked: _plain.options.stacking & "none"
+barchartOptions: _plain.options & {xTickLabelRotation: -45, legend: {displayMode: "list", placement: "bottom", showLegend: true}, showValue: "auto"}
+barchartOwnLabels: _plain.transformations[1].options & {rowField: "day", columnField: "mode"}
+statHasNoTable: _a.dashboard.panels[1].targets & [{refId: "A", expr: "business_orders{app=\"$app\"}", legendFormat: ""}]
 dashUid: _a.dashboard.uid & "business-shop"
 
 // Names: every metric starts `business_`; a journey's or perf's is no business metric; a counter

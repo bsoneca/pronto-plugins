@@ -57,11 +57,21 @@ import (
 // variable is `$app`.
 #AnalyticsPanel: {
 	title!:      string & !=""
-	kind:        *"stat" | "timeseries" | "table" | "bargauge"
+	kind:        *"stat" | "timeseries" | "table" | "bargauge" | "barchart"
 	expr!:       string & !=""
 	unit:        *"short" | string
 	legend:      *"" | string
 	description: *"" | string
+	// A barchart reads an instant query as a table: one bar a value of the label `x` (a day, say),
+	// each bar split by the label `series` (a mode), stacked when `stack`. A chart with no
+	// axis or no split has nothing to draw, so a barchart names both.
+	x?:      #AnalyticsLabel
+	series?: #AnalyticsLabel
+	stack:   *false | bool
+	if kind == "barchart" {
+		x!:      #AnalyticsLabel
+		series!: #AnalyticsLabel
+	}
 	// Width out of 24, and height in grid rows.
 	w: *6 | int & >=3 & <=24
 	h: *5 | int & >=3
@@ -248,8 +258,22 @@ import (
 						description: p.description
 						gridPos: {x: mod(before, 24), y: _top[ri] + 1 + div(before, 24)*_rowH[ri], w: p.w, h: p.h}
 						fieldConfig: defaults: {unit: p.unit, noValue: "no data"}
-						targets: [{refId: "A", expr: p.expr, legendFormat: p.legend, if p.kind == "table" {format: "table", instant: true}}]
+						targets: [{refId: "A", expr: p.expr, legendFormat: p.legend, if p.kind == "table" || p.kind == "barchart" {format: "table", instant: true}}]
 						if p.kind == "stat" {options: {reduceOptions: {calcs: ["lastNotNull"]}}}
+						// Grafana pivots the table into one column a series: sorted by the axis, the
+						// missing cells zero so a bar is not skipped.
+						if p.kind == "barchart" {
+							transformations: [
+								{id: "sortBy", options: {sort: [{field: p.x}]}},
+								{id: "groupingToMatrix", options: {rowField: p.x, columnField: p.series, valueField: "Value", emptyValue: "zero"}},
+							]
+							options: {
+								stacking: [if p.stack {"normal"}, "none"][0]
+								xTickLabelRotation: -45
+								legend: {displayMode: "list", placement: "bottom", showLegend: true}
+								showValue: "auto"
+							}
+						}
 					}
 				}]])
 		}])

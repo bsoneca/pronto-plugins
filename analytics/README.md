@@ -30,7 +30,8 @@ From one spec (`analytics_spec.cue`: each metric's name, help, labels and SQL, a
   production it runs as a Cloud Run service whose Managed Service for Prometheus sidecar scrapes it
   (pronto-infra's state, not the app's release); on a host launch it is a process of the stack.
 - **A dashboard** (`observability/analytics.business.dashboard.json`): rows of panels with an `app`
-  variable, for the shared Grafana.
+  variable, for the shared Grafana. A panel's `kind` is `stat`, `timeseries`, `table`, `bargauge` or
+  `barchart` (bars along the label `x`, split by `series`, stacked with `stack: true`).
 - **Umami** for visits and referrers, cookieless: the door routes `/a/s.js` (the tracker) and `/a/e`
   (its events) to Umami, so the page's policy (`script-src` and `connect-src 'self'`, Trusted Types) is
   unchanged, and a host-DOM hatch on every screen adds the tracker, unless the browser sends Global
