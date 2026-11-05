@@ -52,6 +52,25 @@ Deno.test("accounts need a local value, and an account id is a token's sub", asy
   }
 });
 
+Deno.test("a flip's cases: the testers, the production address and the commands are checked; a spec with none exports as before", async () => {
+  const dir = await app(SPEC);
+  const before = await cue(dir, "flagd.document");
+  await Deno.writeTextFile(`${dir}/flags_spec.cue`, `package shop\n${SPEC}
+flagsLive: {url: "https://shop.example", testers: ["tester-1"]}
+flagsCases: {local: "sh local.sh", live: "sh live.sh"}
+`);
+  eq(await cue(dir, "flagd.document"), before, "the flags' document is the same");
+  eq(await cue(dir, "flagsLive.testers"), ["tester-1"], "the testers");
+  eq(await cue(dir, "flagsCases"), { local: "sh local.sh", live: "sh live.sh" }, "the commands");
+  for (const bad of [`flagsLive: testers: ["no spaces"]`, `flagsLive: url: "http://insecure.example"`, `flagsCases: other: "x"`]) {
+    await Deno.writeTextFile(`${dir}/flags_spec.cue`, `package shop\n${SPEC}\n${bad}\n`);
+    let refused = false;
+    try { await cue(dir, "flagd.document"); await cue(dir, "flagsCases"); } catch { refused = true; }
+    eq(refused, true, bad);
+  }
+  await Deno.remove(dir, { recursive: true });
+});
+
 const flagd = Deno.env.get("FLAGD");
 Deno.test({ name: "flagd serves the live source over the baked file, by account and host, and follows its edits", ignore: !flagd, async fn() {
   const dir = await app(SPEC);

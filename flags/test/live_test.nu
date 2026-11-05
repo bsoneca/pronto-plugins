@@ -25,10 +25,13 @@ GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\",
 " | save -f $"($app)/flags_spec.cue"
 }
 
-def live [...args] {
-	let r = (with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state} {
+def livex [args: list<string>, extra: record = {}] {
+	with-env ({SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state, FLAGS_OFREP_CMD: $"python3 ($here)/fake_ofrep.py", FLAGS_POLL_SEC: "0.01", FLAGS_WAIT_SEC: "0.1"} | merge $extra) {
 		^$nu.current-exe $"($here)/../live.nu" ...$args | complete
-	})
+	}
+}
+def --wrapped live [...args] {
+	let r = (livex $args)
 	if $r.exit_code != 0 { error make {msg: $"live.nu ($args | str join ' '): ($r.stderr | str trim)"} }
 	$r.stdout
 }
@@ -81,8 +84,90 @@ GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\",
 let plain = (live show $app)
 check (($plain | str contains "premium") and ($plain | str contains "theme")) "show: a flag local alone, and one with no targeting"
 let before = (object | length)
-let pushed = (live push $app)
-check ((object | length) == $before + 1 and ($pushed | str contains "theme")) "push: written, then summarized"
+let refused = (livex [push $app])
+check ($refused.exit_code != 0 and ($refused.stderr | str contains "no cases") and (object | length) == $before) "push: a new flag with no cases is refused, and nothing is written"
+let pushed = (live push $app --untested "a theme is no feature")
+check ((object | length) == $before + 1 and ($pushed | str contains "theme")) "push --untested: written, then summarized"
+check ((object | first).metadata.cases == "untested" and ((object | first).metadata.note | str contains "a theme is no feature")) "push --untested: the reason is kept on the version"
+
+# A flip runs its flag's cases: at hand, then on production for the testers alone, then for everyone.
+def full-spec [premium: bool, theme: string] {
+	$"package shop
+flags: premium: {default: ($premium), local: true}
+flags: theme: {default: \"($theme)\"}
+flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", url: \"https://shop.example\", testers: [\"tester-1\"]}
+flagsCases: {
+	local: \"echo local $FLAG $ONLY $UNIT_ONLY $SLOW >> ran.log; test ! -f fail-local\"
+	live:  \"echo live $FLAG $ONLY $APP_URL $FLAGS_TESTER >> ran.log; test ! -f fail-live\"
+}
+GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
+" | save -f $"($app)/flags_spec.cue"
+}
+mkdir $"($app)/tests/scenarios" $"($app)/tests/unit"
+'package scenarios
+scenarios: buy: {flags: ["premium"], production: true, steps: [{by: "tester", open: "/"}]}
+scenarios: shelf: {steps: [{by: "lia", flag: "premium"}, {by: "lia", open: "/"}]}
+scenarios: unrelated: {flags: ["theme-x"], steps: [{by: "lia", open: "/"}]}
+' | save $"($app)/tests/scenarios/shop.cue"
+'package unit
+cases: price: {flags: ["premium"], steps: [{call: "price"}]}
+' | save $"($app)/tests/unit/shop.cue"
+def ran [] { if ($"($app)/ran.log" | path exists) { open --raw $"($app)/ran.log" | lines } else { [] } }
+def newest [n: int] { object | get $n }
+
+let found = (live cases $app premium)
+check (($found | str contains "buy") and ($found | str contains "shelf") and ($found | str contains "price") and not ($found | str contains "unrelated")) "cases: a flag's scenarios (flags, or a step's flag) and unit cases"
+let none = (live cases $app theme)
+check (not ($none | str contains "buy")) "cases: a flag nothing names has none"
+
+full-spec true "light"
+let n0 = (object | length)
+let launched = (live push $app)
+check ((object | length) == $n0 + 2) "flip: the canary and then the final version are written"
+check ((newest 1).metadata.stage == "testers" and (newest 1).metadata.flag == "premium") "flip: the canary says its stage and flag"
+let canary = (premium (newest 1))
+check ($canary.targeting.if.0.in.1 == ["tester-1"] and $canary.targeting.if.1 == "new" and $canary.variants.new == true and $canary.variants.old == false) "flip: the canary is on for the testers alone"
+check ((newest 0).metadata.stage == "all" and (newest 0).metadata.cases == "passed" and (newest 0).metadata.flag == "premium") "flip: the final version is for all, cases passed"
+check ((premium (newest 0)).variants.default == true) "flip: the final version holds the new value"
+check ((ran) == ["local premium buy,shelf price 1" "live premium buy https://shop.example tester-1"]) "flip: the cases ran at hand, slowed, then the production ones as the tester"
+let hist = (with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state} {
+	^$nu.current-exe -c $"use ($here)/../live.nu history; history ($app) | to json" | complete
+}).stdout | from json
+check ($hist.0.stage == "all" and $hist.0.cases == "passed" and $hist.1.stage == "testers") "history: the stage and the verdict of each version"
+
+# Local failure: nothing is written.
+full-spec false "light"
+touch $"($app)/fail-local"
+let n1 = (object | length)
+let lf = (livex [push $app])
+check ($lf.exit_code != 0 and (object | length) == $n1 and ($lf.stderr | str contains "failed at hand")) "local failure: refused, nothing written"
+rm $"($app)/fail-local"
+
+# Live failure: back to the version read before the canary.
+touch $"($app)/fail-live"
+let pre = (premium (newest 0))
+let lv = (livex [push $app])
+check ($lv.exit_code != 0 and ($lv.stderr | str contains "rolled back")) "live failure: the push fails"
+check ((object | length) == $n1 + 2 and (premium (newest 0)) == $pre and (newest 0).metadata.stage == "rolled-back" and (newest 1).metadata.stage == "testers") "live failure: the pre-canary flags are the newest version again"
+rm $"($app)/fail-live"
+
+# An OFREP that never answers the new value: back as well.
+let n2 = (object | length)
+let st = (livex [push $app] {FAKE_OFREP_STALE: "1"})
+check ($st.exit_code != 0 and ($st.stderr | str contains "did not answer") and (premium (newest 0)) == $pre and (object | length) == $n2 + 2) "OFREP timeout: rolled back"
+
+# No change to a default value: no cases needed, and none run.
+full-spec true "light"
+let n3 = (object | length)
+let ran3 = (ran | length)
+live push $app | ignore
+check ((object | length) == $n3 + 1 and (ran | length) == $ran3 and (newest 0).metadata.stage == "all") "unchanged defaults: written with no cases run"
+
+# --skip-live: the cases at hand only, and the reason kept.
+full-spec false "light"
+let n4 = (object | length)
+live push $app --skip-live "no tester yet" | ignore
+check ((object | length) == $n4 + 1 and (newest 0).metadata.cases == "local-only" and ((newest 0).metadata.note | str contains "no tester yet") and ((ran | last) | str starts-with "local")) "--skip-live: no canary, the reason kept"
 
 rm -rf $dir
 print "flags: live commands pass"

@@ -54,6 +54,11 @@ elif a[:3] == ["storage", "objects", "describe"]:
     if not v:
         fail(f"{url} not found: 404.")
     print(v["generation"])
+elif a[:2] == ["storage", "cat"]:
+    v = live(a[2])
+    if not v:
+        fail(f"{a[2]} not found: 404.")
+    print(v["data"])
 elif a[:2] == ["storage", "cp"]:
     src, dst = a[2], a[3]
     if src.startswith("gs://"):
@@ -61,7 +66,10 @@ elif a[:2] == ["storage", "cp"]:
         found = [v for v in versions(url) if v["generation"] == gen]
         if not found:
             fail(f"{src} not found: 404.")
-        data, metadata = found[0]["data"], found[0]["metadata"]
+        data, metadata = found[0]["data"], dict(found[0]["metadata"])
+        custom = opt("custom-metadata")
+        if custom:
+            metadata.update(kv.split("=", 1) for kv in custom.split(","))
     else:
         data = open(src).read()
         custom = opt("custom-metadata")
