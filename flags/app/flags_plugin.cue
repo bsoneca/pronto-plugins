@@ -90,7 +90,28 @@ flagsLive?: {
 	bucket!:  =~"^[a-z0-9][a-z0-9_.-]{1,61}[a-z0-9]$"
 	object:   *"flags.json" | =~"^[A-Za-z0-9_./-]+\\.json$"
 	sources:  "[{\"uri\":\"gs://\(bucket)/\(object)\",\"provider\":\"gcs\"}]"
+	// Production's address, where a flip's live cases run (`flagsCases.live`) and where
+	// `push` waits for OFREP to answer the tester's value before it runs them.
+	url?: =~"^https://[a-z0-9][a-z0-9.-]*[a-z0-9](:[0-9]+)?$"
+	// The production accounts tests sign in as, and no one else: a flip is first on for
+	// them alone, so its cases run on production while everyone else still reads the old
+	// value. Ids as `accounts` has them. The first is the one `FLAGS_TESTER` names.
+	testers?: [...string & =~"^[A-Za-z0-9_-]{1,64}$"]
 }
+
+// The app's commands for a flip's cases (`pronto-flags push`), each run with `sh -c` in the
+// app's folder. `local` runs at hand with the settings a release has: env `FLAG` (the flag),
+// `ONLY` (its scenarios' ids, comma-separated), `UNIT_ONLY` (its unit cases' names, the same)
+// and `SLOW=1`. `live` runs against production once the flag is on for the testers alone: env
+// `FLAG`, `ONLY` (the flag's scenarios marked `production`), `APP_URL` (flagsLive.url) and
+// `FLAGS_TESTER` (the first of flagsLive.testers). Either fails with a non-zero exit. A flag's
+// cases are the scenarios (tests/scenarios/*.cue) and unit cases (tests/unit/*.cue) that name
+// it in `flags`, or in a step's `flag`; `pronto-flags cases <app-dir> [flag]` lists them.
+#FlagsCases: {
+	local?: string
+	live?:  string
+}
+flagsCases?: #FlagsCases
 
 code: capabilities: hatches: flagd: {
 	kind: "container"

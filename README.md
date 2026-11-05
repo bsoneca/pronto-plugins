@@ -544,7 +544,8 @@ flagsLive: {project: "my-project", bucket: "my-project-flags"}
 
 ```sh
 <this repo>/bin/pronto-flags setup <app-dir>               # once: the bucket, its readers, the first push
-<this repo>/bin/pronto-flags push <app-dir>                # the flags as flags_spec.cue says them now
+<this repo>/bin/pronto-flags push <app-dir>                # the flags as flags_spec.cue says them now, once a changed flag's cases pass
+<this repo>/bin/pronto-flags cases <app-dir> [flag]        # the cases a flip runs (below)
 <this repo>/bin/pronto-flags history <app-dir>             # every version, newest first: when, by whom, from which commit
 <this repo>/bin/pronto-flags rollback <app-dir> [version]  # the version before the live one, or the one named
 <this repo>/bin/pronto-flags show <app-dir>                # what a push would write, and where: nothing written
@@ -562,6 +563,53 @@ spelled out as `cue export -e flagsLive.sources` prints it, since a release
 reads `release.cue` alone; `GCP: sidecars: flagd: env: FLAGD_SOURCES: flagsLive.sources`
 in `flags_spec.cue` makes lint fail if the two part. A page reads a change on
 its next load.
+
+### A flip runs its cases
+
+A flag's value can break what it turns on, and a push runs no release check. So
+a push that changes a flag's default value, or adds a flag, runs that flag's
+cases before the flag is on for everyone, and `rollback` stays the fast way out
+(it runs no cases):
+
+```cue
+flagsLive: {url: "https://shop.example", testers: ["<a production account only tests sign in as>"]}
+flagsCases: {
+	local: "deno run -A tests/flip.ts"  // at hand; env FLAG, ONLY, UNIT_ONLY, SLOW=1
+	live:  "deno run -A tests/flip.ts"  // on production; env FLAG, ONLY, APP_URL, FLAGS_TESTER
+}
+```
+
+A flag's cases are the scenarios (`tests/scenarios/*.cue`) and unit cases
+(`tests/unit/*.cue`) that name it in `flags: ["<flag>"]`, or in a step's `flag`;
+`pronto-flags cases <app-dir> [flag]` lists them. An app with neither folder has
+no cases. `pronto-flags push <app-dir>` then:
+
+1. reads the live object and finds the flags whose default value moves; a flag
+   with no cases is refused, or pushed with `--untested "<why>"`, loudly;
+2. runs `flagsCases.local` for each, at hand with the settings a release has,
+   and slowed (`SLOW=1`); a failure stops the push, with nothing written;
+3. writes the flag on for `flagsLive.testers` alone and the old value for
+   everyone else (version metadata `stage=testers`), and waits until OFREP at
+   `flagsLive.url` answers the tester's key the new value and no key the old
+   one (every 2 s, 90 s at most);
+4. runs `flagsCases.live` against production, as the first tester, with the
+   flag's `production` scenarios; a failure, or an OFREP that never answers,
+   writes the version read before the canary again as the newest, prints the
+   report and exits non-zero;
+5. writes the flags as the spec says them (`stage=all`, `cases=passed`).
+
+`--skip-live "<why>"` leaves out 3 and 4, for an app with no testers yet. Both
+reasons are kept on the version, and `pronto-flags history` shows each version's
+stage, flag, cases verdict and reason.
+
+What runs on production is held narrow. Only scenarios marked `production: true`
+run there, and the scenario schema allows one actor, who signs in as the tester
+and never signs up, no payment step (`pay`), no other player and no move,
+table or game, and only GET requests. They run as the tester alone, whose
+passkey credential lives in Secret Manager and is imported into the virtual
+authenticator: no real player's data is touched, nothing is bought, and nothing
+shows in the lobby. The runner refuses a scenario that isn't marked `production`
+against the host `flagsLive.url` names.
 
 ### An app
 

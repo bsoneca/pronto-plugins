@@ -3,14 +3,16 @@
 #   bin/pronto-flags <app-dir>
 # Or changes the released app's live flags, with no deploy (flags/live.nu):
 #   bin/pronto-flags setup <app-dir>               # once: the bucket, its readers, the first push
-#   bin/pronto-flags push <app-dir>                # the flags as flags_spec.cue says them now
+#   bin/pronto-flags push <app-dir> [--untested "<why>"] [--skip-live "<why>"]
+#                                                  # the flags as flags_spec.cue says them now, once a changed flag's cases pass
+#   bin/pronto-flags cases <app-dir> [flag]        # the cases a flip of each flag (or the one) runs
 #   bin/pronto-flags history <app-dir>             # every version, newest first
 #   bin/pronto-flags rollback <app-dir> [version]  # the version before the live one, or the one named
 #   bin/pronto-flags show <app-dir>                # what a push would write, and where: nothing written
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 case "${1:-}" in
-setup|push|history|rollback|show)
+setup|push|history|rollback|show|cases)
 	cmd=$1
 	app=$(cd "$2" && pwd)
 	shift 2

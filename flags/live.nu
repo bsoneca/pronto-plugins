@@ -5,11 +5,13 @@
 # the app's CUE as generate writes flags/flags.json. Every push is a version of
 # the object, kept: the history, and what a rollback restores.
 #   bin/pronto-flags setup <app-dir>               # the bucket, its readers, the first push
-#   bin/pronto-flags push <app-dir>                # the flags as flags_spec.cue says them now
+#   bin/pronto-flags push <app-dir>                # the flags as flags_spec.cue says them now, once their cases pass
+#   bin/pronto-flags cases <app-dir> [flag]        # the cases a flip of each flag (or the one) runs
 #   bin/pronto-flags history <app-dir>             # every version, newest first
 #   bin/pronto-flags rollback <app-dir> [version]  # the version before the live one, or the one named
 #   bin/pronto-flags show <app-dir>                # what a push would write, and where: nothing written
 # Each runs as the operator's own gcloud login.
+# A push that changes a flag's default value runs that flag's cases first (see `push`).
 
 # gcloud on the Python pinned beside it, never on the virtualenv it shares with every other gcloud
 # on the machine (~/.config/gcloud/virtenv): another gcloud rebuilds that on its own Python, and a
@@ -32,7 +34,7 @@ def --wrapped exists [...args]: nothing -> bool {
 def cue-of [app: path, expr: string] {
 	let r = (do { cd $app; ^$env.SAYT_MISE_BIN exec -- cue export . -e $expr --out json } | complete)
 	if $r.exit_code != 0 {
-		if ($r.stderr | str contains "not found") or ($r.stderr | str contains "undefined field") { return null }
+		if ($r.stderr | str contains "not found") or ($r.stderr | str contains "undefined field") or ($r.stderr | str contains "optional field") { return null }
 		error make {msg: $"cue export -e ($expr) in ($app): ($r.stderr | str trim)"}
 	}
 	$r.stdout | from json
@@ -41,7 +43,8 @@ def cue-of [app: path, expr: string] {
 def live [app: path] {
 	let at = (cue-of $app flagsLive)
 	if $at == null { error make {msg: $"($app)'s flags_spec.cue names no flagsLive: say `flagsLive: {project: \"…\", bucket: \"…\"}` there"} }
-	$at | insert url $"gs://($at.bucket)/($at.object)"
+	# `url` is the object's; flagsLive.url, production's address, is `site`.
+	$at | upsert site ($at.url? | default null) | upsert testers ($at.testers? | default []) | upsert url $"gs://($at.bucket)/($at.object)"
 }
 
 # The live object's generation, or 0 where there is none yet: a push writes only over the one it read.
@@ -61,17 +64,20 @@ def provenance [app: path] {
 	{who: $who, commit: ($commit + (if ($dirty | is-empty) { "" } else { "+edits" }))}
 }
 
-def write-flags [at: record, doc: record, app: path] {
+# --meta: more of what the version keeps (meta-of); --from: the generation the write is over, when
+# an earlier step of the same push read it. The new generation is returned.
+def write-flags [at: record, doc: record, app: path, --meta: string = "", --from: string = ""]: nothing -> string {
 	if not ($doc.flags? | describe | str starts-with "record") { error make {msg: "flagd.document has no flags"} }
-	let from = (generation $at.url)
+	let from = if $from == "" { generation $at.url } else { $from }
 	let file = (mktemp -t --suffix .json)
 	$doc | to json --indent 2 | save -f $file
 	let p = (provenance $app)
-	gc storage cp $file $at.url $"--if-generation-match=($from)" --content-type application/json --cache-control no-store $"--custom-metadata=pushed-by=($p.who),commit=($p.commit)" | ignore
+	gc storage cp $file $at.url $"--if-generation-match=($from)" --content-type application/json --cache-control no-store $"--custom-metadata=pushed-by=($p.who),commit=($p.commit)($meta)" | ignore
 	rm $file
 	let now = (generation $at.url)
 	print $"flags: ($at.url) is version ($now) \(was ($from)\); flagd reads it within seconds, and a page on its next load"
 	summary $doc | print
+	$now
 }
 
 # The accounts a flag names: its targeting's second test (flags_plugin.cue), where it has one.
@@ -98,8 +104,196 @@ export def show [app: path] {
 	summary (cue-of $app flagd.document) | print
 }
 
-export def push [app: path] {
-	write-flags (live $app) (cue-of $app flagd.document) $app
+# The flags as the spec says them, written with no cases: the first push of `setup`.
+def push-plain [app: path] {
+	write-flags (live $app) (cue-of $app flagd.document) $app | ignore
+}
+
+# ---- A flip runs its flag's cases (flags_plugin.cue: flagsCases, flagsLive.testers) ----
+
+# An expression of the CUE package in one of the app's folders (tests/scenarios, tests/unit); null where
+# the app has no such folder or the expression is not there.
+def cue-dir [app: path, dir: string, expr: string] {
+	if not ($app | path join $dir | path exists) { return null }
+	let r = (do { cd $app; ^$env.SAYT_MISE_BIN exec -- cue export $"./($dir)" -e $expr --out json } | complete)
+	if $r.exit_code != 0 {
+		if ($r.stderr | str contains "undefined field") or ($r.stderr | str contains "not found") { return null }
+		error make {msg: $"cue export ./($dir) -e ($expr) in ($app): ($r.stderr | str trim)"}
+	}
+	$r.stdout | from json
+}
+
+def entries [r: any]: nothing -> list<any> {
+	if ($r == null) or ($r | is-empty) { [] } else { $r | transpose id v | each {|e| $e } }
+}
+
+# A flag's default value: the one its default variant holds; null where there is no such flag.
+def default-of [def: any] {
+	if $def == null { return null }
+	$def.variants? | default {} | get -o ($def.defaultVariant? | default "default")
+}
+
+# The flags a push changes: new ones, and those whose default value moves.
+def changed-flags [old: record, doc: record]: nothing -> list<string> {
+	$doc.flags | transpose f def | where {|r| (default-of ($old.flags | get -o $r.f)) != (default-of $r.def) } | each {|r| $r.f }
+}
+
+# A flag's cases: the scenarios (tests/scenarios/*.cue) that name it in `flags` or a step's `flag`,
+# which of them are marked `production`, and the unit cases (tests/unit/*.cue) that name it.
+def cases-of [app: path, flag: string] {
+	let scen = (entries (cue-dir $app tests/scenarios scenarios) | where {|e|
+		let named = ($e.v.flags? | default []) | append ($e.v.steps? | default [] | each {|st| $st.flag? | default null } | compact)
+		$flag in $named
+	})
+	let unit = (entries (cue-dir $app tests/unit cases) | where {|e| $flag in ($e.v.flags? | default []) })
+	{flag: $flag, scenarios: ($scen | each {|e| $e.id }), production: ($scen | where {|e| ($e.v.production? | default false) == true } | each {|e| $e.id }), unit: ($unit | each {|e| $e.id })}
+}
+def has-cases [c: record]: nothing -> bool { ($c.scenarios | is-not-empty) or ($c.unit | is-not-empty) }
+
+export def cases [app: path, flag?: string] {
+	let names = if $flag != null { [$flag] } else { cue-of $app flagd.document | get flags | columns }
+	$names | each {|f| cases-of $app $f }
+}
+
+# What a version keeps beyond who and which commit: ",key=value" pairs, which gcloud splits at commas.
+def meta-of [m: record]: nothing -> string {
+	$m | items {|k, v| $",($k)=($v | into string | str replace -a -r '[,=\n]' ' ')" } | str join
+}
+
+# The app's command, run with sh in its folder with the env given; ok and what it printed.
+def run-cases [app: path, cmd: string, vars: record] {
+	let r = (do { cd $app; with-env $vars { ^sh -c $cmd } } | complete)
+	{ok: ($r.exit_code == 0), out: ($r.stdout + $r.stderr | str trim)}
+}
+
+# The live document with each flag in `flags` at its old value for everyone and its new one for the
+# testers: variants {old, new} beside the ones it had, and the testers' test first in its targeting.
+def canary-doc [old: record, doc: record, flags: list<string>, testers: list<string>]: nothing -> record {
+	$flags | reduce -f $old {|f, acc|
+		let o = ($old.flags | get -o $f | default {})
+		let new = (default-of ($doc.flags | get $f))
+		# A flag the live object doesn't have yet reads as off, or as itself where it isn't a bool.
+		let was = if ($o | is-empty) { if ($new | describe) == "bool" { false } else { $new } } else { default-of $o }
+		let rest = if ($o.targeting? | describe | str starts-with "record") { $o.targeting } else { "old" }
+		let def = {
+			state: "ENABLED"
+			variants: (($o.variants? | default {}) | merge {old: $was, new: $new})
+			defaultVariant: ($o.defaultVariant? | default "old")
+			targeting: {"if": [{"in": [{"var": "targetingKey"}, $testers]}, "new", $rest]}
+		}
+		$acc | upsert flags ($acc.flags | upsert $f $def)
+	}
+}
+
+# What OFREP at `site` answers for a flag and a targetingKey (none: no context); null where it doesn't answer.
+# FLAGS_OFREP_CMD stands in for the request in tests: an sh command printing the reply, given
+# OFREP_URL, FLAG and TARGETING_KEY.
+def ofrep-ask [site: string, flag: string, key: any] {
+	let cmd = ($env.FLAGS_OFREP_CMD? | default "")
+	try {
+		if $cmd != "" {
+			let r = (with-env {OFREP_URL: $site, FLAG: $flag, TARGETING_KEY: ($key | default "")} { ^sh -c $cmd } | from json)
+			$r.value?
+		} else {
+			let ctx = if $key == null { {} } else { {targetingKey: $key} }
+			(http post --content-type application/json --max-time 10sec $"($site)/ofrep/v1/evaluate/flags/($flag)" {context: $ctx}).value?
+		}
+	} catch { null }
+}
+
+# Waits until OFREP answers each flag's new value for the tester and its old one with no context: polls
+# every FLAGS_POLL_SEC (2), gives up at FLAGS_WAIT_SEC (90). Whether it did.
+def wait-ofrep [site: string, tester: string, want: list<record>]: nothing -> bool {
+	let poll = ($env.FLAGS_POLL_SEC? | default 2 | into float)
+	let limit = ($env.FLAGS_WAIT_SEC? | default 90 | into float)
+	mut waited = 0.0
+	loop {
+		let ok = ($want | all {|w| (ofrep-ask $site $w.flag $tester) == $w.new and (ofrep-ask $site $w.flag null) == $w.old })
+		if $ok { return true }
+		if $waited >= $limit { return false }
+		sleep ($poll * 1sec)
+		$waited = $waited + $poll
+	}
+	false
+}
+
+# The version a push read, written again as the newest after a failed live stage.
+def restore [at: record, app: path, to: string, now: string, names: string, why: string] {
+	let p = (provenance $app)
+	gc storage cp $"($at.url)#($to)" $at.url $"--if-generation-match=($now)" $"--custom-metadata=pushed-by=($p.who)(meta-of {stage: rolled-back, flag: $names, cases: failed, note: $why})" | ignore
+	print -e $"flags: ($at.url) is version ($to)'s flags again, as version (generation $at.url)"
+}
+
+# Changes the live flags. A flag whose default value changes (or that is new) goes through its cases:
+#   1. it needs cases (`cases`); with none the push is refused, or goes on with --untested "<why>";
+#   2. at hand, flagsCases.local runs them with the settings a release has; a failure stops, nothing written;
+#   3. the flag is written on for flagsLive.testers alone, everyone else keeping the old value (stage=testers),
+#      and the push waits until OFREP at flagsLive.url says so;
+#   4. flagsCases.live runs the flag's `production` scenarios against production as the tester; a failure
+#      writes the version read in 3 again, and the push fails;
+#   5. the flags as the spec says them are written (stage=all, cases=passed).
+# --skip-live "<why>" leaves out 3 and 4, for an app with no testers yet. Both reasons are kept on the version.
+export def push [app: path, --untested: string, --skip-live: string] {
+	let at = (live $app)
+	let doc = (cue-of $app flagd.document)
+	let before = (generation $at.url)
+	let old = if $before == "0" { {flags: {}} } else { gc storage cat $at.url | from json }
+	let changed = (changed-flags $old $doc)
+	if ($changed | is-empty) {
+		write-flags $at $doc $app --meta (meta-of {stage: all}) --from $before | ignore
+		return
+	}
+	let all = ($changed | each {|f| cases-of $app $f })
+	let bare = ($all | where {|c| not (has-cases $c) } | each {|c| $c.flag })
+	let tested = ($all | where {|c| has-cases $c })
+	if ($bare | is-not-empty) and $untested == null {
+		error make {msg: $"a push changes ($bare | str join ', '), which has no cases: name the flag in a scenario's or a unit case's `flags` (tests/scenarios/*.cue, tests/unit/*.cue; `pronto-flags cases` lists them), or push with --untested \"<why>\""}
+	}
+	let cmds = (cue-of $app flagsCases | default {})
+	let testers = $at.testers
+	if ($tested | is-not-empty) {
+		if ($cmds.local? | default "" | is-empty) { error make {msg: $"($app) names no flagsCases.local: the command that runs a flag's cases at hand"} }
+		if $skip_live == null {
+			if ($at.site | is-empty) or ($testers | is-empty) or ($cmds.live? | default "" | is-empty) {
+				error make {msg: "a flip runs its cases on production as a tester: say flagsLive.url, flagsLive.testers and flagsCases.live, or push with --skip-live \"<why>\""}
+			}
+			let none = ($tested | where {|c| $c.production | is-empty } | each {|c| $c.flag })
+			if ($none | is-not-empty) { error make {msg: $"($none | str join ', ') has no `production` scenario to run on production: mark one, or push with --skip-live \"<why>\""} }
+		}
+	}
+	let names = ($changed | str join "+")
+	let notes = ([(if $untested != null { $"untested: ($untested)" }), (if $skip_live != null { $"skip-live: ($skip_live)" })] | compact | str join "; ")
+	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
+	if $skip_live != null and ($tested | is-not-empty) { print -e $"flags: WARNING: ($tested | each {|c| $c.flag } | str join ', ') not tried on production: ($skip_live)" }
+
+	for c in ($tested) {
+		print $"flags: ($c.flag): running its cases at hand \(($c.scenarios | length) scenarios, ($c.unit | length) unit cases\)"
+		let r = (run-cases $app $cmds.local {FLAG: $c.flag, ONLY: ($c.scenarios | str join ","), UNIT_ONLY: ($c.unit | str join ","), SLOW: "1"})
+		if not $r.ok { error make {msg: $"($c.flag)'s cases failed at hand; nothing was written:\n($r.out)"} }
+	}
+	let verdict = if ($tested | is-empty) { "untested" } else if $skip_live != null { "local-only" } else { "passed" }
+	if $skip_live != null or ($tested | is-empty) {
+		write-flags $at $doc $app --meta (meta-of {stage: all, flag: $names, cases: $verdict, note: $notes}) --from $before | ignore
+		return
+	}
+
+	let on = ($tested | each {|c| $c.flag })
+	let canary = (write-flags $at (canary-doc $old $doc $on $testers) $app --meta (meta-of {stage: testers, flag: ($on | str join "+"), cases: running}) --from $before)
+	print $"flags: ($on | str join ', ') is on for ($testers | str join ', ') alone; waiting for ($at.site) to say so"
+	let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f)), old: (canary-doc $old $doc [$f] $testers | get flags | get $f | get variants.old)} })
+	if not (wait-ofrep $at.site $testers.0 $want) {
+		restore $at $app $before $canary ($on | str join "+") "OFREP never answered the tester's value"
+		error make {msg: $"($at.site) did not answer the new value for ($testers.0) within the wait; rolled back to version ($before)"}
+	}
+	for c in $tested {
+		print $"flags: ($c.flag): running its production cases as ($testers.0) \(($c.production | str join ', ')\)"
+		let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site, FLAGS_TESTER: $testers.0})
+		if not $r.ok {
+			restore $at $app $before $canary ($on | str join "+") $"($c.flag) failed on production"
+			error make {msg: $"($c.flag)'s production cases failed; rolled back to version ($before):\n($r.out)"}
+		}
+	}
+	write-flags $at $doc $app --meta (meta-of {stage: all, flag: $names, cases: $verdict, note: $notes}) --from $canary | ignore
 }
 
 # Every version of the object, newest first: `gcloud storage ls -a --json` gives each
@@ -107,7 +301,7 @@ export def push [app: path] {
 export def history [app: path] {
 	let at = (live $app)
 	gc storage ls -a --json $at.url | from json | get metadata
-	| each {|o| {version: $o.generation, at: $o.timeCreated, live: ($o.timeDeleted? == null), by: ($o.metadata?.pushed-by? | default ""), commit: ($o.metadata?.commit? | default "")}}
+	| each {|o| {version: $o.generation, at: $o.timeCreated, live: ($o.timeDeleted? == null), by: ($o.metadata?.pushed-by? | default ""), commit: ($o.metadata?.commit? | default ""), stage: ($o.metadata?.stage? | default ""), flag: ($o.metadata?.flag? | default ""), cases: ($o.metadata?.cases? | default ""), note: ($o.metadata?.note? | default "")}}
 	| sort-by {|v| $v.version | into int } --reverse
 }
 
@@ -148,12 +342,13 @@ export def setup [app: path] {
 		gc storage buckets add-iam-policy-binding $bucket --member $"serviceAccount:($r)" --role roles/storage.objectViewer | ignore
 		print $"flags: ($r) reads ($bucket)"
 	}
-	if (generation $at.url) == "0" { push $app } else { print $"flags: ($at.url) is there already; `pronto-flags push` changes it" }
+	if (generation $at.url) == "0" { push-plain $app } else { print $"flags: ($at.url) is there already; `pronto-flags push` changes it" }
 }
 
-def main [] { print "usage: live.nu setup|push|history|rollback|show <app-dir> [version]" }
+def main [] { print "usage: live.nu setup|push|history|rollback|show|cases <app-dir> [version|flag]" }
 def "main setup" [app: path] { setup $app }
-def "main push" [app: path] { push $app }
+def "main push" [app: path, --untested: string, --skip-live: string] { push $app --untested $untested --skip-live $skip_live }
 def "main history" [app: path] { history $app | table -e | print }
 def "main rollback" [app: path, version?: string] { rollback $app $version }
 def "main show" [app: path] { show $app }
+def "main cases" [app: path, flag?: string] { cases $app $flag | table -e | print }
