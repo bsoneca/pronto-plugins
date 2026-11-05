@@ -11,8 +11,9 @@
 //
 // Names follow the markup as journeys_gestures.cue derives them: a data-on-*
 // handler by its module, a form by its id, else its action and entity joined
-// by "-", else "form". Nothing a reader typed, no row and no error message
-// leaves the page.
+// by "-", else "form". Nothing a reader typed and no row leaves the page; an error
+// leaves as its name, a trimmed message, its top stack frame and the screen it
+// happened on, which the collector redacts and writes as a log line (prod-watch).
 
 const ENDPOINT = "__ENDPOINT__";
 const READER = ["click", "dblclick", "change", "submit", "keydown", "drop"];
@@ -22,6 +23,9 @@ const SETTLE_MS = 10000;
 const HANDLER_MS = 1500;
 const LATE_MS = 5000;
 const BATCH = 20;
+// An error's text and frame are cut to this; a page reports this many errors in all.
+const ERROR_TEXT = 200;
+const ERRORS_PER_PAGE = 10;
 // The terminal moves between screens without unloading the page, so pagehide
 // may not come for a long while: a batch also goes this long after its first
 // event, which is what keeps a dashboard live.
@@ -43,6 +47,8 @@ const session = (() => {
 	}
 })();
 
+// The screen mounted last, which an error is reported on.
+let current = "";
 let queue = [];
 let timer;
 const flush = () => {
@@ -109,8 +115,24 @@ if (!globalThis.__prontoJourneys) {
 		if (document.visibilityState === "hidden") flush();
 	});
 	const nameOf = (x) => (x instanceof Error ? x.name : typeof x);
-	addEventListener("error", (e) => emit({ type: "error", kind: "error", name: nameOf(e.error) }));
-	addEventListener("unhandledrejection", (e) => emit({ type: "error", kind: "rejection", name: nameOf(e.reason) }));
+	const messageOf = (x) => String(x instanceof Error ? x.message : typeof x === "string" ? x : "").slice(0, ERROR_TEXT);
+	// The first frame of the stack that names a place: "fn (url:line:col)" without "at ".
+	const frameOf = (x) => {
+		const stack = x instanceof Error && typeof x.stack === "string" ? x.stack : "";
+		const line = stack.split("\n").map((l) => l.trim()).find((l) => /^at\s/.test(l) || /@\S+:\d+:\d+$/.test(l));
+		return line ? line.replace(/^at\s+/, "").slice(0, ERROR_TEXT) : "";
+	};
+	// A page reports a few errors, each once: a loop in a tab is no flood of beacons.
+	const reported = new Set();
+	const report = (kind, thrown, fallback) => {
+		const event = { type: "error", kind, name: nameOf(thrown), message: messageOf(thrown) || String(fallback ?? "").slice(0, ERROR_TEXT), frame: frameOf(thrown), screen: current };
+		const key = `${event.name} ${event.message} ${event.frame}`;
+		if (reported.has(key) || reported.size >= ERRORS_PER_PAGE) return;
+		reported.add(key);
+		emit(event);
+	};
+	addEventListener("error", (e) => report("error", e.error, e.message));
+	addEventListener("unhandledrejection", (e) => report("rejection", e.reason));
 }
 
 // A form by its id, else the name its data-gesture gives it (forms of one action and entity on a
@@ -122,6 +144,7 @@ const formName = (form) => form.id || form.dataset.gesture || [form.dataset.acti
 
 export default function mount(screen, { signal }) {
 	const name = screen.dataset.screen ?? location.pathname;
+	current = name;
 	emit({ type: "screen", screen: name, state: screen.dataset.state });
 
 	// The gestures waiting on the state that says how they went.

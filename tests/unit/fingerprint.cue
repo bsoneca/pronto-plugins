@@ -65,6 +65,15 @@ cases: {
 		{call: "watch.keyOf", args: [(_entry & {text: "analyst: GET /analysis?taken_at=lt.2026-11-02T13:57:20Z: error sending request for url (http://127.0.0.1:3000/analysis)", container: "billing"}).out]},
 		{call: "probe.differs", args: ["$", "$a"], expect: true},
 	]}
+	"a browser error the journeys collector logs is one fingerprint across sessions, screens and line numbers; another error or frame is another": {suite: "fingerprint", steps: [
+		{call: "watch.keyOf", args: [{jsonPayload: {severity: "ERROR", message: "frontend TypeError: x is not a function", stack_trace: "    at render (/assets/app.js:10:5)", screen: "board"}, resource: labels: {service_name: "bonk-chess"}, labels: container_name: "journeys-collector"}]},
+		{keep: "a"},
+		{call: "watch.keyOf", args: [{jsonPayload: {severity: "ERROR", message: "frontend TypeError: x is not a function", stack_trace: "    at render (/assets/app.js:88:21)", screen: "shop"}, resource: labels: {service_name: "bonk-chess"}, labels: container_name: "journeys-collector"}]},
+		{call: "probe.differs", args: ["$", "$a"], expect: false},
+		{call: "watch.keyOf", args: [{jsonPayload: {severity: "ERROR", message: "frontend TypeError: y is not a function", stack_trace: "    at render (/assets/app.js:10:5)"}, resource: labels: {service_name: "bonk-chess"}, labels: container_name: "journeys-collector"}]},
+		{call: "probe.differs", args: ["$", "$a"], expect: true},
+		{call: "watch.frameOf", args: ["    at render (/assets/app.js:10:5)"], expect: "assets/app.js:render"},
+	]}
 	"a request is named by its status, method and path, never its query": {suite: "fingerprint", steps: [
 		{call: "watch.messageOf", args: [{httpRequest: {status: 500, requestMethod: "POST", requestUrl: "https://bonkchess.com/crud/game?select=id&owner=eq.3f0c9a1e"}}], expect: "HTTP 500 POST /crud/game"},
 	]}

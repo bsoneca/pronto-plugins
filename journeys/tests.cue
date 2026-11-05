@@ -160,3 +160,14 @@ reportedMoment: _reported.collector.transforms["reduce-c"].type & "reduce"
 reportedKnown: _reported._known.cart & ["pay", "view", "coupon-check"]
 reportedOnlyThere: _reported._known.done & ["confirm"]
 reporterTakesHatchGestures: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "screen.addEventListener(\"journeys:gesture\"") & true
+
+// A browser error is no moment: it leaves as an ERROR line on stdout that prod-watch reads, after
+// its own rate caps (a session's, then one error's across sessions) and the collector's redaction.
+errorsLogged: _j.collector.sinks.errors & {type: "console", inputs: ["errors_log"], target: "stdout", encoding: codec: "json"}
+errorsCappedPerSession: _j.collector.transforms.errors_per_session & {type: "throttle", key_field: "{{ session }}", threshold: 5, window_secs: 60}
+errorsCappedPerError: _j.collector.transforms.errors_per_error & {type: "throttle", key_field: "{{ fingerprint }}", threshold: 20, window_secs: 60}
+errorsRedactedBeforeCap: _j.collector.transforms.errors_per_error.inputs & ["errors_clean"]
+errorsOnlyErrors: _j.collector.transforms.errors_in.condition & ".type == \"error\""
+// The reporter sends the name, a trimmed message, the top frame and the screen; a page reports a few, once each.
+reporterSendsError: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "const event = { type: \"error\", kind, name: nameOf(thrown), message: messageOf(thrown) || String(fallback ?? \"\").slice(0, ERROR_TEXT), frame: frameOf(thrown), screen: current };") & true
+reporterCapsErrors: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "if (reported.has(key) || reported.size >= ERRORS_PER_PAGE) return;") & true

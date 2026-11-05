@@ -53,6 +53,9 @@ production (`released`): `release-cron` when the app has a `release_cron.cue`, e
   (error, panic, exception, traceback, fatal, refused, failed); never a request answered below 500.
   Also Cloud Run's start and shutdown lines, which open an instance's windows (below) and are
   never reported themselves.
+- **Browser errors**: the journeys collector writes each page error as an `ERROR` line
+  (`frontend TypeError: ...`, with its top frame, screen and revision; journeys/README.md), so they
+  are read, fingerprinted and triaged like any server line, under the collector's container.
 - **A traceback written a line an entry** (Python's logging to stdout, as pronto-llm does) is put
   back into one entry before it is grouped.
 
