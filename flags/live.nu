@@ -11,14 +11,21 @@
 #   bin/pronto-flags show <app-dir>                # what a push would write, and where: nothing written
 # Each runs as the operator's own gcloud login.
 
+# gcloud on the Python pinned beside it, never on the virtualenv it shares with every other gcloud
+# on the machine (~/.config/gcloud/virtenv): another gcloud rebuilds that on its own Python, and a
+# Python this gcloud predates crashes it (3.14: "module 'ssl' has no attribute 'PROTOCOL_TLSv1'").
+def --wrapped run-gcloud [...args] {
+	let input = $in
+	$input | with-env {CLOUDSDK_PYTHON: python3.12, CLOUDSDK_PYTHON_SITEPACKAGES: "0"} { ^$env.SAYT_MISE_BIN exec gcloud@589.0.0 python@3.12.11 -- gcloud --quiet ...$args | complete }
+}
 def --wrapped gc [...args] {
 	let input = $in
-	let r = ($input | ^$env.SAYT_MISE_BIN exec gcloud@589.0.0 python@3.12.11 -- gcloud --quiet ...$args | complete)
+	let r = ($input | run-gcloud ...$args)
 	if $r.exit_code != 0 { error make {msg: $"gcloud ($args | str join ' '): ($r.stderr | str trim)"} }
 	$r.stdout
 }
 def --wrapped exists [...args]: nothing -> bool {
-	(^$env.SAYT_MISE_BIN exec gcloud@589.0.0 python@3.12.11 -- gcloud --quiet ...$args | complete).exit_code == 0
+	(run-gcloud ...$args).exit_code == 0
 }
 
 # An expression of the app's CUE, exported with the CUE its own mise pins; null where the app has none.
@@ -39,7 +46,7 @@ def live [app: path] {
 
 # The live object's generation, or 0 where there is none yet: a push writes only over the one it read.
 def generation [url: string] {
-	let r = (^$env.SAYT_MISE_BIN exec gcloud@589.0.0 python@3.12.11 -- gcloud --quiet storage objects describe $url --format "value(generation)" | complete)
+	let r = (run-gcloud storage objects describe $url --format "value(generation)")
 	if $r.exit_code == 0 { $r.stdout | str trim } else if ($r.stderr | str contains "404") or ($r.stderr | str contains "not found") or ($r.stderr | str contains "No URLs matched") { "0" } else {
 		error make {msg: $"gcloud storage objects describe ($url): ($r.stderr | str trim)"}
 	}

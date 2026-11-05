@@ -10,14 +10,21 @@
 const here = path self .
 const deno = "denoland/deno:distroless-2.5.0@sha256:5c4530d4babe37ded3566803e9498e2b5d643b915cce701d8b7b82f87a86629e"
 
+# gcloud on the Python pinned beside it, never on the virtualenv it shares with every other gcloud
+# on the machine (~/.config/gcloud/virtenv): another gcloud rebuilds that on its own Python, and a
+# Python this gcloud predates crashes it (3.14: "module 'ssl' has no attribute 'PROTOCOL_TLSv1'").
+def --wrapped run-gcloud [...args] {
+	let input = $in
+	$input | with-env {CLOUDSDK_PYTHON: python3.12, CLOUDSDK_PYTHON_SITEPACKAGES: "0"} { ^$env.SAYT_MISE_BIN exec gcloud@589.0.0 python@3.12.11 -- gcloud --quiet ...$args | complete }
+}
 def --wrapped gc [...args] {
 	let input = $in
-	let r = ($input | ^$env.SAYT_MISE_BIN exec gcloud@589.0.0 python@3.12.11 -- gcloud --quiet ...$args | complete)
+	let r = ($input | run-gcloud ...$args)
 	if $r.exit_code != 0 { error make {msg: $"gcloud ($args | str join ' '): ($r.stderr | str trim)"} }
 	$r.stdout
 }
 def --wrapped exists [...args]: nothing -> bool {
-	(^$env.SAYT_MISE_BIN exec gcloud@589.0.0 python@3.12.11 -- gcloud --quiet ...$args | complete).exit_code == 0
+	(run-gcloud ...$args).exit_code == 0
 }
 
 # The domain onto the service, through Cloud Run's domain-mapping API (gcloud
