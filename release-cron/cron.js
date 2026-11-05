@@ -175,10 +175,10 @@ export const plist = ({ label, program, args, poll, log, env }) => {
 
 // --- Bisect: a failed run names the commit that broke it. ---
 
-// What a failed run failed on, from its `why` and its output: the kind ("release" when release@gcp
-// or its confirm failed, else "rehearsal") and the scenarios the output marks failed (`✗ <name> (12s) at step`).
+// What a failed run failed on, from its `why` and its output: the kind ("release" when release@gcp,
+// a target's release command (`release (cmd)`) or the confirm failed, else "rehearsal") and the scenarios the output marks failed (`✗ <name> (12s) at step`).
 export const signature = (why, text) => ({
-  kind: /^release@gcp|^released, production/.test(why ?? "") ? "release" : "rehearsal",
+  kind: /^release@gcp|^release \(|^released, production/.test(why ?? "") ? "release" : "rehearsal",
   names: [...new Set([...(text ?? "").matchAll(/✗ (\S+) \(\d+s\) at step/g)].map((m) => m[1]))],
 });
 

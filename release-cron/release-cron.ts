@@ -10,6 +10,8 @@
 // RELEASE_CRON_REF names the ref a run takes in place of origin/main (a branch's, to try a change to
 // this script); RELEASE_CRON_DRY=1 ends a run once it knows whether it would rehearse;
 // RELEASE_CRON_NOW=1 starts the run without waiting the gap (a CD job's run for the commit it was pushed for).
+// An app whose releaseCron has a `target` (aprende, on Cloudflare Pages, with no release.cue) runs
+// its own release and serving commands in place of `./saytw release@gcp` and gcloud, and its probes ask the target's origin.
 // launchd wakes it every few minutes; a wake starts a run only once the gap since the last run
 // that released or failed is over (release, wait an hour, release again). A run: main fetched into the run's own worktree; skipped when nothing the app's releaseCron
 // watches changed since the last run that released; else `./saytw verify@local`, then `./saytw release@gcp`
@@ -147,7 +149,7 @@ if (verb === "bisect") {
   must("git", ["--git-dir", repo, "fetch", "-q", "origin"]);
   const slug = must("git", ["--git-dir", repo, "remote", "get-url", "origin"]).replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1");
   const { gcp: g, cron } = config(top);
-  const gcpName = g.name as string;
+  const gcpName = g?.name as string | undefined;
   const b = cron.bisect;
   const text = (() => { try { return Deno.readTextFileSync(`${state}/runs/${failed.started}.log`); } catch { return ""; } })();
   const sig = signature(failed.why, text);
@@ -155,7 +157,7 @@ if (verb === "bisect") {
   const list: Merge[] = merges(must("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H %s", `${green.commit}..${failed.commit}`]).split("\n"));
   say(`${failed.started} failed on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}); last release ${green.commit.slice(0, 8)}; ${list.length} merges between`);
   const home_ = (f: string) => `${home}/.cache/pronto/${f}`;
-  const evidence = () => ({ rehearsals: jsonl(home_(`rehearsals/${app}.jsonl`)), releases: jsonl(home_(`releases/${gcpName}.jsonl`)), ledger: jsonl(`${dir}/verdicts.jsonl`) });
+  const evidence = () => ({ rehearsals: jsonl(home_(`rehearsals/${app}.jsonl`)), releases: gcpName ? jsonl(home_(`releases/${gcpName}.jsonl`)) : [], ledger: jsonl(`${dir}/verdicts.jsonl`) });
   const known: Record<string, string> = {};
   const settle = () => { const ev = evidence(); for (const c of list) known[c.sha] ??= "unknown"; for (const c of list) if (known[c.sha] === "unknown") known[c.sha] = verdict(c.sha, sig, ev); known[list.at(-1)!.sha] = "bad"; };
   if (!list.length) { say("no merge between: nothing to bisect"); unlock(); Deno.exit(0); }
@@ -290,7 +292,10 @@ function config(dir: string) {
   // The app's own cue, as mise finds it there: a shim run from elsewhere finds no version.
   const cue = Deno.env.get("CUE") || sh(mise, ["which", "cue"], appDir, {}, 60).out || "cue";
   const registry = Deno.readTextFileSync(`${appDir}/.mise.toml`).match(/^CUE_REGISTRY\s*=\s*['"]([^'"]+)['"]/m)?.[1];
-  const { gcp, cron } = JSON.parse(must(cue, ["export", "release.cue", "release_cron.cue", "release_cron_plugin.cue", "-e", "{gcp: GCP, cron: releaseCron}", "--out", "json"], appDir, registry ? { CUE_REGISTRY: registry } : {}));
+  // An app with no release.cue (releaseCron.target) has no GCP: only its opt-in is read.
+  const own = exists(`${appDir}/release.cue`);
+  const { gcp, cron } = JSON.parse(must(cue, ["export", ...(own ? ["release.cue"] : []), "release_cron.cue", "release_cron_plugin.cue", "-e", own ? "{gcp: GCP, cron: releaseCron}" : "{cron: releaseCron}", "--out", "json"], appDir, registry ? { CUE_REGISTRY: registry } : {}));
+  if (!gcp && !cron.target) throw new Error(`${appRel} has no release.cue and its releaseCron names no target: nothing to release`);
   return { gcp, cron: { ...cron, watch: cron.watch?.length ? cron.watch : [appRel] } };
 }
 
@@ -327,7 +332,7 @@ const enc = new TextEncoder();
 const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() - t0) / 1000)}s ${s}\n`; log(enc.encode(l)); Deno.stdout.writeSync(enc.encode(l)); };
 let head = "";
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
-let cron: { gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { lead: string; notes: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[] }> };
+let cron: { target?: { release: string[]; serving: string[]; origin: string }; gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { lead: string; notes: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[] }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
 let mark = Date.now();
@@ -351,8 +356,8 @@ const end = (outcome: string, why = "", code = 0) => {
   try { if (JSON.parse(Deno.readTextFileSync(activePath)).pid === Deno.pid) Deno.removeSync(activePath); } catch { /* none, or not ours */ }
   Object.assign(run, { outcome, why: why || undefined, ended: local(Date.now()) });
   // Inside the steps: the rehearsal's and the release's own records of this commit, since this run began.
-  if (run.commit && ("rehearse" in steps || "release" in steps) && gcp) {
-    const d = detail(jsonl(`${home}/.cache/pronto/rehearsals/${app}.jsonl`), jsonl(`${home}/.cache/pronto/releases/${gcp.name}.jsonl`), run.commit, new Date(t0).toISOString());
+  if (run.commit && ("rehearse" in steps || "release" in steps)) {
+    const d = detail(jsonl(`${home}/.cache/pronto/rehearsals/${app}.jsonl`), gcp ? jsonl(`${home}/.cache/pronto/releases/${gcp.name}.jsonl`) : [], run.commit, new Date(t0).toISOString());
     run.detail = d;
     if (d.rehearsal) run.rehearsal = d.rehearsal;
   }
@@ -496,8 +501,11 @@ try {
   }
   ({ gcp, cron } = config(wt));
   run.gap = cron.gap;
-  before = whole(JSON.parse(gcloud(["run", "services", "describe", gcp!.service])).status?.traffic);
-  const live = base(jsonl(`${state}/runs.jsonl`), before);
+  // What production serves: the commit the target's serving command prints, else Cloud Run's traffic.
+  const target = cron.target;
+  const servingNow = () => must(target!.serving[0], target!.serving.slice(1), `${wt}/${appRel}`, Deno.env.toObject(), 120).split(/\s+/)[0];
+  before = target ? servingNow() : whole(JSON.parse(gcloud(["run", "services", "describe", gcp!.service])).status?.traffic);
+  const live = target ? (sh("git", ["cat-file", "-e", `${before}^{commit}`], wt).ok ? before : undefined) : base(jsonl(`${state}/runs.jsonl`), before);
   step("prepare");
   if (live === head) end("skipped", `main ${head.slice(0, 8)} is serving as ${before}`);
   if (live) {
@@ -510,7 +518,7 @@ try {
   // 2. The rehearsal: it waits for its slot as long as it takes (the lock keeps another run from starting meanwhile), then runs to its verdict.
   const dir = `${wt}/${appRel}`;
   // With GCP.rehearsal the rehearsal is release@gcp's own, in the cloud: no slot, nothing run here.
-  const cloud = !!gcp!.rehearsal;
+  const cloud = !!gcp?.rehearsal;
   if (cloud) say(`GCP.rehearsal: the rehearsal runs in the cloud, job ${gcp!.rehearsal!.job}, inside release@gcp`);
   let got = cloud;
   if (!cloud) active("slot");
@@ -542,7 +550,7 @@ try {
 
   // 3. The release, on the tree the rehearsal passed.
   active("release");
-  const rel = await child("./saytw", ["release@gcp"], dir, { ...Deno.env.toObject(), STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
+  const rel = await child(target ? target.release[0] : "./saytw", target ? target.release.slice(1) : ["release@gcp"], dir, { ...Deno.env.toObject(), STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
   step("release");
   // A scenario that flaked and passed only on a rerun (the rehearsal's, or the cloud tests' in release@gcp) is told to the PR that added or last changed it, once per scenario
   // (its own ledger, apart from the new-feature one): the rerun is never a fix.
@@ -568,7 +576,7 @@ try {
   }
 
   // (told above even when the release failed: the flakes happened)
-  if (rel.code !== 0) end("failed", `release@gcp failed (exit ${rel.code})`, 1);
+  if (rel.code !== 0) end("failed", target ? `release (${target.release.join(" ")}) failed (exit ${rel.code})` : `release@gcp failed (exit ${rel.code})`, 1);
   // pronto's release ships when only new-feature scenarios fail: the run names them, and the PR that added each is told once.
   if (newFailing.length) {
     run.newFailing = newFailing;
@@ -597,12 +605,18 @@ try {
   active("confirm");
   let said = 0;
   let wrong: string[] = [];
-  let origin = gcp!.domain ? `https://${gcp!.domain}` : "";
+  let origin = target ? target.origin : gcp!.domain ? `https://${gcp!.domain}` : "";
   for (;;) {
     wrong = [];
     // A gcloud call that fails is one more thing wrong this round, retried with the rest: the release
     // has happened, and a flake must not log it failed.
-    try {
+    if (target) {
+      try {
+        const now = servingNow();
+        run.revision = now;
+        if (now !== head) wrong.push(`serving ${now.slice(0, 8)}, not ${head.slice(0, 8)}`);
+      } catch (e) { wrong.push(`serving unread: ${(e as Error).message.split("\n")[0]}`); }
+    } else try {
       const svc = JSON.parse(gcloud(["run", "services", "describe", gcp!.service], 60));
       const now = whole(svc.status?.traffic);
       // The probes' address: the domain mapped onto the service, else its run.app one (GCP.domain absent).
@@ -610,7 +624,7 @@ try {
       run.revision = now;
       wrong.push(...served(now, jsonl(`${home}/.cache/pronto/releases/${gcp!.name}.jsonl`), head));
     } catch (e) { wrong.push(`traffic unread: ${(e as Error).message.split("\n")[0]}`); }
-    for (const svc of cron.ready) {
+    for (const svc of target ? [] : cron.ready) {
       try {
         const c = JSON.parse(gcloud(["run", "services", "describe", svc], 60)).status?.conditions?.find((c: { type: string }) => c.type === "Ready");
         if (c?.status !== "True") wrong.push(`${svc} not ready`);
@@ -643,7 +657,7 @@ try {
   }
   // A release that changed nothing Cloud Run runs (tests, config) keeps the revision: said, so it
   // does not read as a deploy that never went out.
-  end("released", run.revision === before ? `same image, nothing served changed: ${before} kept` : "");
+  end("released", !target && run.revision === before ? `same image, nothing served changed: ${before} kept` : "");
 } catch (e) {
   step("error");
   end("failed", (e as Error).message.split("\n")[0], 1);

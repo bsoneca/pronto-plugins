@@ -28,3 +28,9 @@ ume: {ready: _ume.ready, holder: _ume.holder} & {ready: ["a-render"], holder: ".
 
 // A failed run is bisected within these limits, and the lead is told when no author session is named.
 bisectDefaults: _defaults.bisect & {command: "./saytw integrate@local", lead: "local_7c6084eb-07de-487a-b8e6-689748accaaa"}
+
+// An app off Cloud Run names a target: the commands that release and read what serves, and the https address the probes ask.
+_aprende: #Cron & {watch: ["x"], probes: {}, target: {release: ["./release.sh"], serving: ["./serving.sh", "prod"], origin: "https://aprende.example"}}
+target: {release: _aprende.target.release, origin: _aprende.target.origin} & {release: ["./release.sh"], origin: "https://aprende.example"}
+// A target whose origin is not https is refused.
+noHttp: [if (#Cron & {watch: ["x"], probes: {}, target: {release: ["r"], serving: ["s"], origin: "http://x"}}) == _|_ {"refused"}, "accepted"][0] & "refused"

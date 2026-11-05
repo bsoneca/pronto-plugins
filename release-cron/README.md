@@ -160,6 +160,16 @@ the author session its body names (`local_<uuid>`), else of `bisect.lead`. That 
 on main's first-parent history since the last released run whose tree has the scenario's file
 (`tests/scenarios/<name>.cue`, else a mention of the name in `tests/scenarios/`).
 
+## An app off Cloud Run
+
+An app with no `release.cue`, released elsewhere, sets `releaseCron.target`: `release`, the command
+that releases the checked-out tree; `serving`, the command that prints the commit production serves
+(its first word is read); and `origin`, the https address the probes ask. Both commands run in the
+app's folder. A run then uses them where it would use `./saytw release@gcp` and Cloud Run's traffic:
+it skips when `serving` already names main's head, releases with `release`, and confirms when
+`serving` names the head and the probes answer. `ready` is not read. aprende, on Cloudflare Pages,
+uses it. An app without `target` runs exactly as before.
+
 ## Install, pause, remove
 
 ```sh

@@ -15,6 +15,15 @@ releaseCron: #Cron
 	// The paths whose change since the last run that released makes a release, relative to the
 	// repository; the app's own folder when not named. Nothing changed: the run skips.
 	watch: [...string]
+	// An app released elsewhere than Cloud Run (aprende, on Cloudflare Pages), with no release.cue: the
+	// command that releases the checked-out tree and the one that prints the commit production serves,
+	// both run in the app's folder, and the address the probes ask. Absent: release.cue's GCP,
+	// `./saytw release@gcp` and Cloud Run's traffic.
+	target?: {
+		release!: [string, ...string]
+		serving!: [string, ...string]
+		origin!:  string & =~"^https://"
+	}
 	// Cloud Run services, besides GCP.service, that must be Ready in confirm (Bonk Chess: its renderer).
 	ready: [...string]
 	// The `what` of a slot's owner line (tests/slot.ts) that marks the rehearsal's main slot: what the
