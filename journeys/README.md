@@ -12,6 +12,8 @@ A journey is an ordered list of the gestures a reader makes on the app's screens
 
 A host-DOM hatch on every screen ([`telemetry.js`](telemetry.js)) reports each gesture and the outcome the screen's `data-state` shows. It works on the released terminal, which is not changed.
 
+It also reports the page's errors (`error`, `unhandledrejection`): the name, a message cut to 200 characters, the top stack frame and the screen. The collector redacts them (emails, urls, token-like strings, long digit runs), caps them (5 per session and 20 per error, per minute) and writes each as one JSON `ERROR` line on stdout (`frontend <Name>: <message>`, `stack_trace`, `screen`, `revision`), which Cloud Logging keeps and [prod-watch](../prod-watch/README.md) fingerprints like a server's error. A bundle's build hash is taken off the frame so one bug stays one fingerprint across releases.
+
 ## Use
 
 From a pronto app:

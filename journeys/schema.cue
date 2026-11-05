@@ -122,6 +122,14 @@ _journeysHours: {
 		events:  *600 | int & >0
 		seconds: *60 | int & >0
 	}
+	// The browser errors the collector writes as log lines for prod-watch: one session's
+	// share per window, and one error's (its name and top frame) across all sessions,
+	// past which the rest are dropped and counted.
+	errors: {
+		perSession: *5 | int & >0
+		perError:   *20 | int & >0
+		seconds:    *60 | int & >0
+	}
 	_days: strconv.Atoi(strings.TrimSuffix(J.window, "d"))
 	// The ratio windows: every burn window, and the budget window once even
 	// where it is one of them.
@@ -300,6 +308,77 @@ _journeysHours: {
 				inputs: ["per_session"]
 				fields: match: ["session", "trace", "type", "outcome"]
 			}
+			// A browser error is no moment: it leaves as a log line (errors_log), which
+			// prod-watch reads like a server error's. One session's share is capped
+			// first, then the text is trimmed and redacted here, the one place, so
+			// nothing a reader typed reaches a log (emails, urls and their queries,
+			// token-like strings and long digit runs such as documents and phones
+			// are taken out), then one error's share across all sessions is capped.
+			// What is dropped is dropped: an error past its share is the same line again.
+			errors_in: {
+				type:      "filter"
+				inputs:    ["events"]
+				condition: ".type == \"error\""
+			}
+			errors_per_session: {
+				type:        "throttle"
+				inputs:      ["errors_in"]
+				key_field:   "{{ session }}"
+				threshold:   J.errors.perSession
+				window_secs: J.errors.seconds
+			}
+			// A beacon can be delivered twice: the same session, instant and error.
+			errors_once: {
+				type:   "dedupe"
+				inputs: ["errors_per_session"]
+				fields: match: ["session", "t", "kind", "name", "message"]
+			}
+			errors_clean: {
+				type:   "remap"
+				inputs: ["errors_once"]
+				source: #"""
+					name = slice(string(.name) ?? "Error", 0, 60) ?? "Error"
+					if !match(name, r'^[A-Za-z0-9_.$]+$') { name = "Error" }
+					message = string(.message) ?? ""
+					message = replace(message, r'[^\s@]+@[^\s@]+', "<email>")
+					message = replace(message, r'https?://[^\s)]*', "<url>")
+					message = replace(message, r'[A-Za-z0-9_+/=-]{24,}', "<token>")
+					message = replace(message, r'\d[\d.\-/ ]{6,}\d', "<number>")
+					message = slice(message, 0, 200) ?? ""
+					frame = string(.frame) ?? ""
+					frame = replace(frame, r'https?://[^/\s)]*', "")
+					frame = replace(frame, r'\?[^\s):]*', "")
+					frame = replace(frame, r'\.[0-9a-fA-F]{6,}\.(m?js)', ".${1}")
+					frame = slice(frame, 0, 200) ?? ""
+					screen = string(.screen) ?? ""
+					if !match(screen, r'^[A-Za-z0-9_/-]{1,60}$') { screen = "" }
+					kind = if .kind == "rejection" { "rejection" } else { "error" }
+					text = "frontend " + name
+					if message != "" { text = text + ": " + message }
+					. = {
+						"severity": "ERROR",
+						"message": text,
+						"source": "frontend",
+						"kind": kind,
+						"screen": screen,
+						"revision": get_env_var("K_REVISION") ?? "",
+						"fingerprint": name + " " + replace(frame, r':\d+', ""),
+					}
+					if frame != "" { .stack_trace = "    at " + frame }
+					"""#
+			}
+			errors_per_error: {
+				type:        "throttle"
+				inputs:      ["errors_clean"]
+				key_field:   "{{ fingerprint }}"
+				threshold:   J.errors.perError
+				window_secs: J.errors.seconds
+			}
+			errors_log: {
+				type:   "remap"
+				inputs: ["errors_per_error"]
+				source: "del(.fingerprint)"
+			}
 			// Each gesture or late refusal, once per journey it is a moment of.
 			moments: {
 				type:   "remap"
@@ -404,6 +483,14 @@ _journeysHours: {
 			hooks: {init: "init", process: "process"}
 			source: "function init() started = os.time() end\nfunction process(event, emit)\n  event.metric.name = \"process_start_time_seconds\"\n  event.metric.namespace = nil\n  event.metric.tags = nil\n  event.metric.gauge.value = started\n  emit(event)\nend"
 		}
+		// The errors, one JSON line each on stdout: Cloud Run reads `severity` and
+		// `message` from it, and prod-watch reads the line like a server's.
+		sinks: errors: {
+			type:    "console"
+			inputs:  ["errors_log"]
+			target:  "stdout"
+			encoding: codec: "json"
+		}
 		sinks: metrics: {
 			type:    "prometheus_exporter"
 			inputs:  ["run_metrics", "moment_metrics", "latency_metrics", "throttled_named", "process_start"]
@@ -455,6 +542,47 @@ _journeysHours: {
 			name: c.name
 			inputs: [{insert_at: "ended", type: "log", log_fields: c.fields & {journey: "j", late: false}}]
 			outputs: [{extract_from: "ended", conditions: [{type: "vrl", source: ".run == \"\(c.run)\""}]}]
+		}],
+		[for c in [
+			{
+				name: "a browser error becomes an ERROR line with its name, message, top frame and screen"
+				in: {name: "TypeError", message: "x is not a function", frame: "render (/assets/app.js:10:5)", screen: "board", kind: "error"}
+				check: #"""
+					.severity == "ERROR" && .message == "frontend TypeError: x is not a function" && .source == "frontend" && .screen == "board" && .kind == "error" && .stack_trace == "    at render (/assets/app.js:10:5)" && .fingerprint == "TypeError render (/assets/app.js)"
+					"""#
+			},
+			{
+				name: "a browser error's origin, query and build hash are taken off its frame"
+				in: {name: "Error", message: "", frame: "f (https://x.example/a.1a2b3c4d.js?v=1:3:4)"}
+				check: #"""
+					.stack_trace == "    at f (/a.js:3:4)" && .message == "frontend Error"
+					"""#
+			},
+			{
+				name: "a browser error's message loses emails, urls, tokens and long numbers"
+				in: {name: "Error", message: "bad ana@example.com at https://x.example/p?q=1 token abcdefghijklmnopqrstuvwxyz0123 doc 123.456.789-09"}
+				check: #"""
+					.message == "frontend Error: bad <email> at <url> token <token> doc <number>"
+					"""#
+			},
+			{
+				name: "a browser error's name and message are trimmed"
+				in: {name: "not a name!", message: strings.Repeat("ab ", 200)}
+				check: #"""
+					strlen(string!(.message)) == 216 && starts_with(string!(.message), "frontend Error: ab ab")
+					"""#
+			},
+			{
+				name: "a screen that is no screen's name is dropped"
+				in: {name: "Error", message: "m", screen: "<script>"}
+				check: #"""
+					.screen == ""
+					"""#
+			},
+		] {
+			name: c.name
+			inputs: [{insert_at: "errors_clean", type: "log", log_fields: {session: "s", t: 1, type: "error"} & c.in}]
+			outputs: [{extract_from: "errors_clean", conditions: [{type: "vrl", source: c.check}]}]
 		}],
 		[{
 			name: "a run a late refusal opened is no run"
