@@ -7,6 +7,10 @@ setups: "bsoneca-mac": {
 	cluster: host: {}
 	github: {owner: "bsoneca", kind: "user"}
 	hostRunners: "pronto-mac": repo: "pronto"
+	// Two more ci runners under the same label, so PR checks run three at a time instead of queueing
+	// behind one runner; tests/slot.ts still caps what their heavy steps put on the machine.
+	hostRunners: "pronto-mac-2": {repo: "pronto", labels: ["pronto-mac"]}
+	hostRunners: "pronto-mac-3": {repo: "pronto", labels: ["pronto-mac"]}
 	// Releases only (cd.yml's release job runs on this label): a release never waits behind ci,
 	// whose queue on pronto-mac can be long. Same Mac; release-cron's own slot (STACK_PRIORITY=release)
 	// already puts its rehearsal first on the machine.
