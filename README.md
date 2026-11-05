@@ -411,9 +411,10 @@ attaches a bank account to it.
 | `<origin>/.well-known/pronto-billing.json` | the app's: `{owner, plans: {<id>: {name, interval, prices: {usd: 499, brl: 1990}}}}`, prices in minor units, the first the default |
 | `POST /onboard {tenant, owner, email, country?}` | the author, with the secret (`billing/owner.ts onboard`): Stripe's onboarding for the origin's payouts |
 | `POST /checkout {tenant, account, plan, currency?, locale?, return?}` | a Stripe Checkout for one of the tenant's accounts; `return` a path on the origin. Anyone may ask; any other checkout the account left open is closed first |
+| `POST /trial/offer {tenant, account, ticket, currency?}`, `POST /trial/checkout {tenant, account, ticket, locale?, return?}` | an opt-in free trial ([docs/stripe.md](docs/stripe.md#free-trial)): only on a single-use `ticket` the tenant minted, which the broker takes back from `<origin>/billing/trial/consent`. A broker without them answers 404 and no trial is offered |
 | `POST /portal {tenant, account, manage, return?}` | Stripe's portal for that account, with the token its tenant was given |
 | `POST /resync {tenant, account, plan, manage}` | the account's entitlement read again, for a tenant that missed a push |
-| `POST <origin>/billing/events` | the broker's push: an ES256 JWT (`application/jwt`) whose audience is the tenant, `{sub, plan, status: active\|lapsed, through, manage, ver}`, checked by [`billing/entitlement.ts`](billing/entitlement.ts) against `/jwks` |
+| `POST <origin>/billing/events` | the broker's push: an ES256 JWT (`application/jwt`) whose audience is the tenant, `{sub, plan, status: active\|lapsed, through, manage, ver, trial?}`, checked by [`billing/entitlement.ts`](billing/entitlement.ts) against `/jwks` |
 
 A changed subscription is read again from Stripe, all of the account's
 subscriptions to the plan together, and pushed to the tenant, again if Stripe
@@ -465,7 +466,7 @@ PRONTO_BILLING_OWNER=<secret> deno run --allow-net --allow-env <this repo>/billi
 
 | Path in the app | |
 | --- | --- |
-| `billing_plugin.cue` | the schema, the `Subscription` entity, the `billing_01` migration (`billing_entitle`, `billing_manage` and `billing_me`, a trigger refusing sessions' writes), the `billing` container hatch and its target, and on a developer's machine the broker with its stand-in |
+| `billing_plugin.cue` | the schema, the `Subscription` entity, the `billing_01` migration (`billing_entitle`, `billing_manage` and `billing_me`, a trigger refusing sessions' writes), the free trial's (`_billingTrialMigration`: `billing.trial` and its functions), the `billing` container hatch and its target, and on a developer's machine the broker with its stand-in |
 | `pronto/billing.cue`, `billing/billing.nu` | the generate step giving the door `/billing/*` and `/.well-known/pronto-billing.json` again after pronto's writer |
 | `billing/` | the service and the broker, run from the app's own files |
 | `billing_spec.cue` | written once, then the app's: the broker, the owner's hash, the plans, the grants, and the `Subscription` type id mint stamps |

@@ -15,6 +15,7 @@ Deno.test("an app gets billing in its own package, and keeps its spec", async ()
   eq(plugin.includes("__PACKAGE__"), false, "no placeholder left");
   const spec = await Deno.readTextFile(`${app}/billing_spec.cue`);
   eq(spec.includes(`owner:  "${"o".repeat(43)}"`), true, "the owner");
+  eq(spec.includes(`_billingTrialMigration: "billing_03"`), true, "the trial's migration is named");
   for (const f of ["billing/service.ts", "billing/broker/main.ts", "billing/billing.nu", "pronto/billing.cue"]) await Deno.stat(`${app}/${f}`);
   await Deno.writeTextFile(`${app}/billing_spec.cue`, spec + "// the app's own\n");
   await Deno.writeTextFile(`${app}/billing_plugin.cue`, "edited\n");

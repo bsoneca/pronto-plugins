@@ -2,8 +2,9 @@
 // Stripe key is not: the broker serves its pages under /fake/stripe and calls
 // it in place of Stripe's API. It keeps what it is told in memory and speaks
 // just enough of Stripe for the broker: connected accounts and their
-// onboarding, customers, prices, a checkout that pays at a press, and a
-// portal that cancels or fails the next payment. Each change reaches the
+// onboarding, customers, prices, a checkout that pays at a press (or starts
+// a free trial, as Stripe's trial_end does), and a portal that cancels, fails
+// the next payment or moves a trial on. Each change reaches the
 // broker as Stripe's webhook would, signed, and is sent again until the
 // broker takes it. main refuses it on any issuer but localhost.
 import { esc, json, randomToken } from "../shared.ts";
@@ -70,8 +71,7 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
   });
   const missing = (what: string) => { throw new StripeError(404, "resource_missing", `No such ${what}`); };
 
-  // Async as Stripe's client is, though the stand-in answers at once.
-  // deno-lint-ignore require-await
+  // Async as Stripe's client is.
   const stripe: Stripe = async <T,>(method: string, path: string, params: Obj = {}, key?: string): Promise<T> => {
     // /v2/core/accounts is spoken as /v2/accounts, beside /v1's kinds.
     const [, , kind, oid, sub] = (path.startsWith("/v2/core/") ? `/v2${path.slice("/v2/core".length)}` : path).split("/");
@@ -114,6 +114,21 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
       customers.set(c.id, c);
       return remember(c);
     }
+    if (kind === "subscriptions" && oid) {
+      const s = subscriptions.get(oid) ?? missing("subscription");
+      if (method === "POST") {
+        // As Stripe's: metadata keys merge, and a cancelled subscription takes no other change.
+        if (s.status === "canceled" && Object.keys(params).some((k) => k !== "metadata")) throw new StripeError(400, "resource_missing", "A canceled subscription can only update its metadata.");
+        Object.assign(s, params.cancel_at_period_end === undefined ? {} : { cancel_at_period_end: params.cancel_at_period_end === true || params.cancel_at_period_end === "true" });
+        Object.assign(s.metadata, params.metadata ?? {});
+        await emit("customer.subscription.updated", s);
+      } else if (method === "DELETE") {
+        if (s.status === "canceled") throw new StripeError(404, "resource_missing", `No such subscription: '${oid}'`);
+        s.status = "canceled";
+        await emit("customer.subscription.deleted", s);
+      }
+      return structuredClone(s) as T;
+    }
     if (kind === "subscriptions") return list(subscriptions, (s) => s.customer === params.customer) as T;
     if (kind === "prices" && method === "GET") return list(prices, (p) => p.active && (params.lookup_keys ?? []).includes(p.lookup_key)) as T;
     if (kind === "prices" && method === "POST") {
@@ -129,6 +144,11 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
       return { id: sub, status: "expired" } as T;
     }
     if (kind === "checkout" && oid === "sessions") {
+      // As Stripe's: a trial ends two days to two years out, and Checkout takes a card for it.
+      const end = params.subscription_data?.trial_end;
+      if (end !== undefined && (!(Number(end) >= now() + 2 * DAY) || Number(end) > now() + 730 * DAY)) {
+        throw new StripeError(400, "invalid_request_error", "subscription_data[trial_end]: trial_end must be at least 48 hours in the future and no more than 730 days.");
+      }
       const s = { id: id("cs"), ...params };
       sessions.set(s.id, s);
       return { id: s.id, url: `${base}/pay/${s.id}` } as T;
@@ -163,11 +183,15 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
       const price = prices.get(s.line_items[0].price)!;
       const currency = s.currency ?? price.currency;
       const amount = currency === price.currency ? price.unit_amount : price.currency_options[currency].unit_amount;
+      const trialEnd: number | undefined = s.subscription_data.trial_end === undefined ? undefined : Number(s.subscription_data.trial_end);
       if (action === "pay") {
         sessions.delete(oid);
+        // A trial is trialing until its end and charges nothing; any other pays its first month now.
         const sub = {
-          id: id("sub"), object: "subscription", customer: s.customer, status: "active",
-          current_period_end: now() + 30 * DAY, metadata: s.subscription_data.metadata,
+          id: id("sub"), object: "subscription", customer: s.customer, status: trialEnd ? "trialing" : "active", created: now(),
+          current_period_start: now(), current_period_end: trialEnd ?? now() + 30 * DAY,
+          ...(trialEnd ? { trial_start: now(), trial_end: trialEnd } : { trial_end: null }),
+          cancel_at_period_end: false, charges: trialEnd ? 0 : 1, metadata: s.subscription_data.metadata,
           transfer_data: s.subscription_data.transfer_data, items: { data: [{ price }] },
         };
         subscriptions.set(sub.id, sub);
@@ -176,8 +200,9 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
       }
       if (action === "cancel") { sessions.delete(oid); return go(s.cancel_url); }
       return page("Checkout", `<h1>${esc(price.product.name)}</h1>
-<p><strong>${(amount / 100).toFixed(2)} ${esc(currency.toUpperCase())}</strong> a ${esc(price.recurring.interval)}</p>
-<form method="post"><button name="do" value="pay">Subscribe</button> <button class="quiet" name="do" value="cancel">Back</button></form>`);
+<p><strong>${(amount / 100).toFixed(2)} ${esc(currency.toUpperCase())}</strong> a ${esc(price.recurring.interval)}</p>${trialEnd ? `
+<p>Free until ${new Date(trialEnd * 1000).toISOString().slice(0, 10)}, then charged. Cancel before then and nothing is.</p>` : ""}
+<form method="post"><button name="do" value="pay">${trialEnd ? "Start free trial" : "Subscribe"}</button> <button class="quiet" name="do" value="cancel">Back</button></form>`);
     }
     if (kind === "portal") {
       const s = portals.get(oid);
@@ -191,12 +216,34 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
         target.status = "past_due";
         await emit("customer.subscription.updated", target);
       } else if (target && action === "renew") {
-        Object.assign(target, { status: "active", current_period_end: target.current_period_end + 30 * DAY });
+        Object.assign(target, { status: "active", current_period_start: target.current_period_end, current_period_end: target.current_period_end + 30 * DAY, charges: target.charges + 1 });
+        await emit("customer.subscription.updated", target);
+      } else if (target && action === "cancel_end") {
+        // As the real portal's cancel, which the broker configures to end at the period's end.
+        target.cancel_at_period_end = true;
+        await emit("customer.subscription.updated", target);
+      } else if (target && target.status === "trialing" && action === "trial_paid") {
+        // The trial ends: a subscription set to cancel ends there, uncharged; any other is charged
+        // and begins its first paid period.
+        if (target.cancel_at_period_end) {
+          target.status = "canceled";
+          await emit("customer.subscription.deleted", target);
+        } else {
+          Object.assign(target, { status: "active", charges: target.charges + 1, current_period_start: target.trial_end, current_period_end: target.trial_end + 30 * DAY });
+          await emit("customer.subscription.updated", target);
+        }
+      } else if (target && target.status === "trialing" && action === "trial_fail") {
+        // The trial ends and the first charge fails.
+        Object.assign(target, { status: "past_due", current_period_start: target.trial_end, current_period_end: target.trial_end + 30 * DAY });
+        await emit("customer.subscription.updated", target);
+      } else if (target && target.status === "trialing" && action === "trial_week") {
+        // The trial now ends in a week, as Stripe's reminder window opens.
+        target.trial_end = target.current_period_end = now() + 7 * DAY - 60;
         await emit("customer.subscription.updated", target);
       }
       if (action) return go(url.pathname);
-      const rows = mine.map((x) => `<section><p><strong>${esc(x.items.data[0].price.product.name)}</strong> · ${esc(x.status)}, until ${new Date(x.current_period_end * 1000).toISOString().slice(0, 10)}</p>
-<form method="post" action="${esc(`${url.pathname}?sub=${x.id}`)}">${x.status === "canceled" ? "" : `<button class="quiet" name="do" value="cancel">Cancel now</button> <button class="quiet" name="do" value="fail">Fail the next payment</button> `}<button class="quiet" name="do" value="renew">Renew</button></form></section>`).join("");
+      const rows = mine.map((x) => `<section data-status="${esc(x.status)}" data-charges="${x.charges}"><p><strong>${esc(x.items.data[0].price.product.name)}</strong> · ${esc(x.status)}${x.cancel_at_period_end ? " (ends at the period's end)" : ""}, until ${new Date(x.current_period_end * 1000).toISOString().slice(0, 10)}</p>
+<form method="post" action="${esc(`${url.pathname}?sub=${x.id}`)}">${x.status === "canceled" ? "" : `<button class="quiet" name="do" value="cancel_end">Cancel at the period's end</button> <button class="quiet" name="do" value="cancel">Cancel now</button> <button class="quiet" name="do" value="fail">Fail the next payment</button> `}${x.status === "trialing" ? `<button class="quiet" name="do" value="trial_paid">The trial ends</button> <button class="quiet" name="do" value="trial_fail">The trial ends, the charge fails</button> <button class="quiet" name="do" value="trial_week">A week to go</button> ` : ""}<button class="quiet" name="do" value="renew">Renew</button></form></section>`).join("");
       return page("Your subscription", `<h1>Your subscription</h1>${rows || "<p>None.</p>"}<p><a href="${esc(s.return_url)}">Back</a></p>`);
     }
     return json(404, { error: "not found" });

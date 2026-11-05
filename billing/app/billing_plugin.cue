@@ -34,11 +34,21 @@ import (
 	grants: [=~"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"]: close({
 		[or([for p, _ in plans {p}])]: time.Format("2006-01-02")
 	})
+	// An opt-in free trial, which an account chooses and consents to: `months` of the plan
+	// free, charged from the day it ends unless cancelled before. Published with the plans,
+	// so a broker that does not know trials still sees a document it can read, and offers none.
+	// `remindDays` is how long before the first charge the app reminds the account.
+	let sold = [for p, _ in plans {p}]
+	trial?: {
+		months: int & >=1 & <=24
+		plans: [_, ...] & [...or(sold)]
+		remindDays: int & >=1 | *7
+	}
 }
 billing: #Billing
 // Inside the billing target, `billing` is the target: the spec is _billing there.
 _billing: billing
-_billingDocument: json.Marshal({owner: _billing.owner, plans: _billing.plans})
+_billingDocument: json.Marshal({owner: _billing.owner, plans: _billing.plans, if _billing.trial != _|_ {trial: _billing.trial}})
 _billingGrants: (#billingGrants & {grants: _billing.grants}).out
 
 // Where the service reads the grants live, when the app has pronto-flags: the
@@ -63,6 +73,12 @@ if _billingFlags != "" {
 	grants: _
 	out: json.Marshal([for a, g in grants for p, d in g {account: a, plan: p, through: "\(d)T23:59:59Z"}])
 }
+
+// The flag the free trial is behind, evaluated per account by the service (OFREP, through
+// _billingFlags): the document's trial is on only where the flag says true. Empty, the trial is
+// on wherever the document has one.
+_billingTrialFlag: *"" | string
+
 _billingGrantsChecks: {
 	none: (#billingGrants & {grants: {}}).out & "[]"
 	two: (#billingGrants & {grants: "00000000-0000-4000-8000-00000000000a": {analysis: "2027-01-31", coach: "2026-12-24"}}).out &
@@ -73,6 +89,12 @@ _billingGrantsChecks: {
 	noDay: (#Billing & _spec & {grants: "00000000-0000-4000-8000-00000000000a": analysis: "2027-02-30"}) == _|_ & true
 	noUuid: (#Billing & _spec & {grants: "ana": analysis: "2027-01-31"}) == _|_ & true
 	accepted: (#Billing & _spec & {grants: "00000000-0000-4000-8000-00000000000a": analysis: "2027-01-31"}) != _|_ & true
+	// A trial: of plans the app sells, 1 to 24 months, the reminder 7 days unless said.
+	trialUnsold: (#Billing & _spec & {trial: {months: 3, plans: ["coach"]}}) == _|_ & true
+	trialNoPlan: (#Billing & _spec & {trial: {months: 3, plans: []}}) == _|_ & true
+	trialLong: (#Billing & _spec & {trial: {months: 25, plans: ["analysis"]}}) == _|_ & true
+	trialOk: (#Billing & _spec & {trial: {months: 3, plans: ["analysis"]}}) != _|_ & true
+	trialRemind: (#Billing & _spec & {trial: {months: 3, plans: ["analysis"]}}).trial.remindDays & 7
 }
 
 // Each plan an account holds, and until when: the broker's word, which only
@@ -182,6 +204,96 @@ code: state: migrations: "\(_billingGrantsMigration)": operations: [{sql: up: ""
 	END $f$;
 	REVOKE ALL ON FUNCTION public.billing_grant(json) FROM PUBLIC;
 	GRANT EXECUTE ON FUNCTION public.billing_grant(json) TO service;
+	NOTIFY pgrst, 'reload schema';
+	"""}]
+
+// The free trial (billing.trial), kept apart from billing_01's tables so an app that offers
+// none has them all the same and nothing reads them. Only the service writes it, as the broker's
+// entitlements are written. A row is born at an account's consent, with a ticket the broker
+// gives back once (billing_trial_take) to prove the account asked, its state null until Stripe
+// confirms the trial (billing_trial_state). The trial is spent for good once its state is set.
+// Named by the app (billing_spec.cue), after the grants' migration.
+_billingTrialMigration: string
+code: state: migrations: "\(_billingTrialMigration)": operations: [{sql: up: """
+	CREATE TABLE IF NOT EXISTS billing.trial (
+	  account uuid PRIMARY KEY, ticket text, plan text, amount integer, currency text, charges_at timestamptz,
+	  terms text, consented_at timestamptz, state text, ver bigint NOT NULL DEFAULT 0,
+	  CONSTRAINT trial_state CHECK (state IS NULL OR state IN ('running', 'cancelled', 'converted', 'ended', 'failed'))
+	);
+
+	-- Where an account's trial stands; holds is whether it has a plan now (paid or granted), which
+	-- is no time for a trial. The consent of a trial not yet confirmed is nobody's to read.
+	CREATE OR REPLACE FUNCTION public.billing_trial_status(account uuid) RETURNS json
+	LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $f$
+	  SELECT json_build_object('state', t.state, 'plan', t.plan, 'amount', t.amount, 'currency', t.currency, 'charges_at', t.charges_at,
+	    'holds', EXISTS (SELECT 1 FROM public.subscription s WHERE s.owner_id = billing_trial_status.account AND s.active AND s.through > now()))
+	  FROM (SELECT 1) one LEFT JOIN billing.trial t ON t.account = billing_trial_status.account AND t.state IS NOT NULL
+	$f$;
+	REVOKE ALL ON FUNCTION public.billing_trial_status(uuid) FROM PUBLIC;
+	GRANT EXECUTE ON FUNCTION public.billing_trial_status(uuid) TO service;
+
+	-- A ticket for the broker to ask the service about: with a consent, what the account agreed to;
+	-- without, an offer's. A consent is refused once the trial is spent.
+	CREATE OR REPLACE FUNCTION public.billing_trial_ask(account uuid, plan text, amount integer, currency text, charges_at timestamptz, terms text)
+	RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $f$
+	DECLARE made text := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+	BEGIN
+	  IF plan IS NOT NULL AND EXISTS (SELECT 1 FROM billing.trial t WHERE t.account = billing_trial_ask.account AND t.state IS NOT NULL) THEN
+	    RAISE EXCEPTION 'the free trial is spent' USING ERRCODE = 'check_violation';
+	  END IF;
+	  INSERT INTO billing.trial AS t (account, ticket, plan, amount, currency, charges_at, terms, consented_at)
+	    VALUES (account, made, plan, amount, currency, charges_at, terms, CASE WHEN plan IS NULL THEN NULL ELSE now() END)
+	    ON CONFLICT ON CONSTRAINT trial_pkey DO UPDATE SET ticket = EXCLUDED.ticket,
+	      plan = CASE WHEN t.state IS NULL THEN EXCLUDED.plan ELSE t.plan END,
+	      amount = CASE WHEN t.state IS NULL THEN EXCLUDED.amount ELSE t.amount END,
+	      currency = CASE WHEN t.state IS NULL THEN EXCLUDED.currency ELSE t.currency END,
+	      charges_at = CASE WHEN t.state IS NULL THEN EXCLUDED.charges_at ELSE t.charges_at END,
+	      terms = CASE WHEN t.state IS NULL THEN EXCLUDED.terms ELSE t.terms END,
+	      consented_at = CASE WHEN t.state IS NULL THEN EXCLUDED.consented_at ELSE t.consented_at END;
+	  RETURN made;
+	END $f$;
+	REVOKE ALL ON FUNCTION public.billing_trial_ask(uuid, text, integer, text, timestamptz, text) FROM PUBLIC;
+	GRANT EXECUTE ON FUNCTION public.billing_trial_ask(uuid, text, integer, text, timestamptz, text) TO service;
+
+	-- The consent a ticket stands for, once: the ticket is spent as it is taken.
+	CREATE OR REPLACE FUNCTION public.billing_trial_take(account uuid, ticket text) RETURNS json
+	LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public AS $f$
+	  UPDATE billing.trial t SET ticket = NULL
+	  WHERE t.account = billing_trial_take.account AND t.ticket IS NOT NULL AND t.ticket = billing_trial_take.ticket
+	  RETURNING json_build_object('plan', t.plan, 'amount', t.amount, 'currency', t.currency, 'charges_at', t.charges_at, 'terms', t.terms)
+	$f$;
+	REVOKE ALL ON FUNCTION public.billing_trial_take(uuid, text) FROM PUBLIC;
+	GRANT EXECUTE ON FUNCTION public.billing_trial_take(uuid, text) TO service;
+
+	-- The broker's word on the trial, ordered by its ver as an entitlement is.
+	CREATE OR REPLACE FUNCTION public.billing_trial_state(account uuid, state text, plan text, amount integer, currency text, charges_at timestamptz, ver bigint)
+	RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $f$
+	BEGIN
+	  INSERT INTO billing.trial AS t (account, plan, amount, currency, charges_at, state, ver)
+	    VALUES (account, plan, amount, currency, charges_at, state, ver)
+	    ON CONFLICT ON CONSTRAINT trial_pkey DO UPDATE SET plan = EXCLUDED.plan, amount = EXCLUDED.amount, currency = EXCLUDED.currency,
+	      charges_at = EXCLUDED.charges_at, state = EXCLUDED.state, ver = EXCLUDED.ver
+	    WHERE t.ver < EXCLUDED.ver;
+	END $f$;
+	REVOKE ALL ON FUNCTION public.billing_trial_state(uuid, text, text, integer, text, timestamptz, bigint) FROM PUBLIC;
+	GRANT EXECUTE ON FUNCTION public.billing_trial_state(uuid, text, text, integer, text, timestamptz, bigint) TO service;
+
+	-- Whether an account is on a trial that has not yet charged it, for analytics to keep it
+	-- apart from paying subscribers.
+	CREATE OR REPLACE FUNCTION public.billing_on_trial(account uuid) RETURNS boolean
+	LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $f$
+	  SELECT EXISTS (SELECT 1 FROM billing.trial t WHERE t.account = billing_on_trial.account AND t.state IN ('running', 'cancelled'))
+	    AND EXISTS (SELECT 1 FROM public.subscription s WHERE s.owner_id = billing_on_trial.account AND s.active AND s.through > now())
+	$f$;
+	REVOKE ALL ON FUNCTION public.billing_on_trial(uuid) FROM PUBLIC;
+	GRANT EXECUTE ON FUNCTION public.billing_on_trial(uuid) TO service;
+	-- An analytics view runs as the function's own owner; the viewer role is granted where an app has it.
+	DO $g$ BEGIN
+	  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'analytics_viewer') THEN
+	    GRANT EXECUTE ON FUNCTION public.billing_on_trial(uuid) TO analytics_viewer;
+	  END IF;
+	END $g$;
+
 	NOTIFY pgrst, 'reload schema';
 	"""}]
 

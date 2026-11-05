@@ -95,11 +95,20 @@ export interface Plan {
   prices: Partial<Record<Currency, number>>;
 }
 
+/** The free trial a tenant offers: how long, on which of its plans, and how
+ * many days before the first charge it reminds the account. */
+export interface Trial {
+  months: number;
+  plans: string[];
+  remindDays: number;
+}
+
 /** What a tenant's /.well-known/pronto-billing.json says. */
 export interface Published {
   /** ownerOf the author's secret. */
   owner: string;
   plans: Record<string, Plan>;
+  trial?: Trial;
 }
 
 /** The tenant's published document, or why it is refused. */
@@ -124,7 +133,56 @@ export function parsePublished(doc: unknown): { ok: true; published: Published }
     plans[id] = { name: p.name.trim(), interval: p.interval, prices };
   }
   if (Object.keys(plans).length === 0) return { ok: false, error: "no plans" };
-  return { ok: true, published: { owner: d.owner, plans } };
+  if (d.trial === undefined) return { ok: true, published: { owner: d.owner, plans } };
+  const t = d.trial as Record<string, unknown> | null;
+  if (typeof t !== "object" || t === null) return { ok: false, error: "trial: an object" };
+  if (!Number.isInteger(t.months) || (t.months as number) < 1 || (t.months as number) > 24) return { ok: false, error: "trial: months 1 to 24" };
+  if (!Array.isArray(t.plans) || t.plans.length === 0 || !t.plans.every((x) => typeof x === "string" && Object.hasOwn(plans, x))) {
+    return { ok: false, error: "trial: plans the tenant sells" };
+  }
+  const remindDays = t.remindDays ?? 7;
+  if (!Number.isInteger(remindDays) || (remindDays as number) < 1) return { ok: false, error: "trial: remindDays at least 1" };
+  return { ok: true, published: { owner: d.owner, plans, trial: { months: t.months as number, plans: t.plans as string[], remindDays: remindDays as number } } };
+}
+
+/** When a trial begun at `now` ends and charging starts: `months` calendar months on, the day
+ * kept or, in a shorter month, the month's last, the time of day and UTC kept. */
+export function chargesAt(now: Date, months: number): Date {
+  const first = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + months, 1);
+  const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + months + 1, 0)).getUTCDate();
+  const out = new Date(first);
+  out.setUTCDate(Math.min(now.getUTCDate(), last));
+  out.setUTCHours(now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds(), now.getUTCMilliseconds());
+  return out;
+}
+
+/** What an account consented to, as its tenant keeps it. */
+export interface Consent {
+  plan: string | null;
+  amount: number | null;
+  currency: string | null;
+  charges_at: string | null;
+  terms: string | null;
+}
+
+/** Whether a consent is one the broker may start a trial from, now: what was shown is what Stripe
+ * gets, so the amount must be the plan's price in that currency and the date the one `months` on,
+ * within a day (a page left open overnight is stale, not wrong). `bad` is the caller's mistake,
+ * `stale` a page to refresh. */
+export function consentChecked(c: Consent, published: Published, now = new Date()):
+  | { ok: true; plan: string; def: Plan; amount: number; currency: Currency; endsAt: number }
+  | { ok: false; kind: "bad" | "stale"; error: string } {
+  const trial = published.trial;
+  if (!trial) return { ok: false, kind: "bad", error: "no trial" };
+  if (typeof c.plan !== "string" || !trial.plans.includes(c.plan)) return { ok: false, kind: "bad", error: `plan is one of ${trial.plans.join(", ")}` };
+  const plan = published.plans[c.plan];
+  if (typeof c.currency !== "string" || !Object.hasOwn(plan.prices, c.currency)) return { ok: false, kind: "bad", error: `currency is one of ${Object.keys(plan.prices).join(", ")}` };
+  const currency = c.currency as Currency;
+  const at = typeof c.charges_at === "string" ? Date.parse(c.charges_at) : NaN;
+  if (!Number.isInteger(c.amount) || Number.isNaN(at)) return { ok: false, kind: "bad", error: "amount and charges_at required" };
+  if (c.amount !== plan.prices[currency]) return { ok: false, kind: "stale", error: "stale" };
+  if (Math.abs(at - chargesAt(now, trial.months).getTime()) > 86_400_000) return { ok: false, kind: "stale", error: "stale" };
+  return { ok: true, plan: c.plan, def: plan, amount: c.amount as number, currency, endsAt: Math.floor(at / 1000) };
 }
 
 /** The Stripe price a plan is sold at, named so that changing what the plan
@@ -141,6 +199,11 @@ export interface Subscription {
   status: string;
   current_period_end: number;
   metadata: Record<string, string>;
+  /** Seconds. A trial's subscription has them; others may leave them out. */
+  created?: number;
+  cancel_at_period_end?: boolean;
+  trial_end?: number | null;
+  current_period_start?: number;
 }
 
 /** Whether an account holds a plan, and until when, from all of its
@@ -155,16 +218,73 @@ export function entitlementOf(subs: readonly Subscription[], tenant: string, acc
   return { active: through > 0, through };
 }
 
+/** Whether an account of a tenant has spent its trial: it holds, or held, a subscription to
+ * any plan. Only one never paid for (incomplete) spends nothing. */
+export function trialSpent(subs: readonly Subscription[], tenant: string, account: string): boolean {
+  return subs.some((s) => s.metadata.tenant === tenant && s.metadata.account === account && s.status !== "incomplete" && s.status !== "incomplete_expired");
+}
+
+/** The state of an account's trial, from its newest subscription that began as one. */
+export interface TrialClaim {
+  state: "running" | "cancelled" | "converted" | "ended" | "failed";
+  amount: number;
+  currency: string;
+  /** When charging starts (started), in seconds: the trial's end. */
+  charges_at: number;
+}
+export function trialOf(subs: readonly Subscription[], tenant: string, account: string, plan: string): TrialClaim | undefined {
+  let newest: Subscription | undefined;
+  for (const s of subs) {
+    if (s.metadata.tenant !== tenant || s.metadata.account !== account || s.metadata.plan !== plan || s.metadata.trial !== "1") continue;
+    if (s.status === "incomplete" || s.status === "incomplete_expired") continue;
+    if (!newest || (s.created ?? 0) > (newest.created ?? 0)) newest = s;
+  }
+  if (!newest) return undefined;
+  const state = newest.status === "trialing" ? (newest.cancel_at_period_end ? "cancelled" : "running")
+    : newest.status === "active" || newest.status === "past_due" ? "converted"
+    : newest.status === "canceled" && newest.metadata.trial_failed === "1" ? "failed"
+    : "ended";
+  return { state, amount: Number(newest.metadata.trial_amount), currency: newest.metadata.trial_currency, charges_at: newest.trial_end ?? 0 };
+}
+
+/** Whether a subscription's first charge failed: still in the period the trial's end opened, and
+ * past due or unpaid. A later renewal's failure has a period of its own and is not this. */
+export const firstChargeFailed = (s: Subscription): boolean =>
+  (s.status === "past_due" || s.status === "unpaid") && s.metadata.trial === "1" && !!s.trial_end && s.current_period_start === s.trial_end;
+
 /** The entitlement a tenant receives about one of its accounts: its audience
  * the tenant alone, and newer than every one before it by `ver`. */
 export function entitlementClaims(p: {
   issuer: string; tenant: string; account: string; plan: string; active: boolean; through: number; manage: string; ver: number; now?: number;
+  trial?: TrialClaim;
 }): Record<string, unknown> {
   const now = p.now ?? Math.floor(Date.now() / 1000);
   return {
     iss: p.issuer, aud: p.tenant, sub: p.account, plan: p.plan,
     status: p.active ? "active" : "lapsed", through: p.through, manage: p.manage, ver: p.ver,
+    ...(p.trial ? { trial: p.trial } : {}),
     iat: now, exp: now + 300,
+  };
+}
+
+/** What Checkout is opened with. A trial adds the card, the trial's end and what to do if there
+ * is no card by then; the metadata rides the session and the subscription alike. */
+export function checkoutSession(p: {
+  customer: string; account: string; locale: unknown; price: string; back: string; metadata: Record<string, string>;
+  destination?: string; feePercent?: number; currency?: string; trialEnd?: number;
+}): Record<string, unknown> {
+  return {
+    mode: "subscription", customer: p.customer, client_reference_id: p.account, locale: checkoutLocale(p.locale),
+    line_items: [{ price: p.price, quantity: 1 }],
+    ...(p.currency ? { currency: p.currency } : {}),
+    ...(p.trialEnd ? { payment_method_collection: "always" } : {}),
+    success_url: p.back, cancel_url: p.back, metadata: p.metadata,
+    subscription_data: {
+      metadata: p.metadata,
+      ...(p.destination ? { transfer_data: { destination: p.destination } } : {}),
+      ...(p.feePercent && p.feePercent > 0 ? { application_fee_percent: p.feePercent } : {}),
+      ...(p.trialEnd ? { trial_end: p.trialEnd, trial_settings: { end_behavior: { missing_payment_method: "cancel" } } } : {}),
+    },
   };
 }
 
