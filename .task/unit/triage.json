@@ -1,0 +1,33 @@
+{
+ "key": "13a14528484bec98ccfa85f12ec596a294e60f7594a6be01d9dec48ba9265cbf",
+ "at": "2026-11-05T01:52:05.558Z",
+ "observed": {
+  "read": {},
+  "dir": {},
+  "stat": {},
+  "env": {},
+  "tree": {},
+  "cmd": []
+ },
+ "lines": [
+  "suite triage",
+  "cases 0df1bf3ae35bd54c26075ef6f5192ac512f14ac8de26050b7c5bb2899969a641",
+  "jobs 1",
+  "file tests/unit.ts 5299ee134265c1802354c3a8ec781bd7eba9b7a9790a1edb9f398a517d6ae12b",
+  "file tests/unit/select.js f04983b61baf86539ac5bafb0fccf9e67847f614866b4f243551d3b179e163b1",
+  "file tests/unit/schema.cue c99dd3783e892883aeb6192564c6e26d36bc7b0bf7a7991a401f4c431d2de1c6",
+  "file mise.lock d04b8b610b41c786883f0fd67b41d2cac0ca38562e7396ca8caf5e12d79cbfe1",
+  "file deno.json absent",
+  "file deno.jsonc absent",
+  "file deno.lock absent",
+  "file package.json absent",
+  "deno 2.9.8",
+  "args [\"triage\"]",
+  "allow read=granted write=granted env=granted run=granted net=granted sys=prompt ffi=prompt",
+  "env CUE e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "module tests/unit/registry.js d611efd1b4a96a3bb28c2a4870938665c2801aac607f8fc7ae83bcd7f9057b31",
+  "module intents/run.ts 3137ad06e3e40c841bb0d78753da1b6c43943f6df8126be268f102f6abe1992b",
+  "module prod-watch/watch.js 21120926c19f39a5188eae503acc9ce400e0807f8465ae1b0289a91756292950",
+  "module node:crypto"
+ ]
+}
