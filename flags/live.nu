@@ -44,7 +44,7 @@ def live [app: path] {
 	let at = (cue-of $app flagsLive)
 	if $at == null { error make {msg: $"($app)'s flags_spec.cue names no flagsLive: say `flagsLive: {project: \"…\", bucket: \"…\"}` there"} }
 	# `url` is the object's; flagsLive.url, production's address, is `site`.
-	$at | upsert site ($at.url? | default null) | upsert testers ($at.testers? | default []) | upsert url $"gs://($at.bucket)/($at.object)"
+	$at | upsert site ($at.url? | default null) | upsert testers ($at.testers? | default []) | upsert runAs ($at.runAs? | default null) | upsert alert ($at.alert? | default null) | upsert url $"gs://($at.bucket)/($at.object)"
 }
 
 # The live object's generation, or 0 where there is none yet: a push writes only over the one it read.
@@ -257,6 +257,9 @@ export def push [app: path, --untested: string, --skip-live: string] {
 			if ($at.site | is-empty) or ($testers | is-empty) or ($cmds.live? | default "" | is-empty) {
 				error make {msg: "a flip runs its cases on production as a tester: say flagsLive.url, flagsLive.testers and flagsCases.live, or push with --skip-live \"<why>\""}
 			}
+			if ($at.runAs? | default "" | is-empty) {
+				error make {msg: "the tester's credential is the release identity's, not the operator's: say flagsLive.runAs (a service account the operator may impersonate), or push with --skip-live \"<why>\""}
+			}
 			let none = ($tested | where {|c| $c.production | is-empty } | each {|c| $c.flag })
 			if ($none | is-not-empty) { error make {msg: $"($none | str join ', ') has no `production` scenario to run on production: mark one, or push with --skip-live \"<why>\""} }
 		}
@@ -278,22 +281,55 @@ export def push [app: path, --untested: string, --skip-live: string] {
 	}
 
 	let on = ($tested | each {|c| $c.flag })
+	let final = {stage: all, flag: $names, cases: $verdict, note: $notes}
+	# The alert that fires on a tester's sign-in is snoozed for exactly the live stage, however it ends.
+	let snooze = (snooze-start $at $on)
+	try {
+		flip-live $at $app $old $doc $on $tested $cmds $before $final
+	} finally {
+		snooze-end $at $snooze
+	}
+}
+
+# Cloud Monitoring's snooze of flagsLive.alert, for the live stage of a flip: a name to end it by, or null where
+# the app names no alert. The snooze ends on its own after two hours should the push never end it.
+def snooze-start [at: record, flags: list<string>] {
+	if ($at.alert? | default "" | is-empty) { return null }
+	let from = (date now | date to-timezone utc)
+	let name = (gc monitoring snoozes create --project $at.project --display-name $"pronto-flags flip: ($flags | str join ' ')" --criteria-policies $at.alert --start-time ($from | format date "%Y-%m-%dT%H:%M:%SZ") --end-time ($from + 2hr | format date "%Y-%m-%dT%H:%M:%SZ") --format "value(name)" | str trim)
+	print $"flags: ($at.alert) is snoozed for the live stage \(($name)\)"
+	$name
+}
+def snooze-end [at: record, name: any] {
+	if $name == null { return }
+	try {
+		gc monitoring snoozes update $name --project $at.project --end-time (date now | date to-timezone utc | format date "%Y-%m-%dT%H:%M:%SZ") | ignore
+		print $"flags: ($at.alert) is no longer snoozed"
+	} catch {|e| print -e $"flags: WARNING: could not end the snooze ($name) of ($at.alert); it ends by itself within two hours: ($e.msg)" }
+}
+
+# The live stage: the canary (the flags on for the testers alone), OFREP's word, the production cases, then the
+# final version. Whatever fails after the canary was written, an error or a crash of the cases' command, writes the
+# version read before it again: the testers are named in no version that outlives the run.
+def flip-live [at: record, app: path, old: record, doc: record, on: list<string>, tested: list<record>, cmds: record, before: string, final: record] {
+	let testers = $at.testers
 	let canary = (write-flags $at (canary-doc $old $doc $on $testers) $app --meta (meta-of {stage: testers, flag: ($on | str join "+"), cases: running}) --from $before)
 	print $"flags: ($on | str join ', ') is on for ($testers | str join ', ') alone; waiting for ($at.site) to say so"
-	let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f)), old: (canary-doc $old $doc [$f] $testers | get flags | get $f | get variants.old)} })
-	if not (wait-ofrep $at.site $testers.0 $want) {
-		restore $at $app $before $canary ($on | str join "+") "OFREP never answered the tester's value"
-		error make {msg: $"($at.site) did not answer the new value for ($testers.0) within the wait; rolled back to version ($before)"}
-	}
-	for c in $tested {
-		print $"flags: ($c.flag): running its production cases as ($testers.0) \(($c.production | str join ', ')\)"
-		let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site, FLAGS_TESTER: $testers.0})
-		if not $r.ok {
-			restore $at $app $before $canary ($on | str join "+") $"($c.flag) failed on production"
-			error make {msg: $"($c.flag)'s production cases failed; rolled back to version ($before):\n($r.out)"}
+	try {
+		let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f)), old: (canary-doc $old $doc [$f] $testers | get flags | get $f | get variants.old)} })
+		if not (wait-ofrep $at.site $testers.0 $want) {
+			error make {msg: $"($at.site) did not answer the new value for ($testers.0) within the wait"}
 		}
+		for c in $tested {
+			print $"flags: ($c.flag): running its production cases as ($testers.0) \(($c.production | str join ', ')\)"
+			let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site, FLAGS_TESTER: $testers.0, CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT: $at.runAs})
+			if not $r.ok { error make {msg: $"($c.flag)'s production cases failed:\n($r.out)"} }
+		}
+		write-flags $at $doc $app --meta (meta-of $final) --from $canary | ignore
+	} catch {|e|
+		try { restore $at $app $before $canary ($on | str join "+") ($e.msg | lines | first) } catch {|r| print -e $"flags: WARNING: could not restore version ($before) over the canary: ($r.msg); `pronto-flags rollback` does" }
+		error make {msg: $"rolled back to version ($before): ($e.msg)"}
 	}
-	write-flags $at $doc $app --meta (meta-of {stage: all, flag: $names, cases: $verdict, note: $notes}) --from $canary | ignore
 }
 
 # Every version of the object, newest first: `gcloud storage ls -a --json` gives each

@@ -29,7 +29,7 @@ Live flags, run as the operator's own gcloud login:
 <this repo>/bin/pronto-flags setup|push|history|rollback|show|cases <app-dir>
 ```
 
-A `push` that changes a flag's default value (or adds a flag) is a flip, and a flip runs the flag's cases before it reaches everyone: at hand, then on production for the testers alone. See [A flip runs its cases](../README.md#a-flip-runs-its-cases). In the spec: `flagsLive: {url, testers}` and `flagsCases: {local, live}`; in the app's scenarios and unit cases, `flags: ["<flag>"]` (and `production: true` on the scenarios safe to run on production).
+A `push` that changes a flag's default value (or adds a flag) is a flip, and a flip runs the flag's cases before it reaches everyone: at hand, then on production for the testers alone. See [A flip runs its cases](../README.md#a-flip-runs-its-cases). In the spec: `flagsLive: {url, testers, runAs, alert}` (a tester is targeted only during the run and may not be in any flag's `accounts`; the live cases run impersonating `runAs`, the release identity that reads the tester's credential; `alert` is snoozed for the live stage) and `flagsCases: {local, live}`; in the app's scenarios and unit cases, `flags: ["<flag>"]` (and `production: true` on the scenarios safe to run on production).
 
 Live flags need `flagsLive: {project, bucket}` in the spec and a flagd sidecar in `release.cue`. The page reads flags with OpenFeature's web SDK and the OFREP provider. Details in the [root README](../README.md#pronto-flags); why a flip runs its flag's cases, in [docs/flag-flips.md](../docs/flag-flips.md). There is no skill for this plugin.
 

@@ -37,6 +37,8 @@ _flagsLocal: ["localhost", "127.0.0.1", "caddy"]
 // flagd's flag definitions (https://flagd.dev/reference/flag-definitions/),
 // which generate writes to flags/flags.json for the flagd image to carry.
 flagd: document: {
+	// Holds _testersNamed (below) to every export of the document, push's included.
+	_testersNamedGuard: _testersNamed
 	"$schema": "https://flagd.dev/schema/v0/flags.json"
 	"flags": {
 		for k, f in flags {
@@ -97,6 +99,26 @@ flagsLive?: {
 	// them alone, so its cases run on production while everyone else still reads the old
 	// value. Ids as `accounts` has them. The first is the one `FLAGS_TESTER` names.
 	testers?: [...string & =~"^[A-Za-z0-9_-]{1,64}$"]
+	// The service account the live cases run as (`gcloud` impersonation, so the operator needs
+	// only token-creator on it): the release identity that may read the testers' credential in
+	// Secret Manager. A push with testers and no runAs refuses the live stage.
+	runAs?: =~"^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$"
+	// The Cloud Monitoring alert policy that fires on a tester's sign-in, as
+	// projects/<project>/alertPolicies/<id>. A push snoozes it for the live stage alone.
+	alert?: =~"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/alertPolicies/[0-9]+$"
+}
+
+// A tester is targeted only while a push runs its live stage, as the canary, and never in a flag's
+// `accounts`: that would keep it on for the tester after the run, and let a free account read a
+// paid feature. The label below is the error.
+_testersNamed: {
+	if flagsLive.testers != _|_ {
+		for k, f in flags if f.accounts != _|_ {
+			for t in f.accounts for u in flagsLive.testers if t == u {
+				"flag \(k) names the tester \(t) in accounts: a tester is targeted only during a push's live stage": "allowed" & "named in accounts"
+			}
+		}
+	}
 }
 
 // The app's commands for a flip's cases (`pronto-flags push`), each run with `sh -c` in the
