@@ -133,9 +133,14 @@ def default-of [def: any] {
 	$def.variants? | default {} | get -o ($def.defaultVariant? | default "default")
 }
 
-# The flags a push changes: new ones, and those whose default value moves.
+# The flags a push changes: new ones, and those whose default value moves. A flag new to the live
+# object and off changes nothing: absent already reads as off, so it has no flip to test.
 def changed-flags [old: record, doc: record]: nothing -> list<string> {
-	$doc.flags | transpose f def | where {|r| (default-of ($old.flags | get -o $r.f)) != (default-of $r.def) } | each {|r| $r.f }
+	$doc.flags | transpose f def | where {|r|
+		let was = ($old.flags | get -o $r.f)
+		let new = (default-of $r.def)
+		if $was == null { $new != false } else { (default-of $was) != $new }
+	} | each {|r| $r.f }
 }
 
 # A flag's cases: the scenarios (tests/scenarios/*.cue) that name it in `flags` or a step's `flag`,
@@ -162,7 +167,9 @@ def meta-of [m: record]: nothing -> string {
 
 # The app's command, run with sh in its folder with the env given; ok and what it printed.
 def run-cases [app: path, cmd: string, vars: record] {
-	let r = (do { cd $app; with-env $vars { ^sh -c $cmd } } | complete)
+	# This tool runs under the plugins tree's saytw, which exports its SAYT_VERSION. The app's own ./saytw
+	# must read its own pin: with ours it starts the wrong sayt, which refuses the app's pin.
+	let r = (do { cd $app; with-env $vars { ^env -u SAYT_VERSION sh -c $cmd } } | complete)
 	{ok: ($r.exit_code == 0), out: ($r.stdout + $r.stderr | str trim)}
 }
 
