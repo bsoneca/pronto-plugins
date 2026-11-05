@@ -26,13 +26,14 @@ async function setup(o: { searchLagMs?: number; issuer?: string } = {}) {
   // Every request the broker makes to Stripe, as the stand-in is asked it.
   const sent: { method: string; path: string; params?: Record<string, unknown> }[] = [];
   // What Stripe should refuse, for a test of the broker's retries.
-  const stripeDown = { delete: false };
+  const stripeDown = { delete: false, invoices: 0 };
   const stripe = ((method: string, path: string, ...rest: unknown[]) => {
     sent.push({ method, path, params: rest[0] as Record<string, unknown> | undefined });
+    if (path.startsWith("/v1/invoices/") && stripeDown.invoices) return Promise.reject(new StripeError(stripeDown.invoices, stripeDown.invoices === 403 ? "permission" : "api_error", "invoices refused"));
     if (method === "DELETE" && stripeDown.delete) return Promise.reject(new StripeError(500, "api_error", "Stripe is down"));
     return (fake.stripe as (...a: unknown[]) => unknown)(method, path, ...rest);
   }) as typeof fake.stripe;
-  const tenants = new Map<string, { doc?: unknown; up: boolean; got: Entitlement[]; hold?: Promise<void>; tickets: Map<string, Consent> }>([
+  const tenants = new Map<string, { doc?: unknown; up: boolean; got: Entitlement[]; hold?: Promise<void>; tickets: Map<string, Consent>; consentFails?: number }>([
     [A, { up: true, got: [], tickets: new Map() }], [B, { up: true, got: [], tickets: new Map() }],
   ]);
   // The tenants, as the broker reaches them: each serves what it publishes and
@@ -56,6 +57,7 @@ async function setup(o: { searchLagMs?: number; issuer?: string } = {}) {
     }
     // A ticket the tenant minted gives back its consent once, and is unknown after.
     if (url.pathname === "/billing/trial/consent") {
+      if (t.consentFails) return new Response("secret detail of the tenant's failure", { status: t.consentFails });
       const { account, ticket } = JSON.parse(String(init?.body));
       const consent = account === ANA || account === BEA ? t.tickets.get(ticket) : undefined;
       t.tickets.delete(ticket);
@@ -612,4 +614,107 @@ Deno.test("one broker in two modes sends a sandboxed tenant's trial to the sandb
     assertEquals(await ask(path, "https://preview.example"), "sandbox", path);
     assertEquals(await ask(path, "https://shop.example.com"), "live", path);
   }
+});
+
+async function failFirstCharge(s: Awaited<ReturnType<typeof setup>>) {
+  const sub = await startTrial(s);
+  return { sub, portal: await portalOf(s) };
+}
+
+Deno.test("a failed first charge voids its open invoice before the cancel", async () => {
+  const s = await setup();
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const { sub, portal } = await failFirstCharge(s);
+  await s.press(`${portal}?sub=${sub.id}`, "trial_fail");
+  const [inv] = [...s.fake.held.invoices.values()];
+  assertEquals([inv.status, sub.status], ["void", "canceled"]);
+  const order = s.sent.filter((r) => r.path.startsWith("/v1/invoices/") || r.method === "DELETE").map((r) => `${r.method} ${r.path.replace(inv.id, "IN")}`);
+  assertEquals(order, ["GET /v1/invoices/IN", "POST /v1/invoices/IN/void", `DELETE /v1/subscriptions/${sub.id}`]);
+});
+
+Deno.test("a key without Invoices access is logged and the trial is still cancelled; any other invoice error is retried", async () => {
+  const s = await setup();
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const { sub, portal } = await failFirstCharge(s);
+  s.stripeDown.invoices = 403;
+  await s.press(`${portal}?sub=${sub.id}`, "trial_fail");
+  assertEquals(sub.status, "canceled", "cancelled though the invoice could not be read");
+  // Another error is Stripe's to send again, and nothing is cancelled meanwhile.
+  const bea = await startTrial(s, BEA);
+  const beaPortal = await portalOf(s, BEA);
+  s.stripeDown.invoices = 500;
+  await s.press(`${beaPortal}?sub=${bea.id}`, "trial_fail");
+  assertEquals(bea.status, "past_due");
+  s.stripeDown.invoices = 0;
+  assertEquals(await s.fake.emit("customer.subscription.updated", bea), true);
+  assertEquals([bea.status, [...s.fake.held.invoices.values()].at(-1)!.status], ["canceled", "void"]);
+  s.fake.close();
+});
+
+Deno.test("a first charge that was paid since is no failed trial: nothing is voided or cancelled", async () => {
+  const s = await setup();
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const sub = await startTrial(s);
+  s.fake.held.invoices.set("in_paid", { id: "in_paid", status: "paid", subscription: sub.id });
+  Object.assign(sub, { status: "past_due", latest_invoice: "in_paid", current_period_start: sub.trial_end });
+  assertEquals(await s.fake.emit("customer.subscription.updated", sub), true);
+  assertEquals(s.sent.filter((r) => r.method === "DELETE" || r.path.endsWith("/void")), []);
+  assertEquals(sub.status, "past_due");
+});
+
+Deno.test("a junk ticket spends the caller's trial bucket, never the tenant's", async () => {
+  const { call, prove, payouts, ticket } = await setup();
+  await prove(A, TRIAL);
+  await payouts(A);
+  const from = (client: string, body: unknown) => call("/trial/offer", {
+    method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": client }, body: JSON.stringify(body),
+  });
+  const junk = { tenant: A, account: ANA, ticket: "j".repeat(32) };
+  const statuses: number[] = [];
+  for (let i = 0; i < 61; i++) statuses.push((await from("1.1.1.1", junk)).status);
+  assertEquals([statuses.slice(0, 60).every((x) => x === 403), statuses[60]], [true, 429], "one caller's limit");
+  // Far more junk than a tenant's own 120 a minute, from callers that each stay under theirs.
+  for (let c = 2; c < 6; c++) for (let i = 0; i < 50; i++) assertEquals((await from(`2.2.2.${c}`, junk)).status, 403);
+  assertEquals((await from("3.3.3.3", { tenant: A, account: ANA, ticket: ticket(A) })).status, 200, "the tenant's bucket is whole");
+});
+
+Deno.test("two checkouts at once for one account open one Checkout", async () => {
+  const s = await setup();
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const [one, two] = await Promise.all([
+    s.post("/checkout", { tenant: A, account: ANA, plan: "analysis" }),
+    s.post("/trial/checkout", { tenant: A, account: ANA, ticket: s.ticket(A, s.consentTo()) }),
+  ]);
+  assertEquals([one.status, two.status], [200, 200]);
+  assertEquals([s.fake.held.customers.size, s.fake.held.sessions.size], [1, 1], "the first was closed when the second opened");
+});
+
+Deno.test("a second trial that raced in is cancelled at once and marked, and the first stands", async () => {
+  const s = await setup();
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const older = await startTrial(s);
+  // deno-lint-ignore no-explicit-any
+  const newer: Record<string, any> = { ...structuredClone(older), id: "sub_newer", created: older.created + 5, status: "trialing", metadata: { ...older.metadata } };
+  s.fake.held.subscriptions.set(newer.id, newer);
+  await s.fake.emit("customer.subscription.created", newer);
+  assertEquals([newer.status, newer.metadata.trial_duplicate, older.status], ["canceled", "1", "trialing"]);
+  assertEquals(newer.charges, 0, "nothing was charged");
+  const e = lastGot(s);
+  assertEquals([e.active, e.trial?.state], [true, "running"], "the account's trial is still the first");
+  // The first's own created event cancels nothing.
+  await s.fake.emit("customer.subscription.created", older);
+  assertEquals(older.status, "trialing");
+});
+
+Deno.test("a tenant that fails its consent callback is a generic 502 to the caller, and the log has why", async () => {
+  const s = await setup();
+  await s.prove(A, TRIAL);
+  s.tenants.get(A)!.consentFails = 500;
+  const res = await s.post("/trial/offer", { tenant: A, account: ANA, ticket: "t".repeat(32) });
+  assertEquals([res.status, await res.json()], [502, { error: "the tenant is unavailable" }]);
 });

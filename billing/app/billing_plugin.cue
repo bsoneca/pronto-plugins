@@ -40,7 +40,7 @@ import (
 	// `remindDays` is how long before the first charge the app reminds the account.
 	let sold = [for p, _ in plans {p}]
 	trial?: {
-		months: int & >=1 & <=24
+		months: int & >=1 & <=23
 		plans: [_, ...] & [...or(sold)]
 		remindDays: int & >=1 | *7
 	}
@@ -89,10 +89,10 @@ _billingGrantsChecks: {
 	noDay: (#Billing & _spec & {grants: "00000000-0000-4000-8000-00000000000a": analysis: "2027-02-30"}) == _|_ & true
 	noUuid: (#Billing & _spec & {grants: "ana": analysis: "2027-01-31"}) == _|_ & true
 	accepted: (#Billing & _spec & {grants: "00000000-0000-4000-8000-00000000000a": analysis: "2027-01-31"}) != _|_ & true
-	// A trial: of plans the app sells, 1 to 24 months, the reminder 7 days unless said.
+	// A trial: of plans the app sells, 1 to 23 months, the reminder 7 days unless said.
 	trialUnsold: (#Billing & _spec & {trial: {months: 3, plans: ["coach"]}}) == _|_ & true
 	trialNoPlan: (#Billing & _spec & {trial: {months: 3, plans: []}}) == _|_ & true
-	trialLong: (#Billing & _spec & {trial: {months: 25, plans: ["analysis"]}}) == _|_ & true
+	trialLong: (#Billing & _spec & {trial: {months: 24, plans: ["analysis"]}}) == _|_ & true
 	trialOk: (#Billing & _spec & {trial: {months: 3, plans: ["analysis"]}}) != _|_ & true
 	trialRemind: (#Billing & _spec & {trial: {months: 3, plans: ["analysis"]}}).trial.remindDays & 7
 }

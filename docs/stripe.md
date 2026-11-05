@@ -86,8 +86,13 @@ that, and for cancelling in the same place it was bought.
   subscription is `past_due`/`unpaid`, `metadata.trial` is `1` and `current_period_start` is
   `trial_end`) the broker marks `trial_failed` and cancels the subscription at once: no dunning,
   no surprise charge, whatever the dashboard's retry settings. It cancels only that first
-  charge, once; a later renewal's failure is Stripe's ordinary dunning. A Stripe error answers the
-  webhook 502, so Stripe sends it again.
+  charge, once; a later renewal's failure is Stripe's ordinary dunning. Its failed first invoice is voided
+  first (one paid since means the charge recovered, and the trial stands). A Stripe error answers
+  the webhook 502, so Stripe sends it again; a 403 on the invoice calls (a key without Invoices
+  access) is logged and the cancel goes on, since Stripe stops collecting on a cancelled
+  subscription. Two trials that raced past the broker's per-account lock are settled when the
+  newer's `customer.subscription.created` arrives: it is cancelled at once, marked
+  `trial_duplicate`, and the older stands.
 - **The state reaches the app** as the entitlement's optional `trial: {state, amount, currency,
   charges_at}` claim (`running`, `cancelled`, `converted`, `ended`, `failed`), which the service
   writes to `billing.trial` (`billing_trial_state`) after `billing_entitle`. `status` and
@@ -101,6 +106,11 @@ that, and for cancelling in the same place it was bought.
   Billing, "Subscriptions and emails", a link to a Stripe-hosted page), but not from a sandbox.
   That setting is the operator's to turn on in live; the app reminds in its own pages from
   `remindDays` meanwhile.
+
+The broker's Stripe key needs, for trials, Subscriptions write (the cancel and its marks) and
+Invoices read and write (to void). The trial is at most 23 months, so that its date plus the
+broker's one-day tolerance stays inside Stripe's 730 days. Rolling the broker back to an old one
+leaves `trial=1` subscriptions to ordinary dunning: it does not know to cancel a failed first charge.
 
 Release order: the broker first (an old one offers nothing, which is safe), then the app with
 the trial in its document and the new service and migration, then the flag. The webhook endpoint

@@ -33,7 +33,7 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
   const base = `${issuer.replace(/\/$/, "")}/fake/stripe`;
   const webhookSecret = `whsec_fake_${randomToken(12)}`;
   const accounts = new Map<string, Obj>(), customers = new Map<string, Obj>(), prices = new Map<string, Obj>();
-  const subscriptions = new Map<string, Obj>(), sessions = new Map<string, Obj>(), portals = new Map<string, Obj>(), links = new Map<string, Obj>();
+  const subscriptions = new Map<string, Obj>(), invoices = new Map<string, Obj>(), sessions = new Map<string, Obj>(), portals = new Map<string, Obj>(), links = new Map<string, Obj>();
   const idempotent = new Map<string, Obj>();
   const id = (prefix: string) => `${prefix}_${randomToken(10).replace(/[-_]/g, "x")}`;
   let broker: ((req: Request) => Promise<Response>) | undefined;
@@ -113,6 +113,11 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
       const c = { id: id("cus"), metadata: params.metadata ?? {}, indexed: Date.now() + searchLagMs };
       customers.set(c.id, c);
       return remember(c);
+    }
+    if (kind === "invoices" && oid) {
+      const i = invoices.get(oid) ?? missing("invoice");
+      if (sub === "void") i.status = "void";
+      return structuredClone(i) as T;
     }
     if (kind === "subscriptions" && oid) {
       const s = subscriptions.get(oid) ?? missing("subscription");
@@ -229,12 +234,16 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
           target.status = "canceled";
           await emit("customer.subscription.deleted", target);
         } else {
-          Object.assign(target, { status: "active", charges: target.charges + 1, current_period_start: target.trial_end, current_period_end: target.trial_end + 30 * DAY });
+          const inv = { id: id("in"), status: "paid", subscription: target.id };
+          invoices.set(inv.id, inv);
+          Object.assign(target, { status: "active", latest_invoice: inv.id, charges: target.charges + 1, current_period_start: target.trial_end, current_period_end: target.trial_end + 30 * DAY });
           await emit("customer.subscription.updated", target);
         }
       } else if (target && target.status === "trialing" && action === "trial_fail") {
         // The trial ends and the first charge fails.
-        Object.assign(target, { status: "past_due", current_period_start: target.trial_end, current_period_end: target.trial_end + 30 * DAY });
+        const inv = { id: id("in"), status: "open", subscription: target.id };
+        invoices.set(inv.id, inv);
+        Object.assign(target, { status: "past_due", latest_invoice: inv.id, current_period_start: target.trial_end, current_period_end: target.trial_end + 30 * DAY });
         await emit("customer.subscription.updated", target);
       } else if (target && target.status === "trialing" && action === "trial_week") {
         // The trial now ends in a week, as Stripe's reminder window opens.
@@ -262,7 +271,7 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
       accounts.set(a.id, a);
     },
     /** For tests: what the stand-in holds. */
-    held: { accounts, customers, prices, subscriptions },
+    held: { accounts, customers, prices, subscriptions, invoices, sessions },
     emit,
     /** Stops sending again what the broker has not taken. */
     close() { clearInterval(retrying); retrying = undefined; },

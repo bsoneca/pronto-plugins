@@ -92,8 +92,14 @@ try {
   result("a trial whose card is declined is past due", late.status === "past_due" || late.status === "unpaid", late.status);
   result("in the period its end opened", late.current_period_start === decline.trialEnd, String(late.current_period_start));
   result("the broker's rule 4 reads it as a failed first charge", firstChargeFailed(late));
+  // As the broker ends it: the failed first invoice voided, then the subscription cancelled.
+  const invoice = typeof late.latest_invoice === "string" ? await s<{ status: string }>("GET", `/v1/invoices/${late.latest_invoice}`) : undefined;
+  result("its first invoice is open", invoice?.status === "open", invoice?.status);
+  if (invoice?.status === "open") await s("POST", `/v1/invoices/${late.latest_invoice}/void`);
   await s("POST", `/v1/subscriptions/${late.id}`, { metadata: { trial_failed: "1" } });
   await s("DELETE", `/v1/subscriptions/${late.id}`);
+  const stillOpen = (await s<{ data: { status: string }[] }>("GET", "/v1/invoices", { customer: decline.customer, limit: 10 })).data.filter((i) => i.status === "open").length;
+  result("no invoice of the cancelled subscription stays open", stillOpen === 0, String(stillOpen));
   const ended = await s<Subscription>("GET", `/v1/subscriptions/${late.id}`);
   result("cancelled at once, marked failed, nothing paid", ended.status === "canceled" && ended.metadata.trial_failed === "1" && (await paidInvoices(decline.customer)) === 0, ended.status);
 

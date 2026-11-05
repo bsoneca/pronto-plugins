@@ -136,7 +136,7 @@ export function parsePublished(doc: unknown): { ok: true; published: Published }
   if (d.trial === undefined) return { ok: true, published: { owner: d.owner, plans } };
   const t = d.trial as Record<string, unknown> | null;
   if (typeof t !== "object" || t === null) return { ok: false, error: "trial: an object" };
-  if (!Number.isInteger(t.months) || (t.months as number) < 1 || (t.months as number) > 24) return { ok: false, error: "trial: months 1 to 24" };
+  if (!Number.isInteger(t.months) || (t.months as number) < 1 || (t.months as number) > 23) return { ok: false, error: "trial: months 1 to 23" };
   if (!Array.isArray(t.plans) || t.plans.length === 0 || !t.plans.every((x) => typeof x === "string" && Object.hasOwn(plans, x))) {
     return { ok: false, error: "trial: plans the tenant sells" };
   }
@@ -202,6 +202,7 @@ export interface Subscription {
   /** Seconds. A trial's subscription has them; others may leave them out. */
   created?: number;
   cancel_at_period_end?: boolean;
+  latest_invoice?: string | null;
   trial_end?: number | null;
   current_period_start?: number;
 }
@@ -236,7 +237,7 @@ export function trialOf(subs: readonly Subscription[], tenant: string, account: 
   let newest: Subscription | undefined;
   for (const s of subs) {
     if (s.metadata.tenant !== tenant || s.metadata.account !== account || s.metadata.plan !== plan || s.metadata.trial !== "1") continue;
-    if (s.status === "incomplete" || s.status === "incomplete_expired") continue;
+    if (s.status === "incomplete" || s.status === "incomplete_expired" || s.metadata.trial_duplicate === "1") continue;
     if (!newest || (s.created ?? 0) > (newest.created ?? 0)) newest = s;
   }
   if (!newest) return undefined;

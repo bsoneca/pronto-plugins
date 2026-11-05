@@ -117,14 +117,14 @@ Deno.test("a published trial is months of plans the tenant sells, with a reminde
   const plans = { plus: { name: "Plus", interval: "month", prices: { usd: 499 } }, pro: { name: "Pro", interval: "month", prices: { usd: 999 } } };
   const ok = parsePublished({ owner: O, plans, trial: { months: 3, plans: ["plus"] } });
   assertEquals(ok.ok && ok.published.trial, { months: 3, plans: ["plus"], remindDays: 7 }, "the reminder defaults to 7 days");
-  const own = parsePublished({ owner: O, plans, trial: { months: 24, plans: ["plus", "pro"], remindDays: 2 } });
-  assertEquals(own.ok && own.published.trial, { months: 24, plans: ["plus", "pro"], remindDays: 2 });
+  const own = parsePublished({ owner: O, plans, trial: { months: 23, plans: ["plus", "pro"], remindDays: 2 } });
+  assertEquals(own.ok && own.published.trial, { months: 23, plans: ["plus", "pro"], remindDays: 2 });
   assertEquals(parsePublished({ owner: O, plans }).ok && !("trial" in (parsePublished({ owner: O, plans }) as { published: object }).published), true, "none published, none offered");
   for (const [trial, why] of [
     [null, "trial: an object"],
-    [{ months: 0, plans: ["plus"] }, "trial: months 1 to 24"],
-    [{ months: 25, plans: ["plus"] }, "trial: months 1 to 24"],
-    [{ months: 1.5, plans: ["plus"] }, "trial: months 1 to 24"],
+    [{ months: 0, plans: ["plus"] }, "trial: months 1 to 23"],
+    [{ months: 24, plans: ["plus"] }, "trial: months 1 to 23"],
+    [{ months: 1.5, plans: ["plus"] }, "trial: months 1 to 23"],
     [{ months: 3, plans: [] }, "trial: plans the tenant sells"],
     [{ months: 3, plans: ["coach"] }, "trial: plans the tenant sells"],
     [{ months: 3, plans: ["toString"] }, "trial: plans the tenant sells"],
