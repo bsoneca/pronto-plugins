@@ -1,0 +1,61 @@
+{
+ "key": "4d7526088b5af72cefdb316a6538cacf90e3a9ea0589d9933bd9f0cfd46206c0",
+ "at": "2026-11-05T22:20:18.281Z",
+ "observed": {
+  "read": {
+   "/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts": "d97fd79bcc45edc6b62c2dbd145449be6b154bae45da44337e511afc56303d2c"
+  },
+  "dir": {},
+  "stat": {},
+  "env": {},
+  "tree": {},
+  "cmd": [
+   "[\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-18e68107517812d6\"],\".\",[]]",
+   "[\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-411d949041e51a0e\"],\".\",[]]",
+   "[\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-9c61e23d4d995919\"],\".\",[]]",
+   "[\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-a6a7fb52f4592d3c\"],\".\",[]]",
+   "[\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-baca86ed23dbf90f\"],\".\",[]]",
+   "[\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-c8537eb1daf38114\"],\".\",[]]",
+   "[\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-f63fe24584f48541\"],\".\",[]]",
+   "[\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-fbeceb0aa8b8a85c\"],\".\",[]]",
+   "[\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-ff8341dfb4196610\"],\".\",[]]"
+  ]
+ },
+ "lines": [
+  "suite stripe",
+  "cases 896f7739c59dadfe69c300d0f0ad5e3862a90d2e220b1ac178cd14cfb44b6c92",
+  "jobs 1",
+  "file tests/unit.ts 5299ee134265c1802354c3a8ec781bd7eba9b7a9790a1edb9f398a517d6ae12b",
+  "file tests/unit/select.js f04983b61baf86539ac5bafb0fccf9e67847f614866b4f243551d3b179e163b1",
+  "file tests/unit/schema.cue c99dd3783e892883aeb6192564c6e26d36bc7b0bf7a7991a401f4c431d2de1c6",
+  "file mise.lock d04b8b610b41c786883f0fd67b41d2cac0ca38562e7396ca8caf5e12d79cbfe1",
+  "file deno.json absent",
+  "file deno.jsonc absent",
+  "file deno.lock absent",
+  "file package.json absent",
+  "deno 2.9.8",
+  "args [\"stripe\"]",
+  "allow read=granted write=granted env=granted run=granted net=granted sys=prompt ffi=prompt",
+  "env CUE 50244208da1de5f9026c35f01ebdbb249b3ee9e70893e0d14ef5901a59aee9d7",
+  "module tests/unit/registry.js d611efd1b4a96a3bb28c2a4870938665c2801aac607f8fc7ae83bcd7f9057b31",
+  "module billing/broker/core.ts c075de10224cbaf4dc64e18163c180cb6eefbda1684060c967a7e747b905916f",
+  "module billing/connect.ts 641439c3ec9e2988cd84957a2577ef660b917a9dff72293ea0f48d4969ce3540",
+  "module billing/shared.ts c43dd872da08c368514a03d16ce4c8157eba59b4e3fed7cea2c9df61b5f161e9",
+  "module gcp/deploy.ts 2abeb9509276f07226414abc31a1fd9142401ab341eb7235db18ea05a839c1ce",
+  "module gcp/release_target.ts 393262ec1309fee99f6459a209693014e5d3afbd2ca810a2ea746ec444293101",
+  "module intents/release.ts ea823de904fe1e5ddd0ad3e7e830f22a1c30fffb14af932c8aa1548d2aab9d83",
+  "module intents/run.ts 3137ad06e3e40c841bb0d78753da1b6c43943f6df8126be268f102f6abe1992b",
+  "module tests/unit/probes.js dafb02227fc0d91c074c9b44b9037ddc82276041df209637cf5ab08165459f90",
+  "module tests/unit/shops.js 874101429ff3bce7fde5315ba15d0882ed5f390031b9e983464dc38637897b98",
+  "read billing/install.ts d97fd79bcc45edc6b62c2dbd145449be6b154bae45da44337e511afc56303d2c",
+  "cmd [\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-18e68107517812d6\"],\".\",[]]",
+  "cmd [\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-411d949041e51a0e\"],\".\",[]]",
+  "cmd [\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-9c61e23d4d995919\"],\".\",[]]",
+  "cmd [\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-a6a7fb52f4592d3c\"],\".\",[]]",
+  "cmd [\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-baca86ed23dbf90f\"],\".\",[]]",
+  "cmd [\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-c8537eb1daf38114\"],\".\",[]]",
+  "cmd [\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-f63fe24584f48541\"],\".\",[]]",
+  "cmd [\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-fbeceb0aa8b8a85c\"],\".\",[]]",
+  "cmd [\"/Users/bruno/.deno/bin/deno\",[\"run\",\"--no-config\",\"--allow-read\",\"--allow-write\",\"/Users/bruno/code/bsoneca/pronto-plugins-wt-trial/billing/install.ts\",\"/var/folders/3j/vgxjqv5n7jl196pqgrsgg_y00000gn/T/connect-stripe-ff8341dfb4196610\"],\".\",[]]"
+ ]
+}
