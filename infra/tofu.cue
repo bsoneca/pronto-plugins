@@ -65,7 +65,7 @@ import (
 
 	for P in state.projects {
 		let adopted = {
-			for kind in ["apis", "iam", "members", "serviceAccounts", "repositories", "repositoryIam", "buckets", "secrets", "runJobs", "runServices", "databases", "sqlUsers", "apiKeys", "identityPlatform", "budgets", "hostingSites"] {
+			for kind in ["apis", "iam", "members", "serviceAccounts", "repositories", "repositoryIam", "buckets", "secrets", "runJobs", "runServices", "databases", "sqlUsers", "sqlBackups", "apiKeys", "identityPlatform", "budgets", "hostingSites"] {
 				(kind): {for n in *P.adopt[kind] | [] {(n): true}}
 			}
 		}
@@ -464,6 +464,37 @@ import (
 			}
 		}
 
+		// An instance someone else keeps, of which OpenTofu holds the backups alone: imported, never
+		// made, destroyed or replaced, and every setting but backup_configuration left as it is.
+		for inst, b in P.sqlBackups if P.adoptAll || adopted.sqlBackups[inst] != _|_ {
+			let k = (#name & {in: "\(P.id)_\(inst)"}).out
+			tofu: resource: google_sql_database_instance: (k): {
+				project:             P.id
+				name:                inst
+				region:              b.region
+				database_version:    b.databaseVersion
+				deletion_protection: true
+				settings: {
+					tier: b.tier
+					backup_configuration: {
+						enabled:                        true
+						start_time:                     b.startTime
+						point_in_time_recovery_enabled: b.pointInTimeRecovery
+						transaction_log_retention_days: b.transactionLogDays
+						backup_retention_settings: {retained_backups: b.retainedBackups, retention_unit: "COUNT"}
+					}
+				}
+				lifecycle: {
+					prevent_destroy: true
+					ignore_changes: list.Concat([
+						["database_version", "root_password", "settings[0].tier"],
+						[for a in _sqlInstanceOthers {"settings[0].\(a)"}],
+					])
+				}
+			}
+			_imports: "google_sql_database_instance.\(k)": {id: "projects/\(P.id)/instances/\(inst)", project: P.id}
+		}
+
 		// A user's password is made by OpenTofu (random_password) and written as a version of the
 		// secrets named, so it is in OpenTofu's state (a private, versioned bucket) and in Secret
 		// Manager, never in this one. A user is always made here, never imported.
@@ -490,3 +521,17 @@ import (
 		}
 	}
 }
+
+// The settings of a Cloud SQL instance (google 7.x) other than its tier and backup_configuration,
+// which an instance whose backups alone are this state's (sqlBackups) leaves to its owner.
+_sqlInstanceOthers: [
+	"activation_policy", "auto_upgrade_enabled", "availability_type", "collation", "connector_enforcement",
+	"data_api_access", "data_disk_provisioned_iops", "data_disk_provisioned_throughput",
+	"deletion_protection_enabled", "disk_autoresize", "disk_autoresize_limit", "disk_size", "disk_type",
+	"edition", "enable_dataplex_integration", "enable_google_ml_integration", "pricing_plan",
+	"replication_lag_max_seconds", "retain_backups_on_delete", "time_zone", "user_labels", "active_directory_config",
+	"advanced_machine_features", "connection_pool_config", "data_cache_config", "database_flags",
+	"deny_maintenance_period", "entraid_config", "final_backup_config", "insights_config",
+	"ip_configuration", "location_preference", "maintenance_window", "password_validation_policy",
+	"read_pool_auto_scale_config", "sql_server_audit_config",
+]

@@ -441,6 +441,7 @@ _always: #Plan & {
 			"client-id": {source: "the operator", made: true, placeholder: "unset", accessors: "serviceAccount:app-svc@example-project-123.iam.gserviceaccount.com": true}
 		}
 		sqlUsers: "db-1": app: {password: "db-password", url: "db-url", database: "app", query: "&options=-c%20role%3Dviewer"}
+		sqlBackups: "db-1": {databaseVersion: "POSTGRES_18", tier: "db-f1-micro", startTime: "07:00"}
 		runServices: always: {
 			location:       "us-central1", image:                                       "registry.example.com/exporter:1", port: 9399
 			serviceAccount: "app-svc@example-project-123.iam.gserviceaccount.com", cpu: "250m", memory:                          "128Mi", timeout: "60s", maxInstances: 1
@@ -480,3 +481,19 @@ alwaysUserPinned: [for e in _al.google_cloud_run_v2_service.example_project_123_
 // The service's own secret files come first, in the order of their directories, as they always did;
 // a sidecar-only one follows (an existing service's volumes are not reordered by a sidecar's).
 alwaysVolumeOrder: [for v in _al.google_cloud_run_v2_service.example_project_123_always.template.volumes {v.name}] & ["cfg", "scrape", "cloudsql"]
+// An instance whose backups alone are this state's: imported, never destroyed, and every setting
+// but its backups (and the version and tier the provider requires) left to its owner.
+alwaysBackups: _al.google_sql_database_instance.example_project_123_db_1 & {
+	name:                "db-1"
+	database_version:    "POSTGRES_18"
+	deletion_protection: true
+	settings: backup_configuration: {enabled: true, start_time: "07:00", point_in_time_recovery_enabled: true, transaction_log_retention_days: 3, backup_retention_settings: {retained_backups: 7, retention_unit: "COUNT"}}
+	lifecycle: prevent_destroy: true
+}
+alwaysBackupsKeepsFlags: list.Contains(_al.google_sql_database_instance.example_project_123_db_1.lifecycle.ignore_changes, "settings[0].database_flags") & true
+alwaysBackupsKeepsTier:  list.Contains(_al.google_sql_database_instance.example_project_123_db_1.lifecycle.ignore_changes, "settings[0].tier") & true
+alwaysBackupsNotOwned: [for a in _al.google_sql_database_instance.example_project_123_db_1.lifecycle.ignore_changes if strings.Contains(a, "backup_configuration") {a}] & []
+alwaysBackupsImported: [for i in _always.tofu.import if i.to == "google_sql_database_instance.example_project_123_db_1" {i.id}] & ["projects/example-project-123/instances/db-1"]
+// A start that is not on the hour, or more logs than Enterprise keeps, is refused.
+backupsOffHour: _ok & {sqlBackups: x: {databaseVersion: "POSTGRES_18", tier: "t", startTime: "07:30"}} & matchN(0, [#Project])
+backupsTooManyLogDays: _ok & {sqlBackups: x: {databaseVersion: "POSTGRES_18", tier: "t", startTime: "07:00", transactionLogDays: 8}} & matchN(0, [#Project])

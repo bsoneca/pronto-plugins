@@ -55,9 +55,11 @@ import "list"
 	// Users of such an instance, by instance and name, each with a password OpenTofu makes and
 	// puts in the secrets named (never in this state, always in its own).
 	sqlUsers: [Instance=string]: [Name=string]: #SqlUser
-	repositories: [Name=string]: #Repository
-	buckets: [Name=#BucketName]: #Bucket
-	secrets: [Name=string]:      #Secret
+	// The automated backups of a Cloud SQL instance another owner makes and keeps (#SqlBackups).
+	sqlBackups: [Instance=string]: #SqlBackups
+	repositories: [Name=string]:   #Repository
+	buckets: [Name=#BucketName]:   #Bucket
+	secrets: [Name=string]:        #Secret
 	// Firebase and Identity Platform, and the budgets that watch the project's spend. Their APIs
 	// are called with this project as the quota project (tofu.cue), as Google asks of a user's login.
 	apiKeys: [Key=string]: #ApiKey
@@ -103,7 +105,7 @@ import "list"
 #Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases" | "sqlUsers" | "apiKeys" | "budgets" | "hostingSites"
 
 // identityPlatform is adopted by naming "config": a project has one.
-#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "sqlUsers" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies"
+#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "sqlUsers" | "sqlBackups" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies"
 
 #Found: "serviceAccounts" | "members"
 
@@ -224,6 +226,27 @@ import "list"
 	database:  string
 	region:    *"us-central1" | string
 	query:     *"" | =~"^&"
+}
+
+// The automated backups of a Cloud SQL instance someone else makes and keeps (a release engine):
+// OpenTofu imports the instance and holds its backup configuration alone. Every other setting is
+// ignored, so a tier or flags its owner changes are never drift, and the instance is never
+// destroyed or replaced from here. `databaseVersion` and `tier` are the instance's own, which the
+// provider requires; this state never changes them.
+//
+// Turning point-in-time recovery on or off restarts the instance (Cloud SQL's instance settings):
+// apply such a change at a quiet hour. Backups alone restart nothing.
+#SqlBackups: {
+	region:          *"us-central1" | string
+	databaseVersion: =~"^POSTGRES_[0-9]+$"
+	tier:            string
+	// When the daily backup starts, in UTC (HH:00): Cloud SQL takes it within the four hours after.
+	startTime: =~"^([01][0-9]|2[0-3]):00$"
+	// How many daily backups are kept.
+	retainedBackups: *7 | int & >=1 & <=365
+	// Point-in-time recovery, and the days of transaction logs it keeps (1 to 7 on Enterprise).
+	pointInTimeRecovery: *true | bool
+	transactionLogDays:  *3 | int & >=1 & <=7
 }
 
 // A Cloud Monitoring notification channel: mail to one address.
