@@ -99,6 +99,16 @@ elif a[:3] == ["storage", "buckets", "update"]:
         b["lifecycle"] = json.load(open(opt("lifecycle-file")))
 elif a[:3] == ["storage", "buckets", "add-iam-policy-binding"]:
     state["buckets"][a[3][len("gs://"):]]["readers"].append([opt("member"), opt("role")])
+elif a[:3] == ["monitoring", "snoozes", "create"]:
+    snoozes = state.setdefault("snoozes", [])
+    name = f"projects/{opt('project')}/snoozes/{len(snoozes) + 1}"
+    snoozes.append({"name": name, "policies": opt("criteria-policies"), "start": opt("start-time"), "end": opt("end-time"), "ended": False, "name_display": opt("display-name")})
+    print(name)
+elif a[:3] == ["monitoring", "snoozes", "update"]:
+    found = [z for z in state.get("snoozes", []) if z["name"] == a[3]]
+    if not found:
+        fail(f"{a[3]} not found: 404.")
+    found[0].update(end=opt("end-time"), ended=True)
 else:
     fail(f"the stand-in doesn't speak gcloud {' '.join(a)}")
 save()

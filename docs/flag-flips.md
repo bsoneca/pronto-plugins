@@ -73,6 +73,24 @@ Three rules hold that, each enforced by code rather than by convention:
   Manager. That credential is imported into the browser's virtual authenticator, so no real
   person's account is used. The tester never goes online in the lobby, so no player sees it.
 
+- **Temporary targeting.** A tester is targeted only by the canary, for the live stage. A flag's
+  `accounts` may never name one: the CUE refuses it (`flagsLive.testers` and `accounts` are
+  disjoint), so no final or rolled-back version names a tester. Whatever fails after the canary
+  is written, an error or a crash of the cases' command, writes the pre-canary version again
+  (nu's `try`/`finally`); only a push killed outright leaves the canary, which is on for the
+  tester alone, and `rollback` removes it.
+- **The credential is the release identity's.** `flagsLive.runAs` is the service account the live
+  cases run as: the live command gets `CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=<runAs>`, so it
+  reads the tester's credential from Secret Manager as that account. The operator needs only
+  token-creator on it, never the secret. A push with testers and no `runAs` refuses the live stage.
+- **A monitoring window.** `flagsLive.alert` names the Cloud Monitoring alert policy that fires on
+  a tester's sign-in. A push snoozes it (`gcloud monitoring snoozes`) before the canary is written
+  and ends the snooze when the run ends, passed or rolled back (it also lapses on its own after
+  two hours). A sign-in at any other time still fires it.
+- **What each app enforces server-side** (the plugin cannot): the account carries a tester marker;
+  checkout refuses it; it is never in grants; the lobby, tables, seeks and chat refuse it; and its
+  gold and unlocks are reset after each run.
+
 The plugin's own tests run every stage against stand-ins for gcloud and OFREP (`fake_gcloud.py`,
 `fake_ofrep.py`). No production flag was flipped while this was built.
 

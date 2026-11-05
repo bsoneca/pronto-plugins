@@ -574,7 +574,7 @@ cases before the flag is on for everyone, and `rollback` stays the fast way out
 (it runs no cases):
 
 ```cue
-flagsLive: {url: "https://shop.example", testers: ["<a production account only tests sign in as>"]}
+flagsLive: {url: "https://shop.example", testers: ["<a production account only tests sign in as>"], runAs: "<release identity>@<project>.iam.gserviceaccount.com", alert: "projects/<project>/alertPolicies/<id>"}
 flagsCases: {
 	local: "deno run -A tests/flip.ts"  // at hand; env FLAG, ONLY, UNIT_ONLY, SLOW=1
 	live:  "deno run -A tests/flip.ts"  // on production; env FLAG, ONLY, APP_URL, FLAGS_TESTER
@@ -603,6 +603,18 @@ no cases. `pronto-flags push <app-dir>` then:
 `--skip-live "<why>"` leaves out 3 and 4, for an app with no testers yet. Both
 reasons are kept on the version, and `pronto-flags history` shows each version's
 stage, flag, cases verdict and reason.
+
+A tester is targeted only while the live stage runs: the CUE refuses a flag
+whose `accounts` name one, and whatever fails after the canary writes the version
+before it again. The live cases run as `flagsLive.runAs` (the command gets
+`CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT`), the release identity that reads the
+tester's credential, so the operator needs only token-creator on it, never the
+secret; a push with testers and no `runAs` refuses the live stage.
+`flagsLive.alert`, the Cloud Monitoring policy that fires on a tester's
+sign-in, is snoozed for exactly the live stage. The app enforces the rest on
+its server (tester marker, no checkout, never in grants, no lobby, tables, seeks
+or chat, gold and unlocks reset after each run); see
+[docs/flag-flips.md](docs/flag-flips.md).
 
 What runs on production is held narrow. Only scenarios marked `production: true`
 run there, and the scenario schema allows one actor, who signs in as the tester

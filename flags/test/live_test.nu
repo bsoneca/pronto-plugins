@@ -95,10 +95,10 @@ def full-spec [premium: bool, theme: string] {
 	$"package shop
 flags: premium: {default: ($premium), local: true}
 flags: theme: {default: \"($theme)\"}
-flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", url: \"https://shop.example\", testers: [\"tester-1\"]}
+flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", url: \"https://shop.example\", testers: [\"tester-1\"], runAs: \"shop-run@shop-prod.iam.gserviceaccount.com\", alert: \"projects/shop-prod/alertPolicies/42\"}
 flagsCases: {
 	local: \"echo local $FLAG $ONLY $UNIT_ONLY $SLOW >> ran.log; test ! -f fail-local\"
-	live:  \"echo live $FLAG $ONLY $APP_URL $FLAGS_TESTER >> ran.log; test ! -f fail-live\"
+	live:  \"echo live $FLAG $ONLY $APP_URL $FLAGS_TESTER $CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT >> ran.log; test ! -f crash-live || kill -9 $$; test ! -f fail-live\"
 }
 GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
 " | save -f $"($app)/flags_spec.cue"
@@ -129,7 +129,7 @@ let canary = (premium (newest 1))
 check ($canary.targeting.if.0.in.1 == ["tester-1"] and $canary.targeting.if.1 == "new" and $canary.variants.new == true and $canary.variants.old == false) "flip: the canary is on for the testers alone"
 check ((newest 0).metadata.stage == "all" and (newest 0).metadata.cases == "passed" and (newest 0).metadata.flag == "premium") "flip: the final version is for all, cases passed"
 check ((premium (newest 0)).variants.default == true) "flip: the final version holds the new value"
-check ((ran) == ["local premium buy,shelf price 1" "live premium buy https://shop.example tester-1"]) "flip: the cases ran at hand, slowed, then the production ones as the tester"
+check ((ran) == ["local premium buy,shelf price 1" "live premium buy https://shop.example tester-1 shop-run@shop-prod.iam.gserviceaccount.com"]) "flip: the cases ran at hand, slowed, then the production ones as the tester"
 let hist = (with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state} {
 	^$nu.current-exe -c $"use ($here)/../live.nu history; history ($app) | to json" | complete
 }).stdout | from json
@@ -151,6 +151,13 @@ check ($lv.exit_code != 0 and ($lv.stderr | str contains "rolled back")) "live f
 check ((object | length) == $n1 + 2 and (premium (newest 0)) == $pre and (newest 0).metadata.stage == "rolled-back" and (newest 1).metadata.stage == "testers") "live failure: the pre-canary flags are the newest version again"
 rm $"($app)/fail-live"
 
+# The cases' command dies under the push (killed): the same, back to the version before the canary.
+touch $"($app)/crash-live"
+let n1b = (object | length)
+let cr = (livex [push $app])
+check ($cr.exit_code != 0 and (object | length) == $n1b + 2 and (premium (newest 0)) == $pre and (newest 0).metadata.stage == "rolled-back") "a crashed live command: rolled back"
+rm $"($app)/crash-live"
+
 # An OFREP that never answers the new value: back as well.
 let n2 = (object | length)
 let st = (livex [push $app] {FAKE_OFREP_STALE: "1"})
@@ -163,11 +170,35 @@ let ran3 = (ran | length)
 live push $app | ignore
 check ((object | length) == $n3 + 1 and (ran | length) == $ran3 and (newest 0).metadata.stage == "all") "unchanged defaults: written with no cases run"
 
+# The monitoring window: one snooze per live stage, made before the canary and ended with the run, passed or not.
+let zs = (held | get snoozes)
+check (($zs | length) == 4 and ($zs | all {|z| $z.ended and $z.policies == "projects/shop-prod/alertPolicies/42" }) and ($zs.0.start <= $zs.0.end)) "snooze: each live stage has one, ended with the run"
+
 # --skip-live: the cases at hand only, and the reason kept.
 full-spec false "light"
 let n4 = (object | length)
 live push $app --skip-live "no tester yet" | ignore
 check ((object | length) == $n4 + 1 and (newest 0).metadata.cases == "local-only" and ((newest 0).metadata.note | str contains "no tester yet") and ((ran | last) | str starts-with "local")) "--skip-live: no canary, the reason kept"
+
+# Targeted only during a run: no version outlives a run with a tester named in it.
+let named = (object | where {|v| $v.data | str contains "tester-1" } | each {|v| $v.metadata.stage? | default "" })
+check ($named | all {|st| $st == "testers" }) "testers: named only in the canary versions"
+check (($named | length) == 4) "testers: the canaries are the only ones"
+
+# A flag cannot name a tester in its accounts, nor a live stage run without the release identity.
+$"package shop
+flags: premium: {default: false, local: true, accounts: [\"tester-1\"]}
+flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", testers: [\"tester-1\"]}
+" | save -f $"($app)/flags_spec.cue"
+let named_in = (livex [show $app])
+check ($named_in.exit_code != 0 and ($named_in.stderr | str replace -a -r "[ |\\n]+" " " | str contains "names the tester tester-1 in accounts")) "a tester named in a flag's accounts is refused"
+full-spec true "light"
+open --raw $"($app)/flags_spec.cue" | str replace -r 'runAs: [^,]*, ' '' | save -f $"($app)/flags_spec.cue"
+full-spec true "light"
+open --raw $"($app)/flags_spec.cue" | str replace -r ', runAs: [^,]*,' ',' | save -f $"($app)/flags_spec.cue"
+let n5 = (object | length)
+let norun = (livex [push $app])
+check (($norun.stderr | str contains "flagsLive.runAs") and (object | length) == $n5) "no runAs: the live stage is refused"
 
 rm -rf $dir
 print "flags: live commands pass"
