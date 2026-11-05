@@ -10,6 +10,10 @@ package unit
 
 cases: [Name=string]: #Case
 
+// How many processes a suite's cases run over at once (tests/unit.ts), when not one: only for a
+// suite whose cases share nothing outside their own process.
+jobs: [#Suite]: int & >=1
+
 #Case: {
 	suite: #Suite
 	steps: [#Step, ...#Step]
