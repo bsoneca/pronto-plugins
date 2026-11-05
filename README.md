@@ -566,6 +566,8 @@ its next load.
 
 ### A flip runs its cases
 
+The design, and why it has this shape: [docs/flag-flips.md](docs/flag-flips.md).
+
 A flag's value can break what it turns on, and a push runs no release check. So
 a push that changes a flag's default value, or adds a flag, runs that flag's
 cases before the flag is on for everyone, and `rollback` stays the fast way out
