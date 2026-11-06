@@ -64,6 +64,22 @@ def provenance [app: path] {
 	{who: $who, commit: ($commit + (if ($dirty | is-empty) { "" } else { "+edits" }))}
 }
 
+# The flags written where else a flagd reads them (flagsLive.mirrors): a release@k8s node's ConfigMap,
+# which its flagd mounts (release.cue's services.flagd.files), applied over ssh as the node's kubectl.
+# Each write of the live object is written there too: a push, its canary and restore, a rollback.
+# A mirror that fails warns and the push goes on (a staging node), unless it is required (production).
+def mirror [at: record, text: string] {
+	for m in ($at.mirrors? | default []) {
+		let key = ($m.key? | default "flags.json")
+		let cm = ({apiVersion: v1, kind: ConfigMap, metadata: {name: $m.configMap, namespace: $m.namespace}, data: {$key: $text}} | to json)
+		let r = ($cm | ^ssh -o BatchMode=yes -o ConnectTimeout=20 $m.ssh $"($m.kubectl? | default 'sudo k3s kubectl') apply -f -" | complete)
+		let where = $"($m.ssh)'s ($m.namespace)/($m.configMap)"
+		if $r.exit_code == 0 { print $"flags: mirrored to ($where)" } else if ($m.required? | default false) {
+			error make {msg: $"flags: the mirror at ($where) failed: ($r.stderr | str trim)"}
+		} else { print -e $"flags: WARNING: the mirror at ($where) failed, so it still serves its last flags: ($r.stderr | str trim)" }
+	}
+}
+
 # --meta: more of what the version keeps (meta-of); --from: the generation the write is over, when
 # an earlier step of the same push read it. The new generation is returned.
 def write-flags [at: record, doc: record, app: path, --meta: string = "", --from: string = ""]: nothing -> string {
@@ -74,6 +90,7 @@ def write-flags [at: record, doc: record, app: path, --meta: string = "", --from
 	let p = (provenance $app)
 	gc storage cp $file $at.url $"--if-generation-match=($from)" --content-type application/json --cache-control no-store $"--custom-metadata=pushed-by=($p.who),commit=($p.commit)($meta)" | ignore
 	rm $file
+	mirror $at ($doc | to json --indent 2)
 	let now = (generation $at.url)
 	print $"flags: ($at.url) is version ($now) \(was ($from)\); flagd reads it within seconds, and a page on its next load"
 	summary $doc | print
@@ -228,6 +245,7 @@ def wait-ofrep [site: string, tester: string, want: list<record>]: nothing -> bo
 def restore [at: record, app: path, to: string, now: string, names: string, why: string] {
 	let p = (provenance $app)
 	gc storage cp $"($at.url)#($to)" $at.url $"--if-generation-match=($now)" $"--custom-metadata=pushed-by=($p.who)(meta-of {stage: rolled-back, flag: $names, cases: failed, note: $why})" | ignore
+	mirror $at (gc storage cat $at.url)
 	print -e $"flags: ($at.url) is version ($to)'s flags again, as version (generation $at.url)"
 }
 
@@ -357,6 +375,7 @@ export def rollback [app: path, version?: string] {
 	let to = if $version != null { $version } else { $all | where version != $live | get version.0? }
 	if $to == null or ($all | where version == $to | is-empty) { error make {msg: $"no version ($to) of ($at.url) to roll back to: `pronto-flags history` lists them"} }
 	gc storage cp $"($at.url)#($to)" $at.url $"--if-generation-match=($live)" | ignore
+	mirror $at (gc storage cat $at.url)
 	print $"flags: ($at.url) is ($to)'s flags again, as version (generation $at.url)"
 }
 

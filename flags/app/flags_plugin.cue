@@ -106,6 +106,19 @@ flagsLive?: {
 	// The Cloud Monitoring alert policy that fires on a tester's sign-in, as
 	// projects/<project>/alertPolicies/<id>. A push snoozes it for the live stage alone.
 	alert?: =~"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/alertPolicies/[0-9]+$"
+	// Where else a flagd reads the flags: a release@k8s node's ConfigMap, which its flagd mounts
+	// (release.cue's services.flagd.files) and reads as a file source. Each write of the object
+	// (push, its canary and restore, rollback) is applied there too, over ssh, as the node's kubectl.
+	// A mirror that fails warns, so a staging node never holds a flip back; a required one (the
+	// node is production) fails the push.
+	mirrors: [...{
+		ssh!:       =~"^[a-z_][a-z0-9_-]*@[A-Za-z0-9.-]+$"
+		namespace!: =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+		configMap!: =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+		key:        *"flags.json" | =~"^[A-Za-z0-9_.-]+$"
+		kubectl:    *"sudo k3s kubectl" | string
+		required:   *false | bool
+	}]
 }
 
 // A tester is targeted only while a push runs its live stage, as the canary, and never in a flag's

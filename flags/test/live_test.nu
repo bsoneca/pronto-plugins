@@ -214,5 +214,28 @@ open --raw $"($app)/flags_spec.cue" | str replace 'echo local $FLAG' 'echo sayt=
 let pinned = (livex [push $app --skip-live "no tester yet"] {SAYT_VERSION: "v0.0.1"})
 check ($pinned.exit_code == 0 and ((ran | last) | str starts-with "sayt=none")) "the cases don't inherit this tool's SAYT_VERSION"
 
+# A mirror (flagsLive.mirrors): each write of the object is applied to a node's ConfigMap over ssh;
+# a failing mirror warns, unless it is required. ssh is a stand-in that keeps what it was sent.
+let bin = $"($dir)/bin"
+mkdir $bin
+let sent = $"($dir)/ssh-sent"
+$"#!/bin/sh\necho \"$@\" >> ($sent).args\nif [ -n \"$SSH_FAIL\" ]; then echo refused >&2; exit 255; fi\ncat > ($sent)\n" | save -f $"($bin)/ssh"
+^chmod +x $"($bin)/ssh"
+full-spec false "light"
+"flagsLive: mirrors: [{ssh: \"ops@node.example\", namespace: \"shop\", configMap: \"shop-flags\"}]\n" | save -a $"($app)/flags_spec.cue"
+"flags: mirrored: {default: false, local: true}\n" | save -a $"($app)/flags_spec.cue"
+let m = (livex [push $app] {PATH: ([$bin] | append $env.PATH)})
+let cm = (open --raw $sent | from json)
+check ($m.exit_code == 0 and $cm.kind == "ConfigMap" and $cm.metadata == {name: "shop-flags", namespace: "shop"}) "a push applies the mirror's ConfigMap"
+check (($cm.data."flags.json" | from json | get flags | columns | any {|c| $c == "mirrored" }) and (open --raw $"($sent).args" | str contains "ops@node.example sudo k3s kubectl apply -f -")) "the mirror holds the flags pushed, applied as the node's kubectl"
+"flags: warned: {default: false, local: true}\n" | save -a $"($app)/flags_spec.cue"
+let n7 = (object | length)
+let w = (livex [push $app] {PATH: ([$bin] | append $env.PATH), SSH_FAIL: "1"})
+check ($w.exit_code == 0 and (object | length) == $n7 + 1 and ($w.stderr | str contains "the mirror at ops@node.example's shop/shop-flags failed")) "a failing mirror warns, and the push is written"
+open --raw $"($app)/flags_spec.cue" | str replace 'configMap: "shop-flags"}' 'configMap: "shop-flags", required: true}' | save -f $"($app)/flags_spec.cue"
+"flags: held: {default: false, local: true}\n" | save -a $"($app)/flags_spec.cue"
+let r = (livex [push $app] {PATH: ([$bin] | append $env.PATH), SSH_FAIL: "1"})
+check ($r.exit_code != 0 and ($r.stderr | str contains "the mirror at ops@node.example's shop/shop-flags failed")) "a required mirror that fails fails the push"
+
 rm -rf $dir
 print "flags: live commands pass"
