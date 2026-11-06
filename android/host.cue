@@ -10,6 +10,7 @@ package android
 
 import (
 	"encoding/json"
+	"list"
 	"strings"
 )
 
@@ -41,8 +42,33 @@ _template: {
 // fill and from which columns is the program's to say.
 _seeded: ["app/src/main/assets/screen.js", "app/src/main/assets/autofill.json"]
 
+// The terminal mode's project: omnishell's own interpreter running the app's
+// screens, nothing seeded because nothing is the app's to write. Its sources sit
+// in android/terminal, bundled by build@android at the app's omnishell pin.
+_terminal: {
+	"settings.gradle.kts":                 _template["settings.gradle.kts"]
+	"build.gradle.kts":                    _template["build.gradle.kts"]
+	"gradle.properties":                   _template["gradle.properties"]
+	".gitignore":                          _template[".gitignore"]
+	"app/build.gradle.kts":                _ @embed(file="template/terminal/app/build.gradle.kts", type=text)
+	"app/src/main/AndroidManifest.xml":    _ @embed(file="template/terminal/app/src/main/AndroidManifest.xml", type=text)
+	"app/src/debug/AndroidManifest.xml":   _ @embed(file="template/terminal/app/src/debug/AndroidManifest.xml", type=text)
+	"app/src/main/kotlin/MainActivity.kt": _ @embed(file="template/terminal/app/src/main/kotlin/MainActivity.kt", type=text)
+	"app/src/main/kotlin/TerminalEngine.kt": _ @embed(file="template/terminal/app/src/main/kotlin/TerminalEngine.kt", type=text)
+	"app/src/debug/kotlin/Driver.kt":      _ @embed(file="template/terminal/app/src/debug/kotlin/Driver.kt", type=text)
+	"app/src/release/kotlin/Driver.kt":    _ @embed(file="template/terminal/app/src/release/kotlin/Driver.kt", type=text)
+	"app/src/main/assets/prelude.js":      _ @embed(file="template/terminal/app/src/main/assets/prelude.js", type=text)
+	"terminal/browser.js":                 _ @embed(file="template/terminal/browser.js", type=text)
+	"terminal/bundle.ts":                  _ @embed(file="template/terminal/bundle.ts", type=text)
+	"terminal/compile.js":                 _ @embed(file="template/terminal/compile.js", type=text)
+	"terminal/css.js":                     _ @embed(file="template/terminal/css.js", type=text)
+	"terminal/display.js":                 _ @embed(file="template/terminal/display.js", type=text)
+	"terminal/main.js":                    _ @embed(file="template/terminal/main.js", type=text)
+	"terminal/scenarios.ts":               _ @embed(file="template/terminal/scenarios.ts", type=text)
+}
+
 // Kotlin sources, main and test, land under the application id's package path.
-_kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/"]
+_kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/", "app/src/release/kotlin/"]
 
 #Host: H={
 	app: string
@@ -53,10 +79,21 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/"]
 	activity:      *".MainActivity" | string
 	// What the launcher, the autofill picker and the unlock prompt call it.
 	label: *app | string
+	// terminal: omnishell's interpreter draws the program's screens, for any app.
+	// vault: the app's own screen.js over sealed device tables and autofill.
+	mode: *"terminal" | "vault"
+	// Where a release build finds the app's cluster; a debug build is told at start.
+	base: *"https://\(app).invalid" | string
 
 	_gradle: "cd android; use tools.nu [run-mise]; run-mise exec -- gradle --console=plain"
 	_adb:    "use tools.nu [run-mise]; run-mise exec -- sh -c"
 	_apk:    "android/app/build/outputs/apk/debug/app-debug.apk"
+	// The terminal is bundled at the omnishell the app itself pins.
+	_bundle: [
+		if H.mode == "terminal" {{do: "use tools.nu [run-mise]; run-mise exec -- deno run -A --no-lock android/terminal/bundle.ts (run-mise where github:bonisoft3/omnishell | str trim)"}},
+	]
+	// PRONTO_BASE names a local stack; the emulator reaches the host at 10.0.2.2.
+	_startExtras: [if H.mode == "terminal" {"${PRONTO_BASE:+ --es base $PRONTO_BASE}"}, ""][0]
 
 	surface: {
 		// Merged by mise beside the app's own config. mise's android-sdk sets
@@ -83,7 +120,7 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/"]
 			}
 			build: android: {
 				platform: "android"
-				cmds: [{do: "\(H._gradle) :app:assembleDebug"}]
+				cmds: list.Concat([H._bundle, [{do: "\(H._gradle) :app:assembleDebug"}]])
 			}
 			test: android: {
 				platform: "android"
@@ -91,11 +128,24 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/"]
 			}
 			launch: android: {
 				platform: "android"
-				cmds: [
+				cmds: list.Concat([H._bundle, [
 					{do: "\(H._gradle) :app:assembleDebug"},
 					{do: "\(H._adb) \"$ANDROID_HOME/platform-tools/adb install -r \(H._apk)\""},
-					{do: "\(H._adb) \"$ANDROID_HOME/platform-tools/adb shell am start -S -n \(H.applicationId)/\(H.activity)\""},
-				]
+					{do: "\(H._adb) \"$ANDROID_HOME/platform-tools/adb shell am start -S -n \(H.applicationId)/\(H.activity)\(H._startExtras)\""},
+				]])
+			}
+			// The phone's acceptance: the app's CUE scenarios (named in android/android.json) run on the
+			// emulator through real touches (android/terminal/scenarios.ts). Against PRONTO_BASE when it
+			// names a stack that is up, else against one it brings up on a slot (tests/slot.ts launch,
+			// weight 1) and takes down after. No scenarios named is a failure, never a pass.
+			if H.mode == "terminal" {
+				integrate: android: {
+					platform: "android"
+					cmds: list.Concat([H._bundle, [
+						{do: "\(H._gradle) :app:assembleDebug"},
+						{do: "use tools.nu [run-mise]; let scenarios = (open android/android.json | get scenarios); let base = ($env.PRONTO_BASE? | default \"stack\"); run-mise exec -- deno run -A --no-lock android/terminal/scenarios.ts \(H.applicationId) \(H._apk) $base ...$scenarios"},
+					]])
+				}
 			}
 		}
 	}
@@ -111,8 +161,12 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/"]
 			text:  json.Indent(json.Marshal({say: {for verb, rs in H.surface.rules {(verb): rulemap: rs}}}), "", "  ") + "\n"
 		}
 		".config/mise/conf.d/android.toml": {seed: false, text: H.surface.miseConf}
-		for path, source in _template {
-			let filled = strings.Replace(strings.Replace(strings.Replace(source, "__APPLICATION_ID__", H.applicationId, -1), "__APP__", H.app, -1), "__LABEL__", H.label, -1)
+		// The scenario files integrate@android runs, by path from the app's root; the app's to fill.
+		if H.mode == "terminal" {
+			"android/android.json": {seed: true, text: json.Indent(json.Marshal({scenarios: []}), "", "  ") + "\n"}
+		}
+		for path, source in [if H.mode == "terminal" {_terminal}, _template][0] {
+			let filled = strings.Replace(strings.Replace(strings.Replace(strings.Replace(source, "__APPLICATION_ID__", H.applicationId, -1), "__APP__", H.app, -1), "__LABEL__", H.label, -1), "__BASE__", H.base, -1)
 			let dest = [
 				for k in _kotlin if strings.HasPrefix(path, k) {"\(k)\(strings.Replace(H.applicationId, ".", "/", -1))/\(strings.TrimPrefix(path, k))"},
 				path,
