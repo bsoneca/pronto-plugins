@@ -456,6 +456,32 @@ import (
 			}
 		}
 
+		// A pool and its providers are made, never imported; a provider keeps the keys it is given.
+		for pool, w in P.workloadIdentityPools if P.adoptAll || list.Contains(*P.adopt["workloadIdentityPools"] | [], pool) {
+			let pk = (#name & {in: "\(P.id)_\(pool)"}).out
+			tofu: resource: google_iam_workload_identity_pool: (pk): {
+				depends_on:                deps
+				project:                   P.id
+				workload_identity_pool_id: pool
+				if w.displayName != _|_ {display_name: w.displayName}
+			}
+			for pn, pr in w.providers {
+				let k = (#name & {in: "\(P.id)_\(pool)_\(pn)"}).out
+				tofu: resource: google_iam_workload_identity_pool_provider: (k): {
+					project:                            P.id
+					workload_identity_pool_id:          "${google_iam_workload_identity_pool.\(pk).workload_identity_pool_id}"
+					workload_identity_pool_provider_id: pn
+					attribute_mapping:                  pr.mapping
+					if pr.condition != _|_ {attribute_condition: pr.condition}
+					oidc: {
+						issuer_uri: pr.issuer
+						if len(pr.allowedAudiences) > 0 {allowed_audiences: pr.allowedAudiences}
+						if pr.jwks != _|_ {jwks_json: pr.jwks}
+					}
+				}
+			}
+		}
+
 		for inst, dbs in P.databases if P.adoptAll || adopted.databases[inst] != _|_ {
 			for nm, _ in dbs {
 				let k = (#name & {in: "\(P.id)_\(inst)_\(nm)"}).out

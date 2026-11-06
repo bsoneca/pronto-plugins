@@ -64,6 +64,7 @@ projects. A project says its `id`, its `billing` account and the rest of what it
 | `apiKeys` | a key by its id: its display name, the services it may call and a browser key's referrers. The key string is never in the state |
 | `identityPlatform` | the project's config (adopt it as `identityPlatform: ["config"]`): phone sign-in, the SMS regions allowed, authorised domains and blocking functions. What it does not name, such as reCAPTCHA's SMS defence, is left as it is |
 | `budgets` | a budget on the project's billing account, by a name of your own, imported by its `id`: amount, period, the projects and services it watches, and its alert thresholds of current and forecast spend |
+| `workloadIdentityPools` | workload identity pools by id, each with `providers` (OIDC: `issuer`, `jwks` as JSON text uploaded as jwks_json, `allowedAudiences`, `mapping`, `condition`); made, never imported. A pool not declared (GitHub's) is never touched; grant on it through the iam kinds with a `principal:` member |
 | `hostingSites` | a Firebase Hosting site by its id; what it serves is deployed elsewhere. It brings in the `google-beta` provider |
 
 Identity Platform, Billing Budgets and Firebase refuse a user's login without a quota project, so
