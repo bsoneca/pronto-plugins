@@ -27,6 +27,7 @@ const plans = [
 	[./infra _found.tofu]
 	[./infra _foundGrant.tofu]
 	[./infra _watch.tofu]
+	[./infra _wif.tofu]
 	[./infra _always.tofu]
 	[./examples/infra plan.tofu]
 ]

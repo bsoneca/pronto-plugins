@@ -497,3 +497,33 @@ alwaysBackupsImported: [for i in _always.tofu.import if i.to == "google_sql_data
 // A start that is not on the hour, or more logs than Enterprise keeps, is refused.
 backupsOffHour: _ok & {sqlBackups: x: {databaseVersion: "POSTGRES_18", tier: "t", startTime: "07:30"}} & matchN(0, [#Project])
 backupsTooManyLogDays: _ok & {sqlBackups: x: {databaseVersion: "POSTGRES_18", tier: "t", startTime: "07:00", transactionLogDays: 8}} & matchN(0, [#Project])
+
+// Workload identity pools: a pool and a provider with uploaded keys, made and never imported.
+_wif: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing: "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		workloadIdentityPools: contabo: {
+			displayName: "Contabo"
+			providers: "k3s-oidc": {
+				issuer: "https://kubernetes.default.svc.cluster.local"
+				jwks:   "{\"keys\":[]}"
+				allowedAudiences: ["contabo-k3s"]
+				mapping: "google.subject": "assertion.sub"
+			}
+		}
+		adopt: workloadIdentityPools: ["contabo"]
+	}
+}
+_wi: _wif.tofu.resource
+wifPool: _wi.google_iam_workload_identity_pool.example_project_123_contabo & {workload_identity_pool_id: "contabo", display_name: "Contabo"}
+wifProvider: _wi.google_iam_workload_identity_pool_provider.example_project_123_contabo_k3s_oidc & {
+	workload_identity_pool_provider_id: "k3s-oidc"
+	attribute_mapping: "google.subject": "assertion.sub"
+	oidc: {issuer_uri: "https://kubernetes.default.svc.cluster.local", allowed_audiences: ["contabo-k3s"], jwks_json: "{\"keys\":[]}"}
+}
+wifNeverImported: [for i in _wif.tofu.import if strings.Contains(i.to, "workload_identity") {i}] & []
+// A provider without a subject mapping or a https issuer is refused.
+wifHttpIssuer: _ok & {workloadIdentityPools: x: providers: y: {issuer: "http://a", mapping: "google.subject": "a"}} & matchN(0, [#Project])
+wifNoSubject: _ok & {workloadIdentityPools: x: providers: y: {issuer: "https://a", mapping: a: "b"}} & matchN(0, [#Project])
+wifShortId: _ok & {workloadIdentityPools: x: providers: k3s: {issuer: "https://a", mapping: "google.subject": "a"}} & matchN(0, [#Project])

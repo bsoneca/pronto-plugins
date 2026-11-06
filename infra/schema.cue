@@ -68,6 +68,9 @@ import "list"
 	// A budget there already is imported by its id.
 	for nm, _ in budgets if !list.Contains(*fresh["budgets"] | [], nm) {budgets: (nm): id!: _}
 	hostingSites: [Site=string]: #HostingSite
+	// Workload identity pools, by id, each with its OIDC providers: made here, never imported (an
+	// existing pool, such as GitHub's, is simply not declared, and so never touched).
+	workloadIdentityPools: [Pool=#WifId]: #WorkloadIdentityPool
 	// Cloud Monitoring: where an alert goes, by a name of your own, and PromQL alerting policies
 	// a plugin generates into a file (pronto-journeys' observability/journeys.alerts.json), each
 	// sent to the channels named. Both are made here, never imported: a policy is the file's,
@@ -105,7 +108,7 @@ import "list"
 #Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases" | "sqlUsers" | "apiKeys" | "budgets" | "hostingSites"
 
 // identityPlatform is adopted by naming "config": a project has one.
-#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "sqlUsers" | "sqlBackups" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies"
+#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "sqlUsers" | "sqlBackups" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies" | "workloadIdentityPools"
 
 #Found: "serviceAccounts" | "members"
 
@@ -150,6 +153,29 @@ import "list"
 	// Alerts at these fractions of the amount, of what is spent and of what is forecast.
 	current: [...number & >0]
 	forecasted: [...number & >0]
+}
+
+// A workload identity pool and its OIDC providers, by a name of your own. A provider whose issuer
+// is not public (a k3s cluster's) carries its keys: `jwks` is the JWKS as JSON text, uploaded as
+// jwks_json, and Google never fetches the issuer. Grant on a service account to
+// principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/subject/<sub>
+// through the iam kinds.
+// Google's id rule for a pool and a provider: 4 to 32 of a-z, 0-9 and -, not starting with gcp-.
+#WifId: =~"^[a-z0-9][a-z0-9-]{2,30}[a-z0-9]$" & !~"^gcp-"
+
+#WorkloadIdentityPool: {
+	displayName?: string
+	providers: [Name=#WifId]: #WorkloadIdentityProvider
+}
+
+#WorkloadIdentityProvider: {
+	issuer!: =~"^https://"
+	// The JWKS as JSON text; absent, Google reads the issuer's own.
+	jwks?: string & !=""
+	allowedAudiences: [...string & !=""]
+	mapping: {"google.subject"!: string, [string]: string}
+	// A CEL condition on the token's claims.
+	condition?: string & !=""
 }
 
 // A Firebase Hosting site, by its id (its default address is <id>.web.app). What it serves is
