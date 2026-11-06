@@ -17,8 +17,9 @@
 // of. One instance: an entitlement's `ver` is this process's clock.
 import { base64url, esc, type Jwk, json, page, randomToken, signEs256 } from "../shared.ts";
 import {
-  accountOf, checkoutLocale, Limiter, readCapped, derivedKey, entitlementClaims, entitlementOf, lookupKeyOf, manageTokenOf, ownerOf,
-  parsePublished, type Plan, type Published, returnTo, same, type Subscription, tenantOf,
+  accountOf, chargesAt, checkoutSession, type Consent, consentChecked, Limiter, readCapped, derivedKey, entitlementClaims, entitlementOf,
+  firstChargeFailed, lookupKeyOf, manageTokenOf, ownerOf, parsePublished, type Plan, type Published, returnTo, same, type Subscription,
+  tenantOf, trialOf, trialSpent,
 } from "./core.ts";
 import { type Stripe, StripeError, webhookSigned } from "./stripe.ts";
 
@@ -26,6 +27,8 @@ import { type Stripe, StripeError, webhookSigned } from "./stripe.ts";
 export const PUBLISHED_PATH = "/.well-known/pronto-billing.json";
 /** Where a tenant takes the entitlements the broker pushes. */
 export const EVENTS_PATH = "/billing/events";
+/** Where a tenant gives back what an account consented to, for a ticket it minted. */
+export const CONSENT_PATH = "/billing/trial/consent";
 
 export const SUBSCRIPTION_EVENTS = new Set([
   "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted",
@@ -101,6 +104,9 @@ export async function broker(p: {
   if (!(fee >= 0 && fee < 100)) throw new Error("the fee is a percentage under 100");
   // What a caller nobody signed in may make the broker ask of Stripe.
   const perTenant = new Limiter(120), perClient = new Limiter(20);
+  // A trial route's own: a tenant's calls all leave from one address, so this is generous, and it is
+  // taken before a ticket is tried, which a junk one must not spend the tenant's bucket on.
+  const trialClient = new Limiter(60);
   // Each entitlement newer than every one before it, though two are signed in one millisecond.
   let lastVer = 0;
   const nextVer = () => (lastVer = Math.max(lastVer + 1, Date.now()));
@@ -196,9 +202,10 @@ export async function broker(p: {
   // The entitlement of one account to one plan, read from Stripe and signed for its tenant.
   async function entitlement(t: string, account: string, plan: string, known?: string) {
     const ver = nextVer();
-    const held = entitlementOf(await subscriptionsOf(await customersOf(t, account, known)), t, account, plan);
+    const subs = await subscriptionsOf(await customersOf(t, account, known));
+    const held = entitlementOf(subs, t, account, plan);
     const token = await signEs256(signing.key, signing.publicJwk.kid!, entitlementClaims({
-      issuer, tenant: t, account, plan, ...held, manage: await manageTokenOf(manageKey, t, account), ver,
+      issuer, tenant: t, account, plan, ...held, manage: await manageTokenOf(manageKey, t, account), ver, trial: trialOf(subs, t, account, plan),
     }));
     return { held, token };
   }
@@ -275,9 +282,51 @@ export async function broker(p: {
       : page("Payouts", `<h1>Payouts for <span class="origin">${host}</span> aren't set up yet</h1><p>Run <code>${ONBOARD}</code> again to finish.</p>`);
   }
 
+  // The customer an account is at Stripe, made if it has none, with every subscription of it.
+  async function customerOf(t: string, account: string): Promise<{ customer: string; subs: Subscription[] }> {
+    const found = await customersOf(t, account);
+    // Made at most once a day by this key, and found by search after.
+    const customer = found[0] ?? (await p.stripe<{ id: string }>("POST", "/v1/customers", { metadata: { tenant: t, account } }, `customer ${t} ${account}`)).id;
+    return { customer, subs: await subscriptionsOf([...new Set([customer, ...found])]) };
+  }
+
+  // One at a time for an account of a tenant, so two requests do not both find no customer, no
+  // subscription and no open session, and each open a Checkout of its own.
+  const queues = new Map<string, Promise<unknown>>();
+  async function locked<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const run = (queues.get(key) ?? Promise.resolve()).then(fn);
+    const tail = run.catch(() => {});
+    queues.set(key, tail);
+    try {
+      return await run;
+    } finally {
+      if (queues.get(key) === tail) queues.delete(key);
+    }
+  }
+
+  // Opens Checkout for an account, closing any other it left open first, so two tabs pay once.
+  // `refuse` looks at the account's subscriptions and may turn it away.
+  function openSession(s: {
+    t: string; account: string; acct: Account; planId: string; plan: Plan; back: string; metadata: Record<string, string>; locale: unknown;
+    currency?: string; trialEnd?: number; refuse: (subs: Subscription[]) => Response | null;
+  }): Promise<Response> {
+    return locked(`${s.t} ${s.account}`, async () => {
+      const { customer, subs } = await customerOf(s.t, s.account);
+      const no = s.refuse(subs);
+      if (no) return no;
+      for (const o of (await p.stripe<{ data: { id: string }[] }>("GET", "/v1/checkout/sessions", { customer, status: "open", limit: 100 })).data) {
+        await p.stripe("POST", `/v1/checkout/sessions/${o.id}/expire`);
+      }
+      const session = await p.stripe<{ url: string }>("POST", "/v1/checkout/sessions", checkoutSession({
+        customer, account: s.account, locale: s.locale, price: await priceOf(s.t, s.planId, s.plan), back: s.back, metadata: s.metadata,
+        destination: s.acct.id, feePercent: fee, currency: s.currency, trialEnd: s.trialEnd,
+      }));
+      return json(200, { url: session.url });
+    });
+  }
+
   // A tenant's page sends an account to pay for a plan. Anyone may ask: what
-  // it opens is a payment for that account, which only adds to it. Any other
-  // checkout the account left open is closed first, so two tabs pay once.
+  // it opens is a payment for that account, which only adds to it.
   async function checkout(req: Request, client: string): Promise<Response> {
     const b = await body(req);
     const t = tenant(b.tenant);
@@ -296,23 +345,99 @@ export async function broker(p: {
     if (!plan) return json(400, { error: `plan is one of ${Object.keys(doc.doc.plans).join(", ")}` });
     const acct = await connectedAccount(t);
     if (!payable(acct)) return json(409, { error: "the tenant's payouts are not set up" });
-    const found = await customersOf(t, account);
-    // Made at most once a day by this key, and found by search after.
-    const customer = found[0] ?? (await p.stripe<{ id: string }>("POST", "/v1/customers", { metadata: { tenant: t, account } }, `customer ${t} ${account}`)).id;
-    if (entitlementOf(await subscriptionsOf([...new Set([customer, ...found])]), t, account, planId).active) return json(409, { error: "already subscribed" });
-    for (const s of (await p.stripe<{ data: { id: string }[] }>("GET", "/v1/checkout/sessions", { customer, status: "open", limit: 100 })).data) {
-      await p.stripe("POST", `/v1/checkout/sessions/${s.id}/expire`);
-    }
     const currency = typeof b.currency === "string" && Object.hasOwn(plan.prices, b.currency) ? b.currency : undefined;
-    const metadata = { tenant: t, account, plan: planId };
-    const session = await p.stripe<{ url: string }>("POST", "/v1/checkout/sessions", {
-      mode: "subscription", customer, client_reference_id: account, locale: checkoutLocale(b.locale),
-      line_items: [{ price: await priceOf(t, planId, plan), quantity: 1 }],
-      ...(currency ? { currency } : {}),
-      success_url: back, cancel_url: back, metadata,
-      subscription_data: { metadata, transfer_data: { destination: acct.id }, ...(fee > 0 ? { application_fee_percent: fee } : {}) },
+    return await openSession({
+      t, account, acct, planId, plan, back, metadata: { tenant: t, account, plan: planId }, locale: b.locale, currency,
+      refuse: (subs) => entitlementOf(subs, t, account, planId).active ? json(409, { error: "already subscribed" }) : null,
     });
-    return json(200, { url: session.url });
+  }
+
+  // What an account consented to, given back by its tenant for the ticket the tenant minted: the
+  // tenant's own word that the account asked, signed in, with the flag on. A ticket is good once.
+  async function consentOf(t: string, account: string, ticket: unknown): Promise<Consent | Response> {
+    if (typeof ticket !== "string" || ticket.length < 16 || ticket.length > 200) return json(400, { error: "ticket required" });
+    let res: Response;
+    try {
+      res = await fetcher(`${t}${CONSENT_PATH}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ account, ticket }), redirect: "manual", signal: AbortSignal.timeout(10_000),
+      });
+    } catch {
+      console.error(`billing: ${t}${CONSENT_PATH} unreachable`);
+      return json(502, { error: "the tenant is unavailable" });
+    }
+    if (res.status !== 200) {
+      await res.body?.cancel();
+      if (res.status === 404) return json(403, { error: "ticket refused" });
+      console.error(`billing: ${t}${CONSENT_PATH} answered ${res.status}`);
+      return json(502, { error: "the tenant is unavailable" });
+    }
+    const text = await readCapped(res.body, 4096, res.headers.get("content-length"));
+    let c: Record<string, unknown> | null = null;
+    try {
+      c = text === null ? null : JSON.parse(text);
+    } catch { /* not JSON: refused below */ }
+    if (typeof c !== "object" || c === null) return json(502, { error: "the tenant's consent is unreadable" });
+    const str = (v: unknown) => (typeof v === "string" ? v : null);
+    return { plan: str(c.plan), amount: Number.isInteger(c.amount) ? c.amount as number : null, currency: str(c.currency), charges_at: str(c.charges_at), terms: str(c.terms) };
+  }
+
+  // What the broker needs of a trial request: the tenant's document with a trial in it, and a
+  // ticket the tenant stands behind. A broker that knows no /trial/* answers 404 to all of it, so
+  // an old broker never charges for what a new page promised free.
+  async function trialAsk(b: Record<string, unknown>, client: string) {
+    const t = tenant(b.tenant);
+    const account = accountOf(b.account);
+    if (!t || !account) return { err: json(400, { error: "tenant and account required" }) };
+    if (!trialClient.take(client)) return { err: json(429, { error: "too many requests; try again in a minute" }) };
+    const doc = await publishedBy(t);
+    if (!doc.ok) {
+      console.error(`billing: ${doc.error}`);
+      return { err: json(409, { error: "the tenant's billing document is unavailable" }) };
+    }
+    if (!doc.doc.trial) return { err: json(404, { error: "no trial" }) };
+    const consent = await consentOf(t, account, b.ticket);
+    if (consent instanceof Response) return { err: consent };
+    if (!perTenant.take(t)) return { err: json(429, { error: "too many requests; try again in a minute" }) };
+    return { t, account, doc: doc.doc, trial: doc.doc.trial, consent };
+  }
+
+  // The plans an account may take as a trial, priced and dated: none once it has held a plan.
+  async function trialOffer(req: Request, client: string): Promise<Response> {
+    const b = await body(req);
+    const r = await trialAsk(b, client);
+    if (r.err) return r.err;
+    const { t, account, doc, trial } = r;
+    const acct = await connectedAccount(t);
+    if (!payable(acct)) return json(409, { error: "the tenant's payouts are not set up" });
+    if (trialSpent(await subscriptionsOf(await customersOf(t, account)), t, account)) return json(200, { eligible: false, why: "used", offers: [] });
+    const charges = chargesAt(new Date(), trial.months).toISOString();
+    return json(200, {
+      eligible: true,
+      offers: trial.plans.map((id) => {
+        const plan = doc.plans[id];
+        const currency = typeof b.currency === "string" && Object.hasOwn(plan.prices, b.currency) ? b.currency : Object.keys(plan.prices)[0];
+        return { plan: id, name: plan.name, amount: plan.prices[currency as keyof Plan["prices"]], currency, interval: plan.interval, months: trial.months, charges_at: charges };
+      }),
+    });
+  }
+
+  // A trial: the one the account consented to, which the ticket gave back, is what Stripe gets.
+  async function trialCheckout(req: Request, client: string): Promise<Response> {
+    const b = await body(req);
+    const r = await trialAsk(b, client);
+    if (r.err) return r.err;
+    const { t, account, doc, consent } = r;
+    const back = returnTo(t, b.return);
+    if (!back) return json(400, { error: "return is a path on the tenant's origin" });
+    const checked = consentChecked(consent, doc);
+    if (!checked.ok) return json(checked.kind === "stale" ? 409 : 400, { error: checked.error });
+    const acct = await connectedAccount(t);
+    if (!payable(acct)) return json(409, { error: "the tenant's payouts are not set up" });
+    const metadata = { tenant: t, account, plan: checked.plan, trial: "1", trial_amount: String(checked.amount), trial_currency: checked.currency };
+    return await openSession({
+      t, account, acct, planId: checked.plan, plan: checked.def, back, metadata, locale: b.locale, currency: checked.currency, trialEnd: checked.endsAt,
+      refuse: (subs) => trialSpent(subs, t, account) ? json(409, { error: "used" }) : null,
+    });
   }
 
   // What only an account's tenant holds the token for: its portal at Stripe,
@@ -358,6 +483,58 @@ export async function broker(p: {
   // as the account's entitlement; answered once the tenant has taken it, and
   // pushed again if Stripe changed while it was on its way. A tenant that
   // refuses it is told no more of it: its own fault is not every tenant's.
+  // A trial whose first charge failed ends at once: no dunning, and no charge a retry setting
+  // of the operator's dashboard would make later. Read again from Stripe, so an event that
+  // lags a subscription already ended asks nothing; one instance, so the ids in hand are all.
+  const ending = new Set<string>();
+  async function endFailedTrial(event: Subscription): Promise<void> {
+    if (event.metadata?.trial !== "1" || (event.status !== "past_due" && event.status !== "unpaid") || ending.has(event.id)) return;
+    ending.add(event.id);
+    try {
+      const fresh = await p.stripe<Subscription>("GET", `/v1/subscriptions/${event.id}`);
+      if (!firstChargeFailed(fresh)) return;
+      // The failed first invoice must not stay payable: one that was paid since means the charge
+      // recovered and the trial stands; an open one is voided. A key without Invoices access is
+      // logged and the cancel goes on, since Stripe stops collecting an invoice when its
+      // subscription is cancelled.
+      if (typeof fresh.latest_invoice === "string") {
+        try {
+          const inv = await p.stripe<{ status: string }>("GET", `/v1/invoices/${fresh.latest_invoice}`);
+          if (inv.status === "paid") return;
+          if (inv.status === "open") await p.stripe("POST", `/v1/invoices/${fresh.latest_invoice}/void`);
+        } catch (e) {
+          if (!(e instanceof StripeError && e.status === 403)) throw e;
+          console.error(`billing: the Stripe key cannot read or void invoices (403); cancelling ${event.id} without voiding`);
+        }
+      }
+      await p.stripe("POST", `/v1/subscriptions/${event.id}`, { metadata: { trial_failed: "1" } }, `trial failed ${event.id}`);
+      await p.stripe("DELETE", `/v1/subscriptions/${event.id}`);
+    } finally {
+      ending.delete(event.id);
+    }
+  }
+
+  // Two Checkouts that raced past the lock (another broker instance, or a customer Stripe's search
+  // had not found) can each start a trial: the newer, still trialing and uncharged, is cancelled
+  // at once and marked, so it never shows as the account's trial. The older keeps its trial.
+  async function endDuplicateTrial(event: Subscription & { customer: string }, t: string, account: string): Promise<void> {
+    if (event.metadata.trial !== "1" || ending.has(event.id)) return;
+    ending.add(event.id);
+    try {
+      const subs = await subscriptionsOf(await customersOf(t, account, event.customer));
+      const mine = subs.find((x) => x.id === event.id);
+      if (mine?.status !== "trialing") return;
+      const older = subs.some((x) => x.id !== event.id && x.metadata.tenant === t && x.metadata.account === account && x.metadata.trial === "1" &&
+        x.metadata.trial_duplicate !== "1" && x.status !== "incomplete" && x.status !== "incomplete_expired" &&
+        ((x.created ?? 0) < (mine.created ?? 0) || ((x.created ?? 0) === (mine.created ?? 0) && x.id < mine.id)));
+      if (!older) return;
+      await p.stripe("POST", `/v1/subscriptions/${event.id}`, { metadata: { trial_duplicate: "1" } }, `trial duplicate ${event.id}`);
+      await p.stripe("DELETE", `/v1/subscriptions/${event.id}`);
+    } finally {
+      ending.delete(event.id);
+    }
+  }
+
   async function webhook(req: Request): Promise<Response> {
     const payload = await readCapped(req.body, 262_144, req.headers.get("content-length"));
     if (payload === null) return json(413, { error: "too large" });
@@ -369,6 +546,8 @@ export async function broker(p: {
     const account = accountOf(sub.metadata?.account);
     const plan = sub.metadata?.plan;
     if (!t || !account || !plan) return json(200, { ignored: "not a pronto subscription" });
+    await endFailedTrial(sub);
+    if (event.type === "customer.subscription.created") await endDuplicateTrial(sub, t, account);
     let sent: { active: boolean; through: number } | null = null;
     for (let round = 0; round < 3; round++) {
       const { held, token } = await entitlement(t, account, plan, sub.customer);
@@ -398,6 +577,11 @@ export async function broker(p: {
         // The platform's front appends the caller it saw last; a direct connection is its address.
         const addr = info?.remoteAddr as Deno.NetAddr | undefined;
         return await checkout(req, req.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() || addr?.hostname || "");
+      }
+      if (req.method === "POST" && (path === "/trial/offer" || path === "/trial/checkout")) {
+        const addr = info?.remoteAddr as Deno.NetAddr | undefined;
+        const client = req.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() || addr?.hostname || "";
+        return await (path === "/trial/offer" ? trialOffer(req, client) : trialCheckout(req, client));
       }
       if (req.method === "POST" && path === "/portal") return await portal(req);
       if (req.method === "POST" && path === "/resync") return await resync(req);
@@ -430,7 +614,7 @@ export function twoModes(p: {
     const url = new URL(req.url), path = url.pathname;
     let tenant: unknown = null;
     if (req.method === "GET" && path === "/onboarded") tenant = url.searchParams.get("tenant");
-    else if (req.method === "POST" && ["/checkout", "/portal", "/resync", "/onboard"].includes(path)) {
+    else if (req.method === "POST" && ["/checkout", "/trial/offer", "/trial/checkout", "/portal", "/resync", "/onboard"].includes(path)) {
       try {
         tenant = (await req.clone().json())?.tenant;
       } catch {

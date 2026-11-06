@@ -29,7 +29,7 @@ export class StripeError extends Error {
 }
 
 export type Stripe = <T = Record<string, unknown>>(
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "DELETE",
   path: string,
   params?: Record<string, unknown>,
   idempotencyKey?: string,

@@ -24,6 +24,9 @@ export interface Settings {
   /** Where the grants are read live, as the flag billing_grants: a flagd's OFREP, or `origin`
    * for the app's own door, which routes /ofrep/ to its flagd wherever it runs apart. */
   flags?: string;
+  /** The flag that turns the free trial on, evaluated per account at `flags`; none, and a
+   * document with a trial is all it takes. */
+  trialFlag?: string;
   fetcher?: typeof fetch;
 }
 
@@ -45,7 +48,8 @@ export function service(s: Settings) {
   const brokerAt = (s.brokerInternal || s.broker).replace(/\/$/, "");
   const crud = s.crud.replace(/\/$/, "");
   const keys = brokerKeys(brokerAt, fetcher);
-  const plans = Object.keys((JSON.parse(s.document) as { plans: Record<string, unknown> }).plans);
+  const doc = JSON.parse(s.document) as { plans: Record<string, unknown>; trial?: { plans: string[] } };
+  const plans = Object.keys(doc.plans);
 
   async function rpc(fn: string, auth: string, args: Record<string, unknown> = {}): Promise<Response> {
     return await fetcher(`${crud}/rpc/${fn}`, {
@@ -107,7 +111,87 @@ export function service(s: Settings) {
     });
     if (!res.ok) throw new Error(`billing_entitle answered ${res.status}: ${brief(await res.text())}`);
     await res.body?.cancel();
+    if (e.trial) {
+      // Failing throws, so the broker is not answered and Stripe sends it again.
+      const t = await asService("billing_trial_state", {
+        account: e.account, state: e.trial.state, plan: e.plan, amount: e.trial.amount, currency: e.trial.currency,
+        charges_at: new Date(e.trial.chargesAt * 1000).toISOString(), ver: e.ver,
+      });
+      if (!t.ok) throw new Error(`billing_trial_state answered ${t.status}: ${brief(await t.text())}`);
+      await t.body?.cancel();
+    }
     return new Response(null, { status: 204 });
+  }
+
+  // The free trial is off unless the document has one and its flag, if any, is true for this
+  // account as flagd evaluates it now; a flag that cannot be asked is off, never on.
+  async function trialOn(account: string): Promise<boolean> {
+    if (!doc.trial) return false;
+    if (!s.trialFlag) return true;
+    if (!s.flags) return false;
+    try {
+      const at = s.flags === "origin" ? origin : s.flags.replace(/\/$/, "");
+      const res = await fetcher(`${at}/ofrep/v1/evaluate/flags/${encodeURIComponent(s.trialFlag)}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ context: { targetingKey: account } }), signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        await res.body?.cancel();
+        return false;
+      }
+      return (await res.json() as { value?: unknown }).value === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function trialStatus(account: string): Promise<{ state: string | null; holds: boolean } & Record<string, unknown>> {
+    const res = await asService("billing_trial_status", { account });
+    if (!res.ok) throw new Error(`billing_trial_status answered ${res.status}: ${brief(await res.text())}`);
+    return await res.json();
+  }
+
+  // A ticket for the broker to ask this service about: what the account consented to, or nothing
+  // for an offer. Refused by the database for an account whose trial is spent.
+  async function trialTicket(account: string, c: Record<string, unknown> = {}): Promise<string> {
+    const res = await asService("billing_trial_ask", {
+      account, plan: c.plan ?? null, amount: c.amount ?? null, currency: c.currency ?? null, charges_at: c.charges_at ?? null, terms: c.terms ?? null,
+    });
+    if (!res.ok) throw new Error(`billing_trial_ask answered ${res.status}: ${brief(await res.text())}`);
+    return await res.json();
+  }
+
+  async function trial(req: Request, path: string): Promise<Response> {
+    if (path === "/billing/trial/consent") {
+      // The broker's: the ticket is the proof, so there is no reader.
+      const a = await args(req);
+      if (typeof a.account !== "string" || typeof a.ticket !== "string" || !(await trialOn(a.account))) return json(404, { error: "not found" });
+      const res = await asService("billing_trial_take", { account: a.account, ticket: a.ticket });
+      if (!res.ok) throw new Error(`billing_trial_take answered ${res.status}: ${brief(await res.text())}`);
+      const consent = await res.json();
+      return consent ? json(200, consent) : json(404, { error: "not found" });
+    }
+    const account = await reader(req);
+    if (account instanceof Response) return account;
+    if (!(await trialOn(account))) return json(404, { error: "not found" });
+    const a = await args(req, 8192);
+    const held = await trialStatus(account);
+    if (path === "/billing/trial") {
+      const none = { ...held, eligible: false, offers: [] };
+      if (held.holds || held.state) return json(200, none);
+      const res = await toBroker("/trial/offer", { account, ticket: await trialTicket(account), currency: a.currency });
+      // A broker that does not know trials offers none.
+      if (res.status === 404) return json(200, none);
+      return res.ok ? json(200, { ...held, ...(await res.json()) }) : res;
+    }
+    if (a.consent !== true) return json(400, { error: "consent is required" });
+    const plan = typeof a.plan === "string" && doc.trial!.plans.includes(a.plan) ? a.plan : null;
+    if (!plan || !Number.isInteger(a.amount) || typeof a.currency !== "string" || typeof a.charges_at !== "string" || Number.isNaN(Date.parse(a.charges_at))) {
+      return json(400, { error: "plan, amount, currency and charges_at required" });
+    }
+    if (typeof a.terms !== "string" || a.terms.trim() === "" || a.terms.length > 1000) return json(400, { error: "terms required, at most 1000 characters" });
+    if (held.holds || held.state) return json(409, { error: held.holds ? "holds" : "used" });
+    const ticket = await trialTicket(account, { plan, amount: a.amount, currency: a.currency, charges_at: a.charges_at, terms: a.terms });
+    return await toBroker("/trial/checkout", { account, ticket, locale: a.locale, return: a.return });
   }
 
   async function toBroker(path: string, args: Record<string, unknown>): Promise<Response> {
@@ -124,8 +208,8 @@ export function service(s: Settings) {
     return await res.json();
   }
 
-  async function args(req: Request): Promise<Record<string, unknown>> {
-    const text = await readCapped(req.body, 4096, req.headers.get("content-length"));
+  async function args(req: Request, max = 4096): Promise<Record<string, unknown>> {
+    const text = await readCapped(req.body, max, req.headers.get("content-length"));
     try {
       const v = JSON.parse(text || "{}");
       return typeof v === "object" && v !== null ? v : {};
@@ -143,6 +227,9 @@ export function service(s: Settings) {
       if (req.method === "POST" && path === "/billing/events") {
         const token = await readCapped(req.body, 8192, req.headers.get("content-length"));
         return token === null ? json(413, { error: "too large" }) : await entitle(token);
+      }
+      if (req.method === "POST" && (path === "/billing/trial" || path === "/billing/trial/checkout" || path === "/billing/trial/consent")) {
+        return await trial(req, path);
       }
       if (req.method === "POST" && (path === "/billing/checkout" || path === "/billing/portal" || path === "/billing/resync")) {
         const account = await reader(req);
@@ -179,7 +266,7 @@ if (import.meta.main) {
   const billing = service({
     origin: env("ORIGIN"), broker: env("BILLING_BROKER"), brokerInternal: Deno.env.get("BILLING_BROKER_INTERNAL"),
     crud: env("CRUD_URL"), serviceJwt: env("SERVICE_JWT"), document: env("BILLING_DOCUMENT"), grants: Deno.env.get("BILLING_GRANTS"),
-    flags: Deno.env.get("BILLING_FLAGS") || undefined,
+    flags: Deno.env.get("BILLING_FLAGS") || undefined, trialFlag: Deno.env.get("BILLING_TRIAL_FLAG") || undefined,
   });
   Deno.serve({ port: Number(Deno.env.get("BILLING_PORT") ?? 8688) }, billing);
   // Until the gateway serves billing_grant, as it does once it has reloaded its schema; with
