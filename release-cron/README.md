@@ -137,7 +137,7 @@ own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>
    runs in that commit's tree with `ONLY=<the failed scenarios>` and `SLOW=1`, as a plain claim on the
    machine's slots (the app's `tests/slot.ts`): it waits for release-active like any job, never holds
    it, never carries `STACK_PRIORITY=release`. Neither a check nor the bisect has a time limit (an old `bisect.minutes` or
-   `bisect.check` is accepted and ignored; the bisect log says every 5 minutes that a check is still running). A release failure first runs it on the failing commit: passing there, the failure shows only in the cloud, nothing is bisected and the range is told to the lead. A cloud-only failure (the
+   `bisect.check` is accepted and ignored; the bisect log says every 5 minutes that a check is still running). Every failure first runs it on the failing commit, and only a check that fails there too is bisected. A release failure that passes there shows only in the cloud: nothing is bisected and the range is told to the lead. A rehearsal failure that passes there came from the run's conditions (a service stopped from outside the stack, as when every flagd on the machine was killed mid-rehearsal on 2026-11-06), not from a commit: no pull request is named, and the lead is told so. A cloud-only failure (the
    rc preview) is approximated by the same scenarios run locally.
 4. The culprit is mapped to its pull request (`Merge pull request #N from …`). The pull request gets a
    comment; a notes file goes to the author session when the PR body names one (`local_<uuid>`) and
