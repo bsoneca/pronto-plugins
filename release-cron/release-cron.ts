@@ -27,7 +27,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole } from "./cron.js";
+import { activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole } from "./cron.js";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -202,11 +202,13 @@ if (verb === "bisect") {
     group = 0;
     return code === 0 ? "good" : "bad";
   };
-  // A release failure shows in the cloud (the rc preview): the check must fail here on the failing
-  // commit too (an explicit failure: a pass or a timeout is not), or there is nothing to bisect
-  // with, and the range is told as it stands. The failing commit's own ledger verdict stands for it.
+  // The check must fail here on the failing commit too (an explicit failure: a pass or a timeout is
+  // not), or there is nothing to bisect with. A release failure shows in the cloud (the rc preview),
+  // and its range is told as it stands; a rehearsal failure that does not come back came from the
+  // run's conditions (a service killed from outside, the machine), and no commit is named. The
+  // failing commit's own ledger verdict stands for it.
   let reproduced = true;
-  if (!dry && sig.kind === "release") {
+  if (!dry) {
     const failing = list.at(-1)!.sha;
     const same = (r: { commit: string; kind: string; names?: string[] }) => r.commit === failing && r.kind === sig.kind && (r.names ?? []).join(",") === sig.names.join(",");
     const mine = jsonl(`${dir}/verdicts.jsonl`).filter(same).at(-1)?.verdict;
@@ -217,8 +219,9 @@ if (verb === "bisect") {
       ran++;
       verdicts(failing, v);
     }
-    reproduced = v === "bad";
-    if (!reproduced) { why = `the check ${v === "good" ? "passes" : "did not finish"} here on the failing commit: a failure only the cloud shows, not bisected`; step = { range: list }; }
+    const not = unreproduced(sig.kind, v);
+    reproduced = !not;
+    if (not) { why = not; step = { range: sig.kind === "release" ? list : [] }; }
   }
   if (!dry && reproduced) {
     for (; "test" in step; step = next(list, known)) {
@@ -241,7 +244,7 @@ if (verb === "bisect") {
     const c = step.culprit as { sha: string; pr: number | null; branch: string | null; subject: string };
     Object.assign(result, { culprit: c.sha, pr: c.pr, branch: c.branch, subject: c.subject });
     say(`culprit ${c.sha.slice(0, 8)} ${c.subject}`);
-  } else if ("range" in step) {
+  } else if ("range" in step && (step.range as unknown[]).length) {
     result.range = (step.range as { sha: string }[]).map((c) => c.sha);
     say(`narrowed to ${(step.range as { sha: string; pr: number | null }[]).map((c) => `${c.sha.slice(0, 8)}${c.pr ? ` (#${c.pr})` : ""}`).join(", ")}`);
   }
@@ -251,11 +254,11 @@ if (verb === "bisect") {
   // reads: the author's when the PR body names one, else the lead's), and a macOS notification.
   const prior = bisects;
   const said = prior.some((x) => x.culprit && x.culprit === result.culprit && x.notified);
-  if (!result.culprit && result.range && !quiet) {
+  if (!result.culprit && (result.range || why) && !quiet) {
     const folder = `${home}/${b.notes}/${b.lead}`;
     try {
       Deno.mkdirSync(folder, { recursive: true });
-      Deno.writeTextFileSync(`${folder}/release-cron-bisect-${failed.started.replace(/[^0-9A-Za-z-]/g, "")}.md`, `# release-cron bisect\n\nrelease-cron (${app}) failed ${failed.started} on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}). Bisect: ${why || "no commit left to test"}. The culprit is one of: ${list.filter((c) => (result.range as string[]).includes(c.sha)).map((c) => `${c.sha.slice(0, 8)}${c.pr ? ` #${c.pr} ${c.branch}` : ""}`).join(", ")}. Log: ${state}/runs/${failed.started}.log\n`);
+      Deno.writeTextFileSync(`${folder}/release-cron-bisect-${failed.started.replace(/[^0-9A-Za-z-]/g, "")}.md`, `# release-cron bisect\n\nrelease-cron (${app}) failed ${failed.started} on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}). Bisect: ${why || "no commit left to test"}. ${result.range ? `The culprit is one of: ${list.filter((c) => (result.range as string[]).includes(c.sha)).map((c) => `${c.sha.slice(0, 8)}${c.pr ? ` #${c.pr} ${c.branch}` : ""}`).join(", ")}.` : "No commit is blamed: look at what else ran on the machine then."} Log: ${state}/runs/${failed.started}.log\n`);
       result.notified = `notes of ${b.lead}`;
     } catch { /* a folder that cannot be written is one channel less */ }
   }

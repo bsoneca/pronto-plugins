@@ -222,6 +222,14 @@ export const next = (commits, known) => {
   return { test: commits[open[Math.floor((open.length - 1) / 2)]] };
 };
 
+// Whether a bisect may name a commit, from the failing commit's own check: "bad" reproduced the run's
+// failure, and the search goes on; anything else did not, and the why says so. A release failure the
+// check passes showed only in the cloud (the rc preview). A rehearsal failure the check passes came
+// from the run's conditions, not its tree: on 2026-11-06 every flagd on the machine was killed from
+// outside mid-rehearsal, and the bisect, assuming the failing commit bad, blamed the last PR merged.
+export const unreproduced = (kind, v) => v === "bad" ? null :
+  `the check ${v === "good" ? "passes" : "did not finish"} here on the failing commit: ${kind === "release" ? "a failure only the cloud shows" : "a failure of the run's conditions (a service stopped from outside, the machine), not of a commit"}, not bisected`;
+
 // The author session a pull request names in its body: a Claude Desktop session id (local_<uuid>).
 export const sessionOf = (body) => (body ?? "").match(/local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)?.[0] ?? null;
 

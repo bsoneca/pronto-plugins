@@ -221,6 +221,15 @@ cases: {
 		{call: "cron.bisectLine", args: [{of: "r1", culprit: "0123456789ab", pr: 5, branch: "fix/x", ran: 2, fromRecords: 3, notified: "PR #5 comment"}], expect: "r1: culprit 01234567 (PR #5, fix/x); checks run 2, from records 3; told PR #5 comment"},
 		{call: "cron.bisectLine", args: [{of: "r1", range: ["aaaaaaaa11", "bbbbbbbb22"], ran: 0, fromRecords: 1}], expect: "r1: narrowed to aaaaaaaa bbbbbbbb; checks run 0, from records 1"},
 	]}
+	"a bisect names a commit only when the failing commit's own check fails too": {suite: "cron", steps: [
+		{call: "cron.unreproduced", args: ["rehearsal", "bad"], expect: null, why: "reproduced: the search goes on"},
+		{call: "cron.unreproduced", args: ["rehearsal", "good"], expect: "the check passes here on the failing commit: a failure of the run's conditions (a service stopped from outside, the machine), not of a commit, not bisected", why: "2026-11-06: every flagd killed from outside mid-rehearsal, and the last PR merged was blamed"},
+		{call: "cron.unreproduced", args: ["release", "good"], expect: "the check passes here on the failing commit: a failure only the cloud shows, not bisected"},
+		{call: "cron.unreproduced", args: ["release", "timeout"], expect: "the check did not finish here on the failing commit: a failure only the cloud shows, not bisected"},
+	]}
+	"an unreproduced bisect reads as its why": {suite: "cron", steps: [
+		{call: "cron.bisectLine", args: [{of: "r1", why: "the check passes here on the failing commit: not bisected", ran: 1, fromRecords: 0, notified: "notes of lead"}], expect: "r1: the check passes here on the failing commit: not bisected; checks run 1, from records 0; told notes of lead"},
+	]}
 	"a release line names the new-feature scenarios that failed": {suite: "cron", steps: [
 		{call: "cron.newFeatureNames", args: ["gcp: 2026-11-04T10:00:00-03:00 new-feature scenarios failed, released anyway: a, b (absent from 0123abcd, live release)"], expect: ["a", "b"]},
 		{call: "cron.newFeatureNames", args: ["gcp: 2026-11-04T10:00:00-03:00 released on stable features; new-feature scenarios failed: a, b (absent from 0123abcd, live release)"], expect: ["a", "b"], why: "the rule's name since the rename"},
