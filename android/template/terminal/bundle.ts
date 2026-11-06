@@ -38,24 +38,38 @@ try {
 } catch (e) {
   if (!(e instanceof Deno.errors.NotFound)) throw e;
 }
-// A debug build trusts the machine's local stack: its door serves https://localhost
-// under mkcert's root, reached through adb reverse. Never in a release build.
+// A debug build trusts the machine's local stack: its door (Caddy) serves https://localhost
+// under Caddy's local root, reached through adb reverse; mkcert's root too, where there is one.
+// Never in a release build.
 const res = "android/app/build/generated/debug-res";
 await Deno.mkdir(`${res}/xml`, { recursive: true });
 await Deno.mkdir(`${res}/raw`, { recursive: true });
+const home = Deno.env.get("HOME") ?? "";
+const caddyData = Deno.env.get("XDG_DATA_HOME")
+  ? `${Deno.env.get("XDG_DATA_HOME")}/caddy`
+  : Deno.build.os === "darwin" ? `${home}/Library/Application Support/Caddy` : `${home}/.local/share/caddy`;
 let caroot = "";
 try {
   caroot = new TextDecoder().decode((await new Deno.Command("mkcert", { args: ["-CAROOT"], stdout: "piped", stderr: "null" }).output()).stdout).trim();
 } catch (e) {
   if (!(e instanceof Deno.errors.NotFound)) throw e;
 }
-const ca = caroot ? await Deno.readTextFile(`${caroot}/rootCA.pem`).catch(() => "") : "";
-if (ca) await Deno.writeTextFile(`${res}/raw/local_ca.pem`, ca);
+const roots: Record<string, string> = { local_caddy: `${caddyData}/pki/authorities/local/root.crt`, local_ca: caroot ? `${caroot}/rootCA.pem` : "" };
+const trusted: string[] = [];
+for (const [name, path] of Object.entries(roots)) {
+  const pem = path ? await Deno.readTextFile(path).catch(() => "") : "";
+  if (pem) {
+    await Deno.writeTextFile(`${res}/raw/${name}.pem`, pem);
+    trusted.push(name);
+  } else {
+    await Deno.remove(`${res}/raw/${name}.pem`).catch(() => {});
+  }
+}
 await Deno.writeTextFile(`${res}/xml/local_stack.xml`, `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
-            <certificates src="system" />${ca ? '\n            <certificates src="@raw/local_ca" />' : ""}
+            <certificates src="system" />${trusted.map((n) => `\n            <certificates src="@raw/${n}" />`).join("")}
         </trust-anchors>
     </base-config>
 </network-security-config>

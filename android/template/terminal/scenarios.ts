@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any -- a step's argument is the scenario's free-form CUE data
 // integrate@android's runner: an app's CUE scenarios (tests/scenarios/schema.cue) run on an
 // emulator through the system's own touches. Tests are data; this is the runner, as
 // tests/scenarios.ts is the web's. The page is the real DOM in the phone, so a scenario's
@@ -9,7 +10,7 @@
 //
 // <base> is the stack's address, or `stack` to bring one up on a slot (tests/slot.ts launch) and
 // take it down after. Environment: SLOW (a factor on every wait, default 1), SHOTS (where a
-// failure's screenshot goes, default .shots/android), ADB (the adb to use).
+// failure's screenshot goes, default android/app/build/shots), ADB (the adb to use).
 
 const META = ["by", "timeout", "why", "fresh"];
 export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs"];
@@ -192,19 +193,25 @@ class Phone {
   }
 
   async start(path: string, actor: string) {
+    // The device's ports to this machine are tied to adb's connection, which a busy emulator drops
+    // and remakes: they are made again before every start, so the app always reaches the stack.
+    await adb("forward", "tcp:8765", "tcp:8765");
+    const door = this.base.match(/^https:\/\/localhost:(\d+)/);
+    if (door) await adb("reverse", `tcp:${door[1]}`, `tcp:${door[1]}`);
     await sh(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(path)} --es actor ${quote(actor)}`);
     await until(`${actor}'s terminal at ${path}`, 30, async () => {
-      const body = await this.find("body", false);
-      return [body && body.length > 0 ? body : null, "the driver does not answer"];
+      const ready = await this.find("html[data-terminal-ready]", false);
+      return [ready && ready.length > 0 ? ready : null, ready ? "the terminal has not booted" : "the driver does not answer"];
     });
   }
 
+  /** The keyboard put away by the app itself: a BACK key would reach the page whenever no keyboard was up. */
   async hideKeyboard() {
-    if ((await sh("dumpsys input_method")).includes("mInputShown=true")) await sh("input keyevent KEYCODE_BACK");
+    await ask({ hideKeyboard: true });
   }
 
   /** The first of the selectors shown, scrolled onto the screen. */
-  async shownOf(selectors: string[], seconds: number, what: string) {
+  shownOf(selectors: string[], seconds: number, what: string) {
     return until(what, seconds, async () => {
       for (const s of selectors) {
         const els = await this.find(s);
@@ -228,8 +235,20 @@ class Phone {
     throw new Fail(`${selector} cannot be scrolled onto the screen`);
   }
 
-  async tap(el: { box?: Box }) {
-    const { x, y } = centre(el.box!);
+  /** A tap on what is drawn, once it is stable (Playwright's word): no redraw and the same box over
+   * a short while, since a tap across a redraw lands on a view that is gone. */
+  async tap(el: Probed & { box?: Box }) {
+    let box = el.box!;
+    await until("a stable screen", 15, async () => {
+      const before = await ask({ frames: true });
+      await new Promise((r) => setTimeout(r, 250 * slow()));
+      const after = await ask({ frames: true });
+      const now = el.id ? await ask({ bounds: el.id }) : box;
+      const still = before !== undefined && before === after && now && now.x === box.x && now.y === box.y && now.w === box.w && now.h === box.h;
+      if (now) box = now;
+      return [still ? true : null, `the screen keeps redrawing (${before} then ${after} draws)`];
+    });
+    const { x, y } = centre(box);
     await sh(`input tap ${x} ${y}`);
   }
 
@@ -395,7 +414,7 @@ async function main() {
   if (!names.length) throw new Fail(`${files.join(", ")} hold no scenarios`);
 
   const running = baseArg === "stack" ? await stack() : { base: baseArg, stop: async () => {} };
-  const dir = Deno.env.get("SHOTS") ?? ".shots/android";
+  const dir = Deno.env.get("SHOTS") ?? "android/app/build/shots";
   const results: string[] = [];
   let failed = 0;
   try {

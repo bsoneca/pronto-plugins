@@ -3,9 +3,10 @@
 import { compile, elementOf, idOf } from "./compile.js";
 
 let sheets = [];
-const readSheets = async () => {
+const readSheets = () => {
   const names = JSON.parse(__native_sheets());
   sheets = names.map(__native_asset);
+  return Promise.resolve();
 };
 
 let waiting = false;
@@ -14,11 +15,6 @@ const draw = () => {
   waiting = false;
   const live = [...document.querySelectorAll("style")].map((s) => s.textContent);
   const { card, unsupported } = compile(document, { sheets: [...sheets, ...live], width: globalThis.innerWidth });
-  // Typing comes back as the variable's trigger: DivKit owns the field while a person types.
-  card.variable_triggers = (card.variables ?? []).map((v) => ({
-    condition: `@{${v.name} == ${v.name}}`, mode: "on_variable",
-    actions: [{ log_id: v.name, url: `pronto://input/${v.name.slice(2)}?value=@{encodeUri(${v.name})}` }],
-  }));
   const json = JSON.stringify(card);
   for (const u of unsupported) reported.has(u) || (reported.add(u), console.warn("unsupported on Android:", u));
   if (json !== lastCard) { lastCard = json; __native_emit(json); }

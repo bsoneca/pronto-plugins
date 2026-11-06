@@ -113,7 +113,7 @@ const locks = {
       release();
     }
   },
-  query: async () => ({ held: [], pending: [] }),
+  query: () => Promise.resolve({ held: [], pending: [] }),
 };
 const navigator = { userAgent: "pronto-android", language: __native_locale(), languages: [__native_locale()], onLine: true, credentials: undefined, serviceWorker: undefined, locks };
 
@@ -134,8 +134,8 @@ class Response {
   constructor(body, init = {}) {
     this._body = body ?? ""; this.status = init.status ?? 200; this.statusText = init.statusText ?? ""; this.headers = new Headers(init.headers); this.url = init.url ?? ""; this.ok = this.status >= 200 && this.status < 300; this.redirected = false; this.type = "basic"; this.body = null; this.bodyUsed = false;
   }
-  async text() { return this._body; }
-  async json() { return JSON.parse(this._body); }
+  text() { return Promise.resolve(this._body); }
+  json() { return Promise.resolve().then(() => JSON.parse(this._body)); }
   clone() { return new Response(this._body, this); }
 }
 class Request {
@@ -259,8 +259,27 @@ Object.defineProperty(F, "elements", { configurable: true, get() { const l = fie
 F.checkValidity = function () { return fieldsOf(this).filter((e) => e.localName !== "button").map((e) => e.checkValidity()).every(Boolean); };
 F.reportValidity = F.checkValidity;
 F.reset = function () { for (const e of fieldsOf(this)) { e._value = undefined; e._checked = undefined; e._custom = undefined; } this.dispatchEvent(new Event("reset", { bubbles: true })); };
-F.requestSubmit = function (submitter) { if (!this.hasAttribute("novalidate") && !this.checkValidity()) return; const e = new Event("submit", { bubbles: true, cancelable: true }); e.submitter = submitter ?? null; this.dispatchEvent(e); };
+Object.defineProperty(F, "noValidate", { configurable: true, get() { return this.hasAttribute("novalidate"); }, set(v) { if (v) this.setAttribute("novalidate", ""); else this.removeAttribute("novalidate"); } });
+F.requestSubmit = function (submitter) { if (!this.noValidate && !(submitter?.hasAttribute?.("formnovalidate")) && !this.checkValidity()) return; const e = new Event("submit", { bubbles: true, cancelable: true }); e.submitter = submitter ?? null; this.dispatchEvent(e); };
 F.submit = F.requestSubmit;
+// linkedom registers no class for <form>: a form is a plain HTMLElement. So what a form answers is
+// lent to every element whose localName is "form", and to no other.
+{
+  const HE = (HTMLElement ?? Element).prototype;
+  if (F !== HE) {
+    for (const k of Reflect.ownKeys(F)) {
+      if (k === "constructor") continue;
+      const d = Object.getOwnPropertyDescriptor(F, k);
+      const before = Object.getOwnPropertyDescriptor(HE, k);
+      const other = (self) => before ? (before.get ? before.get.call(self) : before.value) : undefined;
+      Object.defineProperty(HE, k, {
+        configurable: true,
+        get() { return this.localName === "form" ? (d.get ? d.get.call(this) : d.value) : other(this); },
+        set(v) { if (this.localName === "form" && d.set) d.set.call(this, v); else Object.defineProperty(this, k, { configurable: true, writable: true, value: v }); },
+      });
+    }
+  }
+}
 g.FormData = class {
   constructor(form, submitter) { this.e = []; for (const f of form ? fieldsOf(form) : []) { const n = f.getAttribute("name"); if (!n || f.disabled) continue; if (f.localName === "button") { if (f === submitter) this.e.push([n, f.getAttribute("value") ?? ""]); continue; } if ((f.type === "checkbox" || f.type === "radio") && !f.checked) continue; this.e.push([n, f.value]); } }
   get(n) { return this.e.find(([k]) => k === n)?.[1] ?? null; } getAll(n) { return this.e.filter(([k]) => k === n).map(([, v]) => v); } has(n) { return this.e.some(([k]) => k === n); }

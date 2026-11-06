@@ -189,7 +189,7 @@ function transform(s, st) {
   const t = st.p["text-transform"];
   if (t === "uppercase") return s.toUpperCase();
   if (t === "lowercase") return s.toLowerCase();
-  if (t === "capitalize") return s.replace(/(^|\s)(\S)/g, (m, a, b) => a + b.toUpperCase());
+  if (t === "capitalize") return s.replace(/(^|\s)(\S)/g, (_m, a, b) => a + b.toUpperCase());
   return s;
 }
 
@@ -248,7 +248,7 @@ function pseudoText(el, which, C) {
   let out = "";
   for (const t of splitWs(c)) {
     const q = /^(["'])([\s\S]*)\1$/.exec(t);
-    if (q) out += q[2].replace(/\\([0-9a-f]{1,6})\s?/gi, (m, h) => String.fromCodePoint(parseInt(h, 16))).replace(/\\(.)/g, "$1");
+    if (q) out += q[2].replace(/\\([0-9a-f]{1,6})\s?/gi, (_m, h) => String.fromCodePoint(parseInt(h, 16))).replace(/\\(.)/g, "$1");
     else if (/^attr\(/i.test(t)) out += attr(el, t.slice(5, -1).trim()) || "";
     else C.rep("content: " + t, desc(el) + "::" + which);
   }
@@ -625,7 +625,7 @@ function labelText(el, C) {
   return "";
 }
 
-function a11y(el, kind, C, extra) {
+function a11y(el, kind, _C, extra) {
   const tag = lname(el);
   const role = attr(el, "role");
   const o = {};
@@ -776,7 +776,7 @@ function textElement(el, st, pctx, C, flexish) {
   return [interact(div, el, C, "text")];
 }
 
-function anonText(run, st, cctx, C, id) {
+function anonText(run, st, cctx, _C, id) {
   const div = Object.assign({ type: "text", id, text: lit(run.text), width: cctx.kind === "row" ? { type: "wrap_content" } : { type: "match_parent" }, height: { type: "wrap_content" } }, textProps(st));
   if (run.ranges.length) div.ranges = run.ranges.map((r) => Object.assign({}, r));
   return div;
@@ -828,7 +828,7 @@ function gridColumns(st, gap, avail, el, C) {
   return Math.max(1, tracks.length);
 }
 
-function spanOf(el, st, cols) {
+function spanOf(_el, st, cols) {
   const v = (st.p["grid-column"] || "").trim();
   if (!v) return 1;
   const m = /^span\s+(\d+)$/.exec(v);
@@ -987,7 +987,7 @@ function ruleDiv(el, st, pctx, C) {
   return [div];
 }
 
-function fieldBase(el, st, pctx, C, type, hint) {
+function fieldBase(el, st, pctx, C, _type, hint) {
   const b = outerBox(el, st, pctx, C, "control", hint);
   const id = C.reg(el);
   const tp = textProps(st);
@@ -1130,7 +1130,7 @@ export function compile(document, opts) {
   const styler = createStyler(rules, env);
   const C = newState(document, { width, scheme }, styler, rules);
   const html = document.documentElement, body = document.body;
-  let root = { type: "container", orientation: "vertical", width: { type: "match_parent" }, height: { type: "match_parent" }, items: [] };
+  const root = { type: "container", orientation: "vertical", width: { type: "match_parent" }, height: { type: "match_parent" }, items: [] };
   if (html && body) {
     const hs = C.style(html), bs = C.style(body);
     const hasHtmlBg = backgroundOf(html, hs, C).length > 0;

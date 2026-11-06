@@ -15,8 +15,10 @@ import com.yandex.div.core.Div2Context
 import com.yandex.div.core.DivActionHandler
 import com.yandex.div.core.DivConfiguration
 import com.yandex.div.core.DivViewFacade
+import com.yandex.div.core.expression.variables.DivVariableController
 import com.yandex.div.core.view2.Div2View
 import com.yandex.div.data.DivParsingEnvironment
+import com.yandex.div.data.Variable
 import com.yandex.div.glide.GlideDivImageLoader
 import com.yandex.div.json.ParsingErrorLogger
 import com.yandex.div.json.expressions.ExpressionResolver
@@ -32,6 +34,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var divView: Div2View
     private var engine: TerminalEngine? = null
     private val shown = HashMap<String, String>()
+    // A field's variable lives here, not in a card: a redraw is a new card, and DivKit's reused
+    // input keeps typing into the variable it was first bound to. So that variable is one that
+    // outlives every card, and what a person types reaches the page from it.
+    private val fields = DivVariableController()
+    // How many times the screen was drawn: a driver waits until it stops changing before a tap,
+    // since a tap across a redraw lands on a view that is gone.
+    @Volatile var frames = 0
+        private set
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,6 +51,7 @@ class MainActivity : AppCompatActivity() {
         val actor = intent.getStringExtra("actor").takeIf { debug } ?: "me"
 
         val configuration = DivConfiguration.Builder(GlideDivImageLoader(this))
+            .divVariableController(fields)
             .actionHandler(object : DivActionHandler() {
                 override fun handleAction(action: DivAction, view: DivViewFacade, resolver: ExpressionResolver): Boolean {
                     val url = action.url?.evaluate(resolver) ?: return super.handleAction(action, view, resolver)
@@ -77,28 +88,36 @@ class MainActivity : AppCompatActivity() {
         when (url.host) {
             "tap" -> engine?.tap("click", id)
             "contextmenu" -> engine?.tap("contextmenu", id)
-            "input" -> {
-                val value = url.getQueryParameter("value") ?: ""
-                shown["v_$id"] = value
-                engine?.input(id, value)
-            }
         }
     }
 
-    // DivKit keeps a card's variables across a redraw, so a value the program
-    // changed (a form's reset) is set here; one a person typed is already there.
+    // The card names its fields' variables and the page's values; they are this screen's, so a
+    // value the page changed (a form's reset) is set here, and one a person typed is already there.
     private fun show(card: JSONObject) {
-        divView.setData(DivData(DivParsingEnvironment(ParsingErrorLogger.LOG), card), DivDataTag("screen"))
-        val variables = card.optJSONArray("variables") ?: return
-        for (i in 0 until variables.length()) {
-            val v = variables.getJSONObject(i)
+        val variables = card.optJSONArray("variables")
+        card.remove("variables")
+        for (i in 0 until (variables?.length() ?: 0)) {
+            val v = variables!!.getJSONObject(i)
             val name = v.getString("name")
             val value = v.optString("value")
-            if (shown[name] != value) {
+            if (!fields.isDeclared(name)) {
                 shown[name] = value
-                divView.setVariable(name, value)
+                val field = Variable.StringVariable(name, value)
+                field.addObserver { changed ->
+                    val now = changed.getValue().toString()
+                    if (shown[name] != now) {
+                        shown[name] = now
+                        engine?.input(name.removePrefix("v_"), now)
+                    }
+                }
+                fields.declare(field)
+            } else if (shown[name] != value) {
+                shown[name] = value
+                fields.get(name)?.set(value)
             }
         }
+        divView.setData(DivData(DivParsingEnvironment(ParsingErrorLogger.LOG), card), DivDataTag("screen"))
+        frames++
     }
 
     override fun onDestroy() {
