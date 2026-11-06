@@ -13,7 +13,11 @@ export interface Entitlement {
   manage: string;
   /** Newer than every entitlement before it for this account and plan. */
   ver: number;
+  /** Where the account's free trial stands, for an account that has had one. */
+  trial?: { state: string; amount: number; currency: string; chargesAt: number };
 }
+
+const TRIAL_STATES = ["running", "cancelled", "converted", "ended", "failed"];
 
 const enc = new TextEncoder();
 
@@ -41,7 +45,14 @@ export async function verifyEntitlement(token: string, p: { issuer: string; tena
   if (typeof c.sub !== "string" || typeof c.plan !== "string" || typeof c.manage !== "string") throw new Refused("entitlement claims");
   if (c.status !== "active" && c.status !== "lapsed") throw new Refused("entitlement status");
   if (typeof c.through !== "number" || typeof c.ver !== "number") throw new Refused("entitlement claims");
-  return { account: c.sub, plan: c.plan, active: c.status === "active", through: c.through, manage: c.manage, ver: c.ver };
+  const out: Entitlement = { account: c.sub, plan: c.plan, active: c.status === "active", through: c.through, manage: c.manage, ver: c.ver };
+  if (c.trial !== undefined) {
+    const t = c.trial as Record<string, unknown> | null;
+    if (typeof t !== "object" || t === null || typeof t.state !== "string" || !TRIAL_STATES.includes(t.state) || !Number.isInteger(t.amount) ||
+      typeof t.currency !== "string" || !Number.isInteger(t.charges_at)) throw new Refused("entitlement trial");
+    out.trial = { state: t.state, amount: t.amount as number, currency: t.currency, chargesAt: t.charges_at as number };
+  }
+  return out;
 }
 
 /** The broker's keys, fetched again for a key not held at most once a

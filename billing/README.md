@@ -28,11 +28,13 @@ deno run <this repo>/billing/owner.ts new                    # the author's secr
 ./saytw generate && ./saytw lint
 ```
 
+An app may offer an opt-in free trial of some plans (`billing.trial` in `billing_spec.cue`, behind `_billingTrialFlag`): [docs/stripe.md](../docs/stripe.md#free-trial) says how it stays safe. Its tables and functions are the `_billingTrialMigration`, named by the app after the grants'.
+
 The operator runs the broker with `bin/pronto-billing-broker` (`keygen`, `webhook`, `release`). Without `STRIPE_SECRET_KEY` on a localhost issuer, a stand-in for Stripe takes payments. Config: the plans, the owner's hash and the broker's address in `billing_spec.cue`; the broker's env file. The files written and the endpoints are in the [root README](../README.md#pronto-billing).
 
 ## Tests
 
-Deno tests next to the code: [`service_test.ts`](service_test.ts), [`install_test.ts`](install_test.ts) and [`broker/`](broker) (`core_test.ts`, `broker_test.ts`).
+Deno tests next to the code: [`service_test.ts`](service_test.ts), [`install_test.ts`](install_test.ts) and [`broker/`](broker) (`core_test.ts`, `broker_test.ts`). [`broker/trial_sandbox.ts`](broker/trial_sandbox.ts) is not run by them: it checks the stand-in's trials against Stripe's sandbox, by an operator with a test key.
 
 ```sh
 deno lint --no-config billing && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
