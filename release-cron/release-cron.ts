@@ -289,12 +289,15 @@ function worktree() {
 // (release_cron_plugin.cue): the three files alone, as the whole package takes a minute to export.
 function config(dir: string) {
   const appDir = `${dir}/${appRel}`;
-  // The app's own cue, as mise finds it there: a shim run from elsewhere finds no version.
-  const cue = Deno.env.get("CUE") || sh(mise, ["which", "cue"], appDir, {}, 60).out || "cue";
   const registry = Deno.readTextFileSync(`${appDir}/.mise.toml`).match(/^CUE_REGISTRY\s*=\s*['"]([^'"]+)['"]/m)?.[1];
+  // The app's own cue, run through mise there: pronto's runtime puts its memory-budget wrapper first
+  // (`mise which cue` names it), and the wrapper finds the real cue on the PATH mise gives it; called by
+  // its path from a run's own PATH, it finds none (2026-11-05, pronto gcp.98). Its memory claim is the
+  // run's own (STACK_PRIORITY=release), ahead of the pull requests' evaluations in the budget's line.
+  const cue = (args: string[]) => must(mise, ["exec", "--", "cue", ...args], appDir, { STACK_PRIORITY: "release", ...(registry ? { CUE_REGISTRY: registry } : {}) }, 900);
   // An app with no release.cue (releaseCron.target) has no GCP: only its opt-in is read.
   const own = exists(`${appDir}/release.cue`);
-  const { gcp, cron } = JSON.parse(must(cue, ["export", ...(own ? ["release.cue"] : []), "release_cron.cue", "release_cron_plugin.cue", "-e", own ? "{gcp: GCP, cron: releaseCron}" : "{cron: releaseCron}", "--out", "json"], appDir, registry ? { CUE_REGISTRY: registry } : {}));
+  const { gcp, cron } = JSON.parse(cue(["export", ...(own ? ["release.cue"] : []), "release_cron.cue", "release_cron_plugin.cue", "-e", own ? "{gcp: GCP, cron: releaseCron}" : "{cron: releaseCron}", "--out", "json"]));
   if (!gcp && !cron.target) throw new Error(`${appRel} has no release.cue and its releaseCron names no target: nothing to release`);
   return { gcp, cron: { ...cron, watch: cron.watch?.length ? cron.watch : [appRel] } };
 }
@@ -304,13 +307,8 @@ if (verb === "install") {
   const { cron } = config(wt);
   // launchd's environment is bare: the tools the run calls by name are found as the app's mise finds
   // them, and sayt's own mise (which ./saytw installs) is on its PATH for `mise trust`.
-  const appDir = `${wt}/${appRel}`;
-  const which = (t: string) => sh(mise, ["which", t], appDir).out;
   const path = [...new Set([mise.replace(/\/mise$/, ""), `${home}/.local/share/mise/shims`, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])].join(":");
-  // The job's cue by its path: a bare name would leave launchd's runs to whichever cue a shim finds.
-  const cue = which("cue") || Deno.env.get("CUE") || "";
-  if (!cue.startsWith("/")) throw new Error(`install: no path for cue (mise which cue in ${appDir} found none): set CUE to it`);
-  const env = { PATH: path, HOME: home, CUE: cue, CLOUDSDK_PYTHON: Deno.env.get("CLOUDSDK_PYTHON") ?? "/opt/homebrew/bin/python3.13" };
+  const env = { PATH: path, HOME: home, CLOUDSDK_PYTHON: Deno.env.get("CLOUDSDK_PYTHON") ?? "/opt/homebrew/bin/python3.13" };
   Deno.mkdirSync(`${home}/Library/LaunchAgents`, { recursive: true });
   Deno.writeTextFileSync(agent, plist({ label, program: Deno.execPath(), args: ["run", "-A", `${wt}/${appRel}/release-cron/release-cron.ts`, app, "run"], poll: cron.poll, log: `${state}/launchd.log`, env }));
   sh("launchctl", ["bootout", `gui/${uid}/${label}`]);

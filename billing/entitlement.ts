@@ -60,15 +60,25 @@ export async function verifyEntitlement(token: string, p: { issuer: string; tena
 export function brokerKeys(issuer: string, fetcher: typeof fetch = fetch, cooldownMs = 60_000, now = () => Date.now()): KeySource {
   let keys: Jwk[] = [];
   let fetched = -Infinity;
-  return async (kid) => {
-    const held = keys.find((k) => k.kid === kid);
-    if (held || now() - fetched < cooldownMs) return held;
-    fetched = now();
+  // The fetch on its way: a lookup that arrives while it is answers from it, not from the keys held
+  // before it, or two events at once after a start would see the cooldown begun and no key yet.
+  let fetching: Promise<void> | null = null;
+  const refetch = async () => {
     const res = await fetcher(`${issuer.replace(/\/$/, "")}/jwks`, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) throw new Error(`jwks ${res.status}`);
     const text = await res.text();
     if (text.length > 65_536) throw new Error("jwks over 64 KB");
     keys = (JSON.parse(text) as { keys: Jwk[] }).keys ?? [];
+  };
+  return async (kid) => {
+    const held = keys.find((k) => k.kid === kid);
+    if (held) return held;
+    if (!fetching) {
+      if (now() - fetched < cooldownMs) return undefined;
+      fetched = now();
+      fetching = refetch().finally(() => { fetching = null; });
+    }
+    await fetching;
     return keys.find((k) => k.kid === kid);
   };
 }
