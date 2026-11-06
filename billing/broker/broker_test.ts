@@ -3,7 +3,7 @@
 // subscribes and its tenant alone is told, manages it with the token its
 // tenant was given, and lapses when it cancels or a payment fails; one
 // tenant's claim, customers and tokens are nothing to another.
-import { Refused } from "../shared.ts";
+import { type Jwk, Refused } from "../shared.ts";
 import { brokerKeys, type Entitlement, verifyEntitlement } from "../entitlement.ts";
 import { broker, twoModes } from "./main.ts";
 import { chargesAt, checkoutLocale, type Consent, ownerOf, tenantOf } from "./core.ts";
@@ -232,6 +232,21 @@ Deno.test("a tenant that missed its entitlement asks for it again with its token
   assertEquals(again, "entitlement key unknown", "checked against the broker's keys alone");
   assertEquals(typeof token === "string" && token.split(".").length === 3, true);
   void ver;
+});
+
+Deno.test("lookups that arrive while the broker's keys are fetched wait for that fetch, which is made once", async () => {
+  const jwk = { kid: "k1", kty: "EC", crv: "P-256", x: "x", y: "y" } as unknown as Jwk;
+  let calls = 0;
+  let answer!: () => void;
+  const fetcher = (() => { calls++; return new Promise<Response>((r) => { answer = () => r(Response.json({ keys: [jwk] })); }); }) as typeof fetch;
+  const keys = brokerKeys(ISSUER, fetcher);
+  const three = Promise.all([keys("k1"), keys("k1"), keys("k1")]);
+  await new Promise((r) => setTimeout(r, 0));
+  answer();
+  assertEquals((await three).map((k) => k?.kid), ["k1", "k1", "k1"], "none of the three is refused while the first fetches");
+  assertEquals(calls, 1);
+  assertEquals(await keys("k2"), undefined, "an unknown key within the cooldown fetches nothing");
+  assertEquals(calls, 1);
 });
 
 Deno.test("a tenant is a public https host: no address, no private name", () => {
