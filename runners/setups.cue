@@ -15,4 +15,11 @@ setups: "bsoneca-mac": {
 	// whose queue on pronto-mac can be long. Same Mac; release-cron's own slot (STACK_PRIORITY=release)
 	// already puts its rehearsal first on the machine.
 	hostRunners: "pronto-release": repo: "pronto"
+	// Light jobs only (ci.yml's `changed` and its `ci` summary): they take seconds and claim no
+	// slot, so a pull request's ci starts at once instead of queueing behind checks that hold the
+	// pronto-mac runners while they wait in tests/slot.ts (2026-11-06: a PR's `changed` waited up to
+	// 7 h, and ci took a median 6.3 h end to end).
+	hostRunners: "ci-light-1": {repo: "pronto", labels: ["ci-light"]}
+	hostRunners: "ci-light-2": {repo: "pronto", labels: ["ci-light"]}
+	hostRunners: "ci-light-3": {repo: "pronto", labels: ["ci-light"]}
 }
