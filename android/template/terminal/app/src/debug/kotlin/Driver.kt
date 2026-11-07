@@ -32,6 +32,8 @@ object Driver {
                             q.has("bounds") -> bounds(activity, root, q.getString("bounds"))
                             q.has("hideKeyboard") -> hideKeyboard(activity, root)
                             q.has("frames") -> activity.frames.toString()
+                            // The pages the app left for since last asked (a stand-in browser's start).
+                            q.has("trips") -> org.json.JSONArray(activity.takeTrips()).toString()
                             else -> "null"
                         }
                         it.getOutputStream().write((answer + "\n").toByteArray())

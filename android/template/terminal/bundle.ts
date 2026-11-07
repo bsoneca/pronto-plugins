@@ -2,6 +2,7 @@
 // unchanged, with this directory's browser and display. Run by build@android
 // from the app's root: deno run -A --no-lock android/terminal/bundle.ts <omnishell-dir>.
 import { transform, stop } from "npm:esbuild@0.25.12";
+import { localRoots } from "./trust.ts";
 
 const [omnishell] = Deno.args;
 if (!omnishell) throw new Error("bundle: name omnishell's directory");
@@ -44,22 +45,11 @@ try {
 const res = "android/app/build/generated/debug-res";
 await Deno.mkdir(`${res}/xml`, { recursive: true });
 await Deno.mkdir(`${res}/raw`, { recursive: true });
-const home = Deno.env.get("HOME") ?? "";
-const caddyData = Deno.env.get("XDG_DATA_HOME")
-  ? `${Deno.env.get("XDG_DATA_HOME")}/caddy`
-  : Deno.build.os === "darwin" ? `${home}/Library/Application Support/Caddy` : `${home}/.local/share/caddy`;
-let caroot = "";
-try {
-  caroot = new TextDecoder().decode((await new Deno.Command("mkcert", { args: ["-CAROOT"], stdout: "piped", stderr: "null" }).output()).stdout).trim();
-} catch (e) {
-  if (!(e instanceof Deno.errors.NotFound)) throw e;
-}
-const roots: Record<string, string> = { local_caddy: `${caddyData}/pki/authorities/local/root.crt`, local_ca: caroot ? `${caroot}/rootCA.pem` : "" };
+const roots = await localRoots();
 const trusted: string[] = [];
-for (const [name, path] of Object.entries(roots)) {
-  const pem = path ? await Deno.readTextFile(path).catch(() => "") : "";
-  if (pem) {
-    await Deno.writeTextFile(`${res}/raw/${name}.pem`, pem);
+for (const name of ["local_caddy", "local_ca"]) {
+  if (roots[name]) {
+    await Deno.writeTextFile(`${res}/raw/${name}.pem`, roots[name]);
     trusted.push(name);
   } else {
     await Deno.remove(`${res}/raw/${name}.pem`).catch(() => {});

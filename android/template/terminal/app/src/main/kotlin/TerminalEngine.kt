@@ -43,6 +43,8 @@ class TerminalEngine(
     private val actor: String,
     private val onReload: () -> Unit,
     private val onExit: () -> Unit,
+    // A page of another origin: the host takes it to the system browser.
+    private val onOpen: (String) -> Unit,
 ) : AutoCloseable {
     private val js = Executors.newSingleThreadExecutor { Thread(null, it, "pronto-quickjs", 16L * 1024 * 1024).apply { isDaemon = true } }
     private val dispatcher = js.asCoroutineDispatcher()
@@ -93,6 +95,7 @@ class TerminalEngine(
         qjs.function("__native_zone") { _ -> java.util.TimeZone.getDefault().id }
         qjs.function("__native_reload") { _ -> onReload() }
         qjs.function("__native_exit") { _ -> onExit() }
+        qjs.function("__native_open") { a -> onOpen(a[0] as String); null }
         qjs.function("__native_asset") { a -> asset(a[0] as String) }
         qjs.function("__native_timer") { a ->
             val id = (a[0] as Number).toLong()
@@ -199,6 +202,8 @@ class TerminalEngine(
     fun tap(kind: String, id: String) = call("__onTap", JSONObject.quote(kind), JSONObject.quote(id))
     fun input(id: String, value: String) = call("__onInput", JSONObject.quote(id), JSONObject.quote(value))
     fun back() = call("__goBack")
+    // A link the OS handed the app, back from the system browser (or opened from elsewhere).
+    fun link(url: String) = call("__onLink", JSONObject.quote(url))
     fun resize(dp: Int) = call("__onResize", "$dp")
 
     // The driver's question over the live DOM, in a debug build.
