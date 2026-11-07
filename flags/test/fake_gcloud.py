@@ -46,6 +46,12 @@ def write(url, data, metadata):
 
 
 a = args
+# FAKE_GCLOUD_READONLY: any command but a read is noted in FAKE_GCLOUD_STATE.writes and fails, so a test can
+# prove a dry run never reached a write.
+READS = [["config", "get-value"], ["storage", "objects", "describe"], ["storage", "cat"], ["storage", "ls"], ["storage", "buckets", "describe"]]
+if os.environ.get("FAKE_GCLOUD_READONLY") and not any(a[:len(r)] == r for r in READS):
+    open(STATE + ".writes", "a").write(" ".join(a) + "\n")
+    fail("fake gcloud: a write under FAKE_GCLOUD_READONLY")
 if a[:3] == ["config", "get-value", "account"]:
     print("operator@example.com")
 elif a[:3] == ["storage", "objects", "describe"]:
