@@ -37,3 +37,16 @@ setups: "bsoneca-mac": {
 	hostRunners: "pronto-bulk-5": {repo: "pronto", labels: ["pronto-bulk"]}
 	hostRunners: "pronto-bulk-6": {repo: "pronto", labels: ["pronto-bulk"]}
 }
+
+// bsoneca/studio-apps, the apps Studio's owner makes (pronto's apps/studio): GitHub registers a
+// personal account's runners per repository, so it has runners of its own on the same Mac, under one
+// label for all its jobs (its ci.yml and automerge.yml: runs-on [self-hosted, macOS, studio-apps]).
+// Two, so a pull request's light jobs never wait behind a check; a check's heavy steps claim the
+// machine's budget through the app's tests/slot.ts like pronto's. A setup of its own, so applying it
+// registers these alone.
+setups: "bsoneca-mac-studio-apps": {
+	cluster: host: {}
+	github: {owner: "bsoneca", kind: "user"}
+	hostRunners: "studio-apps-1": {repo: "studio-apps", labels: ["studio-apps"]}
+	hostRunners: "studio-apps-2": {repo: "studio-apps", labels: ["studio-apps"]}
+}
