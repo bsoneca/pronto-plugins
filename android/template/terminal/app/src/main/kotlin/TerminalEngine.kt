@@ -94,7 +94,6 @@ class TerminalEngine(
         qjs.function("__native_reload") { _ -> onReload() }
         qjs.function("__native_exit") { _ -> onExit() }
         qjs.function("__native_asset") { a -> asset(a[0] as String) }
-        qjs.function("__native_sheets") { _ -> JSONArray(listOf("shell.css", "design.css")).toString() }
         qjs.function("__native_timer") { a ->
             val id = (a[0] as Number).toLong()
             val ms = (a[1] as Number).toLong()
