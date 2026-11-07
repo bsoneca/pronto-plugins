@@ -88,10 +88,19 @@ _flagdPorts: {ofrep: 8693, evaluation: 8694, management: 8695, sync: 8696}
 // since a release reads that file alone, and flags_spec.cue holds the two to
 // each other.
 flagsLive?: {
-	project!: =~"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
-	bucket!:  =~"^[a-z0-9][a-z0-9_.-]{1,61}[a-z0-9]$"
+	// A bucket (with its project), or a local directory instead (`dir`, relative to the app's
+	// folder or absolute): the same versioned store kept as files, `<dir>/flags.json` live and
+	// `<dir>/versions/` the rest, which flagd reads as a file source. For a drill, a laptop or a test.
+	project?: =~"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
+	bucket?:  =~"^[a-z0-9][a-z0-9_.-]{1,61}[a-z0-9]$"
+	dir?:     string & !=""
 	object:   *"flags.json" | =~"^[A-Za-z0-9_./-]+\\.json$"
-	sources:  "[{\"uri\":\"gs://\(bucket)/\(object)\",\"provider\":\"gcs\"}]"
+	if bucket != _|_ {
+		sources: "[{\"uri\":\"gs://\(bucket)/\(object)\",\"provider\":\"gcs\"}]"
+	}
+	if dir != _|_ {
+		sources: "[{\"uri\":\"\(dir)/flags.json\",\"provider\":\"file\"}]"
+	}
 	// Production's address, where a flip's live cases run (`flagsCases.live`) and where
 	// `push` waits for OFREP to answer the tester's value before it runs them.
 	url?: =~"^https://[a-z0-9][a-z0-9.-]*[a-z0-9](:[0-9]+)?$"

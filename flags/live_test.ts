@@ -36,6 +36,9 @@ Deno.test("a flag's accounts read its local value beside the hosts at hand; othe
   eq(doc.flags.banner.targeting, { if: [local, "local", "default"] }, "a flag without accounts");
   eq(doc.flags.quiet.targeting, undefined, "a flag with one value everywhere");
   eq(await cue(dir, "flagsLive.sources"), '[{"uri":"gs://shop-prod-flags/flags.json","provider":"gcs"}]', "the live source");
+  await Deno.writeTextFile(`${dir}/flags_spec.cue`, `package shop\n${SPEC.replace(/flagsLive: \{.*\}/, 'flagsLive: {dir: "flagstore"}')}`);
+  eq(await cue(dir, "flagsLive.sources"), '[{"uri":"flagstore/flags.json","provider":"file"}]', "a directory store is a file source");
+  await Deno.writeTextFile(`${dir}/flags_spec.cue`, `package shop\n${SPEC}`);
   const entry = await cue(dir, "cluster.surface.targets.flagd.entrypoint");
   eq(entry.do.includes("--ofrep-port"), false, "a host launch takes the OFREP port it is handed");
   eq(entry.dockerfile.do.includes("--ofrep-port 8693"), true, "the image keeps 8693");

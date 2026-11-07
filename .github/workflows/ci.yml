@@ -49,6 +49,8 @@ jobs:
           sayt --script tools.nu cue vet -c -t package=check ./release-cron/export
           sayt --script tools.nu cue vet -c ./prod-watch
           sayt --script tools.nu cue vet -c -t package=check ./prod-watch/export
+          sayt --script tools.nu cue vet -c ./probe
+          sayt --script tools.nu cue vet -c -t package=check ./probe/export
           sayt --script tools.nu cue vet -c ./release-notes
           sayt --script tools.nu cue vet -c ./release-notes/export
           sayt --script tools.nu cue vet -c ./runners
@@ -92,6 +94,15 @@ jobs:
           grep -q "the app's own" "$app/prod_watch.cue"
           (cd "$app" && cue export prod_watch.cue prod_watch_plugin.cue -e prodWatch.lifecycle.start.within) | grep -qx 60
           ! ./bin/pronto-prod-watch "$app" nope=1
+      - name: Opt an app into pronto-probe, then refresh it keeping its own journeys
+        run: |
+          app=$(mktemp -d)/app && mkdir -p "$app" && printf 'package demo\n' > "$app/program.cue"
+          ./bin/pronto-probe "$app"
+          echo "// the app's own" >> "$app/probes_spec.cue"
+          ./bin/pronto-probe "$app"
+          grep -q "the app's own" "$app/probes_spec.cue"
+          (cd "$app" && cue export probes_spec.cue probes_plugin.cue -e probeTarget.url) | grep -qx '"https://example.com"'
+          ! ./bin/pronto-probe "$app" nope=1
       - name: Opt an app into release-notes
         run: |
           app=$(mktemp -d)/app && mkdir -p "$app" && printf 'package demo\n' > "$app/program.cue"
@@ -136,13 +147,13 @@ jobs:
       - name: Test the identity broker
         run: deno test --no-config --allow-net identity/oidc_test.ts identity/broker
       - name: Test the billing broker
-        run: deno lint --no-config billing intents gcp release-cron release-notes prod-watch runners tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
+        run: deno lint --no-config billing intents gcp release-cron release-notes prod-watch probe runners tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
       # A script that does not parse fails only when it is run, and a release script runs rarely
       # (identity/release.nu shipped `env: [...] ++ $phone`, a record field nu cannot parse).
       - name: Parse each nushell script
         run: sayt --script tools.nu nu -c 'let bad = (glob **/*.nu | where {|f| not (nu-check $f) }); if ($bad | is-not-empty) { print $bad; exit 1 }'
       - name: Test the intents (tests/unit/*.cue)
-        run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
+        run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android probe; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
       # flagd, the version the flags plugin pins, checked against its release's digest.
       - name: Install flagd
         env:

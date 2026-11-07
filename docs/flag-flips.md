@@ -123,3 +123,5 @@ The plugin's own tests run every stage against stand-ins for gcloud and OFREP (`
   and a push.
 - **Release notes.** A flip's report is printed and kept on the version. It does not yet appear on
   the app's GitHub Releases (release-notes) the way a release does.
+
+A flip that breaks a journey anyway is caught and undone as [docs/flag-rollback-drill.md](flag-rollback-drill.md) shows: pronto-probe alerts, naming the flip from the flags journal, and `pronto-flags rollback` restores the version before it.

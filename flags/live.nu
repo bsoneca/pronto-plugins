@@ -4,13 +4,18 @@
 # names the bucket and its project; its flags are flagd.document, exported from
 # the app's CUE as generate writes flags/flags.json. Every push is a version of
 # the object, kept: the history, and what a rollback restores.
+# Where flagsLive says `dir` instead of a bucket, the same store is a local directory (see
+# "The store"): a drill or a laptop, with no gcloud.
 #   bin/pronto-flags setup <app-dir>               # the bucket, its readers, the first push
 #   bin/pronto-flags push <app-dir>                # the flags as flags_spec.cue says them now, once their cases pass
 #   bin/pronto-flags cases <app-dir> [flag]        # the cases a flip of each flag (or the one) runs
-#   bin/pronto-flags history <app-dir>             # every version, newest first
+#   bin/pronto-flags history <app-dir> [--json]    # every version, newest first
 #   bin/pronto-flags rollback <app-dir> [version]  # the version before the live one, or the one named
 #   bin/pronto-flags show <app-dir>                # what a push would write, and where: nothing written
 # Each runs as the operator's own gcloud login.
+# Every write (setup, push, rollback) prints its target first and takes --expect <url> (or PRONTO_FLAGS_EXPECT):
+# a target that differs is refused with nothing written. With PRONTO_FLAGS_DRY_RUN set a write shows what it
+# would write and stops. Each write is also appended to a journal (see `journal`).
 # A push that changes a flag's default value runs that flag's cases first (see `push`).
 
 # gcloud on the Python pinned beside it, never on the virtualenv it shares with every other gcloud
@@ -44,20 +49,105 @@ def live [app: path] {
 	let at = (cue-of $app flagsLive)
 	if $at == null { error make {msg: $"($app)'s flags_spec.cue names no flagsLive: say `flagsLive: {project: \"…\", bucket: \"…\"}` there"} }
 	# `url` is the object's; flagsLive.url, production's address, is `site`.
-	$at | upsert site ($at.url? | default null) | upsert testers ($at.testers? | default []) | upsert runAs ($at.runAs? | default null) | upsert alert ($at.alert? | default null) | upsert url $"gs://($at.bucket)/($at.object)"
+	let at = ($at | upsert site ($at.url? | default null) | upsert testers ($at.testers? | default []) | upsert runAs ($at.runAs? | default null) | upsert alert ($at.alert? | default null))
+	if ($at.dir? | default null) != null {
+		if ($at.bucket? | default null) != null { error make {msg: $"($app)'s flagsLive names both a bucket and a dir: say one"} }
+		let dir = if ($at.dir | str starts-with "/") { $at.dir | path expand } else { $app | path expand | path join $at.dir | path expand }
+		return ($at | upsert dir $dir | upsert url $"file://($dir)/flags.json")
+	}
+	if ($at.bucket? | default null) == null or ($at.project? | default null) == null { error make {msg: $"($app)'s flagsLive names no bucket and project, nor a dir"} }
+	$at | upsert url $"gs://($at.bucket)/($at.object)"
+}
+
+# ---- The store: the live flags and every version of them, in a bucket or in a directory ----
+# A bucket is a versioned Cloud Storage object. A directory (flagsLive.dir) keeps the same things as files:
+# the live document at <dir>/flags.json, written whole by a rename so that a flagd watching the file never
+# reads half of one, and each version beside it, <dir>/versions/<generation>.json with its
+# <generation>.meta.json (the generation, when it was written, when a newer one replaced it, and what the
+# write kept: who, commit, stage, flag, cases, note). Generations are increasing integers, 0 where there is
+# no object yet. A write names the generation it read and is refused when it is no longer the live one.
+
+def is-dir [at: record]: nothing -> bool { ($at.dir? | default null) != null }
+
+def now-utc []: nothing -> string { date now | date to-timezone utc | format date "%Y-%m-%dT%H:%M:%SZ" }
+
+# Every version's record, oldest first: generation, timeCreated, timeDeleted (null while live), metadata.
+def dir-versions [at: record]: nothing -> list<record> {
+	let vdir = ($at.dir | path join versions)
+	if not ($vdir | path exists) { return [] }
+	glob $"($vdir)/*.meta.json" | each {|f| open --raw $f | from json } | sort-by {|v| $v.generation | into int }
 }
 
 # The live object's generation, or 0 where there is none yet: a push writes only over the one it read.
-def generation [url: string] {
-	let r = (run-gcloud storage objects describe $url --format "value(generation)")
+def generation [at: record] {
+	if (is-dir $at) {
+		return ("0" | append (dir-versions $at | where {|v| $v.timeDeleted? == null } | get generation) | last)
+	}
+	let r = (run-gcloud storage objects describe $at.url --format "value(generation)")
 	if $r.exit_code == 0 { $r.stdout | str trim } else if ($r.stderr | str contains "404") or ($r.stderr | str contains "not found") or ($r.stderr | str contains "No URLs matched") { "0" } else {
-		error make {msg: $"gcloud storage objects describe ($url): ($r.stderr | str trim)"}
+		error make {msg: $"gcloud storage objects describe ($at.url): ($r.stderr | str trim)"}
 	}
 }
 
-# Who pushed, and from which commit: kept on each version, which history shows.
-def provenance [app: path] {
-	let who = (gc config get-value account | str trim)
+# The live document's text, or that of one version.
+def store-cat [at: record]: nothing -> string {
+	if (is-dir $at) { open --raw ($at.dir | path join flags.json) } else { gc storage cat $at.url }
+}
+def store-version [at: record, gen: string]: nothing -> string {
+	if (is-dir $at) {
+		let f = ($at.dir | path join versions $"($gen).json")
+		if not ($f | path exists) { error make {msg: $"($at.url) has no version ($gen)"} }
+		open --raw $f
+	} else { gc storage cat $"($at.url)#($gen)" }
+}
+
+# Every version: generation, timeCreated, timeDeleted (null while live), metadata.
+def store-versions [at: record]: nothing -> list<record> {
+	if (is-dir $at) { return (dir-versions $at) }
+	gc storage ls -a --json $at.url | from json | get metadata
+	| each {|o| {generation: $o.generation, timeCreated: $o.timeCreated, timeDeleted: ($o.timeDeleted? | default null), metadata: ($o.metadata? | default {})} }
+}
+
+# What a version keeps, as gcloud's --custom-metadata takes it: key=value pairs split at commas.
+def meta-str [m: record]: nothing -> string {
+	$m | items {|k, v| $"($k)=($v | into string | str replace -a -r '[,=\n]' ' ')" } | str join ","
+}
+
+# Writes text as the new live version, over the generation `from` and no other, and returns the new generation.
+export def store-put [at: record, text: string, meta: record, from: string]: nothing -> string {
+	if not (is-dir $at) {
+		let file = (mktemp -t --suffix .json)
+		$text | save -f $file
+		gc storage cp $file $at.url $"--if-generation-match=($from)" --content-type application/json --cache-control no-store $"--custom-metadata=(meta-str $meta)" | ignore
+		rm $file
+		return (generation $at)
+	}
+	let now = (generation $at)
+	if $from != $now { error make {msg: $"($at.url): 412 Precondition Failed: the live version is ($now), not ($from)"} }
+	let known = (dir-versions $at | get generation | each {|g| $g | into int })
+	let gen = ([((date now | into int) // 1000) (($known | append 0 | math max) + 1)] | math max | into string)
+	let stamp = (now-utc)
+	let vdir = ($at.dir | path join versions)
+	mkdir $vdir
+	$text | save -f ($vdir | path join $"($gen).json")
+	{generation: $gen, timeCreated: $stamp, timeDeleted: null, metadata: $meta} | to json --indent 2 | save -f ($vdir | path join $"($gen).meta.json")
+	if $now != "0" {
+		let old = ($vdir | path join $"($now).meta.json")
+		open --raw $old | from json | upsert timeDeleted $stamp | to json --indent 2 | save -f $old
+	}
+	let tmp = ($at.dir | path join $".flags.json.($gen).tmp")
+	$text | save -f $tmp
+	mv -f $tmp ($at.dir | path join flags.json)
+	$gen
+}
+
+# Who pushed, and from which commit: kept on each version, which history shows. A directory store
+# needs no gcloud: the account where one is installed, else the login name.
+def provenance [app: path, at: record] {
+	let who = if (is-dir $at) {
+		let a = if (which gcloud | is-empty) { "" } else { do { ^gcloud config get-value account } | complete | get stdout | str trim }
+		if $a == "" { $env.USER? | default (^whoami | str trim) } else { $a }
+	} else { gc config get-value account | str trim }
 	let commit = (do { cd $app; ^git rev-parse --short HEAD } | complete | get stdout | str trim)
 	# Any of the app's CUE: a flag's value may come from another spec (pronto-billing's grants, say).
 	let dirty = (do { cd $app; ^git status --porcelain -- '*.cue' } | complete | get stdout | str trim)
@@ -80,18 +170,81 @@ def mirror [at: record, text: string] {
 	}
 }
 
-# --meta: more of what the version keeps (meta-of); --from: the generation the write is over, when
+# The flags that differ between two documents, by their default value: {flag, from, to}. A flag the other
+# document lacks reads as off where the one that has it is a bool (as the live object does), so a new flag
+# that is off changes nothing.
+def changes-between [old: record, new: record]: nothing -> list<record> {
+	let a = ($old.flags? | default {})
+	let b = ($new.flags? | default {})
+	($a | columns) | append ($b | columns) | uniq | each {|f|
+		let was = (default-of ($a | get -o $f))
+		let now = (default-of ($b | get -o $f))
+		let was = if $was == null and (($now | describe) == "bool") { false } else { $was }
+		let now = if $now == null and (($was | describe) == "bool") { false } else { $now }
+		{flag: $f, from: $was, to: $now}
+	} | where {|c| $c.from != $c.to }
+}
+
+# The flags whose definition differs between two documents in anything but its default value.
+def defs-between [old: record, new: record]: nothing -> list<string> {
+	let a = ($old.flags? | default {})
+	let b = ($new.flags? | default {})
+	($a | columns) | append ($b | columns) | uniq | where {|f|
+		let x = ($a | get -o $f)
+		let y = ($b | get -o $f)
+		$x != null and $y != null and (($x | reject -o variants) != ($y | reject -o variants) or ($x.variants? | default {} | reject -o default) != ($y.variants? | default {} | reject -o default))
+	}
+}
+
+# Where a write is noted: one JSON line per write, in the operator's state (PRONTO_FLAGS_JOURNAL names the file).
+export def journal-file [app: path]: nothing -> string {
+	let named = ($env.PRONTO_FLAGS_JOURNAL? | default "")
+	if $named != "" { return $named }
+	let state = ($env.XDG_STATE_HOME? | default "")
+	let root = if $state == "" { $env.HOME? | default $nu.home-dir | path join .local state } else { $state }
+	$root | path join pronto-flags $"($app | path expand | path basename).jsonl"
+}
+
+# Every write of the live flags goes through here: it reads the version it replaces, writes the new text over
+# that generation, mirrors it, and notes it in the journal (printed too). --derive-flag: the version's `flag`
+# is the flags whose default moved, where its metadata names none (a rollback). The new generation is returned.
+def commit [at: record, app: path, text: string, meta: record, from: string, --derive-flag]: nothing -> string {
+	let old = if $from == "0" { {flags: {}} } else { try { store-version $at $from | from json } catch { null } }
+	let changes = if $old == null { [] } else { changes-between $old ($text | from json) }
+	# The flags named: those whose default moved, and those whose definition changed otherwise (targeting, variants,
+	# state): a rollout widened to everyone breaks things without its default moving.
+	let names = if $old == null { "" } else { ($changes | each {|c| $c.flag }) | append (defs-between $old ($text | from json)) | uniq | str join "+" }
+	let meta = if $derive_flag and ($meta.flag? | default "" | is-empty) and $names != "" { $meta | upsert flag $names } else { $meta }
+	let p = (provenance $app $at)
+	let gen = (store-put $at $text ({pushed-by: $p.who, commit: $p.commit} | merge $meta) $from)
+	mirror $at $text
+	let line = {
+		at: (now-utc), event: "flags.write", app: ($app | path expand | path basename), target: $at.url, version: $gen, from: $from
+		stage: ($meta.stage? | default ""), flag: (if $names != "" { $names } else { $meta.flag? | default "" }), who: $p.who, commit: $p.commit
+		cases: ($meta.cases? | default ""), note: ($meta.note? | default ""), changes: $changes
+	} | to json -r
+	# The flags are written by now: a journal that cannot be written warns and never fails the write.
+	let file = (journal-file $app)
+	try { mkdir ($file | path dirname); $"($line)\n" | save -a $file } catch {|e| print -e $"flags: WARNING: could not note the write in ($file): ($e.msg)" }
+	print $"flags: journal ($line)"
+	$gen
+}
+
+# Before a write: the target is said, and refused when it is not the one the operator expected
+# (--expect, else PRONTO_FLAGS_EXPECT). Whether the write is only a dry run (PRONTO_FLAGS_DRY_RUN) is returned.
+def target-guard [at: record, expect: any]: nothing -> bool {
+	print $"flags: target ($at.url)"
+	let want = if $expect != null { $expect } else { $env.PRONTO_FLAGS_EXPECT? | default "" }
+	if $want != "" and $want != $at.url { error make {msg: $"flags: the target is ($at.url), not the expected ($want); nothing was written"} }
+	not (($env.PRONTO_FLAGS_DRY_RUN? | default "") in ["" "0"])
+}
+
+# --meta: more of what the version keeps; --from: the generation the write is over, when
 # an earlier step of the same push read it. The new generation is returned.
-def write-flags [at: record, doc: record, app: path, --meta: string = "", --from: string = ""]: nothing -> string {
+def write-flags [at: record, doc: record, app: path, --meta: record = {}, --from: string = ""]: nothing -> string {
 	if not ($doc.flags? | describe | str starts-with "record") { error make {msg: "flagd.document has no flags"} }
-	let from = if $from == "" { generation $at.url } else { $from }
-	let file = (mktemp -t --suffix .json)
-	$doc | to json --indent 2 | save -f $file
-	let p = (provenance $app)
-	gc storage cp $file $at.url $"--if-generation-match=($from)" --content-type application/json --cache-control no-store $"--custom-metadata=pushed-by=($p.who),commit=($p.commit)($meta)" | ignore
-	rm $file
-	mirror $at ($doc | to json --indent 2)
-	let now = (generation $at.url)
+	let from = if $from == "" { generation $at } else { $from }
+	let now = (commit $at $app ($doc | to json --indent 2) $meta $from)
 	print $"flags: ($at.url) is version ($now) \(was ($from)\); flagd reads it within seconds, and a page on its next load"
 	summary $doc | print
 	$now
@@ -117,13 +270,13 @@ def summary [doc: record] {
 
 export def show [app: path] {
 	let at = (live $app)
-	print $"flags: a push writes ($at.url) in ($at.project):"
+	print $"flags: a push writes ($at.url) in ($at.project? | default 'a local directory'):"
 	summary (cue-of $app flagd.document) | print
 }
 
 # The flags as the spec says them, written with no cases: the first push of `setup`.
 def push-plain [app: path] {
-	write-flags (live $app) (cue-of $app flagd.document) $app | ignore
+	write-flags (live $app) (cue-of $app flagd.document) $app --meta {stage: all, note: "first push"} | ignore
 }
 
 # ---- A flip runs its flag's cases (flags_plugin.cue: flagsCases, flagsLive.testers) ----
@@ -175,11 +328,6 @@ def has-cases [c: record]: nothing -> bool { ($c.scenarios | is-not-empty) or ($
 export def cases [app: path, flag?: string] {
 	let names = if $flag != null { [$flag] } else { cue-of $app flagd.document | get flags | columns }
 	$names | each {|f| cases-of $app $f }
-}
-
-# What a version keeps beyond who and which commit: ",key=value" pairs, which gcloud splits at commas.
-def meta-of [m: record]: nothing -> string {
-	$m | items {|k, v| $",($k)=($v | into string | str replace -a -r '[,=\n]' ' ')" } | str join
 }
 
 # The app's command, run with sh in its folder with the env given; ok and what it printed.
@@ -274,10 +422,8 @@ def wait-ofrep [site: string, tester: string, want: list<record>]: nothing -> bo
 
 # The version a push read, written again as the newest after a failed live stage.
 def restore [at: record, app: path, to: string, now: string, names: string, why: string] {
-	let p = (provenance $app)
-	gc storage cp $"($at.url)#($to)" $at.url $"--if-generation-match=($now)" $"--custom-metadata=pushed-by=($p.who)(meta-of {stage: rolled-back, flag: $names, cases: failed, note: $why})" | ignore
-	mirror $at (gc storage cat $at.url)
-	print -e $"flags: ($at.url) is version ($to)'s flags again, as version (generation $at.url)"
+	let again = (commit $at $app (store-version $at $to) {stage: rolled-back, flag: $names, cases: failed, note: $why} $now)
+	print -e $"flags: ($at.url) is version ($to)'s flags again, as version ($again)"
 }
 
 # Changes the live flags. A flag whose default value changes (or that is new) goes through its cases:
@@ -289,14 +435,15 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 #      writes the version read in 3 again, and the push fails;
 #   5. the flags as the spec says them are written (stage=all, cases=passed).
 # --skip-live "<why>" leaves out 3 and 4, for an app with no testers yet. Both reasons are kept on the version.
-export def push [app: path, --untested: string, --skip-live: string] {
+export def push [app: path, --untested: string, --skip-live: string, --expect: string] {
 	let at = (live $app)
+	if (target-guard $at $expect) { show $app; print "flags: dry run: nothing written"; return }
 	let doc = (cue-of $app flagd.document)
-	let before = (generation $at.url)
-	let old = if $before == "0" { {flags: {}} } else { gc storage cat $at.url | from json }
+	let before = (generation $at)
+	let old = if $before == "0" { {flags: {}} } else { store-cat $at | from json }
 	let changed = (changed-flags $old $doc)
 	if ($changed | is-empty) {
-		write-flags $at $doc $app --meta (meta-of {stage: all}) --from $before | ignore
+		write-flags $at $doc $app --meta {stage: all} --from $before | ignore
 		return
 	}
 	let all = ($changed | each {|f| cases-of $app $f })
@@ -344,7 +491,7 @@ export def push [app: path, --untested: string, --skip-live: string] {
 	let verdict = if ($tested | is-empty) { "untested" } else if $skip_live != null { if $passed { "gated" } else { "local-only" } } else { "passed" }
 	let notes = ([$notes (if $passed { $"at hand: the gate \(($by)\)" } else { "" })] | where {|n| $n != "" } | str join "; ")
 	if $skip_live != null or ($tested | is-empty) {
-		write-flags $at $doc $app --meta (meta-of {stage: all, flag: $names, cases: $verdict, note: $notes}) --from $before | ignore
+		write-flags $at $doc $app --meta {stage: all, flag: $names, cases: $verdict, note: $notes} --from $before | ignore
 		return
 	}
 
@@ -362,7 +509,7 @@ export def push [app: path, --untested: string, --skip-live: string] {
 # Cloud Monitoring's snooze of flagsLive.alert, for the live stage of a flip: a name to end it by, or null where
 # the app names no alert. The snooze ends on its own after two hours should the push never end it.
 def snooze-start [at: record, flags: list<string>] {
-	if ($at.alert? | default "" | is-empty) { return null }
+	if ($at.alert? | default "" | is-empty) or (is-dir $at) { return null }
 	let from = (date now | date to-timezone utc)
 	let name = (gc monitoring snoozes create --project $at.project --display-name $"pronto-flags flip: ($flags | str join ' ')" --criteria-policies $at.alert --start-time ($from | format date "%Y-%m-%dT%H:%M:%SZ") --end-time ($from + 2hr | format date "%Y-%m-%dT%H:%M:%SZ") --format "value(name)" | str trim)
 	print $"flags: ($at.alert) is snoozed for the live stage \(($name)\)"
@@ -381,7 +528,7 @@ def snooze-end [at: record, name: any] {
 # version read before it again: the testers are named in no version that outlives the run.
 def flip-live [at: record, app: path, old: record, doc: record, on: list<string>, tested: list<record>, cmds: record, before: string, final: record] {
 	let testers = $at.testers
-	let canary = (write-flags $at (canary-doc $old $doc $on $testers) $app --meta (meta-of {stage: testers, flag: ($on | str join "+"), cases: running}) --from $before)
+	let canary = (write-flags $at (canary-doc $old $doc $on $testers) $app --meta {stage: testers, flag: ($on | str join "+"), cases: running} --from $before)
 	print $"flags: ($on | str join ', ') is on for ($testers | str join ', ') alone; waiting for ($at.site) to say so"
 	try {
 		let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f)), old: (canary-doc $old $doc [$f] $testers | get flags | get $f | get variants.old)} })
@@ -393,41 +540,55 @@ def flip-live [at: record, app: path, old: record, doc: record, on: list<string>
 			let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site, FLAGS_TESTER: $testers.0, CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT: $at.runAs})
 			if not $r.ok { error make {msg: $"($c.flag)'s production cases failed:\n($r.out)"} }
 		}
-		write-flags $at $doc $app --meta (meta-of $final) --from $canary | ignore
+		write-flags $at $doc $app --meta $final --from $canary | ignore
 	} catch {|e|
 		try { restore $at $app $before $canary ($on | str join "+") ($e.msg | lines | first) } catch {|r| print -e $"flags: WARNING: could not restore version ($before) over the canary: ($r.msg); `pronto-flags rollback` does" }
 		error make {msg: $"rolled back to version ($before): ($e.msg)"}
 	}
 }
 
-# Every version of the object, newest first: `gcloud storage ls -a --json` gives each
-# its generation, when it was written, when a newer one replaced it, and what push kept on it.
-export def history [app: path] {
+# Every version of the object, newest first: when it was written, when a newer one replaced it, and what
+# its write kept. --changes adds, to each, the flags whose default value it moved against the version before
+# it (null where either cannot be read); it reads every version, so history asks for it only as JSON.
+export def history [app: path, --changes] {
 	let at = (live $app)
-	gc storage ls -a --json $at.url | from json | get metadata
+	let rows = (store-versions $at
 	| each {|o| {version: $o.generation, at: $o.timeCreated, live: ($o.timeDeleted? == null), by: ($o.metadata?.pushed-by? | default ""), commit: ($o.metadata?.commit? | default ""), stage: ($o.metadata?.stage? | default ""), flag: ($o.metadata?.flag? | default ""), cases: ($o.metadata?.cases? | default ""), note: ($o.metadata?.note? | default "")}}
-	| sort-by {|v| $v.version | into int } --reverse
+	| sort-by {|v| $v.version | into int } --reverse)
+	if not $changes { return $rows }
+	let docs = ($rows | reverse | each {|r| try { store-version $at $r.version | from json } catch { null } })
+	$rows | reverse | enumerate | each {|e|
+		let cur = ($docs | get $e.index)
+		let prev = if $e.index == 0 { {flags: {}} } else { $docs | get ($e.index - 1) }
+		$e.item | insert changes (if $cur == null or $prev == null { null } else { changes-between $prev $cur })
+	} | reverse
 }
 
 # The version before the live one, or the one named, written again as the newest:
 # a rollback is itself a version, which a rollback undoes.
-export def rollback [app: path, version?: string] {
+export def rollback [app: path, version?: string, --expect: string] {
 	let at = (live $app)
+	if (target-guard $at $expect) { show $app; print "flags: dry run: nothing written"; return }
 	let all = (history $app)
 	let live = ($all | where live | get version.0? | default "")
 	let to = if $version != null { $version } else { $all | where version != $live | get version.0? }
 	if $to == null or ($all | where version == $to | is-empty) { error make {msg: $"no version ($to) of ($at.url) to roll back to: `pronto-flags history` lists them"} }
-	gc storage cp $"($at.url)#($to)" $at.url $"--if-generation-match=($live)" | ignore
-	mirror $at (gc storage cat $at.url)
-	print $"flags: ($at.url) is ($to)'s flags again, as version (generation $at.url)"
+	let again = (commit $at $app (store-version $at $to) {stage: rollback, note: $"rolled back from ($live) to ($to)"} $live --derive-flag)
+	print $"flags: ($at.url) is ($to)'s flags again, as version ($again)"
 }
 
 # Once per app: the bucket, versioned and private, keeping the last 50 versions;
 # the app's run and preview accounts as its readers, since flagd reads it as the
 # service it runs in; and the first push, which flagd needs before a release
 # names the object (flagd stops at start on a source it cannot read).
-export def setup [app: path] {
+export def setup [app: path, --expect: string] {
 	let at = (live $app)
+	if (target-guard $at $expect) { show $app; print "flags: dry run: nothing written"; return }
+	if (is-dir $at) {
+		mkdir $at.dir
+		if (generation $at) == "0" { push-plain $app } else { print $"flags: ($at.url) is there already; `pronto-flags push` changes it" }
+		return
+	}
 	let bucket = $"gs://($at.bucket)"
 	if not (exists storage buckets describe $bucket --project $at.project) {
 		let region = (cue-of $app GCP.region | default "us-central1")
@@ -447,13 +608,13 @@ export def setup [app: path] {
 		gc storage buckets add-iam-policy-binding $bucket --member $"serviceAccount:($r)" --role roles/storage.objectViewer | ignore
 		print $"flags: ($r) reads ($bucket)"
 	}
-	if (generation $at.url) == "0" { push-plain $app } else { print $"flags: ($at.url) is there already; `pronto-flags push` changes it" }
+	if (generation $at) == "0" { push-plain $app } else { print $"flags: ($at.url) is there already; `pronto-flags push` changes it" }
 }
 
 def main [] { print "usage: live.nu setup|push|history|rollback|show|cases <app-dir> [version|flag]" }
-def "main setup" [app: path] { setup $app }
-def "main push" [app: path, --untested: string, --skip-live: string] { push $app --untested $untested --skip-live $skip_live }
-def "main history" [app: path] { history $app | table -e | print }
-def "main rollback" [app: path, version?: string] { rollback $app $version }
+def "main setup" [app: path, --expect: string] { setup $app --expect $expect }
+def "main push" [app: path, --untested: string, --skip-live: string, --expect: string] { push $app --untested $untested --skip-live $skip_live --expect $expect }
+def "main history" [app: path, --json] { if $json { history $app --changes | to json | print } else { history $app | table -e | print } }
+def "main rollback" [app: path, version?: string, --expect: string] { rollback $app $version --expect $expect }
 def "main show" [app: path] { show $app }
 def "main cases" [app: path, flag?: string] { cases $app $flag | table -e | print }

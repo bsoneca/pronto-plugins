@@ -1,0 +1,25 @@
+#!/bin/sh
+# Adds or refreshes pronto-probe in a pronto app, or runs it (probe/README.md):
+#   bin/pronto-probe <app-dir>                  install: probe/ (driver, rules), probes_plugin.cue (the schema, in the app's package), probes_spec.cue seeded once
+#   bin/pronto-probe run <app-dir> [--once] [--probe name]
+#                                               run the app's journeys every `every`, alert on consecutive failures
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+if [ "${1:-}" = run ]; then
+	shift
+	app=$(cd "$1" && pwd)
+	shift
+	cd "$here"
+	# Deno as CI pins it, with the repository's tools (cue) on the PATH, as bin/pronto-flags runs its own.
+	exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run -A probe/probe.ts "$app" "$@"
+fi
+app=$(cd "$1" && pwd)
+shift
+[ $# -eq 0 ] || { echo "pronto-probe: unknown argument $1" >&2; exit 2; }
+package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" | head -n 1)
+[ -n "$package" ] || { echo "pronto-probe: $app/program.cue names no package" >&2; exit 2; }
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+./saytw --script tools.nu cue export ./probe/export -t "package=$package" -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"

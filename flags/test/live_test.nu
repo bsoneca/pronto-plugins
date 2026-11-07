@@ -1,5 +1,5 @@
 # pronto-flags' live commands (flags/live.nu) against a stand-in for gcloud
-# (fake_gcloud.py), on an app the installer writes: setup makes the bucket
+# (fake_gcloud.py), and a store kept in a local directory (flagsLive.dir), on an app the installer writes: setup makes the bucket
 # private, versioned and read by the release's accounts, and pushes once; a push
 # writes over only the version it read; history lists every version, by whom;
 # a rollback writes an earlier one again as the newest. The app's cue is real.
@@ -26,7 +26,7 @@ GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\",
 }
 
 def livex [args: list<string>, extra: record = {}] {
-	with-env ({SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state, FLAGS_OFREP_CMD: $"python3 ($here)/fake_ofrep.py", FLAGS_POLL_SEC: "0.01", FLAGS_WAIT_SEC: "0.1"} | merge $extra) {
+	with-env ({SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state, FLAGS_OFREP_CMD: $"python3 ($here)/fake_ofrep.py", FLAGS_POLL_SEC: "0.01", FLAGS_WAIT_SEC: "0.1", PRONTO_FLAGS_JOURNAL: $"($dir)/journal.jsonl"} | merge $extra) {
 		^$nu.current-exe $"($here)/../live.nu" ...$args | complete
 	}
 }
@@ -253,6 +253,132 @@ open --raw $"($app)/flags_spec.cue" | str replace 'configMap: "shop-flags"}' 'co
 "flags: held: {default: false, local: true}\n" | save -a $"($app)/flags_spec.cue"
 let r = (livex [push $app] {PATH: ([$bin] | append $env.PATH), SSH_FAIL: "1"})
 check ($r.exit_code != 0 and ($r.stderr | str contains "the mirror at ops@node.example's shop/shop-flags failed")) "a required mirror that fails fails the push"
+
+# The journal of the writes above: one JSON line each, with the flags whose default moved.
+let jl = (open --raw $"($dir)/journal.jsonl" | lines | each {|l| $l | from json })
+check (($jl | all {|j| $j.event == "flags.write" and $j.app == "shop" and ($j.target | str starts-with "gs://shop-prod-flags/") and ($j.at | str ends-with "Z") }) and ($jl | length) > 10) "journal: a line for every write, with its event, app, target and time"
+check (($jl | where stage == "rollback" | first).note | str starts-with "rolled back from ") "journal: a rollback says from which version"
+check (($jl | where stage == "testers" | first).flag == "premium") "journal: a canary names its flag"
+let gh = (livex [history $app --json])
+let gj = ($gh.stdout | from json)
+check ($gh.exit_code == 0 and ($gj | length) == (object | length) and ($gj | all {|r| "changes" in ($r | columns) }) and ($gj.0.version | into int) > ($gj.1.version | into int)) "history --json on a bucket: newest first, each with its changes"
+
+# ---- A store in a directory (flagsLive.dir): the same versions, with no gcloud ----
+let drill = $"($dir)/drill"
+mkdir $drill
+"package drill\n" | save $"($drill)/program.cue"
+'[tools]
+"github:cue-lang/cue" = "0.16.1"
+' | save $"($drill)/.mise.toml"
+^$real trust -q $"($drill)/.mise.toml"
+^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $drill | ignore
+def dspec [broken: bool] {
+	$"package drill
+flags: drill_break_checkout: {default: ($broken), local: true}
+flagsLive: {dir: \"flagstore\"}
+" | save -f $"($drill)/flags_spec.cue"
+}
+let store = $"(($drill | path expand))/flagstore"
+let want = $"file://($store)/flags.json"
+let jfile = $"($dir)/drill-journal.jsonl"
+def dlive [args: list<string>, extra: record = {}] { livex $args ({PRONTO_FLAGS_JOURNAL: $jfile} | merge $extra) }
+def djournal [] { if ($jfile | path exists) { open --raw $jfile | lines | each {|l| $l | from json } } else { [] } }
+def dversions [] { glob $"($store)/versions/*.meta.json" | length }
+
+dspec false
+let dshow = (dlive [show $drill])
+check ($dshow.exit_code == 0 and ($dshow.stdout | str contains $want) and not ($store | path exists)) "dir store: show names file://<dir>/flags.json and writes nothing"
+let dset = (dlive [setup $drill])
+check ($dset.exit_code == 0 and ($dset.stdout | str starts-with $"flags: target ($want)")) "dir store: setup says its target first"
+check (($"($store)/flags.json" | path exists) and (dversions) == 1 and (open $"($store)/flags.json" | get flags.drill_break_checkout.variants.default) == false) "dir store: setup makes the directory and the first push"
+let v1 = (glob $"($store)/versions/*.meta.json" | first | open --raw | from json)
+check ($v1.timeDeleted == null and $v1.metadata.stage == "all" and ($v1.metadata.pushed-by | is-not-empty) and ($v1.generation | into int) > 0) "dir store: a version keeps its generation, time, who and stage"
+check ((djournal | length) == 1 and (djournal).0.from == "0" and (djournal).0.flag == "" and (djournal).0.changes == [] and (djournal).0.target == $want and (djournal).0.app == "drill") "dir store: the first push is journaled, from generation 0, with no flip"
+let again = (dlive [setup $drill])
+check ($again.exit_code == 0 and (dversions) == 1) "dir store: setup again pushes nothing"
+
+# A flip, with no cases and said so.
+dspec true
+let refused2 = (dlive [push $drill])
+check ($refused2.exit_code != 0 and ($refused2.stderr | str contains "no cases") and (dversions) == 1) "dir store: a flip with no cases is refused, nothing written"
+let flip = (dlive [push $drill --untested "the drill"])
+check ($flip.exit_code == 0 and (dversions) == 2 and (open $"($store)/flags.json" | get flags.drill_break_checkout.variants.default) == true) "dir store: the flip is written to flags.json"
+let metas = (glob $"($store)/versions/*.meta.json" | each {|f| open --raw $f | from json } | sort-by {|m| $m.generation | into int })
+check ($metas.0.timeDeleted != null and $metas.1.timeDeleted == null and $metas.1.metadata.cases == "untested" and $metas.1.metadata.flag == "drill_break_checkout") "dir store: the replaced version is kept, marked deleted; the new one keeps its stage, cases and flag"
+check ((ls -a $store | get name | where {|n| $n | str contains ".tmp" } | is-empty) and ((open --raw $"($store)/flags.json") == (open --raw $"($store)/versions/($metas.1.generation).json"))) "dir store: flags.json is the newest version whole, no temp file left"
+let j2 = (djournal | get 1)
+check ($j2.flag == "drill_break_checkout" and $j2.changes == [{flag: "drill_break_checkout", from: false, to: true}] and $j2.from == $metas.0.generation and $j2.version == $metas.1.generation and $j2.stage == "all" and $j2.cases == "untested" and ($j2.note | str contains "the drill") and ($j2.who | is-not-empty) and ($flip.stdout | str contains "flags: journal {")) "dir store: the flip's journal line, printed too"
+
+# History as JSON.
+let dh = (dlive [history $drill --json])
+let dj = ($dh.stdout | from json)
+check ($dh.exit_code == 0 and ($dj | length) == 2 and $dj.0.version == $metas.1.generation and $dj.0.live and not $dj.1.live) "dir store: history --json lists every version, newest first"
+check ($dj.0.changes == [{flag: "drill_break_checkout", from: false, to: true}] and $dj.1.changes == []) "dir store: history --json: each version's changes against the one before"
+
+# A rollback.
+let rb = (dlive [rollback $drill])
+check ($rb.exit_code == 0 and (dversions) == 3 and (open $"($store)/flags.json" | get flags.drill_break_checkout.variants.default) == false) "dir store: rollback writes the version before the live one again"
+let j3 = (djournal | get 2)
+check ($j3.stage == "rollback" and $j3.note == $"rolled back from ($metas.1.generation) to ($metas.0.generation)" and $j3.flag == "drill_break_checkout" and $j3.changes == [{flag: "drill_break_checkout", from: true, to: false}] and $j3.from == $metas.1.generation) "dir store: the rollback's journal line"
+check ((djournal | length) == 3) "dir store: the journal holds three lines"
+let rh = ((dlive [history $drill --json]).stdout | from json)
+check ($rh.0.stage == "rollback" and $rh.0.note == $j3.note and $rh.0.flag == "drill_break_checkout") "dir store: the rollback's stage and note are kept on its version"
+let back = (dlive [rollback $drill $metas.1.generation])
+check ($back.exit_code == 0 and (open $"($store)/flags.json" | get flags.drill_break_checkout.variants.default) == true and (dversions) == 4) "dir store: rollback to a named version"
+let nov = (dlive [rollback $drill 999])
+check ($nov.exit_code != 0 and (dversions) == 4) "dir store: rollback to a version that isn't there is refused"
+dspec false
+dlive [push $drill] | ignore
+
+# The target guard.
+let nv = (dversions)
+let nj = (djournal | length)
+let wrong = (dlive [push $drill --untested x --expect "gs://brawl-chess-flags/flags.json"])
+check ($wrong.exit_code != 0 and ($wrong.stdout | str contains $"flags: target ($want)") and ($wrong.stderr | str contains "not the expected") and (dversions) == $nv and (djournal | length) == $nj) "--expect: a different target is refused, nothing written"
+let wrong_env = (dlive [rollback $drill] {PRONTO_FLAGS_EXPECT: "gs://brawl-chess-flags/flags.json"})
+check ($wrong_env.exit_code != 0 and (dversions) == $nv) "PRONTO_FLAGS_EXPECT: a different target is refused, nothing written"
+let wrong_setup = (dlive [setup $drill --expect "gs://brawl-chess-flags/flags.json"])
+check ($wrong_setup.exit_code != 0 and (dversions) == $nv) "--expect on setup too"
+dspec true
+let right = (dlive [push $drill --untested "expected target" --expect $want])
+check ($right.exit_code == 0 and (dversions) == $nv + 1) "--expect: the right target is written"
+let right_env = (dlive [rollback $drill] {PRONTO_FLAGS_EXPECT: $want})
+check ($right_env.exit_code == 0 and (dversions) == $nv + 2) "PRONTO_FLAGS_EXPECT: the right target is written"
+
+# A dry run writes nothing.
+let nv2 = (dversions)
+let nj2 = (djournal | length)
+dspec false
+let dry = (dlive [push $drill --untested x] {PRONTO_FLAGS_DRY_RUN: "1"})
+check ($dry.exit_code == 0 and ($dry.stdout | str contains "dry run: nothing written") and ($dry.stdout | str contains $want) and (dversions) == $nv2 and (djournal | length) == $nj2) "dry run: push shows and writes nothing"
+let dry_rb = (dlive [rollback $drill] {PRONTO_FLAGS_DRY_RUN: "1"})
+check ($dry_rb.exit_code == 0 and ($dry_rb.stdout | str contains "dry run: nothing written") and (dversions) == $nv2 and (djournal | length) == $nj2) "dry run: rollback shows and writes nothing"
+
+# Two writers: a write names the generation it read, and is refused when another has written since.
+let stale = (^$nu.current-exe -c $"use ($here)/../live.nu store-put; store-put {dir: '($store)', url: '($want)'} '{}' {stage: all} '1'" | complete)
+check ($stale.exit_code != 0 and ($stale.stderr | str contains "412 Precondition Failed") and (dversions) == $nv2) "dir store: a write over a generation that is no longer live is refused"
+let live_gen = (glob $"($store)/versions/*.meta.json" | each {|f| open --raw $f | from json } | where timeDeleted == null | get generation.0)
+let fresh = (^$nu.current-exe -c $"use ($here)/../live.nu store-put; store-put {dir: '($store)', url: '($want)'} '{\"flags\": {}}' {stage: all} '($live_gen)'" | complete)
+check ($fresh.exit_code == 0 and (dversions) == $nv2 + 1 and ($fresh.stdout | str trim | into int) > ($live_gen | into int)) "dir store: a write over the live generation goes, with a greater generation"
+
+# A change to a flag's targeting alone (its `local` gone, so no host rule) names the flag, its default unmoved.
+dspec false
+let base = (dlive [push $drill --untested "the flag back, with its local value"])
+check ($base.exit_code == 0) "dir store: a push over the stand-in write"
+$"package drill
+flags: drill_break_checkout: {default: false}
+flagsLive: {dir: \"flagstore\"}
+" | save -f $"($drill)/flags_spec.cue"
+let tgt = (dlive [push $drill --untested "targeting only"])
+let jt = (djournal | last)
+check ($tgt.exit_code == 0 and $jt.flag == "drill_break_checkout" and $jt.changes == []) "journal: a targeting-only change names its flag, with no default change"
+
+# Where no file is named, the journal is in the operator's state: XDG_STATE_HOME, else ~/.local/state.
+let xdg = $"($dir)/xdg"
+let byxdg = (livex [rollback $drill] {PRONTO_FLAGS_JOURNAL: "", XDG_STATE_HOME: $xdg})
+check ($byxdg.exit_code == 0 and ($"($xdg)/pronto-flags/drill.jsonl" | path exists)) "journal: XDG_STATE_HOME/pronto-flags/<app>.jsonl by default"
+let byhome = (with-env {PRONTO_FLAGS_JOURNAL: "", XDG_STATE_HOME: "", HOME: $"($dir)/home"} { ^$nu.current-exe -c $"use ($here)/../live.nu journal-file; journal-file ($drill)" | complete })
+check ($byhome.exit_code == 0 and ($byhome.stdout | str trim) == $"($dir)/home/.local/state/pronto-flags/drill.jsonl") "journal: ~/.local/state/pronto-flags/<app>.jsonl without XDG_STATE_HOME"
 
 rm -rf $dir
 print "flags: live commands pass"
