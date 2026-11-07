@@ -59,6 +59,10 @@ globalThis.__onTap = (kind, id) => {
   const ev = new CustomEvent(type, { bubbles: true, cancelable: true, composed: true });
   ev.button = kind === "contextmenu" ? 2 : 0;
   el.dispatchEvent(ev);
+  // A link's own action, which no handler took: one to another origin leaves for the system
+  // browser; one of the app's is the shell's (its router took it, or it is a route).
+  const a = type === "click" && !ev.defaultPrevented ? el.closest("a[href]") : null;
+  if (a && !a.hasAttribute("download")) globalThis.__leave(a.getAttribute("href"));
 };
 // The driver's eyes in a debug build: a selector over the same DOM the web's scenarios read.
 globalThis.__probe = (selector) => {

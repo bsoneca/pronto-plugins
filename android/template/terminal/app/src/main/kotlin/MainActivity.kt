@@ -1,5 +1,7 @@
 package __APPLICATION_ID__
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Bundle
@@ -42,12 +44,21 @@ class MainActivity : AppCompatActivity() {
     // since a tap across a redraw lands on a view that is gone.
     @Volatile var frames = 0
         private set
+    // A debug build started with `browser standin` hands no page to a real browser: it keeps the
+    // addresses for its driver, whose scenario runner plays the browser and sends the link back.
+    private var standIn = false
+    private val trips = mutableListOf<String>()
+    @Synchronized fun takeTrips(): List<String> = trips.toList().also { trips.clear() }
+    @Synchronized private fun trip(url: String) { trips.add(url) }
+    private var base = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val debug = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
-        val base = intent.getStringExtra("base").takeIf { debug } ?: getString(R.string.pronto_base)
-        val path = intent.getStringExtra("path").takeIf { debug } ?: "/"
+        base = (intent.getStringExtra("base").takeIf { debug } ?: getString(R.string.pronto_base)).trimEnd('/')
+        standIn = debug && intent.getStringExtra("browser") == "standin"
+        // Opened by a link to the app's own origin (an App Link), it starts where the link points.
+        val path = ownPath(intent.data) ?: intent.getStringExtra("path").takeIf { debug } ?: "/"
         val actor = intent.getStringExtra("actor").takeIf { debug } ?: "me"
 
         val configuration = DivConfiguration.Builder(GlideDivImageLoader(this))
@@ -73,7 +84,7 @@ class MainActivity : AppCompatActivity() {
         }
         setContentView(scroll)
 
-        val started = TerminalEngine(this, base.trimEnd('/'), "${base.trimEnd('/')}$path", actor, { runOnUiThread { recreate() } }, { runOnUiThread { finish() } })
+        val started = TerminalEngine(this, base, "$base$path", actor, { runOnUiThread { recreate() } }, { runOnUiThread { finish() } }, { url -> runOnUiThread { open(url) } })
         engine = started
         lifecycleScope.launch { started.tree.collect { if (it.isNotEmpty()) show(JSONObject(it)) } }
         lifecycleScope.launch { started.failure.collect { if (it != null) Log.e("pronto", "the terminal stopped", it) } }
@@ -81,6 +92,30 @@ class MainActivity : AppCompatActivity() {
         started.resize((resources.displayMetrics.widthPixels / resources.displayMetrics.density).toInt())
         onBackPressedDispatcher.addCallback(this) { started.back() }
         Driver.attach(this, started, divView)
+    }
+
+    private fun open(url: String) {
+        if (standIn) { trip(url); return }
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE))
+        } catch (e: ActivityNotFoundException) {
+            Log.e("pronto", "no browser takes $url", e)
+        }
+    }
+
+    // A path of the app's own origin, or null: a link of any other origin is not the app's to open.
+    private fun ownPath(link: Uri?): String? {
+        val origin = Uri.parse(base)
+        if (link == null || link.scheme != origin.scheme || link.host != origin.host || link.port != origin.port) return null
+        return (link.encodedPath ?: "/") + (link.encodedQuery?.let { "?$it" } ?: "") + (link.encodedFragment?.let { "#$it" } ?: "")
+    }
+
+    // Back from the system browser: the activity is the one already running (singleTask), and the
+    // link moves its page there, as a navigation the shell hears.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val link = intent.data ?: return
+        if (ownPath(link) != null) engine?.link(link.toString())
     }
 
     private fun gesture(url: Uri) {

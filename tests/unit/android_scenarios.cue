@@ -63,4 +63,17 @@ cases: {
 		{call: "androidScenarios.holds", args: ["attr", {of: ".s", name: "data-state", is: "validation-error"}, [_el & {attrs: {"data-state": "empty"}}]], matches: "want \"validation-error\""},
 		{call: "androidScenarios.holds", args: ["attr", {of: ".s", name: "n", below: 5}, [_el & {attrs: {n: "7"}}]], matches: "below 5"},
 	]}
+	"a trip in the browser ends back at the app's own origin, never at the door's sign-in routes": {suite: "android", steps: [
+		{call: "androidScenarios.backTo", args: ["https://localhost:33600/beginner?pro=1#x", "https://localhost:33600"], expect: true},
+		{call: "androidScenarios.backTo", args: ["https://localhost:33600/", "https://localhost:33600/"], expect: true},
+		{call: "androidScenarios.backTo", args: ["https://localhost:33600/auth/oidc/google/callback", "https://localhost:33600"], expect: false},
+		{call: "androidScenarios.backTo", args: ["http://localhost:28463/pay/cs_1", "https://localhost:33600"], expect: false},
+		{call: "androidScenarios.backTo", args: ["https://localhost:33601/", "https://localhost:33600"], expect: false},
+		{call: "androidScenarios.backTo", args: ["https://checkout.stripe.com/c/pay/cs_1", "https://prontoweeper.example"], expect: false},
+	]}
+	"a form's submission is HTML's: a GET in the query, a POST in an urlencoded body, at its action or the page": {suite: "android", steps: [
+		{call: "androidScenarios.submission", args: ["http://localhost:28463/pay/cs_1", "/pay/cs_1/confirm", "post", [["paid", "yes"], ["note", "a b&c"]]], expect: {url: "http://localhost:28463/pay/cs_1/confirm", method: "POST", body: "paid=yes&note=a+b%26c"}},
+		{call: "androidScenarios.submission", args: ["http://localhost:28463/pay/cs_1?old=1#top", null, null, [["q", "x"]]], expect: {url: "http://localhost:28463/pay/cs_1?q=x", method: "GET"}},
+		{call: "androidScenarios.submission", args: ["http://localhost:28463/a/b", "c", "POST", []], expect: {url: "http://localhost:28463/a/c", method: "POST", body: ""}},
+	]}
 }

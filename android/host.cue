@@ -65,6 +65,7 @@ _terminal: {
 	"terminal/display.js":                 _ @embed(file="template/terminal/display.js", type=text)
 	"terminal/main.js":                    _ @embed(file="template/terminal/main.js", type=text)
 	"terminal/scenarios.ts":               _ @embed(file="template/terminal/scenarios.ts", type=text)
+	"terminal/trust.ts":                   _ @embed(file="template/terminal/trust.ts", type=text)
 }
 
 // Kotlin sources, main and test, land under the application id's package path.

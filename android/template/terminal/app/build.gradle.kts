@@ -1,3 +1,5 @@
+import java.net.URI
+
 plugins {
     id("com.android.application")
 }
@@ -12,7 +14,11 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
-        resValue("string", "pronto_base", (project.findProperty("prontoBase") as String?) ?: "__BASE__")
+        val base = (project.findProperty("prontoBase") as String?) ?: "__BASE__"
+        resValue("string", "pronto_base", base)
+        // The app's links open it: an App Link of its own origin, verified by the Digital Asset
+        // Links its door serves (assetlinks.json) for the certificate that signs the release.
+        manifestPlaceholders["prontoHost"] = URI(base).host
     }
 
     buildFeatures { resValues = true }

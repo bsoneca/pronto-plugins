@@ -60,12 +60,27 @@ g.__fireWindow = (type, event) => { for (const h of events.get(type) ?? []) h(ev
 let here = new URL(__native_start(), base);
 const stack = [{ url: here.href, state: null }];
 let at = 0;
+// A page of another origin (a checkout, a provider's sign-in) is not the app's to draw: the host
+// hands it to the system browser, and the trip ends when the OS hands the app a link back to its
+// own origin (__onLink), as the Unity host's SystemBrowser does.
+const own = (u) => u.origin === new URL(base).origin;
+const leave = (v) => {
+  const u = new URL(v, here);
+  if (own(u)) return false;
+  __native_open(u.href);
+  return true;
+};
+g.__leave = leave;
+g.__onLink = (url) => {
+  const u = new URL(url);
+  if (own(u)) location.assign(u.pathname + u.search + u.hash);
+};
 const location = {
   get href() { return here.href; }, set href(v) { location.assign(v); },
   get origin() { return here.origin; }, get protocol() { return here.protocol; }, get host() { return here.host; }, get hostname() { return here.hostname; }, get port() { return here.port; },
   get pathname() { return here.pathname; }, get search() { return here.search; }, get hash() { return here.hash; },
-  assign(v) { history.pushState(null, "", v); __fireWindow("popstate", new Event("popstate")); },
-  replace(v) { history.replaceState(null, "", v); __fireWindow("popstate", new Event("popstate")); },
+  assign(v) { if (leave(v)) return; history.pushState(null, "", v); __fireWindow("popstate", new Event("popstate")); },
+  replace(v) { if (leave(v)) return; history.replaceState(null, "", v); __fireWindow("popstate", new Event("popstate")); },
   reload() { __native_reload(); },
   toString() { return here.href; },
 };
@@ -331,6 +346,7 @@ Object.defineProperties(g, {
 });
 g.addEventListener = on; g.removeEventListener = off;
 g.scrollTo = () => {};
+g.open = (v) => { if (v !== undefined && v !== null && String(v) !== "") location.assign(String(v)); return null; };
 g.getComputedStyle = () => ({ getPropertyValue: () => "" });
 g.matchMedia = (q) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} });
 g.IntersectionObserver = class { observe() {} unobserve() {} disconnect() {} };

@@ -11,6 +11,15 @@
 // <base> is the stack's address, or `stack` to bring one up on a slot (tests/slot.ts launch) and
 // take it down after. Environment: SLOW (a factor on every wait, default 1), SHOTS (where a
 // failure's screenshot goes, default android/app/build/shots), ADB (the adb to use).
+//
+// A page of another origin (a checkout, a provider) is the system browser's on a phone. The runner
+// starts the app with `browser standin`, so the app keeps such an address for the driver ({"trips"})
+// instead of opening a browser, and plays that browser itself, as the Unity host's StandInBrowser
+// does: the scenario's next steps act on that page, and when it comes back to the app's origin the
+// link is handed to the app as the OS would (`am start -a VIEW -d`).
+
+import { parseHTML } from "npm:linkedom@0.18.4";
+import { localRoots } from "./trust.ts";
 
 const META = ["by", "timeout", "why", "fresh"];
 export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs"];
@@ -74,6 +83,22 @@ export function scrollFor(box: Box, display: { w: number; h: number }): "up" | "
 
 /** The middle of a box, in pixels. */
 export const centre = (b: Box) => ({ x: Math.round(b.x + b.w / 2), y: Math.round(b.y + b.h / 2) });
+
+/** Whether an address the browser reached ends its trip: the app's own origin, but not the door's /auth/ routes. */
+export function backTo(url: string, base: string): boolean {
+  const u = new URL(url), b = new URL(base);
+  return u.origin === b.origin && !u.pathname.startsWith("/auth/");
+}
+
+/** The request a form's submission makes (HTML's): a GET puts the fields in the query, a POST in an urlencoded body. */
+export function submission(page: string, action: string | null, method: string | null, fields: [string, string][]): { url: string; method: string; body?: string } {
+  const post = (method ?? "get").toLowerCase() === "post";
+  const target = new URL(action || page, page);
+  const data = new URLSearchParams(fields).toString();
+  target.hash = "";
+  if (!post) { target.search = data; return { url: target.href, method: "GET" }; }
+  return { url: target.href, method: "POST", body: data };
+}
 
 const lookup = (messages: Record<string, any>, key: string) => key.split(".").reduce((m, k) => m?.[k], messages) ?? messages[key];
 
@@ -173,12 +198,115 @@ async function displaySize() {
   return display = { w: Number(m[1]), h: Number(m[2]) };
 }
 
+// ------------------------------------------------------------------ the stand-in browser
+
+/** The browser of a trip away from the app: a page fetched on this machine, its forms submitted and its links followed. */
+class StandIn {
+  url = "";
+  private doc: any = null;
+  private readonly jar = new Map<string, Map<string, string>>();
+  constructor(private readonly base: string, private readonly client: Deno.HttpClient) {}
+
+  /** Goes to an address, following redirects; the link back when it reaches the app, else null with the page shown. */
+  async go(url: string, method = "GET", body?: string): Promise<string | null> {
+    for (let hops = 0; hops < 20; hops++) {
+      if (backTo(url, this.base)) return url;
+      const host = new URL(url).host;
+      const headers: Record<string, string> = {};
+      const cookies = this.jar.get(host);
+      if (cookies?.size) headers.cookie = [...cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+      if (body !== undefined) headers["content-type"] = "application/x-www-form-urlencoded";
+      const r = await fetch(url, { method, body, headers, redirect: "manual", client: this.client });
+      for (const set of r.headers.getSetCookie()) {
+        const kv = set.split(";")[0], i = kv.indexOf("=");
+        if (i > 0) { if (!this.jar.has(host)) this.jar.set(host, new Map()); this.jar.get(host)!.set(kv.slice(0, i).trim(), kv.slice(i + 1).trim()); }
+      }
+      const to = r.headers.get("location");
+      if (r.status >= 300 && r.status < 400 && to) {
+        await r.body?.cancel();
+        url = new URL(to, url).href;
+        if (r.status !== 307 && r.status !== 308) { method = "GET"; body = undefined; }
+        continue;
+      }
+      const html = await r.text();
+      // A page that moves on by itself is followed, as a browser would.
+      const refresh = html.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["']?\d+\s*;\s*url=([^"'>]+)/i);
+      if (refresh) { url = new URL(refresh[1], url).href; method = "GET"; body = undefined; continue; }
+      if (r.status >= 400) throw new Fail(`the browser got ${r.status} at ${url}`);
+      this.url = url;
+      this.doc = (parseHTML(html) as any).document;
+      return null;
+    }
+    throw new Fail(`the browser went round in redirects from ${url}`);
+  }
+
+  find(selector: string): (Probed & { box?: Box })[] {
+    return [...this.doc.querySelectorAll(selector)].map((el: any, i: number) => {
+      const hidden = el.closest("[hidden]") !== null;
+      return { id: `away-${i}`, text: el.textContent ?? "", value: el.localName === "textarea" ? el.textContent : el.getAttribute("value") ?? undefined, attrs: Object.fromEntries([...el.attributes].map((a: any) => [a.name, a.value])), hidden, shown: !hidden };
+    });
+  }
+
+  fill(selector: string, value: string) {
+    const el = this.doc.querySelector(selector);
+    if (!el) throw new Fail(`fill ${selector}: nothing on the page at ${this.url}`);
+    if (el.localName === "textarea") el.textContent = value; else el.setAttribute("value", value);
+  }
+
+  /** A click: a link is followed, a form's submit button submits it; the link back if that ends the trip. */
+  click(selector: string): Promise<string | null> {
+    const el = this.doc.querySelector(selector);
+    if (!el) throw new Fail(`click ${selector}: nothing on the page at ${this.url}`);
+    const link = el.closest("a[href]");
+    if (link) return this.go(new URL(link.getAttribute("href"), this.url).href);
+    const form = el.closest("form");
+    const type = (el.getAttribute("type") ?? (el.localName === "button" ? "submit" : "")).toLowerCase();
+    if (!form || type !== "submit") throw new Fail(`click ${selector}: the browser follows links and submits forms, and this is neither`);
+    const fields: [string, string][] = [];
+    for (const f of form.querySelectorAll("input[name], select[name], textarea[name]")) {
+      if (f.hasAttribute("disabled")) continue;
+      const kind = (f.getAttribute("type") ?? "text").toLowerCase();
+      if (f.localName === "input" && ["submit", "button", "reset", "image", "file"].includes(kind)) continue;
+      if ((kind === "checkbox" || kind === "radio") && !f.hasAttribute("checked")) continue;
+      if (f.localName === "select") {
+        const o = f.querySelector("option[selected]") ?? f.querySelector("option");
+        if (o) fields.push([f.getAttribute("name"), o.getAttribute("value") ?? o.textContent]);
+      } else fields.push([f.getAttribute("name"), f.localName === "textarea" ? f.textContent : f.getAttribute("value") ?? (kind === "checkbox" || kind === "radio" ? "on" : "")]);
+    }
+    if (el.getAttribute("name")) fields.push([el.getAttribute("name"), el.getAttribute("value") ?? ""]);
+    const s = submission(this.url, el.getAttribute("formaction") ?? form.getAttribute("action"), el.getAttribute("formmethod") ?? form.getAttribute("method"), fields);
+    return this.go(s.url, s.method, s.body);
+  }
+}
+
 class Phone {
   messages: Record<string, any> = {};
+  private page: StandIn | null = null;
+  private client?: Deno.HttpClient;
   constructor(readonly id: string, readonly base: string) {}
+
+  /** The page of a trip away from the app, if it left for one: the driver keeps the address it left for. */
+  private async away(): Promise<StandIn | null> {
+    if (this.page) return this.page;
+    const trips: string[] | undefined = await ask({ trips: true });
+    if (!trips?.length) return null;
+    this.client ??= Deno.createHttpClient({ caCerts: Object.values(await localRoots()) });
+    const page = new StandIn(this.base, this.client);
+    const back = await page.go(trips[trips.length - 1]);
+    if (back) await this.deliver(back); else this.page = page;
+    return this.page;
+  }
+
+  /** The link back from a trip, handed to the app as the OS hands it an App Link. */
+  private async deliver(url: string) {
+    this.page = null;
+    await sh(`am start -W -a android.intent.action.VIEW -d ${quote(url)} -n ${this.id}/.MainActivity`);
+  }
 
   /** The elements a selector finds, each with whether it is shown (not hidden and drawn) and, if so, its box. */
   async find(selector: string, boxes = true): Promise<(Probed & { box?: Box })[] | undefined> {
+    const page = await this.away();
+    if (page) return page.find(selector);
     const els: Probed[] | undefined = await ask({ probe: selector });
     if (!els) return undefined;
     const out: (Probed & { box?: Box })[] = els;
@@ -198,7 +326,8 @@ class Phone {
     await adb("forward", "tcp:8765", "tcp:8765");
     const door = this.base.match(/^https:\/\/localhost:(\d+)/);
     if (door) await adb("reverse", `tcp:${door[1]}`, `tcp:${door[1]}`);
-    await sh(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(path)} --es actor ${quote(actor)}`);
+    this.page = null;
+    await sh(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(path)} --es actor ${quote(actor)} --es browser standin`);
     await until(`${actor}'s terminal at ${path}`, 30, async () => {
       const ready = await this.find("html[data-terminal-ready]", false);
       return [ready && ready.length > 0 ? ready : null, ready ? "the terminal has not booted" : "the driver does not answer"];
@@ -253,11 +382,21 @@ class Phone {
   }
 
   async clickOf(selectors: string[], seconds: number) {
+    if (await this.away()) {
+      const sel = await until(`click ${selectors.join(" | ")}`, seconds, () => {
+        const hit = selectors.find((s) => this.page!.find(s).some((e) => e.shown));
+        return Promise.resolve([hit ?? null, `nothing on the page at ${this.page!.url} matches ${selectors.join(" | ")}`]);
+      });
+      const back = await this.page!.click(sel);
+      if (back) await this.deliver(back);
+      return;
+    }
     await this.hideKeyboard();
     await this.tap(await this.shownOf(selectors, seconds, `click ${selectors.join(" | ")}`));
   }
 
   async fillIn(selector: string, value: string, seconds: number) {
+    if (await this.away()) return this.page!.fill(selector, value);
     await this.hideKeyboard();
     const el = await this.shownOf([selector], seconds, `fill ${selector}`);
     await this.tap(el);
