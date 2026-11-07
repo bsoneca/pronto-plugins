@@ -23,6 +23,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.SecureRandom
@@ -232,9 +233,18 @@ class TerminalEngine(
         for (name in hatches("hatches")) qjs.addModule("$base/shell/$name", asset(name))
         // quickjs-kt converts a script's completion value back to Kotlin and
         // throws on a symbol, so every script here ends in undefined.
+        // Parsing terminal.js (about 2 MB) is most of a cold start, so each script's bytecode is kept in
+        // the code cache beside the install, stamped by its update time: the next start only evaluates.
+        val stamp = context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
         for (name in listOf("prelude.js", "ses.umd.min.js", "terminal.js")) {
             val began = System.currentTimeMillis()
-            qjs.evaluate<Any?>("${asset(name)}\n;undefined", name, false)
+            val kept = File(context.codeCacheDir, "$name.$stamp.qjsc")
+            val code = (if (kept.exists()) runCatching { kept.readBytes() }.getOrNull() else null)
+                ?: qjs.compile("${asset(name)}\n;undefined", name, false).also { bytes ->
+                    context.codeCacheDir.listFiles { f -> f.name.startsWith("$name.") }?.forEach { it.delete() }
+                    runCatching { kept.writeBytes(bytes) }
+                }
+            qjs.evaluate<Any?>(code)
             Log.i("pronto", "evaluated $name in ${System.currentTimeMillis() - began} ms")
         }
     }
