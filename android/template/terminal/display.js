@@ -2,10 +2,28 @@
 // goes to the host; a native gesture comes back as the DOM event it is on the web.
 import { compile, elementOf, idOf } from "./compile.js";
 
+// The sheets are the web's: the stylesheets the app's shell/index.html links, in its order, then
+// any the shell links or writes into the page as it runs. A file is the asset at its path under
+// /shell/, where the web serves it.
 let sheets = [];
+const loaded = new Map();
+const assetOf = (href) => {
+  const path = new URL(href, document.querySelector("base")?.getAttribute("href") ?? location.href).pathname;
+  if (!path.startsWith("/shell/")) return null;
+  const name = path.slice("/shell/".length);
+  if (!loaded.has(name)) {
+    let text = null;
+    try { text = __native_asset(name); } catch { console.warn("unsupported on Android: a stylesheet the app does not ship:", href); }
+    loaded.set(name, text);
+  }
+  return loaded.get(name);
+};
+const linked = (html) => [...html.matchAll(/<link\b[^>]*>/gi)].map((m) => m[0])
+  .filter((tag) => /\brel\s*=\s*["']?[^"'>]*\bstylesheet\b/i.test(tag))
+  .map((tag) => (tag.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i) || []).slice(1).find((v) => v !== undefined))
+  .filter((href) => href);
 const readSheets = () => {
-  const names = JSON.parse(__native_sheets());
-  sheets = names.map(__native_asset);
+  sheets = linked(__native_asset("index.html")).map(assetOf).filter((s) => s !== null);
   return Promise.resolve();
 };
 
@@ -13,7 +31,8 @@ let waiting = false;
 let lastCard = "";
 const draw = () => {
   waiting = false;
-  const live = [...document.querySelectorAll("style")].map((s) => s.textContent);
+  const live = [...document.querySelectorAll('link[rel~="stylesheet"], style')]
+    .map((s) => s.localName === "style" ? s.textContent : assetOf(s.getAttribute("href") || "")).filter((s) => s !== null);
   const { card, unsupported } = compile(document, { sheets: [...sheets, ...live], width: globalThis.innerWidth });
   const json = JSON.stringify(card);
   for (const u of unsupported) reported.has(u) || (reported.add(u), console.warn("unsupported on Android:", u));
