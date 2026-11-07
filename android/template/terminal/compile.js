@@ -406,7 +406,16 @@ function borderOf(el, st, C, lctx) {
     // a rule above or below alone is drawn as a separator beside the view (decorate)
     const lone = !sides[1] && !sides[3] && (!sides[0] || !sides[2] || (sides[0].w === sides[2].w && sides[0].c === sides[2].c));
     if (lone) C.edges.set(el, { top: sides[0], bottom: sides[2] });
-    else C.rep("border on some sides only", desc(el));
+    else if (present.length < 4) C.rep("border on some sides only", desc(el));
+    else {
+      // DivKit has one stroke for all four sides, so a bevel (a light edge above and left, a dark one below and
+      // right) is drawn as one outline in the shadowed edge colour, half the width: the control keeps its edge instead of
+      // vanishing into its surround. The width is the widest side, so the box model is unchanged.
+      const edge = sides[2] || sides[1] || sides[0] || sides[3];
+      width = Math.max(...present.map((s) => s.w));
+      if (opaque(edge.c)) border.stroke = { color: edge.c, width: Math.max(1, round(width / 2)) };
+      C.rep("border on some sides only (drawn as one outline)", desc(el));
+    }
   }
   const radius = ["top-left", "top-right", "bottom-right", "bottom-left"].map((c) => {
     const v = p["border-" + c + "-radius"];
