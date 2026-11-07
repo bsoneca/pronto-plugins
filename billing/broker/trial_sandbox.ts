@@ -40,8 +40,9 @@ async function begin(card: string) {
   clocks.push(clock.id);
   const customer = await s<{ id: string }>("POST", "/v1/customers", { test_clock: clock.id, metadata: { tag } });
   customers.push(customer.id);
-  await s("POST", `/v1/payment_methods/${card}/attach`, { customer: customer.id });
-  await s("POST", `/v1/customers/${customer.id}`, { invoice_settings: { default_payment_method: card } });
+  // A test token (pm_card_visa) attaches as a payment method of its own, under a new id.
+  const method = await s<{ id: string }>("POST", `/v1/payment_methods/${card}/attach`, { customer: customer.id });
+  await s("POST", `/v1/customers/${customer.id}`, { invoice_settings: { default_payment_method: method.id } });
   const trialEnd = now + 3 * DAY;
   const sub = await s<Subscription>("POST", "/v1/subscriptions", {
     customer: customer.id, items: [{ price: price.id }], trial_end: trialEnd,
