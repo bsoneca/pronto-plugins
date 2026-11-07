@@ -12,6 +12,9 @@ import kotlin.concurrent.thread
 // integrate@android's eyes: on loopback in a debug build, reached through adb
 // forward. A line in, a line out: {"probe": selector} answers the DOM's elements;
 // {"bounds": id} the drawn view's rectangle on screen, so a tap is the system's own;
+// {"where": true} the page's address; {"session": true} the token, id and guest-ness of the session it holds;
+// {"click": selector} a script's click on the DOM's element, whatever the screen shows;
+// {"fetches": n} the requests the page made from number n on, and what they answered;
 // {"frames": true} how many times the screen was drawn; {"hideKeyboard": true} puts the keyboard away, as a person would, without a key the app reads.
 object Driver {
     private var server: ServerSocket? = null
@@ -31,6 +34,10 @@ object Driver {
                             q.has("probe") -> runBlocking { engine.probe(q.getString("probe")) }
                             q.has("bounds") -> bounds(activity, root, q.getString("bounds"))
                             q.has("hideKeyboard") -> hideKeyboard(activity, root)
+                            q.has("where") -> runBlocking { engine.where() }
+                            q.has("session") -> runBlocking { engine.session() }
+                            q.has("click") -> runBlocking { engine.domClick(q.getString("click")) }
+                            q.has("fetches") -> engine.fetches(q.getInt("fetches"))
                             q.has("frames") -> activity.frames.toString()
                             // The pages the app left for since last asked (a stand-in browser's start).
                             q.has("trips") -> org.json.JSONArray(activity.takeTrips()).toString()

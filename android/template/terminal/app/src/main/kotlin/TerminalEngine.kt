@@ -80,6 +80,11 @@ class TerminalEngine(
         return runCatching { asset(name) }.getOrNull()
     }
 
+    private fun hatches(dir: String): List<String> = (context.assets.list(dir) ?: emptyArray()).flatMap { n ->
+        val path = "$dir/$n"
+        if (!context.assets.list(path).isNullOrEmpty()) hatches(path) else if (path.endsWith(".js") || path.endsWith(".mjs")) listOf(path) else emptyList()
+    }
+
     private fun call(fn: String, vararg args: String) = scope.launch {
         qjs.evaluate<Any?>("$fn(${args.joinToString(",")}); undefined", "bridge.js", false)
     }
@@ -118,7 +123,38 @@ class TerminalEngine(
             fetch((a[0] as Number).toLong(), a[1] as String, a[2] as String, JSONObject(a[3] as String), a[4] as String?)
             null
         }
+        qjs.function("__native_passkeys") { _ -> Passkeys.available }
+        qjs.function("__native_passkey") { a ->
+            passkey(a[0] as String, a[1] as String, (a[2] as Number).toLong())
+            null
+        }
         qjs.function("__native_fetch_abort") { a -> requests.remove((a[0] as Number).toLong())?.let { c -> net.execute { c.disconnect() } }; null }
+    }
+
+    // A ceremony of the host's authenticator (Passkeys), answered by a later __onPasskey: the response
+    // as WebAuthn's JSON, or the error's name and message.
+    private fun passkey(kind: String, options: String, id: Long) {
+        net.execute {
+            try {
+                call("__onPasskey", "$id", "true", JSONObject.quote(Passkeys.run(context, actor, base, kind, options)))
+            } catch (e: Exception) {
+                Log.w("pronto", "passkey $kind refused", e)
+                val name = (e as? Passkeys.Refused)?.name ?: "NotAllowedError"
+                call("__onPasskey", "$id", "false", JSONObject.quote(JSONObject().put("name", name).put("message", e.message ?: name).toString()))
+            }
+        }
+    }
+
+    // The requests the page made and what they answered, for a debug build's driver: a scenario's
+    // `response` step reads what an action caused. The newest 300, each with its number.
+    private val fetched = ArrayDeque<JSONObject>()
+    private var fetchedCount = 0
+    private fun note(url: String, method: String, status: Int, body: String) = synchronized(fetched) {
+        fetched.addLast(JSONObject().put("n", fetchedCount++).put("url", url).put("method", method).put("status", status).put("body", body.take(2000)))
+        if (fetched.size > 300) fetched.removeFirst()
+    }
+    fun fetches(from: Int): String = synchronized(fetched) {
+        JSONObject().put("count", fetchedCount).put("items", JSONArray(fetched.filter { it.getInt("n") >= from })).toString()
     }
 
     private fun fetch(id: Long, url: String, method: String, headers: JSONObject, body: String?) {
@@ -146,6 +182,7 @@ class TerminalEngine(
                 val out = JSONObject()
                 for ((k, v) in c.headerFields) if (k != null) out.put(k.lowercase(), v.joinToString(", "))
                 requests.remove(id)
+                note(url, method, status, text)
                 call("__onFetch", "$id", "$status", JSONObject.quote(out.toString()), JSONObject.quote(text))
             } catch (e: Exception) {
                 requests.remove(id)
@@ -190,6 +227,9 @@ class TerminalEngine(
         qjs = QuickJs.create(dispatcher)
         qjs.maxStackSize = 12L * 1024 * 1024
         bridge()
+        // The host-DOM hatches the shell declares (shell/hatches/**.js) are modules the interpreter
+        // imports by their address on the web; they are the app's assets, so they are named so here.
+        for (name in hatches("hatches")) qjs.addModule("$base/shell/$name", asset(name))
         // quickjs-kt converts a script's completion value back to Kotlin and
         // throws on a symbol, so every script here ends in undefined.
         for (name in listOf("prelude.js", "ses.umd.min.js", "terminal.js")) {
@@ -207,8 +247,12 @@ class TerminalEngine(
     fun resize(dp: Int) = call("__onResize", "$dp")
 
     // The driver's question over the live DOM, in a debug build.
-    suspend fun probe(selector: String): String = withContext(dispatcher) {
-        qjs.evaluate<String>("__probe(${JSONObject.quote(selector)})", "probe.js", false)
+    suspend fun probe(selector: String): String = script("__probe(${JSONObject.quote(selector)})")
+    suspend fun where(): String = script("JSON.stringify(__where())")
+    suspend fun session(): String = script("__session()")
+    suspend fun domClick(selector: String): String = script("__domClick(${JSONObject.quote(selector)})")
+    private suspend fun script(expression: String): String = withContext(dispatcher) {
+        qjs.evaluate<String>(expression, "probe.js", false)
     }
 
     override fun close() {

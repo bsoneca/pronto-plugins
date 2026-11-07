@@ -21,8 +21,9 @@
 import { parseHTML } from "npm:linkedom@0.18.4";
 import { localRoots } from "./trust.ts";
 
-const META = ["by", "timeout", "why", "fresh"];
-export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs"];
+// `flag` and `unless` say where a step runs (skips); they are not what it does.
+const META = ["by", "timeout", "why", "fresh", "flag", "unless"];
+export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response"];
 
 export type Probed = { id: string | null; text: string; value?: string; attrs: Record<string, string>; hidden: boolean; shown?: boolean };
 export type Step = Record<string, unknown>;
@@ -84,10 +85,30 @@ export function scrollFor(box: Box, display: { w: number; h: number }): "up" | "
 /** The middle of a box, in pixels. */
 export const centre = (b: Box) => ({ x: Math.round(b.x + b.w / 2), y: Math.round(b.y + b.h / 2) });
 
-/** Whether an address the browser reached ends its trip: the app's own origin, but not the door's /auth/ routes. */
+/** Whether an address the browser reached ends its trip: the app's own origin, but not the door's own pages (/auth/ routes, a stand-in's /fake/ checkout). */
 export function backTo(url: string, base: string): boolean {
   const u = new URL(url), b = new URL(base);
-  return u.origin === b.origin && !u.pathname.startsWith("/auth/");
+  return u.origin === b.origin && !/^\/(auth|fake)\//.test(u.pathname);
+}
+
+/** Whether a step does not run: it names a flag that is off (`flag`) or one that is on (`unless`), as the door answered. */
+export function skips(step: Step, flags: Record<string, boolean>): boolean {
+  if (typeof step.unless === "string" && flags[step.unless]) return true;
+  return typeof step.flag === "string" && !flags[step.flag];
+}
+
+export type Fetched = { n: number; url: string; method: string; status: number; body: string };
+
+/**
+ * Whether the request a `response` step awaits was made, and answered as expected: `seen` false while no
+ * request to `arg.to` by `arg.method` is among those the page made; else `fail` is what differs, if anything.
+ */
+export function responseHolds(arg: { to: string; method: string; status: number; matches?: string }, made: Fetched[]): { seen: boolean; fail?: string } {
+  const r = made.find((x) => x.url.includes(arg.to) && x.method === arg.method);
+  if (!r) return { seen: false };
+  if (r.status !== arg.status) return { seen: true, fail: `${arg.method} ${arg.to} answered ${r.status}, not ${arg.status}: ${r.body.slice(0, 200)}` };
+  if (arg.matches && !new RegExp(arg.matches).test(r.body)) return { seen: true, fail: `${arg.method} ${arg.to} answered ${r.body.slice(0, 200)}, which does not match ${arg.matches}` };
+  return { seen: true };
 }
 
 /** The request a form's submission makes (HTML's): a GET puts the fields in the query, a POST in an urlencoded body. */
@@ -286,7 +307,7 @@ class Phone {
   constructor(readonly id: string, readonly base: string) {}
 
   /** The page of a trip away from the app, if it left for one: the driver keeps the address it left for. */
-  private async away(): Promise<StandIn | null> {
+  async away(): Promise<StandIn | null> {
     if (this.page) return this.page;
     const trips: string[] | undefined = await ask({ trips: true });
     if (!trips?.length) return null;
@@ -332,6 +353,44 @@ class Phone {
       const ready = await this.find("html[data-terminal-ready]", false);
       return [ready && ready.length > 0 ? ready : null, ready ? "the terminal has not booted" : "the driver does not answer"];
     });
+  }
+
+  /** The address the page is at: the browser's, on a trip away from the app, else the app's own. */
+  async where(): Promise<string | undefined> {
+    const page = await this.away();
+    return page ? page.url : await ask({ where: true });
+  }
+
+  /** The session the app holds ({token, id, guest}), or null before it has one. */
+  session(): Promise<{ token: string; id: string; guest: boolean } | null | undefined> {
+    return ask({ session: true });
+  }
+
+  /** A click the script makes on the DOM's element, whatever the screen shows. */
+  async domClick(selector: string): Promise<boolean> {
+    return (await ask({ click: selector })) === true;
+  }
+
+  /** The requests the page made from number `from` on, and how many it has made. */
+  fetches(from: number): Promise<{ count: number; items: Fetched[] } | undefined> {
+    return ask({ fetches: from });
+  }
+
+  private readonly flags = new Map<string, Promise<boolean>>();
+  /** A flag as the door answers it (OFREP), asked once; a door that does not answer is a failure, never a reason to skip. */
+  flagOn(name: string): Promise<boolean> {
+    let asked = this.flags.get(name);
+    if (!asked) {
+      asked = (async () => {
+        this.client ??= Deno.createHttpClient({ caCerts: Object.values(await localRoots()) });
+        const res = await fetch(new URL(`/ofrep/v1/evaluate/flags/${name}`, this.base).href, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ context: {} }), client: this.client });
+        const value = res.ok ? (await res.json()).value : null;
+        if (typeof value !== "boolean") throw new Fail(`the flags did not answer at ${this.base}/ofrep/: ${name} is ${JSON.stringify(value)}`);
+        return value;
+      })();
+      this.flags.set(name, asked);
+    }
+    return asked;
   }
 
   /** The keyboard put away by the app itself: a BACK key would reach the page whenever no keyboard was up. */
@@ -422,10 +481,9 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
   let current: string | undefined;
   await adb("logcat", "-c");
   await sh(`pm clear ${phone.id}`);
+  const flagsOn = new Map<string, boolean>();
   let i = 0;
-  try {
-    for (; i < sc.steps.length; i++) {
-      const raw = sc.steps[i];
+  const perform = async (raw: Step): Promise<void> => {
       const { timeout, kind, arg } = normalize(raw);
       const actor = actorOf(raw, sc.actors, current);
       const sub = (s: string) => substitute(s, vars);
@@ -434,7 +492,7 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
         opened[actor] = path;
         current = actor;
         await phone.start(path, actor);
-        continue;
+        return;
       }
       if (actor !== current) {
         if (!(actor in opened)) throw new Fail(`${actor} has no page open`);
@@ -475,6 +533,50 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
           await Deno.writeFile(`${dir}/${name}-${sub(arg)}.png`, await runBytes(adbPath(), ["exec-out", "screencap", "-p"]));
           break;
         }
+        case "signUp": {
+          // The terminal's passkey register, which the app shows nobody (decision-signup): a test's own
+          // way to a new account. Clicked on the DOM even where CSS hides it, then an account's session
+          // (not a guest's) is awaited.
+          await until("the register control", timeout, async () => [(await phone.find("body > nav .shell-register", false))?.length ? true : null, "none in the page"]);
+          if (!await phone.domClick("body > nav .shell-register")) throw new Fail("signUp: nothing to click");
+          await until("an account's session", Math.max(timeout, 60), async () => {
+            const s = await phone.session();
+            return [s && !s.guest ? true : null, s === undefined ? "the driver does not answer" : s === null ? "no session yet" : "the session is a guest's"];
+          });
+          break;
+        }
+        case "pay": {
+          // The checkout the app left for (the stand-in's), paid at a press; the trip ends when it is back at the app's origin.
+          await until("the checkout opens", timeout, async () => [await phone.away(), "the app has not left for a checkout"]);
+          await phone.clickOf(["button[value=pay]"], timeout);
+          await until("back at the app", timeout, async () => {
+            const at = await phone.where();
+            return [at && backTo(at, phone.base) ? true : null, `at ${at}`];
+          });
+          break;
+        }
+        case "address": {
+          const re = new RegExp(sub(arg.matches));
+          await until("the address", timeout, async () => {
+            const at = await phone.where();
+            return [at !== undefined && re.test(at) ? true : null, `at ${at}`];
+          });
+          break;
+        }
+        case "response": {
+          // Started before the step that causes it: the requests made from now on are the ones read.
+          const from = (await phone.fetches(1 << 30))?.count ?? 0;
+          await perform({ by: raw.by, timeout: raw.timeout, ...arg.when });
+          const to = sub(arg.to);
+          await until(`${arg.method} ${to}`, timeout, async () => {
+            const made = await phone.fetches(from);
+            if (!made) return [null, "the driver does not answer"];
+            const r = responseHolds({ ...arg, to }, made.items);
+            if (r.fail) throw new Fail(r.fail);
+            return [r.seen ? true : null, `no ${arg.method} ${to} made`];
+          });
+          break;
+        }
         case "closeDialogs": {
           const open = await phone.find("dialog[open]", false);
           if (open?.length) {
@@ -495,6 +597,13 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
           });
         }
       }
+  };
+  try {
+    for (; i < sc.steps.length; i++) {
+      const raw = sc.steps[i];
+      for (const f of [raw.flag, raw.unless]) if (typeof f === "string") flagsOn.set(f, await phone.flagOn(f));
+      if (skips(raw, Object.fromEntries(flagsOn))) continue;
+      await perform(raw);
     }
   } catch (e) {
     const why = (sc.steps[i] as Step | undefined)?.why;
@@ -502,7 +611,7 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
     await Deno.mkdir(dir, { recursive: true });
     const shot = `${dir}/${name}-fail.png`;
     await Deno.writeFile(shot, await runBytes(adbPath(), ["exec-out", "screencap", "-p"], false)).catch(() => {});
-    const log = (await run(adbPath(), ["logcat", "-d", "-s", "pronto:*"], { check: false })).trim().split("\n").slice(-60).join("\n");
+    const log = (await run(adbPath(), ["logcat", "-d", "-s", "pronto:*"], { check: false })).trim().split("\n").filter((l) => !l.includes("unsupported on Android")).slice(-60).join("\n");
     console.error(`--- logcat pronto (tail)\n${log}\n--- screenshot ${shot}`);
     throw new Fail(detail);
   }

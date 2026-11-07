@@ -508,4 +508,35 @@ cases: {
 		{use: "run"},
 		{get: "drawn", near: {value: 160, within: 10}, why: "the screen was drawn, not skipped"},
 	]}
+
+	"passkey options reach the host as WebAuthn's JSON: every buffer a base64url string": {suite: "android", steps: [
+		{call: "android.passkeyOptions", args: ["create"], expect: {
+			rp: {name: "App", id: "localhost"}, user: {id: "Bwg", name: "ana", displayName: "Ana"}, challenge: "AQID",
+			pubKeyCredParams: [{type: "public-key", alg: -7}], excludeCredentials: [{type: "public-key", id: "_w", transports: ["internal"]}], timeout: 60000,
+		}},
+		{call: "android.passkeyOptions", args: ["get"], expect: {challenge: "-__-", allowCredentials: [{type: "public-key", id: "AAA"}], userVerification: "preferred"}},
+	]}
+	"base64url is unpadded and url-safe, and reads padded text and plain base64 too": {suite: "android", steps: [
+		{call: "android.passkeyBase64", args: [[]], expect: {text: "", back: "", padded: ""}},
+		{call: "android.passkeyBase64", args: [[251, 255]], expect: {text: "-_8", back: "fbff", padded: "fbff"}},
+		{call: "android.passkeyBase64", args: [[1, 2, 3, 4]], expect: {text: "AQIDBA", back: "01020304", padded: "01020304"}},
+	]}
+	"a registration answer is a credential: buffers for the page, transports from a call, no user handle": {suite: "android", steps: [
+		{call: "android.passkeyCredential", args: [{id: "AQI", rawId: "AQI", type: "public-key", authenticatorAttachment: "platform", clientExtensionResults: {}, response: {clientDataJSON: "e30", attestationObject: "oA", transports: ["internal"]}}], expect: {
+			id: "AQI", type: "public-key", rawId: "0102", attachment: "platform", extensions: {}, buffers: {clientDataJSON: "7b7d", attestationObject: "a0"}, transports: ["internal"],
+		}},
+	]}
+	"an assertion answer is a credential with the authenticator data, signature and user handle": {suite: "android", steps: [
+		{call: "android.passkeyCredential", args: [{id: "AQI", rawId: "AQI", type: "public-key", clientExtensionResults: {}, response: {clientDataJSON: "e30", authenticatorData: "AQ", signature: "Ag", userHandle: "Aw"}}], holds: {
+			attachment: null, buffers: {clientDataJSON: "7b7d", authenticatorData: "01", signature: "02", userHandle: "03"},
+		}},
+	]}
+	"a refusal is an Error named as a browser names it, NotAllowedError when the host does not say": {suite: "android", steps: [
+		{call: "android.passkeyError", args: [{name: "InvalidStateError", message: "held"}], expect: {name: "InvalidStateError", message: "held", error: true}},
+		{call: "android.passkeyError", args: ["not json"], holds: {name: "NotAllowedError", error: true}},
+	]}
+	"atob and btoa, which QuickJS lacks, are a browser's: padded base64 of Latin1 text": {suite: "android", steps: [
+		{call: "android.passkeyAtob", args: ["Ana\u00ff?>"], expect: {encoded: "QW5h/z8+", back: "Ana\u00ff?>", unpadded: "Ana\u00ff?>", refused: "InvalidCharacterError"}},
+		{call: "android.passkeyAtob", args: ["a"], expect: {encoded: "YQ==", back: "a", unpadded: "a", refused: "InvalidCharacterError"}},
+	]}
 }

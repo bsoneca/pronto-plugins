@@ -7,11 +7,15 @@ import URLImpl from "npm:core-js-pure@3.45.1/actual/url/index.js";
 import URLSearchParamsImpl from "npm:core-js-pure@3.45.1/actual/url-search-params/index.js";
 import { TextEncoder as TE, TextDecoder as TD } from "npm:fastestsmallesttextencoderdecoder@1.0.22";
 
+import { atobOf, btoaOf, optionsToJson, credentialOf, errorOf } from "./passkeys.js";
+
 const g = globalThis;
 g.URL ??= URLImpl;
 g.URLSearchParams ??= URLSearchParamsImpl;
 g.TextEncoder ??= TE;
 g.TextDecoder ??= TD;
+g.atob ??= atobOf;
+g.btoa ??= btoaOf;
 
 // Timers: every wake comes back through __onTimer, so one JS turn at a time.
 const timers = new Map();
@@ -63,7 +67,9 @@ let at = 0;
 // A page of another origin (a checkout, a provider's sign-in) is not the app's to draw: the host
 // hands it to the system browser, and the trip ends when the OS hands the app a link back to its
 // own origin (__onLink), as the Unity host's SystemBrowser does.
-const own = (u) => u.origin === new URL(base).origin;
+// The door's own pages (sign-in routes, a stand-in checkout) are served, not routed by the shell: on the
+// app's origin too, they are still a browser's to show.
+const own = (u) => u.origin === new URL(base).origin && !/^\/(auth|fake)\//.test(u.pathname);
 const leave = (v) => {
   const u = new URL(v, here);
   if (own(u)) return false;
@@ -130,7 +136,28 @@ const locks = {
   },
   query: () => Promise.resolve({ held: [], pending: [] }),
 };
-const navigator = { userAgent: "pronto-android", language: __native_locale(), languages: [__native_locale()], onLine: true, credentials: undefined, serviceWorker: undefined, locks };
+// Passkeys: the host's authenticator, if it has one, answers a ceremony by a later __onPasskey. A host
+// without one (a release build, until the door accepts an Android app's origin) leaves credentials
+// undefined, so the interpreter offers no passkey.
+const ceremonies = new Map();
+let nextCeremony = 1;
+g.__onPasskey = (id, ok, json) => {
+  const c = ceremonies.get(id);
+  if (!c) return;
+  ceremonies.delete(id);
+  if (ok) c.resolve(credentialOf(json)); else c.reject(errorOf(json));
+};
+const ceremony = (kind, options) => new Promise((resolve, reject) => {
+  const id = nextCeremony++;
+  ceremonies.set(id, { resolve, reject });
+  try { __native_passkey(kind, optionsToJson(options), id); } catch (e) { ceremonies.delete(id); reject(e); }
+});
+const credentials = __native_passkeys() ? {
+  create: ({ publicKey }) => ceremony("create", publicKey),
+  get: ({ publicKey }) => ceremony("get", publicKey),
+} : undefined;
+if (credentials) g.PublicKeyCredential = class PublicKeyCredential {};
+const navigator = { userAgent: "pronto-android", language: __native_locale(), languages: [__native_locale()], onLine: true, credentials, serviceWorker: undefined, locks };
 
 // fetch: one bridge call, one whole answer. A live read is a long poll, so
 // nothing the interpreter asks needs a body as a stream.
