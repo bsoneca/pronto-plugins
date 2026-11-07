@@ -4,6 +4,7 @@
 import { parseHTML } from "npm:linkedom@0.18.4";
 import { compile, elementOf, idOf } from "../../android/template/terminal/compile.js";
 import { length, parseColor } from "../../android/template/terminal/css.js";
+import { atobOf, b64u, btoaOf, credentialOf, errorOf, optionsToJson, unb64u } from "../../android/template/terminal/passkeys.js";
 
 const pageOf = (body, base) =>
   parseHTML(`<!doctype html><html lang="en"><head>${base ? `<base href="${base}">` : ""}</head><body>${body}</body></html>`);
@@ -221,4 +222,51 @@ export function guestbook(opts) {
   const home = files["screens/home.html"].replace("</template>", `</template>${entries}`);
   const out = render(`<main id="app">${home}</main>`, [files["shell.css"], files["design.css"], files["screens/home.css"]], { base: "/shell/", width: o.width, scheme: o.scheme });
   return { ...out, source };
+}
+
+// The passkeys bridge's two forms (android/template/terminal/passkeys.js), as a page would meet them.
+const buf = (bytes) => new Uint8Array(bytes).buffer;
+const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
+
+/** The JSON the host takes for options made of an ArrayBuffer, a view on a larger buffer and bytes lists. */
+export function passkeyOptions(kind) {
+  const base = new Uint8Array([9, 9, 1, 2, 3, 9]);
+  if (kind === "create") {
+    return JSON.parse(optionsToJson({
+      rp: { name: "App", id: "localhost" }, user: { id: buf([7, 8]), name: "ana", displayName: "Ana" },
+      challenge: base.subarray(2, 5), pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+      excludeCredentials: [{ type: "public-key", id: buf([255]), transports: ["internal"] }], timeout: 60000,
+    }));
+  }
+  return JSON.parse(optionsToJson({ challenge: buf([251, 255, 254]), allowCredentials: [{ type: "public-key", id: buf([0, 0]) }], userVerification: "preferred" }));
+}
+
+/** base64url both ways: the text of some bytes, and the bytes of that text as hex. */
+export function passkeyBase64(bytes) {
+  const text = b64u(new Uint8Array(bytes));
+  return { text, back: hex(unb64u(text)), padded: hex(unb64u(text + "=".repeat((4 - (text.length % 4)) % 4))) };
+}
+
+/** What a page reads of a credential built from the host's answer: ids and buffers as hex, the functions called. */
+export function passkeyCredential(answer) {
+  const c = credentialOf(answer);
+  const r = c.response;
+  return {
+    id: c.id, type: c.type, rawId: hex(c.rawId), attachment: c.authenticatorAttachment, extensions: c.getClientExtensionResults(),
+    buffers: Object.fromEntries(Object.entries(r).filter(([, v]) => v instanceof ArrayBuffer).map(([k, v]) => [k, hex(v)])),
+    userHandle: r.userHandle === null ? null : undefined, transports: r.getTransports?.(),
+  };
+}
+
+/** The error a refusal is: its name and message, and whether it is an Error. */
+export function passkeyError(refusal) {
+  const e = errorOf(refusal);
+  return { name: e.name, message: e.message, error: e instanceof Error };
+}
+
+/** btoa and atob as a browser's: Latin1 text to padded base64 and back, a char beyond Latin1 refused. */
+export function passkeyAtob(text) {
+  const encoded = btoaOf(text);
+  const refused = (() => { try { btoaOf("\u0100"); return null; } catch (e) { return e.name; } })();
+  return { encoded, back: atobOf(encoded), unpadded: atobOf(encoded.replace(/=+$/, "")), refused };
 }

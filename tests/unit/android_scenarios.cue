@@ -76,4 +76,30 @@ cases: {
 		{call: "androidScenarios.submission", args: ["http://localhost:28463/pay/cs_1?old=1#top", null, null, [["q", "x"]]], expect: {url: "http://localhost:28463/pay/cs_1?q=x", method: "GET"}},
 		{call: "androidScenarios.submission", args: ["http://localhost:28463/a/b", "c", "POST", []], expect: {url: "http://localhost:28463/a/c", method: "POST", body: ""}},
 	]}
+	"a step marked with a flag runs where the flag is on, one marked unless where it is off": {suite: "android", steps: [
+		{call: "androidScenarios.skips", args: [{click: "a"}, {}], expect: false},
+		{call: "androidScenarios.skips", args: [{click: "a", flag: "pro"}, {pro: true}], expect: false},
+		{call: "androidScenarios.skips", args: [{click: "a", flag: "pro"}, {pro: false}], expect: true},
+		{call: "androidScenarios.skips", args: [{click: "a", unless: "pro"}, {pro: true}], expect: true},
+		{call: "androidScenarios.skips", args: [{click: "a", unless: "pro"}, {pro: false}], expect: false},
+		{call: "androidScenarios.normalize", args: [{by: "ana", flag: "pro", hidden: "#b", why: "x"}], holds: {by: "ana", kind: "hidden", arg: "#b"}},
+	]}
+	"the steps that sign up, pay, check the address and read a response are known kinds": {suite: "android", steps: [
+		{call: "androidScenarios.normalize", args: [{signUp: true}], holds: {kind: "signUp", arg: true}},
+		{call: "androidScenarios.normalize", args: [{pay: true, timeout: 60}], holds: {kind: "pay", timeout: 60}},
+		{call: "androidScenarios.normalize", args: [{address: {matches: "^x$"}}], holds: {kind: "address"}},
+		{call: "androidScenarios.normalize", args: [{response: {to: "/a", method: "POST", status: 200, when: {click: "#b"}}}], holds: {kind: "response"}},
+		{call: "androidScenarios.normalize", args: [{reload: true}], throws: "unknown step kind \"reload\""},
+	]}
+	"a response is the first request to the path by the method, held to its status and body": {suite: "android", steps: [
+		{call: "androidScenarios.responseHolds", args: [{to: "/billing/checkout", method: "POST", status: 200}, []], expect: {seen: false}},
+		{call: "androidScenarios.responseHolds", args: [{to: "/billing/checkout", method: "POST", status: 200}, [{n: 0, url: "https://h/billing/checkout", method: "GET", status: 200, body: ""}]], expect: {seen: false}},
+		{call: "androidScenarios.responseHolds", args: [{to: "/billing/checkout", method: "POST", status: 200}, [{n: 1, url: "https://h/billing/checkout", method: "POST", status: 200, body: "{}"}]], expect: {seen: true}},
+		{call: "androidScenarios.responseHolds", args: [{to: "/billing/checkout", method: "POST", status: 200}, [{n: 1, url: "https://h/billing/checkout", method: "POST", status: 402, body: "no"}]], holds: {seen: true, fail: "POST /billing/checkout answered 402, not 200: no"}},
+		{call: "androidScenarios.responseHolds", args: [{to: "/a", method: "POST", status: 200, matches: "url"}, [{n: 1, url: "https://h/a", method: "POST", status: 200, body: "{}"}]], holds: {seen: true, fail: "POST /a answered {}, which does not match url"}},
+	]}
+	"the door's own pages on the app's origin are the browser's, not the app's": {suite: "android", steps: [
+		{call: "androidScenarios.backTo", args: ["https://localhost:33600/fake/stripe/pay/cs_1", "https://localhost:33600"], expect: false},
+		{call: "androidScenarios.backTo", args: ["https://localhost:33600/?pro=welcome", "https://localhost:33600"], expect: true},
+	]}
 }

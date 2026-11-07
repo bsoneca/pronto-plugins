@@ -57,6 +57,8 @@ _terminal: {
 	"app/src/main/kotlin/TerminalEngine.kt": _ @embed(file="template/terminal/app/src/main/kotlin/TerminalEngine.kt", type=text)
 	"app/src/debug/kotlin/Driver.kt":      _ @embed(file="template/terminal/app/src/debug/kotlin/Driver.kt", type=text)
 	"app/src/release/kotlin/Driver.kt":    _ @embed(file="template/terminal/app/src/release/kotlin/Driver.kt", type=text)
+	"app/src/debug/kotlin/Passkeys.kt":    _ @embed(file="template/terminal/app/src/debug/kotlin/Passkeys.kt", type=text)
+	"app/src/release/kotlin/Passkeys.kt":  _ @embed(file="template/terminal/app/src/release/kotlin/Passkeys.kt", type=text)
 	"app/src/main/assets/prelude.js":      _ @embed(file="template/terminal/app/src/main/assets/prelude.js", type=text)
 	"terminal/browser.js":                 _ @embed(file="template/terminal/browser.js", type=text)
 	"terminal/bundle.ts":                  _ @embed(file="template/terminal/bundle.ts", type=text)
@@ -64,6 +66,7 @@ _terminal: {
 	"terminal/css.js":                     _ @embed(file="template/terminal/css.js", type=text)
 	"terminal/display.js":                 _ @embed(file="template/terminal/display.js", type=text)
 	"terminal/main.js":                    _ @embed(file="template/terminal/main.js", type=text)
+	"terminal/passkeys.js":                _ @embed(file="template/terminal/passkeys.js", type=text)
 	"terminal/scenarios.ts":               _ @embed(file="template/terminal/scenarios.ts", type=text)
 	"terminal/trust.ts":                   _ @embed(file="template/terminal/trust.ts", type=text)
 }
