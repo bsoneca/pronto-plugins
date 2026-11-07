@@ -32,4 +32,8 @@ setups: "bsoneca-mac": {
 	// rebuilt Mac recreates them.
 	hostRunners: "pronto-bulk-1": {repo: "pronto", labels: ["pronto-bulk"]}
 	hostRunners: "pronto-bulk-2": {repo: "pronto", labels: ["pronto-bulk"]}
+	hostRunners: "pronto-bulk-3": {repo: "pronto", labels: ["pronto-bulk"]}
+	hostRunners: "pronto-bulk-4": {repo: "pronto", labels: ["pronto-bulk"]}
+	hostRunners: "pronto-bulk-5": {repo: "pronto", labels: ["pronto-bulk"]}
+	hostRunners: "pronto-bulk-6": {repo: "pronto", labels: ["pronto-bulk"]}
 }
