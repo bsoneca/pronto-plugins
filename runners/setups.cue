@@ -27,4 +27,9 @@ setups: "bsoneca-mac": {
 	hostRunners: "ci-light-1": {repo: "pronto", labels: ["ci-light"]}
 	hostRunners: "ci-light-2": {repo: "pronto", labels: ["ci-light"]}
 	hostRunners: "ci-light-3": {repo: "pronto", labels: ["ci-light"]}
+	// Bulk jobs (pronto's ci.yml heavy checks, PR #804), apart from pronto-mac so light and release
+	// work never queues behind them. Registered by hand first (2026-11-07); declared here so a
+	// rebuilt Mac recreates them.
+	hostRunners: "pronto-bulk-1": {repo: "pronto", labels: ["pronto-bulk"]}
+	hostRunners: "pronto-bulk-2": {repo: "pronto", labels: ["pronto-bulk"]}
 }
