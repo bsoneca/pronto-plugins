@@ -190,6 +190,27 @@ def run-cases [app: path, cmd: string, vars: record] {
 	{ok: ($r.exit_code == 0), out: ($r.stdout + $r.stderr | str trim)}
 }
 
+# A flag's value at hand: its `local` variant where it has one, else its default.
+def at-hand [def: record] {
+	$def.variants? | default {} | get -o local | default (default-of $def)
+}
+
+# Whether the app's tree, as it stands, passed its gate on this machine: the ledger release@gcp reads
+# (pronto's gcp/local-gate-key.nu, under the pronto the app pins), stamped by integrate@local with every
+# driver and by a rehearsal. false where the app pins no pronto or its pronto has no ledger, and for a
+# tree with any change since (an edit, an untracked file). FLAGS_GATED_CMD stands in for it in tests: an
+# sh command, run in the app's folder, printing true or false.
+def gated [app: path]: nothing -> bool {
+	let cmd = ($env.FLAGS_GATED_CMD? | default "")
+	if $cmd != "" { return ((do { cd $app; ^sh -c $cmd } | complete | get stdout | str trim) == "true") }
+	let rt = (do { cd $app; ^$env.SAYT_MISE_BIN where github:bonisoft3/pronto } | complete)
+	if $rt.exit_code != 0 { return false }
+	let script = ($rt.stdout | str trim | path join gcp local-gate-key.nu)
+	if not ($script | path exists) { return false }
+	let r = (do { cd $app; ^$env.SAYT_MISE_BIN exec -- nu $script passed . } | complete)
+	$r.exit_code == 0 and ($r.stdout | str trim) == "true"
+}
+
 # The live document with each flag in `flags` at its old value for everyone and its new one for the
 # testers: variants {old, new} beside the ones it had, and the testers' test first in its targeting.
 def canary-doc [old: record, doc: record, flags: list<string>, testers: list<string>]: nothing -> record {
@@ -294,12 +315,22 @@ export def push [app: path, --untested: string, --skip-live: string] {
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
 	if $skip_live != null and ($tested | is-not-empty) { print -e $"flags: WARNING: ($tested | each {|c| $c.flag } | str join ', ') not tried on production: ($skip_live)" }
 
-	for c in ($tested) {
-		print $"flags: ($c.flag): running its cases at hand \(($c.scenarios | length) scenarios, ($c.unit | length) unit cases\)"
-		let r = (run-cases $app $cmds.local {FLAG: $c.flag, ONLY: ($c.scenarios | str join ","), UNIT_ONLY: ($c.unit | str join ","), SLOW: "1"})
-		if not $r.ok { error make {msg: $"($c.flag)'s cases failed at hand; nothing was written:\n($r.out)"} }
+	# A flip builds no stack. Where the tree passed its gate here, and each flag reads at hand the value it
+	# is flipped to, the gate ran the flag's cases with that value: they are not run again. Otherwise the
+	# app's flagsCases.local runs them, against a stack already up or none (its contract: it builds none).
+	let same = ($tested | all {|c| let d = ($doc.flags | get $c.flag); (at-hand $d) == (default-of $d) })
+	let passed = ($tested | is-not-empty) and $same and (gated $app)
+	if $passed {
+		print $"flags: ($tested | each {|c| $c.flag } | str join ', '): this tree passed its gate on this machine, which ran the cases with the new value at hand; not run again"
+	} else {
+		for c in ($tested) {
+			print $"flags: ($c.flag): running its cases at hand \(($c.scenarios | length) scenarios, ($c.unit | length) unit cases\)"
+			let r = (run-cases $app $cmds.local {FLAG: $c.flag, ONLY: ($c.scenarios | str join ","), UNIT_ONLY: ($c.unit | str join ","), SLOW: "1"})
+			if not $r.ok { error make {msg: $"($c.flag)'s cases failed at hand; nothing was written:\n($r.out)"} }
+		}
 	}
-	let verdict = if ($tested | is-empty) { "untested" } else if $skip_live != null { "local-only" } else { "passed" }
+	let verdict = if ($tested | is-empty) { "untested" } else if $skip_live != null { if $passed { "gated" } else { "local-only" } } else { "passed" }
+	let notes = ([$notes (if $passed { "at hand: the tree's gate" } else { "" })] | where {|n| $n != "" } | str join "; ")
 	if $skip_live != null or ($tested | is-empty) {
 		write-flags $at $doc $app --meta (meta-of {stage: all, flag: $names, cases: $verdict, note: $notes}) --from $before | ignore
 		return

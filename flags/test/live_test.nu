@@ -180,6 +180,23 @@ let n4 = (object | length)
 live push $app --skip-live "no tester yet" | ignore
 check ((object | length) == $n4 + 1 and (newest 0).metadata.cases == "local-only" and ((newest 0).metadata.note | str contains "no tester yet") and ((ran | last) | str starts-with "local")) "--skip-live: no canary, the reason kept"
 
+# A tree that passed its gate here, with the flag at hand already at its new value: the gate ran its cases,
+# so the push runs none at hand and builds no stack. A flag whose local value differs runs them all the same.
+full-spec true "light"
+let n4g = (object | length)
+let ran4g = (ran | length)
+let g = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "echo true"})
+check ($g.exit_code == 0 and (ran | length) == $ran4g and (object | length) == $n4g + 1 and (newest 0).metadata.cases == "gated" and ((newest 0).metadata.note | str contains "the tree's gate")) "gated tree: no cases run at hand, the verdict kept"
+open --raw $"($app)/flags_spec.cue" | str replace 'premium: {default: true, local: true}' 'premium: {default: false, local: true}' | save -f $"($app)/flags_spec.cue"
+let g2 = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "echo true"})
+check ($g2.exit_code == 0 and ((ran | last) | str starts-with "local premium") and (newest 0).metadata.cases == "local-only") "gated tree, but the flag reads another value at hand: its cases run"
+let ran4h = (ran | length)
+full-spec true "light"
+let g3 = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "echo false"})
+check ($g3.exit_code == 0 and (ran | length) == $ran4h + 1) "a tree the gate has not passed: its cases run"
+full-spec false "light"
+livex [push $app --skip-live "back to off for what follows"] | ignore
+
 # Targeted only during a run: no version outlives a run with a tester named in it.
 let named = (object | where {|v| $v.data | str contains "tester-1" } | each {|v| $v.metadata.stage? | default "" })
 check ($named | all {|st| $st == "testers" }) "testers: named only in the canary versions"
