@@ -4,7 +4,7 @@
 # Or changes the released app's live flags, with no deploy (flags/live.nu):
 #   bin/pronto-flags setup <app-dir>               # once: the bucket, its readers, the first push
 #                                                  # (every write says its target, and takes --expect <url> or PRONTO_FLAGS_EXPECT;
-#                                                  #  PRONTO_FLAGS_DRY_RUN=1 shows and writes nothing; each is noted in the journal)
+#                                                  #  --dry-run or PRONTO_FLAGS_DRY_RUN=1 shows and writes nothing, refused at each write; each write is noted in the journal)
 #   bin/pronto-flags push <app-dir> [--untested "<why>"]
 #                                                  # the flags as flags_spec.cue says them now, once a changed flag's cases pass
 #   bin/pronto-flags cases <app-dir> [flag]        # the cases a flip of each flag (or the one) runs
