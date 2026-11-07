@@ -138,8 +138,9 @@ _testersNamed: {
 // app's folder. `local` runs at hand with the settings a release has: env `FLAG` (the flag),
 // `ONLY` (its scenarios' ids, comma-separated), `UNIT_ONLY` (its unit cases' names, the same)
 // and `SLOW=1`. A flip builds and launches no stack: `local` runs against a stack already up (or
-// none), and is not run at all for a tree that passed its gate on this machine (pronto's
-// gcp/local-gate-key.nu) when each flag reads at hand the value it is flipped to. `live` runs against production once the flag is on for the testers alone: env
+// none), and is not run at all for a tree a gate vouches for (a commit of main's own line, which the
+// merge gate keeps green, or a tree pronto's gcp/local-gate-key.nu stamped on this machine) when each
+// flag reads at hand the value it is flipped to. `live` runs against production once the flag is on for the testers alone: env
 // `FLAG`, `ONLY` (the flag's scenarios marked `production`), `APP_URL` (flagsLive.url) and
 // `FLAGS_TESTER` (the first of flagsLive.testers). Either fails with a non-zero exit. A flag's
 // cases are the scenarios (tests/scenarios/*.cue) and unit cases (tests/unit/*.cue) that name

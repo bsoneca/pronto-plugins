@@ -592,9 +592,11 @@ no cases. `pronto-flags push <app-dir>` then:
 2. runs `flagsCases.local` for each, at hand with the settings a release has,
    and slowed (`SLOW=1`); a failure stops the push, with nothing written. A
    flip builds no stack: the command runs against a stack already up, and is
-   not run at all when the app's tree passed its gate on this machine (pronto's
-   `gcp/local-gate-key.nu`, the ledger `release@gcp` reads) and each flag reads
-   at hand the value it is flipped to, since that gate ran its cases with it;
+   not run at all when a gate vouches for the app's tree (a clean commit of
+   main's first-parent line, which the merge gate keeps green, or a tree that
+   passed its gate on this machine: pronto's `gcp/local-gate-key.nu`, the
+   ledger `release@gcp` reads) and each flag reads at hand the value it is
+   flipped to, since that gate ran its cases with it;
 3. writes the flag on for `flagsLive.testers` alone and the old value for
    everyone else (version metadata `stage=testers`), and waits until OFREP at
    `flagsLive.url` answers the tester's key the new value and no key the old

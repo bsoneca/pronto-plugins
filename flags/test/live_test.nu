@@ -185,14 +185,14 @@ check ((object | length) == $n4 + 1 and (newest 0).metadata.cases == "local-only
 full-spec true "light"
 let n4g = (object | length)
 let ran4g = (ran | length)
-let g = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "echo true"})
-check ($g.exit_code == 0 and (ran | length) == $ran4g and (object | length) == $n4g + 1 and (newest 0).metadata.cases == "gated" and ((newest 0).metadata.note | str contains "the tree's gate")) "gated tree: no cases run at hand, the verdict kept"
+let g = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "echo ledger"})
+check ($g.exit_code == 0 and (ran | length) == $ran4g and (object | length) == $n4g + 1 and (newest 0).metadata.cases == "gated" and ((newest 0).metadata.note | str contains "the gate (ledger)")) "gated tree: no cases run at hand, the verdict kept"
 open --raw $"($app)/flags_spec.cue" | str replace 'premium: {default: true, local: true}' 'premium: {default: false, local: true}' | save -f $"($app)/flags_spec.cue"
-let g2 = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "echo true"})
+let g2 = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "echo ledger"})
 check ($g2.exit_code == 0 and ((ran | last) | str starts-with "local premium") and (newest 0).metadata.cases == "local-only") "gated tree, but the flag reads another value at hand: its cases run"
 let ran4h = (ran | length)
 full-spec true "light"
-let g3 = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "echo false"})
+let g3 = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "true"})
 check ($g3.exit_code == 0 and (ran | length) == $ran4h + 1) "a tree the gate has not passed: its cases run"
 full-spec false "light"
 livex [push $app --skip-live "back to off for what follows"] | ignore
