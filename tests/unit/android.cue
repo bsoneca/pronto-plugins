@@ -332,6 +332,14 @@ cases: {
 		{call: "android.reported", args: ["$"], expect: ["border on some sides only | p.l"]},
 	]}
 
+	"a bevel (light above and left, dark below and right) is drawn as one outline, half its width, in the dark colour": {suite: "android", steps: [
+		{call: "android.render", args: [#"<p class="b">x</p>"#, ".b { border: 2px solid; border-color: #ffffff #404040 #404040 #ffffff; padding: 2px }"]},
+		{keep: "page"},
+		{pick: ["items.0.border", "items.0.paddings"], expect: [{stroke: {color: "#FF404040", width: 1}}, {top: 4, right: 4, bottom: 4, left: 4}]},
+		{use: "page"},
+		{call: "android.reported", args: ["$"], expect: ["border on some sides only (drawn as one outline) | p.b"]},
+	]}
+
 	"typography: font shorthand, weight, line height, letter spacing, text-align, nowrap": {suite: "android", steps: [
 		{call: "android.render", args: [#"<p class="t">Hi</p><p class="u">there</p>"#, #"""
 			.t { font: italic 700 1.25rem/1.6 monospace; letter-spacing: .1em; text-align: center; text-decoration: underline }
