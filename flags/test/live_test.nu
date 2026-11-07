@@ -241,6 +241,29 @@ open --raw $"($app)/flags_spec.cue" | str replace 'configMap: "shop-flags"}' 'co
 let r = (livex [push $app] {PATH: ([$bin] | append $env.PATH), SSH_FAIL: "1"})
 check ($r.exit_code != 0 and ($r.stderr | str contains "the mirror at ops@node.example's shop/shop-flags failed")) "a required mirror that fails fails the push"
 
+# A dry run never reaches a write. gcloud refuses anything but a read and notes it (FAKE_GCLOUD_READONLY), a
+# mirror is set, and push, rollback and setup run under --dry-run and under PRONTO_FLAGS_DRY_RUN: no version,
+# no gcloud write, no ssh.
+let ro = {PATH: ([$bin] | append $env.PATH), FAKE_GCLOUD_READONLY: "1"}
+let gens = (object | length)
+let sshed = (open --raw $"($sent).args" | lines | length)
+for a in [[push $app --dry-run] [push $app --untested "dry" --dry-run] [rollback $app --dry-run] [setup $app --dry-run]] {
+	let r = (livex $a $ro)
+	check ($r.exit_code == 0 and ($r.stdout | str contains "dry run: nothing written")) $"--dry-run: ($a | str join ' ') shows and stops"
+}
+let r_env = (livex [push $app --untested "dry"] ($ro | merge {PRONTO_FLAGS_DRY_RUN: "1"}))
+check ($r_env.exit_code == 0 and ($r_env.stdout | str contains "dry run: nothing written")) "PRONTO_FLAGS_DRY_RUN: the same"
+check (not ($"($state).writes" | path exists) and (object | length) == $gens and (open --raw $"($sent).args" | lines | length) == $sshed) "dry run: no gcloud write, no new version, no mirror"
+# Each write refuses on its own under a dry run, whatever path reaches it: the store, and gcloud itself.
+let fakes = {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state, FAKE_GCLOUD_READONLY: "1", PRONTO_FLAGS_DRY_RUN: "1"}
+let put = (with-env $fakes { ^$nu.current-exe -c $"use ($here)/../live.nu store-put; store-put {url: 'gs://shop-prod-flags/flags.json'} '{\"flags\": {}}' {stage: all} '1'" | complete })
+check ($put.exit_code != 0 and ($put.stderr | str contains "dry run: refused a write")) "dry run: the store refuses a write"
+let cp = (with-env $fakes { ^$nu.current-exe -c $"use ($here)/../live.nu run-gcloud; run-gcloud storage cp /dev/null gs://shop-prod-flags/flags.json" | complete })
+check ($cp.exit_code != 0 and ($cp.stderr | str contains "dry run: refused a write")) "dry run: gcloud refuses a write"
+let rd = (with-env $fakes { ^$nu.current-exe -c $"use ($here)/../live.nu run-gcloud; run-gcloud config get-value account | get stdout" | complete })
+check ($rd.exit_code == 0 and ($rd.stdout | str contains "operator@example.com")) "dry run: gcloud still reads"
+check (not ($"($state).writes" | path exists) and (object | length) == $gens) "dry run: still nothing written"
+
 # The journal of the writes above: one JSON line each, with the flags whose default moved.
 let jl = (open --raw $"($dir)/journal.jsonl" | lines | each {|l| $l | from json })
 check (($jl | all {|j| $j.event == "flags.write" and $j.app == "shop" and ($j.target | str starts-with "gs://shop-prod-flags/") and ($j.at | str ends-with "Z") }) and ($jl | length) > 10) "journal: a line for every write, with its event, app, target and time"

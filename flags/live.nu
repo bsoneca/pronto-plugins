@@ -15,14 +15,25 @@
 # Each runs as the operator's own gcloud login.
 # Every write (setup, push, rollback) prints its target first and takes --expect <url> (or PRONTO_FLAGS_EXPECT):
 # a target that differs is refused with nothing written. With PRONTO_FLAGS_DRY_RUN set a write shows what it
-# would write and stops. Each write is also appended to a journal (see `journal`).
+# would write and stops, as --dry-run does; a write reached anyway is refused where it happens. Each write is also appended to a journal (see `journal`).
 # A push that changes a flag's default value runs that flag's cases first (see `push`).
+
+# A dry run (--dry-run, or PRONTO_FLAGS_DRY_RUN) writes nothing, enforced where each write happens, not only
+# at the top of a command: the gcloud call (only the reads below go through), the ssh mirror and the directory
+# store each refuse under it. So a dry run reaching a write by any path fails instead of writing (2026-11-07: a
+# "dry run" that stood gcloud in through SAYT_MISE_BIN, which ./saytw replaced, wrote the live bucket).
+def dry []: nothing -> bool { not (($env.PRONTO_FLAGS_DRY_RUN? | default "") in ["" "0"]) }
+def refuse-write [what: string] {
+	if (dry) { error make {msg: $"flags: dry run: refused a write \(($what)\); nothing was written"} }
+}
+const gcloud_reads = [["config" "get-value"] ["storage" "objects" "describe"] ["storage" "cat"] ["storage" "ls"] ["storage" "buckets" "describe"]]
 
 # gcloud on the Python pinned beside it, never on the virtualenv it shares with every other gcloud
 # on the machine (~/.config/gcloud/virtenv): another gcloud rebuilds that on its own Python, and a
 # Python this gcloud predates crashes it (3.14: "module 'ssl' has no attribute 'PROTOCOL_TLSv1'").
-def --wrapped run-gcloud [...args] {
+export def --wrapped run-gcloud [...args] {
 	let input = $in
+	if (dry) and not ($gcloud_reads | any {|r| ($args | take ($r | length)) == $r }) { refuse-write $"gcloud ($args | take 3 | str join ' ')" }
 	$input | with-env {CLOUDSDK_PYTHON: python3.12, CLOUDSDK_PYTHON_SITEPACKAGES: "0"} { ^$env.SAYT_MISE_BIN exec gcloud@589.0.0 python@3.12.11 -- gcloud --quiet ...$args | complete }
 }
 def --wrapped gc [...args] {
@@ -115,6 +126,7 @@ def meta-str [m: record]: nothing -> string {
 
 # Writes text as the new live version, over the generation `from` and no other, and returns the new generation.
 export def store-put [at: record, text: string, meta: record, from: string]: nothing -> string {
+	refuse-write $"the live flags at ($at.url)"
 	if not (is-dir $at) {
 		let file = (mktemp -t --suffix .json)
 		$text | save -f $file
@@ -160,6 +172,7 @@ def provenance [app: path, at: record] {
 # A mirror that fails warns and the push goes on (a staging node), unless it is required (production).
 def mirror [at: record, text: string] {
 	for m in ($at.mirrors? | default []) {
+		refuse-write $"the mirror at ($m.ssh)"
 		let key = ($m.key? | default "flags.json")
 		let cm = ({apiVersion: v1, kind: ConfigMap, metadata: {name: $m.configMap, namespace: $m.namespace}, data: {$key: $text}} | to json)
 		let r = ($cm | ^ssh -o BatchMode=yes -o ConnectTimeout=20 $m.ssh $"($m.kubectl? | default 'sudo k3s kubectl') apply -f -" | complete)
@@ -561,9 +574,10 @@ export def setup [app: path, --expect: string] {
 }
 
 def main [] { print "usage: live.nu setup|push|history|rollback|show|cases <app-dir> [version|flag]" }
-def "main setup" [app: path, --expect: string] { setup $app --expect $expect }
-def "main push" [app: path, --untested: string, --expect: string] { push $app --untested $untested --expect $expect }
+def "main setup" [app: path, --expect: string, --dry-run] { with-env (dry-env $dry_run) { setup $app --expect $expect } }
+def "main push" [app: path, --untested: string, --expect: string, --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --expect $expect } }
 def "main history" [app: path, --json] { if $json { history $app --changes | to json | print } else { history $app | table -e | print } }
-def "main rollback" [app: path, version?: string, --expect: string] { rollback $app $version --expect $expect }
+def "main rollback" [app: path, version?: string, --expect: string, --dry-run] { with-env (dry-env $dry_run) { rollback $app $version --expect $expect } }
+def dry-env [on: bool]: nothing -> record { if $on { {PRONTO_FLAGS_DRY_RUN: "1"} } else { {} } }
 def "main show" [app: path] { show $app }
 def "main cases" [app: path, flag?: string] { cases $app $flag | table -e | print }
