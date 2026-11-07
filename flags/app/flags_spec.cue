@@ -22,10 +22,9 @@ flags: {
 // GCP: sidecars: flagd: env: FLAGD_SOURCES: flagsLive.sources
 //
 // A push of a changed flag runs its cases first (pronto-flags cases <app-dir> lists them):
-// at hand, then on production for the testers alone, and only then for everyone.
+// on production for the testers alone, and only then for everyone.
 // flagsLive: url:     "https://<the released app's address>"
 // flagsLive: testers: ["<a production account only tests sign in as>"]
 // flagsCases: {
-// 	local: "<the app's command for the flag's cases at hand: env FLAG, ONLY, UNIT_ONLY, SLOW>"
 // 	live:  "<the app's command for its production cases: env FLAG, ONLY, APP_URL, FLAGS_TESTER>"
 // }
