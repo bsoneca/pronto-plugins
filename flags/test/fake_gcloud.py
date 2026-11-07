@@ -55,7 +55,8 @@ elif a[:3] == ["storage", "objects", "describe"]:
         fail(f"{url} not found: 404.")
     print(v["generation"])
 elif a[:2] == ["storage", "cat"]:
-    v = live(a[2])
+    url, _, gen = a[2].partition("#")
+    v = next((v for v in versions(url) if v["generation"] == gen), None) if gen else live(url)
     if not v:
         fail(f"{a[2]} not found: 404.")
     print(v["data"])
