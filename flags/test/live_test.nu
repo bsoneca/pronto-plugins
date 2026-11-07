@@ -90,14 +90,13 @@ let pushed = (live push $app --untested "a theme is no feature")
 check ((object | length) == $before + 1 and ($pushed | str contains "theme")) "push --untested: written, then summarized"
 check ((object | first).metadata.cases == "untested" and ((object | first).metadata.note | str contains "a theme is no feature")) "push --untested: the reason is kept on the version"
 
-# A flip runs its flag's cases: at hand, then on production for the testers alone, then for everyone.
+# A flip runs its flag's cases on production, for the testers alone, then writes it for everyone; nothing at hand.
 def full-spec [premium: bool, theme: string] {
 	$"package shop
 flags: premium: {default: ($premium), local: true}
 flags: theme: {default: \"($theme)\"}
 flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", url: \"https://shop.example\", testers: [\"tester-1\"], runAs: \"shop-run@shop-prod.iam.gserviceaccount.com\", alert: \"projects/shop-prod/alertPolicies/42\"}
 flagsCases: {
-	local: \"echo local $FLAG $ONLY $UNIT_ONLY $SLOW >> ran.log; test ! -f fail-local\"
 	live:  \"echo live $FLAG $ONLY $APP_URL $FLAGS_TESTER $CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT >> ran.log; test ! -f crash-live || kill -9 $$; test ! -f fail-live\"
 }
 GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
@@ -129,19 +128,26 @@ let canary = (premium (newest 1))
 check ($canary.targeting.if.0.in.1 == ["tester-1"] and $canary.targeting.if.1 == "new" and $canary.variants.new == true and $canary.variants.old == false) "flip: the canary is on for the testers alone"
 check ((newest 0).metadata.stage == "all" and (newest 0).metadata.cases == "passed" and (newest 0).metadata.flag == "premium") "flip: the final version is for all, cases passed"
 check ((premium (newest 0)).variants.default == true) "flip: the final version holds the new value"
-check ((ran) == ["local premium buy,shelf price 1" "live premium buy https://shop.example tester-1 shop-run@shop-prod.iam.gserviceaccount.com"]) "flip: the cases ran at hand, slowed, then the production ones as the tester"
+check ((ran) == ["live premium buy https://shop.example tester-1 shop-run@shop-prod.iam.gserviceaccount.com"]) "flip: only the production cases ran, as the tester; nothing at hand"
 let hist = (with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state} {
 	^$nu.current-exe -c $"use ($here)/../live.nu history; history ($app) | to json" | complete
 }).stdout | from json
 check ($hist.0.stage == "all" and $hist.0.cases == "passed" and $hist.1.stage == "testers") "history: the stage and the verdict of each version"
 
-# Local failure: nothing is written.
+# No tester, or a flag with no production scenario: the flip is refused, nothing written, nothing run.
 full-spec false "light"
-touch $"($app)/fail-local"
 let n1 = (object | length)
-let lf = (livex [push $app])
-check ($lf.exit_code != 0 and (object | length) == $n1 and ($lf.stderr | str contains "failed at hand")) "local failure: refused, nothing written"
-rm $"($app)/fail-local"
+let ran1 = (ran | length)
+open --raw $"($app)/flags_spec.cue" | str replace 'testers: ["tester-1"]' 'testers: []' | save -f $"($app)/flags_spec.cue"
+let nt = (livex [push $app])
+check ($nt.exit_code != 0 and (object | length) == $n1 and (ran | length) == $ran1 and ($nt.stderr | str contains "flagsLive.testers")) "no tester: the flip is refused, nothing written"
+full-spec false "light"
+open --raw $"($app)/tests/scenarios/shop.cue" | str replace 'production: true, ' '' | save -f $"($app)/tests/scenarios/shop.cue"
+let np = (livex [push $app])
+check ($np.exit_code != 0 and (object | length) == $n1 and (ran | length) == $ran1 and ($np.stderr | str contains "no `production` scenario")) "no production scenario: the flip is refused, nothing written"
+open --raw $"($app)/tests/scenarios/shop.cue" | str replace 'buy: {flags: ["premium"], ' 'buy: {flags: ["premium"], production: true, ' | save -f $"($app)/tests/scenarios/shop.cue"
+let gone = (livex [push $app --skip-live "no tester yet"])
+check ($gone.exit_code != 0 and (object | length) == $n1) "--skip-live is gone: refused"
 
 # Live failure: back to the version read before the canary.
 touch $"($app)/fail-live"
@@ -174,33 +180,14 @@ check ((object | length) == $n3 + 1 and (ran | length) == $ran3 and (newest 0).m
 let zs = (held | get snoozes)
 check (($zs | length) == 4 and ($zs | all {|z| $z.ended and $z.policies == "projects/shop-prod/alertPolicies/42" }) and ($zs.0.start <= $zs.0.end)) "snooze: each live stage has one, ended with the run"
 
-# --skip-live: the cases at hand only, and the reason kept.
+# Back to off, through the live stage, for what follows.
 full-spec false "light"
-let n4 = (object | length)
-live push $app --skip-live "no tester yet" | ignore
-check ((object | length) == $n4 + 1 and (newest 0).metadata.cases == "local-only" and ((newest 0).metadata.note | str contains "no tester yet") and ((ran | last) | str starts-with "local")) "--skip-live: no canary, the reason kept"
-
-# A tree that passed its gate here, with the flag at hand already at its new value: the gate ran its cases,
-# so the push runs none at hand and builds no stack. A flag whose local value differs runs them all the same.
-full-spec true "light"
-let n4g = (object | length)
-let ran4g = (ran | length)
-let g = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "echo ledger"})
-check ($g.exit_code == 0 and (ran | length) == $ran4g and (object | length) == $n4g + 1 and (newest 0).metadata.cases == "gated" and ((newest 0).metadata.note | str contains "the gate (ledger)")) "gated tree: no cases run at hand, the verdict kept"
-open --raw $"($app)/flags_spec.cue" | str replace 'premium: {default: true, local: true}' 'premium: {default: false, local: true}' | save -f $"($app)/flags_spec.cue"
-let g2 = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "echo ledger"})
-check ($g2.exit_code == 0 and ((ran | last) | str starts-with "local premium") and (newest 0).metadata.cases == "local-only") "gated tree, but the flag reads another value at hand: its cases run"
-let ran4h = (ran | length)
-full-spec true "light"
-let g3 = (livex [push $app --skip-live "no tester yet"] {FLAGS_GATED_CMD: "true"})
-check ($g3.exit_code == 0 and (ran | length) == $ran4h + 1) "a tree the gate has not passed: its cases run"
-full-spec false "light"
-livex [push $app --skip-live "back to off for what follows"] | ignore
+live push $app | ignore
 
 # Targeted only during a run: no version outlives a run with a tester named in it.
 let named = (object | where {|v| $v.data | str contains "tester-1" } | each {|v| $v.metadata.stage? | default "" })
 check ($named | all {|st| $st == "testers" }) "testers: named only in the canary versions"
-check (($named | length) == 4) "testers: the canaries are the only ones"
+check (($named | length) == 5) "testers: the canaries are the only ones"
 
 # A flag cannot name a tester in its accounts, nor a live stage run without the release identity.
 $"package shop
@@ -227,8 +214,8 @@ check ((object | length) == $n6 + 1 and (ran | length) == $ran6 and ((newest 0).
 
 # The cases run under the app's own saytw pin, not the SAYT_VERSION this tool runs under.
 full-spec true "light"
-open --raw $"($app)/flags_spec.cue" | str replace 'echo local $FLAG' 'echo sayt=${SAYT_VERSION:-none} local $FLAG' | save -f $"($app)/flags_spec.cue"
-let pinned = (livex [push $app --skip-live "no tester yet"] {SAYT_VERSION: "v0.0.1"})
+open --raw $"($app)/flags_spec.cue" | str replace 'echo live $FLAG' 'echo sayt=${SAYT_VERSION:-none} live $FLAG' | save -f $"($app)/flags_spec.cue"
+let pinned = (livex [push $app] {SAYT_VERSION: "v0.0.1"})
 check ($pinned.exit_code == 0 and ((ran | last) | str starts-with "sayt=none")) "the cases don't inherit this tool's SAYT_VERSION"
 
 # A mirror (flagsLive.mirrors): each write of the object is applied to a node's ConfigMap over ssh;

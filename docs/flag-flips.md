@@ -38,27 +38,21 @@ A flip therefore needs a test of its own, and it must be:
    - Only after they pass is the flag on for everyone.
    - Everything stays inside flagd's JSON logic. There is no new service, no new host, and no
      preview to keep alive.
-3. **The same cases run at hand first, slowed.** `flagsCases.local` runs every case of the flag
-   with `SLOW=1`, before anything is written. That catches the cheap failures without touching
-   production.
-   - A flip builds and launches no stack (the user, 2026-11-07: "flips must not rebuild the
-     stack"). `flagsCases.local` runs against a stack that is already up, never a fresh one.
-   - A tree a gate vouches for runs nothing at hand, when each flag reads at hand the value it is
-     flipped to: that gate ran the flag's cases with it. Two vouch: main (HEAD a commit of
-     origin/main's first-parent line, nothing under the app changed), which the merge gate keeps
-     green, the same trust the scenarios' selection puts in main; and pronto's
-     `gcp/local-gate-key.nu` ledger (the one `release@gcp` reads), for a tree that passed its gate
-     on this machine. The version says which (`cases=gated` with `--skip-live`, and the note `at
-     hand: the gate (main|ledger)`). Any other tree runs `flagsCases.local`.
+3. **Nothing runs at hand.** A flip builds and launches no stack and runs no local case (the
+   user, 2026-11-07: "flips must not rebuild the stack", then "Test cases run against production
+   to that user"). The pull request that set the flag's value passed its gate with the flag on,
+   since every flag reads its `local` value at hand; the flip's own test is production, as the
+   tester. Until 2026-11-07 a flip ran `flagsCases.local`, a whole slowed `integrate@local`: 30+
+   minutes for a 12 s scenario.
 4. **A push stops if any check fails, and rolls back on its own.**
-   - A local failure stops the push before anything is written.
+   - A flip that cannot run its live stage (no tester, no `runAs`, a flag with no `production`
+     scenario) is refused before anything is written. `--skip-live` is gone: no tester, no flip.
    - A live failure, or an OFREP that never answers the tester's value within 90 s, writes the
      version read before the canary again as the newest. The push then prints the report and
      exits non-zero.
    - The rollback is an ordinary version, so `history` shows it and `rollback` can undo it.
 5. **No cases means no flip.** A changed flag without cases is refused.
    - `--untested "<why>"` pushes it anyway, with a loud warning.
-   - `--skip-live "<why>"`, for an app that has no tester yet, stops after the local cases.
    - Both reasons are kept on the version's metadata, so history records each untested flip.
 6. **One mechanism, reused.** The push writes the same versioned object as before. The stages are
    recorded in version metadata (`stage=testers|all|rolled-back`, `cases=…`), which `history`
@@ -114,11 +108,11 @@ The plugin's own tests run every stage against stand-ins for gcloud and OFREP (`
 
 ## Open
 
-- **Bonk Chess's tester.** Making the production account is an owner-approved step. Until it
-  exists, Bonk Chess pushes with `--skip-live`.
-- **At hand, a flag reads its `local` value.** When the new production `default` differs from
-  `local`, the at-hand run does not test the value production will read. Push could warn when the
-  two differ.
+- **Bonk Chess's tester.** Making the production account is an owner-approved step
+  (`tests/tester.ts`, its credential in Secret Manager as `flags-tester-credential`, its id in
+  `flagsLive.testers`). Until it exists, Bonk Chess cannot flip a flag.
+- **At hand, a flag reads its `local` value.** The pull request's gate tests that value; the flip's
+  live stage tests the one production will read, as the tester.
 - **Turning a flag off also runs its cases.** In an emergency, use `rollback`, not an edited spec
   and a push.
 - **Release notes.** A flip's report is printed and kept on the version. It does not yet appear on

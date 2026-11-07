@@ -143,20 +143,15 @@ _testersNamed: {
 	}
 }
 
-// The app's commands for a flip's cases (`pronto-flags push`), each run with `sh -c` in the
-// app's folder. `local` runs at hand with the settings a release has: env `FLAG` (the flag),
-// `ONLY` (its scenarios' ids, comma-separated), `UNIT_ONLY` (its unit cases' names, the same)
-// and `SLOW=1`. A flip builds and launches no stack: `local` runs against a stack already up (or
-// none), and is not run at all for a tree a gate vouches for (a commit of main's own line, which the
-// merge gate keeps green, or a tree pronto's gcp/local-gate-key.nu stamped on this machine) when each
-// flag reads at hand the value it is flipped to. `live` runs against production once the flag is on for the testers alone: env
-// `FLAG`, `ONLY` (the flag's scenarios marked `production`), `APP_URL` (flagsLive.url) and
-// `FLAGS_TESTER` (the first of flagsLive.testers). Either fails with a non-zero exit. A flag's
+// The app's command for a flip's cases (`pronto-flags push`), run with `sh -c` in the app's
+// folder. A flip runs its cases on production as the tester, and nothing at hand (it builds no
+// stack): `live` runs once the flag is on for the testers alone, with env `FLAG`, `ONLY` (the
+// flag's scenarios marked `production`), `APP_URL` (flagsLive.url) and `FLAGS_TESTER` (the first
+// of flagsLive.testers), and fails with a non-zero exit. A flag's
 // cases are the scenarios (tests/scenarios/*.cue) and unit cases (tests/unit/*.cue) that name
 // it in `flags`, or in a step's `flag`; `pronto-flags cases <app-dir> [flag]` lists them.
 #FlagsCases: {
-	local?: string
-	live?:  string
+	live?: string
 }
 flagsCases?: #FlagsCases
 

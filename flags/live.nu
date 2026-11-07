@@ -338,37 +338,6 @@ def run-cases [app: path, cmd: string, vars: record] {
 	{ok: ($r.exit_code == 0), out: ($r.stdout + $r.stderr | str trim)}
 }
 
-# A flag's value at hand: its `local` variant where it has one, else its default.
-def at-hand [def: record] {
-	$def.variants? | default {} | get -o local | default (default-of $def)
-}
-
-# Whether the app's tree, as it stands, is one its gate vouches for, and how; null where none does:
-# - "main": the app's files are main's (origin/main, with nothing changed, staged or new under the app),
-#   which the merge gate keeps green, the trust the scenarios' own selection puts in main (an app's
-#   tests/scenarios/select.ts: "the diff trusts main");
-# - "ledger": the tree passed its gate on this machine, the ledger release@gcp reads (pronto's
-#   gcp/local-gate-key.nu, under the pronto the app pins), stamped by integrate@local with every driver
-#   and by a rehearsal.
-# FLAGS_GATED_CMD stands in for it in tests: an sh command, run in the app's folder, printing main,
-# ledger or nothing.
-def gated [app: path]: nothing -> any {
-	let cmd = ($env.FLAGS_GATED_CMD? | default "")
-	if $cmd != "" { let w = (do { cd $app; ^sh -c $cmd } | complete | get stdout | str trim); return (if $w == "" { null } else { $w }) }
-	# main's: HEAD is a commit of main's own line (a merge the gate let in; first parents, the last 2000),
-	# and nothing under the app differs from it.
-	let head = (do { cd $app; ^git rev-parse HEAD } | complete | get stdout | str trim)
-	let line = (do { cd $app; ^git rev-list --first-parent -n 2000 origin/main } | complete)
-	let loose = (do { cd $app; ^git status --porcelain --untracked-files=all -- . } | complete)
-	if $head != "" and $line.exit_code == 0 and $head in ($line.stdout | lines) and $loose.exit_code == 0 and ($loose.stdout | str trim | is-empty) { return "main" }
-	let rt = (do { cd $app; ^$env.SAYT_MISE_BIN where github:bonisoft3/pronto } | complete)
-	if $rt.exit_code != 0 { return null }
-	let script = ($rt.stdout | str trim | path join gcp local-gate-key.nu)
-	if not ($script | path exists) { return null }
-	let r = (do { cd $app; ^$env.SAYT_MISE_BIN exec -- nu $script passed . } | complete)
-	if $r.exit_code == 0 and ($r.stdout | str trim) == "true" { "ledger" } else { null }
-}
-
 # The live document with each flag in `flags` at its old value for everyone and its new one for the
 # testers: variants {old, new} beside the ones it had, and the testers' test first in its targeting.
 def canary-doc [old: record, doc: record, flags: list<string>, testers: list<string>]: nothing -> record {
@@ -426,16 +395,19 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 	print -e $"flags: ($at.url) is version ($to)'s flags again, as version ($again)"
 }
 
-# Changes the live flags. A flag whose default value changes (or that is new) goes through its cases:
+# Changes the live flags. A flag whose default value changes (or that is new) goes through its cases, on
+# production as the tester (the user, 2026-11-07: "Test cases run against production to that user"; a flip
+# builds and launches no stack, and runs nothing at hand: the pull request's gate ran the flag's cases with
+# it on, every flag being on at hand):
 #   1. it needs cases (`cases`); with none the push is refused, or goes on with --untested "<why>";
-#   2. at hand, flagsCases.local runs them with the settings a release has; a failure stops, nothing written;
+#   2. it needs what the live stage needs: flagsLive.url, testers and runAs, flagsCases.live, and a `production`
+#      scenario of its own; with any missing the push is refused, nothing written;
 #   3. the flag is written on for flagsLive.testers alone, everyone else keeping the old value (stage=testers),
 #      and the push waits until OFREP at flagsLive.url says so;
 #   4. flagsCases.live runs the flag's `production` scenarios against production as the tester; a failure
 #      writes the version read in 3 again, and the push fails;
 #   5. the flags as the spec says them are written (stage=all, cases=passed).
-# --skip-live "<why>" leaves out 3 and 4, for an app with no testers yet. Both reasons are kept on the version.
-export def push [app: path, --untested: string, --skip-live: string, --expect: string] {
+export def push [app: path, --untested: string, --expect: string] {
 	let at = (live $app)
 	if (target-guard $at $expect) { show $app; print "flags: dry run: nothing written"; return }
 	let doc = (cue-of $app flagd.document)
@@ -450,53 +422,30 @@ export def push [app: path, --untested: string, --skip-live: string, --expect: s
 	let bare = ($all | where {|c| not (has-cases $c) } | each {|c| $c.flag })
 	let tested = ($all | where {|c| has-cases $c })
 	if ($bare | is-not-empty) and $untested == null {
-		error make {msg: $"a push changes ($bare | str join ', '), which has no cases: name the flag in a scenario's or a unit case's `flags` (tests/scenarios/*.cue, tests/unit/*.cue; `pronto-flags cases` lists them), or push with --untested \"<why>\""}
+		error make {msg: $"a push changes ($bare | str join ', '), which has no cases: name the flag in a scenario's `flags` and mark it `production` (tests/scenarios/*.cue; `pronto-flags cases` lists them), or push with --untested \"<why>\""}
 	}
 	let cmds = (cue-of $app flagsCases | default {})
 	let testers = $at.testers
 	if ($tested | is-not-empty) {
-		if ($cmds.local? | default "" | is-empty) { error make {msg: $"($app) names no flagsCases.local: the command that runs a flag's cases at hand"} }
-		if $skip_live == null {
-			if ($at.site | is-empty) or ($testers | is-empty) or ($cmds.live? | default "" | is-empty) {
-				error make {msg: "a flip runs its cases on production as a tester: say flagsLive.url, flagsLive.testers and flagsCases.live, or push with --skip-live \"<why>\""}
-			}
-			if ($at.runAs? | default "" | is-empty) {
-				error make {msg: "the tester's credential is the release identity's, not the operator's: say flagsLive.runAs (a service account the operator may impersonate), or push with --skip-live \"<why>\""}
-			}
-			let none = ($tested | where {|c| $c.production | is-empty } | each {|c| $c.flag })
-			if ($none | is-not-empty) { error make {msg: $"($none | str join ', ') has no `production` scenario to run on production: mark one, or push with --skip-live \"<why>\""} }
+		if ($at.site | is-empty) or ($testers | is-empty) or ($cmds.live? | default "" | is-empty) {
+			error make {msg: "a flip runs its cases on production as a tester: say flagsLive.url, flagsLive.testers and flagsCases.live (the tester is made once, by the operator: the app's tests/tester.ts)"}
 		}
+		if ($at.runAs? | default "" | is-empty) {
+			error make {msg: "the tester's credential is the release identity's, not the operator's: say flagsLive.runAs (a service account the operator may impersonate)"}
+		}
+		let none = ($tested | where {|c| $c.production | is-empty } | each {|c| $c.flag })
+		if ($none | is-not-empty) { error make {msg: $"($none | str join ', ') has no `production` scenario to run on production as the tester: mark one \(production: true, tests/scenarios/schema.cue\)"} }
 	}
 	let names = ($changed | str join "+")
-	let notes = ([(if $untested != null { $"untested: ($untested)" }), (if $skip_live != null { $"skip-live: ($skip_live)" })] | compact | str join "; ")
+	let notes = (if $untested != null { $"untested: ($untested)" } else { "" })
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
-	if $skip_live != null and ($tested | is-not-empty) { print -e $"flags: WARNING: ($tested | each {|c| $c.flag } | str join ', ') not tried on production: ($skip_live)" }
-
-	# A flip builds no stack. Where a gate vouches for the tree (gated), and each flag reads at hand the value
-	# it is flipped to, that gate ran the flag's cases with that value: they are not run again. Otherwise the
-	# app's flagsCases.local runs them, against a stack already up or none (its contract: it builds none).
-	let same = ($tested | all {|c| let d = ($doc.flags | get $c.flag); (at-hand $d) == (default-of $d) })
-	let by = if ($tested | is-not-empty) and $same { gated $app } else { null }
-	let passed = $by != null
-	if $passed {
-		let why = if $by == "main" { "the app's files are main's, which the merge gate keeps green" } else { "this tree passed its gate on this machine" }
-		print $"flags: ($tested | each {|c| $c.flag } | str join ', '): ($why), with the new value at hand; its cases are not run again"
-	} else {
-		for c in ($tested) {
-			print $"flags: ($c.flag): running its cases at hand \(($c.scenarios | length) scenarios, ($c.unit | length) unit cases\)"
-			let r = (run-cases $app $cmds.local {FLAG: $c.flag, ONLY: ($c.scenarios | str join ","), UNIT_ONLY: ($c.unit | str join ","), SLOW: "1"})
-			if not $r.ok { error make {msg: $"($c.flag)'s cases failed at hand; nothing was written:\n($r.out)"} }
-		}
-	}
-	let verdict = if ($tested | is-empty) { "untested" } else if $skip_live != null { if $passed { "gated" } else { "local-only" } } else { "passed" }
-	let notes = ([$notes (if $passed { $"at hand: the gate \(($by)\)" } else { "" })] | where {|n| $n != "" } | str join "; ")
-	if $skip_live != null or ($tested | is-empty) {
-		write-flags $at $doc $app --meta {stage: all, flag: $names, cases: $verdict, note: $notes} --from $before | ignore
+	if ($tested | is-empty) {
+		write-flags $at $doc $app --meta {stage: all, flag: $names, cases: untested, note: $notes} --from $before | ignore
 		return
 	}
 
 	let on = ($tested | each {|c| $c.flag })
-	let final = {stage: all, flag: $names, cases: $verdict, note: $notes}
+	let final = {stage: all, flag: $names, cases: passed, note: $notes}
 	# The alert that fires on a tester's sign-in is snoozed for exactly the live stage, however it ends.
 	let snooze = (snooze-start $at $on)
 	try {
@@ -613,7 +562,7 @@ export def setup [app: path, --expect: string] {
 
 def main [] { print "usage: live.nu setup|push|history|rollback|show|cases <app-dir> [version|flag]" }
 def "main setup" [app: path, --expect: string] { setup $app --expect $expect }
-def "main push" [app: path, --untested: string, --skip-live: string, --expect: string] { push $app --untested $untested --skip-live $skip_live --expect $expect }
+def "main push" [app: path, --untested: string, --expect: string] { push $app --untested $untested --expect $expect }
 def "main history" [app: path, --json] { if $json { history $app --changes | to json | print } else { history $app | table -e | print } }
 def "main rollback" [app: path, version?: string, --expect: string] { rollback $app $version --expect $expect }
 def "main show" [app: path] { show $app }

@@ -39,7 +39,7 @@ wait_for '"ok":true' "$logs/probe.log"
 say "probe green"
 
 sed 's/default: false/default: true/' "$app/flags_spec.cue.drill" > "$app/flags_spec.cue"
-"$root/bin/pronto-flags" push "$app" --expect "$target" --untested "drill: the bad flip" --skip-live "drill: a local store" > "$logs/flip.log" 2>&1
+"$root/bin/pronto-flags" push "$app" --expect "$target" --untested "drill: the bad flip" > "$logs/flip.log" 2>&1
 say "flip pushed: $(grep -o '"version":"[0-9]*"' "$logs/flip.log" | head -n 1)"
 wait_for '"ok":false' "$logs/probe.log"
 say "first failure"

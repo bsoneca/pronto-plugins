@@ -60,12 +60,12 @@ Deno.test("a flip's cases: the testers, the production address and the commands 
   const before = await cue(dir, "flagd.document");
   await Deno.writeTextFile(`${dir}/flags_spec.cue`, `package shop\n${SPEC}
 flagsLive: {url: "https://shop.example", testers: ["tester-1"]}
-flagsCases: {local: "sh local.sh", live: "sh live.sh"}
+flagsCases: {live: "sh live.sh"}
 `);
   eq(await cue(dir, "flagd.document"), before, "the flags' document is the same");
   eq(await cue(dir, "flagsLive.testers"), ["tester-1"], "the testers");
-  eq(await cue(dir, "flagsCases"), { local: "sh local.sh", live: "sh live.sh" }, "the commands");
-  for (const bad of [`flagsLive: testers: ["no spaces"]`, `flagsLive: url: "http://insecure.example"`, `flagsCases: other: "x"`, `flagsLive: testers: ["acct-me"]`, `flagsLive: runAs: "a human@example.com"`, `flagsLive: alert: "my alert"`]) {
+  eq(await cue(dir, "flagsCases"), { live: "sh live.sh" }, "the command");
+  for (const bad of [`flagsLive: testers: ["no spaces"]`, `flagsLive: url: "http://insecure.example"`, `flagsCases: other: "x"`, `flagsCases: local: "x"`, `flagsLive: testers: ["acct-me"]`, `flagsLive: runAs: "a human@example.com"`, `flagsLive: alert: "my alert"`]) {
     await Deno.writeTextFile(`${dir}/flags_spec.cue`, `package shop\n${SPEC}\n${bad}\n`);
     let refused = false;
     try { await cue(dir, "flagd.document"); await cue(dir, "flagsCases"); } catch { refused = true; }

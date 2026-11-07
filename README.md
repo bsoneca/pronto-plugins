@@ -578,26 +578,23 @@ cases before the flag is on for everyone, and `rollback` stays the fast way out
 ```cue
 flagsLive: {url: "https://shop.example", testers: ["<a production account only tests sign in as>"], runAs: "<release identity>@<project>.iam.gserviceaccount.com", alert: "projects/<project>/alertPolicies/<id>"}
 flagsCases: {
-	local: "deno run -A tests/flip.ts"  // at hand; env FLAG, ONLY, UNIT_ONLY, SLOW=1
-	live:  "deno run -A tests/flip.ts"  // on production; env FLAG, ONLY, APP_URL, FLAGS_TESTER
+	live: "deno run -A tests/flip.ts"  // on production; env FLAG, ONLY, APP_URL, FLAGS_TESTER
 }
 ```
 
 A flag's cases are the scenarios (`tests/scenarios/*.cue`) and unit cases
 (`tests/unit/*.cue`) that name it in `flags: ["<flag>"]`, or in a step's `flag`;
-`pronto-flags cases <app-dir> [flag]` lists them. An app with neither folder has
-no cases. `pronto-flags push <app-dir>` then:
+`pronto-flags cases <app-dir> [flag]` lists them. A flip runs them on production,
+as the tester, and nothing at hand: it builds and launches no stack (the user,
+2026-11-07: "Test cases run against production to that user"). The pull
+request's gate already ran every case with the flag on, since at hand every flag
+reads its `local` value. `pronto-flags push <app-dir>` then:
 
 1. reads the live object and finds the flags whose default value moves; a flag
    with no cases is refused, or pushed with `--untested "<why>"`, loudly;
-2. runs `flagsCases.local` for each, at hand with the settings a release has,
-   and slowed (`SLOW=1`); a failure stops the push, with nothing written. A
-   flip builds no stack: the command runs against a stack already up, and is
-   not run at all when a gate vouches for the app's tree (a clean commit of
-   main's first-parent line, which the merge gate keeps green, or a tree that
-   passed its gate on this machine: pronto's `gcp/local-gate-key.nu`, the
-   ledger `release@gcp` reads) and each flag reads at hand the value it is
-   flipped to, since that gate ran its cases with it;
+2. refuses, with nothing written, a flip whose app lacks what the live stage
+   needs (`flagsLive.url`, `testers`, `runAs`, `flagsCases.live`) or whose flag
+   has no `production` scenario: no tester, no flip;
 3. writes the flag on for `flagsLive.testers` alone and the old value for
    everyone else (version metadata `stage=testers`), and waits until OFREP at
    `flagsLive.url` answers the tester's key the new value and no key the old
@@ -608,9 +605,7 @@ no cases. `pronto-flags push <app-dir>` then:
    report and exits non-zero;
 5. writes the flags as the spec says them (`stage=all`, `cases=passed`).
 
-`--skip-live "<why>"` leaves out 3 and 4, for an app with no testers yet. Both
-reasons are kept on the version, and `pronto-flags history` shows each version's
-stage, flag, cases verdict and reason.
+`pronto-flags history` shows each version's stage, flag, cases verdict and reason.
 
 A tester is targeted only while the live stage runs: the CUE refuses a flag
 whose `accounts` name one, and whatever fails after the canary writes the version
