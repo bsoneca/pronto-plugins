@@ -41,6 +41,15 @@ A flip therefore needs a test of its own, and it must be:
 3. **The same cases run at hand first, slowed.** `flagsCases.local` runs every case of the flag
    with `SLOW=1`, before anything is written. That catches the cheap failures without touching
    production.
+   - A flip builds and launches no stack (the user, 2026-11-07: "flips must not rebuild the
+     stack"). `flagsCases.local` runs against a stack that is already up, never a fresh one.
+   - A tree a gate vouches for runs nothing at hand, when each flag reads at hand the value it is
+     flipped to: that gate ran the flag's cases with it. Two vouch: main (HEAD a commit of
+     origin/main's first-parent line, nothing under the app changed), which the merge gate keeps
+     green, the same trust the scenarios' selection puts in main; and pronto's
+     `gcp/local-gate-key.nu` ledger (the one `release@gcp` reads), for a tree that passed its gate
+     on this machine. The version says which (`cases=gated` with `--skip-live`, and the note `at
+     hand: the gate (main|ledger)`). Any other tree runs `flagsCases.local`.
 4. **A push stops if any check fails, and rolls back on its own.**
    - A local failure stops the push before anything is written.
    - A live failure, or an OFREP that never answers the tester's value within 90 s, writes the
