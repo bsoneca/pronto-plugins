@@ -1,0 +1,23 @@
+#!/bin/sh
+# An app's live armies (the catalog its page reads as a shape: Bonk Chess's army_catalog), published by the
+# same push as pronto-flags': the second object kind of flags/live.nu. Testers first, the flag's `production`
+# scenarios run as the tester, then everyone, written back on a failure. Run as the operator's own login.
+#   bin/pronto-armies push <app-dir> [--local] [--untested "<why>"]   # the app's armiesLive.rows, once their cases pass
+#   bin/pronto-armies show <app-dir> [--local]                         # what a push would write, and where: nothing written
+#   bin/pronto-armies history <app-dir> [--local] [--json]             # every write of every row, newest first
+#   bin/pronto-armies rollback <app-dir> <army> [version] [--local]    # the version before the live one, or the one named
+# --local is the stack at hand (armiesLive.local): everyone at once, no cases. Every write prints its target and takes
+# --expect <target> and --dry-run, as pronto-flags' do.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+case "${1:-}" in
+push|show|history|rollback)
+	cmd=$1
+	app=$(cd "$2" && pwd)
+	shift 2
+	cd "$here"
+	exec ./saytw --script tools.nu nu flags/live.nu armies "$cmd" "$app" "$@"
+	;;
+esac
+echo "usage: pronto-armies push|show|history|rollback <app-dir> [army] [--local]" >&2
+exit 2

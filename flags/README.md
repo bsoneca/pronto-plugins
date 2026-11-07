@@ -37,7 +37,13 @@ The store can be a local directory instead of a bucket, for a drill or a laptop:
 
 Live flags need `flagsLive: {project, bucket}` in the spec and a flagd sidecar in `release.cue`. The page reads flags with OpenFeature's web SDK and the OFREP provider. Details in the [root README](../README.md#pronto-flags); why a flip runs its flag's cases, in [docs/flag-flips.md](../docs/flag-flips.md). There is no skill for this plugin.
 
+## pronto-armies
+
+The same push, one object kind over: an app whose page reads its armies from a database shape publishes them with `bin/pronto-armies push|show|history|rollback <app-dir>` (testers first, the flag's `production` scenarios as the tester, then everyone, written back on a failure). See [pronto-armies](../README.md#pronto-armies-the-second-object-kind-of-the-push).
+
 ## Tests
+
+- [`test/armies_test.nu`](test/armies_test.nu): the armies kind, against a stand-in for the app's SQL command ([`fake_sql.py`](test/fake_sql.py)): a local push, a live push through its testers' stage and its cases, a refusal with no cases, tester or `production` scenario, a failing case written back, the dry run, `--expect`, `history` and `rollback`.
 
 - [`install_test.ts`](install_test.ts): the installer: flags in the app's own package, its spec kept, a program with no package refused.
 - [`live_test.ts`](live_test.ts) and [`test/live_test.nu`](test/live_test.nu): the live commands against a stand-in for gcloud ([`fake_gcloud.py`](test/fake_gcloud.py)) and for flagd's OFREP answer ([`fake_ofrep.py`](test/fake_ofrep.py)), with the app's cases as tiny `sh` commands: a flip refused with no cases, with no tester or with no `production` scenario (nothing written), `--untested` with its reason kept, the happy path (canary, then final, nothing at hand), a live failure and an OFREP timeout (rolled back). The same cases run on a directory store (flagsLive.dir), with the journal, `history --json`, `--expect`, the dry run and a stale write; with gcloud refusing every write (`FAKE_GCLOUD_READONLY`), `--dry-run` and `PRONTO_FLAGS_DRY_RUN` on push, rollback and setup write nothing, and the store and gcloud each refuse a write under a dry run on their own.

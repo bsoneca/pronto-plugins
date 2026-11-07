@@ -573,7 +573,195 @@ export def setup [app: path, --expect: string] {
 	if (generation $at) == "0" { push-plain $app } else { print $"flags: ($at.url) is there already; `pronto-flags push` changes it" }
 }
 
-def main [] { print "usage: live.nu setup|push|history|rollback|show|cases <app-dir> [version|flag]" }
+# ---- The second object kind: the catalog's armies (pronto-armies) ----
+# An app's live armies (Bonk Chess: spec/army_catalog.cue) are rows of its database's `army_catalog` table, which
+# the page reads as a shape, not an object in a bucket. They are published by the push above, one kind over: the
+# same validate (the app's CUE exports the rows, refusing what it does not allow), optimistic write (a row is
+# written over the version it read), provenance and journal, testers first, the flag's `production` cases run as the
+# tester (cases-of, run-cases), then everyone, and the version read written again on a failure. Only the store
+# differs: the rows are written by the database's own SECURITY DEFINER functions (player_record.army_catalog_set and
+# army_catalog_drop), through a command the app names, so no app role can write a catalog.
+#   bin/pronto-armies push <app-dir> [--local] [--untested "<why>"]   # the app's armiesLive.rows, once their cases pass
+#   bin/pronto-armies show <app-dir> [--local]                          # what a push would write, and where: nothing written
+#   bin/pronto-armies history <app-dir> [--local]                       # every write of every row, newest first
+#   bin/pronto-armies rollback <app-dir> <army> [version] [--local]     # the version before the live one, or the one named
+# --local pushes to the stack at hand (armiesLive.local): everyone at once, no cases, as nothing at hand has a tester.
+
+# The app's armiesLive with the testers, address and runAs of its flagsLive.
+def armies-at [app: path, local: bool] {
+	let a = (cue-of $app armiesLive)
+	if $a == null { error make {msg: $"($app)'s flags_spec.cue names no armiesLive: say `armiesLive: {flag: \"…\", rows: […], local: \"…\"}` there"} }
+	let cmd = if $local { $a.local? | default "" } else { $a.live? | default "" }
+	if ($cmd | is-empty) {
+		let which = if $local { "local" } else { "live" }
+		error make {msg: $"($app)'s armiesLive names no ($which) command, the way to run SQL \(on its stdin\) in the ($which) database"}
+	}
+	let f = (cue-of $app flagsLive | default {})
+	{
+		flag: $a.flag, rows: $a.rows, cmd: $cmd, local: $local
+		target: $"armies:(if $local { 'local' } else { 'live' }):($cmd)"
+		site: ($f.url? | default ""), testers: ($f.testers? | default []), runAs: ($f.runAs? | default null), alert: ($f.alert? | default null)
+	}
+}
+
+# SQL run by the app's command; what it printed. Every write passes through here, so the dry run refuses it here.
+def army-sql [at: record, sql: string, --write]: nothing -> string {
+	if $write { refuse-write $"a write of the army catalog at ($at.target)" }
+	let r = ($sql | ^sh -c $at.cmd | complete)
+	if $r.exit_code != 0 { error make {msg: $"armies: ($at.cmd): ($r.stderr | str trim)"} }
+	$r.stdout
+}
+def sq [s: string]: nothing -> string { $s | str replace -a "'" "''" }
+
+# The catalog's rows now: id, army, audience, version, min_runner, entry.
+def army-rows [at: record]: nothing -> list<record> {
+	army-sql $at "SELECT json_build_object('id', id, 'army', army, 'audience', audience, 'version', version, 'min_runner', min_runner, 'entry', entry::jsonb)::text FROM public.army_catalog ORDER BY id;"
+	| lines | where {|l| ($l | str trim) != "" } | each {|l| $l | from json }
+}
+def row-version [row: any]: nothing -> any { if $row == null { null } else { $row.version } }
+def army-key [army: string, aud: string]: nothing -> string { if $aud == "testers" { $"($army)/testers" } else { $army } }
+# A row is the same as another when its entry (key order aside) and runner are.
+def army-same [have: any, want: record]: nothing -> bool {
+	if $have == null { return false }
+	($have.min_runner == $want.min_runner) and (($have.entry | to json -r | from json | sort) == ($want.entry | to json -r | from json | sort))
+}
+# The row `want` writes for `aud`, over the version `expect` (null: any); the new version.
+def army-set [at: record, want: record, aud: string, expect: any]: nothing -> int {
+	let ex = if $expect == null { "NULL" } else { $expect | into string }
+	army-sql $at $"SELECT player_record.army_catalog_set\('(sq $want.army)', '(sq ($want.entry | to json -r))'::jsonb, '($aud)', ($want.min_runner), ($ex)\);" --write | str trim | into int
+}
+def army-drop [at: record, army: string, aud: string, expect: any]: nothing -> int {
+	let ex = if $expect == null { "NULL" } else { $expect | into string }
+	army-sql $at $"SELECT player_record.army_catalog_drop\('(sq $army)', '($aud)', ($ex)\);" --write | str trim | into int
+}
+
+# Every write is journalled as the flags' are (journal-file), one JSON line.
+def army-journal [app: path, at: record, stage: string, armies: list<string>, cases: string, note: string] {
+	let p = (provenance $app (if $at.local { {dir: "local"} } else { {} }))
+	let line = {at: (now-utc), event: "armies.write", app: ($app | path expand | path basename), target: $at.target, stage: $stage, armies: ($armies | str join "+"), who: $p.who, commit: $p.commit, cases: $cases, note: $note} | to json -r
+	let file = (journal-file $app)
+	try { mkdir ($file | path dirname); $"($line)\n" | save -a $file } catch {|e| print -e $"armies: WARNING: could not note the write in ($file): ($e.msg)" }
+	print $"armies: journal ($line)"
+}
+
+export def armies-show [app: path, --local] {
+	let at = (armies-at $app $local)
+	let have = (army-rows $at)
+	print $"armies: a push writes to ($at.target):"
+	$at.rows | each {|w|
+		let now = ($have | where id == (army-key $w.army $w.audience) | get -o 0)
+		{army: $w.army, audience: $w.audience, min_runner: $w.min_runner, like: ($w.entry.like? | default ""), now: (if $now == null { "absent" } else if (army-same $now $w) { $"same \(v($now.version))" } else { $"changes v($now.version)" })}
+	} | print
+}
+
+# Publishes armiesLive.rows. A row that is new or differs is a flip of the catalog, and runs the flag's cases:
+#   1. it needs cases (`cases`: the scenarios and unit cases that name the flag); with none the push is refused, or
+#      goes on with --untested "<why>";
+#   2. it needs what the live stage needs: flagsLive.url, testers and runAs, flagsCases.live, and a `production`
+#      scenario of the flag's; with any missing it is refused, nothing written;
+#   3. each changed army is written for the testers alone (audience testers), everyone else keeping what they had;
+#   4. flagsCases.live runs the flag's `production` scenarios against production as the tester, which look for the
+#      army in the page the shape built (their steps wait for the shape to deliver it); a failure writes what was
+#      there before, and the push fails;
+#   5. each is written for everyone and the testers' rows dropped.
+# --local: the stack at hand (armiesLive.local), written for everyone at once, no cases.
+export def armies-push [app: path, --local, --untested: string, --expect: string] {
+	let at = (armies-at $app $local)
+	if (target-guard {url: $at.target} $expect) { armies-show $app --local=$local; print "armies: dry run: nothing written"; return }
+	let have = (army-rows $at)
+	let changed = ($at.rows | where {|w| not (army-same ($have | where id == (army-key $w.army $w.audience) | get -o 0) $w) })
+	if ($changed | is-empty) { print "armies: the catalog is as armiesLive.rows says already; nothing written"; return }
+	let names = ($changed | get army)
+	if $local {
+		for w in $changed {
+			let v = (army-set $at $w $w.audience (row-version ($have | where id == (army-key $w.army $w.audience) | get -o 0)))
+			print $"armies: ($w.army) is version ($v) for ($w.audience)"
+		}
+		army-journal $app $at all $names none "at hand"
+		return
+	}
+	let c = (cases-of $app $at.flag)
+	if not (has-cases $c) and $untested == null {
+		error make {msg: $"a push of ($names | str join ', ') has no cases: name the flag ($at.flag) in a scenario's `flags` and mark it `production` \(tests/scenarios/*.cue; `pronto-flags cases` lists them\), or push with --untested \"<why>\""}
+	}
+	let cmds = (cue-of $app flagsCases | default {})
+	let note = (if $untested != null { $"untested: ($untested)" } else { "" })
+	if (has-cases $c) {
+		if ($at.site | is-empty) or ($at.testers | is-empty) or ($cmds.live? | default "" | is-empty) {
+			error make {msg: "a push runs its cases on production as a tester: say flagsLive.url, flagsLive.testers and flagsCases.live (the tester is made once, by the operator: the app's tests/tester.ts)"}
+		}
+		if ($at.runAs? | default "" | is-empty) { error make {msg: "the tester's credential is the release identity's, not the operator's: say flagsLive.runAs"} }
+		if ($c.production | is-empty) { error make {msg: $"($at.flag) has no `production` scenario to run on production as the tester: mark one \(production: true, tests/scenarios/schema.cue\)"} }
+	}
+	if $untested != null and not (has-cases $c) { print -e $"armies: WARNING: ($names | str join ', ') pushed with NO CASES: ($untested)" }
+	let snooze = (if (has-cases $c) { snooze-start $at [$at.flag] } else { null })
+	try { armies-live $app $at $have $changed $c $cmds $note } finally { snooze-end $at $snooze }
+}
+
+# The live stage. The state before it is kept, and written again by whatever fails after the first write.
+def armies-live [app: path, at: record, have: list<record>, changed: list<record>, c: record, cmds: record, note: string] {
+	let before = ($changed | each {|w| {army: $w.army, everyone: ($have | where id == $w.army | get -o 0), testers: ($have | where id == $"($w.army)/testers" | get -o 0)} })
+	let names = ($changed | get army)
+	let staged = ($changed | where audience == "everyone")
+	try {
+		for w in $changed {
+			let aud = if $w.audience == "everyone" { "testers" } else { $w.audience }
+			let b = ($before | where army == $w.army | first)
+			let v = (army-set $at $w $aud (row-version (if $aud == "testers" { $b.testers } else { $b.everyone })))
+			print $"armies: ($w.army) is version ($v) for ($aud)"
+		}
+		army-journal $app $at testers $names (if (has-cases $c) { "running" } else { "untested" }) $note
+		if (has-cases $c) {
+			print $"armies: ($names | str join ', ') is in the page of ($at.testers | str join ', ') alone; running its production cases as ($at.testers.0) \(($c.production | str join ', ')\)"
+			let r = (run-cases $app $cmds.live {FLAG: $at.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site, FLAGS_TESTER: $at.testers.0, CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT: $at.runAs})
+			if not $r.ok { error make {msg: $"($at.flag)'s production cases failed:\n($r.out)"} }
+		}
+		for w in $staged {
+			let v = (army-set $at $w "everyone" (row-version ($before | where army == $w.army | first | get everyone)))
+			print $"armies: ($w.army) is version ($v) for everyone"
+			army-drop $at $w.army "testers" null | ignore
+		}
+		army-journal $app $at all $names (if (has-cases $c) { "passed" } else { "untested" }) $note
+	} catch {|e|
+		# What was there before is written again: an army that had a row gets its entry back, one that had none loses the row.
+		for b in $before {
+			try {
+				if $b.everyone != null { army-set $at {army: $b.army, entry: $b.everyone.entry, min_runner: $b.everyone.min_runner} "everyone" null | ignore } else { army-drop $at $b.army "everyone" null | ignore }
+				if $b.testers != null { army-set $at {army: $b.army, entry: $b.testers.entry, min_runner: $b.testers.min_runner} "testers" null | ignore } else { army-drop $at $b.army "testers" null | ignore }
+			} catch {|r| print -e $"armies: WARNING: could not restore ($b.army): ($r.msg); `pronto-armies rollback` does" }
+		}
+		army-journal $app $at rolled-back $names failed ($e.msg | lines | first)
+		error make {msg: $"rolled back: ($e.msg)"}
+	}
+}
+
+# Every write of the catalog's rows, newest first: when, by whom, which row, the version it made (an entry of null is a drop).
+export def armies-history [app: path, --local] {
+	let at = (armies-at $app $local)
+	army-sql $at "SELECT json_build_object('at', at, 'who', who, 'key', key, 'version', version, 'min_runner', min_runner, 'entry', entry)::text FROM player_record.army_catalog_log ORDER BY at DESC, version DESC LIMIT 200;"
+	| lines | where {|l| ($l | str trim) != "" } | each {|l| $l | from json }
+}
+
+# An army's earlier entry written again for everyone, as the newest version: the one before the live one, or `version`.
+export def armies-rollback [app: path, army: string, version?: int, --local, --expect: string] {
+	let at = (armies-at $app $local)
+	if (target-guard {url: $at.target} $expect) { print "armies: dry run: nothing written"; return }
+	let log = (armies-history $app --local=$local | where key == $army | where {|r| $r.entry != null })
+	let live = (army-rows $at | where id == $army | get -o 0)
+	let to = if $version != null { $log | where version == $version | get -o 0 } else { $log | where {|r| $live == null or $r.version != $live.version } | get -o 0 }
+	if $to == null { error make {msg: $"no earlier version of ($army) to roll back to: `pronto-armies history` lists them"} }
+	let v = (army-set $at {army: $army, entry: $to.entry, min_runner: $to.min_runner} "everyone" ($live | get -o version))
+	print $"armies: ($army) is version ($to.version)'s entry again, as version ($v)"
+	army-journal $app $at rollback [$army] none $"rolled back to ($to.version)"
+}
+
+def "main armies" [] { print "usage: live.nu armies push|show|history|rollback <app-dir> [army] [--local]" }
+def "main armies push" [app: path, --local, --untested: string, --expect: string, --dry-run] { with-env (dry-env $dry_run) { armies-push $app --local=$local --untested $untested --expect $expect } }
+def "main armies show" [app: path, --local] { armies-show $app --local=$local }
+def "main armies history" [app: path, --local, --json] { let h = (armies-history $app --local=$local); if $json { $h | to json | print } else { $h | table -e | print } }
+def "main armies rollback" [app: path, army: string, version?: int, --local, --expect: string, --dry-run] { with-env (dry-env $dry_run) { armies-rollback $app $army $version --local=$local --expect $expect } }
+
+def main [] { print "usage: live.nu setup|push|history|rollback|show|cases <app-dir> [version|flag]; live.nu armies push|show|history|rollback <app-dir>" }
 def "main setup" [app: path, --expect: string, --dry-run] { with-env (dry-env $dry_run) { setup $app --expect $expect } }
 def "main push" [app: path, --untested: string, --expect: string, --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --expect $expect } }
 def "main history" [app: path, --json] { if $json { history $app --changes | to json | print } else { history $app | table -e | print } }

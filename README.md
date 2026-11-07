@@ -628,6 +628,44 @@ authenticator: no real player's data is touched, nothing is bought, and nothing
 shows in the lobby. The runner refuses a scenario that isn't marked `production`
 against the host `flagsLive.url` names.
 
+### pronto-armies: the second object kind of the push
+
+An app whose page reads its armies from the database (Bonk Chess: the `army_catalog` shape,
+behind the flag `army_catalog_live`) publishes them with the same push, one kind over. Nothing
+is a second mechanism: the stages, the cases and the roll back are the flip's above; only the
+store differs. The rows are written by the database's own `SECURITY DEFINER` functions
+(`player_record.army_catalog_set` and `army_catalog_drop`) through a command the app names, so
+no app role can write a catalog.
+
+```sh
+<this repo>/bin/pronto-armies push <app-dir> [--local] [--untested "<why>"]
+<this repo>/bin/pronto-armies show|history <app-dir> [--local]
+<this repo>/bin/pronto-armies rollback <app-dir> <army> [version] [--local]
+```
+
+In the app's spec: `armiesLive: {flag, rows, local, live}`. `rows` are the armies to publish,
+exported from the app's CUE (which refuses an unknown reskin, beat, asset or rig before anything
+is written); `local` and `live` are the commands that run SQL (on stdin; rows printed unaligned)
+in the stack at hand and in the released database; `flag` names the flag whose cases are the
+catalog's (`flags: ["<flag>"]`, `production: true`), and `flagsLive` supplies the tester, the
+address and `runAs`. A push of rows that are new or differ:
+
+1. needs cases, as a flip does (`--untested "<why>"` goes on with a warning), and the live stage's
+   `flagsLive.url`, `testers`, `runAs`, `flagsCases.live` and a `production` scenario;
+2. writes each changed army for the testers (`audience` testers: the page shows it to a tester
+   first);
+3. runs the flag's `production` scenarios against production as the first tester, which wait for
+   the army to reach the tester's page through the shape; a failure writes back what was there
+   (the entry it had, or no row) and fails the push;
+4. writes each for everyone and drops the testers' rows.
+
+`--local` writes everyone at once with no cases, as nothing at hand has a tester. Every write
+prints `armies: target …`, takes `--expect <target>` and `--dry-run`, and is appended to the same
+journal as the flags' (`event: armies.write`). `history` lists every write of every row (the
+database keeps them); `rollback` writes an earlier entry again for everyone, as the newest.
+[`flags/test/armies_test.nu`](flags/test/armies_test.nu) runs these against a stand-in for the SQL
+command ([`fake_sql.py`](flags/test/fake_sql.py)).
+
 ### An app
 
 ```sh
