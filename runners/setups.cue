@@ -15,6 +15,11 @@ setups: "bsoneca-mac": {
 	// whose queue on pronto-mac can be long. Same Mac; release-cron's own slot (STACK_PRIORITY=release)
 	// already puts its rehearsal first on the machine.
 	hostRunners: "pronto-release": repo: "pronto"
+	// cd's other jobs (cd.yml's plan and mirror) only: cd never queues behind ci on pronto-mac, and
+	// ci never behind cd (the user, 2026-11-07: "cd must not compete with ci. They must use different
+	// queues."). Apart from pronto-release, which a release holds for its whole run, so a mirror never
+	// waits for a release either.
+	hostRunners: "pronto-cd": repo: "pronto"
 	// Light jobs only (ci.yml's `changed` and its `ci` summary): they take seconds and claim no
 	// slot, so a pull request's ci starts at once instead of queueing behind checks that hold the
 	// pronto-mac runners while they wait in tests/slot.ts (2026-11-06: a PR's `changed` waited up to
