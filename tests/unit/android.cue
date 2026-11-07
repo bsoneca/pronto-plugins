@@ -332,12 +332,28 @@ cases: {
 		{call: "android.reported", args: ["$"], expect: ["border on some sides only | p.l"]},
 	]}
 
-	"a bevel (light above and left, dark below and right) is drawn as one outline, half its width, in the dark colour": {suite: "android", steps: [
-		{call: "android.render", args: [#"<p class="b">x</p>"#, ".b { border: 2px solid; border-color: #ffffff #404040 #404040 #ffffff; padding: 2px }"]},
+	"a bevel (light above and left, dark below and right) is four edge strips over the face, under the view": {suite: "android", steps: [
+		{call: "android.render", args: [#"<p class="b">x</p>"#, ".b { border: 2px solid; border-color: #ffffff #404040 #404040 #ffffff; padding: 2px; background: #c0c0c0 }"]},
 		{keep: "page"},
-		{pick: ["items.0.border", "items.0.paddings"], expect: [{stroke: {color: "#FF404040", width: 1}}, {top: 4, right: 4, bottom: 4, left: 4}]},
+		{pick: ["items.0.orientation", "items.0.items.0.background.0.color", "items.0.items.1.background.0.color", "items.0.items.1.height", "items.0.items.2.background.0.color", "items.0.items.3.background.0.color", "items.0.items.3.alignment_vertical", "items.0.items.4.background.0.color", "items.0.items.4.alignment_horizontal", "items.0.items.5.paddings", "items.0.items.5.background"], expect: ["overlap", "#FFC0C0C0", "#FFFFFFFF", {type: "fixed", value: 2}, "#FFFFFFFF", "#FF404040", "bottom", "#FF404040", "right", {top: 4, right: 4, bottom: 4, left: 4}, null]},
+		{use: "page"},
+		{call: "android.reported", args: ["$"], expect: []},
+	]}
+
+	"an edge colour pair that is not a bevel is drawn as one outline, half the width, in the dark colour": {suite: "android", steps: [
+		{call: "android.render", args: [#"<p class="b">x</p>"#, ".b { border: 2px solid; border-color: #ffffff #404040 #808080 #ffffff; padding: 2px }"]},
+		{keep: "page"},
+		{pick: ["items.0.border", "items.0.paddings"], expect: [{stroke: {color: "#FF808080", width: 1}}, {top: 4, right: 4, bottom: 4, left: 4}]},
 		{use: "page"},
 		{call: "android.reported", args: ["$"], expect: ["border on some sides only (drawn as one outline) | p.b"]},
+	]}
+
+	"a content-sized width (max-content) is a wrap_content box at the start and is not reported": {suite: "android", steps: [
+		{call: "android.render", args: [#"<div class="f">x</div><p>after</p>"#, ".f { width: max-content; padding: 4px }"]},
+		{keep: "page"},
+		{pick: ["items.0.width", "items.0.alignment_horizontal"], expect: [{type: "wrap_content"}, null]},
+		{use: "page"},
+		{call: "android.reported", args: ["$"], expect: []},
 	]}
 
 	"typography: font shorthand, weight, line height, letter spacing, text-align, nowrap": {suite: "android", steps: [
