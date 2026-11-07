@@ -86,6 +86,7 @@ function newState(document, opts, styler, rules) {
     reg(el) { const id = idOf(el); seen.set(id, el); return id; },
     noBg: null,
     edges: new Map(),
+    bevels: new Map(),
   };
 }
 
@@ -408,13 +409,19 @@ function borderOf(el, st, C, lctx) {
     if (lone) C.edges.set(el, { top: sides[0], bottom: sides[2] });
     else if (present.length < 4) C.rep("border on some sides only", desc(el));
     else {
-      // DivKit has one stroke for all four sides, so a bevel (a light edge above and left, a dark one below and
-      // right) is drawn as one outline in the shadowed edge colour, half the width: the control keeps its edge instead of
-      // vanishing into its surround. The width is the widest side, so the box model is unchanged.
-      const edge = sides[2] || sides[1] || sides[0] || sides[3];
       width = Math.max(...present.map((s) => s.w));
-      if (opaque(edge.c)) border.stroke = { color: edge.c, width: Math.max(1, round(width / 2)) };
-      C.rep("border on some sides only (drawn as one outline)", desc(el));
+      const [t, r, b, l] = sides;
+      if (t.w === r.w && r.w === b.w && b.w === l.w && t.c === l.c && r.c === b.c && opaque(t.c) && opaque(b.c)) {
+        // A bevel (a light edge above and left, a dark one below and right): DivKit has one stroke for all
+        // four sides, so the view is framed by layers (see `bevel`), the box model unchanged.
+        C.bevels.set(el, { light: t.c, dark: b.c, w: width });
+      } else {
+        // Anything else is drawn as one outline in the shadowed edge's colour, half the width, so the control
+        // keeps its edge instead of vanishing into its surround.
+        const edge = b || r || t || l;
+        if (opaque(edge.c)) border.stroke = { color: edge.c, width: Math.max(1, round(width / 2)) };
+        C.rep("border on some sides only (drawn as one outline)", desc(el));
+      }
     }
   }
   const radius = ["top-left", "top-right", "bottom-right", "bottom-left"].map((c) => {
@@ -472,19 +479,23 @@ function outerBox(el, st, pctx, C, type, hint) {
 
   // --- width
   const availW = Math.max(0, pctx.avail - num(ml) - num(mr));
-  let wpx = null, stretch = false, weight = null, alignH = null;
+  let wpx = null, stretch = false, weight = null, alignH = null, shrink = false;
   const wv = p.width;
   if (wv !== undefined && wv !== "auto") {
+    // A content-sized box is what DivKit's wrap_content is: the box takes its children's width, at the start.
+    if (/^(max-content|min-content|fit-content(\(.*\))?)$/.test(wv.trim().toLowerCase())) shrink = true;
+    else {
     const sz = size(wv, sctx);
     if (!sz) C.rep("width: " + wv, sel);
     else if (sz.pct === 100 && num(ml) === 0 && num(mr) === 0) stretch = true;
     else if (sz.px !== undefined) wpx = borderBox ? sz.px : sz.px + padW;
     else C.rep("width: " + wv, sel);
+    }
   } else if (hint && hint.w !== undefined) wpx = hint.w + (borderBox ? 0 : padW);
   const grow = parseFloat(p["flex-grow"] || "0") || 0;
   const self = p["align-self"] && p["align-self"] !== "auto" ? p["align-self"] : null;
   const selfJ = p["justify-self"] && p["justify-self"] !== "auto" ? p["justify-self"] : null;
-  if (wpx === null && !stretch) {
+  if (wpx === null && !stretch && !shrink) {
     const control = type === "control";
     if (kind === "row") {
       const basis = p["flex-basis"];
@@ -711,9 +722,45 @@ function decorate(el, divs, C) {
   return [wrap];
 }
 
+// A bevel is four strips over the view's face: light along the top and left, dark along the bottom and
+// right, as a border paints only its own edges and leaves the inside to what lies behind. The view itself,
+// which keeps its padding for the edge, its action and its id, lies over them without a background.
+function bevel(el, divs, C) {
+  const e = C.bevels.get(el);
+  if (!e || divs.length !== 1) return divs;
+  const d = divs[0];
+  const face = d.background;
+  const wrap = { type: "container", id: d.id + "_b", orientation: "overlap", width: d.width, height: d.height };
+  for (const k of ["margins", "alignment_horizontal", "alignment_vertical"]) if (d[k]) { wrap[k] = d[k]; delete d[k]; }
+  // A grid that stretches (css grids size to their tracks) stays as wide as its content inside the frame, which
+  // stretches for it: a match_parent view under an overlap adds nothing to the width its parents wrap to.
+  d.width = d.width && d.width.type === "wrap_content" ? d.width : d.width && d.width.type === "match_parent" && layoutKind(C.style(el)) === "grid" ? { type: "wrap_content" } : { type: "match_parent" };
+  d.height = d.height && d.height.type === "wrap_content" ? d.height : { type: "match_parent" };
+  delete d.background;
+  const w = Math.max(1, round(e.w));
+  const strip = (n, color, width, height, h, v) => {
+    const o = { type: "container", id: d.id + "_" + n, width, height, background: [{ type: "solid", color }], items: [] };
+    if (h) o.alignment_horizontal = h;
+    if (v) o.alignment_vertical = v;
+    return o;
+  };
+  const all = { type: "match_parent" }, edge = { type: "fixed", value: w };
+  wrap.items = [
+    ...(face ? [{ type: "container", id: d.id + "_face", width: all, height: all, background: face, items: [] }] : []),
+    strip("top", e.light, all, edge),
+    strip("left", e.light, edge, all),
+    strip("bottom", e.dark, all, edge, null, "bottom"),
+    strip("right", e.dark, edge, all, "right"),
+    d,
+  ];
+  return [wrap];
+}
+
 function convert(el, pctx, C) {
-  const out = convertOne(el, pctx, C);
-  return C.edges.size ? decorate(el, out, C) : out;
+  let out = convertOne(el, pctx, C);
+  if (C.edges.size) out = decorate(el, out, C);
+  if (C.bevels.size) out = bevel(el, out, C);
+  return out;
 }
 
 function convertOne(el, pctx, C) {
