@@ -49,8 +49,13 @@ devFlow: #DevFlow
 	// The modules an SRE builds: the cloud's configuration (infra/) and the nodes. Made beside a
 	// module per app.
 	infra: *["infra"] | [...string]
-	// A sprint is one day and ends at this time, each day.
+	// A sprint is one day and ends at this time, each day. It commits perPerson issues to each
+	// engineer and each SRE (the user, 2026-11-08: "add more issues per sprint, but with limits"):
+	// 4 engineers and 1 SRE make 12 app issues and 3 infra issues. That is the sprint's capacity,
+	// apart from the slots: a person has one issue in Implementing at a time, and pulls the next
+	// of theirs when the pull request of the last opens (review does not hold the slot).
 	sprint: {
+		perPerson: *3 | (int & >=1)
 		ends:     *"18:00" | (string & =~"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 		timeZone: *"America/Sao_Paulo" | string
 	}

@@ -32,6 +32,12 @@ sprint's, and then it goes through the steps below like any other.
 5. **Open the pull request** ready for review, its title starting `PRONTO-<n>:`. The plane
    workflow moves the issue to Review, and to Merged once it merges; release-cron makes it Live and
    the flag's flip Done.
+5b. **Pull the next one.** Review holds no slot, so the moment the pull request is open (or the
+   issue is cancelled or abandoned) run `pronto-devflow pull . [--lane SRE]` (engineer by default):
+   it starts the lane's next Ready issue of today's sprint, most urgent first. Work that issue the
+   same way, as its own session, and say which you started. A sprint commits 3 issues per person
+   with 1 in Implementing each, so an engineer is never idle after one issue. Nothing Ready:
+   say so.
 6. **What you learn on the way** becomes new issues (`pronto-devflow file ...`), each linked in a
    comment. Do it now only when this issue's objective needs it; say on the issue which you chose.
 
