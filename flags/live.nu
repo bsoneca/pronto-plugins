@@ -460,6 +460,7 @@ export def push [app: path, --untested: string, --expect: string] {
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
 	if ($tested | is-empty) {
 		write-flags $at $doc $app --meta {stage: all, flag: $names, cases: untested, note: $notes} --from $before | ignore
+		tell-board $at $app ($changed | where {|f| $f not-in $off }) $off
 		return
 	}
 
@@ -471,6 +472,24 @@ export def push [app: path, --untested: string, --expect: string] {
 		flip-live $at $app $old $doc $on $tested $cmds $before $final
 	} finally {
 		snooze-end $at $snooze
+	}
+	tell-board $at $app ($changed | where {|f| $f not-in $off }) $off
+}
+
+# The dev flow's board, where the app's repository keeps one (its devflow/devflow.cue; devflow/README.md): the
+# issues whose flag went on for everyone are Done, those whose flag went off are Live again. Never fails the push.
+const flags_dir = path self .
+def tell-board [at: record, app: path, on: list<string>, off: list<string>] {
+	if (is-dir $at) { return }
+	let top = (do { ^git -C $app rev-parse --show-toplevel } | complete)
+	if $top.exit_code != 0 { return }
+	let repo = ($top.stdout | str trim)
+	if not ($repo | path join devflow devflow.cue | path exists) { return }
+	let devflow = ($flags_dir | path join .. bin pronto-devflow)
+	for told in [[verb, flags]; [flipped, $on], [rolledback, $off]] {
+		if ($told.flags | is-empty) { continue }
+		let r = (do { ^$devflow $told.verb $repo ($app | path basename) ...$told.flags } | complete)
+		print -e $"flags: board: ($r.stdout + $r.stderr | str trim)"
 	}
 }
 

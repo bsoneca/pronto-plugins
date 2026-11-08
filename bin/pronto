@@ -5,7 +5,8 @@
 #   bin/pronto release <app>                         its checks, its release, and what it sells through
 #   bin/pronto connect stripe <app> [flags]          pronto-billing set up (billing/connect_cli.ts)
 #   bin/pronto deploy gcp <app> [flags]              Cloud Run, its release target written (gcp/deploy_cli.ts)
-#   bin/pronto plan release|stripe|gcp <app> [flags] what is done, what is next, changing nothing
+#   bin/pronto connect plane <repo>                  the repository's dev-flow board (devflow/connect_cli.ts)
+#   bin/pronto plan release|stripe|gcp|plane <app> [flags] what is done, what is next, changing nothing
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 mode=${1:?release, connect, deploy or plan}
@@ -30,7 +31,8 @@ case "$intent" in
 	release) script=intents/release_cli.ts; set -- "$mode" "$app" "$@" ;;
 	stripe) script=billing/connect_cli.ts; set -- "$mode" "$intent" "$app" "$@" ;;
 	gcp) script=gcp/deploy_cli.ts; set -- "$mode" "$intent" "$app" "$@" ;;
-	*) echo "pronto: no intent $intent (release, stripe, gcp)" >&2; exit 2 ;;
+	plane) script=devflow/connect_cli.ts; set -- "$mode" "$intent" "$app" "$@" ;;
+	*) echo "pronto: no intent $intent (release, stripe, gcp, plane)" >&2; exit 2 ;;
 esac
 cd "$here"
 # Deno as CI pins it for the plugins tree (.github/workflows/ci.yml).

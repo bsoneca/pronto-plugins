@@ -15,6 +15,7 @@ beyond the browser, and beside them, on unmodified pronto. Why and how they are 
 - [gcp](gcp/README.md): release to Cloud Run.
 - [identity](identity/README.md): social sign-in through a shared broker.
 - [infra](infra/README.md): a Google Cloud state kept in CUE, applied by OpenTofu.
+- [devflow](devflow/README.md): a repository's dev flow on a self-hosted Plane board: `bin/pronto connect plane`, the hooks that move issues, and the skills pronto-sprint-plan, pronto-issue and pronto-bug.
 - [intents](intents/README.md): one-command plumbing behind `bin/pronto`.
 - [journeys](journeys/README.md): user-journey SLOs from the terminal's telemetry.
 - [modular-design](modular-design/README.md): an app's design split into modules, each exported alone, so a change rebuilds only its module.

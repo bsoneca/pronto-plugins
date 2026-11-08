@@ -656,6 +656,17 @@ try {
     } catch (e) { run.notes = `failed (${(e as Error).message.split("\n")[0]})`; }
     say(`release notes ${run.notes}`);
   }
+  // 7. The dev flow's board, where the repository keeps one (its devflow/devflow.cue; pronto-plugins' devflow/README.md):
+  // the app's Merged issues whose pull request this release holds go Live. Run from pronto-plugins' main, this script
+  // being a copy in the app; the board's token is PLANE_TOKEN or Secret Manager's. Whatever it says, the run's outcome stays.
+  if (exists(`${wt}/devflow/devflow.cue`)) {
+    try {
+      const hooks = "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/";
+      const b = await child(Deno.execPath(), ["run", "-A", `--reload=${hooks}`, `${hooks}hook.ts`, "released", wt, appRel.split("/").pop()!, head], wt, Deno.env.toObject());
+      run.board = b.code === 0 ? "told" : `failed (exit ${b.code})`;
+    } catch (e) { run.board = `failed (${(e as Error).message.split("\n")[0]})`; }
+    say(`board ${run.board}`);
+  }
   // A release that changed nothing Cloud Run runs (tests, config) keeps the revision: said, so it
   // does not read as a deploy that never went out.
   end("released", !target && run.revision === before ? `same image, nothing served changed: ${before} kept` : "");
