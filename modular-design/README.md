@@ -59,27 +59,32 @@ join: "spec"  // the package that reads every module's export and checks what sp
    edition; join), its `spec.json` byte-identical to today's, then measured through
    `tests/slot.ts` with `/usr/bin/time -l`: full build, unchanged, one ENEM 2021 question
    changed, one subject's lesson changed (CPU-s and peak memory, before and after).
-3. Bonk Chess (`apps/brawl-chess/spec`) the same way.
+3. Bonk Chess (`apps/brawl-chess/spec`) the same way, if its design is the cost (it was not).
 4. Every other app takes it when its design grows past one cheap evaluation.
 
-## First measure: aprende, two modules (2026-11-08)
+## Measured (2026-11-08, BRT)
 
-bsoneca/pronto branch `feat/aprende-modules`: `ma` (Matemática 1–9) and `enem2021` split out
-beside `schema` and `bncc`; `spec.json` byte-identical to main's. Through `tests/slot.ts`, CPU-s
-(user+sys) and peak memory:
+Through `tests/slot.ts --weight 6` with `/usr/bin/time -l`; CPU-s is user+sys.
+
+**aprende**, fully split (bsoneca/pronto#877): schema, bncc, six subjects, rumo, seven exam
+editions and two exams, `spec.json` byte-identical to before. The join merges the exports'
+disjoint subtrees and runs only the checks that span modules, never `#Trilha` or `#Aula` again.
 
 | case | before | after |
 | --- | --- | --- |
-| full build, cache off | 199.7 s, 8.9 GB | 222.6 s, 10.6 GB |
-| unchanged | 1.7 s, 0.37 GB | 3.3 s, 0.54 GB |
-| one ENEM 2021 question | 45.9 s, 8.7 GB | 26.0 s, 9.0 GB |
-| one ma lesson | 167.3 s, 8.9 GB | 23.5 s, 9.0 GB |
+| full build, cache off | 199.7 s, 8.9 GB | 33.8 s, 2.0 GB |
+| one ma lesson | 167.3 s, 8.9 GB | 12.1 s, 1.2 GB |
+| one lp lesson | 196.5 s, 8.5 GB | 12.5 s, 1.2 GB |
+| one ENEM 2021 question | 45.9 s, 8.7 GB | 30.0 s, 1.9 GB |
+| unchanged | 1.7 s, 0.37 GB | 26.3 s, 1.3 GB |
 
-A module costs ~1 s and 0.5 GB; the join (~21 s, 9 GB) is now every edit's cost. So the next
-step is a smaller join: it merges the exports' disjoint subtrees without evaluating `#Trilha` or
-`#Aula` over them again, the per-module checks having already run. Hidden fields read across
-files become definitions (`#ids`), and definitions that read ambient data (`#Cabe`) take it as a
-parameter.
+The unchanged case is worse: the cue wrapper replays only claimed exports (learned peak ≥ 1 GB),
+and most modules are now under that, so each is evaluated again. The wrapper should replay every
+module's export.
+
+**Bonk Chess**, not split: its `spec/` exports in 0.45 CPU-s and 158 MB. Its generate's cost,
+~9 CPU-s and 3.5 GB, is `cue export . -e analytics.out` over the app's root package, which a
+`spec/` split would not touch. A design is split only where its own evaluation is the cost.
 
 ## Not in scope
 
