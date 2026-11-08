@@ -42,8 +42,11 @@ async function pr(repo: string, warn: boolean, flow: DevFlow) {
     Deno.exit(m.ok ? 0 : 1);
   }
   const event = prEvent(ev.action, !!p.merged);
-  const b = await boardOf(flow);
-  if (!b) throw new Error("no board token: set PLANE_TOKEN");
+  const b = await boardOf(flow).catch((e) => (console.log(`devflow: ${(e as Error).message}`), null));
+  if (!b) {
+    console.log(`${key}: the board is not reachable yet (no PLANE_TOKEN, or no project): not told`);
+    Deno.exit(warn ? 0 : 1);
+  }
   const issue = await b.plane.issue(key).catch(() => null);
   if (!issue) {
     console.log(`${key} is not on the board`);
