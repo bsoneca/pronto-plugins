@@ -37,7 +37,25 @@ sprint's, and then it goes through the steps below like any other.
    it starts the lane's next Ready issue of today's sprint, most urgent first. Work that issue the
    same way, as its own session, and say which you started. A sprint commits 3 issues per person
    with 1 in Implementing each, so an engineer is never idle after one issue. Nothing Ready:
-   say so.
+   help (5c).
+5c. **Nothing Ready: help finish the sprint.** An engineer or SRE whose `pull` finds nothing Ready
+   becomes a helper. A helper takes no new issue from the Backlog and files none to keep busy; it
+   helps today's sprint's open issues (`pronto-devflow status .`: Implementing and Review) merge.
+   It looks first in its own app or lane, then in any. In this order:
+   1. **A failing gate or ci on an open pull request.** Reproduce it, find the cause, and hand the
+      issue's owner the diagnosis: the failing step, the evidence and the fix it points to.
+   2. **A piece of an Implementing issue that can merge on its own,** such as a plugin change an
+      app's change waits on, or one app of many in a bump. Agree it with the owner first. It is a
+      pull request of the helper's own, titled with the same key (`PRONTO-<n>: ...`) on
+      `pronto-<n>/<slug>-<part>`, with its own gate.
+   3. **Evidence an open pull request still lacks,** such as a scenario it added run alone, or a
+      measure its description promises.
+   Ask the owner before starting (SendMessage to its session, or a comment on the issue), and say
+   on the issue what you are doing. The issue keeps its owner: a helper never pushes to the
+   owner's branch, never edits files the owner has in hand, and never moves the issue. Gates
+   share the machine's slots, so when they are full (`deno run -A tests/slot.ts status` in an app, or the
+   machine dashboard), diagnosis and reading come before starting another gate. When nothing in
+   the sprint needs help, say so and stop.
 6. **What you learn on the way** becomes new issues (`pronto-devflow file ...`), each linked in a
    comment. Do it now only when this issue's objective needs it; say on the issue which you chose.
 
@@ -45,3 +63,4 @@ sprint's, and then it goes through the steps below like any other.
 
 - Never move an issue to Review, Merged, Live or Done yourself: the hooks do, from what happened.
 - Cancelled is `pronto-devflow move . PRONTO-<n> Cancelled --why "<reason>"`.
+- Being idle is never a reason to start or file new work: help finish the sprint (5c).
