@@ -13,15 +13,18 @@ enabled), run bare from the repository: never move an issue on the board by hand
 ## Steps
 
 1. **Close the day that ended.** `pronto-devflow close . --json`. It takes the issues that did not
-   merge out of that sprint (Refine and Ready go back to the Backlog; work in progress keeps its
-   state). Report it in a few lines: what merged, what went Live, which flags went on (Done), what
+   merge out of that sprint (Refine goes back to the Backlog; Ready, being designed, stays Ready for a
+   later sprint; work in progress keeps its state). Report it in a few lines: what merged, what went Live, which flags went on (Done), what
    slipped and why if a comment says.
 2. **Ask for the objective.** One question: what should tomorrow's sprint achieve? Offer, as the
-   default, the objective the slipped work implies. Ask also whether the agent cap changes
-   (devFlow.agents in devflow/devflow.cue; a change there is a pull request).
-3. **Propose the issues.** Read the Backlog (the Plane MCP server's list of work items, or
-   `pronto-devflow status . --json` for the counts) and pick the issues that serve the objective,
-   in order, no more than the day can merge: about two per agent. P1 bugs come first. Each
+   default, the objective the slipped work implies. Ask also whether the team changes
+   (devFlow.team in devflow/devflow.cue: engineers, SREs, product managers; a change there is a
+   pull request).
+3. **Propose the issues.** Read what the product managers designed (`pronto-devflow status . --json`,
+   its `designed`: Ready issues in no sprint) and then the Backlog (the Plane MCP server's list of
+   work items), and pick the issues that serve the objective, in order, no more than the day can
+   merge: about two per engineer for the apps, two per SRE for `infra`. P1 bugs come first, then
+   designed issues. Each
    proposal says its key, title, app and why it serves the objective. A need with no issue yet
    is filed first (`pronto-devflow file . --title "..." --app <app>`), never built.
 4. **Wait for the developer's yes**, or their edits to the list. Do not plan without it.

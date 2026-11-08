@@ -62,8 +62,8 @@ async function pr(repo: string, warn: boolean, flow: DevFlow) {
 async function inStates(b: Board, names: string[]) {
   const s = await stateIds(b);
   const want = new Set(names.map(s.id));
-  const modules = new Map((await b.plane.modules(b.project)).map((m) => [m.id, m.name]));
-  return (await b.plane.issues(b.project)).filter((i) => want.has(i.state)).map((i) => ({ issue: i, modules: (i.module_ids ?? []).map((m) => modules.get(m) ?? "") }));
+  const modules = await b.plane.modulesByIssue(b.project);
+  return (await b.plane.issues(b.project)).filter((i) => want.has(i.state)).map((i) => ({ issue: i, modules: modules.get(i.id) ?? [] }));
 }
 
 /** Whether an issue is the app's: it is in the app's module, or in none. */

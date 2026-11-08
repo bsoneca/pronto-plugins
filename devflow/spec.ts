@@ -23,7 +23,8 @@ export interface DevFlow {
   plane: { host: string; workspace: string; project: { name: string; identifier: string }; chart: string };
   cluster: { context: string; ssh: string; namespace: string; tunnel: string; apiPort: number };
   token: { project: string; secret: string };
-  agents: number;
+  team: { engineers: number; sre: number; product: number };
+  infra: string[];
   sprint: { ends: string; timeZone: string };
   chore: string;
   states: { name: string; group: string; color: string; means: string }[];

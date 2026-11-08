@@ -24,8 +24,9 @@ sprint's, and then it goes through the steps below like any other.
    tests/unit/*.cue and tests/scenarios/*.cue), its app (its module), and its flag on a line of
    its own, `Flag: <name>`, the flag declared in the app's `flags_spec.cue`. An objective that
    cannot merge within the day is split into issues, each filed, before it is Ready.
-3. **Start**: `pronto-devflow start . PRONTO-<n>`. It refuses while every agent is busy, a P0
-   excepted; then say which issues hold the agents and stop.
+3. **Start**: `pronto-devflow start . PRONTO-<n>`. It refuses while its lane is full, a P0
+   excepted: an `infra` issue takes an SRE's slot, any other an engineer's (devFlow.team). Then
+   say which issues hold the lane's slots and stop.
 4. **Build** on a branch named `pronto-<n>/<slug>`, following the repository's AGENTS.md: behind
    the flag, tests as data, its gate.
 5. **Open the pull request** ready for review, its title starting `PRONTO-<n>:`. The plane

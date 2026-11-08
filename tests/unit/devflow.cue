@@ -40,10 +40,16 @@ cases: {
 		{call: "devflow.flagOf", args: ["<p>The Flag: line is missing</p>"], expect: null},
 		{call: "devflow.flagOf", args: [null], expect: null},
 	]}
-	"an issue starts while an agent is free; a P0 starts regardless": {suite: "devflow", steps: [
-		{call: "devflow.mayStart", args: [3, 4, "high"]}, {pick: ["ok"], expect: [true]},
-		{call: "devflow.mayStart", args: [4, 4, "medium"], expect: {ok: false, why: "all 4 agents are busy"}},
-		{call: "devflow.mayStart", args: [9, 4, "urgent"]}, {pick: ["ok"], expect: [true]},
+	"an issue starts while its lane has a free slot; a P0 starts regardless": {suite: "devflow", steps: [
+		{call: "devflow.mayStart", args: [1, 2, "high", "engineer"], expect: {ok: true, why: "engineer slot 2 of 2"}},
+		{call: "devflow.mayStart", args: [2, 2, "medium", "engineer"], expect: {ok: false, why: "all 2 engineer slots are busy"}},
+		{call: "devflow.mayStart", args: [0, 0, "high", "SRE"], expect: {ok: false, why: "the team has no SRE"}},
+		{call: "devflow.mayStart", args: [9, 2, "urgent", "engineer"]}, {pick: ["ok"], expect: [true]},
+	]}
+	"an infra module's issue is an SRE's, every other an engineer's": {suite: "devflow", steps: [
+		{call: "devflow.laneOf", args: [["infra"], ["infra"]], expect: "SRE"},
+		{call: "devflow.laneOf", args: [["brawl-chess"], ["infra"]], expect: "engineer"},
+		{call: "devflow.laneOf", args: [[], ["infra"]], expect: "engineer"},
 	]}
 	"P0..P3 are Plane's priorities, and say where a new bug goes": {suite: "devflow", steps: [
 		{call: "devflow.priorityOf", args: ["p0"], expect: "urgent"},

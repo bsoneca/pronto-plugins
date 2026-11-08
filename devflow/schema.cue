@@ -1,5 +1,5 @@
 // The dev flow (bsoneca/pronto's docs/dev-flow.md) as data: where the board is, the states an
-// issue moves through, what a priority means, and the sprint's cap and end. Written once here and
+// issue moves through, what a priority means, the team and the sprint's end. Written once here and
 // in the repository's own devflow/devflow.cue (its devFlow values); read by the intent that sets
 // the board up (connect.ts), the hooks that move issues (hook.ts) and the skills.
 package devflow
@@ -36,8 +36,19 @@ devFlow: #DevFlow
 		project!: string
 		secret:   *"plane-api-token" | string
 	}
-	// How many issues may be in Implementing at once (rule 1): the sessions the machines can run.
-	agents: *4 | (int & >=1)
+	// The team (rule 1). Engineers and SREs build: each is a slot, and an issue in Implementing
+	// takes one. An SRE's slots build the infra modules' issues, an engineer's every other module's,
+	// so infrastructure never waits behind app work, nor app work behind it. The product managers
+	// take no slot: they design what is to come, turning Backlog issues into Ready ones (objective,
+	// acceptance, flag) that a later sprint's planning picks.
+	team: {
+		engineers: *2 | (int & >=0)
+		sre:       *1 | (int & >=0)
+		product:   *1 | (int & >=0)
+	}
+	// The modules an SRE builds: the cloud's configuration (infra/) and the nodes. Made beside a
+	// module per app.
+	infra: *["infra"] | [...string]
 	// A sprint is one day and ends at this time, each day.
 	sprint: {
 		ends:     *"18:00" | (string & =~"^([01][0-9]|2[0-3]):[0-5][0-9]$")
@@ -64,8 +75,8 @@ devFlow: #DevFlow
 _states: [
 	{name: "Backlog", group: "backlog", color: "#a3a3a3", means: "on the board, not planned"},
 	{name: "Refine", group: "unstarted", color: "#60a5fa", means: "in the sprint, being turned into an objective that can be met"},
-	{name: "Ready", group: "unstarted", color: "#3b82f6", means: "objective, acceptance, flag and app written down"},
-	{name: "Implementing", group: "started", color: "#f59e0b", means: "a Claude session is building it; counts against the agent cap"},
+	{name: "Ready", group: "unstarted", color: "#3b82f6", means: "designed: objective, acceptance, flag and app written down"},
+	{name: "Implementing", group: "started", color: "#f59e0b", means: "a Claude session is building it; takes an engineer's or an SRE's slot"},
 	{name: "Review", group: "started", color: "#8b5cf6", means: "its pull request is open"},
 	{name: "Merged", group: "completed", color: "#22c55e", means: "merged to main; done for the sprint"},
 	{name: "Live", group: "completed", color: "#14b8a6", means: "released, its flag still off"},
@@ -74,7 +85,7 @@ _states: [
 ]
 
 _priorities: {
-	P0: {plane: "urgent", does: "fixed now: straight to Implementing, past the agent cap"}
+	P0: {plane: "urgent", does: "fixed now: straight to Implementing, past the slots"}
 	P1: {plane: "high", does: "enters the current sprint, waits for the work in progress"}
 	P2: {plane: "medium", does: "Backlog, considered at the next planning"}
 	P3: {plane: "low", does: "Backlog"}

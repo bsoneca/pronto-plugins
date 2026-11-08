@@ -70,6 +70,15 @@ export class Plane {
   modules = (project: string) => this.all<Named>(`${this.p(project)}/modules/`);
   createModule = (project: string, name: string, description: string) => this.call("POST", `${this.p(project)}/modules/`, { name, description });
   addToModule = (project: string, module: string, issues: string[]) => this.call("POST", `${this.p(project)}/modules/${module}/module-issues/`, { issues });
+  moduleIssues = (project: string, module: string) => this.all<Issue>(`${this.p(project)}/modules/${module}/module-issues/`);
+  /** Each issue's modules, by name: read from the modules, since an issue's own fields may not say. */
+  async modulesByIssue(project: string): Promise<Map<string, string[]>> {
+    const by = new Map<string, string[]>();
+    for (const m of await this.modules(project)) {
+      for (const i of await this.moduleIssues(project, m.id)) by.set(i.id, [...(by.get(i.id) ?? []), m.name]);
+    }
+    return by;
+  }
 
   cycles = (project: string) => this.all<Named & { start_date: string | null; end_date: string | null }>(`${this.p(project)}/cycles/`);
   createCycle = (project: string, name: string, start: string, end: string, owner: string) =>

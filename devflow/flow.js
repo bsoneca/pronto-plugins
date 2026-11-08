@@ -53,13 +53,20 @@ export function flagOf(description) {
   return m ? m[1] : null;
 }
 
-/** Whether an issue may start (move to Implementing): the slots are `agents`, the issues already
+/** Whose slot an issue takes: an SRE's when one of its modules is an infra module, else an
+ * engineer's. */
+export function laneOf(modules, infra) {
+  return (modules ?? []).some((m) => (infra ?? []).includes(m)) ? "SRE" : "engineer";
+}
+
+/** Whether an issue may start (move to Implementing): its lane has `slots`, the lane's issues already
  * Implementing take one each, and an urgent one (P0) starts regardless. */
-export function mayStart(implementing, agents, priority) {
-  if (priority === "urgent") return { ok: true, why: "P0: starts past the cap" };
-  return implementing < agents
-    ? { ok: true, why: `${implementing + 1} of ${agents} agents` }
-    : { ok: false, why: `all ${agents} agents are busy` };
+export function mayStart(busy, slots, priority, lane) {
+  if (priority === "urgent") return { ok: true, why: "P0: starts past the slots" };
+  if (slots === 0) return { ok: false, why: `the team has no ${lane}` };
+  return busy < slots
+    ? { ok: true, why: `${lane} slot ${busy + 1} of ${slots}` }
+    : { ok: false, why: `all ${slots} ${lane} slots are busy` };
 }
 
 /** P0..P3 as Plane's priority, and back. */

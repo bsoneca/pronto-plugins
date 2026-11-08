@@ -46,7 +46,8 @@ export function steps(repo: string, flow: DevFlow, now = new Date()): Step[] {
     return p;
   };
   const project = async (p: Plane) => (await p.projects()).find((x) => x.identifier === board.project.identifier);
-  const apps = () => [...Deno.readDirSync(`${repo}/apps`)].filter((e) => e.isDirectory && !e.name.startsWith(".")).map((e) => e.name).sort();
+  // A module per app, and the infra modules an SRE builds (devFlow.infra).
+  const apps = () => [...[...Deno.readDirSync(`${repo}/apps`)].filter((e) => e.isDirectory && !e.name.startsWith(".")).map((e) => e.name).sort(), ...flow.infra];
 
   return [
     {
@@ -167,18 +168,18 @@ export function steps(repo: string, flow: DevFlow, now = new Date()): Step[] {
       },
     },
     {
-      name: "a module per app",
+      name: "a module per app, and infra",
       check: async () => {
         const p = (await need());
         const have = new Set((await p.modules((await project(p))!.id)).map((m) => m.name));
         const missing = apps().filter((a) => !have.has(a));
-        return missing.length ? todo(missing.join(", ")) : ok(`${apps().length} apps`);
+        return missing.length ? todo(missing.join(", ")) : ok(`${apps().length - flow.infra.length} apps, ${flow.infra.join(", ")}`);
       },
       apply: async () => {
         const p = (await need());
         const pid = (await project(p))!.id;
         const have = new Set((await p.modules(pid)).map((m) => m.name));
-        for (const a of apps().filter((x) => !have.has(x))) await p.createModule(pid, a, `apps/${a}`);
+        for (const a of apps().filter((x) => !have.has(x))) await p.createModule(pid, a, flow.infra.includes(a) ? `${a}: an SRE's` : `apps/${a}`);
       },
     },
     {

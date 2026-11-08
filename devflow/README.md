@@ -4,14 +4,14 @@ The dev flow of a repository of pronto apps (bsoneca/pronto's [docs/dev-flow.md]
 
 ## What it adds
 
-No files in an app. A repository opts in with one file, `devflow/devflow.cue`: its board's host and project, the node Plane runs on, the agent cap and when the day's sprint ends. The rest of the flow is here:
+No files in an app. A repository opts in with one file, `devflow/devflow.cue`: its board's host and project, the node Plane runs on, its team (engineers, SREs, product managers) and when the day's sprint ends. The rest of the flow is here:
 
 - [`schema.cue`](schema.cue): the flow as data: its states, in order and in Plane's groups, and what P0..P3 do.
 - [`plane.cue`](plane.cue): Plane on the node: the plane-ce chart's values, its CloudNativePG database, and its route on the node's Envoy Gateway.
-- [`flow.js`](flow.js): the rules: an issue's key from a pull request, where an event moves an issue, an issue's flag, the agent cap, which day's sprint a moment is in. Its cases are [`tests/unit/devflow.cue`](../tests/unit/devflow.cue).
+- [`flow.js`](flow.js): the rules: an issue's key from a pull request, where an event moves an issue, an issue's flag, whose slot an issue takes (an engineer's or an SRE's), which day's sprint a moment is in. Its cases are [`tests/unit/devflow.cue`](../tests/unit/devflow.cue).
 - [`connect.ts`](connect.ts): the `connect plane` intent ([docs/intents.md](../docs/intents.md)): Plane installed on the node, its hostname, then the board set up from the spec.
 - [`hook.ts`](hook.ts): what GitHub, release-cron and pronto-flags tell the board.
-- [`board.ts`](board.ts): the board as the skills use it: [`pronto-sprint-plan`](../skills/pronto-sprint-plan/SKILL.md), [`pronto-issue`](../skills/pronto-issue/SKILL.md), [`pronto-bug`](../skills/pronto-bug/SKILL.md).
+- [`board.ts`](board.ts): the board as the skills use it: [`pronto-sprint-plan`](../skills/pronto-sprint-plan/SKILL.md), [`pronto-issue`](../skills/pronto-issue/SKILL.md), [`pronto-bug`](../skills/pronto-bug/SKILL.md), [`pronto-design`](../skills/pronto-design/SKILL.md) (the product managers').
 
 ## Use
 

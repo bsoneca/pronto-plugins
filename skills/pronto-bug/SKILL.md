@@ -11,7 +11,7 @@ run bare from the repository).
 
 | Priority | When | Where it goes |
 | --- | --- | --- |
-| P0 | production is broken for players or payments, data is at risk | Implementing now, past the agent cap |
+| P0 | production is broken for players or payments, data is at risk | Implementing now, past the slots |
 | P1 | a real feature is broken, with a way around it | today's sprint, after the work in progress |
 | P2 | wrong, but few notice | the Backlog, for the next planning |
 | P3 | cosmetic | the Backlog |
