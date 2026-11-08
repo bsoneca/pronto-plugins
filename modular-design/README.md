@@ -19,9 +19,10 @@ keyed by its package's files, its in-module imports and its embeds. What it cann
 - A CUE package in the app's `modules/<name>/`, with its own files only.
 - It imports the app's **schema** module (`#Defs`, the shared constraints) as CUE: definitions do
   not survive an export, and a schema is cheap to evaluate.
-- It reads any other module's **export**, not its CUE: `@embed(file=../<dep>/out.json)`. An
-  importer never re-evaluates its dependency, and the wrapper's key changes only when that export
-  changes, not when its sources are reworded.
+- It reads any other module's **export**, not its CUE: the build copies each export it needs into
+  the module's own (ignored) `deps/` and the module embeds it, `@embed(file=deps/<dep>.json)` (cue
+  0.16 refuses an embed of a parent folder). An importer never re-evaluates its dependency, and the
+  wrapper's key changes only when that export changes, not when its sources are reworded.
 - It owns a disjoint subtree of the app's data (`trilhas."7".ma`, `exames.enem."2021"`), declared
   in the app's `modules.cue`. Two modules never write the same field.
 
@@ -60,6 +61,25 @@ join: "spec"  // the package that reads every module's export and checks what sp
    changed, one subject's lesson changed (CPU-s and peak memory, before and after).
 3. Bonk Chess (`apps/brawl-chess/spec`) the same way.
 4. Every other app takes it when its design grows past one cheap evaluation.
+
+## First measure: aprende, two modules (2026-11-08)
+
+bsoneca/pronto branch `feat/aprende-modules`: `ma` (Matemática 1–9) and `enem2021` split out
+beside `schema` and `bncc`; `spec.json` byte-identical to main's. Through `tests/slot.ts`, CPU-s
+(user+sys) and peak memory:
+
+| case | before | after |
+| --- | --- | --- |
+| full build, cache off | 199.7 s, 8.9 GB | 222.6 s, 10.6 GB |
+| unchanged | 1.7 s, 0.37 GB | 3.3 s, 0.54 GB |
+| one ENEM 2021 question | 45.9 s, 8.7 GB | 26.0 s, 9.0 GB |
+| one ma lesson | 167.3 s, 8.9 GB | 23.5 s, 9.0 GB |
+
+A module costs ~1 s and 0.5 GB; the join (~21 s, 9 GB) is now every edit's cost. So the next
+step is a smaller join: it merges the exports' disjoint subtrees without evaluating `#Trilha` or
+`#Aula` over them again, the per-module checks having already run. Hidden fields read across
+files become definitions (`#ids`), and definitions that read ambient data (`#Cabe`) take it as a
+parameter.
 
 ## Not in scope
 
