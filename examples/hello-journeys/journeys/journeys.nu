@@ -67,7 +67,7 @@ export def route [endpoint: string] {
 	# the comment that route carries.
 	let at = $lines | enumerate | where {|l| $l.item | str starts-with "  handle /auth/*"} | get index.0?
 	if $at == null { error make {msg: "docker/Caddyfile has no `handle /auth/*` to place the telemetry route before"} }
-	let start = $at - ($lines | first $at | reverse | take while {|l| $l | str starts-with "  #"} | length)
+	let start = $at - ($lines | first $at | reverse | take while {|l| ($l | str starts-with "  #") and not ($l | str ends-with ":end")} | length)
 	[...($lines | first $start) ...$route ...($lines | skip $start)] | str join "\n" | $"($in)\n" | save-changed docker/Caddyfile
 }
 

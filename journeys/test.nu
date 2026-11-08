@@ -56,6 +56,13 @@ def main [] {
 	let moved = open --raw docker/Caddyfile
 	check "a changed endpoint replaces the route" (($moved | str contains "handle /v2/t {") and not ($moved | str contains "handle /t {"))
 
+	# Another plugin's block right above the auth route's comment: the route goes after it, never inside it,
+	# so that plugin's own step, replacing its block, never takes the journeys route with it.
+	"(app) {\n  # other:begin\n  handle /other {\n  }\n  # other:end\n  # The auth service\n  handle /auth/* {\n  }\n}\n" | save --force docker/Caddyfile
+	journeys route "/t"
+	let after = open --raw docker/Caddyfile
+	check "the route lands after another plugin's block, not inside it" (($after | str index-of "# other:end") < ($after | str index-of "pronto-journeys:begin"))
+
 	"(app) {\n}\n" | save --force docker/Caddyfile
 	check "a door with no auth route refuses" (try { journeys route "/t"; false } catch { true })
 
