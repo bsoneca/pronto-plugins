@@ -11,7 +11,10 @@ def save-changed [path: path] {
 	let text = $in
 	if not ($path | path exists) or (open --raw $path) != $text {
 		mkdir ($path | path dirname)
-		$text | save --force --raw $path
+		# Replaced in one rename: a reader (a gate beside a stack's generate) never sees it half-written.
+		let tmp = $"($path).($nu.pid).tmp"
+		$text | save --force --raw $tmp
+		mv --force $tmp $path
 	}
 }
 
