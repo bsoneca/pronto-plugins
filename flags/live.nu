@@ -481,16 +481,18 @@ export def push [app: path, --untested: string, --expect: string] {
 const flags_dir = path self .
 def tell-board [at: record, app: path, on: list<string>, off: list<string>] {
 	if (is-dir $at) { return }
-	let top = (do { ^git -C $app rev-parse --show-toplevel } | complete)
-	if $top.exit_code != 0 { return }
-	let repo = ($top.stdout | str trim)
-	if not ($repo | path join devflow devflow.cue | path exists) { return }
-	let devflow = ($flags_dir | path join .. bin pronto-devflow)
-	for told in [[verb, flags]; [flipped, $on], [rolledback, $off]] {
-		if ($told.flags | is-empty) { continue }
-		let r = (do { ^$devflow $told.verb $repo ($app | path basename) ...$told.flags } | complete)
-		print -e $"flags: board: ($r.stdout + $r.stderr | str trim)"
-	}
+	try {
+		let top = (do { ^git -C $app rev-parse --show-toplevel } | complete)
+		if $top.exit_code != 0 { return }
+		let repo = ($top.stdout | str trim)
+		if not ($repo | path join devflow devflow.cue | path exists) { return }
+		let devflow = ($flags_dir | path join .. bin pronto-devflow)
+		for told in [[verb, flags]; [flipped, $on], [rolledback, $off]] {
+			if ($told.flags | is-empty) { continue }
+			let r = (do { ^$devflow $told.verb $repo ($app | path basename) ...$told.flags } | complete)
+			print -e $"flags: board: ($r.stdout + $r.stderr | str trim)"
+		}
+	} catch {|e| print -e $"flags: WARNING: the board was not told: ($e.msg | lines | first)" }
 }
 
 # Cloud Monitoring's snooze of flagsLive.alert, for the live stage of a flip: a name to end it by, or null where
@@ -560,8 +562,12 @@ export def rollback [app: path, version?: string, --expect: string] {
 	let live = ($all | where live | get version.0? | default "")
 	let to = if $version != null { $version } else { $all | where version != $live | get version.0? }
 	if $to == null or ($all | where version == $to | is-empty) { error make {msg: $"no version ($to) of ($at.url) to roll back to: `pronto-flags history` lists them"} }
+	let before = if $live == "" { {flags: {}} } else { store-version $at $live | from json }
+	let target = (store-version $at $to | from json)
 	let again = (commit $at $app (store-version $at $to) {stage: rollback, note: $"rolled back from ($live) to ($to)"} $live --derive-flag)
 	print $"flags: ($at.url) is ($to)'s flags again, as version ($again)"
+	# The flags a rollback turned off are rolled back for the board: their Done issues are Live again.
+	tell-board $at $app [] (changes-between $before $target | where {|c| $c.to == false } | each {|c| $c.flag })
 }
 
 # Once per app: the bucket, versioned and private, keeping the last 50 versions;

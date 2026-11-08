@@ -6,7 +6,7 @@
 // Only `pr` can fail (an issue key missing, rule 3). The others say what they did and exit 0 whatever
 // happens: a release or a flip never fails for the board.
 import { cmd } from "../intents/shell.ts";
-import { flagOf, keyOf, missingKey, moveFor, prEvent } from "./flow.js";
+import { doneAt, flagOf, keyOf, missingKey, moveFor, prEvent } from "./flow.js";
 import { esc, type Issue, Plane } from "./plane.ts";
 import { boardOf, devflowOf, type DevFlow } from "./spec.ts";
 
@@ -20,10 +20,12 @@ async function stateIds(b: Board) {
 }
 
 /** Moves an issue for an event, with a comment saying why; what it did, as a line. */
-async function move(b: Board, issue: Issue, event: string, why: string): Promise<string> {
+async function move(b: Board, issue: Issue, event: string, why: string, infra: string[], modules?: string[]): Promise<string> {
   const s = await stateIds(b);
   const from = s.name(issue.state);
-  const to = moveFor(event, from);
+  // Where it ends: its flag's flip, or without a flag its release or merge (flow.js doneAt).
+  const mods = modules ?? (await b.plane.modulesByIssue(b.project)).get(issue.id) ?? [];
+  const to = moveFor(event, from, doneAt(flagOf(issue.description_html), mods, infra));
   const key = `#${issue.sequence_id}`;
   if (!to) return `${key} stays ${from} (${event})`;
   await b.plane.updateIssue(b.project, issue.id, { state: s.id(to) });
@@ -55,7 +57,7 @@ async function pr(repo: string, warn: boolean, flow: DevFlow) {
   if (!(await b.plane.links(b.project, issue.id)).some((l) => l.url === p.html_url)) {
     await b.plane.link(b.project, issue.id, p.html_url, `#${p.number} ${p.title}`);
   }
-  console.log(event ? await move(b, issue, event, `pull request #${p.number} ${event}`) : `${key}: nothing to do for ${ev.action}`);
+  console.log(event ? await move(b, issue, event, `pull request #${p.number} ${event}`, flow.infra) : `${key}: nothing to do for ${ev.action}`);
 }
 
 /** The board's issues in these states, with what the dev flow reads of each. */
@@ -69,9 +71,11 @@ async function inStates(b: Board, names: string[]) {
 /** Whether an issue is the app's: it is in the app's module, or in none. */
 const forApp = (modules: string[], app: string) => modules.length === 0 || modules.includes(app);
 
-async function released(repo: string, app: string, commit: string, b: Board) {
-  for (const { issue, modules } of await inStates(b, ["Merged"])) {
+async function released(repo: string, app: string, commit: string, b: Board, infra: string[]) {
+  for (const { issue, modules } of await inStates(b, ["Merged", "Live"])) {
     if (modules.length === 0 || !modules.includes(app)) continue;
+    // Live waits only for a release that finishes it: a flagless bug fix (a flagged one waits for its flip).
+    if (issue.state !== (await stateIds(b)).id("Merged") && doneAt(flagOf(issue.description_html), modules, infra) !== "release") continue;
     // The pull request that merged it: its merge commit is in what was released, or it waits.
     const prs = (await b.plane.links(b.project, issue.id)).map((l) => l.url).filter((u) => /\/pull\/\d+$/.test(u));
     let held = false;
@@ -80,16 +84,16 @@ async function released(repo: string, app: string, commit: string, b: Board) {
       const sha = v.out.trim();
       if (v.ok && sha && (await cmd("git", ["merge-base", "--is-ancestor", sha, commit], { cwd: repo })).ok) held = true;
     }
-    if (held) console.log(await move(b, issue, "released", `${app} released ${commit.slice(0, 8)}`));
+    if (held) console.log(await move(b, issue, "released", `${app} released ${commit.slice(0, 8)}`, infra, modules));
   }
 }
 
-async function flip(event: "flipped" | "rolledback", app: string, flags: string[], b: Board) {
+async function flip(event: "flipped" | "rolledback", app: string, flags: string[], b: Board, infra: string[]) {
   const from = event === "flipped" ? ["Merged", "Live"] : ["Done"];
   for (const { issue, modules } of await inStates(b, from)) {
     const flag = flagOf(issue.description_html);
     if (!flag || !flags.includes(flag) || !forApp(modules, app)) continue;
-    console.log(await move(b, issue, event, event === "flipped" ? `${flag} is on for everyone in ${app}` : `${flag}'s flip in ${app} was rolled back`));
+    console.log(await move(b, issue, event, event === "flipped" ? `${flag} is on for everyone in ${app}` : `${flag}'s flip in ${app} was rolled back`, infra, modules));
   }
 }
 
@@ -113,9 +117,9 @@ if (import.meta.main) {
       if (!b) {
         console.log("devflow: no board token (PLANE_TOKEN or Secret Manager): the board was not told");
       } else if (verb === "released") {
-        await released(repo, rest[0], rest[1], b);
+        await released(repo, rest[0], rest[1], b, flow.infra);
       } else if (verb === "flipped" || verb === "rolledback") {
-        await flip(verb, rest[0], rest.slice(1), b);
+        await flip(verb, rest[0], rest.slice(1), b, flow.infra);
       } else {
         console.error(`devflow: no hook ${verb}`);
         Deno.exit(2);
