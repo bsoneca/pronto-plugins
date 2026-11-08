@@ -17,6 +17,7 @@ beyond the browser, and beside them, on unmodified pronto. Why and how they are 
 - [infra](infra/README.md): a Google Cloud state kept in CUE, applied by OpenTofu.
 - [intents](intents/README.md): one-command plumbing behind `bin/pronto`.
 - [journeys](journeys/README.md): user-journey SLOs from the terminal's telemetry.
+- [modular-design](modular-design/README.md): an app's design split into modules, each exported alone, so a change rebuilds only its module.
 - [perf](perf/README.md): frame, interaction and paint timings on readers' devices.
 - [prod-watch](prod-watch/README.md): what production logged that may be a bug, triaged by an agent on a loop.
 - [probe](probe/README.md): a journey run against the released app every few seconds, and an alert naming the flag write just before it broke.
