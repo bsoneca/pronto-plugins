@@ -420,6 +420,7 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 #   4. flagsCases.live runs the flag's `production` scenarios against production as the tester; a failure
 #      writes the version read in 3 again, and the push fails;
 #   5. the flags as the spec says them are written (stage=all, cases=passed).
+# A flag turned off (default now false) skips 1-4: it returns to the path before it, and its cases test it on.
 export def push [app: path, --untested: string, --expect: string] {
 	let at = (live $app)
 	if (target-guard $at $expect) { show $app; print "flags: dry run: nothing written"; return }
@@ -431,7 +432,12 @@ export def push [app: path, --untested: string, --expect: string] {
 		write-flags $at $doc $app --meta {stage: all} --from $before | ignore
 		return
 	}
-	let all = ($changed | each {|f| cases-of $app $f })
+	# A flag turned off (its default now false) returns to the path the app ran before it went on; its
+	# cases test it on, so they cannot pass on the tester with it off (2026-11-08, card_chess: the user's
+	# "Rollback card game"). It goes to everyone with no cases, and the journal says so.
+	let off = ($changed | where {|f| (default-of ($doc.flags | get $f)) == false })
+	if ($off | is-not-empty) { print -e $"flags: ($off | str join ', ') turned off: no cases run \(they test the flag on\)" }
+	let all = ($changed | where {|f| $f not-in $off } | each {|f| cases-of $app $f })
 	let bare = ($all | where {|c| not (has-cases $c) } | each {|c| $c.flag })
 	let tested = ($all | where {|c| has-cases $c })
 	if ($bare | is-not-empty) and $untested == null {
@@ -450,7 +456,7 @@ export def push [app: path, --untested: string, --expect: string] {
 		if ($none | is-not-empty) { error make {msg: $"($none | str join ', ') has no `production` scenario to run on production as the tester: mark one \(production: true, tests/scenarios/schema.cue\)"} }
 	}
 	let names = ($changed | str join "+")
-	let notes = (if $untested != null { $"untested: ($untested)" } else { "" })
+	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" })] | compact | str join "; ")
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
 	if ($tested | is-empty) {
 		write-flags $at $doc $app --meta {stage: all, flag: $names, cases: untested, note: $notes} --from $before | ignore

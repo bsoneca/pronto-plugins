@@ -134,14 +134,25 @@ let hist = (with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, 
 }).stdout | from json
 check ($hist.0.stage == "all" and $hist.0.cases == "passed" and $hist.1.stage == "testers") "history: the stage and the verdict of each version"
 
-# No tester, or a flag with no production scenario: the flip is refused, nothing written, nothing run.
+# A flag turned off (its default now false) skips its cases, which test it on: stage=all, none run, the
+# note says so (2026-11-08, card_chess).
+let n4 = (object | length)
+let ran4 = (ran | length)
 full-spec false "light"
+let off = (livex [push $app])
+check ($off.exit_code == 0 and ($off.stderr | str contains "turned off: no cases run")) "off-flip: pushed, saying its cases did not run"
+check ((object | length) == $n4 + 1 and (ran | length) == $ran4) "off-flip: one version written, no case run"
+check ((newest 0).metadata.stage == "all" and (newest 0).metadata.flag == "premium" and ((newest 0).metadata.note | str contains "turned off: premium")) "off-flip: stage=all, and the note records it"
+check ((premium (newest 0)).variants.default == false and not ((newest 0).data | str contains "tester-1")) "off-flip: the version holds the new value, no tester named"
+
+# No tester, or a flag with no production scenario: the flip is refused, nothing written, nothing run.
+full-spec true "light"
 let n1 = (object | length)
 let ran1 = (ran | length)
 open --raw $"($app)/flags_spec.cue" | str replace 'testers: ["tester-1"]' 'testers: []' | save -f $"($app)/flags_spec.cue"
 let nt = (livex [push $app])
 check ($nt.exit_code != 0 and (object | length) == $n1 and (ran | length) == $ran1 and ($nt.stderr | str contains "flagsLive.testers")) "no tester: the flip is refused, nothing written"
-full-spec false "light"
+full-spec true "light"
 open --raw $"($app)/tests/scenarios/shop.cue" | str replace 'production: true, ' '' | save -f $"($app)/tests/scenarios/shop.cue"
 let np = (livex [push $app])
 check ($np.exit_code != 0 and (object | length) == $n1 and (ran | length) == $ran1 and ($np.stderr | str contains "no `production` scenario")) "no production scenario: the flip is refused, nothing written"
@@ -170,7 +181,7 @@ let st = (livex [push $app] {FAKE_OFREP_STALE: "1"})
 check ($st.exit_code != 0 and ($st.stderr | str contains "did not answer") and (premium (newest 0)) == $pre and (object | length) == $n2 + 2) "OFREP timeout: rolled back"
 
 # No change to a default value: no cases needed, and none run.
-full-spec true "light"
+full-spec false "light"
 let n3 = (object | length)
 let ran3 = (ran | length)
 live push $app | ignore
@@ -180,14 +191,10 @@ check ((object | length) == $n3 + 1 and (ran | length) == $ran3 and (newest 0).m
 let zs = (held | get snoozes)
 check (($zs | length) == 4 and ($zs | all {|z| $z.ended and $z.policies == "projects/shop-prod/alertPolicies/42" }) and ($zs.0.start <= $zs.0.end)) "snooze: each live stage has one, ended with the run"
 
-# Back to off, through the live stage, for what follows.
-full-spec false "light"
-live push $app | ignore
-
 # Targeted only during a run: no version outlives a run with a tester named in it.
 let named = (object | where {|v| $v.data | str contains "tester-1" } | each {|v| $v.metadata.stage? | default "" })
 check ($named | all {|st| $st == "testers" }) "testers: named only in the canary versions"
-check (($named | length) == 5) "testers: the canaries are the only ones"
+check (($named | length) == 4) "testers: the canaries are the only ones"
 
 # A flag cannot name a tester in its accounts, nor a live stage run without the release identity.
 $"package shop
