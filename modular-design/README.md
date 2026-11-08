@@ -61,8 +61,26 @@ overlapping paths, when `needs` has a cycle or names a module that is not listed
 ./saytw --script tools.nu nu modular-design/test.nu
 ```
 
-## First users
+## Measured (2026-11-08, BRT)
 
-aprende (`apps/aprende/modules`): the schema, the BNCC, one module per subject and per exam edition, one per exam, and a join
-(`spec/`) that no longer evaluates what the modules checked. A lesson edit costs about 12 CPU-s and 1.2 GB, from about 170-200
-CPU-s and 9 GB. Bonk Chess was measured and not split: its spec costs 0.45 CPU-s; the cost is the root package's export.
+Through `tests/slot.ts --weight 6` with `/usr/bin/time -l`; CPU-s is user+sys.
+
+**aprende**, fully split (bsoneca/pronto#877): schema, bncc, six subjects, rumo, seven exam
+editions and two exams, `spec.json` byte-identical to before. The join merges the exports'
+disjoint subtrees and runs only the checks that span modules, never `#Trilha` or `#Aula` again.
+
+| case | before | after |
+| --- | --- | --- |
+| full build, cache off | 199.7 s, 8.9 GB | 33.8 s, 2.0 GB |
+| one ma lesson | 167.3 s, 8.9 GB | 12.1 s, 1.2 GB |
+| one lp lesson | 196.5 s, 8.5 GB | 12.5 s, 1.2 GB |
+| one ENEM 2021 question | 45.9 s, 8.7 GB | 30.0 s, 1.9 GB |
+| unchanged | 1.7 s, 0.37 GB | 26.3 s, 1.3 GB |
+
+The unchanged case is worse: the cue wrapper replays only claimed exports (learned peak ≥ 1 GB),
+and most modules are now under that, so each is evaluated again. The wrapper should replay every
+module's export.
+
+**Bonk Chess**, not split: its `spec/` exports in 0.45 CPU-s and 158 MB. Its generate's cost,
+~9 CPU-s and 3.5 GB, is `cue export . -e analytics.out` over the app's root package, which a
+`spec/` split would not touch. A design is split only where its own evaluation is the cost.
