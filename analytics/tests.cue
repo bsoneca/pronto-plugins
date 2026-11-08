@@ -103,3 +103,18 @@ loaderCleanupAtEnd: strings.Contains(_loader, "document.head.append(tag);\n\tret
 loaderSameOrigin:   strings.Contains(_loader, "tag.src = scriptURL(config.script);") & true
 loaderHost:         strings.Contains(_loader, "tag.dataset.hostUrl = location.origin;") & true
 loaderPrivacy:      strings.Contains(_loader, "navigator.globalPrivacyControl === true || navigator.doNotTrack === \"1\"") & true
+
+// A modular app (module set): the schema is the schema module's, the spec is modules/analytics's, the
+// program's package embeds the module's export and the write step exports the module; a plain app has none of
+// that (its schema and spec are in the program's package, as before).
+_m: #Host & {package: "shop", module: "example.dev/shop"}
+modularSchemaInModule:  strings.Contains(_m.files["modules/schema/analytics_plugin.cue"].text, "\npackage schema\n") & true
+modularSpecInModule:    strings.Contains(_m.files["modules/analytics/analytics.cue"].text, "analytics: schema.#Analytics & {app: \"shop\"}") & true
+modularSpecSeeded:      _m.files["modules/analytics/analytics.cue"].seed & true
+modularProgramEmbeds:   strings.Contains(_m.files["analytics_plugin.cue"].text, "analytics: _ @embed(file=\"join/analytics.json\")") & true
+modularProgramHasNoSchema: strings.Contains(_m.files["analytics_plugin.cue"].text, "#BusinessMetric") & false
+modularNoRootSpec:      [for p, _ in _m.files if p == "analytics_spec.cue" {p}] & []
+modularWritesTheModule: strings.Contains(_m.files["pronto/analytics.cue"].text, "cue export ./modules/analytics -e analytics.out") & true
+plainSchemaInProgram:   strings.Contains(_h.files["analytics_plugin.cue"].text, "#BusinessMetric") & true
+plainWritesTheProgram:  strings.Contains(_h.files["pronto/analytics.cue"].text, "cue export . -e analytics.out") & true
+plainNoModuleFiles:     [for p, _ in _h.files if strings.HasPrefix(p, "modules/") {p}] & []

@@ -53,6 +53,12 @@ From a pronto app:
 ./saytw generate && ./saytw lint
 ```
 
+`modular=true` is for an app split into modules ([modular-design](../modular-design/README.md)): the schema is written into
+`modules/schema/analytics_plugin.cue` (the schema module every module imports), the spec is the module `modules/analytics`
+(`modules/analytics/analytics.cue`, list it in `modules/modules.cue` with `join: "join/analytics.json"`, `expr: "analytics"`,
+`owns: ["analytics"]`), the program's package embeds that export, and the generate step exports the module. An edit to the
+program's package then does not evaluate the schema and the spec again. Without the option nothing changes.
+
 `journeys=false` is for an app without journeys. The host is [`host.cue`](host.cue), the schema
 [`schema.cue`](schema.cue), the generate step [`analytics.nu`](analytics.nu). The
 [`pronto-analytics` skill](../skills/pronto-analytics/SKILL.md) writes the metrics.

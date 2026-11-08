@@ -1,8 +1,10 @@
 #!/bin/sh
 # Adds or refreshes the analytics host in a pronto app:
-#   bin/pronto-analytics <app-dir> [journeys=false]
+#   bin/pronto-analytics <app-dir> [journeys=false] [modular=true]
 # journeys=false: the app has no journeys plugin, so there are no alerts to hold clear of the
 # business metrics.
+# modular=true: the app is modular (pronto-modular-design): the schema goes into modules/schema, the spec is
+# modules/analytics's, and the program's package embeds the module's export (join/analytics.json).
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 app=$(cd "$1" && pwd)
@@ -13,6 +15,11 @@ tags=""
 for kv in "$@"; do
 	case "$kv" in
 	journeys=true | journeys=false) tags="$tags -t $kv" ;;
+	modular=false) ;;
+	modular=true)
+		module=$(sed -n 's/^module:[[:space:]]*"\([^"@]*\).*$/\1/p' "$app/cue.mod/module.cue" | head -n 1)
+		[ -n "$module" ] || { echo "pronto-analytics: $app/cue.mod/module.cue names no module" >&2; exit 2; }
+		tags="$tags -t module=$module" ;;
 	*) echo "pronto-analytics: unknown argument $kv" >&2; exit 2 ;;
 	esac
 done
