@@ -268,3 +268,9 @@ cases: {
 		{call: "cron.line", args: [{app: "x", started: "t", outcome: "released", steps: {release: 60}, newFailing: ["a", "b"]}], expect: "t x released; new-feature scenarios failing: a, b: 1.0 min = release 1.0"},
 	]}
 }
+
+cases: {
+	"a confirmed release tells the board: devflow's released hook, with the app, the commit and the checkout": {suite: "cron", steps: [
+		{call: "cron.boardHook", args: ["/state/wt", "apps/brawl-chess", "c9ecd1f7a0b1"], expect: ["run", "-A", "--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released", "/state/wt", "brawl-chess", "c9ecd1f7a0b1"], why: "PRONTO-1, released 2026-11-08 11:45 BRT: no run ever told the board"},
+	]}
+}

@@ -17,10 +17,12 @@ export function keyOf(identifier, ...texts) {
 const order = ["Backlog", "Refine", "Ready", "Implementing", "Review", "Merged", "Live", "Done"];
 const rank = (s) => order.indexOf(s);
 
-/** Where an event moves an issue in `state`, or null to leave it. An issue never moves back past
+/** Where an event moves an issue in `state`, or null to leave it. `done` is when the issue ends (doneAt):
+ * "flip" (its flag is on for everyone), "release" (released) or "merge" (merged); it only matters for
+ * `merged` and `released`. An issue never moves back past
  * where it is, but for the two ways back the flow names: a pull request closed unmerged (back to
  * Implementing) and a flip rolled back (back to Live). A cancelled issue is never moved. */
-export function moveFor(event, state) {
+export function moveFor(event, state, done = "flip") {
   if (state === "Cancelled" || rank(state) < 0) return null;
   const forward = (to) => (rank(state) < rank(to) ? to : null);
   switch (event) {
@@ -29,10 +31,11 @@ export function moveFor(event, state) {
     case "ready_for_review":
       return forward("Review");
     case "merged":
-      return forward("Merged");
+      return forward(done === "merge" ? "Done" : "Merged");
     case "closed":
       return state === "Review" ? "Implementing" : null;
     case "released":
+      if (done === "release") return state === "Merged" || state === "Live" ? "Done" : null;
       return state === "Merged" ? "Live" : null;
     // A flip that reached everyone. An app released outside release-cron never says "released", so
     // Merged goes straight to Done.
@@ -51,6 +54,16 @@ export function flagOf(description) {
   const text = String(description ?? "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|h[1-6])>/gi, "\n").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ");
   const m = /^\s*Flag:\s*`?([A-Za-z0-9_.-]+)`?\s*$/m.exec(text);
   return m ? m[1] : null;
+}
+
+/** When an issue is Done. With a flag: when the flag is on for everyone ("flip"). Without one: an infra
+ * issue or a plugins issue (its modules among `infra` and `plugins`: nothing a player sees, nothing
+ * released by release-cron) when it merges ("merge"); any other (a bug fix) when it is released
+ * ("release"). */
+export function doneAt(flag, modules, infra, plugins = ["plugins"]) {
+  if (flag) return "flip";
+  const own = [...(infra ?? []), ...plugins];
+  return (modules ?? []).some((m) => own.includes(m)) ? "merge" : "release";
 }
 
 /** Whose slot an issue takes: an SRE's when one of its modules is an infra module, else an

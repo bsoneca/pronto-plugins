@@ -27,7 +27,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole } from "./cron.js";
+import { activeLine, boardHook, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole } from "./cron.js";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -661,8 +661,7 @@ try {
   // being a copy in the app; the board's token is PLANE_TOKEN or Secret Manager's. Whatever it says, the run's outcome stays.
   if (exists(`${wt}/devflow/devflow.cue`)) {
     try {
-      const hooks = "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/";
-      const b = await child(Deno.execPath(), ["run", "-A", `--reload=${hooks}`, `${hooks}hook.ts`, "released", wt, appRel.split("/").pop()!, head], wt, Deno.env.toObject());
+      const b = await child(Deno.execPath(), boardHook(wt, appRel, head), wt, Deno.env.toObject());
       run.board = b.code === 0 ? "told" : `failed (exit ${b.code})`;
     } catch (e) { run.board = `failed (${(e as Error).message.split("\n")[0]})`; }
     say(`board ${run.board}`);

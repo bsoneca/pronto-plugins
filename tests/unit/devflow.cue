@@ -29,6 +29,20 @@ cases: {
 		{call: "devflow.moveFor", args: ["rolledback", "Done"], expect: "Live"},
 		{call: "devflow.moveFor", args: ["rolledback", "Live"], expect: null},
 	]}
+	"an issue with no flag is Done when it is released (a bug fix) or merged (infra, plugins); a flagged one when its flag flips": {suite: "devflow", steps: [
+		{call: "devflow.doneAt", args: ["army_pick_usable", ["brawl-chess"], ["infra"]], expect: "flip"},
+		{call: "devflow.doneAt", args: [null, ["brawl-chess"], ["infra"]], expect: "release", why: "a bug fix: PRONTO-1, released 2026-11-08 11:45 BRT as c9ecd1f7"},
+		{call: "devflow.doneAt", args: [null, [], ["infra"]], expect: "release"},
+		{call: "devflow.doneAt", args: [null, ["infra"], ["infra"]], expect: "merge"},
+		{call: "devflow.doneAt", args: [null, ["plugins"], ["infra"]], expect: "merge"},
+		{call: "devflow.moveFor", args: ["released", "Merged", "release"], expect: "Done", why: "a flagless bug fix is finished by its release"},
+		{call: "devflow.moveFor", args: ["released", "Live", "release"], expect: "Done"},
+		{call: "devflow.moveFor", args: ["released", "Review", "release"], expect: null},
+		{call: "devflow.moveFor", args: ["released", "Merged", "flip"], expect: "Live", why: "a flagged issue waits for its flip"},
+		{call: "devflow.moveFor", args: ["merged", "Review", "merge"], expect: "Done", why: "infra and plugins: nothing release-cron ships"},
+		{call: "devflow.moveFor", args: ["merged", "Review", "release"], expect: "Merged"},
+		{call: "devflow.moveFor", args: ["merged", "Done", "merge"], expect: null},
+	]}
 	"a GitHub action is the flow's event: a closed pull request that merged is merged": {suite: "devflow", steps: [
 		{call: "devflow.prEvent", args: ["closed", true], expect: "merged"},
 		{call: "devflow.prEvent", args: ["closed", false], expect: "closed"},

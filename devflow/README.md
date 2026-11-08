@@ -1,6 +1,6 @@
 # devflow
 
-The dev flow of a repository of pronto apps (bsoneca/pronto's [docs/dev-flow.md](https://github.com/bsoneca/pronto/blob/main/docs/dev-flow.md)): one-day sprints on a self-hosted [Plane](https://github.com/makeplane/plane) board, every piece of work an issue, one Claude session per issue, an issue Done only when its flag is on in production.
+The dev flow of a repository of pronto apps (bsoneca/pronto's [docs/dev-flow.md](https://github.com/bsoneca/pronto/blob/main/docs/dev-flow.md)): one-day sprints on a self-hosted [Plane](https://github.com/makeplane/plane) board, every piece of work an issue, one Claude session per issue, an issue Done only when it is in production: its flag is on for everyone, or, with no flag, when it is released (infra and plugins issues: when merged).
 
 ## What it adds
 
@@ -29,6 +29,18 @@ The hooks, which run without a person:
 | the repository's `plane` workflow | a pull request opens, merges or closes | `pronto-devflow pr` | its issue to Review, Merged, or back to Implementing; a pull request with no key fails the check unless labelled `chore` |
 | release-cron | a run confirmed a release | `pronto-devflow released` | the app's Merged issues the release holds go Live |
 | `pronto-flags push` | a flag went on, or off, for everyone | `pronto-devflow flipped` / `rolledback` | the issues naming it are Done, or Live again |
+
+### When an issue is Done
+
+`flow.js` `doneAt` decides, from the issue's `Flag:` line and its modules:
+
+| the issue | Done when | path |
+| --- | --- | --- |
+| names a flag | the flag is on for everyone (`flipped`); `rolledback` puts it back to Live | Merged → Live (released) → Done (flipped) |
+| names none (a bug fix) | it is released (`released`) | Merged → Done |
+| names none, in an infra module (`infra`) or the `plugins` module | its pull request merges (`merged`) | Review → Done: nothing release-cron ships |
+
+A flagless issue is never left in Live: the release that holds its pull request finishes it. `pronto-flags rollback` tells the board too (`rolledback` for each flag it turned off).
 
 A hook never fails a release or a flip: without a token or a board it says so and goes on.
 

@@ -267,3 +267,11 @@ export const flakedNames = (text) => {
 // The merge that last changed a scenario's file: the newest of `list` (merges(), oldest first) whose diff
 // touched it (`touched`: sha -> bool); none when no merge of the list did.
 export const changedBy = (list, touched) => [...list].reverse().find((c) => touched[c.sha]) ?? null;
+
+// The dev flow's `released` hook, as the arguments of the deno run that tells the board (devflow/hook.ts, from
+// pronto-plugins' main: release-cron's script is a copy in the app): the app's Merged issues whose pull request
+// `head` holds go Live, a flagless fix Done (devflow/flow.js doneAt).
+export const boardHook = (wt, appRel, head) => {
+  const hooks = "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/";
+  return ["run", "-A", `--reload=${hooks}`, `${hooks}hook.ts`, "released", wt, appRel.split("/").pop(), head];
+};
