@@ -1,7 +1,7 @@
 {
   "name": "pronto-studio",
-  "version": "0.8.0",
-  "description": "pronto's skills beyond its own plugin: intents (release, connect stripe, deploy), the Android host, Firebase Hosting, Google Cloud Run, social sign-in, the Unity host opt-in, journey monitoring, performance measurement, production log watching (prod-watch) and self-hosted GitHub Actions runners.",
+  "version": "0.9.0",
+  "description": "pronto's skills beyond its own plugin: intents (release, connect stripe, deploy), the Android host, Firebase Hosting, Google Cloud Run, social sign-in, the Unity host opt-in, journey monitoring, performance measurement, modular design (an app's spec split into modules, each exported alone), production log watching (prod-watch) and self-hosted GitHub Actions runners.",
   "author": {
     "name": "bsoneca",
     "url": "https://github.com/bsoneca"
@@ -19,6 +19,7 @@
     "identity",
     "unity",
     "observability",
+    "modular-design",
     "runners"
   ]
 }

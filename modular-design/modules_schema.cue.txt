@@ -1,0 +1,16 @@
+package modules
+
+// The app's modules (modules.cue): each is a package of its own under modules/<name>, evaluated and exported on its own by
+// modules/build.nu. A module imports the `schema` module as CUE and any other module only through that module's export
+// (modules/<name>/deps/<dep>.json, which build.nu copies there). Two modules never write the same field.
+#Modules: [Name=string]: {
+	// The modules whose exports it reads (the schema is imported, never exported, and may be listed or not).
+	needs: [...string]
+	// What of the package is its export (`cue export -e`); default: its regular fields.
+	expr?: string
+	// Where its export is also written, for the package that joins the modules.
+	join?: string
+	// The subtrees of the app's data it writes: dotted paths, a segment `*`, `a|b` or a range `1-9`; a path owns what is
+	// under it. modules/lint.ts refuses two modules whose paths overlap.
+	owns: [...string]
+}
