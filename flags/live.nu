@@ -259,7 +259,8 @@ def write-flags [at: record, doc: record, app: path, --meta: record = {}, --from
 	let from = if $from == "" { generation $at } else { $from }
 	let now = (commit $at $app ($doc | to json --indent 2) $meta $from)
 	print $"flags: ($at.url) is version ($now) \(was ($from)\); flagd reads it within seconds, and a page on its next load"
-	summary $doc | print
+	# Written: what is said of it never fails the push, whose caller holds the version to roll back from.
+	try { summary $doc | print } catch {|e| print -e $"flags: WARNING: no summary of version ($now): ($e.msg | lines | first)" }
 	$now
 }
 
@@ -276,9 +277,11 @@ def accounts-of [def: record]: nothing -> list<string> {
 	if ($names | describe | str starts-with "list") { $names } else { [] }
 }
 
-# The flags a push writes, as a table: each flag's values and the accounts it names.
+# The flags a push writes, as a table: each flag's values and the accounts it names. A flag's default is the
+# value its default variant holds: a canary's is `old`, with no `default` variant for a flag new to the live
+# object (2026-11-08 18:02 BRT, trial_banner: the push failed past its testers write, PRONTO-43).
 def summary [doc: record] {
-	$doc.flags | transpose flag def | each {|f| {flag: $f.flag, default: $f.def.variants.default, local: ($f.def.variants.local? | default "—"), accounts: (accounts-of $f.def | str join ", ")}}
+	$doc.flags | transpose flag def | each {|f| {flag: $f.flag, default: (default-of $f.def), local: ($f.def.variants.local? | default "—"), accounts: (accounts-of $f.def | str join ", ")}}
 }
 
 export def show [app: path] {
@@ -468,11 +471,15 @@ export def push [app: path, --untested: string, --expect: string] {
 	let final = {stage: all, flag: $names, cases: passed, note: $notes}
 	# The alert that fires on a tester's sign-in is snoozed for exactly the live stage, however it ends.
 	let snooze = (snooze-start $at $on)
+	# Not `try ... finally`: nu runs what follows it and raises the error only at the end, so a failed flip
+	# told the board its flags were on for everyone (PRONTO-15 Done at 18:02 BRT, 2026-11-08; PRONTO-43).
 	try {
 		flip-live $at $app $old $doc $on $tested $cmds $before $final
-	} finally {
+	} catch {|e|
 		snooze-end $at $snooze
+		error make {msg: $e.msg}
 	}
+	snooze-end $at $snooze
 	tell-board $at $app ($changed | where {|f| $f not-in $off }) $off
 }
 
@@ -486,7 +493,8 @@ def tell-board [at: record, app: path, on: list<string>, off: list<string>] {
 		if $top.exit_code != 0 { return }
 		let repo = ($top.stdout | str trim)
 		if not ($repo | path join devflow devflow.cue | path exists) { return }
-		let devflow = ($flags_dir | path join .. bin pronto-devflow)
+		# PRONTO_DEVFLOW_BIN: a stand-in, in tests.
+		let devflow = ($env.PRONTO_DEVFLOW_BIN? | default ($flags_dir | path join .. bin pronto-devflow))
 		for told in [[verb, flags]; [flipped, $on], [rolledback, $off]] {
 			if ($told.flags | is-empty) { continue }
 			let r = (do { ^$devflow $told.verb $repo ($app | path basename) ...$told.flags } | complete)

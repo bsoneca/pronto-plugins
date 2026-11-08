@@ -219,6 +219,33 @@ let ran6 = (ran | length)
 live push $app | ignore
 check ((object | length) == $n6 + 1 and (ran | length) == $ran6 and ((newest 0).data | from json | get flags | columns | any {|c| $c == "shy" })) "a new flag that is off: written with no cases run"
 
+# A flag new to the live object and on, through the flip (PRONTO-43, 2026-11-08 18:02 BRT: trial_banner's
+# canary has variants {old, new} and no `default`, and the push failed past its testers write, unrolled back,
+# with the board told the flag was on for everyone). The board is a stand-in that keeps what it was told.
+^git -C $app init -q
+mkdir $"($app)/devflow"
+"package devflow\n" | save -f $"($app)/devflow/devflow.cue"
+let board = $"($dir)/board.log"
+let told = $"($dir)/devflow.sh"
+$"#!/bin/sh\necho \"$*\" >> ($board)\n" | save -f $told
+chmod +x $told
+def board-said [] { if ($board | path exists) { open --raw $board | lines } else { [] } }
+"scenarios: fresh_buy: {flags: [\"fresh\"], production: true, steps: [{by: \"tester\", open: \"/\"}]}\n" | save -a $"($app)/tests/scenarios/shop.cue"
+full-spec false "light"
+"flags: fresh: {default: true, local: true}\n" | save -a $"($app)/flags_spec.cue"
+let n7 = (object | length)
+touch $"($app)/fail-live"
+let fresh_fail = (livex [push $app] {PRONTO_DEVFLOW_BIN: $told})
+rm $"($app)/fail-live"
+check ($fresh_fail.exit_code != 0 and ($fresh_fail.stderr | str contains "rolled back") and not ($fresh_fail.stderr | str contains "variants.default")) "a new flag on, its cases failing: the push fails as a rollback, not on the summary"
+check ((object | length) == $n7 + 2 and (newest 1).metadata.stage == "testers" and (newest 0).metadata.stage == "rolled-back" and not ((newest 0).data | from json | get flags | columns | any {|c| $c == "fresh" })) "a new flag on, failing: the version before the canary is the newest again"
+check ((board-said) | is-empty) "a failed flip tells the board nothing"
+let fresh_ok = (livex [push $app] {PRONTO_DEVFLOW_BIN: $told})
+check ($fresh_ok.exit_code == 0 and ($fresh_ok.stdout | str contains "fresh")) "a new flag on: the canary's summary and the final one are said"
+check ((newest 1).metadata.stage == "testers" and ((newest 1).data | from json | get flags.fresh.variants) == {old: false, new: true} and (newest 0).metadata.stage == "all" and ((newest 0).data | from json | get flags.fresh.variants.default) == true) "a new flag on: the canary has old and new only, the final version holds it on"
+check ((board-said | length) == 1 and (board-said | first | str starts-with "flipped ") and (board-said | first | str ends-with "/shop shop fresh")) "a passed flip tells the board, once, after the everyone stage"
+rm -rf $"($app)/.git" $"($app)/devflow"
+
 # The cases run under the app's own saytw pin, not the SAYT_VERSION this tool runs under.
 full-spec true "light"
 open --raw $"($app)/flags_spec.cue" | str replace 'echo live $FLAG' 'echo sayt=${SAYT_VERSION:-none} live $FLAG' | save -f $"($app)/flags_spec.cue"
