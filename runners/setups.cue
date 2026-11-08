@@ -36,10 +36,12 @@ setups: "bsoneca-mac": {
 	hostRunners: "ci-light-2": {repo: "pronto", labels: ["ci-light"]}
 	hostRunners: "ci-light-3": {repo: "pronto", labels: ["ci-light"]}
 	// Bulk jobs (pronto's ci.yml heavy checks, PR #804), apart from pronto-mac so light and release
-	// work never queues behind them. Two: six let a change to a file every app copies start ten
-	// checks at once (20 to 29 min queue, 2026-11-07); gates have pronto-gate now.
+	// work never queues behind them. Three: six let a change to a file every app copies start ten
+	// checks at once (20 to 29 min queue, 2026-11-07), two left a full fan-out (a change to ci.yml) at
+	// 15 checks on 2 runners; gates have pronto-gate now.
 	hostRunners: "pronto-bulk-1": {repo: "pronto", labels: ["pronto-bulk"]}
 	hostRunners: "pronto-bulk-2": {repo: "pronto", labels: ["pronto-bulk"]}
+	hostRunners: "pronto-bulk-3": {repo: "pronto", labels: ["pronto-bulk"]}
 }
 
 // bsoneca/studio-apps, the apps Studio's owner makes (pronto's apps/studio): GitHub registers a
