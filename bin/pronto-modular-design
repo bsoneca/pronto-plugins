@@ -1,0 +1,25 @@
+#!/bin/sh
+# Starts a modular app, or refreshes one: an app's design split into modules, each exported on its own
+# (modular-design/README.md).
+#   bin/pronto-modular-design <app-dir>
+# Writes, regenerated: pronto/modular_design.cue (the generate rule), modular_design_plugin.cue (the schema in the program's
+# package), modules/modules_plugin.cue (#Modules), modules/build.nu and modules/lint.ts. Seeds, once: modular_design_spec.cue,
+# and, in an app with no modules/modules.cue yet, modules/modules.cue, modules/schema/, an example module and join/. Adds
+# the exports' ignore lines to the app's .gitignore. A rerun changes only what is missing or regenerated.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+shift
+[ $# -eq 0 ] || { echo "pronto-modular-design: unknown argument $1" >&2; exit 2; }
+package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" | head -n 1)
+[ -n "$package" ] || { echo "pronto-modular-design: $app/program.cue names no package" >&2; exit 2; }
+module=$(sed -n 's/^module:[[:space:]]*"\([^"@]*\).*$/\1/p' "$app/cue.mod/module.cue" | head -n 1)
+[ -n "$module" ] || { echo "pronto-modular-design: $app/cue.mod/module.cue names no module" >&2; exit 2; }
+fresh=true
+[ ! -f "$app/modules/modules.cue" ] || fresh=false
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+./saytw --script tools.nu cue export ./modular-design/export -t "package=$package" -t "module=$module" -t "fresh=$fresh" -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"
+./saytw --script tools.nu nu modular-design/ignore.nu "$app"
