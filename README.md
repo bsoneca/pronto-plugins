@@ -332,6 +332,34 @@ states `cluster: meta: hostPeers` from it in the same words, so hosts join: an
 app whose program renders on request (pronto's `render` peer) adds
 `_hostPeers: render: <port>` beside them.
 
+
+## pronto-modular-design
+
+Starts a modular app, or refreshes one: an app's design (its CUE spec) split into modules, small packages each exported on its own
+and joined by a small one, so an edit to a lesson, a question or a level re-evaluates its module and the join, not the whole spec.
+Worth it only when the design's own `cue export` is the cost; the skill says how to measure that first (aprende: 8 evaluations of
+about 20 CPU-s and 9 GB each, now one module and a join, about 12 CPU-s and 1.2 GB; Bonk Chess: its spec costs 0.45 CPU-s, so it was
+not split).
+
+```sh
+<this repo>/bin/pronto-modular-design .
+./saytw --script tools.nu cue cmd generate ./pronto   # the seat: the generate rule
+./saytw generate && ./saytw lint && ./saytw test
+```
+
+| Path in the app | |
+| --- | --- |
+| `pronto/modular_design.cue` | a seat beside `pronto/config.cue`'s: a `generate` rule (`nu modules/build.nu`), before pronto's writer, which evaluates a program that reads the exports |
+| `modular_design_plugin.cue` | the schema (`#ModularDesign`, whose check is the lint, in `test`), in the program's package |
+| `modules/modules_plugin.cue` | `#Modules`, in package `modules` |
+| `modules/build.nu` | the build step: each module exported in `needs` order, the export written beside every module that reads it (`deps/`) and for the join |
+| `modules/lint.ts` | fails when a module imports another module's CUE (the schema excepted), two modules own overlapping paths, or `needs` has a cycle |
+| `modular_design_spec.cue` | written once: opts the lint into the program's checks |
+| `modules/modules.cue`, `modules/schema/`, `modules/example/`, `join/` | written once, in an app with no `modules/modules.cue`: the app's own from then on |
+
+[`modular-design/README.md`](modular-design/README.md) has the rules; the
+[`pronto-modular-design` skill](skills/pronto-modular-design/SKILL.md) the measuring, the split and the pitfalls.
+
 ## pronto-identity
 
 Social sign-in beside the passkey, with no client, secret or cloud console of
@@ -744,6 +772,9 @@ its own lists replaced whole and other hosts' rules kept.
 ./saytw --script tools.nu cue vet -c ./perf
 ./saytw --script tools.nu cue vet -c -t package=check ./perf/export
 ./saytw --script tools.nu nu perf/test.nu
+./saytw --script tools.nu cue vet -c ./modular-design
+./saytw --script tools.nu cue vet -c -t package=check -t module=check ./modular-design/export
+./saytw --script tools.nu nu modular-design/test.nu
 ./saytw --script tools.nu nu flags/test/live_test.nu
 ./saytw --script tools.nu cue vet -c ./identity
 ./saytw --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export

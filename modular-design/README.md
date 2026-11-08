@@ -1,88 +1,86 @@
 # modular-design
 
-An app's design split into modules: small CUE packages, each evaluated and exported on its own,
-so a change re-evaluates the module it touches and the step that joins them, never the whole
-design. Smaller cues, faster builds. Design status: proposed (2026-11-08); the measures below
-decide it.
-
-## Why
-
-An app's design is one CUE package today. aprende's (`apps/aprende/spec`) is ~30 MB of output:
-`cue export` of it costs ~1,350 CPU-s and 14.5 GB, and an edit to one ENEM question costs the
-same as a fresh build because the package is one evaluation. pronto's cue wrapper
-(`tools/cue-budget`, bsoneca/pronto#858) already replays any export whose inputs are unchanged,
-keyed by its package's files, its in-module imports and its embeds. What it cannot do is replay
-*part* of a package. Modules give it parts.
+An app's design split into modules: small CUE packages, each evaluated and exported on its own, so a change re-evaluates the
+module it touches and the step that joins them, never the whole design. It pays only when the design's own `cue export` is the
+cost: measure first ([`pronto-modular-design` skill](../skills/pronto-modular-design/SKILL.md)).
 
 ## What a module is
 
 - A CUE package in the app's `modules/<name>/`, with its own files only.
-- It imports the app's **schema** module (`#Defs`, the shared constraints) as CUE: definitions do
-  not survive an export, and a schema is cheap to evaluate.
-- It reads any other module's **export**, not its CUE: the build copies each export it needs into
-  the module's own (ignored) `deps/` and the module embeds it, `@embed(file=deps/<dep>.json)` (cue
-  0.16 refuses an embed of a parent folder). An importer never re-evaluates its dependency, and the
-  wrapper's key changes only when that export changes, not when its sources are reworded.
-- It owns a disjoint subtree of the app's data (`trilhas."7".ma`, `exames.enem."2021"`), declared
-  in the app's `modules.cue`. Two modules never write the same field.
+- It imports the app's **schema** module (`modules/schema`: the shared definitions) as CUE: definitions do not survive an export,
+  and a schema is cheap to evaluate.
+- It reads any other module's **export**, not its CUE: `modules/build.nu` copies each export a module needs into the module's own
+  (ignored) `deps/` and the module embeds it, `@embed(file="deps/<dep>.json")` (cue 0.16 refuses an embed of a parent folder). An
+  importer never re-evaluates its dependency, and the cue wrapper's key changes only when that export changes, not when its
+  sources are reworded.
+- It owns a disjoint subtree of the app's data, declared in `modules/modules.cue`. Two modules never write the same field.
+- Its checks are hidden fields of what it exports (`out`), so exporting it is vetting it.
 
-## What the app writes
+## Use
 
-`modules.cue`, the app's own, held by this plugin's `#Modules`:
+From a pronto app (a `program.cue`, a `cue.mod`):
 
-```cue
-modules: {
-	schema: {}
-	bncc:   {needs: ["schema"], owns: ["habilidades"]}
-	ma:     {needs: ["schema", "bncc"], owns: ["trilhas.*.ma", "aulas.*.ma"]}
-	enem2021: {needs: ["schema", "bncc"], owns: ["exames.enem.\"2021\""]}
-}
-join: "spec"  // the package that reads every module's export and checks what spans them
+```sh
+<this repo>/bin/pronto-modular-design . 
+./saytw --script tools.nu cue cmd generate ./pronto   # the seat: the generate rule
+./saytw generate && ./saytw lint && ./saytw test
 ```
 
-## What the plugin adds
+| Path in the app | Owner |
+| --- | --- |
+| `pronto/modular_design.cue` | regenerated: the `generate` rule (`nu modules/build.nu`), before pronto's writer, since the writer evaluates a program that reads the exports |
+| `modular_design_plugin.cue` | regenerated: the schema (`#ModularDesign`, its `test` check), in the program's package |
+| `modules/modules_plugin.cue` | regenerated: `#Modules`, in package `modules` |
+| `modules/build.nu` | regenerated: the build step, each module exported in `needs` order, independent ones side by side |
+| `modules/lint.ts` | regenerated: the lint |
+| `modular_design_spec.cue` | seeded, then the app's: opts the lint into the program's checks |
+| `modules/modules.cue`, `modules/schema/`, `modules/example/`, `join/` | seeded once, in an app with no `modules/modules.cue`: the app's own from then on |
+| `.gitignore` | each module's `deps/` and each place an export is written for the join, added when missing |
 
-- A generate rule that exports each module in `needs` order through the cue wrapper, independent
-  ones in parallel within the app's slot weight. An unchanged module is replayed in well under a
-  second, and its export file stays byte-identical, so its dependents' keys stay the same too.
-- The **join** step: a small package that embeds every module's export, merges the disjoint
-  subtrees (a merge, not a unification of whole programs) and runs only the checks that span
-  modules (unique ids, the paths between subjects, the exam grids). Its result is the file the
-  app's readers already read, so `program.cue`, tests and scenarios are unchanged.
-- A lint, run in `test`: a module that imports another module's CUE (other than the schema),
-  two modules owning overlapping paths, or a `needs` cycle fails it.
+`modules/modules.cue` lists the modules, held by `#Modules`: `needs` (the modules whose exports it reads), `expr` (what of the
+package is its export), `join` (where the export is also written, for the package that joins the modules) and `owns` (dotted
+paths of the data it writes, a segment `*`, `a|b` or `1-9`).
 
-## Order of work
+The **join** is a package of the app's that embeds the exports and merges their disjoint subtrees. It checks only what spans
+modules; each module has already checked its own data.
 
-1. This document.
-2. aprende split into modules (map: subjects ma, lp, ci, hi, ge, li; bncc; rumo; one per exam
-   edition; join), its `spec.json` byte-identical to today's, then measured through
-   `tests/slot.ts` with `/usr/bin/time -l`: full build, unchanged, one ENEM 2021 question
-   changed, one subject's lesson changed (CPU-s and peak memory, before and after).
-3. Bonk Chess (`apps/brawl-chess/spec`) the same way.
-4. Every other app takes it when its design grows past one cheap evaluation.
+## The lint
 
-## First measure: aprende, two modules (2026-11-08)
+`modules/lint.ts` runs in `test` and fails when a module imports another module's CUE (the schema excepted), when two modules own
+overlapping paths, when `needs` has a cycle or names a module that is not listed, or when a folder under `modules/` is not listed.
 
-bsoneca/pronto branch `feat/aprende-modules`: `ma` (Matemática 1–9) and `enem2021` split out
-beside `schema` and `bncc`; `spec.json` byte-identical to main's. Through `tests/slot.ts`, CPU-s
-(user+sys) and peak memory:
+## Tests
+
+- [`tests.cue`](tests.cue): what the host writes, checked with `cue vet`.
+- [`test.nu`](test.nu): the installer, the build step and the lint against a fresh example app, including an overlap, a
+  cross-module import and a cycle the lint refuses.
+
+```sh
+./saytw --script tools.nu cue vet -c ./modular-design
+./saytw --script tools.nu cue vet -c -t package=check -t module=check ./modular-design/export
+./saytw --script tools.nu nu modular-design/test.nu
+```
+
+## Measured (2026-11-08, BRT)
+
+Through `tests/slot.ts --weight 6` with `/usr/bin/time -l`; CPU-s is user+sys.
+
+**aprende**, fully split (bsoneca/pronto#877): schema, bncc, six subjects, rumo, seven exam
+editions and two exams, `spec.json` byte-identical to before. The join merges the exports'
+disjoint subtrees and runs only the checks that span modules, never `#Trilha` or `#Aula` again.
 
 | case | before | after |
 | --- | --- | --- |
-| full build, cache off | 199.7 s, 8.9 GB | 222.6 s, 10.6 GB |
-| unchanged | 1.7 s, 0.37 GB | 3.3 s, 0.54 GB |
-| one ENEM 2021 question | 45.9 s, 8.7 GB | 26.0 s, 9.0 GB |
-| one ma lesson | 167.3 s, 8.9 GB | 23.5 s, 9.0 GB |
+| full build, cache off | 199.7 s, 8.9 GB | 33.8 s, 2.0 GB |
+| one ma lesson | 167.3 s, 8.9 GB | 12.1 s, 1.2 GB |
+| one lp lesson | 196.5 s, 8.5 GB | 12.5 s, 1.2 GB |
+| one ENEM 2021 question | 45.9 s, 8.7 GB | 30.0 s, 1.9 GB |
+| unchanged | 1.7 s, 0.37 GB | 26.3 s, 1.3 GB |
 
-A module costs ~1 s and 0.5 GB; the join (~21 s, 9 GB) is now every edit's cost. So the next
-step is a smaller join: it merges the exports' disjoint subtrees without evaluating `#Trilha` or
-`#Aula` over them again, the per-module checks having already run. Hidden fields read across
-files become definitions (`#ids`), and definitions that read ambient data (`#Cabe`) take it as a
-parameter.
+The unchanged case is worse: the cue wrapper replays only claimed exports (learned peak ≥ 1 GB),
+and most modules are now under that, so each is evaluated again. The wrapper should replay every
+module's export.
 
-## Not in scope
-
-- Slimming any design: every value and every check stays, the cross-module ones in the join.
-- Per-app scripts: what an app has is its `modules.cue`; the rule, the join and the lint are the
-  plugin's, written once.
+**Bonk Chess**, not split: its `spec/` exports in 0.45 CPU-s and 158 MB. Its generate's cost,
+~9 CPU-s and 3.5 GB, is `cue export . -e analytics.out` over the app's root package, which a
+`spec/` split would not touch. A design is split only where its own evaluation is the cost.
