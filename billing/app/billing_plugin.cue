@@ -209,9 +209,10 @@ code: state: migrations: "\(_billingGrantsMigration)": operations: [{sql: up: ""
 
 // The free trial (billing.trial), kept apart from billing_01's tables so an app that offers
 // none has them all the same and nothing reads them. Only the service writes it, as the broker's
-// entitlements are written. A row is born at an account's consent, with a ticket the broker
-// gives back once (billing_trial_take) to prove the account asked, its state null until Stripe
-// confirms the trial (billing_trial_state). The trial is spent for good once its state is set.
+// entitlements are written. Each ask mints its own ticket (billing.trial_ticket), which carries the
+// consent it stands for and which the broker gives back once (billing_trial_take) to prove the
+// account asked; a row of billing.trial is the broker's word on the trial (billing_trial_state),
+// spent for good once its state is set.
 // Named by the app (billing_spec.cue), after the grants' migration.
 _billingTrialMigration: string
 code: state: migrations: "\(_billingTrialMigration)": operations: [{sql: up: """
@@ -232,6 +233,16 @@ code: state: migrations: "\(_billingTrialMigration)": operations: [{sql: up: """
 	REVOKE ALL ON FUNCTION public.billing_trial_status(uuid) FROM PUBLIC;
 	GRANT EXECUTE ON FUNCTION public.billing_trial_status(uuid) TO service;
 
+	-- Each ask is its own ticket row, so two tabs of one account never overwrite each other's:
+	-- the row holds the consent the ticket stands for (none for an offer's) and is spent when taken.
+	-- (billing.trial's ticket, plan, amount, currency, charges_at, terms and consented_at columns
+	-- are left as they were, no longer written.)
+	CREATE TABLE IF NOT EXISTS billing.trial_ticket (
+	  ticket text PRIMARY KEY, account uuid NOT NULL, plan text, amount integer, currency text,
+	  charges_at timestamptz, terms text, made_at timestamptz NOT NULL DEFAULT now()
+	);
+	CREATE INDEX IF NOT EXISTS trial_ticket_account ON billing.trial_ticket (account);
+
 	-- A ticket for the broker to ask the service about: with a consent, what the account agreed to;
 	-- without, an offer's. A consent is refused once the trial is spent.
 	CREATE OR REPLACE FUNCTION public.billing_trial_ask(account uuid, plan text, amount integer, currency text, charges_at timestamptz, terms text)
@@ -241,26 +252,22 @@ code: state: migrations: "\(_billingTrialMigration)": operations: [{sql: up: """
 	  IF plan IS NOT NULL AND EXISTS (SELECT 1 FROM billing.trial t WHERE t.account = billing_trial_ask.account AND t.state IS NOT NULL) THEN
 	    RAISE EXCEPTION 'the free trial is spent' USING ERRCODE = 'check_violation';
 	  END IF;
-	  INSERT INTO billing.trial AS t (account, ticket, plan, amount, currency, charges_at, terms, consented_at)
-	    VALUES (account, made, plan, amount, currency, charges_at, terms, CASE WHEN plan IS NULL THEN NULL ELSE now() END)
-	    ON CONFLICT ON CONSTRAINT trial_pkey DO UPDATE SET ticket = EXCLUDED.ticket,
-	      plan = CASE WHEN t.state IS NULL THEN EXCLUDED.plan ELSE t.plan END,
-	      amount = CASE WHEN t.state IS NULL THEN EXCLUDED.amount ELSE t.amount END,
-	      currency = CASE WHEN t.state IS NULL THEN EXCLUDED.currency ELSE t.currency END,
-	      charges_at = CASE WHEN t.state IS NULL THEN EXCLUDED.charges_at ELSE t.charges_at END,
-	      terms = CASE WHEN t.state IS NULL THEN EXCLUDED.terms ELSE t.terms END,
-	      consented_at = CASE WHEN t.state IS NULL THEN EXCLUDED.consented_at ELSE t.consented_at END;
+	  -- Tickets of an account never pile up: its unspent ones older than a day go.
+	  DELETE FROM billing.trial_ticket k WHERE k.account = billing_trial_ask.account AND k.made_at < now() - interval '1 day';
+	  INSERT INTO billing.trial_ticket (ticket, account, plan, amount, currency, charges_at, terms)
+	    VALUES (made, account, plan, amount, currency, charges_at, terms);
 	  RETURN made;
 	END $f$;
 	REVOKE ALL ON FUNCTION public.billing_trial_ask(uuid, text, integer, text, timestamptz, text) FROM PUBLIC;
 	GRANT EXECUTE ON FUNCTION public.billing_trial_ask(uuid, text, integer, text, timestamptz, text) TO service;
+	REVOKE ALL ON TABLE billing.trial_ticket FROM PUBLIC;
 
-	-- The consent a ticket stands for, once: the ticket is spent as it is taken.
+	-- The consent a ticket stands for, once: the ticket is spent as it is taken, and no other is touched.
 	CREATE OR REPLACE FUNCTION public.billing_trial_take(account uuid, ticket text) RETURNS json
 	LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public AS $f$
-	  UPDATE billing.trial t SET ticket = NULL
-	  WHERE t.account = billing_trial_take.account AND t.ticket IS NOT NULL AND t.ticket = billing_trial_take.ticket
-	  RETURNING json_build_object('plan', t.plan, 'amount', t.amount, 'currency', t.currency, 'charges_at', t.charges_at, 'terms', t.terms)
+	  DELETE FROM billing.trial_ticket k
+	  WHERE k.account = billing_trial_take.account AND k.ticket = billing_trial_take.ticket
+	  RETURNING json_build_object('plan', k.plan, 'amount', k.amount, 'currency', k.currency, 'charges_at', k.charges_at, 'terms', k.terms)
 	$f$;
 	REVOKE ALL ON FUNCTION public.billing_trial_take(uuid, text) FROM PUBLIC;
 	GRANT EXECUTE ON FUNCTION public.billing_trial_take(uuid, text) TO service;
