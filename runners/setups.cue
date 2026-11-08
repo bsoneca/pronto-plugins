@@ -12,14 +12,22 @@ setups: "bsoneca-mac": {
 	hostRunners: "pronto-mac-2": {repo: "pronto", labels: ["pronto-mac"]}
 	hostRunners: "pronto-mac-3": {repo: "pronto", labels: ["pronto-mac"]}
 	// Releases only (cd.yml's release job runs on this label): a release never waits behind ci,
-	// whose queue on pronto-mac can be long. Same Mac; release-cron's own slot (STACK_PRIORITY=release)
-	// already puts its rehearsal first on the machine.
+	// whose queue on pronto-mac can be long. Two runners, so two apps release at once; one release
+	// per app at a time is cd.yml's concurrency group, not a runner count. Never plan, mirror or
+	// bisect work here: a long job there held every release behind it (2026-11-07: a 1 h 40 min
+	// bisect kept six cd runs queued).
 	hostRunners: "pronto-release": repo: "pronto"
-	// cd's other jobs (cd.yml's plan and mirror) only: cd never queues behind ci on pronto-mac, and
-	// ci never behind cd (the user, 2026-11-07: "cd must not compete with ci. They must use different
-	// queues."). Apart from pronto-release, which a release holds for its whole run, so a mirror never
-	// waits for a release either.
-	hostRunners: "pronto-cd": repo: "pronto"
+	hostRunners: "pronto-release-2": {repo: "pronto", labels: ["pronto-release"]}
+	// cd's jobs of seconds (cd.yml's plan, mirror and release-plan, the 10-min tick's): they never
+	// queue behind ci on pronto-mac, nor behind a release on pronto-release (the user, 2026-11-07:
+	// "cd must not compete with ci. They must use different queues."). One runner is enough: each
+	// takes under a minute. Replaces pronto-cd, same job, a name that says what it plans.
+	hostRunners: "pronto-plan": repo: "pronto"
+	// The pull-request gate's runners (a gate workflow's jobs): three, so up to three gates run at
+	// once and a fourth waits in GitHub's queue, the only one (queue-research-2026-11-07 s.4).
+	hostRunners: "pronto-gate-1": {repo: "pronto", labels: ["pronto-gate"]}
+	hostRunners: "pronto-gate-2": {repo: "pronto", labels: ["pronto-gate"]}
+	hostRunners: "pronto-gate-3": {repo: "pronto", labels: ["pronto-gate"]}
 	// Light jobs only (ci.yml's `changed` and its `ci` summary): they take seconds and claim no
 	// slot, so a pull request's ci starts at once instead of queueing behind checks that hold the
 	// pronto-mac runners while they wait in tests/slot.ts (2026-11-06: a PR's `changed` waited up to
@@ -28,14 +36,10 @@ setups: "bsoneca-mac": {
 	hostRunners: "ci-light-2": {repo: "pronto", labels: ["ci-light"]}
 	hostRunners: "ci-light-3": {repo: "pronto", labels: ["ci-light"]}
 	// Bulk jobs (pronto's ci.yml heavy checks, PR #804), apart from pronto-mac so light and release
-	// work never queues behind them. Registered by hand first (2026-11-07); declared here so a
-	// rebuilt Mac recreates them.
+	// work never queues behind them. Two: six let a change to a file every app copies start ten
+	// checks at once (20 to 29 min queue, 2026-11-07); gates have pronto-gate now.
 	hostRunners: "pronto-bulk-1": {repo: "pronto", labels: ["pronto-bulk"]}
 	hostRunners: "pronto-bulk-2": {repo: "pronto", labels: ["pronto-bulk"]}
-	hostRunners: "pronto-bulk-3": {repo: "pronto", labels: ["pronto-bulk"]}
-	hostRunners: "pronto-bulk-4": {repo: "pronto", labels: ["pronto-bulk"]}
-	hostRunners: "pronto-bulk-5": {repo: "pronto", labels: ["pronto-bulk"]}
-	hostRunners: "pronto-bulk-6": {repo: "pronto", labels: ["pronto-bulk"]}
 }
 
 // bsoneca/studio-apps, the apps Studio's owner makes (pronto's apps/studio): GitHub registers a
