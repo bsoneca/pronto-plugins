@@ -2,12 +2,13 @@
 // step of the flow, its rule decided in flow.js, so a session never moves an issue by hand.
 //   board.ts status <repo> [--json]                     today's sprint: its issues by state, the slots busy, what is designed
 //   board.ts start <repo> <KEY>                         Implementing, if its lane (engineer or SRE) has a slot (a P0 always)
+//   board.ts pull <repo> [--lane engineer|SRE]          start the next Ready issue of the sprint for that lane (engineer by default)
 //   board.ts move <repo> <KEY> <State> [--why <text>]   Refine, Ready or Cancelled (the others are the hooks')
 //   board.ts file <repo> --title <t> --app <app> [--bug] [--priority P0..P3] [--flag <f>] [--body <text>]
 //   board.ts close <repo> [--json]                      the sprint that ended: what merged, went live, is done, slipped
-//   board.ts next <repo> <KEY...>                        the next sprint, with these issues in Refine
+//   board.ts next <repo> <KEY...>                        the next sprint, with these issues in Refine; refuses past a lane's capacity
 import { flagsOf } from "../intents/shell.ts";
-import { bugPlace, laneOf, mayStart, nextDay, priorityOf, sprintOf } from "./flow.js";
+import { bugPlace, capacity, laneOf, mayPlan, mayStart, nextDay, priorityOf, pullNext, sprintOf } from "./flow.js";
 import { esc, type Issue, Plane } from "./plane.ts";
 import { boardOf, devflowOf, type DevFlow } from "./spec.ts";
 
@@ -15,7 +16,7 @@ const [verb, repoArg, ...rest] = Deno.args;
 const repo = repoArg ? await Deno.realPath(repoArg) : "";
 const flow = repo ? await devflowOf(repo) : null;
 if (!verb || !flow) {
-  console.error(flow === null && repo ? `${repo} has no devflow/devflow.cue` : "usage: board.ts status|start|move|file|close|next <repo> ...");
+  console.error(flow === null && repo ? `${repo} has no devflow/devflow.cue` : "usage: board.ts status|start|pull|move|file|close|next <repo> ...");
   Deno.exit(2);
 }
 const b = await boardOf(flow);
@@ -35,6 +36,7 @@ const say = async (i: Issue, html: string) => void (await plane.comment(project,
 
 /** The lanes that build: an engineer's slots and an SRE's (devFlow.team), and which an issue takes. */
 const slots = { engineer: flow.team.engineers, SRE: flow.team.sre } as Record<string, number>;
+const cap = capacity(flow.team, flow.sprint.perPerson) as Record<string, number>;
 const modulesOf = await plane.modulesByIssue(project);
 const lane = (i: Issue) => laneOf(modulesOf.get(i.id) ?? [], flow.infra);
 
@@ -63,6 +65,10 @@ async function status() {
     sprint: day,
     ends: `${flow!.sprint.ends} ${flow!.sprint.timeZone}`,
     slots: Object.fromEntries(Object.entries(slots).map(([l, of]) => [l, { of, on: busy.filter((i) => lane(i) === l).map(key) }])),
+    // Planned against capacity, by lane (a cancelled issue is not planned), and the Ready issues
+    // waiting for their lane to pull them.
+    capacity: Object.fromEntries(Object.keys(slots).map((l) => [l, { planned: sprint.filter((i) => lane(i) === l && stateName(i.state) !== "Cancelled").length, of: cap[l] }])),
+    ready: Object.fromEntries(Object.keys(slots).map((l) => [l, sprint.filter((i) => lane(i) === l && stateName(i.state) === "Ready").map((i) => `${key(i)} ${i.name}`)])),
     issues: Object.fromEntries(flow!.states.map((s) => [s.name, sprint.filter((i) => stateName(i.state) === s.name).map((i) => `${key(i)} ${i.name}`)]).filter(([, v]) => v.length)),
     // The product managers' work: issues designed (Ready) that no sprint holds yet.
     designed: all.filter((i) => stateName(i.state) === "Ready" && !inCycle.has(i.id)).map((i) => `${key(i)} ${i.name}`),
@@ -71,6 +77,8 @@ async function status() {
   if (rest.includes("--json")) return console.log(JSON.stringify(out, null, 2));
   const lanes = Object.entries(out.slots).map(([l, s]) => `${s.on.length} of ${s.of} ${l} slots busy${s.on.length ? ` (${s.on.join(", ")})` : ""}`);
   console.log(`sprint ${out.sprint} (ends ${out.ends}): ${lanes.join(", ")}`);
+  console.log(`planned: ${Object.entries(out.capacity).map(([l, c]) => `${c.planned} of ${c.of} ${l}`).join(", ")} (${flow!.sprint.perPerson} per person)`);
+  for (const [l, is] of Object.entries(out.ready)) console.log(`  ready to pull, ${l}: ${is.length ? is.join("; ") : "none"}`);
   for (const [s, is] of Object.entries(out.issues)) console.log(`  ${s}: ${(is as string[]).join("; ")}`);
   console.log(`designed for a later sprint: ${out.designed.length ? out.designed.join("; ") : "none"}`);
   console.log(`backlog: ${out.backlog}`);
@@ -89,6 +97,21 @@ async function start(k: string) {
   await plane.updateIssue(project, issue.id, { state: stateId("Implementing") });
   await say(issue, `<p>${esc(from)} → Implementing: ${esc(may.why)}</p>`);
   console.log(`${k} ${from} → Implementing (${may.why})`);
+}
+
+/** The next Ready issue of the sprint for a lane, started: what a session does when its pull
+ * request opens (review holds no slot), or when it finishes an issue. */
+async function pull(l: string) {
+  if (!(l in slots)) throw new Error(`a lane is engineer or SRE, not ${l}`);
+  const cycle = await cycleOf(today(), false);
+  const inSprint = cycle ? new Set((await plane.cycleIssues(project, cycle.id)).map((i) => i.id)) : new Set<string>();
+  const ready = (await plane.issues(project)).filter((i) => inSprint.has(i.id) && stateName(i.state) === "Ready" && lane(i) === l);
+  const pick = pullNext(ready.map((i) => ({ key: key(i), sequence: i.sequence_id, priority: i.priority })));
+  if (!pick) {
+    console.log(`nothing Ready in sprint ${today()} for ${l}`);
+    return;
+  }
+  await start(pick.key);
 }
 
 async function move(k: string, to: string, why: string) {
@@ -143,6 +166,22 @@ async function close() {
 
 async function next(keys: string[]) {
   const day = today();
+  // Capacity first, so a refused plan changes nothing: the sprint's issues already planned, by
+  // lane, plus the new ones, against perPerson for each engineer and SRE.
+  const present = await cycleOf(day, false);
+  const held = present ? await plane.cycleIssues(project, present.id) : [];
+  const heldIds = new Set(held.map((i) => i.id));
+  const fresh = (await Promise.all(keys.map((k) => plane.issue(k)))).filter((i, n, all) => !heldIds.has(i.id) && all.findIndex((j) => j.id === i.id) === n);
+  const refused: string[] = [];
+  for (const l of Object.keys(slots)) {
+    const planned = held.filter((i) => lane(i) === l && stateName(i.state) !== "Cancelled").length;
+    const may = mayPlan(planned, cap[l], fresh.filter((i) => lane(i) === l).length, l);
+    if (!may.ok) refused.push(may.why);
+  }
+  if (refused.length) {
+    console.log(`sprint ${day} is over capacity (${flow!.sprint.perPerson} per person): ${refused.join("; ")}`);
+    Deno.exit(1);
+  }
   const cycle = (await cycleOf(day, true))!;
   const ids: string[] = [];
   for (const k of keys) {
@@ -157,6 +196,7 @@ async function next(keys: string[]) {
 switch (verb) {
   case "status": await status(); break;
   case "start": await start(rest[0]); break;
+  case "pull": await pull(flagsOf(rest).lane ?? "engineer"); break;
   case "move": await move(rest[0], rest[1], flagsOf(rest.slice(2)).why ?? ""); break;
   case "file": await file(); break;
   case "close": await close(); break;

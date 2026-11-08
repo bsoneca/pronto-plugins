@@ -82,6 +82,29 @@ export function mayStart(busy, slots, priority, lane) {
     : { ok: false, why: `all ${slots} ${lane} slots are busy` };
 }
 
+/** What a sprint may commit to, by lane: `perPerson` issues for each engineer and each SRE. */
+export function capacity(team, perPerson) {
+  return { engineer: (team?.engineers ?? 0) * perPerson, SRE: (team?.sre ?? 0) * perPerson };
+}
+
+/** Whether a lane may plan `add` more issues when `planned` are in the sprint already, of `cap`. */
+export function mayPlan(planned, cap, add, lane) {
+  if (add <= 0) return { ok: true, why: `${lane}: nothing to add` };
+  if (cap === 0) return { ok: false, why: `the team has no ${lane}` };
+  const room = Math.max(0, cap - planned);
+  return add <= room
+    ? { ok: true, why: `${lane}: ${planned + add} of ${cap} planned` }
+    : { ok: false, why: `${lane}: ${planned} of ${cap} planned, ${add} more is ${add - room} over` };
+}
+
+/** The next Ready issue a lane pulls: the sprint's Ready issues of that lane, most urgent first
+ * (Plane's urgent, high, medium, low, none), then the oldest. `issues` are `{key, sequence, priority}`. */
+export function pullNext(issues) {
+  const rank = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
+  const sorted = [...issues].sort((a, b) => (rank[a.priority] ?? 4) - (rank[b.priority] ?? 4) || a.sequence - b.sequence);
+  return sorted[0] ?? null;
+}
+
 /** P0..P3 as Plane's priority, and back. */
 const plane = { P0: "urgent", P1: "high", P2: "medium", P3: "low" };
 export function priorityOf(p) {

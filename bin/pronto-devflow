@@ -4,7 +4,7 @@
 #   bin/pronto-devflow released <repo> <app> <commit>     release-cron confirmed a release
 #   bin/pronto-devflow flipped|rolledback <repo> <app> <flag...>
 # and the board as the skills use it (devflow/board.ts):
-#   bin/pronto-devflow status|start|move|file|close|next <repo> ...
+#   bin/pronto-devflow status|start|pull|move|file|close|next <repo> ...
 # and the Plane MCP server for the repository's board (devflow/mcp.ts), as its .mcp.json starts it:
 #   bin/pronto-devflow mcp <repo>
 # <repo> is a repository with a devflow/devflow.cue; one without has nothing to tell.

@@ -25,7 +25,7 @@ export interface DevFlow {
   token: { project: string; secret: string };
   team: { engineers: number; sre: number; product: number };
   infra: string[];
-  sprint: { ends: string; timeZone: string };
+  sprint: { ends: string; timeZone: string; perPerson: number };
   chore: string;
   states: { name: string; group: string; color: string; means: string }[];
   priorities: Record<string, { plane: string; does: string }>;
