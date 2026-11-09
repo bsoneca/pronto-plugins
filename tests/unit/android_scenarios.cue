@@ -26,6 +26,13 @@ cases: {
 		{call: "androidScenarios.actorOf", args: [{see: "a"}, {ana: {name: "Ana"}, bia: {name: "Bia"}}, "bia"], expect: "bia"},
 		{call: "androidScenarios.actorOf", args: [{open: "/"}, {}, null], expect: "me"},
 	]}
+	"a page's seed is its scenario's and actor's own, so two scenarios on one stack mint different row ids": {suite: "android", steps: [
+		{call: "androidScenarios.seeded", args: ["/?seed=7", "board/ana"], expect: "/?seed=180092085"},
+		{call: "androidScenarios.seeded", args: ["/?seed=7", "board2/ana"], expect: "/?seed=1848758629"},
+		{call: "androidScenarios.seeded", args: ["/?seed=7", "board/ana"], expect: "/?seed=180092085"},
+		{call: "androidScenarios.seeded", args: ["/play?a=1&seed=4294967295&b=2", "x"], expect: "/play?a=1&seed=4245442694&b=2"},
+		{call: "androidScenarios.seeded", args: ["/play?a=1", "board/ana"], expect: "/play?a=1"},
+	]}
 	"input text is quoted for the device's shell, spaces as %s": {suite: "android", steps: [
 		{call: "androidScenarios.inputText", args: ["Signed from the Unity host."], expect: "'Signed%sfrom%sthe%sUnity%shost.'"},
 		{call: "androidScenarios.inputText", args: ["it's $HOME; `x` & \"y\""], expect: "'it'\\''s%s$HOME;%s`x`%s&%s\"y\"'"},
