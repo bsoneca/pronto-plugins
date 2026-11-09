@@ -156,6 +156,7 @@ export function holds(kind: string, arg: any, els: Probed[], messages: Record<st
       const want = arg.msg ? lookup(messages, arg.msg) : arg.is;
       if (arg.msg && want === undefined) throw new Fail(`no message ${arg.msg}`);
       if (want !== undefined && first.text !== want) return `text is ${JSON.stringify(first.text)}, want ${JSON.stringify(want)}`;
+      if (arg.not !== undefined && first.text === arg.not) return `text is ${JSON.stringify(first.text)}, want anything else`;
       if (arg.has !== undefined && !first.text.includes(arg.has)) return `text is ${JSON.stringify(first.text)}, want it to have ${JSON.stringify(arg.has)}`;
       return null;
     }
@@ -616,7 +617,7 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
         default: {
           // An expectation: asked again until it holds. `see` and the others needing a drawing ask for the boxes.
           const sel = sub(arg.of ?? arg);
-          const a = typeof arg === "object" ? { ...arg, of: undefined, is: typeof arg.is === "string" ? sub(arg.is) : arg.is, has: typeof arg.has === "string" ? sub(arg.has) : arg.has } : arg;
+          const a = typeof arg === "object" ? { ...arg, of: undefined, is: typeof arg.is === "string" ? sub(arg.is) : arg.is, has: typeof arg.has === "string" ? sub(arg.has) : arg.has, not: typeof arg.not === "string" ? sub(arg.not) : arg.not } : arg;
           await until(`${kind} ${sel}`, timeout, async () => {
             const els = await phone.find(sel, kind === "see" || kind === "hidden");
             if (!els) return [null, "the driver does not answer"];
