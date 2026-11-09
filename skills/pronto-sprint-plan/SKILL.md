@@ -39,3 +39,9 @@ enabled), run bare from the repository: never move an issue on the board by hand
 - A feature request is never built from planning: it is an issue (rule 3).
 - Planning does not start work: each issue is its own session (the pronto-issue skill).
 - Without a board token, `pronto-devflow` says so: point the user at `pronto connect plane .`.
+- **No idle engineer during the day.** An engineer finishing an issue starts the next one at once,
+  refining it first when nothing is Ready (the pronto-issue skill, 5b). When a lane runs out (its
+  engineer reports nothing to refine or start), the lead adds the most urgent Backlog issue that was
+  already there at this planning to today's cycle, in Refine, and hands it to that engineer: an idle
+  engineer is money spent for nothing (the owner, 2026-11-09). An issue the owner filed after
+  planning still waits for the next one, unless the owner says to take it now.
