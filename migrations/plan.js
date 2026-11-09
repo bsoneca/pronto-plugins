@@ -80,6 +80,18 @@ const canonical = (f, types) => {
   return t === "decimal" ? `decimal(${f.precision ?? ""},${f.scale ?? ""})` : t;
 };
 
+// The column's type as Postgres holds it, which an alias does not always share with its type
+// (pronto's emit.cue, _sqlType): text and int are string's and int32's, but bigint, timestamptz and
+// tsvector are base types where int64 and timestamp are domains and string is text. Spelling a
+// field another way with another column type is a retype the replay never applies.
+const LEGACY = { text: "text", int: "integer", bigint: "bigint", timestamptz: "timestamptz", tsvector: "tsvector" };
+const physical = (f, types) => {
+  if (LEGACY[f.type]) return LEGACY[f.type];
+  if (f.type === "decimal") return `portable_decimal_${f.precision ?? ""}_${f.scale ?? ""}`;
+  const c = types?.types?.[f.type];
+  return String(c ? (c.column === "domain" ? c.sql : c.pg) : f.type).toLowerCase();
+};
+
 // The model of an app's database: each entity with a table (pronto's `server`), keyed by its
 // message, with its live fields and its retired ones by number. The proto says what a column is (its
 // number, its name, its wire type, a retirement); .pronto/check-inputs.json (`inputs`, pronto's facts
@@ -102,6 +114,7 @@ export function model(protoText, inputs, machinesSql = "") {
     const facts = (f) => clean({
       name: f.name,
       type: canonical(f, inputs.types),
+      sql: physical(f, inputs.types),
       required: !!f.required,
       default: f.default,
       enum: enums[f.name],
@@ -171,6 +184,7 @@ export const verdicts = {
   "field-added": "replay",
   "enum-widened": "replay",
   "index-added": "replay",
+  "machine-added": "replay",
   "check-changed": "advisory",
   "check-added": "advisory",
 };
@@ -239,8 +253,9 @@ export function diff(before, after) {
         out.push({ ...at, kind: "field-renamed", to: now.name });
         continue;
       }
-      if (now.type !== was.type || (bf && af && af.proto !== bf.proto)) {
-        out.push({ ...at, kind: "field-retyped", from: was.type, to: now.type });
+      if (now.type !== was.type || (now.sql ?? null) !== (was.sql ?? null) || (bf && af && af.proto !== bf.proto)) {
+        const same = now.type === was.type && (now.sql ?? null) !== (was.sql ?? null);
+        out.push({ ...at, kind: "field-retyped", from: same ? was.sql : was.type, to: same ? now.sql : now.type });
         continue;
       }
       if (bf && ar) {
@@ -276,6 +291,7 @@ function alter(out, at, was, now, machined) {
   if (!now.required && was.required) out.push({ ...at, kind: "optional" });
   if ((now.default ?? null) !== (was.default ?? null)) out.push({ ...at, kind: "default", from: was.default ?? null, to: now.default ?? null });
   if (was.machine && !now.machine) out.push({ ...at, kind: "machine-dropped" });
+  if (!was.machine && now.machine) out.push({ ...at, kind: "machine-added" });
   if (was.enum && now.enum) {
     const removed = was.enum.filter((v) => !now.enum.includes(v));
     if (removed.length) out.push({ ...at, kind: "enum-narrowed", removed, admitted: now.enum, machined });
@@ -389,10 +405,11 @@ export function plan(changes, declared = {}, dropped = {}) {
 }
 
 // The names a replay-only change builds: a plain or unique index the replay creates, a check it adds,
-// a machine's trigger 010 creates.
+// a machine's trigger and check 010 creates.
 function rebuilt(c) {
   if (c.kind === "index-added") return [c.index];
   if (c.kind === "check-added") return [`${c.table}_${c.field}_check`, ...(c.machine ? [`trg_${c.table}_${c.field}_machine`] : [])];
+  if (c.kind === "machine-added") return [`trg_${c.table}_${c.field}_machine`, `${c.table}_${c.field}_check`];
   return [];
 }
 
@@ -468,21 +485,30 @@ export function droppedBy(migrations) {
 // holding every change in phase order, each opening with where it is and why. pgroll runs a raw SQL
 // operation alone (one with others is refused) and in one transaction, so the migration lands whole
 // or not at all. It runs once on a live database (pgroll's ledger), after the replay of the emitted
-// schema.
-export const migration = (ops) => ({ operations: [{ sql: { up: ops.map((o) => `-- ${o.at}: ${o.why}\n${o.sql}`).join("\n\n") } }] });
+// schema. Its constraints are checked as each statement ends: a deferred constraint trigger (an app's
+// own, DEFERRABLE INITIALLY DEFERRED) would otherwise leave events pending, and Postgres refuses to
+// alter a table with pending events, as a tighten after a backfill or a carry's ENABLE TRIGGER does.
+export const migration = (ops) => ({
+  operations: [{ sql: { up: ["-- Deferred constraints checked as each statement ends, so the tables can be altered after rows move.\nSET CONSTRAINTS ALL IMMEDIATE;", ...ops.map((o) => `-- ${o.at}: ${o.why}\n${o.sql}`)].join("\n\n") } }],
+});
 
-// The next migration's name: the day it is made (`date`, YYYYMMDD), its four-digit count among the
-// migrations made that day (`made`: the files and the one folded last), and a name that says what it
-// does, in the alphabet pgroll's ledger takes (mecha's pgroll.#Name): 20261109_0001_retire_ref.
-// pgroll's runner refuses a migration that sorts before one it has run, so a name that would sort
-// before another of the app's migrations (`others`: its own, and any written by hand) is refused.
+// The next migration's name: the day it is made (`date`, YYYYMMDD, in UTC so machines in other zones
+// agree), its four-digit count among the migrations made that day (`made`: the files and the one
+// folded last), and a name that says what it does, in the alphabet pgroll's ledger takes (mecha's
+// pgroll.#Name): 20261109_0001_retire_ref. pgroll's runner refuses a migration that sorts before one
+// it has run, so the name sorts after every migration the app has (`others`: its own, and any written
+// by hand): a later day already used (a clock ahead) is taken, with the next count. A migration
+// written by hand that sorts after every dated name is refused: no name can follow it.
+const DATED = /^(\d{8})_(\d{4})_/;
 export function nextName(made, slug, date, others = []) {
   if (!/^\d{8}$/.test(date)) throw new Error(`"${date}": a migration's day is YYYYMMDD`);
   if (!/^[a-z][a-z0-9_]*$/.test(slug)) throw new Error(`"${slug}": a migration's name says what it does, in lowercase letters, digits and _, starting with a letter`);
-  const count = made.filter((e) => e.startsWith(`${date}_`)).map((e) => Number(e.slice(9, 13))).filter(Number.isInteger).reduce((a, b) => Math.max(a, b), 0);
-  const name = `${date}_${String(count + 1).padStart(4, "0")}_${slug}`;
-  const after = [...made, ...others].filter((o) => o > name).sort();
-  if (after.length) throw new Error(`${name} sorts before the app's migration ${after.at(-1)}, and pgroll's runner refuses a migration that sorts before one it ran: make it on a later day, or rename that one`);
+  const all = [...made, ...others];
+  const day = all.map((e) => e.match(DATED)?.[1]).filter(Boolean).reduce((a, b) => (b > a ? b : a), date);
+  const count = all.map((e) => e.match(DATED)).filter((m) => m && m[1] === day).map((m) => Number(m[2])).reduce((a, b) => Math.max(a, b), 0);
+  const name = `${day}_${String(count + 1).padStart(4, "0")}_${slug}`;
+  const after = all.filter((o) => o > name).sort();
+  if (after.length) throw new Error(`${name} sorts before the app's migration ${after.at(-1)}, which pgroll's runner has to run first: a migration written by hand is named <YYYYMMDD>_<NNNN>_<name> too`);
   return name;
 }
 

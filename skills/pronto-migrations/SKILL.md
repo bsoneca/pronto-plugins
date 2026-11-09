@@ -36,7 +36,8 @@ app with no live database. Commit the snapshot, the sum and `migrations_ledger.c
    - `backfill.<Entity>.<column>`: the value the NULL rows of a column made required take, when it
      has no default, or only one read from the session, such as `auth_uid()`.
 4. Commit what make wrote: `migrations/<YYYYMMDD>_<NNNN>_<name>.json` (the day, its count that day,
-   what it does, e.g. `20261109_0001_retire_ref`), the snapshot, the sum and the ledger.
+   what it does, e.g. `20261109_0001_retire_ref`; the day in UTC), the snapshot, the sum and the
+   ledger.
    Delete the declaration once its migration is written.
 
 A change that only adds (an entity, an optional or defaulted column, an enum value, an index) writes
@@ -48,7 +49,8 @@ no migration: make moves the snapshot, and the replay adds it.
   by the replay. Once every database has run that migration, run
   `deno run --no-config -A migrations/migrate.ts fold <that migration>`, then make again.
 - **A merge conflict** on `snapshot.json` and `migrations.sum`: take main's side of both and of
-  `migrations_ledger.cue`, delete your branch's migration, and run make again.
+  `migrations_ledger.cue`, delete your branch's migration, restore its carry or backfill in
+  `migrations_spec.cue`, and run make again.
 
 ## What not to do
 

@@ -28,11 +28,8 @@ const LEDGER = "migrations_ledger.cue";
 const NAMED = /^\d{8}_\d{4}_[a-z][a-z0-9_]*\.json$/;
 
 class Refusal extends Error {}
-// The day a migration is made, on this machine's calendar: YYYYMMDD.
-const today = () => {
-  const d = new Date();
-  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
-};
+// The day a migration is made, in UTC so machines in other zones agree: YYYYMMDD.
+const today = () => new Date().toISOString().slice(0, 10).replaceAll("-", "");
 const fail = (msg: string): never => {
   throw new Refusal(msg);
 };

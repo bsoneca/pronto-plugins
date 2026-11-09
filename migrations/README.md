@@ -91,14 +91,14 @@ what it held to what pronto still emits for it. A default pronto keeps for a ret
 
 | Change | What it is | Why |
 | --- | --- | --- |
-| a name changed under a number; a type changed (precision and scale too); a field gone without `reserved`; a reserved number used again; an entity removed or renamed; its table renamed; a generated column changed; a primary key retired | **refused** | a reader of the JSON reads by name, and an open page or a queued row cannot be migrated: a new field beside a retired one instead (pronto's admission rules) |
+| a name changed under a number; a type changed (precision and scale too, and an alias with another column type: `tsvector` for `string`, `timestamptz` for `timestamp`); a field gone without `reserved`; a reserved number used again; an entity removed or renamed; its table renamed; a generated column changed; a primary key retired | **refused** | a reader of the JSON reads by name, and an open page or a queued row cannot be migrated: a new field beside a retired one instead (pronto's admission rules) |
 | a required column added to an existing table with no default, or with one a migration cannot compute (`auth_uid()`) | **refused** | the replay adds it to every row before any migration runs: give it a default, or add it optional and make it required later |
-| a name an earlier migration dropped, built again by the replay (an index, a check, a machine's trigger) | **refused** | every fresh database runs that migration after initdb built the name, and would lose it: `fold` the migration first, once every database has run it |
+| a name an earlier migration dropped, built again by the replay (an index, a check, a machine's trigger and check put back) | **refused** | every fresh database runs that migration after initdb built the name, and would lose it: `fold` the migration first, once every database has run it |
 | a column made optional; its default changed or removed; a check, unique, reference, machine or index removed | **ledger**, relax | `DROP NOT NULL`, `SET DEFAULT` or `DROP DEFAULT`, `DROP CONSTRAINT`, `DROP TRIGGER`, `DROP INDEX` |
 | a value gone from an enum or a machine | **ledger**, rows | the rows holding it carried, by the declared `carry`; without one, make names it |
 | a column made required | **ledger**, rows then tighten | its NULL rows filled from `backfill`, else from its default, then `SET NOT NULL`; with neither, make names the `backfill` it needs |
 | a unique or a reference added; an index changed | **ledger**, tighten | the constraint pronto's inline `UNIQUE` or `REFERENCES` makes (the reference `NOT VALID`); the index built again |
-| an entity or an optional or defaulted column added; an enum widened; an index added | **replay** | the emitted schema makes it; no migration |
+| an entity or an optional or defaulted column added; an enum widened; an index or a machine added | **replay** | the emitted schema makes it; no migration |
 | a check changed or added | **advisory** | the replay adds it `NOT VALID`, so rows written before are not checked. No carry can be named, since the values a check admitted before are not known |
 
 A unique index added, by the replay or by a migration, is noted too: it is built over every row and
@@ -129,15 +129,20 @@ deno run --no-config -A migrations/migrate.ts fold 20261109_0001_retire_ref   # 
 pgroll's grammar (mecha's `pgroll.#Migration`), so a field pgroll does not know fails the program's
 `cue vet`. With no migration it declares nothing, so the cluster gets no migrate step.
 
-A migration's name has three parts: the day make writes it, its count among that day's migrations
-(a folded one included), and what it does. For example, `20261109_0001_retire_ref`, then
-`20261109_0002_…`; the count starts again the next day. The name must sort after every migration the
-app has, its own and any written by hand, because pgroll's runner refuses a migration that sorts
-before one it ran. make refuses a name that would not.
+A migration's name has three parts: the day make writes it (in UTC, so machines in other zones
+agree), its count among that day's migrations (a folded one included), and what it does. For example,
+`20261109_0001_retire_ref`, then `20261109_0002_…`; the count starts again the next day.
+
+pgroll's runner refuses a migration that sorts before one it ran, so the name must sort after every
+migration the app has:
+- if a later day is already used (a clock ahead), make takes that day, with the next count;
+- a migration written by hand that sorts after every dated name is refused, so name hand migrations
+  the same way.
 
 **When two branches both made a migration**, `snapshot.json` and `migrations.sum` conflict at the
-merge. Take main's side of both and of `migrations_ledger.cue`, delete this branch's migration, and
-run make again: it names the migration after main's, with today's date.
+merge. Take main's side of both and of `migrations_ledger.cue`, delete this branch's migration, restore
+in `migrations_spec.cue` any carry or backfill it needed, and run make again: it names the migration
+after main's.
 
 ### Declarations
 
@@ -171,7 +176,9 @@ pronto's migrate step replays the emitted schema, then runs the pgroll migration
 
 **One operation, three phases.** A migration is one raw SQL operation, because pgroll 0.16 refuses a
 raw SQL operation beside others. pgroll runs it in one transaction, so the migration lands whole or
-not at all. Its changes run in three phases, whatever order the columns come in:
+not at all. It opens with `SET CONSTRAINTS ALL IMMEDIATE`: an app's deferred constraint trigger would
+otherwise leave events pending after rows move, and Postgres refuses to alter a table that has pending
+events. Its changes run in three phases, whatever order the columns come in:
 1. **Relax:** constraints, triggers and indexes dropped, `NOT NULL` lifted, defaults moved.
 2. **Move rows:** backfills and carries. No row is moved against a rule the same migration drops.
 3. **Tighten:** `SET NOT NULL`, uniques, references and indexes built.
@@ -187,6 +194,13 @@ triggers that exist when it runs.
 So a property that a later migration changes again ends as the latest model has it. One thing would
 not: a name a migration dropped that the replay builds again. make refuses that until the migration
 is folded.
+
+initdb also loads the app's seed rows (and a preview's fixture rows) before the migrations run. Those
+rows must satisfy every migration not yet folded:
+- a value an old migration carries away, but which the model admits again, is carried again in them;
+- a unique an old migration added, and a later model dropped, is built over them.
+
+Folding old migrations keeps this short.
 
 This is how the plugin keeps pronto's rule that the two paths, initdb and the ledger, do not claim the
 same thing: initdb and the replay add, and a migration only alters what an earlier model left.
@@ -205,6 +219,7 @@ same thing: initdb and the replay add, and a migration only alters what an earli
   the one place that reads it, and it refuses a version or a shape it does not know. The way to make
   the proto the whole contract upstream is a custom option on each field, `[(pronto.column) =
   {required, default, check}]`; this plugin would then read nothing else.
+- **Seed and fixture rows meet every migration not yet folded** (see "How it runs").
 - **Drift that was already there when `init --from` ran is not seen.** For example, a column retired
   before then that a live database still holds `NOT NULL`. The snapshot starts from the model, not
   from the database.
@@ -251,7 +266,8 @@ CI has neither Postgres nor pgroll, so the database runs below were done by hand
 | Case | Result |
 | --- | --- |
 | two raw SQL operations in one migration | refused by pgroll: `operation "sql" cannot be executed with other operations` |
-| the plugin's migration, three changes in one operation (a column retired, its unique index dropped, a state carried), on a database with rows | applied and in the ledger: the rows carried, the column nullable, the index gone, an insert without the column accepted |
+| the plugin's migration, three changes in one operation after `SET CONSTRAINTS ALL IMMEDIATE` (a column retired, its unique index dropped, a state carried), on a database with rows | applied and in the ledger: the rows carried, the column nullable, the index gone, an insert without the column accepted |
+| a migration that backfills a column and then tightens its table, which has a deferred constraint trigger (checked by the review) | without `SET CONSTRAINTS ALL IMMEDIATE`, refused for pending trigger events and rolled back; with it, applied |
 | the same migration on a database initdb built at the new model | applied, nothing changed |
 
 **A production pronto app on the gcp target** (51 tables, 624 live columns, 9 retired). The plugin

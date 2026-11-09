@@ -12,7 +12,7 @@ _order: Order: {
 	id:    "0x01"
 	fields: {
 		"1": {name: "id", type: "uuid", proto: "string", required: true, pk: true}
-		"2": {name: "status", type: "string", proto: "string", required: true, default: "'draft'", enum: ["draft", "open", "closed"], machine: true}
+		"2": {name: "status", type: "string", sql: "text", proto: "string", required: true, default: "'draft'", enum: ["draft", "open", "closed"], machine: true}
 		"3": {name: "note", type: "string", proto: "string", required: false}
 		"4": {name: "ref", type: "uuid", proto: "string", required: true, unique: true, ref: "customer"}
 		"5": {name: "stage", type: "string", proto: "string", required: true, default: "'new'", enum: ["new", "paid"]}
@@ -50,7 +50,10 @@ _proto: """
 
 _facts: {
 	version: 1
-	types: aliases: {text: "string", int: "int32"}
+	types: {
+		aliases: {text: "string", int: "int32", timestamptz: "timestamp"}
+		types: {string: {column: "plain", pg: "text"}, uuid: {column: "plain", pg: "uuid"}, timestamp: {column: "domain", sql: "portable_timestamp", pg: "timestamptz"}}
+	}
 	entities: {
 		Order: {
 			server: true
@@ -108,14 +111,14 @@ cases: {
 			table: "order"
 			id:    "0x01"
 			fields: {
-				"1": {name: "id", type: "uuid", proto: "string", required: true, pk: true}
-				"2": {name: "status", type: "string", proto: "string", required: true, default: "'draft'", enum: ["draft", "open", "it's"], machine: true}
-				"4": {name: "total", type: "decimal(10,2)", proto: "string", required: false, check: "total >= 0"}
-				"5": {name: "owner", type: "uuid", proto: "string", required: true, ref: "app_user", default: "auth_uid()"}
+				"1": {name: "id", type: "uuid", sql: "uuid", proto: "string", required: true, pk: true}
+				"2": {name: "status", type: "string", sql: "text", proto: "string", required: true, default: "'draft'", enum: ["draft", "open", "it's"], machine: true}
+				"4": {name: "total", type: "decimal(10,2)", sql: "portable_decimal_10_2", proto: "string", required: false, check: "total >= 0"}
+				"5": {name: "owner", type: "uuid", sql: "uuid", proto: "string", required: true, ref: "app_user", default: "auth_uid()"}
 			}
-			retired: {"3": {name: "old", type: "string", required: false, default: "''"}}
+			retired: {"3": {name: "old", type: "string", sql: "text", required: false, default: "''"}}
 			indexes: {order_status: {cols: ["status"], unique: true}, idx_order_status: {cols: ["status"], using: "btree"}}
-		}}, why: "an alias is its type (text is string), a decimal carries its precision and scale, and an index's name is as Postgres keeps an unquoted one"},
+		}}, why: "an alias is its type (text is string), a column keeps the type Postgres holds, a decimal carries its precision and scale, and an index's name is as Postgres keeps an unquoted one"},
 		{get: "Draft", matches: "^undefined$", why: "an entity with no table is not the database's"},
 	]}
 	"a proto and facts that disagree, or a pronto this does not read, are refused, never guessed": {suite: "migrations", steps: [
@@ -138,7 +141,7 @@ cases: {
 			#"ALTER TABLE "public"."order" DROP CONSTRAINT IF EXISTS "order_ref_fkey";"#,
 			#"DROP INDEX IF EXISTS "public"."order_ref_status";"#,
 		]},
-		{call: "mig.sql", args: [_order, [["Order.fields.2", null], ["Order.retired.2", {name: "status", type: "string", required: false, default: "'draft'"}]]], expect: [
+		{call: "mig.sql", args: [_order, [["Order.fields.2", null], ["Order.retired.2", {name: "status", type: "string", sql: "text", required: false, default: "'draft'"}]]], expect: [
 			#"ALTER TABLE "public"."order" ALTER COLUMN "status" DROP NOT NULL;"#,
 			#"DROP TRIGGER IF EXISTS "trg_order_status_machine" ON "public"."order";"#,
 			#"ALTER TABLE "public"."order" DROP CONSTRAINT IF EXISTS "order_status_check";"#,
@@ -150,6 +153,7 @@ cases: {
 		{call: "mig.plan", args: [_order, [["Order.fields.3.name", "remark"]]], holds: {ops: [], refused: [{at: "Order.note", kind: "field-renamed"}]}},
 		{call: "mig.changes", args: [_order, [["Order.fields.6.type", "decimal(10,2)"]]], expect: ["field-retyped Order.total"]},
 		{call: "mig.changes", args: [_order, [["Order.fields.6.proto", "double"]]], expect: ["field-retyped Order.total"], why: "the proto's type is the wire's"},
+		{call: "mig.plan", args: [_order, [["Order.fields.2.sql", "tsvector"]]], holds: {refused: [{kind: "field-retyped", why: "retyped from text to tsvector: a retype is a new field beside the retired one"}]}, why: "an alias with another column type (tsvector for string) is a retype the replay never applies"},
 		{call: "mig.changes", args: [_order, [["Order.fields.3", null]]], expect: ["field-dropped Order.note"]},
 		{call: "mig.changes", args: [_order, [["Order.fields.1", null], ["Order.retired.1", {name: "id", type: "uuid", required: false}]]], expect: ["pk-retired Order.id"]},
 		{call: "mig.changes", args: [_order, [["Order.fields.3", null], ["Order.retired.3", {name: "remark", type: "string", required: false}]]], expect: ["field-renamed Order.note"], why: "a retirement keeps the name"},
@@ -172,6 +176,7 @@ cases: {
 		{call: "mig.changes", args: [_order, [["Order.indexes.idx_order_stage", {cols: ["stage"], using: "btree"}]]], expect: ["index-added Order idx_order_stage"]},
 		{call: "mig.plan", args: [_order, [["Order.indexes.order_stage", {cols: ["stage"], unique: true}]]], holds: {ops: [], advisories: [{kind: "index-added"}]}, why: "a unique index the replay builds can fail on a duplicate"},
 		{call: "mig.changes", args: [_order, [["Order.fields.5.enum", ["new", "paid", "refunded"]]]], expect: ["enum-widened Order.stage"]},
+		{call: "mig.changes", args: [_order, [["Order.fields.5.machine", true]]], expect: ["machine-added Order.stage"], why: "010 builds the trigger"},
 	]}
 	"a column made required fills its NULLs, then is tightened: from what the app declares, else its default, else it is a need": {suite: "migrations", steps: [
 		{call: "mig.plan", args: [_order, [["Order.fields.3.required", true]]], holds: {ops: [], needs: [{at: "Order.note", declare: "backfill.Order.note"}]}},
@@ -247,18 +252,20 @@ cases: {
 		]], expect: {idx_order_note: "20261109_0001_a", trg_order_stage_machine: "20261109_0002_b"}, why: "a name the same migration builds again is not dropped"},
 		{call: "mig.plan", args: [_order, [["Order.indexes.idx_order_stage", {cols: ["stage"], using: "btree"}]], {}, {idx_order_stage: "20261109_0002_b"}], holds: {refused: [{kind: "rebuilt", why: "idx_order_stage was dropped by 20261109_0002_b, which every fresh database still runs after building it: fold 20261109_0002_b (once every database has run it) before building idx_order_stage again"}]}},
 		{call: "mig.plan", args: [_order, [["Order.fields.3.check", "note <> ''"]], {}, {order_note_check: "20261109_0001_a"}], holds: {refused: [{kind: "rebuilt"}], advisories: [{kind: "check-added"}]}},
+		{call: "mig.plan", args: [_order, [["Order.fields.5.machine", true]], {}, {trg_order_stage_machine: "20261109_0002_b"}], holds: {refused: [{kind: "rebuilt", why: "trg_order_stage_machine was dropped by 20261109_0002_b, which every fresh database still runs after building it: fold 20261109_0002_b (once every database has run it) before building trg_order_stage_machine again"}]}, why: "a machine put back on a column whose states did not change"},
 	]}
 	"a check changed or added is advisory: the replay adds it NOT VALID": {suite: "migrations", steps: [
 		{call: "mig.plan", args: [_order, [["Order.fields.6.check", "total > 0"]]], holds: {ops: [], advisories: [{at: "Order.total", kind: "check-changed"}]}},
 		{call: "mig.plan", args: [_order, [["Order.fields.3.check", "note <> ''"]]], holds: {ops: [], advisories: [{at: "Order.note", kind: "check-added"}]}},
 	]}
 	"a migration is pgroll's: one raw SQL operation, every change in it saying where and why": {suite: "migrations", steps: [
-		{call: "migrations.migration", args: [[{at: "Order.ref", why: "no longer required", sql: "ALTER TABLE x;"}, {at: "Order.note", why: "made required", sql: "ALTER TABLE y;"}]], expect: {operations: [{sql: {up: "-- Order.ref: no longer required\nALTER TABLE x;\n\n-- Order.note: made required\nALTER TABLE y;"}}]}, why: "pgroll refuses a raw SQL operation beside others, and runs one in one transaction"},
+		{call: "migrations.migration", args: [[{at: "Order.ref", why: "no longer required", sql: "ALTER TABLE x;"}, {at: "Order.note", why: "made required", sql: "ALTER TABLE y;"}]], expect: {operations: [{sql: {up: "-- Deferred constraints checked as each statement ends, so the tables can be altered after rows move.\nSET CONSTRAINTS ALL IMMEDIATE;\n\n-- Order.ref: no longer required\nALTER TABLE x;\n\n-- Order.note: made required\nALTER TABLE y;"}}]}, why: "pgroll refuses a raw SQL operation beside others, and runs one in one transaction, where a deferred constraint trigger's pending events would stop an ALTER TABLE"},
 		{call: "migrations.nextName", args: [[], "relax_ref", "20261109"], expect: "20261109_0001_relax_ref", why: "the day it is made, its count that day, and what it does"},
 		{call: "migrations.nextName", args: [["20261108_0007_a", "20261109_0001_b", "20261109_0002_c"], "d", "20261109"], expect: "20261109_0003_d"},
 		{call: "migrations.nextName", args: [["20261109_0002_c"], "e", "20261110"], expect: "20261110_0001_e", why: "the count starts again each day"},
 		{call: "migrations.nextName", args: [["20261109_0004_folded"], "f", "20261109", ["01_hand"]], expect: "20261109_0005_f", why: "the count goes on after a migration folded away, and a migration written by hand that sorts before stays before"},
-		{call: "migrations.nextName", args: [[], "a", "20261109", ["20261110_0001_x"]], throws: "20261109_0001_a sorts before the app's migration 20261110_0001_x", why: "pgroll's runner refuses a migration that sorts before one it ran"},
+		{call: "migrations.nextName", args: [[], "a", "20261109", ["20261110_0001_x"]], expect: "20261110_0002_a", why: "a later day already used (a clock ahead) is taken, so the name sorts after it, as pgroll's runner needs"},
+		{call: "migrations.nextName", args: [[], "a", "20261109", ["zz_hand"]], throws: "20261109_0001_a sorts before the app's migration zz_hand", why: "no dated name can follow it"},
 		{call: "migrations.nextName", args: [[], "Relax-Ref", "20261109"], throws: "lowercase letters, digits and _", why: "pgroll's ledger takes these names"},
 		{call: "migrations.nextName", args: [[], "0001", "20261109"], throws: "starting with a letter", why: "the name says what the migration does"},
 		{call: "migrations.nextName", args: [[], "a", "2026-11-09"], throws: "YYYYMMDD"},
