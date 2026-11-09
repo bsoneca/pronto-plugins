@@ -77,6 +77,8 @@ flagd: document: {
 // holds the flags baked into the image instead, at hand's host, refreshed at every replay.
 flagd: sql: """
 	-- pronto-flags: the app's flags in its database (flags_plugin.cue's flagd.sql). Generated, do not edit.
+	SET lock_timeout = '30s';
+	SET statement_timeout = '60s';
 	CREATE SCHEMA IF NOT EXISTS pronto_flags;
 	GRANT USAGE ON SCHEMA pronto_flags TO PUBLIC;
 	-- The document flagd serves, and the host it is evaluated for: one row, written by put() alone.
