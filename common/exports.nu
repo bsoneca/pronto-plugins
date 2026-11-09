@@ -16,6 +16,7 @@ const exports = [
 	{name: "journeys", expr: "journeys.out", rule: "journeys"}
 	{name: "perf", expr: "perf.out", rule: "perf"}
 	{name: "flagd", expr: "flagd.document", rule: "flags"}
+	{name: "flagsql", expr: "flagd.sql", rule: "flags"}
 	{name: "adsense", expr: "adsense", rule: "ads"}
 	{name: "umami", expr: "analytics.umami", rule: "analytics"}
 ]
