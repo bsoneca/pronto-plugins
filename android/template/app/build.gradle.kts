@@ -64,4 +64,6 @@ dependencies {
     implementation("com.yandex.div:glide:33.6.0")
     implementation("androidx.biometric:biometric:1.1.0")
     testImplementation("junit:junit:4.13.2")
+    // The real org.json: the platform's is a stub in a JVM test (AskTest reads and writes JSON).
+    testImplementation("org.json:json:20250517")
 }

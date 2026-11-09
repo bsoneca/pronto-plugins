@@ -109,3 +109,14 @@ termUnlockNoneBuilt: strings.Contains(_term.files["android/app/build.gradle.kts"
 _unlocked: #Host & {app: "emit", base: "https://emit.example", unlock: "biometric"}
 termUnlockBiometricBuilt: strings.Contains(_unlocked.files["android/app/build.gradle.kts"].text, "resValue(\"string\", \"pronto_unlock\", \"biometric\")") & true
 termUnlockShips: list.SortStrings([for p, _ in _term.files if strings.HasSuffix(p, "/Unlock.kt") || strings.HasSuffix(p, "/UnlockTest.kt") {p}]) & ["android/app/src/main/kotlin/dev/pronto/emit/Unlock.kt", "android/app/src/test/kotlin/dev/pronto/emit/UnlockTest.kt"]
+
+// The terminal's autofill (FillService.kt): asked for in android.json, it ships its service, declares
+// it, and seeds the contract; asked for by nobody, the manifest names no service. It needs the unlock.
+termFillNone: [for p, _ in _term.files if strings.HasSuffix(p, "/FillService.kt") || strings.HasSuffix(p, "/autofill.json") {p}] & []
+termFillNoneDeclared: strings.Contains(_term.files["android/app/src/main/AndroidManifest.xml"].text, "AUTOFILL") & false
+_filling: #Host & {app: "emit", base: "https://emit.example", autofill: true}
+termFillUnlocks: _filling.unlock & "biometric"
+termFillShips: list.SortStrings([for p, _ in _filling.files if strings.HasSuffix(p, "/FillService.kt") || strings.HasSuffix(p, "/FillActivity.kt") || strings.HasSuffix(p, "/autofill_service.xml") || strings.HasSuffix(p, "/fill.xml") {p}]) & ["android/app/src/main/kotlin/dev/pronto/emit/FillActivity.kt", "android/app/src/main/kotlin/dev/pronto/emit/FillService.kt", "android/app/src/main/res/values/fill.xml", "android/app/src/main/res/xml/autofill_service.xml"]
+termFillDeclared: strings.Contains(_filling.files["android/app/src/main/AndroidManifest.xml"].text, "android:permission=\"android.permission.BIND_AUTOFILL_SERVICE\"") & strings.Contains(_filling.files["android/app/src/main/AndroidManifest.xml"].text, "android:label=\"emit\"") & true
+termFillSeeded: _filling.files["android/app/src/main/assets/autofill.json"].seed & true
+termFillWithoutUnlockRefused: [if (#Host & {app: "emit", autofill: true, unlock: "none"}).unlock == _|_ {"refused"}, "accepted"][0] & "refused"
