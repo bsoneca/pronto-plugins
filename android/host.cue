@@ -60,6 +60,8 @@ _terminal: {
 	"app/src/main/kotlin/MainActivity.kt": _ @embed(file="template/terminal/app/src/main/kotlin/MainActivity.kt", type=text)
 	"app/src/main/kotlin/TerminalEngine.kt": _ @embed(file="template/terminal/app/src/main/kotlin/TerminalEngine.kt", type=text)
 	"app/src/main/kotlin/SceneView.kt":      _ @embed(file="template/terminal/app/src/main/kotlin/SceneView.kt", type=text)
+	"app/src/main/kotlin/SealedStore.kt":    _ @embed(file="template/terminal/app/src/main/kotlin/SealedStore.kt", type=text)
+	"app/src/test/kotlin/SealTest.kt":       _ @embed(file="template/terminal/app/src/test/kotlin/SealTest.kt", type=text)
 	"app/src/debug/kotlin/Driver.kt":      _ @embed(file="template/terminal/app/src/debug/kotlin/Driver.kt", type=text)
 	"app/src/release/kotlin/Driver.kt":    _ @embed(file="template/terminal/app/src/release/kotlin/Driver.kt", type=text)
 	"app/src/debug/kotlin/Passkeys.kt":    _ @embed(file="template/terminal/app/src/debug/kotlin/Passkeys.kt", type=text)

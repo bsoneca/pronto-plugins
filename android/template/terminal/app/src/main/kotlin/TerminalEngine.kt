@@ -63,7 +63,8 @@ class TerminalEngine(
     private val random = SecureRandom()
     private lateinit var qjs: QuickJs
 
-    private fun prefs(ns: String) = context.getSharedPreferences("terminal-$actor-$ns", Context.MODE_PRIVATE)
+    // Sealed at rest (SealedStore.kt); a value another build left in plain preferences moves in.
+    private val store by lazy { SealedStore(context, actor) }
 
     private fun asset(name: String) = context.assets.open(name).bufferedReader().use { it.readText() }
 
@@ -114,11 +115,11 @@ class TerminalEngine(
             null
         }
         qjs.function("__native_clear") { a -> timers.remove((a[0] as Number).toLong())?.cancel(); null }
-        qjs.function("__native_kv_get") { a -> prefs(a[0] as String).getString(a[1] as String, null) }
-        qjs.function("__native_kv_set") { a -> prefs(a[0] as String).edit().putString(a[1] as String, a[2] as String).apply(); null }
-        qjs.function("__native_kv_del") { a -> prefs(a[0] as String).edit().remove(a[1] as String).apply(); null }
-        qjs.function("__native_kv_clear") { a -> prefs(a[0] as String).edit().clear().apply(); null }
-        qjs.function("__native_kv_keys") { a -> JSONArray(prefs(a[0] as String).all.keys.toList()).toString() }
+        qjs.function("__native_kv_get") { a -> store.get(a[0] as String, a[1] as String) }
+        qjs.function("__native_kv_set") { a -> store.set(a[0] as String, a[1] as String, a[2] as String); null }
+        qjs.function("__native_kv_del") { a -> store.del(a[0] as String, a[1] as String); null }
+        qjs.function("__native_kv_clear") { a -> store.clear(a[0] as String); null }
+        qjs.function("__native_kv_keys") { a -> JSONArray(store.keys(a[0] as String)).toString() }
         qjs.function("__native_intl") { a -> intl(a[0] as String, a[1] as String, JSONObject(a[2] as String), a[3] as String) }
         qjs.function("__native_fetch") { a ->
             fetch((a[0] as Number).toLong(), a[1] as String, a[2] as String, JSONObject(a[3] as String), a[4] as String?)

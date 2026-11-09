@@ -58,6 +58,11 @@ scenariosSeededEmpty: _term.files["android/android.json"] & {seed: true, text: "
 scenariosRunnerShips: strings.Contains(_terminal["terminal/scenarios.ts"], "integrate@android's runner") & true
 vaultSeedsNoScenarios: [for p, _ in _t.files if p == "android/android.json" {p}] & []
 
+// Sealed storage: the store and its JVM test land in the id's package, the test has junit.
+sealedStore: strings.HasPrefix(_term.files["android/app/src/main/kotlin/dev/pronto/emit/SealedStore.kt"].text, "package dev.pronto.emit\n") & true
+sealTest: strings.HasPrefix(_term.files["android/app/src/test/kotlin/dev/pronto/emit/SealTest.kt"].text, "package dev.pronto.emit\n") & true
+sealTestRuns: strings.Contains(_term.files["android/app/build.gradle.kts"].text, "testImplementation(\"junit:junit:4.13.2\")") & true
+
 // A release's certificates (android.json's signing): the door admits its passkeys and serves its
 // Digital Asset Links, beside any other host's; none writes a declaration that says nothing.
 _fp: "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
