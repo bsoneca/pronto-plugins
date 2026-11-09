@@ -126,6 +126,8 @@ function isTappable(el) {
   const tag = lname(el);
   if (has(el, "disabled") || attr(el, "aria-disabled") === "true") return false;
   for (let a = el.parentElement; a; a = a.parentElement) if (lname(a) === "fieldset" && has(a, "disabled")) return false;
+  // A held control (a ticked hatch's touch layout) is pressed and let go, never tapped: interact gives it both.
+  if (has(el, "data-hatch-hold")) return false;
   if (tag === "button" || tag === "summary") return true;
   if (tag === "a" && has(el, "href")) return true;
   if (tag === "input") return /^(checkbox|radio|submit|button|reset|image)$/.test((attr(el, "type") || "").toLowerCase());
@@ -655,7 +657,7 @@ function a11y(el, kind, _C, extra) {
   if (/^h[1-6]$/.test(tag) || role === "heading") o.type = "header";
   else if (kind === "image") o.type = "image";
   else if (extra && extra.type) o.type = extra.type;
-  else if (isTappable(el)) o.type = "button";
+  else if (isTappable(el) || has(el, "data-hatch-hold")) o.type = "button";
   if (attr(el, "aria-hidden") === "true") o.mode = "exclude";
   else if (kind === "image" && attr(el, "alt") === "") o.mode = "exclude";
   else if (kind === "container" && isTappable(el)) o.mode = "merge";
@@ -668,6 +670,11 @@ function interact(div, el, C, kind, extra) {
   if (isTappable(el)) {
     const id = C.reg(el);
     div.actions = [{ log_id: id, url: "pronto://tap/" + id }];
+  }
+  if (has(el, "data-hatch-hold") && !has(el, "disabled")) {
+    const id = C.reg(el);
+    div.press_start_actions = [{ log_id: id, url: "pronto://press/" + id }];
+    div.press_end_actions = [{ log_id: id, url: "pronto://release/" + id }];
   }
   if (has(el, "data-on-contextmenu") && !has(el, "disabled")) {
     const id = C.reg(el);

@@ -14,9 +14,12 @@
 // A v3 scene (scene, model, anim, camera, audio; the contract's "Contract v3") is checked here as the Unity
 // host's Scene.Check checks it, kept in the DOM with its attributes and classes, and drawn natively: compile.js
 // turns the scene element into one DivKit custom div ("pronto-scene") that Kotlin's SceneView draws in OpenGL.
-// What the phone does not do yet: a ticked hatch gets no held input (no touch layout; PRONTO-101). There is no
-// ad network: an outcome's ad ends `none` at once, as the contract's
-// "no ad to show".
+// A ticked hatch whose binding lists `input` gets a touch layout: one button per control
+// (div#hatch-<name>-pad, button[data-hatch-hold=<control>], in the binding's order) beside the hatch, which
+// compile.js gives DivKit's press start and press end. Every tick passes the controls held then, in the binding's
+// order, as Unity's keyboard does; a press let go before the tick still counts for that one tick, as the
+// contract's "a tap shorter than a frame still counts" (PRONTO-101).
+// There is no ad network: an outcome's ad ends `none` at once, as the contract's "no ad to show".
 
 const NODE = new Set(["tag", "key", "class", "attrs", "text", "style", "children"]);
 const STYLE = new Set(["left", "top", "width", "height", "opacity"]);
@@ -33,6 +36,8 @@ const ALLOWED = {
   audio: ["clip", "volume", "loop"],
 };
 const WORDS = new Set(["shape", "prefab", "color", "target", "clip", "loop"]);
+
+const repeat = (fn, ms) => { const t = setInterval(fn, ms); return () => clearInterval(t); };
 
 const clone = (v) => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
 
@@ -183,10 +188,12 @@ export function patch(doc, el, node) {
  * @param {string} name
  * @param {object | string} bindingJson
  * @param {Record<string, any>} module
- * @param {{log?: {error: (m: string) => unknown, log: (m: string) => unknown}, css?: string | null}} [options]
+ * @param {{log?: {error: (m: string) => unknown, log: (m: string) => unknown}, css?: string | null,
+ *   every?: (fn: () => void, ms: number) => () => void}} [options]
  *   css: the hatch's own stylesheet (android.json hatches.<name>.css), linked while it is mounted.
+ *   every: how a ticked hatch is called each frame (setInterval; a test steps it by hand); returns its stop.
  */
-export function bound(name, bindingJson, module, { log = console, css = null } = {}) {
+export function bound(name, bindingJson, module, { log = console, css = null, every = repeat } = {}) {
   const binding = bindingOf(bindingJson);
   for (const f of ["init", "view"]) if (typeof module[f] !== "function") throw new Error(`hatch ${name}: the module exports no ${f}`);
   if (binding.hz && typeof module.tick !== "function") throw new Error(`hatch ${name}: a ticked binding needs tick`);
@@ -211,7 +218,41 @@ export function bound(name, bindingJson, module, { log = console, css = null } =
       (doc.head ?? doc.documentElement).appendChild(sheet);
     }
 
-    const outside = (el) => !mountEl.contains(el);
+    // The touch layout: a ticked hatch's controls, each held while a finger is on it.
+    const held = new Set();
+    const pressed = new Set();
+    const pad = binding.hz && binding.input.length ? doc.createElement("div") : null;
+    const onPress = (event) => {
+      const c = event.target?.closest?.("[data-hatch-hold]")?.getAttribute("data-hatch-hold");
+      if (!c || !binding.input.includes(c)) return;
+      if (event.type === "pointerdown") { held.add(c); pressed.add(c); }
+      else held.delete(c);
+    };
+    if (pad) {
+      pad.setAttribute("id", `hatch-${name}-pad`);
+      pad.setAttribute("class", "hatch-pad");
+      pad.setAttribute("data-hatch-pad", name);
+      pad.setAttribute("style", "display: flex; flex-direction: row");
+      for (const c of binding.input) {
+        const b = doc.createElement("button");
+        b.setAttribute("type", "button");
+        b.setAttribute("id", `hatch-${name}-hold-${c}`);
+        b.setAttribute("data-hatch-hold", c);
+        b.setAttribute("aria-label", c);
+        b.setAttribute("style", "display: block; flex-grow: 1");
+        b.textContent = c;
+        pad.appendChild(b);
+      }
+      for (const t of ["pointerdown", "pointerup", "pointercancel"]) pad.addEventListener(t, onPress);
+      mountEl.after(pad);
+    }
+    const input = () => {
+      const now = binding.input.filter((c) => held.has(c) || pressed.has(c));
+      pressed.clear();
+      return now;
+    };
+
+    const outside = (el) => !mountEl.contains(el) && !pad?.contains(el);
     const reads = () => {
       const r = {};
       for (const { key, select, attrs } of binding.reads) {
@@ -285,12 +326,12 @@ export function bound(name, bindingJson, module, { log = console, css = null } =
     let pending = null;
     const Observer = doc.defaultView?.MutationObserver ?? globalThis.MutationObserver;
     const observer = new Observer((records) => {
-      if (drawing || pending || records.every((r) => r.target === mountEl || mountEl.contains(r.target))) return;
+      if (drawing || pending || records.every((r) => r.target === mountEl || mountEl.contains(r.target) || pad?.contains(r.target))) return;
       pending = setTimeout(() => { pending = null; draw(); }, 0);
     });
     observer.observe(screen, { subtree: true, childList: true, attributes: true, characterData: true });
 
-    const ticker = binding.hz ? setInterval(() => call(() => module.tick(clone(state), reads(), [], ctx())), 1000 / binding.hz) : null;
+    const ticker = binding.hz ? every(() => call(() => module.tick(clone(state), reads(), input(), ctx())), 1000 / binding.hz) : null;
     draw();
 
     let stopped = false;
@@ -299,10 +340,11 @@ export function bound(name, bindingJson, module, { log = console, css = null } =
       stopped = true;
       observer.disconnect();
       if (pending) clearTimeout(pending);
-      if (ticker) clearInterval(ticker);
+      ticker?.();
       mountEl.removeEventListener("click", onGesture);
       mountEl.removeEventListener("contextmenu", onGesture);
       mountEl.remove();
+      pad?.remove();
       sheet?.remove();
     };
     signal?.addEventListener?.("abort", cleanup);

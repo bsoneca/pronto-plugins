@@ -623,4 +623,29 @@ cases: {
 		{call: "android.sceneFault", args: [[{tag: "anim", key: "n", attrs: {target: "a"}}]], matches: "an anim needs a target"},
 		{call: "android.sceneFault", args: [[{tag: "audio", key: "u", attrs: {clip: "x", volume: 2}}]], matches: "volume is 0..1"},
 	]}
+
+	"a ticked hatch's input is a pad of held controls, in the binding's order, and each tick gets those held": {suite: "android", steps: [
+		{call: "android.held", args: [["left", "right", "fire"], 30, ["tick", "down fire", "tick", "down left", "tick", "up fire", "tick", "cancel left", "tick"]]},
+		{pick: ["controls", "inputs", "faults", "padAfterStop"], expect: [["left", "right", "fire"], [[], ["fire"], ["left", "fire"], ["left"], []], [], false]},
+	]}
+
+	"a press let go before the tick still counts for that one tick": {suite: "android", steps: [
+		{call: "android.held", args: [["left", "fire"], 60, ["down fire", "up fire", "tick", "tick"]]},
+		{pick: ["inputs"], expect: [[["fire"], []]]},
+	]}
+
+	"a hatch with no tick, or a tick and no input, has no pad": {suite: "android", steps: [
+		{call: "android.held", args: [["fire"], 0, ["down fire"]]},
+		{pick: ["controls", "buttons"], expect: [null, []]},
+		{call: "android.held", args: [[], 30, ["tick"]]},
+		{pick: ["controls", "inputs", "buttons"], expect: [null, [[]], []]},
+	]}
+
+	"the pad's controls compile to DivKit's press start and press end, buttons and never taps": {suite: "android", steps: [
+		{call: "android.held", args: [["left", "fire"], 30, []]},
+		{get: "buttons", expect: [
+			{control: "left", start: ["pronto://press/<id>"], end: ["pronto://release/<id>"], tap: false, type: "button"},
+			{control: "fire", start: ["pronto://press/<id>"], end: ["pronto://release/<id>"], tap: false, type: "button"},
+		]},
+	]}
 }
