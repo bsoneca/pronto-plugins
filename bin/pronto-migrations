@@ -1,0 +1,19 @@
+#!/bin/sh
+# Adds or refreshes pronto-migrations in a pronto app: its database carried forward by migrations made
+# from the changes to its emitted proto (migrations/README.md).
+#   bin/pronto-migrations <app-dir>
+# Writes migrations/migrate.ts and migrations/plan.js (the driver and its rules) and
+# migrations_plugin.cue (the schema, in the app's package), all regenerated, and seeds
+# migrations_spec.cue, the app's own opt-in. What `migrate.ts init` and `make` write is the app's.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+shift
+[ $# -eq 0 ] || { echo "pronto-migrations: unknown argument $1" >&2; exit 2; }
+package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" | head -n 1)
+[ -n "$package" ] || { echo "pronto-migrations: $app/program.cue names no package" >&2; exit 2; }
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+./saytw --script tools.nu cue export ./migrations/export -t "package=$package" -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"
