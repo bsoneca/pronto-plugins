@@ -7,7 +7,7 @@ A native Android host for a pronto app: no WebView. The program's own handlers r
 - `android/`: a Gradle project from [`template/`](template), its package `dev.pronto.<name>`.
 - `.say.json` rules `setup`, `build`, `test` and `launch`, each answering `@android`.
 - `.config/mise/conf.d/android.toml`: Temurin JDK, the SDK's cmdline-tools, Gradle.
-- The bridges [a native terminal](../docs/native-terminal.md) names: sealed **storage** for `device` tables (built: SQLite, every value AES-256/GCM under an AndroidKeyStore key, see below), a **Keystore** key behind one biometric prompt (PRONTO-104, not built), and an **autofill** service that runs the app's handler over the vault (PRONTO-105, not built).
+- The bridges [a native terminal](../docs/native-terminal.md) names: sealed **storage** for `device` tables (built: SQLite, every value AES-256/GCM under an AndroidKeyStore key, see below), a **Keystore** key behind one biometric prompt (built for the terminal mode, opt-in: see Biometric unlock below), and an **autofill** service that runs the app's handler over the vault (PRONTO-105, not built).
 - `screen.js` and `autofill.json`, written once and then the app's.
 
 ## Two modes
@@ -20,6 +20,19 @@ In terminal mode, `build@android` bundles the interpreter (`android/terminal/bun
 ### Sealed storage
 
 In terminal mode the `__native_kv_*` bridges (`localStorage`, where omnishell keeps the `device` tables) write to SQLite (`terminal-sealed.db`, table `kv(ns, actor, k, v)`), never to plain text. Each value is sealed with AES/GCM/NoPadding under an AndroidKeyStore AES-256 key (`pronto-terminal-store`, no user authentication): a fresh 12-byte nonce, a 128-bit tag, and the address `actor NUL ns NUL k` as associated data, stored as nonce followed by ciphertext. A value that does not open (tampered, or moved to another address) reads as absent and logs `PRONTO STORE refused <ns>/<k>` once. Values an earlier build left in SharedPreferences move in on first use and the preferences are cleared. The seal (`Seal` in `SealedStore.kt`) is pure over a `SecretKey`, so a JVM test (`SealTest.kt`) runs it on a software key. Scenarios can assert `{undisclosed: "text"}`: no file in the app's private directory (read with `run-as`) holds the text.
+
+### Biometric unlock
+
+An app asks for it with `"unlock": "biometric"` in `android/android.json` (held to `#Host`'s `unlock`, default `none`, which prompts nobody). With it the terminal starts only after one strong-biometric prompt per process (`Unlock.kt`):
+
+- The prompt opens a random AES-256 data key. It is wrapped by an AndroidKeyStore key (`pronto-terminal-unlock`) that requires a strong biometric for every use and is destroyed when a new fingerprint or face is enrolled.
+- The sealed storage above then seals under that data key, in a file of its own (`terminal-unlocked.db`), and the data key lives only in the process's memory.
+- The wrapped key is written before any row is.
+- The prompt has three outcomes, each logged as `PRONTO UNLOCK <outcome>`:
+  - `opened`: the terminal starts.
+  - `canceled` or `refused`: the reason is shown on the screen and the terminal stays shut.
+  - `lost` (rows with no wrapped key, or a key the Keystore invalidated): the reason is shown and nothing is silently recreated.
+- The wrap is pure over an initialised cipher, so a JVM test (`UnlockTest.kt`) runs it on a software key. Only the prompt needs a phone, where an emulator's fingerprint answers it (`adb emu finger touch 1`).
 
 ### Hatches
 

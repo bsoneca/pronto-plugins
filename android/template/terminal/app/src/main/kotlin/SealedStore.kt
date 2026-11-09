@@ -49,14 +49,22 @@ object Seal {
 // AndroidKeyStore key that never leaves the Keystore. omnishell keeps the app's `device` tables in
 // localStorage, so what a phone holds of them is ciphertext. A value that fails to open reads as
 // absent, and is logged once; nothing here throws at the page.
-class SealedStore(private val context: Context, private val actor: String) {
-    private val db: SQLiteDatabase = object : SQLiteOpenHelper(context, "terminal-sealed.db", null, 1) {
+//
+// An app that asks for an unlock (Unlock.kt) gives its data key and file instead: the values are
+// then sealed under a key one biometric prompt opened, in a file of their own.
+class SealedStore(
+    private val context: Context,
+    private val actor: String,
+    private val given: SecretKey? = null,
+    file: String = "terminal-sealed.db",
+) {
+    private val db: SQLiteDatabase = object : SQLiteOpenHelper(context, file, null, 1) {
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("CREATE TABLE kv(ns TEXT NOT NULL, actor TEXT NOT NULL, k TEXT NOT NULL, v BLOB NOT NULL, PRIMARY KEY(ns, actor, k))")
         }
         override fun onUpgrade(db: SQLiteDatabase, from: Int, to: Int) {}
     }.writableDatabase
-    private val key: SecretKey by lazy { keystoreKey() }
+    private val key: SecretKey by lazy { given ?: keystoreKey() }
     private val migrated = HashSet<String>()
     private val refused = HashSet<String>()
 

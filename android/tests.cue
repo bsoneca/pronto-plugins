@@ -1,6 +1,9 @@
 package android
 
-import "strings"
+import (
+	"list"
+	"strings"
+)
 
 _t: #Host & {app: "emit", mode: "vault"}
 
@@ -98,3 +101,11 @@ _gradleTerm:           _term.files["android/app/build.gradle.kts"].text
 _gradleVault:          _t.files["android/app/build.gradle.kts"].text
 gradleSignsOnEnv:      strings.Contains(_gradleTerm, "System.getenv(\"PRONTO_ANDROID_KEYSTORE\")") & strings.Contains(_gradleTerm, "System.getenv(\"PRONTO_ANDROID_KEYSTORE_PASSWORD\")") & strings.Contains(_gradleTerm, "System.getenv(\"PRONTO_ANDROID_KEY_ALIAS\")") & strings.Contains(_gradleTerm, "if (signed) signingConfig = signingConfigs.getByName(\"release\")") & true
 gradleVaultSignsOnEnv: strings.Contains(_gradleVault, "if (signed) signingConfig = signingConfigs.getByName(\"release\")") & true
+
+// The unlock (Unlock.kt): asked for in android.json, it reaches the build; asked for by nobody, no
+// app is prompted. The unlock's sources ship with the terminal.
+termUnlockNone:      _term.unlock & "none"
+termUnlockNoneBuilt: strings.Contains(_term.files["android/app/build.gradle.kts"].text, "resValue(\"string\", \"pronto_unlock\", \"none\")") & true
+_unlocked: #Host & {app: "emit", base: "https://emit.example", unlock: "biometric"}
+termUnlockBiometricBuilt: strings.Contains(_unlocked.files["android/app/build.gradle.kts"].text, "resValue(\"string\", \"pronto_unlock\", \"biometric\")") & true
+termUnlockShips: list.SortStrings([for p, _ in _term.files if strings.HasSuffix(p, "/Unlock.kt") || strings.HasSuffix(p, "/UnlockTest.kt") {p}]) & ["android/app/src/main/kotlin/dev/pronto/emit/Unlock.kt", "android/app/src/test/kotlin/dev/pronto/emit/UnlockTest.kt"]

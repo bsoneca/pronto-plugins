@@ -6,6 +6,8 @@ import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.widget.TextView
+import javax.crypto.SecretKey
 import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -85,7 +87,28 @@ class MainActivity : AppCompatActivity() {
         }
         setContentView(scroll)
 
-        val started = TerminalEngine(this, base, "$base$path", actor, { runOnUiThread { recreate() } }, { runOnUiThread { finish() } }, { url -> runOnUiThread { open(url) } })
+        // An app that asks for an unlock (android.json's "unlock": "biometric") starts its terminal
+        // only once one strong-biometric prompt opened its storage's key; a refusal or a lost key
+        // is said on the screen and the terminal never starts.
+        if (getString(R.string.pronto_unlock) == "biometric") {
+            lifecycleScope.launch {
+                val key = try {
+                    Unlock.open(this@MainActivity, applicationInfo.loadLabel(packageManager).toString())
+                } catch (e: Locked) {
+                    Log.w("pronto", "PRONTO UNLOCK ${if (e.lost) "lost" else if (e.canceled) "canceled" else "refused"}: ${e.message}")
+                    setContentView(TextView(this@MainActivity).apply { text = e.message; setPadding(48, 48, 48, 48) })
+                    return@launch
+                }
+                Log.i("pronto", "PRONTO UNLOCK opened")
+                startTerminal(path, actor, key)
+            }
+        } else {
+            startTerminal(path, actor, null)
+        }
+    }
+
+    private fun startTerminal(path: String, actor: String, key: SecretKey?) {
+        val started = TerminalEngine(this, base, "$base$path", actor, { runOnUiThread { recreate() } }, { runOnUiThread { finish() } }, { url -> runOnUiThread { open(url) } }, key)
         engine = started
         lifecycleScope.launch { started.tree.collect { if (it.isNotEmpty()) show(JSONObject(it)) } }
         lifecycleScope.launch { started.failure.collect { if (it != null) Log.e("pronto", "the terminal stopped", it) } }
