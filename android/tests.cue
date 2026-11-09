@@ -73,3 +73,23 @@ vaultNoDecl: [for p, _ in (#Host & {app: "emit", mode: "vault", package: "emit"}
 lowerPrintRefused: [if (#Host & {app: "emit", signing: ["ab:cd"]}).signing == _|_ {"refused"}, "accepted"][0] & "refused"
 releasePasskeys: strings.Contains(_term.files["android/app/src/release/kotlin/dev/pronto/emit/Passkeys.kt"].text, "CredentialManager.create(context)") & true
 releaseCredentials: strings.Contains(_term.files["android/app/build.gradle.kts"].text, "releaseImplementation(\"androidx.credentials:credentials:1.5.0\")") & true
+
+// A release signed from Secret Manager (android.json's release): the Gradle build signs when the three
+// PRONTO_ANDROID_* variables are set and stays unsigned without them, and android/sign-release.sh is
+// written, with the project and secret filled, only where the app names where its key lives.
+_released: #Host & {app: "emit", release: project: "emit-proj"}
+releaseSecretDefault:   _released.release.secret & "android-release-signing"
+releaseScript:          strings.Contains(_released.files["android/sign-release.sh"].text, "ANDROID_SIGNING_PROJECT:-emit-proj") & true
+releaseScriptSecret:    strings.Contains(_released.files["android/sign-release.sh"].text, "ANDROID_SIGNING_SECRET:-android-release-signing") & true
+releaseScriptNotSeeded: _released.files["android/sign-release.sh"].seed & false
+releaseNamedSecret: strings.Contains((#Host & {app: "emit", release: {project: "emit-proj", secret: "my-key"}}).files["android/sign-release.sh"].text, "ANDROID_SIGNING_SECRET:-my-key") & true
+releaseVaultToo: strings.Contains((#Host & {app: "emit", mode: "vault", release: project: "emit-proj"}).files["android/sign-release.sh"].text, "gcloud secrets versions access latest") & true
+releaseNoTokenLeft: [for p, f in _released.files if strings.Contains(f.text, "__RELEASE_") {p}] & []
+noReleaseNoScript: [for p, _ in _term.files if p == "android/sign-release.sh" {p}] & []
+noReleaseNoScriptVault: [for p, _ in _t.files if p == "android/sign-release.sh" {p}] & []
+releaseProjectRefused: [if (#Host & {app: "emit", release: project: "Bad Project"}).release == _|_ {"refused"}, "accepted"][0] & "refused"
+releaseSecretRefused: [if (#Host & {app: "emit", release: {project: "emit-proj", secret: "a/b"}}).release == _|_ {"refused"}, "accepted"][0] & "refused"
+_gradleTerm:           _term.files["android/app/build.gradle.kts"].text
+_gradleVault:          _t.files["android/app/build.gradle.kts"].text
+gradleSignsOnEnv:      strings.Contains(_gradleTerm, "System.getenv(\"PRONTO_ANDROID_KEYSTORE\")") & strings.Contains(_gradleTerm, "System.getenv(\"PRONTO_ANDROID_KEYSTORE_PASSWORD\")") & strings.Contains(_gradleTerm, "System.getenv(\"PRONTO_ANDROID_KEY_ALIAS\")") & strings.Contains(_gradleTerm, "if (signed) signingConfig = signingConfigs.getByName(\"release\")") & true
+gradleVaultSignsOnEnv: strings.Contains(_gradleVault, "if (signed) signingConfig = signingConfigs.getByName(\"release\")") & true

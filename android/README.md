@@ -48,6 +48,18 @@ A web hatch is a host-DOM module (three.js, a canvas, Web Audio) that the phone 
 
   Without `signing`, the door admits no app, and a release's ceremony is refused there as a browser's at a wrong origin would be.
 
+### Signing a release
+
+`:app:assembleRelease` signs the APK only when `PRONTO_ANDROID_KEYSTORE` (a path), `PRONTO_ANDROID_KEYSTORE_PASSWORD` and `PRONTO_ANDROID_KEY_ALIAS` are all set; without them it makes the unsigned APK it always did, so ci and the gates need no secret. The key itself is never a file in a repo: it is one Secret Manager secret, a JSON value `{"keystore": <base64 PKCS12>, "password": ..., "alias": ...}` that the app's owner puts once with their own command.
+
+`android/android.json`'s `release` says where it lives:
+
+```json
+{"release": {"project": "my-project", "secret": "android-release-signing"}}
+```
+
+`secret` defaults to `android-release-signing`; `project` is the Secret Manager project. With `release`, `pronto-android` writes `android/sign-release.sh` (none without it). Run `sh android/sign-release.sh` signed in to gcloud: it reads the secret's latest version with your own gcloud (`ANDROID_SIGNING_PROJECT` and `ANDROID_SIGNING_SECRET` override the names), writes the keystore to a mode-600 temporary file removed on exit, exports the three variables, runs Gradle as `build@android` does (the app's mise), checks the APK with the SDK's `apksigner verify --print-certs` and prints the signer's SHA-256. That fingerprint is what `signing` lists, so the door admits the release's passkeys. It needs `gcloud` and `jq`.
+
 Scenario steps beyond the DOM's: `signUp`, `pay` (the stand-in checkout), `address`, `response` (a request the page made and what it answered), and a step's `flag`/`unless`.
 
 ## Use
