@@ -31,6 +31,39 @@ await stop();
 await Deno.writeTextFile(`${dir}/terminal.js`, code);
 await Deno.remove(esm);
 await Deno.remove(map);
+// The hatches android/android.json binds (`hatches: {<name>: {binding}}`, the hatch contract's binding.json, the
+// same file the Unity host runs): each is one module, this directory's bound.js over the app's pure module,
+// written under bound/ at the address of the web's host-DOM module (shell.json hostDom.<name>.src), where
+// TerminalEngine registers it in that module's place. The web's (three.js, a canvas) is never loaded.
+const boundDir = `${dir}/bound`;
+await Deno.remove(boundDir, { recursive: true }).catch(() => {});
+const declared = JSON.parse(await Deno.readTextFile("android/android.json")).hatches ?? {};
+const hostDom = JSON.parse(await Deno.readTextFile("shell/shell.json")).hostDom ?? {};
+for (const [name, { binding }] of Object.entries(declared as Record<string, { binding: string }>)) {
+  const src: string | undefined = hostDom[name]?.src;
+  if (!src?.startsWith("shell/hatches/")) throw new Error(`bundle: hatch ${name} is bound in android/android.json but shell.json declares no host-DOM hatch ${name}`);
+  const json = await Deno.readTextFile(binding);
+  const { module } = JSON.parse(json);
+  const out = `${boundDir}/${src.slice("shell/".length)}`;
+  await Deno.mkdir(out.slice(0, out.lastIndexOf("/")), { recursive: true });
+  const entry = await Deno.makeTempFile({ dir: ".", prefix: ".bound-", suffix: ".js" });
+  try {
+    await Deno.writeTextFile(entry, [
+      `import * as hatch from ${JSON.stringify(`./${module}`)};`,
+      `import { bound } from ${JSON.stringify(`${here}bound.js`)};`,
+      `export default bound(${JSON.stringify(name)}, ${json.trim()}, hatch);`,
+    ].join("\n"));
+    const made = await new Deno.Command(Deno.execPath(), {
+      args: ["bundle", "--quiet", "--no-lock", "--platform", "browser", entry, "-o", out],
+      stdout: "inherit",
+      stderr: "inherit",
+    }).output();
+    if (!made.success) throw new Error(`bundle: hatch ${name}'s module did not bundle`);
+  } finally {
+    await Deno.remove(entry);
+  }
+  console.log(`bound hatch ${name}: ${binding} at ${src}`);
+}
 // SES at omnishell's own pin, so the phone's cage is the page's.
 await Deno.copyFile(`${omnishell}/interpreter/vendor/ses.umd.min.js`, `${dir}/ses.umd.min.js`);
 // The catalogues the interpreter fetches beside the screens, under the same names.

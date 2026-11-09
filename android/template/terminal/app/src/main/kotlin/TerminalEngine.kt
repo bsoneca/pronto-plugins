@@ -230,7 +230,9 @@ class TerminalEngine(
         bridge()
         // The host-DOM hatches the shell declares (shell/hatches/**.js) are modules the interpreter
         // imports by their address on the web; they are the app's assets, so they are named so here.
-        for (name in hatches("hatches")) qjs.addModule("$base/shell/$name", asset(name))
+        // A hatch android.json binds (bundle.ts: bound/<its address>) takes the web module's place.
+        val bound = hatches("bound/hatches").associateBy { it.removePrefix("bound/") }
+        for (name in hatches("hatches")) qjs.addModule("$base/shell/$name", asset(bound[name] ?: name))
         // quickjs-kt converts a script's completion value back to Kotlin and
         // throws on a symbol, so every script here ends in undefined.
         // Parsing terminal.js (about 2 MB) is most of a cold start, so each script's bytecode is kept in

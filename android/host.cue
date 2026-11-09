@@ -60,6 +60,7 @@ _terminal: {
 	"app/src/debug/kotlin/Passkeys.kt":    _ @embed(file="template/terminal/app/src/debug/kotlin/Passkeys.kt", type=text)
 	"app/src/release/kotlin/Passkeys.kt":  _ @embed(file="template/terminal/app/src/release/kotlin/Passkeys.kt", type=text)
 	"app/src/main/assets/prelude.js":      _ @embed(file="template/terminal/app/src/main/assets/prelude.js", type=text)
+	"terminal/bound.js":                   _ @embed(file="template/terminal/bound.js", type=text)
 	"terminal/browser.js":                 _ @embed(file="template/terminal/browser.js", type=text)
 	"terminal/bundle.ts":                  _ @embed(file="template/terminal/bundle.ts", type=text)
 	"terminal/compile.js":                 _ @embed(file="template/terminal/compile.js", type=text)

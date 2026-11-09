@@ -148,7 +148,7 @@ jobs:
           sayt --script tools.nu cue vet -c -t package=check -t module=check ./modular-design/export
           sayt --script tools.nu nu modular-design/test.nu
       - name: Test the Android host
-        run: deno test --allow-read --allow-env android/test/host_test.ts
+        run: deno test --allow-read --allow-env android/test/host_test.ts android/test/bound_test.ts
       - name: Test the identity broker
         run: deno test --no-config --allow-net identity/oidc_test.ts identity/broker
       - name: Test the billing broker
