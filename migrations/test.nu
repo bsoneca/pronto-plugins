@@ -4,7 +4,8 @@
 # does (a column retired, a machine's state gone) and makes the migration: the lint refuses the moved
 # model, make names the carry it needs, writes the migration once it is declared, and the program reads
 # it. Then a migration edited by hand is refused; an index the migration dropped is refused until the
-# migration is folded; and a rename is refused.
+# migration is folded; a rename is refused; and two branches that each made a migration are merged,
+# rebase making the side's again after main's.
 def check [what: string, ok: bool] {
 	if not $ok { error make {msg: $"migrations/test.nu: ($what)"} }
 	print $"ok  ($what)"
@@ -13,6 +14,10 @@ def check [what: string, ok: bool] {
 def migrate [app: path, ...args: string] {
 	cd $app
 	^deno run --no-config --allow-read --allow-write --allow-run --allow-env migrations/migrate.ts ...$args | complete
+}
+
+def --wrapped g [...args] {
+	^git -c user.name=t -c user.email=t@example.com -c init.defaultBranch=main -c core.autocrlf=false ...$args | complete
 }
 
 def field [name: string, ordinal: int, type: string, required: bool, more: record = {}] {
@@ -106,6 +111,43 @@ def main [] {
 	check "make refuses a rename" ($renamed.exit_code == 1 and ($renamed.stderr | str contains "refused  Order.status: renamed to state"))
 	check "and writes nothing" ((open --raw ($app | path join migrations/snapshot.json)) == $snapshot)
 	check "the lint refuses it too" ((migrate $app check).stderr | str contains "Order.status: renamed to state")
+
+	# Two branches each make a migration. main's (status made optional) is released first; the side
+	# branch's (status's default changed) has main's count and a name that sorts before it, so pgroll's
+	# runner would refuse it. Merging main in conflicts on the snapshot, the sum and the ledger; rebase
+	# takes main's and makes the side's changes again, named after main's.
+	let status_open = (field status 2 string true {default: "'open'"})
+	emitted $app $proto2 $retired [{name: orders_ref, cols: [id]}] [open closed]
+	check "the model is the snapshot again" ((migrate $app check).exit_code == 0)
+	cd $app
+	g init -q
+	g add -A
+	g commit -q -m base
+	g checkout -q -b side
+	emitted $app $proto2 [$id $status_open ((field ref 3 uuid false) | merge {retired: true})] [{name: orders_ref, cols: [id]}] [open closed]
+	check "the side branch makes its migration" ((migrate $app make status_default).exit_code == 0)
+	cd $app
+	g add -A
+	g commit -q -m side
+	g checkout -q main
+	emitted $app $proto2 [$id (field status 2 string false {default: "'draft'"}) ((field ref 3 uuid false) | merge {retired: true})] [{name: orders_ref, cols: [id]}] [open closed]
+	check "main makes its migration" ((migrate $app make status_optional).exit_code == 0)
+	cd $app
+	g add -A
+	g commit -q -m main
+	let theirs = (ls migrations | where name =~ '_status_optional\.json$' | get name.0 | path basename | str replace '.json' '')
+	let ours = $"($day)_0002_status_default"
+	check "the side's migration sorts before main's, as pgroll would refuse" ($ours < $theirs)
+	g checkout -q side
+	check "merging main conflicts on what make wrote" ((g merge -q main).exit_code != 0)
+	# generate settles the emitted files: the model is both branches' changes.
+	emitted $app $proto2 [$id (field status 2 string false {default: "'open'"}) ((field ref 3 uuid false) | merge {retired: true})] [{name: orders_ref, cols: [id]}] [open closed]
+	check "the lint refuses the merged tree" ((migrate $app check).exit_code == 1)
+	let rebased = (migrate $app rebase main)
+	let names = (ls ($app | path join migrations) | get name | path basename | where {|n| $n =~ '^\d{8}_\d{4}_.*\.json$' } | sort)
+	check "rebase keeps main's migration and makes the side's again, named after it" ($rebased.exit_code == 0 and ($names | length) == 2 and ($names.0 == $"($theirs).json") and ($names.1 | str ends-with "_status_default.json") and ($names.1 > $names.0) and not ($"($ours).json" in $names))
+	check "the rebased migration holds only the side's change" ((open ($app | path join $"migrations/($names.1)") | get operations.0.sql.up) =~ "SET DEFAULT 'open'" and not ((open ($app | path join $"migrations/($names.1)") | get operations.0.sql.up) =~ "DROP NOT NULL"))
+	check "the lint passes after rebase" ((migrate $app check).exit_code == 0)
 	cd $root
 	rm -r $dir
 }

@@ -117,6 +117,7 @@ deno run --no-config -A migrations/migrate.ts init --from <ref>   # the release 
 deno run --no-config -A migrations/migrate.ts plan                # what make would write
 deno run --no-config -A migrations/migrate.ts make retire_ref     # migrations/20261109_0001_retire_ref.json
 ./saytw lint                                                      # runs migrate.ts check
+deno run --no-config -A migrations/migrate.ts rebase main         # after merging main in, when both made a migration
 deno run --no-config -A migrations/migrate.ts fold 20261109_0001_retire_ref   # once every database has run it
 ```
 
@@ -129,7 +130,7 @@ deno run --no-config -A migrations/migrate.ts fold 20261109_0001_retire_ref   # 
 All of them are committed: the regenerated files too, as an app commits every host's `*_plugin.cue`.
 `check` needs only deno. `plan` and `make` also run `cue` (or the binary `CUE` names) to read the
 declarations and the app's migration names from the program.
-| `migrations/snapshot.json`, `migrations/migrations.sum`, `migrations/<YYYYMMDD>_<NNNN>_<name>.json`, `migrations_ledger.cue` | the app's, written by `init`, `make` and `fold` only, committed |
+| `migrations/snapshot.json`, `migrations/migrations.sum`, `migrations/<YYYYMMDD>_<NNNN>_<name>.json`, `migrations_ledger.cue` | the app's, written by `init`, `make`, `rebase` and `fold` only, committed |
 
 `migrations_ledger.cue` embeds each migration into `code.state.migrations`. pronto types it there with
 pgroll's grammar (mecha's `pgroll.#Migration`), so a field pgroll does not know fails the program's
@@ -146,10 +147,14 @@ migration the app has:
 - a migration written by hand that sorts after every dated name is refused, so name hand migrations
   the same way.
 
-**When two branches both made a migration**, `snapshot.json` and `migrations.sum` conflict at the
-merge. Take main's side of both and of `migrations_ledger.cue`, delete this branch's migration, restore
-in `migrations_spec.cue` any carry or backfill it needed, and run make again: it names the migration
-after main's.
+**When two branches both made a migration**, `snapshot.json`, `migrations.sum` and
+`migrations_ledger.cue` conflict at the merge, and the branch's migration may sort before one main
+already released, which pgroll's runner would refuse. After merging main in and running generate, run
+`deno run --no-config -A migrations/migrate.ts rebase main`. It takes main's snapshot, sum, ledger and
+migrations whole, removes the branch's own migrations, and runs make again under the branch's name,
+so the branch's changes become one migration named after main's. If make then names a carry or
+backfill (one the branch's migration had, and its declaration was deleted), declare it and run
+`make <name>`.
 
 ### Declarations
 
@@ -254,7 +259,8 @@ same thing: initdb and the replay add, and a migration only alters what an earli
   - the program reading the migration;
   - a hand edit, refused;
   - an index rebuilt over a migration that dropped it, refused until `fold`;
-  - a rename, refused.
+  - a rename, refused;
+  - two branches that each made a migration, merged: `rebase` remakes the side's after main's.
 
 ```sh
 ./saytw --script tools.nu cue vet -c ./migrations

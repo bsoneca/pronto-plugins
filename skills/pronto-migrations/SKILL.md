@@ -50,9 +50,10 @@ no migration: make moves the snapshot, and the replay adds it.
 - **`… was dropped by <migration>, which every fresh database still runs after building it: fold …`**:
   an index, check or machine's trigger that an earlier migration dropped is built again by the replay. Once every database has run that migration, run
   `deno run --no-config -A migrations/migrate.ts fold <that migration>`, then make again.
-- **A merge conflict** on `snapshot.json` and `migrations.sum`: take main's side of both and of
-  `migrations_ledger.cue`, delete your branch's migration, restore its carry or backfill in
-  `migrations_spec.cue`, and run make again.
+- **A merge conflict** on `snapshot.json`, `migrations.sum` or `migrations_ledger.cue` (main also
+  made a migration): run generate, then `deno run --no-config -A migrations/migrate.ts rebase main`.
+  It takes main's files and makes your branch's changes again as one migration named after main's.
+  If it names a carry or backfill, declare it and run `make <name>`.
 
 ## What not to do
 

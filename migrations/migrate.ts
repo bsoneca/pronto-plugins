@@ -9,6 +9,10 @@
 //                        count that day, what it does), and the snapshot, the sum and the ledger
 //                        moved with it; nothing when a change is refused or needs a declaration
 //                        (migrations_spec.cue), each named
+//   rebase <ref> [name]  after merging <ref> (main) into a branch that also ran make: <ref>'s
+//                        snapshot, sum, ledger and migrations taken whole, the branch's own
+//                        migrations removed, and make run again, so they become one migration
+//                        named after <ref>'s
 //   fold <name>          the migrations through <name> deleted, once every database has run them:
 //                        pgroll's ledger keeps them, and a fresh database no longer runs them
 //   check                the lint: the snapshot is the model, every file make wrote is as it wrote it,
@@ -106,6 +110,42 @@ async function write(now: ReturnType<typeof rules.model>, names: string[], pkgNa
   Deno.writeTextFileSync(LEDGER, rules.ledger(pkgName, names));
 }
 
+// The next migration from the snapshot to the model, with the snapshot, the sum and the ledger moved
+// with it; false when the model is the snapshot. A refusal or a need writes nothing.
+async function make(slug: string): Promise<boolean> {
+  const pkgName = pkg();
+  const now = modelAt();
+  const list = rules.diff(snapshotModel(), now);
+  if (!list.length) return false;
+  const { declared, names: all } = program();
+  const p = rules.plan(list, declared, droppedNow());
+  report(p);
+  if (p.refused.length || p.needs.length) fail("nothing written");
+  const names = migrations();
+  if (p.ops.length) {
+    const last = folded();
+    const name = rules.nextName(last ? [...names, last] : names, slug, today(), all);
+    Deno.writeTextFileSync(`${DIR}/${name}.json`, JSON.stringify(rules.migration(p.ops), null, 2) + "\n");
+    names.push(name);
+    console.log(`wrote ${DIR}/${name}.json: ${p.ops.length} change${p.ops.length === 1 ? "" : "s"}, in one operation`);
+  } else {
+    console.log("nothing for the ledger: the replay of the emitted schema makes these changes");
+  }
+  await write(now, names, pkgName, folded());
+  console.log(`moved ${SNAPSHOT}, ${SUM} and ${LEDGER}`);
+  return true;
+}
+
+// What a git ref holds of the files make writes (the snapshot, the sum, the ledger and each
+// migration), by their path in the app, read through the app's own path in its repository.
+function filesAt(ref: string): Map<string, string> {
+  const sha = run("git", ["rev-parse", "--verify", `${ref}^{commit}`]).trim();
+  const prefix = run("git", ["rev-parse", "--show-prefix"]).trim();
+  const held = run("git", ["ls-tree", "-r", "--name-only", "--full-tree", sha, "--", `${prefix}${DIR}/`, `${prefix}${LEDGER}`]).split("\n").filter(Boolean).map((p) => p.slice(prefix.length));
+  const wanted = held.filter((p) => p === SNAPSHOT || p === SUM || p === LEDGER || (p.startsWith(`${DIR}/`) && NAMED.test(p.slice(DIR.length + 1))));
+  return new Map(wanted.map((p) => [p, run("git", ["show", `${sha}:${prefix}${p}`])]));
+}
+
 async function main(command: string | undefined, args: string[]) {
   switch (command) {
     case "init": {
@@ -129,26 +169,34 @@ async function main(command: string | undefined, args: string[]) {
     case "make": {
       if (args.length !== 1) fail("make <name>: what the migration does, in lowercase letters, digits and _");
       await sound();
+      if (!await make(args[0])) fail("the model is the snapshot: nothing to make");
+      break;
+    }
+    case "rebase": {
+      // After a merge of <ref> (main) into a branch that also ran make: the snapshot, the sum and the
+      // ledger conflict, and the branch's migration may sort before one <ref> already released. Take
+      // <ref>'s migrations/ and ledger whole, drop the branch's own migrations, and make again from
+      // <ref>'s snapshot, so the branch's changes become one migration named after <ref>'s.
+      if (args.length < 1 || args.length > 2) fail("rebase <ref> [name]: the ref merged in (main), and what the migration does (the branch's own name when omitted)");
+      const [ref, given] = args;
       const pkgName = pkg();
-      const now = modelAt();
-      const list = rules.diff(snapshotModel(), now);
-      if (!list.length) fail("the model is the snapshot: nothing to make");
-      const { declared, names: all } = program();
-      const p = rules.plan(list, declared, droppedNow());
-      report(p);
-      if (p.refused.length || p.needs.length) fail("nothing written");
-      const names = migrations();
-      if (p.ops.length) {
-        const last = folded();
-        const name = rules.nextName(last ? [...names, last] : names, args[0], today(), all);
-        Deno.writeTextFileSync(`${DIR}/${name}.json`, JSON.stringify(rules.migration(p.ops), null, 2) + "\n");
-        names.push(name);
-        console.log(`wrote ${DIR}/${name}.json: ${p.ops.length} change${p.ops.length === 1 ? "" : "s"}, in one operation`);
-      } else {
-        console.log("nothing for the ledger: the replay of the emitted schema makes these changes");
+      const theirs = filesAt(ref);
+      if (!theirs.has(SNAPSHOT)) fail(`${ref} has no ${SNAPSHOT}: rebase follows a ref that took the snapshot`);
+      const theirNames = [...theirs.keys()].filter((p) => p.startsWith(`${DIR}/`) && NAMED.test(p.slice(DIR.length + 1))).map((p) => p.slice(DIR.length + 1, -5));
+      const mine = migrations().filter((n) => !theirNames.includes(n));
+      const slugs = [...new Set(mine.map((n) => n.replace(/^\d{8}_\d{4}_/, "")))];
+      const slug = given ?? (slugs.length === 1 ? slugs[0] : fail(mine.length ? `the branch made ${mine.join(", ")}: name the one migration they become (rebase ${ref} <name>)` : `the branch made no migration: name what the next one does (rebase ${ref} <name>), in case the model needs one`));
+      for (const n of migrations()) if (!theirNames.includes(n)) Deno.removeSync(`${DIR}/${n}.json`);
+      for (const [p, text] of theirs) if (p !== LEDGER) Deno.writeTextFileSync(p, text);
+      Deno.writeTextFileSync(LEDGER, rules.ledger(pkgName, theirNames.sort()));
+      await sound();
+      console.log(`took ${ref}'s ${SNAPSHOT}, ${SUM}, ${LEDGER} and ${theirNames.length} migration${theirNames.length === 1 ? "" : "s"}${mine.length ? `; removed the branch's ${mine.join(", ")} (git keeps them)` : ""}`);
+      try {
+        if (!await make(slug)) console.log("the model is the snapshot: nothing to make");
+      } catch (e) {
+        if (e instanceof Refusal) fail(`${e.message}: ${ref}'s migrations are in place; declare what make names (a carry or backfill the branch's migration had), then run make ${slug}`);
+        throw e;
       }
-      await write(now, names, pkgName, folded());
-      console.log(`moved ${SNAPSHOT}, ${SUM} and ${LEDGER}`);
       break;
     }
     case "fold": {
@@ -183,7 +231,7 @@ async function main(command: string | undefined, args: string[]) {
       break;
     }
     default:
-      fail("init [--from <ref>] | plan | make <name> | fold <name> | check");
+      fail("init [--from <ref>] | plan | make <name> | rebase <ref> [name] | fold <name> | check");
   }
 }
 
