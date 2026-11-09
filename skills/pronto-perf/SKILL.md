@@ -60,6 +60,6 @@ Then:
    `./saytw --script tools.nu nu -c 'use perf/perf.nu; perf report
    http://127.0.0.1:<PERF_COLLECTOR_METRICS_PORT>/metrics'`.
 
-An app whose program renders on request (pronto's `render` host peer) conflicts
-with `perf_hatch.cue`'s `cluster: meta: hostPeers`: CUE cannot join two lists.
-The host does not handle that yet; say so rather than editing the generated file.
+An app whose program renders on request (pronto's `render` host peer) adds its peer's
+`PRONTO_UPSTREAM_RENDER` to `cluster: surface: targets: caddy: entrypoint: env` beside
+`perf_hatch.cue`'s `PRONTO_UPSTREAM_PERF_COLLECTOR`: a record, so the two join. The hatch needs pronto 1.1 or later.

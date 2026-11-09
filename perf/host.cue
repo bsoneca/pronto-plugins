@@ -125,10 +125,10 @@ _configPath:   "shell/hatches/perf/config.js"
 					note: "pronto-perf's collector: Vector turning the reporter's batches into metrics"
 				}
 
-				// The door proxies to it on a host launch too: pronto runs the
-				// program's host peers (code.meta.hostPeers, pronto 0.24.1-gcp.26)
-				// beside its own renderer.
-				code: meta: hostPeers: "perf-collector": 8687
+				// The door proxies to it on a host launch too, by its peer address: the
+				// port a launch hands the collector (its `http`), so stacks side by side
+				// never share one.
+				cluster: surface: targets: caddy: entrypoint: env: PRONTO_UPSTREAM_PERF_COLLECTOR: {peer: "perf-collector", port: "http"}
 				cluster: surface: targets: "perf-collector": {
 					srcs: globs: ["observability/perf.collector.yaml", "perf/perf.nu"]
 					expose: {

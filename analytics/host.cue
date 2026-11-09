@@ -24,9 +24,8 @@ _analyticsNu: _ @embed(file="analytics.nu", type=text)
 _loaderJs:    _ @embed(file="analytics.js", type=text)
 _standinTs:   _ @embed(file="standin.ts", type=text)
 
-// The stand-in's port on a host launch: a peer's port is its name in the door's Caddyfile, and a
-// launch on a slot moves every literal port of the stack (tests/slot.ts), so it must be no other
-// service's (flagd takes 8693 to 8696, the collectors 8686 and 8687, billing 8688, the analyst 8689).
+// The stand-in's port on a host launch is one the launch hands it (UMAMI_PORT), and the door
+// reaches it by its peer address (PRONTO_UPSTREAM_UMAMI); 8697 is its port in a container.
 _loaderPath: "shell/hatches/analytics/analytics.js"
 _configPath: "shell/hatches/analytics/config.js"
 
@@ -207,8 +206,9 @@ _configPath: "shell/hatches/analytics/config.js"
 					note: "sql_exporter publishing the business metrics from the analytics views, read-only"
 				}
 
-				// The door proxies the tracker's two addresses to it on a host launch too.
-				code: meta: hostPeers: "umami": 8697
+				// The door proxies the tracker's two addresses to it on a host launch too, by its
+				// peer address: the port a launch hands the stand-in (its `http`).
+				cluster: surface: targets: caddy: entrypoint: env: PRONTO_UPSTREAM_UMAMI: {peer: "umami", port: "http"}
 				cluster: surface: targets: umami: {
 					srcs: globs: ["analytics/standin.ts"]
 					expose: http: {port: 8697, env: "UMAMI_PORT"}

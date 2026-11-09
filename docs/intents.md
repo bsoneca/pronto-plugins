@@ -86,9 +86,9 @@ bin/pronto connect stripe apps/my-app --origin https://my-app.example --email me
 
 Steps, in order (`billing/connect.ts`):
 
-1. **pronto**: billing's service is one of the program's host peers (`code.meta.hostPeers`), which
-   pronto runs beside its own renderer from 0.24.1-gcp.26 on: an app on an older pronto is stopped
-   before anything is touched, with what to update.
+1. **pronto**: billing's service is a peer a host launch hands its port and the door reaches by its
+   peer address (`PRONTO_UPSTREAM_BILLING: {peer, port}`), which pronto 1.1.0 or later does: an app on
+   an older pronto is stopped before anything is touched, with what to update.
 2. **installed**: pronto-billing's files in the app (`install.ts`), its migrations numbered after
    the app's own.
 3. **owner**: the author's payout secret, made once and kept in Secret Manager

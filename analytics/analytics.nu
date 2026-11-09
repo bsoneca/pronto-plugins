@@ -21,15 +21,15 @@ def save-changed [path: path] {
 # collector, and nothing else of Umami (its console has its own address). An earlier run's go
 # first, so a changed address replaces the old one. Umami answers at the very paths, which its
 # TRACKER_SCRIPT_NAME and COLLECT_API_ENDPOINT name. On a host launch (a request for localhost) the
-# upstream is the stand-in, a host peer of the program by the name `umami` and the port 8697, which
-# the host door rewrites to the peer's address; anywhere else it is Umami at `upstream`, which is
+# upstream is the stand-in, the door's PRONTO_UPSTREAM_UMAMI (the launch sets it to the peer's
+# address; umami:8697 is its address in a container); anywhere else it is Umami at `upstream`, which is
 # not a peer of the release (the operator's state runs it, not the app's release). Neither gets the
 # app's cookies, authorization or referrer: Umami is told the page and its referrer by the tracker.
 export def route [script: string, collect: string, upstream: string] {
 	let proxy = [
 		"    @local host localhost 127.0.0.1"
 		"    route {"
-		"      reverse_proxy @local umami:8697 {"
+		"      reverse_proxy @local {$PRONTO_UPSTREAM_UMAMI:umami:8697} {"
 		"        header_up -Cookie"
 		"        header_up -Authorization"
 		"        header_up -Referer"

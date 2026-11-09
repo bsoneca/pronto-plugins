@@ -74,14 +74,14 @@ cases: {
 		{get: "states", expect: ["done", "todo", "todo", "todo", "done", "done", "todo"]},
 	]}
 	"an app whose pronto cannot run billing's service is stopped before anything is touched, with what to do": {suite: "stripe", steps: [
-		{call: "shop.stripe"}, {call: "shop.pinned", args: ["$", "0.24.1-gcp.25"]}, {keep: "shop"},
+		{call: "shop.stripe"}, {call: "shop.pinned", args: ["$", "1.0.9-gcp.4"]}, {keep: "shop"},
 		{call: "shop.connectStripe", args: ["$shop", _broker]}, {keep: "out"},
 		{get: "states", expect: ["gate"]},
-		{use: "out"}, {get: "notes.0", matches: "0\\.24\\.1-gcp\\.26"},
+		{use: "out"}, {get: "notes.0", matches: "1\\.1\\.0"},
 		{call: "shop.file", args: ["$shop", "billing_plugin.cue"], expect: null, why: "nothing installed"},
-		{call: "shop.pinned", args: ["$shop", "0.24.1-gcp.26"]},
+		{call: "shop.pinned", args: ["$shop", "1.1.4-gcp.4"]},
 		{call: "shop.connectStripe", args: ["$shop", _broker, "plan"]},
-		{pick: ["names.0", "states.0", "notes.0"], expect: ["a pronto that runs billing's service", "done", "0.24.1-gcp.26"]},
+		{pick: ["names.0", "states.0", "notes.0"], expect: ["a pronto that runs billing's service", "done", "1.1.4-gcp.4"]},
 	]}
 	"migration names follow the app's own, and a plan is written in minor units": {suite: "stripe", steps: [
 		{call: "stripe.migrationNames", args: [[]], expect: {billing: "billing_01", grants: "billing_02"}},
@@ -102,10 +102,11 @@ cases: {
 		{use: "moved"}, {get: 0}, {call: "probe.holdsEach", args: ["$", ["0xabc", "table:      \"subscription\""]], expect: [false, true]},
 		{call: "stripe.withIdInSpec", args: ["$moved.0", "$moved.1"], expect: null, why: "nothing left to move"},
 	]}
-	"host peers from 0.24.1-gcp.26 on, and the release a billing service is told the broker in": {suite: "stripe", steps: [
-		{value: ["0.24.1-gcp.25", "0.24.1-gcp.26", "0.24.1-gcp.30", "0.24.1-metal.2", "0.24.1", "0.25.0", "0.16.1-gcp.23"]},
-		{map: {call: "stripe.takesHostPeers", args: ["$"]}, expect: [false, true, true, false, true, true, false]},
+	"the host launch from 1.1.0 on, and the release a billing service is told the broker in": {suite: "stripe", steps: [
+		{value: ["0.24.1-gcp.26", "0.25.0", "1.0.9-gcp.4", "1.1.0", "1.1.4-gcp.4", "1.2.0-metal.1", "2.0.0"]},
+		{map: {call: "stripe.takesHostLaunch", args: ["$"]}, expect: [false, false, false, true, true, true, true]},
 		{call: "stripe.prontoPin", args: ["\"github.com/bonisoft3/pronto@v0\": {\n\t\tv: \"v0.24.1-gcp.24\"\n\t}"], expect: "0.24.1-gcp.24"},
+		{call: "stripe.prontoPin", args: ["\"github.com/bonisoft3/pronto@v1\": {\n\t\tv: \"v1.1.4-gcp.4\"\n\t}"], expect: "1.1.4-gcp.4"},
 		{value: [_k8sRelease, "GCP: schema.#Release & {}\n", "package x\n"]},
 		{map: {call: "stripe.releasedTo", args: ["$"]}, expect: ["k8s", "gcp", null]},
 		{call: "stripe.withBroker", args: [_k8sRelease, "https://broker.example"]},

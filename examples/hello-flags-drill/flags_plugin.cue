@@ -80,7 +80,10 @@ _flagdPorts: {ofrep: 8693, evaluation: 8694, management: 8695, sync: 8696}
 #FlagdArgs: {
 	file: string
 	ofrep: *"--ofrep-port \(_flagdPorts.ofrep) " | ""
-	out:  "start --uri file:\(file) \(ofrep)--port \(_flagdPorts.evaluation) --management-port \(_flagdPorts.management) --sync-port \(_flagdPorts.sync) --ofrep-sse-enabled=false --context-from-header X-Pronto-Host=host --context-from-header X-Pronto-Account=targetingKey"
+	// On a host launch these are the ports it hands out (FLAGD_PORT, FLAGD_MANAGEMENT_PORT,
+	// FLAGD_SYNC_PORT, which flagd reads), so stacks side by side never share them.
+	ports: *"--port \(_flagdPorts.evaluation) --management-port \(_flagdPorts.management) --sync-port \(_flagdPorts.sync) " | ""
+	out:  "start --uri file:\(file) \(ofrep)\(ports)--ofrep-sse-enabled=false --context-from-header X-Pronto-Host=host --context-from-header X-Pronto-Account=targetingKey"
 }
 
 // Where the released app's flags live: one object in a Cloud Storage bucket
@@ -168,16 +171,21 @@ code: capabilities: hatches: flagd: {
 	note: "pronto-flags' flagd: evaluates the app's feature flags (flags_spec.cue) over OFREP, behind the door's /ofrep/"
 }
 
-// The door proxies to it on a host launch too: pronto runs the program's host peers
-// (code.meta.hostPeers, pronto 0.24.1-gcp.26) beside its own renderer.
-code: meta: hostPeers: flagd: _flagdPorts.ofrep
+// The door proxies to it by its peer address: where a launch hands flagd its OFREP port
+// (mecha 0.22's host launch moves it), the door's variable follows.
+cluster: surface: targets: caddy: entrypoint: env: PRONTO_UPSTREAM_FLAGD: {peer: "flagd", port: "http"}
 
 cluster: surface: targets: flagd: {
 	srcs: globs: ["flags/flags.json"]
-	expose: http: {port: _flagdPorts.ofrep, env: "FLAGD_OFREP_PORT"}
+	expose: {
+		http:       {port: _flagdPorts.ofrep, env: "FLAGD_OFREP_PORT"}
+		eval:       {port: _flagdPorts.evaluation, env: "FLAGD_PORT"}
+		management: {port: _flagdPorts.management, env: "FLAGD_MANAGEMENT_PORT"}
+		sync:       {port: _flagdPorts.sync, env: "FLAGD_SYNC_PORT"}
+	}
 	"process-compose": activate: "mise x --"
 	entrypoint: {
-		do:    "exec flagd \((#FlagdArgs & {file: "flags/flags.json", ofrep: ""}).out)"
+		do:    "exec flagd \((#FlagdArgs & {file: "flags/flags.json", ofrep: "", ports: ""}).out)"
 		shell: "sh"
 		// The image's binary, distroless: no shell to run it with.
 		dockerfile: {do: "/flagd-build \((#FlagdArgs & {file: "/flags/flags.json"}).out)", shell: "exec"}

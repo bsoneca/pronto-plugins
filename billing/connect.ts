@@ -130,20 +130,14 @@ export function withBroker(release: string, broker: string): string {
   return release + `\n// The billing service sells through the operator's broker (connect stripe, docs/intents.md).\n${service}\n`;
 }
 
-/** The pronto an app's cue.mod pins, as "0.24.1-gcp.26"; null where it names none. */
-export const prontoPin = (moduleCue: string) => /"github\.com\/bonisoft3\/pronto@v0":\s*\{\s*v:\s*"v([^"]+)"/.exec(moduleCue)?.[1] ?? null;
-/** Whether a pronto runs a program's host peers beside its own renderer (code.meta.hostPeers),
- * which billing's service is: 0.24.1-gcp.26 on, or a later release. */
-export function takesHostPeers(pin: string): boolean {
-  const [base, pre] = pin.split("-", 2);
-  const [a, b, c] = base.split(".").map(Number);
-  const past = a > 0 || b > 24 || (b === 24 && c > 1);
-  if (past) return true;
-  if (b < 24 || (b === 24 && c < 1)) return false;
-  // 0.24.1 itself: a release past every prerelease; of the prereleases, gcp.26 and later.
-  if (pre === undefined) return true;
-  const gcp = /^gcp\.(\d+)/.exec(pre);
-  return !!gcp && Number(gcp[1]) >= 26;
+/** The pronto an app's cue.mod pins, as "1.1.4-gcp.4" (module `pronto@v1`; 0.24's was `@v0`); null where it names none. */
+export const prontoPin = (moduleCue: string) => /"github\.com\/bonisoft3\/pronto@v[01]":\s*\{\s*v:\s*"v([^"]+)"/.exec(moduleCue)?.[1] ?? null;
+/** Whether a pronto's host launch hands out a service's ports and names its peers (the `{peer, port}`
+ * form of an entrypoint's env, which billing's service and its local broker are written in): 1.1.0 on.
+ * An earlier one (0.24's `code.meta.hostPeers`) cannot read them. */
+export function takesHostLaunch(pin: string): boolean {
+  const [a, b] = pin.split("-", 1)[0].split(".").map(Number);
+  return a > 1 || (a === 1 && b >= 1);
 }
 
 export function steps(d: Deps, o: Options): Step[] {
@@ -152,14 +146,14 @@ export function steps(d: Deps, o: Options): Step[] {
   const spec = () => d.read(`${d.dir}/${SPEC}`);
   const local: Step[] = [
     {
-      // Billing's service is one of the program's host peers (code.meta.hostPeers), which a pronto
-      // before 0.24.1-gcp.26 does not take: the app could not generate. Known before anything is
-      // touched, not halfway through generate.
+      // Billing's service is written for pronto's host launch (launch-assigned ports, {peer, port}
+      // addresses), which a pronto before 1.1.0 does not take: the app could not generate. Known
+      // before anything is touched, not halfway through generate.
       name: "a pronto that runs billing's service",
       check: async () => {
         const pin = prontoPin((await d.read(`${d.dir}/cue.mod/module.cue`)) ?? "");
-        if (pin === null || takesHostPeers(pin)) return { done: true, note: pin ?? "" };
-        return { gate: `this app's pronto is ${pin}, which cannot run billing's service beside its own: update it to 0.24.1-gcp.26 or later (its .mise.toml and cue.mod/module.cue), generate, then run this again` };
+        if (pin === null || takesHostLaunch(pin)) return { done: true, note: pin ?? "" };
+        return { gate: `this app's pronto is ${pin}, which cannot run billing's service beside its own: update it to 1.1.0 or later (its .mise.toml and cue.mod/module.cue), generate, then run this again` };
       },
     },
     {

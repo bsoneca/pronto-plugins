@@ -6,6 +6,14 @@ beyond the browser, and beside them, on unmodified pronto. Why and how they are 
 
 ## Plugins
 
+The plugins that run a service beside the app on a host launch (journeys, perf, analytics, flags,
+billing) are written for pronto 1.1 or later (pronto-fork 1.1.4's host launch, mecha 0.22): a launch hands
+each exposed port out itself and names the peers by `{peer, port}` in an entrypoint's env, a form pronto
+0.24 does not read (it ran such services as `code.meta.hostPeers`, which these plugins no longer write). An
+app on 0.24 keeps the copy it has until it moves to 1.1; one that reinstalls (`bin/pronto-journeys <app>`,
+`-perf`, `-analytics`, `-flags`, `-billing`) must be on pronto 1.1 first, and `bin/pronto connect stripe`
+refuses an app that is not.
+
 - [ads](ads/README.md): rewarded ads a player chooses to watch.
 - [analytics](analytics/README.md): business numbers (users, paying users, games, funnels) and visits, read not alerted.
 - [android](android/README.md): a native Android host, no WebView.
@@ -327,10 +335,13 @@ The door refuses a batch past 32 KB; the collector drops a session's reports
 past `perf.limit` (120 a minute) and counts them as
 `perf_reports_throttled_total`. A release with no collector behind the door
 answers the reporter's first post with an error, and the tab stops posting.
-Each host names the door's peers it adds in `_hostPeers` (`name: port`) and
-states `cluster: meta: hostPeers` from it in the same words, so hosts join: an
-app whose program renders on request (pronto's `render` peer) adds
-`_hostPeers: render: <port>` beside them.
+On a host launch the collector's `http` and `metrics` ports are ones the launch hands out
+(`expose: http: {port: 8687, env: "PERF_HTTP_PORT"}`), so stacks side by side never share one, and
+the door reaches the collector by its peer address:
+`cluster: surface: targets: caddy: entrypoint: env: PRONTO_UPSTREAM_PERF_COLLECTOR: {peer: "perf-collector", port: "http"}`.
+Every host adds its own `PRONTO_UPSTREAM_<NAME>` to that one record, so hosts join, and an app whose
+program renders on request adds its peer's beside them. Containers keep their names and ports
+(`perf-collector:8687`).
 
 
 ## pronto-modular-design
