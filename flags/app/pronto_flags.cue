@@ -20,5 +20,11 @@ pronto: {
 			}
 		}
 	}
-	say: say: generate: rulemap: flags: {"priority":4,"cmds":[{"do":"use ./flags/flags.nu; flags route; use ./pronto/exports.nu; exports of flagd | flags write"}]}
+	// The flags' SQL after the writers of what the program embeds (priority -1) and before pronto's writer (1),
+	// which copies it into the app's raw migrations; the route after
+	// it, which rewrites the door's Caddyfile.
+	say: say: generate: rulemap: {
+		"flags-sql": {"priority":0,"cmds":[{"do":"use ./flags/flags.nu; use ./pronto/exports.nu; exports of flagsql | flags sql"}]}
+		flags: {"priority":4,"cmds":[{"do":"use ./flags/flags.nu; flags route; use ./pronto/exports.nu; exports of flagd | flags write"}]}
+	}
 }

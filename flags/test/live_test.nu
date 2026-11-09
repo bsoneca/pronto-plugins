@@ -424,5 +424,30 @@ check ($byxdg.exit_code == 0 and ($"($xdg)/pronto-flags/drill.jsonl" | path exis
 let byhome = (with-env {PRONTO_FLAGS_JOURNAL: "", XDG_STATE_HOME: "", HOME: $"($dir)/home"} { ^$nu.current-exe -c $"use ($here)/../live.nu journal-file; journal-file ($drill)" | complete })
 check ($byhome.exit_code == 0 and ($byhome.stdout | str trim) == $"($dir)/home/.local/state/pronto-flags/drill.jsonl") "journal: ~/.local/state/pronto-flags/<app>.jsonl without XDG_STATE_HOME"
 
+# The database (flagsLive.database): each write is also put() into the app's database with the host the document is
+# served at (flagsLive.url's), a write that fails there fails the push, and a dry run writes nothing there. The
+# command is a stand-in that keeps the SQL it was sent.
+check ($tgt.stdout | str contains "no flagsLive.database") "database: a push without one says so"
+let dbsql = $"($dir)/db.sql"
+def dbspec [] {
+	$"package drill
+flags: drill_break_checkout: {default: false, local: true}
+flagsLive: {dir: \"flagstore\", url: \"https://drill.example\", database: \"test -z $DB_FAIL || { echo refused >&2; exit 3; }; cat >> ($dbsql)\"}
+" | save -f $"($drill)/flags_spec.cue"
+}
+def puts [] { if ($dbsql | path exists) { open --raw $dbsql | lines | where {|l| $l | str starts-with "SELECT pronto_flags.put(" } } else { [] } }
+def put-doc [line: string] { $line | str replace "SELECT pronto_flags.put('" "" | str replace "'::jsonb, 'drill.example');" "" | str replace -a "''" "'" | from json }
+dbspec
+let dp = (dlive [push $drill --untested "the database"])
+check ($dp.exit_code == 0 and (puts | length) == 1 and ($dp.stdout | str contains "written to the database")) "database: a push puts the document"
+check ((put-doc (puts | last)) == (open $"($store)/flags.json") and ((puts | last) | str ends-with "'drill.example');")) "database: the document written, with flagsLive.url's host"
+let drb = (dlive [rollback $drill])
+check ($drb.exit_code == 0 and (puts | length) == 2 and (put-doc (puts | last)) == (open $"($store)/flags.json")) "database: a rollback puts the version it restored"
+let nv3 = (dversions)
+let ddry = (dlive [rollback $drill] {PRONTO_FLAGS_DRY_RUN: "1"})
+check ($ddry.exit_code == 0 and (puts | length) == 2 and (dversions) == $nv3) "database: a dry run writes nothing there"
+let dfail = (dlive [rollback $drill] {DB_FAIL: "1"})
+check ($dfail.exit_code != 0 and ($dfail.stderr | str contains "the database write through") and ($dfail.stderr | str contains "refused") and (puts | length) == 2) "database: a write that fails there fails the push"
+
 rm -rf $dir
 print "flags: live commands pass"
