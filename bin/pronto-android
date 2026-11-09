@@ -18,5 +18,10 @@ mode=terminal
 files=$(mktemp)
 trap 'rm -f "$files"' EXIT
 cd "$here"
-./saytw --script tools.nu cue export ./android/export -t "app=$name" -t "label=$label" -t "mode=$mode" -t "base=$base" -e files --out json > "$files"
+# The app's CUE package, which android_surface.cue joins, and its android.json (signing: the release
+# certificates whose passkeys the door admits).
+package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" 2>/dev/null | head -n 1)
+config="{}"
+[ -f "$app/android/android.json" ] && config=$(tr -d '\n\t' < "$app/android/android.json")
+./saytw --script tools.nu cue export ./android/export -t "app=$name" -t "label=$label" -t "mode=$mode" -t "base=$base" -t "package=$package" -t "config=$config" -e files --out json > "$files"
 ./saytw --script tools.nu nu bin/write.nu "$files" "$app"

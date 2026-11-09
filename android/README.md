@@ -39,7 +39,11 @@ A web hatch is a host-DOM module (three.js, a canvas, Web Audio) that the phone 
 `navigator.credentials` is the host's (`browser.js` over `__native_passkey`, answered by Kotlin's `Passkeys`), so omnishell's own register and sign-in ceremonies run unchanged. There are two source sets, like `Driver.kt`:
 
 - **debug**: a software authenticator (EC P-256, ES256, "none" attestation, user always verified), its credentials kept per actor in SharedPreferences. Its clientDataJSON `origin` is the app's base origin, as a browser at that door would send, so the door's pinned origin accepts it. This is what lets `integrate@android` run a scenario that signs up with a passkey (`signUp`), unchanged from the web.
-- **release**: unavailable, so `navigator.credentials` is undefined and the interpreter offers no passkey. A native Android passkey's clientData origin is `android:apk-key-hash:...`, which the door (mecha) does not accept yet. Follow-up: the door accepts the app's origin (and serves `/.well-known/assetlinks.json`), then `Passkeys` in release calls Credential Manager.
+- **release**: the device's passkeys, through Credential Manager (androidx.credentials; Play services before Android 14). The page's options go to it as WebAuthn's JSON and its answer comes back the same way. Its clientData origin is the app's signing certificate (`android:apk-key-hash:...`), not a page. `android/android.json`'s `signing` lists the SHA-256 fingerprints of the certificates that sign the release (`AB:CD:...`, as keytool prints them), and `pronto-android` writes them into `android_surface.cue`:
+  - `code: capabilities: auth: android`: the door's auth admits those origins (mecha's `WEBAUTHN_ANDROID_ORIGINS`, passed by release@gcp and release@k8s; pronto 0.24.1-gcp.129, mecha 0.18.1-host.12);
+  - the app's statement in the door's `/.well-known/assetlinks.json` (`get_login_creds` and `handle_all_urls`), so Android lets the app use the door's relying party. The Unity player's statement joins it in the same file ([assetlinks](../assetlinks/assetlinks.cue)).
+
+  Without `signing`, the door admits no app, and a release's ceremony is refused there as a browser's at a wrong origin would be.
 
 Scenario steps beyond the DOM's: `signUp`, `pay` (the stand-in checkout), `address`, `response` (a request the page made and what it answered), and a step's `flag`/`unless`.
 

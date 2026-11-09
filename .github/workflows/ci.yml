@@ -56,6 +56,7 @@ jobs:
           sayt --script tools.nu cue vet -c ./runners
           sayt --script tools.nu cue vet -c -t setup=check-org ./runners/export
           sayt --script tools.nu cue vet -c ./unity
+          sayt --script tools.nu cue vet -c ./assetlinks
           sayt --script tools.nu cue vet -c -t package=check -t screens=table ./unity/export
           sayt --script tools.nu cue vet -c ./infra
           sayt --script tools.nu cue vet -c ./examples/infra
@@ -76,6 +77,17 @@ jobs:
           jq -e '.android.links == ["example.com"] and .scenarios == ["tests/scenarios/table.cue"]' "$app/unity/unity.json"
           grep -q 'wellKnown: "assetlinks.json"' "$app/unity_surface.cue"
           ! ./bin/pronto-unity "$app" fingerprints=
+      - name: An app's Unity player and Android terminal serve one assetlinks.json, and its release's passkeys reach auth
+        run: |
+          app=$(mktemp -d)/app && mkdir -p "$app/android" && printf 'package demo\n' > "$app/program.cue"
+          fp=AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89
+          ./bin/pronto-unity "$app" screens=table links=example.com fingerprints=$fp
+          printf '{"scenarios": [], "signing": ["%s"]}\n' "$fp" > "$app/android/android.json"
+          ./bin/pronto-android "$app" demo
+          decl="$app/program.cue $app/unity_surface.cue $app/android_surface.cue"
+          sayt --script tools.nu cue export $decl -e 'code.meta.wellKnown."assetlinks.json".text' --out text \
+            | jq -e '[.[].target.package_name] == ["com.bsoneca.prontohost", "dev.pronto.demo"] and .[1].relation == ["delegate_permission/common.get_login_creds", "delegate_permission/common.handle_all_urls"]'
+          sayt --script tools.nu cue export $decl -e code.capabilities.auth.android | jq -e --arg fp "$fp" '. == [$fp]'
       - name: Opt an app into release-cron, then refresh it keeping its own opt-in
         run: |
           app=$(mktemp -d)/app && mkdir -p "$app" && printf 'package demo\n' > "$app/program.cue"
