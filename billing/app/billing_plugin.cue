@@ -309,9 +309,9 @@ code: capabilities: hatches: billing: {
 	note: "pronto-billing's service: publishes the plans, takes the broker's entitlements into the database, and sends an account to pay or to manage what it pays for"
 }
 
-// The door proxies to it on a host launch too: pronto runs the program's host peers
-// (code.meta.hostPeers, pronto 0.24.1-gcp.26) beside its own renderer.
-code: meta: hostPeers: billing: 8688
+// The door proxies to it by its peer address: where a launch hands billing its port
+// (mecha 0.22's host launch moves it), the door's variable follows.
+cluster: surface: targets: caddy: entrypoint: env: PRONTO_UPSTREAM_BILLING: {peer: "billing", port: "http"}
 
 // The broker on this machine listens on a port of the app's own, hashed from its package as
 // bayt hashes a launch's other ports (and pronto-identity its broker's), so two apps' launches
@@ -326,6 +326,10 @@ _billingBrokerInternal: *_billingBroker | string
 // person reaches it, the door's port the host projection gives BILLING_DOOR (caddy:8443).
 _billingOrigin: "export ORIGIN=\"${ORIGIN:-https://localhost:${BILLING_DOOR##*:}}\"; "
 if _billing.brokerInternal != _|_ {_billingBrokerInternal: _billing.brokerInternal}
+// Where the local broker listens is a port a launch hands out (the broker's `http`), so the
+// address its readers are given follows it; one the spec names is spelled as it is.
+_billingBrokerEnv: [if _billingLocal {["http://localhost:", {peer: "billing-broker", port: "http", part: "port"}]}, _billingBroker][0]
+_billingBrokerInternalEnv: [if _billing.brokerInternal != _|_ {_billingBrokerInternal}, _billingBrokerEnv][0]
 
 cluster: surface: targets: billing: {
 	srcs: globs: ["billing/*.ts", "billing/broker/*.ts"]
@@ -335,7 +339,13 @@ cluster: surface: targets: billing: {
 		do:    "\(_billingOrigin)exec deno run --no-config --allow-net --allow-env billing/service.ts"
 		shell: "sh"
 		dockerfile: {do: "\(_billingOrigin)exec deno run --no-config --allow-net --allow-env /app/billing/service.ts", shell: "sh"}
-		env: compose.environment
+		env: compose.environment & {
+			// Where a launch puts the door and crud, not the containers' names.
+			BILLING_DOOR:            {peer: "caddy", port: "door"}
+			CRUD_URL:                {peer: "crud", port: "http", prefix: "http://"}
+			BILLING_BROKER:          _billingBrokerEnv
+			BILLING_BROKER_INTERNAL: _billingBrokerInternalEnv
+		}
 		after: {crud: "healthy", migrate: "completed"}
 		if _billingLocal {after: "billing-broker": "healthy"}
 	}
@@ -346,13 +356,9 @@ cluster: surface: targets: billing: {
 	compose: {
 		restart: "on-failure"
 		environment: {
-			BILLING_DOOR:            "caddy:8443"
-			BILLING_BROKER:          _billingBroker
-			BILLING_BROKER_INTERNAL: _billingBrokerInternal
 			BILLING_DOCUMENT:        _billingDocument
 			BILLING_GRANTS:          _billingGrants
 			BILLING_FLAGS:           _billingFlags
-			CRUD_URL:                "http://crud:3000"
 			SERVICE_JWT:             "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}"
 		}
 	}
@@ -365,15 +371,19 @@ if _billingLocal {
 		cmd: builtin: null
 		activate: ""
 		srcs: globs: ["billing/*.ts", "billing/broker/*.ts"]
-		healthcheck: url: "http://127.0.0.1:\(_billingLocalPort)/health"
-		expose: http: port: _billingLocalPort
+		healthcheck: {port: _billingLocalPort, path: "/health"}
+		// The port a launch hands it, so stacks side by side never share one.
+		expose: http: {port: _billingLocalPort, env: "PORT"}
 		"process-compose": activate: "mise x --"
 		entrypoint: {
 			// It pushes to the door, whose certificate is the developer's own.
 			do:    "\(_billingOrigin)BILLING_FAKE_TENANTS=\"$ORIGIN\" exec deno run --no-config --allow-net --allow-env --unsafely-ignore-certificate-errors=localhost billing/broker/main.ts"
 			shell: "sh"
 			dockerfile: {do: "\(_billingOrigin)BILLING_FAKE_TENANTS=\"$ORIGIN\" exec deno run --no-config --allow-net --allow-env --unsafely-ignore-certificate-errors=localhost /app/billing/broker/main.ts", shell: "sh"}
-			env: compose.environment
+			env: compose.environment & {
+				BILLING_DOOR:  {peer: "caddy", port: "door"}
+				BROKER_ISSUER: ["http://localhost:", {port: "http", part: "port"}]
+			}
 		}
 		dockerfile: {
 			from: name: "denoland/deno:alpine-2.5.0"
@@ -385,10 +395,7 @@ if _billingLocal {
 		compose: {
 			ports: ["\(_billingLocalPort):\(_billingLocalPort)"]
 			environment: {
-				BROKER_ISSUER: _billingLocalBroker
 				BROKER_SECRET: "pronto-billing-local-launch-secret-000000"
-				BILLING_DOOR:  "caddy:8443"
-				PORT:          "\(_billingLocalPort)"
 			}
 		}
 	}
