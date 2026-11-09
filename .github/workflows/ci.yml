@@ -221,9 +221,38 @@ jobs:
           sayt test@android
           grep -ho 'tests="[0-9]*" skipped="[0-9]*" failures="[0-9]*" errors="[0-9]*"' android/app/build/test-results/testDebugUnitTest/*.xml
 
+  # The terminal mode's JVM tests (the seal of its sealed storage): a terminal app is written beside
+  # the example's toolchain config, then Gradle runs its unit tests.
+  android-terminal:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-sayt
+      - name: Write the terminal host into a scratch app
+        run: |
+          app=$RUNNER_TEMP/term
+          mkdir -p "$app/.config/mise"
+          printf 'package term\n' > "$app/program.cue"
+          cp -r examples/hello-android/.config/mise/. "$app/.config/mise/"
+          ./bin/pronto-android "$app" term
+          echo "APP=$app" >> "$GITHUB_ENV"
+      - name: Run the terminal's Kotlin unit tests
+        working-directory: ${{ env.APP }}
+        run: |
+          sayt --script tools.nu mise trust .config/mise/conf.d/android.toml
+          sayt --script tools.nu mise install java android-sdk gradle
+          sayt setup@android
+          # The debug manifest names the network config build@android's bundle writes; a unit test needs only that it exists.
+          mkdir -p android/app/build/generated/debug-res/xml
+          printf '<?xml version="1.0" encoding="utf-8"?>\n<network-security-config/>\n' > android/app/build/generated/debug-res/xml/local_stack.xml
+          sayt test@android
+          grep -ho 'tests="[0-9]*" skipped="[0-9]*" failures="[0-9]*" errors="[0-9]*"' android/app/build/test-results/testDebugUnitTest/*.xml
+
   # The one check main requires: it passes only when each job above passed.
   ci:
-    needs: [check, android-host]
+    needs: [check, android-host, android-terminal]
     if: always()
     runs-on: ubuntu-24.04
     steps:

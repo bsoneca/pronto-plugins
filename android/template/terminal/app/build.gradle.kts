@@ -47,6 +47,7 @@ dependencies {
     implementation("com.yandex.div:div:33.6.0")
     implementation("com.yandex.div:div-core:33.6.0")
     implementation("com.yandex.div:glide:33.6.0")
+    testImplementation("junit:junit:4.13.2")
     // A release build's passkeys (src/release/Passkeys.kt); before Android 14, through Play services.
     releaseImplementation("androidx.credentials:credentials:1.5.0")
     releaseImplementation("androidx.credentials:credentials-play-services-auth:1.5.0")

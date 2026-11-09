@@ -23,7 +23,7 @@ import { localRoots } from "./trust.ts";
 
 // `flag` and `unless` say where a step runs (skips); they are not what it does.
 const META = ["by", "timeout", "why", "fresh", "flag", "unless"];
-export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response"];
+export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response", "undisclosed"];
 
 export type Probed = { id: string | null; text: string; value?: string; attrs: Record<string, string>; hidden: boolean; shown?: boolean };
 export type Step = Record<string, unknown>;
@@ -543,6 +543,18 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
             vars[v] = how.attr ? el.attrs[how.attr] ?? "" : how.value ? el.value ?? "" : el.text;
           }
           break;
+        case "undisclosed": {
+          // Nothing the app keeps in its private directory (databases, preferences, files) holds the text:
+          // the debug build's run-as reads it. The sealed store must exist, or an empty directory would pass.
+          const text = sub(arg as string);
+          const dbs = await sh(`run-as ${phone.id} ls databases`);
+          if (!dbs.split(/\s+/).includes("terminal-sealed.db")) throw new Fail(`no sealed store in ${phone.id}'s databases: ${dbs.trim()}`);
+          const out = await new Deno.Command(adbPath(), { args: ["shell", `run-as ${phone.id} grep -rlaF -- ${quote(text)} .`], stdin: "null", stdout: "piped", stderr: "piped" }).output();
+          const found = new TextDecoder().decode(out.stdout).trim();
+          if (out.code === 0 && found) throw new Fail(`${JSON.stringify(text)} is in the app's private files in plain text: ${found.split("\n").join(", ")}`);
+          if (out.code !== 1) throw new Fail(`run-as grep exited ${out.code}: ${new TextDecoder().decode(out.stderr).trim() || found}`);
+          break;
+        }
         case "pause": await sleep(Number(arg) * 1000 * slow()); break;
         case "shot": {
           await Deno.mkdir(dir, { recursive: true });

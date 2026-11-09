@@ -68,7 +68,7 @@ Every native plugin declares the same things, each named by the spike:
   `TextEncoder`, `TextDecoder`, `Intl`, `queueMicrotask`, and a clock-injected
   `setTimeout`, plus any repair the engine needs for SES (QuickJS's
   `Iterator.prototype` getters).
-- **Bridges**: storage over the platform's SQLite, network over HTTP and SSE,
+- **Bridges**: storage over the platform's SQLite (built on Android: sealed with AES-GCM under a Keystore key, [android/README.md](../android/README.md); the biometric Keystore key is PRONTO-104, autofill PRONTO-105), network over HTTP and SSE,
   crypto over the platform's key store by handle.
 - **Renderer**: DivKit, fed by the kit's compiler from the screens' markup.
 - **Verbs**: `setup` (the SDK), `build` (the package), `launch` (install and

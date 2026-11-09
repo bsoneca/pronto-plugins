@@ -7,7 +7,7 @@ A native Android host for a pronto app: no WebView. The program's own handlers r
 - `android/`: a Gradle project from [`template/`](template), its package `dev.pronto.<name>`.
 - `.say.json` rules `setup`, `build`, `test` and `launch`, each answering `@android`.
 - `.config/mise/conf.d/android.toml`: Temurin JDK, the SDK's cmdline-tools, Gradle.
-- The three bridges [a native terminal](../docs/native-terminal.md) names as unbuilt: sealed **storage** for `device` tables (SQLite, AES-GCM), a **Keystore** key behind one biometric prompt, and an **autofill** service that runs the app's handler over the vault.
+- The bridges [a native terminal](../docs/native-terminal.md) names: sealed **storage** for `device` tables (built: SQLite, every value AES-256/GCM under an AndroidKeyStore key, see below), a **Keystore** key behind one biometric prompt (PRONTO-104, not built), and an **autofill** service that runs the app's handler over the vault (PRONTO-105, not built).
 - `screen.js` and `autofill.json`, written once and then the app's.
 
 ## Two modes
@@ -16,6 +16,10 @@ A native Android host for a pronto app: no WebView. The program's own handlers r
 - **Vault**: an app that already has `android/app/src/main/assets/screen.js` keeps its hand-drawn phone screens.
 
 In terminal mode, `build@android` bundles the interpreter (`android/terminal/bundle.ts`), and `integrate@android` runs the app's CUE scenarios (named in `android/android.json`) on an emulator through real taps and typing (`android/terminal/scenarios.ts`). It uses `PRONTO_BASE` when that is set, and otherwise brings up a stack on a slot. A debug build trusts the machine's local stack: Caddy's local root, and mkcert's when present.
+
+### Sealed storage
+
+In terminal mode the `__native_kv_*` bridges (`localStorage`, where omnishell keeps the `device` tables) write to SQLite (`terminal-sealed.db`, table `kv(ns, actor, k, v)`), never to plain text. Each value is sealed with AES/GCM/NoPadding under an AndroidKeyStore AES-256 key (`pronto-terminal-store`, no user authentication): a fresh 12-byte nonce, a 128-bit tag, and the address `actor NUL ns NUL k` as associated data, stored as nonce followed by ciphertext. A value that does not open (tampered, or moved to another address) reads as absent and logs `PRONTO STORE refused <ns>/<k>` once. Values an earlier build left in SharedPreferences move in on first use and the preferences are cleared. The seal (`Seal` in `SealedStore.kt`) is pure over a `SecretKey`, so a JVM test (`SealTest.kt`) runs it on a software key. Scenarios can assert `{undisclosed: "text"}`: no file in the app's private directory (read with `run-as`) holds the text.
 
 ### Hatches
 
