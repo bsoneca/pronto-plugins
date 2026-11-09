@@ -31,6 +31,60 @@ await stop();
 await Deno.writeTextFile(`${dir}/terminal.js`, code);
 await Deno.remove(esm);
 await Deno.remove(map);
+// The host-DOM hatches shell.json declares, each bundled into one module under modules/, at its address
+// (hostDom.<name>.src), which is all TerminalEngine registers: QuickJS resolves no relative import between
+// the app's files, so a hatch's own imports (a generated config.js, a library) are inlined here. A hatch
+// android/android.json binds (`hatches: {<name>: {binding}}`, the hatch contract's binding.json, the same
+// file the Unity host runs, and its own stylesheet, `css`) is this directory's bound.js over the app's pure module instead: the web's
+// (three.js, a canvas) is never loaded.
+const modulesDir = `${dir}/modules`;
+await Deno.remove(modulesDir, { recursive: true }).catch(() => {});
+const declared = JSON.parse(await Deno.readTextFile("android/android.json")).hatches ?? {};
+const hostDom: Record<string, { src: string }> = JSON.parse(await Deno.readTextFile("shell/shell.json")).hostDom ?? {};
+for (const name of Object.keys(declared)) {
+  if (!hostDom[name]) throw new Error(`bundle: hatch ${name} is bound in android/android.json but shell.json declares no host-DOM hatch ${name}`);
+}
+// A hatch imports omnishell's own files by their path on the app's origin (/omnishell/...): the pinned omnishell.
+const hatchMap = await Deno.makeTempFile({ dir: ".", prefix: ".hatch-map-", suffix: ".json" });
+await Deno.writeTextFile(hatchMap, JSON.stringify({ imports: { "/omnishell/": `file://${omnishell.replace(/\/*$/, "")}/` } }));
+for (const [name, { src }] of Object.entries(hostDom)) {
+  if (!src?.startsWith("shell/hatches/")) throw new Error(`bundle: host-DOM hatch ${name} is not under shell/hatches/: ${src}`);
+  const out = `${modulesDir}/${src.slice("shell/".length)}`;
+  await Deno.mkdir(out.slice(0, out.lastIndexOf("/")), { recursive: true });
+  const binding: string | undefined = declared[name]?.binding;
+  // A bound hatch's own stylesheet (`css`, as Unity's has its .uss): an asset beside its module, linked while mounted.
+  const css: string | undefined = declared[name]?.css;
+  let href = null;
+  if (css) {
+    const sheet = `${out.slice(0, out.lastIndexOf("."))}.css`;
+    await Deno.copyFile(css, sheet);
+    href = `/shell/${sheet.slice(dir.length + 1)}`;
+  }
+  const entry = await Deno.makeTempFile({ dir: ".", prefix: ".hatch-", suffix: ".js" });
+  try {
+    if (binding) {
+      const json = await Deno.readTextFile(binding);
+      const { module } = JSON.parse(json);
+      await Deno.writeTextFile(entry, [
+        `import * as hatch from ${JSON.stringify(`./${module}`)};`,
+        `import { bound } from ${JSON.stringify(`${here}bound.js`)};`,
+        `export default bound(${JSON.stringify(name)}, ${json.trim()}, hatch, { css: ${JSON.stringify(href)} });`,
+      ].join("\n"));
+    } else {
+      await Deno.writeTextFile(entry, `export { default } from ${JSON.stringify(`./${src}`)};\n`);
+    }
+    const made = await new Deno.Command(Deno.execPath(), {
+      args: ["bundle", "--quiet", "--no-lock", "--platform", "browser", "--import-map", hatchMap, entry, "-o", out],
+      stdout: "inherit",
+      stderr: "inherit",
+    }).output();
+    if (!made.success) throw new Error(`bundle: hatch ${name} did not bundle`);
+  } finally {
+    await Deno.remove(entry);
+  }
+  console.log(binding ? `hatch ${name}: bound by ${binding}` : `hatch ${name}: ${src}`);
+}
+await Deno.remove(hatchMap);
 // SES at omnishell's own pin, so the phone's cage is the page's.
 await Deno.copyFile(`${omnishell}/interpreter/vendor/ses.umd.min.js`, `${dir}/ses.umd.min.js`);
 // The catalogues the interpreter fetches beside the screens, under the same names.

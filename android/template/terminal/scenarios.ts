@@ -23,7 +23,7 @@ import { localRoots } from "./trust.ts";
 
 // `flag` and `unless` say where a step runs (skips); they are not what it does.
 const META = ["by", "timeout", "why", "fresh", "flag", "unless"];
-export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response"];
+export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response", "undisclosed"];
 
 export type Probed = { id: string | null; text: string; value?: string; attrs: Record<string, string>; hidden: boolean; shown?: boolean };
 export type Step = Record<string, unknown>;
@@ -60,6 +60,19 @@ export function actorOf(step: Step, actors: Record<string, unknown> | undefined,
 export function inputText(text: string): string {
   if (/[^\x20-\x7e]/.test(text)) throw new Fail(`input text cannot type ${JSON.stringify(text)}: only printable ASCII is typed on a phone`);
   return "'" + text.replace(/'/g, "'\\''").replace(/ /g, "%s") + "'";
+}
+
+/**
+ * A page's `?seed=N` made its own to a scenario and actor. The shell mints every row id it creates
+ * from that seed, so two pages of one seed mint the same ids; a stack outlives the scenario (one per
+ * run), so the second scenario's insert met the first one's row of the same id, which the database
+ * answered 201 without writing, and the page never showed its game. The seed stays deterministic
+ * (the same salt gives the same seed) and a path without one is left as it is.
+ */
+export function seeded(path: string, salt: string): string {
+  let h = 2166136261;
+  for (const ch of salt) h = Math.imul(h ^ ch.codePointAt(0)!, 16777619) >>> 0;
+  return path.replace(/([?&]seed=)(\d+)/, (_m, head: string, n: string) => head + (((Number(n) + h) >>> 0) % 4294967296));
 }
 
 /** A shell word, whatever it holds. */
@@ -143,6 +156,7 @@ export function holds(kind: string, arg: any, els: Probed[], messages: Record<st
       const want = arg.msg ? lookup(messages, arg.msg) : arg.is;
       if (arg.msg && want === undefined) throw new Fail(`no message ${arg.msg}`);
       if (want !== undefined && first.text !== want) return `text is ${JSON.stringify(first.text)}, want ${JSON.stringify(want)}`;
+      if (arg.not !== undefined && first.text === arg.not) return `text is ${JSON.stringify(first.text)}, want anything else`;
       if (arg.has !== undefined && !first.text.includes(arg.has)) return `text is ${JSON.stringify(first.text)}, want it to have ${JSON.stringify(arg.has)}`;
       return null;
     }
@@ -302,6 +316,8 @@ class StandIn {
 
 class Phone {
   messages: Record<string, any> = {};
+  /** The scenario running: it salts the seed of every page it opens (seeded). */
+  scenario = "";
   private page: StandIn | null = null;
   private client?: Deno.HttpClient;
   constructor(readonly id: string, readonly base: string) {}
@@ -348,7 +364,7 @@ class Phone {
     const door = this.base.match(/^https:\/\/localhost:(\d+)/);
     if (door) await adb("reverse", `tcp:${door[1]}`, `tcp:${door[1]}`);
     this.page = null;
-    await sh(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(path)} --es actor ${quote(actor)} --es browser standin`);
+    await sh(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(seeded(path, `${this.scenario}/${actor}`))} --es actor ${quote(actor)} --es browser standin`);
     await until(`${actor}'s terminal at ${path}`, 30, async () => {
       const ready = await this.find("html[data-terminal-ready]", false);
       return [ready && ready.length > 0 ? ready : null, ready ? "the terminal has not booted" : "the driver does not answer"];
@@ -479,6 +495,7 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
   const vars: Record<string, string> = {};
   const opened: Record<string, string> = {};
   let current: string | undefined;
+  phone.scenario = name;
   await adb("logcat", "-c");
   await sh(`pm clear ${phone.id}`);
   const flagsOn = new Map<string, boolean>();
@@ -527,6 +544,20 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
             vars[v] = how.attr ? el.attrs[how.attr] ?? "" : how.value ? el.value ?? "" : el.text;
           }
           break;
+        case "undisclosed": {
+          // Nothing the app keeps in its private directory (databases, preferences, files) holds the text:
+          // the debug build's run-as reads it. code_cache is not the app's data: it holds the compiled bytecode of
+          // the app's own scripts (TerminalEngine), whose source has words like "Anonymous" in it. The sealed
+          // store must exist, or an empty directory would pass.
+          const text = sub(arg as string);
+          const dbs = await sh(`run-as ${phone.id} ls databases`);
+          if (!dbs.split(/\s+/).includes("terminal-sealed.db")) throw new Fail(`no sealed store in ${phone.id}'s databases: ${dbs.trim()}`);
+          const out = await new Deno.Command(adbPath(), { args: ["shell", `run-as ${phone.id} grep -rlaF --exclude-dir=code_cache -- ${quote(text)} .`], stdin: "null", stdout: "piped", stderr: "piped" }).output();
+          const found = new TextDecoder().decode(out.stdout).trim();
+          if (out.code === 0 && found) throw new Fail(`${JSON.stringify(text)} is in the app's private files in plain text: ${found.split("\n").join(", ")}`);
+          if (out.code !== 1) throw new Fail(`run-as grep exited ${out.code}: ${new TextDecoder().decode(out.stderr).trim() || found}`);
+          break;
+        }
         case "pause": await sleep(Number(arg) * 1000 * slow()); break;
         case "shot": {
           await Deno.mkdir(dir, { recursive: true });
@@ -588,7 +619,7 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
         default: {
           // An expectation: asked again until it holds. `see` and the others needing a drawing ask for the boxes.
           const sel = sub(arg.of ?? arg);
-          const a = typeof arg === "object" ? { ...arg, of: undefined, is: typeof arg.is === "string" ? sub(arg.is) : arg.is, has: typeof arg.has === "string" ? sub(arg.has) : arg.has } : arg;
+          const a = typeof arg === "object" ? { ...arg, of: undefined, is: typeof arg.is === "string" ? sub(arg.is) : arg.is, has: typeof arg.has === "string" ? sub(arg.has) : arg.has, not: typeof arg.not === "string" ? sub(arg.not) : arg.not } : arg;
           await until(`${kind} ${sel}`, timeout, async () => {
             const els = await phone.find(sel, kind === "see" || kind === "hidden");
             if (!els) return [null, "the driver does not answer"];

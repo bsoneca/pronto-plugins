@@ -63,7 +63,8 @@ class TerminalEngine(
     private val random = SecureRandom()
     private lateinit var qjs: QuickJs
 
-    private fun prefs(ns: String) = context.getSharedPreferences("terminal-$actor-$ns", Context.MODE_PRIVATE)
+    // Sealed at rest (SealedStore.kt); a value another build left in plain preferences moves in.
+    private val store by lazy { SealedStore(context, actor) }
 
     private fun asset(name: String) = context.assets.open(name).bufferedReader().use { it.readText() }
 
@@ -114,11 +115,11 @@ class TerminalEngine(
             null
         }
         qjs.function("__native_clear") { a -> timers.remove((a[0] as Number).toLong())?.cancel(); null }
-        qjs.function("__native_kv_get") { a -> prefs(a[0] as String).getString(a[1] as String, null) }
-        qjs.function("__native_kv_set") { a -> prefs(a[0] as String).edit().putString(a[1] as String, a[2] as String).apply(); null }
-        qjs.function("__native_kv_del") { a -> prefs(a[0] as String).edit().remove(a[1] as String).apply(); null }
-        qjs.function("__native_kv_clear") { a -> prefs(a[0] as String).edit().clear().apply(); null }
-        qjs.function("__native_kv_keys") { a -> JSONArray(prefs(a[0] as String).all.keys.toList()).toString() }
+        qjs.function("__native_kv_get") { a -> store.get(a[0] as String, a[1] as String) }
+        qjs.function("__native_kv_set") { a -> store.set(a[0] as String, a[1] as String, a[2] as String); null }
+        qjs.function("__native_kv_del") { a -> store.del(a[0] as String, a[1] as String); null }
+        qjs.function("__native_kv_clear") { a -> store.clear(a[0] as String); null }
+        qjs.function("__native_kv_keys") { a -> JSONArray(store.keys(a[0] as String)).toString() }
         qjs.function("__native_intl") { a -> intl(a[0] as String, a[1] as String, JSONObject(a[2] as String), a[3] as String) }
         qjs.function("__native_fetch") { a ->
             fetch((a[0] as Number).toLong(), a[1] as String, a[2] as String, JSONObject(a[3] as String), a[4] as String?)
@@ -228,9 +229,6 @@ class TerminalEngine(
         qjs = QuickJs.create(dispatcher)
         qjs.maxStackSize = 12L * 1024 * 1024
         bridge()
-        // The host-DOM hatches the shell declares (shell/hatches/**.js) are modules the interpreter
-        // imports by their address on the web; they are the app's assets, so they are named so here.
-        for (name in hatches("hatches")) qjs.addModule("$base/shell/$name", asset(name))
         // quickjs-kt converts a script's completion value back to Kotlin and
         // throws on a symbol, so every script here ends in undefined.
         // Parsing terminal.js (about 2 MB) is most of a cold start, so each script's bytecode is kept in
@@ -247,6 +245,13 @@ class TerminalEngine(
             qjs.evaluate<Any?>(code)
             Log.i("pronto", "evaluated $name in ${System.currentTimeMillis() - began} ms")
         }
+        // The host-DOM hatches the shell declares are modules the interpreter imports by their address
+        // on the web (shell/hatches/...): bundle.ts made each one module (modules/hatches/...), its own
+        // imports inlined, a bound one the hatch contract's driver; so they are named so here. QuickJS
+        // evaluates a module as it is added, and a hatch may read the browser (window, navigator) at its
+        // top, so they are added once terminal.js has set it up; then the shell boots (main.js __boot).
+        for (name in hatches("modules/hatches")) qjs.addModule("$base/shell/${name.removePrefix("modules/")}", asset(name))
+        qjs.evaluate<Any?>("__boot(); undefined", "boot.js", false)
     }
 
     fun tap(kind: String, id: String) = call("__onTap", JSONObject.quote(kind), JSONObject.quote(id))

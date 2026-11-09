@@ -34,6 +34,29 @@ android {
         }
     }
 
+    // A release is signed only where its key is at hand: PRONTO_ANDROID_KEYSTORE (a path),
+    // PRONTO_ANDROID_KEYSTORE_PASSWORD and PRONTO_ANDROID_KEY_ALIAS (android/sign-release.sh sets them
+    // from Secret Manager). Without them it stays unsigned, so ci and the gates need no secret.
+    val keystorePath = System.getenv("PRONTO_ANDROID_KEYSTORE")
+    val keystorePassword = System.getenv("PRONTO_ANDROID_KEYSTORE_PASSWORD")
+    val releaseAlias = System.getenv("PRONTO_ANDROID_KEY_ALIAS")
+    val signed = !keystorePath.isNullOrEmpty() && !keystorePassword.isNullOrEmpty() && !releaseAlias.isNullOrEmpty()
+    if (signed) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(keystorePath!!)
+                storePassword = keystorePassword
+                keyAlias = releaseAlias
+                keyPassword = keystorePassword
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            if (signed) signingConfig = signingConfigs.getByName("release")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -47,4 +70,8 @@ dependencies {
     implementation("com.yandex.div:div:33.6.0")
     implementation("com.yandex.div:div-core:33.6.0")
     implementation("com.yandex.div:glide:33.6.0")
+    testImplementation("junit:junit:4.13.2")
+    // A release build's passkeys (src/release/Passkeys.kt); before Android 14, through Play services.
+    releaseImplementation("androidx.credentials:credentials:1.5.0")
+    releaseImplementation("androidx.credentials:credentials-play-services-auth:1.5.0")
 }

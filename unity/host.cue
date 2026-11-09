@@ -14,6 +14,8 @@ import (
 	"list"
 	"strings"
 	"struct"
+
+	"github.com/bsoneca/pronto-plugins/assetlinks"
 )
 
 // A path in the app, from its root, never out of it.
@@ -127,18 +129,26 @@ import (
 		relation: ["delegate_permission/common.handle_all_urls"]
 		target: {namespace: "android_app", package_name: H.surface.android.package, sha256_cert_fingerprints: H.surface.android.fingerprints & [_, ...]}
 	}]), "", "  ")}
+	_linked: len(H.surface.android.links) > 0
 	_wellKnown: [
-		if len(H.surface.android.links) > 0 {"""
+		if H._linked {"""
 
-			// The door serves the Digital Asset Links of the app's Android player, so its links open it.
-			code: meta: wellKnown: "assetlinks.json": text: \(json.Marshal(H._assetlinks + "\n"))
+			// The door serves the Digital Asset Links of the app's Android player, so its links open it,
+			// beside any other host's (assetlinks).
+			\((assetlinks.#Statement & {package: H.surface.android.package, relation: [assetlinks.#Links], fingerprints: H.surface.android.fingerprints}).text)
+			\(assetlinks.#Declaration)
 			"""},
 		"",
 	][0]
 	// The map form when any hatch is bound: a name with no binding is listed and not mounted.
 	_mapForm: len(H.bindings) > 0
 	_boundNames: list.SortStrings([for n, _ in H.bindings {n}])
-	_import: [if H._mapForm {"\nimport \"list\"\n"}, ""][0]
+	_imports: list.SortStrings(list.Concat([[if H._mapForm || H._linked {"list"}], [if H._linked {"encoding/json"}]]))
+	_import: [
+		if len(H._imports) == 1 {"\nimport \"\(H._imports[0])\"\n"},
+		if len(H._imports) > 1 {"\nimport (\n" + strings.Join([for i in H._imports {"\t\"\(i)\""}], "\n") + "\n)\n"},
+		"",
+	][0]
 	_iter: [if H._mapForm {"h, _"}, "h"][0]
 	// What `cue vet` (lint) can say of a binding: its hatch is drawn on a screen Unity draws, and no submits
 	// selector is empty. Whether the module file exists is for pronto-unity to refuse when it writes, as CUE cannot stat.

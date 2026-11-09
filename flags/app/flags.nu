@@ -71,3 +71,9 @@ export def route [] {
 export def write [] {
 	$in | from json | to json --indent 2 | $"($in)\n" | save-changed flags/flags.json
 }
+
+# The flags in the app's database (the program's `flagd.sql`), into flags/flags.sql, which an app with a
+# database lists among its raw migrations.
+export def sql [] {
+	$in | from json | save-changed flags/flags.sql
+}

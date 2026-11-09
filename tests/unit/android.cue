@@ -563,4 +563,64 @@ cases: {
 		{call: "android.passkeyAtob", args: ["Ana\u00ff?>"], expect: {encoded: "QW5h/z8+", back: "Ana\u00ff?>", unpadded: "Ana\u00ff?>", refused: "InvalidCharacterError"}},
 		{call: "android.passkeyAtob", args: ["a"], expect: {encoded: "YQ==", back: "a", unpadded: "a", refused: "InvalidCharacterError"}},
 	]}
+
+	"a good scene compiles to one pronto-scene custom div, typed, defaults applied": {suite: "android", steps: [
+		{call: "android.sceneDrawn", args: [[
+			{tag: "model", key: "king", class: ["model"], attrs: {shape: "cube", color: "#ff0000", x: 1, ry: 90}},
+			{tag: "model", key: "pawn", class: ["model"], attrs: {prefab: "pawn", sx: 2, sy: 2, sz: 2}},
+			{tag: "anim", key: "anim-1", class: ["anim"], attrs: {target: "king", clip: "slap", dx: 1, spin: 180}},
+			{tag: "camera", key: "cam", attrs: {y: 3, "look-y": 1, fov: 70}},
+			{tag: "audio", key: "audio-1", class: ["audio"], attrs: {clip: "slap", volume: 0.5}},
+		], {background: "#102030", "data-fight": "fight_slap_fight"}, "#scene { height: 200px }"]},
+		{keep: "scene"},
+		{get: "customs.length", expect: 1},
+		{use: "scene"},
+		{get: "customs.0", holds: {type: "custom", custom_type: "pronto-scene", height: {type: "fixed", value: 200}, width: {type: "match_parent"}, custom_props: {
+			background: "#102030"
+			camera: {x: 0, y: 3, z: 0, lookX: 0, lookY: 1, lookZ: 0, fov: 70}
+			models: [
+				{key: "king", shape: "cube", prefab: "", color: "#ff0000", x: 1, y: 0, z: 0, rx: 0, ry: 90, rz: 0, sx: 1, sy: 1, sz: 1},
+				{key: "pawn", shape: "", prefab: "pawn", color: "", x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 2, sy: 2, sz: 2},
+			]
+			anims: [{key: "anim-1", target: "king", clip: "slap", duration: 0.5, dx: 1, dy: 0, dz: 0, spin: 180, loop: false}]
+			audios: [{key: "audio-1", clip: "slap", volume: 0.5, loop: false}]
+		}}},
+	]}
+
+	"a scene with no camera, size or colour gets the contract's defaults and a square": {suite: "android", steps: [
+		{call: "android.sceneDrawn", args: [[{tag: "model", key: "m", attrs: {shape: "sphere"}}], {}]},
+		{get: "customs.0", holds: {custom_type: "pronto-scene", width: {type: "match_parent"}, aspect: {ratio: 1}, custom_props: {
+			background: ""
+			camera: {x: 0, y: 5, z: -8, lookX: 0, lookY: 0, lookZ: 0, fov: 45}
+			anims: []
+			audios: []
+		}}},
+	]}
+
+	"the scene is not hidden, keeps its id and its children, which stay countable": {suite: "android", steps: [
+		{call: "android.sceneDrawn", args: [[
+			{tag: "model", key: "a", attrs: {shape: "cube"}},
+			{tag: "model", key: "b", attrs: {shape: "quad"}},
+			{tag: "anim", key: "n", attrs: {target: "a", clip: "hop"}},
+			{tag: "camera", key: "c"},
+			{tag: "audio", key: "u", attrs: {clip: "x"}},
+		], {"data-fight": "slap"}]},
+		{pick: ["hidden", "fight", "models", "tags", "idMatches", "unsupported"], expect: [false, "slap", 2, ["model", "model", "anim", "camera", "audio"], true, []]},
+	]}
+
+	"a scene the contract refuses is a fault, in the contract's words": {suite: "android", steps: [
+		{call: "android.sceneFault", args: [[{tag: "model", key: "m", attrs: {shape: "cube"}}]], expect: ""},
+		{call: "android.sceneFault", args: [[{tag: "model", key: "m", attrs: {shape: "cube", glow: 1}}]], matches: "m: a model has no attribute glow"},
+		{call: "android.sceneFault", args: [[{tag: "model", key: "m", attrs: {shape: "cube", x: "far"}}]], matches: #"m: x is a number, not "far""#},
+		{call: "android.sceneFault", args: [[{tag: "model", key: "m", attrs: {shape: "cube", x: true}}]], matches: "m: x is a number"},
+		{call: "android.sceneFault", args: [[{tag: "model", key: "m", attrs: {}}]], matches: "a model has a shape or a prefab, one of them"},
+		{call: "android.sceneFault", args: [[{tag: "model", key: "m", attrs: {shape: "cube", prefab: "p"}}]], matches: "a model has a shape or a prefab, one of them"},
+		{call: "android.sceneFault", args: [[{tag: "model", key: "m", attrs: {shape: "torus"}}]], matches: "shape torus is not one of cube, sphere"},
+		{call: "android.sceneFault", args: [[{tag: "model", key: "m", attrs: {shape: "cube", color: "red"}}]], matches: "m: color is #rrggbb"},
+		{call: "android.sceneFault", args: [[{tag: "model", key: "m", attrs: {shape: "cube"}}], {background: "blue"}], matches: "scene: background is #rrggbb"},
+		{call: "android.sceneFault", args: [[{tag: "p", key: "m", text: "hi"}]], matches: "a scene holds model, anim, camera and audio, not p"},
+		{call: "android.sceneFault", args: [[{tag: "model", key: "m", attrs: {shape: "cube"}, children: [{tag: "model", key: "k", attrs: {shape: "cube"}}]}]], matches: "m: a model has no children"},
+		{call: "android.sceneFault", args: [[{tag: "anim", key: "n", attrs: {target: "a"}}]], matches: "an anim needs a target"},
+		{call: "android.sceneFault", args: [[{tag: "audio", key: "u", attrs: {clip: "x", volume: 2}}]], matches: "volume is 0..1"},
+	]}
 }
