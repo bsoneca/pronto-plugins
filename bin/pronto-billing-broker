@@ -10,12 +10,18 @@
 #   bin/pronto-billing-broker webhook [env-file]   # prints STRIPE_WEBHOOK_SECRET=…
 # Or releases it to Cloud Run, as billing/release.nu says:
 #   bin/pronto-billing-broker release --project P --domain D [--fee N] [--webhook]
+# Or to a cluster the operator runs (pronto's envs.Metal), as billing/metal.nu says:
+#   bin/pronto-billing-broker metal --ssh U@H --project P --domain D [--fee N] [--sandbox-tenants RE]
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 cd "$here"
 if [ "${1:-}" = release ]; then
 	shift
 	exec ./saytw --script tools.nu nu billing/release.nu "$@"
+fi
+if [ "${1:-}" = metal ]; then
+	shift
+	exec ./saytw --script tools.nu nu billing/metal.nu "$@"
 fi
 cmd=
 case "${1:-}" in keygen|webhook) cmd=$1; shift ;; esac
