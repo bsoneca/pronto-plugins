@@ -62,3 +62,14 @@ collectorPeer: strings.Contains(_h.files["perf_hatch.cue"].text, "code: meta: ho
 // The seeded settings are the defaults' own.
 seedSettings: strings.Contains(_h.files["shell/hatches/perf/config.js"].text, "\"frame\":[0.008,0.0167,0.025,0.0333,0.05,0.1,0.25]") & true
 stepShipped: strings.Contains(_h.files["perf/perf.nu"].text, "export def route [endpoint: string]") & true
+
+// The first load: no budget, no alert; a budget alerts on the share of first visits within it, on its device and
+// connection, and its boundary joins the seconds' spread once and in order.
+noFirstLoadAlert: len([for r in _rules if r.alert != _|_ if r.alert == "PerfFirstLoadOverBudget" {r}]) & 0
+_budgeted: #Perf & {firstLoad: {under: "5s", form: "mobile", net: "4g"}}
+_budgetedRules: _budgeted.rules.groups[0].rules
+firstLoadAlert: [for r in _budgetedRules if r.alert != _|_ if r.alert == "PerfFirstLoadOverBudget" {r.labels.severity}] & ["ticket"]
+firstLoadReadsBucket: strings.Contains([for r in _budgetedRules if r.alert != _|_ if r.alert == "PerfFirstLoadOverBudget" {r.expr}][0], "stage=\"menu\",visit=\"first\",form=\"mobile\",net=\"4g\",le=~\"5([.]0)?\"") & true
+firstLoadBoundaryJoins: _budgeted.loadSeconds & [0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 12.0, 20.0, 40.0]
+firstLoadBoundaryOnce: (#Perf & {firstLoad: {under: "6s"}}).loadSeconds & [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 20.0, 40.0]
+firstLoadCollected: strings.Contains(_p.collector.transforms.reports.source, "perf_first_load_seconds_bucket") & true

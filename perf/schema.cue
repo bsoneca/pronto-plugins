@@ -77,7 +77,15 @@ _perfWindows: {
 	let all = [for b in _perfBurns for w in [b.short, b.long] {w}]
 	[for i, w in all if !list.Contains(list.Slice(all, 0, i), w) {w}]
 }
-_perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
+// A first load (the reporter's perf.load): the page's stages, in seconds, and the bytes it fetched by
+// then, in megabytes, each a histogram over these boundaries, by whether the browser had been here
+// before, its device class, browser and connection. The budget's own boundary joins the seconds'.
+_perfLoadSeconds: [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 20.0, 40.0]
+_perfLoadMegabytes: [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+_perfLoadStages: ["fcp", "menu", "ready", "lcp"]
+_perfLoadVisits: ["first", "returning", "unknown"]
+_perfLoadNets: ["4g", "3g", "2g", "slow-2g", "unknown"]
+_perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context", first_load: "FirstLoad"}
 
 #Perf: P={
 	// The fraction of sessions that report, decided once per tab.
@@ -109,6 +117,18 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 		}
 	}
 
+	// A budget for the first load: `percent` of the first visits, on `form` devices over `net`
+	// connections, reach `stage` within `under`; a release that breaks it alerts. None by default.
+	firstLoad: *null | {
+		stage:   *"menu" | "fcp" | "ready" | "lcp"
+		percent: *75 | number & >0 & <100
+		under!:  #PerfDuration
+		form:    *"mobile" | "desktop"
+		net:     *"4g" | "3g" | "2g" | "slow-2g"
+		// Fewer first visits than this in the window is no verdict.
+		min: *20 | int & >0
+	}
+
 	_days: strconv.Atoi(strings.TrimSuffix(P.window, "d"))
 	_ratioWindows: list.Concat([_perfWindows, [if !list.Contains(_perfWindows, P.window) {P.window}]])
 
@@ -122,6 +142,16 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 			][0]
 			(k): list.Sort(list.Concat([[for b in spread if !list.Contains(target, b) {b}], target]), list.Ascending)
 		}
+	}
+	// A first load's seconds, the budget's boundary among them, ascending.
+	loadSeconds: list.Sort(list.Concat([
+		[if P.firstLoad == null for b in _perfLoadSeconds {b}],
+		[if P.firstLoad != null for b in _perfLoadSeconds if b != (_perfSeconds & {in: P.firstLoad.under}).value {b}],
+		[if P.firstLoad != null {(_perfSeconds & {in: P.firstLoad.under}).value}],
+	]), list.Ascending)
+	_loadLes: {
+		seconds: list.Concat([[for b in loadSeconds {strconv.FormatFloat(b, 103, -1, 64)}], ["+Inf"]])
+		megabytes: list.Concat([[for b in _perfLoadMegabytes {strconv.FormatFloat(b, 103, -1, 64)}], ["+Inf"]])
 	}
 	// The same, as the `le` labels the collector writes.
 	_les: {for k, bs in buckets {(k): list.Concat([[for b in bs {strconv.FormatFloat(b, 103, -1, 64)}], ["+Inf"]])}}
@@ -170,6 +200,18 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 				labels: {slo: s.kind, owner: P.owner, severity: b.severity}
 				annotations: summary: "\(s.kind) is spending its budget at \(factor)× (\(strconv.FormatFloat(b.spend*100, 103, -1, 64))% of \(P.window) in \(b.long))"
 			}],
+			// The first load's budget, if the app set one: the share of first visits on the
+			// device and connection that reach the stage within it, over six hours, with
+			// enough visits to say.
+			[if P.firstLoad != null {
+				let sel = "stage=\"\(P.firstLoad.stage)\",visit=\"first\",form=\"\(P.firstLoad.form)\",net=\"\(P.firstLoad.net)\""
+				let le = strings.Replace((_perfSeconds & {in: P.firstLoad.under}).out, ".", "[.]", -1) + "([.]0)?"
+				alert: "PerfFirstLoadOverBudget"
+				expr:  "(sum(increase(perf_first_load_seconds_bucket{\(sel),le=~\"\(le)\"}[6h])) / sum(increase(perf_first_load_seconds_count{\(sel)}[6h])) < \(P.firstLoad.percent / 100)) and sum(increase(perf_first_load_seconds_count{\(sel)}[6h])) >= \(P.firstLoad.min)"
+				for:   "30m"
+				labels: {owner: P.owner, severity: "ticket"}
+				annotations: summary: "fewer than \(P.firstLoad.percent)% of first visits on \(P.firstLoad.form) over \(P.firstLoad.net) reach \(P.firstLoad.stage) within \(P.firstLoad.under)"
+			}],
 			// No session reported reads as no data, never as healthy: a
 			// collector down, or a release with nowhere to post, say so here.
 			[{
@@ -208,6 +250,45 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 			}
 			"""
 	}], "\n")
+	let _loadVrl = """
+		visit = if includes(\(json.Marshal(_perfLoadVisits)), .visit) { string!(.visit) } else { "unknown" }
+		net = if includes(\(json.Marshal(_perfLoadNets)), .net) { string!(.net) } else { "unknown" }
+		tags = {"visit": visit, "form": d.form, "browser": d.browser, "net": net}
+		out = push(out, merge(one, {"name": "perf_loads_total", "tags": tags}))
+		les = \(json.Marshal(_loadLes.seconds))
+		for_each(\(json.Marshal(_perfLoadStages)))  -> |_i, stage| {
+			v = get(., [stage]) ?? null
+			if is_integer(v) || is_float(v) {
+				x = to_float(v) ?? -1.0
+				if x >= 0.0 && x <= 600.0 {
+					stage_tags = merge(tags, {"stage": stage})
+					for_each(les) -> |_j, le| {
+						bound = if le == "+Inf" { 1000000.0 } else { to_float(le) ?? 0.0 }
+						if x <= bound {
+							out = push(out, {"name": "perf_first_load_seconds_bucket", "kind": "incremental", "tags": merge(stage_tags, {"le": le}), "counter": {"value": 1.0}})
+						}
+					}
+					out = push(out, {"name": "perf_first_load_seconds_count", "kind": "incremental", "tags": stage_tags, "counter": {"value": 1.0}})
+					out = push(out, {"name": "perf_first_load_seconds_sum", "kind": "incremental", "tags": stage_tags, "counter": {"value": x}})
+				}
+			}
+		}
+		mb = get(., ["mb"]) ?? null
+		if is_integer(mb) || is_float(mb) {
+			y = to_float(mb) ?? -1.0
+			if y >= 0.0 && y <= 10000.0 {
+				mles = \(json.Marshal(_loadLes.megabytes))
+				for_each(mles) -> |_k, le| {
+					bound = if le == "+Inf" { 1000000.0 } else { to_float(le) ?? 0.0 }
+					if y <= bound {
+						out = push(out, {"name": "perf_first_load_megabytes_bucket", "kind": "incremental", "tags": merge(tags, {"le": le}), "counter": {"value": 1.0}})
+					}
+				}
+				out = push(out, {"name": "perf_first_load_megabytes_count", "kind": "incremental", "tags": tags, "counter": {"value": 1.0}})
+				out = push(out, {"name": "perf_first_load_megabytes_sum", "kind": "incremental", "tags": tags, "counter": {"value": y}})
+			}
+		}
+		"""
 	collector: {
 		sources: perf: {
 			type:    "http_server"
@@ -267,6 +348,8 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 						tags = {"screen": d.screen, "source": source, "browser": d.browser, "form": d.form}
 						out = push(out, {"name": "perf_loaf_total", "kind": "incremental", "tags": tags, "counter": {"value": n}})
 						out = push(out, {"name": "perf_loaf_blocking_seconds_total", "kind": "incremental", "tags": tags, "counter": {"value": ms / 1000.0}})
+					} else if .type == "perf.load" {
+						\(_loadVrl)
 					} else if .type == "perf.hist" {
 						counts = if is_array(.counts) { array!(.counts) } else { abort }
 						sum = if is_integer(.sum) || is_float(.sum) { to_float!(.sum) } else { -1.0 }
@@ -395,6 +478,42 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 				"""}]
 		}]
 	}, {
+		name: "a first load is counted by visit, device and connection, each stage a cumulative histogram of seconds"
+		inputs: [{insert_at: "reports", type: "log", log_fields: _report & {type: "perf.load", visit: "first", net: "4g", fcp: 0.9, menu: 3.2, ready: 7.5, lcp: 2.1, mb: 1.3}}]
+		outputs: [{
+			extract_from: "reports"
+			conditions: [{type: "vrl", source: """
+				.name == "perf_first_load_seconds_bucket" && .tags.stage == "menu" && .tags.visit == "first" && .tags.net == "4g" && .tags.form == "mobile" && .tags.le == "4" && .counter.value == 1.0
+				"""}]
+		}]
+	}, {
+		name: "a first load with no stage still counts the load"
+		inputs: [{insert_at: "reports", type: "log", log_fields: _report & {type: "perf.load", visit: "returning", net: "3g"}}]
+		outputs: [{
+			extract_from: "reports"
+			conditions: [{type: "vrl", source: """
+				.name == "perf_loads_total" && .tags.visit == "returning" && .tags.net == "3g" && .counter.value == 1.0
+				"""}]
+		}]
+	}, {
+		name: "a visit or connection that is not one of the few is unknown, a stage out of range is dropped"
+		inputs: [{insert_at: "reports", type: "log", log_fields: _report & {type: "perf.load", visit: "Mozilla/5.0", net: "wifi", menu: 99999}}]
+		outputs: [{
+			extract_from: "reports"
+			conditions: [{type: "vrl", source: """
+				.name == "perf_loads_total" && .tags.visit == "unknown" && .tags.net == "unknown"
+				"""}]
+		}]
+	}, {
+		name: "the bytes a first load fetched are a histogram of megabytes"
+		inputs: [{insert_at: "reports", type: "log", log_fields: _report & {type: "perf.load", visit: "first", net: "4g", mb: 1.3}}]
+		outputs: [{
+			extract_from: "reports"
+			conditions: [{type: "vrl", source: """
+				.name == "perf_first_load_megabytes_bucket" && .tags.le == "2" && .counter.value == 1.0
+				"""}]
+		}]
+	}, {
 		name: "an unknown report is dropped"
 		inputs: [{insert_at: "reports", type: "log", log_fields: _report & {type: "gesture"}}]
 		no_outputs_from: ["reports"]
@@ -429,6 +548,7 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 			metric: string
 			expr: "histogram_quantile(\(p), sum by (\(by), le) (rate(\(metric)_bucket{\(sel)}[$__rate_interval])))"
 		}
+		let fl = {stage: string, visit: string, p: string, by: string, expr: "histogram_quantile(\(p), sum by (\(by), le) (increase(perf_first_load_seconds_bucket{stage=\"\(stage)\",visit=\"\(visit)\"}[$__rate_interval])))"}
 		panels: list.Concat([
 			[for i, s in _slis {
 				id: 1 + i, type: "stat", title: "\(_perfTitle[s.kind]) budget left (\(P.window))", datasource: ds
@@ -495,6 +615,58 @@ _perfTitle: {frames: "Frames", interaction: "Interaction", context: "Context"}
 				id: 22, type: "piechart", title: "Sessions by browser", datasource: ds
 				gridPos: {x: 12, y: 32, w: 12, h: 8}
 				targets: [{refId: "A", expr: "sum by (browser) (increase(perf_sessions_total[$__range]))", legendFormat: "{{browser}}"}]
+			}],
+			// The first load: how long a browser waits the first time it comes (empty cache), against a
+			// returning one, by stage, device and connection. The page's own marks say the menu and
+			// the readiness; the browser's, the first and the largest paint.
+			[{
+				id: 30, type: "stat", title: "First visits", datasource: ds
+				gridPos: {x: 0, y: 40, w: 6, h: 4}
+				targets: [{refId: "A", expr: "sum(increase(perf_loads_total{visit=\"first\"}[$__range]))"}]
+			}, {
+				id: 31, type: "stat", title: "First paint p75, first visit", datasource: ds
+				gridPos: {x: 6, y: 40, w: 6, h: 4}
+				fieldConfig: defaults: unit: "s"
+				targets: [{refId: "A", expr: "histogram_quantile(0.75, sum by (le) (increase(perf_first_load_seconds_bucket{stage=\"fcp\",visit=\"first\"}[$__range])))"}]
+			}, {
+				id: 32, type: "stat", title: "Title menu p75, first visit", datasource: ds
+				gridPos: {x: 12, y: 40, w: 6, h: 4}
+				fieldConfig: defaults: unit: "s"
+				targets: [{refId: "A", expr: "histogram_quantile(0.75, sum by (le) (increase(perf_first_load_seconds_bucket{stage=\"menu\",visit=\"first\"}[$__range])))"}]
+			}, {
+				id: 33, type: "stat", title: "Ready to play p75, first visit", datasource: ds
+				gridPos: {x: 18, y: 40, w: 6, h: 4}
+				fieldConfig: defaults: unit: "s"
+				targets: [{refId: "A", expr: "histogram_quantile(0.75, sum by (le) (increase(perf_first_load_seconds_bucket{stage=\"ready\",visit=\"first\"}[$__range])))"}]
+			}, {
+				id: 34, type: "timeseries", title: "Title menu, first visit: p50 / p75 / p95", datasource: ds
+				gridPos: {x: 0, y: 44, w: 12, h: 8}
+				fieldConfig: defaults: unit: "s"
+				targets: [{refId: "A", expr: (fl & {stage: "menu", visit: "first", p: "0.5", by: "visit"}).expr, legendFormat: "p50"}, {refId: "B", expr: (fl & {stage: "menu", visit: "first", p: "0.75", by: "visit"}).expr, legendFormat: "p75"}, {refId: "C", expr: (fl & {stage: "menu", visit: "first", p: "0.95", by: "visit"}).expr, legendFormat: "p95"}]
+			}, {
+				id: 35, type: "timeseries", title: "Title menu, returning visit: p50 / p75 / p95", datasource: ds
+				gridPos: {x: 12, y: 44, w: 12, h: 8}
+				fieldConfig: defaults: unit: "s"
+				targets: [{refId: "A", expr: (fl & {stage: "menu", visit: "returning", p: "0.5", by: "visit"}).expr, legendFormat: "p50"}, {refId: "B", expr: (fl & {stage: "menu", visit: "returning", p: "0.75", by: "visit"}).expr, legendFormat: "p75"}, {refId: "C", expr: (fl & {stage: "menu", visit: "returning", p: "0.95", by: "visit"}).expr, legendFormat: "p95"}]
+			}, {
+				id: 36, type: "timeseries", title: "Ready to play, first visit, p75 by device", datasource: ds
+				gridPos: {x: 0, y: 52, w: 12, h: 8}
+				fieldConfig: defaults: unit: "s"
+				targets: [{refId: "A", expr: (fl & {stage: "ready", visit: "first", p: "0.75", by: "form"}).expr, legendFormat: "{{form}}"}]
+			}, {
+				id: 37, type: "timeseries", title: "Ready to play, first visit, p75 by connection", datasource: ds
+				gridPos: {x: 12, y: 52, w: 12, h: 8}
+				fieldConfig: defaults: unit: "s"
+				targets: [{refId: "A", expr: (fl & {stage: "ready", visit: "first", p: "0.75", by: "net"}).expr, legendFormat: "{{net}}"}]
+			}, {
+				id: 38, type: "timeseries", title: "Largest paint, first visit vs returning, p75", datasource: ds
+				gridPos: {x: 0, y: 60, w: 12, h: 8}
+				fieldConfig: defaults: unit: "s"
+				targets: [{refId: "A", expr: "histogram_quantile(0.75, sum by (visit, le) (increase(perf_first_load_seconds_bucket{stage=\"lcp\",visit=~\"first|returning\"}[$__rate_interval])))", legendFormat: "{{visit}}"}]
+			}, {
+				id: 39, type: "timeseries", title: "Bytes fetched by the first load, p75 (MB)", datasource: ds
+				gridPos: {x: 12, y: 60, w: 12, h: 8}
+				targets: [{refId: "A", expr: "histogram_quantile(0.75, sum by (visit, le) (increase(perf_first_load_megabytes_bucket{visit=~\"first|returning\"}[$__rate_interval])))", legendFormat: "{{visit}}"}]
 			}],
 		])
 	}
