@@ -7,11 +7,11 @@ beyond the browser, and beside them, on unmodified pronto. Why and how they are 
 ## Plugins
 
 The plugins that run a service beside the app on a host launch (journeys, perf, analytics, flags,
-billing) are written for pronto 1.1 or later (pronto-fork 1.1.4's host launch, mecha 0.22): a launch hands
+billing, identity's local broker) are written for pronto 1.1 or later (pronto-fork 1.1.4's host launch, mecha 0.22): a launch hands
 each exposed port out itself and names the peers by `{peer, port}` in an entrypoint's env, a form pronto
 0.24 does not read (it ran such services as `code.meta.hostPeers`, which these plugins no longer write). An
 app on 0.24 keeps the copy it has until it moves to 1.1; one that reinstalls (`bin/pronto-journeys <app>`,
-`-perf`, `-analytics`, `-flags`, `-billing`) must be on pronto 1.1 first, and `bin/pronto connect stripe`
+`-perf`, `-analytics`, `-flags`, `-billing`, `-identity`) must be on pronto 1.1 first, and `bin/pronto connect stripe`
 refuses an app that is not.
 
 - [ads](ads/README.md): rewarded ads a player chooses to watch.

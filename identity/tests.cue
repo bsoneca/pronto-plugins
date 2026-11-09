@@ -81,6 +81,14 @@ localHydraMoves: strings.Contains(_decl, "expose: {public: {port: 28453, env: \"
 localHydraIssuer: strings.Contains(_decl, "URLS_SELF_ISSUER: \"http://localhost:19543\"") & true
 noSharedPort: strings.Contains(_decl, "28443") & false
 
+// On a host launch Hydra's health is asked on the port the launch hands it (a literal URL would keep
+// Hydra's own), the front's on its own, and the front finds Hydra by its peer address, not the
+// container's name; the container's compose keeps its own names and ports.
+localHydraHealth: (strings.Contains(_decl, "healthcheck: {port: 28453, path: \"/.well-known/jwks.json\"}") && !strings.Contains(_decl, "http://127.0.0.1:28453")) & true
+localFrontHealth: (strings.Contains(_decl, "healthcheck: {port: 19543, path: \"/health\"}") && !strings.Contains(_decl, "http://127.0.0.1:19543")) & true
+localHydraPeer: strings.Contains(_decl, "HYDRA_PUBLIC: {peer: \"identity-hydra\", port: \"public\", prefix: \"http://\"}") & strings.Contains(_decl, "HYDRA_ADMIN:  {peer: \"identity-hydra\", port: \"admin\", prefix: \"http://\"}") & true
+noHydraContainerName: strings.Contains(_decl, "\"http://identity-hydra:") & false
+
 // What the app asks the broker for is its own: openid and profile unless it says, and the
 // verified e-mail too where it names email, each provider alike; nothing else is admitted.
 scopeDefault: _t.scope & "openid profile"
