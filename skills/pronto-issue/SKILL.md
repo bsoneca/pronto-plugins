@@ -32,14 +32,23 @@ sprint's, and then it goes through the steps below like any other.
 5. **Open the pull request** ready for review, its title starting `PRONTO-<n>:`. The plane
    workflow moves the issue to Review, and to Merged once it merges; release-cron makes it Live and
    the flag's flip Done.
-5b. **Pull the next one.** Review holds no slot, so the moment the pull request is open (or the
-   issue is cancelled or abandoned) run `pronto-devflow pull . [--lane SRE]` (engineer by default):
-   it starts the lane's next Ready issue of today's sprint, most urgent first. Work that issue the
-   same way, as its own session, and say which you started. A sprint commits 3 issues per person
-   with 1 in Implementing each, so an engineer is never idle after one issue. Nothing Ready:
-   help (5c).
-5c. **Nothing Ready: help finish the sprint.** An engineer or SRE whose `pull` finds nothing Ready
-   becomes a helper. A helper takes no new issue from the Backlog and files none to keep busy; it
+5b. **Pull the next one, always.** An idle engineer is money spent for nothing (the owner,
+   2026-11-09), so the moment an issue leaves your hands (its pull request opens, or it is
+   cancelled or abandoned) you start the next one in the same turn; you never end a turn idle
+   while today's sprint has work. Review holds no slot. In this order:
+   1. `pronto-devflow pull . [--lane SRE]` (engineer by default): it starts the lane's next Ready
+      issue of today's sprint, most urgent first.
+   2. Nothing Ready: take the most urgent issue of today's sprint still in Refine, in your lane
+      (`pronto-devflow status .`), that no one else is refining and that waits on nothing the owner
+      must do. Refine it yourself (step 2), move it to Ready, and start it (step 3).
+   3. The sprint has nothing left to refine or start: tell the lead (SendMessage to the session
+      that started you, or a comment on the sprint) that your lane is empty, then help (5c) while
+      the lead adds the next issue. The lead adds the most urgent Backlog issue that was already
+      there at the day's planning, never one the owner filed today, which waits for planning
+      unless the owner says otherwise.
+   Work each issue the same way, as its own session, and say which you started.
+5c. **Nothing to start: help finish the sprint.** An engineer or SRE for whom 5b found nothing to
+   start becomes a helper until the lead gives it an issue. A helper takes no new issue from the Backlog and files none to keep busy; it
    helps today's sprint's open issues (`pronto-devflow status .`: Implementing and Review) merge.
    It looks first in its own app or lane, then in any. In this order:
    1. **A failing gate or ci on an open pull request.** Reproduce it, find the cause, and hand the
@@ -55,7 +64,7 @@ sprint's, and then it goes through the steps below like any other.
    owner's branch, never edits files the owner has in hand, and never moves the issue. Gates
    share the machine's slots, so when they are full (`deno run -A tests/slot.ts status` in an app, or the
    machine dashboard), diagnosis and reading come before starting another gate. When nothing in
-   the sprint needs help, say so and stop.
+   the sprint needs help, say so to the lead and wait for its next issue.
 6. **What you learn on the way** becomes new issues (`pronto-devflow file ...`), each linked in a
    comment. Do it now only when this issue's objective needs it; say on the issue which you chose.
 
@@ -63,4 +72,5 @@ sprint's, and then it goes through the steps below like any other.
 
 - Never move an issue to Review, Merged, Live or Done yourself: the hooks do, from what happened.
 - Cancelled is `pronto-devflow move . PRONTO-<n> Cancelled --why "<reason>"`.
-- Being idle is never a reason to start or file new work: help finish the sprint (5c).
+- An engineer is never idle: finishing one issue means starting the next (5b), refining it first
+  when nothing is Ready. Being idle is still never a reason to file new work.
