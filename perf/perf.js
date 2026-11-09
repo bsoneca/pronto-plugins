@@ -11,6 +11,11 @@
 //
 //	screen.dispatchEvent(new CustomEvent("pronto:perf", {detail: {drawCalls, gpuMs, tier}}))
 //
+// A page may also say when it was usable, by marking performance.mark("pronto:menu") (its first
+// screen drawn and answering) and performance.mark("pronto:ready") (everything it needs to play
+// is in); with the first paint, the largest paint, the bytes fetched by then and whether this
+// browser had visited before, they leave once, as a first-load report.
+//
 // What leaves the page is counts in buckets and the device's kind — a GPU
 // family, a browser, an OS, mobile or desktop — never a renderer string, an
 // address, or anything a reader typed. A browser that asks not to be tracked
@@ -287,6 +292,7 @@ if (!globalThis.__prontoPerf) {
 		pageCounted = true;
 		if (lcp !== undefined) recordOf(lcpScreen).lcp.add(lcp / 1000);
 		recordOf(current).cls.add(cls);
+		reportLoad(lcp);
 	};
 
 	setInterval(() => {
@@ -303,6 +309,56 @@ if (!globalThis.__prontoPerf) {
 	});
 	addEventListener("pagehide", leave);
 }
+
+// A first load: once a page, when it is left. A browser is on its first visit when the page could
+// write its mark and found none; one that cannot keep it is told apart as neither.
+const VISITED = "pronto-perf.visited";
+const visitOf = () => {
+	try {
+		if (localStorage.getItem(VISITED) !== null) return "returning";
+		localStorage.setItem(VISITED, "1");
+		return "first";
+	} catch {
+		return "unknown";
+	}
+};
+const netOf = () => {
+	const t = navigator.connection?.effectiveType;
+	return ["4g", "3g", "2g", "slow-2g"].includes(t) ? t : "unknown";
+};
+const secondsOf = (name) => {
+	const m = performance.getEntriesByName(name, "mark")[0];
+	return m ? Math.round(m.startTime) / 1000 : undefined;
+};
+// The bytes the page fetched until it was ready (or until now, if it never was), in megabytes.
+const fetchedMb = (until) => {
+	let bytes = 0;
+	const nav = performance.getEntriesByType("navigation")[0];
+	if (nav?.transferSize) bytes += nav.transferSize;
+	for (const e of performance.getEntriesByType("resource")) {
+		if (until !== undefined && e.startTime > until * 1000) continue;
+		bytes += e.transferSize || 0;
+	}
+	return Math.round(bytes / 1e4) / 100;
+};
+let loadReported = false;
+const reportLoad = (lcp) => {
+	if (loadReported) return;
+	loadReported = true;
+	const fcp = performance.getEntriesByName("first-contentful-paint", "paint")[0];
+	const ready = secondsOf("pronto:ready");
+	push({
+		type: "perf.load",
+		visit: visitState,
+		net: netOf(),
+		...(fcp ? { fcp: Math.round(fcp.startTime) / 1000 } : {}),
+		...(secondsOf("pronto:menu") !== undefined ? { menu: secondsOf("pronto:menu") } : {}),
+		...(ready !== undefined ? { ready } : {}),
+		...(lcp !== undefined ? { lcp: Math.round(lcp) / 1000 } : {}),
+		mb: fetchedMb(ready),
+	});
+};
+const visitState = visitOf();
 
 // The on-page numbers, for whoever asked for them.
 const overlayOf = () => {

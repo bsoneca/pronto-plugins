@@ -14,6 +14,23 @@ Only counts and the device's kind leave the page, never the renderer string or a
 screen.dispatchEvent(new CustomEvent("pronto:perf", { detail: { drawCalls, gpuMs, tier } }));
 ```
 
+## First load
+
+The reporter sends one `perf.load` report per page (when it is left): whether the browser had visited before (`visit` first or returning, from a mark in localStorage), its connection (`net`, the browser's effective type), the first paint, the largest paint, and the bytes fetched by the time the page was ready. An app says when its first screen answered and when it can play with two marks:
+
+```js
+performance.mark("pronto:menu");
+performance.mark("pronto:ready");
+```
+
+The collector exports `perf_first_load_seconds{stage=fcp|menu|ready|lcp,visit,form,browser,net}` and `perf_first_load_megabytes{visit,...}` as histograms, and `perf_loads_total`; the dashboard has a First load row. A budget is optional, in `perf_spec.cue`:
+
+```cue
+perf: #Perf & {firstLoad: {stage: "menu", percent: 75, under: "6s", form: "mobile", net: "4g"}}
+```
+
+and `PerfFirstLoadOverBudget` alerts when fewer first visits on that device and connection reach the stage within it (six hours, at least `min` visits).
+
 ## Use
 
 From a pronto app:
