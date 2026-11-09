@@ -87,6 +87,10 @@ noSharedPort: strings.Contains(_decl, "28443") & false
 localHydraHealth: (strings.Contains(_decl, "healthcheck: {port: 28453, path: \"/.well-known/jwks.json\"}") && !strings.Contains(_decl, "http://127.0.0.1:28453")) & true
 localFrontHealth: (strings.Contains(_decl, "healthcheck: {port: 19543, path: \"/health\"}") && !strings.Contains(_decl, "http://127.0.0.1:19543")) & true
 localHydraPeer: strings.Contains(_decl, "HYDRA_PUBLIC: {peer: \"identity-hydra\", port: \"public\", prefix: \"http://\"}") & strings.Contains(_decl, "HYDRA_ADMIN:  {peer: \"identity-hydra\", port: \"admin\", prefix: \"http://\"}") & true
+// The auth service's address for the front is, on a host launch, the front's peer address as the
+// variable's default (the container keeps `internal`'s hostname), one per provider.
+authInternalPeer: strings.Contains(_decl, "auth: \"process-compose\": env: {\n\t\tOIDC_GOOGLE_INTERNAL: [\"${OIDC_GOOGLE_INTERNAL:-\", {peer: \"identity\", port: \"http\", prefix: \"http://\", suffix: \"/\"}, \"}\"]\n\t}") & true
+authInternalPeers: strings.Contains(_two, "OIDC_GITHUB_INTERNAL: [\"${OIDC_GITHUB_INTERNAL:-\", {peer: \"identity\"") & strings.Contains(_two, "OIDC_GOOGLE_INTERNAL: [") & true
 noHydraContainerName: strings.Contains(_decl, "\"http://identity-hydra:") & false
 
 // What the app asks the broker for is its own: openid and profile unless it says, and the

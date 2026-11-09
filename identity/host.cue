@@ -75,6 +75,12 @@ import (
 		let q = "\\\""
 		for mode in ["hydra", "front"] {(mode): "d=\(q)${XDG_CACHE_HOME:-$HOME/.cache}/pronto-identity/\(H.cacheKey)\(q); [ -f \(q)$d/hydra/local.sh\(q) ] || { t=$(mktemp -d) && crane export --platform linux/amd64 \(H.frontImage) - | tar -xf - -C \(q)$t\(q) app && mkdir -p \(q)${d%/*}\(q) && { [ -f \(q)$d/hydra/local.sh\(q) ] || mv \(q)$t/app\(q) \(q)$d\(q); }; }; exec sh \(q)$d/hydra/local.sh\(q) \(mode)"}
 	}
+	// Per provider, the variable mecha's auth service reads the front's address from, as its default
+	// spelled with the front's host address.
+	_authInternalEnv: strings.Join([for p in H.providers {
+		let e = "OIDC_\(strings.ToUpper(p))_INTERNAL"
+		#"\#(e): ["${\#(e):-", {peer: "identity", port: "http", prefix: "http://", suffix: "/"}, "}"]"#
+	}], "\n\t\t\t\t")
 	_localTargets: [if H._local {"""
 		// The broker itself, for a local test: Hydra and the front as two of
 		// the cluster's own services, from pronto-identity's image. On the
@@ -88,6 +94,14 @@ import (
 			// A docker launch brings up what its aggregate waits on, which is
 			// mecha's plane alone: the broker joins it.
 			launch: compose: depends_on: identity: {condition: "service_healthy", restart: true}
+			// The auth service reaches the front by the `internal` address above, whose hostname is the
+			// container's: mecha writes it, as a string, into OIDC_<PROVIDER>_INTERNAL's default, and the
+			// host has no such name. A launch's own env for auth gives that variable's default as the front's
+			// peer address (the front's port is a literal the slot moves, so no variable of its own), while
+			// a container keeps the hostname.
+			auth: "process-compose": env: {
+				\(H._authInternalEnv)
+			}
 			"identity-hydra": bayt.healthcheck.http & {
 				cmd: builtin: null
 				activate: ""
