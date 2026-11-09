@@ -12,7 +12,6 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
-import org.json.JSONArray
 import org.json.JSONObject
 
 // The locked entry's other side: unlock, state the probe, ask the program's
@@ -40,22 +39,15 @@ class FillActivity : AppCompatActivity() {
                     engine.start().join()
                     // Only an app has certificates; a site's probe states none.
                     val signers = if (probe.kind == "app") Signer.of(packageManager, request.packageName) else emptyList()
-                    val stated = JSONObject()
-                        .put(contract.probe, JSONArray().put(JSONObject().put("id", contract.probe).put("kind", probe.kind).put("target", probe.target)
-                            .put(contract.signers, signers.joinToString(","))))
-                        .put(contract.candidate, JSONArray())
-                    val reply = engine.ask(contract.handler, contract.reads, stated, JSONObject().put("type", "mutation"))
-                    val picked = reply.getJSONArray("updates").let { u -> List(u.length(), u::getJSONObject) }
-                        .filter { it.getString("op") == "put" && it.optString("entity") == contract.candidate }
-                        .map { it.getString("id") }
+                    val reply = engine.ask(contract.handler, contract.reads, Ask.stated(contract, probe, signers), Ask.event())
+                    val picked = Ask.picks(contract, reply)
                     val logins = store.load(contract.vault).map(::JSONObject).associateBy { it.getString("id") }
                     val chosen = picked.mapNotNull(logins::get)
                     // Trust on first use: an app login added before its app was
                     // installed is pinned now, behind the fingerprint just given,
                     // to the app asking.
-                    val pins = chosen.filter { probe.kind == "app" && it.optString(contract.signer).isEmpty() && signers.isNotEmpty() }
-                        .map { JSONObject().put("op", "patch").put("id", it.getString("id")).put("row", JSONObject().put(contract.signer, signers.first())) }
-                    if (pins.isNotEmpty()) engine.commit(contract.vault, JSONArray(pins))?.let { error("pinning refused: $it") }
+                    val pins = Ask.pins(contract, probe, signers, chosen)
+                    if (pins.length() > 0) engine.commit(contract.vault, pins)?.let { error("pinning refused: $it") }
                     val datasets = chosen.map { dataset(request, contract, it) }
                     if (datasets.isEmpty()) return@launch tell("Nothing in the vault fills ${probe.target}.")
                     done(FillResponse.Builder().apply { datasets.forEach(::addDataset) }.build())

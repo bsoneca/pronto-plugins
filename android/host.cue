@@ -37,6 +37,7 @@ _template: {
 	"app/src/main/assets/screen.js":       _ @embed(file="template/app/src/main/assets/screen.js", type=text)
 	"app/src/main/assets/autofill.json":   _ @embed(file="template/app/src/main/assets/autofill.json", type=text)
 	"app/src/test/kotlin/FillTest.kt":     _ @embed(file="template/app/src/test/kotlin/FillTest.kt", type=text)
+	"app/src/test/kotlin/AskTest.kt":      _ @embed(file="template/app/src/test/kotlin/AskTest.kt", type=text)
 	"sign-release.sh":                     _ @embed(file="template/sign-release.sh", type=text)
 }
 
@@ -64,6 +65,10 @@ _terminal: {
 	"app/src/test/kotlin/SealTest.kt":       _ @embed(file="template/terminal/app/src/test/kotlin/SealTest.kt", type=text)
 	"app/src/main/kotlin/Unlock.kt":         _ @embed(file="template/terminal/app/src/main/kotlin/Unlock.kt", type=text)
 	"app/src/test/kotlin/UnlockTest.kt":     _ @embed(file="template/terminal/app/src/test/kotlin/UnlockTest.kt", type=text)
+	// The autofill's pure half, the same file as the vault's: the terminal asks the same handler.
+	"app/src/main/kotlin/Fill.kt":           _template["app/src/main/kotlin/Fill.kt"]
+	"app/src/test/kotlin/FillTest.kt":       _template["app/src/test/kotlin/FillTest.kt"]
+	"app/src/test/kotlin/AskTest.kt":        _template["app/src/test/kotlin/AskTest.kt"]
 	"app/src/debug/kotlin/Driver.kt":      _ @embed(file="template/terminal/app/src/debug/kotlin/Driver.kt", type=text)
 	"app/src/release/kotlin/Driver.kt":    _ @embed(file="template/terminal/app/src/release/kotlin/Driver.kt", type=text)
 	"app/src/debug/kotlin/Passkeys.kt":    _ @embed(file="template/terminal/app/src/debug/kotlin/Passkeys.kt", type=text)
@@ -80,6 +85,38 @@ _terminal: {
 	"terminal/scenarios.ts":               _ @embed(file="template/terminal/scenarios.ts", type=text)
 	"terminal/trust.ts":                   _ @embed(file="template/terminal/trust.ts", type=text)
 }
+
+// The terminal's autofill, written only for an app that asks for it (#Host.autofill): the service,
+// its activity, and the contract seeded as the vault's is, the app's to point at its own handler.
+_terminalFill: {
+	"app/src/main/kotlin/FillService.kt":     _ @embed(file="template/terminal/app/src/main/kotlin/FillService.kt", type=text)
+	"app/src/main/kotlin/FillActivity.kt":    _ @embed(file="template/terminal/app/src/main/kotlin/FillActivity.kt", type=text)
+	"app/src/main/res/values/fill.xml":       _ @embed(file="template/terminal/app/src/main/res/values/fill.xml", type=text)
+	"app/src/main/res/xml/autofill_service.xml": _template["app/src/main/res/xml/autofill_service.xml"]
+	"app/src/main/assets/autofill.json":      _template["app/src/main/assets/autofill.json"]
+}
+
+// What the terminal's manifest declares for it, in place of its <!--__AUTOFILL__--> line.
+_fillManifest: """
+	        <activity
+	            android:name=".FillActivity"
+	            android:exported="false"
+	            android:excludeFromRecents="true"
+	            android:theme="@style/Theme.Pronto.Fill" />
+	        <service
+	            android:name=".FillService"
+	            android:exported="true"
+	            android:label="__LABEL__"
+	            android:permission="android.permission.BIND_AUTOFILL_SERVICE">
+	            <intent-filter>
+	                <action android:name="android.service.autofill.AutofillService" />
+	            </intent-filter>
+	            <meta-data
+	                android:name="android.autofill"
+	                android:resource="@xml/autofill_service" />
+	        </service>
+
+	"""
 
 // Kotlin sources, main and test, land under the application id's package path.
 _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/", "app/src/release/kotlin/"]
@@ -108,6 +145,14 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 	// Whether the terminal's sealed storage opens only after one strong-biometric prompt
 	// (android/android.json's `unlock`, Unlock.kt). none: its key needs no person, nobody is prompted.
 	unlock: *"none" | "biometric"
+	// Whether the terminal fills other apps' logins (android/android.json's `autofill`, FillService.kt):
+	// its handler named in the seeded autofill.json answers which. A fill hands out secrets, so it
+	// needs the unlock; the vault mode always fills.
+	autofill: *false | bool
+	if autofill {
+		mode:   "terminal"
+		unlock: "biometric"
+	}
 	release: *null | {
 		project: =~"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
 		secret:  *"android-release-signing" | =~"^[A-Za-z0-9_-]{1,255}$"
@@ -218,8 +263,8 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 		if H.mode == "terminal" && H.package != "" {
 			"android_surface.cue": {seed: false, text: H._surface}
 		}
-		for path, source in [if H.mode == "terminal" {_terminal}, _template][0] if path != "sign-release.sh" || H.release != null {
-			let filled = strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(source, "__RELEASE_PROJECT__", [if H.release != null {H.release.project}, ""][0], -1), "__RELEASE_SECRET__", [if H.release != null {H.release.secret}, ""][0], -1), "__APPLICATION_ID__", H.applicationId, -1), "__APP__", H.app, -1), "__LABEL__", H.label, -1), "__BASE__", H.base, -1), "__UNLOCK__", H.unlock, -1)
+		for path, source in [if H.mode == "terminal" {{_terminal, if H.autofill {_terminalFill}}}, _template][0] if path != "sign-release.sh" || H.release != null {
+			let filled = strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(source, "<!--__AUTOFILL__-->\n", [if H.autofill {_fillManifest}, ""][0], -1), "__RELEASE_PROJECT__", [if H.release != null {H.release.project}, ""][0], -1), "__RELEASE_SECRET__", [if H.release != null {H.release.secret}, ""][0], -1), "__APPLICATION_ID__", H.applicationId, -1), "__APP__", H.app, -1), "__LABEL__", H.label, -1), "__BASE__", H.base, -1), "__UNLOCK__", H.unlock, -1)
 			let dest = [
 				for k in _kotlin if strings.HasPrefix(path, k) {"\(k)\(strings.Replace(H.applicationId, ".", "/", -1))/\(strings.TrimPrefix(path, k))"},
 				path,

@@ -7,7 +7,7 @@ A native Android host for a pronto app: no WebView. The program's own handlers r
 - `android/`: a Gradle project from [`template/`](template), its package `dev.pronto.<name>`.
 - `.say.json` rules `setup`, `build`, `test` and `launch`, each answering `@android`.
 - `.config/mise/conf.d/android.toml`: Temurin JDK, the SDK's cmdline-tools, Gradle.
-- The bridges [a native terminal](../docs/native-terminal.md) names: sealed **storage** for `device` tables (built: SQLite, every value AES-256/GCM under an AndroidKeyStore key, see below), a **Keystore** key behind one biometric prompt (built for the terminal mode, opt-in: see Biometric unlock below), and an **autofill** service that runs the app's handler over the vault (PRONTO-105, not built).
+- The bridges [a native terminal](../docs/native-terminal.md) names: sealed **storage** for `device` tables (built: SQLite, every value AES-256/GCM under an AndroidKeyStore key, see below), a **Keystore** key behind one biometric prompt (built for the terminal mode, opt-in: see Biometric unlock below), and an **autofill** service that runs the app's handler over its logins (built for both modes; opt-in in the terminal: see Autofill below).
 - `screen.js` and `autofill.json`, written once and then the app's.
 
 ## Two modes
@@ -33,6 +33,18 @@ An app asks for it with `"unlock": "biometric"` in `android/android.json` (held 
   - `canceled` or `refused`: the reason is shown on the screen and the terminal stays shut.
   - `lost` (rows with no wrapped key, or a key the Keystore invalidated): the reason is shown and nothing is silently recreated.
 - The wrap is pure over an initialised cipher, so a JVM test (`UnlockTest.kt`) runs it on a software key. Only the prompt needs a phone, where an emulator's fingerprint answers it (`adb emu finger touch 1`).
+
+### Autofill
+
+The vault mode always fills. A terminal app asks for it with `"autofill": true` in `android/android.json`, which needs `"unlock": "biometric"` (`#Host` sets it, and refuses `"none"` beside it): a fill hands out secrets, so it opens only behind a prompt. With it the build declares `FillService` and `FillActivity` and seeds `autofill.json`, the app's to point at its own handler and columns:
+
+- The service answers a login form in another app or site with one locked entry, "Unlock <label>".
+- Choosing it opens `FillActivity`, which runs the biometric prompt above and boots the terminal headless over the opened key.
+- It states the probe (the asking app's package and its signing certificates, or the site's domain) to the app's handler, compiled as a screen compiles it (`main.js` `__ask`, omnishell's `evaluateRole`). It never runs a second implementation.
+- One dataset is offered per login the handler picks. The secret is read by id from the store's rows and goes only into the dataset.
+- An app login with no signer yet is pinned to the asking app's certificate on first fill.
+
+The ask's pure half (`Fill.kt`: reading the form, the probe, and the picks and pins from the handler's reply) is the same file in both modes, tested on the JVM (`FillTest.kt`, `AskTest.kt`). The fill itself needs an emulator.
 
 ### Hatches
 

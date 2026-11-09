@@ -74,6 +74,8 @@ dependencies {
     implementation("com.yandex.div:div-core:33.6.0")
     implementation("com.yandex.div:glide:33.6.0")
     testImplementation("junit:junit:4.13.2")
+    // The real org.json: the platform's is a stub in a JVM test (AskTest reads and writes JSON).
+    testImplementation("org.json:json:20250517")
     // A release build's passkeys (src/release/Passkeys.kt); before Android 14, through Play services.
     releaseImplementation("androidx.credentials:credentials:1.5.0")
     releaseImplementation("androidx.credentials:credentials-play-services-auth:1.5.0")

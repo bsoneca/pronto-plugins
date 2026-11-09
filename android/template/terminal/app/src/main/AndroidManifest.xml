@@ -22,5 +22,6 @@
                 <data android:scheme="https" android:host="${prontoHost}" />
             </intent-filter>
         </activity>
+<!--__AUTOFILL__-->
     </application>
 </manifest>

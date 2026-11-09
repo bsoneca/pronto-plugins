@@ -269,6 +269,14 @@ class TerminalEngine(
     suspend fun where(): String = script("JSON.stringify(__where())")
     suspend fun session(): String = script("__session()")
     suspend fun domClick(selector: String): String = script("__domClick(${JSONObject.quote(selector)})")
+    // The autofill's questions (FillActivity.kt), each answered once the shell has booted (main.js):
+    // the app's handler over the stated rows, a table's rows, and the fill's pins (null, or why refused).
+    suspend fun ask(handler: String, reads: List<String>, stated: JSONObject, event: JSONObject): JSONObject =
+        JSONObject(script("__ask(${JSONObject.quote(handler)},${JSONArray(reads)},${JSONObject.quote(stated.toString())},${JSONObject.quote(event.toString())})"))
+    suspend fun rows(table: String): List<JSONObject> =
+        JSONArray(script("__rows(${JSONObject.quote(table)})")).let { a -> List(a.length(), a::getJSONObject) }
+    suspend fun commit(table: String, patches: JSONArray): String? =
+        script("__patch(${JSONObject.quote(table)},${JSONObject.quote(patches.toString())})").ifEmpty { null }
     private suspend fun script(expression: String): String = withContext(dispatcher) {
         qjs.evaluate<String>(expression, "probe.js", false)
     }

@@ -1,9 +1,14 @@
 package __APPLICATION_ID__
 
+import android.app.assist.AssistStructure
 import android.content.pm.PackageManager
 import android.os.Build
 import android.text.InputType
+import android.view.View
+import android.view.autofill.AutofillId
 import java.security.MessageDigest
+import org.json.JSONArray
+import org.json.JSONObject
 
 // What asks to be filled: a site, named by its domain, or an app, by its package.
 data class Probe(val kind: String, val target: String)
@@ -105,4 +110,76 @@ object Fill {
             f.htmlType.equals("email", ignoreCase = true) ||
             variation(f) in setOf(InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS, InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS) ||
             listOfNotNull(f.htmlName, f.idEntry).any { n -> listOf("user", "email", "login").any { n.contains(it, ignoreCase = true) } }
+}
+
+// autofill.json: which handler answers a fill, the tables it reads, and the vault's columns a
+// dataset is drawn from. Both modes read it: the vault's host and the terminal ask the same handler.
+class Autofill(json: JSONObject) {
+    val handler: String = json.getString("handler")
+    val reads: List<String> = json.getJSONArray("reads").let { a -> List(a.length(), a::getString) }
+    val probe: String = json.getString("probe")
+    val candidate: String = json.getString("candidate")
+    val vault: String = json.getString("vault")
+    val title: String = json.getString("title")
+    val username: String = json.getString("username")
+    val secret: String = json.getString("secret")
+    // The vault's pin column and the probe's signer column: an app login fills
+    // only an app signed as it was, and an unpinned one is pinned on first fill.
+    val signer: String = json.getString("signer")
+    val signers: String = json.getString("signers")
+}
+
+// The ask itself, the same in both modes: the probe stated as the handler's input, the logins it
+// picked read back from its reply, and the pins an app's first fill writes. Pure over JSON, so a
+// JVM test (AskTest) holds it; only running the handler needs an engine.
+object Ask {
+    // The event a fill sends: the stated tables changed, as a mutation would.
+    fun event(): JSONObject = JSONObject().put("type", "mutation")
+
+    // Only an app has certificates; a site's probe states none.
+    fun stated(c: Autofill, probe: Probe, signers: List<String>): JSONObject = JSONObject()
+        .put(c.probe, JSONArray().put(JSONObject().put("id", c.probe).put("kind", probe.kind).put("target", probe.target)
+            .put(c.signers, signers.joinToString(","))))
+        .put(c.candidate, JSONArray())
+
+    // The ids of the logins the handler stated as candidates, in its order; nothing else it wrote.
+    fun picks(c: Autofill, reply: JSONObject): List<String> =
+        (reply.optJSONArray("updates") ?: JSONArray()).let { u -> List(u.length(), u::getJSONObject) }
+            .filter { it.optString("op") == "put" && it.optString("entity") == c.candidate }
+            .map { it.getString("id") }
+
+    // Trust on first use: an app login with no pin yet is pinned, behind the prompt just answered,
+    // to the app asking. A site's login, or one already pinned, is left as it is.
+    fun pins(c: Autofill, probe: Probe, signers: List<String>, chosen: List<JSONObject>): JSONArray = JSONArray(
+        chosen.filter { probe.kind == "app" && it.optString(c.signer).isEmpty() && signers.isNotEmpty() }
+            .map { JSONObject().put("op", "patch").put("id", it.getString("id")).put("row", JSONObject().put(c.signer, signers.first())) },
+    )
+}
+
+// One request's facts, read off the asking screen's view tree.
+class Request(val packageName: String, val probe: Probe?, val username: AutofillId?, val password: AutofillId?) {
+    val ids get() = listOfNotNull(username, password)
+
+    companion object {
+        fun read(structure: AssistStructure): Request {
+            val fields = mutableListOf<Field<AutofillId>>()
+            // A node's page is the nearest one declared at or above it: a frame
+            // inside a page declares its own.
+            fun walk(node: AssistStructure.ViewNode, outer: String?, outerScheme: String?) {
+                val domain = node.webDomain ?: outer
+                val scheme = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && node.webDomain != null) node.webScheme else null) ?: outerScheme
+                val id = node.autofillId
+                if (id != null && node.autofillType == View.AUTOFILL_TYPE_TEXT) {
+                    val attrs = node.htmlInfo?.attributes.orEmpty().associate { it.first to it.second }
+                    fields += Field(id, domain, scheme, node.autofillHints.orEmpty().toList(), node.inputType, attrs["type"], attrs["name"], node.idEntry)
+                }
+                for (i in 0 until node.childCount) walk(node.getChildAt(i), domain, scheme)
+            }
+            for (i in 0 until structure.windowNodeCount) walk(structure.getWindowNodeAt(i).rootViewNode, null, null)
+            val pkg = structure.activityComponent.packageName
+            val targets = Fill.targets(fields)
+            val asking = fields.firstOrNull { it.id == targets.password } ?: fields.firstOrNull { it.id == targets.username }
+            return Request(pkg, Fill.probe(pkg, asking), targets.username, targets.password)
+        }
+    }
 }

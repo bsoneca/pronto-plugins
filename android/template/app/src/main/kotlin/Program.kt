@@ -35,18 +35,3 @@ class Program(private val context: Context) {
 
     private fun asset(name: String) = assets.open(name).bufferedReader().use { it.readText() }
 }
-
-class Autofill(json: JSONObject) {
-    val handler: String = json.getString("handler")
-    val reads: List<String> = json.getJSONArray("reads").let { a -> List(a.length(), a::getString) }
-    val probe: String = json.getString("probe")
-    val candidate: String = json.getString("candidate")
-    val vault: String = json.getString("vault")
-    val title: String = json.getString("title")
-    val username: String = json.getString("username")
-    val secret: String = json.getString("secret")
-    // The vault's pin column and the probe's signer column: an app login fills
-    // only an app signed as it was, and an unpinned one is pinned on first fill.
-    val signer: String = json.getString("signer")
-    val signers: String = json.getString("signers")
-}
