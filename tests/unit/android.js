@@ -2,6 +2,7 @@
 // DivKit card by the Android terminal's compiler (android/template/terminal/compile.js), and small
 // measures of the card (tests/unit/android.cue).
 import { parseHTML } from "npm:linkedom@0.18.4";
+import { checkView, elementOf as viewElement } from "../../android/template/terminal/bound.js";
 import { compile, elementOf, idOf } from "../../android/template/terminal/compile.js";
 import { length, parseColor } from "../../android/template/terminal/css.js";
 import { atobOf, b64u, btoaOf, credentialOf, errorOf, optionsToJson, unb64u } from "../../android/template/terminal/passkeys.js";
@@ -269,4 +270,31 @@ export function passkeyAtob(text) {
   const encoded = btoaOf(text);
   const refused = (() => { try { btoaOf("\u0100"); return null; } catch (e) { return e.name; } })();
   return { encoded, back: atobOf(encoded), unpadded: atobOf(encoded.replace(/=+$/, "")), refused };
+}
+
+// --- the hatch contract's v3 scene (bound.js checks it, compile.js types it)
+
+const sceneView = (children, attrs = {}) => ({ tag: "scene", key: "scene", attrs: { id: "scene", ...attrs }, children });
+
+/** The fault bound.js gives a scene whose children are `children` (and its own `attrs`), or "" when it holds. */
+export function sceneFault(children, attrs) {
+  try { checkView({ tag: "div", key: "root", children: [sceneView(children, attrs)] }); return ""; } catch (e) { return e.message; }
+}
+
+/** A scene view drawn as bound.js draws it, then compiled: the elements' facts, and the card's custom div(s). */
+export function sceneDrawn(children, attrs, css) {
+  const { document } = pageOf("");
+  const root = viewElement(document, { tag: "div", key: "root", children: [sceneView(children, attrs)] });
+  document.body.appendChild(root);
+  const { card, unsupported } = compile(document, { sheets: asSheets(css), width: 411 });
+  const el = document.querySelector("#scene");
+  return {
+    hidden: el.hasAttribute("hidden"),
+    fight: el.getAttribute("data-fight"),
+    models: document.querySelectorAll("#scene .model").length,
+    tags: [...el.children].map((c) => c.localName),
+    customs: all(card.states[0].div).filter((d) => d.type === "custom"),
+    idMatches: all(card.states[0].div).some((d) => d.type === "custom" && elementOf(d.id) === el),
+    unsupported: unsupported.map((u) => u.what),
+  };
 }

@@ -62,6 +62,19 @@ export function inputText(text: string): string {
   return "'" + text.replace(/'/g, "'\\''").replace(/ /g, "%s") + "'";
 }
 
+/**
+ * A page's `?seed=N` made its own to a scenario and actor. The shell mints every row id it creates
+ * from that seed, so two pages of one seed mint the same ids; a stack outlives the scenario (one per
+ * run), so the second scenario's insert met the first one's row of the same id, which the database
+ * answered 201 without writing, and the page never showed its game. The seed stays deterministic
+ * (the same salt gives the same seed) and a path without one is left as it is.
+ */
+export function seeded(path: string, salt: string): string {
+  let h = 2166136261;
+  for (const ch of salt) h = Math.imul(h ^ ch.codePointAt(0)!, 16777619) >>> 0;
+  return path.replace(/([?&]seed=)(\d+)/, (_m, head: string, n: string) => head + (((Number(n) + h) >>> 0) % 4294967296));
+}
+
 /** A shell word, whatever it holds. */
 export const quote = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
 
@@ -302,6 +315,8 @@ class StandIn {
 
 class Phone {
   messages: Record<string, any> = {};
+  /** The scenario running: it salts the seed of every page it opens (seeded). */
+  scenario = "";
   private page: StandIn | null = null;
   private client?: Deno.HttpClient;
   constructor(readonly id: string, readonly base: string) {}
@@ -348,7 +363,7 @@ class Phone {
     const door = this.base.match(/^https:\/\/localhost:(\d+)/);
     if (door) await adb("reverse", `tcp:${door[1]}`, `tcp:${door[1]}`);
     this.page = null;
-    await sh(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(path)} --es actor ${quote(actor)} --es browser standin`);
+    await sh(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(seeded(path, `${this.scenario}/${actor}`))} --es actor ${quote(actor)} --es browser standin`);
     await until(`${actor}'s terminal at ${path}`, 30, async () => {
       const ready = await this.find("html[data-terminal-ready]", false);
       return [ready && ready.length > 0 ? ready : null, ready ? "the terminal has not booted" : "the driver does not answer"];
@@ -479,6 +494,7 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
   const vars: Record<string, string> = {};
   const opened: Record<string, string> = {};
   let current: string | undefined;
+  phone.scenario = name;
   await adb("logcat", "-c");
   await sh(`pm clear ${phone.id}`);
   const flagsOn = new Map<string, boolean>();

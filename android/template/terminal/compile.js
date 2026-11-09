@@ -776,6 +776,7 @@ function convertOne(el, pctx, C) {
     case "textarea": return fieldDiv(el, st, pctx, C);
     case "select": return selectDiv(el, st, pctx, C);
     case "hr": return ruleDiv(el, st, pctx, C);
+    case "scene": return sceneDiv(el, st, pctx, C);
     case "br": return [];
     default:
   }
@@ -1030,6 +1031,45 @@ function imageDiv(el, st, pctx, C) {
   const acc = interact(div, el, C, "image");
   if (alt && !acc.accessibility.description) acc.accessibility = Object.assign({}, acc.accessibility, { description: lit(alt) });
   return [acc];
+}
+
+// A v3 scene (the hatch contract's scene, model, anim, camera, audio) is one custom div, "pronto-scene":
+// Kotlin's SceneView draws it. bound.js has already refused a scene the contract refuses, so this only
+// types what is there, with the contract's defaults (the Unity host's Scene.Of).
+const sceneNum = (el, name, dflt) => { const v = attr(el, name); const n = v === null || v.trim() === "" ? NaN : Number(v); return isFinite(n) ? n : dflt; };
+const sceneVec = (el, names, dflt) => names.map((n, i) => sceneNum(el, n, dflt[i]));
+const sceneKey = (el) => attr(el, "data-hatch-key") || idOf(el);
+const sceneOn = (el, name) => has(el, name) && attr(el, name) !== "false";
+function sceneProps(el) {
+  const props = { background: attr(el, "background") || "", camera: { x: 0, y: 5, z: -8, lookX: 0, lookY: 0, lookZ: 0, fov: 45 }, models: [], anims: [], audios: [] };
+  let cam = false;
+  for (const c of el.children) {
+    const tag = lname(c), key = sceneKey(c);
+    if (tag === "model") {
+      const [x, y, z] = sceneVec(c, ["x", "y", "z"], [0, 0, 0]), [rx, ry, rz] = sceneVec(c, ["rx", "ry", "rz"], [0, 0, 0]), [sx, sy, sz] = sceneVec(c, ["sx", "sy", "sz"], [1, 1, 1]);
+      props.models.push({ key, shape: attr(c, "shape") || "", prefab: attr(c, "prefab") || "", color: attr(c, "color") || "", x, y, z, rx, ry, rz, sx, sy, sz });
+    } else if (tag === "anim") {
+      const [dx, dy, dz] = sceneVec(c, ["dx", "dy", "dz"], [0, 0, 0]);
+      props.anims.push({ key, target: attr(c, "target") || "", clip: attr(c, "clip") || "", duration: sceneNum(c, "duration", 0.5), dx, dy, dz, spin: sceneNum(c, "spin", 0), loop: sceneOn(c, "loop") });
+    } else if (tag === "camera" && !cam) {
+      cam = true;
+      const [x, y, z] = ["x", "y", "z"].some((n) => has(c, n)) ? sceneVec(c, ["x", "y", "z"], [0, 0, 0]) : [0, 5, -8];
+      const [lookX, lookY, lookZ] = sceneVec(c, ["look-x", "look-y", "look-z"], [0, 0, 0]);
+      props.camera = { x, y, z, lookX, lookY, lookZ, fov: sceneNum(c, "fov", 45) };
+    } else if (tag === "audio") {
+      props.audios.push({ key, clip: attr(c, "clip") || "", volume: sceneNum(c, "volume", 1), loop: sceneOn(c, "loop") });
+    }
+  }
+  return props;
+}
+
+function sceneDiv(el, st, pctx, C) {
+  const b = outerBox(el, st, pctx, C, "scene", {});
+  const f = b.fields;
+  // No size from the CSS: the width of the page and a square.
+  if (f.width.type === "wrap_content") f.width = { type: "match_parent" };
+  if (f.height.type === "wrap_content" && !f.aspect) f.aspect = { ratio: 1 };
+  return [Object.assign({ type: "custom", id: C.reg(el), custom_type: "pronto-scene", custom_props: sceneProps(el) }, f)];
 }
 
 function ruleDiv(el, st, pctx, C) {

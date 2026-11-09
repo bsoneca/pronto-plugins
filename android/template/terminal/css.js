@@ -555,6 +555,7 @@ html, body, div, section, article, header, footer, main, nav, aside, form, field
 blockquote, pre, hr, p, h1, h2, h3, h4, h5, h6, ul, ol, li, dl, dt, dd, menu, dialog, legend, table, thead, tbody, tfoot, search, hgroup { display: block; }
 head, script, style, template, meta, link, title, base, noscript, area, datalist, param, source, track, [popover], dialog:not([open]) { display: none; }
 [data-popover-open] { display: block; }
+scene { display: block; }
 tr { display: flex; } td, th { display: block; flex: 1 1 0; }
 button, input, select, textarea { display: inline-block; }
 body { margin: 8px; }

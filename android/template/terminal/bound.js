@@ -11,16 +11,28 @@
 // else is a fault (`PRONTO FAULT hatch <name>: ...`) and the hatch keeps its previous state. A view that
 // faults leaves the last good one drawn.
 //
-// What the phone does not do yet (PRONTO-75): a v3 scene (scene, model, anim, camera, audio) is kept in the
-// DOM, hidden, so its attributes stay readable, but nothing is drawn in 3D; a ticked hatch gets no held
-// input (no touch layout). There is no ad network: an outcome's ad ends `none` at once, as the contract's
+// A v3 scene (scene, model, anim, camera, audio; the contract's "Contract v3") is checked here as the Unity
+// host's Scene.Check checks it, kept in the DOM with its attributes and classes, and drawn natively: compile.js
+// turns the scene element into one DivKit custom div ("pronto-scene") that Kotlin's SceneView draws in OpenGL.
+// What the phone does not do yet: a ticked hatch gets no held input (no touch layout; PRONTO-101). There is no
+// ad network: an outcome's ad ends `none` at once, as the contract's
 // "no ad to show".
 
 const NODE = new Set(["tag", "key", "class", "attrs", "text", "style", "children"]);
 const STYLE = new Set(["left", "top", "width", "height", "opacity"]);
 const OUTCOME = new Set(["state", "submit", "click", "say", "ad"]);
-const SCENE = new Set(["scene", "model", "anim", "camera", "audio"]);
 const KEY = "data-hatch-key";
+const KINDS = new Set(["model", "anim", "camera", "audio"]);
+const SHAPES = ["cube", "sphere", "capsule", "cylinder", "plane", "quad"];
+const HEX = /^#[0-9a-fA-F]{6}$/;
+// A 3D kind's attributes (besides id and data-*); WORDS are the ones that are not numbers.
+const ALLOWED = {
+  model: ["shape", "prefab", "color", "x", "y", "z", "rx", "ry", "rz", "sx", "sy", "sz"],
+  anim: ["target", "clip", "duration", "dx", "dy", "dz", "spin", "loop"],
+  camera: ["x", "y", "z", "look-x", "look-y", "look-z", "fov"],
+  audio: ["clip", "volume", "loop"],
+};
+const WORDS = new Set(["shape", "prefab", "color", "target", "clip", "loop"]);
 
 const clone = (v) => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
 
@@ -51,6 +63,36 @@ export function bindingOf(json) {
   return { module: d.module, reads, submits: strings(d.submits, "submits"), clicks: strings(d.clicks, "clicks"), hz, input: strings(d.input, "input") };
 }
 
+/** Checks a scene's children as the Unity host refuses them; throws the fault's words. */
+function checkScene(node) {
+  const bg = node.attrs?.background;
+  if (bg != null && !HEX.test(String(bg))) throw new Error(`${node.key}: background is #rrggbb`);
+  for (const c of node.children ?? []) {
+    if (!ALLOWED[c.tag]) throw new Error(`${c.key}: a scene holds model, anim, camera and audio, not ${c.tag}`);
+    if (c.children?.length || c.text != null) throw new Error(`${c.key}: a ${c.tag} has no children`);
+    const a = c.attrs ?? {};
+    for (const k of Object.keys(a)) {
+      if (!ALLOWED[c.tag].includes(k) && k !== "id" && !k.startsWith("data-")) throw new Error(`${c.key}: a ${c.tag} has no attribute ${k} (it has ${ALLOWED[c.tag].join(", ")})`);
+    }
+    for (const [k, v] of Object.entries(a)) {
+      if (!ALLOWED[c.tag].includes(k) || WORDS.has(k)) continue;
+      if (typeof v === "boolean" || (typeof v === "string" && v.trim() === "") || !Number.isFinite(Number(v))) throw new Error(`${c.key}: ${k} is a number, not "${v}"`);
+    }
+    const t = (n) => (a[n] == null ? "" : String(a[n]));
+    if (c.tag === "model") {
+      if ((t("shape") === "") === (t("prefab") === "")) throw new Error(`${c.key}: a model has a shape or a prefab, one of them`);
+      if (t("shape") !== "" && !SHAPES.includes(t("shape"))) throw new Error(`${c.key}: shape ${t("shape")} is not one of ${SHAPES.join(", ")}`);
+      if (t("color") !== "" && !HEX.test(t("color"))) throw new Error(`${c.key}: color is #rrggbb`);
+    } else if (c.tag === "anim") {
+      if (t("target") === "" || t("clip") === "") throw new Error(`${c.key}: an anim needs a target (a model's key) and a clip (a name)`);
+      if (a.duration != null && Number(a.duration) <= 0) throw new Error(`${c.key}: duration is above 0`);
+    } else if (c.tag === "audio") {
+      if (t("clip") === "") throw new Error(`${c.key}: an audio needs a clip (a name)`);
+      if (a.volume != null && (Number(a.volume) < 0 || Number(a.volume) > 1)) throw new Error(`${c.key}: volume is 0..1`);
+    }
+  }
+}
+
 /** Checks a view node (the contract's strict shape); throws the fault's words. */
 export function checkView(node, keys = new Set(), path = "view") {
   if (!node || typeof node !== "object" || Array.isArray(node)) throw new Error(`${path} is not a node`);
@@ -67,6 +109,7 @@ export function checkView(node, keys = new Set(), path = "view") {
   for (const s of Object.keys(node.style ?? {})) if (!STYLE.has(s)) throw new Error(`${node.key}: style.${s} is not one of left, top, width, height, opacity`);
   if (node.children != null && !Array.isArray(node.children)) throw new Error(`${node.key}: children is a list`);
   for (const c of node.children ?? []) checkView(c, keys, node.key);
+  if (node.tag === "scene") checkScene(node);
   return node;
 }
 
@@ -84,27 +127,27 @@ export function checkOutcome(o, binding) {
   return o;
 }
 
-/** The attributes a node's element carries: its own, its key, its class, its style; a scene hidden (PRONTO-75). */
-function attrsOf(node, inScene) {
+/** The attributes a node's element carries: its own, its key, its class, its style. */
+function attrsOf(node) {
   const out = { [KEY]: node.key };
   for (const [a, v] of Object.entries(node.attrs ?? {})) if (v !== false) out[a] = v === true ? "" : String(v);
-  if (node.class?.length) out.class = node.class.join(" ");
+  // A 3D kind is also its own class, as a scenario reads a scene (`#scene .model`, `#scene .anim`).
+  const cls = [...(KINDS.has(node.tag) ? [node.tag] : []), ...(node.class ?? []).filter((c) => c !== node.tag)];
+  if (cls.length) out.class = cls.join(" ");
   const s = node.style ?? {};
   const css = [];
   if (s.left != null || s.top != null) css.push("position: absolute");
   for (const p of ["left", "top", "width", "height", "opacity"]) if (s[p] != null) css.push(`${p}: ${s[p]}`);
   if (css.length) out.style = css.join("; ");
-  if (node.tag === "scene" && !inScene) out.hidden = "";
   return out;
 }
 
 /** The view as new elements of `doc`. */
-export function elementOf(doc, node, inScene = false) {
+export function elementOf(doc, node) {
   const el = doc.createElement(node.tag);
-  for (const [a, v] of Object.entries(attrsOf(node, inScene))) el.setAttribute(a, v);
-  const scene = inScene || SCENE.has(node.tag);
+  for (const [a, v] of Object.entries(attrsOf(node))) el.setAttribute(a, v);
   if (node.text != null) el.appendChild(doc.createTextNode(node.text));
-  for (const c of node.children ?? []) el.appendChild(elementOf(doc, c, scene));
+  for (const c of node.children ?? []) el.appendChild(elementOf(doc, c));
   return el;
 }
 
@@ -113,11 +156,10 @@ export function elementOf(doc, node, inScene = false) {
  * children changed in place, a child kept while its key and tag stay. An element the display drew keeps
  * its identity, so a tap the driver aimed at it still lands, as on Unity, whose elements are its keys.
  */
-export function patch(doc, el, node, inScene = false) {
-  const want = attrsOf(node, inScene);
+export function patch(doc, el, node) {
+  const want = attrsOf(node);
   for (const a of [...el.attributes].map((x) => x.name)) if (!(a in want)) el.removeAttribute(a);
   for (const [a, v] of Object.entries(want)) if (el.getAttribute(a) !== v) el.setAttribute(a, v);
-  const scene = inScene || SCENE.has(node.tag);
   const old = new Map();
   for (const c of [...el.children]) old.set(c.getAttribute(KEY), c);
   const kids = [];
@@ -128,7 +170,7 @@ export function patch(doc, el, node, inScene = false) {
   }
   for (const c of node.children ?? []) {
     const had = old.get(c.key);
-    kids.push(had && had.localName === c.tag ? (old.delete(c.key), patch(doc, had, c, scene)) : elementOf(doc, c, scene));
+    kids.push(had && had.localName === c.tag ? (old.delete(c.key), patch(doc, had, c)) : elementOf(doc, c));
   }
   for (const n of [...el.childNodes]) if (!kids.includes(n)) n.remove();
   kids.forEach((k, i) => { if (el.childNodes[i] !== k) el.insertBefore(k, el.childNodes[i] ?? null); });

@@ -63,6 +63,7 @@ class MainActivity : AppCompatActivity() {
 
         val configuration = DivConfiguration.Builder(GlideDivImageLoader(this))
             .divVariableController(fields)
+            .divCustomContainerViewAdapter(SceneAdapter(this))
             .actionHandler(object : DivActionHandler() {
                 override fun handleAction(action: DivAction, view: DivViewFacade, resolver: ExpressionResolver): Boolean {
                     val url = action.url?.evaluate(resolver) ?: return super.handleAction(action, view, resolver)
