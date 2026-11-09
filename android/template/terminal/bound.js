@@ -84,26 +84,54 @@ export function checkOutcome(o, binding) {
   return o;
 }
 
-const attrText = (v) => (typeof v === "number" && Number.isInteger(v) ? String(v) : String(v));
-
-/** The view as elements of `doc`: keys kept as data-hatch-key, a scene subtree hidden (PRONTO-75). */
-export function elementOf(doc, node, inScene = false) {
-  const el = doc.createElement(node.tag);
-  el.setAttribute(KEY, node.key);
-  for (const [a, v] of Object.entries(node.attrs ?? {})) {
-    if (v === false) continue;
-    el.setAttribute(a, v === true ? "" : attrText(v));
-  }
-  if (node.class?.length) el.setAttribute("class", node.class.join(" "));
+/** The attributes a node's element carries: its own, its key, its class, its style; a scene hidden (PRONTO-75). */
+function attrsOf(node, inScene) {
+  const out = { [KEY]: node.key };
+  for (const [a, v] of Object.entries(node.attrs ?? {})) if (v !== false) out[a] = v === true ? "" : String(v);
+  if (node.class?.length) out.class = node.class.join(" ");
   const s = node.style ?? {};
   const css = [];
   if (s.left != null || s.top != null) css.push("position: absolute");
   for (const p of ["left", "top", "width", "height", "opacity"]) if (s[p] != null) css.push(`${p}: ${s[p]}`);
-  if (css.length) el.setAttribute("style", css.join("; "));
+  if (css.length) out.style = css.join("; ");
+  if (node.tag === "scene" && !inScene) out.hidden = "";
+  return out;
+}
+
+/** The view as new elements of `doc`. */
+export function elementOf(doc, node, inScene = false) {
+  const el = doc.createElement(node.tag);
+  for (const [a, v] of Object.entries(attrsOf(node, inScene))) el.setAttribute(a, v);
   const scene = inScene || SCENE.has(node.tag);
-  if (scene && node.tag === "scene") el.setAttribute("hidden", "");
   if (node.text != null) el.appendChild(doc.createTextNode(node.text));
   for (const c of node.children ?? []) el.appendChild(elementOf(doc, c, scene));
+  return el;
+}
+
+/**
+ * The view written over `el`, the element an earlier view drew for the same key: attributes, text and
+ * children changed in place, a child kept while its key and tag stay. An element the display drew keeps
+ * its identity, so a tap the driver aimed at it still lands, as on Unity, whose elements are its keys.
+ */
+export function patch(doc, el, node, inScene = false) {
+  const want = attrsOf(node, inScene);
+  for (const a of [...el.attributes].map((x) => x.name)) if (!(a in want)) el.removeAttribute(a);
+  for (const [a, v] of Object.entries(want)) if (el.getAttribute(a) !== v) el.setAttribute(a, v);
+  const scene = inScene || SCENE.has(node.tag);
+  const old = new Map();
+  for (const c of [...el.children]) old.set(c.getAttribute(KEY), c);
+  const kids = [];
+  if (node.text != null) {
+    const t = el.firstChild?.nodeType === 3 ? el.firstChild : doc.createTextNode("");
+    if (t.data !== node.text) t.data = node.text;
+    kids.push(t);
+  }
+  for (const c of node.children ?? []) {
+    const had = old.get(c.key);
+    kids.push(had && had.localName === c.tag ? (old.delete(c.key), patch(doc, had, c, scene)) : elementOf(doc, c, scene));
+  }
+  for (const n of [...el.childNodes]) if (!kids.includes(n)) n.remove();
+  kids.forEach((k, i) => { if (el.childNodes[i] !== k) el.insertBefore(k, el.childNodes[i] ?? null); });
   return el;
 }
 
@@ -113,9 +141,10 @@ export function elementOf(doc, node, inScene = false) {
  * @param {string} name
  * @param {object | string} bindingJson
  * @param {Record<string, any>} module
- * @param {{log?: {error: (m: string) => unknown, log: (m: string) => unknown}}} [options]
+ * @param {{log?: {error: (m: string) => unknown, log: (m: string) => unknown}, css?: string | null}} [options]
+ *   css: the hatch's own stylesheet (android.json hatches.<name>.css), linked while it is mounted.
  */
-export function bound(name, bindingJson, module, { log = console } = {}) {
+export function bound(name, bindingJson, module, { log = console, css = null } = {}) {
   const binding = bindingOf(bindingJson);
   for (const f of ["init", "view"]) if (typeof module[f] !== "function") throw new Error(`hatch ${name}: the module exports no ${f}`);
   if (binding.hz && typeof module.tick !== "function") throw new Error(`hatch ${name}: a ticked binding needs tick`);
@@ -132,6 +161,13 @@ export function bound(name, bindingJson, module, { log = console } = {}) {
     mountEl.setAttribute("class", `hatch hatch--${name.replace(/[^A-Za-z0-9_-]/g, "-")}`);
     mountEl.setAttribute(KEY, `hatch:${name}`);
     screen.appendChild(mountEl);
+    const sheet = css ? doc.createElement("link") : null;
+    if (sheet) {
+      sheet.setAttribute("rel", "stylesheet");
+      sheet.setAttribute("href", css);
+      sheet.setAttribute("data-hatch-css", name);
+      (doc.head ?? doc.documentElement).appendChild(sheet);
+    }
 
     const outside = (el) => !mountEl.contains(el);
     const reads = () => {
@@ -153,7 +189,11 @@ export function bound(name, bindingJson, module, { log = console } = {}) {
       let tree;
       try { tree = checkView(module.view(clone(state), reads(), ctx())); } catch (e) { fault(e); return; }
       drawing = true;
-      try { mountEl.replaceChildren(elementOf(doc, tree)); } finally { drawing = false; }
+      try {
+        const was = mountEl.firstElementChild;
+        if (was && was.getAttribute(KEY) === tree.key && was.localName === tree.tag) patch(doc, was, tree);
+        else mountEl.replaceChildren(elementOf(doc, tree));
+      } finally { drawing = false; }
     };
 
     const submit = ({ form, values }) => {
@@ -221,6 +261,7 @@ export function bound(name, bindingJson, module, { log = console } = {}) {
       mountEl.removeEventListener("click", onGesture);
       mountEl.removeEventListener("contextmenu", onGesture);
       mountEl.remove();
+      sheet?.remove();
     };
     signal?.addEventListener?.("abort", cleanup);
     return cleanup;

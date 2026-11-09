@@ -110,3 +110,23 @@ Deno.test("a v3 scene stays in the DOM, hidden, its attributes readable", async 
   stop();
   await settle();
 });
+
+Deno.test("a redraw keeps each keyed element, so a tap aimed at one still lands", async () => {
+  const { screen, tap } = screenOf();
+  const stop = bound("probe", binding, probe, quiet())(screen, {});
+  const add = screen.querySelector("#hatch-probe #add");
+  tap("add");
+  await settle();
+  assertEquals(screen.querySelector("#hatch-probe #add"), add, "the same element after the gesture's redraw");
+  assertEquals(screen.querySelector("#hatch-probe #count").textContent, "1");
+  stop();
+});
+
+Deno.test("a bound hatch's stylesheet is linked while it is mounted", async () => {
+  const { document, screen } = screenOf();
+  const stop = bound("probe", binding, probe, { ...quiet(), css: "/shell/modules/hatches/probe/probe.css" })(screen, {});
+  assertEquals(document.querySelector("link[data-hatch-css=probe]").getAttribute("href"), "/shell/modules/hatches/probe/probe.css");
+  stop();
+  assertEquals(document.querySelector("link[data-hatch-css=probe]"), null);
+  await settle();
+});
