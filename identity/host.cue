@@ -94,7 +94,8 @@ import (
 				// Its key set, not /health/ready: Hydra makes the ID-token key on the first ask for it,
 				// which on a loaded machine outlasts a sign-in's wait. Asked here, the key is made before
 				// anything that waits on Hydra starts, and every later ask is answered at once.
-				healthcheck: url: "http://127.0.0.1:28453/.well-known/jwks.json"
+				// On the port a launch hands Hydra (a literal URL would keep Hydra's own).
+				healthcheck: {port: 28453, path: "/.well-known/jwks.json"}
 				// Per app on the host, each moved by its variable, as every
 				// other port of a launch: the front names them as its peer's.
 				expose: {public: {port: 28453, env: "SERVE_PUBLIC_PORT"}, admin: {port: 28455, env: "SERVE_ADMIN_PORT"}}
@@ -120,15 +121,20 @@ import (
 			identity: bayt.healthcheck.http & {
 				cmd: builtin: null
 				activate: ""
-				healthcheck: url: "http://127.0.0.1:\(H.localPort)/health"
-				// The broker's issuer, which the browser and Google's redirect name.
+				healthcheck: {port: \(H.localPort), path: "/health"}
+				// The broker's issuer, which the browser and Google's redirect name: a literal to mecha's
+				// auth service, so its port has no variable and a launch leaves it where the issuer says.
 				expose: http: port: \(H.localPort)
 				"process-compose": activate: "\(H._crane)"
 				entrypoint: {
 					do:    "\(H._fromImage["front"])"
 					shell: "sh"
 					dockerfile: {do: "deno run --no-config --allow-net --allow-env /app/hydra/front.ts", shell: "exec"}
-					env:   compose.environment
+					// Hydra where a launch puts it, not the container's name.
+					env: compose.environment & {
+						HYDRA_PUBLIC: {peer: "identity-hydra", port: "public", prefix: "http://"}
+						HYDRA_ADMIN:  {peer: "identity-hydra", port: "admin", prefix: "http://"}
+					}
 					after: "identity-hydra": "healthy"
 				}
 				dockerfile: from: name: "\(H.frontImage)"
@@ -140,8 +146,6 @@ import (
 						BROKER_FAKE_GOOGLE:   "1"
 						GOOGLE_CLIENT_ID:     "${GOOGLE_CLIENT_ID:-}"
 						GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
-						HYDRA_PUBLIC:         "http://identity-hydra:28453"
-						HYDRA_ADMIN:          "http://identity-hydra:28455"
 						PORT:                 "\(H.localPort)"
 					}
 				}
