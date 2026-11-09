@@ -546,11 +546,13 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
           break;
         case "undisclosed": {
           // Nothing the app keeps in its private directory (databases, preferences, files) holds the text:
-          // the debug build's run-as reads it. The sealed store must exist, or an empty directory would pass.
+          // the debug build's run-as reads it. code_cache is not the app's data: it holds the compiled bytecode of
+          // the app's own scripts (TerminalEngine), whose source has words like "Anonymous" in it. The sealed
+          // store must exist, or an empty directory would pass.
           const text = sub(arg as string);
           const dbs = await sh(`run-as ${phone.id} ls databases`);
           if (!dbs.split(/\s+/).includes("terminal-sealed.db")) throw new Fail(`no sealed store in ${phone.id}'s databases: ${dbs.trim()}`);
-          const out = await new Deno.Command(adbPath(), { args: ["shell", `run-as ${phone.id} grep -rlaF -- ${quote(text)} .`], stdin: "null", stdout: "piped", stderr: "piped" }).output();
+          const out = await new Deno.Command(adbPath(), { args: ["shell", `run-as ${phone.id} grep -rlaF --exclude-dir=code_cache -- ${quote(text)} .`], stdin: "null", stdout: "piped", stderr: "piped" }).output();
           const found = new TextDecoder().decode(out.stdout).trim();
           if (out.code === 0 && found) throw new Fail(`${JSON.stringify(text)} is in the app's private files in plain text: ${found.split("\n").join(", ")}`);
           if (out.code !== 1) throw new Fail(`run-as grep exited ${out.code}: ${new TextDecoder().decode(out.stderr).trim() || found}`);
