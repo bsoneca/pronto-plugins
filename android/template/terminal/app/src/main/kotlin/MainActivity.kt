@@ -124,6 +124,9 @@ class MainActivity : AppCompatActivity() {
         when (url.host) {
             "tap" -> engine?.tap("click", id)
             "contextmenu" -> engine?.tap("contextmenu", id)
+            // A ticked hatch's held control: a finger down on it, and lifted.
+            "press" -> engine?.tap("pointerdown", id)
+            "release" -> engine?.tap("pointerup", id)
         }
     }
 

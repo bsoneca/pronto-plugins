@@ -2,7 +2,7 @@
 // DivKit card by the Android terminal's compiler (android/template/terminal/compile.js), and small
 // measures of the card (tests/unit/android.cue).
 import { parseHTML } from "npm:linkedom@0.18.4";
-import { checkView, elementOf as viewElement } from "../../android/template/terminal/bound.js";
+import { bound, checkView, elementOf as viewElement } from "../../android/template/terminal/bound.js";
 import { compile, elementOf, idOf } from "../../android/template/terminal/compile.js";
 import { length, parseColor } from "../../android/template/terminal/css.js";
 import { atobOf, b64u, btoaOf, credentialOf, errorOf, optionsToJson, unb64u } from "../../android/template/terminal/passkeys.js";
@@ -297,4 +297,48 @@ export function sceneDrawn(children, attrs, css) {
     idMatches: all(card.states[0].div).some((d) => d.type === "custom" && elementOf(d.id) === el),
     unsupported: unsupported.map((u) => u.what),
   };
+}
+
+// --- a ticked hatch's held input: its touch layout (bound.js mounts it, compile.js gives it press start and end)
+
+/**
+ * A ticked probe hatch whose binding lists `input` (no tick when `hz` is 0), mounted on a page of linkedom, its
+ * frames stepped by hand. `moves` are "down <control>", "up <control>", "cancel <control>" (a pointer event on the
+ * pad's button) and "tick" (one frame). The pad's controls in order (null with no pad), what each tick was given,
+ * and the card the page compiles to, as the pad's buttons' press actions and accessibility.
+ */
+export function held(input, hz, moves) {
+  const { document, CustomEvent } = pageOf("<section data-screen></section>");
+  const screen = document.querySelector("[data-screen]");
+  const binding = { generated: "test", module: "probe.js", reads: {}, submits: [], clicks: [], input };
+  if (hz) binding.tick = { hz };
+  const inputs = [];
+  const probe = {
+    init: () => ({ n: 0 }),
+    view: (st) => ({ tag: "p", key: "n", text: String(st.n) }),
+    tick: (st, _reads, given) => { inputs.push(given); return { state: { n: st.n + 1 } }; },
+  };
+  let frame = null;
+  const every = (fn) => { frame = fn; return () => { frame = null; }; };
+  const faults = [];
+  const log = { error: (m) => faults.push(m), log: () => {} };
+  const stop = bound("probe", binding, probe, { log, every })(screen, {});
+  for (const m of moves) {
+    if (m === "tick") { frame?.(); continue; }
+    const [what, c] = m.split(" ");
+    const type = { down: "pointerdown", up: "pointerup", cancel: "pointercancel" }[what];
+    screen.querySelector(`[data-hatch-hold="${c}"]`)?.dispatchEvent(new CustomEvent(type, { bubbles: true, cancelable: true }));
+  }
+  const pad = screen.querySelector("#hatch-probe-pad");
+  const controls = pad ? [...pad.querySelectorAll("[data-hatch-hold]")].map((b) => b.getAttribute("data-hatch-hold")) : null;
+  const { card } = compile(document, { sheets: [], width: 411 });
+  const buttons = all(card.states[0].div).filter((d) => d.press_start_actions).map((d) => ({
+    control: elementOf(d.id)?.getAttribute("data-hatch-hold") ?? null,
+    start: d.press_start_actions.map((a) => a.url.replace(/[^/]+$/, "<id>")),
+    end: d.press_end_actions?.map((a) => a.url.replace(/[^/]+$/, "<id>")) ?? [],
+    tap: !!d.actions,
+    type: d.accessibility?.type ?? null,
+  }));
+  stop();
+  return { controls, inputs, buttons, faults, padAfterStop: screen.querySelector("#hatch-probe-pad") !== null };
 }

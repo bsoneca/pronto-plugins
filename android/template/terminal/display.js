@@ -50,10 +50,12 @@ globalThis.__onInput = (id, value) => {
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
 };
+const HELD = new Set(["pointerdown", "pointerup"]);
 const press = (kind, el) => {
   if (el.type === "checkbox") { el.checked = !el.checked; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); }
   if (el.type === "radio") { el.checked = true; el.dispatchEvent(new Event("change", { bubbles: true })); }
-  const type = kind === "contextmenu" ? "contextmenu" : "click";
+  // A press start and end (a ticked hatch's held control) are pointerdown and pointerup; a long tap a contextmenu.
+  const type = HELD.has(kind) || kind === "contextmenu" ? kind : "click";
   const ev = new CustomEvent(type, { bubbles: true, cancelable: true, composed: true });
   ev.button = kind === "contextmenu" ? 2 : 0;
   el.dispatchEvent(ev);
