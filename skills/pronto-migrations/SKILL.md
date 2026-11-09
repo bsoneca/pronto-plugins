@@ -1,6 +1,6 @@
 ---
 name: pronto-migrations
-description: "Carry a pronto app's live database forward when its entities change: install pronto-migrations, take the snapshot at the release the database runs, and make the migration (pgroll SQL) from the change to the emitted proto, declaring a carry or a backfill when make names one. Use when a change retires a column, makes one required or optional, changes a default, adds or removes a unique or a reference, or removes a value from an enum or a machine's states, or when the app's lint says the model moved since the snapshot; not for an addition, which the replay of the emitted schema makes by itself."
+description: "Carry a pronto app's live database forward when its entities change: install pronto-migrations, take the snapshot at the release the database runs, and make the migration (pgroll SQL) from the change to the emitted schema, its columns paired by their proto field number, declaring a carry or a backfill when make names one. Use when a change retires a column, makes one required or optional, changes a default, adds or removes a unique or a reference, or removes a value from an enum or a machine's states, or when the app's lint says the model moved since the snapshot; not for an addition, which the replay of the emitted schema makes by itself."
 ---
 
 # pronto-migrations
@@ -19,7 +19,9 @@ deno run --no-config -A migrations/migrate.ts init --from <ref>
 ```
 
 `--from` names the git ref the live database runs: the app's last release tag. Plain `init` is for an
-app with no live database. Commit the snapshot, the sum and `migrations_ledger.cue`.
+app with no live database. Commit everything the installer and init wrote: `migrations/` (the driver,
+its rules, `.gitattributes`, the snapshot and the sum), `migrations_plugin.cue`, `migrations_spec.cue`
+and `migrations_ledger.cue`. `check` needs deno; `plan` and `make` also need `cue` on the PATH.
 
 ## Each change to an entity
 
@@ -36,7 +38,7 @@ app with no live database. Commit the snapshot, the sum and `migrations_ledger.c
    - `backfill.<Entity>.<column>`: the value the NULL rows of a column made required take, when it
      has no default, or only one read from the session, such as `auth_uid()`.
 4. Commit what make wrote: `migrations/<YYYYMMDD>_<NNNN>_<name>.json` (the day, its count that day,
-   what it does, e.g. `20261109_0001_retire_ref`; the day in UTC), the snapshot, the sum and the
+   what it does, e.g. `20261109_0001_retire_ref`; the machine's calendar day), the snapshot, the sum and the
    ledger.
    Delete the declaration once its migration is written.
 
@@ -45,8 +47,8 @@ no migration: make moves the snapshot, and the replay adds it.
 
 ## When make refuses
 
-- **`rebuilt`**: an index, check or machine's trigger that an earlier migration dropped is built again
-  by the replay. Once every database has run that migration, run
+- **`… was dropped by <migration>, which every fresh database still runs after building it: fold …`**:
+  an index, check or machine's trigger that an earlier migration dropped is built again by the replay. Once every database has run that migration, run
   `deno run --no-config -A migrations/migrate.ts fold <that migration>`, then make again.
 - **A merge conflict** on `snapshot.json` and `migrations.sum`: take main's side of both and of
   `migrations_ledger.cue`, delete your branch's migration, restore its carry or backfill in

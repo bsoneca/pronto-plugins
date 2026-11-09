@@ -134,7 +134,7 @@ cases: {
 		{call: "mig.changes", args: [_order, []], expect: []},
 	]}
 	"a retirement moves the column to what pronto still emits for it: its NOT NULL, unique, reference, machine and indexes go, a default it keeps stays": {suite: "migrations", steps: [
-		{call: "mig.changes", args: [_order, [["Order.fields.4", null], ["Order.retired.4", {name: "ref", type: "uuid", required: false}], ["Order.indexes.order_ref_status", null]]], expect: ["retired Order.ref", "optional Order.ref", "unique-dropped Order.ref", "ref-dropped Order.ref", "index-dropped Order order_ref_status"]},
+		{call: "mig.changes", args: [_order, [["Order.fields.4", null], ["Order.retired.4", {name: "ref", type: "uuid", required: false}], ["Order.indexes.order_ref_status", null]]], expect: ["retired Order.ref", "optional Order.ref", "unique-dropped Order.ref", "ref-dropped Order.ref", "index-dropped Order index order_ref_status"]},
 		{call: "mig.sql", args: [_order, [["Order.fields.4", null], ["Order.retired.4", {name: "ref", type: "uuid", required: false}], ["Order.indexes.order_ref_status", null]]], expect: [
 			#"ALTER TABLE "public"."order" ALTER COLUMN "ref" DROP NOT NULL;"#,
 			#"ALTER TABLE "public"."order" DROP CONSTRAINT IF EXISTS "order_ref_key";"#,
@@ -173,7 +173,7 @@ cases: {
 		{call: "mig.changes", args: [_order, [["Order.fields.8", {name: "owner_id", type: "uuid", proto: "string", required: true, default: "auth_uid()"}]]], expect: ["required-added Order.owner_id"], why: "auth_uid() is NULL in a migration, as in the replay"},
 		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "placed_at", type: "timestamp", proto: "google.protobuf.Timestamp", required: true}]]], holds: {refused: [{at: "Order.placed_at", kind: "required-added"}]}},
 		{call: "mig.changes", args: [_order, [["Refund", {table: "refund", id: "0x02", fields: {"1": {name: "id", type: "uuid", proto: "string", required: true, pk: true}}, retired: {}, indexes: {}}]]], expect: ["entity-added Refund"]},
-		{call: "mig.changes", args: [_order, [["Order.indexes.idx_order_stage", {cols: ["stage"], using: "btree"}]]], expect: ["index-added Order idx_order_stage"]},
+		{call: "mig.changes", args: [_order, [["Order.indexes.idx_order_stage", {cols: ["stage"], using: "btree"}]]], expect: ["index-added Order index idx_order_stage"]},
 		{call: "mig.plan", args: [_order, [["Order.indexes.order_stage", {cols: ["stage"], unique: true}]]], holds: {ops: [], advisories: [{kind: "index-added"}]}, why: "a unique index the replay builds can fail on a duplicate"},
 		{call: "mig.changes", args: [_order, [["Order.fields.5.enum", ["new", "paid", "refunded"]]]], expect: ["enum-widened Order.stage"]},
 		{call: "mig.changes", args: [_order, [["Order.fields.5.machine", true]]], expect: ["machine-added Order.stage"], why: "010 builds the trigger"},
@@ -264,7 +264,7 @@ cases: {
 		{call: "migrations.nextName", args: [["20261108_0007_a", "20261109_0001_b", "20261109_0002_c"], "d", "20261109"], expect: "20261109_0003_d"},
 		{call: "migrations.nextName", args: [["20261109_0002_c"], "e", "20261110"], expect: "20261110_0001_e", why: "the count starts again each day"},
 		{call: "migrations.nextName", args: [["20261109_0004_folded"], "f", "20261109", ["01_hand"]], expect: "20261109_0005_f", why: "the count goes on after a migration folded away, and a migration written by hand that sorts before stays before"},
-		{call: "migrations.nextName", args: [[], "a", "20261109", ["20261110_0001_x"]], expect: "20261110_0002_a", why: "a later day already used (a clock ahead) is taken, so the name sorts after it, as pgroll's runner needs"},
+		{call: "migrations.nextName", args: [[], "a", "20261109", ["20261110_0001_x"]], expect: "20261110_0002_a", why: "a later day already used (a machine in a zone ahead) is taken, so the name sorts after it, as pgroll's runner needs"},
 		{call: "migrations.nextName", args: [[], "a", "20261109", ["zz_hand"]], throws: "20261109_0001_a sorts before the app's migration zz_hand", why: "no dated name can follow it"},
 		{call: "migrations.nextName", args: [[], "Relax-Ref", "20261109"], throws: "lowercase letters, digits and _", why: "pgroll's ledger takes these names"},
 		{call: "migrations.nextName", args: [[], "0001", "20261109"], throws: "starting with a letter", why: "the name says what the migration does"},

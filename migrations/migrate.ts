@@ -1,14 +1,14 @@
 // pronto-migrations' driver (migrations/README.md in pronto-plugins): run from the app's folder.
 //
-//   deno run --no-config --allow-read --allow-write --allow-run --allow-env migrations/migrate.ts <command>
+//   deno run --no-config -A migrations/migrate.ts <command>   (the lint's check needs only --allow-read)
 //
 //   init [--from <ref>]  the snapshot: the model as it stands, or as a git ref held it (the release
 //                        the live database runs), so the first migration is what changed since
 //   plan                 the changes since the snapshot and the SQL `make` would write; writes nothing
 //   make <name>          the next migration, migrations/<YYYYMMDD>_<NNNN>_<name>.json (the day, its
-//                        count that day, what it does), and the snapshot, the
-//                        sum and the ledger moved with it; nothing when a change is refused or needs
-//                        a declaration (migrations_spec.cue), each named
+//                        count that day, what it does), and the snapshot, the sum and the ledger
+//                        moved with it; nothing when a change is refused or needs a declaration
+//                        (migrations_spec.cue), each named
 //   fold <name>          the migrations through <name> deleted, once every database has run them:
 //                        pgroll's ledger keeps them, and a fresh database no longer runs them
 //   check                the lint: the snapshot is the model, every file make wrote is as it wrote it,
@@ -28,8 +28,11 @@ const LEDGER = "migrations_ledger.cue";
 const NAMED = /^\d{8}_\d{4}_[a-z][a-z0-9_]*\.json$/;
 
 class Refusal extends Error {}
-// The day a migration is made, in UTC so machines in other zones agree: YYYYMMDD.
-const today = () => new Date().toISOString().slice(0, 10).replaceAll("-", "");
+// The day a migration is made, on this machine's calendar: YYYYMMDD.
+const today = () => {
+  const d = new Date();
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+};
 const fail = (msg: string): never => {
   throw new Refusal(msg);
 };
@@ -187,6 +190,6 @@ async function main(command: string | undefined, args: string[]) {
 try {
   await main(Deno.args[0], Deno.args.slice(1));
 } catch (e) {
-  console.error(`migrate: ${(e as Error).message}`);
+  console.error(`migrations: ${(e as Error).message}`);
   Deno.exit(1);
 }

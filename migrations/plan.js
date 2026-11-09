@@ -492,12 +492,12 @@ export const migration = (ops) => ({
   operations: [{ sql: { up: ["-- Deferred constraints checked as each statement ends, so the tables can be altered after rows move.\nSET CONSTRAINTS ALL IMMEDIATE;", ...ops.map((o) => `-- ${o.at}: ${o.why}\n${o.sql}`)].join("\n\n") } }],
 });
 
-// The next migration's name: the day it is made (`date`, YYYYMMDD, in UTC so machines in other zones
-// agree), its four-digit count among the migrations made that day (`made`: the files and the one
-// folded last), and a name that says what it does, in the alphabet pgroll's ledger takes (mecha's
-// pgroll.#Name): 20261109_0001_retire_ref. pgroll's runner refuses a migration that sorts before one
-// it has run, so the name sorts after every migration the app has (`others`: its own, and any written
-// by hand): a later day already used (a clock ahead) is taken, with the next count. A migration
+// The next migration's name: the day it is made (`date`, YYYYMMDD, the machine's calendar day), its
+// four-digit count among the migrations made that day (`made`: the files and the one folded last), and
+// a name that says what it does, in the alphabet pgroll's ledger takes (mecha's pgroll.#Name):
+// 20261109_0001_retire_ref. pgroll's runner refuses a migration that sorts before one it has run, so
+// the name sorts after every migration the app has (`others`: its own, and any written by hand): a
+// later day already used (a machine in a zone ahead) is taken, with the next count. A migration
 // written by hand that sorts after every dated name is refused: no name can follow it.
 const DATED = /^(\d{8})_(\d{4})_/;
 export function nextName(made, slug, date, others = []) {
@@ -523,8 +523,7 @@ export function ledger(pkg, names) {
 // The sum of what make and fold write (atlas.sum's idea): the migration folded last, when one was,
 // then a line per file with its SHA-256, and a first line over them all. A file edited, removed or
 // added by hand no longer sums.
-/** @param {{name: string, text: string}[]} files @param {string | null} [folded] */
-export async function sum(files, folded = null) {
+export async function sum(files, folded) {
   const lines = folded ? [`folded ${folded}`] : [];
   for (const f of [...files].sort((a, b) => a.name < b.name ? -1 : 1)) lines.push(`${f.name} h1:${await sha(f.text)}`);
   return `h1:${await sha(lines.join("\n"))}\n${lines.join("\n")}\n`;

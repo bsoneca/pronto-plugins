@@ -1,8 +1,8 @@
 // The migrations host: an app's database carried forward by migrations made from the changes to its
-// emitted proto (README.md). The driver and its rules are this host's, written into the app as
+// emitted schema, columns paired by their proto field number (README.md). The driver and its rules are this host's, written into the app as
 // migrations/migrate.ts and migrations/plan.js; the schema joins the app's package, and the app's own
 // migrations_spec.cue (seeded once) opts the lint in and holds what the next migration needs. What
-// make writes (migrations/snapshot.json, migrations/migrations.sum, migrations/<NNNN>_<name>.json,
+// make writes (migrations/snapshot.json, migrations/migrations.sum, migrations/<YYYYMMDD>_<NNNN>_<name>.json,
 // migrations_ledger.cue) is the app's, committed, and never written here.
 @extern(embed)
 

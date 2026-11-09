@@ -24,7 +24,7 @@ _carry: #Migrations & {carry: Order: {
 	status: values: {draft: "open"}
 	stage: {set: {step: "stage", stage: "'open'"}, triggers: ["trg_order_step_machine"]}
 }}
-carry: {values: _carry.carry.Order.status.values, triggers: _carry.carry.Order.status.triggers, set: _carry.carry.Order.stage.triggers} & {values: {draft: "open"}, triggers: [], set: ["trg_order_step_machine"]}
+carry: {values: _carry.carry.Order.status.values, triggers: _carry.carry.Order.status.triggers, set: _carry.carry.Order.stage.set, setTriggers: _carry.carry.Order.stage.triggers} & {values: {draft: "open"}, triggers: [], set: {step: "stage", stage: "'open'"}, setTriggers: ["trg_order_step_machine"]}
 
 // A schema that is not an identifier is refused.
 badSchema: [if (#Migrations & {schema: "Bad-Name"}) == _|_ {"refused"}, "accepted"][0] & "refused"

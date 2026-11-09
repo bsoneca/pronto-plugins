@@ -1,8 +1,10 @@
 # migrations
 
-An app's database carried forward by migrations made from the changes to its emitted proto, on
-unmodified pronto. A column keeps its name and its type for as long as the app lives. What changes
-is what it holds: it is retired, made required or optional, its default moves, a value leaves its
+An app's database carried forward by migrations made from the changes to its emitted schema, on
+unmodified pronto. The proto gives each column its identity (its field number, name, type and
+retirement), so a column keeps its name and its type for as long as the app lives. pronto's own facts
+beside it (`.pronto/check-inputs.json`, `010_machines.sql`) say what the column holds, and the
+migrations' SQL comes from those. What changes is what a column holds: it is retired, made required or optional, its default moves, a value leaves its
 enum or its machine, a reference or a unique goes. Each such change goes into a migration in pgroll's
 grammar, which pronto already runs (`code.state.migrations`). A change that no migration can make
 safe is refused before anything is written.
@@ -123,19 +125,24 @@ deno run --no-config -A migrations/migrate.ts fold 20261109_0001_retire_ref   # 
 | `migrations/migrate.ts`, `migrations/plan.js`, `migrations/.gitattributes` | regenerated: the driver, its rules, and LF line ends for what the sum covers |
 | `migrations_plugin.cue` | regenerated: `#Migrations`, in the program's package |
 | `migrations_spec.cue` | seeded, then the app's: the `carry` and `backfill` the next migration needs, and the lint's opt-in |
+
+All of them are committed: the regenerated files too, as an app commits every host's `*_plugin.cue`.
+`check` needs only deno. `plan` and `make` also run `cue` (or the binary `CUE` names) to read the
+declarations and the app's migration names from the program.
 | `migrations/snapshot.json`, `migrations/migrations.sum`, `migrations/<YYYYMMDD>_<NNNN>_<name>.json`, `migrations_ledger.cue` | the app's, written by `init`, `make` and `fold` only, committed |
 
 `migrations_ledger.cue` embeds each migration into `code.state.migrations`. pronto types it there with
 pgroll's grammar (mecha's `pgroll.#Migration`), so a field pgroll does not know fails the program's
 `cue vet`. With no migration it declares nothing, so the cluster gets no migrate step.
 
-A migration's name has three parts: the day make writes it (in UTC, so machines in other zones
-agree), its count among that day's migrations (a folded one included), and what it does. For example,
+A migration's name has three parts: the day make writes it (the machine's calendar day), its count
+among that day's migrations (a folded one included), and what it does. For example,
 `20261109_0001_retire_ref`, then `20261109_0002_…`; the count starts again the next day.
 
 pgroll's runner refuses a migration that sorts before one it ran, so the name must sort after every
 migration the app has:
-- if a later day is already used (a clock ahead), make takes that day, with the next count;
+- if a later day is already used (a machine in a zone ahead), make takes that day, with the next
+  count;
 - a migration written by hand that sorts after every dated name is refused, so name hand migrations
   the same way.
 

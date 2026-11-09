@@ -28,8 +28,8 @@ def emitted [app: path, proto: string, fields: list, uniques: list, states: list
 }
 
 def main [] {
-	# make names a migration by the day it is made, in UTC: YYYYMMDD_NNNN_<what it does>.
-	let day = (date now | date to-timezone UTC | format date "%Y%m%d")
+	# make names a migration by the day it is made: YYYYMMDD_NNNN_<what it does>.
+	let day = (date now | format date "%Y%m%d")
 	let first = $"($day)_0001_retire_ref"
 	let root = ($env.CURRENT_FILE | path dirname | path dirname)
 	let dir = (mktemp --directory | path expand)
@@ -43,6 +43,7 @@ def main [] {
 
 	cd $root
 	^sh bin/pronto-migrations $app
+	check "the installer refuses an argument it does not know" ((do { ^sh bin/pronto-migrations $app nope=1 } | complete).exit_code == 2)
 	for f in ["migrations/migrate.ts" "migrations/plan.js" "migrations_plugin.cue" "migrations_spec.cue"] {
 		check $"the installer writes ($f)" (($app | path join $f) | path exists)
 	}
