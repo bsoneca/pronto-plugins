@@ -562,10 +562,13 @@ reach it), over any header a page sent, and a flag's targeting picks `local`
 there. A flag without `local` has one value everywhere.
 
 `accounts` names the accounts that read `local` wherever the app runs, by the
-`sub` of their session's token, which the page sends as OpenFeature's
-`targetingKey`. The page says which account it is,
-so a flag opens a feature to an account and never guards one: what an account
-may do stays the database's.
+`sub` of their session's token. The door, not the page, says which account a
+request is from: it asks the auth service's `/auth/door`, which always answers
+2xx, and gives flagd the verified session's `sub` as OpenFeature's
+`targetingKey` (flagd's `--context-from-header`), over any a page sent in the
+request's body or headers. A request with no session, or a bad token, is no
+account. So a flag opens a feature to an account and never guards one: what an
+account may do stays the database's.
 
 ```cue
 flags: premium: {default: false, local: true, accounts: ["<an account's id>"]}

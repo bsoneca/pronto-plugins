@@ -19,8 +19,8 @@ def save-changed [path: path] {
 
 # The door's route to flagd, which pronto's writer regenerates without it. An
 # earlier run's goes first. The door tells flagd which host a request reached,
-# over whatever header a page sent: the flags' `local` values are the door's
-# word, never the page's.
+# and which account it is from, over whatever a page sent: the flags' `local`
+# values and `accounts` are the door's word, never the page's.
 export def route [] {
 	let route = [
 		$begin
@@ -29,10 +29,26 @@ export def route [] {
 		"    request_body {"
 		"      max_size 16KB"
 		"    }"
-		"    reverse_proxy {$PRONTO_UPSTREAM_FLAGD:flagd:8693} {"
-		"      header_up dapr-app-id flagd"
-		"      header_up Host {upstream_hostport}"
-		"      header_up X-Pronto-Host {host}"
+		# `route`, so these run as written (Caddy orders directives by its own table).
+		"    route {"
+		# The account is the session's, the auth service's word, never the page's. forward_auth's
+		# copy_headers drops a page's header too when the service names none, but the route says so
+		# itself. flagd takes a body's targetingKey when the header is absent or empty, so a request
+		# the session names no one for gets "no session", which no account id (no spaces) can be.
+		# /auth/door always answers 2xx, which is what keeps a signed-out page's flags.
+		"      request_header -X-Pronto-Account"
+		"      forward_auth {$PRONTO_MESH:auth:9999} {"
+		"        uri /auth/door"
+		"        header_up dapr-app-id auth"
+		"        copy_headers X-Pronto-Account"
+		"      }"
+		"      @anon not header X-Pronto-Account *"
+		"      request_header @anon X-Pronto-Account \"no session\""
+		"      reverse_proxy {$PRONTO_UPSTREAM_FLAGD:flagd:8693} {"
+		"        header_up dapr-app-id flagd"
+		"        header_up Host {upstream_hostport}"
+		"        header_up X-Pronto-Host {host}"
+		"      }"
 		"    }"
 		"  }"
 		$end

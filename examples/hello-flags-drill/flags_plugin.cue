@@ -22,16 +22,19 @@ package drill
 	if (default & string) != _|_ {local?: string}
 	if (default & number) != _|_ {local?: number}
 	// The accounts that read `local` wherever the app runs: their ids, the
-	// `sub` of their session's token, which the page sends as OpenFeature's
-	// targetingKey. A page can name any account, so a flag opens a feature to
-	// one and never guards it: what an account may do stays the database's.
+	// `sub` of their session's token, which the door reads from the verified
+	// session (the auth service's /auth/door) and hands flagd as the
+	// targetingKey, over any a page sent. A page with no session is no account,
+	// but a flag still opens a feature and never guards it: what an account
+	// may do stays the database's.
 	accounts?: [...string & =~"^[A-Za-z0-9_-]{1,64}$"]
 }
 #Flags: [=~"^[a-z][a-z0-9_-]{0,63}$"]: #Flag
 flags: #Flags
 
 // The hosts a door answers at hand. The door, not the page, says which host a
-// request reached (flagd's --context-from-header): a page cannot claim one.
+// request reached and which account it is from (flagd's --context-from-header,
+// over a targetingKey in the body): a page cannot claim either.
 _flagsLocal: ["localhost", "127.0.0.1", "caddy"]
 
 // flagd's flag definitions (https://flagd.dev/reference/flag-definitions/),
@@ -77,7 +80,7 @@ _flagdPorts: {ofrep: 8693, evaluation: 8694, management: 8695, sync: 8696}
 #FlagdArgs: {
 	file: string
 	ofrep: *"--ofrep-port \(_flagdPorts.ofrep) " | ""
-	out:  "start --uri file:\(file) \(ofrep)--port \(_flagdPorts.evaluation) --management-port \(_flagdPorts.management) --sync-port \(_flagdPorts.sync) --ofrep-sse-enabled=false --context-from-header X-Pronto-Host=host"
+	out:  "start --uri file:\(file) \(ofrep)--port \(_flagdPorts.evaluation) --management-port \(_flagdPorts.management) --sync-port \(_flagdPorts.sync) --ofrep-sse-enabled=false --context-from-header X-Pronto-Host=host --context-from-header X-Pronto-Account=targetingKey"
 }
 
 // Where the released app's flags live: one object in a Cloud Storage bucket
