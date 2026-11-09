@@ -16,6 +16,8 @@ android {
         versionName = "0.1.0"
         val base = (project.findProperty("prontoBase") as String?) ?: "__BASE__"
         resValue("string", "pronto_base", base)
+        // android.json's "unlock": "biometric" opens the sealed storage with one prompt (Unlock.kt).
+        resValue("string", "pronto_unlock", "__UNLOCK__")
         // The app's links open it: an App Link of its own origin, verified by the Digital Asset
         // Links its door serves (assetlinks.json) for the certificate that signs the release.
         manifestPlaceholders["prontoHost"] = URI(base).host
@@ -67,6 +69,7 @@ dependencies {
     implementation("io.github.dokar3:quickjs-kt-android:1.0.14")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("androidx.biometric:biometric:1.1.0")
     implementation("com.yandex.div:div:33.6.0")
     implementation("com.yandex.div:div-core:33.6.0")
     implementation("com.yandex.div:glide:33.6.0")

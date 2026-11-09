@@ -62,6 +62,8 @@ _terminal: {
 	"app/src/main/kotlin/SceneView.kt":      _ @embed(file="template/terminal/app/src/main/kotlin/SceneView.kt", type=text)
 	"app/src/main/kotlin/SealedStore.kt":    _ @embed(file="template/terminal/app/src/main/kotlin/SealedStore.kt", type=text)
 	"app/src/test/kotlin/SealTest.kt":       _ @embed(file="template/terminal/app/src/test/kotlin/SealTest.kt", type=text)
+	"app/src/main/kotlin/Unlock.kt":         _ @embed(file="template/terminal/app/src/main/kotlin/Unlock.kt", type=text)
+	"app/src/test/kotlin/UnlockTest.kt":     _ @embed(file="template/terminal/app/src/test/kotlin/UnlockTest.kt", type=text)
 	"app/src/debug/kotlin/Driver.kt":      _ @embed(file="template/terminal/app/src/debug/kotlin/Driver.kt", type=text)
 	"app/src/release/kotlin/Driver.kt":    _ @embed(file="template/terminal/app/src/release/kotlin/Driver.kt", type=text)
 	"app/src/debug/kotlin/Passkeys.kt":    _ @embed(file="template/terminal/app/src/debug/kotlin/Passkeys.kt", type=text)
@@ -103,6 +105,9 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 	signing: [...assetlinks.#Fingerprint] & list.UniqueItems()
 	// Where the release key lives (android/android.json's `release`): the Secret Manager project and
 	// secret holding its keystore. Named, android/sign-release.sh is written; none: there is no such script.
+	// Whether the terminal's sealed storage opens only after one strong-biometric prompt
+	// (android/android.json's `unlock`, Unlock.kt). none: its key needs no person, nobody is prompted.
+	unlock: *"none" | "biometric"
 	release: *null | {
 		project: =~"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
 		secret:  *"android-release-signing" | =~"^[A-Za-z0-9_-]{1,255}$"
@@ -214,7 +219,7 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 			"android_surface.cue": {seed: false, text: H._surface}
 		}
 		for path, source in [if H.mode == "terminal" {_terminal}, _template][0] if path != "sign-release.sh" || H.release != null {
-			let filled = strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(source, "__RELEASE_PROJECT__", [if H.release != null {H.release.project}, ""][0], -1), "__RELEASE_SECRET__", [if H.release != null {H.release.secret}, ""][0], -1), "__APPLICATION_ID__", H.applicationId, -1), "__APP__", H.app, -1), "__LABEL__", H.label, -1), "__BASE__", H.base, -1)
+			let filled = strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(source, "__RELEASE_PROJECT__", [if H.release != null {H.release.project}, ""][0], -1), "__RELEASE_SECRET__", [if H.release != null {H.release.secret}, ""][0], -1), "__APPLICATION_ID__", H.applicationId, -1), "__APP__", H.app, -1), "__LABEL__", H.label, -1), "__BASE__", H.base, -1), "__UNLOCK__", H.unlock, -1)
 			let dest = [
 				for k in _kotlin if strings.HasPrefix(path, k) {"\(k)\(strings.Replace(H.applicationId, ".", "/", -1))/\(strings.TrimPrefix(path, k))"},
 				path,

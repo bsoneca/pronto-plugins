@@ -32,6 +32,7 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import javax.crypto.SecretKey
 
 // omnishell's engine contract (start, a UI tree flow, dispatch) with the bridges
 // a terminal owes the interpreter: fetch, timers, storage, Intl, the clock's zone.
@@ -46,6 +47,8 @@ class TerminalEngine(
     private val onExit: () -> Unit,
     // A page of another origin: the host takes it to the system browser.
     private val onOpen: (String) -> Unit,
+    // The data key one biometric prompt opened (Unlock.kt), when the app asks for an unlock.
+    private val unlocked: SecretKey? = null,
 ) : AutoCloseable {
     private val js = Executors.newSingleThreadExecutor { Thread(null, it, "pronto-quickjs", 16L * 1024 * 1024).apply { isDaemon = true } }
     private val dispatcher = js.asCoroutineDispatcher()
@@ -64,7 +67,7 @@ class TerminalEngine(
     private lateinit var qjs: QuickJs
 
     // Sealed at rest (SealedStore.kt); a value another build left in plain preferences moves in.
-    private val store by lazy { SealedStore(context, actor) }
+    private val store by lazy { if (unlocked != null) SealedStore(context, actor, unlocked, Unlock.FILE) else SealedStore(context, actor) }
 
     private fun asset(name: String) = context.assets.open(name).bufferedReader().use { it.readText() }
 
