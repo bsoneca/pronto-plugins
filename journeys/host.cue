@@ -237,11 +237,11 @@ _dashboardCompose: """
 				// The app the alerts and the dashboard are named for.
 				journeys: app: "\(H.package)"
 
-				// The door proxies to it on a host launch too: pronto runs the
-				// program's host peers (code.meta.hostPeers, pronto 0.24.1-gcp.26)
-				// beside its own renderer. With no collector there, every page's
-				// telemetry would answer 502.
-				code: meta: hostPeers: "journeys-collector": 8686
+				// The door proxies to it on a host launch too, by its peer address: the
+				// port a launch hands the collector (its `http`), so stacks side by side
+				// never share one. With no collector there, every page's telemetry would
+				// answer 502.
+				cluster: surface: targets: caddy: entrypoint: env: PRONTO_UPSTREAM_JOURNEYS_COLLECTOR: {peer: "journeys-collector", port: "http"}
 				cluster: surface: targets: "journeys-collector": {
 					srcs: globs: ["observability/journeys.collector.yaml", "journeys/journeys.nu"]
 					expose: {

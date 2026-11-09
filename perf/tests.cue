@@ -58,7 +58,7 @@ reporterEverywhere: strings.Contains(_h.files["perf_hatch.cue"].text, "code: sur
 reporterRequired: strings.Contains(_h.files["perf_hatch.cue"].text, "_perfUnreported: [for n, s in code.surface.screens if !list.Contains(s.hatches, \"perf\") {n}] & []") & true
 reporterServesConfig: strings.Contains(_h.files["perf_hatch.cue"].text, "files: [\"shell/hatches/perf/perf.js\", \"shell/hatches/perf/config.js\"]") & true
 collectorBaked: strings.Contains(_h.files["perf_hatch.cue"].text, "copy: [{srcs: [\"observability/perf.collector.yaml\"], dst: \"/etc/vector/vector.yaml\"}]") & true
-collectorPeer: strings.Contains(_h.files["perf_hatch.cue"].text, "code: meta: hostPeers: \"perf-collector\": 8687") & true
+collectorPeer: strings.Contains(_h.files["perf_hatch.cue"].text, "PRONTO_UPSTREAM_PERF_COLLECTOR: {peer: \"perf-collector\", port: \"http\"}") & true
 // The seeded settings are the defaults' own.
 seedSettings: strings.Contains(_h.files["shell/hatches/perf/config.js"].text, "\"frame\":[0.008,0.0167,0.025,0.0333,0.05,0.1,0.25]") & true
 stepShipped: strings.Contains(_h.files["perf/perf.nu"].text, "export def route [endpoint: string]") & true

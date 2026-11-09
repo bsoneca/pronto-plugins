@@ -138,7 +138,7 @@ panelIdsUnique: len({for p in _j.dashboard.panels {"\(p.id)": true}}) & len(_j.d
 // A host launch runs the collector too, as a host peer the door reaches, with
 // Vector from mise; the alerts and dashboard carry the program's package.
 _hatch: _h.files["journeys_hatch.cue"].text
-hostPeer: strings.Contains(_hatch, "code: meta: hostPeers: \"journeys-collector\": 8686") & true
+hostPeer: strings.Contains(_hatch, "PRONTO_UPSTREAM_JOURNEYS_COLLECTOR: {peer: \"journeys-collector\", port: \"http\"}") & true
 hostCollects: strings.Contains(_hatch, "do:    \"exec nu -c 'use journeys/journeys.nu; journeys collect'\"") & true
 hostPorts: strings.Contains(_hatch, "metrics: {port: 9598, env: \"JOURNEYS_METRICS_PORT\"}") & true
 appNamed: strings.Contains(_hatch, "journeys: app: \"shop\"") & true

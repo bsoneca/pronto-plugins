@@ -82,7 +82,7 @@ export const asked = (h) => h.web.asked;
 /** The pronto the shop's cue.mod pins. */
 export const pinned = async (h, v) => {
   await Deno.mkdir(`${h.dir}/cue.mod`, { recursive: true });
-  await Deno.writeTextFile(`${h.dir}/cue.mod/module.cue`, `deps: {\n\t"github.com/bonisoft3/pronto@v0": {\n\t\tv: "v${v}"\n\t}\n}\n`);
+  await Deno.writeTextFile(`${h.dir}/cue.mod/module.cue`, `deps: {\n\t"github.com/bonisoft3/pronto@v${v.startsWith("0.") ? 0 : 1}": {\n\t\tv: "v${v}"\n\t}\n}\n`);
   return h;
 };
 
