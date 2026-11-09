@@ -100,13 +100,14 @@ Deno.test("a binding and a view are held to the contract's shape", () => {
   assertThrows(() => checkView({ tag: "div", key: "a", style: { color: "red" } }), Error, "style.color");
 });
 
-Deno.test("a v3 scene stays in the DOM, hidden, its attributes readable", async () => {
+Deno.test("a v3 scene stays in the DOM, drawn (not hidden), its attributes readable", async () => {
   const { screen } = screenOf();
   const scened = { ...probe, view: () => ({ tag: "div", key: "root", children: [{ tag: "scene", key: "scene", attrs: { id: "scene", "data-fight": "slap" }, children: [{ tag: "model", key: "m", attrs: { shape: "cube" } }] }] }) };
   const stop = bound("probe", binding, scened, quiet())(screen, {});
   const scene = screen.querySelector("#scene");
   assertEquals(scene.getAttribute("data-fight"), "slap");
-  assert(scene.hasAttribute("hidden"));
+  assert(!scene.hasAttribute("hidden"));
+  assertEquals(scene.querySelectorAll("model").length, 1);
   stop();
   await settle();
 });

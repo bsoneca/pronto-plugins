@@ -29,9 +29,12 @@ A web hatch is a host-DOM module (three.js, a canvas, Web Audio) that the phone 
   - A tap on one of them becomes `gesture()`.
   - It carries out an outcome only within the binding: one form of `submits`, one element of `clicks`.
   - Anything else is `PRONTO FAULT hatch <name>: ...`, and the state is kept.
+- **A v3 scene** (3D: `scene`, `model`, `anim`, `camera`, `audio`, the contract's "Contract v3") is drawn natively:
+  - `bound.js` checks it as the Unity host does (an unknown attribute, a non-number, a model with neither or both of `shape` and `prefab`, an unknown shape, a colour that is not `#rrggbb`, a child under a 3D kind is a `PRONTO FAULT`) and keeps it in the DOM with its attributes and classes, so a scenario counts `#scene .model` and reads `#scene[data-fight]`.
+  - `compile.js` compiles the scene element, children included, to one DivKit `custom` div, `custom_type: "pronto-scene"`, sized by the element's CSS (else the page's width and a square). Its `custom_props` is `{background, camera: {x, y, z, lookX, lookY, lookZ, fov}, models: [{key, shape, prefab, color, x, y, z, rx, ry, rz, sx, sy, sz}], anims: [{key, target, clip, duration, dx, dy, dz, spin, loop}], audios: [{key, clip, volume, loop}]}`, numbers as numbers and the contract's defaults applied.
+  - `SceneView.kt` (`SceneAdapter`, registered in `MainActivity`) draws it with OpenGL ES 2.0: the six primitives at Unity's sizes, one directional light, Unity's left-handed transforms, the camera, and the background as the clear colour. An anim whose key appeared runs its tween out and back, turning `spin`. An audio whose key appeared plays the APK asset `unity/audio/<clip>.wav` or `.ogg`. A `prefab` draws as a cube. Each bind logs `PRONTO SCENE drew <n> models` (tag `pronto`); a clip the app does not ship is `PRONTO SCENE audio <clip> not shipped`, a prefab `PRONTO SCENE prefab <name> not on Android`, once each.
 - **Not yet:**
-  - A v3 scene (3D: `scene`, `model`, `anim`, `camera`, `audio`) stays in the DOM, hidden, so its attributes can be read, but it is not drawn.
-  - A ticked hatch gets no held input, because there is no touch layout yet.
+  - A ticked hatch gets no held input, because there is no touch layout yet (PRONTO-101).
   - There is no ad network, so an ad ends `none`.
 
 ### Passkeys
