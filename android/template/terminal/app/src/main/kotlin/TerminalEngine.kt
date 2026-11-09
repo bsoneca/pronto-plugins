@@ -228,9 +228,6 @@ class TerminalEngine(
         qjs = QuickJs.create(dispatcher)
         qjs.maxStackSize = 12L * 1024 * 1024
         bridge()
-        // The host-DOM hatches the shell declares (shell/hatches/**.js) are modules the interpreter
-        // imports by their address on the web; they are the app's assets, so they are named so here.
-        for (name in hatches("hatches")) qjs.addModule("$base/shell/$name", asset(name))
         // quickjs-kt converts a script's completion value back to Kotlin and
         // throws on a symbol, so every script here ends in undefined.
         // Parsing terminal.js (about 2 MB) is most of a cold start, so each script's bytecode is kept in
@@ -247,6 +244,13 @@ class TerminalEngine(
             qjs.evaluate<Any?>(code)
             Log.i("pronto", "evaluated $name in ${System.currentTimeMillis() - began} ms")
         }
+        // The host-DOM hatches the shell declares are modules the interpreter imports by their address
+        // on the web (shell/hatches/...): bundle.ts made each one module (modules/hatches/...), its own
+        // imports inlined, a bound one the hatch contract's driver; so they are named so here. QuickJS
+        // evaluates a module as it is added, and a hatch may read the browser (window, navigator) at its
+        // top, so they are added once terminal.js has set it up; then the shell boots (main.js __boot).
+        for (name in hatches("modules/hatches")) qjs.addModule("$base/shell/${name.removePrefix("modules/")}", asset(name))
+        qjs.evaluate<Any?>("__boot(); undefined", "boot.js", false)
     }
 
     fun tap(kind: String, id: String) = call("__onTap", JSONObject.quote(kind), JSONObject.quote(id))

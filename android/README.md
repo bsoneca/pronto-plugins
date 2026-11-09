@@ -12,10 +12,27 @@ A native Android host for a pronto app: no WebView. The program's own handlers r
 
 ## Two modes
 
-- **Terminal** (the default): the app's own omnishell, at its pinned version and unchanged, runs in QuickJS under SES over a headless DOM (linkedom). Its screens, CSS, forms, sync and guest sign-in are the web's. [`template/terminal/`](template/terminal) compiles that DOM and its CSS to a DivKit card (`compile.js`, `css.js`) and sends taps and typing back as DOM events (`display.js`); Kotlin supplies fetch, storage, timers and the clock (`browser.js`, `TerminalEngine.kt`). The app writes no Android code. CSS that Android cannot draw is listed in the log as unsupported, not silently dropped. Hatches (canvas, three.js) are not supported yet. Passkeys are offered in debug builds only (below).
+- **Terminal** (the default): the app's own omnishell, at its pinned version and unchanged, runs in QuickJS under SES over a headless DOM (linkedom). Its screens, CSS, forms, sync and guest sign-in are the web's. [`template/terminal/`](template/terminal) compiles that DOM and its CSS to a DivKit card (`compile.js`, `css.js`) and sends taps and typing back as DOM events (`display.js`); Kotlin supplies fetch, storage, timers and the clock (`browser.js`, `TerminalEngine.kt`). The app writes no Android code. CSS that Android cannot draw is listed in the log as unsupported, not silently dropped. Hatches: see below. Passkeys are offered in debug builds only (below).
 - **Vault**: an app that already has `android/app/src/main/assets/screen.js` keeps its hand-drawn phone screens.
 
 In terminal mode, `build@android` bundles the interpreter (`android/terminal/bundle.ts`), and `integrate@android` runs the app's CUE scenarios (named in `android/android.json`) on an emulator through real taps and typing (`android/terminal/scenarios.ts`). It uses `PRONTO_BASE` when that is set, and otherwise brings up a stack on a slot. A debug build trusts the machine's local stack: Caddy's local root, and mkcert's when present.
+
+### Hatches
+
+A web hatch is a host-DOM module (three.js, a canvas, Web Audio) that the phone cannot draw. The phone runs the hatch the way the Unity host does: through the app's binding under the hatch contract (pronto-csharp `docs/pronto-unity-hatch-contract.md`, v2). That binding is the app's `binding.json` and its pure module (`init`, `view`, `gesture`, `tick`, `ad`), and Unity runs the same files.
+
+- **Declaring one:** `android/android.json` names the bindings, for example `"hatches": {"battle": {"binding": "unity/hatches/battle/binding.json"}}`.
+- **Building:** `build@android` turns every host-DOM hatch the shell declares into one module of its own, with the hatch's imports inlined, because QuickJS resolves no relative import between the app's files. `TerminalEngine` registers each module at the hatch's web address, so omnishell mounts, pauses and stops it unchanged. A bound hatch's module is [`bound.js`](template/terminal/bound.js) over the app's pure module, and the web's module is never loaded.
+- **Running:**
+  - The driver reads the screen through the binding's selectors.
+  - It draws the view's nodes under `div#hatch-<name>`, like any element.
+  - A tap on one of them becomes `gesture()`.
+  - It carries out an outcome only within the binding: one form of `submits`, one element of `clicks`.
+  - Anything else is `PRONTO FAULT hatch <name>: ...`, and the state is kept.
+- **Not yet:**
+  - A v3 scene (3D: `scene`, `model`, `anim`, `camera`, `audio`) stays in the DOM, hidden, so its attributes can be read, but it is not drawn.
+  - A ticked hatch gets no held input, because there is no touch layout yet.
+  - There is no ad network, so an ad ends `none`.
 
 ### Passkeys
 
@@ -42,9 +59,10 @@ From a bootstrapped pronto app whose four verbs are green:
 
 - [`tests.cue`](tests.cue): the host's exported files, checked with `cue vet`.
 - [`test/host_test.ts`](test/host_test.ts): Deno tests of the template's `host.js`.
+- [`test/bound_test.ts`](test/bound_test.ts): Deno tests of the hatch driver `bound.js` over linkedom.
 - `test@android` in an app runs the template's JVM tests ([`FillTest.kt`](template/app/src/test/kotlin/FillTest.kt)).
 
 ```sh
 ./saytw --script tools.nu cue vet -c ./android
-deno test --allow-read --allow-env android/test/host_test.ts
+deno test --allow-read --allow-env android/test/host_test.ts android/test/bound_test.ts
 ```
