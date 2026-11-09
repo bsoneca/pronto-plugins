@@ -28,6 +28,14 @@ The operator runs the broker once:
 <this repo>/bin/pronto-identity-broker [env-file]   # default ~/.config/pronto-identity/broker.env
 ```
 
+Or on a cluster the operator runs (pronto's `envs.Metal`: k3s on a node reached over SSH, behind its Cloudflare Tunnel), with [`metal.nu`](metal.nu):
+
+```sh
+<this repo>/bin/pronto-identity-broker metal --ssh <user>@<node> --project <gcp project> --domain id.example.com --google-client-id <id> [--phone-…]
+```
+
+It runs the broker's files on the pinned Deno image from a ConfigMap (no image to build), one replica in namespace `identity`, routed by its host through the node's gateway, let out only to DNS and public HTTPS. Its two secrets are read from the project's Secret Manager with the operator's gcloud and piped into the Secret `identity-broker`, never a file. It ends by asking the broker, through the gateway, for its issuer; pointing the domain at the tunnel is the operator's step.
+
 The env file is never committed. It holds `BROKER_ISSUER`, `BROKER_SECRET` and each provider's client, such as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. `bin/pronto-identity-hydra` runs the broker on Ory Hydra on the operator's machine instead. The app side is [`host.cue`](host.cue) and [`export/`](export). The [`pronto-identity` skill](../skills/pronto-identity/SKILL.md) covers both halves.
 
 ## The phone

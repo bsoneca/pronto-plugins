@@ -6,12 +6,18 @@
 # GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET; PORT defaults to 28443.
 # Or releases it to Cloud Run, as identity/release.nu says:
 #   bin/pronto-identity-broker release --project P --domain D --google-client-id C
+# Or to a cluster the operator runs (pronto's envs.Metal), as identity/metal.nu says:
+#   bin/pronto-identity-broker metal --ssh U@H --project P --domain D --google-client-id C
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 cd "$here"
 if [ "${1:-}" = release ]; then
 	shift
 	exec ./saytw --script tools.nu nu identity/release.nu "$@"
+fi
+if [ "${1:-}" = metal ]; then
+	shift
+	exec ./saytw --script tools.nu nu identity/metal.nu "$@"
 fi
 env_file=${1:-$HOME/.config/pronto-identity/broker.env}
 [ -f "$env_file" ] || { echo "pronto-identity-broker: no $env_file" >&2; exit 2; }
