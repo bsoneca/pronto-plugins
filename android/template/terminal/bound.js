@@ -22,6 +22,7 @@ const NODE = new Set(["tag", "key", "class", "attrs", "text", "style", "children
 const STYLE = new Set(["left", "top", "width", "height", "opacity"]);
 const OUTCOME = new Set(["state", "submit", "click", "say", "ad"]);
 const KEY = "data-hatch-key";
+const KINDS = new Set(["model", "anim", "camera", "audio"]);
 const SHAPES = ["cube", "sphere", "capsule", "cylinder", "plane", "quad"];
 const HEX = /^#[0-9a-fA-F]{6}$/;
 // A 3D kind's attributes (besides id and data-*); WORDS are the ones that are not numbers.
@@ -130,7 +131,9 @@ export function checkOutcome(o, binding) {
 function attrsOf(node) {
   const out = { [KEY]: node.key };
   for (const [a, v] of Object.entries(node.attrs ?? {})) if (v !== false) out[a] = v === true ? "" : String(v);
-  if (node.class?.length) out.class = node.class.join(" ");
+  // A 3D kind is also its own class, as a scenario reads a scene (`#scene .model`, `#scene .anim`).
+  const cls = [...(KINDS.has(node.tag) ? [node.tag] : []), ...(node.class ?? []).filter((c) => c !== node.tag)];
+  if (cls.length) out.class = cls.join(" ");
   const s = node.style ?? {};
   const css = [];
   if (s.left != null || s.top != null) css.push("position: absolute");

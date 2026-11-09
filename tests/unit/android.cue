@@ -599,11 +599,11 @@ cases: {
 
 	"the scene is not hidden, keeps its id and its children, which stay countable": {suite: "android", steps: [
 		{call: "android.sceneDrawn", args: [[
-			{tag: "model", key: "a", class: ["model"], attrs: {shape: "cube"}},
-			{tag: "model", key: "b", class: ["model"], attrs: {shape: "quad"}},
-			{tag: "anim", key: "n", class: ["anim"], attrs: {target: "a", clip: "hop"}},
+			{tag: "model", key: "a", attrs: {shape: "cube"}},
+			{tag: "model", key: "b", attrs: {shape: "quad"}},
+			{tag: "anim", key: "n", attrs: {target: "a", clip: "hop"}},
 			{tag: "camera", key: "c"},
-			{tag: "audio", key: "u", class: ["audio"], attrs: {clip: "x"}},
+			{tag: "audio", key: "u", attrs: {clip: "x"}},
 		], {"data-fight": "slap"}]},
 		{pick: ["hidden", "fight", "models", "tags", "idMatches", "unsupported"], expect: [false, "slap", 2, ["model", "model", "anim", "camera", "audio"], true, []]},
 	]}
