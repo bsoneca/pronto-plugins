@@ -183,6 +183,20 @@ def mirror [at: record, text: string] {
 	}
 }
 
+# The flags written to the app's database too (flagsLive.database, a command that runs SQL on its stdin there),
+# through pronto_flags.put() (flags_plugin.cue's flagd.sql), with the host the document is served at (flagsLive.url's),
+# so the database's pronto_flags.flag_on() answers as flagd does. A write that fails there fails the push.
+def database [at: record, app: path, text: string] {
+	let cmd = ($at.database? | default "")
+	if ($cmd | is-empty) { print "flags: no flagsLive.database, so no database holds these flags"; return }
+	refuse-write $"the database through ($cmd)"
+	let host = if ($at.site? | default "" | is-empty) { "" } else { $at.site | url parse | get host }
+	let sql = $"SELECT pronto_flags.put\('(sq ($text | from json | to json -r))'::jsonb, '(sq $host)'\);\n"
+	let r = (do { cd $app; $sql | ^sh -c $cmd } | complete)
+	if $r.exit_code != 0 { error make {msg: $"flags: the database write through ($cmd) failed: ($r.stderr | str trim)"} }
+	print $"flags: written to the database through ($cmd), host ($host)"
+}
+
 # The flags that differ between two documents, by their default value: {flag, from, to}. A flag the other
 # document lacks reads as off where the one that has it is a bool (as the live object does), so a new flag
 # that is off changes nothing.
@@ -231,6 +245,7 @@ def commit [at: record, app: path, text: string, meta: record, from: string, --d
 	let p = (provenance $app $at)
 	let gen = (store-put $at $text ({pushed-by: $p.who, commit: $p.commit} | merge $meta) $from)
 	mirror $at $text
+	database $at $app $text
 	let line = {
 		at: (now-utc), event: "flags.write", app: ($app | path expand | path basename), target: $at.url, version: $gen, from: $from
 		stage: ($meta.stage? | default ""), flag: (if $names != "" { $names } else { $meta.flag? | default "" }), who: $p.who, commit: $p.commit
