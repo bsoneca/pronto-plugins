@@ -85,10 +85,17 @@ oldShapes: {
 	differ: ((#DevFlow & {plane: {host: "a.example.com", workspace: "w", project: {name: "n", identifier: "AB"}}, board: host: "b.example.com"}).board == _|_) & true
 }
 
-// github-projects is a kind the schema knows (its adapter is PRONTO-207); another is refused.
-_gh: #DevFlow & {board: {kind: "github-projects", host: "github.com", workspace: "acme", project: {name: "acme", identifier: "ACME"}}}
+// github-projects: a GitHub Projects (v2) project owned by `workspace` (a GitHub login, upper case
+// allowed), its issues in `repository`, on github.com (written or not); another kind is refused.
+_gh: #DevFlow & {board: {kind: "github-projects", workspace: "Acme-Co", repository: "Acme-Co/shop", project: {name: "shop", identifier: "SHOP"}}, token: {kind: "env", name: "GH_PROJECTS_TOKEN"}}
 boardKinds: {
-	gh: _gh.board.kind & "github-projects"
+	gh:      _gh.board.kind & "github-projects"
+	ghHost:  _gh.board.host & "github.com"
+	ghOwner: _gh.board.workspace & "Acme-Co"
+	ghRepo:  _gh.board.repository & "Acme-Co/shop"
+	ghElsewhere: ((#DevFlow & {board: {kind: "github-projects", host: "ghe.example.com", workspace: "a", repository: "a/b", project: {name: "b", identifier: "AB"}}}).board == _|_) & true
+	ghBadRepo: ((#DevFlow & {board: {kind: "github-projects", workspace: "a", repository: "no-slash", project: {name: "b", identifier: "AB"}}}).board == _|_) & true
+	planeLower: ((#DevFlow & {board: {host: "p.example.com", workspace: "Acme", project: {name: "n", identifier: "AB"}}}).board == _|_) & true
 	refused: ((#DevFlow & {board: kind: "jira"}).board == _|_) & true
 }
 

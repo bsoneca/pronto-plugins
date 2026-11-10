@@ -2,6 +2,7 @@
 // token. Absent (a repository with no dev flow), devflowOf says null and every hook does nothing.
 import { cmd } from "../intents/shell.ts";
 import type { Board } from "./board/board.ts";
+import { GitHubProjects } from "./github-projects.ts";
 import { Plane } from "./plane.ts";
 
 // The schema and Plane's manifests, read beside this file: on disk from a checkout, or fetched when
@@ -23,7 +24,7 @@ async function schema(): Promise<string> {
 export type Role = "backlog" | "refine" | "ready" | "implementing" | "review" | "merged" | "live" | "done" | "cancelled";
 
 export interface DevFlow {
-  board: { kind: "plane" | "github-projects"; host: string; workspace: string; project: { name: string; identifier: string }; chart: string; access: { signup: boolean; github?: { secrets: string } } };
+  board: { kind: "plane" | "github-projects"; host: string; workspace: string; repository?: string; project: { name: string; identifier: string }; chart: string; access: { signup: boolean; github?: { secrets: string } } };
   /** Absent in a repository that only reports to a board set up from another (schema.cue). */
   cluster?: { context: string; ssh: string; namespace: string; tunnel: string; apiPort: number };
   token: { kind: "secret-manager"; project: string; secret: string } | { kind: "env"; name: string };
@@ -74,8 +75,10 @@ export function adapterOf(flow: DevFlow, token: string): Board {
   switch (flow.board.kind) {
     case "plane":
       return new Plane(`https://${flow.board.host}`, flow.board.workspace, token);
+    case "github-projects":
+      return new GitHubProjects(flow.board.workspace, flow.board.repository!, flow.board.project.name, flow.board.project.identifier, token);
     default:
-      throw new Error(`board kind ${flow.board.kind}: not yet (PRONTO-207)`);
+      throw new Error(`no board kind ${flow.board.kind}`);
   }
 }
 
