@@ -45,6 +45,8 @@ jobs:
           sayt --script tools.nu cue vet -c ./identity
           sayt --script tools.nu cue vet -c -t package=check -t frontImage=registry.example.com/pronto-identity:0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000 ./identity/export
           sayt --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
+          sayt --script tools.nu cue vet -c ./migrations
+          sayt --script tools.nu cue vet -c -t package=check ./migrations/export
           sayt --script tools.nu cue vet -c ./release-cron
           sayt --script tools.nu cue vet -c -t package=check ./release-cron/export
           sayt --script tools.nu cue vet -c ./prod-watch
@@ -159,18 +161,20 @@ jobs:
           sayt --script tools.nu cue vet -c ./modular-design
           sayt --script tools.nu cue vet -c -t package=check -t module=check ./modular-design/export
           sayt --script tools.nu nu modular-design/test.nu
+      - name: Test migrations (needs deno, for its driver)
+        run: sayt --script tools.nu nu migrations/test.nu
       - name: Test the Android host
         run: deno test --allow-read --allow-env android/test/host_test.ts android/test/bound_test.ts
       - name: Test the identity broker
         run: deno test --no-config --allow-net identity/oidc_test.ts identity/broker
       - name: Test the billing broker
-        run: deno lint --no-config billing intents gcp release-cron release-notes prod-watch probe runners tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
+        run: deno lint --no-config billing intents gcp release-cron release-notes prod-watch probe runners migrations tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
       # A script that does not parse fails only when it is run, and a release script runs rarely
       # (identity/release.nu shipped `env: [...] ++ $phone`, a record field nu cannot parse).
       - name: Parse each nushell script
         run: sayt --script tools.nu nu -c 'let bad = (glob **/*.nu | where {|f| not (nu-check $f) }); if ($bad | is-not-empty) { print $bad; exit 1 }'
       - name: Test the intents (tests/unit/*.cue)
-        run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android probe devflow; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
+        run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android probe devflow migrations; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
       # flagd, the version the flags plugin pins, checked against its release's digest.
       - name: Install flagd
         env:

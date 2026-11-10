@@ -26,6 +26,7 @@ refuses an app that is not.
 - [devflow](devflow/README.md): a repository's dev flow on a self-hosted Plane board: `bin/pronto connect plane`, the hooks that move issues, and the skills pronto-sprint-plan, pronto-issue, pronto-bug and pronto-design.
 - [intents](intents/README.md): one-command plumbing behind `bin/pronto`.
 - [journeys](journeys/README.md): user-journey SLOs from the terminal's telemetry.
+- [migrations](migrations/README.md): a live database carried forward by migrations made from pronto's emitted schema: columns paired by their proto field number (a rename, retype or drop refused), pgroll operations for what the replay of the schema never alters.
 - [modular-design](modular-design/README.md): an app's design split into modules, each exported alone, so a change rebuilds only its module.
 - [perf](perf/README.md): frame, interaction and paint timings on readers' devices.
 - [prod-watch](prod-watch/README.md): what production logged that may be a bug, triaged by an agent on a loop.
@@ -789,6 +790,9 @@ its own lists replaced whole and other hosts' rules kept.
 ./saytw --script tools.nu cue vet -c ./modular-design
 ./saytw --script tools.nu cue vet -c -t package=check -t module=check ./modular-design/export
 ./saytw --script tools.nu nu modular-design/test.nu
+./saytw --script tools.nu cue vet -c ./migrations
+./saytw --script tools.nu cue vet -c -t package=check ./migrations/export
+./saytw --script tools.nu nu migrations/test.nu  # cue and deno on PATH
 ./saytw --script tools.nu nu flags/test/live_test.nu
 ./saytw --script tools.nu cue vet -c ./identity
 ./saytw --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
