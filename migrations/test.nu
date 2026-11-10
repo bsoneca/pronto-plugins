@@ -40,7 +40,8 @@ def emitted [app: path, proto: string, fields: list, uniques: list, states: list
 	let initial = ($states | first)
 	let create = ($fields | each {|f| $"  \"($f.name)\" (clause $f $initial)"} | str join ",\n")
 	let added = ($fields | where {|f| not $f.pk } | each {|f| $"ALTER TABLE orders ADD COLUMN IF NOT EXISTS \"($f.name)\" (clause $f $initial);"} | str join "\n")
-	$"CREATE TABLE IF NOT EXISTS orders \(\n($create)\n\);\n($added)\n" | save --force --raw ($app | path join services/database/migrations/005_create_tables.sql)
+	let unique = ($uniques | each {|u| $"CREATE UNIQUE INDEX IF NOT EXISTS ($u.name) ON orders \(($u.cols | str join ', ')\);"} | str join "\n")
+	$"CREATE TABLE IF NOT EXISTS orders \(\n($create)\n\);\n($added)\n($unique)\n" | save --force --raw ($app | path join services/database/migrations/005_create_tables.sql)
 	let list = ($states | each {|s| $"'($s)'"} | str join ", ")
 	$"ALTER TABLE \"orders\" DROP CONSTRAINT IF EXISTS \"orders_status_check\";\nALTER TABLE \"orders\" ADD CONSTRAINT \"orders_status_check\" CHECK \(\"status\" IN \(($list)\)\) NOT VALID;\n" | save --force --raw ($app | path join services/database/migrations/010_machines.sql)
 }

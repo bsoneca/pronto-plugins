@@ -128,8 +128,8 @@ _machines: #"""
 	"""#
 
 // What 005_create_tables.sql writes for order: each column in its CREATE TABLE, and again (but the
-// primary key) as an ADD COLUMN, from the same clause. status, a machine's column, has the default
-// pronto writes from its initial state, which the facts do not state.
+// primary key) as an ADD COLUMN, from the same clause, then its indexes. status, a machine's column,
+// has the default pronto writes from its initial state, which the facts do not state.
 _tables: #"""
 	CREATE TABLE IF NOT EXISTS "order" (
 	  "id" uuid PRIMARY KEY,
@@ -143,6 +143,8 @@ _tables: #"""
 	ALTER TABLE order ADD COLUMN IF NOT EXISTS "old" TEXT DEFAULT '';
 	ALTER TABLE order ADD COLUMN IF NOT EXISTS "total" portable_decimal_10_2 CHECK (total >= 0);
 	ALTER TABLE order ADD COLUMN IF NOT EXISTS "owner" uuid DEFAULT auth_uid() NOT NULL REFERENCES app_user(id) ON DELETE CASCADE;
+	CREATE INDEX IF NOT EXISTS idx_order_status ON order USING btree (status);
+	CREATE UNIQUE INDEX IF NOT EXISTS Order_Status ON order (status);
 	"""#
 
 _sql: {machines: _machines, tables: _tables}
@@ -182,6 +184,8 @@ cases: {
 		{call: "migrations.model", args: ["message Order {\n  optional string id = 1;\n  optional string status = 2;\n  reserved 3;\n  reserved \"old\";\n  optional string total = 4;\n  optional string owner = 5;\n  optional string extra = 6;\n}\n", _facts, _sql], throws: "entities.proto has extra at 6"},
 		{call: "migrations.model", args: ["message Other {\n}\n", _facts, _sql], throws: "Order: a table with no message"},
 		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines}], throws: "^Order: 005_create_tables.sql creates no table order: run generate$"},
+		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "Order_Status ON order (status)", "Order_Status ON order (owner)", -1)}], throws: "^Order: 005_create_tables.sql has no unique index order_status on \\(status\\): run generate$", why: "an index's name is read from 005, never made up"},
+		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "USING btree (status)", "USING gin (status)", -1)}], throws: "^Order: 005_create_tables.sql has no btree index on order \\(status\\): run generate$"},
 		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "\"owner\"", "\"owner_id\"", -1)}], throws: "^Order.owner: 005_create_tables.sql has no column order.owner, or one whose type this does not read: run generate$"},
 		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "auth_uid()", "gen_random_uuid()", -1)}], throws: "^Order.owner: its default is auth_uid\\(\\), and 005_create_tables.sql writes gen_random_uuid\\(\\): run generate$", why: "the replay writes the facts' default: one 005 does not write is an app not generated"},
 		{call: "migrations.model", args: [_modelProto, {version: 2, entities: {}}], throws: "^.pronto/check-inputs.json: version 2, where this plugin reads version 1: a pronto this plugin does not read \\(rerun bin/pronto-migrations from a pronto-plugins that reads it\\)$"},
@@ -190,25 +194,29 @@ cases: {
 	]}
 	"005's columns: the type Postgres holds, and the default up to the clause's next part, outside quotes and parentheses": {suite: "migrations", steps: [
 		{call: "migrations.parseTables", args: [_tables], holds: {order: {
-			id: {sql: "uuid"}
-			status: {sql: "text", default: "'draft'"}
-			old: {sql: "text", default: "''"}
-			total: {sql: "portable_decimal_10_2"}
-			owner: {sql: "uuid", default: "auth_uid()"}
-		}}},
+			columns: {
+				id: {sql: "uuid"}
+				status: {sql: "text", default: "'draft'"}
+				old: {sql: "text", default: "''"}
+				total: {sql: "portable_decimal_10_2"}
+				owner: {sql: "uuid", default: "auth_uid()"}
+			}
+			indexes: {idx_order_status: {cols: ["status"], using: "btree"}, order_status: {cols: ["status"], unique: true}}
+		}}, why: "an index by the name pronto writes, as Postgres keeps an unquoted one"},
 		{call: "migrations.parseTables", args: [#"""
 			ALTER TABLE t ADD COLUMN IF NOT EXISTS "a" double precision DEFAULT (1 + 2) NOT NULL;
 			ALTER TABLE t ADD COLUMN IF NOT EXISTS "b" text DEFAULT 'it''s NOT NULL' NOT NULL CHECK (b <> '');
 			ALTER TABLE t ADD COLUMN IF NOT EXISTS "c" portable_timestamp DEFAULT now() AT TIME ZONE 'utc' UNIQUE;
 			ALTER TABLE t ADD COLUMN IF NOT EXISTS "d" time(6);
 			ALTER TABLE t ADD COLUMN IF NOT EXISTS "e" integer DEFAULT 0;
-			"""#], expect: {t: {
+			"""#], expect: {t: {columns: {
 			a: {sql: "double precision", default: "(1 + 2)"}
 			b: {sql: "text", default: "'it''s NOT NULL'"}
 			c: {sql: "portable_timestamp", default: "now() AT TIME ZONE 'utc'"}
 			d: {sql: "time(6)"}
 			e: {sql: "integer", default: "0"}
-		}}, why: "a type of two words, a default in parentheses, one quoting a part's own words, one of several words, a type with its precision"},
+		}, indexes: {}}}, why: "a type of two words, a default in parentheses, one quoting a part's own words, one of several words, a type with its precision"},
+		{call: "migrations.parseTables", args: [#"CREATE UNIQUE INDEX IF NOT EXISTS t_ab ON t (a, "b") WHERE a IS NOT NULL;"#], expect: {t: {columns: {}, indexes: {t_ab: {cols: ["a", "b"], unique: true}}}}, why: "several columns, a quoted one, and a partial unique"},
 	]}
 	"the same model has no changes": {suite: "migrations", steps: [
 		{call: "mig.changes", args: [_order, []], expect: []},

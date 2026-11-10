@@ -17,16 +17,15 @@ const ungenerated = (what, why) => new Error(`${what}: ${why}: run generate`);
 
 // --- pronto's names ---
 
-// What pronto names on a column (emit.cue): Postgres's own names for a column's inline CHECK, UNIQUE
-// and REFERENCES, the trigger of a machine's column (010_machines.sql), and a plain index, which
-// pronto writes unquoted, so Postgres keeps it in lower case. Every name this plugin builds, drops or
-// reads on a column is one of these.
+// What a column's constraints and trigger are named: Postgres's own names for a column's inline
+// CHECK, UNIQUE and REFERENCES, and pronto's for the trigger of a machine's column
+// (010_machines.sql). Every name this plugin builds, drops or reads on a column is one of these. An
+// index's name is read from 005, as pronto writes it.
 export const names = {
   check: (table, column) => `${table}_${column}_check`,
   unique: (table, column) => `${table}_${column}_key`,
   ref: (table, column) => `${table}_${column}_fkey`,
   machine: (table, column) => `trg_${table}_${column}_machine`,
-  index: (table, column) => `idx_${table}_${column}`.toLowerCase(),
 };
 
 // --- The model ---
@@ -93,26 +92,32 @@ export function parseMachines(sql) {
   return out;
 }
 
-// The column each field is, as the replay writes it, from the emitted 005_create_tables.sql: its
-// type as Postgres holds it, and its default. A table's columns are each a line of its CREATE TABLE,
-// and every one but the primary key again an ADD COLUMN IF NOT EXISTS, from the same clause
-// (emit.cue, #colSql). By table, then column. These are what a live database was given, where
-// pronto's facts state the field: the type a field's alias stands for, and a default pronto writes
-// that the facts do not state (a machine's initial state), are read here and never restated.
+// Each table as the replay writes it, from the emitted 005_create_tables.sql: its columns, each with
+// its type as Postgres holds it and its default, and its indexes, each by the name pronto gives it.
+// A table's columns are each a line of its CREATE TABLE, and every one but the primary key again an
+// ADD COLUMN IF NOT EXISTS, from the same clause (emit.cue, #colSql); an index is a CREATE [UNIQUE]
+// INDEX IF NOT EXISTS, its name unquoted, so Postgres keeps it in lower case. By table. These are
+// what a live database was given, where pronto's facts state the field and the index: the type a
+// field's alias stands for, a default pronto writes that the facts do not state (a machine's initial
+// state), and an index's name are read here and never restated.
 export function parseTables(sql) {
   const out = {};
+  const at = (t) => (out[t] ??= { columns: {}, indexes: {} });
   let table = null;
   for (const line of sql.split("\n")) {
     let m;
     if ((m = line.match(/^CREATE TABLE IF NOT EXISTS (?:"([^"]+)"|(\w+)) \($/))) {
       table = m[1] ?? m[2];
-      out[table] ??= {};
+      at(table);
     } else if (table && line.startsWith(")")) {
       table = null;
     } else if (table && (m = line.match(/^ {2}"(\w+)" (.*?),?$/))) {
-      out[table][m[1]] ??= columnClause(m[2]);
+      at(table).columns[m[1]] ??= columnClause(m[2]);
     } else if ((m = line.match(/^ALTER TABLE (?:"([^"]+)"|(\w+)) ADD COLUMN IF NOT EXISTS "(\w+)" (.*);$/))) {
-      (out[m[1] ?? m[2]] ??= {})[m[3]] = columnClause(m[4]);
+      at(m[1] ?? m[2]).columns[m[3]] = columnClause(m[4]);
+    } else if ((m = line.match(/^CREATE (UNIQUE )?INDEX IF NOT EXISTS (\w+) ON (?:"([^"]+)"|(\w+))(?: USING (\w+))? \(([^)]*)\)/))) {
+      const cols = m[6].split(",").map((c) => c.trim().replace(/^"(.*)"$/, "$1"));
+      at(m[3] ?? m[4]).indexes[m[2].toLowerCase()] = m[1] ? { cols, unique: true } : clean({ cols, using: m[5] });
     }
   }
   return out;
@@ -172,8 +177,8 @@ export function model(protoText, inputs, sql = {}) {
     const msg = proto[name];
     if (!msg) throw ungenerated(name, "a table with no message in entities.proto");
     if (!e.cel?.enums || !e.cel?.checks || !Array.isArray(e.uniques)) throw foreign(".pronto/check-inputs.json", `${name} has no cel.enums, cel.checks or uniques`);
-    const columns = tables[e.table];
-    if (!columns) throw ungenerated(name, `005_create_tables.sql creates no table ${e.table}`);
+    if (!tables[e.table]) throw ungenerated(name, `005_create_tables.sql creates no table ${e.table}`);
+    const { columns, indexes: written } = tables[e.table];
     const machined = machines[e.table] ?? {};
     const enums = { ...e.cel.enums, ...machined };
     const facts = (f) => {
@@ -211,11 +216,19 @@ export function model(protoText, inputs, sql = {}) {
     for (const [n, p] of Object.entries(msg.fields)) {
       if (!fields[n]) throw ungenerated(name, `entities.proto has ${p.name} at ${n}, which .pronto/check-inputs.json does not`);
     }
-    // An entity's `uniques` entry by its name, a plain index by pronto's; both as Postgres keeps an
-    // unquoted name.
+    // The entity's indexes, each as 005 writes it: a unique by the name the entity gives it, a plain
+    // index by the one pronto gives it, found by its column.
     const indexes = {};
-    for (const u of e.uniques) indexes[u.name.toLowerCase()] = { cols: u.cols, unique: true };
-    for (const x of e.indexes ?? []) indexes[names.index(e.table, x.on)] = clean({ cols: [x.on], using: x.using });
+    for (const u of e.uniques) {
+      const x = written[u.name.toLowerCase()];
+      if (!x?.unique || JSON.stringify(x.cols) !== JSON.stringify(u.cols)) throw ungenerated(name, `005_create_tables.sql has no unique index ${u.name.toLowerCase()} on (${u.cols.join(", ")})`);
+      indexes[u.name.toLowerCase()] = x;
+    }
+    for (const i of e.indexes ?? []) {
+      const found = Object.entries(written).filter(([, x]) => !x.unique && x.cols.length === 1 && x.cols[0] === i.on && x.using === i.using);
+      if (found.length !== 1) throw ungenerated(name, `005_create_tables.sql has ${found.length ? "more than one" : "no"} ${i.using} index on ${e.table} (${i.on})`);
+      indexes[found[0][0]] = found[0][1];
+    }
     out[name] = clean({ table: e.table, id: e.id, fields, retired, indexes });
   }
   return sorted(out);

@@ -84,12 +84,14 @@ Three other files that generate writes from the same CUE say that:
   - and, for the entity, its table and indexes.
 - `005_create_tables.sql` has each column as the replay writes it: its type as Postgres holds it
   (what an alias stands for, a domain, a decimal's own domain), and its default, including one
-  pronto writes that its facts do not state, a machine's initial state. These are read, never
-  restated, so a pronto that changes them is followed, not misread.
+  pronto writes that its facts do not state, a machine's initial state. It has each index too, by
+  the name pronto gives it. These are read, never restated, so a pronto that changes them is
+  followed, not misread.
 - `010_machines.sql` has a machine's states, and each machine's trigger must have its check there.
 
 The model joins them by entity and field number. Where they disagree (a field with no column, a
-default the facts state and `005` does not write), the app was not generated. A facts version or a
+default the facts state and `005` does not write, an index the facts name and `005` does not build),
+the app was not generated. A facts version or a
 `010` shape this plugin does not read is a pronto it does not know. Either way, that is an error,
 not a guess.
 
