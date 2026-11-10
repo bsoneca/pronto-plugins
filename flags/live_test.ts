@@ -139,7 +139,7 @@ Deno.test({ name: "the door gives flagd the account of the verified session, nev
   }).spawn();
   const caddyProc = new Deno.Command(caddy!, {
     args: ["run", "--config", `${dir}/Caddyfile`, "--adapter", "caddyfile"],
-    env: { PRONTO_UPSTREAM_FLAGD: `127.0.0.1:${ofrep}`, PRONTO_MESH: `127.0.0.1:${auth}` }, stdout: "null", stderr: "null",
+    env: { PRONTO_UPSTREAM_FLAGD: `127.0.0.1:${ofrep}`, PRONTO_UPSTREAM_AUTH: `127.0.0.1:${auth}` }, stdout: "null", stderr: "null",
   }).spawn();
   // A request through the door, as a page at host `host` sends it: its body's targetingKey, a header it made up, its token.
   // node's http, since fetch drops a Host header: the door says which host it was reached at from it.
