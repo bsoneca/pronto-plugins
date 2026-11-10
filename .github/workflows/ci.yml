@@ -59,6 +59,8 @@ jobs:
           sayt --script tools.nu cue vet -c ./release-notes/export
           sayt --script tools.nu cue vet -c ./runners
           sayt --script tools.nu cue vet -c -t setup=check-org ./runners/export
+          sayt --script tools.nu cue vet -c -t setup=check-linux -t user=check ./runners/export
+          sayt --script tools.nu nu runners/test.nu
           sayt --script tools.nu cue vet -c ./unity
           sayt --script tools.nu cue vet -c ./assetlinks
           sayt --script tools.nu cue vet -c -t package=check -t screens=table ./unity/export

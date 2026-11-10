@@ -1,0 +1,32 @@
+{
+ "key": "84a8d066f8cde4b7acc9c1906df8c6b499e7561af8b1dbbb65fc2642cf7fbb55",
+ "at": "2026-11-10T20:38:44.815Z",
+ "observed": {
+  "read": {},
+  "dir": {},
+  "stat": {},
+  "env": {},
+  "tree": {},
+  "cmd": []
+ },
+ "lines": [
+  "suite runners",
+  "cases 0fd26100f6fba2bf7b7e194758ac26752b202940316e0d093a70c5f449adb2da",
+  "jobs 1",
+  "file tests/unit.ts 5299ee134265c1802354c3a8ec781bd7eba9b7a9790a1edb9f398a517d6ae12b",
+  "file tests/unit/select.js f04983b61baf86539ac5bafb0fccf9e67847f614866b4f243551d3b179e163b1",
+  "file tests/unit/schema.cue c99dd3783e892883aeb6192564c6e26d36bc7b0bf7a7991a401f4c431d2de1c6",
+  "file mise.lock d04b8b610b41c786883f0fd67b41d2cac0ca38562e7396ca8caf5e12d79cbfe1",
+  "file deno.json absent",
+  "file deno.jsonc absent",
+  "file deno.lock absent",
+  "file package.json absent",
+  "deno 2.5.0",
+  "args [\"runners\"]",
+  "allow read=granted write=granted env=granted run=granted net=granted sys=prompt ffi=prompt",
+  "env CUE 50244208da1de5f9026c35f01ebdbb249b3ee9e70893e0d14ef5901a59aee9d7",
+  "module tests/unit/registry.js 405bdcd1fed22631d62571d3986096d47e05ab386ba61be28e97159e156dd805",
+  "module intents/run.ts 3137ad06e3e40c841bb0d78753da1b6c43943f6df8126be268f102f6abe1992b",
+  "module runners/plan.js 9e9dfdaf9b4df5f28ac4eb376b9ef5a7e46a5f982166f6ac5ccc342548f240bd"
+ ]
+}
