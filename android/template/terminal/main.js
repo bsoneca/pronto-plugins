@@ -38,7 +38,8 @@ const handlerPath = (cfg, name) => {
 };
 globalThis.__ask = async (name, reads, stated, event) => {
   const shell = await ready;
-  const cfg = await (await fetch("./shell.json")).json();
+  // The shell's own address: the page's base is /shell/, but the engine a fill starts is at the app's root.
+  const cfg = await (await fetch(new URL("/shell/shell.json", location.href))).json();
   const path = handlerPath(cfg, name);
   const source = await (await fetch(new URL(path, new URL("./", location.href)))).text();
   const reduce = await evaluateRole(source, "handler", (cfg.endowments ?? {})[path] ?? []);

@@ -1,0 +1,61 @@
+<section class="screen" data-screen="vault">
+  <!-- The create form mints the key; {now} is the only clock the row sees. -->
+  <form class="add" data-entity="login" data-action="create">
+    <input name="title" required maxlength="80" placeholder="{msg.title_placeholder}" aria-label="{msg.title_placeholder}">
+    <input name="username" maxlength="120" autocomplete="off" placeholder="{msg.username_placeholder}" aria-label="{msg.username_placeholder}">
+    <input name="secret" type="password" required maxlength="256" autocomplete="new-password" placeholder="{msg.secret_placeholder}" aria-label="{msg.secret_placeholder}">
+    <select name="kind" aria-label="{msg.fill_kind}">
+      <option value="web" data-text="{msg.fill_web}">Website</option>
+      <option value="app" data-text="{msg.fill_app}">App</option>
+    </select>
+    <input name="target" required maxlength="253" autocomplete="off" placeholder="{msg.target_placeholder}" aria-label="{msg.target_placeholder}">
+    <input type="hidden" name="created" data-value="{now}">
+    <!-- The browser cannot read an app's signing certificate: its logins are
+         pinned on the phone, on their first fill. -->
+    <input type="hidden" name="signer" value="">
+    <button type="submit" data-text="{msg.add}">Add</button>
+  </form>
+  <!-- `match` rides the login region and the probe region, the two tables
+       whose change must re-ask which logins fill. -->
+  <ul class="logins" data-live="login" data-order="created.desc" data-empty="{msg.vault_empty}"
+      data-reads="login,probe,candidate" data-on-mutation="match">
+    <template data-item>
+      <li>
+        <div class="who">
+          <strong data-text="{title}"></strong>
+          <span class="target" data-text="{target}"></span>
+          <span class="username" data-text="{username}"></span>
+          <!-- Not in prontokeep's screen: shown so the scenario can read the pin a fill gives an app login. -->
+          <span class="signer" data-text="{signer}"></span>
+        </div>
+        <!-- Hidden until asked: the secret is drawn only inside an open details. -->
+        <details class="secret">
+          <summary data-text="{msg.reveal}">Show password</summary>
+          <code data-text="{secret}"></code>
+        </details>
+        <button type="button" data-on-click="remove" aria-label="{msg.remove}">✕</button>
+      </li>
+    </template>
+  </ul>
+  <h2 data-text="{msg.fill_heading}">Autofill check</h2>
+  <div class="probe" data-live="probe" data-filter="id=eq.probe"
+       data-reads="login,probe,candidate" data-on-mutation="match">
+    <template data-item>
+      <!-- A form inside the probe's item updates the probe row. -->
+      <form data-entity="probe" data-action="update">
+        <input type="hidden" name="signers" value="">
+        <select name="kind" aria-label="{msg.fill_kind}">
+          <option value="web" data-text="{msg.fill_web}">Website</option>
+          <option value="app" data-text="{msg.fill_app}">App</option>
+        </select>
+        <input name="target" value="{target}" maxlength="253" autocomplete="off" placeholder="{msg.target_placeholder}" aria-label="{msg.target_placeholder}">
+        <button type="submit" data-text="{msg.fill_check}">Check</button>
+      </form>
+    </template>
+  </div>
+  <ul class="candidates" data-live="candidate" data-order="title.asc" data-empty="{msg.fill_none}">
+    <template data-item>
+      <li><strong data-text="{title}"></strong> <span data-text="{username}"></span></li>
+    </template>
+  </ul>
+</section>

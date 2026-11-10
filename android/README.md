@@ -48,7 +48,7 @@ The vault mode always fills. A terminal app asks for it with `"autofill": true` 
 - One dataset is offered per login the handler picks. The secret is read by id from the store's rows and goes only into the dataset.
 - An app login with no signer yet is pinned to the asking app's certificate on first fill.
 
-The ask's pure half (`Fill.kt`: reading the form, the probe, and the picks and pins from the handler's reply) is the same file in both modes, tested on the JVM (`FillTest.kt`, `AskTest.kt`). The fill itself needs an emulator.
+The ask's pure half (`Fill.kt`: reading the form, the probe, and the picks and pins from the handler's reply) is the same file in both modes, tested on the JVM (`FillTest.kt`, `AskTest.kt`). The fill itself is covered on an emulator by [`test/autofill`](test/autofill): a terminal vault ([`vault`](test/autofill/vault), prontokeep's `Login` entity and `match` handler, copied) and a native app with a username and a password field ([`asker`](test/autofill/asker)). Its scenario signs in behind the fingerprint, stores a login for the asker's package, turns the service on, launches the asker, taps its username field, chooses "Unlock <label>", touches the sensor, picks the login, asserts that both native fields hold the stored values, and reads the asker's signing-certificate pin back in the vault. `emulator.sh` gives an emulator a screen lock and an enrolled fingerprint once; `run.sh <scratch-dir> <omnishell-dir>` writes the vault into a scratch app as `bin/pronto-android` does, builds both apps and runs the scenario (`ANDROID_SERIAL` names the emulator).
 
 ### Hatches
 
@@ -92,7 +92,7 @@ A web hatch is a host-DOM module (three.js, a canvas, Web Audio) that the phone 
 
 `secret` defaults to `android-release-signing`; `project` is the Secret Manager project. With `release`, `pronto-android` writes `android/sign-release.sh` (none without it). Run `sh android/sign-release.sh` signed in to gcloud: it reads the secret's latest version with your own gcloud (`ANDROID_SIGNING_PROJECT` and `ANDROID_SIGNING_SECRET` override the names), writes the keystore to a mode-600 temporary file removed on exit, exports the three variables, runs Gradle as `build@android` does (the app's mise), checks the APK with the SDK's `apksigner verify --print-certs` and prints the signer's SHA-256. That fingerprint is what `signing` lists, so the door admits the release's passkeys. It needs `gcloud` and `jq`.
 
-Scenario steps beyond the DOM's: `signUp`, `pay` (the stand-in checkout), `address`, `response` (a request the page made and what it answered), and a step's `flag`/`unless`.
+Scenario steps beyond the DOM's: `autofillService` (turns a service on, `<package>/<service>`), `launch` (another app's activity), `native` (a view of any app, found with `uiautomator dump` by `id` or `text`, then tapped with `tap` or held to `is`/`has`) and `finger` (the emulator's sensor, once a biometric prompt is up; an `open` with `unlock: true` meets its app's prompt the same way), `signUp`, `pay` (the stand-in checkout), `address`, `response` (a request the page made and what it answered), and a step's `flag`/`unless`.
 
 ## Use
 
@@ -111,6 +111,7 @@ From a bootstrapped pronto app whose four verbs are green:
 - [`tests.cue`](tests.cue): the host's exported files, checked with `cue vet`.
 - [`test/host_test.ts`](test/host_test.ts): Deno tests of the template's `host.js`.
 - [`test/bound_test.ts`](test/bound_test.ts): Deno tests of the hatch driver `bound.js` over linkedom.
+- [`test/autofill`](test/autofill): the terminal autofill scenario on an emulator (see Autofill); the runner's pure parts (`nativeNodes`, `findNative`, `nativeHolds`) are cases in `tests/unit/android_scenarios.cue`.
 - `test@android` in an app runs the template's JVM tests ([`FillTest.kt`](template/app/src/test/kotlin/FillTest.kt)).
 
 ```sh

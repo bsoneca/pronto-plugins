@@ -1,0 +1,17 @@
+{
+  "nav_vault": "Vault",
+  "title_placeholder": "Name",
+  "username_placeholder": "Username",
+  "secret_placeholder": "Password",
+  "target_placeholder": "example.com or com.example.app",
+  "vault_empty": "No logins yet.",
+  "add": "Add",
+  "reveal": "Show password",
+  "remove": "Remove",
+  "fill_heading": "Autofill check",
+  "fill_kind": "Kind",
+  "fill_web": "Website",
+  "fill_app": "App",
+  "fill_check": "Check",
+  "fill_none": "Nothing fills this."
+}
