@@ -492,6 +492,62 @@ import (
 
 		// An instance someone else keeps, of which OpenTofu holds the backups alone: imported, never
 		// made, destroyed or replaced, and every setting but backup_configuration left as it is.
+		// What is being retired (#Project.retire): held, it is imported with its deletion protection off and
+		// every other setting ignored, so the import changes nothing but that; dropped, it is in no
+		// configuration, and OpenTofu destroys what its state still holds. Its address is the one a kept
+		// resource of its kind has, so a resource kept until now is held without being replaced.
+		for nm, r in P.retire.runServices if r.phase == "hold" {
+			let k = (#name & {in: "\(P.id)_\(nm)"}).out
+			tofu: resource: google_cloud_run_v2_service: (k): {
+				name:                nm
+				project:             P.id
+				location:            r.location
+				deletion_protection: false
+				template: containers: [{image: _retiredImage}]
+				lifecycle: ignore_changes: ["template", "traffic", "labels", "annotations", "client", "client_version", "ingress", "launch_stage", "binary_authorization", "custom_audiences", "scaling", "description", "invoker_iam_disabled", "default_uri_disabled"]
+			}
+			_imports: "google_cloud_run_v2_service.\(k)": {id: "projects/\(P.id)/locations/\(r.location)/services/\(nm)", project: P.id}
+		}
+		for nm, r in P.retire.runJobs if r.phase == "hold" {
+			let k = (#name & {in: "\(P.id)_\(nm)"}).out
+			tofu: resource: google_cloud_run_v2_job: (k): {
+				name:                nm
+				project:             P.id
+				location:            r.location
+				deletion_protection: false
+				template: template: containers: [{image: _retiredImage}]
+				lifecycle: ignore_changes: ["template", "labels", "annotations", "client", "client_version", "launch_stage", "binary_authorization"]
+			}
+			_imports: "google_cloud_run_v2_job.\(k)": {id: "projects/\(P.id)/locations/\(r.location)/jobs/\(nm)", project: P.id}
+		}
+		for nm, r in P.retire.schedulerJobs if r.phase == "hold" {
+			let k = (#name & {in: "\(P.id)_\(nm)"}).out
+			tofu: resource: google_cloud_scheduler_job: (k): {
+				name:    nm
+				project: P.id
+				region:  r.location
+				http_target: uri: "https://retired.invalid/"
+				lifecycle: ignore_changes: ["http_target", "schedule", "time_zone", "description", "attempt_deadline", "retry_config", "paused"]
+			}
+			_imports: "google_cloud_scheduler_job.\(k)": {id: "projects/\(P.id)/locations/\(r.location)/jobs/\(nm)", project: P.id}
+		}
+		for inst, r in P.retire.sqlInstances if r.phase == "hold" {
+			let k = (#name & {in: "\(P.id)_\(inst)"}).out
+			tofu: resource: google_sql_database_instance: (k): {
+				project:             P.id
+				name:                inst
+				region:              r.location
+				database_version:    r.databaseVersion
+				deletion_protection: false
+				settings: {tier: r.tier, deletion_protection_enabled: false}
+				lifecycle: ignore_changes: list.Concat([
+					["database_version", "root_password", "settings[0].tier", "settings[0].backup_configuration"],
+					[for a in _sqlInstanceOthers if a != "deletion_protection_enabled" {"settings[0].\(a)"}],
+				])
+			}
+			_imports: "google_sql_database_instance.\(k)": {id: "projects/\(P.id)/instances/\(inst)", project: P.id}
+		}
+
 		for inst, b in P.sqlBackups if P.adoptAll || adopted.sqlBackups[inst] != _|_ {
 			let k = (#name & {in: "\(P.id)_\(inst)"}).out
 			tofu: resource: google_sql_database_instance: (k): {
@@ -547,6 +603,10 @@ import (
 		}
 	}
 }
+
+// What a held Cloud Run service or job is configured with: the provider requires an image, and a held
+// one's template is ignored, so this is never deployed.
+_retiredImage: "us-docker.pkg.dev/cloudrun/container/hello"
 
 // The settings of a Cloud SQL instance (google 7.x) other than its tier and backup_configuration,
 // which an instance whose backups alone are this state's (sqlBackups) leaves to its owner.
