@@ -83,8 +83,10 @@ const canonical = (f, types) => {
 // The column's type as Postgres holds it, which an alias does not always share with its type
 // (pronto's emit.cue, _sqlType): text and int are string's and int32's, but bigint, timestamptz and
 // tsvector are base types where int64 and timestamp are domains and string is text. Spelling a
-// field another way with another column type is a retype the replay never applies.
-const LEGACY = { text: "text", int: "integer", bigint: "bigint", timestamptz: "timestamptz", tsvector: "tsvector" };
+// field another way with another column type is a retype the replay never applies. pronto's facts
+// name the aliases but not their column types, so this map restates _sqlType's; an alias it does not
+// hold is refused (model), never guessed.
+const LEGACY ={ text: "text", int: "integer", bigint: "bigint", timestamptz: "timestamptz", tsvector: "tsvector" };
 const physical = (f, types) => {
   if (LEGACY[f.type]) return LEGACY[f.type];
   if (f.type === "decimal") return `portable_decimal_${f.precision ?? ""}_${f.scale ?? ""}`;
@@ -101,6 +103,8 @@ const physical = (f, types) => {
 // Where the proto and the facts disagree the app was not generated: an error, not a guess.
 export function model(protoText, inputs, machinesSql = "") {
   if (inputs.version !== FACTS_VERSION) throw new Error(`.pronto/check-inputs.json is version ${inputs.version}; this plugin reads version ${FACTS_VERSION}`);
+  const unknown = Object.keys(inputs.types?.aliases ?? {}).filter((a) => !LEGACY[a]);
+  if (unknown.length) throw new Error(`.pronto/check-inputs.json names the alias ${unknown.join(", ")}, whose column type this plugin does not know (pronto's emit.cue, _sqlType): a pronto this plugin does not read`);
   const proto = parseProto(protoText);
   const machines = parseMachines(machinesSql);
   const out = {};

@@ -163,6 +163,7 @@ cases: {
 		{call: "migrations.model", args: ["message Other {\n}\n", _facts], throws: "Order: a table with no message"},
 		{call: "migrations.model", args: [_modelProto, {version: 2, entities: {}}], throws: "version 2; this plugin reads version 1"},
 		{call: "migrations.model", args: [_modelProto, {version: 1, entities: Order: {server: true, table: "order", fields: [], cel: {}}}], throws: "has no cel.enums, cel.checks or uniques"},
+		{call: "migrations.model", args: [_modelProto, {version: 1, types: aliases: {text: "string", varchar: "string"}, entities: {}}], throws: "names the alias varchar, whose column type this plugin does not know", why: "pronto's facts name an alias but not its column type: a new one is refused rather than guessed"},
 		{call: "migrations.parseMachines", args: [#"CREATE TRIGGER "trg_order_stage_machine""#], throws: "trg_order_stage_machine has no check this reader knows"},
 	]}
 	"the same model has no changes": {suite: "migrations", steps: [
