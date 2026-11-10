@@ -1,12 +1,15 @@
 // `connect plane` (docs/intents.md): the repository's board, from nothing to a board ready for its first sprint, each step
-// checked and applied in order, stopping only where a person must act. Plane runs on the repository's
-// node (devFlow.cluster) beside its apps: a CloudNativePG database, the node's gateway, the tunnel's
-// hostname; then the board itself, set up from devFlow: the project, the flow's states, a module per
-// app, the chore label and GitHub's token (the first sprint is planning's, pronto-devflow next).
+// checked and applied in order, stopping only where a person must act. With a cluster (devFlow.cluster)
+// the intent installs Plane on the repository's node beside its apps: a CloudNativePG database, the
+// node's gateway, the tunnel's hostname. With none, the board is one that exists (a hosted Plane, or
+// one installed another way): the intent installs nothing and checks only that its host answers and
+// the token signs in. Then the board itself, set up from devFlow: the project, the flow's states, a
+// module per app, the chore label and GitHub's token (the first sprint is planning's, pronto-devflow next).
+// The install steps are Plane's own; the rest goes through the Board interface (board/board.ts).
 import { cmd } from "../intents/shell.ts";
 import type { Step } from "../intents/run.ts";
-import { Plane } from "./plane.ts";
-import { type DevFlow, exportFlow, tokenOf } from "./spec.ts";
+import type { Board } from "./board/board.ts";
+import { adapterOf, type DevFlow, exportFlow, tokenOf } from "./spec.ts";
 
 const ok = (note = "") => ({ done: true as const, note });
 const todo = (why: string) => ({ todo: why });
@@ -20,24 +23,20 @@ async function must(c: string, args: string[], opts: { stdin?: string; cwd?: str
 
 const random = () => Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, "0")).join("");
 
-export function steps(repo: string, flow: DevFlow, now = new Date()): Step[] {
-  const { cluster, plane: board } = flow;
-  if (!cluster) throw new Error(`${repo}/devflow/devflow.cue names no cluster: this repository only reports to a board set up from another, which connects it`);
-  const ns = cluster.namespace;
-  const kc = (...a: string[]) => ["--context", cluster.context, ...a];
-  const k = (...a: string[]) => cmd("kubectl", kc(...a));
+export function steps(repo: string, flow: DevFlow): Step[] {
+  const { cluster, board } = flow;
   const origin = `https://${board.host}`;
   const instance = async () => {
     const r = await fetch(`${origin}/api/instances/`).catch(() => null);
     if (!r?.ok) return null;
     return (await r.json().catch(() => null)) as { instance?: { is_setup_done?: boolean } } | null;
   };
-  let client: Plane | null = null;
+  let client: Board | null = null;
   const signedIn = async () => {
     if (client) return client;
     const t = await tokenOf(flow);
     if (!t) return null;
-    return (client = new Plane(origin, board.workspace, t));
+    return (client = adapterOf(flow, t));
   };
   // A step past the token's: says what it waits on instead of failing on a missing board.
   const need = async () => {
@@ -45,94 +44,112 @@ export function steps(repo: string, flow: DevFlow, now = new Date()): Step[] {
     if (!p) throw new Error("waits on the board's token (the step above)");
     return p;
   };
-  const project = async (p: Plane) => (await p.projects()).find((x) => x.identifier === board.project.identifier);
+  const project = async (p: Board) => (await p.projects()).find((x) => x.identifier === board.project.identifier);
   // A module per app, and the infra modules an SRE builds (devFlow.infra).
   const apps = () => [...[...Deno.readDirSync(`${repo}/apps`)].filter((e) => e.isDirectory && !e.name.startsWith(".")).map((e) => e.name).sort(), ...flow.infra];
 
+  // Plane on the node: only when the repository names a cluster.
+  const install = (cluster: NonNullable<DevFlow["cluster"]>): Step[] => {
+    const ns = cluster.namespace;
+    const kc = (...a: string[]) => ["--context", cluster.context, ...a];
+    const k = (...a: string[]) => cmd("kubectl", kc(...a));
+    return [
+      {
+        name: `the node's API (${cluster.context})`,
+        check: async () => ((await k("get", "ns", "default")).ok ? ok() : todo(`tunnel 127.0.0.1:${cluster.apiPort} to ${cluster.ssh}`)),
+        apply: async () => {
+          await must("ssh", ["-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-fN", "-L", `${cluster.apiPort}:127.0.0.1:6443`, cluster.ssh]);
+          await new Promise((r) => setTimeout(r, 1500));
+        },
+      },
+      {
+        name: `namespace ${ns}`,
+        check: async () => ((await k("get", "ns", ns)).ok ? ok() : todo(`create ${ns}`)),
+        apply: async () => void (await must("kubectl", kc("create", "ns", ns))),
+      },
+      {
+        name: "Plane's secret keys",
+        check: async () => ((await k("-n", ns, "get", "secret", "plane-keys")).ok ? ok("kept in the cluster") : todo("make them")),
+        apply: async () => void (await must("kubectl", kc("-n", ns, "create", "secret", "generic", "plane-keys", `--from-literal=secret_key=${random()}`, `--from-literal=live_server_secret_key=${random()}`))),
+      },
+      {
+        name: "Plane's database and door (CloudNativePG, the gateway's route)",
+        check: async () => {
+          const db = await k("-n", ns, "get", "secret", "plane-db-app");
+          const route = await k("-n", ns, "get", "httproute", "plane-route");
+          return db.ok && route.ok ? ok() : todo("apply them");
+        },
+        apply: async () => {
+          const objects = await exportFlow<unknown[]>(repo, "planeObjects");
+          await must("kubectl", kc("apply", "-f", "-"), { stdin: JSON.stringify({ apiVersion: "v1", kind: "List", items: objects }) });
+          // CloudNativePG writes plane-db-app once the database is up.
+          for (let i = 0; i < 60 && !(await k("-n", ns, "get", "secret", "plane-db-app")).ok; i++) await new Promise((r) => setTimeout(r, 5000));
+        },
+      },
+      {
+        name: `Plane (plane-ce ${board.chart})`,
+        check: async () => {
+          const r = await cmd("helm", ["--kube-context", cluster.context, "-n", ns, "status", "plane", "-o", "json"]);
+          if (!r.ok) return todo("install it");
+          const s = JSON.parse(r.out);
+          const chart = s.chart?.metadata?.version ?? (await cmd("helm", ["--kube-context", cluster.context, "-n", ns, "list", "-o", "json"]).then((l) => JSON.parse(l.out).find((x: { name: string }) => x.name === "plane")?.chart?.replace("plane-ce-", "")));
+          return s.info?.status === "deployed" && chart === board.chart ? ok() : todo(`${s.info?.status ?? "not deployed"} ${chart ?? ""}: upgrade to ${board.chart}`);
+        },
+        apply: async () => {
+          const secret = async (name: string, key: string) => atob(await must("kubectl", kc("-n", ns, "get", "secret", name, "-o", `jsonpath={.data.${key}}`)));
+          const values = await exportFlow<Record<string, unknown>>(repo, "planeValues");
+          const kept = { env: { secret_key: await secret("plane-keys", "secret_key"), live_server_secret_key: await secret("plane-keys", "live_server_secret_key"), pgdb_remote_url: await secret("plane-db-app", "uri") } };
+          const dir = await Deno.makeTempDir();
+          try {
+            await Deno.writeTextFile(`${dir}/values.json`, JSON.stringify(values));
+            await Deno.writeTextFile(`${dir}/kept.json`, JSON.stringify(kept), { mode: 0o600 });
+            await must("helm", ["--kube-context", cluster.context, "-n", ns, "upgrade", "--install", "plane", "plane-ce", "--repo", "https://helm.plane.so", "--version", board.chart, "-f", `${dir}/values.json`, "-f", `${dir}/kept.json`, "--wait", "--timeout", "20m"]);
+          } finally {
+            await Deno.remove(dir, { recursive: true });
+          }
+        },
+      },
+      {
+        name: `${board.host} on the tunnel`,
+        // A DNS record is the person's to make, as minesweeper's was (docs/infra-opentofu.md), with
+        // cloudflared's own login, until the zone is OpenTofu's.
+        check: async () =>
+          (await instance()) ? ok(origin) : gate(`point ${board.host} at the tunnel, then run this again: cloudflared tunnel route dns ${cluster.tunnel} ${board.host}`),
+      },
+      {
+        name: "Plane's instance admin",
+        check: async () =>
+          (await instance())?.instance?.is_setup_done
+            ? ok()
+            : gate(`create Plane's admin (yourself), then in Authentication turn off sign-ups so only invited people join: ${origin}/god-mode/`),
+      },
+    ];
+  };
+  // With no cluster the board exists already: its host must answer.
+  const answers: Step = {
+    name: `${board.host} answers`,
+    check: async () => {
+      const r = await fetch(origin).catch(() => null);
+      return r && r.status < 500 ? ok(origin) : gate(`${origin} does not answer: check the board's host in devflow/devflow.cue`);
+    },
+  };
+  const how = flow.token.kind === "env" ? `set ${flow.token.name} in the environment` : `keep it in Secret Manager: pbpaste | gcloud secrets create ${flow.token.secret} --project ${flow.token.project} --data-file=- (or versions add, to replace one)`;
+
   return [
-    {
-      name: `the node's API (${cluster.context})`,
-      check: async () => ((await k("get", "ns", "default")).ok ? ok() : todo(`tunnel 127.0.0.1:${cluster.apiPort} to ${cluster.ssh}`)),
-      apply: async () => {
-        await must("ssh", ["-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-fN", "-L", `${cluster.apiPort}:127.0.0.1:6443`, cluster.ssh]);
-        await new Promise((r) => setTimeout(r, 1500));
-      },
-    },
-    {
-      name: `namespace ${ns}`,
-      check: async () => ((await k("get", "ns", ns)).ok ? ok() : todo(`create ${ns}`)),
-      apply: async () => void (await must("kubectl", kc("create", "ns", ns))),
-    },
-    {
-      name: "Plane's secret keys",
-      check: async () => ((await k("-n", ns, "get", "secret", "plane-keys")).ok ? ok("kept in the cluster") : todo("make them")),
-      apply: async () => void (await must("kubectl", kc("-n", ns, "create", "secret", "generic", "plane-keys", `--from-literal=secret_key=${random()}`, `--from-literal=live_server_secret_key=${random()}`))),
-    },
-    {
-      name: "Plane's database and door (CloudNativePG, the gateway's route)",
-      check: async () => {
-        const db = await k("-n", ns, "get", "secret", "plane-db-app");
-        const route = await k("-n", ns, "get", "httproute", "plane-route");
-        return db.ok && route.ok ? ok() : todo("apply them");
-      },
-      apply: async () => {
-        const objects = await exportFlow<unknown[]>(repo, "planeObjects");
-        await must("kubectl", kc("apply", "-f", "-"), { stdin: JSON.stringify({ apiVersion: "v1", kind: "List", items: objects }) });
-        // CloudNativePG writes plane-db-app once the database is up.
-        for (let i = 0; i < 60 && !(await k("-n", ns, "get", "secret", "plane-db-app")).ok; i++) await new Promise((r) => setTimeout(r, 5000));
-      },
-    },
-    {
-      name: `Plane (plane-ce ${board.chart})`,
-      check: async () => {
-        const r = await cmd("helm", ["--kube-context", cluster.context, "-n", ns, "status", "plane", "-o", "json"]);
-        if (!r.ok) return todo("install it");
-        const s = JSON.parse(r.out);
-        const chart = s.chart?.metadata?.version ?? (await cmd("helm", ["--kube-context", cluster.context, "-n", ns, "list", "-o", "json"]).then((l) => JSON.parse(l.out).find((x: { name: string }) => x.name === "plane")?.chart?.replace("plane-ce-", "")));
-        return s.info?.status === "deployed" && chart === board.chart ? ok() : todo(`${s.info?.status ?? "not deployed"} ${chart ?? ""}: upgrade to ${board.chart}`);
-      },
-      apply: async () => {
-        const secret = async (name: string, key: string) => atob(await must("kubectl", kc("-n", ns, "get", "secret", name, "-o", `jsonpath={.data.${key}}`)));
-        const values = await exportFlow<Record<string, unknown>>(repo, "planeValues");
-        const kept = { env: { secret_key: await secret("plane-keys", "secret_key"), live_server_secret_key: await secret("plane-keys", "live_server_secret_key"), pgdb_remote_url: await secret("plane-db-app", "uri") } };
-        const dir = await Deno.makeTempDir();
-        try {
-          await Deno.writeTextFile(`${dir}/values.json`, JSON.stringify(values));
-          await Deno.writeTextFile(`${dir}/kept.json`, JSON.stringify(kept), { mode: 0o600 });
-          await must("helm", ["--kube-context", cluster.context, "-n", ns, "upgrade", "--install", "plane", "plane-ce", "--repo", "https://helm.plane.so", "--version", board.chart, "-f", `${dir}/values.json`, "-f", `${dir}/kept.json`, "--wait", "--timeout", "20m"]);
-        } finally {
-          await Deno.remove(dir, { recursive: true });
-        }
-      },
-    },
-    {
-      name: `${board.host} on the tunnel`,
-      // A DNS record is the person's to make, as minesweeper's was (docs/infra-opentofu.md), with
-      // cloudflared's own login, until the zone is OpenTofu's.
-      check: async () =>
-        (await instance()) ? ok(origin) : gate(`point ${board.host} at the tunnel, then run this again: cloudflared tunnel route dns ${cluster.tunnel} ${board.host}`),
-    },
-    {
-      name: "Plane's instance admin",
-      check: async () =>
-        (await instance())?.instance?.is_setup_done
-          ? ok()
-          : gate(`create Plane's admin (yourself), then in Authentication turn off sign-ups so only invited people join: ${origin}/god-mode/`),
-    },
+    ...(cluster ? install(cluster) : [answers]),
     {
       name: `workspace ${board.workspace} and its API token`,
       check: async () => {
         const p = await signedIn();
-        const how = `sign in at ${origin}/, create the workspace with the URL ${board.workspace}, then make a token in Profile settings → Personal access tokens and keep it: ` +
-          `pbpaste | gcloud secrets create ${flow.token.secret} --project ${flow.token.project} --data-file=- (or versions add, to replace one)`;
-        if (!p) return gate(how);
+        const make = `sign in at ${origin}/, ${cluster ? `create the workspace with the URL ${board.workspace}, then ` : ""}make a token in Profile settings → Personal access tokens and ${how}`;
+        if (!p) return gate(make);
         try {
           await p.me();
           await p.projects();
           return ok();
         } catch (e) {
           client = null;
-          return gate(`${(e as Error).message.split(":").slice(-1)[0].trim()}: ${how}`);
+          return gate(`${(e as Error).message.split(":").slice(-1)[0].trim()}: ${make}`);
         }
       },
     },
@@ -142,8 +159,8 @@ export function steps(repo: string, flow: DevFlow, now = new Date()): Step[] {
       apply: async () => {
         const p = (await need());
         const made = await p.createProject(board.project.name, board.project.identifier);
-        // Cycles and modules are Plane features a project turns on.
-        await p.updateProject(made.id, { cycle_view: true, module_view: true });
+        // Cycles and modules are features a project turns on.
+        await p.enableFeatures(made.id);
       },
     },
     {
@@ -163,8 +180,8 @@ export function steps(repo: string, flow: DevFlow, now = new Date()): Step[] {
           if (!at) await p.createState(pid, { name: s.name, group: s.group, color: s.color, description: s.means });
           else if (at.group !== s.group) await p.updateState(pid, at.id, { group: s.group, color: s.color });
         }
-        const backlog = (await p.states(pid)).find((s) => s.name === "Backlog");
-        if (backlog) await p.updateState(pid, backlog.id, { default: true });
+        const backlog = (await p.states(pid)).find((s) => s.name === flow.roles.backlog);
+        if (backlog) await p.setDefaultState(pid, backlog.id);
       },
     },
     {

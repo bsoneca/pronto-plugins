@@ -5,8 +5,8 @@ description: "File a bug on the dev-flow board (Plane) with its priority, P0 to 
 
 # pronto-bug
 
-A bug carries a priority that decides whether it waits for a sprint (bsoneca/pronto's
-docs/dev-flow.md, rule 6). Filed through `pronto-devflow` (this plugin's `bin/pronto-devflow`,
+A bug carries a priority that decides whether it waits for a sprint (devflow/dev-flow.md,
+rule 6). Filed through `pronto-devflow` (this plugin's `bin/pronto-devflow`,
 run bare from the repository).
 
 | Priority | When | Where it goes |

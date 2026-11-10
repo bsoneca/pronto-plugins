@@ -5,7 +5,7 @@ description: "Work one issue of the dev-flow board (Plane) from refinement to a 
 
 # pronto-issue
 
-One issue, one Claude session (bsoneca/pronto's docs/dev-flow.md, rule 5). The board moves through
+One issue, one Claude session (devflow/dev-flow.md, rule 5). The board moves through
 `pronto-devflow` (this plugin's `bin/pronto-devflow`, run bare from the repository) and the hooks;
 never by hand.
 

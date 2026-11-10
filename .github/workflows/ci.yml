@@ -49,6 +49,7 @@ jobs:
           sayt --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
           sayt --script tools.nu cue vet -c ./migrations
           sayt --script tools.nu cue vet -c -t package=check ./migrations/export
+          sayt --script tools.nu cue vet -c=false ./devflow
           sayt --script tools.nu cue vet -c ./release-cron
           sayt --script tools.nu cue vet -c -t package=check ./release-cron/export
           sayt --script tools.nu cue vet -c ./prod-watch
@@ -175,7 +176,7 @@ jobs:
       - name: Test the identity broker
         run: deno test --no-config --allow-net identity/oidc_test.ts identity/broker
       - name: Test the billing broker
-        run: deno lint --no-config billing intents gcp release-cron release-notes prod-watch probe runners migrations tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
+        run: deno lint --no-config billing intents gcp devflow release-cron release-notes prod-watch probe runners migrations tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
       # A script that does not parse fails only when it is run, and a release script runs rarely
       # (identity/release.nu shipped `env: [...] ++ $phone`, a record field nu cannot parse).
       - name: Parse each nushell script

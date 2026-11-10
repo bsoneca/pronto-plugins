@@ -6,8 +6,7 @@ description: "The product manager's session on the dev-flow board (Plane), in a 
 # pronto-design
 
 The team has product managers (devFlow.team.product in devflow/devflow.cue) who build nothing and
-take no slot: they design what later sprints build (bsoneca/pronto's docs/dev-flow.md, Agents and
-the team). A designed issue is **Ready** and in no sprint; the next planning (`pronto-sprint-plan`)
+take no slot: they design what later sprints build (devflow/dev-flow.md, The team). A designed issue is **Ready** and in no sprint; the next planning (`pronto-sprint-plan`)
 picks from those first. Moved through `pronto-devflow` (this plugin's `bin/pronto-devflow`, run
 bare from the repository): never move an issue on the board by hand.
 
