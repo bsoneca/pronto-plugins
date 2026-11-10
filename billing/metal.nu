@@ -16,6 +16,18 @@ const here = path self .
 use ../common/sops.nu
 const deno = "denoland/deno:distroless-2.5.0@sha256:5c4530d4babe37ded3566803e9498e2b5d643b915cce701d8b7b82f87a86629e"
 const port = 8080
+# The airlock beside the broker (--airlock, PRONTO-135): mecha-fork's airlock with its door
+# (mecha-fork#26, published as mecha 0.22.0-host.3 by pronto-fork's prerelease-mecha), mecha's daprd,
+# and mecha's database image, which stages the ledger's initdb steps.
+const airlock_image = "ghcr.io/bsoneca/mecha-airlock:0.22.0-host.3@sha256:3e41f77dd45922b5a0f38d21a1c69f21d751debf6f2ee717daa11b77c8f210f0"
+const mesh_image = "bonitao/mecha-mesh:0.22.0@sha256:8d39aa3543560232c52330152ba70a4d2c973b76d0ac97899d677704bc0e09a4"
+const ledger_image = "bonitao/mecha-database:0.22.0@sha256:ed58b6be6cd69658fbb4e6daff1f91b8923b333f364905c4dacdec2974a05d82"
+const door_port = 9998
+# The keys the airlock holds instead of the broker, by the door each is the credential of.
+const door_keys = [
+	{door: "stripe", var: "STRIPE_SECRET_KEY"}
+	{door: "stripe-sandbox", var: "STRIPE_SANDBOX_SECRET_KEY"}
+]
 # A ConfigMap's keys hold dots, which a cell path would split: look each up whole.
 def at [key: string]: record -> string { transpose k v | where k == $key | get v.0 }
 # The broker's files as the image sees them under /app/billing, each a ConfigMap key.
@@ -47,8 +59,15 @@ export def manifests [
 	--secrets: list<string> = []
 	--namespace: string = "billing"
 	--name: string = "billing-broker"
+	--airlock # Stripe through the airlock's door: the airlock holds the Stripe keys, the broker none
 ]: nothing -> string {
 	let labels = {"app.kubernetes.io/name": $name, "app.kubernetes.io/part-of": "pronto-billing"}
+	let lock = $"($name)-airlock"
+	let lock_labels = {"app.kubernetes.io/name": $lock, "app.kubernetes.io/part-of": "pronto-billing"}
+	# Through the door, the broker's env names no Stripe key, and the airlock's names those it holds.
+	let held = if $airlock { $door_keys | where {|k| $k.var in $secrets } } else { [] }
+	let secrets = ($secrets | where {|v| $v not-in ($held | get var) })
+	let settings = ($settings ++ (if $airlock { [{name: "STRIPE_DOOR", value: $"http://($lock):($door_port)"}] } else { [] }))
 	let meta = {namespace: $namespace, labels: $labels}
 	# A change to a file is a new pod: the files' digest is the template's.
 	let digest = ($files | each {|f| $sources | at $f.key } | str join "\n" | hash sha256 | str substring 0..15)
@@ -122,13 +141,142 @@ export def manifests [
 				podSelector: {matchLabels: $labels}
 				policyTypes: ["Ingress" "Egress"]
 				ingress: [{ports: [{protocol: "TCP", port: $port}]}]
+				egress: ([
+					{ports: [{protocol: "UDP", port: 53} {protocol: "TCP", port: 53}]}
+					{to: [{ipBlock: {cidr: "0.0.0.0/0", except: $private}}], ports: [{protocol: "TCP", port: 443}]}
+				] ++ (if $airlock { [{to: [{podSelector: {matchLabels: $lock_labels}}], ports: [{protocol: "TCP", port: $door_port}]}] } else { [] }))
+			}
+		}
+	] ++ (if $airlock { airlock-objects $namespace $lock $lock_labels $labels $name ($held | get door) ($held | get var) } else { [] })
+	| each { to yaml } | str join "---\n"
+}
+
+# The airlock beside the broker: one pod of the airlock, its daprd and its ledger's Postgres, which
+# only the broker reaches, on the door's port. Each door is a Stripe key's: the airlock reads the key
+# from the broker's Secret and adds it to every call; the broker's pod names none of them. Every call
+# is a row of the ledger (mecha's services/airlock/README.md, "A door").
+def airlock-objects [namespace: string, name: string, labels: record, caller_labels: record, caller: string, doors: list<string>, vars: list<string>]: nothing -> list<record> {
+	let meta = {namespace: $namespace, labels: $labels}
+	let manifest = {
+		effects: {}
+		doors: ($doors | zip $vars | reduce -f {} {|d, acc| $acc | insert $d.0 {
+			idempotent: true
+			credential: {header: "Authorization", scheme: "Bearer", secret: $d.1}
+			headers: ["Stripe-Version"]
+			callers: [$caller]
+		}})
+	}
+	# The daprd's wall and breaker, as mecha's cluster writes them for its effects (cluster.cue's
+	# #AirlockWall and #AirlockResiliency), and one HTTPEndpoint per door.
+	let wall = {
+		apiVersion: "dapr.io/v1alpha1", kind: "Component", metadata: {name: "wall"}
+		spec: {type: "middleware.http.routerchecker", version: "v1", metadata: [{name: "rule", value: $"^/v1[.]0/\(healthz\(/outbound\)?|invoke/\(($doors | str join '|')\)/method/.*\)$"}]}
+	}
+	let resiliency = {
+		apiVersion: "dapr.io/v1alpha1", kind: "Resiliency", metadata: {name: "airlock"}
+		spec: {
+			policies: {circuitBreakers: {sink: {maxRequests: 1, interval: "60s", timeout: "30s", trip: "consecutiveFailures >= 10"}}}
+			targets: {apps: ($doors | reduce -f {} {|d, acc| $acc | insert $d {circuitBreaker: "sink"} })}
+		}
+	}
+	let endpoints = ($doors | each {|d| {key: $"($d).yaml", value: ({apiVersion: "dapr.io/v1alpha1", kind: "HTTPEndpoint", metadata: {name: $d}, spec: {baseUrl: "https://api.stripe.com"}} | to yaml)} })
+	let components = ([{key: "wall.yaml", value: ($wall | to yaml)} {key: "resiliency.yaml", value: ($resiliency | to yaml)}] ++ $endpoints | reduce -f {} {|c, acc| $acc | insert $c.key $c.value })
+	let digest = ([($manifest | to json) ($components | to json)] | str join "\n" | hash sha256 | str substring 0..15)
+	let private = ["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"]
+	let restricted = {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
+	[
+		{apiVersion: "v1", kind: "ConfigMap", metadata: ($meta | insert name $"($name)-effects"), data: {"effects.json": ($manifest | to json)}}
+		{apiVersion: "v1", kind: "ConfigMap", metadata: ($meta | insert name $"($name)-dapr"), data: $components}
+		# The ledger outlives the pod: the record of every call made outside.
+		{apiVersion: "v1", kind: "PersistentVolumeClaim", metadata: ($meta | insert name $"($name)-ledger"), spec: {accessModes: ["ReadWriteOnce"], resources: {requests: {storage: "1Gi"}}}}
+		{
+			apiVersion: "apps/v1", kind: "Deployment", metadata: ($meta | insert name $name)
+			spec: {
+				replicas: 1
+				strategy: {type: "Recreate"}
+				selector: {matchLabels: $labels}
+				template: {
+					metadata: {labels: $labels, annotations: {"pronto.dev/config": $digest}}
+					spec: {
+						automountServiceAccountToken: false
+						securityContext: {seccompProfile: {type: "RuntimeDefault"}}
+						initContainers: [
+							# mecha's own steps: Graphile's schema, then the ledger (with the ticker's schedule table it
+							# seeds); and the airlock daprd's configuration, from the airlock's image.
+							{
+								name: "steps", image: $ledger_image, securityContext: $restricted
+								command: ["sh" "-c" "cp /usr/share/mecha/initdb/011_graphile_worker.sql /usr/share/mecha/initdb/012_airlock.sql /initdb/"]
+								volumeMounts: [{name: "initdb", mountPath: "/initdb"}]
+							}
+							{
+								name: "config", image: $airlock_image, securityContext: $restricted
+								command: ["sh" "-c" "cp /app/airlock/dapr.yaml /dapr-config/config.yaml"]
+								volumeMounts: [{name: "dapr-config", mountPath: "/dapr-config"}]
+							}
+						]
+						containers: [
+							{
+								name: "ledger", image: $ledger_image
+								args: ["postgres" "-c" "listen_addresses=127.0.0.1" "-c" "shared_buffers=32MB" "-c" "max_connections=20"]
+								env: [
+									{name: "POSTGRES_USER", value: "airlock"} {name: "POSTGRES_DB", value: "airlock"}
+									# Only this pod's own loopback reaches it.
+									{name: "POSTGRES_HOST_AUTH_METHOD", value: "trust"}
+									{name: "PGDATA", value: "/var/lib/postgresql/data/pgdata"}
+								]
+								resources: {requests: {cpu: "20m", memory: "64Mi"}, limits: {memory: "256Mi"}}
+								readinessProbe: {exec: {command: ["pg_isready" "-h" "127.0.0.1" "-U" "airlock"]}, periodSeconds: 5}
+								volumeMounts: [{name: "ledger", mountPath: "/var/lib/postgresql/data"} {name: "initdb", mountPath: "/docker-entrypoint-initdb.d", readOnly: true}]
+							}
+							{
+								name: "mesh", image: $mesh_image, securityContext: $restricted
+								command: ["/daprd"]
+								args: ["--app-id" "airlock" "--dapr-listen-addresses" "127.0.0.1" "--resources-path" "/dapr/airlock" "--config" "/dapr-config/config.yaml" "--dapr-http-port" "3500" "--metrics-port" "0" "--profile-port" "0" "--log-level" "info"]
+								resources: {requests: {cpu: "20m", memory: "48Mi"}, limits: {memory: "192Mi"}}
+								volumeMounts: [{name: "dapr", mountPath: "/dapr/airlock", readOnly: true} {name: "dapr-config", mountPath: "/dapr-config", readOnly: true}]
+							}
+							{
+								name: "airlock", image: $airlock_image, securityContext: $restricted
+								workingDir: "/app/airlock"
+								args: ["run" "--frozen" "--unstable-worker-options" "--allow-net=127.0.0.1:5432,127.0.0.1:3500,0.0.0.0:9997,0.0.0.0:9998" "--allow-read" "--allow-env" "--allow-sys" "main.ts"]
+								ports: [{name: "door", containerPort: $door_port}]
+								env: ([
+									{name: "DATABASE_URL", value: "postgres://airlock@127.0.0.1:5432/airlock"}
+									{name: "MESH_URL", value: "http://127.0.0.1:3500"}
+									{name: "AIRLOCK_DIR", value: "/airlock"}
+								] ++ ($vars | each {|v| {name: $v, valueFrom: {secretKeyRef: {name: $caller, key: $v}}} }))
+								resources: {requests: {cpu: "20m", memory: "96Mi"}, limits: {memory: "384Mi"}}
+								startupProbe: {httpGet: {path: "/healthz", port: 9997}, periodSeconds: 2, failureThreshold: 90}
+								readinessProbe: {tcpSocket: {port: $door_port}, periodSeconds: 10}
+								volumeMounts: [{name: "effects", mountPath: "/airlock", readOnly: true}]
+							}
+						]
+						volumes: [
+							{name: "ledger", persistentVolumeClaim: {claimName: $"($name)-ledger"}}
+							{name: "initdb", emptyDir: {}}
+							{name: "dapr-config", emptyDir: {}}
+							{name: "dapr", configMap: {name: $"($name)-dapr"}}
+							{name: "effects", configMap: {name: $"($name)-effects"}}
+						]
+					}
+				}
+			}
+		}
+		{apiVersion: "v1", kind: "Service", metadata: ($meta | insert name $name), spec: {selector: $labels, ports: [{name: "door", port: $door_port, targetPort: $door_port}]}}
+		# The door's port from the broker alone; out, DNS and HTTPS to public addresses (Stripe).
+		{
+			apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy", metadata: ($meta | insert name $name)
+			spec: {
+				podSelector: {matchLabels: $labels}
+				policyTypes: ["Ingress" "Egress"]
+				ingress: [{from: [{podSelector: {matchLabels: $caller_labels}}], ports: [{protocol: "TCP", port: $door_port}]}]
 				egress: [
 					{ports: [{protocol: "UDP", port: 53} {protocol: "TCP", port: 53}]}
 					{to: [{ipBlock: {cidr: "0.0.0.0/0", except: $private}}], ports: [{protocol: "TCP", port: 443}]}
 				]
 			}
 		}
-	] | each { to yaml } | str join "---\n"
+	]
 }
 
 # The broker's files from this checkout, by their ConfigMap keys.
@@ -155,6 +303,7 @@ export def main [
 	--sandbox-tenants: string = "" # As release.nu: the tenants that buy through Stripe's sandbox
 	--namespace: string = "billing"
 	--service: string = "billing-broker" # The secrets' names in Secret Manager are <service>-<suffix>, as release.nu stores them
+	--airlock # Stripe through the airlock's door beside the broker, which then holds no Stripe key (PRONTO-135)
 ] {
 	if ([$ssh $domain] | any { is-empty }) { error make {msg: "--ssh and --domain are both required"} }
 	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
@@ -164,7 +313,7 @@ export def main [
 	let settings = ([{name: "BILLING_FEE_PERCENT", value: ($fee | into string)}] ++ (if $sandbox { [{name: "BILLING_SANDBOX_TENANTS", value: $sandbox_tenants}] } else { [] }))
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
-	let yaml = (manifests --domain $domain --sources (sources) --settings $settings --secrets ($keys | get var) --namespace $namespace --name $service)
+	let yaml = (manifests --domain $domain --sources (sources) --settings $settings --secrets ($keys | get var) --namespace $namespace --name $service --airlock=$airlock)
 	# The namespace first, so the Secret has somewhere to go before the pod that reads it.
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# The secrets through ssh's stdin alone: never a file, never an argument.
@@ -175,6 +324,9 @@ export def main [
 		$"($secret_env)\n" | do $remote $"($kubectl) create secret generic ($service) -n ($namespace) --from-env-file=/dev/stdin --dry-run=client -o yaml | ($kubectl) apply -f -" | print
 	}
 	$yaml | do $remote $"($kubectl) apply -f -" | print
+	if $airlock {
+		do $remote $"($kubectl) rollout restart deployment/($service)-airlock -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service)-airlock -n ($namespace) --timeout=300s" | print
+	}
 	do $remote $"($kubectl) rollout restart deployment/($service) -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service) -n ($namespace) --timeout=120s" | print
 	# Through the gateway as the tunnel reaches it, by host: the broker answers, signing with the key
 	# the domain's current broker publishes.

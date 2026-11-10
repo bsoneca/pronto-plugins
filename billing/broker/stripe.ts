@@ -35,7 +35,50 @@ export type Stripe = <T = Record<string, unknown>>(
   idempotencyKey?: string,
 ) => Promise<T>;
 
-export function stripe(p: { key: string; api?: string; fetcher?: typeof fetch }): Stripe {
+/** A key the airlock's door takes (A-Z a-z 0-9 . _ : -, at most 200): the broker's own key hashed, so
+ * two keys stay two, and a call with none gets one of its own, so every call through the door is in
+ * its ledger once. */
+async function doorKey(idempotencyKey: string | undefined): Promise<string> {
+  if (idempotencyKey === undefined) return `call-${crypto.randomUUID()}`;
+  return `key-${hex(await crypto.subtle.digest("SHA-256", enc.encode(idempotencyKey)))}`;
+}
+
+/** How often a call the door could not answer (502: Stripe answered 5xx, or nothing) is made again,
+ * with the same key, which Stripe's idempotency makes safe. */
+const DOOR_TRIES = 3;
+
+/** Stripe through the airlock's door (PRONTO-135): the airlock holds the key and adds it, records
+ * every call in its ledger under its idempotency key, and answers Stripe's status and body. `door`
+ * is the door's URL, `http://billing-airlock:9998/door/stripe`. */
+function throughDoor(door: string, fetcher: typeof fetch): Stripe {
+  return async (method, path, params = {}, idempotencyKey) => {
+    const v2 = path.startsWith("/v2/");
+    const query = form(params);
+    const key = await doorKey(idempotencyKey);
+    const request = {
+      key,
+      method,
+      path: method === "GET" && `${query}` !== "" ? `${path}?${query}` : path,
+      ...(method === "POST" ? (v2 ? { body: params, contentType: "application/json" } : { body: `${query}`, contentType: "application/x-www-form-urlencoded" }) : {}),
+      headers: { "Stripe-Version": v2 ? STRIPE_V2_VERSION : STRIPE_VERSION },
+    };
+    for (let i = 1;; i++) {
+      const res = await fetcher(door, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request) });
+      const answer = await res.json();
+      if (res.status === 502 && i < DOOR_TRIES) {
+        await new Promise((r) => setTimeout(r, 250 * 2 ** i));
+        continue;
+      }
+      if (res.status !== 200) throw new StripeError(res.status, "airlock", `airlock door: ${res.status} ${answer?.error ?? ""}`.trim());
+      const { status, body } = answer as { status: number; body: Record<string, unknown> & { error?: { code?: string; type?: string; message?: string } } };
+      if (status >= 300) throw new StripeError(status, body?.error?.code ?? body?.error?.type ?? "error", body?.error?.message ?? `stripe ${status}`);
+      return body as never;
+    }
+  };
+}
+
+export function stripe(p: { key: string; api?: string; fetcher?: typeof fetch } | { door: string; fetcher?: typeof fetch }): Stripe {
+  if ("door" in p) return throughDoor(p.door, p.fetcher ?? fetch);
   const api = (p.api ?? "https://api.stripe.com").replace(/\/$/, "");
   const fetcher = p.fetcher ?? fetch;
   return async (method, path, params = {}, idempotencyKey) => {

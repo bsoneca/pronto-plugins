@@ -41,4 +41,30 @@ assert equal ((do $kind Gateway).spec.listeners | first).hostname "billing.examp
 let egress = (do $kind NetworkPolicy).spec.egress
 assert equal ($egress | get ports | flatten | get port | uniq | sort) [53 443]
 assert equal (($egress | where to? != null | first).to | first).ipBlock.except ["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"]
+
+# --airlock (PRONTO-135): Stripe through the airlock's door beside the broker. The broker names no
+# Stripe key and reaches the door; the airlock holds the key, reached by the broker alone.
+let sandboxed = ($secrets ++ [STRIPE_SANDBOX_SECRET_KEY STRIPE_SANDBOX_WEBHOOK_SECRET])
+let locked = (metal manifests --domain billing.example.com --sources (metal sources) --settings [{name: "BILLING_FEE_PERCENT", value: "0"} {name: "BILLING_SANDBOX_TENANTS", value: "^https://pr-"}] --secrets $sandboxed --airlock | split row "---\n" | each { from yaml })
+let at = {|k, n| $locked | where kind == $k and metadata.name == $n | first }
+assert equal ($locked | get kind) [Namespace ConfigMap Deployment Service Gateway HTTPRoute NetworkPolicy ConfigMap ConfigMap PersistentVolumeClaim Deployment Service NetworkPolicy]
+let broker = ((do $at Deployment billing-broker).spec.template.spec.containers | first)
+assert equal ($broker.env | where name =~ "^STRIPE_(SANDBOX_)?SECRET_KEY$" | length) 0 "the broker holds no Stripe key"
+assert equal ($broker.env | where name == STRIPE_DOOR | first).value "http://billing-broker-airlock:9998"
+assert equal ($broker.env | where name == STRIPE_WEBHOOK_SECRET | length) 1 "a webhook is the broker's to check"
+let lock = (do $at Deployment billing-broker-airlock).spec.template.spec
+let air = ($lock.containers | where name == airlock | first)
+assert equal ($air.env | where valueFrom? != null | get name) [STRIPE_SECRET_KEY STRIPE_SANDBOX_SECRET_KEY]
+assert equal ($air.env | where name == STRIPE_SECRET_KEY | first).valueFrom.secretKeyRef {name: "billing-broker", key: STRIPE_SECRET_KEY}
+let manifest = ((do $at ConfigMap billing-broker-airlock-effects).data."effects.json" | from json)
+assert equal ($manifest.doors | columns) [stripe stripe-sandbox]
+assert equal $manifest.doors.stripe {idempotent: true, credential: {header: Authorization, scheme: Bearer, secret: STRIPE_SECRET_KEY}, headers: [Stripe-Version], callers: [billing-broker]}
+let dapr = (do $at ConfigMap billing-broker-airlock-dapr).data
+assert equal ($dapr."stripe.yaml" | from yaml).spec.baseUrl "https://api.stripe.com"
+assert (($dapr."wall.yaml" | from yaml).spec.metadata.0.value | str contains "invoke/(stripe|stripe-sandbox)/method/")
+# The door from the broker alone; the broker's own way to it.
+let lockpol = (do $at NetworkPolicy billing-broker-airlock).spec
+assert equal ($lockpol.ingress | first).from [{podSelector: {matchLabels: {"app.kubernetes.io/name": billing-broker, "app.kubernetes.io/part-of": pronto-billing}}}]
+assert equal (($lockpol.ingress | first).ports | first).port 9998
+assert equal ((do $at NetworkPolicy billing-broker).spec.egress | where to? != null | get to | flatten | where podSelector? != null | length) 1
 print "metal_test: ok"

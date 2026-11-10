@@ -653,18 +653,24 @@ if (import.meta.main) {
   }
   const settings = { issuer, secret, signingKey: env("BILLING_SIGNING_KEY"), feePercent: Number(env("BILLING_FEE_PERCENT") ?? 0) };
   const key = env("STRIPE_SECRET_KEY");
-  if (key) {
+  // Off by default: set (by metal.nu --airlock), every Stripe call goes through the airlock's door at
+  // this address, which holds the keys, and the broker holds none (PRONTO-135).
+  const door = env("STRIPE_DOOR")?.replace(/\/$/, "");
+  if (door && key) throw new Error("STRIPE_DOOR and STRIPE_SECRET_KEY: through the door, the airlock holds the key and the broker none");
+  if (key || door) {
     const webhookSecret = env("STRIPE_WEBHOOK_SECRET");
     if (!webhookSecret) throw new Error("STRIPE_WEBHOOK_SECRET is required with STRIPE_SECRET_KEY: bin/pronto-billing-broker webhook");
-    const live = await broker({ ...settings, stripe: stripe({ key }), webhookSecret });
+    const live = await broker({ ...settings, stripe: door ? stripe({ door: `${door}/door/stripe` }) : stripe({ key: key! }), webhookSecret });
     // A sandbox beside the live account, for the tenants BILLING_SANDBOX_TENANTS matches: an
     // app's previews test a purchase there, with Stripe's test cards, never a live charge.
+    // Through the door, the sandbox's key is the airlock's too, behind its door stripe-sandbox.
     const sandboxKey = env("STRIPE_SANDBOX_SECRET_KEY"), sandboxTenants = env("BILLING_SANDBOX_TENANTS");
-    if (sandboxKey) {
+    if (door && sandboxKey) throw new Error("STRIPE_DOOR and STRIPE_SANDBOX_SECRET_KEY: the airlock holds the sandbox's key too");
+    if (sandboxKey || (door && sandboxTenants)) {
       const sandboxWebhookSecret = env("STRIPE_SANDBOX_WEBHOOK_SECRET");
-      if (!sandboxWebhookSecret || !sandboxTenants) throw new Error("STRIPE_SANDBOX_SECRET_KEY needs STRIPE_SANDBOX_WEBHOOK_SECRET and BILLING_SANDBOX_TENANTS");
+      if (!sandboxWebhookSecret || !sandboxTenants) throw new Error("a sandbox (STRIPE_SANDBOX_SECRET_KEY, or BILLING_SANDBOX_TENANTS through the door) needs STRIPE_SANDBOX_WEBHOOK_SECRET and BILLING_SANDBOX_TENANTS");
       const pattern = new RegExp(sandboxTenants);
-      const sandbox = await broker({ ...settings, stripe: stripe({ key: sandboxKey }), webhookSecret: sandboxWebhookSecret });
+      const sandbox = await broker({ ...settings, stripe: door ? stripe({ door: `${door}/door/stripe-sandbox` }) : stripe({ key: sandboxKey! }), webhookSecret: sandboxWebhookSecret });
       console.warn(`billing: tenants matching ${sandboxTenants} sell through the sandbox`);
       Deno.serve({ port }, twoModes({ live, sandbox, sandboxed: (t) => pattern.test(t), sandboxWebhookSecret }));
     } else {
