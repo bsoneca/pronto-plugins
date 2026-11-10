@@ -52,6 +52,12 @@ import (
 	// its NoData would mail the operator at once and stay open. Its SLO still
 	// burns on the runs it does get.
 	quiet: *"1h" | false | =~"^[1-9][0-9]*(m|h|d)$"
+	// Whether a moment that arrives with no open run of this journey is counted
+	// as an `unstarted` run. `false` is for a journey whose later moment is one
+	// readers make all day outside it (a game's move, which a lobby or a room
+	// link only sometimes leads to): each such moment is not a run of this
+	// journey at all, so its row counts the runs readers began, not every move.
+	unstarted: *true | false
 }
 
 // The burn-rate pairs of the SRE workbook, as fractions of the budget spent
@@ -392,7 +398,7 @@ _journeysHours: {
 						"if is_integer(.ms) || is_float(.ms) { base.seconds = to_float!(.ms) / 1000.0 }",
 						"out = []"],
 					[for k in _mark {
-						"if m == \"\(k.moment)\" { out = push(out, merge(base, { \"journey\": \"\(k.journey)\", \"step\": \(k.step), \"started\": \(k.step == 0), \"closed\": bad || (\(k.last) && .outcome == \"ok\") })) }"
+						"if m == \"\(k.moment)\" { out = push(out, merge(base, { \"journey\": \"\(k.journey)\", \"step\": \(k.step), \"started\": \(k.step == 0), \"unstarted\": \(J.spec[k.journey].unstarted), \"closed\": bad || (\(k.last) && .outcome == \"ok\") })) }"
 					}],
 					["if length(out) == 0 { abort }", ". = out"],
 				]), "\n")
@@ -409,7 +415,7 @@ _journeysHours: {
 					group_by: ["session"]
 					ends_when: ".closed == true"
 					expire_after_ms: J._idleMs[n]
-					merge_strategies: {journey: "retain", closed: "retain", bad: "retain", outcome: "retain", step: "max", late: "discard", started: "discard"}
+					merge_strategies: {journey: "retain", closed: "retain", bad: "retain", outcome: "retain", step: "max", late: "discard", started: "discard", unstarted: "discard"}
 				}
 			}
 			ended: {
@@ -422,9 +428,11 @@ _journeysHours: {
 				// after the run closed, or a later batch overtaking an earlier one —
 				// is `unstarted`: outside the SLI, which reads good and bad alone,
 				// but counted, so how often moments arrive out of order is a number
-				// rather than a silence.
+				// rather than a silence. A journey whose `unstarted` is false counts
+				// none: there such a run is a moment readers make outside it.
 				source: """
 					if .late == true { abort }
+					if .started != true && .unstarted == false { abort }
 					.run = if .started != true { "unstarted" } else if .closed != true { "abandoned" } else if .bad == true { "bad" } else { "good" }
 					"""
 			}
@@ -505,7 +513,7 @@ _journeysHours: {
 			// 1.0, and a "1s" target would export its boundary twice.
 			let slo = [for x in J.buckets {strconv.ParseFloat(x, 64)}]
 			buckets: list.Sort(list.Concat([
-				[for b in [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0] if !list.Contains(slo, b) {b}],
+				[for b in [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0] if !list.Contains(slo, b) {b}],
 				slo,
 			]), list.Ascending)
 		}
@@ -530,7 +538,7 @@ _journeysHours: {
 			inputs: [{insert_at: "moments", type: "log", log_fields: _event & {screen: p[0], gesture: p[1]}}]
 			outputs: [{
 				extract_from: "moments"
-				conditions: [{type: "vrl", source: ".journey == \"\(k.journey)\" && .step == \(k.step) && .started == \(k.step == 0) && .closed == \(k.last) && .seconds == 0.04"}]
+				conditions: [{type: "vrl", source: ".journey == \"\(k.journey)\" && .step == \(k.step) && .started == \(k.step == 0) && .unstarted == \(J.spec[k.journey].unstarted) && .closed == \(k.last) && .seconds == 0.04"}]
 			}]
 		}],
 		[for c in [
@@ -588,6 +596,14 @@ _journeysHours: {
 			name: "a run a late refusal opened is no run"
 			inputs: [{insert_at: "ended", type: "log", log_fields: {journey: "j", late: true, started: false, closed: true, bad: true}}]
 			no_outputs_from: ["ended"]
+		}, {
+			name: "a run begun past its first moment is no run of a journey that counts no unstarted"
+			inputs: [{insert_at: "ended", type: "log", log_fields: {journey: "j", late: false, started: false, unstarted: false, closed: true, bad: false}}]
+			no_outputs_from: ["ended"]
+		}, {
+			name: "a run from its first moment is a run of a journey that counts no unstarted"
+			inputs: [{insert_at: "ended", type: "log", log_fields: {journey: "j", late: false, started: true, unstarted: false, closed: true, bad: false}}]
+			outputs: [{extract_from: "ended", conditions: [{type: "vrl", source: ".run == \"good\""}]}]
 		}, {
 			name: "a gesture that is no moment of any journey is dropped"
 			inputs: [{insert_at: "moments", type: "log", log_fields: _event & {screen: "nowhere", gesture: "nothing"}}]

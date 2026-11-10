@@ -54,7 +54,15 @@ seriesKept: _j.collector.sinks.metrics.flush_period_secs & 2419200
 
 // The collector: each moment marks its journey, step and whether it closes the
 // run; each journey reduces its own runs, abandoned after its idle.
-_moments: _j.collector.transforms.moments.source
+_k: #Journeys & {
+	app:      "shop"
+	gestures: {cart: ["view"], todo: ["create-todo"]}
+	spec: {
+		first: {owner: "growth", moments: ["todo.create-todo"], slo: availability: 99}
+		invited: {owner: "growth", moments: ["cart.view", "todo.create-todo"], slo: availability: 99, unstarted: false}
+	}
+}
+_moments: _k.collector.transforms.moments.source
 idleDefault: _j.collector.transforms["reduce-checkout"].expire_after_ms & 1800000
 idleHours: _j.collector.transforms["reduce-first"].expire_after_ms & 7200000
 invalidMovesNothing: _j.collector.transforms["runs-checkout"].condition & ".journey == \"checkout\" && .outcome != \"invalid\""
@@ -171,3 +179,21 @@ errorsOnlyErrors: _j.collector.transforms.errors_in.condition & ".type == \"erro
 // The reporter sends the name, a trimmed message, the top frame and the screen; a page reports a few, once each.
 reporterSendsError: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "const event = { type: \"error\", kind, name: nameOf(thrown), message: messageOf(thrown) || String(fallback ?? \"\").slice(0, ERROR_TEXT), frame: frameOf(thrown), screen: current };") & true
 reporterCapsErrors: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "if (reported.has(key) || reported.size >= ERRORS_PER_PAGE) return;") & true
+
+// A journey may count no unstarted runs: each moment says which, and the run
+// it reduces to is dropped when it began past the first moment.
+_k: #Journeys & {
+	app:      "shop"
+	gestures: {cart: ["view"], todo: ["create-todo"]}
+	spec: {
+		first: {owner: "growth", moments: ["todo.create-todo"], slo: availability: 99}
+		invited: {owner: "growth", moments: ["cart.view", "todo.create-todo"], slo: availability: 99, unstarted: false}
+	}
+}
+_moments: _k.collector.transforms.moments.source
+unstartedCounted: strings.Contains(_moments, "\"journey\": \"first\", \"step\": 0, \"started\": true, \"unstarted\": true,") & true
+unstartedDropped: strings.Contains(_moments, "\"journey\": \"invited\", \"step\": 1, \"started\": false, \"unstarted\": false,") & true
+unstartedKept: _k.collector.transforms["reduce-invited"].merge_strategies.unstarted & "discard"
+unstartedAborts: strings.Contains(_k.collector.transforms.ended.source, "if .started != true && .unstarted == false { abort }") & true
+// A moment's tens of milliseconds read as a number: finer buckets below 50 ms.
+finerBuckets: _j.collector.sinks.metrics.buckets[0:4] & [0.005, 0.01, 0.025, 0.05]
