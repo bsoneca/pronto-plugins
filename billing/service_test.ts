@@ -63,10 +63,11 @@ Deno.test("in a release, the flag through the app's own door", async () => {
 // The free trial: what the service answers and asks of the database and the broker, with the
 // flag, the account's status and the broker as each test sets them.
 const ANA_ID = "00000000-0000-4000-8000-00000000000a";
-function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>; offer?: () => Response; checkout?: () => Response; document?: unknown; consent?: unknown } = {}) {
+function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>; offer?: () => Response; checkout?: () => Response; document?: unknown; consent?: unknown; door?: () => Response } = {}) {
   const calls: { fn: string; args: Record<string, unknown> }[] = [];
   const broker: { path: string; body: Record<string, unknown> }[] = [];
   const flagBodies: unknown[] = [];
+  const doorAsks: { auth: string | null; body: unknown }[] = [];
   const status = { state: null, plan: null, amount: null, currency: null, charges_at: null, holds: false, ...o.status };
   const fetcher = ((input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
@@ -84,6 +85,10 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
       flagBodies.push(body);
       return Promise.resolve(o.flag ? o.flag() : Response.json({ value: true }));
     }
+    if (url === "http://flagd:8693/ofrep/v1/evaluate/flags/stripe_door") {
+      doorAsks.push({ auth: new Headers(init?.headers).get("authorization"), body });
+      return Promise.resolve(o.door ? o.door() : Response.json({ value: true }));
+    }
     if (url.startsWith("https://b.example/trial/")) {
       broker.push({ path: url.slice("https://b.example".length), body });
       if (url.endsWith("/offer")) return Promise.resolve(o.offer ? o.offer() : Response.json({ eligible: true, offers: [{ plan: "analysis", amount: 1990 }] }));
@@ -98,7 +103,7 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
   });
   const ask = (svc: ReturnType<typeof make>, path: string, body: unknown = {}) =>
     svc(new Request(`https://a.example${path}`, { method: "POST", headers: { authorization: "Bearer reader", "content-type": "application/json" }, body: JSON.stringify(body) }));
-  return { calls, broker, flagBodies, make, ask };
+  return { calls, broker, flagBodies, doorAsks, make, ask };
 }
 const fns = (calls: { fn: string }[]) => calls.map((c) => c.fn);
 const CONSENT = { plan: "analysis", amount: 1990, currency: "brl", charges_at: "2027-02-05T12:00:00Z", terms: "Free until Feb 5, then R$ 19,90 a month.", consent: true, locale: "pt-BR", return: "/?premium=trial" };
@@ -270,4 +275,23 @@ Deno.test("a trial state the database would not take fails the push, so the brok
   const svc = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), fetcher });
   const res = await svc(new Request("https://a.example/billing/events", { method: "POST", body: token }));
   eq(res.status, 502, "not taken");
+});
+
+Deno.test("the door flag is read with the reader's own session and told to the broker; a flag that does not answer fails the call", async () => {
+  const on = trialStage();
+  const res = await on.ask(on.make({ doorFlag: "stripe_door" }), "/billing/trial");
+  eq(res.status, 200, "on");
+  await res.body?.cancel();
+  eq(on.doorAsks, [{ auth: "Bearer reader", body: { context: { targetingKey: ANA_ID } } }], "asked as the reader, for the reader");
+  eq(on.broker.map((b) => b.body.door), [true], "the broker is told");
+  const off = trialStage({ door: () => Response.json({ value: false }) });
+  await (await off.ask(off.make({ doorFlag: "stripe_door" }), "/billing/trial")).body?.cancel();
+  eq(off.broker.map((b) => b.body.door), [false], "off is told too");
+  const none = trialStage();
+  await (await none.ask(none.make(), "/billing/trial")).body?.cancel();
+  eq([none.doorAsks.length, "door" in none.broker[0].body], [0, false], "no door flag: nothing asked, nothing told");
+  const down = trialStage({ door: () => new Response("", { status: 503 }) });
+  const failed = await down.ask(down.make({ doorFlag: "stripe_door" }), "/billing/trial");
+  eq([failed.ok, down.broker.length], [false, 0], "a flag that does not answer sends nothing to the broker");
+  await failed.body?.cancel();
 });
