@@ -733,3 +733,17 @@ Deno.test("a tenant that fails its consent callback is a generic 502 to the call
   const res = await s.post("/trial/offer", { tenant: A, account: ANA, ticket: "t".repeat(32) });
   assertEquals([res.status, await res.json()], [502, { error: "the tenant is unavailable" }]);
 });
+
+Deno.test("a probe reads the account at Stripe and writes nothing", async () => {
+  const { fake, post, prove, payouts, sent } = await setup();
+  await prove(A);
+  await payouts(A);
+  const before = sent.length, customers = fake.held.customers.size;
+  const res = await post("/probe", { tenant: A, account: ANA });
+  assertEquals([res.status, await res.json()], [200, { ok: true }]);
+  const asked = sent.slice(before);
+  assertEquals(asked.map((s) => s.method).every((m) => m === "GET"), true, "only reads");
+  assertEquals(asked.some((s) => s.path === "/v1/customers/search"), true, "the account's customers read");
+  assertEquals(fake.held.customers.size, customers, "no customer made");
+  assertEquals((await post("/probe", { tenant: A })).status, 400, "an account is named");
+});
