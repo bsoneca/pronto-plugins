@@ -89,7 +89,7 @@ what Cloud Run's kept still decrypts and signs. Copy the data, then point the tw
 bin/pronto-analytics metal --ssh bruno@13.140.186.223 --project brawl-chess \
   --grafana-domain metrics.bonkchess.com --umami-domain umami.bonkchess.com \
   --users-file <grafanaUsers as JSON> --titles '{"bonk-chess": "Bonk Chess"}' \
-  --dashboards [bonk-chess/business=<pronto>/apps/brawl-chess/observability/analytics.business.dashboard.json]
+  --dashboards bonk-chess/business=<pronto>/apps/brawl-chess/observability/analytics.business.dashboard.json,…
 ```
 
 ## Tests
