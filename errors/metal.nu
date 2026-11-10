@@ -1,6 +1,7 @@
 # The operator's error tracking on a cluster the operator runs (pronto's envs.Metal: k3s on a node
 # reached over SSH, its traffic arriving through the node's Cloudflare Tunnel to Envoy Gateway):
-#   bin/pronto-errors metal --ssh bruno@node --domain errors.example.com --projects bonk-chess,…
+#   bin/pronto-errors metal <app-dir>                  the node, domain and project the app's errors_spec.cue names (its `server`)
+#   bin/pronto-errors metal --ssh user@node --kubeconfig K --domain errors.example.com --projects app,…
 #
 # GlitchTip (AGPL, the Sentry protocol): what a page throws is grouped into issues, counted per
 # release and searchable, read at --domain. One process serves the web, ingests and runs its tasks,
@@ -193,13 +194,21 @@ for name in json.loads\('($names)'\):
 }
 
 export def main [
-	--ssh: string                  # The node, as an app's envs.Metal names it: bruno@13.140.186.223
-	--kubeconfig: string = "$HOME/.cache/contabo2.kubeconfig" # On the node
+	--ssh: string                  # The node, as an app's envs.Metal names it: user@203.0.113.7
+	--kubeconfig: string           # The cluster's kubeconfig on the node
 	--domain: string               # GlitchTip's console: errors.example.com
-	--projects: string = ""       # Each app's project, comma-separated: bonk-chess,…
+	--projects: string = ""       # Each app's project, comma-separated: my-app,…
 	--namespace: string = "errors"
+	--spec: string = ""            # An app's errors.metal, as JSON (bin/pronto-errors metal <app-dir>): the values above
 ] {
-	if ([$ssh $domain] | any { is-empty }) { error make {msg: "--ssh and --domain are required"} }
+	let s = if ($spec | is-empty) { {} } else { open --raw $spec | from json }
+	# A flag given by hand wins over the app's spec.
+	let ssh = $ssh | default $s.ssh?
+	let kubeconfig = $kubeconfig | default $s.kubeconfig?
+	let domain = $domain | default $s.domain?
+	let namespace = $s.namespace? | default $namespace
+	let projects = if ($projects | is-not-empty) or ($s.projects? | is-empty) { $projects } else { $s.projects | str join "," }
+	if ([$ssh $kubeconfig $domain] | any { is-empty }) { error make {msg: "--ssh, --kubeconfig and --domain are required (or name an app whose errors_spec.cue has a server)"} }
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
 	manifests --domain $domain --namespace $namespace | do $remote $"($kubectl) apply --server-side --force-conflicts -f -" | print
