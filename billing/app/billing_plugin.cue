@@ -330,6 +330,9 @@ if _billing.brokerInternal != _|_ {_billingBrokerInternal: _billing.brokerIntern
 // address its readers are given follows it; one the spec names is spelled as it is.
 _billingBrokerEnv: [if _billingLocal {["http://localhost:", {peer: "billing-broker", port: "http", part: "port"}]}, _billingBroker][0]
 _billingBrokerInternalEnv: [if _billing.brokerInternal != _|_ {_billingBrokerInternal}, _billingBrokerEnv][0]
+// The same for the flagd the grants are read from, when the spec names the app's own (flagd:<port>, the
+// container's name for it): on a launch it is the peer's address, and a container reads the same name.
+_billingFlagsPeer: _billingFlags =~ "^http://flagd:[0-9]+$"
 
 cluster: surface: targets: billing: {
 	srcs: globs: ["billing/*.ts", "billing/broker/*.ts"]
@@ -345,6 +348,7 @@ cluster: surface: targets: billing: {
 			CRUD_URL:                {peer: "crud", port: "http", prefix: "http://"}
 			BILLING_BROKER:          _billingBrokerEnv
 			BILLING_BROKER_INTERNAL: _billingBrokerInternalEnv
+			if _billingFlagsPeer {BILLING_FLAGS: {peer: "flagd", port: "http", prefix: "http://"}}
 		}
 		after: {crud: "healthy", migrate: "completed"}
 		if _billingLocal {after: "billing-broker": "healthy"}
@@ -358,7 +362,7 @@ cluster: surface: targets: billing: {
 		environment: {
 			BILLING_DOCUMENT:        _billingDocument
 			BILLING_GRANTS:          _billingGrants
-			BILLING_FLAGS:           _billingFlags
+			if !_billingFlagsPeer {BILLING_FLAGS: _billingFlags}
 			SERVICE_JWT:             "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}"
 		}
 	}
