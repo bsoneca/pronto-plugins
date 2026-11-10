@@ -225,8 +225,8 @@ copy (so a fresh database, and one copied already, run nothing). A copy runs onc
 before the release serves, so every row it finds is one the table held; a machine's column is copied
 with its trigger off, as a copy is no transition. A copy into a required column must give every
 row a value (`coalesce(placed, 'epoch')`, say): one `NULL` fails the migration whole. Seed rows meet it
-too. A carry turns off only the triggers that exist when it
-runs. Postgres checks every check on a row it updates, even one `NOT VALID`, and the replay restates
+too. A carry turns off only the triggers that exist and are on when it
+runs, and puts each back in the mode it had. Postgres checks every check on a row it updates, even one `NOT VALID`, and the replay restates
 every check `NOT VALID`. So a row written before a check was restated, on any of its columns, would
 stop the move. The block lifts every check on the table around the update and puts each back as the
 database held it, `NOT VALID`:

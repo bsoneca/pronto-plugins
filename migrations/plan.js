@@ -544,7 +544,7 @@ function fillable(fill, x) {
 }
 
 // A carry, as one DO block: it runs only where a row holds a value gone, so on a fresh database
-// (and on one carried already) it does nothing, and it turns off only the triggers that exist then.
+// (and on one carried already) it does nothing, and it turns off only the triggers that are on then.
 function carrySql(c, x) {
   const carry = x.declared("carry");
   const gone = c.removed.map(lit).join(", ");
@@ -587,23 +587,28 @@ function carrySql(c, x) {
 // check on a row it updates, even one NOT VALID, and the replay restates every check NOT VALID, so a
 // row written before a check was restated, on any of its columns, would stop the move. Every check on
 // the table but `kept` is lifted around the update and put back as the database held it, NOT VALID,
-// as the replay leaves it. `triggers` are turned off around it where they exist.
+// as the replay leaves it. Of `triggers`, those that exist and are on are turned off around it, and
+// each is put back in the mode it had (origin, always, replica); one already off stays off.
 function moveSql(tag, t, where, update, triggers = [], kept = []) {
-  const exists = (trigger) => `EXISTS (SELECT FROM pg_trigger WHERE tgrelid = ${lit(t)}::regclass AND tgname = ${lit(trigger)})`;
   const each = "FOR pronto_i IN 1 .. coalesce(array_length(pronto_lifted, 1), 0) LOOP";
+  const eachOff = "FOR pronto_t IN 1 .. coalesce(array_length(pronto_off, 1), 0) LOOP";
   return [
     `DO ${tag}`,
     "DECLARE",
     "  pronto_lifted text[];",
     "  pronto_defs text[];",
+    ...(triggers.length ? ["  pronto_off text[];", "  pronto_modes text[];"] : []),
     "BEGIN",
     `  IF EXISTS (SELECT FROM ${t} WHERE ${where}) THEN`,
-    ...triggers.map((trigger) => `    IF ${exists(trigger)} THEN ALTER TABLE ${t} DISABLE TRIGGER ${ident(trigger)}; END IF;`),
+    ...(triggers.length ? [
+      `    SELECT array_agg(tgname::text ORDER BY tgname), array_agg(tgenabled::text ORDER BY tgname) INTO pronto_off, pronto_modes FROM pg_trigger WHERE tgrelid = ${lit(t)}::regclass AND tgname = ANY (ARRAY[${triggers.map(lit).join(", ")}]) AND tgenabled <> 'D';`,
+      `    ${eachOff} EXECUTE ${lit(`ALTER TABLE ${t} DISABLE TRIGGER `)} || quote_ident(pronto_off[pronto_t]); END LOOP;`,
+    ] : []),
     `    SELECT array_agg(conname ORDER BY conname), array_agg(pg_get_constraintdef(oid) ORDER BY conname) INTO pronto_lifted, pronto_defs FROM pg_constraint WHERE conrelid = ${lit(t)}::regclass AND contype = 'c'${kept.length ? ` AND conname <> ALL (ARRAY[${kept.map(lit).join(", ")}])` : ""};`,
     `    ${each} EXECUTE ${lit(`ALTER TABLE ${t} DROP CONSTRAINT `)} || quote_ident(pronto_lifted[pronto_i]); END LOOP;`,
     `    ${update}`,
     `    ${each} EXECUTE ${lit(`ALTER TABLE ${t} ADD CONSTRAINT `)} || quote_ident(pronto_lifted[pronto_i]) || ' ' || pronto_defs[pronto_i] || CASE WHEN pronto_defs[pronto_i] LIKE '%NOT VALID' THEN '' ELSE ' NOT VALID' END; END LOOP;`,
-    ...triggers.map((trigger) => `    IF ${exists(trigger)} THEN ALTER TABLE ${t} ENABLE TRIGGER ${ident(trigger)}; END IF;`),
+    ...(triggers.length ? [`    ${eachOff} EXECUTE ${lit(`ALTER TABLE ${t} ENABLE `)} || CASE pronto_modes[pronto_t] WHEN 'A' THEN 'ALWAYS ' WHEN 'R' THEN 'REPLICA ' ELSE '' END || 'TRIGGER ' || quote_ident(pronto_off[pronto_t]); END LOOP;`] : []),
     "  END IF;",
     `END ${tag};`,
   ].join("\n");

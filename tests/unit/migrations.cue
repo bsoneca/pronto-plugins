@@ -31,29 +31,34 @@ _retired: Order: _order.Order & {retired: "7": {name: "legacy", type: "string", 
 _carryValues: {carry: Order: stage: values: paid: "settled"}
 _stageNarrowed: [["Order.fields.5.enum", ["new", "settled"]]]
 
-// A move's block (a carry, a backfill) on order: it runs only where a row matches, and every check on
-// the table but those kept is lifted around the update and put back as the database held it, NOT VALID.
+// A move's block (a carry, a backfill, a copy) on order: it runs only where a row matches, and every
+// check on the table but those kept is lifted around the update and put back as the database held
+// it, NOT VALID. Of `triggers`, those on are turned off around it and put back in their mode.
 _move: {
 	tag:    "$carry$" | "$fill$"
 	where:  string
 	update: string
 	kept:   *"" | string
-	off: *[] | [...string]
-	on: *[] | [...string]
-	_each: "FOR pronto_i IN 1 .. coalesce(array_length(pronto_lifted, 1), 0) LOOP"
+	triggers: *[] | [...string]
+	_each:    "FOR pronto_i IN 1 .. coalesce(array_length(pronto_lifted, 1), 0) LOOP"
+	_eachOff: "FOR pronto_t IN 1 .. coalesce(array_length(pronto_off, 1), 0) LOOP"
+	_names: strings.Join([for x in triggers {"'\(x)'"}], ", ")
 	text: strings.Join([
 		"DO \(tag)",
 		"DECLARE",
 		"  pronto_lifted text[];",
 		"  pronto_defs text[];",
+		if len(triggers) > 0 {"  pronto_off text[];"},
+		if len(triggers) > 0 {"  pronto_modes text[];"},
 		"BEGIN",
 		"  IF EXISTS (SELECT FROM \"public\".\"order\" WHERE \(where)) THEN",
-		for x in off {x},
+		if len(triggers) > 0 {"    SELECT array_agg(tgname::text ORDER BY tgname), array_agg(tgenabled::text ORDER BY tgname) INTO pronto_off, pronto_modes FROM pg_trigger WHERE tgrelid = '\"public\".\"order\"'::regclass AND tgname = ANY (ARRAY[\(_names)]) AND tgenabled <> 'D';"},
+		if len(triggers) > 0 {"    \(_eachOff) EXECUTE 'ALTER TABLE \"public\".\"order\" DISABLE TRIGGER ' || quote_ident(pronto_off[pronto_t]); END LOOP;"},
 		"    SELECT array_agg(conname ORDER BY conname), array_agg(pg_get_constraintdef(oid) ORDER BY conname) INTO pronto_lifted, pronto_defs FROM pg_constraint WHERE conrelid = '\"public\".\"order\"'::regclass AND contype = 'c'\(kept);",
 		"    \(_each) EXECUTE 'ALTER TABLE \"public\".\"order\" DROP CONSTRAINT ' || quote_ident(pronto_lifted[pronto_i]); END LOOP;",
 		"    \(update)",
 		"    \(_each) EXECUTE 'ALTER TABLE \"public\".\"order\" ADD CONSTRAINT ' || quote_ident(pronto_lifted[pronto_i]) || ' ' || pronto_defs[pronto_i] || CASE WHEN pronto_defs[pronto_i] LIKE '%NOT VALID' THEN '' ELSE ' NOT VALID' END; END LOOP;",
-		for x in on {x},
+		if len(triggers) > 0 {"    \(_eachOff) EXECUTE 'ALTER TABLE \"public\".\"order\" ENABLE ' || CASE pronto_modes[pronto_t] WHEN 'A' THEN 'ALWAYS ' WHEN 'R' THEN 'REPLICA ' ELSE '' END || 'TRIGGER ' || quote_ident(pronto_off[pronto_t]); END LOOP;"},
 		"  END IF;",
 		"END \(tag);",
 	], "\n")
@@ -150,7 +155,6 @@ _tables: #"""
 _sql: {machines: _machines, tables: _tables}
 
 _t:   #""public"."order""#
-_trg: "IF EXISTS (SELECT FROM pg_trigger WHERE tgrelid = '\(_t)'::regclass AND tgname = 'trg_order_status_machine')"
 
 cases: {
 	"the proto: each field's number, name and type, what each message reserves, and nothing pronto does not emit": {suite: "migrations", steps: [
@@ -280,8 +284,7 @@ cases: {
 			where:  #""phase" IS DISTINCT FROM ("stage")"#
 			update: #"UPDATE "public"."order" SET "phase" = "stage" WHERE "phase" IS DISTINCT FROM ("stage");"#
 			kept:   " AND conname <> ALL (ARRAY['order_phase_check'])"
-			off: ["    IF EXISTS (SELECT FROM pg_trigger WHERE tgrelid = '\(_t)'::regclass AND tgname = 'trg_order_phase_machine') THEN ALTER TABLE \(_t) DISABLE TRIGGER \"trg_order_phase_machine\"; END IF;"]
-			on: ["    IF EXISTS (SELECT FROM pg_trigger WHERE tgrelid = '\(_t)'::regclass AND tgname = 'trg_order_phase_machine') THEN ALTER TABLE \(_t) ENABLE TRIGGER \"trg_order_phase_machine\"; END IF;"]
+			triggers: ["trg_order_phase_machine"]
 		}).text], why: "a copy is not a transition: a machine's column is copied with its trigger off"
 		},
 		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "remark", type: "string", proto: "string", required: false}]], {backfill: Order: remark: "$fill$x$fill$"}], holds: {ops: [], refused: [{at: "Order.remark", kind: "backfill", why: "the backfill holds $fill$, its block's own quote"}]}},
@@ -342,8 +345,7 @@ cases: {
 			tag:    "$carry$"
 			where:  #""stage" IN ('paid')"#
 			update: #"UPDATE "public"."order" SET "stage" = 'settled', "status" = 'open' WHERE "stage" IN ('paid');"#
-			off: ["    \(_trg) THEN ALTER TABLE \(_t) DISABLE TRIGGER \"trg_order_status_machine\"; END IF;"]
-			on: ["    \(_trg) THEN ALTER TABLE \(_t) ENABLE TRIGGER \"trg_order_status_machine\"; END IF;"]
+			triggers: ["trg_order_status_machine"]
 		}).text], why: "set also moves status, a machine's column, with its trigger off where it exists"
 		},
 		{call: "mig.plan", args: [_order, [["Order.fields.2.enum", ["open", "closed"]]], {carry: Order: status: values: draft: "open"}], holds: {ops: [{at: "Order.status"}], refused: []}, why: "a machine's own column needs no trigger off: its chart lets a state it does not know move"},
