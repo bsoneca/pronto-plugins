@@ -146,6 +146,8 @@ export default function mount() {
 	Promise.all([flagOn(), releaseOf()]).then(([on, id]) => {
 		release = id;
 		settle(on ? "on" : "off");
+		// Whether it reports is the page's to show: a check waits for it before it throws.
+		document.documentElement.dataset.errors = on ? "on" : "off";
 	});
 	return nothing;
 }

@@ -59,3 +59,6 @@ standinPeer:       strings.Contains(_h.files["errors_hatch.cue"].text, "PRONTO_U
 writeBeforeWriter: strings.Contains(_h.files["pronto/errors.cue"].text, "\"priority\":-1") & true
 routeAfterWriter:  strings.Contains(_h.files["pronto/errors.cue"].text, "\"priority\":3") & true
 routeFromExports:  strings.Contains(_h.files["pronto/errors.cue"].text, "exports of errors") & true
+
+// Once it knows whether it reports, it says so on the page (<html data-errors="on|off">), which a check waits for.
+reporterMarks: strings.Contains(_reporter, "document.documentElement.dataset.errors = on ? \"on\" : \"off\";") & true
