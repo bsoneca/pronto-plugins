@@ -36,9 +36,17 @@ export def route [prefix: string, upstream: string] {
 		"        header_up -Forwarded"
 		"        header_up -Cf-Connecting-Ip"
 	]
+	# Only a page's report goes on: a POST to a project's envelope. Nothing else of GlitchTip (its API, its
+	# console) is ever reachable through the app's origin. The stand-in's own read of what it kept
+	# (GET /e/api/events, the scenarios') answers on a host launch alone.
+	let local = $"      reverse_proxy {$PRONTO_UPSTREAM_ERRORS:errors:8700} {"
 	let route = [
 		$begin
-		$"  handle ($prefix)/api/* {"
+		$"  @errors_ingest {"
+		"    method POST"
+		$"    path_regexp ^($prefix)/api/[0-9]+/envelope/$"
+		"  }"
+		"  handle @errors_ingest {"
 		"    request_body {"
 		"      max_size 64KB"
 		"    }"
@@ -52,6 +60,17 @@ export def route [prefix: string, upstream: string] {
 		"        header_up Host {upstream_hostport}"
 		...$dropped
 		"      }"
+		"    }"
+		"  }"
+		$"  @errors_standin {"
+		"    method GET"
+		$"    path ($prefix)/api/events"
+		"    host localhost 127.0.0.1"
+		"  }"
+		"  handle @errors_standin {"
+		$"    uri strip_prefix ($prefix)"
+		$local
+		...$dropped
 		"    }"
 		"  }"
 		$end

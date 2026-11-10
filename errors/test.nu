@@ -32,13 +32,14 @@ def main [] {
 	errors route /e https://errors.example.com
 	check "a second patch leaves the door untouched" ((ls docker/Caddyfile | get modified.0) == $stamp)
 	check "a second patch changes nothing" ((open --raw docker/Caddyfile) == $caddy)
-	check "the reports' address is the only route" (($caddy | str contains "handle /e/api/* {") and (($caddy | split row "handle /e/" | length) == 2))
+	check "only a POST to a project's envelope goes on" (($caddy | str contains "    method POST\n    path_regexp ^/e/api/[0-9]+/envelope/$\n") and not ($caddy | str contains "handle /e/api/*"))
+	check "the stand-in's read is a host launch's alone" ($caddy | str contains "    method GET\n    path /e/api/events\n    host localhost 127.0.0.1\n")
 	check "the door caps a report's size" ($caddy | str contains "    request_body {\n      max_size 64KB\n    }")
 	check "the prefix is stripped" ($caddy | str contains "    uri strip_prefix /e\n")
 	check "a request for localhost reaches the stand-in the host door rewrites" (($caddy | str contains "@local host localhost 127.0.0.1") and ($caddy | str contains "reverse_proxy @local {$PRONTO_UPSTREAM_ERRORS:errors:8700}"))
 	check "any other request reaches GlitchTip's address" ($caddy | str contains "      reverse_proxy https://errors.example.com {")
 	check "the proxy sends the upstream's own Host" ($caddy | str contains "header_up Host {upstream_hostport}")
-	let upstreams = 2
+	let upstreams = 3
 	for header in ["Cookie" "Authorization" "Referer" "X-Forwarded-For"] {
 		check $"neither upstream is sent ($header)" (($caddy | split row $"header_up -($header)" | length) == ($upstreams + 1))
 	}
@@ -47,7 +48,7 @@ def main [] {
 
 	errors route /x https://e2.example.com
 	let moved = open --raw docker/Caddyfile
-	check "a changed address replaces the route" (($moved | str contains "handle /x/api/* {") and not ($moved | str contains "handle /e/api/* {") and not ($moved | str contains "errors.example.com"))
+	check "a changed address replaces the route" (($moved | str contains "path_regexp ^/x/api/[0-9]+/envelope/$") and not ($moved | str contains "^/e/api/") and not ($moved | str contains "errors.example.com"))
 
 	{"errors.loader.json": {project: 1, key: "921d1ab3ed184f91867663937ab0002f", prefix: "/e", flag: "error_tracking"}} | to json | errors write
 	check "the reporter's settings are its module's" ((open --raw shell/hatches/errors/config.js) | str contains 'export default {"project":1,"key":"921d1ab3ed184f91867663937ab0002f","prefix":"/e","flag":"error_tracking"};')
