@@ -16,6 +16,9 @@ const postgres = "ghcr.io/cloudnative-pg/postgresql:18.1-standard-trixie@sha256:
 const grafana_image = "grafana/grafana:11.2.0@sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f"
 const umami_image = "ghcr.io/umami-software/umami@sha256:e69d1a7932e9dab0fc523edc7be1f3a53f3c261f57856fc2167ae74a8fc022e8"
 const victoria = "http://vmsingle.observability.svc.cluster.local:8428"
+# The node's logs (pronto's services/logs/metal.nu, PRONTO-158), read through VictoriaLogs' plugin.
+const victoria_logs = "http://victoria-logs.logs.svc.cluster.local:9428"
+const victoria_logs_plugin = "victoriametrics-logs-datasource 0.33.1"
 # The addresses no public service has: what Grafana never needs to reach on 443.
 const private = ["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"]
 
@@ -74,7 +77,10 @@ export def manifests [
 	let databases = [{apiVersion: "postgresql.cnpg.io/v1", kind: "Database", metadata: (do $meta "umami"), spec: {name: "umami", owner: "umami", cluster: {name: $db}}}]
 	let datasources = {
 		apiVersion: 1
-		datasources: [{name: "VictoriaMetrics", uid: "victoriametrics", type: "prometheus", access: "proxy", url: $victoria, isDefault: true, editable: false, jsonData: {httpMethod: "POST", timeInterval: "30s"}}]
+		datasources: [
+			{name: "VictoriaMetrics", uid: "victoriametrics", type: "prometheus", access: "proxy", url: $victoria, isDefault: true, editable: false, jsonData: {httpMethod: "POST", timeInterval: "30s"}}
+			{name: "VictoriaLogs", uid: "victorialogs", type: "victoriametrics-logs-datasource", access: "proxy", url: $victoria_logs, editable: false}
+		]
 	}
 	let apps = $dashboards | get app | uniq
 	let providers = {
@@ -124,6 +130,7 @@ export def manifests [
 							[GF_ANALYTICS_REPORTING_ENABLED "false"]
 							[GF_ANALYTICS_CHECK_FOR_UPDATES "false"]
 							[GF_LOG_MODE console]
+							[GF_INSTALL_PLUGINS $victoria_logs_plugin]
 						] | each {|p| {name: $p.0, value: $p.1} }) ++ [
 							{name: "GF_DATABASE_PASSWORD", valueFrom: {secretKeyRef: {name: "grafana-db", key: "password"}}}
 							{name: "GF_SECURITY_SECRET_KEY", valueFrom: {secretKeyRef: {name: "grafana", key: "GF_SECURITY_SECRET_KEY"}}}
@@ -207,6 +214,7 @@ export def manifests [
 					$dns
 					$to_db
 					{to: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "observability"}}}], ports: [{protocol: "TCP", port: 8428}]}
+					{to: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "logs"}}}], ports: [{protocol: "TCP", port: 9428}]}
 					{to: [{ipBlock: {cidr: "0.0.0.0/0", except: $private}}], ports: [{protocol: "TCP", port: 443}]}
 				]
 			}
