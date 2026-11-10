@@ -24,6 +24,9 @@ assert equal ($docs | where kind == Password | get metadata.name | sort) [grafan
 # Grafana: the cluster's VictoriaMetrics, each dashboard under its app, and Google's sign-in for those named alone.
 let prov = (do $named ConfigMap grafana-provisioning).data
 assert equal ($prov."datasources.yaml" | from yaml).datasources.0.url "http://vmsingle.observability.svc.cluster.local:8428"
+# The node's logs (PRONTO-158): VictoriaLogs through its plugin, which Grafana installs at start.
+let vl = ($prov."datasources.yaml" | from yaml).datasources | where uid == "victorialogs" | first
+assert equal [$vl.type $vl.url] ["victoriametrics-logs-datasource" "http://victoria-logs.logs.svc.cluster.local:9428"]
 assert equal (($prov."dashboards.yaml" | from yaml).providers | select name folder) [[name folder]; [bonk-chess "Bonk Chess"] [ume Ume]]
 assert equal (do $named ConfigMap grafana-dashboards-bonk-chess-business).data."business.json" "{\"uid\": \"b\"}"
 let g = (do $named Deployment grafana).spec.template.spec
@@ -53,7 +56,7 @@ assert equal (do $named Gateway umami).spec.listeners.0.hostname umami.example.c
 let up = (do $named NetworkPolicy umami).spec.egress
 assert equal ($up | get ports | flatten | get port | uniq | sort) [53 5432]
 let gp = (do $named NetworkPolicy grafana).spec.egress
-assert equal ($gp | get ports | flatten | get port | uniq | sort) [53 443 5432 8428]
+assert equal ($gp | get ports | flatten | get port | uniq | sort) [53 443 5432 8428 9428]
 let dbp = (do $named NetworkPolicy analytics-db).spec.ingress
 assert equal $dbp.0.from.0.podSelector.matchExpressions.0.values [grafana umami]
 

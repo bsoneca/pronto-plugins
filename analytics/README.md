@@ -80,7 +80,8 @@ unless they change dashboards). Adding someone is one line there and `release@in
 `bin/pronto-analytics metal` ([`metal.nu`](metal.nu)) runs the operator's Grafana and Umami on a
 node the operator runs (pronto's envs.Metal), in namespace `analytics`, behind the node's tunnel:
 Grafana reads the cluster's VictoriaMetrics, where each app's exporter (its release's
-`analytics-exporter` service) and collectors are scraped; both keep their state in one
+`analytics-exporter` service) and collectors are scraped, and the node's logs in VictoriaLogs
+(pronto's `services/logs/metal.nu`) through the VictoriaLogs datasource plugin; both keep their state in one
 CloudNativePG cluster whose logins are generated in the namespace. Grafana's secret key, its Google
 client and Umami's app secret are read from the project's Secret Manager and piped into Secrets, so
 what Cloud Run's kept still decrypts and signs. Copy the data, then point the two names at the tunnel.
