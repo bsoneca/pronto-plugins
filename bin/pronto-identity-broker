@@ -7,7 +7,8 @@
 # Or releases it to Cloud Run, as identity/release.nu says:
 #   bin/pronto-identity-broker release --project P --domain D --google-client-id C
 # Or to a cluster the operator runs (pronto's envs.Metal), as identity/metal.nu says:
-#   bin/pronto-identity-broker metal --ssh U@H --project P --domain D --google-client-id C
+#   bin/pronto-identity-broker metal --ssh U@H --secrets F --domain D --google-client-id C
+# (F: pronto's services/identity-broker/secrets.metal.enc.yaml, SOPS; or --project P, Secret Manager)
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 cd "$here"

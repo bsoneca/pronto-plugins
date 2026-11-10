@@ -38,3 +38,17 @@ let egress = (do $kind NetworkPolicy).spec.egress
 assert equal ($egress | get ports | flatten | get port | uniq | sort) [53 443]
 assert equal (($egress | where to? != null | first).to | first).ipBlock.except ["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"]
 print "metal_test: ok"
+
+# --secrets: the SOPS file's manifests, held to the Secret the broker reads (common/sops.nu).
+use ../../common/sops.nu
+let plain = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: identity-broker\ntype: Opaque\ndata:\n  BROKER_SECRET: YQ==\n  GOOGLE_CLIENT_SECRET: Yg==\n"
+let applied = ($plain | sops secret-manifests identity-broker identity [BROKER_SECRET GOOGLE_CLIENT_SECRET] | from yaml)
+assert equal $applied.metadata {name: "identity-broker", namespace: "identity"}
+assert equal ($applied.data | columns) [BROKER_SECRET GOOGLE_CLIENT_SECRET]
+assert error { $plain | sops secret-manifests identity-broker identity [BROKER_SECRET OTHER] }
+assert error { $plain | sops secret-manifests billing-broker identity [BROKER_SECRET] }
+assert error { $"($plain)---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n" | sops secret-manifests identity-broker identity [BROKER_SECRET] }
+let two = ($"($plain)---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: other\ndata:\n  K: YQ==\n" | sops secret-manifests identity-broker identity [BROKER_SECRET] | split row "---\n" | each { from yaml })
+assert equal ($two | get metadata.namespace) [identity identity]
+assert ((sops apply-command "kubectl" identity) =~ "--server-side --force-conflicts --field-manager=pronto-sops")
+print "identity metal: --secrets"

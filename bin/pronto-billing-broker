@@ -11,7 +11,8 @@
 # Or releases it to Cloud Run, as billing/release.nu says:
 #   bin/pronto-billing-broker release --project P --domain D [--fee N] [--webhook]
 # Or to a cluster the operator runs (pronto's envs.Metal), as billing/metal.nu says:
-#   bin/pronto-billing-broker metal --ssh U@H --project P --domain D [--fee N] [--sandbox-tenants RE]
+#   bin/pronto-billing-broker metal --ssh U@H --secrets F --domain D [--fee N] [--sandbox-tenants RE]
+# (F: pronto's services/billing-broker/secrets.metal.enc.yaml, SOPS; or --project P, Secret Manager)
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 cd "$here"
