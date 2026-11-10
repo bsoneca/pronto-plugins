@@ -639,7 +639,7 @@ if (import.meta.main) {
   const secret = env("BROKER_SECRET");
   if (!issuer || !secret) throw new Error("BROKER_ISSUER and BROKER_SECRET are required");
   const port = Number(env("PORT") ?? 28463);
-  const { stripe } = await import("./stripe.ts");
+  const { stripe, switched, ofrepFlag, forAccount } = await import("./stripe.ts");
   // Once per platform account: the one endpoint Stripe sends every app's
   // subscriptions to, whose secret STRIPE_WEBHOOK_SECRET then holds.
   if (Deno.args[0] === "webhook") {
@@ -656,25 +656,32 @@ if (import.meta.main) {
   // Off by default: set (by metal.nu --airlock), every Stripe call goes through the airlock's door at
   // this address, which holds the keys, and the broker holds none (PRONTO-135).
   const door = env("STRIPE_DOOR")?.replace(/\/$/, "");
-  if (door && key) throw new Error("STRIPE_DOOR and STRIPE_SECRET_KEY: through the door, the airlock holds the key and the broker none");
+  // While it moves (PRONTO-218): the door beside the broker's own key, chosen per call by the app's flag
+  // stripe_door, read from this flagd (OFREP); the key leaves the broker once the flag is on for everyone.
+  const doorFlag = env("STRIPE_DOOR_FLAG");
+  if (doorFlag && !(door && key)) throw new Error("STRIPE_DOOR_FLAG moves the broker between its key and the door: it needs STRIPE_DOOR and STRIPE_SECRET_KEY");
+  if (door && key && !doorFlag) throw new Error("STRIPE_DOOR and STRIPE_SECRET_KEY: through the door, the airlock holds the key and the broker none");
+  const on = doorFlag ? ofrepFlag(doorFlag, "stripe_door") : null;
+  const client = (k: string | undefined, d: string) =>
+    on ? switched({ direct: stripe({ key: k! }), door: stripe({ door: d }), on }) : door ? stripe({ door: d }) : stripe({ key: k! });
   if (key || door) {
     const webhookSecret = env("STRIPE_WEBHOOK_SECRET");
     if (!webhookSecret) throw new Error("STRIPE_WEBHOOK_SECRET is required with STRIPE_SECRET_KEY: bin/pronto-billing-broker webhook");
-    const live = await broker({ ...settings, stripe: door ? stripe({ door: `${door}/door/stripe` }) : stripe({ key: key! }), webhookSecret });
+    const live = await broker({ ...settings, stripe: client(key, `${door}/door/stripe`), webhookSecret });
     // A sandbox beside the live account, for the tenants BILLING_SANDBOX_TENANTS matches: an
     // app's previews test a purchase there, with Stripe's test cards, never a live charge.
     // Through the door, the sandbox's key is the airlock's too, behind its door stripe-sandbox.
     const sandboxKey = env("STRIPE_SANDBOX_SECRET_KEY"), sandboxTenants = env("BILLING_SANDBOX_TENANTS");
-    if (door && sandboxKey) throw new Error("STRIPE_DOOR and STRIPE_SANDBOX_SECRET_KEY: the airlock holds the sandbox's key too");
+    if (door && sandboxKey && !doorFlag) throw new Error("STRIPE_DOOR and STRIPE_SANDBOX_SECRET_KEY: the airlock holds the sandbox's key too");
     if (sandboxKey || (door && sandboxTenants)) {
       const sandboxWebhookSecret = env("STRIPE_SANDBOX_WEBHOOK_SECRET");
       if (!sandboxWebhookSecret || !sandboxTenants) throw new Error("a sandbox (STRIPE_SANDBOX_SECRET_KEY, or BILLING_SANDBOX_TENANTS through the door) needs STRIPE_SANDBOX_WEBHOOK_SECRET and BILLING_SANDBOX_TENANTS");
       const pattern = new RegExp(sandboxTenants);
-      const sandbox = await broker({ ...settings, stripe: door ? stripe({ door: `${door}/door/stripe-sandbox` }) : stripe({ key: sandboxKey! }), webhookSecret: sandboxWebhookSecret });
+      const sandbox = await broker({ ...settings, stripe: client(sandboxKey, `${door}/door/stripe-sandbox`), webhookSecret: sandboxWebhookSecret });
       console.warn(`billing: tenants matching ${sandboxTenants} sell through the sandbox`);
-      Deno.serve({ port }, twoModes({ live, sandbox, sandboxed: (t) => pattern.test(t), sandboxWebhookSecret }));
+      Deno.serve({ port }, forAccount(twoModes({ live, sandbox, sandboxed: (t) => pattern.test(t), sandboxWebhookSecret })));
     } else {
-      Deno.serve({ port }, live);
+      Deno.serve({ port }, forAccount(live));
     }
   } else {
     // No Stripe key: a stand-in, on a broker only a developer's machine reaches.

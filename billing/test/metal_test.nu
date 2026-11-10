@@ -68,3 +68,15 @@ assert equal ($lockpol.ingress | first).from [{podSelector: {matchLabels: {"app.
 assert equal (($lockpol.ingress | first).ports | first).port 9998
 assert equal ((do $at NetworkPolicy billing-broker).spec.egress | where to? != null | get to | flatten | where podSelector? != null | length) 1
 print "metal_test: ok"
+
+# --door-flag (PRONTO-218): while the app's flag stripe_door moves it, the broker keeps its keys beside the
+# door, told where to read the flag; the airlock holds them as well.
+let moving = (metal manifests --domain billing.example.com --sources (metal sources) --settings [] --secrets $sandboxed --airlock --door-flag "https://app.example" | split row "---\n" | each { from yaml })
+let mb = (($moving | where kind == Deployment and metadata.name == billing-broker | first).spec.template.spec.containers | first)
+assert equal ($mb.env | where name =~ "^STRIPE_(SANDBOX_)?SECRET_KEY$" | get name) [STRIPE_SECRET_KEY STRIPE_SANDBOX_SECRET_KEY] "the broker keeps its keys while the flag moves it"
+assert equal ($mb.env | where name == STRIPE_DOOR_FLAG | first).value "https://app.example"
+assert equal ($mb.env | where name == STRIPE_DOOR | first).value "http://billing-broker-airlock:9998"
+let ma = (($moving | where kind == Deployment and metadata.name == billing-broker-airlock | first).spec.template.spec.containers | where name == airlock | first)
+assert equal ($ma.env | where valueFrom? != null | get name) [STRIPE_SECRET_KEY STRIPE_SANDBOX_SECRET_KEY]
+assert equal ($dep.spec.template.spec.containers | first | get env | where name == STRIPE_DOOR_FLAG | length) 0 "no flag without --door-flag"
+assert (try { metal manifests --domain billing.example.com --sources (metal sources) --door-flag "https://app.example"; false } catch { true }) "--door-flag needs --airlock"

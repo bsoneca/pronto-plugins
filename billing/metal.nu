@@ -1,7 +1,7 @@
 # Releases the billing broker to a cluster the operator runs (pronto's envs.Metal: k3s on a node
 # reached over SSH, its traffic arriving through the node's Cloudflare Tunnel to Envoy Gateway),
 # beside release.nu's Cloud Run, in the shape identity/metal.nu gives the identity broker:
-#   bin/pronto-billing-broker metal --ssh bruno@node --domain D --secrets F (or --project P) [--fee N] [--sandbox-tenants RE]
+#   bin/pronto-billing-broker metal --ssh bruno@node --domain D --secrets F (or --project P) [--fee N] [--sandbox-tenants RE] [--airlock [--door-flag <OFREP origin>]]
 #
 # The broker imports nothing from outside its own files, so no image is built: the pinned Deno image
 # runs shared.ts and broker/*.ts from a ConfigMap. It keeps nothing but its secrets: with --secrets,
@@ -60,14 +60,18 @@ export def manifests [
 	--namespace: string = "billing"
 	--name: string = "billing-broker"
 	--airlock # Stripe through the airlock's door: the airlock holds the Stripe keys, the broker none
+	--door-flag: string = "" # With --airlock, while it moves (PRONTO-218): the app's flagd (OFREP origin) whose stripe_door picks the door per call; the broker keeps its keys
 ]: nothing -> string {
 	let labels = {"app.kubernetes.io/name": $name, "app.kubernetes.io/part-of": "pronto-billing"}
 	let lock = $"($name)-airlock"
 	let lock_labels = {"app.kubernetes.io/name": $lock, "app.kubernetes.io/part-of": "pronto-billing"}
 	# Through the door, the broker's env names no Stripe key, and the airlock's names those it holds.
 	let held = if $airlock { $door_keys | where {|k| $k.var in $secrets } } else { [] }
-	let secrets = ($secrets | where {|v| $v not-in ($held | get var) })
-	let settings = ($settings ++ (if $airlock { [{name: "STRIPE_DOOR", value: $"http://($lock):($door_port)"}] } else { [] }))
+	if ($door_flag | is-not-empty) and not $airlock { error make {msg: "--door-flag moves the broker to the airlock's door: it needs --airlock"} }
+	# While the flag moves it, the broker keeps its keys beside the door; after, the airlock alone holds them.
+	let secrets = if ($door_flag | is-not-empty) { $secrets } else { $secrets | where {|v| $v not-in ($held | get var) } }
+	let settings = ($settings ++ (if $airlock { [{name: "STRIPE_DOOR", value: $"http://($lock):($door_port)"}] } else { [] })
+		++ (if ($door_flag | is-not-empty) { [{name: "STRIPE_DOOR_FLAG", value: $door_flag}] } else { [] }))
 	let meta = {namespace: $namespace, labels: $labels}
 	# A change to a file is a new pod: the files' digest is the template's.
 	let digest = ($files | each {|f| $sources | at $f.key } | str join "\n" | hash sha256 | str substring 0..15)
@@ -304,6 +308,7 @@ export def main [
 	--namespace: string = "billing"
 	--service: string = "billing-broker" # The secrets' names in Secret Manager are <service>-<suffix>, as release.nu stores them
 	--airlock # Stripe through the airlock's door beside the broker, which then holds no Stripe key (PRONTO-135)
+	--door-flag: string = "" # With --airlock: the app's flagd (OFREP origin, https://bonkchess.com) whose stripe_door moves each call to the door; the broker keeps its keys until a deploy without it (PRONTO-218)
 ] {
 	if ([$ssh $domain] | any { is-empty }) { error make {msg: "--ssh and --domain are both required"} }
 	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
@@ -313,7 +318,7 @@ export def main [
 	let settings = ([{name: "BILLING_FEE_PERCENT", value: ($fee | into string)}] ++ (if $sandbox { [{name: "BILLING_SANDBOX_TENANTS", value: $sandbox_tenants}] } else { [] }))
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
-	let yaml = (manifests --domain $domain --sources (sources) --settings $settings --secrets ($keys | get var) --namespace $namespace --name $service --airlock=$airlock)
+	let yaml = (manifests --domain $domain --sources (sources) --settings $settings --secrets ($keys | get var) --namespace $namespace --name $service --airlock=$airlock --door-flag $door_flag)
 	# The namespace first, so the Secret has somewhere to go before the pod that reads it.
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# The secrets through ssh's stdin alone: never a file, never an argument.
