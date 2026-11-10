@@ -23,6 +23,7 @@ const random = () => Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) 
 
 export function steps(repo: string, flow: DevFlow, now = new Date()): Step[] {
   const { cluster, plane: board } = flow;
+  if (!cluster) throw new Error(`${repo}/devflow/devflow.cue names no cluster: this repository only reports to a board set up from another, which connects it`);
   const ns = cluster.namespace;
   const kc = (...a: string[]) => ["--context", cluster.context, ...a];
   const k = (...a: string[]) => cmd("kubectl", kc(...a));

@@ -20,8 +20,11 @@ devFlow: #DevFlow
 		chart: *"1.8.6" | string
 	}
 	// Where Plane runs: a k3s node reached over SSH, its door a Cloudflare Tunnel into the node's
-	// Envoy Gateway, as pronto's release@k8s sets every node up (envs.Metal).
-	cluster: {
+	// Envoy Gateway, as pronto's release@k8s sets every node up (envs.Metal). Only the repository
+	// the board is set up from names it: another repository whose pull requests move the same
+	// board's issues (bsoneca/ume's, on bsoneca/pronto's board) names the board and its token alone,
+	// and its hooks run; `connect plane` refuses it.
+	cluster?: {
 		context!:  string
 		ssh!:      string & =~"^[a-z0-9_.-]+@[a-z0-9.-]+$"
 		namespace: *"plane" | string

@@ -21,7 +21,8 @@ async function schema(): Promise<string> {
 
 export interface DevFlow {
   plane: { host: string; workspace: string; project: { name: string; identifier: string }; chart: string };
-  cluster: { context: string; ssh: string; namespace: string; tunnel: string; apiPort: number };
+  /** Absent in a repository that only reports to a board set up from another (schema.cue). */
+  cluster?: { context: string; ssh: string; namespace: string; tunnel: string; apiPort: number };
   token: { project: string; secret: string };
   team: { engineers: number; sre: number; product: number };
   infra: string[];
