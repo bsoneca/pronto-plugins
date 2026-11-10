@@ -203,6 +203,8 @@ jobs:
         run: sayt --script tools.nu nu flags/test/armies_test.nu
       - name: The identity broker on a metal cluster
         run: sayt --script tools.nu nu identity/test/metal_test.nu
+      - name: The operator's Grafana and Umami on a metal cluster
+        run: sayt --script tools.nu nu analytics/test/metal_test.nu
       - name: The billing broker on a metal cluster
         run: sayt --script tools.nu nu billing/test/metal_test.nu
       - name: Test the ads installer
