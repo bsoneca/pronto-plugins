@@ -93,6 +93,16 @@ devFlow: #DevFlow
 	}
 	// The plane-ce chart (https://helm.plane.so) the intent installs, when it installs Plane.
 	chart: *"1.8.6" | string
+	// Who gets in, on a Plane the intent installs (cluster), written into Plane's instance
+	// configuration by `connect plane`, never in god-mode by hand: sign-up off, so only an invited
+	// person joins (an invitation's email may still sign up), and GitHub's sign-in when `github` names
+	// the repository's SOPS file holding its OAuth App (a Secret's stringData `client_id` and
+	// `client_secret`, from the repository's root). The App's callback is
+	// https://<host>/auth/github/callback/. GitHub signs a person in by their primary, verified email.
+	access: {
+		signup: *false | bool
+		github?: secrets!: string & =~"(^|/)secrets\\.[a-z0-9-]+\\.enc\\.yaml$"
+	}
 }
 
 #SecretManagerToken: {
