@@ -35,7 +35,7 @@ export const retry = (failed, head) => !!failed && !!head && head !== failed;
 // The checks a failed rehearsal's summary marks failed: its `  ✗ <check>` lines (integrate@local,
 // premium, `scenarios, pass 1: …`), not a scenario's own `✗ <name> (12s) at step`.
 export const failedRehearsal = (text) =>
-  [...new Set([...(text ?? "").matchAll(/^  ✗ ([^:\n(]+?)\s*(?::.*)?$/gm)].map((m) => m[1].trim()))];
+  [...new Set([...(text ?? "").matchAll(/^ {2}✗ ([^:\n(]+?)\s*(?::.*)?$/gm)].map((m) => m[1].trim()))];
 
 // Whether a change since a failed run concerns what its failed checks read, so the next run retries
 // without the gap: the first file that does, with why, or null, and the run waits the gap (2026-11-07:
@@ -129,6 +129,7 @@ export const holds = (owner, dir, what = "verify@local") => {
 
 // A probe's verdict: null when the answer is what it expects, else what was wrong. A probe with a
 // `location` is asked without following its redirect, and answers one to an address that starts so.
+/** @param {string | null} [location] */
 export const probe = (spec, status, body, location = null) => {
   if (status !== (spec.status ?? 200)) return `${spec.path}: ${status}, expected ${spec.status ?? 200}`;
   if (spec.location && !(location ?? "").startsWith(spec.location)) return `${spec.path}: to ${location ?? "nowhere"}, expected ${spec.location}`;
@@ -219,6 +220,36 @@ export const plist = ({ label, program, args, poll, log, env }) => {
 </dict>
 </plist>
 `;
+};
+
+// The systemd user units of the same job (~/.config/systemd/user/<label>.service and .timer), the Linux
+// scheduler's: the service runs `program` with `args` once and its output is appended to `log`, with the
+// variables in `env`; the timer starts it `poll` minutes after the last start (OnUnitActiveSec; systemd never
+// starts a service while it runs) and once a minute after boot, so a run follows a restart.
+export const systemdUnits = ({ label, program, args, poll, log, env }) => {
+  // A word of a unit file in double quotes: \ and " escaped, and % and $ doubled (specifiers, variables).
+  const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\$/g, "$$$$")}"`;
+  const service = `[Unit]
+Description=release-cron ${label}
+
+[Service]
+Type=oneshot
+ExecStart=${[program, ...args].map(q).join(" ")}
+${Object.entries(env).map(([k, v]) => `Environment=${q(`${k}=${v}`)}\n`).join("")}StandardOutput=append:${log}
+StandardError=append:${log}
+`;
+  const timer = `[Unit]
+Description=release-cron ${label}, every ${poll} min
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=${poll}min
+Unit=${label}.service
+
+[Install]
+WantedBy=timers.target
+`;
+  return { service, timer };
 };
 
 // --- Bisect: a failed run names the commit that broke it. ---
@@ -369,13 +400,33 @@ export const flakedNames = (text) => {
 // touched it (`touched`: sha -> bool); none when no merge of the list did.
 export const changedBy = (list, touched) => [...list].reverse().find((c) => touched[c.sha]) ?? null;
 
-// The dev flow's `released` hook, as the arguments of the deno run that tells the board (pronto-plugins'
-// devflow/hook.ts, from its main: this script is a copy in the app): the app's Merged issues whose pull request
-// `head` holds go Live, a flagless fix Done (devflow/flow.js doneAt).
-export const boardHook = (wt, appRel, head) => {
-  const hooks = "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/";
-  return ["run", "-A", `--reload=${hooks}`, `${hooks}hook.ts`, "released", wt, appRel.split("/").pop(), head];
-};
+// A hook of releaseCron.hooks as the command run: its own argv, then the run's worktree, the app and the commit
+// released (the dev flow's `released` hook, devflow/hook.ts, takes exactly those). The hooks of one event, in order.
+export const hookArgv = (hook, wt, app, commit) => [...hook.command, wt, app, commit];
+export const hooksOf = (hooks, on) => (hooks ?? []).filter((h) => h.on === on);
+
+// Who a finding reaches, by the app's `notify`: the log always when nobody else is (`none`); `github-comment` the pull
+// request's comment; `claude-session` that, a notes file in a session's folder and, on a Mac (`platform`, Deno.build.os),
+// a notification.
+export const channels = (notify, platform) =>
+  notify.kind === "claude-session" ? ["comment", "notes", ...(platform === "darwin" ? ["toast"] : [])]
+  : notify.kind === "github-comment" ? ["comment"]
+  : ["log"];
+
+// The releaseCron the driver reads, whole: what the schema (release_cron_plugin.cue) normalizes, and what a configuration
+// exported by an older schema lacks filled in the same way: no target is Cloud Run's, a target without a kind is a
+// command's, the rehearsal runs verify@local in a slot of `holder`, a `bisect.lead` is a claude-session notify, nobody
+// is told otherwise, no hooks, launchd. A configuration the schema normalized is returned as it is.
+export const resolve = (c) => ({
+  ...c,
+  scheduler: c.scheduler ?? { kind: "launchd" },
+  target: c.target ? { kind: "command", ...c.target } : { kind: "cloud-run" },
+  rehearsal: { command: ["./saytw", "verify@local"], slot: true, holder: c.holder ?? "verify@local", ...(c.rehearsal ?? {}) },
+  notify: c.notify ?? (c.bisect?.lead
+    ? { kind: "claude-session", lead: c.bisect.lead, notes: c.bisect.notes ?? "Library/Application Support/Claude/side-session-notes" }
+    : { kind: "none" }),
+  hooks: c.hooks ?? [],
+});
 
 // The hook reads the repository's devflow.cue with `cue` (pronto-plugins' devflow/spec.ts: $CUE, else PATH's),
 // and launchd's PATH has no mise, so every run's board step failed "Failed to spawn 'cue'" (PRONTO-77,

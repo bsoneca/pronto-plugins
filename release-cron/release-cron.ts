@@ -1,8 +1,8 @@
 // release-cron: an app released to production on a schedule, by launchd on this Mac, from main.
 // pronto-plugins' release-cron/README.md says more. Run from the app's folder, where it is written:
 //   deno run -A release-cron/release-cron.ts <app> run         one run now (what launchd runs)
-//   deno run -A release-cron/release-cron.ts <app> install     the run's worktree and the launchd job
-//   deno run -A release-cron/release-cron.ts <app> uninstall   the launchd job gone (the worktree kept)
+//   deno run -A release-cron/release-cron.ts <app> install     the run's worktree and the scheduler's job (releaseCron.scheduler: launchd, systemd or actions)
+//   deno run -A release-cron/release-cron.ts <app> uninstall   the scheduler's job gone (the worktree kept)
 //   deno run -A release-cron/release-cron.ts <app> pause|resume  runs skip while paused
 //   deno run -A release-cron/release-cron.ts <app> status      the job, the pause, the last runs
 //   deno run -A release-cron/release-cron.ts <app> report      every release measured, the newest's phases against those before
@@ -27,7 +27,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { previewProbes, boardEnv, boardHook, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal } from "./cron.js";
+import { previewProbes, boardEnv, hookArgv, hooksOf, channels, resolve, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 
 const here = new URL("./", import.meta.url).pathname;
@@ -43,6 +43,7 @@ const state = `${home}/.cache/pronto/release-cron/${app}`;
 const wt = `${state}/wt`;
 const label = `dev.pronto.release-cron.${app}`;
 const agent = `${home}/Library/LaunchAgents/${label}.plist`;
+const units = `${home}/.config/systemd/user/${label}`;
 const uid = decode(new Deno.Command("id", { args: ["-u"], stdout: "piped" }).outputSync().stdout).trim();
 Deno.mkdirSync(`${state}/runs`, { recursive: true });
 
@@ -65,7 +66,7 @@ const mise = sh("sh", ["-c", "command -v mise"]).out || `${home}/Library/Caches/
 if (verb === "pause") { Deno.writeTextFileSync(`${state}/paused`, local(Date.now()) + "\n"); console.log(`${app}: paused; runs skip until \`resume\``); Deno.exit(0); }
 if (verb === "resume") { Deno.removeSync(`${state}/paused`); console.log(`${app}: resumed`); Deno.exit(0); }
 if (verb === "status") {
-  const job = sh("launchctl", ["print", `gui/${uid}/${label}`]);
+  const job = exists(`${units}.timer`) ? sh("systemctl", ["--user", "is-enabled", `${label}.timer`]) : sh("launchctl", ["print", `gui/${uid}/${label}`]);
   console.log(`job ${label}: ${job.ok ? "installed" : "not installed"}${exists(`${state}/paused`) ? ", paused" : ""}`);
   console.log(sh("tail", ["-n", "12", `${state}/release-cron.log`]).out);
   Deno.exit(0);
@@ -73,31 +74,50 @@ if (verb === "status") {
 const jsonl = (f: string) => { try { return Deno.readTextFileSync(f).split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 if (verb === "report") { console.log(report(jsonl(`${state}/runs.jsonl`))); Deno.exit(0); }
 if (verb === "uninstall") {
-  sh("launchctl", ["bootout", `gui/${uid}/${label}`]);
-  Deno.removeSync(agent);
+  // Whichever scheduler installed it: its files say.
+  if (exists(`${units}.timer`)) {
+    sh("systemctl", ["--user", "disable", "--now", `${label}.timer`]);
+    for (const f of [`${units}.timer`, `${units}.service`]) { try { Deno.removeSync(f); } catch { /* none */ } }
+    sh("systemctl", ["--user", "daemon-reload"]);
+  } else if (exists(agent)) {
+    sh("launchctl", ["bootout", `gui/${uid}/${label}`]);
+    Deno.removeSync(agent);
+  } else throw new Error(`${label}: no launchd job or systemd timer installed (an app on actions installs nothing)`);
   console.log(`${label}: removed (the worktree ${wt} kept)`);
   Deno.exit(0);
 }
 
-// Telling a pull request's author: the PR (a comment), a notes file for a session (the author's when the PR
-// body names one and its notes folder exists, else the lead's) and a macOS notification, `gh` with the run's own
+// Telling a pull request's author, as releaseCron.notify says (cron.js channels): `none` the log alone, `github-comment` the
+// PR (a comment), `claude-session` that, a notes file for a session (the author's when the PR body names one and its notes
+// folder exists, else the lead's) and, on a Mac, a notification: `gh` with the run's own
 // login: under CD the release job's GH_TOKEN (bsoneca/pronto's cd.yml: pull-requests write), which a runner started
 // with SessionCreate needs, since it cannot reach the owner's gh login in the keychain; under launchd the owner's.
 // Bisect and the new-feature and flaked notices all use it.
-type Bisect = { lead: string; notes: string };
+type Notify = { kind: "none" } | { kind: "github-comment" } | { kind: "claude-session"; lead: string; notes: string };
 const prInfo = (slug: string, pr: number) => { try { return JSON.parse(must("gh", ["pr", "view", String(pr), "-R", slug, "--json", "body,url,title"], undefined, {}, 120)); } catch { return { body: "", url: "", title: "" }; } };
-const tellPr = (slug: string, b: Bisect, pr: number, info: { body: string }, msg: string, note: string, toast: string) => {
-  const sess = sessionOf(info.body) ?? b.lead;
-  const folder = `${home}/${b.notes}/${exists(`${home}/${b.notes}/${sess}`) ? sess : b.lead}`;
-  const told: string[] = [];
-  if (sh("gh", ["pr", "comment", String(pr), "--body", `${msg}\n\nPosted by release-cron.`, "-R", slug], undefined, {}, 120).ok) told.push(`PR #${pr} comment`);
+// A note in the lead's folder, or the session's own: the notes file's folder, the lead's when the session has none.
+const writeNote = (n: { lead: string; notes: string }, sess: string, note: string, msg: string, title = "release-cron") => {
+  const folder = `${home}/${n.notes}/${exists(`${home}/${n.notes}/${sess}`) ? sess : n.lead}`;
   try {
     Deno.mkdirSync(folder, { recursive: true });
-    Deno.writeTextFileSync(`${folder}/${note}`, `# release-cron\n\n${msg}\n`);
-    told.push(`notes of ${folder.split("/").at(-1)}`);
-  } catch { /* a folder that cannot be written is one channel less */ }
-  sh("osascript", ["-e", `display notification ${JSON.stringify(toast)} with title "release-cron"`], undefined, {}, 10);
+    Deno.writeTextFileSync(`${folder}/${note}`, `# ${title}\n\n${msg}\n`);
+    return `notes of ${folder.split("/").at(-1)}`;
+  } catch { return ""; /* a folder that cannot be written is one channel less */ }
+};
+const tellPr = (slug: string, n: Notify, pr: number, info: { body: string }, msg: string, note: string, toast: string) => {
+  const via = channels(n, Deno.build.os);
+  const told: string[] = [];
+  if (via.includes("log")) { console.log(`release-cron: ${msg}`); told.push("logged"); }
+  if (via.includes("comment") && sh("gh", ["pr", "comment", String(pr), "--body", `${msg}\n\nPosted by release-cron.`, "-R", slug], undefined, {}, 120).ok) told.push(`PR #${pr} comment`);
+  if (via.includes("notes") && n.kind === "claude-session") { const w = writeNote(n, sessionOf(info.body) ?? n.lead, note, msg); if (w) told.push(w); }
+  if (via.includes("toast")) sh("osascript", ["-e", `display notification ${JSON.stringify(toast)} with title "release-cron"`], undefined, {}, 10);
   return told.join(", ");
+};
+// A finding with no pull request to comment on: the lead's notes file, or the log.
+const tellNote = (n: Notify, msg: string, note: string, title: string) => {
+  if (n.kind === "claude-session") return writeNote(n, n.lead, note, msg, title);
+  console.log(`release-cron: ${msg}`);
+  return "logged";
 };
 
 // --- Bisect: `bisect [--dry] [<run's start>]` names the commit that broke a failed run. ---
@@ -160,6 +180,7 @@ if (verb === "bisect") {
   const { gcp: g, cron } = config(top);
   const gcpName = g?.name as string | undefined;
   const b = cron.bisect;
+  const notify = cron.notify;
   const text = (() => { try { return Deno.readTextFileSync(`${state}/runs/${failed.started}.log`); } catch { return ""; } })();
   const sig = signature(failed.why, text);
   type Merge = { sha: string; subject: string; pr: number | null; branch: string | null };
@@ -311,17 +332,12 @@ if (verb === "bisect") {
   const prior = bisects;
   const said = prior.some((x) => x.culprit && x.culprit === result.culprit && x.notified);
   if (!result.culprit && (result.range || why) && !quiet) {
-    const folder = `${home}/${b.notes}/${b.lead}`;
-    try {
-      Deno.mkdirSync(folder, { recursive: true });
-      Deno.writeTextFileSync(`${folder}/release-cron-bisect-${failed.started.replace(/[^0-9A-Za-z-]/g, "")}.md`, `# release-cron bisect\n\nrelease-cron (${app}) failed ${failed.started} on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}). Bisect: ${why || "no commit left to test"}. ${result.range ? `The culprit is one of: ${list.filter((c) => (result.range as string[]).includes(c.sha)).map((c) => `${c.sha.slice(0, 8)}${c.pr ? ` #${c.pr} ${c.branch}` : ""}`).join(", ")}.` : "No commit is blamed: look at what else ran on the machine then."} Log: ${state}/runs/${failed.started}.log\n`);
-      result.notified = `notes of ${b.lead}`;
-    } catch { /* a folder that cannot be written is one channel less */ }
+    result.notified = tellNote(notify, `release-cron (${app}) failed ${failed.started} on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}). Bisect: ${why || "no commit left to test"}. ${result.range ? `The culprit is one of: ${list.filter((c) => (result.range as string[]).includes(c.sha)).map((c) => `${c.sha.slice(0, 8)}${c.pr ? ` #${c.pr} ${c.branch}` : ""}`).join(", ")}.` : "No commit is blamed: look at what else ran on the machine then."} Log: ${state}/runs/${failed.started}.log`, `release-cron-bisect-${failed.started.replace(/[^0-9A-Za-z-]/g, "")}.md`, "release-cron bisect") || undefined;
   }
   if (result.culprit && result.pr && !said && !quiet) {
     const info = prInfo(slug, result.pr as number);
     const msg = `release-cron (${app}) failed ${failed.started} on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}). Bisecting main since the last release ${green.commit.slice(0, 8)} names ${(result.culprit as string).slice(0, 8)}, PR #${result.pr} (${result.branch}) ${info.title}. ${ran} checks run, ${fromRecords} commits settled by records. Bisect only reports; nothing is reverted. Log: ${state}/runs/${failed.started}.log`;
-    result.notified = tellPr(slug, b, result.pr as number, info, msg, `release-cron-bisect-${failed.started.replace(/[^0-9A-Za-z-]/g, "")}.md`, `PR #${result.pr} (${result.branch}) broke release-cron ${app}`);
+    result.notified = tellPr(slug, notify, result.pr as number, info, msg, `release-cron-bisect-${failed.started.replace(/[^0-9A-Za-z-]/g, "")}.md`, `PR #${result.pr} (${result.branch}) broke release-cron ${app}`);
   }
   Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify(result) + "\n", { append: true });
   // In runs.jsonl beside the runs, for `report`; its own outcome, which no rule of the schedule reads.
@@ -354,24 +370,42 @@ function config(dir: string) {
   // its path from a run's own PATH, it finds none (2026-11-05, pronto gcp.98). Its memory claim is the
   // run's own (STACK_PRIORITY=release), ahead of the pull requests' evaluations in the budget's line.
   const cue = (args: string[]) => must(mise, ["exec", "--", "cue", ...args], appDir, { STACK_PRIORITY: "release", ...(registry ? { CUE_REGISTRY: registry } : {}) }, 900);
-  // An app with no release.cue (releaseCron.target) has no GCP: only its opt-in is read.
+  // An app with no release.cue (a releaseCron.target of kind command) has no GCP: only its opt-in is read.
   const own = exists(`${appDir}/release.cue`);
   const { gcp, cron } = JSON.parse(cue(["export", ...(own ? ["release.cue"] : []), "release_cron.cue", "release_cron_plugin.cue", "-e", own ? "{gcp: GCP, cron: releaseCron}" : "{cron: releaseCron}", "--out", "json"]));
-  if (!gcp && !cron.target) throw new Error(`${appRel} has no release.cue and its releaseCron names no target: nothing to release`);
-  return { gcp, cron: { ...cron, watch: cron.watch?.length ? cron.watch : [appRel] } };
+  const resolved = resolve({ ...cron, watch: cron.watch?.length ? cron.watch : [appRel] });
+  if (!gcp && resolved.target.kind === "cloud-run") throw new Error(`${appRel} has no release.cue and its releaseCron names no target: nothing to release`);
+  return { gcp, cron: resolved };
 }
 
 if (verb === "install") {
+  // On actions nothing is installed: the app's workflow is the scheduler.
+  if (config(top).cron.scheduler.kind === "actions") {
+    console.log(`${label}: nothing to install: releaseCron.scheduler is actions, so the app's workflow runs \`release-cron.ts ${app} run\` itself`);
+    Deno.exit(0);
+  }
   const head = worktree();
   const { cron } = config(wt);
-  // launchd's environment is bare: the tools the run calls by name are found as the app's mise finds
+  // The scheduler's environment is bare: the tools the run calls by name are found as the app's mise finds
   // them, and sayt's own mise (which ./saytw installs) is on its PATH for `mise trust`.
   const path = [...new Set([mise.replace(/\/mise$/, ""), `${home}/.local/share/mise/shims`, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])].join(":");
-  const env = { PATH: path, HOME: home, CLOUDSDK_PYTHON: Deno.env.get("CLOUDSDK_PYTHON") ?? "/opt/homebrew/bin/python3.13" };
-  Deno.mkdirSync(`${home}/Library/LaunchAgents`, { recursive: true });
-  Deno.writeTextFileSync(agent, plist({ label, program: Deno.execPath(), args: ["run", "-A", `${wt}/${appRel}/release-cron/release-cron.ts`, app, "run"], poll: cron.poll, log: `${state}/launchd.log`, env }));
-  sh("launchctl", ["bootout", `gui/${uid}/${label}`]);
-  must("launchctl", ["bootstrap", `gui/${uid}`, agent]);
+  // gcloud's `pronto` configuration, never this Mac's default one, which is the owner's other work
+  // and asks to sign in again where launchd cannot answer (integrate@local's check-secrets).
+  const env = { PATH: path, HOME: home, CLOUDSDK_PYTHON: Deno.env.get("CLOUDSDK_PYTHON") ?? "/opt/homebrew/bin/python3.13", CLOUDSDK_ACTIVE_CONFIG_NAME: Deno.env.get("CLOUDSDK_ACTIVE_CONFIG_NAME") ?? "pronto" };
+  const job = { label, program: Deno.execPath(), args: ["run", "-A", `${wt}/${appRel}/release-cron/release-cron.ts`, app, "run"], poll: cron.poll };
+  if (cron.scheduler.kind === "systemd") {
+    const u = systemdUnits({ ...job, log: `${state}/systemd.log`, env });
+    Deno.mkdirSync(`${home}/.config/systemd/user`, { recursive: true });
+    Deno.writeTextFileSync(`${units}.service`, u.service);
+    Deno.writeTextFileSync(`${units}.timer`, u.timer);
+    must("systemctl", ["--user", "daemon-reload"]);
+    must("systemctl", ["--user", "enable", "--now", `${label}.timer`]);
+  } else {
+    Deno.mkdirSync(`${home}/Library/LaunchAgents`, { recursive: true });
+    Deno.writeTextFileSync(agent, plist({ ...job, log: `${state}/launchd.log`, env }));
+    sh("launchctl", ["bootout", `gui/${uid}/${label}`]);
+    must("launchctl", ["bootstrap", `gui/${uid}`, agent]);
+  }
   console.log(`${label}: a run ${cron.gap} min after the last release, checked every ${cron.poll} min, from ${wt} (main ${head.slice(0, 8)}); no step has a time limit`);
   Deno.exit(0);
 }
@@ -389,7 +423,8 @@ const enc = new TextEncoder();
 const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() - t0) / 1000)}s ${s}\n`; log(enc.encode(l)); Deno.stdout.writeSync(enc.encode(l)); };
 let head = "";
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
-let cron: { target?: { release: string[]; serving: string[]; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string } }; gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { lead: string; notes: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
+type Command = { release: string[]; serving: string[]; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string } };
+let cron: { scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; notify: Notify; hooks: { on: string; command: string[] }[]; gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
 let mark = Date.now();
@@ -616,7 +651,7 @@ try {
   ({ gcp, cron } = config(wt));
   run.gap = cron.gap;
   // What production serves: the commit the target's serving command prints, else Cloud Run's traffic.
-  const target = cron.target;
+  const target = cron.target.kind === "command" ? cron.target : undefined;
   const servingNow = () => must(target!.serving[0], target!.serving.slice(1), `${wt}/${appRel}`, Deno.env.toObject(), 120).split(/\s+/)[0];
   before = target ? servingNow() : whole(JSON.parse(gcloud(["run", "services", "describe", gcp!.service])).status?.traffic);
   const live = target ? (sh("git", ["cat-file", "-e", `${before}^{commit}`], wt).ok ? before : undefined) : base(jsonl(`${state}/runs.jsonl`), before);
@@ -631,11 +666,17 @@ try {
 
   // 2. The rehearsal: it waits for its slot as long as it takes (the lock keeps another run from starting meanwhile), then runs to its verdict.
   const dir = `${wt}/${appRel}`;
-  // With GCP.rehearsal the rehearsal is release@gcp's own, in the cloud: no slot, nothing run here.
+  // With GCP.rehearsal the rehearsal is release@gcp's own, in the cloud: no slot, nothing run here. A rehearsal.command of
+  // null is none at all; rehearsal.slot false runs the command without waiting for a slot.
   const cloud = !!gcp?.rehearsal;
+  const rehearse = cron.rehearsal.command;
+  const own = !cloud && !!rehearse;
+  const wantSlot = own && cron.rehearsal.slot;
   if (cloud) say(`GCP.rehearsal: the rehearsal runs in the cloud, job ${gcp!.rehearsal!.job}, inside release@gcp`);
-  let got = cloud;
-  if (!cloud) active("slot");
+  else if (!rehearse) say("no rehearsal: releaseCron.rehearsal.command is null");
+  let got = !wantSlot;
+  if (wantSlot) active("slot");
+  else if (own) { step("slot"); active("rehearse"); say("rehearsal.slot is false: run without waiting for a slot"); }
   // The slot is taken once a live slot of the pool names this rehearsal as its owner.
   const pool = Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks";
   const look = setInterval(() => {
@@ -646,7 +687,7 @@ try {
       const pid = (() => { try { return Deno.readTextFileSync(`${pool}/${e.name}/pid`).trim(); } catch { return ""; } })();
       // The holder alive and started by this run: not a slot a dead or stray rehearsal left.
       const ours = pid && current && tree(current.pgid).pids.includes(Number(pid));
-      if (ours && holds(owner, dir, cron.holder) && owner.startsWith(`${pid} `)) { got = true; step("slot"); active("rehearse"); say(`slot taken: ${e.name}`); return; }
+      if (ours && holds(owner, dir, cron.rehearsal.holder) && owner.startsWith(`${pid} `)) { got = true; step("slot"); active("rehearse"); say(`slot taken: ${e.name}`); return; }
     }
   }, 5000);
   // STACK_PRIORITY=release puts its claim at the head of the pool's line, ahead of every claim a
@@ -654,12 +695,12 @@ try {
   // The rehearsal's own output names the new-feature scenarios it passed on and the ones that flaked on their one retry.
   let newFailing: string[] = [];
   let flaked: string[] = [];
-  const gate = cloud ? { code: 0 } : await child("./saytw", ["verify@local"], dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
+  const gate = !own ? { code: 0 } : await child(rehearse![0], rehearse!.slice(1), dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
   clearInterval(look);
   // Every check passed already for this tree: the rehearsal took no slot and waited for none.
   if (!got && gate.code === 0) { got = true; step("slot"); active("rehearse"); }
-  if (!got) { step("slot"); end("failed", `verify@local ended before its slot (exit ${gate.code}): nothing released`, 1); }
-  if (!cloud) step("rehearse");
+  if (!got) { step("slot"); end("failed", `${rehearse!.slice(1).join(" ") || rehearse![0]} ended before its slot (exit ${gate.code}): nothing released`, 1); }
+  if (own) step("rehearse");
   if (gate.code !== 0) end("failed", `the rehearsal failed (exit ${gate.code}): nothing released`, 1);
 
   // 2b. The release preview (releaseCron.target.preview): the release's whole stack in a namespace of its own on the
@@ -725,7 +766,7 @@ try {
       for (const f of untold(found, jsonl(ledger))) {
         const info = prInfo(slug, f.pr);
         const msg = `release-cron (${app}): the scenario ${f.scenario} (added or last changed by PR #${f.pr}, ${f.branch}) flaked, and passed only on its one rerun. Fix it at its cause: the rerun is never a fix. Log: ${state}/runs/${started}.log`;
-        const told = tellPr(slug, cron.bisect, f.pr, info, msg, `release-cron-flaked-${f.scenario.replace(/[^0-9A-Za-z-]/g, "")}.md`, `scenario ${f.scenario} (PR #${f.pr}) flaked in release-cron ${app}`);
+        const told = tellPr(slug, cron.notify, f.pr, info, msg, `release-cron-flaked-${f.scenario.replace(/[^0-9A-Za-z-]/g, "")}.md`, `scenario ${f.scenario} (PR #${f.pr}) flaked in release-cron ${app}`);
         if (told.includes("comment")) Deno.writeTextFileSync(ledger, JSON.stringify({ ...f, told, at: local(Date.now()) }) + "\n", { append: true });
       }
     } catch (e) { say(`flaked scenarios not told: ${(e as Error).message.split("\n")[0]}`); }
@@ -750,7 +791,7 @@ try {
       for (const f of untold(found, jsonl(ledger))) {
         const info = prInfo(slug, f.pr);
         const msg = `release-cron (${app}) released ${head.slice(0, 8)} on stable features, although the new scenario ${f.scenario} (added by PR #${f.pr}, ${f.branch}) fails: a release is not held by a new feature's own scenarios. Fix it or take it out. Log: ${state}/runs/${started}.log`;
-        const told = tellPr(slug, cron.bisect, f.pr, info, msg, `release-cron-new-feature-${f.scenario.replace(/[^0-9A-Za-z-]/g, "")}.md`, `new scenario ${f.scenario} (PR #${f.pr}) fails in release-cron ${app}`);
+        const told = tellPr(slug, cron.notify, f.pr, info, msg, `release-cron-new-feature-${f.scenario.replace(/[^0-9A-Za-z-]/g, "")}.md`, `new scenario ${f.scenario} (PR #${f.pr}) fails in release-cron ${app}`);
         if (told.includes("comment")) Deno.writeTextFileSync(ledger, JSON.stringify({ ...f, told, at: local(Date.now()) }) + "\n", { append: true });
       }
     } catch (e) { say(`new-feature scenarios not told: ${(e as Error).message.split("\n")[0]}`); }
@@ -821,16 +862,22 @@ try {
     } catch (e) { run.maps = `failed (${(e as Error).message.split("\n")[0]})`; }
     say(`source maps ${run.maps}`);
   }
-  // 7. The dev flow's board, where the repository keeps one (its devflow/devflow.cue; pronto-plugins' devflow/README.md):
-  // the app's Merged issues whose pull request this release holds go Live (a flagless fix, Done). The board's token is
-  // PLANE_TOKEN or Secret Manager's. A board that cannot be told is logged and never changes the run's outcome.
-  if (exists(`${wt}/devflow/devflow.cue`)) {
+  // 7. The hooks (releaseCron.hooks, on `released`), each in the run's worktree with the worktree, the app and the commit
+  // appended (the dev flow's board is one: devflow/hook.ts released, which tells the app's Merged issues whose pull request
+  // this release holds that they are Live, a flagless fix Done; its token is PLANE_TOKEN or Secret Manager's). The hook finds
+  // `cue` as mise's newest when the PATH has none (boardEnv). A hook that fails is logged and never changes the run's outcome.
+  const hooked: string[] = [];
+  for (const h of hooksOf(cron.hooks, "released")) {
+    const argv = hookArgv(h, wt, appRel.split("/").pop()!, head);
+    let result: string;
     try {
-      const b = await child(Deno.execPath(), boardHook(wt, appRel, head), wt, boardEnv(Deno.env.toObject(), Deno.env.get("HOME") ?? "", cueVersions()));
-      run.board = b.code === 0 ? "told" : `failed (exit ${b.code})`;
-    } catch (e) { run.board = `failed (${(e as Error).message.split("\n")[0]})`; }
-    say(`board ${run.board}`);
+      const r = await child(argv[0] === "deno" ? Deno.execPath() : argv[0], argv.slice(1), wt, boardEnv(Deno.env.toObject(), Deno.env.get("HOME") ?? "", cueVersions()));
+      result = r.code === 0 ? "ok" : `failed (exit ${r.code})`;
+    } catch (e) { result = `failed (${(e as Error).message.split("\n")[0]})`; }
+    hooked.push(`${h.command.slice(0, 3).join(" ")} ${result}`);
+    say(`hook ${h.on} ${h.command.join(" ")}: ${result}`);
   }
+  if (hooked.length) run.hooks = hooked;
   // A release that changed nothing Cloud Run runs (tests, config) keeps the revision: said, so it
   // does not read as a deploy that never went out.
   end("released", !target && run.revision === before ? `same image, nothing served changed: ${before} kept` : "");
