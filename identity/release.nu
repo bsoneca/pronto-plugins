@@ -64,6 +64,7 @@ export def main [
 	--phone-otp: string = "firebase" # Who issues the codes: firebase (Identity Platform), or broker (the broker itself, texting through --phone-sms)
 	--phone-sms: string = ""         # With --phone-otp broker: the SMS sender's name (broker/otp.ts SMS_PROVIDERS)
 	--phone-sms-gate: string = ""    # With --phone-otp broker: the URL the broker asks, signed, before each SMS (identity/README.md "The phone")
+	--phone-prove-tenants: string = "" # With --phone-otp broker: the origins that may learn a proven number (the prove step); none, off
 	--region: string = "us-central1"
 	--service: string = "identity-broker"
 	--repository: string = "pronto"
@@ -121,7 +122,7 @@ export def main [
 			{name: "PHONE_SMS_GATE", value: $phone_sms_gate}
 			{name: "PHONE_ADMIT", value: $phone_admit}
 			{name: "PHONE_TENANTS", value: $phone_tenants}
-		]
+		] ++ (if ($phone_prove_tenants | is-empty) { [] } else { [{name: "PHONE_PROVE_TENANTS", value: $phone_prove_tenants}] })
 	} else if $phone_otp != "firebase" {
 		error make {msg: "--phone-otp is firebase or broker"}
 	} else if ($phone_project | is-empty) { [] } else {

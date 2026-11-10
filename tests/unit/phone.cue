@@ -197,3 +197,37 @@ cases: {
 		{call: "identity.otpFlow", args: [{phone: "+14155550100", ops: [["send"]]}], holds: {log: [{status: 400, error: "region"}], gateCalls: 0}},
 	]}
 }
+
+cases: {
+	"the prove step gives a listed tenant a token for the number, signed by the key the broker publishes": {suite: "identity", steps: [
+		{call: "identity.proveFlow", holds: {log: [{op: "send", status: 200}, {op: "check", status: 200}], gateCalls: 1}}, {keep: "out"},
+		{use: "out"}, {get: "proof", holds: {signed: true, iss: "http://localhost:19000", aud: "https://app.example.com", phone: "+5511912345678", event: "phone_proof", amr: ["sms"], ttl: 300, authTime: true, claims: ["amr", "aud", "auth_time", "event", "exp", "iat", "iss", "phone_number", "sub"]}},
+		{use: "out"}, {get: "proof.sub", expect: "Pnl8Lv7vTGoWM0aOoybSPsWFwoXkUjUZjxdjFmaA8mg", why: "the same provider subject as sign-in's"},
+	]}
+	"the prove step is off unless the operator lists tenants: its routes answer 404": {suite: "identity", steps: [
+		{call: "identity.proveFlow", args: [{env: {}, ops: [["page"], ["js"], ["send", "https://app.example.com"]]}], holds: {log: [{status: 404}, {status: 404}, {status: 404}], gateCalls: 0}},
+	]}
+	"a tenant not listed for the prove step is refused before the gate, and learns no number": {suite: "identity", steps: [
+		{call: "identity.proveFlow", args: [{ops: [["send", "https://other.example.com"], ["send", "https://app.example.com.evil.example"]]}], holds: {log: [{status: 403, error: "tenant"}, {status: 403, error: "tenant"}], gateCalls: 0, proof: null}},
+		{call: "identity.proveFlow", args: [{env: {PHONE_PROVE_TENANTS: "https://localhost:*"}, ops: [["send", "https://localhost:8443"]]}], holds: {log: [{status: 200}]}, why: "a star stands for a port"},
+	]}
+	"the prove step's wrong code is told so, the fifth kills the code, and no token is given": {suite: "identity", steps: [
+		{call: "identity.proveFlow", args: [{ops: [["send", "https://app.example.com"], ["check", "000000"], ["check", "000000"], ["check", "000000"], ["check", "000000"], ["check", "000000"], ["check", "right"]]}], holds: {log: [
+			{op: "send"}, {error: "wrong_code"}, {error: "wrong_code"}, {error: "wrong_code"}, {error: "wrong_code"}, {error: "too_many"}, {error: "expired"},
+		], proof: null}, why: "000000 is a guess; it is the code once in a million runs"},
+	]}
+	"the prove step's code is good five minutes, and a gate refusal sends nothing": {suite: "identity", steps: [
+		{call: "identity.proveFlow", args: [{ops: [["send", "https://app.example.com"], ["advance", 300000], ["check", "right"]]}], holds: {log: [{op: "send"}, {op: "check", status: 400, error: "expired"}], proof: null}},
+		{call: "identity.proveFlow", args: [{gate: 403, ops: [["send", "https://app.example.com"], ["check", "right"]]}], holds: {log: [{status: 429, error: "too_many"}, {status: 400, error: "expired"}], gateCalls: 1, proof: null}},
+		{call: "identity.proveFlow", args: [{gate: 500, ops: [["send", "https://app.example.com"]]}], holds: {log: [{status: 503, error: "down"}]}},
+	]}
+	"the prove step shares the resend wait with sign-in, per number": {suite: "identity", steps: [
+		{call: "identity.proveFlow", args: [{ops: [["send", "https://app.example.com"], ["send", "https://app.example.com"]]}], holds: {log: [{status: 200}, {status: 429, error: "cooldown"}], gateCalls: 1}},
+	]}
+	"the prove page is the sign-in page's look in the reader's language, self only, with a script that loads nothing of Google's": {suite: "identity", steps: [
+		{call: "identity.proveFlow", args: [{ops: [["page"], ["js"]]}], holds: {page: {status: 200, title: "Confirmar seu celular", csp: "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"}, js: {status: 200, google: false, cleansAddress: true, leaves: true}}},
+	]}
+	"the prove tenants are for broker mode alone": {suite: "identity", steps: [
+		{call: "identity.phoneSettings", args: [{PHONE_PROVE_TENANTS: "https://app.example.com"}], throws: "PHONE_PROVE_TENANTS is for PHONE_OTP=broker"},
+	]}
+}
