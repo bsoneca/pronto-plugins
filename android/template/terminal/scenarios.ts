@@ -23,7 +23,7 @@ import { localRoots } from "./trust.ts";
 
 // `flag` and `unless` say where a step runs (skips); they are not what it does.
 const META = ["by", "timeout", "why", "fresh", "flag", "unless"];
-export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response", "undisclosed"];
+export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response", "undisclosed", "fills"];
 
 export type Probed = { id: string | null; text: string; value?: string; attrs: Record<string, string>; hidden: boolean; shown?: boolean };
 export type Step = Record<string, unknown>;
@@ -99,6 +99,19 @@ export function scrollFor(box: Box, display: { w: number; h: number }): "up" | "
 export const centre = (b: Box) => ({ x: Math.round(b.x + b.w / 2), y: Math.round(b.y + b.h / 2) });
 
 /** Whether an address the browser reached ends its trip: the app's own origin, but not the door's own pages (/auth/ routes, a stand-in's /fake/ checkout). */
+/**
+ * `fills`: whether a drawn box fills the screen, null when it does, else what it lacks. The page must have asked for
+ * the whole screen (the display is `fullscreen`: the system bars hidden), and the box must span at least `1 - within`
+ * of the screen along one axis (a field square on a long phone fills its width, and its height in landscape).
+ */
+export function fills(box: Box | null, display: { mode: string; screen: { w: number; h: number } }, within = 0.1): string | null {
+  if (display.mode !== "fullscreen") return `the display is ${display.mode}, the system bars shown`;
+  if (!box) return "it is not drawn";
+  const w = box.w / display.screen.w, h = box.h / display.screen.h;
+  if (Math.max(w, h) >= 1 - within) return null;
+  return `it spans ${Math.round(w * 100)}% of the screen's width and ${Math.round(h * 100)}% of its height, under ${Math.round((1 - within) * 100)}%`;
+}
+
 export function backTo(url: string, base: string): boolean {
   const u = new URL(url), b = new URL(base);
   return u.origin === b.origin && !/^\/(auth|fake)\//.test(u.pathname);
@@ -556,6 +569,19 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
           const found = new TextDecoder().decode(out.stdout).trim();
           if (out.code === 0 && found) throw new Fail(`${JSON.stringify(text)} is in the app's private files in plain text: ${found.split("\n").join(", ")}`);
           if (out.code !== 1) throw new Fail(`run-as grep exited ${out.code}: ${new TextDecoder().decode(out.stderr).trim() || found}`);
+          break;
+        }
+        case "fills": {
+          // The page asked for the whole screen and the element spans it (fills): the driver's display and bounds.
+          const sel = sub(arg.of);
+          await until(`fills ${sel}`, timeout, async () => {
+            const display = await ask({ display: true });
+            if (!display) return [null, "the driver does not answer"];
+            const el = (await phone.find(sel, false))?.find((e) => e.id && !e.hidden);
+            const box = el ? await ask({ bounds: el.id }) : null;
+            const lack = fills(box, display, arg.within ?? 0.1);
+            return [lack === null ? true : null, el ? lack! : `nothing matches ${sel}`];
+          });
           break;
         }
         case "pause": await sleep(Number(arg) * 1000 * slow()); break;

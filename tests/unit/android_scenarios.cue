@@ -109,4 +109,13 @@ cases: {
 		{call: "androidScenarios.backTo", args: ["https://localhost:33600/fake/stripe/pay/cs_1", "https://localhost:33600"], expect: false},
 		{call: "androidScenarios.backTo", args: ["https://localhost:33600/?pro=welcome", "https://localhost:33600"], expect: true},
 	]}
+
+	"fills: a drawn box spans the screen along one axis, with the bars hidden": {suite: "android", steps: [
+		{call: "androidScenarios.fills", args: [{x: 0, y: 300, w: 1060, h: 1300}, {mode: "fullscreen", screen: {w: 1080, h: 2400}}], expect: null, why: "98% of a portrait screen's width"},
+		{call: "androidScenarios.fills", args: [{x: 400, y: 0, w: 1300, h: 1050}, {mode: "fullscreen", screen: {w: 2400, h: 1080}}], expect: null, why: "landscape: 97% of the height"},
+		{call: "androidScenarios.fills", args: [{x: 0, y: 300, w: 540, h: 700}, {mode: "fullscreen", screen: {w: 1080, h: 2400}}], expect: "it spans 50% of the screen's width and 29% of its height, under 90%"},
+		{call: "androidScenarios.fills", args: [{x: 0, y: 300, w: 1060, h: 1300}, {mode: "standard", screen: {w: 1080, h: 2400}}], expect: "the display is standard, the system bars shown"},
+		{call: "androidScenarios.fills", args: [null, {mode: "fullscreen", screen: {w: 1080, h: 2400}}], expect: "it is not drawn"},
+		{call: "androidScenarios.fills", args: [{x: 0, y: 300, w: 1000, h: 1300}, {mode: "fullscreen", screen: {w: 1080, h: 2400}}, 0.05], matches: "under 95%", why: "within is the gap allowed"},
+	]}
 }
