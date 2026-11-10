@@ -255,9 +255,14 @@ const code = (d) => String(d).replace(/'(?:[^']|'')*'/g, "''");
 // nothing. Postgres folds an unquoted name to lower case, so it is matched in any case.
 export const sessionDefault = (d) => d !== undefined && /\b(auth_\w*|current_setting|current_user|session_user|current_role)\b/i.test(code(d));
 
-// A default that takes another value each time it is read (a clock, a random value, a sequence): the
-// replay gives every row a table already holds the value it reads as it runs.
-export const volatileDefault = (d) => d !== undefined && /\b(now|clock_timestamp|statement_timestamp|transaction_timestamp|timeofday|random|gen_random_uuid|uuid_generate_v\w*|nextval|current_timestamp|current_date|current_time|localtimestamp|localtime)\b/i.test(code(d));
+// A default that takes another value each time it is read (a clock, a random value, a sequence, the
+// transaction): the replay gives every row a table already holds the value it reads as it runs. A
+// time keyword in a literal ('now'::timestamptz) is read as the statement runs too.
+export const volatileDefault = (d) => d !== undefined && (/\b(now|clock_timestamp|statement_timestamp|transaction_timestamp|timeofday|random|random_normal|gen_random_uuid|gen_random_bytes|uuidv4|uuidv7|uuid_generate_v\w*|nextval|txid_current|pg_current_xact_id|current_timestamp|current_date|current_time|localtimestamp|localtime)\b/i.test(code(d)) || /'\s*(now|today|tomorrow|yesterday)\s*'/i.test(d));
+
+// A default that is the same value whenever it is read: a literal (a string, a number, true, false,
+// NULL), cast or not, that is no time keyword. Only such a default marks the rows the replay filled.
+export const constantDefault = (d) => d !== undefined && !volatileDefault(d) && /^\s*\(?\s*(?:'(?:[^']|'')*'|[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|true|false|null)\s*\)?(?:\s*::\s*[a-z_][a-z0-9_ ]*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?(?:\[\])?)*\s*$/i.test(d);
 
 // The changes from one model to the next, in a stable order: entities by name, columns by number.
 // A column is paired by its number, never by its name, so a rename is seen as one; a live field and
@@ -285,7 +290,7 @@ export function diff(before, after) {
       const was = bf ?? br, now = af ?? ar;
       const at = { ...on, field: (was ?? now).name, number: Number(n) };
       if (!was) {
-        if (af) out.push(af.required && (af.default === undefined || sessionDefault(af.default)) && !af.generated ? { ...at, kind: "required-added" } : clean({ ...at, kind: "field-added", default: af.default, machine: af.machine, generated: af.generated }));
+        if (af) out.push(af.required && (af.default === undefined || sessionDefault(af.default)) && !af.generated ? { ...at, kind: "required-added" } : clean({ ...at, kind: "field-added", default: af.default, machine: af.machine, generated: af.generated, sql: af.sql }));
         continue;
       }
       if (!now) {
@@ -397,7 +402,7 @@ export const KINDS = {
     ops: (c, x) => {
       const fill = fillOf(x.declared("backfill")) ?? (sessionDefault(c.default) || c.default === undefined ? undefined : { value: c.default, triggers: [] });
       if (fill === undefined) return x.need("backfill", `made required, with ${c.default === undefined ? "no default" : `a default a migration cannot compute (${c.default})`}: the value (an SQL expression of the row) its NULL rows take`);
-      if (!fillable(fill, x)) return;
+      if (!fillable(fill, x, [])) return;
       // Its own checks stay: the value it fills is the model's, which those checks (the replay's
       // newest) admit, or the migration fails.
       x.op(FILL, "made required: its NULL rows filled", moveSql("$fill$", x.t, `${x.col} IS NULL`, `UPDATE ${x.t} SET ${x.col} = ${fill.value} WHERE ${x.col} IS NULL;`, fill.triggers, [names.check(c.table, c.field), names.type(c.table, c.field)]));
@@ -443,28 +448,38 @@ export const KINDS = {
     // A backfill declared for a column added copies into it, after the replay added it, what the rows
     // the table held should hold (another column, the field a rename retired): a rename spelled as a
     // retirement beside an addition keeps its data. Beside a retirement in the same change, as a
-    // rename is, the backfill is a need, so a migration made again (rebase) never loses the copy;
-    // DEFAULT says the rows keep the replay's default. The copy touches only the rows that still hold
-    // what the replay gave them (its constant default, or NULL), so a row written since with a value
-    // of its own, or seeded with one, keeps it. A copy is not a transition, so a machine's column is
-    // copied with its trigger off, and so is any trigger the backfill names.
+    // rename is, the backfill is a need, so a migration made again never loses the copy; DEFAULT says
+    // the rows keep the replay's default. The copy touches only the rows that still hold what the
+    // replay gave them, when that is known: NULL, or a constant default. A row written since, or
+    // seeded, with a value of its own keeps it; one written with the default itself cannot be told
+    // from a row the replay filled, and takes the copy. Any other default (a clock, a function) marks
+    // nothing, so the copy touches every row that differs, which is noted. A json column is compared
+    // as jsonb, as json has no equality. A copy is not a transition, so a machine's column is copied
+    // with its trigger off, and so is any trigger the backfill names. A generated column takes none.
     ops: (c, x) => {
       const fill = fillOf(x.declared("backfill"));
+      if (c.generated) {
+        if (fill !== undefined && fill.value !== "DEFAULT") x.refuse("backfill", "a generated column is computed by Postgres: it takes no backfill");
+        return;
+      }
       if (fill === undefined) {
         if (x.renaming) x.need("backfill", `added beside a field ${c.entity} retires in the same change, as a rename is: the SQL of the row the rows it held take (the retired column), or DEFAULT to keep the replay's default`);
         return;
       }
       if (fill.value === "DEFAULT") return;
-      if (c.generated) return x.refuse("backfill", "a generated column is computed by Postgres: it takes no backfill");
-      if (!fillable(fill, x)) return;
-      const filled = c.default === undefined ? `${x.col} IS NULL` : volatileDefault(c.default) ? null : `${x.col} IS NOT DISTINCT FROM (${c.default})`;
-      const where = [filled, `${x.col} IS DISTINCT FROM (${fill.value})`].filter(Boolean).join(" AND ");
+      if (!fillable(fill, x, [c.default])) return;
+      const json = c.sql === "json";
+      const as = (e) => json ? `(${e})::jsonb` : `(${e})`;
+      const column = json ? `${x.col}::jsonb` : x.col;
+      const filled = c.default === undefined ? `${x.col} IS NULL` : constantDefault(c.default) ? `${column} IS NOT DISTINCT FROM ${as(c.default)}` : null;
+      const where = [filled, `${column} IS DISTINCT FROM ${as(fill.value)}`].filter(Boolean).join(" AND ");
       x.op(FILL, "added: the rows the table held take their copy", moveSql("$fill$", x.t, where, `UPDATE ${x.t} SET ${x.col} = ${fill.value} WHERE ${where};`, [...fill.triggers, ...(c.machine ? [names.machine(c.table, c.field)] : [])], [names.check(c.table, c.field), names.type(c.table, c.field)]));
     },
     note: (c, x) => {
       const fill = fillOf(x.declared("backfill"));
-      if (!volatileDefault(c.default) || fill?.value === "DEFAULT") return undefined;
-      if (fill === undefined) return x.renaming ? undefined : `the replay gives every row the table holds ${c.default}, as it reads when the replay runs (the deploy's time, or a new value a row): declare backfill.${c.entity}.${c.field}, the SQL of the row they should take (another column, say), and make copies it`;
+      if (c.generated || fill?.value === "DEFAULT") return undefined;
+      if (fill === undefined) return volatileDefault(c.default) && !x.renaming ? `the replay gives every row the table holds ${c.default}, as it reads when the replay runs (the deploy's time, or a new value a row): declare backfill.${c.entity}.${c.field}, the SQL of the row they should take (another column, say), and make copies it` : undefined;
+      if (c.default === undefined || constantDefault(c.default)) return undefined;
       return `the copy cannot tell a row the replay gave ${c.default} from one written since with a value of its own, so it copies into every row whose value differs (a seed row, a row written between the replay and the migration): a constant default, or none, lets it touch only the rows the replay filled`;
     },
   },
@@ -487,7 +502,9 @@ export const KINDS = {
   },
 };
 
-// A change's verdict; a kind with no rule is an error, never the replay's.
+// A change's verdict as its kind states it, before any plan; a kind with no rule is an error, never
+// the replay's. A change the replay makes that also writes SQL in a plan (a copy into an added
+// column) is the ledger's there: plan().verdicts says each change's verdict as made.
 export function verdict(c) {
   const k = KINDS[c.kind];
   if (!k) throw new Error(`${where(c)}: a change of kind ${c.kind}, which this plugin has no rule for`);
@@ -501,16 +518,20 @@ const DECLARED = ["carry", "backfill"];
 // --- The plan ---
 
 // The SQL each of the ledger's changes needs, in phase order, with what the app declared
-// (#Migrations: the schema, carries, backfills) and what the app's migrations already dropped
-// (`dropped`: a name to the migration that dropped it, from droppedBy). A change the model cannot
+// (#Migrations: the schema, carries, backfills), what the app's migrations already dropped
+// (`dropped`: a name to the migration that dropped it, from droppedBy), and the declarations a
+// migration made before recorded (`inherited`, for rebase: read where the app declares none, and
+// never refused when no change reads them). A change the model cannot
 // settle alone is a need: the declaration it wants, by path. A refused change, a declaration that
 // cannot be applied, and one no change reads (left from an earlier migration, it would fill a later
 // change to the same column) are refused. `make` writes a migration only when both are empty. Each
 // op says the names it drops and builds for good.
-export function plan(changes, declared = {}, dropped = {}) {
+export function plan(changes, declared = {}, dropped = {}, inherited = {}) {
   const schema = declared.schema ?? "public";
   const ops = [], refused = [], needs = [], advisories = [], verdicts = [];
   const read = new Set();
+  // The declarations the plan read, which its migration records (declaredIn).
+  const used = {};
   // The entities that retire a field in this change: a column added beside one is a rename's.
   const retiring = new Set(changes.filter((c) => c.kind === "retired").map((c) => c.entity));
   for (const c of changes) {
@@ -550,9 +571,12 @@ export function plan(changes, declared = {}, dropped = {}) {
       refuse: (kind, why) => refused.push({ at, kind, why }),
       // A declaration is read only by a rule that takes it (a backfill by a column added or made
       // required, a carry by a narrowed enum), so one left beside any other change is still refused.
+      // One the app declares wins over one inherited from a migration made before (rebase).
       declared: (what) => {
         read.add(`${what}.${c.entity}.${c.field}`);
-        return declared[what]?.[c.entity]?.[c.field];
+        const d = declared[what]?.[c.entity]?.[c.field] ?? inherited[what]?.[c.entity]?.[c.field];
+        if (d !== undefined) ((used[what] ??= {})[c.entity] ??= {})[c.field] = d;
+        return d;
       },
     };
     k.ops?.(c, x);
@@ -569,19 +593,29 @@ export function plan(changes, declared = {}, dropped = {}) {
     }
   }
   ops.sort((a, b) => a.phase - b.phase);
-  return { ops, refused, needs, advisories, verdicts };
+  return { ops, refused, needs, advisories, verdicts, used };
 }
 
 // A backfill as declared: the SQL expression of the row alone, or with the triggers the fill would
 // trip (an app's own, say) to turn off around it.
 const fillOf = (d) => d === undefined ? undefined : typeof d === "string" ? { value: d, triggers: [] } : { value: d.value, triggers: d.triggers ?? [] };
 
-// A backfill is an SQL expression put inside a $fill$-quoted block, so it may not hold $fill$.
-function fillable(fill, x) {
-  if (!String(fill.value).includes("$fill$")) return true;
+// A backfill is an SQL expression put inside a $fill$-quoted block, with the column's default and the
+// triggers it names, so none may hold $fill$; a trigger is named by its identifier.
+function fillable(fill, x, more) {
+  const bad = fill.triggers.filter((t) => !TRIGGER.test(t));
+  if (bad.length) {
+    x.refuse("backfill", `triggers names ${bad.join(", ")}, which is no trigger's name (letters, digits, _ and $)`);
+    return false;
+  }
+  if (![fill.value, ...fill.triggers, ...more.filter(Boolean)].some((e) => String(e).includes("$fill$"))) return true;
   x.refuse("backfill", "the backfill holds $fill$, its block's own quote");
   return false;
 }
+
+// A trigger's name as a carry or a backfill lists it: an identifier, as Postgres keeps an unquoted one
+// or pronto writes one.
+const TRIGGER = /^[A-Za-z_][A-Za-z0-9_$]*$/;
 
 // A carry, as one DO block: it runs only where a row holds a value gone, so on a fresh database
 // (and on one carried already) it does nothing, and it turns off only the triggers that are on then.
@@ -609,7 +643,9 @@ function carrySql(c, x) {
     : both ? `both values and set give ${c.field} its value`
     : assign[c.field] === undefined ? `the carry gives ${c.field} no value: name values, or set ${c.field}`
     : guarded.length ? `set moves ${guarded.join(", ")}, which a machine guards: list ${guarded.map((k) => names.machine(c.table, k)).join(", ")} in triggers`
+    : triggers.some((t) => !TRIGGER.test(t)) ? `triggers names ${triggers.filter((t) => !TRIGGER.test(t)).join(", ")}, which is no trigger's name (letters, digits, _ and $)`
     : Object.values(assign).some((e) => e.includes("$carry$")) ? "set holds $carry$, the carry's own quote"
+    : triggers.some((t) => t.includes("$carry$")) ? "triggers holds $carry$, the carry's own quote"
     : null;
   if (problem) {
     x.refuse("carry", problem);
@@ -627,7 +663,10 @@ function carrySql(c, x) {
 // row written before a check was restated, on any of its columns, would stop the move. Every check on
 // the table but `kept` is lifted around the update and put back as the database held it, NOT VALID,
 // as the replay leaves it. Of `triggers`, those that exist and are on are turned off around it, and
-// each is put back in the mode it had (origin, always, replica); one already off stays off.
+// each is put back in the mode it had (origin, always, replica); one already off stays off. With
+// triggers to turn off, the block takes the table's ACCESS EXCLUSIVE lock first, so it never climbs
+// from the triggers' lock to the one lifting a check needs, which deadlocks an app transaction that
+// read the table and then writes it.
 function moveSql(tag, t, where, update, triggers = [], kept = []) {
   const each = "FOR pronto_i IN 1 .. coalesce(array_length(pronto_lifted, 1), 0) LOOP";
   const eachOff = "FOR pronto_t IN 1 .. coalesce(array_length(pronto_off, 1), 0) LOOP";
@@ -640,6 +679,7 @@ function moveSql(tag, t, where, update, triggers = [], kept = []) {
     "BEGIN",
     `  IF EXISTS (SELECT FROM ${t} WHERE ${where}) THEN`,
     ...(triggers.length ? [
+      `    LOCK TABLE ${t} IN ACCESS EXCLUSIVE MODE;`,
       `    SELECT array_agg(tgname::text ORDER BY tgname), array_agg(tgenabled::text ORDER BY tgname) INTO pronto_off, pronto_modes FROM pg_trigger WHERE tgrelid = ${lit(t)}::regclass AND tgname = ANY (ARRAY[${triggers.map(lit).join(", ")}]) AND tgenabled <> 'D';`,
       `    ${eachOff} EXECUTE ${lit(`ALTER TABLE ${t} DISABLE TRIGGER `)} || quote_ident(pronto_off[pronto_t]); END LOOP;`,
     ] : []),
@@ -689,9 +729,21 @@ export function droppedBy(migrations) {
 // schema. Its constraints are checked as each statement ends: a deferred constraint trigger (an app's
 // own, DEFERRABLE INITIALLY DEFERRED) would otherwise leave events pending, and Postgres refuses to
 // alter a table with pending events, as a tighten after a backfill or a carry's ENABLE TRIGGER does.
-export const migration = (ops) => ({
-  operations: [{ sql: { up: ["-- Deferred constraints checked as each statement ends, so the tables can be altered after rows move.\nSET CONSTRAINTS ALL IMMEDIATE;", ...ops.map((o) => `-- ${`${o.at}: ${o.why}`.replaceAll("\n", "\n-- ")}\n${o.sql}`)].join("\n\n") } }],
+// The declarations the plan read (`used`) are recorded as its first line, `-- declared: <json>`, so a
+// migration made again (rebase) reads them back (declaredIn) after the app has removed them.
+export const migration = (ops, used = {}) => ({
+  operations: [{ sql: { up: [
+    ...(Object.keys(used).length ? [`-- declared: ${JSON.stringify(sorted(used))}`] : []),
+    "-- Deferred constraints checked as each statement ends, so the tables can be altered after rows move.\nSET CONSTRAINTS ALL IMMEDIATE;",
+    ...ops.map((o) => `-- ${`${o.at}: ${o.why}`.replace(/\r\n|\r|\n/g, "\n-- ")}\n${o.sql}`),
+  ].join("\n\n") } }],
 });
+
+// The declarations a migration recorded (migration), or none.
+export function declaredIn(json) {
+  const line = (json.operations ?? []).map((o) => o.sql?.up ?? "").join("\n").match(/^-- declared: (.*)$/m);
+  return line ? JSON.parse(line[1]) : {};
+}
 
 // A migration's name, which pgroll's ledger takes (mecha's pgroll.#Name): the day it is made, its
 // four-digit count among the migrations made that day, and what it does, 20261109_0001_retire_ref.

@@ -143,8 +143,16 @@ def main [] {
 	g add -A
 	g commit -q -m base
 	g checkout -q -b side
-	emitted $app $proto2 [$id $status_closed ((field ref 3 uuid false) | merge {retired: true})] [{name: orders_ref, cols: [id]}] [open closed]
+	# The side also adds memo, a copy of status: its backfill goes once the migration is made, as the
+	# lint wants, and the migration records it.
+	let proto3 = $"($proto2)  optional string memo = 4 [json_name = \"memo\"];\n"
+	let memo = (field memo 4 string false)
+	emitted $app $proto3 [$id $status_closed ((field ref 3 uuid false) | merge {retired: true}) $memo] [{name: orders_ref, cols: [id]}] [open closed]
+	"package demo\n\nschemaMigrations: backfill: Order: memo: \"status\"\n\nloop: surface: checks: schemaMigrations.checks\n" | save --force --raw ($app | path join migrations_spec.cue)
+	check "plan says a copy into an added column is the ledger's" ((migrate $app plan).stdout | str contains "ledger   field-added Order.memo")
 	check "the side branch makes its migration" ((migrate $app make status_default).exit_code == 0)
+	"package demo\n\nloop: surface: checks: schemaMigrations.checks\n" | save --force --raw ($app | path join migrations_spec.cue)
+	check "the side's lint passes with its backfill removed" ((migrate $app check).exit_code == 0)
 	cd $app
 	g add -A
 	g commit -q -m side
@@ -160,12 +168,14 @@ def main [] {
 	g checkout -q side
 	check "merging main conflicts on what make wrote" ((g merge -q main).exit_code != 0)
 	# generate settles the emitted files: the model is both branches' changes.
-	emitted $app $proto2 [$id (field status 2 string false {default: "'closed'"}) ((field ref 3 uuid false) | merge {retired: true})] [{name: orders_ref, cols: [id]}] [open closed]
+	emitted $app $proto3 [$id (field status 2 string false {default: "'closed'"}) ((field ref 3 uuid false) | merge {retired: true}) $memo] [{name: orders_ref, cols: [id]}] [open closed]
 	check "the lint refuses the merged tree" ((migrate $app check).exit_code == 1)
 	let rebased = (migrate $app rebase main)
 	let names = (ls ($app | path join migrations) | get name | path basename | where {|n| $n =~ '^\d{8}_\d{4}_.*\.json$' } | sort)
 	check "rebase keeps main's migration and makes the side's again, named after it" ($rebased.exit_code == 0 and ($names | length) == 2 and ($names.0 == $"($theirs).json") and ($names.1 | str ends-with "_status_default.json") and ($names.1 > $names.0) and not ($"($ours).json" in $names))
-	check "the rebased migration holds only the side's change" ((open ($app | path join $"migrations/($names.1)") | get operations.0.sql.up) =~ "SET DEFAULT 'closed'" and not ((open ($app | path join $"migrations/($names.1)") | get operations.0.sql.up) =~ "DROP NOT NULL"))
+	let up2 = (open ($app | path join $"migrations/($names.1)") | get operations.0.sql.up)
+	check "the rebased migration holds only the side's change" ($up2 =~ "SET DEFAULT 'closed'" and not ($up2 =~ "DROP NOT NULL"))
+	check "and its copy, read back from the declarations the side's migration recorded" ($rebased.stdout =~ "making it again with the declarations" and ($up2 | str contains "SET \"memo\" = status") and ($up2 | str starts-with "-- declared: "))
 	check "the lint passes after rebase" ((migrate $app check).exit_code == 0)
 	cd $app
 	let program2 = (^cue export . -e code.state.migrations --out json | from json)
@@ -175,6 +185,9 @@ def main [] {
 	"{}" | save --raw ($app | path join migrations/notes.json)
 	check "the lint refuses a .json in migrations/ that is no migration" ((migrate $app check).stderr | str contains "migrations/notes.json: migrations_ledger.cue embeds every .json here but the snapshot")
 	rm ($app | path join migrations/notes.json)
+	"{" | save --raw ($app | path join migrations/broken.json)
+	check "and one that is no JSON, whose message nothing hides" ((migrate $app check).stderr | str contains "migrations/broken.json: migrations_ledger.cue embeds every .json here but the snapshot")
+	rm ($app | path join migrations/broken.json)
 
 	# init --from takes the model as a git ref held it: in a copy of the app with no migrations yet,
 	# the snapshot at main's base, so the first make is what changed since.

@@ -147,8 +147,11 @@ deno run --no-config -A migrations/migrate.ts upgrade             # after a plug
 | `migrations/snapshot.json`, `migrations/migrations.sum`, `migrations/<YYYYMMDD>_<NNNN>_<name>.json` | the app's, written by `init`, `make`, `rebase`, `fold` and `upgrade` only |
 
 All of them are committed: the regenerated files too, as an app commits every host's `*_plugin.cue`.
-`check` needs only deno. `plan` and `make` also run `cue` (or the binary `CUE` names) to read the
-declarations and the app's migration names from the program.
+`plan` and `make` run `cue` to read the declarations and the app's migration names from the program.
+`check` runs it only when the model is the snapshot, on `migrations_plugin.cue` and
+`migrations_spec.cue` alone (the whole program when the spec needs more), to find a declaration left
+behind. Its lint command allows `cue` and the `CUE` variable only: an app that names another binary
+in `CUE` widens `--allow-run` to it.
 
 `migrations_ledger.cue` embeds every `.json` in `migrations/` but the snapshot into
 `code.state.migrations`, by a glob, so it is never generated and a merge has nothing in it to settle.
@@ -172,9 +175,10 @@ merge, and the branch's migration may sort before one main already released, whi
 would refuse. After merging main in and running generate, run
 `deno run --no-config -A migrations/migrate.ts rebase main`. It takes main's snapshot, sum and
 migrations whole, removes the branch's own migrations, and runs make again under the branch's name,
-so the branch's changes become one migration named after main's. If make then names a carry or
-backfill (one the branch's migration had, and its declaration was deleted), declare it and run
-`make <name>`.
+so the branch's changes become one migration named after main's. Each migration records the
+declarations it was made with (`-- declared: …`, its first line), and `rebase` makes the branch's
+again with them, so a copy, a fill or a carry it had is kept although the app removed the
+declaration. One the app declares again wins; one no change reads any more is dropped.
 
 ### Declarations
 
@@ -227,11 +231,14 @@ events. Its changes run in three phases, whatever order the columns come in:
 
 **A carry, a backfill or a copy is a `DO` block.** It runs only where a row needs moving: one holding
 a value gone, a `NULL` in a column made required, or, in a column added, a row that still holds what
-the replay gave it (its constant default, or `NULL`) and differs from its copy. So a fresh database,
-one copied already, and a row written or seeded with a value of its own run nothing. A volatile
-default (`now()`) cannot mark the rows the replay filled, so that copy touches every row that
-differs, which is noted. A machine's column is copied with its trigger off, as a copy is no
-transition. A copy into a required column must give every
+the replay gave it (`NULL`, or a constant default: a literal, cast or not) and differs from its copy.
+So a fresh database, one copied already, and a row written or seeded with a value of its own run
+nothing. A row written between the replay and the migration with the default itself cannot be told
+from one the replay filled, and takes the copy. Any other default (`now()`, a function) marks no
+row, so that copy touches every row that differs, which is noted. A `json` column is compared as
+`jsonb`. A machine's column is copied with its trigger off, as a copy is no transition, and a block
+that turns triggers off takes its table's `ACCESS EXCLUSIVE` lock first, so it never climbs locks
+against an app transaction that read the table and then writes it. A copy into a required column must give every
 row a value (`coalesce(placed, 'epoch')`, say): one `NULL` fails the migration whole. Seed rows meet it
 too. A carry turns off only the triggers that exist and are on when it
 runs, and puts each back in the mode it had. Postgres checks every check on a row it updates, even one `NOT VALID`, and the replay restates
@@ -317,6 +324,9 @@ if that is the model at the commit exactly. Then it sums it again.
   - a kind with no rule, and each op's names against what `droppedBy` reads;
   - the migration, its name and the strays, the sum with a fold, the snapshot's format and its
     upgrade.
+- The SQL a plan writes is run on Postgres by hand (CI has none): each block on rows that break an
+  unrelated `NOT VALID` check, a second run, a fresh table, triggers in every mode, an app trigger
+  named and not, and a concurrent app transaction against a block that turns triggers off.
 - [`test.nu`](test.nu): the installer and the driver in a fresh example app:
   - `init`, then a lint that refuses a moved model;
   - a `make` that names the carry it needs, then writes one operation;
@@ -325,8 +335,8 @@ if that is the model at the commit exactly. Then it sums it again.
   - an index rebuilt over a migration that dropped it, refused until `fold`, and the declaration
     left from the last migration, refused until removed;
   - a rename, refused;
-  - two branches that each made a migration, merged: `rebase` remakes the side's after main's, and
-    the ledger embeds both with nothing to settle;
+  - two branches that each made a migration, merged: `rebase` remakes the side's after main's, with
+    the copy its migration recorded, and the ledger embeds both with nothing to settle;
   - a `.json` in `migrations/` that is no migration, refused;
   - `init --from` a git ref, taking the model the ref held.
 

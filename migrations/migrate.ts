@@ -103,6 +103,18 @@ function program(): { declared: Record<string, unknown>; names: string[] } {
   return { declared, names: declared.names ?? [] };
 }
 
+// The declarations alone, for the lint: the schema and the app's spec evaluated by themselves, which
+// takes no time, and the whole program only when the spec leans on the rest of it.
+function declarations(): Record<string, unknown> {
+  const cue = Deno.env.get("CUE") ?? "cue";
+  try {
+    return JSON.parse(run(cue, ["export", "migrations_plugin.cue", "migrations_spec.cue", "-e", "schemaMigrations", "--out", "json"]));
+  } catch (e) {
+    if (!(e instanceof Refusal)) throw e;
+    return program().declared;
+  }
+}
+
 function report(p: ReturnType<typeof rules.plan>) {
   for (const r of p.refused) console.error(`refused  ${r.at}: ${r.why}`);
   for (const n of p.needs) console.error(`needs    ${n.at}: declare schemaMigrations.${n.declare} in migrations_spec.cue: ${n.why}`);
@@ -117,19 +129,19 @@ async function write(now: ReturnType<typeof rules.model>, foldedName: string | n
 
 // The next migration from the snapshot to the model, with the snapshot and the sum moved with it;
 // false when the model is the snapshot. A refusal or a need writes nothing.
-async function make(slug: string): Promise<boolean> {
+async function make(slug: string, inherited: Record<string, unknown> = {}): Promise<boolean> {
   const now = modelAt();
   const list = rules.diff(snapshotModel(), now);
   if (!list.length) return false;
   const { declared, names: all } = program();
-  const p = rules.plan(list, declared, droppedNow());
+  const p = rules.plan(list, declared, droppedNow(), inherited);
   report(p);
   if (p.refused.length || p.needs.length) fail("nothing written");
   const names = migrations();
   if (p.ops.length) {
     const last = folded();
     const name = rules.nextName(last ? [...names, last] : names, slug, today(), all);
-    Deno.writeTextFileSync(`${DIR}/${name}.json`, JSON.stringify(rules.migration(p.ops), null, 2) + "\n");
+    Deno.writeTextFileSync(`${DIR}/${name}.json`, JSON.stringify(rules.migration(p.ops, p.used), null, 2) + "\n");
     console.log(`wrote ${DIR}/${name}.json: ${p.ops.length} change${p.ops.length === 1 ? "" : "s"}, in one operation`);
   } else {
     console.log("nothing for the ledger: the replay of the emitted schema makes these changes");
@@ -198,13 +210,22 @@ async function main(command: string | undefined, args: string[]) {
       const theirNames = [...theirs.keys()].filter((p) => p.startsWith(`${DIR}/`) && named(p.slice(DIR.length + 1))).map((p) => p.slice(DIR.length + 1, -5));
       const mine = migrations().filter((n) => !theirNames.includes(n));
       const slugs = [...new Set(mine.map((n) => rules.slugOf(n)))];
+      // What the branch's migrations were made with, which the app removed once they were: make
+      // reads it again, so the remade migration keeps every copy, fill and carry they had.
+      const inherited: Record<string, Record<string, Record<string, unknown>>> = {};
+      for (const n of mine) {
+        for (const [what, entities] of Object.entries(rules.declaredIn(JSON.parse(read(`${DIR}/${n}.json`))) as Record<string, Record<string, Record<string, unknown>>>)) {
+          for (const [entity, columns] of Object.entries(entities)) Object.assign((inherited[what] ??= {})[entity] ??= {}, columns);
+        }
+      }
       const slug = given ?? (slugs.length === 1 ? slugs[0] : fail(mine.length ? `the branch made ${mine.join(", ")}: name the one migration they become (rebase ${ref} <name>)` : `the branch made no migration: name what the next one does (rebase ${ref} <name>), in case the model needs one`));
       for (const n of migrations()) if (!theirNames.includes(n)) Deno.removeSync(`${DIR}/${n}.json`);
       for (const [p, text] of theirs) Deno.writeTextFileSync(p, text);
       await sound();
       console.log(`took ${ref}'s ${SNAPSHOT}, ${SUM} and ${theirNames.length} migration${theirNames.length === 1 ? "" : "s"}${mine.length ? `; removed the branch's ${mine.join(", ")} (git keeps them)` : ""}`);
+      if (Object.keys(inherited).length) console.log(`making it again with the declarations ${mine.join(", ")} recorded`);
       try {
-        if (!await make(slug)) console.log("the model is the snapshot: nothing to make");
+        if (!await make(slug, inherited)) console.log("the model is the snapshot: nothing to make");
       } catch (e) {
         if (e instanceof Refusal) fail(`${e.message}: ${ref}'s migrations are in place; declare what make names (a carry or backfill the branch's migration had), then run make ${slug}`);
         throw e;
@@ -243,7 +264,17 @@ async function main(command: string | undefined, args: string[]) {
       const list = rules.diff(before, modelAt());
       // With the model at the snapshot, every declaration left in migrations_spec.cue is one no
       // change reads, which the next make would refuse: it is caught here, in the change that left it.
-      const p = rules.plan(list, list.length ? {} : program().declared, droppedNow());
+      // A program that does not evaluate is reported with the rest, not instead of it.
+      let declared = {};
+      if (!list.length) {
+        try {
+          declared = declarations();
+        } catch (e) {
+          if (!(e instanceof Refusal)) throw e;
+          problems.push(`the declarations could not be read: ${e.message}`);
+        }
+      }
+      const p = rules.plan(list, declared, droppedNow());
       for (const r of p.refused) problems.push(`${r.at}: ${r.why}`);
       if (list.length && !p.refused.length) {
         problems.push(`the model moved since ${SNAPSHOT} (${list.length} change${list.length === 1 ? "" : "s"}): run \`deno run --no-config -A migrations/migrate.ts make <name>\``);

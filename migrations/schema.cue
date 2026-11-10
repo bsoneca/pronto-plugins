@@ -25,7 +25,7 @@ code: state: migrations?: _
 	carry: [Entity=string]: [Column=string]: {
 		values?: [string]: string
 		set?: [string]: string
-		triggers: *[] | [...string]
+		triggers: *[] | [...#Trigger]
 	}
 	// The SQL expression of the row a column's rows take, alone or with the `triggers` the fill
 	// would trip, turned off around it as a carry's are. On a column made required, its NULL rows take
@@ -33,7 +33,9 @@ code: state: migrations?: _
 	// that still hold what the replay gave them take it: another column's value, as a rename spelled
 	// as a retirement beside an addition keeps its data. Beside a retirement in the same change it is
 	// needed; DEFAULT keeps the replay's default instead.
-	backfill: [Entity=string]: [Column=string]: string | {value!: string, triggers: *[] | [...string]}
+	backfill: [Entity=string]: [Column=string]: string | {value!: string, triggers: *[] | [...#Trigger]}
+	// A trigger's name: an identifier.
+	#Trigger: =~"^[A-Za-z_][A-Za-z0-9_$]*$"
 	// Computed, not declared: the names of all the app's pgroll migrations, its own and any written by
 	// hand, so make numbers the next after them.
 	names: [...string]
@@ -42,7 +44,7 @@ code: state: migrations?: _
 	checks: {
 		"migrations": {
 			verb: "lint"
-			cmds: ["deno run --no-config --allow-read --allow-run --allow-env migrations/migrate.ts check"]
+			cmds: ["deno run --no-config --allow-read --allow-run=cue --allow-env=CUE migrations/migrate.ts check"]
 			note: "the snapshot is the model (schema/entities.proto, pronto's facts and its emitted schema), every migration is as make wrote it, migrations/ holds no other .json the ledger would embed, and no declaration is left once its migration is made"
 		}
 	}
