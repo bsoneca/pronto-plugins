@@ -14,7 +14,7 @@ planeValues: {
 		// The node's gateway routes the host (planeObjects); the chart's ingress is Traefik's or
 		// nginx's, neither of which a pronto node runs.
 		enabled: false
-		appHost: devFlow.plane.host
+		appHost: devFlow.board.host
 	}
 	// Cloudflare ends TLS: Plane's links are https.
 	ssl: externalTermination: true
@@ -49,7 +49,7 @@ planeObjects: [
 		metadata: {name: "plane-gateway", namespace: _ns}
 		spec: {
 			gatewayClassName: "eg"
-			listeners: [{name: "http", port: 80, protocol: "HTTP", hostname: devFlow.plane.host, allowedRoutes: namespaces: from: "Same"}]
+			listeners: [{name: "http", port: 80, protocol: "HTTP", hostname: devFlow.board.host, allowedRoutes: namespaces: from: "Same"}]
 		}
 	},
 	{
@@ -57,7 +57,7 @@ planeObjects: [
 		kind:       "HTTPRoute"
 		metadata: {name: "plane-route", namespace: _ns}
 		spec: {
-			hostnames: [devFlow.plane.host]
+			hostnames: [devFlow.board.host]
 			parentRefs: [{group: "gateway.networking.k8s.io", kind: "Gateway", name: "plane-gateway"}]
 			// The chart's own ingress paths (templates/ingress.yaml), one rule each.
 			rules: [for r in _routes {

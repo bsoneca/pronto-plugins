@@ -1,7 +1,10 @@
-// The dev flow's rules (bsoneca/pronto's docs/dev-flow.md), pure: which issue a pull request is, where
-// an event moves an issue, an issue's flag, the agent cap. The hooks (hook.ts) and the intent
-// (connect.ts) do the talking to Plane; what they decide is decided here, and tested as CUE cases
-// (tests/unit/devflow.cue).
+// The dev flow's rules (devflow/dev-flow.md), pure: which issue a pull request is, where an event
+// moves an issue, an issue's flag, the agent cap. The hooks (hook.ts) and the intent (connect.ts)
+// do the talking to the board; what they decide is decided here, and tested as CUE cases
+// (tests/unit/devflow.cue). The rules reason in roles (backlog, refine, ready, implementing,
+// review, merged, live, done, cancelled), never in a repository's names for its states: a caller
+// maps a state's name to its role with roleOf and a role back to its name with nameOf, through
+// the repository's `roles` (schema.cue).
 
 /** The issue a pull request is for: the first `<ID>-<n>` in its title, else its branch (written
  * `<id>-<n>/<slug>`, lower case), as `<ID>-<n>`; null when neither names one. */
@@ -14,35 +17,48 @@ export function keyOf(identifier, ...texts) {
   return null;
 }
 
-const order = ["Backlog", "Refine", "Ready", "Implementing", "Review", "Merged", "Live", "Done"];
-const rank = (s) => order.indexOf(s);
+const order = ["backlog", "refine", "ready", "implementing", "review", "merged", "live", "done"];
+const rank = (r) => order.indexOf(r);
 
-/** Where an event moves an issue in `state`, or null to leave it. `done` is when the issue ends (doneAt):
+/** The role a state plays in the repository's `roles` (role to the state's name), or null when
+ * it plays none. */
+export function roleOf(roles, name) {
+  return Object.keys(roles ?? {}).find((r) => roles[r] === name) ?? null;
+}
+
+/** The name the repository gives a role's state. */
+export function nameOf(roles, role) {
+  const n = roles?.[role];
+  if (!n) throw new Error(`no such role: ${role}`);
+  return n;
+}
+
+/** Where an event moves an issue in role `state`, as a role, or null to leave it. `done` is when the issue ends (doneAt):
  * "flip" (its flag is on for everyone), "release" (released) or "merge" (merged); it only matters for
  * `merged` and `released`. An issue never moves back past
  * where it is, but for the two ways back the flow names: a pull request closed unmerged (back to
  * Implementing) and a flip rolled back (back to Live). A cancelled issue is never moved. */
 export function moveFor(event, state, done = "flip") {
-  if (state === "Cancelled" || rank(state) < 0) return null;
+  if (state === "cancelled" || rank(state) < 0) return null;
   const forward = (to) => (rank(state) < rank(to) ? to : null);
   switch (event) {
     case "opened":
     case "reopened":
     case "ready_for_review":
-      return forward("Review");
+      return forward("review");
     case "merged":
-      return forward(done === "merge" ? "Done" : "Merged");
+      return forward(done === "merge" ? "done" : "merged");
     case "closed":
-      return state === "Review" ? "Implementing" : null;
+      return state === "review" ? "implementing" : null;
     case "released":
-      if (done === "release") return state === "Merged" || state === "Live" ? "Done" : null;
-      return state === "Merged" ? "Live" : null;
+      if (done === "release") return state === "merged" || state === "live" ? "done" : null;
+      return state === "merged" ? "live" : null;
     // A flip that reached everyone. An app released outside release-cron never says "released", so
     // Merged goes straight to Done.
     case "flipped":
-      return state === "Merged" || state === "Live" ? "Done" : null;
+      return state === "merged" || state === "live" ? "done" : null;
     case "rolledback":
-      return state === "Done" ? "Live" : null;
+      return state === "done" ? "live" : null;
     default:
       throw new Error(`no such event: ${event}`);
   }
@@ -73,9 +89,10 @@ export function laneOf(modules, infra) {
 }
 
 /** Whether an issue may start (move to Implementing): its lane has `slots`, the lane's issues already
- * Implementing take one each, and an urgent one (P0) starts regardless. */
-export function mayStart(busy, slots, priority, lane) {
-  if (priority === "urgent") return { ok: true, why: "P0: starts past the slots" };
+ * Implementing take one each, and an urgent one (P0, `urgent` in the board's own word) starts
+ * regardless. */
+export function mayStart(busy, slots, priority, lane, urgent = "urgent") {
+  if (priority === urgent) return { ok: true, why: "P0: starts past the slots" };
   if (slots === 0) return { ok: false, why: `the team has no ${lane}` };
   return busy < slots
     ? { ok: true, why: `${lane} slot ${busy + 1} of ${slots}` }
@@ -98,26 +115,29 @@ export function mayPlan(planned, cap, add, lane) {
 }
 
 /** The next Ready issue a lane pulls: the sprint's Ready issues of that lane, most urgent first
- * (Plane's urgent, high, medium, low, none), then the oldest. `issues` are `{key, sequence, priority}`. */
-export function pullNext(issues) {
-  const rank = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
-  const sorted = [...issues].sort((a, b) => (rank[a.priority] ?? 4) - (rank[b.priority] ?? 4) || a.sequence - b.sequence);
+ * (`order`: the board's priorities from P0 down, then none), then the oldest. `issues` are
+ * `{key, sequence, priority}`. */
+export function pullNext(issues, order = ["urgent", "high", "medium", "low", "none"]) {
+  const rank = (p) => (order.includes(p) ? order.indexOf(p) : order.length);
+  const sorted = [...issues].sort((a, b) => rank(a.priority) - rank(b.priority) || a.sequence - b.sequence);
   return sorted[0] ?? null;
 }
 
-/** P0..P3 as Plane's priority, and back. */
+/** P0..P3 as the board's priority, in `priorities` (P to the board's word; Plane's by default). */
+/** @type {Record<string, string>} */
 const plane = { P0: "urgent", P1: "high", P2: "medium", P3: "low" };
-export function priorityOf(p) {
-  const v = plane[String(p).toUpperCase()];
+export function priorityOf(p, priorities = plane) {
+  const v = priorities[String(p).toUpperCase()];
   if (!v) throw new Error(`a priority is P0, P1, P2 or P3, not ${p}`);
   return v;
 }
 
-/** Where a new bug goes by its priority (rule 6): P0 starts now, P1 joins the current sprint, P2 and
- * P3 wait in the Backlog for a coming sprint. */
-export function bugPlace(p) {
-  const v = priorityOf(p);
-  return v === "urgent" ? { state: "Implementing", sprint: true } : v === "high" ? { state: "Refine", sprint: true } : { state: "Backlog", sprint: false };
+/** Where a new bug goes by its priority (rule 6), as a role: P0 starts now, P1 joins the current
+ * sprint, P2 and P3 wait in the Backlog for a coming sprint. */
+export function bugPlace(p, priorities = plane) {
+  priorityOf(p, priorities);
+  const n = String(p).toUpperCase();
+  return n === "P0" ? { role: "implementing", sprint: true } : n === "P1" ? { role: "refine", sprint: true } : { role: "backlog", sprint: false };
 }
 
 /** A sprint is a Plane cycle named `Sprint <n>: <theme>`. Its number, or null for another cycle. */

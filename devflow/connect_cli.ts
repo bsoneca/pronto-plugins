@@ -1,7 +1,8 @@
 // `connect plane` from a terminal (docs/intents.md), through bin/pronto:
 //   bin/pronto plan|connect plane <repo>
 // <repo> is a repository with a devflow/devflow.cue (bsoneca/pronto's): its board set up, from Plane on
-// its node to a board ready for its first sprint. Run again, it goes on from the step it stopped at.
+// its node (or, with no cluster, from a Plane that is there) to a board ready for its first sprint.
+// Run again, it goes on from the step it stopped at.
 import { resolve } from "jsr:@std/path@1.1.2";
 import { connect, finished, line, plan, waitingOn } from "../intents/run.ts";
 import { steps } from "./connect.ts";
@@ -23,5 +24,5 @@ if (mode === "plan") {
   for (const o of await plan(all)) console.log(line(o));
 } else {
   const out = await connect(all, (o) => console.log(line(o)));
-  console.log(finished(out, all) ? `\nThe board is ready: https://${flow.plane.host}/${flow.plane.workspace}/` : waitingOn(out));
+  console.log(finished(out, all) ? `\nThe board is ready: https://${flow.board.host}/${flow.board.workspace}/` : waitingOn(out));
 }
