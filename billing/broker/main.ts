@@ -327,6 +327,19 @@ export async function broker(p: {
 
   // A tenant's page sends an account to pay for a plan. Anyone may ask: what
   // it opens is a payment for that account, which only adds to it.
+  // A read of Stripe for one account, and nothing written anywhere: the account's customers and
+  // subscriptions, answered only by whether Stripe answered. A flag's live check reads Stripe through
+  // it as the tester (PRONTO-218: stripe_door's), where every other path writes (a ticket, a session).
+  async function probe(req: Request, client: string): Promise<Response> {
+    const b = await body(req);
+    const t = tenant(b.tenant);
+    const account = accountOf(b.account);
+    if (!t || !account) return json(400, { error: "tenant and account required" });
+    if (!perClient.take(client) || !perTenant.take(t)) return json(429, { error: "too many probes; try again in a minute" });
+    await subscriptionsOf(await customersOf(t, account));
+    return json(200, { ok: true });
+  }
+
   async function checkout(req: Request, client: string): Promise<Response> {
     const b = await body(req);
     const t = tenant(b.tenant);
@@ -584,6 +597,10 @@ export async function broker(p: {
         return await (path === "/trial/offer" ? trialOffer(req, client) : trialCheckout(req, client));
       }
       if (req.method === "POST" && path === "/portal") return await portal(req);
+      if (req.method === "POST" && path === "/probe") {
+        const addr = info?.remoteAddr as Deno.NetAddr | undefined;
+        return await probe(req, req.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() || addr?.hostname || "");
+      }
       if (req.method === "POST" && path === "/resync") return await resync(req);
       if (req.method === "POST" && path === "/stripe") return await webhook(req);
       if (req.method === "GET" && path === "/health") return json(200, { ok: true });
@@ -614,7 +631,7 @@ export function twoModes(p: {
     const url = new URL(req.url), path = url.pathname;
     let tenant: unknown = null;
     if (req.method === "GET" && path === "/onboarded") tenant = url.searchParams.get("tenant");
-    else if (req.method === "POST" && ["/checkout", "/trial/offer", "/trial/checkout", "/portal", "/resync", "/onboard"].includes(path)) {
+    else if (req.method === "POST" && ["/checkout", "/trial/offer", "/trial/checkout", "/portal", "/resync", "/onboard", "/probe"].includes(path)) {
       try {
         tenant = (await req.clone().json())?.tenant;
       } catch {

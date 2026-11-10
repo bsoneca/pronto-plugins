@@ -248,6 +248,13 @@ export function service(s: Settings) {
         return await entitle((await res.json()).token);
       }
       if (req.method === "GET" && path === "/billing/health") return json(200, { ok: true });
+      // The reader's own account read at Stripe through the broker, nothing written: what a flag's live
+      // check asks as the tester (PRONTO-218).
+      if (req.method === "GET" && path === "/billing/probe") {
+        const account = await reader(req);
+        if (account instanceof Response) return account;
+        return await toBroker("/probe", { account });
+      }
       return json(404, { error: "not found" });
     } catch (e) {
       console.error(`billing: ${(e as Error).message}`);
