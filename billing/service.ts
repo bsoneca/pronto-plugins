@@ -150,8 +150,8 @@ export function service(s: Settings) {
   // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag
   // for them now: asked with the reader's own session, which the door's OFREP route reads the account
   // from (and as the targetingKey, which flagd reached directly reads). Unset flag: no word, the
-  // broker's own way, as is a flag the live document does not have yet. A flag that cannot be asked
-  // fails the request, never picks a way.
+  // broker's own way. A flag that cannot be asked, or that is not there, fails the request, never
+  // picks a way.
   async function doorOn(account: string, auth: string | null): Promise<boolean | undefined> {
     if (!s.doorFlag) return undefined;
     if (!s.flags) throw new Error("BILLING_DOOR_FLAG needs BILLING_FLAGS: where to ask it");
@@ -160,11 +160,9 @@ export function service(s: Settings) {
       method: "POST", headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) },
       body: JSON.stringify({ context: { targetingKey: account } }), signal: AbortSignal.timeout(10_000),
     });
-    const answer = res.ok || res.status === 404 ? await res.json().catch(() => null) as { value?: unknown; errorCode?: unknown } | null : (await res.body?.cancel(), null);
-    // A flagd whose live document does not have the flag yet (OFREP's FLAG_NOT_FOUND) says no word:
-    // the broker's own way, as before the flag, so setting BILLING_DOOR_FLAG changes nothing until a
-    // push names it. Anything else that is not an answer fails the request.
-    if (res.status === 404 && answer?.errorCode === "FLAG_NOT_FOUND") return undefined;
+    const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
+    // A flag the live document does not have (FLAG_NOT_FOUND) is no answer either: BILLING_DOOR_FLAG
+    // is set only once a push has published it (release.cue).
     if (!res.ok || typeof answer?.value !== "boolean") throw new Error(`flag ${s.doorFlag}: flagd answered ${res.status}`);
     return answer.value;
   }
