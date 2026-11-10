@@ -72,6 +72,19 @@ const run = async (cmd: string[], env: Record<string, string> = {}) => {
 
 type Spec = { upstream: string; org: string; slug: string; files: string[]; build: string; token: string };
 
+// A map built in the scratch folder names its sources relative to it, so through the builder's own
+// folders (../../Users/<name>/…): each is named from the app's root instead, as GlitchTip shows it.
+const relativeSources = async (map: string) => {
+	const m = JSON.parse(await Deno.readTextFile(map));
+	const root = `${Deno.cwd()}/`;
+	const base = `file://${map.replace(/[^/]+$/, "")}`;
+	m.sources = (m.sources ?? []).map((src: string) => {
+		const p = decodeURIComponent(new URL(src, base).pathname);
+		return p.startsWith(root) ? p.slice(root.length) : p.split("/").at(-1);
+	});
+	await Deno.writeTextFile(map, JSON.stringify(m));
+};
+
 const spec = async (): Promise<Spec> => JSON.parse(await Deno.readTextFile("errors/sourcemaps.json"));
 
 export const upload = async () => {
@@ -89,6 +102,7 @@ export const upload = async () => {
 			await inject([copy]);
 			const [a, b] = [await Deno.readFile(copy), await Deno.readFile(f)];
 			if (a.length !== b.length || a.some((x, i) => x !== b[i])) throw new Error(`errors: ${f} built again is not the bundle released; its map would lie`);
+			await relativeSources(`${copy}.map`);
 			files.push(copy, `${copy}.map`);
 		}
 		const token = Deno.env.get("ERRORS_UPLOAD_TOKEN") ?? (s.token ? (await run(["sh", "-c", s.token])).out.trim() : "");
