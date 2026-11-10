@@ -56,7 +56,7 @@ jobs:
           sayt --script tools.nu cue vet -c ./probe
           sayt --script tools.nu cue vet -c -t package=check ./probe/export
           sayt --script tools.nu cue vet -c ./release-notes
-          sayt --script tools.nu cue vet -c ./release-notes/export
+          sayt --script tools.nu cue vet -c -t package=check ./release-notes/export
           sayt --script tools.nu cue vet -c ./runners
           sayt --script tools.nu cue vet -c -t setup=check-org ./runners/export
           sayt --script tools.nu cue vet -c -t setup=check-linux -t user=check ./runners/export
@@ -125,7 +125,8 @@ jobs:
         run: |
           app=$(mktemp -d)/app && mkdir -p "$app" && printf 'package demo\n' > "$app/program.cue"
           ./bin/pronto-release-notes "$app"
-          test -f "$app/release-notes/release-notes.ts" && test -f "$app/release-notes/notes.js"
+          test -f "$app/release-notes/release-notes.ts" && test -f "$app/release-notes/notes.js" && test -f "$app/release_notes_plugin.cue"
+          (cd "$app" && cue export release_notes_plugin.cue -e releaseNotes.timeZone) | grep -qx '"America/Sao_Paulo"'
           ! ./bin/pronto-release-notes "$app" nope=1
       - name: Bind a Unity hatch, then refuse a missing module
         run: |
