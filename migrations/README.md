@@ -236,15 +236,19 @@ So a fresh database, one copied already, and a row written or seeded with a valu
 nothing. A row written between the replay and the migration with the default itself cannot be told
 from one the replay filled, and takes the copy. Any other default (`now()`, a function) marks no
 row, so that copy touches every row that differs, which is noted. A `json` column is compared as
-`jsonb`. A machine's column is copied with its trigger off, as a copy is no transition, and a block
+`jsonb`. A copy into a required column must give every row a value (`coalesce(placed, 'epoch')`,
+say): one `NULL` fails the migration whole. Seed rows meet it too.
+
+**Triggers.** A machine's column is copied with its trigger off, as a copy is no transition, and a
+backfill or a carry may name any other trigger on its table, an app's own guard too. A block turns
+off only those that exist and are on when it runs, and puts each back in the mode it had. A block
 that turns triggers off takes its table's `ACCESS EXCLUSIVE` lock first, so it never climbs locks
-against an app transaction that read the table and then writes it. A copy into a required column must give every
-row a value (`coalesce(placed, 'epoch')`, say): one `NULL` fails the migration whole. Seed rows meet it
-too. A carry turns off only the triggers that exist and are on when it
-runs, and puts each back in the mode it had. Postgres checks every check on a row it updates, even one `NOT VALID`, and the replay restates
-every check `NOT VALID`. So a row written before a check was restated, on any of its columns, would
-stop the move. The block lifts every check on the table around the update and puts each back as the
-database held it, `NOT VALID`:
+against an app transaction that read the table and then writes it.
+
+**Checks.** Postgres checks every check on a row it updates, even one `NOT VALID`, and the replay
+restates every check `NOT VALID`. So a row written before a check was restated, on any of its
+columns, would stop the move. The block lifts every check on the table around the update and puts
+each back as the database held it, `NOT VALID`:
 - a carry also lifts its own column's check, since a database that skipped releases already holds the
   newest check from the replay, and an earlier carry's destination (one a later migration carries on)
   is outside it;
