@@ -94,7 +94,10 @@ def main [] {
 	let at = {|s| $up | str index-of $s}
 	check "it is one pgroll operation, as pgroll runs a raw SQL operation alone" (($ops | length) == 1)
 	check "it relaxes the retired column and drops its index, then carries the rows" ((do $at "\"ref\" DROP NOT NULL") >= 0 and (do $at "DROP INDEX IF EXISTS \"public\".\"orders_ref\"") >= 0 and (do $at "WHEN 'draft' THEN 'open'") > (do $at "DROP INDEX IF EXISTS"))
-	check "the lint passes once the migration is made" ((migrate $app check).exit_code == 0)
+	let left = (migrate $app check)
+	check "the lint refuses the carry left once its migration is made" ($left.exit_code == 1 and ($left.stderr | str contains "schemaMigrations.carry.Order.status is for no change since the snapshot: remove it"))
+	"package demo\n\nloop: surface: checks: schemaMigrations.checks\n" | save --force --raw ($app | path join migrations_spec.cue)
+	check "the lint passes once the migration is made and its carry removed" ((migrate $app check).exit_code == 0)
 	cd $app
 	let program = (^cue export . -e code.state.migrations --out json | from json)
 	check "the program takes it as a pgroll migration, named by its day" (($program | columns) == [$first] and (($program | get $first | get operations | length) == 1))
@@ -112,8 +115,6 @@ def main [] {
 	emitted $app $proto2 $retired [{name: orders_ref, cols: [id]}] [open closed]
 	let rebuilt = (migrate $app make unique_id)
 	check "make refuses an index a migration dropped, until it is folded" ($rebuilt.exit_code == 1 and ($rebuilt.stderr | str contains $"orders_ref was dropped by ($first)") and ($rebuilt.stderr | str contains $"fold ($first)"))
-	check "and the carry its migration was made with, which no change reads now, until it is removed" ($rebuilt.stderr | str contains "schemaMigrations.carry.Order.status is for no change since the snapshot: remove it")
-	"package demo\n\nloop: surface: checks: schemaMigrations.checks\n" | save --force --raw ($app | path join migrations_spec.cue)
 	let fold = (migrate $app fold $first)
 	check "fold deletes the migration and keeps its number" ($fold.exit_code == 0 and not (($app | path join $"migrations/($first).json") | path exists) and ((open --raw ($app | path join migrations/migrations.sum)) | str contains $"folded ($first)"))
 	cd $app

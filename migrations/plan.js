@@ -18,11 +18,12 @@ const ungenerated = (what, why) => new Error(`${what}: ${why}: run generate`);
 // --- pronto's names ---
 
 // What a column's constraints and trigger are named: Postgres's own names for a column's inline
-// CHECK, UNIQUE and REFERENCES, and pronto's for the trigger of a machine's column
-// (010_machines.sql). Every name this plugin builds, drops or reads on a column is one of these. An
-// index's name is read from 005, as pronto writes it.
+// CHECK, UNIQUE and REFERENCES, pronto's for the check of a checked type (emit.cue, _typeCheck) and
+// for the trigger of a machine's column (010_machines.sql). Every name this plugin builds, drops or
+// reads on a column is one of these. An index's name is read from 005, as pronto writes it.
 export const names = {
   check: (table, column) => `${table}_${column}_check`,
+  type: (table, column) => `${table}_${column}_type`,
   unique: (table, column) => `${table}_${column}_key`,
   ref: (table, column) => `${table}_${column}_fkey`,
   machine: (table, column) => `trg_${table}_${column}_machine`,
@@ -124,31 +125,38 @@ export function parseTables(sql) {
 }
 
 // A column's type and default from its clause, the text after its name: `text DEFAULT 'x' NOT NULL
-// CHECK (...)`. The default runs to the first of the clause's other parts outside quotes and
-// parentheses. A type this does not read is null, and refused where a field needs it.
+// CHECK (...)`, or `uuid PRIMARY KEY DEFAULT gen_random_uuid()`, as #colSql orders its parts. The
+// default is found, and runs to the next of the clause's parts, outside quotes and parentheses. A
+// type this does not read is kept as the clause, and refused where a field needs it.
 const TYPE = /^(double precision|[A-Za-z_][A-Za-z0-9_]*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)(?=\s|$)/;
-const PARTS = [" NOT NULL", " NULL", " PRIMARY KEY", " UNIQUE", " REFERENCES ", " CHECK ", " CONSTRAINT ", " GENERATED "];
+const PARTS = [" NOT NULL", " NULL", " PRIMARY KEY", " UNIQUE", " REFERENCES ", " CHECK ", " CONSTRAINT ", " GENERATED ", " DEFAULT "];
 function columnClause(clause) {
   const m = clause.match(TYPE);
-  if (!m) return null;
+  if (!m) return { unread: clause };
   const rest = clause.slice(m[0].length);
   const out = { sql: m[1].toLowerCase() };
-  if (rest.startsWith(" DEFAULT ")) {
-    const from = " DEFAULT ".length;
-    let i = from, depth = 0, quoted = false;
-    for (; i < rest.length; i++) {
-      const ch = rest[i];
-      if (quoted) {
-        if (ch === "'" && rest[i + 1] === "'") i++;
-        else if (ch === "'") quoted = false;
-      } else if (ch === "'") quoted = true;
-      else if (ch === "(") depth++;
-      else if (ch === ")") depth--;
-      else if (depth === 0 && PARTS.some((p) => rest.startsWith(p, i))) break;
-    }
-    out.default = rest.slice(from, i);
+  const at = outside(rest, 0, (i) => rest.startsWith(" DEFAULT ", i));
+  if (at < rest.length) {
+    const from = at + " DEFAULT ".length;
+    out.default = rest.slice(from, outside(rest, from, (i) => PARTS.some((p) => rest.startsWith(p, i))));
   }
   return out;
+}
+
+// The first index from `from` where `stop` holds outside quotes and parentheses, or the text's end.
+function outside(text, from, stop) {
+  let depth = 0, quoted = false;
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === "'" && text[i + 1] === "'") i++;
+      else if (ch === "'") quoted = false;
+    } else if (ch === "'") quoted = true;
+    else if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (depth === 0 && stop(i)) return i;
+  }
+  return text.length;
 }
 
 // A column's type as pronto's identity compares it: an alias named by its type (text is string),
@@ -183,7 +191,8 @@ export function model(protoText, inputs, sql = {}) {
     const enums = { ...e.cel.enums, ...machined };
     const facts = (f) => {
       const col = columns[f.name];
-      if (!col) throw ungenerated(`${name}.${f.name}`, `005_create_tables.sql has no column ${e.table}.${f.name}, or one whose type this does not read`);
+      if (!col) throw ungenerated(`${name}.${f.name}`, `005_create_tables.sql has no column ${e.table}.${f.name}`);
+      if (col.unread !== undefined) throw foreign("005_create_tables.sql", `${e.table}.${f.name} has the clause "${col.unread}", whose type this does not read`);
       // The replay writes the facts' default, else one pronto adds that they do not state.
       if (!f.generated && f.default !== undefined && f.default !== col.default) throw ungenerated(`${name}.${f.name}`, `its default is ${f.default}, and 005_create_tables.sql writes ${col.default ?? "none"}`);
       return clean({
@@ -239,13 +248,16 @@ export function model(protoText, inputs, sql = {}) {
 // Where a change is: the entity's column, its index, or the entity.
 export const where = (c) => c.field ? `${c.entity}.${c.field}` : c.index ? `${c.entity} index ${c.index}` : c.entity;
 
+// A default's SQL with its string literals emptied, so a word inside one ('random') is no call.
+const code = (d) => String(d).replace(/'(?:[^']|'')*'/g, "''");
+
 // A default read from the session (the caller's claims, a setting): NULL in a migration, so it fills
 // nothing. Postgres folds an unquoted name to lower case, so it is matched in any case.
-export const sessionDefault = (d) => d !== undefined && /\b(auth_\w*|current_setting|current_user|session_user|current_role)\b/i.test(d);
+export const sessionDefault = (d) => d !== undefined && /\b(auth_\w*|current_setting|current_user|session_user|current_role)\b/i.test(code(d));
 
 // A default that takes another value each time it is read (a clock, a random value, a sequence): the
 // replay gives every row a table already holds the value it reads as it runs.
-export const volatileDefault = (d) => d !== undefined && /\b(now|clock_timestamp|statement_timestamp|transaction_timestamp|timeofday|random|gen_random_uuid|uuid_generate_v\w*|nextval|current_timestamp|current_date|current_time|localtimestamp|localtime)\b/i.test(d);
+export const volatileDefault = (d) => d !== undefined && /\b(now|clock_timestamp|statement_timestamp|transaction_timestamp|timeofday|random|gen_random_uuid|uuid_generate_v\w*|nextval|current_timestamp|current_date|current_time|localtimestamp|localtime)\b/i.test(code(d));
 
 // The changes from one model to the next, in a stable order: entities by name, columns by number.
 // A column is paired by its number, never by its name, so a rename is seen as one; a live field and
@@ -273,7 +285,7 @@ export function diff(before, after) {
       const was = bf ?? br, now = af ?? ar;
       const at = { ...on, field: (was ?? now).name, number: Number(n) };
       if (!was) {
-        if (af) out.push(af.required && (af.default === undefined || sessionDefault(af.default)) && !af.generated ? { ...at, kind: "required-added" } : clean({ ...at, kind: "field-added", default: af.default, machine: af.machine }));
+        if (af) out.push(af.required && (af.default === undefined || sessionDefault(af.default)) && !af.generated ? { ...at, kind: "required-added" } : clean({ ...at, kind: "field-added", default: af.default, machine: af.machine, generated: af.generated }));
         continue;
       }
       if (!now) {
@@ -350,11 +362,12 @@ function alter(out, at, was, now, machined) {
 // --- The kinds of change ---
 
 // The phases a migration runs in, whatever order the changes came in: what is relaxed (a NOT NULL,
-// a default, a check, a unique, a reference, a machine's trigger, an index), then the rows moved (a
-// backfill, a copy, a carry), then what is tightened (a NOT NULL, a unique, a reference, an index
-// built again), so no row is moved against a rule the same migration removes, and nothing is
-// tightened before the rows it holds are moved.
-const RELAX = 0, DATA = 1, TIGHTEN = 2;
+// a default, a check, a unique, a reference, a machine's trigger, an index), then the rows filled (a
+// backfill, a copy), then the rows carried, then what is tightened (a NOT NULL, a unique, a
+// reference, an index built again). No row is moved against a rule the same migration removes,
+// nothing is tightened before the rows it holds are moved, and a fill or a copy reads a row as the
+// release before left it, before a carry moves it.
+const RELAX = 0, FILL = 1, DATA = 2, TIGHTEN = 3;
 
 // Every kind of change diff reports, in one place. Its verdict: refused (no migration can make it
 // safe for every holder of the data), the ledger's (an existing column, constraint or index the
@@ -373,7 +386,7 @@ export const KINDS = {
   "field-retyped": { verdict: "refused", why: (c) => `retyped from ${c.from} to ${c.to}: a retype is a new field beside the retired one, which a backfill can copy` },
   "field-revived": { verdict: "refused", why: () => "its number was retired: a retired number is never used again" },
   "retirement-dropped": { verdict: "refused", why: () => "a retired number stays reserved" },
-  "generated-changed": { verdict: "refused", why: () => "a generated column is not altered in place: re-creating it gives it a new attnum, which every replay reports as a column gone" },
+  "generated-changed": { verdict: "refused", why: () => "a generated column is not altered in place: re-creating it gives it a new attnum, which every replay reports as a column gone (a retired generated field keeps its generated expression)" },
   "pk-retired": { verdict: "refused", why: () => "a primary key is never retired" },
   "required-added": {
     verdict: "refused",
@@ -382,12 +395,12 @@ export const KINDS = {
   required: {
     verdict: "ledger",
     ops: (c, x) => {
-      const fill = x.declared("backfill") ?? (sessionDefault(c.default) ? undefined : c.default);
+      const fill = fillOf(x.declared("backfill")) ?? (sessionDefault(c.default) || c.default === undefined ? undefined : { value: c.default, triggers: [] });
       if (fill === undefined) return x.need("backfill", `made required, with ${c.default === undefined ? "no default" : `a default a migration cannot compute (${c.default})`}: the value (an SQL expression of the row) its NULL rows take`);
       if (!fillable(fill, x)) return;
-      // Its own check stays: the value it fills is the model's, which that check (the replay's newest)
-      // admits, or the migration fails.
-      x.op(DATA, "made required: its NULL rows filled", moveSql("$fill$", x.t, `${x.col} IS NULL`, `UPDATE ${x.t} SET ${x.col} = ${fill} WHERE ${x.col} IS NULL;`, [], [names.check(c.table, c.field)]));
+      // Its own checks stay: the value it fills is the model's, which those checks (the replay's
+      // newest) admit, or the migration fails.
+      x.op(FILL, "made required: its NULL rows filled", moveSql("$fill$", x.t, `${x.col} IS NULL`, `UPDATE ${x.t} SET ${x.col} = ${fill.value} WHERE ${x.col} IS NULL;`, fill.triggers, [names.check(c.table, c.field), names.type(c.table, c.field)]));
       x.op(TIGHTEN, "made required", `ALTER TABLE ${x.t} ALTER COLUMN ${x.col} SET NOT NULL;`);
     },
   },
@@ -429,15 +442,31 @@ export const KINDS = {
     verdict: "replay",
     // A backfill declared for a column added copies into it, after the replay added it, what the rows
     // the table held should hold (another column, the field a rename retired): a rename spelled as a
-    // retirement beside an addition keeps its data. Every row the migration finds is one the table
-    // held: it runs once, before the release serves. A copy is not a transition, so a machine's
-    // column is copied with its trigger off.
+    // retirement beside an addition keeps its data. Beside a retirement in the same change, as a
+    // rename is, the backfill is a need, so a migration made again (rebase) never loses the copy;
+    // DEFAULT says the rows keep the replay's default. The copy touches only the rows that still hold
+    // what the replay gave them (its constant default, or NULL), so a row written since with a value
+    // of its own, or seeded with one, keeps it. A copy is not a transition, so a machine's column is
+    // copied with its trigger off, and so is any trigger the backfill names.
     ops: (c, x) => {
-      const fill = x.declared("backfill");
-      if (fill === undefined || !fillable(fill, x)) return;
-      x.op(DATA, `added: the rows the table held take ${fill}`, moveSql("$fill$", x.t, `${x.col} IS DISTINCT FROM (${fill})`, `UPDATE ${x.t} SET ${x.col} = ${fill} WHERE ${x.col} IS DISTINCT FROM (${fill});`, c.machine ? [names.machine(c.table, c.field)] : [], [names.check(c.table, c.field)]));
+      const fill = fillOf(x.declared("backfill"));
+      if (fill === undefined) {
+        if (x.renaming) x.need("backfill", `added beside a field ${c.entity} retires in the same change, as a rename is: the SQL of the row the rows it held take (the retired column), or DEFAULT to keep the replay's default`);
+        return;
+      }
+      if (fill.value === "DEFAULT") return;
+      if (c.generated) return x.refuse("backfill", "a generated column is computed by Postgres: it takes no backfill");
+      if (!fillable(fill, x)) return;
+      const filled = c.default === undefined ? `${x.col} IS NULL` : volatileDefault(c.default) ? null : `${x.col} IS NOT DISTINCT FROM (${c.default})`;
+      const where = [filled, `${x.col} IS DISTINCT FROM (${fill.value})`].filter(Boolean).join(" AND ");
+      x.op(FILL, "added: the rows the table held take their copy", moveSql("$fill$", x.t, where, `UPDATE ${x.t} SET ${x.col} = ${fill.value} WHERE ${where};`, [...fill.triggers, ...(c.machine ? [names.machine(c.table, c.field)] : [])], [names.check(c.table, c.field), names.type(c.table, c.field)]));
     },
-    note: (c, x) => x.declared("backfill") === undefined && volatileDefault(c.default) ? `the replay gives every row the table holds ${c.default}, as it reads when the replay runs (the deploy's time, or a new value a row): declare backfill.${c.entity}.${c.field}, the SQL of the row they should take (another column, say), and make copies it` : undefined,
+    note: (c, x) => {
+      const fill = fillOf(x.declared("backfill"));
+      if (!volatileDefault(c.default) || fill?.value === "DEFAULT") return undefined;
+      if (fill === undefined) return x.renaming ? undefined : `the replay gives every row the table holds ${c.default}, as it reads when the replay runs (the deploy's time, or a new value a row): declare backfill.${c.entity}.${c.field}, the SQL of the row they should take (another column, say), and make copies it`;
+      return `the copy cannot tell a row the replay gave ${c.default} from one written since with a value of its own, so it copies into every row whose value differs (a seed row, a row written between the replay and the migration): a constant default, or none, lets it touch only the rows the replay filled`;
+    },
   },
   "enum-widened": { verdict: "replay" },
   "index-added": {
@@ -480,16 +509,20 @@ const DECLARED = ["carry", "backfill"];
 // op says the names it drops and builds for good.
 export function plan(changes, declared = {}, dropped = {}) {
   const schema = declared.schema ?? "public";
-  const ops = [], refused = [], needs = [], advisories = [];
+  const ops = [], refused = [], needs = [], advisories = [], verdicts = [];
   const read = new Set();
+  // The entities that retire a field in this change: a column added beside one is a rename's.
+  const retiring = new Set(changes.filter((c) => c.kind === "retired").map((c) => c.entity));
   for (const c of changes) {
     const v = verdict(c);
+    const before = ops.length;
     const k = KINDS[c.kind];
     const at = where(c);
     if (v === "refused") {
       // A declaration at a refused change is that change's: refused once, with it.
       if (c.field) for (const what of DECLARED) read.add(`${what}.${c.entity}.${c.field}`);
       refused.push({ at, kind: c.kind, why: k.why(c) });
+      verdicts.push({ at, kind: c.kind, verdict: v });
       continue;
     }
     // A name an earlier migration dropped, which the replay builds again: every fresh database runs
@@ -503,6 +536,7 @@ export function plan(changes, declared = {}, dropped = {}) {
       schema,
       t,
       col: c.field && ident(c.field),
+      renaming: retiring.has(c.entity),
       op,
       // A name dropped for good: an index by its schema, a trigger on its table, a constraint.
       drop: (phase, why, what, name) => op(phase, why, {
@@ -524,6 +558,8 @@ export function plan(changes, declared = {}, dropped = {}) {
     k.ops?.(c, x);
     const note = k.note?.(c, x);
     if (note) advisories.push({ at, kind: c.kind, why: note });
+    // A change the replay makes that also wrote SQL here (a copy) is the ledger's too.
+    verdicts.push({ at, kind: c.kind, verdict: v === "replay" && ops.length > before ? "ledger" : v });
   }
   for (const what of DECLARED) {
     for (const [entity, columns] of Object.entries(declared[what] ?? {})) {
@@ -533,12 +569,16 @@ export function plan(changes, declared = {}, dropped = {}) {
     }
   }
   ops.sort((a, b) => a.phase - b.phase);
-  return { ops, refused, needs, advisories };
+  return { ops, refused, needs, advisories, verdicts };
 }
+
+// A backfill as declared: the SQL expression of the row alone, or with the triggers the fill would
+// trip (an app's own, say) to turn off around it.
+const fillOf = (d) => d === undefined ? undefined : typeof d === "string" ? { value: d, triggers: [] } : { value: d.value, triggers: d.triggers ?? [] };
 
 // A backfill is an SQL expression put inside a $fill$-quoted block, so it may not hold $fill$.
 function fillable(fill, x) {
-  if (!String(fill).includes("$fill$")) return true;
+  if (!String(fill.value).includes("$fill$")) return true;
   x.refuse("backfill", "the backfill holds $fill$, its block's own quote");
   return false;
 }
@@ -557,19 +597,18 @@ function carrySql(c, x) {
   const both = carry.values && carry.set?.[c.field] !== undefined;
   const assign = { ...(carry.set ?? {}) };
   if (carry.values) assign[c.field] = `CASE ${x.col} ${c.removed.map((v) => `WHEN ${lit(v)} THEN ${lit(carry.values[v])}`).join(" ")} END`;
+  // Any trigger on the table may be listed: another machine's, or one of the app's own (a guard that
+  // refuses to change a row once final) that the move would trip.
   const triggers = carry.triggers ?? [];
-  const known = (c.machined ?? []).map((k) => names.machine(c.table, k));
   // A machine's trigger lets a row whose state its chart does not know move anywhere, so the carried
   // column's own needs nothing; another machine's column the carry sets would be refused by its
   // chart, as the rows never walked it.
   const guarded = Object.keys(assign).filter((k) => k !== c.field && (c.machined ?? []).includes(k) && !triggers.includes(names.machine(c.table, k)));
-  const strange = triggers.filter((t) => !known.includes(t));
   const problem = missing.length ? `values says nothing for ${missing.map(lit).join(", ")}`
     : stray.length ? `values carries to what it does not admit: ${stray.join(", ")}`
     : both ? `both values and set give ${c.field} its value`
     : assign[c.field] === undefined ? `the carry gives ${c.field} no value: name values, or set ${c.field}`
     : guarded.length ? `set moves ${guarded.join(", ")}, which a machine guards: list ${guarded.map((k) => names.machine(c.table, k)).join(", ")} in triggers`
-    : strange.length ? `triggers names ${strange.join(", ")}, which is no machine's trigger on ${c.table} (${known.join(", ") || "it has none"})`
     : Object.values(assign).some((e) => e.includes("$carry$")) ? "set holds $carry$, the carry's own quote"
     : null;
   if (problem) {
@@ -631,7 +670,7 @@ export function droppedBy(migrations) {
     // A move's DO block (a carry, a backfill, a copy) lifts and puts back checks by what the database
     // holds, naming none, and holds the app's own SQL (a set, a fill), which is left unread: no text
     // the app wrote can read as a drop or a build.
-    const sql = (json.operations ?? []).map((o) => o.sql?.up ?? "").join("\n").replace(/DO (\$carry\$|\$fill\$)[\s\S]*?END \1;/g, "");
+    const sql = (json.operations ?? []).map((o) => o.sql?.up ?? "").join("\n").replace(/DO (\$carry\$|\$fill\$)[\s\S]*?END \1;/g, "").replace(/^--.*$/gm, "");
     const built = new Set([...sql.matchAll(/(?:ADD CONSTRAINT|INDEX) "([^"]+)"/g)].map((m) => m[1]));
     for (const [, n] of sql.matchAll(/DROP (?:INDEX IF EXISTS "[^"]+"\.|CONSTRAINT IF EXISTS |TRIGGER IF EXISTS )"([^"]+)"/g)) {
       if (!built.has(n)) out[n] ??= name;
@@ -651,7 +690,7 @@ export function droppedBy(migrations) {
 // own, DEFERRABLE INITIALLY DEFERRED) would otherwise leave events pending, and Postgres refuses to
 // alter a table with pending events, as a tighten after a backfill or a carry's ENABLE TRIGGER does.
 export const migration = (ops) => ({
-  operations: [{ sql: { up: ["-- Deferred constraints checked as each statement ends, so the tables can be altered after rows move.\nSET CONSTRAINTS ALL IMMEDIATE;", ...ops.map((o) => `-- ${o.at}: ${o.why}\n${o.sql}`)].join("\n\n") } }],
+  operations: [{ sql: { up: ["-- Deferred constraints checked as each statement ends, so the tables can be altered after rows move.\nSET CONSTRAINTS ALL IMMEDIATE;", ...ops.map((o) => `-- ${`${o.at}: ${o.why}`.replaceAll("\n", "\n-- ")}\n${o.sql}`)].join("\n\n") } }],
 });
 
 // A migration's name, which pgroll's ledger takes (mecha's pgroll.#Name): the day it is made, its

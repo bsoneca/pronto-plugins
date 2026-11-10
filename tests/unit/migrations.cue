@@ -67,7 +67,7 @@ _move: {
 // A backfill of note: every check but note's own lifted.
 _fillNote: {
 	value: string
-	text: (_move & {tag: "$fill$", where: #""note" IS NULL"#, update: #"UPDATE "public"."order" SET "note" = "# + value + #" WHERE "note" IS NULL;"#, kept: " AND conname <> ALL (ARRAY['order_note_check'])"}).text
+	text: (_move & {tag: "$fill$", where: #""note" IS NULL"#, update: #"UPDATE "public"."order" SET "note" = "# + value + #" WHERE "note" IS NULL;"#, kept: " AND conname <> ALL (ARRAY['order_note_check', 'order_note_type'])"}).text
 }
 
 _proto: """
@@ -190,7 +190,8 @@ cases: {
 		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines}], throws: "^Order: 005_create_tables.sql creates no table order: run generate$"},
 		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "Order_Status ON order (status)", "Order_Status ON order (owner)", -1)}], throws: "^Order: 005_create_tables.sql has no unique index order_status on \\(status\\): run generate$", why: "an index's name is read from 005, never made up"},
 		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "USING btree (status)", "USING gin (status)", -1)}], throws: "^Order: 005_create_tables.sql has no btree index on order \\(status\\): run generate$"},
-		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "\"owner\"", "\"owner_id\"", -1)}], throws: "^Order.owner: 005_create_tables.sql has no column order.owner, or one whose type this does not read: run generate$"},
+		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "\"owner\"", "\"owner_id\"", -1)}], throws: "^Order.owner: 005_create_tables.sql has no column order.owner: run generate$"},
+		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "\"owner\" uuid", "\"owner\" -uuid", -1)}], throws: "^005_create_tables.sql: order.owner has the clause \"-uuid DEFAULT auth_uid\\(\\) NOT NULL REFERENCES app_user\\(id\\) ON DELETE CASCADE\", whose type this does not read: a pronto this plugin does not read"},
 		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "auth_uid()", "gen_random_uuid()", -1)}], throws: "^Order.owner: its default is auth_uid\\(\\), and 005_create_tables.sql writes gen_random_uuid\\(\\): run generate$", why: "the replay writes the facts' default: one 005 does not write is an app not generated"},
 		{call: "migrations.model", args: [_modelProto, {version: 2, entities: {}}], throws: "^.pronto/check-inputs.json: version 2, where this plugin reads version 1: a pronto this plugin does not read \\(rerun bin/pronto-migrations from a pronto-plugins that reads it\\)$"},
 		{call: "migrations.model", args: [_modelProto, {version: 1, entities: Order: {server: true, table: "order", fields: [], cel: {}}}], throws: "^.pronto/check-inputs.json: Order has no cel.enums, cel.checks or uniques: a pronto this plugin does not read"},
@@ -213,13 +214,19 @@ cases: {
 			ALTER TABLE t ADD COLUMN IF NOT EXISTS "c" portable_timestamp DEFAULT now() AT TIME ZONE 'utc' UNIQUE;
 			ALTER TABLE t ADD COLUMN IF NOT EXISTS "d" time(6);
 			ALTER TABLE t ADD COLUMN IF NOT EXISTS "e" integer DEFAULT 0;
+			CREATE TABLE IF NOT EXISTS t (
+			  "f" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			  "g" text GENERATED ALWAYS AS (('a' || ' DEFAULT ')) STORED
+			);
 			"""#], expect: {t: {columns: {
 			a: {sql: "double precision", default: "(1 + 2)"}
 			b: {sql: "text", default: "'it''s NOT NULL'"}
 			c: {sql: "portable_timestamp", default: "now() AT TIME ZONE 'utc'"}
 			d: {sql: "time(6)"}
 			e: {sql: "integer", default: "0"}
-		}, indexes: {}}}, why: "a type of two words, a default in parentheses, one quoting a part's own words, one of several words, a type with its precision"},
+			f: {sql: "uuid", default: "gen_random_uuid()"}
+			g: {sql: "text"}
+		}, indexes: {}}}, why: "a type of two words, a default in parentheses, one quoting a part's own words, one of several words, a type with its precision, a primary key's default after PRIMARY KEY, and DEFAULT inside a generated expression, which is none"},
 		{call: "migrations.parseTables", args: [#"CREATE UNIQUE INDEX IF NOT EXISTS t_ab ON t (a, "b") WHERE a IS NOT NULL;"#], expect: {t: {columns: {}, indexes: {t_ab: {cols: ["a", "b"], unique: true}}}}, why: "several columns, a quoted one, and a partial unique"},
 	]}
 	"the same model has no changes": {suite: "migrations", steps: [
@@ -276,18 +283,26 @@ cases: {
 		{call: "mig.plan", args: [_order, [["Order.fields.3.machine", true], ["Order.fields.3.enum", ["a", "b"]]], {}, {trg_order_note_machine: "20261109_0001_a", order_note_check: "20261109_0001_a"}], holds: {refused: [{kind: "rebuilt", why: "trg_order_note_machine was dropped by 20261109_0001_a, which every fresh database still runs after building it: fold 20261109_0001_a (once every database has run it) before building trg_order_note_machine again"}, {kind: "rebuilt", why: "order_note_check was dropped by 20261109_0001_a, which every fresh database still runs after building it: fold 20261109_0001_a (once every database has run it) before building order_note_check again"}], advisories: [{kind: "machine-added"}]}, why: "each name refused once"},
 	]}
 	"a column added copies what the rows the table held should hold, from the backfill declared for it: a rename spelled as a retirement beside an addition keeps its data": {suite: "migrations", steps: [
-		{call: "mig.sql", args: [_order, [["Order.fields.8", {name: "remark", type: "string", proto: "string", required: false}]], {backfill: Order: remark: #""note""#}], expect: [(_move & {tag: "$fill$", where: #""remark" IS DISTINCT FROM ("note")"#, update: #"UPDATE "public"."order" SET "remark" = "note" WHERE "remark" IS DISTINCT FROM ("note");"#, kept: " AND conname <> ALL (ARRAY['order_remark_check'])"}).text], why: "runs where a row differs, so a fresh database, or one copied already, runs nothing; every other check is lifted, as in a backfill"},
+		{call: "mig.sql", args: [_order, [["Order.fields.8", {name: "remark", type: "string", proto: "string", required: false}]], {backfill: Order: remark: #""note""#}], expect: [(_move & {tag: "$fill$", where: #""remark" IS NULL AND "remark" IS DISTINCT FROM ("note")"#, update: #"UPDATE "public"."order" SET "remark" = "note" WHERE "remark" IS NULL AND "remark" IS DISTINCT FROM ("note");"#, kept: " AND conname <> ALL (ARRAY['order_remark_check', 'order_remark_type'])"}).text], why: "only rows still holding what the replay gave them (NULL here) and differing from the copy, so a row written or seeded with a value of its own keeps it, and a fresh or copied database runs nothing; every other check is lifted, as in a backfill"},
+		{call: "mig.sql", args: [_order, [["Order.fields.8", {name: "remark", type: "string", proto: "string", required: true, default: "''"}]], {backfill: Order: remark: {value: #""note""#, triggers: ["order_final"]}}], expect: [(_move & {tag: "$fill$", where: #""remark" IS NOT DISTINCT FROM ('') AND "remark" IS DISTINCT FROM ("note")"#, update: #"UPDATE "public"."order" SET "remark" = "note" WHERE "remark" IS NOT DISTINCT FROM ('') AND "remark" IS DISTINCT FROM ("note");"#, kept: " AND conname <> ALL (ARRAY['order_remark_check', 'order_remark_type'])", triggers: ["order_final"]}).text], why: "a constant default marks the rows the replay filled; an app's own trigger the copy would trip is named with the value"},
 		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "placed_at", type: "timestamp", proto: "google.protobuf.Timestamp", required: true, default: "now()"}]]], holds: {ops: [], advisories: [{at: "Order.placed_at", kind: "field-added", why: "the replay gives every row the table holds now(), as it reads when the replay runs (the deploy's time, or a new value a row): declare backfill.Order.placed_at, the SQL of the row they should take (another column, say), and make copies it"}]}, why: "a default that reads another value each time fills old rows with the deploy's"},
-		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "placed_at", type: "timestamp", proto: "google.protobuf.Timestamp", required: true, default: "now()"}]], {backfill: Order: placed_at: #""created""#}], holds: {ops: [{at: "Order.placed_at", why: "added: the rows the table held take \"created\""}], advisories: []}, why: "declared, it is copied, and nothing is noted"},
+		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "placed_at", type: "timestamp", proto: "google.protobuf.Timestamp", required: true, default: "now()"}]], {backfill: Order: placed_at: #""created""#}], holds: {ops: [{at: "Order.placed_at", why: "added: the rows the table held take their copy"}], advisories: [{at: "Order.placed_at", kind: "field-added", why: "the copy cannot tell a row the replay gave now() from one written since with a value of its own, so it copies into every row whose value differs (a seed row, a row written between the replay and the migration): a constant default, or none, lets it touch only the rows the replay filled"}], verdicts: [{at: "Order.placed_at", kind: "field-added", verdict: "ledger"}]}, why: "declared, it is copied, and the change is the ledger's; a volatile default cannot mark the rows the replay filled, which is noted"},
+		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "tag", type: "string", proto: "string", required: true, default: "'random'"}]]], holds: {advisories: []}, why: "a word inside a string literal is no call"},
 		{call: "mig.sql", args: [_order, [["Order.fields.8", {name: "phase", type: "string", proto: "string", required: true, default: "'new'", enum: ["new", "old"], machine: true}]], {backfill: Order: phase: #""stage""#}], expect: [(_move & {
 			tag:    "$fill$"
-			where:  #""phase" IS DISTINCT FROM ("stage")"#
-			update: #"UPDATE "public"."order" SET "phase" = "stage" WHERE "phase" IS DISTINCT FROM ("stage");"#
-			kept:   " AND conname <> ALL (ARRAY['order_phase_check'])"
+			where:  #""phase" IS NOT DISTINCT FROM ('new') AND "phase" IS DISTINCT FROM ("stage")"#
+			update: #"UPDATE "public"."order" SET "phase" = "stage" WHERE "phase" IS NOT DISTINCT FROM ('new') AND "phase" IS DISTINCT FROM ("stage");"#
+			kept:   " AND conname <> ALL (ARRAY['order_phase_check', 'order_phase_type'])"
 			triggers: ["trg_order_phase_machine"]
 		}).text], why: "a copy is not a transition: a machine's column is copied with its trigger off"
 		},
 		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "remark", type: "string", proto: "string", required: false}]], {backfill: Order: remark: "$fill$x$fill$"}], holds: {ops: [], refused: [{at: "Order.remark", kind: "backfill", why: "the backfill holds $fill$, its block's own quote"}]}},
+		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "upper", type: "string", proto: "string", required: false, generated: "upper(note)"}]], {backfill: Order: upper: #""note""#}], holds: {ops: [], refused: [{at: "Order.upper", kind: "backfill", why: "a generated column is computed by Postgres: it takes no backfill"}]}},
+		{call: "mig.plan", args: [_order, [["Order.fields.3", null], ["Order.retired.3", {name: "note", type: "string", required: false}], ["Order.fields.8", {name: "remark", type: "string", proto: "string", required: false}]]], holds: {ops: [], needs: [{at: "Order.remark", declare: "backfill.Order.remark"}]}, why: "beside a retirement, as a rename is, the copy is a need: a migration made again (rebase) cannot lose it"},
+		{call: "mig.plan", args: [_order, [["Order.fields.3", null], ["Order.retired.3", {name: "note", type: "string", required: false}], ["Order.fields.8", {name: "remark", type: "string", proto: "string", required: false}]], {backfill: Order: remark: "DEFAULT"}], holds: {ops: [], needs: [], refused: []}, why: "DEFAULT says the rows keep the replay's default"},
+		{call: "mig.plan", args: [_order, [["Order.fields.5.enum", ["new", "settled"]], ["Order.fields.8", {name: "was_stage", type: "string", proto: "string", required: false}]], {carry: Order: stage: values: paid: "settled", backfill: Order: was_stage: #""stage""#}], holds: {ops: [{at: "Order.was_stage"}, {at: "Order.stage"}]}, why: "a copy reads the row as the release before left it, before a carry moves it"},
+		{call: "migrations.migration", args: [[{at: "Order.x", why: "a\nDROP INDEX IF EXISTS \"public\".\"idx_x\";", sql: "SELECT 1;"}]], expect: {operations: [{sql: {up: "-- Deferred constraints checked as each statement ends, so the tables can be altered after rows move.\nSET CONSTRAINTS ALL IMMEDIATE;\n\n-- Order.x: a\n-- DROP INDEX IF EXISTS \"public\".\"idx_x\";\nSELECT 1;"}}]}, why: "every line of a why is a comment"},
+		{call: "migrations.droppedBy", args: [[{name: "m", json: operations: [{sql: up: "-- DROP INDEX IF EXISTS \"public\".\"idx_x\";\nSELECT 1;"}]}]], expect: {}, why: "a comment drops nothing"},
 	]}
 	"a declaration no change since the snapshot reads is refused, so none is read into a later change": {suite: "migrations", steps: [
 		{call: "mig.plan", args: [_order, [["Order.fields.4.required", false]], {backfill: Order: note: "''"}], holds: {refused: [{at: "Order.note", kind: "declaration", why: "schemaMigrations.backfill.Order.note is for no change since the snapshot: remove it, as a declaration serves the migration it was written for, and one left would be read into a later change to Order.note"}]}},
@@ -356,7 +371,7 @@ cases: {
 		{call: "mig.plan", args: [_order, _stageNarrowed, {carry: Order: stage: set: note: "'x'"}], holds: {refused: [{why: "the carry gives stage no value: name values, or set stage"}]}},
 		{call: "mig.plan", args: [_order, _stageNarrowed, {carry: Order: stage: {values: paid: "settled", set: stage: "'new'"}}], holds: {refused: [{why: "both values and set give stage its value"}]}},
 		{call: "mig.plan", args: [_order, _stageNarrowed, {carry: Order: stage: set: {stage: "'settled'", status: "'open'"}}], holds: {refused: [{why: "set moves status, which a machine guards: list trg_order_status_machine in triggers"}]}},
-		{call: "mig.plan", args: [_order, _stageNarrowed, {carry: Order: stage: {values: paid: "settled", triggers: ["trg_order_step_machine"]}}], holds: {refused: [{why: "triggers names trg_order_step_machine, which is no machine's trigger on order (trg_order_status_machine)"}]}},
+		{call: "mig.plan", args: [_order, _stageNarrowed, {carry: Order: stage: {values: paid: "settled", triggers: ["order_final"]}}], holds: {refused: [], ops: [{at: "Order.stage"}]}, why: "any trigger on the table may be listed, an app's own too (one refusing to change a final row)"},
 	]}
 	"a migration relaxes, then moves rows, then tightens, whatever order the columns come in": {suite: "migrations", steps: [
 		{call: "mig.plan", args: [_order, [["Order.fields.3.required", true], ["Order.fields.5.enum", ["new", "settled"]], ["Order.fields.6.check", null]], {backfill: Order: note: "''", carry: Order: stage: set: {stage: "'settled'", total: "-1"}}], holds: {ops: [

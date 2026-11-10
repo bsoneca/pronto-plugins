@@ -1,6 +1,6 @@
 // pronto-migrations' driver (migrations/README.md in pronto-plugins): run from the app's folder.
 //
-//   deno run --no-config -A migrations/migrate.ts <command>   (the lint's check needs only --allow-read)
+//   deno run --no-config -A migrations/migrate.ts <command>   (the lint's check reads, and runs cue)
 //
 //   init [--from <ref>]  the snapshot: the model as it stands, or as a git ref held it (the release
 //                        the live database runs), so the first migration is what changed since
@@ -17,7 +17,8 @@
 //   upgrade [--from <ref>]  a snapshot of an older format carried to this plugin's, from the model at
 //                        the commit it was taken at (the last that wrote it, or <ref>)
 //   check                the lint: the snapshot is the model, every file make wrote is as it wrote it,
-//                        and migrations/ holds no other .json the ledger would embed
+//                        migrations/ holds no other .json the ledger would embed, and no declaration
+//                        is left once its migration is made
 //
 // The model is read from what pronto's generate writes: schema/entities.proto, .pronto/check-inputs.json,
 // services/database/migrations/005_create_tables.sql and 010_machines.sql. What it decides is
@@ -95,8 +96,8 @@ async function sound() {
 }
 
 // What the app declared for the migrations (#Migrations in migrations_spec.cue) and the names of all
-// its pgroll migrations, its own included, in one evaluation of the program: read only by make and
-// plan, as the lint does not evaluate the program.
+// its pgroll migrations, its own included, in one evaluation of the program: read by make and plan,
+// and by the lint only when the model is the snapshot, to find a declaration left behind.
 function program(): { declared: Record<string, unknown>; names: string[] } {
   const declared = JSON.parse(run(Deno.env.get("CUE") ?? "cue", ["export", ".", "-e", "schemaMigrations", "--out", "json"]));
   return { declared, names: declared.names ?? [] };
@@ -173,8 +174,8 @@ async function main(command: string | undefined, args: string[]) {
         console.log("the model is the snapshot: nothing to make");
         break;
       }
-      for (const c of list) console.log(`${rules.verdict(c).padEnd(8)} ${c.kind} ${rules.where(c)}`);
       const p = rules.plan(list, program().declared, droppedNow());
+      for (const v of p.verdicts) console.log(`${v.verdict.padEnd(8)} ${v.kind} ${v.at}`);
       report(p);
       if (p.ops.length) console.log(`\n${rules.migration(p.ops).operations[0].sql.up}`);
       break;
@@ -240,7 +241,9 @@ async function main(command: string | undefined, args: string[]) {
       const names = migrations();
       for (const f of rules.strays(files())) problems.push(`${DIR}/${f}: migrations_ledger.cue embeds every .json here but the snapshot, and this is no migration's name (<YYYYMMDD>_<NNNN>_<name>.json)`);
       const list = rules.diff(before, modelAt());
-      const p = rules.plan(list, {}, droppedNow());
+      // With the model at the snapshot, every declaration left in migrations_spec.cue is one no
+      // change reads, which the next make would refuse: it is caught here, in the change that left it.
+      const p = rules.plan(list, list.length ? {} : program().declared, droppedNow());
       for (const r of p.refused) problems.push(`${r.at}: ${r.why}`);
       if (list.length && !p.refused.length) {
         problems.push(`the model moved since ${SNAPSHOT} (${list.length} change${list.length === 1 ? "" : "s"}): run \`deno run --no-config -A migrations/migrate.ts make <name>\``);

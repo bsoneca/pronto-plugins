@@ -107,7 +107,7 @@ what it held to what pronto still emits for it. A default pronto keeps for a ret
 | a column made optional; its default changed or removed; a check, unique, reference, machine or index removed | **ledger**, relax | `DROP NOT NULL`, `SET DEFAULT` or `DROP DEFAULT`, `DROP CONSTRAINT`, `DROP TRIGGER`, `DROP INDEX` |
 | a value gone from an enum or a machine | **ledger**, rows | the rows holding it carried, by the declared `carry`; without one, make names it |
 | a column made required | **ledger**, rows then tighten | its NULL rows filled from `backfill`, else from its default, then `SET NOT NULL`; with neither, make names the `backfill` it needs |
-| a column added, with a `backfill` declared | **ledger**, rows | after the replay adds it, every row the table held takes the `backfill` (another column, the field a rename retired): the data moves to the new field |
+| a column added, with a `backfill` declared | **ledger**, rows | after the replay adds it, the rows that still hold what the replay gave them (its constant default, or `NULL`) take the `backfill` (another column, the field a rename retired): the data moves to the new field. Beside a field the entity retires in the same change, as a rename is, the `backfill` is a need; `DEFAULT` keeps the replay's default |
 | a unique or a reference added | **ledger**, tighten | the constraint pronto's inline `UNIQUE` or `REFERENCES` makes (the reference `NOT VALID`) |
 | an index changed | **ledger**, relax then tighten | the old index dropped, then built again |
 | an entity or an optional or defaulted column added, with no `backfill`; an enum widened; an index or a machine added | **replay** | the emitted schema makes it; no migration |
@@ -131,6 +131,7 @@ deno run --no-config -A migrations/migrate.ts init --from <ref>   # the release 
 # change the app's CUE, then generate, then:
 deno run --no-config -A migrations/migrate.ts plan                # what make would write
 deno run --no-config -A migrations/migrate.ts make retire_ref     # migrations/20261109_0001_retire_ref.json
+# then generate again: a first migration gives the cluster its migrate step
 ./saytw lint                                                      # runs migrate.ts check
 deno run --no-config -A migrations/migrate.ts rebase main         # after merging main in, when both made a migration
 deno run --no-config -A migrations/migrate.ts fold 20261109_0001_retire_ref   # once every database has run it
@@ -192,19 +193,23 @@ schemaMigrations: carry: Order: stage: {
 
 schemaMigrations: backfill: Order: note: "''"   // a column made required, with no default
 
-// A column added beside the one a rename retired: the rows the table held copy it.
+// A column added beside the one a rename retired: the rows the table held copy it. With the
+// triggers the copy would trip (an app's own guard on a final row), turned off around it.
 schemaMigrations: backfill: Order: remark: "note"
+schemaMigrations: backfill: Invoice: amount: {value: "amount_cents", triggers: ["invoice_final"]}
+schemaMigrations: backfill: Order: tag: "DEFAULT"   // added beside a retirement, but no copy
 ```
 
 `make` checks them:
 - every value gone has a carry, to a value still admitted;
 - `values` and `set` don't both set the column;
 - every other machine's column `set` moves has its trigger listed;
-- every trigger listed is a machine's on that table.
+- a trigger listed may be any of the table's, an app's own too; one that does not exist, or is off,
+  is left as it is, and each one on is put back in the mode it had.
 
 A declaration serves the migration it was written for. `make` refuses one that no change since the
-snapshot reads, as it would otherwise be read into a later change to the same column: remove each in
-the change that wrote its migration.
+snapshot reads, as it would otherwise be read into a later change to the same column, and so does
+the lint once the model is the snapshot: remove each in the change that writes its migration.
 
 ## How it runs
 
@@ -216,14 +221,17 @@ not at all. It opens with `SET CONSTRAINTS ALL IMMEDIATE`: an app's deferred con
 otherwise leave events pending after rows move, and Postgres refuses to alter a table that has pending
 events. Its changes run in three phases, whatever order the columns come in:
 1. **Relax:** constraints, triggers and indexes dropped, `NOT NULL` lifted, defaults moved.
-2. **Move rows:** backfills and carries. No row is moved against a rule the same migration drops.
+2. **Move rows:** backfills and copies, then carries, so a fill or a copy reads a row as the release
+   before left it. No row is moved against a rule the same migration drops.
 3. **Tighten:** `SET NOT NULL`, uniques, references and indexes built.
 
 **A carry, a backfill or a copy is a `DO` block.** It runs only where a row needs moving: one holding
-a value gone, a `NULL` in a column made required, or a value of a column added that differs from its
-copy (so a fresh database, and one copied already, run nothing). A copy runs once on a live database,
-before the release serves, so every row it finds is one the table held; a machine's column is copied
-with its trigger off, as a copy is no transition. A copy into a required column must give every
+a value gone, a `NULL` in a column made required, or, in a column added, a row that still holds what
+the replay gave it (its constant default, or `NULL`) and differs from its copy. So a fresh database,
+one copied already, and a row written or seeded with a value of its own run nothing. A volatile
+default (`now()`) cannot mark the rows the replay filled, so that copy touches every row that
+differs, which is noted. A machine's column is copied with its trigger off, as a copy is no
+transition. A copy into a required column must give every
 row a value (`coalesce(placed, 'epoch')`, say): one `NULL` fails the migration whole. Seed rows meet it
 too. A carry turns off only the triggers that exist and are on when it
 runs, and puts each back in the mode it had. Postgres checks every check on a row it updates, even one `NOT VALID`, and the replay restates
@@ -271,6 +279,11 @@ same thing: initdb and the replay add, and a migration only alters what an earli
   on each field, `[(pronto.column) = {required, default, check}]`; this plugin would then read
   nothing else.
 - **Seed and fixture rows meet every migration not yet folded** (see "How it runs").
+- **The ledger is what `migrations/` holds.** The glob embeds every `.json` there, so a dated file
+  left untracked (an aborted `make`) reaches the local stack's migrate step; the lint refuses it.
+- **A carry the app's own replays depend on** (a hand-written replay that reads the carried column)
+  runs after them: keep that carry in the replay until it is folded, as the migrations run after
+  every replay.
 - **Drift that was already there when `init --from` ran is not seen.** For example, a column retired
   before then that a live database still holds `NOT NULL`. The snapshot starts from the model, not
   from the database.

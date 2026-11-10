@@ -70,9 +70,9 @@ _rules:  _ @embed(file="plan.js", type=text)
 
 				// What the next migration needs that the model cannot say (migrations/plan.js): a value for
 				// rows a narrowed enum no longer admits (carry), one for the rows of a column added or the
-				// NULLs of one made required (backfill). `migrate.ts make` names what is missing, and
-				// refuses a declaration no change since the snapshot reads: remove each once make has
-				// written its migration.
+				// NULLs of one made required (backfill). `migrate.ts make` names what is missing; a
+				// declaration goes in the change that makes its migration, as make and the lint refuse
+				// one no change reads.
 				schemaMigrations: {}
 
 				loop: surface: checks: schemaMigrations.checks
