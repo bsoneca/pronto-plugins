@@ -2,7 +2,7 @@
 # over SSH, its traffic arriving through the node's Cloudflare Tunnel to Envoy Gateway), beside
 # pronto's infra/gcp Cloud Run services of the same names:
 #   bin/pronto-analytics metal --ssh bruno@node --grafana-domain G --umami-domain U --project P \
-#     --dashboards [bonk-chess/business=apps/…/analytics.business.dashboard.json …] --users '{"a@b.c": "Admin"}'
+#     --dashboards [bonk-chess/business=apps/…/analytics.business.dashboard.json …] --users-file grafana-users.json
 #
 # Grafana reads the cluster's VictoriaMetrics (which scrapes each app's exporter and collectors) and
 # keeps its own state in a database of its own; Umami keeps visits in another. Both databases are one
@@ -255,15 +255,15 @@ export def main [
 	--grafana-domain: string       # Grafana's address: metrics.example.com
 	--umami-domain: string         # Umami's console and the doors' upstream: umami.example.com
 	--project: string              # The Google Cloud project whose Secret Manager holds what Cloud Run's had
-	--users: string                # Grafana's accounts, JSON: {"a@b.c": "Admin"}
+	--users-file: string           # Grafana's accounts, a JSON file: {"<account>": "Admin"} (kept off the command line)
 	--dashboards: list<string> = [] # app/name=path of each dashboard
 	--titles: string = "{}"        # JSON: each app's folder title, {"bonk-chess": "Bonk Chess"}
 	--namespace: string = "analytics"
 ] {
-	if ([$ssh $grafana_domain $umami_domain $project $users] | any { is-empty }) { error make {msg: "--ssh, --grafana-domain, --umami-domain, --project and --users are all required"} }
+	if ([$ssh $grafana_domain $umami_domain $project $users_file] | any { is-empty }) { error make {msg: "--ssh, --grafana-domain, --umami-domain, --project and --users-file are all required"} }
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
-	let yaml = (manifests --grafana-domain $grafana_domain --umami-domain $umami_domain --users ($users | from json) --dashboards (dashboards $dashboards ($titles | from json)) --namespace $namespace)
+	let yaml = (manifests --grafana-domain $grafana_domain --umami-domain $umami_domain --users (open --raw $users_file | from json) --dashboards (dashboards $dashboards ($titles | from json)) --namespace $namespace)
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# What Cloud Run's kept, through ssh's stdin alone: never a file, never an argument.
 	let grafana_env = $"GF_SECURITY_SECRET_KEY=(gc-secret grafana-secret-key $project)\nGF_AUTH_GOOGLE_CLIENT_ID=(gc-secret grafana-google-client-id $project)\nGF_AUTH_GOOGLE_CLIENT_SECRET=(gc-secret grafana-google-client-secret $project)\n"

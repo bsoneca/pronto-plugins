@@ -8,7 +8,7 @@
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 # Or Grafana and Umami on a cluster the operator runs (pronto's envs.Metal), as analytics/metal.nu says:
-#   bin/pronto-analytics metal --ssh U@H --project P --grafana-domain G --umami-domain U --users '{...}' --dashboards [...]
+#   bin/pronto-analytics metal --ssh U@H --project P --grafana-domain G --umami-domain U --users-file F --dashboards [...]
 if [ "${1:-}" = metal ]; then
 	shift
 	cd "$here"
