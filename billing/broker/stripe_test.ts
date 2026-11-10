@@ -2,7 +2,7 @@
 // sends, that every call carries a key, what a retry keeps, and how Stripe's answers come back.
 
 import { assertEquals, assertRejects } from "jsr:@std/assert@1";
-import { STRIPE_V2_VERSION, STRIPE_VERSION, stripe, StripeError } from "./stripe.ts";
+import { forAccount, ofrepFlag, STRIPE_V2_VERSION, STRIPE_VERSION, stripe, StripeError, switched, type Stripe } from "./stripe.ts";
 
 type Sent = { url: string; body: Record<string, unknown> };
 function door(answers: { status: number; body: unknown }[]): { sent: Sent[]; fetcher: typeof fetch } {
@@ -66,4 +66,52 @@ Deno.test("Stripe's refusal comes back as the StripeError it was, and the door's
   const s2 = stripe({ door: "http://airlock:9998/door/stripe", fetcher: door([{ status: 400, body: { error: "key already names another request" } }]).fetcher });
   const e2 = await assertRejects(() => s2("POST", "/v1/charges", {}, "k"), StripeError, "another request");
   assertEquals([e2.status, e2.code], [400, "airlock"]);
+});
+
+// While it moves (PRONTO-218): the app's flag stripe_door, read over OFREP for the request's account,
+// picks the door or the broker's own key for each call.
+function flagd(on: (account: string) => boolean | "down"): { asked: string[]; fetcher: typeof fetch } {
+  const asked: string[] = [];
+  return {
+    asked,
+    fetcher: (url, init) => {
+      const account = JSON.parse(String(init!.body)).context.targetingKey;
+      asked.push(`${url} ${account}`);
+      const v = on(account);
+      return v === "down" ? Promise.reject(new TypeError("connection refused")) : Promise.resolve(Response.json({ key: "stripe_door", value: v }));
+    },
+  };
+}
+const via = (name: string, seen: string[]): Stripe => (method, path) => {
+  seen.push(`${name} ${method} ${path}`);
+  return Promise.resolve({} as never);
+};
+
+Deno.test("the flag on for an account sends its calls through the door, off straight to Stripe", async () => {
+  const f = flagd((a) => a === "tess");
+  const seen: string[] = [];
+  const s = switched({ direct: via("direct", seen), door: via("door", seen), on: ofrepFlag("https://app.example/", "stripe_door", f.fetcher) });
+  const handler = forAccount(async (req: Request) => {
+    await s("GET", `/v1/customers/${(await req.json()).account}`);
+    return new Response("ok");
+  });
+  const ask = (account: string) => handler(new Request("https://b/trial/offer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ account }) }));
+  await ask("tess");
+  await ask("ana");
+  await ask("tess");
+  assertEquals(seen, ["door GET /v1/customers/tess", "direct GET /v1/customers/ana", "door GET /v1/customers/tess"]);
+  assertEquals(f.asked, ["https://app.example/ofrep/v1/evaluate/flags/stripe_door tess", "https://app.example/ofrep/v1/evaluate/flags/stripe_door ana"], "each account asked once, then kept");
+});
+
+Deno.test("what names no account reads the flag for everyone, and a flagd that does not answer is off", async () => {
+  const seen: string[] = [];
+  const up = flagd((a) => a === "broker");
+  await switched({ direct: via("direct", seen), door: via("door", seen), on: ofrepFlag("https://app.example", "stripe_door", up.fetcher) })("POST", "/v1/webhook_endpoints");
+  const down = flagd(() => "down");
+  await forAccount(async () => {
+    await switched({ direct: via("direct", seen), door: via("door", seen), on: ofrepFlag("https://app.example", "stripe_door", down.fetcher) })("GET", "/v1/prices");
+    return new Response("ok");
+  })(new Request("https://b/checkout", { method: "POST", headers: { "content-type": "application/json" }, body: "{\"account\":\"tess\"}" }));
+  assertEquals(seen, ["door POST /v1/webhook_endpoints", "direct GET /v1/prices"]);
+  assertEquals(up.asked.map((a) => a.split(" ")[1]), ["broker"]);
 });
