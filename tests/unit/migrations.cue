@@ -95,7 +95,7 @@ _facts: {
 			id:     "0x01"
 			fields: [
 				{name: "id", ordinal: 1, retired: false, type: "uuid", pk: true, required: true},
-				{name: "status", ordinal: 2, retired: false, type: "text", pk: false, required: true, default: "'draft'"},
+				{name: "status", ordinal: 2, retired: false, type: "text", pk: false, required: true},
 				{name: "old", ordinal: 3, retired: true, type: "string", pk: false, required: false, default: "''"},
 				{name: "total", ordinal: 4, retired: false, type: "decimal", precision: 10, scale: 2, pk: false, required: false, cel: "this >= 0"},
 				{name: "owner", ordinal: 5, retired: false, type: "uuid", pk: false, required: true, ref: "app_user", default: "auth_uid()"},
@@ -127,6 +127,26 @@ _machines: #"""
 	CREATE TRIGGER "trg_order_status_machine"
 	"""#
 
+// What 005_create_tables.sql writes for order: each column in its CREATE TABLE, and again (but the
+// primary key) as an ADD COLUMN, from the same clause. status, a machine's column, has the default
+// pronto writes from its initial state, which the facts do not state.
+_tables: #"""
+	CREATE TABLE IF NOT EXISTS "order" (
+	  "id" uuid PRIMARY KEY,
+	  "status" text DEFAULT 'draft' NOT NULL CHECK ("status" IN ('draft', 'open', 'it''s')),
+	  "old" TEXT DEFAULT '',
+	  "total" portable_decimal_10_2 CHECK (total >= 0),
+	  "owner" uuid DEFAULT auth_uid() NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+	  "txid" BIGINT DEFAULT pg_current_xact_id()::text::bigint
+	);
+	ALTER TABLE order ADD COLUMN IF NOT EXISTS "status" text DEFAULT 'draft' NOT NULL CHECK ("status" IN ('draft', 'open', 'it''s'));
+	ALTER TABLE order ADD COLUMN IF NOT EXISTS "old" TEXT DEFAULT '';
+	ALTER TABLE order ADD COLUMN IF NOT EXISTS "total" portable_decimal_10_2 CHECK (total >= 0);
+	ALTER TABLE order ADD COLUMN IF NOT EXISTS "owner" uuid DEFAULT auth_uid() NOT NULL REFERENCES app_user(id) ON DELETE CASCADE;
+	"""#
+
+_sql: {machines: _machines, tables: _tables}
+
 _t:   #""public"."order""#
 _trg: "IF EXISTS (SELECT FROM pg_trigger WHERE tgrelid = '\(_t)'::regclass AND tgname = 'trg_order_status_machine')"
 
@@ -141,7 +161,7 @@ cases: {
 		{call: "migrations.parseProto", args: ["message A {\n  optional string id = 1;\n  optional string other = 1;\n}\n"], throws: "number 1 twice"},
 	]}
 	"the model: the proto names a column, pronto's facts say what it holds, a retired one included, and the machines their states": {suite: "migrations", steps: [
-		{call: "migrations.model", args: [_modelProto, _facts, _machines], holds: {Order: {
+		{call: "migrations.model", args: [_modelProto, _facts, _sql], holds: {Order: {
 			table: "order"
 			id:    "0x01"
 			fields: {
@@ -152,19 +172,43 @@ cases: {
 			}
 			retired: {"3": {name: "old", type: "string", sql: "text", required: false, default: "''"}}
 			indexes: {order_status: {cols: ["status"], unique: true}, idx_order_status: {cols: ["status"], using: "btree"}}
-		}}, why: "an alias is its type (text is string), a column keeps the type Postgres holds, a decimal carries its precision and scale, and an index's name is as Postgres keeps an unquoted one"
+		}}, why: "an alias is its type (text is string), a column keeps the type and the default 005 writes (status's, a machine's initial state, which the facts do not state), a decimal carries its precision and scale, and an index's name is as Postgres keeps an unquoted one"
 		},
 		{get: "Draft", matches: "^undefined$", why: "an entity with no table is not the database's"},
 	]}
-	"a proto and facts that disagree, or a pronto this does not read, are refused, never guessed": {suite: "migrations", steps: [
-		{call: "migrations.model", args: ["message Order {\n  optional string id = 1;\n  optional string state = 2;\n  reserved 3;\n  reserved \"old\";\n  optional string total = 4;\n  optional string owner = 5;\n}\n", _facts], throws: "Order.status: entities.proto has state at 2: run generate"},
-		{call: "migrations.model", args: ["message Order {\n  optional string id = 1;\n  optional string status = 2;\n  optional string total = 4;\n  optional string owner = 5;\n}\n", _facts], throws: "Order.old: retired, and entities.proto does not reserve 3"},
-		{call: "migrations.model", args: ["message Order {\n  optional string id = 1;\n  optional string status = 2;\n  reserved 3;\n  reserved \"old\";\n  optional string total = 4;\n  optional string owner = 5;\n  optional string extra = 6;\n}\n", _facts], throws: "entities.proto has extra at 6"},
-		{call: "migrations.model", args: ["message Other {\n}\n", _facts], throws: "Order: a table with no message"},
-		{call: "migrations.model", args: [_modelProto, {version: 2, entities: {}}], throws: "version 2; this plugin reads version 1"},
-		{call: "migrations.model", args: [_modelProto, {version: 1, entities: Order: {server: true, table: "order", fields: [], cel: {}}}], throws: "has no cel.enums, cel.checks or uniques"},
-		{call: "migrations.model", args: [_modelProto, {version: 1, types: aliases: {text: "string", varchar: "string"}, entities: {}}], throws: "names the alias varchar, whose column type this plugin does not know", why: "pronto's facts name an alias but not its column type: a new one is refused rather than guessed"},
-		{call: "migrations.parseMachines", args: [#"CREATE TRIGGER "trg_order_stage_machine""#], throws: "trg_order_stage_machine has no check this reader knows"},
+	"a proto, facts and an emitted schema that disagree, or a pronto this does not read, are refused, never guessed": {suite: "migrations", steps: [
+		{call: "migrations.model", args: ["message Order {\n  optional string id = 1;\n  optional string state = 2;\n  reserved 3;\n  reserved \"old\";\n  optional string total = 4;\n  optional string owner = 5;\n}\n", _facts, _sql], throws: "^Order.status: entities.proto has state at 2: run generate$"},
+		{call: "migrations.model", args: ["message Order {\n  optional string id = 1;\n  optional string status = 2;\n  optional string total = 4;\n  optional string owner = 5;\n}\n", _facts, _sql], throws: "Order.old: retired, and entities.proto does not reserve 3"},
+		{call: "migrations.model", args: ["message Order {\n  optional string id = 1;\n  optional string status = 2;\n  reserved 3;\n  reserved \"old\";\n  optional string total = 4;\n  optional string owner = 5;\n  optional string extra = 6;\n}\n", _facts, _sql], throws: "entities.proto has extra at 6"},
+		{call: "migrations.model", args: ["message Other {\n}\n", _facts, _sql], throws: "Order: a table with no message"},
+		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines}], throws: "^Order: 005_create_tables.sql creates no table order: run generate$"},
+		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "\"owner\"", "\"owner_id\"", -1)}], throws: "^Order.owner: 005_create_tables.sql has no column order.owner, or one whose type this does not read: run generate$"},
+		{call: "migrations.model", args: [_modelProto, _facts, {machines: _machines, tables: strings.Replace(_tables, "auth_uid()", "gen_random_uuid()", -1)}], throws: "^Order.owner: its default is auth_uid\\(\\), and 005_create_tables.sql writes gen_random_uuid\\(\\): run generate$", why: "the replay writes the facts' default: one 005 does not write is an app not generated"},
+		{call: "migrations.model", args: [_modelProto, {version: 2, entities: {}}], throws: "^.pronto/check-inputs.json: version 2, where this plugin reads version 1: a pronto this plugin does not read \\(rerun bin/pronto-migrations from a pronto-plugins that reads it\\)$"},
+		{call: "migrations.model", args: [_modelProto, {version: 1, entities: Order: {server: true, table: "order", fields: [], cel: {}}}], throws: "^.pronto/check-inputs.json: Order has no cel.enums, cel.checks or uniques: a pronto this plugin does not read"},
+		{call: "migrations.parseMachines", args: [#"CREATE TRIGGER "trg_order_stage_machine""#], throws: "^010_machines.sql: the trigger trg_order_stage_machine has no check this reader knows: a pronto this plugin does not read"},
+	]}
+	"005's columns: the type Postgres holds, and the default up to the clause's next part, outside quotes and parentheses": {suite: "migrations", steps: [
+		{call: "migrations.parseTables", args: [_tables], holds: {order: {
+			id: {sql: "uuid"}
+			status: {sql: "text", default: "'draft'"}
+			old: {sql: "text", default: "''"}
+			total: {sql: "portable_decimal_10_2"}
+			owner: {sql: "uuid", default: "auth_uid()"}
+		}}},
+		{call: "migrations.parseTables", args: [#"""
+			ALTER TABLE t ADD COLUMN IF NOT EXISTS "a" double precision DEFAULT (1 + 2) NOT NULL;
+			ALTER TABLE t ADD COLUMN IF NOT EXISTS "b" text DEFAULT 'it''s NOT NULL' NOT NULL CHECK (b <> '');
+			ALTER TABLE t ADD COLUMN IF NOT EXISTS "c" portable_timestamp DEFAULT now() AT TIME ZONE 'utc' UNIQUE;
+			ALTER TABLE t ADD COLUMN IF NOT EXISTS "d" time(6);
+			ALTER TABLE t ADD COLUMN IF NOT EXISTS "e" integer DEFAULT 0;
+			"""#], expect: {t: {
+			a: {sql: "double precision", default: "(1 + 2)"}
+			b: {sql: "text", default: "'it''s NOT NULL'"}
+			c: {sql: "portable_timestamp", default: "now() AT TIME ZONE 'utc'"}
+			d: {sql: "time(6)"}
+			e: {sql: "integer", default: "0"}
+		}}, why: "a type of two words, a default in parentheses, one quoting a part's own words, one of several words, a type with its precision"},
 	]}
 	"the same model has no changes": {suite: "migrations", steps: [
 		{call: "mig.changes", args: [_order, []], expect: []},
@@ -190,13 +234,14 @@ cases: {
 		{call: "mig.plan", args: [_order, [["Order.fields.3.name", "remark"]]], holds: {ops: [], refused: [{at: "Order.note", kind: "field-renamed"}]}},
 		{call: "mig.changes", args: [_order, [["Order.fields.6.type", "decimal(10,2)"]]], expect: ["field-retyped Order.total"]},
 		{call: "mig.changes", args: [_order, [["Order.fields.6.proto", "double"]]], expect: ["field-retyped Order.total"], why: "the proto's type is the wire's"},
-		{call: "mig.plan", args: [_order, [["Order.fields.2.sql", "tsvector"]]], holds: {refused: [{kind: "field-retyped", why: "retyped from text to tsvector: a retype is a new field beside the retired one"}]}, why: "an alias with another column type (tsvector for string) is a retype the replay never applies"},
+		{call: "mig.plan", args: [_order, [["Order.fields.2.sql", "tsvector"]]], holds: {refused: [{kind: "field-retyped", why: "retyped from text to tsvector: a retype is a new field beside the retired one, which a backfill can copy"}]}, why: "an alias with another column type (tsvector for string) is a retype the replay never applies"},
 		{call: "mig.changes", args: [_order, [["Order.fields.3", null]]], expect: ["field-dropped Order.note"]},
 		{call: "mig.changes", args: [_order, [["Order.fields.1", null], ["Order.retired.1", {name: "id", type: "uuid", required: false}]]], expect: ["pk-retired Order.id"]},
 		{call: "mig.changes", args: [_order, [["Order.fields.3", null], ["Order.retired.3", {name: "remark", type: "string", required: false}]]], expect: ["field-renamed Order.note"], why: "a retirement keeps the name"},
 		{call: "mig.changes", args: [_retired, [["Order.retired.7", null], ["Order.fields.7", {name: "legacy", type: "string", proto: "string", required: false}]]], expect: ["field-revived Order.legacy"]},
 		{call: "mig.changes", args: [_retired, [["Order.retired.7", null]]], expect: ["retirement-dropped Order.legacy"]},
 		{call: "mig.changes", args: [_order, [["Order", null]]], expect: ["entity-dropped Order"]},
+		{call: "mig.plan", args: [_order, [["Order", null]]], holds: {refused: [{at: "Order", kind: "entity-dropped", why: "an entity is never removed, as its rows and every reader of them stay: retire each of its fields but the primary key (retired: true) instead, which keeps its table, and make relaxes what the columns held"}]}, why: "the refusal names the path admitted instead"},
 		{call: "mig.changes", args: [_order, [["Order", null], ["Purchase", _order.Order]]], expect: ["entity-renamed Order"], why: "the same type id under another name"},
 		{call: "mig.changes", args: [_order, [["Order.table", "orders"]]], expect: ["table-renamed Order"]},
 		{call: "mig.changes", args: [_order, [["Order.fields.6.generated", "1"]]], expect: ["generated-changed Order.total"]},
@@ -215,6 +260,52 @@ cases: {
 		{call: "mig.plan", args: [_order, [["Order.indexes.order_stage", {cols: ["stage"], unique: true}]]], holds: {ops: [], advisories: [{kind: "index-added"}]}, why: "a unique index the replay builds can fail on a duplicate"},
 		{call: "mig.changes", args: [_order, [["Order.fields.5.enum", ["new", "paid", "refunded"]]]], expect: ["enum-widened Order.stage"]},
 		{call: "mig.changes", args: [_order, [["Order.fields.5.machine", true]]], expect: ["machine-added Order.stage"], why: "010 builds the trigger"},
+		{call: "mig.changes", args: [_order, [["Order.fields.3.machine", true], ["Order.fields.3.enum", ["a", "b"]]]], expect: ["machine-added Order.note"], why: "a machine brings its check, which is no change of its own"},
+		{call: "mig.plan", args: [_order, [["Order.fields.3.machine", true], ["Order.fields.3.enum", ["a", "b"]]], {}, {trg_order_note_machine: "20261109_0001_a", order_note_check: "20261109_0001_a"}], holds: {refused: [{kind: "rebuilt", why: "trg_order_note_machine was dropped by 20261109_0001_a, which every fresh database still runs after building it: fold 20261109_0001_a (once every database has run it) before building trg_order_note_machine again"}, {kind: "rebuilt", why: "order_note_check was dropped by 20261109_0001_a, which every fresh database still runs after building it: fold 20261109_0001_a (once every database has run it) before building order_note_check again"}], advisories: [{kind: "machine-added"}]}, why: "each name refused once"},
+	]}
+	"a column added copies what the rows the table held should hold, from the backfill declared for it: a rename spelled as a retirement beside an addition keeps its data": {suite: "migrations", steps: [
+		{call: "mig.sql", args: [_order, [["Order.fields.8", {name: "remark", type: "string", proto: "string", required: false}]], {backfill: Order: remark: #""note""#}], expect: [(_move & {tag: "$fill$", where: #""remark" IS DISTINCT FROM ("note")"#, update: #"UPDATE "public"."order" SET "remark" = "note" WHERE "remark" IS DISTINCT FROM ("note");"#, kept: " AND conname <> ALL (ARRAY['order_remark_check'])"}).text], why: "runs where a row differs, so a fresh database, or one copied already, runs nothing; every other check is lifted, as in a backfill"},
+		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "placed_at", type: "timestamp", proto: "google.protobuf.Timestamp", required: true, default: "now()"}]]], holds: {ops: [], advisories: [{at: "Order.placed_at", kind: "field-added", why: "the replay gives every row the table holds now(), as it reads when the replay runs (the deploy's time, or a new value a row): declare backfill.Order.placed_at, the SQL of the row they should take (another column, say), and make copies it"}]}, why: "a default that reads another value each time fills old rows with the deploy's"},
+		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "placed_at", type: "timestamp", proto: "google.protobuf.Timestamp", required: true, default: "now()"}]], {backfill: Order: placed_at: #""created""#}], holds: {ops: [{at: "Order.placed_at", why: "added: the rows the table held take \"created\""}], advisories: []}, why: "declared, it is copied, and nothing is noted"},
+		{call: "mig.sql", args: [_order, [["Order.fields.8", {name: "phase", type: "string", proto: "string", required: true, default: "'new'", enum: ["new", "old"], machine: true}]], {backfill: Order: phase: #""stage""#}], expect: [(_move & {
+			tag:    "$fill$"
+			where:  #""phase" IS DISTINCT FROM ("stage")"#
+			update: #"UPDATE "public"."order" SET "phase" = "stage" WHERE "phase" IS DISTINCT FROM ("stage");"#
+			kept:   " AND conname <> ALL (ARRAY['order_phase_check'])"
+			off: ["    IF EXISTS (SELECT FROM pg_trigger WHERE tgrelid = '\(_t)'::regclass AND tgname = 'trg_order_phase_machine') THEN ALTER TABLE \(_t) DISABLE TRIGGER \"trg_order_phase_machine\"; END IF;"]
+			on: ["    IF EXISTS (SELECT FROM pg_trigger WHERE tgrelid = '\(_t)'::regclass AND tgname = 'trg_order_phase_machine') THEN ALTER TABLE \(_t) ENABLE TRIGGER \"trg_order_phase_machine\"; END IF;"]
+		}).text], why: "a copy is not a transition: a machine's column is copied with its trigger off"
+		},
+		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "remark", type: "string", proto: "string", required: false}]], {backfill: Order: remark: "$fill$x$fill$"}], holds: {ops: [], refused: [{at: "Order.remark", kind: "backfill", why: "the backfill holds $fill$, its block's own quote"}]}},
+	]}
+	"a declaration no change since the snapshot reads is refused, so none is read into a later change": {suite: "migrations", steps: [
+		{call: "mig.plan", args: [_order, [["Order.fields.4.required", false]], {backfill: Order: note: "''"}], holds: {refused: [{at: "Order.note", kind: "declaration", why: "schemaMigrations.backfill.Order.note is for no change since the snapshot: remove it, as a declaration serves the migration it was written for, and one left would be read into a later change to Order.note"}]}},
+		{call: "mig.plan", args: [_order, [["Order.fields.4.required", false]], {carry: Order: stage: values: paid: "new"}], holds: {refused: [{at: "Order.stage", kind: "declaration"}]}},
+		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "placed_at", type: "timestamp", proto: "google.protobuf.Timestamp", required: true}]], {backfill: Order: placed_at: "now()"}], holds: {refused: [{at: "Order.placed_at", kind: "required-added"}]}, why: "a declaration at a refused change is that change's, refused once"},
+	]}
+	"every kind of change has a rule, and one with none is an error, never the replay's": {suite: "migrations", steps: [
+		{call: "migrations.plan", args: [[{kind: "column-moved", entity: "Order", table: "order", field: "x"}]], throws: "^Order.x: a change of kind column-moved, which this plugin has no rule for$"},
+		{call: "migrations.verdict", args: [{kind: "column-moved", entity: "Order"}], throws: "a change of kind column-moved"},
+		{call: "migrations.verdict", args: [{kind: "field-added", entity: "Order", field: "x"}], expect: "replay"},
+	]}
+	"every op says the names it drops and builds for good, and droppedBy reads the same from its migration": {suite: "migrations", steps: [
+		{call: "mig.names", args: [_order, [
+			["Order.fields.4", null], ["Order.retired.4", {name: "ref", type: "uuid", required: false}],
+			["Order.indexes.order_ref_status", null],
+			["Order.fields.6.check", null],
+			["Order.fields.2.machine", null],
+			["Order.indexes.idx_order_note", {cols: ["note", "stage"], using: "btree"}],
+			["Order.fields.3.unique", true],
+			["Order.fields.3.ref", "customer"],
+			["Order.fields.5.enum", ["new", "settled"]],
+		], {carry: Order: stage: values: paid: "settled"}], expect: {
+			said: ["order_ref_fkey", "order_ref_key", "order_ref_status", "order_total_check", "trg_order_status_machine"]
+			read: ["order_ref_fkey", "order_ref_key", "order_ref_status", "order_total_check", "trg_order_status_machine"]
+		}},
+		{call: "mig.names", args: [_order, [["Order.fields.3.unique", true], ["Order.fields.3.ref", "customer"]], {}, ["order_note_key", "order_note_fkey", "order_stage_check"]], expect: {
+			said: ["order_stage_check"]
+			read: ["order_stage_check"]
+		}, why: "a unique and a reference built again are no longer dropped, by either reading"},
 	]}
 	"a column made required fills its NULLs, then is tightened: from what the app declares, else its default, else it is a need": {suite: "migrations", steps: [
 		{call: "mig.plan", args: [_order, [["Order.fields.3.required", true]]], holds: {ops: [], needs: [{at: "Order.note", declare: "backfill.Order.note"}]}},
@@ -308,9 +399,12 @@ cases: {
 		{call: "migrations.nextName", args: [[], "0001", "20261109"], throws: "starting with a letter", why: "the name says what the migration does"},
 		{call: "migrations.nextName", args: [[], "a", "2026-11-09"], throws: "YYYYMMDD"},
 	]}
-	"the ledger embeds each migration into code.state.migrations, and none declares nothing": {suite: "migrations", steps: [
-		{call: "migrations.ledger", args: ["shop", ["20261109_0001_a", "20261109_0002_b"]], expect: "// generated by migrations/migrate.ts (make) — do not edit\n@extern(embed)\n\npackage shop\n\n// The app's pgroll migrations (migrations/README.md): each runs once on a database that already\n// holds rows, after the replay of the emitted schema.\ncode: state: migrations: {\n\t\"20261109_0001_a\": _ @embed(file=\"migrations/20261109_0001_a.json\")\n\t\"20261109_0002_b\": _ @embed(file=\"migrations/20261109_0002_b.json\")\n}\n"},
-		{call: "migrations.ledger", args: ["shop", []], expect: "// generated by migrations/migrate.ts (make) — do not edit\npackage shop\n", why: "an empty map would still give the cluster a migrate step"},
+	"a migration's name is the day, its count and what it does; every other .json the ledger would embed is a stray": {suite: "migrations", steps: [
+		{call: "migrations.isName", args: ["20261109_0001_retire_ref"], expect: true},
+		{call: "migrations.isName", args: ["20261109_0001_Retire"], expect: false},
+		{call: "migrations.isName", args: ["01_hand"], expect: false},
+		{call: "migrations.slugOf", args: ["20261109_0001_retire_ref"], expect: "retire_ref"},
+		{call: "migrations.strays", args: [["snapshot.json", "migrations.sum", "migrate.ts", "20261109_0001_a.json", "notes.json", "01_hand.json"]], expect: ["notes.json", "01_hand.json"], why: "the ledger embeds every .json but the snapshot, so a file that is no migration would reach pgroll"},
 	]}
 	"the sum finds a file edited, removed or not written by make, and keeps the migration folded last": {suite: "migrations", steps: [
 		{call: "migrations.sum", args: [[{name: "snapshot.json", text: "{}\n"}, {name: "20261109_0001_a.json", text: "a"}]]},
@@ -325,9 +419,16 @@ cases: {
 		{call: "migrations.foldedOf", args: ["$f"], expect: "20261109_0001_a"},
 		{call: "migrations.verify", args: ["$f", [{name: "snapshot.json", text: "{}\n"}]], expect: []},
 	]}
-	"the snapshot is the model with its format, keys sorted and field numbers as numbers, and another format is refused": {suite: "migrations", steps: [
-		{call: "migrations.snapshot", args: [{b: {fields: {"10": {}, "9": {}}}, a: 1}], expect: "{\n  \"format\": 1,\n  \"model\": {\n    \"a\": 1,\n    \"b\": {\n      \"fields\": {\n        \"9\": {},\n        \"10\": {}\n      }\n    }\n  }\n}\n"},
-		{call: "migrations.fromSnapshot", args: ["{\"format\": 1, \"model\": {\"A\": {}}}"], expect: {A: {}}},
-		{call: "migrations.fromSnapshot", args: ["{\"format\": 2, \"model\": {}}"], throws: "format 2; this plugin reads format 1"},
+	"the snapshot is the model with its format, keys sorted and field numbers as numbers; an older format is upgraded first, a newer one refused": {suite: "migrations", steps: [
+		{call: "migrations.snapshot", args: [{b: {fields: {"10": {}, "9": {}}}, a: 1}], expect: "{\n  \"format\": 2,\n  \"model\": {\n    \"a\": 1,\n    \"b\": {\n      \"fields\": {\n        \"9\": {},\n        \"10\": {}\n      }\n    }\n  }\n}\n"},
+		{call: "migrations.fromSnapshot", args: ["{\"format\": 2, \"model\": {\"A\": {}}}"], expect: {A: {}}},
+		{call: "migrations.fromSnapshot", args: ["{\"format\": 1, \"model\": {}}"], throws: "^migrations/snapshot.json is format 1, where this plugin reads format 2: run `deno run --no-config -A migrations/migrate.ts upgrade`$"},
+		{call: "migrations.fromSnapshot", args: ["{\"format\": 3, \"model\": {}}"], throws: "^migrations/snapshot.json: format 3: a pronto this plugin does not read"},
+	]}
+	"upgrade carries an older snapshot to this format from the model at the commit it was taken at, and refuses one that is not that model": {suite: "migrations", steps: [
+		{call: "mig.upgrade", args: [_order, [["Order.fields.2.default", null]]], holds: {from: 1, model: Order: fields: "2": default: "'draft'"}, why: "format 2 records a machine's default, which format 1 did not"},
+		{call: "mig.upgrade", args: [_order, [["Order.fields.2.default", null], ["Order.fields.3.required", true]]], throws: "differ at Order.fields.3.required\\): name the commit the snapshot was taken at \\(upgrade --from <ref>\\)$", why: "a snapshot that is not the model at that commit is not guessed into it"},
+		{call: "mig.upgrade", args: [_order, [["Order.fields.5.default", null]]], throws: "differ at Order.fields.5.default", why: "only a machine's default is what format 2 adds"},
+		{call: "mig.upgrade", args: [_order, [], 2], throws: "format 2 already"},
 	]}
 }

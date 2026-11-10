@@ -2,9 +2,10 @@
 # Adds or refreshes pronto-migrations in a pronto app: its database carried forward by migrations made
 # from the changes to its emitted proto (migrations/README.md).
 #   bin/pronto-migrations <app-dir>
-# Writes migrations/migrate.ts and migrations/plan.js (the driver and its rules) and
-# migrations_plugin.cue (the schema, in the app's package), all regenerated, and seeds
-# migrations_spec.cue, the app's own opt-in. What `migrate.ts init` and `make` write is the app's.
+# Writes migrations/migrate.ts and migrations/plan.js (the driver and its rules),
+# migrations_plugin.cue (the schema, in the app's package) and migrations_ledger.cue (the app's
+# migrations embedded into it), all regenerated, and seeds migrations_spec.cue, the app's own opt-in.
+# What `migrate.ts init` and `make` write is the app's.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 app=$(cd "$1" && pwd)

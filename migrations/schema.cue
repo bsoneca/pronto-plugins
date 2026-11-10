@@ -25,7 +25,10 @@ code: state: migrations?: _
 		set?: [string]: string
 		triggers: *[] | [...string]
 	}
-	// A column made required, with no default: the SQL expression its NULL rows take first.
+	// The SQL expression of the row a column's rows take. On a column made required, its NULL rows
+	// take it first (needed when it has no default a migration can compute). On a column added, every
+	// row the table held takes it once the replay added the column: another column's value, as a
+	// rename spelled as a retirement beside an addition keeps its data.
 	backfill: [Entity=string]: [Column=string]: string
 	// Computed, not declared: the names of all the app's pgroll migrations, its own and any written by
 	// hand, so make numbers the next after them.

@@ -5,7 +5,11 @@ import "strings"
 _t: #Host & {package: "myapp"}
 
 // An opt-in writes the driver, its rules and the schema, and seeds the app's own migrations_spec.cue.
-written: [for p, f in _t.files if !f.seed {p}] & ["migrations/migrate.ts", "migrations/plan.js", "migrations/.gitattributes", "migrations_plugin.cue"]
+written: [for p, f in _t.files if !f.seed {p}] & ["migrations/migrate.ts", "migrations/plan.js", "migrations/.gitattributes", "migrations_plugin.cue", "migrations_ledger.cue"]
+
+// The ledger embeds every migration by a glob, in the app's package, and declares nothing without one.
+ledgerPackage: strings.Contains(_t.files["migrations_ledger.cue"].text, "\npackage myapp\n") & true
+ledgerGlob:    strings.Contains(_t.files["migrations_ledger.cue"].text, "@embed(glob=\"migrations/*\", type=text)") & true
 seeded: [for p, f in _t.files if f.seed {p}] & ["migrations_spec.cue"]
 
 // The schema and the opt-in join the app's package; the schema holds schemaMigrations to

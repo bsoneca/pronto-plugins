@@ -3,9 +3,10 @@
 An app's database carried forward by migrations made from the changes to its emitted schema, on
 unmodified pronto. The proto gives each column its identity (its field number, name, type and
 retirement), so a column keeps its name and its type for as long as the app lives. pronto's own facts
-beside it (`.pronto/check-inputs.json`, `010_machines.sql`) say what the column holds, and the
-migrations' SQL comes from those. What changes is what a column holds: it is retired, made required or optional, its default moves, a value leaves its
-enum or its machine, a reference or a unique goes. Each such change goes into a migration in pgroll's
+and emitted schema beside it (`.pronto/check-inputs.json`, `005_create_tables.sql`,
+`010_machines.sql`) say what the column holds, and the migrations' SQL comes from those. What changes
+is what a column holds: it is retired, made required or optional, its default moves, a value leaves
+its enum or its machine, a reference or a unique goes, and a column added takes another's data. Each such change goes into a migration in pgroll's
 grammar, which pronto already runs (`code.state.migrations`). A change that no migration can make
 safe is refused before anything is written.
 
@@ -75,17 +76,22 @@ Two choices differ from most of them.
 retirement (`reserved N; reserved "name";`). It carries nothing about what the column holds: every
 field is `optional`, with no default and no check.
 
-Two other files that generate writes from the same CUE say that:
+Three other files that generate writes from the same CUE say that:
 - `.pronto/check-inputs.json` (version 1) has, for each live **and retired** field:
   - its type, read through pronto's aliases (`text` is `string`), with a decimal's precision and
     scale;
   - `required`, the default, the enum or check, unique, the reference and generated;
   - and, for the entity, its table and indexes.
+- `005_create_tables.sql` has each column as the replay writes it: its type as Postgres holds it
+  (what an alias stands for, a domain, a decimal's own domain), and its default, including one
+  pronto writes that its facts do not state, a machine's initial state. These are read, never
+  restated, so a pronto that changes them is followed, not misread.
 - `010_machines.sql` has a machine's states, and each machine's trigger must have its check there.
 
-The model joins them by entity and field number. Where they disagree, the app was not generated. A
-facts version or a `010` shape this plugin does not read is a pronto it does not know. Either way,
-that is an error, not a guess.
+The model joins them by entity and field number. Where they disagree (a field with no column, a
+default the facts state and `005` does not write), the app was not generated. A facts version or a
+`010` shape this plugin does not read is a pronto it does not know. Either way, that is an error,
+not a guess.
 
 Two models are compared by number. A retirement is a change like any other: the column moves from
 what it held to what pronto still emits for it. A default pronto keeps for a retired column (an
@@ -93,15 +99,22 @@ what it held to what pronto still emits for it. A default pronto keeps for a ret
 
 | Change | What it is | Why |
 | --- | --- | --- |
-| a name changed under a number; a type changed (precision and scale too, and an alias with another column type: `tsvector` for `string`, `timestamptz` for `timestamp`); a field gone without `reserved`; a reserved number used again; an entity removed or renamed; its table renamed; a generated column changed; a primary key retired | **refused** | a reader of the JSON reads by name, and an open page or a queued row cannot be migrated: a new field beside a retired one instead (pronto's admission rules) |
-| a required column added to an existing table with no default, or with one a migration cannot compute (`auth_uid()`) | **refused** | the replay adds it to every row before any migration runs: give it a default, or add it optional and make it required later |
+| a name changed under a number; a type changed (precision and scale too, and an alias with another column type: `tsvector` for `string`, `timestamptz` for `timestamp`); a field gone without `reserved`; a reserved number used again; an entity removed or renamed; its table renamed; a generated column changed; a primary key retired | **refused** | a reader of the JSON reads by name, and an open page or a queued row cannot be migrated: a new field beside a retired one instead (pronto's admission rules), which a `backfill` copies into. An entity no longer used keeps its table: retire each of its fields but the primary key |
+| a required column added to an existing table with no default, or with one a migration cannot compute (`auth_uid()`) | **refused** | the replay adds it to every row before any migration runs: give it a default, or add it optional and make it required in a later release (in one release, the replay adds the final `NOT NULL` first) |
 | a name an earlier migration dropped, built again by the replay (an index, a check, a machine's trigger and check put back) | **refused** | every fresh database runs that migration after initdb built the name, and would lose it: `fold` the migration first, once every database has run it |
 | a column made optional; its default changed or removed; a check, unique, reference, machine or index removed | **ledger**, relax | `DROP NOT NULL`, `SET DEFAULT` or `DROP DEFAULT`, `DROP CONSTRAINT`, `DROP TRIGGER`, `DROP INDEX` |
 | a value gone from an enum or a machine | **ledger**, rows | the rows holding it carried, by the declared `carry`; without one, make names it |
 | a column made required | **ledger**, rows then tighten | its NULL rows filled from `backfill`, else from its default, then `SET NOT NULL`; with neither, make names the `backfill` it needs |
-| a unique or a reference added; an index changed | **ledger**, tighten | the constraint pronto's inline `UNIQUE` or `REFERENCES` makes (the reference `NOT VALID`); the index built again |
-| an entity or an optional or defaulted column added; an enum widened; an index or a machine added | **replay** | the emitted schema makes it; no migration |
+| a column added, with a `backfill` declared | **ledger**, rows | after the replay adds it, every row the table held takes the `backfill` (another column, the field a rename retired): the data moves to the new field |
+| a unique or a reference added | **ledger**, tighten | the constraint pronto's inline `UNIQUE` or `REFERENCES` makes (the reference `NOT VALID`) |
+| an index changed | **ledger**, relax then tighten | the old index dropped, then built again |
+| an entity or an optional or defaulted column added, with no `backfill`; an enum widened; an index or a machine added | **replay** | the emitted schema makes it; no migration |
 | a check changed or added | **advisory** | the replay adds it `NOT VALID`, so rows written before are not checked. No carry can be named, since the values a check admitted before are not known |
+| a column added with a default that reads another value each time (`now()`, `gen_random_uuid()`), and no `backfill` | **advisory** | the replay gives every row the table holds the value it reads as it runs: the deploy's time, or a value per row. Declare the `backfill` they should take |
+
+Every kind of change is one entry of `KINDS` in [`plan.js`](plan.js): its verdict, why it is refused,
+what to note, the names the replay builds for it, and the SQL it needs. A kind with no entry is an
+error, never taken for the replay's.
 
 A unique index added, by the replay or by a migration, is noted too: it is built over every row and
 locks writes while it builds, and a duplicate fails it.
@@ -119,22 +132,26 @@ deno run --no-config -A migrations/migrate.ts make retire_ref     # migrations/2
 ./saytw lint                                                      # runs migrate.ts check
 deno run --no-config -A migrations/migrate.ts rebase main         # after merging main in, when both made a migration
 deno run --no-config -A migrations/migrate.ts fold 20261109_0001_retire_ref   # once every database has run it
+deno run --no-config -A migrations/migrate.ts upgrade             # after a plugin update changes the snapshot's format
 ```
 
 | Path in the app | Owner |
 | --- | --- |
 | `migrations/migrate.ts`, `migrations/plan.js`, `migrations/.gitattributes` | regenerated: the driver, its rules, and LF line ends for what the sum covers |
 | `migrations_plugin.cue` | regenerated: `#Migrations`, in the program's package |
+| `migrations_ledger.cue` | regenerated: the migrations embedded into `code.state.migrations` |
 | `migrations_spec.cue` | seeded, then the app's: the `carry` and `backfill` the next migration needs, and the lint's opt-in |
+| `migrations/snapshot.json`, `migrations/migrations.sum`, `migrations/<YYYYMMDD>_<NNNN>_<name>.json` | the app's, written by `init`, `make`, `rebase`, `fold` and `upgrade` only |
 
 All of them are committed: the regenerated files too, as an app commits every host's `*_plugin.cue`.
 `check` needs only deno. `plan` and `make` also run `cue` (or the binary `CUE` names) to read the
 declarations and the app's migration names from the program.
-| `migrations/snapshot.json`, `migrations/migrations.sum`, `migrations/<YYYYMMDD>_<NNNN>_<name>.json`, `migrations_ledger.cue` | the app's, written by `init`, `make`, `rebase` and `fold` only, committed |
 
-`migrations_ledger.cue` embeds each migration into `code.state.migrations`. pronto types it there with
+`migrations_ledger.cue` embeds every `.json` in `migrations/` but the snapshot into
+`code.state.migrations`, by a glob, so it is never generated and a merge has nothing in it to settle.
+`check` refuses a `.json` there whose name is no migration's. pronto types the migrations with
 pgroll's grammar (mecha's `pgroll.#Migration`), so a field pgroll does not know fails the program's
-`cue vet`. With no migration it declares nothing, so the cluster gets no migrate step.
+`cue vet`. With no migration the ledger declares nothing, so the cluster gets no migrate step.
 
 A migration's name has three parts: the day make writes it (the machine's calendar day), its count
 among that day's migrations (a folded one included), and what it does. For example,
@@ -147,10 +164,10 @@ migration the app has:
 - a migration written by hand that sorts after every dated name is refused, so name hand migrations
   the same way.
 
-**When two branches both made a migration**, `snapshot.json`, `migrations.sum` and
-`migrations_ledger.cue` conflict at the merge, and the branch's migration may sort before one main
-already released, which pgroll's runner would refuse. After merging main in and running generate, run
-`deno run --no-config -A migrations/migrate.ts rebase main`. It takes main's snapshot, sum, ledger and
+**When two branches both made a migration**, `snapshot.json` and `migrations.sum` conflict at the
+merge, and the branch's migration may sort before one main already released, which pgroll's runner
+would refuse. After merging main in and running generate, run
+`deno run --no-config -A migrations/migrate.ts rebase main`. It takes main's snapshot, sum and
 migrations whole, removes the branch's own migrations, and runs make again under the branch's name,
 so the branch's changes become one migration named after main's. If make then names a carry or
 backfill (one the branch's migration had, and its declaration was deleted), declare it and run
@@ -172,6 +189,9 @@ schemaMigrations: carry: Order: stage: {
 }
 
 schemaMigrations: backfill: Order: note: "''"   // a column made required, with no default
+
+// A column added beside the one a rename retired: the rows the table held copy it.
+schemaMigrations: backfill: Order: remark: "note"
 ```
 
 `make` checks them:
@@ -180,7 +200,9 @@ schemaMigrations: backfill: Order: note: "''"   // a column made required, with 
 - every other machine's column `set` moves has its trigger listed;
 - every trigger listed is a machine's on that table.
 
-A declaration only serves the next `make`, and can go once its migration is written.
+A declaration serves the migration it was written for. `make` refuses one that no change since the
+snapshot reads, as it would otherwise be read into a later change to the same column: remove each in
+the change that wrote its migration.
 
 ## How it runs
 
@@ -195,8 +217,13 @@ events. Its changes run in three phases, whatever order the columns come in:
 2. **Move rows:** backfills and carries. No row is moved against a rule the same migration drops.
 3. **Tighten:** `SET NOT NULL`, uniques, references and indexes built.
 
-**A carry or a backfill is a `DO` block.** It runs only where a row needs moving: one holding a value
-gone, or a `NULL` in a column made required. A carry turns off only the triggers that exist when it
+**A carry, a backfill or a copy is a `DO` block.** It runs only where a row needs moving: one holding
+a value gone, a `NULL` in a column made required, or a value of a column added that differs from its
+copy (so a fresh database, and one copied already, run nothing). A copy runs once on a live database,
+before the release serves, so every row it finds is one the table held; a machine's column is copied
+with its trigger off, as a copy is no transition. A copy into a required column must give every
+row a value (`coalesce(placed, 'epoch')`, say): one `NULL` fails the migration whole. Seed rows meet it
+too. A carry turns off only the triggers that exist when it
 runs. Postgres checks every check on a row it updates, even one `NOT VALID`, and the replay restates
 every check `NOT VALID`. So a row written before a check was restated, on any of its columns, would
 stop the move. The block lifts every check on the table around the update and puts each back as the
@@ -236,10 +263,11 @@ same thing: initdb and the replay add, and a migration only alters what an earli
   a move out of a removed state. Closing that is k8s's job, as gcp does.
 - **The window between the replay and the ledger is the migrate step's.** During it, a retired column
   is still `NOT NULL` while the replayed functions already stop writing it.
-- **`check-inputs.json` is pronto's own file.** Its shape is not a published contract. `model()` is
-  the one place that reads it, and it refuses a version or a shape it does not know. The way to make
-  the proto the whole contract upstream is a custom option on each field, `[(pronto.column) =
-  {required, default, check}]`; this plugin would then read nothing else.
+- **`check-inputs.json` and `005`'s clauses are pronto's own files.** Their shape is not a published
+  contract. `model()` is the one place that reads them, and it refuses a version, a shape or a type
+  clause it does not know. The way to make the proto the whole contract upstream is a custom option
+  on each field, `[(pronto.column) = {required, default, check}]`; this plugin would then read
+  nothing else.
 - **Seed and fixture rows meet every migration not yet folded** (see "How it runs").
 - **Drift that was already there when `init --from` ran is not seen.** For example, a column retired
   before then that a live database still holds `NOT NULL`. The snapshot starts from the model, not
@@ -249,6 +277,15 @@ same thing: initdb and the replay add, and a migration only alters what an earli
     added `NOT VALID`;
   - no index is built `CONCURRENTLY`;
   - a name longer than Postgres's 63 bytes is not matched.
+
+## The snapshot's format
+
+The snapshot records the model this plugin reads, so a plugin that reads more (format 2 records the
+default `005` writes for a machine's column) changes it. `check`, `plan` and `make` refuse a snapshot
+of an older format, naming `upgrade`; one of a newer format is refused as a plugin too old. `upgrade`
+reads the model at the commit that last wrote the snapshot (or `--from <ref>`, the commit it was
+taken at), carries the old snapshot forward with what each later format records, and writes it only
+if that is the model at the commit exactly. Then it sums it again.
 
 ## Tests
 
@@ -261,15 +298,22 @@ same thing: initdb and the replay add, and a migration only alters what an earli
   - the phases;
   - the carries and their refusals;
   - the names a migration dropped;
-  - the migration, its name, the ledger, the sum with a fold, and the snapshot's format.
+  - the copy into a column added, the note on a volatile default, and a declaration no change reads;
+  - a kind with no rule, and each op's names against what `droppedBy` reads;
+  - the migration, its name and the strays, the sum with a fold, the snapshot's format and its
+    upgrade.
 - [`test.nu`](test.nu): the installer and the driver in a fresh example app:
   - `init`, then a lint that refuses a moved model;
   - a `make` that names the carry it needs, then writes one operation;
   - the program reading the migration;
   - a hand edit, refused;
-  - an index rebuilt over a migration that dropped it, refused until `fold`;
+  - an index rebuilt over a migration that dropped it, refused until `fold`, and the declaration
+    left from the last migration, refused until removed;
   - a rename, refused;
-  - two branches that each made a migration, merged: `rebase` remakes the side's after main's.
+  - two branches that each made a migration, merged: `rebase` remakes the side's after main's, and
+    the ledger embeds both with nothing to settle;
+  - a `.json` in `migrations/` that is no migration, refused;
+  - `init --from` a git ref, taking the model the ref held.
 
 ```sh
 ./saytw --script tools.nu cue vet -c ./migrations
