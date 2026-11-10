@@ -1,27 +1,21 @@
 # An operator service's node Secret from a SOPS file (PRONTO-155), for identity/metal.nu and
-# billing/metal.nu: `--secrets <dir>/secrets.metal.enc.yaml`, full k8s Secret manifests encrypted
-# for every age recipient in .sops.yaml (bsoneca/pronto's services/<service>/, made by its
-# tools/secrets/import.nu). Decrypted here, on the operator's Mac, with the sops and the age key
-# pronto's release@k8s uses (k8s/release.nu sops-bin and sops-age-key: the Keychain item
-# pronto-sops-age), of the pronto `mise where` finds from the file's folder; the plain manifests go
-# only down a pipe, to the node's server-side apply, never to a file or an argument.
+# billing/metal.nu: `--secrets <file>`, full k8s Secret manifests encrypted for every age recipient
+# in .sops.yaml (bsoneca/pronto's services/<service>/secrets.metal.enc.yaml, made by its
+# tools/secrets/import.nu). Decrypted on the operator's Mac by that checkout's own
+# tools/secrets/sops.nu, the one mechanism pronto's tools use (the sops release@k8s pins, the
+# Keychain key pronto-sops-age); the plain manifests go only down a pipe, to the node's
+# server-side apply, never to a file or an argument.
 
-# The pronto whose k8s/release.nu decrypts `file`: the one pinned where the file lives.
-def pronto-for [file: string]: nothing -> string {
-	let mise = (which mise | get -o 0.path | default (
-		glob ($env.HOME | path join "Library/Caches/sayt/mise-*/mise") | append (glob ($env.HOME | path join ".cache/sayt/mise-*/mise")) | sort | last))
-	let r = (do { cd ($file | path dirname); ^$mise where github:bonisoft3/pronto } | complete)
-	if $r.exit_code != 0 { error make {msg: $"no pronto pinned for ($file): ($r.stderr | str trim)"} }
-	$r.stdout | str trim
-}
-
-# The decrypted manifests, as YAML documents: the age key stays inside the one nu that decrypts.
+# The decrypted manifests, as YAML documents, from the pronto checkout that holds `file`.
 export def decrypt [file: string]: nothing -> string {
 	let file = ($file | path expand)
 	if not ($file | path exists) { error make {msg: $"no ($file)"} }
-	let pronto = (pronto-for $file)
-	let r = (do { ^$nu.current-exe -c $"use ($pronto)/k8s/release.nu [sops-bin sops-age-key]; with-env {SOPS_AGE_KEY: \(sops-age-key\)} { ^\(sops-bin\) -d --output-type yaml ($file) }" } | complete)
-	if $r.exit_code != 0 { error make {msg: $"sops -d ($file): ($r.stderr | str trim)"} }
+	let root = (do { cd ($file | path dirname); ^git rev-parse --show-toplevel } | complete)
+	if $root.exit_code != 0 { error make {msg: $"($file) is in no git checkout"} }
+	let tool = ($root.stdout | str trim | path join tools secrets sops.nu)
+	if not ($tool | path exists) { error make {msg: $"no ($tool): --secrets reads a file from a pronto checkout that has it"} }
+	let r = (do { ^$nu.current-exe -c $"use ($tool) [decrypt]; decrypt ($file)" } | complete)
+	if $r.exit_code != 0 { error make {msg: $"decrypt ($file): ($r.stderr | str trim)"} }
 	$r.stdout
 }
 
@@ -40,8 +34,8 @@ export def secret-manifests [name: string, namespace: string, keys: list<string>
 	$docs | each {|d| $d | upsert metadata.namespace $namespace | to yaml } | str join "---\n"
 }
 
-# The node command that applies them: server-side, owned by pronto-sops as release@k8s's are, so a
-# Secret made by hand before is taken over, not refused.
+# The node command that applies them: server-side, owned by pronto-sops as release@k8s's and
+# pronto's tools/secrets/sops.nu apply-to-node are, so a Secret made by hand before is taken over.
 export def apply-command [kubectl: string, namespace: string]: nothing -> string {
 	$"($kubectl) apply -n ($namespace) --server-side --force-conflicts --field-manager=pronto-sops -f -"
 }

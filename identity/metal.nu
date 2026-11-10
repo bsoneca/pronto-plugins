@@ -137,7 +137,7 @@ export def main [
 	--domain: string               # Where the broker answers, its issuer: id.example.com
 	--google-client-id: string     # The operator's Google client, registered for https://<domain>/callback/google
 	--project: string = ""         # The Google Cloud project whose Secret Manager holds the broker's secrets
-	--secrets: string = ""         # Or the SOPS file holding the Secret <service> (pronto's services/identity-broker/secrets.metal.enc.yaml)
+	--secrets: string = ""         # Or the SOPS file holding the Secret <service>, in a pronto checkout (its services/identity-broker/secrets.metal.enc.yaml)
 	--phone-project: string = ""   # As release.nu: the Firebase project that texts the phone's codes; none, no phone
 	--phone-api-key: string = ""
 	--phone-app-id: string = ""

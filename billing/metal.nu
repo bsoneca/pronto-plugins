@@ -150,7 +150,7 @@ export def main [
 	--kubeconfig: string = "$HOME/.cache/contabo2.kubeconfig" # On the node
 	--domain: string               # Where the broker answers, its issuer: billing.example.com
 	--project: string = ""         # The Google Cloud project whose Secret Manager holds the broker's secrets
-	--secrets: string = ""         # Or the SOPS file holding the Secret <service> (pronto's services/billing-broker/secrets.metal.enc.yaml)
+	--secrets: string = ""         # Or the SOPS file holding the Secret <service>, in a pronto checkout (its services/billing-broker/secrets.metal.enc.yaml)
 	--fee: int = 0                 # The share of each payment the platform keeps, in percent
 	--sandbox-tenants: string = "" # As release.nu: the tenants that buy through Stripe's sandbox
 	--namespace: string = "billing"
