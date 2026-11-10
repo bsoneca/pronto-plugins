@@ -18,6 +18,7 @@ refuses an app that is not.
 - [analytics](analytics/README.md): business numbers (users, paying users, games, funnels) and visits, read not alerted.
 - [android](android/README.md): a native Android host, no WebView.
 - [billing](billing/README.md): paid plans through a shared Stripe broker.
+- [errors](errors/README.md): what the pages throw, reported to a self-hosted GlitchTip (Sentry protocol): the node's server, the page's reporter, the door's route.
 - [firebase](firebase/README.md): release to Firebase Hosting.
 - [flags](flags/README.md): feature flags on OpenFeature and flagd.
 - [gcp](gcp/README.md): release to Cloud Run.
