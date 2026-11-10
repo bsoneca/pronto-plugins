@@ -31,6 +31,15 @@ _retired: Order: _order.Order & {retired: "7": {name: "legacy", type: "string", 
 _carryValues: {carry: Order: stage: values: paid: "settled"}
 _stageNarrowed: [["Order.fields.5.enum", ["new", "settled"]]]
 
+// A carry's lift of a moved column's check, and its putting back as the database held it, NOT VALID.
+_lift: {"1": stage: _, "2": status: _}
+_lift: [N=string]: [C=string]: strings.Join([
+	"    SELECT pg_get_constraintdef(oid) INTO check_\(N) FROM pg_constraint WHERE conrelid = '\"public\".\"order\"'::regclass AND conname = 'order_\(C)_check';",
+	"    IF check_\(N) IS NOT NULL THEN ALTER TABLE \"public\".\"order\" DROP CONSTRAINT \"order_\(C)_check\"; END IF;",
+], "\n")
+_putBack: {"1": stage: _, "2": status: _}
+_putBack: [N=string]: [C=string]: "    IF check_\(N) IS NOT NULL THEN EXECUTE 'ALTER TABLE \"public\".\"order\" ADD CONSTRAINT \"order_\(C)_check\" ' || check_\(N) || CASE WHEN check_\(N) LIKE '%NOT VALID' THEN '' ELSE ' NOT VALID' END; END IF;"
+
 _proto: """
 	syntax = "proto3";
 	package pronto.entities;
@@ -199,18 +208,29 @@ cases: {
 		{call: "mig.plan", args: [_order, _stageNarrowed], holds: {ops: [], needs: [{at: "Order.stage", declare: "carry.Order.stage"}]}},
 		{call: "mig.sql", args: [_order, _stageNarrowed, _carryValues], expect: [strings.Join([
 			"DO $carry$",
+			"DECLARE",
+			"  check_1 text;",
 			"BEGIN",
 			#"  IF EXISTS (SELECT FROM "public"."order" WHERE "stage" IN ('paid')) THEN"#,
+			_lift["1"].stage,
 			#"    UPDATE "public"."order" SET "stage" = CASE "stage" WHEN 'paid' THEN 'settled' END WHERE "stage" IN ('paid');"#,
+			_putBack["1"].stage,
 			"  END IF;",
 			"END $carry$;",
-		], "\n")], why: "a fresh database, or one carried already, holds no such row and runs nothing"},
+		], "\n")], why: "a fresh database, or one carried already, holds no such row and runs nothing; the column's check is lifted around the move and put back NOT VALID, as a database that skipped releases holds a later migration's check, which an earlier carry's destination is outside"},
 		{call: "mig.sql", args: [_order, _stageNarrowed, {carry: Order: stage: {set: {stage: "'settled'", status: "'open'"}, triggers: ["trg_order_status_machine"]}}], expect: [strings.Join([
 			"DO $carry$",
+			"DECLARE",
+			"  check_1 text;",
+			"  check_2 text;",
 			"BEGIN",
 			#"  IF EXISTS (SELECT FROM "public"."order" WHERE "stage" IN ('paid')) THEN"#,
 			"    \(_trg) THEN ALTER TABLE \(_t) DISABLE TRIGGER \"trg_order_status_machine\"; END IF;",
+			_lift["1"].stage,
+			_lift["2"].status,
 			#"    UPDATE "public"."order" SET "stage" = 'settled', "status" = 'open' WHERE "stage" IN ('paid');"#,
+			_putBack["1"].stage,
+			_putBack["2"].status,
 			"    \(_trg) THEN ALTER TABLE \(_t) ENABLE TRIGGER \"trg_order_status_machine\"; END IF;",
 			"  END IF;",
 			"END $carry$;",

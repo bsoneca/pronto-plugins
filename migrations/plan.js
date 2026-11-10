@@ -446,12 +446,24 @@ function carrySql(c, carry, t, col, needs, refused, at) {
     return null;
   }
   const exists = (x) => `EXISTS (SELECT FROM pg_trigger WHERE tgrelid = ${lit(t)}::regclass AND tgname = ${lit(x)})`;
+  // Each moved column's check is lifted around the UPDATE and put back as the database holds it then.
+  // The replay restates the newest check before any migration runs, so on a database that skipped
+  // releases an older carry's destination (one a later migration carries on) is outside it, and an
+  // UPDATE is checked even under NOT VALID. Put back NOT VALID, so the rows a later migration carries
+  // on are left for it.
+  const checks = Object.keys(assign).map((k, i) => ({ name: `${c.table}_${k}_check`, v: `check_${i + 1}` }));
   return [
     "DO $carry$",
+    ...(checks.length ? ["DECLARE", ...checks.map((x) => `  ${x.v} text;`)] : []),
     "BEGIN",
     `  IF EXISTS (SELECT FROM ${t} WHERE ${col} IN (${gone})) THEN`,
     ...triggers.map((x) => `    IF ${exists(x)} THEN ALTER TABLE ${t} DISABLE TRIGGER ${ident(x)}; END IF;`),
+    ...checks.flatMap((x) => [
+      `    SELECT pg_get_constraintdef(oid) INTO ${x.v} FROM pg_constraint WHERE conrelid = ${lit(t)}::regclass AND conname = ${lit(x.name)};`,
+      `    IF ${x.v} IS NOT NULL THEN ALTER TABLE ${t} DROP CONSTRAINT ${ident(x.name)}; END IF;`,
+    ]),
     `    UPDATE ${t} SET ${Object.entries(assign).map(([k, e]) => `${ident(k)} = ${e}`).join(", ")} WHERE ${col} IN (${gone});`,
+    ...checks.map((x) => `    IF ${x.v} IS NOT NULL THEN EXECUTE ${lit(`ALTER TABLE ${t} ADD CONSTRAINT ${ident(x.name)} `)} || ${x.v} || CASE WHEN ${x.v} LIKE '%NOT VALID' THEN '' ELSE ' NOT VALID' END; END IF;`),
     ...triggers.map((x) => `    IF ${exists(x)} THEN ALTER TABLE ${t} ENABLE TRIGGER ${ident(x)}; END IF;`),
     "  END IF;",
     "END $carry$;",

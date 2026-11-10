@@ -196,7 +196,10 @@ events. Its changes run in three phases, whatever order the columns come in:
 3. **Tighten:** `SET NOT NULL`, uniques, references and indexes built.
 
 **A carry is a `DO` block.** It runs only where a row holds a value gone, and turns off only the
-triggers that exist when it runs.
+triggers that exist when it runs. It lifts each moved column's check around the update and puts back
+the check the database holds, `NOT VALID`. A database that skipped releases already holds the newest
+check from the replay, and an earlier carry's destination (one a later migration carries on) is
+outside it.
 
 **On a fresh database**, initdb builds the latest model, and then every migration runs in order:
 - each relaxes what initdb already relaxed;
