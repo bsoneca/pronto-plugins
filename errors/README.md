@@ -63,6 +63,32 @@ At most one report of each message, and twenty events a page load. It reports on
 pronto-flags flag `error_tracking` is true, asked over OFREP at `/ofrep/` on the same origin; what is
 thrown before the flag answers is held, then sent or dropped.
 
+## Source maps
+
+An error in GlitchTip shows its original file, function and line, not the minified bundle's. Each
+bundle carries a debug ID (a UUID from its own SHA-256), appended by the app's build
+(`deno run -A errors/sourcemaps.ts inject`, the bundles `sourcemaps.files` lists), so no line of it
+moves. On load the bundle records its ID under its own stack (Sentry's `_sentryDebugIds`), and the
+reporter sends, with each event, the IDs of the bundles its frames run through (`debug_meta`).
+
+The maps are never served or committed. After each release, release-cron's step runs
+`errors/sourcemaps.ts upload` in the tree released: it builds the bundles again with hidden maps
+(`sourcemaps.build`, into the folder `ERRORS_MAPS_OUT` names), refuses unless each is byte-identical to
+the committed one, and sends the maps with sentry-cli as a debug-ID artifact bundle to the project
+`slug` of organization `org`. It signs with the token the Secret `upload` holds, which `metal` makes and
+gives the owner's API token (upload scopes only); `sourcemaps.token` is the command that prints it:
+
+```cue
+errors: #Errors & {
+	project: 1, key: "…", upstream: "https://errors.example.com", slug: "shop"
+	sourcemaps: {
+		files: ["shell/hatches/game/game.js"]
+		build: "cd src && vite build" // writes $ERRORS_MAPS_OUT/shell/hatches/game/game.js and .map
+		token: "ssh node 'kubectl get secret upload -n errors -o jsonpath={.data.token} | base64 -d'"
+	}
+}
+```
+
 ## Use
 
 From a pronto app, once GlitchTip runs (above) and has a project for it:

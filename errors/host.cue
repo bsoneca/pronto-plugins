@@ -21,6 +21,7 @@ _schema:    _ @embed(file="schema.cue", type=text)
 _errorsNu:  _ @embed(file="errors.nu", type=text)
 _reporter:  _ @embed(file="errors.js", type=text)
 _standinTs: _ @embed(file="standin.ts", type=text)
+_mapsTs:    _ @embed(file="sourcemaps.ts", type=text)
 
 // The stand-in's port on a host launch is one the launch hands it (ERRORS_PORT), and the door
 // reaches it by its peer address (PRONTO_UPSTREAM_ERRORS); 8700 is its port in a container.
@@ -84,6 +85,7 @@ _configPath:   "shell/hatches/errors/config.js"
 		"errors/errors.nu": {seed: false, text: _errorsNu}
 		"pronto/exports.nu": {seed: false, text: common.exportsNu}
 		"errors/standin.ts": {seed: false, text: _standinTs}
+		"errors/sourcemaps.ts": {seed: false, text: _mapsTs}
 		(_reporterPath): {seed: false, text: _reporter}
 		(_configPath): {
 			seed: true

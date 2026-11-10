@@ -656,6 +656,16 @@ try {
     } catch (e) { run.notes = `failed (${(e as Error).message.split("\n")[0]})`; }
     say(`release notes ${run.notes}`);
   }
+  // 6b. The release's source maps (pronto-errors: errors/sourcemaps.ts), when the app sends them and the revision is new:
+  // the bundles built again from the tree released, with their maps, sent to GlitchTip, so a page's error there shows its
+  // original file, function and line. Its output is in the run's log; whatever it does, the run's outcome stays.
+  if (run.revision !== before && exists(`${dir}/errors/sourcemaps.ts`)) {
+    try {
+      const m = await child(Deno.execPath(), ["run", "-A", "--no-config", "errors/sourcemaps.ts", "upload"], dir, Deno.env.toObject());
+      run.maps = m.code === 0 ? "sent" : `failed (exit ${m.code})`;
+    } catch (e) { run.maps = `failed (${(e as Error).message.split("\n")[0]})`; }
+    say(`source maps ${run.maps}`);
+  }
   // 7. The dev flow's board, where the repository keeps one (its devflow/devflow.cue; pronto-plugins' devflow/README.md):
   // the app's Merged issues whose pull request this release holds go Live. Run from pronto-plugins' main, this script
   // being a copy in the app; the board's token is PLANE_TOKEN or Secret Manager's. Whatever it says, the run's outcome stays.

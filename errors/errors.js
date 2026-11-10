@@ -6,7 +6,8 @@
 // (an error event does not bubble, so the capture phase of the window sees it). Each is one Sentry
 // envelope, POSTed to the page's own origin (config.prefix: the app's door routes it to GlitchTip,
 // so connect-src stays 'self'). An event holds the error's type, message and stack frames (without
-// their query or hash), the page's path (no query, no hash) and the release; no user, no cookie
+// their query or hash) with the debug IDs of the bundles they run through (their source maps are
+// GlitchTip's, sent at release, never the page's), the page's path (no query, no hash) and the release; no user, no cookie
 // (the request omits them), no breadcrumb and nothing a reader typed.
 //
 // It reports only when the pronto-flags flag config.flag answers true, asked over OFREP on the
@@ -46,9 +47,25 @@ export const frames = (stack) => {
 	const out = [];
 	for (const line of String(stack ?? "").split("\n")) {
 		const m = CHROME.exec(line) ?? GECKO.exec(line);
-		if (m) out.push({ function: m[1] || "?", filename: bare(m[2]), lineno: Number(m[3]), colno: Number(m[4]) });
+		if (m) {
+			const file = bare(m[2]);
+			out.push({ function: m[1] || "?", filename: file, abs_path: file, lineno: Number(m[3]), colno: Number(m[4]) });
+		}
 	}
 	return out.reverse().slice(-MAX_FRAMES);
+};
+
+// The debug IDs of the bundles a stack runs through, as GlitchTip finds their source maps: each
+// bundle built with one (errors/sourcemaps.ts inject) set globalThis._sentryDebugIds[its own stack] =
+// its ID as it loaded, so the newest frame of that stack names the file it was loaded from.
+export const debugImages = (stacktrace, ids = globalThis._sentryDebugIds) => {
+	const used = new Set(stacktrace.map((f) => f.abs_path));
+	const images = [];
+	for (const [stack, id] of Object.entries(ids ?? {})) {
+		const file = frames(stack).at(-1)?.abs_path;
+		if (file && used.has(file)) images.push({ type: "sourcemap", code_file: file, debug_id: text(id) });
+	}
+	return images;
 };
 
 const send = (event) => {
@@ -70,6 +87,7 @@ const event = (type, value, stacktrace) => ({
 	release,
 	environment: "production",
 	exception: { values: [{ type, value, stacktrace: { frames: stacktrace } }] },
+	debug_meta: { images: debugImages(stacktrace) },
 	request: { url: location.origin + location.pathname },
 	sdk: { name: "pronto-errors", version: "1" },
 });
@@ -100,7 +118,7 @@ const onError = (e) => {
 	}
 	const error = e.error;
 	if (error instanceof Error) report(text(error.name || "Error"), text(error.message), frames(error.stack));
-	else report("Error", text(e.message), e.filename ? [{ function: "?", filename: bare(e.filename), lineno: e.lineno, colno: e.colno }] : []);
+	else report("Error", text(e.message), e.filename ? [{ function: "?", filename: bare(e.filename), abs_path: bare(e.filename), lineno: e.lineno, colno: e.colno }] : []);
 };
 const onRejection = (e) => {
 	const reason = e.reason;

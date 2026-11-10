@@ -23,8 +23,29 @@ package errors
 	// The pronto-flags flag (flags_spec.cue) that turns the reporter on.
 	flag: *"error_tracking" | =~"^[a-z][a-z0-9_-]{0,63}$"
 
-	// The files the generate step writes: the reporter's settings, beside its module.
+	// GlitchTip's organization and the project's slug, which a release's source maps are sent to.
+	org:  *"pronto" | =~"^[a-z0-9_-]+$"
+	slug: *"" | =~"^[a-z0-9_-]+$"
+	// The source maps of the bundles the pages load, sent to GlitchTip after each release
+	// (errors/sourcemaps.ts upload), so an error shows its original file, function and line. The maps
+	// are never served: GlitchTip finds each by the debug ID its bundle carries (the build's
+	// `errors/sourcemaps.ts inject`). Without files or a slug nothing is sent.
+	sourcemaps: {
+		// The bundles, from the app's root, as committed: what the release serves.
+		files: [...string]
+		// The command, run in the app's folder, that builds them again with their maps (`.js.map` beside
+		// each) into the folder ERRORS_MAPS_OUT names, each at its path from the app's root there, and
+		// unchanged otherwise.
+		build: *"" | string
+		// The command that prints the uploader's token (GlitchTip's `upload` Secret, which metal.nu
+		// makes); its output is never shown. ERRORS_UPLOAD_TOKEN, when set, is used instead.
+		token: *"" | string
+	}
+
+	// The files the generate step writes: the reporter's settings, beside its module, and what the
+	// upload of the maps reads.
 	out: {
 		"errors.loader.json": {project: E.project, key: E.key, prefix: E.prefix, flag: E.flag}
+		"errors.sourcemaps.json": {upstream: E.upstream, org: E.org, slug: E.slug, files: E.sourcemaps.files, build: E.sourcemaps.build, token: E.sourcemaps.token}
 	}
 }

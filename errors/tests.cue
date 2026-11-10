@@ -7,11 +7,18 @@ import (
 
 // The spec as an app writes it, and what it gives the generate step.
 _e: #Errors & {project: 1, key: "921d1ab3ed184f91867663937ab0002f", upstream: "https://errors.example.com"}
-outFiles: list.SortStrings([for f, _ in _e.out {f}]) & ["errors.loader.json"]
+outFiles: list.SortStrings([for f, _ in _e.out {f}]) & ["errors.loader.json", "errors.sourcemaps.json"]
 loaderSettings: _e.out["errors.loader.json"] & {project: 1, key: "921d1ab3ed184f91867663937ab0002f", prefix: "/e", flag: "error_tracking"}
 // An app that has written nothing is inert: no project, no key.
 _blank: #Errors
 blankIsInert: _blank.out["errors.loader.json"] & {project: 0, key: ""}
+// …and sends no maps: no bundles, no slug.
+blankSendsNoMaps: _blank.out["errors.sourcemaps.json"] & {files: [], slug: "", org: "pronto"}
+_m: #Errors & {slug: "bonk-chess", sourcemaps: {files: ["shell/hatches/battle/battle.js"], build: "nu hatch/hatch.nu maps", token: "ssh n cat"}}
+mapsSettings: _m.out["errors.sourcemaps.json"] & {upstream: "https://errors.invalid", org: "pronto", slug: "bonk-chess", files: ["shell/hatches/battle/battle.js"], build: "nu hatch/hatch.nu maps", token: "ssh n cat"}
+// Each frame names its file as GlitchTip matches a source map's bundle to it, and the event the bundles' debug IDs.
+reporterAbsPath:  strings.Contains(_reporter, "abs_path: file,") & true
+reporterDebugIds: strings.Contains(_reporter, "debug_meta: { images: debugImages(stacktrace) },") & true
 
 // The reporter: a host-DOM hatch answers every mount with its cleanup, on the early exit too.
 _h: #Host & {package: "shop"}
@@ -42,6 +49,7 @@ reporterTwenty: strings.Contains(_reporter, "const MAX_EVENTS = 20;") & true
 // The host's files, and the door's seat for the stand-in.
 hostFiles: list.SortStrings([for f, _ in _h.files {f}]) & [
 	"errors/errors.nu",
+	"errors/sourcemaps.ts",
 	"errors/standin.ts",
 	"errors_hatch.cue",
 	"errors_plugin.cue",
@@ -51,14 +59,14 @@ hostFiles: list.SortStrings([for f, _ in _h.files {f}]) & [
 	"shell/hatches/errors/config.js",
 	"shell/hatches/errors/errors.js",
 ]
-specSeeded:        _h.files["errors_spec.cue"].seed & true
-configSeeded:      _h.files["shell/hatches/errors/config.js"].seed & true
-schemaInPackage:   strings.Contains(_h.files["errors_plugin.cue"].text, "\npackage shop\n") & true
-standinHatch:      strings.Contains(_h.files["errors_hatch.cue"].text, "code: capabilities: hatches: \"errors-glitchtip\": {") & true
-standinPeer:       strings.Contains(_h.files["errors_hatch.cue"].text, "PRONTO_UPSTREAM_ERRORS: {peer: \"errors\", port: \"http\"}") & true
-writeAfterEmbeds:  strings.Contains(_h.files["pronto/errors.cue"].text, "\"errors-write\": {\"priority\":0") & true
-routeAfterWriter:  strings.Contains(_h.files["pronto/errors.cue"].text, "\"priority\":3") & true
-routeFromExports:  strings.Contains(_h.files["pronto/errors.cue"].text, "exports of errors") & true
+specSeeded:       _h.files["errors_spec.cue"].seed & true
+configSeeded:     _h.files["shell/hatches/errors/config.js"].seed & true
+schemaInPackage:  strings.Contains(_h.files["errors_plugin.cue"].text, "\npackage shop\n") & true
+standinHatch:     strings.Contains(_h.files["errors_hatch.cue"].text, "code: capabilities: hatches: \"errors-glitchtip\": {") & true
+standinPeer:      strings.Contains(_h.files["errors_hatch.cue"].text, "PRONTO_UPSTREAM_ERRORS: {peer: \"errors\", port: \"http\"}") & true
+writeAfterEmbeds: strings.Contains(_h.files["pronto/errors.cue"].text, "\"errors-write\": {\"priority\":0") & true
+routeAfterWriter: strings.Contains(_h.files["pronto/errors.cue"].text, "\"priority\":3") & true
+routeFromExports: strings.Contains(_h.files["pronto/errors.cue"].text, "exports of errors") & true
 
 // Once it knows whether it reports, it says so on the page (<html data-errors="on|off">), which a check waits for.
 reporterMarks: strings.Contains(_reporter, "document.documentElement.dataset.errors = on ? \"on\" : \"off\";") & true
