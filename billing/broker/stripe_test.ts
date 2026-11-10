@@ -95,7 +95,10 @@ Deno.test("the flag on for an account sends its calls through the door, off stra
     await s("GET", `/v1/customers/${(await req.json()).account}`);
     return new Response("ok");
   });
-  const ask = (account: string) => handler(new Request("https://b/trial/offer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ account }) }));
+  const ask = (account: string) => {
+    const body = JSON.stringify({ account });
+    return handler(new Request("https://b/trial/offer", { method: "POST", headers: { "content-type": "application/json", "content-length": String(body.length) }, body }));
+  };
   await ask("tess");
   await ask("ana");
   await ask("tess");
@@ -103,15 +106,40 @@ Deno.test("the flag on for an account sends its calls through the door, off stra
   assertEquals(f.asked, ["https://app.example/ofrep/v1/evaluate/flags/stripe_door tess", "https://app.example/ofrep/v1/evaluate/flags/stripe_door ana"], "each account asked once, then kept");
 });
 
-Deno.test("what names no account reads the flag for everyone, and a flagd that does not answer is off", async () => {
+Deno.test("what names no account reads the flag for everyone, and a flagd that does not answer fails the call", async () => {
   const seen: string[] = [];
   const up = flagd((a) => a === "broker");
   await switched({ direct: via("direct", seen), door: via("door", seen), on: ofrepFlag("https://app.example", "stripe_door", up.fetcher) })("POST", "/v1/webhook_endpoints");
-  const down = flagd(() => "down");
-  await forAccount(async () => {
-    await switched({ direct: via("direct", seen), door: via("door", seen), on: ofrepFlag("https://app.example", "stripe_door", down.fetcher) })("GET", "/v1/prices");
-    return new Response("ok");
-  })(new Request("https://b/checkout", { method: "POST", headers: { "content-type": "application/json" }, body: "{\"account\":\"tess\"}" }));
-  assertEquals(seen, ["door POST /v1/webhook_endpoints", "direct GET /v1/prices"]);
+  assertEquals(seen, ["door POST /v1/webhook_endpoints"]);
   assertEquals(up.asked.map((a) => a.split(" ")[1]), ["broker"]);
+  const down = flagd(() => "down");
+  const s = switched({ direct: via("direct", seen), door: via("door", seen), on: ofrepFlag("https://app.example", "stripe_door", down.fetcher) });
+  await assertRejects(() => s("GET", "/v1/prices"));
+  await assertRejects(() => s("GET", "/v1/prices"), Error, undefined, "a failure is never kept");
+  assertEquals(down.asked.length, 2);
+  const odd = ofrepFlag("https://app.example", "stripe_door", () => Promise.resolve(Response.json({ errorCode: "FLAG_NOT_FOUND" }, { status: 404 })));
+  await assertRejects(() => odd(), Error, "flagd answered 404");
+  assertEquals(seen, ["door POST /v1/webhook_endpoints"], "nothing went either way on a failure");
+});
+
+Deno.test("a route asked afresh reads the flag again; a body too large or of no declared length names no account", async () => {
+  let on = false;
+  const f: typeof fetch = () => Promise.resolve(Response.json({ value: on }));
+  const s = switched({ direct: via("direct", []), door: via("door", []), on: ofrepFlag("https://app.example", "stripe_door", f) });
+  assertEquals(await s.route!(), "direct");
+  on = true;
+  assertEquals(await s.route!(), "direct", "kept for 30 s");
+  assertEquals(await s.route!(true), "door", "asked afresh");
+  assertEquals(await stripe({ key: "k" }).route!(), "direct");
+  assertEquals(await stripe({ door: "http://d" }).route!(), "door");
+  const asked = flagd(() => false);
+  const g = ofrepFlag("https://app.example", "stripe_door", asked.fetcher);
+  const handler = forAccount(async () => {
+    await g(true);
+    return new Response("ok");
+  });
+  const big = JSON.stringify({ account: "tess", pad: "x".repeat(5000) });
+  await handler(new Request("https://b/checkout", { method: "POST", headers: { "content-type": "application/json", "content-length": String(big.length) }, body: big }));
+  await handler(new Request("https://b/checkout", { method: "POST", headers: { "content-type": "application/json", "content-length": "17" }, body: "{\"account\":\"ana\"}" }));
+  assertEquals(asked.asked.map((a) => a.split(" ")[1]), ["broker", "ana"]);
 });
