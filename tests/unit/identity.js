@@ -311,3 +311,84 @@ export async function started(phone = true) {
     await child.status;
   }
 }
+
+// The phone with the broker issuing the codes (PHONE_OTP=broker, broker/otp.ts): a stand-in sender
+// that texts nothing, and a gate this module answers for.
+const OTP_ENV = {
+  PHONE_OTP: 'broker', PHONE_SMS: 'standin', PHONE_SMS_GATE: 'https://app.example.com/rental/phone/sms-gate',
+  PHONE_ADMIT: 'https://app.example.com/rental/phone/admit', PHONE_TENANTS: 'https://app.example.com,https://localhost:*',
+};
+
+/** The phone's settings in broker mode (`over` on OTP_ENV, a null removing one), for a broker at `issuer`. */
+export function otpSettings(over = {}, issuer = 'http://localhost:19000') {
+  const env = { ...OTP_ENV, ...over };
+  const cfg = phoneConfig((k) => env[k] ?? undefined, issuer);
+  return { otp: cfg.otp, sms: cfg.sms, smsGate: cfg.smsGate, project: cfg.project, hasSender: cfg.sender !== null, resendSeconds: cfg.resendSeconds };
+}
+
+/** A sign-in by phone with the broker's own codes, as the page drives it: `ops` in order, each
+ * ['send'], ['approve', code | 'right'], ['advance', ms] or ['codes'] (what the stand-in's reader
+ * route says). The gate answers `gate` (a status; 0 is no answer), the sender is the stand-in, or
+ * `sender` 'capture' (keeps the SMS text) or 'fails'. Returns each op's status and error, the
+ * subject the tenant ended with, and what the gate was sent. */
+export async function otpFlow(p = {}) {
+  const { env = {}, gate = 200, ops = [['send'], ['approve', 'right']], phone = '+5511912345678', tenant = TENANT, issuer = 'http://localhost:19000', lang = 'pt-BR,pt;q=0.9', sender = 'standin', secret = 'a-secret-of-thirty-two-characters!' } = p;
+  let clock = Date.now();
+  const gateCalls = [];
+  const fetcher = (url, init) => {
+    gateCalls.push({ url: String(url), type: init.headers['content-type'], jwt: String(init.body) });
+    return gate === 0 ? Promise.reject(new TypeError('network')) : Promise.resolve(new Response(gate === 204 ? null : '{}', { status: gate }));
+  };
+  const cfg = phoneConfig((k) => ({ ...OTP_ENV, ...env })[k] ?? undefined, issuer);
+  const texts = [];
+  if (sender === 'capture') cfg.sender = { send: (to, text) => { texts.push(text); return Promise.resolve(); } };
+  if (sender === 'fails') cfg.sender = { send: () => Promise.reject(new Error('provider down')) };
+  const up = await phoneUpstream(issuer, cfg, { secret, now: () => clock, fetcher });
+  const handle = await broker({ issuer, secret, providers: [up.provider], extra: up.handle });
+  const callback = `${tenant}/auth/oidc/phone/callback`;
+  const verifier = randomToken(32);
+  const q = new URLSearchParams({ client_id: tenant, provider: 'phone', redirect_uri: callback, state: 'S1', response_type: 'code', scope: 'openid', code_challenge: await sha256url(verifier), code_challenge_method: 'S256', nonce: 'N1' });
+  const consent = await (await handle(new Request(`${issuer}/authorize?${q}`))).text();
+  const toPhone = new URL((await handle(new Request(linkOf(consent, '/authorize/continue')))).headers.get('location'));
+  const pageRes = await handle(new Request(toPhone, { headers: { 'accept-language': lang } }));
+  const page = await pageRes.text();
+  const config = JSON.parse(/<script type="application\/json" id="phone-config">([^<]*)<\/script>/.exec(page)[1]);
+  const post = (path, body) => handle(new Request(`${issuer}/phone/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+  const readCode = async () => {
+    if (sender === 'capture') return /\b[0-9]{6}\b/.exec(texts.at(-1) ?? '')?.[0] ?? '';
+    const res = await handle(new Request(`${issuer}/phone/fake/codes?phone=${encodeURIComponent(phone)}`));
+    return res.ok ? (await res.json()).code : '';
+  };
+  const log = [];
+  let sub = null;
+  for (const [op, arg] of ops) {
+    if (op === 'advance') { clock += arg; continue; }
+    if (op === 'codes') {
+      const res = await handle(new Request(`${issuer}/phone/fake/codes?phone=${encodeURIComponent(phone)}`));
+      log.push({ op, status: res.status, shape: Object.keys(await res.json()).join() });
+      continue;
+    }
+    const res = op === 'send' ? await post('send', { id: config.id, phone }) : await post('approve', { id: config.id, code: arg === 'right' ? await readCode() : arg });
+    const out = await res.json();
+    log.push({ op, status: res.status, error: out.error ?? null });
+    if (op === 'approve' && out.to) {
+      const back = new URL((await handle(new Request(out.to))).headers.get('location'));
+      const form = new URLSearchParams({ grant_type: 'authorization_code', code: back.searchParams.get('code') ?? '', client_id: tenant, redirect_uri: callback, code_verifier: verifier });
+      sub = claimsOf((await (await handle(new Request(`${issuer}/token`, { method: 'POST', body: form }))).json()).id_token).sub;
+    }
+  }
+  let gateJwt = null;
+  if (gateCalls.length > 0) {
+    const jwt = gateCalls[0].jwt;
+    const [h, b, s] = jwt.split('.');
+    const jwk = (await (await handle(new Request(`${issuer}/phone/jwks`))).json()).keys.find((k) => k.kid === JSON.parse(new TextDecoder().decode(fromBase64url(h))).kid);
+    const key = await crypto.subtle.importKey('jwk', { kty: jwk.kty, n: jwk.n, e: jwk.e, alg: 'RS256', ext: true }, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+    const c = claimsOf(jwt);
+    gateJwt = { signed: await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, fromBase64url(s), new TextEncoder().encode(`${h}.${b}`)), claims: Object.keys(c).sort(), iss: c.iss, aud: c.aud, event: c.event, phone: c.phone_number, ttl: c.exp - c.iat, url: gateCalls[0].url, type: gateCalls[0].type };
+  }
+  return {
+    log, sub, gateCalls: gateCalls.length, gateJwt, texts: texts.map((t) => ({ text: t.replace(/[0-9]{6}/, 'CODE'), length: t.length })),
+    csp: pageRes.headers.get('content-security-policy'), config: Object.keys(config).sort(), firebaseInPage: /gstatic|firebase|recaptcha/i.test(page),
+    hasRecaptchaBox: page.includes('id="recaptcha"'), script: await (await handle(new Request(`${issuer}/phone/page.js`))).text().then((js) => ({ firebase: /firebase|gstatic|recaptcha/i.test(js), sends: js.includes("'/send'"), approves: js.includes('code }') })),
+  };
+}

@@ -23,6 +23,7 @@ const files = [
 	{key: "main.ts", from: "broker/main.ts", path: "broker/main.ts"}
 	{key: "core.ts", from: "broker/core.ts", path: "broker/core.ts"}
 	{key: "phone.ts", from: "broker/phone.ts", path: "broker/phone.ts"}
+	{key: "otp.ts", from: "broker/otp.ts", path: "broker/otp.ts"}
 ]
 
 # Every object the broker is on a metal cluster, as YAML documents. `sources` holds each file's text by
@@ -143,12 +144,29 @@ export def main [
 	--phone-app-id: string = ""
 	--phone-admit: string = ""
 	--phone-tenants: string = ""
+	--phone-otp: string = "firebase" # As release.nu: firebase, or broker (then --phone-sms and --phone-sms-gate)
+	--phone-sms: string = ""
+	--phone-sms-gate: string = ""
 	--namespace: string = "identity"
 	--service: string = "identity-broker" # The secrets' names in Secret Manager are <service>-secret and <service>-google-client-secret
 ] {
 	if ([$ssh $domain $google_client_id] | any { is-empty }) { error make {msg: "--ssh, --domain and --google-client-id are all required"} }
 	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
-	let phone = if ($phone_project | is-empty) { [] } else {
+	let phone = if $phone_otp == "broker" {
+		if ([$phone_sms $phone_sms_gate $phone_admit $phone_tenants] | any { is-empty }) {
+			error make {msg: "--phone-otp broker needs --phone-sms, --phone-sms-gate, --phone-admit and --phone-tenants"}
+		}
+		if ($phone_project | is-not-empty) { error make {msg: "--phone-project is for --phone-otp firebase"} }
+		[
+			{name: "PHONE_OTP", value: "broker"}
+			{name: "PHONE_SMS", value: $phone_sms}
+			{name: "PHONE_SMS_GATE", value: $phone_sms_gate}
+			{name: "PHONE_ADMIT", value: $phone_admit}
+			{name: "PHONE_TENANTS", value: $phone_tenants}
+		]
+	} else if $phone_otp != "firebase" {
+		error make {msg: "--phone-otp is firebase or broker"}
+	} else if ($phone_project | is-empty) { [] } else {
 		if ([$phone_api_key $phone_app_id $phone_admit $phone_tenants] | any { is-empty }) {
 			error make {msg: "--phone-project needs --phone-api-key, --phone-app-id, --phone-admit and --phone-tenants"}
 		}

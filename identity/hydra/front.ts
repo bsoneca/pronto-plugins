@@ -265,11 +265,11 @@ if (import.meta.main) {
   // on a developer's machine (PHONE_EMULATOR) or the operator's project.
   const phoneCfg = phoneConfig(env, issuer);
   if (phoneCfg) {
-    const phone = await phoneUpstream(issuer, phoneCfg);
+    const phone = await phoneUpstream(issuer, phoneCfg, { secret });
     providers.push(phone.provider);
     routes.push(phone.handle);
   }
-  if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT");
+  if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT, or PHONE_OTP=broker");
   const extra = (req: Request, url: URL) => routes.reduce<Promise<Response> | null>((got, r) => got ?? r(req, url), null);
   const hydra = { public: env("HYDRA_PUBLIC") ?? "http://127.0.0.1:28453", admin: env("HYDRA_ADMIN") ?? "http://127.0.0.1:28455" };
   Deno.serve({ port: Number(env("PORT") ?? 28443) }, await front({ issuer, secret, providers, hydra, extra }));

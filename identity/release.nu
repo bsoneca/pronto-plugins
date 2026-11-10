@@ -61,6 +61,9 @@ export def main [
 	--phone-app-id: string = ""      # Its Web app's id
 	--phone-admit: string = ""       # Where the page asks for a code: the owner of the project's beforeSendSms gate
 	--phone-tenants: string = ""     # The origins that may offer the phone, comma-separated
+	--phone-otp: string = "firebase" # Who issues the codes: firebase (Identity Platform), or broker (the broker itself, texting through --phone-sms)
+	--phone-sms: string = ""         # With --phone-otp broker: the SMS sender's name (broker/otp.ts SMS_PROVIDERS)
+	--phone-sms-gate: string = ""    # With --phone-otp broker: the URL the broker asks, signed, before each SMS (identity/README.md "The phone")
 	--region: string = "us-central1"
 	--service: string = "identity-broker"
 	--repository: string = "pronto"
@@ -92,7 +95,7 @@ export def main [
 	let work = (mktemp -d)
 	mkdir $"($work)/broker"
 	cp $"($here)/oidc.ts" $work
-	cp $"($here)/broker/main.ts" $"($here)/broker/core.ts" $"($here)/broker/phone.ts" $"($work)/broker/"
+	cp $"($here)/broker/main.ts" $"($here)/broker/core.ts" $"($here)/broker/phone.ts" $"($here)/broker/otp.ts" $"($work)/broker/"
 	$"FROM ($deno)\nWORKDIR /app\nCOPY oidc.ts /app/\nCOPY broker /app/broker\nRUN [\"deno\", \"cache\", \"/app/broker/main.ts\"]\nENV PORT=8080\nCMD [\"run\", \"--allow-net\", \"--allow-env\", \"/app/broker/main.ts\"]\n" | save $"($work)/Dockerfile"
 	let host = $"($region)-docker.pkg.dev"
 	let image = $"($host)/($p)/($repository)/($service)"
@@ -107,7 +110,21 @@ export def main [
 	let broker_version = (do $version $"($service)-secret")
 	let google_version = (do $version $google_secret)
 	# The phone, when its project is named: each setting public (the page shows them), so plain env.
-	let phone = if ($phone_project | is-empty) { [] } else {
+	let phone = if $phone_otp == "broker" {
+		if ([$phone_sms $phone_sms_gate $phone_admit $phone_tenants] | any { is-empty }) {
+			error make {msg: "--phone-otp broker needs --phone-sms, --phone-sms-gate, --phone-admit and --phone-tenants"}
+		}
+		if ($phone_project | is-not-empty) { error make {msg: "--phone-project is for --phone-otp firebase"} }
+		[
+			{name: "PHONE_OTP", value: "broker"}
+			{name: "PHONE_SMS", value: $phone_sms}
+			{name: "PHONE_SMS_GATE", value: $phone_sms_gate}
+			{name: "PHONE_ADMIT", value: $phone_admit}
+			{name: "PHONE_TENANTS", value: $phone_tenants}
+		]
+	} else if $phone_otp != "firebase" {
+		error make {msg: "--phone-otp is firebase or broker"}
+	} else if ($phone_project | is-empty) { [] } else {
 		if ([$phone_api_key $phone_app_id $phone_admit $phone_tenants] | any { is-empty }) {
 			error make {msg: "--phone-project needs --phone-api-key, --phone-app-id, --phone-admit and --phone-tenants"}
 		}
