@@ -19,6 +19,7 @@ const exports = [
 	{name: "flagsql", expr: "flagd.sql", rule: "flags"}
 	{name: "adsense", expr: "adsense", rule: "ads"}
 	{name: "umami", expr: "analytics.umami", rule: "analytics"}
+	{name: "errors", expr: "errors", rule: "errors"}
 ]
 
 # Every file the evaluation reads: the program's CUE, and what it embeds (bayt.json, DESIGN.md,

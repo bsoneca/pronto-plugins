@@ -42,6 +42,8 @@ jobs:
           sayt --script tools.nu cue vet -c -t package=check ./perf/export
           sayt --script tools.nu cue vet -c ./analytics
           sayt --script tools.nu cue vet -c -t package=check ./analytics/export
+          sayt --script tools.nu cue vet -c ./errors
+          sayt --script tools.nu cue vet -c -t package=check ./errors/export
           sayt --script tools.nu cue vet -c ./identity
           sayt --script tools.nu cue vet -c -t package=check -t frontImage=registry.example.com/pronto-identity:0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000 ./identity/export
           sayt --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
@@ -156,6 +158,8 @@ jobs:
           echo "$DENO_SHA256  $dir/deno.zip" | sha256sum -c -
           unzip -q "$dir/deno.zip" -d "$dir"
           echo "$dir" >> "$GITHUB_PATH"
+      - name: Test errors (needs deno, for its stand-in)
+        run: sayt --script tools.nu nu errors/test.nu
       - name: Test modular design (needs deno, for its lint)
         run: |
           sayt --script tools.nu cue vet -c ./modular-design

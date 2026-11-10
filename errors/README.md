@@ -35,6 +35,64 @@ ssh bruno@13.140.186.223 'KUBECONFIG=$HOME/.cache/contabo2.kubeconfig kubectl ge
 ## What a page sends
 
 A page reports to its own origin, never to GlitchTip's domain: the app's door routes
-`/e/api/<project>/envelope/` to GlitchTip's ingest in the cluster, so `connect-src` stays `'self'`.
-An event carries the error, its stack, the page's path (no query, no hash), the release, and nothing
-about the person: no user, no cookie, no IP (the door drops them).
+`/e/api/<project>/envelope/` to GlitchTip's ingest, so `connect-src` stays `'self'`. The reporter
+(`shell/hatches/errors/errors.js`, a host-DOM hatch on every screen) is ours, about 150 lines and
+no SDK, so it needs no script from another host and runs under the page's Trusted Types.
+
+It reports:
+
+- an uncaught error (`error` event), with its type, message and stack frames (filename, function,
+  line and column, read from `error.stack` in Chrome's or Firefox's and Safari's format);
+- an unhandled promise rejection;
+- a script, link or image that failed to load (the window's capture phase sees the element's `error`).
+
+Each is one Sentry envelope, a `POST` with `fetch` (`keepalive`, no credentials) to
+`/e/api/<project>/envelope/?sentry_key=<key>&sentry_version=7`. An event carries `platform:
+"javascript"`, `level: "error"`, `environment: "production"`, the `release`, the exception, and
+`request.url`: the page's origin and path, never its query or its hash (nor, in a frame, a script
+address's). The release is a digest of the page's own entry map (`#pronto-assets`, which names every
+file the page loads by content address), so it changes with each release and with nothing else; a
+page served without one says `unknown`.
+
+It sends no user, no cookie, no breadcrumb and nothing a reader typed. The door drops the `Cookie`,
+`Authorization` and `Referer` headers and every header that carries the sender's address
+(`X-Forwarded-For`, `X-Real-Ip`, `Forwarded`, `Cf-Connecting-Ip`), so GlitchTip never holds a player's IP,
+and caps a body at 64KB.
+
+At most one report of each message, and twenty events a page load. It reports only while the
+pronto-flags flag `error_tracking` is true, asked over OFREP at `/ofrep/` on the same origin; what is
+thrown before the flag answers is held, then sent or dropped.
+
+## Use
+
+From a pronto app, once GlitchTip runs (above) and has a project for it:
+
+```sh
+<this repo>/bin/pronto-errors .
+# write the project and its public key (the run of `metal` printed them) in errors_spec.cue:
+#   errors: #Errors & {project: 1, key: "<32 hex digits>", upstream: "https://errors.example.com"}
+# add the flag `error_tracking` to flags_spec.cue (default: false where released, local: true at hand)
+# list the screens that name their own hatches among _errorsOwnHatches and give each `errors`
+./saytw generate && ./saytw lint
+```
+
+Until the project and the key are written the reporter does nothing. `generate` writes the reporter's
+settings (`shell/hatches/errors/config.js`) and the door's route (`# pronto-errors:begin … :end`
+in `docker/Caddyfile`). The key is public by design (every page sends it): it goes in the spec, not in
+a secret.
+
+On a host launch the door sends the reports to a stand-in for GlitchTip (`errors/standin.ts`, the
+`errors` target), which keeps them in memory: `GET /events` says them as a JSON array, and through the
+door `GET /e/api/events`, so a scenario can read what a page reported. Turn the flag on
+(`pronto-flags push`) when the project exists; the flag's cases are the app's scenarios that name it.
+
+## Tests
+
+- [`tests.cue`](tests.cue): the spec's output, the reporter's guarantees and the host's files, checked with `cue vet`.
+- [`test.nu`](test.nu): the door's route, the generate step, the stand-in (run with deno) and the reporter's stack parsing.
+
+```sh
+./saytw --script tools.nu cue vet -c ./errors
+./saytw --script tools.nu cue vet -c -t package=check ./errors/export
+./saytw --script tools.nu nu errors/test.nu
+```
