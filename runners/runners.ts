@@ -173,8 +173,18 @@ if (plan.host) {
       const found = { runner: file ? JSON.parse(file) : null, path: read(`${r.dir}/.path`), labels: file ? await labels(r, name) : null };
       seen[name] = { installed: exists(`${r.dir}/config.sh`), registration: registration(plan, name, found), agent: (await svc.same(r.service)) && (await svc.loaded(r.service.label)) };
     }
+    // A runner in the middle of a job is left alone: unregistering it or restarting its service would
+    // cut the job. Its steps wait for the next apply, which says so.
+    const busy = async (r: HostRunner, name: string) => (await run("gh", ["api", r.api, "--jq", `.runners[] | select(.name == "${name}") | .busy`])).out === "true";
+    const held = new Set<string>();
     for (const step of hostSteps(plan, seen)) {
       const r = runners[step.name];
+      if (held.has(step.name)) continue;
+      if ((step.do === "unregister" || step.do === "agent") && await busy(r, step.name)) {
+        say(`${step.name}: running a job; left as it is (apply again once it is idle)`);
+        held.add(step.name);
+        continue;
+      }
       switch (step.do) {
         case "install": {
           say(`${step.name}: actions/runner into ${r.dir}`);
