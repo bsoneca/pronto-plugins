@@ -76,7 +76,7 @@ function newState(document, opts, styler, rules) {
   const reportSeen = new Set();
   const reports = [];
   return {
-    document, styler, rules, width: opts.width, scheme: opts.scheme, base: document.baseURI || "",
+    document, styler, rules, width: opts.width, vh: opts.height, scheme: opts.scheme, base: document.baseURI || "",
     style: styler.style, seen, vars: [], reports,
     drawnMemo: new Map(), phrasingMemo: new Map(), tapMemo: new Map(),
     rep(what, selector) {
@@ -454,7 +454,7 @@ function crossAlign(v) {
 // The common fields of the view an element becomes, and what its children are told of it.
 function outerBox(el, st, pctx, C, type, hint) {
   const p = st.p, fs = st.fs;
-  const lctx = { fs, basis: pctx.avail, width: C.width };
+  const lctx = { fs, basis: pctx.avail, width: C.width, vh: C.vh };
   const sel = desc(el);
   const L = (name) => {
     const v = p[name];
@@ -474,7 +474,7 @@ function outerBox(el, st, pctx, C, type, hint) {
   const pads = { top: pad.top + bw, right: pad.right + bw, bottom: pad.bottom + bw, left: pad.left + bw };
   const padW = pads.left + pads.right, padH = pads.top + pads.bottom;
   const borderBox = (p["box-sizing"] || "").indexOf("border-box") === 0;
-  const sctx = { fs, basis: pctx.avail, width: C.width };
+  const sctx = { fs, basis: pctx.avail, width: C.width, vh: C.vh };
   const kind = pctx.kind;
   const block = !inlineLevel(st);
   const fields = {};
@@ -553,7 +553,7 @@ function outerBox(el, st, pctx, C, type, hint) {
   let hpx = null, hMatch = false, hWeight = null;
   const hv = p.height;
   if (hv !== undefined && hv !== "auto") {
-    const sz = size(hv, { fs, width: C.width });
+    const sz = size(hv, { fs, width: C.width, vh: C.vh });
     if (!sz) C.rep("height: " + hv, sel);
     else if (sz.pct === 100) hMatch = true;
     else if (sz.px !== undefined) hpx = borderBox ? sz.px : sz.px + padH;
@@ -563,13 +563,13 @@ function outerBox(el, st, pctx, C, type, hint) {
   let hMin = null, hMax = null;
   const minh = p["min-height"];
   if (minh && minh !== "auto" && minh !== "0") {
-    const mn = size(minh, { fs, width: C.width });
+    const mn = size(minh, { fs, width: C.width, vh: C.vh });
     if (mn && mn.px !== undefined && mn.px > 0) hMin = borderBox ? mn.px : mn.px + padH;
     else if (!mn || mn.pct !== undefined) C.rep("min-height: " + minh, sel);
   }
   const maxh = p["max-height"];
   if (maxh && maxh !== "none") {
-    const mx = size(maxh, { fs, width: C.width });
+    const mx = size(maxh, { fs, width: C.width, vh: C.vh });
     if (mx && mx.px !== undefined) hMax = borderBox ? mx.px : mx.px + padH;
     else C.rep("max-height: " + maxh, sel);
   }
@@ -710,7 +710,7 @@ function checkProps(el, st, C, par) {
     if (!/^(system-ui|sans-serif|ui-sans-serif|-apple-system|blinkmacsystemfont|roboto|inherit|monospace|ui-monospace|courier|menlo|consolas|monaco)$/.test(first)) C.rep("font-family: " + first, sel);
   }
   const h = p.height;
-  if (h && /(vh|svh|dvh|lvh)$/.test(h)) C.rep("height: " + h, sel);
+  if (h && C.vh == null && /(vh|svh|dvh|lvh)$/.test(h)) C.rep("height: " + h, sel);
 }
 
 // ---------------------------------------------------------------- conversion
@@ -872,7 +872,7 @@ function childItems(el, st, cctx, C, flexish, parentId) {
 function gridColumns(st, gap, avail, el, C) {
   const v = (st.p["grid-template-columns"] || "").trim().toLowerCase();
   if (!v || v === "none") return 1;
-  const lctx = { fs: st.fs, basis: avail, width: C.width };
+  const lctx = { fs: st.fs, basis: avail, width: C.width, vh: C.vh };
   const rep = /^repeat\(\s*(auto-fit|auto-fill|\d+)\s*,\s*([\s\S]+)\)$/.exec(v);
   const equal = (t) => /^(1fr|minmax\([^,]+,\s*1fr\))$/.test(t.trim());
   if (rep) {
@@ -912,7 +912,7 @@ function containerElement(el, st, pctx, C, kind) {
   const b = outerBox(el, st, pctx, C, "container");
   const id = C.reg(el);
   const fs = st.fs;
-  const lctx = { fs, basis: b.contentW, width: C.width };
+  const lctx = { fs, basis: b.contentW, width: C.width, vh: C.vh };
   const gapOf = (name) => { const v = p[name]; if (v === undefined || v === "normal") return 0; const n = length(v, lctx); return n === null ? 0 : Math.max(0, n); };
   const rowGap = gapOf("row-gap"), colGap = gapOf("column-gap");
   const div = Object.assign({ type: "container", id }, b.fields);
@@ -1223,15 +1223,18 @@ function checkDiv(el, st, pctx, C, type) {
 
 /**
  * Compiles a document (HTML elements, computed against the sheets) to a DivKit card.
- * opts: {sheets: string[], width: dp, scheme?: "light" | "dark"}.
+ * opts: {sheets: string[], width: dp, height?: dp, scheme?: "light" | "dark"}. The height is given only for a
+ * page that fills the screen (display.js: <html data-display="fullscreen">): then vh lengths and height media
+ * queries read it; without it they are unsupported, as a scrolled page has no height of its own.
  */
 export function compile(document, opts) {
   const width = opts.width || 411;
   const scheme = opts.scheme === "dark" ? "dark" : "light";
-  const env = { width, scheme };
+  const height = opts.height || undefined;
+  const env = { width, height, scheme };
   const rules = parse(opts.sheets || [], env);
   const styler = createStyler(rules, env);
-  const C = newState(document, { width, scheme }, styler, rules);
+  const C = newState(document, { width, height, scheme }, styler, rules);
   const html = document.documentElement, body = document.body;
   const root = { type: "container", orientation: "vertical", width: { type: "match_parent" }, height: { type: "match_parent" }, items: [] };
   if (html && body) {
@@ -1241,7 +1244,7 @@ export function compile(document, opts) {
     root.background = canvas.length ? canvas : [{ type: "solid", color: hs.scope.dark ? "#FF121212" : "#FFFFFFFF" }];
     if (!hasHtmlBg) C.noBg = body;
     // the html element's own margin and padding surround the body
-    const hp = hs.p, hl = { fs: hs.fs, basis: width, width };
+    const hp = hs.p, hl = { fs: hs.fs, basis: width, width, vh: height };
     const side = (s) => Math.max(0, (length(hp["margin-" + s] || "0", hl) || 0) + (length(hp["padding-" + s] || "0", hl) || 0));
     const pads = { top: side("top"), right: side("right"), bottom: side("bottom"), left: side("left") };
     const pd = {};
