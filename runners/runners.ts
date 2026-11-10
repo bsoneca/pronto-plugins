@@ -77,7 +77,14 @@ const launchd = async (): Promise<Service> => {
       Deno.mkdirSync(svc.path.replace(/\/[^/]*$/, ""), { recursive: true });
       await must("plutil", ["-convert", "xml1", "-o", svc.path, "-"], JSON.stringify(svc.plist));
       if (await loaded(svc.label)) await must("launchctl", ["bootout", `${domain}/${svc.label}`]);
-      await must("launchctl", ["bootstrap", domain, svc.path]);
+      // Right after a bootout launchd may refuse the bootstrap (error 5, Input/output error) while the
+      // old job tears down; an agent left unloaded takes no jobs, so it is retried, not given up on.
+      for (let i = 1; ; i++) {
+        const o = await run("launchctl", ["bootstrap", domain, svc.path]);
+        if (o.ok) break;
+        if (i === 12) throw new Error(`launchctl bootstrap ${domain} ${svc.path}: ${o.err || o.out}`);
+        await new Promise((ok) => setTimeout(ok, 5_000));
+      }
     },
     stop: async (svc) => {
       if (await loaded(svc.label)) await must("launchctl", ["bootout", `${domain}/${svc.label}`]);
@@ -166,8 +173,18 @@ if (plan.host) {
       const found = { runner: file ? JSON.parse(file) : null, path: read(`${r.dir}/.path`), labels: file ? await labels(r, name) : null };
       seen[name] = { installed: exists(`${r.dir}/config.sh`), registration: registration(plan, name, found), agent: (await svc.same(r.service)) && (await svc.loaded(r.service.label)) };
     }
+    // A runner in the middle of a job is left alone: unregistering it or restarting its service would
+    // cut the job. Its steps wait for the next apply, which says so.
+    const busy = async (r: HostRunner, name: string) => (await run("gh", ["api", r.api, "--jq", `.runners[] | select(.name == "${name}") | .busy`])).out === "true";
+    const held = new Set<string>();
     for (const step of hostSteps(plan, seen)) {
       const r = runners[step.name];
+      if (held.has(step.name)) continue;
+      if ((step.do === "unregister" || step.do === "agent") && await busy(r, step.name)) {
+        say(`${step.name}: running a job; left as it is (apply again once it is idle)`);
+        held.add(step.name);
+        continue;
+      }
       switch (step.do) {
         case "install": {
           say(`${step.name}: actions/runner into ${r.dir}`);
