@@ -5,18 +5,35 @@
 # door's route to GlitchTip, a stand-in for a host launch, and errors_spec.cue (seeded; write the
 # project and key `metal` printed). See errors/README.md.
 #
-# Or GlitchTip itself on a cluster the operator runs (pronto's envs.Metal), as errors/metal.nu says:
-#   bin/pronto-errors metal --ssh U@H --domain errors.example.com --projects app,…
+# Or GlitchTip itself on a cluster the operator runs (pronto's envs.Metal), as errors/metal.nu says,
+# where the app's errors_spec.cue names it (its `server`), with the app's project:
+#   bin/pronto-errors metal <app-dir>
+# or by hand:
+#   bin/pronto-errors metal --ssh U@H --kubeconfig K --domain errors.example.com --projects app,…
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 if [ "${1:-}" = metal ]; then
 	shift
+	if [ $# -ge 1 ] && [ -d "$1" ]; then
+		app=$(cd "$1" && pwd)
+		shift
+		spec=$(mktemp)
+		trap 'rm -f "$spec"' EXIT
+		(cd "$app" && ./saytw --script tools.nu mise exec -- cue export . -e errors.metal --out json) > "$spec" || {
+			echo "pronto-errors: $app's errors_spec.cue names no server (errors.server)" >&2
+			exit 2
+		}
+		cd "$here"
+		./saytw --script tools.nu nu errors/metal.nu --spec "$spec" "$@"
+		exit
+	fi
 	cd "$here"
 	exec ./saytw --script tools.nu nu errors/metal.nu "$@"
 fi
 if [ $# -ne 1 ] || [ ! -d "$1" ]; then
 	echo "usage: bin/pronto-errors <app-dir>" >&2
-	echo "       bin/pronto-errors metal --ssh U@H --domain D [--projects a,b]" >&2
+	echo "       bin/pronto-errors metal <app-dir>" >&2
+	echo "       bin/pronto-errors metal --ssh U@H --kubeconfig K --domain D [--projects a,b]" >&2
 	exit 2
 fi
 app=$(cd "$1" && pwd)

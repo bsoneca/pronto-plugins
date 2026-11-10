@@ -54,6 +54,14 @@ def main [] {
 	check "the reporter's settings are its module's" ((open --raw shell/hatches/errors/config.js) | str contains 'export default {"project":1,"key":"921d1ab3ed184f91867663937ab0002f","prefix":"/e","flag":"error_tracking"};')
 	{"errors.sourcemaps.json": {upstream: "https://errors.example.com", org: "pronto", slug: "shop", files: ["a.js"], build: "b", token: "t"}} | to json | errors write
 	check "what the maps' upload reads is written beside it" ((open errors/sourcemaps.json) == {upstream: "https://errors.example.com", org: "pronto", slug: "shop", files: ["a.js"], build: "b", token: "t"})
+	{"errors.scenarios.json": {error_tracking: {flags: ["error_tracking"], steps: []}}} | to json | errors write
+	let sc = open --raw tests/scenarios/errors_plugin.cue
+	check "the scenarios are written into the app's scenarios package" (($sc | str contains "\npackage scenarios\n") and ($sc | str contains "\"error_tracking\""))
+	{"errors.loader.json": {project: 0, key: "", prefix: "/e", flag: "error_tracking"}} | to json | errors write
+	check "an inert app's scenarios are taken away" (not ("tests/scenarios/errors_plugin.cue" | path exists))
+	"// the app's own\npackage scenarios\n" | save tests/scenarios/errors_plugin.cue
+	{"errors.loader.json": {project: 0, key: "", prefix: "/e", flag: "error_tracking"}} | to json | errors write
+	check "a scenarios file the plugin did not write is left alone" ("tests/scenarios/errors_plugin.cue" | path exists)
 	check "a file with no place is refused" (try { {"errors.other.json": {}} | to json | errors write; false } catch { true })
 
 	"(app) {\n}\n" | save --force docker/Caddyfile
@@ -93,5 +101,5 @@ def main [] {
 	check "a project is not negative" (refused "package errors\nx: #Errors & {project: -1}\n")
 	check "an upstream is https" (refused "package errors\nx: #Errors & {upstream: \"http://errors.example.com\"}\n")
 	check "the prefix is a path" (refused "package errors\nx: #Errors & {prefix: \"e\"}\n")
-	check "a spec of a project and a key is fine" (not (refused "package errors\nx: #Errors & {project: 1, key: \"921d1ab3ed184f91867663937ab0002f\", upstream: \"https://errors.bonkchess.com\"}\n"))
+	check "a spec of a project and a key is fine" (not (refused "package errors\nx: #Errors & {project: 1, key: \"921d1ab3ed184f91867663937ab0002f\", upstream: \"https://errors.example.com\"}\n"))
 }

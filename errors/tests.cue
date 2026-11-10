@@ -7,15 +7,38 @@ import (
 
 // The spec as an app writes it, and what it gives the generate step.
 _e: #Errors & {project: 1, key: "921d1ab3ed184f91867663937ab0002f", upstream: "https://errors.example.com"}
-outFiles: list.SortStrings([for f, _ in _e.out {f}]) & ["errors.loader.json", "errors.sourcemaps.json"]
+outFiles: list.SortStrings([for f, _ in _e.out {f}]) & ["errors.loader.json", "errors.scenarios.json", "errors.sourcemaps.json"]
 loaderSettings: _e.out["errors.loader.json"] & {project: 1, key: "921d1ab3ed184f91867663937ab0002f", prefix: "/e", flag: "error_tracking"}
 // An app that has written nothing is inert: no project, no key.
 _blank: #Errors
 blankIsInert: _blank.out["errors.loader.json"] & {project: 0, key: ""}
 // …and sends no maps: no bundles, no slug.
 blankSendsNoMaps: _blank.out["errors.sourcemaps.json"] & {files: [], slug: "", org: "pronto"}
-_m: #Errors & {slug: "bonk-chess", sourcemaps: {files: ["shell/hatches/battle/battle.js"], build: "nu hatch/hatch.nu maps", token: "ssh n cat"}}
-mapsSettings: _m.out["errors.sourcemaps.json"] & {upstream: "https://errors.invalid", org: "pronto", slug: "bonk-chess", files: ["shell/hatches/battle/battle.js"], build: "nu hatch/hatch.nu maps", token: "ssh n cat"}
+_m: #Errors & {slug: "my-app", sourcemaps: {files: ["shell/hatches/game/game.js"], build: "nu hatch/hatch.nu maps", token: "ssh n cat"}}
+mapsSettings: _m.out["errors.sourcemaps.json"] & {upstream: "https://errors.invalid", org: "pronto", slug: "my-app", files: ["shell/hatches/game/game.js"], build: "nu hatch/hatch.nu maps", token: "ssh n cat"}
+
+// A server names where the reports and the maps' token come from, and what `metal <app-dir>` installs.
+_s: #Errors & {project: 3, key: "921d1ab3ed184f91867663937ab0002f", slug: "my-app", server: {ssh: "ops@203.0.113.7", kubeconfig: "/etc/k.yaml", domain: "errors.example.com"}, scenarios: {accepts: ["accept-errors"], tester: "Tess"}}
+serverUpstream: _s.out["errors.sourcemaps.json"].upstream & "https://errors.example.com"
+serverToken:    _s.out["errors.sourcemaps.json"].token & "ssh -o BatchMode=yes ops@203.0.113.7 'KUBECONFIG=/etc/k.yaml kubectl get secret upload -n errors -o jsonpath={.data.token} | base64 -d'"
+serverMetal:    _s.metal & {ssh: "ops@203.0.113.7", kubeconfig: "/etc/k.yaml", domain: "errors.example.com", namespace: "errors", projects: ["my-app"]}
+// A token written by hand still wins.
+_t:          #Errors & {server: {ssh: "ops@203.0.113.7", kubeconfig: "/etc/k.yaml", domain: "errors.example.com"}, sourcemaps: token: "cat token"}
+tokenByHand: _t.out["errors.sourcemaps.json"].token & "cat token"
+// No server: nothing for metal to read.
+noServerNoMetal: (_e.metal == _|_) & true
+
+// With a project and a key the plugin writes its scenarios: the stand-in's, and the tester's in production.
+_sc:            _s.out["errors.scenarios.json"]
+scenarioNames:  list.SortStrings([for n, _ in _sc {n}]) & ["error_tracking", "error_tracking_tester"]
+scenarioFlag:   _sc.error_tracking.flags & ["error_tracking"]
+scenarioAccept: _sc.error_tracking_tester.accepts & ["accept-errors"]
+scenarioTo:     _sc.error_tracking.steps[1].response.to & "/e/api/3/envelope/"
+scenarioNever:  _sc.error_tracking.steps[3].never & "errors.example.com"
+testerOnly:     _sc.error_tracking_tester.production & true
+testerName:     _sc.error_tracking_tester.actors.tess.name & "Tess"
+// …and none while the app is inert.
+blankNoScenarios: (_blank.out["errors.scenarios.json"] == _|_) & true
 // Each frame names its file as GlitchTip matches a source map's bundle to it, and the event the bundles' debug IDs.
 reporterAbsPath:  strings.Contains(_reporter, "abs_path: file,") & true
 reporterDebugIds: strings.Contains(_reporter, "debug_meta: { images: debugImages(stacktrace) },") & true

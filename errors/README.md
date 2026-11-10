@@ -18,19 +18,41 @@ Postgres, about 120 MiB at rest (PRONTO-187, measured on the Contabo node). Weig
 `bin/pronto-errors metal` ([`metal.nu`](metal.nu)) runs GlitchTip in namespace `errors` behind the
 node's tunnel, with its database (CloudNativePG) beside it. Every secret is generated in-cluster.
 Sign-up and new organizations are off. The one account is `owner@<domain>`, in organization `pronto`,
-and each `--projects` name gets a project. The run prints each project's id and public key, which
-a page sends:
+and each project named gets one. The run prints each project's id and public key, which a page sends.
 
-```sh
-bin/pronto-errors metal --ssh bruno@13.140.186.223 --domain errors.bonkchess.com --projects bonk-chess
+The app names its server once, in its `errors_spec.cue`, and the run reads it from there with the
+app's project (`slug`):
+
+```cue
+errors: #Errors & {
+	server: {ssh: "user@203.0.113.7", kubeconfig: "$HOME/.kube/config", domain: "errors.example.com"}
+	slug:   "my-app"
+}
 ```
 
-The domain is a proxied CNAME onto the node's tunnel (pronto's `infra/gcp/outside.cue` lists it).
-To sign in, copy the owner's password without printing it:
+```sh
+bin/pronto-errors metal ../my-repo/apps/my-app
+```
+
+Flags still do it by hand, and win over the app's spec:
+`bin/pronto-errors metal --ssh user@203.0.113.7 --kubeconfig '$HOME/.kube/config' --domain errors.example.com --projects my-app`.
+
+The server also gives the door's `upstream` (`https://<domain>`) and the command that reads the
+source maps' upload token from the node; either can still be written by hand. The domain is a proxied
+CNAME onto the node's tunnel. To sign in, copy the owner's password without printing it:
 
 ```sh
-ssh bruno@13.140.186.223 'KUBECONFIG=$HOME/.cache/contabo2.kubeconfig kubectl get secret owner -n errors -o jsonpath={.data.password} | base64 -d' | pbcopy
+ssh user@203.0.113.7 'KUBECONFIG=$HOME/.kube/config kubectl get secret owner -n errors -o jsonpath={.data.password} | base64 -d' | pbcopy
 ```
+
+## Installing it in an app
+
+`bin/pronto-errors <app-dir>` writes the reporter, the door's route, the stand-in and a seeded
+`errors_spec.cue`. Write the server and the slug, run `metal`, then write the `project` and `key` it
+printed, and the acceptance ids the scenarios hold (`scenarios.accepts`). From then on the app's
+generate writes `tests/scenarios/errors_plugin.cue`: `error_tracking`, a thrown error reaching the
+stand-in through the door on a host launch, and `error_tracking_tester`, the `production` check the
+flag's flip runs as the tester (`scenarios.tester` names the actor).
 
 ## What a page sends
 

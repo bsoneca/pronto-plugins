@@ -72,12 +72,19 @@ _configPath:   "shell/hatches/errors/config.js"
 			text: """
 				package \(H.package)
 
-				// Where this app's pages report what they throw (pronto-errors): the project and the public
-				// key `bin/pronto-errors metal` printed for it, and GlitchTip's address. Until the project and
+				// Where this app's pages report what they throw (pronto-errors): the GlitchTip server (a node
+				// of envs.Metal, where `bin/pronto-errors metal <app-dir>` installs it and makes the app's
+				// project `slug`), then the project id and public key that run printed. Until the project and
 				// the key are written the reporter does nothing, and it reports only while the flag
-				// `error_tracking` (flags_spec.cue) is on.
+				// `error_tracking` (flags_spec.cue) is on. With them, the plugin writes the scenarios that
+				// hold it (tests/scenarios/errors_plugin.cue), against the acceptance `scenarios.accepts`.
 				//
-				//	errors: #Errors & {project: 1, key: "<32 hex digits>", upstream: "https://errors.example.com"}
+				//	errors: #Errors & {
+				//		server: {ssh: "user@203.0.113.7", kubeconfig: "$HOME/.kube/config", domain: "errors.example.com"}
+				//		slug:   "my-app"
+				//		project: 1, key: "<32 hex digits>"
+				//		scenarios: accepts: ["accept-error-tracking"]
+				//	}
 				errors: #Errors
 
 				"""
