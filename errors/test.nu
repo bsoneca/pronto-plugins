@@ -32,12 +32,12 @@ def main [] {
 	errors route /e https://errors.example.com
 	check "a second patch leaves the door untouched" ((ls docker/Caddyfile | get modified.0) == $stamp)
 	check "a second patch changes nothing" ((open --raw docker/Caddyfile) == $caddy)
-	check "only a POST to a project's envelope goes on" (($caddy | str contains "    method POST\n    path_regexp ^/e/api/[0-9]+/envelope/$\n") and not ($caddy | str contains "handle /e/api/*"))
-	check "the stand-in's read is a host launch's alone" ($caddy | str contains "    method GET\n    path /e/api/events\n    host localhost 127.0.0.1\n")
-	check "the door caps a report's size" ($caddy | str contains "    request_body {\n      max_size 64KB\n    }")
-	check "the prefix is stripped" ($caddy | str contains "    uri strip_prefix /e\n")
+	check "only a POST to a project's envelope goes on" (($caddy | str contains "  handle /e/api/* {\n    @ingest {\n      method POST\n      path_regexp ^/e/api/[0-9]+/envelope/$\n") and ($caddy | str contains "    handle {\n      respond 404\n    }"))
+	check "the stand-in's read is a host launch's alone" ($caddy | str contains "      method GET\n      path /e/api/events\n      host localhost 127.0.0.1\n")
+	check "the door caps a report's size" ($caddy | str contains "      request_body {\n        max_size 64KB\n      }")
+	check "the prefix is stripped" ($caddy | str contains "      uri strip_prefix /e\n")
 	check "a request for localhost reaches the stand-in the host door rewrites" (($caddy | str contains "@local host localhost 127.0.0.1") and ($caddy | str contains "reverse_proxy @local {$PRONTO_UPSTREAM_ERRORS:errors:8700}"))
-	check "any other request reaches GlitchTip's address" ($caddy | str contains "      reverse_proxy https://errors.example.com {")
+	check "any other request reaches GlitchTip's address" ($caddy | str contains "        reverse_proxy https://errors.example.com {")
 	check "the proxy sends the upstream's own Host" ($caddy | str contains "header_up Host {upstream_hostport}")
 	let upstreams = 3
 	for header in ["Cookie" "Authorization" "Referer" "X-Forwarded-For"] {

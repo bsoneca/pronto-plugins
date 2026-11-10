@@ -40,37 +40,47 @@ export def route [prefix: string, upstream: string] {
 	# console) is ever reachable through the app's origin. The stand-in's own read of what it kept
 	# (GET /e/api/events, the scenarios') answers on a host launch alone.
 	let local = $"      reverse_proxy {$PRONTO_UPSTREAM_ERRORS:errors:8700} {"
+	# A path handle, so Caddy orders it among the door's other routes by its path (a named matcher
+	# would sort after the app's own). Inside it, only a page's report goes on, a POST to a project's
+	# envelope: nothing else of GlitchTip (its API, its console) is reachable through the app's origin.
+	# The stand-in's read of what it kept (GET /e/api/events, the scenarios') answers on a host launch
+	# alone; anything else is a 404.
 	let route = [
 		$begin
-		$"  @errors_ingest {"
-		"    method POST"
-		$"    path_regexp ^($prefix)/api/[0-9]+/envelope/$"
-		"  }"
-		"  handle @errors_ingest {"
-		"    request_body {"
-		"      max_size 64KB"
+		$"  handle ($prefix)/api/* {"
+		"    @ingest {"
+		"      method POST"
+		$"      path_regexp ^($prefix)/api/[0-9]+/envelope/$"
 		"    }"
-		$"    uri strip_prefix ($prefix)"
-		"    @local host localhost 127.0.0.1"
-		"    route {"
-		"      reverse_proxy @local {$PRONTO_UPSTREAM_ERRORS:errors:8700} {"
+		"    @standin {"
+		"      method GET"
+		$"      path ($prefix)/api/events"
+		"      host localhost 127.0.0.1"
+		"    }"
+		"    handle @ingest {"
+		"      request_body {"
+		"        max_size 64KB"
+		"      }"
+		$"      uri strip_prefix ($prefix)"
+		"      @local host localhost 127.0.0.1"
+		"      route {"
+		"        reverse_proxy @local {$PRONTO_UPSTREAM_ERRORS:errors:8700} {"
+		...($dropped | each {|l| $"  ($l)" })
+		"        }"
+		$"        reverse_proxy ($upstream) {"
+		"          header_up Host {upstream_hostport}"
+		...($dropped | each {|l| $"  ($l)" })
+		"        }"
+		"      }"
+		"    }"
+		"    handle @standin {"
+		$"      uri strip_prefix ($prefix)"
+		"      reverse_proxy {$PRONTO_UPSTREAM_ERRORS:errors:8700} {"
 		...$dropped
 		"      }"
-		$"      reverse_proxy ($upstream) {"
-		"        header_up Host {upstream_hostport}"
-		...$dropped
-		"      }"
 		"    }"
-		"  }"
-		$"  @errors_standin {"
-		"    method GET"
-		$"    path ($prefix)/api/events"
-		"    host localhost 127.0.0.1"
-		"  }"
-		"  handle @errors_standin {"
-		$"    uri strip_prefix ($prefix)"
-		$local
-		...$dropped
+		"    handle {"
+		"      respond 404"
 		"    }"
 		"  }"
 		$end
