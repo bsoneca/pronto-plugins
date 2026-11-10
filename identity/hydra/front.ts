@@ -16,7 +16,7 @@
 // broker's pairwise one, under the same secret, so a person keeps the subject
 // each application already linked.
 import { Refused, randomToken, verifyIdToken } from "../oidc.ts";
-import { callbackOf, emailOf, learnsMore, pairwiseKey, pairwiseSubject, profileOf, providerScope, tenantOf } from "../broker/core.ts";
+import { callbackOf, emailOf, learnsMore, pairwiseKey, pairwiseSubject, profileOf, providerScope, sectorOf, sectorsOf, tenantOf } from "../broker/core.ts";
 import { esc, google, hmacKey, json, page, type Provider, seal, unseal } from "../broker/main.ts";
 import { fakeGoogle } from "./fake.ts";
 import { phoneConfig, phoneUpstream } from "../broker/phone.ts";
@@ -42,12 +42,15 @@ export async function front(p: {
   fetcher?: typeof fetch;
   /** Routes served beside the broker's own: a stand-in provider's (fake.ts). */
   extra?: (req: Request, url: URL) => Promise<Response> | null;
+  /** Each moved tenant's sector, as the broker's (core.ts sectorsOf). */
+  sectors?: ReadonlyMap<string, string>;
 }) {
   if (p.secret.length < 32) throw new Error("BROKER_SECRET is at least 32 characters");
   const fetcher = p.fetcher ?? fetch;
   const issuer = p.issuer.replace(/\/$/, "");
   const providers = new Map(p.providers.map((x) => [x.name, x]));
   const pairwise = await pairwiseKey(p.secret);
+  const sectors = p.sectors ?? new Map<string, string>();
   const stateKey = await hmacKey(p.secret, "hydra login round trip");
   const callback = (provider: string) => `${issuer}/callback/${provider}`;
 
@@ -192,7 +195,7 @@ export async function front(p: {
     }
     // Hydra holds the challenge to the tenant it was issued for, so the subject
     // is derived for that tenant and no other.
-    const sub = await pairwiseSubject(pairwise, leg.t as string, provider.name, claims.sub);
+    const sub = await pairwiseSubject(pairwise, sectorOf(sectors, leg.t as string), provider.name, claims.sub);
     const { redirect_to } = await adminJson("PUT", `/oauth2/auth/requests/login/accept?login_challenge=${challenge}`, {
       subject: sub, remember: false, context: { idp: provider.name, ...(leg.sp ? profileOf(claims) : {}), ...(leg.se ? emailOf(claims) : {}) },
     });
@@ -272,5 +275,5 @@ if (import.meta.main) {
   if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT, or PHONE_OTP=broker");
   const extra = (req: Request, url: URL) => routes.reduce<Promise<Response> | null>((got, r) => got ?? r(req, url), null);
   const hydra = { public: env("HYDRA_PUBLIC") ?? "http://127.0.0.1:28453", admin: env("HYDRA_ADMIN") ?? "http://127.0.0.1:28455" };
-  Deno.serve({ port: Number(env("PORT") ?? 28443) }, await front({ issuer, secret, providers, hydra, extra }));
+  Deno.serve({ port: Number(env("PORT") ?? 28443) }, await front({ issuer, secret, providers, hydra, extra, sectors: sectorsOf(env("BROKER_SECTORS")) }));
 }

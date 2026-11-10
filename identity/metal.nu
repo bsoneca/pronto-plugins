@@ -148,6 +148,7 @@ export def main [
 	--phone-sms: string = ""
 	--phone-sms-gate: string = ""
 	--phone-prove-tenants: string = "" # With --phone-otp broker: the origins that may learn a proven number (the prove step); none, off
+	--sectors: string = ""         # Apps that moved address, each keeping its people's subjects: https://new=https://old, comma separated (broker/core.ts sectorsOf); none, every app is its own sector
 	--namespace: string = "identity"
 	--service: string = "identity-broker" # The secrets' names in Secret Manager are <service>-secret and <service>-google-client-secret
 ] {
@@ -181,7 +182,9 @@ export def main [
 	}
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
-	let yaml = (manifests --domain $domain --sources (sources) --settings ([{name: "GOOGLE_CLIENT_ID", value: $google_client_id}] ++ $phone) --namespace $namespace --name $service)
+	# A malformed list stops the broker at start, so the rollout below fails rather than serve new subjects.
+	let sector = if ($sectors | is-empty) { [] } else { [{name: "BROKER_SECTORS", value: $sectors}] }
+	let yaml = (manifests --domain $domain --sources (sources) --settings ([{name: "GOOGLE_CLIENT_ID", value: $google_client_id}] ++ $phone ++ $sector) --namespace $namespace --name $service)
 	# The namespace first, so the Secret has somewhere to go before the pod that reads it.
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# The secrets through ssh's stdin alone: never a file, never an argument.
