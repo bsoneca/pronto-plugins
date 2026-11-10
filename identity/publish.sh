@@ -1,7 +1,7 @@
 #!/bin/sh
 # Publishes the identity broker's runtime, as pronto's forks publish theirs:
 # $IMAGE:<version>, in the operator's own registry (there is no default), the
-# broker's code at this commit, without its tests, on Deno. An app's docker
+# broker's code at this commit, without its tests, on Deno, built with crane (no Docker). An app's docker
 # launch runs the image as the front; its launch@local takes the image's /app
 # and runs hydra/local.sh from it on the host (identity/host.cue).
 # Run from anywhere, with what ships (oidc.ts, broker/, hydra/) committed:
@@ -39,14 +39,34 @@ identity/ at $rev; its source, tests and docs live there.
   processes, run from this image's /app.
 EOF
 
-# The front's image.
-if ! docker buildx imagetools inspect "$IMAGE:$V" >/dev/null 2>&1; then
-	printf 'FROM %s\nWORKDIR /app\nCOPY . /app/\nRUN ["deno", "cache", "--no-config", "/app/hydra/front.ts"]\nENV PORT=28443\nCMD ["run", "--no-config", "--allow-net", "--allow-env", "/app/hydra/front.ts"]\n' "$DENO" > "$work/src/Dockerfile"
-	docker buildx inspect identitypub >/dev/null 2>&1 || docker buildx create --name identitypub --driver docker-container >/dev/null
-	docker buildx build --builder identitypub --platform linux/amd64,linux/arm64 \
-		--label "org.opencontainers.image.source=https://github.com/bsoneca/pronto-plugins" \
-		--annotation "index:org.opencontainers.image.source=https://github.com/bsoneca/pronto-plugins" \
-		-t "$IMAGE:$V" --push -q "$work/src" >/dev/null
+# The front's image, without Docker anywhere (PRONTO-180): the base's linux/amd64 and linux/arm64
+# images, each with one layer of /app, set up as the Dockerfile this replaced did (WORKDIR /app,
+# PORT=28443, deno run front.ts), staged in a registry on localhost (`crane registry serve`) and
+# copied up as one index. Pushing needs a login to the registry that can write the package
+# (`crane auth login`, or Docker's config). The broker imports nothing remote, so no Deno cache ships:
+# a cache made here would be keyed by this machine's paths, not /app.
+CRANE=${CRANE:-crane}
+command -v "$CRANE" >/dev/null || { echo "publish.sh needs crane (go-containerregistry) on PATH or in \$CRANE" >&2; exit 1; }
+if ! "$CRANE" digest "$IMAGE:$V" >/dev/null 2>&1; then
+	mkdir -p "$work/layer/app"
+	cp -R "$work/src/." "$work/layer/app/"
+	if tar --version 2>/dev/null | grep -q GNU; then owner="--owner=0 --group=0 --numeric-owner"; else owner="--uid 0 --gid 0"; fi
+	# shellcheck disable=SC2086
+	tar -C "$work/layer" $owner -cf "$work/app.tar" app
+	port=${STAGE_PORT:-5058}
+	"$CRANE" registry serve --address "localhost:$port" >"$work/registry.log" 2>&1 &
+	reg=$!
+	trap 'kill "$reg" 2>/dev/null; rm -rf "$work"' EXIT
+	stage=localhost:$port/pronto-identity
+	for _ in 1 2 3 4 5 6 7 8 9 10; do "$CRANE" catalog --insecure "localhost:$port" >/dev/null 2>&1 && break; sleep 1; done
+	for arch in amd64 arm64; do
+		"$CRANE" append --insecure --platform "linux/$arch" -b "$DENO" -f "$work/app.tar" -t "$stage:$arch" >/dev/null
+		"$CRANE" mutate --insecure "$stage:$arch" -t "$stage:$arch" --workdir /app -e PORT=28443 \
+			--cmd run,--no-config,--allow-net,--allow-env,/app/hydra/front.ts \
+			-l org.opencontainers.image.source=https://github.com/bsoneca/pronto-plugins >/dev/null
+	done
+	"$CRANE" index append --insecure -m "$stage:amd64" -m "$stage:arm64" -t "$stage:$V" >/dev/null
+	"$CRANE" copy --insecure "$stage:$V" "$IMAGE:$V"
 fi
-digest=$(docker buildx imagetools inspect "$IMAGE:$V" --format '{{json .Manifest}}' | python3 -I -c 'import json,sys;print(json.load(sys.stdin)["digest"])')
+digest=$("$CRANE" digest "$IMAGE:$V")
 echo "image    $IMAGE:$V@$digest"

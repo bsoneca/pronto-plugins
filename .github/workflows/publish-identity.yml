@@ -1,5 +1,5 @@
-# Publishes the identity broker's runtime (identity/publish.sh) from Actions, so no developer's
-# machine runs Docker: ghcr.io/bsoneca/pronto-identity:<version> for linux/amd64 and linux/arm64,
+# Publishes the identity broker's runtime (identity/publish.sh, built with crane, no Docker) from
+# Actions: ghcr.io/bsoneca/pronto-identity:<version> for linux/amd64 and linux/arm64,
 # the broker's code at the pushed commit, composed exactly as publish.sh composes it (it runs
 # publish.sh itself). A version once published never changes: publish.sh reuses what is there.
 #
@@ -16,8 +16,7 @@ permissions:
   packages: write
 env:
   IMAGE: ghcr.io/bsoneca/pronto-identity
-  # QEMU for the arm64 half of the build, pinned by digest.
-  BINFMT: tonistiigi/binfmt:qemu-v9.2.2@sha256:1b804311fe87047a4c96d38b4b3ef6f62fca8cd125265917a9e3dc3c996c39e6
+  CRANE_VERSION: v0.20.2
 jobs:
   publish:
     runs-on: ubuntu-24.04
@@ -30,14 +29,17 @@ jobs:
           v="${GITHUB_REF_NAME#publish-identity/v}"
           echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "not a version: $v" >&2; exit 1; }
           echo "V=$v" >> "$GITHUB_ENV"
-      # GHCR_TOKEN, a token with write:packages, when the package doesn't grant this repository's
-      # Actions write.
+      # publish.sh builds with crane, no Docker (PRONTO-180).
+      - name: crane
+        run: curl -sSL "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/go-containerregistry_Linux_x86_64.tar.gz" | sudo tar xz -C /usr/local/bin crane
+      # The run's token writes the package only once the package grants this repository's Actions write
+      # (its settings, Manage Actions access: the owner's step); until then GHCR_TOKEN, a token with
+      # write:packages. Without either the push is refused (write_package), as 0.2.1, 0.2.2 and 0.2.4
+      # were; publish.sh runs as well from a machine logged in to ghcr.io (crane auth login).
       - name: registry
         env:
           TOKEN: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
-      - name: arm64 emulation
-        run: docker run --privileged --rm "$BINFMT" --install arm64
+        run: printf '%s' "$TOKEN" | crane auth login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
       - name: publish
         # bash, not the default bash -e: pipefail, so a refused push fails the run rather than tee hiding it.
         shell: bash
