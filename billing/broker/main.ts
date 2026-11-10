@@ -682,6 +682,8 @@ if (import.meta.main) {
   const doorAsked = env("STRIPE_DOOR_ASKED") === "1";
   if (doorAsked && !(door && key)) throw new Error("STRIPE_DOOR_ASKED moves the broker between its key and the door: it needs STRIPE_DOOR and STRIPE_SECRET_KEY");
   if (door && key && !doorAsked) throw new Error("STRIPE_DOOR and STRIPE_SECRET_KEY: through the door, the airlock holds the key and the broker none");
+  // Only a broker that is asked which way reads its callers' bodies for it; any other serves as before.
+  const asked = <A extends unknown[]>(h: (req: Request, ...rest: A) => Promise<Response>) => doorAsked ? forAccount(h) : h;
   const client = (k: string | undefined, d: string) =>
     doorAsked ? switched({ direct: stripe({ key: k! }), door: stripe({ door: d }), on: askedDoor }) : door ? stripe({ door: d }) : stripe({ key: k! });
   if (key || door) {
@@ -700,9 +702,9 @@ if (import.meta.main) {
       const pattern = new RegExp(sandboxTenants);
       const sandbox = await broker({ ...settings, stripe: client(sandboxKey, `${door}/door/stripe-sandbox`), webhookSecret: sandboxWebhookSecret });
       console.warn(`billing: tenants matching ${sandboxTenants} sell through the sandbox`);
-      Deno.serve({ port }, forAccount(twoModes({ live, sandbox, sandboxed: (t) => pattern.test(t), sandboxWebhookSecret })));
+      Deno.serve({ port }, asked(twoModes({ live, sandbox, sandboxed: (t) => pattern.test(t), sandboxWebhookSecret })));
     } else {
-      Deno.serve({ port }, forAccount(live));
+      Deno.serve({ port }, asked(live));
     }
   } else {
     // No Stripe key: a stand-in, on a broker only a developer's machine reaches.

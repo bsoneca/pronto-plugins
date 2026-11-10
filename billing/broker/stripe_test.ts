@@ -111,19 +111,26 @@ Deno.test("a body too large or of no declared length asks for nothing", async ()
   assertEquals(seen, ["direct GET /v1/prices", "door GET /v1/prices", "door GET /v1/prices"], "an undeclared length is read like a declared one");
 });
 
-Deno.test("both ways send Stripe the same idempotency key, so a retry the other way is one call", async () => {
-  const keys: (string | undefined)[] = [];
-  const direct: Stripe = (_m, _p, _q, k) => (keys.push(k), Promise.resolve({} as never));
-  const answers = door([{ status: 200, body: { status: 200, body: {} } }]);
-  const s = switched({ direct, door: stripe({ door: "http://airlock:9998/door/stripe", fetcher: answers.fetcher }), on: askedDoor });
+Deno.test("a large body is never copied, and Stripe's webhook is never read for a caller", async () => {
+  const seen: string[] = [];
+  const s = switched({ direct: via("direct", seen), door: via("door", seen), on: askedDoor });
   const handler = forAccount(async (req: Request) => {
-    await s("POST", "/v1/customers", {}, "customer ana");
-    await req.body?.cancel();
+    await req.text();
+    await s("GET", "/v1/prices");
     return new Response("ok");
   });
-  await handler(post(JSON.stringify({ account: "ana" })));
-  await handler(post(JSON.stringify({ account: "ana", door: true })));
-  assertEquals(keys.length, 1);
-  assertEquals(keys[0], (answers.sent[0].body as { key: string }).key);
-  assertEquals(keys[0]!.startsWith("key-"), true);
+  const big = JSON.stringify({ door: true, pad: "x".repeat(300_000) });
+  const res = await handler(post(big));
+  assertEquals(await res.text(), "ok", "the handler reads it all; nothing waits on a cancelled copy");
+  const hook = JSON.stringify({ door: true });
+  await handler(new Request("https://b/stripe", { method: "POST", headers: { "content-type": "application/json" }, body: hook }));
+  assertEquals(seen, ["direct GET /v1/prices", "direct GET /v1/prices"]);
+});
+
+Deno.test("the direct way sends the broker's own idempotency key, as before the door", async () => {
+  const keys: (string | undefined)[] = [];
+  const direct: Stripe = (_m, _p, _q, k) => (keys.push(k), Promise.resolve({} as never));
+  const s = switched({ direct, door: via("door", []), on: askedDoor });
+  await s("POST", "/v1/customers", {}, "customer t ana");
+  assertEquals(keys, ["customer t ana"]);
 });
