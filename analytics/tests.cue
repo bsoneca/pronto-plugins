@@ -57,6 +57,9 @@ startTimeRef: [for m in _p.metrics {m.query_ref}] & [for q in _p.queries {q.quer
 dashApp: [for t in _a.dashboard.templating.list if t.name == "app" {t.query}] & ["label_values(business_accounts, app)"]
 rowThenPanels: [for p in _a.dashboard.panels {p.type}] & ["row", "stat", "timeseries", "row", "barchart", "barchart"]
 secondPanelRight: _a.dashboard.panels[2].gridPos & {x: 6, y: 1, w: 18, h: 5}
+// A stat reads the value now, not the last point of a range (PRONTO-189); a timeseries the range.
+statInstant: _a.dashboard.panels[1].targets[0] & {instant: true, range: false}
+timeseriesRange: [for k, _ in _a.dashboard.panels[2].targets[0] if k == "instant" {k}] & []
 
 // A barchart reads an instant table, sorted by its axis then pivoted by its split; it stacks only
 // when asked.

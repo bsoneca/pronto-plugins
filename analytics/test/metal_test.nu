@@ -24,6 +24,8 @@ assert equal ($docs | where kind == Password | get metadata.name | sort) [grafan
 # Grafana: the cluster's VictoriaMetrics, each dashboard under its app, and Google's sign-in for those named alone.
 let prov = (do $named ConfigMap grafana-provisioning).data
 assert equal ($prov."datasources.yaml" | from yaml).datasources.0.url "http://vmsingle.observability.svc.cluster.local:8428"
+# The Google Managed Prometheus datasource Grafana's database brought from Cloud Run is removed (PRONTO-189).
+assert equal ($prov."datasources.yaml" | from yaml).deleteDatasources [{name: "Google Managed Prometheus", orgId: 1}]
 # The node's logs (PRONTO-158): VictoriaLogs through its plugin, which Grafana installs at start.
 let vl = ($prov."datasources.yaml" | from yaml).datasources | where uid == "victorialogs" | first
 assert equal [$vl.type $vl.url] ["victoriametrics-logs-datasource" "http://victoria-logs.logs.svc.cluster.local:9428"]

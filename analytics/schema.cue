@@ -258,7 +258,10 @@ import (
 						description: p.description
 						gridPos: {x: mod(before, 24), y: _top[ri] + 1 + div(before, 24)*_rowH[ri], w: p.w, h: p.h}
 						fieldConfig: defaults: {unit: p.unit, noValue: "no data"}
-						targets: [{refId: "A", expr: p.expr, legendFormat: p.legend, if p.kind == "table" || p.kind == "barchart" {format: "table", instant: true}}]
+						targets: [{refId: "A", expr: p.expr, legendFormat: p.legend, if p.kind == "table" || p.kind == "barchart" {format: "table", instant: true}, if p.kind == "stat" {instant: true, range: false}}]
+						// A stat reads the value now, an instant query: a range query's points fall on its
+						// step, so a series younger than that step (a store just emptied, PRONTO-189) read
+						// "no data" though it had a value.
 						if p.kind == "stat" {options: {reduceOptions: {calcs: ["lastNotNull"]}}}
 						// Grafana pivots the table into one column a series: sorted by the axis, the
 						// missing cells zero so a bar is not skipped.
