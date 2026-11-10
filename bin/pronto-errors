@@ -1,0 +1,13 @@
+#!/bin/sh
+# Error tracking for pronto apps (PRONTO-187): GlitchTip on a cluster the operator runs (pronto's
+# envs.Metal), as errors/metal.nu says:
+#   bin/pronto-errors metal --ssh U@H --domain errors.example.com --projects app,…
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+if [ "${1:-}" = metal ]; then
+	shift
+	cd "$here"
+	exec ./saytw --script tools.nu nu errors/metal.nu "$@"
+fi
+echo "usage: bin/pronto-errors metal --ssh U@H --domain D [--projects a,b]" >&2
+exit 2
