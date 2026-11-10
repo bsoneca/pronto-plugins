@@ -65,6 +65,7 @@ function throughDoor(door: string, fetcher: typeof fetch): Stripe {
     const key = await doorKey(idempotencyKey);
     const request = {
       key,
+      ...(idempotencyKey === undefined ? {} : { sinkKey: idempotencyKey }),
       method,
       path: method === "GET" && `${query}` !== "" ? `${path}?${query}` : path,
       ...(method === "POST" ? (v2 ? { body: params, contentType: "application/json" } : { body: `${query}`, contentType: "application/x-www-form-urlencoded" }) : {}),
@@ -91,23 +92,28 @@ function throughDoor(door: string, fetcher: typeof fetch): Stripe {
  * names no account (Stripe's webhook, say). Set by `forAccount` around the broker's handler. */
 const caller = new AsyncLocalStorage<{ account?: string; door?: boolean }>();
 
-/** A body this size or under is read for its caller, declared or not (the handler's own capped read
- * takes the same); one declared larger is not touched (a cancelled copy would wait on the handler's
- * read), and says nothing here. Stripe's webhook (/stripe) names no caller and is never read here. */
+/** A body this size or under is read for its caller, declared or not, once: the handler is handed
+ * the same text (no copy whose cancelling would wait on the handler's read). A larger one is handed
+ * on empty, which the handler's own capped read makes of it anyway, and says nothing here. Stripe's
+ * webhook (/stripe) names no caller and is never read here. */
 const CALLER_BODY_MAX = 4096;
 
 /** Runs `handler` with what its request's JSON body says of its caller (`account`, `door`). */
 export function forAccount<A extends unknown[]>(handler: (req: Request, ...rest: A) => Promise<Response>) {
   return async (req: Request, ...rest: A): Promise<Response> => {
     const who: { account?: string; door?: boolean } = {};
-    const declared = Number(req.headers.get("content-length") ?? 0);
-    if (req.method === "POST" && new URL(req.url).pathname !== "/stripe" && !(declared > CALLER_BODY_MAX)) {
-      try {
-        const text = await readCapped(req.clone().body, CALLER_BODY_MAX);
-        const b = text ? JSON.parse(text) : null;
-        if (typeof b?.account === "string" && b.account) who.account = b.account;
-        if (typeof b?.door === "boolean") who.door = b.door;
-      } catch { /* not JSON: nothing said */ }
+    if (req.method === "POST" && new URL(req.url).pathname !== "/stripe") {
+      const text = await readCapped(req.body, CALLER_BODY_MAX, req.headers.get("content-length")) ?? "";
+      if ((req.headers.get("content-type") ?? "").startsWith("application/json")) {
+        try {
+          const b = JSON.parse(text);
+          if (typeof b?.account === "string" && b.account) who.account = b.account;
+          if (typeof b?.door === "boolean") who.door = b.door;
+        } catch { /* not JSON: nothing said, and the handler refuses it as before */ }
+      }
+      const headers = new Headers(req.headers);
+      headers.delete("content-length");
+      req = new Request(req.url, { method: req.method, headers, body: text, signal: req.signal });
     }
     return await caller.run(who, () => handler(req, ...rest));
   };
@@ -120,8 +126,8 @@ export const askedDoor = (): boolean => caller.getStore()?.door === true;
  * request asked for it (its tenant's flag), else straight to Stripe with the broker's key, as before.
  * A flag, not a deploy, moves it. */
 export function switched(p: { direct: Stripe; door: Stripe; on: () => boolean }): Routed {
-  // The direct way sends Stripe the broker's own key, as before the door; the door sends its hashed
-  // one (the airlock forwards its ledger key), so a call retried the other way across a flip is two.
+  // Both ways send Stripe the broker's own key: the direct way as before the door, the door as its
+  // `sinkKey` (its ledger keeps a hashed one), so a call retried the other way across a flip is one.
   const s: Routed = (method, path, params, idempotencyKey) => (p.on() ? p.door : p.direct)(method, path, params, idempotencyKey);
   s.route = () => Promise.resolve<Route>(p.on() ? "door" : "direct");
   return s;

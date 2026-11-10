@@ -127,6 +127,36 @@ Deno.test("a large body is never copied, and Stripe's webhook is never read for 
   assertEquals(seen, ["direct GET /v1/prices", "direct GET /v1/prices"]);
 });
 
+Deno.test("a chunked body is read once for its caller, and the handler gets the same text", async () => {
+  const seen: string[] = [];
+  const s = switched({ direct: via("direct", seen), door: via("door", seen), on: askedDoor });
+  const got: string[] = [];
+  const handler = forAccount(async (req: Request) => {
+    got.push(await req.text());
+    await s("GET", "/v1/prices");
+    return new Response("ok");
+  });
+  const text = JSON.stringify({ account: "tess", door: true });
+  const chunked = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode(text)); c.close(); } });
+  await handler(new Request("https://b/checkout", { method: "POST", headers: { "content-type": "application/json" }, body: chunked }));
+  const over = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode(JSON.stringify({ door: true, pad: "x".repeat(5000) }))); c.close(); } });
+  const res = await handler(new Request("https://b/checkout", { method: "POST", headers: { "content-type": "application/json" }, body: over }));
+  assertEquals(await res.text(), "ok", "an undeclared body over the cap never waits");
+  assertEquals(got, [text, ""]);
+  assertEquals(seen, ["door GET /v1/prices", "direct GET /v1/prices"]);
+});
+
+Deno.test("the door sends Stripe the broker's own key as its sinkKey; its ledger keeps a hashed one", async () => {
+  const answers = door([{ status: 200, body: { status: 200, body: {} } }, { status: 200, body: { status: 200, body: {} } }]);
+  const d = stripe({ door: "http://airlock:9998/door/stripe", fetcher: answers.fetcher });
+  await d("POST", "/v1/customers", {}, "customer https://a.example ana");
+  await d("GET", "/v1/prices");
+  const [keyed, unkeyed] = answers.sent.map((x) => x.body as { key: string; sinkKey?: string });
+  assertEquals(keyed.sinkKey, "customer https://a.example ana");
+  assertEquals(keyed.key.startsWith("key-"), true);
+  assertEquals("sinkKey" in unkeyed, false);
+});
+
 Deno.test("the direct way sends the broker's own idempotency key, as before the door", async () => {
   const keys: (string | undefined)[] = [];
   const direct: Stripe = (_m, _p, _q, k) => (keys.push(k), Promise.resolve({} as never));
