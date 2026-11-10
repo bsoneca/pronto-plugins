@@ -1,16 +1,18 @@
 # Releases the identity broker to a cluster the operator runs (pronto's envs.Metal: k3s on a node
 # reached over SSH, its traffic arriving through the node's Cloudflare Tunnel to Envoy Gateway),
 # beside release.nu's Cloud Run:
-#   bin/pronto-identity-broker metal --ssh bruno@node --domain D --google-client-id C --project P
+#   bin/pronto-identity-broker metal --ssh bruno@node --domain D --google-client-id C --secrets F (or --project P)
 #
 # The broker imports nothing from outside its own files, so no image is built: the pinned Deno image
 # runs oidc.ts and broker/*.ts from a ConfigMap. Its one-time codes live in memory, so one replica,
-# replaced (Recreate) rather than overlapped. Its only kept state is BROKER_SECRET, read with the
-# operator's gcloud from the project's Secret Manager, as Cloud Run's release keeps it, and piped
-# into a Secret on the node, never written to a file: the same value, so the subjects it vouches for
-# and the codes it signs stay the same across the move.
+# replaced (Recreate) rather than overlapped. Its only kept state is BROKER_SECRET: with --secrets, the
+# Secret's manifest in a SOPS file (common/sops.nu, PRONTO-155); else read with the operator's gcloud
+# from the project's Secret Manager, as Cloud Run's release keeps it. Either way it is piped into a
+# Secret on the node, never written to a file: the same value, so the subjects it vouches for and the
+# codes it signs stay the same across the move.
 
 const here = path self .
+use ../common/sops.nu
 const deno = "denoland/deno:distroless-2.5.0@sha256:5c4530d4babe37ded3566803e9498e2b5d643b915cce701d8b7b82f87a86629e"
 const port = 8080
 # The broker's files as the image sees them under /app, each a ConfigMap key.
@@ -134,7 +136,8 @@ export def main [
 	--kubeconfig: string = "$HOME/.cache/contabo2.kubeconfig" # On the node
 	--domain: string               # Where the broker answers, its issuer: id.example.com
 	--google-client-id: string     # The operator's Google client, registered for https://<domain>/callback/google
-	--project: string              # The Google Cloud project whose Secret Manager holds the broker's secrets
+	--project: string = ""         # The Google Cloud project whose Secret Manager holds the broker's secrets
+	--secrets: string = ""         # Or the SOPS file holding the Secret <service> (pronto's services/identity-broker/secrets.metal.enc.yaml)
 	--phone-project: string = ""   # As release.nu: the Firebase project that texts the phone's codes; none, no phone
 	--phone-api-key: string = ""
 	--phone-app-id: string = ""
@@ -143,7 +146,8 @@ export def main [
 	--namespace: string = "identity"
 	--service: string = "identity-broker" # The secrets' names in Secret Manager are <service>-secret and <service>-google-client-secret
 ] {
-	if ([$ssh $domain $google_client_id $project] | any { is-empty }) { error make {msg: "--ssh, --domain, --google-client-id and --project are all required"} }
+	if ([$ssh $domain $google_client_id] | any { is-empty }) { error make {msg: "--ssh, --domain and --google-client-id are all required"} }
+	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
 	let phone = if ($phone_project | is-empty) { [] } else {
 		if ([$phone_api_key $phone_app_id $phone_admit $phone_tenants] | any { is-empty }) {
 			error make {msg: "--phone-project needs --phone-api-key, --phone-app-id, --phone-admit and --phone-tenants"}
@@ -162,8 +166,12 @@ export def main [
 	# The namespace first, so the Secret has somewhere to go before the pod that reads it.
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# The secrets through ssh's stdin alone: never a file, never an argument.
-	let secret_env = $"BROKER_SECRET=(gc-secret $"($service)-secret" $project)\nGOOGLE_CLIENT_SECRET=(gc-secret $"($service)-google-client-secret" $project)\n"
-	$secret_env | do $remote $"($kubectl) create secret generic ($service) -n ($namespace) --from-env-file=/dev/stdin --dry-run=client -o yaml | ($kubectl) apply -f -" | print
+	if ($secrets | is-not-empty) {
+		sops decrypt $secrets | sops secret-manifests $service $namespace [BROKER_SECRET GOOGLE_CLIENT_SECRET] | do $remote (sops apply-command $kubectl $namespace) | print
+	} else {
+		let secret_env = $"BROKER_SECRET=(gc-secret $"($service)-secret" $project)\nGOOGLE_CLIENT_SECRET=(gc-secret $"($service)-google-client-secret" $project)\n"
+		$secret_env | do $remote $"($kubectl) create secret generic ($service) -n ($namespace) --from-env-file=/dev/stdin --dry-run=client -o yaml | ($kubectl) apply -f -" | print
+	}
 	$yaml | do $remote $"($kubectl) apply -f -" | print
 	do $remote $"($kubectl) rollout restart deployment/($service) -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service) -n ($namespace) --timeout=120s" | print
 	# Through the gateway as the tunnel reaches it, by host: the broker answers, under its own issuer.

@@ -1,17 +1,19 @@
 # Releases the billing broker to a cluster the operator runs (pronto's envs.Metal: k3s on a node
 # reached over SSH, its traffic arriving through the node's Cloudflare Tunnel to Envoy Gateway),
 # beside release.nu's Cloud Run, in the shape identity/metal.nu gives the identity broker:
-#   bin/pronto-billing-broker metal --ssh bruno@node --domain D --project P [--fee N] [--sandbox-tenants RE]
+#   bin/pronto-billing-broker metal --ssh bruno@node --domain D --secrets F (or --project P) [--fee N] [--sandbox-tenants RE]
 #
 # The broker imports nothing from outside its own files, so no image is built: the pinned Deno image
-# runs shared.ts and broker/*.ts from a ConfigMap. It keeps nothing but its secrets, read with the
-# operator's gcloud from the project's Secret Manager, as Cloud Run's release keeps them, and piped
-# into a Secret on the node, never written to a file: the same signing key, so the entitlements it
+# runs shared.ts and broker/*.ts from a ConfigMap. It keeps nothing but its secrets: with --secrets,
+# the Secret's manifest in a SOPS file (common/sops.nu, PRONTO-155); else read with the operator's
+# gcloud from the project's Secret Manager, as Cloud Run's release keeps them. Either way they are
+# piped into a Secret on the node, never written to a file: the same signing key, so the entitlements it
 # signs verify as Cloud Run's did, and the same webhook secret, so Stripe's one webhook
 # (https://<domain>/stripe) is accepted by whichever of the two the name points at. An
 # entitlement's `ver` is its clock: one replica, replaced (Recreate) rather than overlapped.
 
 const here = path self .
+use ../common/sops.nu
 const deno = "denoland/deno:distroless-2.5.0@sha256:5c4530d4babe37ded3566803e9498e2b5d643b915cce701d8b7b82f87a86629e"
 const port = 8080
 # A ConfigMap's keys hold dots, which a cell path would split: look each up whole.
@@ -147,25 +149,31 @@ export def main [
 	--ssh: string                  # The node, as the app's envs.Metal names it: bruno@13.140.186.223
 	--kubeconfig: string = "$HOME/.cache/contabo2.kubeconfig" # On the node
 	--domain: string               # Where the broker answers, its issuer: billing.example.com
-	--project: string              # The Google Cloud project whose Secret Manager holds the broker's secrets
+	--project: string = ""         # The Google Cloud project whose Secret Manager holds the broker's secrets
+	--secrets: string = ""         # Or the SOPS file holding the Secret <service> (pronto's services/billing-broker/secrets.metal.enc.yaml)
 	--fee: int = 0                 # The share of each payment the platform keeps, in percent
 	--sandbox-tenants: string = "" # As release.nu: the tenants that buy through Stripe's sandbox
 	--namespace: string = "billing"
 	--service: string = "billing-broker" # The secrets' names in Secret Manager are <service>-<suffix>, as release.nu stores them
 ] {
-	if ([$ssh $domain $project] | any { is-empty }) { error make {msg: "--ssh, --domain and --project are all required"} }
+	if ([$ssh $domain] | any { is-empty }) { error make {msg: "--ssh and --domain are both required"} }
+	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
 	if not ($fee >= 0 and $fee < 100) { error make {msg: "--fee is a percentage under 100"} }
 	let sandbox = ($sandbox_tenants | is-not-empty)
-	let secrets = ($live_secrets ++ (if $sandbox { $sandbox_secrets } else { [] }))
+	let keys = ($live_secrets ++ (if $sandbox { $sandbox_secrets } else { [] }))
 	let settings = ([{name: "BILLING_FEE_PERCENT", value: ($fee | into string)}] ++ (if $sandbox { [{name: "BILLING_SANDBOX_TENANTS", value: $sandbox_tenants}] } else { [] }))
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
-	let yaml = (manifests --domain $domain --sources (sources) --settings $settings --secrets ($secrets | get var) --namespace $namespace --name $service)
+	let yaml = (manifests --domain $domain --sources (sources) --settings $settings --secrets ($keys | get var) --namespace $namespace --name $service)
 	# The namespace first, so the Secret has somewhere to go before the pod that reads it.
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# The secrets through ssh's stdin alone: never a file, never an argument.
-	let secret_env = ($secrets | each {|s| $"($s.var)=(gc-secret $"($service)-($s.suffix)" $project)" } | str join "\n")
-	$"($secret_env)\n" | do $remote $"($kubectl) create secret generic ($service) -n ($namespace) --from-env-file=/dev/stdin --dry-run=client -o yaml | ($kubectl) apply -f -" | print
+	if ($secrets | is-not-empty) {
+		sops decrypt $secrets | sops secret-manifests $service $namespace ($keys | get var) | do $remote (sops apply-command $kubectl $namespace) | print
+	} else {
+		let secret_env = ($keys | each {|s| $"($s.var)=(gc-secret $"($service)-($s.suffix)" $project)" } | str join "\n")
+		$"($secret_env)\n" | do $remote $"($kubectl) create secret generic ($service) -n ($namespace) --from-env-file=/dev/stdin --dry-run=client -o yaml | ($kubectl) apply -f -" | print
+	}
 	$yaml | do $remote $"($kubectl) apply -f -" | print
 	do $remote $"($kubectl) rollout restart deployment/($service) -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service) -n ($namespace) --timeout=120s" | print
 	# Through the gateway as the tunnel reaches it, by host: the broker answers, signing with the key
