@@ -53,6 +53,8 @@ export interface PhoneConfig {
   sdk: string;
   /** The tenants that may offer the phone: origins, a `*` standing for a port. */
   tenants: string[];
+  /** Broker mode: the tenants that may learn a proven number (the prove step); none, the capability is off. */
+  proveTenants: string[];
   /** Where the page asks for a code before Firebase sends one: the beforeSendSms gate's owner. */
   admit: string;
   /** The Firebase Auth emulator's host:port, on a localhost broker only. */
@@ -77,7 +79,7 @@ export function phoneConfig(env: (k: string) => string | undefined, issuer: stri
     return v;
   };
   if (otp === "firebase") {
-    for (const k of ["PHONE_SMS", "PHONE_SMS_GATE"]) if (env(k)) throw new Error(`${k} is for PHONE_OTP=broker`);
+    for (const k of ["PHONE_SMS", "PHONE_SMS_GATE", "PHONE_PROVE_TENANTS"]) if (env(k)) throw new Error(`${k} is for PHONE_OTP=broker`);
   } else {
     for (const k of FIREBASE_ONLY) if (env(k)) throw new Error(`${k} is for PHONE_OTP=firebase, not broker`);
   }
@@ -109,6 +111,7 @@ export function phoneConfig(env: (k: string) => string | undefined, issuer: stri
     appId: otp === "broker" ? "" : emulator ? env("PHONE_APP_ID") || "emulator" : need("PHONE_APP_ID"),
     sdk: env("PHONE_SDK") || SDK,
     tenants,
+    proveTenants: (env("PHONE_PROVE_TENANTS") ?? "").split(",").map((t) => t.trim()).filter((t) => t !== ""),
     admit,
     emulator,
     resendSeconds,
@@ -118,8 +121,11 @@ export function phoneConfig(env: (k: string) => string | undefined, issuer: stri
 
 /** Whether a tenant is one the operator lets offer the phone: exact, or with `*` for a port. */
 export function tenantAdmitted(tenants: readonly string[], tenant: string): boolean {
-  return tenants.some((t) => new RegExp("^" + t.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[0-9]+") + "$").test(tenant));
+  return tenants.some((t) => new RegExp(tenantPattern(t)).test(tenant));
 }
+
+/** The regular expression a tenant entry stands for. */
+const tenantPattern = (t: string) => "^" + t.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[0-9]+") + "$";
 
 /** The page's words, by language: Portuguese for a reader whose browser asks for it first, else English. */
 export const STRINGS = {
@@ -144,6 +150,9 @@ export const STRINGS = {
     change: "Use another number",
     back: "Back to the app",
     footer: "Only the app learns that it's you, and it can't tell you apart in any other app. It never learns your number from this sign-in.",
+    prove_refused: "This app can't ask to confirm a number here. Go back and start again.",
+    prove_title: "Confirm your phone",
+    prove_intro: "We'll text a 6-digit code to confirm this number to",
     sms: "{host}: your sign-in code is {code}",
   },
   "pt-BR": {
@@ -167,6 +176,9 @@ export const STRINGS = {
     change: "Usar outro número",
     back: "Voltar ao app",
     footer: "Só o app fica sabendo que é você, e ele não consegue te reconhecer em nenhum outro app. Ele não recebe seu número por este acesso.",
+    prove_refused: "Este app não pode pedir a confirmação de um número aqui. Volte e comece de novo.",
+    prove_title: "Confirmar seu celular",
+    prove_intro: "Vamos enviar um código de 6 dígitos por SMS para confirmar este número para",
     sms: "{host}: seu código para entrar é {code}",
   },
 } as const;
@@ -246,6 +258,8 @@ export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { ke
   const brokerMode = cfg.otp === "broker";
   if (brokerMode && (opts.secret ?? "").length < 32) throw new Error("PHONE_OTP=broker needs BROKER_SECRET to derive subjects");
   const otp = new Otp(cfg.resendSeconds, now);
+  const proving = new Map<string, { origin: string; expires: number }>();
+  const proveCsp = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
   const fetcher = opts.fetcher ?? fetch;
   const codes = new Map<string, { nonce: string; sub: string; expires: number }>();
   const live = <T extends { expires: number }>(m: Map<string, T>, k: string | null, take: boolean) => {
@@ -343,24 +357,18 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
     }
   }
 
-  // Broker mode: the page asks for a code. The wait is checked first (a refused number costs the gate
-  // nothing), then the gate admits the SMS, then the code is made and sent.
-  async function send(req: Request): Promise<Response> {
-    const body = await jsonBody(req);
-    if (body instanceof Response) return body;
-    const a = live(asked, typeof body.id === "string" ? body.id : null, false);
-    if (!a) return json(400, { error: "expired" });
-    const phone = body.phone;
-    if (typeof phone !== "string" || !new RegExp(cfg.pattern).test(phone)) return json(400, { error: "region" });
+  // Broker mode: a code for `visit` and `phone`. The wait is checked first (a refused number costs the
+  // gate nothing), then the gate admits the SMS, then the code is made and sent.
+  async function deliver(visit: string, phone: string, lang: Lang): Promise<Response> {
     if (otp.wait(phone) > 0) return json(429, { error: "cooldown" });
     const verdict = await gate(phone);
     if (verdict !== "go") return json(verdict === "too_many" ? 429 : 503, { error: verdict });
-    const made = await otp.issue(body.id as string, phone);
+    const made = await otp.issue(visit, phone);
     if ("wait" in made) return json(429, { error: "cooldown" });
     try {
-      await cfg.sender!.send(phone, STRINGS[a.lang].sms.replace("{host}", new URL(issuer).host).replace("{code}", made.code));
+      await cfg.sender!.send(phone, STRINGS[lang].sms.replace("{host}", new URL(issuer).host).replace("{code}", made.code));
     } catch (e) {
-      otp.revoke(body.id as string);
+      otp.revoke(visit);
       // The sender's failure, never the number or the code.
       console.error(`broker: phone SMS not sent: ${e instanceof Error ? e.name : "error"}`);
       return json(503, { error: "down" });
@@ -368,16 +376,99 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
     return json(200, {});
   }
 
+  async function send(req: Request): Promise<Response> {
+    const body = await jsonBody(req);
+    if (body instanceof Response) return body;
+    const a = live(asked, typeof body.id === "string" ? body.id : null, false);
+    if (!a) return json(400, { error: "expired" });
+    const phone = body.phone;
+    if (typeof phone !== "string" || !new RegExp(cfg.pattern).test(phone)) return json(400, { error: "region" });
+    return deliver(body.id as string, phone, a.lang);
+  }
+
+  const codeError = (result: string) => json(400, { error: result === "dead" ? "too_many" : result === "wrong" ? "wrong_code" : "expired" });
+
+  // The prove step: a tenant the operator listed (PHONE_PROVE_TENANTS) learns the number, which the
+  // reader confirms with a code. Each ask is a visit of its own, kept ten minutes.
+  async function proveSend(req: Request): Promise<Response> {
+    const body = await jsonBody(req);
+    if (body instanceof Response) return body;
+    const origin = body.return_origin;
+    if (typeof origin !== "string" || !tenantAdmitted(cfg.proveTenants, origin)) return json(403, { error: "tenant" });
+    const phone = body.phone;
+    if (typeof phone !== "string" || !new RegExp(cfg.pattern).test(phone)) return json(400, { error: "region" });
+    for (const [k, v] of proving) if (v.expires <= now()) proving.delete(k);
+    const visit = randomToken(16);
+    const res = await deliver(visit, phone, langOf(req.headers.get("accept-language")));
+    if (!res.ok) return res;
+    proving.set(visit, { origin, expires: now() + 600_000 });
+    return json(200, { visit });
+  }
+
+  async function proveCheck(req: Request): Promise<Response> {
+    const body = await jsonBody(req);
+    if (body instanceof Response) return body;
+    const v = live(proving, typeof body.visit === "string" ? body.visit : null, false);
+    if (!v || typeof body.code !== "string") return json(400, { error: "expired" });
+    const checked = await otp.check(body.visit as string, body.code);
+    if (checked.result === "dead" || checked.result === "ok") proving.delete(body.visit as string);
+    if (checked.result !== "ok") return codeError(checked.result);
+    const t = Math.floor(now() / 1000);
+    const id_token = await signJwt({
+      iss: root, aud: v.origin, sub: await phoneSubject(opts.secret!, checked.phone!), phone_number: checked.phone, auth_time: t, iat: t, exp: t + 300, amr: ["sms"], event: "phone_proof",
+    });
+    return json(200, { id_token });
+  }
+
+  async function signJwt(claims: Record<string, unknown>): Promise<string> {
+    const head = base64url(enc.encode(JSON.stringify({ alg: "RS256", typ: "JWT", kid: jwk.kid })));
+    const body = base64url(enc.encode(JSON.stringify(claims)));
+    const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", pair.privateKey, enc.encode(`${head}.${body}`)));
+    return `${head}.${body}.${base64url(sig)}`;
+  }
+
+  function provePage(req: Request): Response {
+    const lang = langOf(req.headers.get("accept-language"));
+    const s = STRINGS[lang];
+    const config = { resendSeconds: cfg.resendSeconds, pattern: cfg.pattern, tenants: cfg.proveTenants.map(tenantPattern), strings: s };
+    const data = JSON.stringify(config).replace(/</g, "\\u003c");
+    return html(`<!doctype html>
+<html lang="${lang}">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer">
+<title>${esc(s.prove_title)}</title>
+<style>${STYLE}</style></head>
+<body><main>
+<h1>${esc(s.prove_title)}</h1>
+<p class="notice" id="phone-notice" role="alert" hidden></p>
+<form id="phone-ask" novalidate>
+  <p>${esc(s.prove_intro)} <strong class="e164" data-e164></strong></p>
+  <p class="sms-said">${esc(s.sms_said)}</p>
+  <button type="submit" class="primary" id="phone-send">${esc(s.send)}</button>
+</form>
+<form id="phone-check" novalidate hidden>
+  <p>${esc(s.sent_to)} <strong class="e164" data-e164></strong></p>
+  <label for="phone-code">${esc(s.code)}</label>
+  <input id="phone-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required>
+  <p class="notice wrong-code" role="alert" hidden></p>
+  <button type="submit" class="primary" id="phone-confirm">${esc(s.confirm)}</button>
+  <button type="button" id="phone-resend" disabled></button>
+</form>
+<p><button type="button" class="link" id="phone-back">${esc(s.back)}</button></p>
+</main>
+<script type="application/json" id="phone-config">${data}</script>
+<script type="module" src="${esc(`${base}/prove.js`)}"></script>
+</body></html>
+`, proveCsp);
+  }
+
   // The gate (PHONE_SMS_GATE) is asked before each SMS with a JWT signed by the phone key (/phone/jwks):
   // no answer in time, or any but a 2xx, is no SMS.
   async function gate(phone: string): Promise<"go" | "too_many" | "down"> {
     const t = Math.floor(now() / 1000);
-    const head = base64url(enc.encode(JSON.stringify({ alg: "RS256", typ: "JWT", kid: jwk.kid })));
-    const claims = base64url(enc.encode(JSON.stringify({ iss: issuer.replace(/\/$/, ""), aud: cfg.smsGate, event: "sms", phone_number: phone, iat: t, exp: t + 60, jti: randomToken(16) })));
-    const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", pair.privateKey, enc.encode(`${head}.${claims}`)));
+    const jwt = await signJwt({ iss: root, aud: cfg.smsGate, event: "sms", phone_number: phone, iat: t, exp: t + 60, jti: randomToken(16) });
     try {
       const res = await fetcher(cfg.smsGate!, {
-        method: "POST", headers: { "content-type": "application/jwt" }, body: `${head}.${claims}.${base64url(sig)}`, signal: AbortSignal.timeout(8000),
+        method: "POST", headers: { "content-type": "application/jwt" }, body: jwt, signal: AbortSignal.timeout(8000),
       });
       await res.body?.cancel();
       const verdict = gateVerdict(res.status);
@@ -399,7 +490,7 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
     if (brokerMode) {
       if (!a || typeof body.code !== "string") return json(400, { error: "expired" });
       const checked = await otp.check(body.id as string, body.code);
-      if (checked.result !== "ok") return json(400, { error: checked.result === "dead" ? "too_many" : checked.result === "wrong" ? "wrong_code" : "expired" });
+      if (checked.result !== "ok") return codeError(checked.result);
       // Firebase-mode users had Firebase's uid as their subject: they get different ones here (a migration, not solved here).
       sub = await phoneSubject(opts.secret!, checked.phone!);
     } else {
@@ -450,6 +541,12 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
       }
       if (req.method === "POST" && url.pathname === "/phone/approve") return approve(req);
       if (brokerMode && req.method === "POST" && url.pathname === "/phone/send") return send(req);
+      if (brokerMode && cfg.proveTenants.length > 0) {
+        if (req.method === "GET" && url.pathname === "/phone/prove") return Promise.resolve(provePage(req));
+        if (req.method === "GET" && url.pathname === "/phone/prove.js") return Promise.resolve(new Response(PROVE_SCRIPT, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" } }));
+        if (req.method === "POST" && url.pathname === "/phone/prove/send") return proveSend(req);
+        if (req.method === "POST" && url.pathname === "/phone/prove/check") return proveCheck(req);
+      }
       if (brokerMode && req.method === "GET" && url.pathname === "/phone/jwks") return Promise.resolve(json(200, { keys: [{ ...jwk, alg: "RS256", use: "sig" }] }));
       // A local scenario reads the code the stand-in "sent", as it reads the Firebase emulator's.
       if (cfg.sender instanceof Standin && req.method === "GET" && url.pathname === "/phone/fake/codes") {
@@ -742,4 +839,98 @@ $('#phone-check').addEventListener('submit', async (ev) => {
   }
   confirm.disabled = false;
 });
+`;
+
+// The prove page's script: the app's fragment (#phone=<E.164>&state=<s>&return=<url>) is read and
+// the address cleaned at once; the page leaves only for a return the operator listed, with
+// #id_token=...&state=... or #error=...&state=....
+const PROVE_SCRIPT = `const $ = (s) => document.querySelector(s);
+const config = JSON.parse($('#phone-config').textContent);
+const t = config.strings;
+const notice = (text) => { const el = $('#phone-notice'); el.textContent = text; el.hidden = !text; };
+let timer = 0;
+${COMMON_COUNTDOWN}
+// The fragment is the app's word, read once and gone from the address.
+const frag = new URLSearchParams(location.hash.slice(1));
+history.replaceState(null, '', location.pathname);
+const phone = frag.get('phone') || '';
+const state = frag.get('state') || '';
+let ret = null;
+try {
+  const u = new URL(frag.get('return') || '');
+  if (config.tenants.some((p) => new RegExp(p).test(u.origin))) ret = u;
+} catch {}
+const leave = (params) => {
+  if (!ret) return;
+  const u = new URL(ret);
+  u.hash = new URLSearchParams({ ...params, state }).toString();
+  location.replace(u.toString());
+};
+let visit = '';
+const failure = (error) => error === 'cooldown' ? t.cooldown : error === 'too_many' ? t.too_many : error === 'region' ? t.wrong_number : error === 'tenant' ? t.prove_refused : t.down;
+
+document.querySelectorAll('[data-e164]').forEach((el) => { el.textContent = phone; });
+if (!ret || !new RegExp(config.pattern).test(phone)) {
+  // Never a redirect to a return that is not listed: the page says so and stays.
+  notice(ret ? t.wrong_number : t.prove_refused);
+  $('#phone-ask').hidden = true;
+  $('#phone-back').hidden = !ret;
+}
+
+async function ask() {
+  try {
+    const res = await fetch(location.pathname + '/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone, return_origin: ret.origin }) });
+    const out = await res.json();
+    if (res.ok) { visit = out.visit; return ''; }
+    return failure(out.error);
+  } catch {
+    return t.down;
+  }
+}
+
+$('#phone-ask').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const send = $('#phone-send');
+  send.disabled = true;
+  notice('');
+  const problem = await ask();
+  send.disabled = false;
+  if (problem) { notice(problem); return; }
+  $('#phone-ask').hidden = true;
+  $('#phone-check').hidden = false;
+  countdown(config.resendSeconds);
+  $('#phone-code').focus();
+});
+
+$('#phone-resend').addEventListener('click', async () => {
+  const b = $('#phone-resend');
+  b.disabled = true;
+  $('.wrong-code').hidden = true;
+  notice('');
+  const problem = await ask();
+  if (problem) { notice(problem); b.disabled = false; return; }
+  countdown(config.resendSeconds);
+});
+
+$('#phone-check').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const wrong = $('.wrong-code');
+  const confirm = $('#phone-confirm');
+  wrong.hidden = true;
+  const code = $('#phone-code').value.replace(/\\D/g, '');
+  if (!/^[0-9]{6}$/.test(code)) { wrong.textContent = t.wrong_code; wrong.hidden = false; return; }
+  confirm.disabled = true;
+  try {
+    const res = await fetch(location.pathname + '/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ visit, code }) });
+    const out = await res.json();
+    if (res.ok && out.id_token) { leave({ id_token: out.id_token }); return; }
+    wrong.textContent = out.error === 'expired' ? t.expired : out.error === 'too_many' ? t.too_many : t.wrong_code;
+    wrong.hidden = false;
+  } catch {
+    notice(t.down);
+  }
+  confirm.disabled = false;
+});
+
+$('#phone-back').addEventListener('click', () => leave({ error: 'cancelled' }));
 `;

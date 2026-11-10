@@ -392,3 +392,59 @@ export async function otpFlow(p = {}) {
     hasRecaptchaBox: page.includes('id="recaptcha"'), script: await (await handle(new Request(`${issuer}/phone/page.js`))).text().then((js) => ({ firebase: /firebase|gstatic|recaptcha/i.test(js), sends: js.includes("'/send'"), approves: js.includes('code }') })),
   };
 }
+
+/** The prove step (PHONE_PROVE_TENANTS) as the page drives it: `ops` in order, each ['page'], ['js'],
+ * ['send', return origin], ['check', code | 'right'] or ['advance', ms]. The gate answers `gate`, the
+ * stand-in sender keeps the code. Returns each op's status and error, the token it ended with (its
+ * claims and whether the key at /phone/jwks verifies it), the gate's calls and the page's facts. */
+export async function proveFlow(p = {}) {
+  const { env = { PHONE_PROVE_TENANTS: 'https://app.example.com' }, gate = 200, ops = [['send', TENANT], ['check', 'right']], phone = '+5511912345678', issuer = 'http://localhost:19000', secret = 'a-secret-of-thirty-two-characters!' } = p;
+  let clock = Date.now();
+  let gateCalls = 0;
+  const fetcher = () => { gateCalls++; return Promise.resolve(new Response(null, { status: gate })); };
+  const cfg = phoneConfig((k) => ({ ...OTP_ENV, ...env })[k] ?? undefined, issuer);
+  const up = await phoneUpstream(issuer, cfg, { secret, now: () => clock, fetcher });
+  const handle = await broker({ issuer, secret, providers: [up.provider], extra: up.handle });
+  const post = (path, body) => handle(new Request(`${issuer}/phone/prove/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+  const log = [];
+  let visit = '', token = null, page = null, js = null;
+  for (const [op, arg] of ops) {
+    if (op === 'advance') { clock += arg; continue; }
+    if (op === 'page') {
+      const res = await handle(new Request(`${issuer}/phone/prove`, { headers: { 'accept-language': 'pt-BR' } }));
+      const body = await res.text();
+      page = { status: res.status, csp: res.headers.get('content-security-policy'), title: /<title>([^<]*)/.exec(body)?.[1] ?? null };
+      log.push({ op, status: res.status });
+      continue;
+    }
+    if (op === 'js') {
+      const res = await handle(new Request(`${issuer}/phone/prove.js`));
+      const body = await res.text();
+      js = { status: res.status, google: /gstatic|google|firebase|recaptcha/i.test(body), cleansAddress: body.includes('history.replaceState'), leaves: body.includes('location.replace') };
+      log.push({ op, status: res.status });
+      continue;
+    }
+    if (op === 'send') {
+      const res = await post('send', { phone, return_origin: arg });
+      const out = await res.json();
+      if (out.visit) visit = out.visit;
+      log.push({ op, status: res.status, error: out.error ?? null });
+      continue;
+    }
+    const code = arg === 'right' ? ((await (await handle(new Request(`${issuer}/phone/fake/codes?phone=${encodeURIComponent(phone)}`))).json()).code ?? '') : arg;
+    const res = await post('check', { visit, code });
+    const out = await res.json();
+    log.push({ op, status: res.status, error: out.error ?? null });
+    if (out.id_token) token = out.id_token;
+  }
+  let proof = null;
+  if (token) {
+    const [h, b, s] = token.split('.');
+    const kid = JSON.parse(new TextDecoder().decode(fromBase64url(h))).kid;
+    const jwk = (await (await handle(new Request(`${issuer}/phone/jwks`))).json()).keys.find((k) => k.kid === kid);
+    const key = await crypto.subtle.importKey('jwk', { kty: jwk.kty, n: jwk.n, e: jwk.e, alg: 'RS256', ext: true }, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+    const c = claimsOf(token);
+    proof = { signed: await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, fromBase64url(s), new TextEncoder().encode(`${h}.${b}`)), claims: Object.keys(c).sort(), iss: c.iss, aud: c.aud, phone: c.phone_number, event: c.event, amr: c.amr, ttl: c.exp - c.iat, authTime: c.auth_time === c.iat, sub: c.sub };
+  }
+  return { log, gateCalls, proof, page, js };
+}

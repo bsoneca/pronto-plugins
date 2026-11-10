@@ -81,6 +81,18 @@ The endpoint verifies the signature against the issuer's jwks, `iss`, `aud` (its
 
 The broker checks the resend wait first, so a number inside it costs the gate nothing.
 
+#### The prove step (`PHONE_PROVE_TENANTS`)
+
+Sign-in never tells a tenant the number. Some apps must know it (a rental's fraud checks), so broker mode has a second capability the operator grants per tenant: `PHONE_PROVE_TENANTS`, origins in `PHONE_TENANTS`' syntax (`*` for a port). Empty or unset, it is off and its routes answer 404. Only listed tenants ever receive a number; a `return` whose origin is not listed is refused by the page, which never redirects there.
+
+The app sends the customer to `<issuer>/phone/prove` with a fragment (never sent to a server): `#phone=<E.164>&state=<s>&return=<url>`. The page cleans its address at once, has the reader confirm the number with a code (the same gate, resend wait and code rules as sign-in; its visit lasts ten minutes) and returns to `return` with `#id_token=<jwt>&state=<s>`, or `#error=cancelled&state=<s>` if the reader goes back. The token is RS256, signed by the key at `<issuer>/phone/jwks` (header `kid`), with:
+
+```json
+{ "iss": "<issuer>", "aud": "<return's origin>", "sub": "<the number's HMAC subject>", "phone_number": "+5511912345678", "auth_time": 1700000000, "iat": 1700000000, "exp": 1700000300, "amr": ["sms"], "event": "phone_proof" }
+```
+
+The app checks the signature, `iss`, `aud` (its own origin), `exp`, `event` and `state`, then reads `phone_number`. `--phone-prove-tenants` sets it in `release.nu` and `metal.nu`.
+
 `release.nu` and `metal.nu` take `--phone-project`, `--phone-api-key`, `--phone-app-id`, `--phone-admit` and `--phone-tenants` for Firebase mode, and `--phone-otp broker --phone-sms <name> --phone-sms-gate <url>` (with `--phone-admit` and `--phone-tenants`) for broker mode. An app offers it with `providers=google,phone`.
 
 ## Tests
