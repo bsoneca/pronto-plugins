@@ -5,15 +5,15 @@ description: "File a bug on the dev-flow board (Plane) with its priority, P0 to 
 
 # pronto-bug
 
-A bug carries a priority that decides whether it waits for a sprint (bsoneca/pronto's
-docs/dev-flow.md, rule 6). Filed through `pronto-devflow` (this plugin's `bin/pronto-devflow`,
+A bug carries a priority that decides whether it waits for a sprint (devflow/dev-flow.md,
+rule 6). Filed through `pronto-devflow` (this plugin's `bin/pronto-devflow`,
 run bare from the repository).
 
 | Priority | When | Where it goes |
 | --- | --- | --- |
 | P0 | production is broken for players or payments, data is at risk | Implementing now, past the slots |
-| P1 | a real feature is broken, with a way around it | today's sprint, after the work in progress |
-| P2 | wrong, but few notice | the Backlog, for the next planning |
+| P1 | a real feature is broken, with a way around it | the current sprint, after the work in progress |
+| P2 | wrong, but few notice | the Backlog, for a coming sprint |
 | P3 | cosmetic | the Backlog |
 
 ## Steps

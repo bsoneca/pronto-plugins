@@ -42,11 +42,14 @@ jobs:
           sayt --script tools.nu cue vet -c -t package=check ./perf/export
           sayt --script tools.nu cue vet -c ./analytics
           sayt --script tools.nu cue vet -c -t package=check ./analytics/export
+          sayt --script tools.nu cue vet -c ./errors
+          sayt --script tools.nu cue vet -c -t package=check ./errors/export
           sayt --script tools.nu cue vet -c ./identity
           sayt --script tools.nu cue vet -c -t package=check -t frontImage=registry.example.com/pronto-identity:0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000 ./identity/export
           sayt --script tools.nu cue vet -c -t package=check -t broker=https://id.example.com ./identity/export
           sayt --script tools.nu cue vet -c ./migrations
           sayt --script tools.nu cue vet -c -t package=check ./migrations/export
+          sayt --script tools.nu cue vet -c=false ./devflow
           sayt --script tools.nu cue vet -c ./release-cron
           sayt --script tools.nu cue vet -c -t package=check ./release-cron/export
           sayt --script tools.nu cue vet -c ./prod-watch
@@ -54,9 +57,11 @@ jobs:
           sayt --script tools.nu cue vet -c ./probe
           sayt --script tools.nu cue vet -c -t package=check ./probe/export
           sayt --script tools.nu cue vet -c ./release-notes
-          sayt --script tools.nu cue vet -c ./release-notes/export
+          sayt --script tools.nu cue vet -c -t package=check ./release-notes/export
           sayt --script tools.nu cue vet -c ./runners
           sayt --script tools.nu cue vet -c -t setup=check-org ./runners/export
+          sayt --script tools.nu cue vet -c -t setup=check-linux -t user=check ./runners/export
+          sayt --script tools.nu nu runners/test.nu
           sayt --script tools.nu cue vet -c ./unity
           sayt --script tools.nu cue vet -c ./assetlinks
           sayt --script tools.nu cue vet -c -t package=check -t screens=table ./unity/export
@@ -121,7 +126,8 @@ jobs:
         run: |
           app=$(mktemp -d)/app && mkdir -p "$app" && printf 'package demo\n' > "$app/program.cue"
           ./bin/pronto-release-notes "$app"
-          test -f "$app/release-notes/release-notes.ts" && test -f "$app/release-notes/notes.js"
+          test -f "$app/release-notes/release-notes.ts" && test -f "$app/release-notes/notes.js" && test -f "$app/release_notes_plugin.cue"
+          (cd "$app" && cue export release_notes_plugin.cue -e releaseNotes.timeZone) | grep -qx '"America/Sao_Paulo"'
           ! ./bin/pronto-release-notes "$app" nope=1
       - name: Bind a Unity hatch, then refuse a missing module
         run: |
@@ -156,6 +162,8 @@ jobs:
           echo "$DENO_SHA256  $dir/deno.zip" | sha256sum -c -
           unzip -q "$dir/deno.zip" -d "$dir"
           echo "$dir" >> "$GITHUB_PATH"
+      - name: Test errors (needs deno, for its stand-in)
+        run: sayt --script tools.nu nu errors/test.nu
       - name: Test modular design (needs deno, for its lint)
         run: |
           sayt --script tools.nu cue vet -c ./modular-design
@@ -168,7 +176,7 @@ jobs:
       - name: Test the identity broker
         run: deno test --no-config --allow-net identity/oidc_test.ts identity/broker
       - name: Test the billing broker
-        run: deno lint --no-config billing intents gcp release-cron release-notes prod-watch probe runners migrations tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
+        run: deno lint --no-config billing intents gcp devflow release-cron release-notes prod-watch probe runners migrations tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run billing
       # A script that does not parse fails only when it is run, and a release script runs rarely
       # (identity/release.nu shipped `env: [...] ++ $phone`, a record field nu cannot parse).
       - name: Parse each nushell script

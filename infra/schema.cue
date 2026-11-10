@@ -103,6 +103,31 @@ import "list"
 	// with nothing to import, so it is adopted whole.
 	create: *false | bool
 	if create {adoptAll: true}
+
+	// What OpenTofu takes out of the project, by kind and name: something a release engine made and
+	// no release keeps any more (a rollback, say). An import and a destroy cannot be one apply, so a
+	// resource is retired in two: `hold` imports it as it is, with its deletion protection off and
+	// nothing else changed; once that is applied, `drop` leaves it out of the configuration, and the
+	// next apply destroys it. A retired name is in no other field of its kind.
+	retire: {
+		runServices: [Name=string]: #Retiring
+		runJobs: [Name=string]:     #Retiring
+		// A Cloud Scheduler job (an HTTP one): what its target was is not this state's.
+		schedulerJobs: [Name=string]: #Retiring
+		// A Cloud SQL instance: deleting it deletes its automated backups too, so its data is dumped
+		// somewhere else first. The provider requires its version and tier, which hold never changes.
+		sqlInstances: [Name=string]: #Retiring & {databaseVersion: =~"^POSTGRES_[0-9]+$", tier: string}
+	}
+	for nm, _ in retire.runServices if runServices[nm] != _|_ {"run service \(nm) is both kept and retired": _|_}
+	for nm, _ in retire.runJobs if runJobs[nm] != _|_ {"run job \(nm) is both kept and retired": _|_}
+	for nm, _ in retire.sqlInstances if sqlBackups[nm] != _|_ {"sql instance \(nm) is both kept (sqlBackups) and retired": _|_}
+}
+
+// One resource being retired (#Project.retire): held, then dropped.
+#Retiring: {
+	phase:    "hold" | "drop"
+	location: *"us-central1" | string
+	...
 }
 
 #Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases" | "sqlUsers" | "apiKeys" | "budgets" | "hostingSites"

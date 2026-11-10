@@ -270,7 +270,26 @@ cases: {
 }
 
 cases: {
-	"a confirmed release tells the board: devflow's released hook, with the app, the commit and the checkout": {suite: "cron", steps: [
-		{call: "cron.boardHook", args: ["/state/wt", "apps/brawl-chess", "c9ecd1f7a0b1"], expect: ["run", "-A", "--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released", "/state/wt", "brawl-chess", "c9ecd1f7a0b1"], why: "PRONTO-1, released 2026-11-08 11:45 BRT: no run ever told the board"},
+	"the launchd job is the plist it always was": {suite: "cron", steps: [
+		{call: "cron.plist", args: [{"label": "dev.pronto.release-cron.brawl-chess", "program": "/usr/bin/deno", "args": ["run", "-A", "/wt/apps/brawl-chess/release-cron/release-cron.ts", "brawl-chess", "run"], "poll": 10, "log": "/c/launchd.log", "env": {"PATH": "/usr/bin:/bin", "HOME": "/Users/me"}}], expect: "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key><string>dev.pronto.release-cron.brawl-chess</string>\n\t<key>ProgramArguments</key>\n\t<array><string>/usr/bin/deno</string><string>run</string><string>-A</string><string>/wt/apps/brawl-chess/release-cron/release-cron.ts</string><string>brawl-chess</string><string>run</string></array>\n\t<key>StartInterval</key><integer>600</integer>\n\t<key>EnvironmentVariables</key>\n\t<dict><key>PATH</key><string>/usr/bin:/bin</string><key>HOME</key><string>/Users/me</string></dict>\n\t<key>StandardOutPath</key><string>/c/launchd.log</string>\n\t<key>StandardErrorPath</key><string>/c/launchd.log</string>\n\t<key>ProcessType</key><string>Standard</string>\n</dict>\n</plist>\n", why: "the launchd scheduler's output, unchanged by the systemd one beside it (PRONTO-141)"},
+	]}
+	"the systemd job is a oneshot service and a timer from the same inputs": {suite: "cron", steps: [
+		{call: "cron.systemdUnits", args: [{"label": "dev.pronto.release-cron.brawl-chess", "program": "/usr/bin/deno", "args": ["run", "-A", "/wt/apps/brawl-chess/release-cron/release-cron.ts", "brawl-chess", "run"], "poll": 10, "log": "/c/systemd.log", "env": {"PATH": "/usr/bin:/bin", "HOME": "/Users/me"}}]},
+		{keep: "u"},
+		{get: "service", expect: "[Unit]\nDescription=release-cron dev.pronto.release-cron.brawl-chess\n\n[Service]\nType=oneshot\nExecStart=\"/usr/bin/deno\" \"run\" \"-A\" \"/wt/apps/brawl-chess/release-cron/release-cron.ts\" \"brawl-chess\" \"run\"\nEnvironment=\"PATH=/usr/bin:/bin\"\nEnvironment=\"HOME=/Users/me\"\nStandardOutput=append:/c/systemd.log\nStandardError=append:/c/systemd.log\n", why: "the service runs the program once, its output appended to the log"},
+		{use: "u"},
+		{get: "timer", expect: "[Unit]\nDescription=release-cron dev.pronto.release-cron.brawl-chess, every 10 min\n\n[Timer]\nOnBootSec=1min\nOnUnitActiveSec=10min\nUnit=dev.pronto.release-cron.brawl-chess.service\n\n[Install]\nWantedBy=timers.target\n", why: "OnUnitActiveSec is the poll minutes, OnBootSec starts a run after a restart"},
+		{call: "cron.systemdUnits", args: [{"label": "dev.pronto.release-cron.brawl-chess", "program": "/usr/bin/deno", "args": ["a b", "50%$HOME", "q\"x"], "poll": 10, "log": "/l", "env": {"N": "a%b"}}]},
+		{get: "service", expect: "[Unit]\nDescription=release-cron dev.pronto.release-cron.brawl-chess\n\n[Service]\nType=oneshot\nExecStart=\"/usr/bin/deno\" \"a b\" \"50%%$$HOME\" \"q\\\"x\"\nEnvironment=\"N=a%%b\"\nStandardOutput=append:/l\nStandardError=append:/l\n", why: "words quoted, a quote escaped, % and $ doubled: a unit file expands both"},
+	]}
+	"a finding reaches the channels its notify names": {suite: "cron", steps: [
+		{call: "cron.channels", args: [{kind: "none"}, "darwin"], expect: ["log"], why: "none logs only"},
+		{call: "cron.channels", args: [{kind: "github-comment"}, "linux"], expect: ["comment"]},
+		{call: "cron.channels", args: [{kind: "claude-session", lead: "L", notes: "n"}, "darwin"], expect: ["comment", "notes", "toast"]},
+		{call: "cron.channels", args: [{kind: "claude-session", lead: "L", notes: "n"}, "linux"], expect: ["comment", "notes"], why: "the macOS notification only on darwin"},
+	]}
+	"a hook is its command with the worktree, the app and the commit appended, for its event only": {suite: "cron", steps: [
+		{call: "cron.hookArgv", args: [{on: "released", command: ["deno", "run", "-A", "--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released"]}, "/state/wt", "brawl-chess", "c9ecd1f7a0b1"], expect: ["deno", "run", "-A", "--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released", "/state/wt", "brawl-chess", "c9ecd1f7a0b1"], why: "the dev flow's released hook, as Bonk Chess's and Book a time's releaseCron names it (PRONTO-1's board step, before hooks)"},
+		{call: "cron.hooksOf", args: [[{on: "released", command: ["a"]}, {on: "other", command: ["b"]}, {on: "released", command: ["c"]}], "released"], expect: [{on: "released", command: ["a"]}, {on: "released", command: ["c"]}], why: "in the order named"},
 	]}
 }

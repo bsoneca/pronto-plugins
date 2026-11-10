@@ -4,14 +4,18 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.WindowManager
 import android.widget.TextView
 import javax.crypto.SecretKey
 import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.widget.NestedScrollView
 import androidx.lifecycle.lifecycleScope
 import com.yandex.div.DivDataTag
@@ -53,6 +57,13 @@ class MainActivity : AppCompatActivity() {
     @Synchronized fun takeTrips(): List<String> = trips.toList().also { trips.clear() }
     @Synchronized private fun trip(url: String) { trips.add(url) }
     private var base = ""
+    private lateinit var scroll: NestedScrollView
+    // Whether the page asked for the whole screen (<html data-display="fullscreen">, display.js): the system
+    // bars are then hidden (a swipe shows them for a moment), the page draws into a cutout's short edges, and
+    // only the cutout and the keyboard are kept clear. A page that does not ask is drawn inside the bars.
+    private var fullscreen = false
+    // The page's viewport last sent to the terminal, in dp: what the screen leaves it once the insets are clear.
+    private var viewport = Pair(0, 0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,12 +90,16 @@ class MainActivity : AppCompatActivity() {
         // The host scrolls, so a screen is a plain container: a DivKit gallery
         // is a RecyclerView, whose recycled inputs keep typing into the
         // variable of the field they were bound to before a redraw.
-        val scroll = NestedScrollView(this).apply { isFillViewport = true; addView(divView) }
+        scroll = NestedScrollView(this).apply { isFillViewport = true; addView(divView) }
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         ViewCompat.setOnApplyWindowInsetsListener(scroll) { view, insets ->
-            val clear = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
+            val kept = if (fullscreen) WindowInsetsCompat.Type.displayCutout() else WindowInsetsCompat.Type.systemBars()
+            val clear = insets.getInsets(kept or WindowInsetsCompat.Type.ime())
             view.setPadding(clear.left, clear.top, clear.right, clear.bottom)
             WindowInsetsCompat.CONSUMED
         }
+        // A rotation, a keyboard or the bars coming and going: the page is told its new viewport.
+        scroll.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> sendViewport() }
         setContentView(scroll)
 
         // An app that asks for an unlock (android.json's "unlock": "biometric") starts its terminal
@@ -113,10 +128,43 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch { started.tree.collect { if (it.isNotEmpty()) show(JSONObject(it)) } }
         lifecycleScope.launch { started.failure.collect { if (it != null) Log.e("pronto", "the terminal stopped", it) } }
         started.start()
-        started.resize((resources.displayMetrics.widthPixels / resources.displayMetrics.density).toInt())
+        sendViewport()
         onBackPressedDispatcher.addCallback(this) { started.back() }
         Driver.attach(this, started, divView)
     }
+
+    private fun sendViewport() {
+        val density = resources.displayMetrics.density
+        val laid = scroll.width > 0
+        val w = if (laid) scroll.width - scroll.paddingLeft - scroll.paddingRight else resources.displayMetrics.widthPixels
+        val h = if (laid) scroll.height - scroll.paddingTop - scroll.paddingBottom else resources.displayMetrics.heightPixels
+        val now = Pair((w / density).toInt(), (h / density).toInt())
+        if (now == viewport) return
+        viewport = now
+        engine?.resize(now.first, now.second)
+    }
+
+    private fun display(full: Boolean) {
+        if (full == fullscreen) return
+        fullscreen = full
+        val bars = WindowCompat.getInsetsController(window, window.decorView)
+        if (full) {
+            bars.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            bars.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            bars.show(WindowInsetsCompat.Type.systemBars())
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode = if (full) WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+            }
+        }
+        Log.i("pronto", "PRONTO DISPLAY ${if (full) "fullscreen" else "standard"}")
+        ViewCompat.requestApplyInsets(scroll)
+    }
+
+    // The driver's question: whether the bars are hidden, and the viewport the page was given.
+    fun displayed(): String = "${if (fullscreen) "fullscreen" else "standard"} ${viewport.first}x${viewport.second}"
 
     private fun open(url: String) {
         if (standIn) { trip(url); return }
@@ -158,6 +206,8 @@ class MainActivity : AppCompatActivity() {
     private fun show(card: JSONObject) {
         val variables = card.optJSONArray("variables")
         card.remove("variables")
+        display(card.optString("pronto_display") == "fullscreen")
+        card.remove("pronto_display")
         for (i in 0 until (variables?.length() ?: 0)) {
             val v = variables!!.getJSONObject(i)
             val name = v.getString("name")

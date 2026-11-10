@@ -1,15 +1,17 @@
 # devflow
 
-The dev flow of a repository of pronto apps (bsoneca/pronto's [docs/dev-flow.md](https://github.com/bsoneca/pronto/blob/main/docs/dev-flow.md)): one-day sprints on a self-hosted [Plane](https://github.com/makeplane/plane) board, every piece of work an issue, one Claude session per issue, an issue Done only when it is in production: its flag is on for everyone, or, with no flag, when it is released (infra and plugins issues: when merged).
+The dev flow of a repository of pronto apps ([dev-flow.md](dev-flow.md)): sprints in an endless loop on a [Plane](https://github.com/makeplane/plane) board, self-hosted or hosted (each ends when its issues merge, the next already planned, so no engineer waits), every piece of work an issue, one Claude session per issue, an issue Done only when it is in production: its flag is on for everyone, or, with no flag, when it is released (infra and plugins issues: when merged).
 
 ## What it adds
 
-No files in an app. A repository opts in with one file, `devflow/devflow.cue`: its board's host and project, the node Plane runs on, its team (engineers, SREs, product managers) and when the day's sprint ends. The rest of the flow is here:
+No files in an app. A repository opts in with one file, `devflow/devflow.cue`: its board (kind, host and project), where its token is kept, the node Plane runs on if it installs one, its team (engineers, SREs, product managers) and a sprint's size; and, if it wants them, its own states, the role each plays, and its priorities' words. The rest of the flow is here:
 
-- [`schema.cue`](schema.cue): the flow as data: its states, in order and in Plane's groups, and what P0..P3 do.
+- [`dev-flow.md`](dev-flow.md): how the flow works, for any repository: the rules, the board, the states and their roles, P0..P3, the team, the hooks.
+- [`schema.cue`](schema.cue): the flow as data, every default in it: the board and its kind, the token's source, the states (in order and in the board's groups) and the role each plays, what P0..P3 do. Its checks are [`tests.cue`](tests.cue) (`cue vet -c=false ./devflow`).
+- [`board/board.ts`](board/board.ts): the `Board` interface everything else talks to, and [`plane.ts`](plane.ts), the adapter for `board.kind: "plane"` (`spec.ts`'s `boardOf` picks the adapter; `github-projects` is in the schema and refused until its adapter exists, PRONTO-207).
 - [`plane.cue`](plane.cue): Plane on the node: the plane-ce chart's values, its CloudNativePG database, and its route on the node's Envoy Gateway.
-- [`flow.js`](flow.js): the rules: an issue's key from a pull request, where an event moves an issue, an issue's flag, whose slot an issue takes (an engineer's or an SRE's), what a sprint may plan per lane (`sprint.perPerson` for each person) and which Ready issue a lane pulls next, which day's sprint a moment is in. Its cases are [`tests/unit/devflow.cue`](../tests/unit/devflow.cue).
-- [`connect.ts`](connect.ts): the `connect plane` intent ([docs/intents.md](../docs/intents.md)): Plane installed on the node, its hostname, then the board set up from the spec.
+- [`flow.js`](flow.js): the rules, in roles rather than a repository's state names: an issue's key from a pull request, where an event moves an issue, an issue's flag, whose slot an issue takes (an engineer's or an SRE's), what a sprint may plan per lane (`sprint.perPerson` for each person) and which Ready issue a lane pulls next, where the loop of sprints stands (the current, the next, the finished). Its cases are [`tests/unit/devflow.cue`](../tests/unit/devflow.cue).
+- [`connect.ts`](connect.ts): the `connect plane` intent ([docs/intents.md](../docs/intents.md)): Plane installed on the node (when the repository names a `cluster`), its hostname, then the board set up from the spec. With no `cluster` it installs nothing: it checks the board's host answers and the token signs in, then sets the board up.
 - [`hook.ts`](hook.ts): what GitHub, release-cron and pronto-flags tell the board.
 - [`board.ts`](board.ts): the board as the skills use it: [`pronto-sprint-plan`](../skills/pronto-sprint-plan/SKILL.md), [`pronto-issue`](../skills/pronto-issue/SKILL.md), [`pronto-bug`](../skills/pronto-bug/SKILL.md), [`pronto-design`](../skills/pronto-design/SKILL.md) (the product managers').
 
@@ -20,7 +22,7 @@ bin/pronto plan plane .          # what is set up, what is next; changes nothing
 bin/pronto connect plane .       # sets up what it can, stops where a person must act
 ```
 
-It stops three times the first time, each saying what to do: the hostname's DNS record (`cloudflared tunnel route dns`), Plane's instance admin, and the workspace and its API token, kept in Secret Manager. Run again, it goes on from there.
+It stops three times the first time, each saying what to do: the hostname's DNS record (`cloudflared tunnel route dns`), Plane's instance admin, and the workspace and its API token, kept where `token.kind` says (Secret Manager by default, or an environment variable); with no `cluster`, only the last. Run again, it goes on from there.
 
 The hooks, which run without a person:
 
@@ -42,10 +44,10 @@ The hooks, which run without a person:
 
 A flagless issue is never left in Live: the release that holds its pull request finishes it. `pronto-flags rollback` tells the board too (`rolledback` for each flag it turned off).
 
-Another repository whose pull requests carry the same board's keys (bsoneca/ume's, on bsoneca/pronto's board) gets the same `plane` workflow and its own `PLANE_TOKEN` secret, and a `devflow/devflow.cue` that names the board (`plane`) and its token (`token`) alone, with no `cluster`: the board is set up from one repository, and `connect plane` refuses the others.
+Another repository whose pull requests carry the same board's keys (bsoneca/ume's, on bsoneca/pronto's board) gets the same `plane` workflow and its own `PLANE_TOKEN` secret, and a `devflow/devflow.cue` that names the board (`board`, or its earlier name `plane`) and its token (`token`) alone, with no `cluster`: the board is set up from one repository; `connect plane` there installs nothing and checks the board answers.
 
 A hook never fails a release or a flip: without a token or a board it says so and goes on.
 
 ## Tests
 
-The `devflow` suite: `deno test --allow-read --allow-env --allow-run tests/unit.ts -- devflow`.
+The `devflow` suite: `deno test --allow-read --allow-env --allow-run tests/unit.ts -- devflow`. [`tests.cue`](tests.cue) holds the schema to what a repository may write (`cue vet -c=false ./devflow`): an existing board with no cluster, an env token, custom states and roles (a role naming a missing state refused), the earlier `plane` and token shapes, and bsoneca/pronto's own `devflow.cue` under the new fields.

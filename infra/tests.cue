@@ -527,3 +527,33 @@ wifNeverImported: [for i in _wif.tofu.import if strings.Contains(i.to, "workload
 wifHttpIssuer: _ok & {workloadIdentityPools: x: providers: y: {issuer: "http://a", mapping: "google.subject": "a"}} & matchN(0, [#Project])
 wifNoSubject: _ok & {workloadIdentityPools: x: providers: y: {issuer: "https://a", mapping: a: "b"}} & matchN(0, [#Project])
 wifShortId: _ok & {workloadIdentityPools: x: providers: k3s: {issuer: "https://a", mapping: "google.subject": "a"}} & matchN(0, [#Project])
+
+// Retiring (#Project.retire): held, a resource is imported with its deletion protection off and
+// nothing else configured to change; dropped, it is in no configuration, so the apply destroys it.
+_retire: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing: "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		retire: {
+			runServices: {"old-app": phase: "hold", "older-app": phase: "drop"}
+			runJobs: "old-app-initdb": phase:      "hold"
+			schedulerJobs: "old-app-clock": phase: "hold"
+			sqlInstances: "old-app-db": {phase: "hold", databaseVersion: "POSTGRES_18", tier: "db-f1-micro"}
+		}
+	}
+}
+_retireIms: {for i in _retire.tofu.import {(i.to): i.id}}
+retireHoldImports: _retireIms & {
+	"google_cloud_run_v2_service.example_project_123_old_app":      "projects/example-project-123/locations/us-central1/services/old-app"
+	"google_cloud_run_v2_job.example_project_123_old_app_initdb":   "projects/example-project-123/locations/us-central1/jobs/old-app-initdb"
+	"google_cloud_scheduler_job.example_project_123_old_app_clock": "projects/example-project-123/locations/us-central1/jobs/old-app-clock"
+	"google_sql_database_instance.example_project_123_old_app_db":  "projects/example-project-123/instances/old-app-db"
+}
+retireDropsLeaveNothing: [for a, _ in _retireIms if strings.Contains(a, "older_app") {a}] & []
+retireHoldUnprotects: [
+	_retire.tofu.resource.google_cloud_run_v2_service.example_project_123_old_app.deletion_protection,
+	_retire.tofu.resource.google_cloud_run_v2_job.example_project_123_old_app_initdb.deletion_protection,
+	_retire.tofu.resource.google_sql_database_instance.example_project_123_old_app_db.deletion_protection,
+	_retire.tofu.resource.google_sql_database_instance.example_project_123_old_app_db.settings.deletion_protection_enabled,
+] & [false, false, false, false]
+retireKeptRefused: _ok & {sqlBackups: "old-db": {databaseVersion: "POSTGRES_18", tier: "db-f1-micro", startTime: "07:00"}, retire: sqlInstances: "old-db": {phase: "hold", databaseVersion: "POSTGRES_18", tier: "db-f1-micro"}} & matchN(0, [#Project])

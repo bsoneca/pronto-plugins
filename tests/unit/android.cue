@@ -648,4 +648,17 @@ cases: {
 			{control: "fire", start: ["pronto://press/<id>"], end: ["pronto://release/<id>"], tap: false, type: "button"},
 		]},
 	]}
+
+	"a page that fills the screen is given its height: vh lengths resolve, and only then": {suite: "android", steps: [
+		{call: "android.render", args: [#"<div class="b">x</div>"#, ":root { --cell: min(calc(100vw / 9), calc(100vh / 12)) } .b { width: var(--cell); height: var(--cell) }"]},
+		{get: "whats", expect: ["width: min(calc(100vw / 9), calc(100vh / 12))", "height: min(calc(100vw / 9), calc(100vh / 12))"], why: "a scrolled page has no height of its own (display.js gives none): unsupported, as before"},
+		{call: "android.render", args: [#"<div class="b">x</div>"#, ":root { --cell: min(calc(100vw / 9), calc(100vh / 12)) } .b { width: var(--cell); height: var(--cell) }", {height: 800}]},
+		{get: "items"},
+		{map: {pick: ["width", "height"]}},
+		{value: "$", expect: [[{type: "fixed", value: 46}, {type: "fixed", value: 46}]], why: "portrait 411 × 800: the width's ninth, 45.7, is the smaller"},
+		{call: "android.render", args: [#"<div class="b">x</div>"#, ":root { --cell: min(calc(100vw / 9), calc(100vh / 12)) } .b { width: var(--cell); height: var(--cell) }", {width: 800, height: 400}]},
+		{get: "items"},
+		{map: {pick: ["width", "height"]}},
+		{value: "$", expect: [[{type: "fixed", value: 33}, {type: "fixed", value: 33}]], why: "landscape 800 × 400: the height's twelfth is"},
+	]}
 }

@@ -1,5 +1,7 @@
 // The dev flow's rules (devflow/flow.js): which issue a pull request is, where each event moves an
-// issue, an issue's flag, the agent cap, P0..P3, and which day's sprint a moment falls in.
+// issue, an issue's flag, the agent cap, P0..P3, and where the loop of sprints stands. They reason in
+// roles (backlog, refine, ready, implementing, review, merged, live, done, cancelled); a
+// repository's names for its states are mapped to roles and back (roleOf, nameOf).
 package unit
 
 cases: {
@@ -10,24 +12,24 @@ cases: {
 		{call: "devflow.keyOf", args: ["PRONTO", "MYPRONTO-12 is another project's", "PRONTO-123x"], expect: null, why: "a key is a whole word"},
 		{call: "devflow.keyOf", args: ["PRONTO", "no key", null], expect: null},
 	]}
-	"a pull request moves its issue forward, never back, but for a pull request closed unmerged": {suite: "devflow", steps: [
-		{call: "devflow.moveFor", args: ["opened", "Implementing"], expect: "Review"},
-		{call: "devflow.moveFor", args: ["opened", "Ready"], expect: "Review", why: "a session may open its pull request before the board heard it started"},
-		{call: "devflow.moveFor", args: ["merged", "Review"], expect: "Merged"},
-		{call: "devflow.moveFor", args: ["reopened", "Merged"], expect: null},
-		{call: "devflow.moveFor", args: ["merged", "Live"], expect: null, why: "a second pull request for a released issue leaves it Live"},
-		{call: "devflow.moveFor", args: ["closed", "Review"], expect: "Implementing"},
-		{call: "devflow.moveFor", args: ["closed", "Merged"], expect: null},
-		{call: "devflow.moveFor", args: ["merged", "Cancelled"], expect: null, why: "a cancelled issue is never moved"},
+	"a pull request moves its issue (a role) forward, never back, but for a pull request closed unmerged": {suite: "devflow", steps: [
+		{call: "devflow.moveFor", args: ["opened", "implementing"], expect: "review"},
+		{call: "devflow.moveFor", args: ["opened", "ready"], expect: "review", why: "a session may open its pull request before the board heard it started"},
+		{call: "devflow.moveFor", args: ["merged", "review"], expect: "merged"},
+		{call: "devflow.moveFor", args: ["reopened", "merged"], expect: null},
+		{call: "devflow.moveFor", args: ["merged", "live"], expect: null, why: "a second pull request for a released issue leaves it Live"},
+		{call: "devflow.moveFor", args: ["closed", "review"], expect: "implementing"},
+		{call: "devflow.moveFor", args: ["closed", "merged"], expect: null},
+		{call: "devflow.moveFor", args: ["merged", "cancelled"], expect: null, why: "a cancelled issue is never moved"},
 	]}
 	"a release makes Merged Live; a flip makes it Done, and its rollback Live again": {suite: "devflow", steps: [
-		{call: "devflow.moveFor", args: ["released", "Merged"], expect: "Live"},
-		{call: "devflow.moveFor", args: ["released", "Review"], expect: null},
-		{call: "devflow.moveFor", args: ["flipped", "Live"], expect: "Done"},
-		{call: "devflow.moveFor", args: ["flipped", "Merged"], expect: "Done", why: "an app released outside release-cron never says released"},
-		{call: "devflow.moveFor", args: ["flipped", "Implementing"], expect: null},
-		{call: "devflow.moveFor", args: ["rolledback", "Done"], expect: "Live"},
-		{call: "devflow.moveFor", args: ["rolledback", "Live"], expect: null},
+		{call: "devflow.moveFor", args: ["released", "merged"], expect: "live"},
+		{call: "devflow.moveFor", args: ["released", "review"], expect: null},
+		{call: "devflow.moveFor", args: ["flipped", "live"], expect: "done"},
+		{call: "devflow.moveFor", args: ["flipped", "merged"], expect: "done", why: "an app released outside release-cron never says released"},
+		{call: "devflow.moveFor", args: ["flipped", "implementing"], expect: null},
+		{call: "devflow.moveFor", args: ["rolledback", "done"], expect: "live"},
+		{call: "devflow.moveFor", args: ["rolledback", "live"], expect: null},
 	]}
 	"an issue with no flag is Done when it is released (a bug fix) or merged (infra, plugins); a flagged one when its flag flips": {suite: "devflow", steps: [
 		{call: "devflow.doneAt", args: ["army_pick_usable", ["brawl-chess"], ["infra"]], expect: "flip"},
@@ -35,13 +37,13 @@ cases: {
 		{call: "devflow.doneAt", args: [null, [], ["infra"]], expect: "release"},
 		{call: "devflow.doneAt", args: [null, ["infra"], ["infra"]], expect: "merge"},
 		{call: "devflow.doneAt", args: [null, ["plugins"], ["infra"]], expect: "merge"},
-		{call: "devflow.moveFor", args: ["released", "Merged", "release"], expect: "Done", why: "a flagless bug fix is finished by its release"},
-		{call: "devflow.moveFor", args: ["released", "Live", "release"], expect: "Done"},
-		{call: "devflow.moveFor", args: ["released", "Review", "release"], expect: null},
-		{call: "devflow.moveFor", args: ["released", "Merged", "flip"], expect: "Live", why: "a flagged issue waits for its flip"},
-		{call: "devflow.moveFor", args: ["merged", "Review", "merge"], expect: "Done", why: "infra and plugins: nothing release-cron ships"},
-		{call: "devflow.moveFor", args: ["merged", "Review", "release"], expect: "Merged"},
-		{call: "devflow.moveFor", args: ["merged", "Done", "merge"], expect: null},
+		{call: "devflow.moveFor", args: ["released", "merged", "release"], expect: "done", why: "a flagless bug fix is finished by its release"},
+		{call: "devflow.moveFor", args: ["released", "live", "release"], expect: "done"},
+		{call: "devflow.moveFor", args: ["released", "review", "release"], expect: null},
+		{call: "devflow.moveFor", args: ["released", "merged", "flip"], expect: "live", why: "a flagged issue waits for its flip"},
+		{call: "devflow.moveFor", args: ["merged", "review", "merge"], expect: "done", why: "infra and plugins: nothing release-cron ships"},
+		{call: "devflow.moveFor", args: ["merged", "review", "release"], expect: "merged"},
+		{call: "devflow.moveFor", args: ["merged", "done", "merge"], expect: null},
 	]}
 	"a GitHub action is the flow's event: a closed pull request that merged is merged": {suite: "devflow", steps: [
 		{call: "devflow.prEvent", args: ["closed", true], expect: "merged"},
@@ -83,19 +85,51 @@ cases: {
 	]}
 	"P0..P3 are Plane's priorities, and say where a new bug goes": {suite: "devflow", steps: [
 		{call: "devflow.priorityOf", args: ["p0"], expect: "urgent"},
-		{call: "devflow.bugPlace", args: ["P0"], expect: {state: "Implementing", sprint: true}},
-		{call: "devflow.bugPlace", args: ["P1"], expect: {state: "Refine", sprint: true}},
-		{call: "devflow.bugPlace", args: ["P3"], expect: {state: "Backlog", sprint: false}},
+		{call: "devflow.bugPlace", args: ["P0"], expect: {role: "implementing", sprint: true}},
+		{call: "devflow.bugPlace", args: ["P1"], expect: {role: "refine", sprint: true}},
+		{call: "devflow.bugPlace", args: ["P3"], expect: {role: "backlog", sprint: false}},
 		{call: "devflow.priorityOf", args: ["P4"], throws: "P0, P1, P2 or P3"},
 	]}
-	"a day's sprint ends at its hour: a moment after it is the next day's": {suite: "devflow", steps: [
-		{call: "devflow.sprintOf", args: ["2026-11-08T20:59:00Z", "18:00", "America/Sao_Paulo"], expect: "2026-11-08", why: "17:59 in São Paulo"},
-		{call: "devflow.sprintOf", args: ["2026-11-08T21:00:00Z", "18:00", "America/Sao_Paulo"], expect: "2026-11-09"},
-		{call: "devflow.sprintOf", args: ["2026-12-31T22:00:00Z", "18:00", "America/Sao_Paulo"], expect: "2027-01-01"},
+	"a sprint is a cycle named Sprint <n>, its theme after a colon": {suite: "devflow", steps: [
+		{call: "devflow.sprintNumber", args: ["Sprint 12: payments"], expect: 12},
+		{call: "devflow.sprintNumber", args: ["Sprint 3"], expect: 3},
+		{call: "devflow.sprintNumber", args: ["2026-11-09"], expect: null, why: "a day's cycle from before the loop is not a sprint"},
+		{call: "devflow.sprintNumber", args: ["Sprint 12b"], expect: null},
+		{call: "devflow.sprintName", args: [7, "army pick"], expect: "Sprint 7: army pick"},
+		{call: "devflow.sprintName", args: [7, ""], expect: "Sprint 7"},
+	]}
+	"sprints loop: one ends when all its issues merge, and planning fills the next": {suite: "devflow", steps: [
+		{call: "devflow.loopOf", args: [[]], expect: {current: null, next: null, finished: [], number: 1, plansInto: 1}, why: "the first planning makes Sprint 1, the current"},
+		{call: "devflow.loopOf", args: [[{n: 1, groups: ["completed", "started"]}]], expect: {current: 1, next: null, finished: [], number: 2, plansInto: 2}, why: "a lane runs dry: planning makes the next sprint it pulls from"},
+		{call: "devflow.loopOf", args: [[{n: 1, groups: ["started"]}, {n: 2, groups: ["unstarted"]}]], expect: {current: 1, next: 2, finished: [], number: 3, plansInto: 2}, why: "with a next sprint, planning adds to it, never a third"},
+		{call: "devflow.loopOf", args: [[{n: 1, groups: ["completed", "cancelled"]}, {n: 2, groups: ["started"]}]], expect: {current: 2, next: null, finished: [1], number: 3, plansInto: 3}, why: "merged and cancelled end a sprint, at any hour"},
+		{call: "devflow.loopOf", args: [[{n: 4, groups: []}, {n: 5, groups: ["completed"]}]], expect: {current: null, next: null, finished: [5], number: 6, plansInto: 6}, why: "an emptied sprint is neither open nor finished"},
+	]}
+	"a cycle is dated by the day in the flow's time zone": {suite: "devflow", steps: [
+		{call: "devflow.dayOf", args: ["2026-11-10T02:00:00Z", "America/Sao_Paulo"], expect: "2026-11-09"},
+		{call: "devflow.dayOf", args: ["2026-11-10T16:00:00Z", "America/Sao_Paulo"], expect: "2026-11-10"},
 	]}
 	"a pull request with no issue fails the check, but for a chore or while it only warns": {suite: "devflow", steps: [
 		{call: "devflow.missingKey", args: [["chore"], "chore", false, "PRONTO"]}, {pick: ["ok"], expect: [true]},
 		{call: "devflow.missingKey", args: [[], "chore", false, "PRONTO"]}, {pick: ["ok"], expect: [false]},
 		{call: "devflow.missingKey", args: [[], "chore", true, "PRONTO"]}, {pick: ["ok"], expect: [true]},
+	]}
+	"a repository's own state names are mapped to roles and back, so the rules hold for any names": {suite: "devflow", steps: [
+		{call: "devflow.roleOf", args: [{backlog: "Intake", refine: "Triage", ready: "To do", implementing: "In dev", review: "In review", merged: "Merged", live: "Shipped", done: "Closed", cancelled: "Dropped"}, "In dev"], expect: "implementing"},
+		{call: "devflow.roleOf", args: [{backlog: "Intake", refine: "Triage", ready: "To do", implementing: "In dev", review: "In review", merged: "Merged", live: "Shipped", done: "Closed", cancelled: "Dropped"}, "Shipped"], expect: "live"},
+		{call: "devflow.roleOf", args: [{backlog: "Intake", refine: "Triage", ready: "To do", implementing: "In dev", review: "In review", merged: "Merged", live: "Shipped", done: "Closed", cancelled: "Dropped"}, "Implementing"], expect: null, why: "a name the repository does not use plays no role: the issue is left alone"},
+		{call: "devflow.nameOf", args: [{backlog: "Intake", refine: "Triage", ready: "To do", implementing: "In dev", review: "In review", merged: "Merged", live: "Shipped", done: "Closed", cancelled: "Dropped"}, "review"], expect: "In review"},
+		{call: "devflow.nameOf", args: [{backlog: "Intake"}, "nope"], throws: "no such role: nope"},
+		{call: "devflow.moveFor", args: ["opened", "implementing"], expect: "review", why: "the role, whatever the repository calls its state"},
+		{call: "devflow.moveFor", args: ["released", "merged", "release"], expect: "done"},
+		{call: "devflow.moveFor", args: ["opened", null], expect: null, why: "a state no role names is never moved"},
+	]}
+	"priorities are the repository's words: P0 is urgent in its own, and the order follows P0..P3": {suite: "devflow", steps: [
+		{call: "devflow.priorityOf", args: ["P1", {P0: "critical", P1: "major", P2: "minor", P3: "trivial"}], expect: "major"},
+		{call: "devflow.bugPlace", args: ["P0", {P0: "critical", P1: "major", P2: "minor", P3: "trivial"}], expect: {role: "implementing", sprint: true}},
+		{call: "devflow.bugPlace", args: ["P4", {P0: "critical", P1: "major", P2: "minor", P3: "trivial"}], throws: "P0, P1, P2 or P3"},
+		{call: "devflow.mayStart", args: [9, 2, "critical", "engineer", "critical"]}, {pick: ["ok"], expect: [true]},
+		{call: "devflow.mayStart", args: [2, 2, "urgent", "engineer", "critical"]}, {pick: ["ok"], expect: [false], why: "urgent is not P0 where P0 is critical"},
+		{call: "devflow.pullNext", args: [[{key: "K-1", sequence: 1, priority: "minor"}, {key: "K-2", sequence: 2, priority: "critical"}], ["critical", "major", "minor", "trivial", "none"]], expect: {key: "K-2", sequence: 2, priority: "critical"}},
 	]}
 }

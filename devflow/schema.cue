@@ -1,29 +1,30 @@
-// The dev flow (bsoneca/pronto's docs/dev-flow.md) as data: where the board is, the states an
-// issue moves through, what a priority means, the team and the sprint's end. Written once here and
-// in the repository's own devflow/devflow.cue (its devFlow values); read by the intent that sets
-// the board up (connect.ts), the hooks that move issues (hook.ts) and the skills.
+// The dev flow (devflow/dev-flow.md) as data: where the board is, the states an issue moves
+// through, what a priority means, the team and a sprint's size. Written once here and in the
+// repository's own devflow/devflow.cue (its devFlow values); read by the intent that sets the
+// board up (connect.ts), the hooks that move issues (hook.ts) and the skills. Every default and
+// every normalization is here: the exported devFlow is final, and spec.ts adds none.
 package devflow
 
 devFlow: #DevFlow
 
 #DevFlow: {
-	// The board: a self-hosted Plane (plane-ce), one workspace, one project for every app.
-	plane: {
-		host!:      string & =~"^[a-z0-9.-]+$"
-		workspace!: string & =~"^[a-z0-9-]+$"
-		project: {
-			name!: string
-			// The key every issue, branch and pull request carries: PRONTO-123.
-			identifier!: string & =~"^[A-Z]{2,12}$"
-		}
-		// The plane-ce chart (https://helm.plane.so) the intent installs.
-		chart: *"1.8.6" | string
+	// The board: one workspace, one project for every app. Plane is the board implemented; the
+	// repository's own, or one `connect plane` installs (cluster, below).
+	board: #Board
+	// Read as the board's earlier name: a repository that writes `plane: {...}` vets and its
+	// board is that, of kind plane. Write `board` in a new one.
+	plane?: #Board & {kind: "plane"}
+	if plane != _|_ {
+		board: plane
 	}
-	// Where Plane runs: a k3s node reached over SSH, its door a Cloudflare Tunnel into the node's
+
+	// Where Plane runs, when this repository installs it: a k3s node reached over SSH, its door a Cloudflare Tunnel into the node's
 	// Envoy Gateway, as pronto's release@k8s sets every node up (envs.Metal). Only the repository
 	// the board is set up from names it: another repository whose pull requests move the same
 	// board's issues (bsoneca/ume's, on bsoneca/pronto's board) names the board and its token alone,
-	// and its hooks run; `connect plane` refuses it.
+	// and its hooks run. With no cluster, `connect plane` installs nothing: it checks that the
+	// board's host answers and that the token signs in, then makes the project, its states, its
+	// modules and its labels.
 	cluster?: {
 		context!:  string
 		ssh!:      string & =~"^[a-z0-9_.-]+@[a-z0-9.-]+$"
@@ -33,12 +34,10 @@ devFlow: #DevFlow
 		// The local port the intent tunnels the node's API to, as the kube context names it.
 		apiPort: *26443 | int
 	}
-	// The board's API token: kept in Secret Manager, read with the reader's own gcloud; PLANE_TOKEN
-	// in the environment (a GitHub Actions secret) wins.
-	token: {
-		project!: string
-		secret:   *"plane-api-token" | string
-	}
+	// The board's API token, by where it is kept: Secret Manager (read with the reader's own gcloud)
+	// or the environment variable `name`. PLANE_TOKEN in the environment (a GitHub Actions secret)
+	// wins for every kind. A token written as `{project, secret?}` with no kind is Secret Manager's.
+	token: *#SecretManagerToken | #EnvToken
 	// The team (rule 1). Engineers and SREs build: each is a slot, and an issue in Implementing
 	// takes one. An SRE's slots build the infra modules' issues, an engineer's every other module's,
 	// so infrastructure never waits behind app work, nor app work behind it. The product managers
@@ -52,23 +51,89 @@ devFlow: #DevFlow
 	// The modules an SRE builds: the cloud's configuration (infra/) and the nodes. Made beside a
 	// module per app.
 	infra: *["infra"] | [...string]
-	// A sprint is one day and ends at this time, each day. It commits perPerson issues to each
-	// engineer and each SRE (the user, 2026-11-08: "add more issues per sprint, but with limits"):
-	// 4 engineers and 1 SRE make 12 app issues and 3 infra issues. That is the sprint's capacity,
-	// apart from the slots: a person has one issue in Implementing at a time, and pulls the next
-	// of theirs when the pull request of the last opens (review does not hold the slot).
+	// Sprints run in an endless loop (the owner, 2026-11-10): a sprint ends when all its issues
+	// merge, and the next is already planned, so no engineer waits. The lead picks each sprint's
+	// theme from the board; the owner names one only when he wants to. A sprint commits perPerson
+	// issues to each engineer and each SRE (the user, 2026-11-08: "add more issues per sprint, but
+	// with limits"): 4 engineers and 1 SRE make 12 app issues and 3 infra issues. That is the
+	// sprint's capacity, apart from the slots: a person has one issue in Implementing at a time, and
+	// pulls the next of theirs when the pull request of the last opens (review does not hold the
+	// slot), from the next sprint when the current has nothing left to start. timeZone dates the
+	// sprints' cycles; ends is no longer read (sprints have no hour) and stays so a repository that
+	// still sets it vets.
 	sprint: {
 		perPerson: *3 | (int & >=1)
-		ends:     *"18:00" | (string & =~"^([01][0-9]|2[0-3]):[0-5][0-9]$")
-		timeZone: *"America/Sao_Paulo" | string
+		timeZone:  *"America/Sao_Paulo" | string
+		ends?:     string & =~"^([01][0-9]|2[0-3]):[0-5][0-9]$"
 	}
 	// A pull request with this label needs no issue (dependency bumps, the CI fingerprint).
 	chore: *"chore" | string
 
-	// The states, in order, each in one of Plane's groups. Fixed by the flow, not by a repository.
-	states: [...#State] & _states
-	// P0..P3 as Plane's priorities, and what each does.
-	priorities: _priorities
+	// The states, in order, each in one of the board's groups: the flow's own, or a repository's
+	// list of its own (then every role below names one of them).
+	states: *(_states & [...#State]) | [...#State]
+	// Which state plays each role of the flow, by the repository's name for it. The rules
+	// (flow.js) reason in roles; the board knows names.
+	roles: #Roles
+	// P0..P3 as the board's priorities, and what each does.
+	priorities: #Priorities
+	// Every role names a state of `states`.
+	roles: [string]: or([for s in states {s.name}])
+}
+
+#Board: {
+	// plane is implemented; github-projects is next (PRONTO-207).
+	kind:       *"plane" | "github-projects"
+	host!:      string & =~"^[a-z0-9.-]+$"
+	workspace!: string & =~"^[a-z0-9-]+$"
+	project: {
+		name!: string
+		// The key every issue, branch and pull request carries: PRONTO-123.
+		identifier!: string & =~"^[A-Z]{2,12}$"
+	}
+	// The plane-ce chart (https://helm.plane.so) the intent installs, when it installs Plane.
+	chart: *"1.8.6" | string
+	// Who gets in, on a Plane the intent installs (cluster), written into Plane's instance
+	// configuration by `connect plane`, never in god-mode by hand: sign-up off, so only an invited
+	// person joins (an invitation's email may still sign up), and GitHub's sign-in when `github` names
+	// the repository's SOPS file holding its OAuth App (a Secret's stringData `client_id` and
+	// `client_secret`, from the repository's root). The App's callback is
+	// https://<host>/auth/github/callback/. GitHub signs a person in by their primary, verified email.
+	access: {
+		signup: *false | bool
+		github?: secrets!: string & =~"(^|/)secrets\\.[a-z0-9-]+\\.enc\\.yaml$"
+	}
+}
+
+#SecretManagerToken: {
+	kind:     "secret-manager"
+	project!: string
+	secret:   *"plane-api-token" | string
+}
+
+#EnvToken: {
+	kind: "env"
+	name: *"PLANE_TOKEN" | string
+}
+
+// The flow's roles, in order, and the name each state has by default.
+#Roles: {
+	backlog:      *"Backlog" | string
+	refine:       *"Refine" | string
+	ready:        *"Ready" | string
+	implementing: *"Implementing" | string
+	review:       *"Review" | string
+	merged:       *"Merged" | string
+	live:         *"Live" | string
+	done:         *"Done" | string
+	cancelled:    *"Cancelled" | string
+}
+
+#Priorities: {
+	P0: {plane: *_priorities.P0.plane | string, does: *_priorities.P0.does | string}
+	P1: {plane: *_priorities.P1.plane | string, does: *_priorities.P1.does | string}
+	P2: {plane: *_priorities.P2.plane | string, does: *_priorities.P2.does | string}
+	P3: {plane: *_priorities.P3.plane | string, does: *_priorities.P3.does | string}
 }
 
 #State: {

@@ -475,7 +475,7 @@ const SILENT_PSEUDO = /^(?:selection|marker|backdrop|-webkit-.*|-moz-.*|scrollba
 
 function mediaFeature(inner, env, report) {
   const width = env.width, height = env.height || 800;
-  const px = (v) => length(v, { fs: 16, rem: 16, width });
+  const px = (v) => length(v, { fs: 16, rem: 16, width, vh: env.height });
   const m = /^([\w-]+)\s*:\s*(.+)$/.exec(inner);
   if (m) {
     const name = m[1], val = m[2].trim();
@@ -836,17 +836,17 @@ let parsed = null;
 
 /**
  * The sheets as rules, indexed by the id, class or tag of each selector's rightmost compound.
- * Parsed once for the same sheet texts, width and scheme. env: {width, scheme}.
+ * Parsed once for the same sheet texts, width, height and scheme. env: {width, height?, scheme}.
  */
 export function parse(sheets, env) {
-  if (parsed && parsed.width === env.width && parsed.scheme === env.scheme && parsed.sheets.length === sheets.length && parsed.sheets.every((s, i) => s === sheets[i])) return parsed.rules;
+  if (parsed && parsed.width === env.width && parsed.height === env.height && parsed.scheme === env.scheme && parsed.sheets.length === sheets.length && parsed.sheets.every((s, i) => s === sheets[i])) return parsed.rules;
   const reports = newReports();
   const st = { entries: [], byId: new Map(), byClass: new Map(), byTag: new Map(), universal: [], pseudo: [], layers: new Map(), order: 0, reports, env };
   const rules = { byId: st.byId, byClass: st.byClass, byTag: st.byTag, universal: st.universal, pseudo: st.pseudo, reports, layerCount: 0 };
   parseSheet(UA, st, -2);
   for (const sheet of sheets) parseSheet(String(sheet), st, -1);
   rules.layerCount = st.layers.size;
-  parsed = { sheets: sheets.slice(), width: env.width, scheme: env.scheme, rules };
+  parsed = { sheets: sheets.slice(), width: env.width, height: env.height, scheme: env.scheme, rules };
   return rules;
 }
 

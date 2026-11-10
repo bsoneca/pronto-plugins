@@ -14,7 +14,7 @@ planeValues: {
 		// The node's gateway routes the host (planeObjects); the chart's ingress is Traefik's or
 		// nginx's, neither of which a pronto node runs.
 		enabled: false
-		appHost: devFlow.plane.host
+		appHost: devFlow.board.host
 	}
 	// Cloudflare ends TLS: Plane's links are https.
 	ssl: externalTermination: true
@@ -49,7 +49,7 @@ planeObjects: [
 		metadata: {name: "plane-gateway", namespace: _ns}
 		spec: {
 			gatewayClassName: "eg"
-			listeners: [{name: "http", port: 80, protocol: "HTTP", hostname: devFlow.plane.host, allowedRoutes: namespaces: from: "Same"}]
+			listeners: [{name: "http", port: 80, protocol: "HTTP", hostname: devFlow.board.host, allowedRoutes: namespaces: from: "Same"}]
 		}
 	},
 	{
@@ -57,12 +57,16 @@ planeObjects: [
 		kind:       "HTTPRoute"
 		metadata: {name: "plane-route", namespace: _ns}
 		spec: {
-			hostnames: [devFlow.plane.host]
+			hostnames: [devFlow.board.host]
 			parentRefs: [{group: "gateway.networking.k8s.io", kind: "Gateway", name: "plane-gateway"}]
 			// The chart's own ingress paths (templates/ingress.yaml), one rule each.
 			rules: [for r in _routes {
 				matches: [{path: {type: "PathPrefix", value: r.path}}]
 				backendRefs: [{group: "", kind: "Service", name: "\(_release)-\(r.to)", port: r.port, weight: 1}]
+				// Cloudflare ends TLS and the tunnel reaches the gateway over http, which tells Plane
+				// http: its OAuth callbacks (https://<host>/auth/github/callback/) and Django's secure
+				// checks need https, which every request to the host was.
+				filters: [{type: "RequestHeaderModifier", requestHeaderModifier: set: [{name: "X-Forwarded-Proto", value: "https"}]}]
 				timeouts: request: "120s"
 			}]
 		}

@@ -10,6 +10,7 @@ import android.icu.util.ULocale
 import android.util.Log
 import com.dokar.quickjs.QuickJs
 import com.dokar.quickjs.binding.function
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -32,6 +33,7 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.SecretKey
 
 // omnishell's engine contract (start, a UI tree flow, dispatch) with the bridges
@@ -63,6 +65,8 @@ class TerminalEngine(
     })
     private val timers = ConcurrentHashMap<Long, Job>()
     private val requests = ConcurrentHashMap<Long, HttpURLConnection>()
+    private val answers = ConcurrentHashMap<Long, CompletableDeferred<String>>()
+    private val asked = AtomicLong()
     private val random = SecureRandom()
     private lateinit var qjs: QuickJs
 
@@ -131,6 +135,12 @@ class TerminalEngine(
         qjs.function("__native_passkeys") { _ -> Passkeys.available }
         qjs.function("__native_passkey") { a ->
             passkey(a[0] as String, a[1] as String, (a[2] as Number).toLong())
+            null
+        }
+        // The answer of an async question (settled): its promise's value, or why it was rejected.
+        qjs.function("__native_answer") { a ->
+            val answer = answers.remove((a[0] as Number).toLong())
+            if (a[1] as Boolean) answer?.complete(a[2] as String) else answer?.completeExceptionally(IllegalStateException(a[2] as String))
             null
         }
         qjs.function("__native_fetch_abort") { a -> requests.remove((a[0] as Number).toLong())?.let { c -> net.execute { c.disconnect() } }; null }
@@ -262,7 +272,8 @@ class TerminalEngine(
     fun back() = call("__goBack")
     // A link the OS handed the app, back from the system browser (or opened from elsewhere).
     fun link(url: String) = call("__onLink", JSONObject.quote(url))
-    fun resize(dp: Int) = call("__onResize", "$dp")
+    // The page's viewport in dp: the width, and the height a page that fills the screen reads (display.js).
+    fun resize(dp: Int, hdp: Int) = call("__onResize", "$dp", "$hdp")
 
     // The driver's question over the live DOM, in a debug build.
     suspend fun probe(selector: String): String = script("__probe(${JSONObject.quote(selector)})")
@@ -272,11 +283,22 @@ class TerminalEngine(
     // The autofill's questions (FillActivity.kt), each answered once the shell has booted (main.js):
     // the app's handler over the stated rows, a table's rows, and the fill's pins (null, or why refused).
     suspend fun ask(handler: String, reads: List<String>, stated: JSONObject, event: JSONObject): JSONObject =
-        JSONObject(script("__ask(${JSONObject.quote(handler)},${JSONArray(reads)},${JSONObject.quote(stated.toString())},${JSONObject.quote(event.toString())})"))
+        JSONObject(settled("__ask(${JSONObject.quote(handler)},${JSONArray(reads)},${JSONObject.quote(stated.toString())},${JSONObject.quote(event.toString())})"))
     suspend fun rows(table: String): List<JSONObject> =
-        JSONArray(script("__rows(${JSONObject.quote(table)})")).let { a -> List(a.length(), a::getJSONObject) }
+        JSONArray(settled("__rows(${JSONObject.quote(table)})")).let { a -> List(a.length(), a::getJSONObject) }
     suspend fun commit(table: String, patches: JSONArray): String? =
-        script("__patch(${JSONObject.quote(table)},${JSONObject.quote(patches.toString())})").ifEmpty { null }
+        settled("__patch(${JSONObject.quote(table)},${JSONObject.quote(patches.toString())})").ifEmpty { null }
+    // An async question (main.js's __ask, __rows, __patch): evaluate hands back the promise itself, not what it
+    // settles to, so the page's answer comes through __native_answer once the promise has settled.
+    private suspend fun settled(expression: String): String {
+        val id = asked.incrementAndGet()
+        val answer = CompletableDeferred<String>()
+        answers[id] = answer
+        withContext(dispatcher) {
+            qjs.evaluate<Any?>("Promise.resolve($expression).then((v) => __native_answer($id, true, String(v)), (e) => __native_answer($id, false, String(e?.message ?? e))); undefined", "answer.js", false)
+        }
+        return answer.await()
+    }
     private suspend fun script(expression: String): String = withContext(dispatcher) {
         qjs.evaluate<String>(expression, "probe.js", false)
     }

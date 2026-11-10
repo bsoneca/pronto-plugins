@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 // The little of Stripe's API the broker speaks: form-encoded requests under
 // one pinned API version, JSON ones under another for the /v2 namespace
 // connected accounts live in, and the signature Stripe puts on a webhook.
@@ -75,6 +77,51 @@ function throughDoor(door: string, fetcher: typeof fetch): Stripe {
       return body as never;
     }
   };
+}
+
+/** The account the request being answered names, for the door's flag (PRONTO-218); none for what names
+ * no account, Stripe's webhook say. Set by `forAccount` around the broker's handler. */
+const caller = new AsyncLocalStorage<string | undefined>();
+
+/** Runs `handler` with the account its request's JSON body names (`account`) as the caller. */
+export function forAccount<A extends unknown[]>(handler: (req: Request, ...rest: A) => Promise<Response>) {
+  return async (req: Request, ...rest: A): Promise<Response> => {
+    let account: string | undefined;
+    if (req.method === "POST" && req.headers.get("content-type")?.includes("json")) {
+      try {
+        const a = (await req.clone().json())?.account;
+        if (typeof a === "string" && a) account = a;
+      } catch { /* not JSON: no account */ }
+    }
+    return await caller.run(account, () => handler(req, ...rest));
+  };
+}
+
+/** A flag read from an app's flagd over OFREP (`origin`'s /ofrep/v1/evaluate/flags/<flag>), for the
+ * caller's account (none: "broker", which no flag targets, so it reads the flag's value for everyone),
+ * each answer kept `ttl` ms. Off when flagd does not answer, or answers anything but true. */
+export function ofrepFlag(origin: string, flag: string, fetcher: typeof fetch = fetch, ttl = 30_000): () => Promise<boolean> {
+  const kept = new Map<string, { at: number; on: boolean }>();
+  const url = `${origin.replace(/\/$/, "")}/ofrep/v1/evaluate/flags/${flag}`;
+  return async () => {
+    const key = caller.getStore() ?? "broker";
+    const k = kept.get(key);
+    if (k && Date.now() - k.at < ttl) return k.on;
+    let on = false;
+    try {
+      const res = await fetcher(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ context: { targetingKey: key } }), signal: AbortSignal.timeout(2000) });
+      on = res.ok && (await res.json())?.value === true;
+    } catch { /* unreachable: off */ }
+    if (kept.size > 10_000) kept.clear();
+    kept.set(key, { at: Date.now(), on });
+    return on;
+  };
+}
+
+/** While the broker moves to the airlock's door (PRONTO-218): each call goes through the door when the
+ * flag says so, else straight to Stripe with the broker's key, as before. A flag, not a deploy, moves it. */
+export function switched(p: { direct: Stripe; door: Stripe; on: () => Promise<boolean> }): Stripe {
+  return async (method, path, params, idempotencyKey) => (await p.on() ? p.door : p.direct)(method, path, params, idempotencyKey);
 }
 
 export function stripe(p: { key: string; api?: string; fetcher?: typeof fetch } | { door: string; fetcher?: typeof fetch }): Stripe {

@@ -1,0 +1,29 @@
+#!/bin/sh
+# Error tracking for pronto apps (PRONTO-187):
+#   bin/pronto-errors <app-dir>
+# adds or refreshes the page side in an app: the reporter (a host-DOM hatch on every screen), the
+# door's route to GlitchTip, a stand-in for a host launch, and errors_spec.cue (seeded; write the
+# project and key `metal` printed). See errors/README.md.
+#
+# Or GlitchTip itself on a cluster the operator runs (pronto's envs.Metal), as errors/metal.nu says:
+#   bin/pronto-errors metal --ssh U@H --domain errors.example.com --projects app,…
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+if [ "${1:-}" = metal ]; then
+	shift
+	cd "$here"
+	exec ./saytw --script tools.nu nu errors/metal.nu "$@"
+fi
+if [ $# -ne 1 ] || [ ! -d "$1" ]; then
+	echo "usage: bin/pronto-errors <app-dir>" >&2
+	echo "       bin/pronto-errors metal --ssh U@H --domain D [--projects a,b]" >&2
+	exit 2
+fi
+app=$(cd "$1" && pwd)
+package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" | head -n 1)
+[ -n "$package" ] || { echo "pronto-errors: $app/program.cue names no package" >&2; exit 2; }
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+./saytw --script tools.nu cue export ./errors/export -t "package=$package" -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"

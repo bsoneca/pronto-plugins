@@ -6,10 +6,12 @@
 // --dry prints each Release's title and body and touches nothing on GitHub. A Release is made or,
 // when its tag has one, edited: never deleted, no tag moved. The changes are the pull requests of the
 // app's folder between the previous live release and this one (git log --first-parent), each in
-// plain words from the local model (Ollama, RELEASE_NOTES_MODEL, default qwen3-coder:30b), or from
-// notes.js's rules when it cannot answer. A pull request's words are kept in
+// plain words from the app's model (Ollama by default, qwen3-coder:30b; Claude; or none), or from
+// notes.js's rules when it cannot answer. The app's release_notes.cue (README.md) says where the live
+// releases are read from, the time zone, the model and the audience; without one, release-cron's records
+// under release.cue's GCP.name, Brasília, the local model and players. A pull request's words are kept in
 // ~/.cache/pronto/release-notes/<app>/prs.json, so a re-run says the same.
-import { body, fallback, prNumbers, releases, tag, title } from "./notes.js";
+import { answer, body, fallback, fromDeployments, fromTags, prNumbers, prompt, releases, tag, title } from "./notes.js";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -32,38 +34,92 @@ if (flags.some((f) => f !== "--dry")) usage(`unknown flag ${flags.find((f) => f 
 const home = Deno.env.get("HOME")!;
 const jsonl = (f: string) => { try { return Deno.readTextFileSync(f).split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 
-// The app's release records are kept under the name its release.cue gives (GCP.name), read as
-// release-cron reads it: the app's own cue, as mise finds it there.
-const mise = sh("sh", ["-c", "command -v mise"]).out || `${home}/Library/Caches/sayt/mise-v2026.8.11/mise`;
-const cue = Deno.env.get("CUE") || sh(mise, ["which", "cue"], appDir).out || "cue";
+// What the app chose (release_notes.cue, held to #Notes with its defaults by release_notes_plugin.cue): the two
+// files alone, as the whole package takes a minute to export. mise, as the shell finds it or the newest sayt has
+// installed (which ./saytw installs), runs the app's own cue there (`mise exec -- cue`): pronto's runtime puts its
+// memory-budget wrapper first, and called by the path `mise which cue` names it finds no real cue behind it. Without
+// mise, cue on the PATH.
+const newest = (dirs: string[]) => {
+  const found: { dir: string; v: number[] }[] = [];
+  for (const d of dirs) {
+    try {
+      for (const e of Deno.readDirSync(d)) {
+        const m = e.name.match(/^mise-v(\d+(?:\.\d+)*)$/);
+        if (m) { try { Deno.statSync(`${d}/${e.name}/mise`); found.push({ dir: `${d}/${e.name}/mise`, v: m[1].split(".").map(Number) }); } catch { /* not installed */ } }
+      }
+    } catch { /* no such folder */ }
+  }
+  found.sort((a, b) => { for (let i = 0; i < Math.max(a.v.length, b.v.length); i++) { const d = (b.v[i] ?? 0) - (a.v[i] ?? 0); if (d) return d; } return 0; });
+  return found[0]?.dir ?? "";
+};
+const mise = sh("sh", ["-c", "command -v mise"]).out || newest([`${home}/Library/Caches/sayt`, `${home}/.cache/sayt`]);
+const cueCmd: [string, string[]] = Deno.env.get("CUE") ? [Deno.env.get("CUE")!, []] : mise ? [mise, ["exec", "--", "cue"]] : ["cue", []];
 const registry = Deno.readTextFileSync(`${appDir}/.mise.toml`).match(/^CUE_REGISTRY\s*=\s*['"]([^'"]+)['"]/m)?.[1];
-const name = JSON.parse((() => {
-  const r = sh(cue, ["export", "release.cue", "-e", "GCP.name", "--out", "json"], appDir, registry ? { CUE_REGISTRY: registry } : {});
-  if (!r.ok) usage(`GCP.name of ${appDir}/release.cue unread: ${r.err.split("\n")[0]}`);
-  return r.out;
-})());
-const records = jsonl(`${home}/.cache/pronto/releases/${name}.jsonl`);
+const cueOut = (args: string[], what: string) => {
+  const r = sh(cueCmd[0], [...cueCmd[1], "export", ...args, "--out", "json"], appDir, registry ? { CUE_REGISTRY: registry } : {});
+  if (!r.ok) usage(`${what} of ${appDir} unread: ${r.err.split("\n")[0]}`);
+  return JSON.parse(r.out);
+};
+const ownFile = (f: string) => { try { Deno.statSync(`${appDir}/${f}`); return [f]; } catch { return []; } };
+if (!ownFile("release_notes_plugin.cue").length) usage(`${appDir}/release_notes_plugin.cue is missing: run pronto-plugins' bin/pronto-release-notes on the app`);
+const notes: {
+  source: { kind: "release-cron"; name?: string } | { kind: "tags"; prefix: string } | { kind: "deployments"; environment: string };
+  timeZone: string; zoneLabel: string; audience: string;
+  model: { kind: "ollama"; name: string; url: string } | { kind: "claude"; name: string } | { kind: "none" };
+} = cueOut([...ownFile("release_notes.cue"), "release_notes_plugin.cue", "-e", "releaseNotes"], "releaseNotes");
+const { timeZone, zoneLabel, audience } = notes;
+
 // The repository from origin's URL (git@github.com:o/n.git, https://github.com/o/n): no gh call, which
 // would need a login before anything is read.
 const origin = sh("git", ["remote", "get-url", "origin"], appDir);
 const repo = origin.out.match(/github\.com[:/]([^/]+\/[^/]+?)(\.git)?\/?$/)?.[1] ?? "";
 if (!repo) usage(`no GitHub repository in origin's URL (${origin.out || origin.err})`);
 
+// The live release records of the source: release-cron's (named by the source, else release.cue's GCP.name),
+// the git tags' or the GitHub deployments' (notes.js adapts the last two).
+const records = (() => {
+  const s = notes.source;
+  if (s.kind === "tags") {
+    const r = sh("git", ["for-each-ref", `--format=%(refname:lstrip=2)\t%(objectname)\t%(*objectname)\t%(creatordate:iso-strict)`, `refs/tags/${s.prefix}*`], top);
+    if (!r.ok) usage(`git tags unread: ${r.err.split("\n")[0]}`);
+    return fromTags(r.out.split("\n"), s.prefix);
+  }
+  if (s.kind === "deployments") {
+    const list = sh("gh", ["api", `repos/${repo}/deployments?environment=${encodeURIComponent(s.environment)}&per_page=100`, "--paginate", "--jq", ".[] | @json"], appDir);
+    if (!list.ok) usage(`deployments of ${s.environment} unread (gh api): ${list.err.split("\n")[0]}`);
+    const deployments = list.out.split("\n").filter(Boolean).map((l) => JSON.parse(l)).map((d) => {
+      const st = sh("gh", ["api", `repos/${repo}/deployments/${d.id}/statuses`, "--jq", "[.[] | {state, created_at}]"], appDir);
+      return { ...d, statuses: st.ok ? JSON.parse(st.out || "[]") : [] };
+    });
+    return fromDeployments(deployments);
+  }
+  if (!s.name && !ownFile("release.cue").length) usage(`${appDir}/release.cue is missing: name the release-cron records in releaseNotes.source.name`);
+  const name = s.name ?? cueOut(["release.cue", "-e", "GCP.name"], "GCP.name");
+  return jsonl(`${home}/.cache/pronto/releases/${name}.jsonl`);
+})();
 // A pull request in plain words, once: the cache first, then the local model, then the rules.
 const cacheFile = `${home}/.cache/pronto/release-notes/${app}/prs.json`;
 const cache: Record<string, { summary: string; players: boolean }> = (() => { try { return JSON.parse(Deno.readTextFileSync(cacheFile)); } catch { return {}; } })();
-const model = Deno.env.get("RELEASE_NOTES_MODEL") ?? "qwen3-coder:30b";
+// The model's name is the app's, RELEASE_NOTES_MODEL overriding it. Ollama answers at its url; Claude through the Messages
+// API with ANTHROPIC_API_KEY from the environment (never printed: a missing key is no answer); none asks nothing.
+const model = notes.model;
+const modelName = model.kind === "none" ? "" : Deno.env.get("RELEASE_NOTES_MODEL") ?? model.name;
 async function ask(pr: { title: string; body: string; files: { path: string }[] }) {
-  const prompt = `A pull request to a game or web app. Say what it changes in ONE line of at most 20 words that a player or product reader understands: no file names, function names, PR numbers or commit jargon. Set players to true only if a person playing or using the product would notice the change on screen or in how it behaves (a new feature, a rule, a screen, a fix of something they hit, a price). Set it false for everything a player never notices: tests, docs, CI, how and when releases or deploys happen, release automation, rehearsals, analytics, tracking and telemetry, monitoring, build and test speed, flags or files the build needs, database internals and refactors. When unsure, false. Answer as JSON {"summary": string, "players": boolean}.\n\nTitle: ${pr.title}\n\nDescription:\n${(pr.body ?? "").slice(0, 3000)}\n\nFiles changed:\n${pr.files.slice(0, 40).map((f) => f.path).join("\n")}`;
   try {
-    const r = await fetch("http://localhost:11434/api/chat", { method: "POST", body: JSON.stringify({ model, stream: false, format: "json", messages: [{ role: "user", content: prompt }] }), signal: AbortSignal.timeout(180_000) });
-    const a = JSON.parse((await r.json()).message.content);
-    const summary = String(a.summary ?? "").replace(/\s+/g, " ").trim().replace(/\.$/, "");
-    return summary && typeof a.players === "boolean" ? { summary, players: a.players } : null;
+    if (model.kind === "none") return null;
+    const content = prompt(pr, audience);
+    if (model.kind === "claude") {
+      const key = Deno.env.get("ANTHROPIC_API_KEY");
+      if (!key) return null;
+      const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" }, body: JSON.stringify({ model: modelName, max_tokens: 400, messages: [{ role: "user", content }] }), signal: AbortSignal.timeout(180_000) });
+      return answer((await r.json()).content[0].text);
+    }
+    const r = await fetch(`${model.url}/api/chat`, { method: "POST", body: JSON.stringify({ model: modelName, stream: false, format: "json", messages: [{ role: "user", content }] }), signal: AbortSignal.timeout(180_000) });
+    return answer((await r.json()).message.content);
   } catch { return null; }
 }
 async function words(n: number) {
-  if (cache[n]) return cache[n];
+  if (model.kind !== "none" && cache[n]) return cache[n];
   const v = sh("gh", ["pr", "view", String(n), "-R", repo, "--json", "number,title,body,url,files"], appDir);
   if (!v.ok) { console.log(`#${n} unread (gh pr view): ${v.err.split("\n")[0]}`); return { summary: `Pull request #${n}`, players: true, unread: true }; }
   const pr = JSON.parse(v.out);
@@ -89,8 +145,8 @@ async function publish(rel: ReturnType<typeof releases>[number]) {
   const subjects = rel.base ? sh("git", ["log", "--first-parent", "--format=%s", `${rel.base}..${rel.last.commit}`, "--", appDir], top).out.split("\n").filter(Boolean) : [];
   const prs = [];
   for (const n of prNumbers(subjects)) prs.push({ number: n, ...await words(n) });
-  const text = body({ app, repo, release: rel, prs });
-  const head = title(app, rel);
+  const text = body({ app, repo, release: rel, prs, timeZone, zoneLabel, audience });
+  const head = title(app, rel, timeZone, zoneLabel);
   if (dry) { console.log(`=== ${t}\n${head}\n\n${text}`); return "dry"; }
   const file = Deno.makeTempFileSync({ suffix: ".md" });
   try {

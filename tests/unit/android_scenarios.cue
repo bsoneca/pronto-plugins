@@ -109,4 +109,49 @@ cases: {
 		{call: "androidScenarios.backTo", args: ["https://localhost:33600/fake/stripe/pay/cs_1", "https://localhost:33600"], expect: false},
 		{call: "androidScenarios.backTo", args: ["https://localhost:33600/?pro=welcome", "https://localhost:33600"], expect: true},
 	]}
+
+	"the steps that act on another app are known kinds, and an open can ask for the unlock": {suite: "android", steps: [
+		{call: "androidScenarios.normalize", args: [{autofillService: "dev.pronto.vault/.FillService"}], holds: {kind: "autofillService", arg: "dev.pronto.vault/.FillService"}},
+		{call: "androidScenarios.normalize", args: [{launch: "dev.pronto.autofill.asker/.LoginActivity", timeout: 30}], holds: {kind: "launch", timeout: 30}},
+		{call: "androidScenarios.normalize", args: [{native: {id: "a:id/b", tap: true}}], holds: {kind: "native", arg: {id: "a:id/b", tap: true}}},
+		{call: "androidScenarios.normalize", args: [{finger: true}], holds: {kind: "finger", arg: true}},
+		{call: "androidScenarios.normalize", args: [{open: "/", unlock: true}], holds: {kind: "open", arg: "/"}, why: "unlock says how the open goes, it is not a second action"},
+	]}
+	"the views of uiautomator's dump are its nodes with their id, text, description and drawn box": {suite: "android", steps: [
+		{call: "androidScenarios.nativeNodes", args: ["<?xml version='1.0'?><hierarchy rotation=\"0\"><node index=\"0\" text=\"Asker &amp; &quot;Co&quot; \u00b7 ana\" resource-id=\"a:id/t\" class=\"android.widget.TextView\" content-desc=\"\" clickable=\"true\" bounds=\"[63,181][381,307]\"><node index=\"0\" text=\"\" resource-id=\"\" content-desc=\"Cancel\" clickable=\"false\" bounds=\"[0,0][1080,2400]\" /></node></hierarchy>"], expect: [
+			{id: "a:id/t", text: "Asker & \"Co\" \u00b7 ana", desc: "", clickable: true, box: {x: 63, y: 181, w: 318, h: 126}},
+			{id: "", text: "", desc: "Cancel", clickable: false, box: {x: 0, y: 0, w: 1080, h: 2400}},
+		]},
+	]}
+	"a native view is found by its id, or by its text or description when it names no id": {suite: "android", steps: [
+		{value: [
+			{id: "a:id/u", text: "Username", desc: "", clickable: true, box: {x: 63, y: 63, w: 954, h: 118}},
+			{id: "", text: "Unlock Vault", desc: "", clickable: false, box: {x: 63, y: 181, w: 318, h: 126}},
+			{id: "x:id/gone", text: "Gone", desc: "", clickable: false, box: {x: 0, y: 0, w: 0, h: 0}},
+		]}, {keep: "nodes"},
+		{call: "androidScenarios.findNative", args: ["$nodes", {id: "a:id/u"}], holds: {text: "Username"}},
+		{call: "androidScenarios.findNative", args: ["$nodes", {text: "Unlock Vault"}], holds: {box: {y: 181}}},
+		{call: "androidScenarios.findNative", args: ["$nodes", {text: "Nope"}], expect: null},
+		{call: "androidScenarios.findNative", args: ["$nodes", {id: "x:id/gone"}], expect: null, why: "a view with no area is not on the screen"},
+		{call: "androidScenarios.findNative", args: ["$nodes", {}], throws: "name a view by id or by text"},
+	]}
+	"a found native view's text is held to is and has": {suite: "android", steps: [
+		{call: "androidScenarios.nativeHolds", args: [{text: "ana:pw", id: "", desc: "", clickable: false, box: {x: 0, y: 0, w: 1, h: 1}}, {is: "ana:pw"}], expect: null},
+		{call: "androidScenarios.nativeHolds", args: [{text: "ana:pw", id: "", desc: "", clickable: false, box: {x: 0, y: 0, w: 1, h: 1}}, {has: "ana"}], expect: null},
+		{call: "androidScenarios.nativeHolds", args: [{text: "ana:pw", id: "", desc: "", clickable: false, box: {x: 0, y: 0, w: 1, h: 1}}, {is: "bob"}], expect: "text is \"ana:pw\", want \"bob\""},
+		{call: "androidScenarios.nativeHolds", args: [{text: "ana:pw", id: "", desc: "", clickable: false, box: {x: 0, y: 0, w: 1, h: 1}}, {has: "bob"}], matches: "want it to have \"bob\""},
+	]}
+	"text can be held to a pattern": {suite: "android", steps: [
+		{call: "androidScenarios.holds", args: ["text", {of: ".s", matches: "^[0-9a-f]{64}$"}, [_el & {text: "ab"}]], matches: "want it to match"},
+		{call: "androidScenarios.holds", args: ["text", {of: ".s", matches: "^[0-9a-f]{4}$"}, [_el & {text: "ab12"}]], expect: null},
+	]}
+
+	"fills: a drawn box spans the screen along one axis, with the bars hidden": {suite: "android", steps: [
+		{call: "androidScenarios.fills", args: [{x: 0, y: 300, w: 1060, h: 1300}, {mode: "fullscreen", screen: {w: 1080, h: 2400}}], expect: null, why: "98% of a portrait screen's width"},
+		{call: "androidScenarios.fills", args: [{x: 400, y: 0, w: 1300, h: 1050}, {mode: "fullscreen", screen: {w: 2400, h: 1080}}], expect: null, why: "landscape: 97% of the height"},
+		{call: "androidScenarios.fills", args: [{x: 0, y: 300, w: 540, h: 700}, {mode: "fullscreen", screen: {w: 1080, h: 2400}}], expect: "it spans 50% of the screen's width and 29% of its height, under 90%"},
+		{call: "androidScenarios.fills", args: [{x: 0, y: 300, w: 1060, h: 1300}, {mode: "standard", screen: {w: 1080, h: 2400}}], expect: "the display is standard, the system bars shown"},
+		{call: "androidScenarios.fills", args: [null, {mode: "fullscreen", screen: {w: 1080, h: 2400}}], expect: "it is not drawn"},
+		{call: "androidScenarios.fills", args: [{x: 0, y: 300, w: 1000, h: 1300}, {mode: "fullscreen", screen: {w: 1080, h: 2400}}, 0.05], matches: "under 95%", why: "within is the gap allowed"},
+	]}
 }

@@ -19,7 +19,7 @@ if (!token) {
 const server = "plane-mcp-server==0.3.4";
 const p = new Deno.Command("uvx", {
   args: [server, "stdio"],
-  env: { PLANE_API_KEY: token, PLANE_WORKSPACE_SLUG: flow.plane.workspace, PLANE_BASE_URL: `https://${flow.plane.host}` },
+  env: { PLANE_API_KEY: token, PLANE_WORKSPACE_SLUG: flow.board.workspace, PLANE_BASE_URL: `https://${flow.board.host}` },
   stdin: "inherit",
   stdout: "inherit",
   stderr: "inherit",

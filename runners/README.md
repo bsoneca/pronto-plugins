@@ -12,9 +12,9 @@ set's chart values. [`runners.ts`](runners.ts) applies the plan as it is, so not
 written by hand. What an apply does, given what it finds, is [`plan.js`](plan.js)'s, held by the
 cases in [`tests/unit/runners.cue`](../tests/unit/runners.cue).
 
-A setup can instead be a **host** setup: no cluster, GitHub's own [actions/runner] for macOS on the
-Mac itself, each runner a launchd agent. Its jobs run on the Mac's own tools and caches, with no VM
-and no docker, one job at a time per runner.
+A setup can instead be a **host** setup: no cluster, GitHub's own [actions/runner] on the machine
+itself, each runner a launchd agent on a Mac or a systemd unit on Linux. Its jobs run on the
+machine's own tools and caches, with no VM and no docker, one job at a time per runner.
 
 [Actions Runner Controller]: https://github.com/actions/actions-runner-controller
 [actions/runner]: https://github.com/actions/runner
@@ -48,16 +48,27 @@ The rest have defaults:
   `emulate` lists foreign platforms built under QEMU, on a `context` cluster only (a Colima setup
   builds amd64 in Cloud Build instead). binfmt is registered in the node's kernel by an
   init container before BuildKit starts, and the list is empty by default.
+- **amd64**: where an amd64 image (Cloud Run's) builds. `cloud-build` builds it in Cloud Build
+  (`gcloud builds submit`). `emulate` builds it under QEMU in the setup's BuildKit, which must list
+  `linux/amd64` in `emulate`; Colima and host setups refuse it. `none` builds the setup's own platform
+  only. The default is `cloud-build` for Colima and host setups, and on a cluster `emulate` when its
+  BuildKit emulates amd64, else `none`. Every runner's jobs read it as `PRONTO_AMD64`: in the
+  scale set's pod, the launchd agent or the systemd unit.
 - **secret**: the Kubernetes secret's `name` (`gha-token`) and `kind`. A `pat` is a fine-grained token
   under the key `github_token`. An `app` is a GitHub App's id, installation id and private key. The
   values are never written in the setup. `apply` prints the command that creates the secret.
+- **cluster: host**: the machine's `os` (`macos`, or `linux`) and `arch` (`arm64`, or `x64` on
+  Linux), which pick the runner's tarball and what GitHub labels it with. `hostService` is
+  `launchd` on macOS and `systemd` on Linux.
 - **hostRunners** (a host setup's, instead of scaleSets): each runner's `repo`, its `labels` (its
-  name by default; GitHub adds `self-hosted`, `macOS` and `ARM64`), its folder `dir` under the home
-  (`actions-runners/<name>`) and `work` under that (`_work`), the `path` its jobs run with, and
-  `nice` (10), the agent's CPU priority, so jobs yield to the person's own work. The schema refuses
-  a setup with both scale sets and host runners.
+  name by default; GitHub adds `self-hosted`, the OS (`macOS` or `Linux`) and the arch (`ARM64` or
+  `X64`)), its folder `dir` under the home (`actions-runners/<name>`) and `work` under that
+  (`_work`), the `path` its jobs run with (Homebrew's folders on a Mac only), and `nice` (10), the
+  service's CPU priority, so jobs yield to the person's own work. The schema refuses a setup with
+  both scale sets and host runners.
 - **versions**: the ARC charts and the runner, BuildKit and binfmt images, each pinned by digest;
-  the macOS runner's first download, by version and sha256 (it updates itself afterwards).
+  the host runner's first download, by version, with a sha256 per platform (`osx-arm64`,
+  `linux-x64`, `linux-arm64`); it updates itself afterwards.
 
 ## Use
 
@@ -77,7 +88,10 @@ back afterwards. Every kubectl and helm call names the plan's context and never 
 
 For a host setup, `apply` downloads the runner (checked against its sha256) into its folder,
 registers it, and writes and loads its launchd agent (`~/Library/LaunchAgents/actions.runner.<owner>-<repo>.<name>.plist`,
-logs in `~/Library/Logs/` under the same name), each only when missing or changed. Registering
+logs in `~/Library/Logs/` under the same name), each only when missing or changed. On Linux it writes
+the systemd unit GitHub's `svc.sh` would (`/etc/systemd/system/actions.runner.<owner>-<repo>.<name>.service`,
+run as the person who applies, `Nice=` the runner's), with `sudo -n`, then reloads, enables and
+restarts it. Where sudo asks for a password, `apply` stops and says so. Registering
 takes a short-lived token that `apply` fetches with `gh api` (admin on the repository) and hands to
 `config.sh`, never to a file or the screen. When gh can't fetch it, `apply` prints the command for
 someone who can. `status` shows the agent's state and GitHub's view of the runner (online, busy);

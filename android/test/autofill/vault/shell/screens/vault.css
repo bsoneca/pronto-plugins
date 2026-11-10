@@ -1,0 +1,5 @@
+.add, .probe form { display: grid; gap: var(--sp-sm); }
+.logins li, .candidates li { display: flex; flex-wrap: wrap; gap: var(--sp-sm); align-items: center; }
+.logins .who { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.logins .target, .logins .username, .candidates span { color: var(--secondary); }
+.logins .secret code { overflow-wrap: anywhere; }

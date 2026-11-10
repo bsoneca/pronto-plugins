@@ -21,9 +21,10 @@
 import { parseHTML } from "npm:linkedom@0.18.4";
 import { localRoots } from "./trust.ts";
 
-// `flag` and `unless` say where a step runs (skips); they are not what it does.
-const META = ["by", "timeout", "why", "fresh", "flag", "unless"];
-export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response", "undisclosed"];
+// `flag` and `unless` say where a step runs (skips); they are not what it does. `unlock` says an `open` meets the
+// biometric prompt of an app that asks for one (android.json's "unlock"): the sensor is touched once it is shown.
+const META = ["by", "timeout", "why", "fresh", "flag", "unless", "unlock"];
+export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response", "undisclosed", "fills", "autofillService", "launch", "native", "finger"];
 
 export type Probed = { id: string | null; text: string; value?: string; attrs: Record<string, string>; hidden: boolean; shown?: boolean };
 export type Step = Record<string, unknown>;
@@ -99,6 +100,49 @@ export function scrollFor(box: Box, display: { w: number; h: number }): "up" | "
 export const centre = (b: Box) => ({ x: Math.round(b.x + b.w / 2), y: Math.round(b.y + b.h / 2) });
 
 /** Whether an address the browser reached ends its trip: the app's own origin, but not the door's own pages (/auth/ routes, a stand-in's /fake/ checkout). */
+/**
+ * `fills`: whether a drawn box fills the screen, null when it does, else what it lacks. The page must have asked for
+ * the whole screen (the display is `fullscreen`: the system bars hidden), and the box must span at least `1 - within`
+ * of the screen along one axis (a field square on a long phone fills its width, and its height in landscape).
+ */
+export function fills(box: Box | null, display: { mode: string; screen: { w: number; h: number } }, within = 0.1): string | null {
+  if (display.mode !== "fullscreen") return `the display is ${display.mode}, the system bars shown`;
+  if (!box) return "it is not drawn";
+  const w = box.w / display.screen.w, h = box.h / display.screen.h;
+  if (Math.max(w, h) >= 1 - within) return null;
+  return `it spans ${Math.round(w * 100)}% of the screen's width and ${Math.round(h * 100)}% of its height, under ${Math.round((1 - within) * 100)}%`;
+}
+
+export type Native = { id: string; text: string; desc: string; clickable: boolean; box: Box };
+
+const ENTITIES: Record<string, string> = { "&quot;": '"', "&apos;": "'", "&lt;": "<", "&gt;": ">", "&amp;": "&" };
+
+/** The nodes of `uiautomator dump`'s XML: any app's views, by resource id, text and drawn box. */
+export function nativeNodes(xml: string): Native[] {
+  const out: Native[] = [];
+  for (const [tag] of xml.matchAll(/<node\b[^>]*>/g)) {
+    const attr = (name: string) => (tag.match(new RegExp(`\\s${name}="([^"]*)"`))?.[1] ?? "").replace(/&#(\d+);/g, (_m, n: string) => String.fromCodePoint(Number(n))).replace(/&(quot|apos|lt|gt|amp);/g, (m) => ENTITIES[m]);
+    const b = attr("bounds").match(/^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/);
+    if (!b) continue;
+    const [x1, y1, x2, y2] = b.slice(1).map(Number);
+    out.push({ id: attr("resource-id"), text: attr("text"), desc: attr("content-desc"), clickable: attr("clickable") === "true", box: { x: x1, y: y1, w: x2 - x1, h: y2 - y1 } });
+  }
+  return out;
+}
+
+/** The first node a `native` step names: by resource id, or by its text (or description) when it names no id. */
+export function findNative(nodes: Native[], arg: { id?: string; text?: string }): Native | null {
+  if (arg.id === undefined && arg.text === undefined) throw new Fail("native: name a view by id or by text");
+  return nodes.find((n) => n.box.w > 0 && n.box.h > 0 && (arg.id !== undefined ? n.id === arg.id : n.text === arg.text || n.desc === arg.text)) ?? null;
+}
+
+/** What differs of a found view from a `native` step's `is` (its text) or `has`, null when nothing does. */
+export function nativeHolds(node: Native, arg: { is?: string; has?: string }): string | null {
+  if (arg.is !== undefined && node.text !== arg.is) return `text is ${JSON.stringify(node.text)}, want ${JSON.stringify(arg.is)}`;
+  if (arg.has !== undefined && !node.text.includes(arg.has)) return `text is ${JSON.stringify(node.text)}, want it to have ${JSON.stringify(arg.has)}`;
+  return null;
+}
+
 export function backTo(url: string, base: string): boolean {
   const u = new URL(url), b = new URL(base);
   return u.origin === b.origin && !/^\/(auth|fake)\//.test(u.pathname);
@@ -158,6 +202,7 @@ export function holds(kind: string, arg: any, els: Probed[], messages: Record<st
       if (want !== undefined && first.text !== want) return `text is ${JSON.stringify(first.text)}, want ${JSON.stringify(want)}`;
       if (arg.not !== undefined && first.text === arg.not) return `text is ${JSON.stringify(first.text)}, want anything else`;
       if (arg.has !== undefined && !first.text.includes(arg.has)) return `text is ${JSON.stringify(first.text)}, want it to have ${JSON.stringify(arg.has)}`;
+      if (arg.matches !== undefined && !new RegExp(arg.matches).test(first.text)) return `text is ${JSON.stringify(first.text)}, want it to match ${arg.matches}`;
       return null;
     }
     case "value": {
@@ -231,6 +276,31 @@ async function displaySize() {
   const m = [...out.matchAll(/(\d+)x(\d+)/g)].pop();
   if (!m) throw new Fail(`wm size answered ${JSON.stringify(out)}`);
   return display = { w: Number(m[1]), h: Number(m[2]) };
+}
+
+// ------------------------------------------------------------------ other apps' views
+
+/** The system's biometric prompt, which any app's strong-biometric request shows. */
+const PROMPT = "com.android.systemui:id/biometric_prompt_constraint_layout";
+
+/** The views on the screen now, whichever app draws them. */
+async function screenNodes(): Promise<Native[]> {
+  await sh("uiautomator dump /sdcard/pronto-ui.xml > /dev/null");
+  return nativeNodes(await adb("exec-out", "cat", "/sdcard/pronto-ui.xml"));
+}
+
+/** The emulator's fingerprint sensor touched once a biometric prompt is up: a touch before it shows is lost. */
+async function finger(seconds: number) {
+  await native("a biometric prompt", seconds, { id: PROMPT });
+  await adb("emu", "finger", "touch", "1");
+}
+
+/** A view of any app, found by `uiautomator dump` once it is on the screen. */
+function native(what: string, seconds: number, arg: { id?: string; text?: string }): Promise<Native> {
+  return until(what, seconds, async () => {
+    const n = findNative(await screenNodes(), arg);
+    return [n ?? null, `no view with ${arg.id !== undefined ? `id ${arg.id}` : `text ${JSON.stringify(arg.text)}`} on the screen`];
+  });
 }
 
 // ------------------------------------------------------------------ the stand-in browser
@@ -357,7 +427,7 @@ class Phone {
     return out;
   }
 
-  async start(path: string, actor: string) {
+  async start(path: string, actor: string, unlock = false) {
     // The device's ports to this machine are tied to adb's connection, which a busy emulator drops
     // and remakes: they are made again before every start, so the app always reaches the stack.
     await adb("forward", "tcp:8765", "tcp:8765");
@@ -365,6 +435,8 @@ class Phone {
     if (door) await adb("reverse", `tcp:${door[1]}`, `tcp:${door[1]}`);
     this.page = null;
     await sh(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(seeded(path, `${this.scenario}/${actor}`))} --es actor ${quote(actor)} --es browser standin`);
+    // The prompt of an app that asks for its owner (Unlock.kt) shows before the driver answers: the sensor is touched once it is up.
+    if (unlock) await finger(30);
     await until(`${actor}'s terminal at ${path}`, 30, async () => {
       const ready = await this.find("html[data-terminal-ready]", false);
       return [ready && ready.length > 0 ? ready : null, ready ? "the terminal has not booted" : "the driver does not answer"];
@@ -475,6 +547,13 @@ class Phone {
     await this.hideKeyboard();
     const el = await this.shownOf([selector], seconds, `fill ${selector}`);
     await this.tap(el);
+    // The keyboard coming up resizes and redraws the page: typing across that redraw loses keys, so it waits for it.
+    await until(`fill ${selector}`, seconds, async () => {
+      const before = await ask({ frames: true });
+      await sleep(250 * slow());
+      const after = await ask({ frames: true });
+      return [before !== undefined && before === after ? true : null, `the screen keeps redrawing (${before} then ${after} draws)`];
+    });
     const cur = (el.value ?? "").length;
     // The end of the text, then as many deletes as it holds: a select-all that every Android keeps.
     await sh("input keyevent KEYCODE_MOVE_END" + " KEYCODE_DEL".repeat(cur));
@@ -508,7 +587,7 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
         const path = sub(arg as string);
         opened[actor] = path;
         current = actor;
-        await phone.start(path, actor);
+        await phone.start(path, actor, raw.unlock === true);
         return;
       }
       if (actor !== current) {
@@ -556,6 +635,45 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
           const found = new TextDecoder().decode(out.stdout).trim();
           if (out.code === 0 && found) throw new Fail(`${JSON.stringify(text)} is in the app's private files in plain text: ${found.split("\n").join(", ")}`);
           if (out.code !== 1) throw new Fail(`run-as grep exited ${out.code}: ${new TextDecoder().decode(out.stderr).trim() || found}`);
+          break;
+        }
+        case "fills": {
+          // The page asked for the whole screen and the element spans it (fills): the driver's display and bounds.
+          const sel = sub(arg.of);
+          await until(`fills ${sel}`, timeout, async () => {
+            const display = await ask({ display: true });
+            if (!display) return [null, "the driver does not answer"];
+            const el = (await phone.find(sel, false))?.find((e) => e.id && !e.hidden);
+            const box = el ? await ask({ bounds: el.id }) : null;
+            const lack = fills(box, display, arg.within ?? 0.1);
+            return [lack === null ? true : null, el ? lack! : `nothing matches ${sel}`];
+          });
+          break;
+        }
+        case "autofillService":
+          // Cleared first: the system drops a service whose package restarts (the scenario's pm clear) and, the
+          // setting unchanged, does not bind it again.
+          await sh(`settings delete secure autofill_service; settings put secure autofill_service ${quote(sub(arg))}`);
+          break;
+        case "launch": await sh(`am start -W -S -n ${quote(sub(arg))}`); break;
+        case "finger": await finger(timeout); break;
+        case "native": {
+          // A view of another app (uiautomator's dump): tapped at its middle, or its text held, as asked.
+          const want = { id: arg.id === undefined ? undefined : sub(arg.id), text: arg.text === undefined ? undefined : sub(arg.text) };
+          const hold = { is: typeof arg.is === "string" ? sub(arg.is) : undefined, has: typeof arg.has === "string" ? sub(arg.has) : undefined };
+          const view = await until(`native ${JSON.stringify(want)}`, timeout, async () => {
+            const n = findNative(await screenNodes(), want);
+            if (!n) return [null, "nothing on the screen"];
+            const why = nativeHolds(n, hold);
+            if (why !== null) return [null, why];
+            if (!arg.tap) return [n, ""];
+            // A tap across a launch's transition or a redraw lands on a view that is moving: the same box twice, a short while apart.
+            await sleep(300 * slow());
+            const again = findNative(await screenNodes(), want);
+            const still = again && again.box.x === n.box.x && again.box.y === n.box.y && again.box.w === n.box.w && again.box.h === n.box.h;
+            return [still ? again : null, "the view keeps moving"];
+          });
+          if (arg.tap) { const { x, y } = centre(view.box); await sh(`input tap ${x} ${y}`); }
           break;
         }
         case "pause": await sleep(Number(arg) * 1000 * slow()); break;
