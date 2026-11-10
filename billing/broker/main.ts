@@ -21,7 +21,7 @@ import {
   firstChargeFailed, lookupKeyOf, manageTokenOf, ownerOf, parsePublished, type Plan, type Published, returnTo, same, type Subscription,
   tenantOf, trialOf, trialSpent,
 } from "./core.ts";
-import { type Stripe, StripeError, webhookSigned } from "./stripe.ts";
+import { type Routed, type Stripe, StripeError, webhookSigned } from "./stripe.ts";
 
 /** Where a tenant publishes its owner and its plans. */
 export const PUBLISHED_PATH = "/.well-known/pronto-billing.json";
@@ -336,8 +336,11 @@ export async function broker(p: {
     const account = accountOf(b.account);
     if (!t || !account) return json(400, { error: "tenant and account required" });
     if (!perClient.take(client) || !perTenant.take(t)) return json(429, { error: "too many probes; try again in a minute" });
+    // Which way this read goes, the flag asked afresh (not what it kept), so a flip's check sees the
+    // way it just turned on; `direct` is true only when the read went straight to Stripe.
+    const route = await (p.stripe as Routed).route?.(true);
     await subscriptionsOf(await customersOf(t, account));
-    return json(200, { ok: true });
+    return json(200, { ok: true, direct: route === "direct" });
   }
 
   async function checkout(req: Request, client: string): Promise<Response> {
@@ -689,6 +692,7 @@ if (import.meta.main) {
     // app's previews test a purchase there, with Stripe's test cards, never a live charge.
     // Through the door, the sandbox's key is the airlock's too, behind its door stripe-sandbox.
     const sandboxKey = env("STRIPE_SANDBOX_SECRET_KEY"), sandboxTenants = env("BILLING_SANDBOX_TENANTS");
+    if (doorFlag && sandboxTenants && !sandboxKey) throw new Error("STRIPE_DOOR_FLAG with a sandbox needs STRIPE_SANDBOX_SECRET_KEY too: the sandbox's calls go straight to Stripe while the flag is off");
     if (door && sandboxKey && !doorFlag) throw new Error("STRIPE_DOOR and STRIPE_SANDBOX_SECRET_KEY: the airlock holds the sandbox's key too");
     if (sandboxKey || (door && sandboxTenants)) {
       const sandboxWebhookSecret = env("STRIPE_SANDBOX_WEBHOOK_SECRET");

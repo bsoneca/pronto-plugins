@@ -740,7 +740,7 @@ Deno.test("a probe reads the account at Stripe and writes nothing", async () => 
   await payouts(A);
   const before = sent.length, customers = fake.held.customers.size;
   const res = await post("/probe", { tenant: A, account: ANA });
-  assertEquals([res.status, await res.json()], [200, { ok: true }]);
+  assertEquals([res.status, await res.json()], [200, { ok: true, direct: false }], "the stand-in goes neither way");
   const asked = sent.slice(before);
   assertEquals(asked.map((s) => s.method).every((m) => m === "GET"), true, "only reads");
   assertEquals(asked.some((s) => s.path === "/v1/customers/search"), true, "the account's customers read");
