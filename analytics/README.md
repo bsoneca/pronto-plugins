@@ -75,6 +75,23 @@ That is pronto-infra's state, not this plugin's (`infra/gcp/analytics.cue`): one
 accounts, `grafanaUsers`, each with a role (`Admin`, `Editor`, `Viewer`; a person is a `Viewer`
 unless they change dashboards). Adding someone is one line there and `release@infra`.
 
+## On a metal cluster
+
+`bin/pronto-analytics metal` ([`metal.nu`](metal.nu)) runs the operator's Grafana and Umami on a
+node the operator runs (pronto's envs.Metal), in namespace `analytics`, behind the node's tunnel:
+Grafana reads the cluster's VictoriaMetrics, where each app's exporter (its release's
+`analytics-exporter` service) and collectors are scraped; both keep their state in one
+CloudNativePG cluster whose logins are generated in the namespace. Grafana's secret key, its Google
+client and Umami's app secret are read from the project's Secret Manager and piped into Secrets, so
+what Cloud Run's kept still decrypts and signs. Copy the data, then point the two names at the tunnel.
+
+```sh
+bin/pronto-analytics metal --ssh bruno@13.140.186.223 --project brawl-chess \
+  --grafana-domain metrics.bonkchess.com --umami-domain umami.bonkchess.com \
+  --users-file <grafanaUsers as JSON> --titles '{"bonk-chess": "Bonk Chess"}' \
+  --dashboards [bonk-chess/business=<pronto>/apps/brawl-chess/observability/analytics.business.dashboard.json]
+```
+
 ## Tests
 
 - [`tests.cue`](tests.cue): the views, the exporter's files, the dashboard and the names, checked with `cue vet`.

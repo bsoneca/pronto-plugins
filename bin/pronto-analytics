@@ -7,6 +7,13 @@
 # modules/analytics's, and the program's package embeds the module's export (join/analytics.json).
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
+# Or Grafana and Umami on a cluster the operator runs (pronto's envs.Metal), as analytics/metal.nu says:
+#   bin/pronto-analytics metal --ssh U@H --project P --grafana-domain G --umami-domain U --users-file F --dashboards [...]
+if [ "${1:-}" = metal ]; then
+	shift
+	cd "$here"
+	exec ./saytw --script tools.nu nu analytics/metal.nu "$@"
+fi
 app=$(cd "$1" && pwd)
 shift
 package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" | head -n 1)
