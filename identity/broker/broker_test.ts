@@ -73,6 +73,8 @@ async function redeem(tenant: string, code: string, verifier: string, over: Reco
 }
 
 const A = "https://app-a.example", B = "https://app-b.example";
+// A moved to a new address: its sector is the origin its people's subjects were made under.
+const MOVED = "https://app-a-moved.example";
 const cases: [string, () => Promise<void>][] = [];
 
 
@@ -115,6 +117,17 @@ cases.push(["the same person is a stranger to another tenant, and the same to th
   assertEquals(a1 === b, false);
 }]);
 
+cases.push(["an app that moved address keeps every person's subject, under its sector, and is still a stranger to others", async () => {
+  const subOf = async (tenant: string, who: string) => {
+    const s = await signIn(tenant, who);
+    const t = await redeem(tenant, s.landed!.searchParams.get("code")!, s.verifier!);
+    return (await verifyIdToken(t.body.id_token, { alg: "ES256", issuers: [ISSUER], audience: tenant, nonce: s.q!.get("nonce")!, keys: brokerKeys })).sub;
+  };
+  assertEquals(await subOf(MOVED, "alice"), await subOf(A, "alice"), "the moved address answers the subject the old one did");
+  assertEquals(await subOf(MOVED, "alice") === await subOf(MOVED, "bob"), false, "and each person stays their own");
+  assertEquals(await subOf(MOVED, "alice") === await subOf(B, "alice"), false, "and another app still sees a stranger");
+}]);
+
 cases.push(["a tenant cannot redeem another tenant's code, nor use another's redirect", async () => {
   const s = await signIn(A, "bob");
   const stolen = await redeem(B, s.landed!.searchParams.get("code")!, s.verifier!);
@@ -150,7 +163,7 @@ Deno.test("the broker end to end", async (t) => {
     name: "google", label: "Google", authUrl: `${G}/auth`, tokenUrl: `${G}/token`, issuers: ["https://accounts.google.com"],
     keys: async (kid) => (kid === "g1" ? googleJwk : undefined), clientId: "op-client", clientSecret: "op-secret",
   };
-  handler = await broker({ issuer: ISSUER, secret: "s".repeat(40), providers: [provider] });
+  handler = await broker({ issuer: ISSUER, secret: "s".repeat(40), providers: [provider], sectors: new Map([[MOVED, A]]) });
   try {
     for (const [name, run] of cases) await t.step({ name, fn: run, sanitizeOps: false, sanitizeResources: false });
   } finally {

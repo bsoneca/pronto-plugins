@@ -9,7 +9,7 @@
 // start and never stored, since its tokens live five minutes and tenants
 // fetch a key they do not know.
 import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, signEs256, verifyIdToken } from "../oidc.ts";
-import { type AuthRequest, Codes, emailOf, esc, json, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, profileOf, providerScope, redeem } from "./core.ts";
+import { type AuthRequest, Codes, emailOf, esc, json, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, sectorOf, sectorsOf, profileOf, providerScope, redeem } from "./core.ts";
 
 // Kept where phone.ts takes them (core.ts), so the phone imports nothing of this module at run time:
 // a cycle with its top-level await would never resolve, and the broker would never start.
@@ -99,6 +99,8 @@ export async function broker(p: {
   secret: string;
   providers: Provider[];
   codes?: Codes;
+  /** Each moved tenant's sector, the origin its subjects were made under (core.ts sectorsOf). */
+  sectors?: ReadonlyMap<string, string>;
   /** Routes served beside the broker's own: the phone's (phone.ts). */
   extra?: (req: Request, url: URL) => Promise<Response> | null;
 }) {
@@ -108,6 +110,7 @@ export async function broker(p: {
   const pairwise = await pairwiseKey(p.secret);
   const stateKey = await hmacKey(p.secret, "broker round trip");
   const codes = p.codes ?? new Codes();
+  const sectors = p.sectors ?? new Map<string, string>();
   const signing = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
   const kid = randomToken(8);
   const publicJwk = { ...(await crypto.subtle.exportKey("jwk", signing.publicKey)), kid, alg: "ES256", use: "sig" };
@@ -177,7 +180,8 @@ export async function broker(p: {
       console.error(`broker: ${name}'s id token refused: ${e.message}`);
       return back(r.redirectUri, { error: "access_denied", state: r.state });
     }
-    const sub = await pairwiseSubject(pairwise, r.tenant, provider.name, claims.sub);
+    // Under the tenant's sector: an app that moved address keeps its people's subjects (sectorsOf).
+    const sub = await pairwiseSubject(pairwise, sectorOf(sectors, r.tenant), provider.name, claims.sub);
     // The name and picture, and the verified e-mail, only to a tenant that asked for them, which the
     // provider then showed the person.
     const code = codes.issue({
@@ -242,5 +246,5 @@ if (import.meta.main) {
   const phone = phoneCfg ? await phoneUpstream(issuer, phoneCfg, { secret }) : null;
   if (phone) providers.push(phone.provider);
   if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT, or PHONE_OTP=broker");
-  Deno.serve({ port: Number(env("PORT") ?? 28443) }, await broker({ issuer, secret, providers, extra: phone?.handle }));
+  Deno.serve({ port: Number(env("PORT") ?? 28443) }, await broker({ issuer, secret, providers, sectors: sectorsOf(env("BROKER_SECTORS")), extra: phone?.handle }));
 }

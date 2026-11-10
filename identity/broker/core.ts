@@ -42,6 +42,32 @@ export function pairwiseKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
 }
 
+/**
+ * The operator's sectors (BROKER_SECTORS): an application that moved address keeps the subjects it
+ * had, so its new origin is mapped to the one its people's subjects were made under, as OpenID's
+ * sector_identifier names the host a pairwise subject is computed for. Written
+ * "https://new.example=https://old.example", comma separated; both sides bare https origins, a
+ * tenant named once, and no sector that is itself mapped (a chain would hide the one in force).
+ */
+export function sectorsOf(text: string | undefined): Map<string, string> {
+  const sectors = new Map<string, string>();
+  for (const entry of (text ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const [from, to, ...rest] = entry.split("=");
+    const tenant = tenantOf(from?.trim()), sector = tenantOf(to?.trim());
+    if (rest.length > 0 || !tenant || !sector) throw new Error(`BROKER_SECTORS: "${entry}" is not https://tenant=https://sector`);
+    if (tenant === sector) throw new Error(`BROKER_SECTORS: ${tenant} is mapped to itself`);
+    if (sectors.has(tenant)) throw new Error(`BROKER_SECTORS: ${tenant} is mapped twice`);
+    sectors.set(tenant, sector);
+  }
+  for (const [tenant, sector] of sectors) {
+    if (sectors.has(sector)) throw new Error(`BROKER_SECTORS: ${tenant} is mapped to ${sector}, which is mapped in turn`);
+  }
+  return sectors;
+}
+
+/** The origin a tenant's subjects are made under: its sector, else itself. */
+export const sectorOf = (sectors: ReadonlyMap<string, string>, tenant: string) => sectors.get(tenant) ?? tenant;
+
 /** A person's subject in one tenant: unrelated across tenants and providers. */
 export async function pairwiseSubject(key: CryptoKey, tenant: string, provider: string, providerSub: string): Promise<string> {
   const mac = await crypto.subtle.sign("HMAC", key, enc.encode(`${tenant}\u0000${provider}\u0000${providerSub}`));

@@ -1,7 +1,7 @@
 // The broker's isolation rules: a tenant is an https origin, its redirect is
 // its own origin's one callback, a person's subject differs per tenant, and a
 // code is redeemed once, by the tenant and redirect it was issued to.
-import { callbackOf, Codes, type Grant, idTokenClaims, pairwiseKey, pairwiseSubject, parseAuthorize, pkceMatches, redeem, tenantOf } from "./core.ts";
+import { callbackOf, Codes, type Grant, idTokenClaims, pairwiseKey, pairwiseSubject, parseAuthorize, sectorOf, sectorsOf, pkceMatches, redeem, tenantOf } from "./core.ts";
 import { randomToken, Refused, sha256url, signEs256, verifyIdToken } from "../oidc.ts";
 
 function assertEquals(a: unknown, b: unknown, m = "") {
@@ -120,4 +120,23 @@ Deno.test("the ID token is the tenant's alone: another tenant refuses it", async
   let refused = "";
   try { await check("https://app-b.example"); } catch (e) { refused = e instanceof Refused ? e.message : String(e); }
   assertEquals(refused, "id token audience");
+});
+
+Deno.test("a moved tenant's sector is read from BROKER_SECTORS, and a malformed one refuses to start", () => {
+  const sectors = sectorsOf(" https://new.example=https://old.example , https://b2.example=https://b.example");
+  assertEquals(sectorOf(sectors, "https://new.example"), "https://old.example");
+  assertEquals(sectorOf(sectors, "https://b2.example"), "https://b.example");
+  assertEquals(sectorOf(sectors, "https://other.example"), "https://other.example", "an unmapped tenant is its own sector");
+  assertEquals(sectorsOf(undefined).size, 0);
+  assertEquals(sectorsOf("").size, 0);
+  for (const bad of [
+    "https://new.example", "https://new.example=http://old.example", "https://new.example/=https://old.example",
+    "https://new.example=https://old.example=https://x.example", "https://a.example=https://a.example",
+    "https://a.example=https://b.example,https://a.example=https://c.example",
+    "https://a.example=https://b.example,https://b.example=https://c.example",
+  ]) {
+    let threw = false;
+    try { sectorsOf(bad); } catch { threw = true; }
+    assertEquals(threw, true, bad);
+  }
 });

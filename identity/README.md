@@ -11,6 +11,10 @@ Two halves:
 
 Each app is its own tenant, never merged with another. The subject the broker vouches for is pairwise, so a person is a stranger to every other app. Only what the tenant asks for arrives: `profile` adds the person's name and picture, `email` an e-mail address the provider says it verified; the installer's `scope=` (default `openid profile`) says which. It needs a pronto with `auth.providers`, a mecha whose auth service signs in by OpenID Connect, and an omnishell that draws a provider's way in.
 
+### An app that moves address
+
+A subject is derived from the tenant's origin, so an app served from a new address would see every person as new, with an empty account. The operator keeps them by giving the new origin a sector, the origin its subjects were made under (OpenID's `sector_identifier`): `BROKER_SECTORS=https://new.example=https://old.example`, comma separated, which `metal.nu` sets with `--sectors`. Both sides are bare https origins; a tenant is named once and a sector is never itself mapped. A malformed list stops the broker at start. The old address stays its own sector, so both addresses answer the same subjects while the app moves.
+
 ## Use
 
 From a pronto app:
