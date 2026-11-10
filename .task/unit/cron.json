@@ -1,6 +1,6 @@
 {
- "key": "f3edd5684642b0f9c9055e87585af210b2433634e9e6c1503492b4b245105472",
- "at": "2026-11-08T15:42:54.625Z",
+ "key": "a2d3f5d0d92a9ef80ab2c49438343fdd9ab438e941dd15951ddf2b13291e19c1",
+ "at": "2026-11-10T20:51:17.384Z",
  "observed": {
   "read": {},
   "dir": {},
@@ -11,7 +11,7 @@
  },
  "lines": [
   "suite cron",
-  "cases 8b1a8f41a8b2bcede28947afb344288e44ffe85439b3de9bba61c4c6f977f7f8",
+  "cases b1d2f8c0133a3633ea47b49bccfb3f1a1d99fd6b6e67055ee3c01aec70ac7b23",
   "jobs 1",
   "file tests/unit.ts 5299ee134265c1802354c3a8ec781bd7eba9b7a9790a1edb9f398a517d6ae12b",
   "file tests/unit/select.js f04983b61baf86539ac5bafb0fccf9e67847f614866b4f243551d3b179e163b1",
@@ -21,13 +21,13 @@
   "file deno.jsonc absent",
   "file deno.lock absent",
   "file package.json absent",
-  "deno 2.5.0",
+  "deno 2.9.8",
   "args [\"cron\"]",
-  "allow read=granted write=prompt env=granted run=granted net=prompt sys=prompt ffi=prompt",
-  "env CUE e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "module tests/unit/registry.js 350f78fb3a008951710dc2e1c54c7c91481042627d7d56501c03cf73b3af5274",
+  "allow read=granted write=granted env=granted run=granted net=granted sys=granted ffi=granted",
+  "env CUE 50244208da1de5f9026c35f01ebdbb249b3ee9e70893e0d14ef5901a59aee9d7",
+  "module tests/unit/registry.js 405bdcd1fed22631d62571d3986096d47e05ab386ba61be28e97159e156dd805",
   "module intents/run.ts 3137ad06e3e40c841bb0d78753da1b6c43943f6df8126be268f102f6abe1992b",
-  "module release-cron/cron.js 3732d93ecfd30bbfda2a31ed7e44f5a7d77b81372401ee7422767c239307f06e",
+  "module release-cron/cron.js 5132f9357ad94b6d504dbb31dcbf96cccae7582964df0b99dcd8d6752630a00b",
   "module tests/unit/probes.js dafb02227fc0d91c074c9b44b9037ddc82276041df209637cf5ab08165459f90"
  ]
 }

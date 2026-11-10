@@ -23,6 +23,16 @@ releaseCron: #Cron
 		release!: [string, ...string]
 		serving!: [string, ...string]
 		origin!:  string & =~"^https://"
+		// A release preview (rc) proven before the release: `up` releases it (the node's release@k8s --preview=rc), `reach`
+		// makes it answer at `origin` for as long as it runs (a port-forward, killed when the check is done), `down`
+		// removes it, always. The probes below that do not say `preview: false` are asked of it, and it must answer them
+		// all before the release goes ahead: its images, migrations and config proven on the node, before traffic moves.
+		preview?: {
+			up!:    [string, ...string]
+			reach!: [string, ...string]
+			down!:  [string, ...string]
+			origin: *"http://localhost:18080" | (string & =~"^http://localhost:[0-9]+$")
+		}
 	}
 	// Cloud Run services, besides GCP.service, that must be Ready in confirm (Bonk Chess: its renderer).
 	ready: [...string]
@@ -62,5 +72,10 @@ releaseCron: #Cron
 	status: int | *200
 	// Text the body holds, when the status alone does not prove the right server answered.
 	has: [...string]
+	// Where a redirect must send the probe (the Location's start): the probe is asked without
+	// following it, so the address the app sends to is what is checked (PRONTO-6's Google start).
+	location?: string & =~"^https://"
+	// `false`: the release preview is not asked this probe (it holds no production rows, say).
+	preview?: false
 	why?: string
 }

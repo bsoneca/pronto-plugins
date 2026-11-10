@@ -27,7 +27,8 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { activeLine, boardHook, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole } from "./cron.js";
+import { previewProbes, boardEnv, boardHook, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal } from "./cron.js";
+import { hotSql, touched } from "../tests/scenarios/select.ts";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -105,7 +106,11 @@ const tellPr = (slug: string, b: Bisect, pr: number, info: { body: string }, msg
 // Each commit between the last run that released and the failed one is read from the records
 // first (rehearsals, releases, and the verdicts of earlier bisects); the failing check is run only
 // on a commit none of them covers, in the middle of what is left, as a plain claim on the machine's
-// slots (the app's tests/slot.ts, waiting for release-active like any job). It never releases.
+// slots (the app's tests/slot.ts, in the pull requests' pool). It never releases, and never holds a
+// release up: it runs apart from the run that started it (its own process, never a cd job's), yields to
+// any release-cron run that takes the lock (stopping its check, the verdicts so far kept for the next
+// bisect), and stops when a later run released or main is green for the failure (cron.js stopsBisect).
+// Low priority: the process tree runs under `nice -n 19` and macOS's background QoS (`lowPriority`), so a gate or a release outranks it.
 // `--dry` reads the records and says what it would run, running nothing and writing nothing.
 if (verb === "bisect") {
   const dry = Deno.args.includes("--dry");
@@ -145,6 +150,10 @@ if (verb === "bisect") {
     if (!ok) { say("another bisect took the lock"); Deno.exit(0); }
   }
   const unlock = () => { try { if (Deno.readTextFileSync(`${dir}/lock`) === String(Deno.pid)) Deno.removeSync(`${dir}/lock`); } catch { /* none, or not ours */ } };
+  // The run's lock holder. The run that started this bisect (RELEASE_CRON_BISECT_BY, its pid) lets it go
+  // as it ends; any other live holder is a run this bisect yields to, one by hand's too.
+  const runHolder = () => { try { return Number(Deno.readTextFileSync(`${state}/lock/pid`)); } catch { return 0; } };
+  const starter = Number(Deno.env.get("RELEASE_CRON_BISECT_BY") ?? 0);
   const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], here);
   must("git", ["--git-dir", repo, "fetch", "-q", "origin"]);
   const slug = must("git", ["--git-dir", repo, "remote", "get-url", "origin"]).replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1");
@@ -161,9 +170,43 @@ if (verb === "bisect") {
   const known: Record<string, string> = {};
   const settle = () => { const ev = evidence(); for (const c of list) known[c.sha] ??= "unknown"; for (const c of list) if (known[c.sha] === "unknown") known[c.sha] = verdict(c.sha, sig, ev); known[list.at(-1)!.sha] = "bad"; };
   if (!list.length) { say("no merge between: nothing to bisect"); unlock(); Deno.exit(0); }
+  // A failure that flags, time or load decide is not the commit's: say so, bisect nothing.
+  const specs = (() => {
+    const out: { id: string; flags: boolean; slow: boolean }[] = [];
+    try {
+      for (const f of Deno.readDirSync(`${top}/tests/scenarios`)) {
+        if (!f.name.endsWith(".cue")) continue;
+        const body = Deno.readTextFileSync(`${top}/tests/scenarios/${f.name}`);
+        for (const m of body.matchAll(/^scenarios:\s+(\w+):\s*\{([\s\S]*?)^\}/gm)) out.push({ id: m[1], flags: /^\tflags:/m.test(m[2]), slow: /^\tslow:\s*true/m.test(m[2]) });
+      }
+    } catch { /* no scenarios to read: only load and the menu budget decide */ }
+    return out;
+  })();
+  const never = undecidable(sig, text, specs, Deno.loadavg()[0], navigator.hardwareConcurrency, (failed.flaked as string[] | undefined) ?? []);
+  if (never) {
+    say(never);
+    Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify({ of: failed.started, kind: sig.kind, names: sig.names, green: green.commit, failing: failed.commit, ran: 0, fromRecords: 0, why: never }) + "\n", { append: true });
+    unlock(); Deno.exit(0);
+  }
   settle();
+  // Before each check: yield to a run, or stop when a later run released or main went green for it.
+  const halt = () => {
+    const h = runHolder();
+    const after = jsonl(`${state}/runs.jsonl`).slice(at + 1).find((r) => r.outcome === "released" && r.commit);
+    sh("git", ["--git-dir", repo, "fetch", "-q", "origin"], undefined, {}, 120);
+    const since = (sh("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H", `${failed.commit}..origin/main`], undefined, {}, 60).out ?? "").split("\n").filter(Boolean).reverse();
+    return stopsBisect(h, starter, h > 0 && sh("kill", ["-0", String(h)]).ok, after?.commit ?? null, fixedBy(since, sig, evidence()));
+  };
+  const stop = (why: string) => {
+    say(why);
+    // A yield is not recorded: the next bisect takes the same failed run up, on the verdicts kept.
+    if (!/yields/.test(why)) Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify({ of: failed.started, kind: sig.kind, names: sig.names, green: green.commit, failing: failed.commit, ran, fromRecords: 0, why }) + "\n", { append: true });
+    unlock(); Deno.exit(0);
+  };
   const fromRecords = list.filter((c) => known[c.sha] !== "unknown").length;
   let ran = 0, step = next(list, known), why = "";
+  // Skipped at the start, not only before a later check: a run holds the lock, a later run released, or main is already green for the failure.
+  if (!dry) { const h = halt(); if (h) stop(h); }
   const verdicts = (sha: string, v: string) => Deno.writeTextFileSync(`${dir}/verdicts.jsonl`, JSON.stringify({ commit: sha, kind: sig.kind, names: sig.names, verdict: v, at: new Date().toISOString() }) + "\n", { append: true });
   // The failing check on a commit's tree: ONLY the failed scenarios, slowed as the rehearsal runs
   // them, in its own process group, with no time limit (a line every 5 minutes says it is still running).
@@ -190,16 +233,27 @@ if (verb === "bisect") {
     const env: Record<string, string> = { ...Deno.env.toObject(), SLOW: "1", INTEGRATE_LOCAL_DRIVERS: "all", STACK_WAIT_MINUTES: "525600", ...(sig.names.length ? { ONLY: sig.names.join(",") } : {}) };
     delete env.STACK_PRIORITY;
     const logf = `${dir}/${sha.slice(0, 8)}.log`;
-    const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", "sh", "-c", b.command], cwd: `${bwt}/${appRel}`, env, clearEnv: true, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
+    const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...lowPriority(["sh", "-c", b.command])], cwd: `${bwt}/${appRel}`, env, clearEnv: true, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
     group = p.pid;
     const t0 = Date.now();
     const beat = setInterval(() => say(`${sha.slice(0, 8)}: check still running, ${Math.round((Date.now() - t0) / 60_000)} min`), 5 * 60_000);
+    // A run that takes the lock mid-check stops the check: its group TERM, then KILL after 30 s.
+    let yielded = 0;
+    const watch = setInterval(() => {
+      const h = runHolder();
+      if (yielded || !stopsBisect(h, starter, h > 0 && sh("kill", ["-0", String(h)]).ok, null, null)) return;
+      yielded = h;
+      sh("kill", ["-TERM", "--", `-${p.pid}`], undefined, {}, 10);
+      setTimeout(() => sh("kill", ["-KILL", "--", `-${p.pid}`], undefined, {}, 10), 30_000);
+    }, 30_000);
     const f = Deno.openSync(logf, { write: true, create: true, truncate: true });
     await Promise.all([p.stdout, p.stderr].map(async (s) => { for await (const c of s) f.writeSync(c); }));
     f.close();
     const { code } = await p.status;
     clearInterval(beat);
+    clearInterval(watch);
     group = 0;
+    if (yielded) stop(stopsBisect(yielded, starter, true, null, null)!);
     return code === 0 ? "good" : "bad";
   };
   // The check must fail here on the failing commit too (an explicit failure: a pass or a timeout is
@@ -213,6 +267,7 @@ if (verb === "bisect") {
     const same = (r: { commit: string; kind: string; names?: string[] }) => r.commit === failing && r.kind === sig.kind && (r.names ?? []).join(",") === sig.names.join(",");
     const mine = jsonl(`${dir}/verdicts.jsonl`).filter(same).at(-1)?.verdict;
     let v = mine;
+    if (!v) { const h = halt(); if (h) stop(h); }
     if (!v) {
       say(`running the failing commit ${failing.slice(0, 8)} first: the check must fail here too`);
       v = await check(failing);
@@ -225,6 +280,7 @@ if (verb === "bisect") {
   }
   if (!dry && reproduced) {
     for (; "test" in step; step = next(list, known)) {
+      { const h = halt(); if (h) stop(h); }
       say(`running ${(step.test as { sha: string }).sha.slice(0, 8)} (${sig.names.length ? `ONLY=${sig.names.join(",")}` : "the whole check"})`);
       const v = await check((step.test as { sha: string }).sha);
       ran++;
@@ -333,7 +389,7 @@ const enc = new TextEncoder();
 const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() - t0) / 1000)}s ${s}\n`; log(enc.encode(l)); Deno.stdout.writeSync(enc.encode(l)); };
 let head = "";
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
-let cron: { target?: { release: string[]; serving: string[]; origin: string }; gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { lead: string; notes: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[] }> };
+let cron: { target?: { release: string[]; serving: string[]; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string } }; gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { lead: string; notes: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
 let mark = Date.now();
@@ -369,22 +425,26 @@ const end = (outcome: string, why = "", code = 0) => {
   if (spaced(outcome)) Deno.writeTextFileSync(`${state}/last`, `${Date.now()} ${(run.gap as number | undefined) ?? 60} ${outcome === "failed" && run.commit ? run.commit : "-"}${run.commit ? ` ${run.commit}` : ""}`);
   say(l);
   // A failed run starts its bisect as it ends, after the machine was given back above, so it never holds
-  // release-active. Under launchd: its own process in its own session (launchd stops a job's process group),
-  // `gh` with the owner's login. Under CD (GITHUB_ACTIONS): in the foreground once the lock is let go below,
-  // so the job, and the GH_TOKEN bisect's `gh` and push use, last until it ends (the token dies with the job).
+  // release-active.
   const bisects = outcome === "failed" && !!run.commit && !Deno.env.get("RELEASE_CRON_NO_BISECT");
-  const underCd = Deno.env.get("GITHUB_ACTIONS") === "true";
-  const bisectEnv = () => ({ ...Deno.env.toObject(), RELEASE_CRON_NO_BISECT: "1" });
-  if (bisects && !underCd) {
-    try { new Deno.Command("perl", { args: ["-e", "use POSIX; setsid(); exec @ARGV or die $!", "--", Deno.execPath(), "run", "-A", `${here}release-cron.ts`, app, "bisect"], env: bisectEnv(), clearEnv: true, stdin: "null", stdout: "null", stderr: "null" }).spawn().unref(); } catch (e) { say(`bisect not started: ${(e as Error).message}`); }
+  // Never in the cd job's foreground, which held pronto-release, and with it every release, for the
+  // bisect's hours (2026-11-07 12:12-15:12 BRT): its own process in its own session, run from the run's
+  // worktree (the job's checkout is the next job's), `gh` with the owner's login, not the job's token,
+  // and out of the runner's reach (an empty RUNNER_TRACKING_ID: the runner ends a job's leftovers by it).
+  const bisectEnv = () => {
+    const env: Record<string, string> = { ...Deno.env.toObject(), RELEASE_CRON_NO_BISECT: "1", RELEASE_CRON_BISECT_BY: String(Deno.pid), RUNNER_TRACKING_ID: "" };
+    delete env.STACK_PRIORITY; // the pull requests' pool, never the release lane
+    for (const k of ["GH_TOKEN", "GITHUB_TOKEN", "CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE", "GOOGLE_GHA_CREDS_PATH"]) delete env[k];
+    return env;
+  };
+  const script = exists(`${wt}/${appRel}/release-cron/release-cron.ts`) ? `${wt}/${appRel}/release-cron/release-cron.ts` : `${here}release-cron.ts`;
+  if (bisects) {
+    try { new Deno.Command("perl", { args: ["-e", "use POSIX; setsid(); exec @ARGV or die $!", "--", ...lowPriority([Deno.execPath(), "run", "-A", script, app, "bisect"])], env: bisectEnv(), clearEnv: true, cwd: home, stdin: "null", stdout: "null", stderr: "null" }).spawn().unref(); } catch (e) { say(`bisect not started: ${(e as Error).message}`); }
   }
   // The last 50 runs' output kept.
   const logs = [...Deno.readDirSync(`${state}/runs`)].map((e) => e.name).sort();
   for (const old of logs.slice(0, -50)) Deno.removeSync(`${state}/runs/${old}`);
   try { if (Deno.readTextFileSync(`${state}/lock/pid`) === String(Deno.pid)) Deno.removeSync(`${state}/lock`, { recursive: true }); } catch { /* none, or not ours */ }
-  if (bisects && underCd) {
-    try { new Deno.Command(Deno.execPath(), { args: ["run", "-A", `${here}release-cron.ts`, app, "bisect"], env: bisectEnv(), stdin: "null", stdout: "inherit", stderr: "inherit" }).outputSync(); } catch (e) { say(`bisect not run: ${(e as Error).message}`); }
-  }
   Deno.exit(code);
 };
 
@@ -412,13 +472,66 @@ const [lastAt, lastGap, lastFailed, lastTried] = (() => { try { const [a, g, f, 
 {
   const [at, gap, failed] = [lastAt, lastGap, lastFailed];
   // After a failed run, main as the remote has it now (git ls-remote, no fetch): moved past the
-  // failed commit, the run starts without the gap.
+  // failed commit by a change that concerns what failed (judged), the run starts without the gap.
   const moved = () => { const r = sh("git", ["ls-remote", "origin", "refs/heads/main"], wt, {}, 60); return r.ok ? r.out.split(/\s/)[0] || null : null; };
+  const early = () => { const head = moved(); return !!failed && retry(failed, head) && judged(failed, head!) !== null; };
   // A run a CD job starts for a commit (RELEASE_CRON_NOW=1) has no gap to wait: the commit's push is its schedule.
-  if (!Deno.env.get("RELEASE_CRON_NOW") && !Number.isNaN(at) && !due(Date.now(), at, Number.isNaN(gap) ? 60 : gap) && !(failed && retry(failed, moved()))) {
+  if (!Deno.env.get("RELEASE_CRON_NOW") && !Number.isNaN(at) && !due(Date.now(), at, Number.isNaN(gap) ? 60 : gap) && !early()) {
     try { Deno.removeSync(`${state}/lock`, { recursive: true }); } catch { /* ours, just made */ }
     Deno.exit(0);
   }
+}
+
+// Whether main's change from the failed commit to `head` concerns what failed (cron.js's concerns): the
+// first file that does and why, or null, and the run waits the gap. Judged once per failed commit and
+// head (kept in <state>/retry), so the wakes in between fetch nothing; said once in launchd.log. A change
+// that cannot be fetched or read concerns it (fail open).
+function judged(failed: string, head: string): string | null {
+  const memo = `${state}/retry`;
+  try {
+    const [f, h, ...v] = Deno.readTextFileSync(memo).trim().split(" ");
+    if (f === failed && h === head) return v.join(" ") === "-" ? null : v.join(" ");
+  } catch { /* not judged yet */ }
+  const verdict = (() => {
+    if (!sh("git", ["fetch", "-q", "origin", "main"], wt, {}, 120).ok) return "main's change could not be fetched";
+    const diff = sh("git", ["diff", "--name-only", "--no-renames", failed, head], wt, {}, 60);
+    if (!diff.ok) return "main's change could not be read";
+    const run = jsonl(`${state}/runs.jsonl`).reverse().find((r) => r.outcome === "failed" && r.commit === failed);
+    const text = (() => { try { return run ? Deno.readTextFileSync(`${state}/runs/${run.started}.log`) : ""; } catch { return ""; } })();
+    const sig = signature(run?.why, text), flaked = flakedNames(text);
+    const names = sig.names.filter((n) => !flaked.includes(n));
+    // A SQL file and the failed scenarios: by what their newest green records touched, at `head`.
+    const sqlHot = (file: string) => {
+      const ledger = `${home}/.cache/pronto/scenarios/${app}`;
+      const served: string[] = [];
+      for (const n of names) {
+        let newest: { at: number; served: string[] } | undefined;
+        try {
+          for (const e of Deno.readDirSync(ledger)) {
+            if (!e.name.startsWith(`${n}.`)) continue;
+            const at = Deno.statSync(`${ledger}/${e.name}`).mtime?.getTime() ?? 0;
+            if (!newest || at > newest.at) newest = { at, served: JSON.parse(Deno.readTextFileSync(`${ledger}/${e.name}`)).served ?? [] };
+          }
+        } catch { return null; }
+        if (!newest) return null;
+        served.push(...newest.served);
+      }
+      const listed = sh("git", ["ls-tree", "-r", "--name-only", head, "--", appRel], wt, {}, 60);
+      if (!listed.ok) return null;
+      const sql: Record<string, string> = {};
+      for (const f of listed.out.split("\n").filter((x) => x.endsWith(".sql"))) {
+        const t = sh("git", ["show", `${head}:${f}`], wt, {}, 60);
+        if (t.ok) sql[f] = t.out;
+      }
+      const t = touched(served);
+      return hotSql(sql, t.names, t.wild).includes(file);
+    };
+    const c = concerns(diff.out.split("\n").filter(Boolean), appRel, { ...sig, names }, failedRehearsal(text), sqlHot);
+    return c ? `${c.file}, ${c.why}` : null;
+  })();
+  Deno.writeTextFileSync(memo, `${failed} ${head} ${verdict ?? "-"}\n`);
+  console.log(`${local(Date.now())} ${app}: main moved from the failed ${failed.slice(0, 8)} to ${head.slice(0, 8)}; ${verdict ? `retried without the gap: ${verdict}` : "nothing it changed concerns what failed: the gap is waited"}`);
+  return verdict;
 }
 
 let current: { pgid: number } | undefined;
@@ -549,6 +662,48 @@ try {
   if (!cloud) step("rehearse");
   if (gate.code !== 0) end("failed", `the rehearsal failed (exit ${gate.code}): nothing released`, 1);
 
+  // 2b. The release preview (releaseCron.target.preview): the release's whole stack in a namespace of its own on the
+  // cluster, asked the probes through a port-forward before the release goes ahead, and removed after, whatever it
+  // said. It proves the images, the migrations replayed over a fresh database and the config on the node before
+  // any traffic moves; a preview that fails stops the release (nothing released).
+  if (target?.preview) {
+    const pv = target.preview;
+    active("preview");
+    const env = { ...Deno.env.toObject(), STACK_PRIORITY: "release" };
+    const bad: string[] = [];
+    let reach: Deno.ChildProcess | undefined;
+    try {
+      const up = await child(pv.up[0], pv.up.slice(1), dir, env);
+      if (up.code !== 0) bad.push(`the preview (${pv.up.join(" ")}) failed (exit ${up.code})`);
+      else {
+        // In a process group of its own, so ending it ends the ssh forward and what it started; its stdin stays open (nothing
+        // is written to it), which is how the remote side knows to stop: it reads it until the connection closes.
+        reach = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...pv.reach], cwd: dir, env, stdin: "piped", stdout: "null", stderr: "null" }).spawn();
+        // Answering through the forward: `/` is asked until it answers (the forward takes a moment, as a cold pod's first page does).
+        let said2 = 0;
+        for (;;) {
+          try { const r = await fetch(pv.origin + "/", { signal: AbortSignal.timeout(15_000) }); await r.body?.cancel(); if (r.status < 500) break; } catch { /* not up yet */ }
+          if (Date.now() - said2 >= HEARTBEAT) { said2 = Date.now(); say(`preview: still waiting for ${pv.origin}`); }
+          await new Promise((r) => setTimeout(r, 5_000));
+        }
+        for (const [name, p] of previewProbes(cron.probes)) {
+          try {
+            const r = await fetch(`${pv.origin}${p.path}`, { headers: p.agent ? { "User-Agent": p.agent } : {}, redirect: p.location ? "manual" : "follow", signal: AbortSignal.timeout(60_000) });
+            const v = probe(p, r.status, await r.text(), r.headers.get("location"));
+            if (v) bad.push(`${name} ${v}`);
+          } catch (e) { bad.push(`${name} ${p.path}: ${(e as Error).message}`); }
+        }
+      }
+    } finally {
+      if (reach) { try { send(reach.pid, "TERM"); await reach.stdin.close().catch(() => {}); } catch { /* already gone */ } }
+      const down = await child(pv.down[0], pv.down.slice(1), dir, env);
+      if (down.code !== 0) say(`preview: removing it failed (exit ${down.code}): ${pv.down.join(" ")}`);
+    }
+    step("preview");
+    say(bad.length ? `preview failed: ${bad.join("; ")}` : "preview answered every probe");
+    if (bad.length) end("failed", `the release preview failed: ${bad.join("; ")}: nothing released`, 1);
+  }
+
   // 3. The release, on the tree the rehearsal passed.
   active("release");
   const rel = await child(target ? target.release[0] : "./saytw", target ? target.release.slice(1) : ["release@gcp"], dir, { ...Deno.env.toObject(), STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
@@ -633,8 +788,8 @@ try {
     }
     for (const [name, p] of Object.entries(cron.probes)) {
       try {
-        const r = await fetch(`${origin}${p.path}`, { headers: p.agent ? { "User-Agent": p.agent } : {}, signal: AbortSignal.timeout(30_000) });
-        const v = probe(p, r.status, await r.text());
+        const r = await fetch(`${origin}${p.path}`, { headers: p.agent ? { "User-Agent": p.agent } : {}, redirect: p.location ? "manual" : "follow", signal: AbortSignal.timeout(30_000) });
+        const v = probe(p, r.status, await r.text(), r.headers.get("location"));
         if (v) wrong.push(`${name} ${v}`);
       } catch (e) { wrong.push(`${name} ${p.path}: ${(e as Error).message}`); }
     }
@@ -667,11 +822,11 @@ try {
     say(`source maps ${run.maps}`);
   }
   // 7. The dev flow's board, where the repository keeps one (its devflow/devflow.cue; pronto-plugins' devflow/README.md):
-  // the app's Merged issues whose pull request this release holds go Live. Run from pronto-plugins' main, this script
-  // being a copy in the app; the board's token is PLANE_TOKEN or Secret Manager's. Whatever it says, the run's outcome stays.
+  // the app's Merged issues whose pull request this release holds go Live (a flagless fix, Done). The board's token is
+  // PLANE_TOKEN or Secret Manager's. A board that cannot be told is logged and never changes the run's outcome.
   if (exists(`${wt}/devflow/devflow.cue`)) {
     try {
-      const b = await child(Deno.execPath(), boardHook(wt, appRel, head), wt, Deno.env.toObject());
+      const b = await child(Deno.execPath(), boardHook(wt, appRel, head), wt, boardEnv(Deno.env.toObject(), Deno.env.get("HOME") ?? "", cueVersions()));
       run.board = b.code === 0 ? "told" : `failed (exit ${b.code})`;
     } catch (e) { run.board = `failed (${(e as Error).message.split("\n")[0]})`; }
     say(`board ${run.board}`);
@@ -684,4 +839,9 @@ try {
   end("failed", (e as Error).message.split("\n")[0], 1);
 }
 
+function cueVersions(): string[] {
+  try {
+    return [...Deno.readDirSync(`${Deno.env.get("HOME")}/.local/share/mise/installs/github-cue-lang-cue`)].map((e) => e.name);
+  } catch { return []; }
+}
 function exists(p: string) { try { Deno.statSync(p); return true; } catch { return false; } }
