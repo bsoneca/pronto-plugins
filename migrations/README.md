@@ -195,11 +195,17 @@ events. Its changes run in three phases, whatever order the columns come in:
 2. **Move rows:** backfills and carries. No row is moved against a rule the same migration drops.
 3. **Tighten:** `SET NOT NULL`, uniques, references and indexes built.
 
-**A carry is a `DO` block.** It runs only where a row holds a value gone, and turns off only the
-triggers that exist when it runs. It lifts each moved column's check around the update and puts back
-the check the database holds, `NOT VALID`. A database that skipped releases already holds the newest
-check from the replay, and an earlier carry's destination (one a later migration carries on) is
-outside it.
+**A carry or a backfill is a `DO` block.** It runs only where a row needs moving: one holding a value
+gone, or a `NULL` in a column made required. A carry turns off only the triggers that exist when it
+runs. Postgres checks every check on a row it updates, even one `NOT VALID`, and the replay restates
+every check `NOT VALID`. So a row written before a check was restated, on any of its columns, would
+stop the move. The block lifts every check on the table around the update and puts each back as the
+database held it, `NOT VALID`:
+- a carry also lifts its own column's check, since a database that skipped releases already holds the
+  newest check from the replay, and an earlier carry's destination (one a later migration carries on)
+  is outside it;
+- a backfill keeps its own column's check, since the value it fills is the model's, which that check
+  admits.
 
 **On a fresh database**, initdb builds the latest model, and then every migration runs in order:
 - each relaxes what initdb already relaxed;

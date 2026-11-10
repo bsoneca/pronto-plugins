@@ -210,7 +210,7 @@ export const where = (c) => c.field ? `${c.entity}.${c.field}` : c.index ? `${c.
 
 // A default read from the session (the caller's claims, a setting): NULL in a migration, so it fills
 // nothing.
-export const sessionDefault = (d) => d !== undefined && /\b(auth_\w*|current_setting|current_user|session_user|current_role)\b/.test(d);
+export const sessionDefault = (d) => d !== undefined && /\b(auth_\w*|current_setting|current_user|session_user|current_role)\b/i.test(d);
 
 // The changes from one model to the next, in a stable order: entities by name, columns by number.
 // A column is paired by its number, never by its name, so a rename is seen as one; a live field and
@@ -361,7 +361,13 @@ export function plan(changes, declared = {}, dropped = {}) {
           needs.push({ at, declare: `backfill.${c.entity}.${c.field}`, why: `made required, with ${c.default === undefined ? "no default" : `a default a migration cannot compute (${c.default})`}: the value (an SQL expression) its NULL rows take` });
           break;
         }
-        op(DATA, "made required: its NULL rows filled", `UPDATE ${t} SET ${col} = ${fill} WHERE ${col} IS NULL;`);
+        if (String(fill).includes("$fill$")) {
+          refused.push({ at, kind: "backfill", why: "the backfill holds $fill$, its block's own quote" });
+          break;
+        }
+        // Its own check stays: the value it fills is the model's, which that check (the replay's newest)
+        // admits.
+        op(DATA, "made required: its NULL rows filled", moveSql("$fill$", t, `${col} IS NULL`, `UPDATE ${t} SET ${col} = ${fill} WHERE ${col} IS NULL;`, [], [`${c.table}_${c.field}_check`]));
         op(TIGHTEN, "made required", `ALTER TABLE ${t} ALTER COLUMN ${col} SET NOT NULL;`);
         break;
       }
@@ -445,28 +451,36 @@ function carrySql(c, carry, t, col, needs, refused, at) {
     refused.push({ at, kind: "carry", why: problem });
     return null;
   }
+  // The moved columns' own checks are lifted too: the replay restates the newest check before any
+  // migration runs, so on a database that skipped releases an older carry's destination (one a later
+  // migration carries on) is outside it.
+  return moveSql("$carry$", t, `${col} IN (${gone})`, `UPDATE ${t} SET ${Object.entries(assign).map(([k, e]) => `${ident(k)} = ${e}`).join(", ")} WHERE ${col} IN (${gone});`, triggers);
+}
+
+// Rows moved (a carry, a backfill) as one DO block, quoted by `tag`, that runs only where a row
+// matches `where`, so a fresh database, or one moved already, runs nothing. Postgres checks every
+// check on a row it updates, even one NOT VALID, and the replay restates every check NOT VALID, so a
+// row written before a check was restated, on any of its columns, would stop the move. Every check on
+// the table but `kept` is lifted around the update and put back as the database held it, NOT VALID,
+// as the replay leaves it. `triggers` are turned off around it where they exist.
+function moveSql(tag, t, where, update, triggers = [], kept = []) {
   const exists = (x) => `EXISTS (SELECT FROM pg_trigger WHERE tgrelid = ${lit(t)}::regclass AND tgname = ${lit(x)})`;
-  // Each moved column's check is lifted around the UPDATE and put back as the database holds it then.
-  // The replay restates the newest check before any migration runs, so on a database that skipped
-  // releases an older carry's destination (one a later migration carries on) is outside it, and an
-  // UPDATE is checked even under NOT VALID. Put back NOT VALID, so the rows a later migration carries
-  // on are left for it.
-  const checks = Object.keys(assign).map((k, i) => ({ name: `${c.table}_${k}_check`, v: `check_${i + 1}` }));
+  const each = "FOR pronto_i IN 1 .. coalesce(array_length(pronto_lifted, 1), 0) LOOP";
   return [
-    "DO $carry$",
-    ...(checks.length ? ["DECLARE", ...checks.map((x) => `  ${x.v} text;`)] : []),
+    `DO ${tag}`,
+    "DECLARE",
+    "  pronto_lifted text[];",
+    "  pronto_defs text[];",
     "BEGIN",
-    `  IF EXISTS (SELECT FROM ${t} WHERE ${col} IN (${gone})) THEN`,
+    `  IF EXISTS (SELECT FROM ${t} WHERE ${where}) THEN`,
     ...triggers.map((x) => `    IF ${exists(x)} THEN ALTER TABLE ${t} DISABLE TRIGGER ${ident(x)}; END IF;`),
-    ...checks.flatMap((x) => [
-      `    SELECT pg_get_constraintdef(oid) INTO ${x.v} FROM pg_constraint WHERE conrelid = ${lit(t)}::regclass AND conname = ${lit(x.name)};`,
-      `    IF ${x.v} IS NOT NULL THEN ALTER TABLE ${t} DROP CONSTRAINT ${ident(x.name)}; END IF;`,
-    ]),
-    `    UPDATE ${t} SET ${Object.entries(assign).map(([k, e]) => `${ident(k)} = ${e}`).join(", ")} WHERE ${col} IN (${gone});`,
-    ...checks.map((x) => `    IF ${x.v} IS NOT NULL THEN EXECUTE ${lit(`ALTER TABLE ${t} ADD CONSTRAINT ${ident(x.name)} `)} || ${x.v} || CASE WHEN ${x.v} LIKE '%NOT VALID' THEN '' ELSE ' NOT VALID' END; END IF;`),
+    `    SELECT array_agg(conname ORDER BY conname), array_agg(pg_get_constraintdef(oid) ORDER BY conname) INTO pronto_lifted, pronto_defs FROM pg_constraint WHERE conrelid = ${lit(t)}::regclass AND contype = 'c'${kept.length ? ` AND conname <> ALL (ARRAY[${kept.map(lit).join(", ")}])` : ""};`,
+    `    ${each} EXECUTE ${lit(`ALTER TABLE ${t} DROP CONSTRAINT `)} || quote_ident(pronto_lifted[pronto_i]); END LOOP;`,
+    `    ${update}`,
+    `    ${each} EXECUTE ${lit(`ALTER TABLE ${t} ADD CONSTRAINT `)} || quote_ident(pronto_lifted[pronto_i]) || ' ' || pronto_defs[pronto_i] || CASE WHEN pronto_defs[pronto_i] LIKE '%NOT VALID' THEN '' ELSE ' NOT VALID' END; END LOOP;`,
     ...triggers.map((x) => `    IF ${exists(x)} THEN ALTER TABLE ${t} ENABLE TRIGGER ${ident(x)}; END IF;`),
     "  END IF;",
-    "END $carry$;",
+    `END ${tag};`,
   ].join("\n");
 }
 
@@ -476,19 +490,22 @@ const createIndex = (t, name, x) => `CREATE ${x.unique ? "UNIQUE " : ""}INDEX ${
 export const ident = (s) => `"${String(s).replaceAll('"', '""')}"`;
 export const lit = (s) => `'${String(s).replaceAll("'", "''")}'`;
 
-// The names a migration drops and does not build again in itself (`DROP INDEX`, `DROP CONSTRAINT`,
-// `DROP TRIGGER` ... IF EXISTS), each to the first migration that dropped it. A replay that builds
-// one again is refused until that migration is folded (plan).
+// The names the migrations, in order, leave dropped (`DROP INDEX`, `DROP CONSTRAINT`, `DROP TRIGGER`
+// ... IF EXISTS, and not built again in the same migration or a later one), each to the first
+// migration that dropped it since it was last built. A replay that builds one again is refused until
+// that migration is folded (plan).
 export function droppedBy(migrations) {
   const out = {};
   for (const { name, json } of migrations) {
-    // A carry's DO block drops a check only to put it back as it was: it neither drops nor builds a
-    // name for good, so its text is left out, or its putting back would hide the migration's own drop.
-    const sql = (json.operations ?? []).map((o) => o.sql?.up ?? "").join("\n").replace(/DO \$carry\$[\s\S]*?END \$carry\$;/g, "");
+    // A move's DO block (a carry, a backfill) drops a check only to put it back as it was: it neither
+    // drops nor builds a name for good, so its text is left out, or its putting back would hide the
+    // migration's own drop.
+    const sql = (json.operations ?? []).map((o) => o.sql?.up ?? "").join("\n").replace(/DO (\$carry\$|\$fill\$)[\s\S]*?END \1;/g, "");
     const built = new Set([...sql.matchAll(/(?:ADD CONSTRAINT|INDEX) "([^"]+)"/g)].map((m) => m[1]));
     for (const [, x] of sql.matchAll(/DROP (?:INDEX IF EXISTS "[^"]+"\.|CONSTRAINT IF EXISTS |TRIGGER IF EXISTS )"([^"]+)"/g)) {
       if (!built.has(x)) out[x] ??= name;
     }
+    for (const x of built) delete out[x];
   }
   return out;
 }

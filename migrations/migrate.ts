@@ -41,12 +41,14 @@ const fail = (msg: string): never => {
   throw new Refusal(msg);
 };
 const read = (p: string) => Deno.readTextFileSync(p);
+// Whether a file is there: only its absence is false; a permission or any other error is the error.
 const exists = (p: string) => {
   try {
     Deno.statSync(p);
     return true;
-  } catch {
-    return false;
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return false;
+    throw e;
   }
 };
 

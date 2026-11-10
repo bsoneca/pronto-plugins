@@ -31,14 +31,39 @@ _retired: Order: _order.Order & {retired: "7": {name: "legacy", type: "string", 
 _carryValues: {carry: Order: stage: values: paid: "settled"}
 _stageNarrowed: [["Order.fields.5.enum", ["new", "settled"]]]
 
-// A carry's lift of a moved column's check, and its putting back as the database held it, NOT VALID.
-_lift: {"1": stage: _, "2": status: _}
-_lift: [N=string]: [C=string]: strings.Join([
-	"    SELECT pg_get_constraintdef(oid) INTO check_\(N) FROM pg_constraint WHERE conrelid = '\"public\".\"order\"'::regclass AND conname = 'order_\(C)_check';",
-	"    IF check_\(N) IS NOT NULL THEN ALTER TABLE \"public\".\"order\" DROP CONSTRAINT \"order_\(C)_check\"; END IF;",
-], "\n")
-_putBack: {"1": stage: _, "2": status: _}
-_putBack: [N=string]: [C=string]: "    IF check_\(N) IS NOT NULL THEN EXECUTE 'ALTER TABLE \"public\".\"order\" ADD CONSTRAINT \"order_\(C)_check\" ' || check_\(N) || CASE WHEN check_\(N) LIKE '%NOT VALID' THEN '' ELSE ' NOT VALID' END; END IF;"
+// A move's block (a carry, a backfill) on order: it runs only where a row matches, and every check on
+// the table but those kept is lifted around the update and put back as the database held it, NOT VALID.
+_move: {
+	tag:    "$carry$" | "$fill$"
+	where:  string
+	update: string
+	kept:   *"" | string
+	off: *[] | [...string]
+	on: *[] | [...string]
+	_each: "FOR pronto_i IN 1 .. coalesce(array_length(pronto_lifted, 1), 0) LOOP"
+	text: strings.Join([
+		"DO \(tag)",
+		"DECLARE",
+		"  pronto_lifted text[];",
+		"  pronto_defs text[];",
+		"BEGIN",
+		"  IF EXISTS (SELECT FROM \"public\".\"order\" WHERE \(where)) THEN",
+		for x in off {x},
+		"    SELECT array_agg(conname ORDER BY conname), array_agg(pg_get_constraintdef(oid) ORDER BY conname) INTO pronto_lifted, pronto_defs FROM pg_constraint WHERE conrelid = '\"public\".\"order\"'::regclass AND contype = 'c'\(kept);",
+		"    \(_each) EXECUTE 'ALTER TABLE \"public\".\"order\" DROP CONSTRAINT ' || quote_ident(pronto_lifted[pronto_i]); END LOOP;",
+		"    \(update)",
+		"    \(_each) EXECUTE 'ALTER TABLE \"public\".\"order\" ADD CONSTRAINT ' || quote_ident(pronto_lifted[pronto_i]) || ' ' || pronto_defs[pronto_i] || CASE WHEN pronto_defs[pronto_i] LIKE '%NOT VALID' THEN '' ELSE ' NOT VALID' END; END LOOP;",
+		for x in on {x},
+		"  END IF;",
+		"END \(tag);",
+	], "\n")
+}
+
+// A backfill of note: every check but note's own lifted.
+_fillNote: {
+	value: string
+	text: (_move & {tag: "$fill$", where: #""note" IS NULL"#, update: #"UPDATE "public"."order" SET "note" = "# + value + #" WHERE "note" IS NULL;"#, kept: " AND conname <> ALL (ARRAY['order_note_check'])"}).text
+}
 
 _proto: """
 	syntax = "proto3";
@@ -102,7 +127,7 @@ _machines: #"""
 	CREATE TRIGGER "trg_order_status_machine"
 	"""#
 
-_t: #""public"."order""#
+_t:   #""public"."order""#
 _trg: "IF EXISTS (SELECT FROM pg_trigger WHERE tgrelid = '\(_t)'::regclass AND tgname = 'trg_order_status_machine')"
 
 cases: {
@@ -127,7 +152,8 @@ cases: {
 			}
 			retired: {"3": {name: "old", type: "string", sql: "text", required: false, default: "''"}}
 			indexes: {order_status: {cols: ["status"], unique: true}, idx_order_status: {cols: ["status"], using: "btree"}}
-		}}, why: "an alias is its type (text is string), a column keeps the type Postgres holds, a decimal carries its precision and scale, and an index's name is as Postgres keeps an unquoted one"},
+		}}, why: "an alias is its type (text is string), a column keeps the type Postgres holds, a decimal carries its precision and scale, and an index's name is as Postgres keeps an unquoted one"
+		},
 		{get: "Draft", matches: "^undefined$", why: "an entity with no table is not the database's"},
 	]}
 	"a proto and facts that disagree, or a pronto this does not read, are refused, never guessed": {suite: "migrations", steps: [
@@ -154,7 +180,8 @@ cases: {
 			#"ALTER TABLE "public"."order" ALTER COLUMN "status" DROP NOT NULL;"#,
 			#"DROP TRIGGER IF EXISTS "trg_order_status_machine" ON "public"."order";"#,
 			#"ALTER TABLE "public"."order" DROP CONSTRAINT IF EXISTS "order_status_check";"#,
-		], why: "the default pronto still emits for the retired column stays, so a fresh database and a live one agree"},
+		], why: "the default pronto still emits for the retired column stays, so a fresh database and a live one agree"
+		},
 		{call: "mig.sql", args: [_order, [["Order.fields.3", null], ["Order.retired.3", {name: "note", type: "string", required: false}]]], expect: [], why: "an optional column with no default needs nothing"},
 	]}
 	"a rename, a retype, a drop, a reused number and a lost entity are refused: an addition beside a retirement is admitted instead": {suite: "migrations", steps: [
@@ -180,6 +207,7 @@ cases: {
 		{call: "mig.changes", args: [_order, [["Order.fields.8", {name: "placed_at", type: "timestamp", proto: "google.protobuf.Timestamp", required: true, default: "now()"}]]], expect: ["field-added Order.placed_at"]},
 		{call: "mig.changes", args: [_order, [["Order.fields.8", {name: "placed_at", type: "timestamp", proto: "google.protobuf.Timestamp", required: true}]]], expect: ["required-added Order.placed_at"]},
 		{call: "mig.changes", args: [_order, [["Order.fields.8", {name: "owner_id", type: "uuid", proto: "string", required: true, default: "auth_uid()"}]]], expect: ["required-added Order.owner_id"], why: "auth_uid() is NULL in a migration, as in the replay"},
+		{call: "mig.changes", args: [_order, [["Order.fields.8", {name: "owner_id", type: "uuid", proto: "string", required: true, default: "AUTH_UID()"}]]], expect: ["required-added Order.owner_id"], why: "Postgres folds an unquoted name to lowercase, so AUTH_UID() is auth_uid()"},
 		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "placed_at", type: "timestamp", proto: "google.protobuf.Timestamp", required: true}]]], holds: {refused: [{at: "Order.placed_at", kind: "required-added"}]}},
 		{call: "mig.changes", args: [_order, [["Refund", {table: "refund", id: "0x02", fields: {"1": {name: "id", type: "uuid", proto: "string", required: true, pk: true}}, retired: {}, indexes: {}}]]], expect: ["entity-added Refund"]},
 		{call: "mig.changes", args: [_order, [["Order.indexes.idx_order_stage", {cols: ["stage"], using: "btree"}]]], expect: ["index-added Order index idx_order_stage"]},
@@ -189,13 +217,14 @@ cases: {
 	]}
 	"a column made required fills its NULLs, then is tightened: from what the app declares, else its default, else it is a need": {suite: "migrations", steps: [
 		{call: "mig.plan", args: [_order, [["Order.fields.3.required", true]]], holds: {ops: [], needs: [{at: "Order.note", declare: "backfill.Order.note"}]}},
-		{call: "mig.sql", args: [_order, [["Order.fields.3.required", true]], {backfill: Order: note: "''"}], expect: [#"UPDATE "public"."order" SET "note" = '' WHERE "note" IS NULL;"#, #"ALTER TABLE "public"."order" ALTER COLUMN "note" SET NOT NULL;"#]},
+		{call: "mig.sql", args: [_order, [["Order.fields.3.required", true]], {backfill: Order: note: "''"}], expect: [(_fillNote & {value: "''"}).text, #"ALTER TABLE "public"."order" ALTER COLUMN "note" SET NOT NULL;"#], why: "a database with no NULL row runs nothing; every other check is lifted around the fill, as an update is checked against all of them, and the column's own stays, as the value it fills is the model's"},
 		{call: "mig.sql", args: [_order, [["Order.fields.3.required", true], ["Order.fields.3.default", "'none'"]]], expect: [
 			#"ALTER TABLE "public"."order" ALTER COLUMN "note" SET DEFAULT 'none';"#,
-			#"UPDATE "public"."order" SET "note" = 'none' WHERE "note" IS NULL;"#,
+			(_fillNote & {value: "'none'"}).text,
 			#"ALTER TABLE "public"."order" ALTER COLUMN "note" SET NOT NULL;"#,
 		]},
 		{call: "mig.plan", args: [_order, [["Order.fields.3.required", true], ["Order.fields.3.default", "auth_uid()"]]], holds: {needs: [{declare: "backfill.Order.note"}]}, why: "a session's default fills nothing in a migration"},
+		{call: "mig.plan", args: [_order, [["Order.fields.3.required", true]], {backfill: Order: note: "$fill$x$fill$"}], holds: {ops: [], refused: [{at: "Order.note", kind: "backfill", why: "the backfill holds $fill$, its block's own quote"}]}},
 	]}
 	"a column made optional, and a default changed or removed, alter the column in place": {suite: "migrations", steps: [
 		{call: "mig.sql", args: [_order, [["Order.fields.4.required", false]]], expect: [#"ALTER TABLE "public"."order" ALTER COLUMN "ref" DROP NOT NULL;"#]},
@@ -206,35 +235,15 @@ cases: {
 	"a value gone from an enum is carried, only where a row holds one: what each becomes, or the row's new columns, else it is a need": {suite: "migrations", steps: [
 		{call: "mig.changes", args: [_order, _stageNarrowed], expect: ["enum-narrowed Order.stage"]},
 		{call: "mig.plan", args: [_order, _stageNarrowed], holds: {ops: [], needs: [{at: "Order.stage", declare: "carry.Order.stage"}]}},
-		{call: "mig.sql", args: [_order, _stageNarrowed, _carryValues], expect: [strings.Join([
-			"DO $carry$",
-			"DECLARE",
-			"  check_1 text;",
-			"BEGIN",
-			#"  IF EXISTS (SELECT FROM "public"."order" WHERE "stage" IN ('paid')) THEN"#,
-			_lift["1"].stage,
-			#"    UPDATE "public"."order" SET "stage" = CASE "stage" WHEN 'paid' THEN 'settled' END WHERE "stage" IN ('paid');"#,
-			_putBack["1"].stage,
-			"  END IF;",
-			"END $carry$;",
-		], "\n")], why: "a fresh database, or one carried already, holds no such row and runs nothing; the column's check is lifted around the move and put back NOT VALID, as a database that skipped releases holds a later migration's check, which an earlier carry's destination is outside"},
-		{call: "mig.sql", args: [_order, _stageNarrowed, {carry: Order: stage: {set: {stage: "'settled'", status: "'open'"}, triggers: ["trg_order_status_machine"]}}], expect: [strings.Join([
-			"DO $carry$",
-			"DECLARE",
-			"  check_1 text;",
-			"  check_2 text;",
-			"BEGIN",
-			#"  IF EXISTS (SELECT FROM "public"."order" WHERE "stage" IN ('paid')) THEN"#,
-			"    \(_trg) THEN ALTER TABLE \(_t) DISABLE TRIGGER \"trg_order_status_machine\"; END IF;",
-			_lift["1"].stage,
-			_lift["2"].status,
-			#"    UPDATE "public"."order" SET "stage" = 'settled', "status" = 'open' WHERE "stage" IN ('paid');"#,
-			_putBack["1"].stage,
-			_putBack["2"].status,
-			"    \(_trg) THEN ALTER TABLE \(_t) ENABLE TRIGGER \"trg_order_status_machine\"; END IF;",
-			"  END IF;",
-			"END $carry$;",
-		], "\n")], why: "set also moves status, a machine's column, with its trigger off where it exists"},
+		{call: "mig.sql", args: [_order, _stageNarrowed, _carryValues], expect: [(_move & {tag: "$carry$", where: #""stage" IN ('paid')"#, update: #"UPDATE "public"."order" SET "stage" = CASE "stage" WHEN 'paid' THEN 'settled' END WHERE "stage" IN ('paid');"#}).text], why: "a fresh database, or one carried already, holds no such row and runs nothing; every check on the table is lifted around the move and put back NOT VALID: Postgres checks a row it updates against every check, even one NOT VALID, which a row written before the replay restated it may break, and a database that skipped releases holds a later migration's check, which an earlier carry's destination is outside"},
+		{call: "mig.sql", args: [_order, _stageNarrowed, {carry: Order: stage: {set: {stage: "'settled'", status: "'open'"}, triggers: ["trg_order_status_machine"]}}], expect: [(_move & {
+			tag:    "$carry$"
+			where:  #""stage" IN ('paid')"#
+			update: #"UPDATE "public"."order" SET "stage" = 'settled', "status" = 'open' WHERE "stage" IN ('paid');"#
+			off: ["    \(_trg) THEN ALTER TABLE \(_t) DISABLE TRIGGER \"trg_order_status_machine\"; END IF;"]
+			on: ["    \(_trg) THEN ALTER TABLE \(_t) ENABLE TRIGGER \"trg_order_status_machine\"; END IF;"]
+		}).text], why: "set also moves status, a machine's column, with its trigger off where it exists"
+		},
 		{call: "mig.plan", args: [_order, [["Order.fields.2.enum", ["open", "closed"]]], {carry: Order: status: values: draft: "open"}], holds: {ops: [{at: "Order.status"}], refused: []}, why: "a machine's own column needs no trigger off: its chart lets a state it does not know move"},
 	]}
 	"a carry that cannot be applied is refused, saying why": {suite: "migrations", steps: [
@@ -247,11 +256,12 @@ cases: {
 	]}
 	"a migration relaxes, then moves rows, then tightens, whatever order the columns come in": {suite: "migrations", steps: [
 		{call: "mig.plan", args: [_order, [["Order.fields.3.required", true], ["Order.fields.5.enum", ["new", "settled"]], ["Order.fields.6.check", null]], {backfill: Order: note: "''", carry: Order: stage: set: {stage: "'settled'", total: "-1"}}], holds: {ops: [
-			{at: "Order.total", why: "its check removed"},
-			{at: "Order.note", why: "made required: its NULL rows filled"},
-			{at: "Order.stage"},
-			{at: "Order.note", why: "made required"},
-		]}, why: "the carry writes a total the check it drops would refuse, and the column made required is tightened last"},
+				{at: "Order.total", why: "its check removed"},
+				{at: "Order.note", why: "made required: its NULL rows filled"},
+				{at: "Order.stage"},
+				{at: "Order.note", why: "made required"},
+		]}, why: "the carry writes a total the check it drops would refuse, and the column made required is tightened last"
+		},
 	]}
 	"checks, machines, uniques, references and indexes the replay never removes or rebuilds are the ledger's": {suite: "migrations", steps: [
 		{call: "mig.sql", args: [_order, [["Order.fields.6.check", null]]], expect: [#"ALTER TABLE "public"."order" DROP CONSTRAINT IF EXISTS "order_total_check";"#]},
@@ -269,7 +279,13 @@ cases: {
 		{call: "migrations.droppedBy", args: [[
 			{name: "20261109_0001_a", json: operations: [{sql: up: #"DROP INDEX IF EXISTS "public"."idx_order_note";"# + "\n" + #"ALTER TABLE "public"."order" DROP CONSTRAINT IF EXISTS "order_note_key", ADD CONSTRAINT "order_note_key" UNIQUE ("note");"#}]},
 			{name: "20261109_0002_b", json: operations: [{sql: up: #"DROP TRIGGER IF EXISTS "trg_order_stage_machine" ON "public"."order";"# + "\n" + #"DROP INDEX IF EXISTS "public"."idx_order_note";"#}]},
-		]], expect: {idx_order_note: "20261109_0001_a", trg_order_stage_machine: "20261109_0002_b"}, why: "a name the same migration builds again is not dropped"},
+		]], expect: {idx_order_note: "20261109_0001_a", trg_order_stage_machine: "20261109_0002_b"}, why: "a name the same migration builds again is not dropped"
+		},
+		{call: "migrations.droppedBy", args: [[
+			{name: "20261109_0001_a", json: operations: [{sql: up: #"ALTER TABLE "public"."order" DROP CONSTRAINT IF EXISTS "order_note_key";"#}]},
+			{name: "20261109_0002_b", json: operations: [{sql: up: #"ALTER TABLE "public"."order" DROP CONSTRAINT IF EXISTS "order_note_key", ADD CONSTRAINT "order_note_key" UNIQUE ("note");"#}]},
+		]], expect: {}, why: "a name a later migration builds again is no longer dropped"
+		},
 		{call: "mig.dropped", args: [_order, [["Order.fields.6.check", null], ["Order.fields.5.enum", ["new", "settled"]]], {carry: Order: stage: set: {stage: "'settled'", total: "0"}}], expect: {order_total_check: "m"}, why: "a carry puts back the check it lifted, so a check the same migration drops for good stays dropped"},
 		{call: "mig.plan", args: [_order, [["Order.indexes.idx_order_stage", {cols: ["stage"], using: "btree"}]], {}, {idx_order_stage: "20261109_0002_b"}], holds: {refused: [{kind: "rebuilt", why: "idx_order_stage was dropped by 20261109_0002_b, which every fresh database still runs after building it: fold 20261109_0002_b (once every database has run it) before building idx_order_stage again"}]}},
 		{call: "mig.plan", args: [_order, [["Order.fields.3.check", "note <> ''"]], {}, {order_note_check: "20261109_0001_a"}], holds: {refused: [{kind: "rebuilt"}], advisories: [{kind: "check-added"}]}},
