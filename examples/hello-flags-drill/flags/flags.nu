@@ -37,7 +37,7 @@ export def route [] {
 		# the session names no one for gets "no session", which no account id (no spaces) can be.
 		# /auth/door always answers 2xx, which is what keeps a signed-out page's flags.
 		"      request_header -X-Pronto-Account"
-		"      forward_auth {$PRONTO_MESH:auth:9999} {"
+		"      forward_auth {$PRONTO_UPSTREAM_AUTH:auth:9999} {"
 		"        uri /auth/door"
 		"        header_up dapr-app-id auth"
 		"        copy_headers X-Pronto-Account"
