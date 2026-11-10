@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { readCapped } from "../shared.ts";
 
 // The little of Stripe's API the broker speaks: form-encoded requests under
 // one pinned API version, JSON ones under another for the /v2 namespace
@@ -90,18 +91,18 @@ function throughDoor(door: string, fetcher: typeof fetch): Stripe {
  * names no account (Stripe's webhook, say). Set by `forAccount` around the broker's handler. */
 const caller = new AsyncLocalStorage<{ account?: string; door?: boolean }>();
 
-/** A body this size or under is read for its caller; a larger one, or one whose length is not
- * declared, says nothing here, and the handler's own capped read refuses it as before. */
+/** A body this size or under is read for its caller, declared or not (the handler's own capped read
+ * takes the same); a larger one says nothing here, and that read refuses it as before. */
 const CALLER_BODY_MAX = 4096;
 
 /** Runs `handler` with what its request's JSON body says of its caller (`account`, `door`). */
 export function forAccount<A extends unknown[]>(handler: (req: Request, ...rest: A) => Promise<Response>) {
   return async (req: Request, ...rest: A): Promise<Response> => {
     const who: { account?: string; door?: boolean } = {};
-    const length = Number(req.headers.get("content-length") ?? NaN);
-    if (req.method === "POST" && req.headers.get("content-type")?.includes("json") && length >= 0 && length <= CALLER_BODY_MAX) {
+    if (req.method === "POST") {
       try {
-        const b = await req.clone().json();
+        const text = await readCapped(req.clone().body, CALLER_BODY_MAX, req.headers.get("content-length"));
+        const b = text ? JSON.parse(text) : null;
         if (typeof b?.account === "string" && b.account) who.account = b.account;
         if (typeof b?.door === "boolean") who.door = b.door;
       } catch { /* not JSON: nothing said */ }
@@ -117,7 +118,10 @@ export const askedDoor = (): boolean => caller.getStore()?.door === true;
  * request asked for it (its tenant's flag), else straight to Stripe with the broker's key, as before.
  * A flag, not a deploy, moves it. */
 export function switched(p: { direct: Stripe; door: Stripe; on: () => boolean }): Routed {
-  const s: Routed = (method, path, params, idempotencyKey) => (p.on() ? p.door : p.direct)(method, path, params, idempotencyKey);
+  // Both ways send Stripe the same idempotency key (the door's, which the airlock sends on), so a call
+  // retried the other way is still the one call at Stripe.
+  const s: Routed = async (method, path, params, idempotencyKey) =>
+    p.on() ? await p.door(method, path, params, idempotencyKey) : await p.direct(method, path, params, idempotencyKey === undefined ? undefined : await doorKey(idempotencyKey));
   s.route = () => Promise.resolve<Route>(p.on() ? "door" : "direct");
   return s;
 }

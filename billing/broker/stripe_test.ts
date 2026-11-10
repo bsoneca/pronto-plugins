@@ -108,5 +108,22 @@ Deno.test("a body too large or of no declared length asks for nothing", async ()
   await handler(post(JSON.stringify({ account: "tess", door: true, pad: "x".repeat(5000) })));
   await handler(new Request("https://b/checkout", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ door: true }) }));
   await handler(post(JSON.stringify({ door: true })));
-  assertEquals(seen, ["direct GET /v1/prices", "direct GET /v1/prices", "door GET /v1/prices"]);
+  assertEquals(seen, ["direct GET /v1/prices", "door GET /v1/prices", "door GET /v1/prices"], "an undeclared length is read like a declared one");
+});
+
+Deno.test("both ways send Stripe the same idempotency key, so a retry the other way is one call", async () => {
+  const keys: (string | undefined)[] = [];
+  const direct: Stripe = (_m, _p, _q, k) => (keys.push(k), Promise.resolve({} as never));
+  const answers = door([{ status: 200, body: { status: 200, body: {} } }]);
+  const s = switched({ direct, door: stripe({ door: "http://airlock:9998/door/stripe", fetcher: answers.fetcher }), on: askedDoor });
+  const handler = forAccount(async (req: Request) => {
+    await s("POST", "/v1/customers", {}, "customer ana");
+    await req.body?.cancel();
+    return new Response("ok");
+  });
+  await handler(post(JSON.stringify({ account: "ana" })));
+  await handler(post(JSON.stringify({ account: "ana", door: true })));
+  assertEquals(keys.length, 1);
+  assertEquals(keys[0], (answers.sent[0].body as { key: string }).key);
+  assertEquals(keys[0]!.startsWith("key-"), true);
 });
