@@ -42,6 +42,8 @@ The hooks, which run without a person:
 
 A flagless issue is never left in Live: the release that holds its pull request finishes it. `pronto-flags rollback` tells the board too (`rolledback` for each flag it turned off).
 
+Another repository whose pull requests carry the same board's keys (bsoneca/ume's, on bsoneca/pronto's board) gets the same `plane` workflow and its own `PLANE_TOKEN` secret, and a `devflow/devflow.cue` that names the board (`plane`) and its token (`token`) alone, with no `cluster`: the board is set up from one repository, and `connect plane` refuses the others.
+
 A hook never fails a release or a flip: without a token or a board it says so and goes on.
 
 ## Tests
