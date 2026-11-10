@@ -290,6 +290,9 @@ Deno.test("the door flag is read with the reader's own session and told to the b
   const none = trialStage();
   await (await none.ask(none.make(), "/billing/trial")).body?.cancel();
   eq([none.doorAsks.length, "door" in none.broker[0].body], [0, false], "no door flag: nothing asked, nothing told");
+  const absent = trialStage({ door: () => Response.json({ key: "stripe_door", errorCode: "FLAG_NOT_FOUND" }, { status: 404 }) });
+  await (await absent.ask(absent.make({ doorFlag: "stripe_door" }), "/billing/trial")).body?.cancel();
+  eq([absent.broker.length, "door" in absent.broker[0].body], [1, false], "a flag not pushed yet: no word, the broker's own way");
   const down = trialStage({ door: () => new Response("", { status: 503 }) });
   const failed = await down.ask(down.make({ doorFlag: "stripe_door" }), "/billing/trial");
   eq([failed.ok, down.broker.length], [false, 0], "a flag that does not answer sends nothing to the broker");
