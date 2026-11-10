@@ -56,3 +56,13 @@ setups: "bsoneca-mac-studio-apps": {
 	hostRunners: "studio-apps-1": {repo: "studio-apps", labels: ["studio-apps"]}
 	hostRunners: "studio-apps-2": {repo: "studio-apps", labels: ["studio-apps"]}
 }
+
+// bsoneca/pronto-fork, the fork of pronto every app pins (PRONTO-217): its ci (k8s/release_test.nu
+// and the deno tests that stand alone) on each pull request to its fork line. One runner under its
+// own label, a setup of its own so applying it registers this alone. The repository is public, so
+// its ci job runs only for pull requests from the repository itself, never a fork's.
+setups: "bsoneca-mac-pronto-fork": {
+	cluster: host: {}
+	github: {owner: "bsoneca", kind: "user"}
+	hostRunners: "pronto-fork-1": {repo: "pronto-fork", labels: ["pronto-fork"]}
+}
