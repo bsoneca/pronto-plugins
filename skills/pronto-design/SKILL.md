@@ -32,4 +32,6 @@ bare from the repository): never move an issue on the board by hand.
 ## Rules
 
 - Never start an issue, open a branch or write the app's code: building is a sprint's.
-- Never add an issue to a sprint: planning does, with the developer's yes.
+- Never add an issue to a sprint: planning does (the pronto-sprint-plan skill), which takes designed
+  issues before Backlog ones. Design ahead of the loop: the next sprint is planned while the
+  current one runs.

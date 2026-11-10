@@ -113,28 +113,43 @@ export function priorityOf(p) {
   return v;
 }
 
-/** Where a new bug goes by its priority (rule 6): P0 starts now, P1 joins today's sprint, P2 and P3
- * wait in the Backlog. */
+/** Where a new bug goes by its priority (rule 6): P0 starts now, P1 joins the current sprint, P2 and
+ * P3 wait in the Backlog for a coming sprint. */
 export function bugPlace(p) {
   const v = priorityOf(p);
   return v === "urgent" ? { state: "Implementing", sprint: true } : v === "high" ? { state: "Refine", sprint: true } : { state: "Backlog", sprint: false };
 }
 
-/** The sprint a moment falls in: each day's sprint ends at `ends` in `timeZone`, so a moment after
- * the end belongs to the next day's. Its name is its date, as Plane's cycle is named. */
-export function sprintOf(at, ends, timeZone) {
-  const local = (d) => new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(d).reduce((o, p) => ({ ...o, [p.type]: p.value }), {});
-  const t = local(new Date(at));
-  let day = `${t.year}-${t.month}-${t.day}`;
-  if (`${t.hour}:${t.minute}` >= ends) day = nextDay(day);
-  return day;
+/** A sprint is a Plane cycle named `Sprint <n>: <theme>`. Its number, or null for another cycle. */
+export function sprintNumber(name) {
+  const m = /^Sprint (\d+)(?::|$)/.exec(name ?? "");
+  return m ? Number(m[1]) : null;
 }
 
-/** The day after a YYYY-MM-DD day. */
-export function nextDay(day) {
-  const d = new Date(`${day}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
+/** A sprint's cycle name: its number and, when there is one, its theme. */
+export function sprintName(n, theme) {
+  return theme ? `Sprint ${n}: ${theme}` : `Sprint ${n}`;
+}
+
+/** Where the endless loop stands (the owner, 2026-11-10: "the eternal loop sprint"). `sprints` are
+ * `{n, groups}`, `groups` the Plane state group of each issue in it. A sprint is finished when it has
+ * issues and each is completed (merged or past) or cancelled: it ends when its work is done, not at
+ * an hour. The current sprint is the oldest one still open, the next the one after it; there are at
+ * most these two, and a sprint planned now goes into the next (made when absent, numbered after the
+ * last). A sprint with no issues is neither open nor finished. */
+export function loopOf(sprints) {
+  const sorted = [...sprints].sort((a, b) => a.n - b.n);
+  const done = (g) => g === "completed" || g === "cancelled";
+  const open = sorted.filter((s) => s.groups.length && !s.groups.every(done)).map((s) => s.n);
+  const finished = sorted.filter((s) => s.groups.length && s.groups.every(done)).map((s) => s.n);
+  const number = sorted.length ? sorted[sorted.length - 1].n + 1 : 1;
+  return { current: open[0] ?? null, next: open[1] ?? null, finished, number, plansInto: open[1] ?? number };
+}
+
+/** The day a moment falls on in `timeZone`, YYYY-MM-DD: a cycle's dates. */
+export function dayOf(at, timeZone) {
+  const t = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(at)).reduce((o, p) => ({ ...o, [p.type]: p.value }), {});
+  return `${t.year}-${t.month}-${t.day}`;
 }
 
 /** What a pull request event from GitHub is to the flow: merged is a closed event that merged. */

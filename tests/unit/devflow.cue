@@ -1,5 +1,5 @@
 // The dev flow's rules (devflow/flow.js): which issue a pull request is, where each event moves an
-// issue, an issue's flag, the agent cap, P0..P3, and which day's sprint a moment falls in.
+// issue, an issue's flag, the agent cap, P0..P3, and where the loop of sprints stands.
 package unit
 
 cases: {
@@ -88,10 +88,24 @@ cases: {
 		{call: "devflow.bugPlace", args: ["P3"], expect: {state: "Backlog", sprint: false}},
 		{call: "devflow.priorityOf", args: ["P4"], throws: "P0, P1, P2 or P3"},
 	]}
-	"a day's sprint ends at its hour: a moment after it is the next day's": {suite: "devflow", steps: [
-		{call: "devflow.sprintOf", args: ["2026-11-08T20:59:00Z", "18:00", "America/Sao_Paulo"], expect: "2026-11-08", why: "17:59 in São Paulo"},
-		{call: "devflow.sprintOf", args: ["2026-11-08T21:00:00Z", "18:00", "America/Sao_Paulo"], expect: "2026-11-09"},
-		{call: "devflow.sprintOf", args: ["2026-12-31T22:00:00Z", "18:00", "America/Sao_Paulo"], expect: "2027-01-01"},
+	"a sprint is a cycle named Sprint <n>, its theme after a colon": {suite: "devflow", steps: [
+		{call: "devflow.sprintNumber", args: ["Sprint 12: payments"], expect: 12},
+		{call: "devflow.sprintNumber", args: ["Sprint 3"], expect: 3},
+		{call: "devflow.sprintNumber", args: ["2026-11-09"], expect: null, why: "a day's cycle from before the loop is not a sprint"},
+		{call: "devflow.sprintNumber", args: ["Sprint 12b"], expect: null},
+		{call: "devflow.sprintName", args: [7, "army pick"], expect: "Sprint 7: army pick"},
+		{call: "devflow.sprintName", args: [7, ""], expect: "Sprint 7"},
+	]}
+	"sprints loop: one ends when all its issues merge, and planning fills the next": {suite: "devflow", steps: [
+		{call: "devflow.loopOf", args: [[]], expect: {current: null, next: null, finished: [], number: 1, plansInto: 1}, why: "the first planning makes Sprint 1, the current"},
+		{call: "devflow.loopOf", args: [[{n: 1, groups: ["completed", "started"]}]], expect: {current: 1, next: null, finished: [], number: 2, plansInto: 2}, why: "a lane runs dry: planning makes the next sprint it pulls from"},
+		{call: "devflow.loopOf", args: [[{n: 1, groups: ["started"]}, {n: 2, groups: ["unstarted"]}]], expect: {current: 1, next: 2, finished: [], number: 3, plansInto: 2}, why: "with a next sprint, planning adds to it, never a third"},
+		{call: "devflow.loopOf", args: [[{n: 1, groups: ["completed", "cancelled"]}, {n: 2, groups: ["started"]}]], expect: {current: 2, next: null, finished: [1], number: 3, plansInto: 3}, why: "merged and cancelled end a sprint, at any hour"},
+		{call: "devflow.loopOf", args: [[{n: 4, groups: []}, {n: 5, groups: ["completed"]}]], expect: {current: null, next: null, finished: [5], number: 6, plansInto: 6}, why: "an emptied sprint is neither open nor finished"},
+	]}
+	"a cycle is dated by the day in the flow's time zone": {suite: "devflow", steps: [
+		{call: "devflow.dayOf", args: ["2026-11-10T02:00:00Z", "America/Sao_Paulo"], expect: "2026-11-09"},
+		{call: "devflow.dayOf", args: ["2026-11-10T16:00:00Z", "America/Sao_Paulo"], expect: "2026-11-10"},
 	]}
 	"a pull request with no issue fails the check, but for a chore or while it only warns": {suite: "devflow", steps: [
 		{call: "devflow.missingKey", args: [["chore"], "chore", false, "PRONTO"]}, {pick: ["ok"], expect: [true]},
