@@ -1,11 +1,10 @@
-// `connect plane` (docs/intents.md): the repository's board, from nothing to a sprint, each step
+// `connect plane` (docs/intents.md): the repository's board, from nothing to a board ready for its first sprint, each step
 // checked and applied in order, stopping only where a person must act. Plane runs on the repository's
 // node (devFlow.cluster) beside its apps: a CloudNativePG database, the node's gateway, the tunnel's
 // hostname; then the board itself, set up from devFlow: the project, the flow's states, a module per
-// app, the chore label, today's sprint, and GitHub's token.
+// app, the chore label and GitHub's token (the first sprint is planning's, pronto-devflow next).
 import { cmd } from "../intents/shell.ts";
 import type { Step } from "../intents/run.ts";
-import { sprintOf } from "./flow.js";
 import { Plane } from "./plane.ts";
 import { type DevFlow, exportFlow, tokenOf } from "./spec.ts";
 
@@ -192,19 +191,6 @@ export function steps(repo: string, flow: DevFlow, now = new Date()): Step[] {
       apply: async () => {
         const p = (await need());
         await p.createLabel((await project(p))!.id, flow.chore, "#a3a3a3");
-      },
-    },
-    {
-      name: "today's sprint",
-      check: async () => {
-        const p = (await need());
-        const day = sprintOf(now, flow.sprint.ends, flow.sprint.timeZone);
-        return (await p.cycles((await project(p))!.id)).some((c) => c.name === day) ? ok(day) : todo(`cycle ${day}`);
-      },
-      apply: async () => {
-        const p = (await need());
-        const day = sprintOf(now, flow.sprint.ends, flow.sprint.timeZone);
-        await p.createCycle((await project(p))!.id, day, day, day, (await p.me()).id);
       },
     },
     {

@@ -1,5 +1,5 @@
 // The dev flow (bsoneca/pronto's docs/dev-flow.md) as data: where the board is, the states an
-// issue moves through, what a priority means, the team and the sprint's end. Written once here and
+// issue moves through, what a priority means, the team and a sprint's size. Written once here and
 // in the repository's own devflow/devflow.cue (its devFlow values); read by the intent that sets
 // the board up (connect.ts), the hooks that move issues (hook.ts) and the skills.
 package devflow
@@ -52,15 +52,20 @@ devFlow: #DevFlow
 	// The modules an SRE builds: the cloud's configuration (infra/) and the nodes. Made beside a
 	// module per app.
 	infra: *["infra"] | [...string]
-	// A sprint is one day and ends at this time, each day. It commits perPerson issues to each
-	// engineer and each SRE (the user, 2026-11-08: "add more issues per sprint, but with limits"):
-	// 4 engineers and 1 SRE make 12 app issues and 3 infra issues. That is the sprint's capacity,
-	// apart from the slots: a person has one issue in Implementing at a time, and pulls the next
-	// of theirs when the pull request of the last opens (review does not hold the slot).
+	// Sprints run in an endless loop (the owner, 2026-11-10): a sprint ends when all its issues
+	// merge, and the next is already planned, so no engineer waits. The lead picks each sprint's
+	// theme from the board; the owner names one only when he wants to. A sprint commits perPerson
+	// issues to each engineer and each SRE (the user, 2026-11-08: "add more issues per sprint, but
+	// with limits"): 4 engineers and 1 SRE make 12 app issues and 3 infra issues. That is the
+	// sprint's capacity, apart from the slots: a person has one issue in Implementing at a time, and
+	// pulls the next of theirs when the pull request of the last opens (review does not hold the
+	// slot), from the next sprint when the current has nothing left to start. timeZone dates the
+	// sprints' cycles; ends is no longer read (sprints have no hour) and stays so a repository that
+	// still sets it vets.
 	sprint: {
 		perPerson: *3 | (int & >=1)
-		ends:     *"18:00" | (string & =~"^([01][0-9]|2[0-3]):[0-5][0-9]$")
-		timeZone: *"America/Sao_Paulo" | string
+		timeZone:  *"America/Sao_Paulo" | string
+		ends?:     string & =~"^([01][0-9]|2[0-3]):[0-5][0-9]$"
 	}
 	// A pull request with this label needs no issue (dependency bumps, the CI fingerprint).
 	chore: *"chore" | string
