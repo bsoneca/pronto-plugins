@@ -336,9 +336,9 @@ export async function broker(p: {
     const account = accountOf(b.account);
     if (!t || !account) return json(400, { error: "tenant and account required" });
     if (!perClient.take(client) || !perTenant.take(t)) return json(429, { error: "too many probes; try again in a minute" });
-    // Which way this read goes, the flag asked afresh (not what it kept), so a flip's check sees the
-    // way it just turned on; `direct` is true only when the read went straight to Stripe.
-    const route = await (p.stripe as Routed).route?.(true);
+    // Which way this read goes, as its tenant asked for its reader just now; `direct` is true only when
+    // the read went straight to Stripe, so a flip's check sees whether the door answered.
+    const route = await (p.stripe as Routed).route?.();
     await subscriptionsOf(await customersOf(t, account));
     return json(200, { ok: true, direct: route === "direct" });
   }
@@ -659,7 +659,7 @@ if (import.meta.main) {
   const secret = env("BROKER_SECRET");
   if (!issuer || !secret) throw new Error("BROKER_ISSUER and BROKER_SECRET are required");
   const port = Number(env("PORT") ?? 28463);
-  const { stripe, switched, ofrepFlag, forAccount } = await import("./stripe.ts");
+  const { stripe, switched, askedDoor, forAccount } = await import("./stripe.ts");
   // Once per platform account: the one endpoint Stripe sends every app's
   // subscriptions to, whose secret STRIPE_WEBHOOK_SECRET then holds.
   if (Deno.args[0] === "webhook") {
@@ -676,14 +676,14 @@ if (import.meta.main) {
   // Off by default: set (by metal.nu --airlock), every Stripe call goes through the airlock's door at
   // this address, which holds the keys, and the broker holds none (PRONTO-135).
   const door = env("STRIPE_DOOR")?.replace(/\/$/, "");
-  // While it moves (PRONTO-218): the door beside the broker's own key, chosen per call by the app's flag
-  // stripe_door, read from this flagd (OFREP); the key leaves the broker once the flag is on for everyone.
-  const doorFlag = env("STRIPE_DOOR_FLAG");
-  if (doorFlag && !(door && key)) throw new Error("STRIPE_DOOR_FLAG moves the broker between its key and the door: it needs STRIPE_DOOR and STRIPE_SECRET_KEY");
-  if (door && key && !doorFlag) throw new Error("STRIPE_DOOR and STRIPE_SECRET_KEY: through the door, the airlock holds the key and the broker none");
-  const on = doorFlag ? ofrepFlag(doorFlag, "stripe_door") : null;
+  // While it moves (PRONTO-218): the door beside the broker's own key, each call through the door when
+  // its request asked for it (`door`, the tenant's flag for its reader); the key leaves the broker once
+  // the flag is on for everyone.
+  const doorAsked = env("STRIPE_DOOR_ASKED") === "1";
+  if (doorAsked && !(door && key)) throw new Error("STRIPE_DOOR_ASKED moves the broker between its key and the door: it needs STRIPE_DOOR and STRIPE_SECRET_KEY");
+  if (door && key && !doorAsked) throw new Error("STRIPE_DOOR and STRIPE_SECRET_KEY: through the door, the airlock holds the key and the broker none");
   const client = (k: string | undefined, d: string) =>
-    on ? switched({ direct: stripe({ key: k! }), door: stripe({ door: d }), on }) : door ? stripe({ door: d }) : stripe({ key: k! });
+    doorAsked ? switched({ direct: stripe({ key: k! }), door: stripe({ door: d }), on: askedDoor }) : door ? stripe({ door: d }) : stripe({ key: k! });
   if (key || door) {
     const webhookSecret = env("STRIPE_WEBHOOK_SECRET");
     if (!webhookSecret) throw new Error("STRIPE_WEBHOOK_SECRET is required with STRIPE_SECRET_KEY: bin/pronto-billing-broker webhook");
@@ -692,8 +692,8 @@ if (import.meta.main) {
     // app's previews test a purchase there, with Stripe's test cards, never a live charge.
     // Through the door, the sandbox's key is the airlock's too, behind its door stripe-sandbox.
     const sandboxKey = env("STRIPE_SANDBOX_SECRET_KEY"), sandboxTenants = env("BILLING_SANDBOX_TENANTS");
-    if (doorFlag && sandboxTenants && !sandboxKey) throw new Error("STRIPE_DOOR_FLAG with a sandbox needs STRIPE_SANDBOX_SECRET_KEY too: the sandbox's calls go straight to Stripe while the flag is off");
-    if (door && sandboxKey && !doorFlag) throw new Error("STRIPE_DOOR and STRIPE_SANDBOX_SECRET_KEY: the airlock holds the sandbox's key too");
+    if (doorAsked && sandboxTenants && !sandboxKey) throw new Error("STRIPE_DOOR_ASKED with a sandbox needs STRIPE_SANDBOX_SECRET_KEY too: the sandbox's calls go straight to Stripe while the flag is off");
+    if (door && sandboxKey && !doorAsked) throw new Error("STRIPE_DOOR and STRIPE_SANDBOX_SECRET_KEY: the airlock holds the sandbox's key too");
     if (sandboxKey || (door && sandboxTenants)) {
       const sandboxWebhookSecret = env("STRIPE_SANDBOX_WEBHOOK_SECRET");
       if (!sandboxWebhookSecret || !sandboxTenants) throw new Error("a sandbox (STRIPE_SANDBOX_SECRET_KEY, or BILLING_SANDBOX_TENANTS through the door) needs STRIPE_SANDBOX_WEBHOOK_SECRET and BILLING_SANDBOX_TENANTS");

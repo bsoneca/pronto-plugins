@@ -27,6 +27,9 @@ export interface Settings {
   /** The flag that turns the free trial on, evaluated per account at `flags`; none, and a
    * document with a trial is all it takes. */
   trialFlag?: string;
+  // The flag that sends this tenant's calls to Stripe through the operator's airlock (PRONTO-218):
+  // asked for each request's own reader, its value told to the broker as `door`.
+  doorFlag?: string;
   fetcher?: typeof fetch;
 }
 
@@ -144,6 +147,23 @@ export function service(s: Settings) {
     }
   }
 
+  // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag
+  // for them now: asked with the reader's own session, which the door's OFREP route reads the account
+  // from (and as the targetingKey, which flagd reached directly reads). Unset flag: no word, the
+  // broker's own way. A flag that cannot be asked fails the request, never picks a way.
+  async function doorOn(account: string, auth: string | null): Promise<boolean | undefined> {
+    if (!s.doorFlag) return undefined;
+    if (!s.flags) throw new Error("BILLING_DOOR_FLAG needs BILLING_FLAGS: where to ask it");
+    const at = s.flags === "origin" ? origin : s.flags.replace(/\/$/, "");
+    const res = await fetcher(`${at}/ofrep/v1/evaluate/flags/${encodeURIComponent(s.doorFlag)}`, {
+      method: "POST", headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) },
+      body: JSON.stringify({ context: { targetingKey: account } }), signal: AbortSignal.timeout(10_000),
+    });
+    const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
+    if (typeof answer?.value !== "boolean") throw new Error(`flag ${s.doorFlag}: flagd answered ${res.status}`);
+    return answer.value;
+  }
+
   async function trialStatus(account: string): Promise<{ state: string | null; holds: boolean } & Record<string, unknown>> {
     const res = await asService("billing_trial_status", { account });
     if (!res.ok) throw new Error(`billing_trial_status answered ${res.status}: ${brief(await res.text())}`);
@@ -178,7 +198,7 @@ export function service(s: Settings) {
     if (path === "/billing/trial") {
       const none = { ...held, eligible: false, offers: [] };
       if (held.holds || held.state) return json(200, none);
-      const res = await toBroker("/trial/offer", { account, ticket: await trialTicket(account), currency: a.currency });
+      const res = await toBroker("/trial/offer", { account, ticket: await trialTicket(account), currency: a.currency }, req.headers.get("authorization"));
       // A broker that does not know trials offers none.
       if (res.status === 404) return json(200, none);
       return res.ok ? json(200, { ...held, ...(await res.json()) }) : res;
@@ -191,12 +211,15 @@ export function service(s: Settings) {
     if (typeof a.terms !== "string" || a.terms.trim() === "" || a.terms.length > 1000) return json(400, { error: "terms required, at most 1000 characters" });
     if (held.holds || held.state) return json(409, { error: held.holds ? "holds" : "used" });
     const ticket = await trialTicket(account, { plan, amount: a.amount, currency: a.currency, charges_at: a.charges_at, terms: a.terms });
-    return await toBroker("/trial/checkout", { account, ticket, locale: a.locale, return: a.return });
+    return await toBroker("/trial/checkout", { account, ticket, locale: a.locale, return: a.return }, req.headers.get("authorization"));
   }
 
-  async function toBroker(path: string, args: Record<string, unknown>): Promise<Response> {
+  // `auth`: the reader's session, for a call made on the reader's behalf, which then says which way
+  // its Stripe calls go (doorOn); a call with none (the broker's own consent check) says nothing.
+  async function toBroker(path: string, args: Record<string, unknown>, auth?: string | null): Promise<Response> {
+    const door = auth !== undefined && typeof args.account === "string" ? await doorOn(args.account, auth) : undefined;
     const res = await fetcher(`${brokerAt}${path}`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tenant: origin, ...args }),
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tenant: origin, ...args, ...(door === undefined ? {} : { door }) }),
       signal: AbortSignal.timeout(20_000),
     });
     return json(res.status, await res.json());
@@ -237,13 +260,13 @@ export function service(s: Settings) {
         const a = await args(req);
         const plan = typeof a.plan === "string" && plans.includes(a.plan) ? a.plan : plans[0];
         if (path === "/billing/checkout") {
-          return await toBroker("/checkout", { account, plan, currency: a.currency, locale: a.locale, return: a.return });
+          return await toBroker("/checkout", { account, plan, currency: a.currency, locale: a.locale, return: a.return }, req.headers.get("authorization"));
         }
         const manage = await manageOf(account);
         if (!manage) return json(404, { error: "no subscription" });
-        if (path === "/billing/portal") return await toBroker("/portal", { account, manage, return: a.return });
+        if (path === "/billing/portal") return await toBroker("/portal", { account, manage, return: a.return }, req.headers.get("authorization"));
         // What the broker holds now, for a page that waited on a push.
-        const res = await toBroker("/resync", { account, manage, plan });
+        const res = await toBroker("/resync", { account, manage, plan }, req.headers.get("authorization"));
         if (!res.ok) return res;
         return await entitle((await res.json()).token);
       }
@@ -253,7 +276,7 @@ export function service(s: Settings) {
       if (req.method === "GET" && path === "/billing/probe") {
         const account = await reader(req);
         if (account instanceof Response) return account;
-        return await toBroker("/probe", { account });
+        return await toBroker("/probe", { account }, req.headers.get("authorization"));
       }
       return json(404, { error: "not found" });
     } catch (e) {
@@ -274,6 +297,7 @@ if (import.meta.main) {
     origin: env("ORIGIN"), broker: env("BILLING_BROKER"), brokerInternal: Deno.env.get("BILLING_BROKER_INTERNAL"),
     crud: env("CRUD_URL"), serviceJwt: env("SERVICE_JWT"), document: env("BILLING_DOCUMENT"), grants: Deno.env.get("BILLING_GRANTS"),
     flags: Deno.env.get("BILLING_FLAGS") || undefined, trialFlag: Deno.env.get("BILLING_TRIAL_FLAG") || undefined,
+    doorFlag: Deno.env.get("BILLING_DOOR_FLAG") || undefined,
   });
   Deno.serve({ port: Number(Deno.env.get("BILLING_PORT") ?? 8688) }, billing);
   // Until the gateway serves billing_grant, as it does once it has reloaded its schema; with
