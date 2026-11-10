@@ -76,9 +76,9 @@ if (verb === "report") { console.log(report(jsonl(`${state}/runs.jsonl`))); Deno
 if (verb === "uninstall") {
   // Whichever scheduler installed it: its files say.
   if (exists(`${units}.timer`)) {
-    sh("systemctl", ["--user", "disable", "--now", `${label}.timer`]);
-    for (const f of [`${units}.timer`, `${units}.service`]) { try { Deno.removeSync(f); } catch { /* none */ } }
-    sh("systemctl", ["--user", "daemon-reload"]);
+    must("systemctl", ["--user", "disable", "--now", `${label}.timer`]);
+    for (const f of [`${units}.timer`, `${units}.service`]) { try { Deno.removeSync(f); } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e; } }
+    must("systemctl", ["--user", "daemon-reload"]);
   } else if (exists(agent)) {
     sh("launchctl", ["bootout", `gui/${uid}/${label}`]);
     Deno.removeSync(agent);
