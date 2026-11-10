@@ -52,6 +52,8 @@ def main [] {
 
 	{"errors.loader.json": {project: 1, key: "921d1ab3ed184f91867663937ab0002f", prefix: "/e", flag: "error_tracking"}} | to json | errors write
 	check "the reporter's settings are its module's" ((open --raw shell/hatches/errors/config.js) | str contains 'export default {"project":1,"key":"921d1ab3ed184f91867663937ab0002f","prefix":"/e","flag":"error_tracking"};')
+	{"errors.sourcemaps.json": {upstream: "https://errors.example.com", org: "pronto", slug: "shop", files: ["a.js"], build: "b", token: "t"}} | to json | errors write
+	check "what the maps' upload reads is written beside it" ((open errors/sourcemaps.json) == {upstream: "https://errors.example.com", org: "pronto", slug: "shop", files: ["a.js"], build: "b", token: "t"})
 	check "a file with no place is refused" (try { {"errors.other.json": {}} | to json | errors write; false } catch { true })
 
 	"(app) {\n}\n" | save --force docker/Caddyfile
@@ -76,11 +78,12 @@ def main [] {
 	mkdir shell
 	cp $"($plugin)/errors/errors.js" shell/errors.js
 	"export default {};\n" | save shell/config.js
-	let script = "import { frames } from './shell/errors.js'; const chrome = frames('Error: boom\\n    at inner (https://h/a.js?x=1#y:10:5)\\n    at async outer (https://h/b.js:20:7)\\n    at https://h/c.js:3:1'); const gecko = frames('inner@https://h/a.js:10:5\\nouter@https://h/b.js:20:7\\n@https://h/c.js:3:1\\nnative@[native code]'); console.log(JSON.stringify({chrome, gecko}));"
+	let script = "import { frames, debugImages } from './shell/errors.js'; const chrome = frames('Error: boom\\n    at inner (https://h/a.js?x=1#y:10:5)\\n    at async outer (https://h/b.js:20:7)\\n    at https://h/c.js:3:1'); const gecko = frames('inner@https://h/a.js:10:5\\nouter@https://h/b.js:20:7\\n@https://h/c.js:3:1\\nnative@[native code]'); const images = debugImages(chrome, {'Error\\n    at https://h/a.js:900:1\\n    at https://h/a.js:900:9': 'id-a', 'Error\\n    at https://h/z.js:1:1': 'id-z'}); console.log(JSON.stringify({chrome, gecko, images}));"
 	$script | save parse.js
 	let parsed = ^deno run --no-config --allow-read parse.js | from json
-	check "Chrome's stack is read, the oldest call first, without a query or a hash" ($parsed.chrome == [{function: "?", filename: "https://h/c.js", lineno: 3, colno: 1} {function: "outer", filename: "https://h/b.js", lineno: 20, colno: 7} {function: "inner", filename: "https://h/a.js", lineno: 10, colno: 5}])
-	check "Firefox's and Safari's stack is read" ($parsed.gecko == [{function: "?", filename: "https://h/c.js", lineno: 3, colno: 1} {function: "outer", filename: "https://h/b.js", lineno: 20, colno: 7} {function: "inner", filename: "https://h/a.js", lineno: 10, colno: 5}])
+	check "Chrome's stack is read, the oldest call first, without a query or a hash" ($parsed.chrome == [{function: "?", filename: "https://h/c.js", abs_path: "https://h/c.js", lineno: 3, colno: 1} {function: "outer", filename: "https://h/b.js", abs_path: "https://h/b.js", lineno: 20, colno: 7} {function: "inner", filename: "https://h/a.js", abs_path: "https://h/a.js", lineno: 10, colno: 5}])
+	check "Firefox's and Safari's stack is read" ($parsed.gecko == [{function: "?", filename: "https://h/c.js", abs_path: "https://h/c.js", lineno: 3, colno: 1} {function: "outer", filename: "https://h/b.js", abs_path: "https://h/b.js", lineno: 20, colno: 7} {function: "inner", filename: "https://h/a.js", abs_path: "https://h/a.js", lineno: 10, colno: 5}])
+	check "a bundle the stack runs through is named by its debug ID, one it does not is not" ($parsed.images == [{type: "sourcemap", code_file: "https://h/a.js", debug_id: "id-a"}])
 
 	cd -
 	rm --recursive $dir

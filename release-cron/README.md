@@ -76,6 +76,11 @@ Bonk Chess (bsoneca/pronto's `apps/brawl-chess`) is the first: its `release_cron
    its GitHub Release is made (`release-notes/release-notes.ts <app> publish <revision>`). The run
    records `notes` (`published` or `failed (exit N)`) and its outcome never changes with it.
 
+7. **source maps**: when the revision is new and the app has [pronto-errors](../errors/README.md)
+   `errors/sourcemaps.ts`, its bundles are built again from the tree released, with their maps, and
+   sent to GlitchTip (`errors/sourcemaps.ts upload`). The run records `maps` (`sent` or `failed (exit N)`)
+   and its outcome never changes with it.
+
 Each step's output goes to `runs/<start>.log`. Each run appends one line to `release-cron.log`
 (and the same as JSON to `runs.jsonl`). Every time a person reads there (the line, the log's name,
 the `paused` file) is Brasília's, with its offset (`cron.js`'s `local`):

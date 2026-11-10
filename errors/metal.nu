@@ -31,9 +31,9 @@ export def manifests [
 	let db = "errors-db"
 	# A secret generated once in the namespace, never rotated under running pods, and its Secret's
 	# data templated from it.
-	let generated = {|name: string, data: record|
+	let generated = {|name: string, data: record, password: record = {}|
 		[
-			{apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", metadata: (do $meta $"($name)-password"), spec: {length: 40, digits: 8, symbols: 0, noUpper: false, allowRepeat: true}}
+			{apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", metadata: (do $meta $"($name)-password"), spec: ({length: 40, digits: 8, symbols: 0, noUpper: false, allowRepeat: true} | merge $password)}
 			{
 				apiVersion: "external-secrets.io/v1beta1", kind: "ExternalSecret", metadata: (do $meta $name)
 				spec: {
@@ -49,6 +49,9 @@ export def manifests [
 		...(do $generated "glitchtip-db" {username: "glitchtip", password: "{{ .password }}", url: $"postgres://glitchtip:{{ .password }}@($db)-rw.($ns).svc:5432/glitchtip?sslmode=disable"})
 		...(do $generated "glitchtip" {SECRET_KEY: "{{ .password }}"})
 		...(do $generated "owner" {email: $"owner@($domain)", password: "{{ .password }}"})
+		# The token a release sends its source maps with (errors/sourcemaps.ts): the owner's API token,
+		# made by `provision` from this file, to upload and nothing else. GlitchTip keeps 64 characters.
+		...(do $generated "upload" {token: "{{ .password }}"} {length: 64, digits: 24, noUpper: true})
 	] | each {|o| if $o.metadata.name == "glitchtip-db" and $o.kind == "ExternalSecret" { $o | upsert spec.target.template.type "kubernetes.io/basic-auth" } else { $o } }
 	let cluster = {
 		apiVersion: "postgresql.cnpg.io/v1", kind: "Cluster", metadata: (do $meta $db)
@@ -104,12 +107,15 @@ export def manifests [
 							{name: "tmp", mountPath: "/tmp"}
 							# The owner's sign-in, read by `provision` alone.
 							{name: "owner", mountPath: "/etc/glitchtip-owner", readOnly: true}
+							# The source maps' upload token, read by `provision` alone.
+							{name: "upload", mountPath: "/etc/glitchtip-upload", readOnly: true}
 						]
 					}]
 					volumes: [
 						{name: "uploads", persistentVolumeClaim: {claimName: "glitchtip-uploads"}}
 						{name: "tmp", emptyDir: {}}
 						{name: "owner", secret: {secretName: "owner", defaultMode: 288}}
+						{name: "upload", secret: {secretName: "upload", defaultMode: 288}}
 					]
 				}
 			}
@@ -156,7 +162,9 @@ export def manifests [
 
 # The Django shell program that makes the owner, the organization and a project per app (each
 # once), and prints each project's DSN key as JSON lines: {project, id, key}. The key is public (a
-# page sends it); the owner's sign-in is read from the pod's mounted Secret, never passed.
+# page sends it); the owner's sign-in is read from the pod's mounted Secret, never passed. The
+# owner's API token for the releases' source maps is the Secret `upload`'s, made once, its scopes
+# only what sentry-cli's upload asks.
 export def provision [projects: list<string>]: nothing -> string {
 	let names = $projects | to json --raw
 	$"
@@ -164,6 +172,7 @@ import json
 from apps.users.models import User
 from apps.organizations_ext.models import Organization, OrganizationUserRole
 from apps.projects.models import Project, ProjectKey
+from apps.api_tokens.models import APIToken
 email, password = [open\(f'/etc/glitchtip-owner/{k}'\).read\(\).strip\(\) for k in \('email', 'password'\)]
 user = User.objects.filter\(email=email\).first\(\)
 if user is None:
@@ -173,6 +182,9 @@ elif not user.check_password\(password\):
 org, _ = Organization.objects.get_or_create\(slug='($org)', defaults={'name': '($org)'}\)
 if not org.organization_users.filter\(user=user\).exists\(\):
     org.add_user\(user, role=OrganizationUserRole.OWNER\)
+upload = open\('/etc/glitchtip-upload/token'\).read\(\).strip\(\)
+token = APIToken.objects.filter\(token=upload\).first\(\) or APIToken.objects.create\(user=user, token=upload, label='release source maps'\)
+token.add_permissions\(['org:read', 'project:read', 'project:write', 'project:releases']\)
 for name in json.loads\('($names)'\):
     project, _ = Project.objects.get_or_create\(organization=org, slug=name, defaults={'name': name, 'platform': 'javascript-browser'}\)
     key = ProjectKey.objects.filter\(project=project\).first\(\) or ProjectKey.objects.create\(project=project\)
