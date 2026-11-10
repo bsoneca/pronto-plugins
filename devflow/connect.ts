@@ -21,6 +21,49 @@ async function must(c: string, args: string[], opts: { stdin?: string; cwd?: str
   return r.out;
 }
 
+// A SOPS file's Secret, decrypted in memory: sops from PATH, else the one sayt keeps; the age key
+// from SOPS_AGE_KEY, else (on a Mac) the Keychain item pronto-sops-age, as pronto's tools/secrets do.
+async function sopsSecret(file: string): Promise<Record<string, string>> {
+  const home = Deno.env.get("HOME") ?? "";
+  const kept = [...(function* () {
+    try {
+      for (const e of Deno.readDirSync(`${home}/.cache/sayt/k8s/operators`)) if (e.name.startsWith("sops-")) yield `${home}/.cache/sayt/k8s/operators/${e.name}`;
+    } catch { /* none kept */ }
+  })()].sort();
+  const bin = (await cmd("sh", ["-c", "command -v sops"])).out.trim() || kept.at(-1);
+  if (!bin) throw new Error("no sops on PATH, nor one sayt keeps");
+  const key = Deno.env.get("SOPS_AGE_KEY") ?? (await cmd("security", ["find-generic-password", "-s", "pronto-sops-age", "-w"])).out.trim();
+  const r = await cmd(bin, ["-d", "--output-type", "json", file], { env: { ...Deno.env.toObject(), SOPS_AGE_KEY: key } });
+  if (!r.ok) throw new Error(`sops -d ${file}: ${r.err.trim().split("\n").at(-1)}`);
+  const s = JSON.parse(r.out);
+  return { ...Object.fromEntries(Object.entries(s.data ?? {}).map(([k, v]) => [k, atob(String(v))])), ...(s.stringData ?? {}) };
+}
+
+// The Django program that holds Plane's instance configuration to `want` (key to value): it says
+// which keys differ, and with `apply` writes them (encrypted where Plane keeps them encrypted).
+// Run by `manage.py shell` with the values on its stdin, never in an argument.
+const planeConfig = (want: Record<string, string>, apply: boolean) => `
+import json
+from plane.license.models import InstanceConfiguration
+from plane.license.utils.encryption import encrypt_data, decrypt_data
+from plane.utils.instance_config_variables import instance_config_variables
+encrypted = {v["key"]: v.get("is_encrypted", False) for v in instance_config_variables}
+want = json.loads(${JSON.stringify(JSON.stringify(want))})
+differs = []
+for key, value in want.items():
+    row = InstanceConfiguration.objects.filter(key=key).first()
+    now = None if row is None else (decrypt_data(row.value) if row.is_encrypted and row.value else row.value)
+    if now == value:
+        continue
+    differs.append(key)
+    if ${apply ? "True" : "False"}:
+        row = row or InstanceConfiguration(key=key, category=key.split("_")[0])
+        row.is_encrypted = encrypted.get(key, False)
+        row.value = encrypt_data(value) if row.is_encrypted else value
+        row.save()
+print(json.dumps({"differs": differs}))
+`;
+
 const random = () => Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, "0")).join("");
 
 export function steps(repo: string, flow: DevFlow): Step[] {
@@ -76,8 +119,9 @@ export function steps(repo: string, flow: DevFlow): Step[] {
         name: "Plane's database and door (CloudNativePG, the gateway's route)",
         check: async () => {
           const db = await k("-n", ns, "get", "secret", "plane-db-app");
-          const route = await k("-n", ns, "get", "httproute", "plane-route");
-          return db.ok && route.ok ? ok() : todo("apply them");
+          const route = await k("-n", ns, "get", "httproute", "plane-route", "-o", "jsonpath={.spec.rules[*].filters}");
+          // The route as plane.cue has it now: telling Plane each request was https.
+          return db.ok && route.ok && route.out.includes("X-Forwarded-Proto") ? ok() : todo("apply them");
         },
         apply: async () => {
           const objects = await exportFlow<unknown[]>(repo, "planeObjects");
@@ -118,10 +162,39 @@ export function steps(repo: string, flow: DevFlow): Step[] {
       },
       {
         name: "Plane's instance admin",
-        check: async () =>
-          (await instance())?.instance?.is_setup_done
-            ? ok()
-            : gate(`create Plane's admin (yourself), then in Authentication turn off sign-ups so only invited people join: ${origin}/god-mode/`),
+        check: async () => (await instance())?.instance?.is_setup_done ? ok() : gate(`create Plane's admin (yourself): ${origin}/god-mode/`),
+      },
+      {
+        name: `who gets in (sign-up ${board.access.signup ? "on" : "off"}${board.access.github ? ", GitHub's sign-in" : ""})`,
+        ...(() => {
+          // What Plane should hold; sign-up is written even while GitHub's App is still to be made.
+          const want = async (): Promise<{ w: Record<string, string>; waiting: boolean }> => {
+            const w: Record<string, string> = { ENABLE_SIGNUP: board.access.signup ? "1" : "0" };
+            if (!board.access.github) return { w, waiting: false };
+            const s = await sopsSecret(`${repo}/${board.access.github.secrets}`);
+            if (!s.client_id || !s.client_secret || s.client_id === "unset" || s.client_secret === "unset") return { w, waiting: true };
+            return { w: { ...w, IS_GITHUB_ENABLED: "1", GITHUB_CLIENT_ID: s.client_id, GITHUB_CLIENT_SECRET: s.client_secret }, waiting: false };
+          };
+          const shell = async (w: Record<string, string>, apply: boolean) => {
+            const r = await must("kubectl", kc("-n", ns, "exec", "-i", "deploy/plane-api-wl", "--", "python", "manage.py", "shell"), { stdin: planeConfig(w, apply) });
+            return JSON.parse(r.split("\n").filter((l) => l.startsWith("{")).at(-1) ?? "{}").differs as string[];
+          };
+          return {
+            check: async () => {
+              const { w, waiting } = await want();
+              const differs = await shell(w, false);
+              if (differs.length) return todo(`write ${differs.join(", ")}`);
+              return waiting
+                ? gate(`put GitHub's OAuth App's client_id and client_secret in ${board.access.github!.secrets} (sops set --value-stdin); make the App with this callback: ${origin}/auth/github/callback/`)
+                : ok();
+            },
+            apply: async () => {
+              await shell((await want()).w, true);
+              // /api/instances/ answers from a cache for two hours.
+              await must("kubectl", kc("-n", ns, "exec", "deploy/plane-api-wl", "--", "python", "manage.py", "clear_cache"));
+            },
+          };
+        })(),
       },
     ];
   };

@@ -63,6 +63,10 @@ planeObjects: [
 			rules: [for r in _routes {
 				matches: [{path: {type: "PathPrefix", value: r.path}}]
 				backendRefs: [{group: "", kind: "Service", name: "\(_release)-\(r.to)", port: r.port, weight: 1}]
+				// Cloudflare ends TLS and the tunnel reaches the gateway over http, which tells Plane
+				// http: its OAuth callbacks (https://<host>/auth/github/callback/) and Django's secure
+				// checks need https, which every request to the host was.
+				filters: [{type: "RequestHeaderModifier", requestHeaderModifier: set: [{name: "X-Forwarded-Proto", value: "https"}]}]
 				timeouts: request: "120s"
 			}]
 		}

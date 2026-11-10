@@ -23,7 +23,7 @@ async function schema(): Promise<string> {
 export type Role = "backlog" | "refine" | "ready" | "implementing" | "review" | "merged" | "live" | "done" | "cancelled";
 
 export interface DevFlow {
-  board: { kind: "plane" | "github-projects"; host: string; workspace: string; project: { name: string; identifier: string }; chart: string };
+  board: { kind: "plane" | "github-projects"; host: string; workspace: string; project: { name: string; identifier: string }; chart: string; access: { signup: boolean; github?: { secrets: string } } };
   /** Absent in a repository that only reports to a board set up from another (schema.cue). */
   cluster?: { context: string; ssh: string; namespace: string; tunnel: string; apiPort: number };
   token: { kind: "secret-manager"; project: string; secret: string } | { kind: "env"; name: string };
