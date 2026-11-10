@@ -56,7 +56,7 @@ configSeeded:      _h.files["shell/hatches/errors/config.js"].seed & true
 schemaInPackage:   strings.Contains(_h.files["errors_plugin.cue"].text, "\npackage shop\n") & true
 standinHatch:      strings.Contains(_h.files["errors_hatch.cue"].text, "code: capabilities: hatches: \"errors-glitchtip\": {") & true
 standinPeer:       strings.Contains(_h.files["errors_hatch.cue"].text, "PRONTO_UPSTREAM_ERRORS: {peer: \"errors\", port: \"http\"}") & true
-writeBeforeWriter: strings.Contains(_h.files["pronto/errors.cue"].text, "\"priority\":-1") & true
+writeAfterEmbeds:  strings.Contains(_h.files["pronto/errors.cue"].text, "\"errors-write\": {\"priority\":0") & true
 routeAfterWriter:  strings.Contains(_h.files["pronto/errors.cue"].text, "\"priority\":3") & true
 routeFromExports:  strings.Contains(_h.files["pronto/errors.cue"].text, "exports of errors") & true
 
