@@ -341,7 +341,7 @@ export async function otpFlow(p = {}) {
   };
   const cfg = phoneConfig((k) => ({ ...OTP_ENV, ...env })[k] ?? undefined, issuer);
   const texts = [];
-  if (sender === 'capture') cfg.sender = { send: (to, text) => { texts.push(text); return Promise.resolve(); } };
+  if (sender === 'capture') cfg.sender = { send: (_to, text) => { texts.push(text); return Promise.resolve(); } };
   if (sender === 'fails') cfg.sender = { send: () => Promise.reject(new Error('provider down')) };
   const up = await phoneUpstream(issuer, cfg, { secret, now: () => clock, fetcher });
   const handle = await broker({ issuer, secret, providers: [up.provider], extra: up.handle });
