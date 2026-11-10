@@ -36,7 +36,46 @@ Bonk Chess (bsoneca/pronto's `apps/brawl-chess`) is the first: its `release_cron
   (none by default).
 - `holder: "verify@local"`: the `what` in a slot's owner line (`tests/slot.ts` writes `<pid> <ISO>
   <app dir> <what> (weight <w>)`) that marks the rehearsal's main slot. Ume's `verify@local` ends in
-  `./saytw integrate@local`, so its apps set `holder: "./saytw integrate@local"`.
+  `./saytw integrate@local`, so its apps set `holder: "./saytw integrate@local"` (read as
+  `rehearsal.holder`, below).
+
+## What an app chooses
+
+Everything below is a field of `releaseCron` with a default that is what an app got before it
+existed, so an app that names none of them runs as it did.
+
+- `scheduler`: `{kind: "launchd"}` (the default; the LaunchAgent above), `{kind: "systemd"}` or
+  `{kind: "actions"}`. `systemd`: `install` writes `~/.config/systemd/user/<label>.service` (a
+  oneshot that runs the script) and `.timer` (`OnUnitActiveSec` = `poll` minutes, `OnBootSec=1min`),
+  then `systemctl --user daemon-reload` and `systemctl --user enable --now <label>.timer`;
+  `uninstall` disables the timer and removes both. `actions`: `install` writes nothing and says
+  that the app's workflow runs `release-cron.ts <app> run` (see "Started by CD"). The units and
+  the plist are rendered by pure functions of `cron.js` (`systemdUnits`, `plist`).
+- `target`: `{kind: "cloud-run"}` (the default: release.cue's GCP, `./saytw release@gcp`, Cloud Run's
+  traffic) or `{kind: "command", release, serving, origin, preview?}` (see "An app off Cloud Run").
+  A `target` that names no `kind` is a command's, so an existing one loads unchanged.
+- `rehearsal`: `{command: ["./saytw", "verify@local"], slot: true, holder: "verify@local"}`. `command`
+  is the rehearsal, run in the app's folder (null: none, the release follows the schedule alone);
+  `slot: false` runs it without waiting for a slot of the pool; `holder` is the `what` above, which
+  the top-level `holder` still sets. `GCP.rehearsal` (the cloud's) replaces it, as before.
+- `notify`: who is told of a bisect's culprit and of the scenarios that flaked or failed new:
+  `{kind: "none"}` (the default: the log alone), `{kind: "github-comment"}` (a comment on the pull
+  request) or `{kind: "claude-session", lead, notes}` (that comment, a notes file in the author
+  session's folder when the PR body names one, else `lead`'s, under `~/<notes>`, and a macOS
+  notification, on darwin only). `lead` has no default. An app that still sets `bisect.lead` or
+  `bisect.notes` is read as a `claude-session` with them.
+- `hooks`: `[{on: "released", command: [...]}]`. After a confirmed release, each hook runs in the
+  run's worktree with `<worktree> <app> <commit>` appended to its command (a first word of `deno` is
+  the deno running the script; `cue` is found as mise's newest when the PATH has none). A hook that
+  fails is logged and recorded (`hooks` in runs.jsonl) and never changes the run's outcome. The dev
+  flow's board, which tells the app's Merged issues whose pull request the release holds that they
+  are Live, is one:
+
+  ```cue
+  releaseCron: hooks: [{on: "released", command: ["deno", "run", "-A",
+  	"--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/",
+  	"https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released"]}]
+  ```
 
 ## A run
 
@@ -80,6 +119,8 @@ Bonk Chess (bsoneca/pronto's `apps/brawl-chess`) is the first: its `release_cron
    `errors/sourcemaps.ts`, its bundles are built again from the tree released, with their maps, and
    sent to GlitchTip (`errors/sourcemaps.ts upload`). The run records `maps` (`sent` or `failed (exit N)`)
    and its outcome never changes with it.
+
+8. **hooks**: `releaseCron.hooks` on `released`, as above.
 
 Each step's output goes to `runs/<start>.log`. Each run appends one line to `release-cron.log`
 (and the same as JSON to `runs.jsonl`). Every time a person reads there (the line, the log's name,
@@ -146,9 +187,10 @@ own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>
    rc preview) is approximated by the same scenarios run locally.
 4. The culprit is mapped to its pull request (`Merge pull request #N from …`). The pull request gets a
    comment; a notes file goes to the author session when the PR body names one (`local_<uuid>`) and
-   its notes folder exists, else to `bisect.lead`'s
+   its notes folder exists, else to `notify.lead`'s
    (`~/Library/Application Support/Claude/side-session-notes/<session>/`); a macOS notification is
-   shown. Once per culprit.
+   shown. That is `notify: {kind: "claude-session"}`; `github-comment` only comments and `none`
+   (the default) only logs. Once per culprit.
 
 Each bisect is a line of `bisect/bisects.jsonl` and a `bisect` line of `runs.jsonl` (`detail.bisect`),
 and `report` ends with them; it never reverts, never releases and never calls `release@gcp`.
@@ -161,7 +203,7 @@ on stable features and prints `released on stable features; new-feature scenario
 When a run's release output has that line, the run's log line and `report` name the scenarios
 (`released; new-feature scenarios failing: a, b`), and the pull request that added each is told once
 (`new-feature.jsonl`), through the same path as a bisect's culprit: a comment, and the notes file of
-the author session its body names (`local_<uuid>`), else of `bisect.lead`. That PR is the first merge
+the author session its body names (`local_<uuid>`), else of `notify.lead`. That PR is the first merge
 on main's first-parent history since the last released run whose tree has the scenario's file
 (`tests/scenarios/<name>.cue`, else a mention of the name in `tests/scenarios/`).
 
@@ -173,7 +215,7 @@ that releases the checked-out tree; `serving`, the command that prints the commi
 app's folder. A run then uses them where it would use `./saytw release@gcp` and Cloud Run's traffic:
 it skips when `serving` already names main's head, releases with `release`, and confirms when
 `serving` names the head and the probes answer. `ready` is not read. aprende, on Cloudflare Pages,
-uses it. An app without `target` runs exactly as before.
+uses it. An app without `target` is `{kind: "cloud-run"}` and runs exactly as before.
 
 ## Install, pause, remove
 
@@ -183,7 +225,7 @@ deno run -A release-cron/release-cron.ts brawl-chess status     # installed? pau
 deno run -A release-cron/release-cron.ts brawl-chess report     # every release measured; the newest against the rest
 deno run -A release-cron/release-cron.ts brawl-chess pause      # runs skip (logged) until resume
 deno run -A release-cron/release-cron.ts brawl-chess resume
-deno run -A release-cron/release-cron.ts brawl-chess uninstall  # the launchd job removed
+deno run -A release-cron/release-cron.ts brawl-chess uninstall  # the launchd job (or systemd timer) removed
 ```
 
 Run these from the app's folder (`apps/brawl-chess`), where mise supplies deno and cue.
@@ -207,6 +249,8 @@ that app has no launchd job.
 
 ## Why launchd
 
+(The default scheduler; `systemd` and `actions` above are the same run on Linux and under CI.)
+
 This Mac already runs its agents through launchd (`~/Library/LaunchAgents`), and launchd
 already does what a scheduled release needs. It never runs two copies of a job at once. It
 catches up one missed wake after sleep instead of a burst. It keeps running without a
@@ -217,7 +261,7 @@ rehearsal stack.
 
 ## Tests
 
-[`tests.cue`](tests.cue) checks the written files and #Cron's defaults with `cue vet`; the rules'
+[`tests.cue`](tests.cue) checks the written files and #Cron's defaults (scheduler, target, rehearsal, notify, hooks) with `cue vet`; the rules'
 cases are suite `cron` of the plugins' unit cases.
 
 ```sh

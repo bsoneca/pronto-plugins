@@ -27,9 +27,51 @@ export const activeLine = (app, pid, started, phase) => JSON.stringify({ app, pi
 export const spaced = (outcome) => outcome === "released" || outcome === "failed";
 
 // A failed run's gap is waived once main has moved past the commit it failed on (`failed`; `head`
-// main now, null when it could not be read): the fix may be in, and an hour's wait on top of the
-// failed run's own would leave the app unreleased past its period. The same commit waits the gap.
+// main now, null when it could not be read) by a change that concerns what failed (concerns, below):
+// the fix may be in, and an hour's wait on top of the failed run's own would leave the app unreleased
+// past its period. The same commit waits the gap.
 export const retry = (failed, head) => !!failed && !!head && head !== failed;
+
+// The checks a failed rehearsal's summary marks failed: its `  ✗ <check>` lines (integrate@local,
+// premium, `scenarios, pass 1: …`), not a scenario's own `✗ <name> (12s) at step`.
+export const failedRehearsal = (text) =>
+  [...new Set([...(text ?? "").matchAll(/^ {2}✗ ([^:\n(]+?)\s*(?::.*)?$/gm)].map((m) => m[1].trim()))];
+
+// Whether a change since a failed run concerns what its failed checks read, so the next run retries
+// without the gap: the first file that does, with why, or null, and the run waits the gap (2026-11-07:
+// 17:56 failed integrate@local's visual lint; main moved by tools/metrics and .github alone, and 18:16
+// ran the same rehearsal to the same failure 8 minutes later, most of the machine for both). `files`:
+// what the change touched, from the repository's top; `app`: the app's folder there; `sig`: the failure
+// (signature); `checks`: failedRehearsal's; `sqlHot(file)`: whether a SQL file matters to the failed
+// scenarios by what their last green runs touched (tests/scenarios/select.ts's touched and hotSql), null
+// when no record says. What the scenario selection (docs/test-selection.md) knows no check reads, none
+// does here: documentation, the unit cases, and a file outside the app but the tool pins above it (and,
+// for a release, infra/). A runner concerns its own check: tests/premium.ts premium, a scenario's CUE
+// the scenarios. Anything else in the app concerns every check (fail open: the served files, which the
+// visual lint and the scenarios load, the server, the app's CUE, the rehearsal's runners, release-cron),
+// but SQL that no failed scenario touched. A failure whose checks cannot be read concerns everything.
+/** @param {(file: string) => boolean | null} sqlHot */
+export const concerns = (files, app, sig, checks, sqlHot = () => null) => {
+  const all = sig.kind === "release" || !checks.length;
+  const scenarios = all || checks.some((c) => c.startsWith("scenarios")) || sig.names.length > 0;
+  const premium = all || checks.includes("premium");
+  const onlyScenarios = !all && checks.every((c) => c.startsWith("scenarios")) && sig.names.length > 0;
+  for (const f of files) {
+    if (f !== app && !f.startsWith(`${app}/`)) {
+      const dir = f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : "";
+      if (/(^|\/)(mise\.lock|\.?mise\.toml)$/.test(f) && (dir === "" || app.startsWith(`${dir}/`))) return { file: f, why: "a tool pin above the app" };
+      if (sig.kind === "release" && f.startsWith("infra/")) return { file: f, why: "the cloud's configuration, which a release reads" };
+      continue;
+    }
+    const rel = f.slice(app.length + 1);
+    if (/\.md$/.test(rel) || /^journal\//.test(rel) || /^tests\/unit(\/|\.ts$)/.test(rel)) continue;
+    if (rel === "tests/premium.ts") { if (premium) return { file: f, why: "premium's runner, and premium failed" }; continue; }
+    if (/^tests\/scenarios\/[^/]+\.cue$/.test(rel) && rel !== "tests/scenarios/schema.cue") { if (scenarios) return { file: f, why: "a scenario's steps, and scenarios failed" }; continue; }
+    if (rel.endsWith(".sql") && onlyScenarios && sqlHot(f) === false) continue;
+    return { file: f, why: rel.endsWith(".sql") ? "SQL a failed scenario may touch" : `read by ${all ? "every check" : checks.join(", ")}` };
+  }
+  return null;
+};
 
 // Whether a run's commit `ref` is a strict ancestor of `last`, the commit the last run (released or
 // failed) tried (`isAncestor`: git merge-base --is-ancestor ref last): the run skips, for a ref
@@ -85,12 +127,19 @@ export const holds = (owner, dir, what = "verify@local") => {
   return !!m && m[1].replace(/\/+$/, "") === dir.replace(/\/+$/, "") && m[2] === what;
 };
 
-// A probe's verdict: null when the answer is what it expects, else what was wrong.
-export const probe = (spec, status, body) => {
+// A probe's verdict: null when the answer is what it expects, else what was wrong. A probe with a
+// `location` is asked without following its redirect, and answers one to an address that starts so.
+/** @param {string | null} [location] */
+export const probe = (spec, status, body, location = null) => {
   if (status !== (spec.status ?? 200)) return `${spec.path}: ${status}, expected ${spec.status ?? 200}`;
+  if (spec.location && !(location ?? "").startsWith(spec.location)) return `${spec.path}: to ${location ?? "nowhere"}, expected ${spec.location}`;
   const missing = (spec.has ?? []).filter((h) => !body.includes(h));
   return missing.length ? `${spec.path}: ${status} without ${missing.map((m) => JSON.stringify(m)).join(", ")}` : null;
 };
+
+// The probes the release preview (releaseCron.target.preview) is asked: every one but those that say `preview: false`
+// (a probe of a row only production holds, say). Name and spec, in the probes' order.
+export const previewProbes = (probes) => Object.entries(probes).filter(([, p]) => p.preview !== false);
 
 // The run's log line: when, the app, the outcome, the commit, then each step's minutes, one decimal,
 // in the order run, and the total. `steps` holds the steps that ran, in seconds.
@@ -173,6 +222,36 @@ export const plist = ({ label, program, args, poll, log, env }) => {
 `;
 };
 
+// The systemd user units of the same job (~/.config/systemd/user/<label>.service and .timer), the Linux
+// scheduler's: the service runs `program` with `args` once and its output is appended to `log`, with the
+// variables in `env`; the timer starts it `poll` minutes after the last start (OnUnitActiveSec; systemd never
+// starts a service while it runs) and once a minute after boot, so a run follows a restart.
+export const systemdUnits = ({ label, program, args, poll, log, env }) => {
+  // A word of a unit file in double quotes: \ and " escaped, and % and $ doubled (specifiers, variables).
+  const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\$/g, "$$$$")}"`;
+  const service = `[Unit]
+Description=release-cron ${label}
+
+[Service]
+Type=oneshot
+ExecStart=${[program, ...args].map(q).join(" ")}
+${Object.entries(env).map(([k, v]) => `Environment=${q(`${k}=${v}`)}\n`).join("")}StandardOutput=append:${log}
+StandardError=append:${log}
+`;
+  const timer = `[Unit]
+Description=release-cron ${label}, every ${poll} min
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=${poll}min
+Unit=${label}.service
+
+[Install]
+WantedBy=timers.target
+`;
+  return { service, timer };
+};
+
 // --- Bisect: a failed run names the commit that broke it. ---
 
 // What a failed run failed on, from its `why` and its output: the kind ("release" when release@gcp,
@@ -230,6 +309,59 @@ export const next = (commits, known) => {
 export const unreproduced = (kind, v) => v === "bad" ? null :
   `the check ${v === "good" ? "passes" : "did not finish"} here on the failing commit: ${kind === "release" ? "a failure only the cloud shows" : "a failure of the run's conditions (a service stopped from outside, the machine), not of a commit"}, not bisected`;
 
+// Whether a failed run's failure is one a bisect cannot decide, whatever it names: a failure that
+// depends on a flag (the scenario's `flags`), on time (a scenario marked `slow`, the menu budget) or on
+// the machine's load says nothing about the commit it ran on. On 2026-11-06 the bisect blamed #773 for
+// #771's flag-off menu path, and a check run while the machine sat at load 185 fails by itself.
+// `specs` is [{id, flags, slow}] of the scenarios; `load` the 1-minute load average and `cores` the machine's.
+export const undecidable = (sig, text, specs, load, cores, flaked = []) => {
+  // A release's failure is the cloud's (its rc preview), so the machine's load now says nothing of it;
+  // one whose only failed checks are the menu budget's timing is not the commit's either (2026-11-07
+  // 10:11 BRT: "menu time 9327 ms > 6000 ms" on the rc, and its bisect ran a whole local check to say so).
+  // Nor is one with nothing a local check can run: no scenario named and no failed check read, or only
+  // scenarios the run itself saw flake (they passed on a retry). Of 15 bisects to 2026-11-07, 7 ended "a
+  // failure only the cloud shows" after a whole local check on the failing commit; this decides it before.
+  if (sig.kind === "release") {
+    const checks = failedChecks(text);
+    if (checks.length && checks.every((c) => /menu[- ]budget/i.test(c))) return "the menu budget is a timing check, not bisected";
+    if (!sig.names.length && !checks.length) return "a release failure that names no scenario and no check: a failure only the cloud shows, not bisected";
+    if (sig.names.length && sig.names.every((n) => (flaked ?? []).includes(n))) return `${sig.names.join(", ")} flaked in the run itself: a failure only the cloud shows, not bisected`;
+    return null;
+  }
+  if (load > cores) return `the machine is under load (${load.toFixed(0)} on ${cores} cores): a timing check would fail by itself, not bisected`;
+  const dependent = (specs ?? []).filter((x) => sig.names.includes(x.id) && (x.flags || x.slow));
+  if (dependent.length) return `${dependent.map((x) => x.id).join(", ")} depend${dependent.length > 1 ? "" : "s"} on ${dependent.some((x) => x.flags) ? "a flag" : "time"} (flags or slow in its CUE), which the commit under test does not decide, not bisected`;
+  if (!sig.names.length && /menu[- ]budget/i.test(text ?? "")) return "the menu budget is a timing check, not bisected";
+  return null;
+};
+
+// A bisect's check in the background: `nice -n 19` under macOS's background QoS (`taskpolicy -b`: the
+// lowest CPU, disk and network priority), so a gate or a release always outranks it. Every process the
+// check starts inherits both.
+export const lowPriority = (argv) => ["taskpolicy", "-b", "nice", "-n", "19", ...argv];
+
+// The checks the last verify line names as failed ("verify: failed: check-menu-budget check-online").
+export const failedChecks = (text) => {
+  const m = [...(text ?? "").matchAll(/^verify: failed: (.+)$/gm)].at(-1);
+  return m ? m[1].trim().split(/\s+/) : [];
+};
+
+// Whether a bisect stops before its next check, and why (null: go on). It never holds a release up:
+// it yields to a release-cron run that holds the run's lock (`holder`, alive; not the run that started
+// it, `starter`, which lets the lock go as it ends), and it is moot once a run after the failed one
+// released (`releasedAfter`) or a commit on main after the failed one is green for this failure in the
+// records (`fixedBy`, its sha). On 2026-11-07 a bisect of the 11:29 BRT failure held the release runner,
+// waiting 11th in line for its check, until it was stopped at 15:12: no release ran from 14:12.
+export const stopsBisect = (holder, starter, alive, releasedAfter, fixedBy) =>
+  holder > 0 && alive && holder !== starter ? `a release-cron run (${holder}) is going: the bisect yields to it, its verdicts kept`
+  : releasedAfter ? `a run since released ${releasedAfter.slice(0, 8)}: nothing to bisect`
+  : fixedBy ? `main is green for this failure at ${fixedBy.slice(0, 8)}: fixed, not bisected`
+  : null;
+
+// The first of `commits` (main after the failed commit, oldest first) the records find good for this
+// failure; null when none.
+export const fixedBy = (commits, sig, ev) => commits.find((c) => verdict(c, sig, ev) === "good") ?? null;
+
 // The author session a pull request names in its body: a Claude Desktop session id (local_<uuid>).
 export const sessionOf = (body) => (body ?? "").match(/local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)?.[0] ?? null;
 
@@ -268,10 +400,29 @@ export const flakedNames = (text) => {
 // touched it (`touched`: sha -> bool); none when no merge of the list did.
 export const changedBy = (list, touched) => [...list].reverse().find((c) => touched[c.sha]) ?? null;
 
-// The dev flow's `released` hook, as the arguments of the deno run that tells the board (devflow/hook.ts, from
-// pronto-plugins' main: release-cron's script is a copy in the app): the app's Merged issues whose pull request
-// `head` holds go Live, a flagless fix Done (devflow/flow.js doneAt).
-export const boardHook = (wt, appRel, head) => {
-  const hooks = "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/";
-  return ["run", "-A", `--reload=${hooks}`, `${hooks}hook.ts`, "released", wt, appRel.split("/").pop(), head];
+// A hook of releaseCron.hooks as the command run: its own argv, then the run's worktree, the app and the commit
+// released (the dev flow's `released` hook, devflow/hook.ts, takes exactly those). The hooks of one event, in order.
+export const hookArgv = (hook, wt, app, commit) => [...hook.command, wt, app, commit];
+export const hooksOf = (hooks, on) => (hooks ?? []).filter((h) => h.on === on);
+
+// Who a finding reaches, by the app's `notify`: the log always when nobody else is (`none`); `github-comment` the pull
+// request's comment; `claude-session` that, a notes file in a session's folder and, on a Mac (`platform`, Deno.build.os),
+// a notification.
+export const channels = (notify, platform) =>
+  notify.kind === "claude-session" ? ["comment", "notes", ...(platform === "darwin" ? ["toast"] : [])]
+  : notify.kind === "github-comment" ? ["comment"]
+  : ["log"];
+
+// The hook reads the repository's devflow.cue with `cue` (pronto-plugins' devflow/spec.ts: $CUE, else PATH's),
+// and launchd's PATH has no mise, so every run's board step failed "Failed to spawn 'cue'" (PRONTO-77,
+// 2026-11-08 21:18 BRT). It is handed mise's newest cue, as .github/workflows/plane.yml hands its own; a CUE
+// already set is kept, and with no cue installed the environment is unchanged.
+export const boardEnv = (env, home, cues) => {
+  if (env.CUE) return env;
+  const n = (s) => s.split(".").map(Number);
+  const v = cues.filter((c) => /^\d+\.\d+\.\d+$/.test(c)).sort((a, b) => {
+    const [x, y] = [n(a), n(b)];
+    return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+  }).pop();
+  return v ? { ...env, CUE: `${home}/.local/share/mise/installs/github-cue-lang-cue/${v}/cue` } : env;
 };
