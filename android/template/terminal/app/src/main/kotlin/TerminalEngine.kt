@@ -262,7 +262,8 @@ class TerminalEngine(
     fun back() = call("__goBack")
     // A link the OS handed the app, back from the system browser (or opened from elsewhere).
     fun link(url: String) = call("__onLink", JSONObject.quote(url))
-    fun resize(dp: Int) = call("__onResize", "$dp")
+    // The page's viewport in dp: the width, and the height a page that fills the screen reads (display.js).
+    fun resize(dp: Int, hdp: Int) = call("__onResize", "$dp", "$hdp")
 
     // The driver's question over the live DOM, in a debug build.
     suspend fun probe(selector: String): String = script("__probe(${JSONObject.quote(selector)})")

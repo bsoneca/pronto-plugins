@@ -16,7 +16,7 @@ const asSheets = (css) => (Array.isArray(css) ? css : css ? [css] : []);
 export function render(body, css, opts) {
   const o = opts ?? {};
   const { document } = pageOf(body, o.base);
-  const { card, unsupported } = compile(document, { sheets: asSheets(css), width: o.width ?? 411, scheme: o.scheme });
+  const { card, unsupported } = compile(document, { sheets: asSheets(css), width: o.width ?? 411, height: o.height, scheme: o.scheme });
   const root = card.states[0].div;
   const top = root.items[0] ?? { items: [] };
   return { card, root, body: top, items: top.items ?? [], vars: Object.fromEntries(card.variables.map((v) => [v.name, v.value])), unsupported, whats: unsupported.map((u) => u.what) };

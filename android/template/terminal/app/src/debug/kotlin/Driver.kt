@@ -15,6 +15,7 @@ import kotlin.concurrent.thread
 // {"where": true} the page's address; {"session": true} the token, id and guest-ness of the session it holds;
 // {"click": selector} a script's click on the DOM's element, whatever the screen shows;
 // {"fetches": n} the requests the page made from number n on, and what they answered;
+// {"display": true} whether the page has the whole screen (`fullscreen`, the bars hidden, or `standard`), its viewport in dp and the screen in px;
 // {"frames": true} how many times the screen was drawn; {"hideKeyboard": true} puts the keyboard away, as a person would, without a key the app reads.
 object Driver {
     private var server: ServerSocket? = null
@@ -39,6 +40,7 @@ object Driver {
                             q.has("click") -> runBlocking { engine.domClick(q.getString("click")) }
                             q.has("fetches") -> engine.fetches(q.getInt("fetches"))
                             q.has("frames") -> activity.frames.toString()
+                            q.has("display") -> display(activity, root)
                             // The pages the app left for since last asked (a stand-in browser's start).
                             q.has("trips") -> org.json.JSONArray(activity.takeTrips()).toString()
                             else -> "null"
@@ -59,6 +61,21 @@ object Driver {
                 v.getLocationOnScreen(at)
                 out = JSONObject().put("x", at[0]).put("y", at[1]).put("w", v.width).put("h", v.height).toString()
             }
+            done.countDown()
+        }
+        done.await()
+        return out
+    }
+
+    private fun display(activity: MainActivity, root: View): String {
+        var out = "null"
+        val done = java.util.concurrent.CountDownLatch(1)
+        activity.runOnUiThread {
+            val (mode, viewport) = activity.displayed().split(" ")
+            val (w, h) = viewport.split("x").map { it.toInt() }
+            val screen = root.rootView
+            out = JSONObject().put("mode", mode).put("viewport", JSONObject().put("w", w).put("h", h))
+                .put("screen", JSONObject().put("w", screen.width).put("h", screen.height)).toString()
             done.countDown()
         }
         done.await()

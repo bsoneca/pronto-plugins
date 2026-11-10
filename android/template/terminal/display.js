@@ -33,7 +33,11 @@ const draw = () => {
   waiting = false;
   const live = [...document.querySelectorAll('link[rel~="stylesheet"], style')]
     .map((s) => s.localName === "style" ? s.textContent : assetOf(s.getAttribute("href") || "")).filter((s) => s !== null);
-  const { card, unsupported } = compile(document, { sheets: [...sheets, ...live], width: globalThis.innerWidth });
+  // A page that asks for the whole screen (<html data-display="fullscreen">, as a manifest's display) is
+  // given the viewport's height too, and its card says so: MainActivity then hides the system bars.
+  const fullscreen = document.documentElement?.getAttribute("data-display") === "fullscreen";
+  const { card, unsupported } = compile(document, { sheets: [...sheets, ...live], width: globalThis.innerWidth, height: fullscreen ? globalThis.innerHeight : undefined });
+  if (fullscreen) card.pronto_display = "fullscreen";
   const json = JSON.stringify(card);
   for (const u of unsupported) reported.has(u) || (reported.add(u), console.warn("unsupported on Android:", u));
   if (json !== lastCard) { lastCard = json; __native_emit(json); }
@@ -41,7 +45,7 @@ const draw = () => {
 const reported = new Set();
 const soon = () => { if (!waiting) { waiting = true; setTimeout(draw, 16); } };
 
-globalThis.__onResize = (dp) => { globalThis.innerWidth = dp; soon(); };
+globalThis.__onResize = (dp, hdp) => { globalThis.innerWidth = dp; if (hdp) globalThis.innerHeight = hdp; soon(); };
 // A typed value lands on the field, and the field's own input event follows.
 globalThis.__onInput = (id, value) => {
   const el = elementOf(id);
