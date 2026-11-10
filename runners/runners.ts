@@ -1,11 +1,11 @@
 // runners: GitHub Actions runners on a cluster, an ARC runner scale set per repository (or
 // organization) whose runners build through one shared BuildKit; or, for a host setup, GitHub's
-// runner on this Mac as a launchd agent. README.md says more. From this repository's root:
+// runner on this machine as a launchd agent (macOS) or a systemd unit (Linux, installed with sudo). README.md says more. From this repository's root:
 //   deno run -A runners/runners.ts <setup> apply    the VM (a Colima setup's), the controller, BuildKit, then the scale sets;
-//                                                   a host setup's runners downloaded, registered and their agents loaded
+//                                                   a host setup's runners downloaded, registered and their services started
 //   deno run -A runners/runners.ts <setup> status   the releases and the pods; a host runner's agent and GitHub's view of it
 //   deno run -A runners/runners.ts <setup> remove   the setup's scale sets gone (the VM, the controller and BuildKit kept);
-//                                                   a host runner unregistered and its agent unloaded (its folder kept)
+//                                                   a host runner unregistered and its service stopped (its folder kept)
 // What it applies is plans[<setup>] (host.cue) of setups[<setup>] (setups.cue), never a value of its
 // own; what to do, given what it finds, is plan.js's. Every kubectl and helm call names the plan's
 // context, never the current one. Applying again changes only what differs.
@@ -35,7 +35,8 @@ const say = (s: string) => console.log(`runners: ${s}`);
 
 // The repository's own cue, through its saytw.
 const home = Deno.env.get("HOME") ?? "";
-const plan = JSON.parse(await must("./saytw", ["--script", "tools.nu", "cue", "export", "./runners/export", "-t", `setup=${setup}`, "-t", `home=${home}`, "-e", "plan", "--out", "json"]));
+const user = Deno.env.get("USER") ?? (await run("id", ["-un"])).out;
+const plan = JSON.parse(await must("./saytw", ["--script", "tools.nu", "cue", "export", "./runners/export", "-t", `setup=${setup}`, "-t", `home=${home}`, "-t", `user=${user}`, "-e", "plan", "--out", "json"]));
 const kubectl = (...args: string[]) => ["kubectl", ["--context", plan.context, ...args]] as const;
 const helm = (...args: string[]) => ["helm", ["--kube-context", plan.context, ...args]] as const;
 const chart = (name: string) => `${plan.charts.repo}/${name}`;
@@ -52,8 +53,82 @@ type HostRunner = {
   path: string;
   work: string;
   download: { url: string; sha256: string };
-  service: { label: string; path: string; plist: Record<string, unknown> & { StandardOutPath: string } };
+  service: { label: string; path: string; plist?: Record<string, unknown> & { StandardOutPath: string }; unit?: string };
 };
+
+// A host runner's service: a launchd agent in the person's session, or a systemd unit of the
+// system's, written and started with `sudo -n` (a sudo that asks for a password stops the apply
+// with the commands to run).
+type Service = { loaded(label: string): Promise<boolean>; same(svc: HostRunner["service"]): Promise<boolean>; install(svc: HostRunner["service"]): Promise<void>; stop(svc: HostRunner["service"]): Promise<void>; remove(svc: HostRunner["service"]): Promise<void>; state(label: string): Promise<string> };
+
+const launchd = async (): Promise<Service> => {
+  const domain = `gui/${await must("id", ["-u"])}`;
+  const loaded = async (label: string) => (await run("launchctl", ["print", `${domain}/${label}`])).ok;
+  const sort = (v: unknown): unknown => v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort().map(([k, x]) => [k, sort(x)])) : v;
+  return {
+    loaded,
+    // The agent on disk is the plan's when plutil reads back the same keys and values.
+    same: async (svc) => {
+      const o = await run("plutil", ["-convert", "json", "-o", "-", svc.path]);
+      return o.ok && JSON.stringify(sort(JSON.parse(o.out))) === JSON.stringify(sort(svc.plist));
+    },
+    install: async (svc) => {
+      Deno.mkdirSync(svc.plist!.StandardOutPath.replace(/\/[^/]*$/, ""), { recursive: true });
+      Deno.mkdirSync(svc.path.replace(/\/[^/]*$/, ""), { recursive: true });
+      await must("plutil", ["-convert", "xml1", "-o", svc.path, "-"], JSON.stringify(svc.plist));
+      if (await loaded(svc.label)) await must("launchctl", ["bootout", `${domain}/${svc.label}`]);
+      await must("launchctl", ["bootstrap", domain, svc.path]);
+    },
+    stop: async (svc) => {
+      if (await loaded(svc.label)) await must("launchctl", ["bootout", `${domain}/${svc.label}`]);
+    },
+    remove: async (svc) => {
+      if (await loaded(svc.label)) await must("launchctl", ["bootout", `${domain}/${svc.label}`]);
+      try { Deno.removeSync(svc.path); } catch { /* gone already */ }
+    },
+    state: async (label) => {
+      const o = await run("launchctl", ["print", `${domain}/${label}`]);
+      return o.ok ? (o.out.match(/^\s*state = (.*)$/m)?.[1] ?? "loaded") : "not loaded";
+    },
+  };
+};
+
+const systemd = (): Service => {
+  const sudo = async (args: string[], input?: string) => {
+    const o = await run("sudo", ["-n", ...args], input);
+    if (!o.ok) {
+      say(`sudo -n ${args.join(" ")} failed: ${o.err || o.out}`);
+      say("a systemd unit is the system's: run apply where sudo needs no password, or run that as root and apply again");
+      Deno.exit(3);
+    }
+  };
+  const loaded = async (label: string) => (await run("systemctl", ["is-active", "--quiet", label])).ok;
+  return {
+    loaded,
+    same: async (svc) => {
+      try { return (await Deno.readTextFile(svc.path)) === svc.unit; } catch { return false; }
+    },
+    install: async (svc) => {
+      await sudo(["tee", svc.path], svc.unit);
+      await sudo(["systemctl", "daemon-reload"]);
+      await sudo(["systemctl", "enable", svc.label]);
+      await sudo(["systemctl", "restart", svc.label]);
+    },
+    stop: async (svc) => {
+      if (await loaded(svc.label)) await sudo(["systemctl", "stop", svc.label]);
+    },
+    remove: async (svc) => {
+      try { Deno.statSync(svc.path); } catch { return; }
+      await sudo(["systemctl", "disable", "--now", svc.label]);
+      await sudo(["rm", svc.path]);
+      await sudo(["systemctl", "daemon-reload"]);
+    },
+    state: async (label) => (await run("systemctl", ["is-active", label])).out || "unknown",
+  };
+};
+
+// A file's sha256, in Deno: shasum is macOS's, sha256sum Linux's.
+const sha256 = async (path: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", Deno.readFileSync(path)))].map((b) => b.toString(16).padStart(2, "0")).join("");
 
 if (plan.host) {
   const runners: Record<string, HostRunner> = plan.host;
@@ -65,16 +140,7 @@ if (plan.host) {
       return false;
     }
   };
-  const uid = (await must("id", ["-u"]));
-  const domain = `gui/${uid}`;
-  const loaded = async (label: string) => (await run("launchctl", ["print", `${domain}/${label}`])).ok;
-  // The agent on disk is the plan's when plutil reads back the same keys and values.
-  const sameAgent = async (svc: { path: string; plist: Record<string, unknown> }) => {
-    const o = await run("plutil", ["-convert", "json", "-o", "-", svc.path]);
-    if (!o.ok) return false;
-    const sort = (v: unknown): unknown => v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort().map(([k, x]) => [k, sort(x)])) : v;
-    return JSON.stringify(sort(JSON.parse(o.out))) === JSON.stringify(sort(svc.plist));
-  };
+  const svc = plan.service === "systemd" ? systemd() : await launchd();
   const token = async (api: string, kind: string) => {
     const o = await run("gh", ["api", "-X", "POST", `${api}/${kind}-token`, "--jq", ".token"]);
     return o.ok && o.out ? o.out : undefined;
@@ -98,7 +164,7 @@ if (plan.host) {
     for (const [name, r] of Object.entries(runners)) {
       const file = read(`${r.dir}/.runner`);
       const found = { runner: file ? JSON.parse(file) : null, path: read(`${r.dir}/.path`), labels: file ? await labels(r, name) : null };
-      seen[name] = { installed: exists(`${r.dir}/config.sh`), registration: registration(plan, name, found), agent: (await sameAgent(r.service)) && (await loaded(r.service.label)) };
+      seen[name] = { installed: exists(`${r.dir}/config.sh`), registration: registration(plan, name, found), agent: (await svc.same(r.service)) && (await svc.loaded(r.service.label)) };
     }
     for (const step of hostSteps(plan, seen)) {
       const r = runners[step.name];
@@ -108,14 +174,14 @@ if (plan.host) {
           Deno.mkdirSync(r.dir, { recursive: true });
           const tgz = `${r.dir}/runner.tar.gz`;
           await must("curl", ["-fsSL", "-o", tgz, r.download.url]);
-          await must("shasum", ["-a", "256", "-c", "-"], `${r.download.sha256}  ${tgz}\n`);
+          if ((await sha256(tgz)) !== r.download.sha256) throw new Error(`${step.name}: ${r.download.url} is not the sha256 the setup pins`);
           await must("tar", ["xzf", tgz, "-C", r.dir]);
           Deno.removeSync(tgz);
           break;
         }
         case "unregister": {
           say(`${step.name}: registered otherwise than the plan says; unregistering first`);
-          if (await loaded(r.service.label)) await must("launchctl", ["bootout", `${domain}/${r.service.label}`]);
+          await svc.stop(r.service);
           const t = await token(r.api, "remove");
           if (!t || !(await config(r, ["remove", "--token", t])).success) throw new Error(`${step.name}: config.sh remove failed; remove it under the repository's Settings, Actions, Runners and apply again`);
           break;
@@ -134,29 +200,23 @@ if (plan.host) {
           break;
         }
         case "agent": {
-          say(`${step.name}: launchd agent ${r.service.label}`);
-          Deno.mkdirSync(r.service.plist.StandardOutPath.replace(/\/[^/]*$/, ""), { recursive: true });
-          Deno.mkdirSync(r.service.path.replace(/\/[^/]*$/, ""), { recursive: true });
-          await must("plutil", ["-convert", "xml1", "-o", r.service.path, "-"], JSON.stringify(r.service.plist));
-          if (await loaded(r.service.label)) await must("launchctl", ["bootout", `${domain}/${r.service.label}`]);
-          await must("launchctl", ["bootstrap", domain, r.service.path]);
+          say(`${step.name}: ${plan.service} ${r.service.label}`);
+          await svc.install(r.service);
           break;
         }
       }
     }
-    const runsOn = Object.values(runners).map((r) => `[self-hosted, macOS, ${r.labels.join(", ")}]`);
+    const runsOn = Object.values(runners).map((r) => `[${[...plan.runsOn, ...r.labels].join(", ")}]`);
     say(`applied: workflows say runs-on: ${runsOn.join(" | ")}`);
   } else if (verb === "status") {
     for (const [name, r] of Object.entries(runners)) {
-      const o = await run("launchctl", ["print", `${domain}/${r.service.label}`]);
-      const state = o.ok ? (o.out.match(/^\s*state = (.*)$/m)?.[1] ?? "loaded") : "not loaded";
+      const state = await svc.state(r.service.label);
       const gh = await run("gh", ["api", r.api, "--jq", `.runners[] | select(.name == "${name}") | "\\(.status)\\(if .busy then ", busy" else "" end)"`]);
-      say(`${name}: agent ${state}; GitHub: ${gh.ok && gh.out ? gh.out : "not registered"}`);
+      say(`${name}: ${plan.service} ${state}; GitHub: ${gh.ok && gh.out ? gh.out : "not registered"}`);
     }
   } else if (verb === "remove") {
     for (const [name, r] of Object.entries(runners)) {
-      if (await loaded(r.service.label)) await must("launchctl", ["bootout", `${domain}/${r.service.label}`]);
-      if (exists(r.service.path)) Deno.removeSync(r.service.path);
+      await svc.remove(r.service);
       if (exists(`${r.dir}/.runner`)) {
         const t = await token(r.api, "remove");
         if (!t || !(await config(r, ["remove", "--token", t])).success) say(`${name}: unregister it under the repository's Settings, Actions, Runners`);

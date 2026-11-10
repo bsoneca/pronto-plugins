@@ -19,6 +19,24 @@ setups: {
 		}
 		buildkit: emulate: ["linux/amd64", "linux/riscv64"]
 	}
+	// A Linux machine's runners, a systemd unit each, that send nothing amd64 anywhere.
+	"check-linux": {
+		cluster: host: {os: "linux", arch: "x64"}
+		github: owner: "acme"
+		amd64: "none"
+		hostRunners: "shop-linux": repo: "shop"
+	}
+	"check-linux-arm": {
+		cluster: host: os: "linux"
+		github: owner: "acme"
+		hostRunners: "shop-arm": repo: "shop"
+	}
+	// A cluster whose BuildKit emulates nothing: it builds its own platform only.
+	"check-plain": {
+		cluster: context: "k3s-home"
+		github: owner:    "acme"
+		scaleSets: "shop-plain": repo: "shop"
+	}
 	"check-host": {
 		cluster: host: {}
 		github: owner: "acme"
@@ -29,8 +47,8 @@ setups: {
 	}
 }
 
-// The checks' home; runners.ts exports a plan with the person's.
-plans: [string]: home: "/Users/check"
+// The checks' home and login; runners.ts exports a plan with the person's.
+plans: [string]: {home: "/Users/check", user: "check"}
 
 _mac: plans["check-mac"]
 _org: plans["check-org"]
@@ -88,3 +106,64 @@ host: {
 	program: ["/bin/bash", "/Users/check/actions-runners/shop-mac/bin/runsvc.sh"]
 	nice: {shop: 10, web: 0}
 }
+
+// Where amd64 builds, and what every runner's jobs read of it: Cloud Build on a Mac (its VM or the
+// Mac itself), emulation on a cluster whose BuildKit emulates amd64, nothing on one that does not,
+// and what a setup says.
+amd64: {
+	mac:   _mac.setup.amd64
+	org:   _org.setup.amd64
+	host:  _host.setup.amd64
+	plain: plans["check-plain"].setup.amd64
+	linux: plans["check-linux"].setup.amd64
+} & {mac: "cloud-build", org: "emulate", host: "cloud-build", plain: "none", linux: "none"}
+amd64Env: {
+	pod:   _org.scaleSets["web-amd"].template.spec.containers[0].env[1]
+	agent: _shop.service.plist.EnvironmentVariables.PRONTO_AMD64
+} & {pod: {name: "PRONTO_AMD64", value: "emulate"}, agent: "cloud-build"}
+
+// A Linux host: GitHub's linux runner for its arch, pinned, run by the systemd unit svc.sh writes,
+// as the person, with no Homebrew on its PATH.
+_linux: plans["check-linux"]
+_lx:    _linux.host["shop-linux"]
+linux: {
+	service: _linux.service
+	runsOn:  _linux.runsOn
+	tarball: strings.HasSuffix(_lx.download.url, "/v2.338.2/actions-runner-linux-x64-2.338.2.tar.gz")
+	sha256:  _lx.download.sha256
+	arm:     strings.HasSuffix(plans["check-linux-arm"].host["shop-arm"].download.url, "/actions-runner-linux-arm64-2.338.2.tar.gz")
+	unit:    _lx.service.path
+	plist:   _lx.service.plist == _|_
+	path:    _lx.path
+} & {
+	service: "systemd"
+	runsOn: ["self-hosted", "Linux", "X64"]
+	tarball: true
+	sha256:  "baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40"
+	arm:     true
+	unit:    "/etc/systemd/system/actions.runner.acme-shop.shop-linux.service"
+	plist:   true
+	path:    "/Users/check/.deno/bin:/Users/check/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+}
+linuxUnit: _lx.service.unit & """
+	[Unit]
+	Description=GitHub Actions Runner (acme/shop.shop-linux)
+	After=network.target
+
+	[Service]
+	ExecStart=/bin/bash /Users/check/actions-runners/shop-linux/bin/runsvc.sh
+	User=check
+	WorkingDirectory=/Users/check/actions-runners/shop-linux
+	KillMode=process
+	KillSignal=SIGTERM
+	TimeoutStopSec=5min
+	Nice=10
+	Environment=ACTIONS_RUNNER_SVC=1
+	Environment=PRONTO_AMD64=none
+
+	[Install]
+	WantedBy=multi-user.target
+
+	"""
+// A Mac's runner says so to GitHub, as before.
+macRunsOn: _host.runsOn & ["self-hosted", "macOS", "ARM64"]

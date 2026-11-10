@@ -1,6 +1,7 @@
 // The runners host: a setup (schema.cue) rendered into what runners.ts applies, in order: the VM (a
 // Colima setup's), the controller's chart, BuildKit's objects, then each scale set's chart values;
-// or, for a host setup, each host runner's download, registration and launchd agent.
+// or, for a host setup, each host runner's download, registration and service (a launchd agent on
+// macOS, a systemd unit on Linux).
 // Nothing here is written by hand anywhere else: runners.ts exports a plan and applies it as it is.
 package runners
 
@@ -14,6 +15,10 @@ plans: {for name, s in setups {(name): #Plan & {setup: s}}}
 	setup: #Setup
 	// The person's home directory: a host runner's folder, logs and agent are under it.
 	home: =~"^/"
+	// The person's login, which a systemd unit runs as (a launchd agent is theirs already).
+	user: *"" | =~"^[a-z_][a-z0-9_.-]*$"
+	// Where the setup's amd64 images build (schema.cue's amd64), as every runner's jobs read it.
+	env: PRONTO_AMD64: setup.amd64
 
 	if setup.cluster.host == _|_ {
 		// The kubeconfig context every kubectl and helm call names, never the current one.
@@ -132,7 +137,7 @@ plans: {for name, s in setups {(name): #Plan & {setup: s}}}
 						name:  "runner"
 						image: setup.versions.runnerImage
 						command: ["/home/runner/run.sh"]
-						env: [{name: "BUILDKIT_HOST", value: P.endpoint}]
+						env: [{name: "BUILDKIT_HOST", value: P.endpoint}, for k, v in P.env {name: k, value: v}]
 					}]
 				}
 			}
@@ -140,7 +145,14 @@ plans: {for name, s in setups {(name): #Plan & {setup: s}}}
 	}
 
 	if setup.cluster.host != _|_ {
-		// Each host runner: its download, what config.sh registers, and its launchd agent.
+		_os:       setup.cluster.host.os
+		_platform: "\({macos: "osx", linux: "linux"}[_os])-\(setup.cluster.host.arch)"
+		// What GitHub labels the runner with besides the setup's: its OS and arch.
+		runsOn: ["self-hosted", {macos: "macOS", linux: "Linux"}[_os], {arm64: "ARM64", x64: "X64"}[setup.cluster.host.arch]]
+		service: setup.hostService
+		if service == "systemd" {user: !=""}
+
+		// Each host runner: its download, what config.sh registers, and its service.
 		host: {for name, r in setup.hostRunners {
 			(name): {
 				_repo: [if r.repo != _|_ {"\(setup.github.owner)/\(r.repo)"}, setup.github.owner][0]
@@ -152,12 +164,13 @@ plans: {for name, s in setups {(name): #Plan & {setup: s}}}
 				work:   r.work
 				path: strings.Join([for p in r.path {[if strings.HasPrefix(p, "~/") {P.home + strings.TrimPrefix(p, "~")}, p][0]}], ":")
 				download: {
-					url:    "https://github.com/actions/runner/releases/download/v\(setup.versions.hostRunner.version)/actions-runner-osx-arm64-\(setup.versions.hostRunner.version).tar.gz"
-					sha256: setup.versions.hostRunner.sha256
+					url:    "https://github.com/actions/runner/releases/download/v\(setup.versions.hostRunner.version)/actions-runner-\(P._platform)-\(setup.versions.hostRunner.version).tar.gz"
+					sha256: setup.versions.hostRunner.sha256[P._platform]
 				}
-				// The agent actions/runner's own svc.sh would write, at a lower CPU priority.
-				service: {
-					label: "actions.runner.\(strings.Replace(_repo, "/", "-", -1)).\(name)"
+				// The service actions/runner's own svc.sh would write, at a lower CPU priority.
+				service: label: "actions.runner.\(strings.Replace(_repo, "/", "-", -1)).\(name)"
+				if P.service == "launchd" {service: {
+					label: string
 					path:  "\(P.home)/Library/LaunchAgents/\(label).plist"
 					plist: {
 						Label: label
@@ -166,12 +179,39 @@ plans: {for name, s in setups {(name): #Plan & {setup: s}}}
 						RunAtLoad:         true
 						StandardOutPath:   "\(P.home)/Library/Logs/\(label)/stdout.log"
 						StandardErrorPath: "\(P.home)/Library/Logs/\(label)/stderr.log"
-						EnvironmentVariables: ACTIONS_RUNNER_SVC: "1"
+						EnvironmentVariables: {ACTIONS_RUNNER_SVC: "1", P.env}
 						ProcessType:   "Interactive"
 						SessionCreate: true
 						Nice:          r.nice
 					}
-				}
+				}}
+
+				// svc.sh's unit (its actions.runner.service.template): the system's, run as the person,
+				// stopped gently so a job may finish.
+				if P.service == "systemd" {service: {
+					label: string
+					path:  "/etc/systemd/system/\(label).service"
+					unit: strings.Join([
+						"[Unit]",
+						"Description=GitHub Actions Runner (\(_repo).\(name))",
+						"After=network.target",
+						"",
+						"[Service]",
+						"ExecStart=/bin/bash \(dir)/bin/runsvc.sh",
+						"User=\(P.user)",
+						"WorkingDirectory=\(dir)",
+						"KillMode=process",
+						"KillSignal=SIGTERM",
+						"TimeoutStopSec=5min",
+						"Nice=\(r.nice)",
+						"Environment=ACTIONS_RUNNER_SVC=1",
+						for k, v in P.env {"Environment=\(k)=\(v)"},
+						"",
+						"[Install]",
+						"WantedBy=multi-user.target",
+						"",
+					], "\n")
+				}}
 			}
 		}}
 	}
