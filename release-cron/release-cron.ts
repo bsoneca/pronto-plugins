@@ -27,7 +27,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { previewProbes, boardEnv, hookArgv, hooksOf, channels, resolve, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal } from "./cron.js";
+import { previewProbes, boardEnv, hookArgv, hooksOf, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 
 const here = new URL("./", import.meta.url).pathname;
@@ -373,9 +373,8 @@ function config(dir: string) {
   // An app with no release.cue (a releaseCron.target of kind command) has no GCP: only its opt-in is read.
   const own = exists(`${appDir}/release.cue`);
   const { gcp, cron } = JSON.parse(cue(["export", ...(own ? ["release.cue"] : []), "release_cron.cue", "release_cron_plugin.cue", "-e", own ? "{gcp: GCP, cron: releaseCron}" : "{cron: releaseCron}", "--out", "json"]));
-  const resolved = resolve({ ...cron, watch: cron.watch?.length ? cron.watch : [appRel] });
-  if (!gcp && resolved.target.kind === "cloud-run") throw new Error(`${appRel} has no release.cue and its releaseCron names no target: nothing to release`);
-  return { gcp, cron: resolved };
+  if (!gcp && cron.target.kind === "cloud-run") throw new Error(`${appRel} has no release.cue and its releaseCron names no target: nothing to release`);
+  return { gcp, cron: { ...cron, watch: cron.watch?.length ? cron.watch : [appRel] } };
 }
 
 if (verb === "install") {

@@ -413,21 +413,6 @@ export const channels = (notify, platform) =>
   : notify.kind === "github-comment" ? ["comment"]
   : ["log"];
 
-// The releaseCron the driver reads, whole: what the schema (release_cron_plugin.cue) normalizes, and what a configuration
-// exported by an older schema lacks filled in the same way: no target is Cloud Run's, a target without a kind is a
-// command's, the rehearsal runs verify@local in a slot of `holder`, a `bisect.lead` is a claude-session notify, nobody
-// is told otherwise, no hooks, launchd. A configuration the schema normalized is returned as it is.
-export const resolve = (c) => ({
-  ...c,
-  scheduler: c.scheduler ?? { kind: "launchd" },
-  target: c.target ? { kind: "command", ...c.target } : { kind: "cloud-run" },
-  rehearsal: { command: ["./saytw", "verify@local"], slot: true, holder: c.holder ?? "verify@local", ...(c.rehearsal ?? {}) },
-  notify: c.notify ?? (c.bisect?.lead
-    ? { kind: "claude-session", lead: c.bisect.lead, notes: c.bisect.notes ?? "Library/Application Support/Claude/side-session-notes" }
-    : { kind: "none" }),
-  hooks: c.hooks ?? [],
-});
-
 // The hook reads the repository's devflow.cue with `cue` (pronto-plugins' devflow/spec.ts: $CUE, else PATH's),
 // and launchd's PATH has no mise, so every run's board step failed "Failed to spawn 'cue'" (PRONTO-77,
 // 2026-11-08 21:18 BRT). It is handed mise's newest cue, as .github/workflows/plane.yml hands its own; a CUE

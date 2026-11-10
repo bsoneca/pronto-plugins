@@ -282,40 +282,6 @@ cases: {
 		{call: "cron.systemdUnits", args: [{"label": "dev.pronto.release-cron.brawl-chess", "program": "/usr/bin/deno", "args": ["a b", "50%$HOME", "q\"x"], "poll": 10, "log": "/l", "env": {"N": "a%b"}}]},
 		{get: "service", expect: "[Unit]\nDescription=release-cron dev.pronto.release-cron.brawl-chess\n\n[Service]\nType=oneshot\nExecStart=\"/usr/bin/deno\" \"a b\" \"50%%$$HOME\" \"q\\\"x\"\nEnvironment=\"N=a%%b\"\nStandardOutput=append:/l\nStandardError=append:/l\n", why: "words quoted, a quote escaped, % and $ doubled: a unit file expands both"},
 	]}
-	"no target is Cloud Run's, a target without a kind is a command's": {suite: "cron", steps: [
-		{call: "cron.resolve", args: [{}]},
-		{get: "target", expect: {kind: "cloud-run"}, why: "release.cue's GCP, ./saytw release@gcp and Cloud Run's traffic"},
-		{call: "cron.resolve", args: [{target: {release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example"}}]},
-		{get: "target", expect: {kind: "command", release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example"}, why: "Bonk Chess's and Book a time's release_cron.cue, which name no kind"},
-		{call: "cron.resolve", args: [{target: {kind: "command", release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example", preview: {up: ["u"], reach: ["r"], down: ["d"], origin: "http://localhost:18080"}}}]},
-		{get: "target.preview.up", expect: ["u"]},
-		{call: "cron.resolve", args: [{target: {kind: "cloud-run"}}]},
-		{get: "target", expect: {kind: "cloud-run"}},
-	]}
-	"the rehearsal is verify@local in a slot of its holder, unless the app says otherwise": {suite: "cron", steps: [
-		{call: "cron.resolve", args: [{}]},
-		{get: "rehearsal", expect: {command: ["./saytw", "verify@local"], slot: true, holder: "verify@local"}},
-		{call: "cron.resolve", args: [{holder: "./saytw integrate@local"}]},
-		{get: "rehearsal", expect: {command: ["./saytw", "verify@local"], slot: true, holder: "./saytw integrate@local"}, why: "the top-level holder, Book a time's, is the rehearsal's"},
-		{call: "cron.resolve", args: [{holder: "a", rehearsal: {holder: "b"}}]},
-		{get: "rehearsal.holder", expect: "b", why: "the rehearsal's own holder wins"},
-		{call: "cron.resolve", args: [{rehearsal: {command: null, slot: true, holder: "verify@local"}}]},
-		{get: "rehearsal.command", expect: null, why: "null: no rehearsal"},
-		{call: "cron.resolve", args: [{rehearsal: {command: ["./check.sh"], slot: false, holder: "verify@local"}}]},
-		{get: "rehearsal", expect: {command: ["./check.sh"], slot: false, holder: "verify@local"}, why: "slot false: run without waiting for a slot"},
-	]}
-	"who is told: nobody by default, a lead named in bisect is a claude-session, a notify is itself": {suite: "cron", steps: [
-		{call: "cron.resolve", args: [{}]},
-		{get: "notify", expect: {kind: "none"}},
-		{call: "cron.resolve", args: [{bisect: {command: "./saytw integrate@local", lead: "local_7c6084eb-07de-487a-b8e6-689748accaaa"}}]},
-		{get: "notify", expect: {kind: "claude-session", lead: "local_7c6084eb-07de-487a-b8e6-689748accaaa", notes: "Library/Application Support/Claude/side-session-notes"}, why: "an app that still sets bisect.lead"},
-		{call: "cron.resolve", args: [{bisect: {lead: "local_a", notes: "my/notes"}}]},
-		{get: "notify", expect: {kind: "claude-session", lead: "local_a", notes: "my/notes"}},
-		{call: "cron.resolve", args: [{notify: {kind: "github-comment"}, bisect: {}}]},
-		{get: "notify", expect: {kind: "github-comment"}},
-		{call: "cron.resolve", args: [{notify: {kind: "claude-session", lead: "L", notes: "n"}, bisect: {lead: "other"}}]},
-		{get: "notify.lead", expect: "L", why: "a notify the schema normalized is read as it is"},
-	]}
 	"a finding reaches the channels its notify names": {suite: "cron", steps: [
 		{call: "cron.channels", args: [{kind: "none"}, "darwin"], expect: ["log"], why: "none logs only"},
 		{call: "cron.channels", args: [{kind: "github-comment"}, "linux"], expect: ["comment"]},
@@ -325,9 +291,5 @@ cases: {
 	"a hook is its command with the worktree, the app and the commit appended, for its event only": {suite: "cron", steps: [
 		{call: "cron.hookArgv", args: [{on: "released", command: ["deno", "run", "-A", "--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released"]}, "/state/wt", "brawl-chess", "c9ecd1f7a0b1"], expect: ["deno", "run", "-A", "--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released", "/state/wt", "brawl-chess", "c9ecd1f7a0b1"], why: "the dev flow's released hook, as Bonk Chess's and Book a time's releaseCron names it (PRONTO-1's board step, before hooks)"},
 		{call: "cron.hooksOf", args: [[{on: "released", command: ["a"]}, {on: "other", command: ["b"]}, {on: "released", command: ["c"]}], "released"], expect: [{on: "released", command: ["a"]}, {on: "released", command: ["c"]}], why: "in the order named"},
-		{call: "cron.resolve", args: [{}]},
-		{get: "hooks", expect: []},
-		{call: "cron.resolve", args: [{}]},
-		{get: "scheduler", expect: {kind: "launchd"}},
 	]}
 }

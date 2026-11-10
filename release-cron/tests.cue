@@ -75,3 +75,27 @@ _aprende: #Cron & {watch: ["x"], probes: {}, target: {release: ["./release.sh"],
 target: {release: _aprende.target.release, origin: _aprende.target.origin} & {release: ["./release.sh"], origin: "https://aprende.example"}
 // A target whose origin is not https is refused.
 noHttp: [if (#Cron & {watch: ["x"], probes: {}, target: {release: ["r"], serving: ["s"], origin: "http://x"}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+
+// The whole of an old app's releaseCron, as `cue export -e releaseCron` hands it to the driver: its target without a kind a
+// command, its top-level holder the rehearsal's, its bisect.lead a claude-session's, the rest the defaults.
+_legacy: #Cron & {
+	watch: ["x"], probes: {}, holder: "./saytw integrate@local"
+	target: {release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example"}
+	bisect: lead: "local_a"
+}
+legacyExport: {
+	target:    _legacy.target
+	rehearsal: _legacy.rehearsal
+	notify:    _legacy.notify
+	hooks:     _legacy.hooks
+	scheduler: _legacy.scheduler
+} & {
+	target: {kind: "command", release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example"}
+	rehearsal: {command: ["./saytw", "verify@local"], slot: true, holder: "./saytw integrate@local"}
+	notify: {kind: "claude-session", lead: "local_a", notes: "Library/Application Support/Claude/side-session-notes"}
+	hooks: []
+	scheduler: kind: "launchd"
+}
+// The rehearsal's own holder wins over the top-level one.
+_both: #Cron & {watch: ["x"], probes: {}, holder: "a", rehearsal: holder: "b"}
+rehearsalHolderWins: _both.rehearsal.holder & "b"
