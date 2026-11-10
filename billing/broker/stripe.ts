@@ -92,16 +92,18 @@ function throughDoor(door: string, fetcher: typeof fetch): Stripe {
 const caller = new AsyncLocalStorage<{ account?: string; door?: boolean }>();
 
 /** A body this size or under is read for its caller, declared or not (the handler's own capped read
- * takes the same); a larger one says nothing here, and that read refuses it as before. */
+ * takes the same); one declared larger is not touched (a cancelled copy would wait on the handler's
+ * read), and says nothing here. Stripe's webhook (/stripe) names no caller and is never read here. */
 const CALLER_BODY_MAX = 4096;
 
 /** Runs `handler` with what its request's JSON body says of its caller (`account`, `door`). */
 export function forAccount<A extends unknown[]>(handler: (req: Request, ...rest: A) => Promise<Response>) {
   return async (req: Request, ...rest: A): Promise<Response> => {
     const who: { account?: string; door?: boolean } = {};
-    if (req.method === "POST") {
+    const declared = Number(req.headers.get("content-length") ?? 0);
+    if (req.method === "POST" && new URL(req.url).pathname !== "/stripe" && !(declared > CALLER_BODY_MAX)) {
       try {
-        const text = await readCapped(req.clone().body, CALLER_BODY_MAX, req.headers.get("content-length"));
+        const text = await readCapped(req.clone().body, CALLER_BODY_MAX);
         const b = text ? JSON.parse(text) : null;
         if (typeof b?.account === "string" && b.account) who.account = b.account;
         if (typeof b?.door === "boolean") who.door = b.door;
@@ -118,10 +120,9 @@ export const askedDoor = (): boolean => caller.getStore()?.door === true;
  * request asked for it (its tenant's flag), else straight to Stripe with the broker's key, as before.
  * A flag, not a deploy, moves it. */
 export function switched(p: { direct: Stripe; door: Stripe; on: () => boolean }): Routed {
-  // Both ways send Stripe the same idempotency key (the door's, which the airlock sends on), so a call
-  // retried the other way is still the one call at Stripe.
-  const s: Routed = async (method, path, params, idempotencyKey) =>
-    p.on() ? await p.door(method, path, params, idempotencyKey) : await p.direct(method, path, params, idempotencyKey === undefined ? undefined : await doorKey(idempotencyKey));
+  // The direct way sends Stripe the broker's own key, as before the door; the door sends its hashed
+  // one (the airlock forwards its ledger key), so a call retried the other way across a flip is two.
+  const s: Routed = (method, path, params, idempotencyKey) => (p.on() ? p.door : p.direct)(method, path, params, idempotencyKey);
   s.route = () => Promise.resolve<Route>(p.on() ? "door" : "direct");
   return s;
 }
