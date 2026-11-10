@@ -82,10 +82,21 @@ devFlow: #DevFlow
 }
 
 #Board: {
-	// plane is implemented; github-projects is next (PRONTO-207).
-	kind:       *"plane" | "github-projects"
-	host!:      string & =~"^[a-z0-9.-]+$"
-	workspace!: string & =~"^[a-z0-9-]+$"
+	// plane: a Plane workspace (plane.ts). github-projects: a GitHub Projects (v2) project
+	// (github-projects.ts), owned by the user or organization `workspace`, its issues in `repository`.
+	kind:  *"plane" | "github-projects"
+	host!: string & =~"^[a-z0-9.-]+$"
+	// Plane's workspace slug; on GitHub, the project's owner's login.
+	workspace!: string
+	if kind == "plane" {
+		workspace!: =~"^[a-z0-9-]+$"
+	}
+	if kind == "github-projects" {
+		host:       "github.com"
+		workspace!: =~"^[A-Za-z0-9-]+$"
+		// The repository whose issues the project holds: PRONTO-123 is its #123.
+		repository!: string & =~"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+	}
 	project: {
 		name!: string
 		// The key every issue, branch and pull request carries: PRONTO-123.

@@ -132,4 +132,57 @@ cases: {
 		{call: "devflow.mayStart", args: [2, 2, "urgent", "engineer", "critical"]}, {pick: ["ok"], expect: [false], why: "urgent is not P0 where P0 is critical"},
 		{call: "devflow.pullNext", args: [[{key: "K-1", sequence: 1, priority: "minor"}, {key: "K-2", sequence: 2, priority: "critical"}], ["critical", "major", "minor", "trivial", "none"]], expect: {key: "K-2", sequence: 2, priority: "critical"}},
 	]}
+
+	// GitHub Projects (devflow/board/github.js): a project's fields in the board's words.
+	"a GitHub board's issue key is its repository's issue number": {suite: "devflow", steps: [
+		{call: "ghboard.numberOf", args: ["SHOP", "SHOP-123"], expect: 123},
+		{call: "ghboard.numberOf", args: ["SHOP", "shop-7"], expect: 7, why: "keys are matched as branches write them"},
+		{call: "ghboard.numberOf", args: ["SHOP", "PRONTO-7"], expect: null, why: "another project's key"},
+		{call: "ghboard.numberOf", args: ["SHOP", "SHOP-12x"], expect: null},
+	]}
+	"a Status option is a state: its group and whether new issues start there kept in its description": {suite: "devflow", steps: [
+		{call: "ghboard.stateOf", args: [{id: "o1", name: "Ready", color: "BLUE", description: "group:unstarted designed: objective, acceptance"}], expect: {id: "o1", name: "Ready", group: "unstarted", color: "BLUE", default: false}},
+		{call: "ghboard.stateOf", args: [{id: "o2", name: "Backlog", color: "GRAY", description: "group:backlog default on the board"}], expect: {id: "o2", name: "Backlog", group: "backlog", color: "GRAY", default: true}},
+		{call: "ghboard.stateOf", args: [{id: "o3", name: "Todo", color: "GREEN", description: ""}], expect: {id: "o3", name: "Todo", group: "unstarted", color: "GREEN", default: false}, why: "GitHub's own option, which devflow did not write"},
+		{call: "ghboard.describeState", args: ["completed", false, "merged into main"], expect: "group:completed merged into main"},
+	]}
+	"writing the Status options keeps every option by its id, so no item loses its status": {suite: "devflow", steps: [
+		{call: "ghboard.optionsWith", args: [[{id: "o1", name: "Backlog", color: "GRAY", description: "group:backlog default"}], {add: {name: "Ready", group: "unstarted", color: "#3b82f6", description: "designed"}}], expect: [
+			{id: "o1", name: "Backlog", color: "GRAY", description: "group:backlog default"},
+			{name: "Ready", color: "BLUE", description: "group:unstarted designed"},
+		]},
+		{call: "ghboard.optionsWith", args: [[{id: "o1", name: "Backlog", color: "GRAY", description: "group:backlog default"}, {id: "o2", name: "Ready", color: "BLUE", description: "group:unstarted designed"}], {defaultId: "o2"}], expect: [
+			{id: "o1", name: "Backlog", color: "GRAY", description: "group:backlog"},
+			{id: "o2", name: "Ready", color: "BLUE", description: "group:unstarted default designed"},
+		], why: "one default: the state new issues start in moves"},
+		{call: "ghboard.optionsWith", args: [[{id: "o1", name: "Live", color: "GRAY", description: "group:completed in production"}], {change: {id: "o1", fields: {color: "#22c55e", group: "completed"}}}], expect: [
+			{id: "o1", name: "Live", color: "GREEN", description: "group:completed in production"},
+		]},
+		{call: "ghboard.colorOf", args: ["#ef4444"], expect: "RED"},
+		{call: "ghboard.colorOf", args: ["not a colour"], expect: "GRAY"},
+	]}
+	"a project item is an issue: its state, priority, apps and sprint read from the fields by name": {suite: "devflow", steps: [
+		{call: "ghboard.issueOf", args: [{id: "PVTI_1", content: {id: "I_9", number: 9, title: "army pick", body: "<p>Flag: army_pick</p>", labels: {nodes: [{id: "bug"}]}}, fieldValues: {nodes: [
+			{optionId: "o5", name: "Implementing", field: {name: "Status"}},
+			{optionId: "p2", name: "high", field: {name: "Priority"}},
+			{options: [{id: "m1", name: "brawl-chess"}, {id: "m2", name: "plugins"}], field: {name: "Module"}},
+			{iterationId: "it3", title: "Sprint 3", field: {name: "Sprint"}},
+			{},
+		]}}], expect: {id: "I_9", item: "PVTI_1", name: "army pick", sequence_id: 9, state: "o5", priority: "high", description_html: "<p>Flag: army_pick</p>", modules: ["brawl-chess", "plugins"], cycle: "it3", labels: ["bug"]}},
+		{call: "ghboard.issueOf", args: [{id: "PVTI_2", content: {id: "I_1", number: 1, title: "t"}, fieldValues: {nodes: []}}], expect: {id: "I_1", item: "PVTI_2", name: "t", sequence_id: 1, state: "", priority: "none", description_html: "", modules: [], cycle: null, labels: []}, why: "an item with no values yet: no state, no priority, no app, no sprint"},
+	]}
+	"a sprint is an iteration: its end the last day it covers, every iteration kept by its id when one is added": {suite: "devflow", steps: [
+		{call: "ghboard.cycleOf", args: [{id: "it1", title: "Sprint 1", startDate: "2026-11-08", duration: 3}], expect: {id: "it1", name: "Sprint 1", start_date: "2026-11-08", end_date: "2026-11-10"}},
+		{call: "ghboard.cycleOf", args: [{id: "it2", title: "Sprint 2", startDate: "2026-11-10", duration: 1}], expect: {id: "it2", name: "Sprint 2", start_date: "2026-11-10", end_date: "2026-11-10"}},
+		{call: "ghboard.daysFrom", args: ["2026-11-10", "2026-11-10"], expect: 1, why: "a sprint the planner makes for its day lasts that day"},
+		{call: "ghboard.addDays", args: ["2026-12-31", 1], expect: "2027-01-01"},
+		{call: "ghboard.iterationsWith", args: [[{id: "it1", title: "Sprint 1", startDate: "2026-11-08", duration: 3, extra: true}], {name: "Sprint 2", start: "2026-11-10", end: "2026-11-10"}], expect: [
+			{id: "it1", title: "Sprint 1", startDate: "2026-11-08", duration: 3},
+			{title: "Sprint 2", startDate: "2026-11-10", duration: 1},
+		]},
+	]}
+	"a link is a comment carrying its address, read back once each": {suite: "devflow", steps: [
+		{call: "ghboard.linkComment", args: ["https://github.com/a/b/pull/4", "#4 a <fix>"], expect: "<!-- devflow:link https://github.com/a/b/pull/4 -->\n<p>Linked: <a href=\"https://github.com/a/b/pull/4\">#4 a &lt;fix></a></p>"},
+		{call: "ghboard.linksOf", args: [[{body: "<!-- devflow:link https://github.com/a/b/pull/4 -->\nLinked"}, {body: "a comment"}, {body: "<!-- devflow:link https://github.com/a/b/pull/4 -->"}, {body: "<!-- devflow:link https://github.com/a/b/pull/9 -->"}]], expect: [{url: "https://github.com/a/b/pull/4"}, {url: "https://github.com/a/b/pull/9"}]},
+	]}
 }
