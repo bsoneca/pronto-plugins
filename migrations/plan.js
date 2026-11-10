@@ -482,7 +482,9 @@ export const lit = (s) => `'${String(s).replaceAll("'", "''")}'`;
 export function droppedBy(migrations) {
   const out = {};
   for (const { name, json } of migrations) {
-    const sql = (json.operations ?? []).map((o) => o.sql?.up ?? "").join("\n");
+    // A carry's DO block drops a check only to put it back as it was: it neither drops nor builds a
+    // name for good, so its text is left out, or its putting back would hide the migration's own drop.
+    const sql = (json.operations ?? []).map((o) => o.sql?.up ?? "").join("\n").replace(/DO \$carry\$[\s\S]*?END \$carry\$;/g, "");
     const built = new Set([...sql.matchAll(/(?:ADD CONSTRAINT|INDEX) "([^"]+)"/g)].map((m) => m[1]));
     for (const [, x] of sql.matchAll(/DROP (?:INDEX IF EXISTS "[^"]+"\.|CONSTRAINT IF EXISTS |TRIGGER IF EXISTS )"([^"]+)"/g)) {
       if (!built.has(x)) out[x] ??= name;

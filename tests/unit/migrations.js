@@ -23,3 +23,6 @@ export const plan = (model, edits, declared = {}, dropped = {}) => rules.plan(ru
 
 // The SQL of each change the plan makes, in the order the migration runs them.
 export const sql = (model, edits, declared = {}, dropped = {}) => plan(model, edits, declared, dropped).ops.map((o) => o.sql);
+
+// The names the migration the plan makes drops for good, as droppedBy reads them from its file.
+export const dropped = (model, edits, declared = {}) => rules.droppedBy([{ name: "m", json: rules.migration(plan(model, edits, declared).ops) }]);
