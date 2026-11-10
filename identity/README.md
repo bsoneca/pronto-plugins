@@ -40,14 +40,48 @@ The env file is never committed. It holds `BROKER_ISSUER`, `BROKER_SECRET` and e
 
 ## The phone
 
-A broker whose operator names a Firebase project (`PHONE_PROJECT`) also offers `phone`: the person types a mobile number, Identity Platform texts a code, and the broker vouches for a pairwise subject derived from the Firebase user, as it does for Google's. No claim carries the number. The page is the broker's own ([`broker/phone.ts`](broker/phone.ts), under `/phone`), served behind the same code flow as any provider, so `/authorize`, Hydra's login and the callback are unchanged.
+A broker whose operator turns the phone on also offers `phone`: the person types a mobile number, is texted a code, and the broker vouches for a pairwise subject derived from that number, as it does for Google's. No claim carries the number. The page is the broker's own ([`broker/phone.ts`](broker/phone.ts), under `/phone`), served behind the same code flow as any provider, so `/authorize`, Hydra's login and the callback are unchanged. Two modes, chosen by `PHONE_OTP`:
+
+- `PHONE_TENANTS` (both modes): the origins that may offer it (`*` for a port). Any other tenant asking for `phone` gets `unauthorized_client`: each sign-in is an SMS the operator pays for.
+- `PHONE_ADMIT` (both modes): where the page asks for a code before anything is sent, from the reader's browser. It is the app's own rate limit (per phone, device and network), so the caps count the reader's network.
+- `PHONE_RESEND_SECONDS` (default 60) and `PHONE_PATTERN` (E.164 numbers accepted, Brazil's mobiles by default).
+
+### `PHONE_OTP=firebase` (the default)
+
+Identity Platform texts the code and the broker takes the Firebase ID token. Nothing changes unless the operator sets `PHONE_OTP=broker`.
 
 - `PHONE_PROJECT`, `PHONE_API_KEY`, `PHONE_APP_ID` (and `PHONE_AUTH_DOMAIN`, default `<project>.firebaseapp.com`): the Firebase Web app's public config. The key must admit the broker's origin as a referrer, and Identity Platform must list it as an authorized domain.
-- `PHONE_ADMIT`: where the page asks for a code before Firebase sends one, from the reader's browser. It is the owner of the project's `beforeSendSms` blocking function, which lets an SMS go only against a code it admitted under its caps; the broker adds no SMS path of its own.
-- `PHONE_TENANTS`: the origins that may offer it (`*` for a port). Any other tenant asking for `phone` gets `unauthorized_client`: each sign-in is an SMS the operator pays for.
+- `PHONE_ADMIT` is also the owner of the project's `beforeSendSms` blocking function, which lets an SMS go only against a code it admitted; the broker adds no SMS path of its own.
 - `PHONE_EMULATOR` (`host:port`, a localhost broker only): the Firebase Auth emulator, which sends no SMS and signs unsigned tokens, for a local launch's scenarios.
 
-An app offers it with `providers=google,phone`. `release.nu` takes `--phone-project`, `--phone-api-key`, `--phone-app-id`, `--phone-admit` and `--phone-tenants`.
+The subject is derived from the Firebase user, one per number.
+
+### `PHONE_OTP=broker`
+
+The broker issues and checks the codes itself ([`broker/otp.ts`](broker/otp.ts)) and sends the SMS through a pluggable sender. The page loads no Firebase SDK, no gstatic and no reCAPTCHA, and its content security policy names only the broker and the `PHONE_ADMIT` origin. The Firebase settings (`PHONE_PROJECT`, `PHONE_API_KEY`, `PHONE_APP_ID`, `PHONE_AUTH_DOMAIN`, `PHONE_SDK`, `PHONE_EMULATOR`) are refused in this mode, and `PHONE_SMS` and `PHONE_SMS_GATE` in the other, so a mixed-up deployment fails at start.
+
+- The code: six digits from the platform's random source, kept only as a keyed hash bound to the visit and the number, good five minutes, dead after five wrong tries, one per number every `PHONE_RESEND_SECONDS`. In memory (one replica); neither the number nor the code is logged.
+- `PHONE_SMS` (required): the sender. `standin` is for a localhost broker only: it sends nothing, and a local scenario reads the last code for a number from `GET /phone/fake/codes?phone=<e164>`, which answers `{"code": "123456"}` (404 if none), as scenarios read the Firebase emulator's verification codes. A real provider is one entry in `SMS_PROVIDERS` in `otp.ts`: a function that reads its key from the environment and returns `{ send(e164, text) }`. None is registered yet.
+- `PHONE_SMS_GATE` (required): the SMS gate, below.
+- The subject: HMAC-SHA-256 of the E.164 number under a key HKDF-derived from `BROKER_SECRET`, base64url: stable across restarts, one per number, then the broker's usual pairwise derivation per tenant. Firebase-mode users have different subjects (their Firebase uids): moving a deployment from `firebase` to `broker` signs existing phone users in as new people unless the app maps them.
+
+#### The SMS gate contract
+
+Before each SMS the broker POSTs to `PHONE_SMS_GATE` with `content-type: application/jwt` and the JWT itself as the body, signed RS256 by the key the broker mints at start and publishes at `<issuer>/phone/jwks` (header `kid`; the key changes on a restart, so fetch the set by `kid` and refetch on an unknown one). Claims:
+
+```json
+{ "iss": "<broker issuer>", "aud": "<PHONE_SMS_GATE>", "event": "sms", "phone_number": "+5511912345678", "iat": 1700000000, "exp": 1700000060, "jti": "<unique>" }
+```
+
+The endpoint verifies the signature against the issuer's jwks, `iss`, `aud` (its own URL), `event` and `exp`, consumes one admission for the number (it may count `jti` once), and answers:
+
+- any `2xx` (body `{}`): send the SMS;
+- `403` or `429`: refused, nothing is sent and the page says too many codes were asked for;
+- anything else, a timeout (8 s) or no answer: nothing is sent and the page says the SMS sign-in is down. The gate fails closed.
+
+The broker checks the resend wait first, so a number inside it costs the gate nothing.
+
+`release.nu` and `metal.nu` take `--phone-project`, `--phone-api-key`, `--phone-app-id`, `--phone-admit` and `--phone-tenants` for Firebase mode, and `--phone-otp broker --phone-sms <name> --phone-sms-gate <url>` (with `--phone-admit` and `--phone-tenants`) for broker mode. An app offers it with `providers=google,phone`.
 
 ## Tests
 

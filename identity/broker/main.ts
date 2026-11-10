@@ -239,8 +239,8 @@ if (import.meta.main) {
   // The phone, where the operator configured it (phone.ts): its page and token endpoint beside the broker's own.
   const { phoneConfig, phoneUpstream } = await import("./phone.ts");
   const phoneCfg = phoneConfig(env, issuer);
-  const phone = phoneCfg ? await phoneUpstream(issuer, phoneCfg) : null;
+  const phone = phoneCfg ? await phoneUpstream(issuer, phoneCfg, { secret }) : null;
   if (phone) providers.push(phone.provider);
-  if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT");
+  if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT, or PHONE_OTP=broker");
   Deno.serve({ port: Number(env("PORT") ?? 28443) }, await broker({ issuer, secret, providers, extra: phone?.handle }));
 }

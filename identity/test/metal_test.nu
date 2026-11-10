@@ -10,7 +10,7 @@ assert equal ($docs | get metadata.namespace? | compact | uniq) [identity]
 
 # Every file the broker imports is mounted where its import finds it, and nothing outside is fetched.
 let files = (do $kind ConfigMap).data
-for f in [oidc.ts main.ts core.ts phone.ts] { assert ($f in ($files | columns)) $"($f) is mounted" }
+for f in [oidc.ts main.ts core.ts phone.ts otp.ts] { assert ($f in ($files | columns)) $"($f) is mounted" }
 for f in ($files | values) { assert ($f | lines | where {|l| $l =~ '^import .* from "(https?|npm|jsr):' } | is-empty) "a mounted file imports from outside" }
 let pod = (do $kind Deployment).spec.template.spec
 let items = ($pod.volumes | where name == files | first).configMap.items

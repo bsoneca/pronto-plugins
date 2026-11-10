@@ -16,11 +16,17 @@
 // browser, so the caps count the reader's network), then has Firebase send it. Only the tenants
 // the operator lists (PHONE_TENANTS) may offer the phone: each SMS is the operator's cost.
 //
+// PHONE_OTP=broker moves the codes off Google: the broker issues and checks them itself (otp.ts) and
+// sends the SMS through the sender PHONE_SMS names, after the gate PHONE_SMS_GATE admits (the broker
+// signs a JWT with the key it mints at start, published at /phone/jwks). The page then loads no
+// Firebase SDK, no gstatic and no reCAPTCHA. The default, firebase, is the way described above.
+//
 // Locally (PHONE_EMULATOR, a localhost broker only) the page signs in against the Firebase Auth
 // emulator, which sends no SMS and whose tokens are unsigned.
 import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, verifyIdToken } from "../oidc.ts";
 import { esc, json } from "./core.ts";
 import type { Provider } from "./main.ts";
+import { Otp, phoneSubject, type SmsSender, smsSender, Standin } from "./otp.ts";
 
 const enc = new TextEncoder();
 
@@ -33,6 +39,12 @@ export const SDK = "13.1.0";
 export const BRAZIL_MOBILE = "^\\+55[1-9][1-9]9[0-9]{8}$";
 
 export interface PhoneConfig {
+  /** Who issues and checks the codes: Firebase (the default) or the broker itself. */
+  otp: "firebase" | "broker";
+  /** Broker mode: the sender's name (PHONE_SMS), the sender, and the gate asked before each SMS. */
+  sms: string | null;
+  sender: SmsSender | null;
+  smsGate: string | null;
   /** The Firebase project whose Identity Platform sends the codes (the emulator's demo- project locally). */
   project: string;
   apiKey: string;
@@ -50,15 +62,25 @@ export interface PhoneConfig {
   pattern: string;
 }
 
-/** The phone's settings from the broker's environment, or null when PHONE_PROJECT is not set. */
+/** The settings only Firebase mode takes: a broker mode that names one is a mixed-up deployment. */
+const FIREBASE_ONLY = ["PHONE_PROJECT", "PHONE_API_KEY", "PHONE_APP_ID", "PHONE_AUTH_DOMAIN", "PHONE_SDK", "PHONE_EMULATOR"];
+
+/** The phone's settings from the broker's environment, or null when neither PHONE_PROJECT nor PHONE_OTP is set. */
 export function phoneConfig(env: (k: string) => string | undefined, issuer: string): PhoneConfig | null {
+  const otp = env("PHONE_OTP") || "firebase";
+  if (otp !== "firebase" && otp !== "broker") throw new Error("PHONE_OTP is firebase or broker");
   const project = env("PHONE_PROJECT");
-  if (!project) return null;
+  if (otp === "firebase" && !project) return null;
   const need = (k: string) => {
     const v = env(k);
-    if (!v) throw new Error(`${k} is required with PHONE_PROJECT`);
+    if (!v) throw new Error(`${k} is required with ${otp === "broker" ? "PHONE_OTP=broker" : "PHONE_PROJECT"}`);
     return v;
   };
+  if (otp === "firebase") {
+    for (const k of ["PHONE_SMS", "PHONE_SMS_GATE"]) if (env(k)) throw new Error(`${k} is for PHONE_OTP=broker`);
+  } else {
+    for (const k of FIREBASE_ONLY) if (env(k)) throw new Error(`${k} is for PHONE_OTP=firebase, not broker`);
+  }
   const emulator = env("PHONE_EMULATOR") || null;
   if (emulator !== null) {
     if (new URL(issuer).hostname !== "localhost") throw new Error(`PHONE_EMULATOR is for a localhost broker, not ${issuer}`);
@@ -69,11 +91,22 @@ export function phoneConfig(env: (k: string) => string | undefined, issuer: stri
   const tenants = need("PHONE_TENANTS").split(",").map((t) => t.trim()).filter((t) => t !== "");
   const resendSeconds = Number(env("PHONE_RESEND_SECONDS") || "60");
   if (!Number.isInteger(resendSeconds) || resendSeconds <= 0) throw new Error("PHONE_RESEND_SECONDS is a whole number of seconds");
+  let sms: string | null = null, sender: SmsSender | null = null, smsGate: string | null = null;
+  if (otp === "broker") {
+    sms = need("PHONE_SMS");
+    smsGate = need("PHONE_SMS_GATE");
+    if (!/^https?:\/\//.test(smsGate)) throw new Error("PHONE_SMS_GATE is an http(s) URL");
+    sender = smsSender(sms, env, issuer);
+  }
   return {
-    project,
-    apiKey: emulator ? env("PHONE_API_KEY") || "emulator" : need("PHONE_API_KEY"),
-    authDomain: env("PHONE_AUTH_DOMAIN") || `${project}.firebaseapp.com`,
-    appId: emulator ? env("PHONE_APP_ID") || "emulator" : need("PHONE_APP_ID"),
+    otp,
+    sms,
+    sender,
+    smsGate,
+    project: project ?? "",
+    apiKey: otp === "broker" ? "" : emulator ? env("PHONE_API_KEY") || "emulator" : need("PHONE_API_KEY"),
+    authDomain: otp === "broker" ? "" : env("PHONE_AUTH_DOMAIN") || `${project}.firebaseapp.com`,
+    appId: otp === "broker" ? "" : emulator ? env("PHONE_APP_ID") || "emulator" : need("PHONE_APP_ID"),
     sdk: env("PHONE_SDK") || SDK,
     tenants,
     admit,
@@ -111,6 +144,7 @@ export const STRINGS = {
     change: "Use another number",
     back: "Back to the app",
     footer: "Only the app learns that it's you, and it can't tell you apart in any other app. It never learns your number from this sign-in.",
+    sms: "{host}: your sign-in code is {code}",
   },
   "pt-BR": {
     title: "Entrar com celular",
@@ -133,6 +167,7 @@ export const STRINGS = {
     change: "Usar outro número",
     back: "Voltar ao app",
     footer: "Só o app fica sabendo que é você, e ele não consegue te reconhecer em nenhum outro app. Ele não recebe seu número por este acesso.",
+    sms: "{host}: seu código para entrar é {code}",
   },
 } as const;
 export type Lang = keyof typeof STRINGS;
@@ -150,6 +185,13 @@ export function langOf(accept: string | null): Lang {
 /** The page's content security policy: Firebase's SDK and reCAPTCHA, the gate, and the emulator locally. */
 export function pageCsp(cfg: PhoneConfig): string {
   const admit = new URL(cfg.admit).origin;
+  // Broker mode loads nothing of Google's: the page and the broker, and the admit gate.
+  if (cfg.otp === "broker") {
+    return [
+      "default-src 'none'", "script-src 'self'", `connect-src 'self' ${admit}`, "style-src 'unsafe-inline'",
+      "form-action 'none'", "frame-ancestors 'none'", "base-uri 'none'",
+    ].join("; ");
+  }
   const emulator = cfg.emulator ? ` http://${cfg.emulator}` : "";
   return [
     "default-src 'none'",
@@ -183,7 +225,11 @@ export function firebaseProblem(claims: Record<string, unknown>, cfg: PhoneConfi
 const html = (body: string, csp: string, status = 200) =>
   new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": csp, "cache-control": "no-store", "referrer-policy": "strict-origin" } });
 
-export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { keys?: KeySource; now?: () => number } = {}): Promise<{
+/** What a gate answers makes of a send: the status, as the page's words. */
+export const gateVerdict = (status: number): "go" | "too_many" | "down" => status >= 200 && status < 300 ? "go" : status === 403 || status === 429 ? "too_many" : "down";
+
+// `secret` (BROKER_SECRET) derives the broker mode's subjects; `fetcher` is the gate's transport.
+export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { keys?: KeySource; now?: () => number; secret?: string; fetcher?: typeof fetch } = {}): Promise<{
   provider: Provider;
   handle: (req: Request, url: URL) => Promise<Response> | null;
 }> {
@@ -196,7 +242,11 @@ export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { ke
   const pair = await crypto.subtle.generateKey(
     { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
   const jwk = { ...(await crypto.subtle.exportKey("jwk", pair.publicKey)), kid: "phone-1" };
-  const asked = new Map<string, { nonce: string; state: string; since: number; expires: number }>();
+  const asked = new Map<string, { nonce: string; state: string; since: number; expires: number; lang: Lang }>();
+  const brokerMode = cfg.otp === "broker";
+  if (brokerMode && (opts.secret ?? "").length < 32) throw new Error("PHONE_OTP=broker needs BROKER_SECRET to derive subjects");
+  const otp = new Otp(cfg.resendSeconds, now);
+  const fetcher = opts.fetcher ?? fetch;
   const codes = new Map<string, { nonce: string; sub: string; expires: number }>();
   const live = <T extends { expires: number }>(m: Map<string, T>, k: string | null, take: boolean) => {
     const v = k === null ? undefined : m.get(k);
@@ -215,14 +265,16 @@ export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { ke
     }
     sweep();
     const id = randomToken(16);
-    asked.set(id, { nonce: q.get("nonce")!, state: q.get("state")!, since: Math.floor(now() / 1000), expires: now() + 900_000 });
     const lang = langOf(req.headers.get("accept-language"));
+    asked.set(id, { nonce: q.get("nonce")!, state: q.get("state")!, since: Math.floor(now() / 1000), expires: now() + 900_000, lang });
     const s = STRINGS[lang];
     const cancel = `${callback}?${new URLSearchParams({ error: "access_denied", state: q.get("state")! })}`;
-    const config = {
-      id, admit: cfg.admit, project: cfg.project, apiKey: cfg.apiKey, authDomain: cfg.authDomain, appId: cfg.appId, sdk: cfg.sdk,
-      emulator: cfg.emulator ? `http://${cfg.emulator}` : null, resendSeconds: cfg.resendSeconds, pattern: cfg.pattern, strings: s,
-    };
+    const config = brokerMode
+      ? { id, mode: "broker", admit: cfg.admit, resendSeconds: cfg.resendSeconds, pattern: cfg.pattern, strings: s }
+      : {
+        id, admit: cfg.admit, project: cfg.project, apiKey: cfg.apiKey, authDomain: cfg.authDomain, appId: cfg.appId, sdk: cfg.sdk,
+        emulator: cfg.emulator ? `http://${cfg.emulator}` : null, resendSeconds: cfg.resendSeconds, pattern: cfg.pattern, strings: s,
+      };
     // The config rides in a data block the CSP does not run; </ is escaped so it cannot end it.
     const data = JSON.stringify(config).replace(/</g, "\\u003c");
     return html(`<!doctype html>
@@ -248,8 +300,7 @@ export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { ke
   <button type="button" id="phone-resend" disabled></button>
   <button type="button" class="link" id="phone-change">${esc(s.change)}</button>
 </form>
-<div id="recaptcha"></div>
-<p><a class="back" id="phone-back" href="${esc(cancel)}">${esc(s.back)}</a></p>
+${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-back" href="${esc(cancel)}">${esc(s.back)}</a></p>
 <p><small>${esc(s.footer)}</small></p>
 </main>
 <script type="application/json" id="phone-config">${data}</script>
@@ -279,32 +330,94 @@ export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { ke
     return claims;
   }
 
-  // The page's word: the visit it is, and the ID token Firebase gave it. It answers where to go:
-  // the broker's callback with a code, or a refusal the page shows.
-  async function approve(req: Request): Promise<Response> {
+  /** The page's JSON body, or the answer that refuses it. */
+  async function jsonBody(req: Request): Promise<Record<string, unknown> | Response> {
     if ((req.headers.get("content-type") ?? "").split(";")[0] !== "application/json") return json(415, { error: "json" });
     const text = await req.text();
     if (text.length > 8192) return json(413, { error: "too large" });
-    let body: { id?: unknown; token?: unknown };
     try {
-      body = JSON.parse(text);
+      const body = JSON.parse(text);
+      return body && typeof body === "object" && !Array.isArray(body) ? body : json(400, { error: "body" });
     } catch {
       return json(400, { error: "body" });
     }
+  }
+
+  // Broker mode: the page asks for a code. The wait is checked first (a refused number costs the gate
+  // nothing), then the gate admits the SMS, then the code is made and sent.
+  async function send(req: Request): Promise<Response> {
+    const body = await jsonBody(req);
+    if (body instanceof Response) return body;
     const a = live(asked, typeof body.id === "string" ? body.id : null, false);
-    if (!a || typeof body.token !== "string") return json(400, { error: "expired" });
-    let claims;
+    if (!a) return json(400, { error: "expired" });
+    const phone = body.phone;
+    if (typeof phone !== "string" || !new RegExp(cfg.pattern).test(phone)) return json(400, { error: "region" });
+    if (otp.wait(phone) > 0) return json(429, { error: "cooldown" });
+    const verdict = await gate(phone);
+    if (verdict !== "go") return json(verdict === "too_many" ? 429 : 503, { error: verdict });
+    const made = await otp.issue(body.id as string, phone);
+    if ("wait" in made) return json(429, { error: "cooldown" });
     try {
-      claims = await verifyFirebase(body.token, a.since);
+      await cfg.sender!.send(phone, STRINGS[a.lang].sms.replace("{host}", new URL(issuer).host).replace("{code}", made.code));
     } catch (e) {
-      if (!(e instanceof Refused)) throw e;
-      // Why, on the broker's log; never the number or the token.
-      console.error(`broker: phone sign-in refused: ${e.message}`);
-      return json(400, { error: e.message.endsWith("region") ? "region" : "refused" });
+      otp.revoke(body.id as string);
+      // The sender's failure, never the number or the code.
+      console.error(`broker: phone SMS not sent: ${e instanceof Error ? e.name : "error"}`);
+      return json(503, { error: "down" });
+    }
+    return json(200, {});
+  }
+
+  // The gate (PHONE_SMS_GATE) is asked before each SMS with a JWT signed by the phone key (/phone/jwks):
+  // no answer in time, or any but a 2xx, is no SMS.
+  async function gate(phone: string): Promise<"go" | "too_many" | "down"> {
+    const t = Math.floor(now() / 1000);
+    const head = base64url(enc.encode(JSON.stringify({ alg: "RS256", typ: "JWT", kid: jwk.kid })));
+    const claims = base64url(enc.encode(JSON.stringify({ iss: issuer.replace(/\/$/, ""), aud: cfg.smsGate, event: "sms", phone_number: phone, iat: t, exp: t + 60, jti: randomToken(16) })));
+    const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", pair.privateKey, enc.encode(`${head}.${claims}`)));
+    try {
+      const res = await fetcher(cfg.smsGate!, {
+        method: "POST", headers: { "content-type": "application/jwt" }, body: `${head}.${claims}.${base64url(sig)}`, signal: AbortSignal.timeout(8000),
+      });
+      await res.body?.cancel();
+      const verdict = gateVerdict(res.status);
+      if (verdict !== "go") console.error(`broker: phone SMS gate answered ${res.status}`);
+      return verdict;
+    } catch {
+      console.error("broker: phone SMS gate did not answer");
+      return "down";
+    }
+  }
+
+  // The page's word: the visit it is, and the ID token Firebase gave it (broker mode: the code the
+  // reader typed). It answers where to go: the broker's callback with a code, or a refusal the page shows.
+  async function approve(req: Request): Promise<Response> {
+    const body = await jsonBody(req);
+    if (body instanceof Response) return body;
+    const a = live(asked, typeof body.id === "string" ? body.id : null, false);
+    let sub: string;
+    if (brokerMode) {
+      if (!a || typeof body.code !== "string") return json(400, { error: "expired" });
+      const checked = await otp.check(body.id as string, body.code);
+      if (checked.result !== "ok") return json(400, { error: checked.result === "dead" ? "too_many" : checked.result === "wrong" ? "wrong_code" : "expired" });
+      // Firebase-mode users had Firebase's uid as their subject: they get different ones here (a migration, not solved here).
+      sub = await phoneSubject(opts.secret!, checked.phone!);
+    } else {
+      if (!a || typeof body.token !== "string") return json(400, { error: "expired" });
+      let claims;
+      try {
+        claims = await verifyFirebase(body.token, a.since);
+      } catch (e) {
+        if (!(e instanceof Refused)) throw e;
+        // Why, on the broker's log; never the number or the token.
+        console.error(`broker: phone sign-in refused: ${e.message}`);
+        return json(400, { error: e.message.endsWith("region") ? "region" : "refused" });
+      }
+      sub = claims.sub;
     }
     asked.delete(body.id as string);
     const code = randomToken(16);
-    codes.set(code, { nonce: a.nonce, sub: claims.sub, expires: now() + 60_000 });
+    codes.set(code, { nonce: a.nonce, sub, expires: now() + 60_000 });
     const to = new URL(callback);
     to.searchParams.set("code", code);
     to.searchParams.set("state", a.state);
@@ -333,9 +446,17 @@ export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { ke
     handle(req, url) {
       if (req.method === "GET" && url.pathname === "/phone/auth") return Promise.resolve(authorize(req, url));
       if (req.method === "GET" && url.pathname === "/phone/page.js") {
-        return Promise.resolve(new Response(SCRIPT, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" } }));
+        return Promise.resolve(new Response(brokerMode ? BROKER_SCRIPT : SCRIPT, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" } }));
       }
       if (req.method === "POST" && url.pathname === "/phone/approve") return approve(req);
+      if (brokerMode && req.method === "POST" && url.pathname === "/phone/send") return send(req);
+      if (brokerMode && req.method === "GET" && url.pathname === "/phone/jwks") return Promise.resolve(json(200, { keys: [{ ...jwk, alg: "RS256", use: "sig" }] }));
+      // A local scenario reads the code the stand-in "sent", as it reads the Firebase emulator's.
+      if (cfg.sender instanceof Standin && req.method === "GET" && url.pathname === "/phone/fake/codes") {
+        const phone = (url.searchParams.get("phone") ?? "").replace(/^ /, "+");
+        const code = cfg.sender.last(phone);
+        return Promise.resolve(code ? json(200, { code }) : json(404, { error: "no code" }));
+      }
       if (req.method === "POST" && url.pathname === "/phone/token") return req.text().then((t) => token(new URLSearchParams(t)));
       return null;
     },
@@ -377,12 +498,8 @@ button.link{border:0;background:none;color:var(--accent);text-decoration:underli
 button:disabled{opacity:.55;cursor:default}button:focus-visible,input:focus-visible,a:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 .notice{color:var(--danger);font-weight:600}.e164{font-weight:700;letter-spacing:.02em}a{color:var(--accent)}small{color:var(--muted)}`;
 
-// The page's script: plain ES modules from gstatic, no framework. It reads its config from the data
-// block, asks the gate for a code, has Firebase send it, and hands the broker the ID token Firebase
-// gives back. Nothing is kept: Firebase's persistence is in memory, and it signs out once it has the
-// token.
-const SCRIPT = `${sendCode.toString()}
-const $ = (s) => document.querySelector(s);
+// The parts of the page's script both modes share: the number field, and the resend countdown.
+const COMMON_TOP = `const $ = (s) => document.querySelector(s);
 const config = JSON.parse($('#phone-config').textContent);
 const t = config.strings;
 const pattern = new RegExp(config.pattern);
@@ -394,7 +511,25 @@ const masked = (d) => d.length <= 2 ? (d ? '(' + d : '') : d.length <= 7 ? '(' +
 const field = $('#phone-number');
 field.addEventListener('input', () => { field.value = masked(digitsOf(field.value)); });
 
-let firebase, auth, verifier, sent = null, e164 = '', timer = 0;
+`;
+const COMMON_COUNTDOWN = `// The resend button counts down the gate's wait, then offers a new code.
+function countdown(seconds) {
+  clearInterval(timer);
+  const b = $('#phone-resend');
+  let left = seconds;
+  const draw = () => { b.disabled = left > 0; b.textContent = left > 0 ? t.resend_in.replace('{s}', left) : t.resend; };
+  draw();
+  timer = setInterval(() => { left -= 1; draw(); if (left <= 0) clearInterval(timer); }, 1000);
+}
+
+`;
+
+// The page's script: plain ES modules from gstatic, no framework. It reads its config from the data
+// block, asks the gate for a code, has Firebase send it, and hands the broker the ID token Firebase
+// gives back. Nothing is kept: Firebase's persistence is in memory, and it signs out once it has the
+// token.
+const SCRIPT = `${sendCode.toString()}
+${COMMON_TOP}let firebase, auth, verifier, sent = null, e164 = '', timer = 0;
 async function start() {
   const base = 'https://www.gstatic.com/firebasejs/' + config.sdk + '/';
   const [{ initializeApp }, a] = await Promise.all([import(base + 'firebase-app.js'), import(base + 'firebase-auth.js')]);
@@ -416,17 +551,7 @@ function freshVerifier() {
   verifier = new auth.RecaptchaVerifier(firebase, box, { size: 'invisible' });
 }
 
-// The resend button counts down the gate's wait, then offers a new code.
-function countdown(seconds) {
-  clearInterval(timer);
-  const b = $('#phone-resend');
-  let left = seconds;
-  const draw = () => { b.disabled = left > 0; b.textContent = left > 0 ? t.resend_in.replace('{s}', left) : t.resend; };
-  draw();
-  timer = setInterval(() => { left -= 1; draw(); if (left <= 0) clearInterval(timer); }, 1000);
-}
-
-// The gate's word on a code for this number ('' to go), then Firebase sends it.
+${COMMON_COUNTDOWN}// The gate's word on a code for this number ('' to go), then Firebase sends it.
 async function ask() {
   // The SDK is loaded once the page starts; a tap before it has waits for it rather than failing on
   // an SDK not there yet (bsoneca/ume's phone-signin under load: "reading 'RecaptchaVerifier'" of undefined).
@@ -531,4 +656,90 @@ try {
   notice(t.down);
   $('#phone-ask').hidden = true;
 }
+`;
+
+// The page's script in broker mode: no SDK, no reCAPTCHA. The gate's owner is asked for a code first
+// (unchanged), then the broker is asked to send it, and the code typed is the broker's to check.
+const BROKER_SCRIPT = `${COMMON_TOP}let e164 = '', timer = 0;
+${COMMON_COUNTDOWN}
+// The gate's word on a code for this number ('' to go), then the broker sends it.
+async function ask() {
+  let said;
+  try {
+    const res = await fetch(config.admit, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone: e164 }), credentials: 'omit' });
+    if (!res.ok) throw new Error('admit ' + res.status);
+    said = (await res.json()).notice ?? '';
+  } catch (e) {
+    console.warn('phone: the gate did not answer: ' + (e && e.message));
+    return t.down;
+  }
+  if (said === 'phone-cooldown') return t.cooldown;
+  if (said === 'phone-cap') return t.too_many;
+  if (said === 'phone-region') return t.region;
+  if (said !== '') return t.down;
+  try {
+    const res = await fetch(location.pathname.replace(/\\/auth$/, '/send'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: config.id, phone: e164 }) });
+    if (res.ok) return '';
+    const error = (await res.json()).error;
+    return error === 'cooldown' ? t.cooldown : error === 'too_many' ? t.too_many : error === 'region' ? t.wrong_number : t.down;
+  } catch {
+    return t.down;
+  }
+}
+
+$('#phone-ask').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  e164 = '+55' + digitsOf(field.value);
+  if (!pattern.test(e164)) { notice(t.wrong_number); field.focus(); return; }
+  const send = $('#phone-send');
+  send.disabled = true;
+  notice('');
+  const problem = await ask();
+  send.disabled = false;
+  if (problem) { notice(problem); return; }
+  $('[data-e164]').textContent = e164;
+  $('#phone-ask').hidden = true;
+  $('#phone-check').hidden = false;
+  countdown(config.resendSeconds);
+  $('#phone-code').focus();
+});
+
+$('#phone-resend').addEventListener('click', async () => {
+  const b = $('#phone-resend');
+  b.disabled = true;
+  $('.wrong-code').hidden = true;
+  notice('');
+  const problem = await ask();
+  if (problem) { notice(problem); b.disabled = false; return; }
+  countdown(config.resendSeconds);
+});
+
+$('#phone-change').addEventListener('click', () => {
+  clearInterval(timer);
+  notice('');
+  $('.wrong-code').hidden = true;
+  $('#phone-check').hidden = true;
+  $('#phone-ask').hidden = false;
+  field.focus();
+});
+
+$('#phone-check').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const wrong = $('.wrong-code');
+  const confirm = $('#phone-confirm');
+  wrong.hidden = true;
+  const code = $('#phone-code').value.replace(/\\D/g, '');
+  if (!/^[0-9]{6}$/.test(code)) { wrong.textContent = t.wrong_code; wrong.hidden = false; return; }
+  confirm.disabled = true;
+  try {
+    const res = await fetch(location.pathname.replace(/\\/auth$/, '/approve'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: config.id, code }) });
+    const out = await res.json();
+    if (res.ok && out.to) { location.replace(out.to); return; }
+    wrong.textContent = out.error === 'expired' ? t.expired : out.error === 'too_many' ? t.too_many : t.wrong_code;
+    wrong.hidden = false;
+  } catch {
+    notice(t.down);
+  }
+  confirm.disabled = false;
+});
 `;
