@@ -289,6 +289,8 @@ cases: {
 	"a declaration no change since the snapshot reads is refused, so none is read into a later change": {suite: "migrations", steps: [
 		{call: "mig.plan", args: [_order, [["Order.fields.4.required", false]], {backfill: Order: note: "''"}], holds: {refused: [{at: "Order.note", kind: "declaration", why: "schemaMigrations.backfill.Order.note is for no change since the snapshot: remove it, as a declaration serves the migration it was written for, and one left would be read into a later change to Order.note"}]}},
 		{call: "mig.plan", args: [_order, [["Order.fields.4.required", false]], {carry: Order: stage: values: paid: "new"}], holds: {refused: [{at: "Order.stage", kind: "declaration"}]}},
+		{call: "mig.plan", args: [_order, [["Order.fields.3.required", false], ["Order.fields.3.default", "'x'"]], {backfill: Order: note: "''"}], holds: {refused: [{at: "Order.note", kind: "declaration"}]}, why: "another change to the same column reads no backfill, so one left there is still refused"},
+		{call: "mig.plan", args: [_order, [["Order.fields.5.default", "'paid'"]], {carry: Order: stage: values: paid: "new"}], holds: {refused: [{at: "Order.stage", kind: "declaration"}]}, why: "a default change reads no carry"},
 		{call: "mig.plan", args: [_order, [["Order.fields.8", {name: "placed_at", type: "timestamp", proto: "google.protobuf.Timestamp", required: true}]], {backfill: Order: placed_at: "now()"}], holds: {refused: [{at: "Order.placed_at", kind: "required-added"}]}, why: "a declaration at a refused change is that change's, refused once"},
 	]}
 	"every kind of change has a rule, and one with none is an error, never the replay's": {suite: "migrations", steps: [

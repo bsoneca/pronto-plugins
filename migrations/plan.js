@@ -486,8 +486,9 @@ export function plan(changes, declared = {}, dropped = {}) {
     const v = verdict(c);
     const k = KINDS[c.kind];
     const at = where(c);
-    if (c.field) for (const what of DECLARED) read.add(`${what}.${c.entity}.${c.field}`);
     if (v === "refused") {
+      // A declaration at a refused change is that change's: refused once, with it.
+      if (c.field) for (const what of DECLARED) read.add(`${what}.${c.entity}.${c.field}`);
       refused.push({ at, kind: c.kind, why: k.why(c) });
       continue;
     }
@@ -513,7 +514,12 @@ export function plan(changes, declared = {}, dropped = {}) {
       build: (phase, why, name, def) => op(phase, why, `ALTER TABLE ${t} DROP CONSTRAINT IF EXISTS ${ident(name)}, ADD CONSTRAINT ${ident(name)} ${def};`, { builds: [name] }),
       need: (what, why) => needs.push({ at, declare: `${what}.${c.entity}.${c.field}`, why }),
       refuse: (kind, why) => refused.push({ at, kind, why }),
-      declared: (what) => declared[what]?.[c.entity]?.[c.field],
+      // A declaration is read only by a rule that takes it (a backfill by a column added or made
+      // required, a carry by a narrowed enum), so one left beside any other change is still refused.
+      declared: (what) => {
+        read.add(`${what}.${c.entity}.${c.field}`);
+        return declared[what]?.[c.entity]?.[c.field];
+      },
     };
     k.ops?.(c, x);
     const note = k.note?.(c, x);
