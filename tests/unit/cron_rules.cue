@@ -55,6 +55,10 @@ cases: {
 	]}
 	"a bisect runs in the background": {suite: "cron", steps: [
 		{call: "cron.lowPriority", args: [["sh", "-c", "./saytw integrate@local"]], expect: ["taskpolicy", "-b", "nice", "-n", "19", "sh", "-c", "./saytw integrate@local"], why: "a gate or a release always outranks a bisect (2026-11-07: a bisect of 11:29 held the release runner)"},
+		{call: "cron.lowPriority", args: [["sh", "-c", "./saytw integrate@local"], "linux"], expect: ["nice", "-n", "19", "sh", "-c", "./saytw integrate@local"], why: "Linux has no taskpolicy: a systemd host's bisect still starts (PRONTO-141)"},
+		{call: "cron.schedulerEnv", args: [{}, "darwin"], expect: {CLOUDSDK_PYTHON: "/opt/homebrew/bin/python3.13", CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto"}, why: "a Mac's launchd run finds Homebrew's Python (#294)"},
+		{call: "cron.schedulerEnv", args: [{}, "linux"], expect: {CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto"}, why: "on Linux gcloud picks its own Python"},
+		{call: "cron.schedulerEnv", args: [{CLOUDSDK_PYTHON: "/usr/bin/python3", CLOUDSDK_ACTIVE_CONFIG_NAME: "x"}, "linux"], expect: {CLOUDSDK_PYTHON: "/usr/bin/python3", CLOUDSDK_ACTIVE_CONFIG_NAME: "x"}, why: "the caller's settings win"},
 	]}
 }
 

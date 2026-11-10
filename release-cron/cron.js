@@ -335,10 +335,17 @@ export const undecidable = (sig, text, specs, load, cores, flaked = []) => {
   return null;
 };
 
-// A bisect's check in the background: `nice -n 19` under macOS's background QoS (`taskpolicy -b`: the
-// lowest CPU, disk and network priority), so a gate or a release always outranks it. Every process the
-// check starts inherits both.
-export const lowPriority = (argv) => ["taskpolicy", "-b", "nice", "-n", "19", ...argv];
+// A bisect's check in the background: `nice -n 19`, under macOS's background QoS (`taskpolicy -b`: the
+// lowest CPU, disk and network priority) where there is one, so a gate or a release always outranks it.
+// Every process the check starts inherits both. `os` is Deno.build.os: Linux has no taskpolicy.
+export const lowPriority = (argv, os = "darwin") => [...(os === "darwin" ? ["taskpolicy", "-b"] : []), "nice", "-n", "19", ...argv];
+
+// The environment a scheduled run starts with, beside its PATH and HOME: gcloud's Python and config,
+// each the caller's when set. Homebrew's Python is only a default on macOS; elsewhere gcloud finds its own.
+export const schedulerEnv = (env, os = "darwin") => ({
+  ...(env.CLOUDSDK_PYTHON ? { CLOUDSDK_PYTHON: env.CLOUDSDK_PYTHON } : os === "darwin" ? { CLOUDSDK_PYTHON: "/opt/homebrew/bin/python3.13" } : {}),
+  CLOUDSDK_ACTIVE_CONFIG_NAME: env.CLOUDSDK_ACTIVE_CONFIG_NAME ?? "pronto",
+});
 
 // The checks the last verify line names as failed ("verify: failed: check-menu-budget check-online").
 export const failedChecks = (text) => {
