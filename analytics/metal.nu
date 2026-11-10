@@ -75,8 +75,12 @@ export def manifests [
 		}
 	}
 	let databases = [{apiVersion: "postgresql.cnpg.io/v1", kind: "Database", metadata: (do $meta "umami"), spec: {name: "umami", owner: "umami", cluster: {name: $db}}}]
+	# Grafana's database came over from Cloud Run with its Google Managed Prometheus datasource, which
+	# answers nothing here; named before VictoriaMetrics, a dashboard's datasource variable took it
+	# (PRONTO-189). Provisioning removes it; one already gone is nothing to remove.
 	let datasources = {
 		apiVersion: 1
+		deleteDatasources: [{name: "Google Managed Prometheus", orgId: 1}]
 		datasources: [
 			{name: "VictoriaMetrics", uid: "victoriametrics", type: "prometheus", access: "proxy", url: $victoria, isDefault: true, editable: false, jsonData: {httpMethod: "POST", timeInterval: "30s"}}
 			{name: "VictoriaLogs", uid: "victorialogs", type: "victoriametrics-logs-datasource", access: "proxy", url: $victoria_logs, editable: false}
