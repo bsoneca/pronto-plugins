@@ -99,6 +99,15 @@ The app checks the signature, `iss`, `aud` (its own origin), `exp`, `event` and 
 
 `release.nu` and `metal.nu` take `--phone-project`, `--phone-api-key`, `--phone-app-id`, `--phone-admit` and `--phone-tenants` for Firebase mode, and `--phone-otp broker --phone-sms <name> --phone-sms-gate <url>` (with `--phone-admit` and `--phone-tenants`) for broker mode. An app offers it with `providers=google,phone`.
 
+## Google's token exchange through an airlock door (`signin_door`)
+
+On a metal cluster, `metal --airlock` puts mecha's airlock beside the broker (the same pod, ledger and wall as billing's Stripe door: [`common/airlock.nu`](../common/airlock.nu)) and sends Google's token exchange through its door `google`: the broker posts the exchange to `http://identity-broker-airlock:9998/door/google` with the code's own key (`code-<sha256 of the code>`, so one sign-in is one ledger row however often it is made again) and no client secret; the airlock adds the client's credential as `Authorization: Basic` (Google's token endpoint takes `client_secret_basic`), records the call in its ledger, and answers Google's status and body. Only the broker reaches the door's port (NetworkPolicy). The client is the broker's own, and an app's sign-in is the same either way.
+
+- The credential is `GOOGLE_CLIENT_BASIC` in the broker's Secret: base64 of `<client id>:<client secret>`. With `--project`, `metal` makes it from the two; with `--secrets`, the SOPS file holds it beside `GOOGLE_CLIENT_SECRET`.
+- `--airlock` alone: the broker holds no `GOOGLE_CLIENT_SECRET` and every exchange goes through the door (`GOOGLE_DOOR`). `GOOGLE_DOOR` with a secret and no `GOOGLE_DOOR_ASKED`, and `GOOGLE_DOOR_ASKED` without both, stop the broker at start.
+- `--airlock --door-asked` (while the flag moves it): the broker keeps its secret and sets `GOOGLE_DOOR_ASKED=1`. When a sign-in begins, it asks the tenant's own flagd for the flag `signin_door` (`POST <tenant>/ofrep/v1/evaluate/flags/signin_door`, the tenant as the targeting key; `GOOGLE_DOOR_FLAG` names another flag), seals the answer in the round trip, and exchanges through the door when it is on, straight to Google as before when it is off. A flag that cannot be asked, or that the tenant has not published, is no answer: the sign-in stops with a 503, never picks a way (as billing's door flag); deploy `--door-asked` only once the tenants' push has published it. Once it is on for everyone, deploy without `--door-asked`: the broker then holds no Google secret.
+- An app declares the flag in its `flags_spec.cue` (`flags: signin_door: {note: "...", default: false, local: true}`) and must route `/ofrep/` to its flagd from its origin, as its door does.
+
 ## Tests
 
 - [`tests.cue`](tests.cue): the exported declaration, checked with `cue vet`.

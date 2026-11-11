@@ -9,6 +9,7 @@
 // start and never stored, since its tokens live five minutes and tenants
 // fetch a key they do not know.
 import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, signEs256, verifyIdToken } from "../oidc.ts";
+import { doorKey, throughDoor } from "./door.ts";
 import { type AuthRequest, Codes, emailOf, esc, json, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, sectorOf, sectorsOf, profileOf, providerScope, redeem } from "./core.ts";
 
 // Kept where phone.ts takes them (core.ts), so the phone imports nothing of this module at run time:
@@ -25,7 +26,14 @@ export interface Provider {
   issuers: readonly string[];
   keys: KeySource;
   clientId: string;
-  clientSecret: string;
+  /** The client's secret, posted to tokenUrl; absent when the airlock's door alone holds the credential. */
+  clientSecret?: string;
+  /** The airlock's door for the token exchange (PRONTO-268): its URL, `http://identity-broker-airlock:9998/door/google`.
+   * The airlock adds the client's credential and records every exchange in its ledger. */
+  door?: string;
+  /** With `door`, while the flag moves it: the broker keeps its secret, and exchanges through the door
+   * only the sign-ins whose tenant's flag asked for it (`askDoor`); the rest go straight to tokenUrl. */
+  doorAsked?: boolean;
   /** Whether a tenant may sign in through this provider; any, when absent. The phone's tenants are
    * the operator's list, since each of its sign-ins is an SMS the operator pays for. */
   admits?: (tenant: string) => boolean;
@@ -36,7 +44,15 @@ export interface Provider {
 
 export function google(env: (k: string) => string | undefined): Provider | null {
   const clientId = env("GOOGLE_CLIENT_ID"), clientSecret = env("GOOGLE_CLIENT_SECRET");
-  if (!clientId || !clientSecret) return null;
+  // Off by default: set (by metal.nu --airlock), the token exchange goes through the airlock's door,
+  // which holds the client's credential instead of the broker.
+  const door = env("GOOGLE_DOOR")?.replace(/\/$/, "");
+  // While it moves (PRONTO-268): the door beside the broker's own secret, each exchange through the door
+  // when its tenant's flag asked for it; the secret leaves the broker once a deploy drops this.
+  const doorAsked = env("GOOGLE_DOOR_ASKED") === "1";
+  if (doorAsked && !(door && clientSecret)) throw new Error("GOOGLE_DOOR_ASKED moves the broker between its client secret and the door: it needs GOOGLE_DOOR and GOOGLE_CLIENT_SECRET");
+  if (door && clientSecret && !doorAsked) throw new Error("GOOGLE_DOOR and GOOGLE_CLIENT_SECRET: through the door, the airlock holds the credential and the broker none");
+  if (!clientId || !(clientSecret || door)) return null;
   return {
     name: "google",
     label: "Google",
@@ -45,8 +61,38 @@ export function google(env: (k: string) => string | undefined): Provider | null 
     issuers: ["https://accounts.google.com", "accounts.google.com"],
     keys: jwksSource(env("GOOGLE_JWKS_URL") || "https://www.googleapis.com/oauth2/v3/certs"),
     clientId,
-    clientSecret,
+    ...(clientSecret ? { clientSecret } : {}),
+    ...(door ? { door: `${door}/door/google`, doorAsked } : {}),
   };
+}
+
+/** The tenant's word on the door (its flag `signin_door`), asked at the tenant's own flagd through the
+ * door its app has (`/ofrep/`, as billing's service asks it), for the tenant as the targeting key.
+ * As billing's door flag: a flag that cannot be asked, or that the live document does not have
+ * (FLAG_NOT_FOUND), is no answer and fails the sign-in, never picks a way. --door-asked is deployed
+ * only once the tenants' push has published the flag. */
+export function askedFlag(flag: string, fetcher: typeof fetch = fetch): (tenant: string) => Promise<boolean> {
+  return async (tenant) => {
+    const res = await fetcher(`${tenant}/ofrep/v1/evaluate/flags/${encodeURIComponent(flag)}`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ context: { targetingKey: tenant } }), signal: AbortSignal.timeout(10_000), redirect: "error",
+    });
+    const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
+    if (!res.ok || typeof answer?.value !== "boolean") throw new Error(`flag ${flag}: flagd answered ${res.status}`);
+    return answer.value;
+  };
+}
+
+/** Google's token exchange through the airlock's door: the code's own key, so one sign-in is one
+ * ledger row however often it is made again, and no credential in the body, which the airlock adds as
+ * client_secret_basic. The sink's answer comes back as the response it was. */
+async function exchangeThroughDoor(door: string, form: URLSearchParams, fetcher: typeof fetch = fetch): Promise<Response> {
+  const body = new URLSearchParams(form);
+  body.delete("client_secret");
+  const { status, body: answer } = await throughDoor(door, {
+    key: await doorKey("code", form.get("code") ?? ""), method: "POST", path: "/token", body: `${body}`, contentType: "application/x-www-form-urlencoded",
+  }, fetcher);
+  return typeof answer === "string" ? new Response(answer, { status }) : Response.json(answer, { status });
 }
 
 export async function hmacKey(secret: string, label: string): Promise<CryptoKey> {
@@ -103,6 +149,10 @@ export async function broker(p: {
   sectors?: ReadonlyMap<string, string>;
   /** Routes served beside the broker's own: the phone's (phone.ts). */
   extra?: (req: Request, url: URL) => Promise<Response> | null;
+  /** Whether a tenant's flag sends its sign-ins through the airlock's door, for a provider with `doorAsked`. */
+  askDoor?: (tenant: string) => Promise<boolean>;
+  /** The fetch that reaches the door (tests'). */
+  fetcher?: typeof fetch;
 }) {
   if (p.secret.length < 32) throw new Error("BROKER_SECRET is at least 32 characters");
   const issuer = p.issuer.replace(/\/$/, "");
@@ -125,7 +175,15 @@ export async function broker(p: {
     const r = parsed.request;
     const provider = providers.get(r.provider)!;
     if (provider.admits && !provider.admits(r.tenant)) return back(r.redirectUri, { error: "unauthorized_client", state: r.state });
-    const leg = await seal(stateKey, { r, pn: randomToken(16), exp: Math.floor(Date.now() / 1000) + 600 });
+    // Asked once, here: a sign-in goes the way its tenant's flag said when it began, whatever the flag does meanwhile.
+    let door = false;
+    if (provider.door !== undefined && provider.doorAsked === true && p.askDoor) {
+      try { door = await p.askDoor(r.tenant); } catch (e) {
+        console.error(`sign-in for ${r.tenant}: ${(e as Error).message}`);
+        return page("Sign-in unavailable", `<h1>This sign-in can't continue right now</h1><p class="err">Try again in a moment.</p>`, 503);
+      }
+    }
+    const leg = await seal(stateKey, { r, pn: randomToken(16), door, exp: Math.floor(Date.now() / 1000) + 600 });
     const host = new URL(r.tenant).host;
     return page(`Sign in to ${host}`, `<h1>Sign in to <span class="origin">${esc(host)}</span></h1>
 <p>You'll continue with ${esc(provider.label)}. Only <span class="origin">${esc(r.tenant)}</span> learns that it's you, and it can't tell you apart in any other app.${r.email ? ` ${esc(learnsMore(r))}` : ""}</p>
@@ -160,9 +218,14 @@ export async function broker(p: {
     }
     const form = new URLSearchParams({
       grant_type: "authorization_code", code: url.searchParams.get("code") ?? "", client_id: provider.clientId,
-      client_secret: provider.clientSecret, redirect_uri: callback(provider.name),
+      ...(provider.clientSecret ? { client_secret: provider.clientSecret } : {}), redirect_uri: callback(provider.name),
     });
-    const exchanged = provider.exchange ? await provider.exchange(form) : await fetch(provider.tokenUrl, {
+    const viaDoor = provider.door !== undefined && (!provider.doorAsked || leg.door === true);
+    const exchanged = provider.exchange ? await provider.exchange(form) : viaDoor ? await exchangeThroughDoor(provider.door!, form, p.fetcher).catch((e) => {
+      // The door could not answer (its ledger holds the attempt): the sign-in fails as a refused exchange does.
+      console.error(`broker: ${name}'s door: ${e instanceof Error ? e.message : e}`);
+      return new Response("door", { status: 502 });
+    }) : await fetch(provider.tokenUrl, {
       method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form,
     });
     if (!exchanged.ok) {
@@ -246,5 +309,7 @@ if (import.meta.main) {
   const phone = phoneCfg ? await phoneUpstream(issuer, phoneCfg, { secret }) : null;
   if (phone) providers.push(phone.provider);
   if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT, or PHONE_OTP=broker");
-  Deno.serve({ port: Number(env("PORT") ?? 28443) }, await broker({ issuer, secret, providers, sectors: sectorsOf(env("BROKER_SECTORS")), extra: phone?.handle }));
+  Deno.serve({ port: Number(env("PORT") ?? 28443) }, await broker({
+    issuer, secret, providers, sectors: sectorsOf(env("BROKER_SECTORS")), extra: phone?.handle, askDoor: askedFlag(env("GOOGLE_DOOR_FLAG") || "signin_door"),
+  }));
 }

@@ -177,7 +177,7 @@ export async function front(p: {
     if (url.searchParams.get("error")) return await refuse(`${name} refused: ${url.searchParams.get("error")}`);
     const form = new URLSearchParams({
       grant_type: "authorization_code", code: url.searchParams.get("code") ?? "", client_id: provider.clientId,
-      client_secret: provider.clientSecret, redirect_uri: callback(provider.name),
+      ...(provider.clientSecret ? { client_secret: provider.clientSecret } : {}), redirect_uri: callback(provider.name),
     });
     const exchanged = provider.exchange ? await provider.exchange(form) : await fetcher(provider.tokenUrl, {
       method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form,

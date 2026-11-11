@@ -24,7 +24,7 @@ Deno.test("the fake Google signs in the test person picked, once", async () => {
   assertEquals([`${back.origin}${back.pathname}`, back.searchParams.get("state")], [REDIRECT, state]);
   const redeem = () => call(provider.tokenUrl, {
     method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "authorization_code", code: back.searchParams.get("code")!, client_id: provider.clientId, client_secret: provider.clientSecret, redirect_uri: REDIRECT }),
+    body: new URLSearchParams({ grant_type: "authorization_code", code: back.searchParams.get("code")!, client_id: provider.clientId, client_secret: provider.clientSecret!, redirect_uri: REDIRECT }),
   });
   const t = await redeem();
   assertEquals(t.status, 200);

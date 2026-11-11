@@ -3,7 +3,7 @@
 // is a stranger to a second tenant, and a sign-in never leaves for a redirect
 // that is not the tenant's.
 import { base64url, type Jwk, randomToken, sha256url, verifyIdToken } from "../oidc.ts";
-import { broker, type Provider } from "./main.ts";
+import { askedFlag, broker, google, type Provider } from "./main.ts";
 
 function assertEquals(a: unknown, b: unknown, m = "") {
   if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m} expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
@@ -169,4 +169,94 @@ Deno.test("the broker end to end", async (t) => {
   } finally {
     await fake.shutdown();
   }
+});
+
+// Google's token exchange through the airlock's door (PRONTO-268, flag signin_door), the door faked:
+// the airlock adds the client's secret (here, the fake door does, as the airlock does) and the broker's
+// own request carries none.
+Deno.test("the token exchange through the airlock's door, as the tenant's flag signin_door asks", async () => {
+  const fake = Deno.serve({ port: 0, onListen() {} }, fakeGoogle);
+  const G = `http://localhost:${fake.addr.port}`;
+  const sent: { url: string; body: Record<string, unknown> }[] = [];
+  const fetcher: typeof fetch = async (url, init) => {
+    const body = JSON.parse(String(init!.body));
+    sent.push({ url: String(url), body });
+    const form = new URLSearchParams(body.body);
+    form.set("client_secret", "op-secret");
+    const res = await fetch(`${G}${body.path}`, { method: body.method, headers: { "content-type": body.contentType }, body: form });
+    return Response.json({ status: res.status, body: await res.json(), replayed: false });
+  };
+  const asked: string[] = [];
+  const flag: Record<string, boolean> = { [A]: true, [B]: false };
+  const make = async (over: Partial<Provider>) => {
+    const provider: Provider = {
+      name: "google", label: "Google", authUrl: `${G}/auth`, tokenUrl: `${G}/token`, issuers: ["https://accounts.google.com"],
+      keys: async (kid) => (kid === "g1" ? googleJwk : undefined), clientId: "op-client", ...over,
+    };
+    handler = await broker({ issuer: ISSUER, secret: "s".repeat(40), providers: [provider], fetcher, askDoor: (t) => { asked.push(t); return Promise.resolve(flag[t] === true); } });
+  };
+  const signedIn = async (tenant: string) => {
+    const s = await signIn(tenant, "alice");
+    return s.landed!.searchParams.has("code");
+  };
+  try {
+    // The door alone: the airlock holds the credential, the broker none.
+    await make({ door: "http://airlock:9998/door/google" });
+    assertEquals(await signedIn(A), true, "signed in through the door");
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0].url, "http://airlock:9998/door/google");
+    const b = sent[0].body;
+    assertEquals([b.method, b.path, b.contentType], ["POST", "/token", "application/x-www-form-urlencoded"]);
+    assertEquals(/^code-[0-9a-f]{64}$/.test(String(b.key)), true, "a key of the code's own");
+    assertEquals(String(b.body).includes("op-secret") || String(b.body).includes("client_secret"), false, "no secret in the body");
+    assertEquals(new URLSearchParams(String(b.body)).get("client_id"), "op-client");
+    assertEquals(asked, [], "no flag asked: the door is the only way");
+
+    // While the flag moves it (door-asked): the broker keeps its secret; the tenant's flag picks the way.
+    sent.length = 0;
+    await make({ door: "http://airlock:9998/door/google", doorAsked: true, clientSecret: "op-secret" });
+    assertEquals(await signedIn(A), true);
+    assertEquals(sent.length, 1, "flag on: through the door");
+    assertEquals(await signedIn(B), true, "flag off: straight to Google, with the broker's secret");
+    assertEquals(sent.length, 1, "flag off: the door is not called");
+    assertEquals(asked.slice(-2), [A, B], "each sign-in asks its own tenant's flag");
+    // A tenant whose flag cannot be asked goes straight, as off.
+    assertEquals(await signedIn("https://app-c.example"), true);
+    assertEquals(sent.length, 1);
+
+    // A door that answers nothing fails the sign-in as a refused exchange does: back to the tenant, no code.
+    const down: typeof fetch = () => Promise.resolve(Response.json({ error: "the sink answered 503" }, { status: 400 }));
+    handler = await broker({
+      issuer: ISSUER, secret: "s".repeat(40), fetcher: down, askDoor: () => Promise.resolve(true),
+      providers: [{ name: "google", label: "Google", authUrl: `${G}/auth`, tokenUrl: `${G}/token`, issuers: ["https://accounts.google.com"], keys: async () => googleJwk, clientId: "op-client", door: "http://airlock:9998/door/google" }],
+    });
+    const failed = await signIn(A, "alice");
+    assertEquals([failed.landed!.searchParams.get("error"), failed.landed!.searchParams.has("code")], ["access_denied", false]);
+  } finally {
+    await fake.shutdown();
+  }
+});
+
+Deno.test("the door's startup consistency: a secret and a door need the flag, the flag needs both", () => {
+  const e = (o: Record<string, string>) => (k: string) => o[k];
+  const base = { GOOGLE_CLIENT_ID: "c" };
+  const fails = (o: Record<string, string>) => { try { google(e({ ...base, ...o })); return false; } catch { return true; } };
+  assertEquals(fails({ GOOGLE_CLIENT_SECRET: "s", GOOGLE_DOOR: "http://d" }), true, "door and secret, no flag");
+  assertEquals(fails({ GOOGLE_DOOR: "http://d", GOOGLE_DOOR_ASKED: "1" }), true, "the flag needs the secret too");
+  assertEquals(fails({ GOOGLE_CLIENT_SECRET: "s", GOOGLE_DOOR_ASKED: "1" }), true, "the flag needs the door");
+  assertEquals(google(e({ ...base, GOOGLE_DOOR: "http://d/" }))?.door, "http://d/door/google");
+  assertEquals(google(e({ ...base, GOOGLE_DOOR: "http://d", GOOGLE_CLIENT_SECRET: "s", GOOGLE_DOOR_ASKED: "1" }))?.doorAsked, true);
+  assertEquals(google(e({ ...base, GOOGLE_CLIENT_SECRET: "s" }))?.door, undefined, "no door unless set");
+  assertEquals(google(e(base)), null, "neither a secret nor a door: no Google");
+});
+
+Deno.test("the tenant's flag is asked at its own origin as the tenant, and an answer that does not come is off", async () => {
+  const seen: { url: string; body: unknown }[] = [];
+  const on = askedFlag("signin_door", (url, init) => { seen.push({ url: String(url), body: JSON.parse(String(init!.body)) }); return Promise.resolve(Response.json({ value: true })); });
+  assertEquals(await on(A), true);
+  assertEquals(seen, [{ url: `${A}/ofrep/v1/evaluate/flags/signin_door`, body: { context: { targetingKey: A } } }]);
+  assertEquals(await askedFlag("signin_door", () => Promise.resolve(Response.json({ value: false })))(A), false);
+  const fails = async (f: () => Promise<boolean>) => { try { await f(); return false; } catch { return true; } };
+  assertEquals(await fails(() => askedFlag("signin_door", () => Promise.resolve(new Response("", { status: 404 })))(A)), true, "a flag not there is no answer");
+  assertEquals(await fails(() => askedFlag("signin_door", () => Promise.reject(new Error("down")))(A)), true, "unreachable is no answer");
 });
