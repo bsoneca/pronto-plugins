@@ -41,6 +41,12 @@ other.
    `pronto-flags push` of the flag for everyone marks it Done (`hook.ts flipped`). Don't file one by
    hand for a flag a pull request adds; a flip waits for the owner's go, so it is never pulled into a
    sprint unless the owner says so.
+   **A flag on for a week gets its removal issue.** Once a flip issue has been Done for 7 days, the
+   released hook (release-cron runs it after each release, so there is no scheduler) files "Remove flag
+   <flag> from <app>" in the Backlog, in the app's module, linking the flip issue (the owner,
+   2026-11-11). Done means the flag and its off-path code are deleted from the app (`flags_spec.cue`,
+   `flags/flags.json`, the code, the scenarios) and shipped through release-cron. One already on the
+   board, in any state, is reused, never doubled. `pronto-devflow removals . <app>` runs it by hand.
 5b. **Pull the next one, always.** An idle engineer is money spent for nothing (the owner,
    2026-11-09), so the moment an issue leaves your hands (its pull request opens, or it is
    cancelled or abandoned) you start the next one in the same turn; you never end a turn idle

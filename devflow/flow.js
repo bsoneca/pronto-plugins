@@ -259,3 +259,45 @@ export function flipIssueOf(issues, flag, app) {
 export function flipIssueMove(state) {
   return state === "done" || state === "cancelled" || rank(state) < 0 ? null : "done";
 }
+
+/** How long a flag is on for everyone before its removal issue is filed, in days (the owner, 2026-11-11). */
+export const REMOVE_AFTER_DAYS = 7;
+
+/** A removal issue's title: the flag and its off-path code leave the app a week after its flip. */
+export function removeTitle(flag, app) {
+  return `Remove flag ${flag} from ${app}`;
+}
+
+/** The flag a removal issue's title names ("Remove flag <flag> from <app>"), or null for another issue. */
+export function removeOf(title) {
+  const m = /^Remove flag `?([A-Za-z0-9_.-]+)`? from \S/.exec(String(title ?? "").trim());
+  return m ? m[1] : null;
+}
+
+/** The removal issue of an app's flag among `issues` (`{name, modules}`): titled for the flag, in the
+ * app's module, whatever its state (Done and Cancelled too), so it is never filed twice; null when none. */
+export function removeIssueOf(issues, flag, app) {
+  return (issues ?? []).find((i) => removeOf(i.name) === flag && (i.modules ?? []).includes(app)) ?? null;
+}
+
+/** Whether a flag on for everyone since `since` (an ISO time) has been so for `days` by `now`, both
+ * injected: a missing or unreadable time is never old enough. */
+export function onForDays(since, now, days = REMOVE_AFTER_DAYS) {
+  const t = Date.parse(since ?? "");
+  const n = now instanceof Date ? now.getTime() : Date.parse(now ?? "");
+  return Number.isFinite(t) && Number.isFinite(n) && n - t >= days * 86400000;
+}
+
+/** The removal issues to file for an app: each of its flip issues (`{name, modules, state, doneAt}`, `state` a
+ * role, `doneAt` when it went Done: the board's completion time) that is Done, was Done `days` ago by `now`,
+ * and has no removal issue among `issues` (any state). `[{flag, flip}]`, sorted by flag, once per flag. */
+export function removalsDue(issues, app, now, days = REMOVE_AFTER_DAYS) {
+  const due = new Map();
+  for (const i of issues ?? []) {
+    const flag = flipOf(i.name);
+    if (!flag || i.state !== "done" || !(i.modules ?? []).includes(app)) continue;
+    if (!onForDays(i.doneAt, now, days) || removeIssueOf(issues, flag, app) || due.has(flag)) continue;
+    due.set(flag, { flag, flip: i });
+  }
+  return [...due.values()].sort((a, b) => (a.flag < b.flag ? -1 : a.flag > b.flag ? 1 : 0));
+}

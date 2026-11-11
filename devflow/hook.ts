@@ -1,14 +1,17 @@
 // The dev flow's hooks: what GitHub, release-cron and pronto-flags tell the board.
 //   hook.ts pr <repo> [--warn]                    a pull_request event (GITHUB_EVENT_PATH): its issue to Review, Merged, back to Implementing;
 //                                                 a merge that added flags off where released files "Flip <flag> on in <app>" for each
-//   hook.ts released <repo> <app> <commit>        release-cron confirmed <commit>: the app's Merged issues it holds go Live
+//   hook.ts released <repo> <app> <commit>        release-cron confirmed <commit>: the app's Merged issues it holds go Live; and each of its
+//                                                 flip issues Done 7 days ago or more gets "Remove flag <flag> from <app>" in the Backlog,
+//                                                 linking the flip, unless one is on the board already (release-cron runs it every release: no scheduler)
+//   hook.ts removals <repo> <app>                 only the removal issues, by hand (a one-off; `released` does it after each release)
 //   hook.ts flipped <repo> <app> <flag...>        pronto-flags turned the flags on for everyone: their issues and flip issues are Done
 //   hook.ts rolledback <repo> <app> <flag...>     a flip was rolled back: their Done issues go back to Live
 // Only `pr` can fail (an issue key missing, rule 3). The others say what they did and exit 0 whatever
 // happens: a release or a flip never fails for the board.
 import { cmd } from "../intents/shell.ts";
 import { esc, type Issue } from "./board/board.ts";
-import { addedFlags, doneAt, flagNote, flagOf, flipIssueMove, flipIssueOf, flipTitle, keyOf, missingKey, moveFor, nameOf, prEvent, roleOf } from "./flow.js";
+import { addedFlags, doneAt, flagNote, flagOf, flipIssueMove, flipIssueOf, flipTitle, keyOf, missingKey, moveFor, nameOf, prEvent, REMOVE_AFTER_DAYS, removalsDue, removeTitle, roleOf } from "./flow.js";
 import { boardOf, devflowOf, type DevFlow } from "./spec.ts";
 
 type Conn = NonNullable<Awaited<ReturnType<typeof boardOf>>>;
@@ -143,6 +146,31 @@ async function released(repo: string, app: string, commit: string, b: Conn, flow
   }
 }
 
+/** A flag on for everyone for 7 days gets one Backlog issue, "Remove flag <flag> from <app>", in the app's module,
+ * linking its flip issue: done means the flag and its off-path code are deleted from the app and shipped through
+ * release-cron. A flip issue's Done time is the board's completion time (updated_at when it has none). A removal
+ * issue already on the board, in any state, is reused, so a run files only what is missing. `now` is injected. */
+export async function fileRemovals(app: string, b: Conn, flow: DevFlow, now = new Date()) {
+  const s = await stateIds(b);
+  const modules = await b.board.modulesByIssue(b.project);
+  const issues = (await b.board.issues(b.project)).map((i) => {
+    const t = i as Issue & { completed_at?: string | null; updated_at?: string | null };
+    return { ...i, state: roleOf(flow.roles, s.name(i.state)) as string, modules: modules.get(i.id) ?? [], doneAt: t.completed_at ?? t.updated_at ?? "" };
+  });
+  const mod = (await b.board.modules(b.project)).find((m) => m.name === app);
+  const { host, workspace, project } = flow.board;
+  for (const { flag, flip } of removalsDue(issues, app, now)) {
+    const key = `${project.identifier}-${flip.sequence_id}`;
+    const body = `<p>Flag \`${esc(flag)}\` has been on for everyone in ${esc(app)} for ${REMOVE_AFTER_DAYS} days or more since its flip ${esc(key)} went Done (${esc(flip.doneAt)}).</p>` +
+      `<p>Done when: the flag and its off-path code are deleted from ${esc(app)} (\`flags_spec.cue\`, \`flags/flags.json\`, the code, the scenarios) and that is shipped through release-cron.</p>` +
+      `<p>Flag: ${esc(flag)}</p>`;
+    const made = await b.board.createIssue(b.project, { name: removeTitle(flag, app), description_html: body, priority: "none", state: s.id(nameOf(flow.roles, "backlog")), labels: [] });
+    if (mod) await b.board.addToModule(b.project, mod.id, [made.id]);
+    await b.board.link(b.project, made.id, `https://${host}/${workspace}/browse/${key}/`, `${key} ${flip.name}`);
+    console.log(`${flag}: filed #${made.sequence_id} ${removeTitle(flag, app)} (flip ${key} Done ${flip.doneAt})`);
+  }
+}
+
 async function flip(event: "flipped" | "rolledback", app: string, flags: string[], b: Conn, flow: DevFlow) {
   const from = event === "flipped" ? [flow.roles.merged, flow.roles.live] : [flow.roles.done];
   for (const { issue, modules } of await inStates(b, from)) {
@@ -173,7 +201,7 @@ if (import.meta.main) {
   const repo = repoArg ? await Deno.realPath(repoArg) : "";
   const flow = repo ? await devflowOf(repo) : null;
   if (!verb || !repo) {
-    console.error("usage: hook.ts pr|released|flipped|rolledback <repo> ...");
+    console.error("usage: hook.ts pr|released|removals|flipped|rolledback <repo> ...");
     Deno.exit(2);
   }
   if (!flow) {
@@ -189,6 +217,9 @@ if (import.meta.main) {
         console.log("devflow: no board token (PLANE_TOKEN or Secret Manager): the board was not told");
       } else if (verb === "released") {
         await released(repo, rest[0], rest[1], b, flow);
+        await fileRemovals(rest[0], b, flow);
+      } else if (verb === "removals") {
+        await fileRemovals(rest[0], b, flow);
       } else if (verb === "flipped" || verb === "rolledback") {
         await flip(verb, rest[0], rest.slice(1), b, flow);
       } else {
