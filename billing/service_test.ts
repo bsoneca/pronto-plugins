@@ -1,7 +1,7 @@
 // The service hands the author's grants to the database: the release's set, or
 // the flag billing_grants as flagd serves it now; each set once, and none taken
 // away because flagd could not be asked.
-import { service } from "./service.ts";
+import { grantLog, service } from "./service.ts";
 import { entitlementClaims } from "./broker/core.ts";
 import { signEs256 } from "./shared.ts";
 
@@ -298,4 +298,14 @@ Deno.test("the door flag is read with the reader's own session and told to the b
   const failed = await down.ask(down.make({ doorFlag: "stripe_door" }), "/billing/trial");
   eq([failed.ok, down.broker.length], [false, 0], "a flag that does not answer sends nothing to the broker");
   await failed.body?.cancel();
+});
+
+// The grants loop keeps the startup race out of the logs (PRONTO-295, from Bonk Chess's copy): billing starts
+// before crud listens, so a refusal in the first minute says nothing, one after it warns, and after a success
+// any failure is an error.
+Deno.test("a failed grants call is quiet in the startup window, a warning after it, an error once served", () => {
+  eq(grantLog(false, 2000), "none", "crud is not listening yet at every instance start");
+  eq(grantLog(false, 59000), "none");
+  eq(grantLog(false, 70000), "warn", "still not written after the window");
+  eq(grantLog(true, 2000), "error", "after a success it is real trouble");
 });
