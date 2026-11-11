@@ -1,6 +1,6 @@
 {
- "key": "6c5843f6ab9c46bced607d6db7179e8f9ecb86fc3a0171974b149779d176f48a",
- "at": "2026-11-11T22:46:13.401Z",
+ "key": "f4a873ecf5bde7afed26fbd627d6860b41c4ab5e66c8c2e5cc1191a400bfca4d",
+ "at": "2026-11-11T23:54:03.508Z",
  "observed": {
   "read": {},
   "dir": {},
@@ -25,7 +25,7 @@
   "args [\"devflow\"]",
   "allow read=granted write=granted env=granted run=granted net=granted sys=granted ffi=granted",
   "env CUE e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "module tests/unit/registry.js 6bb01a88fb8c4c06e62882a3b8f258e55b137db03acb3516d085c889f98ff9fb",
+  "module tests/unit/registry.js 30b0d914e65a0e5c64f5a4394ece0f703b90480ec824472f6453d4f5fc5df7a9",
   "module devflow/board/github.js 180ed33d3ef7a001de1317b1b9f38031050c0cab0c6a57c17cf0a9b9ef638659",
   "module devflow/flow.js 7c8d3931f5973b816cd9157d6c882d233ee0ef6fc3cf3645fdef39372b1c14b3",
   "module intents/run.ts 3137ad06e3e40c841bb0d78753da1b6c43943f6df8126be268f102f6abe1992b"

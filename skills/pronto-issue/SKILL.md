@@ -32,7 +32,11 @@ other.
    the flag, tests as data, its gate.
 5. **Open the pull request** ready for review, its title starting `PRONTO-<n>:`. The plane
    workflow moves the issue to Review, and to Merged once it merges; release-cron makes it Live and
-   the flag's flip Done.
+   the flag's flip Done. **Arm auto-merge as you open it** (the owner, 2026-11-11: "Open our prs
+   with auto-merge from now on"): `gh pr merge <n> --auto --squash` right after `gh pr create`. It
+   merges once the required checks pass; never `--admin`. A repository with no required check (or
+   auto-merge off) would merge before ci, so there wait for ci and `gh pr merge --match-head-commit`. Where the repository
+   has its own automerge workflow (pronto), that workflow still does the merge.
 5a. **A flag merged off gets its own flip issue.** When there are flags to be flipped, there is an
    issue for each (the owner, 2026-11-10). The plane workflow files it: a merged pull request that
    adds a flag whose default is false to an app's `flags_spec.cue` gets "Flip <flag> on in <app>" in

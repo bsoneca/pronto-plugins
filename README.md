@@ -2,7 +2,8 @@
 
 Host plugins for [pronto](https://github.com/bonisoft3/pronto) terminals
 beyond the browser, and beside them, on unmodified pronto. Why and how they are shaped:
-[a native terminal](docs/native-terminal.md).
+[a native terminal](docs/native-terminal.md). Designed, not built yet:
+[pronto-api](docs/pronto-api.md), a plugin that exports any app as a Google-style REST API, PostgREST over table projections.
 
 ## Plugins
 
@@ -16,6 +17,7 @@ refuses an app that is not.
 
 - [ads](ads/README.md): rewarded ads a player chooses to watch.
 - [analytics](analytics/README.md): business numbers (users, paying users, games, funnels) and visits, read not alerted.
+- [api](api/README.md): pronto-api's spike: one Deno service serving a runtime descriptor set over gRPC, Connect and REST on one port, behind `api_export`.
 - [android](android/README.md): a native Android host, no WebView.
 - [billing](billing/README.md): paid plans through a shared Stripe broker.
 - [errors](errors/README.md): what the pages throw, reported to a self-hosted GlitchTip (Sentry protocol): the node's server, the page's reporter, the door's route.
