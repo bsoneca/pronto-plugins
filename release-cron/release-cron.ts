@@ -847,7 +847,10 @@ try {
       // With the run's own GH_TOKEN: under CD the release job's token, which may write Releases (bsoneca/pronto's
       // cd.yml: contents write, pull-requests read). A job started with SessionCreate cannot reach the owner's
       // gh login in the keychain, so that token is the only login there; launchd's run uses the owner's.
-      const n = await child(Deno.execPath(), ["run", "-A", "release-notes/release-notes.ts", app, "publish", String(run.revision)], dir, Deno.env.toObject());
+      // This run as release-notes reads a released one: end() writes it to runs.jsonl only after the notes, and an app
+      // on a command target has no other record of the revision it just made live (PRONTO-205).
+      const current = JSON.stringify({ ...run, outcome: "released", ended: local(Date.now()) });
+      const n = await child(Deno.execPath(), ["run", "-A", "release-notes/release-notes.ts", app, "publish", String(run.revision)], dir, { ...Deno.env.toObject(), RELEASE_NOTES_RUN: current });
       run.notes = n.code === 0 ? "published" : `failed (exit ${n.code})`;
     } catch (e) { run.notes = `failed (${(e as Error).message.split("\n")[0]})`; }
     say(`release notes ${run.notes}`);
