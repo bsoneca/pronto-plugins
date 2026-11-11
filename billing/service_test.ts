@@ -329,17 +329,18 @@ Deno.test("the door flag is read for the reader and told to the broker; a flag t
 // The grants loop keeps the startup race out of the logs (PRONTO-295, from Bonk Chess's copy): billing starts
 // before crud listens, so a neighbour not up yet says nothing in the first minute and warns after it; any
 // other failure, and any after a success, is an error.
-Deno.test("a neighbour not up yet is quiet in the startup window, a warning after it; any other failure is an error", () => {
-  eq(grantLog(false, 2000, true), "none", "crud is not listening yet at every instance start");
-  eq(grantLog(false, 59000, true), "none");
-  eq(grantLog(false, 70000, true), "warn", "still not written after the window");
-  eq(grantLog(true, 2000, true), "error", "after a success it is real trouble");
-  eq(grantLog(false, 2000, false), "error", "a refusal no wait can mend is never quiet");
+Deno.test("a neighbour not up yet is said once in the startup window, an error after it; any other failure is an error", () => {
+  eq(grantLog(false, 2000, true, false), "info", "crud is not listening yet at every instance start: said once");
+  eq(grantLog(false, 4000, true, true), "none", "the same wait, already said");
+  eq(grantLog(false, 70000, true, true), "error", "still not written after the window");
+  eq(grantLog(true, 2000, true, false), "error", "after a success it is real trouble");
+  eq(grantLog(false, 2000, false, true), "error", "a refusal no wait can mend is an error at once");
 });
 
 Deno.test("what a failed grants call is: not up yet, or a failure", async () => {
   const cases: [string, () => Response, boolean][] = [
-    ["connection refused", () => { throw new TypeError("connection refused"); }, true],
+    ["connection refused", () => { throw new TypeError("error sending request", { cause: new Error("tcp connect error: Connection refused (os error 61)") }); }, true],
+    ["name not resolved", () => { throw new TypeError("error sending request", { cause: new Error("failed to lookup address information: nodename nor servname provided") }); }, false],
     ["gateway not serving", () => new Response("", { status: 503 }), true],
     ["schema not reloaded", () => Response.json({ code: "PGRST202", message: "Could not find the function public.billing_grant" }, { status: 404 }), true],
     ["token refused", () => Response.json({ code: "PGRST301" }, { status: 401 }), false],
