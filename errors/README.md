@@ -51,8 +51,8 @@ ssh user@203.0.113.7 'KUBECONFIG=$HOME/.kube/config kubectl get secret owner -n 
 `errors_spec.cue`. Write the server and the slug, run `metal`, then write the `project` and `key` it
 printed, and the acceptance ids the scenarios hold (`scenarios.accepts`). From then on the app's
 generate writes `tests/scenarios/errors_plugin.cue`: `error_tracking`, a thrown error reaching the
-stand-in through the door on a host launch, and `error_tracking_tester`, the `production` check the
-flag's flip runs as the tester (`scenarios.tester` names the actor).
+stand-in through the door on a host launch, and `error_tracking_tester`, a `production` check that signs in
+as a tester (`scenarios.tester` names the actor); a flip lists it and does not run it (PRONTO-284).
 
 ## What a page sends
 

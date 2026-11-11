@@ -260,8 +260,8 @@ how anything ships:
 1. **After a release-cron run confirms a release**, items in Merged whose PR is in the released
    commit move to **Live** (**Done** when they have no flag).
 2. **After a flag flip completes**, the item whose `Flag:` line names that flag moves to **Done**. A
-   flip already runs its flag's cases: first for the app's testers in production, then for everyone,
-   rolled back on a failure ([flag-flips.md](../docs/flag-flips.md)). So "flipped on successfully"
+   flip already runs its flag's cases: it writes the flag for everyone, then runs its `production`
+   cases that need no tester, rolled back on a failure ([flag-flips.md](../docs/flag-flips.md)). So "flipped on successfully"
    means the flip reached everyone and was not rolled back. A rollback puts the item back to Live,
    with the failing case in a comment.
 

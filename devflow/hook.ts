@@ -106,7 +106,7 @@ async function fileFlips(p: { number: number; html_url: string; title: string; b
       }
       const note = flagNote(spec, flag) ?? `(no note for ${flag} in apps/${app}/flags_spec.cue)`;
       const body = `<p>Flag \`${esc(flag)}\` merged off where ${esc(app)} is released, in #${p.number} ${esc(p.title)}. What it does: ${esc(note)}</p>` +
-        `<p>Done when: \`pronto-flags push\` turned it on for everyone after its production cases passed as the tester; or the owner says it stays off and the flag is retired. A flip changes what players see, so it waits for the owner's go.</p>` +
+        `<p>Done when: \`pronto-flags push\` turned it on for everyone and its production cases passed; or the owner says it stays off and the flag is retired. A flip changes what players see, so it waits for the owner's go.</p>` +
         `<p>Flag: ${esc(flag)}</p>`;
       const made = await b.board.createIssue(b.project, { name: flipTitle(flag, app), description_html: body, priority: "none", state: s.id(nameOf(flow.roles, "backlog")), labels: [] });
       const mod = mods.find((m) => m.name === app);

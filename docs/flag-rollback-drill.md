@@ -4,7 +4,7 @@ A flag flip broke a critical journey: the probe caught it and named the flip, an
 
 - [pronto-probe](../probe/README.md) runs an app's journeys (`probes_spec.cue`) on a schedule and alerts at the N-th failure in a row. The alert lists the flag writes made just before the first failure, each with the `pronto-flags rollback` that undoes it. When the probe passes again, it says how long the journey was down.
 - [pronto-flags](../flags/README.md) has three additions:
-  - **Flip journal.** Every write (push, canary, restore, rollback) is one JSON line: which flags changed (`changes`: from → to), the version and the one it replaced, who, and which commit. The line is printed and kept in `~/.local/state/pronto-flags/<app>.jsonl`, or wherever `PRONTO_FLAGS_JOURNAL` points. `history --json` gives the same facts per version.
+  - **Flip journal.** Every write (push, restore, rollback) is one JSON line: which flags changed (`changes`: from → to), the version and the one it replaced, who, and which commit. The line is printed and kept in `~/.local/state/pronto-flags/<app>.jsonl`, or wherever `PRONTO_FLAGS_JOURNAL` points. `history --json` gives the same facts per version.
   - **Target guard.** Every write prints its target first. `--expect <url>` or `PRONTO_FLAGS_EXPECT` refuses any other target, and `PRONTO_FLAGS_DRY_RUN` writes nothing. Earlier that day a "dry run" wrote Bonk Chess's production flags; this guard is the answer to that.
   - **Local store.** `flagsLive: {dir}` keeps a versioned store in a directory, with the same generations and preconditions as the bucket. A drill or a local stack can then flip and roll back without any cloud.
 - [examples/hello-flags-drill](../examples/hello-flags-drill/README.md) is the stand-in for the app:

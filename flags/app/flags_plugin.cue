@@ -45,8 +45,6 @@ _flagsLocal: ["localhost", "127.0.0.1", "caddy"]
 // flagd's flag definitions (https://flagd.dev/reference/flag-definitions/),
 // which generate writes to flags/flags.json for the flagd image to carry.
 flagd: document: {
-	// Holds _testersNamed (below) to every export of the document, push's included.
-	_testersNamedGuard: _testersNamed
 	"$schema": "https://flagd.dev/schema/v0/flags.json"
 	"flags": {
 		for k, f in flags {
@@ -75,7 +73,7 @@ flagd: document: {
 // lists among its raw migrations, so every release replays it. It adds only. pronto_flags.flag_on(flag,
 // player) reads the flag the way flagd answers it, from the document `pronto-flags push` wrote there
 // (flagsLive.database) and the host that document is served at: its default, its local value at hand,
-// its accounts and a push's canary for the testers. A flag the document lacks, or no document, is off.
+// and its accounts. A flag the document lacks, or no document, is off.
 // A test database (one holding the marker pronto_flags.at_hand, which only the app's fixture inserts)
 // holds the flags baked into the image instead, at hand's host, refreshed at every replay.
 flagd: sql: """
@@ -160,7 +158,7 @@ flagd: sql: """
 	  SELECT coalesce(pronto_flags.flag_value(flag, player) = 'true'::jsonb, false)
 	$f$;
 
-	-- Written by `pronto-flags push`, its canary, restore and rollback (flagsLive.database), and by fill_local().
+	-- Written by `pronto-flags push`, its restore and rollback (flagsLive.database), and by fill_local().
 	CREATE OR REPLACE FUNCTION pronto_flags.put(doc jsonb, host text) RETURNS void
 	LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS $f$
 	  INSERT INTO pronto_flags.live (one, doc, host, at) VALUES (true, doc, host, now())
@@ -225,27 +223,21 @@ flagsLive?: {
 	if dir != _|_ {
 		sources: "[{\"uri\":\"\(dir)/flags.json\",\"provider\":\"file\"}]"
 	}
-	// Production's address, where a flip's live cases run (`flagsCases.live`) and where
-	// `push` waits for OFREP to answer the tester's value before it runs them.
+	// Production's address, where a flip's live cases run (`flagsCases.live`) once `push` has
+	// written the flags for everyone and OFREP answers their new value.
 	url?: =~"^https://[a-z0-9][a-z0-9.-]*[a-z0-9](:[0-9]+)?$"
-	// The production accounts tests sign in as, and no one else: a flip is first on for
-	// them alone, so its cases run on production while everyone else still reads the old
-	// value. Ids as `accounts` has them. The first is the one `FLAGS_TESTER` names.
+	// No longer read (PRONTO-284, 2026-11-11: a flip has no testers' stage; the owner: "drop the
+	// requirement of testers for flag flips"). Kept so an app that still says them evaluates.
 	testers?: [...string & =~"^[A-Za-z0-9_-]{1,64}$"]
-	// The service account the live cases run as (`gcloud` impersonation, so the operator needs
-	// only token-creator on it): the release identity that may read the testers' credential in
-	// Secret Manager. A push with testers and no runAs refuses the live stage.
-	runAs?: =~"^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$"
-	// The Cloud Monitoring alert policy that fires on a tester's sign-in, as
-	// projects/<project>/alertPolicies/<id>. A push snoozes it for the live stage alone.
-	alert?: =~"^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/alertPolicies/[0-9]+$"
+	runAs?:   string
+	alert?:   string
 	// The app's command that runs SQL (on its stdin) in the released app's database, as the database's owner:
-	// each write of the object (push, its canary and restore, rollback) is written there too, through
+	// each write of the object (push, its restore, rollback) is written there too, through
 	// pronto_flags.put() (flagd.sql), for pronto_flags.flag_on(). A write that fails there fails the push.
 	database?: string & !=""
 	// Where else a flagd reads the flags: a release@k8s node's ConfigMap, which its flagd mounts
 	// (release.cue's services.flagd.files) and reads as a file source. Each write of the object
-	// (push, its canary and restore, rollback) is applied there too, over ssh, as the node's kubectl.
+	// (push, its restore, rollback) is applied there too, over ssh, as the node's kubectl.
 	// A mirror that fails warns, so a staging node never holds a flip back; a required one (the
 	// node is production) fails the push.
 	mirrors: [...{
@@ -258,24 +250,11 @@ flagsLive?: {
 	}]
 }
 
-// A tester is targeted only while a push runs its live stage, as the canary, and never in a flag's
-// `accounts`: that would keep it on for the tester after the run, and let a free account read a
-// paid feature. The label below is the error.
-_testersNamed: {
-	if flagsLive.testers != _|_ {
-		for k, f in flags if f.accounts != _|_ {
-			for t in f.accounts for u in flagsLive.testers if t == u {
-				"flag \(k) names the tester \(t) in accounts: a tester is targeted only during a push's live stage": "allowed" & "named in accounts"
-			}
-		}
-	}
-}
-
 // The app's command for a flip's cases (`pronto-flags push`), run with `sh -c` in the app's
-// folder. A flip runs its cases on production as the tester, and nothing at hand (it builds no
-// stack): `live` runs once the flag is on for the testers alone, with env `FLAG`, `ONLY` (the
-// flag's scenarios marked `production`), `APP_URL` (flagsLive.url) and `FLAGS_TESTER` (the first
-// of flagsLive.testers), and fails with a non-zero exit. A flag's
+// folder. A flip runs its cases on production, and nothing at hand (it builds no stack): `live`
+// runs once the flag is on for everyone, with env `FLAG`, `ONLY` (the flag's scenarios marked
+// `production` that sign in as no one: no `signIn` step) and `APP_URL` (flagsLive.url), and
+// fails with a non-zero exit, which writes the version before the flip again. A flag's
 // cases are the scenarios (tests/scenarios/*.cue) and unit cases (tests/unit/*.cue) that name
 // it in `flags`, or in a step's `flag`; `pronto-flags cases <app-dir> [flag]` lists them.
 #FlagsCases: {

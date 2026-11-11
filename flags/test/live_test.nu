@@ -90,14 +90,14 @@ let pushed = (live push $app --untested "a theme is no feature")
 check ((object | length) == $before + 1 and ($pushed | str contains "theme")) "push --untested: written, then summarized"
 check ((object | first).metadata.cases == "untested" and ((object | first).metadata.note | str contains "a theme is no feature")) "push --untested: the reason is kept on the version"
 
-# A flip runs its flag's cases on production, for the testers alone, then writes it for everyone; nothing at hand.
+# A flip writes the flags for everyone, then runs the flag's production cases that sign in as no one; nothing at hand.
 def full-spec [premium: bool, theme: string] {
 	$"package shop
 flags: premium: {default: ($premium), local: true}
 flags: theme: {default: \"($theme)\"}
-flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", url: \"https://shop.example\", testers: [\"tester-1\"], runAs: \"shop-run@shop-prod.iam.gserviceaccount.com\", alert: \"projects/shop-prod/alertPolicies/42\"}
+flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", url: \"https://shop.example\"}
 flagsCases: {
-	live:  \"echo live $FLAG $ONLY $APP_URL $FLAGS_TESTER $CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT >> ran.log; test ! -f crash-live || kill -9 $$; test ! -f fail-live\"
+	live:  \"echo live $FLAG $ONLY $APP_URL ${FLAGS_TESTER:-} >> ran.log; test ! -f crash-live || kill -9 $$; test ! -f fail-live\"
 }
 GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
 " | save -f $"($app)/flags_spec.cue"
@@ -105,6 +105,7 @@ GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\",
 mkdir $"($app)/tests/scenarios" $"($app)/tests/unit"
 'package scenarios
 scenarios: buy: {flags: ["premium"], production: true, steps: [{by: "tester", open: "/"}]}
+scenarios: mine: {flags: ["premium"], production: true, steps: [{by: "tester", signIn: true}]}
 scenarios: shelf: {steps: [{by: "lia", flag: "premium"}, {by: "lia", open: "/"}]}
 scenarios: unrelated: {flags: ["theme-x"], steps: [{by: "lia", open: "/"}]}
 ' | save $"($app)/tests/scenarios/shop.cue"
@@ -122,17 +123,16 @@ check (not ($none | str contains "buy")) "cases: a flag nothing names has none"
 full-spec true "light"
 let n0 = (object | length)
 let launched = (live push $app)
-check ((object | length) == $n0 + 2) "flip: the canary and then the final version are written"
-check ((newest 1).metadata.stage == "testers" and (newest 1).metadata.flag == "premium") "flip: the canary says its stage and flag"
-let canary = (premium (newest 1))
-check ($canary.targeting.if.0.in.1 == ["tester-1"] and $canary.targeting.if.1 == "new" and $canary.variants.new == true and $canary.variants.old == false) "flip: the canary is on for the testers alone"
-check ((newest 0).metadata.stage == "all" and (newest 0).metadata.cases == "passed" and (newest 0).metadata.flag == "premium") "flip: the final version is for all, cases passed"
+check ((object | length) == $n0 + 2) "flip: the version for everyone, then its verdict"
+check ((newest 1).metadata.stage == "all" and (newest 1).metadata.cases == "running" and (newest 1).metadata.flag == "premium") "flip: written for everyone at once, its cases running"
+check ((premium (newest 1)).variants.default == true and ((premium (newest 1)).variants | columns | all {|v| $v != "new" })) "flip: the new value for everyone, no canary"
+check ((newest 0).metadata.stage == "all" and (newest 0).metadata.cases == "passed" and (newest 0).metadata.flag == "premium") "flip: the verdict, cases passed"
 check ((premium (newest 0)).variants.default == true) "flip: the final version holds the new value"
-check ((ran) == ["live premium buy https://shop.example tester-1 shop-run@shop-prod.iam.gserviceaccount.com"]) "flip: only the production cases ran, as the tester; nothing at hand"
+check ((ran) == ["live premium buy https://shop.example"]) "flip: only the production cases that sign in as no one ran, as no one; nothing at hand"
 let hist = (with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state} {
 	^$nu.current-exe -c $"use ($here)/../live.nu history; history ($app) | to json" | complete
 }).stdout | from json
-check ($hist.0.stage == "all" and $hist.0.cases == "passed" and $hist.1.stage == "testers") "history: the stage and the verdict of each version"
+check ($hist.0.stage == "all" and $hist.0.cases == "passed" and $hist.1.cases == "running") "history: the stage and the verdict of each version"
 
 # A flag turned off (its default now false) skips its cases, which test it on: stage=all, none run, the
 # note says so (2026-11-08, card_chess).
@@ -145,42 +145,47 @@ check ((object | length) == $n4 + 1 and (ran | length) == $ran4) "off-flip: one 
 check ((newest 0).metadata.stage == "all" and (newest 0).metadata.flag == "premium" and ((newest 0).metadata.note | str contains "turned off: premium")) "off-flip: stage=all, and the note records it"
 check ((premium (newest 0)).variants.default == false and not ((newest 0).data | str contains "tester-1")) "off-flip: the version holds the new value, no tester named"
 
-# --no-canary "<why>": the owner's go to flip at once: one version for everyone, no tester stage, no case run.
+# --no-canary "<why>" (pronto-plugins#184) is every push's way now: accepted, its reason kept, the cases run.
 let n5 = (object | length)
 let ran5 = (ran | length)
 full-spec true "light"
 let nc = (livex [push $app --no-canary "the owner's go"])
-check ($nc.exit_code == 0 and ($nc.stderr | str contains "NO CANARY")) "--no-canary: pushed, loudly"
-check ((object | length) == $n5 + 1 and (ran | length) == $ran5) "--no-canary: one version written, no case run"
-check ((newest 0).metadata.stage == "all" and (newest 0).metadata.cases == "skipped" and ((newest 0).metadata.note | str contains "no canary: the owner's go")) "--no-canary: stage=all, cases=skipped, the reason kept"
-check ((premium (newest 0)).variants.default == true and not ((newest 0).data | str contains "tester-1")) "--no-canary: the new value for everyone, no tester named"
+check ($nc.exit_code == 0 and ($nc.stderr | str contains "every push's way")) "--no-canary: pushed, saying it is the only way now"
+check ((object | length) == $n5 + 2 and (ran | length) == $ran5 + 1) "--no-canary: written for everyone, its production cases run"
+check (((newest 0).metadata.note | str contains "no canary: the owner's go")) "--no-canary: the reason kept"
 full-spec false "light"
 livex [push $app] | ignore
 
-# No tester, or a flag with no production scenario: the flip is refused, nothing written, nothing run.
+# A flag with no production scenario: written for everyone, nothing run. Production cases with no
+# flagsLive.url to run them at: refused, nothing written.
 full-spec true "light"
 let n1 = (object | length)
 let ran1 = (ran | length)
-open --raw $"($app)/flags_spec.cue" | str replace 'testers: ["tester-1"]' 'testers: []' | save -f $"($app)/flags_spec.cue"
-let nt = (livex [push $app])
-check ($nt.exit_code != 0 and (object | length) == $n1 and (ran | length) == $ran1 and ($nt.stderr | str contains "flagsLive.testers")) "no tester: the flip is refused, nothing written"
-full-spec true "light"
-open --raw $"($app)/tests/scenarios/shop.cue" | str replace 'production: true, ' '' | save -f $"($app)/tests/scenarios/shop.cue"
+open --raw $"($app)/tests/scenarios/shop.cue" | str replace -a 'production: true, ' '' | save -f $"($app)/tests/scenarios/shop.cue"
 let np = (livex [push $app])
-check ($np.exit_code != 0 and (object | length) == $n1 and (ran | length) == $ran1 and ($np.stderr | str contains "no `production` scenario")) "no production scenario: the flip is refused, nothing written"
-open --raw $"($app)/tests/scenarios/shop.cue" | str replace 'buy: {flags: ["premium"], ' 'buy: {flags: ["premium"], production: true, ' | save -f $"($app)/tests/scenarios/shop.cue"
+check ($np.exit_code == 0 and (object | length) == $n1 + 1 and (ran | length) == $ran1 and (newest 0).metadata.cases == "none on production") "no production scenario: written for everyone, no case run"
+open --raw $"($app)/tests/scenarios/shop.cue" | str replace 'buy: {flags: ["premium"], ' 'buy: {flags: ["premium"], production: true, ' | str replace 'mine: {flags: ["premium"], ' 'mine: {flags: ["premium"], production: true, ' | save -f $"($app)/tests/scenarios/shop.cue"
+full-spec false "light"
+livex [push $app] | ignore
+full-spec true "light"
+let n1 = (object | length)
+let ran1 = (ran | length)
+open --raw $"($app)/flags_spec.cue" | str replace ', url: "https://shop.example"' '' | save -f $"($app)/flags_spec.cue"
+let nourl = (livex [push $app])
+check ($nourl.exit_code != 0 and (object | length) == $n1 and (ran | length) == $ran1 and ($nourl.stderr | str contains "flagsLive.url")) "production cases, no url: refused, nothing written"
+full-spec true "light"
 let gone = (livex [push $app --skip-live "no tester yet"])
 check ($gone.exit_code != 0 and (object | length) == $n1) "--skip-live is gone: refused"
 
-# Live failure: back to the version read before the canary.
+# Live failure: back to the version read before the flip.
 touch $"($app)/fail-live"
 let pre = (premium (newest 0))
 let lv = (livex [push $app])
 check ($lv.exit_code != 0 and ($lv.stderr | str contains "rolled back")) "live failure: the push fails"
-check ((object | length) == $n1 + 2 and (premium (newest 0)) == $pre and (newest 0).metadata.stage == "rolled-back" and (newest 1).metadata.stage == "testers") "live failure: the pre-canary flags are the newest version again"
+check ((object | length) == $n1 + 2 and (premium (newest 0)) == $pre and (newest 0).metadata.stage == "rolled-back" and (newest 1).metadata.stage == "all") "live failure: the flags before the flip are the newest version again"
 rm $"($app)/fail-live"
 
-# The cases' command dies under the push (killed): the same, back to the version before the canary.
+# The cases' command dies under the push (killed): the same, back to the version before the flip.
 touch $"($app)/crash-live"
 let n1b = (object | length)
 let cr = (livex [push $app])
@@ -199,29 +204,9 @@ let ran3 = (ran | length)
 live push $app | ignore
 check ((object | length) == $n3 + 1 and (ran | length) == $ran3 and (newest 0).metadata.stage == "all") "unchanged defaults: written with no cases run"
 
-# The monitoring window: one snooze per live stage, made before the canary and ended with the run, passed or not.
-let zs = (held | get snoozes)
-check (($zs | length) == 4 and ($zs | all {|z| $z.ended and $z.policies == "projects/shop-prod/alertPolicies/42" }) and ($zs.0.start <= $zs.0.end)) "snooze: each live stage has one, ended with the run"
-
-# Targeted only during a run: no version outlives a run with a tester named in it.
-let named = (object | where {|v| $v.data | str contains "tester-1" } | each {|v| $v.metadata.stage? | default "" })
-check ($named | all {|st| $st == "testers" }) "testers: named only in the canary versions"
-check (($named | length) == 4) "testers: the canaries are the only ones"
-
-# A flag cannot name a tester in its accounts, nor a live stage run without the release identity.
-$"package shop
-flags: premium: {default: false, local: true, accounts: [\"tester-1\"]}
-flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", testers: [\"tester-1\"]}
-" | save -f $"($app)/flags_spec.cue"
-let named_in = (livex [show $app])
-check ($named_in.exit_code != 0 and ($named_in.stderr | str replace -a -r "[ |\\n]+" " " | str contains "names the tester tester-1 in accounts")) "a tester named in a flag's accounts is refused"
-full-spec true "light"
-open --raw $"($app)/flags_spec.cue" | str replace -r 'runAs: [^,]*, ' '' | save -f $"($app)/flags_spec.cue"
-full-spec true "light"
-open --raw $"($app)/flags_spec.cue" | str replace -r ', runAs: [^,]*,' ',' | save -f $"($app)/flags_spec.cue"
-let n5 = (object | length)
-let norun = (livex [push $app])
-check (($norun.stderr | str contains "flagsLive.runAs") and (object | length) == $n5) "no runAs: the live stage is refused"
+# No tester is named anywhere, nor any snooze made: a flip has no testers' stage.
+check (object | all {|v| not ($v.data | str contains "tester-1") }) "no version names a tester"
+check ((held | get -o snoozes | default []) | is-empty) "no alert is snoozed"
 
 # A flag new to the live object and off: nothing flips, so no cases are asked for and none run.
 full-spec false "light"
@@ -250,11 +235,11 @@ touch $"($app)/fail-live"
 let fresh_fail = (livex [push $app] {PRONTO_DEVFLOW_BIN: $told})
 rm $"($app)/fail-live"
 check ($fresh_fail.exit_code != 0 and ($fresh_fail.stderr | str contains "rolled back") and not ($fresh_fail.stderr | str contains "variants.default")) "a new flag on, its cases failing: the push fails as a rollback, not on the summary"
-check ((object | length) == $n7 + 2 and (newest 1).metadata.stage == "testers" and (newest 0).metadata.stage == "rolled-back" and not ((newest 0).data | from json | get flags | columns | any {|c| $c == "fresh" })) "a new flag on, failing: the version before the canary is the newest again"
+check ((object | length) == $n7 + 2 and (newest 1).metadata.stage == "all" and (newest 0).metadata.stage == "rolled-back" and not ((newest 0).data | from json | get flags | columns | any {|c| $c == "fresh" })) "a new flag on, failing: the version before the flip is the newest again"
 check ((board-said) | is-empty) "a failed flip tells the board nothing"
 let fresh_ok = (livex [push $app] {PRONTO_DEVFLOW_BIN: $told})
-check ($fresh_ok.exit_code == 0 and ($fresh_ok.stdout | str contains "fresh")) "a new flag on: the canary's summary and the final one are said"
-check ((newest 1).metadata.stage == "testers" and ((newest 1).data | from json | get flags.fresh.variants) == {old: false, new: true} and (newest 0).metadata.stage == "all" and ((newest 0).data | from json | get flags.fresh.variants.default) == true) "a new flag on: the canary has old and new only, the final version holds it on"
+check ($fresh_ok.exit_code == 0 and ($fresh_ok.stdout | str contains "fresh")) "a new flag on: its summary is said"
+check ((newest 1).metadata.stage == "all" and (newest 0).metadata.stage == "all" and ((newest 0).data | from json | get flags.fresh.variants.default) == true) "a new flag on: written for everyone, held on"
 check ((board-said | length) == 1 and (board-said | first | str starts-with "flipped ") and (board-said | first | str ends-with "/shop shop fresh")) "a passed flip tells the board, once, after the everyone stage"
 rm -rf $"($app)/.git" $"($app)/devflow"
 
@@ -314,7 +299,7 @@ check (not ($"($state).writes" | path exists) and (object | length) == $gens) "d
 let jl = (open --raw $"($dir)/journal.jsonl" | lines | each {|l| $l | from json })
 check (($jl | all {|j| $j.event == "flags.write" and $j.app == "shop" and ($j.target | str starts-with "gs://shop-prod-flags/") and ($j.at | str ends-with "Z") }) and ($jl | length) > 10) "journal: a line for every write, with its event, app, target and time"
 check (($jl | where stage == "rollback" | first).note | str starts-with "rolled back from ") "journal: a rollback says from which version"
-check (($jl | where stage == "testers" | first).flag == "premium") "journal: a canary names its flag"
+check (($jl | where cases? == "running" | first).flag == "premium") "journal: a flip names its flag"
 let gh = (livex [history $app --json])
 let gj = ($gh.stdout | from json)
 check ($gh.exit_code == 0 and ($gj | length) == (object | length) and ($gj | all {|r| "changes" in ($r | columns) }) and ($gj.0.version | into int) > ($gj.1.version | into int)) "history --json on a bucket: newest first, each with its changes"
