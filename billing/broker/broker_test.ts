@@ -10,6 +10,9 @@ import { chargesAt, checkoutLocale, type Consent, ownerOf, tenantOf } from "./co
 import { fakeStripe, unform } from "./fake.ts";
 import { form, signWebhook, stripe as stripeClient, StripeError } from "./stripe.ts";
 
+// billing_plugin.cue's _billingTrialStates, as an app's service is given them (BILLING_TRIAL_STATES).
+const STATES = ["running", "cancelled", "converted", "ended", "failed"];
+
 function assertEquals(a: unknown, b: unknown, m = "") {
   if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m} expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
 }
@@ -49,7 +52,7 @@ async function setup(o: { searchLagMs?: number; issuer?: string } = {}) {
     if (url.pathname === "/.well-known/pronto-billing.json") return t.doc ? Response.json(t.doc) : new Response("", { status: 404 });
     if (url.pathname === "/billing/events") {
       try {
-        const e = await verifyEntitlement(String(init?.body), { issuer: ISSUER, tenant: url.origin, keys });
+        const e = await verifyEntitlement(String(init?.body), { issuer: ISSUER, tenant: url.origin, keys, trialStates: STATES });
         if (t.hold) await t.hold;
         t.got.push(e);
         return new Response(null, { status: 204 });
@@ -231,7 +234,7 @@ Deno.test("a tenant that missed its entitlement asks for it again with its token
   assertEquals((await post("/resync", { tenant: A, account: ANA, plan: "analysis", manage: "guess" })).status, 403);
   const res = await post("/resync", { tenant: A, account: ANA, plan: "analysis", manage });
   const { token } = await res.json();
-  const again = await verifyEntitlement(token, { issuer: ISSUER, tenant: A, keys: brokerKeys(ISSUER, (() => Promise.resolve(Response.json({ keys: [] }))) as typeof fetch) }).catch((e) => e.message);
+  const again = await verifyEntitlement(token, { issuer: ISSUER, tenant: A, keys: brokerKeys(ISSUER, (() => Promise.resolve(Response.json({ keys: [] }))) as typeof fetch), trialStates: STATES }).catch((e) => e.message);
   assertEquals(again, "entitlement key unknown", "checked against the broker's keys alone");
   assertEquals(typeof token === "string" && token.split(".").length === 3, true);
   void ver;
@@ -651,23 +654,20 @@ Deno.test("a failed first charge voids its open invoice before the cancel", asyn
   assertEquals(order, ["GET /v1/invoices/IN", "POST /v1/invoices/IN/void", `DELETE /v1/subscriptions/${sub.id}`]);
 });
 
-Deno.test("a key without Invoices access is logged and the trial is still cancelled; any other invoice error is retried", async () => {
+Deno.test("an invoice that cannot be read or voided, a key without Invoices access included, fails the event and cancels nothing until it can", async () => {
   const s = await setup();
   await s.prove(A, TRIAL);
   await s.payouts(A);
-  const { sub, portal } = await failFirstCharge(s);
-  s.stripeDown.invoices = 403;
-  await s.press(`${portal}?sub=${sub.id}`, "trial_fail");
-  assertEquals(sub.status, "canceled", "cancelled though the invoice could not be read");
-  // Another error is Stripe's to send again, and nothing is cancelled meanwhile.
-  const bea = await startTrial(s, BEA);
-  const beaPortal = await portalOf(s, BEA);
-  s.stripeDown.invoices = 500;
-  await s.press(`${beaPortal}?sub=${bea.id}`, "trial_fail");
-  assertEquals(bea.status, "past_due");
-  s.stripeDown.invoices = 0;
-  assertEquals(await s.fake.emit("customer.subscription.updated", bea), true);
-  assertEquals([bea.status, [...s.fake.held.invoices.values()].at(-1)!.status], ["canceled", "void"]);
+  for (const [who, status] of [[ANA, 403], [BEA, 500]] as const) {
+    const sub = await startTrial(s, who);
+    const portal = await portalOf(s, who);
+    s.stripeDown.invoices = status;
+    await s.press(`${portal}?sub=${sub.id}`, "trial_fail");
+    assertEquals(sub.status, "past_due", `${status}: nothing cancelled while the invoice is unknown`);
+    s.stripeDown.invoices = 0;
+    assertEquals(await s.fake.emit("customer.subscription.updated", sub), true, `${status}: Stripe's next send`);
+    assertEquals([sub.status, [...s.fake.held.invoices.values()].at(-1)!.status], ["canceled", "void"], `${status}: cancelled once voided`);
+  }
   s.fake.close();
 });
 

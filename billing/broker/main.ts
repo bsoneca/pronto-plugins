@@ -510,18 +510,13 @@ export async function broker(p: {
       const fresh = await p.stripe<Subscription>("GET", `/v1/subscriptions/${event.id}`);
       if (!firstChargeFailed(fresh)) return;
       // The failed first invoice must not stay payable: one that was paid since means the charge
-      // recovered and the trial stands; an open one is voided. A key without Invoices access is
-      // logged and the cancel goes on, since Stripe stops collecting an invoice when its
-      // subscription is cancelled.
+      // recovered and the trial stands; an open one is voided. Any error here, a key without
+      // Invoices access (403) included, fails the event, which Stripe sends again: nothing is
+      // cancelled until the invoice is known paid or void.
       if (typeof fresh.latest_invoice === "string") {
-        try {
-          const inv = await p.stripe<{ status: string }>("GET", `/v1/invoices/${fresh.latest_invoice}`);
-          if (inv.status === "paid") return;
-          if (inv.status === "open") await p.stripe("POST", `/v1/invoices/${fresh.latest_invoice}/void`);
-        } catch (e) {
-          if (!(e instanceof StripeError && e.status === 403)) throw e;
-          console.error(`billing: the Stripe key cannot read or void invoices (403); cancelling ${event.id} without voiding`);
-        }
+        const inv = await p.stripe<{ status: string }>("GET", `/v1/invoices/${fresh.latest_invoice}`);
+        if (inv.status === "paid") return;
+        if (inv.status === "open") await p.stripe("POST", `/v1/invoices/${fresh.latest_invoice}/void`);
       }
       await p.stripe("POST", `/v1/subscriptions/${event.id}`, { metadata: { trial_failed: "1" } }, `trial failed ${event.id}`);
       await p.stripe("DELETE", `/v1/subscriptions/${event.id}`);

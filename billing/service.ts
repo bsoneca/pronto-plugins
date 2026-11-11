@@ -29,6 +29,9 @@ export interface Settings {
   /** The flag that turns the free trial on, evaluated per account at `flags`; none, and a
    * document with a trial is all it takes. */
   trialFlag?: string;
+  /** The states an entitlement's trial may be in: billing_plugin.cue's _billingTrialStates, the same
+   * list billing.trial's constraint is written from (BILLING_TRIAL_STATES, a JSON array). */
+  trialStates: readonly string[];
   // The flag that sends this tenant's calls to Stripe through the operator's airlock (PRONTO-218):
   // asked for each request's own reader, its value told to the broker as `door`.
   doorFlag?: string;
@@ -57,6 +60,7 @@ export function grantLog(served: boolean, sinceStartMs: number): "none" | "warn"
 }
 
 export function service(s: Settings) {
+  if (!Array.isArray(s.trialStates) || !s.trialStates.length || !s.trialStates.every((x) => typeof x === "string")) throw new Error("BILLING_TRIAL_STATES: a JSON array of the trial's states");
   const fetcher = s.fetcher ?? fetch;
   const origin = s.origin.replace(/\/$/, "");
   const issuer = s.broker.replace(/\/$/, "");
@@ -131,7 +135,7 @@ export function service(s: Settings) {
   async function entitle(token: string): Promise<Response> {
     let e;
     try {
-      e = await verifyEntitlement(token, { issuer, tenant: origin, keys });
+      e = await verifyEntitlement(token, { issuer, tenant: origin, keys, trialStates: s.trialStates });
     } catch (err) {
       if (err instanceof Refused) return json(400, { error: err.message });
       throw err;
@@ -154,22 +158,18 @@ export function service(s: Settings) {
   }
 
   // The free trial is off unless the document has one and its flag, if any, is true for this
-  // account as flagd evaluates it now; a flag that cannot be asked is off, never on. The broker's
-  // consent check carries no session, so a flag that names accounts needs flagd asked directly.
+  // account as flagd evaluates it now. A flag that cannot be asked (no flagd, flagd down or erroring,
+  // the flag not there, an answer that is no boolean) fails the request, as doorOn's does: never on,
+  // and never mistaken for a trial turned off. The broker's consent check carries no session, so a
+  // flag that names accounts needs flagd asked directly.
   async function trialOn(account: string): Promise<boolean> {
     if (!doc.trial) return false;
     if (!s.trialFlag) return true;
-    if (!s.flags) return false;
-    try {
-      const res = await ofrep(s.trialFlag, account);
-      if (!res.ok) {
-        await res.body?.cancel();
-        return false;
-      }
-      return (await res.json() as { value?: unknown }).value === true;
-    } catch {
-      return false;
-    }
+    if (!s.flags) throw new Error("BILLING_TRIAL_FLAG needs BILLING_FLAGS: where to ask it");
+    const res = await ofrep(s.trialFlag, account);
+    const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
+    if (!res.ok || typeof answer?.value !== "boolean") throw new Error(`flag ${s.trialFlag}: flagd answered ${res.status}`);
+    return answer.value;
   }
 
   // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag
@@ -321,7 +321,7 @@ if (import.meta.main) {
     origin: env("ORIGIN"), broker: env("BILLING_BROKER"), brokerInternal: Deno.env.get("BILLING_BROKER_INTERNAL"),
     crud: env("CRUD_URL"), serviceJwt: env("SERVICE_JWT"), document: env("BILLING_DOCUMENT"), grants: Deno.env.get("BILLING_GRANTS"),
     flags: Deno.env.get("BILLING_FLAGS") || undefined, trialFlag: Deno.env.get("BILLING_TRIAL_FLAG") || undefined,
-    doorFlag: Deno.env.get("BILLING_DOOR_FLAG") || undefined,
+    doorFlag: Deno.env.get("BILLING_DOOR_FLAG") || undefined, trialStates: JSON.parse(env("BILLING_TRIAL_STATES")),
   });
   Deno.serve({ port: Number(Deno.env.get("BILLING_PORT") ?? 8688) }, billing);
   // Until the gateway serves billing_grant, as it does once it has reloaded its schema; with

@@ -217,11 +217,14 @@ code: state: migrations: "\(_billingGrantsMigration)": operations: [{sql: up: ""
 // spent for good once its state is set.
 // Named by the app (billing_spec.cue), after the grants' migration.
 _billingTrialMigration: string
+// Where a trial stands, as the broker words it: written here once, for billing.trial's constraint
+// and for the service, which refuses an entitlement whose trial is in any other (BILLING_TRIAL_STATES).
+_billingTrialStates: ["running", "cancelled", "converted", "ended", "failed"]
 code: state: migrations: "\(_billingTrialMigration)": operations: [{sql: up: """
 	CREATE TABLE IF NOT EXISTS billing.trial (
 	  account uuid PRIMARY KEY, ticket text, plan text, amount integer, currency text, charges_at timestamptz,
 	  terms text, consented_at timestamptz, state text, ver bigint NOT NULL DEFAULT 0,
-	  CONSTRAINT trial_state CHECK (state IS NULL OR state IN ('running', 'cancelled', 'converted', 'ended', 'failed'))
+	  CONSTRAINT trial_state CHECK (state IS NULL OR state IN (\(strings.Join([for t in _billingTrialStates {"'\(t)'"}], ", "))))
 	);
 
 	-- Where an account's trial stands; holds is whether it has a plan now (paid or granted), which
@@ -364,6 +367,7 @@ cluster: surface: targets: billing: {
 		environment: {
 			BILLING_DOCUMENT:        _billingDocument
 			BILLING_GRANTS:          _billingGrants
+			BILLING_TRIAL_STATES:    json.Marshal(_billingTrialStates)
 			if !_billingFlagsPeer {BILLING_FLAGS: _billingFlags}
 			SERVICE_JWT:             "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}"
 		}

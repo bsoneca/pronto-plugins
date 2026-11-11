@@ -5,6 +5,9 @@ import { grantLog, service } from "./service.ts";
 import { entitlementClaims } from "./broker/core.ts";
 import { signEs256 } from "./shared.ts";
 
+// billing_plugin.cue's _billingTrialStates, as an app's service is given them (BILLING_TRIAL_STATES).
+const STATES = ["running", "cancelled", "converted", "ended", "failed"];
+
 const eq = (a: unknown, b: unknown, m = "") => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); };
 const ANA = [{ account: "00000000-0000-4000-8000-00000000000a", plan: "analysis", through: "2028-10-28T23:59:59Z" }];
 
@@ -19,7 +22,7 @@ function stage(flag: () => Response) {
     if (url === "http://flagd:8693/ofrep/v1/evaluate/flags/billing_grants" || url === "https://a.example/ofrep/v1/evaluate/flags/billing_grants") return Promise.resolve(flag());
     return Promise.resolve(new Response("", { status: 404 }));
   }) as typeof fetch;
-  const base = { origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), fetcher };
+  const base = { origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), trialStates: STATES, fetcher };
   return { handed, base };
 }
 
@@ -101,7 +104,7 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
   }) as typeof fetch;
   const doc = o.document === undefined ? { owner: "o", plans: { analysis: {} }, trial: { months: 3, plans: ["analysis"], remindDays: 7 } } : o.document;
   const make = (extra: Record<string, unknown> = {}) => service({
-    origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify(doc), fetcher,
+    origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify(doc), trialStates: STATES, fetcher,
     flags: "http://flagd:8693", trialFlag: "free_trial", ...extra,
   });
   const ask = (svc: ReturnType<typeof make>, path: string, body: unknown = {}) =>
@@ -111,27 +114,27 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
 const fns = (calls: { fn: string }[]) => calls.map((c) => c.fn);
 const CONSENT = { plan: "analysis", amount: 1990, currency: "brl", charges_at: "2027-02-05T12:00:00Z", terms: "Free until Feb 5, then R$ 19,90 a month.", consent: true, locale: "pt-BR", return: "/?premium=trial" };
 
-Deno.test("the trial is off when its flag is off, down, or erroring: 404, and nothing asked of the broker", async () => {
-  const downs: [string, () => Response][] = [
-    ["false", () => Response.json({ value: false })],
-    ["not a boolean", () => Response.json({ value: "true" })],
-    ["flag not found", () => Response.json({ errorCode: "FLAG_NOT_FOUND" }, { status: 404 })],
-    ["flagd down", () => new Response("", { status: 503 })],
-    ["flagd unreachable", () => { throw new TypeError("connection refused"); }],
+Deno.test("the trial is off when its flag is off: 404; a flag that cannot be asked fails the request: 502; nothing asked of the broker", async () => {
+  const cases: [string, () => Response, number][] = [
+    ["false", () => Response.json({ value: false }), 404],
+    ["not a boolean", () => Response.json({ value: "true" }), 502],
+    ["flag not found", () => Response.json({ errorCode: "FLAG_NOT_FOUND" }, { status: 404 }), 502],
+    ["flagd down", () => new Response("", { status: 503 }), 502],
+    ["flagd unreachable", () => { throw new TypeError("connection refused"); }, 502],
   ];
-  for (const [why, flag] of downs) {
+  for (const [why, flag, status] of cases) {
     const t = trialStage({ flag });
     for (const [path, body] of [["/billing/trial", {}], ["/billing/trial/checkout", CONSENT], ["/billing/trial/consent", { account: ANA_ID, ticket: "t".repeat(32) }]] as const) {
       const res = await t.ask(t.make(), path, body);
-      eq([why, path, res.status], [why, path, 404], "off");
+      eq([why, path, res.status], [why, path, status], status === 404 ? "off" : "no answer is no trial, and says so");
       await res.body?.cancel();
     }
     eq(t.broker, [], `${why}: no broker call`);
     eq(fns(t.calls).filter((f) => f.startsWith("billing_trial")), [], `${why}: no trial function called`);
   }
-  // A flag configured with nowhere to ask it, and a document that has no trial, are off too.
+  // A flag configured with nowhere to ask it fails too; a document that has no trial is off.
   const noFlagd = trialStage();
-  eq((await noFlagd.ask(noFlagd.make({ flags: undefined }), "/billing/trial")).status, 404, "no flagd to ask");
+  eq((await noFlagd.ask(noFlagd.make({ flags: undefined }), "/billing/trial")).status, 502, "no flagd to ask");
   const noTrial = trialStage({ document: { owner: "o", plans: { analysis: {} } } });
   eq((await noTrial.ask(noTrial.make({ trialFlag: undefined }), "/billing/trial")).status, 404, "no trial in the document");
 });
@@ -244,7 +247,7 @@ async function pushed(claims: Record<string, unknown>) {
     calls.push({ fn: url.slice("http://crud/rpc/".length), args: JSON.parse(String(init?.body)) });
     return Promise.resolve(new Response(null, { status: 204 }));
   }) as typeof fetch;
-  const svc = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), fetcher });
+  const svc = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), trialStates: STATES, fetcher });
   const res = await svc(new Request("https://a.example/billing/events", { method: "POST", body: token }));
   await res.body?.cancel();
   return { status: res.status, calls };
@@ -275,7 +278,7 @@ Deno.test("a trial state the database would not take fails the push, so the brok
     if (url === "https://b.example/jwks") return Promise.resolve(Response.json({ keys: [jwk] }));
     return Promise.resolve(url.endsWith("billing_trial_state") ? new Response("boom", { status: 500 }) : new Response(null, { status: 204 }));
   }) as typeof fetch;
-  const svc = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), fetcher });
+  const svc = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), trialStates: STATES, fetcher });
   const res = await svc(new Request("https://a.example/billing/events", { method: "POST", body: token }));
   eq(res.status, 502, "not taken");
 });
