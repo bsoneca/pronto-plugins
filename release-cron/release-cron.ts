@@ -370,10 +370,11 @@ function config(dir: string) {
   // its path from a run's own PATH, it finds none (2026-11-05, pronto gcp.98). Its memory claim is the
   // run's own (STACK_PRIORITY=release), ahead of the pull requests' evaluations in the budget's line.
   const cue = (args: string[]) => must(mise, ["exec", "--", "cue", ...args], appDir, { STACK_PRIORITY: "release", ...(registry ? { CUE_REGISTRY: registry } : {}) }, 900);
-  // An app with no release.cue (a releaseCron.target of kind command) has no GCP: only its opt-in is read.
-  const own = exists(`${appDir}/release.cue`);
+  // An app with no GCP in its release.cue, or no release.cue (a releaseCron.target of kind command, as Bonk Chess on its
+  // node since PRONTO-205), has no Cloud Run release: only its opt-in is read.
+  const own = exists(`${appDir}/release.cue`) && /^GCP:/m.test(Deno.readTextFileSync(`${appDir}/release.cue`));
   const { gcp, cron } = JSON.parse(cue(["export", ...(own ? ["release.cue"] : []), "release_cron.cue", "release_cron_plugin.cue", "-e", own ? "{gcp: GCP, cron: releaseCron}" : "{cron: releaseCron}", "--out", "json"]));
-  if (!gcp && cron.target.kind === "cloud-run") throw new Error(`${appRel} has no release.cue and its releaseCron names no target: nothing to release`);
+  if (!gcp && cron.target.kind === "cloud-run") throw new Error(`${appRel} has no GCP in a release.cue and its releaseCron names no target: nothing to release`);
   return { gcp, cron: { ...cron, watch: cron.watch?.length ? cron.watch : [appRel] } };
 }
 
