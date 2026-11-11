@@ -96,7 +96,14 @@ const records = (() => {
   // A release.cue without GCP (a command target, Bonk Chess on its node since PRONTO-205) has no pronto release
   // records: release-cron's own runs are its releases.
   const gcp = (() => { try { return /^GCP:/m.test(Deno.readTextFileSync(`${appDir}/release.cue`)); } catch { return false; } })();
-  if (!s.name && !gcp) return fromCronRuns(jsonl(`${home}/.cache/pronto/release-cron/${app}/runs.jsonl`));
+  // The run publishing these notes, which release-cron hands over in RELEASE_NOTES_RUN: it writes that run to
+  // runs.jsonl only after the notes, and such an app has no other record of the revision it just made live.
+  if (!s.name && !gcp) {
+    const current = Deno.env.get("RELEASE_NOTES_RUN");
+    let run: unknown[] = [];
+    if (current) { try { run = [JSON.parse(current)]; } catch (e) { usage(`RELEASE_NOTES_RUN unread: ${(e as Error).message}`); } }
+    return fromCronRuns([...jsonl(`${home}/.cache/pronto/release-cron/${app}/runs.jsonl`), ...run]);
+  }
   const name = s.name ?? cueOut(["release.cue", "-e", "GCP.name"], "GCP.name");
   return jsonl(`${home}/.cache/pronto/releases/${name}.jsonl`);
 })();

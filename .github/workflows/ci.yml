@@ -102,6 +102,7 @@ jobs:
           echo "// the app's own" >> "$app/release_cron.cue"
           ./bin/pronto-release-cron "$app"
           grep -q "the app's own" "$app/release_cron.cue"
+          cmp "$app/release-cron/release-cron.ts" release-cron/release-cron.ts && cmp "$app/release-cron/cron.js" release-cron/cron.js
           (cd "$app" && cue export release_cron.cue release_cron_plugin.cue -e releaseCron.gap) | grep -qx 60
           ! ./bin/pronto-release-cron "$app" nope=1
       - name: Opt an app into prod-watch, then refresh it keeping its own opt-in

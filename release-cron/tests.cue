@@ -99,3 +99,7 @@ legacyExport: {
 // The rehearsal's own holder wins over the top-level one.
 _both: #Cron & {watch: ["x"], probes: {}, holder: "a", rehearsal: holder: "b"}
 rehearsalHolderWins: _both.rehearsal.holder & "b"
+
+// The driver and its rules are written verbatim (PRONTO-202): an app's copy is the plugin's file byte for byte,
+// so a plain diff against release-cron/ finds a change made in the app instead of here.
+verbatim: (_t.files["release-cron/release-cron.ts"].text == _driver && _t.files["release-cron/cron.js"].text == _rules) & true
