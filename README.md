@@ -520,8 +520,8 @@ day in UTC: `grants: "<account>": {analysis: "2027-01-31"}`, refused by
 `cue vet` for a plan the app does not sell, a day that is no day or an account
 that is no uuid. The billing service hands the whole set to `billing_grant`.
 In an app with pronto-flags, the grants are the flag `billing_grants` too
-(`_billingFlags`: flagd's address at hand, `"origin"` in a release, which reads
-it through the app's own door), and the service reads that flag every minute: a
+(`_billingFlags`: flagd's address at hand, `"mesh"` on a node, which asks the
+app's flagd through the pod's dapr sidecar, or `"origin"`, through the app's own door), and the service reads that flag every minute: a
 new grant, a moved day or one taken out reaches the database within a minute of
 `pronto-flags push`, with no deploy, and a flagd that can't be reached takes no
 grant away. Without pronto-flags, the service takes the set as it starts, so a
