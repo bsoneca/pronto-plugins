@@ -19,12 +19,12 @@ import (
 	broker:          string
 	brokerInternal?: string
 	// ownerOf the author's secret (pronto-billing's billing/owner.ts new).
-	owner: =~"^[A-Za-z0-9_-]{43}$"
-	plans: [=~"^[a-z][a-z0-9-]{0,31}$"]: {
-		name:     strings.MinRunes(1) & strings.MaxRunes(80)
-		interval: *"month" | "year"
+	owner: =~_billingRules.owner
+	plans: [=~_billingRules.plan.id]: {
+		name:     strings.MinRunes(1) & strings.MaxRunes(_billingRules.plan.nameMax)
+		interval: *_billingRules.plan.interval[0] | or(_billingRules.plan.interval)
 		// In minor units, the first the default: {usd: 499, brl: 1990}.
-		prices: [=~"^(usd|brl|eur|gbp)$"]: int & >=50 & <=1000000
+		prices: [or(_billingRules.currencies)]: int & >=_billingRules.price.min & <=_billingRules.price.max
 	}
 	// Plans the author gives accounts free, each through the end of a day, in UTC:
 	// {"<account>": {analysis: "2027-01-31"}}. One past is no plan; one taken out
@@ -40,9 +40,9 @@ import (
 	// `remindDays` is how long before the first charge the app reminds the account.
 	let sold = [for p, _ in plans {p}]
 	trial?: {
-		months: int & >=1 & <=23
+		months: int & >=_billingRules.trial.monthsMin & <=_billingRules.trial.monthsMax
 		plans: [_, ...] & [...or(sold)]
-		remindDays: int & >=1 | *7
+		remindDays: int & >=1 | *_billingRules.trial.remindDays
 	}
 }
 billing: #Billing
@@ -217,14 +217,11 @@ code: state: migrations: "\(_billingGrantsMigration)": operations: [{sql: up: ""
 // spent for good once its state is set.
 // Named by the app (billing_spec.cue), after the grants' migration.
 _billingTrialMigration: string
-// Where a trial stands, as the broker words it: written here once, for billing.trial's constraint
-// and for the service, which refuses an entitlement whose trial is in any other (BILLING_TRIAL_STATES).
-_billingTrialStates: ["running", "cancelled", "converted", "ended", "failed"]
 code: state: migrations: "\(_billingTrialMigration)": operations: [{sql: up: """
 	CREATE TABLE IF NOT EXISTS billing.trial (
 	  account uuid PRIMARY KEY, ticket text, plan text, amount integer, currency text, charges_at timestamptz,
 	  terms text, consented_at timestamptz, state text, ver bigint NOT NULL DEFAULT 0,
-	  CONSTRAINT trial_state CHECK (state IS NULL OR state IN (\(strings.Join([for t in _billingTrialStates {"'\(t)'"}], ", "))))
+	  CONSTRAINT trial_state CHECK (state IS NULL OR state IN (\(strings.Join([for t in _billingRules.trialStates {"'\(t)'"}], ", "))))
 	);
 
 	-- Where an account's trial stands; holds is whether it has a plan now (paid or granted), which
@@ -360,14 +357,14 @@ cluster: surface: targets: billing: {
 	}
 	dockerfile: {
 		from: name: "denoland/deno:alpine-2.5.0"
-		copy: [{srcs: ["billing/service.ts", "billing/entitlement.ts", "billing/shared.ts"], dst: "/app/billing/"}]
+		copy: [{srcs: ["billing/service.ts", "billing/entitlement.ts", "billing/shared.ts", "billing/rules.ts"], dst: "/app/billing/"}]
 	}
 	compose: {
 		restart: "on-failure"
 		environment: {
 			BILLING_DOCUMENT:        _billingDocument
 			BILLING_GRANTS:          _billingGrants
-			BILLING_TRIAL_STATES:    json.Marshal(_billingTrialStates)
+			if _billingTrialFlag != "" {BILLING_TRIAL_FLAG: _billingTrialFlag}
 			if !_billingFlagsPeer {BILLING_FLAGS: _billingFlags}
 			SERVICE_JWT:             "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}"
 		}
@@ -401,7 +398,7 @@ if _billingLocal {
 		dockerfile: {
 			from: name: "denoland/deno:alpine-2.5.0"
 			copy: [
-				{srcs: ["billing/shared.ts"], dst: "/app/billing/"},
+				{srcs: ["billing/shared.ts", "billing/rules.ts"], dst: "/app/billing/"},
 				{srcs: ["billing/broker/core.ts", "billing/broker/main.ts", "billing/broker/stripe.ts", "billing/broker/door.ts", "billing/broker/fake.ts"], dst: "/app/billing/broker/"},
 			]
 		}

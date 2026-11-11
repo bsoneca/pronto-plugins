@@ -1,12 +1,9 @@
 // The service hands the author's grants to the database: the release's set, or
 // the flag billing_grants as flagd serves it now; each set once, and none taken
 // away because flagd could not be asked.
-import { grantLog, service } from "./service.ts";
+import { grantLog, NotReady, service } from "./service.ts";
 import { entitlementClaims } from "./broker/core.ts";
 import { signEs256 } from "./shared.ts";
-
-// billing_plugin.cue's _billingTrialStates, as an app's service is given them (BILLING_TRIAL_STATES).
-const STATES = ["running", "cancelled", "converted", "ended", "failed"];
 
 const eq = (a: unknown, b: unknown, m = "") => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); };
 const ANA = [{ account: "00000000-0000-4000-8000-00000000000a", plan: "analysis", through: "2028-10-28T23:59:59Z" }];
@@ -22,7 +19,7 @@ function stage(flag: () => Response) {
     if (url === "http://flagd:8693/ofrep/v1/evaluate/flags/billing_grants" || url === "https://a.example/ofrep/v1/evaluate/flags/billing_grants") return Promise.resolve(flag());
     return Promise.resolve(new Response("", { status: 404 }));
   }) as typeof fetch;
-  const base = { origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), trialStates: STATES, fetcher };
+  const base = { origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), fetcher };
   return { handed, base };
 }
 
@@ -104,7 +101,7 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
   }) as typeof fetch;
   const doc = o.document === undefined ? { owner: "o", plans: { analysis: {} }, trial: { months: 3, plans: ["analysis"], remindDays: 7 } } : o.document;
   const make = (extra: Record<string, unknown> = {}) => service({
-    origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify(doc), trialStates: STATES, fetcher,
+    origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify(doc), fetcher,
     flags: "http://flagd:8693", trialFlag: "free_trial", ...extra,
   });
   const ask = (svc: ReturnType<typeof make>, path: string, body: unknown = {}) =>
@@ -247,7 +244,7 @@ async function pushed(claims: Record<string, unknown>) {
     calls.push({ fn: url.slice("http://crud/rpc/".length), args: JSON.parse(String(init?.body)) });
     return Promise.resolve(new Response(null, { status: 204 }));
   }) as typeof fetch;
-  const svc = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), trialStates: STATES, fetcher });
+  const svc = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), fetcher });
   const res = await svc(new Request("https://a.example/billing/events", { method: "POST", body: token }));
   await res.body?.cancel();
   return { status: res.status, calls };
@@ -278,7 +275,7 @@ Deno.test("a trial state the database would not take fails the push, so the brok
     if (url === "https://b.example/jwks") return Promise.resolve(Response.json({ keys: [jwk] }));
     return Promise.resolve(url.endsWith("billing_trial_state") ? new Response("boom", { status: 500 }) : new Response(null, { status: 204 }));
   }) as typeof fetch;
-  const svc = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), trialStates: STATES, fetcher });
+  const svc = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), fetcher });
   const res = await svc(new Request("https://a.example/billing/events", { method: "POST", body: token }));
   eq(res.status, 502, "not taken");
 });
@@ -330,11 +327,28 @@ Deno.test("the door flag is read for the reader and told to the broker; a flag t
 });
 
 // The grants loop keeps the startup race out of the logs (PRONTO-295, from Bonk Chess's copy): billing starts
-// before crud listens, so a refusal in the first minute says nothing, one after it warns, and after a success
-// any failure is an error.
-Deno.test("a failed grants call is quiet in the startup window, a warning after it, an error once served", () => {
-  eq(grantLog(false, 2000), "none", "crud is not listening yet at every instance start");
-  eq(grantLog(false, 59000), "none");
-  eq(grantLog(false, 70000), "warn", "still not written after the window");
-  eq(grantLog(true, 2000), "error", "after a success it is real trouble");
+// before crud listens, so a neighbour not up yet says nothing in the first minute and warns after it; any
+// other failure, and any after a success, is an error.
+Deno.test("a neighbour not up yet is quiet in the startup window, a warning after it; any other failure is an error", () => {
+  eq(grantLog(false, 2000, true), "none", "crud is not listening yet at every instance start");
+  eq(grantLog(false, 59000, true), "none");
+  eq(grantLog(false, 70000, true), "warn", "still not written after the window");
+  eq(grantLog(true, 2000, true), "error", "after a success it is real trouble");
+  eq(grantLog(false, 2000, false), "error", "a refusal no wait can mend is never quiet");
+});
+
+Deno.test("what a failed grants call is: not up yet, or a failure", async () => {
+  const cases: [string, () => Response, boolean][] = [
+    ["connection refused", () => { throw new TypeError("connection refused"); }, true],
+    ["gateway not serving", () => new Response("", { status: 503 }), true],
+    ["schema not reloaded", () => Response.json({ code: "PGRST202", message: "Could not find the function public.billing_grant" }, { status: 404 }), true],
+    ["token refused", () => Response.json({ code: "PGRST301" }, { status: 401 }), false],
+    ["SQL error", () => Response.json({ code: "22P02", message: "invalid input" }, { status: 400 }), false],
+  ];
+  for (const [why, answer, notReady] of cases) {
+    const fetcher = (() => Promise.resolve().then(answer)) as typeof fetch;
+    const s = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), grants: "[]", fetcher });
+    const e = await s.grant().then(() => null, (x) => x);
+    eq([why, e instanceof Error, e instanceof NotReady], [why, true, notReady], why);
+  }
 });

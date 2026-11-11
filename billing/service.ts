@@ -29,9 +29,6 @@ export interface Settings {
   /** The flag that turns the free trial on, evaluated per account at `flags`; none, and a
    * document with a trial is all it takes. */
   trialFlag?: string;
-  /** The states an entitlement's trial may be in: billing_plugin.cue's _billingTrialStates, the same
-   * list billing.trial's constraint is written from (BILLING_TRIAL_STATES, a JSON array). */
-  trialStates: readonly string[];
   // The flag that sends this tenant's calls to Stripe through the operator's airlock (PRONTO-218):
   // asked for each request's own reader, its value told to the broker as `door`.
   doorFlag?: string;
@@ -49,18 +46,22 @@ export function brief(body: string, max = 120): string {
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
 
-// What the grants loop logs of a failed call. Billing starts before its neighbour crud listens, so
-// the first calls are always refused: until the startup window has passed, saying nothing keeps
-// that race out of the logs; past it, a warning, since the gateway is slow, not starting.
-// After one success it is real trouble.
+// A neighbour that is not up yet: crud or flagd not listening (the connection refused), the gateway
+// not serving (503), or serving without billing_grant until it reloads its schema (404, PGRST202).
+export class NotReady extends Error {}
+
+// What the grants loop logs of a failed call. Billing starts before its neighbours listen, so the
+// first calls are refused: until the startup window has passed, saying nothing of a NotReady keeps
+// that race out of the logs; past it, a warning, since the gateway is slow, not starting. Any other
+// failure (a refused token, an SQL error, a flag that holds no grants), and any failure after one
+// success, is an error at once.
 export const grantsWindowMs = 60_000;
-export function grantLog(served: boolean, sinceStartMs: number): "none" | "warn" | "error" {
-  if (served) return "error";
+export function grantLog(served: boolean, sinceStartMs: number, notReady: boolean): "none" | "warn" | "error" {
+  if (served || !notReady) return "error";
   return sinceStartMs < grantsWindowMs ? "none" : "warn";
 }
 
 export function service(s: Settings) {
-  if (!Array.isArray(s.trialStates) || !s.trialStates.length || !s.trialStates.every((x) => typeof x === "string")) throw new Error("BILLING_TRIAL_STATES: a JSON array of the trial's states");
   const fetcher = s.fetcher ?? fetch;
   const origin = s.origin.replace(/\/$/, "");
   const issuer = s.broker.replace(/\/$/, "");
@@ -115,10 +116,15 @@ export function service(s: Settings) {
   // the one the release carried. A set already handed over is not sent again.
   let granted: string | null = null;
   async function grant(): Promise<void> {
-    const set = s.flags ? await flagged() : s.grants ?? "[]";
+    const up = <T>(p: Promise<T>) => p.catch((e) => { throw e instanceof TypeError ? new NotReady(e.message) : e; });
+    const set = s.flags ? await up(flagged()) : s.grants ?? "[]";
     if (set === granted) return;
-    const res = await asService("billing_grant", { grants: JSON.parse(set) });
-    if (!res.ok) throw new Error(`billing_grant answered ${res.status}: ${brief(await res.text())}`);
+    const res = await up(asService("billing_grant", { grants: JSON.parse(set) }));
+    if (!res.ok) {
+      const text = await res.text();
+      const why = `billing_grant answered ${res.status}: ${brief(text)}`;
+      throw res.status === 503 || (res.status === 404 && text.includes("PGRST202")) ? new NotReady(why) : new Error(why);
+    }
     await res.body?.cancel();
     granted = set;
   }
@@ -135,7 +141,7 @@ export function service(s: Settings) {
   async function entitle(token: string): Promise<Response> {
     let e;
     try {
-      e = await verifyEntitlement(token, { issuer, tenant: origin, keys, trialStates: s.trialStates });
+      e = await verifyEntitlement(token, { issuer, tenant: origin, keys });
     } catch (err) {
       if (err instanceof Refused) return json(400, { error: err.message });
       throw err;
@@ -321,7 +327,7 @@ if (import.meta.main) {
     origin: env("ORIGIN"), broker: env("BILLING_BROKER"), brokerInternal: Deno.env.get("BILLING_BROKER_INTERNAL"),
     crud: env("CRUD_URL"), serviceJwt: env("SERVICE_JWT"), document: env("BILLING_DOCUMENT"), grants: Deno.env.get("BILLING_GRANTS"),
     flags: Deno.env.get("BILLING_FLAGS") || undefined, trialFlag: Deno.env.get("BILLING_TRIAL_FLAG") || undefined,
-    doorFlag: Deno.env.get("BILLING_DOOR_FLAG") || undefined, trialStates: JSON.parse(env("BILLING_TRIAL_STATES")),
+    doorFlag: Deno.env.get("BILLING_DOOR_FLAG") || undefined,
   });
   Deno.serve({ port: Number(Deno.env.get("BILLING_PORT") ?? 8688) }, billing);
   // Until the gateway serves billing_grant, as it does once it has reloaded its schema; with
@@ -336,7 +342,7 @@ if (import.meta.main) {
       wait = 60;
     } catch (e) {
       wait = Math.min(wait * 2, 60);
-      const log = grantLog(served, Date.now() - started);
+      const log = grantLog(served, Date.now() - started, e instanceof NotReady);
       if (log === "error") console.error(`billing: grants not written: ${(e as Error).message}`);
       else if (log === "warn") console.warn(`billing: grants not written yet, retrying in ${wait} s: ${(e as Error).message}`);
     }
