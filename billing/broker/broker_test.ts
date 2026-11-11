@@ -7,8 +7,8 @@ import { type Jwk, Refused } from "../shared.ts";
 import { brokerKeys, type Entitlement, verifyEntitlement } from "../entitlement.ts";
 import { broker, twoModes } from "./main.ts";
 import { chargesAt, checkoutLocale, type Consent, ownerOf, tenantOf } from "./core.ts";
-import { fakeStripe } from "./fake.ts";
-import { signWebhook, StripeError } from "./stripe.ts";
+import { fakeStripe, unform } from "./fake.ts";
+import { form, signWebhook, stripe as stripeClient, StripeError } from "./stripe.ts";
 
 function assertEquals(a: unknown, b: unknown, m = "") {
   if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m} expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
@@ -27,12 +27,15 @@ async function setup(o: { searchLagMs?: number; issuer?: string } = {}) {
   const sent: { method: string; path: string; params?: Record<string, unknown> }[] = [];
   // What Stripe should refuse, for a test of the broker's retries.
   const stripeDown = { delete: false, invoices: 0 };
+  // The broker reaches the stand-in as it reaches Stripe on the node: through its door (PRONTO-270).
+  const door = stripeClient({ door: `${ISSUER}/door/stripe`, fetcher: ((u: string | URL | Request, init?: RequestInit) => fake.handle(new Request(u, init))!) as typeof fetch });
   const stripe = ((method: string, path: string, ...rest: unknown[]) => {
     sent.push({ method, path, params: rest[0] as Record<string, unknown> | undefined });
     if (path.startsWith("/v1/invoices/") && stripeDown.invoices) return Promise.reject(new StripeError(stripeDown.invoices, stripeDown.invoices === 403 ? "permission" : "api_error", "invoices refused"));
     if (method === "DELETE" && stripeDown.delete) return Promise.reject(new StripeError(500, "api_error", "Stripe is down"));
-    return (fake.stripe as (...a: unknown[]) => unknown)(method, path, ...rest);
-  }) as typeof fake.stripe;
+    return (door as (...a: unknown[]) => unknown)(method, path, ...rest);
+  }) as typeof fake.stripe & { route?: typeof door.route };
+  stripe.route = door.route;
   const tenants = new Map<string, { doc?: unknown; up: boolean; got: Entitlement[]; hold?: Promise<void>; tickets: Map<string, Consent>; consentFails?: number }>([
     [A, { up: true, got: [], tickets: new Map() }], [B, { up: true, got: [], tickets: new Map() }],
   ]);
@@ -103,7 +106,7 @@ async function setup(o: { searchLagMs?: number; issuer?: string } = {}) {
     assertEquals(back, `${ISSUER}/onboarded?tenant=${encodeURIComponent(tenant)}`);
     assertEquals((await call(new URL(back).pathname + new URL(back).search)).status, 200, "set up");
   };
-  return { fake, sent, stripeDown, tenants, call, post, press, prove, payouts, secrets, ticket, consentTo, OFFER };
+  return { fake, door, sent, stripeDown, tenants, call, post, press, prove, payouts, secrets, ticket, consentTo, OFFER };
 }
 
 Deno.test("an account subscribes, its tenant alone is told, and it lapses when it cancels", async () => {
@@ -740,10 +743,36 @@ Deno.test("a probe reads the account at Stripe and writes nothing", async () => 
   await payouts(A);
   const before = sent.length, customers = fake.held.customers.size;
   const res = await post("/probe", { tenant: A, account: ANA });
-  assertEquals([res.status, await res.json()], [200, { ok: true, direct: false }], "the stand-in goes neither way");
+  assertEquals([res.status, await res.json()], [200, { ok: true, direct: false }], "the stand-in is reached through its door");
   const asked = sent.slice(before);
   assertEquals(asked.map((s) => s.method).every((m) => m === "GET"), true, "only reads");
   assertEquals(asked.some((s) => s.path === "/v1/customers/search"), true, "the account's customers read");
   assertEquals(fake.held.customers.size, customers, "no customer made");
   assertEquals((await post("/probe", { tenant: A })).status, 400, "an account is named");
+});
+
+Deno.test("the stand-in is reached through its door: every call in its ledger, a replayed key answered from it", async () => {
+  const { fake, door, prove, payouts } = await setup();
+  assertEquals(await door.route!(), "door", "every call goes through the door");
+  await prove(A);
+  await payouts(A);
+  assertEquals(fake.ledger.size > 0, true, "the broker's calls are in the door's ledger");
+  const ask = (body: unknown, name = "stripe") =>
+    fake.handle(new Request(`${ISSUER}/door/${name}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }))!;
+  const made = { key: "key-1", sinkKey: "made once", method: "POST", path: "/v1/customers", body: "metadata[tenant]=https%3A%2F%2Fa.example&metadata[account]=x", contentType: "application/x-www-form-urlencoded" };
+  const first = await (await ask(made)).json();
+  const again = await (await ask(made)).json();
+  assertEquals([first.status, again.status, again.replayed, again.body.id], [200, 200, true, first.body.id], "a replayed key answers from the ledger, making nothing");
+  assertEquals(first.body.metadata, { tenant: A, account: "x" }, "the form read back as Stripe reads it");
+  assertEquals((await ask({ ...made, path: "/v1/prices" })).status, 409, "a key is one call");
+  const missing = await (await ask({ key: "key-2", method: "GET", path: "/v1/subscriptions/sub_none" })).json();
+  assertEquals([missing.status, missing.body.error.code], [404, "resource_missing"], "Stripe's refusal is the door's answer");
+  assertEquals((await ask({ key: "key-3", method: "GET", path: "/v1/account" }, "stripe-sandbox")).status, 200, "the sandbox's door too");
+  assertEquals((await ask({ key: "key-4", method: "GET", path: "/v1/account" }, "github")).status, 404, "no other door");
+  assertEquals((await ask({ key: "bad key!", method: "GET", path: "/v1/account" })).status, 400, "a key the airlock takes");
+});
+
+Deno.test("Stripe's form is read back into its objects and arrays", () => {
+  assertEquals(unform("a=1&b[c]=2&d[0]=x&d[1]=y&e[0][f]=g"), { a: "1", b: { c: "2" }, d: ["x", "y"], e: [{ f: "g" }] });
+  assertEquals(unform(`${form({ line_items: [{ price: "p", quantity: 1 }], metadata: { tenant: "t" } })}`), { line_items: [{ price: "p", quantity: "1" }], metadata: { tenant: "t" } });
 });

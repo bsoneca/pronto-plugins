@@ -147,6 +147,15 @@ it refuses any other key and cleans up after itself).
 payouts set up at a press, a checkout that pays, and a portal that cancels, renews or fails the
 next payment. The stand-in listens on 127.0.0.1 only and refuses to run with a real signing key.
 
+The broker reaches the stand-in as it reaches Stripe on the node: through a door (PRONTO-270). The
+stand-in serves the airlock's door contract at `STRIPE_DOOR` (the broker's own address):
+`POST /door/stripe` and `/door/stripe-sandbox` take `{key, sinkKey?, method, path, body?,
+contentType?, headers?}` and answer Stripe's `{status, body}`, keeping each call in a ledger under
+its key, which a replayed key answers from (`replayed: true`) and another call under it is refused
+(409). So the stand-in runs the code path the node's broker runs; the direct path, with the broker's
+own key, is left only while Bonk Chess's `stripe_door` flag moves the node (PRONTO-218), and leaves
+with it.
+
 An app's own browser test can use it end to end: an account is offered the plan, subscribes,
 uses the paid feature, cancels, and is refused it by the database.
 

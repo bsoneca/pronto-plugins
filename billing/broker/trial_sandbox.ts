@@ -2,9 +2,11 @@
 // with test clocks. The operator runs it by hand, with a test key; nothing else in this
 // repository talks to Stripe, so this is what keeps the stand-in honest:
 //
-//   STRIPE_SECRET_KEY=sk_test_... deno run --allow-net --allow-env billing/broker/trial_sandbox.ts [acct_...]
+//   STRIPE_DOOR=http://<airlock>:9998/door/stripe-sandbox deno run --allow-net --allow-env billing/broker/trial_sandbox.ts [acct_...]
 //
-// It refuses any key that is not a test key. It runs a trial to a paid subscription (a card that
+// Through the airlock's sandbox door, as the broker reaches Stripe (PRONTO-270); or, where no airlock
+// is at hand, STRIPE_SECRET_KEY=sk_test_... in its place. It refuses any key that is not a test key,
+// and any door whose Stripe answers in live mode, before it makes anything. It runs a trial to a paid subscription (a card that
 // pays), to a failed first charge (a card that is declined, which must read as the broker's rule
 // 4 reads it), and to a cancel at the period's end (which must end uncharged); and it opens, and
 // does not complete, a Checkout session with the very parameters the broker sends for a trial.
@@ -13,10 +15,12 @@
 import { checkoutSession, firstChargeFailed, type Subscription } from "./core.ts";
 import { stripe } from "./stripe.ts";
 
+const door = Deno.env.get("STRIPE_DOOR") ?? "";
 const key = Deno.env.get("STRIPE_SECRET_KEY") ?? "";
-if (!/^[sr]k_test_/.test(key)) throw new Error("STRIPE_SECRET_KEY is a test key: sk_test_ or rk_test_");
+if (!door && !/^[sr]k_test_/.test(key)) throw new Error("STRIPE_DOOR, the airlock's sandbox door; or STRIPE_SECRET_KEY, a test key: sk_test_ or rk_test_");
 const destination = Deno.args[0];
-const s = stripe({ key });
+const s = door ? stripe({ door }) : stripe({ key });
+if ((await s<{ livemode: boolean }>("GET", "/v1/balance")).livemode !== false) throw new Error("Stripe answers in live mode: trial_sandbox runs on the sandbox only");
 
 const HOUR = 3600, DAY = 86_400;
 let failed = 0;

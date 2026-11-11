@@ -7,7 +7,12 @@
 // the next payment or moves a trial on. Each change reaches the
 // broker as Stripe's webhook would, signed, and is sent again until the
 // broker takes it. main refuses it on any issuer but localhost.
+// The broker reaches it as it reaches Stripe on the node: through a door (PRONTO-270). The stand-in
+// serves the airlock's door contract at /door/stripe and /door/stripe-sandbox, and keeps each call in
+// a ledger under its key, which a replayed key answers from, so no broker anywhere calls Stripe but
+// through a door.
 import { esc, json, randomToken } from "../shared.ts";
+import type { DoorRequest } from "./door.ts";
 import { type Stripe, StripeError, signWebhook } from "./stripe.ts";
 
 // Stripe's objects, as loosely as the stand-in keeps them.
@@ -27,6 +32,28 @@ button.quiet{background:#e3e8ee;color:#1a1f36}a{color:#635bff}@media (prefers-co
 <body><main><p><span class="test">Test mode · no money moves</span></p>${body}</main></body></html>
 `, { status, headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": PAGE_CSP, "cache-control": "no-store" } });
 }
+/** Stripe's bracketed form (`a[b][0]=x`) read back into objects and arrays: the inverse of
+ * stripe.ts's `form`, as Stripe reads it. Every value is a string, as Stripe gets it. */
+export function unform(text: string): Obj {
+  const root: Obj = {};
+  for (const [k, v] of new URLSearchParams(text)) {
+    const path = [k.replace(/\[.*$/, ""), ...[...k.matchAll(/\[([^\]]*)\]/g)].map((m) => m[1])];
+    let at = root;
+    path.forEach((p, i) => {
+      if (i === path.length - 1) at[p] = v;
+      else at = at[p] ??= {};
+    });
+  }
+  // An object whose keys are 0..n-1 was an array.
+  const arrays = (o: unknown): unknown => {
+    if (o === null || typeof o !== "object") return o;
+    const keys = Object.keys(o);
+    const out = Object.fromEntries(keys.map((k) => [k, arrays((o as Obj)[k])]));
+    return keys.length > 0 && keys.every((k, i) => k === String(i)) ? keys.map((k) => out[k]) : out;
+  };
+  return arrays(root) as Obj;
+}
+
 const go = (to: string) => new Response(null, { status: 303, headers: { location: to, "cache-control": "no-store" } });
 
 export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() / 1000), searchLagMs = 0 } = {}) {
@@ -137,7 +164,10 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
     if (kind === "subscriptions") return list(subscriptions, (s) => s.customer === params.customer) as T;
     if (kind === "prices" && method === "GET") return list(prices, (p) => p.active && (params.lookup_keys ?? []).includes(p.lookup_key)) as T;
     if (kind === "prices" && method === "POST") {
-      const p = { id: id("price"), active: true, ...params, product: { id: id("prod"), ...params.product_data } };
+      // As Stripe's: amounts are integers, however the form spelled them.
+      const amounts = (o: Obj) => ({ ...o, ...(o.unit_amount === undefined ? {} : { unit_amount: Number(o.unit_amount) }) });
+      const options = params.currency_options && Object.fromEntries(Object.entries(params.currency_options as Obj).map(([c, o]) => [c, amounts(o)]));
+      const p = { id: id("price"), active: true, ...amounts(params), ...(options ? { currency_options: options } : {}), product: { id: id("prod"), ...params.product_data } };
       prices.set(p.id, p);
       return remember(p);
     }
@@ -167,8 +197,46 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
     throw new StripeError(400, "fake_unsupported", `the stand-in doesn't speak ${method} ${path}`);
   };
 
+  // The door's ledger: each call by its key, with what it asked and what it was answered.
+  const ledger = new Map<string, { asked: string; answer: { status: number; body: unknown } }>();
+  const doors = new Set(["stripe", "stripe-sandbox"]);
+
+  /** One call through the stand-in's door, as the airlock's door answers it: Stripe's status and
+   * body under 200, the same answer again for a replayed key, and the door's own refusal otherwise. */
+  async function door(req: Request, name: string): Promise<Response> {
+    if (req.method !== "POST") return json(405, { error: "POST a call to the door" });
+    if (!doors.has(name)) return json(404, { error: `no door ${name}` });
+    let r: DoorRequest;
+    try {
+      r = await req.json();
+    } catch {
+      return json(400, { error: "the door takes JSON" });
+    }
+    if (typeof r?.key !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(r.key) || typeof r.method !== "string" || typeof r.path !== "string" || !r.path.startsWith("/")) {
+      return json(400, { error: "key, method and path required" });
+    }
+    const asked = JSON.stringify([name, r.method, r.path, r.body ?? null, r.contentType ?? null, r.sinkKey ?? null]);
+    const earlier = ledger.get(r.key);
+    if (earlier && earlier.asked !== asked) return json(409, { error: "the key was used for another call" });
+    if (earlier) return json(200, { ...earlier.answer, replayed: true });
+    const [path, query = ""] = r.path.split("?", 2);
+    const params = r.method === "GET" || r.method === "DELETE" ? unform(query)
+      : r.contentType === "application/json" ? (r.body ?? {}) as Obj
+      : unform(typeof r.body === "string" ? r.body : "");
+    let answer: { status: number; body: unknown };
+    try {
+      answer = { status: 200, body: await stripe(r.method as "GET", path, params, r.sinkKey) };
+    } catch (e) {
+      if (!(e instanceof StripeError)) throw e;
+      answer = { status: e.status, body: { error: { code: e.code, type: e.code, message: e.message } } };
+    }
+    ledger.set(r.key, { asked, answer });
+    return json(200, answer);
+  }
+
   async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
+    if (url.pathname.startsWith("/door/")) return await door(req, url.pathname.slice("/door/".length));
     const [kind, oid] = url.pathname.slice("/fake/stripe/".length).split("/");
     const action = req.method === "POST" ? new URLSearchParams(await req.text()).get("do") : null;
     if (kind === "onboard") {
@@ -263,8 +331,10 @@ export function fakeStripe(issuer: string, { now = () => Math.floor(Date.now() /
     webhookSecret,
     /** The broker the stand-in's webhooks reach. */
     connect(handler: (req: Request) => Promise<Response>) { broker = handler; },
-    /** A response for the stand-in's own pages, or null for the broker's. */
-    handle: (req: Request): Promise<Response> | null => new URL(req.url).pathname.startsWith("/fake/stripe/") ? handle(req) : null,
+    /** A response for the stand-in's own pages and its door, or null for the broker's. */
+    handle: (req: Request): Promise<Response> | null => /^\/(fake\/stripe|door)\//.test(new URL(req.url).pathname) ? handle(req) : null,
+    /** For tests: the door's ledger, by key. */
+    ledger,
     /** A tenant whose payouts are set up already, as a local launch wants its own. */
     ready(tenant: string) {
       const a = account(tenant, "us", "active");
