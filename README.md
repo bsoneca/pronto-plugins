@@ -638,6 +638,9 @@ reads its `local` value. `pronto-flags push <app-dir>` then:
 
 1. reads the live object and finds the flags whose default value moves; a flag
    with no cases is refused, or pushed with `--untested "<why>"`, loudly;
+   `--no-canary "<why>"`, on the owner's go, skips steps 2 to 4 for every flag:
+   one version for everyone (`cases=skipped`, the reason in its note), no tester
+   and no case run (PRONTO-284);
 2. refuses, with nothing written, a flip whose app lacks what the live stage
    needs (`flagsLive.url`, `testers`, `runAs`, `flagsCases.live`) or whose flag
    has no `production` scenario: no tester, no flip;
