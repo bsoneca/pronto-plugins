@@ -10,6 +10,7 @@
 // fetch a key they do not know.
 import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, signEs256, verifyIdToken } from "../oidc.ts";
 import { doorKey, throughDoor } from "./door.ts";
+import { tenantAdmitted } from "./phone.ts";
 import { type AuthRequest, Codes, emailOf, esc, json, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, sectorOf, sectorsOf, profileOf, providerScope, redeem } from "./core.ts";
 
 // Kept where phone.ts takes them (core.ts), so the phone imports nothing of this module at run time:
@@ -34,6 +35,10 @@ export interface Provider {
   /** With `door`, while the flag moves it: the broker keeps its secret, and exchanges through the door
    * only the sign-ins whose tenant's flag asked for it (`askDoor`); the rest go straight to tokenUrl. */
   doorAsked?: boolean;
+  /** With `doorAsked`: the tenants whose flag is asked (GOOGLE_DOOR_TENANTS, PHONE_TENANTS' syntax). Every
+   * other tenant of the broker goes straight to tokenUrl, unasked: an app that has no `signin_door`, or no
+   * `/ofrep/` route, would otherwise fail every sign-in. */
+  doorTenants?: string[];
   /** Whether a tenant may sign in through this provider; any, when absent. The phone's tenants are
    * the operator's list, since each of its sign-ins is an SMS the operator pays for. */
   admits?: (tenant: string) => boolean;
@@ -52,6 +57,9 @@ export function google(env: (k: string) => string | undefined): Provider | null 
   const doorAsked = env("GOOGLE_DOOR_ASKED") === "1";
   if (doorAsked && !(door && clientSecret)) throw new Error("GOOGLE_DOOR_ASKED moves the broker between its client secret and the door: it needs GOOGLE_DOOR and GOOGLE_CLIENT_SECRET");
   if (door && clientSecret && !doorAsked) throw new Error("GOOGLE_DOOR and GOOGLE_CLIENT_SECRET: through the door, the airlock holds the credential and the broker none");
+  const doorTenants = (env("GOOGLE_DOOR_TENANTS") ?? "").split(",").map((t) => t.trim()).filter((t) => t !== "");
+  if (doorAsked && !doorTenants.length) throw new Error("GOOGLE_DOOR_ASKED needs GOOGLE_DOOR_TENANTS: the tenants whose flag signin_door is asked, the rest going straight to Google");
+  if (doorTenants.length && !doorAsked) throw new Error("GOOGLE_DOOR_TENANTS is for GOOGLE_DOOR_ASKED: without it, every exchange takes the door or none does");
   if (!clientId || !(clientSecret || door)) return null;
   return {
     name: "google",
@@ -62,7 +70,7 @@ export function google(env: (k: string) => string | undefined): Provider | null 
     keys: jwksSource(env("GOOGLE_JWKS_URL") || "https://www.googleapis.com/oauth2/v3/certs"),
     clientId,
     ...(clientSecret ? { clientSecret } : {}),
-    ...(door ? { door: `${door}/door/google`, doorAsked } : {}),
+    ...(door ? { door: `${door}/door/google`, doorAsked, ...(doorAsked ? { doorTenants } : {}) } : {}),
   };
 }
 
@@ -177,7 +185,7 @@ export async function broker(p: {
     if (provider.admits && !provider.admits(r.tenant)) return back(r.redirectUri, { error: "unauthorized_client", state: r.state });
     // Asked once, here: a sign-in goes the way its tenant's flag said when it began, whatever the flag does meanwhile.
     let door = false;
-    if (provider.door !== undefined && provider.doorAsked === true && p.askDoor) {
+    if (provider.door !== undefined && provider.doorAsked === true && p.askDoor && tenantAdmitted(provider.doorTenants ?? [], r.tenant)) {
       try { door = await p.askDoor(r.tenant); } catch (e) {
         console.error(`sign-in for ${r.tenant}: ${(e as Error).message}`);
         return page("Sign-in unavailable", `<h1>This sign-in can't continue right now</h1><p class="err">Try again in a moment.</p>`, 503);

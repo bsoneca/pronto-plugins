@@ -62,9 +62,12 @@ let lockpol = (do $at NetworkPolicy identity-broker-airlock).spec
 assert equal $lockpol.ingress [{from: [{podSelector: {matchLabels: {"app.kubernetes.io/name": "identity-broker", "app.kubernetes.io/part-of": "pronto-identity"}}}], ports: [{protocol: TCP, port: 9998}]}]
 assert equal ((do $at NetworkPolicy identity-broker).spec.egress | where to? != null | get to | flatten | where podSelector? != null | first).podSelector.matchLabels."app.kubernetes.io/name" "identity-broker-airlock"
 # --door-asked: while each tenant's flag moves it, the broker keeps its secret beside the door.
-let moving = (metal manifests --domain id.example.com --sources (metal sources) --settings [] --airlock --door-asked | split row "---\n" | each { from yaml })
+let moving = (metal manifests --domain id.example.com --sources (metal sources) --settings [] --airlock --door-asked --door-tenants "https://bonkchess.com" | split row "---\n" | each { from yaml })
 let mb = (($moving | where kind == Deployment and metadata.name == identity-broker | first).spec.template.spec.containers | first)
 assert equal ($mb.env | where name == GOOGLE_DOOR_ASKED | first).value "1"
+assert equal ($mb.env | where name == GOOGLE_DOOR_TENANTS | first).value "https://bonkchess.com"
+assert (try { metal manifests --domain id.example.com --sources (metal sources) --airlock --door-asked; false } catch { true }) "--door-asked needs --door-tenants"
+assert (try { metal manifests --domain id.example.com --sources (metal sources) --airlock --door-tenants "https://a"; false } catch { true }) "--door-tenants needs --door-asked"
 assert equal ($mb.env | where name == GOOGLE_DOOR | first).value "http://identity-broker-airlock:9998"
 assert equal ($mb.env | where name == GOOGLE_CLIENT_SECRET | length) 1 "the broker keeps its secret while the flag moves it"
 assert equal ($mb.env | where name == GOOGLE_CLIENT_BASIC | length) 0 "the credential is the airlock's alone"

@@ -214,15 +214,16 @@ Deno.test("the token exchange through the airlock's door, as the tenant's flag s
 
     // While the flag moves it (door-asked): the broker keeps its secret; the tenant's flag picks the way.
     sent.length = 0;
-    await make({ door: "http://airlock:9998/door/google", doorAsked: true, clientSecret: "op-secret" });
+    await make({ door: "http://airlock:9998/door/google", doorAsked: true, doorTenants: [A, B], clientSecret: "op-secret" });
     assertEquals(await signedIn(A), true);
     assertEquals(sent.length, 1, "flag on: through the door");
     assertEquals(await signedIn(B), true, "flag off: straight to Google, with the broker's secret");
     assertEquals(sent.length, 1, "flag off: the door is not called");
     assertEquals(asked.slice(-2), [A, B], "each sign-in asks its own tenant's flag");
-    // A tenant whose flag cannot be asked goes straight, as off.
+    // A tenant the operator did not list is never asked (it may have no signin_door): straight to Google.
     assertEquals(await signedIn("https://app-c.example"), true);
-    assertEquals(sent.length, 1);
+    assertEquals(sent.length, 1, "unlisted: the door is not called");
+    assertEquals(asked.includes("https://app-c.example"), false, "unlisted: its flag is not asked");
 
     // A door that answers nothing fails the sign-in as a refused exchange does: back to the tenant, no code.
     const down: typeof fetch = () => Promise.resolve(Response.json({ error: "the sink answered 503" }, { status: 400 }));
@@ -245,7 +246,9 @@ Deno.test("the door's startup consistency: a secret and a door need the flag, th
   assertEquals(fails({ GOOGLE_DOOR: "http://d", GOOGLE_DOOR_ASKED: "1" }), true, "the flag needs the secret too");
   assertEquals(fails({ GOOGLE_CLIENT_SECRET: "s", GOOGLE_DOOR_ASKED: "1" }), true, "the flag needs the door");
   assertEquals(google(e({ ...base, GOOGLE_DOOR: "http://d/" }))?.door, "http://d/door/google");
-  assertEquals(google(e({ ...base, GOOGLE_DOOR: "http://d", GOOGLE_CLIENT_SECRET: "s", GOOGLE_DOOR_ASKED: "1" }))?.doorAsked, true);
+  assertEquals(fails({ GOOGLE_CLIENT_SECRET: "s", GOOGLE_DOOR: "http://d", GOOGLE_DOOR_ASKED: "1" }), true, "the flag needs its tenants");
+  assertEquals(fails({ GOOGLE_DOOR: "http://d", GOOGLE_DOOR_TENANTS: "https://a" }), true, "tenants need the flag");
+  assertEquals(google(e({ ...base, GOOGLE_DOOR: "http://d", GOOGLE_CLIENT_SECRET: "s", GOOGLE_DOOR_ASKED: "1", GOOGLE_DOOR_TENANTS: "https://a, http://localhost:*" }))?.doorTenants, ["https://a", "http://localhost:*"]);
   assertEquals(google(e({ ...base, GOOGLE_CLIENT_SECRET: "s" }))?.door, undefined, "no door unless set");
   assertEquals(google(e(base)), null, "neither a secret nor a door: no Google");
 });
