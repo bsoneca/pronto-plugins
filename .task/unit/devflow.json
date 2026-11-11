@@ -1,6 +1,6 @@
 {
- "key": "19f0fc9e10f625d4c6e7b2e29309e26c9218522251c3de906667a9bd7df7449f",
- "at": "2026-11-11T18:10:07.222Z",
+ "key": "9934262651c9d63fade13c91ed63aa5c22fb785f4b01d8e371852d38c337cac6",
+ "at": "2026-11-11T22:40:59.015Z",
  "observed": {
   "read": {},
   "dir": {},
@@ -21,11 +21,11 @@
   "file deno.jsonc absent",
   "file deno.lock absent",
   "file package.json absent",
-  "deno 2.9.8",
+  "deno 2.5.0",
   "args [\"devflow\"]",
-  "allow read=granted write=prompt env=granted run=granted net=prompt sys=prompt ffi=prompt",
-  "env CUE e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "module tests/unit/registry.js 6bb01a88fb8c4c06e62882a3b8f258e55b137db03acb3516d085c889f98ff9fb",
+  "allow read=granted write=granted env=granted run=granted net=granted sys=prompt ffi=prompt",
+  "env CUE 50244208da1de5f9026c35f01ebdbb249b3ee9e70893e0d14ef5901a59aee9d7",
+  "module tests/unit/registry.js 04d3548a84ad98e3b8869198c767fe1ea4558f6d47f1de497abc255d70a1b5f6",
   "module devflow/board/github.js 180ed33d3ef7a001de1317b1b9f38031050c0cab0c6a57c17cf0a9b9ef638659",
   "module devflow/flow.js 37eb1caa816ae42bd5b24cca61498f3101ddfdd5a79234765779cc93a3f04e31",
   "module intents/run.ts 3137ad06e3e40c841bb0d78753da1b6c43943f6df8126be268f102f6abe1992b"
