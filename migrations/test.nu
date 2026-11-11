@@ -4,8 +4,8 @@
 # does (a column retired, a machine's state gone) and makes the migration: the lint refuses the moved
 # model, make names the carry it needs, writes the migration once it is declared, and the program reads
 # it. Then a migration edited by hand is refused; an index the migration dropped is refused until the
-# migration is folded; a rename is refused; and two branches that each made a migration are merged,
-# rebase making the side's again after main's.
+# migration is folded; a rename is refused; two branches that each made a migration are merged,
+# rebase making the side's again after main's; and init --from takes the model a git ref held.
 def check [what: string, ok: bool] {
 	if not $ok { error make {msg: $"migrations/test.nu: ($what)"} }
 	print $"ok  ($what)"
@@ -24,10 +24,24 @@ def field [name: string, ordinal: int, type: string, required: bool, more: recor
 	{name: $name, ordinal: $ordinal, retired: false, type: $type, pk: ($ordinal == 1), required: $required} | merge $more
 }
 
+# A column's clause as pronto's 005 writes it: its type, its default (status, the machine's column,
+# takes its initial state where the facts state none) and its NOT NULL.
+def clause [f: record, initial: string] {
+	let type = (if $f.type == "uuid" { "uuid" } else { "text" })
+	let given = ($f | get -o default)
+	let default = (if $given != null { $given } else if $f.name == "status" { $"'($initial)'" } else { null })
+	[$type (if $default != null { $"DEFAULT ($default)" }) (if $f.pk { "PRIMARY KEY" } else if $f.required { "NOT NULL" })] | compact | str join " "
+}
+
 # The files pronto's generate writes, as the example app's model has them.
 def emitted [app: path, proto: string, fields: list, uniques: list, states: list] {
 	$"syntax = \"proto3\";\npackage pronto.entities;\n\nmessage Order {\n($proto)}\n" | save --force --raw ($app | path join schema/entities.proto)
 	{version: 1, entities: {Order: {server: true, table: "orders", id: "0x01", fields: $fields, cel: {enums: {}, checks: {}}, uniques: $uniques}}} | to json | save --force --raw ($app | path join .pronto/check-inputs.json)
+	let initial = ($states | first)
+	let create = ($fields | each {|f| $"  \"($f.name)\" (clause $f $initial)"} | str join ",\n")
+	let added = ($fields | where {|f| not $f.pk } | each {|f| $"ALTER TABLE orders ADD COLUMN IF NOT EXISTS \"($f.name)\" (clause $f $initial);"} | str join "\n")
+	let unique = ($uniques | each {|u| $"CREATE UNIQUE INDEX IF NOT EXISTS ($u.name) ON orders \(($u.cols | str join ', ')\);"} | str join "\n")
+	$"CREATE TABLE IF NOT EXISTS orders \(\n($create)\n\);\n($added)\n($unique)\n" | save --force --raw ($app | path join services/database/migrations/005_create_tables.sql)
 	let list = ($states | each {|s| $"'($s)'"} | str join ", ")
 	$"ALTER TABLE \"orders\" DROP CONSTRAINT IF EXISTS \"orders_status_check\";\nALTER TABLE \"orders\" ADD CONSTRAINT \"orders_status_check\" CHECK \(\"status\" IN \(($list)\)\) NOT VALID;\n" | save --force --raw ($app | path join services/database/migrations/010_machines.sql)
 }
@@ -43,13 +57,14 @@ def main [] {
 	"package demo\n" | save --raw ($app | path join program.cue)
 	"module: \"demo.example/app@v0\"\nlanguage: {\n\tversion: \"v0.16.1\"\n}\n" | save --raw ($app | path join cue.mod/module.cue)
 	let id = (field id 1 uuid true)
-	let status = (field status 2 string true {default: "'draft'"})
+	# status is a machine's column: pronto's facts state no default for it, and 005 writes its initial state.
+	let status = (field status 2 string true)
 	emitted $app "  optional string id = 1 [json_name = \"id\"];\n  optional string status = 2 [json_name = \"status\"];\n  optional string ref = 3 [json_name = \"ref\"];\n" [$id $status (field ref 3 uuid true)] [{name: orders_ref, cols: [ref]}] [draft open closed]
 
 	cd $root
 	^sh bin/pronto-migrations $app
 	check "the installer refuses an argument it does not know" ((do { ^sh bin/pronto-migrations $app nope=1 } | complete).exit_code == 2)
-	for f in ["migrations/migrate.ts" "migrations/plan.js" "migrations_plugin.cue" "migrations_spec.cue"] {
+	for f in ["migrations/migrate.ts" "migrations/plan.js" "migrations_plugin.cue" "migrations_ledger.cue" "migrations_spec.cue"] {
 		check $"the installer writes ($f)" (($app | path join $f) | path exists)
 	}
 	check "the lint asks for the snapshot first" ((migrate $app check).stderr | str contains "run init")
@@ -79,7 +94,10 @@ def main [] {
 	let at = {|s| $up | str index-of $s}
 	check "it is one pgroll operation, as pgroll runs a raw SQL operation alone" (($ops | length) == 1)
 	check "it relaxes the retired column and drops its index, then carries the rows" ((do $at "\"ref\" DROP NOT NULL") >= 0 and (do $at "DROP INDEX IF EXISTS \"public\".\"orders_ref\"") >= 0 and (do $at "WHEN 'draft' THEN 'open'") > (do $at "DROP INDEX IF EXISTS"))
-	check "the lint passes once the migration is made" ((migrate $app check).exit_code == 0)
+	let left = (migrate $app check)
+	check "the lint refuses the carry left once its migration is made" ($left.exit_code == 1 and ($left.stderr | str contains "schemaMigrations.carry.Order.status is for no change since the snapshot: remove it"))
+	"package demo\n\nloop: surface: checks: schemaMigrations.checks\n" | save --force --raw ($app | path join migrations_spec.cue)
+	check "the lint passes once the migration is made and its carry removed" ((migrate $app check).exit_code == 0)
 	cd $app
 	let program = (^cue export . -e code.state.migrations --out json | from json)
 	check "the program takes it as a pgroll migration, named by its day" (($program | columns) == [$first] and (($program | get $first | get operations | length) == 1))
@@ -99,7 +117,8 @@ def main [] {
 	check "make refuses an index a migration dropped, until it is folded" ($rebuilt.exit_code == 1 and ($rebuilt.stderr | str contains $"orders_ref was dropped by ($first)") and ($rebuilt.stderr | str contains $"fold ($first)"))
 	let fold = (migrate $app fold $first)
 	check "fold deletes the migration and keeps its number" ($fold.exit_code == 0 and not (($app | path join $"migrations/($first).json") | path exists) and ((open --raw ($app | path join migrations/migrations.sum)) | str contains $"folded ($first)"))
-	check "and the ledger lists nothing" (not ((open --raw ($app | path join migrations_ledger.cue)) | str contains "code: state"))
+	cd $app
+	check "and the ledger declares no migration, so the cluster gets no migrate step" ((do { ^cue export . -e code.state.migrations --out json } | complete).exit_code != 0)
 	let readded = (migrate $app make unique_id)
 	check "then the index is the replay's, and only the snapshot moves" ($readded.exit_code == 0 and ($readded.stdout | str contains "nothing for the ledger"))
 	check "the lint passes after the fold" ((migrate $app check).exit_code == 0)
@@ -113,10 +132,10 @@ def main [] {
 	check "the lint refuses it too" ((migrate $app check).stderr | str contains "Order.status: renamed to state")
 
 	# Two branches each make a migration. main's (status made optional) is released first; the side
-	# branch's (status's default changed) has main's count and a name that sorts before it, so pgroll's
-	# runner would refuse it. Merging main in conflicts on the snapshot, the sum and the ledger; rebase
+	# branch's (status's default changed to closed) has main's count and a name that sorts before it, so pgroll's
+	# runner would refuse it. Merging main in conflicts on the snapshot and the sum; rebase
 	# takes main's and makes the side's changes again, named after main's.
-	let status_open = (field status 2 string true {default: "'open'"})
+	let status_closed = (field status 2 string true {default: "'closed'"})
 	emitted $app $proto2 $retired [{name: orders_ref, cols: [id]}] [open closed]
 	check "the model is the snapshot again" ((migrate $app check).exit_code == 0)
 	cd $app
@@ -124,13 +143,21 @@ def main [] {
 	g add -A
 	g commit -q -m base
 	g checkout -q -b side
-	emitted $app $proto2 [$id $status_open ((field ref 3 uuid false) | merge {retired: true})] [{name: orders_ref, cols: [id]}] [open closed]
+	# The side also adds memo, a copy of status: its backfill goes once the migration is made, as the
+	# lint wants, and the migration records it.
+	let proto3 = $"($proto2)  optional string memo = 4 [json_name = \"memo\"];\n"
+	let memo = (field memo 4 string false)
+	emitted $app $proto3 [$id $status_closed ((field ref 3 uuid false) | merge {retired: true}) $memo] [{name: orders_ref, cols: [id]}] [open closed]
+	"package demo\n\nschemaMigrations: backfill: Order: memo: \"status\"\n\nloop: surface: checks: schemaMigrations.checks\n" | save --force --raw ($app | path join migrations_spec.cue)
+	check "plan says a copy into an added column is the ledger's" ((migrate $app plan).stdout | str contains "ledger   field-added Order.memo")
 	check "the side branch makes its migration" ((migrate $app make status_default).exit_code == 0)
+	"package demo\n\nloop: surface: checks: schemaMigrations.checks\n" | save --force --raw ($app | path join migrations_spec.cue)
+	check "the side's lint passes with its backfill removed" ((migrate $app check).exit_code == 0)
 	cd $app
 	g add -A
 	g commit -q -m side
 	g checkout -q main
-	emitted $app $proto2 [$id (field status 2 string false {default: "'draft'"}) ((field ref 3 uuid false) | merge {retired: true})] [{name: orders_ref, cols: [id]}] [open closed]
+	emitted $app $proto2 [$id (field status 2 string false) ((field ref 3 uuid false) | merge {retired: true})] [{name: orders_ref, cols: [id]}] [open closed]
 	check "main makes its migration" ((migrate $app make status_optional).exit_code == 0)
 	cd $app
 	g add -A
@@ -141,13 +168,38 @@ def main [] {
 	g checkout -q side
 	check "merging main conflicts on what make wrote" ((g merge -q main).exit_code != 0)
 	# generate settles the emitted files: the model is both branches' changes.
-	emitted $app $proto2 [$id (field status 2 string false {default: "'open'"}) ((field ref 3 uuid false) | merge {retired: true})] [{name: orders_ref, cols: [id]}] [open closed]
+	emitted $app $proto3 [$id (field status 2 string false {default: "'closed'"}) ((field ref 3 uuid false) | merge {retired: true}) $memo] [{name: orders_ref, cols: [id]}] [open closed]
 	check "the lint refuses the merged tree" ((migrate $app check).exit_code == 1)
 	let rebased = (migrate $app rebase main)
 	let names = (ls ($app | path join migrations) | get name | path basename | where {|n| $n =~ '^\d{8}_\d{4}_.*\.json$' } | sort)
 	check "rebase keeps main's migration and makes the side's again, named after it" ($rebased.exit_code == 0 and ($names | length) == 2 and ($names.0 == $"($theirs).json") and ($names.1 | str ends-with "_status_default.json") and ($names.1 > $names.0) and not ($"($ours).json" in $names))
-	check "the rebased migration holds only the side's change" ((open ($app | path join $"migrations/($names.1)") | get operations.0.sql.up) =~ "SET DEFAULT 'open'" and not ((open ($app | path join $"migrations/($names.1)") | get operations.0.sql.up) =~ "DROP NOT NULL"))
+	let up2 = (open ($app | path join $"migrations/($names.1)") | get operations.0.sql.up)
+	check "the rebased migration holds only the side's change" ($up2 =~ "SET DEFAULT 'closed'" and not ($up2 =~ "DROP NOT NULL"))
+	check "and its copy, read back from the declarations the side's migration recorded" ($rebased.stdout =~ "making it again with the declarations" and ($up2 | str contains "SET \"memo\" = status") and ($up2 | str starts-with "-- declared: "))
 	check "the lint passes after rebase" ((migrate $app check).exit_code == 0)
+	cd $app
+	let program2 = (^cue export . -e code.state.migrations --out json | from json)
+	check "the ledger embeds both, with nothing to settle at the merge" (($program2 | columns | sort) == ($names | each {|n| $n | str replace '.json' ''}))
+
+	# A stray .json would reach pgroll through the ledger's glob: the lint refuses it.
+	"{}" | save --raw ($app | path join migrations/notes.json)
+	check "the lint refuses a .json in migrations/ that is no migration" ((migrate $app check).stderr | str contains "migrations/notes.json: migrations_ledger.cue embeds every .json here but the snapshot")
+	rm ($app | path join migrations/notes.json)
+	"{" | save --raw ($app | path join migrations/broken.json)
+	check "and one that is no JSON, whose message nothing hides" ((migrate $app check).stderr | str contains "migrations/broken.json: migrations_ledger.cue embeds every .json here but the snapshot")
+	rm ($app | path join migrations/broken.json)
+
+	# init --from takes the model as a git ref held it: in a copy of the app with no migrations yet,
+	# the snapshot at main's base, so the first make is what changed since.
+	cd $app
+	g add -A
+	g commit -q -m rebased
+	let copy = ($dir | path join copy)
+	g worktree add -q $copy (g rev-list --max-parents=0 HEAD | get stdout | str trim)
+	rm -r ($copy | path join migrations/snapshot.json) ($copy | path join migrations/migrations.sum)
+	let from = (migrate $copy init "--from" main)
+	check "init --from writes the snapshot of the model at that ref" ($from.exit_code == 0 and ($from.stdout | str contains "(the model at main)"))
+	check "and the lint sees the model in the tree moved past it" ((migrate $copy check).stderr | str contains "the model moved since migrations/snapshot.json")
 	cd $root
 	rm -r $dir
 }

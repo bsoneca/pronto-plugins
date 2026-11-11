@@ -1,9 +1,10 @@
 // The migrations host: an app's database carried forward by migrations made from the changes to its
-// emitted schema, columns paired by their proto field number (README.md). The driver and its rules are this host's, written into the app as
-// migrations/migrate.ts and migrations/plan.js; the schema joins the app's package, and the app's own
+// emitted schema, columns paired by their proto field number (README.md). The driver and its rules
+// are this host's, written into the app as migrations/migrate.ts and migrations/plan.js; the schema
+// joins the app's package, the ledger embeds the app's migrations into it, and the app's own
 // migrations_spec.cue (seeded once) opts the lint in and holds what the next migration needs. What
-// make writes (migrations/snapshot.json, migrations/migrations.sum, migrations/<YYYYMMDD>_<NNNN>_<name>.json,
-// migrations_ledger.cue) is the app's, committed, and never written here.
+// make writes (migrations/snapshot.json, migrations/migrations.sum,
+// migrations/<YYYYMMDD>_<NNNN>_<name>.json) is the app's, committed, and never written here.
 @extern(embed)
 
 package migrations
@@ -29,6 +30,37 @@ _rules:  _ @embed(file="plan.js", type=text)
 			seed: false
 			text: H._header + strings.Replace(_schema, "\npackage migrations\n", "\npackage \(H.package)\n", 1)
 		}
+		// The ledger: every migration make wrote, embedded by a glob over migrations/ and filtered here,
+		// so it is never generated, and a merge of two branches' migrations needs nothing to settle it.
+		// The glob always matches, as the driver is there (a glob matching nothing is an error); every
+		// .json but the snapshot is a migration, which the lint holds to (migrate.ts check). With none,
+		// code.state.migrations is not declared, so the cluster gets no migrate step.
+		"migrations_ledger.cue": {
+			seed: false
+			text: H._header + """
+				@extern(embed)
+
+				package \(H.package)
+
+				import (
+					"encoding/json"
+					"strings"
+				)
+
+				// The app's pgroll migrations (migrations/README.md): each runs once on a database that
+				// already holds rows, after the replay of the emitted schema.
+				_schemaMigrationFiles: _ @embed(glob="migrations/*", type=text)
+				_schemaMigrations: {
+					for p, t in _schemaMigrationFiles if strings.HasSuffix(p, ".json") && p != "migrations/snapshot.json" {
+						(strings.TrimSuffix(strings.TrimPrefix(p, "migrations/"), ".json")): json.Unmarshal(t)
+					}
+				}
+				if len(_schemaMigrations) > 0 {
+					code: state: migrations: _schemaMigrations
+				}
+
+				"""
+		}
 		// The app's own. Not migrations.cue: sayt's lint vets an X.cue against a path X, and
 		// migrations/ holds the app's migrations.
 		"migrations_spec.cue": {
@@ -37,9 +69,10 @@ _rules:  _ @embed(file="plan.js", type=text)
 				package \(H.package)
 
 				// What the next migration needs that the model cannot say (migrations/plan.js): a value for
-				// rows a narrowed enum no longer admits (carry), one for the NULLs of a column made required
-				// (backfill). `migrate.ts make` names what is missing; a declaration can go once make has
-				// written its migration.
+				// rows a narrowed enum no longer admits (carry), one for the rows of a column added or the
+				// NULLs of one made required (backfill). `migrate.ts make` names what is missing; a
+				// declaration goes in the change that makes its migration, as make and the lint refuse
+				// one no change reads.
 				schemaMigrations: {}
 
 				loop: surface: checks: schemaMigrations.checks
