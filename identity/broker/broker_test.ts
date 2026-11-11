@@ -256,6 +256,7 @@ Deno.test("the tenant's flag is asked at its own origin as the tenant, and an an
   assertEquals(await on(A), true);
   assertEquals(seen, [{ url: `${A}/ofrep/v1/evaluate/flags/signin_door`, body: { context: { targetingKey: A } } }]);
   assertEquals(await askedFlag("signin_door", () => Promise.resolve(Response.json({ value: false })))(A), false);
-  assertEquals(await askedFlag("signin_door", () => Promise.resolve(new Response("", { status: 404 })))(A), false, "a flag not there is off");
-  assertEquals(await askedFlag("signin_door", () => Promise.reject(new Error("down")))(A), false, "unreachable is off");
+  const fails = async (f: () => Promise<boolean>) => { try { await f(); return false; } catch { return true; } };
+  assertEquals(await fails(() => askedFlag("signin_door", () => Promise.resolve(new Response("", { status: 404 })))(A)), true, "a flag not there is no answer");
+  assertEquals(await fails(() => askedFlag("signin_door", () => Promise.reject(new Error("down")))(A)), true, "unreachable is no answer");
 });

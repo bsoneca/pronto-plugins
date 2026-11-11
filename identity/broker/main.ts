@@ -68,20 +68,18 @@ export function google(env: (k: string) => string | undefined): Provider | null 
 
 /** The tenant's word on the door (its flag `signin_door`), asked at the tenant's own flagd through the
  * door its app has (`/ofrep/`, as billing's service asks it), for the tenant as the targeting key.
- * An answer that does not come is off: while the flag moves it the broker still holds its secret, so
- * the exchange goes straight to Google as before. */
+ * As billing's door flag: a flag that cannot be asked, or that the live document does not have
+ * (FLAG_NOT_FOUND), is no answer and fails the sign-in, never picks a way. --door-asked is deployed
+ * only once the tenants' push has published the flag. */
 export function askedFlag(flag: string, fetcher: typeof fetch = fetch): (tenant: string) => Promise<boolean> {
   return async (tenant) => {
-    try {
-      const res = await fetcher(`${tenant}/ofrep/v1/evaluate/flags/${encodeURIComponent(flag)}`, {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ context: { targetingKey: tenant } }), signal: AbortSignal.timeout(3_000), redirect: "error",
-      });
-      const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
-      return answer?.value === true;
-    } catch {
-      return false;
-    }
+    const res = await fetcher(`${tenant}/ofrep/v1/evaluate/flags/${encodeURIComponent(flag)}`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ context: { targetingKey: tenant } }), signal: AbortSignal.timeout(10_000), redirect: "error",
+    });
+    const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
+    if (!res.ok || typeof answer?.value !== "boolean") throw new Error(`flag ${flag}: flagd answered ${res.status}`);
+    return answer.value;
   };
 }
 
@@ -178,7 +176,13 @@ export async function broker(p: {
     const provider = providers.get(r.provider)!;
     if (provider.admits && !provider.admits(r.tenant)) return back(r.redirectUri, { error: "unauthorized_client", state: r.state });
     // Asked once, here: a sign-in goes the way its tenant's flag said when it began, whatever the flag does meanwhile.
-    const door = provider.door !== undefined && provider.doorAsked === true && (await p.askDoor?.(r.tenant)) === true;
+    let door = false;
+    if (provider.door !== undefined && provider.doorAsked === true && p.askDoor) {
+      try { door = await p.askDoor(r.tenant); } catch (e) {
+        console.error(`sign-in for ${r.tenant}: ${(e as Error).message}`);
+        return page("Sign-in unavailable", `<h1>This sign-in can't continue right now</h1><p class="err">Try again in a moment.</p>`, 503);
+      }
+    }
     const leg = await seal(stateKey, { r, pn: randomToken(16), door, exp: Math.floor(Date.now() / 1000) + 600 });
     const host = new URL(r.tenant).host;
     return page(`Sign in to ${host}`, `<h1>Sign in to <span class="origin">${esc(host)}</span></h1>
