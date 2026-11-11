@@ -12,7 +12,7 @@ assert equal ($docs | get metadata.namespace? | compact | uniq) [billing]
 
 # Every file the broker imports is mounted where its import finds it, and nothing outside is fetched.
 let files = (do $kind ConfigMap).data
-for f in [shared.ts main.ts core.ts stripe.ts door.ts fake.ts] { assert ($f in ($files | columns)) $"($f) is mounted" }
+for f in [shared.ts rules.ts main.ts core.ts stripe.ts door.ts fake.ts] { assert ($f in ($files | columns)) $"($f) is mounted" }
 for f in ($files | values) { assert ($f | lines | where {|l| $l =~ '^import .* from "(https?|npm|jsr):' } | is-empty) "a mounted file imports from outside" }
 let pod = (do $kind Deployment).spec.template.spec
 let mount = (($pod.containers | first).volumeMounts | where name == files | first).mountPath

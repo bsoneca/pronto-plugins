@@ -15,6 +15,7 @@
 // a customer is one account of one tenant, and every token the broker signs
 // has that tenant alone as its audience.
 import { base64url, originOf, sha256url } from "../shared.ts";
+import { RULES } from "../rules.ts";
 export { readCapped } from "../shared.ts";
 
 const enc = new TextEncoder();
@@ -83,15 +84,15 @@ export function returnTo(tenant: string, path: unknown): string | null {
   return url.origin === tenant ? url.toString() : null;
 }
 
-/** The currencies a plan may be priced in, as Stripe names them. */
-export const CURRENCIES = ["usd", "brl", "eur", "gbp"] as const;
+/** The currencies a plan may be priced in, as Stripe names them (rules.cue). */
+export const CURRENCIES = RULES.currencies;
 export type Currency = typeof CURRENCIES[number];
 
 /** A plan a tenant sells: a monthly or yearly subscription, priced in minor
  * units in each currency it names, the first its default. */
 export interface Plan {
   name: string;
-  interval: "month" | "year";
+  interval: typeof RULES.plan.interval[number];
   prices: Partial<Record<Currency, number>>;
 }
 
@@ -115,32 +116,32 @@ export interface Published {
 export function parsePublished(doc: unknown): { ok: true; published: Published } | { ok: false; error: string } {
   if (typeof doc !== "object" || doc === null) return { ok: false, error: "not an object" };
   const d = doc as Record<string, unknown>;
-  if (typeof d.owner !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(d.owner)) return { ok: false, error: "no owner" };
+  if (typeof d.owner !== "string" || !new RegExp(RULES.owner).test(d.owner)) return { ok: false, error: "no owner" };
   if (typeof d.plans !== "object" || d.plans === null) return { ok: false, error: "no plans" };
   const plans: Record<string, Plan> = {};
   for (const [id, raw] of Object.entries(d.plans as Record<string, unknown>)) {
-    if (!/^[a-z][a-z0-9-]{0,31}$/.test(id)) return { ok: false, error: `plan ${id}: a lowercase name` };
+    if (!new RegExp(RULES.plan.id).test(id)) return { ok: false, error: `plan ${id}: a lowercase name` };
     const p = raw as Record<string, unknown>;
-    if (typeof p?.name !== "string" || p.name.trim() === "" || p.name.length > 80) return { ok: false, error: `plan ${id}: a name` };
-    if (p.interval !== "month" && p.interval !== "year") return { ok: false, error: `plan ${id}: interval month or year` };
+    if (typeof p?.name !== "string" || p.name.trim() === "" || p.name.length > RULES.plan.nameMax) return { ok: false, error: `plan ${id}: a name` };
+    if (!(RULES.plan.interval as readonly unknown[]).includes(p.interval)) return { ok: false, error: `plan ${id}: interval ${RULES.plan.interval.join(" or ")}` };
     const prices: Partial<Record<Currency, number>> = {};
     for (const [c, amount] of Object.entries((p.prices ?? {}) as Record<string, unknown>)) {
       if (!(CURRENCIES as readonly string[]).includes(c)) return { ok: false, error: `plan ${id}: currency ${c}` };
-      if (!Number.isInteger(amount) || (amount as number) < 50 || (amount as number) > 1_000_000) return { ok: false, error: `plan ${id}: ${c} in minor units, 50 to 1000000` };
+      if (!Number.isInteger(amount) || (amount as number) < RULES.price.min || (amount as number) > RULES.price.max) return { ok: false, error: `plan ${id}: ${c} in minor units, ${RULES.price.min} to ${RULES.price.max}` };
       prices[c as Currency] = amount as number;
     }
     if (Object.keys(prices).length === 0) return { ok: false, error: `plan ${id}: a price` };
-    plans[id] = { name: p.name.trim(), interval: p.interval, prices };
+    plans[id] = { name: p.name.trim(), interval: p.interval as Plan["interval"], prices };
   }
   if (Object.keys(plans).length === 0) return { ok: false, error: "no plans" };
   if (d.trial === undefined) return { ok: true, published: { owner: d.owner, plans } };
   const t = d.trial as Record<string, unknown> | null;
   if (typeof t !== "object" || t === null) return { ok: false, error: "trial: an object" };
-  if (!Number.isInteger(t.months) || (t.months as number) < 1 || (t.months as number) > 23) return { ok: false, error: "trial: months 1 to 23" };
+  if (!Number.isInteger(t.months) || (t.months as number) < RULES.trial.monthsMin || (t.months as number) > RULES.trial.monthsMax) return { ok: false, error: `trial: months ${RULES.trial.monthsMin} to ${RULES.trial.monthsMax}` };
   if (!Array.isArray(t.plans) || t.plans.length === 0 || !t.plans.every((x) => typeof x === "string" && Object.hasOwn(plans, x))) {
     return { ok: false, error: "trial: plans the tenant sells" };
   }
-  const remindDays = t.remindDays ?? 7;
+  const remindDays = t.remindDays ?? RULES.trial.remindDays;
   if (!Number.isInteger(remindDays) || (remindDays as number) < 1) return { ok: false, error: "trial: remindDays at least 1" };
   return { ok: true, published: { owner: d.owner, plans, trial: { months: t.months as number, plans: t.plans as string[], remindDays: remindDays as number } } };
 }
@@ -227,7 +228,7 @@ export function trialSpent(subs: readonly Subscription[], tenant: string, accoun
 
 /** The state of an account's trial, from its newest subscription that began as one. */
 export interface TrialClaim {
-  state: "running" | "cancelled" | "converted" | "ended" | "failed";
+  state: typeof RULES.trialStates[number];
   amount: number;
   currency: string;
   /** When charging starts (started), in seconds: the trial's end. */

@@ -132,7 +132,7 @@ export def main [
 	# for Cloud Run's linux/amd64: no docker on the operator's machine.
 	let work = (mktemp -d)
 	mkdir $"($work)/billing/broker"
-	cp $"($here)/shared.ts" $"($work)/billing/"
+	cp $"($here)/shared.ts" $"($here)/rules.ts" $"($work)/billing/"
 	cp $"($here)/broker/main.ts" $"($here)/broker/core.ts" $"($here)/broker/stripe.ts" $"($here)/broker/door.ts" $"($here)/broker/fake.ts" $"($work)/billing/broker/"
 	$"FROM ($deno)\nWORKDIR /app\nCOPY billing /app/billing\nRUN [\"deno\", \"cache\", \"/app/billing/broker/main.ts\"]\nENV PORT=8080\nCMD [\"run\", \"--allow-net\", \"--allow-env\", \"/app/billing/broker/main.ts\"]\n" | save $"($work)/Dockerfile"
 	let image = $"($region)-docker.pkg.dev/($p)/($repository)/($service)"

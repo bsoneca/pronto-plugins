@@ -32,6 +32,7 @@ def at [key: string]: record -> string { transpose k v | where k == $key | get v
 # The broker's files as the image sees them under /app/billing, each a ConfigMap key.
 const files = [
 	{key: "shared.ts", from: "shared.ts", path: "shared.ts"}
+	{key: "rules.ts", from: "rules.ts", path: "rules.ts"}
 	{key: "main.ts", from: "broker/main.ts", path: "broker/main.ts"}
 	{key: "core.ts", from: "broker/core.ts", path: "broker/core.ts"}
 	{key: "stripe.ts", from: "broker/stripe.ts", path: "broker/stripe.ts"}
