@@ -1,9 +1,9 @@
 # pronto-armies (flags/live.nu: the armies kind of the push) against a stand-in for the app's SQL command
 # (fake_sql.py, which keeps army_catalog and its log in a JSON file and answers army_catalog_set and
 # army_catalog_drop as the database's functions do) on an app whose CUE is real: `show` writes nothing; a push to the
-# stack at hand writes everyone at once and only what changed; a push to production is refused with no cases, no
-# tester or no `production` scenario (nothing written), writes the testers' rows, runs the flag's production cases as
-# the tester, and then everyone's, dropping the testers'; a failing case writes back what was there; a dry run
+# stack at hand writes everyone at once and only what changed; a push to production is refused with no cases
+# (nothing written), writes everyone's rows at once, then runs the flag's production cases that sign in as no one
+# (PRONTO-284: no testers' stage); a failing case writes back what was there; a dry run
 # writes nothing; a rollback writes an earlier entry again as the newest.
 #   ./saytw --script tools.nu nu flags/test/armies_test.nu
 
@@ -30,8 +30,8 @@ armiesLive: {
 	local: \"($sql)\"
 	($livepart)
 }
-flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", url: \"https://shop.example\", testers: [\"tester-1\"], runAs: \"shop-run@shop-prod.iam.gserviceaccount.com\"}
-flagsCases: live: \"echo live $FLAG $ONLY $APP_URL $FLAGS_TESTER $CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT >> ran.log; test ! -f fail-live\"
+flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", url: \"https://shop.example\"}
+flagsCases: live: \"echo live $FLAG $ONLY $APP_URL ${FLAGS_TESTER:-} >> ran.log; test ! -f fail-live\"
 " | save -f $"($app)/flags_spec.cue"
 }
 def livex [args: list<string>, extra: record = {}] {
@@ -64,7 +64,7 @@ armies push $app --local | ignore
 check ((held).rows.sparta.version == 2 and (held).rows.sparta.entry.label == "Spartans" and ((held).log | length) == 2) "local push: a changed entry is the next version"
 check (open --raw $"($dir)/journal.jsonl" | lines | last | from json | get event | $in == "armies.write") "the push is journalled as the flags' are"
 
-# Production: no command for it, no cases, no tester, no production scenario: refused, nothing written.
+# Production: no command for it, or no cases: refused, nothing written.
 let n = ((held).log | length)
 let nolive = (livex [armies push $app])
 check ($nolive.exit_code != 0 and ($nolive.stderr | str contains "names no live command") and ((held).log | length) == $n) "no live command: refused"
@@ -75,28 +75,33 @@ mkdir $"($app)/tests/scenarios"
 'package scenarios
 scenarios: lobby: {flags: ["army_catalog_live"], steps: [{by: "tess", flag: "army_catalog_live", open: "/"}]}
 ' | save -f $"($app)/tests/scenarios/armies.cue"
+let v0 = (held).rows.sparta.version
 let noprod = (livex [armies push $app])
-check ($noprod.exit_code != 0 and ($noprod.stderr | str contains "no `production` scenario") and ((held).log | length) == $n) "no production scenario: refused, nothing written"
+check ($noprod.exit_code == 0 and (ran | is-empty) and (held).rows.sparta.version == $v0 + 1) "no production scenario: written for everyone, no case run"
+spec "Spartans" true
+livex [armies push $app] | ignore
+spec "Spartans of Pronto" true
 'package scenarios
 scenarios: lobby: {flags: ["army_catalog_live"], production: true, steps: [{by: "tess", flag: "army_catalog_live", open: "/"}]}
+scenarios: mine: {flags: ["army_catalog_live"], production: true, steps: [{by: "tess", signIn: true}]}
 ' | save -f $"($app)/tests/scenarios/armies.cue"
 
-# The live stage: the testers' row, the production cases as the tester, then everyone's row, and the testers' dropped.
+# The live stage: everyone's row at once, then the production cases that sign in as no one; no testers' row.
 let v = (held).rows.sparta.version
-armies push $app | ignore
-check ((ran) == ["live army_catalog_live lobby https://shop.example tester-1 shop-run@shop-prod.iam.gserviceaccount.com"]) "live push: only the production cases ran, as the tester"
+let ok = (livex [armies push $app])
+check ($ok.exit_code == 0 and ($ok.stderr | str contains "not run")) "live push: a case that signs in is listed, not run"
+check ((ran) == ["live army_catalog_live lobby https://shop.example"]) "live push: only the production cases that sign in as no one ran"
 check ((held).rows.sparta.version == $v + 1 and (held).rows.sparta.entry.label == "Spartans of Pronto") "live push: everyone's row is the new entry"
-check (("sparta/testers" in (held).rows) == false) "live push: the testers' row is gone"
-check ((held).log | any {|r| $r.key == "sparta/testers" and $r.entry != null }) "live push: the testers' stage was written first"
+check (not ((held).log | any {|r| $r.key == "sparta/testers" })) "live push: no testers' row was ever written"
 check (open --raw $"($dir)/journal.jsonl" | lines | last | from json | get cases | $in == "passed") "live push: the journal says the cases passed"
 
-# A case that fails: what was there is written again, the testers' row dropped.
+# A case that fails: what was there is written again.
 spec "Spartans of the North" true
 touch $"($app)/fail-live"
 let before = (held).rows.sparta
 let bad = (livex [armies push $app])
 check ($bad.exit_code != 0 and ($bad.stderr | str contains "rolled back") and ($bad.stderr | str contains "production cases failed")) "a failing case: the push fails"
-check ((held).rows.sparta.entry.label == $before.entry.label and ("sparta/testers" in (held).rows) == false) "a failing case: the entry is as it was, the testers' row dropped"
+check ((held).rows.sparta.entry.label == $before.entry.label and ("sparta/testers" in (held).rows) == false) "a failing case: the entry is as it was"
 check (open --raw $"($dir)/journal.jsonl" | lines | last | from json | get stage | $in == "rolled-back") "a failing case: the journal says rolled back"
 rm $"($app)/fail-live"
 
@@ -116,7 +121,9 @@ check ($wrong.exit_code != 0 and ((held).log | length) == $m) "--expect: another
 # History and rollback.
 let hist = (armies history $app --local --json | from json)
 check (($hist | length) == ((held).log | length) and $hist.0.version >= $hist.1.version) "history: every write, newest first"
+let live_v = (held).rows.sparta.version
+let want = ((held).log | where {|r| $r.key == "sparta" and $r.entry != null and $r.version != $live_v } | sort-by version --reverse | first | get entry.label)
 armies rollback $app sparta --local | ignore
-check ((held).rows.sparta.entry.label == "Spartans" or (held).rows.sparta.entry.label == "Spartans of Pronto") "rollback: the version before the live one, written again"
+check ((held).rows.sparta.entry.label == $want and (held).rows.sparta.version > $live_v) "rollback: the version before the live one, written again"
 let none = (livex [armies rollback $app sparta 999 --local])
 check ($none.exit_code != 0 and ($none.stderr | str contains "no earlier version")) "rollback to a version that isn't there is refused"

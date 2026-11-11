@@ -87,7 +87,7 @@ Deno.test("at hand: a test database holds the baked flags at hand's host; anothe
 Deno.test("a push's canary: on for the testers alone, then the final document for everyone", async () => {
   const pg = await db(await exported(SPEC, "flagd.sql"), false);
   const doc = await exported(SPEC, "flagd.document");
-  // As live.nu's canary-doc writes it: old and new variants, the testers' test first, then the rule it had.
+  // As live.nu's canary-doc wrote it before PRONTO-284 (an older version may still hold one): old and new variants, the testers' test first, then the rule it had.
   const canary = structuredClone(doc);
   canary.flags.premium = {
     state: "ENABLED", variants: { ...doc.flags.premium.variants, old: false, new: true }, defaultVariant: "default",

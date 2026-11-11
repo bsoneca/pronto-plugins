@@ -21,10 +21,9 @@ flags: {
 // flagsLive: {project: "<the release's project>", bucket: "<project>-flags"}
 // GCP: sidecars: flagd: env: FLAGD_SOURCES: flagsLive.sources
 //
-// A push of a changed flag runs its cases first (pronto-flags cases <app-dir> lists them):
-// on production for the testers alone, and only then for everyone.
+// A push writes the flags for everyone at once, then runs a changed flag's production cases
+// (pronto-flags cases <app-dir> lists them) on production; a failure writes the version before again.
 // flagsLive: url:     "https://<the released app's address>"
-// flagsLive: testers: ["<a production account only tests sign in as>"]
 // flagsCases: {
-// 	live:  "<the app's command for its production cases: env FLAG, ONLY, APP_URL, FLAGS_TESTER>"
+// 	live:  "<the app's command for its production cases: env FLAG, ONLY, APP_URL>"
 // }

@@ -1,7 +1,9 @@
 # A flag flip runs its flag's cases
 
-**Status:** the plugin side was built and merged on 2026-11-04 (#65). Bonk Chess is the first app
-being wired. Its production tester account is waiting on the owner's approval.
+**Status:** the plugin side was built and merged on 2026-11-04 (#65). On 2026-11-11 the owner
+dropped the tester (PRONTO-284: "drop the requirement of testers for flag flips"): a flip now
+writes the flag for everyone at once, then runs the cases that need no tester. Decisions 2 and 4
+below record the shape it had before, and what replaced it.
 
 **How to use it:** the [root README](../README.md#a-flip-runs-its-cases) explains the commands.
 This page records why the mechanism has this shape and what was decided.
@@ -29,33 +31,33 @@ A flip therefore needs a test of its own, and it must be:
    - The flag itself lists nothing. A test knows what it exercises, and a list on the flag would be
      a second place to keep in step.
    - `pronto-flags cases <app-dir> [flag]` prints the mapping.
-2. **The test user is the canary.** Flags already target accounts (`accounts`, used for the
-   operator's ad trial). A flip uses that same targeting:
-   - Production first reads the new value only for the app's `flagsLive.testers`, accounts that
-     only tests sign in as. Everyone else keeps the old value.
-   - The flag's `production` scenarios then run against the live site, signed in as the first
-     tester.
-   - Only after they pass is the flag on for everyone.
-   - Everything stays inside flagd's JSON logic. There is no new service, no new host, and no
-     preview to keep alive.
+2. **No tester, no canary (since 2026-11-11).** Until PRONTO-284 a flip was first on only for
+   `flagsLive.testers`, production accounts only tests signed in as, and the flag's `production`
+   scenarios ran signed in as the first tester before everyone got it. Bonk Chess's tester
+   account never came to exist in time, every flip waited on it, and the owner flipped with
+   `--no-canary` instead (pronto-plugins#184). Now every push is that push:
+   - it writes the flags as the spec says them, for everyone, in one version (`stage=all`);
+   - it then runs the flag's `production` scenarios that need no tester (no `signIn` step)
+     against the live site; one that signs in is listed and not run;
+   - `flagsLive.testers`, `runAs` and `alert` are no longer read, and nothing is snoozed.
+   The cost: a broken flag meets real players for the length of its cases (seconds) before it is
+   rolled back, where the canary kept it to the tester.
 3. **Nothing runs at hand.** A flip builds and launches no stack and runs no local case (the
-   user, 2026-11-07: "flips must not rebuild the stack", then "Test cases run against production
-   to that user"). The pull request that set the flag's value passed its gate with the flag on,
-   since every flag reads its `local` value at hand; the flip's own test is production, as the
-   tester. Until 2026-11-07 a flip ran `flagsCases.local`, a whole slowed `integrate@local`: 30+
-   minutes for a 12 s scenario.
+   user, 2026-11-07: "flips must not rebuild the stack"). The pull request that set the flag's
+   value passed its gate with the flag on, since every flag reads its `local` value at hand; the
+   flip's own test is production. Until 2026-11-07 a flip ran `flagsCases.local`, a whole slowed
+   `integrate@local`: 30+ minutes for a 12 s scenario.
 4. **A push stops if any check fails, and rolls back on its own.**
-   - A flip that cannot run its live stage (no tester, no `runAs`, a flag with no `production`
-     scenario) is refused before anything is written. `--skip-live` is gone: no tester, no flip.
-   - A live failure, or an OFREP that never answers the tester's value within 90 s, writes the
-     version read before the canary again as the newest. The push then prints the report and
-     exits non-zero.
+   - A flag with `production` scenarios whose app lacks `flagsLive.url` or `flagsCases.live` is
+     refused before anything is written.
+   - A live failure, or an OFREP that never answers the new value within 90 s, writes the version
+     read before the push again as the newest. The push then prints the report and exits non-zero.
    - The rollback is an ordinary version, so `history` shows it and `rollback` can undo it.
 5. **No cases means no flip.** A changed flag without cases is refused.
    - `--untested "<why>"` pushes it anyway, with a loud warning.
    - Both reasons are kept on the version's metadata, so history records each untested flip.
 6. **One mechanism, reused.** The push writes the same versioned object as before. The stages are
-   recorded in version metadata (`stage=testers|all|rolled-back`, `cases=…`), which `history`
+   recorded in version metadata (`stage=all|rolled-back`, `cases=…`; older versions may say `stage=testers`), which `history`
    shows. Each app's own runner (its scenario driver, `tests/unit.ts`) runs the cases. The plugin
    only selects them (`ONLY`, `UNIT_ONLY`) and sets the environment.
 7. **`rollback` stays the fast way out.** It runs no cases, since turning a broken feature off must
@@ -63,38 +65,18 @@ A flip therefore needs a test of its own, and it must be:
 
 ## The production guarantee
 
-Scenarios that run on production must never touch real players, real money, or what players see.
-Three rules hold that, each enforced by code rather than by convention:
+Scenarios that run on production must never touch real players, real money, or what players see:
 
 - **The schema.** Only scenarios marked `production: true` run on production. The app's scenario
-  schema limits such a scenario to one actor. That actor signs in as the tester and never signs up.
-  The schema allows no `pay` step, no other player, no table, move or game, and only GET requests.
-  Since nothing pays, Stripe (live) charges nothing.
-- **The runner.** The runner refuses any scenario not marked `production` when it runs as a tester
-  or against the host that `flagsLive.url` names.
-- **The tester's identity.** The tester signs in with a passkey whose credential is kept in Secret
-  Manager. That credential is imported into the browser's virtual authenticator, so no real
-  person's account is used. The tester never goes online in the lobby, so no player sees it.
+  schema limits such a scenario to one actor who never signs up. The schema allows no `pay` step,
+  no other player, no table, move or game, and only GET requests. Since nothing pays, Stripe
+  (live) charges nothing.
+- **No sign-in.** A flip runs only the `production` scenarios with no `signIn` step, so no
+  account is used at all; one that signs in (written for the tester's stage) is listed, not run.
+- **The runner.** The runner refuses any scenario not marked `production` against the host that
+  `flagsLive.url` names.
 
-- **Temporary targeting.** A tester is targeted only by the canary, for the live stage. A flag's
-  `accounts` may never name one: the CUE refuses it (`flagsLive.testers` and `accounts` are
-  disjoint), so no final or rolled-back version names a tester. Whatever fails after the canary
-  is written, an error or a crash of the cases' command, writes the pre-canary version again
-  (nu's `try`/`finally`); only a push killed outright leaves the canary, which is on for the
-  tester alone, and `rollback` removes it.
-- **The credential is the release identity's.** `flagsLive.runAs` is the service account the live
-  cases run as: the live command gets `CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=<runAs>`, so it
-  reads the tester's credential from Secret Manager as that account. The operator needs only
-  token-creator on it, never the secret. A push with testers and no `runAs` refuses the live stage.
-- **A monitoring window.** `flagsLive.alert` names the Cloud Monitoring alert policy that fires on
-  a tester's sign-in. A push snoozes it (`gcloud monitoring snoozes`) before the canary is written
-  and ends the snooze when the run ends, passed or rolled back (it also lapses on its own after
-  two hours). A sign-in at any other time still fires it.
-- **What each app enforces server-side** (the plugin cannot): the account carries a tester marker;
-  checkout refuses it; it is never in grants; the lobby, tables, seeks and chat refuse it; and its
-  gold and unlocks are reset after each run.
-
-The plugin's own tests run every stage against stand-ins for gcloud and OFREP (`fake_gcloud.py`,
+The plugin's own tests run every step against stand-ins for gcloud and OFREP (`fake_gcloud.py`,
 `fake_ofrep.py`). No production flag was flipped while this was built.
 
 ## Rejected alternatives
@@ -108,11 +90,8 @@ The plugin's own tests run every stage against stand-ins for gcloud and OFREP (`
 
 ## Open
 
-- **Bonk Chess's tester.** Making the production account is an owner-approved step
-  (`tests/tester.ts`, its credential in Secret Manager as `flags-tester-credential`, its id in
-  `flagsLive.testers`). Until it exists, Bonk Chess cannot flip a flag.
 - **At hand, a flag reads its `local` value.** The pull request's gate tests that value; the flip's
-  live stage tests the one production will read, as the tester.
+  live cases test the one production reads, for everyone.
 - **Turning a flag off also runs its cases.** In an emergency, use `rollback`, not an edited spec
   and a push.
 - **Release notes.** A flip's report is printed and kept on the version. It does not yet appear on

@@ -622,60 +622,43 @@ cases before the flag is on for everyone, and `rollback` stays the fast way out
 (it runs no cases):
 
 ```cue
-flagsLive: {url: "https://shop.example", testers: ["<a production account only tests sign in as>"], runAs: "<release identity>@<project>.iam.gserviceaccount.com", alert: "projects/<project>/alertPolicies/<id>"}
+flagsLive: {url: "https://shop.example"}
 flagsCases: {
-	live: "deno run -A tests/flip.ts"  // on production; env FLAG, ONLY, APP_URL, FLAGS_TESTER
+	live: "deno run -A tests/flip.ts"  // on production; env FLAG, ONLY, APP_URL
 }
 ```
 
 A flag's cases are the scenarios (`tests/scenarios/*.cue`) and unit cases
 (`tests/unit/*.cue`) that name it in `flags: ["<flag>"]`, or in a step's `flag`;
-`pronto-flags cases <app-dir> [flag]` lists them. A flip runs them on production,
-as the tester, and nothing at hand: it builds and launches no stack (the user,
-2026-11-07: "Test cases run against production to that user"). The pull
-request's gate already ran every case with the flag on, since at hand every flag
-reads its `local` value. `pronto-flags push <app-dir>` then:
+`pronto-flags cases <app-dir> [flag]` lists them. A flip runs nothing at hand: it
+builds and launches no stack, since the pull request's gate already ran every case
+with the flag on (at hand every flag reads its `local` value). No tester account is
+needed (the owner, 2026-11-11: "drop the requirement of testers for flag flips",
+PRONTO-284). `pronto-flags push <app-dir>`:
 
 1. reads the live object and finds the flags whose default value moves; a flag
    with no cases is refused, or pushed with `--untested "<why>"`, loudly;
-   `--no-canary "<why>"`, on the owner's go, skips steps 2 to 4 for every flag:
-   one version for everyone (`cases=skipped`, the reason in its note), no tester
-   and no case run (PRONTO-284);
-2. refuses, with nothing written, a flip whose app lacks what the live stage
-   needs (`flagsLive.url`, `testers`, `runAs`, `flagsCases.live`) or whose flag
-   has no `production` scenario: no tester, no flip;
-3. writes the flag on for `flagsLive.testers` alone and the old value for
-   everyone else (version metadata `stage=testers`), and waits until OFREP at
-   `flagsLive.url` answers the tester's key the new value and no key the old
-   one (every 2 s, 90 s at most);
-4. runs `flagsCases.live` against production, as the first tester, with the
-   flag's `production` scenarios; a failure, or an OFREP that never answers,
-   writes the version read before the canary again as the newest, prints the
-   report and exits non-zero;
-5. writes the flags as the spec says them (`stage=all`, `cases=passed`).
+2. refuses, with nothing written, a flip whose flag has `production` scenarios
+   while the app lacks `flagsLive.url` or `flagsCases.live`;
+3. writes the flags as the spec says them, for everyone, in one version
+   (`stage=all`); with no `production` case to run it stops there
+   (`cases=none on production`, or `untested`);
+4. otherwise waits until OFREP at `flagsLive.url` answers the new value (every
+   2 s, 90 s at most), runs `flagsCases.live` against production with the flag's
+   `production` scenarios that need no tester (no `signIn` step), and writes
+   `cases=passed`; a failure, or an OFREP that never answers, writes the version
+   read before the push again as the newest, prints the report and exits non-zero.
 
+A `production` scenario that signs in is listed and not run: a flip has no tester to
+sign in as. `--no-canary "<why>"` (pronto-plugins#184) is still accepted and does
+what every push does now; its reason is kept in the journal.
 `pronto-flags history` shows each version's stage, flag, cases verdict and reason.
 
-A tester is targeted only while the live stage runs: the CUE refuses a flag
-whose `accounts` name one, and whatever fails after the canary writes the version
-before it again. The live cases run as `flagsLive.runAs` (the command gets
-`CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT`), the release identity that reads the
-tester's credential, so the operator needs only token-creator on it, never the
-secret; a push with testers and no `runAs` refuses the live stage.
-`flagsLive.alert`, the Cloud Monitoring policy that fires on a tester's
-sign-in, is snoozed for exactly the live stage. The app enforces the rest on
-its server (tester marker, no checkout, never in grants, no lobby, tables, seeks
-or chat, gold and unlocks reset after each run); see
-[docs/flag-flips.md](docs/flag-flips.md).
-
 What runs on production is held narrow. Only scenarios marked `production: true`
-run there, and the scenario schema allows one actor, who signs in as the tester
-and never signs up, no payment step (`pay`), no other player and no move,
-table or game, and only GET requests. They run as the tester alone, whose
-passkey credential lives in Secret Manager and is imported into the virtual
-authenticator: no real player's data is touched, nothing is bought, and nothing
-shows in the lobby. The runner refuses a scenario that isn't marked `production`
-against the host `flagsLive.url` names.
+run there, and the scenario schema allows one actor, no sign-up, no payment step
+(`pay`), no other player and no move, table or game, and only GET requests. The
+runner refuses a scenario that isn't marked `production` against the host
+`flagsLive.url` names.
 
 ### pronto-armies: the second object kind of the push
 
@@ -696,19 +679,17 @@ In the app's spec: `armiesLive: {flag, rows, local, live}`. `rows` are the armie
 exported from the app's CUE (which refuses an unknown reskin, beat, asset or rig before anything
 is written); `local` and `live` are the commands that run SQL (on stdin; rows printed unaligned)
 in the stack at hand and in the released database; `flag` names the flag whose cases are the
-catalog's (`flags: ["<flag>"]`, `production: true`), and `flagsLive` supplies the tester, the
-address and `runAs`. A push of rows that are new or differ:
+catalog's (`flags: ["<flag>"]`, `production: true`), and `flagsLive.url` the address. A push
+of rows that are new or differ:
 
-1. needs cases, as a flip does (`--untested "<why>"` goes on with a warning), and the live stage's
-   `flagsLive.url`, `testers`, `runAs`, `flagsCases.live` and a `production` scenario;
-2. writes each changed army for the testers (`audience` testers: the page shows it to a tester
-   first);
-3. runs the flag's `production` scenarios against production as the first tester, which wait for
-   the army to reach the tester's page through the shape; a failure writes back what was there
-   (the entry it had, or no row) and fails the push;
-4. writes each for everyone and drops the testers' rows.
+1. needs cases, as a flip does (`--untested "<why>"` goes on with a warning), and, when the flag
+   has `production` scenarios, `flagsLive.url` and `flagsCases.live`;
+2. writes each changed army for everyone (and drops a testers' row an older push left);
+3. runs the flag's `production` scenarios that need no tester against production, which wait for
+   the army to reach the page through the shape; a failure writes back what was there (the entry
+   it had, or no row) and fails the push.
 
-`--local` writes everyone at once with no cases, as nothing at hand has a tester. Every write
+`--local` writes everyone at once with no cases. Every write
 prints `armies: target …`, takes `--expect <target>` and `--dry-run`, and is appended to the same
 journal as the flags' (`event: armies.write`). `history` lists every write of every row (the
 database keeps them); `rollback` writes an earlier entry again for everyone, as the newest.

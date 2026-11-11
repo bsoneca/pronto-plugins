@@ -60,7 +60,7 @@ def live [app: path] {
 	let at = (cue-of $app flagsLive)
 	if $at == null { error make {msg: $"($app)'s flags_spec.cue names no flagsLive: say `flagsLive: {project: \"…\", bucket: \"…\"}` there"} }
 	# `url` is the object's; flagsLive.url, production's address, is `site`.
-	let at = ($at | upsert site ($at.url? | default null) | upsert testers ($at.testers? | default []) | upsert runAs ($at.runAs? | default null) | upsert alert ($at.alert? | default null))
+	let at = ($at | upsert site ($at.url? | default null))
 	if ($at.dir? | default null) != null {
 		if ($at.bucket? | default null) != null { error make {msg: $"($app)'s flagsLive names both a bucket and a dir: say one"} }
 		let dir = if ($at.dir | str starts-with "/") { $at.dir | path expand } else { $app | path expand | path join $at.dir | path expand }
@@ -168,7 +168,7 @@ def provenance [app: path, at: record] {
 
 # The flags written where else a flagd reads them (flagsLive.mirrors): a release@k8s node's ConfigMap,
 # which its flagd mounts (release.cue's services.flagd.files), applied over ssh as the node's kubectl.
-# Each write of the live object is written there too: a push, its canary and restore, a rollback.
+# Each write of the live object is written there too: a push, its restore, a rollback.
 # A mirror that fails warns and the push goes on (a staging node), unless it is required (production).
 def mirror [at: record, text: string] {
 	for m in ($at.mirrors? | default []) {
@@ -310,7 +310,7 @@ def push-plain [app: path] {
 	write-flags (live $app) (cue-of $app flagd.document) $app --meta {stage: all, note: "first push"} | ignore
 }
 
-# ---- A flip runs its flag's cases (flags_plugin.cue: flagsCases, flagsLive.testers) ----
+# ---- A flip runs its flag's cases (flags_plugin.cue: flagsCases) ----
 
 # An expression of the CUE package in one of the app's folders (tests/scenarios, tests/unit); null where
 # the app has no such folder or the expression is not there.
@@ -352,7 +352,11 @@ def cases-of [app: path, flag: string] {
 		$flag in $named
 	})
 	let unit = (entries (cue-dir $app tests/unit cases) | where {|e| $flag in ($e.v.flags? | default []) })
-	{flag: $flag, scenarios: ($scen | each {|e| $e.id }), production: ($scen | where {|e| ($e.v.production? | default false) == true } | each {|e| $e.id }), unit: ($unit | each {|e| $e.id })}
+	let prod = ($scen | where {|e| ($e.v.production? | default false) == true })
+	# A production scenario that signs in (a `signIn` step) needs a tester's account, which a flip no longer has
+	# (PRONTO-284): it is listed, not run.
+	let signs = {|e| $e.v.steps? | default [] | any {|st| ($st.signIn? | default false) == true } }
+	{flag: $flag, scenarios: ($scen | each {|e| $e.id }), production: ($prod | where {|e| not (do $signs $e) } | each {|e| $e.id }), signedIn: ($prod | where {|e| do $signs $e } | each {|e| $e.id }), unit: ($unit | each {|e| $e.id })}
 }
 def has-cases [c: record]: nothing -> bool { ($c.scenarios | is-not-empty) or ($c.unit | is-not-empty) }
 
@@ -369,30 +373,11 @@ def run-cases [app: path, cmd: string, vars: record] {
 	{ok: ($r.exit_code == 0), out: ($r.stdout + $r.stderr | str trim)}
 }
 
-# The live document with each flag in `flags` at its old value for everyone and its new one for the
-# testers: variants {old, new} beside the ones it had, and the testers' test first in its targeting.
-def canary-doc [old: record, doc: record, flags: list<string>, testers: list<string>]: nothing -> record {
-	$flags | reduce -f $old {|f, acc|
-		let o = ($old.flags | get -o $f | default {})
-		let new = (default-of ($doc.flags | get $f))
-		# A flag the live object doesn't have yet reads as off, or as itself where it isn't a bool.
-		let was = if ($o | is-empty) { if ($new | describe) == "bool" { false } else { $new } } else { default-of $o }
-		let rest = if ($o.targeting? | describe | str starts-with "record") { $o.targeting } else { "old" }
-		let def = {
-			state: "ENABLED"
-			variants: (($o.variants? | default {}) | merge {old: $was, new: $new})
-			defaultVariant: ($o.defaultVariant? | default "old")
-			targeting: {"if": [{"in": [{"var": "targetingKey"}, $testers]}, "new", $rest]}
-		}
-		$acc | upsert flags ($acc.flags | upsert $f $def)
-	}
-}
-
 # What OFREP answers for a flag and a targetingKey (none: no context); null where it doesn't answer.
 # Where the flags are mirrored to a node (flagsLive.mirrors), its flagd is asked itself, from the node, at its
 # Service's address (the mirror's `flagd`, default "flagd", port `ofrepPort`, default 8693): the app's door names
 # the account from a verified session alone and drops a body's targetingKey (pronto-plugins#113), so the site's
-# /ofrep/ answers every request as no account and never shows the tester's canary (PRONTO-257). Elsewhere, the
+# /ofrep/ answers every request as no account (PRONTO-257), and the node's flagd answers before a cache could. Elsewhere, the
 # site's /ofrep/. FLAGS_OFREP_CMD stands in for the request in tests: an sh command printing the reply, given
 # OFREP_URL, FLAG and TARGETING_KEY.
 def ofrep-ask [at: record, flag: string, key: any] {
@@ -416,14 +401,14 @@ def ofrep-ask [at: record, flag: string, key: any] {
 	} catch { null }
 }
 
-# Waits until OFREP answers each flag's new value for the tester and its old one with no context: polls
-# every FLAGS_POLL_SEC (2), gives up at FLAGS_WAIT_SEC (90). Whether it did.
-def wait-ofrep [at: record, tester: string, want: list<record>]: nothing -> bool {
+# Waits until OFREP answers each flag's new value for everyone (no context): polls every FLAGS_POLL_SEC (2),
+# gives up at FLAGS_WAIT_SEC (90). Whether it did.
+def wait-ofrep [at: record, want: list<record>]: nothing -> bool {
 	let poll = ($env.FLAGS_POLL_SEC? | default 2 | into float)
 	let limit = ($env.FLAGS_WAIT_SEC? | default 90 | into float)
 	mut waited = 0.0
 	loop {
-		let ok = ($want | all {|w| (ofrep-ask $at $w.flag $tester) == $w.new and (ofrep-ask $at $w.flag null) == $w.old })
+		let ok = ($want | all {|w| (ofrep-ask $at $w.flag null) == $w.new })
 		if $ok { return true }
 		if $waited >= $limit { return false }
 		sleep ($poll * 1sec)
@@ -438,19 +423,17 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 	print -e $"flags: ($at.url) is version ($to)'s flags again, as version ($again)"
 }
 
-# Changes the live flags. A flag whose default value changes (or that is new) goes through its cases, on
-# production as the tester (the user, 2026-11-07: "Test cases run against production to that user"; a flip
-# builds and launches no stack, and runs nothing at hand: the pull request's gate ran the flag's cases with
-# it on, every flag being on at hand):
-#   1. it needs cases (`cases`); with none the push is refused, or goes on with --untested "<why>";
-#   2. it needs what the live stage needs: flagsLive.url, testers and runAs, flagsCases.live, and a `production`
-#      scenario of its own; with any missing the push is refused, nothing written;
-#   3. the flag is written on for flagsLive.testers alone, everyone else keeping the old value (stage=testers),
-#      and the push waits until OFREP at flagsLive.url says so;
-#   4. flagsCases.live runs the flag's `production` scenarios against production as the tester; a failure
-#      writes the version read in 3 again, and the push fails;
-#   5. the flags as the spec says them are written (stage=all, cases=passed).
-# A flag turned off (default now false) skips 1-4: it returns to the path before it, and its cases test it on.
+# Changes the live flags, for everyone at once, in one version (the owner, 2026-11-11: "drop the requirement of
+# testers for flag flips"; PRONTO-284). A flip builds and launches no stack: the pull request's gate ran the flag's
+# cases at hand, every flag being on there.
+#   1. a flag whose default value changes (or that is new) needs cases (`cases`: scenarios or unit cases that name
+#      it); with none the push is refused, or goes on with --untested "<why>";
+#   2. the flags as the spec says them are written (stage=all);
+#   3. where a changed flag has `production` scenarios that need no tester (no `signIn` step), the push waits until
+#      OFREP says the new value, runs them against production (flagsCases.live, APP_URL=flagsLive.url), and a
+#      failure writes the version read before 2 again, and the push fails. A production scenario that signs in
+#      needs a tester's account, which a flip no longer has: it is listed and not run.
+# A flag turned off (default now false) runs no cases: it returns to the path before it, and its cases test it on.
 export def push [app: path, --untested: string, --no-canary: string, --expect: string] {
 	let at = (live $app)
 	if (target-guard $at $expect) { show $app; print "flags: dry run: nothing written"; return }
@@ -462,54 +445,36 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 		write-flags $at $doc $app --meta {stage: all} --from $before | ignore
 		return
 	}
+	# --no-canary was the way past the testers' stage (pronto-plugins#184); every push is that way now.
+	if $no_canary != null { print -e "flags: --no-canary is every push's way now (PRONTO-284); its reason is kept in the journal" }
 	# A flag turned off (its default now false) returns to the path the app ran before it went on; its
-	# cases test it on, so they cannot pass on the tester with it off (2026-11-08, card_chess: the user's
-	# "Rollback card game"). It goes to everyone with no cases, and the journal says so.
+	# cases test it on (2026-11-08, card_chess: the user's "Rollback card game"). No cases run.
 	let off = ($changed | where {|f| (default-of ($doc.flags | get $f)) == false })
 	if ($off | is-not-empty) { print -e $"flags: ($off | str join ', ') turned off: no cases run \(they test the flag on\)" }
 	let all = ($changed | where {|f| $f not-in $off } | each {|f| cases-of $app $f })
-	# --no-canary "<why>": the owner's go to turn the flags on for everyone at once, with no tester stage and
-	# no cases run (2026-11-11, army_fights: "Can you flip army_fights with no test canary?"; PRONTO-284).
-	let bare = if $no_canary != null { [] } else { $all | where {|c| not (has-cases $c) } | each {|c| $c.flag } }
-	let tested = if $no_canary != null { [] } else { $all | where {|c| has-cases $c } }
-	if $no_canary != null { print -e $"flags: WARNING: ($changed | str join ', ') pushed to everyone with NO CANARY and no cases run: ($no_canary)" }
+	let bare = ($all | where {|c| not (has-cases $c) } | each {|c| $c.flag })
 	if ($bare | is-not-empty) and $untested == null {
-		error make {msg: $"a push changes ($bare | str join ', '), which has no cases: name the flag in a scenario's `flags` and mark it `production` (tests/scenarios/*.cue; `pronto-flags cases` lists them), or push with --untested \"<why>\""}
+		error make {msg: $"a push changes ($bare | str join ', '), which has no cases: name the flag in a scenario's `flags` \(tests/scenarios/*.cue\) or a unit case's \(tests/unit/*.cue\); `pronto-flags cases` lists them; or push with --untested \"<why>\""}
 	}
+	let live = ($all | where {|c| $c.production | is-not-empty })
 	let cmds = (cue-of $app flagsCases | default {})
-	let testers = $at.testers
-	if ($tested | is-not-empty) {
-		if ($at.site | is-empty) or ($testers | is-empty) or ($cmds.live? | default "" | is-empty) {
-			error make {msg: "a flip runs its cases on production as a tester: say flagsLive.url, flagsLive.testers and flagsCases.live (the tester is made once, by the operator: the app's tests/tester.ts)"}
-		}
-		if ($at.runAs? | default "" | is-empty) {
-			error make {msg: "the tester's credential is the release identity's, not the operator's: say flagsLive.runAs (a service account the operator may impersonate)"}
-		}
-		let none = ($tested | where {|c| $c.production | is-empty } | each {|c| $c.flag })
-		if ($none | is-not-empty) { error make {msg: $"($none | str join ', ') has no `production` scenario to run on production as the tester: mark one \(production: true, tests/scenarios/schema.cue\)"} }
+	if ($live | is-not-empty) and (($at.site | default "" | is-empty) or ($cmds.live? | default "" | is-empty)) {
+		error make {msg: $"($live | get flag | str join ', ') has production cases: say flagsLive.url and flagsCases.live, which run them on production after the flip"}
+	}
+	for c in ($all | where {|c| $c.signedIn | is-not-empty }) {
+		print -e $"flags: ($c.flag): not run, they sign in as a tester a flip no longer has: ($c.signedIn | str join ', ')"
 	}
 	let names = ($changed | str join "+")
 	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if $no_canary != null { $"no canary: ($no_canary)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" })] | compact | str join "; ")
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
-	if ($tested | is-empty) {
-		write-flags $at $doc $app --meta {stage: all, flag: $names, cases: (if $no_canary != null { "skipped" } else { "untested" }), note: $notes} --from $before | ignore
+	if ($live | is-empty) {
+		write-flags $at $doc $app --meta {stage: all, flag: $names, cases: (if ($bare | is-not-empty) { "untested" } else { "none on production" }), note: $notes} --from $before | ignore
 		tell-board $at $app ($changed | where {|f| $f not-in $off }) $off
 		return
 	}
-
-	let on = ($tested | each {|c| $c.flag })
-	let final = {stage: all, flag: $names, cases: passed, note: $notes}
-	# The alert that fires on a tester's sign-in is snoozed for exactly the live stage, however it ends.
-	let snooze = (snooze-start $at $on)
 	# Not `try ... finally`: nu runs what follows it and raises the error only at the end, so a failed flip
 	# told the board its flags were on for everyone (PRONTO-15 Done at 18:02 BRT, 2026-11-08; PRONTO-43).
-	try {
-		flip-live $at $app $old $doc $on $tested $cmds $before $final
-	} catch {|e|
-		snooze-end $at $snooze
-		error make {msg: $e.msg}
-	}
-	snooze-end $at $snooze
+	flip-live $at $app $doc $live $cmds $before {stage: all, flag: $names, note: $notes}
 	tell-board $at $app ($changed | where {|f| $f not-in $off }) $off
 }
 
@@ -533,43 +498,24 @@ def tell-board [at: record, app: path, on: list<string>, off: list<string>] {
 	} catch {|e| print -e $"flags: WARNING: the board was not told: ($e.msg | lines | first)" }
 }
 
-# Cloud Monitoring's snooze of flagsLive.alert, for the live stage of a flip: a name to end it by, or null where
-# the app names no alert. The snooze ends on its own after two hours should the push never end it.
-def snooze-start [at: record, flags: list<string>] {
-	if ($at.alert? | default "" | is-empty) or (is-dir $at) { return null }
-	let from = (date now | date to-timezone utc)
-	let name = (gc monitoring snoozes create --project $at.project --display-name $"pronto-flags flip: ($flags | str join ' ')" --criteria-policies $at.alert --start-time ($from | format date "%Y-%m-%dT%H:%M:%SZ") --end-time ($from + 2hr | format date "%Y-%m-%dT%H:%M:%SZ") --format "value(name)" | str trim)
-	print $"flags: ($at.alert) is snoozed for the live stage \(($name)\)"
-	$name
-}
-def snooze-end [at: record, name: any] {
-	if $name == null { return }
+# The live stage: the flags written for everyone, OFREP's word, then the production cases that need no tester, as
+# no one in particular. Whatever fails after the write, an error or a crash of the cases' command, writes the
+# version read before it again.
+def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: record, before: string, meta: record] {
+	let on = ($live | get flag)
+	let v = (write-flags $at $doc $app --meta ($meta | insert cases running) --from $before)
+	print $"flags: ($on | str join ', ') is on for everyone; waiting for OFREP to say so"
 	try {
-		gc monitoring snoozes update $name --project $at.project --end-time (date now | date to-timezone utc | format date "%Y-%m-%dT%H:%M:%SZ") | ignore
-		print $"flags: ($at.alert) is no longer snoozed"
-	} catch {|e| print -e $"flags: WARNING: could not end the snooze ($name) of ($at.alert); it ends by itself within two hours: ($e.msg)" }
-}
-
-# The live stage: the canary (the flags on for the testers alone), OFREP's word, the production cases, then the
-# final version. Whatever fails after the canary was written, an error or a crash of the cases' command, writes the
-# version read before it again: the testers are named in no version that outlives the run.
-def flip-live [at: record, app: path, old: record, doc: record, on: list<string>, tested: list<record>, cmds: record, before: string, final: record] {
-	let testers = $at.testers
-	let canary = (write-flags $at (canary-doc $old $doc $on $testers) $app --meta {stage: testers, flag: ($on | str join "+"), cases: running} --from $before)
-	print $"flags: ($on | str join ', ') is on for ($testers | str join ', ') alone; waiting for ($at.site) to say so"
-	try {
-		let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f)), old: (canary-doc $old $doc [$f] $testers | get flags | get $f | get variants.old)} })
-		if not (wait-ofrep $at $testers.0 $want) {
-			error make {msg: $"($at.site) did not answer the new value for ($testers.0) within the wait"}
-		}
-		for c in $tested {
-			print $"flags: ($c.flag): running its production cases as ($testers.0) \(($c.production | str join ', ')\)"
-			let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site, FLAGS_TESTER: $testers.0, CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT: $at.runAs})
+		let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f))} })
+		if not (wait-ofrep $at $want) { error make {msg: $"OFREP did not answer the new value of ($on | str join ', ') within the wait"} }
+		for c in $live {
+			print $"flags: ($c.flag): running its production cases \(($c.production | str join ', ')\)"
+			let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site})
 			if not $r.ok { error make {msg: $"($c.flag)'s production cases failed:\n($r.out)"} }
 		}
-		write-flags $at $doc $app --meta $final --from $canary | ignore
+		write-flags $at $doc $app --meta ($meta | insert cases passed) --from $v | ignore
 	} catch {|e|
-		try { restore $at $app $before $canary ($on | str join "+") ($e.msg | lines | first) } catch {|r| print -e $"flags: WARNING: could not restore version ($before) over the canary: ($r.msg); `pronto-flags rollback` does" }
+		try { restore $at $app $before $v ($on | str join "+") ($e.msg | lines | first) } catch {|r| print -e $"flags: WARNING: could not restore version ($before): ($r.msg); `pronto-flags rollback` does" }
 		error make {msg: $"rolled back to version ($before): ($e.msg)"}
 	}
 }
@@ -646,17 +592,17 @@ export def setup [app: path, --expect: string] {
 # An app's live armies (Bonk Chess: spec/army_catalog.cue) are rows of its database's `army_catalog` table, which
 # the page reads as a shape, not an object in a bucket. They are published by the push above, one kind over: the
 # same validate (the app's CUE exports the rows, refusing what it does not allow), optimistic write (a row is
-# written over the version it read), provenance and journal, testers first, the flag's `production` cases run as the
-# tester (cases-of, run-cases), then everyone, and the version read written again on a failure. Only the store
+# written over the version it read), provenance and journal, everyone at once, then the flag's `production` cases that
+# need no tester (cases-of, run-cases), and the version read written again on a failure. Only the store
 # differs: the rows are written by the database's own SECURITY DEFINER functions (player_record.army_catalog_set and
 # army_catalog_drop), through a command the app names, so no app role can write a catalog.
 #   bin/pronto-armies push <app-dir> [--local] [--untested "<why>"]   # the app's armiesLive.rows, once their cases pass
 #   bin/pronto-armies show <app-dir> [--local]                          # what a push would write, and where: nothing written
 #   bin/pronto-armies history <app-dir> [--local]                       # every write of every row, newest first
 #   bin/pronto-armies rollback <app-dir> <army> [version] [--local]     # the version before the live one, or the one named
-# --local pushes to the stack at hand (armiesLive.local): everyone at once, no cases, as nothing at hand has a tester.
+# --local pushes to the stack at hand (armiesLive.local): everyone at once, no cases.
 
-# The app's armiesLive with the testers, address and runAs of its flagsLive.
+# The app's armiesLive with the address of its flagsLive.
 def armies-at [app: path, local: bool] {
 	let a = (cue-of $app armiesLive)
 	if $a == null { error make {msg: $"($app)'s flags_spec.cue names no armiesLive: say `armiesLive: {flag: \"…\", rows: […], local: \"…\"}` there"} }
@@ -669,7 +615,7 @@ def armies-at [app: path, local: bool] {
 	{
 		flag: $a.flag, rows: $a.rows, cmd: $cmd, local: $local
 		target: $"armies:(if $local { 'local' } else { 'live' }):($cmd)"
-		site: ($f.url? | default ""), testers: ($f.testers? | default []), runAs: ($f.runAs? | default null), alert: ($f.alert? | default null)
+		site: ($f.url? | default "")
 	}
 }
 
@@ -723,17 +669,15 @@ export def armies-show [app: path, --local] {
 	} | print
 }
 
-# Publishes armiesLive.rows. A row that is new or differs is a flip of the catalog, and runs the flag's cases:
+# Publishes armiesLive.rows, for everyone at once (PRONTO-284, as the flags' push). A row that is new or differs is a
+# flip of the catalog, and runs the flag's cases:
 #   1. it needs cases (`cases`: the scenarios and unit cases that name the flag); with none the push is refused, or
 #      goes on with --untested "<why>";
-#   2. it needs what the live stage needs: flagsLive.url, testers and runAs, flagsCases.live, and a `production`
-#      scenario of the flag's; with any missing it is refused, nothing written;
-#   3. each changed army is written for the testers alone (audience testers), everyone else keeping what they had;
-#   4. flagsCases.live runs the flag's `production` scenarios against production as the tester, which look for the
-#      army in the page the shape built (their steps wait for the shape to deliver it); a failure writes what was
-#      there before, and the push fails;
-#   5. each is written for everyone and the testers' rows dropped.
-# --local: the stack at hand (armiesLive.local), written for everyone at once, no cases.
+#   2. each changed army is written for its audience, and a testers' row an earlier push left is dropped;
+#   3. where the flag has `production` scenarios that need no tester (no `signIn` step), flagsCases.live runs them
+#      against production (they look for the army in the page the shape built, waiting for the shape to deliver it);
+#      a failure writes what was there before, and the push fails.
+# --local: the stack at hand (armiesLive.local), no cases.
 export def armies-push [app: path, --local, --untested: string, --expect: string] {
 	let at = (armies-at $app $local)
 	if (target-guard {url: $at.target} $expect) { armies-show $app --local=$local; print "armies: dry run: nothing written"; return }
@@ -751,46 +695,37 @@ export def armies-push [app: path, --local, --untested: string, --expect: string
 	}
 	let c = (cases-of $app $at.flag)
 	if not (has-cases $c) and $untested == null {
-		error make {msg: $"a push of ($names | str join ', ') has no cases: name the flag ($at.flag) in a scenario's `flags` and mark it `production` \(tests/scenarios/*.cue; `pronto-flags cases` lists them\), or push with --untested \"<why>\""}
+		error make {msg: $"a push of ($names | str join ', ') has no cases: name the flag ($at.flag) in a scenario's `flags` or a unit case's \(`pronto-flags cases` lists them\), or push with --untested \"<why>\""}
 	}
 	let cmds = (cue-of $app flagsCases | default {})
-	let note = (if $untested != null { $"untested: ($untested)" } else { "" })
-	if (has-cases $c) {
-		if ($at.site | is-empty) or ($at.testers | is-empty) or ($cmds.live? | default "" | is-empty) {
-			error make {msg: "a push runs its cases on production as a tester: say flagsLive.url, flagsLive.testers and flagsCases.live (the tester is made once, by the operator: the app's tests/tester.ts)"}
-		}
-		if ($at.runAs? | default "" | is-empty) { error make {msg: "the tester's credential is the release identity's, not the operator's: say flagsLive.runAs"} }
-		if ($c.production | is-empty) { error make {msg: $"($at.flag) has no `production` scenario to run on production as the tester: mark one \(production: true, tests/scenarios/schema.cue\)"} }
+	if ($c.production | is-not-empty) and (($at.site | is-empty) or ($cmds.live? | default "" | is-empty)) {
+		error make {msg: $"($at.flag) has production cases: say flagsLive.url and flagsCases.live, which run them on production after the push"}
 	}
+	if ($c.signedIn | is-not-empty) { print -e $"armies: ($at.flag): not run, they sign in as a tester a push no longer has: ($c.signedIn | str join ', ')" }
+	let note = (if $untested != null { $"untested: ($untested)" } else { "" })
 	if $untested != null and not (has-cases $c) { print -e $"armies: WARNING: ($names | str join ', ') pushed with NO CASES: ($untested)" }
-	let snooze = (if (has-cases $c) { snooze-start $at [$at.flag] } else { null })
-	try { armies-live $app $at $have $changed $c $cmds $note } finally { snooze-end $at $snooze }
+	armies-live $app $at $have $changed $c $cmds $note
 }
 
 # The live stage. The state before it is kept, and written again by whatever fails after the first write.
 def armies-live [app: path, at: record, have: list<record>, changed: list<record>, c: record, cmds: record, note: string] {
 	let before = ($changed | each {|w| {army: $w.army, everyone: ($have | where id == $w.army | get -o 0), testers: ($have | where id == $"($w.army)/testers" | get -o 0)} })
 	let names = ($changed | get army)
-	let staged = ($changed | where audience == "everyone")
+	let run = ($c.production | is-not-empty)
 	try {
 		for w in $changed {
-			let aud = if $w.audience == "everyone" { "testers" } else { $w.audience }
 			let b = ($before | where army == $w.army | first)
-			let v = (army-set $at $w $aud (row-version (if $aud == "testers" { $b.testers } else { $b.everyone })))
-			print $"armies: ($w.army) is version ($v) for ($aud)"
+			let v = (army-set $at $w $w.audience (row-version (if $w.audience == "testers" { $b.testers } else { $b.everyone })))
+			print $"armies: ($w.army) is version ($v) for ($w.audience)"
+			if $w.audience == "everyone" and $b.testers != null { army-drop $at $w.army "testers" null | ignore }
 		}
-		army-journal $app $at testers $names (if (has-cases $c) { "running" } else { "untested" }) $note
-		if (has-cases $c) {
-			print $"armies: ($names | str join ', ') is in the page of ($at.testers | str join ', ') alone; running its production cases as ($at.testers.0) \(($c.production | str join ', ')\)"
-			let r = (run-cases $app $cmds.live {FLAG: $at.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site, FLAGS_TESTER: $at.testers.0, CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT: $at.runAs})
+		army-journal $app $at all $names (if $run { "running" } else if (has-cases $c) { "none on production" } else { "untested" }) $note
+		if $run {
+			print $"armies: ($names | str join ', ') is in everyone's page; running its production cases \(($c.production | str join ', ')\)"
+			let r = (run-cases $app $cmds.live {FLAG: $at.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site})
 			if not $r.ok { error make {msg: $"($at.flag)'s production cases failed:\n($r.out)"} }
+			army-journal $app $at all $names passed $note
 		}
-		for w in $staged {
-			let v = (army-set $at $w "everyone" (row-version ($before | where army == $w.army | first | get everyone)))
-			print $"armies: ($w.army) is version ($v) for everyone"
-			army-drop $at $w.army "testers" null | ignore
-		}
-		army-journal $app $at all $names (if (has-cases $c) { "passed" } else { "untested" }) $note
 	} catch {|e|
 		# What was there before is written again: an army that had a row gets its entry back, one that had none loses the row.
 		for b in $before {
