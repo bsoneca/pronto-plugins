@@ -186,3 +186,41 @@ cases: {
 		{call: "ghboard.linksOf", args: [[{body: "<!-- devflow:link https://github.com/a/b/pull/4 -->\nLinked"}, {body: "a comment"}, {body: "<!-- devflow:link https://github.com/a/b/pull/4 -->"}, {body: "<!-- devflow:link https://github.com/a/b/pull/9 -->"}]], expect: [{url: "https://github.com/a/b/pull/4"}, {url: "https://github.com/a/b/pull/9"}]},
 	]}
 }
+
+// A flag merged off gets its flip issue (PRONTO-265): the flags a merge added off, their notes, the
+// flip issue's title, and the one a flip finishes.
+cases: {
+	"a merge's added flags are those new in its flagd file whose default is off": {suite: "devflow", steps: [
+		{call: "devflow.addedFlags", args: [
+			{flags: {ads: {variants: {default: false, local: true}, defaultVariant: "default"}}},
+			{flags: {
+				ads: {variants: {default: false, local: true}, defaultVariant: "default"}
+				shop: {variants: {default: false, local: true}, defaultVariant: "default"}
+				premium: {variants: {default: true}, defaultVariant: "default"}
+				grants: {variants: {default: "[]"}, defaultVariant: "default"}
+			}}], expect: ["shop"], why: "ads was there; premium is on where released; grants is no switch"},
+		{call: "devflow.addedFlags", args: [null, {flags: {b: {variants: {default: false}, defaultVariant: "default"}, a: {variants: {default: false}, defaultVariant: "default"}}}], expect: ["a", "b"], why: "a new flagd file: all its off flags, sorted"},
+		{call: "devflow.addedFlags", args: [{flags: {a: {variants: {default: false}, defaultVariant: "default"}}}, {flags: {}}], expect: [], why: "a flag removed is no flip"},
+	]}
+	"a flag's note is read from flags_spec.cue, in either way a flag is written": {suite: "devflow", steps: [
+		{call: "devflow.flagNote", args: ["flags: {\n\tpremium: {\n\t\tnote: \"\"\"\n\t\t\tPlus and Premium:\n\t\t\tthe offer.\n\t\t\t\"\"\"\n\t\tdefault: true\n\t}\n}\n", "premium"], expect: "Plus and Premium: the offer."},
+		{call: "devflow.flagNote", args: ["flags: ads: {\n\tnote: \"\"\"\n\t\tRewarded ads.\n\t\t\"\"\"\n\tdefault: false\n}\n", "ads"], expect: "Rewarded ads."},
+		{call: "devflow.flagNote", args: ["flags: a: {\n\tdefault: false\n}\nflags: b: {\n\tnote: \"\"\"\n\t\tB's.\n\t\t\"\"\"\n}\n", "a"], expect: null, why: "a flag without a note never takes the next flag's"},
+		{call: "devflow.flagNote", args: ["flags: {}\n", "ads"], expect: null},
+	]}
+	"a flip issue is titled for its flag and app, and found by title and module, whatever its state": {suite: "devflow", steps: [
+		{call: "devflow.flipTitle", args: ["ads", "brawl-chess"], expect: "Flip ads on in brawl-chess"},
+		{call: "devflow.flipOf", args: ["Flip ads on in Bonk Chess"], expect: "ads", why: "PRONTO-225, filed by hand"},
+		{call: "devflow.flipOf", args: ["Flip `ads` on in Bonk Chess"], expect: "ads"},
+		{call: "devflow.flipOf", args: ["Ads: rewarded ads for reviews"], expect: null},
+		{call: "devflow.flipIssueOf", args: [[{name: "Flip ads on in Bonk Chess", modules: ["brawl-chess"], key: 225}], "ads", "brawl-chess"], expect: {name: "Flip ads on in Bonk Chess", modules: ["brawl-chess"], key: 225}, why: "the one filed by hand is reused, not filed twice"},
+		{call: "devflow.flipIssueOf", args: [[{name: "Flip ads on in Bonk Chess", modules: ["brawl-chess"]}], "ads", "studio"], expect: null, why: "another app's flag of the same name"},
+		{call: "devflow.flipIssueOf", args: [[{name: "Ads in the shop", modules: ["brawl-chess"]}], "ads", "brawl-chess"], expect: null},
+	]}
+	"a flip finishes the flag's flip issue from wherever it waits": {suite: "devflow", steps: [
+		{call: "devflow.flipIssueMove", args: ["backlog"], expect: "done", why: "it waits in the Backlog for the owner's go"},
+		{call: "devflow.flipIssueMove", args: ["implementing"], expect: "done"},
+		{call: "devflow.flipIssueMove", args: ["done"], expect: null},
+		{call: "devflow.flipIssueMove", args: ["cancelled"], expect: null, why: "a flag the owner said stays off"},
+	]}
+}
