@@ -10,8 +10,8 @@
 //   board.ts close <repo> [<n>] [--json]                a finished sprint's report (the last finished by default)
 //   board.ts next <repo> [--theme <t>] <KEY...>          plan into the next sprint (made when absent), in Refine; refuses past a lane's capacity
 import { flagsOf } from "../intents/shell.ts";
-import { esc, type Issue } from "./board/board.ts";
-import { bugPlace, capacity, dayOf, laneOf, loopOf, mayPlan, mayStart, nameOf, priorityOf, pullNext, roleOf, sprintName, sprintNumber } from "./flow.js";
+import { type Cycle, esc, type Issue } from "./board/board.ts";
+import { bugPlace, capacity, laneOf, loopOf, mayPlan, mayStart, nameOf, priorityOf, pullNext, roleOf, sprintDates, sprintEndFor, sprintName, sprintNumber } from "./flow.js";
 import { boardOf, devflowOf, type Role } from "./spec.ts";
 
 const [verb, repoArg, ...rest] = Deno.args;
@@ -62,13 +62,20 @@ async function sprints() {
   return { loop, all, current: byN(loop.current), next: byN(loop.next), byN };
 }
 type Sprint = NonNullable<Awaited<ReturnType<typeof sprints>>["current"]>;
-/** The sprint numbered `n`, made (named with `theme`) when absent. */
+/** A sprint's cycle, its end moved forward when it nears (flow.js sprintEndFor), so the board keeps
+ * taking issues into it for as long as the sprint runs. */
+async function keepOpen(cycle: Cycle) {
+  const end = board.setCycleEnd ? sprintEndFor(cycle.end_date, new Date()) : null;
+  if (end) await board.setCycleEnd!(project, cycle.id, end);
+  return end ? { ...cycle, end_date: end } : cycle;
+}
+/** The sprint numbered `n`, made (named with `theme`) when absent, open-ended (flow.js sprintDates). */
 async function sprintCycle(n: number, theme: string) {
   const s = await sprints();
   const found = s.byN(n);
-  if (found) return found.cycle;
-  const day = dayOf(new Date(), flow!.sprint.timeZone);
-  return await board.createCycle(project, sprintName(n, theme), day, day, (await board.me()).id);
+  if (found) return await keepOpen(found.cycle);
+  const { start, end } = sprintDates(new Date());
+  return await board.createCycle(project, sprintName(n, theme), start, end, (await board.me()).id);
 }
 const titleOf = (s: Sprint | null) => (s ? s.cycle.name : "none");
 
@@ -141,6 +148,8 @@ async function pull(l: string) {
   const all = await board.issues(project);
   for (const sp of [current, next]) {
     if (!sp) continue;
+    // Each pull keeps the open sprints' cycles open, so a hook can still add to them.
+    await keepOpen(sp.cycle);
     const ids = new Set(sp.issues.map((i) => i.id));
     const ready = all.filter((i) => ids.has(i.id) && roleAt(i.state) === "ready" && lane(i) === l);
     const pick = pullNext(ready.map((i) => ({ key: key(i), sequence: i.sequence_id, priority: i.priority })), order);
@@ -184,7 +193,7 @@ async function file() {
   let into = "";
   if (place.sprint) {
     const { loop, current } = await sprints();
-    const cycle = current ? current.cycle : await sprintCycle(loop.number, "");
+    const cycle = current ? await keepOpen(current.cycle) : await sprintCycle(loop.number, "");
     await board.addToCycle(project, cycle.id, [made.id]);
     into = cycle.name;
   }
