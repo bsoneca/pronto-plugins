@@ -44,6 +44,16 @@ export function brief(body: string, max = 120): string {
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
 
+// What the grants loop logs of a failed call. Billing starts before its neighbour crud listens, so
+// the first calls are always refused: until the startup window has passed, saying nothing keeps
+// that race out of the logs; past it, a warning, since the gateway is slow, not starting.
+// After one success it is real trouble.
+export const grantsWindowMs = 60_000;
+export function grantLog(served: boolean, sinceStartMs: number): "none" | "warn" | "error" {
+  if (served) return "error";
+  return sinceStartMs < grantsWindowMs ? "none" : "warn";
+}
+
 export function service(s: Settings) {
   const fetcher = s.fetcher ?? fetch;
   const origin = s.origin.replace(/\/$/, "");
@@ -306,6 +316,7 @@ if (import.meta.main) {
   // Until the gateway serves billing_grant, as it does once it has reloaded its schema; with
   // flags, every minute after, so a push reaches the database with no deploy.
   let served = false;
+  const started = Date.now();
   for (let wait = 1; ; ) {
     try {
       await billing.grant();
@@ -314,10 +325,9 @@ if (import.meta.main) {
       wait = 60;
     } catch (e) {
       wait = Math.min(wait * 2, 60);
-      // Before the first success it is the startup race (the door, the gateway not ready yet): a
-      // warning that says it will retry. After one, it is real trouble.
-      if (served) console.error(`billing: grants not written: ${(e as Error).message}`);
-      else console.warn(`billing: grants not written yet, retrying in ${wait} s: ${(e as Error).message}`);
+      const log = grantLog(served, Date.now() - started);
+      if (log === "error") console.error(`billing: grants not written: ${(e as Error).message}`);
+      else if (log === "warn") console.warn(`billing: grants not written yet, retrying in ${wait} s: ${(e as Error).message}`);
     }
     await new Promise((r) => setTimeout(r, wait * 1000));
   }
