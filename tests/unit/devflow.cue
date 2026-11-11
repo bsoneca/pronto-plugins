@@ -236,4 +236,33 @@ cases: {
 		{call: "devflow.flipIssueMove", args: ["done"], expect: null},
 		{call: "devflow.flipIssueMove", args: ["cancelled"], expect: null, why: "a flag the owner said stays off"},
 	]}
+	"a flag on for everyone for a week gets one removal issue, found by title and module, whatever its state": {suite: "devflow", steps: [
+		{call: "devflow.removeTitle", args: ["ads", "brawl-chess"], expect: "Remove flag ads from brawl-chess"},
+		{call: "devflow.removeOf", args: ["Remove flag ads from brawl-chess"], expect: "ads"},
+		{call: "devflow.removeOf", args: ["Remove flag `ads` from Bonk Chess"], expect: "ads"},
+		{call: "devflow.removeOf", args: ["Flip ads on in brawl-chess"], expect: null},
+		{call: "devflow.removeIssueOf", args: [[{name: "Remove flag ads from brawl-chess", modules: ["brawl-chess"], state: "done"}], "ads", "brawl-chess"], expect: {name: "Remove flag ads from brawl-chess", modules: ["brawl-chess"], state: "done"}, why: "a removal issue already Done is reused, never filed again"},
+		{call: "devflow.removeIssueOf", args: [[{name: "Remove flag ads from brawl-chess", modules: ["brawl-chess"]}], "ads", "studio"], expect: null, why: "another app's flag of the same name"},
+	]}
+	"seven days on for everyone is the line, at an injected now": {suite: "devflow", steps: [
+		{call: "devflow.onForDays", args: ["2026-11-04T12:00:00Z", "2026-11-11T12:00:00Z"], expect: true, why: "exactly 7 days"},
+		{call: "devflow.onForDays", args: ["2026-11-04T12:00:01Z", "2026-11-11T12:00:00Z"], expect: false, why: "a second short"},
+		{call: "devflow.onForDays", args: [null, "2026-11-11T12:00:00Z"], expect: false, why: "no Done time is never old enough"},
+		{call: "devflow.onForDays", args: ["not a time", "2026-11-11T12:00:00Z"], expect: false},
+	]}
+	"the removal issues due are the app's flip issues Done 7 days ago with none filed yet": {suite: "devflow", steps: [
+		{call: "devflow.removalsDue", args: [[
+			{name: "Flip ads on in brawl-chess", modules: ["brawl-chess"], state: "done", doneAt: "2026-11-03T10:00:00Z"},
+			{name: "Flip shop on in brawl-chess", modules: ["brawl-chess"], state: "done", doneAt: "2026-11-09T10:00:00Z"},
+			{name: "Flip menu on in brawl-chess", modules: ["brawl-chess"], state: "backlog", doneAt: ""},
+			{name: "Flip trophies on in brawl-chess", modules: ["brawl-chess"], state: "done", doneAt: "2026-11-01T10:00:00Z"},
+			{name: "Remove flag trophies from brawl-chess", modules: ["brawl-chess"], state: "cancelled"},
+			{name: "Flip ads on in studio", modules: ["studio"], state: "done", doneAt: "2026-10-01T10:00:00Z"},
+			{name: "Flip friends on in brawl-chess", modules: ["brawl-chess"], state: "done", doneAt: "2026-10-30T10:00:00Z"},
+		], "brawl-chess", "2026-11-11T12:00:00Z"], expect: [
+			{flag: "ads", flip: {name: "Flip ads on in brawl-chess", modules: ["brawl-chess"], state: "done", doneAt: "2026-11-03T10:00:00Z"}},
+			{flag: "friends", flip: {name: "Flip friends on in brawl-chess", modules: ["brawl-chess"], state: "done", doneAt: "2026-10-30T10:00:00Z"}},
+		], why: "shop is 2 days Done, menu waits in the Backlog, trophies has a removal issue, studio is another app"},
+		{call: "devflow.removalsDue", args: [[{name: "Flip ads on in brawl-chess", modules: ["brawl-chess"], state: "done", doneAt: "2026-11-03T10:00:00Z"}, {name: "Remove flag ads from brawl-chess", modules: ["brawl-chess"], state: "backlog"}], "brawl-chess", "2026-11-11T12:00:00Z"], expect: [], why: "a second run files nothing"},
+	]}
 }

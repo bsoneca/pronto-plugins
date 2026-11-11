@@ -2,6 +2,7 @@
 # The dev flow's hooks (devflow/README.md): what GitHub, release-cron and pronto-flags tell the board.
 #   bin/pronto-devflow pr <repo> [--warn]                 a pull_request event (GITHUB_EVENT_PATH)
 #   bin/pronto-devflow released <repo> <app> <commit>     release-cron confirmed a release
+#   bin/pronto-devflow removals <repo> <app>              the removal issues of flags on for a week, by hand
 #   bin/pronto-devflow flipped|rolledback <repo> <app> <flag...>
 # and the board as the skills use it (devflow/board.ts):
 #   bin/pronto-devflow status|start|pull|move|file|close|next <repo> ...
@@ -10,13 +11,13 @@
 # <repo> is a repository with a devflow/devflow.cue; one without has nothing to tell.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
-[ $# -ge 2 ] || { echo "usage: pronto-devflow pr|released|flipped|rolledback <repo> ..." >&2; exit 2; }
+[ $# -ge 2 ] || { echo "usage: pronto-devflow pr|released|removals|flipped|rolledback <repo> ..." >&2; exit 2; }
 verb=$1
 repo=$(cd "$2" && pwd)
 shift 2
 cd "$here"
 case "$verb" in
-	pr|released|flipped|rolledback) script=devflow/hook.ts ;;
+	pr|released|removals|flipped|rolledback) script=devflow/hook.ts ;;
 	mcp) script=devflow/mcp.ts; exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config -A "$script" "$repo" ;;
 	*) script=devflow/board.ts ;;
 esac
