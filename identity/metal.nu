@@ -1,7 +1,7 @@
 # Releases the identity broker to a cluster the operator runs (pronto's envs.Metal: k3s on a node
 # reached over SSH, its traffic arriving through the node's Cloudflare Tunnel to Envoy Gateway),
 # beside release.nu's Cloud Run:
-#   bin/pronto-identity-broker metal --ssh bruno@node --domain D --google-client-id C --secrets F (or --project P) [--airlock [--door-asked]]
+#   bin/pronto-identity-broker metal --ssh bruno@node --domain D --google-client-id C --secrets F (or --project P) [--airlock [--door-asked --door-tenants T]]
 #
 # The broker imports nothing from outside its own files, so no image is built: the pinned Deno image
 # runs oidc.ts and broker/*.ts from a ConfigMap. Its one-time codes live in memory, so one replica,
@@ -44,16 +44,20 @@ export def manifests [
 	--name: string = "identity-broker"
 	--airlock # Google's token exchange through the airlock's door: the airlock holds the client's credential, the broker no secret
 	--door-asked # With --airlock, while it moves (PRONTO-268): each exchange through the door when its tenant asks (its flag signin_door), the broker keeping its secret
+	--door-tenants: string = "" # With --door-asked: the tenants whose flag is asked, PHONE_TENANTS' syntax; every other tenant goes straight to Google, unasked
 ]: nothing -> string {
 	let labels = {"app.kubernetes.io/name": $name, "app.kubernetes.io/part-of": "pronto-identity"}
 	let lock = $"($name)-airlock"
 	let lock_labels = {"app.kubernetes.io/name": $lock, "app.kubernetes.io/part-of": "pronto-identity"}
 	if $door_asked and not $airlock { error make {msg: "--door-asked moves the broker to the airlock's door: it needs --airlock"} }
+	# Only the tenants listed are asked: an app on the broker with no signin_door (or no /ofrep/) would fail every sign-in.
+	if $door_asked and ($door_tenants | is-empty) { error make {msg: "--door-asked needs --door-tenants: the tenants whose flag signin_door is asked"} }
+	if ($door_tenants | is-not-empty) and not $door_asked { error make {msg: "--door-tenants is for --door-asked"} }
 	# Through the door the broker's env names no client secret, and the airlock's names the credential it holds.
 	# While the flag moves it, the broker keeps its secret beside the door; after, the airlock alone holds it.
 	let secret_vars = if $airlock and not $door_asked { [BROKER_SECRET] } else { [BROKER_SECRET GOOGLE_CLIENT_SECRET] }
 	let settings = ($settings ++ (if $airlock { [{name: "GOOGLE_DOOR", value: $"http://($lock):($door_port)"}] } else { [] })
-		++ (if $door_asked { [{name: "GOOGLE_DOOR_ASKED", value: "1"}] } else { [] }))
+		++ (if $door_asked { [{name: "GOOGLE_DOOR_ASKED", value: "1"} {name: "GOOGLE_DOOR_TENANTS", value: $door_tenants}] } else { [] }))
 	let meta = {namespace: $namespace, labels: $labels}
 	# A change to a file is a new pod: the files' digest is the template's.
 	let digest = ($files | each {|f| $sources | at $f.key } | str join "\n" | hash sha256 | str substring 0..15)
@@ -170,6 +174,7 @@ export def main [
 	--service: string = "identity-broker" # The secrets' names in Secret Manager are <service>-secret and <service>-google-client-secret
 	--airlock # Google's token exchange through the airlock's door beside the broker, which then holds no client secret (PRONTO-268); its Secret also holds GOOGLE_CLIENT_BASIC
 	--door-asked # With --airlock: each exchange through the door when its tenant asks (the app's flag signin_door); the broker keeps its secret until a deploy without it
+	--door-tenants: string = "" # With --door-asked: the tenants whose flag is asked (comma separated, `*` for a port); the others go straight to Google
 ] {
 	if ([$ssh $domain $google_client_id] | any { is-empty }) { error make {msg: "--ssh, --domain and --google-client-id are all required"} }
 	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
@@ -204,7 +209,7 @@ export def main [
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
 	# A malformed list stops the broker at start, so the rollout below fails rather than serve new subjects.
 	let sector = if ($sectors | is-empty) { [] } else { [{name: "BROKER_SECTORS", value: $sectors}] }
-	let yaml = (manifests --domain $domain --sources (sources) --settings ([{name: "GOOGLE_CLIENT_ID", value: $google_client_id}] ++ $phone ++ $sector) --namespace $namespace --name $service --airlock=$airlock --door-asked=$door_asked)
+	let yaml = (manifests --domain $domain --sources (sources) --settings ([{name: "GOOGLE_CLIENT_ID", value: $google_client_id}] ++ $phone ++ $sector) --namespace $namespace --name $service --airlock=$airlock --door-asked=$door_asked --door-tenants=$door_tenants)
 	# The namespace first, so the Secret has somewhere to go before the pod that reads it.
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# The secrets through ssh's stdin alone: never a file, never an argument.
