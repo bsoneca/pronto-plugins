@@ -75,11 +75,13 @@ disjoint subtrees and runs only the checks that span modules, never `#Trilha` or
 | one ma lesson | 167.3 s, 8.9 GB | 12.1 s, 1.2 GB |
 | one lp lesson | 196.5 s, 8.5 GB | 12.5 s, 1.2 GB |
 | one ENEM 2021 question | 45.9 s, 8.7 GB | 30.0 s, 1.9 GB |
-| unchanged | 1.7 s, 0.37 GB | 26.3 s, 1.3 GB |
+| unchanged | 1.7 s, 0.37 GB | 26.3 s, 1.3 GB; 3.6 s, 0.47 GB since PRONTO-11 |
 
-The unchanged case is worse: the cue wrapper replays only claimed exports (learned peak ≥ 1 GB),
-and most modules are now under that, so each is evaluated again. The wrapper should replay every
-module's export.
+The unchanged case was worse at first: the cue wrapper replayed only claimed exports (learned peak
+≥ 1 GB), and most modules are under that, so each was evaluated again. Since PRONTO-11
+(bsoneca/pronto#1155) it replays every export that took more CPU than a hit costs: measured again on
+2026-11-11 (BRT), the unchanged build is 3.6 CPU-s and 0.47 GB, against 11.5 CPU-s with the old
+wrapper on the same tree. What is left is about 0.11 CPU-s per module's hit, one deno start each.
 
 **Bonk Chess**, not split: its `spec/` exports in 0.45 CPU-s and 158 MB. Its generate's cost,
 ~9 CPU-s and 3.5 GB, is `cue export . -e analytics.out` over the app's root package, which a
