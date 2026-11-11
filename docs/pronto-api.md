@@ -318,8 +318,8 @@ The flag goes live with `pronto-flags push`, which needs a `production` scenario
 **Open questions**
 
 - [x] Language: Deno, like every pronto sidecar (decided 2026-11-10). REST comes from a route table generated from CUE, not a general `google.api.http` transcoder, because the generator only emits four route shapes.
-- [ ] Does connect-es serve services built purely from a runtime descriptor set? The spike answers this; the fallback is to generate TypeScript stubs per app with `buf generate` at `generate` time.
-- [ ] Native gRPC on Cloud Run needs HTTP/2 end to end: does Deno accept h2c there? If not, production serves gRPC-Web and Connect over HTTP/1.1, and native gRPC stays local only.
+- [x] Does connect-es serve services built purely from a runtime descriptor set? Yes (the spike, PRONTO-289, [`api/`](../api/README.md)): `createFileRegistry` over the descriptor set gives a service `router.service` takes like a generated one, so no per-app stubs are generated.
+- [x] Native gRPC needs HTTP/2 end to end: does Deno accept h2c? Yes, on Deno 2.9 (the spike): `node:http2`'s server takes h2c and sends the `grpc-status` trailer, with HTTP/1.1 on the same port by sniffing the HTTP/2 preface; Deno 2.5's `node:http2` cannot, and `Deno.serve` has no trailers. Cloud Run's end-to-end HTTP/2 in front of it is PRONTO-320's to check.
 - [ ] Key exchange in mecha-fork's auth service (recommended) or in the `api` service holding the signing secret? The fork adds upstream drift; the service spreads the secret.
 - [ ] Should bots be visible as bots? A `bot` flag on `profile` set by key use would let players opt out of bot opponents and keep bot games out of leaderboards.
 - [ ] Rated or unrated? Stand-in games are unrated today; two keys on two real accounts can farm Elo. Proposal: API games unrated until there is a bot policy.
