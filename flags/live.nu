@@ -388,30 +388,42 @@ def canary-doc [old: record, doc: record, flags: list<string>, testers: list<str
 	}
 }
 
-# What OFREP at `site` answers for a flag and a targetingKey (none: no context); null where it doesn't answer.
-# FLAGS_OFREP_CMD stands in for the request in tests: an sh command printing the reply, given
+# What OFREP answers for a flag and a targetingKey (none: no context); null where it doesn't answer.
+# Where the flags are mirrored to a node (flagsLive.mirrors), its flagd is asked itself, from the node, at its
+# Service's address (the mirror's `flagd`, default "flagd", port `ofrepPort`, default 8693): the app's door names
+# the account from a verified session alone and drops a body's targetingKey (pronto-plugins#113), so the site's
+# /ofrep/ answers every request as no account and never shows the tester's canary (PRONTO-257). Elsewhere, the
+# site's /ofrep/. FLAGS_OFREP_CMD stands in for the request in tests: an sh command printing the reply, given
 # OFREP_URL, FLAG and TARGETING_KEY.
-def ofrep-ask [site: string, flag: string, key: any] {
+def ofrep-ask [at: record, flag: string, key: any] {
 	let cmd = ($env.FLAGS_OFREP_CMD? | default "")
+	let ctx = if $key == null { {} } else { {targetingKey: $key} }
+	let m = ($at.mirrors? | default [] | get -o 0)
 	try {
 		if $cmd != "" {
-			let r = (with-env {OFREP_URL: $site, FLAG: $flag, TARGETING_KEY: ($key | default "")} { ^sh -c $cmd } | from json)
+			let r = (with-env {OFREP_URL: $at.site, FLAG: $flag, TARGETING_KEY: ($key | default "")} { ^sh -c $cmd } | from json)
 			$r.value?
+		} else if $m != null {
+			let kubectl = ($m.kubectl? | default 'sudo k3s kubectl')
+			let svc = ($m.flagd? | default "flagd")
+			let port = ($m.ofrepPort? | default 8693)
+			let body = ({context: $ctx} | to json -r)
+			let remote = $"ip=$\(($kubectl) -n ($m.namespace) get svc ($svc) -o jsonpath={.spec.clusterIP}\) && curl -sS -m 10 -X POST -H content-type:application/json --data-binary @- http://$ip:($port)/ofrep/v1/evaluate/flags/($flag)"
+			($body | ^ssh -o BatchMode=yes -o ConnectTimeout=20 $m.ssh $remote | from json).value?
 		} else {
-			let ctx = if $key == null { {} } else { {targetingKey: $key} }
-			(http post --content-type application/json --max-time 10sec $"($site)/ofrep/v1/evaluate/flags/($flag)" {context: $ctx}).value?
+			(http post --content-type application/json --max-time 10sec $"($at.site)/ofrep/v1/evaluate/flags/($flag)" {context: $ctx}).value?
 		}
 	} catch { null }
 }
 
 # Waits until OFREP answers each flag's new value for the tester and its old one with no context: polls
 # every FLAGS_POLL_SEC (2), gives up at FLAGS_WAIT_SEC (90). Whether it did.
-def wait-ofrep [site: string, tester: string, want: list<record>]: nothing -> bool {
+def wait-ofrep [at: record, tester: string, want: list<record>]: nothing -> bool {
 	let poll = ($env.FLAGS_POLL_SEC? | default 2 | into float)
 	let limit = ($env.FLAGS_WAIT_SEC? | default 90 | into float)
 	mut waited = 0.0
 	loop {
-		let ok = ($want | all {|w| (ofrep-ask $site $w.flag $tester) == $w.new and (ofrep-ask $site $w.flag null) == $w.old })
+		let ok = ($want | all {|w| (ofrep-ask $at $w.flag $tester) == $w.new and (ofrep-ask $at $w.flag null) == $w.old })
 		if $ok { return true }
 		if $waited >= $limit { return false }
 		sleep ($poll * 1sec)
@@ -544,7 +556,7 @@ def flip-live [at: record, app: path, old: record, doc: record, on: list<string>
 	print $"flags: ($on | str join ', ') is on for ($testers | str join ', ') alone; waiting for ($at.site) to say so"
 	try {
 		let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f)), old: (canary-doc $old $doc [$f] $testers | get flags | get $f | get variants.old)} })
-		if not (wait-ofrep $at.site $testers.0 $want) {
+		if not (wait-ofrep $at $testers.0 $want) {
 			error make {msg: $"($at.site) did not answer the new value for ($testers.0) within the wait"}
 		}
 		for c in $tested {
