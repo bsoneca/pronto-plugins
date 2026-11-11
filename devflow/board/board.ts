@@ -23,6 +23,12 @@ export interface Member { id: string; display_name?: string; email?: string }
 /** What an issue is made with: its title, a description in HTML, a priority in the board's own word, a state's id and labels' ids. */
 export interface NewIssue { name: string; description_html: string; priority: string; state: string; labels: string[] }
 
+/** A comment as a board answers it: its HTML (or Markdown) and when it was made (ISO). */
+export interface Comment {
+  html: string;
+  at: string;
+}
+
 export interface Board {
   /** The signed-in member: whoever the token is. */
   me(): Promise<Member>;
@@ -51,13 +57,16 @@ export interface Board {
 
   cycles(project: string): Promise<Cycle[]>;
   createCycle(project: string, name: string, start: string, end: string, owner: string): Promise<Cycle>;
+  /** A cycle's issues: id, name, sequence_id, state and priority at least. */
   cycleIssues(project: string, cycle: string): Promise<Issue[]>;
   addToCycle(project: string, cycle: string, issues: string[]): Promise<unknown>;
   removeFromCycle(project: string, cycle: string, issue: string): Promise<unknown>;
   /** Moves a cycle's end (a board whose cycles never close, as GitHub's iterations, has none). */
   setCycleEnd?(project: string, cycle: string, end: string): Promise<unknown>;
 
-  issues(project: string): Promise<Issue[]>;
+  /** The project's issues; `light`, only id, name, sequence_id, state and priority (the board's
+   * verbs read no more, and a board may answer that much faster). */
+  issues(project: string, light?: boolean): Promise<Issue[]>;
   /** An issue by its key, PRONTO-123. */
   issue(key: string): Promise<Issue>;
   createIssue(project: string, fields: NewIssue): Promise<Issue>;
@@ -66,6 +75,8 @@ export interface Board {
   /** Replaces an issue's description (HTML). */
   describe(project: string, id: string, html: string): Promise<Issue>;
   comment(project: string, id: string, html: string): Promise<unknown>;
+  /** An issue's comments, oldest first: what a pull reads its claim back from (PRONTO-341). */
+  comments(project: string, id: string): Promise<Comment[]>;
   links(project: string, id: string): Promise<{ url: string }[]>;
   link(project: string, id: string, url: string, title: string): Promise<unknown>;
 }

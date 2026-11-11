@@ -3,7 +3,8 @@
 // the repository's issues, labels and comments. The mapping (board/github.js) says how a project's
 // fields hold the flow's states, priorities, apps and sprints. One token, a GitHub token with the
 // `project` and `repo` scopes.
-import type { Board, Cycle, Issue, Member, Named, NewIssue, State } from "./board/board.ts";
+import type { Board, Comment, Cycle, Issue, Member, Named, NewIssue, State } from "./board/board.ts";
+import { askAgain } from "./flow.js";
 import { colorOf, cycleOf, FIELDS, issueOf, iterationsWith, linkComment, linksOf, optionsWith, PRIORITIES, stateOf } from "./board/github.js";
 
 const API = "https://api.github.com";
@@ -33,19 +34,30 @@ export class GitHubProjects implements Board {
 
   private async rest(method: string, path: string, body?: unknown): Promise<Json> {
     for (let attempt = 0; ; attempt++) {
-      const r = await fetch(`${API}${path}`, {
-        method,
-        headers: { Authorization: `Bearer ${this.token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json" },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      // A secondary rate limit: wait and ask again.
-      if ((r.status === 403 || r.status === 429) && r.headers.get("retry-after") && attempt < 3) {
-        await new Promise((ok) => setTimeout(ok, 1000 * Number(r.headers.get("retry-after"))));
-        continue;
+      // As Plane's (plane.ts call): each call waits 30 s at most, and flow.js askAgain says which
+      // failures are asked again (PRONTO-341).
+      let failure: number | "timeout" | "network";
+      let text = "";
+      let after = 0;
+      try {
+        const r = await fetch(`${API}${path}`, {
+          method,
+          headers: { Authorization: `Bearer ${this.token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: AbortSignal.timeout(Number(Deno.env.get("PLANE_TIMEOUT_MS") ?? "") || 30_000),
+        });
+        text = await r.text();
+        if (r.ok) return text ? JSON.parse(text) : null;
+        // A secondary rate limit (a 403 with retry-after) never ran, as a 429.
+        after = Number(r.headers.get("retry-after") ?? 0) * 1000;
+        failure = r.status === 403 && after ? 429 : r.status;
+      } catch (e) {
+        failure = e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError") ? "timeout" : "network";
+        text = String(e);
       }
-      const text = await r.text();
-      if (!r.ok) throw new Error(`github ${method} ${path}: ${r.status} ${text.slice(0, 300)}`);
-      return text ? JSON.parse(text) : null;
+      const wait = askAgain(method, failure, attempt);
+      if (wait === null) throw new Error(`github ${method} ${path}: ${failure} ${text.slice(0, 300)}`);
+      await new Promise((ok) => setTimeout(ok, Math.max(wait, after)));
     }
   }
 
@@ -273,6 +285,8 @@ export class GitHubProjects implements Board {
     return await this.byNumber(n);
   }
   comment = async (_project: string, id: string, html: string) => await this.rest("POST", `${this.repo()}/issues/${await this.numberOf(id)}/comments`, { body: html });
+  comments = async (_project: string, id: string): Promise<Comment[]> =>
+    (await this.restAll(`${this.repo()}/issues/${await this.numberOf(id)}/comments`)).map((c) => ({ html: String(c.body ?? ""), at: String(c.created_at) }));
   links = async (_project: string, id: string) => linksOf(await this.restAll(`${this.repo()}/issues/${await this.numberOf(id)}/comments`));
   link = (project: string, id: string, url: string, title: string) => this.comment(project, id, linkComment(url, title));
 }

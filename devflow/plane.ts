@@ -2,7 +2,12 @@
 // project, its states, labels, modules and cycles, and an issue's state, comments and links. One
 // token, X-API-Key; the token is a member's, made once in Plane's profile settings. The adapter of
 // the Board interface (board/board.ts) for kind plane.
-import type { Board, Cycle, Issue, Member, Named, NewIssue, State } from "./board/board.ts";
+import type { Board, Comment, Cycle, Issue, Member, Named, NewIssue, State } from "./board/board.ts";
+import { askAgain } from "./flow.js";
+
+// An issue's fields the board's verbs read (board.ts): a list of issues asks for these alone.
+const LIGHT = "id,name,sequence_id,state,priority";
+const timeoutMs = () => Number(Deno.env.get("PLANE_TIMEOUT_MS") ?? "") || 30_000;
 
 export class Plane implements Board {
   constructor(readonly origin: string, readonly workspace: string, private readonly token: string) {}
@@ -11,19 +16,29 @@ export class Plane implements Board {
   private async call(method: string, path: string, body?: unknown): Promise<any> {
     const url = path.startsWith("http") ? path : `${this.origin}/api/v1${path}`;
     for (let attempt = 0; ; attempt++) {
-      const r = await fetch(url, {
-        method,
-        headers: { "X-API-Key": this.token, "Content-Type": "application/json", Accept: "application/json" },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      // Plane limits a token's calls a minute (env.api_key_rate_limit): wait and ask again.
-      if (r.status === 429 && attempt < 5) {
-        await new Promise((ok) => setTimeout(ok, 2000 * (attempt + 1)));
-        continue;
+      // Each call waits PLANE_TIMEOUT_MS at most (30 s): one that never answers held a verb for ever
+      // (PRONTO-341). flow.js askAgain says which failures are asked again: a 429 (Plane limits a
+      // token's calls a minute, env.api_key_rate_limit), and a timeout, a lost connection or a 5xx of
+      // a call that is the same twice; never a POST that may have been made.
+      let failure: number | "timeout" | "network";
+      let text = "";
+      try {
+        const r = await fetch(url, {
+          method,
+          headers: { "X-API-Key": this.token, "Content-Type": "application/json", Accept: "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: AbortSignal.timeout(timeoutMs()),
+        });
+        text = await r.text();
+        if (r.ok) return text ? JSON.parse(text) : null;
+        failure = r.status;
+      } catch (e) {
+        failure = e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError") ? "timeout" : "network";
+        text = String(e);
       }
-      const text = await r.text();
-      if (!r.ok) throw new Error(`plane ${method} ${path}: ${r.status} ${text.slice(0, 300)}`);
-      return text ? JSON.parse(text) : null;
+      const wait = askAgain(method, failure, attempt);
+      if (wait === null) throw new Error(`plane ${method} ${path}: ${failure} ${text.slice(0, 300)}`);
+      await new Promise((ok) => setTimeout(ok, wait));
     }
   }
 
@@ -61,26 +76,30 @@ export class Plane implements Board {
   modules = (project: string) => this.all<Named>(`${this.p(project)}/modules/`);
   createModule = (project: string, name: string, description: string) => this.call("POST", `${this.p(project)}/modules/`, { name, description }) as Promise<Named>;
   addToModule = (project: string, module: string, issues: string[]) => this.call("POST", `${this.p(project)}/modules/${module}/module-issues/`, { issues });
-  private moduleIssues = (project: string, module: string) => this.all<Issue>(`${this.p(project)}/modules/${module}/module-issues/`);
-  /** Each issue's modules, by name: read from the modules, since an issue's own fields may not say. */
+  // Only the ids: a whole issue is ten times the bytes, and Plane answers by the byte (PRONTO-341).
+  private moduleIssues = (project: string, module: string) => this.all<{ id: string }>(`${this.p(project)}/modules/${module}/module-issues/?fields=id`);
+  /** Each issue's modules, by name: read from the modules, since an issue's own fields may not say.
+   * The modules are read at once, not one after another (17 in turn took 14 s, PRONTO-341). */
   async modulesByIssue(project: string): Promise<Map<string, string[]>> {
     const by = new Map<string, string[]>();
-    for (const m of await this.modules(project)) {
-      for (const i of await this.moduleIssues(project, m.id)) by.set(i.id, [...(by.get(i.id) ?? []), m.name]);
-    }
+    const mods = await this.modules(project);
+    const issues = await Promise.all(mods.map((m) => this.moduleIssues(project, m.id)));
+    mods.forEach((m, x) => {
+      for (const i of issues[x]) by.set(i.id, [...(by.get(i.id) ?? []), m.name]);
+    });
     return by;
   }
 
   cycles = (project: string) => this.all<Cycle>(`${this.p(project)}/cycles/`);
   createCycle = (project: string, name: string, start: string, end: string, owner: string) =>
     this.call("POST", `${this.p(project)}/cycles/`, { name, start_date: start, end_date: end, project_id: project, owned_by: owner }) as Promise<Cycle>;
-  cycleIssues = (project: string, cycle: string) => this.all<Issue>(`${this.p(project)}/cycles/${cycle}/cycle-issues/`);
+  cycleIssues = (project: string, cycle: string) => this.all<Issue>(`${this.p(project)}/cycles/${cycle}/cycle-issues/?fields=${LIGHT}`);
   removeFromCycle = (project: string, cycle: string, issue: string) => this.call("DELETE", `${this.p(project)}/cycles/${cycle}/cycle-issues/${issue}/`);
   // Plane refuses to edit a cycle whose end has passed: it is moved while open (flow.js sprintEndFor).
   setCycleEnd = (project: string, cycle: string, end: string) => this.call("PATCH", `${this.p(project)}/cycles/${cycle}/`, { end_date: end });
   addToCycle = (project: string, cycle: string, issues: string[]) => this.call("POST", `${this.p(project)}/cycles/${cycle}/cycle-issues/`, { issues });
 
-  issues = (project: string) => this.all<Issue>(`${this.p(project)}/issues/`);
+  issues = (project: string, light = false) => this.all<Issue>(`${this.p(project)}/issues/${light ? `?fields=${LIGHT}` : ""}`);
   /** An issue by its key, PRONTO-123. */
   issue = (key: string) => this.call("GET", `${this.ws()}/issues/${key}/`) as Promise<Issue>;
   createIssue = (project: string, fields: NewIssue) => this.call("POST", `${this.p(project)}/issues/`, fields) as Promise<Issue>;
@@ -88,6 +107,8 @@ export class Plane implements Board {
   moveIssue = (project: string, id: string, state: string) => this.updateIssue(project, id, { state });
   describe = (project: string, id: string, html: string) => this.updateIssue(project, id, { description_html: html });
   comment = (project: string, id: string, html: string) => this.call("POST", `${this.p(project)}/issues/${id}/comments/`, { comment_html: html });
+  comments = async (project: string, id: string): Promise<Comment[]> =>
+    (await this.all<{ comment_html?: string; created_at: string }>(`${this.p(project)}/issues/${id}/comments/`)).map((c) => ({ html: c.comment_html ?? "", at: c.created_at }));
   links = (project: string, id: string) => this.all<{ url: string }>(`${this.p(project)}/issues/${id}/links/`);
   link = (project: string, id: string, url: string, title: string) => this.call("POST", `${this.p(project)}/issues/${id}/links/`, { url, title });
 }

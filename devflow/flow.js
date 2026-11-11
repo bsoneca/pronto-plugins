@@ -344,3 +344,40 @@ export function removalsDue(issues, app, now, days = REMOVE_AFTER_DAYS, on = {})
   }
   return [...due.values()].sort((a, b) => (a.flag < b.flag ? -1 : a.flag > b.flag ? 1 : 0));
 }
+
+/** Whether a board call that failed is asked again, and after how long (ms), or null to give up.
+ * `failure` is the HTTP status, or "timeout" / "network" when no answer came. A 429 never ran, so
+ * any call is asked again; a GET, PATCH, PUT or DELETE is the same call twice, so a timeout, a lost
+ * connection or a 5xx asks again too; a POST that got no answer may have been made (a comment, an
+ * issue), so it is not asked twice. `tries` calls in all (PRONTO-341: a call that never answered
+ * held a verb for ever). */
+export function askAgain(method, failure, attempt, tries = 4) {
+  if (attempt + 1 >= tries) return null;
+  const wait = 2000 * (attempt + 1);
+  if (failure === 429) return wait;
+  const same = ["GET", "HEAD", "PATCH", "PUT", "DELETE"].includes(String(method).toUpperCase());
+  if (!same) return null;
+  if (failure === "timeout" || failure === "network" || (typeof failure === "number" && failure >= 500)) return wait;
+  return null;
+}
+
+/** A pull's claim on an issue, written in the comment that moves it: `claim <nonce>`. */
+export function claimText(nonce) {
+  return `claim ${nonce}`;
+}
+
+/** Which of two pulls racing for one issue keeps it (PRONTO-341: two sessions both moved PRONTO-298):
+ * each moves the issue and comments its claim, then reads the comments; the claim made first, among
+ * those of the last `windowS` seconds, wins, and the other pull leaves the issue to it and takes the
+ * next. `comments` are `{html, at}` (an ISO time); null when no claim is there. Equal times go to
+ * the smaller nonce, so both pulls agree. */
+export function claimWinner(comments, now, windowS = 600) {
+  const since = new Date(now).getTime() - windowS * 1000;
+  const claims = comments.flatMap((c) => {
+    const m = /\bclaim ([0-9a-z-]{8,})/i.exec(String(c.html ?? ""));
+    const at = new Date(c.at).getTime();
+    return m && at >= since ? [{ nonce: m[1], at }] : [];
+  });
+  claims.sort((a, b) => a.at - b.at || (a.nonce < b.nonce ? -1 : a.nonce > b.nonce ? 1 : 0));
+  return claims[0]?.nonce ?? null;
+}
