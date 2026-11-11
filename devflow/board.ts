@@ -11,7 +11,7 @@
 //   board.ts next <repo> [--theme <t>] <KEY...>          plan into the next sprint (made when absent), in Refine; refuses past a lane's capacity
 import { flagsOf } from "../intents/shell.ts";
 import { type Cycle, esc, type Issue } from "./board/board.ts";
-import { bugPlace, capacity, laneOf, loopOf, mayPlan, mayStart, nameOf, priorityOf, pullNext, roleOf, sprintDates, sprintEndFor, sprintName, sprintNumber } from "./flow.js";
+import { bugPlace, capacity, claimText, claimWinner, laneOf, loopOf, mayPlan, mayStart, nameOf, priorityOf, pullNext, roleOf, sprintDates, sprintEndFor, sprintName, sprintNumber } from "./flow.js";
 import { boardOf, devflowOf, type Role } from "./spec.ts";
 
 const [verb, repoArg, ...rest] = Deno.args;
@@ -46,8 +46,14 @@ const order = [...Object.keys(priorities).sort().map((p) => priorities[p]), "non
 /** The lanes that build: an engineer's slots and an SRE's (devFlow.team), and which an issue takes. */
 const slots = { engineer: flow.team.engineers, SRE: flow.team.sre } as Record<string, number>;
 const cap = capacity(flow.team, flow.sprint.perPerson) as Record<string, number>;
-const modulesOf = await board.modulesByIssue(project);
-const lane = (i: Issue) => laneOf(modulesOf.get(i.id) ?? [], flow.infra);
+// Each issue's modules, read only by a verb that asks for lanes (status, start, pull, next): move and
+// file never did need them, and they were the slowest read (PRONTO-341).
+let modulesOf: Map<string, string[]> | null = null;
+const withLanes = async () => void (modulesOf ??= await board.modulesByIssue(project));
+const lane = (i: Issue) => {
+  if (!modulesOf) throw new Error("lanes asked for before withLanes()");
+  return laneOf(modulesOf.get(i.id) ?? [], flow.infra);
+};
 
 /** The sprints on the board (cycles named `Sprint <n>...`), each with its issues, and where the loop
  * stands: the current sprint, the next, the finished, and the number a new one takes. */
@@ -80,8 +86,7 @@ async function sprintCycle(n: number, theme: string) {
 const titleOf = (s: Sprint | null) => (s ? s.cycle.name : "none");
 
 async function status() {
-  const all = await board.issues(project);
-  const { loop, current, next } = await sprints();
+  const [all, { loop, current, next }] = await Promise.all([board.issues(project, true), sprints(), withLanes()]);
   const inOpen = new Set([...(current?.issues ?? []), ...(next?.issues ?? [])].map((i) => i.id));
   const now = (sp: Sprint | null) => sp ? all.filter((i) => sp.issues.some((j) => j.id === i.id)) : [];
   const cur = now(current), nxt = now(next);
@@ -123,10 +128,17 @@ async function status() {
   if (out.plan) console.log("plan the next sprint now (pronto-sprint-plan)");
 }
 
-async function start(k: string) {
-  const issue = await board.issue(k);
+/** Starts an issue: Implementing, if its lane has a slot. From a pull (`claim`), only while the
+ * issue is still Ready, and only for the pull whose claim came first (flow.js claimWinner): a pull
+ * that lost answers "lost" and leaves the issue to the other (PRONTO-341). */
+async function start(k: string, claim = false): Promise<"started" | "lost"> {
+  const [issue, all] = await Promise.all([board.issue(k), board.issues(project, true), withLanes()]);
+  if (claim && roleAt(issue.state) !== "ready") {
+    console.log(`${k} is no longer Ready (${stateName(issue.state)}): another pull took it`);
+    return "lost";
+  }
   const l = lane(issue);
-  const busy = (await board.issues(project)).filter((i) => roleAt(i.state) === "implementing" && lane(i) === l).length;
+  const busy = all.filter((i) => roleAt(i.state) === "implementing" && lane(i) === l).length;
   const may = mayStart(busy, slots[l], issue.priority, l, urgent);
   if (!may.ok) {
     console.log(`${k} waits: ${may.why}`);
@@ -135,8 +147,17 @@ async function start(k: string) {
   const from = stateName(issue.state);
   const implementing = nameOf(flow!.roles, "implementing");
   await board.moveIssue(project, issue.id, stateId(implementing));
-  await say(issue, `<p>${esc(from)} → ${esc(implementing)}: ${esc(may.why)}</p>`);
+  const nonce = crypto.randomUUID();
+  await say(issue, `<p>${esc(from)} → ${esc(implementing)}: ${esc(may.why)}${claim ? ` (${claimText(nonce)})` : ""}</p>`);
+  if (claim) {
+    const first = claimWinner(await board.comments(project, issue.id), new Date().toISOString());
+    if (first !== nonce) {
+      console.log(`${k} was pulled by another session at the same moment, which keeps it`);
+      return "lost";
+    }
+  }
   console.log(`${k} ${from} → ${implementing} (${may.why})`);
+  return "started";
 }
 
 /** The lane's next Ready issue, started: the current sprint's, else the next sprint's (an engineer is
@@ -144,18 +165,20 @@ async function start(k: string) {
  * its pull request opens (review holds no slot), or when it finishes an issue. */
 async function pull(l: string) {
   if (!(l in slots)) throw new Error(`a lane is engineer or SRE, not ${l}`);
-  const { current, next } = await sprints();
-  const all = await board.issues(project);
+  const [{ current, next }, all] = await Promise.all([sprints(), board.issues(project, true), withLanes()]);
   for (const sp of [current, next]) {
     if (!sp) continue;
     // Each pull keeps the open sprints' cycles open, so a hook can still add to them.
     await keepOpen(sp.cycle);
     const ids = new Set(sp.issues.map((i) => i.id));
-    const ready = all.filter((i) => ids.has(i.id) && roleAt(i.state) === "ready" && lane(i) === l);
-    const pick = pullNext(ready.map((i) => ({ key: key(i), sequence: i.sequence_id, priority: i.priority })), order);
-    if (pick) {
+    let ready = all.filter((i) => ids.has(i.id) && roleAt(i.state) === "ready" && lane(i) === l)
+      .map((i) => ({ key: key(i), sequence: i.sequence_id, priority: i.priority }));
+    // In pull order; one another session took meanwhile is passed over for the next.
+    for (let pick = pullNext(ready, order); pick; pick = pullNext(ready, order)) {
       console.log(`from ${sp.cycle.name}`);
-      return await start(pick.key);
+      if (await start(pick.key, true) === "started") return;
+      const taken = pick.key;
+      ready = ready.filter((i) => i.key !== taken);
     }
   }
   console.log(`nothing Ready for ${l} in ${titleOf(current)} or ${titleOf(next)}${next ? "" : ": no next sprint yet, the lead plans it now"}`);
@@ -223,7 +246,7 @@ async function close(n?: number) {
 /** Plan issues into the next sprint, made (named for `theme`) when absent: the sprint the idle lanes
  * pull from. With no sprint open at all, the new one is the current. In Refine from the Backlog. */
 async function next(theme: string, keys: string[]) {
-  const { loop, byN } = await sprints();
+  const [{ loop, byN }] = await Promise.all([sprints(), withLanes()]);
   const n = loop.plansInto;
   const held = byN(n)?.issues ?? [];
   // Capacity first, so a refused plan changes nothing: the sprint's issues already planned, by

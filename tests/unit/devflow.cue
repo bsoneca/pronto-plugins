@@ -296,4 +296,34 @@ cases: {
 			{flag: "trial_banner", flip: {name: "Flip trial_banner and roman_army on for everyone where Bonk Chess is released", modules: ["brawl-chess"], state: "done", doneAt: "2026-11-03T10:00:00Z"}},
 		], why: "shop's flip is 2 days Done, which wins over its history; premium has its removal issue; menu_first is 4 days on; a cancelled flip leaves the history to say"},
 	]}
+
+	// PRONTO-341: a board call that never answered held a verb for ever, and two pulls both took PRONTO-298.
+	"a board call is asked again only where asking twice is safe": {suite: "devflow", steps: [
+		{call: "devflow.askAgain", args: ["GET", "timeout", 0], expect: 2000, why: "a read that never answered is asked again"},
+		{call: "devflow.askAgain", args: ["PATCH", 502, 1], expect: 4000, why: "moving an issue twice moves it once"},
+		{call: "devflow.askAgain", args: ["DELETE", "network", 0], expect: 2000},
+		{call: "devflow.askAgain", args: ["POST", 429, 0], expect: 2000, why: "a 429 never ran, so even a comment is asked again"},
+		{call: "devflow.askAgain", args: ["POST", "timeout", 0], expect: null, why: "a comment or an issue that got no answer may have been made: asked twice, it would be two"},
+		{call: "devflow.askAgain", args: ["POST", 503, 0], expect: null},
+		{call: "devflow.askAgain", args: ["GET", 404, 0], expect: null, why: "an answer that says no is not asked again"},
+		{call: "devflow.askAgain", args: ["GET", "timeout", 3], expect: null, why: "four calls in all, then the verb fails and says so"},
+		{call: "devflow.askAgain", args: ["get", 429, 2, 4], expect: 6000, why: "the wait grows with each try"},
+	]}
+	"of two pulls racing for one issue, the first claim keeps it": {suite: "devflow", steps: [
+		{call: "devflow.claimText", args: ["5f0c2a9e-1111-4222-8333-944455556666"], expect: "claim 5f0c2a9e-1111-4222-8333-944455556666"},
+		{call: "devflow.claimWinner", args: [[
+			{html: "<p>Ready → Implementing: engineer slot 3 of 6 (claim bbbbbbbb-0000)</p>", at: "2026-11-11T22:00:05Z"},
+			{html: "<p>Ready → Implementing: engineer slot 3 of 6 (claim aaaaaaaa-0000)</p>", at: "2026-11-11T22:00:03Z"},
+		], "2026-11-11T22:00:06Z"], expect: "aaaaaaaa-0000", why: "the one made first, whatever order the board lists them in"},
+		{call: "devflow.claimWinner", args: [[
+			{html: "<p>(claim bbbbbbbb-0000)</p>", at: "2026-11-11T22:00:03Z"},
+			{html: "<p>(claim aaaaaaaa-0000)</p>", at: "2026-11-11T22:00:03Z"},
+		], "2026-11-11T22:00:06Z"], expect: "aaaaaaaa-0000", why: "at the same moment, the smaller nonce: both pulls agree on one"},
+		{call: "devflow.claimWinner", args: [[
+			{html: "<p>Ready → Implementing (claim oldoldol-0000)</p>", at: "2026-11-11T20:00:00Z"},
+			{html: "<p>Implementing → Ready: refined</p>", at: "2026-11-11T21:00:00Z"},
+			{html: "<p>Ready → Implementing (claim newnewne-0000)</p>", at: "2026-11-11T22:00:00Z"},
+		], "2026-11-11T22:00:02Z"], expect: "newnewne-0000", why: "a claim from an earlier pull, long past, does not count"},
+		{call: "devflow.claimWinner", args: [[{html: "<p>Refine → Ready: refined</p>", at: "2026-11-11T22:00:00Z"}], "2026-11-11T22:00:02Z"], expect: null},
+	]}
 }
