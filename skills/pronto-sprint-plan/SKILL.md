@@ -64,6 +64,12 @@ only when the owner asks; a change there is a pull request.
   current sprint's, then the next sprint's (`pronto-devflow pull`). So the next sprint is planned
   while the current one still runs. An issue the owner files goes into the next sprint planned;
   the owner can say to take it now, and then it joins the current sprint.
+- **The loop never waits for the owner's next message** (the owner, 2026-11-11: "I don't need to
+  ask for next turns"). A free slot is filled on the turn it frees, whoever began that turn: start
+  the new session when the app allows it; when it refuses (a turn another session or a hook began)
+  or would show the owner an approval card, tell the free engineer's own session (SendMessage)
+  to take the issue there, renamed to it (the pronto-issue skill, 5b). Never leave a slot empty
+  "until the owner writes", and never show the owner a card to start a session.
 - **A blocked issue does not hold a sprint open.** An issue that waits on the owner (a question, an
   account, a decision) goes back to the Backlog with the question
   (`pronto-devflow move . PRONTO-<n> Backlog --why "<the question>"`), which takes it out of its
