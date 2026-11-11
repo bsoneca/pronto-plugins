@@ -6,12 +6,13 @@ use ../metal.nu
 let secrets = [BROKER_SECRET BILLING_SIGNING_KEY STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET]
 let docs = (metal manifests --domain billing.example.com --sources (metal sources) --settings [{name: "BILLING_FEE_PERCENT", value: "0"}] --secrets $secrets | split row "---\n" | each { from yaml })
 let kind = {|k| $docs | where kind == $k | first }
-assert equal ($docs | get kind) [Namespace ConfigMap Deployment Service Gateway HTTPRoute NetworkPolicy]
+# The airlock is always beside the broker (PRONTO-270): no flag asks for it.
+assert equal ($docs | get kind) [Namespace ConfigMap Deployment Service Gateway HTTPRoute NetworkPolicy ConfigMap ConfigMap PersistentVolumeClaim Deployment Service NetworkPolicy]
 assert equal ($docs | get metadata.namespace? | compact | uniq) [billing]
 
 # Every file the broker imports is mounted where its import finds it, and nothing outside is fetched.
 let files = (do $kind ConfigMap).data
-for f in [shared.ts main.ts core.ts stripe.ts fake.ts] { assert ($f in ($files | columns)) $"($f) is mounted" }
+for f in [shared.ts main.ts core.ts stripe.ts door.ts fake.ts] { assert ($f in ($files | columns)) $"($f) is mounted" }
 for f in ($files | values) { assert ($f | lines | where {|l| $l =~ '^import .* from "(https?|npm|jsr):' } | is-empty) "a mounted file imports from outside" }
 let pod = (do $kind Deployment).spec.template.spec
 let mount = (($pod.containers | first).volumeMounts | where name == files | first).mountPath
@@ -27,7 +28,10 @@ assert equal $dep.spec.strategy.type Recreate
 let c = ($pod.containers | first)
 assert equal ($c.env | where name == BROKER_ISSUER | first).value "https://billing.example.com"
 assert equal ($c.env | where name == BILLING_FEE_PERCENT | first).value "0"
-for v in $secrets { assert equal ($c.env | where name == $v | first).valueFrom.secretKeyRef {name: "billing-broker", key: $v} }
+for v in ($secrets | where $it != STRIPE_SECRET_KEY) { assert equal ($c.env | where name == $v | first).valueFrom.secretKeyRef {name: "billing-broker", key: $v} }
+assert equal ($c.env | where name =~ "^STRIPE_(SANDBOX_)?SECRET_KEY$" | length) 0 "the broker holds no Stripe key, with no flag asked"
+assert equal ($c.env | where name == STRIPE_DOOR | first).value "http://billing-broker-airlock:9998"
+assert equal (($docs | where kind == Deployment and metadata.name == billing-broker-airlock | first).spec.template.spec.containers | where name == airlock | first | get env | where valueFrom? != null | get name) [STRIPE_SECRET_KEY]
 assert equal ($c.env | where name == STRIPE_SANDBOX_SECRET_KEY | length) 0 "no sandbox unless asked"
 assert equal $c.startupProbe.httpGet.path "/health"
 
@@ -39,13 +43,13 @@ assert not equal $other.spec.template.metadata.annotations $dep.spec.template.me
 assert equal (do $kind HTTPRoute).spec.hostnames ["billing.example.com"]
 assert equal ((do $kind Gateway).spec.listeners | first).hostname "billing.example.com"
 let egress = (do $kind NetworkPolicy).spec.egress
-assert equal ($egress | get ports | flatten | get port | uniq | sort) [53 443]
+assert equal ($egress | get ports | flatten | get port | uniq | sort) [53 443 9998]
 assert equal (($egress | where to? != null | first).to | first).ipBlock.except ["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"]
 
-# --airlock (PRONTO-135): Stripe through the airlock's door beside the broker. The broker names no
-# Stripe key and reaches the door; the airlock holds the key, reached by the broker alone.
+# Stripe through the airlock's door beside the broker (PRONTO-135, the only way since PRONTO-270). The
+# broker names no Stripe key and reaches the door; the airlock holds the keys, reached by the broker alone.
 let sandboxed = ($secrets ++ [STRIPE_SANDBOX_SECRET_KEY STRIPE_SANDBOX_WEBHOOK_SECRET])
-let locked = (metal manifests --domain billing.example.com --sources (metal sources) --settings [{name: "BILLING_FEE_PERCENT", value: "0"} {name: "BILLING_SANDBOX_TENANTS", value: "^https://pr-"}] --secrets $sandboxed --airlock | split row "---\n" | each { from yaml })
+let locked = (metal manifests --domain billing.example.com --sources (metal sources) --settings [{name: "BILLING_FEE_PERCENT", value: "0"} {name: "BILLING_SANDBOX_TENANTS", value: "^https://pr-"}] --secrets $sandboxed | split row "---\n" | each { from yaml })
 let at = {|k, n| $locked | where kind == $k and metadata.name == $n | first }
 assert equal ($locked | get kind) [Namespace ConfigMap Deployment Service Gateway HTTPRoute NetworkPolicy ConfigMap ConfigMap PersistentVolumeClaim Deployment Service NetworkPolicy]
 let broker = ((do $at Deployment billing-broker).spec.template.spec.containers | first)
@@ -71,7 +75,7 @@ print "metal_test: ok"
 
 # --door-asked (PRONTO-218): while each tenant's flag moves it, the broker keeps its keys beside the
 # door; the airlock holds them as well.
-let moving = (metal manifests --domain billing.example.com --sources (metal sources) --settings [] --secrets $sandboxed --airlock --door-asked | split row "---\n" | each { from yaml })
+let moving = (metal manifests --domain billing.example.com --sources (metal sources) --settings [] --secrets $sandboxed --door-asked | split row "---\n" | each { from yaml })
 let mb = (($moving | where kind == Deployment and metadata.name == billing-broker | first).spec.template.spec.containers | first)
 assert equal ($mb.env | where name =~ "^STRIPE_(SANDBOX_)?SECRET_KEY$" | get name) [STRIPE_SECRET_KEY STRIPE_SANDBOX_SECRET_KEY] "the broker keeps its keys while the flag moves it"
 assert equal ($mb.env | where name == STRIPE_DOOR_ASKED | first).value "1"
@@ -79,4 +83,15 @@ assert equal ($mb.env | where name == STRIPE_DOOR | first).value "http://billing
 let ma = (($moving | where kind == Deployment and metadata.name == billing-broker-airlock | first).spec.template.spec.containers | where name == airlock | first)
 assert equal ($ma.env | where valueFrom? != null | get name) [STRIPE_SECRET_KEY STRIPE_SANDBOX_SECRET_KEY]
 assert equal ($dep.spec.template.spec.containers | first | get env | where name == STRIPE_DOOR_ASKED | length) 0 "not asked without --door-asked"
-assert (try { metal manifests --domain billing.example.com --sources (metal sources) --door-asked; false } catch { true }) "--door-asked needs --airlock"
+assert (try { metal manifests --domain billing.example.com --sources (metal sources) --door-asked; false } catch { true }) "--door-asked needs a Stripe key to move"
+# No flag turns the airlock off.
+let flags = {|cmd| (scope commands | where name == $cmd | first).signatures | values | flatten | get parameter_name | compact }
+for cmd in ["metal manifests" "metal"] {
+	assert ("door-asked" in (do $flags $cmd)) $"($cmd) is the command read"
+	assert ("airlock" not-in (do $flags $cmd)) $"($cmd) has no --airlock"
+}
+# Secrets with no Stripe key: the airlock still beside it, holding nothing, and the broker no door.
+let keyless = (metal manifests --domain billing.example.com --sources (metal sources) --secrets [BROKER_SECRET BILLING_SIGNING_KEY] | split row "---\n" | each { from yaml })
+assert equal ($keyless | where kind == Deployment | get metadata.name) [billing-broker billing-broker-airlock]
+assert equal (($keyless | where kind == Deployment and metadata.name == billing-broker | first).spec.template.spec.containers | first | get env | where name == STRIPE_DOOR | length) 0
+print "metal_test: door-asked ok"

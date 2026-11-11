@@ -1,7 +1,7 @@
 # Releases the billing broker to a cluster the operator runs (pronto's envs.Metal: k3s on a node
 # reached over SSH, its traffic arriving through the node's Cloudflare Tunnel to Envoy Gateway),
 # beside release.nu's Cloud Run, in the shape identity/metal.nu gives the identity broker:
-#   bin/pronto-billing-broker metal --ssh bruno@node --domain D --secrets F (or --project P) [--fee N] [--sandbox-tenants RE] [--airlock [--door-asked]]
+#   bin/pronto-billing-broker metal --ssh bruno@node --domain D --secrets F (or --project P) [--fee N] [--sandbox-tenants RE] [--door-asked]
 #
 # The broker imports nothing from outside its own files, so no image is built: the pinned Deno image
 # runs shared.ts and broker/*.ts from a ConfigMap. It keeps nothing but its secrets: with --secrets,
@@ -11,6 +11,11 @@
 # signs verify as Cloud Run's did, and the same webhook secret, so Stripe's one webhook
 # (https://<domain>/stripe) is accepted by whichever of the two the name points at. An
 # entitlement's `ver` is its clock: one replica, replaced (Recreate) rather than overlapped.
+#
+# Stripe only through the airlock's door (PRONTO-270): the airlock beside the broker is always made, and
+# holds the Stripe keys the secrets hold, a door each; the broker holds none (but while --door-asked
+# moves it, PRONTO-218). Secrets with no Stripe key give a broker with no door, which only serves
+# the stand-in on a localhost issuer.
 
 const here = path self .
 use ../common/sops.nu
@@ -30,6 +35,7 @@ const files = [
 	{key: "main.ts", from: "broker/main.ts", path: "broker/main.ts"}
 	{key: "core.ts", from: "broker/core.ts", path: "broker/core.ts"}
 	{key: "stripe.ts", from: "broker/stripe.ts", path: "broker/stripe.ts"}
+	{key: "door.ts", from: "broker/door.ts", path: "broker/door.ts"}
 	{key: "fake.ts", from: "broker/fake.ts", path: "broker/fake.ts"}
 ]
 # Each variable the Secret `<name>` holds, and the Secret Manager secret it is read from (<service>-<suffix>).
@@ -53,18 +59,18 @@ export def manifests [
 	--secrets: list<string> = []
 	--namespace: string = "billing"
 	--name: string = "billing-broker"
-	--airlock # Stripe through the airlock's door: the airlock holds the Stripe keys, the broker none
-	--door-asked # With --airlock, while it moves (PRONTO-218): each call through the door when its tenant asks (its flag), the broker keeping its keys
+	--door-asked # While it moves (PRONTO-218): each call through the door when its tenant asks (its flag), the broker keeping its keys
 ]: nothing -> string {
 	let labels = {"app.kubernetes.io/name": $name, "app.kubernetes.io/part-of": "pronto-billing"}
 	let lock = $"($name)-airlock"
 	let lock_labels = {"app.kubernetes.io/name": $lock, "app.kubernetes.io/part-of": "pronto-billing"}
 	# Through the door, the broker's env names no Stripe key, and the airlock's names those it holds.
-	let held = if $airlock { $door_keys | where {|k| $k.var in $secrets } } else { [] }
-	if $door_asked and not $airlock { error make {msg: "--door-asked moves the broker to the airlock's door: it needs --airlock"} }
+	let held = ($door_keys | where {|k| $k.var in $secrets })
+	let doors = ($held | is-not-empty)
+	if $door_asked and not $doors { error make {msg: "--door-asked moves the broker between its Stripe key and the door: the secrets hold no Stripe key"} }
 	# While the flag moves it, the broker keeps its keys beside the door; after, the airlock alone holds them.
 	let secrets = if $door_asked { $secrets } else { $secrets | where {|v| $v not-in ($held | get var) } }
-	let settings = ($settings ++ (if $airlock { [{name: "STRIPE_DOOR", value: $"http://($lock):($door_port)"}] } else { [] })
+	let settings = ($settings ++ (if $doors { [{name: "STRIPE_DOOR", value: $"http://($lock):($door_port)"}] } else { [] })
 		++ (if $door_asked { [{name: "STRIPE_DOOR_ASKED", value: "1"}] } else { [] }))
 	let meta = {namespace: $namespace, labels: $labels}
 	# A change to a file is a new pod: the files' digest is the template's.
@@ -131,8 +137,8 @@ export def manifests [
 			}
 		}
 		# Nothing in or out but what it serves and what it asks: requests on its port, DNS, and HTTPS to
-		# public addresses (Stripe, and each app's origin it pushes entitlements to). PRONTO-135's airlock
-		# takes the HTTPS over later.
+		# public addresses (each app's origin it pushes entitlements to), and the airlock's door, the
+		# broker's one way to Stripe (PRONTO-270; PRONTO-220 guards against any other).
 		{
 			apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy", metadata: ($meta | insert name $name)
 			spec: {
@@ -142,10 +148,10 @@ export def manifests [
 				egress: ([
 					{ports: [{protocol: "UDP", port: 53} {protocol: "TCP", port: 53}]}
 					{to: [{ipBlock: {cidr: "0.0.0.0/0", except: $private}}], ports: [{protocol: "TCP", port: 443}]}
-				] ++ (if $airlock { [{to: [{podSelector: {matchLabels: $lock_labels}}], ports: [{protocol: "TCP", port: $door_port}]}] } else { [] }))
+				] ++ [{to: [{podSelector: {matchLabels: $lock_labels}}], ports: [{protocol: "TCP", port: $door_port}]}])
 			}
 		}
-	] ++ (if $airlock { airlock-objects $namespace $lock $lock_labels $labels $name $held } else { [] })
+	] ++ (airlock-objects $namespace $lock $lock_labels $labels $name $held)
 	| each { to yaml } | str join "---\n"
 }
 
@@ -173,8 +179,7 @@ export def main [
 	--sandbox-tenants: string = "" # As release.nu: the tenants that buy through Stripe's sandbox
 	--namespace: string = "billing"
 	--service: string = "billing-broker" # The secrets' names in Secret Manager are <service>-<suffix>, as release.nu stores them
-	--airlock # Stripe through the airlock's door beside the broker, which then holds no Stripe key (PRONTO-135)
-	--door-asked # With --airlock: each call through the door when its tenant asks (the app's flag, told by its billing service); the broker keeps its keys until a deploy without it (PRONTO-218)
+	--door-asked # Each call through the door when its tenant asks (the app's flag, told by its billing service); the broker keeps its keys until a deploy without it (PRONTO-218)
 ] {
 	if ([$ssh $domain] | any { is-empty }) { error make {msg: "--ssh and --domain are both required"} }
 	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
@@ -184,7 +189,7 @@ export def main [
 	let settings = ([{name: "BILLING_FEE_PERCENT", value: ($fee | into string)}] ++ (if $sandbox { [{name: "BILLING_SANDBOX_TENANTS", value: $sandbox_tenants}] } else { [] }))
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
-	let yaml = (manifests --domain $domain --sources (sources) --settings $settings --secrets ($keys | get var) --namespace $namespace --name $service --airlock=$airlock --door-asked=$door_asked)
+	let yaml = (manifests --domain $domain --sources (sources) --settings $settings --secrets ($keys | get var) --namespace $namespace --name $service --door-asked=$door_asked)
 	# The namespace first, so the Secret has somewhere to go before the pod that reads it.
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# The secrets through ssh's stdin alone: never a file, never an argument.
@@ -195,9 +200,7 @@ export def main [
 		$"($secret_env)\n" | do $remote $"($kubectl) create secret generic ($service) -n ($namespace) --from-env-file=/dev/stdin --dry-run=client -o yaml | ($kubectl) apply -f -" | print
 	}
 	$yaml | do $remote $"($kubectl) apply -f -" | print
-	if $airlock {
-		do $remote $"($kubectl) rollout restart deployment/($service)-airlock -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service)-airlock -n ($namespace) --timeout=300s" | print
-	}
+	do $remote $"($kubectl) rollout restart deployment/($service)-airlock -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service)-airlock -n ($namespace) --timeout=300s" | print
 	do $remote $"($kubectl) rollout restart deployment/($service) -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service) -n ($namespace) --timeout=120s" | print
 	# Through the gateway as the tunnel reaches it, by host: the broker answers, signing with the key
 	# the domain's current broker publishes.

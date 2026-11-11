@@ -369,7 +369,9 @@ cluster: surface: targets: billing: {
 }
 
 // On a developer's machine, the broker itself, its Stripe a stand-in that
-// pays at a press, and this app's payouts already set up.
+// pays at a press, and this app's payouts already set up. The broker reaches the
+// stand-in as it reaches Stripe on the node, through a door (PRONTO-270): the
+// stand-in serves the airlock's door contract at its own address, STRIPE_DOOR.
 if _billingLocal {
 	cluster: surface: targets: "billing-broker": bayt.healthcheck.http & {
 		cmd: builtin: null
@@ -387,13 +389,14 @@ if _billingLocal {
 			env: compose.environment & {
 				BILLING_DOOR:  {peer: "caddy", port: "door"}
 				BROKER_ISSUER: ["http://localhost:", {port: "http", part: "port"}]
+				STRIPE_DOOR:   ["http://127.0.0.1:", {port: "http", part: "port"}]
 			}
 		}
 		dockerfile: {
 			from: name: "denoland/deno:alpine-2.5.0"
 			copy: [
 				{srcs: ["billing/shared.ts"], dst: "/app/billing/"},
-				{srcs: ["billing/broker/core.ts", "billing/broker/main.ts", "billing/broker/stripe.ts", "billing/broker/fake.ts"], dst: "/app/billing/broker/"},
+				{srcs: ["billing/broker/core.ts", "billing/broker/main.ts", "billing/broker/stripe.ts", "billing/broker/door.ts", "billing/broker/fake.ts"], dst: "/app/billing/broker/"},
 			]
 		}
 		compose: {

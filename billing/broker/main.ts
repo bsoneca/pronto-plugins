@@ -686,7 +686,10 @@ if (import.meta.main) {
   const asked = <A extends unknown[]>(h: (req: Request, ...rest: A) => Promise<Response>) => doorAsked ? forAccount(h) : h;
   const client = (k: string | undefined, d: string) =>
     doorAsked ? switched({ direct: stripe({ key: k! }), door: stripe({ door: d }), on: askedDoor }) : door ? stripe({ door: d }) : stripe({ key: k! });
-  if (key || door) {
+  // A door with no webhook secret on a localhost issuer is the stand-in's (PRONTO-270): the real
+  // Stripe's needs its webhook's secret.
+  const standIn = !key && !env("STRIPE_WEBHOOK_SECRET") && /^https?:\/\/localhost(:\d+)?$/.test(issuer.replace(/\/$/, ""));
+  if (!standIn && (key || door)) {
     const webhookSecret = env("STRIPE_WEBHOOK_SECRET");
     if (!webhookSecret) throw new Error("STRIPE_WEBHOOK_SECRET is required with STRIPE_SECRET_KEY: bin/pronto-billing-broker webhook");
     const live = await broker({ ...settings, stripe: client(key, `${door}/door/stripe`), webhookSecret });
@@ -713,9 +716,13 @@ if (import.meta.main) {
     const { fakeStripe } = await import("./fake.ts");
     const fake = fakeStripe(issuer);
     for (const t of (env("BILLING_FAKE_TENANTS") ?? "").split(/[\s,]+/)) if (t) fake.ready(t);
-    const handler = await broker({ ...settings, stripe: fake.stripe, webhookSecret: fake.webhookSecret });
+    // Through a door, as on the node (PRONTO-270): the stand-in serves the airlock's door contract
+    // beside its pages, at this broker's own address unless STRIPE_DOOR names another on this machine.
+    const standInDoor = (door ?? `http://127.0.0.1:${port}`);
+    if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(standInDoor)) throw new Error("the stand-in's STRIPE_DOOR is on this machine");
+    const handler = await broker({ ...settings, stripe: stripe({ door: `${standInDoor}/door/stripe` }), webhookSecret: fake.webhookSecret });
     fake.connect(handler);
-    console.warn("billing: no STRIPE_SECRET_KEY, so the stand-in at /fake/stripe takes payments");
+    console.warn(`billing: no STRIPE_SECRET_KEY, so the stand-in at /fake/stripe takes payments, through its door at ${standInDoor}/door/stripe`);
     Deno.serve({ hostname: "127.0.0.1", port }, (req, info) => fake.handle(req) ?? handler(req, info));
   }
 }
