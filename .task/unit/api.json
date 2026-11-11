@@ -1,0 +1,40 @@
+{
+ "key": "d14df193219f914eb60d8fc00312ca4f645ffd66acda497c97053dd132f71676",
+ "at": "2026-11-11T22:45:02.252Z",
+ "observed": {
+  "read": {},
+  "dir": {},
+  "stat": {},
+  "env": {},
+  "tree": {},
+  "cmd": []
+ },
+ "lines": [
+  "suite api",
+  "cases fc6e49c018b2150afe6da8487f4be9816edc074d1165bcdaebcfcfedca9ee8ba",
+  "jobs 1",
+  "file tests/unit.ts 5299ee134265c1802354c3a8ec781bd7eba9b7a9790a1edb9f398a517d6ae12b",
+  "file tests/unit/select.js f04983b61baf86539ac5bafb0fccf9e67847f614866b4f243551d3b179e163b1",
+  "file tests/unit/schema.cue c99dd3783e892883aeb6192564c6e26d36bc7b0bf7a7991a401f4c431d2de1c6",
+  "file mise.lock d04b8b610b41c786883f0fd67b41d2cac0ca38562e7396ca8caf5e12d79cbfe1",
+  "file deno.json absent",
+  "file deno.jsonc absent",
+  "file deno.lock absent",
+  "file package.json absent",
+  "deno 2.9.7",
+  "args [\"api\"]",
+  "allow read=granted write=granted env=granted run=granted net=granted sys=prompt ffi=prompt",
+  "env CUE 50244208da1de5f9026c35f01ebdbb249b3ee9e70893e0d14ef5901a59aee9d7",
+  "module tests/unit/registry.js 04d3548a84ad98e3b8869198c767fe1ea4558f6d47f1de497abc255d70a1b5f6",
+  "module api/service.ts 7c0985ffffd64409b62495168acd12d00fde03d5a99ba12c47a1339d20c216b4",
+  "module intents/run.ts 3137ad06e3e40c841bb0d78753da1b6c43943f6df8126be268f102f6abe1992b",
+  "module tests/unit/api.js 507cd2fd2e7e0e12f462466fb74a5fb5885f1b442cc754c58d82cf4a01a4561b",
+  "module node:http",
+  "module node:http2",
+  "module node:net",
+  "module npm:/@bufbuild/protobuf@2.10.1",
+  "module npm:/@bufbuild/protobuf@2.10.1/wkt",
+  "module npm:/@connectrpc/connect-node@2.1.0",
+  "module npm:/@connectrpc/connect@2.1.0"
+ ]
+}
