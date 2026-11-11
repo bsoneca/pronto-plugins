@@ -3,7 +3,7 @@
 Host plugins for [pronto](https://github.com/bonisoft3/pronto) terminals
 beyond the browser, and beside them, on unmodified pronto. Why and how they are shaped:
 [a native terminal](docs/native-terminal.md). Designed, not built yet:
-[pronto-api](docs/pronto-api.md), a plugin that exports any app's operations as gRPC and REST.
+[pronto-api](docs/pronto-api.md), a plugin that exports any app as a Google-style REST API, PostgREST over table projections.
 
 ## Plugins
 

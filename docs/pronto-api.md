@@ -1,33 +1,38 @@
 # Pronto App API Export — Design Doc
 
-Design, not built (2026-11-10). Living copy, with its comment threads: [Claude Doc](https://claude.ai/artifact/KjRYUassxrsZnw75wNnAGr).
+Design, not built (redesigned 2026-11-11, PRONTO-374). It replaces the gRPC design of PRONTO-344 (the [first version](https://github.com/bsoneca/pronto-plugins/blob/66aaf80/docs/pronto-api.md), kept in history).
 
 ## Summary
 
-We add **pronto-api**, a plugin that exports any pronto app's operations as a **gRPC** API, defined in CUE and published as a generated `.proto`. The same Deno service also answers REST/JSON at `/api/v1`, gRPC-Web and Connect. REST is transcoded in process through a route table generated from the same CUE, so there is one source, one contract and one handler per method. It is accepted when two bots holding API keys play complete Bonk Chess matches through it, over gRPC and over REST, and the same plugin installed on guestbook works with no chess-specific code.
+We add **pronto-api**, a plugin that exports a pronto app's data and operations as a REST/JSON API. It is **PostgREST served over table projections**: the plugin generates a Postgres schema per major version, `api_v1`, that holds one view per exported resource (its projection: the public shape, column names and computed fields) and one SQL function per API method. The door routes Google-style URLs (`GET /api/v1/matches/{match}`, `POST /api/v1/matches/{match}:move`) to those functions through the PostgREST every app already runs. The REST surface follows [Google's API design guide](https://docs.cloud.google.com/apis/design): resource names, standard and custom methods, the canonical error codes, and the major version in the path.
 
-The plugin adds no new backend logic. Each exported operation is a typed name for something the app already does through `/crud`: insert a row, read rows, call a SQL function, or drive a mecha machine. Postgres RLS, CEL checks and machine guards stay the only authority, so an API caller can do exactly what the same user can do in the browser, and nothing more.
+There is no gRPC, Connect, protobuf or buf, and no new service. The API is SQL and a block of door routes, all generated from one author-edited file, `api_spec.cue`, and the app's `program.cue`. It is accepted when two bots holding API keys play complete Bonk Chess matches over it, and the same plugin installed on guestbook works with no chess-specific code.
 
-Every call takes one path: client → `api` service (gRPC handler; REST transcoded in the same process) → PostgREST (`/crud`) → Postgres. Two side paths join it: token exchange goes through auth, and watch goes through Electric. `/crud` is how the API is implemented, not its contract, and the mapping is not 1:1:
+Postgres stays the only authority. Projections are `security_invoker` views and the functions are `SECURITY INVOKER`, so RLS, CEL checks and machine guards judge every call as the caller: an API client can do exactly what the same user can do in the browser, and nothing more.
 
-- **Entities:** one RPC becomes one `/crud` call. Message, field and filter names come from the `.proto`, and PostgREST's query grammar (`select`, `or`, embeds) is never exposed.
-- **Machines:** one RPC becomes several calls. `SendCommand` with a `move` becomes a command insert plus a read-back, and the service fills the row id, protocol version and revision.
-- **Errors:** database refusals become gRPC status codes with a stable `ErrorInfo.reason`; REST gets the standard HTTP mapping of the same status.
+**What changed from the gRPC design, and why**
+
+| Before (PRONTO-344) | Now | Why |
+| --- | --- | --- |
+| A Deno `api` service (connect-es) transcoding gRPC, Connect and REST to `/crud` | No service: the door rewrites each route to a PostgREST call on `api_v1` | The service only translated names and errors; SQL functions do both, in the same transaction as the write |
+| CUE → `.proto` → descriptor set, `fields.lock.cue`, `buf breaking` | CUE → `api_v1` SQL, door routes, `openapi.json`, `contract.json` | No wire format to number; the contract is the JSON shape, guarded by a contract diff and by Postgres itself |
+| Machine command = insert, then a second request to read the result back | One function inserts the command and reads the stored result in one transaction | The machine's AFTER INSERT trigger has run by the time the function selects the row |
+| `Watch` (server stream) and a 25 s long-poll | Clients poll `Get` | A long-poll holds a PostgREST pool connection; chess bots need no more than one read a second |
+| Native gRPC over HTTP/2 end to end on Cloud Run (h2c into Deno 2.9) | Plain HTTP through the door, as the shell's `/crud` | Nothing new on the wire |
 
 **Goals**
 
-1. One install command (`pronto-api <app>`) and one author-edited file (`api_spec.cue`) export an app. The `.proto`, its REST bindings and the OpenAPI document are generated, never hand-written.
-2. Bots get a durable identity: per-account API keys, exchanged for short-lived user tokens, never the service role.
-3. Mecha machines are exported generically: each machine named in the spec becomes a gRPC service with `Open`, `SendCommand`, `GetState`, `Watch` and `ListOpen`.
-4. Clients learn of changes without speaking the Electric protocol: a server-streaming `Watch` RPC for gRPC and Connect clients, and a long-poll `GetState` for REST.
-5. The contract is stable: `buf breaking` against the last released descriptor set fails the gate on any incompatible change.
-6. Validation is data: a CUE scenario plays Bonk Chess games end to end over gRPC, Connect and REST in the gate.
+1. One install command (`pronto-api <app>`) and one author-edited file (`api_spec.cue`) export an app. The `api_v1` SQL, the door routes and `openapi.json` are generated, never hand-written.
+2. The REST surface reads like a Google API: resource-oriented, standard methods, AIP error codes, and stable for the life of `v1`.
+3. Bots get a durable identity: per-account API keys, exchanged for short-lived user tokens, never the service role.
+4. Mecha machines are exported generically: each machine named in the spec becomes a resource with `Create`, `Get`, `List` and one custom method per exported event.
+5. Validation is data: a CUE scenario plays Bonk Chess games end to end over the API in the gate, with the `http` step the runner already has.
 
-**Non-goals:** a public developer program, OAuth for third-party apps, webhooks, an MCP server (designed to drop in later from the same spec), and exporting `tab`/`device` entities that have no server table.
+**Non-goals:** a public developer program, OAuth for third-party apps, webhooks, push (watch or streaming) in `v1`, PostgREST's own query grammar as a public contract, an MCP server (it can be generated from `openapi.json` later), and exporting `tab`/`device` entities that have no server table.
 
 ## Context: how a pronto app talks to its server today
 
-A pronto app has no RPC layer and no per-app HTTP routes: every write is a keyed row change to PostgREST, and every server rule is a Postgres constraint, RLS policy or trigger-backed state machine. That is the seam this design uses: the API is a typed, documented, authenticated front for the row grammar the app already speaks, not a second backend.
+A pronto app has no RPC layer and no per-app HTTP routes: every write is a keyed row change to PostgREST, and every server rule is a Postgres constraint, RLS policy or trigger-backed state machine. That is the seam this design uses: the API is a second, stable PostgREST schema over the tables the app already has, not a second backend.
 
 | Concern | How it works today | Where |
 | --- | --- | --- |
@@ -36,39 +41,48 @@ A pronto app has no RPC layer and no per-app HTTP routes: every write is a keyed
 | Commands | Gestures are rows with deterministic ids (Bonk Chess `_command`, `Intent`: same click twice = one row); triggers advance state machines and raise on illegal transitions | `apps/brawl-chess/surface.cue`, `machines/*.js` |
 | Functions | SQL functions reachable as `/crud/rpc/<fn>` | billing `service.ts` |
 | Reads | `server` entities via `/crud/<table>?…` (PostgREST grammar); `live` entities via Electric shapes at `/electric/*`, gated by `/auth/shape` tokens | mecha `ARCHITECTURE.md` |
-| Realtime | Electric HTTP long-poll; no websockets | mecha |
 | Identity | HS256 JWT `{role, sub, handle, exp, guest?}`; `POST /auth/guest` mints a guest, passkeys promote it; sidecars use a pre-signed `service` token (`SERVICE_JWT`) | mecha `services/auth` |
-| Refusals | Any 4xx except 408/429 is non-retriable and surfaces as `refused` | omnishell `docs/data.md` |
-| Plugins | Installer `bin/pronto-<name> <app>` writes `<name>_plugin.cue` (generated), `<name>_spec.cue` (author-edited), migrations, hatches and sidecars; sidecars get `CRUD_URL` + `SERVICE_JWT` and are routed by the door | `bsoneca/pronto-plugins` |
+| Plugins | Installer `bin/pronto-<name> <app>` writes `<name>_plugin.cue` (generated), `<name>_spec.cue` (author-edited), migrations, hatches and sidecars | `bsoneca/pronto-plugins` |
 | Gates | `generate`, `lint`, `test`, `integrate@local`; scenarios are CUE with Playwright actors and an `http` step that already calls `/crud` as an actor | `tests/scenarios/schema.cue` |
 
-What is missing for an external client: a stable contract (raw `/crud` exposes table names and RLS internals that change with migrations), a way for a non-browser client to get a durable identity (no API keys; the only credential is a 7-day session JWT minted by a passkey, Google sign-in or the guest flow), a discoverable list of what may be called, and a push channel a bot can consume without speaking the Electric shape protocol. PostgREST could emit OpenAPI from the catalog, but no app exposes it, and it would document tables, not operations.
+What is missing for an external client: a stable contract (raw `/crud` exposes table names and RLS internals that change with migrations), a durable identity for a non-browser client (no API keys), a discoverable list of what may be called, and errors a client can branch on. PostgREST can serve all of that once it is pointed at a schema made for the API instead of at the app's tables.
 
 ## Design
 
-The plugin is a stateless gRPC service, `api`, plus two tables and one generated contract. It is written in Deno, like every other pronto sidecar, on [connect-es](https://connectrpc.com/docs/web/getting-started), which serves gRPC, gRPC-Web and Connect from one handler per method. REST is a thin layer in the same process: it matches a request against the generated route table, builds the request message from path, query and body, calls that same handler, and maps the status to HTTP. No Envoy, grpc-gateway or Go sits in front. Each handler turns the call into the `/crud` request the browser would have sent, with the caller's own user token, so RLS and machine guards decide every outcome.
-
 ```mermaid
 flowchart LR
-  bot["Bot<br/>API key, then JWT"] --> door["Door<br/>Caddy"]
+  bot["Bot<br/>API key, then JWT"] --> door["Door (Caddy)<br/>generated /api/v1 routes"]
   browser["Browser shell<br/>session JWT"] --> door
-  door -- "gRPC · Connect · REST" --> api["api service (Deno)<br/>gRPC, REST transcoded<br/>keys, limits, watch"]
-  door -. "shell path, unchanged" .-> crud
-  subgraph mecha["mecha stack, unchanged"]
-    auth["auth /auth/key"]
-    crud["PostgREST /crud"]
-    electric["Electric shapes"]
-    pg["Postgres<br/>RLS and CEL checks<br/>machine triggers"]
+  door -- "/api/v1/* → /rpc/{fn}<br/>Accept-Profile: api_v1" --> crud
+  door -. "/crud/*, unchanged" .-> crud
+  door -- "/auth/key*" --> auth
+  subgraph mecha["mecha stack"]
+    auth["auth<br/>keys, token exchange"]
+    crud["PostgREST"]
+    pg["Postgres<br/>api_v1: projections + functions<br/>public: tables, RLS, machine triggers"]
   end
-  api --> auth
-  api --> crud
-  api --> electric
   auth --> pg
   crud --> pg
-  electric --> pg
 ```
 
-The service is the only new box: it holds no authority of its own, and the database decides every outcome for both paths.
+Three layers, each generated from `api_spec.cue` and `program.cue`:
+
+1. **Projections** (`api_v1.<resource>` views). One per exported resource: the columns the API shows, renamed to public field names, plus the standard fields `name`, `create_time`, `update_time` and `etag`. A projection is a `security_invoker` view over the app's tables, so RLS on the tables still filters what the caller sees. It is the only place an internal table or column name meets a public one.
+2. **Methods** (`api_v1.<method>` functions). One function per API method, `SECURITY INVOKER`, reading through the projections and writing to the app's tables. Each validates its request, maps the outcome to a Google error code, and returns the projection row (or the List response). Reads are `STABLE`, so PostgREST answers them on `GET`; writes are `VOLATILE`, on `POST`.
+3. **Routes** (a generated door hatch). Each Google route, a verb plus a path template, is rewritten to one PostgREST call: `GET` or `POST /rpc/<fn>` with `Accept-Profile`/`Content-Profile: api_v1`. The door moves everything but the body into headers: the resource name from the path into `X-Api-Name`, and each query parameter the route declares (`page_size`, `match_id`, `update_mask`, …) into `X-Api-Param-<name>`. It then drops the query string and any `Prefer` header, so no PostgREST grammar (`select=`, `order=`, filters) reaches PostgREST, and a function called on `POST` still gets its query parameters (PostgREST passes a `POST` function only its JSON body). Functions read them through `api_v1.request_name()` and `api_v1.request_param(name)`, over PostgREST's `request.headers`. A path not generated is `404` at the door; raw `/rpc` and the views in `api_v1` are never routed under `/api`, and the `/crud` block strips `Accept-Profile` and `Content-Profile`, so `/crud` cannot reach `api_v1` either.
+
+### Why functions for every method, over projections
+
+PostgREST could serve the projections directly (`GET /match?id=eq.…`) and even write through auto-updatable views. We use views for the shape and functions for every method instead, because:
+
+- **Google's methods do not fit PostgREST's grammar.** `List` must answer `{matches: […], next_page_token}` with an opaque token (AIP-158), `Get` of a missing or hidden row must be `404 NOT_FOUND` (PostgREST answers `406` for an empty singular read), and custom methods (`:move`) have no PostgREST equivalent. A function returns exactly the AIP shape.
+- **Writes are more than one row.** A machine command inserts a command row, records its `request_id`, then reads the outcome the trigger stored; a `Create` checks the user-specified id and the caller's scope. A function does it in one transaction, so a retried request either sees the whole effect or none.
+- **Errors are ours to name.** A function raises `SQLSTATE 'PGRST'`, which PostgREST turns into the HTTP status and JSON body we choose, so every refusal is a Google code plus the app's own reason word (Errors, below).
+- **The query grammar stays private.** Clients never send `select=`, `or=` or embeds, so the internal tables can change without a client noticing; only the projections' columns are contract.
+
+Views stay because they keep the contract and the internals apart: a migration that renames a table changes a view's body, not its columns, and Postgres refuses `CREATE OR REPLACE VIEW` that drops, renames or retypes a column, which is the first guard of `v1`'s stability.
+
+Projections are plain views, computed on read. A projection materialized into a table (kept by triggers or CDC) is a later option for a read too slow as a view; nothing in `v1` needs one.
 
 ### What the installer writes
 
@@ -77,253 +91,229 @@ Following the existing plugin shape (billing, flags, analytics):
 | File | Owner | Holds |
 | --- | --- | --- |
 | `api_plugin.cue` | generated, do not edit | The `#Api` schema the spec is checked against |
-| `api_spec.cue` | app author | Which entities, functions and machines are exported, and their public names; the only hand-written input |
-| `api/v1/<app>.proto` | generated by `generate` | The published contract: services, messages, `google.api.http` annotations; committed, so `guard-generated` catches drift |
-| `api/v1/routes.json` | generated by `generate` | The REST route table: path template, verb, path/query/body fields, target RPC; emitted from the same CUE as the annotations, so the two cannot disagree |
-| `api/v1/fields.lock.cue` | generated, append-only | Every field number ever assigned, so regenerating never renumbers a field |
-| `api/v1/descriptor.binpb` | generated by `buf build` | The descriptor set the service loads at start |
-| `api/v1/openapi.json` | generated from the `.proto` | REST documentation only |
-| `api_service.cue` | generated | The `api` container hatch, its routes and `PRONTO_UPSTREAM_API` |
-| `services/database/migrations/NN_api.sql` | generated | `api_key`, `api_call` tables, RLS, `api_key_issue()` / `api_key_revoke()` |
-| `flags_spec.cue` entry | installer | Flag `api_export`: `default: false`, `local: true` |
-
-The service lives once in `pronto-plugins/api/` and is copied unchanged into each app, like `tests/slot.ts`. At start it loads the app's `descriptor.binpb` into a protobuf-es v2 registry and `routes.json`, and serves those services with messages built from the descriptors, so no per-app code is compiled. The REST layer only handles the four route shapes the generator emits (Operation kinds, below), not all of `google.api.http`. Routing: the door sends `/api/*` and `/<package>.<Service>/*` to it, which covers REST, Connect and gRPC-Web over HTTP/1.1. Native gRPC needs HTTP/2 end to end, so on Cloud Run the service also runs `apart` with HTTP/2 enabled at its own host, `api.<app domain>`, and Deno must accept the unencrypted HTTP/2 (h2c) Cloud Run sends.
+| `api_spec.cue` | app author | Which entities, functions and machines are exported, their public names and fields; the only hand-written input |
+| `services/database/migrations/NN_api_v1.sql` | generated by `generate` | Schema `api_v1`: the projections and the method functions (each with `SET search_path = pg_catalog, api_v1, public`); schema `api_private`, not exposed: `request` (idempotency); grants to `app_user`; committed, so `guard-generated` catches drift |
+| `api_door.cue` | generated | The door's `/api/v1` routes as a hatch, which pronto renders into the app's Caddyfile: one rewrite per route, the path and declared query parameters moved into headers, `Accept-Profile`/`Content-Profile: api_v1`, and the Google error body for every error a function did not raise |
+| `api/v1/openapi.json` | generated | OpenAPI 3.1 for the Google routes (not PostgREST's own `/` document, which describes `/rpc`) |
+| `api/v1/contract.json` | generated | Every route, field and type, sorted; the additive-only check compares it with `released.json` |
+| mecha `cluster.cue` option | installer | PostgREST's schemas become `public,api_v1` (`PGRST_DB_SCHEMAS`, a mecha-fork option, PRONTO-376; today `PGRST_DB_SCHEMA` is fixed to `public` for every app), so `/crud` keeps `public` as its default and is unchanged |
+| `flags_spec.cue` entry | installer | Flag `api_export`: `default: false`, `local: true`; off, the door block is not mounted |
 
 ### The spec
 
-An author names what to export; the generator reads field types, CEL checks and access from `program.cue`, so nothing is restated:
+An author names what to export and its public names; types, checks and access are read from `program.cue`, so nothing is restated:
 
 ```cue
 api: {
   version: "v1"
-  // a mecha machine: public name -> its surface tables, checked against program.cue
-  machines: match: {
+  // a mecha machine: public collection -> its surface tables, checked against program.cue
+  machines: matches: {
     machine: "chess_match"
     tables: { open: "chess_match_open", command: "chess_match_command", seat: "chess_match_seat", public: "chess_match_public" }
-    open:   ["create", "join"]
-    events: ["move", "resign", "offer_draw", "accept_draw", "decline_draw"]
-    state:  { fen: "view.fen", moves: "view.moves", result: "view.result", reason: "view.reason", actions: "view.actions" }
+    create: "create"                          // the open kind Create sends
+    methods: { join: "join" }                 // other open kinds, as custom methods
+    events: ["move", "resign", "offer_draw", "accept_draw", "decline_draw"]  // custom methods :move, :resign, :offerDraw, …
+    fields: { fen: "view.fen", moves: "view.moves", result: "view.result", reason: "view.reason", actions: "view.actions", seat: "seat", phase: "phase" }
   }
-  // plain entities: public name -> table, read and, where access allows, write
-  entities: player: { table: "player_card", read: { filter: ["id"] } }
-  entities: games:  { table: "player_game", read: { filter: ["owner_id", "room"] } }
+  // plain entities: public collection -> table, its fields, and which methods
+  entities: players: { table: "player_card", fields: { display_name: "handle", rating: "rating" }, methods: ["get"] }
+  entities: games:   { table: "player_game", parent: "players", fields: { result: "result", reason: "reason", match: "room" }, methods: ["get", "list"] }
   functions: {}
 }
 ```
 
-A spec that names a field the entity lacks, an event the machine does not declare, or a write on an entity whose access forbids it fails `generate`. Exporting is opt-in per operation; nothing is public by default.
+A spec that names a field the entity lacks, an event the machine does not declare, or a write on an entity whose access forbids it fails `generate`. Exporting is opt-in per method; nothing is public by default.
 
-### The contract: generated proto
+### Resources and methods (Google API design guide → PostgREST)
 
-`generate` turns the spec and `program.cue` into one `.proto` per app. Machine events become a typed `oneof`, field types and CEL checks come from the entity, and REST paths come from the spec's public names. For Bonk Chess, abridged:
+**Resource names** (AIP-122). Every projection has a `name` column, `{collection}/{id}`, nested under a parent where the spec says so: `matches/{match}`, `players/{player}`, `players/{player}/games/{game}`. Collections are plural lowerCamelCase (`matches`, `players`); ids are the row's existing key, never a new one.
 
-```proto
-syntax = "proto3";
-package bonk.v1;
-import "google/api/annotations.proto";
+**Standard methods** (AIP-131 to 135) and **custom methods** (AIP-136):
 
-service MatchService {
-  rpc Open(OpenMatchRequest) returns (OpenMatchResponse) {
-    option (google.api.http) = { post: "/api/v1/matches" body: "*" };
-  }
-  rpc SendCommand(SendCommandRequest) returns (SendCommandResponse) {
-    option (google.api.http) = { post: "/api/v1/matches/{match_id}/commands" body: "*" };
-  }
-  rpc GetState(GetStateRequest) returns (MatchState) {
-    option (google.api.http) = { get: "/api/v1/matches/{match_id}" };  // ?after_revision= long-polls
-  }
-  rpc Watch(WatchRequest) returns (stream MatchState);               // gRPC and Connect only
-  rpc ListOpen(ListOpenRequest) returns (ListOpenResponse) {
-    option (google.api.http) = { get: "/api/v1/matches" };
-  }
-}
-
-message SendCommandRequest {
-  string match_id = 1;
-  int64 expected_revision = 2;
-  string request_id = 3;  // idempotency key, AIP-155
-  oneof event {
-    Move move = 10;
-    Resign resign = 11;
-    OfferDraw offer_draw = 12;
-    AcceptDraw accept_draw = 13;
-    DeclineDraw decline_draw = 14;
-  }
-}
-message Move { string uci = 1; }  // "e2e4", promotion "e7e8q"
-```
-
-Field numbers are taken from `fields.lock.cue`, never from position, so reordering or renaming in CUE cannot renumber the wire format.
-
-### Operation kinds
-
-Four kinds cover every app in the monorepo, because they are the four things `/crud` already does. Each kind has a fixed RPC shape and a fixed REST binding:
-
-| Kind | RPCs | REST binding | Becomes |
+| Method | HTTP | PostgREST call | Function body |
 | --- | --- | --- | --- |
-| Entity read | `Get{E}`, `List{E}s` | `GET /api/v1/{es}/{id}`, `GET /api/v1/{es}?{filter}` | `GET /crud/{table}?{col}=eq.{v}&select=…` |
-| Entity write | `Create{E}`, `Update{E}`, `Delete{E}` | `POST`, `PATCH`, `DELETE /api/v1/{es}/{id}` | the same verb on `/crud/{table}`, client id kept |
-| Function | `{Fn}` | `POST /api/v1/fn/{fn}` | `POST /crud/rpc/{fn}` |
-| Machine | `Open`, `SendCommand`, `GetState`, `Watch`, `ListOpen` | see below | rows on the machine's surface tables |
+| `Get` | `GET /api/v1/{name=matches/*}` | `GET /rpc/get_match` | `select … from api_v1.match where name = request_name()`; none → `NOT_FOUND` |
+| `List` | `GET /api/v1/{parent}/games?page_size=&page_token=` | `GET /rpc/list_games` | keyset by `name` after the token, `page_size` default 50, max 200; returns `{games, next_page_token}` |
+| `Create` | `POST /api/v1/matches?match_id=` | `POST /rpc/create_match` | insert with the client-chosen id (AIP-133 `match_id`) or a new UUID; returns the resource; an existing id is `ALREADY_EXISTS`, unless the same `request_id` made it (a retry) |
+| `Update` | `PATCH /api/v1/{name}?update_mask=` | `POST /rpc/update_<e>` | update only the masked fields (AIP-134), `etag` checked; returns the resource |
+| `Delete` | `DELETE /api/v1/{name}` | `POST /rpc/delete_<e>` | delete by name; returns `{}` (AIP-135) |
+| custom | `POST /api/v1/{name}:verb` | `POST /rpc/<verb>_<e>` | the machine event or the exported SQL function (below) |
 
-Machines are what make games work, and they are not uniform: in Bonk Chess `chess_presence` has a lease table and no open table, `chess_challenge` has no public table, and each machine has its own protocol `version` and reason set. So the spec names each machine's surface tables explicitly, and the generator checks them against `program.cue`; the plugin assumes no naming convention. One mapping then serves any machine:
+The door turns `PATCH` and `DELETE` into `POST` on the function, since PostgREST calls functions on `GET` and `POST` only. Request fields come from the JSON body; the resource name and the declared query parameters from headers the door sets (Routes, above). A `GET` function takes no arguments.
 
-| RPC | REST binding | Row written or read |
+**Naming** (AIP-140, AIP-142). Fields are lower_snake_case and timestamps end in `_time` (`create_time`), as in Google's proto definitions. JSON keeps snake_case rather than proto3 JSON's lowerCamelCase, because there is no proto to map from and every pronto table and client already speaks snake_case. This and the error body's shape (Errors, below) are the two deliberate departures from the guide, the same for every pronto API. Enums are UPPER_SNAKE strings (`PLAYING`, `WHITE`).
+
+**Exported functions.** An entry in `functions` becomes a custom method on its collection (`POST /api/v1/players:search`) or on the service root (`POST /api/v1:quote`), with a function in `api_v1` that calls the app's own SQL function, so the app's function name is not contract.
+
+### Machines
+
+Machines are what make games work, and they are not uniform: in Bonk Chess `chess_presence` has a lease table and no open table, `chess_challenge` has no public table, and each machine has its own protocol `version` and reason set. So the spec names each machine's surface tables explicitly and the generator checks them against `program.cue`; the plugin assumes no naming convention. One mapping then serves any machine:
+
+| Method | HTTP (Bonk Chess) | What the function does |
 | --- | --- | --- |
-| `Open` | `POST /api/v1/{ms}` | insert the open table with a client-minted `instance_id`; returns `outcome`, `reason` |
-| `SendCommand` | `POST /api/v1/{ms}/{id}/commands` | insert the command table, then read the row back; returns `outcome`, `reason`, `revision` |
-| `GetState` | `GET /api/v1/{ms}/{id}` | the caller's seat row: `seat`, `revision`, `phase`, the exported `view` fields; with `after_revision`, holds up to 25 s until the revision passes it |
-| `Watch` | none (server stream) | streams the seat row on every new revision |
-| `ListOpen` | `GET /api/v1/{ms}` | the public table (waiting tables, open seeks), when the machine has one |
+| `Create` | `POST /api/v1/matches?match_id=` `{clock}` | insert the open table, kind `create`, with the instance id; read its outcome; returns the `Match` |
+| custom open | `POST /api/v1/matches/{match}:join` | insert the open table, kind `join` |
+| `Get` | `GET /api/v1/matches/{match}` | the caller's seat row through the `match` projection: `seat`, `phase`, the exported `view` fields, `etag` (the seat's revision) |
+| `List` | `GET /api/v1/matches` | the public table (waiting rooms), when the machine has one |
+| custom event | `POST /api/v1/matches/{match}:move` `{uci, etag, request_id}` | insert the command row, read back its stored `outcome`, `reason` and `revision`; returns the `Match` |
 
 Three details the code forces:
 
-- **Command results are read back.** The machine writes `outcome`, `reason` and `revision` with an AFTER INSERT trigger's UPDATE, which `INSERT … RETURNING` does not show. The service inserts the command, then reads the row by id in the same RPC, and answers with the stored result.
-- **The service builds the command id** from the room, the seat's current revision, the seat, the event and the request's `request_id`, and fills `version` from the machine's setup. Clients never compute either, which also keeps the scenario free of arithmetic its steps cannot do.
-- **Watch and long-poll share one upstream.** They use keyed Electric shapes when the seat table is keyed or scoped; shape tokens last 900 s, so the service re-mints them and retries on 401. Where a table is neither, the service polls `/crud` once a second. REST has no server streaming through the transcoder, so REST clients use `GetState` with `after_revision`.
+- **Command results are read in the same call.** The machine writes `outcome`, `reason` and `revision` in an AFTER INSERT trigger's UPDATE, which `INSERT … RETURNING` does not show. The function inserts the row, then selects it by id; the trigger has run by then, in the same transaction.
+- **Retries are found before anything is checked.** The function first looks up (caller, `request_id`) in `api_private.request`: a hit with the same body hash returns the stored resource, a hit with another body is `ALREADY_EXISTS`. Only then does it check `etag` and insert.
+- **The function builds the command id** from the room, the request's `etag` (the revision the client saw), the seat, the event and `request_id`, and fills `version` from the machine's setup. Clients never compute either. It inserts with `ON CONFLICT DO NOTHING` and then selects the row, so a concurrent duplicate reads the stored result instead of failing.
+- **A rejection stores nothing.** PostgREST commits nothing when a function raises, so a rejected command leaves no row and no `request` entry. That is safe: a rejection changes no state, so a retry is judged again on the same state and gets the same rejection.
+- **Server-only events have no route.** `start` and the like are not in `events`, so `POST …:start` is `404` at the door and writes nothing.
+
+Clients learn of the other seat's move by polling `Get` (a bot: once a second). `etag` changes on every revision, so a client compares it and does nothing when it has not moved. Push (a watch over the seat's Electric shape) is a later version's, when a client needs it.
 
 ### Identity
 
-A bot is an ordinary account with an API key; the API never runs as `service`.
+A bot is an ordinary account with an API key; the API never runs as `service`. Keys live in mecha-fork's auth service (PRONTO-312), so the JWT signing secret stays in one process:
 
-1. A signed-in, non-guest user calls `KeyService.CreateKey` (REST `POST /api/v1/keys`), or a settings screen, and gets `pk_live_…` once; the table keeps only its SHA-256 hash, owner, label, scopes and `last_used`.
-2. The bot exchanges it with `KeyService.ExchangeKey` (REST `POST /api/v1/token`) for a user JWT with the usual claims plus `kid` (key id) and `scp` (scopes), lifetime 15 minutes.
-3. Every RPC carries, as gRPC metadata or an HTTP header, `Authorization: Bearer <jwt>`; the service forwards it to `/crud`, so `auth_uid()` is the key's owner and RLS applies unchanged.
+1. A signed-in, non-guest user calls `POST /auth/keys` and gets `pk_live_…` once; auth keeps only its SHA-256 hash, owner, label, scopes and `last_used`.
+2. The bot exchanges it at `POST /auth/key` for a user JWT with the usual claims plus `kid` (key id) and `scp` (scopes), lifetime 15 minutes.
+3. Every call carries `Authorization: Bearer <jwt>`; PostgREST verifies it as it does the shell's, so `auth_uid()` is the key's owner and RLS applies unchanged. Scopes are checked twice: mecha's `app_pre_request` already refuses a key token's read without `read` and write without `write` (mecha-fork#37), and each machine method checks `machines:{name}` from `request.jwt.claims`. A session token without `scp` (the browser's) has all of its user's rights.
 
-Key exchange lives in the mecha auth service (a `/auth/key` endpoint in mecha-fork), not in the `api` service, so the JWT signing secret stays in one process. Guests cannot issue keys: a guest is refused every online operation anyway, and keys would let them persist.
+Keys are off unless the app's mecha config sets `capabilities.apiKeys`, which the installer sets from `api_export`. A key's own token cannot make keys (`403`, reason `key token`).
+
+Guests cannot issue keys, and every `api_v1` function refuses a guest token with `PERMISSION_DENIED`, reason `guest`.
 
 ### Errors
 
-Refusals become gRPC status codes, and the app's own reason word rides in `google.rpc.ErrorInfo.reason` (domain `pronto.api`), so a client sees exactly what a browser would. REST receives the same status as JSON with the standard HTTP mapping:
+Errors use the guide's canonical codes and HTTP mapping (AIP-193). A function raises them as `RAISE SQLSTATE 'PGRST' USING MESSAGE = <body>, DETAIL = '{"status": <http>, "headers": {"X-Api-Error": "1"}}'`, and PostgREST answers with that status, header and body. The body is not AIP-193's `{"error": {code, status, details: [ErrorInfo]}}` envelope, because PostgREST's raised body has four fixed fields. It gives them Google's meaning: `code` is the canonical code's name (`status` in AIP-193), `message` a sentence for developers, `details` the `ErrorInfo` reason (the app's own word, so a client sees exactly what a browser would), and `hint` the field at fault, when there is one:
 
-| When | gRPC status | REST | `ErrorInfo.reason` |
+```json
+{"code": "FAILED_PRECONDITION", "message": "That move is not legal in this position.", "details": "illegal_move", "hint": null}
+```
+
+| When | Code | HTTP | `details` (reason) |
 | --- | --- | --- | --- |
-| `outcome: accepted` | `OK` | 200 | none |
+| machine `outcome: accepted` | `OK` | 200 | none; the body is the resource |
 | machine `outcome: rejected` | `FAILED_PRECONDITION` | 400 | the machine's reason: `illegal_move`, `not_your_move`, `room_unavailable`, … |
-| CEL check or malformed field | `INVALID_ARGUMENT` | 400 | `invalid_field`, with the field in `metadata` |
-| `stale_revision` | `ABORTED` | 409 | `stale_revision` |
+| CEL check or malformed field | `INVALID_ARGUMENT` | 400 | `invalid_field`; `hint` names the field |
+| `etag` older than the resource | `ABORTED` | 409 | `stale_etag` |
 | same `request_id`, different body | `ALREADY_EXISTS` | 409 | `idempotency_conflict` |
-| no or expired token | `UNAUTHENTICATED` | 401 | `unauthenticated` |
-| RLS refusal, guest, missing scope | `PERMISSION_DENIED` | 403 | `forbidden`, `guest`, `scope` |
-| not exported, or not visible to this caller | `NOT_FOUND` | 404 | `not_found` (never reveals which) |
-| per-key rate limit | `RESOURCE_EXHAUSTED` | 429 | `rate_limited`, with `RetryInfo` |
+| `Create` with an id that exists | `ALREADY_EXISTS` | 409 | `exists` |
+| no, bad or expired token | `UNAUTHENTICATED` | 401 | `unauthenticated` |
+| guest, missing scope, RLS refusal on write | `PERMISSION_DENIED` | 403 | `guest`, `scope`, `forbidden` |
+| not exported, or not visible to this caller | `NOT_FOUND` | 404 | `not_found` (never says which) |
 
-Only `UNAVAILABLE`, `RESOURCE_EXHAUSTED` and `DEADLINE_EXCEEDED` are retriable, matching the outbox's own rule (408, 429 and 5xx).
+The functions catch the Postgres errors a write can meet (`check_violation`, `unique_violation`, `insufficient_privilege`, the machines' raised reasons) and re-raise them in this form. Errors that no function raised (PostgREST's `401` for a bad JWT, `400` for bad JSON, `404` for an unknown argument, `406`, `415`, and the door's own `404`) are rewritten by the door hatch into the same body; it tells them apart by the missing `X-Api-Error` header. Only `429`, `503` and `504` are retriable, matching the outbox's own rule.
 
 ## Validation: Bonk Chess over the API
 
-The plugin is done when a CUE scenario, `tests/scenarios/api_match.cue`, plays five complete games between two API-key bots in the gate, spread over gRPC, Connect and REST, and every ending, refusal and record matches what the browser path produces. No browser touches the board. The browser is used once, to sign the two accounts up, because only a passkey or the identity stand-in can make a non-guest account.
-
-The scenario schema gains one step kind, `grpc: {service, method, body, expect: {code, reason, json}, keep}`, beside the existing `http` step. The runner (`tests/scenarios.ts`) sends it with a Connect client built from the app's `descriptor.binpb`, over native gRPC (HTTP/2) or the Connect protocol, as the step says. Tests stay data; only the runner learns the new step.
+The plugin is done when a CUE scenario, `tests/scenarios/api_match.cue`, plays five complete games between two API-key bots in the gate, and every ending, refusal and record matches what the browser path produces. It uses the runner's existing `http` step (`{method, path, body, expect: {status, json}, keep}`), so the runner learns nothing new. The browser is used once, to sign the two accounts up, because only a passkey or the identity stand-in can make a non-guest account.
 
 ### One match, call by call
 
 Two accounts, `ada` (white) and `bob` (black), play Fool's mate:
 
-1. Each actor signs up in its page (existing scenario step), then calls `KeyService.CreateKey` with its session token and keeps the key, then `KeyService.ExchangeKey` and keeps the JWT.
-2. ada: `MatchService.Open` `{instance_id: "{uuid}", kind: CREATE, clock: "none"}` → `OK`, `outcome: accepted`; keep the match id.
-3. bob: `MatchService.Open` `{instance_id: match, kind: JOIN}` → `OK`, `accepted`.
-4. Both: `MatchService.GetState` `{match_id}` → `phase: PLAYING`, ada `seat: WHITE`, `revision` r.
-5. ada: `MatchService.SendCommand` `{match_id, expected_revision: r, request_id: "ada-1", move: {uci: "f2f3"}}` → `OK`, `accepted`, revision r+1.
-6. bob: `MatchService.Watch` `{match_id, after_revision: r}` yields as soon as ada's move lands; bob plays `e7e5`, and the two alternate `g2g4`, `d8h4`.
-7. Both read `phase: FINISHED`, `result: BLACK`, `reason: "checkmate"`; `PlayerGameService.ListPlayerGames` `{match_id}` shows two rows, and bob's `Player` shows one more win.
-
-The same steps over REST are `POST /api/v1/matches`, `GET /api/v1/matches/{id}`, `POST /api/v1/matches/{id}/commands` and `GET …?after_revision=r` for step 6.
+1. Each actor signs up in its page (existing step), then `POST /auth/keys` with its session token and keeps the key, then `POST /auth/key` and keeps the JWT.
+2. ada: `POST /api/v1/matches?match_id={uuid}` `{clock: "none"}` → 200, `phase: WAITING`; keep `name`.
+3. bob: `POST /api/v1/{name}:join` → 200.
+4. Both: `GET /api/v1/{name}` → `phase: PLAYING`, ada `seat: WHITE`, `etag` e.
+5. ada: `POST /api/v1/{name}:move` `{uci: "f2f3", etag: e, request_id: "{uuid}"}` → 200, a new `etag`.
+6. bob polls `GET /api/v1/{name}` until `etag` moves, plays `e7e5`, and the two alternate `g2g4`, `d8h4`.
+7. Both read `phase: FINISHED`, `result: BLACK`, `reason: "checkmate"`; `GET /api/v1/players/{bob}/games` lists the game, and `GET /api/v1/players/{bob}` shows one more win.
 
 ### The games
 
 Games are data, in `spec/api_games.cue`, and the scenario is generated from them by a CUE comprehension, so adding a game adds no code. A unit case replays each game through `machines/match.js` and asserts its declared ending, so a typo in a move list fails in `test` before any stack starts.
 
-| Game | Transport | Moves (UCI) | Clock | Expected end |
-| --- | --- | --- | --- | --- |
-| Fool's mate | gRPC | f2f3 e7e5 g2g4 d8h4 | none | black, checkmate, 4 plies |
-| Threefold | Connect | g1f3 g8f6 f3g1 f6g8 g1f3 g8f6 f3g1 f6g8 | none | draw, threefold repetition |
-| Stalemate (Loyd) | REST | e2e3 a7a5 d1h5 a8a6 h5a5 h7h5 h2h4 a6h6 a5c7 f7f6 c7d7 e8f7 d7b7 d8d3 b7b8 d3h7 b8c8 f7g6 c8e6 | none | draw, stalemate, 19 plies |
-| Resign | gRPC | e2e4, then bob `resign` | 3+2 | white, resignation |
-| Agreement | REST | e2e4 e7e5, ada `offer_draw`, bob `accept_draw` | 5+0 | draw, agreement |
+| Game | Moves (UCI) | Clock | Expected end |
+| --- | --- | --- | --- |
+| Fool's mate | f2f3 e7e5 g2g4 d8h4 | none | black, checkmate, 4 plies |
+| Threefold | g1f3 g8f6 f3g1 f6g8 g1f3 g8f6 f3g1 f6g8 | none | draw, threefold repetition |
+| Stalemate (Loyd) | e2e3 a7a5 d1h5 a8a6 h5a5 h7h5 h2h4 a6h6 a5c7 f7f6 c7d7 e8f7 d7b7 d8d3 b7b8 d3h7 b8c8 f7g6 c8e6 | none | draw, stalemate, 19 plies |
+| Resign | e2e4, then bob `:resign` | 3+2 | white, resignation |
+| Agreement | e2e4 e7e5, ada `:offerDraw`, bob `:acceptDraw` | 5+0 | draw, agreement |
 
 ### Refusals the scenario asserts
 
-Each is one `grpc` step expecting a status and `ErrorInfo.reason`, taken from the machine's own reasons. The four marked REST are sent as `http` steps too, checking the transcoded status and the same reason:
+Each is one `http` step expecting a status and body, taken from the machine's own reasons:
 
 | Call | Expect |
 | --- | --- |
-| bob moves on ada's turn (also REST) | `FAILED_PRECONDITION` / 400, `not_your_move` |
-| ada plays `e2e5` (also REST) | `FAILED_PRECONDITION` / 400, `illegal_move` |
-| ada sends an old `expected_revision` (also REST) | `ABORTED` / 409, `stale_revision` |
-| ada repeats step 5 with the same `request_id` and body | `OK`, same `revision`, no second move |
-| same `request_id`, different body | `ALREADY_EXISTS`, `idempotency_conflict` |
-| a third account joins the full room | `FAILED_PRECONDITION`, `room_unavailable` |
-| bob reads ada's seat by id | `NOT_FOUND` (RLS hides it) |
-| a guest token calls `CreateKey` (also REST) | `PERMISSION_DENIED` / 403, `guest` |
-| a revoked key calls `ExchangeKey` | `UNAUTHENTICATED` |
-| `SendCommand` with a server-only event (`start`) | `INVALID_ARGUMENT`: not in the `oneof`, refused before any row is written |
+| bob moves on ada's turn | 400 `FAILED_PRECONDITION`, `not_your_move` |
+| ada plays `e2e5` | 400 `FAILED_PRECONDITION`, `illegal_move` |
+| ada sends an old `etag` | 409 `ABORTED`, `stale_etag` |
+| ada repeats step 5 with the same `request_id` and body | 200, the same `etag`, no second move |
+| same `request_id`, different body | 409 `ALREADY_EXISTS`, `idempotency_conflict` |
+| a third account joins the full room | 400 `FAILED_PRECONDITION`, `room_unavailable` |
+| bob gets ada's private resource by name | 404 `NOT_FOUND` (RLS hides it) |
+| a guest token calls `POST /auth/keys` | 403 `PERMISSION_DENIED`, `guest` |
+| a revoked key calls `POST /auth/key` | 401 `UNAUTHENTICATED` |
+| `POST …:start` (a server-only event) | 404 `NOT_FOUND`, no row written |
+| `GET /api/v1/match?id=eq.x` (PostgREST grammar) | 404 `NOT_FOUND` |
 
 ### Proving it is generic
 
-The same plugin is installed on guestbook in the same pull request, with a spec of four lines (read and write `entry`), and a three-step scenario creates and lists an entry, once over gRPC and once over REST. The plugin's own lint fails if `pronto-plugins/api/` names any app, table or event; everything app-specific comes from `api_spec.cue`, `program.cue` and the generated descriptor set.
+The same plugin is installed on guestbook, with a spec of a few lines (`entries`: get, list, create), and a three-step scenario creates and lists an entry. The plugin's own lint fails if `pronto-plugins/api/` names any app, table or event; everything app-specific comes from `api_spec.cue` and `program.cue`.
 
-A reference client, `pronto-plugins/api/examples/bot/`, uses a client generated by `buf generate` from the app's `.proto` and plays random moves from `view.actions` against a local stack, for anyone who wants to watch two bots play to the end. It documents the API; it is not a gate.
+`openapi.json` is the reference for client authors; any OpenAPI generator makes a client from it. A sample bot is `curl` in the README.
 
 ## Security, idempotence, limits and versioning
 
-The API's authority is the user's, enforced by the database; the service only narrows it.
+The API's authority is the user's, enforced by the database; the generated SQL only narrows it.
 
 **Security**
 
-- No service role. The service holds no `SERVICE_JWT` for caller traffic; it reads `api_key` only through `SECURITY DEFINER` functions that return a key's owner and scopes by hash. A bug in the service can therefore never write a row the caller could not.
-- Allow-list, not deny-list. A path not generated from `api_spec.cue` is `NOT_FOUND` before any upstream call; raw `/crud` stays reachable only by the shell's own token, as today.
-- Scopes per key: `read`, `write`, `machines:{name}`. The token carries `scp`; the service refuses an operation outside it with `PERMISSION_DENIED`, and RLS still checks the row.
-- Keys are shown once, stored as SHA-256, revocable, and listed with `last_used`; at most 5 per account. Revoking one ends its next token exchange; issued tokens expire within 15 minutes.
-- `api_call` logs key id, operation, status and latency (no bodies) for 30 days, which feeds the existing analytics plugin.
-- Bonk Chess specifics stay where they are: stand-in seating, rating, gold and Premium gates are triggers, so a bot gets exactly what its account would.
+- No service role. Projections are `security_invoker` views and functions are `SECURITY INVOKER`, so every read and write runs as the token's user under the tables' RLS. A bug in a generated function can never touch a row its caller could not.
+- Allow-list, not deny-list. Only generated routes are mounted under `/api/v1`; `api_v1`'s views and `/rpc` are never routed there, and `/crud` cannot select `api_v1`. `/crud` itself is unchanged: a key token reaches it within its scopes, as the user's session does.
+- `api_v1` is granted to `app_user` only (the role every user and key token carries): `USAGE` on the schema, `SELECT` on the projections, `EXECUTE` on the functions, all revoked from `PUBLIC` and `anon`. Every function refuses a guest token and pins `search_path`.
+- Scopes per key: `read`, `write`, `machines:{name}`, checked by each function from the token's `scp`; RLS still checks the row.
+- Keys are shown once, stored as SHA-256, revocable, at most 5 per account; issued tokens expire within 15 minutes.
+- Bonk Chess specifics stay where they are: stand-in seating, rating, gold and Premium gates are triggers, so a bot gets exactly what its account would. Bots are marked and their games unrated (PRONTO-316).
 
-**Idempotence**
+**Idempotence** (AIP-155)
 
-- Entity writes keep the client-minted id the door already de-duplicates (`resolution=ignore-duplicates`).
-- Every mutating RPC carries `request_id` (AIP-155), a field rather than a header, so it behaves the same over gRPC, Connect and REST. The service maps it into the command row id (`{room}/{revision}/{seat}/{event}/{request_id}`), so a retry is the same row and returns its stored `outcome` and `revision`. It hashes the request into `api_call`, so a reused `request_id` with a different body is `ALREADY_EXISTS`.
-- `expected_revision` is required on every command, which turns a lost race into `ABORTED` that the client resolves by re-reading state.
+- Every mutating method takes `request_id`, a UUID. A machine event maps it into the command row id (`{room}/{etag}/{seat}/{event}/{request_id}`), so a retry is the same row and returns its stored result; a `Create` also keeps the client's `match_id`.
+- `api_private.request` (primary key owner and `request_id`, the body hash, `create_time`; RLS `owner = auth_uid()`; not in an exposed schema) is written in the same transaction as the effect, so it holds exactly the requests that took effect. A reused `request_id` with another body is `ALREADY_EXISTS`. Each insert deletes the caller's rows older than 24 hours, so no job is needed.
+- Every machine event requires `etag` (AIP-154), which turns a lost race into `ABORTED` that the client resolves by re-reading the resource.
 
 **Limits**
 
-- Per key: 10 commands/s burst 20, 60 reads/s, 4 open watches. Per account: 20 commands/s across keys. Numbers live in `api_spec.cue`, so an app can tighten them.
-- A watch holds at most 25 s and one upstream shape per (seat row, service instance), shared by every watcher of that row.
+- `v1` ships with no per-key request limit. The door is stock Caddy (`caddy:2.11.7-alpine`), which has no rate limiting, and a limit cannot live in Postgres: a `GET` runs in a read-only transaction, and a refused request rolls its transaction back with its count.
+- What bounds a bot meanwhile: 5 keys per account, 15-minute tokens, PostgREST's connection pool, and the machines' own pace (one move per turn). `List` caps `page_size` at 200.
+- A limit, when needed, goes before PostgREST: a Caddy build with a rate-limit module, or the edge (Cloudflare) in front of the door. Either answers `429 RESOURCE_EXHAUSTED`, reason `rate_limited`, with `Retry-After`.
 
-**Versioning**
+**Versioning** (AIP-185)
 
-Stability is the reason the API exists: `/crud` changes whenever a migration does, while `/api/v1` never changes incompatibly for its whole life. Releases ship every 2 hours, so this is enforced by a gate, not by care.
+Stability is the reason the API exists: the app's tables change whenever a migration does, while `/api/v1` never changes incompatibly for its whole life. Releases ship every 2 hours, so this is enforced by gates, not by care.
 
-- Within a major version, changes are additive only: new RPCs, new fields with new numbers, new enum values clients must tolerate. Nothing is removed, renamed, renumbered or retyped.
-- Each release's descriptor set is frozen as `api/v1/released.binpb`. The `test` step runs `buf breaking` (rule set `WIRE_JSON`, which guards both the binary and the JSON/REST encoding) against it and fails on any incompatible change, whatever the release cadence.
-- `fields.lock.cue` is append-only: a field number, once assigned, is never reused, even after the field is deprecated.
+- The major version is in the path and the schema: `/api/v1` is `api_v1`. Within it, changes are additive only: new resources, methods, fields and enum values clients must tolerate. Nothing is removed, renamed or retyped.
+- `contract.json` lists every route, field and type. Each release freezes it as `api/v1/released.json`, and `test` fails when the current contract lacks or retypes anything the released one has.
+- Postgres guards the projections too: `CREATE OR REPLACE VIEW` cannot drop, rename or retype a column, so a migration that would break a view fails `integrate@local`. A dropped table column a projection still needs fails `generate`.
 - The API scenario runs against the released contract as well as the current one, so behaviour, not only shape, stays compatible.
-- A breaking change means package `bonk.v2` and `/api/v2`, served beside `v1` by the same service. `v1` keeps working through mappings in `api_spec.cue` for at least 6 months after `v2` ships.
-- The package and path carry the major version; `api_spec.cue` may declare `v1` and `v2` side by side during a migration.
-- `generate` writes the `.proto`, `routes.json`, the descriptor set and, from them, `openapi.json` for REST readers. CUE is the only source; the generated `.proto` is the published contract.
-- Public names belong to the spec, not the tables. Each export maps a public message and field to an internal table and column, so a rename in `program.cue` changes the mapping, not the contract; a dropped column an export still needs fails `generate`.
-- Deprecations are marked `deprecated = true` in the `.proto`, and REST responses carry `Deprecation` and `Sunset` headers for 30 days before removal in the next major version.
+- A breaking change means `api_v2` and `/api/v2`, generated beside `v1` from a second `version` in `api_spec.cue`; `db-schemas` lists both, and `v1` keeps working for at least 6 months after `v2` ships.
+- A deprecated method keeps working and its responses carry `Deprecation` and `Sunset` headers (set by the door) for 30 days before it goes in the next major version.
 
 ## Rollout, gates and open questions
 
-Five pull requests, each behind the `api_export` flag (`default: false` in production, `local: true`), each passing `generate`, `lint`, `test` and `INTEGRATE_LOCAL_DRIVERS=all ./saytw integrate@local` before automerge.
+Pull requests, each behind the `api_export` flag (`default: false` in production, `local: true`), each passing `generate`, `lint`, `test` and `INTEGRATE_LOCAL_DRIVERS=all ./saytw integrate@local` before automerge:
 
-1. **Spike, 2 days** (pronto-plugins `api/`): a Deno service that loads a descriptor set into a protobuf-es registry and serves one method over native gRPC, Connect and a generated REST route, on Cloud Run with HTTP/2. It settles the two unproven pieces, runtime descriptors in connect-es and h2c into Deno, before any plugin code.
-2. **Auth key exchange** (mecha-fork): `/auth/key` mints a 15-minute user JWT from a hashed key; `KeyService` fronts it. Unit cases for expiry, revocation and guest refusal.
-3. **Plugin core** (pronto-plugins `api/`): schema, CUE-to-proto and CUE-to-routes generator with `fields.lock.cue`, `buf breaking` in `test`, the service for entities and functions, and the scenario runner's `grpc` step. Installed on guestbook with its scenario.
-4. **Machines and watch** (pronto-plugins `api/`): `Open`, `SendCommand`, `GetState`, `Watch`, `ListOpen`, idempotency, status mapping, rate limits.
-5. **Bonk Chess** (apps/brawl-chess): `pronto-api brawl-chess`, `api_spec.cue`, `spec/api_games.cue`, the replay unit case and `api_match.cue`. Release-cron ships it; nothing is released by hand.
+1. **Keys** (mecha-fork, PRONTO-312, merged as mecha-fork#36 and #37), then **the flag and keys in Bonk Chess** (PRONTO-323). Unchanged by this redesign.
+2. **`api_v1` in PostgREST** (mecha-fork, PRONTO-376): a cluster option that adds schemas after `public`, and its pin in Bonk Chess and guestbook.
+3. **Plugin core** (pronto-plugins `api/`, PRONTO-324): the `#Api` schema, the generator for entities and functions (projections, method functions, door routes, `openapi.json`, `contract.json` and its additive check), with unit cases on PGlite; it removes the gRPC spike (`service.ts`), the proto generator, `api/proto/` and buf from ci.
+4. **guestbook** (PRONTO-325): installed with a small spec and `api_entry.cue` over `http` steps.
+5. **Machines** (PRONTO-314): `Create`, `Get`, `List`, custom open kinds and events, `etag`, `request_id`, the error mapping, on a two-seat test machine.
+6. **Bonk Chess** (PRONTO-316, then PRONTO-315): bots marked and unrated; `pronto-api brawl-chess`, `api_spec.cue`, `spec/api_games.cue`, the replay unit case and `api_match.cue`. Release-cron ships it; nothing is released by hand.
+7. **On the wire** (PRONTO-320) and **the production tester** (PRONTO-328).
 
-The flag goes live with `pronto-flags push`, which needs a `production` scenario, and a production scenario writes nothing. So it only reads: it exchanges the tester account's key (issued once, kept with the tester's other credentials), then reads its own player once over gRPC and once over REST. Games are proven by the local gate and release-cron's rehearsal, never on production.
+The flag goes live with `pronto-flags push`, which needs a `production` scenario, and a production scenario writes nothing. So it only reads: it exchanges the tester account's key (issued once, kept with the tester's other credentials; the exchange writes only the key's `last_used`), then gets its own player. Games are proven by the local gate and release-cron's rehearsal, never on production.
+
+**Decisions**
+
+- [x] PostgREST over projections, no service (the owner, 2026-11-11). Functions carry every method; views carry every shape (Design, above).
+- [x] Google's API design guide for the surface; snake_case JSON is the one departure.
+- [x] No gRPC, Connect, protobuf or buf. The spike's findings (runtime descriptors in connect-es, h2c into Deno 2.9) are no longer needed; its code goes with PRONTO-324.
+- [x] Key exchange in mecha-fork's auth service; bots visible as bots; API games unrated; `chess_seek` not in `v1` (the product manager, 2026-11-11).
+- [x] No push in `v1`: clients poll `Get` and compare `etag`.
 
 **Open questions**
 
-- [x] Language: Deno, like every pronto sidecar (decided 2026-11-10). REST comes from a route table generated from CUE, not a general `google.api.http` transcoder, because the generator only emits four route shapes.
-- [x] Does connect-es serve services built purely from a runtime descriptor set? Yes (the spike, PRONTO-289, [`api/`](../api/README.md)): `createFileRegistry` over the descriptor set gives a service `router.service` takes like a generated one, so no per-app stubs are generated.
-- [x] Native gRPC needs HTTP/2 end to end: does Deno accept h2c? Yes, on Deno 2.9 (the spike): `node:http2`'s server takes h2c and sends the `grpc-status` trailer, with HTTP/1.1 on the same port by sniffing the HTTP/2 preface; Deno 2.5's `node:http2` cannot, and `Deno.serve` has no trailers. Cloud Run's end-to-end HTTP/2 in front of it is PRONTO-320's to check.
-- [ ] Key exchange in mecha-fork's auth service (recommended) or in the `api` service holding the signing secret? The fork adds upstream drift; the service spreads the secret.
-- [ ] Should bots be visible as bots? A `bot` flag on `profile` set by key use would let players opt out of bot opponents and keep bot games out of leaderboards.
-- [ ] Rated or unrated? Stand-in games are unrated today; two keys on two real accounts can farm Elo. Proposal: API games unrated until there is a bot policy.
-- [ ] Generate an MCP server from the same `.proto` in v2, so agents can play through tools?
-- [ ] Does `chess_seek` matchmaking belong in v1, given it needs a presence lease renewed every 10 s?
+- [ ] Per-key rate limits: a Caddy build with a rate-limit module, or Cloudflare in front of the door? Not in `v1` (Limits, above); PRONTO-327 was cancelled until a bot needs one.
+- [ ] Generate an MCP server from `openapi.json` in `v2`, so agents can play through tools?
 
-**Sources:** read from the monorepo on 2026-11-10: `AGENTS.md`, `apps/brawl-chess/{program.cue, surface.cue, machines/, tests/scenarios/, standin/}`, `apps/guestbook/docker/Caddyfile`, mecha `services/auth/README.md` and `ARCHITECTURE.md`, pronto `docs/access.md` and `docs/lattice.md`, and `bsoneca/pronto-plugins` (billing, flags, analytics installers). The three scripted games were replayed through `machines/match.js` and end as the table says; the API path has not yet been run.
+**Sources:** the first version's sources (read from the monorepo on 2026-11-10: `AGENTS.md`, `apps/brawl-chess/{program.cue, surface.cue, machines/, tests/scenarios/, standin/}`, mecha `services/auth` and `ARCHITECTURE.md`, pronto `docs/access.md`), the spike (bsoneca/pronto-plugins#200, bsoneca/pronto#1169) and the generator (bsoneca/pronto-plugins#205), [Google's API design guide](https://docs.cloud.google.com/apis/design) and the AIPs it cites (122, 131–136, 140, 142, 154, 155, 158, 185, 193), and PostgREST's documentation on schemas, functions as RPC, `request.headers` and raising errors with `SQLSTATE 'PGRST'`. The three scripted games were replayed through `machines/match.js` for the first version; the API path has not yet been run.
