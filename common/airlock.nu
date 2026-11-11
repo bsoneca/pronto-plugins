@@ -1,11 +1,13 @@
 # The airlock beside an operator's broker (--airlock, PRONTO-135, PRONTO-268): shared by
-# billing/metal.nu (Stripe's door) and identity/metal.nu (Google's token door), so the pod, its ledger
-# and the wall around it are written once.
+# billing/metal.nu (Stripe's door), identity/metal.nu (Google's token door) and airlock/metal.nu (an
+# app's doors from its own spec: Studio's model doors, PRONTO-271), so the pod, its ledger and the wall
+# around it are written once.
 
 # The airlock beside the broker (--airlock, PRONTO-135): mecha-fork's airlock with its door
-# (mecha-fork#26, and its sinkKey, mecha-fork#30: mecha 0.22.0-host.6 by pronto-fork's prerelease-mecha), mecha's daprd,
+# (mecha-fork#26, its sinkKey, mecha-fork#30, and a door's own timeoutMs and hidden headers,
+# mecha-fork#34: mecha 0.22.0-host.8 by pronto-fork's prerelease-mecha), mecha's daprd,
 # and mecha's database image, which stages the ledger's initdb steps.
-const airlock_image = "ghcr.io/bsoneca/mecha-airlock:0.22.0-host.6@sha256:dcc2d12a8f29855230a60411b0fd7a2a1be4dc778952a42e26bebf0fc37db8ec"
+const airlock_image = "ghcr.io/bsoneca/mecha-airlock:0.22.0-host.8@sha256:02822aa37edf22081740fc0935fe9f41df93ba9146030c8ca31f0814876acbb0"
 const mesh_image = "bonitao/mecha-mesh:0.22.0@sha256:8d39aa3543560232c52330152ba70a4d2c973b76d0ac97899d677704bc0e09a4"
 const ledger_image = "bonitao/mecha-database:0.22.0@sha256:ed58b6be6cd69658fbb4e6daff1f91b8923b333f364905c4dacdec2974a05d82"
 export const door_port = 9998
@@ -15,19 +17,29 @@ export const door_port = 9998
 # credential's: the airlock reads it from the broker's Secret (`var`), adds it to every call as the
 # Authorization header's `scheme` value, and calls `base`; the broker's pod names none of them. Every
 # call is a row of the ledger (mecha's services/airlock/README.md, "A door").
-export def airlock-objects [namespace: string, name: string, labels: record, caller_labels: record, caller: string, held: list<record>]: nothing -> list<record> {
+# A door may also say: no `var`, holding no credential (its caller's hidden header is the sink's key);
+# `secret` {name, key}, the Secret its credential is read from where it is not the
+# caller's own; `timeoutMs`, how long its sink may take (a model's answer: minutes), which the door and
+# the daprd's resiliency policy both wait; `headers` entries {name, hidden: true}, passed to the sink
+# and frozen in the ledger only as their sha256; and `egress`, the NetworkPolicy rules that reach a sink
+# inside the cluster, in place of HTTPS to public addresses. `from` is who reaches the door: the
+# caller's pod labels (in this namespace), or a list of NetworkPolicy peers (callers elsewhere).
+export def airlock-objects [namespace: string, name: string, labels: record, from: any, caller: string, held: list<record>]: nothing -> list<record> {
 	let doors = ($held | get door)
-	let vars = ($held | get var)
 	let meta = {namespace: $namespace, labels: $labels}
+	let peers = (if ($from | describe | str starts-with "record") { [{podSelector: {matchLabels: $from}}] } else { $from })
+	# Each credential's Secret and key: the caller's own Secret, by the variable's name, unless named.
+	# A door with no `var` holds no credential: its caller's own header (hidden) is the sink's key.
+	let refs = ($held | where {|d| ($d.var? | is-not-empty) } | each {|d| {var: $d.var, ref: ($d.secret? | default {name: $caller, key: $d.var})} } | uniq-by var)
 	let manifest = {
 		effects: {}
-		doors: ($held | reduce -f {} {|d, acc| $acc | insert $d.door {
-			idempotent: true
-			credential: {header: "Authorization", scheme: $d.scheme, secret: $d.var}
-			headers: $d.headers
-			callers: [$caller]
-		}})
+		doors: ($held | reduce -f {} {|d, acc| $acc | insert $d.door ({idempotent: true}
+			| merge (if ($d.var? | is-empty) { {} } else { {credential: {header: "Authorization", scheme: $d.scheme, secret: $d.var}} })
+			| merge {headers: $d.headers, callers: [$caller]}
+			| merge (if ($d.timeoutMs? | is-empty) { {} } else { {timeoutMs: $d.timeoutMs} }))})
 	}
+	# A door that waits longer than daprd's default waits there too.
+	let timed = ($held | where {|d| ($d.timeoutMs? | is-not-empty) })
 	# The daprd's wall and breaker, as mecha's cluster writes them for its effects (cluster.cue's
 	# #AirlockWall and #AirlockResiliency), and one HTTPEndpoint per door.
 	let wall = {
@@ -37,8 +49,9 @@ export def airlock-objects [namespace: string, name: string, labels: record, cal
 	let resiliency = {
 		apiVersion: "dapr.io/v1alpha1", kind: "Resiliency", metadata: {name: "airlock"}
 		spec: {
-			policies: {circuitBreakers: {sink: {maxRequests: 1, interval: "60s", timeout: "30s", trip: "consecutiveFailures >= 10"}}}
-			targets: {apps: ($doors | reduce -f {} {|d, acc| $acc | insert $d {circuitBreaker: "sink"} })}
+			policies: ({circuitBreakers: {sink: {maxRequests: 1, interval: "60s", timeout: "30s", trip: "consecutiveFailures >= 10"}}}
+				| merge (if ($timed | is-empty) { {} } else { {timeouts: ($timed | reduce -f {} {|d, acc| $acc | insert $d.door $"($d.timeoutMs // 1000)s" })} }))
+			targets: {apps: ($held | reduce -f {} {|d, acc| $acc | insert $d.door ({circuitBreaker: "sink"} | merge (if ($d.timeoutMs? | is-empty) { {} } else { {timeout: $d.door} })) })}
 		}
 	}
 	let endpoints = ($held | each {|d| {key: $"($d.door).yaml", value: ({apiVersion: "dapr.io/v1alpha1", kind: "HTTPEndpoint", metadata: {name: $d.door}, spec: {baseUrl: $d.base}} | to yaml)} })
@@ -106,7 +119,7 @@ export def airlock-objects [namespace: string, name: string, labels: record, cal
 									{name: "DATABASE_URL", value: "postgres://airlock@127.0.0.1:5432/airlock"}
 									{name: "MESH_URL", value: "http://127.0.0.1:3500"}
 									{name: "AIRLOCK_DIR", value: "/airlock"}
-								] ++ ($vars | each {|v| {name: $v, valueFrom: {secretKeyRef: {name: $caller, key: $v}}} }))
+								] ++ ($refs | each {|r| {name: $r.var, valueFrom: {secretKeyRef: $r.ref}} }))
 								resources: {requests: {cpu: "20m", memory: "96Mi"}, limits: {memory: "384Mi"}}
 								startupProbe: {httpGet: {path: "/healthz", port: 9997}, periodSeconds: 2, failureThreshold: 90}
 								readinessProbe: {tcpSocket: {port: $door_port}, periodSeconds: 10}
@@ -125,17 +138,17 @@ export def airlock-objects [namespace: string, name: string, labels: record, cal
 			}
 		}
 		{apiVersion: "v1", kind: "Service", metadata: ($meta | insert name $name), spec: {selector: $labels, ports: [{name: "door", port: $door_port, targetPort: $door_port}]}}
-		# The door's port from the broker alone; out, DNS and HTTPS to public addresses (the sinks).
+		# The door's port from its callers alone; out, DNS and HTTPS to public addresses (the sinks), or
+		# each in-cluster sink's own way where its doors all name one.
 		{
 			apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy", metadata: ($meta | insert name $name)
 			spec: {
 				podSelector: {matchLabels: $labels}
 				policyTypes: ["Ingress" "Egress"]
-				ingress: [{from: [{podSelector: {matchLabels: $caller_labels}}], ports: [{protocol: "TCP", port: $door_port}]}]
-				egress: [
-					{ports: [{protocol: "UDP", port: 53} {protocol: "TCP", port: 53}]}
-					{to: [{ipBlock: {cidr: "0.0.0.0/0", except: $private}}], ports: [{protocol: "TCP", port: 443}]}
-				]
+				ingress: [{from: $peers, ports: [{protocol: "TCP", port: $door_port}]}]
+				egress: ([{ports: [{protocol: "UDP", port: 53} {protocol: "TCP", port: 53}]}]
+					++ (if ($held | any {|d| ($d.egress? | is-empty) }) { [{to: [{ipBlock: {cidr: "0.0.0.0/0", except: $private}}], ports: [{protocol: "TCP", port: 443}]}] } else { [] })
+					++ ($held | each {|d| $d.egress? | default [] } | flatten | uniq))
 			}
 		}
 	]

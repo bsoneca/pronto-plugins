@@ -545,6 +545,28 @@ operator's broker there in place of the one on a developer's machine:
 which needs a pronto whose release lets `release.cue`'s keys win over
 compose's (bsoneca/pronto-fork#21).
 
+## pronto-airlock
+
+An app's own airlock on a metal cluster (pronto's `envs.Metal`): mecha's airlock with its doors,
+for calls an app's service makes outside that must be answered now, recorded once and billed once
+(mecha's `services/airlock/README.md`, "A door"). The objects are `common/airlock.nu`'s, the ones the
+billing and identity brokers' `--airlock` use; the doors come from the app's spec, written in its CUE
+and exported:
+
+```sh
+cue export <app> -e modelAirlock --out json > /abs/spec.json   # Studio's: apps/studio/release.cue
+<this repo>/bin/pronto-airlock metal --spec /abs/spec.json [--ssh U@H] [--kubeconfig K]
+```
+
+Each door is `{door, base, var?, scheme?, secret?: {name, key}, headers, timeoutMs?, egress?}`: its
+sink, the credential the airlock adds as `Authorization` (read into `var` from a Secret already on the
+node, never written here), the headers a caller may set (`{name, hidden: true}` reaches the sink and
+is frozen in the ledger only as its sha256), how long the sink may take (whole seconds, at most ten
+minutes, given to daprd's resiliency policy as well), and, for a sink inside the cluster, the egress
+rules that reach it in place of public HTTPS. `from` is who may reach the door's port. The release
+refuses a credential whose Secret is not there, then checks from inside the pod that each door
+answers.
+
 ## pronto-flags
 
 Feature flags for pronto apps, on [OpenFeature](https://openfeature.dev), the
