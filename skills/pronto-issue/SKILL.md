@@ -33,6 +33,14 @@ other.
 5. **Open the pull request** ready for review, its title starting `PRONTO-<n>:`. The plane
    workflow moves the issue to Review, and to Merged once it merges; release-cron makes it Live and
    the flag's flip Done.
+5a. **A flag merged off gets its own flip issue.** When there are flags to be flipped, there is an
+   issue for each (the owner, 2026-11-10). The plane workflow files it: a merged pull request that
+   adds a flag whose default is false to an app's `flags_spec.cue` gets "Flip <flag> on in <app>" in
+   the Backlog, in the app's module, with the flag's note, a `Flag: <flag>` line and the pull request
+   linked; one already titled so for that app (filed by hand) is reused, never doubled.
+   `pronto-flags push` of the flag for everyone marks it Done (`hook.ts flipped`). Don't file one by
+   hand for a flag a pull request adds; a flip waits for the owner's go, so it is never pulled into a
+   sprint unless the owner says so.
 5b. **Pull the next one, always.** An idle engineer is money spent for nothing (the owner,
    2026-11-09), so the moment an issue leaves your hands (its pull request opens, or it is
    cancelled or abandoned) you start the next one in the same turn; you never end a turn idle

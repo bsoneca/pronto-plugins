@@ -185,3 +185,51 @@ export function missingKey(labels, chore, warn, identifier) {
   const say = `this pull request names no issue: put its key (${identifier}-123) in the title, or label it ${chore}`;
   return { ok: warn, say: warn ? `warning: ${say}` : say };
 }
+
+/** The flags a merge added that are off where the app is released: those of the app's generated
+ * flagd file (flags/flags.json) at the merge, `head`, not at its base, whose default variant is false.
+ * `base` is null when the file is new. The flags to flip on later (PRONTO-265). */
+export function addedFlags(base, head) {
+  const before = new Set(Object.keys(base?.flags ?? {}));
+  return Object.entries(head?.flags ?? {})
+    .filter(([name, f]) => !before.has(name) && f?.variants?.[f.defaultVariant] === false)
+    .map(([name]) => name)
+    .sort();
+}
+
+/** A flag's note in an app's flags_spec.cue (`flags: <flag>: {` or `<flag>: {` inside `flags: {`),
+ * its multi-line string dedented to one paragraph; null when the flag or its note is not there. */
+export function flagNote(cue, flag) {
+  const text = String(cue ?? "");
+  const at = new RegExp(`(?:^|[\\s{])${flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*\\{`, "m").exec(text);
+  if (!at) return null;
+  const rest = text.slice(at.index + at[0].length);
+  const m = /^\s*note:\s*"""\n([\s\S]*?)\n\s*"""/m.exec(rest);
+  // The note is the flag's own: no other flag's block opens before it.
+  if (!m || /^\s*(?:[A-Za-z0-9_]+:\s*)+\{/m.test(rest.slice(0, m.index))) return null;
+  return m[1].split("\n").map((l) => l.trim()).filter(Boolean).join(" ");
+}
+
+/** A flip issue's title: what turning the flag on for everyone in the app is called on the board. */
+export function flipTitle(flag, app) {
+  return `Flip ${flag} on in ${app}`;
+}
+
+/** The flag a flip issue's title names ("Flip <flag> on in <app>"), or null for another issue. */
+export function flipOf(title) {
+  const m = /^Flip `?([A-Za-z0-9_.-]+)`? on in \S/.exec(String(title ?? "").trim());
+  return m ? m[1] : null;
+}
+
+/** The flip issue of an app's flag among `issues` (`{name, modules}`): titled for the flag, in the
+ * app's module, whatever its state, so one filed by hand (PRONTO-225..264) is never filed twice;
+ * null when there is none. */
+export function flipIssueOf(issues, flag, app) {
+  return (issues ?? []).find((i) => flipOf(i.name) === flag && (i.modules ?? []).includes(app)) ?? null;
+}
+
+/** Where a flip moves the flag's flip issue, as a role: Done from any open state (it waits in the
+ * Backlog for the owner's go, not for a pull request); null when it is Done or cancelled already. */
+export function flipIssueMove(state) {
+  return state === "done" || state === "cancelled" || rank(state) < 0 ? null : "done";
+}

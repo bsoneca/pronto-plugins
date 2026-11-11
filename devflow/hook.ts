@@ -1,13 +1,14 @@
 // The dev flow's hooks: what GitHub, release-cron and pronto-flags tell the board.
-//   hook.ts pr <repo> [--warn]                    a pull_request event (GITHUB_EVENT_PATH): its issue to Review, Merged, back to Implementing
+//   hook.ts pr <repo> [--warn]                    a pull_request event (GITHUB_EVENT_PATH): its issue to Review, Merged, back to Implementing;
+//                                                 a merge that added flags off where released files "Flip <flag> on in <app>" for each
 //   hook.ts released <repo> <app> <commit>        release-cron confirmed <commit>: the app's Merged issues it holds go Live
-//   hook.ts flipped <repo> <app> <flag...>        pronto-flags turned the flags on for everyone: their issues are Done
+//   hook.ts flipped <repo> <app> <flag...>        pronto-flags turned the flags on for everyone: their issues and flip issues are Done
 //   hook.ts rolledback <repo> <app> <flag...>     a flip was rolled back: their Done issues go back to Live
 // Only `pr` can fail (an issue key missing, rule 3). The others say what they did and exit 0 whatever
 // happens: a release or a flip never fails for the board.
 import { cmd } from "../intents/shell.ts";
 import { esc, type Issue } from "./board/board.ts";
-import { doneAt, flagOf, keyOf, missingKey, moveFor, nameOf, prEvent, roleOf } from "./flow.js";
+import { addedFlags, doneAt, flagNote, flagOf, flipIssueMove, flipIssueOf, flipTitle, keyOf, missingKey, moveFor, nameOf, prEvent, roleOf } from "./flow.js";
 import { boardOf, devflowOf, type DevFlow } from "./spec.ts";
 
 type Conn = NonNullable<Awaited<ReturnType<typeof boardOf>>>;
@@ -51,6 +52,8 @@ async function pr(warn: boolean, flow: DevFlow) {
     console.log(`${key}: the board is not reachable yet (no PLANE_TOKEN, or no project): not told`);
     Deno.exit(warn ? 0 : 1);
   }
+  // Filing flip issues never fails the pull request's check: what went wrong is said, as the other hooks say it.
+  if (event === "merged") await fileFlips(p, ev.repository?.full_name ?? "", b, flow).catch((e) => console.log(`devflow: WARNING: no flip issues filed: ${(e as Error).message.split("\n")[0]}`));
   const issue = await b.board.issue(key).catch(() => null);
   if (!issue) {
     console.log(`${key} is not on the board`);
@@ -60,6 +63,56 @@ async function pr(warn: boolean, flow: DevFlow) {
     await b.board.link(b.project, issue.id, p.html_url, `#${p.number} ${p.title}`);
   }
   console.log(event ? await move(b, issue, event, `pull request #${p.number} ${event}`, flow) : `${key}: nothing to do for ${ev.action}`);
+}
+
+/** A file of the repository at a commit, through GitHub's API (the hook's checkout has only devflow/):
+ * null when it is not there. */
+async function fileAt(repo: string, path: string, ref: string): Promise<string | null> {
+  const r = await cmd("gh", ["api", "-H", "Accept: application/vnd.github.raw", `repos/${repo}/contents/${path}?ref=${ref}`]);
+  if (r.ok) return r.out;
+  if (/HTTP 404/.test(r.err)) return null;
+  throw new Error(`gh api ${path}@${ref.slice(0, 8)}: ${r.err.trim().split("\n")[0]}`);
+}
+
+/** Every flag a merged pull request added that is off where its app is released gets a flip issue in
+ * the Backlog (PRONTO-265: "When there are flags to be flipped, create a new issue."): "Flip <flag> on
+ * in <app>", in the app's module, with the flag's note, its Flag line and the pull request linked. A
+ * flip issue already on the board for that flag and app, in any state, is reused. */
+async function fileFlips(p: { number: number; html_url: string; title: string; base: { sha: string }; merge_commit_sha: string }, repo: string, b: Conn, flow: DevFlow) {
+  const files = await cmd("gh", ["api", "--paginate", `repos/${repo}/pulls/${p.number}/files`, "-q", ".[].filename"]);
+  if (!files.ok) throw new Error(`gh api pulls/${p.number}/files: ${files.err.trim().split("\n")[0]}`);
+  const apps = [...new Set(files.out.split("\n").map((f) => /^apps\/([^/]+)\/flags\/flags\.json$/.exec(f.trim())?.[1]).filter((a): a is string => !!a))];
+  if (!apps.length) return;
+  const s = await stateIds(b);
+  const modules = await b.board.modulesByIssue(b.project);
+  const issues = (await b.board.issues(b.project)).map((i) => ({ ...i, modules: modules.get(i.id) ?? [] }));
+  const mods = await b.board.modules(b.project);
+  for (const app of apps) {
+    const path = `apps/${app}/flags/flags.json`;
+    const base = await fileAt(repo, path, p.base.sha);
+    const head = await fileAt(repo, path, p.merge_commit_sha);
+    const added = addedFlags(base ? JSON.parse(base) : null, head ? JSON.parse(head) : null);
+    if (!added.length) continue;
+    const spec = (await fileAt(repo, `apps/${app}/flags_spec.cue`, p.merge_commit_sha)) ?? "";
+    for (const flag of added) {
+      const had = flipIssueOf(issues, flag, app);
+      if (had) {
+        if (!(await b.board.links(b.project, had.id)).some((l) => l.url === p.html_url)) await b.board.link(b.project, had.id, p.html_url, `#${p.number} ${p.title}`);
+        console.log(`${flag}: #${had.sequence_id} is its flip issue already`);
+        continue;
+      }
+      const note = flagNote(spec, flag) ?? `(no note for ${flag} in apps/${app}/flags_spec.cue)`;
+      const body = `<p>Flag \`${esc(flag)}\` merged off where ${esc(app)} is released, in #${p.number} ${esc(p.title)}. What it does: ${esc(note)}</p>` +
+        `<p>Done when: \`pronto-flags push\` turned it on for everyone after its production cases passed as the tester; or the owner says it stays off and the flag is retired. A flip changes what players see, so it waits for the owner's go.</p>` +
+        `<p>Flag: ${esc(flag)}</p>`;
+      const made = await b.board.createIssue(b.project, { name: flipTitle(flag, app), description_html: body, priority: "none", state: s.id(nameOf(flow.roles, "backlog")), labels: [] });
+      const mod = mods.find((m) => m.name === app);
+      if (mod) await b.board.addToModule(b.project, mod.id, [made.id]);
+      await b.board.link(b.project, made.id, p.html_url, `#${p.number} ${p.title}`);
+      issues.push({ ...made, modules: mod ? [app] : [] });
+      console.log(`${flag}: filed #${made.sequence_id} ${flipTitle(flag, app)}`);
+    }
+  }
 }
 
 /** The board's issues in these states, with what the dev flow reads of each. */
@@ -96,6 +149,22 @@ async function flip(event: "flipped" | "rolledback", app: string, flags: string[
     const flag = flagOf(issue.description_html);
     if (!flag || !flags.includes(flag) || !forApp(modules, app)) continue;
     console.log(await move(b, issue, event, event === "flipped" ? `${flag} is on for everyone in ${app}` : `${flag}'s flip in ${app} was rolled back`, flow, modules));
+  }
+  if (event !== "flipped") return;
+  // Each flag's flip issue (fileFlips, or filed by hand) is Done from wherever it waits.
+  const s = await stateIds(b);
+  const modules = await b.board.modulesByIssue(b.project);
+  const issues = (await b.board.issues(b.project)).map((i) => ({ ...i, modules: modules.get(i.id) ?? [] }));
+  for (const flag of flags) {
+    const issue = flipIssueOf(issues, flag, app);
+    if (!issue) continue;
+    const from = s.name(issue.state);
+    const role = flipIssueMove(roleOf(flow.roles, from));
+    if (!role) { console.log(`#${issue.sequence_id} stays ${from} (flipped)`); continue; }
+    const to = nameOf(flow.roles, role);
+    await b.board.moveIssue(b.project, issue.id, s.id(to));
+    await b.board.comment(b.project, issue.id, `<p>${esc(from)} → ${esc(to)}: ${esc(`${flag} is on for everyone in ${app}`)}</p>`);
+    console.log(`#${issue.sequence_id} ${from} → ${to}`);
   }
 }
 
