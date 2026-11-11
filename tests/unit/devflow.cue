@@ -265,4 +265,35 @@ cases: {
 		], why: "shop is 2 days Done, menu waits in the Backlog, trophies has a removal issue, studio is another app"},
 		{call: "devflow.removalsDue", args: [[{name: "Flip ads on in brawl-chess", modules: ["brawl-chess"], state: "done", doneAt: "2026-11-03T10:00:00Z"}, {name: "Remove flag ads from brawl-chess", modules: ["brawl-chess"], state: "backlog"}], "brawl-chess", "2026-11-11T12:00:00Z"], expect: [], why: "a second run files nothing"},
 	]}
+	"a flip issue may name several flags, each one its own removal": {suite: "devflow", steps: [
+		{call: "devflow.flipFlagsOf", args: ["Flip ads on in brawl-chess"], expect: ["ads"]},
+		{call: "devflow.flipFlagsOf", args: ["Flip trial_banner and roman_army on for everyone where Bonk Chess is released"], expect: ["trial_banner", "roman_army"], why: "PRONTO-44, filed by hand"},
+		{call: "devflow.flipFlagsOf", args: ["Flip `a`, b and c on in brawl-chess"], expect: ["a", "b", "c"]},
+		{call: "devflow.flipFlagsOf", args: ["Flip the menu on in brawl-chess"], expect: [], why: "words that are no flag name"},
+		{call: "devflow.flipFlagsOf", args: ["Remove flag ads from brawl-chess"], expect: []},
+	]}
+	"a flag on by default counts from when the released history turned it on": {suite: "devflow", steps: [
+		{call: "devflow.onSince", args: [[
+			{at: "2026-11-08T10:00:00Z", flags: {flags: {a: {variants: {on: true, off: false}, defaultVariant: "on"}, b: {variants: {on: true, off: false}, defaultVariant: "on"}, c: {variants: {on: true, off: false}, defaultVariant: "off"}, grants: {variants: {default: [1]}, defaultVariant: "default"}}}},
+			{at: "2026-11-05T10:00:00Z", flags: {flags: {a: {variants: {on: true, off: false}, defaultVariant: "on"}, b: {variants: {on: true, off: false}, defaultVariant: "off"}}}},
+			{at: "2026-11-01T10:00:00Z", flags: {flags: {a: {variants: {on: true, off: false}, defaultVariant: "on"}, b: {variants: {on: true, off: false}, defaultVariant: "on"}}}},
+		]], expect: {a: "2026-11-01T10:00:00Z", b: "2026-11-08T10:00:00Z"}, why: "b was off on 11-05, so its run starts 11-08; c is off; an object variant is no flag"},
+		{call: "devflow.onSince", args: [[]], expect: {}, why: "no history, nothing on"},
+	]}
+	"flags with no Done flip issue go by the released history; one with a Done flip goes by the flip": {suite: "devflow", steps: [
+		{call: "devflow.removalsDue", args: [[
+			{name: "Flip trial_banner and roman_army on for everyone where Bonk Chess is released", modules: ["brawl-chess"], state: "done", doneAt: "2026-11-03T10:00:00Z"},
+			{name: "Flip shop on in brawl-chess", modules: ["brawl-chess"], state: "done", doneAt: "2026-11-09T10:00:00Z"},
+			{name: "Flip army_fights on in brawl-chess", modules: ["brawl-chess"], state: "cancelled", doneAt: ""},
+			{name: "Remove flag premium from brawl-chess", modules: ["brawl-chess"], state: "backlog"},
+		], "brawl-chess", "2026-11-11T12:00:00Z", 7, {
+			shop: "2026-10-01T10:00:00Z", premium: "2026-10-28T10:00:00Z", birosca_army: "2026-11-04T12:00:00Z",
+			army_fights: "2026-11-01T10:00:00Z", menu_first: "2026-11-07T10:00:00Z", roman_army: "2026-11-08T10:00:00Z",
+		}], expect: [
+			{flag: "army_fights", since: "2026-11-01T10:00:00Z"},
+			{flag: "birosca_army", since: "2026-11-04T12:00:00Z"},
+			{flag: "roman_army", flip: {name: "Flip trial_banner and roman_army on for everyone where Bonk Chess is released", modules: ["brawl-chess"], state: "done", doneAt: "2026-11-03T10:00:00Z"}},
+			{flag: "trial_banner", flip: {name: "Flip trial_banner and roman_army on for everyone where Bonk Chess is released", modules: ["brawl-chess"], state: "done", doneAt: "2026-11-03T10:00:00Z"}},
+		], why: "shop's flip is 2 days Done, which wins over its history; premium has its removal issue; menu_first is 4 days on; a cancelled flip leaves the history to say"},
+	]}
 }
