@@ -66,7 +66,14 @@ other.
       the lead (SendMessage to the session that started you, or a comment on the sprint) that your
       lane is empty. The lead plans the next sprint at once (the pronto-sprint-plan skill); help
       (5c) until it does, then pull again.
-   Work each issue the same way, as its own session, and say which you started.
+   Work each issue the same way, as its own session, and say which you started. **Never wait for
+   the owner to begin it** (the owner, 2026-11-11: "I don't need to ask for next turns"): start the
+   new session yourself (`start_session`, its title `Engineer N · PRONTO-<n> ...`). When the app
+   refuses that, as it does on a turn the owner did not begin (another session's message, a hook,
+   a watcher), or would show the owner an approval card, do not show the card and do not wait:
+   rename this session to the new issue (`set_session_title self`) and work it here. A session
+   that changes issue this way says so in its first line, and the old issue's pull request keeps
+   its own watch.
 5c. **Nothing to start: help finish the sprint.** An engineer or SRE for whom 5b found nothing to
    start becomes a helper until the lead plans the next sprint. A helper takes no new issue from the Backlog and files none to keep busy; it
    helps the current sprint's open issues (`pronto-devflow status .`: Implementing and Review) merge.

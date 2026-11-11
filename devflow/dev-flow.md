@@ -44,6 +44,9 @@ on.
    whose sprint has nothing Ready pulls from the next one.
 5. **One issue, one Claude session.** An issue goes refine → implement → review → merge. Anything new
    learned along the way becomes a new issue; the session judges whether it belongs in this sprint.
+   The next issue never waits for the owner to write: when a new session cannot be started without
+   the owner (the app refuses it, or asks for approval), the engineer's session takes the next issue
+   itself, renamed to it.
 6. **Bugs carry a priority**, P0 to P3 (below), which decides whether they wait for a sprint.
 7. **Releases run on the release cron, independent of sprints.** Every task ships behind a flag.
 8. **A sprint ends when its tasks are merged. A task ends when it is in production and its flag was
