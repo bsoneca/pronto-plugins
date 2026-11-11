@@ -451,7 +451,7 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 #      writes the version read in 3 again, and the push fails;
 #   5. the flags as the spec says them are written (stage=all, cases=passed).
 # A flag turned off (default now false) skips 1-4: it returns to the path before it, and its cases test it on.
-export def push [app: path, --untested: string, --expect: string] {
+export def push [app: path, --untested: string, --no-canary: string, --expect: string] {
 	let at = (live $app)
 	if (target-guard $at $expect) { show $app; print "flags: dry run: nothing written"; return }
 	let doc = (cue-of $app flagd.document)
@@ -468,8 +468,11 @@ export def push [app: path, --untested: string, --expect: string] {
 	let off = ($changed | where {|f| (default-of ($doc.flags | get $f)) == false })
 	if ($off | is-not-empty) { print -e $"flags: ($off | str join ', ') turned off: no cases run \(they test the flag on\)" }
 	let all = ($changed | where {|f| $f not-in $off } | each {|f| cases-of $app $f })
-	let bare = ($all | where {|c| not (has-cases $c) } | each {|c| $c.flag })
-	let tested = ($all | where {|c| has-cases $c })
+	# --no-canary "<why>": the owner's go to turn the flags on for everyone at once, with no tester stage and
+	# no cases run (2026-11-11, army_fights: "Can you flip army_fights with no test canary?"; PRONTO-284).
+	let bare = if $no_canary != null { [] } else { $all | where {|c| not (has-cases $c) } | each {|c| $c.flag } }
+	let tested = if $no_canary != null { [] } else { $all | where {|c| has-cases $c } }
+	if $no_canary != null { print -e $"flags: WARNING: ($changed | str join ', ') pushed to everyone with NO CANARY and no cases run: ($no_canary)" }
 	if ($bare | is-not-empty) and $untested == null {
 		error make {msg: $"a push changes ($bare | str join ', '), which has no cases: name the flag in a scenario's `flags` and mark it `production` (tests/scenarios/*.cue; `pronto-flags cases` lists them), or push with --untested \"<why>\""}
 	}
@@ -486,10 +489,10 @@ export def push [app: path, --untested: string, --expect: string] {
 		if ($none | is-not-empty) { error make {msg: $"($none | str join ', ') has no `production` scenario to run on production as the tester: mark one \(production: true, tests/scenarios/schema.cue\)"} }
 	}
 	let names = ($changed | str join "+")
-	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" })] | compact | str join "; ")
+	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if $no_canary != null { $"no canary: ($no_canary)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" })] | compact | str join "; ")
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
 	if ($tested | is-empty) {
-		write-flags $at $doc $app --meta {stage: all, flag: $names, cases: untested, note: $notes} --from $before | ignore
+		write-flags $at $doc $app --meta {stage: all, flag: $names, cases: (if $no_canary != null { "skipped" } else { "untested" }), note: $notes} --from $before | ignore
 		tell-board $at $app ($changed | where {|f| $f not-in $off }) $off
 		return
 	}
@@ -829,7 +832,7 @@ def "main armies rollback" [app: path, army: string, version?: int, --local, --e
 
 def main [] { print "usage: live.nu setup|push|history|rollback|show|cases <app-dir> [version|flag]; live.nu armies push|show|history|rollback <app-dir>" }
 def "main setup" [app: path, --expect: string, --dry-run] { with-env (dry-env $dry_run) { setup $app --expect $expect } }
-def "main push" [app: path, --untested: string, --expect: string, --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --expect $expect } }
+def "main push" [app: path, --untested: string, --no-canary: string, --expect: string, --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --no-canary $no_canary --expect $expect } }
 def "main history" [app: path, --json] { if $json { history $app --changes | to json | print } else { history $app | table -e | print } }
 def "main rollback" [app: path, version?: string, --expect: string, --dry-run] { with-env (dry-env $dry_run) { rollback $app $version --expect $expect } }
 def dry-env [on: bool]: nothing -> record { if $on { {PRONTO_FLAGS_DRY_RUN: "1"} } else { {} } }

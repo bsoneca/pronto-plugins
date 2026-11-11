@@ -145,6 +145,18 @@ check ((object | length) == $n4 + 1 and (ran | length) == $ran4) "off-flip: one 
 check ((newest 0).metadata.stage == "all" and (newest 0).metadata.flag == "premium" and ((newest 0).metadata.note | str contains "turned off: premium")) "off-flip: stage=all, and the note records it"
 check ((premium (newest 0)).variants.default == false and not ((newest 0).data | str contains "tester-1")) "off-flip: the version holds the new value, no tester named"
 
+# --no-canary "<why>": the owner's go to flip at once: one version for everyone, no tester stage, no case run.
+let n5 = (object | length)
+let ran5 = (ran | length)
+full-spec true "light"
+let nc = (livex [push $app --no-canary "the owner's go"])
+check ($nc.exit_code == 0 and ($nc.stderr | str contains "NO CANARY")) "--no-canary: pushed, loudly"
+check ((object | length) == $n5 + 1 and (ran | length) == $ran5) "--no-canary: one version written, no case run"
+check ((newest 0).metadata.stage == "all" and (newest 0).metadata.cases == "skipped" and ((newest 0).metadata.note | str contains "no canary: the owner's go")) "--no-canary: stage=all, cases=skipped, the reason kept"
+check ((premium (newest 0)).variants.default == true and not ((newest 0).data | str contains "tester-1")) "--no-canary: the new value for everyone, no tester named"
+full-spec false "light"
+livex [push $app] | ignore
+
 # No tester, or a flag with no production scenario: the flip is refused, nothing written, nothing run.
 full-spec true "light"
 let n1 = (object | length)
