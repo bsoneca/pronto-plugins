@@ -263,3 +263,58 @@ Deno.test("the tenant's flag is asked at its own origin as the tenant, and an an
   assertEquals(await fails(() => askedFlag("signin_door", () => Promise.resolve(new Response("", { status: 404 })))(A)), true, "a flag not there is no answer");
   assertEquals(await fails(() => askedFlag("signin_door", () => Promise.reject(new Error("down")))(A)), true, "unreachable is no answer");
 });
+
+// The door probe (PRONTO-268): asked with the caller's session at the tenant's own door, it exchanges a code no one
+// was given through the door. Google, faked here as it answers: invalid_client when the client did not
+// authenticate (the airlock added no credential), invalid_grant for the code when it did.
+Deno.test("the door probe: a tester's session proves the door before its flag reaches everyone", async () => {
+  let added = true;
+  const sent: Record<string, unknown>[] = [];
+  const fetcher: typeof fetch = async (url, init) => {
+    const body = JSON.parse(String(init!.body));
+    sent.push({ url: String(url), ...body });
+    const authed = added && !String(body.body).includes("client_secret");
+    return Response.json(authed ? { status: 400, body: { error: "invalid_grant" } } : { status: 401, body: { error: "invalid_client" } });
+  };
+  const sessions: (string | undefined)[] = [];
+  let clock = 0;
+  const provider: Provider = {
+    name: "google", label: "Google", authUrl: "https://g.example/auth", tokenUrl: "https://g.example/token", issuers: ["https://accounts.google.com"],
+    keys: async () => googleJwk, clientId: "op-client", door: "http://airlock:9998/door/google", doorAsked: true, doorTenants: [A, B], clientSecret: "op-secret",
+  };
+  handler = await broker({
+    issuer: ISSUER, secret: "s".repeat(40), providers: [provider], fetcher, now: () => clock, probeEveryMs: 1000,
+    askDoor: (t, s) => { sessions.push(s); return Promise.resolve(t === A && s === "tess-token"); },
+  });
+  const probe = async (tenant: unknown, token?: string) => {
+    const res = await call(`${ISSUER}/probe/door`, { method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ tenant }) });
+    clock += 1000;
+    return [res.status, await res.json()];
+  };
+  assertEquals(await probe(A, "tess-token"), [200, { door: "credential", sink: { status: 400, error: "invalid_grant" } }], "the tester's session: through the door, credential added");
+  assertEquals(sessions, ["tess-token"], "the flag is asked with the caller's session");
+  assertEquals(sent.length, 1);
+  assertEquals([sent[0].url, sent[0].method, sent[0].path], ["http://airlock:9998/door/google", "POST", "/token"]);
+  const form = new URLSearchParams(String(sent[0].body));
+  assertEquals([form.get("client_id"), form.get("client_secret"), form.get("code")?.startsWith("door-probe-")], ["op-client", null, true], "a code no one was given, no secret");
+
+  assertEquals((await probe(A, "someone"))[0], 409, "a session the flag does not name: the door is not called");
+  assertEquals(sent.length, 1);
+  added = false;
+  assertEquals(await probe(A, "tess-token"), [502, { door: "refused", sink: { status: 401, error: "invalid_client" } }], "no credential added: refused");
+
+  assertEquals((await probe(A))[0], 401, "no session");
+  assertEquals((await probe("https://app-c.example", "tess-token"))[0], 404, "a tenant the operator did not list");
+  assertEquals((await probe("not an origin", "tess-token"))[0], 400);
+  assertEquals((await probe(A, "tess-token"))[0], 502, "spaced: the next probe after probeEveryMs runs");
+  clock -= 500; // within probeEveryMs of the last probe
+  assertEquals((await call(`${ISSUER}/probe/door`, { method: "POST", headers: { authorization: "Bearer tess-token" }, body: JSON.stringify({ tenant: A }) })).status, 429, "one per tenant every probeEveryMs");
+});
+
+Deno.test("the tenant's flag, asked with a session, sends it as the door's Bearer token", async () => {
+  const seen: (string | null)[] = [];
+  const ask = askedFlag("signin_door", (_url, init) => { seen.push(new Headers(init!.headers).get("authorization")); return Promise.resolve(Response.json({ value: true })); });
+  await ask(A, "tess-token");
+  await ask(A);
+  assertEquals(seen, ["Bearer tess-token", null]);
+});

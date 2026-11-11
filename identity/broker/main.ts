@@ -79,10 +79,12 @@ export function google(env: (k: string) => string | undefined): Provider | null 
  * As billing's door flag: a flag that cannot be asked, or that the live document does not have
  * (FLAG_NOT_FOUND), is no answer and fails the sign-in, never picks a way. --door-asked is deployed
  * only once the tenants' push has published the flag. */
-export function askedFlag(flag: string, fetcher: typeof fetch = fetch): (tenant: string) => Promise<boolean> {
-  return async (tenant) => {
+export function askedFlag(flag: string, fetcher: typeof fetch = fetch): (tenant: string, session?: string) => Promise<boolean> {
+  // With a session (the door probe's caller's): the tenant's door names the account from it, so a flag on for the
+  // accounts it names (a flip's tester) answers for that account. Without one, the tenant's answer for no account.
+  return async (tenant, session) => {
     const res = await fetcher(`${tenant}/ofrep/v1/evaluate/flags/${encodeURIComponent(flag)}`, {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST", headers: { "content-type": "application/json", ...(session ? { authorization: `Bearer ${session}` } : {}) },
       body: JSON.stringify({ context: { targetingKey: tenant } }), signal: AbortSignal.timeout(10_000), redirect: "error",
     });
     const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
@@ -158,9 +160,12 @@ export async function broker(p: {
   /** Routes served beside the broker's own: the phone's (phone.ts). */
   extra?: (req: Request, url: URL) => Promise<Response> | null;
   /** Whether a tenant's flag sends its sign-ins through the airlock's door, for a provider with `doorAsked`. */
-  askDoor?: (tenant: string) => Promise<boolean>;
+  askDoor?: (tenant: string, session?: string) => Promise<boolean>;
   /** The fetch that reaches the door (tests'). */
   fetcher?: typeof fetch;
+  /** The door probe's spacing, per tenant (tests'). */
+  probeEveryMs?: number;
+  now?: () => number;
 }) {
   if (p.secret.length < 32) throw new Error("BROKER_SECRET is at least 32 characters");
   const issuer = p.issuer.replace(/\/$/, "");
@@ -197,6 +202,53 @@ export async function broker(p: {
 <p>You'll continue with ${esc(provider.label)}. Only <span class="origin">${esc(r.tenant)}</span> learns that it's you, and it can't tell you apart in any other app.${r.email ? ` ${esc(learnsMore(r))}` : ""}</p>
 <p><a class="go" href="${esc(`${issuer}/authorize/continue?leg=${encodeURIComponent(leg)}`)}">Continue with ${esc(provider.label)}</a></p>
 <p><small>If you didn't start this from ${esc(host)}, close this page.</small></p>`);
+  }
+
+  // The door probe (PRONTO-268): a flip's tester proves the door before its flag reaches everyone. A sign-in asks
+  // its tenant's flag for no account (the broker knows none when it begins), so a flag on for the testers alone
+  // never sends a real sign-in through the door; this asks it for the caller's own session at the tenant's door,
+  // and where it is on, exchanges a code that no one was given through the door. Google answers invalid_grant
+  // when the client authenticated, i.e. the airlock added the credential, and invalid_client when it did not.
+  // Read-only: the code is refused, no sign-in happens, and each probe is one ledger row. One per tenant every
+  // probeEveryMs.
+  const probeEvery = p.probeEveryMs ?? 5_000;
+  const now = p.now ?? (() => Date.now());
+  const probed = new Map<string, number>();
+  async function probe(req: Request): Promise<Response> {
+    const tenant = (await req.json().catch(() => null) as { tenant?: unknown } | null)?.tenant;
+    const session = req.headers.get("authorization")?.match(/^Bearer ([A-Za-z0-9._~+/=-]{1,4096})$/)?.[1];
+    if (typeof tenant !== "string" || !/^https?:\/\/[^/]+$/.test(tenant)) return json(400, { error: "tenant: an origin" });
+    if (!session) return json(401, { error: "a session of the tenant's: Authorization: Bearer <token>" });
+    const provider = [...providers.values()].find((x) => x.door !== undefined);
+    const listed = provider && (provider.doorAsked !== true || tenantAdmitted(provider.doorTenants ?? [], tenant));
+    if (!provider || !listed || (provider.admits && !provider.admits(tenant))) return json(404, { error: "no door for this tenant" });
+    const last = probed.get(tenant) ?? -Infinity;
+    if (now() - last < probeEvery) return json(429, { error: "a probe for this tenant ran just now" });
+    probed.set(tenant, now());
+    if (provider.doorAsked === true) {
+      if (!p.askDoor) return json(404, { error: "no door for this tenant" });
+      let on: boolean;
+      try { on = await p.askDoor(tenant, session); } catch (e) {
+        console.error(`door probe for ${tenant}: ${(e as Error).message}`);
+        return json(503, { error: "the tenant's flag did not answer" });
+      }
+      if (!on) return json(409, { door: "off", error: "the tenant's flag does not send this session's sign-ins through the door" });
+    }
+    const form = new URLSearchParams({ grant_type: "authorization_code", code: `door-probe-${randomToken(16)}`, client_id: provider.clientId, redirect_uri: callback(provider.name) });
+    let status: number, answer: { error?: unknown } | null;
+    try {
+      const res = await exchangeThroughDoor(provider.door!, form, p.fetcher);
+      status = res.status;
+      answer = await res.json().catch(() => null);
+    } catch (e) {
+      console.error(`door probe for ${tenant}: ${e instanceof Error ? e.message : e}`);
+      return json(502, { door: "unanswered", error: "the door did not answer" });
+    }
+    const error = typeof answer?.error === "string" ? answer.error : null;
+    console.log(`door probe for ${tenant}: ${provider.name} answered ${status} ${error ?? ""}`);
+    return error === "invalid_grant"
+      ? json(200, { door: "credential", sink: { status, error } })
+      : json(502, { door: "refused", sink: { status, error } });
   }
 
   async function proceed(url: URL): Promise<Response> {
@@ -296,6 +348,7 @@ export async function broker(p: {
       if (req.method === "GET" && path === "/authorize/continue") return await proceed(url);
       if (req.method === "GET" && path.startsWith("/callback/")) return await arrive(path.slice("/callback/".length), url);
       if (req.method === "POST" && path === "/token") return await token(req);
+      if (req.method === "POST" && path === "/probe/door") return await probe(req);
       if (req.method === "GET" && path === "/health") return json(200, { ok: true });
       return json(404, { error: "not found" });
     } catch (e) {
