@@ -1,6 +1,7 @@
 // What a tenant's billing document may say, and the words an entitlement may use: written once
-// here, read by the broker and the service (rules.ts, which rules_gen.ts writes from this) and by
-// every app's billing_plugin.cue (billing_rules.cue, which install.ts writes from rules.ts).
+// here. The plugin's broker reads it as billing/rules.ts (rules_gen.ts); install.ts copies it into
+// each app as billing_rules.cue (_billingRules), which its billing_plugin.cue holds the spec to and
+// its generate writes the app's billing/rules.ts from (billing.nu's rules).
 package billing
 
 rules: {

@@ -2,5 +2,5 @@
 package prontoproject
 
 pronto: {
-	say: say: generate: rulemap: billing: {"priority":3,"cmds":[{"do":"use ./billing/billing.nu; billing route"}]}
+	say: say: generate: rulemap: billing: {"priority":3,"cmds":[{"do":"use ./billing/billing.nu; billing route; billing rules"}]}
 }
