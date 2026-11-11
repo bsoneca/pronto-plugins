@@ -558,12 +558,13 @@ cue export <app> -e modelAirlock --out json > /abs/spec.json   # Studio's: apps/
 <this repo>/bin/pronto-airlock metal --spec /abs/spec.json [--ssh U@H] [--kubeconfig K]
 ```
 
-Each door is `{door, base, var?, scheme?, secret?: {name, key}, headers, timeoutMs?, egress?}`: its
+Each door is `{door, base, var?, scheme?, secret?: {name, key}, headers, timeoutMs?, sink?}`: its
 sink, the credential the airlock adds as `Authorization` (read into `var` from a Secret already on the
 node, never written here), the headers a caller may set (`{name, hidden: true}` reaches the sink and
 is frozen in the ledger only as its sha256), how long the sink may take (whole seconds, at most ten
-minutes, given to daprd's resiliency policy as well), and, for a sink inside the cluster, the egress
-rules that reach it in place of public HTTPS. `from` is who may reach the door's port. The release
+minutes, given to daprd's resiliency policy as well), and, for a sink that is a pod in the airlock's
+namespace, `sink: {pod: <labels>, port}`: the airlock is let out to that port alone, in place of public
+HTTPS, and a NetworkPolicy of its own lets it into the pod. `from` is who may reach the door's port. The release
 refuses a credential whose Secret is not there, then checks from inside the pod that each door
 answers.
 

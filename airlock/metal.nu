@@ -7,7 +7,10 @@
 # The spec (JSON):
 #   {namespace, name, caller, from: [NetworkPolicy peers], partOf?,
 #    doors: [{door, base, var?, scheme?, secret?: {name, key}, headers: [name | {name, hidden: true}],
-#             timeoutMs?, egress?: [NetworkPolicy egress rules]}]}
+#             timeoutMs?, sink?: {pod: {labels}, port}}]}
+# A door whose sink is a pod in the airlock's namespace says so (`sink`): the airlock is let out to that
+# pod's port alone, not to public HTTPS, and a NetworkPolicy of the airlock's own lets it into the pod
+# (policies add up, so the sink's own is left as it is).
 # Each credential is read from a Secret already on the node (`secret`), which this never writes: the
 # service that owns the key (its metal.nu) put it there. The pod, its ledger and its wall are
 # common/airlock.nu's airlock-objects; its door answers on 9998 to the `from` peers alone.
@@ -32,6 +35,9 @@ export def check [spec: record]: nothing -> record {
 		if ($d.var? | is-not-empty) and not ($d.var =~ '^[A-Z][A-Z0-9_]*$') { do $bad $"door ($d.door): var is an environment variable's name" }
 		if ($d.var? | is-not-empty) and ($d.secret? | is-empty) { do $bad $"door ($d.door): name the Secret its credential is read from" }
 		if ($d.var? | is-empty) and ($d.secret? | is-not-empty) { do $bad $"door ($d.door): a Secret with no var to read it into" }
+		if ($d.sink? | is-not-empty) and not (($d.sink.pod? | describe) =~ '^record' and ($d.sink.pod | is-not-empty) and ($d.sink.port? | describe) == "int") {
+			do $bad $"door ($d.door): sink is {pod: <its labels>, port}"
+		}
 		if ($d.timeoutMs? | is-not-empty) and not (($d.timeoutMs | describe) == "int" and $d.timeoutMs > 0 and $d.timeoutMs <= 600000 and $d.timeoutMs mod 1000 == 0) {
 			do $bad $"door ($d.door): timeoutMs is whole seconds, at most 600000"
 		}
@@ -43,8 +49,22 @@ export def check [spec: record]: nothing -> record {
 export def manifests [spec: record]: nothing -> string {
 	let s = (check $spec)
 	let labels = {"app.kubernetes.io/name": $s.name, "app.kubernetes.io/part-of": ($s.partOf? | default $s.name)}
-	let held = ($s.doors | each {|d| $d | merge {headers: ($d.headers? | default []), scheme: ($d.scheme? | default "Bearer")} })
-	airlock-objects $s.namespace $s.name $labels $s.from $s.caller $held | each { to yaml } | str join "---\n"
+	let way = {|d| {to: [{podSelector: {matchLabels: $d.sink.pod}}], ports: [{protocol: "TCP", port: $d.sink.port}]} }
+	let held = ($s.doors | each {|d|
+		$d | reject -o sink | merge {headers: ($d.headers? | default []), scheme: ($d.scheme? | default "Bearer")}
+		| merge (if ($d.sink? | is-empty) { {} } else { {egress: [(do $way $d)]} })
+	})
+	# Into each in-cluster sink from the airlock alone, on the sink's port.
+	let admit = ($s.doors | where {|d| ($d.sink? | is-not-empty) } | each {|d| {
+		apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy"
+		metadata: {namespace: $s.namespace, labels: $labels, name: $"($s.name)-to-($d.door)"}
+		spec: {
+			podSelector: {matchLabels: $d.sink.pod}
+			policyTypes: ["Ingress"]
+			ingress: [{from: [{podSelector: {matchLabels: $labels}}], ports: [{protocol: "TCP", port: $d.sink.port}]}]
+		}
+	}})
+	airlock-objects $s.namespace $s.name $labels $s.from $s.caller $held | append $admit | each { to yaml } | str join "---\n"
 }
 
 export def main [

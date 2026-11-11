@@ -6,17 +6,18 @@ use ../metal.nu
 let builder = {podSelector: {matchLabels: {"app.kubernetes.io/name": studio, "app.kubernetes.io/component": builder}}}
 let gateway = {to: [{podSelector: {matchLabels: {"app.kubernetes.io/name": pronto-llm}}}], ports: [{protocol: TCP, port: 4000}]}
 let chatgpt = {to: [{podSelector: {matchLabels: {"app.kubernetes.io/name": pronto-llm-chatgpt}}}], ports: [{protocol: TCP, port: 4000}]}
+let mine = {"app.kubernetes.io/name": studio-model-airlock, "app.kubernetes.io/part-of": pronto-llm}
 let spec = {
 	namespace: pronto-llm, name: studio-model-airlock, caller: builder, partOf: pronto-llm
 	from: [({namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": studio}}} | merge $builder) ({namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": studio-rc}}} | merge {podSelector: {matchLabels: {"app.kubernetes.io/name": studio-rc, "app.kubernetes.io/component": builder}}})]
 	doors: [
-		{door: model, base: "http://pronto-llm.pronto-llm.svc:4000", headers: [Anthropic-Version Anthropic-Beta {name: X-Api-Key, hidden: true}], timeoutMs: 300000, egress: [$gateway]}
-		{door: model-chatgpt, base: "http://pronto-llm-chatgpt.pronto-llm.svc:4000", var: LLM_CHATGPT_KEY, secret: {name: pronto-llm-chatgpt, key: LITELLM_MASTER_KEY}, headers: [Anthropic-Version Anthropic-Beta], timeoutMs: 300000, egress: [$chatgpt]}
+		{door: model, base: "http://pronto-llm.pronto-llm.svc:4000", headers: [Anthropic-Version Anthropic-Beta {name: X-Api-Key, hidden: true}], timeoutMs: 300000, sink: {pod: {"app.kubernetes.io/name": pronto-llm}, port: 4000}}
+		{door: model-chatgpt, base: "http://pronto-llm-chatgpt.pronto-llm.svc:4000", var: LLM_CHATGPT_KEY, secret: {name: pronto-llm-chatgpt, key: LITELLM_MASTER_KEY}, headers: [Anthropic-Version Anthropic-Beta], timeoutMs: 300000, sink: {pod: {"app.kubernetes.io/name": pronto-llm-chatgpt}, port: 4000}}
 	]
 }
 let docs = (metal manifests $spec | split row "---\n" | each { from yaml })
 let at = {|k, n| $docs | where kind == $k and metadata.name == $n | first }
-assert equal ($docs | get kind) [ConfigMap ConfigMap PersistentVolumeClaim Deployment Service NetworkPolicy]
+assert equal ($docs | get kind) [ConfigMap ConfigMap PersistentVolumeClaim Deployment Service NetworkPolicy NetworkPolicy NetworkPolicy]
 assert equal ($docs | get metadata.namespace | uniq) [pronto-llm]
 
 # The doors as the airlock reads them: model holds no credential (the person's key, hidden, is the
@@ -47,6 +48,12 @@ assert equal ($pol.ingress | first).from $spec.from
 assert equal (($pol.ingress | first).ports | first).port 9998
 assert equal ($pol.egress | skip 1) [$gateway $chatgpt]
 assert equal ($pol.egress | where {|e| ($e.to? | default [] | any {|t| $t.ipBlock? != null }) } | length) 0 "no way out but the gateways"
+# …and into each gateway from the airlock alone, by a policy of its own beside the gateway's.
+let into = (do $at NetworkPolicy studio-model-airlock-to-model).spec
+assert equal $into.podSelector.matchLabels {"app.kubernetes.io/name": pronto-llm}
+assert equal $into.policyTypes [Ingress]
+assert equal $into.ingress [{from: [{podSelector: {matchLabels: $mine}}], ports: [{protocol: TCP, port: 4000}]}]
+assert equal (do $at NetworkPolicy studio-model-airlock-to-model-chatgpt).spec.podSelector.matchLabels {"app.kubernetes.io/name": pronto-llm-chatgpt}
 
 # A spec that cannot be released is refused before anything is applied.
 let refused = {|s| try { metal manifests $s; false } catch { true } }
@@ -57,4 +64,5 @@ assert (do $refused ($spec | update doors {|s| $s.doors | each {|d| $d | upsert 
 assert (do $refused ($spec | update doors {|s| $s.doors | each {|d| $d | upsert base "http://x.svc:4000/v1" } }))
 assert (do $refused ($spec | update doors {|s| [($s.doors.1 | reject secret)] }))
 assert (do $refused ($spec | update doors {|s| [$s.doors.0 $s.doors.0] }))
+assert (do $refused ($spec | update doors {|s| [($s.doors.0 | update sink {pod: {}, port: 4000})] }))
 print "airlock metal_test: ok"
