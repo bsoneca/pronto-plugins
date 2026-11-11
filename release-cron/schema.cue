@@ -4,6 +4,8 @@
 // (release_cron_plugin.cue), where the app's release_cron.cue gives releaseCron its values.
 package releasecron
 
+import "strings"
+
 releaseCron: #Cron
 
 #Cron: {
@@ -88,6 +90,18 @@ releaseCron: #Cron
 #Actions: {kind: "actions"}
 
 #CloudRun: {kind: "cloud-run"}
+
+// A command that opens an ssh connection says how it learns the other end is gone: ServerAliveInterval. A step has no time
+// limit (a release takes as long as it takes), so a connection to a node that rebooted, its TCP state lost with it, would be
+// waited on for ever: on 2026-11-11 a rc preview sat 104 min on a dead ssh to a node that had restarted at 15:41 BRT, and the
+// run was recorded only once the lead killed the ssh by hand. With it ssh ends with 255 after interval x count seconds and
+// the run records the failure itself.
+#SshAlive: {
+	cmd: [string, ...string]
+	_text: strings.Join(cmd, " ")
+	ok:    !strings.Contains(_text, "ssh ") || strings.Contains(_text, "ServerAliveInterval=")
+	ok:    true
+}
 #Command: {
 	kind: *"command" | "command"
 	release!: [string, ...string]
@@ -103,6 +117,13 @@ releaseCron: #Cron
 		down!:  [string, ...string]
 		origin: *"http://localhost:18080" | (string & =~"^http://localhost:[0-9]+$")
 	}
+	_alive: [
+		(#SshAlive & {cmd: release}).ok,
+		(#SshAlive & {cmd: serving}).ok,
+		if preview != _|_ {(#SshAlive & {cmd: preview.up}).ok},
+		if preview != _|_ {(#SshAlive & {cmd: preview.reach}).ok},
+		if preview != _|_ {(#SshAlive & {cmd: preview.down}).ok},
+	]
 }
 
 #NoNotify: {kind: "none"}
