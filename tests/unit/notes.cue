@@ -193,3 +193,14 @@ cases: {
 		{call: "notes.body", args: [{app: "shop", repo: "o/r", timeZone: "Europe/Lisbon", zoneLabel: "WET", audience: "player", release: {revision: "r", first: _e, last: _e, base: "b"}, prs: []}], matches: "\\| Went live \\| 2026-11-04 11:51 WET \\|\n"},
 	]}
 }
+
+// An app releasing to a command target has no pronto release records: release-cron's runs that released are its
+// releases (PRONTO-205).
+cases: "release-cron's released runs are the records of an app with no Cloud Run release": {suite: "notes", steps: [
+	{call: "notes.fromCronRuns", args: [[
+		{outcome: "failed", commit: "a", started: "s0", ended: "e0"},
+		{outcome: "released", commit: "b", revision: "b", started: "s1", ended: "e1", steps: {release: 184}},
+		{outcome: "skipped", commit: "c", revision: "c", started: "s2", ended: "e2"},
+	]], expect: [{outcome: "live", revision: "b", commit: "b", started: "s1", ended: "e1"}]},
+	{call: "notes.fromCronRuns", args: [[{outcome: "released", commit: "d", started: "s", ended: "e"}]], expect: [], why: "a run that released nothing new names no revision"},
+]}

@@ -27,6 +27,13 @@ export const fromDeployments = (deployments) =>
       : [];
   });
 
+// release-cron's own runs (~/.cache/pronto/release-cron/<app>/runs.jsonl) as records: a run that
+// released is a revision made live, from its commit, between its start and end. An app releasing to a
+// command target (no Cloud Run, no pronto release records) has these alone (PRONTO-205).
+export const fromCronRuns = (runs) =>
+  runs.filter((r) => r.outcome === "released" && r.revision && r.commit)
+    .map((r) => ({ outcome: "live", revision: r.revision, commit: r.commit, started: r.started, ended: r.ended }));
+
 // The records that made a revision live in production, oldest first by their end: outcome live, no
 // preview, a revision. (Pronto's release records, ~/.cache/pronto/releases/<name>.jsonl.)
 export const live = (records) =>

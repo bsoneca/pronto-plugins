@@ -11,7 +11,7 @@
 // releases are read from, the time zone, the model and the audience; without one, release-cron's records
 // under release.cue's GCP.name, Brasília, the local model and players. A pull request's words are kept in
 // ~/.cache/pronto/release-notes/<app>/prs.json, so a re-run says the same.
-import { answer, body, fallback, fromDeployments, fromTags, prNumbers, prompt, releases, tag, title } from "./notes.js";
+import { answer, body, fallback, fromDeployments, fromTags, prNumbers, prompt, releases, tag, title, fromCronRuns } from "./notes.js";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -93,7 +93,10 @@ const records = (() => {
     });
     return fromDeployments(deployments);
   }
-  if (!s.name && !ownFile("release.cue").length) usage(`${appDir}/release.cue is missing: name the release-cron records in releaseNotes.source.name`);
+  // A release.cue without GCP (a command target, Bonk Chess on its node since PRONTO-205) has no pronto release
+  // records: release-cron's own runs are its releases.
+  const gcp = (() => { try { return /^GCP:/m.test(Deno.readTextFileSync(`${appDir}/release.cue`)); } catch { return false; } })();
+  if (!s.name && !gcp) return fromCronRuns(jsonl(`${home}/.cache/pronto/release-cron/${app}/runs.jsonl`));
   const name = s.name ?? cueOut(["release.cue", "-e", "GCP.name"], "GCP.name");
   return jsonl(`${home}/.cache/pronto/releases/${name}.jsonl`);
 })();

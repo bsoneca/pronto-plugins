@@ -11,6 +11,9 @@ package prodwatch
 prodWatch: #Watch
 
 #Watch: {
+	// The Google Cloud project whose Cloud Run logs are read: the release's (release.cue's GCP.project) by
+	// default; an app whose release.cue has no GCP (it releases elsewhere) names it here.
+	project?: string
 	// Other Cloud Run services of the release's project this app answers for.
 	services: [...string]
 	// The app's own noise, beside the shared rules below, which every app gets.
