@@ -164,10 +164,11 @@ Deno.test("an account that holds a plan or has a trial is offered none, and the 
     eq(t.broker, [], "no broker call");
     eq(fns(t.calls).includes("billing_trial_ask"), false, "no ticket");
   }
-  // An old broker has no /trial/offer: no offer, and not an error.
+  // An old broker has no /trial/offer: its refusal is the answer, never an ineligible account.
   const old = trialStage({ offer: () => Response.json({ error: "not found" }, { status: 404 }) });
-  const out = await (await old.ask(old.make(), "/billing/trial")).json();
-  eq([out.eligible, out.offers], [false, []], "an old broker offers none");
+  const res = await old.ask(old.make(), "/billing/trial");
+  eq(res.status, 404, "an old broker's refusal, passed on");
+  await res.body?.cancel();
 });
 
 Deno.test("a trial starts only on a consent that is true, and says what it consented to", async () => {

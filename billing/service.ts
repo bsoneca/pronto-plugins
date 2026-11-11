@@ -236,8 +236,8 @@ export function service(s: Settings) {
       const none = { ...held, eligible: false, offers: [] };
       if (held.holds || held.state) return json(200, none);
       const res = await toBroker("/trial/offer", { account, ticket: await trialTicket(account), currency: a.currency }, req.headers.get("authorization"));
-      // A broker that does not know trials offers none.
-      if (res.status === 404) return json(200, none);
+      // A broker that does not know trials (404) fails the request as any refusal does: a trial's
+      // flag is turned on only where the broker offers trials, so this is no account's ineligibility.
       return res.ok ? json(200, { ...held, ...(await res.json()) }) : res;
     }
     if (a.consent !== true) return json(400, { error: "consent is required" });
