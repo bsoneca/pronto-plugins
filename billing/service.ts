@@ -50,15 +50,22 @@ export function brief(body: string, max = 120): string {
 // not serving (503), or serving without billing_grant until it reloads its schema (404, PGRST202).
 export class NotReady extends Error {}
 
-// What the grants loop logs of a failed call. Billing starts before its neighbours listen, so the
-// first calls are refused: until the startup window has passed, saying nothing of a NotReady keeps
-// that race out of the logs; past it, a warning, since the gateway is slow, not starting. Any other
-// failure (a refused token, an SQL error, a flag that holds no grants), and any failure after one
-// success, is an error at once.
+// Whether a failed call met a neighbour still starting: a connection refused (nothing listens there
+// yet), never any other network error such as a name that does not resolve.
+export function refused(e: unknown): boolean {
+  const said = (x: unknown): string => x instanceof Error ? `${x.message} ${said(x.cause)}` : "";
+  return e instanceof TypeError && /connection refused|ECONNREFUSED/i.test(said(e));
+}
+
+// What the grants loop logs of a failed call. Billing starts before its neighbours listen, so its
+// first calls can meet one still starting (a NotReady): the first says so once, as a line of its
+// own, and the loop retries; one still failing after the startup window is an error, as is any
+// other failure (a refused token, an SQL error, a flag that holds no grants, an address that does
+// not resolve) and any failure after one success, each time.
 export const grantsWindowMs = 60_000;
-export function grantLog(served: boolean, sinceStartMs: number, notReady: boolean): "none" | "warn" | "error" {
-  if (served || !notReady) return "error";
-  return sinceStartMs < grantsWindowMs ? "none" : "warn";
+export function grantLog(served: boolean, sinceStartMs: number, notReady: boolean, waiting: boolean): "none" | "info" | "error" {
+  if (served || !notReady || sinceStartMs >= grantsWindowMs) return "error";
+  return waiting ? "none" : "info";
 }
 
 export function service(s: Settings) {
@@ -116,7 +123,7 @@ export function service(s: Settings) {
   // the one the release carried. A set already handed over is not sent again.
   let granted: string | null = null;
   async function grant(): Promise<void> {
-    const up = <T>(p: Promise<T>) => p.catch((e) => { throw e instanceof TypeError ? new NotReady(e.message) : e; });
+    const up = <T>(p: Promise<T>) => p.catch((e) => { throw refused(e) ? new NotReady(e.message) : e; });
     const set = s.flags ? await up(flagged()) : s.grants ?? "[]";
     if (set === granted) return;
     const res = await up(asService("billing_grant", { grants: JSON.parse(set) }));
@@ -332,7 +339,7 @@ if (import.meta.main) {
   Deno.serve({ port: Number(Deno.env.get("BILLING_PORT") ?? 8688) }, billing);
   // Until the gateway serves billing_grant, as it does once it has reloaded its schema; with
   // flags, every minute after, so a push reaches the database with no deploy.
-  let served = false;
+  let served = false, waiting = false;
   const started = Date.now();
   for (let wait = 1; ; ) {
     try {
@@ -342,9 +349,10 @@ if (import.meta.main) {
       wait = 60;
     } catch (e) {
       wait = Math.min(wait * 2, 60);
-      const log = grantLog(served, Date.now() - started, e instanceof NotReady);
+      const log = grantLog(served, Date.now() - started, e instanceof NotReady, waiting);
       if (log === "error") console.error(`billing: grants not written: ${(e as Error).message}`);
-      else if (log === "warn") console.warn(`billing: grants not written yet, retrying in ${wait} s: ${(e as Error).message}`);
+      else if (log === "info") console.log(`billing: waiting for the gateway to write the grants, retrying until ${grantsWindowMs / 1000} s after start: ${(e as Error).message}`);
+      waiting = e instanceof NotReady;
     }
     await new Promise((r) => setTimeout(r, wait * 1000));
   }
