@@ -1,0 +1,13 @@
+#!/bin/sh
+# An app's own airlock on a cluster the operator runs (pronto's envs.Metal), as airlock/metal.nu says:
+#   bin/pronto-airlock metal --spec /abs/path/spec.json [--ssh U@H] [--kubeconfig K]
+# The spec is the app's, exported from its CUE (Studio's: apps/studio/release.cue modelAirlock).
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+cd "$here"
+if [ "${1:-}" = metal ]; then
+	shift
+	exec ./saytw --script tools.nu nu airlock/metal.nu "$@"
+fi
+echo "usage: bin/pronto-airlock metal --spec <file.json> [--ssh U@H] [--kubeconfig K]" >&2
+exit 2
