@@ -98,7 +98,9 @@ that, and for cancelling in the same place it was bought.
   writes to `billing.trial` (`billing_trial_state`) after `billing_entitle`. `status` and
   `through` mean what they meant: a trialing subscription holds the plan through the trial's end.
 - **Behind a flag.** `_billingTrialFlag: "free_trial"` in `billing_spec.cue` makes the service
-  evaluate that flag per account (OFREP, `targetingKey` the account; it needs `_billingFlags`);
+  evaluate that flag per account (OFREP, `targetingKey` the account; it needs `_billingFlags`,
+  and flagd asked directly, a flagd's address or `"mesh"`, for a flag that names accounts: the
+  door's `/ofrep/` takes the account from a session, and the broker's consent check has none);
   false, unreachable or erroring is off, and off answers 404 on `/billing/trial`,
   `/billing/trial/checkout` and `/billing/trial/consent`. A document with a trial and no flag
   configured is on.

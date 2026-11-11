@@ -67,7 +67,8 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
   const calls: { fn: string; args: Record<string, unknown> }[] = [];
   const broker: { path: string; body: Record<string, unknown> }[] = [];
   const flagBodies: unknown[] = [];
-  const doorAsks: { auth: string | null; body: unknown }[] = [];
+  const flagAsks: { url: string; headers: Record<string, string> }[] = [];
+  const doorAsks: { auth: string | null; account: string | null; body: unknown }[] = [];
   const status = { state: null, plan: null, amount: null, currency: null, charges_at: null, holds: false, ...o.status };
   const fetcher = ((input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
@@ -81,12 +82,14 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
       if (fn === "billing_trial_take") return Promise.resolve(Response.json(o.consent ?? null));
       return Promise.resolve(new Response(null, { status: 204 }));
     }
-    if (url === "http://flagd:8693/ofrep/v1/evaluate/flags/free_trial") {
+    if (/^(http:\/\/flagd:8693|http:\/\/localhost:3500|https:\/\/a\.example)\/ofrep\/v1\/evaluate\/flags\/free_trial$/.test(url)) {
       flagBodies.push(body);
+      flagAsks.push({ url, headers: Object.fromEntries(new Headers(init?.headers)) });
       return Promise.resolve(o.flag ? o.flag() : Response.json({ value: true }));
     }
-    if (url === "http://flagd:8693/ofrep/v1/evaluate/flags/stripe_door") {
-      doorAsks.push({ auth: new Headers(init?.headers).get("authorization"), body });
+    if (/^(http:\/\/flagd:8693|https:\/\/a\.example)\/ofrep\/v1\/evaluate\/flags\/stripe_door$/.test(url)) {
+      const h = new Headers(init?.headers);
+      doorAsks.push({ auth: h.get("authorization"), account: h.get("x-pronto-account"), body });
       return Promise.resolve(o.door ? o.door() : Response.json({ value: true }));
     }
     if (url.startsWith("https://b.example/trial/")) {
@@ -103,7 +106,7 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
   });
   const ask = (svc: ReturnType<typeof make>, path: string, body: unknown = {}) =>
     svc(new Request(`https://a.example${path}`, { method: "POST", headers: { authorization: "Bearer reader", "content-type": "application/json" }, body: JSON.stringify(body) }));
-  return { calls, broker, flagBodies, doorAsks, make, ask };
+  return { calls, broker, flagBodies, flagAsks, doorAsks, make, ask };
 }
 const fns = (calls: { fn: string }[]) => calls.map((c) => c.fn);
 const CONSENT = { plan: "analysis", amount: 1990, currency: "brl", charges_at: "2027-02-05T12:00:00Z", terms: "Free until Feb 5, then R$ 19,90 a month.", consent: true, locale: "pt-BR", return: "/?premium=trial" };
@@ -277,12 +280,35 @@ Deno.test("a trial state the database would not take fails the push, so the brok
   eq(res.status, 502, "not taken");
 });
 
-Deno.test("the door flag is read with the reader's own session and told to the broker; a flag that does not answer fails the call", async () => {
+// PRONTO-82: the door's /ofrep/ reads the account from a session alone, and the broker's consent check
+// carries none, so the trial's per-account flag is asked of flagd directly: told the account and the
+// host in the headers flagd reads them from (--context-from-header), as the door would tell it.
+Deno.test("asked directly, flagd is told the account and the host; through the mesh, by the sidecar's address", async () => {
+  const direct = trialStage();
+  for (const [path, body] of [["/billing/trial", {}], ["/billing/trial/consent", { account: ANA_ID, ticket: "t".repeat(32) }]] as const) {
+    await (await direct.ask(direct.make(), path, body)).body?.cancel();
+  }
+  eq(direct.flagAsks.map((a) => [a.url, a.headers["x-pronto-account"], a.headers["x-pronto-host"], a.headers.authorization]),
+    Array(2).fill(["http://flagd:8693/ofrep/v1/evaluate/flags/free_trial", ANA_ID, "a.example", undefined]), "the reader's and the broker's asks alike");
+  const mesh = trialStage();
+  await (await mesh.ask(mesh.make({ flags: "mesh" }), "/billing/trial/consent", { account: ANA_ID, ticket: "t".repeat(32) })).body?.cancel();
+  eq(mesh.flagAsks.map((a) => [a.url, a.headers["dapr-app-id"], a.headers["x-pronto-account"]]),
+    [["http://localhost:3500/ofrep/v1/evaluate/flags/free_trial", "flagd", ANA_ID]], "the pod's sidecar, to the app-id flagd");
+  const door = trialStage();
+  await (await door.ask(door.make({ flags: "origin" }), "/billing/trial/consent", { account: ANA_ID, ticket: "t".repeat(32) })).body?.cancel();
+  eq(door.flagAsks.map((a) => [a.url, a.headers["x-pronto-account"], a.headers["x-pronto-host"]]),
+    [["https://a.example/ofrep/v1/evaluate/flags/free_trial", undefined, undefined]], "the door says both itself: the page's headers would be stripped");
+});
+
+Deno.test("the door flag is read for the reader and told to the broker; a flag that does not answer fails the call", async () => {
   const on = trialStage();
   const res = await on.ask(on.make({ doorFlag: "stripe_door" }), "/billing/trial");
   eq(res.status, 200, "on");
   await res.body?.cancel();
-  eq(on.doorAsks, [{ auth: "Bearer reader", body: { context: { targetingKey: ANA_ID } } }], "asked as the reader, for the reader");
+  eq(on.doorAsks, [{ auth: null, account: ANA_ID, body: { context: { targetingKey: ANA_ID } } }], "asked of flagd directly, for the reader");
+  const viaDoor = trialStage();
+  await (await viaDoor.ask(viaDoor.make({ doorFlag: "stripe_door", flags: "origin" }), "/billing/trial")).body?.cancel();
+  eq(viaDoor.doorAsks.map((a) => [a.auth, a.account]), [["Bearer reader", null]], "through the door, with the reader's own session");
   eq(on.broker.map((b) => b.body.door), [true], "the broker is told");
   const off = trialStage({ door: () => Response.json({ value: false }) });
   await (await off.ask(off.make({ doorFlag: "stripe_door" }), "/billing/trial")).body?.cancel();

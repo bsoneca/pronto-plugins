@@ -21,8 +21,10 @@ export interface Settings {
   document: string;
   /** The author's grants, as billing_spec.cue declares them (billing_plugin.cue's #billingGrants). */
   grants?: string;
-  /** Where the grants are read live, as the flag billing_grants: a flagd's OFREP, or `origin`
-   * for the app's own door, which routes /ofrep/ to its flagd wherever it runs apart. */
+  /** Where the flags are asked (OFREP), the grants among them as the flag billing_grants: a flagd's
+   * own origin; `mesh`, the app's flagd through the pod's dapr sidecar, as the door reaches it on a
+   * node; or `origin`, the app's own door, whose /ofrep/ takes the account from a session alone, so a
+   * per-account flag asked with none (the trial's, PRONTO-82) answers for no account there. */
   flags?: string;
   /** The flag that turns the free trial on, evaluated per account at `flags`; none, and a
    * document with a trial is all it takes. */
@@ -64,6 +66,24 @@ export function service(s: Settings) {
   const doc = JSON.parse(s.document) as { plans: Record<string, unknown>; trial?: { plans: string[] } };
   const plans = Object.keys(doc.plans);
 
+  // One flag as flagd evaluates it now, for `account` where it is per account. Asked directly (a
+  // flagd's origin, or `mesh`), flagd is told the account and the host the app is reached at in the
+  // headers it reads them from (flags_plugin.cue's --context-from-header), as the door tells it; asked
+  // through the door, the door says both, the account from the session `auth` carries.
+  const flagsAt = !s.flags ? "" : s.flags === "origin" ? origin : s.flags === "mesh" ? "http://localhost:3500" : s.flags.replace(/\/$/, "");
+  const host = new URL(origin).hostname;
+  function ofrep(key: string, account?: string, auth?: string | null): Promise<Response> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (s.flags === "mesh") headers["dapr-app-id"] = "flagd";
+    if (s.flags !== "origin") {
+      headers["x-pronto-host"] = host;
+      if (account) headers["x-pronto-account"] = account;
+    } else if (auth) headers.authorization = auth;
+    return fetcher(`${flagsAt}/ofrep/v1/evaluate/flags/${encodeURIComponent(key)}`, {
+      method: "POST", headers, body: JSON.stringify({ context: account ? { targetingKey: account } : {} }), signal: AbortSignal.timeout(10_000),
+    });
+  }
+
   async function rpc(fn: string, auth: string, args: Record<string, unknown> = {}): Promise<Response> {
     return await fetcher(`${crud}/rpc/${fn}`, {
       method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: JSON.stringify(args),
@@ -101,10 +121,7 @@ export function service(s: Settings) {
   // The flag as OFREP evaluates it: a string holding the grants' JSON array. Any
   // other answer is an error, so a flagd that is down or a flag gone takes no grant away.
   async function flagged(): Promise<string> {
-    const at = s.flags === "origin" ? origin : s.flags!.replace(/\/$/, "");
-    const res = await fetcher(`${at}/ofrep/v1/evaluate/flags/billing_grants`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ context: {} }), signal: AbortSignal.timeout(10_000),
-    });
+    const res = await ofrep("billing_grants");
     if (!res.ok) throw new Error(`flag billing_grants answered ${res.status}: ${brief(await res.text())}`);
     const { value } = await res.json() as { value?: unknown };
     if (typeof value !== "string" || !Array.isArray(JSON.parse(value))) throw new Error("flag billing_grants holds no list of grants");
@@ -137,16 +154,14 @@ export function service(s: Settings) {
   }
 
   // The free trial is off unless the document has one and its flag, if any, is true for this
-  // account as flagd evaluates it now; a flag that cannot be asked is off, never on.
+  // account as flagd evaluates it now; a flag that cannot be asked is off, never on. The broker's
+  // consent check carries no session, so a flag that names accounts needs flagd asked directly.
   async function trialOn(account: string): Promise<boolean> {
     if (!doc.trial) return false;
     if (!s.trialFlag) return true;
     if (!s.flags) return false;
     try {
-      const at = s.flags === "origin" ? origin : s.flags.replace(/\/$/, "");
-      const res = await fetcher(`${at}/ofrep/v1/evaluate/flags/${encodeURIComponent(s.trialFlag)}`, {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ context: { targetingKey: account } }), signal: AbortSignal.timeout(10_000),
-      });
+      const res = await ofrep(s.trialFlag, account);
       if (!res.ok) {
         await res.body?.cancel();
         return false;
@@ -158,18 +173,14 @@ export function service(s: Settings) {
   }
 
   // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag
-  // for them now: asked with the reader's own session, which the door's OFREP route reads the account
-  // from (and as the targetingKey, which flagd reached directly reads). Unset flag: no word, the
+  // for them now: through the door, with the reader's own session, which its OFREP route reads the
+  // account from; asked directly, for the reader's account. Unset flag: no word, the
   // broker's own way. A flag that cannot be asked, or that is not there, fails the request, never
   // picks a way.
   async function doorOn(account: string, auth: string | null): Promise<boolean | undefined> {
     if (!s.doorFlag) return undefined;
     if (!s.flags) throw new Error("BILLING_DOOR_FLAG needs BILLING_FLAGS: where to ask it");
-    const at = s.flags === "origin" ? origin : s.flags.replace(/\/$/, "");
-    const res = await fetcher(`${at}/ofrep/v1/evaluate/flags/${encodeURIComponent(s.doorFlag)}`, {
-      method: "POST", headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) },
-      body: JSON.stringify({ context: { targetingKey: account } }), signal: AbortSignal.timeout(10_000),
-    });
+    const res = await ofrep(s.doorFlag, account, auth);
     const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
     // A flag the live document does not have (FLAG_NOT_FOUND) is no answer either: BILLING_DOOR_FLAG
     // is set only once a push has published it (release.cue).
