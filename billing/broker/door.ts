@@ -1,0 +1,1 @@
+../../common/door.ts

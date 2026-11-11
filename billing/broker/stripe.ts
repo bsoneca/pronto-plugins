@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readCapped } from "../shared.ts";
+import { DoorError, doorKey, throughDoor as callDoor } from "./door.ts";
 
 // The little of Stripe's API the broker speaks: form-encoded requests under
 // one pinned API version, JSON ones under another for the /v2 namespace
@@ -46,14 +47,10 @@ export type Routed = Stripe & { route?: () => Promise<Route> };
 /** A key the airlock's door takes (A-Z a-z 0-9 . _ : -, at most 200): the broker's own key hashed, so
  * two keys stay two, and a call with none gets one of its own, so every call through the door is in
  * its ledger once. */
-async function doorKey(idempotencyKey: string | undefined): Promise<string> {
+async function callKey(idempotencyKey: string | undefined): Promise<string> {
   if (idempotencyKey === undefined) return `call-${crypto.randomUUID()}`;
-  return `key-${hex(await crypto.subtle.digest("SHA-256", enc.encode(idempotencyKey)))}`;
+  return await doorKey("key", idempotencyKey);
 }
-
-/** How often a call the door could not answer (502: Stripe answered 5xx, or nothing) is made again,
- * with the same key, which Stripe's idempotency makes safe. */
-const DOOR_TRIES = 3;
 
 /** Stripe through the airlock's door (PRONTO-135): the airlock holds the key and adds it, records
  * every call in its ledger under its idempotency key, and answers Stripe's status and body. `door`
@@ -62,7 +59,7 @@ function throughDoor(door: string, fetcher: typeof fetch): Stripe {
   return async (method, path, params = {}, idempotencyKey) => {
     const v2 = path.startsWith("/v2/");
     const query = form(params);
-    const key = await doorKey(idempotencyKey);
+    const key = await callKey(idempotencyKey);
     const request = {
       key,
       ...(idempotencyKey === undefined ? {} : { sinkKey: idempotencyKey }),
@@ -71,18 +68,16 @@ function throughDoor(door: string, fetcher: typeof fetch): Stripe {
       ...(method === "POST" ? (v2 ? { body: params, contentType: "application/json" } : { body: `${query}`, contentType: "application/x-www-form-urlencoded" }) : {}),
       headers: { "Stripe-Version": v2 ? STRIPE_V2_VERSION : STRIPE_VERSION },
     };
-    for (let i = 1;; i++) {
-      const res = await fetcher(door, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request) });
-      const answer = await res.json();
-      if (res.status === 502 && i < DOOR_TRIES) {
-        await new Promise((r) => setTimeout(r, 250 * 2 ** i));
-        continue;
-      }
-      if (res.status !== 200) throw new StripeError(res.status, "airlock", `airlock door: ${res.status} ${answer?.error ?? ""}`.trim());
-      const { status, body } = answer as { status: number; body: Record<string, unknown> & { error?: { code?: string; type?: string; message?: string } } };
-      if (status >= 300) throw new StripeError(status, body?.error?.code ?? body?.error?.type ?? "error", body?.error?.message ?? `stripe ${status}`);
-      return body as never;
+    let answer;
+    try {
+      answer = await callDoor(door, request, fetcher);
+    } catch (e) {
+      if (e instanceof DoorError) throw new StripeError(e.status, "airlock", e.message);
+      throw e;
     }
+    const { status, body } = answer as { status: number; body: Record<string, unknown> & { error?: { code?: string; type?: string; message?: string } } };
+    if (status >= 300) throw new StripeError(status, body?.error?.code ?? body?.error?.type ?? "error", body?.error?.message ?? `stripe ${status}`);
+    return body as never;
   };
 }
 

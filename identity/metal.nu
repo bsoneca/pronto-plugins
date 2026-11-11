@@ -1,7 +1,7 @@
 # Releases the identity broker to a cluster the operator runs (pronto's envs.Metal: k3s on a node
 # reached over SSH, its traffic arriving through the node's Cloudflare Tunnel to Envoy Gateway),
 # beside release.nu's Cloud Run:
-#   bin/pronto-identity-broker metal --ssh bruno@node --domain D --google-client-id C --secrets F (or --project P)
+#   bin/pronto-identity-broker metal --ssh bruno@node --domain D --google-client-id C --secrets F (or --project P) [--airlock [--door-asked]]
 #
 # The broker imports nothing from outside its own files, so no image is built: the pinned Deno image
 # runs oidc.ts and broker/*.ts from a ConfigMap. Its one-time codes live in memory, so one replica,
@@ -13,8 +13,15 @@
 
 const here = path self .
 use ../common/sops.nu
+use ../common/airlock.nu [airlock-objects door_port]
 const deno = "denoland/deno:distroless-2.5.0@sha256:5c4530d4babe37ded3566803e9498e2b5d643b915cce701d8b7b82f87a86629e"
 const port = 8080
+# The credential the airlock holds instead of the broker (--airlock, PRONTO-268): Google's token
+# endpoint takes the client's id and secret as client_secret_basic, which the airlock adds as the
+# Authorization header, `Basic <GOOGLE_CLIENT_BASIC>`: base64 of `<client id>:<client secret>`.
+const door_keys = [
+	{door: "google", var: "GOOGLE_CLIENT_BASIC", base: "https://oauth2.googleapis.com", scheme: "Basic", headers: []}
+]
 # The broker's files as the image sees them under /app, each a ConfigMap key.
 # A ConfigMap's keys hold dots, which a cell path would split: look each up whole.
 def at [key: string]: record -> string { transpose k v | where k == $key | get v.0 }
@@ -24,6 +31,7 @@ const files = [
 	{key: "core.ts", from: "broker/core.ts", path: "broker/core.ts"}
 	{key: "phone.ts", from: "broker/phone.ts", path: "broker/phone.ts"}
 	{key: "otp.ts", from: "broker/otp.ts", path: "broker/otp.ts"}
+	{key: "door.ts", from: "broker/door.ts", path: "broker/door.ts"}
 ]
 
 # Every object the broker is on a metal cluster, as YAML documents. `sources` holds each file's text by
@@ -34,8 +42,18 @@ export def manifests [
 	--settings: list<record> = []
 	--namespace: string = "identity"
 	--name: string = "identity-broker"
+	--airlock # Google's token exchange through the airlock's door: the airlock holds the client's credential, the broker no secret
+	--door-asked # With --airlock, while it moves (PRONTO-268): each exchange through the door when its tenant asks (its flag signin_door), the broker keeping its secret
 ]: nothing -> string {
 	let labels = {"app.kubernetes.io/name": $name, "app.kubernetes.io/part-of": "pronto-identity"}
+	let lock = $"($name)-airlock"
+	let lock_labels = {"app.kubernetes.io/name": $lock, "app.kubernetes.io/part-of": "pronto-identity"}
+	if $door_asked and not $airlock { error make {msg: "--door-asked moves the broker to the airlock's door: it needs --airlock"} }
+	# Through the door the broker's env names no client secret, and the airlock's names the credential it holds.
+	# While the flag moves it, the broker keeps its secret beside the door; after, the airlock alone holds it.
+	let secret_vars = if $airlock and not $door_asked { [BROKER_SECRET] } else { [BROKER_SECRET GOOGLE_CLIENT_SECRET] }
+	let settings = ($settings ++ (if $airlock { [{name: "GOOGLE_DOOR", value: $"http://($lock):($door_port)"}] } else { [] })
+		++ (if $door_asked { [{name: "GOOGLE_DOOR_ASKED", value: "1"}] } else { [] }))
 	let meta = {namespace: $namespace, labels: $labels}
 	# A change to a file is a new pod: the files' digest is the template's.
 	let digest = ($files | each {|f| $sources | at $f.key } | str join "\n" | hash sha256 | str substring 0..15)
@@ -65,9 +83,7 @@ export def manifests [
 								{name: "PORT", value: ($port | into string)}
 								{name: "DENO_DIR", value: "/deno-dir"}
 								{name: "BROKER_ISSUER", value: $"https://($domain)"}
-								{name: "BROKER_SECRET", valueFrom: {secretKeyRef: {name: $name, key: "BROKER_SECRET"}}}
-								{name: "GOOGLE_CLIENT_SECRET", valueFrom: {secretKeyRef: {name: $name, key: "GOOGLE_CLIENT_SECRET"}}}
-							] ++ $settings)
+							] ++ ($secret_vars | each {|v| {name: $v, valueFrom: {secretKeyRef: {name: $name, key: $v}}} }) ++ $settings)
 							securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
 							resources: {requests: {cpu: "50m", memory: "64Mi"}, limits: {memory: "256Mi"}}
 							startupProbe: {httpGet: {path: "/health", port: $port}, periodSeconds: 1, failureThreshold: 60}
@@ -111,13 +127,14 @@ export def manifests [
 				podSelector: {matchLabels: $labels}
 				policyTypes: ["Ingress" "Egress"]
 				ingress: [{ports: [{protocol: "TCP", port: $port}]}]
-				egress: [
+				egress: ([
 					{ports: [{protocol: "UDP", port: 53} {protocol: "TCP", port: 53}]}
 					{to: [{ipBlock: {cidr: "0.0.0.0/0", except: $private}}], ports: [{protocol: "TCP", port: 443}]}
-				]
+				] ++ (if $airlock { [{to: [{podSelector: {matchLabels: $lock_labels}}], ports: [{protocol: "TCP", port: $door_port}]}] } else { [] }))
 			}
 		}
-	] | each { to yaml } | str join "---\n"
+	] ++ (if $airlock { airlock-objects $namespace $lock $lock_labels $labels $name $door_keys } else { [] })
+	| each { to yaml } | str join "---\n"
 }
 
 # The broker's files from this checkout, by their ConfigMap keys.
@@ -151,6 +168,8 @@ export def main [
 	--sectors: string = ""         # Apps that moved address, each keeping its people's subjects: https://new=https://old, comma separated (broker/core.ts sectorsOf); none, every app is its own sector
 	--namespace: string = "identity"
 	--service: string = "identity-broker" # The secrets' names in Secret Manager are <service>-secret and <service>-google-client-secret
+	--airlock # Google's token exchange through the airlock's door beside the broker, which then holds no client secret (PRONTO-268); its Secret also holds GOOGLE_CLIENT_BASIC
+	--door-asked # With --airlock: each exchange through the door when its tenant asks (the app's flag signin_door); the broker keeps its secret until a deploy without it
 ] {
 	if ([$ssh $domain $google_client_id] | any { is-empty }) { error make {msg: "--ssh, --domain and --google-client-id are all required"} }
 	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
@@ -180,21 +199,29 @@ export def main [
 			{name: "PHONE_TENANTS", value: $phone_tenants}
 		]
 	}
+	let keys = ([BROKER_SECRET GOOGLE_CLIENT_SECRET] ++ (if $airlock { [GOOGLE_CLIENT_BASIC] } else { [] }))
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
 	# A malformed list stops the broker at start, so the rollout below fails rather than serve new subjects.
 	let sector = if ($sectors | is-empty) { [] } else { [{name: "BROKER_SECTORS", value: $sectors}] }
-	let yaml = (manifests --domain $domain --sources (sources) --settings ([{name: "GOOGLE_CLIENT_ID", value: $google_client_id}] ++ $phone ++ $sector) --namespace $namespace --name $service)
+	let yaml = (manifests --domain $domain --sources (sources) --settings ([{name: "GOOGLE_CLIENT_ID", value: $google_client_id}] ++ $phone ++ $sector) --namespace $namespace --name $service --airlock=$airlock --door-asked=$door_asked)
 	# The namespace first, so the Secret has somewhere to go before the pod that reads it.
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# The secrets through ssh's stdin alone: never a file, never an argument.
 	if ($secrets | is-not-empty) {
-		sops decrypt $secrets | sops secret-manifests $service $namespace [BROKER_SECRET GOOGLE_CLIENT_SECRET] | do $remote (sops apply-command $kubectl $namespace) | print
+		sops decrypt $secrets | sops secret-manifests $service $namespace $keys | do $remote (sops apply-command $kubectl $namespace) | print
 	} else {
-		let secret_env = $"BROKER_SECRET=(gc-secret $"($service)-secret" $project)\nGOOGLE_CLIENT_SECRET=(gc-secret $"($service)-google-client-secret" $project)\n"
+		let client_secret = (gc-secret $"($service)-google-client-secret" $project)
+		# The credential the airlock adds, made here from the client's id and secret, never stored.
+		let pair = $"($google_client_id):($client_secret | str trim --right --char (char nl))"
+		let basic = if $airlock { $"GOOGLE_CLIENT_BASIC=($pair | encode base64)\n" } else { "" }
+		let secret_env = $"BROKER_SECRET=(gc-secret $"($service)-secret" $project)\nGOOGLE_CLIENT_SECRET=($client_secret)\n($basic)"
 		$secret_env | do $remote $"($kubectl) create secret generic ($service) -n ($namespace) --from-env-file=/dev/stdin --dry-run=client -o yaml | ($kubectl) apply -f -" | print
 	}
 	$yaml | do $remote $"($kubectl) apply -f -" | print
+	if $airlock {
+		do $remote $"($kubectl) rollout restart deployment/($service)-airlock -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service)-airlock -n ($namespace) --timeout=300s" | print
+	}
 	do $remote $"($kubectl) rollout restart deployment/($service) -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service) -n ($namespace) --timeout=120s" | print
 	# Through the gateway as the tunnel reaches it, by host: the broker answers, under its own issuer.
 	let gateway = (do $remote $"($kubectl) get svc -n envoy-gateway-system pronto-gateway -o jsonpath='{.spec.clusterIP}'" | str trim)

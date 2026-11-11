@@ -26,7 +26,7 @@ const template = async (name: string) => (await Deno.readTextFile(`${here}app/${
 await write("billing_plugin.cue", await template("billing_plugin.cue"));
 await write("pronto/billing.cue", await template("pronto_billing.cue"));
 await write("billing/billing.nu", await template("billing.nu"));
-for (const f of ["service.ts", "entitlement.ts", "shared.ts", "broker/core.ts", "broker/main.ts", "broker/stripe.ts", "broker/fake.ts"]) {
+for (const f of ["service.ts", "entitlement.ts", "shared.ts", "broker/core.ts", "broker/main.ts", "broker/stripe.ts", "broker/door.ts", "broker/fake.ts"]) {
   await write(`billing/${f}`, await Deno.readTextFile(`${here}${f}`));
 }
 if (!owner && !(await Deno.stat(`${app}/billing_spec.cue`).catch(() => null))) {
