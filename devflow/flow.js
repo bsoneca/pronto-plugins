@@ -162,7 +162,10 @@ export function loopOf(sprints) {
   const done = (g) => g === "completed" || g === "cancelled";
   const open = sorted.filter((s) => s.groups.length && !s.groups.every(done)).map((s) => s.n);
   const finished = sorted.filter((s) => s.groups.length && s.groups.every(done)).map((s) => s.n);
-  const number = sorted.length ? sorted[sorted.length - 1].n + 1 : 1;
+  // An empty highest sprint (made, then emptied or never filled) is the one a new sprint would be:
+  // planning fills it rather than making another after it.
+  const top = sorted[sorted.length - 1];
+  const number = !top ? 1 : top.groups.length ? top.n + 1 : top.n;
   return { current: open[0] ?? null, next: open[1] ?? null, finished, number, plansInto: open[1] ?? number };
 }
 
@@ -170,6 +173,29 @@ export function loopOf(sprints) {
 export function dayOf(at, timeZone) {
   const t = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(at)).reduce((o, p) => ({ ...o, [p.type]: p.value }), {});
   return `${t.year}-${t.month}-${t.day}`;
+}
+
+const DAY = 86400000;
+const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+/** A sprint cycle's dates, YYYY-MM-DD, in UTC as the board compares them. A sprint ends when its work
+ * merges, not on a date (loopOf), but a board takes no issues into a cycle past its end (Plane: 400
+ * CYCLE_COMPLETED), so a cycle starts on the UTC day it is made and ends `horizon` days later
+ * (PRONTO-273: a cycle dated by the local day alone ended at 23:59 UTC of the day it was made,
+ * already past when made after 21:00 BRT). */
+export function sprintDates(at, horizon = 365) {
+  const t = new Date(at).getTime();
+  return { start: utcDay(t), end: utcDay(t + horizon * DAY) };
+}
+
+/** The end a sprint's cycle moves to so it stays open, or null to leave it: when it has no end, or
+ * less than half of `horizon` days left. A board refuses to edit a cycle once it ended, so it is moved
+ * long before, and one that ended already is left (null) for the lead to remake. */
+export function sprintEndFor(end, at, horizon = 365) {
+  const t = new Date(at).getTime();
+  const left = end ? new Date(String(end).slice(0, 10) + "T23:59:59Z").getTime() - t : null;
+  if (left != null && (left < 0 || left >= (horizon / 2) * DAY)) return null;
+  return sprintDates(at, horizon).end;
 }
 
 /** What a pull request event from GitHub is to the flow: merged is a closed event that merged. */

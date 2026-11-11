@@ -76,6 +76,8 @@ export class Plane implements Board {
     this.call("POST", `${this.p(project)}/cycles/`, { name, start_date: start, end_date: end, project_id: project, owned_by: owner }) as Promise<Cycle>;
   cycleIssues = (project: string, cycle: string) => this.all<Issue>(`${this.p(project)}/cycles/${cycle}/cycle-issues/`);
   removeFromCycle = (project: string, cycle: string, issue: string) => this.call("DELETE", `${this.p(project)}/cycles/${cycle}/cycle-issues/${issue}/`);
+  // Plane refuses to edit a cycle whose end has passed: it is moved while open (flow.js sprintEndFor).
+  setCycleEnd = (project: string, cycle: string, end: string) => this.call("PATCH", `${this.p(project)}/cycles/${cycle}/`, { end_date: end });
   addToCycle = (project: string, cycle: string, issues: string[]) => this.call("POST", `${this.p(project)}/cycles/${cycle}/cycle-issues/`, { issues });
 
   issues = (project: string) => this.all<Issue>(`${this.p(project)}/issues/`);

@@ -54,6 +54,8 @@ export interface Board {
   cycleIssues(project: string, cycle: string): Promise<Issue[]>;
   addToCycle(project: string, cycle: string, issues: string[]): Promise<unknown>;
   removeFromCycle(project: string, cycle: string, issue: string): Promise<unknown>;
+  /** Moves a cycle's end (a board whose cycles never close, as GitHub's iterations, has none). */
+  setCycleEnd?(project: string, cycle: string, end: string): Promise<unknown>;
 
   issues(project: string): Promise<Issue[]>;
   /** An issue by its key, PRONTO-123. */

@@ -104,6 +104,19 @@ cases: {
 		{call: "devflow.loopOf", args: [[{n: 1, groups: ["started"]}, {n: 2, groups: ["unstarted"]}]], expect: {current: 1, next: 2, finished: [], number: 3, plansInto: 2}, why: "with a next sprint, planning adds to it, never a third"},
 		{call: "devflow.loopOf", args: [[{n: 1, groups: ["completed", "cancelled"]}, {n: 2, groups: ["started"]}]], expect: {current: 2, next: null, finished: [1], number: 3, plansInto: 3}, why: "merged and cancelled end a sprint, at any hour"},
 		{call: "devflow.loopOf", args: [[{n: 4, groups: []}, {n: 5, groups: ["completed"]}]], expect: {current: null, next: null, finished: [5], number: 6, plansInto: 6}, why: "an emptied sprint is neither open nor finished"},
+		{call: "devflow.loopOf", args: [[{n: 3, groups: ["started"]}, {n: 4, groups: []}]], expect: {current: 3, next: null, finished: [], number: 4, plansInto: 4}, why: "PRONTO-273: an empty highest sprint is the next, filled rather than followed by Sprint 5"},
+		{call: "devflow.loopOf", args: [[{n: 3, groups: ["completed"]}, {n: 4, groups: []}]], expect: {current: null, next: null, finished: [3], number: 4, plansInto: 4}, why: "an empty highest sprint after a finished one becomes the current when filled"},
+		{call: "devflow.loopOf", args: [[{n: 1, groups: ["started"]}, {n: 2, groups: ["unstarted"]}, {n: 3, groups: []}]], expect: {current: 1, next: 2, finished: [], number: 3, plansInto: 2}, why: "with a next sprint open, planning still adds to it"},
+	]}
+	"a sprint's cycle stays open while its work runs (PRONTO-273)": {suite: "devflow", steps: [
+		{call: "devflow.sprintDates", args: ["2026-11-11T02:05:00Z"], expect: {start: "2026-11-11", end: "2027-11-11"}, why: "planned at 23:05 BRT: dated by the UTC day the board compares in, and ending a year on, not at 23:59 UTC of the day it was made"},
+		{call: "devflow.sprintDates", args: ["2026-11-10T15:00:00Z"], expect: {start: "2026-11-10", end: "2027-11-10"}, why: "planned at 12:00 BRT"},
+		{call: "devflow.sprintDates", args: ["2026-11-11T02:05:00Z", 30], expect: {start: "2026-11-11", end: "2026-12-11"}},
+		{call: "devflow.sprintEndFor", args: ["2027-11-11", "2026-11-12T12:00:00Z"], expect: null, why: "the day after it was planned it is open, and left alone"},
+		{call: "devflow.sprintEndFor", args: ["2026-11-10", "2026-11-10T20:00:00Z"], expect: "2027-11-10", why: "a cycle ending today (the old one-day sprint) is moved a year on before it ends"},
+		{call: "devflow.sprintEndFor", args: ["2027-03-01T23:59:00Z", "2026-11-12T12:00:00Z"], expect: "2027-11-12", why: "under half a horizon left: moved forward"},
+		{call: "devflow.sprintEndFor", args: [null, "2026-11-12T12:00:00Z"], expect: "2027-11-12", why: "a cycle with no end gets one"},
+		{call: "devflow.sprintEndFor", args: ["2026-11-10T23:59:00Z", "2026-11-11T02:30:00Z"], expect: null, why: "a cycle that ended already is left: the board refuses to edit it"},
 	]}
 	"a cycle is dated by the day in the flow's time zone": {suite: "devflow", steps: [
 		{call: "devflow.dayOf", args: ["2026-11-10T02:00:00Z", "America/Sao_Paulo"], expect: "2026-11-09"},
