@@ -2,7 +2,7 @@
 # The dev flow's hooks (devflow/README.md): what GitHub, release-cron and pronto-flags tell the board.
 #   bin/pronto-devflow pr <repo> [--warn]                 a pull_request event (GITHUB_EVENT_PATH)
 #   bin/pronto-devflow released <repo> <app> <commit>     release-cron confirmed a release
-#   bin/pronto-devflow removals <repo> <app>              the removal issues of flags on for a week, by hand
+#   bin/pronto-devflow removals <repo> <app> [<commit>]   the removal issues of flags on for a week, by hand
 #   bin/pronto-devflow flipped|rolledback <repo> <app> <flag...>
 # and the board as the skills use it (devflow/board.ts):
 #   bin/pronto-devflow status|start|pull|move|file|close|next <repo> ...

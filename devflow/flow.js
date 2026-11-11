@@ -288,16 +288,59 @@ export function onForDays(since, now, days = REMOVE_AFTER_DAYS) {
   return Number.isFinite(t) && Number.isFinite(n) && n - t >= days * 86400000;
 }
 
-/** The removal issues to file for an app: each of its flip issues (`{name, modules, state, doneAt}`, `state` a
- * role, `doneAt` when it went Done: the board's completion time) that is Done, was Done `days` ago by `now`,
- * and has no removal issue among `issues` (any state). `[{flag, flip}]`, sorted by flag, once per flag. */
-export function removalsDue(issues, app, now, days = REMOVE_AFTER_DAYS) {
+/** The flags a flip issue's title names: "Flip <flag> on in <app>", or several, as PRONTO-44 was filed by
+ * hand ("Flip trial_banner and roman_army on for everyone where Bonk Chess is released"; commas too);
+ * empty for another issue. */
+export function flipFlagsOf(title) {
+  const m = /^Flip (.+?) on (?:in|for) \S/.exec(String(title ?? "").trim());
+  if (!m) return [];
+  const names = m[1].split(/\s*,\s*(?:and\s+)?|\s+and\s+/).map((n) => n.replace(/^`|`$/g, ""));
+  return names.every((n) => /^[A-Za-z0-9_.-]+$/.test(n)) ? names : [];
+}
+
+/** Since when each flag on by default in an app's flags.json has been so, from the file's versions along
+ * the released history (`versions`: `{at, flags}`, newest first, `flags` the file's parsed JSON): the
+ * time of the oldest version of the run of versions, back from the newest, in which it is on. A flag is on
+ * when its default variant is the boolean true (billing_grants' object is no flag to remove). When the
+ * history runs out still on, its oldest version's time: a lower bound, never too old. `{flag: at}`. */
+export function onSince(versions) {
+  const on = (file, flag) => {
+    const f = file?.flags?.[flag];
+    return f?.variants?.[f.defaultVariant] === true;
+  };
+  const [newest, ...older] = versions ?? [];
+  const since = {};
+  for (const flag of Object.keys(newest?.flags?.flags ?? {}).filter((f) => on(newest.flags, f))) {
+    let at = newest.at;
+    for (const v of older) {
+      if (!on(v.flags, flag)) break;
+      at = v.at;
+    }
+    since[flag] = at;
+  }
+  return since;
+}
+
+/** The removal issues to file for an app, `[{flag, flip}]` or `[{flag, since}]`, sorted by flag, once per flag,
+ * none for a flag with a removal issue among `issues` (any state). A flag goes by its flip issue
+ * (`{name, modules, state, doneAt}`, `state` a role, `doneAt` when it went Done: the board's completion time)
+ * when one is Done, titled for it alone or with others: due once Done `days` ago by `now`. A flag with no
+ * Done flip issue (on by a merge before flip issues, or its flip cancelled) goes by `on`, `{flag: since}` from
+ * the released history (onSince): due once on `days`. */
+export function removalsDue(issues, app, now, days = REMOVE_AFTER_DAYS, on = {}) {
   const due = new Map();
+  const flipped = new Set();
   for (const i of issues ?? []) {
-    const flag = flipOf(i.name);
-    if (!flag || i.state !== "done" || !(i.modules ?? []).includes(app)) continue;
-    if (!onForDays(i.doneAt, now, days) || removeIssueOf(issues, flag, app) || due.has(flag)) continue;
-    due.set(flag, { flag, flip: i });
+    if (i.state !== "done" || !(i.modules ?? []).includes(app)) continue;
+    for (const flag of flipFlagsOf(i.name)) {
+      flipped.add(flag);
+      if (!onForDays(i.doneAt, now, days) || removeIssueOf(issues, flag, app) || due.has(flag)) continue;
+      due.set(flag, { flag, flip: i });
+    }
+  }
+  for (const [flag, since] of Object.entries(on ?? {})) {
+    if (flipped.has(flag) || !onForDays(since, now, days) || removeIssueOf(issues, flag, app)) continue;
+    due.set(flag, { flag, since });
   }
   return [...due.values()].sort((a, b) => (a.flag < b.flag ? -1 : a.flag > b.flag ? 1 : 0));
 }

@@ -46,7 +46,10 @@ other.
    <flag> from <app>" in the Backlog, in the app's module, linking the flip issue (the owner,
    2026-11-11). Done means the flag and its off-path code are deleted from the app (`flags_spec.cue`,
    `flags/flags.json`, the code, the scenarios) and shipped through release-cron. One already on the
-   board, in any state, is reused, never doubled. `pronto-devflow removals . <app>` runs it by hand.
+   board, in any state, is reused, never doubled. A flip issue may name several flags ("Flip a and b
+   on ..."): each gets its own. A flag on by default in the released `flags/flags.json` with no Done
+   flip issue (turned on by a merge, or its flip cancelled) counts from when the released history
+   turned it on. `pronto-devflow removals . <app> [<commit>]` runs it by hand.
 5b. **Pull the next one, always.** An idle engineer is money spent for nothing (the owner,
    2026-11-09), so the moment an issue leaves your hands (its pull request opens, or it is
    cancelled or abandoned) you start the next one in the same turn; you never end a turn idle
