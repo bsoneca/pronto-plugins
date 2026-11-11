@@ -103,3 +103,20 @@ rehearsalHolderWins: _both.rehearsal.holder & "b"
 // The driver and its rules are written verbatim (PRONTO-202): an app's copy is the plugin's file byte for byte,
 // so a plain diff against release-cron/ finds a change made in the app instead of here.
 verbatim: (_t.files["release-cron/release-cron.ts"].text == _driver && _t.files["release-cron/cron.js"].text == _rules) & true
+
+// An ssh in a target's command carries ServerAliveInterval, in the release, the serving, and each of the preview's.
+_aliveOpts: "-o ServerAliveInterval=30 -o ServerAliveCountMax=6"
+_aliveCron: #Cron & {watch: ["x"], probes: {}, target: {
+	release: ["sh", "-c", "ssh \(_aliveOpts) h './r.sh'"]
+	serving: ["ssh", "-o", "ServerAliveInterval=30", "h", "git rev-parse HEAD"]
+	origin:  "https://x.example"
+	preview: {up: ["sh", "-c", "ssh \(_aliveOpts) h up"], reach: ["sh", "-c", "ssh -L 1:1:1 \(_aliveOpts) h"], down: ["sh", "-c", "ssh \(_aliveOpts) h down"]}
+}}
+sshAliveAccepted: _aliveCron.target._alive & [true, true, true, true, true]
+// A command with no ssh needs nothing.
+_noSsh: #Cron & {watch: ["x"], probes: {}, target: {release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example"}}
+noSshAccepted: _noSsh.target._alive & [true, true]
+// A release, a serving, or any of the preview's that ssh without it is refused.
+sshReleaseBare: [if (#Cron & {watch: ["x"], probes: {}, target: {release: ["sh", "-c", "ssh h r"], serving: ["./s.sh"], origin: "https://x.example"}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+sshServingBare: [if (#Cron & {watch: ["x"], probes: {}, target: {release: ["./r.sh"], serving: ["ssh", "h", "x"], origin: "https://x.example"}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+sshPreviewBare: [if (#Cron & {watch: ["x"], probes: {}, target: {release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example", preview: {up: ["./u.sh"], reach: ["sh", "-c", "ssh -A -L 1:1:1 h"], down: ["./d.sh"]}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
