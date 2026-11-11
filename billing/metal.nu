@@ -17,9 +17,9 @@ use ../common/sops.nu
 const deno = "denoland/deno:distroless-2.5.0@sha256:5c4530d4babe37ded3566803e9498e2b5d643b915cce701d8b7b82f87a86629e"
 const port = 8080
 # The airlock beside the broker (--airlock, PRONTO-135): mecha-fork's airlock with its door
-# (mecha-fork#26, published as mecha 0.22.0-host.3 by pronto-fork's prerelease-mecha), mecha's daprd,
+# (mecha-fork#26, and its sinkKey, mecha-fork#30: mecha 0.22.0-host.6 by pronto-fork's prerelease-mecha), mecha's daprd,
 # and mecha's database image, which stages the ledger's initdb steps.
-const airlock_image = "ghcr.io/bsoneca/mecha-airlock:0.22.0-host.3@sha256:3e41f77dd45922b5a0f38d21a1c69f21d751debf6f2ee717daa11b77c8f210f0"
+const airlock_image = "ghcr.io/bsoneca/mecha-airlock:0.22.0-host.6@sha256:dcc2d12a8f29855230a60411b0fd7a2a1be4dc778952a42e26bebf0fc37db8ec"
 const mesh_image = "bonitao/mecha-mesh:0.22.0@sha256:8d39aa3543560232c52330152ba70a4d2c973b76d0ac97899d677704bc0e09a4"
 const ledger_image = "bonitao/mecha-database:0.22.0@sha256:ed58b6be6cd69658fbb4e6daff1f91b8923b333f364905c4dacdec2974a05d82"
 const door_port = 9998
