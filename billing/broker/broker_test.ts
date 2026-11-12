@@ -5,10 +5,11 @@
 // tenant's claim, customers and tokens are nothing to another.
 import { type Jwk, Refused } from "../shared.ts";
 import { brokerKeys, type Entitlement, verifyEntitlement } from "../entitlement.ts";
-import { broker, twoModes } from "./main.ts";
+import { broker, newSigningKey, twoModes } from "./main.ts";
 import { chargesAt, checkoutLocale, type Consent, ownerOf, tenantOf } from "./core.ts";
 import { fakeStripe, unform } from "./fake.ts";
 import { form, signWebhook, stripe as stripeClient, StripeError } from "./stripe.ts";
+import { MemoryStore, type Store } from "./store.ts";
 
 function assertEquals(a: unknown, b: unknown, m = "") {
   if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m} expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
@@ -21,7 +22,9 @@ const BEA = "00000000-0000-4000-8000-00000000000b";
 const PLANS = { analysis: { name: "Analysis", interval: "month", prices: { usd: 499, brl: 1990 } } };
 const TRIAL = { months: 3, plans: ["analysis"], remindDays: 7 };
 
-async function setup(o: { searchLagMs?: number; issuer?: string } = {}) {
+// `replicas` brokers share one store (store.ts), as the node's pods share their database: each
+// request goes to the next, round robin.
+async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: number; store?: Store } = {}) {
   const fake = fakeStripe(ISSUER, { searchLagMs: o.searchLagMs ?? 0 });
   // Every request the broker makes to Stripe, as the stand-in is asked it.
   const sent: { method: string; path: string; params?: Record<string, unknown> }[] = [];
@@ -68,7 +71,13 @@ async function setup(o: { searchLagMs?: number; issuer?: string } = {}) {
     }
     return new Response("", { status: 404 });
   }) as typeof fetch;
-  const handler = await broker({ issuer: ISSUER, secret: "s".repeat(32), stripe, webhookSecret: fake.webhookSecret, fetcher, cacheMs: 0, feePercent: 10 });
+  const store = o.store ?? new MemoryStore();
+  // Replicas sign with one key, as the node's pods read BILLING_SIGNING_KEY from one Secret.
+  const signingKey = (o.replicas ?? 1) > 1 ? await newSigningKey() : undefined;
+  const replicas = await Promise.all(Array.from({ length: o.replicas ?? 1 }, () =>
+    broker({ issuer: ISSUER, secret: "s".repeat(32), stripe, webhookSecret: fake.webhookSecret, fetcher, cacheMs: 0, feePercent: 10, store, signingKey })));
+  let turn = 0;
+  const handler = (req: Request) => replicas[turn++ % replicas.length](req);
   const keys = brokerKeys(ISSUER, fetcher, 0);
   fake.connect(handler);
   const call = (path: string, init?: RequestInit) => {
@@ -106,7 +115,7 @@ async function setup(o: { searchLagMs?: number; issuer?: string } = {}) {
     assertEquals(back, `${ISSUER}/onboarded?tenant=${encodeURIComponent(tenant)}`);
     assertEquals((await call(new URL(back).pathname + new URL(back).search)).status, 200, "set up");
   };
-  return { fake, door, sent, stripeDown, tenants, call, post, press, prove, payouts, secrets, ticket, consentTo, OFFER };
+  return { fake, door, sent, stripeDown, tenants, call, post, press, prove, payouts, secrets, ticket, consentTo, OFFER, replicas };
 }
 
 Deno.test("an account subscribes, its tenant alone is told, and it lapses when it cancels", async () => {
@@ -772,4 +781,48 @@ Deno.test("the stand-in is reached through its door: every call in its ledger, a
 Deno.test("Stripe's form is read back into its objects and arrays", () => {
   assertEquals(unform("a=1&b[c]=2&d[0]=x&d[1]=y&e[0][f]=g"), { a: "1", b: { c: "2" }, d: ["x", "y"], e: [{ f: "g" }] });
   assertEquals(unform(`${form({ line_items: [{ price: "p", quantity: 1 }], metadata: { tenant: "t" } })}`), { line_items: [{ price: "p", quantity: "1" }], metadata: { tenant: "t" } });
+});
+
+// Two replicas sharing one store (PRONTO-371), as the node's pods share the broker's database.
+Deno.test("two replicas: two checkouts at once for one account still open one Checkout", async () => {
+  const s = await setup({ replicas: 2 });
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const [one, two] = await Promise.all([
+    s.post("/checkout", { tenant: A, account: ANA, plan: "analysis" }),
+    s.post("/trial/checkout", { tenant: A, account: ANA, ticket: s.ticket(A, s.consentTo()) }),
+  ]);
+  assertEquals([one.status, two.status], [200, 200]);
+  assertEquals([s.fake.held.customers.size, s.fake.held.sessions.size], [1, 1], "the lock held across the replicas");
+});
+
+Deno.test("two replicas: an event delivered by one is answered by the other without a second push", async () => {
+  const s = await setup({ replicas: 2 });
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const sub = await startTrial(s);
+  const got = s.tenants.get(A)!.got;
+  const before = got.length;
+  const payload = JSON.stringify({ id: "evt_replayed", type: "customer.subscription.updated", created: 1, data: { object: sub } });
+  const send = async () => s.call("/stripe", { method: "POST", body: payload, headers: { "stripe-signature": await signWebhook(s.fake.webhookSecret, payload) } });
+  const first = await send();
+  assertEquals([first.status, await first.json()], [200, { delivered: "evt_replayed" }]);
+  assertEquals(got.length, before + 1, "pushed once");
+  const again = await send();
+  assertEquals([again.status, await again.json()], [200, { duplicate: "evt_replayed" }], "the other replica knows it");
+  assertEquals(got.length, before + 1, "not pushed again");
+});
+
+Deno.test("two replicas: every entitlement is newer than the one before, whichever signed it", async () => {
+  const s = await setup({ replicas: 2 });
+  await s.prove(A);
+  await s.payouts(A);
+  await s.press((await (await s.post("/checkout", { tenant: A, account: ANA, plan: "analysis" })).json()).url, "pay");
+  const { manage } = s.tenants.get(A)!.got[0];
+  const vers: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    const { token } = await (await s.post("/resync", { tenant: A, account: ANA, plan: "analysis", manage })).json();
+    vers.push(JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)))).ver);
+  }
+  assertEquals(vers.every((v, i) => i === 0 || v > vers[i - 1]), true, `increasing over both replicas: ${vers}`);
 });

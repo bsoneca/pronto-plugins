@@ -17,11 +17,12 @@
 // of. One instance: an entitlement's `ver` is this process's clock.
 import { base64url, esc, type Jwk, json, page, randomToken, signEs256 } from "../shared.ts";
 import {
-  accountOf, chargesAt, checkoutSession, type Consent, consentChecked, Limiter, readCapped, derivedKey, entitlementClaims, entitlementOf,
+  accountOf, chargesAt, checkoutSession, type Consent, consentChecked, readCapped, derivedKey, entitlementClaims, entitlementOf,
   firstChargeFailed, lookupKeyOf, manageTokenOf, ownerOf, parsePublished, type Plan, type Published, returnTo, same, type Subscription,
   tenantOf, trialOf, trialSpent,
 } from "./core.ts";
 import { type Routed, type Stripe, StripeError, webhookSigned } from "./stripe.ts";
+import { MemoryStore, type Store } from "./store.ts";
 
 /** Where a tenant publishes its owner and its plans. */
 export const PUBLISHED_PATH = "/.well-known/pronto-billing.json";
@@ -29,6 +30,9 @@ export const PUBLISHED_PATH = "/.well-known/pronto-billing.json";
 export const EVENTS_PATH = "/billing/events";
 /** Where a tenant gives back what an account consented to, for a ticket it minted. */
 export const CONSENT_PATH = "/billing/trial/consent";
+
+// How long a delivered Stripe event is known: past Stripe's three days of sending it again.
+const EVENT_KEPT_MS = 7 * 24 * 3600_000;
 
 export const SUBSCRIPTION_EVENTS = new Set([
   "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted",
@@ -91,6 +95,8 @@ export async function broker(p: {
   /** How the broker reaches tenants: their published plans, and their events. */
   fetcher?: typeof fetch;
   cacheMs?: number;
+  /** What every replica shares (store.ts): this process's memory unless the broker has a database. */
+  store?: Store;
 }) {
   const issuer = p.issuer.replace(/\/$/, "");
   // A broker on a developer's machine serves tenants there too.
@@ -102,14 +108,16 @@ export async function broker(p: {
   const cacheMs = p.cacheMs ?? 300_000;
   const fee = p.feePercent ?? 0;
   if (!(fee >= 0 && fee < 100)) throw new Error("the fee is a percentage under 100");
-  // What a caller nobody signed in may make the broker ask of Stripe.
-  const perTenant = new Limiter(120), perClient = new Limiter(20);
+  const store = p.store ?? new MemoryStore();
+  // What a caller nobody signed in may make the broker ask of Stripe, counted over every replica.
+  const perTenant = (t: string) => store.take("tenant", t, 120, 60_000);
+  const perClient = (c: string) => store.take("client", c, 20, 60_000);
   // A trial route's own: a tenant's calls all leave from one address, so this is generous, and it is
   // taken before a ticket is tried, which a junk one must not spend the tenant's bucket on.
-  const trialClient = new Limiter(60);
-  // Each entitlement newer than every one before it, though two are signed in one millisecond.
-  let lastVer = 0;
-  const nextVer = () => (lastVer = Math.max(lastVer + 1, Date.now()));
+  const trialClient = (c: string) => store.take("trial client", c, 60, 60_000);
+  // Each entitlement newer than every one before it, from any replica, though two are signed in one
+  // millisecond.
+  const nextVer = () => store.tick("ver", Date.now());
 
   // A tenant's published plans, for a few minutes.
   const published = new Map<string, { at: number; doc: Published }>();
@@ -140,14 +148,13 @@ export async function broker(p: {
   }
 
   // The connected account that pays a tenant's author, found by its metadata;
-  // a tenant without one is not looked for again for a minute.
+  // a tenant without one is not looked for again for a minute, by any replica, until its author
+  // onboards through one of them.
   const accounts = new Map<string, string>();
-  const none = new Map<string, number>();
   async function connectedAccount(t: string): Promise<Account | null> {
     const id = accounts.get(t);
     if (id) return await p.stripe<Account>("GET", `/v2/core/accounts/${id}`, RECIPIENT);
-    if ((none.get(t) ?? 0) > Date.now()) return null;
-    if (none.size > 10_000) none.clear();
+    if (await store.seen("no account", t)) return null;
     // Twenty at most to a page, as /v2 lists are; a listed account leaves its
     // configurations out, so the one found is read again.
     let page: string | null = null;
@@ -162,7 +169,7 @@ export async function broker(p: {
       }
       page = got.next_page_url ? new URL(got.next_page_url, "https://api.stripe.com").searchParams.get("page") : null;
       if (!page || got.data.length === 0) {
-        none.set(t, Date.now() + 60_000);
+        await store.remember("no account", t, 60_000);
         return null;
       }
     }
@@ -201,7 +208,7 @@ export async function broker(p: {
 
   // The entitlement of one account to one plan, read from Stripe and signed for its tenant.
   async function entitlement(t: string, account: string, plan: string, known?: string) {
-    const ver = nextVer();
+    const ver = await nextVer();
     const subs = await subscriptionsOf(await customersOf(t, account, known));
     const held = entitlementOf(subs, t, account, plan);
     const token = await signEs256(signing.key, signing.publicJwk.kid!, entitlementClaims({
@@ -259,7 +266,7 @@ export async function broker(p: {
         ...RECIPIENT,
       }, `account ${t} ${country}`);
       accounts.set(t, acct.id);
-      none.delete(t);
+      await store.forget("no account", t);
     }
     const done = `${issuer}/onboarded?tenant=${encodeURIComponent(t)}`;
     // Onboarding asks for what each configuration the account has needs: Stripe reads
@@ -290,19 +297,9 @@ export async function broker(p: {
     return { customer, subs: await subscriptionsOf([...new Set([customer, ...found])]) };
   }
 
-  // One at a time for an account of a tenant, so two requests do not both find no customer, no
-  // subscription and no open session, and each open a Checkout of its own.
-  const queues = new Map<string, Promise<unknown>>();
-  async function locked<T>(key: string, fn: () => Promise<T>): Promise<T> {
-    const run = (queues.get(key) ?? Promise.resolve()).then(fn);
-    const tail = run.catch(() => {});
-    queues.set(key, tail);
-    try {
-      return await run;
-    } finally {
-      if (queues.get(key) === tail) queues.delete(key);
-    }
-  }
+  // One at a time for an account of a tenant, in any replica, so two requests do not both find no
+  // customer, no subscription and no open session, and each open a Checkout of its own.
+  const locked = <T>(key: string, fn: () => Promise<T>) => store.locked(`account ${key}`, fn);
 
   // Opens Checkout for an account, closing any other it left open first, so two tabs pay once.
   // `refuse` looks at the account's subscriptions and may turn it away.
@@ -335,7 +332,7 @@ export async function broker(p: {
     const t = tenant(b.tenant);
     const account = accountOf(b.account);
     if (!t || !account) return json(400, { error: "tenant and account required" });
-    if (!perClient.take(client) || !perTenant.take(t)) return json(429, { error: "too many probes; try again in a minute" });
+    if (!(await perClient(client)) || !(await perTenant(t))) return json(429, { error: "too many probes; try again in a minute" });
     // Which way this read goes, as its tenant asked for its reader just now; `direct` is true only when
     // the read went straight to Stripe, so a flip's check sees whether the door answered.
     const route = await (p.stripe as Routed).route?.();
@@ -348,7 +345,7 @@ export async function broker(p: {
     const t = tenant(b.tenant);
     const account = accountOf(b.account);
     if (!t || !account) return json(400, { error: "tenant and account required" });
-    if (!perClient.take(client) || !perTenant.take(t)) return json(429, { error: "too many checkouts; try again in a minute" });
+    if (!(await perClient(client)) || !(await perTenant(t))) return json(429, { error: "too many checkouts; try again in a minute" });
     const back = returnTo(t, b.return);
     if (!back) return json(400, { error: "return is a path on the tenant's origin" });
     const doc = await publishedBy(t);
@@ -404,7 +401,7 @@ export async function broker(p: {
     const t = tenant(b.tenant);
     const account = accountOf(b.account);
     if (!t || !account) return { err: json(400, { error: "tenant and account required" }) };
-    if (!trialClient.take(client)) return { err: json(429, { error: "too many requests; try again in a minute" }) };
+    if (!(await trialClient(client))) return { err: json(429, { error: "too many requests; try again in a minute" }) };
     const doc = await publishedBy(t);
     if (!doc.ok) {
       console.error(`billing: ${doc.error}`);
@@ -413,7 +410,7 @@ export async function broker(p: {
     if (!doc.doc.trial) return { err: json(404, { error: "no trial" }) };
     const consent = await consentOf(t, account, b.ticket);
     if (consent instanceof Response) return { err: consent };
-    if (!perTenant.take(t)) return { err: json(429, { error: "too many requests; try again in a minute" }) };
+    if (!(await perTenant(t))) return { err: json(429, { error: "too many requests; try again in a minute" }) };
     return { t, account, doc: doc.doc, trial: doc.doc.trial, consent };
   }
 
@@ -501,12 +498,12 @@ export async function broker(p: {
   // refuses it is told no more of it: its own fault is not every tenant's.
   // A trial whose first charge failed ends at once: no dunning, and no charge a retry setting
   // of the operator's dashboard would make later. Read again from Stripe, so an event that
-  // lags a subscription already ended asks nothing; one instance, so the ids in hand are all.
-  const ending = new Set<string>();
+  // lags a subscription already ended asks nothing. One subscription's end is handled by one caller at
+  // a time, in any replica; another event for it meanwhile leaves it to that one.
+  const ending = <T>(id: string, fn: () => Promise<T>) => store.exclusive(`ending ${id}`, fn);
   async function endFailedTrial(event: Subscription): Promise<void> {
-    if (event.metadata?.trial !== "1" || (event.status !== "past_due" && event.status !== "unpaid") || ending.has(event.id)) return;
-    ending.add(event.id);
-    try {
+    if (event.metadata?.trial !== "1" || (event.status !== "past_due" && event.status !== "unpaid")) return;
+    await ending(event.id, async () => {
       const fresh = await p.stripe<Subscription>("GET", `/v1/subscriptions/${event.id}`);
       if (!firstChargeFailed(fresh)) return;
       // The failed first invoice must not stay payable: one that was paid since means the charge
@@ -520,18 +517,15 @@ export async function broker(p: {
       }
       await p.stripe("POST", `/v1/subscriptions/${event.id}`, { metadata: { trial_failed: "1" } }, `trial failed ${event.id}`);
       await p.stripe("DELETE", `/v1/subscriptions/${event.id}`);
-    } finally {
-      ending.delete(event.id);
-    }
+    });
   }
 
-  // Two Checkouts that raced past the lock (another broker instance, or a customer Stripe's search
-  // had not found) can each start a trial: the newer, still trialing and uncharged, is cancelled
+  // Two Checkouts that raced past the lock (a customer Stripe's search had not found yet, or a lock
+  // that gave up waiting) can each start a trial: the newer, still trialing and uncharged, is cancelled
   // at once and marked, so it never shows as the account's trial. The older keeps its trial.
   async function endDuplicateTrial(event: Subscription & { customer: string }, t: string, account: string): Promise<void> {
-    if (event.metadata.trial !== "1" || ending.has(event.id)) return;
-    ending.add(event.id);
-    try {
+    if (event.metadata.trial !== "1") return;
+    await ending(event.id, async () => {
       const subs = await subscriptionsOf(await customersOf(t, account, event.customer));
       const mine = subs.find((x) => x.id === event.id);
       if (mine?.status !== "trialing") return;
@@ -541,9 +535,7 @@ export async function broker(p: {
       if (!older) return;
       await p.stripe("POST", `/v1/subscriptions/${event.id}`, { metadata: { trial_duplicate: "1" } }, `trial duplicate ${event.id}`);
       await p.stripe("DELETE", `/v1/subscriptions/${event.id}`);
-    } finally {
-      ending.delete(event.id);
-    }
+    });
   }
 
   async function webhook(req: Request): Promise<Response> {
@@ -552,6 +544,9 @@ export async function broker(p: {
     if (!(await webhookSigned(p.webhookSecret, payload, req.headers.get("stripe-signature")))) return json(400, { error: "signature" });
     const event = JSON.parse(payload) as { id: string; type: string; data: { object: Subscription & { customer: string } } };
     if (!SUBSCRIPTION_EVENTS.has(event.type)) return json(200, { ignored: event.type });
+    // Stripe sends an event again until it is answered, for up to three days, and to every replica
+    // alike: one delivered (or refused for good) already is answered so without a second push.
+    if (await store.seen("stripe event", event.id)) return json(200, { duplicate: event.id });
     const sub = event.data.object;
     const t = tenantOf(sub.metadata?.tenant, true);
     const account = accountOf(sub.metadata?.account);
@@ -566,6 +561,7 @@ export async function broker(p: {
       const r = await push(t, token);
       if (r.refused) {
         console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}; not sent again`);
+        await store.remember("stripe event", event.id, EVENT_KEPT_MS);
         return json(200, { refused: event.id });
       }
       if (!r.taken) {
@@ -574,6 +570,7 @@ export async function broker(p: {
       }
       sent = held;
     }
+    await store.remember("stripe event", event.id, EVENT_KEPT_MS);
     return json(200, { delivered: event.id });
   }
 
@@ -666,7 +663,9 @@ if (import.meta.main) {
     console.log(`STRIPE_WEBHOOK_SECRET=${made.secret}`);
     Deno.exit(0);
   }
-  const settings = { issuer, secret, signingKey: env("BILLING_SIGNING_KEY"), feePercent: Number(env("BILLING_FEE_PERCENT") ?? 0) };
+  // One store for the live broker and its sandbox: the database at DATABASE_URL (metal.nu), else memory.
+  const { storeFrom } = await import("./store.ts");
+  const settings = { issuer, secret, signingKey: env("BILLING_SIGNING_KEY"), feePercent: Number(env("BILLING_FEE_PERCENT") ?? 0), store: await storeFrom(env) };
   const key = env("STRIPE_SECRET_KEY");
   // Off by default: set (by metal.nu --airlock), every Stripe call goes through the airlock's door at
   // this address, which holds the keys, and the broker holds none (PRONTO-135).

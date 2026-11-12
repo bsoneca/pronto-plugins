@@ -289,19 +289,3 @@ export function checkoutSession(p: {
     },
   };
 }
-
-/** At most `per` requests a `windowMs` for each key, the oldest keys
- * forgotten past `keys`: what a caller nobody signed in may ask of Stripe. */
-export class Limiter {
-  #seen = new Map<string, { n: number; at: number }>();
-  constructor(readonly per: number, readonly windowMs = 60_000, readonly keys = 10_000, readonly now = () => Date.now()) {}
-  take(key: string): boolean {
-    const t = this.now();
-    let held = this.#seen.get(key);
-    if (!held || t - held.at >= this.windowMs) held = { n: 0, at: t };
-    this.#seen.delete(key);
-    this.#seen.set(key, held);
-    if (this.#seen.size > this.keys) this.#seen.delete(this.#seen.keys().next().value!);
-    return ++held.n <= this.per;
-  }
-}
