@@ -11,7 +11,7 @@
 // The broker has no migration runner, so it creates its two tables itself at start, idempotently
 // (CREATE TABLE IF NOT EXISTS, tried again if a replica starting at the same moment made a table first).
 // Values are JSON text; the broker never reads one with SQL.
-import { base64url, type Jwk, jwkThumbprint } from "../oidc.ts";
+import { base64url, fromBase64url, type Jwk, jwkThumbprint } from "../oidc.ts";
 
 export interface Store {
   /** Keep `value` under (kind, key) for `ttlMs`, replacing any earlier one and its wrong-guess count. */
@@ -175,6 +175,43 @@ export class PostgresStore implements Store {
     const [won] = await this.sql.unsafe(SQL.onceGet, [name]);
     return String(won.value);
   }
+}
+
+/**
+ * The store with `once`'s values sealed (AES-GCM under a key derived from BROKER_SECRET, the value's
+ * name bound in): the private signing keys and secrets it holds cannot be read from the database, a
+ * dump or a backup without the broker's own secret. A value sealed under another secret fails to
+ * open, loudly, rather than signing with a key nobody can check.
+ */
+export async function sealedOnce(store: Store, secret: string): Promise<Store> {
+  const te = new TextEncoder();
+  const base = await crypto.subtle.importKey("raw", te.encode(secret), "HKDF", false, ["deriveKey"]);
+  const key = await crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(), info: te.encode("broker once") }, base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  const seal = async (name: string, plain: string) => {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: te.encode(name) }, key, te.encode(plain)));
+    return `v1.${base64url(iv)}.${base64url(ct)}`;
+  };
+  const open = async (name: string, sealed: string) => {
+    const [v, iv, ct] = sealed.split(".");
+    if (v !== "v1" || !iv || !ct) throw new Error(`the store's ${name} is not sealed`);
+    try {
+      return new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromBase64url(iv), additionalData: te.encode(name) }, key, fromBase64url(ct)));
+    } catch {
+      throw new Error(`the store's ${name} was sealed under another BROKER_SECRET`);
+    }
+  };
+  return {
+    put: (kind, k, value, ttlMs) => store.put(kind, k, value, ttlMs),
+    get: (kind, k) => store.get(kind, k),
+    take: (kind, k) => store.take(kind, k),
+    del: (kind, k) => store.del(kind, k),
+    bump: (kind, k) => store.bump(kind, k),
+    claim: (kind, k, ttlMs) => store.claim(kind, k, ttlMs),
+    left: (kind, k) => store.left(kind, k),
+    once: async (name, make) => open(name, await store.once(name, async () => seal(name, await make()))),
+  };
 }
 
 /** The broker's store: the database at DATABASE_URL when there is one, else this process's memory. */

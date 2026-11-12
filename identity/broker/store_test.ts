@@ -5,7 +5,7 @@
 // wrong guesses are counted across them, and both serve the same keys.
 import { PGlite } from "npm:@electric-sql/pglite@0.3.7";
 import { jwkThumbprint } from "../oidc.ts";
-import { MemoryStore, PostgresStore, SCHEMA, SQL, type Sql, type Store, sharedKeyPair } from "./store.ts";
+import { MemoryStore, PostgresStore, SCHEMA, SQL, type Sql, type Store, sealedOnce, sharedKeyPair } from "./store.ts";
 import { Otp } from "./otp.ts";
 import { phoneConfig, phoneUpstream } from "./phone.ts";
 import { broker } from "./main.ts";
@@ -219,4 +219,18 @@ Deno.test("two broker replicas serve one ID-token key", async () => {
   const [x, y] = await Promise.all(h.map(async (f) => await (await f(new Request(`${ISSUER}/jwks`))).json()));
   assertEquals(x, y);
   assertEquals(x.keys[0].kid, await jwkThumbprint({ kty: "EC", crv: "P-256", x: x.keys[0].x, y: x.keys[0].y }));
+});
+
+Deno.test("the keys and secrets made once are sealed under BROKER_SECRET, and open only under it", async () => {
+  const held = new MemoryStore();
+  const secret = "s".repeat(32);
+  const a = await sealedOnce(held, secret);
+  const b = await sealedOnce(held, secret);
+  const { jwk } = await sharedKeyPair(a, "k", "ES256");
+  assertEquals((await sharedKeyPair(b, "k", "ES256")).jwk, jwk, "a second replica opens the same key");
+  const raw = await held.once("k", () => "unused");
+  if (!raw.startsWith("v1.") || raw.includes('"d"')) throw new Error(`held in the clear: ${raw.slice(0, 40)}`);
+  const other = await sealedOnce(held, "t".repeat(32));
+  const refused = await other.once("k", () => "unused").then(() => "", (e: Error) => e.message);
+  if (!refused.includes("another BROKER_SECRET")) throw new Error(`opened under another secret: ${refused}`);
 });

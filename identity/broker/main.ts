@@ -12,7 +12,7 @@
 import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, signEs256, verifyIdToken } from "../oidc.ts";
 import { doorKey, throughDoor } from "./door.ts";
 import { tenantAdmitted } from "./phone.ts";
-import { type Store, MemoryStore, sharedKeyPair, storeFrom } from "./store.ts";
+import { type Store, MemoryStore, sealedOnce, sharedKeyPair, storeFrom } from "./store.ts";
 import { type AuthRequest, Codes, emailOf, esc, json, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, sectorOf, sectorsOf, profileOf, providerScope, redeem } from "./core.ts";
 
 // Kept where phone.ts takes them (core.ts), so the phone imports nothing of this module at run time:
@@ -371,7 +371,8 @@ if (import.meta.main) {
   // The phone, where the operator configured it (phone.ts): its page and token endpoint beside the broker's own.
   const { phoneConfig, phoneUpstream } = await import("./phone.ts");
   const phoneCfg = phoneConfig(env, issuer);
-  const store = await storeFrom(env);
+  // Its keys and secrets are sealed under BROKER_SECRET in the store (sealedOnce).
+  const store = await sealedOnce(await storeFrom(env), secret);
   const phone = phoneCfg ? await phoneUpstream(issuer, phoneCfg, { secret, store }) : null;
   if (phone) providers.push(phone.provider);
   if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT, or PHONE_OTP=broker");
