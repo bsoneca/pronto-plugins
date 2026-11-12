@@ -5,7 +5,7 @@ use ../metal.nu
 
 let docs = (metal manifests --domain id.example.com --sources (metal sources) --settings [{name: "GOOGLE_CLIENT_ID", value: "c"}] | split row "---\n" | each { from yaml })
 let kind = {|k| $docs | where kind == $k | first }
-assert equal ($docs | get kind) [Namespace ConfigMap Deployment Service Gateway HTTPRoute NetworkPolicy Password ExternalSecret Cluster NetworkPolicy]
+assert equal ($docs | get kind) [Namespace ConfigMap Deployment Service PodDisruptionBudget Gateway HTTPRoute NetworkPolicy Password ExternalSecret Cluster NetworkPolicy]
 assert equal ($docs | get metadata.namespace? | compact | uniq) [identity]
 
 # Every file the broker imports is mounted where its import finds it, and nothing outside is fetched.
@@ -17,11 +17,16 @@ let items = ($pod.volumes | where name == files | first).configMap.items
 assert equal ($items | where key == "main.ts" | first).path "broker/main.ts"
 assert equal ($items | where key == "oidc.ts" | first).path "oidc.ts"
 
-# One pod for now, replaced rather than overlapped until the scaling change; what it keeps is in its
-# own database, which it reads by the URL of the login generated in the cluster (PRONTO-371).
+# Three pods, any of which answers any request: what it keeps is in its own database, which it reads by
+# the URL of the login generated in the cluster (PRONTO-371). A new pod is ready before an old one goes,
+# a drain takes one at a time, and they spread over the nodes where there are several.
 let dep = (do $kind Deployment)
-assert equal $dep.spec.replicas 1
-assert equal $dep.spec.strategy.type Recreate
+assert equal $dep.spec.replicas 3
+assert equal $dep.spec.strategy {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+assert equal ($dep.spec.template.spec.topologySpreadConstraints | first | select topologyKey whenUnsatisfiable) {topologyKey: "kubernetes.io/hostname", whenUnsatisfiable: ScheduleAnyway}
+assert equal ($dep.spec.template.spec.topologySpreadConstraints | first).labelSelector.matchLabels $dep.spec.selector.matchLabels
+let budget = ($docs | where kind == PodDisruptionBudget | first)
+assert equal [$budget.metadata.name $budget.spec.minAvailable $budget.spec.selector.matchLabels] [identity-broker 2 $dep.spec.selector.matchLabels]
 let c = ($pod.containers | first)
 assert equal ($c.env | where name == DATABASE_URL | first).valueFrom.secretKeyRef {name: "identity-broker-db", key: "url"}
 let cluster = (do $kind Cluster)
@@ -56,7 +61,7 @@ assert equal (($egress | where {|e| $e.to? != null and ("ipBlock" in ($e.to | fi
 # (client_secret_basic), reached by the broker alone.
 let locked = (metal manifests --domain id.example.com --sources (metal sources) --settings [{name: "GOOGLE_CLIENT_ID", value: "c"}] --airlock | split row "---\n" | each { from yaml })
 let at = {|k, n| $locked | where kind == $k and metadata.name == $n | first }
-assert equal ($locked | get kind) [Namespace ConfigMap Deployment Service Gateway HTTPRoute NetworkPolicy Password ExternalSecret Cluster NetworkPolicy ConfigMap ConfigMap PersistentVolumeClaim Deployment Service NetworkPolicy]
+assert equal ($locked | get kind) [Namespace ConfigMap Deployment Service PodDisruptionBudget Gateway HTTPRoute NetworkPolicy Password ExternalSecret Cluster NetworkPolicy ConfigMap ConfigMap PersistentVolumeClaim Deployment Service NetworkPolicy]
 let broker = ((do $at Deployment identity-broker).spec.template.spec.containers | first)
 assert equal ($broker.env | where name == GOOGLE_CLIENT_SECRET | length) 0 "the broker holds no client secret"
 assert equal ($broker.env | where name == BROKER_SECRET | length) 1
