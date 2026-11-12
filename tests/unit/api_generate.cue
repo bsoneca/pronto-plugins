@@ -161,6 +161,9 @@ cases: {
 		{call: "apigen.as", args: ["$db", _bob, "SELECT pronto_flags.flag_on('api_export', $1) AS on", [_ada]], throws: "42501", why: "the gate reads the flags as their owner; the caller cannot"},
 		{call: "apigen.exported", args: ["$app", "code.capabilities.auth.apiKeysGate"], expect: "api_private.api_on", why: "the auth service asks the same gate for keys"},
 		{call: "apigen.exported", args: ["$app", "cluster.capabilities.apiSchemas"], expect: ["api_v1"], why: "PostgREST serves api_v1 after public"},
+		{call: "apigen.edit", args: ["$app", "api_spec.cue", "api: {", "api: {\n\tentities: categories: {table: \"tag\", fields: {label: \"label\"}, methods: [\"get\"]}"]},
+		{call: "apigen.generated", args: ["$app"]},
+		{call: "apigen.files", args: ["$app"]}, {get: "sql", matches: #"VIEW "api_v1"\."category" "#, why: "a collection in -ies is a view in -y"},
 	]}
 	"generate's route puts the API's block before /auth, after the other plugins' blocks, once however often it runs": {suite: "api", steps: [
 		{call: "apigen.app"}, {keep: "app"},

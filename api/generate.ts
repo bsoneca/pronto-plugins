@@ -167,6 +167,8 @@ export function sqlOf(spec: Spec, released?: Contract): string {
   const s = ident(spec.schema);
   return [
     `-- pronto-api: the app's ${spec.schema} (api/${spec.version}/${spec.schema}.sql). Generated, do not edit.`,
+    // A replayed migration waits on a lock for so long, and runs for so long, and no longer.
+    `SET lock_timeout = '30s';\nSET statement_timeout = '60s';`,
     `CREATE SCHEMA IF NOT EXISTS ${s};`,
     `REVOKE ALL ON SCHEMA ${s} FROM PUBLIC;`,
     `GRANT USAGE ON SCHEMA ${s} TO app_user;`,
