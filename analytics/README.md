@@ -31,7 +31,10 @@ From one spec (`analytics_spec.cue`: each metric's name, help, labels and SQL, a
   (pronto-infra's state, not the app's release); on a host launch it is a process of the stack.
 - **A dashboard** (`observability/analytics.business.dashboard.json`): rows of panels with an `app`
   variable, for the shared Grafana. A panel's `kind` is `stat`, `timeseries`, `table`, `bargauge` or
-  `barchart` (bars along the label `x`, split by `series`, stacked with `stack: true`).
+  `barchart` (bars along the label `x`, split by `series`, stacked with `stack: true`). Every pod
+  of the exporter answers the same numbers, so the dashboard asks each business selector once, the
+  max over the pods (`max without (instance, pod, pod_template_hash)`); a range such as
+  `increase(m[1d])` is taken over its function, and a range anywhere else is refused.
 - **Umami** for visits and referrers, cookieless: the door routes `/a/s.js` (the tracker) and `/a/e`
   (its events) to Umami, so the page's policy (`script-src` and `connect-src 'self'`, Trusted Types) is
   unchanged, and a host-DOM hatch on every screen adds the tracker, unless the browser sends Global

@@ -65,7 +65,7 @@ timeseriesRange: [for k, _ in _a.dashboard.panels[2].targets[0] if k == "instant
 // when asked.
 _bar: _a.dashboard.panels[4]
 _plain: _a.dashboard.panels[5]
-barchartTarget: _bar.targets & [{refId: "A", expr: "business_orders{app=\"$app\"}", legendFormat: "", format: "table", instant: true}]
+barchartTarget: _bar.targets & [{refId: "A", expr: "max without (instance, pod, pod_template_hash) (business_orders{app=\"$app\"})", legendFormat: "", format: "table", instant: true}]
 barchartSorted: _bar.transformations[0] & {id: "sortBy", options: {sort: [{field: "state"}]}}
 barchartMatrix: _bar.transformations[1] & {id: "groupingToMatrix", options: {rowField: "state", columnField: "provider", valueField: "Value", emptyValue: "zero"}}
 barchartTwoSteps: len(_bar.transformations) & 2
@@ -73,8 +73,18 @@ barchartStacked: _bar.options.stacking & "normal"
 barchartUnstacked: _plain.options.stacking & "none"
 barchartOptions: _plain.options & {xTickLabelRotation: -45, legend: {displayMode: "list", placement: "bottom", showLegend: true}, showValue: "auto"}
 barchartOwnLabels: _plain.transformations[1].options & {rowField: "day", columnField: "mode"}
-statHasNoTable: _a.dashboard.panels[1].targets & [{refId: "A", expr: "business_orders{app=\"$app\"}", legendFormat: ""}]
+statHasNoTable: _a.dashboard.panels[1].targets & [{refId: "A", expr: "max without (instance, pod, pod_template_hash) (business_orders{app=\"$app\"})", legendFormat: ""}]
 dashUid: _a.dashboard.uid & "business-shop"
+
+// Each pod of the exporter answers the same numbers (PRONTO-370): a panel asks every business
+// selector once, the max over the pods; a range over its function; the rest of the query as written.
+_once: {
+	plain:  (#AnalyticsPanel & {title: "t", expr: "sum by (state) (business_orders{app=\"$app\",state=~\"a|b\"}) / clamp_min(sum(business_logins), 1)"}).once
+	ranged: (#AnalyticsPanel & {title: "t", expr: "sum by (mode) (increase(business_signups_total{app=\"$app\"}[1d]))"}).once
+}
+oncePlain:  _once.plain & "sum by (state) (max without (instance, pod, pod_template_hash) (business_orders{app=\"$app\",state=~\"a|b\"})) / clamp_min(sum(max without (instance, pod, pod_template_hash) (business_logins)), 1)"
+onceRanged: _once.ranged & "sum by (mode) (max without (instance, pod, pod_template_hash) (increase(business_signups_total{app=\"$app\"}[1d])))"
+onceTimeseries: _a.dashboard.panels[2].targets[0].expr & "max without (instance, pod, pod_template_hash) (increase(business_signups_total{app=\"$app\"}[1d]))"
 
 // Names: every metric starts `business_`; a journey's or perf's is no business metric; a counter
 // ends `_total` and a gauge does not.
