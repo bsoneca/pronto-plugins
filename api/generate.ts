@@ -35,7 +35,21 @@ export interface Spec {
    * refuses their writes. */
   flag?: string;
   resources: Resource[];
+  /** The exported machines (PRONTO-314): each a collection of rooms. */
+  machines?: Machine[];
   types: Record<string, { pg: string; json: string; format?: string }>;
+}
+/** An exported machine: its reducer's surface tables, protocol version, the events a client may
+ * send (tier omnishell) and the open kinds it may ask for, and its public table's fields. */
+export interface Machine {
+  collection: string;
+  view: string;
+  machine: string;
+  version: number;
+  tables: { seat: string; command: string; open?: string; public?: string };
+  events: string[];
+  opens: ("create" | "join")[];
+  public?: { name: string; column: string; type: string }[];
 }
 /** One door route: the Google route a client calls, and the PostgREST call it becomes. */
 export interface Route {
@@ -48,10 +62,18 @@ export interface Route {
   prefer?: string;
   ifMatch?: boolean;
   pageSize?: boolean;
+  /** A machine's route: the room's name and the event (or open kind) the door hands its trigger in
+   * X-Api-Name and X-Api-Event, and the path a client sees. */
+  apiName?: string;
+  apiEvent?: string;
+  google?: string;
+  /** A Create's room id, from the query (`?{view}_id=`). */
+  createId?: string;
 }
 export interface Contract {
   version: string;
   resources: { collection: string; fields: { name: string; type: string; writable: boolean }[]; methods: string[] }[];
+  machines?: { collection: string; fields: { name: string; type: string }[]; events: string[]; opens: string[] }[];
   routes: { method: string; path: string }[];
 }
 
@@ -161,6 +183,166 @@ function gateSql(flag: string): string {
   ].join("\n");
 }
 
+// A room's id: a uuid, the machine's instance_id.
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+// A client's request_id: what a command id can carry as its last part.
+const REQUEST_ID = "^[A-Za-z0-9_-]{1,36}$";
+/** An event's custom method, lowerCamelCase (`make_move` is `:makeMove`). */
+export const camel = (e: string) => e.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+const lit = (s: string) => `'${s.replaceAll("'", "''")}'`;
+
+/** A machine's views and their triggers (PRONTO-314, v1): the machine runs as it does for the
+ * browser, so nothing here changes how a room advances.
+ *   <view>          the caller's seat in a room (Get): seat, phase, view, etag (the seat's revision)
+ *   <view>_public   the public table (List), when the spec exports one
+ *   <view>_command  an event (`POST {room}:{event}`): an INSTEAD OF INSERT trigger builds the
+ *                   machine's command row from the door's headers and the body (payload, etag,
+ *                   request_id), lets the machine's own AFTER trigger judge it, and answers its
+ *                   outcome; a rejection raises, so nothing is stored
+ *   <view>_open     Create and join, the same way over the open table
+ * Idempotency is the machine's: the command id carries request_id, so a retry is the stored row. */
+export function machineSql(m: Machine, schema: string, gated: boolean): string {
+  const v = (n: string) => `${ident(schema)}.${ident(n)}`;
+  const t = (n: string) => `public.${ident(n)}`;
+  const where = gated ? `\n  WHERE ${GATE}(public.auth_uid())` : "";
+  const opts = `WITH (security_invoker = true)`;
+  const room = `(${lit(m.collection + "/")} || t."instance_id"::text)`;
+  const out: string[] = [];
+  const grant = (n: string, extra = "") => out.push(`REVOKE ALL ON ${v(n)} FROM PUBLIC, anon;`, `GRANT SELECT${extra} ON ${v(n)} TO app_user;`);
+  // Get: the caller's seat (the table's RLS shows a player only their own).
+  out.push(
+    `CREATE OR REPLACE VIEW ${v(m.view)} ${opts} AS`,
+    `  SELECT ${room} AS "name",\n         t."revision"::text AS "etag",\n         t."seat" AS "seat",\n         t."phase" AS "phase",\n         t."view" AS "view"`,
+    `  FROM ${t(m.tables.seat)} t${where};`,
+  );
+  grant(m.view);
+  if (m.tables.public && m.public) {
+    const cols = m.public.map((f) => `t.${ident(f.column)} AS ${ident(f.name)}`);
+    out.push(
+      `CREATE OR REPLACE VIEW ${v(m.view + "_public")} ${opts} AS`,
+      `  SELECT (${lit(m.collection + "/")} || t."id"::text) AS "name",\n         md5(row(${m.public.map((f) => `t.${ident(f.column)}`).join(", ")})::text) AS "etag",\n         ${cols.join(",\n         ")}`,
+      `  FROM ${t(m.tables.public)} t${where};`,
+    );
+    grant(m.view + "_public");
+  }
+  // The door's headers: the room's name and the event, never the client's (the block strips both).
+  const header = (h: string) => `nullif(current_setting('request.headers', true), '')::json->>${lit(h)}`;
+  const raise = (code: string, message: string, detail?: string) =>
+    `RAISE SQLSTATE ${lit(code)} USING MESSAGE = ${lit(message)}${detail ? `, DETAIL = ${detail}` : ""};`;
+  const prologue = (kinds: string[]) => [
+    `DECLARE`,
+    `  room_name text := ${header("x-api-name")};`,
+    `  kind text := ${header("x-api-event")};`,
+    `  room uuid;`,
+    `  got record;`,
+    `BEGIN`,
+    ...(gated ? [`  IF NOT ${GATE}(public.auth_uid()) THEN ${raise("PT403", "api_off")} END IF;`] : []),
+    `  IF room_name IS NULL OR room_name !~ ${lit(`^${m.collection}/${UUID}$`)} OR kind IS NULL OR NOT (kind = ANY (ARRAY[${kinds.map(lit).join(", ")}]::text[])) THEN`,
+    `    ${raise("PT404", "not_found")}`,
+    `  END IF;`,
+    `  room := substr(room_name, ${m.collection.length + 2})::uuid;`,
+    `  IF NEW."request_id" IS NULL OR NEW."request_id" !~ ${lit(REQUEST_ID)} THEN ${raise("PT400", "invalid_argument", lit("request_id"))} END IF;`,
+  ];
+  // The machine's answer: a rejection raises (the call rolls back, so nothing is stored and a retry
+  // is judged again), stale_revision as 409.
+  const judged = [
+    `  IF got."outcome" = 'rejected' THEN`,
+    `    IF got."reason" = 'stale_revision' THEN ${raise("PT409", "stale_revision", "got.\"reason\"")} END IF;`,
+    `    ${raise("P0001", "rejected", "got.\"reason\"")}`,
+    `  END IF;`,
+  ];
+  const fn = (name: string, body: string[]) => [
+    `CREATE OR REPLACE FUNCTION api_private.${ident(name)}() RETURNS trigger`,
+    `LANGUAGE plpgsql SET search_path = pg_catalog AS $f$`,
+    ...body,
+    `END`,
+    `$f$;`,
+    `REVOKE EXECUTE ON FUNCTION api_private.${ident(name)}() FROM PUBLIC;`,
+  ];
+  const trigger = (view: string, name: string) => [
+    `CREATE OR REPLACE TRIGGER "write" INSTEAD OF INSERT ON ${v(view)} FOR EACH ROW EXECUTE FUNCTION api_private.${ident(name)}();`,
+  ];
+  // An event: the command view.
+  {
+    const view = m.view + "_command";
+    const name = `${m.view}_command`;
+    out.push(
+      `CREATE OR REPLACE VIEW ${v(view)} ${opts} AS`,
+      `  SELECT ${room} AS "name",\n         split_part(t."id", '/', 5) AS "request_id",\n         t."request"->'event'->>'kind' AS "event",\n         t."request"->'event'->'payload' AS "payload",\n         t."revision"::text AS "etag",\n         t."outcome" AS "outcome",\n         t."reason" AS "reason"`,
+      `  FROM ${t(m.tables.command)} t${where};`,
+      ...fn(name, [
+        ...prologue(m.events),
+        `  IF NEW."etag" IS NULL OR NEW."etag" !~ '^[0-9]{1,20}$' THEN ${raise("PT400", "invalid_argument", lit("etag"))} END IF;`,
+        `  DECLARE`,
+        `    s record;`,
+        `    req json;`,
+        `    cid text;`,
+        `  BEGIN`,
+        `    SELECT x."seat" INTO s FROM ${t(m.tables.seat)} x WHERE x."instance_id" = room AND x."actor" = public.auth_uid();`,
+        `    IF NOT FOUND THEN ${raise("PT404", "not_found")} END IF;`,
+        `    req := json_build_object('event', json_build_object('kind', kind, 'payload', coalesce(NEW."payload", '{}'::json)), 'expected_revision', NEW."etag", 'version', ${m.version});`,
+        `    cid := room::text || '/' || NEW."etag" || '/' || s."seat" || '/' || kind || '/' || NEW."request_id";`,
+        // The machine's receipt: an earlier call with this request_id is answered from its row, and
+        // the same request_id with another body is a conflict.
+        `    SELECT c."id", c."request", c."revision", c."outcome", c."reason" INTO got FROM ${t(m.tables.command)} c`,
+        `      WHERE c."instance_id" = room AND c."actor" = public.auth_uid() AND split_part(c."id", '/', 5) = NEW."request_id";`,
+        `    IF FOUND AND (got."id" <> cid OR got."request"::jsonb <> req::jsonb) THEN ${raise("PT409", "idempotency_conflict", lit("request_id"))} END IF;`,
+        `    IF NOT FOUND THEN`,
+        `      INSERT INTO ${t(m.tables.command)} ("id", "instance_id", "request") VALUES (cid, room, req) ON CONFLICT ("id") DO NOTHING;`,
+        `      SELECT c."id", c."request", c."revision", c."outcome", c."reason" INTO got FROM ${t(m.tables.command)} c WHERE c."id" = cid;`,
+        `      IF NOT FOUND THEN ${raise("PT409", "idempotency_conflict", lit("request_id"))} END IF;`,
+        `    END IF;`,
+        `  END;`,
+        ...judged,
+        `  NEW."name" := room_name;`,
+        `  NEW."event" := kind;`,
+        `  NEW."payload" := got."request"->'event'->'payload';`,
+        `  NEW."etag" := got."revision"::text;`,
+        `  NEW."outcome" := got."outcome";`,
+        `  NEW."reason" := got."reason";`,
+        `  RETURN NEW;`,
+      ]),
+      ...trigger(view, name),
+    );
+    grant(view, `, INSERT ("payload", "etag", "request_id")`);
+  }
+  // Create and join: the open view.
+  if (m.opens.length && m.tables.open) {
+    const view = m.view + "_open";
+    const name = `${m.view}_open`;
+    out.push(
+      `CREATE OR REPLACE VIEW ${v(view)} ${opts} AS`,
+      `  SELECT ${room} AS "name",\n         split_part(t."id", '/', 3) AS "request_id",\n         t."kind" AS "kind",\n         t."input" AS "input",\n         t."outcome" AS "outcome",\n         t."reason" AS "reason"`,
+      `  FROM ${t(m.tables.open)} t${where};`,
+      ...fn(name, [
+        ...prologue(m.opens),
+        `  DECLARE`,
+        `    open_id text := room::text || '/' || kind || '/' || NEW."request_id";`,
+        `    input json := coalesce(NEW."input", '{}'::json);`,
+        `  BEGIN`,
+        `    SELECT o."id", o."input", o."outcome", o."reason" INTO got FROM ${t(m.tables.open)} o WHERE o."id" = open_id;`,
+        `    IF FOUND AND got."input"::jsonb <> input::jsonb THEN ${raise("PT409", "idempotency_conflict", lit("request_id"))} END IF;`,
+        `    IF NOT FOUND THEN`,
+        `      INSERT INTO ${t(m.tables.open)} ("id", "instance_id", "kind", "input") VALUES (open_id, room, kind, input) ON CONFLICT ("id") DO NOTHING;`,
+        `      SELECT o."id", o."input", o."outcome", o."reason" INTO got FROM ${t(m.tables.open)} o WHERE o."id" = open_id;`,
+        `      IF NOT FOUND THEN ${raise("PT409", "idempotency_conflict", lit("request_id"))} END IF;`,
+        `    END IF;`,
+        `  END;`,
+        ...judged,
+        `  NEW."name" := room_name;`,
+        `  NEW."kind" := kind;`,
+        `  NEW."input" := got."input";`,
+        `  NEW."outcome" := got."outcome";`,
+        `  NEW."reason" := got."reason";`,
+        `  RETURN NEW;`,
+      ]),
+      ...trigger(view, name),
+    );
+    grant(view, `, INSERT ("input", "request_id")`);
+  }
+  return out.join("\n");
+}
+
 /** The whole api_v1.sql: the schema, the flag's gate, each view and its grants, and PostgREST told
  * to reload. */
 export function sqlOf(spec: Spec, released?: Contract): string {
@@ -172,6 +354,8 @@ export function sqlOf(spec: Spec, released?: Contract): string {
     `GRANT USAGE ON SCHEMA ${s} TO app_user;`,
     ...(spec.flag ? [gateSql(spec.flag)] : []),
     ...spec.resources.map((r) => viewSql(r, spec.schema, releasedColumns(released, r), !!spec.flag)),
+    ...(spec.machines?.length ? [`CREATE SCHEMA IF NOT EXISTS api_private;\nREVOKE ALL ON SCHEMA api_private FROM PUBLIC;\nGRANT USAGE ON SCHEMA api_private TO app_user;`] : []),
+    ...(spec.machines ?? []).map((m) => machineSql(m, spec.schema, !!spec.flag)),
     `NOTIFY pgrst, 'reload schema';`,
     "",
   ].join("\n\n");
@@ -194,6 +378,17 @@ export function routesOf(spec: Spec): Route[] {
     if (r.methods.includes("update")) out.push({ method: "PATCH", path: item, view: r.view, verb: "PATCH", query: one, object: true, prefer: "return=representation", ifMatch: true });
     if (r.methods.includes("delete")) out.push({ method: "DELETE", path: item, view: r.view, verb: "DELETE", query: one, object: false, prefer: "return=minimal" });
   }
+  for (const m of spec.machines ?? []) {
+    const base = `/api/${spec.version}/${m.collection}`;
+    const room = `{${m.view}}`;
+    const named = `${m.collection}/{re.$.1}`;
+    const write = { verb: "POST", query: "", object: true, prefer: "return=representation" };
+    out.push({ method: "GET", path: `${base}/${ID}`, view: m.view, verb: "GET", query: `name=eq.${named}`, object: true, google: `${base}/${room}` });
+    if (m.public) out.push({ method: "GET", path: base, view: `${m.view}_public`, verb: "GET", query: "order=name.asc&name=gt.{query.after}", object: false, pageSize: true, google: base });
+    if (m.opens.includes("create")) out.push({ method: "POST", path: base, view: `${m.view}_open`, ...write, apiName: `${m.collection}/{vars.api_room}`, apiEvent: "create", createId: `${m.view}_id`, google: base });
+    if (m.opens.includes("join")) out.push({ method: "POST", path: `${base}/${ID}:join`, view: `${m.view}_open`, ...write, apiName: named, apiEvent: "join", google: `${base}/${room}:join` });
+    for (const e of m.events) out.push({ method: "POST", path: `${base}/${ID}:${camel(e)}`, view: `${m.view}_command`, ...write, apiName: named, apiEvent: e, google: `${base}/${room}:${camel(e)}` });
+  }
   return out;
 }
 
@@ -202,7 +397,7 @@ export function routesOf(spec: Spec): Route[] {
 export function caddyOf(spec: Spec, routes: Route[]): string {
   // No request picks PostgREST's schema itself: /crud stays on public, and the API's handles name
   // theirs below (request_header runs before any handle).
-  const strip = [`request_header -Accept-Profile`, `request_header -Content-Profile`];
+  const strip = [`request_header -Accept-Profile`, `request_header -Content-Profile`, ...(spec.machines?.length ? [`request_header -X-Api-Name`, `request_header -X-Api-Event`] : [])];
   // A handle, so it sits beside the door's /crud handle; inside, a route keeps the written order.
   const lines = [`handle /api/${spec.version}/* {`, `  route {`];
   const upstream = [
@@ -219,6 +414,8 @@ export function caddyOf(spec: Spec, routes: Route[]): string {
       const q = query.replaceAll("{re.$.", `{re.${id}.`);
       lines.push(`  @${m} {`, `    method ${r.method}`, `    path_regexp ${id} ${regexp}`, ...extra.map((e) => `    ${e}`), `  }`);
       lines.push(`  handle @${m} {`);
+      // The room a Create names, kept before the rewrite drops the query.
+      if (r.createId) lines.push(`    vars api_room {query.${r.createId}}`);
       // Always a `?`: a rewrite without one keeps the client's query.
       lines.push(`    rewrite * /${r.view}?${q}`);
       lines.push(`    request_header -Prefer`, `    request_header -Accept-Profile`, `    request_header -Content-Profile`, `    request_header -Range`, `    request_header -Range-Unit`);
@@ -228,6 +425,8 @@ export function caddyOf(spec: Spec, routes: Route[]): string {
       if (r.verb !== "GET") lines.push(`    request_header Accept-Profile ${spec.schema}`);
       lines.push(`    request_header Accept ${r.object ? "application/vnd.pgrst.object+json" : "application/json"}`);
       if (r.prefer) lines.push(`    request_header Prefer ${r.prefer}`);
+      // A machine's room and event, for its trigger: the door's, never the client's.
+      if (r.apiName) lines.push(`    request_header X-Api-Name ${r.apiName.replaceAll("{re.$.", `{re.${id}.`)}`, `    request_header X-Api-Event ${r.apiEvent}`);
       lines.push(...upstream, `  }`);
     };
     if (r.pageSize) {
@@ -239,6 +438,9 @@ export function caddyOf(spec: Spec, routes: Route[]): string {
     } else if (r.ifMatch) {
       handle("_if", [`header_regexp ${id}_etag If-Match ^"?([0-9a-f]{32})"?$`], `${r.query}&etag=eq.{re.${id}_etag.1}`);
       handle("", [`not header If-Match *`], r.query);
+    } else if (r.createId) {
+      // A Create names its room: a uuid, else no route.
+      handle("", [`expression {query.${r.createId}}.matches('^${UUID}$')`], r.query);
     } else handle("", [], r.query);
   });
   lines.push(`  handle {`, `    respond 404`, `  }`);
@@ -263,6 +465,7 @@ export function doorOf(spec: Spec, routes: Route[]): string {
 
 /** The Google route a client sees for each door route, `{collection}/{id}` named as AIP-122 does. */
 function googlePath(r: Route, spec: Spec): string {
+  if (r.google) return r.google;
   const res = spec.resources.find((x) => x.view === r.view)!;
   let i = 0;
   const names = res.parent ? [res.parent.collection.replace(/s$/, ""), res.view] : [res.view];
@@ -283,8 +486,34 @@ export function contractOf(spec: Spec, routes: Route[], released?: Contract): Co
       fields: columnsOf(r, releasedColumns(released, r)).map((c) => ({ name: c.name, type: c.type, writable: c.writable })),
       methods: [...r.methods].sort(),
     })).sort((a, b) => a.collection.localeCompare(b.collection)),
+    ...(spec.machines?.length ? { machines: spec.machines.map((m) => ({ collection: m.collection, fields: machineFields(m), events: [...m.events].sort(), opens: [...m.opens].sort() })) } : {}),
     routes: routes.map((r) => ({ method: r.method, path: googlePath(r, spec) })).sort((a, b) => `${a.path} ${a.method}`.localeCompare(`${b.path} ${b.method}`)),
   };
+}
+
+/** A machine's seat (Get) fields, then its public (List) fields. */
+function machineFields(m: Machine) {
+  return [
+    ...[["name", "string"], ["etag", "string"], ["seat", "string"], ["phase", "string"], ["view", "json"]].map(([name, type]) => ({ name, type })),
+    ...(m.public ?? []).map((f) => ({ name: `public.${f.name}`, type: f.type })),
+  ];
+}
+
+/** OpenAPI schemas of a machine: its seat, its public row, an event and an open. */
+function machineSchemas(m: Machine, spec: Spec): Record<string, unknown> {
+  const ro = (type: string | string[]) => ({ type, readOnly: true });
+  const answer = { outcome: ro("string"), reason: ro(["string", "null"]), name: ro("string") };
+  const out: Record<string, unknown> = {
+    [m.view]: { type: "object", properties: { name: ro("string"), etag: ro("string"), seat: ro("string"), phase: ro("string"), view: ro("object") } },
+    [`${m.view}_command`]: { type: "object", required: ["etag", "request_id"], properties: { payload: { type: "object" }, etag: { type: "string", description: "the room's etag the event was decided on; the answer's is the room's next" }, request_id: { type: "string", pattern: REQUEST_ID }, event: ro("string"), ...answer } },
+  };
+  if (m.opens.length) out[`${m.view}_open`] = { type: "object", required: ["request_id"], properties: { input: { type: "object" }, request_id: { type: "string", pattern: REQUEST_ID }, kind: ro("string"), ...answer } };
+  if (m.public) {
+    const props: Record<string, unknown> = { name: ro("string"), etag: ro("string") };
+    for (const f of m.public) { const t = spec.types[f.type]; props[f.name] = { type: t.json, ...(t.format ? { format: t.format } : {}), readOnly: true }; }
+    out[`${m.view}_public`] = { type: "object", properties: props };
+  }
+  return out;
 }
 
 /** OpenAPI 3.1 for the routes, each resource a schema, PostgREST's error body for every error. */
@@ -300,6 +529,7 @@ export function openapiOf(spec: Spec, routes: Route[]): Record<string, unknown> 
     }
     schemas[r.view] = { type: "object", properties: props };
   }
+  for (const m of spec.machines ?? []) Object.assign(schemas, machineSchemas(m, spec));
   const paths: Record<string, Record<string, unknown>> = {};
   const errors = { default: { description: "PostgREST's error", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } } };
   for (const r of routes) {
@@ -308,11 +538,12 @@ export function openapiOf(spec: Spec, routes: Route[]): Record<string, unknown> 
     const params = [...p.matchAll(/\{([a-z_]+)\}/g)].map((m) => ({ name: m[1], in: "path", required: true, schema: { type: "string" } }));
     if (r.pageSize) params.push({ name: "page_size", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 200, default: 50 } as never }, { name: "after", in: "query", required: false, schema: { type: "string" } });
     if (r.ifMatch) params.push({ name: "If-Match", in: "header", required: false, schema: { type: "string" } });
+    if (r.createId) params.push({ name: r.createId, in: "query", required: true, schema: { type: "string", format: "uuid" } as never });
     const ok = r.method === "DELETE"
       ? { 204: { description: "deleted" } }
       : { [r.method === "POST" ? 201 : 200]: { description: "ok", content: { "application/json": { schema: r.pageSize ? { type: "array", items: ref } : ref } } } };
     (paths[p] ??= {})[r.method.toLowerCase()] = {
-      operationId: `${r.method.toLowerCase()}_${r.view}${r.pageSize ? "_list" : ""}`,
+      operationId: `${r.method.toLowerCase()}_${r.view}${r.pageSize ? "_list" : ""}${r.apiEvent ? `_${r.apiEvent}` : ""}`,
       parameters: params,
       ...(r.method === "POST" || r.method === "PATCH" ? { requestBody: { required: true, content: { "application/json": { schema: ref } } } } : {}),
       responses: { ...ok, ...errors },
@@ -334,6 +565,17 @@ export function breaks(released: Contract, now: Contract): string[] {
       if (!g) out.push(`${r.collection}.${f.name} removed`);
       else if (g.type !== f.type) out.push(`${r.collection}.${f.name} retyped: released as ${f.type}, now ${g.type}`);
       else if (f.writable && !g.writable) out.push(`${r.collection}.${f.name} no longer written`);
+    }
+  }
+  for (const m of released.machines ?? []) {
+    const n = now.machines?.find((x) => x.collection === m.collection);
+    if (!n) { out.push(`machine ${m.collection} removed`); continue; }
+    for (const e of m.events) if (!n.events.includes(e)) out.push(`${m.collection}: event ${e} removed`);
+    for (const o of m.opens) if (!n.opens.includes(o)) out.push(`${m.collection}: open ${o} removed`);
+    for (const f of m.fields) {
+      const g = n.fields.find((x) => x.name === f.name);
+      if (!g) out.push(`${m.collection}.${f.name} removed`);
+      else if (g.type !== f.type) out.push(`${m.collection}.${f.name} retyped: released as ${f.type}, now ${g.type}`);
     }
   }
   for (const r of released.routes) if (!now.routes.some((x) => x.method === r.method && x.path === r.path)) out.push(`route ${r.method} ${r.path} removed`);

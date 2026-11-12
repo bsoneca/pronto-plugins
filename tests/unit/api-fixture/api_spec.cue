@@ -15,4 +15,11 @@ api: {
 		fields: {label: "label"}
 		methods: ["get", "list"]
 	}
+	// The counter machine (program.cue): each room a counter two seats add to, its total public.
+	machines: counters: {
+		machine: "counter"
+		events: ["add", "finish"]
+		opens: ["create", "join"]
+		public: {total: "total"}
+	}
 }

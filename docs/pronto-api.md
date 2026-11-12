@@ -10,7 +10,7 @@ There is no gRPC, Connect, protobuf or buf, and no new service. The API is views
 
 Postgres stays the only authority. Views are `security_invoker`, and writes go through auto-updatable views to the app's tables, so RLS, CEL checks (CHECK constraints) and machine guards judge every call as the caller: an API client can do exactly what the same user can do in the browser, and nothing more.
 
-Two pieces still need SQL, and the doc says so rather than hiding them: **idempotency** (the `request_id` lookup and the body-hash check) is a BEFORE INSERT trigger on the command table behind the command view, and **returning a command's outcome in one call** needs the machine to compute the outcome in a BEFORE trigger, so `RETURNING` shows it; otherwise the client does a second read.
+One piece still needs SQL, and the doc says so rather than hiding it: a machine's command and open views are written through an INSTEAD OF INSERT trigger (v1, PRONTO-314), which builds the machine's row from the door's headers and the body, lets the machine judge it as it does a browser's, and answers its outcome in the same call. Idempotency is the machine's own: the command id carries `request_id`.
 
 **What changed from the gRPC design, and why**
 
@@ -18,7 +18,7 @@ Two pieces still need SQL, and the doc says so rather than hiding them: **idempo
 | --- | --- | --- |
 | A Deno `api` service (connect-es) transcoding gRPC, Connect and REST to `/crud` | No service and no per-method code: the door rewrites each route to a read or write on an `api_v1` view | A service, then functions, only translated names and errors; reading and writing the typed views is already what PostgREST does |
 | CUE → `.proto` → descriptor set, `fields.lock.cue`, `buf breaking` | CUE → `api_v1` SQL, door routes, `openapi.json`, `contract.json` | No wire format to number; the contract is the JSON shape, guarded by a contract diff and by Postgres itself |
-| Machine command = insert, then a second request to read the result back | An insert into the command view; the machine computes the outcome in a BEFORE trigger, so `RETURNING` shows it | A trigger's AFTER INSERT update is invisible to `RETURNING`; without the BEFORE change the client does a second read |
+| Machine command = insert, then a second request to read the result back | An insert into the command view, whose INSTEAD OF trigger inserts the machine's command, reads back what the machine's AFTER trigger stamped, and answers it | The machine runs unchanged for the browser; a BEFORE-trigger machine (PRONTO-392) would let a plain insert answer too |
 | Google errors (AIP-193) and opaque `page_token` | PostgREST's statuses and bodies, and a plain `name` cursor, in v1 | Nothing translates, so nothing to maintain (the owner, 2026-11-12); Google's shapes stay a later option |
 | `Watch` (server stream) and a 25 s long-poll | Clients poll `Get` | A long-poll holds a PostgREST pool connection; chess bots need no more than one read a second |
 | Native gRPC over HTTP/2 end to end on Cloud Run (h2c into Deno 2.9) | Plain HTTP through the door, as the shell's `/crud` | Nothing new on the wire |
@@ -89,7 +89,7 @@ An earlier version of this design served every method through an `api_v1.<method
 - **The query grammar stays private.** The door builds the query; clients never send `select=`, `or=` or embeds, so the internal tables can change without a client noticing, and only the views' columns are contract.
 - **The price is the shapes.** PostgREST answers `406` for an empty singular read where Google says `404`, a list is a JSON array with no token, and an error body has PostgREST's four fields. We accept that in v1 (Errors and Pagination, below), and the door may still rewrite status codes.
 
-What this costs in SQL, stated plainly: two pieces still need it. **Idempotency** (the `request_id` lookup and the body-hash check) is a BEFORE INSERT trigger on the command table behind the command view; Postgres allows row-level BEFORE triggers on tables only, not on views, and the trigger fires for inserts that arrive through the auto-updatable view. **A command's outcome in one call** needs the machine to compute `outcome`, `reason` and `revision` in a BEFORE trigger, so that `INSERT … RETURNING` shows them; today the machine writes them in an AFTER INSERT trigger's UPDATE, which `RETURNING` does not show, and until the machine changes, the client reads the command back with a second request.
+What this costs in SQL, stated plainly: one generated trigger function per machine view. The machine writes `outcome`, `reason` and `revision` in an AFTER INSERT trigger's UPDATE, which `INSERT … RETURNING` on its table does not show; so the command view is not auto-updatable but has an INSTEAD OF INSERT trigger that inserts into the command table (the machine's trigger fires in the same transaction), reads the stamped row back and returns it as the view's row. **Idempotency** needs nothing new: the command id is `{room}/{etag}/{seat}/{event}/{request_id}`, so a retry finds its stored row.
 
 Views stay because they keep the contract and the internals apart: a migration that renames a table changes a view's body, not its columns, and Postgres refuses `CREATE OR REPLACE VIEW` that drops, renames or retypes a column, which is the first guard of `v1`'s stability.
 
@@ -112,7 +112,7 @@ Following the existing plugin shape (billing, flags, analytics):
 | --- | --- | --- |
 | `api_plugin.cue` | generated, do not edit | The `#Api` schema the spec is checked against |
 | `api_spec.cue` | app author | Which entities and machines are exported, their public names and fields; the only hand-written input |
-| `api/v1/api_v1.sql` | generated by `generate` | Schema `api_v1`: the typed views and (PRONTO-314) the command views, no method functions; the BEFORE INSERT trigger on each command table (idempotency, and the resource name and event from the door's headers); schema `api_private`, not exposed: `request` (idempotency); grants to `app_user`. Idempotent (`CREATE OR REPLACE VIEW`), so the app lists it among its raw migrations and every release replays it, as `flags/flags.sql`; committed, so `guard-generated` catches drift |
+| `api/v1/api_v1.sql` | generated by `generate` | Schema `api_v1`: the typed views and (PRONTO-314) each machine's seat, public, command and open views, no method functions; schema `api_private`, not exposed: the flag's gate and the command and open views' INSTEAD OF INSERT trigger functions (the room's name and the event from the door's headers); grants to `app_user`. Idempotent (`CREATE OR REPLACE VIEW`), so the app lists it among its raw migrations and every release replays it, as `flags/flags.sql`; committed, so `guard-generated` catches drift |
 | `api_door.cue` | generated | `apiDoor`: the routes; the Caddyfile block, a `handle /api/v1/*` beside the door's `/crud` one, with one rewrite per route onto a view (filters, order and limit built from the path and the declared query parameters), `Accept-Profile`/`Content-Profile: api_v1`, and the client's query, `Prefer` and profile headers dropped; and `crudStrips`, the headers the `/crud` block drops. the route step (`api/generate.ts route`) puts it in the door, always; the flag is the views' gate, per request (PRONTO-325) |
 | `api/v1/openapi.json` | generated | OpenAPI 3.1 for the Google routes, with PostgREST's error body (not PostgREST's own `/` document, which describes the views by table name) |
 | `api/v1/contract.json` | generated | Every route, field and type, sorted; the additive-only check compares it with `released.json` |
@@ -126,14 +126,13 @@ An author names what to export and its public names; types, checks and access ar
 ```cue
 api: {
   version: "v1"
-  // a mecha machine: public collection -> its surface tables, checked against program.cue
+  // a mecha machine: public collection -> its reducer (program.cue's state.mecha.reducers); its
+  // surface tables are <machine>_seat, _command, _open and _public, checked against program.cue
   machines: matches: {
     machine: "chess_match"
-    tables: { open: "chess_match_open", command: "chess_match_command", seat: "chess_match_seat", public: "chess_match_public" }
-    create: "create"                          // the open kind Create sends
-    methods: { join: "join" }                 // other open kinds, as custom methods
-    events: ["move", "resign", "offer_draw", "accept_draw", "decline_draw"]  // custom methods :move, :resign, :offerDraw, …
-    fields: { fen: "view.fen", moves: "view.moves", result: "view.result", reason: "view.reason", actions: "view.actions", seat: "seat", phase: "phase" }
+    opens:  ["create", "join"]                // Create (POST /matches?match_id=) and :join, each a port the machine has
+    events: ["move", "resign", "offer_draw", "accept_draw", "decline_draw"]  // custom methods :move, :resign, :offerDraw, …; each tier omnishell
+    public: { white_name: "white_name", clock: "clock" }  // the List, over the public table
   }
   // plain entities: public collection -> table, its fields, and which methods
   entities: players: { table: "player_card", fields: { display_name: "handle", rating: "rating" }, methods: ["get"] }
@@ -141,7 +140,7 @@ api: {
 }
 ```
 
-A spec that names a field the entity lacks, an event the machine does not declare, or a write on an entity whose access forbids it fails `generate`. Exporting is opt-in per method; nothing is public by default. A custom method backed by an app SQL function is not in `v1`: it is the one case where a function would be the right tool, and nothing needs it yet.
+A spec that names a field the entity lacks, an event the machine does not declare or keeps server-only, an open kind its ports lack, or a write on an entity whose access forbids it fails `generate`. Exporting is opt-in per method; nothing is public by default. A custom method backed by an app SQL function is not in `v1`: it is the one case where a function would be the right tool, and nothing needs it yet.
 
 ### Resources and methods (Google API design guide → PostgREST views)
 
@@ -174,20 +173,20 @@ Machines are what make games work, and they are not uniform: in Bonk Chess `ches
 
 | Method | HTTP (Bonk Chess) | What the view does |
 | --- | --- | --- |
-| `Create` | `POST /api/v1/matches` `{name, clock}` | insert into the open view, kind `create`, with the instance id; the response is the open row with its `outcome` and `etag` |
-| custom open | `POST /api/v1/matches/{match}:join` | insert into the open view, kind `join` |
-| `Get` | `GET /api/v1/matches/{match}` | the caller's seat row through the `match` view: `seat`, `phase`, the exported `view` fields, `etag` (the seat's revision) |
+| `Create` | `POST /api/v1/matches?match_id={uuid}` `{input, request_id}` | insert into the open view, kind `create`; the response is the open row with its `outcome` |
+| custom open | `POST /api/v1/matches/{match}:join` `{input, request_id}` | insert into the open view, kind `join` |
+| `Get` | `GET /api/v1/matches/{match}` | the caller's seat row through the `match` view: `seat`, `phase`, `view` (the machine's whole seat view in v1), `etag` (the seat's revision) |
 | `List` | `GET /api/v1/matches` | the public view (waiting rooms), when the machine has one |
-| custom event | `POST /api/v1/matches/{match}:move` `{uci, etag, request_id}` | insert into the command view; the response is the command row with its `outcome`, `reason` and `etag` |
+| custom event | `POST /api/v1/matches/{match}:move` `{payload: {uci}, etag, request_id}` | insert into the command view; the response is the command row with its `outcome`, `reason` and the room's next `etag` |
 
 A command response is the command row, not the whole `Match`: the client reads `Get` for the board.
 
 The details the code forces:
 
-- **Command results need the machine to change.** Today the machine writes `outcome`, `reason` and `revision` in an AFTER INSERT trigger's UPDATE, which `INSERT … RETURNING` does not show. For one call, the machine computes them in a BEFORE INSERT trigger on the command table, so the inserted row already carries them and `RETURNING` shows them. Until a machine does, a client inserts the command and then reads it back by `name` with a `Get`.
-- **Retries are found before anything is checked.** The idempotency trigger, a BEFORE INSERT trigger on the command table, first looks up (caller, `request_id`) in `api_private.request`. A hit with the same body hash skips the insert, so nothing is written twice, and the response carries no new row; the client reads `Get` and sees the stored result and the same `etag`. A hit with another body raises `409`, reason `idempotency_conflict`. Only then does it check `etag` and let the insert go on. It cannot hand back the stored row itself, because a BEFORE trigger that skips an insert returns nothing to `RETURNING`.
-- **The command id is built by the trigger,** from the room, the request's `etag` (the revision the client saw), the seat, the event and `request_id`, and `version` comes from the machine's setup; clients never compute either. The room and the event come from the door's `X-Api-Name` and `X-Api-Event` headers when the body does not carry them. The trigger sets the id on `NEW`, and the insert is `ON CONFLICT DO NOTHING` through the door's `Prefer: resolution=ignore-duplicates`, so a concurrent duplicate is skipped, not an error.
-- **A rejection stores nothing.** A rejected command raises from the machine's BEFORE trigger with its reason in `DETAIL`, PostgREST commits nothing, and a rejected command leaves no row and no `request` entry. That is safe: a rejection changes no state, so a retry is judged again on the same state and gets the same rejection.
+- **One call answers, through the view (v1).** The machine writes `outcome`, `reason` and `revision` in an AFTER INSERT trigger's UPDATE, invisible to `RETURNING` on its table. The command view's INSTEAD OF INSERT trigger (`api_private.<view>_command`, security invoker) inserts into the command table, where the machine's trigger judges the command in the same transaction, then reads the stamped row back and returns it. Changing the machine to a BEFORE trigger (PRONTO-392) would touch every browser's `/crud` path, so v1 leaves it alone.
+- **The command id is built by the trigger,** from the room, the request's `etag` (the revision the client saw), the seat, the event and `request_id`, and `version` comes from the machine's setup; clients never compute either. The room and the event come from the door's `X-Api-Name` and `X-Api-Event` headers, which the block strips from every request first, so a client cannot name another.
+- **Retries are the machine's receipt.** The trigger first looks for the caller's command in the room with that `request_id`: the same id and body answer the stored row (same `etag`, nothing written twice); another body is `409`, `idempotency_conflict`. `api_private.request` is not needed.
+- **A rejection stores nothing.** The machine stores a rejected command for the browser; the view's trigger raises on it (`stale_revision` as `PT409`, any other reason as `P0001` with the reason in `DETAIL`), so the call rolls back, leaving no row. That is safe: a rejection changes no state, so a retry is judged again on the same state and gets the same rejection.
 - **Server-only events have no route.** `start` and the like are not in `events`, so `POST …:start` is `404` at the door and writes nothing.
 
 Clients learn of the other seat's move by polling `Get` (a bot: once a second). `etag` changes on every revision, so a client compares it and does nothing when it has not moved. Push (a watch over the seat's Electric shape) is a later version's, when a client needs it.
@@ -212,14 +211,16 @@ Guests cannot issue keys, and `app_pre_request` refuses a guest token on every `
 {"code": "P0001", "message": "rejected", "details": "illegal_move", "hint": null}
 ```
 
-`code` is the SQLSTATE or a `PGRST` code, `message` is the error's message, `details` carries the app's own raised reason unmapped (the machine's `illegal_move`, `not_your_move`, `room_unavailable`, `stale_etag`, so a client sees exactly what a browser would), and `hint` is the database's hint, when there is one. A trigger that needs a particular status raises with a `PTnnn` SQLSTATE (`PT409`), which PostgREST turns into that status.
+`code` is the SQLSTATE or a `PGRST` code, `message` is the error's message, `details` carries the app's own raised reason unmapped (the machine's `illegal_move`, `not_your_move`, `room_unavailable`, `stale_revision`, so a client sees exactly what a browser would), and `hint` is the database's hint, when there is one. A trigger that needs a particular status raises with a `PTnnn` SQLSTATE (`PT409`), which PostgREST turns into that status.
 
 | When | HTTP | `code` | `details` |
 | --- | --- | --- | --- |
 | machine rejects a command | 400 | `P0001` | the machine's reason: `illegal_move`, `not_your_move`, `room_unavailable`, … |
 | CEL check (CHECK constraint) or malformed field | 400 | `23514`, or `22P02` for a bad value | the constraint and the row, from Postgres |
-| `etag` older than the resource, on a command | 409 | `PT409` | `stale_etag` |
-| same `request_id`, different body | 409 | `PT409` | `idempotency_conflict` |
+| `etag` older than the resource, on a command | 409 | `PT409` (message `stale_revision`) | `stale_revision`, the machine's own reason |
+| same `request_id`, different body | 409 | `PT409` (message `idempotency_conflict`) | `request_id` |
+| no seat in the room, an event or open kind not exported | 404 | `PT404` | |
+| `etag` or `request_id` missing or malformed | 400 | `PT400` (message `invalid_argument`) | the field |
 | `Create` with a `name` that exists | 409 | `23505` | the key, from Postgres |
 | singular read or write that matches no row, or one RLS hides | 406 | `PGRST116` | `The result contains 0 rows`; never says which |
 | no, bad or expired token | 401 | `PGRST301` or `PGRST303` | PostgREST's own |
@@ -267,7 +268,7 @@ Each is one `http` step expecting a status and body, taken from the machine's ow
 | --- | --- |
 | bob moves on ada's turn | 400, `code: P0001`, `details: not_your_move` |
 | ada plays `e2e5` | 400, `code: P0001`, `details: illegal_move` |
-| ada sends an old `etag` | 409, `code: PT409`, `details: stale_etag` |
+| ada sends an old `etag` | 409, `code: PT409`, `details: stale_revision` |
 | ada repeats step 5 with the same `request_id` and body | no second row; `GET` shows the same `etag` and no second move |
 | same `request_id`, different body | 409, `code: PT409`, `details: idempotency_conflict` |
 | a third account joins the full room | 400, `code: P0001`, `details: room_unavailable` |
@@ -291,16 +292,16 @@ The API's authority is the user's, enforced by the database; the generated SQL o
 
 - No service role. Views are `security_invoker`, and writes go through auto-updatable views, so every read and write runs as the token's user under the tables' RLS, and the base tables' privileges are checked as that user. There are no `SECURITY DEFINER` functions and no functions to call: a bug in a generated view or trigger can never touch a row its caller could not.
 - Allow-list, not deny-list. Only generated routes are mounted under `/api/v1`, and the door builds each query itself; `/rpc` is never routed there, and `/crud` cannot select `api_v1`. `/crud` itself is unchanged: a key token reaches it within its scopes, as the user's session does.
-- `api_v1` is granted to `app_user` only (the role every user and key token carries): `USAGE` on the schema, and `SELECT`, `INSERT`, `UPDATE` or `DELETE` on each view for the methods the spec exports, all revoked from `PUBLIC` and `anon`. Guest tokens are refused by `app_pre_request`. The idempotency trigger writes `api_private.request` as the caller, under that table's own RLS.
-- Scopes per key: `read`, `write`, `machines:{name}`, checked by `app_pre_request` from the token's `scp`; RLS still checks the row.
+- `api_v1` is granted to `app_user` only (the role every user and key token carries): `USAGE` on the schema, and `SELECT`, `INSERT`, `UPDATE` or `DELETE` on each view for the methods the spec exports, all revoked from `PUBLIC` and `anon`. Refusing guest tokens on `api_v1` is PRONTO-393. A machine view's trigger writes the machine's command or open table as the caller (security invoker), under that table's own RLS.
+- Scopes per key: `read` and `write`, checked by `app_pre_request` from the token's `scp`; RLS still checks the row. `machines:{name}` and refusing guests on `api_v1` need a hook in mecha-fork (PRONTO-393), not in v1.
 - Keys are shown once, stored as SHA-256, revocable, at most 5 per account; issued tokens expire within 15 minutes.
 - Bonk Chess specifics stay where they are: stand-in seating, rating, gold and Premium gates are triggers, so a bot gets exactly what its account would. Bots are marked and their games unrated (PRONTO-316).
 
 **Idempotence** (AIP-155)
 
-- Every mutating method takes `request_id`, a UUID. A machine event maps it into the command row id (`{room}/{etag}/{seat}/{event}/{request_id}`), so a retry is the same row and is not written twice; a `Create` also keeps the client's `name`.
-- `api_private.request` (primary key owner and `request_id`, the body hash, `create_time`; RLS `owner = auth_uid()`; not in an exposed schema) is read and written by the BEFORE INSERT trigger on the command table, in the same transaction as the effect, so it holds exactly the requests that took effect. A reused `request_id` with another body is `409`, reason `idempotency_conflict`. Each insert deletes the caller's rows older than 24 hours, so no job is needed. This trigger and the body-hash check are the idempotency SQL the design cannot avoid.
-- Every machine event requires `etag` (AIP-154), which turns a lost race into `409`, reason `stale_etag`, that the client resolves by re-reading the resource.
+- Every machine call takes `request_id` (1 to 36 of `[A-Za-z0-9_-]`, a UUID fits). A machine event maps it into the command row id (`{room}/{etag}/{seat}/{event}/{request_id}`), so a retry is the same row and is not written twice; a `Create` also keeps the client's `name`.
+- A reused `request_id` is answered from the machine's own row (its command id carries it), in the same transaction as the effect, so it holds exactly the requests that took effect; with another body it is `409`, `idempotency_conflict`. An open's id is `{room}/{kind}/{request_id}`, the same way.
+- Every machine event requires `etag` (AIP-154), which turns a lost race into `409`, reason `stale_revision`, that the client resolves by re-reading the resource.
 
 **Limits**
 
@@ -327,7 +328,7 @@ Pull requests, each behind the `api_export` flag (`default: false` in production
 2. **`api_v1` in PostgREST** (mecha-fork, PRONTO-376): a cluster option that adds schemas after `public`, and its pin in Bonk Chess and guestbook.
 3. **Plugin core** (pronto-plugins `api/`, PRONTO-324, built; `api/README.md`): the `#Api` schema, the generator for entities (views, grants, door routes, `openapi.json`, `contract.json` and its additive check), with unit cases on PGlite; it removes the gRPC spike (`service.ts`), the proto generator, `api/proto/` and buf from ci.
 4. **guestbook** (PRONTO-325): `bin/pronto-api`, installed with a small spec and `api_entry.cue` over `http` steps. The flag gates the views per request, since the door's Caddyfile is static.
-5. **Machines** (PRONTO-314): the command views, the idempotency trigger, `Get`, `List`, custom open kinds and events, `etag` and `request_id`, on a two-seat test machine; and the machine change that computes `outcome`, `reason` and `revision` in a BEFORE trigger, so a command answers in one call (until it lands, clients read the command back).
+5. **Machines** (PRONTO-314, v1 built): the seat, public, command and open views, the INSTEAD OF triggers, `Get`, `List`, Create, `:join` and events, `etag` and `request_id`, on a two-seat stand-in machine on PGlite. Follow-ups: the BEFORE-trigger machine, so a plain insert answers (PRONTO-392), and the `machines:{name}` scope with guest refusal (PRONTO-393).
 6. **Bonk Chess** (PRONTO-316, then PRONTO-315): bots marked and unrated; `pronto-api brawl-chess`, `api_spec.cue`, `spec/api_games.cue`, the replay unit case and `api_match.cue`. Release-cron ships it; nothing is released by hand.
 7. **On the wire** (PRONTO-320) and **the production tester** (PRONTO-328).
 

@@ -12,13 +12,16 @@ import (
 // written are read from program.cue's entities, so nothing is restated, and a spec naming a field,
 // a table or a write the program does not have fails generate. `api/generate.ts` writes the views
 // (api_v1.sql), the door's routes (api_door.cue), openapi.json and contract.json from `apiContract`.
-// Machines (PRONTO-314) join the schema with their issue; until then a spec naming one fails.
+// A machine (PRONTO-314) is exported as a collection of rooms: the caller's seat as the resource,
+// its open kinds and its exported events as custom methods, its public table as the List.
 #Api: {
 	version: *"v1" | =~"^v[1-9][0-9]*$"
 	// Each exported resource, by its collection (plural lowerCamelCase, AIP-122): the table it reads,
 	// its public fields and its methods. Nothing is exported by default.
 	entities: [=~"^[a-z][a-zA-Z0-9]*$"]: #Entity
-	machines?: error("api: machines are exported with PRONTO-314; this spec names one")
+	// Each exported machine, by its collection: the reducer (program.cue's state.mecha.reducers),
+	// the events a client may send and the open kinds it may ask for. Nothing is exported by default.
+	machines: [=~"^[a-z][a-zA-Z0-9]*$"]: #MachineExport
 	// The flag (pronto-flags' flags_spec.cue) the API rides. Off for an account, every view is empty
 	// to it and refuses its writes, and the auth service makes, lists and exchanges none of its keys
 	// (capabilities.auth.apiKeysGate): `pronto-flags push` turns the API on and off, no deploy.
@@ -38,6 +41,21 @@ import (
 	create_time?: string
 	update_time?: string
 	methods!: [_, ...] & [...("get" | "list" | "create" | "update" | "delete")]
+}
+
+#MachineExport: {
+	// The reducer's name: its surface tables are <machine>_seat, _command, _open and _public.
+	machine!: =~"^[a-z][a-z0-9_]*$"
+	// The views' stem, singular snake_case; the collection less its `s` (`ies` to `y`) unless said.
+	view?: =~"^[a-z][a-z0-9_]*$"
+	// The events a client sends (`POST {room}:{event}`, lowerCamelCase): each an event the browser
+	// may send (tier omnishell). A server-only event has no route.
+	events!: [_, ...] & [...=~"^[a-z][a-z0-9_]*$"]
+	// The open kinds a client asks for: `create` (`POST {collection}?{view}_id=`) and `join`
+	// (`POST {room}:join`), each one the machine's ports have.
+	opens: *[] | [...("create" | "join")]
+	// The List, over the machine's public table: public field -> its column.
+	public?: [=~"^[a-z][a-z0-9_]*$" & !="name" & !="etag"]: string
 }
 
 api: #Api
@@ -114,6 +132,42 @@ apiContract: {
 			[if m == "get" || m == "list" || (*e.access.write | false) {m}, error("api: \(s.table)'s access forbids writes, which the spec's \(coll) exports")][0] &
 			[if s.parent == _|_ || m == "get" || m == "list" || m == "delete" {m}, error("api: \(coll) is nested; its Create and Update come with the parent from the path, not yet")][0]
 		}]
+	}]
+	machines: [for coll in list.SortStrings([for c, _ in api.machines {c}]) {
+		let s = api.machines[coll]
+		let red = [if code.state.mecha.reducers[s.machine] != _|_ {code.state.mecha.reducers[s.machine]}, error("api: no reducer \(s.machine), which the spec's \(coll) names")][0]
+		let setup = red.machine.setup
+		let table = {
+			for part in ["seat", "command", "open", "public"] {
+				(part): "\(s.machine)_\(part)"
+			}
+		}
+		let need = list.Concat([["seat", "command"], [if len(s.opens) > 0 {"open"}], [if s.public != _|_ {"public"}]])
+		collection: coll
+		view:       [if s.view != _|_ {s.view}, if strings.HasSuffix(coll, "ies") {strings.TrimSuffix(coll, "ies") + "y"}, strings.TrimSuffix(coll, "s")][0]
+		machine:    s.machine
+		version:    setup.version
+		tables: {
+			for part in need {
+				(part): [if _apiByTable[table[part]] != _|_ {table[part]}, error("api: no entity has the table \(table[part]), \(coll)'s \(part)")][0]
+			}
+		}
+		events: [for e in s.events {
+			[if setup.types.events[e] != _|_ {e}, error("api: \(s.machine) has no event \(e), which the spec's \(coll) names")][0] &
+			[if (*setup.types.events[e].tier | "") == "omnishell" {e}, error("api: \(s.machine)'s \(e) is server-only, which the spec's \(coll) exports")][0]
+		}]
+		opens: [for o in s.opens {
+			[if (o == "create" && setup.ports.admission != _|_) || (o == "join" && setup.ports.join != _|_) {o}, error("api: \(s.machine)'s ports have no \(o), which the spec's \(coll) exports")][0]
+		}]
+		if s.public != _|_ {
+			let pub = {for f in _apiByTable[table.public].fields {(f.name): f}}
+			public: [for k in list.SortStrings([for n, _ in s.public {n}]) {
+				let col = s.public[k]
+				name:   k
+				column: [if pub[col] != _|_ {col}, error("api: \(table.public) has no field \(col), which the spec's \(coll).public.\(k) names")][0]
+				type:   pub[col].type
+			}]
+		}
 	}]
 	types: _apiTypes
 }
