@@ -12,6 +12,7 @@ import (
 	"encoding/yaml"
 	"list"
 	"math"
+	"regexp"
 	"strings"
 )
 
@@ -75,6 +76,18 @@ import (
 	// Width out of 24, and height in grid rows.
 	w: *6 | int & >=3 & <=24
 	h: *5 | int & >=3
+
+	// Each pod of the exporter answers the same numbers from the same views, so at several
+	// replicas a selector reads one series a pod (PRONTO-370). The dashboard asks `once`: every
+	// business selector taken once, the max over the pods (`instance` and `pod`, and
+	// `pod_template_hash` while a rollout runs two sets). A range (`increase(m[1d])`) is taken
+	// over its function, the selector's only argument there; a range anywhere else is refused,
+	// since a max of it is no query.
+	let by = "max without (instance, pod, pod_template_hash)"
+	let sel = "business_[a-z0-9_]+(\\{[^}]*\\})?"
+	let ranged = regexp.ReplaceAll("([a-z_]+)\\((\(sel)\\[[^\\]]+\\])\\)", expr, "\(by) (${1}(@${2}))")
+	rangeOutsideAFunction: regexp.Match("(^|[^@a-z0-9_])\(sel)\\[", ranged) & false
+	once: strings.Replace(regexp.ReplaceAll("(^|[^@a-z0-9_])(\(sel))", ranged, "${1}\(by) (${2})"), "@business_", "business_", -1)
 }
 
 #AnalyticsRow: {
@@ -258,7 +271,7 @@ import (
 						description: p.description
 						gridPos: {x: mod(before, 24), y: _top[ri] + 1 + div(before, 24)*_rowH[ri], w: p.w, h: p.h}
 						fieldConfig: defaults: {unit: p.unit, noValue: "no data"}
-						targets: [{refId: "A", expr: p.expr, legendFormat: p.legend, if p.kind == "table" || p.kind == "barchart" {format: "table", instant: true}, if p.kind == "stat" {instant: true, range: false}}]
+						targets: [{refId: "A", expr: p.once, legendFormat: p.legend, if p.kind == "table" || p.kind == "barchart" {format: "table", instant: true}, if p.kind == "stat" {instant: true, range: false}}]
 						// A stat reads the value now, an instant query: a range query's points fall on its
 						// step, so a series younger than that step (a store just emptied, PRONTO-189) read
 						// "no data" though it had a value.
