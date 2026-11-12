@@ -105,25 +105,25 @@ Deno.test("a push's canary: on for the testers alone, then the final document fo
   await pg.close();
 });
 
-Deno.test("a rule the evaluator cannot read reads the default variant with a warning, or raises when strict; a disabled flag reads nothing", async () => {
+Deno.test("a targeting the evaluator cannot evaluate raises, never the default; null or an unknown variant reads the default; a disabled flag reads nothing", async () => {
   const pg = await db(await exported(SPEC, "flagd.sql"), false);
   await put(pg, {
     flags: {
       odd: { state: "ENABLED", variants: { on: true, off: false }, defaultVariant: "off", targeting: { if: [{ "==": [1, 1] }, "on", "off"] } },
       gone: { state: "DISABLED", variants: { on: true }, defaultVariant: "on" },
       stray: { state: "ENABLED", variants: { on: true, off: false }, defaultVariant: "on", targeting: { if: [true, "missing", "off"] } },
+      nil: { state: "ENABLED", variants: { on: true, off: false }, defaultVariant: "on", targeting: { if: [false, "off"] } },
     },
   }, "localhost");
-  eq(await on(pg, "odd"), false, "an operator it doesn't know: the default variant");
-  const warned: string[] = [];
-  await pg.query("SELECT pronto_flags.flag_on('odd')", [], { onNotice: (n) => warned.push(n.message ?? "") });
-  eq(warned.some((m: string) => /odd read its default variant: its rule .* failed: pronto_flags: no operator ==/.test(m)), true, "never silently: a warning names the flag, the rule and the error");
-  let refused = "";
-  try { await pg.query("SELECT pronto_flags.flag_on_strict('odd')"); } catch (e) { refused = (e as Error).message; }
-  eq(refused, "pronto_flags: no operator == in this evaluator", "a gate's strict read raises: it fails closed");
-  eq((await pg.query<{ v: boolean }>("SELECT pronto_flags.flag_on_strict('gone') AS v, pronto_flags.flag_on_strict('missing') AS w")).rows[0], { v: false, w: false } as never, "strict, a disabled or missing flag is off");
+  const refusal = async (sql: string) => { try { await pg.query(sql); } catch (e) { return (e as Error).message; } return "answered"; };
+  const lacks = "pronto_flags: no operator == in this evaluator";
+  eq(await refusal("SELECT pronto_flags.flag_on('odd')"), lacks, "flag_on raises on an operator it lacks");
+  eq(await refusal("SELECT pronto_flags.flag_value('odd')"), lacks, "flag_value raises on it");
+  eq(await refusal("SELECT pronto_flags.flag_on_strict('odd')"), lacks, "the gate's name raises on it");
+  eq((await pg.query<{ v: boolean }>("SELECT pronto_flags.flag_on_strict('gone') AS v, pronto_flags.flag_on_strict('missing') AS w")).rows[0], { v: false, w: false } as never, "a disabled or missing flag is off");
   eq(await on(pg, "gone"), false, "a disabled flag");
   eq(await on(pg, "stray"), true, "a variant the document lacks: the default variant");
+  eq(await on(pg, "nil"), true, "a targeting that yields null: the default variant");
   await pg.close();
 });
 

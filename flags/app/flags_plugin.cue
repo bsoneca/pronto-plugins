@@ -132,10 +132,11 @@ flagd: sql: """
 	END $f$;
 
 	-- A flag's value for a player (null: no one), as flagd answers it; null where the document has no such flag,
-	-- or the flag is disabled, or there is no document. A targeting rule that fails reads the default variant, as
-	-- flagd's does (OpenFeature's default on error), never silently: a WARNING names the flag, the rule and the
-	-- error. Strict, the failure is raised instead, for a gate that must fail closed (flag_on_strict).
-	CREATE OR REPLACE FUNCTION pronto_flags.flag_read(flag text, player uuid, strict boolean) RETURNS jsonb
+	-- or the flag is disabled, or there is no document. A targeting that yields null or a variant the flag lacks reads
+	-- the default variant, as flagd documents. A targeting the evaluator cannot evaluate (an operator it lacks,
+	-- a malformed rule, a database error) raises: it is never answered with the default.
+	DROP FUNCTION IF EXISTS pronto_flags.flag_read(text, uuid, boolean);
+	CREATE OR REPLACE FUNCTION pronto_flags.flag_read(flag text, player uuid) RETURNS jsonb
 	LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $f$
 	DECLARE d jsonb; h text; f jsonb; v jsonb;
 	BEGIN
@@ -144,14 +145,8 @@ flagd: sql: """
 	  IF f IS NULL OR coalesce(f ->> 'state', 'ENABLED') <> 'ENABLED' THEN RETURN NULL; END IF;
 	  v := NULL;
 	  IF f ? 'targeting' AND f -> 'targeting' <> '{}'::jsonb THEN
-	    BEGIN
-	      v := pronto_flags.rule(f -> 'targeting', jsonb_build_object('host', h, 'targetingKey', player::text,
-	        '$flagd', jsonb_build_object('flagKey', flag, 'timestamp', floor(extract(epoch FROM now()))::bigint)));
-	    EXCEPTION WHEN OTHERS THEN
-	      IF strict THEN RAISE; END IF;
-	      RAISE WARNING 'pronto_flags: % read its default variant: its rule % failed: %', flag, f -> 'targeting', SQLERRM;
-	      v := NULL;
-	    END;
+	    v := pronto_flags.rule(f -> 'targeting', jsonb_build_object('host', h, 'targetingKey', player::text,
+	      '$flagd', jsonb_build_object('flagKey', flag, 'timestamp', floor(extract(epoch FROM now()))::bigint)));
 	  END IF;
 	  IF v IS NULL OR v = 'null'::jsonb OR NOT (f -> 'variants') ? (v #>> '{}') THEN v := f -> 'defaultVariant'; END IF;
 	  RETURN f -> 'variants' -> (v #>> '{}');
@@ -159,7 +154,7 @@ flagd: sql: """
 
 	CREATE OR REPLACE FUNCTION pronto_flags.flag_value(flag text, player uuid DEFAULT NULL) RETURNS jsonb
 	LANGUAGE sql STABLE AS $f$
-	  SELECT pronto_flags.flag_read(flag, player, false)
+	  SELECT pronto_flags.flag_read(flag, player)
 	$f$;
 
 	-- Whether a boolean flag is on for a player: off for a flag the document lacks, or no document.
@@ -168,11 +163,11 @@ flagd: sql: """
 	  SELECT coalesce(pronto_flags.flag_value(flag, player) = 'true'::jsonb, false)
 	$f$;
 
-	-- The same for an access gate (an API's, its keys'): a targeting rule that fails raises, so the gate fails
-	-- closed rather than on a default variant.
+	-- The access gate's name (an API's, its keys'), kept for its callers: flag_on raises on a targeting it cannot
+	-- evaluate too, so every read fails closed.
 	CREATE OR REPLACE FUNCTION pronto_flags.flag_on_strict(flag text, player uuid DEFAULT NULL) RETURNS boolean
 	LANGUAGE sql STABLE AS $f$
-	  SELECT coalesce(pronto_flags.flag_read(flag, player, true) = 'true'::jsonb, false)
+	  SELECT coalesce(pronto_flags.flag_read(flag, player) = 'true'::jsonb, false)
 	$f$;
 
 	-- Written by `pronto-flags push`, its restore and rollback (flagsLive.database), and by fill_local().
