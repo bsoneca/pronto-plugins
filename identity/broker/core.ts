@@ -11,6 +11,7 @@
 // own origin's callback for the provider it asks for, exact, never shared or
 // wildcarded: the one mecha's auth service signs in at.
 import { base64url, sha256url } from "../oidc.ts";
+import { MemoryStore, type Store } from "./store.ts";
 
 
 /**
@@ -167,22 +168,18 @@ export function profileOf(claims: Record<string, unknown>): { name?: string; pic
 }
 
 /**
- * Single-use, short-lived codes. In memory: the broker runs as one instance,
- * and a code it forgets on restart is a sign-in the reader repeats.
+ * Single-use, short-lived codes, kept in the store so the replica that mints a code need not be the one
+ * that redeems it: `take` deletes as it reads, so a code is redeemed once across all of them.
  */
 export class Codes {
-  #grants = new Map<string, { grant: Grant; expires: number }>();
-  constructor(readonly ttlMs = 60_000, readonly now = () => Date.now()) {}
-  issue(grant: Grant, code = crypto.randomUUID()): string {
-    for (const [c, g] of this.#grants) if (g.expires <= this.now()) this.#grants.delete(c);
-    this.#grants.set(code, { grant, expires: this.now() + this.ttlMs });
+  constructor(readonly store: Store = new MemoryStore(), readonly ttlMs = 60_000) {}
+  async issue(grant: Grant, code = crypto.randomUUID()): Promise<string> {
+    await this.store.put("code", code, grant, this.ttlMs);
     return code;
   }
-  take(code: unknown): Grant | null {
+  async take(code: unknown): Promise<Grant | null> {
     if (typeof code !== "string") return null;
-    const held = this.#grants.get(code);
-    this.#grants.delete(code);
-    return held && held.expires > this.now() ? held.grant : null;
+    return (await this.store.take<Grant>("code", code)) ?? null;
   }
 }
 
@@ -193,7 +190,7 @@ export class Codes {
 export async function redeem(codes: Codes, form: URLSearchParams):
   Promise<{ ok: true; grant: Grant } | { ok: false; error: string }> {
   if (form.get("grant_type") !== "authorization_code") return { ok: false, error: "unsupported_grant_type" };
-  const grant = codes.take(form.get("code"));
+  const grant = await codes.take(form.get("code"));
   if (!grant) return { ok: false, error: "invalid_grant" };
   if (form.get("client_id") !== grant.tenant || form.get("redirect_uri") !== grant.redirectUri) return { ok: false, error: "invalid_grant" };
   if (!(await pkceMatches(form.get("code_verifier"), grant.challenge))) return { ok: false, error: "invalid_grant" };

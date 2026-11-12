@@ -21,9 +21,10 @@ rev=$(git -C "$here" rev-parse HEAD)
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/src/broker" "$work/src/hydra"
+mkdir -p "$work/src/broker/vendor" "$work/src/hydra"
 cp "$here/oidc.ts" "$work/src/"
-cp "$here/broker/core.ts" "$here/broker/main.ts" "$here/broker/phone.ts" "$here/broker/otp.ts" "$here/broker/door.ts" "$work/src/broker/"
+cp "$here/broker/core.ts" "$here/broker/main.ts" "$here/broker/phone.ts" "$here/broker/otp.ts" "$here/broker/door.ts" "$here/broker/store.ts" "$work/src/broker/"
+cp "$here/broker/vendor/postgres.js" "$work/src/broker/vendor/"
 cp "$here/hydra/front.ts" "$here/hydra/fake.ts" "$here/hydra/local.sh" "$work/src/hydra/"
 cat > "$work/src/README.md" <<EOF
 # pronto-identity $V

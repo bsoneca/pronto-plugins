@@ -26,6 +26,7 @@
 import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, verifyIdToken } from "../oidc.ts";
 import { esc, json } from "./core.ts";
 import type { Provider } from "./main.ts";
+import { MemoryStore, sharedKeyPair, sharedSecret, type Store } from "./store.ts";
 import { Otp, phoneSubject, type SmsSender, smsSender, Standin } from "./otp.ts";
 
 const enc = new TextEncoder();
@@ -240,47 +241,39 @@ const html = (body: string, csp: string, status = 200) =>
 /** What a gate answers makes of a send: the status, as the page's words. */
 export const gateVerdict = (status: number): "go" | "too_many" | "down" => status >= 200 && status < 300 ? "go" : status === 403 || status === 429 ? "too_many" : "down";
 
-// `secret` (BROKER_SECRET) derives the broker mode's subjects; `fetcher` is the gate's transport.
-export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { keys?: KeySource; now?: () => number; secret?: string; fetcher?: typeof fetch } = {}): Promise<{
+// `secret` (BROKER_SECRET) derives the broker mode's subjects; `fetcher` is the gate's transport; `store` holds
+// everything kept between requests (visits, codes, wrong guesses, waits) and the keys, shared by every replica (store.ts).
+export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { keys?: KeySource; now?: () => number; secret?: string; fetcher?: typeof fetch; store?: Store } = {}): Promise<{
   provider: Provider;
   handle: (req: Request, url: URL) => Promise<Response> | null;
 }> {
   const root = issuer.replace(/\/$/, "");
   const base = `${root}/phone`;
   const callback = `${root}/callback/phone`;
-  const ISSUER = base, CLIENT = "phone", SECRET = randomToken(24);
+  const ISSUER = base, CLIENT = "phone";
   const now = opts.now ?? Date.now;
   const firebaseKeys = opts.keys ?? jwksSource(FIREBASE_JWKS);
-  const pair = await crypto.subtle.generateKey(
-    { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
-  const jwk = { ...(await crypto.subtle.exportKey("jwk", pair.publicKey)), kid: "phone-1" };
-  const asked = new Map<string, { nonce: string; state: string; since: number; expires: number; lang: Lang }>();
+  const store = opts.store ?? new MemoryStore(now);
+  // The proofs' key (tenants verify them, RS256) and the client secret of the broker's own exchange are the
+  // store's: every replica signs with, serves and accepts the same.
+  const { privateKey, jwk } = await sharedKeyPair(store, "phone-rs256", "RS256");
+  const SECRET = await sharedSecret(store, "phone-client-secret", 24);
+  type Asked = { nonce: string; state: string; since: number; lang: Lang };
   const brokerMode = cfg.otp === "broker";
   if (brokerMode && (opts.secret ?? "").length < 32) throw new Error("PHONE_OTP=broker needs BROKER_SECRET to derive subjects");
-  const otp = new Otp(cfg.resendSeconds, now);
-  const proving = new Map<string, { origin: string; expires: number }>();
+  const otp = new Otp(cfg.resendSeconds, store);
   const proveCsp = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
   const fetcher = opts.fetcher ?? fetch;
-  const codes = new Map<string, { nonce: string; sub: string; expires: number }>();
-  const live = <T extends { expires: number }>(m: Map<string, T>, k: string | null, take: boolean) => {
-    const v = k === null ? undefined : m.get(k);
-    if (k !== null && take) m.delete(k);
-    return v && v.expires > now() ? v : undefined;
-  };
-  const sweep = () => {
-    for (const m of [asked, codes] as Map<string, { expires: number }>[]) for (const [k, v] of m) if (v.expires <= now()) m.delete(k);
-  };
   const csp = pageCsp(cfg);
 
-  function authorize(req: Request, url: URL): Response {
+  async function authorize(req: Request, url: URL): Promise<Response> {
     const q = url.searchParams;
     if (q.get("client_id") !== CLIENT || q.get("redirect_uri") !== callback || !q.get("state") || !q.get("nonce")) {
       return html(`<!doctype html><title>Sign-in refused</title><p>This sign-in can't continue. Go back to the app and start again.</p>`, csp, 400);
     }
-    sweep();
     const id = randomToken(16);
     const lang = langOf(req.headers.get("accept-language"));
-    asked.set(id, { nonce: q.get("nonce")!, state: q.get("state")!, since: Math.floor(now() / 1000), expires: now() + 900_000, lang });
+    await store.put("phone-asked", id, { nonce: q.get("nonce")!, state: q.get("state")!, since: Math.floor(now() / 1000), lang } satisfies Asked, 900_000);
     const s = STRINGS[lang];
     const cancel = `${callback}?${new URLSearchParams({ error: "access_denied", state: q.get("state")! })}`;
     const config = brokerMode
@@ -360,7 +353,7 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
   // Broker mode: a code for `visit` and `phone`. The wait is checked first (a refused number costs the
   // gate nothing), then the gate admits the SMS, then the code is made and sent.
   async function deliver(visit: string, phone: string, lang: Lang): Promise<Response> {
-    if (otp.wait(phone) > 0) return json(429, { error: "cooldown" });
+    if (await otp.wait(phone) > 0) return json(429, { error: "cooldown" });
     const verdict = await gate(phone);
     if (verdict !== "go") return json(verdict === "too_many" ? 429 : 503, { error: verdict });
     const made = await otp.issue(visit, phone);
@@ -368,7 +361,7 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
     try {
       await cfg.sender!.send(phone, STRINGS[lang].sms.replace("{host}", new URL(issuer).host).replace("{code}", made.code));
     } catch (e) {
-      otp.revoke(visit);
+      await otp.revoke(visit);
       // The sender's failure, never the number or the code.
       console.error(`broker: phone SMS not sent: ${e instanceof Error ? e.name : "error"}`);
       return json(503, { error: "down" });
@@ -379,7 +372,7 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
   async function send(req: Request): Promise<Response> {
     const body = await jsonBody(req);
     if (body instanceof Response) return body;
-    const a = live(asked, typeof body.id === "string" ? body.id : null, false);
+    const a = typeof body.id === "string" ? await store.get<Asked>("phone-asked", body.id) : undefined;
     if (!a) return json(400, { error: "expired" });
     const phone = body.phone;
     if (typeof phone !== "string" || !new RegExp(cfg.pattern).test(phone)) return json(400, { error: "region" });
@@ -397,21 +390,20 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
     if (typeof origin !== "string" || !tenantAdmitted(cfg.proveTenants, origin)) return json(403, { error: "tenant" });
     const phone = body.phone;
     if (typeof phone !== "string" || !new RegExp(cfg.pattern).test(phone)) return json(400, { error: "region" });
-    for (const [k, v] of proving) if (v.expires <= now()) proving.delete(k);
     const visit = randomToken(16);
     const res = await deliver(visit, phone, langOf(req.headers.get("accept-language")));
     if (!res.ok) return res;
-    proving.set(visit, { origin, expires: now() + 600_000 });
+    await store.put("phone-proving", visit, { origin }, 600_000);
     return json(200, { visit });
   }
 
   async function proveCheck(req: Request): Promise<Response> {
     const body = await jsonBody(req);
     if (body instanceof Response) return body;
-    const v = live(proving, typeof body.visit === "string" ? body.visit : null, false);
+    const v = typeof body.visit === "string" ? await store.get<{ origin: string }>("phone-proving", body.visit) : undefined;
     if (!v || typeof body.code !== "string") return json(400, { error: "expired" });
     const checked = await otp.check(body.visit as string, body.code);
-    if (checked.result === "dead" || checked.result === "ok") proving.delete(body.visit as string);
+    if (checked.result === "dead" || checked.result === "ok") await store.del("phone-proving", body.visit as string);
     if (checked.result !== "ok") return codeError(checked.result);
     const t = Math.floor(now() / 1000);
     const id_token = await signJwt({
@@ -423,7 +415,7 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
   async function signJwt(claims: Record<string, unknown>): Promise<string> {
     const head = base64url(enc.encode(JSON.stringify({ alg: "RS256", typ: "JWT", kid: jwk.kid })));
     const body = base64url(enc.encode(JSON.stringify(claims)));
-    const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", pair.privateKey, enc.encode(`${head}.${body}`)));
+    const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", privateKey, enc.encode(`${head}.${body}`)));
     return `${head}.${body}.${base64url(sig)}`;
   }
 
@@ -485,7 +477,7 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
   async function approve(req: Request): Promise<Response> {
     const body = await jsonBody(req);
     if (body instanceof Response) return body;
-    const a = live(asked, typeof body.id === "string" ? body.id : null, false);
+    const a = typeof body.id === "string" ? await store.get<Asked>("phone-asked", body.id) : undefined;
     let sub: string;
     if (brokerMode) {
       if (!a || typeof body.code !== "string") return json(400, { error: "expired" });
@@ -506,9 +498,10 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
       }
       sub = claims.sub;
     }
-    asked.delete(body.id as string);
+    // The visit is spent as it is approved: taken, so of two approvals of one visit only one gets a code.
+    if (!await store.take("phone-asked", body.id as string)) return json(400, { error: "expired" });
     const code = randomToken(16);
-    codes.set(code, { nonce: a.nonce, sub, expires: now() + 60_000 });
+    await store.put("phone-code", code, { nonce: a.nonce, sub }, 60_000);
     const to = new URL(callback);
     to.searchParams.set("code", code);
     to.searchParams.set("state", a.state);
@@ -516,14 +509,14 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
   }
 
   async function token(f: URLSearchParams): Promise<Response> {
-    const c = live(codes, f.get("code"), true);
+    const c = typeof f.get("code") === "string" ? await store.take<{ nonce: string; sub: string }>("phone-code", f.get("code")!) : undefined;
     if (!c || f.get("client_id") !== CLIENT || f.get("client_secret") !== SECRET || f.get("redirect_uri") !== callback) {
       return json(400, { error: "invalid_grant" });
     }
     const t = Math.floor(now() / 1000);
     const head = base64url(enc.encode(JSON.stringify({ alg: "RS256", kid: jwk.kid })));
     const body = base64url(enc.encode(JSON.stringify({ iss: ISSUER, aud: CLIENT, sub: c.sub, nonce: c.nonce, iat: t, exp: t + 300 })));
-    const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", pair.privateKey, enc.encode(`${head}.${body}`)));
+    const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", privateKey, enc.encode(`${head}.${body}`)));
     return json(200, { id_token: `${head}.${body}.${base64url(sig)}`, token_type: "Bearer", expires_in: 300 });
   }
 
@@ -535,7 +528,7 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
       exchange: token,
     },
     handle(req, url) {
-      if (req.method === "GET" && url.pathname === "/phone/auth") return Promise.resolve(authorize(req, url));
+      if (req.method === "GET" && url.pathname === "/phone/auth") return authorize(req, url);
       if (req.method === "GET" && url.pathname === "/phone/page.js") {
         return Promise.resolve(new Response(brokerMode ? BROKER_SCRIPT : SCRIPT, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" } }));
       }

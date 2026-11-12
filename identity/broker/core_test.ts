@@ -1,6 +1,7 @@
 // The broker's isolation rules: a tenant is an https origin, its redirect is
 // its own origin's one callback, a person's subject differs per tenant, and a
 // code is redeemed once, by the tenant and redirect it was issued to.
+import { MemoryStore } from "./store.ts";
 import { callbackOf, Codes, type Grant, idTokenClaims, pairwiseKey, pairwiseSubject, parseAuthorize, sectorOf, sectorsOf, pkceMatches, redeem, tenantOf } from "./core.ts";
 import { randomToken, Refused, sha256url, signEs256, verifyIdToken } from "../oidc.ts";
 
@@ -79,7 +80,7 @@ Deno.test("a code is redeemed once, by its tenant and redirect, with its verifie
     grant_type: "authorization_code", code, client_id: "https://app-a.example",
     redirect_uri: "https://app-a.example/auth/oidc/google/callback", code_verifier: verifier, ...over,
   });
-  const c1 = codes.issue(grant({ challenge }));
+  const c1 = await codes.issue(grant({ challenge }));
   assertEquals((await redeem(codes, form(c1))).ok, true);
   assertEquals(await redeem(codes, form(c1)), { ok: false, error: "invalid_grant" }); // single use
   const tampered: Record<string, string>[] = [
@@ -89,17 +90,17 @@ Deno.test("a code is redeemed once, by its tenant and redirect, with its verifie
     { grant_type: "password" },
   ];
   for (const over of tampered) {
-    const c = codes.issue(grant({ challenge }));
+    const c = await codes.issue(grant({ challenge }));
     assertEquals((await redeem(codes, form(c, over))).ok, false, JSON.stringify(over));
   }
 });
 
 Deno.test("a code expires", async () => {
   let t = 0;
-  const codes = new Codes(1000, () => t);
-  const c = codes.issue(grant());
+  const codes = new Codes(new MemoryStore(() => t), 1000);
+  const c = await codes.issue(grant());
   t = 1000;
-  assertEquals(codes.take(c), null);
+  assertEquals(await codes.take(c), null);
 });
 
 Deno.test("PKCE accepts only the verifier of the challenge", async () => {

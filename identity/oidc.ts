@@ -96,3 +96,9 @@ export async function verifyIdToken(token: string, p: {
   if (typeof claims.sub !== "string" || claims.sub === "") throw new Refused("id token subject");
   return claims as Record<string, unknown> & { sub: string };
 }
+
+/** The RFC 7638 thumbprint of a public key: the same key is always the same `kid`, and a new key a new one. */
+export async function jwkThumbprint(jwk: Jwk): Promise<string> {
+  const members = jwk.kty === "EC" ? { crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y } : { e: jwk.e, kty: jwk.kty, n: jwk.n };
+  return sha256url(JSON.stringify(members));
+}

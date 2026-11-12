@@ -3,14 +3,16 @@
 // operator registers once. An application signs people in through it with no
 // client, secret or console of its own (core.ts says how tenants stay apart).
 //
-// Plain HTTP: TLS is the platform's, as it is the door's. Its one persistent
-// secret, BROKER_SECRET, derives the pairwise-subject key and the key that
-// signs the round trip through a provider; the ID-token key is minted at
-// start and never stored, since its tokens live five minutes and tenants
-// fetch a key they do not know.
+// Plain HTTP: TLS is the platform's, as it is the door's. BROKER_SECRET
+// derives the pairwise-subject key and the key that signs the round trip
+// through a provider. Everything else it keeps between requests (its codes,
+// the phone's visits, its signing keys) is in the store (store.ts), a database
+// of its own when DATABASE_URL names one, so any replica answers any request;
+// without one it is this process's memory, and the broker runs as one.
 import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, signEs256, verifyIdToken } from "../oidc.ts";
 import { doorKey, throughDoor } from "./door.ts";
 import { tenantAdmitted } from "./phone.ts";
+import { type Store, MemoryStore, sealedOnce, sharedKeyPair, storeFrom } from "./store.ts";
 import { type AuthRequest, Codes, emailOf, esc, json, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, sectorOf, sectorsOf, profileOf, providerScope, redeem } from "./core.ts";
 
 // Kept where phone.ts takes them (core.ts), so the phone imports nothing of this module at run time:
@@ -154,7 +156,8 @@ export async function broker(p: {
   issuer: string;
   secret: string;
   providers: Provider[];
-  codes?: Codes;
+  /** Where the codes and the signing key live (store.ts); a replica of the same store answers for any other. Default: this process's memory. */
+  store?: Store;
   /** Each moved tenant's sector, the origin its subjects were made under (core.ts sectorsOf). */
   sectors?: ReadonlyMap<string, string>;
   /** Routes served beside the broker's own: the phone's (phone.ts). */
@@ -172,11 +175,11 @@ export async function broker(p: {
   const providers = new Map(p.providers.map((x) => [x.name, x]));
   const pairwise = await pairwiseKey(p.secret);
   const stateKey = await hmacKey(p.secret, "broker round trip");
-  const codes = p.codes ?? new Codes();
+  const store = p.store ?? new MemoryStore();
+  const codes = new Codes(store);
   const sectors = p.sectors ?? new Map<string, string>();
-  const signing = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
-  const kid = randomToken(8);
-  const publicJwk = { ...(await crypto.subtle.exportKey("jwk", signing.publicKey)), kid, alg: "ES256", use: "sig" };
+  // The ID-token key is the store's, so every replica signs with, and serves at /jwks, the same one.
+  const { privateKey: signingKey, jwk: publicJwk } = await sharedKeyPair(store, "id-token-es256", "ES256");
   const callback = (provider: string) => `${issuer}/callback/${provider}`;
 
   async function authorize(url: URL): Promise<Response> {
@@ -213,6 +216,7 @@ export async function broker(p: {
   // probeEveryMs.
   const probeEvery = p.probeEveryMs ?? 5_000;
   const now = p.now ?? (() => Date.now());
+  // Per replica: a probe is a read-only check a flip's tester makes, so a replica's own spacing is enough.
   const probed = new Map<string, number>();
   async function probe(req: Request): Promise<Response> {
     const tenant = (await req.json().catch(() => null) as { tenant?: unknown } | null)?.tenant;
@@ -307,7 +311,7 @@ export async function broker(p: {
     const sub = await pairwiseSubject(pairwise, sectorOf(sectors, r.tenant), provider.name, claims.sub);
     // The name and picture, and the verified e-mail, only to a tenant that asked for them, which the
     // provider then showed the person.
-    const code = codes.issue({
+    const code = await codes.issue({
       tenant: r.tenant, redirectUri: r.redirectUri, challenge: r.challenge, nonce: r.nonce, sub, provider: provider.name,
       ...(r.profile ? profileOf(claims) : {}), ...(r.email ? emailOf(claims) : {}),
     });
@@ -318,7 +322,7 @@ export async function broker(p: {
     const form = new URLSearchParams(await req.text());
     const out = await redeem(codes, form);
     if (!out.ok) return json(400, { error: out.error });
-    const id_token = await signEs256(signing.privateKey, kid, idTokenClaims({ issuer, grant: out.grant }));
+    const id_token = await signEs256(signingKey, publicJwk.kid!, idTokenClaims({ issuer, grant: out.grant }));
     return json(200, { id_token, token_type: "Bearer", expires_in: 300 });
   }
 
@@ -367,10 +371,12 @@ if (import.meta.main) {
   // The phone, where the operator configured it (phone.ts): its page and token endpoint beside the broker's own.
   const { phoneConfig, phoneUpstream } = await import("./phone.ts");
   const phoneCfg = phoneConfig(env, issuer);
-  const phone = phoneCfg ? await phoneUpstream(issuer, phoneCfg, { secret }) : null;
+  // Its keys and secrets are sealed under BROKER_SECRET in the store (sealedOnce).
+  const store = await sealedOnce(await storeFrom(env), secret);
+  const phone = phoneCfg ? await phoneUpstream(issuer, phoneCfg, { secret, store }) : null;
   if (phone) providers.push(phone.provider);
   if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT, or PHONE_OTP=broker");
   Deno.serve({ port: Number(env("PORT") ?? 28443) }, await broker({
-    issuer, secret, providers, sectors: sectorsOf(env("BROKER_SECTORS")), extra: phone?.handle, askDoor: askedFlag(env("GOOGLE_DOOR_FLAG") || "signin_door"),
+    issuer, secret, providers, store, sectors: sectorsOf(env("BROKER_SECTORS")), extra: phone?.handle, askDoor: askedFlag(env("GOOGLE_DOOR_FLAG") || "signin_door"),
   }));
 }
