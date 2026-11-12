@@ -2,7 +2,6 @@
 
 pronto-api (design: [`docs/pronto-api.md`](../docs/pronto-api.md)): an app's entities exported as
 a REST/JSON API that is PostgREST over typed views, with no service and no translation code.
-Machines come with PRONTO-314.
 
 ## Installing it (PRONTO-325)
 
@@ -35,8 +34,8 @@ account or for everyone, with no deploy. The block also strips `Accept-Profile` 
 [`app/api_plugin.cue`](app/api_plugin.cue)'s `#Api` schema and `apiContract`. The spec names each
 exported resource by its collection, the table it reads, its public fields and its methods; types,
 the key and whether the entity may be written come from the program, so a spec naming a field the
-entity lacks (a dropped column), a write its access forbids, or a machine fails generate, saying
-which.
+entity lacks (a dropped column), a write its access forbids, or a machine's server-only event
+fails generate, saying which.
 
 ```cue
 api: entities: notes: {
@@ -75,6 +74,35 @@ The door builds every PostgREST query itself from the route: `GET /api/v1/notes/
 `?order=name.asc&name=gt.{after}&limit={page_size}` (1 to 200, else 50), `PATCH` with `If-Match`
 adds `etag=eq.…`. The client's query, `Prefer` and profile headers never reach PostgREST; an id or
 cursor that could start a filter, and every path not generated, is `404`.
+
+## Machines (PRONTO-314, v1)
+
+```cue
+api: machines: counters: {
+	machine: "counter"              // program.cue's state.mecha.reducers.counter
+	events: ["add", "finish"]       // POST /api/v1/counters/{counter}:add; each tier omnishell
+	opens: ["create", "join"]       // POST /api/v1/counters?counter_id={uuid}, POST {counter}:join
+	public: {total: "total"}        // GET /api/v1/counters, over counter_public
+}
+```
+
+A machine is exported over its surface tables (`<machine>_seat`, `_command`, `_open`, `_public`)
+and runs exactly as it does for the browser. Per machine, `api_v1.sql` has:
+
+| View | What |
+| --- | --- |
+| `<view>` | `Get`: the caller's seat (`name`, `etag` = the revision, `seat`, `phase`, `view`) |
+| `<view>_public` | `List`, over the public table |
+| `<view>_command` | an event: an INSTEAD OF INSERT trigger (`api_private.<view>_command`) takes `payload`, `etag` and `request_id`, inserts the machine's command (`{room}/{etag}/{seat}/{event}/{request_id}`), reads back what the machine's AFTER trigger stamped and answers `outcome`, `reason` and the next `etag` |
+| `<view>_open` | Create and `:join`, the same way over the open table (`{room}/{kind}/{request_id}`) |
+
+The room's name and the event come from the door, in `X-Api-Name` and `X-Api-Event` (stripped from
+every request first). A retry with the same `request_id` and body is the stored row; another body
+is `PT409 idempotency_conflict`. A rejection raises and rolls back, so nothing is stored:
+`stale_revision` is `PT409`, any other reason `P0001` with the reason in `DETAIL`. No seat, or an
+event the spec does not export, is `PT404`. The cases run a stand-in counter machine on PGlite
+(`tests/unit/apigen.js`), since a real machine's step function is plv8. A plain insert answering
+in one call (PRONTO-392) and the `machines:{name}` scope with guest refusal (PRONTO-393) come later.
 
 [`lint.ts`](lint.ts) keeps every app's name, and the wire formats this plugin no longer is, out of
 `api/`. The words are the cases' data (`tests/unit/api_generate.cue`).

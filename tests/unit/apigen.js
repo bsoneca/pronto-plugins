@@ -68,11 +68,71 @@ CREATE FUNCTION pronto_flags.flag_on(flag text, player uuid DEFAULT NULL) RETURN
 INSERT INTO public.tag VALUES ('0b0b0b0b-0000-4000-8000-0000000000f1', 'red', NULL), ('0b0b0b0b-0000-4000-8000-0000000000f2', 'blue', NULL);
 `;
 
+// A stand-in machine with the surface a mecha machine has (pronto's mecha-reducer): seats, commands
+// and opens a player reads and writes as themself (RLS), judged by AFTER INSERT triggers that stamp
+// outcome, reason and revision in the same transaction, rejections stored, as the real one does
+// (its step function is plv8, which PGlite has not). A counter: create seats a, join seats b; `add`
+// adds n (more than 3 is rejected, too_big) and advances the revision; an expected_revision that
+// is not the room's is stale_revision.
+const MACHINE = `
+CREATE TABLE public.counter_room (id uuid PRIMARY KEY, revision bigint NOT NULL DEFAULT 1, total int NOT NULL DEFAULT 0, phase text NOT NULL DEFAULT 'playing');
+CREATE TABLE public.counter_seat (id text PRIMARY KEY, instance_id uuid NOT NULL, actor uuid NOT NULL, seat text NOT NULL, revision bigint NOT NULL, phase text NOT NULL, view json NOT NULL);
+CREATE TABLE public.counter_command (id text PRIMARY KEY CHECK (char_length(id) <= 128), instance_id uuid NOT NULL, actor uuid NOT NULL DEFAULT public.auth_uid(), request json NOT NULL, revision bigint, outcome text, reason text);
+CREATE TABLE public.counter_open (id text PRIMARY KEY CHECK (char_length(id) <= 128), instance_id uuid NOT NULL, actor uuid NOT NULL DEFAULT public.auth_uid(), kind text NOT NULL CHECK (kind IN ('create', 'join')), input json NOT NULL, outcome text, reason text);
+CREATE TABLE public.counter_public (id text PRIMARY KEY, total int NOT NULL);
+ALTER TABLE public.counter_seat ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.counter_command ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.counter_open ENABLE ROW LEVEL SECURITY;
+CREATE POLICY own ON public.counter_seat TO app_user USING (actor = public.auth_uid());
+CREATE POLICY own ON public.counter_command TO app_user USING (actor = public.auth_uid()) WITH CHECK (actor = public.auth_uid());
+CREATE POLICY own ON public.counter_open TO app_user USING (actor = public.auth_uid()) WITH CHECK (actor = public.auth_uid());
+GRANT SELECT ON public.counter_seat, public.counter_public TO app_user;
+GRANT SELECT, INSERT ON public.counter_command, public.counter_open TO app_user;
+CREATE FUNCTION public.counter_seated(room uuid, who uuid, s text) RETURNS void LANGUAGE sql AS $$
+  INSERT INTO public.counter_seat SELECT room || '/' || s, room, who, s, r.revision, r.phase, json_build_object('total', r.total) FROM public.counter_room r WHERE r.id = room
+$$;
+CREATE FUNCTION public.counter_open() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE why text := '';
+BEGIN
+  IF NEW.kind = 'create' THEN
+    IF EXISTS (SELECT 1 FROM public.counter_room WHERE id = NEW.instance_id) THEN why := 'room_taken';
+    ELSE
+      INSERT INTO public.counter_room (id) VALUES (NEW.instance_id);
+      INSERT INTO public.counter_public VALUES (NEW.instance_id::text, 0);
+      PERFORM public.counter_seated(NEW.instance_id, NEW.actor, 'a');
+    END IF;
+  ELSIF NOT EXISTS (SELECT 1 FROM public.counter_room WHERE id = NEW.instance_id) THEN why := 'room_unavailable';
+  ELSIF EXISTS (SELECT 1 FROM public.counter_seat WHERE instance_id = NEW.instance_id AND (seat = 'b' OR actor = NEW.actor)) THEN why := 'seat_taken';
+  ELSE PERFORM public.counter_seated(NEW.instance_id, NEW.actor, 'b');
+  END IF;
+  UPDATE public.counter_open SET outcome = CASE WHEN why = '' THEN 'accepted' ELSE 'rejected' END, reason = why WHERE id = NEW.id;
+  RETURN NULL;
+END $$;
+CREATE TRIGGER open AFTER INSERT ON public.counter_open FOR EACH ROW EXECUTE FUNCTION public.counter_open();
+CREATE FUNCTION public.counter_command() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE r public.counter_room; why text := ''; n int := coalesce((NEW.request->'event'->'payload'->>'n')::int, 0);
+BEGIN
+  SELECT * INTO r FROM public.counter_room WHERE id = NEW.instance_id;
+  IF NOT FOUND THEN why := 'room_unavailable';
+  ELSIF NEW.request->>'expected_revision' <> r.revision::text THEN why := 'stale_revision';
+  ELSIF r.phase <> 'playing' THEN why := 'finished';
+  ELSIF NEW.request->'event'->>'kind' = 'add' AND n > 3 THEN why := 'too_big';
+  ELSE
+    UPDATE public.counter_room SET revision = revision + 1, total = total + n, phase = CASE WHEN NEW.request->'event'->>'kind' = 'finish' THEN 'finished' ELSE phase END WHERE id = NEW.instance_id RETURNING * INTO r;
+    UPDATE public.counter_seat SET revision = r.revision, phase = r.phase, view = json_build_object('total', r.total) WHERE instance_id = r.id;
+    UPDATE public.counter_public SET total = r.total WHERE id = r.id::text;
+  END IF;
+  UPDATE public.counter_command SET outcome = CASE WHEN why = '' THEN 'accepted' ELSE 'rejected' END, reason = why, revision = r.revision WHERE id = NEW.id;
+  RETURN NULL;
+END $$;
+CREATE TRIGGER command AFTER INSERT ON public.counter_command FOR EACH ROW EXECUTE FUNCTION public.counter_command();
+`;
+
 /** The app's database: the fixture's tables, then the generated api_v1.sql, replayed twice as every
  * release replays it. */
 export async function db(dir) {
   const pg = new PGlite();
-  await pg.exec(TABLES);
+  await pg.exec(TABLES + MACHINE);
   const sql = await Deno.readTextFile(`${dir}/api/v1/api_v1.sql`);
   await pg.exec(sql);
   await pg.exec(sql);
@@ -133,19 +193,25 @@ export async function replayed(pg, dir) {
   return 'replayed';
 }
 
-/** `sql` run as the user `uid` (app_user with its claims) or, with uid "anon", as anon: the rows,
- * or a throw of "<SQLSTATE>: <message>". */
-export async function as(pg, uid, sql, params = []) {
+/** `sql` run as the user `uid` (app_user with its claims) or, with uid "anon", as anon, with the
+ * request's `headers` as PostgREST hands them (lower-case names): the rows, or a throw of
+ * "<SQLSTATE>: <message>" and, when the error has one, " (<detail>)". */
+export async function as(pg, uid, sql, params = [], headers = {}) {
   try {
     return await pg.transaction(async (tx) => {
       await tx.exec(uid === 'anon' ? 'SET LOCAL ROLE anon' : 'SET LOCAL ROLE app_user');
       await tx.query("SELECT set_config('request.jwt.claims', $1, true)", [JSON.stringify(uid === 'anon' ? { role: 'anon' } : { sub: uid, role: 'app_user' })]);
+      await tx.query("SELECT set_config('request.headers', $1, true)", [JSON.stringify(headers)]);
       return (await tx.query(sql, params)).rows;
     });
   } catch (e) {
-    throw new Error(`${e.code ?? '?'}: ${e.message}`);
+    throw new Error(`${e.code ?? '?'}: ${e.message}${e.detail ? ` (${e.detail})` : ''}`);
   }
 }
+
+/** A machine's call as the door makes it: `sql` as `uid` with the room's name and the event (or
+ * open kind) in X-Api-Name and X-Api-Event. */
+export const sent = (pg, uid, name, event, sql, params = []) => as(pg, uid, sql, params, { 'x-api-name': name, 'x-api-event': event });
 
 /** The app's door: caddy serving the generated block in front of a stand-in PostgREST that answers
  * each request with what reached it (method, path and query, the profile and Prefer headers). */
@@ -153,7 +219,7 @@ export async function door(dir) {
   const upstream = Deno.serve({ port: 0, hostname: '127.0.0.1', onListen() {} }, (req) => {
     const u = new URL(req.url);
     const h = (n) => req.headers.get(n);
-    return Response.json({ method: req.method, path: u.pathname, query: u.search, accept_profile: h('accept-profile'), content_profile: h('content-profile'), prefer: h('prefer'), accept: h('accept'), range: h('range'), content_type: h('content-type') });
+    return Response.json({ method: req.method, path: u.pathname, query: u.search, accept_profile: h('accept-profile'), content_profile: h('content-profile'), prefer: h('prefer'), accept: h('accept'), range: h('range'), content_type: h('content-type'), api_name: h('x-api-name'), api_event: h('x-api-event') });
   });
   const text = await Deno.readTextFile(`${dir}/api_door.cue`);
   const block = /apiDoor: caddy: """\n([\s\S]*?)\n\t"""/.exec(text)[1].replace(/^\t/gm, '');

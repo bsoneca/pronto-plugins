@@ -23,6 +23,10 @@ _bob: "0b0b0b0b-0000-4000-8000-00000000000b"
 _n1:  "0b0b0b0b-0000-4000-8000-0000000000a1"
 _n2:  "0b0b0b0b-0000-4000-8000-0000000000a2"
 
+// A counter room (the fixture's stand-in machine).
+_room_id: "0b0b0b0b-0000-4000-8000-0000000000c1"
+_room:    "counters/" + _room_id
+
 cases: {
 	"each exported entity is a typed view in api_v1 with name, its public fields and etag, granted to app_user only": {suite: "api", steps: [
 		{call: "apigen.app"}, {keep: "app"},
@@ -92,6 +96,12 @@ cases: {
 		{call: "apigen.app"}, {keep: "app"},
 		{call: "apigen.generated", args: ["$app"]}, {keep: "out"},
 		{get: "contract.routes", expect: [
+			{method: "GET", path: "/api/v1/counters"},
+			{method: "POST", path: "/api/v1/counters"},
+			{method: "GET", path: "/api/v1/counters/{counter}"},
+			{method: "POST", path: "/api/v1/counters/{counter}:add"},
+			{method: "POST", path: "/api/v1/counters/{counter}:finish"},
+			{method: "POST", path: "/api/v1/counters/{counter}:join"},
 			{method: "GET", path: "/api/v1/notes"},
 			{method: "POST", path: "/api/v1/notes"},
 			{method: "DELETE", path: "/api/v1/notes/{note}"},
@@ -103,7 +113,9 @@ cases: {
 			{method: "GET", path: "/api/v1/tags/{tag}"},
 		]},
 		{use: "out"}, {get: "contract.resources.2", expect: {collection: "tags", fields: [{name: "name", type: "string", writable: false}, {name: "etag", type: "string", writable: false}, {name: "id", type: "uuid", writable: true}, {name: "label", type: "string", writable: true}], methods: ["get", "list"]}},
+		{use: "out"}, {get: "contract.machines.0", expect: {collection: "counters", fields: [{name: "name", type: "string"}, {name: "etag", type: "string"}, {name: "seat", type: "string"}, {name: "phase", type: "string"}, {name: "view", type: "json"}, {name: "public.total", type: "int32"}], events: ["add", "finish"], opens: ["create", "join"]}},
 		{call: "apigen.files", args: ["$app"]}, {get: "openapi", matches: #""/api/v1/notes/\{note\}": \{"#},
+		{call: "apigen.files", args: ["$app"]}, {get: "openapi", matches: #""/api/v1/counters/\{counter\}:add": \{\n      "post": \{\n        "operationId": "post_counter_command_add""#},
 	]}
 	"removing or retyping a released field fails the check; adding one does not, and its view replays over the release's": {suite: "api", steps: [
 		{call: "apigen.app"}, {keep: "app"},
@@ -129,7 +141,7 @@ cases: {
 			"route DELETE /api/v1/notes/{note} removed",
 		]},
 	]}
-	"a dropped column the spec names, a write the entity's access forbids, or a machine fails generate": {suite: "api", steps: [
+	"a dropped column the spec names, a write the entity's access forbids, or a machine's server-only event fails generate": {suite: "api", steps: [
 		{call: "apigen.app"}, {keep: "app"},
 		{call: "apigen.edit", args: ["$app", "program.cue", "{ordinal: 2, name: \"owner_id\", type: \"uuid\"},\n", ""]},
 		{call: "apigen.generated", args: ["$app"], throws: "api: note has no field owner_id, which the spec's notes.owner names"},
@@ -137,14 +149,70 @@ cases: {
 		{call: "apigen.edit", args: ["$other", "api_spec.cue", "fields: {label: \"label\"}, methods: [\"get\", \"list\"]", "fields: {label: \"label\"}, methods: [\"get\", \"create\"]"]},
 		{call: "apigen.generated", args: ["$other"], throws: "api: tag's access forbids writes, which the spec's tags exports"},
 		{call: "apigen.app"}, {keep: "third"},
-		{call: "apigen.edit", args: ["$third", "api_spec.cue", "api: {", "api: {\n\tmachines: games: {}"]},
-		{call: "apigen.generated", args: ["$third"], throws: "api: machines are exported with PRONTO-314"},
+		{call: "apigen.edit", args: ["$third", "api_spec.cue", "events: [\"add\", \"finish\"]", "events: [\"add\", \"tick\"]"]},
+		{call: "apigen.generated", args: ["$third"], throws: "api: counter's tick is server-only, which the spec's counters exports"},
+		{call: "apigen.app"}, {keep: "sixth"},
+		{call: "apigen.edit", args: ["$sixth", "api_spec.cue", "machine: \"counter\"", "machine: \"counted\""]},
+		{call: "apigen.generated", args: ["$sixth"], throws: "api: no reducer counted, which the spec's counters names"},
 		{call: "apigen.app"}, {keep: "fourth"},
 		{call: "apigen.edit", args: ["$fourth", "api_spec.cue", "fields: {label: \"label\"}\n\t\tmethods: [\"get\", \"list\"]", "fields: {label: \"label\"}\n\t\tmethods: [\"get\", \"create\"]"]},
 		{call: "apigen.generated", args: ["$fourth"], throws: "api: noteTags is nested; its Create and Update come with the parent from the path"},
 		{call: "apigen.app"}, {keep: "fifth"},
 		{call: "apigen.edit", args: ["$fifth", "api_spec.cue", "fields: {owner: \"owner_id\"", "fields: {etag: \"owner_id\""]},
 		{call: "apigen.generated", args: ["$fifth"], throws: "etag"},
+	]}
+	"a machine's open view creates and joins a room, its seat view is the caller's seat, and its public view the List": {suite: "api", steps: [
+		{call: "apigen.app"}, {keep: "app"},
+		{call: "apigen.generated", args: ["$app"]},
+		{call: "apigen.db", args: ["$app"]}, {keep: "db"},
+		{call: "apigen.sent", args: ["$db", _ada, _room, "create", "INSERT INTO api_v1.counter_open (request_id) VALUES ('o1') RETURNING name, kind, outcome"], expect: [{name: _room, kind: "create", outcome: "accepted"}], why: "Create: the room's name from the door's X-Api-Name, its open row's outcome answered"},
+		{call: "apigen.sent", args: ["$db", _ada, _room, "create", "INSERT INTO api_v1.counter_open (request_id) VALUES ('o1') RETURNING outcome"], expect: [{outcome: "accepted"}], why: "a retried Create is its stored row"},
+		{call: "apigen.sent", args: ["$db", _ada, _room, "create", "INSERT INTO api_v1.counter_open (request_id, input) VALUES ('o1', '{\"x\": 1}')"], throws: "PT409: idempotency_conflict", why: "the same request_id with another body"},
+		{call: "apigen.sent", args: ["$db", _bob, _room, "create", "INSERT INTO api_v1.counter_open (request_id) VALUES ('o2')"], throws: "P0001: rejected .room_taken.", why: "the machine's reason, in DETAIL"},
+		{call: "apigen.sent", args: ["$db", _bob, _room, "join", "INSERT INTO api_v1.counter_open (request_id) VALUES ('j1') RETURNING kind, outcome"], expect: [{kind: "join", outcome: "accepted"}]},
+		{call: "apigen.as", args: ["$db", _ada, "SELECT name, seat, phase, view, etag FROM api_v1.counter"], expect: [{name: _room, seat: "a", phase: "playing", view: {total: 0}, etag: "1"}], why: "Get: ada's seat, its etag the room's revision"},
+		{call: "apigen.as", args: ["$db", _bob, "SELECT seat FROM api_v1.counter WHERE name = $1", [_room]], expect: [{seat: "b"}], why: "bob sees his own seat, never ada's"},
+		{call: "apigen.as", args: ["$db", _ada, "SELECT name, total FROM api_v1.counter_public"], expect: [{name: _room, total: 0}], why: "List: the public table"},
+		{call: "apigen.sent", args: ["$db", _ada, "counters/x", "create", "INSERT INTO api_v1.counter_open (request_id) VALUES ('o3')"], throws: "PT404", why: "a room that is not a uuid"},
+		{call: "apigen.sent", args: ["$db", _ada, _room, "create", "INSERT INTO api_v1.counter_open (request_id) VALUES ('a/b')"], throws: "PT400: invalid_argument .request_id."},
+		{call: "apigen.as", args: ["$db", _ada, "INSERT INTO api_v1.counter_open (request_id) VALUES ('o4')"], throws: "PT404", why: "no room or kind from the door, no write"},
+		{call: "apigen.as", args: ["$db", "anon", "SELECT 1 FROM api_v1.counter"], throws: "42501"},
+	]}
+	"a machine event goes through the command view: accepted with the room's next etag, retried as its stored row, rejected with today's reasons and nothing stored": {suite: "api", steps: [
+		{call: "apigen.app"}, {keep: "app"},
+		{call: "apigen.generated", args: ["$app"]},
+		{call: "apigen.db", args: ["$app"]}, {keep: "db"},
+		{call: "apigen.sent", args: ["$db", _ada, _room, "create", "INSERT INTO api_v1.counter_open (request_id) VALUES ('o1')"]},
+		{call: "apigen.sent", args: ["$db", _bob, _room, "join", "INSERT INTO api_v1.counter_open (request_id) VALUES ('j1')"]},
+		{call: "apigen.sent", args: ["$db", _ada, _room, "add", "INSERT INTO api_v1.counter_command (request_id, etag, payload) VALUES ('r1', '1', '{\"n\": 2}') RETURNING name, event, payload, etag, outcome"], expect: [{name: _room, event: "add", payload: {n: 2}, etag: "2", outcome: "accepted"}], why: "one call answers the outcome and the room's next etag"},
+		{call: "apigen.sent", args: ["$db", _ada, _room, "add", "INSERT INTO api_v1.counter_command (request_id, etag, payload) VALUES ('r1', '1', '{\"n\": 2}') RETURNING etag, outcome"], expect: [{etag: "2", outcome: "accepted"}], why: "a retry with the same request_id and body is the stored row"},
+		{call: "apigen.as", args: ["$db", _ada, "SELECT count(*)::int AS n, max(total) AS total FROM api_v1.counter_command, api_v1.counter_public"], expect: [{n: 1, total: 2}], why: "the retry wrote no second command and added nothing"},
+		{call: "apigen.sent", args: ["$db", _ada, _room, "add", "INSERT INTO api_v1.counter_command (request_id, etag, payload) VALUES ('r1', '1', '{\"n\": 3}')"], throws: "PT409: idempotency_conflict .request_id.", why: "the same request_id with another body"},
+		{call: "apigen.sent", args: ["$db", _bob, _room, "add", "INSERT INTO api_v1.counter_command (request_id, etag, payload) VALUES ('b1', '1', '{\"n\": 1}')"], throws: "PT409: stale_revision", why: "an etag the room has moved past"},
+		{call: "apigen.sent", args: ["$db", _bob, _room, "add", "INSERT INTO api_v1.counter_command (request_id, etag, payload) VALUES ('b2', '2', '{\"n\": 9}')"], throws: "P0001: rejected .too_big.", why: "the machine's own reason"},
+		{call: "apigen.sent", args: ["$db", _bob, _room, "add", "INSERT INTO api_v1.counter_command (request_id, etag, payload) VALUES ('b2', '2', '{\"n\": 9}')"], throws: "P0001: rejected .too_big.", why: "a retried rejection is judged again"},
+		{call: "apigen.as", args: ["$db", _bob, "SELECT count(*)::int AS n FROM api_v1.counter_command"], expect: [{n: 0}], why: "a rejection stores nothing"},
+		{call: "apigen.sent", args: ["$db", _bob, _room, "tick", "INSERT INTO api_v1.counter_command (request_id, etag) VALUES ('b3', '2')"], throws: "PT404", why: "a server-only event is no event of the view's"},
+		{call: "apigen.sent", args: ["$db", _bob, _room, "add", "INSERT INTO api_v1.counter_command (request_id, payload) VALUES ('b4', '{}')"], throws: "PT400: invalid_argument .etag.", why: "every event names the etag it was decided on"},
+		{call: "apigen.sent", args: ["$db", _bob, _room, "add", "INSERT INTO api_v1.counter_command (request_id, etag, outcome) VALUES ('b5', '2', 'accepted')"], throws: "42501", why: "only payload, etag and request_id are the client's"},
+		{call: "apigen.sent", args: ["$db", _bob, "counters/" + _n1, "add", "INSERT INTO api_v1.counter_command (request_id, etag) VALUES ('b6', '2')"], throws: "PT404", why: "no seat in that room"},
+		{call: "apigen.sent", args: ["$db", _bob, _room, "finish", "INSERT INTO api_v1.counter_command (request_id, etag) VALUES ('b7', '2') RETURNING etag, outcome"], expect: [{etag: "3", outcome: "accepted"}]},
+		{call: "apigen.as", args: ["$db", _ada, "SELECT phase, etag FROM api_v1.counter"], expect: [{phase: "finished", etag: "3"}], why: "the other seat reads the new etag on its next Get"},
+		{call: "apigen.replayed", args: ["$db", "$app"], expect: "replayed", why: "the views and triggers replay"},
+	]}
+	"the door routes a machine's Create, join and exported events onto its views with the room and event in its own headers": {suite: "api", steps: [
+		{call: "apigen.app"}, {keep: "app"},
+		{call: "apigen.generated", args: ["$app"]},
+		{call: "apigen.door", args: ["$app"]}, {keep: "d"},
+		{call: "apigen.call", args: ["$d", "POST", "/api/v1/counters/c1:add", {"X-Api-Name": "counters/other", "X-Api-Event": "tick"}], holds: {status: 200, seen: {method: "POST", path: "/counter_command", query: "", content_profile: "api_v1", prefer: "return=representation", accept: "application/vnd.pgrst.object+json", api_name: "counters/c1", api_event: "add"}}, why: "the client's X-Api headers are the door's"},
+		{call: "apigen.call", args: ["$d", "POST", "/api/v1/counters/c1:tick"], holds: {status: 404, seen: null}, why: "a server-only event has no route"},
+		{call: "apigen.call", args: ["$d", "POST", "/api/v1/counters/c1:join"], holds: {status: 200, seen: {path: "/counter_open", api_name: "counters/c1", api_event: "join"}}},
+		{call: "apigen.call", args: ["$d", "POST", "/api/v1/counters?counter_id=" + _room_id], holds: {status: 200, seen: {path: "/counter_open", query: "", api_name: _room, api_event: "create"}}},
+		{call: "apigen.call", args: ["$d", "POST", "/api/v1/counters?counter_id=x%26y"], holds: {status: 404, seen: null}, why: "a Create names its room by a uuid"},
+		{call: "apigen.call", args: ["$d", "GET", "/api/v1/counters/c1"], holds: {status: 200, seen: {path: "/counter", query: "?name=eq.counters/c1", api_name: null}}},
+		{call: "apigen.call", args: ["$d", "GET", "/api/v1/counters?page_size=2"], holds: {status: 200, seen: {path: "/counter_public", query: "?order=name.asc&name=gt.&limit=2"}}},
+		{call: "apigen.call", args: ["$d", "GET", "/api/v1/notes/abc", {"X-Api-Name": "counters/c1"}], holds: {status: 200, seen: {api_name: null}}, why: "no route passes a client's X-Api header on"},
+		{call: "apigen.stopped", args: ["$d"]},
 	]}
 	"the spec's flag gates every view per account: off, a view is empty and refuses a write; the keys and PostgREST follow": {suite: "api", steps: [
 		{call: "apigen.app"}, {keep: "app"},
@@ -154,7 +222,9 @@ cases: {
 		{call: "apigen.db", args: ["$app"]}, {keep: "db"},
 		{call: "apigen.as", args: ["$db", _ada, "INSERT INTO api_v1.note (id, body) VALUES ($1, 'off')", [_n1]], throws: "44000", why: "off for ada: the view's check option refuses her write"},
 		{call: "apigen.as", args: ["$db", _ada, "SELECT count(*)::int AS n FROM api_v1.tag"], expect: [{n: 0}], why: "off, every view is empty to her"},
+		{call: "apigen.sent", args: ["$db", _ada, _room, "create", "INSERT INTO api_v1.counter_open (request_id) VALUES ('o1')"], throws: "PT403: api_off", why: "off, a machine's trigger refuses her call"},
 		{call: "apigen.flagOn", args: ["$db", _ada]},
+		{call: "apigen.sent", args: ["$db", _ada, _room, "create", "INSERT INTO api_v1.counter_open (request_id) VALUES ('o1') RETURNING outcome"], expect: [{outcome: "accepted"}]},
 		{call: "apigen.as", args: ["$db", _ada, "INSERT INTO api_v1.note (id, body) VALUES ($1, 'on') RETURNING name, create_time IS NOT NULL AS stamped", [_n1]], expect: [{name: "notes/" + _n1, stamped: true}], why: "on, she writes, and the view stamps create_time (the table has no default)"},
 		{call: "apigen.as", args: ["$db", _ada, "SELECT count(*)::int AS n FROM api_v1.tag"], expect: [{n: 2}]},
 		{call: "apigen.as", args: ["$db", _bob, "SELECT count(*)::int AS n FROM api_v1.tag"], expect: [{n: 0}], why: "per account: still off for bob"},
@@ -165,7 +235,7 @@ cases: {
 	"generate's route puts the API's block before /auth, after the other plugins' blocks, once however often it runs": {suite: "api", steps: [
 		{call: "apigen.app"}, {keep: "app"},
 		{call: "apigen.caddyRouted", args: ["$app"]}, {keep: "c"},
-		{get: "once", matches: #"  # flags:end\n  # pronto-api:begin[^\n]*\n  request_header -Accept-Profile\n  request_header -Content-Profile\n  handle /api/v1/\* \{\n    route \{[\s\S]*\n  \}\n  # pronto-api:end\n  # The auth service\.\n  handle /auth/\*"#},
+		{get: "once", matches: #"  # flags:end\n  # pronto-api:begin[^\n]*\n  request_header -Accept-Profile\n  request_header -Content-Profile\n  request_header -X-Api-Name\n  request_header -X-Api-Event\n  handle /api/v1/\* \{\n    route \{[\s\S]*\n  \}\n  # pronto-api:end\n  # The auth service\.\n  handle /auth/\*"#},
 		{call: "apigen.caddyRouted", args: ["$app"]}, {get: "twice", matches: #"^(?:(?!pronto-api:begin)[\s\S])*pronto-api:begin(?:(?!pronto-api:begin)[\s\S])*$"#, why: "a second route replaces its block, never adds one"},
 	]}
 	"pronto-api installs its plugin, generator and rules, and seeds the spec once": {suite: "api", steps: [
