@@ -77,6 +77,8 @@ ${links}`);
     provider: {
       name: "google", label: "a test person", authUrl: `${base}/auth`, tokenUrl: `${base}/token`, issuers: [ISSUER],
       keys: async (kid) => (kid === jwk.kid ? jwk : undefined), clientId: CLIENT, clientSecret: SECRET,
+      // Refuses in-app browsers as Google does (PRONTO-448), so a launch shows the open-in-browser step.
+      refusesWebviews: true,
     },
     handle(req, url) {
       if (req.method === "GET" && url.pathname === "/fake/google/auth") return Promise.resolve(authorize(url));
