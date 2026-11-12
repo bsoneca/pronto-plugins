@@ -6,113 +6,109 @@ import (
 	"strings"
 )
 
-// pronto-api (docs/pronto-api.md in pronto): which of the app's entities are exported over gRPC,
-// Connect and REST, and the contract that follows from them. The app's `api_spec.cue` says the
-// `api` value; everything else (field types, the key, whether the entity may be written) is read
-// from program.cue's entities, so nothing is restated, and a spec naming a field, a table or a
-// write the program does not have fails generate. `api/generate.ts` writes the contract out: the
-// .proto, routes.json, the descriptor set, openapi.json and the append-only fields.lock.cue.
-// Functions (PRONTO-324) and machines (PRONTO-314) join the schema with their issues; until then a
-// spec naming either fails, rather than exporting nothing.
+// pronto-api (pronto-plugins docs/pronto-api.md): which of the app's entities are exported as typed
+// views in the schema api_v1, served by the app's own PostgREST, and the contract that follows. The
+// app's `api_spec.cue` says the `api` value; field types, the key and whether the entity may be
+// written are read from program.cue's entities, so nothing is restated, and a spec naming a field,
+// a table or a write the program does not have fails generate. `api/generate.ts` writes the views
+// (api_v1.sql), the door's routes (api_door.cue), openapi.json and contract.json from `apiContract`.
+// Machines (PRONTO-314) join the schema with their issue; until then a spec naming one fails.
 #Api: {
-	// The proto package's root: `<package>.<version>`.
-	package!: =~"^[a-z][a-z0-9]*$"
-	version:  *"v1" | =~"^v[1-9][0-9]*$"
-	// Each exported entity, by its public name (singular, snake_case): the table it reads, and
-	// what is exported of it. Nothing is exported by default.
-	entities: [=~"^[a-z][a-z0-9_]*$"]: #Entity
+	version: *"v1" | =~"^v[1-9][0-9]*$"
+	// Each exported resource, by its collection (plural lowerCamelCase, AIP-122): the table it reads,
+	// its public fields and its methods. Nothing is exported by default.
+	entities: [=~"^[a-z][a-zA-Z0-9]*$"]: #Entity
+	machines?: error("api: machines are exported with PRONTO-314; this spec names one")
 }
 
 #Entity: {
 	table!: string
-	// The plural in REST paths and List RPCs; the public name with an `s` unless said.
-	plural?: =~"^[a-z][a-z0-9_]*$"
-	// Get and List; List filters by equality on these fields.
-	read?: {filter: [...string]}
-	// Create, Update and Delete, each opted into; the entity's access must allow writes.
-	write?: [...("create" | "update" | "delete")]
+	// The view's name, singular snake_case; the collection less its `s` unless said.
+	view?: =~"^[a-z][a-z0-9_]*$"
+	// A nested collection (players/{player}/games/{game}): the parent's collection, and the field
+	// of this table that holds the parent's id.
+	parent?: {collection!: =~"^[a-z][a-zA-Z0-9]*$", field!: string}
+	// Public field (lower_snake_case) -> the program's field it shows. The key is always shown, as
+	// `id` unless a public field names it; name, etag and parent are the view's own.
+	fields!: [=~"^[a-z][a-z0-9_]*$" & !="name" & !="etag" & !="parent" & !="create_time" & !="update_time"]: string
+	create_time?: string
+	update_time?: string
+	methods!: [_, ...] & [...("get" | "list" | "create" | "update" | "delete")]
 }
 
 api: #Api
 
-// pronto types as proto types: the JSON each encodes is the JSON PostgREST reads and writes.
-_apiProtoType: {
-	string: "string", text: "string", tsvector: "string", uuid: "string", timezone: "string"
-	decimal: "string", date: "string", time: "string", duration: "string"
-	bool: "bool", int32: "int32", int: "int32", int64: "int64", bigint: "int64", double: "double"
-	bytes: "bytes", timestamp: "google.protobuf.Timestamp", timestamptz: "google.protobuf.Timestamp"
-	json: "google.protobuf.Value", geojson: "google.protobuf.Value"
-}
-
-// snake_case to PascalCase.
-#Pascal: {
-	snake:  string
-	pascal: strings.Join([for w in strings.Split(snake, "_") {strings.ToUpper(strings.SliceRunes(w, 0, 1)) + strings.SliceRunes(w, 1, len(w))}], "")
+// pronto types as Postgres types (the view's columns) and JSON Schema types (openapi.json).
+_apiTypes: {
+	string: {pg: "text", json: "string"}
+	text: {pg: "text", json: "string"}
+	tsvector: {pg: "tsvector", json: "string"}
+	uuid: {pg: "uuid", json: "string", format: "uuid"}
+	timezone: {pg: "text", json: "string"}
+	decimal: {pg: "numeric", json: "string"}
+	date: {pg: "date", json: "string", format: "date"}
+	time: {pg: "time", json: "string"}
+	duration: {pg: "interval", json: "string"}
+	bool: {pg: "boolean", json: "boolean"}
+	int32: {pg: "integer", json: "integer", format: "int32"}
+	int: {pg: "integer", json: "integer", format: "int32"}
+	int64: {pg: "bigint", json: "string", format: "int64"}
+	bigint: {pg: "bigint", json: "string", format: "int64"}
+	double: {pg: "double precision", json: "number"}
+	bytes: {pg: "bytea", json: "string", format: "byte"}
+	timestamp: {pg: "timestamptz", json: "string", format: "date-time"}
+	timestamptz: {pg: "timestamptz", json: "string", format: "date-time"}
+	json: {pg: "jsonb", json: "object"}
+	geojson: {pg: "jsonb", json: "object"}
 }
 
 _apiByTable: {for _, e in code.state.entities {(e.table): e}}
 
-// The contract, in the order generate writes it: services with their methods and REST bindings,
-// the messages they carry (fields by name; numbers come from fields.lock.cue, never from here),
-// and the route table the service serves REST from.
+// The contract generate writes out, one resource per exported entity, in collection order: its
+// view, its fields (public name, the table's column, the type) and its methods. A field the
+// entity lacks (a dropped column the spec still names) or a write its access forbids fails here,
+// saying which.
 apiContract: {
-	package: "\(api.package).\(api.version)"
-	file:    "\(api.package).proto"
-	services: [for pub, s in api.entities {
-		let e = _apiByTable[s.table]
-		let live = [for f in e.fields if !(*f.retired | false) {f}]
-		let names = [for f in live {f.name}]
-		let pk = [for f in live if (*f.pk | false) {f.name}][0]
-		let E = (#Pascal & {snake: pub}).pascal
-		let pl = [if s.plural != _|_ {s.plural}, "\(pub)s"][0]
-		let Es = (#Pascal & {snake: pl}).pascal
-		let base = "/api/\(api.version)/\(pl)"
-		// A filter naming a field the entity does not have (a dropped column an export needs), or a
-		// write on an entity whose access forbids it, fails generate, saying which.
-		let filters = [for f in *s.read.filter | [] {[if list.Contains(names, f) {f}, error("api: \(s.table) has no field \(f), which the spec's read.filter names")][0]}]
-		let writes = [if s.write != _|_ for w in s.write {[if (*e.access.write | false) {w}, error("api: \(s.table)'s access forbids writes, which the spec exports")][0]}]
-		name: "\(E)Service"
-		methods: [
-			if s.read != _|_ {
-				{name: "Get\(E)", input: "Get\(E)Request", output: E, http: {method: "GET", path: "\(base)/{\(pk)}"}}
+	version: api.version
+	schema:  "api_\(api.version)"
+	resources: [for coll in list.SortStrings([for c, _ in api.entities {c}]) {
+		let s = api.entities[coll]
+		let e = [if _apiByTable[s.table] != _|_ {_apiByTable[s.table]}, error("api: no entity has the table \(s.table), which the spec's \(coll) names")][0]
+		let live = {for f in e.fields if !(*f.retired | false) {(f.name): f}}
+		let col = {
+			for pub, name in s.fields {
+				(pub): [if live[name] != _|_ {live[name]}, error("api: \(s.table) has no field \(name), which the spec's \(coll).\(pub) names")][0]
+			}
+		}
+		let pk = [for _, f in live if (*f.pk | false) {f}][0]
+		let keyed = [for pub, name in s.fields if name == pk.name {pub}]
+		let stamp = {
+			if s.create_time != _|_ {create_time: s.create_time}
+			if s.update_time != _|_ {update_time: s.update_time}
+		}
+		collection: coll
+		view:       [if s.view != _|_ {s.view}, strings.TrimSuffix(coll, "s")][0]
+		table:      s.table
+		if s.parent != _|_ {
+			parent: {
+				collection: s.parent.collection
+				column:     [if live[s.parent.field] != _|_ {s.parent.field}, error("api: \(s.table) has no field \(s.parent.field), which the spec's \(coll).parent names")][0]
+			}
+		}
+		key: {column: pk.name, type: _apiTypes[pk.type].pg}
+		fields: [
+			if len(keyed) == 0 {{name: "id", column: pk.name, type: pk.type, writable: true}},
+			for pub in list.SortStrings([for p, _ in s.fields {p}]) {
+				name: pub, column: [if pub != "id" || col[pub].name == pk.name {col[pub].name}, error("api: \(coll).id names \(col[pub].name), not the key \(pk.name)")][0], type: col[pub].type, writable: true
 			},
-			if s.read != _|_ {
-				{name: "List\(Es)", input: "List\(Es)Request", output: "List\(Es)Response", http: {method: "GET", path: base}}
-			},
-			for w in writes if w == "create" {
-				{name: "Create\(E)", input: "Create\(E)Request", output: E, http: {method: "POST", path: base, body: "*"}}
-			},
-			for w in writes if w == "update" {
-				{name: "Update\(E)", input: "Update\(E)Request", output: E, http: {method: "PATCH", path: "\(base)/{\(pk)}", body: "*"}}
-			},
-			for w in writes if w == "delete" {
-				{name: "Delete\(E)", input: "Delete\(E)Request", output: "Delete\(E)Response", http: {method: "DELETE", path: "\(base)/{\(pk)}"}}
-			},
-		]
-		messages: [
-			{name: E, fields: [for f in live {name: f.name, type: _apiProtoType[f.type]}]},
-			if s.read != _|_ {
-				{name: "Get\(E)Request", fields: [for f in live if f.name == pk {name: f.name, type: _apiProtoType[f.type]}]}
-			},
-			if s.read != _|_ {
-				{name: "List\(Es)Request", fields: [for f in live for g in filters if f.name == g {name: f.name, type: _apiProtoType[f.type]}]}
-			},
-			if s.read != _|_ {
-				{name: "List\(Es)Response", fields: [{name: "items", type: E, repeated: true}]}
-			},
-			for w in writes if w == "create" {
-				{name: "Create\(E)Request", fields: [for f in live {name: f.name, type: _apiProtoType[f.type]}]}
-			},
-			for w in writes if w == "update" {
-				{name: "Update\(E)Request", fields: [for f in live {name: f.name, type: _apiProtoType[f.type]}]}
-			},
-			for w in writes if w == "delete" {
-				{name: "Delete\(E)Request", fields: [for f in live if f.name == pk {name: f.name, type: _apiProtoType[f.type]}]}
-			},
-			for w in writes if w == "delete" {
-				{name: "Delete\(E)Response", fields: []}
+			for k in list.SortStrings([for k, _ in stamp {k}]) {
+				name: k, column: [if live[stamp[k]] != _|_ {stamp[k]}, error("api: \(s.table) has no field \(stamp[k]), which the spec's \(coll).\(k) names")][0], type: "timestamptz", writable: false
 			},
 		]
+		methods: [for m in ["get", "list", "create", "update", "delete"] if list.Contains(s.methods, m) {
+			[if m == "get" || m == "list" || (*e.access.write | false) {m}, error("api: \(s.table)'s access forbids writes, which the spec's \(coll) exports")][0] &
+			[if s.parent == _|_ || m == "get" || m == "list" || m == "delete" {m}, error("api: \(coll) is nested; its Create and Update come with the parent from the path, not yet")][0]
+		}]
 	}]
-	routes: [for s in services for m in s.methods {method: m.http.method, path: m.http.path, rpc: "\(package).\(s.name)/\(m.name)"}]
+	types: _apiTypes
 }

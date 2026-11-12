@@ -1,63 +1,62 @@
 # api
 
-pronto-api's spike (PRONTO-289; the design is pronto's `docs/pronto-api.md`): one Deno service,
-[`service.ts`](service.ts), that loads a descriptor set at run time into a protobuf-es registry, with
-no generated stubs, and serves its methods over native gRPC, Connect (and gRPC-Web) and a REST route
-table, all on one port. Every method answers only while the flag `api_export` is on, read from
-flagd over OFREP (`ofrepFlag`); off, gRPC and Connect say `unimplemented` and REST `404`. Nothing
-installs it yet: the installer, the service for entities and functions (PRONTO-324) and the apps
-come after.
+pronto-api (design: [`docs/pronto-api.md`](../docs/pronto-api.md)): an app's entities exported as
+a REST/JSON API that is PostgREST over typed views, with no service and no translation code. Nothing
+installs it yet: the installer and guestbook come with PRONTO-325, machines with PRONTO-314.
 
-## The generator (PRONTO-313)
+## The generator (PRONTO-324)
 
-[`generate.ts`](generate.ts) turns an app's `api_spec.cue` and `program.cue` into its contract,
-through [`app/api_plugin.cue`](app/api_plugin.cue)'s `#Api` schema and `apiContract`. The spec
-names what is exported. Field types, the key and whether an entity may be written are all read from
-the program's entities, so a spec that names a filter field the entity lacks (a dropped column), or a
-write its access forbids, fails generate and says which. It writes under `api/v1/`:
+[`generate.ts`](generate.ts) turns an app's `api_spec.cue` and `program.cue` into its API, through
+[`app/api_plugin.cue`](app/api_plugin.cue)'s `#Api` schema and `apiContract`. The spec names each
+exported resource by its collection, the table it reads, its public fields and its methods; types,
+the key and whether the entity may be written come from the program, so a spec naming a field the
+entity lacks (a dropped column), a write its access forbids, or a machine fails generate, saying
+which.
+
+```cue
+api: entities: notes: {
+	table:       "note"
+	fields:      {owner: "owner_id", body: "body", stars: "stars"} // public name: program field
+	create_time: "created"                                         // read-only stamps
+	methods: ["get", "list", "create", "update", "delete"]
+}
+api: entities: noteTags: {table: "note_tag", parent: {collection: "notes", field: "note_id"}, fields: {label: "label"}, methods: ["get", "list"]}
+```
+
+It writes:
 
 | File | What |
 | --- | --- |
-| `<package>.proto` | the published contract: a service per entity (Get, List, and Create/Update/Delete where opted into), with `google.api.http` annotations |
-| `routes.json` | the REST route table `service.ts` serves (its `Route[]`) |
-| `fields.lock.cue` | every field number ever given, append-only: a new field takes one above every number its message had; a removed field's stays under `retired` and is never given again |
-| `descriptor.binpb` | `buf build` of the .proto beside the vendored `google/api` annotations ([`proto/`](proto/)), which the service loads |
-| `openapi.json` | OpenAPI 3.1 for the REST routes, from the same contract |
+| `api/v1/api_v1.sql` | schema `api_v1`: per resource a `security_invoker` view (`name`, the key as `id` unless a field names it, the public fields, the stamps, `etag`), `SELECT` and the exported writes granted to `app_user` column by column, nothing to `PUBLIC` or `anon`. Replayed by every release; `CREATE OR REPLACE VIEW` refuses a dropped, renamed or retyped column |
+| `api_door.cue` | `apiDoor`: the routes, the Caddyfile block (`handle /api/v1/*`) that rewrites each onto its view, and the headers the `/crud` block strips (`Accept-Profile`, `Content-Profile`) |
+| `api/v1/openapi.json` | OpenAPI 3.1 for the routes, PostgREST's error body |
+| `api/v1/contract.json` | every resource, field, type and route, sorted |
 
-`generate` fails on a lock that gives one number twice in a message, or that numbers a field
-otherwise than `api/v1/released.binpb` (the last release's descriptor set) did. `generate.ts breaking
-<app>` runs `buf breaking` (rule set `WIRE_JSON`) against that release, so removing a released field
-fails it. Functions (PRONTO-324) and machines (PRONTO-314) join the schema with their issues.
+`generate.ts check <app>` holds `contract.json` to `api/v1/released.json`, the last release's: a
+resource, method, route or field removed, or a field retyped, fails it; an addition does not.
 
-[`lint.ts`](lint.ts) keeps every app's name out of `api/`. The words it looks for are the cases'
-data (`tests/unit/api_generate.cue`), since code here would name them.
+A view's columns keep the order of the last release (`released.json`) and new ones go last, since
+`CREATE OR REPLACE VIEW` only adds columns at the end. `etag` hashes the public fields only. A nested
+resource has a `parent` column (`notes/{note}`), which its List filters on; its Create and Update
+(the parent taken from the path) are not built yet, and a spec exporting them fails generate.
 
-What it settled, each measured by a case of [`tests/unit/api.cue`](../tests/unit/api.cue):
+Views stay auto-updatable: a public field is a plain column reference, so Postgres maps a write
+back onto the table, and the table's RLS and CHECK constraints judge it as the caller. A stamp is
+cast and not granted, and the key is not granted for `UPDATE`, so writing either is `42501`.
 
-- **connect-es serves a service built purely from a runtime descriptor.** `createFileRegistry` over
-  a `FileDescriptorSet` gives a `DescService` that `router.service` takes like a generated one;
-  requests arrive as messages of the registry's types and answers may be plain objects. The fallback
-  (generated TypeScript stubs per app) is not needed.
-- **Deno takes h2c, with trailers, on Deno 2.9.** `node:http2`'s server answers native gRPC with its
-  `grpc-status` trailer and Connect over HTTP/2, through connect-node's adapter unchanged. Deno 2.5's
-  `node:http2` loses `:method`, `:authority` and the socket, so the service needs 2.9 (the Deno
-  pronto's apps pin); ci runs this suite on 2.9.7. `Deno.serve` takes h2c too but has no response
-  trailers, so it cannot answer gRPC.
-- **One port for HTTP/1.1 and HTTP/2.** A plain `node:http2` server refuses HTTP/1.1, so the
-  service listens with `node:net` and hands each connection to the HTTP/2 server when it opens with
-  the HTTP/2 preface (`PRI`), else to `node:http`. Cloud Run with end-to-end HTTP/2 sends only h2c;
-  locally a browser's or curl's HTTP/1.1 reaches the same port.
-- **REST through the same method.** A route (`GET /api/v1/ping/{text}`) fills the request from its
-  path segments, its query and its JSON body (`fromJson` of the method's input), calls the same
-  handler, and answers `toJson` of its output. Connect's codes map to HTTP statuses; an error the
-  handler did not mean is `internal` with its message kept back, as connect-es does.
-- **A missing service, method or route fails at start**, not on the first call.
+The door builds every PostgREST query itself from the route: `GET /api/v1/notes/{id}` becomes
+`GET /note?name=eq.notes/{id}` with the singular `Accept`, a List
+`?order=name.asc&name=gt.{after}&limit={page_size}` (1 to 200, else 50), `PATCH` with `If-Match`
+adds `etag=eq.…`. The client's query, `Prefer` and profile headers never reach PostgREST; an id or
+cursor that could start a filter, and every path not generated, is `404`.
 
-Not settled here: Cloud Run's end-to-end HTTP/2 in front of it (PRONTO-320, the API on the wire).
+[`lint.ts`](lint.ts) keeps every app's name, and the wire formats this plugin no longer is, out of
+`api/`. The words are the cases' data (`tests/unit/api_generate.cue`).
 
-Its cases are `tests/unit/api.cue` (the service) and `tests/unit/api_generate.cue` (the generator,
-on the stand-in app `tests/unit/api-fixture/`). They need cue and buf, on PATH or as `CUE` and `BUF`.
+Its cases are `tests/unit/api_generate.cue`, on the stand-in app `tests/unit/api-fixture/`: the views
+on PGlite as two users, the door in caddy in front of a stand-in PostgREST, the contract check and
+the lint. They need cue and caddy, on PATH or as `CUE` and `CADDY`.
 
 ```sh
-deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- api   # Deno 2.9
+deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- api
 ```

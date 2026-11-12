@@ -184,27 +184,21 @@ jobs:
         run: sayt --script tools.nu nu -c 'let bad = (glob **/*.nu | where {|f| not (nu-check $f) }); if ($bad | is-not-empty) { print $bad; exit 1 }'
       - name: Test the intents (tests/unit/*.cue)
         run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android probe devflow migrations; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
-      # pronto-api (api/, tests/unit/api*.cue) needs the Deno pronto's apps run, 2.9: 2.5's
-      # node:http2 server loses :method and the socket, so gRPC never reaches connect-es. Its
-      # generator builds and holds descriptor sets with buf, checked against its release's digest.
-      - name: Test pronto-api (Deno 2.9.7, buf 1.74.0)
+      # pronto-api (api/, tests/unit/api_generate.cue): its views run on PGlite, its door in caddy,
+      # the version pronto's doors run (caddy:2.11.7-alpine), checked against its release's digest.
+      - name: Test pronto-api (caddy 2.11.7)
         env:
-          DENO_VERSION: v2.9.7
-          DENO_SHA256: c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490
-          BUF_VERSION: 1.74.0
-          BUF_SHA256: 92326d957d613712669fb55f9e4340946a8142a92120e09008459118778273d2
+          CADDY_VERSION: 2.11.7
+          CADDY_SHA512: a7a433a1b133efc3c8d10eb0b99d52a24b5ef5c322dc77f5282182b1c0402139ab83f3a99f0c52409df77d20123fb0b523edad8a66d8f5e49136197bf61ef0e7
         run: |
-          dir="$RUNNER_TEMP/deno-2.9"
+          dir="$RUNNER_TEMP/caddy"
           mkdir -p "$dir"
-          curl -fsSL -o "$dir/deno.zip" "https://github.com/denoland/deno/releases/download/$DENO_VERSION/deno-x86_64-unknown-linux-gnu.zip"
-          echo "$DENO_SHA256  $dir/deno.zip" | sha256sum -c -
-          unzip -q "$dir/deno.zip" -d "$dir"
-          curl -fsSL -o "$dir/buf" "https://github.com/bufbuild/buf/releases/download/v$BUF_VERSION/buf-Linux-x86_64"
-          echo "$BUF_SHA256  $dir/buf" | sha256sum -c -
-          chmod +x "$dir/buf"
-          export BUF="$dir/buf"
-          "$dir/deno" lint --no-config api
-          "$dir/deno" test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- api
+          curl -fsSL -o "$dir/caddy.tar.gz" "https://github.com/caddyserver/caddy/releases/download/v$CADDY_VERSION/caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
+          echo "$CADDY_SHA512  $dir/caddy.tar.gz" | sha512sum -c -
+          tar -xzf "$dir/caddy.tar.gz" -C "$dir" caddy
+          export CADDY="$dir/caddy"
+          deno lint --no-config api
+          deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- api
       # flagd, the version the flags plugin pins, checked against its release's digest.
       - name: Install flagd
         env:

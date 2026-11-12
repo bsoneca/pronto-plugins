@@ -23,4 +23,13 @@ code: state: entities: {
 			{ordinal: 3, name: "old", type: "string", retired: true},
 		]
 	}
+	NoteTag: {
+		table: "note_tag"
+		access: {scope: "public"}
+		fields: [
+			{ordinal: 1, name: "id", type: "uuid", pk: true},
+			{ordinal: 2, name: "note_id", type: "uuid"},
+			{ordinal: 3, name: "label", type: "string"},
+		]
+	}
 }
