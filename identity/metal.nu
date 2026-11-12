@@ -17,11 +17,12 @@ const here = path self .
 use ../common/sops.nu
 use ../common/airlock.nu [airlock-objects door_port]
 use ../common/broker_db.nu
+use ../common/replicas.nu
 const deno = "denoland/deno:distroless-2.5.0@sha256:5c4530d4babe37ded3566803e9498e2b5d643b915cce701d8b7b82f87a86629e"
 const port = 8080
-# The broker's replicas. One until the scaling change (PRONTO-371): with the store, the rollout below
-# could overlap them, so a Recreate is no longer needed for the codes' sake.
-const replicas = 1
+# The broker's replicas (PRONTO-371): any of them answers any request, since what it keeps is in its
+# database (broker/store.ts), so losing one pod, or a node's drain, costs nothing a caller sees.
+const replicas = 3
 # The credential the airlock holds instead of the broker (--airlock, PRONTO-268): Google's token
 # endpoint takes the client's id and secret as client_secret_basic, which the airlock adds as the
 # Authorization header, `Basic <GOOGLE_CLIENT_BASIC>`: base64 of `<client id>:<client secret>`.
@@ -83,14 +84,14 @@ export def manifests [
 			apiVersion: "apps/v1", kind: "Deployment", metadata: ($meta | insert name $name)
 			spec: {
 				replicas: $replicas
-				# Once, a code minted by the old pod was unknown to the new one, so never two at once. The store
-				# (DATABASE_URL) keeps them now and the reason is gone; the strategy changes with the scaling.
-				strategy: {type: "Recreate"}
+				# A new pod is ready before an old one goes: never fewer than `replicas` answering.
+				strategy: {type: "RollingUpdate", rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
 				selector: {matchLabels: $labels}
 				template: {
 					metadata: {labels: $labels, annotations: {"pronto.dev/files": $digest}}
 					spec: {
 						automountServiceAccountToken: false
+						topologySpreadConstraints: (replicas spread $labels)
 						securityContext: {runAsNonRoot: true, runAsUser: 1993, runAsGroup: 1993, seccompProfile: {type: "RuntimeDefault"}}
 						containers: [{
 							name: "broker"
@@ -124,6 +125,7 @@ export def manifests [
 			}
 		}
 		{apiVersion: "v1", kind: "Service", metadata: ($meta | insert name $name), spec: {selector: $labels, ports: [{name: "http", port: $port, targetPort: $port}]}}
+		...(replicas budget $meta $name $labels $replicas)
 		# Behind the node's tunnel: Cloudflare holds the certificate, Envoy routes by host.
 		{
 			apiVersion: "gateway.networking.k8s.io/v1", kind: "Gateway", metadata: ($meta | insert name $name)
