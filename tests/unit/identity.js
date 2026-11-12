@@ -448,3 +448,35 @@ export async function proveFlow(p = {}) {
   }
   return { log, gateCalls, proof, page, js };
 }
+
+/** The production broker's sign-in for a reader whose browser says `ua` (PRONTO-448), at a provider that refuses
+ * webviews as Google does (`refuses`) or not: which step its page offers ("open-in-browser" or "continue"), the link
+ * it offers to the reader's own browser (Android's intent, or the copied link), and, where the page goes on, whether
+ * the same tab comes back to the tenant's callback with a code that the tenant redeems for an ID token. */
+export async function webviewSignIn(ua, refuses = true) {
+  const tokens = new Map();
+  const server = Deno.serve({ hostname: '127.0.0.1', port: 0, onListen() {} }, async (req) => {
+    const code = new URLSearchParams(await req.text()).get('code');
+    return Response.json({ id_token: tokens.get(code) });
+  });
+  try {
+    const issuer = 'https://id.example.com';
+    const handle = await broker({ issuer, secret: 's'.repeat(40), providers: [{ ...google(`http://127.0.0.1:${server.addr.port}/token`), refusesWebviews: refuses }] });
+    const verifier = randomToken(32);
+    const q = new URLSearchParams({ client_id: TENANT, provider: 'google', redirect_uri: CALLBACK, state: 'S1', response_type: 'code', scope: 'openid', code_challenge: await sha256url(verifier), code_challenge_method: 'S256', nonce: 'N1' });
+    const headers = ua === null ? {} : { 'user-agent': ua };
+    const page = await (await handle(new Request(`${issuer}/authorize?${q}`, { headers }))).text();
+    if (/data-open-in-browser/.test(page)) {
+      const link = (/data-open-in-browser href="([^"]+)"/.exec(page) ?? /data-open-in-browser readonly value="([^"]+)"/.exec(page))[1].replaceAll('&#38;', '&');
+      return { step: 'open-in-browser', link, popup: /window\.open|target="_blank"/.test(page) };
+    }
+    const toGoogle = new URL((await handle(new Request(linkOf(page, '/authorize/continue'), { headers }))).headers.get('location'));
+    tokens.set('G1', await googleToken({}, toGoogle.searchParams.get('nonce')));
+    const back = new URL((await handle(new Request(`${issuer}/callback/google?code=G1&state=${encodeURIComponent(toGoogle.searchParams.get('state'))}`, { headers }))).headers.get('location'));
+    const form = new URLSearchParams({ grant_type: 'authorization_code', code: back.searchParams.get('code') ?? '', client_id: TENANT, redirect_uri: CALLBACK, code_verifier: verifier });
+    const { id_token } = await (await handle(new Request(`${issuer}/token`, { method: 'POST', body: form }))).json();
+    return { step: 'continue', back: `${back.origin}${back.pathname}`, state: back.searchParams.get('state'), signedIn: typeof claimsOf(id_token).sub === 'string', popup: /window\.open|target="_blank"/.test(page) };
+  } finally {
+    await server.shutdown();
+  }
+}

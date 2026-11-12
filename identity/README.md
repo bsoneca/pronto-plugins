@@ -42,6 +42,10 @@ It runs the broker's files on the pinned Deno image from a ConfigMap (no image t
 
 The env file is never committed. It holds `BROKER_ISSUER`, `BROKER_SECRET` and each provider's client, such as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. `bin/pronto-identity-hydra` runs the broker on Ory Hydra on the operator's machine instead. The app side is [`host.cue`](host.cue) and [`export/`](export). The [`pronto-identity` skill](../skills/pronto-identity/SKILL.md) covers both halves.
 
+## In-app browsers
+
+An ad lands players in Instagram's, Facebook's, Messenger's, TikTok's or LINE's own browser, a webview. Sign-in is a same-tab redirect throughout: the terminal's provider link, the auth service, the broker's page, the provider, and back to the page the reader left. Nothing opens a popup, so it works in a webview. The exception is a provider that refuses webviews outright, as Google does (`403 disallowed_useragent`): a provider marked `refusesWebviews`. For such a provider, a reader whose user agent names a webview ([`broker/core.ts`](broker/core.ts) `webviewOf`) gets an "Open in your browser" page instead of the provider's. On Android it is an `intent://` link to the default browser; on iOS it is the menu's *Open in browser*, or the link to copy. In the reader's own browser the same sign-in starts again at the tenant (`/auth/oidc/<provider>/start`). The app's passkey stays offered in the webview. The local stand-in Google refuses webviews too, so a launch shows the same page (PRONTO-448).
+
 ## The phone
 
 A broker whose operator turns the phone on also offers `phone`: the person types a mobile number, is texted a code, and the broker vouches for a pairwise subject derived from that number, as it does for Google's. No claim carries the number. The page is the broker's own ([`broker/phone.ts`](broker/phone.ts), under `/phone`), served behind the same code flow as any provider, so `/authorize`, Hydra's login and the callback are unchanged. Two modes, chosen by `PHONE_OTP`:

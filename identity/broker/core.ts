@@ -221,3 +221,62 @@ export const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt
 
 export const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+
+// In-app browsers (PRONTO-448). An app's ad lands its players in Instagram's, Facebook's, Messenger's,
+// TikTok's or Line's own browser, a webview. Sign-in here is a same-tab redirect throughout (the
+// terminal's provider link, the auth service, this page, the provider and back), never a popup, so
+// it works in a webview, except at a provider that refuses webviews outright: Google answers
+// "403 disallowed_useragent". There this page offers the reader's own browser instead, where the
+// same sign-in starts again, and the app's passkey and e-mail stay where they were.
+
+/** The in-app browser a user agent names, or null for a browser of its own. */
+export function webviewOf(ua: string | null | undefined): { app: string; os: "android" | "ios" | "other" } | null {
+  const s = ua ?? "";
+  const os = /Android/.test(s) ? "android" : /iPhone|iPad|iPod/.test(s) ? "ios" : "other";
+  const named: [RegExp, string][] = [
+    [/\bInstagram\b/, "instagram"],
+    [/FBAN\/Messenger|\bMessengerForiOS\b|\bOrca-Android\b|\bMessengerLite/, "messenger"],
+    [/\bFBAN\/|\bFBAV\/|\bFB_IAB\//, "facebook"],
+    [/\bmusical_ly\b|\bTikTok\b|\bBytedanceWebview\b|\bByteLocale\b/, "tiktok"],
+    [/\bLine\/\d/, "line"],
+  ];
+  for (const [re, app] of named) if (re.test(s)) return { app, os };
+  // Any other Android webview says `wv` in its platform; an iOS one is WebKit without Safari's
+  // token (Chrome, Firefox and Edge on iOS name themselves, and are browsers).
+  if (os === "android" && /;\s*wv\)/.test(s)) return { app: "webview", os };
+  if (os === "ios" && /AppleWebKit/.test(s) && !/Safari\/|CriOS|FxiOS|EdgiOS|OPiOS/.test(s)) return { app: "webview", os };
+  return null;
+}
+
+/** How a sign-in with `provider` goes on for this user agent: "redirect" (the provider's own
+ * pages, same tab), or "open-in-browser" where the provider refuses this webview. */
+export const signInFlow = (ua: string | null | undefined, provider: { refusesWebviews?: boolean }) =>
+  provider.refusesWebviews && webviewOf(ua) ? "open-in-browser" : "redirect";
+
+/** Where the reader's own browser starts the same sign-in: the tenant's auth service's start for the
+ * provider (mecha's, beside callbackOf's callback), back at the app's front page. */
+export const startOf = (tenant: string, provider: string) => `${tenant}/auth/oidc/${provider}/start?return=%2F`;
+
+/** An Android link that opens `url` in the reader's default browser, out of the webview; a browser
+ * that cannot follow it goes to `url` itself. */
+export function intentOf(url: string): string {
+  const u = new URL(url);
+  return `intent://${u.host}${u.pathname}${u.search}#Intent;scheme=${u.protocol.replace(":", "")};action=android.intent.action.VIEW;S.browser_fallback_url=${encodeURIComponent(url)};end`;
+}
+
+const APP_NAMES: Record<string, string> = { instagram: "Instagram", facebook: "Facebook", messenger: "Messenger", tiktok: "TikTok", line: "LINE" };
+
+/** The page's body where the provider refuses the webview: open the sign-in in the reader's own
+ * browser (Android: one tap; iOS: the in-app browser's menu, or the link copied). No script: the
+ * page's CSP allows none. */
+export function openInBrowserBody(p: { host: string; label: string; url: string; webview: { app: string; os: string } }): string {
+  const inApp = APP_NAMES[p.webview.app] ? `${APP_NAMES[p.webview.app]}'s browser` : "this app's browser";
+  const how = p.webview.os === "android"
+    ? `<p><a class="go" data-open-in-browser href="${esc(intentOf(p.url))}">Open in your browser</a></p>`
+    : `<p>Tap <b>•••</b> (or the share button) and choose <b>Open in browser</b>${p.webview.os === "ios" ? " (Safari)" : ""}. Or copy this link into your browser:</p>
+<p><input data-open-in-browser readonly value="${esc(p.url)}" aria-label="Sign-in link" style="width:100%;font:inherit;padding:.5rem"></p>`;
+  return `<h1>Open <span class="origin">${esc(p.host)}</span> in your browser</h1>
+<p>${esc(p.label)} doesn't allow signing in inside ${esc(inApp)}. Sign in from your phone's own browser instead.</p>
+${how}
+<p><small>Or go back and sign in another way the app offers here, such as a passkey.</small></p>`;
+}
