@@ -7,3 +7,5 @@ set -eu
 cd "$(dirname "$0")"
 deno bundle --platform=deno npm:postgres@3.4.7 -o postgres.js
 sed -i.bak "/^\/\/ \.\.\/.*registry\.npmjs\.org/d" postgres.js && rm postgres.js.bak
+# Another's code, kept as the bundler wrote it: not held to this repository's lint.
+{ printf '// deno-lint-ignore-file\n'; cat postgres.js; } > postgres.js.new && mv postgres.js.new postgres.js

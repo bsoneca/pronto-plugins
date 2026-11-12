@@ -1,3 +1,4 @@
+// deno-lint-ignore-file
 import os from "node:os";
 import fs from "node:fs";
 

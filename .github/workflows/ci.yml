@@ -177,7 +177,7 @@ jobs:
       - name: Test the identity broker
         run: deno test --no-config --allow-net --allow-read --allow-env identity/oidc_test.ts identity/broker
       - name: Test the billing broker
-        run: deno lint --no-config --ignore=billing/broker/vendor billing intents gcp devflow release-cron release-notes prod-watch probe runners migrations tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run --allow-env billing
+        run: deno lint --no-config billing intents gcp devflow release-cron release-notes prod-watch probe runners migrations tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run --allow-env billing
       # A script that does not parse fails only when it is run, and a release script runs rarely
       # (identity/release.nu shipped `env: [...] ++ $phone`, a record field nu cannot parse).
       - name: Parse each nushell script
