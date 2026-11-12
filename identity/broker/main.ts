@@ -13,7 +13,7 @@ import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refu
 import { doorKey, throughDoor } from "./door.ts";
 import { tenantAdmitted } from "./phone.ts";
 import { type Store, MemoryStore, sealedOnce, sharedKeyPair, storeFrom } from "./store.ts";
-import { type AuthRequest, Codes, emailOf, esc, json, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, sectorOf, sectorsOf, profileOf, providerScope, redeem } from "./core.ts";
+import { type AuthRequest, Codes, emailOf, esc, json, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, sectorOf, sectorsOf, profileOf, providerScope, redeem, openInBrowserBody, signInFlow, startOf, webviewOf } from "./core.ts";
 
 // Kept where phone.ts takes them (core.ts), so the phone imports nothing of this module at run time:
 // a cycle with its top-level await would never resolve, and the broker would never start.
@@ -47,6 +47,9 @@ export interface Provider {
   /** The token exchange in-process, for a provider the broker serves itself (the phone), instead
    * of a request to tokenUrl. */
   exchange?: (form: URLSearchParams) => Promise<Response>;
+  /** Whether the provider refuses in-app browsers (Google's 403 disallowed_useragent): there the
+   * broker's page offers the reader's own browser instead (core.ts signInFlow, PRONTO-448). */
+  refusesWebviews?: boolean;
 }
 
 export function google(env: (k: string) => string | undefined): Provider | null {
@@ -70,6 +73,7 @@ export function google(env: (k: string) => string | undefined): Provider | null 
     tokenUrl: env("GOOGLE_TOKEN_URL") || "https://oauth2.googleapis.com/token",
     issuers: ["https://accounts.google.com", "accounts.google.com"],
     keys: jwksSource(env("GOOGLE_JWKS_URL") || "https://www.googleapis.com/oauth2/v3/certs"),
+    refusesWebviews: true,
     clientId,
     ...(clientSecret ? { clientSecret } : {}),
     ...(door ? { door: `${door}/door/google`, doorAsked, ...(doorAsked ? { doorTenants } : {}) } : {}),
@@ -182,7 +186,7 @@ export async function broker(p: {
   const { privateKey: signingKey, jwk: publicJwk } = await sharedKeyPair(store, "id-token-es256", "ES256");
   const callback = (provider: string) => `${issuer}/callback/${provider}`;
 
-  async function authorize(url: URL): Promise<Response> {
+  async function authorize(url: URL, ua: string | null): Promise<Response> {
     const parsed = parseAuthorize(url.searchParams, [...providers.keys()]);
     if (!parsed.ok) {
       if (parsed.redirect) return back(parsed.redirect, { error: parsed.error, state: url.searchParams.get("state") ?? "" });
@@ -199,8 +203,13 @@ export async function broker(p: {
         return page("Sign-in unavailable", `<h1>This sign-in can't continue right now</h1><p class="err">Try again in a moment.</p>`, 503);
       }
     }
-    const leg = await seal(stateKey, { r, pn: randomToken(16), door, exp: Math.floor(Date.now() / 1000) + 600 });
     const host = new URL(r.tenant).host;
+    // A webview the provider refuses: the reader's own browser, where the sign-in starts again (PRONTO-448).
+    const webview = webviewOf(ua);
+    if (webview && signInFlow(ua, provider) === "open-in-browser") {
+      return page(`Open ${host} in your browser`, openInBrowserBody({ host, label: provider.label, url: startOf(r.tenant, provider.name), webview }));
+    }
+    const leg = await seal(stateKey, { r, pn: randomToken(16), door, exp: Math.floor(Date.now() / 1000) + 600 });
     return page(`Sign in to ${host}`, `<h1>Sign in to <span class="origin">${esc(host)}</span></h1>
 <p>You'll continue with ${esc(provider.label)}. Only <span class="origin">${esc(r.tenant)}</span> learns that it's you, and it can't tell you apart in any other app.${r.email ? ` ${esc(learnsMore(r))}` : ""}</p>
 <p><a class="go" href="${esc(`${issuer}/authorize/continue?leg=${encodeURIComponent(leg)}`)}">Continue with ${esc(provider.label)}</a></p>
@@ -348,7 +357,7 @@ export async function broker(p: {
       if (extra) return await extra;
       if (req.method === "GET" && path === "/.well-known/openid-configuration") return json(200, discovery);
       if (req.method === "GET" && path === "/jwks") return json(200, { keys: [publicJwk] });
-      if (req.method === "GET" && path === "/authorize") return await authorize(url);
+      if (req.method === "GET" && path === "/authorize") return await authorize(url, req.headers.get("user-agent"));
       if (req.method === "GET" && path === "/authorize/continue") return await proceed(url);
       if (req.method === "GET" && path.startsWith("/callback/")) return await arrive(path.slice("/callback/".length), url);
       if (req.method === "POST" && path === "/token") return await token(req);

@@ -16,7 +16,7 @@
 // broker's pairwise one, under the same secret, so a person keeps the subject
 // each application already linked.
 import { Refused, randomToken, verifyIdToken } from "../oidc.ts";
-import { callbackOf, emailOf, learnsMore, pairwiseKey, pairwiseSubject, profileOf, providerScope, sectorOf, sectorsOf, tenantOf } from "../broker/core.ts";
+import { callbackOf, emailOf, learnsMore, openInBrowserBody, pairwiseKey, pairwiseSubject, profileOf, providerScope, sectorOf, sectorsOf, signInFlow, startOf, tenantOf, webviewOf } from "../broker/core.ts";
 import { esc, google, hmacKey, json, page, type Provider, seal, unseal } from "../broker/main.ts";
 import { fakeGoogle } from "./fake.ts";
 import { phoneConfig, phoneUpstream } from "../broker/phone.ts";
@@ -117,7 +117,7 @@ export async function front(p: {
     return await pass(req, url);
   }
 
-  async function login(url: URL): Promise<Response> {
+  async function login(url: URL, ua: string | null): Promise<Response> {
     const challenge = url.searchParams.get("login_challenge") ?? "";
     const r = await adminJson("GET", `/oauth2/auth/requests/login?login_challenge=${encodeURIComponent(challenge)}`);
     const tenant = (r.client as { client_id: string }).client_id;
@@ -141,8 +141,13 @@ export async function front(p: {
     const sp = asked.includes("profile");
     // And whether it asked for the person's e-mail, which likewise only then the provider is asked for.
     const se = asked.includes("email");
-    const leg = await seal(stateKey, { c: challenge, t: tenant, p: name, sp, se, pn: randomToken(16), exp: Math.floor(Date.now() / 1000) + 600 });
     const host = new URL(tenant).host;
+    // A webview the provider refuses: the reader's own browser, where the sign-in starts again (PRONTO-448).
+    const webview = webviewOf(ua);
+    if (webview && signInFlow(ua, provider) === "open-in-browser") {
+      return page(`Open ${host} in your browser`, openInBrowserBody({ host, label: provider.label, url: startOf(tenant, name), webview }));
+    }
+    const leg = await seal(stateKey, { c: challenge, t: tenant, p: name, sp, se, pn: randomToken(16), exp: Math.floor(Date.now() / 1000) + 600 });
     return page(`Sign in to ${host}`, `<h1>Sign in to <span class="origin">${esc(host)}</span></h1>
 <p>You'll continue with ${esc(provider.label)}. Only <span class="origin">${esc(tenant)}</span> learns that it's you, and it can't tell you apart in any other app.${se ? ` ${esc(learnsMore({ profile: sp, email: se }))}` : ""}</p>
 <p><a class="go" href="${esc(`${issuer}/login/continue?leg=${encodeURIComponent(leg)}`)}">Continue with ${esc(provider.label)}</a></p>
@@ -231,7 +236,7 @@ export async function front(p: {
       if (extra) return await extra;
       if (req.method === "GET" && path === "/oauth2/auth") return await authorize(req, url);
       if (PASSED.test(path)) return await pass(req, url);
-      if (req.method === "GET" && path === "/login") return await login(url);
+      if (req.method === "GET" && path === "/login") return await login(url, req.headers.get("user-agent"));
       if (req.method === "GET" && path === "/login/continue") return await proceed(url);
       if (req.method === "GET" && path === "/consent") return await consent(url);
       if (req.method === "GET" && path.startsWith("/callback/")) return await arrive(path.slice("/callback/".length), url);
