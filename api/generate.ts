@@ -10,6 +10,8 @@
 // a resource, method or field removed, or a field retyped, fails. Nothing here names an app.
 //   generate.ts <app-dir>         write the API
 //   generate.ts check <app-dir>   the additive-only check against released.json
+//   generate.ts route <app-dir>   put the door's block into the app's docker/Caddyfile (after
+//                                 pronto's writer, which rewrites it)
 
 export interface Field {
   name: string;
@@ -29,6 +31,9 @@ export interface Resource {
 export interface Spec {
   version: string;
   schema: string;
+  /** The flag (pronto-flags) the API rides: off for a caller, every view is empty to them and
+   * refuses their writes. */
+  flag?: string;
   resources: Resource[];
   types: Record<string, { pg: string; json: string; format?: string }>;
 }
@@ -100,7 +105,7 @@ export function columnsOf(r: Resource, released: string[] = []): Column[] {
     // The etag hashes what the resource shows, never a column it does not.
     { name: "etag", sql: `md5(row(${r.fields.map((f) => `t.${ident(f.column)}`).join(", ")})::text)`, type: "string", writable: false },
     ...(r.parent ? [{ name: "parent", sql: `(${parentName})`, type: "string", writable: false }] : []),
-    ...r.fields.map((f) => ({ name: f.name, sql: f.writable ? `t.${ident(f.column)}` : `t.${ident(f.column)}::timestamptz`, type: f.type, writable: f.writable })),
+    ...r.fields.map((f) => ({ name: f.name, sql: `t.${ident(f.column)}`, type: f.type, writable: f.writable })),
   ];
   const at = (c: Column) => { const i = released.indexOf(c.name); return i < 0 ? released.length + base.indexOf(c) : i; };
   return [...base].sort((a, b) => at(a) - at(b));
@@ -109,7 +114,7 @@ export function columnsOf(r: Resource, released: string[] = []): Column[] {
 /** The view of a resource and its grants: security_invoker, so the table's RLS judges every read
  * and write as the caller. A public field stays a plain column reference, so the view is
  * auto-updatable and Postgres maps a write back onto the table. */
-export function viewSql(r: Resource, schema: string, released: string[] = []): string {
+export function viewSql(r: Resource, schema: string, released: string[] = [], gated = false): string {
   const cols = columnsOf(r, released);
   // Writes are granted column by column: only the public fields, never a stamp, and never the key
   // after Create; a write naming another column is refused (42501) before RLS is asked.
@@ -125,15 +130,39 @@ export function viewSql(r: Resource, schema: string, released: string[] = []): s
   ];
   const v = `${ident(schema)}.${ident(r.view)}`;
   return [
-    `CREATE OR REPLACE VIEW ${v} WITH (security_invoker = true) AS`,
+    `CREATE OR REPLACE VIEW ${v} WITH (security_invoker = true${gated ? ", check_option = local" : ""}) AS`,
     `  SELECT ${cols.map((c) => `${c.sql} AS ${ident(c.name)}`).join(",\n         ")}`,
-    `  FROM public.${ident(r.table)} t;`,
+    `  FROM public.${ident(r.table)} t${gated ? `\n  WHERE ${GATE}(public.auth_uid())` : ""};`,
     `REVOKE ALL ON ${v} FROM PUBLIC, anon;`,
     `GRANT ${privileges.join(", ")} ON ${v} TO app_user;`,
+    // A stamp is the server's: a Create sets it to now() (the table may have no default of its own,
+    // and the caller may not name it).
+    ...(r.methods.includes("create") ? cols.filter((c) => c.name === "create_time" || c.name === "update_time").map((c) => `ALTER VIEW ${v} ALTER COLUMN ${ident(c.name)} SET DEFAULT now();`) : []),
   ].join("\n");
 }
 
-/** The whole api_v1.sql: the schema, each view and its grants, and PostgREST told to reload. */
+/** The flag's gate: whether the API is on for an account, as pronto-flags says (its
+ * pronto_flags.flag_on). The views ask it for the caller; the auth service asks it, as the app's
+ * capabilities.auth.apiKeysGate, before it makes, lists or exchanges a key. In api_private, which
+ * PostgREST does not serve. */
+const GATE = "api_private.api_on";
+function gateSql(flag: string): string {
+  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(flag)) throw new Error(`api: ${JSON.stringify(flag)} is not a flag's name`);
+  return [
+    `CREATE SCHEMA IF NOT EXISTS api_private;`,
+    `REVOKE ALL ON SCHEMA api_private FROM PUBLIC;`,
+    `GRANT USAGE ON SCHEMA api_private TO app_user;`,
+    `CREATE OR REPLACE FUNCTION ${GATE}(owner uuid) RETURNS boolean`,
+    `LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $f$`,
+    `  SELECT pronto_flags.flag_on('${flag}', owner)`,
+    `$f$;`,
+    `REVOKE EXECUTE ON FUNCTION ${GATE}(uuid) FROM PUBLIC;`,
+    `GRANT EXECUTE ON FUNCTION ${GATE}(uuid) TO app_user;`,
+  ].join("\n");
+}
+
+/** The whole api_v1.sql: the schema, the flag's gate, each view and its grants, and PostgREST told
+ * to reload. */
 export function sqlOf(spec: Spec, released?: Contract): string {
   const s = ident(spec.schema);
   return [
@@ -141,7 +170,8 @@ export function sqlOf(spec: Spec, released?: Contract): string {
     `CREATE SCHEMA IF NOT EXISTS ${s};`,
     `REVOKE ALL ON SCHEMA ${s} FROM PUBLIC;`,
     `GRANT USAGE ON SCHEMA ${s} TO app_user;`,
-    ...spec.resources.map((r) => viewSql(r, spec.schema, releasedColumns(released, r))),
+    ...(spec.flag ? [gateSql(spec.flag)] : []),
+    ...spec.resources.map((r) => viewSql(r, spec.schema, releasedColumns(released, r), !!spec.flag)),
     `NOTIFY pgrst, 'reload schema';`,
     "",
   ].join("\n\n");
@@ -170,6 +200,9 @@ export function routesOf(spec: Spec): Route[] {
 /** The routes as a Caddyfile block: a route the spec does not generate is 404, the client's query,
  * Prefer and Accept-Profile never reach PostgREST, and the profile is the API's schema. */
 export function caddyOf(spec: Spec, routes: Route[]): string {
+  // No request picks PostgREST's schema itself: /crud stays on public, and the API's handles name
+  // theirs below (request_header runs before any handle).
+  const strip = [`request_header -Accept-Profile`, `request_header -Content-Profile`];
   // A handle, so it sits beside the door's /crud handle; inside, a route keeps the written order.
   const lines = [`handle /api/${spec.version}/* {`, `  route {`];
   const upstream = [
@@ -209,11 +242,12 @@ export function caddyOf(spec: Spec, routes: Route[]): string {
     } else handle("", [], r.query);
   });
   lines.push(`  handle {`, `    respond 404`, `  }`);
-  return [lines[0], lines[1], ...lines.slice(2).map((l) => `  ${l}`), `  }`, `}`].join("\n") + "\n";
+  return [...strip, lines[0], lines[1], ...lines.slice(2).map((l) => `  ${l}`), `  }`, `}`].join("\n") + "\n";
 }
 
-/** api_door.cue: the routes as data and as the Caddyfile block the door mounts while api_export is
- * on, and the headers the door's /crud block strips so /crud never reaches the API's schema. */
+/** api_door.cue: the routes as data and as the Caddyfile block the door carries (route() puts it
+ * in docker/Caddyfile; the spec's flag is the views' gate, per request, as a flag must be), and the
+ * headers the block strips from every request so /crud never reaches the API's schema. */
 export function doorOf(spec: Spec, routes: Route[]): string {
   const caddy = caddyOf(spec, routes).replace(/\n$/, "").split("\n").map((l) => `\t${l}`).join("\n");
   return [
@@ -315,6 +349,40 @@ const pkg = async (app: string) => {
   throw new Error(`api: no CUE package in ${app}`);
 };
 
+/** A file written only when its text changes, so a generate that changes nothing leaves every
+ * watch and build cache where it was; replaced in one rename. */
+async function save(path: string, text: string) {
+  if ((await Deno.readTextFile(path).catch(() => null)) === text) return;
+  const tmp = `${path}.${Deno.pid}.tmp`;
+  await Deno.writeTextFile(tmp, text);
+  await Deno.rename(tmp, path);
+}
+
+const BEGIN = "  # pronto-api:begin — the app's API (api_spec.cue), each route one PostgREST call on a view";
+const END = "  # pronto-api:end";
+
+/** The door's Caddyfile with the API's block, an earlier one taken out first: in the (app) snippet
+ * every listener imports, before the first `handle /auth/*` and the comments it carries, as every
+ * plugin's route step places its block (pronto's caddy-blocks.ts keeps it there across a rewrite). */
+export function routed(caddyfile: string, block: string): string {
+  let lines = caddyfile.split("\n");
+  const from = lines.indexOf(BEGIN), to = lines.indexOf(END);
+  if (from >= 0 && to > from) lines = [...lines.slice(0, from), ...lines.slice(to + 1)];
+  const at = lines.findIndex((l) => l.startsWith("  handle /auth/*"));
+  if (at < 0) throw new Error("api: docker/Caddyfile has no `handle /auth/*` to place the API's routes before");
+  let start = at;
+  while (start > 0 && lines[start - 1].startsWith("  #") && !lines[start - 1].endsWith(":end")) start--;
+  const own = block.replace(/\n$/, "").split("\n").map((l) => (l ? `  ${l}` : l));
+  return [...lines.slice(0, start), BEGIN, ...own, END, ...lines.slice(start)].join("\n");
+}
+
+/** Puts the API's block into the app's docker/Caddyfile. */
+export async function route(app: string) {
+  const spec = await specOf(app);
+  const path = `${app}/docker/Caddyfile`;
+  await save(path, routed(await Deno.readTextFile(path), caddyOf(spec, routesOf(spec))));
+}
+
 /** Writes the app's API and answers what it wrote. */
 export async function generate(app: string) {
   const spec = await specOf(app);
@@ -325,10 +393,10 @@ export async function generate(app: string) {
   const sql = sqlOf(spec, released);
   const contract = contractOf(spec, routes, released);
   const door = doorOf(spec, routes).replace("__PACKAGE__", await pkg(app));
-  await Deno.writeTextFile(`${dir}/${spec.schema}.sql`, sql);
-  await Deno.writeTextFile(`${app}/api_door.cue`, door);
-  await Deno.writeTextFile(`${dir}/openapi.json`, JSON.stringify(openapiOf(spec, routes), null, 2) + "\n");
-  await Deno.writeTextFile(`${dir}/contract.json`, JSON.stringify(contract, null, 2) + "\n");
+  await save(`${dir}/${spec.schema}.sql`, sql);
+  await save(`${app}/api_door.cue`, door);
+  await save(`${dir}/openapi.json`, JSON.stringify(openapiOf(spec, routes), null, 2) + "\n");
+  await save(`${dir}/contract.json`, JSON.stringify(contract, null, 2) + "\n");
   return { sql, routes, contract, door };
 }
 
@@ -355,5 +423,6 @@ if (import.meta.main) {
       console.error(`api: the contract breaks the released one:\n  ${found.join("\n  ")}`);
       Deno.exit(1);
     }
-  } else await generate(a);
+  } else if (a === "route") await route(b);
+  else await generate(a);
 }

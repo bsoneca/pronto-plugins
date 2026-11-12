@@ -1,8 +1,33 @@
 # api
 
 pronto-api (design: [`docs/pronto-api.md`](../docs/pronto-api.md)): an app's entities exported as
-a REST/JSON API that is PostgREST over typed views, with no service and no translation code. Nothing
-installs it yet: the installer and guestbook come with PRONTO-325, machines with PRONTO-314.
+a REST/JSON API that is PostgREST over typed views, with no service and no translation code.
+Machines come with PRONTO-314.
+
+## Installing it (PRONTO-325)
+
+```sh
+bin/pronto-api <app-dir>         # adds or refreshes the plugin; the app's api_spec.cue is seeded once
+bin/pronto-api check <app-dir>   # the contract against the last release's, additive only
+```
+
+It writes `api_plugin.cue` (the schema and the contract; it also sets the cluster's
+`capabilities.apiSchemas`, so PostgREST serves `api_v1` after `public`, and the auth service's
+`apiKeysGate` to the flag's gate unless the app names its own), `pronto/api.cue` (two generate
+rules: `api-generate` before pronto's writer, `api-route` after it) and `api/generate.ts`, a copy
+of the generator they run. The app then:
+
+- lists `{name: "<NNN>_api_v1.sql", src: "api/v1/api_v1.sql"}` among its `rawMigrations`, after
+  its flags' SQL (the gate calls `pronto_flags.flag_on`);
+- declares the spec's flag (`api_export`, default `false`, local `true`) in `flags_spec.cue`.
+
+The door carries the block always (Caddy's file is baked at generate time, so nothing could mount
+it per flag); the flag is decided per request, in the database. With `api.flag` set, every view
+reads `WHERE api_private.api_on(auth_uid())` with a local check option: off for an account, the
+API is empty to it (a `Get` is `406`) and refuses its writes (`44000`, PostgREST's `403`), and the
+auth service makes, lists and exchanges none of its keys. `pronto-flags push` turns it on, per
+account or for everyone, with no deploy. The block also strips `Accept-Profile` and
+`Content-Profile` from every request, so `/crud` stays on `public`.
 
 ## The generator (PRONTO-324)
 
@@ -42,7 +67,8 @@ resource has a `parent` column (`notes/{note}`), which its List filters on; its 
 
 Views stay auto-updatable: a public field is a plain column reference, so Postgres maps a write
 back onto the table, and the table's RLS and CHECK constraints judge it as the caller. A stamp is
-cast and not granted, and the key is not granted for `UPDATE`, so writing either is `42501`.
+not granted (a Create sets it to `now()`, the view's default, so the table needs none), and the key
+is not granted for `UPDATE`, so writing either is `42501`.
 
 The door builds every PostgREST query itself from the route: `GET /api/v1/notes/{id}` becomes
 `GET /note?name=eq.notes/{id}` with the singular `Accept`, a List

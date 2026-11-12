@@ -19,6 +19,10 @@ import (
 	// its public fields and its methods. Nothing is exported by default.
 	entities: [=~"^[a-z][a-zA-Z0-9]*$"]: #Entity
 	machines?: error("api: machines are exported with PRONTO-314; this spec names one")
+	// The flag (pronto-flags' flags_spec.cue) the API rides. Off for an account, every view is empty
+	// to it and refuses its writes, and the auth service makes, lists and exchanges none of its keys
+	// (capabilities.auth.apiKeysGate): `pronto-flags push` turns the API on and off, no deploy.
+	flag?: =~"^[a-z][a-z0-9_-]{0,63}$"
 }
 
 #Entity: {
@@ -71,6 +75,7 @@ _apiByTable: {for _, e in code.state.entities {(e.table): e}}
 apiContract: {
 	version: api.version
 	schema:  "api_\(api.version)"
+	if api.flag != _|_ {flag: api.flag}
 	resources: [for coll in list.SortStrings([for c, _ in api.entities {c}]) {
 		let s = api.entities[coll]
 		let e = [if _apiByTable[s.table] != _|_ {_apiByTable[s.table]}, error("api: no entity has the table \(s.table), which the spec's \(coll) names")][0]
@@ -111,4 +116,14 @@ apiContract: {
 		}]
 	}]
 	types: _apiTypes
+}
+
+// PostgREST serves the API's schema after public (mecha's capabilities.apiSchemas), so /crud keeps
+// public as its default and the door's /api routes name theirs.
+cluster: capabilities: apiSchemas: [apiContract.schema]
+
+// The auth service asks the flag's gate (api_v1.sql's api_private.api_on) before it makes, lists or
+// exchanges a key, unless the app names a gate of its own.
+if api.flag != _|_ {
+	code: capabilities: auth: apiKeysGate: *"api_private.api_on" | string
 }

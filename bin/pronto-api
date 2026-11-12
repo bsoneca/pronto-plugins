@@ -1,0 +1,17 @@
+#!/bin/sh
+# Adds or refreshes pronto-api in a pronto app (api/README.md):
+#   bin/pronto-api <app-dir>
+# Or holds the app's API to the last release's, additive only:
+#   bin/pronto-api check <app-dir>
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+if [ "${1:-}" = check ]; then
+	app=$(cd "$2" && pwd)
+	cd "$here"
+	exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config --allow-read --allow-run --allow-env api/generate.ts check "$app"
+fi
+app=$(cd "$1" && pwd)
+shift
+cd "$here"
+# Deno as CI pins it for the plugins tree (.github/workflows/ci.yml).
+exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write api/install.ts "$app" "$@"
