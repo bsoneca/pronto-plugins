@@ -4,11 +4,11 @@ Design, not built (redesigned 2026-11-11, PRONTO-374). It replaces the gRPC desi
 
 ## Summary
 
-We add **pronto-api**, a plugin that exports a pronto app's data and operations as a REST/JSON API. It is **PostgREST served over table projections**: the plugin generates a Postgres schema per major version, `api_v1`, that holds one view per exported resource (its projection: the public shape, column names and computed fields) and one SQL function per API method. The door routes Google-style URLs (`GET /api/v1/matches/{match}`, `POST /api/v1/matches/{match}:move`) to those functions through the PostgREST every app already runs. The REST surface follows [Google's API design guide](https://docs.cloud.google.com/apis/design): resource names, standard and custom methods, the canonical error codes, and the major version in the path.
+We add **pronto-api**, a plugin that exports a pronto app's data and operations as a REST/JSON API. It is **PostgREST served over typed views**: the plugin generates a Postgres schema per major version, `api_v1`, that holds one typed view per exported resource (the public shape: explicit column types, public names and computed fields) and one SQL function per API method. The door routes Google-style URLs (`GET /api/v1/matches/{match}`, `POST /api/v1/matches/{match}:move`) to those functions through the PostgREST every app already runs. The REST surface follows [Google's API design guide](https://docs.cloud.google.com/apis/design): resource names, standard and custom methods, the canonical error codes, and the major version in the path.
 
 There is no gRPC, Connect, protobuf or buf, and no new service. The API is SQL and a block of door routes, all generated from one author-edited file, `api_spec.cue`, and the app's `program.cue`. It is accepted when two bots holding API keys play complete Bonk Chess matches over it, and the same plugin installed on guestbook works with no chess-specific code.
 
-Postgres stays the only authority. Projections are `security_invoker` views and the functions are `SECURITY INVOKER`, so RLS, CEL checks and machine guards judge every call as the caller: an API client can do exactly what the same user can do in the browser, and nothing more.
+Postgres stays the only authority. Views are `security_invoker` and the functions are `SECURITY INVOKER`, so RLS, CEL checks and machine guards judge every call as the caller: an API client can do exactly what the same user can do in the browser, and nothing more.
 
 **What changed from the gRPC design, and why**
 
@@ -59,7 +59,7 @@ flowchart LR
   subgraph mecha["mecha stack"]
     auth["auth<br/>keys, token exchange"]
     crud["PostgREST"]
-    pg["Postgres<br/>api_v1: projections + functions<br/>public: tables, RLS, machine triggers"]
+    pg["Postgres<br/>api_v1: typed views + functions<br/>public: tables, RLS, machine triggers"]
   end
   auth --> pg
   crud --> pg
@@ -67,22 +67,31 @@ flowchart LR
 
 Three layers, each generated from `api_spec.cue` and `program.cue`:
 
-1. **Projections** (`api_v1.<resource>` views). One per exported resource: the columns the API shows, renamed to public field names, plus the standard fields `name`, `create_time`, `update_time` and `etag`. A projection is a `security_invoker` view over the app's tables, so RLS on the tables still filters what the caller sees. It is the only place an internal table or column name meets a public one.
-2. **Methods** (`api_v1.<method>` functions). One function per API method, `SECURITY INVOKER`, reading through the projections and writing to the app's tables. Each validates its request, maps the outcome to a Google error code, and returns the projection row (or the List response). Reads are `STABLE`, so PostgREST answers them on `GET`; writes are `VOLATILE`, on `POST`.
+1. **Views** (`api_v1.<resource>`). One per exported resource: the columns the API shows, renamed to public field names, plus the standard fields `name`, `create_time`, `update_time` and `etag`. A view is `security_invoker` over the app's tables, so RLS on the tables still filters what the caller sees. It is the only place an internal table or column name meets a public one.
+2. **Methods** (`api_v1.<method>` functions). One function per API method, `SECURITY INVOKER`, reading through the views and writing to the app's tables. Each validates its request, maps the outcome to a Google error code, and returns the view's row (or the List response). Reads are `STABLE`, so PostgREST answers them on `GET`; writes are `VOLATILE`, on `POST`.
 3. **Routes** (a generated door hatch). Each Google route, a verb plus a path template, is rewritten to one PostgREST call: `GET` or `POST /rpc/<fn>` with `Accept-Profile`/`Content-Profile: api_v1`. The door moves everything but the body into headers: the resource name from the path into `X-Api-Name`, and each query parameter the route declares (`page_size`, `match_id`, `update_mask`, …) into `X-Api-Param-<name>`. It then drops the query string and any `Prefer` header, so no PostgREST grammar (`select=`, `order=`, filters) reaches PostgREST, and a function called on `POST` still gets its query parameters (PostgREST passes a `POST` function only its JSON body). Functions read them through `api_v1.request_name()` and `api_v1.request_param(name)`, over PostgREST's `request.headers`. A path not generated is `404` at the door; raw `/rpc` and the views in `api_v1` are never routed under `/api`, and the `/crud` block strips `Accept-Profile` and `Content-Profile`, so `/crud` cannot reach `api_v1` either.
 
-### Why functions for every method, over projections
+### Why functions for every method, over views
 
-PostgREST could serve the projections directly (`GET /match?id=eq.…`) and even write through auto-updatable views. We use views for the shape and functions for every method instead, because:
+PostgREST could serve the views directly (`GET /match?id=eq.…`) and even write through auto-updatable views. We use views for the shape and functions for every method instead, because:
 
 - **Google's methods do not fit PostgREST's grammar.** `List` must answer `{matches: […], next_page_token}` with an opaque token (AIP-158), `Get` of a missing or hidden row must be `404 NOT_FOUND` (PostgREST answers `406` for an empty singular read), and custom methods (`:move`) have no PostgREST equivalent. A function returns exactly the AIP shape.
 - **Writes are more than one row.** A machine command inserts a command row, records its `request_id`, then reads the outcome the trigger stored; a `Create` checks the user-specified id and the caller's scope. A function does it in one transaction, so a retried request either sees the whole effect or none.
 - **Errors are ours to name.** A function raises `SQLSTATE 'PGRST'`, which PostgREST turns into the HTTP status and JSON body we choose, so every refusal is a Google code plus the app's own reason word (Errors, below).
-- **The query grammar stays private.** Clients never send `select=`, `or=` or embeds, so the internal tables can change without a client noticing; only the projections' columns are contract.
+- **The query grammar stays private.** Clients never send `select=`, `or=` or embeds, so the internal tables can change without a client noticing; only the views' columns are contract.
 
 Views stay because they keep the contract and the internals apart: a migration that renames a table changes a view's body, not its columns, and Postgres refuses `CREATE OR REPLACE VIEW` that drops, renames or retypes a column, which is the first guard of `v1`'s stability.
 
-Projections are plain views, computed on read. A projection materialized into a table (kept by triggers or CDC) is a later option for a read too slow as a view; nothing in `v1` needs one.
+Views are plain views, computed on read. A view materialized into a table (kept by triggers or CDC) is a later option for a read too slow as a view; nothing in `v1` needs one.
+
+### Views have a strong schema
+
+A view is the API's contract, so its shape is declared, never inferred from the tables under it (the owner, 2026-11-11: "this view must have strong schema (for api evolution)"):
+
+- **Every column has an explicit type.** The generator casts each column to the type `api_spec.cue` declares or `program.cue` gives the field (`::text`, `::bigint`, `::timestamptz`, `::boolean`), so retyping a table column never retypes the API. A field whose type cannot be stated is a `generate` error.
+- **Enums are Postgres types.** Each enum field is a Postgres enum in `api_v1` with the UPPER_SNAKE values the spec lists (`api_v1.match_phase`: `WAITING`, `PLAYING`, `FINISHED`). The view maps the table's value into it, so an unmapped internal value fails the cast instead of leaking.
+- **Nullability is contract.** Postgres does not keep `NOT NULL` on view columns, so `contract.json` records each field's type and whether it may be null, and each column that must not be null is wrapped so a null raises. The additive-only check fails when a field is removed, retyped, renamed, or becomes nullable.
+- **Postgres is the backstop.** `CREATE OR REPLACE VIEW` refuses to drop, rename or retype a column, so a migration that would break a view fails `integrate@local` (Versioning, below).
 
 ### What the installer writes
 
@@ -92,7 +101,7 @@ Following the existing plugin shape (billing, flags, analytics):
 | --- | --- | --- |
 | `api_plugin.cue` | generated, do not edit | The `#Api` schema the spec is checked against |
 | `api_spec.cue` | app author | Which entities, functions and machines are exported, their public names and fields; the only hand-written input |
-| `services/database/migrations/NN_api_v1.sql` | generated by `generate` | Schema `api_v1`: the projections and the method functions (each with `SET search_path = pg_catalog, api_v1, public`); schema `api_private`, not exposed: `request` (idempotency); grants to `app_user`; committed, so `guard-generated` catches drift |
+| `services/database/migrations/NN_api_v1.sql` | generated by `generate` | Schema `api_v1`: the typed views and the method functions (each with `SET search_path = pg_catalog, api_v1, public`); schema `api_private`, not exposed: `request` (idempotency); grants to `app_user`; committed, so `guard-generated` catches drift |
 | `api_door.cue` | generated | The door's `/api/v1` routes as a hatch, which pronto renders into the app's Caddyfile: one rewrite per route, the path and declared query parameters moved into headers, `Accept-Profile`/`Content-Profile: api_v1`, and the Google error body for every error a function did not raise |
 | `api/v1/openapi.json` | generated | OpenAPI 3.1 for the Google routes (not PostgREST's own `/` document, which describes `/rpc`) |
 | `api/v1/contract.json` | generated | Every route, field and type, sorted; the additive-only check compares it with `released.json` |
@@ -126,7 +135,7 @@ A spec that names a field the entity lacks, an event the machine does not declar
 
 ### Resources and methods (Google API design guide → PostgREST)
 
-**Resource names** (AIP-122). Every projection has a `name` column, `{collection}/{id}`, nested under a parent where the spec says so: `matches/{match}`, `players/{player}`, `players/{player}/games/{game}`. Collections are plural lowerCamelCase (`matches`, `players`); ids are the row's existing key, never a new one.
+**Resource names** (AIP-122). Every view has a `name` column, `{collection}/{id}`, nested under a parent where the spec says so: `matches/{match}`, `players/{player}`, `players/{player}/games/{game}`. Collections are plural lowerCamelCase (`matches`, `players`); ids are the row's existing key, never a new one.
 
 **Standard methods** (AIP-131 to 135) and **custom methods** (AIP-136):
 
@@ -153,7 +162,7 @@ Machines are what make games work, and they are not uniform: in Bonk Chess `ches
 | --- | --- | --- |
 | `Create` | `POST /api/v1/matches?match_id=` `{clock}` | insert the open table, kind `create`, with the instance id; read its outcome; returns the `Match` |
 | custom open | `POST /api/v1/matches/{match}:join` | insert the open table, kind `join` |
-| `Get` | `GET /api/v1/matches/{match}` | the caller's seat row through the `match` projection: `seat`, `phase`, the exported `view` fields, `etag` (the seat's revision) |
+| `Get` | `GET /api/v1/matches/{match}` | the caller's seat row through the `match` view: `seat`, `phase`, the exported `view` fields, `etag` (the seat's revision) |
 | `List` | `GET /api/v1/matches` | the public table (waiting rooms), when the machine has one |
 | custom event | `POST /api/v1/matches/{match}:move` `{uci, etag, request_id}` | insert the command row, read back its stored `outcome`, `reason` and `revision`; returns the `Match` |
 
@@ -259,9 +268,9 @@ The API's authority is the user's, enforced by the database; the generated SQL o
 
 **Security**
 
-- No service role. Projections are `security_invoker` views and functions are `SECURITY INVOKER`, so every read and write runs as the token's user under the tables' RLS. A bug in a generated function can never touch a row its caller could not.
+- No service role. Views are `security_invoker` and functions are `SECURITY INVOKER`, so every read and write runs as the token's user under the tables' RLS. A bug in a generated function can never touch a row its caller could not.
 - Allow-list, not deny-list. Only generated routes are mounted under `/api/v1`; `api_v1`'s views and `/rpc` are never routed there, and `/crud` cannot select `api_v1`. `/crud` itself is unchanged: a key token reaches it within its scopes, as the user's session does.
-- `api_v1` is granted to `app_user` only (the role every user and key token carries): `USAGE` on the schema, `SELECT` on the projections, `EXECUTE` on the functions, all revoked from `PUBLIC` and `anon`. Every function refuses a guest token and pins `search_path`.
+- `api_v1` is granted to `app_user` only (the role every user and key token carries): `USAGE` on the schema, `SELECT` on the views, `EXECUTE` on the functions, all revoked from `PUBLIC` and `anon`. Every function refuses a guest token and pins `search_path`.
 - Scopes per key: `read`, `write`, `machines:{name}`, checked by each function from the token's `scp`; RLS still checks the row.
 - Keys are shown once, stored as SHA-256, revocable, at most 5 per account; issued tokens expire within 15 minutes.
 - Bonk Chess specifics stay where they are: stand-in seating, rating, gold and Premium gates are triggers, so a bot gets exactly what its account would. Bots are marked and their games unrated (PRONTO-316).
@@ -284,7 +293,7 @@ Stability is the reason the API exists: the app's tables change whenever a migra
 
 - The major version is in the path and the schema: `/api/v1` is `api_v1`. Within it, changes are additive only: new resources, methods, fields and enum values clients must tolerate. Nothing is removed, renamed or retyped.
 - `contract.json` lists every route, field and type. Each release freezes it as `api/v1/released.json`, and `test` fails when the current contract lacks or retypes anything the released one has.
-- Postgres guards the projections too: `CREATE OR REPLACE VIEW` cannot drop, rename or retype a column, so a migration that would break a view fails `integrate@local`. A dropped table column a projection still needs fails `generate`.
+- Postgres guards the views too: `CREATE OR REPLACE VIEW` cannot drop, rename or retype a column, so a migration that would break a view fails `integrate@local`. A dropped table column a view still needs fails `generate`.
 - The API scenario runs against the released contract as well as the current one, so behaviour, not only shape, stays compatible.
 - A breaking change means `api_v2` and `/api/v2`, generated beside `v1` from a second `version` in `api_spec.cue`; `db-schemas` lists both, and `v1` keeps working for at least 6 months after `v2` ships.
 - A deprecated method keeps working and its responses carry `Deprecation` and `Sunset` headers (set by the door) for 30 days before it goes in the next major version.
@@ -295,7 +304,7 @@ Pull requests, each behind the `api_export` flag (`default: false` in production
 
 1. **Keys** (mecha-fork, PRONTO-312, merged as mecha-fork#36 and #37), then **the flag and keys in Bonk Chess** (PRONTO-323). Unchanged by this redesign.
 2. **`api_v1` in PostgREST** (mecha-fork, PRONTO-376): a cluster option that adds schemas after `public`, and its pin in Bonk Chess and guestbook.
-3. **Plugin core** (pronto-plugins `api/`, PRONTO-324): the `#Api` schema, the generator for entities and functions (projections, method functions, door routes, `openapi.json`, `contract.json` and its additive check), with unit cases on PGlite; it removes the gRPC spike (`service.ts`), the proto generator, `api/proto/` and buf from ci.
+3. **Plugin core** (pronto-plugins `api/`, PRONTO-324): the `#Api` schema, the generator for entities and functions (views, method functions, door routes, `openapi.json`, `contract.json` and its additive check), with unit cases on PGlite; it removes the gRPC spike (`service.ts`), the proto generator, `api/proto/` and buf from ci.
 4. **guestbook** (PRONTO-325): installed with a small spec and `api_entry.cue` over `http` steps.
 5. **Machines** (PRONTO-314): `Create`, `Get`, `List`, custom open kinds and events, `etag`, `request_id`, the error mapping, on a two-seat test machine.
 6. **Bonk Chess** (PRONTO-316, then PRONTO-315): bots marked and unrated; `pronto-api brawl-chess`, `api_spec.cue`, `spec/api_games.cue`, the replay unit case and `api_match.cue`. Release-cron ships it; nothing is released by hand.
@@ -305,7 +314,7 @@ The flag goes live with `pronto-flags push`, which needs a `production` scenario
 
 **Decisions**
 
-- [x] PostgREST over projections, no service (the owner, 2026-11-11). Functions carry every method; views carry every shape (Design, above).
+- [x] PostgREST over typed views, no service (the owner, 2026-11-11: "The right name is a view. And this view must have strong schema"). Functions carry every method; views carry every shape (Design, above).
 - [x] Google's API design guide for the surface; snake_case JSON is the one departure.
 - [x] No gRPC, Connect, protobuf or buf. The spike's findings (runtime descriptors in connect-es, h2c into Deno 2.9) are no longer needed; its code goes with PRONTO-324.
 - [x] Key exchange in mecha-fork's auth service; bots visible as bots; API games unrated; `chess_seek` not in `v1` (the product manager, 2026-11-11).
