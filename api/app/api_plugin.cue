@@ -30,7 +30,7 @@ import (
 
 #Entity: {
 	table!: string
-	// The view's name, singular snake_case; the collection less its `s` unless said.
+	// The view's name, singular snake_case: the collection less its `s` (`ies` to `y`) unless said.
 	view?: =~"^[a-z][a-z0-9_]*$"
 	// A nested collection (players/{player}/games/{game}): the parent's collection, and the field
 	// of this table that holds the parent's id.
@@ -110,7 +110,7 @@ apiContract: {
 			if s.update_time != _|_ {update_time: s.update_time}
 		}
 		collection: coll
-		view:       [if s.view != _|_ {s.view}, strings.TrimSuffix(coll, "s")][0]
+		view:       [if s.view != _|_ {s.view}, if strings.HasSuffix(coll, "ies") {strings.TrimSuffix(coll, "ies") + "y"}, strings.TrimSuffix(coll, "s")][0]
 		table:      s.table
 		if s.parent != _|_ {
 			parent: {
