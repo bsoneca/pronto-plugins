@@ -17,7 +17,7 @@ rules: `api-generate` before pronto's writer, `api-route` after it) and `api/gen
 of the generator they run. The app then:
 
 - lists `{name: "<NNN>_api_v1.sql", src: "api/v1/api_v1.sql"}` among its `rawMigrations`, after
-  its flags' SQL (the gate calls `pronto_flags.flag_on`);
+  its flags' SQL (the gate calls `pronto_flags.flag_on_strict`, which fails closed on a broken rule);
 - declares the spec's flag (`api_export`, default `false`, local `true`) in `flags_spec.cue`.
 
 The door carries the block always (Caddy's file is baked at generate time, so nothing could mount

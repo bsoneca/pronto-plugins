@@ -228,7 +228,7 @@ cases: {
 		{call: "apigen.as", args: ["$db", _ada, "INSERT INTO api_v1.note (id, body) VALUES ($1, 'on') RETURNING name, create_time IS NOT NULL AS stamped", [_n1]], expect: [{name: "notes/" + _n1, stamped: true}], why: "on, she writes, and the view stamps create_time (the table has no default)"},
 		{call: "apigen.as", args: ["$db", _ada, "SELECT count(*)::int AS n FROM api_v1.tag"], expect: [{n: 2}]},
 		{call: "apigen.as", args: ["$db", _bob, "SELECT count(*)::int AS n FROM api_v1.tag"], expect: [{n: 0}], why: "per account: still off for bob"},
-		{call: "apigen.as", args: ["$db", _bob, "SELECT pronto_flags.flag_on('api_export', $1) AS on", [_ada]], throws: "42501", why: "the gate reads the flags as their owner; the caller cannot"},
+		{call: "apigen.as", args: ["$db", _bob, "SELECT pronto_flags.flag_on_strict('api_export', $1) AS on", [_ada]], throws: "42501", why: "the gate reads the flags as their owner; the caller cannot"},
 		{call: "apigen.exported", args: ["$app", "code.capabilities.auth.apiKeysGate"], expect: "api_private.api_on", why: "the auth service asks the same gate for keys"},
 		{call: "apigen.exported", args: ["$app", "cluster.capabilities.apiSchemas"], expect: ["api_v1"], why: "PostgREST serves api_v1 after public"},
 	]}
