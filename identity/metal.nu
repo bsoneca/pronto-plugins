@@ -16,10 +16,9 @@
 const here = path self .
 use ../common/sops.nu
 use ../common/airlock.nu [airlock-objects door_port]
+use ../common/broker_db.nu
 const deno = "denoland/deno:distroless-2.5.0@sha256:5c4530d4babe37ded3566803e9498e2b5d643b915cce701d8b7b82f87a86629e"
 const port = 8080
-# CloudNativePG's PostgreSQL image, as errors/metal.nu pins it.
-const postgres = "ghcr.io/cloudnative-pg/postgresql:18.1-standard-trixie@sha256:ec0c0d60f9462b49f4c6f2403fd680ac43a063fc793f5d570a21a3cea8e627b5"
 # The broker's replicas. One until the scaling change (PRONTO-371): with the store, the rollout below
 # could overlap them, so a Recreate is no longer needed for the codes' sake.
 const replicas = 1
@@ -69,47 +68,9 @@ export def manifests [
 	let settings = ($settings ++ (if $airlock { [{name: "GOOGLE_DOOR", value: $"http://($lock):($door_port)"}] } else { [] })
 		++ (if $door_asked { [{name: "GOOGLE_DOOR_ASKED", value: "1"} {name: "GOOGLE_DOOR_TENANTS", value: $door_tenants}] } else { [] }))
 	let meta = {namespace: $namespace, labels: $labels}
-	# The broker's database: its login generated once in the namespace (never a file or an argument, never
-	# rotated under a running pod), the cluster that reads it, and who may reach it.
+	# The broker's database (common/broker_db.nu).
 	let db = $"($name)-db"
-	let db_labels = {"app.kubernetes.io/name": $db, "app.kubernetes.io/part-of": "pronto-identity"}
-	let db_meta = {namespace: $namespace, labels: $db_labels}
-	let database = [
-		{apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", metadata: ($db_meta | insert name $"($db)-password"), spec: {length: 40, digits: 8, symbols: 0, noUpper: false, allowRepeat: true}}
-		{
-			apiVersion: "external-secrets.io/v1beta1", kind: "ExternalSecret", metadata: ($db_meta | insert name $db)
-			spec: {
-				refreshInterval: "0"
-				# The login CloudNativePG reads (basic-auth), with the URL the broker reads beside it.
-				target: {name: $db, creationPolicy: "Owner", template: {type: "kubernetes.io/basic-auth", data: {username: "identity", password: "{{ .password }}", url: $"postgres://identity:{{ .password }}@($db)-rw.($namespace).svc:5432/identity?sslmode=disable"}}}
-				dataFrom: [{sourceRef: {generatorRef: {apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", name: $"($db)-password"}}}]
-			}
-		}
-		{
-			apiVersion: "postgresql.cnpg.io/v1", kind: "Cluster", metadata: ($db_meta | insert name $db)
-			spec: {
-				instances: 1
-				imageName: $postgres
-				storage: {size: "1Gi"}
-				smartShutdownTimeout: 15
-				stopDelay: 120
-				bootstrap: {initdb: {database: "identity", owner: "identity", secret: {name: $db}}}
-			}
-		}
-		# The database: the broker, the operator, and its own instances.
-		{
-			apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy", metadata: ($db_meta | insert name $db)
-			spec: {
-				podSelector: {matchLabels: {"cnpg.io/cluster": $db}}
-				policyTypes: ["Ingress"]
-				ingress: [
-					{from: [{podSelector: {matchLabels: $labels}}], ports: [{protocol: "TCP", port: 5432}]}
-					{from: [{podSelector: {matchLabels: {"cnpg.io/cluster": $db}}}], ports: [{protocol: "TCP", port: 5432} {protocol: "TCP", port: 8000}]}
-					{from: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "cnpg-system"}}}], ports: [{protocol: "TCP", port: 5432} {protocol: "TCP", port: 8000}]}
-				]
-			}
-		}
-	]
+	let database = (broker_db objects $namespace $db "pronto-identity" "identity" $labels)
 	if $database_only { return ([{apiVersion: "v1", kind: "Namespace", metadata: {name: $namespace, labels: $labels}}] ++ $database | each { to yaml } | str join "---\n") }
 	# A change to a file is a new pod: the files' digest is the template's.
 	let digest = ($files | each {|f| $sources | at $f.key } | str join "\n" | hash sha256 | str substring 0..15)
@@ -141,7 +102,7 @@ export def manifests [
 								{name: "DENO_DIR", value: "/deno-dir"}
 								{name: "BROKER_ISSUER", value: $"https://($domain)"}
 							] ++ ($secret_vars | each {|v| {name: $v, valueFrom: {secretKeyRef: {name: $name, key: $v}}} })
-								++ [{name: "DATABASE_URL", valueFrom: {secretKeyRef: {name: $db, key: "url"}}}] ++ $settings)
+								++ [(broker_db url-env $db)] ++ $settings)
 							securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
 							resources: {requests: {cpu: "50m", memory: "64Mi"}, limits: {memory: "256Mi"}}
 							startupProbe: {httpGet: {path: "/health", port: $port}, periodSeconds: 1, failureThreshold: 60}
@@ -187,7 +148,7 @@ export def manifests [
 				ingress: [{ports: [{protocol: "TCP", port: $port}]}]
 				egress: ([
 					{ports: [{protocol: "UDP", port: 53} {protocol: "TCP", port: 53}]}
-					{to: [{podSelector: {matchLabels: {"cnpg.io/cluster": $db}}}], ports: [{protocol: "TCP", port: 5432}]}
+					(broker_db egress $db)
 					{to: [{ipBlock: {cidr: "0.0.0.0/0", except: $private}}], ports: [{protocol: "TCP", port: 443}]}
 				] ++ (if $airlock { [{to: [{podSelector: {matchLabels: $lock_labels}}], ports: [{protocol: "TCP", port: $door_port}]}] } else { [] }))
 			}

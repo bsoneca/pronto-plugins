@@ -4,13 +4,16 @@
 #   bin/pronto-billing-broker metal --ssh bruno@node --domain D --secrets F (or --project P) [--fee N] [--sandbox-tenants RE] [--door-asked]
 #
 # The broker imports nothing from outside its own files, so no image is built: the pinned Deno image
-# runs shared.ts and broker/*.ts from a ConfigMap. It keeps nothing but its secrets: with --secrets,
-# the Secret's manifest in a SOPS file (common/sops.nu, PRONTO-155); else read with the operator's
-# gcloud from the project's Secret Manager, as Cloud Run's release keeps them. Either way they are
-# piped into a Secret on the node, never written to a file: the same signing key, so the entitlements it
-# signs verify as Cloud Run's did, and the same webhook secret, so Stripe's one webhook
-# (https://<domain>/stripe) is accepted by whichever of the two the name points at. An
-# entitlement's `ver` is its clock: one replica, replaced (Recreate) rather than overlapped.
+# runs shared.ts, broker/*.ts and the one vendored Postgres client from a ConfigMap. What it keeps
+# between requests (the lock on an account while its Checkout opens, the entitlements' `ver`, its
+# limits, the Stripe events it delivered) is in a Postgres of its own, `<name>-db`
+# (common/broker_db.nu), which the broker reaches by DATABASE_URL; any replica answers any request
+# (broker/store.ts, PRONTO-371). Its secrets: with --secrets, the Secret's manifest in a SOPS file
+# (common/sops.nu, PRONTO-155); else read with the operator's gcloud from the project's Secret
+# Manager, as Cloud Run's release keeps them. Either way they are piped into a Secret on the node,
+# never written to a file: the same signing key, so the entitlements it signs verify as Cloud Run's
+# did, and the same webhook secret, so Stripe's one webhook (https://<domain>/stripe) is accepted by
+# whichever of the two the name points at.
 #
 # Stripe only through the airlock's door (PRONTO-270): the airlock beside the broker is always made, and
 # holds the Stripe keys the secrets hold, a door each; the broker holds none (but while --door-asked
@@ -20,8 +23,12 @@
 const here = path self .
 use ../common/sops.nu
 use ../common/airlock.nu [airlock-objects door_port]
+use ../common/broker_db.nu
 const deno = "denoland/deno:distroless-2.5.0@sha256:5c4530d4babe37ded3566803e9498e2b5d643b915cce701d8b7b82f87a86629e"
 const port = 8080
+# The broker's replicas. One until the scaling change (PRONTO-371): with the store, the rollout below
+# could overlap them, so a Recreate is no longer needed for the `ver` clock's sake.
+const replicas = 1
 # The keys the airlock holds instead of the broker, by the door each is the credential of.
 const door_keys = [
 	{door: "stripe", var: "STRIPE_SECRET_KEY", base: "https://api.stripe.com", scheme: "Bearer", headers: ["Stripe-Version"]}
@@ -38,6 +45,8 @@ const files = [
 	{key: "stripe.ts", from: "broker/stripe.ts", path: "broker/stripe.ts"}
 	{key: "door.ts", from: "broker/door.ts", path: "broker/door.ts"}
 	{key: "fake.ts", from: "broker/fake.ts", path: "broker/fake.ts"}
+	{key: "store.ts", from: "broker/store.ts", path: "broker/store.ts"}
+	{key: "postgres.js", from: "broker/vendor/postgres.js", path: "broker/vendor/postgres.js"}
 ]
 # Each variable the Secret `<name>` holds, and the Secret Manager secret it is read from (<service>-<suffix>).
 const live_secrets = [
@@ -60,6 +69,7 @@ export def manifests [
 	--secrets: list<string> = []
 	--namespace: string = "billing"
 	--name: string = "billing-broker"
+	--database-only # Only the namespace and the broker's database, which a release brings up before the broker is replaced
 	--door-asked # While it moves (PRONTO-218): each call through the door when its tenant asks (its flag), the broker keeping its keys
 ]: nothing -> string {
 	let labels = {"app.kubernetes.io/name": $name, "app.kubernetes.io/part-of": "pronto-billing"}
@@ -74,6 +84,10 @@ export def manifests [
 	let settings = ($settings ++ (if $doors { [{name: "STRIPE_DOOR", value: $"http://($lock):($door_port)"}] } else { [] })
 		++ (if $door_asked { [{name: "STRIPE_DOOR_ASKED", value: "1"}] } else { [] }))
 	let meta = {namespace: $namespace, labels: $labels}
+	# The broker's database (common/broker_db.nu).
+	let db = $"($name)-db"
+	let database = (broker_db objects $namespace $db "pronto-billing" "billing" $labels)
+	if $database_only { return ([{apiVersion: "v1", kind: "Namespace", metadata: {name: $namespace, labels: $labels}}] ++ $database | each { to yaml } | str join "---\n") }
 	# A change to a file is a new pod: the files' digest is the template's.
 	let digest = ($files | each {|f| $sources | at $f.key } | str join "\n" | hash sha256 | str substring 0..15)
 	# The addresses no public service has: what the broker never needs to reach.
@@ -84,8 +98,9 @@ export def manifests [
 		{
 			apiVersion: "apps/v1", kind: "Deployment", metadata: ($meta | insert name $name)
 			spec: {
-				replicas: 1
-				# An entitlement's `ver` is the broker's clock: never two at once.
+				replicas: $replicas
+				# Once, an entitlement's `ver` was the pod's clock, so never two at once. The store (DATABASE_URL)
+				# keeps it now and the reason is gone; the strategy changes with the scaling.
 				strategy: {type: "Recreate"}
 				selector: {matchLabels: $labels}
 				template: {
@@ -102,7 +117,7 @@ export def manifests [
 								{name: "PORT", value: ($port | into string)}
 								{name: "DENO_DIR", value: "/deno-dir"}
 								{name: "BROKER_ISSUER", value: $"https://($domain)"}
-							] ++ $settings ++ ($secrets | each {|v| {name: $v, valueFrom: {secretKeyRef: {name: $name, key: $v}}} }))
+							] ++ $settings ++ ($secrets | each {|v| {name: $v, valueFrom: {secretKeyRef: {name: $name, key: $v}}} }) ++ [(broker_db url-env $db)])
 							securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
 							resources: {requests: {cpu: "50m", memory: "64Mi"}, limits: {memory: "256Mi"}}
 							startupProbe: {httpGet: {path: "/health", port: $port}, periodSeconds: 1, failureThreshold: 60}
@@ -148,11 +163,12 @@ export def manifests [
 				ingress: [{ports: [{protocol: "TCP", port: $port}]}]
 				egress: ([
 					{ports: [{protocol: "UDP", port: 53} {protocol: "TCP", port: 53}]}
+					(broker_db egress $db)
 					{to: [{ipBlock: {cidr: "0.0.0.0/0", except: $private}}], ports: [{protocol: "TCP", port: 443}]}
 				] ++ [{to: [{podSelector: {matchLabels: $lock_labels}}], ports: [{protocol: "TCP", port: $door_port}]}])
 			}
 		}
-	] ++ (airlock-objects $namespace $lock $lock_labels $labels $name $held)
+	] ++ $database ++ (airlock-objects $namespace $lock $lock_labels $labels $name $held)
 	| each { to yaml } | str join "---\n"
 }
 
@@ -200,6 +216,10 @@ export def main [
 		let secret_env = ($keys | each {|s| $"($s.var)=(gc-secret $"($service)-($s.suffix)" $project)" } | str join "\n")
 		$"($secret_env)\n" | do $remote $"($kubectl) create secret generic ($service) -n ($namespace) --from-env-file=/dev/stdin --dry-run=client -o yaml | ($kubectl) apply -f -" | print
 	}
+	# The broker's database first, and its wait: the broker is replaced only once what it keeps is there to read
+	# (its login's Secret is made in the cluster, then the cluster starts).
+	manifests --database-only --domain $domain --sources (sources) --namespace $namespace --name $service | do $remote $"($kubectl) apply -f -" | print
+	do $remote $"($kubectl) wait --for=condition=Ready cluster.postgresql.cnpg.io/($service)-db -n ($namespace) --timeout=300s" | print
 	$yaml | do $remote $"($kubectl) apply -f -" | print
 	do $remote $"($kubectl) rollout restart deployment/($service)-airlock -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service)-airlock -n ($namespace) --timeout=300s" | print
 	do $remote $"($kubectl) rollout restart deployment/($service) -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service) -n ($namespace) --timeout=120s" | print
