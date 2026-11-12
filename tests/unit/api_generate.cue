@@ -28,7 +28,7 @@ cases: {
 		{call: "apigen.app"}, {keep: "app"},
 		{call: "apigen.generated", args: ["$app"]},
 		{call: "apigen.files", args: ["$app"]}, {keep: "f"},
-		{get: "sql", matches: #"CREATE OR REPLACE VIEW "api_v1"\."note" WITH \(security_invoker = true\) AS\n  SELECT \('notes/' \|\| t\."id"::text\) AS "name",\n         md5\(row\(t\."id", t\."body", t\."owner_id", t\."stars", t\."created"\)::text\) AS "etag",\n         t\."id" AS "id",\n         t\."body" AS "body",\n         t\."owner_id" AS "owner",\n         t\."stars" AS "stars",\n         t\."created"::timestamptz AS "create_time"\n  FROM public\."note" t;\nREVOKE ALL ON "api_v1"\."note" FROM PUBLIC, anon;\nGRANT SELECT, INSERT \("id", "body", "owner", "stars"\), UPDATE \("body", "owner", "stars"\), DELETE ON "api_v1"\."note" TO app_user;"#},
+		{get: "sql", matches: #"CREATE OR REPLACE VIEW "api_v1"\."note" WITH \(security_invoker = true\) AS\n  SELECT \('notes/' \|\| t\."id"::text\) AS "name",\n         md5\(row\(t\."id", t\."body", t\."owner_id", t\."stars", t\."created"\)::text\) AS "etag",\n         t\."id" AS "id",\n         t\."body" AS "body",\n         t\."owner_id" AS "owner",\n         t\."stars" AS "stars",\n         t\."created" AS "create_time"\n  FROM public\."note" t;\nREVOKE ALL ON "api_v1"\."note" FROM PUBLIC, anon;\nGRANT SELECT, INSERT \("id", "body", "owner", "stars"\), UPDATE \("body", "owner", "stars"\), DELETE ON "api_v1"\."note" TO app_user;\nALTER VIEW "api_v1"\."note" ALTER COLUMN "create_time" SET DEFAULT now\(\);"#},
 		{use: "f"}, {get: "sql", matches: #"GRANT SELECT ON "api_v1"\."tag" TO app_user;"#, why: "a read-only resource grants no write"},
 		{use: "f"}, {get: "sql", matches: #"\('notes/' \|\| t\."note_id"::text\) AS "parent""#, why: "a nested resource is named under its parent"},
 		{call: "apigen.db", args: ["$app"]}, {keep: "db"},
@@ -115,7 +115,7 @@ cases: {
 		{call: "apigen.edit", args: ["$app", "program.cue", "name: \"old\", type: \"string\", retired: true", "name: \"old\", type: \"string\""]},
 		{call: "apigen.generated", args: ["$app"]},
 		{call: "apigen.checked", args: ["$app"], expect: [], why: "a new field is additive"},
-		{call: "apigen.files", args: ["$app"]}, {get: "sql", matches: #"t\."created"::timestamptz AS "create_time"\n  FROM public\."note" t;"#, why: "a released view keeps its columns' order"},
+		{call: "apigen.files", args: ["$app"]}, {get: "sql", matches: #"t\."created" AS "create_time"\n  FROM public\."note" t;"#, why: "a released view keeps its columns' order"},
 		{call: "apigen.files", args: ["$app"]}, {get: "sql", matches: #"t\."label" AS "label",\n         t\."old" AS "color"\n  FROM public\."tag" t;"#, why: "a new column goes last"},
 		{call: "apigen.replayed", args: ["$db", "$app"], expect: "replayed", why: "CREATE OR REPLACE VIEW takes a column added at the end"},
 		{call: "apigen.edit", args: ["$app", "program.cue", "{ordinal: 4, name: \"stars\", type: \"int32\"}", "{ordinal: 4, name: \"stars\", type: \"string\"}"]},
@@ -145,6 +145,34 @@ cases: {
 		{call: "apigen.app"}, {keep: "fifth"},
 		{call: "apigen.edit", args: ["$fifth", "api_spec.cue", "fields: {owner: \"owner_id\"", "fields: {etag: \"owner_id\""]},
 		{call: "apigen.generated", args: ["$fifth"], throws: "etag"},
+	]}
+	"the spec's flag gates every view per account: off, a view is empty and refuses a write; the keys and PostgREST follow": {suite: "api", steps: [
+		{call: "apigen.app"}, {keep: "app"},
+		{call: "apigen.edit", args: ["$app", "api_spec.cue", "api: {", "api: {\n\tflag: \"api_export\""]},
+		{call: "apigen.generated", args: ["$app"]},
+		{call: "apigen.files", args: ["$app"]}, {get: "sql", matches: #"WITH \(security_invoker = true, check_option = local\) AS[\s\S]*FROM public\."note" t\n  WHERE api_private\.api_on\(public\.auth_uid\(\)\);"#},
+		{call: "apigen.db", args: ["$app"]}, {keep: "db"},
+		{call: "apigen.as", args: ["$db", _ada, "INSERT INTO api_v1.note (id, body) VALUES ($1, 'off')", [_n1]], throws: "44000", why: "off for ada: the view's check option refuses her write"},
+		{call: "apigen.as", args: ["$db", _ada, "SELECT count(*)::int AS n FROM api_v1.tag"], expect: [{n: 0}], why: "off, every view is empty to her"},
+		{call: "apigen.flagOn", args: ["$db", _ada]},
+		{call: "apigen.as", args: ["$db", _ada, "INSERT INTO api_v1.note (id, body) VALUES ($1, 'on') RETURNING name, create_time IS NOT NULL AS stamped", [_n1]], expect: [{name: "notes/" + _n1, stamped: true}], why: "on, she writes, and the view stamps create_time (the table has no default)"},
+		{call: "apigen.as", args: ["$db", _ada, "SELECT count(*)::int AS n FROM api_v1.tag"], expect: [{n: 2}]},
+		{call: "apigen.as", args: ["$db", _bob, "SELECT count(*)::int AS n FROM api_v1.tag"], expect: [{n: 0}], why: "per account: still off for bob"},
+		{call: "apigen.as", args: ["$db", _bob, "SELECT pronto_flags.flag_on('api_export', $1) AS on", [_ada]], throws: "42501", why: "the gate reads the flags as their owner; the caller cannot"},
+		{call: "apigen.exported", args: ["$app", "code.capabilities.auth.apiKeysGate"], expect: "api_private.api_on", why: "the auth service asks the same gate for keys"},
+		{call: "apigen.exported", args: ["$app", "cluster.capabilities.apiSchemas"], expect: ["api_v1"], why: "PostgREST serves api_v1 after public"},
+	]}
+	"generate's route puts the API's block before /auth, after the other plugins' blocks, once however often it runs": {suite: "api", steps: [
+		{call: "apigen.app"}, {keep: "app"},
+		{call: "apigen.caddyRouted", args: ["$app"]}, {keep: "c"},
+		{get: "once", matches: #"  # flags:end\n  # pronto-api:begin[^\n]*\n  request_header -Accept-Profile\n  request_header -Content-Profile\n  handle /api/v1/\* \{\n    route \{[\s\S]*\n  \}\n  # pronto-api:end\n  # The auth service\.\n  handle /auth/\*"#},
+		{call: "apigen.caddyRouted", args: ["$app"]}, {get: "twice", matches: #"^(?:(?!pronto-api:begin)[\s\S])*pronto-api:begin(?:(?!pronto-api:begin)[\s\S])*$"#, why: "a second route replaces its block, never adds one"},
+	]}
+	"pronto-api installs its plugin, generator and rules, and seeds the spec once": {suite: "api", steps: [
+		{call: "apigen.installed"}, {keep: "i"},
+		{get: "first", expect: ["pronto-api: wrote api_plugin.cue", "pronto-api: wrote pronto/api.cue", "pronto-api: wrote api/generate.ts", "pronto-api: wrote api_spec.cue"]},
+		{call: "apigen.installed", holds: {again: [], spec: "package fixture\n\napi: entities: {}\n", plugin: "package fixture", generator: "// copied by pronto-api from api/generate.ts — do not edit"}, why: "a second install writes nothing; the app's spec is its own"},
+		{call: "apigen.installed"}, {get: "rules", matches: #""api-generate": \{"priority":0,[\s\S]*"api-route": \{"priority":4,"#},
 	]}
 	"nothing under api/ names an app or the dropped wire formats, and a name planted there is caught": {suite: "api", steps: [
 		{call: "apigen.linted", args: [list.Concat([_apiAppWords, _apiWireWords])], expect: []},

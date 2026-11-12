@@ -5,7 +5,7 @@
 // fixture's users; its door runs in caddy (on PATH, or CADDY) in front of a stand-in PostgREST that
 // answers what it was asked. cue is the one on PATH, or CUE.
 import { PGlite } from 'npm:@electric-sql/pglite@0.3.7';
-import { check, generate } from '../../api/generate.ts';
+import { check, generate, route } from '../../api/generate.ts';
 import { named } from '../../api/lint.ts';
 
 const here = new URL('.', import.meta.url).pathname;
@@ -50,11 +50,12 @@ export const ADA = '0b0b0b0b-0000-4000-8000-00000000000a';
 export const BOB = '0b0b0b0b-0000-4000-8000-00000000000b';
 
 // The fixture's tables as an app's migrations would leave them, with mecha's roles: a note is its
-// owner's alone (RLS), and its stars a CHECK (a CEL check) keeps between 0 and 5.
+// owner's alone (RLS), its stars a CHECK (a CEL check) keeps between 0 and 5, and its created has no
+// default of its own (as guestbook's entry), so the view's Create stamps it.
 const TABLES = `
 CREATE ROLE anon NOLOGIN; CREATE ROLE app_user NOLOGIN;
 CREATE FUNCTION public.auth_uid() RETURNS uuid LANGUAGE sql STABLE AS $$ SELECT nullif(current_setting('request.jwt.claims', true)::json->>'sub', '')::uuid $$;
-CREATE TABLE public.note (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), owner_id uuid NOT NULL DEFAULT public.auth_uid(), body text, stars int CHECK (stars BETWEEN 0 AND 5), created timestamptz NOT NULL DEFAULT now());
+CREATE TABLE public.note (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), owner_id uuid NOT NULL DEFAULT public.auth_uid(), body text, stars int CHECK (stars BETWEEN 0 AND 5), created timestamptz NOT NULL);
 ALTER TABLE public.note ENABLE ROW LEVEL SECURITY;
 CREATE POLICY own ON public.note TO app_user USING (owner_id = public.auth_uid()) WITH CHECK (owner_id = public.auth_uid());
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.note TO app_user;
@@ -62,6 +63,8 @@ CREATE TABLE public.tag (id uuid PRIMARY KEY, label text, old text);
 GRANT SELECT ON public.tag TO app_user, anon;
 CREATE TABLE public.note_tag (id uuid PRIMARY KEY, note_id uuid REFERENCES public.note, label text);
 GRANT SELECT ON public.note_tag TO app_user;
+CREATE SCHEMA pronto_flags; CREATE TABLE pronto_flags.stub_on (player uuid PRIMARY KEY);
+CREATE FUNCTION pronto_flags.flag_on(flag text, player uuid DEFAULT NULL) RETURNS boolean LANGUAGE sql STABLE AS $$ SELECT flag = 'api_export' AND EXISTS (SELECT 1 FROM pronto_flags.stub_on s WHERE s.player = flag_on.player) $$;
 INSERT INTO public.tag VALUES ('0b0b0b0b-0000-4000-8000-0000000000f1', 'red', NULL), ('0b0b0b0b-0000-4000-8000-0000000000f2', 'blue', NULL);
 `;
 
@@ -74,6 +77,49 @@ export async function db(dir) {
   await pg.exec(sql);
   await pg.exec(sql);
   return pg;
+}
+
+/** pronto-flags' api_export turned on for the account `uid` (the fixture's stand-in of its
+ * flag_on); "on". */
+export async function flagOn(pg, uid) {
+  await pg.query('INSERT INTO pronto_flags.stub_on VALUES ($1)', [uid]);
+  return 'on';
+}
+
+/** A value of the app's package, as cue exports it. */
+export async function exported(dir, expr) {
+  const r = await new Deno.Command(Deno.env.get('CUE') ?? 'cue', { args: ['export', '.', '-e', expr, '--out', 'json'], cwd: dir, stdout: 'piped', stderr: 'piped' }).output();
+  if (!r.success) throw new Error(new TextDecoder().decode(r.stderr).trim());
+  return JSON.parse(new TextDecoder().decode(r.stdout));
+}
+
+/** A door Caddyfile as pronto writes one (an (app) snippet with an earlier plugin's block before
+ * /auth), with the API's block routed into it, then routed again: the file each time. */
+export async function caddyRouted(dir) {
+  const before = '(app) {\n  handle /crud/* {\n    reverse_proxy crud:3000\n  }\n  # flags:begin\n  handle /ofrep/* {\n  }\n  # flags:end\n  # The auth service.\n  handle /auth/* {\n  }\n}\n';
+  await Deno.mkdir(`${dir}/docker`, { recursive: true });
+  await Deno.writeTextFile(`${dir}/docker/Caddyfile`, before);
+  await route(dir);
+  const once = await Deno.readTextFile(`${dir}/docker/Caddyfile`);
+  await route(dir);
+  return { once, twice: await Deno.readTextFile(`${dir}/docker/Caddyfile`) };
+}
+
+/** pronto-api installed in a copy of the fixture with no api plugin of its own: the files it wrote,
+ * then installed again over an api_spec.cue the app changed. */
+export async function installed() {
+  const dir = await Deno.makeTempDir({ prefix: 'api-install-' });
+  await Deno.writeTextFile(`${dir}/program.cue`, 'package fixture\n');
+  const run = async () => {
+    const r = await new Deno.Command(Deno.execPath(), { args: ['run', '--no-config', '--allow-read', '--allow-write', `${here}../../api/install.ts`, dir], stdout: 'piped', stderr: 'piped' }).output();
+    if (!r.success) throw new Error(new TextDecoder().decode(r.stderr));
+    return new TextDecoder().decode(r.stdout).trim().split('\n').filter(Boolean);
+  };
+  const first = await run();
+  await Deno.writeTextFile(`${dir}/api_spec.cue`, 'package fixture\n\napi: entities: {}\n');
+  const again = await run();
+  const text = async (f) => await Deno.readTextFile(`${dir}/${f}`);
+  return { first, again, spec: await text('api_spec.cue'), plugin: (await text('api_plugin.cue')).split('\n')[1], rules: await text('pronto/api.cue'), generator: (await text('api/generate.ts')).split('\n')[0] };
 }
 
 /** The app's api_v1.sql as generated now, replayed over a database that has the last one, as the
