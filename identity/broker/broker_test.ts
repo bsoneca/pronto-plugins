@@ -4,6 +4,7 @@
 // that is not the tenant's.
 import { base64url, type Jwk, randomToken, sha256url, verifyIdToken } from "../oidc.ts";
 import { askedFlag, broker, google, type Provider } from "./main.ts";
+import { MemoryStore } from "./store.ts";
 
 function assertEquals(a: unknown, b: unknown, m = "") {
   if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m} expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
@@ -41,6 +42,8 @@ const fakeGoogle = async (req: Request) => {
 const ISSUER = "https://id.example";
 // Set by the test that owns the fake Google, before any case runs.
 let handler: (req: Request) => Promise<Response>;
+// A second replica over the first's store, as another pod would be (PRONTO-371).
+let replica: (req: Request) => Promise<Response>;
 const call = (url: string, init?: RequestInit) => handler(new Request(url, init));
 const brokerKeys = async (kid: string) => ((await (await call(`${ISSUER}/jwks`)).json()).keys as Jwk[]).find((k) => k.kid === kid);
 
@@ -139,6 +142,25 @@ cases.push(["a tenant cannot redeem another tenant's code, nor use another's red
   assertEquals(elsewhere.shown!.headers.get("location"), null, "never redirected");
 }]);
 
+cases.push(["a code one replica issued is redeemed by another, once, and both serve one key", async () => {
+  const s = await signIn(A, "dana");
+  const code = s.landed!.searchParams.get("code")!;
+  const first = handler;
+  handler = replica;
+  try {
+    const t = await redeem(A, code, s.verifier!);
+    assertEquals(t.status, 200, "redeemed where it was not issued");
+    const claims = await verifyIdToken(t.body.id_token, { alg: "ES256", issuers: [ISSUER], audience: A, nonce: s.q!.get("nonce")!, keys: brokerKeys });
+    assertEquals(claims.aud, A, "signed with the key the first replica serves");
+    assertEquals((await redeem(A, code, s.verifier!)).status, 400, "single use, here");
+    handler = first;
+    assertEquals((await redeem(A, code, s.verifier!)).status, 400, "and there");
+  } finally {
+    handler = first;
+  }
+  assertEquals(await (await call(`${ISSUER}/jwks`)).json(), await (await replica(new Request(`${ISSUER}/jwks`))).json(), "one /jwks");
+}]);
+
 cases.push(["a tampered round trip is refused without redirecting", async () => {
   const res = await call(`${ISSUER}/callback/google?code=x&state=${base64url(enc.encode("{}"))}.AAAA`);
   assertEquals(res.status, 400);
@@ -163,7 +185,9 @@ Deno.test("the broker end to end", async (t) => {
     name: "google", label: "Google", authUrl: `${G}/auth`, tokenUrl: `${G}/token`, issuers: ["https://accounts.google.com"],
     keys: async (kid) => (kid === "g1" ? googleJwk : undefined), clientId: "op-client", clientSecret: "op-secret",
   };
-  handler = await broker({ issuer: ISSUER, secret: "s".repeat(40), providers: [provider], sectors: new Map([[MOVED, A]]) });
+  const store = new MemoryStore();
+  handler = await broker({ issuer: ISSUER, secret: "s".repeat(40), providers: [provider], sectors: new Map([[MOVED, A]]), store });
+  replica = await broker({ issuer: ISSUER, secret: "s".repeat(40), providers: [provider], sectors: new Map([[MOVED, A]]), store });
   try {
     for (const [name, run] of cases) await t.step({ name, fn: run, sanitizeOps: false, sanitizeResources: false });
   } finally {

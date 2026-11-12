@@ -1,11 +1,13 @@
 // The phone's one-time codes when the broker issues and checks them itself (PHONE_OTP=broker),
 // and the sender that texts them. The code is six digits from the platform's random source, kept
 // only as a keyed hash bound to the visit and the number, alive five minutes, dead after five wrong
-// tries, and a number is texted again no sooner than the resend wait. In memory: the broker runs
-// as one replica, and a code it forgets on restart is one the reader asks for again.
+// tries, and a number is texted again no sooner than the resend wait. All of it is in the store
+// (store.ts), so the replica that sent a code need not be the one that checks it, and the counts and
+// the wait hold across replicas.
 //
 // Neither the number nor the code is ever logged here.
-import { base64url } from "../oidc.ts";
+import { base64url, fromBase64url } from "../oidc.ts";
+import { MemoryStore, sharedSecret, type Store } from "./store.ts";
 
 const enc = new TextEncoder();
 
@@ -70,69 +72,58 @@ function same(a: Uint8Array, b: Uint8Array): boolean {
 export type Checked = "ok" | "wrong" | "expired" | "dead";
 
 export class Otp {
-  #key = crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  #codes = new Map<string, { phone: string; salt: Uint8Array; hash: Uint8Array; expires: number; tries: number }>();
-  #next = new Map<string, number>();
-  constructor(readonly resendSeconds: number, readonly now: () => number = Date.now) {}
+  #key: Promise<CryptoKey>;
+  constructor(readonly resendSeconds: number, readonly store: Store = new MemoryStore()) {
+    // The hash's key is the store's, so a code one replica made is checked by another.
+    this.#key = sharedSecret(store, "otp-hmac", 32).then((k) => crypto.subtle.importKey("raw", fromBase64url(k), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]));
+  }
 
   async #hash(salt: Uint8Array, id: string, phone: string, code: string): Promise<Uint8Array> {
     const data = enc.encode(`${base64url(salt)}\u0000${id}\u0000${phone}\u0000${code}`);
     return new Uint8Array(await crypto.subtle.sign("HMAC", await this.#key, data));
   }
 
-  #sweep() {
-    const t = this.now();
-    for (const [k, v] of this.#codes) if (v.expires <= t) this.#codes.delete(k);
-    for (const [k, v] of this.#next) if (v <= t) this.#next.delete(k);
-  }
-
   /** Seconds before `phone` may be texted again, 0 for now. */
-  wait(phone: string): number {
-    this.#sweep();
-    return Math.max(0, Math.ceil(((this.#next.get(phone) ?? 0) - this.now()) / 1000));
+  async wait(phone: string): Promise<number> {
+    return Math.ceil(await this.store.left("otp-next", phone) / 1000);
   }
 
   /** A new code for this visit and number (replacing any earlier one), or the wait left. */
   async issue(id: string, phone: string): Promise<{ code: string } | { wait: number }> {
-    const wait = this.wait(phone);
-    if (wait > 0) return { wait };
+    // Claimed in one step: of two replicas asked at once for one number, one texts and the other waits.
+    if (!await this.store.claim("otp-next", phone, this.resendSeconds * 1000)) return { wait: Math.max(1, await this.wait(phone)) };
     const code = randomCode();
     const salt = crypto.getRandomValues(new Uint8Array(16));
-    this.#codes.set(id, { phone, salt, hash: await this.#hash(salt, id, phone, code), expires: this.now() + CODE_TTL_MS, tries: 0 });
-    this.#next.set(phone, this.now() + this.resendSeconds * 1000);
+    await this.store.put("otp", id, { phone, salt: base64url(salt), hash: base64url(await this.#hash(salt, id, phone, code)) }, CODE_TTL_MS);
     return { code };
   }
 
   /** A code that was never sent: forget it and the wait it started. */
-  revoke(id: string) {
-    const c = this.#codes.get(id);
-    if (!c) return;
-    this.#codes.delete(id);
-    this.#next.delete(c.phone);
+  async revoke(id: string) {
+    const c = await this.store.take<Held>("otp", id);
+    if (c) await this.store.del("otp-next", c.phone);
   }
 
   /** The visit's code checked: spent when right, dead after MAX_TRIES wrong ones. */
   async check(id: string, code: string): Promise<{ result: Checked; phone?: string }> {
-    const c = this.#codes.get(id);
+    const c = await this.store.get<Held>("otp", id);
     if (!c) return { result: "expired" };
-    if (c.expires <= this.now()) {
-      this.#codes.delete(id);
-      return { result: "expired" };
-    }
-    const ok = same(await this.#hash(c.salt, id, c.phone, code), c.hash);
-    if (this.#codes.get(id) !== c) return { result: "expired" };
+    const ok = same(await this.#hash(fromBase64url(c.salt), id, c.phone, code), fromBase64url(c.hash));
     if (ok) {
-      this.#codes.delete(id);
-      return { result: "ok", phone: c.phone };
+      // Taken, not deleted: of two replicas checking the right code at once, one is told ok.
+      return await this.store.take("otp", id) ? { result: "ok", phone: c.phone } : { result: "expired" };
     }
-    c.tries++;
-    if (c.tries >= MAX_TRIES) {
-      this.#codes.delete(id);
+    const tries = await this.store.bump("otp", id);
+    if (tries === undefined) return { result: "expired" };
+    if (tries >= MAX_TRIES) {
+      await this.store.del("otp", id);
       return { result: "dead" };
     }
     return { result: "wrong" };
   }
 }
+
+type Held = { phone: string; salt: string; hash: string };
 
 /** The subject of a phone number under the broker's secret: stable across restarts, one per number. */
 export async function phoneSubject(secret: string, e164: string): Promise<string> {

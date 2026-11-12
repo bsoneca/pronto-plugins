@@ -4,18 +4,25 @@
 #   bin/pronto-identity-broker metal --ssh bruno@node --domain D --google-client-id C --secrets F (or --project P) [--airlock [--door-asked --door-tenants T]]
 #
 # The broker imports nothing from outside its own files, so no image is built: the pinned Deno image
-# runs oidc.ts and broker/*.ts from a ConfigMap. Its one-time codes live in memory, so one replica,
-# replaced (Recreate) rather than overlapped. Its only kept state is BROKER_SECRET: with --secrets, the
-# Secret's manifest in a SOPS file (common/sops.nu, PRONTO-155); else read with the operator's gcloud
-# from the project's Secret Manager, as Cloud Run's release keeps it. Either way it is piped into a
-# Secret on the node, never written to a file: the same value, so the subjects it vouches for and the
-# codes it signs stay the same across the move.
+# runs oidc.ts, broker/*.ts and the one vendored Postgres client from a ConfigMap. What it keeps between
+# requests (its one-time codes, the phone's visits and counts, its signing keys) is in a Postgres of its
+# own, `<name>-db` (a CloudNativePG cluster, its login generated in the cluster as errors/metal.nu's is),
+# which the broker reaches by DATABASE_URL; any replica answers any request (broker/store.ts, PRONTO-371).
+# Its other kept state is BROKER_SECRET: with --secrets, the Secret's manifest in a SOPS file
+# (common/sops.nu, PRONTO-155); else read with the operator's gcloud from the project's Secret Manager,
+# as Cloud Run's release keeps it. Either way it is piped into a Secret on the node, never written to a
+# file: the same value, so the subjects it vouches for and the codes it signs stay the same across the move.
 
 const here = path self .
 use ../common/sops.nu
 use ../common/airlock.nu [airlock-objects door_port]
 const deno = "denoland/deno:distroless-2.5.0@sha256:5c4530d4babe37ded3566803e9498e2b5d643b915cce701d8b7b82f87a86629e"
 const port = 8080
+# CloudNativePG's PostgreSQL image, as errors/metal.nu pins it.
+const postgres = "ghcr.io/cloudnative-pg/postgresql:18.1-standard-trixie@sha256:ec0c0d60f9462b49f4c6f2403fd680ac43a063fc793f5d570a21a3cea8e627b5"
+# The broker's replicas. One until the scaling change (PRONTO-371): with the store, the rollout below
+# could overlap them, so a Recreate is no longer needed for the codes' sake.
+const replicas = 1
 # The credential the airlock holds instead of the broker (--airlock, PRONTO-268): Google's token
 # endpoint takes the client's id and secret as client_secret_basic, which the airlock adds as the
 # Authorization header, `Basic <GOOGLE_CLIENT_BASIC>`: base64 of `<client id>:<client secret>`.
@@ -32,6 +39,8 @@ const files = [
 	{key: "phone.ts", from: "broker/phone.ts", path: "broker/phone.ts"}
 	{key: "otp.ts", from: "broker/otp.ts", path: "broker/otp.ts"}
 	{key: "door.ts", from: "broker/door.ts", path: "broker/door.ts"}
+	{key: "store.ts", from: "broker/store.ts", path: "broker/store.ts"}
+	{key: "postgres.js", from: "broker/vendor/postgres.js", path: "broker/vendor/postgres.js"}
 ]
 
 # Every object the broker is on a metal cluster, as YAML documents. `sources` holds each file's text by
@@ -42,6 +51,7 @@ export def manifests [
 	--settings: list<record> = []
 	--namespace: string = "identity"
 	--name: string = "identity-broker"
+	--database-only # Only the namespace and the broker's database, which a release brings up before the broker is replaced
 	--airlock # Google's token exchange through the airlock's door: the airlock holds the client's credential, the broker no secret
 	--door-asked # With --airlock, while it moves (PRONTO-268): each exchange through the door when its tenant asks (its flag signin_door), the broker keeping its secret
 	--door-tenants: string = "" # With --door-asked: the tenants whose flag is asked, PHONE_TENANTS' syntax; every other tenant goes straight to Google, unasked
@@ -59,6 +69,48 @@ export def manifests [
 	let settings = ($settings ++ (if $airlock { [{name: "GOOGLE_DOOR", value: $"http://($lock):($door_port)"}] } else { [] })
 		++ (if $door_asked { [{name: "GOOGLE_DOOR_ASKED", value: "1"} {name: "GOOGLE_DOOR_TENANTS", value: $door_tenants}] } else { [] }))
 	let meta = {namespace: $namespace, labels: $labels}
+	# The broker's database: its login generated once in the namespace (never a file or an argument, never
+	# rotated under a running pod), the cluster that reads it, and who may reach it.
+	let db = $"($name)-db"
+	let db_labels = {"app.kubernetes.io/name": $db, "app.kubernetes.io/part-of": "pronto-identity"}
+	let db_meta = {namespace: $namespace, labels: $db_labels}
+	let database = [
+		{apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", metadata: ($db_meta | insert name $"($db)-password"), spec: {length: 40, digits: 8, symbols: 0, noUpper: false, allowRepeat: true}}
+		{
+			apiVersion: "external-secrets.io/v1beta1", kind: "ExternalSecret", metadata: ($db_meta | insert name $db)
+			spec: {
+				refreshInterval: "0"
+				# The login CloudNativePG reads (basic-auth), with the URL the broker reads beside it.
+				target: {name: $db, creationPolicy: "Owner", template: {type: "kubernetes.io/basic-auth", data: {username: "identity", password: "{{ .password }}", url: $"postgres://identity:{{ .password }}@($db)-rw.($namespace).svc:5432/identity?sslmode=disable"}}}
+				dataFrom: [{sourceRef: {generatorRef: {apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", name: $"($db)-password"}}}]
+			}
+		}
+		{
+			apiVersion: "postgresql.cnpg.io/v1", kind: "Cluster", metadata: ($db_meta | insert name $db)
+			spec: {
+				instances: 1
+				imageName: $postgres
+				storage: {size: "1Gi"}
+				smartShutdownTimeout: 15
+				stopDelay: 120
+				bootstrap: {initdb: {database: "identity", owner: "identity", secret: {name: $db}}}
+			}
+		}
+		# The database: the broker, the operator, and its own instances.
+		{
+			apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy", metadata: ($db_meta | insert name $db)
+			spec: {
+				podSelector: {matchLabels: {"cnpg.io/cluster": $db}}
+				policyTypes: ["Ingress"]
+				ingress: [
+					{from: [{podSelector: {matchLabels: $labels}}], ports: [{protocol: "TCP", port: 5432}]}
+					{from: [{podSelector: {matchLabels: {"cnpg.io/cluster": $db}}}], ports: [{protocol: "TCP", port: 5432} {protocol: "TCP", port: 8000}]}
+					{from: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "cnpg-system"}}}], ports: [{protocol: "TCP", port: 5432} {protocol: "TCP", port: 8000}]}
+				]
+			}
+		}
+	]
+	if $database_only { return ([{apiVersion: "v1", kind: "Namespace", metadata: {name: $namespace, labels: $labels}}] ++ $database | each { to yaml } | str join "---\n") }
 	# A change to a file is a new pod: the files' digest is the template's.
 	let digest = ($files | each {|f| $sources | at $f.key } | str join "\n" | hash sha256 | str substring 0..15)
 	# The addresses no public service has: what the broker never needs to reach.
@@ -69,8 +121,9 @@ export def manifests [
 		{
 			apiVersion: "apps/v1", kind: "Deployment", metadata: ($meta | insert name $name)
 			spec: {
-				replicas: 1
-				# A code minted by the old pod is unknown to the new one: never two at once.
+				replicas: $replicas
+				# Once, a code minted by the old pod was unknown to the new one, so never two at once. The store
+				# (DATABASE_URL) keeps them now and the reason is gone; the strategy changes with the scaling.
 				strategy: {type: "Recreate"}
 				selector: {matchLabels: $labels}
 				template: {
@@ -87,7 +140,8 @@ export def manifests [
 								{name: "PORT", value: ($port | into string)}
 								{name: "DENO_DIR", value: "/deno-dir"}
 								{name: "BROKER_ISSUER", value: $"https://($domain)"}
-							] ++ ($secret_vars | each {|v| {name: $v, valueFrom: {secretKeyRef: {name: $name, key: $v}}} }) ++ $settings)
+							] ++ ($secret_vars | each {|v| {name: $v, valueFrom: {secretKeyRef: {name: $name, key: $v}}} })
+								++ [{name: "DATABASE_URL", valueFrom: {secretKeyRef: {name: $db, key: "url"}}}] ++ $settings)
 							securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
 							resources: {requests: {cpu: "50m", memory: "64Mi"}, limits: {memory: "256Mi"}}
 							startupProbe: {httpGet: {path: "/health", port: $port}, periodSeconds: 1, failureThreshold: 60}
@@ -133,11 +187,12 @@ export def manifests [
 				ingress: [{ports: [{protocol: "TCP", port: $port}]}]
 				egress: ([
 					{ports: [{protocol: "UDP", port: 53} {protocol: "TCP", port: 53}]}
+					{to: [{podSelector: {matchLabels: {"cnpg.io/cluster": $db}}}], ports: [{protocol: "TCP", port: 5432}]}
 					{to: [{ipBlock: {cidr: "0.0.0.0/0", except: $private}}], ports: [{protocol: "TCP", port: 443}]}
 				] ++ (if $airlock { [{to: [{podSelector: {matchLabels: $lock_labels}}], ports: [{protocol: "TCP", port: $door_port}]}] } else { [] }))
 			}
 		}
-	] ++ (if $airlock { airlock-objects $namespace $lock $lock_labels $labels $name $door_keys } else { [] })
+	] ++ $database ++ (if $airlock { airlock-objects $namespace $lock $lock_labels $labels $name $door_keys } else { [] })
 	| each { to yaml } | str join "---\n"
 }
 
@@ -223,6 +278,10 @@ export def main [
 		let secret_env = $"BROKER_SECRET=(gc-secret $"($service)-secret" $project)\nGOOGLE_CLIENT_SECRET=($client_secret)\n($basic)"
 		$secret_env | do $remote $"($kubectl) create secret generic ($service) -n ($namespace) --from-env-file=/dev/stdin --dry-run=client -o yaml | ($kubectl) apply -f -" | print
 	}
+	# The broker's database first, and its wait: the broker is replaced only once what it keeps is there to read
+	# (its login's Secret is made in the cluster, then the cluster starts).
+	manifests --database-only --domain $domain --sources (sources) --namespace $namespace --name $service | do $remote $"($kubectl) apply -f -" | print
+	do $remote $"($kubectl) wait --for=condition=Ready cluster.postgresql.cnpg.io/($service)-db -n ($namespace) --timeout=300s" | print
 	$yaml | do $remote $"($kubectl) apply -f -" | print
 	if $airlock {
 		do $remote $"($kubectl) rollout restart deployment/($service)-airlock -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service)-airlock -n ($namespace) --timeout=300s" | print
