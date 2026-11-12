@@ -105,7 +105,7 @@ Deno.test("a push's canary: on for the testers alone, then the final document fo
   await pg.close();
 });
 
-Deno.test("a rule the evaluator cannot read, or a disabled flag, reads the default variant or nothing", async () => {
+Deno.test("a rule the evaluator cannot read reads the default variant with a warning, or raises when strict; a disabled flag reads nothing", async () => {
   const pg = await db(await exported(SPEC, "flagd.sql"), false);
   await put(pg, {
     flags: {
@@ -115,6 +115,13 @@ Deno.test("a rule the evaluator cannot read, or a disabled flag, reads the defau
     },
   }, "localhost");
   eq(await on(pg, "odd"), false, "an operator it doesn't know: the default variant");
+  const warned: string[] = [];
+  await pg.query("SELECT pronto_flags.flag_on('odd')", [], { onNotice: (n) => warned.push(n.message ?? "") });
+  eq(warned.some((m: string) => /odd read its default variant: its rule .* failed: pronto_flags: no operator ==/.test(m)), true, "never silently: a warning names the flag, the rule and the error");
+  let refused = "";
+  try { await pg.query("SELECT pronto_flags.flag_on_strict('odd')"); } catch (e) { refused = (e as Error).message; }
+  eq(refused, "pronto_flags: no operator == in this evaluator", "a gate's strict read raises: it fails closed");
+  eq((await pg.query<{ v: boolean }>("SELECT pronto_flags.flag_on_strict('gone') AS v, pronto_flags.flag_on_strict('missing') AS w")).rows[0], { v: false, w: false } as never, "strict, a disabled or missing flag is off");
   eq(await on(pg, "gone"), false, "a disabled flag");
   eq(await on(pg, "stray"), true, "a variant the document lacks: the default variant");
   await pg.close();

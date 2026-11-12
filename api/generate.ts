@@ -164,7 +164,7 @@ export function viewSql(r: Resource, schema: string, released: string[] = [], ga
 }
 
 /** The flag's gate: whether the API is on for an account, as pronto-flags says (its
- * pronto_flags.flag_on). The views ask it for the caller; the auth service asks it, as the app's
+ * pronto_flags.flag_on_strict: a targeting rule that fails raises, so the gate fails closed). The views ask it for the caller; the auth service asks it, as the app's
  * capabilities.auth.apiKeysGate, before it makes, lists or exchanges a key. In api_private, which
  * PostgREST does not serve. */
 const GATE = "api_private.api_on";
@@ -176,7 +176,7 @@ function gateSql(flag: string): string {
     `GRANT USAGE ON SCHEMA api_private TO app_user;`,
     `CREATE OR REPLACE FUNCTION ${GATE}(owner uuid) RETURNS boolean`,
     `LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $f$`,
-    `  SELECT pronto_flags.flag_on('${flag}', owner)`,
+    `  SELECT pronto_flags.flag_on_strict('${flag}', owner)`,
     `$f$;`,
     `REVOKE EXECUTE ON FUNCTION ${GATE}(uuid) FROM PUBLIC;`,
     `GRANT EXECUTE ON FUNCTION ${GATE}(uuid) TO app_user;`,

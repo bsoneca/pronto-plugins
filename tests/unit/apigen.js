@@ -64,7 +64,7 @@ GRANT SELECT ON public.tag TO app_user, anon;
 CREATE TABLE public.note_tag (id uuid PRIMARY KEY, note_id uuid REFERENCES public.note, label text);
 GRANT SELECT ON public.note_tag TO app_user;
 CREATE SCHEMA pronto_flags; CREATE TABLE pronto_flags.stub_on (player uuid PRIMARY KEY);
-CREATE FUNCTION pronto_flags.flag_on(flag text, player uuid DEFAULT NULL) RETURNS boolean LANGUAGE sql STABLE AS $$ SELECT flag = 'api_export' AND EXISTS (SELECT 1 FROM pronto_flags.stub_on s WHERE s.player = flag_on.player) $$;
+CREATE FUNCTION pronto_flags.flag_on_strict(flag text, player uuid DEFAULT NULL) RETURNS boolean LANGUAGE sql STABLE AS $$ SELECT flag = 'api_export' AND EXISTS (SELECT 1 FROM pronto_flags.stub_on s WHERE s.player = flag_on_strict.player) $$;
 INSERT INTO public.tag VALUES ('0b0b0b0b-0000-4000-8000-0000000000f1', 'red', NULL), ('0b0b0b0b-0000-4000-8000-0000000000f2', 'blue', NULL);
 `;
 
@@ -140,7 +140,7 @@ export async function db(dir) {
 }
 
 /** pronto-flags' api_export turned on for the account `uid` (the fixture's stand-in of its
- * flag_on); "on". */
+ * flag_on_strict); "on". */
 export async function flagOn(pg, uid) {
   await pg.query('INSERT INTO pronto_flags.stub_on VALUES ($1)', [uid]);
   return 'on';
