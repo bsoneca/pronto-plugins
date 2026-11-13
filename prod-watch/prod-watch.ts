@@ -151,7 +151,11 @@ if (node) {
   entries.push(...lines);
   entries.sort((a, b) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)));
   // What is serving: the last release of release-cron's log, else the images the pods run.
-  try { sources.release = releasedOf(Deno.readTextFileSync(`${Deno.env.get("HOME")}/.cache/pronto/release-cron/${app}/release-cron.log`), app); } catch { sources.release = null; }
+  // No log is the one thing to go without (an app release-cron does not release); any other failure to read it fails the run.
+  try { sources.release = releasedOf(Deno.readTextFileSync(`${Deno.env.get("HOME")}/.cache/pronto/release-cron/${app}/release-cron.log`), app); } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+    sources.release = null;
+  }
 }
 
 // Each source read up to its own limit: the window ends at the earliest cutoff, for both, and what lies
@@ -162,7 +166,7 @@ const where = [
   ...(services.length ? [`services ${services.join(", ")} (${project})`] : []),
   ...(node ? [`node ${node.namespace} on ${node.host} (${sources.pods} pods)`] : []),
 ].join("; ");
-const serving = !node ? "" : sources.release ? `, release ${sources.release.short} at ${brt(sources.release.at)}` : `, serving ${Object.keys(sources.images).length} containers' images (--json)`;
+const serving = !node ? "" : sources.release ? `, release ${sources.release.short} at ${brt(sources.release.at)}` : `, no release-cron log or release of ${app} in it: serving ${Object.keys(sources.images).length} containers' images (--json)`;
 if (json) console.log(JSON.stringify({ app, project, released, services, node: node ? { ...node, ...sources } : undefined, from, to: reached, report }, null, 1));
 else console.log(`${where}, released: ${released}${serving}\n` + render(report, { app, from, to: reached }));
 // A window asked for is only looked at: the ledger and the cursor move with the cursor's runs alone.

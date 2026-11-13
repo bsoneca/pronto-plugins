@@ -220,6 +220,7 @@ cases: {
 	]}
 	"the query asks for the namespace's lines that may be a bug or go on a stack, of the containers and Deployments named, and refuses a name that is no plain word": {suite: "fingerprint", steps: [
 		{call: "watch.logsQuery", args: [{namespace: "brawl-chess", containers: ["auth", "crud"], deployments: ["brawl-chess-auth"]}], matches: "^\\{namespace=\"brawl-chess\"\\} container:in\\(\"auth\",\"crud\"\\) pod:~`\\^\\(brawl-chess-auth\\)-\\[a-z0-9\\]\\+-\\[a-z0-9\\]\\+\\$` \\(level:~"},
+		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}], matches: "json.record.error_severity:~`\\^\\(WARNING\\|ERROR\\|FATAL\\|PANIC\\)\\$` OR _msg", why: "CloudNativePG's records are info at the outer level, with the database's severity inside"},
 		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}], matches: "\\| fields _time,_msg,pod,container,level,json.error[^|]*\\| sort by \\(_time\\)$"},
 		{call: "watch.logsQuery", args: [{namespace: "x\"} | drop"}], throws: "not a plain name"},
 	]}
