@@ -144,13 +144,19 @@ if (node) {
   const lines = logEntries(got.out, { from, lifecycle, starts });
   // A cut at the limit: the next run starts where this one stopped.
   const rows = got.out.split("\n").filter(Boolean);
-  if (rows.length >= limit) reached = JSON.parse(rows[rows.length - 1])._time;
-  entries.push(...lines.filter((e) => e.timestamp <= reached));
-  entries.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+  if (rows.length >= limit) {
+    const cut = JSON.parse(rows[rows.length - 1])._time;
+    if (Date.parse(cut) < Date.parse(reached)) reached = cut;
+  }
+  entries.push(...lines);
+  entries.sort((a, b) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)));
   // What is serving: the last release of release-cron's log, else the images the pods run.
   try { sources.release = releasedOf(Deno.readTextFileSync(`${Deno.env.get("HOME")}/.cache/pronto/release-cron/${app}/release-cron.log`), app); } catch { sources.release = null; }
 }
 
+// Each source read up to its own limit: the window ends at the earliest cutoff, for both, and what lies
+// past it is the next run's.
+entries = entries.filter((e) => Date.parse(e.timestamp) <= Date.parse(reached));
 const { report, ledger: next } = triage(group(entries, rules, lifecycle), ledger, reached);
 const where = [
   ...(services.length ? [`services ${services.join(", ")} (${project})`] : []),

@@ -74,6 +74,7 @@ const ERRORISH = /(error|panic|exception|traceback|fatal|refused|failed)/i;
 // A line's level: a name (pino's and zap's "warn", logrus's "warning") or pino's number.
 const LEVELS = { trace: "DEBUG", debug: "DEBUG", info: "INFO", notice: "NOTICE", warn: "WARNING", warning: "WARNING", err: "ERROR", error: "ERROR", crit: "CRITICAL", critical: "CRITICAL", fatal: "CRITICAL", panic: "CRITICAL", alert: "ALERT", emerg: "EMERGENCY" };
 const PINO = { 10: "DEBUG", 20: "DEBUG", 30: "INFO", 40: "WARNING", 50: "ERROR", 60: "CRITICAL" };
+const PG = { DEBUG: "DEBUG", LOG: "INFO", INFO: "INFO", NOTICE: "NOTICE", WARNING: "WARNING", ERROR: "ERROR", FATAL: "CRITICAL", PANIC: "EMERGENCY" };
 const levelOf = (l) => (typeof l === "number" ? PINO[l] : LEVELS[String(l ?? "").toLowerCase()]) ?? "DEFAULT";
 // A plain line's severity when it says so ("level=warn", "[error]", "ERROR: ..."), else DEFAULT.
 function severityOf(text) {
@@ -121,15 +122,17 @@ export function podsOf(podList, deployments = []) {
 // what may be a bug, as Cloud Run's filter reads it (prod-watch.ts): a warning or worse, a line that
 // says it failed, or a lifecycle marker. `starts` (podsOf) gives each container's start after
 // `from` the "Starting new instance" marker that opens its pod's start window.
+/** @param {string | object[]} ndjson @param {{from?: string, lifecycle?: Record<string, any>, starts?: {pod: string, container: string, startedAt: string}[]}} [opts] */
 export function logEntries(ndjson, { from = "", lifecycle = {}, starts = [] } = {}) {
   const records = [];
   for (const l of Array.isArray(ndjson) ? ndjson : String(ndjson).split("\n")) {
     let r = l;
     if (typeof l === "string") {
       if (!l.trim()) continue;
-      try { r = JSON.parse(l); } catch { continue; }
+      try { r = JSON.parse(l); } catch (e) { throw new Error(`VictoriaLogs: a line that is not JSON (${e.message}): ${l.slice(0, 200)}`); }
     }
-    if (r && typeof r._time === "string" && typeof r.pod === "string") records.push({ ...r, _time: r._time.replace(/(\.\d{3})\d*Z$/, "$1Z").replace(/(\d\d:\d\d:\d\d)Z$/, "$1.000Z") });
+    if (!r || typeof r._time !== "string" || typeof r.pod !== "string") throw new Error(`VictoriaLogs: a record with no _time or pod: ${JSON.stringify(r).slice(0, 200)}`);
+    records.push({ ...r, _time: r._time.replace(/(\.\d{3})\d*Z$/, "$1Z").replace(/(\d\d:\d\d:\d\d)Z$/, "$1.000Z") });
   }
   records.sort((a, b) => (a._time < b._time ? -1 : a._time > b._time ? 1 : 0));
   const where = (timestamp, pod, container) => {
@@ -163,6 +166,13 @@ export function logEntries(ndjson, { from = "", lifecycle = {}, starts = [] } = 
     }
     if (near && st.last.textPayload !== undefined && CONTINUES.test(body)) { append(body); continue; }
     const level = levelOf(r.level);
+    // CloudNativePG's line is {"msg": "record", "record": {"error_severity", "message", ...}} at level
+    // info: the database's severity and message are the record's.
+    if (r["json.record.message"]) {
+      st.last = { ...base, severity: PG[String(r["json.record.error_severity"]).toUpperCase()] ?? level, textPayload: r["json.record.message"] };
+      entries.push(st.last);
+      continue;
+    }
     // An access log line (Caddy's) is a request, as Cloud Run's httpRequest is: named by its status,
     // method and path, never its query, and never reported answered below 500.
     const status = Number(r["json.status"]);
@@ -197,6 +207,7 @@ export function logEntries(ndjson, { from = "", lifecycle = {}, starts = [] } = 
 // with start and end as parameters): the namespace's lines, of the named containers and Deployments,
 // that may be a bug or go on a stack, as logEntries reads them; nothing else leaves the node. Each
 // name is a plain word, as the schema holds it.
+/** @param {{namespace: string, containers?: string[], deployments?: string[]}} node */
 export function logsQuery({ namespace, containers = [], deployments = [] }) {
   const word = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
   for (const w of [namespace, ...containers, ...deployments]) if (!word.test(w)) throw new Error(`${JSON.stringify(w)}: not a plain name`);
@@ -206,7 +217,7 @@ export function logsQuery({ namespace, containers = [], deployments = [] }) {
     ...(containers.length ? [`container:in(${containers.map((c) => `"${c}"`).join(",")})`] : []),
     ...(deployments.length ? [`pod:~\`^(${deployments.map((d) => d.replace(/\./g, "\\.")).join("|")})-[a-z0-9]+-[a-z0-9]+$\``] : []),
     lines,
-    "| fields _time,_msg,pod,container,level,json.error,json.err,json.stack_trace,json.stack,json.msg,json.status,json.request.method,json.request.uri",
+    "| fields _time,_msg,pod,container,level,json.error,json.err,json.stack_trace,json.stack,json.msg,json.status,json.request.method,json.request.uri,json.record.error_severity,json.record.message",
     "| sort by (_time)",
   ].join(" ");
 }

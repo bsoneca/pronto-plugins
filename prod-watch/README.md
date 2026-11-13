@@ -96,8 +96,9 @@ The lines become entries as Cloud Logging's are: the **service** is the pod's De
 An access log line (Caddy's, with `json.status` and `json.request.uri`) is a request as Cloud Run's `httpRequest` is: named by its status, method and path, never its query, and never reported below 500. A JSON line's `json.error` goes beside its message and its `json.stack_trace` is its stack; a Python
 traceback, JS frames, Java causes and Go goroutines are put into one entry. A container that started
 after the last pass opens its pod's start window, as Cloud Run's "Starting new instance" does, so the
-shared noise rules held to `during: ["start"]` work. A pass reads 50000 lines at most; when it stops
-there the cursor is where it did, and the next pass goes on.
+shared noise rules held to `during: ["start"]` work. A pass reads 50000 lines of each source at most; when one stops there the window ends at the earliest
+cutoff, for both sources, and the next pass goes on. A line VictoriaLogs returns that is not JSON fails the pass, the ledger and the
+cursor untouched. CloudNativePG's records (`record.error_severity`, `record.message`) are read by the database's own severity.
 
 The header's **released** says how fixes reach production; for a node it adds the last release
 release-cron's log holds (`~/.cache/pronto/release-cron/<app>/release-cron.log`, "release 28838831 at
