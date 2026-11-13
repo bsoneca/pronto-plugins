@@ -14,11 +14,13 @@
 #     contents: read
 #   jobs:
 #     board:
-#       uses: bsoneca/pronto-plugins/.github/workflows/devflow-board.yml@main
+#       uses: bsoneca/pronto-plugins/.github/workflows/devflow-board.yml@<commit> # main
 #       secrets:
 #         PLANE_TOKEN: ${{ secrets.PLANE_TOKEN }}
 #
-# The hook is main's pronto-plugins (`plugins-ref`), whatever the pull request changes.
+# A caller pins this file by commit (zizmor's unpinned-uses, which bsoneca/pronto's security check
+# enforces) and moves the pin when this file changes. The hook it runs is still main's pronto-plugins
+# (`plugins-ref`), whatever the pull request changes, so a change to the hook needs no new pin.
 # A repository with runners of its own names them (`runs-on`, JSON): bsoneca/pronto's ci-light run
 # as the owner on the Mac, with its deno and mise's cue; a hosted runner fetches both at the versions
 # pronto pins.
