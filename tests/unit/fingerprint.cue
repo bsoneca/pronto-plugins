@@ -122,6 +122,18 @@ cases: {
 		{use: "es"},
 		{get: "1.severity", expect: "WARNING"},
 	]}
+	"a node's access log line is a request named by its status, method and path, and one answered below 500 is never kept": {suite: "fingerprint", steps: [
+		{value: [
+			(_vl & {msg: "handled request", container: "caddy", level: "error", extra: {"json.msg": "handled request", "json.status": "502", "json.request.method": "GET", "json.request.uri": "/player/3f0c9a1e?select=id"}}).out,
+			(_vl & {msg: "handled request", container: "caddy", level: "error", at: "2026-11-13T13:24:05.000000000Z", extra: {"json.msg": "handled request", "json.status": "404", "json.request.method": "GET", "json.request.uri": "/nope"}}).out,
+		]},
+		{call: "watch.logEntries", args: ["$", {}]},
+		{keep: "es"},
+		{get: "length", expect: 1},
+		{use: "es"},
+		{get: "0"},
+		{call: "watch.messageOf", args: ["$"], expect: "HTTP 502 GET /player/3f0c9a1e"},
+	]}
 	"a node's plain lines are kept by their level, their words or their lifecycle, not for being lines; a container's start opens its window": {suite: "fingerprint", steps: [
 		{value: [
 			(_vl & {msg: "listening on :8080", container: "auth"}).out,
