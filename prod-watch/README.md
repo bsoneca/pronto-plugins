@@ -93,7 +93,7 @@ that reach the remote shell are the schema's, each held to letters, digits and a
 
 The lines become entries as Cloud Logging's are: the **service** is the pod's Deployment, the
 **revision** its ReplicaSet's hash (the template's: a release changes it), the **instance** the pod.
-A JSON line's `json.error` goes beside its message and its `json.stack_trace` is its stack; a Python
+An access log line (Caddy's, with `json.status` and `json.request.uri`) is a request as Cloud Run's `httpRequest` is: named by its status, method and path, never its query, and never reported below 500. A JSON line's `json.error` goes beside its message and its `json.stack_trace` is its stack; a Python
 traceback, JS frames, Java causes and Go goroutines are put into one entry. A container that started
 after the last pass opens its pod's start window, as Cloud Run's "Starting new instance" does, so the
 shared noise rules held to `during: ["start"]` work. A pass reads 50000 lines at most; when it stops

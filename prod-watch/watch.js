@@ -163,6 +163,15 @@ export function logEntries(ndjson, { from = "", lifecycle = {}, starts = [] } = 
     }
     if (near && st.last.textPayload !== undefined && CONTINUES.test(body)) { append(body); continue; }
     const level = levelOf(r.level);
+    // An access log line (Caddy's) is a request, as Cloud Run's httpRequest is: named by its status,
+    // method and path, never its query, and never reported answered below 500.
+    const status = Number(r["json.status"]);
+    if (status && r["json.request.uri"]) {
+      if (status < 500) continue;
+      st.last = { ...base, severity: level, httpRequest: { status, requestMethod: r["json.request.method"] ?? "", requestUrl: r["json.request.uri"] } };
+      entries.push(st.last);
+      continue;
+    }
     if (r["json.msg"] || r["json.error"] || r["json.err"] || r["json.stack_trace"] || r["json.stack"]) {
       const why = r["json.error"] ?? r["json.err"];
       st.last = { ...base, severity: level, jsonPayload: { message: why ? `${body}: ${why}` : body, stack_trace: r["json.stack_trace"] ?? r["json.stack"] ?? "" } };
@@ -197,7 +206,7 @@ export function logsQuery({ namespace, containers = [], deployments = [] }) {
     ...(containers.length ? [`container:in(${containers.map((c) => `"${c}"`).join(",")})`] : []),
     ...(deployments.length ? [`pod:~\`^(${deployments.map((d) => d.replace(/\./g, "\\.")).join("|")})-[a-z0-9]+-[a-z0-9]+$\``] : []),
     lines,
-    "| fields _time,_msg,pod,container,level,json.error,json.err,json.stack_trace,json.stack,json.msg",
+    "| fields _time,_msg,pod,container,level,json.error,json.err,json.stack_trace,json.stack,json.msg,json.status,json.request.method,json.request.uri",
     "| sort by (_time)",
   ].join(" ");
 }
