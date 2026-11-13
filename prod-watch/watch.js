@@ -194,8 +194,9 @@ export function logEntries(ndjson, { from = "", lifecycle = {}, starts = [] } = 
   }
   const out = entries.filter((e) => {
     if (RANK[e.severity] >= RANK.WARNING) return true;
-    if (e.textPayload !== undefined && ERRORISH.test(e.textPayload)) return true;
     const t = clean(messageOf(e));
+    // A line that says it failed, as text or as the message of a JSON line (a request is named by its status, not its words).
+    if (!e.httpRequest && ERRORISH.test(t)) return true;
     return Object.values(lifecycle).some((l) => new RegExp(l.marker).test(t));
   });
   for (const c of starts) {
