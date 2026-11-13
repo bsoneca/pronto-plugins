@@ -12,7 +12,7 @@ sets the board up and says what waits on a person.
 | the rules (an issue's key, where an event moves it, its flag, whose slot it takes) | `devflow/flow.js`, cases in `tests/unit/devflow.cue` |
 | the board, as an interface and its adapter | `devflow/board/board.ts`, `devflow/plane.ts` |
 | the board set up | `bin/pronto connect plane .` (`devflow/connect.ts`) |
-| pull requests → the board | a workflow in the repository that runs `pronto-devflow pr` (its `plane.yml`) |
+| pull requests → the board | `.github/workflows/devflow-board.yml` here, called by the repository's own short `plane.yml` |
 | releases and flips → the board | release-cron's run and `pronto-flags push`, through `pronto-devflow` |
 | the skills | `pronto-sprint-plan`, `pronto-issue`, `pronto-bug`, `pronto-design` |
 | Claude Code reading the board | the repository's `.mcp.json`: the Plane MCP server, started by `pronto-devflow mcp .` |
@@ -240,7 +240,8 @@ rather than building it.
 
 ## GitHub glue
 
-One workflow in the repository keeps the board in step with GitHub. It finds the item by the
+One workflow keeps the board in step with GitHub: pronto-plugins' `devflow-board.yml`, which each
+repository calls from its own `plane.yml`. It finds the item by the
 `PRONTO-<n>` key (the project's `identifier`) in the PR's title or branch, and calls the board's API
 with a token held as the `PLANE_TOKEN` secret (`connect plane` sets it from the token's source):
 
@@ -294,7 +295,8 @@ without the flow.
    must do (the DNS record, Plane's instance admin, the workspace and its API token); then makes the
    project, the states, a module per app, the `chore` label and the `PLANE_TOKEN` secret. Run again
    it goes on from the step it stopped at.
-3. Add the workflow that runs `pronto-devflow pr`, the Plane MCP server in `.mcp.json`, and the hooks
+3. Add a `plane.yml` that calls this repository's `.github/workflows/devflow-board.yml` (its header
+   shows it), the Plane MCP server in `.mcp.json`, and the hooks
    (release-cron's run after confirm, `pronto-flags push`).
 4. Import the open PRs as items in a first catch-up sprint, so the board starts true. Run a week of
    sprints, then make the missing-key check required (drop `--warn`) and back the board's database up.

@@ -1,0 +1,100 @@
+# The dev flow's board (devflow/dev-flow.md) told what a pull request did: the issue its title or
+# branch names (PRONTO-123) linked to it and moved to Review when it opens, Merged when it merges,
+# back to Implementing when it closes unmerged. devflow/hook.ts decides (devflow/flow.js), from the
+# calling repository's devflow/devflow.cue.
+#
+# The one copy of the board's workflow (PRONTO-479): a repository that reports to a board calls it
+# from its own .github/workflows/plane.yml, which GitHub needs in the repository itself, and passes
+# its PLANE_TOKEN:
+#
+#   on:
+#     pull_request:
+#       types: [opened, reopened, ready_for_review, edited, closed]
+#   permissions:
+#     contents: read
+#   jobs:
+#     board:
+#       uses: bsoneca/pronto-plugins/.github/workflows/devflow-board.yml@main
+#       secrets:
+#         PLANE_TOKEN: ${{ secrets.PLANE_TOKEN }}
+#
+# The hook is main's pronto-plugins (`plugins-ref`), whatever the pull request changes.
+# A repository with runners of its own names them (`runs-on`, JSON): bsoneca/pronto's ci-light run
+# as the owner on the Mac, with its deno and mise's cue; a hosted runner fetches both at the versions
+# pronto pins.
+
+name: devflow-board
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: The job's runner labels, as JSON (a string or a list).
+        type: string
+        default: '"ubuntu-24.04"'
+      warn:
+        description: A pull request that names no issue only warns (--warn) instead of failing.
+        type: boolean
+        default: true
+      plugins-ref:
+        description: The pronto-plugins branch whose hook runs.
+        type: string
+        default: main
+    secrets:
+      PLANE_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  DENO_VERSION: v2.5.0
+  CUE_VERSION: v0.16.1
+
+jobs:
+  board:
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 10
+    # One event of a pull request at a time, in order: Review before Merged.
+    concurrency:
+      group: plane-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          sparse-checkout: devflow
+      # pronto-plugins is public: a plain git clone, which spends none of the run token's API calls
+      # (actions/checkout asks the API for the repository first, and failed on its rate limit, PRONTO-193).
+      - name: Check out pronto-plugins
+        env:
+          REF: ${{ inputs.plugins-ref }}
+        run: |
+          rm -rf .pronto-plugins
+          git clone --quiet --depth 1 --branch "$REF" --filter=blob:none --sparse https://github.com/bsoneca/pronto-plugins .pronto-plugins
+          git -C .pronto-plugins sparse-checkout set devflow intents
+      - name: Tools (hosted runner)
+        if: runner.environment == 'github-hosted'
+        run: |
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          curl -fsSL -o "$RUNNER_TEMP/deno.zip" "https://github.com/denoland/deno/releases/download/$DENO_VERSION/deno-x86_64-unknown-linux-gnu.zip"
+          unzip -q -o "$RUNNER_TEMP/deno.zip" -d "$bin"
+          curl -fsSL "https://github.com/cue-lang/cue/releases/download/$CUE_VERSION/cue_${CUE_VERSION}_linux_amd64.tar.gz" | tar -xz -C "$bin" cue
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: Tools (the Mac's runner)
+        if: runner.environment != 'github-hosted'
+        run: |
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+          echo /opt/homebrew/bin >> "$GITHUB_PATH"
+          cue=$(find "$HOME/.local/share/mise/installs/github-cue-lang-cue" -mindepth 2 -maxdepth 2 -path '*/[0-9]*.[0-9]*.[0-9]*/cue' | sort -V | tail -1)
+          test -x "$cue"
+          dirname "$cue" >> "$GITHUB_PATH"
+      - name: Tell the board
+        env:
+          PLANE_TOKEN: ${{ secrets.PLANE_TOKEN }}
+          WARN: ${{ inputs.warn }}
+        run: |
+          set --
+          if [ "$WARN" = true ]; then set -- --warn; fi
+          CUE=$(command -v cue) deno run --no-config -A .pronto-plugins/devflow/hook.ts pr . "$@"
