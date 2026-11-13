@@ -134,6 +134,11 @@ cases: {
 		{get: "0"},
 		{call: "watch.messageOf", args: ["$"], expect: "HTTP 502 GET /player/3f0c9a1e"},
 	]}
+	"a JSON line that says it failed is kept at any level, as a plain one is": {suite: "fingerprint", steps: [
+		{value: [(_vl & {msg: "connection refused", level: "info", extra: {"json.msg": "connection refused"}}).out, (_vl & {msg: "all good", level: "info", at: "2026-11-13T13:24:05.000000000Z", extra: {"json.msg": "all good"}}).out]},
+		{call: "watch.logEntries", args: ["$", {}]},
+		{map: {get: "jsonPayload.message"}, expect: ["connection refused"]},
+	]}
 	"a node's pino level is a string of its number": {suite: "fingerprint", steps: [
 		{value: [(_vl & {msg: "boom", level: "50", extra: {"json.msg": "boom"}}).out, (_vl & {msg: "fine", level: "30", at: "2026-11-13T13:24:05.000000000Z", extra: {"json.msg": "fine"}}).out]},
 		{call: "watch.logEntries", args: ["$", {}]},
