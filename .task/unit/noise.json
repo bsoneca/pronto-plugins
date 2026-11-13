@@ -1,6 +1,6 @@
 {
- "key": "17a0078eed67ad7a7665f782592eb11fd384be36fdc247e443c8c95775618ebc",
- "at": "2026-11-13T15:29:57.454Z",
+ "key": "55a9ca3327b7bfa478de02ed7b57a6d1ed30f18a4bdf127f95ecd89a1ae839e3",
+ "at": "2026-11-13T15:38:27.437Z",
  "observed": {
   "read": {},
   "dir": {},
@@ -27,7 +27,7 @@
   "env CUE e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "module tests/unit/registry.js f5255fd27fefc527f2c41d5bb930aa9be9833aa179d521664cbee39e559b6e64",
   "module intents/run.ts 3137ad06e3e40c841bb0d78753da1b6c43943f6df8126be268f102f6abe1992b",
-  "module prod-watch/watch.js 54e511a912a1a769fa4410aa37c82a0693dfc8e9f8e1795dd0bf78fabdef2556",
+  "module prod-watch/watch.js 025d59c10fe897d5a1c957c3fe3ec474f8ac637f1fb248efc7e4f1fb1d3e7f27",
   "module tests/unit/probes.js dafb02227fc0d91c074c9b44b9037ddc82276041df209637cf5ab08165459f90",
   "module node:crypto"
  ]
