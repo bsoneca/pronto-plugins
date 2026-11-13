@@ -25,6 +25,23 @@ const private = ["10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"]
 # A Grafana dashboard ConfigMap's name, from its app and its name.
 def dash-map [app: string, name: string]: nothing -> string { $"grafana-dashboards-($app)-($name)" }
 
+# A dashboard's ConfigMap: the file, under its name's key, labelled as everything the analytics are.
+def dash-cm [d: record, ns: string]: nothing -> record {
+	let name = dash-map $d.app $d.name
+	{apiVersion: "v1", kind: "ConfigMap", metadata: {name: $name, namespace: $ns, labels: {"app.kubernetes.io/part-of": "pronto-analytics", "app.kubernetes.io/name": $name}}, data: {$"($d.name).json": $d.text}}
+}
+
+# The dashboards whose live ConfigMap differs from the file (`live` maps a ConfigMap's name to the
+# text it holds; a ConfigMap not there holds none).
+export def stale [dashboards: list<record>, live: record]: nothing -> list<record> {
+	$dashboards | where {|d| ($live | get -o (dash-map $d.app $d.name) | default "") != $d.text }
+}
+
+# A digest of every dashboard's name and text, whatever order they are named in.
+export def dashboards-hash [dashboards: list<record>]: nothing -> string {
+	$dashboards | sort-by app name | each {|d| $"(dash-map $d.app $d.name)\n($d.text)" } | str join "\n" | hash sha256
+}
+
 # Grafana's role for each account named, and none for anyone else (role_attribute_strict refuses).
 export def role-path [users: record]: nothing -> string {
 	$users | columns | sort | each {|e| $"\(email=='($e)' && '($users | get $e)'\)" } | str join " || "
@@ -93,7 +110,7 @@ export def manifests [
 	}
 	let config = [
 		{apiVersion: "v1", kind: "ConfigMap", metadata: (do $meta "grafana-provisioning"), data: {"datasources.yaml": ($datasources | to yaml), "dashboards.yaml": ($providers | to yaml)}}
-		...($dashboards | each {|d| {apiVersion: "v1", kind: "ConfigMap", metadata: (do $meta (dash-map $d.app $d.name)), data: {$"($d.name).json": $d.text}} })
+		...($dashboards | each {|d| dash-cm $d $ns })
 	]
 	# A change to a dashboard or the provisioning is a new pod: their digest is the template's.
 	let digest = ($config | to json | hash sha256 | str substring 0..15)
@@ -259,6 +276,44 @@ def gc-secret [name: string, project: string]: nothing -> string {
 	let r = (with-env {CLOUDSDK_PYTHON: python3.12, CLOUDSDK_PYTHON_SITEPACKAGES: "0"} { ^$env.SAYT_MISE_BIN exec gcloud@589.0.0 python@3.12.11 -- gcloud --quiet secrets versions access latest --secret $name --project $project | complete })
 	if $r.exit_code != 0 { error make {msg: $"gcloud secrets versions access ($name): ($r.stderr | str trim)"} }
 	$r.stdout
+}
+
+# Only the dashboards, on a cluster the analytics already run on: each ConfigMap whose file differs from the
+# live one is applied, and a digest of all of them is set on Grafana's pod template, which restarts its pods
+# when it changes (Grafana mounts each file by subPath, which does not follow a ConfigMap's change) and
+# never when it does not. The digest is set on every run, so a run that died after the ConfigMaps changed
+# restarts the pods on the next. Any failing step, a read included, fails the command: only a ConfigMap not
+# there is read as empty.
+#   bin/pronto-analytics metal dashboards --ssh bruno@node --dashboards bonk-chess/business=apps/…/analytics.business.dashboard.json,…
+export def "main dashboards" [
+	--ssh: string                  # The node, as an app's envs.Metal names it: bruno@13.140.186.223
+	--kubeconfig: string = "$HOME/.cache/contabo2.kubeconfig" # On the node
+	--dashboards: string           # app/name=path of each dashboard, comma-separated (a shell passes no nu list)
+	--titles: string = "{}"        # JSON: each app's folder title, {"bonk-chess": "Bonk Chess"}
+	--namespace: string = "analytics"
+] {
+	if ([$ssh $dashboards] | any { is-empty }) { error make {msg: "--ssh and --dashboards are required"} }
+	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
+	let run = {|cmd: string, input: string|
+		let r = ($input | ^ssh -o BatchMode=yes $ssh $cmd | complete)
+		if $r.exit_code != 0 { error make {msg: $"($cmd | str substring 0..120): ($r.stderr | str trim)"} }
+		$r.stdout
+	}
+	let ds = (dashboards ($dashboards | split row "," | str trim | where {|d| $d != ""}) ($titles | from json))
+	if ($ds | is-empty) { error make {msg: "--dashboards names no dashboard"} }
+	let live = ($ds | reduce --fold {} {|d, acc|
+		let name = dash-map $d.app $d.name
+		$acc | insert $name (do $run $"($kubectl) get configmap ($name) -n ($namespace) --ignore-not-found -o go-template='{{index .data \"($d.name).json\"}}'" "")
+	})
+	let changed = (stale $ds $live)
+	if ($changed | is-not-empty) {
+		let yaml = ($changed | each {|d| dash-cm $d $namespace | to yaml } | str join "---\n")
+		do $run $"($kubectl) apply --server-side --force-conflicts -f -" $yaml | print
+	}
+	for d in ($ds | where {|d| not ($d in $changed) }) { print $"(dash-map $d.app $d.name): unchanged" }
+	let digest = (dashboards-hash $ds)
+	do $run $"($kubectl) patch deployment/grafana -n ($namespace) --type merge -p '{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"pronto.dev/dashboards\":\"($digest)\"}}}}}'" "" | print
+	do $run $"($kubectl) rollout status deployment/grafana -n ($namespace) --timeout=300s" "" | print
 }
 
 export def main [
