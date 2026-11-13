@@ -211,7 +211,7 @@ export function logEntries(ndjson, { from = "", lifecycle = {}, starts = [] } = 
 export function logsQuery({ namespace, containers = [], deployments = [] }) {
   const word = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
   for (const w of [namespace, ...containers, ...deployments]) if (!word.test(w)) throw new Error(`${JSON.stringify(w)}: not a plain name`);
-  const lines = `(level:~\`(?i)^(warn|warning|error|err|fatal|critical|crit|panic|alert|emerg)$\` OR _msg:~\`(?i)(error|panic|exception|traceback|fatal|refused|failed|SIGTERM|Container terminated)\` OR _msg:~\`${CONTINUES.source}\`)`;
+  const lines = `(level:~\`(?i)^(warn|warning|error|err|fatal|critical|crit|panic|alert|emerg)$\` OR json.record.error_severity:~\`^(WARNING|ERROR|FATAL|PANIC)$\` OR _msg:~\`(?i)(error|panic|exception|traceback|fatal|refused|failed|SIGTERM|Container terminated)\` OR _msg:~\`${CONTINUES.source}\`)`;
   return [
     `{namespace="${namespace}"}`,
     ...(containers.length ? [`container:in(${containers.map((c) => `"${c}"`).join(",")})`] : []),
