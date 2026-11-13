@@ -7,7 +7,7 @@
 // every n-th case ("-- <suite> <k>/<n>" runs the k-th share alone).
 // Every app's copy of this file, tests/unit/select.js and tests/unit/schema.cue is the same; what
 // an app's cases call is its own tests/unit/registry.js, and its suites its tests/unit/suites.cue.
-import { called, imports, key, needed, reach, sha } from "./unit/select.js";
+import { called, holds, imports, key, needed, reach, sha, slotOf } from "./unit/select.js";
 import { dirname, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -19,20 +19,35 @@ const dir = new URL("./unit/", import.meta.url).pathname;
 const coded = [...Deno.readDirSync(new URL(".", import.meta.url))].filter((f) => /\.test\.[jt]s$/.test(f.name)).map((f) => f.name);
 if (coded.length) throw new Error(`write these as cases in tests/unit/*.cue: ${coded.join(", ")}`);
 const files = [...Deno.readDirSync(dir)].filter((f) => f.name.endsWith(".cue")).map((f) => dir + f.name).sort();
-const out = await new Deno.Command(Deno.env.get("CUE") ?? "cue", { args: ["vet", "-c", ...files], stdout: "piped", stderr: "piped" }).output();
-if (!out.success) throw new Error("the cases do not meet their schema:\n" + new TextDecoder().decode(out.stderr));
-const exported = await new Deno.Command(Deno.env.get("CUE") ?? "cue", { args: ["export", ...files, "-e", "{c: cases, j: jobs}", "--out", "json"], stdout: "piped", stderr: "piped" }).output();
-if (!exported.success) throw new Error(new TextDecoder().decode(exported.stderr));
-const { c: cases, j: jobs }: { c: Record<string, { suite: string; steps: Step[] }>; j: Record<string, number> } = JSON.parse(new TextDecoder().decode(exported.stdout));
+// The parent evaluates the cases once, vet and export side by side, and hands them to its child
+// (and to each share's child) in a scratch file: the child runs this file's top level again and
+// must not evaluate the CUE a second time (UNIT_CASES_FROM).
+const casesFrom = Deno.env.get("UNIT_CASES_FROM");
+let exportedText: string;
+if (casesFrom) exportedText = Deno.readTextFileSync(casesFrom);
+else {
+  const cue = (args: string[]) => new Deno.Command(Deno.env.get("CUE") ?? "cue", { args, stdout: "piped", stderr: "piped" }).output();
+  const [out, exported] = await Promise.all([
+    cue(["vet", "-c", ...files]),
+    cue(["export", ...files, "-e", "{c: cases, j: jobs}", "--out", "json"]),
+  ]);
+  if (!out.success) throw new Error("the cases do not meet their schema:\n" + new TextDecoder().decode(out.stderr));
+  if (!exported.success) throw new Error(new TextDecoder().decode(exported.stderr));
+  exportedText = new TextDecoder().decode(exported.stdout);
+}
+const { c: cases, j: jobs }: { c: Record<string, { suite: string; steps: Step[] }>; j: Record<string, number> } = JSON.parse(exportedText);
 // This process's share of the suite, the k-th of n: every case of it when no share is named.
 const [k, n] = share ? share.split("/").map(Number) : [0, 1];
 const mine = Object.entries(cases).filter(([, c]) => c.suite === suite).filter((_, i) => i % n === k);
 // A suite with no cases ran nothing, and nothing run is not green: a misspelt suite fails here.
 if (!Object.values(cases).some((c) => c.suite === suite)) throw new Error(`no cases ran: the suite "${suite}" has none in tests/unit/*.cue`);
 
-// --- Selection: the suite's inputs, and its last green run's (.task/unit/<suite>.json). ---
+// --- Selection: the suite's inputs, and its last green run's (.task/unit/<suite>/<slot>.json). ---
 const app = new URL("../", import.meta.url).pathname;
-const record = `${app}.task/unit/${suite}.json`;
+// A record is named by the hash of the suite's static inputs (cases, runner, toolchain, modules),
+// so trees that differ there never meet in one file, and it is written whole (temp file, rename):
+// jobs on other trees may share the folder (ci keeps one per project on the runner machine).
+const recordIn = (base: string[]) => `${app}.task/unit/${suite}/${slotOf(base)}.json`;
 const rel = (p: string) => relative(app, p) || ".";
 // Deno's own calls, kept before the child watches them (below), for the runner's own hashing.
 const fs = { readFileSync: Deno.readFileSync.bind(Deno), statSync: Deno.statSync.bind(Deno), readDirSync: Deno.readDirSync.bind(Deno), env: Deno.env.get.bind(Deno.env) };
@@ -114,11 +129,14 @@ const linesNow = (s: Seen) => linesOf({
   ...Object.fromEntries((["read", "dir", "stat", "env", "tree"] as const).map((k) => [k, Object.fromEntries(Object.keys(s[k]).map((p) => [p, valueOf[k](p)]))])),
 } as Seen);
 // The record lives under .task/, which git and bayt's sources leave out. The suites run without
-// --allow-write, so it is written by a deno child, which may write (`deno eval`).
-function persist(path: string, content: string | null) {
+// --allow-write, so it is written by a deno child, which may write (`deno eval`). A file appears
+// whole or not at all (written beside, then renamed); `prune` also drops what a week has not touched.
+function persist(path: string, content: string | null, prune = false) {
+  const to = JSON.stringify(path);
   const code = content === null
-    ? `try { Deno.removeSync(${JSON.stringify(path)}); } catch { /* none */ }`
-    : `Deno.mkdirSync(${JSON.stringify(dirname(path))}, { recursive: true }); Deno.writeTextFileSync(${JSON.stringify(path)}, await new Response(Deno.stdin.readable).text());`;
+    ? `try { Deno.removeSync(${to}); } catch { /* none */ }`
+    : `const d = ${JSON.stringify(dirname(path))}; Deno.mkdirSync(d, { recursive: true }); const t = ${to} + "." + crypto.randomUUID() + ".tmp"; Deno.writeTextFileSync(t, await new Response(Deno.stdin.readable).text()); Deno.renameSync(t, ${to});`
+      + (prune ? ` for (const e of [...Deno.readDirSync(d)]) { try { if (Date.now() - Deno.statSync(d + "/" + e.name).mtime!.getTime() > 6048e5) Deno.removeSync(d + "/" + e.name); } catch { /* gone */ } }` : "");
   const child = new Deno.Command(Deno.execPath(), { args: ["eval", code], stdin: "piped", stdout: "null", stderr: "piped" }).spawn();
   const w = child.stdin.getWriter();
   return w.write(new TextEncoder().encode(content ?? "")).then(() => w.close()).then(() => child.output()).then((o) => {
@@ -134,11 +152,12 @@ if (!observedTo) {
   const base = fixed();
   // deno-lint-ignore no-explicit-any
   let last: any = null;
-  try { last = JSON.parse(Deno.readTextFileSync(record)); } catch { /* never green here */ }
+  const record = base ? recordIn(base) : null;
+  try { last = JSON.parse(Deno.readTextFileSync(record!)); } catch { /* never green here */ }
   if (!last?.observed?.read) last = null;
   if (base && last && !all) {
     const now = [...base, ...linesNow(last.observed)];
-    if (key(now) === last.key) {
+    if (holds(last, now)) {
       console.log(`${suite}: cached, its ${mine.length} cases were green on these inputs at ${last.at} (--all or UNIT_ALL=1 runs them)`);
       Deno.exit(0);
     }
@@ -150,8 +169,11 @@ if (!observedTo) {
   } else if (base) console.log(`${suite}: runs, ${all ? "every suite asked for" : "no green run kept"}`);
   else console.log(`${suite}: runs, its module graph could not be read (deno info)`);
   // A run forgets the last green one until it is green itself.
-  const pending = `${record}.pending`;
-  await Promise.all([persist(record, null), persist(pending, null)]);
+  // Its own scratch, in the temp dir: no other job's run shares a name with it.
+  const pending = `${resolve(tmpdir())}/unit-${suite}-${crypto.randomUUID()}.pending`;
+  if (record) await persist(record, null);
+  const casesFile = `${pending}.cases`;
+  await persist(casesFile, exportedText);
   const granted = ["read", "write", "env", "run", "net", "sys", "ffi"].filter((name) => Deno.permissions.querySync({ name } as Deno.PermissionDescriptor).state === "granted");
   // One child a share, each saying what it saw in its own file; one share is the whole suite.
   const shares = jobs[suite] ?? 1;
@@ -159,7 +181,7 @@ if (!observedTo) {
   if (shares > 1) await Promise.all(pendings.map((to) => persist(to, null)));
   const children = pendings.map((to, i) => new Deno.Command(Deno.execPath(), {
     args: ["test", "--no-config", ...granted.map((p) => `--allow-${p}`), new URL(import.meta.url).pathname, "--", suite, ...(shares > 1 ? [`${i}/${shares}`] : [])],
-    env: { UNIT_OBSERVED_TO: to },
+    env: { UNIT_OBSERVED_TO: to, UNIT_CASES_FROM: casesFile },
     ...(shares > 1 ? { stdout: "piped", stderr: "piped" } : {}),
   }).spawn());
   const codes: number[] = [];
@@ -181,10 +203,10 @@ if (!observedTo) {
     if (got?.open) console.log(`${suite}: green, not kept: ${got.open}`);
     else if (got) {
       const lines = [...base, ...linesOf(got)];
-      await persist(record, JSON.stringify({ key: key(lines), at: new Date().toISOString(), observed: got, lines }, null, 1));
+      await persist(record!, JSON.stringify({ key: key(lines), at: new Date().toISOString(), observed: got, lines }, null, 1), true);
     }
   }
-  await Promise.all(pendings.map((to) => persist(to, null)));
+  await Promise.all([...pendings, casesFile].map((to) => persist(to, null)));
   Deno.exit(code);
 }
 

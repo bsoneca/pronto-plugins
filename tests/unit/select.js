@@ -67,3 +67,11 @@ export function reach(graph, roots) {
 
 // One key for a list of input lines, whatever their order.
 export const key = (lines) => sha([...new Set(lines)].sort().join("\n"));
+
+// The name a suite's record goes by: its static inputs, so a record is only ever looked up by
+// the trees whose cases, runner, toolchain and modules are these.
+export const slotOf = (base) => key(base);
+
+// A record holds for these inputs only when its key is theirs, observed part included: a record
+// another tree wrote for other inputs, or a half-written one, never does.
+export const holds = (last, now) => !!last && typeof last.key === "string" && key(now) === last.key;
