@@ -1,6 +1,6 @@
 {
- "key": "6b481d035ef56009538c5364ebdf514f20ca7a755cb79c8a5d07360537185d8f",
- "at": "2026-11-13T14:33:32.777Z",
+ "key": "e9416f35ac03fdced59ed67cbfcaa5c176598fa0f298506cfea8fb4396f7a2c8",
+ "at": "2026-11-13T14:57:08.800Z",
  "observed": {
   "read": {},
   "dir": {},
@@ -11,7 +11,7 @@
  },
  "lines": [
   "suite fingerprint",
-  "cases 0e26d0ab11f9180327fce35cdf9c78901c3ed3e2b92415dfb006882ba9935075",
+  "cases 4cccef0c432ec2a937f3b049aec67decfc440864245ec10c36772c12b77fc3b5",
   "jobs 1",
   "file tests/unit.ts 5299ee134265c1802354c3a8ec781bd7eba9b7a9790a1edb9f398a517d6ae12b",
   "file tests/unit/select.js f04983b61baf86539ac5bafb0fccf9e67847f614866b4f243551d3b179e163b1",
@@ -27,7 +27,7 @@
   "env CUE e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "module tests/unit/registry.js f5255fd27fefc527f2c41d5bb930aa9be9833aa179d521664cbee39e559b6e64",
   "module intents/run.ts 3137ad06e3e40c841bb0d78753da1b6c43943f6df8126be268f102f6abe1992b",
-  "module prod-watch/watch.js 2717eddd765f84292879ab1ab7bd37a588bab43bd53cab52f6bd44957d153a1a",
+  "module prod-watch/watch.js b65335c311e84c5227f1e5db3cbc378d5a598e7dad27c15ad40afd4bd437018e",
   "module tests/unit/probes.js dafb02227fc0d91c074c9b44b9037ddc82276041df209637cf5ab08165459f90",
   "module node:crypto"
  ]

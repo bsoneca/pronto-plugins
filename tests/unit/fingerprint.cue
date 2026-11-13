@@ -134,6 +134,18 @@ cases: {
 		{get: "0"},
 		{call: "watch.messageOf", args: ["$"], expect: "HTTP 502 GET /player/3f0c9a1e"},
 	]}
+	"a node's database record is read by its own severity and message, a line that is no JSON fails the read": {suite: "fingerprint", steps: [
+		{value: [
+			(_vl & {msg: "record", container: "postgres", pod: "brawl-chess-db-1", level: "info", extra: {"json.msg": "record", "json.record.error_severity": "LOG", "json.record.message": "checkpoint starting: time"}}).out,
+			(_vl & {msg: "record", container: "postgres", pod: "brawl-chess-db-1", level: "info", at: "2026-11-13T13:24:05.000000000Z", extra: {"json.msg": "record", "json.record.error_severity": "FATAL", "json.record.message": "remaining connection slots are reserved for roles with the SUPERUSER attribute"}}).out,
+		]},
+		{call: "watch.logEntries", args: ["$", {}]},
+		{keep: "es"},
+		{get: "length", expect: 1},
+		{use: "es"},
+		{pick: ["0.severity", "0.textPayload", "0.resource.labels.service_name"], expect: ["CRITICAL", "remaining connection slots are reserved for roles with the SUPERUSER attribute", "brawl-chess-db-1"]},
+		{call: "watch.logEntries", args: ["{\"_time\":\"2026-11-13T13:24:04Z\",\"pod\":\"p-1\"}\ncurl: (28) Operation timed out", {}], throws: "not JSON"},
+	]}
 	"a node's plain lines are kept by their level, their words or their lifecycle, not for being lines; a container's start opens its window": {suite: "fingerprint", steps: [
 		{value: [
 			(_vl & {msg: "listening on :8080", container: "auth"}).out,
