@@ -1,6 +1,6 @@
 {
- "key": "094c176c808658d2038e5f10f922d1c4138e5ffd56ec7588053eb69618608fd5",
- "at": "2026-11-05T01:59:12.261Z",
+ "key": "d67e8ca7d8a9805fe7f86308573538cb6a5584d518e9a8c6b34ba4f78e1ab612",
+ "at": "2026-11-13T14:26:10.752Z",
  "observed": {
   "read": {},
   "dir": {},
@@ -23,11 +23,11 @@
   "file package.json absent",
   "deno 2.9.8",
   "args [\"triage\"]",
-  "allow read=granted write=granted env=granted run=granted net=prompt sys=prompt ffi=prompt",
+  "allow read=granted write=granted env=granted run=granted net=granted sys=prompt ffi=prompt",
   "env CUE e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "module tests/unit/registry.js d611efd1b4a96a3bb28c2a4870938665c2801aac607f8fc7ae83bcd7f9057b31",
+  "module tests/unit/registry.js f5255fd27fefc527f2c41d5bb930aa9be9833aa179d521664cbee39e559b6e64",
   "module intents/run.ts 3137ad06e3e40c841bb0d78753da1b6c43943f6df8126be268f102f6abe1992b",
-  "module prod-watch/watch.js 21120926c19f39a5188eae503acc9ce400e0807f8465ae1b0289a91756292950",
+  "module prod-watch/watch.js 4f8e311619699935075228d16bfbcf0b7d13c5aad25010d0ce4510011cf6843d",
   "module node:crypto"
  ]
 }

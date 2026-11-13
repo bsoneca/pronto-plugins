@@ -3,6 +3,8 @@
 // redaction every sample goes through before it can reach a pull request.
 package unit
 
+import pw "github.com/bsoneca/pronto-plugins/prod-watch:prodwatch"
+
 // An entry as Cloud Logging returns it, with only what prod-watch reads.
 _entry: {
 	text:      string
@@ -17,6 +19,25 @@ _entry: {
 		labels: {container_name: container, instanceId: instance}
 	}
 }
+
+// A line as VictoriaLogs returns it for a pod of the node (prodWatch.node), as the query's fields
+// give it; extra holds a JSON line's json.* fields.
+_vl: {
+	msg:       string
+	container: *"auth" | string
+	pod:       *"brawl-chess-auth-5d9c8b7f4-x7k2p" | string
+	level:     *"info" | string
+	at:        *"2026-11-13T13:24:04.220153425Z" | string
+	extra: {...}
+	let t = at
+	let m = msg
+	let p = pod
+	let c = container
+	let l = level
+	out: {"_time": t, "_msg": m, pod: p, container: c, level: l} & extra
+}
+_rules:     pw.prodWatch.noise
+_lifecycle: pw.prodWatch.lifecycle
 
 cases: {
 	"a line loses its timestamp, colour codes, ids, addresses, query values and numbers": {suite: "fingerprint", steps: [
@@ -83,5 +104,110 @@ cases: {
 		{call: "watch.redact", args: ["{\"display_name\":\"Ana Souza\",\"phone\":\"+55 11 98765-4321\",\"game\":\"3f0c9a1e-2b4d-4e8f-9a7b-1c2d3e4f5a6b\"}"], expect: "{\"display_name\":<redacted>,\"phone\":<redacted>,\"game\":\"<uuid>\"}"},
 		{call: "watch.redact", args: ["call me at +55 11 98765-4321, key sk_live_\("Fake0Key9Not")\("Real7Abc2Xyz")"], expect: "call me at <phone>, key <token>"},
 		{call: "watch.redact", args: ["Electric.StatusMonitor condition failed: :snapshot_connection_pool_ready"], expect: "Electric.StatusMonitor condition failed: :snapshot_connection_pool_ready", why: "a long name with no digit is no token"},
+	]}
+	"a node's JSON lines are entries with their level as severity, their error beside the message, and only a warning or worse is kept": {suite: "fingerprint", steps: [
+		{value: [
+			(_vl & {msg: "handled request", container: "caddy", level: "info", extra: {"json.msg": "handled request"}}).out,
+			(_vl & {msg: "upstream unreachable", container: "caddy", level: "error", at: "2026-11-13T13:24:05.000000000Z", extra: {"json.msg": "upstream unreachable", "json.error": "dial tcp 10.42.0.9:8080: connect: connection refused", "json.stack_trace": "    at proxy (/app/proxy.js:10:5)"}}).out,
+			(_vl & {msg: "slow", container: "caddy", level: "warn", at: "2026-11-13T13:24:06.000000000Z", extra: {"json.msg": "slow", "json.stack": ""}}).out,
+		]},
+		{call: "watch.logEntries", args: ["$", {}]},
+		{keep: "es"},
+		{get: "length", expect: 2},
+		{use: "es"},
+		{pick: ["0.severity", "0.jsonPayload.message", "0.labels.container_name", "0.resource.labels.service_name", "0.resource.labels.revision_name", "0.labels.instanceId"], expect: ["ERROR", "upstream unreachable: dial tcp 10.42.0.9:8080: connect: connection refused", "caddy", "brawl-chess-auth", "5d9c8b7f4", "brawl-chess-auth-5d9c8b7f4-x7k2p"]},
+		{use: "es"},
+		{get: "0"},
+		{call: "watch.messageOf", args: ["$"], matches: "^upstream unreachable: dial tcp[^]*\\n    at proxy", why: "a JSON entry reads as the collector's does: its message and its stack"},
+		{use: "es"},
+		{get: "1.severity", expect: "WARNING"},
+	]}
+	"a node's plain lines are kept by their level, their words or their lifecycle, not for being lines; a container's start opens its window": {suite: "fingerprint", steps: [
+		{value: [
+			(_vl & {msg: "listening on :8080", container: "auth"}).out,
+			(_vl & {msg: "2026/11/13 13:24:04 traces export: context deadline exceeded", container: "daprd", level: "error", at: "2026-11-13T13:24:05.000000000Z"}).out,
+			(_vl & {msg: "level=warn msg=\"slow query\"", container: "auth", at: "2026-11-13T13:24:06.000000000Z"}).out,
+			(_vl & {msg: "[error] pool closed", container: "auth", at: "2026-11-13T13:24:07.000000000Z"}).out,
+			(_vl & {msg: "connect failed: Connection refused", container: "auth", at: "2026-11-13T13:24:08.000000000Z"}).out,
+			(_vl & {msg: "Container terminated on signal 15.", container: "auth", at: "2026-11-13T13:24:09.000000000Z"}).out,
+			(_vl & {msg: "served /table/1", container: "auth", at: "2026-11-13T13:24:10.000000000Z"}).out,
+		]},
+		{call: "watch.logEntries", args: ["$", {from: "2026-11-13T13:00:00.000Z", lifecycle: _lifecycle, starts: [{pod: "brawl-chess-auth-5d9c8b7f4-x7k2p", deployment: "brawl-chess-auth", hash: "5d9c8b7f4", container: "auth", revision: "4b224f25665c", startedAt: "2026-11-13T13:24:03.000Z"}, {pod: "brawl-chess-auth-5d9c8b7f4-x7k2p", deployment: "brawl-chess-auth", hash: "5d9c8b7f4", container: "old", revision: "x", startedAt: "2026-11-10T13:24:03.000Z"}]}]},
+		{keep: "es"},
+		{map: {get: "textPayload"}, expect: ["2026/11/13 13:24:04 traces export: context deadline exceeded", "level=warn msg=\"slow query\"", "[error] pool closed", "connect failed: Connection refused", "Container terminated on signal 15.", "Starting new instance. Reason: container started"], why: "listening and served are info lines that say nothing is wrong; a container that started before the window opens none"},
+		{use: "es"},
+		{map: {get: "severity"}, expect: ["ERROR", "WARNING", "ERROR", "INFO", "INFO", "INFO"]},
+	]}
+	"a node's stacks are one entry: indented frames, causes and goroutines join their line, a traceback goes to its exception and its chain, another pod's line or a late one does not": {suite: "fingerprint", steps: [
+		{value: [
+			(_vl & {msg: "Error: boom", level: "error"}).out,
+			(_vl & {msg: "    at discover (file:///app/oidc.ts:41:11)", level: "info", at: "2026-11-13T13:24:04.221000000Z"}).out,
+			(_vl & {msg: "    at async main (file:///app/main.ts:9:3)", level: "info", at: "2026-11-13T13:24:04.222000000Z"}).out,
+			(_vl & {msg: "java.lang.IllegalStateException: x", level: "error", at: "2026-11-13T13:25:00.000000000Z"}).out,
+			(_vl & {msg: "\tat a.B.c(B.java:1)", at: "2026-11-13T13:25:00.001000000Z"}).out,
+			(_vl & {msg: "Caused by: java.io.IOException: y", at: "2026-11-13T13:25:00.002000000Z"}).out,
+			(_vl & {msg: "... 12 more", at: "2026-11-13T13:25:00.003000000Z"}).out,
+			(_vl & {msg: "Traceback (most recent call last):", container: "llm", pod: "pronto-llm-7c9d6b5f8-abcde", at: "2026-11-13T13:26:00.000000000Z"}).out,
+			(_vl & {msg: "  File \"/app/a.py\", line 1, in f", container: "llm", pod: "pronto-llm-7c9d6b5f8-abcde", at: "2026-11-13T13:26:00.001000000Z"}).out,
+			(_vl & {msg: "    boom()", container: "llm", pod: "pronto-llm-7c9d6b5f8-abcde", at: "2026-11-13T13:26:00.002000000Z"}).out,
+			(_vl & {msg: "KeyError: 'x'", container: "llm", pod: "pronto-llm-7c9d6b5f8-abcde", at: "2026-11-13T13:26:00.003000000Z"}).out,
+			(_vl & {msg: "During handling of the above exception, another exception occurred:", container: "llm", pod: "pronto-llm-7c9d6b5f8-abcde", at: "2026-11-13T13:26:00.004000000Z"}).out,
+			(_vl & {msg: "Traceback (most recent call last):", container: "llm", pod: "pronto-llm-7c9d6b5f8-abcde", at: "2026-11-13T13:26:00.005000000Z"}).out,
+			(_vl & {msg: "  File \"/app/b.py\", line 2, in g", container: "llm", pod: "pronto-llm-7c9d6b5f8-abcde", at: "2026-11-13T13:26:00.006000000Z"}).out,
+			(_vl & {msg: "ValueError: y", container: "llm", pod: "pronto-llm-7c9d6b5f8-abcde", at: "2026-11-13T13:26:00.007000000Z"}).out,
+			(_vl & {msg: "    at late (file:///app/late.ts:1:1)", level: "info", at: "2026-11-13T13:25:30.000000000Z"}).out,
+		]},
+		{call: "watch.logEntries", args: ["$", {}]},
+		{keep: "es"},
+		{get: "length", expect: 3, why: "the JS error, the Java error and the chained traceback; a frame 30 seconds on joins nothing, and is no bug on its own"},
+		{use: "es"},
+		{get: "0.textPayload", matches: "^Error: boom\\n    at discover[^]*at async main[^]*main.ts:9:3\\)$"},
+		{use: "es"},
+		{get: "0.textPayload"},
+		{call: "watch.frameOf", args: ["$"], expect: "app/oidc.ts:discover"},
+		{use: "es"},
+		{get: "1.textPayload", matches: "^java.lang.IllegalStateException: x\\n\\tat a.B.c[^]*Caused by: java.io.IOException: y\\n... 12 more$"},
+		{use: "es"},
+		{get: "2.textPayload", matches: "^Traceback[^]*KeyError: 'x'\\nDuring handling[^]*ValueError: y$"},
+		{use: "es"},
+		{get: "2.textPayload"},
+		{call: "watch.titleOf", args: ["$"], expect: "ValueError: y"},
+	]}
+	"a node's pods are named by their Deployment and ReplicaSet hash, and their image is the tag or, for latest, the digest": {suite: "fingerprint", steps: [
+		{call: "watch.ownerOf", args: ["brawl-chess-auth-5d9c8b7f4-x7k2p"], expect: {deployment: "brawl-chess-auth", hash: "5d9c8b7f4"}},
+		{call: "watch.ownerOf", args: ["victoria-logs-0"], expect: {deployment: "victoria-logs-0", hash: ""}},
+		{call: "watch.revisionOf", args: ["127.0.0.1:5000/brawl-chess-auth:latest@sha256:48039f6261053525216f15661268793797c7cda51ef6b05c331ed202ad460d35", "127.0.0.1:5000/brawl-chess-auth@sha256:48039f6261053525216f15661268793797c7cda51ef6b05c331ed202ad460d35"], expect: "48039f626105"},
+		{call: "watch.revisionOf", args: ["registry.example.com/app:28838831"], expect: "28838831"},
+		{call: "watch.revisionOf", args: ["sha256:2a2340bdb53d0940dd83da999a464bcdad173647b72c8336cf7ee0990127f8f7", "docker.io/library/x@sha256:2a2340bdb53d0940dd83da999a464bcdad173647b72c8336cf7ee0990127f8f7"], expect: "2a2340bdb53d", why: "an image that is its digest has no tag"},
+		{value: {items: [
+			{metadata: {name: "brawl-chess-auth-5d9c8b7f4-x7k2p", ownerReferences: [{kind: "ReplicaSet", name: "brawl-chess-auth-5d9c8b7f4"}]}, status: containerStatuses: [{name: "auth", image: "r/auth:latest", imageID: "r/auth@sha256:48039f6261053525216f15661268793797c7cda51ef6b05c331ed202ad460d35", state: running: startedAt: "2026-11-13T13:24:03Z"}]},
+			{metadata: {name: "brawl-chess-crud-6b7d9c5f4-q1w2e", ownerReferences: [{kind: "ReplicaSet", name: "brawl-chess-crud-6b7d9c5f4"}]}, status: containerStatuses: [{name: "crud", image: "r/crud:latest", imageID: "r/crud@sha256:d4aafa388e1fcbd3d582001b4883a0b55c3c8f0a2d30081d2686a08a8c008f69"}]},
+			{metadata: {name: "brawl-chess-db-1", ownerReferences: [{kind: "Cluster", name: "brawl-chess-db"}]}, status: containerStatuses: [{name: "postgres", image: "pg:16"}]},
+		]}},
+		{keep: "list"},
+		{call: "watch.podsOf", args: ["$list", ["brawl-chess-auth"]], expect: [{pod: "brawl-chess-auth-5d9c8b7f4-x7k2p", deployment: "brawl-chess-auth", hash: "5d9c8b7f4", container: "auth", revision: "48039f626105", startedAt: "2026-11-13T13:24:03Z"}], why: "the named Deployment's pod only, and a pod a Cluster owns is no Deployment's"},
+		{call: "watch.podsOf", args: ["$list"]},
+		{get: "length", expect: 2, why: "none named: every Deployment's"},
+	]}
+	"the revision a node's app is serving is release-cron's last release, and only that app's": {suite: "fingerprint", steps: [
+		{call: "watch.releasedOf", args: ["2026-11-13T06:42:27-03:00 brawl-chess failed 2d2a1e9f (the rehearsal failed (exit 1)): 24.4 min\n2026-11-13T08:00:16-03:00 brawl-chess released 28838831 28838831198fcaf67f5afddd8a7e0ab54b35571b: 32.1 min = release 6.0\n2026-11-13T09:00:16-03:00 brawl-chess skipped 074595f2 (nothing changed)\n2026-11-13T09:10:00-03:00 other released 11111111 1111111111111111111111111111111111111111: 1 min\n", "brawl-chess"], expect: {at: "2026-11-13T08:00:16-03:00", short: "28838831", sha: "28838831198fcaf67f5afddd8a7e0ab54b35571b"}},
+		{call: "watch.releasedOf", args: ["", "brawl-chess"], expect: null},
+		{call: "watch.brt", args: ["2026-11-13T11:00:16Z"], expect: "13/11 08:00 BRT"},
+	]}
+	"the query asks for the namespace's lines that may be a bug or go on a stack, of the containers and Deployments named, and refuses a name that is no plain word": {suite: "fingerprint", steps: [
+		{call: "watch.logsQuery", args: [{namespace: "brawl-chess", containers: ["auth", "crud"], deployments: ["brawl-chess-auth"]}], matches: "^\\{namespace=\"brawl-chess\"\\} container:in\\(\"auth\",\"crud\"\\) pod:~`\\^\\(brawl-chess-auth\\)-\\[a-z0-9\\]\\+-\\[a-z0-9\\]\\+\\$` \\(level:~"},
+		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}], matches: "\\| fields _time,_msg,pod,container,level,json.error[^|]*\\| sort by \\(_time\\)$"},
+		{call: "watch.logsQuery", args: [{namespace: "x\"} | drop"}], throws: "not a plain name"},
+	]}
+	"a node's Electric line while its container starts is noise, and the same line an hour on is a bug": {suite: "fingerprint", steps: [
+		{value: [
+			(_vl & {msg: "13:24:05.058 pid=<0.3298.0> [warning] Electric.StatusMonitor condition failed: :pg_lock_acquired", container: "electric", pod: "brawl-chess-electric-8f6d5c7b9-aaaaa", at: "2026-11-13T13:24:05.000000000Z"}).out,
+			(_vl & {msg: "14:24:05.058 pid=<0.3298.0> [warning] Electric.StatusMonitor condition failed: :pg_lock_acquired", container: "electric", pod: "brawl-chess-electric-8f6d5c7b9-aaaaa", at: "2026-11-13T14:24:05.000000000Z"}).out,
+		]},
+		{call: "watch.logEntries", args: ["$", {from: "2026-11-13T13:00:00.000Z", lifecycle: _lifecycle, starts: [{pod: "brawl-chess-electric-8f6d5c7b9-aaaaa", deployment: "brawl-chess-electric", hash: "8f6d5c7b9", container: "electric", revision: "r", startedAt: "2026-11-13T13:24:03.000Z"}]}]},
+		{call: "watch.group", args: ["$", _rules, _lifecycle]},
+		{call: "watch.triage", args: ["$", {}, "2026-11-13T15:00:00.000Z"]},
+		{get: "report"},
+		{pick: ["0.verdict", "0.noise", "1.verdict", "1.noise"], expect: ["new", null, "noise", "electric-not-ready"]},
 	]}
 }
