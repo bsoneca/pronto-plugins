@@ -75,7 +75,8 @@ const ERRORISH = /(error|panic|exception|traceback|fatal|refused|failed)/i;
 const LEVELS = { trace: "DEBUG", debug: "DEBUG", info: "INFO", notice: "NOTICE", warn: "WARNING", warning: "WARNING", err: "ERROR", error: "ERROR", crit: "CRITICAL", critical: "CRITICAL", fatal: "CRITICAL", panic: "CRITICAL", alert: "ALERT", emerg: "EMERGENCY" };
 const PINO = { 10: "DEBUG", 20: "DEBUG", 30: "INFO", 40: "WARNING", 50: "ERROR", 60: "CRITICAL" };
 const PG = { DEBUG: "DEBUG", LOG: "INFO", INFO: "INFO", NOTICE: "NOTICE", WARNING: "WARNING", ERROR: "ERROR", FATAL: "CRITICAL", PANIC: "EMERGENCY" };
-const levelOf = (l) => (typeof l === "number" ? PINO[l] : LEVELS[String(l ?? "").toLowerCase()]) ?? "DEFAULT";
+// Vector writes pino's numbers as strings ("50").
+const levelOf = (l) => (/^\d+$/.test(String(l)) ? PINO[Number(l)] : LEVELS[String(l ?? "").toLowerCase()]) ?? "DEFAULT";
 // A plain line's severity when it says so ("level=warn", "[error]", "ERROR: ..."), else DEFAULT.
 function severityOf(text) {
   const m = text.match(/(?:\blevel=|\[|^)\s*"?(warn(?:ing)?|error|fatal|critical|panic)\b/i);
@@ -207,11 +208,16 @@ export function logEntries(ndjson, { from = "", lifecycle = {}, starts = [] } = 
 // with start and end as parameters): the namespace's lines, of the named containers and Deployments,
 // that may be a bug or go on a stack, as logEntries reads them; nothing else leaves the node. Each
 // name is a plain word, as the schema holds it.
-/** @param {{namespace: string, containers?: string[], deployments?: string[]}} node */
-export function logsQuery({ namespace, containers = [], deployments = [] }) {
+/** @param {{namespace: string, containers?: string[], deployments?: string[]}} node
+ *  @param {Record<string, {marker: string}>} [lifecycle] the markers of prodWatch.lifecycle, each a line to read */
+export function logsQuery({ namespace, containers = [], deployments = [] }, lifecycle = {}) {
   const word = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
   for (const w of [namespace, ...containers, ...deployments]) if (!word.test(w)) throw new Error(`${JSON.stringify(w)}: not a plain name`);
-  const lines = `(level:~\`(?i)^(warn|warning|error|err|fatal|critical|crit|panic|alert|emerg)$\` OR json.record.error_severity:~\`^(WARNING|ERROR|FATAL|PANIC)$\` OR _msg:~\`(?i)(error|panic|exception|traceback|fatal|refused|failed|SIGTERM|Container terminated)\` OR _msg:~\`${CONTINUES.source}\`)`;
+  const markers = Object.values(lifecycle).map((l) => {
+    if (l.marker.includes("`")) throw new Error(`${l.marker}: a lifecycle marker with a backtick`);
+    return ` OR _msg:~\`${l.marker}\``;
+  }).join("");
+  const lines = `(level:~\`(?i)^(warn|warning|error|err|fatal|critical|crit|panic|alert|emerg|40|50|60)$\` OR json.record.error_severity:~\`^(WARNING|ERROR|FATAL|PANIC)$\` OR _msg:~\`(?i)(error|panic|exception|traceback|fatal|refused|failed|SIGTERM|Container terminated)\` OR _msg:~\`${CONTINUES.source}\`${markers})`;
   return [
     `{namespace="${namespace}"}`,
     ...(containers.length ? [`container:in(${containers.map((c) => `"${c}"`).join(",")})`] : []),
