@@ -134,6 +134,11 @@ cases: {
 		{get: "0"},
 		{call: "watch.messageOf", args: ["$"], expect: "HTTP 502 GET /player/3f0c9a1e"},
 	]}
+	"a node's pino level is a string of its number": {suite: "fingerprint", steps: [
+		{value: [(_vl & {msg: "boom", level: "50", extra: {"json.msg": "boom"}}).out, (_vl & {msg: "fine", level: "30", at: "2026-11-13T13:24:05.000000000Z", extra: {"json.msg": "fine"}}).out]},
+		{call: "watch.logEntries", args: ["$", {}]},
+		{map: {get: "severity"}, expect: ["ERROR"]},
+	]}
 	"a node's database record is read by its own severity and message, a line that is no JSON fails the read": {suite: "fingerprint", steps: [
 		{value: [
 			(_vl & {msg: "record", container: "postgres", pod: "brawl-chess-db-1", level: "info", extra: {"json.msg": "record", "json.record.error_severity": "LOG", "json.record.message": "checkpoint starting: time"}}).out,
@@ -222,6 +227,8 @@ cases: {
 		{call: "watch.logsQuery", args: [{namespace: "brawl-chess", containers: ["auth", "crud"], deployments: ["brawl-chess-auth"]}], matches: "^\\{namespace=\"brawl-chess\"\\} container:in\\(\"auth\",\"crud\"\\) pod:~`\\^\\(brawl-chess-auth\\)-\\[a-z0-9\\]\\+-\\[a-z0-9\\]\\+\\$` \\(level:~"},
 		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}], matches: "json.record.error_severity:~`\\^\\(WARNING\\|ERROR\\|FATAL\\|PANIC\\)\\$` OR _msg", why: "CloudNativePG's records are info at the outer level, with the database's severity inside"},
 		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}], matches: "\\| fields _time,_msg,pod,container,level,json.error[^|]*\\| sort by \\(_time\\)$"},
+		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}, _lifecycle], matches: "OR _msg:~`\\^Starting new instance` OR _msg:~`\\^Shutting down \\.\\*instance\\|SIGTERM\\|\\^Container terminated on signal`\\)", why: "the markers of prodWatch.lifecycle are lines to read, as the plugin's CUE gives them"},
+		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}], matches: "\\|50\\|60\\)\\$`", why: "Vector writes pino's numbers as strings"},
 		{call: "watch.logsQuery", args: [{namespace: "x\"} | drop"}], throws: "not a plain name"},
 	]}
 	"a node's Electric line while its container starts is noise, and the same line an hour on is a bug": {suite: "fingerprint", steps: [

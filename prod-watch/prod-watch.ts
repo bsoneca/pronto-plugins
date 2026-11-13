@@ -138,7 +138,7 @@ if (node) {
   const got = await onNode(
     n,
     `ip=$(kubectl -n ${l.namespace} get svc ${l.service} -o jsonpath='{.spec.clusterIP}') && curl -sS --fail --max-time 300 "http://$ip:${l.port}/select/logsql/query" --data-urlencode query@- --data-urlencode start=${from} --data-urlencode end=${to} --data-urlencode limit=${limit}`,
-    logsQuery(n),
+    logsQuery(n, lifecycle),
   );
   if (!got.ok) throw new Error(`VictoriaLogs ${l.namespace}/${l.service} on ${n.host}:\n${got.err}`);
   const lines = logEntries(got.out, { from, lifecycle, starts });
