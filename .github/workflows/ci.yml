@@ -50,6 +50,8 @@ jobs:
           sayt --script tools.nu cue vet -c ./migrations
           sayt --script tools.nu cue vet -c -t package=check ./migrations/export
           sayt --script tools.nu cue vet -c=false ./devflow
+          sayt --script tools.nu cue vet -c ./harness
+          sayt --script tools.nu cue vet -c -t scenarios=true ./harness/export
           sayt --script tools.nu cue vet -c ./release-cron
           sayt --script tools.nu cue vet -c -t package=check ./release-cron/export
           sayt --script tools.nu cue vet -c ./prod-watch
@@ -95,6 +97,15 @@ jobs:
           sayt --script tools.nu cue export $decl -e 'code.meta.wellKnown."assetlinks.json".text' --out text \
             | jq -e '[.[].target.package_name] == ["com.bsoneca.prontohost", "dev.pronto.demo"] and .[1].relation == ["delegate_permission/common.get_login_creds", "delegate_permission/common.handle_all_urls"]'
           sayt --script tools.nu cue export $decl -e code.capabilities.auth.android | jq -e --arg fp "$fp" '. == [$fp]'
+      - name: Write the harness into an app, and hold this repository's own copies to it
+        run: |
+          app=$(mktemp -d)/app && mkdir -p "$app/tests" && printf 'package demo\n' > "$app/program.cue"
+          ./bin/pronto-harness "$app"
+          for f in tests/slot.ts tests/unit.ts tests/unit/select.js tests/unit/schema.cue tests/browser.ts tests/lint.ts; do cmp "$app/$f" "harness/files/$f"; done
+          test ! -e "$app/tests/scenarios/select.ts"
+          touch "$app/tests/scenarios.ts" && ./bin/pronto-harness "$app" && cmp "$app/tests/scenarios/select.ts" harness/files/tests/scenarios/select.ts
+          ! ./bin/pronto-harness "$(mktemp -d)"
+          for f in tests/unit.ts tests/unit/select.js tests/unit/schema.cue; do cmp "$f" "harness/files/$f"; done
       - name: Opt an app into release-cron, then refresh it keeping its own opt-in
         run: |
           app=$(mktemp -d)/app && mkdir -p "$app" && printf 'package demo\n' > "$app/program.cue"

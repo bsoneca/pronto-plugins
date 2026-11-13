@@ -1,0 +1,18 @@
+#!/bin/sh
+# Writes the test harness into a pronto app (harness/README.md): tests/slot.ts, tests/unit.ts and
+# its tests/unit/select.js and schema.cue, tests/browser.ts, tests/lint.ts, and, in an app that runs
+# scenarios (it has tests/scenarios.ts), tests/scenarios/select.ts. Each is regenerated.
+#   bin/pronto-harness <app-dir>...
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+[ $# -ge 1 ] || { echo "usage: pronto-harness <app-dir>..." >&2; exit 2; }
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+for dir in "$@"; do
+	app=$(cd "$dir" && pwd)
+	[ -f "$app/program.cue" ] || { echo "pronto-harness: $app is not a pronto app (no program.cue)" >&2; exit 2; }
+	scenarios=false
+	[ -f "$app/tests/scenarios.ts" ] && scenarios=true
+	(cd "$here" && ./saytw --script tools.nu cue export ./harness/export -t "scenarios=$scenarios" -e files --out json) > "$files"
+	(cd "$here" && ./saytw --script tools.nu nu bin/write.nu "$files" "$app")
+done

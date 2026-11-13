@@ -17,6 +17,8 @@ jobs: [#Suite]: int & >=1
 #Case: {
 	suite: #Suite
 	steps: [#Step, ...#Step]
+	// The pronto-flags flags (the app's flags_spec.cue) the case exercises: a flip of one runs its cases.
+	flags?: [...string]
 }
 
 // A dotted path into the value: "state.white_ms", "0.san", "length".
