@@ -1,6 +1,6 @@
 {
- "key": "44c76f2ec0b615a66d49a63a952cc29a5ca1a6e9a256e2f799ea3136595800ac",
- "at": "2026-11-05T02:00:10.022Z",
+ "key": "9b84abf33c3d13d4c2bdc304b07655d52d415dcb73ccb3b6ee11ca1175c1f0cc",
+ "at": "2026-11-13T14:25:59.890Z",
  "observed": {
   "read": {},
   "dir": {},
@@ -11,7 +11,7 @@
  },
  "lines": [
   "suite fingerprint",
-  "cases a430eefdd3331e7834a0018c49b7b1b07157a3c49f6a00ba9d577a207f32d5c1",
+  "cases a6c858205571925a797207f1e2901845f77345605fd04284c9ec5a89c453d6c5",
   "jobs 1",
   "file tests/unit.ts 5299ee134265c1802354c3a8ec781bd7eba9b7a9790a1edb9f398a517d6ae12b",
   "file tests/unit/select.js f04983b61baf86539ac5bafb0fccf9e67847f614866b4f243551d3b179e163b1",
@@ -23,11 +23,11 @@
   "file package.json absent",
   "deno 2.9.8",
   "args [\"fingerprint\"]",
-  "allow read=granted write=granted env=granted run=granted net=prompt sys=prompt ffi=prompt",
+  "allow read=granted write=granted env=granted run=granted net=granted sys=prompt ffi=prompt",
   "env CUE e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "module tests/unit/registry.js d611efd1b4a96a3bb28c2a4870938665c2801aac607f8fc7ae83bcd7f9057b31",
+  "module tests/unit/registry.js f5255fd27fefc527f2c41d5bb930aa9be9833aa179d521664cbee39e559b6e64",
   "module intents/run.ts 3137ad06e3e40c841bb0d78753da1b6c43943f6df8126be268f102f6abe1992b",
-  "module prod-watch/watch.js 21120926c19f39a5188eae503acc9ce400e0807f8465ae1b0289a91756292950",
+  "module prod-watch/watch.js 4f8e311619699935075228d16bfbcf0b7d13c5aad25010d0ce4510011cf6843d",
   "module tests/unit/probes.js dafb02227fc0d91c074c9b44b9037ddc82276041df209637cf5ab08165459f90",
   "module node:crypto"
  ]

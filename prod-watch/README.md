@@ -1,10 +1,12 @@
 # prod-watch: what production logged that may be a bug
 
-Reads Cloud Logging for an app's Cloud Run services, groups what may be a bug by fingerprint and
-says what is new since it last looked. An agent runs it on a loop ([the pronto-prod-watch
+Reads Cloud Logging for an app's Cloud Run services, and, for an app that releases to a node
+(release@k8s), the logs of its pods in the node's VictoriaLogs, groups what may be a bug by
+fingerprint and says what is new since it last looked. An agent runs it on a loop ([the pronto-prod-watch
 skill](../skills/pronto-prod-watch/SKILL.md)), triages each new fingerprint (a bug to fix in a pull
 request, or noise with a reason) and checks after a release that the fingerprint stopped. It only
-reads: `gcloud logging read` with the caller's credentials.
+reads: `gcloud logging read` with the caller's credentials, and on the node `kubectl get` and one
+read query to VictoriaLogs, over ssh.
 
 ## What it adds
 
@@ -22,7 +24,7 @@ bin/pronto-prod-watch apps/<app>      # from a pronto-plugins clone
 
 Then edit the seeded `prod_watch.cue` (other services, the app's own noise), run the driver once
 from the app's folder (below), and start the loop with the pronto-prod-watch skill. The app needs a
-`release.cue` with `GCP` (project, service, and its `sidecars`).
+`release.cue` with `GCP` (project, service, and its `sidecars`), or a `prodWatch.node` (below), or both.
 
 ## Run it
 
@@ -49,15 +51,59 @@ production (`released`): `release-cron` when the app has a `release_cron.cue`, e
 
 - **Which services**: the app's `release.cue` (`GCP`): its `service`, and `<service>-<name>` for each
   sidecar that runs `apart`; plus the `services` of its `prodWatch`.
-- **Which entries**: a warning or worse, a 5xx, or a line with no severity that says it failed
+- **Which entries** (Cloud Logging): a warning or worse, a 5xx, or a line with no severity that says it failed
   (error, panic, exception, traceback, fatal, refused, failed); never a request answered below 500.
   Also Cloud Run's start and shutdown lines, which open an instance's windows (below) and are
   never reported themselves.
+- **A node's pods** (`prodWatch.node`, for an app released with release@k8s): see [A node's logs](#a-nodes-logs).
 - **Browser errors**: the journeys collector writes each page error as an `ERROR` line
   (`frontend TypeError: ...`, with its top frame, screen and revision; journeys/README.md), so they
   are read, fingerprinted and triaged like any server line, under the collector's container.
 - **A traceback written a line an entry** (Python's logging to stdout, as pronto-llm does) is put
   back into one entry before it is grouped.
+
+## A node's logs
+
+An app on the operator's node (release@k8s on k3s) has no Cloud Run service, and `kubectl logs` loses
+a pod's lines when a release replaces it and rotates them as they grow. The node's Vector DaemonSet
+ships every pod's lines to VictoriaLogs (namespace `logs`, Service `victoria-logs`, 30 days), which is
+what is read. In the app's `prod_watch.cue`:
+
+```cue
+prodWatch: node: {
+	namespace: "brawl-chess"                 // release@k8s's namespace: the app's folder name
+	// containers: ["auth", "crud"]          // only these containers; none named, all
+	// deployments: ["brawl-chess-auth"]     // only these Deployments' pods; none named, all
+	// host, kubeconfig, logs: {namespace, service, port}: the node's, with defaults
+}
+```
+
+Each pass, over `ssh <host>` (batch mode, the kubeconfig exported from the node's own file):
+
+1. `kubectl get pods -n <namespace> -o json`, for each container's image and when it started.
+2. `kubectl -n logs get svc victoria-logs`, for the Service's ClusterIP, then `curl` on the node to
+   `/select/logsql/query` with the query on stdin (nothing is made in the cluster, no port-forward).
+   The query is LogsQL: the namespace's stream (Vector sets `namespace`, `pod`, `container`, `level`
+   on each line) between the last pass and now, the lines at warning or worse or that say they
+   failed, and the indented lines that go on a stack, with only the fields prod-watch reads (the
+   other `json.*` fields of an access log, headers and cookies among them, are never fetched).
+
+Nothing else runs on the node: the only kubectl verb is `get`, the query is a read, and the words
+that reach the remote shell are the schema's, each held to letters, digits and a few signs.
+
+The lines become entries as Cloud Logging's are: the **service** is the pod's Deployment, the
+**revision** its ReplicaSet's hash (the template's: a release changes it), the **instance** the pod.
+A JSON line's `json.error` goes beside its message and its `json.stack_trace` is its stack; a Python
+traceback, JS frames, Java causes and Go goroutines are put into one entry. A container that started
+after the last pass opens its pod's start window, as Cloud Run's "Starting new instance" does, so the
+shared noise rules held to `during: ["start"]` work. A pass reads 50000 lines at most; when it stops
+there the cursor is where it did, and the next pass goes on.
+
+The header's **released** says how fixes reach production; for a node it adds the last release
+release-cron's log holds (`~/.cache/pronto/release-cron/<app>/release-cron.log`, "release 28838831 at
+13/11 08:00 BRT"), else the images the pods run (their tag, or for `latest` the digest's first twelve
+characters). A fingerprint whose **last** is after that time and whose revisions are the running ones
+(`--json`'s `node.images` has each container's image) is still there after the release.
 
 ## Noise is a design fact
 

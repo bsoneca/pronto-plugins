@@ -67,6 +67,161 @@ export function stitch(entries) {
   return out;
 }
 
+// --- A node's logs (prodWatch.node): what VictoriaLogs holds of an app's pods, as entries. ---
+
+// What Cloud Run's log filter calls a line that may be a bug when it carries no severity.
+const ERRORISH = /(error|panic|exception|traceback|fatal|refused|failed)/i;
+// A line's level: a name (pino's and zap's "warn", logrus's "warning") or pino's number.
+const LEVELS = { trace: "DEBUG", debug: "DEBUG", info: "INFO", notice: "NOTICE", warn: "WARNING", warning: "WARNING", err: "ERROR", error: "ERROR", crit: "CRITICAL", critical: "CRITICAL", fatal: "CRITICAL", panic: "CRITICAL", alert: "ALERT", emerg: "EMERGENCY" };
+const PINO = { 10: "DEBUG", 20: "DEBUG", 30: "INFO", 40: "WARNING", 50: "ERROR", 60: "CRITICAL" };
+const levelOf = (l) => (typeof l === "number" ? PINO[l] : LEVELS[String(l ?? "").toLowerCase()]) ?? "DEFAULT";
+// A plain line's severity when it says so ("level=warn", "[error]", "ERROR: ..."), else DEFAULT.
+function severityOf(text) {
+  const m = text.match(/(?:\blevel=|\[|^)\s*"?(warn(?:ing)?|error|fatal|critical|panic)\b/i);
+  return m ? LEVELS[m[1].toLowerCase()] : "DEFAULT";
+}
+// A line that goes on the one before: indented (a frame, a source line), a cause, a Go goroutine.
+export const CONTINUES = /^(\s+\S|Caused by:|goroutine \d+ \[|\.\.\. \d+ more)/;
+
+// The image a container runs, as the revision a report names: its tag, or for `latest` (release@k8s
+// pushes that) the first twelve hexadecimal characters of its digest.
+export function revisionOf(image = "", imageID = "") {
+  const tag = image.replace(/@.*$/, "").match(/:([^:/]+)$/)?.[1];
+  if (tag && tag !== "latest" && !/^[0-9a-f]{64}$/.test(tag)) return tag;
+  return (imageID || image).match(/sha256:([0-9a-f]{12})/)?.[1] ?? "";
+}
+
+// A Deployment's pod is <deployment>-<hash>-<id>, the hash its ReplicaSet's (the revision of its
+// template): the Deployment and the hash, or the name itself for any other pod.
+export function ownerOf(pod) {
+  const m = String(pod).match(/^(.+)-([a-z0-9]{6,10})-[a-z0-9]{5}$/);
+  return m ? { deployment: m[1], hash: m[2] } : { deployment: String(pod), hash: "" };
+}
+
+// The containers of the named Deployments' pods now (`kubectl get pods -o json`; none named, every
+// Deployment's): each with the image's revision and when it started.
+export function podsOf(podList, deployments = []) {
+  const out = [];
+  for (const p of podList?.items ?? []) {
+    const rs = (p.metadata?.ownerReferences ?? []).find((o) => o.kind === "ReplicaSet")?.name ?? "";
+    const o = ownerOf(`${rs}-xxxxx`);
+    if (!o.hash || (deployments.length && !deployments.includes(o.deployment))) continue;
+    for (const c of p.status?.containerStatuses ?? []) {
+      out.push({ pod: p.metadata.name, deployment: o.deployment, hash: o.hash, container: c.name, revision: revisionOf(c.image, c.imageID), startedAt: c.state?.running?.startedAt ?? "" });
+    }
+  }
+  return out;
+}
+
+// The entries VictoriaLogs' NDJSON (or its objects, a list) holds (/select/logsql/query, one object a line with _time, _msg, pod,
+// container, level and a JSON line's json.error and json.stack_trace): the service the pod's
+// Deployment, the revision its ReplicaSet's hash, the instance the pod. A line is a text entry, or,
+// when it carries json.* fields, a jsonPayload; its level is the entry's severity. A stack
+// (Python's traceback, JS's frames, Java's causes, Go's goroutines) is put into one entry. Only
+// what may be a bug, as Cloud Run's filter reads it (prod-watch.ts): a warning or worse, a line that
+// says it failed, or a lifecycle marker. `starts` (podsOf) gives each container's start after
+// `from` the "Starting new instance" marker that opens its pod's start window.
+export function logEntries(ndjson, { from = "", lifecycle = {}, starts = [] } = {}) {
+  const records = [];
+  for (const l of Array.isArray(ndjson) ? ndjson : String(ndjson).split("\n")) {
+    let r = l;
+    if (typeof l === "string") {
+      if (!l.trim()) continue;
+      try { r = JSON.parse(l); } catch { continue; }
+    }
+    if (r && typeof r._time === "string" && typeof r.pod === "string") records.push({ ...r, _time: r._time.replace(/(\.\d{3})\d*Z$/, "$1Z").replace(/(\d\d:\d\d:\d\d)Z$/, "$1.000Z") });
+  }
+  records.sort((a, b) => (a._time < b._time ? -1 : a._time > b._time ? 1 : 0));
+  const where = (timestamp, pod, container) => {
+    const o = ownerOf(pod);
+    return { timestamp, resource: { labels: { service_name: o.deployment, revision_name: o.hash } }, labels: { container_name: container, instanceId: pod } };
+  };
+  const entries = [];
+  // Per pod and container: the entry a continuation goes on, and the traceback being read: "tb"
+  // (frames to come), "ended" (its exception line is in), "chain" (a "During handling" is).
+  const open = new Map();
+  for (const r of records) {
+    const id = `${r.pod}/${r.container}`;
+    const st = open.get(id) ?? {};
+    open.set(id, st);
+    const body = String(r._msg ?? "").replace(/\r$/, "");
+    if (!body.trim()) continue;
+    const near = st.last && Math.abs(Date.parse(r._time) - Date.parse(st.last.timestamp)) <= 2000;
+    const append = (line) => { st.last.textPayload += `\n${line}`; };
+    if (st.py && near) {
+      if (st.py === "tb") { append(body); if (!/^\s/.test(body)) st.py = "ended"; continue; }
+      if (st.py === "ended" && CHAIN.test(body)) { append(body); st.py = "chain"; continue; }
+      if (st.py === "chain" && /^Traceback \(most recent call last\)/.test(body)) { append(body); st.py = "tb"; continue; }
+    }
+    st.py = null;
+    const base = where(r._time, r.pod, r.container);
+    if (/^Traceback \(most recent call last\)/.test(body)) {
+      st.last = { ...base, severity: "ERROR", textPayload: body };
+      entries.push(st.last);
+      st.py = "tb";
+      continue;
+    }
+    if (near && st.last.textPayload !== undefined && CONTINUES.test(body)) { append(body); continue; }
+    const level = levelOf(r.level);
+    if (r["json.msg"] || r["json.error"] || r["json.err"] || r["json.stack_trace"] || r["json.stack"]) {
+      const why = r["json.error"] ?? r["json.err"];
+      st.last = { ...base, severity: level, jsonPayload: { message: why ? `${body}: ${why}` : body, stack_trace: r["json.stack_trace"] ?? r["json.stack"] ?? "" } };
+    } else {
+      const said = severityOf(body);
+      st.last = { ...base, severity: RANK[level] >= RANK.WARNING || said === "DEFAULT" ? level : said, textPayload: body };
+    }
+    entries.push(st.last);
+  }
+  const out = entries.filter((e) => {
+    if (RANK[e.severity] >= RANK.WARNING) return true;
+    if (e.textPayload !== undefined && ERRORISH.test(e.textPayload)) return true;
+    const t = clean(messageOf(e));
+    return Object.values(lifecycle).some((l) => new RegExp(l.marker).test(t));
+  });
+  for (const c of starts) {
+    if (c.startedAt && c.startedAt > from) out.push({ ...where(c.startedAt, c.pod, c.container), severity: "INFO", textPayload: "Starting new instance. Reason: container started" });
+  }
+  return out;
+}
+
+// What a LogsQL query asks for an app's pods since the last pass (prod-watch.ts sends it on stdin,
+// with start and end as parameters): the namespace's lines, of the named containers and Deployments,
+// that may be a bug or go on a stack, as logEntries reads them; nothing else leaves the node. Each
+// name is a plain word, as the schema holds it.
+export function logsQuery({ namespace, containers = [], deployments = [] }) {
+  const word = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
+  for (const w of [namespace, ...containers, ...deployments]) if (!word.test(w)) throw new Error(`${JSON.stringify(w)}: not a plain name`);
+  const lines = `(level:~\`(?i)^(warn|warning|error|err|fatal|critical|crit|panic|alert|emerg)$\` OR _msg:~\`(?i)(error|panic|exception|traceback|fatal|refused|failed|SIGTERM|Container terminated)\` OR _msg:~\`${CONTINUES.source}\`)`;
+  return [
+    `{namespace="${namespace}"}`,
+    ...(containers.length ? [`container:in(${containers.map((c) => `"${c}"`).join(",")})`] : []),
+    ...(deployments.length ? [`pod:~\`^(${deployments.map((d) => d.replace(/\./g, "\\.")).join("|")})-[a-z0-9]+-[a-z0-9]+$\``] : []),
+    lines,
+    "| fields _time,_msg,pod,container,level,json.error,json.err,json.stack_trace,json.stack,json.msg",
+    "| sort by (_time)",
+  ].join(" ");
+}
+
+// The last release release-cron's log says (release-cron.log: "<time> <app> released <sha8> <sha>: ..."):
+// its commit and when, or null.
+export function releasedOf(log, app) {
+  const re = new RegExp(`^(\\S+) ${app.replace(/[^\w-]/g, "\\$&")} released ([0-9a-f]{8}) ([0-9a-f]{40})\\b`);
+  let found = null;
+  for (const l of String(log).split("\n")) {
+    const m = l.match(re);
+    if (m) found = { at: m[1], short: m[2], sha: m[3] };
+  }
+  return found;
+}
+
+// A time in Brasília, "13/11 08:00 BRT".
+export function brt(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(d).map((x) => [x.type, x.value]));
+  return `${p.day}/${p.month} ${p.hour}:${p.minute} BRT`;
+}
+
 // The text of an entry: its text, its JSON's message, or for a request its status, method and path.
 export function messageOf(entry) {
   if (entry.httpRequest) {

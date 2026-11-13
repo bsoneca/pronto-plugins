@@ -16,6 +16,9 @@ prodWatch: #Watch
 	project?: string
 	// Other Cloud Run services of the release's project this app answers for.
 	services: [...string]
+	// An app that releases to a node (release@k8s) has its pods' logs there, beside or instead of Cloud
+	// Logging: in VictoriaLogs, which the node's Vector ships them to, read over ssh and read-only.
+	node?: #Node
 	// The app's own noise, beside the shared rules below, which every app gets.
 	noise: [string]: #Noise
 	// The lines that open an instance's windows: an entry of that instance from two seconds before one
@@ -30,6 +33,25 @@ prodWatch: #Watch
 		// SIGTERM to every container, which say so their own way (Electric, PostgREST) and stop in any
 		// order within Cloud Run's ten seconds; thirty covers a slow one.
 		shutdown: {marker: *"^Shutting down .*instance|SIGTERM|^Container terminated on signal" | string, within: *30 | (int & >0)}
+	}
+}
+
+#Node: {
+	// The ssh destination of the node, user@host.
+	host: *"bruno@13.140.186.223" | (string & =~"^[A-Za-z0-9._@-]+$")
+	// The kubeconfig on that host; $HOME is the host's. Read to find the Service's address and the pods.
+	kubeconfig: *"$HOME/.cache/contabo2.kubeconfig" | (string & =~"^[A-Za-z0-9_$/.~-]+$")
+	// The app's namespace (release@k8s's, the app's folder name): the logs of its pods are the ones read.
+	namespace!: =~"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+	// Only these containers and the pods of only these Deployments; none named, all of the namespace's.
+	containers: [...(=~"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")]
+	deployments: [...(=~"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")]
+	// The VictoriaLogs Service: reached from the node by its ClusterIP (kubectl get, then curl on the node),
+	// so no cluster object is made.
+	logs: {
+		namespace: *"logs" | (string & =~"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+		service:   *"victoria-logs" | (string & =~"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+		port:      *9428 | (int & >0 & <65536)
 	}
 }
 
