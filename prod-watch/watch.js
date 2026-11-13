@@ -39,6 +39,8 @@ const CHAIN = /^(During handling of the above exception|The above exception was 
 export function stitch(entries) {
   const out = [];
   const open = new Map();
+  // The text entry of each instance's container a continuation goes on.
+  const more = new Map();
   const where = (e) => `${e.resource?.labels?.service_name}|${e.resource?.labels?.revision_name}|${e.labels?.instanceId ?? ""}|${e.labels?.container_name ?? ""}`;
   for (const e of entries) {
     const line = typeof e.textPayload === "string" ? clean(e.textPayload) : null;
@@ -59,6 +61,19 @@ export function stitch(entries) {
     if (line !== null && /^Traceback \(most recent call last\)/.test(line)) {
       const entry = { ...e, textPayload: e.textPayload };
       open.set(w, { entry, last: e.timestamp, ended: false });
+      out.push(entry);
+      continue;
+    }
+    // A line that goes on the one before (CONTINUES) joins it: JS frames, a Java cause, a Go goroutine.
+    const p = more.get(w);
+    if (line !== null && p && !e.httpRequest && Math.abs(Date.parse(e.timestamp) - Date.parse(p.last)) <= 2000 && CONTINUES.test(e.textPayload)) {
+      p.entry.textPayload += `\n${e.textPayload}`;
+      p.last = e.timestamp;
+      continue;
+    }
+    if (line !== null && !e.httpRequest) {
+      const entry = { ...e };
+      more.set(w, { entry, last: e.timestamp });
       out.push(entry);
       continue;
     }
@@ -141,37 +156,15 @@ export function logEntries(ndjson, { from = "", lifecycle = {}, starts = [] } = 
     return { timestamp, resource: { labels: { service_name: o.deployment, revision_name: o.hash } }, labels: { container_name: container, instanceId: pod } };
   };
   const entries = [];
-  // Per pod and container: the entry a continuation goes on, and the traceback being read: "tb"
-  // (frames to come), "ended" (its exception line is in), "chain" (a "During handling" is).
-  const open = new Map();
   for (const r of records) {
-    const id = `${r.pod}/${r.container}`;
-    const st = open.get(id) ?? {};
-    open.set(id, st);
     const body = String(r._msg ?? "").replace(/\r$/, "");
     if (!body.trim()) continue;
-    const near = st.last && Math.abs(Date.parse(r._time) - Date.parse(st.last.timestamp)) <= 2000;
-    const append = (line) => { st.last.textPayload += `\n${line}`; };
-    if (st.py && near) {
-      if (st.py === "tb") { append(body); if (!/^\s/.test(body)) st.py = "ended"; continue; }
-      if (st.py === "ended" && CHAIN.test(body)) { append(body); st.py = "chain"; continue; }
-      if (st.py === "chain" && /^Traceback \(most recent call last\)/.test(body)) { append(body); st.py = "tb"; continue; }
-    }
-    st.py = null;
     const base = where(r._time, r.pod, r.container);
-    if (/^Traceback \(most recent call last\)/.test(body)) {
-      st.last = { ...base, severity: "ERROR", textPayload: body };
-      entries.push(st.last);
-      st.py = "tb";
-      continue;
-    }
-    if (near && st.last.textPayload !== undefined && CONTINUES.test(body)) { append(body); continue; }
     const level = levelOf(r.level);
     // CloudNativePG's line is {"msg": "record", "record": {"error_severity", "message", ...}} at level
     // info: the database's severity and message are the record's.
     if (r["json.record.message"]) {
-      st.last = { ...base, severity: PG[String(r["json.record.error_severity"]).toUpperCase()] ?? level, textPayload: r["json.record.message"] };
-      entries.push(st.last);
+      entries.push({ ...base, severity: PG[String(r["json.record.error_severity"]).toUpperCase()] ?? level, textPayload: r["json.record.message"] });
       continue;
     }
     // An access log line (Caddy's) is a request, as Cloud Run's httpRequest is: named by its status,
@@ -179,24 +172,23 @@ export function logEntries(ndjson, { from = "", lifecycle = {}, starts = [] } = 
     const status = Number(r["json.status"]);
     if (status && r["json.request.uri"]) {
       if (status < 500) continue;
-      st.last = { ...base, severity: level, httpRequest: { status, requestMethod: r["json.request.method"] ?? "", requestUrl: r["json.request.uri"] } };
-      entries.push(st.last);
+      entries.push({ ...base, severity: level, httpRequest: { status, requestMethod: r["json.request.method"] ?? "", requestUrl: r["json.request.uri"] } });
       continue;
     }
     if (r["json.msg"] || r["json.error"] || r["json.err"] || r["json.stack_trace"] || r["json.stack"]) {
       const why = r["json.error"] ?? r["json.err"];
-      st.last = { ...base, severity: level, jsonPayload: { message: why ? `${body}: ${why}` : body, stack_trace: r["json.stack_trace"] ?? r["json.stack"] ?? "" } };
+      entries.push({ ...base, severity: level, jsonPayload: { message: why ? `${body}: ${why}` : body, stack_trace: r["json.stack_trace"] ?? r["json.stack"] ?? "" } });
     } else {
       const said = severityOf(body);
-      st.last = { ...base, severity: RANK[level] >= RANK.WARNING || said === "DEFAULT" ? level : said, textPayload: body };
+      entries.push({ ...base, severity: RANK[level] >= RANK.WARNING || said === "DEFAULT" ? level : said, textPayload: body });
     }
-    entries.push(st.last);
   }
-  const out = entries.filter((e) => {
-    if (RANK[e.severity] >= RANK.WARNING) return true;
+  // Text lines that go on one another are one entry (stitch), then only what may be a bug is kept.
+  const out = stitch(entries).filter((e) => {
+    if (e.httpRequest || RANK[e.severity] >= RANK.WARNING) return true;
     const t = clean(messageOf(e));
     // A line that says it failed, as text or as the message of a JSON line (a request is named by its status, not its words).
-    if (!e.httpRequest && ERRORISH.test(t)) return true;
+    if (ERRORISH.test(t)) return true;
     return Object.values(lifecycle).some((l) => new RegExp(l.marker).test(t));
   });
   for (const c of starts) {
@@ -218,7 +210,7 @@ export function logsQuery({ namespace, containers = [], deployments = [] }, life
     if (l.marker.includes("`")) throw new Error(`${l.marker}: a lifecycle marker with a backtick`);
     return ` OR _msg:~\`${l.marker}\``;
   }).join("");
-  const lines = `(level:~\`(?i)^(warn|warning|error|err|fatal|critical|crit|panic|alert|emerg|40|50|60)$\` OR json.record.error_severity:~\`^(WARNING|ERROR|FATAL|PANIC)$\` OR _msg:~\`(?i)(error|panic|exception|traceback|fatal|refused|failed|SIGTERM|Container terminated)\` OR _msg:~\`${CONTINUES.source}\`${markers})`;
+  const lines = `(level:~\`(?i)^(warn|warning|error|err|fatal|critical|crit|panic|alert|emerg|40|50|60)$\` OR json.record.error_severity:~\`^(WARNING|ERROR|FATAL|PANIC)$\` OR json.status:>=500 OR _msg:~\`(?i)(error|panic|exception|traceback|fatal|refused|failed|SIGTERM|Container terminated)\` OR _msg:~\`${CONTINUES.source}\`${markers})`;
   return [
     `{namespace="${namespace}"}`,
     ...(containers.length ? [`container:in(${containers.map((c) => `"${c}"`).join(",")})`] : []),

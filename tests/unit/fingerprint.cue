@@ -134,6 +134,12 @@ cases: {
 		{get: "0"},
 		{call: "watch.messageOf", args: ["$"], expect: "HTTP 502 GET /player/3f0c9a1e"},
 	]}
+	"a 5xx access log line is kept at any level, and the query selects it": {suite: "fingerprint", steps: [
+		{value: [(_vl & {msg: "handled request", container: "caddy", level: "info", extra: {"json.msg": "handled request", "json.status": "503", "json.request.method": "GET", "json.request.uri": "/table/1"}}).out]},
+		{call: "watch.logEntries", args: ["$", {}]},
+		{get: "length", expect: 1},
+		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}], matches: "OR json.status:>=500 OR"},
+	]}
 	"a JSON line that says it failed is kept at any level, as a plain one is": {suite: "fingerprint", steps: [
 		{value: [(_vl & {msg: "connection refused", level: "info", extra: {"json.msg": "connection refused"}}).out, (_vl & {msg: "all good", level: "info", at: "2026-11-13T13:24:05.000000000Z", extra: {"json.msg": "all good"}}).out]},
 		{call: "watch.logEntries", args: ["$", {}]},
@@ -230,7 +236,7 @@ cases: {
 	]}
 	"the query asks for the namespace's lines that may be a bug or go on a stack, of the containers and Deployments named, and refuses a name that is no plain word": {suite: "fingerprint", steps: [
 		{call: "watch.logsQuery", args: [{namespace: "brawl-chess", containers: ["auth", "crud"], deployments: ["brawl-chess-auth"]}], matches: "^\\{namespace=\"brawl-chess\"\\} container:in\\(\"auth\",\"crud\"\\) pod:~`\\^\\(brawl-chess-auth\\)-\\[a-z0-9\\]\\+-\\[a-z0-9\\]\\+\\$` \\(level:~"},
-		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}], matches: "json.record.error_severity:~`\\^\\(WARNING\\|ERROR\\|FATAL\\|PANIC\\)\\$` OR _msg", why: "CloudNativePG's records are info at the outer level, with the database's severity inside"},
+		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}], matches: "json.record.error_severity:~`\\^\\(WARNING\\|ERROR\\|FATAL\\|PANIC\\)\\$` OR json.status:>=500 OR _msg", why: "CloudNativePG's records are info at the outer level, with the database's severity inside"},
 		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}], matches: "\\| fields _time,_msg,pod,container,level,json.error[^|]*\\| sort by \\(_time\\)$"},
 		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}, _lifecycle], matches: "OR _msg:~`\\^Starting new instance` OR _msg:~`\\^Shutting down \\.\\*instance\\|SIGTERM\\|\\^Container terminated on signal`\\)", why: "the markers of prodWatch.lifecycle are lines to read, as the plugin's CUE gives them"},
 		{call: "watch.logsQuery", args: [{namespace: "brawl-chess"}], matches: "\\|50\\|60\\)\\$`", why: "Vector writes pino's numbers as strings"},
