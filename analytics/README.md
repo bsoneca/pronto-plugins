@@ -96,6 +96,14 @@ bin/pronto-analytics metal --ssh bruno@13.140.186.223 --project brawl-chess \
   --dashboards bonk-chess/business=<pronto>/apps/brawl-chess/observability/analytics.business.dashboard.json,…
 ```
 
+`bin/pronto-analytics metal dashboards --ssh bruno@13.140.186.223 --dashboards app/name=path,…` ships the
+dashboards alone, for an app's release to run after it: each ConfigMap whose file differs from the live one is
+applied (a read that fails fails the command; only a ConfigMap not there reads as empty), and a digest of all
+the dashboards is set as Grafana's pod-template annotation `pronto.dev/dashboards` on every run, then the rollout
+is awaited. Grafana mounts each file by subPath, which does not follow a ConfigMap's change, so its pods restart
+when the digest changes and never when it does not; a run that died after the ConfigMaps changed restarts them on
+the next.
+
 ## Tests
 
 - [`tests.cue`](tests.cue): the views, the exporter's files, the dashboard and the names, checked with `cue vet`.

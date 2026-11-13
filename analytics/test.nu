@@ -2,6 +2,7 @@
 # Patches the door three times beside the other hosts' blocks, writes a program's `analytics.out`,
 # and holds the schema to its rules by vetting specs that break them.
 use analytics.nu
+use metal.nu
 
 def check [what: string, ok: bool] {
 	if not $ok { error make {msg: $"analytics/test.nu: ($what)"} }
@@ -54,6 +55,15 @@ def main [] {
 	check "the loader's settings are not in observability/" (not ("observability/analytics.loader.json" | path exists))
 	check "the exporter's files are text, as written" ((open --raw observability/analytics.sql_exporter.yml) == "global:\n  min_interval: 60s\n")
 	check "the dashboard is JSON in observability/" ((open observability/analytics.business.dashboard.json).uid == "business-shop")
+
+	# The metal host's dashboards: only a ConfigMap that differs is shipped, and the digest follows the files.
+	let ds = [{app: "shop", name: "business", folder: "Shop", text: "{\"a\":1}\n"} {app: "shop", name: "perf", folder: "Shop", text: "{\"b\":2}\n"}]
+	let live = {"grafana-dashboards-shop-business": "{\"a\":1}\n", "grafana-dashboards-shop-perf": "{\"b\":1}\n"}
+	check "a dashboard whose live file differs is stale" ((metal stale $ds $live | get name) == ["perf"])
+	check "a dashboard whose ConfigMap is not there is stale" ((metal stale $ds {"grafana-dashboards-shop-business": "{\"a\":1}\n"} | get name) == ["perf"])
+	check "no dashboard is stale when every live file is the file" ((metal stale $ds {"grafana-dashboards-shop-business": "{\"a\":1}\n", "grafana-dashboards-shop-perf": "{\"b\":2}\n"} | is-empty))
+	check "the dashboards' digest does not follow their order" ((metal dashboards-hash $ds) == (metal dashboards-hash ($ds | reverse)))
+	check "the dashboards' digest follows a change of any file" ((metal dashboards-hash $ds) != (metal dashboards-hash ($ds | update 1.text "{\"b\":3}\n")))
 
 	"(app) {\n}\n" | save --force docker/Caddyfile
 	check "a door with no auth route refuses" (try { analytics route /a/s.js /a/e https://umami.example.com; false } catch { true })
