@@ -94,7 +94,7 @@ def main [] {
 	test_golive_switches_after_both_answer
 	test_golive_keeps_traffic_while_the_candidate_never_answers
 	test_golive_rolls_the_sidecars_once_traffic_moved
-	test_golive_warns_of_a_failed_roll_and_goes_live
+	test_golive_fails_on_a_failed_roll
 	test_golive_first_deploy
 	test_golive_tags_the_tested_images_before_the_schema_job
 	test_golive_leaves_the_inputs_key_on_the_copied_images
@@ -252,15 +252,14 @@ def test_golive_rolls_the_sidecars_once_traffic_moved [] {
 	rm -r $d
 }
 
-def test_golive_warns_of_a_failed_roll_and_goes_live [] {
-	print "test go-live only warns of a sidecar whose roll failed..."
+def test_golive_fails_on_a_failed_roll [] {
+	print "test go-live fails the release when a sidecar's roll failed, the door already switched..."
 	let more = {plan: {project: "p", region: "r", service: "svc", iap: false, domain: null, aliases: [], sidecarServicesYaml: {render: "x"}, clock: null, names: {job: "j", migrateJob: "mj", secrets: {}, sidecarServices: {render: "svc-render"}}}}
 	let d = (fakes true "svc-00001-old" "200 ok" "200 svc-00002-new")
 	"" | save -f ($d | path join roll_fails)
 	let res = (golive $d $more)
-	assert equal $res.exit_code 0 $res.stderr
-	assert ($res.stdout | str contains "render apart kept its instance")
-	assert ($res.stdout | str contains "is live at")
+	assert not equal $res.exit_code 0
+	assert ($res.stderr | str contains "render apart kept its instance")
 	assert equal (open --raw ($d | path join serving) | str trim) "svc-00002-new"
 	rm -r $d
 }
