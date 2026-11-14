@@ -321,11 +321,10 @@ export def push-images [
 	# Compose is asked from the app's resolved directory, so a symlink (/tmp) cannot change the
 	# paths it prints and with them every key.
 	let compose = if ($override | is-not-empty) { null } else {
+		# A compose the app cannot render fails here, before any upload or build.
 		let r = (do { cd ($app_dir | path expand); ^docker compose --profile "*" config --format json } | complete)
-		if $r.exit_code == 0 { try { $r.stdout | from json } catch { null } } else {
-			print $"gcp: (stamp) image reuse is coarse: docker compose config failed, so each image is keyed by the whole app \(($r.stderr | lines | last | default '' | str trim)\)"
-			null
-		}
+		if $r.exit_code != 0 { error make {msg: $"docker compose config failed in ($app_dir): ($r.stderr | str trim)"} }
+		$r.stdout | from json
 	}
 	if ($override | is-not-empty) { print $"gcp: (stamp) image reuse is coarse: an override is given, so each image is keyed by the whole app" }
 	let keys = (image-keys $app_dir $compose $hashes $told $services)
