@@ -294,7 +294,7 @@ def call-api [method: string, url: string, body: record, what: string]: nothing 
 	] | str join "\n")
 	let r = ($config | do { ^curl --silent --show-error --fail-with-body --config - } | complete)
 	if $r.exit_code != 0 { error make {msg: $"($what) failed: ($r.stdout | str trim) ($r.stderr | str trim)"} }
-	try { $r.stdout | from json } catch { null }
+	try { $r.stdout | from json } catch { error make {msg: $"($what): the answer is not JSON: ($r.stdout | str trim | str substring 0..200)"} }
 }
 
 # The instance's postgres user given the password, through Cloud SQL's API.
@@ -302,7 +302,8 @@ def set-postgres-password [instance: string, project: string, password: string] 
 	let url = $"https://sqladmin.googleapis.com/v1/projects/($project)/instances/($instance)/users?name=postgres"
 	let op = (call-api PUT $url {name: "postgres", password: $password} $"setting the postgres user's password on ($instance)")
 	# The API answers with an operation; the password holds once it is done.
-	if ($op.name? | is-not-empty) { gc sql operations wait $op.name --project $project --timeout unlimited | ignore }
+	if ($op.name? | is-empty) { error make {msg: $"setting the postgres user's password on ($instance): the answer names no operation to wait for"} }
+	gc sql operations wait $op.name --project $project --timeout unlimited | ignore
 }
 
 # What copies a tested preview's images into the release's registry: Google's
