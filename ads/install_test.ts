@@ -37,7 +37,7 @@ Deno.test("no pronto app, or a path out of it, is refused", async () => {
 });
 
 Deno.test("a provider that fails settles none, reported, and never rejects", async () => {
-  const g = globalThis as any;
+  const g = globalThis as unknown as Record<string, unknown>;
   const reported: unknown[] = [];
   const dialog = { dataset: {}, style: {}, append() {}, setAttribute() {}, addEventListener() {}, remove() {}, close() {}, showModal() { throw new Error("provider down"); } };
   g.document = { createElement: () => ({ ...dialog, showModal: dialog.showModal }), body: { append() {} } };
