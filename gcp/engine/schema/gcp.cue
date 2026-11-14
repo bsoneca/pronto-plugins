@@ -91,8 +91,9 @@ import (
 	// new instances and the admin's, the connections of every instance of both and of
 	// the schema job, and a bound on the WAL a hung but connected replica retains (MB;
 	// the disk is 10 GB).
-	// At 1 that is 50 connections, the smallest tier's raised limit, and four slots.
-	_connections:     (#Pools.crud+R.electric.pool+#PerInstanceExtra)*2*R._replicas + 10
+	// At 1 it stays the 50 connections every app's smallest-tier instance has (what that tier
+	// holds), with four slots and WAL senders.
+	_connections:     [if R._replicas == 1 {50}, (#Pools.crud+R.electric.pool+#PerInstanceExtra)*2*R._replicas + 10][0]
 	_replicaSqlFlags: "cloudsql.logical_decoding=on,max_connections=\(_connections),max_replication_slots=\(2*R._replicas+2),max_wal_senders=\(2*R._replicas+2),max_slot_wal_keep_size=1024"
 
 	// Electric's share of the instance. Its memory holds every shape it keeps
