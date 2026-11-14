@@ -89,14 +89,15 @@ import (
 	_replicas: [if R.preview != _|_ {1}, R.maxScale][0]
 	// The database of replicas: a slot and a WAL sender for each of a rollout's old and
 	// new instances and the admin's, the connections of every instance of both and of
-	// the schema job, and a bound on the WAL a hung but connected replica retains (MB;
-	// the disk is 10 GB).
+	// the schema job. No max_slot_wal_keep_size: Cloud SQL takes 100 GB at least ("1024 is not
+	// between 102400 and 10485760"), ten times the 10 GB disk, so no value it takes bounds
+	// anything; slots are temporary instead, gone with their connection.
 	// At 1 it stays the 50 connections every app's smallest-tier instance has (what that tier
 	// holds). Cloud SQL refuses fewer than 10 slots or WAL senders ("4 is not between 10 and
 	// 8192"), so a small app gets 10 of each, which it never fills.
 	_connections:     [if R._replicas == 1 {50}, (#Pools.crud+R.electric.pool+#PerInstanceExtra)*2*R._replicas + 10][0]
 	_walSenders:      list.Max([#CloudSqlMinSenders, 2*R._replicas + 2])
-	_replicaSqlFlags: "cloudsql.logical_decoding=on,max_connections=\(_connections),max_replication_slots=\(_walSenders),max_wal_senders=\(_walSenders),max_slot_wal_keep_size=1024"
+	_replicaSqlFlags: "cloudsql.logical_decoding=on,max_connections=\(_connections),max_replication_slots=\(_walSenders),max_wal_senders=\(_walSenders)"
 
 	// Electric's share of the instance. Its memory holds every shape it keeps
 	// (its storage is the instance's /tmp, which Cloud Run keeps in memory), so
@@ -525,7 +526,7 @@ import (
 						// dropped with its connection, so a rollout's new revision streams beside the
 						// old one instead of waiting for it to exit. The publication keeps the default
 						// stream's. The permanent slot an earlier release's electric held is dropped by
-						// the schema job once inactive (job), and bounded meanwhile (max_slot_wal_keep_size).
+						// the schema job once inactive (job).
 						{name: "CLEANUP_REPLICATION_SLOTS_ON_SHUTDOWN", value: "true"},
 						{name: "ELECTRIC_TEMPORARY_REPLICATION_SLOT_USE_RANDOM_NAME", value: "true"},
 					]
@@ -819,7 +820,7 @@ import (
 							psql -v ON_ERROR_STOP=1 -XqAc "ALTER ROLE postgres BYPASSRLS"
 							# Every electric streams on a temporary slot (CLEANUP_REPLICATION_SLOTS_ON_SHUTDOWN),
 							# so a permanent electric slot no connection holds is one an earlier release's electric
-							# left: it would keep WAL until max_slot_wal_keep_size, so it is dropped. Dropping
+							# left: it would keep WAL until the disk fills, so it is dropped. Dropping
 							# a slot takes REPLICATION, which Cloud SQL's postgres may give itself.
 							psql -v ON_ERROR_STOP=1 -XqAc "ALTER ROLE postgres REPLICATION"
 							psql -v ON_ERROR_STOP=1 -XtAc "SELECT 'initdb: dropping the idle slot ' || slot_name, pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name LIKE 'electric\\_slot\\_%' AND NOT temporary AND NOT active AND database = current_database()"
