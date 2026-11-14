@@ -3,8 +3,24 @@
 #   bin/pronto-gcp <app-dir> <project> [key=value ...]
 # keys: name (default: the app directory's), region, service, repository,
 #       origin, maxScale, memory.
+# Or writes the release engine (gcp/engine/, README.md "The release engine") into apps whose
+# release.cue holds GCP: schema.#Release, each file regenerated:
+#   bin/pronto-gcp --engine <app-dir>...
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
+if [ "${1:-}" = --engine ]; then
+	shift
+	[ $# -ge 1 ] || { echo "usage: pronto-gcp --engine <app-dir>..." >&2; exit 2; }
+	files=$(mktemp)
+	trap 'rm -f "$files"' EXIT
+	(cd "$here" && ./saytw --script tools.nu cue export ./gcp/engine/export -e files --out json) > "$files"
+	for dir in "$@"; do
+		app=$(cd "$dir" && pwd)
+		[ -f "$app/release.cue" ] || { echo "pronto-gcp: $app has no release.cue" >&2; exit 2; }
+		(cd "$here" && ./saytw --script tools.nu nu bin/write.nu "$files" "$app")
+	done
+	exit 0
+fi
 app=$(cd "$1" && pwd)
 project=$2
 shift 2
