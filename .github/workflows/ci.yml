@@ -185,6 +185,13 @@ jobs:
           sayt --script tools.nu nu modular-design/test.nu
       - name: Test migrations (needs deno, for its driver)
         run: sayt --script tools.nu nu migrations/test.nu
+      # The release engine an app holds (gcp/README.md, "The release engine"): its host, and the
+      # tests it carried in the pronto fork, run against fakes (no gcloud, no cloud).
+      - name: Test the gcp release engine
+        run: |
+          sayt --script tools.nu cue vet -c ./gcp/engine
+          sayt --script tools.nu cue vet -c ./gcp/engine/export
+          for t in release build verify secrets; do sayt --script tools.nu nu "gcp/engine/${t}_test.nu" || exit 1; done
       - name: The machine's cue wrapper against a fake cue
         run: |
           sh -n machine/install.sh && sh -n machine/sysv-shm.sh && sh -n bin/pronto-machine
