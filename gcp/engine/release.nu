@@ -261,7 +261,7 @@ def set-up-project [plan: record] {
 	let pg = (gc secrets versions access latest --secret $n.secrets.POSTGRES_PASSWORD --project $p)
 	if not (exists sql instances describe $n.instance --project $p) {
 		print $"gcp: (stamp) creating Cloud SQL ($n.instance) \(several minutes\)"
-		gc sql instances create $n.instance --project $p --region $plan.region --database-version POSTGRES_18 --edition enterprise --tier $plan.sqlTier --storage-size 10 --storage-type HDD --database-flags $plan.sqlFlags --root-password $pg | ignore
+		gc sql instances create $n.instance --project $p --region $plan.region --database-version POSTGRES_18 --edition enterprise --tier $plan.sqlTier --storage-size 10 --storage-type HDD --database-flags $plan.sqlFlags | ignore
 	}
 	# A tier or flags an earlier release set differently are patched, which restarts it.
 	let live = (gc sql instances describe $n.instance --project $p --format json | from json)
@@ -271,10 +271,35 @@ def set-up-project [plan: record] {
 		gc sql instances patch $n.instance --project $p ...$patch --quiet | ignore
 	}
 	# The password the URLs carry is the user's, whichever came first.
-	gc sql users set-password postgres --instance $n.instance --project $p --password $pg | ignore
+	set-postgres-password $n.instance $p $pg
 	if not (exists sql databases describe $n.database --instance $n.instance --project $p) {
 		gc sql databases create $n.database --instance $n.instance --project $p | ignore
 	}
+}
+
+# The instance's postgres user given the password, through Cloud SQL's API with curl reading its
+# whole request (token and body) from a pipe: a secret never rides a command line, where any
+# process on the machine reads it (gcloud's --password and --root-password would put it there).
+def set-postgres-password [instance: string, project: string, password: string] {
+	let token = (gc auth print-access-token | str trim)
+	let quote = {|v| $v | str replace --all '\' '\\' | str replace --all '"' '\"' }
+	let auth = (do $quote $"Authorization: Bearer ($token)")
+	let body = (do $quote ({name: "postgres", password: $password} | to json --raw))
+	let url = $"https://sqladmin.googleapis.com/v1/projects/($project)/instances/($instance)/users?name=postgres"
+	let config = ([
+		$"url = \"($url)\""
+		'request = "PUT"'
+		$"header = \"($auth)\""
+		'header = "Content-Type: application/json"'
+		$"data = \"($body)\""
+	] | str join "\n")
+	let r = ($config | do { ^curl --silent --show-error --fail-with-body --config - } | complete)
+	if $r.exit_code != 0 {
+		error make {msg: $"the postgres user's password on ($instance) was not set: ($r.stdout | str trim) ($r.stderr | str trim)"}
+	}
+	# The API answers with an operation; the password holds once it is done.
+	let op = (try { $r.stdout | from json | get name } catch { "" })
+	if ($op | is-not-empty) { gc sql operations wait $op --project $project --timeout unlimited | ignore }
 }
 
 # What copies a tested preview's images into the release's registry: Google's

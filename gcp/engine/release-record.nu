@@ -110,8 +110,11 @@ export def write [cue_path: string, preview: string, started: datetime, outcome:
 export def live-commit [app: string]: nothing -> any {
 	let file = ($env.HOME | path join .cache pronto releases $"($app).jsonl")
 	if not ($file | path exists) { return null }
-	let live = (open --raw $file | lines | where {|l| $l | is-not-empty } | each {|l| try { $l | from json } } | compact
-		| where {|r| ($r.outcome? == "live") and ($r.preview? | default "") == "" })
+	# A line that is not a record fails here, so the verdict built on it is unknown, never an older release.
+	let read = (open --raw $file | lines | where {|l| $l | is-not-empty } | each {|l| {line: $l, r: (try { $l | from json } catch { null })} })
+	let bad = ($read | where {|x| not ($x.r | describe | str starts-with "record") })
+	if ($bad | is-not-empty) { error make {msg: $"($file) holds a line that is not a release record: ($bad | first | get line | str substring 0..80)"} }
+	let live = ($read | get r | where {|r| ($r.outcome? == "live") and ($r.preview? | default "") == "" })
 	if ($live | is-empty) { return null }
 	let last = ($live | last)
 	if ($last.dirty? | default true) or ($last.commit? | is-empty) { null } else { $last.commit }
