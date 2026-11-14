@@ -5,6 +5,7 @@ Rewarded ads for a pronto app: an ad a player chooses to watch for something the
 ## What it adds
 
 - `ads/ads.js` (or the path you name): a page module exporting `rewarded()`. It resolves `"viewed"` when the ad played to its end, `"dismissed"` when it was closed before, and `"none"` when there is no ad to show or the provider failed: a failure is reported (`reportError`, so error tracking sees it), its message kept in `rewarded.reason`, and the promise never rejects.
+  Its header names the pronto-plugins commit it was generated from (the last to touch the template), so a diff of an app shows generator output and not a hand edit.
 - A generate step that gives the door `/ads.txt` again after pronto's writer, carrying the AdSense publisher's line.
 - `ads_spec.cue`, written once and then the app's: `adsense: publisher: "pub-…"`, or `""` for none.
 
