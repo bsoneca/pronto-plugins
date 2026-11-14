@@ -486,7 +486,12 @@ def empty-preview [plan: record] {
 		loop {
 			let r = (do { ^gcloud --quiet sql databases delete $n.database --instance $n.instance --project $plan.project } | complete)
 			if $r.exit_code == 0 or not (exists sql databases describe $n.database --instance $n.instance --project $plan.project) { break }
-			print $"gcp: (stamp) the preview's database ($n.database) is still in use, asked again in 20s: ($r.stderr | str trim | lines | last)"
+			# Only a database still in use is asked again; any other refusal (access, a bad name) fails the release.
+			let why = ($r.stderr | str trim | lines | last | default "")
+			if not ($r.stderr =~ '(?i)being accessed|in use|other (users|sessions)|active connections') {
+				error make {msg: $"the preview's database ($n.database) was not dropped: ($why)"}
+			}
+			print $"gcp: (stamp) the preview's database ($n.database) is still in use, asked again in 20s: ($why)"
 			sleep 20sec
 		}
 		gc sql databases create $n.database --instance $n.instance --project $plan.project | ignore
@@ -864,7 +869,12 @@ export def go-live [staged: record]: nothing -> record {
 					let token = (gc auth print-access-token | str trim)
 					^curl --silent --fail --show-error --output /dev/null -X POST -H $"Authorization: Bearer ($token)" $"https://serviceusage.googleapis.com/v1beta1/projects/($number)/services/iap.googleapis.com:generateServiceIdentity"
 					gc-fresh run services add-iam-policy-binding $plan.service --region $r --project $p --member $"serviceAccount:service-($number)@gcp-sa-iap.iam.gserviceaccount.com" --role roles/run.invoker | ignore
-					do { ^gcloud --quiet run services remove-iam-policy-binding $plan.service --region $r --project $p --member allUsers --role roles/run.invoker } | complete | ignore
+					# allUsers off: a service that never had it answers not found, which is what is wanted;
+					# any other refusal leaves it public, and fails the release.
+					let off = (do { ^gcloud --quiet run services remove-iam-policy-binding $plan.service --region $r --project $p --member allUsers --role roles/run.invoker } | complete)
+					if $off.exit_code != 0 and not ($off.stderr =~ '(?i)not found|does not exist|not a member|no binding') {
+						error make {msg: $"($plan.service) behind IAP is still public: allUsers was not removed: ($off.stderr | str trim | lines | last | default '')"}
+					}
 				} else {
 					grant-public $plan.service $p $r
 				}
@@ -1246,6 +1256,16 @@ def release-body [app_info: record, preview: string, delete: bool, dry_run: bool
 	}
 	print $"gcp: (stamp) the rc preview runs: ($rc_why)"
 	preflight $app_info [$rc ""]
+	# The rc preview is a preview like any: `--preview rc` and `--preview rc --delete` take its lock,
+	# so production holds it too while the gate uses it.
+	let rc_lock = (take-lock (lock-of $app_info.cue_path $rc))
+	let outcome = (try { rc-gated $app_info $rc $local $deploy_key $rehearsal; null } catch {|e| (failure-message $e) })
+	drop-lock $rc_lock
+	if $outcome != null { error make {msg: $outcome} }
+}
+
+# The release behind the rc preview, while it holds the preview's lock.
+def rc-gated [app_info: record, rc: string, local: bool, deploy_key: any, rehearsal: any] {
 	release-record note {rc: "ran"}
 	release-record mark rc start
 	# The preview's plan and production's, rendered together; the staging below reuses them.
