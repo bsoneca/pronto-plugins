@@ -106,7 +106,7 @@ export def write [cue_path: string, preview: string, started: datetime, outcome:
 }
 
 # The commit of the app's last production release that went live and was a clean checkout, from
-# its records; null where there is none (an app never released from here, or a dirty last one).
+# its records; null where there is none (an app never released from here, a dirty last one, or a rollback since).
 export def live-commit [app: string]: nothing -> any {
 	let file = ($env.HOME | path join .cache pronto releases $"($app).jsonl")
 	if not ($file | path exists) { return null }
@@ -114,8 +114,11 @@ export def live-commit [app: string]: nothing -> any {
 	let read = (open --raw $file | lines | where {|l| $l | is-not-empty } | each {|l| {line: $l, r: (try { $l | from json } catch { null })} })
 	let bad = ($read | where {|x| not ($x.r | describe | str starts-with "record") })
 	if ($bad | is-not-empty) { error make {msg: $"($file) holds a line that is not a release record: ($bad | first | get line | str substring 0..80)"} }
-	let live = ($read | get r | where {|r| ($r.outcome? == "live") and ($r.preview? | default "") == "" })
+	# Production's last change of what it serves: a release that went live, or a rollback, after which
+	# what serves is an earlier revision this record does not name, so there is no known commit.
+	let live = ($read | get r | where {|r| ($r.outcome? in ["live" "rolled-back"]) and ($r.preview? | default "") == "" })
 	if ($live | is-empty) { return null }
 	let last = ($live | last)
+	if $last.outcome == "rolled-back" { return null }
 	if ($last.dirty? | default true) or ($last.commit? | is-empty) { null } else { $last.commit }
 }
