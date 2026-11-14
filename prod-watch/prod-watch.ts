@@ -135,12 +135,21 @@ if (node) {
   sources.pods = new Set(starts.map((c) => c.pod)).size;
   for (const c of starts) sources.images[`${c.deployment}/${c.container}`] = c.revision;
   const l = n.logs;
-  const got = await onNode(
-    n,
-    `ip=$(kubectl -n ${l.namespace} get svc ${l.service} -o jsonpath='{.spec.clusterIP}') && curl -sS --fail --max-time 300 "http://$ip:${l.port}/select/logsql/query" --data-urlencode query@- --data-urlencode start=${from} --data-urlencode end=${to} --data-urlencode limit=${limit}`,
-    logsQuery(n, lifecycle),
-  );
-  if (!got.ok) throw new Error(`VictoriaLogs ${l.namespace}/${l.service} on ${n.host}:\n${got.err}`);
+  // The window in slices of 4 hours, each its own query: VictoriaLogs (512Mi on the node) cut one long
+  // window's response off mid-stream ("chunk hex-length char not a hex digit"), so a day's cursor never read.
+  const slice = 4 * 3600e3;
+  const got = { ok: true, out: "", err: "" };
+  for (let t = Date.parse(from), left = limit; t < Date.parse(to) && left > 0; t += slice) {
+    const end = new Date(Math.min(t + slice, Date.parse(to))).toISOString();
+    const r = await onNode(
+      n,
+      `ip=$(kubectl -n ${l.namespace} get svc ${l.service} -o jsonpath='{.spec.clusterIP}') && curl -sS --fail --max-time 300 "http://$ip:${l.port}/select/logsql/query" --data-urlencode query@- --data-urlencode start=${new Date(t).toISOString()} --data-urlencode end=${end} --data-urlencode limit=${left}`,
+      logsQuery(n, lifecycle),
+    );
+    if (!r.ok) { got.ok = false; got.err = r.err; break; }
+    got.out += r.out;
+    left -= r.out.split("\n").filter(Boolean).length;
+  }
   const lines = logEntries(got.out, { from, lifecycle, starts });
   // A cut at the limit: the next run starts where this one stopped.
   const rows = got.out.split("\n").filter(Boolean);
