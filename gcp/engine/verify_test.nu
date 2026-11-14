@@ -58,17 +58,17 @@ def test_a_failed_line_after_the_next_header_keeps_its_section [] {
 def test_the_interleaved_log_is_a_new_feature_unless_the_live_tree_has_it [] {
 	let sections = (failed-sections $interleaved)
 	let current = [gold shop_tester]
-	let new = (classify-failures $sections [gold] "scenarios: gold: {}" $current)
+	let new = (classify-failures $sections [gold] "scenarios: gold: {}" $current [shop_tester])
 	assert equal $new.verdict "new"
 	assert equal $new.new [shop_tester]
-	let regression = (classify-failures $sections [gold shop_tester] "scenarios: gold: {}\nscenarios: shop_tester: {}" $current)
+	let regression = (classify-failures $sections [gold shop_tester] "scenarios: gold: {}\nscenarios: shop_tester: {}" $current [shop_tester])
 	assert equal $regression.verdict "regression"
 }
 
 def test_a_failed_driver_with_no_lines_stays_unknown [] {
 	let sections = (failed-sections ["verify: a" "verify: b" "verify: a FAILED" "verify: b passed"])
 	assert equal $sections [[]]
-	assert equal (classify-failures $sections [] "" []).verdict "unknown"
+	assert equal (classify-failures $sections [] "" [] []).verdict "unknown"
 }
 
 def test_failed_before_the_next_header_and_after_both_work [] {
@@ -77,35 +77,41 @@ def test_failed_before_the_next_header_and_after_both_work [] {
 }
 
 def test_only_new_scenarios_failing_is_new [] {
-	let r = (classify-failures [["✗ seek_notify (5s) at step 3"]] [seek] "scenarios: seek: {}" [seek seek_notify])
+	let r = (classify-failures [["✗ seek_notify (5s) at step 3"]] [seek] "scenarios: seek: {}" [seek seek_notify] [seek_notify])
 	assert equal $r.verdict "new"
 	assert equal $r.new [seek_notify]
 }
 
+def test_a_new_scenario_naming_no_flag_is_unknown [] {
+	let r = (classify-failures [["✗ seek_notify (5s) at step 3"]] [seek] "scenarios: seek: {}" [seek seek_notify] [])
+	assert equal $r.verdict "unknown"
+	assert ($r.why | str contains "naming no flag")
+}
+
 def test_a_scenario_of_the_live_tree_failing_is_a_regression [] {
-	let r = (classify-failures [["✗ seek_notify (5s) at step 3" "✗ seek (5s) at step 3"]] [seek] "scenarios: seek: {}" [seek seek_notify])
+	let r = (classify-failures [["✗ seek_notify (5s) at step 3" "✗ seek (5s) at step 3"]] [seek] "scenarios: seek: {}" [seek seek_notify] [seek seek_notify])
 	assert equal $r.verdict "regression"
 }
 
 def test_a_failure_naming_nothing_is_unknown [] {
-	assert equal (classify-failures [["boom"]] [seek] "" [seek]).verdict "unknown"
-	assert equal (classify-failures [["✗ a (1s) at step 1"] ["driver crashed"]] [] "" [a]).verdict "unknown"
-	assert equal (classify-failures [] [seek] "" [seek]).verdict "unknown"
+	assert equal (classify-failures [["boom"]] [seek] "" [seek] [seek]).verdict "unknown"
+	assert equal (classify-failures [["✗ a (1s) at step 1"] ["driver crashed"]] [] "" [a] [a]).verdict "unknown"
+	assert equal (classify-failures [] [seek] "" [seek] [seek]).verdict "unknown"
 }
 
 def test_a_name_the_current_tree_lacks_or_the_live_tree_mentions_is_unknown [] {
-	assert equal (classify-failures [["✗ ghost (1s) at step 1"]] [seek] "" [seek]).verdict "unknown"
-	assert equal (classify-failures [["✗ built (1s) at step 1"]] [seek] "for id in [built]: scenarios: (id): {}" [seek built]).verdict "unknown"
+	assert equal (classify-failures [["✗ ghost (1s) at step 1"]] [seek] "" [seek] [seek]).verdict "unknown"
+	assert equal (classify-failures [["✗ built (1s) at step 1"]] [seek] "for id in [built]: scenarios: (id): {}" [seek built] [seek built]).verdict "unknown"
 }
 
 def test_another_failed_line_is_unknown [] {
-	assert equal (classify-failures [["✗ a (1s) at step 1" "  ✗ stack: not ready"]] [] "" [a]).verdict "unknown"
-	assert equal (classify-failures [["✗ a (1s) at step 1" "✗ premium (4s)"]] [] "" [a]).verdict "unknown"
+	assert equal (classify-failures [["✗ a (1s) at step 1" "  ✗ stack: not ready"]] [] "" [a] [a]).verdict "unknown"
+	assert equal (classify-failures [["✗ a (1s) at step 1" "✗ premium (4s)"]] [] "" [a] [a]).verdict "unknown"
 }
 
 def test_a_name_inside_another_is_not_in_the_live_tree [] {
-	assert equal (classify-failures [["✗ seek (1s) at step 1"]] [seek_notify] "scenarios: seek_notify: {}\n// seek" [seek]).verdict "unknown"
-	assert equal (classify-failures [["✗ seek (1s) at step 1"]] [seek_notify] "scenarios: seek_notify: {}" [seek]).verdict "new"
+	assert equal (classify-failures [["✗ seek (1s) at step 1"]] [seek_notify] "scenarios: seek_notify: {}\n// seek" [seek] [seek]).verdict "unknown"
+	assert equal (classify-failures [["✗ seek (1s) at step 1"]] [seek_notify] "scenarios: seek_notify: {}" [seek] [seek]).verdict "new"
 }
 
 # A git checkout whose first commit holds scenario `seek`, and a working tree adding `seek_notify`.
@@ -118,7 +124,7 @@ def checkout []: nothing -> record {
 	^git -C $app add -A
 	^git -C $app -c user.name=t -c user.email=t@t commit -q -m one
 	let commit = (^git -C $app rev-parse HEAD | str trim)
-	"package scenarios\nscenarios: seek_notify: {}\n" | save -f ($app | path join tests scenarios seek_notify.cue)
+	"package scenarios\nscenarios: seek_notify: flags: [\"notify\"]\n" | save -f ($app | path join tests scenarios seek_notify.cue)
 	{dir: $d, app: $app, commit: $commit}
 }
 
