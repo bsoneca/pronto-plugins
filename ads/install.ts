@@ -23,7 +23,15 @@ async function write(path: string, text: string, seed = false) {
 }
 const template = async (name: string) => (await Deno.readTextFile(`${here}app/${name}`)).replaceAll("__PACKAGE__", pkg);
 
-await write(at, await template("ads.js"));
+// The page's module says which commit of pronto-plugins it was generated from (the last to touch its
+// template), so a reader of an app's diff sees generator output and not a hand edit. Left as the template
+// has it where this is no git checkout.
+async function stamped(text: string) {
+  const out = await new Deno.Command("git", { args: ["-C", here, "log", "-1", "--format=%h", "--", "app/ads.js"], stdout: "piped", stderr: "null" }).output().catch(() => null);
+  const sha = out?.success ? new TextDecoder().decode(out.stdout).trim() : "";
+  return sha ? text.replace("// Written by pronto-ads; regenerated, do not edit.", `// Written by pronto-ads, generated from bsoneca/pronto-plugins@${sha} (ads/app/ads.js); regenerated, do not edit.`) : text;
+}
+await write(at, await stamped(await template("ads.js")));
 await write("pronto/ads.cue", await template("pronto_ads.cue"));
 await write("ads/ads.nu", await template("ads.nu"));
 // One copy of the program's exports for all the plugins that read them (common/exports.nu).

@@ -2,19 +2,23 @@
 // step, again over an edit, and the app's spec once; it refuses a directory that
 // is no pronto app, and a path out of the app.
 const eq = (a: unknown, b: unknown, m: string) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); };
-const install = (...args: string[]) => new Deno.Command(Deno.execPath(), { args: ["run", "--no-config", "--allow-read", "--allow-write", new URL("./install.ts", import.meta.url).pathname, ...args] }).output();
+const install = (...args: string[]) => new Deno.Command(Deno.execPath(), { args: ["run", "--no-config", "--allow-read", "--allow-write", "--allow-run=git", new URL("./install.ts", import.meta.url).pathname, ...args] }).output();
 const module = await Deno.readTextFile(new URL("./app/ads.js", import.meta.url));
 
 Deno.test("an app gets the module, at ads/ads.js or where it names, regenerated", async () => {
   const app = await Deno.makeTempDir();
   await Deno.writeTextFile(`${app}/program.cue`, "package shop\n");
   eq((await install(app)).success, true, "installed");
-  eq(await Deno.readTextFile(`${app}/ads/ads.js`), module, "the module");
+  // The module is the template with its header naming the commit of this repo that last touched the template.
+  const written = await Deno.readTextFile(`${app}/ads/ads.js`);
+  const stamp = /^\/\/ Written by pronto-ads, generated from bsoneca\/pronto-plugins@[0-9a-f]{7,} \(ads\/app\/ads\.js\); regenerated, do not edit\.$/m;
+  eq(stamp.test(written), true, "the header names the commit it was generated from");
+  eq(written.replace(/^\/\/ Written by pronto-ads, generated from [^\n]*\n/m, "// Written by pronto-ads; regenerated, do not edit.\n"), module, "the module, but for its header");
   await Deno.writeTextFile(`${app}/ads/ads.js`, "edited\n");
   await install(app);
-  eq(await Deno.readTextFile(`${app}/ads/ads.js`), module, "the host's file regenerated");
+  eq(await Deno.readTextFile(`${app}/ads/ads.js`), written, "the host's file regenerated");
   await install(app, "web/src/ads.js");
-  eq(await Deno.readTextFile(`${app}/web/src/ads.js`), module, "where the app names");
+  eq(await Deno.readTextFile(`${app}/web/src/ads.js`), written, "where the app names");
   for (const f of ["pronto/ads.cue", "ads/ads.nu", "pronto/exports.nu"]) await Deno.stat(`${app}/${f}`);
   const spec = await Deno.readTextFile(`${app}/ads_spec.cue`);
   eq(spec.split("\n")[0], "package shop", "the spec in the program's package");
