@@ -352,9 +352,7 @@ def map-domain [domain: string, service: string, project: string, region: string
 			spec: {routeName: $service}
 		})
 		if $made.status >= 300 {
-			print $"gcp: (stamp) ($domain) is not mapped: ($made.body.error?.message? | default ($made.body | to json))"
-			print $"gcp: (stamp) verify it first: gcloud domains verify ($domain)"
-			return
+			error make {msg: $"($domain) is not mapped to ($service) \(($made.status)\): ($made.body.error?.message? | default ($made.body | to json)). Verify it first: gcloud domains verify ($domain)"}
 		}
 		$made.body
 	} else if $got.status >= 300 {
@@ -1070,11 +1068,24 @@ def take-lock [lock: record]: nothing -> any {
 			rm -f $file
 			let generation = (gc storage objects describe $lock.object --project $lock.project --format "value(generation)" | str trim)
 			print $"gcp: (stamp) ($lock.key)'s release lock taken \(($lock.object), kept while this release runs\)"
+			# A beat a minute. A lock another release took (its generation changed) stops this release at
+			# once; one not renewed for half of LOCK_STALE stops it before another may take it, so two
+			# releases of an app never write at the same time.
+			let me = $nu.pid
 			let beat = job spawn {
+				mut last = (date now)
 				loop {
 					sleep 1min
 					let r = (do { ^gcloud --quiet storage objects update $lock.object $"--custom-metadata=beat=(date now | format date '%+')" $"--if-generation-match=($generation)" --project $lock.project } | complete)
-					if $r.exit_code != 0 { print -e $"gcp: (stamp) ($lock.key)'s release lock was not renewed \(another release may take it after ($LOCK_STALE)\): ($r.stderr | str trim | lines | last)" }
+					if $r.exit_code == 0 { $last = (date now); continue }
+					let why = ($r.stderr | str trim | lines | last | default "")
+					let lost = ($why =~ '(?i)412|pre-?condition')
+					print -e $"gcp: (stamp) ($lock.key)'s release lock was not renewed: ($why)"
+					if $lost or ((date now) - $last) > ($LOCK_STALE / 2) {
+						let state = if $lost { "taken by another release" } else { $"unrenewed for over ($LOCK_STALE / 2)" }
+						print -e $"gcp: (stamp) ($lock.key)'s release lock is ($state): this release stops before another writes beside it"
+						^kill -TERM $me
+					}
 				}
 			}
 			return ($lock | insert generation $generation | insert beat $beat)
@@ -1145,6 +1156,15 @@ export def main [
 	let rollback = ($rollback or (do $given ROLLBACK))
 	let force_rc = ($rc or (do $given RC))
 	let no_local_gate = ($no_local_gate or (do $given NO_LOCAL_GATE) or (($env.PRONTO_RELEASE_NO_LOCAL_GATE? | default "") not-in ["" "0" "false"]))
+	# Refused before the lock is taken or anything recorded. A rollback and a preview's deletion change
+	# the project as soon as they run: neither has a dry run or a snapshot. A rollback is production's
+	# alone: under a preview's name it would hold the preview's lock and move production.
+	if ($rollback or $delete) and ($dry_run or $snapshot) {
+		error make {msg: $"--(if $rollback { 'rollback' } else { 'delete' }) changes the project: it has no --dry-run or --snapshot"}
+	}
+	if $rollback and ($preview | is-not-empty) {
+		error make {msg: "--rollback moves production's traffic back: it takes no --preview"}
+	}
 	# Every run that can change the project is recorded (gcp/release-record.nu): neither a dry run
 	# nor a snapshot changes anything, and a preview's --delete is no release.
 	let recorded = not ($dry_run or $snapshot or $delete)
@@ -1184,11 +1204,6 @@ export def main [
 
 # The release main parsed its flags for, once it holds the app's lock.
 def release-body [app_info: record, preview: string, delete: bool, dry_run: bool, snapshot: bool, no_gate: bool, rollback: bool, force_rc: bool, no_local_gate: bool] {
-	# A rollback and a preview's deletion change the project as soon as they run: neither has a dry
-	# run or a snapshot, so the pair is refused before either reaches it.
-	if ($rollback or $delete) and ($dry_run or $snapshot) {
-		error make {msg: $"--(if $rollback { 'rollback' } else { 'delete' }) changes the project: it has no --dry-run or --snapshot"}
-	}
 	if $rollback { release-record note {rc: "skipped: --rollback"}; roll-back (plan-of $app_info.cue_path ""); return }
 	if $delete {
 		if ($preview | is-empty) { error make {msg: "--delete removes a preview: name it with --preview; a release is never deleted here"} }
