@@ -34,6 +34,7 @@ refuses an app that is not.
 - [perf](perf/README.md): frame, interaction and paint timings on readers' devices.
 - [prod-watch](prod-watch/README.md): what production logged that may be a bug, triaged by an agent on a loop.
 - [probe](probe/README.md): a journey run against the released app every few seconds, and an alert naming the flag write just before it broke.
+- [machine](machine/README.md): one Mac's budget: the `cue` wrapper (memory and cores from the slot pool, only what changed vetted or exported), its watchdog and shared memory, installed by `bin/pronto-machine`.
 - [harness](harness/README.md): the test files every pronto app holds the same (slot.ts, unit.ts and its schema, lint.ts, browser.ts, and the scenarios' runner, schema and selector), written by `bin/pronto-harness`.
 - [release-cron](release-cron/README.md): an app released to production on a schedule, from main, by launchd.
 - [runners](runners/README.md): GitHub Actions runners on your own cluster, an ARC scale set per repository sharing one BuildKit.

@@ -185,6 +185,10 @@ jobs:
           sayt --script tools.nu nu modular-design/test.nu
       - name: Test migrations (needs deno, for its driver)
         run: sayt --script tools.nu nu migrations/test.nu
+      - name: The machine's cue wrapper against a fake cue
+        run: |
+          sh -n machine/install.sh && sh -n machine/sysv-shm.sh && sh -n bin/pronto-machine
+          deno test --no-config -A machine/tests/cue_test.ts
       - name: Test the Android host
         run: deno test --allow-read --allow-env android/test/host_test.ts android/test/bound_test.ts
       - name: Test the identity broker
