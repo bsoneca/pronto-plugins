@@ -268,6 +268,7 @@ export function normalize(line) {
     .replace(/\t\{.*$/s, "")
     .replace(/\t/g, " ")
     .replace(/pid=<[\d.]+>/g, "pid=<…>")
+    .replace(/request_id=\S+/g, "request_id=<…>")
     .replace(UUID, "<uuid>")
     .replace(EMAIL, "<email>")
     .replace(JWT, "<jwt>")

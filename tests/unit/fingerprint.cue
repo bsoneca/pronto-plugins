@@ -42,6 +42,8 @@ _lifecycle: pw.prodWatch.lifecycle
 cases: {
 	"a line loses its timestamp, colour codes, ids, addresses, query values and numbers": {suite: "fingerprint", steps: [
 		{call: "watch.normalize", args: ["\u001b[33m13:59:12.058 pid=<0.3298.0> [warning] Electric.StatusMonitor condition failed: :pg_lock_acquired\u001b[0m"], expect: "pid=<…> [warning] Electric.StatusMonitor condition failed: :pg_lock_acquired"},
+		// An Electric request names itself by a request id: one fingerprint, not one an occurrence (288 in a night, PRONTO-475).
+		{call: "watch.normalize", args: ["14:45:35.260 pid=<0.27119.0> request_id=GOfAQgQCzgij8HMAHFKC [warning] Stack not ready after 5000ms. Reason: Timeout waiting for Postgres lock acquisition"], expect: "pid=<…> request_id=<…> [warning] Stack not ready after Nms. Reason: Timeout waiting for Postgres lock acquisition"},
 		{call: "watch.normalize", args: ["2026/11/02 13:59:12 proxy server error: accept tcp 127.0.0.1:5432: use of closed network connection"], expect: "proxy server error: accept tcp <ip>: use of closed network connection"},
 		{call: "watch.normalize", args: ["analyst: GET /analysis?select=id&taken_at=lt.2026-11-02T13:57:20Z&limit=5: error sending request for url (http://127.0.0.1:3000/analysis)"], expect: "analyst: GET /analysis?select=…&taken_at=…&limit=…: error sending request for url (http://<ip>/analysis)"},
 		{call: "watch.normalize", args: ["game 3f0c9a1e-2b4d-4e8f-9a7b-1c2d3e4f5a6b of player@example.com from 2600:1900:0:2d09::1400 failed after 3 tries"], expect: "game <uuid> of <email> from <ip> failed after N tries"},
