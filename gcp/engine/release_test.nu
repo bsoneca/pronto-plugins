@@ -31,6 +31,11 @@ case "$*" in
   *"revisions list"*)
     s="$(cat "$d/serving")"
     echo "[{\"metadata\":{\"name\":\"svc-00002-new\",\"creationTimestamp\":\"2\",\"labels\":{\"pronto-schema\":\"a\"}},\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\"}]}},{\"metadata\":{\"name\":\"svc-00001-old\",\"creationTimestamp\":\"1\",\"labels\":{\"pronto-schema\":\"a\"}},\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\"}]}}]" ;;
+  *"projects get-iam-policy"*)
+    # The project's policy: its secrets readable by the app's account where a file says so.
+    if [ -f "$d/project_reads" ]; then echo '{"bindings":[{"role":"roles/secretmanager.secretAccessor","members":["serviceAccount:sa@p.iam.gserviceaccount.com"]}]}'; else echo '{"bindings":[]}'; fi ;;
+  *"secrets add-iam-policy-binding"*)
+    if [ -f "$d/secret_refused" ]; then echo "ERROR: PERMISSION_DENIED: setIamPolicy refused" >&2; exit 1; fi ;;
   *"get-iam-policy"*)
     # The policy as Cloud Run holds it: allUsers an invoker once a file says it was granted.
     if [ -f "$d/granted" ]; then echo '{"bindings":[{"role":"roles/run.invoker","members":["allUsers"]}],"etag":"x"}'; else echo '{"etag":"x"}'; fi ;;
@@ -84,6 +89,7 @@ def main [] {
 	print "Running release-gcp tests...\n"
 	test_stop_preview_stops_every_service_at_once
 	test_grant_secrets_binds_each_secret_at_once
+	test_grant_secrets_refused_on_a_preview_needs_the_project_grant
 	test_hold_traffic_keeps_the_serving_revision
 	test_hold_traffic_first_deploy
 	test_sql_drift_patches_tier_and_flags_at_once
@@ -389,6 +395,22 @@ def test_stop_preview_stops_every_service_at_once [] {
 	}
 	assert ($log | str contains "run jobs delete j") "the schema job goes"
 	assert ($took < 6500ms) $"the services stop at once, not one after another \(($took)\)"
+	rm -r $d
+}
+
+def test_grant_secrets_refused_on_a_preview_needs_the_project_grant [] {
+	print "test grant-secrets refused on a preview goes on only where the project lets the account read secrets..."
+	let plan = {project: "p", preview: "rc", readSecrets: ["s1" "s2"], names: {serviceAccount: "sa@p.iam.gserviceaccount.com"}}
+	let d = (fakes true "svc-00001-old" "200 ok" "200 svc-00002-new")
+	"" | save -f ($d | path join secret_refused)
+	"" | save -f ($d | path join project_reads)
+	let res = (run-release $d $"grant-secrets ($plan | to nuon)")
+	assert equal $res.exit_code 0 $res.stderr
+	assert ($res.stdout | str contains "the project's grant lets it read them")
+	rm ($d | path join project_reads)
+	let res = (run-release $d $"grant-secrets ($plan | to nuon)")
+	assert not equal $res.exit_code 0
+	assert ($res.stderr | str contains "does not let it read secrets")
 	rm -r $d
 }
 

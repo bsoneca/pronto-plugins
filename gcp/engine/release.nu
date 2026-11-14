@@ -100,24 +100,30 @@ def grant-public [service: string, project: string, region: string] {
 }
 
 # The app's account reads each secret its containers name (the plan's readSecrets), granted on
-# that secret alone, never on the project. A preview's release may grant no role in its project,
-# so where its account is refused it says which secret, and the owner's grant on the project, as
-# before, still holds.
+# that secret alone, never on the project. A preview's release may grant no role in its project:
+# where its account is refused, the release goes on only if the project's policy already lets the
+# account read every secret (the owner's grant on the project), and fails otherwise.
 export def grant-secrets [plan: record] {
 	let member = $"serviceAccount:($plan.names.serviceAccount)"
 	# Each secret at once (its own policy, so no two calls touch the same one): one after another,
 	# the rc's staging spent 23 s on these and its scrape configs (2026-11-04).
-	let failed = ($plan.readSecrets | par-each {|s|
-		let r = (try { gc-fresh secrets add-iam-policy-binding $s --project $plan.project --member $member --role roles/secretmanager.secretAccessor; {exit_code: 0, stderr: ""} } catch {|e| {exit_code: 1, stderr: $e.msg} })
-		if $r.exit_code != 0 {
-			if ($plan.preview? | is-not-empty) {
-				print $"gcp: (stamp) ($s) not granted to ($member) alone: ($r.stderr | str trim | lines | last)"
-			} else {
-				$"gcloud secrets add-iam-policy-binding ($s): ($r.stderr | str trim)"
-			}
-		}
+	let refused = ($plan.readSecrets | par-each {|s|
+		try { gc-fresh secrets add-iam-policy-binding $s --project $plan.project --member $member --role roles/secretmanager.secretAccessor | ignore; null } catch {|e| {secret: $s, why: ($e.msg | str trim)} }
 	} | compact)
-	if ($failed | is-not-empty) { error make {msg: ($failed | first)} }
+	if ($refused | is-empty) { return }
+	let first = ($refused | first)
+	if ($plan.preview? | is-empty) { error make {msg: $"gcloud secrets add-iam-policy-binding ($first.secret): ($first.why)"} }
+	if not (project-reads-secrets $plan.project $member) {
+		error make {msg: $"($first.secret) was not granted to ($member), and the project ($plan.project) does not let it read secrets: ($first.why | lines | last)"}
+	}
+	print $"gcp: (stamp) ($refused | get secret | str join ', ') not granted to ($member) alone; the project's grant lets it read them"
+}
+
+# Whether the project's own policy lets the member read its secrets (roles/secretmanager.secretAccessor
+# on the project). A policy that cannot be read fails the release.
+def project-reads-secrets [project: string, member: string]: nothing -> bool {
+	gc projects get-iam-policy $project --format json | from json | get -o bindings | default []
+		| any {|b| $b.role == "roles/secretmanager.secretAccessor" and ($member in $b.members) and ($b.condition? == null) }
 }
 
 # Whether any sidecar's metrics are scraped, in the cluster's instance or apart.
