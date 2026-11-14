@@ -35,3 +35,19 @@ Deno.test("no pronto app, or a path out of it, is refused", async () => {
   eq((await install(dir, "/tmp/x.js")).success, false, "an absolute path");
   await Deno.remove(dir, { recursive: true });
 });
+
+Deno.test("a provider that fails settles none, reported, and never rejects", async () => {
+  const g = globalThis as unknown as Record<string, unknown>;
+  const reported: unknown[] = [];
+  const dialog = { dataset: {}, style: {}, append() {}, setAttribute() {}, addEventListener() {}, remove() {}, close() {}, showModal() { throw new Error("provider down"); } };
+  g.document = { createElement: () => ({ ...dialog, showModal: dialog.showModal }), body: { append() {} } };
+  g.reportError = (e: unknown) => reported.push(e);
+  const { rewarded } = await import(new URL("./app/ads.js", import.meta.url).href);
+  eq(await rewarded(), "none", "the failure is none, not a rejection");
+  eq(rewarded.reason, "provider down", "its reason");
+  eq(reported.length, 1, "reported once");
+  eq((reported[0] as Error).message, "provider down", "the error reported");
+  eq(await rewarded(), "none", "the next ask tries again, it is not stuck on the failure");
+  eq(reported.length, 2, "and reports again");
+  delete g.document; delete g.reportError;
+});
