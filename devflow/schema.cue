@@ -56,6 +56,9 @@ devFlow: #DevFlow
 	// The modules an architect designs. An issue there ends in a design doc in the repository and
 	// follow-up issues filed in build order, never in an implementation or a release.
 	design: *["design"] | [...string]
+	// The model the architect's session runs on (the owner, 2026-11-14: "Architects work with opus";
+	// then "I might also consider fable to architect"): opus by default, a repository changes it here.
+	architectModel: *"opus" | string
 	// Sprints run in an endless loop (the owner, 2026-11-10): a sprint ends when all its issues
 	// merge, and the next is already planned, so no engineer waits. The lead picks each sprint's
 	// theme from the board; the owner names one only when he wants to. A sprint commits perPerson

@@ -136,6 +136,7 @@ pronto: {
 	infra: _pronto.infra & ["infra"]
 	// The architect seat (the owner, 2026-11-14): one by default, its issues in the module design.
 	design: _pronto.design & ["design"]
+	architectModel: _pronto.architectModel & "opus"
 	architectRefused: ((#DevFlow & {team: architect: -1}).team == _|_) & true
 	chore: _pronto.chore & "chore"
 	states: [for s in _pronto.states {s.name}] & ["Backlog", "Refine", "Ready", "Implementing", "Review", "Merged", "Live", "Done", "Cancelled"]

@@ -13,9 +13,10 @@ implementation, a release or a change to production. Moved through `pronto-devfl
 
 ## Seating the architect
 
-One Claude session on **Opus** (`model: "opus"`, `start_session` or `claude --model opus`; the owner,
-2026-11-14: "Architects work with opus and codex/opus reviews", the one seat that runs on Opus
-instead of Sonnet or the local model), titled `Architect · PRONTO-<n> ...`, started with this prompt:
+One Claude session on the model `devFlow.architectModel` names (`opus` by default, `fable` while the
+owner tries it: `start_session` with that `model`, or `claude --model <it>`; the owner, 2026-11-14:
+"Architects work with opus and codex/opus reviews", then "I might also consider fable to architect":
+the one seat that runs above Sonnet and the local model), titled `Architect · PRONTO-<n> ...`, started with this prompt:
 
 > You are the architect. Run the pronto-architect skill: `pronto-devflow pull . --lane architect`
 > and design what it starts; when it has nothing, say so and stop.

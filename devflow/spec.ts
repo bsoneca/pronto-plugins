@@ -31,6 +31,7 @@ export interface DevFlow {
   team: { engineers: number; sre: number; architect: number; product: number };
   infra: string[];
   design: string[];
+  architectModel: string;
   sprint: { timeZone: string; perPerson: number };
   chore: string;
   states: { name: string; group: string; color: string; means: string }[];

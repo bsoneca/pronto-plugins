@@ -189,7 +189,7 @@ bsoneca/pronto started with 2 engineers; from the second sprint it is:
 | --- | --- | --- | --- |
 | **engineer** | 4 | builds the apps' issues, one Claude session each | one each: at most 4 app issues in Implementing |
 | **SRE** | 1 | builds the infrastructure: issues in the `infra` module (infra/, the nodes, Plane itself) | one: at most 1 `infra` issue in Implementing |
-| **architect** | 1 | designs: issues in the `design` module (`design`) end in a design doc in the repository, reviewed by Codex, an Opus architecture review and the backend and platform-advisor seats, and follow-up issues filed small and in build order; never an implementation, a release or a change to production (`/architect`); its session runs on Opus (the owner, 2026-11-14) | one: at most 1 `design` issue in Implementing |
+| **architect** | 1 | designs: issues in the `design` module (`design`) end in a design doc in the repository, reviewed by Codex, an Opus architecture review and the backend and platform-advisor seats, and follow-up issues filed small and in build order; never an implementation, a release or a change to production (`/architect`); its session runs on `architectModel` (default Opus; the owner, 2026-11-14) | one: at most 1 `design` issue in Implementing |
 | **product manager** | 1 | designs features for later sprints (`/design`): turns ideas and Backlog issues into Ready ones | none: designing builds nothing |
 
 The three lanes are apart on purpose: infrastructure and design never wait behind app work, nor app
