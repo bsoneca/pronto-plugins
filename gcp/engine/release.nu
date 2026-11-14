@@ -160,8 +160,11 @@ export def sql-drift [live: record, plan: record]: nothing -> list<string> {
 # setup is some thirty gcloud calls, most of two minutes for each of a
 # release's preview and its project, which changed nothing. PRONTO_SETUP=always
 # sets it up anyway, after a change made by hand.
+# The secret that holds the key of the setup a release last made (ensure-infrastructure).
+def setup-marker [plan: record]: nothing -> string { $plan.names.job | str replace -r '-initdb$' '-setup' }
+
 def ensure-infrastructure [plan: record] {
-	let marker = ($plan.names.job | str replace -r '-initdb$' '-setup')
+	let marker = (setup-marker $plan)
 	let key = ([
 		($plan | select -o project region repository preview names sqlTier sqlFlags | to json --raw)
 		(scraped $plan | into string)
@@ -541,6 +544,10 @@ def empty-preview [plan: record] {
 def delete-preview [plan: record] {
 	let p = $plan.project
 	let n = $plan.names
+	# The setup's marker first: a preview made again with the same plan sets its project up afresh,
+	# rather than read the marker and skip the database and secrets deleted below.
+	let marker = (setup-marker $plan)
+	if (exists secrets describe $marker --project $p) { gc secrets delete $marker --project $p | ignore }
 	stop-preview $plan --remove
 	if (exists sql instances describe $n.instance --project $p) { gc sql instances delete $n.instance --project $p | ignore }
 	for secret in ($n.secrets | values) {
