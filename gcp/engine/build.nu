@@ -43,11 +43,32 @@ def read-again [args: list, input: any, r: record]: nothing -> record {
 	$r
 }
 
+# A gcloud call's arguments as an error or a log may show them: the value of every flag that can
+# carry a credential (a database password, a service token in a request's headers, a secret's data)
+# replaced, whether given as `--flag value` or `--flag=value`.
+const secret_flag = '^--[a-z-]*(password|headers|token|secret|key-file|data-file)[a-z-]*$'
+export def shown-args [args: list]: nothing -> string {
+	mut out = []
+	mut hide = false
+	for a in ($args | each {|x| $x | into string }) {
+		if $hide {
+			$out = ($out | append "<redacted>")
+			$hide = false
+		} else if ($a | str contains "=") and (($a | split row "=" | first) =~ $secret_flag) {
+			$out = ($out | append $"($a | split row '=' | first)=<redacted>")
+		} else {
+			$out = ($out | append $a)
+			$hide = ($a =~ $secret_flag)
+		}
+	}
+	$out | str join " "
+}
+
 export def --wrapped gc [...args] {
 	let input = $in
 	# Never a prompt: a release runs where nobody answers one.
 	let r = (read-again $args $input ($input | ^gcloud --quiet ...$args | complete))
-	if $r.exit_code != 0 { error make {msg: $"gcloud ($args | str join ' '): ($r.stderr | str trim)"} }
+	if $r.exit_code != 0 { error make {msg: $"gcloud (shown-args $args): ($r.stderr | str trim)"} }
 	$r.stdout
 }
 # Whether a resource is there. Only its absence answers false: an expired
@@ -56,7 +77,7 @@ export def --wrapped gc [...args] {
 export def --wrapped exists [...args]: nothing -> bool {
 	let r = (read-again $args null (^gcloud --quiet ...$args | complete))
 	if $r.exit_code != 0 and not ($r.stderr =~ "NOT_FOUND|HTTPError 404|Cannot find|does not exist|not found|was not found") {
-		error make {msg: $"gcloud ($args | str join ' '): ($r.stderr | str trim)"}
+		error make {msg: $"gcloud (shown-args $args): ($r.stderr | str trim)"}
 	}
 	$r.exit_code == 0
 }

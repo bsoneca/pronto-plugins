@@ -4,7 +4,7 @@
 use runtime.nu [resolve-app]
 use runtime.nu
 use verify.nu [start-drivers go-drivers finish-drivers cancel-drivers run-rehearsal plan-of]
-use build.nu [builder stamp key-tag gc exists build-account push-images service-jwt failure-message]
+use build.nu [builder stamp key-tag gc exists build-account push-images service-jwt failure-message shown-args]
 use local-gate-key.nu
 use release-record.nu
 use secrets.nu [check-secrets]
@@ -69,7 +69,7 @@ def --wrapped gc-fresh [...args] {
 	loop {
 		let r = ($input | ^gcloud --quiet ...$args | complete)
 		if $r.exit_code == 0 { return $r.stdout }
-		if not ($r.stderr =~ "does not exist|concurrent policy changes") { error make {msg: $"gcloud ($args | str join ' '): ($r.stderr | str trim)"} }
+		if not ($r.stderr =~ "does not exist|concurrent policy changes") { error make {msg: $"gcloud (shown-args $args): ($r.stderr | str trim)"} }
 		$tries += 1
 		if $tries mod 60 == 0 { print $"gcp: (stamp) gcloud ($args | first 3 | str join ' ') still refused after ((date now) - $t0 | format duration sec): ($r.stderr | str trim | lines | last)" }
 		sleep 1sec
