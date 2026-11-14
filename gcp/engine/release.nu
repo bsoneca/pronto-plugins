@@ -226,7 +226,7 @@ def set-up-secrets [plan: record] {
 	let base = (["POSTGRES_PASSWORD" "ELECTRIC_PASSWORD" "AUTHENTICATOR_PASSWORD" "PGRST_JWT_SECRET" "ELECTRIC_SECRET"] | par-each {|k| {key: $k, value: (ensure-secret ($n.secrets | get $k) $p)} } | reduce -f {} {|it, acc| $acc | insert $it.key $it.value })
 	let pg = $base.POSTGRES_PASSWORD
 	# Through the Auth Proxy on localhost, which carries TLS itself.
-	let at = $"@127.0.0.1:5432/($n.database)"
+	let at = $"@127.0.0.1:($n.databasePort)/($n.database)"
 	# PostgREST logs in as the authenticator role, as compose's crud does; a job has no proxy
 	# beside it: pgroll's runner reaches the database over the socket.
 	let derived = [
@@ -785,14 +785,17 @@ export const invoker_probe = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJwc
 const cloud_run_refusal = "not authorized to invoke this service"
 
 # An address polled until it answers ok (and, where given, with the revision's name, `steady`
-# times in a row). No limit: a poll that gets no such answer goes on, and says so about every
-# minute (elapsed, last answer), so a stuck go-live shows in the log instead of failing or
-# rolling back on a clock. With `bearer` each request carries it, and a Cloud Run refusal of it
-# (its grant of roles/run.invoker to allUsers not in force yet, which can take minutes) is
-# named in that line. The result keeps its shape (ok, last, waited) for its callers; ok is
-# always true, as the poll returns only on the answer it wants.
+# times in a row). A poll that gets no such answer goes on, and says so about every minute
+# (elapsed, last answer, curl's error), so a slow go-live shows in the log; one that gets none
+# for GCP_GOLIVE_LIMIT (minutes, 30 by default: the slowest healthy go-live took under ten)
+# fails, so a release never holds its lock for ever behind an address that will not answer.
+# With `bearer` each request carries it, and a Cloud Run refusal of it (its grant of
+# roles/run.invoker to allUsers not in force yet, which can take minutes) is named in that
+# line. The result keeps its shape (ok, last, waited) for its callers; ok is always true, as
+# the poll returns only on the answer it wants.
 export def poll-health [url: string, ok: list<string>, revision: any, --steady: int = 1, --bearer: string]: nothing -> any {
 	let every = ($env.GCP_GOLIVE_EVERY? | default 2 | into int)
+	let limit = (($env.GCP_GOLIVE_LIMIT? | default 30 | into int) * 1min)
 	let headers = if $bearer == null { [] } else { ["--header" $"Authorization: Bearer ($bearer)"] }
 	let body = (mktemp -t gcp.XXXXXX | str trim)
 	let t0 = (date now)
@@ -800,13 +803,19 @@ export def poll-health [url: string, ok: list<string>, revision: any, --steady: 
 	mut streak = 0
 	mut last = "no answer"
 	loop {
-		let code = (^curl --silent --max-time 10 --output $body --write-out "%{http_code}" ...$headers $url | complete | get stdout | str trim)
+		let got = (^curl --silent --show-error --max-time 10 --output $body --write-out "%{http_code}" ...$headers $url | complete)
+		let code = ($got.stdout | str trim)
 		let said = (open --raw $body | into string | str trim)
-		$last = $"($code) ($said | str substring 0..60)"
+		let err = ($got.stderr | str trim | lines | last | default "")
+		$last = if $got.exit_code != 0 and ($err | is-not-empty) { $"($code) curl: ($err)" } else { $"($code) ($said | str substring 0..60)" }
 		let refused = ($bearer != null and $code == "401" and ($said | str contains $cloud_run_refusal))
 		if $code in $ok and ($revision == null or $said == $revision) { $streak += 1 } else { $streak = 0 }
 		if $streak >= $steady { rm -f $body; return {ok: true, last: $last, waited: ""} }
 		let elapsed = ((date now) - $t0)
+		if $elapsed >= $limit {
+			rm -f $body
+			error make {msg: $"($url) did not answer ($ok | str join '/')(if $revision != null { $" as ($revision)" } else { '' }) in ($elapsed | format duration min): last answer ($last)"}
+		}
 		if $elapsed >= $next_note {
 			let why = if $refused { " (Cloud Run itself still refuses a bearer token not signed by Google: its grant of roles/run.invoker to allUsers is not in force yet)" } else { "" }
 			print $"gcp: (stamp) still waiting for ($url) to answer ($ok | str join '/')(if $revision != null { $" as ($revision)" } else { '' }), ($elapsed | format duration sec): last answer ($last)($why)"

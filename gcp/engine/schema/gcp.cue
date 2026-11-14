@@ -307,6 +307,8 @@ import (
 		instance: "\(R._id)-db" + [if R.sqlGeneration > 1 {"-\(R.sqlGeneration)"}, ""][0]
 		connection: "\(R._project):\(R.region):\(instance)"
 		database:   R.name
+		// Where the Auth Proxy beside each container listens, which the secrets' URLs name.
+		databasePort: #Ports.database
 		// Previews share one, made once by the project's owner with only what
 		// a revision needs (docs/release-targets.md#previews), so the release
 		// that makes a preview needs no say over the project's IAM.
