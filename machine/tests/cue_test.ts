@@ -144,7 +144,7 @@ Deno.test("two wrappers on one PATH (a machine's and a runtime's) claim once and
   }).spawn();
   const out = child.output();
   // Two that skip only themselves exec each other for ever.
-  let timer = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const done = await Promise.race([out.then(() => true), new Promise<boolean>((r) => (timer = setTimeout(() => r(false), 20_000)))]);
   clearTimeout(timer);
   if (!done) {
