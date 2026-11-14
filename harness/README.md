@@ -11,10 +11,26 @@ copy by hand from `apps/brawl-chess` (bsoneca/pronto's AGENTS.md, "Tests are dat
 | `tests/unit/schema.cue` | what a unit case may say |
 | `tests/browser.ts` | the browsers a run launches, shut down however it ends |
 | `tests/lint.ts` | the release guards `test` runs: generated files, the image's files, the schema |
-| `tests/scenarios/select.ts` | which scenarios the runner runs; only in an app with `tests/scenarios.ts` |
+| `tests/scenarios.ts` | runs an app's scenarios (`tests/scenarios/*.cue`) in browsers against its door |
+| `tests/scenarios/schema.cue` | what a scenario may say, and the facts the runner reads beside the scenarios |
+| `tests/scenarios/select.ts` | which scenarios the runner runs: their inputs as at their last green run |
+| `tests/scenarios/early.ts` | a promise the runner starts before the step that awaits it, marked handled |
+| `tests/slow.ts` | the throttling a slowed scenario's pages get, as a preview's |
+
+The last five go only to an app that runs scenarios (it has `tests/scenarios.ts`).
 
 An app keeps only its own: `tests/unit/suites.cue`, `tests/unit/registry.js`, `tests/unit/probes.js`,
-its cases and its scenarios.
+its cases and its scenarios, and, where its scenarios need them:
+
+- `tests/scenarios/app.cue`: the facts `schema.cue` names with a default the app does not share (the
+  screen and locale its actors read it on, its messages, how its pages load, the sources the selection
+  judges by bytes, its database, its passkey sign-in, `parallel`), the fields its actors have besides a
+  name (`#Actor`), its own step kinds (`#Gestures`) and those a production scenario may not take
+  (`#barred`). It is CUE of the scenarios' package: one place, held by the schema.
+- `tests/scenarios/app.ts`: what its own step kinds do, and the moments it adds to (a browser's first
+  script, a page's load, a sign-up, a payment, a failure's report), as `tests/unit/registry.js` is to
+  unit cases. Its default export is the runner's `Hooks`; it imports only the runner's types, since
+  the runner imports it.
 
 ## Use
 
@@ -37,5 +53,5 @@ same files, held to `files/` by ci.
 ## Tests
 
 `cue vet -c ./harness` holds the host to [`tests.cue`](tests.cue): the six files every app gets,
-the scenarios' selector only with scenarios, none seeded, no header. ci writes the harness into a
+the scenarios' five only with scenarios, none seeded, no header. ci writes the harness into a
 scratch app and compares each file with `cmp`.
