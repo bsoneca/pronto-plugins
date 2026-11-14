@@ -329,7 +329,7 @@ def preflight-app [sidecar_env: string]: nothing -> string {
 }
 
 # Cloud SQL refuses fewer than 10 replication slots or WAL senders (studio's release, 2026-11-14:
-# "4 is not between 10 and 8192"); more replicas take more.
+# "4 is not between 10 and 8192"), and any flag outside its range; more replicas take more.
 def test_sql_flags_keep_cloud_sqls_least_slots_and_senders [] {
 	print "test one replica's database keeps Cloud SQL's least 10 slots and WAL senders, more replicas more..."
 	let app = (preflight-app '{"X": "1"}')
@@ -341,6 +341,17 @@ def test_sql_flags_keep_cloud_sqls_least_slots_and_senders [] {
 	let flags = ($res.stdout | from json | each {|f| $f | split row "," | parse "{k}={v}" | transpose -r -d })
 	assert equal [$flags.0.max_replication_slots $flags.0.max_wal_senders $flags.0.max_connections] ["10" "10" "50"]
 	assert equal [$flags.1.max_replication_slots $flags.1.max_wal_senders] ["12" "12"]
+	# Every flag inside the range Cloud SQL takes (gcloud sql flags list --database-version=POSTGRES_17,
+	# 2026-11-14): a value out of it fails the release at the patch, after the preview was emptied.
+	let ranges = {max_connections: [14 262143], max_replication_slots: [10 8192], max_wal_senders: [10 8192], wal_sender_timeout: [0 2147483647], max_slot_wal_keep_size: [102400 10485760]}
+	for f in $flags {
+		for c in ($f | transpose k v) {
+			if $c.k in $ranges {
+				let r = ($ranges | get $c.k)
+				assert (($c.v | into int) >= $r.0 and ($c.v | into int) <= $r.1) $"($c.k)=($c.v) is outside Cloud SQL's ($r.0)..($r.1)"
+			}
+		}
+	}
 }
 
 def preflight-run [d: string, app: string]: nothing -> record {
