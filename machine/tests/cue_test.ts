@@ -144,7 +144,9 @@ Deno.test("two wrappers on one PATH (a machine's and a runtime's) claim once and
   }).spawn();
   const out = child.output();
   // Two that skip only themselves exec each other for ever.
-  const done = await Promise.race([out.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 20_000))]);
+  let timer = 0;
+  const done = await Promise.race([out.then(() => true), new Promise<boolean>((r) => (timer = setTimeout(() => r(false), 20_000)))]);
+  clearTimeout(timer);
   if (!done) {
     // exec keeps the pid: the loop is this child, whichever wrapper it is in now.
     try { child.kill("SIGKILL"); } catch { /* gone already */ }
