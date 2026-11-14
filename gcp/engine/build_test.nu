@@ -9,7 +9,7 @@
 const gcp_dir = path self .
 
 use std/assert
-use build.nu [source-key image-keys key-tag pushed-for tag-action tag-image]
+use build.nu [source-key image-keys key-tag pushed-for tag-action tag-image shown-args]
 
 # A gcloud that answers `images describe <repo>:<tag>` with the digest a file `tags/<tag>` holds
 # (NOT_FOUND without one) and logs every call.
@@ -143,6 +143,13 @@ def test_tag_image_adds_a_missing_tag_and_updates_a_moved_one [] {
 	with-env {PATH: ($env.PATH | prepend ($d | path join bin))} { tag-image "us-docker.pkg.dev/p/app/app-web" "sha256:a" "src-k" }
 	assert ((log-of $d) | any {|l| $l =~ 'artifacts tags update src-k --location us --project p --repository app --package app-web --version sha256:a' })
 	rm -rf $d
+}
+
+def test_shown_args_hide_every_credential [] {
+	assert equal (shown-args [sql users set-password app --instance i --password "s3cret" --project p]) "sql users set-password app --instance i --password <redacted> --project p"
+	assert equal (shown-args [scheduler jobs update http t --update-headers "Authorization=Bearer abc" --uri u]) "scheduler jobs update http t --update-headers <redacted> --uri u"
+	assert equal (shown-args [scheduler jobs create http t "--headers=Authorization=Bearer abc"]) "scheduler jobs create http t --headers=<redacted>"
+	assert equal (shown-args [run deploy svc --region r]) "run deploy svc --region r"
 }
 
 def main [] {

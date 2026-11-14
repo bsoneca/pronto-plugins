@@ -91,7 +91,9 @@ def fold [cue_path: string, preview: string, started: datetime, ended: datetime,
 	}
 }
 
-# The record appended to the app's file. Its writing never fails the release: a warning says why not.
+# The record appended to the app's file. A record that cannot be written fails the run: the records
+# are what live-commit and verify's verdict read, so a missing one would leave an older release
+# standing as the live one and its scenarios judged against it.
 export def write [cue_path: string, preview: string, started: datetime, outcome: string, failure: any, at: record] {
 	let ended = (date now)
 	try {
@@ -100,7 +102,7 @@ export def write [cue_path: string, preview: string, started: datetime, outcome:
 		mkdir $dir
 		$"($r | to json --raw)\n" | save --append ($dir | path join $"($r.app).jsonl")
 		rm -f $env.PRONTO_RELEASE_MARKS
-	} catch {|e| print -e $"gcp: warning: the release's record was not written: ($e.msg)" }
+	} catch {|e| error make {msg: $"the release's record was not written: ($e.msg)"} }
 }
 
 # The commit of the app's last production release that went live and was a clean checkout, from

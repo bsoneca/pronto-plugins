@@ -15,7 +15,7 @@
 
 use runtime.nu [resolve-app]
 use release-record.nu
-use build.nu [builder stamp exists key-tag file-hashes image-keys]
+use build.nu [builder stamp exists key-tag file-hashes image-keys shown-args]
 
 # What uploads the drivers' screenshots: Google's own gsutil builder, by digest, so every run
 # uploads with the same bytes.
@@ -23,7 +23,7 @@ const uploader = "gcr.io/cloud-builders/gsutil@sha256:35117f56523ca26ec3515da9c4
 
 def --wrapped gc [...args] {
 	let r = (^gcloud --quiet ...$args | complete)
-	if $r.exit_code != 0 { error make {msg: $"gcloud ($args | str join ' '): ($r.stderr | str trim)"} }
+	if $r.exit_code != 0 { error make {msg: $"gcloud (shown-args $args): ($r.stderr | str trim)"} }
 	$r.stdout
 }
 
