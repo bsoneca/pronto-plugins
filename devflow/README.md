@@ -10,7 +10,7 @@ No files in an app. A repository opts in with one file, `devflow/devflow.cue`: i
 - [`schema.cue`](schema.cue): the flow as data, every default in it: the board and its kind, the token's source, the states (in order and in the board's groups) and the role each plays, what P0..P3 do. Its checks are [`tests.cue`](tests.cue) (`cue vet -c=false ./devflow`).
 - [`board/board.ts`](board/board.ts): the `Board` interface everything else talks to, and [`plane.ts`](plane.ts), the adapter for `board.kind: "plane"` and [`github-projects.ts`](github-projects.ts), the adapter for `board.kind: "github-projects"`: a GitHub Projects (v2) project whose Status, Priority, Module (multi select) and Sprint (iteration) fields hold the states, priorities, apps and sprints, its issues those of `board.repository` ([`board/github.js`](board/github.js) says how). `spec.ts`'s `boardOf` picks the adapter.
 - [`plane.cue`](plane.cue): Plane on the node: the plane-ce chart's values, its CloudNativePG database, and its route on the node's Envoy Gateway.
-- [`flow.js`](flow.js): the rules, in roles rather than a repository's state names: an issue's key from a pull request, where an event moves an issue, an issue's flag, whose slot an issue takes (an engineer's or an SRE's), what a sprint may plan per lane (`sprint.perPerson` for each person) and which Ready issue a lane pulls next, where the loop of sprints stands (the current, the next, the finished). Its cases are [`tests/unit/devflow.cue`](../tests/unit/devflow.cue).
+- [`flow.js`](flow.js): the rules, in roles rather than a repository's state names: an issue's key from a pull request, where an event moves an issue, an issue's flag, whose slot an issue takes (an engineer's, an SRE's or an architect's), what a sprint may plan per lane (`sprint.perPerson` for each person) and which Ready issue a lane pulls next, where the loop of sprints stands (the current, the next, the finished). Its cases are [`tests/unit/devflow.cue`](../tests/unit/devflow.cue).
 - [`connect.ts`](connect.ts): the `connect plane` intent ([docs/intents.md](../docs/intents.md)): Plane installed on the node (when the repository names a `cluster`), its hostname, then the board set up from the spec. With no `cluster` it installs nothing: it checks the board's host answers and the token signs in, then sets the board up.
 - [`hook.ts`](hook.ts): what GitHub, release-cron and pronto-flags tell the board.
 - [`board.ts`](board.ts): the board as the skills use it: [`pronto-sprint-plan`](../skills/pronto-sprint-plan/SKILL.md), [`pronto-issue`](../skills/pronto-issue/SKILL.md), [`pronto-bug`](../skills/pronto-bug/SKILL.md), [`pronto-design`](../skills/pronto-design/SKILL.md) (the product managers').
@@ -40,7 +40,7 @@ The hooks, which run without a person:
 | --- | --- | --- |
 | names a flag | the flag is on for everyone (`flipped`); `rolledback` puts it back to Live | Merged → Live (released) → Done (flipped) |
 | names none (a bug fix) | it is released (`released`) | Merged → Done |
-| names none, in an infra module (`infra`) or the `plugins` module | its pull request merges (`merged`) | Review → Done: nothing release-cron ships |
+| names none, in an infra module (`infra`), a design module (`design`) or the `plugins` module | its pull request merges (`merged`) | Review → Done: nothing release-cron ships |
 
 A flagless issue is never left in Live: the release that holds its pull request finishes it. `pronto-flags rollback` tells the board too (`rolledback` for each flag it turned off).
 

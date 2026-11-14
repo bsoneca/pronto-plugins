@@ -189,24 +189,28 @@ bsoneca/pronto started with 2 engineers; from the second sprint it is:
 | --- | --- | --- | --- |
 | **engineer** | 4 | builds the apps' issues, one Claude session each | one each: at most 4 app issues in Implementing |
 | **SRE** | 1 | builds the infrastructure: issues in the `infra` module (infra/, the nodes, Plane itself) | one: at most 1 `infra` issue in Implementing |
+| **architect** | 1 | designs: issues in the `design` module (`design`) end in a design doc in the repository, reviewed by Codex, an Opus architecture review and the backend and platform-advisor seats, and follow-up issues filed small and in build order; never an implementation, a release or a change to production (`/architect`); its session runs on Opus (the owner, 2026-11-14) | one: at most 1 `design` issue in Implementing |
 | **product manager** | 1 | designs features for later sprints (`/design`): turns ideas and Backlog issues into Ready ones | none: designing builds nothing |
 
-The two lanes are apart on purpose: infrastructure never waits behind app work, nor app work behind
-it. `infra` names the modules an SRE builds (default `["infra"]`). `/issue` will not move an item into
+The three lanes are apart on purpose: infrastructure and design never wait behind app work, nor app
+work behind them. `infra` names the modules an SRE builds (default `["infra"]`); `design` the modules
+an architect designs (default `["design"]`, and it wins over `infra` for an issue in both). A design
+issue has no flag, and is Done when its pull request merges, like an infra one. The architect's lane
+is never "dry": an empty design lane does not call for a sprint. `/issue` will not move an item into
 Implementing while its lane is full; it says which items hold the slots. P0 bugs are the one
 exception.
 
 ### Capacity and WIP
 
 A sprint **commits `sprint.perPerson` issues per person** (default 3): with 4 engineers and 1 SRE
-that is 12 app issues and 3 `infra` issues. `pronto-devflow next` refuses a plan past a lane's
+that is 12 app issues and 3 `infra` issues (and 3 `design` issues for the architect). `pronto-devflow next` refuses a plan past a lane's
 capacity, and `status` prints planned against capacity per lane and the Ready queue waiting to be
 pulled. A split of a lane between apps stays by hand in planning.
 
 **WIP is 1 in Implementing per person** (so `team.engineers` app issues and `team.sre` infra issues
 at once; `start` refuses beyond that, a P0 excepted). Review (gate, ci, automerge) holds no slot, so
 an engineer is never idle after one issue: when its pull request opens, or its issue is cancelled,
-the session runs `pronto-devflow pull . [--lane SRE]`, which starts the lane's next Ready issue of
+the session runs `pronto-devflow pull . [--lane SRE|architect]`, which starts the lane's next Ready issue of
 the current sprint, else of the next sprint, most urgent first, and works it as its own session.
 
 A **designed** issue is Ready and in no sprint. It stays Ready when a sprint ends without it, and the

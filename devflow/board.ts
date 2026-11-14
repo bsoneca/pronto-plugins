@@ -3,8 +3,8 @@
 // Sprints run in an endless loop (flow.js loopOf): the current one, and the next that idle lanes
 // already pull from; a sprint ends when all its issues merge.
 //   board.ts status <repo> [--json]                     the loop: the current and next sprints' issues by state, the slots busy, what is designed
-//   board.ts start <repo> <KEY>                         Implementing, if its lane (engineer or SRE) has a slot (a P0 always)
-//   board.ts pull <repo> [--lane engineer|SRE]          start the lane's next Ready issue: the current sprint's, else the next sprint's
+//   board.ts start <repo> <KEY>                         Implementing, if its lane (engineer, SRE or architect) has a slot (a P0 always)
+//   board.ts pull <repo> [--lane engineer|SRE|architect]          start the lane's next Ready issue: the current sprint's, else the next sprint's
 //   board.ts move <repo> <KEY> <State> [--why <text>]   Refine, Ready, Backlog (out of its sprint) or Cancelled, by the repository's name for the state or its role (the others are the hooks')
 //   board.ts file <repo> --title <t> --app <app> [--bug] [--priority P0..P3] [--flag <f>] [--body <text>]
 //   board.ts close <repo> [<n>] [--json]                a finished sprint's report (the last finished by default)
@@ -43,8 +43,8 @@ const priorities = Object.fromEntries(Object.entries(flow.priorities).map(([p, v
 const urgent = priorities.P0;
 const order = [...Object.keys(priorities).sort().map((p) => priorities[p]), "none"];
 
-/** The lanes that build: an engineer's slots and an SRE's (devFlow.team), and which an issue takes. */
-const slots = { engineer: flow.team.engineers, SRE: flow.team.sre } as Record<string, number>;
+/** The lanes that build: an engineer's slots, an SRE's and an architect's (devFlow.team), and which an issue takes. */
+const slots = { engineer: flow.team.engineers, SRE: flow.team.sre, architect: flow.team.architect } as Record<string, number>;
 const cap = capacity(flow.team, flow.sprint.perPerson) as Record<string, number>;
 // Each issue's modules, read only by a verb that asks for lanes (status, start, pull, next): move and
 // file never did need them, and they were the slowest read (PRONTO-341).
@@ -52,7 +52,7 @@ let modulesOf: Map<string, string[]> | null = null;
 const withLanes = async () => void (modulesOf ??= await board.modulesByIssue(project));
 const lane = (i: Issue) => {
   if (!modulesOf) throw new Error("lanes asked for before withLanes()");
-  return laneOf(modulesOf.get(i.id) ?? [], flow.infra);
+  return laneOf(modulesOf.get(i.id) ?? [], flow.infra, flow.design);
 };
 
 /** The sprints on the board (cycles named `Sprint <n>...`), each with its issues, and where the loop
@@ -95,7 +95,8 @@ async function status() {
   // What a lane still has to start in the current sprint (Ready or Refine): none, and the lane pulls
   // from the next sprint; no next sprint, and the lead plans it now (skills/pronto-sprint-plan).
   const toStart = (is: Issue[], l: string) => is.filter((i) => lane(i) === l && ["ready", "refine"].includes(roleAt(i.state) ?? "")).length;
-  const dry = Object.keys(slots).filter((l) => slots[l] > 0 && toStart(cur, l) === 0);
+  // The architect's lane is never dry: design work is occasional, and an empty lane must not call for a sprint.
+  const dry = Object.keys(slots).filter((l) => l !== "architect" && slots[l] > 0 && toStart(cur, l) === 0);
   const planning = next ? nxt : current ? [] : cur;
   const out = {
     current: titleOf(current),
@@ -164,7 +165,7 @@ async function start(k: string, claim = false): Promise<"started" | "lost"> {
  * never idle: with nothing left in the current sprint it starts the next). What a session does when
  * its pull request opens (review holds no slot), or when it finishes an issue. */
 async function pull(l: string) {
-  if (!(l in slots)) throw new Error(`a lane is engineer or SRE, not ${l}`);
+  if (!(l in slots)) throw new Error(`a lane is engineer, SRE or architect, not ${l}`);
   const [{ current, next }, all] = await Promise.all([sprints(), board.issues(project, true), withLanes()]);
   for (const sp of [current, next]) {
     if (!sp) continue;
@@ -250,7 +251,7 @@ async function next(theme: string, keys: string[]) {
   const n = loop.plansInto;
   const held = byN(n)?.issues ?? [];
   // Capacity first, so a refused plan changes nothing: the sprint's issues already planned, by
-  // lane, plus the new ones, against perPerson for each engineer and SRE.
+  // lane, plus the new ones, against perPerson for each engineer, SRE and architect.
   const heldIds = new Set(held.map((i) => i.id));
   const fresh = (await Promise.all(keys.map((k) => board.issue(k)))).filter((i, x, all) => !heldIds.has(i.id) && all.findIndex((j) => j.id === i.id) === x);
   const refused: string[] = [];

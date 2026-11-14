@@ -88,8 +88,8 @@ export function steps(repo: string, flow: DevFlow): Step[] {
     return p;
   };
   const project = async (p: Board) => (await p.projects()).find((x) => x.identifier === board.project.identifier);
-  // A module per app, and the infra modules an SRE builds (devFlow.infra).
-  const apps = () => [...[...Deno.readDirSync(`${repo}/apps`)].filter((e) => e.isDirectory && !e.name.startsWith(".")).map((e) => e.name).sort(), ...flow.infra];
+  // A module per app, the infra modules an SRE builds (devFlow.infra) and the design modules an architect does (devFlow.design).
+  const apps = () => [...[...Deno.readDirSync(`${repo}/apps`)].filter((e) => e.isDirectory && !e.name.startsWith(".")).map((e) => e.name).sort(), ...flow.infra, ...flow.design];
 
   // Plane on the node: only when the repository names a cluster.
   const install = (cluster: NonNullable<DevFlow["cluster"]>): Step[] => {
@@ -258,18 +258,18 @@ export function steps(repo: string, flow: DevFlow): Step[] {
       },
     },
     {
-      name: "a module per app, and infra",
+      name: "a module per app, infra and design",
       check: async () => {
         const p = (await need());
         const have = new Set((await p.modules((await project(p))!.id)).map((m) => m.name));
         const missing = apps().filter((a) => !have.has(a));
-        return missing.length ? todo(missing.join(", ")) : ok(`${apps().length - flow.infra.length} apps, ${flow.infra.join(", ")}`);
+        return missing.length ? todo(missing.join(", ")) : ok(`${apps().length - flow.infra.length - flow.design.length} apps, ${[...flow.infra, ...flow.design].join(", ")}`);
       },
       apply: async () => {
         const p = (await need());
         const pid = (await project(p))!.id;
         const have = new Set((await p.modules(pid)).map((m) => m.name));
-        for (const a of apps().filter((x) => !have.has(x))) await p.createModule(pid, a, flow.infra.includes(a) ? `${a}: an SRE's` : `apps/${a}`);
+        for (const a of apps().filter((x) => !have.has(x))) await p.createModule(pid, a, flow.infra.includes(a) ? `${a}: an SRE's` : flow.design.includes(a) ? `${a}: an architect's` : `apps/${a}`);
       },
     },
     {

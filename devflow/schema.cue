@@ -38,24 +38,29 @@ devFlow: #DevFlow
 	// or the environment variable `name`. PLANE_TOKEN in the environment (a GitHub Actions secret)
 	// wins for every kind. A token written as `{project, secret?}` with no kind is Secret Manager's.
 	token: *#SecretManagerToken | #EnvToken
-	// The team (rule 1). Engineers and SREs build: each is a slot, and an issue in Implementing
-	// takes one. An SRE's slots build the infra modules' issues, an engineer's every other module's,
-	// so infrastructure never waits behind app work, nor app work behind it. The product managers
-	// take no slot: they design what is to come, turning Backlog issues into Ready ones (objective,
-	// acceptance, flag) that a later sprint's planning picks.
+	// The team (rule 1). Engineers, SREs and architects build: each is a slot, and an issue in
+	// Implementing takes one. An SRE's slots build the infra modules' issues, an architect's the
+	// design modules' (the owner, 2026-11-14: "Add an architect seat"), an engineer's every other
+	// module's, so infrastructure and design never wait behind app work, nor app work behind them.
+	// The product managers take no slot: they design what is to come, turning Backlog issues into
+	// Ready ones (objective, acceptance, flag) that a later sprint's planning picks.
 	team: {
 		engineers: *2 | (int & >=0)
 		sre:       *1 | (int & >=0)
+		architect: *1 | (int & >=0)
 		product:   *1 | (int & >=0)
 	}
 	// The modules an SRE builds: the cloud's configuration (infra/) and the nodes. Made beside a
 	// module per app.
 	infra: *["infra"] | [...string]
+	// The modules an architect designs. An issue there ends in a design doc in the repository and
+	// follow-up issues filed in build order, never in an implementation or a release.
+	design: *["design"] | [...string]
 	// Sprints run in an endless loop (the owner, 2026-11-10): a sprint ends when all its issues
 	// merge, and the next is already planned, so no engineer waits. The lead picks each sprint's
 	// theme from the board; the owner names one only when he wants to. A sprint commits perPerson
-	// issues to each engineer and each SRE (the user, 2026-11-08: "add more issues per sprint, but
-	// with limits"): 4 engineers and 1 SRE make 12 app issues and 3 infra issues. That is the
+	// issues to each engineer, SRE and architect (the user, 2026-11-08: "add more issues per sprint, but
+	// with limits"): 4 engineers and 1 SRE make 12 app issues and 3 infra issues, and each architect 3 design issues. That is the
 	// sprint's capacity, apart from the slots: a person has one issue in Implementing at a time, and
 	// pulls the next of theirs when the pull request of the last opens (review does not hold the
 	// slot), from the next sprint when the current has nothing left to start. timeZone dates the
@@ -160,7 +165,7 @@ _states: [
 	{name: "Backlog", group: "backlog", color: "#a3a3a3", means: "on the board, not planned"},
 	{name: "Refine", group: "unstarted", color: "#60a5fa", means: "in the sprint, being turned into an objective that can be met"},
 	{name: "Ready", group: "unstarted", color: "#3b82f6", means: "designed: objective, acceptance, flag and app written down"},
-	{name: "Implementing", group: "started", color: "#f59e0b", means: "a Claude session is building it; takes an engineer's or an SRE's slot"},
+	{name: "Implementing", group: "started", color: "#f59e0b", means: "a Claude session is building it; takes an engineer's, an SRE's or an architect's slot"},
 	{name: "Review", group: "started", color: "#8b5cf6", means: "its pull request is open"},
 	{name: "Merged", group: "completed", color: "#22c55e", means: "merged to main; done for the sprint"},
 	{name: "Live", group: "completed", color: "#14b8a6", means: "released, its flag still off"},

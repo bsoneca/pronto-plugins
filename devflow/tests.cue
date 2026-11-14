@@ -131,9 +131,12 @@ pronto: {
 	plane: _pronto.plane & {host: "plane.bsoneca.com", workspace: "pronto", project: {name: "pronto", identifier: "PRONTO"}, chart: "1.8.6"}
 	cluster: _pronto.cluster & {context: "contabo", ssh: "pronto@144.91.92.217", namespace: "plane", tunnel: "45248135-7212-417a-af6d-b1bb2184e2d7", apiPort: 26443}
 	token: _pronto.token & {kind: "secret-manager", project: "brawl-chess", secret: "plane-api-token"}
-	team: _pronto.team & {engineers: 4, sre: 1, product: 1}
+	team: _pronto.team & {engineers: 4, sre: 1, architect: 1, product: 1}
 	sprint: _pronto.sprint & {ends: "18:00", perPerson: 3, timeZone: "America/Sao_Paulo"}
 	infra: _pronto.infra & ["infra"]
+	// The architect seat (the owner, 2026-11-14): one by default, its issues in the module design.
+	design: _pronto.design & ["design"]
+	architectRefused: ((#DevFlow & {team: architect: -1}).team == _|_) & true
 	chore: _pronto.chore & "chore"
 	states: [for s in _pronto.states {s.name}] & ["Backlog", "Refine", "Ready", "Implementing", "Review", "Merged", "Live", "Done", "Cancelled"]
 	roles: _pronto.roles & {backlog: "Backlog", refine: "Refine", ready: "Ready", implementing: "Implementing", review: "Review", merged: "Merged", live: "Live", done: "Done", cancelled: "Cancelled"}
