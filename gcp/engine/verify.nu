@@ -122,10 +122,9 @@ export def start-drivers [app_dir: string, plan: record]: nothing -> record {
 		# made from, built and loaded now: from the bake's cache, before the wait.
 		"  docker compose --profile '*' build --with-dependencies $tobuild"
 		# What was built is pushed under its inputs' key, for the next release
-		# to pull: while the release deploys, and should the push fail the
-		# tests still run.
+		# to pull and for a rehearsal to run: a tag or push that fails fails the build.
 		"  for d in $tobuild; do"
-		"    for c in $pushed; do [ \"${c%%=*}\" != \"$d\" ] || { docker tag \"$(image_of \"$d\")\" \"${c#*=}\" && docker push -q \"${c#*=}\" >/dev/null || echo \"verify: $d not cached\" >&2; }; done"
+		"    for c in $pushed; do [ \"${c%%=*}\" != \"$d\" ] || { docker tag \"$(image_of \"$d\")\" \"${c#*=}\" && docker push -q \"${c#*=}\" >/dev/null; } || { echo \"verify: $d was not pushed to ${c#*=}\" >&2; exit 1; }; done"
 		"  done"
 		"fi"
 		# The release says go once the service is up: a marker in the bucket,
@@ -216,12 +215,38 @@ export def go-drivers [run: record] {
 	print $"gcp: (stamp) testing ($run.url)"
 }
 
-# The current tree's scenarios that name a pronto-flags flag, in their `flags` or a step's `flag`
-# (tests/scenarios/schema.cue), as cue evaluates them. A tree cue cannot evaluate fails here.
+# The current tree's scenarios whose feature production has off: each names a pronto-flags flag (in
+# its `flags` or a step's `flag`, tests/scenarios/schema.cue, as cue evaluates them), and every flag
+# it names is off in the live flags production reads (flags-off-in-production). A tree cue cannot
+# evaluate, or live flags that cannot be read, fail here.
 export def flagged-scenarios [dir: string]: nothing -> list<string> {
 	let all = (do { cd $dir; ^cue export ./tests/scenarios --expression scenarios --out json } | from json)
-	$all | transpose name s | where {|x|
-		(($x.s.flags? | default []) | is-not-empty) or (($x.s.steps? | default []) | any {|st| ($st.flag? | default "") != "" })
+	let named = ($all | transpose name s | each {|x|
+		{name: $x.name, flags: (($x.s.flags? | default []) | append (($x.s.steps? | default []) | each {|st| $st.flag? } | compact) | uniq)}
+	} | where {|x| $x.flags | is-not-empty })
+	if ($named | is-empty) { return [] }
+	let off = (flags-off-in-production $dir)
+	$named | where {|x| $x.flags | all {|f| $f in $off } } | get name
+}
+
+# The flags production has off for everyone: in the live flags document the app's flagsLive names
+# (flags_spec.cue: a bucket, or a dir), a flag enabled whose default variant is false and that has no
+# targeting (which could turn it on for someone). An app with no flagsLive has none known off.
+export def flags-off-in-production [dir: string]: nothing -> list<string> {
+	let r = (do { cd $dir; ^cue export . --expression flagsLive --out json } | complete)
+	if $r.exit_code != 0 { return [] }
+	let at = ($r.stdout | from json)
+	let text = if ($at.dir? | is-not-empty) {
+		let d = if ($at.dir | str starts-with "/") { $at.dir } else { $dir | path join $at.dir }
+		open --raw ($d | path join flags.json)
+	} else {
+		gc storage cat $"gs://($at.bucket)/($at.object? | default 'flags.json')" --project $at.project
+	}
+	let flags = ($text | from json | get -o flags | default {})
+	$flags | transpose name f | where {|x|
+		let variants = ($x.f.variants? | default {})
+		let default = ($x.f.defaultVariant? | default "")
+		($x.f.state? | default "ENABLED") == "ENABLED" and ($default in $variants) and (($variants | get $default) == false) and (($x.f.targeting? | default {}) | is-empty)
 	} | get name
 }
 
@@ -265,9 +290,10 @@ export def failed-sections [lines: list<string>]: nothing -> list<list<string>> 
 # new when every failure is a scenario absent from the last live release's tree; regression when one
 # was in it; unknown for anything else (a failure naming no scenario, a name the current tree does not
 # define, one the live tree mentions in a way the keys do not show, or a new one that names no
-# pronto-flags flag: a feature merges behind a flag, so a new scenario of no flag is no evidence of a
-# new feature, only of a new test). `sections` is the log of each failed unit; `flagged` the current
-# tree's scenarios that name a flag (in `flags` or a step's `flag`). When in doubt, not new.
+# flag that production has off: a feature merges behind a flag, off where the app is released, so only a
+# scenario of such a flag is evidence of a new feature, not a new test of a live one). `sections` is the
+# log of each failed unit; `flagged` the current tree's scenarios whose flags production has off
+# (flagged-scenarios). When in doubt, not new.
 export def classify-failures [sections: list<list<string>>, live_names: list<string>, live_text: string, current_names: list<string>, flagged: list<string>]: nothing -> record {
 	let named = ($sections | each {|s| failed-scenarios $s })
 	# A line marked failed that is not a scenario's (a stack, Premium, a summary) is another failure.
@@ -280,7 +306,7 @@ export def classify-failures [sections: list<list<string>>, live_names: list<str
 	let odd = ($all | where {|n| $n not-in $current_names or ($live_text =~ $"\(?:^|[^A-Za-z0-9_.-]\)($n | str replace -a '.' '\\.')\(?:[^A-Za-z0-9_.-]|$\)") })
 	if ($odd | is-not-empty) { return {verdict: "unknown", new: [], why: $"cannot be classified: ($odd | str join ', ')"} }
 	let unflagged = ($all | where {|n| $n not-in $flagged })
-	if ($unflagged | is-not-empty) { return {verdict: "unknown", new: [], why: $"new, but naming no flag: ($unflagged | str join ', ')"} }
+	if ($unflagged | is-not-empty) { return {verdict: "unknown", new: [], why: $"new, but naming no flag production has off: ($unflagged | str join ', ')"} }
 	{verdict: "new", new: $all, why: ""}
 }
 
