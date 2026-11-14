@@ -404,14 +404,14 @@ def map-domain [domain: string, service: string, project: string, region: string
 # given. Never less than the job, so what differs in any of them differs here.
 def job-hash [job_yaml: string]: nothing -> string { $job_yaml | hash sha256 | str substring 0..39 }
 
-# The job hash the live service was released with; null when there is none, the service is not
-# ready on its latest revision, or the read fails: then the job runs.
+# The job hash the live service was released with; null when there is no service or none is
+# labelled, or the service is not ready on its latest revision: then the job runs. A read that
+# fails otherwise (access, the network) fails the release, rather than run the job on a guess.
 def live-job-hash [plan: record]: nothing -> any {
-	try {
-		let live = (gc run services describe $plan.service --region $plan.region --project $plan.project --format json | from json)
-		if ($live.status?.latestReadyRevisionName? | is-empty) or $live.status.latestReadyRevisionName != $live.status.latestCreatedRevisionName { return null }
-		$live.spec?.template?.metadata?.labels?.pronto-job?
-	} catch { null }
+	if not (exists run services describe $plan.service --region $plan.region --project $plan.project) { return null }
+	let live = (gc run services describe $plan.service --region $plan.region --project $plan.project --format json | from json)
+	if ($live.status?.latestReadyRevisionName? | is-empty) or $live.status.latestReadyRevisionName != $live.status.latestCreatedRevisionName { return null }
+	$live.spec?.template?.metadata?.labels?.pronto-job?
 }
 
 # A job applied and run to its end; its logs are where a failure says why.
