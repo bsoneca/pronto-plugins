@@ -107,6 +107,7 @@ def main [] {
 	test_preflight_dry_runs_every_service_over_placeholder_digests
 	test_preflight_names_the_file_and_clouds_run_message
 	test_preflight_passes_a_sidecar_apart_whose_compose_sets_port
+	test_sql_flags_keep_cloud_sqls_least_slots_and_senders
 	print "\nAll release-gcp tests passed."
 }
 
@@ -325,6 +326,21 @@ def preflight-app [sidecar_env: string]: nothing -> string {
 	$"#!/bin/sh\necho '($compose | to json --raw)'\n" | save -f ($app | path join docker)
 	chmod +x ($app | path join docker)
 	$app
+}
+
+# Cloud SQL refuses fewer than 10 replication slots or WAL senders (studio's release, 2026-11-14:
+# "4 is not between 10 and 8192"); more replicas take more.
+def test_sql_flags_keep_cloud_sqls_least_slots_and_senders [] {
+	print "test one replica's database keeps Cloud SQL's least 10 slots and WAL senders, more replicas more..."
+	let app = (preflight-app '{"X": "1"}')
+	"wide: schema.#Build & {release: GCP & {maxScale: 5, sqlTier: \"db-custom-1-3840\"}}\n" | save -a ($app | path join release.cue)
+	let registry = ($env.CUE_REGISTRY? | default "github.com/bonisoft3/pronto=ghcr.io/bsoneca/cue-modules,github.com/bonisoft3/mecha=ghcr.io/bsoneca/cue-modules,registry.cue.works")
+	let res = (with-env {CUE_REGISTRY: $registry} { do { cd $app; ^cue export . --expression '[gcpRelease.plan.sqlFlags, wide.plan.sqlFlags]' --out json } | complete })
+	rm -r $app
+	assert equal $res.exit_code 0 $res.stderr
+	let flags = ($res.stdout | from json | each {|f| $f | split row "," | parse "{k}={v}" | transpose -r -d })
+	assert equal [$flags.0.max_replication_slots $flags.0.max_wal_senders $flags.0.max_connections] ["10" "10" "50"]
+	assert equal [$flags.1.max_replication_slots $flags.1.max_wal_senders] ["12" "12"]
 }
 
 def preflight-run [d: string, app: string]: nothing -> record {
