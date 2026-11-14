@@ -149,8 +149,11 @@ export def start-drivers [app_dir: string, plan: record]: nothing -> record {
 		# and that build's downloads fail on whatever third party is down then.
 		"docker compose --profile '*' config --format json | jq 'del(.services[].build)' >/workspace/run.json"
 		"drive() {"
-		"  docker compose -f /workspace/run.json --profile '*' run --name \"verify-$1\" --no-deps -e APP_URL=\"$APP_URL\" -e SHOTS=/shots \"$1\" >\"/workspace/logs/$1\" 2>&1 || true"
-		"  docker inspect -f '{{.State.ExitCode}}' \"verify-$1\" >\"/workspace/verdicts/$1\" 2>/dev/null || echo 1 >\"/workspace/verdicts/$1\""
+		# A pass is both: compose ran it to its end with success, and its container exited 0. A
+		# container made but never started also reads ExitCode 0, so neither alone is a pass.
+		"  if docker compose -f /workspace/run.json --profile '*' run --name \"verify-$1\" --no-deps -e APP_URL=\"$APP_URL\" -e SHOTS=/shots \"$1\" >\"/workspace/logs/$1\" 2>&1; then rc=0; else rc=$?; fi"
+		"  st=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' \"verify-$1\" 2>/dev/null || echo missing)"
+		"  if [ \"$rc\" = 0 ] && [ \"$st\" = 'exited 0' ]; then echo 0; else echo \"verify: $1 compose exit $rc, container $st\" >>\"/workspace/logs/$1\"; echo 1; fi >\"/workspace/verdicts/$1\""
 		"  docker cp \"verify-$1:/shots\" \"/workspace/shots/$1\" 2>/dev/null || true"
 		"  docker rm -f \"verify-$1\" >/dev/null 2>&1 || true"
 		"}"
