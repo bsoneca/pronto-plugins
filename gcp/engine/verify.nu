@@ -73,14 +73,15 @@ export def start-drivers [app_dir: string, plan: record]: nothing -> record {
 	}
 	let keys = if ($names | is-empty) { {} } else { image-keys $app_dir $compose (file-hashes $app_dir $"($work)/files") $"($builder) verify linux/amd64" $names }
 	# PRONTO_VERIFY_NO_DRIVER_CACHE=1 builds them all, as before.
-	let found = if ($env.PRONTO_VERIFY_NO_DRIVER_CACHE? | is-not-empty) { [] } else { (try {
+	# A driver not in the cache (exists: a 404) is built; any other failure to read it fails here.
+	let found = if ($env.PRONTO_VERIFY_NO_DRIVER_CACHE? | is-not-empty) { [] } else {
 		$names | par-each --keep-order {|d|
 			let at = $"($cache_repo)-($d):(key-tag ($keys | get $d))"
 			if (exists artifacts docker images describe $at) {
 				$"($d)=($cache_repo)-($d)@(gc artifacts docker images describe $at --format "value(image_summary.digest)" | str trim)"
 			}
 		} | compact
-	} catch { [] }) }
+	}
 	let pushed = ($names | each {|d| $"($d)=($cache_repo)-($d):(key-tag ($keys | get $d))" })
 	# The drivers a rehearsal job runs (GCP.rehearsal) are built and pushed here, but run in the job.
 	let rehearsal = ($plan.rehearsal? | default null)
@@ -215,6 +216,15 @@ export def go-drivers [run: record] {
 	print $"gcp: (stamp) testing ($run.url)"
 }
 
+# The current tree's scenarios that name a pronto-flags flag, in their `flags` or a step's `flag`
+# (tests/scenarios/schema.cue), as cue evaluates them. A tree cue cannot evaluate fails here.
+export def flagged-scenarios [dir: string]: nothing -> list<string> {
+	let all = (do { cd $dir; ^cue export ./tests/scenarios --expression scenarios --out json } | from json)
+	$all | transpose name s | where {|x|
+		(($x.s.flags? | default []) | is-not-empty) or (($x.s.steps? | default []) | any {|st| ($st.flag? | default "") != "" })
+	} | get name
+}
+
 # The scenarios a cue file text defines: the keys of `scenarios:` at the start of a line (tests/scenarios/*.cue).
 export def scenario-names [text: string]: nothing -> list<string> {
 	$text | parse -r '(?m)^scenarios:\s+"?(?<n>[A-Za-z0-9_.-]+)"?:' | each {|r| $r.n } | uniq
@@ -254,9 +264,11 @@ export def failed-sections [lines: list<string>]: nothing -> list<list<string>> 
 
 # new when every failure is a scenario absent from the last live release's tree; regression when one
 # was in it; unknown for anything else (a failure naming no scenario, a name the current tree does not
-# define, or one the live tree mentions in a way the keys do not show). `sections` is the log of each
-# failed unit. When in doubt, not new.
-export def classify-failures [sections: list<list<string>>, live_names: list<string>, live_text: string, current_names: list<string>]: nothing -> record {
+# define, one the live tree mentions in a way the keys do not show, or a new one that names no
+# pronto-flags flag: a feature merges behind a flag, so a new scenario of no flag is no evidence of a
+# new feature, only of a new test). `sections` is the log of each failed unit; `flagged` the current
+# tree's scenarios that name a flag (in `flags` or a step's `flag`). When in doubt, not new.
+export def classify-failures [sections: list<list<string>>, live_names: list<string>, live_text: string, current_names: list<string>, flagged: list<string>]: nothing -> record {
 	let named = ($sections | each {|s| failed-scenarios $s })
 	# A line marked failed that is not a scenario's (a stack, Premium, a summary) is another failure.
 	let marked = ($sections | flatten | where {|l| $l | str trim | str starts-with "✗" })
@@ -267,6 +279,8 @@ export def classify-failures [sections: list<list<string>>, live_names: list<str
 	if ($regressed | is-not-empty) { return {verdict: "regression", new: [], why: $"already in the live release: ($regressed | str join ', ')"} }
 	let odd = ($all | where {|n| $n not-in $current_names or ($live_text =~ $"\(?:^|[^A-Za-z0-9_.-]\)($n | str replace -a '.' '\\.')\(?:[^A-Za-z0-9_.-]|$\)") })
 	if ($odd | is-not-empty) { return {verdict: "unknown", new: [], why: $"cannot be classified: ($odd | str join ', ')"} }
+	let unflagged = ($all | where {|n| $n not-in $flagged })
+	if ($unflagged | is-not-empty) { return {verdict: "unknown", new: [], why: $"new, but naming no flag: ($unflagged | str join ', ')"} }
 	{verdict: "new", new: $all, why: ""}
 }
 
@@ -286,7 +300,7 @@ export def live-verdict [app: string, dir: string, sections: list<list<string>>]
 		let live_text = ($files | each {|f| ^git -C $dir show $"($commit):./($f)" } | str join "\n")
 		let current_text = (glob $"($dir)/tests/scenarios/*.cue" | each {|f| open --raw $f } | str join "\n")
 		let live_names = (scenario-names $live_text)
-		classify-failures $sections $live_names $live_text (scenario-names $current_text) | insert commit $commit | insert live_names $live_names
+		classify-failures $sections $live_names $live_text (scenario-names $current_text) (flagged-scenarios $dir) | insert commit $commit | insert live_names $live_names
 	} catch {|e| {verdict: "unknown", new: [], why: $e.msg, commit: null, live_names: []} }
 }
 
