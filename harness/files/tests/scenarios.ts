@@ -77,10 +77,10 @@ const hooks: Hooks = (await Deno.stat(hooksFile).catch(() => null)) ? (await imp
 // one actor at most, who reads anonymously with GET requests, and writes and buys nothing): where
 // FLAGS_TESTER is set, or APP_URL is flags_spec.cue's flagsLive.url, every scenario run must be one. Read
 // from the file, not exported, since CUE takes the app's whole package half a minute to load. An app with
-// no flags_spec.cue has no such address.
+// no flags_spec.cue, or one whose flags are released nowhere (no `flagsLive`, prontoweeper's), has no such address.
 const flagsSpec = await Deno.readTextFile(here("../flags_spec.cue")).catch(() => null);
 const liveUrl = flagsSpec?.match(/^flagsLive: url: "(https:\/\/[^"]+)"/m)?.[1];
-if (flagsSpec !== null && !liveUrl) throw new Error("flags_spec.cue names no flagsLive.url");
+if (flagsSpec !== null && /^flagsLive:/m.test(flagsSpec) && !liveUrl) throw new Error("flags_spec.cue names no flagsLive.url");
 const TESTER = Deno.env.get("FLAGS_TESTER");
 const onProduction = !!TESTER || (!!liveUrl && new URL(URL_).hostname === new URL(liveUrl).hostname);
 // Deployed: a dotted host that is not this machine's (a stack's door is localhost or a bare name).
