@@ -277,29 +277,32 @@ def set-up-project [plan: record] {
 	}
 }
 
-# The instance's postgres user given the password, through Cloud SQL's API with curl reading its
-# whole request (token and body) from a pipe: a secret never rides a command line, where any
-# process on the machine reads it (gcloud's --password and --root-password would put it there).
-def set-postgres-password [instance: string, project: string, password: string] {
+# A Google API called with a body that holds a secret: curl reads its whole request (token and
+# body) from a pipe, so neither rides a command line, where any process on the machine reads it
+# (gcloud's --password, --root-password and --headers would put them there). The answer's JSON.
+def call-api [method: string, url: string, body: record, what: string]: nothing -> any {
 	let token = (gc auth print-access-token | str trim)
 	let quote = {|v| $v | str replace --all '\' '\\' | str replace --all '"' '\"' }
 	let auth = (do $quote $"Authorization: Bearer ($token)")
-	let body = (do $quote ({name: "postgres", password: $password} | to json --raw))
-	let url = $"https://sqladmin.googleapis.com/v1/projects/($project)/instances/($instance)/users?name=postgres"
+	let data = (do $quote ($body | to json --raw))
 	let config = ([
 		$"url = \"($url)\""
-		'request = "PUT"'
+		$"request = \"($method)\""
 		$"header = \"($auth)\""
 		'header = "Content-Type: application/json"'
-		$"data = \"($body)\""
+		$"data = \"($data)\""
 	] | str join "\n")
 	let r = ($config | do { ^curl --silent --show-error --fail-with-body --config - } | complete)
-	if $r.exit_code != 0 {
-		error make {msg: $"the postgres user's password on ($instance) was not set: ($r.stdout | str trim) ($r.stderr | str trim)"}
-	}
+	if $r.exit_code != 0 { error make {msg: $"($what) failed: ($r.stdout | str trim) ($r.stderr | str trim)"} }
+	try { $r.stdout | from json } catch { null }
+}
+
+# The instance's postgres user given the password, through Cloud SQL's API.
+def set-postgres-password [instance: string, project: string, password: string] {
+	let url = $"https://sqladmin.googleapis.com/v1/projects/($project)/instances/($instance)/users?name=postgres"
+	let op = (call-api PUT $url {name: "postgres", password: $password} $"setting the postgres user's password on ($instance)")
 	# The API answers with an operation; the password holds once it is done.
-	let op = (try { $r.stdout | from json | get name } catch { "" })
-	if ($op | is-not-empty) { gc sql operations wait $op --project $project --timeout unlimited | ignore }
+	if ($op.name? | is-not-empty) { gc sql operations wait $op.name --project $project --timeout unlimited | ignore }
 }
 
 # What copies a tested preview's images into the release's registry: Google's
@@ -427,12 +430,21 @@ def run-job [file: string, name: string, what: string, project: string, region: 
 # token to check (mecha's services/ticker, the cloud clock), and the ticker
 # compares the bearer itself. No retry: the next minute recomputes the same.
 def ensure-clock [clock: record, token: string, project: string, region: string] {
-	let common = [--location $region --project $project --schedule $clock.schedule --time-zone Etc/UTC --uri $clock.uri --http-method POST --max-retry-attempts 0 --attempt-deadline 60s]
-	let header = $"Authorization=Bearer ($token)"
+	# Through Cloud Scheduler's API (call-api), since the job's header carries the service token.
+	let parent = $"projects/($project)/locations/($region)"
+	let job = {
+		name: $"($parent)/jobs/($clock.name)"
+		schedule: $clock.schedule
+		timeZone: "Etc/UTC"
+		httpTarget: {uri: $clock.uri, httpMethod: "POST", headers: {Authorization: $"Bearer ($token)"}}
+		retryConfig: {retryCount: 0}
+		attemptDeadline: "60s"
+	}
+	let api = "https://cloudscheduler.googleapis.com/v1"
 	if (exists scheduler jobs describe $clock.name --location $region --project $project) {
-		gc scheduler jobs update http $clock.name ...$common --update-headers $header | ignore
+		call-api PATCH $"($api)/($job.name)?updateMask=schedule,timeZone,httpTarget,retryConfig.retryCount,attemptDeadline" $job $"updating the clock ($clock.name)" | ignore
 	} else {
-		gc scheduler jobs create http $clock.name ...$common --headers $header | ignore
+		call-api POST $"($api)/($parent)/jobs" $job $"making the clock ($clock.name)" | ignore
 	}
 	# A job made just after the API is enabled can sit past its first slot
 	# until something runs it; running it once also pokes the new revision.
