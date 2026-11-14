@@ -26,7 +26,7 @@ other.
    its own, `Flag: <name>`, the flag declared in the app's `flags_spec.cue`. An objective that
    cannot merge within the day is split into issues, each filed, before it is Ready.
 3. **Start**: `pronto-devflow start . PRONTO-<n>`. It refuses while its lane is full, a P0
-   excepted: an `infra` issue takes an SRE's slot, any other an engineer's (devFlow.team). Then
+   excepted: a `design` issue takes an architect's slot (the pronto-architect skill), an `infra` issue an SRE's, any other an engineer's (devFlow.team). Then
    say which issues hold the lane's slots and stop.
 4. **Build** on a branch named `pronto-<n>/<slug>`, following the repository's AGENTS.md: behind
    the flag, tests as data, its gate.
@@ -60,7 +60,7 @@ other.
    while the board has work. Sprints run in an endless loop (the owner, 2026-11-10): when the
    current sprint has nothing left for you, you start the next sprint. Review holds no slot. In
    this order:
-   1. `pronto-devflow pull . [--lane SRE]` (engineer by default): it starts the lane's next Ready
+   1. `pronto-devflow pull . [--lane SRE|architect]` (engineer by default): it starts the lane's next Ready
       issue, the current sprint's first and then the next sprint's, most urgent first.
    2. Nothing Ready: take the most urgent issue still in Refine in your lane
       (`pronto-devflow status .`), the current sprint's first and then the next sprint's, that no

@@ -31,7 +31,7 @@ async function move(b: Conn, issue: Issue, event: string, why: string, flow: Dev
   // Where it ends: its flag's flip, or without a flag its release or merge (flow.js doneAt).
   const mods = modules ?? (await b.board.modulesByIssue(b.project)).get(issue.id) ?? [];
   // The rules reason in roles; the board knows the repository's names for its states.
-  const role = moveFor(event, roleOf(flow.roles, from), doneAt(flagOf(issue.description_html), mods, flow.infra));
+  const role = moveFor(event, roleOf(flow.roles, from), doneAt(flagOf(issue.description_html), mods, [...flow.infra, ...flow.design]));
   const to = role ? nameOf(flow.roles, role) : null;
   const key = `#${issue.sequence_id}`;
   if (!to) return `${key} stays ${from} (${event})`;
@@ -134,7 +134,7 @@ async function released(repo: string, app: string, commit: string, b: Conn, flow
   for (const { issue, modules } of await inStates(b, [flow.roles.merged, flow.roles.live])) {
     if (modules.length === 0 || !modules.includes(app)) continue;
     // Live waits only for a release that finishes it: a flagless bug fix (a flagged one waits for its flip).
-    if (issue.state !== (await stateIds(b)).id(flow.roles.merged) && doneAt(flagOf(issue.description_html), modules, flow.infra) !== "release") continue;
+    if (issue.state !== (await stateIds(b)).id(flow.roles.merged) && doneAt(flagOf(issue.description_html), modules, [...flow.infra, ...flow.design]) !== "release") continue;
     // The pull request that merged it: its merge commit is in what was released, or it waits.
     const prs = (await b.board.links(b.project, issue.id)).map((l) => l.url).filter((u) => /\/pull\/\d+$/.test(u));
     let held = false;

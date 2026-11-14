@@ -82,9 +82,10 @@ export function doneAt(flag, modules, infra, plugins = ["plugins"]) {
   return (modules ?? []).some((m) => own.includes(m)) ? "merge" : "release";
 }
 
-/** Whose slot an issue takes: an SRE's when one of its modules is an infra module, else an
- * engineer's. */
-export function laneOf(modules, infra) {
+/** Whose slot an issue takes: an architect's when one of its modules is a design module, an SRE's
+ * when one is an infra module, else an engineer's. */
+export function laneOf(modules, infra, design = []) {
+  if ((modules ?? []).some((m) => design.includes(m))) return "architect";
   return (modules ?? []).some((m) => (infra ?? []).includes(m)) ? "SRE" : "engineer";
 }
 
@@ -99,9 +100,9 @@ export function mayStart(busy, slots, priority, lane, urgent = "urgent") {
     : { ok: false, why: `all ${slots} ${lane} slots are busy` };
 }
 
-/** What a sprint may commit to, by lane: `perPerson` issues for each engineer and each SRE. */
+/** What a sprint may commit to, by lane: `perPerson` issues for each engineer, SRE and architect. */
 export function capacity(team, perPerson) {
-  return { engineer: (team?.engineers ?? 0) * perPerson, SRE: (team?.sre ?? 0) * perPerson };
+  return { engineer: (team?.engineers ?? 0) * perPerson, SRE: (team?.sre ?? 0) * perPerson, architect: (team?.architect ?? 0) * perPerson };
 }
 
 /** Whether a lane may plan `add` more issues when `planned` are in the sprint already, of `cap`. */

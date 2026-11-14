@@ -34,7 +34,7 @@ when the next sprint must be planned now.
       ones of the same theme.
    4. Value and age: what the owner filed first, among the rest.
    A need with no issue yet is filed first (`pronto-devflow file . --title "..." --app <app>`).
-3. **Fill it to capacity.** `sprint.perPerson` (3) for each engineer and each SRE: 12 app issues and
+3. **Fill it to capacity.** `sprint.perPerson` (3) for each engineer, SRE and architect: 12 app issues and
    3 `infra` issues for 4 engineers and 1 SRE. `next` refuses a plan past a lane's capacity. Keep
    each app's share by hand (2 on Bonk Chess, 2 on Studio). A lane with too few issues in the theme
    takes the most urgent of the rest, so no lane starts the sprint short.
@@ -51,7 +51,7 @@ when the next sprint must be planned now.
 
 ## The team
 
-The team is devFlow.team in devflow/devflow.cue (engineers, SREs, product managers). Change it
+The team is devFlow.team in devflow/devflow.cue (engineers, SREs, architects, product managers). Change it
 only when the owner asks; a change there is a pull request.
 
 ## Rules

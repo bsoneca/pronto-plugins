@@ -60,16 +60,20 @@ cases: {
 		{call: "devflow.mayStart", args: [1, 2, "high", "engineer"], expect: {ok: true, why: "engineer slot 2 of 2"}},
 		{call: "devflow.mayStart", args: [2, 2, "medium", "engineer"], expect: {ok: false, why: "all 2 engineer slots are busy"}},
 		{call: "devflow.mayStart", args: [0, 0, "high", "SRE"], expect: {ok: false, why: "the team has no SRE"}},
+		{call: "devflow.mayStart", args: [0, 1, "high", "architect"], expect: {ok: true, why: "architect slot 1 of 1"}},
+		{call: "devflow.mayStart", args: [1, 1, "medium", "architect"], expect: {ok: false, why: "all 1 architect slots are busy"}},
 		{call: "devflow.mayStart", args: [9, 2, "urgent", "engineer"]}, {pick: ["ok"], expect: [true]},
 	]}
 	"a sprint commits perPerson issues to each engineer and each SRE": {suite: "devflow", steps: [
-		{call: "devflow.capacity", args: [{engineers: 4, sre: 1}, 3], expect: {engineer: 12, SRE: 3}, why: "the user, 2026-11-08: 3 issues per engineer, 12 app issues and 3 infra issues"},
-		{call: "devflow.capacity", args: [{engineers: 2, sre: 0}, 3], expect: {engineer: 6, SRE: 0}},
+		{call: "devflow.capacity", args: [{engineers: 4, sre: 1}, 3], expect: {engineer: 12, SRE: 3, architect: 0}, why: "the user, 2026-11-08: 3 issues per engineer, 12 app issues and 3 infra issues"},
+		{call: "devflow.capacity", args: [{engineers: 2, sre: 0}, 3], expect: {engineer: 6, SRE: 0, architect: 0}},
+		{call: "devflow.capacity", args: [{engineers: 4, sre: 1, architect: 1}, 3], expect: {engineer: 12, SRE: 3, architect: 3}, why: "the owner, 2026-11-14: an architect seat, its own lane"},
 	]}
 	"next plans up to a lane's capacity and refuses past it": {suite: "devflow", steps: [
 		{call: "devflow.mayPlan", args: [0, 12, 12, "engineer"], expect: {ok: true, why: "engineer: 12 of 12 planned"}},
 		{call: "devflow.mayPlan", args: [10, 12, 3, "engineer"], expect: {ok: false, why: "engineer: 10 of 12 planned, 3 more is 1 over"}},
 		{call: "devflow.mayPlan", args: [3, 3, 1, "SRE"], expect: {ok: false, why: "SRE: 3 of 3 planned, 1 more is 1 over"}},
+		{call: "devflow.mayPlan", args: [3, 3, 1, "architect"], expect: {ok: false, why: "architect: 3 of 3 planned, 1 more is 1 over"}},
 		{call: "devflow.mayPlan", args: [0, 0, 1, "SRE"], expect: {ok: false, why: "the team has no SRE"}},
 		{call: "devflow.mayPlan", args: [3, 3, 0, "SRE"]}, {pick: ["ok"], expect: [true], why: "adding nothing is never over"},
 	]}
@@ -78,7 +82,11 @@ cases: {
 		{call: "devflow.pullNext", args: [[{key: "PRONTO-31", sequence: 31, priority: "medium"}, {key: "PRONTO-30", sequence: 30, priority: "medium"}]], expect: {key: "PRONTO-30", sequence: 30, priority: "medium"}},
 		{call: "devflow.pullNext", args: [[]], expect: null},
 	]}
-	"an infra module's issue is an SRE's, every other an engineer's": {suite: "devflow", steps: [
+	"a design module's issue is an architect's, an infra module's an SRE's, every other an engineer's": {suite: "devflow", steps: [
+		{call: "devflow.laneOf", args: [["design"], ["infra"], ["design"]], expect: "architect"},
+		{call: "devflow.laneOf", args: [["infra", "design"], ["infra"], ["design"]], expect: "architect", why: "design wins: an architect's issue ends in a doc, whatever it touches"},
+		{call: "devflow.laneOf", args: [["infra"], ["infra"], ["design"]], expect: "SRE"},
+		{call: "devflow.laneOf", args: [["brawl-chess"], ["infra"], ["design"]], expect: "engineer"},
 		{call: "devflow.laneOf", args: [["infra"], ["infra"]], expect: "SRE"},
 		{call: "devflow.laneOf", args: [["brawl-chess"], ["infra"]], expect: "engineer"},
 		{call: "devflow.laneOf", args: [[], ["infra"]], expect: "engineer"},
