@@ -771,15 +771,16 @@ export def poll-health [url: string, ok: list<string>, revision: any, --steady: 
 }
 
 # A sidecar apart rolled to a fresh instance, which reads the door of `revision` at its start:
-# its label pronto-door set to the revision's name. A roll that fails leaves the sidecar as it
-# was, and says so.
+# its label pronto-door set to the revision's name. A roll that fails fails the release: the
+# sidecar kept its instance, started before the switch, which may hold what the old release loaded
+# (a catalogue without the new release's keys), so the release is not reported live as it is.
 def roll-sidecar [plan: record, s: string, revision: string] {
 	let svc = ($plan.names.sidecarServices | get $s)
 	let t0 = (date now)
 	try {
 		gc run services update $svc --update-labels $"pronto-door=($revision)" --region $plan.region --project $plan.project | ignore
-		print $"gcp: (stamp) ($s) apart rolled to ($revision), ((date now) - $t0 | format duration sec)"
-	} catch {|e| print $"gcp: (stamp) ($s) apart kept its instance, started before the switch: ($e.msg)" }
+	} catch {|e| error make {msg: $"($s) apart kept its instance, started before the switch to ($revision): ($e.msg)"} }
+	print $"gcp: (stamp) ($s) apart rolled to ($revision), ((date now) - $t0 | format duration sec)"
 }
 
 # A staged release made live: its images tagged the release's (a gated one's, now that its
@@ -1038,11 +1039,14 @@ def local-gate [app_dir: string] {
 # apps, and an app's previews (pr-32), hold locks of their own.
 const LOCK_STALE = 10min
 
+# A preview's lock is in the project its preview deploys to (GCP.previewProject where the release
+# names one, as the schema's plan does), so a deployer of previews needs no access to production.
 def lock-of [cue_path: string, preview: string]: nothing -> record {
-	let g = (^cue export --expression "{p: GCP.project, n: GCP.name, r: GCP.region}" --out json $cue_path | from json)
+	let g = (^cue export --expression "{p: GCP.project, n: GCP.name, r: GCP.region, pp: [if GCP.previewProject != _|_ {GCP.previewProject}, GCP.project][0]}" --out json $cue_path | from json)
 	let key = if ($preview | is-empty) { $g.n } else { $"($g.n)-($preview)" }
-	let bucket = $"gs://($g.p)-release-locks"
-	{bucket: $bucket, object: $"($bucket)/($key)", key: $key, project: $g.p, region: $g.r}
+	let project = if ($preview | is-empty) { $g.p } else { $g.pp }
+	let bucket = $"gs://($project)-release-locks"
+	{bucket: $bucket, object: $"($bucket)/($key)", key: $key, project: $project, region: $g.r}
 }
 
 def take-lock [lock: record]: nothing -> any {
@@ -1174,6 +1178,11 @@ export def main [
 
 # The release main parsed its flags for, once it holds the app's lock.
 def release-body [app_info: record, preview: string, delete: bool, dry_run: bool, snapshot: bool, no_gate: bool, rollback: bool, force_rc: bool, no_local_gate: bool] {
+	# A rollback and a preview's deletion change the project as soon as they run: neither has a dry
+	# run or a snapshot, so the pair is refused before either reaches it.
+	if ($rollback or $delete) and ($dry_run or $snapshot) {
+		error make {msg: $"--(if $rollback { 'rollback' } else { 'delete' }) changes the project: it has no --dry-run or --snapshot"}
+	}
 	if $rollback { release-record note {rc: "skipped: --rollback"}; roll-back (plan-of $app_info.cue_path ""); return }
 	if $delete {
 		if ($preview | is-empty) { error make {msg: "--delete removes a preview: name it with --preview; a release is never deleted here"} }
