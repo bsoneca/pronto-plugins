@@ -40,18 +40,13 @@ Deno.test("no pronto app, or a path out of it, is refused", async () => {
   await Deno.remove(dir, { recursive: true });
 });
 
-Deno.test("a provider that fails settles none, reported, and never rejects", async () => {
+Deno.test("an unexpected failure rejects, and the next ask starts again", async () => {
   const g = globalThis as unknown as Record<string, unknown>;
-  const reported: unknown[] = [];
-  const dialog = { dataset: {}, style: {}, append() {}, setAttribute() {}, addEventListener() {}, remove() {}, close() {}, showModal() { throw new Error("provider down"); } };
-  g.document = { createElement: () => ({ ...dialog, showModal: dialog.showModal }), body: { append() {} } };
-  g.reportError = (e: unknown) => reported.push(e);
+  const dialog = { dataset: {}, style: {}, append() {}, setAttribute() {}, addEventListener() {}, remove() {}, close() {}, showModal() { throw new Error("dialog refused"); } };
+  g.document = { createElement: () => ({ ...dialog }), body: { append() {} } };
   const { rewarded } = await import(new URL("./app/ads.js", import.meta.url).href);
-  eq(await rewarded(), "none", "the failure is none, not a rejection");
-  eq(rewarded.reason, "provider down", "its reason");
-  eq(reported.length, 1, "reported once");
-  eq((reported[0] as Error).message, "provider down", "the error reported");
-  eq(await rewarded(), "none", "the next ask tries again, it is not stuck on the failure");
-  eq(reported.length, 2, "and reports again");
-  delete g.document; delete g.reportError;
+  const failed = async () => { try { await rewarded(); return null; } catch (e) { return (e as Error).message; } };
+  eq(await failed(), "dialog refused", "the failure propagates, it is not settled as none");
+  eq(await failed(), "dialog refused", "the next ask tries again: it is not stuck on the first failure");
+  delete g.document;
 });

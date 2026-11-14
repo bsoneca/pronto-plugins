@@ -1,9 +1,9 @@
 // pronto-ads in the page: a rewarded ad, which the player chooses to watch for something the app
 // gives in return, never one that interrupts them. rewarded() shows it and resolves "viewed" once
 // it played to its end, "dismissed" when it was closed before, "none" when there was no ad to
-// show, and "none" too when the provider failed: that is an expected outcome of an ad, so the
-// failure is reported (reportError, which error tracking sees) and kept in rewarded.reason, and the
-// promise never rejects. Here it is a stand-in that plays at a press, as billing's stand-in Stripe pays at one;
+// show. An unexpected failure is none of them: it rejects, after the failed ad is cleared away, so the
+// next ask starts again; a real provider's adapter maps its no-fill and network failures to "none".
+// Here it is a stand-in that plays at a press, as billing's stand-in Stripe pays at one;
 // Google's ads (the Ad Placement API, H5 Games Ads) take its place once the app names its AdSense
 // publisher and the door admits Google's scripts. Only the page sees an ad: Google's ads for the
 // web tell no server one was watched, so what a reward gives away the app's database bounds.
@@ -13,17 +13,14 @@ let showing = null;
 
 export function rewarded({ seconds = 5 } = {}) {
   if (showing) return showing;
-  rewarded.reason = '';
   showing = new Promise((settle) => {
     let ad = null, timer = null;
-    // A provider that fails: the dialog is cleared away, the failure reported, and the ad is "none".
+    // An unexpected failure clears the failed ad away and propagates: the promise rejects.
+    // `showing` is cleared once it has been assigned (a failure here is synchronous, before the assignment).
     const fail = (error) => {
       clearInterval(timer); ad?.remove();
-      // Cleared once `showing` has been assigned: a failure here is synchronous, before the assignment.
       queueMicrotask(() => { showing = null; });
-      rewarded.reason = String(error?.message ?? error);
-      reportError(error);
-      settle('none');
+      throw error;
     };
     try {
       ad = document.createElement('dialog');
@@ -54,4 +51,4 @@ export function rewarded({ seconds = 5 } = {}) {
   });
   return showing;
 }
-rewarded.reason = '';
+
