@@ -7,7 +7,7 @@
 const gcp_dir = path self .
 
 use std/assert
-use verify.nu [scenario-names failed-scenarios failed-sections classify-failures new-feature-excuse live-verdict]
+use verify.nu [scenario-names failed-scenarios failed-sections classify-failures new-feature-excuse live-verdict flagged-scenarios flags-off-in-production]
 use release-record.nu
 use build.nu [failure-message tag-action]
 
@@ -125,7 +125,31 @@ def checkout []: nothing -> record {
 	^git -C $app -c user.name=t -c user.email=t@t commit -q -m one
 	let commit = (^git -C $app rev-parse HEAD | str trim)
 	"package scenarios\nscenarios: seek_notify: flags: [\"notify\"]\n" | save -f ($app | path join tests scenarios seek_notify.cue)
+	# Production's live flags, in a directory store: `notify` off for everyone.
+	"package t\nflagsLive: dir: \"flagstore\"\n" | save -f ($app | path join flags_spec.cue)
+	live-flags $app {notify: (flag false)}
 	{dir: $d, app: $app, commit: $commit}
+}
+
+# A flagd flag whose default variant is `on`; `targeting` added when given.
+def flag [on: bool, targeting?: record]: nothing -> record {
+	let f = {state: "ENABLED", variants: {on: true, off: false}, defaultVariant: (if $on { "on" } else { "off" })}
+	if $targeting == null { $f } else { $f | insert targeting $targeting }
+}
+
+def live-flags [app: string, flags: record] {
+	mkdir ($app | path join flagstore)
+	{flags: $flags} | to json | save -f ($app | path join flagstore flags.json)
+}
+
+def test_only_a_flag_off_for_everyone_in_production_is_off [] {
+	let c = (checkout)
+	live-flags $c.app {notify: (flag false), live: (flag true), testers: (flag false {if: [{in: [{var: "targetingKey"}, ["a"]]}, "on", "off"]})}
+	assert equal (flags-off-in-production $c.app) [notify]
+	assert equal (flagged-scenarios $c.app) [seek_notify]
+	live-flags $c.app {notify: (flag true)}
+	assert equal (flagged-scenarios $c.app) []
+	rm -r $c.dir
 }
 
 def with-record [c: record, dirty: bool, body: closure] {
