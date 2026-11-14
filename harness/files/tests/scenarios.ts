@@ -785,18 +785,24 @@ export class Run {
   }
 
   // Waits until the field has no `inert` ancestor, in its own frame and up through the frames that hold it
-  // (a preview is a frame of the page): an observable state, with no retry and no longer timeout.
-  async live(p: Page, loc: Locator, ms: number): Promise<Locator> {
-    const h = (await loc.first().elementHandle({ timeout: ms }))!;
-    const frame = (await h.ownerFrame()) ?? p.mainFrame();
-    await frame.waitForFunction((el) => {
-      for (let e: Element | null = el as Element, w: Window = window; e;) {
-        if (e.closest("[inert]")) return false;
-        try { e = w.frameElement; w = w.parent; } catch { return true; }
-      }
-      return true;
-    }, h, { timeout: ms });
-    return loc;
+  // (a preview is a frame of the page): an observable state, with no retry and no longer timeout. The
+  // selector is asked again each time, as a click asks it: a page may keep a leaving copy of what it
+  // redraws (a card drawn from the stock, inert while it goes), and the live one is the one meant.
+  async live(_p: Page, loc: Locator, ms: number): Promise<Locator> {
+    const end = Date.now() + ms;
+    for (let held = "";;) {
+      held = await loc.first().evaluate((el) => {
+        for (let e: Element | null = el as Element, w: Window = window; e;) {
+          const i = e.closest("[inert]");
+          if (i) return `${i.localName}${i.id ? "#" + i.id : ""}.${i.className} ${i.outerHTML.slice(0, 160)}`;
+          try { e = w.frameElement; w = w.parent; } catch { return ""; }
+        }
+        return "";
+      }, undefined, { timeout: Math.max(1, end - Date.now()) }).catch((e) => `not there: ${(e as Error).message.split("\n")[0]}`);
+      if (held === "") return loc;
+      if (Date.now() > end) throw new Error(`never live after ${ms / 1000}s, held by ${held}`);
+      await sleep(0.1);
+    }
   }
   async http(st: Step, a: Actor | null, t: number) {
     const h = st.http, path = await this.fill(h.path);
