@@ -35,7 +35,7 @@ type Screen = { viewport?: { width: number; height: number }; device?: string };
 type Spec = {
   parallel: number;
   deployedParallel: number;
-  flakes: { app?: string; priority: string; file: string[] };
+  flakes: { app?: string; priority: string; file: string[]; retry: boolean };
   screen: Screen;
   screens?: Record<string, Screen>;
   locale: string;
@@ -891,8 +891,8 @@ export class Run {
 }
 
 // At most `parallel` scenarios at once, the longest first, so the short ones fill in beside it.
-// ONLY names some of them, comma-separated. RETRY_FAILED (the rehearsal's, tests/rehearse.ts), and
-// always against a deployed app (the rc's verify, which has no rehearsal around it to retry): a
+// ONLY names some of them, comma-separated. Where the app asks for it (schema.cue's `flakes.retry`), with
+// RETRY_FAILED (the rehearsal's, tests/rehearse.ts), and always against a deployed app (the rc's verify, which has no rehearsal around it to retry): a
 // scenario that fails runs again once, at once, beside those still running, and passes if that
 // passes ("⚠ <id> flaked"); its retry overlaps the pass instead of following it. Its first failure
 // is printed indented, so only a scenario that failed twice has a "✗ <id> (" line.
@@ -925,7 +925,7 @@ const shared = Deno.env.get("SCENARIOS_QUEUE");
 const take = (id: string) => { if (!shared) return true; try { Deno.mkdirSync(`${shared}/${id}`, { recursive: false }); return true; } catch { return false; } };
 const ran: string[] = [];
 const failed: string[] = [];
-const retry = !!Deno.env.get("RETRY_FAILED") || isDeployed;
+const retry = spec.flakes.retry && (!!Deno.env.get("RETRY_FAILED") || isDeployed);
 const t0 = Date.now();
 if (slow) console.log(`scenarios: ${gate ? "the scenarios marked slow" : "every scenario"}, every page with ${slow}`);
 await Promise.all(Array.from({ length: Math.min(isDeployed ? spec.deployedParallel : spec.parallel, queue.length) }, async () => {
