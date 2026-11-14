@@ -19,6 +19,9 @@ use build.nu [builder stamp exists key-tag file-hashes image-keys shown-args]
 
 # What uploads the drivers' screenshots: Google's own gsutil builder, by digest, so every run
 # uploads with the same bytes.
+# jq for the drivers' script, pinned by digest (jq's own image, whose entrypoint is jq): run through
+# the build step's docker, so every run of a tree reads compose with the same jq.
+const jq_image = "ghcr.io/jqlang/jq:1.7.1@sha256:096b83865ad59b5b02841f103f83f45c51318394331bf1995e187ea3be937432"
 const uploader = "gcr.io/cloud-builders/gsutil@sha256:35117f56523ca26ec3515da9c4cdbc835870a36a87590f5389e2df838d3d3d90"
 
 def --wrapped gc [...args] {
@@ -91,7 +94,7 @@ export def start-drivers [app_dir: string, plan: record]: nothing -> record {
 	if ($found | is-not-empty) { print $"gcp: (stamp) the drivers ($found | each {|f| $f | split row '=' | first } | str join ', ') are unchanged since they were last built: pulling them" }
 	let script = ([
 		"set -eu"
-		"apk add --no-cache jq >/dev/null"
+		$"jq\(\) { docker run --rm -i ($jq_image) \"$@\"; }"
 		"drivers=$(docker compose --profile '*' config --format json | jq -r '.services | to_entries[] | select(.value.environment.APP_URL != null and (.value.scale // 1) != 0) | .key' | sort)"
 		"[ -n \"$drivers\" ] || { echo 'verify: no service of the app reads APP_URL' >&2; exit 1; }"
 		"echo \"verify: building $(echo $drivers)\""
