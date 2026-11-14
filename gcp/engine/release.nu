@@ -1174,7 +1174,14 @@ def take-lock [lock: record]: nothing -> any {
 def drop-lock [lock: record] {
 	if ($lock.beat? | is-not-empty) { try { job kill $lock.beat } }
 	let r = (do { ^gcloud --quiet storage rm $lock.object $"--if-generation-match=($lock.generation)" --project $lock.project } | complete)
-	if $r.exit_code == 0 { print $"gcp: (stamp) ($lock.key)'s release lock let go" } else { print $"gcp: (stamp) ($lock.key)'s release lock was not let go: ($r.stderr | str trim | lines | last)" }
+	if $r.exit_code == 0 { print $"gcp: (stamp) ($lock.key)'s release lock let go"; return }
+	let why = ($r.stderr | str trim | lines | last | default "")
+	# Gone, or taken over by another release since (a new generation): not this release's to let go.
+	if ($r.stderr =~ '(?i)404|not found|no urls matched|412|pre-?condition') {
+		print $"gcp: (stamp) ($lock.key)'s release lock was no longer this release's: ($why)"
+		return
+	}
+	error make {msg: $"($lock.key)'s release lock \(($lock.object)\) was not let go, so the next release waits until nothing touched it for ($LOCK_STALE): ($why)"}
 }
 
 export def main [
@@ -1254,7 +1261,8 @@ export def main [
 		release-body $app_info $preview $delete $dry_run $snapshot $no_gate $rollback $force_rc $no_local_gate
 		null
 	} catch {|e| (failure-message $e) })
-	if $lock != null { drop-lock $lock }
+	let unlocked = if $lock != null { try { drop-lock $lock; null } catch {|e| (failure-message $e) } }
+	let failure = ([$failure $unlocked] | compact | str join "\n" | if ($in | is-empty) { null } else { $in })
 	do $record (if $failure != null { "failed" } else if $rollback { "rolled-back" } else { "live" }) $failure
 	if $failure != null { error make {msg: $failure} }
 }
@@ -1307,8 +1315,9 @@ def release-body [app_info: record, preview: string, delete: bool, dry_run: bool
 	# so production holds it too while the gate uses it.
 	let rc_lock = (take-lock (lock-of $app_info.cue_path $rc))
 	let outcome = (try { rc-gated $app_info $rc $local $deploy_key $rehearsal; null } catch {|e| (failure-message $e) })
-	drop-lock $rc_lock
-	if $outcome != null { error make {msg: $outcome} }
+	let unlocked = (try { drop-lock $rc_lock; null } catch {|e| (failure-message $e) })
+	let outcome = ([$outcome $unlocked] | compact | str join "\n")
+	if ($outcome | is-not-empty) { error make {msg: $outcome} }
 }
 
 # The release behind the rc preview, while it holds the preview's lock.
