@@ -1,0 +1,1 @@
+../harness/files/tests/slot.ts

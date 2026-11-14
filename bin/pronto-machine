@@ -1,0 +1,15 @@
+#!/bin/sh
+# The machine budget (machine/README.md): what one Mac holds so that every app's specs, stacks and
+# gates share it, installed once per machine and again after a change in machine/.
+#   bin/pronto-machine install          the cue wrapper (memory and cores from the slot pool, only
+#                                       what changed vetted or exported) and its watchdog
+#   bin/pronto-machine remove           takes that out again
+#   sudo bin/pronto-machine shm [--remove]   System V shared memory for many postgres clusters
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+case "${1:-}" in
+	install) shift; exec sh "$here/machine/install.sh" "$@" ;;
+	remove) shift; exec sh "$here/machine/install.sh" --remove "$@" ;;
+	shm) shift; exec sh "$here/machine/sysv-shm.sh" "$@" ;;
+	*) echo "usage: pronto-machine install|remove|shm [--remove]" >&2; exit 2 ;;
+esac
