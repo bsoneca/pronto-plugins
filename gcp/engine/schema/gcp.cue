@@ -92,9 +92,11 @@ import (
 	// the schema job, and a bound on the WAL a hung but connected replica retains (MB;
 	// the disk is 10 GB).
 	// At 1 it stays the 50 connections every app's smallest-tier instance has (what that tier
-	// holds), with four slots and WAL senders.
+	// holds). Cloud SQL refuses fewer than 10 slots or WAL senders ("4 is not between 10 and
+	// 8192"), so a small app gets 10 of each, which it never fills.
 	_connections:     [if R._replicas == 1 {50}, (#Pools.crud+R.electric.pool+#PerInstanceExtra)*2*R._replicas + 10][0]
-	_replicaSqlFlags: "cloudsql.logical_decoding=on,max_connections=\(_connections),max_replication_slots=\(2*R._replicas+2),max_wal_senders=\(2*R._replicas+2),max_slot_wal_keep_size=1024"
+	_walSenders:      list.Max([#CloudSqlMinSenders, 2*R._replicas + 2])
+	_replicaSqlFlags: "cloudsql.logical_decoding=on,max_connections=\(_connections),max_replication_slots=\(_walSenders),max_wal_senders=\(_walSenders),max_slot_wal_keep_size=1024"
 
 	// Electric's share of the instance. Its memory holds every shape it keeps
 	// (its storage is the instance's /tmp, which Cloud Run keeps in memory), so
@@ -368,6 +370,8 @@ import (
 // wal_sender_timeout cut it, and its live requests hung until the tests failed (seen five times
 // on Bonk Chess's preview, never on its release). A preview's database waits five minutes.
 // Only a preview's: a release's database would restart for the flag.
+// The least max_replication_slots and max_wal_senders Cloud SQL for PostgreSQL takes.
+#CloudSqlMinSenders: 10
 #PreviewSqlFlags: ",wal_sender_timeout=300000"
 
 // Google Cloud Managed Service for Prometheus's collector for Cloud Run, pinned.
