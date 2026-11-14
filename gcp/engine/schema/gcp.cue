@@ -79,10 +79,11 @@ import (
 	// Instances kept at rest, so a visit after a quiet spell does not wait for a
 	// cold start; at most maxScale. A preview keeps none.
 	minScale: *0 | int & >=0 & <=R.maxScale
-	// Instances at most. Past 1, each runs its own electric on a temporary replication
-	// slot of a random name (so none waits for another's advisory lock, keyed on the
-	// slot name) beside the shared publication, and a client's requests stay on one
-	// instance (session affinity), the one holding its shapes. A preview keeps 1.
+	// Instances at most. Each runs its own electric on a temporary replication slot of a
+	// random name (so none waits for another's advisory lock, keyed on the slot name, not
+	// even a rollout's new revision beside the old one at 1) beside the shared publication,
+	// and past 1 a client's requests stay on one instance (session affinity), the one
+	// holding its shapes. A preview keeps 1.
 	maxScale: *1 | int & >=1
 	// maxScale as the release runs it.
 	_replicas: [if R.preview != _|_ {1}, R.maxScale][0]
@@ -90,8 +91,9 @@ import (
 	// new instances and the admin's, the connections of every instance of both and of
 	// the schema job, and a bound on the WAL a hung but connected replica retains (MB;
 	// the disk is 10 GB).
-	_connections:     (#Pools.crud+R.electric.pool+#PerInstanceExtra)*2*R.maxScale + 10
-	_replicaSqlFlags: "cloudsql.logical_decoding=on,max_connections=\(_connections),max_replication_slots=\(2*R.maxScale+2),max_wal_senders=\(2*R.maxScale+2),max_slot_wal_keep_size=1024"
+	// At 1 that is 50 connections, the smallest tier's raised limit, and four slots.
+	_connections:     (#Pools.crud+R.electric.pool+#PerInstanceExtra)*2*R._replicas + 10
+	_replicaSqlFlags: "cloudsql.logical_decoding=on,max_connections=\(_connections),max_replication_slots=\(2*R._replicas+2),max_wal_senders=\(2*R._replicas+2),max_slot_wal_keep_size=1024"
 
 	// Electric's share of the instance. Its memory holds every shape it keeps
 	// (its storage is the instance's /tmp, which Cloud Run keeps in memory), so
@@ -359,14 +361,13 @@ import (
 // An instance's other connections: auth's pool, electric's replication and lock, and
 // the proxy's margin.
 #PerInstanceExtra: 10
-#SqlFlags:         "cloudsql.logical_decoding=on,max_connections=50"
 
 // A preview's database is the smallest tier and its tests open every shape at once: electric
 // fell behind the replication stream there for over a minute, Postgres's default
 // wal_sender_timeout cut it, and its live requests hung until the tests failed (seen five times
 // on Bonk Chess's preview, never on its release). A preview's database waits five minutes.
 // Only a preview's: a release's database would restart for the flag.
-#PreviewSqlFlags: #SqlFlags + ",wal_sender_timeout=300000"
+#PreviewSqlFlags: ",wal_sender_timeout=300000"
 
 // Google Cloud Managed Service for Prometheus's collector for Cloud Run, pinned.
 #Gmp: "us-docker.pkg.dev/cloud-ops-agents-artifacts/cloud-run-gmp-sidecar/cloud-run-gmp-sidecar:1.9.4@sha256:8f8ac35f4bc82aa9547b1458343acb79b2594b35b56fb4c13dbe62c1f5a64679"
@@ -516,9 +517,12 @@ import (
 						{name: "ELECTRIC_STORAGE_DIR", value: "/tmp/electric"},
 						// Electric 1.8.1 names the slot and the lock behind it by the stream id, shared
 						// by every instance; a temporary slot of a random name is the instance's own,
-						// dropped with its connection. The publication keeps the default stream's.
-						if R._replicas > 1 {{name: "CLEANUP_REPLICATION_SLOTS_ON_SHUTDOWN", value: "true"}},
-						if R._replicas > 1 {{name: "ELECTRIC_TEMPORARY_REPLICATION_SLOT_USE_RANDOM_NAME", value: "true"}},
+						// dropped with its connection, so a rollout's new revision streams beside the
+						// old one instead of waiting for it to exit. The publication keeps the default
+						// stream's. The permanent slot an earlier release's electric held is dropped by
+						// the schema job once inactive (job), and bounded meanwhile (max_slot_wal_keep_size).
+						{name: "CLEANUP_REPLICATION_SLOTS_ON_SHUTDOWN", value: "true"},
+						{name: "ELECTRIC_TEMPORARY_REPLICATION_SLOT_USE_RANDOM_NAME", value: "true"},
 					]
 					resources: limits: {cpu: "\(R.electric.cpu)m", memory: R.electric.memory}
 					startupProbe: {httpGet: {path: "/v1/health", port: P.electric}, periodSeconds: 2, failureThreshold: 90}
@@ -808,6 +812,12 @@ import (
 							# bypasses; BYPASSRLS gives it that back. Sessions that switch
 							# roles still meet every policy.
 							psql -v ON_ERROR_STOP=1 -XqAc "ALTER ROLE postgres BYPASSRLS"
+							# Every electric streams on a temporary slot (CLEANUP_REPLICATION_SLOTS_ON_SHUTDOWN),
+							# so a permanent electric slot no connection holds is one an earlier release's electric
+							# left: it would keep WAL until max_slot_wal_keep_size, so it is dropped. Dropping
+							# a slot takes REPLICATION, which Cloud SQL's postgres may give itself.
+							psql -v ON_ERROR_STOP=1 -XqAc "ALTER ROLE postgres REPLICATION"
+							psql -v ON_ERROR_STOP=1 -XtAc "SELECT 'initdb: dropping the idle slot ' || slot_name, pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name LIKE 'electric\\_slot\\_%' AND NOT temporary AND NOT active AND database = current_database()"
 							""" + [if R.migrate != _|_ {"\n# Then the pgroll migrations the schema initdb built lacks, which pgroll records itself.\nunset PGOPTIONS\nexec \(strings.Join([for a in R.migrate.command {strconv.Quote(a)}], " "))\n"}, ""][0]]
 						env: list.Concat([initdbEnv, [if R.migrate != _|_ for e in list.Concat([
 							[(secretOf & {env: "DATABASE_URL", secret: sq.MIGRATE_DATABASE_URL}).out],
@@ -876,7 +886,7 @@ import (
 		if R.preview != _|_ {preview: R.preview}
 		names:   R.names
 		sqlTier: R.sqlTier
-		sqlFlags: [if R.preview != _|_ {#PreviewSqlFlags}, if R._replicas > 1 {R._replicaSqlFlags}, #SqlFlags][0]
+		sqlFlags: R._replicaSqlFlags + [if R.preview != _|_ {#PreviewSqlFlags}, ""][0]
 		minScale: R.minScale
 		if R._replicas > 1 && (R.sqlTier == "db-f1-micro" || R.sqlTier == "db-g1-small") {
 			sqlTier: error("maxScale \(R.maxScale) needs a database above the shared-core tiers (\(R.sqlTier) has 614 MiB or 1.7 GiB): \(R.maxScale+1) to \(2*R.maxScale+2) WAL senders decoding and about \(R._connections) connections do not fit; give sqlTier such as db-custom-1-3840")
