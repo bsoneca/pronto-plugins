@@ -503,24 +503,24 @@ _wif: #Plan & {
 	backend: _plan.backend
 	state: projects: "example-project-123": {
 		billing: "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
-		workloadIdentityPools: contabo: {
-			displayName: "Contabo"
+		workloadIdentityPools: node: {
+			displayName: "Node"
 			providers: "k3s-oidc": {
 				issuer: "https://kubernetes.default.svc.cluster.local"
 				jwks:   "{\"keys\":[]}"
-				allowedAudiences: ["contabo-k3s"]
+				allowedAudiences: ["node-k3s"]
 				mapping: "google.subject": "assertion.sub"
 			}
 		}
-		adopt: workloadIdentityPools: ["contabo"]
+		adopt: workloadIdentityPools: ["node"]
 	}
 }
 _wi: _wif.tofu.resource
-wifPool: _wi.google_iam_workload_identity_pool.example_project_123_contabo & {workload_identity_pool_id: "contabo", display_name: "Contabo"}
-wifProvider: _wi.google_iam_workload_identity_pool_provider.example_project_123_contabo_k3s_oidc & {
+wifPool: _wi.google_iam_workload_identity_pool.example_project_123_node & {workload_identity_pool_id: "node", display_name: "Node"}
+wifProvider: _wi.google_iam_workload_identity_pool_provider.example_project_123_node_k3s_oidc & {
 	workload_identity_pool_provider_id: "k3s-oidc"
 	attribute_mapping: "google.subject": "assertion.sub"
-	oidc: {issuer_uri: "https://kubernetes.default.svc.cluster.local", allowed_audiences: ["contabo-k3s"], jwks_json: "{\"keys\":[]}"}
+	oidc: {issuer_uri: "https://kubernetes.default.svc.cluster.local", allowed_audiences: ["node-k3s"], jwks_json: "{\"keys\":[]}"}
 }
 wifNeverImported: [for i in _wif.tofu.import if strings.Contains(i.to, "workload_identity") {i}] & []
 // A provider without a subject mapping or a https issuer is refused.

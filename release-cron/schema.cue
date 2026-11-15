@@ -23,14 +23,14 @@ releaseCron: #Cron
 	watch: [...string]
 	// Where the app is released. `cloud-run` (the default, no target named): release.cue's GCP, `./saytw release@gcp`
 	// and Cloud Run's traffic. `command`: an app released elsewhere (aprende, on Cloudflare Pages, with no release.cue;
-	// Bonk Chess, on the Contabo node): the command that releases the checked-out tree and the one that prints the
+	// Bonk Chess, on a k3s node): the command that releases the checked-out tree and the one that prints the
 	// commit production serves, both run in the app's folder, and the address the probes ask. A target that names no
 	// `kind` is a command's.
 	target: *#CloudRun | #Command
 	// What the rehearsal is, run before the release on the tree it releases. `command` is run in the app's folder
 	// (its exit says pass or fail; null: no rehearsal, the release follows the schedule alone) and, with `slot`, the
 	// run waits until it holds a slot of the machine's pool (tests/slot.ts) whose owner line is `holder`: the `what` the
-	// app's rehearsal claims its main slot as. The Ume apps' verify@local runs generate, lint and test, then
+	// app's rehearsal claims its main slot as. An app's verify@local may run generate, lint and test, then
 	// `./saytw integrate@local`, which claims it. `slot: false` runs it without waiting for a slot. GCP.rehearsal (the
 	// cloud's) replaces it. The top-level `holder` below is still read, as rehearsal.holder.
 	rehearsal: {

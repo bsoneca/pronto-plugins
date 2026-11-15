@@ -44,10 +44,10 @@ The hooks, which run without a person:
 
 A flagless issue is never left in Live: the release that holds its pull request finishes it. `pronto-flags rollback` tells the board too (`rolledback` for each flag it turned off).
 
-Another repository whose pull requests carry the same board's keys (bsoneca/ume's, and pronto-plugins', omnishell-fork's and pronto-fork's own, on bsoneca/pronto's board) calls the board's one workflow, [`devflow-board.yml`](../.github/workflows/devflow-board.yml), from a short `plane.yml` of its own (its header shows the caller), with its own `PLANE_TOKEN` secret, and a `devflow/devflow.cue` that names the board (`board`, or its earlier name `plane`) and its token (`token`) alone, with no `cluster`: the board is set up from one repository; `connect plane` there installs nothing and checks the board answers.
+Another repository whose pull requests carry the same board's keys (several repositories may share one board) calls the board's one workflow, [`devflow-board.yml`](../.github/workflows/devflow-board.yml), from a short `plane.yml` of its own (its header shows the caller), with its own `PLANE_TOKEN` secret, and a `devflow/devflow.cue` that names the board (`board`, or its earlier name `plane`) and its token (`token`) alone, with no `cluster`: the board is set up from one repository; `connect plane` there installs nothing and checks the board answers.
 
 A hook never fails a release or a flip: without a token or a board it says so and goes on.
 
 ## Tests
 
-The `devflow` suite: `deno test --allow-read --allow-env --allow-run tests/unit.ts -- devflow`. [`tests.cue`](tests.cue) holds the schema to what a repository may write (`cue vet -c=false ./devflow`): an existing board with no cluster, an env token, custom states and roles (a role naming a missing state refused), the earlier `plane` and token shapes, and bsoneca/pronto's own `devflow.cue` under the new fields.
+The `devflow` suite: `deno test --allow-read --allow-env --allow-run tests/unit.ts -- devflow`. [`tests.cue`](tests.cue) holds the schema to what a repository may write (`cue vet -c=false ./devflow`): an existing board with no cluster, an env token, custom states and roles (a role naming a missing state refused), the earlier `plane` and token shapes, and a repository's earlier `devflow.cue` under the new fields.

@@ -3,7 +3,7 @@
 use std/assert
 use ../metal.nu
 
-let dashes = [{app: "bonk-chess", name: "business", folder: "Bonk Chess", text: "{\"uid\": \"b\"}"} {app: "ume", name: "journeys", folder: "Ume", text: "{}"}]
+let dashes = [{app: "bonk-chess", name: "business", folder: "Bonk Chess", text: "{\"uid\": \"b\"}"} {app: "shop", name: "journeys", folder: "Shop", text: "{}"}]
 let users = {"b@example.com": "Viewer", "a@example.com": "Admin"}
 let docs = (metal manifests --grafana-domain metrics.example.com --umami-domain umami.example.com --users $users --dashboards $dashes | split row "---\n" | each { from yaml })
 let named = {|k, n| $docs | where kind == $k and metadata.name == $n | first }
@@ -29,7 +29,7 @@ assert equal ($prov."datasources.yaml" | from yaml).deleteDatasources [{name: "G
 # The node's logs (PRONTO-158): VictoriaLogs through its plugin, which Grafana installs at start.
 let vl = ($prov."datasources.yaml" | from yaml).datasources | where uid == "victorialogs" | first
 assert equal [$vl.type $vl.url] ["victoriametrics-logs-datasource" "http://victoria-logs.logs.svc.cluster.local:9428"]
-assert equal (($prov."dashboards.yaml" | from yaml).providers | select name folder) [[name folder]; [bonk-chess "Bonk Chess"] [ume Ume]]
+assert equal (($prov."dashboards.yaml" | from yaml).providers | select name folder) [[name folder]; [bonk-chess "Bonk Chess"] [shop Shop]]
 assert equal (do $named ConfigMap grafana-dashboards-bonk-chess-business).data."business.json" "{\"uid\": \"b\"}"
 let g = (do $named Deployment grafana).spec.template.spec
 let ge = ($g.containers.0.env | reduce -f {} {|e, acc| $acc | merge {($e.name): (if "value" in $e { $e.value } else { $e.valueFrom })} })
@@ -38,7 +38,7 @@ assert equal $ge.GF_AUTH_GOOGLE_ROLE_ATTRIBUTE_STRICT "true"
 assert equal $ge.GF_AUTH_DISABLE_LOGIN_FORM "true"
 assert equal $ge.GF_SECURITY_SECRET_KEY {secretKeyRef: {name: grafana, key: GF_SECURITY_SECRET_KEY}}
 assert equal $ge.GF_DATABASE_PASSWORD {secretKeyRef: {name: grafana-db, key: password}}
-assert ($g.containers.0.volumeMounts | any {|m| $m.mountPath == "/dashboards/ume/journeys.json" }) "a dashboard is where its provider reads"
+assert ($g.containers.0.volumeMounts | any {|m| $m.mountPath == "/dashboards/shop/journeys.json" }) "a dashboard is where its provider reads"
 
 # A changed dashboard is a new pod.
 let other = (metal manifests --grafana-domain metrics.example.com --umami-domain umami.example.com --users $users --dashboards ($dashes | update 0.text "{}") | split row "---\n" | each { from yaml } | where kind == Deployment and metadata.name == grafana | first)

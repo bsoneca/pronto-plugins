@@ -21,7 +21,7 @@ devFlow: #DevFlow
 	// Where Plane runs, when this repository installs it: a k3s node reached over SSH, its door a Cloudflare Tunnel into the node's
 	// Envoy Gateway, as pronto's release@k8s sets every node up (envs.Metal). Only the repository
 	// the board is set up from names it: another repository whose pull requests move the same
-	// board's issues (bsoneca/ume's, on bsoneca/pronto's board) names the board and its token alone,
+	// board's issues names the board and its token alone,
 	// and its hooks run. With no cluster, `connect plane` installs nothing: it checks that the
 	// board's host answers and that the token signs in, then makes the project, its states, its
 	// modules and its labels.

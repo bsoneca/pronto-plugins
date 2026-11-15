@@ -1,7 +1,7 @@
 # The operator's analytics on a cluster the operator runs (pronto's envs.Metal: k3s on a node reached
 # over SSH, its traffic arriving through the node's Cloudflare Tunnel to Envoy Gateway), beside
 # pronto's infra/gcp Cloud Run services of the same names:
-#   bin/pronto-analytics metal --ssh bruno@node --grafana-domain G --umami-domain U --project P \
+#   bin/pronto-analytics metal --ssh user@node --kubeconfig K --grafana-domain G --umami-domain U --project P \
 #     --dashboards bonk-chess/business=apps/…/analytics.business.dashboard.json,… --users-file grafana-users.json
 #
 # Grafana reads the cluster's VictoriaMetrics (which scrapes each app's exporter and collectors) and
@@ -284,15 +284,15 @@ def gc-secret [name: string, project: string]: nothing -> string {
 # never when it does not. The digest is set on every run, so a run that died after the ConfigMaps changed
 # restarts the pods on the next. Any failing step, a read included, fails the command: only a ConfigMap not
 # there is read as empty.
-#   bin/pronto-analytics metal dashboards --ssh bruno@node --dashboards bonk-chess/business=apps/…/analytics.business.dashboard.json,…
+#   bin/pronto-analytics metal dashboards --ssh user@node --kubeconfig K --dashboards bonk-chess/business=apps/…/analytics.business.dashboard.json,…
 export def "main dashboards" [
-	--ssh: string                  # The node, as an app's envs.Metal names it: bruno@13.140.186.223
-	--kubeconfig: string = "$HOME/.cache/contabo2.kubeconfig" # On the node
+	--ssh: string                  # The node, as an app's envs.Metal names it: user@203.0.113.7
+	--kubeconfig: string           # The cluster's kubeconfig on the node
 	--dashboards: string           # app/name=path of each dashboard, comma-separated (a shell passes no nu list)
 	--titles: string = "{}"        # JSON: each app's folder title, {"bonk-chess": "Bonk Chess"}
 	--namespace: string = "analytics"
 ] {
-	if ([$ssh $dashboards] | any { is-empty }) { error make {msg: "--ssh and --dashboards are required"} }
+	if ([$ssh $kubeconfig $dashboards] | any { is-empty }) { error make {msg: "--ssh, --kubeconfig and --dashboards are required"} }
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let run = {|cmd: string, input: string|
 		let r = ($input | ^ssh -o BatchMode=yes $ssh $cmd | complete)
@@ -317,8 +317,8 @@ export def "main dashboards" [
 }
 
 export def main [
-	--ssh: string                  # The node, as an app's envs.Metal names it: bruno@13.140.186.223
-	--kubeconfig: string = "$HOME/.cache/contabo2.kubeconfig" # On the node
+	--ssh: string                  # The node, as an app's envs.Metal names it: user@203.0.113.7
+	--kubeconfig: string           # The cluster's kubeconfig on the node
 	--grafana-domain: string       # Grafana's address: metrics.example.com
 	--umami-domain: string         # Umami's console and the doors' upstream: umami.example.com
 	--project: string              # The Google Cloud project whose Secret Manager holds what Cloud Run's had
@@ -327,7 +327,7 @@ export def main [
 	--titles: string = "{}"        # JSON: each app's folder title, {"bonk-chess": "Bonk Chess"}
 	--namespace: string = "analytics"
 ] {
-	if ([$ssh $grafana_domain $umami_domain $project $users_file] | any { is-empty }) { error make {msg: "--ssh, --grafana-domain, --umami-domain, --project and --users-file are all required"} }
+	if ([$ssh $kubeconfig $grafana_domain $umami_domain $project $users_file] | any { is-empty }) { error make {msg: "--ssh, --kubeconfig, --grafana-domain, --umami-domain, --project and --users-file are all required"} }
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
 	let yaml = (manifests --grafana-domain $grafana_domain --umami-domain $umami_domain --users (open --raw $users_file | from json) --dashboards (dashboards ($dashboards | split row "," | str trim | where {|d| $d != ""}) ($titles | from json)) --namespace $namespace)

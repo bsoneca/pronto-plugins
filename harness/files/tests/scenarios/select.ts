@@ -199,7 +199,7 @@ export function select<S extends Keyed>(runner: string, url: string, scenarios: 
   // What the scenarios' CUE holds beside the scenarios (a stand-in's image, a shared constant the stack or the
   // runner reads, not a scenario's steps): the package's export less `scenarios`, an input of every scenario.
   // The scenarios' files are left out of the tree, so without it a stand-in moved from one version to another
-  // left every scenario "cached" (Ume's identity broker 0.2.3 → 0.2.4, PRONTO-184). Null when it does not
+  // left every scenario "cached" (an identity broker stand-in 0.2.3 → 0.2.4, PRONTO-184). Null when it does not
   // export, and then nothing is cached.
   const shared = (() => {
     const dir = join(dirname(fileURLToPath(runner)), "scenarios");
@@ -213,7 +213,7 @@ export function select<S extends Keyed>(runner: string, url: string, scenarios: 
   const env = () => sha([`deno ${Deno.version.deno}`, `slow ${Deno.env.get("SLOW") ?? ""}${Deno.env.get("SLOW_GATE") ? " gate" : ""}`, `shared ${shared}`, ...own.map(hashOf)].join("\n"));
   // What the app's tree does not hold but its stack may serve: the files outside it that differ from main
   // and are not documentation (another app's files, a stand-in's version), by content. So a change there
-  // is never "cached green" (it hid Ume's refused and bureau-cap, 2026-11-03).
+  // is never "cached green" (it hid two failing scenarios, 2026-11-03).
   const outside = () => (changedFiles(root) ?? []).filter((f) => f.startsWith("../") && !/\.md$/.test(f) && !/^\.\.\/\.\.\/(docs|\.github)\//.test(f)).sort().map((f) => `outside ${f} ${hashOf(join(root, f))}`);
   const tree = () => {
     const t = treeKey(root);

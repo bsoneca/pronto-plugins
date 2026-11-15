@@ -21,12 +21,12 @@ _own: #Watch & {services: ["x"], noise: mine: {match: "boom", why: "a test"}}
 own: {services: _own.services, noise: [for n, _ in _own.noise {n}]} & {services: ["x"], noise: [...string] & ["mine"]}
 windows: {start: _own.lifecycle.start.within, shutdown: _own.lifecycle.shutdown.within} & {start: 60, shutdown: 30}
 
-// A node source (release@k8s's namespace) has its node, kubeconfig and VictoriaLogs as defaults, reads every
+// A node source (release@k8s's namespace) names its node and kubeconfig, has VictoriaLogs as a default, reads every
 // container and Deployment of the namespace unless some are named, and takes no word a shell would read.
-_node: #Node & {namespace: "brawl-chess"}
+_node: #Node & {host: "user@203.0.113.7", kubeconfig: "$HOME/.kube/config", namespace: "brawl-chess"}
 node: {host: _node.host, kubeconfig: _node.kubeconfig, containers: _node.containers, deployments: _node.deployments, logs: _node.logs} & {
-	host:        "bruno@13.140.186.223"
-	kubeconfig:  "$HOME/.cache/contabo2.kubeconfig"
+	host:        "user@203.0.113.7"
+	kubeconfig:  "$HOME/.kube/config"
 	containers:  []
 	deployments: []
 	logs: {namespace: "logs", service: "victoria-logs", port: 9428}

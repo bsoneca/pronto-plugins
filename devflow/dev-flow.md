@@ -2,8 +2,8 @@
 
 The flow is this plugin's [devflow](README.md), and a repository opts in with one file,
 `devflow/devflow.cue`: its board, its team and the sprint's size. This document says how the flow
-works; the values it gives (the project `PRONTO`, the host `plane.bsoneca.com`, four engineers) are
-bsoneca/pronto's, and stand as examples of what a repository writes. `bin/pronto connect plane .`
+works; the values it gives (the project `PRONTO`, the host `plane.example.com`, four engineers) are
+examples of what a repository writes. `bin/pronto connect plane .`
 sets the board up and says what waits on a person.
 
 | piece | where |
@@ -74,7 +74,7 @@ Projects** were considered and not chosen as the first.
 ```cue
 devFlow: {
 	board: {
-		host:      "plane.bsoneca.com"
+		host:      "plane.example.com"
 		workspace: "pronto"
 		project: {name: "pronto", identifier: "PRONTO"}
 	}
@@ -102,14 +102,14 @@ The board's API token is kept in one place, `token.kind`:
 With a `cluster`, `connect plane` installs Plane on the repository's node (a k3s node reached over
 SSH, its door a Cloudflare Tunnel into the node's Envoy Gateway): the database is a CloudNativePG
 cluster (`plane-db`), the namespace `plane`, who may sign in is Plane's own (the instance admin
-turns sign-ups off and invites the team). bsoneca/pronto's is the Contabo node `pronto@144.91.92.217`,
-the `contabo` kube context.
+turns sign-ups off and invites the team). The example is a node reached as `pronto@203.0.113.10`,
+the `node` kube context.
 
 ```cue
 cluster: {
-	context: "contabo"
-	ssh:     "pronto@144.91.92.217"
-	tunnel:  "45248135-7212-417a-af6d-b1bb2184e2d7"
+	context: "node"
+	ssh:     "pronto@203.0.113.10"
+	tunnel:  "00000000-0000-4000-8000-000000000000"
 }
 ```
 
@@ -183,7 +183,7 @@ first response to a P0. `priorities` in `devflow/devflow.cue` names the board's 
 ## The team
 
 The team is written in `devflow/devflow.cue` (`team`), and changed there by a pull request.
-bsoneca/pronto started with 2 engineers; from the second sprint it is:
+For example, a team of:
 
 | role | how many | does | slots |
 | --- | --- | --- | --- |
@@ -306,9 +306,6 @@ without the flow.
    (release-cron's run after confirm, `pronto-flags push`).
 4. Import the open PRs as items in a first catch-up sprint, so the board starts true. Run a week of
    sprints, then make the missing-key check required (drop `--warn`) and back the board's database up.
-
-bsoneca/pronto's [rollout](https://github.com/bsoneca/pronto/blob/main/docs/dev-flow.md) of these
-steps, and what it still waits on, is its own.
 
 ## Open questions
 

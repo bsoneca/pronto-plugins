@@ -52,8 +52,8 @@ hydra)
 	esac
 	# A file, not memory: Hydra's in-memory store refuses a write that meets another's ("Unable to
 	# serialize access due to a concurrent update"), so two sign-ins at once failed one with a 500
-	# (bsoneca/ume's phone-signin, 2026-11-02). The file waits for the other writer and takes its
-	# write lock as a transaction begins, as pronto-verify's Hydra does (bsoneca/ume#20).
+	# (a phone sign-in scenario, 2026-11-02). The file waits for the other writer and takes its
+	# write lock as a transaction begins, as a production Hydra does.
 	hydra="github:ory/hydra[asset_pattern=hydra_*-$asset.tar.gz]@26.2.0"
 	DSN="sqlite://$(mktemp -d)/hydra.sqlite?_fk=true&_busy_timeout=15000&_journal_mode=WAL&_txlock=immediate"
 	export DSN
