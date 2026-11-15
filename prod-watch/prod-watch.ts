@@ -65,17 +65,20 @@ function cueOut(cmd: string[], cwd: string, env: Record<string, string> = {}) {
   if (!o.success) throw new Error(`cue ${cmd.join(" ")} (in ${cwd}):\n${decode(o.stderr)}`);
   return decode(o.stdout);
 }
-const registry = (() => { try { return Deno.readTextFileSync(`${appDir}/.mise.toml`).match(/^CUE_REGISTRY\s*=\s*['"]([^'"]+)['"]/m)?.[1]; } catch { return undefined; } })();
+// Only a file that is not there is an answer (no .mise.toml: no registry; no release.cue: no GCP; no
+// release_cron.cue: released by hand); any other failure to read one stops the run.
+const absent = (e: unknown) => { if (!(e instanceof Deno.errors.NotFound)) throw e; };
+const registry = (() => { try { return Deno.readTextFileSync(`${appDir}/.mise.toml`).match(/^CUE_REGISTRY\s*=\s*['"]([^'"]+)['"]/m)?.[1]; } catch (e) { absent(e); return undefined; } })();
 // GCP only when release.cue declares it: an app that releases elsewhere (Bonk Chess on its node, PRONTO-205)
 // watches the Cloud Run services its prodWatch names, in its prodWatch.project.
-const declared = (() => { try { return /^GCP:/m.test(Deno.readTextFileSync(`${appDir}/release.cue`)); } catch { return false; } })();
+const declared = (() => { try { return /^GCP:/m.test(Deno.readTextFileSync(`${appDir}/release.cue`)); } catch (e) { absent(e); return false; } })();
 const { gcp, watch } = JSON.parse(cueOut(["export", ".", "-e", declared ? "{gcp: GCP, watch: prodWatch}" : "{watch: prodWatch}", "--out", "json"], appDir, registry ? { CUE_REGISTRY: registry } : {}));
 const node: Node | undefined = watch.node;
 const project: string = watch.project ?? gcp?.project ?? "";
 const rules = watch.noise ?? {};
 const lifecycle = watch.lifecycle;
 // How its fixes reach production: release-cron when the app has one, else by hand.
-const released = (() => { try { Deno.statSync(`${appDir}/release_cron.cue`); return "release-cron"; } catch { return "by hand"; } })();
+const released = (() => { try { Deno.statSync(`${appDir}/release_cron.cue`); return "release-cron"; } catch (e) { absent(e); return "by hand"; } })();
 const apart = gcp ? Object.entries(gcp.sidecars ?? {}).filter(([, s]) => (s as { apart?: unknown }).apart).map(([n]) => `${gcp.service}-${n}`) : [];
 const services: string[] = [...new Set([...(gcp ? [gcp.service] : []), ...apart, ...(watch.services ?? [])])];
 if (!services.length && !node) throw new Error(`${appDir}: nothing to watch: release.cue declares no GCP and prodWatch names no services and no node`);
@@ -163,13 +166,16 @@ if (node) {
   }
   // A slice that failed stops the run before it reads anything or writes a cursor, so the next run reads that window again.
   if (!got.ok) throw new Error(`the node's logs were not read (${got.err.trim().slice(0, 300) || "no message"}): the cursor is where it was`);
-  const lines = logEntries(got.out, { from, lifecycle, starts });
-  // A cut at the limit: the next run starts where this one stopped.
-  const rows = got.out.split("\n").filter(Boolean);
+  // A cut at the limit: the next run starts where this one stopped, at the latest timestamp read (VictoriaLogs'
+  // start is inclusive), so the rows of that timestamp, which may go on past the cut, are left for it whole.
+  let rows = got.out.split("\n").filter(Boolean);
   if (rows.length >= limit) {
-    const cut = JSON.parse(rows[rows.length - 1])._time;
+    const cut = rows.map((r) => JSON.parse(r)._time as string).reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
+    rows = rows.filter((r) => Date.parse(JSON.parse(r)._time) < Date.parse(cut));
+    if (!rows.length) throw new Error(`${limit} rows share the timestamp ${cut}: narrow the window (--since) to read them`);
     if (Date.parse(cut) < Date.parse(reached)) reached = cut;
   }
+  const lines = logEntries(rows.join("\n"), { from, lifecycle, starts });
   entries.push(...lines);
   entries.sort((a, b) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)));
   // What is serving: the last release of release-cron's log, else the images the pods run.
