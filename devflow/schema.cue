@@ -74,6 +74,9 @@ devFlow: #DevFlow
 		timeZone:  *"America/Sao_Paulo" | string
 		ends?:     string & =~"^([01][0-9]|2[0-3]):[0-5][0-9]$"
 	}
+	// Hours an issue holding a slot (Implementing or Review) may go with no linked open pull request and no
+	// commit on a branch naming its key before `status` calls it stuck.
+	stuckHours: *6 | (number & >0)
 	// A pull request with this label needs no issue (dependency bumps, the CI fingerprint).
 	chore: *"chore" | string
 

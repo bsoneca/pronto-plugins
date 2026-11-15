@@ -33,6 +33,8 @@ export interface DevFlow {
   design: string[];
   architectModel: string;
   sprint: { timeZone: string; perPerson: number };
+  /** Hours without a commit or a pull request after which an issue holding a slot is stuck. */
+  stuckHours: number;
   chore: string;
   states: { name: string; group: string; color: string; means: string }[];
   /** The repository's name for the state that plays each role (flow.js reasons in roles). */

@@ -334,4 +334,17 @@ cases: {
 		], "2026-11-11T22:00:02Z"], expect: "newnewne-0000", why: "a claim from an earlier pull, long past, does not count"},
 		{call: "devflow.claimWinner", args: [[{html: "<p>Refine → Ready: refined</p>", at: "2026-11-11T22:00:00Z"}], "2026-11-11T22:00:02Z"], expect: null},
 	]}
+
+	// An issue holding a slot that no work is moving is stuck (2026-11-14: 5 of 6 slots busy for two days, every session ended).
+	"an issue holding a slot is stuck when no PR and no commit moved it for hours, or its PR cannot land": {suite: "devflow", steps: [
+		{call: "devflow.stuckOf", args: [{key: "PRONTO-1", state: "Implementing", since: "2026-11-14T10:00:00Z", pr: null, commit: null}, "2026-11-14T12:00:00Z"], expect: null, why: "fresh work, started two hours ago, is not stuck"},
+		{call: "devflow.stuckOf", args: [{key: "PRONTO-2", state: "Implementing", since: "2026-11-12T10:00:00Z", pr: null, commit: "2026-11-14T09:00:00Z"}, "2026-11-14T12:00:00Z"], expect: null, why: "old issue, but a commit on its branch three hours ago"},
+		{call: "devflow.stuckOf", args: [{key: "PRONTO-444", state: "Implementing", since: "2026-11-12T12:00:00Z", pr: null, commit: null}, "2026-11-14T12:00:00Z"], expect: {key: "PRONTO-444", state: "Implementing", age: "2d", why: "no PR, no commits"}, why: "two days idle"},
+		{call: "devflow.stuckOf", args: [{key: "PRONTO-5", state: "Implementing", since: "2026-11-12T12:00:00Z", pr: null, commit: "2026-11-13T12:00:00Z"}, "2026-11-14T12:00:00Z"], expect: {key: "PRONTO-5", state: "Implementing", age: "2d", why: "no PR, last commit 1d ago"}},
+		{call: "devflow.stuckOf", args: [{key: "PRONTO-6", state: "Review", since: "2026-11-14T11:00:00Z", pr: {ci: "fail", auto: true}, commit: null}, "2026-11-14T12:00:00Z"], expect: {key: "PRONTO-6", state: "Review", age: "1h", why: "PR ci failed"}, why: "a failed ci is stuck however fresh"},
+		{call: "devflow.stuckOf", args: [{key: "PRONTO-7", state: "Review", since: "2026-11-14T11:00:00Z", pr: {ci: "pending", auto: false}, commit: null}, "2026-11-14T12:00:00Z"], expect: {key: "PRONTO-7", state: "Review", age: "1h", why: "PR auto-merge not armed"}},
+		{call: "devflow.stuckOf", args: [{key: "PRONTO-8", state: "Review", since: "2026-11-10T11:00:00Z", pr: {ci: "pending", auto: true}, commit: null}, "2026-11-14T12:00:00Z"], expect: null, why: "a PR with ci running and auto-merge armed is on its way"},
+		{call: "devflow.stuckOf", args: [{key: "PRONTO-9", state: "Implementing", since: "2026-11-14T08:00:00Z", pr: null, commit: null}, "2026-11-14T12:00:00Z", 3], expect: {key: "PRONTO-9", state: "Implementing", age: "4h", why: "no PR, no commits"}, why: "the hours come from devflow.cue"},
+		{call: "devflow.stuckLine", args: [{key: "PRONTO-444", state: "Implementing", age: "2d", why: "no PR, no commits"}], expect: "stuck: PRONTO-444 Implementing 2d, no PR, no commits"},
+	]}
 }

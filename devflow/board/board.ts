@@ -13,6 +13,8 @@ export interface Issue {
   sequence_id: number;
   state: string;
   priority: string;
+  /** When the issue last changed: how long it has held its state, near enough. */
+  updated_at?: string;
   description_html?: string;
   module_ids?: string[];
   labels?: string[];
