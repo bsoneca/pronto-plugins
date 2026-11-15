@@ -456,7 +456,9 @@ export function triage(groups, ledger, now) {
     entry.revisions = [...new Set([...(entry.revisions ?? []), ...g.revisions])].sort().slice(-5);
     entry.samples = g.samples;
     next[g.fp] = entry;
-    report.push({ ...g, verdict, status: entry.status, reason: entry.reason ?? "", pr: entry.pr ?? null });
+    // The grouping key is the line before it is redacted: it makes the fingerprint and goes no further.
+    const { key: _key, ...shown } = g;
+    report.push({ ...shown, verdict, status: entry.status, reason: entry.reason ?? "", pr: entry.pr ?? null });
   }
   const order = { new: 0, regressed: 1, rising: 2, open: 3, fixed: 4, noise: 5 };
   report.sort((a, b) => order[a.verdict] - order[b.verdict] || b.count - a.count);

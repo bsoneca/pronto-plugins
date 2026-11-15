@@ -34,7 +34,11 @@ if (!app) throw new Error("name the app: prod-watch.ts <app> (the app's folder, 
 
 const state = `${root}.omc/prod-watch/${app}`;
 Deno.mkdirSync(state, { recursive: true });
-const read = (f: string, d: unknown) => { try { return JSON.parse(Deno.readTextFileSync(`${state}/${f}`)); } catch { return d; } };
+// Only a file that is not there yet is the initial value: one that cannot be read or parsed stops the run,
+// since a report would overwrite it with an empty one and lose each fingerprint's status.
+const read = (f: string, d: unknown) => {
+  try { return JSON.parse(Deno.readTextFileSync(`${state}/${f}`)); } catch (e) { if (e instanceof Deno.errors.NotFound) return d; throw new Error(`${state}/${f} is unreadable, mend or remove it: ${e}`); }
+};
 const write = (f: string, v: unknown) => Deno.writeTextFileSync(`${state}/${f}`, JSON.stringify(v, null, 1) + "\n");
 const ledger = read("ledger.json", {});
 
@@ -150,6 +154,8 @@ if (node) {
     got.out += r.out;
     left -= r.out.split("\n").filter(Boolean).length;
   }
+  // A slice that failed stops the run before it reads anything or writes a cursor, so the next run reads that window again.
+  if (!got.ok) throw new Error(`the node's logs were not read (${got.err.trim().slice(0, 300) || "no message"}): the cursor is where it was`);
   const lines = logEntries(got.out, { from, lifecycle, starts });
   // A cut at the limit: the next run starts where this one stopped.
   const rows = got.out.split("\n").filter(Boolean);
