@@ -23,6 +23,10 @@ _l: {
 _now: "2026-11-02T10:30:00Z"
 
 cases: {
+	"a report never carries the grouping key, the line before it is redacted": {suite: "triage", steps: [
+		{call: "watch.triage", args: [{a: (_g & {id: "a"}).out}, {}, _now]},
+		{get: "report.0", expect: {fp: "a", service: "bonk-chess", container: "analyst", title: "boom", frame: "", noise: null, count: 1, first: "2026-11-02T10:00:00Z", last: "2026-11-02T10:30:00Z", revisions: ["bonk-chess-00061-jrq"], samples: [], verdict: "new", status: "open", reason: "", pr: null}, why: "exactly these fields: the key is not among them"},
+	]}
 	"a fingerprint never seen is new, and the ledger keeps it open with its count and times": {suite: "triage", steps: [
 		{call: "watch.triage", args: [{a: (_g & {id: "a", n: 3}).out}, {}, _now]},
 		{keep: "run"},
