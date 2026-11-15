@@ -29,14 +29,14 @@ deno run -A release-cron/release-cron.ts <app> install
 ```
 
 Bonk Chess (bsoneca/pronto's `apps/brawl-chess`) is the first: its `release_cron.cue` probes `/`, a
-`/player/<id>` link preview and `/table/<unknown room>`. bsoneca/ume's two apps, `pronto-verify` and
-`ume-rental`, use it too, with two fields Bonk Chess leaves at their defaults:
+`/player/<id>` link preview and `/table/<unknown room>`. Other apps may set two fields Bonk Chess
+leaves at their defaults:
 
 - `ready: [...string]`: Cloud Run services, besides the app's own, that must be Ready in confirm
   (none by default).
 - `holder: "verify@local"`: the `what` in a slot's owner line (`tests/slot.ts` writes `<pid> <ISO>
-  <app dir> <what> (weight <w>)`) that marks the rehearsal's main slot. Ume's `verify@local` ends in
-  `./saytw integrate@local`, so its apps set `holder: "./saytw integrate@local"` (read as
+  <app dir> <what> (weight <w>)`) that marks the rehearsal's main slot. An app whose `verify@local` ends in
+  `./saytw integrate@local` sets `holder: "./saytw integrate@local"` (read as
   `rehearsal.holder`, below).
 
 ## What an app chooses

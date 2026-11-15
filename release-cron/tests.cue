@@ -23,8 +23,8 @@ own: {gap: _own.gap, poll: _own.poll} & {gap: 30, poll: 5}
 
 
 // An app may name its slot holder and the services besides its own that must be ready.
-_ume: #Cron & {watch: ["x"], probes: {}, ready: ["a-render"], holder: "./saytw integrate@local"}
-ume: {ready: _ume.ready, holder: _ume.holder} & {ready: ["a-render"], holder: "./saytw integrate@local"}
+_holder2: #Cron & {watch: ["x"], probes: {}, ready: ["a-render"], holder: "./saytw integrate@local"}
+holderApp: {ready: _holder2.ready, holder: _holder2.holder} & {ready: ["a-render"], holder: "./saytw integrate@local"}
 
 // A failed run is bisected by this check, and nobody is told unless the app names who (notify).
 bisectDefaults: _defaults.bisect & {command: "./saytw integrate@local"}
@@ -53,7 +53,7 @@ cloudWithRelease: [if (#Cron & {watch: ["x"], probes: {}, target: {kind: "cloud-
 
 // The rehearsal is verify@local in a slot, its holder the top-level holder's default; the top-level holder still works.
 rehearsalDefault: _defaults.rehearsal & {command: ["./saytw", "verify@local"], slot: true, holder: "verify@local"}
-rehearsalOfHolder: _ume.rehearsal & {holder: "./saytw integrate@local"}
+rehearsalOfHolder: _holder2.rehearsal & {holder: "./saytw integrate@local"}
 _none: #Cron & {watch: ["x"], probes: {}, rehearsal: {command: null, slot: false, holder: "h"}}
 rehearsalNone: _none.rehearsal & {command: null, slot: false, holder: "h"}
 _cmd: #Cron & {watch: ["x"], probes: {}, rehearsal: command: ["./check.sh", "fast"]}

@@ -108,28 +108,28 @@ priorities: {
 	others:  _prio.priorities.P3.plane & "low"
 }
 
-// bsoneca/pronto's devflow/devflow.cue, as it is at the time of PRONTO-142: it still vets and every
+// A repository's devflow/devflow.cue, as written at the time of PRONTO-142: it still vets and every
 // value it had is what it was, under the new fields (board beside plane, a token of kind
 // secret-manager, the flow's roles).
 _pronto: #DevFlow & {
 	plane: {
-		host:      "plane.bsoneca.com"
+		host:      "plane.example.com"
 		workspace: "pronto"
 		project: {name: "pronto", identifier: "PRONTO"}
 	}
 	cluster: {
-		context: "contabo"
-		ssh:     "pronto@144.91.92.217"
-		tunnel:  "45248135-7212-417a-af6d-b1bb2184e2d7"
+		context: "node"
+		ssh:     "pronto@203.0.113.10"
+		tunnel:  "00000000-0000-4000-8000-000000000000"
 	}
 	token: project: "brawl-chess"
 	team: {engineers: 4, sre: 1, product: 1}
 	sprint: {ends: "18:00", perPerson: 3}
 }
 pronto: {
-	board: _pronto.board & {kind: "plane", host: "plane.bsoneca.com", workspace: "pronto", project: {name: "pronto", identifier: "PRONTO"}, chart: "1.8.6"}
-	plane: _pronto.plane & {host: "plane.bsoneca.com", workspace: "pronto", project: {name: "pronto", identifier: "PRONTO"}, chart: "1.8.6"}
-	cluster: _pronto.cluster & {context: "contabo", ssh: "pronto@144.91.92.217", namespace: "plane", tunnel: "45248135-7212-417a-af6d-b1bb2184e2d7", apiPort: 26443}
+	board: _pronto.board & {kind: "plane", host: "plane.example.com", workspace: "pronto", project: {name: "pronto", identifier: "PRONTO"}, chart: "1.8.6"}
+	plane: _pronto.plane & {host: "plane.example.com", workspace: "pronto", project: {name: "pronto", identifier: "PRONTO"}, chart: "1.8.6"}
+	cluster: _pronto.cluster & {context: "node", ssh: "pronto@203.0.113.10", namespace: "plane", tunnel: "00000000-0000-4000-8000-000000000000", apiPort: 26443}
 	token: _pronto.token & {kind: "secret-manager", project: "brawl-chess", secret: "plane-api-token"}
 	team: _pronto.team & {engineers: 4, sre: 1, architect: 1, product: 1}
 	sprint: _pronto.sprint & {ends: "18:00", perPerson: 3, timeZone: "America/Sao_Paulo"}

@@ -12,13 +12,13 @@ _mac: _runnersPlan & {
 	colima: profile: "arc"
 	scaleSets: {
 		"pronto-arc": githubConfigUrl: "https://github.com/bsoneca/pronto"
-		"ume-arc": githubConfigUrl:    "https://github.com/bsoneca/ume-verify"
+		"shop-arc": githubConfigUrl:    "https://github.com/acme/shop"
 	}
 }
 _remote: _runnersPlan & {context: "k3s-hetzner", scaleSets: "all": githubConfigUrl: "https://github.com/acme-org"}
 _host: host: {
 	"pronto-mac": {url: "https://github.com/bsoneca/pronto", api: "repos/bsoneca/pronto/actions/runners", dir: "/Users/check/actions-runners/pronto-mac", labels: ["pronto-mac"], work: "_work", path: "/Users/check/.deno/bin:/usr/bin:/bin"}
-	"ume-mac": {url: "https://github.com/bsoneca/ume-verify", api: "repos/bsoneca/ume-verify/actions/runners", dir: "/Users/check/actions-runners/ume-mac", labels: ["ume-mac", "xcode"], work: "_work", path: "/Users/check/.deno/bin:/usr/bin:/bin"}
+	"shop-mac": {url: "https://github.com/acme/shop", api: "repos/acme/shop/actions/runners", dir: "/Users/check/actions-runners/shop-mac", labels: ["shop-mac", "xcode"], work: "_work", path: "/Users/check/.deno/bin:/usr/bin:/bin"}
 }
 _ready: {installed: true, registration: *"current" | string, agent: true}
 _found: {runner: {agentName: "pronto-mac", gitHubUrl: "https://github.com/bsoneca/pronto", workFolder: "_work", agentId: 7}, path: "/Users/check/.deno/bin:/usr/bin:/bin\n", labels: ["self-hosted", "macOS", "ARM64", "pronto-mac"]}
@@ -41,12 +41,12 @@ cases: {
 	"each scale set is applied by name, and one the setup no longer names is removed": {suite: "runners", steps: [
 		{call: "runners.steps", args: [_mac, {vm: true, releases: ["old-arc", "pronto-arc"], secret: true}]},
 		{filter: "name"},
-		{map: {pick: ["do", "name"]}, expect: [["scale-set", "pronto-arc"], ["scale-set", "ume-arc"], ["remove", "old-arc"]]},
+		{map: {pick: ["do", "name"]}, expect: [["scale-set", "pronto-arc"], ["scale-set", "shop-arc"], ["remove", "old-arc"]]},
 	]}
 	"the secret's help names every repository and never holds a value": {suite: "runners", steps: [
 		{call: "runners.secretHelp", args: [_mac]},
 		{keep: "pat"},
-		{get: "0", matches: "bsoneca/pronto, bsoneca/ume-verify"},
+		{get: "0", matches: "bsoneca/pronto, acme/shop"},
 		{use: "pat"},
 		{get: "1", matches: "^read -rs t && kubectl --context colima-arc -n arc-runners create secret generic gha-token --from-literal=github_token=\"\\$t\"; unset t$"},
 		{call: "runners.secretHelp", args: [_mac & {secret: kind: "app"}]},
@@ -54,12 +54,12 @@ cases: {
 	]}
 	"a host runner is installed, registered and its agent loaded, each only when missing": {suite: "runners", steps: [
 		{call: "runners.hostSteps", args: [_host, {}]},
-		{map: {pick: ["do", "name"]}, expect: [["install", "pronto-mac"], ["register", "pronto-mac"], ["agent", "pronto-mac"], ["install", "ume-mac"], ["register", "ume-mac"], ["agent", "ume-mac"]]},
-		{call: "runners.hostSteps", args: [_host, {"pronto-mac": _ready, "ume-mac": {installed: true, registration: "current", agent: false}}]},
-		{map: {pick: ["do", "name"]}, expect: [["agent", "ume-mac"]]},
+		{map: {pick: ["do", "name"]}, expect: [["install", "pronto-mac"], ["register", "pronto-mac"], ["agent", "pronto-mac"], ["install", "shop-mac"], ["register", "shop-mac"], ["agent", "shop-mac"]]},
+		{call: "runners.hostSteps", args: [_host, {"pronto-mac": _ready, "shop-mac": {installed: true, registration: "current", agent: false}}]},
+		{map: {pick: ["do", "name"]}, expect: [["agent", "shop-mac"]]},
 	]}
 	"a host runner registered otherwise is unregistered, registered again and its agent reloaded": {suite: "runners", steps: [
-		{call: "runners.hostSteps", args: [_host, {"pronto-mac": _ready & {registration: "stale"}, "ume-mac": _ready}]},
+		{call: "runners.hostSteps", args: [_host, {"pronto-mac": _ready & {registration: "stale"}, "shop-mac": _ready}]},
 		{map: {pick: ["do", "name"]}, expect: [["unregister", "pronto-mac"], ["register", "pronto-mac"], ["agent", "pronto-mac"]]},
 	]}
 	"a host runner's registration is current only as the plan registers it": {suite: "runners", steps: [
@@ -71,7 +71,7 @@ cases: {
 		{call: "runners.registration", args: [_host, "pronto-mac", {runner: {agentName: "pronto-mac", gitHubUrl: "https://github.com/bsoneca/pronto", workFolder: "work"}, path: _found.path, labels: null}], expect: "stale"},
 	]}
 	"a host runner registers with its labels and work folder, the token added only at the call": {suite: "runners", steps: [
-		{call: "runners.registerArgs", args: [_host, "ume-mac"], expect: ["--unattended", "--url", "https://github.com/bsoneca/ume-verify", "--name", "ume-mac", "--labels", "ume-mac,xcode", "--work", "_work", "--replace"]},
+		{call: "runners.registerArgs", args: [_host, "shop-mac"], expect: ["--unattended", "--url", "https://github.com/acme/shop", "--name", "shop-mac", "--labels", "shop-mac,xcode", "--work", "_work", "--replace"]},
 		{call: "runners.registerHelp", args: [_host, "pronto-mac"]},
 		{get: "1", matches: "^cd /Users/check/actions-runners/pronto-mac && \\./config\\.sh --unattended .* --token \"\\$\\(gh api -X POST repos/bsoneca/pronto/actions/runners/registration-token --jq \\.token\\)\"$"},
 	]}

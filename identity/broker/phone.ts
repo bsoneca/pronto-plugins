@@ -556,8 +556,8 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
 // One send of the code, by `send` (Firebase's signInWithPhoneNumber on a fresh verifier), as the page
 // runs it (SCRIPT embeds this function's source). A failure is logged with Firebase's code and its
 // message, which a code-less error (a dropped request) carries alone. Against the emulator only, a
-// failed send is tried once more: a loaded developer's machine drops one now and then (bsoneca/ume's
-// gates, 2026-11-02). Against Firebase itself a tap sends one SMS at most, so the SMS limits stay
+// failed send is tried once more: a loaded developer's machine drops one now and then (a
+// gate's run, 2026-11-02). Against Firebase itself a tap sends one SMS at most, so the SMS limits stay
 // the operator's.
 export async function sendCode<T>(send: () => Promise<T>, emulator: boolean, warn: (line: string) => void): Promise<T> {
   for (let attempt = 1; ; attempt++) {
@@ -644,7 +644,7 @@ function freshVerifier() {
 ${COMMON_COUNTDOWN}// The gate's word on a code for this number ('' to go), then Firebase sends it.
 async function ask() {
   // The SDK is loaded once the page starts; a tap before it has waits for it rather than failing on
-  // an SDK not there yet (bsoneca/ume's phone-signin under load: "reading 'RecaptchaVerifier'" of undefined).
+  // an SDK not there yet (a phone sign-in scenario under load: "reading 'RecaptchaVerifier'" of undefined).
   try { await started; } catch { return t.down; }
   let said;
   try {

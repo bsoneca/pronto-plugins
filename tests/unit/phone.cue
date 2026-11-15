@@ -58,7 +58,7 @@ cases: {
 		{call: "identity.phoneBrokered", args: [{unsigned: true}], holds: {approved: 400, error: "refused"}},
 	]}
 	"a localhost broker on the emulator takes the emulator's unsigned token": {suite: "identity", steps: [
-		{call: "identity.phoneBrokered", args: [{unsigned: true, issuer: "http://localhost:19000", project: "demo-ume-rental", env: {PHONE_EMULATOR: "127.0.0.1:9099", PHONE_PROJECT: "demo-ume-rental", PHONE_API_KEY: null, PHONE_APP_ID: null}}]}, {keep: "out"},
+		{call: "identity.phoneBrokered", args: [{unsigned: true, issuer: "http://localhost:19000", project: "demo-app", env: {PHONE_EMULATOR: "127.0.0.1:9099", PHONE_PROJECT: "demo-app", PHONE_API_KEY: null, PHONE_APP_ID: null}}]}, {keep: "out"},
 		{get: "approved", expect: 200},
 		{use: "out"}, {get: "emulator", expect: "http://127.0.0.1:9099"},
 		{use: "out"}, {get: "csp", matches: "http://127\\.0\\.0\\.1:9099"},
@@ -74,9 +74,9 @@ cases: {
 		{call: "identity.phoneSettings", holds: {resendSeconds: 60, sdk: "13.1.0", authDomain: "brawl-chess.firebaseapp.com", pattern: "^\\+55[1-9][1-9]9[0-9]{8}$"}},
 	]}
 	"the tenants list matches an origin exactly, a star standing for a port": {suite: "identity", steps: [
-		{call: "phone.tenantAdmitted", args: [["https://ume.bsoneca.com", "https://localhost:*"], "https://ume.bsoneca.com"], expect: true},
-		{call: "phone.tenantAdmitted", args: [["https://ume.bsoneca.com", "https://localhost:*"], "https://localhost:8443"], expect: true},
-		{call: "phone.tenantAdmitted", args: [["https://ume.bsoneca.com"], "https://ume.bsoneca.com.evil.example"], expect: false},
+		{call: "phone.tenantAdmitted", args: [["https://app.example.com", "https://localhost:*"], "https://app.example.com"], expect: true},
+		{call: "phone.tenantAdmitted", args: [["https://app.example.com", "https://localhost:*"], "https://localhost:8443"], expect: true},
+		{call: "phone.tenantAdmitted", args: [["https://app.example.com"], "https://app.example.com.evil.example"], expect: false},
 		{call: "phone.tenantAdmitted", args: [["https://localhost:*"], "https://localhost:x"], expect: false},
 	]}
 	"the page's language is the first of its own the reader asks for": {suite: "identity", steps: [
@@ -89,7 +89,7 @@ cases: {
 		{call: "identity.started", args: [false], expect: ["google"]},
 	]}
 	"a send that fails is logged with Firebase's code and message, and tried once more against the emulator alone": {suite: "identity", steps: [
-		{call: "identity.sendTries", args: [true, 1], expect: {sent: true, tries: 2, lines: ["phone: no code sent (try 1): request dropped"]}, why: "a loaded machine's emulator dropped a send with no code: bsoneca/ume's gates failed phone-signin on it (2026-11-02)"},
+		{call: "identity.sendTries", args: [true, 1], expect: {sent: true, tries: 2, lines: ["phone: no code sent (try 1): request dropped"]}, why: "a loaded machine's emulator dropped a send with no code: a gate's phone sign-in failed on it (2026-11-02)"},
 		{call: "identity.sendTries", args: [true, 2], expect: {sent: false, tries: 2, lines: ["phone: no code sent (try 1): request dropped", "phone: no code sent (try 2): request dropped"]}, why: "once more, never a loop"},
 		{call: "identity.sendTries", args: [false, 1, "auth/network-request-failed"], expect: {sent: false, tries: 1, lines: ["phone: no code sent (try 1): auth/network-request-failed request dropped"]}, why: "against Firebase a tap sends one SMS at most, so the operator's SMS limits count every one"},
 		{call: "identity.sendTries", args: [false, 0], expect: {sent: true, tries: 1, lines: []}},
@@ -98,10 +98,10 @@ cases: {
 		{call: "identity.pageSends", holds: {defines: true, sendsThrough: true, sendsOtherwise: 1}, why: "the retry runs in the browser; a send past it would not be retried or logged"},
 	]}
 	"a tap before Firebase's SDK has loaded waits for it, and is never sent to an SDK not there": {suite: "identity", steps: [
-		{call: "identity.pageSends", holds: {startedOnce: true, sendWaits: true}, why: "bsoneca/ume's phone-signin under load: 'Cannot read properties of undefined (reading RecaptchaVerifier)', twice, the retry included (2026-11-02)"},
+		{call: "identity.pageSends", holds: {startedOnce: true, sendWaits: true}, why: "a phone sign-in scenario under load: 'Cannot read properties of undefined (reading RecaptchaVerifier)', twice, the retry included (2026-11-02)"},
 	]}
 	"the local broker's Hydra keeps its rows in a file whose writers wait, so two sign-ins at once both go through": {suite: "identity", steps: [
-		{call: "identity.hydraLocalStore", expect: {memory: false, file: true, waits: true, migratedFirst: true}, why: "Hydra in memory answered a sign-in 500, 'Unable to serialize access due to a concurrent update', when another wrote at once (bsoneca/ume's phone-signin, 2026-11-02); pronto-verify's Hydra met the same (bsoneca/ume#20)"},
+		{call: "identity.hydraLocalStore", expect: {memory: false, file: true, waits: true, migratedFirst: true}, why: "Hydra in memory answered a sign-in 500, 'Unable to serialize access due to a concurrent update', when another wrote at once (a phone sign-in scenario, 2026-11-02); a production Hydra met the same"},
 	]}
 
 	// PHONE_OTP=broker (identity/broker/otp.ts): the broker issues and checks the codes, a sender texts them, a gate admits each SMS.

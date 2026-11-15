@@ -30,7 +30,7 @@ releaseCron: #Cron
 	// What the rehearsal is, run before the release on the tree it releases. `command` is run in the app's folder
 	// (its exit says pass or fail; null: no rehearsal, the release follows the schedule alone) and, with `slot`, the
 	// run waits until it holds a slot of the machine's pool (tests/slot.ts) whose owner line is `holder`: the `what` the
-	// app's rehearsal claims its main slot as. The Ume apps' verify@local runs generate, lint and test, then
+	// app's rehearsal claims its main slot as. An app's verify@local may run generate, lint and test, then
 	// `./saytw integrate@local`, which claims it. `slot: false` runs it without waiting for a slot. GCP.rehearsal (the
 	// cloud's) replaces it. The top-level `holder` below is still read, as rehearsal.holder.
 	rehearsal: {
