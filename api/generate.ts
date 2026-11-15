@@ -283,14 +283,15 @@ export function machineSql(m: Machine, schema: string, gated: boolean): string {
         `    req := json_build_object('event', json_build_object('kind', kind, 'payload', coalesce(NEW."payload", '{}'::json)), 'expected_revision', NEW."etag", 'version', ${m.version});`,
         `    cid := room::text || '/' || NEW."etag" || '/' || s."seat" || '/' || kind || '/' || NEW."request_id";`,
         // The machine's receipt: an earlier call with this request_id is answered from its row, and
-        // the same request_id with another body is a conflict.
+        // the same request_id with another body is a conflict, also when two calls race to insert it (the one
+        // that loses ON CONFLICT compares the winner's row with its own body).
         `    SELECT c."id", c."request", c."revision", c."outcome", c."reason" INTO got FROM ${t(m.tables.command)} c`,
         `      WHERE c."instance_id" = room AND c."actor" = public.auth_uid() AND split_part(c."id", '/', 5) = NEW."request_id";`,
         `    IF FOUND AND (got."id" <> cid OR got."request"::jsonb <> req::jsonb) THEN ${raise("PT409", "idempotency_conflict", lit("request_id"))} END IF;`,
         `    IF NOT FOUND THEN`,
         `      INSERT INTO ${t(m.tables.command)} ("id", "instance_id", "request") VALUES (cid, room, req) ON CONFLICT ("id") DO NOTHING;`,
         `      SELECT c."id", c."request", c."revision", c."outcome", c."reason" INTO got FROM ${t(m.tables.command)} c WHERE c."id" = cid;`,
-        `      IF NOT FOUND THEN ${raise("PT409", "idempotency_conflict", lit("request_id"))} END IF;`,
+        `      IF NOT FOUND OR got."request"::jsonb <> req::jsonb THEN ${raise("PT409", "idempotency_conflict", lit("request_id"))} END IF;`,
         `    END IF;`,
         `  END;`,
         ...judged,
@@ -325,7 +326,7 @@ export function machineSql(m: Machine, schema: string, gated: boolean): string {
         `    IF NOT FOUND THEN`,
         `      INSERT INTO ${t(m.tables.open)} ("id", "instance_id", "kind", "input") VALUES (open_id, room, kind, input) ON CONFLICT ("id") DO NOTHING;`,
         `      SELECT o."id", o."input", o."outcome", o."reason" INTO got FROM ${t(m.tables.open)} o WHERE o."id" = open_id;`,
-        `      IF NOT FOUND THEN ${raise("PT409", "idempotency_conflict", lit("request_id"))} END IF;`,
+        `      IF NOT FOUND OR got."input"::jsonb <> input::jsonb THEN ${raise("PT409", "idempotency_conflict", lit("request_id"))} END IF;`,
         `    END IF;`,
         `  END;`,
         ...judged,
