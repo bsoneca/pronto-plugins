@@ -164,6 +164,12 @@ import (
 	// the service. Filled by the release.
 	blobs?: {}
 
+	// The schemas PostgREST serves besides public (the app's capabilities.apiSchemas,
+	// such as ["api_v1"]): crud's PGRST_DB_SCHEMA, public first, as the compose
+	// project's crud has it, so a request that asks for one by Accept-Profile
+	// is served instead of refused.
+	apiSchemas: [...string] | *[]
+
 	// Containers of the app's own beside the cluster's: each names a service of
 	// the app's compose project, built and pushed as the cluster's images are,
 	// and reached by the door at PRONTO_UPSTREAM_<NAME> (a plugin's collector,
@@ -483,7 +489,7 @@ import (
 					env: [
 						(secretOf & {env: "PGRST_DB_URI", secret: sq.CRUD_DB_URI}).out,
 						(secretOf & {env: "PGRST_JWT_SECRET", secret: sq.PGRST_JWT_SECRET}).out,
-						{name: "PGRST_DB_SCHEMA", value: "public"},
+						{name: "PGRST_DB_SCHEMA", value: strings.Join(["public"] + R.apiSchemas, ",")},
 						{name: "PGRST_DB_ANON_ROLE", value: "anon"},
 						{name: "PGRST_DB_PRE_REQUEST", value: "public.app_pre_request"},
 						// Cloud Run probes the instance's address, not loopback.
