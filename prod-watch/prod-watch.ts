@@ -111,7 +111,14 @@ if (services.length) {
   }).outputSync();
   if (!o.success) throw new Error(`gcloud logging read:\n${decode(o.stderr)}`);
   entries = JSON.parse(decode(o.stdout) || "[]");
-  if (entries.length >= limit) reached = entries[entries.length - 1].timestamp;
+  if (entries.length >= limit) {
+    // Cut at the limit: the entries of the last timestamp may go on past it, and the next query reads
+    // strictly after the cursor, so they are left for it whole: the cursor is the timestamp before.
+    const last = entries[entries.length - 1].timestamp;
+    entries = entries.filter((e) => e.timestamp < last);
+    if (!entries.length) throw new Error(`${limit} entries share the timestamp ${last}: narrow the window (--since) to read them`);
+    reached = entries[entries.length - 1].timestamp;
+  }
 }
 
 // The node's pods (prodWatch.node): their lines in VictoriaLogs, which the node's Vector fills and
