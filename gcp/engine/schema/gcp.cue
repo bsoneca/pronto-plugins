@@ -489,7 +489,7 @@ import (
 					env: [
 						(secretOf & {env: "PGRST_DB_URI", secret: sq.CRUD_DB_URI}).out,
 						(secretOf & {env: "PGRST_JWT_SECRET", secret: sq.PGRST_JWT_SECRET}).out,
-						{name: "PGRST_DB_SCHEMA", value: strings.Join(["public"] + R.apiSchemas, ",")},
+						{name: "PGRST_DB_SCHEMA", value: strings.Join(list.Concat([["public"], R.apiSchemas]), ",")},
 						{name: "PGRST_DB_ANON_ROLE", value: "anon"},
 						{name: "PGRST_DB_PRE_REQUEST", value: "public.app_pre_request"},
 						// Cloud Run probes the instance's address, not loopback.
