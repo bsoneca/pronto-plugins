@@ -382,3 +382,34 @@ export function claimWinner(comments, now, windowS = 600) {
   claims.sort((a, b) => a.at - b.at || (a.nonce < b.nonce ? -1 : a.nonce > b.nonce ? 1 : 0));
   return claims[0]?.nonce ?? null;
 }
+
+/** How long an issue has held its state, as the short age a status line shows: "2d" from a day, else "5h". */
+export function ageOf(since, now) {
+  const ms = new Date(now).getTime() - Date.parse(since ?? "");
+  if (!Number.isFinite(ms) || ms < 0) return "0h";
+  return ms >= 86400000 ? `${Math.floor(ms / 86400000)}d` : `${Math.floor(ms / 3600000)}h`;
+}
+
+/** Why an issue holding a slot (Implementing or Review) is stuck, or null when it is not (2026-11-14: the
+ * board said 5 of 6 slots busy for two days with every session ended). `facts`: `{key, state, since}`
+ * (`state` the repository's name, `since` an ISO time the issue last changed), `pr` (its linked open pull
+ * request, `{ci: "pass"|"fail"|"pending", auto: boolean}`, or null) and `commit` (the newest commit on a
+ * branch naming its key, an ISO time, or null). With no open pull request it is stuck when it changed
+ * `hours` ago or more and no commit is that recent; with one, when its ci failed or its auto-merge is not
+ * armed. `{key, state, age, why}`. */
+export function stuckOf(facts, now, hours = 6) {
+  const { key, state, since, pr, commit } = facts;
+  const quiet = (at) => !Number.isFinite(Date.parse(at ?? "")) || new Date(now).getTime() - Date.parse(at) >= hours * 3600000;
+  const age = ageOf(since, now);
+  let why = null;
+  if (!pr) {
+    if (quiet(since) && quiet(commit)) why = `no PR, ${commit ? `last commit ${ageOf(commit, now)} ago` : "no commits"}`;
+  } else if (pr.ci === "fail") why = `PR ci failed`;
+  else if (!pr.auto) why = `PR auto-merge not armed`;
+  return why ? { key, state, age, why } : null;
+}
+
+/** The line status prints for a stuck issue. */
+export function stuckLine(s) {
+  return `stuck: ${s.key} ${s.state} ${s.age}, ${s.why}`;
+}

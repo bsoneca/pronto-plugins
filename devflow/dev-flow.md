@@ -207,6 +207,8 @@ that is 12 app issues and 3 `infra` issues (and 3 `design` issues for the archit
 capacity, and `status` prints planned against capacity per lane and the Ready queue waiting to be
 pulled. A split of a lane between apps stays by hand in planning.
 
+`status` also prints a `stuck:` line (and a `stuck` list in `--json`) for each issue in Implementing or Review that no work moves: no linked open pull request and no commit on a branch naming its key in the last `stuckHours` (default 6, devflow.cue), or a pull request whose ci failed or whose auto-merge is not armed, e.g. `stuck: PRONTO-444 Implementing 2d, no PR, no commits` (flow.js `stuckOf`).
+
 **WIP is 1 in Implementing per person** (so `team.engineers` app issues and `team.sre` infra issues
 at once; `start` refuses beyond that, a P0 excepted). Review (gate, ci, automerge) holds no slot, so
 an engineer is never idle after one issue: when its pull request opens, or its issue is cancelled,

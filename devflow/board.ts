@@ -9,9 +9,9 @@
 //   board.ts file <repo> --title <t> --app <app> [--bug] [--priority P0..P3] [--flag <f>] [--body <text>]
 //   board.ts close <repo> [<n>] [--json]                a finished sprint's report (the last finished by default)
 //   board.ts next <repo> [--theme <t>] <KEY...>          plan into the next sprint (made when absent), in Refine; refuses past a lane's capacity
-import { flagsOf } from "../intents/shell.ts";
+import { cmd, flagsOf } from "../intents/shell.ts";
 import { type Cycle, esc, type Issue } from "./board/board.ts";
-import { bugPlace, capacity, claimText, claimWinner, laneOf, loopOf, mayPlan, mayStart, nameOf, priorityOf, pullNext, roleOf, sprintDates, sprintEndFor, sprintName, sprintNumber } from "./flow.js";
+import { bugPlace, capacity, claimText, claimWinner, keyOf, laneOf, loopOf, mayPlan, mayStart, nameOf, priorityOf, pullNext, roleOf, stuckLine, stuckOf, sprintDates, sprintEndFor, sprintName, sprintNumber } from "./flow.js";
 import { boardOf, devflowOf, type Role } from "./spec.ts";
 
 const [verb, repoArg, ...rest] = Deno.args;
@@ -85,6 +85,33 @@ async function sprintCycle(n: number, theme: string) {
 }
 const titleOf = (s: Sprint | null) => (s ? s.cycle.name : "none");
 
+/** The newest commit, an ISO time, on a branch of the repository whose name carries `k` (local and remote refs). */
+async function lastCommit(k: string): Promise<string | null> {
+  const r = await cmd("git", ["-C", repo, "for-each-ref", "--sort=-committerdate", "--format=%(refname)\t%(committerdate:iso-strict)", "refs/heads", "refs/remotes"]);
+  if (!r.ok) return null;
+  for (const l of r.out.split("\n")) {
+    const [ref, at] = l.split("\t");
+    if (ref && at && keyOf(id, ref.replace(/^refs\/(heads|remotes)\//, "")) === k) return at;
+  }
+  return null;
+}
+
+/** The open pull request linked to an issue, with its ci and auto-merge, or null when there is none. */
+async function openPr(i: Issue): Promise<{ ci: "pass" | "fail" | "pending"; auto: boolean } | null> {
+  for (const l of await board.links(project, i.id).catch(() => [])) {
+    if (!/\/pull\/\d+/.test(l.url)) continue;
+    const r = await cmd("gh", ["pr", "view", l.url, "--json", "state,autoMergeRequest,statusCheckRollup"]);
+    if (!r.ok) continue;
+    const p = JSON.parse(r.out) as { state: string; autoMergeRequest: unknown; statusCheckRollup: { conclusion?: string; status?: string }[] };
+    if (p.state !== "OPEN") continue;
+    const cs = p.statusCheckRollup ?? [];
+    const failed = cs.some((c) => ["FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED"].includes(c.conclusion ?? ""));
+    const pending = cs.some((c) => c.status !== "COMPLETED");
+    return { ci: failed ? "fail" : pending ? "pending" : "pass", auto: !!p.autoMergeRequest };
+  }
+  return null;
+}
+
 async function status() {
   const [all, { loop, current, next }] = await Promise.all([board.issues(project, true), sprints(), withLanes()]);
   const inOpen = new Set([...(current?.issues ?? []), ...(next?.issues ?? [])].map((i) => i.id));
@@ -98,11 +125,19 @@ async function status() {
   // The architect's lane is never dry: design work is occasional, and an empty lane must not call for a sprint.
   const dry = Object.keys(slots).filter((l) => l !== "architect" && slots[l] > 0 && toStart(cur, l) === 0);
   const planning = next ? nxt : current ? [] : cur;
+  // Issues holding a slot (Implementing, or in Review) that no work is moving (flow.js stuckOf).
+  const now0 = new Date();
+  const held = all.filter((i) => ["implementing", "review"].includes(roleAt(i.state) ?? ""));
+  const stuck = (await Promise.all(held.map(async (i) => {
+    const pr = await openPr(i);
+    return stuckOf({ key: key(i), state: stateName(i.state), since: i.updated_at ?? "", pr, commit: pr ? null : await lastCommit(key(i)) }, now0, flow!.stuckHours);
+  }))).filter((s) => s !== null);
   const out = {
     current: titleOf(current),
     next: titleOf(next),
     finished: loop.finished.length ? `Sprint ${Math.max(...loop.finished)}` : "none",
     slots: Object.fromEntries(Object.entries(slots).map(([l, of]) => [l, { of, on: busy.filter((i) => lane(i) === l).map(key) }])),
+    stuck,
     // The sprint being planned (the next) against capacity, by lane (a cancelled issue is not planned).
     capacity: Object.fromEntries(Object.keys(slots).map((l) => [l, { planned: planning.filter((i) => lane(i) === l && roleAt(i.state) !== "cancelled").length, of: cap[l] }])),
     // The Ready issues each lane pulls, in the order it pulls them: the current sprint's, then the next's.
@@ -120,6 +155,7 @@ async function status() {
   const lanes = Object.entries(out.slots).map(([l, s]) => `${s.on.length} of ${s.of} ${l} slots busy${s.on.length ? ` (${s.on.join(", ")})` : ""}`);
   console.log(`current ${out.current}; next ${out.next}; last finished ${out.finished}`);
   console.log(lanes.join(", "));
+  for (const s of stuck) console.log(stuckLine(s));
   console.log(`planning ${next ? out.next : current ? "a new next sprint" : "a new sprint"}: ${Object.entries(out.capacity).map(([l, c]) => `${c.planned} of ${c.of} ${l}`).join(", ")} (${flow!.sprint.perPerson} per person)`);
   for (const [l, is] of Object.entries(out.ready)) console.log(`  ready to pull, ${l}: ${is.length ? is.join("; ") : "none"}`);
   if (dry.length) console.log(`  nothing left to start in the current sprint: ${dry.join(", ")}`);
