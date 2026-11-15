@@ -1,7 +1,7 @@
 # Releases the billing broker to a cluster the operator runs (pronto's envs.Metal: k3s on a node
 # reached over SSH, its traffic arriving through the node's Cloudflare Tunnel to Envoy Gateway),
 # beside release.nu's Cloud Run, in the shape identity/metal.nu gives the identity broker:
-#   bin/pronto-billing-broker metal --ssh bruno@node --domain D --secrets F (or --project P) [--fee N] [--sandbox-tenants RE] [--door-asked]
+#   bin/pronto-billing-broker metal --ssh user@node --kubeconfig K --domain D --secrets F (or --project P) [--fee N] [--sandbox-tenants RE] [--door-asked]
 #
 # The broker imports nothing from outside its own files, so no image is built: the pinned Deno image
 # runs shared.ts, broker/*.ts and the one vendored Postgres client from a ConfigMap. What it keeps
@@ -189,8 +189,8 @@ def gc-secret [name: string, project: string]: nothing -> string {
 }
 
 export def main [
-	--ssh: string                  # The node, as the app's envs.Metal names it: bruno@13.140.186.223
-	--kubeconfig: string = "$HOME/.cache/contabo2.kubeconfig" # On the node
+	--ssh: string                  # The node, as the app's envs.Metal names it: user@203.0.113.7
+	--kubeconfig: string           # The cluster's kubeconfig on the node
 	--domain: string               # Where the broker answers, its issuer: billing.example.com
 	--project: string = ""         # The Google Cloud project whose Secret Manager holds the broker's secrets
 	--secrets: string = ""         # Or the SOPS file holding the Secret <service>, in a pronto checkout (its services/billing-broker/secrets.metal.enc.yaml)
@@ -200,7 +200,7 @@ export def main [
 	--service: string = "billing-broker" # The secrets' names in Secret Manager are <service>-<suffix>, as release.nu stores them
 	--door-asked # Each call through the door when its tenant asks (the app's flag, told by its billing service); the broker keeps its keys until a deploy without it (PRONTO-218)
 ] {
-	if ([$ssh $domain] | any { is-empty }) { error make {msg: "--ssh and --domain are both required"} }
+	if ([$ssh $kubeconfig $domain] | any { is-empty }) { error make {msg: "--ssh, --kubeconfig and --domain are all required"} }
 	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
 	if not ($fee >= 0 and $fee < 100) { error make {msg: "--fee is a percentage under 100"} }
 	let sandbox = ($sandbox_tenants | is-not-empty)

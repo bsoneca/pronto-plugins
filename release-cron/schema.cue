@@ -23,7 +23,7 @@ releaseCron: #Cron
 	watch: [...string]
 	// Where the app is released. `cloud-run` (the default, no target named): release.cue's GCP, `./saytw release@gcp`
 	// and Cloud Run's traffic. `command`: an app released elsewhere (aprende, on Cloudflare Pages, with no release.cue;
-	// Bonk Chess, on the Contabo node): the command that releases the checked-out tree and the one that prints the
+	// Bonk Chess, on a k3s node): the command that releases the checked-out tree and the one that prints the
 	// commit production serves, both run in the app's folder, and the address the probes ask. A target that names no
 	// `kind` is a command's.
 	target: *#CloudRun | #Command

@@ -1,7 +1,7 @@
 # Releases the identity broker to a cluster the operator runs (pronto's envs.Metal: k3s on a node
 # reached over SSH, its traffic arriving through the node's Cloudflare Tunnel to Envoy Gateway),
 # beside release.nu's Cloud Run:
-#   bin/pronto-identity-broker metal --ssh bruno@node --domain D --google-client-id C --secrets F (or --project P) [--airlock [--door-asked --door-tenants T]]
+#   bin/pronto-identity-broker metal --ssh user@node --kubeconfig K --domain D --google-client-id C --secrets F (or --project P) [--airlock [--door-asked --door-tenants T]]
 #
 # The broker imports nothing from outside its own files, so no image is built: the pinned Deno image
 # runs oidc.ts, broker/*.ts and the one vendored Postgres client from a ConfigMap. What it keeps between
@@ -172,8 +172,8 @@ def gc-secret [name: string, project: string]: nothing -> string {
 }
 
 export def main [
-	--ssh: string                  # The node, as the app's envs.Metal names it: bruno@13.140.186.223
-	--kubeconfig: string = "$HOME/.cache/contabo2.kubeconfig" # On the node
+	--ssh: string                  # The node, as the app's envs.Metal names it: user@203.0.113.7
+	--kubeconfig: string           # The cluster's kubeconfig on the node
 	--domain: string               # Where the broker answers, its issuer: id.example.com
 	--google-client-id: string     # The operator's Google client, registered for https://<domain>/callback/google
 	--project: string = ""         # The Google Cloud project whose Secret Manager holds the broker's secrets
@@ -194,7 +194,7 @@ export def main [
 	--door-asked # With --airlock: each exchange through the door when its tenant asks (the app's flag signin_door); the broker keeps its secret until a deploy without it
 	--door-tenants: string = "" # With --door-asked: the tenants whose flag is asked (comma separated, `*` for a port); the others go straight to Google
 ] {
-	if ([$ssh $domain $google_client_id] | any { is-empty }) { error make {msg: "--ssh, --domain and --google-client-id are all required"} }
+	if ([$ssh $kubeconfig $domain $google_client_id] | any { is-empty }) { error make {msg: "--ssh, --kubeconfig, --domain and --google-client-id are all required"} }
 	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
 	let phone = if $phone_otp == "broker" {
 		if ([$phone_sms $phone_sms_gate $phone_admit $phone_tenants] | any { is-empty }) {

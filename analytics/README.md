@@ -90,13 +90,13 @@ client and Umami's app secret are read from the project's Secret Manager and pip
 what Cloud Run's kept still decrypts and signs. Copy the data, then point the two names at the tunnel.
 
 ```sh
-bin/pronto-analytics metal --ssh bruno@13.140.186.223 --project brawl-chess \
+bin/pronto-analytics metal --ssh user@203.0.113.7 --project brawl-chess \
   --grafana-domain metrics.bonkchess.com --umami-domain umami.bonkchess.com \
   --users-file <grafanaUsers as JSON> --titles '{"bonk-chess": "Bonk Chess"}' \
   --dashboards bonk-chess/business=<pronto>/apps/brawl-chess/observability/analytics.business.dashboard.json,…
 ```
 
-`bin/pronto-analytics metal dashboards --ssh bruno@13.140.186.223 --dashboards app/name=path,…` ships the
+`bin/pronto-analytics metal dashboards --ssh user@203.0.113.7 --dashboards app/name=path,…` ships the
 dashboards alone, for an app's release to run after it: each ConfigMap whose file differs from the live one is
 applied (a read that fails fails the command; only a ConfigMap not there reads as empty), and a digest of all
 the dashboards is set as Grafana's pod-template annotation `pronto.dev/dashboards` on every run, then the rollout

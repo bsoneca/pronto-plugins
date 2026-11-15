@@ -2,7 +2,7 @@
 # their sinks and credentials, and who may call them (PRONTO-271: Studio's model doors, beside the LLM
 # gateways). The objects are common/airlock.nu's, as the billing and identity brokers' airlocks are;
 # only where they come from differs: a spec the app writes in CUE and exports, never written by hand.
-#   bin/pronto-airlock metal --spec <file.json> [--ssh bruno@node] [--kubeconfig K]
+#   bin/pronto-airlock metal --spec <file.json> --ssh user@node --kubeconfig K
 #
 # The spec (JSON):
 #   {namespace, name, caller, from: [NetworkPolicy peers], partOf?,
@@ -69,10 +69,10 @@ export def manifests [spec: record]: nothing -> string {
 
 export def main [
 	--spec: string                 # The app's airlock spec, exported from its CUE (JSON)
-	--ssh: string = "bruno@13.140.186.223" # The node
-	--kubeconfig: string = "$HOME/.cache/contabo2.kubeconfig" # On the node
+	--ssh: string                  # The node: user@203.0.113.7
+	--kubeconfig: string           # The cluster's kubeconfig on the node
 ] {
-	if ($spec | is-empty) { error make {msg: "--spec <file.json> is required"} }
+	if ([$spec $ssh $kubeconfig] | any { is-empty }) { error make {msg: "--spec <file.json>, --ssh and --kubeconfig are all required"} }
 	let s = (open --raw $spec | from json | check $in)
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }

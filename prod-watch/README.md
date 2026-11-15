@@ -71,10 +71,12 @@ what is read. In the app's `prod_watch.cue`:
 
 ```cue
 prodWatch: node: {
-	namespace: "brawl-chess"                 // release@k8s's namespace: the app's folder name
+	host:       "user@203.0.113.7"           // the node, user@host
+	kubeconfig: "$HOME/.kube/config"         // the cluster's kubeconfig on the node
+	namespace:  "brawl-chess"                // release@k8s's namespace: the app's folder name
 	// containers: ["auth", "crud"]          // only these containers; none named, all
 	// deployments: ["brawl-chess-auth"]     // only these Deployments' pods; none named, all
-	// host, kubeconfig, logs: {namespace, service, port}: the node's, with defaults
+	// logs: {namespace, service, port}: the node's VictoriaLogs, with defaults
 }
 ```
 

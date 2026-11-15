@@ -7,7 +7,7 @@ loads, grouped into issues, counted per release and searchable, as Sentry does, 
 
 [GlitchTip](https://glitchtip.com) (AGPL) speaks the Sentry protocol, so any Sentry SDK or a small
 reporter of our own sends to it. It is one process (web, ingest and tasks) with its queue in its own
-Postgres, about 120 MiB at rest (PRONTO-187, measured on the Contabo node). Weighed against it:
+Postgres, about 120 MiB at rest (PRONTO-187, measured on a k3s node). Weighed against it:
 
 - **Self-hosted Sentry** needs 16 GiB or more, plus Kafka, ClickHouse, Redis and Snuba.
 - **Highlight.io** needs ClickHouse, Kafka and Redis, and its open-source edition is in maintenance.

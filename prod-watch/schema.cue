@@ -38,9 +38,9 @@ prodWatch: #Watch
 
 #Node: {
 	// The ssh destination of the node, user@host.
-	host: *"bruno@13.140.186.223" | (string & =~"^[A-Za-z0-9._@-]+$")
+	host!: string & =~"^[A-Za-z0-9._@-]+$"
 	// The kubeconfig on that host; $HOME is the host's. Read to find the Service's address and the pods.
-	kubeconfig: *"$HOME/.cache/contabo2.kubeconfig" | (string & =~"^[A-Za-z0-9_$/.~-]+$")
+	kubeconfig!: string & =~"^[A-Za-z0-9_$/.~-]+$"
 	// The app's namespace (release@k8s's, the app's folder name): the logs of its pods are the ones read.
 	namespace!: =~"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
 	// Only these containers and the pods of only these Deployments; none named, all of the namespace's.
