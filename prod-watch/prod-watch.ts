@@ -189,6 +189,19 @@ if (node) {
 // Each source read up to its own limit: the window ends at the earliest cutoff, for both, and what lies
 // past it is the next run's.
 entries = entries.filter((e) => Date.parse(e.timestamp) <= Date.parse(reached));
+// A line can reach its source after the run that asked for its window (Vector's buffer, Cloud Logging's
+// ingestion) with a timestamp before the cursor. So a run that read to now commits its cursor a lag behind
+// it, and the next one reads that overlap again: the entries it already counted, kept by hash in the cursor,
+// are not counted twice.
+const lag = 5 * 60e3;
+const hashOf = async (e: unknown) => [...new Uint8Array(await crypto.subtle.digest("SHA-1", new TextEncoder().encode(JSON.stringify(e))))].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+const hashes = new Map<unknown, string>();
+for (const e of entries) hashes.set(e, await hashOf(e));
+if (!since) {
+  const counted = new Set<string>(cursor?.seen ?? []);
+  entries = entries.filter((e) => !counted.has(hashes.get(e)!));
+}
+const committed = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
 const { report, ledger: next } = triage(group(entries, rules, lifecycle), ledger, reached);
 const where = [
   ...(services.length ? [`services ${services.join(", ")} (${project})`] : []),
@@ -200,5 +213,7 @@ else console.log(`${where}, released: ${released}${serving}\n` + render(report, 
 // A window asked for is only looked at: the ledger and the cursor move with the cursor's runs alone.
 if (!since) {
   write("ledger.json", next);
-  write("cursor.json", { at: reached });
+  // The overlap is read again, so what it holds is what the next run must not count again.
+  const seen = [...hashes].filter(([e]) => Date.parse((e as { timestamp: string }).timestamp) > Date.parse(committed)).map(([, h]) => h);
+  write("cursor.json", { at: committed, seen });
 }
