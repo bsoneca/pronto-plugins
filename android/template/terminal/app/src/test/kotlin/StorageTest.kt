@@ -91,7 +91,7 @@ class StorageTest {
         for (c in Cases.list(Cases.all.getJSONArray("resume"))) {
             val why = c.getString("why")
             val ns = c.getJSONObject("namespaces")
-            val names = ns.keys().asSequence().toList()
+            val names = ns.keys().asSequence().toList().sorted()
             val plain = HashMap<String, String>()
             for (n in names) for ((k, v) in map(ns.getJSONObject(n))) plain["$n/$k"] = v
             val sealed = HashMap<String, String>()
