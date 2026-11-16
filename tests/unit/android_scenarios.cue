@@ -178,4 +178,9 @@ cases: {
 		{call: "androidScenarios.writesMade", args: [[{n: 0, url: "https://bonkchess.com/shell.json", method: "GET", status: 200, body: ""}]], expect: []},
 		{call: "androidScenarios.writesMade", args: [[{n: 0, url: "https://bonkchess.com/a", method: "GET", status: 200, body: ""}, {n: 1, url: "https://bonkchess.com/auth/guest", method: "POST", status: 201, body: ""}]], expect: ["POST https://bonkchess.com/auth/guest"]},
 	]}
+	"a device whose user is still locked (a cold boot of an emulator with a screen lock) is told from one that is unlocked": {suite: "android", steps: [
+		{call: "androidScenarios.userLocked", args: ["  State: RUNNING_LOCKED\nStarted users state: [0=RUNNING_LOCKED]"], expect: true},
+		{call: "androidScenarios.userLocked", args: ["  State: RUNNING_UNLOCKED\nStarted users state: [0=RUNNING_UNLOCKED]"], expect: false},
+		{call: "androidScenarios.userLocked", args: [""], expect: false},
+	]}
 }

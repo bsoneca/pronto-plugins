@@ -239,6 +239,29 @@ const adb = (...args: string[]) => run(adbPath(), args);
 /** One command line for the device's shell. */
 const sh = (line: string) => adb("shell", line);
 
+/**
+ * Whether `dumpsys user` says the device's user is still locked (RUNNING_LOCKED): after a cold boot of an emulator that has a screen
+ * lock (android/test/autofill/emulator.sh sets a PIN, which a strong biometric needs), the credential-encrypted storage stays locked
+ * until the PIN is entered, and the system then resolves no activity of an app that is not direct-boot aware: `am start` answers
+ * "Activity class ... does not exist" (-92) or "unable to resolve Intent" (-91) for an app that is installed and listed.
+ */
+export function userLocked(dumpsysUser: string): boolean {
+  return /RUNNING_LOCKED/.test(dumpsysUser);
+}
+
+/** Unlocks a locked device with the PIN its screen lock was given (PRONTO_ANDROID_PIN, default emulator.sh's 1234); one that is not locked is left as it is. */
+async function unlockDevice(): Promise<void> {
+  if (!userLocked(await sh("dumpsys user"))) return;
+  const pin = Deno.env.get("PRONTO_ANDROID_PIN") ?? "1234";
+  await sh("input keyevent KEYCODE_WAKEUP");
+  await sh("input keyevent KEYCODE_MENU");
+  await sleep(1000);
+  await sh(`input text ${pin}`);
+  await sh("input keyevent KEYCODE_ENTER");
+  await until("the device unlocked", 60, async () => [userLocked(await sh("dumpsys user")) ? null : true, "the device is still locked: its PIN is not PRONTO_ANDROID_PIN"]);
+  await sh("input keyevent KEYCODE_HOME");
+}
+
 /** The driver's one-line socket: a retry while the app is (re)starting and nothing answers yet. */
 async function ask(q: object): Promise<any | null> {
   let conn: Deno.Conn;
@@ -852,6 +875,7 @@ async function main() {
   const results: string[] = [];
   let failed = 0;
   try {
+    await unlockDevice();
     await adb("install", "-r", apk);
     await adb("forward", "tcp:8765", "tcp:8765");
     const door = running.base.match(/^https:\/\/localhost:(\d+)/);
