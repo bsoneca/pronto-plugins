@@ -22,17 +22,28 @@ class StorageTest {
     fun whatAFlagAnswerSays() {
         for (c in Cases.list(Cases.all.getJSONArray("flag"))) {
             val why = c.getString("why")
-            val got = Flag.parse(c.getString("body"), c.getBoolean("default"))
+            val got = Flag.parse(c.getString("body"))
             val want = c.getJSONObject("want")
-            assertEquals("$why: value", want.getBoolean("value"), got.value)
-            assertEquals("$why: reason", want.getString("reason"), got.reason)
-            if (want.has("errorCode")) assertEquals("$why: errorCode", true, got.errorCode?.contains(want.getString("errorCode")) == true)
-            else assertEquals("$why: no error", null, got.errorCode)
+            if (want.has("failed")) {
+                assertEquals("$why: failed", true, got is Answer.Failed && got.cause.contains(want.getString("failed")))
+            } else {
+                assertEquals("$why: value", Answer.Value(want.getBoolean("value"), want.getString("reason")), got)
+            }
         }
     }
 
     @Test
-    fun theLastAnswerIsKeptAndUsedWhenTheDoorCannotBeReached() {
+    fun theBuildsSnapshot() {
+        for (c in Cases.list(Cases.all.getJSONArray("snapshot"))) {
+            val why = c.getString("why")
+            val got = try { Snapshot.parse(c.getString("json")) } catch (e: org.json.JSONException) { null }
+            val want = c.get("want")
+            if (want is JSONObject) assertEquals(why, want.keys().asSequence().associateWith { want.getBoolean(it) }, got) else assertEquals("$why: fails", null, got)
+        }
+    }
+
+    @Test
+    fun theLastAnswerThenTheBuildsSnapshotAndNeverADefault() {
         for (c in Cases.list(Cases.all.getJSONArray("evaluate"))) {
             val why = c.getString("why")
             val answer = c.getJSONObject("answer")
@@ -43,11 +54,20 @@ class StorageTest {
                 override fun get(key: String): Boolean? = kept[key]
                 override fun put(key: String, value: Boolean) { kept[key] = value }
             }
+            val snap = c.getJSONObject("snapshot")
+            val snapshot = object : FlagSnapshot {
+                override fun get(key: String): Boolean? = if (snap.has(key)) snap.getBoolean(key) else null
+            }
             val reports = ArrayList<String>()
-            val got = Flag.evaluate("sealed_storage", c.getBoolean("default"), {
-                if (answer.has("throws")) throw java.io.IOException(answer.getString("throws")) else answer.getString("body")
-            }, cache) { reports.add(it) }
             val want = c.getJSONObject("want")
+            val got = try {
+                Flag.evaluate("sealed_storage", {
+                    if (answer.has("throws")) throw java.io.IOException(answer.getString("throws")) else answer.getString("body")
+                }, cache, snapshot) { reports.add(it) }
+            } catch (e: IllegalStateException) {
+                assertEquals("$why: fails", true, want.has("fails") && e.message!!.contains("no cached value and no value in the build's snapshot"))
+                continue
+            }
             assertEquals("$why: value", want.getBoolean("value"), got.value)
             assertEquals("$why: reason", want.getString("reason"), got.reason)
             assertEquals("$why: reported", want.getBoolean("reported"), reports.isNotEmpty())
