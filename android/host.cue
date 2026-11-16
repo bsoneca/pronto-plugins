@@ -38,7 +38,10 @@ _template: {
 	"app/src/main/assets/autofill.json":   _ @embed(file="template/app/src/main/assets/autofill.json", type=text)
 	"app/src/test/kotlin/FillTest.kt":     _ @embed(file="template/app/src/test/kotlin/FillTest.kt", type=text)
 	"app/src/test/kotlin/AskTest.kt":      _ @embed(file="template/app/src/test/kotlin/AskTest.kt", type=text)
+	"app/src/test/kotlin/Cases.kt":        _ @embed(file="template/app/src/test/kotlin/Cases.kt", type=text)
 	"sign-release.sh":                     _ @embed(file="template/sign-release.sh", type=text)
+	// The JVM tests' cases, as data (cases.cue); the Kotlin tests are loops over it.
+	"app/src/test/resources/android_cases.json": json.Indent(json.Marshal(_cases), "", "  ") + "\n"
 }
 
 // Written once and then the app's: pronto does not compile its screens for
@@ -69,6 +72,8 @@ _terminal: {
 	"app/src/main/kotlin/Fill.kt":           _template["app/src/main/kotlin/Fill.kt"]
 	"app/src/test/kotlin/FillTest.kt":       _template["app/src/test/kotlin/FillTest.kt"]
 	"app/src/test/kotlin/AskTest.kt":        _template["app/src/test/kotlin/AskTest.kt"]
+	"app/src/test/kotlin/Cases.kt":          _template["app/src/test/kotlin/Cases.kt"]
+	"app/src/test/resources/android_cases.json": _template["app/src/test/resources/android_cases.json"]
 	"app/src/debug/kotlin/Driver.kt":      _ @embed(file="template/terminal/app/src/debug/kotlin/Driver.kt", type=text)
 	"app/src/release/kotlin/Driver.kt":    _ @embed(file="template/terminal/app/src/release/kotlin/Driver.kt", type=text)
 	"app/src/debug/kotlin/Passkeys.kt":    _ @embed(file="template/terminal/app/src/debug/kotlin/Passkeys.kt", type=text)

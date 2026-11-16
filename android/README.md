@@ -124,3 +124,5 @@ From a bootstrapped pronto app whose four verbs are green:
 ./saytw --script tools.nu cue vet -c ./android
 deno test --allow-read --allow-env android/test/host_test.ts android/test/bound_test.ts
 ```
+
+**JVM unit cases are data.** The cases of the native code's JVM tests (`Signer`, `Fill.probe`/`targets`, `Ask`, `Seal`, `Unlock`) are in [`cases.cue`](cases.cue), exported to each app as `android/app/src/test/resources/android_cases.json`; `FillTest`, `AskTest`, `SealTest` and `UnlockTest` are loops over it (`Cases.kt` loads it). Add a case in CUE, never in Kotlin; `test@android` runs them.
