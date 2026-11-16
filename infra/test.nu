@@ -30,6 +30,7 @@ const plans = [
 	[./infra _wif.tofu]
 	[./infra _retire.tofu]
 	[./infra _always.tofu]
+	[./infra _forget.tofu]
 	[./examples/infra plan.tofu]
 ]
 

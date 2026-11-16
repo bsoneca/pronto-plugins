@@ -40,7 +40,13 @@ import (
 		}
 		resource: {}
 		import: [for i in _imports if !state.projects[i.project].create || i.found {to: i.to, id: i.id}]
+		// A forgotten address leaves the state with no delete (#State.forget).
+		if len(state.forget) > 0 {
+			removed: [for a, _ in state.forget {from: a, lifecycle: destroy: false}]
+		}
 	}
+	// No address is both declared and forgotten.
+	forgottenDeclared: [for a, _ in state.forget let t = strings.SplitN(a, ".", 2) if tofu.resource[t[0]][t[1]] != _|_ {a}] & []
 
 	// Each import names its project: one this state makes (create) has nothing to import, its
 	// resources all new, so its imports are left out, but for what the project says it found.
