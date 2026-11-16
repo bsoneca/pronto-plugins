@@ -178,4 +178,11 @@ cases: {
 		{call: "androidScenarios.writesMade", args: [[{n: 0, url: "https://bonkchess.com/shell.json", method: "GET", status: 200, body: ""}]], expect: []},
 		{call: "androidScenarios.writesMade", args: [[{n: 0, url: "https://bonkchess.com/a", method: "GET", status: 200, body: ""}, {n: 1, url: "https://bonkchess.com/auth/guest", method: "POST", status: 201, body: ""}]], expect: ["POST https://bonkchess.com/auth/guest"]},
 	]}
+	"the app's start is asked again while the platform finishes with a fresh install, only on its two answers for that, and for a bounded time (PRONTO-485)": {suite: "android", steps: [
+		{call: "android.startAfter", args: [0, "x"], holds: {answer: "Starting", calls: 1}, why: "a start that works is asked once"},
+		{call: "android.startAfter", args: [3, "Error: Activity class {dev.pronto.x/dev.pronto.x.MainActivity} does not exist."], holds: {answer: "Starting", calls: 4}},
+		{call: "android.startAfter", args: [2, "Error: Activity not started, unable to resolve Intent { cmp=dev.pronto.x/.MainActivity }"], holds: {answer: "Starting", calls: 3}},
+		{call: "android.startAfter", args: [5, "Error: Permission Denial: starting Intent"], holds: {threw: "Error: Permission Denial: starting Intent", calls: 1}, why: "any other failure is the first answer"},
+		{call: "android.startAfter", args: [1000000, "Error: Activity class {a/b} does not exist.", -1], holds: {calls: 1}, why: "with no time left it fails on the first answer"},
+	]}
 }

@@ -239,6 +239,23 @@ const adb = (...args: string[]) => run(adbPath(), args);
 /** One command line for the device's shell. */
 const sh = (line: string) => adb("shell", line);
 
+/**
+ * `am start` of an app just installed on an emulator that has just booted answers "Activity class ... does not exist" or "unable to
+ * resolve Intent" for a while, though the package is installed and its activity listed (measured on this Mac's pronto-terminal AVD:
+ * some seconds to a minute or two, then every start works): the platform is still finishing with the package. The start is asked
+ * again every two seconds, up to `seconds`, only on those two answers; any other failure, and the end of the time, fail it.
+ */
+export async function startApp(line: string, seconds = 120, start: (line: string) => Promise<string> = sh, everyMs = 2000): Promise<string> {
+  const end = Date.now() + seconds * 1000;
+  for (;;) {
+    try { return await start(line); } catch (e) {
+      const said = e instanceof Error ? e.message : String(e);
+      if (!/does not exist|unable to resolve/.test(said) || Date.now() > end) throw e;
+      await sleep(everyMs);
+    }
+  }
+}
+
 /** The driver's one-line socket: a retry while the app is (re)starting and nothing answers yet. */
 async function ask(q: object): Promise<any | null> {
   let conn: Deno.Conn;
@@ -434,7 +451,7 @@ class Phone {
     const door = this.base.match(/^https:\/\/localhost:(\d+)/);
     if (door) await adb("reverse", `tcp:${door[1]}`, `tcp:${door[1]}`);
     this.page = null;
-    await sh(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(seeded(path, `${this.scenario}/${actor}`))} --es actor ${quote(actor)} --es browser standin`);
+    await startApp(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(seeded(path, `${this.scenario}/${actor}`))} --es actor ${quote(actor)} --es browser standin`);
     // The prompt of an app that asks for its owner (Unlock.kt) shows before the driver answers: the sensor is touched once it is up.
     if (unlock) await finger(30);
     await until(`${actor}'s terminal at ${path}`, 30, async () => {
