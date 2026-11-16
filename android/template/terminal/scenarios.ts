@@ -652,12 +652,6 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
           // the app's own scripts (TerminalEngine), whose source has words like "Anonymous" in it. The sealed
           // store must exist, or an empty directory would pass.
           const text = sub(arg as string);
-          // A rehearsal build is the release's, which run-as cannot open: the check is the debug build's, said so, never passed silently.
-          const probe = await new Deno.Command(adbPath(), { args: ["shell", `run-as ${phone.id} true`], stdin: "null", stdout: "piped", stderr: "piped" }).output();
-          if (probe.code !== 0 && /not debuggable/.test(new TextDecoder().decode(probe.stdout) + new TextDecoder().decode(probe.stderr))) {
-            console.log(`not checked: ${phone.id} is not debuggable, so its private files cannot be read (run the debug build to check them)`);
-            break;
-          }
           const dbs = await sh(`run-as ${phone.id} ls databases`);
           if (!dbs.split(/\s+/).includes("terminal-sealed.db")) throw new Fail(`no sealed store in ${phone.id}'s databases: ${dbs.trim()}`);
           const out = await new Deno.Command(adbPath(), { args: ["shell", `run-as ${phone.id} grep -rlaF --exclude-dir=code_cache -- ${quote(text)} .`], stdin: "null", stdout: "piped", stderr: "piped" }).output();
@@ -888,8 +882,15 @@ async function main() {
     if (door) await adb("reverse", `tcp:${door[1]}`, `tcp:${door[1]}`);
     const phone = new Phone(id, running.base);
     phone.messages = await Deno.readTextFile("messages/en.json").then(JSON.parse).catch(() => ({}));
+    // A rehearsal build is the release's: run-as cannot open its private files, so a scenario that asserts on them is
+    // named as skipped, never passed. The debug build runs it.
+    const debuggable = (await new Deno.Command(adbPath(), { args: ["shell", `run-as ${id} true`], stdin: "null", stdout: "null", stderr: "null" }).output()).success;
     for (const name of names) {
       const t = Date.now();
+      if (!debuggable && JSON.stringify(scenarios[name].steps ?? []).includes('"undisclosed"')) {
+        results.push(`skip  ${name}  asserts on private files, which ${id}'s build (not debuggable) does not let run-as read: run the debug build`);
+        continue;
+      }
       try {
         await runScenario(name, scenarios[name], phone, dir);
         // On an app's released address the run only reads: any request the page made that is not a GET (the driver's log) fails it.
