@@ -46,7 +46,7 @@ object Snapshot {
     // {"version": 1, "source": "...", "flags": {"<key>": true|false}}; anything else fails.
     fun parse(json: String): Map<String, Boolean> {
         val o = org.json.JSONObject(json).getJSONObject("flags")
-        return o.keys().asSequence().associateWith { o.getBoolean(it) }
+        return o.keys().asSequence().associateWith { (o.get(it) as? Boolean) ?: throw org.json.JSONException("the snapshot's value of $it is not a boolean") }
     }
 }
 
