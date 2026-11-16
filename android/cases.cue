@@ -124,23 +124,36 @@ _cases: {
 	}
 
 	// Storage.pick(marker, flag): which store a launch uses. The choice is sticky and one way: with the marker the sealed store is
-	// used whatever the flag says or whether the phone is offline (flag null: unknown); with none, only a flag that is on adopts it.
+	// used whatever the flag says or whether the phone is offline; with none, only a flag that is On adopts it. flag is "on", "off"
+	// or "unknown" (Unknown(cause)): Unknown keeps the current store (plain) for this launch only, writes no marker and moves nothing.
 	pick: [
-		{why: "with the marker, sealed, the flag on", marker: true, flag: true, want: "sealed"},
-		{why: "with the marker, sealed, though the flag has been turned off since", marker: true, flag: false, want: "sealed"},
-		{why: "with the marker, sealed, offline", marker: true, flag: null, want: "sealed"},
-		{why: "no marker and the flag on: adopt (write the marker, then seal)", marker: false, flag: true, want: "adopt"},
-		{why: "no marker and the flag off: plain", marker: false, flag: false, want: "plain"},
-		{why: "no marker and the flag unknown (offline, a timeout): plain", marker: false, flag: null, want: "plain"},
+		{why: "with the marker, sealed, the flag on", marker: true, flag: "on", want: "sealed"},
+		{why: "with the marker, sealed, though the flag has been turned off since", marker: true, flag: "off", want: "sealed"},
+		{why: "with the marker, sealed, though the flag is unknown (offline)", marker: true, flag: "unknown", want: "sealed"},
+		{why: "no marker and the flag on: adopt (write the marker, then seal)", marker: false, flag: "on", want: "adopt"},
+		{why: "no marker and the flag off: plain", marker: false, flag: "off", want: "plain"},
+		{why: "no marker and the flag unknown: plain for this launch, never adopt", marker: false, flag: "unknown", want: "plain"},
 	]
 
-	// Flag.parse(body): the boolean an OFREP answer carries; anything else is unknown (null), never off.
+	// Flag.parse(body): what an OFREP answer carries; anything else is Unknown with a cause, never off and never null.
 	flag: [
-		{why: "an answer with the value true", body: #"{"key":"sealed_storage","value":true,"reason":"STATIC","variant":"on"}"#, want: true},
-		{why: "an answer with the value false", body: #"{"key":"sealed_storage","value":false,"reason":"STATIC","variant":"off"}"#, want: false},
-		{why: "an error answer is unknown", body: #"{"key":"sealed_storage","errorCode":"FLAG_NOT_FOUND"}"#, want: null},
-		{why: "a value that is not a boolean is unknown", body: #"{"key":"sealed_storage","value":"true"}"#, want: null},
-		{why: "a body that is not JSON is unknown", body: "<html>", want: null},
+		{why: "an answer with the value true", body: #"{"key":"sealed_storage","value":true,"reason":"STATIC","variant":"on"}"#, want: "on"},
+		{why: "an answer with the value false", body: #"{"key":"sealed_storage","value":false,"reason":"STATIC","variant":"off"}"#, want: "off"},
+		{why: "an error answer is Unknown", body: #"{"key":"sealed_storage","errorCode":"FLAG_NOT_FOUND"}"#, want: "unknown", cause: "no value in the answer"},
+		{why: "a value that is not a boolean is Unknown", body: #"{"key":"sealed_storage","value":"true"}"#, want: "unknown", cause: "the value is not a boolean"},
+		{why: "a body that is not JSON is Unknown", body: "<html>", want: "unknown", cause: "the answer is not JSON"},
+	]
+
+	// Flag.evaluate(key, post, report): asking through `post`, which may fail. An IOException is Unknown with its cause, and every
+	// Unknown is reported (the app's log) with the key and the cause; On and Off report nothing. Each case then picks the store of a
+	// launch with no marker: Unknown keeps plain, and the error is on the log.
+	evaluate: [
+		{why: "an IOException is Unknown with its cause, reported, and the launch keeps plain", answer: {throws: "connection refused"},
+			want: {result: "unknown", cause: "the door did not answer: connection refused", reported: true, store: "plain"}},
+		{why: "an error answer is Unknown, reported, and the launch keeps plain", answer: {body: #"{"key":"sealed_storage","errorCode":"GENERAL"}"#},
+			want: {result: "unknown", cause: "no value in the answer", reported: true, store: "plain"}},
+		{why: "an answer On reports nothing and adopts", answer: {body: #"{"value":true}"#}, want: {result: "on", reported: false, store: "adopt"}},
+		{why: "an answer Off reports nothing and keeps plain", answer: {body: #"{"value":false}"#}, want: {result: "off", reported: false, store: "plain"}},
 	]
 
 	// Migration.once over a plain store and a sealed one: turning the switch on moves what the plain preferences hold, once, and

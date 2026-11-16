@@ -19,8 +19,6 @@ android {
         // Whether the build answers the scenario driver and takes the base, actor and path extras (MainActivity.kt):
         // the debug build does by being debuggable, the rehearsal build says so here, a release never.
         resValue("string", "pronto_driver", "off")
-        // The pronto-flags flag that puts a phone on sealed storage (android.json's "sealedFlag"; Kv.kt): none, always sealed.
-        resValue("string", "pronto_sealed_flag", "__SEALED_FLAG__")
         val base = (project.findProperty("prontoBase") as String?) ?: "__BASE__"
         resValue("string", "pronto_base", base)
         // android.json's "unlock": "biometric" opens the sealed storage with one prompt (Unlock.kt).

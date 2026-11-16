@@ -11,19 +11,50 @@ class StorageTest {
     private fun map(o: JSONObject): Map<String, String> = o.keys().asSequence().associateWith { o.getString(it) }
     private fun ints(a: JSONArray): List<Int> = (0 until a.length()).map { a.getInt(it) }
 
+    private fun result(name: String, cause: String = ""): FlagResult = when (name) {
+        "on" -> FlagResult.On
+        "off" -> FlagResult.Off
+        else -> FlagResult.Unknown(cause)
+    }
+
+    private fun name(r: FlagResult) = when (r) {
+        is FlagResult.On -> "on"
+        is FlagResult.Off -> "off"
+        is FlagResult.Unknown -> "unknown"
+    }
+
     @Test
     fun whichStoreALaunchUses() {
         for (c in Cases.list(Cases.all.getJSONArray("pick"))) {
-            val flag = if (c.isNull("flag")) null else c.getBoolean("flag")
-            assertEquals(c.getString("why"), c.getString("want"), Storage.pick(c.getBoolean("marker"), flag))
+            assertEquals(c.getString("why"), c.getString("want"), Storage.pick(c.getBoolean("marker"), result(c.getString("flag"))))
         }
     }
 
     @Test
     fun whatAFlagAnswerSays() {
         for (c in Cases.list(Cases.all.getJSONArray("flag"))) {
-            val want = if (c.isNull("want")) null else c.getBoolean("want")
-            assertEquals(c.getString("why"), want, Flag.parse(c.getString("body")))
+            val why = c.getString("why")
+            val got = Flag.parse(c.getString("body"))
+            assertEquals(why, c.getString("want"), name(got))
+            if (got is FlagResult.Unknown) assertEquals("$why: cause", true, got.cause.contains(c.getString("cause")))
+        }
+    }
+
+    @Test
+    fun anUnknownFlagIsReportedAndKeepsThePlainStore() {
+        for (c in Cases.list(Cases.all.getJSONArray("evaluate"))) {
+            val why = c.getString("why")
+            val answer = c.getJSONObject("answer")
+            val reports = ArrayList<String>()
+            val got = Flag.evaluate("sealed_storage", {
+                if (answer.has("throws")) throw java.io.IOException(answer.getString("throws")) else answer.getString("body")
+            }) { reports.add(it) }
+            val want = c.getJSONObject("want")
+            assertEquals("$why: result", want.getString("result"), name(got))
+            if (got is FlagResult.Unknown) assertEquals("$why: cause", true, got.cause.contains(want.getString("cause")))
+            assertEquals("$why: reported", want.getBoolean("reported"), reports.isNotEmpty())
+            if (want.getBoolean("reported")) assertEquals("$why: report names the key and the cause", true, reports[0].contains("sealed_storage") && reports[0].contains(want.getString("cause")))
+            assertEquals("$why: store", want.getString("store"), Storage.pick(false, got))
         }
     }
 

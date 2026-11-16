@@ -47,7 +47,7 @@ _template: {
 // Written once and then the app's: pronto does not compile its screens for
 // Android yet, so the phone's screen is authored, and which handler answers a
 // fill and from which columns is the program's to say.
-_seeded: ["app/src/main/assets/screen.js", "app/src/main/assets/autofill.json"]
+_seeded: ["app/src/main/assets/screen.js", "app/src/main/assets/autofill.json", "app/src/main/res/values/sealed_flag.xml"]
 
 // The terminal mode's project: omnishell's own interpreter running the app's
 // screens, nothing seeded because nothing is the app's to write. Its sources sit
@@ -65,6 +65,14 @@ _terminal: {
 	"app/src/main/kotlin/TerminalEngine.kt": _ @embed(file="template/terminal/app/src/main/kotlin/TerminalEngine.kt", type=text)
 	"app/src/main/kotlin/SceneView.kt":      _ @embed(file="template/terminal/app/src/main/kotlin/SceneView.kt", type=text)
 	"app/src/main/kotlin/SealedStore.kt":    _ @embed(file="template/terminal/app/src/main/kotlin/SealedStore.kt", type=text)
+	// The flag that puts a phone on the sealed storage (Kv.kt): empty here, the app's own once its generate writes it from its CUE.
+	"app/src/main/res/values/sealed_flag.xml": """
+		<?xml version="1.0" encoding="utf-8"?>
+		<resources>
+		    <string name="pronto_sealed_flag"></string>
+		</resources>
+
+		"""
 	"app/src/main/kotlin/Kv.kt":             _ @embed(file="template/terminal/app/src/main/kotlin/Kv.kt", type=text)
 	"app/src/test/kotlin/SealTest.kt":       _ @embed(file="template/terminal/app/src/test/kotlin/SealTest.kt", type=text)
 	"app/src/main/kotlin/Unlock.kt":         _ @embed(file="template/terminal/app/src/main/kotlin/Unlock.kt", type=text)
@@ -152,10 +160,6 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 	// Whether the terminal's sealed storage opens only after one strong-biometric prompt
 	// (android/android.json's `unlock`, Unlock.kt). none: its key needs no person, nobody is prompted.
 	unlock: *"none" | "biometric"
-	// The pronto-flags flag that puts a phone on the terminal's sealed storage (android/android.json's `sealedFlag`, Kv.kt),
-	// read over the door's /ofrep/: sticky and one way once a phone has it. None: always sealed. An app that asks for the
-	// unlock always seals.
-	sealedFlag: *"" | string
 	// Whether the terminal fills other apps' logins (android/android.json's `autofill`, FillService.kt):
 	// its handler named in the seeded autofill.json answers which. A fill hands out secrets, so it
 	// needs the unlock; the vault mode always fills.
@@ -277,7 +281,7 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 			"android_surface.cue": {seed: false, text: H._surface}
 		}
 		for path, source in [if H.mode == "terminal" {{_terminal, if H.autofill {_terminalFill}}}, _template][0] if path != "sign-release.sh" || H.release != null {
-			let filled = strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(source, "<!--__AUTOFILL__-->\n", [if H.autofill {_fillManifest}, ""][0], -1), "__RELEASE_PROJECT__", [if H.release != null {H.release.project}, ""][0], -1), "__RELEASE_SECRET__", [if H.release != null {H.release.secret}, ""][0], -1), "__APPLICATION_ID__", H.applicationId, -1), "__APP__", H.app, -1), "__LABEL__", H.label, -1), "__BASE__", H.base, -1), "__UNLOCK__", H.unlock, -1), "__SEALED_FLAG__", H.sealedFlag, -1)
+			let filled = strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(source, "<!--__AUTOFILL__-->\n", [if H.autofill {_fillManifest}, ""][0], -1), "__RELEASE_PROJECT__", [if H.release != null {H.release.project}, ""][0], -1), "__RELEASE_SECRET__", [if H.release != null {H.release.secret}, ""][0], -1), "__APPLICATION_ID__", H.applicationId, -1), "__APP__", H.app, -1), "__LABEL__", H.label, -1), "__BASE__", H.base, -1), "__UNLOCK__", H.unlock, -1)
 			let dest = [
 				for k in _kotlin if strings.HasPrefix(path, k) {"\(k)\(strings.Replace(H.applicationId, ".", "/", -1))/\(strings.TrimPrefix(path, k))"},
 				path,
