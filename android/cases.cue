@@ -132,40 +132,51 @@ _cases: {
 		{why: "no marker and the flag false: plain", marker: false, flag: false, want: "plain"},
 	]
 
-	// Flag.parse(body, default): OpenFeature's details of an OFREP answer: value, reason, errorCode. A boolean value is itself with
-	// the answer's reason; anything else is the declared default with reason ERROR and the cause in errorCode.
+	// Flag.parse(body): what an OFREP answer is. A boolean value is a value, with the answer's reason; anything else (an error answer, a value
+	// of another type, not JSON) is a failed answer with its cause, and a failed answer is not a value.
 	flag: [
-		{why: "an answer with the value true", body: #"{"key":"sealed_storage","value":true,"reason":"STATIC","variant":"on"}"#, default: false, want: {value: true, reason: "STATIC"}},
-		{why: "an answer with the value false", body: #"{"key":"sealed_storage","value":false,"reason":"TARGETING_MATCH","variant":"off"}"#, default: true, want: {value: false, reason: "TARGETING_MATCH"}},
-		{why: "an error answer is the declared default (false), reason ERROR", body: #"{"key":"sealed_storage","errorCode":"FLAG_NOT_FOUND"}"#, default: false, want: {value: false, reason: "ERROR", errorCode: "FLAG_NOT_FOUND"}},
-		{why: "an error answer is the declared default (true), whatever it is: the default is the spec's", body: #"{"key":"sealed_storage","errorCode":"FLAG_NOT_FOUND"}"#, default: true, want: {value: true, reason: "ERROR", errorCode: "FLAG_NOT_FOUND"}},
-		{why: "a value that is not a boolean is the default, reason ERROR", body: #"{"key":"sealed_storage","value":"true"}"#, default: false, want: {value: false, reason: "ERROR", errorCode: "the value is not a boolean"}},
-		{why: "a body that is not JSON is the default, reason ERROR", body: "<html>", default: false, want: {value: false, reason: "ERROR", errorCode: "the answer is not JSON"}},
+		{why: "an answer with the value true", body: #"{"key":"sealed_storage","value":true,"reason":"STATIC","variant":"on"}"#, want: {value: true, reason: "STATIC"}},
+		{why: "an answer with the value false", body: #"{"key":"sealed_storage","value":false,"reason":"TARGETING_MATCH","variant":"off"}"#, want: {value: false, reason: "TARGETING_MATCH"}},
+		{why: "an error answer has no value", body: #"{"key":"sealed_storage","errorCode":"FLAG_NOT_FOUND"}"#, want: {failed: "FLAG_NOT_FOUND"}},
+		{why: "a value that is not a boolean has no value", body: #"{"key":"sealed_storage","value":"true"}"#, want: {failed: "the value is not a boolean"}},
+		{why: "a body that is not JSON has no value", body: "<html>", want: {failed: "the answer is not JSON"}},
 	]
 
-	// Flag.evaluate(key, default, post, cache, report): asking through `post`, which may fail, with the last successful evaluation kept in
-	// `cache` ({key: value}, before and after). An answer with a boolean value is the value and updates the cache. When there is no
-	// answer (an IOException, an error answer), the cached value is used, reason CACHED; only with nothing cached (a first launch that
-	// is offline) is it the declared `default` (the spec's, emitted from CUE into res/values/sealed_flag.xml) with reason ERROR. Every
-	// launch with no answer is reported (the app's log) with the key, the value and the cause. Each case then picks the store of a
-	// launch (`marker`, default false): the marker wins, then a true adopts.
+	// Snapshot.parse(json): the flags' values as the build knew them. A file without them fails.
+	snapshot: [
+		{why: "the flags' values", json: #"{"version":1,"source":"flags_spec.cue","flags":{"sealed_storage":false,"other":true}}"#, want: {sealed_storage: false, other: true}},
+		{why: "a snapshot with no flags is empty", json: #"{"version":1,"source":"none","flags":{}}"#, want: {}},
+		{why: "a file with no flags object fails", json: #"{"version":1}"#, want: "fails"},
+		{why: "a value that is not a boolean fails", json: #"{"flags":{"sealed_storage":"false"}}"#, want: "fails"},
+	]
+
+	// Flag.evaluate(key, post, cache, snapshot, report): only a well-formed answer is a value, and it updates the cache ({key: value}, before
+	// and after). A failed or malformed one is logged with its cause and the cache stays as it was; the value is the cache's (reason CACHED),
+	// else the build's snapshot (reason SNAPSHOT), never a default. With neither it fails (want.fails). Each case then picks the store of a
+	// launch (`marker`, default false): the marker wins, then a true adopts, so plain only ever comes from an explicit false.
 	evaluate: [
-		{why: "an answer updates the cache", default: false, cache: {}, answer: {body: #"{"value":true,"reason":"STATIC"}"#},
+		{why: "an answer updates the cache", snapshot: {sealed_storage: false}, cache: {}, answer: {body: #"{"value":true,"reason":"STATIC"}"#},
 			want: {value: true, reason: "STATIC", reported: false, cache: {sealed_storage: true}, store: "adopt"}},
-		{why: "a later answer replaces what the cache held", default: false, cache: {sealed_storage: true}, answer: {body: #"{"value":false,"reason":"STATIC"}"#},
+		{why: "a later answer replaces what the cache held", snapshot: {sealed_storage: false}, cache: {sealed_storage: true}, answer: {body: #"{"value":false,"reason":"STATIC"}"#},
 			want: {value: false, reason: "STATIC", reported: false, cache: {sealed_storage: false}, store: "plain"}},
-		{why: "offline with a cached true uses it, reason CACHED, reported with the cause: it adopts sealed", default: false, cache: {sealed_storage: true}, answer: {throws: "connection refused"},
+		{why: "offline with a cached true uses it: it adopts sealed", snapshot: {sealed_storage: false}, cache: {sealed_storage: true}, answer: {throws: "connection refused"},
 			want: {value: true, reason: "CACHED", cause: "the door did not answer: connection refused", reported: true, cache: {sealed_storage: true}, store: "adopt"}},
-		{why: "offline with a cached false uses it, whatever the spec default is", default: true, cache: {sealed_storage: false}, answer: {throws: "connection refused"},
+		{why: "offline with a cached false uses it, whatever the snapshot says", snapshot: {sealed_storage: true}, cache: {sealed_storage: false}, answer: {throws: "connection refused"},
 			want: {value: false, reason: "CACHED", cause: "the door did not answer: connection refused", reported: true, cache: {sealed_storage: false}, store: "plain"}},
-		{why: "an error answer with a cache uses the cache", default: false, cache: {sealed_storage: true}, answer: {body: #"{"key":"sealed_storage","errorCode":"GENERAL"}"#},
+		{why: "a malformed answer keeps the cache as it was", snapshot: {sealed_storage: false}, cache: {sealed_storage: true}, answer: {body: "<html>"},
+			want: {value: true, reason: "CACHED", cause: "the answer is not JSON", reported: true, cache: {sealed_storage: true}, store: "adopt"}},
+		{why: "an error answer keeps the cache as it was", snapshot: {sealed_storage: false}, cache: {sealed_storage: true}, answer: {body: #"{"key":"sealed_storage","errorCode":"GENERAL"}"#},
 			want: {value: true, reason: "CACHED", cause: "GENERAL", reported: true, cache: {sealed_storage: true}, store: "adopt"}},
-		{why: "offline on the first launch, with nothing cached, is the spec default (false) with reason ERROR, reported, and caches nothing", default: false, cache: {}, answer: {throws: "connection refused"},
-			want: {value: false, reason: "ERROR", cause: "the door did not answer: connection refused", reported: true, cache: {}, store: "plain"}},
-		{why: "offline on the first launch follows the spec default: true adopts", default: true, cache: {}, answer: {throws: "connection refused"},
-			want: {value: true, reason: "ERROR", cause: "the door did not answer: connection refused", reported: true, cache: {}, store: "adopt"}},
-		{why: "the marker wins over a cached false", marker: true, default: false, cache: {sealed_storage: false}, answer: {throws: "connection refused"},
+		{why: "a first offline launch uses the build's snapshot (false): plain, an explicit value", snapshot: {sealed_storage: false}, cache: {}, answer: {throws: "connection refused"},
+			want: {value: false, reason: "SNAPSHOT", cause: "the door did not answer: connection refused", reported: true, cache: {}, store: "plain"}},
+		{why: "a first offline launch with a snapshot of true adopts sealed", snapshot: {sealed_storage: true}, cache: {}, answer: {throws: "connection refused"},
+			want: {value: true, reason: "SNAPSHOT", cause: "the door did not answer: connection refused", reported: true, cache: {}, store: "adopt"}},
+		{why: "a malformed answer on a first launch caches nothing and uses the snapshot", snapshot: {sealed_storage: true}, cache: {}, answer: {body: "<html>"},
+			want: {value: true, reason: "SNAPSHOT", cause: "the answer is not JSON", reported: true, cache: {}, store: "adopt"}},
+		{why: "the marker wins over a cached false", marker: true, snapshot: {sealed_storage: false}, cache: {sealed_storage: false}, answer: {throws: "connection refused"},
 			want: {value: false, reason: "CACHED", cause: "the door did not answer: connection refused", reported: true, cache: {sealed_storage: false}, store: "sealed"}},
+		{why: "a build with no snapshot value fails: no answer, no cache, no snapshot", snapshot: {}, cache: {}, answer: {throws: "connection refused"},
+			want: {fails: "no cached value and no value in the build snapshot"}},
 	]
 
 	// Migration.once over a plain store and a sealed one: turning the switch on moves what the plain preferences hold, once, and

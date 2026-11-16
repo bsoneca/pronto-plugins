@@ -16,7 +16,7 @@ interface Kv {
     fun keys(ns: String): List<String>
 }
 
-// The last successful evaluation of each flag, kept across launches: what a launch that cannot reach the door uses.
+// The last well-formed answer of each flag, kept across launches: what a launch that cannot get an answer uses.
 interface FlagCache {
     fun get(key: String): Boolean?
     fun put(key: String, value: Boolean)
@@ -30,10 +30,29 @@ class PrefsFlagCache(context: Context) : FlagCache {
     }
 }
 
-// OpenFeature's evaluation details: the value, the reason it has it, and, when the evaluation failed, the error. A flag that cannot
-// be evaluated has its last successful value (reason "CACHED"), and with none yet the value of its declared default (the app's
-// flags_spec.cue), reason "ERROR"; the cause is in `errorCode`: the
-// same contract the page's flags have (an OFREP error evaluates to the default). Storage only ever sees the explicit value.
+// The flags' values as the build knew them (res/raw/flags_snapshot.json, which the app's generate writes from the CUE the flags are
+// pushed from): an explicit, versioned value for a launch that has no answer and no cache yet, never a default. The build fails
+// when the flag a build names has no value in it (build.gradle.kts), and Flag.resolve fails on a missing one.
+interface FlagSnapshot {
+    fun get(key: String): Boolean?
+}
+
+class RawFlagSnapshot(context: Context) : FlagSnapshot {
+    private val flags = Snapshot.parse(context.resources.openRawResource(R.raw.flags_snapshot).bufferedReader().use { it.readText() })
+    override fun get(key: String): Boolean? = flags[key]
+}
+
+object Snapshot {
+    // {"version": 1, "source": "...", "flags": {"<key>": true|false}}; anything else fails.
+    fun parse(json: String): Map<String, Boolean> {
+        val o = org.json.JSONObject(json).getJSONObject("flags")
+        return o.keys().asSequence().associateWith { (o.get(it) as? Boolean) ?: throw org.json.JSONException("the snapshot's value of $it is not a boolean") }
+    }
+}
+
+// OpenFeature's evaluation details: the value, the reason it has it, and, when no answer gave it, the cause. The reason is the
+// answer's own, or CACHED (the last well-formed answer), or SNAPSHOT (the build's value, on a launch with neither). Storage only ever
+// sees the explicit value.
 data class FlagDetails(val value: Boolean, val reason: String, val errorCode: String? = null)
 
 object Storage {
@@ -43,42 +62,53 @@ object Storage {
     fun pick(marker: Boolean, flag: Boolean): String = if (marker) "sealed" else if (flag) "adopt" else "plain"
 }
 
+// What asking the door gave: a well-formed boolean answer, or why there is none (unreachable, an error answer, a value of another
+// type, not JSON). A failed or malformed answer is not a value.
+sealed class Answer {
+    data class Value(val value: Boolean, val reason: String) : Answer()
+    data class Failed(val cause: String) : Answer()
+}
+
 // A flag over the remote evaluation protocol (OFREP), as the page reads it: POST <base>/ofrep/v1/evaluate/flags/<key>.
 object Flag {
-    // The details an answer carries; for anything but a boolean value (an error answer, a value of another type, not JSON) the
-    // declared `default`, reason ERROR and the cause.
-    fun parse(body: String, default: Boolean): FlagDetails = try {
+    fun parse(body: String): Answer = try {
         val o = org.json.JSONObject(body)
         when (val v = o.opt("value")) {
-            is Boolean -> FlagDetails(v, o.optString("reason", "UNKNOWN"))
-            null -> FlagDetails(default, "ERROR", "no value in the answer: ${o.optString("errorCode", body)}")
-            else -> FlagDetails(default, "ERROR", "the value is not a boolean: $v")
+            is Boolean -> Answer.Value(v, o.optString("reason", "UNKNOWN"))
+            null -> Answer.Failed("no value in the answer: ${o.optString("errorCode", body)}")
+            else -> Answer.Failed("the value is not a boolean: $v")
         }
     } catch (e: org.json.JSONException) {
-        FlagDetails(default, "ERROR", "the answer is not JSON: ${e.message}")
+        Answer.Failed("the answer is not JSON: ${e.message}")
     }
 
-    // Asks through `post` (the HTTP call, so a test can make it fail). A boolean answer is the value, and the last successful
-    // evaluation is kept in `cache` each time, so a launch that cannot reach the door has the last known value (reason CACHED, the
-    // cause in errorCode). Only with nothing cached yet (a first launch that is offline) is it the declared `default` with reason
-    // ERROR. Every launch that did not get an answer is reported (the app's log) with the key, the value and the cause.
-    fun evaluate(key: String, default: Boolean, post: () -> String, cache: FlagCache, report: (String) -> Unit): FlagDetails {
-        val asked = try {
-            parse(post(), default)
-        } catch (e: java.io.IOException) {
-            FlagDetails(default, "ERROR", "the door did not answer: ${e.message}")
-        }
-        if (asked.reason != "ERROR") {
-            cache.put(key, asked.value)
-            return asked
-        }
-        val kept = cache.get(key)
-        val details = if (kept != null) FlagDetails(kept, "CACHED", asked.errorCode) else asked
-        report("PRONTO FLAG $key ${details.reason}, value ${details.value}${if (kept == null) " (the declared default)" else " (the last answer)"}: ${asked.errorCode}")
-        return details
+    fun ask(post: () -> String): Answer = try {
+        parse(post())
+    } catch (e: java.io.IOException) {
+        Answer.Failed("the door did not answer: ${e.message}")
     }
 
-    fun read(base: String, key: String, default: Boolean, cache: FlagCache, timeoutMs: Int = 3000): FlagDetails = evaluate(key, default, {
+    // Only a well-formed answer is a value, and it updates `cache`. A failed one is reported (the app's log) with its cause and the cache
+    // stays as it was: the value is the cache's, else the build's snapshot. With neither it fails: a build without the flag's value
+    // does not exist (build.gradle.kts), so this is a build that was not made by generate.
+    fun resolve(key: String, answer: Answer, cache: FlagCache, snapshot: FlagSnapshot, report: (String) -> Unit): FlagDetails = when (answer) {
+        is Answer.Value -> {
+            cache.put(key, answer.value)
+            FlagDetails(answer.value, answer.reason)
+        }
+        is Answer.Failed -> {
+            val kept = cache.get(key)
+            val value = kept ?: snapshot.get(key) ?: throw IllegalStateException("the flag $key has no answer, no cached value and no value in the build's snapshot: ${answer.cause}")
+            val reason = if (kept != null) "CACHED" else "SNAPSHOT"
+            report("PRONTO FLAG $key $reason, value $value: ${answer.cause}")
+            FlagDetails(value, reason, answer.cause)
+        }
+    }
+
+    fun evaluate(key: String, post: () -> String, cache: FlagCache, snapshot: FlagSnapshot, report: (String) -> Unit): FlagDetails =
+        resolve(key, ask(post), cache, snapshot, report)
+
+    fun read(base: String, key: String, cache: FlagCache, snapshot: FlagSnapshot, timeoutMs: Int = 3000): FlagDetails = evaluate(key, {
         val c = java.net.URL("$base/ofrep/v1/evaluate/flags/$key").openConnection() as java.net.HttpURLConnection
         try {
             c.connectTimeout = timeoutMs
@@ -92,7 +122,7 @@ object Flag {
         } finally {
             c.disconnect()
         }
-    }, cache) { android.util.Log.e("pronto", it) }
+    }, cache, snapshot) { android.util.Log.e("pronto", it) }
 }
 
 // The phone's one-way choice, a file in the app's own directory: written before the move starts, so a move that is interrupted

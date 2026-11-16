@@ -47,7 +47,7 @@ _template: {
 // Written once and then the app's: pronto does not compile its screens for
 // Android yet, so the phone's screen is authored, and which handler answers a
 // fill and from which columns is the program's to say.
-_seeded: ["app/src/main/assets/screen.js", "app/src/main/assets/autofill.json", "app/src/main/res/values/sealed_flag.xml"]
+_seeded: ["app/src/main/assets/screen.js", "app/src/main/assets/autofill.json", "app/src/main/res/values/sealed_flag.xml", "app/src/main/res/raw/flags_snapshot.json"]
 
 // The terminal mode's project: omnishell's own interpreter running the app's
 // screens, nothing seeded because nothing is the app's to write. Its sources sit
@@ -70,8 +70,12 @@ _terminal: {
 		<?xml version="1.0" encoding="utf-8"?>
 		<resources>
 		    <string name="pronto_sealed_flag"></string>
-		    <bool name="pronto_sealed_flag_default">false</bool>
 		</resources>
+
+		"""
+	// The flags' values as the build knew them (Kv.kt's FlagSnapshot): empty here, the app's own once its generate writes it from its CUE.
+	"app/src/main/res/raw/flags_snapshot.json": """
+		{"version": 1, "source": "none", "flags": {}}
 
 		"""
 	"app/src/main/kotlin/Kv.kt":             _ @embed(file="template/terminal/app/src/main/kotlin/Kv.kt", type=text)
