@@ -5,55 +5,44 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-// The ask over JSON, as both modes make it: what the handler is told, and what is read back.
+// The ask over JSON, as both modes make it, over the cases in android_cases.json (android/cases.cue).
 class AskTest {
-    private val contract = Autofill(JSONObject("""
-        {"handler": "match", "reads": ["login", "probe", "candidate"], "probe": "probe", "candidate": "candidate",
-         "vault": "login", "title": "title", "username": "username", "secret": "secret", "signer": "signer", "signers": "signers"}
-    """))
+    private val ask = Cases.all.getJSONObject("ask")
+    private val contract = Autofill(ask.getJSONObject("contract"))
+    private fun probe(o: JSONObject) = Probe(o.getString("kind"), o.getString("target"))
 
     @Test
-    fun theProbeIsStatedWithItsSignersAndNoCandidates() {
-        val stated = Ask.stated(contract, Probe("app", "com.bank"), listOf("aa+bb", "cc"))
-        val probe = stated.getJSONArray("probe").getJSONObject(0)
-        assertEquals("probe", probe.getString("id"))
-        assertEquals("app", probe.getString("kind"))
-        assertEquals("com.bank", probe.getString("target"))
-        assertEquals("aa+bb,cc", probe.getString("signers"))
-        assertEquals(0, stated.getJSONArray("candidate").length())
+    fun whatTheHandlerIsTold() {
+        for (c in Cases.list(ask.getJSONArray("stated"))) {
+            val stated = Ask.stated(contract, probe(c.getJSONObject("probe")), Cases.strings(c.getJSONArray("signers")))
+            val got = stated.getJSONArray("probe").getJSONObject(0)
+            val want = c.getJSONObject("want")
+            val why = c.getString("why")
+            for (k in listOf("id", "kind", "target", "signers")) assertEquals("$why: $k", want.getString(k), got.getString(k))
+            assertEquals("$why: candidates", want.getInt("candidates"), stated.getJSONArray("candidate").length())
+        }
     }
 
     @Test
-    fun aSiteStatesNoSigners() {
-        val probe = Ask.stated(contract, Probe("web", "bank.com"), emptyList()).getJSONArray("probe").getJSONObject(0)
-        assertEquals("", probe.getString("signers"))
+    fun picks() {
+        for (c in Cases.list(ask.getJSONArray("picks"))) {
+            assertEquals(c.getString("why"), Cases.strings(c.getJSONArray("want")), Ask.picks(contract, c.getJSONObject("reply")))
+        }
     }
 
     @Test
-    fun picksAreTheCandidatesPutInTheHandlersOrder() {
-        val reply = JSONObject().put("updates", JSONArray()
-            .put(JSONObject().put("op", "put").put("entity", "candidate").put("id", "b"))
-            .put(JSONObject().put("op", "put").put("entity", "login").put("id", "x"))
-            .put(JSONObject().put("op", "delete").put("entity", "candidate").put("id", "c"))
-            .put(JSONObject().put("op", "put").put("entity", "candidate").put("id", "a")))
-        assertEquals(listOf("b", "a"), Ask.picks(contract, reply))
-    }
-
-    @Test
-    fun aReplyWithNoUpdatesPicksNothing() {
-        assertEquals(emptyList<String>(), Ask.picks(contract, JSONObject()))
-    }
-
-    @Test
-    fun onlyAnUnpinnedAppLoginIsPinnedToTheCurrentSigner() {
-        val unpinned = JSONObject().put("id", "1")
-        val pinned = JSONObject().put("id", "2").put("signer", "old")
-        val pins = Ask.pins(contract, Probe("app", "com.bank"), listOf("now", "before"), listOf(unpinned, pinned))
-        assertEquals(1, pins.length())
-        assertEquals("patch", pins.getJSONObject(0).getString("op"))
-        assertEquals("1", pins.getJSONObject(0).getString("id"))
-        assertEquals("now", pins.getJSONObject(0).getJSONObject("row").getString("signer"))
-        assertEquals(0, Ask.pins(contract, Probe("web", "bank.com"), listOf("now"), listOf(unpinned)).length())
-        assertEquals(0, Ask.pins(contract, Probe("app", "com.bank"), emptyList(), listOf(unpinned)).length())
+    fun pins() {
+        for (c in Cases.list(ask.getJSONArray("pins"))) {
+            val rows = Cases.list(c.getJSONArray("rows"))
+            val pins = Ask.pins(contract, probe(c.getJSONObject("probe")), Cases.strings(c.getJSONArray("signers")), rows)
+            val want = Cases.list(c.getJSONArray("want"))
+            val why = c.getString("why")
+            assertEquals(why, want.size, pins.length())
+            for ((i, w) in want.withIndex()) {
+                assertEquals("$why: op", w.getString("op"), pins.getJSONObject(i).getString("op"))
+                assertEquals("$why: id", w.getString("id"), pins.getJSONObject(i).getString("id"))
+                assertEquals("$why: signer", w.getString("signer"), pins.getJSONObject(i).getJSONObject("row").getString("signer"))
+            }
+        }
     }
 }
