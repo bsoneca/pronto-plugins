@@ -236,9 +236,11 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 			if H.mode == "terminal" {
 				integrate: android: {
 					platform: "android"
+					// PRONTO_ANDROID_BUILD names the build type the scenarios run on (PRONTO-488): `debug` by default, `rehearsal` on request,
+					// the release's code with the debug key and the driver on.
 					cmds: list.Concat([H._bundle, [
-						{do: "\(H._gradle) :app:assembleDebug"},
-						{do: "use tools.nu [run-mise]; let scenarios = (open android/android.json | get scenarios); let base = ($env.PRONTO_BASE? | default \"stack\"); run-mise exec -- deno run -A --no-lock android/terminal/scenarios.ts \(H.applicationId) \(H._apk) $base ...$scenarios"},
+						{do: "let type = ($env.PRONTO_ANDROID_BUILD? | default \"debug\"); \(H._gradle) $\":app:assemble(($type | str capitalize))\""},
+						{do: "use tools.nu [run-mise]; let type = ($env.PRONTO_ANDROID_BUILD? | default \"debug\"); let apk = $\"android/app/build/outputs/apk/($type)/app-($type).apk\"; let scenarios = (open android/android.json | get scenarios); let base = ($env.PRONTO_BASE? | default \"stack\"); run-mise exec -- deno run -A --no-lock android/terminal/scenarios.ts \(H.applicationId) $apk $base ...$scenarios"},
 					]])
 				}
 			}

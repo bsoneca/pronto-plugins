@@ -12,8 +12,13 @@ android {
         applicationId = "__APPLICATION_ID__"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // The Play and sideload builds say their own version: -PprontoVersionCode=<n> -PprontoVersionName=<x.y.z>
+        // (a property, never an edit of this file, so a refresh of the host never reverts them).
+        versionCode = (project.findProperty("prontoVersionCode") as String?)?.toInt() ?: 1
+        versionName = (project.findProperty("prontoVersionName") as String?) ?: "0.1.0"
+        // Whether the build answers the scenario driver and takes the base, actor and path extras (MainActivity.kt):
+        // the debug build does by being debuggable, the rehearsal build says so here, a release never.
+        resValue("string", "pronto_driver", "off")
         val base = (project.findProperty("prontoBase") as String?) ?: "__BASE__"
         resValue("string", "pronto_base", base)
         // android.json's "unlock": "biometric" opens the sealed storage with one prompt (Unlock.kt).
@@ -56,6 +61,27 @@ android {
     buildTypes {
         getByName("release") {
             if (signed) signingConfig = signingConfigs.getByName("release")
+        }
+        // The rehearsal build (PRONTO-488): the release build's code, its minification and its other settings, signed with the
+        // debug key, with the scenario driver and the base, actor and path extras on. Scenarios run on it, so what they check is the
+        // release's code; the build signed with the release key never answers a driver (the driver's session answer carries
+        // the session token). It trusts the machine's local roots as the debug build does (src/debug's network config, which
+        // bundle.ts writes): without them it could not reach the local stack the scenarios run against.
+        create("rehearsal") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            resValue("string", "pronto_driver", "on")
+        }
+    }
+
+    // The rehearsal build runs the debug build's driver and local-stack trust (the same files), over the release's code
+    // (its sourceSet exists once the build type does).
+    sourceSets {
+        getByName("rehearsal") {
+            kotlin.directories.add("src/debug/kotlin")
+            res.srcDirs("build/generated/debug-res")
+            manifest.srcFile("src/debug/AndroidManifest.xml")
         }
     }
 
