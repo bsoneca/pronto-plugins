@@ -3,7 +3,7 @@ package __APPLICATION_ID__
 import android.content.Context
 
 // The terminal's storage bridges (__native_kv_*) over one of two stores. The sealed store (SealedStore.kt: AES-GCM in SQLite
-// under a Keystore key) is behind the app's pronto-flags flag (android.json's "sealedFlag", read over the door's /ofrep/), and
+// under a Keystore key) is behind the app's pronto-flags flag (named in res/values/sealed_flag.xml, which the app's generate writes from its CUE, and read over the door's /ofrep/), and
 // the choice is sticky and one way (Storage.pick): once a phone has adopted the sealed store a marker file says so, and the
 // sealed store is used from then on, whatever the flag says or whether the phone is offline; sealed data never goes back to plain.
 // While there is no marker and the flag is off or unknown (an unreachable door, a timeout), the plain SharedPreferences the earlier
@@ -16,42 +16,65 @@ interface Kv {
     fun keys(ns: String): List<String>
 }
 
+// What asking the flag gave: On, Off, or Unknown with its cause. Never a null: a failure to ask is a result the caller branches on.
+sealed class FlagResult {
+    object On : FlagResult()
+    object Off : FlagResult()
+    data class Unknown(val cause: String) : FlagResult()
+}
+
 object Storage {
-    // "sealed": the marker is there. "adopt": no marker and the flag is on: write the marker, then use the sealed store (what the
-    // plain preferences hold moves in per namespace, Migration, and an interrupted move resumes on the next launch because the
-    // marker is already there). "plain": no marker and the flag off or unknown. `flag` is null when it could not be read.
-    fun pick(marker: Boolean, flag: Boolean?): String = if (marker) "sealed" else if (flag == true) "adopt" else "plain"
+    // "sealed": the marker is there (the flag is not asked). "adopt": no marker and the flag is On: write the marker, then use the
+    // sealed store (what the plain preferences hold moves in per namespace, Migration, and an interrupted move resumes on the next
+    // launch because the marker is already there). "plain": no marker and the flag Off or Unknown. Unknown is a stated fallback that
+    // keeps the current state for this launch only: no marker, no move, nothing dropped, and the flag is asked again next launch;
+    // it never adopts sealed storage. Refusing to start instead would leave a phone that is offline on its first launch unusable.
+    fun pick(marker: Boolean, flag: FlagResult?): String = when {
+        marker -> "sealed"
+        flag is FlagResult.On -> "adopt"
+        else -> "plain"
+    }
 }
 
 // A flag over the remote evaluation protocol (OFREP), as the page reads it: POST <base>/ofrep/v1/evaluate/flags/<key>.
 object Flag {
-    // The boolean the answer carries; null for anything else (an error answer, a value that is not a boolean, not JSON).
-    fun parse(body: String): Boolean? = try {
-        val v = org.json.JSONObject(body).opt("value")
-        if (v is Boolean) v else null
+    // The boolean an answer carries; Unknown, with why, for anything else (an error answer, a value that is not a boolean, not JSON).
+    fun parse(body: String): FlagResult = try {
+        when (val v = org.json.JSONObject(body).opt("value")) {
+            true -> FlagResult.On
+            false -> FlagResult.Off
+            else -> FlagResult.Unknown(if (v == null) "no value in the answer: $body" else "the value is not a boolean: $v")
+        }
     } catch (e: org.json.JSONException) {
-        null
+        FlagResult.Unknown("the answer is not JSON: ${e.message}")
     }
 
-    // Null when the door does not answer in time or answers with an error: the flag is unknown, which is not off (a phone that
-    // has adopted the sealed store never asks), and the plain preferences stay in use until a launch that can read it.
-    fun read(base: String, key: String, timeoutMs: Int = 3000): Boolean? {
+    // Asks through `post` (the HTTP call, so a test can make it fail) and says every Unknown through `report`, with its cause.
+    fun evaluate(key: String, post: () -> String, report: (String) -> Unit): FlagResult {
+        val result = try {
+            parse(post())
+        } catch (e: java.io.IOException) {
+            FlagResult.Unknown("the door did not answer: ${e.message}")
+        }
+        if (result is FlagResult.Unknown) report("PRONTO FLAG $key unknown: ${result.cause}")
+        return result
+    }
+
+    fun read(base: String, key: String, timeoutMs: Int = 3000): FlagResult = evaluate(key, {
         val c = java.net.URL("$base/ofrep/v1/evaluate/flags/$key").openConnection() as java.net.HttpURLConnection
-        return try {
+        try {
             c.connectTimeout = timeoutMs
             c.readTimeout = timeoutMs
             c.requestMethod = "POST"
             c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
             c.outputStream.use { it.write("{\"context\":{}}".toByteArray()) }
-            if (c.responseCode == 200) parse(c.inputStream.bufferedReader().readText()) else null
-        } catch (e: java.io.IOException) {
-            android.util.Log.w("pronto", "PRONTO FLAG $key unknown: ${e.message}")
-            null
+            if (c.responseCode != 200) throw java.io.IOException("the door answered ${c.responseCode}")
+            c.inputStream.bufferedReader().readText()
         } finally {
             c.disconnect()
         }
-    }
+    }) { android.util.Log.e("pronto", it) }
 }
 
 // The phone's one-way choice, a file in the app's own directory: written before the move starts, so a move that is interrupted

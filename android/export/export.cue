@@ -17,8 +17,7 @@ _package: *"" | string @tag(package)
 _config:  *"{}" | string @tag(config)
 _signing: [if json.Unmarshal(_config).signing != _|_ {json.Unmarshal(_config).signing}, []][0]
 _release: [if json.Unmarshal(_config).release != _|_ {json.Unmarshal(_config).release}, null][0]
-_sealed:  [if json.Unmarshal(_config).sealedFlag != _|_ {json.Unmarshal(_config).sealedFlag}, ""][0]
 _unlock:  [if json.Unmarshal(_config).unlock != _|_ {json.Unmarshal(_config).unlock}, "none"][0]
 _autofill: [if json.Unmarshal(_config).autofill != _|_ {json.Unmarshal(_config).autofill}, false][0]
 
-files: (android.#Host & {app: _app, label: _label, mode: _mode, base: _base, package: _package, signing: _signing, release: _release, unlock: _unlock, sealedFlag: _sealed, autofill: _autofill}).files
+files: (android.#Host & {app: _app, label: _label, mode: _mode, base: _base, package: _package, signing: _signing, release: _release, unlock: _unlock, autofill: _autofill}).files
