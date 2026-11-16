@@ -34,12 +34,7 @@ casesFixture: json.Unmarshal(_t.files["android/app/src/test/resources/android_ca
 casesTerminal: json.Unmarshal(_term.files["android/app/src/test/resources/android_cases.json"].text).unlock.state[1].want & "LOST"
 casesLoader: strings.HasPrefix(_term.files["android/app/src/test/kotlin/dev/pronto/emit/Cases.kt"].text, "package dev.pronto.emit\n") & true
 
-// The sealed-storage flag's resource: empty (always sealed) until the app's generate writes its flag there, and then the app's. One Kotlin file holds both stores.
-sealedFlagSeeded: strings.Contains(_term.files["android/app/src/main/res/values/sealed_flag.xml"].text, "<string name=\"pronto_sealed_flag\"></string>") & true
-sealedSnapshotSeeded: json.Unmarshal(_term.files["android/app/src/main/res/raw/flags_snapshot.json"].text).flags & {}
-sealedSnapshotTheApps: _term.files["android/app/src/main/res/raw/flags_snapshot.json"].seed & true
-sealedSnapshotChecked: strings.Contains(_term.files["android/app/build.gradle.kts"].text, "checkFlagsSnapshot") & true
-sealedFlagTheApps: _term.files["android/app/src/main/res/values/sealed_flag.xml"].seed & true
+// The terminal's storage is always sealed: one Kotlin file holds the store's interface, the one-time adoption of plain preferences and the migration.
 sealedKvShips: strings.HasPrefix(_term.files["android/app/src/main/kotlin/dev/pronto/emit/Kv.kt"].text, "package dev.pronto.emit\n") & true
 
 // The autofill service is bound only by the system, and the vault never backs up.
@@ -54,7 +49,7 @@ idFromHyphen: (#Host & {app: "pass-vault"}).applicationId & "dev.pronto.pass_vau
 // The terminal mode: nothing seeded, no vault, the bundle before the build.
 _term: #Host & {app: "emit", base: "https://emit.example"}
 termDefault: _term.mode & "terminal"
-termSeedsOnlyTheScenarios: list.SortStrings([for p, f in _term.files if f.seed {p}]) & ["android/android.json", "android/app/src/main/res/raw/flags_snapshot.json", "android/app/src/main/res/values/sealed_flag.xml"]
+termSeedsOnlyTheScenarios: [for p, f in _term.files if f.seed {p}] & ["android/android.json"]
 termNoVault: [for p, f in _term.files if strings.HasSuffix(p, "Vault.kt") || strings.HasSuffix(p, "FillService.kt") {p}] & []
 termBundlesFirst: strings.Contains(_term.surface.rules.build.android.cmds[0].do, "android/terminal/bundle.ts") & true
 termAtThePin: strings.Contains(_term.surface.rules.build.android.cmds[0].do, "run-mise where github:bonisoft3/omnishell") & true

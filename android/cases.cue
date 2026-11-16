@@ -123,62 +123,6 @@ _cases: {
 		]
 	}
 
-	// Storage.pick(marker, flag): which store a launch uses; flag is the explicit boolean the evaluation gave. The choice is sticky and
-	// one way: with the marker the sealed store is used whatever the flag says; with none, only true adopts it.
-	pick: [
-		{why: "with the marker, sealed, the flag true", marker: true, flag: true, want: "sealed"},
-		{why: "with the marker, sealed, though the flag is false (turned off since, or unreachable with the default false)", marker: true, flag: false, want: "sealed"},
-		{why: "no marker and the flag true: adopt (write the marker, then seal)", marker: false, flag: true, want: "adopt"},
-		{why: "no marker and the flag false: plain", marker: false, flag: false, want: "plain"},
-	]
-
-	// Flag.parse(body): what an OFREP answer is. A boolean value is a value, with the answer's reason; anything else (an error answer, a value
-	// of another type, not JSON) is a failed answer with its cause, and a failed answer is not a value.
-	flag: [
-		{why: "an answer with the value true", body: #"{"key":"sealed_storage","value":true,"reason":"STATIC","variant":"on"}"#, want: {value: true, reason: "STATIC"}},
-		{why: "an answer with the value false", body: #"{"key":"sealed_storage","value":false,"reason":"TARGETING_MATCH","variant":"off"}"#, want: {value: false, reason: "TARGETING_MATCH"}},
-		{why: "an error answer has no value", body: #"{"key":"sealed_storage","errorCode":"FLAG_NOT_FOUND"}"#, want: {failed: "FLAG_NOT_FOUND"}},
-		{why: "a value that is not a boolean has no value", body: #"{"key":"sealed_storage","value":"true"}"#, want: {failed: "the value is not a boolean"}},
-		{why: "a body that is not JSON has no value", body: "<html>", want: {failed: "the answer is not JSON"}},
-	]
-
-	// Snapshot.parse(json): the flags' values as the build knew them. A file without them fails.
-	snapshot: [
-		{why: "the flags' values", json: #"{"version":1,"source":"flags_spec.cue","flags":{"sealed_storage":false,"other":true}}"#, want: {sealed_storage: false, other: true}},
-		{why: "a snapshot with no flags is empty", json: #"{"version":1,"source":"none","flags":{}}"#, want: {}},
-		{why: "a file with no flags object fails", json: #"{"version":1}"#, want: "fails"},
-		{why: "a value that is not a boolean fails", json: #"{"flags":{"sealed_storage":"false"}}"#, want: "fails"},
-	]
-
-	// Flag.evaluate(key, post, cache, snapshot, report): only a well-formed answer is a value, and it updates the cache ({key: value}, before
-	// and after). A failed or malformed one is logged with its cause and the cache stays as it was; the value is the cache's (reason CACHED),
-	// else the build's snapshot (reason SNAPSHOT), never a default. With neither it fails (want.fails). Each case then picks the store of a
-	// launch (`marker`, default false): the marker wins, then a true adopts, so plain only ever comes from an explicit false.
-	evaluate: [
-		{why: "an answer updates the cache", snapshot: {sealed_storage: false}, cache: {}, answer: {body: #"{"value":true,"reason":"STATIC"}"#},
-			want: {value: true, reason: "STATIC", reported: false, cache: {sealed_storage: true}, store: "adopt"}},
-		{why: "a later answer replaces what the cache held", snapshot: {sealed_storage: false}, cache: {sealed_storage: true}, answer: {body: #"{"value":false,"reason":"STATIC"}"#},
-			want: {value: false, reason: "STATIC", reported: false, cache: {sealed_storage: false}, store: "plain"}},
-		{why: "offline with a cached true uses it: it adopts sealed", snapshot: {sealed_storage: false}, cache: {sealed_storage: true}, answer: {throws: "connection refused"},
-			want: {value: true, reason: "CACHED", cause: "the door did not answer: connection refused", reported: true, cache: {sealed_storage: true}, store: "adopt"}},
-		{why: "offline with a cached false uses it, whatever the snapshot says", snapshot: {sealed_storage: true}, cache: {sealed_storage: false}, answer: {throws: "connection refused"},
-			want: {value: false, reason: "CACHED", cause: "the door did not answer: connection refused", reported: true, cache: {sealed_storage: false}, store: "plain"}},
-		{why: "a malformed answer keeps the cache as it was", snapshot: {sealed_storage: false}, cache: {sealed_storage: true}, answer: {body: "<html>"},
-			want: {value: true, reason: "CACHED", cause: "the answer is not JSON", reported: true, cache: {sealed_storage: true}, store: "adopt"}},
-		{why: "an error answer keeps the cache as it was", snapshot: {sealed_storage: false}, cache: {sealed_storage: true}, answer: {body: #"{"key":"sealed_storage","errorCode":"GENERAL"}"#},
-			want: {value: true, reason: "CACHED", cause: "GENERAL", reported: true, cache: {sealed_storage: true}, store: "adopt"}},
-		{why: "a first offline launch uses the build's snapshot (false): plain, an explicit value", snapshot: {sealed_storage: false}, cache: {}, answer: {throws: "connection refused"},
-			want: {value: false, reason: "SNAPSHOT", cause: "the door did not answer: connection refused", reported: true, cache: {}, store: "plain"}},
-		{why: "a first offline launch with a snapshot of true adopts sealed", snapshot: {sealed_storage: true}, cache: {}, answer: {throws: "connection refused"},
-			want: {value: true, reason: "SNAPSHOT", cause: "the door did not answer: connection refused", reported: true, cache: {}, store: "adopt"}},
-		{why: "a malformed answer on a first launch caches nothing and uses the snapshot", snapshot: {sealed_storage: true}, cache: {}, answer: {body: "<html>"},
-			want: {value: true, reason: "SNAPSHOT", cause: "the answer is not JSON", reported: true, cache: {}, store: "adopt"}},
-		{why: "the marker wins over a cached false", marker: true, snapshot: {sealed_storage: false}, cache: {sealed_storage: false}, answer: {throws: "connection refused"},
-			want: {value: false, reason: "CACHED", cause: "the door did not answer: connection refused", reported: true, cache: {sealed_storage: false}, store: "sealed"}},
-		{why: "a build with no snapshot value fails: no answer, no cache, no snapshot", snapshot: {}, cache: {}, answer: {throws: "connection refused"},
-			want: {fails: "no cached value and no value in the build snapshot"}},
-	]
-
 	// Migration.once over a plain store and a sealed one: turning the switch on moves what the plain preferences hold, once, and
 	// loses nothing. `plain` and `sealed` are the stores before; `runs` how many times the namespace is opened; `failPut` a key whose
 	// sealed write fails; `failClear` whether clearing the plain copy fails. `want` is what is left, and the values moved per run.
@@ -195,15 +139,19 @@ _cases: {
 			want: {sealed: {a: "1"}, plain: {a: "1"}, moved: [], clears: 2, threw: true}},
 	]
 
-	// A move that is interrupted part-way resumes on the next launch and loses nothing: the marker is written before the move, so
-	// the next launch is sealed whatever the flag says, and each namespace is moved whole or not at all. `launches` is each launch's
-	// failing key (a sealed write that fails), or "" for none; each launch opens every namespace, in order, with a fresh Migration.
-	resume: [
-		{why: "the first launch fails in the second namespace; the next finishes it, and the first namespace is not moved twice",
-			namespaces: {device: {a: "1", b: "2"}, session: {c: "3", d: "4"}}, launches: ["d", ""],
-			want: {sealed: {"device/a": "1", "device/b": "2", "session/c": "3", "session/d": "4"}, plain: {}, movedPerLaunch: [[2, 0], [0, 2]], threwPerLaunch: [true, false]}},
-		{why: "an interrupted move that never recovers leaves the plain values for the namespace it did not finish",
-			namespaces: {device: {a: "1"}, session: {c: "3"}}, launches: ["c", "c"],
-			want: {sealed: {"device/a": "1"}, plain: {"session/c": "3"}, movedPerLaunch: [[1, 0], [0, 0]], threwPerLaunch: [true, true]}},
+	// Adoption.run(marked, namespaces, move, writeMarker): the storage is always sealed; what an earlier build left in plain preferences
+	// moves in once, at the first use, and the marker is written only after every namespace has moved. `namespaces` are the plain
+	// stores before; each launch (`launches`: the key whose sealed write fails, or "" for none) opens the stores with a fresh Migration and
+	// the marker as the last launch left it. `want` is the sealed store and what plain keeps after all of them (ns/key), the marker after
+	// each launch, and the values moved in each. After the marker the plain preferences hold nothing and are never written again.
+	adoption: [
+		{why: "a fresh install is sealed at once: nothing to move, the marker written", namespaces: {}, launches: [""],
+			want: {sealed: {}, plain: {}, marker: [true], moved: [0]}},
+		{why: "an existing plain install moves in once, then the marker; the next launch scans and moves nothing", namespaces: {device: {a: "1", b: "2"}, session: {c: "3"}}, launches: ["", ""],
+			want: {sealed: {"device/a": "1", "device/b": "2", "session/c": "3"}, plain: {}, marker: [true, true], moved: [3, 0]}},
+		{why: "an interrupted move leaves no marker and resumes on the next launch, losing nothing", namespaces: {device: {a: "1", b: "2"}, session: {c: "3", d: "4"}}, launches: ["d", ""],
+			want: {sealed: {"device/a": "1", "device/b": "2", "session/c": "3", "session/d": "4"}, plain: {}, marker: [false, true], moved: [0, 2]}},
+		{why: "a move that never recovers keeps its plain values and never writes the marker", namespaces: {device: {a: "1"}, session: {c: "3"}}, launches: ["c", "c"],
+			want: {sealed: {"device/a": "1"}, plain: {"session/c": "3"}, marker: [false, false], moved: [0, 0]}},
 	]
 }
