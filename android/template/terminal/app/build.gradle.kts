@@ -106,18 +106,3 @@ dependencies {
     releaseImplementation("androidx.credentials:credentials:1.5.0")
     releaseImplementation("androidx.credentials:credentials-play-services-auth:1.5.0")
 }
-
-// A build whose app names a sealed-storage flag (res/values/sealed_flag.xml, written by the app's generate) holds that flag's value
-// in res/raw/flags_snapshot.json (written by the same generate, from the CUE the flags are pushed from): the first launch with no
-// answer and no cache reads it (Kv.kt). A build without it does not happen.
-val checkFlagsSnapshot = tasks.register("checkFlagsSnapshot") {
-    val named = file("src/main/res/values/sealed_flag.xml")
-    val snapshot = file("src/main/res/raw/flags_snapshot.json")
-    doLast {
-        val flag = Regex("<string name=\"pronto_sealed_flag\">([^<]*)</string>").find(named.readText())?.groupValues?.get(1) ?: ""
-        if (flag.isNotEmpty() && !Regex("\"" + Regex.escape(flag) + "\"\\s*:\\s*(true|false)").containsMatchIn(snapshot.readText())) {
-            throw GradleException("res/raw/flags_snapshot.json has no value for the flag $flag: run ./saytw generate")
-        }
-    }
-}
-tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(checkFlagsSnapshot) }

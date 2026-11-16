@@ -70,20 +70,13 @@ class TerminalEngine(
     private val random = SecureRandom()
     private lateinit var qjs: QuickJs
 
-    // Sealed at rest (SealedStore.kt) once the app's flag (res/values/sealed_flag.xml, which the app's generate writes from its CUE) has
-    // put this phone on it, or when the app asks for an unlock; sticky and one way (Kv.kt, Storage.pick). False (the declared default when the
-    // door cannot be reached, logged with its cause), the plain preferences as before. No flag named: sealed.
+    // Always sealed at rest (SealedStore.kt, or the unlock's data key); what an earlier build left in plain preferences moves in once, at
+    // the first use, and the marker says so (Kv.kt, Adoption).
     private val store: Kv by lazy {
-        if (unlocked != null) return@lazy SealedStore(context, actor, unlocked, Unlock.FILE)
-        val marker = Marker(context)
-        val flagKey = context.getString(R.string.pronto_sealed_flag)
-        val has = marker.exists()
-        val value = if (has) false else if (flagKey.isEmpty()) true else Flag.read(base, flagKey, PrefsFlagCache(context), RawFlagSnapshot(context)).value
-        when (Storage.pick(has, value)) {
-            "adopt" -> { marker.write(); SealedStore(context, actor) }
-            "sealed" -> SealedStore(context, actor)
-            else -> PlainStore(context, actor)
-        }
+        val sealed = if (unlocked != null) SealedStore(context, actor, unlocked, Unlock.FILE) else SealedStore(context, actor)
+        val marker = Marker(context, actor)
+        Adoption.run(marker.exists(), { sealed.plainNamespaces() }, { sealed.migrate(it) }, { marker.write() })
+        sealed
     }
 
     private fun asset(name: String) = context.assets.open(name).bufferedReader().use { it.readText() }

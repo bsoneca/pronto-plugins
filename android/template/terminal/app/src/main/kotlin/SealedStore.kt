@@ -122,9 +122,17 @@ class SealedStore(
 
     // What an earlier build left in plain SharedPreferences moves in on the namespace's first use,
     // and the preferences are cleared: sealing must not leave the plain copy behind.
-    private fun migrate(ns: String) {
+    // The namespaces this actor has in plain preferences (the earlier builds' files), for Adoption.
+    fun plainNamespaces(): List<String> {
+        val dir = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
+        val prefix = "terminal-$actor-"
+        return (dir.listFiles() ?: emptyArray()).map { it.name }.filter { it.startsWith(prefix) && it.endsWith(".xml") }.map { it.removePrefix(prefix).removeSuffix(".xml") }.sorted()
+    }
+
+    // Moves one namespace's plain preferences in; returns how many values moved.
+    fun migrate(ns: String): Int {
         val prefs = context.getSharedPreferences("terminal-$actor-$ns", Context.MODE_PRIVATE)
-        migration.once(ns, { prefs.all }, { k, v -> put(ns, k, v) }, { prefs.edit().clear().commit() }) { puts ->
+        return migration.once(ns, { prefs.all }, { k, v -> put(ns, k, v) }, { prefs.edit().clear().commit() }) { puts ->
             db.beginTransaction()
             try {
                 puts()
