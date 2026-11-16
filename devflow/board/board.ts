@@ -6,7 +6,7 @@
 // issues.
 
 export interface Named { id: string; name: string }
-export interface State extends Named { group: string; color: string }
+export interface State extends Named { group: string; color: string; /** The state new issues start in. */ default?: boolean }
 export interface Issue {
   id: string;
   name: string;
@@ -15,6 +15,8 @@ export interface Issue {
   priority: string;
   /** When the issue last changed: how long it has held its state, near enough. */
   updated_at?: string;
+  /** When the issue was made (ISO). */
+  created_at?: string;
   description_html?: string;
   module_ids?: string[];
   labels?: string[];

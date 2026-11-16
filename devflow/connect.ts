@@ -10,6 +10,7 @@ import { cmd } from "../intents/shell.ts";
 import type { Step } from "../intents/run.ts";
 import type { Board } from "./board/board.ts";
 import { adapterOf, type DevFlow, exportFlow, tokenOf } from "./spec.ts";
+import { inboxSteps } from "./suggestions.ts";
 
 const ok = (note = "") => ({ done: true as const, note });
 const todo = (why: string) => ({ todo: why });
@@ -283,6 +284,8 @@ export function steps(repo: string, flow: DevFlow): Step[] {
         await p.createLabel((await project(p))!.id, flow.chore, "#a3a3a3");
       },
     },
+    // The suggestion inbox, when the repository names one (PRONTO-544).
+    ...(flow.suggestions ? inboxSteps(flow, need) : []),
     {
       name: "GitHub's token for the board (PLANE_TOKEN)",
       check: async () => {

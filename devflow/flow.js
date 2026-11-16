@@ -413,3 +413,57 @@ export function stuckOf(facts, now, hours = 6) {
 export function stuckLine(s) {
   return `stuck: ${s.key} ${s.state} ${s.age}, ${s.why}`;
 }
+
+// --- The suggestion inbox (PRONTO-544). A suggestion's text is a stranger's: it reaches output
+// only through excerptOf, and never reaches a PRONTO issue. ---
+
+const NAMED = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+/** A suggestion's description (HTML) as one line of inert text, `{text, cut}`: tags dropped, entities
+ * decoded once (so `&amp;lt;` stays text), terminal escapes and control, format, separator, private
+ * and surrogate characters turned to spaces, whitespace collapsed, the first `max` characters kept,
+ * links and mentions defanged, and each markdown character backslash-escaped. */
+export function excerptOf(html, max = 200) {
+  let s = String(html ?? "").replace(/<[^>]*>/g, " ");
+  s = s.replace(/&(#x[0-9a-f]+|#[0-9]+|amp|lt|gt|quot|apos|nbsp);/gi, (_m, e) => {
+    if (e[0] !== "#") return NAMED[e.toLowerCase()];
+    const n = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+    return Number.isInteger(n) && n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : " ";
+  });
+  // deno-lint-ignore no-control-regex
+  s = s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, " ").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, " ");
+  s = s.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cs}]/gu, " ").replace(/\s+/g, " ").trim();
+  const chars = [...s];
+  const cut = chars.length > max;
+  s = chars.slice(0, max).join("");
+  s = s.replace(/@/g, "(at)").replace(/:\/\//g, "[:]//").replace(/www\./gi, "www[.]");
+  s = s.replace(/[\\"`*_~[\]<>#|]/g, (c) => `\\${c}`);
+  return { text: s, cut };
+}
+
+/** Who filed an inbox item, from its title `<app>: <submitter type>` (the filer's contract,
+ * dev-flow.md): `{app, submitter}`, both "unknown" when the title does not match or the app is not
+ * one of `from`. The raw title is never returned. */
+export function submitterOf(title, from) {
+  const m = /^([a-z0-9][a-z0-9-]{0,39}): ([a-z][a-z0-9-]{0,23})$/.exec(String(title ?? ""));
+  return m && (from ?? []).includes(m[1]) ? { app: m[1], submitter: m[2] } : { app: "unknown", submitter: "unknown" };
+}
+
+/** Whether a suggestion made at `createdAt` is older than `days` days at `now` (both injected):
+ * exactly `days` is not, a moment past it is. A missing or unreadable time is never stale. */
+export function staleOf(createdAt, now, days = 14) {
+  const t = Date.parse(createdAt ?? "");
+  const n = now instanceof Date ? now.getTime() : Date.parse(now ?? "");
+  return Number.isFinite(t) && Number.isFinite(n) && n - t > days * DAY;
+}
+
+/** The title of the issue an approved suggestion is filed as: the filed marker `approve` looks up. */
+export function suggestionTitle(app, key) {
+  return `${app} suggestion ${key}, approved by the owner`;
+}
+
+/** The inbox key and app a filed issue's title names, `{app, key}`, or null for another issue. */
+export function suggestionOf(title, project) {
+  const m = /^([a-z0-9][a-z0-9-]{0,39}) suggestion ([A-Z]{2,12}-[1-9][0-9]*), approved by the owner$/.exec(String(title ?? ""));
+  return m && m[2].startsWith(`${project}-`) ? { app: m[1], key: m[2] } : null;
+}

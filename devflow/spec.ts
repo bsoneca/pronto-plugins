@@ -36,6 +36,8 @@ export interface DevFlow {
   /** Hours without a commit or a pull request after which an issue holding a slot is stuck. */
   stuckHours: number;
   chore: string;
+  /** The inbox project beside the board's, when the repository names one (schema.cue #Suggestions). */
+  suggestions?: { project: string; name: string; from: string[]; staleDays: number; label: string; states: { name: string; group: string; color: string; means: string }[] };
   states: { name: string; group: string; color: string; means: string }[];
   /** The repository's name for the state that plays each role (flow.js reasons in roles). */
   roles: Record<Role, string>;
@@ -86,12 +88,15 @@ export function adapterOf(flow: DevFlow, token: string): Board {
   }
 }
 
-/** The board, signed in, and the project's id; null when there is no token yet. */
-export async function boardOf(flow: DevFlow): Promise<{ board: Board; project: string } | null> {
+/** The board, signed in, and the project's id (and the inbox's, when the flow has one and it exists);
+ * null when there is no token yet. */
+export async function boardOf(flow: DevFlow): Promise<{ board: Board; project: string; inbox?: string } | null> {
   const token = await tokenOf(flow);
   if (!token) return null;
   const board = adapterOf(flow, token);
-  const p = (await board.projects()).find((x) => x.identifier === flow.board.project.identifier);
+  const projects = await board.projects();
+  const p = projects.find((x) => x.identifier === flow.board.project.identifier);
   if (!p) throw new Error(`no project ${flow.board.project.identifier} in ${flow.board.workspace}: run bin/pronto connect plane`);
-  return { board, project: p.id };
+  const inbox = flow.suggestions ? projects.find((x) => x.identifier === flow.suggestions!.project)?.id : undefined;
+  return { board, project: p.id, ...(inbox ? { inbox } : {}) };
 }
