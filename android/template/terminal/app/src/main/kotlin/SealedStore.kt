@@ -58,7 +58,7 @@ class SealedStore(
     private val actor: String,
     private val given: SecretKey? = null,
     file: String = "terminal-sealed.db",
-) {
+) : Kv {
     private val db: SQLiteDatabase = object : SQLiteOpenHelper(context, file, null, 1) {
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("CREATE TABLE kv(ns TEXT NOT NULL, actor TEXT NOT NULL, k TEXT NOT NULL, v BLOB NOT NULL, PRIMARY KEY(ns, actor, k))")
@@ -66,10 +66,10 @@ class SealedStore(
         override fun onUpgrade(db: SQLiteDatabase, from: Int, to: Int) {}
     }.writableDatabase
     private val key: SecretKey by lazy { given ?: keystoreKey() }
-    private val migrated = HashSet<String>()
+    private val migration = Migration()
 
     @Synchronized
-    fun get(ns: String, k: String): String? {
+    override fun get(ns: String, k: String): String? {
         migrate(ns)
         db.rawQuery("SELECT v FROM kv WHERE ns = ? AND actor = ? AND k = ?", arrayOf(ns, actor, k)).use { c ->
             if (!c.moveToFirst()) return null
@@ -83,25 +83,25 @@ class SealedStore(
     }
 
     @Synchronized
-    fun set(ns: String, k: String, v: String) {
+    override fun set(ns: String, k: String, v: String) {
         migrate(ns)
         put(ns, k, v)
     }
 
     @Synchronized
-    fun del(ns: String, k: String) {
+    override fun del(ns: String, k: String) {
         migrate(ns)
         db.delete("kv", "ns = ? AND actor = ? AND k = ?", arrayOf(ns, actor, k))
     }
 
     @Synchronized
-    fun clear(ns: String) {
+    override fun clear(ns: String) {
         migrate(ns)
         db.delete("kv", "ns = ? AND actor = ?", arrayOf(ns, actor))
     }
 
     @Synchronized
-    fun keys(ns: String): List<String> {
+    override fun keys(ns: String): List<String> {
         migrate(ns)
         db.rawQuery("SELECT k FROM kv WHERE ns = ? AND actor = ?", arrayOf(ns, actor)).use { c ->
             val out = ArrayList<String>()
@@ -123,22 +123,16 @@ class SealedStore(
     // What an earlier build left in plain SharedPreferences moves in on the namespace's first use,
     // and the preferences are cleared: sealing must not leave the plain copy behind.
     private fun migrate(ns: String) {
-        if (ns in migrated) return
         val prefs = context.getSharedPreferences("terminal-$actor-$ns", Context.MODE_PRIVATE)
-        val old = prefs.all
-        if (old.isEmpty()) {
-            migrated.add(ns)
-            return
+        migration.once(ns, { prefs.all }, { k, v -> put(ns, k, v) }, { prefs.edit().clear().commit() }) { puts ->
+            db.beginTransaction()
+            try {
+                puts()
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
         }
-        db.beginTransaction()
-        try {
-            for ((k, v) in old) if (v is String) put(ns, k, v)
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
-        if (!prefs.edit().clear().commit()) throw IllegalStateException("the plain preferences of $ns could not be cleared")
-        migrated.add(ns)
     }
 
     private fun keystoreKey(): SecretKey {

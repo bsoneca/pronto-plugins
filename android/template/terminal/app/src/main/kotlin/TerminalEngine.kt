@@ -70,8 +70,14 @@ class TerminalEngine(
     private val random = SecureRandom()
     private lateinit var qjs: QuickJs
 
-    // Sealed at rest (SealedStore.kt); a value another build left in plain preferences moves in.
-    private val store by lazy { if (unlocked != null) SealedStore(context, actor, unlocked, Unlock.FILE) else SealedStore(context, actor) }
+    // Sealed at rest (SealedStore.kt) where the build's `pronto_sealed` switch is on, or the app asks for an unlock; a value
+    // another build left in plain preferences moves in then. Off, the plain preferences as before (Kv.kt).
+    private val store: Kv by lazy {
+        when (Storage.choose(context.getString(R.string.pronto_sealed), unlocked != null)) {
+            "sealed" -> if (unlocked != null) SealedStore(context, actor, unlocked, Unlock.FILE) else SealedStore(context, actor)
+            else -> PlainStore(context, actor)
+        }
+    }
 
     private fun asset(name: String) = context.assets.open(name).bufferedReader().use { it.readText() }
 

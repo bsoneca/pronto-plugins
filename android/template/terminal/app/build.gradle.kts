@@ -19,6 +19,10 @@ android {
         // Whether the build answers the scenario driver and takes the base, actor and path extras (MainActivity.kt):
         // the debug build does by being debuggable, the rehearsal build says so here, a release never.
         resValue("string", "pronto_driver", "off")
+        // Whether the terminal's storage is sealed at rest (SealedStore.kt) or the plain preferences of the earlier builds: a
+        // release's is android.json's "sealedStorage" (off until its flip); the debug and rehearsal builds always seal, so the
+        // scenarios prove the sealed path.
+        resValue("string", "pronto_sealed", "__SEALED__")
         val base = (project.findProperty("prontoBase") as String?) ?: "__BASE__"
         resValue("string", "pronto_base", base)
         // android.json's "unlock": "biometric" opens the sealed storage with one prompt (Unlock.kt).
@@ -62,6 +66,9 @@ android {
         getByName("release") {
             if (signed) signingConfig = signingConfigs.getByName("release")
         }
+        getByName("debug") {
+            resValue("string", "pronto_sealed", "on")
+        }
         // The rehearsal build (PRONTO-488): the release build's code, its minification and its other settings, signed with the
         // debug key, with the scenario driver and the base, actor and path extras on. Scenarios run on it, so what they check is the
         // release's code; the build signed with the release key never answers a driver (the driver's session answer carries
@@ -72,6 +79,7 @@ android {
             signingConfig = signingConfigs.getByName("debug")
             matchingFallbacks += listOf("release")
             resValue("string", "pronto_driver", "on")
+            resValue("string", "pronto_sealed", "on")
         }
     }
 
