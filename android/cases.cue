@@ -123,13 +123,24 @@ _cases: {
 		]
 	}
 
-	// Storage.choose(switch, unlock): which store a build uses. The switch is the build's `pronto_sealed` (android.json's
-	// "sealedStorage" for a release; the debug, rehearsal and local builds say on).
-	storage: [
-		{why: "the switch on seals", switch: "on", unlock: false, want: "sealed"},
-		{why: "the switch off keeps the plain preferences", switch: "off", unlock: false, want: "plain"},
-		{why: "an app that asks for the unlock seals whatever the switch says: its data key is the seal", switch: "off", unlock: true, want: "sealed"},
-		{why: "anything but on is off", switch: "", unlock: false, want: "plain"},
+	// Storage.pick(marker, flag): which store a launch uses. The choice is sticky and one way: with the marker the sealed store is
+	// used whatever the flag says or whether the phone is offline (flag null: unknown); with none, only a flag that is on adopts it.
+	pick: [
+		{why: "with the marker, sealed, the flag on", marker: true, flag: true, want: "sealed"},
+		{why: "with the marker, sealed, though the flag has been turned off since", marker: true, flag: false, want: "sealed"},
+		{why: "with the marker, sealed, offline", marker: true, flag: null, want: "sealed"},
+		{why: "no marker and the flag on: adopt (write the marker, then seal)", marker: false, flag: true, want: "adopt"},
+		{why: "no marker and the flag off: plain", marker: false, flag: false, want: "plain"},
+		{why: "no marker and the flag unknown (offline, a timeout): plain", marker: false, flag: null, want: "plain"},
+	]
+
+	// Flag.parse(body): the boolean an OFREP answer carries; anything else is unknown (null), never off.
+	flag: [
+		{why: "an answer with the value true", body: #"{"key":"sealed_storage","value":true,"reason":"STATIC","variant":"on"}"#, want: true},
+		{why: "an answer with the value false", body: #"{"key":"sealed_storage","value":false,"reason":"STATIC","variant":"off"}"#, want: false},
+		{why: "an error answer is unknown", body: #"{"key":"sealed_storage","errorCode":"FLAG_NOT_FOUND"}"#, want: null},
+		{why: "a value that is not a boolean is unknown", body: #"{"key":"sealed_storage","value":"true"}"#, want: null},
+		{why: "a body that is not JSON is unknown", body: "<html>", want: null},
 	]
 
 	// Migration.once over a plain store and a sealed one: turning the switch on moves what the plain preferences hold, once, and
@@ -146,5 +157,17 @@ _cases: {
 			want: {sealed: {}, plain: {a: "1", b: "2"}, moved: [], clears: 0, threw: true}},
 		{why: "a plain copy that cannot be cleared is an error, and the next open tries again", plain: {a: "1"}, sealed: {}, failClear: true, runs: 2,
 			want: {sealed: {a: "1"}, plain: {a: "1"}, moved: [], clears: 2, threw: true}},
+	]
+
+	// A move that is interrupted part-way resumes on the next launch and loses nothing: the marker is written before the move, so
+	// the next launch is sealed whatever the flag says, and each namespace is moved whole or not at all. `launches` is each launch's
+	// failing key (a sealed write that fails), or "" for none; each launch opens every namespace, in order, with a fresh Migration.
+	resume: [
+		{why: "the first launch fails in the second namespace; the next finishes it, and the first namespace is not moved twice",
+			namespaces: {device: {a: "1", b: "2"}, session: {c: "3", d: "4"}}, launches: ["d", ""],
+			want: {sealed: {"device/a": "1", "device/b": "2", "session/c": "3", "session/d": "4"}, plain: {}, movedPerLaunch: [[2, 0], [0, 2]], threwPerLaunch: [true, false]}},
+		{why: "an interrupted move that never recovers leaves the plain values for the namespace it did not finish",
+			namespaces: {device: {a: "1"}, session: {c: "3"}}, launches: ["c", "c"],
+			want: {sealed: {"device/a": "1"}, plain: {"session/c": "3"}, movedPerLaunch: [[1, 0], [0, 0]], threwPerLaunch: [true, true]}},
 	]
 }

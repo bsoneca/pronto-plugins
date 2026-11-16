@@ -3,8 +3,10 @@ package __APPLICATION_ID__
 import android.content.Context
 
 // The terminal's storage bridges (__native_kv_*) over one of two stores. The sealed store (SealedStore.kt: AES-GCM in SQLite
-// under a Keystore key) is behind a build-time switch, `pronto_sealed` (android.json's "sealedStorage"): on in the debug,
-// rehearsal and local builds, off in a release until a later flip. While it is off the plain SharedPreferences the earlier
+// under a Keystore key) is behind the app's pronto-flags flag (android.json's "sealedFlag", read over the door's /ofrep/), and
+// the choice is sticky and one way (Storage.pick): once a phone has adopted the sealed store a marker file says so, and the
+// sealed store is used from then on, whatever the flag says or whether the phone is offline; sealed data never goes back to plain.
+// While there is no marker and the flag is off or unknown (an unreachable door, a timeout), the plain SharedPreferences the earlier
 // builds wrote are used as they were. An app that asks for an unlock (Unlock.kt) has no plain path: its data key is the seal.
 interface Kv {
     fun get(ns: String, k: String): String?
@@ -15,8 +17,52 @@ interface Kv {
 }
 
 object Storage {
-    // Which store a build uses: "sealed" or "plain".
-    fun choose(switch: String, unlock: Boolean): String = if (unlock || switch == "on") "sealed" else "plain"
+    // "sealed": the marker is there. "adopt": no marker and the flag is on: write the marker, then use the sealed store (what the
+    // plain preferences hold moves in per namespace, Migration, and an interrupted move resumes on the next launch because the
+    // marker is already there). "plain": no marker and the flag off or unknown. `flag` is null when it could not be read.
+    fun pick(marker: Boolean, flag: Boolean?): String = if (marker) "sealed" else if (flag == true) "adopt" else "plain"
+}
+
+// A flag over the remote evaluation protocol (OFREP), as the page reads it: POST <base>/ofrep/v1/evaluate/flags/<key>.
+object Flag {
+    // The boolean the answer carries; null for anything else (an error answer, a value that is not a boolean, not JSON).
+    fun parse(body: String): Boolean? = try {
+        val v = org.json.JSONObject(body).opt("value")
+        if (v is Boolean) v else null
+    } catch (e: org.json.JSONException) {
+        null
+    }
+
+    // Null when the door does not answer in time or answers with an error: the flag is unknown, which is not off (a phone that
+    // has adopted the sealed store never asks), and the plain preferences stay in use until a launch that can read it.
+    fun read(base: String, key: String, timeoutMs: Int = 3000): Boolean? {
+        val c = java.net.URL("$base/ofrep/v1/evaluate/flags/$key").openConnection() as java.net.HttpURLConnection
+        return try {
+            c.connectTimeout = timeoutMs
+            c.readTimeout = timeoutMs
+            c.requestMethod = "POST"
+            c.doOutput = true
+            c.setRequestProperty("Content-Type", "application/json")
+            c.outputStream.use { it.write("{\"context\":{}}".toByteArray()) }
+            if (c.responseCode == 200) parse(c.inputStream.bufferedReader().readText()) else null
+        } catch (e: java.io.IOException) {
+            android.util.Log.w("pronto", "PRONTO FLAG $key unknown: ${e.message}")
+            null
+        } finally {
+            c.disconnect()
+        }
+    }
+}
+
+// The phone's one-way choice, a file in the app's own directory: written before the move starts, so a move that is interrupted
+// is finished by the next launch whatever the flag then says.
+class Marker(context: Context) {
+    private val file = java.io.File(context.filesDir, "sealed.marker")
+    fun exists() = file.exists()
+    fun write() {
+        file.writeText("sealed\n")
+        if (!file.exists()) throw IllegalStateException("the sealed-storage marker could not be written")
+    }
 }
 
 // What the earlier builds did: plain SharedPreferences, one file per actor and namespace.

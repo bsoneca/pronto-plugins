@@ -70,11 +70,16 @@ class TerminalEngine(
     private val random = SecureRandom()
     private lateinit var qjs: QuickJs
 
-    // Sealed at rest (SealedStore.kt) where the build's `pronto_sealed` switch is on, or the app asks for an unlock; a value
-    // another build left in plain preferences moves in then. Off, the plain preferences as before (Kv.kt).
+    // Sealed at rest (SealedStore.kt) once the app's flag (android.json's "sealedFlag") has put this phone on it, or when the app asks
+    // for an unlock; sticky and one way (Kv.kt, Storage.pick). Off or unknown, the plain preferences as before. No flag named: sealed.
     private val store: Kv by lazy {
-        when (Storage.choose(context.getString(R.string.pronto_sealed), unlocked != null)) {
-            "sealed" -> if (unlocked != null) SealedStore(context, actor, unlocked, Unlock.FILE) else SealedStore(context, actor)
+        if (unlocked != null) return@lazy SealedStore(context, actor, unlocked, Unlock.FILE)
+        val marker = Marker(context)
+        val flagKey = context.getString(R.string.pronto_sealed_flag)
+        val flag = if (marker.exists()) null else if (flagKey.isEmpty()) true else Flag.read(base, flagKey)
+        when (Storage.pick(marker.exists(), flag)) {
+            "adopt" -> { marker.write(); SealedStore(context, actor) }
+            "sealed" -> SealedStore(context, actor)
             else -> PlainStore(context, actor)
         }
     }
