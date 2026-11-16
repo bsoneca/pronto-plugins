@@ -123,10 +123,13 @@ class SealedStore(
     // What an earlier build left in plain SharedPreferences moves in on the namespace's first use,
     // and the preferences are cleared: sealing must not leave the plain copy behind.
     private fun migrate(ns: String) {
-        if (!migrated.add(ns)) return
+        if (ns in migrated) return
         val prefs = context.getSharedPreferences("terminal-$actor-$ns", Context.MODE_PRIVATE)
         val old = prefs.all
-        if (old.isEmpty()) return
+        if (old.isEmpty()) {
+            migrated.add(ns)
+            return
+        }
         db.beginTransaction()
         try {
             for ((k, v) in old) if (v is String) put(ns, k, v)
@@ -134,7 +137,8 @@ class SealedStore(
         } finally {
             db.endTransaction()
         }
-        prefs.edit().clear().commit()
+        if (!prefs.edit().clear().commit()) throw IllegalStateException("the plain preferences of $ns could not be cleared")
+        migrated.add(ns)
     }
 
     private fun keystoreKey(): SecretKey {
