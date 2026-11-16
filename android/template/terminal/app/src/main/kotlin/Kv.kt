@@ -16,8 +16,23 @@ interface Kv {
     fun keys(ns: String): List<String>
 }
 
+// The last successful evaluation of each flag, kept across launches: what a launch that cannot reach the door uses.
+interface FlagCache {
+    fun get(key: String): Boolean?
+    fun put(key: String, value: Boolean)
+}
+
+class PrefsFlagCache(context: Context) : FlagCache {
+    private val prefs = context.getSharedPreferences("terminal-flags", Context.MODE_PRIVATE)
+    override fun get(key: String): Boolean? = if (prefs.contains(key)) prefs.getBoolean(key, false) else null
+    override fun put(key: String, value: Boolean) {
+        if (!prefs.edit().putBoolean(key, value).commit()) throw IllegalStateException("the flag $key could not be kept")
+    }
+}
+
 // OpenFeature's evaluation details: the value, the reason it has it, and, when the evaluation failed, the error. A flag that cannot
-// be evaluated has the value of its declared default (the app's flags_spec.cue), reason "ERROR" and the cause in `errorCode`: the
+// be evaluated has its last successful value (reason "CACHED"), and with none yet the value of its declared default (the app's
+// flags_spec.cue), reason "ERROR"; the cause is in `errorCode`: the
 // same contract the page's flags have (an OFREP error evaluates to the default). Storage only ever sees the explicit value.
 data class FlagDetails(val value: Boolean, val reason: String, val errorCode: String? = null)
 
@@ -43,19 +58,27 @@ object Flag {
         FlagDetails(default, "ERROR", "the answer is not JSON: ${e.message}")
     }
 
-    // Asks through `post` (the HTTP call, so a test can make it fail); a failure is the default with reason ERROR, and every ERROR
-    // is reported (the app's log) with the key and the cause.
-    fun evaluate(key: String, default: Boolean, post: () -> String, report: (String) -> Unit): FlagDetails {
-        val details = try {
+    // Asks through `post` (the HTTP call, so a test can make it fail). A boolean answer is the value, and the last successful
+    // evaluation is kept in `cache` each time, so a launch that cannot reach the door has the last known value (reason CACHED, the
+    // cause in errorCode). Only with nothing cached yet (a first launch that is offline) is it the declared `default` with reason
+    // ERROR. Every launch that did not get an answer is reported (the app's log) with the key, the value and the cause.
+    fun evaluate(key: String, default: Boolean, post: () -> String, cache: FlagCache, report: (String) -> Unit): FlagDetails {
+        val asked = try {
             parse(post(), default)
         } catch (e: java.io.IOException) {
             FlagDetails(default, "ERROR", "the door did not answer: ${e.message}")
         }
-        if (details.reason == "ERROR") report("PRONTO FLAG $key ERROR, value ${details.value} (the declared default): ${details.errorCode}")
+        if (asked.reason != "ERROR") {
+            cache.put(key, asked.value)
+            return asked
+        }
+        val kept = cache.get(key)
+        val details = if (kept != null) FlagDetails(kept, "CACHED", asked.errorCode) else asked
+        report("PRONTO FLAG $key ${details.reason}, value ${details.value}${if (kept == null) " (the declared default)" else " (the last answer)"}: ${asked.errorCode}")
         return details
     }
 
-    fun read(base: String, key: String, default: Boolean, timeoutMs: Int = 3000): FlagDetails = evaluate(key, default, {
+    fun read(base: String, key: String, default: Boolean, cache: FlagCache, timeoutMs: Int = 3000): FlagDetails = evaluate(key, default, {
         val c = java.net.URL("$base/ofrep/v1/evaluate/flags/$key").openConnection() as java.net.HttpURLConnection
         try {
             c.connectTimeout = timeoutMs
@@ -69,7 +92,7 @@ object Flag {
         } finally {
             c.disconnect()
         }
-    }) { android.util.Log.e("pronto", it) }
+    }, cache) { android.util.Log.e("pronto", it) }
 }
 
 // The phone's one-way choice, a file in the app's own directory: written before the move starts, so a move that is interrupted

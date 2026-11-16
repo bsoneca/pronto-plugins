@@ -78,7 +78,7 @@ class TerminalEngine(
         val marker = Marker(context)
         val flagKey = context.getString(R.string.pronto_sealed_flag)
         val has = marker.exists()
-        val value = if (has) false else if (flagKey.isEmpty()) true else Flag.read(base, flagKey, context.resources.getBoolean(R.bool.pronto_sealed_flag_default)).value
+        val value = if (has) false else if (flagKey.isEmpty()) true else Flag.read(base, flagKey, context.resources.getBoolean(R.bool.pronto_sealed_flag_default), PrefsFlagCache(context)).value
         when (Storage.pick(has, value)) {
             "adopt" -> { marker.write(); SealedStore(context, actor) }
             "sealed" -> SealedStore(context, actor)

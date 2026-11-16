@@ -143,19 +143,29 @@ _cases: {
 		{why: "a body that is not JSON is the default, reason ERROR", body: "<html>", default: false, want: {value: false, reason: "ERROR", errorCode: "the answer is not JSON"}},
 	]
 
-	// Flag.evaluate(key, default, post, report): asking through `post`, which may fail. An IOException is the declared default with
-	// reason ERROR and its cause; every ERROR is reported (the app's log) with the key, the value and the cause; a boolean answer
-	// reports nothing. Each case then picks the store of a launch with no marker, the default being the spec's (flags_spec.cue,
-	// emitted into res/values/sealed_flag.xml): changing `default` here changes the outcome, as changing the spec does.
+	// Flag.evaluate(key, default, post, cache, report): asking through `post`, which may fail, with the last successful evaluation kept in
+	// `cache` ({key: value}, before and after). An answer with a boolean value is the value and updates the cache. When there is no
+	// answer (an IOException, an error answer), the cached value is used, reason CACHED; only with nothing cached (a first launch that
+	// is offline) is it the declared `default` (the spec's, emitted from CUE into res/values/sealed_flag.xml) with reason ERROR. Every
+	// launch with no answer is reported (the app's log) with the key, the value and the cause. Each case then picks the store of a
+	// launch (`marker`, default false): the marker wins, then a true adopts.
 	evaluate: [
-		{why: "unreachable gives the spec default (false) with reason ERROR, reported, and the launch keeps plain", default: false, answer: {throws: "connection refused"},
-			want: {value: false, reason: "ERROR", cause: "the door did not answer: connection refused", reported: true, store: "plain"}},
-		{why: "unreachable gives the spec default, so a default of true follows: adopt", default: true, answer: {throws: "connection refused"},
-			want: {value: true, reason: "ERROR", cause: "the door did not answer: connection refused", reported: true, store: "adopt"}},
-		{why: "an error answer is the default with reason ERROR, reported", default: false, answer: {body: #"{"key":"sealed_storage","errorCode":"GENERAL"}"#},
-			want: {value: false, reason: "ERROR", cause: "GENERAL", reported: true, store: "plain"}},
-		{why: "an answer true adopts and reports nothing", default: false, answer: {body: #"{"value":true,"reason":"STATIC"}"#}, want: {value: true, reason: "STATIC", reported: false, store: "adopt"}},
-		{why: "an answer false keeps plain and reports nothing, whatever the default", default: true, answer: {body: #"{"value":false,"reason":"STATIC"}"#}, want: {value: false, reason: "STATIC", reported: false, store: "plain"}},
+		{why: "an answer updates the cache", default: false, cache: {}, answer: {body: #"{"value":true,"reason":"STATIC"}"#},
+			want: {value: true, reason: "STATIC", reported: false, cache: {sealed_storage: true}, store: "adopt"}},
+		{why: "a later answer replaces what the cache held", default: false, cache: {sealed_storage: true}, answer: {body: #"{"value":false,"reason":"STATIC"}"#},
+			want: {value: false, reason: "STATIC", reported: false, cache: {sealed_storage: false}, store: "plain"}},
+		{why: "offline with a cached true uses it, reason CACHED, reported with the cause: it adopts sealed", default: false, cache: {sealed_storage: true}, answer: {throws: "connection refused"},
+			want: {value: true, reason: "CACHED", cause: "the door did not answer: connection refused", reported: true, cache: {sealed_storage: true}, store: "adopt"}},
+		{why: "offline with a cached false uses it, whatever the spec default is", default: true, cache: {sealed_storage: false}, answer: {throws: "connection refused"},
+			want: {value: false, reason: "CACHED", cause: "the door did not answer: connection refused", reported: true, cache: {sealed_storage: false}, store: "plain"}},
+		{why: "an error answer with a cache uses the cache", default: false, cache: {sealed_storage: true}, answer: {body: #"{"key":"sealed_storage","errorCode":"GENERAL"}"#},
+			want: {value: true, reason: "CACHED", cause: "GENERAL", reported: true, cache: {sealed_storage: true}, store: "adopt"}},
+		{why: "offline on the first launch, with nothing cached, is the spec default (false) with reason ERROR, reported, and caches nothing", default: false, cache: {}, answer: {throws: "connection refused"},
+			want: {value: false, reason: "ERROR", cause: "the door did not answer: connection refused", reported: true, cache: {}, store: "plain"}},
+		{why: "offline on the first launch follows the spec default: true adopts", default: true, cache: {}, answer: {throws: "connection refused"},
+			want: {value: true, reason: "ERROR", cause: "the door did not answer: connection refused", reported: true, cache: {}, store: "adopt"}},
+		{why: "the marker wins over a cached false", marker: true, default: false, cache: {sealed_storage: false}, answer: {throws: "connection refused"},
+			want: {value: false, reason: "CACHED", cause: "the door did not answer: connection refused", reported: true, cache: {sealed_storage: false}, store: "sealed"}},
 	]
 
 	// Migration.once over a plain store and a sealed one: turning the switch on moves what the plain preferences hold, once, and

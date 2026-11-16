@@ -32,14 +32,21 @@ class StorageTest {
     }
 
     @Test
-    fun anUnreachableFlagIsItsDeclaredDefaultAndReported() {
+    fun theLastAnswerIsKeptAndUsedWhenTheDoorCannotBeReached() {
         for (c in Cases.list(Cases.all.getJSONArray("evaluate"))) {
             val why = c.getString("why")
             val answer = c.getJSONObject("answer")
+            val kept = HashMap<String, Boolean>()
+            val before = c.getJSONObject("cache")
+            for (k in before.keys()) kept[k] = before.getBoolean(k)
+            val cache = object : FlagCache {
+                override fun get(key: String): Boolean? = kept[key]
+                override fun put(key: String, value: Boolean) { kept[key] = value }
+            }
             val reports = ArrayList<String>()
             val got = Flag.evaluate("sealed_storage", c.getBoolean("default"), {
                 if (answer.has("throws")) throw java.io.IOException(answer.getString("throws")) else answer.getString("body")
-            }) { reports.add(it) }
+            }, cache) { reports.add(it) }
             val want = c.getJSONObject("want")
             assertEquals("$why: value", want.getBoolean("value"), got.value)
             assertEquals("$why: reason", want.getString("reason"), got.reason)
@@ -48,7 +55,9 @@ class StorageTest {
                 assertEquals("$why: errorCode", true, got.errorCode?.contains(want.getString("cause")) == true)
                 assertEquals("$why: report names the key and the cause", true, reports[0].contains("sealed_storage") && reports[0].contains(want.getString("cause")))
             }
-            assertEquals("$why: store", want.getString("store"), Storage.pick(false, got.value))
+            val wantCache = want.getJSONObject("cache")
+            assertEquals("$why: cache", wantCache.keys().asSequence().associateWith { wantCache.getBoolean(it) }, kept.toMap())
+            assertEquals("$why: store", want.getString("store"), Storage.pick(c.optBoolean("marker", false), got.value))
         }
     }
 
