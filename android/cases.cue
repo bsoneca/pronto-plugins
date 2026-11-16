@@ -122,4 +122,29 @@ _cases: {
 			{why: "a wrapped key and no rows are sealed", rows: false, wrapped: 60, want: "SEALED"},
 		]
 	}
+
+	// Storage.choose(switch, unlock): which store a build uses. The switch is the build's `pronto_sealed` (android.json's
+	// "sealedStorage" for a release; the debug, rehearsal and local builds say on).
+	storage: [
+		{why: "the switch on seals", switch: "on", unlock: false, want: "sealed"},
+		{why: "the switch off keeps the plain preferences", switch: "off", unlock: false, want: "plain"},
+		{why: "an app that asks for the unlock seals whatever the switch says: its data key is the seal", switch: "off", unlock: true, want: "sealed"},
+		{why: "anything but on is off", switch: "", unlock: false, want: "plain"},
+	]
+
+	// Migration.once over a plain store and a sealed one: turning the switch on moves what the plain preferences hold, once, and
+	// loses nothing. `plain` and `sealed` are the stores before; `runs` how many times the namespace is opened; `failPut` a key whose
+	// sealed write fails; `failClear` whether clearing the plain copy fails. `want` is what is left, and the values moved per run.
+	migration: [
+		{why: "the plain values all move in, the plain copy is cleared, and a second open moves nothing", plain: {a: "1", b: "2"}, sealed: {}, runs: 2,
+			want: {sealed: {a: "1", b: "2"}, plain: {}, moved: [2, 0], clears: 1, threw: false}},
+		{why: "what the sealed store already holds for other keys stays", plain: {a: "1"}, sealed: {z: "9"}, runs: 1,
+			want: {sealed: {a: "1", z: "9"}, plain: {}, moved: [1], clears: 1, threw: false}},
+		{why: "an empty plain store moves nothing and clears nothing", plain: {}, sealed: {}, runs: 2,
+			want: {sealed: {}, plain: {}, moved: [0, 0], clears: 0, threw: false}},
+		{why: "a failed sealed write loses nothing: the plain values stay and the sealed store holds none of the batch", plain: {a: "1", b: "2"}, sealed: {}, failPut: "b", runs: 1,
+			want: {sealed: {}, plain: {a: "1", b: "2"}, moved: [], clears: 0, threw: true}},
+		{why: "a plain copy that cannot be cleared is an error, and the next open tries again", plain: {a: "1"}, sealed: {}, failClear: true, runs: 2,
+			want: {sealed: {a: "1"}, plain: {a: "1"}, moved: [], clears: 2, threw: true}},
+	]
 }
