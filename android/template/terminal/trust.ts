@@ -38,15 +38,12 @@ async function stackPair(): Promise<void> {
   const have = async (f: string) => await Deno.stat(`.certs/${f}`).then(() => true, () => false);
   if ((await have("localhost.pem")) && (await have("localhost-key.pem")) && (await have("rootCA.pem"))) return;
   await Deno.mkdir(".certs", { recursive: true });
-  try {
-    const caroot = await Deno.realPath(".certs");
-    await new Deno.Command("mkcert", {
-      args: ["-cert-file", ".certs/localhost.pem", "-key-file", ".certs/localhost-key.pem", "localhost", "caddy", "127.0.0.1", "::1"],
-      env: { CAROOT: caroot },
-      stdout: "null",
-      stderr: "null",
-    }).output();
-  } catch (e) {
-    if (!(e instanceof Deno.errors.NotFound)) throw e;
-  }
+  const caroot = await Deno.realPath(".certs");
+  const out = await new Deno.Command("mkcert", {
+    args: ["-cert-file", ".certs/localhost.pem", "-key-file", ".certs/localhost-key.pem", "localhost", "caddy", "127.0.0.1", "::1"],
+    env: { CAROOT: caroot },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (out.code !== 0) throw new Error(`mkcert could not issue the stack's pair in .certs (exit ${out.code}): ${new TextDecoder().decode(out.stderr).trim()}`);
 }
