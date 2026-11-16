@@ -22,6 +22,7 @@ export class Plane implements Board {
       // a call that is the same twice; never a POST that may have been made.
       let failure: number | "timeout" | "network";
       let text = "";
+      let ok = false;
       try {
         const r = await fetch(url, {
           method,
@@ -30,11 +31,19 @@ export class Plane implements Board {
           signal: AbortSignal.timeout(timeoutMs()),
         });
         text = await r.text();
-        if (r.ok) return text ? JSON.parse(text) : null;
+        ok = r.ok;
         failure = r.status;
       } catch (e) {
         failure = e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError") ? "timeout" : "network";
         text = String(e);
+      }
+      if (ok) {
+        if (!text) return null;
+        try {
+          return JSON.parse(text);
+        } catch {
+          throw new Error(`${method} ${path}: bad JSON (${failure})`);
+        }
       }
       const wait = askAgain(method, failure, attempt);
       if (wait === null) throw new Error(`plane ${method} ${path}: ${failure} ${text.slice(0, 300)}`);

@@ -1,7 +1,7 @@
 // A fake Plane for the suggestion inbox's cases (tests/unit/devflow_inbox.cue, namespace `inbox`): an
 // in-memory Board built from a JSON seed that logs each write, so a case can say what a run wrote
 // and that a second run wrote nothing. The code under test is devflow/suggestions.ts, on this Board.
-import { approve, inboxSteps, suggestionLines, suggestionStatus } from '../../devflow/suggestions.ts';
+import { approve, inboxSteps, inboxStatus, show, suggestionLines } from '../../devflow/suggestions.ts';
 import * as run from '../../intents/run.ts';
 
 const GROUPS = { Backlog: 'backlog', Todo: 'unstarted', 'In Progress': 'started', Done: 'completed', Cancelled: 'cancelled' };
@@ -36,10 +36,13 @@ function flowOf(seed) {
 /** An in-memory Board of the seed: `inboxMade` (default true) makes the inbox project with its three
  * states (else it is absent, or with Plane's own five when `connect` makes it); `items` the inbox's
  * issues `{seq, state, title, html, created}`; `issues` the board's `{seq, name, state, module}`;
- * `modules` its modules; `failOnce` a write method that throws its first call. Writes are logged. */
+ * `modules` its modules; `failOnce` a write method that throws its first call (`issues` instead: the
+ * inbox's list of issues, failing as Plane's 500 does, with a body); `failAfter` a method whose first
+ * call does its work, writes included, then throws, as a lost answer does. Writes are logged. */
 function boardOf(seed) {
   const log = [];
   let failing = seed.failOnce;
+  let lost = seed.failAfter;
   let n = 0;
   const id = (p) => `${p}-${++n}`;
   const projects = [{ id: 'p-acme', name: 'acme', identifier: 'ACME' }];
@@ -86,13 +89,16 @@ function boardOf(seed) {
       for (const [m, ids] of Object.entries(modIssues)) for (const i of ids) by.set(i, [...(by.get(i) ?? []), m]);
       return by;
     },
-    issues: (p, l = false) => (issues[p] ?? []).map((i) => light(i, !l)),
+    issues: (p, l = false) => {
+      if (p === 'p-sugest' && failing === 'issues') { failing = null; throw new Error('plane GET /workspaces/acme/projects/p-sugest/issues/?per_page=100: 500 {"secret":"the body"}'); }
+      return (issues[p] ?? []).map((i) => light(i, !l));
+    },
     issue: (key) => {
       for (const p of projects) {
         const hit = (issues[p.id] ?? []).find((i) => `${p.identifier}-${i.sequence_id}` === key);
         if (hit) return { ...hit };
       }
-      throw new Error(`no issue ${key}`);
+      throw new Error(`plane GET /workspaces/acme/issues/${key}/: 404 {"detail":"Not found."}`);
     },
     createIssue: (p, f) => {
       write('createIssue', f.name);
@@ -104,7 +110,11 @@ function boardOf(seed) {
     comments: (_p, iid) => (comments[iid] ?? []).map((c) => ({ ...c })),
   };
   // Each call answers as a board's does: late, and a failure as a rejection.
-  const board = Object.fromEntries(Object.entries(sync).map(([k, f]) => [k, (...a) => Promise.resolve().then(() => f(...a))]));
+  const board = Object.fromEntries(Object.entries(sync).map(([k, f]) => [k, (...a) => Promise.resolve().then(() => {
+    const r = f(...a);
+    if (lost === k) { lost = null; throw new Error(`${k} answer lost`); }
+    return r;
+  })]));
   const take = () => log.splice(0, log.length);
   return { board, take, projects, states, issues, comments, modIssues, labels, byId, inboxId: () => projects.find((p) => p.identifier === 'SUGEST')?.id };
 }
@@ -114,8 +124,14 @@ export async function status(seed, now) {
   const f = boardOf(seed);
   const flow = flowOf(seed);
   const names = (await f.board.issues('p-acme', true)).map((i) => i.name);
-  const s = await suggestionStatus(f.board, flow, f.inboxId(), names, new Date(now));
+  const s = await inboxStatus(f.board, flow, f.inboxId(), names, new Date(now));
   return s && { ...s, lines: suggestionLines(s, flow) };
+}
+
+/** `suggestion`'s read of an item: what `show` answers. */
+export async function shown(seed, key) {
+  const f = boardOf(seed);
+  return await show(f.board, flowOf(seed), f.inboxId(), key);
 }
 
 /** `approve` run `runs` times on the seed's board: each run's message (or the error it threw), its

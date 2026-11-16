@@ -4,7 +4,7 @@
 // stranger's: it reaches output only as excerptOf's one inert, capped, labelled line, and never
 // reaches a PRONTO issue.
 import type { Step } from "../intents/run.ts";
-import { type Board, esc } from "./board/board.ts";
+import { type Board, esc, type Issue } from "./board/board.ts";
 import { dayOf, excerptOf, staleOf, submitterOf, suggestionOf, suggestionTitle } from "./flow.js";
 import type { DevFlow } from "./spec.ts";
 
@@ -21,6 +21,11 @@ function inboxOf(flow: DevFlow): Inbox {
 const stateOf = (sug: Inbox, group: string) => sug.states.find((s) => s.group === group)!.name;
 
 const DAY = 86400000;
+/** When an item was made, as a time to sort by: an item with no readable time sorts after all others. */
+const madeAt = (i: { created_at?: string }) => {
+  const t = Date.parse(i.created_at ?? "");
+  return Number.isFinite(t) ? t : Infinity;
+};
 
 export interface Waiting { key: string; app: string; submitter: string; date: string; days: number; stale: boolean; excerpt: string; cut: boolean; untrusted: true }
 export interface Approved { key: string; app: string }
@@ -39,7 +44,7 @@ export async function suggestionStatus(board: Board, flow: DevFlow, inbox: strin
   const keyOf = (n: number) => `${sug.project}-${n}`;
   const filed = new Set(names.flatMap((n) => suggestionOf(n, sug.project)?.key ?? []));
   const waiting = issues.filter((i) => at(i.state) === stateOf(sug, "backlog"))
-    .sort((a, b) => Date.parse(a.created_at ?? "") - Date.parse(b.created_at ?? "") || a.sequence_id - b.sequence_id)
+    .sort((a, b) => madeAt(a) - madeAt(b) || a.sequence_id - b.sequence_id)
     .map((i): Waiting => {
       const who = submitterOf(i.name, sug.from);
       const { text, cut } = excerptOf(i.description_html);
@@ -62,8 +67,22 @@ export async function suggestionStatus(board: Board, flow: DevFlow, inbox: strin
   return { project: sug.project, missing: false, waiting, approved };
 }
 
+export interface Unavailable { unavailable: string }
+
+/** `suggestionStatus` that never fails status: a read of the inbox that fails is `{unavailable}`, its
+ * reason the call and status Plane answered, never the answer's body. */
+export async function inboxStatus(board: Board, flow: DevFlow, inbox: string | undefined, names: string[], now: Date): Promise<SuggestionStatus | Unavailable | null> {
+  try {
+    return await suggestionStatus(board, flow, inbox, names, now);
+  } catch (e) {
+    const m = /^plane \S+ \S+: (?:\d{3}|timeout|network)/.exec(e instanceof Error ? e.message : "");
+    return { unavailable: m ? m[0] : "the inbox could not be read" };
+  }
+}
+
 /** The lines status prints for the inbox, after all its others. */
-export function suggestionLines(s: SuggestionStatus, flow: DevFlow): string[] {
+export function suggestionLines(s: SuggestionStatus | Unavailable, flow: DevFlow): string[] {
+  if ("unavailable" in s) return [`Suggestions: unavailable (${s.unavailable})`];
   const sug = flow.suggestions!;
   if (s.missing) return [`Suggestions: no inbox ${s.project} on the board yet: run bin/pronto connect plane`];
   return [
@@ -73,6 +92,34 @@ export function suggestionLines(s: SuggestionStatus, flow: DevFlow): string[] {
   ];
 }
 
+/** An inbox item by its key and the name of the state it is in, or the message that refuses it: a key
+ * that is no item's, an inbox not made, an item the board does not have (Plane's 404), or one of another
+ * project. Any other failure of the board throws. */
+async function inboxItem(board: Board, sug: Inbox, inbox: string | undefined, key: string): Promise<{ item: Issue; state: string; at: string } | { message: string }> {
+  if (!new RegExp(`^${sug.project}-[1-9][0-9]*$`).test(key)) return { message: `${key} is not an item of the inbox ${sug.project} (${sug.project}-<n>)` };
+  if (!inbox) return { message: `no inbox ${sug.project} on the board yet: run bin/pronto connect plane` };
+  let item: Issue;
+  try {
+    item = await board.issue(key);
+  } catch (e) {
+    if (e instanceof Error && /^plane \S+ \S+: 404\b/.test(e.message)) return { message: `no item ${key} in the inbox` };
+    throw e;
+  }
+  if (item.project !== inbox) return { message: `${key} is not in the inbox ${sug.project}` };
+  return { item, at: inbox, state: (await board.states(inbox)).find((s) => s.id === item.state)?.name ?? "?" };
+}
+
+/** `suggestion`: the one sanctioned read of an approved suggestion's text (an item in Refine), for the
+ * designer: excerptOf's inert, capped line (2000 characters), marked untrusted. Any other item, in
+ * Suggested or Cancelled, is refused: only the owner's approval makes a suggestion readable. */
+export async function show(board: Board, flow: DevFlow, inbox: string | undefined, key: string): Promise<{ ok: true; key: string; untrusted: true; text: string; cut: boolean } | { ok: false; message: string }> {
+  const sug = inboxOf(flow);
+  const found = await inboxItem(board, sug, inbox, key);
+  if ("message" in found) return { ok: false, message: found.message };
+  if (found.state !== stateOf(sug, "unstarted")) return { ok: false, message: `${key} is in ${found.state}: only a suggestion the owner approved (in ${stateOf(sug, "unstarted")}) can be read` };
+  return { ok: true, key, untrusted: true, ...excerptOf(found.item.description_html, 2000) };
+}
+
 /** `approve`: files an inbox item the owner moved to Refine as an issue of the board, in Backlog, in
  * its app's module, labelled, its body a link to the item and none of its text; comments the issue's
  * key on the item. Run again it writes nothing; it finds its own issue by title, so a run that died
@@ -80,11 +127,9 @@ export function suggestionLines(s: SuggestionStatus, flow: DevFlow): string[] {
 export async function approve(board: Board, flow: DevFlow, project: string, inbox: string | undefined, key: string): Promise<{ ok: boolean; message: string }> {
   const sug = inboxOf(flow);
   const refuse = (message: string) => ({ ok: false, message });
-  if (!new RegExp(`^${sug.project}-[1-9][0-9]*$`).test(key)) return refuse(`${key} is not an item of the inbox ${sug.project} (${sug.project}-<n>)`);
-  if (!inbox) return refuse(`no inbox ${sug.project} on the board yet: run bin/pronto connect plane`);
-  const item = await board.issue(key);
-  if (item.project !== inbox) return refuse(`${key} is not in the inbox ${sug.project}`);
-  const state = (await board.states(inbox)).find((s) => s.id === item.state)?.name ?? "?";
+  const found = await inboxItem(board, sug, inbox, key);
+  if ("message" in found) return refuse(found.message);
+  const { item, state, at } = found;
   if (state !== stateOf(sug, "unstarted")) return refuse(`${key} is in ${state}: the owner approves a suggestion by moving it to ${stateOf(sug, "unstarted")}`);
   const { app } = submitterOf(item.name, sug.from);
   if (app === "unknown") return refuse(`${key} names no app that may file here (${sug.from.join(", ")})`);
@@ -107,8 +152,8 @@ export async function approve(board: Board, flow: DevFlow, project: string, inbo
     wrote = true;
   }
   const filedAs = `${id}-${made.sequence_id}`;
-  if (!(await board.comments(inbox, item.id)).some((c) => c.html.includes(`Filed as ${id}-`))) {
-    await board.comment(inbox, item.id, `<p>Filed as ${esc(filedAs)}</p>`);
+  if (!(await board.comments(at, item.id)).some((c) => c.html.includes(`Filed as ${id}-`))) {
+    await board.comment(at, item.id, `<p>Filed as ${esc(filedAs)}</p>`);
     wrote = true;
   }
   return { ok: true, message: wrote ? `${key} filed as ${filedAs}` : `${key} already filed as ${filedAs}` };

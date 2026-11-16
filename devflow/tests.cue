@@ -164,6 +164,10 @@ suggestions: {
 	}).suggestions.staleDays & 7
 	lowerCase: ((#DevFlow & {suggestions: {project: "sugest", from: ["aprende"]}}).suggestions == _|_) & true
 	noApps: ((#DevFlow & {suggestions: {project: "SUGEST", from: []}}).suggestions == _|_) & true
+	notPlane: ((#DevFlow & {
+		board: {kind: "github-projects", workspace: "acme", repository: "acme/acme", project: {name: "acme", identifier: "ACME"}}
+		suggestions: {project: "SUGEST", from: ["aprende"]}
+	}).suggestions == _|_) & true
 	sameAsBoard: ((#DevFlow & {
 		board: {host: "plane.example.com", workspace: "acme", project: {name: "acme", identifier: "ACME"}}
 		suggestions: {project: "ACME", from: ["aprende"]}

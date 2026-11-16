@@ -83,7 +83,8 @@ devFlow: #DevFlow
 	// Nothing in the loop reads it: the owner approves a suggestion by moving it to Refine, or rejects
 	// it by moving it to Cancelled, and `pronto-devflow approve` files an approved one as an issue of
 	// the board. Absent, the board is as it was.
-	suggestions?: #Suggestions & {project: !=board.project.identifier}
+	// A Plane board alone holds an inbox: another kind's board has no second project to make.
+	suggestions?: #Suggestions & {project: !=board.project.identifier, _plane: board.kind & "plane"}
 
 	// The states, in order, each in one of the board's groups: the flow's own, or a repository's
 	// list of its own (then every role below names one of them).
