@@ -101,7 +101,7 @@ await Deno.mkdir(`${res}/xml`, { recursive: true });
 await Deno.mkdir(`${res}/raw`, { recursive: true });
 const roots = await localRoots();
 const trusted: string[] = [];
-for (const name of ["local_caddy", "local_ca"]) {
+for (const name of ["local_caddy", "local_ca", "local_stack"]) {
   if (roots[name]) {
     await Deno.writeTextFile(`${res}/raw/${name}.pem`, roots[name]);
     trusted.push(name);

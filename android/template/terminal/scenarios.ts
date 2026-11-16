@@ -652,6 +652,12 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
           // the app's own scripts (TerminalEngine), whose source has words like "Anonymous" in it. The sealed
           // store must exist, or an empty directory would pass.
           const text = sub(arg as string);
+          // A rehearsal build is the release's, which run-as cannot open: the check is the debug build's, said so, never passed silently.
+          const probe = await new Deno.Command(adbPath(), { args: ["shell", `run-as ${phone.id} true`], stdin: "null", stdout: "piped", stderr: "piped" }).output();
+          if (probe.code !== 0 && /not debuggable/.test(new TextDecoder().decode(probe.stdout) + new TextDecoder().decode(probe.stderr))) {
+            console.log(`not checked: ${phone.id} is not debuggable, so its private files cannot be read (run the debug build to check them)`);
+            break;
+          }
           const dbs = await sh(`run-as ${phone.id} ls databases`);
           if (!dbs.split(/\s+/).includes("terminal-sealed.db")) throw new Fail(`no sealed store in ${phone.id}'s databases: ${dbs.trim()}`);
           const out = await new Deno.Command(adbPath(), { args: ["shell", `run-as ${phone.id} grep -rlaF --exclude-dir=code_cache -- ${quote(text)} .`], stdin: "null", stdout: "piped", stderr: "piped" }).output();
