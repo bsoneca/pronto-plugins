@@ -20,7 +20,7 @@ sayJsonRules: strings.Contains(_t.files[".say.json"].text, "\"platform\": \"andr
 _engine: _t.files["android/app/src/main/kotlin/dev/pronto/emit/HostEngine.kt"]
 enginePackage: strings.HasPrefix(_engine.text, "package dev.pronto.emit\n") & true
 appId: strings.Contains(_t.files["android/app/build.gradle.kts"].text, "applicationId = \"dev.pronto.emit\"") & true
-noTokenLeft: [for p, f in _t.files if strings.Contains(f.text, "__APP") || strings.Contains(f.text, "__LABEL__") || strings.Contains(f.text, "__SEALED__") {p}] & []
+noTokenLeft: [for p, f in _t.files if strings.Contains(f.text, "__APP") || strings.Contains(f.text, "__LABEL__") || strings.Contains(f.text, "__SEALED_FLAG__") {p}] & []
 
 // The screen and the autofill contract are the app's once written; everything
 // else is regenerated.
@@ -34,10 +34,9 @@ casesFixture: json.Unmarshal(_t.files["android/app/src/test/resources/android_ca
 casesTerminal: json.Unmarshal(_term.files["android/app/src/test/resources/android_cases.json"].text).unlock.state[1].want & "LOST"
 casesLoader: strings.HasPrefix(_term.files["android/app/src/test/kotlin/dev/pronto/emit/Cases.kt"].text, "package dev.pronto.emit\n") & true
 
-// The sealed-storage switch: off in a release unless android.json says so, on in the debug and rehearsal builds; one Kotlin file holds both stores.
-_sealedOff: (#Host & {app: "emit", mode: "terminal"}).files["android/app/build.gradle.kts"].text
-sealedDefaultOff: strings.Contains(_sealedOff, "resValue(\"string\", \"pronto_sealed\", \"off\")") & true
-sealedOnForRelease: strings.Contains((#Host & {app: "emit", mode: "terminal", sealedStorage: "on"}).files["android/app/build.gradle.kts"].text, "resValue(\"string\", \"pronto_sealed\", \"on\")") & true
+// The sealed-storage flag: none named, always sealed; named, the build says which flag the phone reads. One Kotlin file holds both stores.
+sealedNoFlag: strings.Contains((#Host & {app: "emit", mode: "terminal"}).files["android/app/build.gradle.kts"].text, "resValue(\"string\", \"pronto_sealed_flag\", \"\")") & true
+sealedFlagNamed: strings.Contains((#Host & {app: "emit", mode: "terminal", sealedFlag: "sealed_storage"}).files["android/app/build.gradle.kts"].text, "resValue(\"string\", \"pronto_sealed_flag\", \"sealed_storage\")") & true
 sealedKvShips: strings.HasPrefix(_term.files["android/app/src/main/kotlin/dev/pronto/emit/Kv.kt"].text, "package dev.pronto.emit\n") & true
 
 // The autofill service is bound only by the system, and the vault never backs up.
