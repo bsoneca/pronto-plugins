@@ -240,20 +240,26 @@ const adb = (...args: string[]) => run(adbPath(), args);
 const sh = (line: string) => adb("shell", line);
 
 /**
- * `am start` of an app just installed on an emulator that has just booted answers "Activity class ... does not exist" or "unable to
- * resolve Intent" for a while, though the package is installed and its activity listed (measured on this Mac's pronto-terminal AVD:
- * some seconds to a minute or two, then every start works): the platform is still finishing with the package. The start is asked
- * again every two seconds, up to `seconds`, only on those two answers; any other failure, and the end of the time, fail it.
+ * Whether `dumpsys user` says the device's user is still locked (RUNNING_LOCKED): after a cold boot of an emulator that has a screen
+ * lock (android/test/autofill/emulator.sh sets a PIN, which a strong biometric needs), the credential-encrypted storage stays locked
+ * until the PIN is entered, and the system then resolves no activity of an app that is not direct-boot aware: `am start` answers
+ * "Activity class ... does not exist" (-92) or "unable to resolve Intent" (-91) for an app that is installed and listed.
  */
-export async function startApp(line: string, seconds = 120, start: (line: string) => Promise<string> = sh, everyMs = 2000): Promise<string> {
-  const end = Date.now() + seconds * 1000;
-  for (;;) {
-    try { return await start(line); } catch (e) {
-      const said = e instanceof Error ? e.message : String(e);
-      if (!/does not exist|unable to resolve/.test(said) || Date.now() > end) throw e;
-      await sleep(everyMs);
-    }
-  }
+export function userLocked(dumpsysUser: string): boolean {
+  return /RUNNING_LOCKED/.test(dumpsysUser);
+}
+
+/** Unlocks a locked device with the PIN its screen lock was given (PRONTO_ANDROID_PIN, default emulator.sh's 1234); one that is not locked is left as it is. */
+async function unlockDevice(): Promise<void> {
+  if (!userLocked(await sh("dumpsys user"))) return;
+  const pin = Deno.env.get("PRONTO_ANDROID_PIN") ?? "1234";
+  await sh("input keyevent KEYCODE_WAKEUP");
+  await sh("input keyevent KEYCODE_MENU");
+  await sleep(1000);
+  await sh(`input text ${pin}`);
+  await sh("input keyevent KEYCODE_ENTER");
+  await until("the device unlocked", 60, async () => [userLocked(await sh("dumpsys user")) ? null : true, "the device is still locked: its PIN is not PRONTO_ANDROID_PIN"]);
+  await sh("input keyevent KEYCODE_HOME");
 }
 
 /** The driver's one-line socket: a retry while the app is (re)starting and nothing answers yet. */
@@ -451,7 +457,7 @@ class Phone {
     const door = this.base.match(/^https:\/\/localhost:(\d+)/);
     if (door) await adb("reverse", `tcp:${door[1]}`, `tcp:${door[1]}`);
     this.page = null;
-    await startApp(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(seeded(path, `${this.scenario}/${actor}`))} --es actor ${quote(actor)} --es browser standin`);
+    await sh(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(seeded(path, `${this.scenario}/${actor}`))} --es actor ${quote(actor)} --es browser standin`);
     // The prompt of an app that asks for its owner (Unlock.kt) shows before the driver answers: the sensor is touched once it is up.
     if (unlock) await finger(30);
     await until(`${actor}'s terminal at ${path}`, 30, async () => {
@@ -869,6 +875,7 @@ async function main() {
   const results: string[] = [];
   let failed = 0;
   try {
+    await unlockDevice();
     await adb("install", "-r", apk);
     await adb("forward", "tcp:8765", "tcp:8765");
     const door = running.base.match(/^https:\/\/localhost:(\d+)/);

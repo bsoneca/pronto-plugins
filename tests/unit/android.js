@@ -5,7 +5,6 @@ import { parseHTML } from "npm:linkedom@0.18.4";
 import { bound, checkView, elementOf as viewElement } from "../../android/template/terminal/bound.js";
 import { compile, elementOf, idOf } from "../../android/template/terminal/compile.js";
 import { length, parseColor } from "../../android/template/terminal/css.js";
-import { startApp } from "../../android/template/terminal/scenarios.ts";
 import { atobOf, b64u, btoaOf, credentialOf, errorOf, optionsToJson, unb64u } from "../../android/template/terminal/passkeys.js";
 
 const pageOf = (body, base) =>
@@ -344,12 +343,3 @@ export function held(input, hz, moves) {
   return { controls, inputs, buttons, faults, padAfterStop: screen.querySelector("#hatch-probe-pad") !== null };
 }
 
-/**
- * The runner's start of an app (scenarios.ts startApp) over a start that fails `times` times with `said`, then answers "Starting": how many
- * times it was asked and what came back, or the error thrown. A wait of 1 ms between asks; `seconds` is how long it may go on.
- */
-export async function startAfter(times, said, seconds = 5) {
-  let calls = 0;
-  const start = async () => { calls++; if (calls <= times) throw new Error(said); return "Starting"; };
-  try { return { answer: await startApp("am start", seconds, start, 1), calls }; } catch (e) { return { threw: e.message, calls }; }
-}
