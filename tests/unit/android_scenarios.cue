@@ -154,4 +154,28 @@ cases: {
 		{call: "androidScenarios.fills", args: [null, {mode: "fullscreen", screen: {w: 1080, h: 2400}}], expect: "it is not drawn"},
 		{call: "androidScenarios.fills", args: [{x: 0, y: 300, w: 1000, h: 1300}, {mode: "fullscreen", screen: {w: 1080, h: 2400}}, 0.05], matches: "under 95%", why: "within is the gap allowed"},
 	]}
+	"a released address is a dotted host that is not this machine's: a stack's door, a bare name and the emulator's host are not": {suite: "android", steps: [
+		{call: "androidScenarios.deployed", args: ["https://bonkchess.com"], expect: true},
+		{call: "androidScenarios.deployed", args: ["https://aprende-czj.pages.dev"], expect: true},
+		{call: "androidScenarios.deployed", args: ["https://localhost:33100"], expect: false},
+		{call: "androidScenarios.deployed", args: ["http://10.0.2.2:8080"], expect: false},
+		{call: "androidScenarios.deployed", args: ["https://caddy"], expect: false},
+		{call: "androidScenarios.deployed", args: ["https://vault.invalid"], expect: false, why: "a base no one can reach (the fixtures' placeholder)"},
+		{call: "androidScenarios.deployed", args: ["https://emit.example"], expect: false},
+	]}
+	"a production scenario holds one actor at most and read-only steps: a signUp, a second actor or a payment is refused when the scenarios load, and a scenario not marked is refused on a released address (PRONTO-488)": {suite: "android", steps: [
+		{call: "androidScenarios.productionProblems", args: ["live", {production: true, actors: {cora: {name: "C"}}, steps: [{by: "cora", open: "/"}, {by: "cora", attached: "#menu"}, {by: "cora", text: {of: "h1", has: "Bonk"}}, {by: "cora", count: {of: ".row", atLeast: 1}}, {by: "cora", fills: {of: "main"}}]}], expect: [], why: "open, attached, text, count and fills only read"},
+		{call: "androidScenarios.productionProblems", args: ["live", {production: true, actors: {cora: {name: "C"}}, steps: [{by: "cora", signUp: true}]}], expect: ["live step 1 (signUp) is not read-only: a production scenario only reads"]},
+		{call: "androidScenarios.productionProblems", args: ["live", {production: true, actors: {cora: {name: "C"}}, steps: [{by: "cora", pay: true}]}], expect: ["live step 1 (pay) is not read-only: a production scenario only reads"]},
+		{call: "androidScenarios.productionProblems", args: ["live", {production: true, actors: {a: {name: "A"}, b: {name: "B"}}, steps: [{by: "a", open: "/"}]}], expect: ["live has 2 actors, at most one on production"]},
+		{call: "androidScenarios.productionProblems", args: ["play", {actors: {a: {name: "A"}}, steps: [{by: "a", open: "/"}]}], expect: ["play is not marked production"]},
+		{call: "androidScenarios.checkProduction", args: [{live: {production: true, actors: {c: {name: "C"}}, steps: [{by: "c", open: "/"}]}}, "https://bonkchess.com"], why: "a production scenario may run on the released address (no throw)"},
+		{call: "androidScenarios.checkProduction", args: [{play: {actors: {a: {name: "A"}}, steps: [{by: "a", signUp: true}]}}, "https://bonkchess.com"], throws: "only scenarios marked production run there"},
+		{call: "androidScenarios.checkProduction", args: [{play: {actors: {a: {name: "A"}}, steps: [{by: "a", signUp: true}]}}, "stack"], why: "a stack at hand runs any (no throw)"},
+		{call: "androidScenarios.checkProduction", args: [{bad: {production: true, actors: {a: {name: "A"}}, steps: [{by: "a", signUp: true}]}}, "stack"], throws: "bad step 1 \\(signUp\\) is not read-only", why: "a scenario that claims production but writes is refused at any base"},
+	]}
+	"a production run fails on any request that is not a GET, and passes on GETs alone": {suite: "android", steps: [
+		{call: "androidScenarios.writesMade", args: [[{n: 0, url: "https://bonkchess.com/shell.json", method: "GET", status: 200, body: ""}]], expect: []},
+		{call: "androidScenarios.writesMade", args: [[{n: 0, url: "https://bonkchess.com/a", method: "GET", status: 200, body: ""}, {n: 1, url: "https://bonkchess.com/auth/guest", method: "POST", status: 201, body: ""}]], expect: ["POST https://bonkchess.com/auth/guest"]},
+	]}
 }

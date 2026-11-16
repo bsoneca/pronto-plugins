@@ -10,8 +10,9 @@ android {
         applicationId = "__APPLICATION_ID__"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // -PprontoVersionCode=<n> -PprontoVersionName=<x.y.z>: a property, never an edit of this file, so a refresh never reverts them.
+        versionCode = (project.findProperty("prontoVersionCode") as String?)?.toInt() ?: 1
+        versionName = (project.findProperty("prontoVersionName") as String?) ?: "0.1.0"
     }
 
     // The program's terminal files are the app's assets: the phone runs the

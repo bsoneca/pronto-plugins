@@ -67,7 +67,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val debug = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        // The debug build is debuggable; the rehearsal build, the release's code, says it answers the driver (build.gradle.kts).
+        val debug = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0 || getString(R.string.pronto_driver) == "on"
         base = (intent.getStringExtra("base").takeIf { debug } ?: getString(R.string.pronto_base)).trimEnd('/')
         standIn = debug && intent.getStringExtra("browser") == "standin"
         // Opened by a link to the app's own origin (an App Link), it starts where the link points.

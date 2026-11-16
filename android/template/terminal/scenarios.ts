@@ -568,7 +568,7 @@ class Phone {
 
 // ------------------------------------------------------------------ the scenarios
 
-type Scenario = { actors?: Record<string, { name: string }>; steps: Step[] };
+type Scenario = { actors?: Record<string, { name: string }>; steps: Step[]; production?: true };
 
 async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string): Promise<void> {
   const vars: Record<string, string> = {};
@@ -766,6 +766,42 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
   }
 }
 
+// ------------------------------------------------------------------ production (PRONTO-488)
+
+/** Whether `base` is an app's released address: a dotted host that is not this machine's (a stack's door is localhost, a bare name, or the emulator's host 10.0.2.2) nor a name no one can reach (the reserved .invalid, .test and .example, which an app that has no cluster yet is given as its base). */
+export function deployed(base: string): boolean {
+  const host = new URL(base).hostname;
+  return host.includes(".") && !/^(127\.0\.0\.1|10\.0\.2\.2)$/.test(host) && !/(^|\.)(localhost|invalid|test|example)$/.test(host);
+}
+
+/** The step kinds a production scenario may take: they only read what the released app shows (nothing is typed, tapped or bought). */
+export const READ_ONLY = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "fills", "pause", "shot", "keep", "closeDialogs"];
+
+/** Why a scenario may not run against a released address, as sentences: none when it may (the web runner's rule, tests/scenarios/schema.cue): marked `production`, one actor at most, read-only steps only (no signUp, signIn or pay). */
+export function productionProblems(name: string, scenario: Scenario): string[] {
+  const out: string[] = [];
+  if (scenario.production !== true) return [`${name} is not marked production`];
+  const actors = Object.keys(scenario.actors ?? {}).length;
+  if (actors > 1) out.push(`${name} has ${actors} actors, at most one on production`);
+  scenario.steps.forEach((st, i) => {
+    const kind = Object.keys(st).find((k) => !META.includes(k));
+    if (kind && !READ_ONLY.includes(kind)) out.push(`${name} step ${i + 1} (${kind}) is not read-only: a production scenario only reads`);
+  });
+  return out;
+}
+
+/** Refuses, when the scenarios load, a scenario marked production that is not one (any base), and any scenario not marked where `base` is an app's released address. */
+export function checkProduction(scenarios: Record<string, Scenario>, base: string): void {
+  const live = base !== "stack" && deployed(base);
+  const refused = Object.entries(scenarios).flatMap(([name, sc]) => (sc.production === true || live ? productionProblems(name, sc) : []));
+  if (refused.length) throw new Fail(`${live ? `${base} is an app's released address: only scenarios marked production run there. ` : ""}${refused.join("; ")}`);
+}
+
+/** The requests a production run made that are not a GET: it fails on any, since a released app is only read. */
+export function writesMade(items: Fetched[]): string[] {
+  return items.filter((f) => f.method.toUpperCase() !== "GET").map((f) => `${f.method} ${f.url}`);
+}
+
 // ------------------------------------------------------------------ the stack
 
 /** A stack on a slot of the machine's budget (tests/slot.ts launch), until `stop`. */
@@ -809,6 +845,7 @@ async function main() {
   const scenarios: Record<string, Scenario> = JSON.parse(new TextDecoder().decode(exported.stdout));
   const names = Object.keys(scenarios);
   if (!names.length) throw new Fail(`${files.join(", ")} hold no scenarios`);
+  checkProduction(scenarios, baseArg);
 
   const running = baseArg === "stack" ? await stack() : { base: baseArg, stop: async () => {} };
   const dir = Deno.env.get("SHOTS") ?? "android/app/build/shots";
@@ -825,6 +862,11 @@ async function main() {
       const t = Date.now();
       try {
         await runScenario(name, scenarios[name], phone, dir);
+        // On an app's released address the run only reads: any request the page made that is not a GET (the driver's log) fails it.
+        if (deployed(running.base)) {
+          const writes = writesMade((await phone.fetches(0))?.items ?? []);
+          if (writes.length) throw new Fail(`${name} made requests that write on production: ${writes.join(", ")}`);
+        }
         results.push(`pass  ${name}  ${((Date.now() - t) / 1000).toFixed(1)} s`);
       } catch (e) {
         failed++;

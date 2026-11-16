@@ -53,7 +53,7 @@ termDriverDebugOnly: strings.Contains(_term.files["android/app/src/release/kotli
 _integrate: _term.surface.rules.integrate.android
 integratePlatform: _integrate.platform & "android"
 integrateBundlesAndBuildsFirst: strings.Contains(_integrate.cmds[0].do, "android/terminal/bundle.ts") & true
-integrateRuns: strings.Contains(_integrate.cmds[len(_integrate.cmds)-1].do, "android/terminal/scenarios.ts dev.pronto.emit android/app/build/outputs/apk/debug/app-debug.apk $base ...$scenarios") & true
+integrateRuns: strings.Contains(_integrate.cmds[len(_integrate.cmds)-1].do, "android/terminal/scenarios.ts dev.pronto.emit $apk $base ...$scenarios") & true
 integrateNamesScenarios: strings.Contains(_integrate.cmds[len(_integrate.cmds)-1].do, "open android/android.json | get scenarios") & true
 integrateUsesPRONTOBase: strings.Contains(_integrate.cmds[len(_integrate.cmds)-1].do, "$env.PRONTO_BASE? | default \"stack\"") & true
 vaultHasNoIntegrate: [for verb, _ in _t.surface.rules if verb == "integrate" {verb}] & []
@@ -120,3 +120,14 @@ termFillShips: list.SortStrings([for p, _ in _filling.files if strings.HasSuffix
 termFillDeclared: strings.Contains(_filling.files["android/app/src/main/AndroidManifest.xml"].text, "android:permission=\"android.permission.BIND_AUTOFILL_SERVICE\"") & strings.Contains(_filling.files["android/app/src/main/AndroidManifest.xml"].text, "android:label=\"emit\"") & true
 termFillSeeded: _filling.files["android/app/src/main/assets/autofill.json"].seed & true
 termFillWithoutUnlockRefused: [if (#Host & {app: "emit", autofill: true, unlock: "none"}).unlock == _|_ {"refused"}, "accepted"][0] & "refused"
+
+// PRONTO-488: integrate@android takes a build type (debug by default, rehearsal on request); the rehearsal build is the release's
+// code signed with the debug key, answering the driver; a release never does; the version is a Gradle property, in both modes.
+_integrateBuild: _integrate.cmds[len(_integrate.cmds)-2].do
+integrateTakesBuildType: strings.Contains(_integrateBuild, "$env.PRONTO_ANDROID_BUILD? | default \"debug\"") & strings.Contains(_integrateBuild, ":app:assemble(($type | str capitalize))") & true
+integrateRunsItsApk: strings.Contains(_integrate.cmds[len(_integrate.cmds)-1].do, "android/app/build/outputs/apk/($type)/app-($type).apk") & true
+rehearsalBuild: strings.Contains(_gradleTerm, "create(\"rehearsal\")") & strings.Contains(_gradleTerm, "initWith(getByName(\"release\"))") & strings.Contains(_gradleTerm, "signingConfig = signingConfigs.getByName(\"debug\")") & true
+rehearsalDriverOn: strings.Contains(_gradleTerm, "resValue(\"string\", \"pronto_driver\", \"on\")") & true
+releaseDriverOff: strings.Contains(_gradleTerm, "resValue(\"string\", \"pronto_driver\", \"off\")") & true
+activityTakesTheGate: strings.Contains(_term.files["android/app/src/main/kotlin/dev/pronto/emit/MainActivity.kt"].text, "getString(R.string.pronto_driver) == \"on\"") & true
+versionFromProperties: strings.Contains(_gradleTerm, "findProperty(\"prontoVersionCode\")") & strings.Contains(_gradleTerm, "findProperty(\"prontoVersionName\")") & strings.Contains(_gradleVault, "findProperty(\"prontoVersionCode\")") & strings.Contains(_gradleVault, "findProperty(\"prontoVersionName\")") & true
