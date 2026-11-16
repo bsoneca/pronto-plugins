@@ -2,6 +2,7 @@ package android
 
 import (
 	"list"
+	"encoding/json"
 	"strings"
 )
 
@@ -27,6 +28,11 @@ seeded: [for p, f in _t.files if f.seed {p}] & ["android/app/src/main/assets/scr
 
 // Tests land in the id's package beside the sources they test.
 testPackage: strings.HasPrefix(_t.files["android/app/src/test/kotlin/dev/pronto/emit/FillTest.kt"].text, "package dev.pronto.emit\n") & true
+
+// The JVM tests' cases are data, exported once per app, in both modes; a Kotlin test holds none of its own.
+casesFixture: json.Unmarshal(_t.files["android/app/src/test/resources/android_cases.json"].text).signer[0].want[0] & "dbc1b4c900ffe48d575b5da5c638040125f65db0fe3e24494b76ea986457d986"
+casesTerminal: json.Unmarshal(_term.files["android/app/src/test/resources/android_cases.json"].text).unlock.state[1].want & "LOST"
+casesLoader: strings.HasPrefix(_term.files["android/app/src/test/kotlin/dev/pronto/emit/Cases.kt"].text, "package dev.pronto.emit\n") & true
 
 // The autofill service is bound only by the system, and the vault never backs up.
 _manifest: _t.files["android/app/src/main/AndroidManifest.xml"].text
