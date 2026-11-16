@@ -142,3 +142,34 @@ pronto: {
 	states: [for s in _pronto.states {s.name}] & ["Backlog", "Refine", "Ready", "Implementing", "Review", "Merged", "Live", "Done", "Cancelled"]
 	roles: _pronto.roles & {backlog: "Backlog", refine: "Refine", ready: "Ready", implementing: "Implementing", review: "Review", merged: "Merged", live: "Live", done: "Done", cancelled: "Cancelled"}
 }
+
+// The inbox (PRONTO-544): absent, the board is as it was; present, its defaults hold.
+_inbox: #DevFlow & {
+	board: {host: "plane.example.com", workspace: "acme", project: {name: "acme", identifier: "ACME"}}
+	token: project: "acme-prod"
+	suggestions: {project: "SUGEST", from: ["aprende"]}
+}
+suggestions: {
+	absent:    (_existing.suggestions == _|_) & true
+	project:   _inbox.suggestions.project & "SUGEST"
+	from:      _inbox.suggestions.from & ["aprende"]
+	name:      _inbox.suggestions.name & "Suggestions"
+	staleDays: _inbox.suggestions.staleDays & 14
+	label:     _inbox.suggestions.label & "suggestion"
+	states: [for s in _inbox.suggestions.states {s.name}] & ["Suggested", "Refine", "Cancelled"]
+	own: (#DevFlow & {
+		board: {host: "plane.example.com", workspace: "acme", project: {name: "acme", identifier: "ACME"}}
+		token: project: "acme-prod"
+		suggestions: {project: "IDEAS", from: ["a", "b"], staleDays: 7}
+	}).suggestions.staleDays & 7
+	lowerCase: ((#DevFlow & {suggestions: {project: "sugest", from: ["aprende"]}}).suggestions == _|_) & true
+	noApps: ((#DevFlow & {suggestions: {project: "SUGEST", from: []}}).suggestions == _|_) & true
+	notPlane: ((#DevFlow & {
+		board: {kind: "github-projects", workspace: "acme", repository: "acme/acme", project: {name: "acme", identifier: "ACME"}}
+		suggestions: {project: "SUGEST", from: ["aprende"]}
+	}).suggestions == _|_) & true
+	sameAsBoard: ((#DevFlow & {
+		board: {host: "plane.example.com", workspace: "acme", project: {name: "acme", identifier: "ACME"}}
+		suggestions: {project: "ACME", from: ["aprende"]}
+	}).suggestions == _|_) & true
+}

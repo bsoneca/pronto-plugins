@@ -79,6 +79,12 @@ devFlow: #DevFlow
 	stuckHours: *6 | (number & >0)
 	// A pull request with this label needs no issue (dependency bumps, the CI fingerprint).
 	chore: *"chore" | string
+	// An inbox project beside the board's, where an app files what its players suggest (PRONTO-544).
+	// Nothing in the loop reads it: the owner approves a suggestion by moving it to Refine, or rejects
+	// it by moving it to Cancelled, and `pronto-devflow approve` files an approved one as an issue of
+	// the board. Absent, the board is as it was.
+	// A Plane board alone holds an inbox: another kind's board has no second project to make.
+	suggestions?: #Suggestions & {project: !=board.project.identifier, _plane: board.kind & "plane"}
 
 	// The states, in order, each in one of the board's groups: the flow's own, or a repository's
 	// list of its own (then every role below names one of them).
@@ -125,6 +131,23 @@ devFlow: #DevFlow
 		signup: *false | bool
 		github?: secrets!: string & =~"(^|/)secrets\\.[a-z0-9-]+\\.enc\\.yaml$"
 	}
+}
+
+#Suggestions: {
+	// The inbox's key: SUGEST-3. It is not the board's own.
+	project!: string & =~"^[A-Z]{2,12}$"
+	name:     *"Suggestions" | string
+	// The apps that may file into it, each a module of the board.
+	from!: [string, ...string]
+	// A waiting suggestion is flagged once it is older than this many days.
+	staleDays: *14 | (int & >=1)
+	label:     *"suggestion" | string
+	// Plane's own default states stay in the inbox; status and approve read these three alone.
+	states: [
+		{name: "Suggested", group: "backlog", color: "#a3a3a3", means: "waiting on the owner"},
+		{name: "Refine", group: "unstarted", color: "#60a5fa", means: "approved by the owner, to file"},
+		{name: "Cancelled", group: "cancelled", color: "#ef4444", means: "rejected by the owner"},
+	]
 }
 
 #SecretManagerToken: {

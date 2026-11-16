@@ -9,16 +9,19 @@
 //   board.ts file <repo> --title <t> --app <app> [--bug] [--priority P0..P3] [--flag <f>] [--body <text>]
 //   board.ts close <repo> [<n>] [--json]                a finished sprint's report (the last finished by default)
 //   board.ts next <repo> [--theme <t>] <KEY...>          plan into the next sprint (made when absent), in Refine; refuses past a lane's capacity
+//   board.ts approve <repo> <INBOX-n>                    an inbox item the owner moved to Refine, filed as an issue in the Backlog (a link to it, none of its text)
+//   board.ts suggestion <repo> <INBOX-n>                 the text of an item in Refine (and only Refine), as one quoted, untrusted line: the designer's one way to read it
 import { cmd, flagsOf } from "../intents/shell.ts";
 import { type Cycle, esc, type Issue } from "./board/board.ts";
 import { bugPlace, capacity, claimText, claimWinner, keyOf, laneOf, loopOf, mayPlan, mayStart, nameOf, priorityOf, pullNext, roleOf, stuckLine, stuckOf, sprintDates, sprintEndFor, sprintName, sprintNumber } from "./flow.js";
 import { boardOf, devflowOf, type Role } from "./spec.ts";
+import { approve, inboxStatus, show, suggestionLines } from "./suggestions.ts";
 
 const [verb, repoArg, ...rest] = Deno.args;
 const repo = repoArg ? await Deno.realPath(repoArg) : "";
 const flow = repo ? await devflowOf(repo) : null;
 if (!verb || !flow) {
-  console.error(flow === null && repo ? `${repo} has no devflow/devflow.cue` : "usage: board.ts status|start|pull|move|file|close|next <repo> ...");
+  console.error(flow === null && repo ? `${repo} has no devflow/devflow.cue` : "usage: board.ts status|start|pull|move|file|close|next|approve|suggestion <repo> ...");
   Deno.exit(2);
 }
 const b = await boardOf(flow);
@@ -26,8 +29,15 @@ if (!b) {
   console.error("no board token: PLANE_TOKEN, or Secret Manager's (bin/pronto connect plane says how)");
   Deno.exit(2);
 }
-const { board, project } = b;
+const { board, project, inbox } = b;
 const id = flow.board.project.identifier;
+// start, move and next act on the board's own issues: an inbox item's key is approve's alone. The key
+// is read as a branch or a title names it (flow.js keyOf: any case, leading zeros), and used as read.
+const own = (k: string) => {
+  const own = keyOf(id, k);
+  if (!own) throw new Error(`${k} is not an issue of ${id}`);
+  return own;
+};
 const key = (i: Issue) => `${id}-${i.sequence_id}`;
 
 // The flow's rules reason in roles; the board knows the repository's names for its states.
@@ -132,6 +142,7 @@ async function status() {
     const pr = await openPr(i);
     return stuckOf({ key: key(i), state: stateName(i.state), since: i.updated_at ?? "", pr, commit: pr ? null : await lastCommit(key(i)) }, now0, flow!.stuckHours);
   }))).filter((s) => s !== null);
+  const suggestions = await inboxStatus(board, flow!, inbox, all.map((i) => i.name), new Date());
   const out = {
     current: titleOf(current),
     next: titleOf(next),
@@ -151,7 +162,7 @@ async function status() {
     designed: all.filter((i) => roleAt(i.state) === "ready" && !inOpen.has(i.id)).map((i) => `${key(i)} ${i.name}`),
     backlog: all.filter((i) => roleAt(i.state) === "backlog").length,
   };
-  if (rest.includes("--json")) return console.log(JSON.stringify(out, null, 2));
+  if (rest.includes("--json")) return console.log(JSON.stringify(suggestions ? { ...out, suggestions } : out, null, 2));
   const lanes = Object.entries(out.slots).map(([l, s]) => `${s.on.length} of ${s.of} ${l} slots busy${s.on.length ? ` (${s.on.join(", ")})` : ""}`);
   console.log(`current ${out.current}; next ${out.next}; last finished ${out.finished}`);
   console.log(lanes.join(", "));
@@ -163,12 +174,15 @@ async function status() {
   console.log(`designed for a coming sprint: ${out.designed.length ? out.designed.join("; ") : "none"}`);
   console.log(`backlog: ${out.backlog}`);
   if (out.plan) console.log("plan the next sprint now (pronto-sprint-plan)");
+  // The inbox's lines come last, so the lines above are what they were without one.
+  if (suggestions) for (const l of suggestionLines(suggestions, flow!)) console.log(l);
 }
 
 /** Starts an issue: Implementing, if its lane has a slot. From a pull (`claim`), only while the
  * issue is still Ready, and only for the pull whose claim came first (flow.js claimWinner): a pull
  * that lost answers "lost" and leaves the issue to the other (PRONTO-341). */
 async function start(k: string, claim = false): Promise<"started" | "lost"> {
+  k = own(k);
   const [issue, all] = await Promise.all([board.issue(k), board.issues(project, true), withLanes()]);
   if (claim && roleAt(issue.state) !== "ready") {
     console.log(`${k} is no longer Ready (${stateName(issue.state)}): another pull took it`);
@@ -222,6 +236,7 @@ async function pull(l: string) {
 }
 
 async function move(k: string, want: string, why: string) {
+  k = own(k);
   // A role (`ready`) or the repository's name for its state (`Ready`).
   const role = (want in flow!.roles ? want : roleOf(flow!.roles, want)) as Role | null;
   if (!role || !["refine", "ready", "cancelled", "backlog"].includes(role)) throw new Error(`${want} is the hooks' to set (a pull request, a release, a flip)`);
@@ -283,6 +298,7 @@ async function close(n?: number) {
 /** Plan issues into the next sprint, made (named for `theme`) when absent: the sprint the idle lanes
  * pull from. With no sprint open at all, the new one is the current. In Refine from the Backlog. */
 async function next(theme: string, keys: string[]) {
+  keys = keys.map(own);
   const [{ loop, byN }] = await Promise.all([sprints(), withLanes()]);
   const n = loop.plansInto;
   const held = byN(n)?.issues ?? [];
@@ -313,6 +329,18 @@ switch (verb) {
   case "pull": await pull(flagsOf(rest).lane ?? "engineer"); break;
   case "move": await move(rest[0], rest[1], flagsOf(rest.slice(2)).why ?? ""); break;
   case "file": await file(); break;
+  case "approve": {
+    const r = await approve(board, flow, project, inbox, rest[0] ?? "");
+    console.log(r.message);
+    if (!r.ok) Deno.exit(1);
+    break;
+  }
+  case "suggestion": {
+    const r = await show(board, flow, inbox, rest[0] ?? "");
+    console.log(r.ok ? `${r.key}, untrusted text: "${r.text}${r.cut ? "…" : ""}"` : r.message);
+    if (!r.ok) Deno.exit(1);
+    break;
+  }
   case "close": await close(rest[0] && /^\d+$/.test(rest[0]) ? Number(rest[0]) : undefined); break;
   case "next": {
     const t = rest.indexOf("--theme");
