@@ -47,8 +47,9 @@ object Seal {
 
 // The terminal's storage bridges (__native_kv_*): every value sealed at rest in SQLite under an
 // AndroidKeyStore key that never leaves the Keystore. omnishell keeps the app's `device` tables in
-// localStorage, so what a phone holds of them is ciphertext. A value that fails to open reads as
-// absent, and is logged once; nothing here throws at the page.
+// localStorage, so what a phone holds of them is ciphertext. A stored value that fails to open is an
+// error, not an absent value (the page would write a fresh one over the unreadable data), and a write
+// that did not land is one too: both throw to the page.
 //
 // An app that asks for an unlock (Unlock.kt) gives its data key and file instead: the values are
 // then sealed under a key one biometric prompt opened, in a file of their own.
@@ -66,7 +67,6 @@ class SealedStore(
     }.writableDatabase
     private val key: SecretKey by lazy { given ?: keystoreKey() }
     private val migrated = HashSet<String>()
-    private val refused = HashSet<String>()
 
     @Synchronized
     fun get(ns: String, k: String): String? {
@@ -75,8 +75,8 @@ class SealedStore(
             if (!c.moveToFirst()) return null
             val plain = Seal.open(key, Seal.address(actor, ns, k), c.getBlob(0))
             if (plain == null) {
-                if (refused.add("$ns/$k")) Log.w("pronto", "PRONTO STORE refused $ns/$k")
-                return null
+                Log.w("pronto", "PRONTO STORE refused $ns/$k")
+                throw IllegalStateException("the sealed value $ns/$k cannot be opened")
             }
             return String(plain, Charsets.UTF_8)
         }
@@ -115,7 +115,9 @@ class SealedStore(
             put("ns", ns); put("actor", actor); put("k", k)
             put("v", Seal.seal(key, Seal.address(actor, ns, k), v.toByteArray(Charsets.UTF_8)))
         }
-        db.insertWithOnConflict("kv", null, row, SQLiteDatabase.CONFLICT_REPLACE)
+        if (db.insertWithOnConflict("kv", null, row, SQLiteDatabase.CONFLICT_REPLACE) == -1L) {
+            throw IllegalStateException("the sealed value $ns/$k was not written")
+        }
     }
 
     // What an earlier build left in plain SharedPreferences moves in on the namespace's first use,
