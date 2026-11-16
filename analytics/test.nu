@@ -70,6 +70,7 @@ def main [] {
 	check "a new dashboard gets its volume and its mount, an old one nothing" (($ops | get path) == ["/spec/template/spec/volumes/-" "/spec/template/spec/containers/0/volumeMounts/-"] and ($ops.0.value.configMap.name == "grafana-dashboards-shop-perf") and ($ops.1.value == {name: "grafana-dashboards-shop-perf", mountPath: "/dashboards/shop/perf.json", subPath: "perf.json", readOnly: true}))
 	check "a dashboard mounted already adds nothing" ((metal mount-ops ($ds | first 1) $deploy) | is-empty)
 	let prov = "apiVersion: 1\nproviders:\n- name: shop\n  folder: Shop\n  options:\n    path: /dashboards/shop\n"
+	check "a provisioning with no dashboards.yaml gets every app's provider" (((metal providers-with $ds "<no value>" | from yaml).providers | get name) == ["shop"])
 	check "an app with its provider adds none" ((metal providers-with $ds $prov) == null)
 	let more = (metal providers-with ($ds | append {app: "operator", name: "traffic", folder: "Operator", text: "{}"}) $prov | from yaml)
 	check "an app new to Grafana gets a provider beside the others" ((($more.providers | get name) == ["shop" "operator"]) and ($more.providers.1.folder == "Operator") and ($more.providers.1.options.path == "/dashboards/operator"))

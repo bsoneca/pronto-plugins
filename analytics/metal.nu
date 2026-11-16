@@ -62,7 +62,9 @@ export def mount-ops [dashboards: list<record>, deployment: record]: nothing -> 
 # Grafana's dashboard providers with one added for each app the dashboards name that has none (its
 # folder, `--titles`), or null when every app has one (PRONTO-591). Providers are only added.
 export def providers-with [dashboards: list<record>, current: string]: nothing -> any {
-	let have = ($current | from yaml)
+	# A provisioning with no dashboards.yaml (kubectl's go-template prints "<no value>") has no providers yet.
+	let parsed = (try { $current | from yaml } catch { null })
+	let have = (if ($parsed | describe | str starts-with "record") { $parsed } else { {apiVersion: 1, providers: []} })
 	let names = ($have.providers? | default [] | get name)
 	let added = ($dashboards | where {|d| $d.app not-in $names } | get app | uniq | each {|a|
 		{name: $a, folder: ($dashboards | where app == $a | first | get folder), type: "file", disableDeletion: true, allowUiUpdates: false, updateIntervalSeconds: 60, options: {path: $"/dashboards/($a)"}}
@@ -347,7 +349,9 @@ export def "main dashboards" [
 	# One patch: the mounts a new dashboard needs (mount-ops) and the digest, so Grafana's pods restart once.
 	let deployment = (do $run $"($kubectl) get deployment/grafana -n ($namespace) -o json" "" | from json)
 	let digest = (dashboards-hash $ds)
-	let ops = (mount-ops $ds $deployment) ++ [{op: "add", path: "/spec/template/metadata/annotations/pronto.dev~1dashboards", value: $digest}]
+	# A provider just added is read only by a new pod (dashboards.yaml is mounted by subPath): the restart is stamped then.
+	let restart = (if $providers != null { [{op: "add", path: "/spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt", value: (date now | format date "%+")}] } else { [] })
+	let ops = (mount-ops $ds $deployment) ++ [{op: "add", path: "/spec/template/metadata/annotations/pronto.dev~1dashboards", value: $digest}] ++ $restart
 	do $run $"($kubectl) patch deployment/grafana -n ($namespace) --type json --patch-file /dev/stdin" ($ops | to json) | print
 	do $run $"($kubectl) rollout status deployment/grafana -n ($namespace) --timeout=300s" "" | print
 }
