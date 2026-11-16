@@ -778,6 +778,22 @@ Deno.test("the stand-in is reached through its door: every call in its ledger, a
   assertEquals((await ask({ key: "bad key!", method: "GET", path: "/v1/account" })).status, 400, "a key the airlock takes");
 });
 
+// Stripe sees one Idempotency-Key whichever way a call went (PRONTO-223): a customer asked for straight,
+// then asked again through the door (the stripe_door flag turned on between them, or a retry after it
+// was), is made once.
+Deno.test("a call made straight and then again through the door reaches Stripe under one key and makes one customer", async () => {
+  const fake = fakeStripe(ISSUER, { searchLagMs: 0 });
+  const door = stripeClient({ door: `${ISSUER}/door/stripe`, fetcher: ((u: string | URL | Request, init?: RequestInit) => fake.handle(new Request(u, init))!) as typeof fetch });
+  const params = { metadata: { tenant: A, account: ANA } };
+  const key = `customer ${A} ${ANA}`;
+  const straight = await fake.stripe("POST", "/v1/customers", params, key) as { id: string };
+  const through = await door("POST", "/v1/customers", params, key) as { id: string };
+  assertEquals(through.id, straight.id, "the door's call is Stripe's replay of the straight one");
+  assertEquals(fake.held.customers.size, 1, "one customer");
+  const other = await door("POST", "/v1/customers", params, `${key} again`) as { id: string };
+  assertEquals(other.id === straight.id, false, "another key is another call");
+});
+
 Deno.test("Stripe's form is read back into its objects and arrays", () => {
   assertEquals(unform("a=1&b[c]=2&d[0]=x&d[1]=y&e[0][f]=g"), { a: "1", b: { c: "2" }, d: ["x", "y"], e: [{ f: "g" }] });
   assertEquals(unform(`${form({ line_items: [{ price: "p", quantity: 1 }], metadata: { tenant: "t" } })}`), { line_items: [{ price: "p", quantity: "1" }], metadata: { tenant: "t" } });
