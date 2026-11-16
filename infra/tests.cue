@@ -557,3 +557,27 @@ retireHoldUnprotects: [
 	_retire.tofu.resource.google_sql_database_instance.example_project_123_old_app_db.settings.deletion_protection_enabled,
 ] & [false, false, false, false]
 retireKeptRefused: _ok & {sqlBackups: "old-db": {databaseVersion: "POSTGRES_18", tier: "db-f1-micro", startTime: "07:00"}, retire: sqlInstances: "old-db": {phase: "hold", databaseVersion: "POSTGRES_18", tier: "db-f1-micro"}} & matchN(0, [#Project])
+
+// Forgetting (#State.forget): an address leaves the state with no delete, as a removed block that
+// does not destroy; a plan without one has none, and an address both declared and forgotten is refused.
+_forget: #Plan & {
+	backend: _plan.backend
+	state: {
+		projects: "example-project-123": {
+			billing: "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+			apis: "run.googleapis.com": true
+			adopt: apis: ["run.googleapis.com"]
+		}
+		forget: {
+			"google_cloud_run_v2_service.example_project_123_gone":   "moved to another repository"
+			"google_monitoring_alert_policy.example_project_123_old": "its app is served elsewhere"
+		}
+	}
+}
+forgetRemoved: _forget.tofu.removed & [
+	{from: "google_cloud_run_v2_service.example_project_123_gone", lifecycle: destroy: false},
+	{from: "google_monitoring_alert_policy.example_project_123_old", lifecycle: destroy: false},
+]
+forgetDeclaredRefused: {backend: _plan.backend, state: _plan.state & {forget: "google_storage_bucket.my_app_assets": "x"}} & matchN(0, [#Plan])
+forgetNoneWithout: (_plan.tofu.removed == _|_) & true
+forgetInstanceKeyRefused: {forget: "google_monitoring_alert_policy.x[\"a\"]": "x"} & matchN(0, [#State])

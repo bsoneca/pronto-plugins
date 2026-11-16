@@ -99,6 +99,12 @@ buckets also carry `prevent_destroy`. A secret's `file` is added as a new versio
 one is left behind, and a service reads that version, so a change to the file rolls a new
 revision.
 
+A resource that leaves this state but stays live is forgotten, not deleted: `state.forget` names
+its address (`type.name`, a `for_each` resource whole) and why, and the export writes a `removed`
+block with `destroy = false`. The plan shows it as forget, never as delete, so `verify@infra` lets
+it through; the apply drops it from OpenTofu's state and leaves it in its project. The entry can go
+once applied: a removed block whose address is in no state does nothing.
+
 ## Checks
 
 ```sh

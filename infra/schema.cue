@@ -24,6 +24,11 @@ import "list"
 
 #State: {
 	projects: [ID=string]: #Project & {id: ID}
+	// What OpenTofu stops tracking, by address (type.name, no instance key: a for_each resource is
+	// forgotten whole), each with why. The next apply drops it from OpenTofu's state and leaves it in
+	// its project as it is: for a resource that leaves this state but stays live. An address
+	// forgotten is declared nowhere else.
+	forget: [Address=string & =~"^[a-z][a-z0-9_]*\\.[A-Za-z0-9_]+$"]: string
 }
 
 #Project: P={
