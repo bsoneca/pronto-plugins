@@ -6,7 +6,7 @@ import android.content.Context
 // under a Keystore key) is behind the app's pronto-flags flag (named in res/values/sealed_flag.xml, which the app's generate writes from its CUE, and read over the door's /ofrep/), and
 // the choice is sticky and one way (Storage.pick): once a phone has adopted the sealed store a marker file says so, and the
 // sealed store is used from then on, whatever the flag says or whether the phone is offline; sealed data never goes back to plain.
-// While there is no marker and the flag is off or unknown (an unreachable door, a timeout), the plain SharedPreferences the earlier
+// While there is no marker and the flag's value is false (the declared default when the door cannot be reached), the plain SharedPreferences the earlier
 // builds wrote are used as they were. An app that asks for an unlock (Unlock.kt) has no plain path: its data key is the seal.
 interface Kv {
     fun get(ns: String, k: String): String?
@@ -16,51 +16,46 @@ interface Kv {
     fun keys(ns: String): List<String>
 }
 
-// What asking the flag gave: On, Off, or Unknown with its cause. Never a null: a failure to ask is a result the caller branches on.
-sealed class FlagResult {
-    object On : FlagResult()
-    object Off : FlagResult()
-    data class Unknown(val cause: String) : FlagResult()
-}
+// OpenFeature's evaluation details: the value, the reason it has it, and, when the evaluation failed, the error. A flag that cannot
+// be evaluated has the value of its declared default (the app's flags_spec.cue), reason "ERROR" and the cause in `errorCode`: the
+// same contract the page's flags have (an OFREP error evaluates to the default). Storage only ever sees the explicit value.
+data class FlagDetails(val value: Boolean, val reason: String, val errorCode: String? = null)
 
 object Storage {
-    // "sealed": the marker is there (the flag is not asked). "adopt": no marker and the flag is On: write the marker, then use the
-    // sealed store (what the plain preferences hold moves in per namespace, Migration, and an interrupted move resumes on the next
-    // launch because the marker is already there). "plain": no marker and the flag Off or Unknown. Unknown is a stated fallback that
-    // keeps the current state for this launch only: no marker, no move, nothing dropped, and the flag is asked again next launch;
-    // it never adopts sealed storage. Refusing to start instead would leave a phone that is offline on its first launch unusable.
-    fun pick(marker: Boolean, flag: FlagResult?): String = when {
-        marker -> "sealed"
-        flag is FlagResult.On -> "adopt"
-        else -> "plain"
-    }
+    // "sealed": the marker is there (the flag is not asked). "adopt": no marker and the flag's value is true: write the marker, then
+    // use the sealed store (what the plain preferences hold moves in per namespace, Migration, and an interrupted move resumes on the
+    // next launch because the marker is already there). "plain": no marker and the value is false.
+    fun pick(marker: Boolean, flag: Boolean): String = if (marker) "sealed" else if (flag) "adopt" else "plain"
 }
 
 // A flag over the remote evaluation protocol (OFREP), as the page reads it: POST <base>/ofrep/v1/evaluate/flags/<key>.
 object Flag {
-    // The boolean an answer carries; Unknown, with why, for anything else (an error answer, a value that is not a boolean, not JSON).
-    fun parse(body: String): FlagResult = try {
-        when (val v = org.json.JSONObject(body).opt("value")) {
-            true -> FlagResult.On
-            false -> FlagResult.Off
-            else -> FlagResult.Unknown(if (v == null) "no value in the answer: $body" else "the value is not a boolean: $v")
+    // The details an answer carries; for anything but a boolean value (an error answer, a value of another type, not JSON) the
+    // declared `default`, reason ERROR and the cause.
+    fun parse(body: String, default: Boolean): FlagDetails = try {
+        val o = org.json.JSONObject(body)
+        when (val v = o.opt("value")) {
+            is Boolean -> FlagDetails(v, o.optString("reason", "UNKNOWN"))
+            null -> FlagDetails(default, "ERROR", "no value in the answer: ${o.optString("errorCode", body)}")
+            else -> FlagDetails(default, "ERROR", "the value is not a boolean: $v")
         }
     } catch (e: org.json.JSONException) {
-        FlagResult.Unknown("the answer is not JSON: ${e.message}")
+        FlagDetails(default, "ERROR", "the answer is not JSON: ${e.message}")
     }
 
-    // Asks through `post` (the HTTP call, so a test can make it fail) and says every Unknown through `report`, with its cause.
-    fun evaluate(key: String, post: () -> String, report: (String) -> Unit): FlagResult {
-        val result = try {
-            parse(post())
+    // Asks through `post` (the HTTP call, so a test can make it fail); a failure is the default with reason ERROR, and every ERROR
+    // is reported (the app's log) with the key and the cause.
+    fun evaluate(key: String, default: Boolean, post: () -> String, report: (String) -> Unit): FlagDetails {
+        val details = try {
+            parse(post(), default)
         } catch (e: java.io.IOException) {
-            FlagResult.Unknown("the door did not answer: ${e.message}")
+            FlagDetails(default, "ERROR", "the door did not answer: ${e.message}")
         }
-        if (result is FlagResult.Unknown) report("PRONTO FLAG $key unknown: ${result.cause}")
-        return result
+        if (details.reason == "ERROR") report("PRONTO FLAG $key ERROR, value ${details.value} (the declared default): ${details.errorCode}")
+        return details
     }
 
-    fun read(base: String, key: String, timeoutMs: Int = 3000): FlagResult = evaluate(key, {
+    fun read(base: String, key: String, default: Boolean, timeoutMs: Int = 3000): FlagDetails = evaluate(key, default, {
         val c = java.net.URL("$base/ofrep/v1/evaluate/flags/$key").openConnection() as java.net.HttpURLConnection
         try {
             c.connectTimeout = timeoutMs

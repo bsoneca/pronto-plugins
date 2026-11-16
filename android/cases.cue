@@ -123,37 +123,39 @@ _cases: {
 		]
 	}
 
-	// Storage.pick(marker, flag): which store a launch uses. The choice is sticky and one way: with the marker the sealed store is
-	// used whatever the flag says or whether the phone is offline; with none, only a flag that is On adopts it. flag is "on", "off"
-	// or "unknown" (Unknown(cause)): Unknown keeps the current store (plain) for this launch only, writes no marker and moves nothing.
+	// Storage.pick(marker, flag): which store a launch uses; flag is the explicit boolean the evaluation gave. The choice is sticky and
+	// one way: with the marker the sealed store is used whatever the flag says; with none, only true adopts it.
 	pick: [
-		{why: "with the marker, sealed, the flag on", marker: true, flag: "on", want: "sealed"},
-		{why: "with the marker, sealed, though the flag has been turned off since", marker: true, flag: "off", want: "sealed"},
-		{why: "with the marker, sealed, though the flag is unknown (offline)", marker: true, flag: "unknown", want: "sealed"},
-		{why: "no marker and the flag on: adopt (write the marker, then seal)", marker: false, flag: "on", want: "adopt"},
-		{why: "no marker and the flag off: plain", marker: false, flag: "off", want: "plain"},
-		{why: "no marker and the flag unknown: plain for this launch, never adopt", marker: false, flag: "unknown", want: "plain"},
+		{why: "with the marker, sealed, the flag true", marker: true, flag: true, want: "sealed"},
+		{why: "with the marker, sealed, though the flag is false (turned off since, or unreachable with the default false)", marker: true, flag: false, want: "sealed"},
+		{why: "no marker and the flag true: adopt (write the marker, then seal)", marker: false, flag: true, want: "adopt"},
+		{why: "no marker and the flag false: plain", marker: false, flag: false, want: "plain"},
 	]
 
-	// Flag.parse(body): what an OFREP answer carries; anything else is Unknown with a cause, never off and never null.
+	// Flag.parse(body, default): OpenFeature's details of an OFREP answer: value, reason, errorCode. A boolean value is itself with
+	// the answer's reason; anything else is the declared default with reason ERROR and the cause in errorCode.
 	flag: [
-		{why: "an answer with the value true", body: #"{"key":"sealed_storage","value":true,"reason":"STATIC","variant":"on"}"#, want: "on"},
-		{why: "an answer with the value false", body: #"{"key":"sealed_storage","value":false,"reason":"STATIC","variant":"off"}"#, want: "off"},
-		{why: "an error answer is Unknown", body: #"{"key":"sealed_storage","errorCode":"FLAG_NOT_FOUND"}"#, want: "unknown", cause: "no value in the answer"},
-		{why: "a value that is not a boolean is Unknown", body: #"{"key":"sealed_storage","value":"true"}"#, want: "unknown", cause: "the value is not a boolean"},
-		{why: "a body that is not JSON is Unknown", body: "<html>", want: "unknown", cause: "the answer is not JSON"},
+		{why: "an answer with the value true", body: #"{"key":"sealed_storage","value":true,"reason":"STATIC","variant":"on"}"#, default: false, want: {value: true, reason: "STATIC"}},
+		{why: "an answer with the value false", body: #"{"key":"sealed_storage","value":false,"reason":"TARGETING_MATCH","variant":"off"}"#, default: true, want: {value: false, reason: "TARGETING_MATCH"}},
+		{why: "an error answer is the declared default (false), reason ERROR", body: #"{"key":"sealed_storage","errorCode":"FLAG_NOT_FOUND"}"#, default: false, want: {value: false, reason: "ERROR", errorCode: "FLAG_NOT_FOUND"}},
+		{why: "an error answer is the declared default (true), whatever it is: the default is the spec's", body: #"{"key":"sealed_storage","errorCode":"FLAG_NOT_FOUND"}"#, default: true, want: {value: true, reason: "ERROR", errorCode: "FLAG_NOT_FOUND"}},
+		{why: "a value that is not a boolean is the default, reason ERROR", body: #"{"key":"sealed_storage","value":"true"}"#, default: false, want: {value: false, reason: "ERROR", errorCode: "the value is not a boolean"}},
+		{why: "a body that is not JSON is the default, reason ERROR", body: "<html>", default: false, want: {value: false, reason: "ERROR", errorCode: "the answer is not JSON"}},
 	]
 
-	// Flag.evaluate(key, post, report): asking through `post`, which may fail. An IOException is Unknown with its cause, and every
-	// Unknown is reported (the app's log) with the key and the cause; On and Off report nothing. Each case then picks the store of a
-	// launch with no marker: Unknown keeps plain, and the error is on the log.
+	// Flag.evaluate(key, default, post, report): asking through `post`, which may fail. An IOException is the declared default with
+	// reason ERROR and its cause; every ERROR is reported (the app's log) with the key, the value and the cause; a boolean answer
+	// reports nothing. Each case then picks the store of a launch with no marker, the default being the spec's (flags_spec.cue,
+	// emitted into res/values/sealed_flag.xml): changing `default` here changes the outcome, as changing the spec does.
 	evaluate: [
-		{why: "an IOException is Unknown with its cause, reported, and the launch keeps plain", answer: {throws: "connection refused"},
-			want: {result: "unknown", cause: "the door did not answer: connection refused", reported: true, store: "plain"}},
-		{why: "an error answer is Unknown, reported, and the launch keeps plain", answer: {body: #"{"key":"sealed_storage","errorCode":"GENERAL"}"#},
-			want: {result: "unknown", cause: "no value in the answer", reported: true, store: "plain"}},
-		{why: "an answer On reports nothing and adopts", answer: {body: #"{"value":true}"#}, want: {result: "on", reported: false, store: "adopt"}},
-		{why: "an answer Off reports nothing and keeps plain", answer: {body: #"{"value":false}"#}, want: {result: "off", reported: false, store: "plain"}},
+		{why: "unreachable gives the spec default (false) with reason ERROR, reported, and the launch keeps plain", default: false, answer: {throws: "connection refused"},
+			want: {value: false, reason: "ERROR", cause: "the door did not answer: connection refused", reported: true, store: "plain"}},
+		{why: "unreachable gives the spec default, so a default of true follows: adopt", default: true, answer: {throws: "connection refused"},
+			want: {value: true, reason: "ERROR", cause: "the door did not answer: connection refused", reported: true, store: "adopt"}},
+		{why: "an error answer is the default with reason ERROR, reported", default: false, answer: {body: #"{"key":"sealed_storage","errorCode":"GENERAL"}"#},
+			want: {value: false, reason: "ERROR", cause: "GENERAL", reported: true, store: "plain"}},
+		{why: "an answer true adopts and reports nothing", default: false, answer: {body: #"{"value":true,"reason":"STATIC"}"#}, want: {value: true, reason: "STATIC", reported: false, store: "adopt"}},
+		{why: "an answer false keeps plain and reports nothing, whatever the default", default: true, answer: {body: #"{"value":false,"reason":"STATIC"}"#}, want: {value: false, reason: "STATIC", reported: false, store: "plain"}},
 	]
 
 	// Migration.once over a plain store and a sealed one: turning the switch on moves what the plain preferences hold, once, and

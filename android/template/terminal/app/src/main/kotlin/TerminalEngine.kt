@@ -71,14 +71,15 @@ class TerminalEngine(
     private lateinit var qjs: QuickJs
 
     // Sealed at rest (SealedStore.kt) once the app's flag (res/values/sealed_flag.xml, which the app's generate writes from its CUE) has
-    // put this phone on it, or when the app asks for an unlock; sticky and one way (Kv.kt, Storage.pick). Off or Unknown (reported with its
-    // cause), the plain preferences as before, for this launch. No flag named: sealed.
+    // put this phone on it, or when the app asks for an unlock; sticky and one way (Kv.kt, Storage.pick). False (the declared default when the
+    // door cannot be reached, logged with its cause), the plain preferences as before. No flag named: sealed.
     private val store: Kv by lazy {
         if (unlocked != null) return@lazy SealedStore(context, actor, unlocked, Unlock.FILE)
         val marker = Marker(context)
         val flagKey = context.getString(R.string.pronto_sealed_flag)
-        val flag = if (marker.exists()) null else if (flagKey.isEmpty()) FlagResult.On else Flag.read(base, flagKey)
-        when (Storage.pick(marker.exists(), flag)) {
+        val has = marker.exists()
+        val value = if (has) false else if (flagKey.isEmpty()) true else Flag.read(base, flagKey, context.resources.getBoolean(R.bool.pronto_sealed_flag_default)).value
+        when (Storage.pick(has, value)) {
             "adopt" -> { marker.write(); SealedStore(context, actor) }
             "sealed" -> SealedStore(context, actor)
             else -> PlainStore(context, actor)
