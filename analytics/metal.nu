@@ -42,6 +42,34 @@ export def dashboards-hash [dashboards: list<record>]: nothing -> string {
 	$dashboards | sort-by app name | each {|d| $"(dash-map $d.app $d.name)\n($d.text)" } | str join "\n" | hash sha256
 }
 
+# What Grafana's Deployment lacks to read the dashboards named, as JSON patch operations (PRONTO-591).
+# `dashboards` applies ConfigMaps, and Grafana mounts each file by subPath, so a dashboard new to the
+# cluster needs a volume and a mount its pod template does not have yet. Only additions: a caller that
+# names some of the dashboards keeps the others.
+export def mount-ops [dashboards: list<record>, deployment: record]: nothing -> list<record> {
+	let spec = $deployment.spec.template.spec
+	let vols = ($spec.volumes? | default [] | get name)
+	let mounts = ($spec.containers.0.volumeMounts? | default [] | get mountPath)
+	let volume_ops = ($dashboards | where {|d| (dash-map $d.app $d.name) not-in $vols } | each {|d|
+		{op: "add", path: "/spec/template/spec/volumes/-", value: {name: (dash-map $d.app $d.name), configMap: {name: (dash-map $d.app $d.name)}}}
+	})
+	let mount_ops = ($dashboards | where {|d| $"/dashboards/($d.app)/($d.name).json" not-in $mounts } | each {|d|
+		{op: "add", path: "/spec/template/spec/containers/0/volumeMounts/-", value: {name: (dash-map $d.app $d.name), mountPath: $"/dashboards/($d.app)/($d.name).json", subPath: $"($d.name).json", readOnly: true}}
+	})
+	$volume_ops ++ $mount_ops
+}
+
+# Grafana's dashboard providers with one added for each app the dashboards name that has none (its
+# folder, `--titles`), or null when every app has one (PRONTO-591). Providers are only added.
+export def providers-with [dashboards: list<record>, current: string]: nothing -> any {
+	let have = ($current | from yaml)
+	let names = ($have.providers? | default [] | get name)
+	let added = ($dashboards | where {|d| $d.app not-in $names } | get app | uniq | each {|a|
+		{name: $a, folder: ($dashboards | where app == $a | first | get folder), type: "file", disableDeletion: true, allowUiUpdates: false, updateIntervalSeconds: 60, options: {path: $"/dashboards/($a)"}}
+	})
+	if ($added | is-empty) { null } else { $have | upsert providers (($have.providers? | default []) ++ $added) | to yaml }
+}
+
 # Grafana's role for each account named, and none for anyone else (role_attribute_strict refuses).
 export def role-path [users: record]: nothing -> string {
 	$users | columns | sort | each {|e| $"\(email=='($e)' && '($users | get $e)'\)" } | str join " || "
@@ -311,8 +339,16 @@ export def "main dashboards" [
 		do $run $"($kubectl) apply --server-side --force-conflicts -f -" $yaml | print
 	}
 	for d in ($ds | where {|d| not ($d in $changed) }) { print $"(dash-map $d.app $d.name): unchanged" }
+	# A dashboard of an app with no provider yet is read once its folder is provided (providers-with).
+	let providers = (providers-with $ds (do $run $"($kubectl) get configmap grafana-provisioning -n ($namespace) -o go-template='{{index .data \"dashboards.yaml\"}}'" ""))
+	if $providers != null {
+		do $run $"($kubectl) patch configmap grafana-provisioning -n ($namespace) --type merge --patch-file /dev/stdin" ({data: {"dashboards.yaml": $providers}} | to json) | print
+	}
+	# One patch: the mounts a new dashboard needs (mount-ops) and the digest, so Grafana's pods restart once.
+	let deployment = (do $run $"($kubectl) get deployment/grafana -n ($namespace) -o json" "" | from json)
 	let digest = (dashboards-hash $ds)
-	do $run $"($kubectl) patch deployment/grafana -n ($namespace) --type merge -p '{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"pronto.dev/dashboards\":\"($digest)\"}}}}}'" "" | print
+	let ops = (mount-ops $ds $deployment) ++ [{op: "add", path: "/spec/template/metadata/annotations/pronto.dev~1dashboards", value: $digest}]
+	do $run $"($kubectl) patch deployment/grafana -n ($namespace) --type json --patch-file /dev/stdin" ($ops | to json) | print
 	do $run $"($kubectl) rollout status deployment/grafana -n ($namespace) --timeout=300s" "" | print
 }
 

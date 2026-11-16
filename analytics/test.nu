@@ -64,6 +64,15 @@ def main [] {
 	check "no dashboard is stale when every live file is the file" ((metal stale $ds {"grafana-dashboards-shop-business": "{\"a\":1}\n", "grafana-dashboards-shop-perf": "{\"b\":2}\n"} | is-empty))
 	check "the dashboards' digest does not follow their order" ((metal dashboards-hash $ds) == (metal dashboards-hash ($ds | reverse)))
 	check "the dashboards' digest follows a change of any file" ((metal dashboards-hash $ds) != (metal dashboards-hash ($ds | update 1.text "{\"b\":3}\n")))
+	# A dashboard new to the cluster gets its volume and mount, and its app a provider; nothing is removed (PRONTO-591).
+	let deploy = {spec: {template: {spec: {volumes: [{name: "data"} {name: "grafana-dashboards-shop-business"}], containers: [{volumeMounts: [{mountPath: "/var/lib/grafana"} {mountPath: "/dashboards/shop/business.json"}]}]}}}}
+	let ops = (metal mount-ops $ds $deploy)
+	check "a new dashboard gets its volume and its mount, an old one nothing" (($ops | get path) == ["/spec/template/spec/volumes/-" "/spec/template/spec/containers/0/volumeMounts/-"] and ($ops.0.value.configMap.name == "grafana-dashboards-shop-perf") and ($ops.1.value == {name: "grafana-dashboards-shop-perf", mountPath: "/dashboards/shop/perf.json", subPath: "perf.json", readOnly: true}))
+	check "a dashboard mounted already adds nothing" ((metal mount-ops ($ds | first 1) $deploy) | is-empty)
+	let prov = "apiVersion: 1\nproviders:\n- name: shop\n  folder: Shop\n  options:\n    path: /dashboards/shop\n"
+	check "an app with its provider adds none" ((metal providers-with $ds $prov) == null)
+	let more = (metal providers-with ($ds | append {app: "operator", name: "traffic", folder: "Operator", text: "{}"}) $prov | from yaml)
+	check "an app new to Grafana gets a provider beside the others" ((($more.providers | get name) == ["shop" "operator"]) and ($more.providers.1.folder == "Operator") and ($more.providers.1.options.path == "/dashboards/operator"))
 
 	"(app) {\n}\n" | save --force docker/Caddyfile
 	check "a door with no auth route refuses" (try { analytics route /a/s.js /a/e https://umami.example.com; false } catch { true })
