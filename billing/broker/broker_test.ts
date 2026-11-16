@@ -780,7 +780,8 @@ Deno.test("the stand-in is reached through its door: every call in its ledger, a
 
 // Stripe sees one Idempotency-Key whichever way a call went (PRONTO-223): a customer asked for straight,
 // then asked again through the door (the stripe_door flag turned on between them, or a retry after it
-// was), is made once.
+// was), is made once. The straight way's header is stripe_test.ts's ("the direct way sends the broker's own
+// idempotency key"); both ways hold one Stripe key, so one account scopes the key (PRONTO-218).
 Deno.test("a call made straight and then again through the door reaches Stripe under one key and makes one customer", async () => {
   const fake = fakeStripe(ISSUER, { searchLagMs: 0 });
   const door = stripeClient({ door: `${ISSUER}/door/stripe`, fetcher: ((u: string | URL | Request, init?: RequestInit) => fake.handle(new Request(u, init))!) as typeof fetch });
@@ -792,6 +793,7 @@ Deno.test("a call made straight and then again through the door reaches Stripe u
   assertEquals(fake.held.customers.size, 1, "one customer");
   const other = await door("POST", "/v1/customers", params, `${key} again`) as { id: string };
   assertEquals(other.id === straight.id, false, "another key is another call");
+  assertEquals(fake.held.customers.size, 2, "and another customer");
 });
 
 Deno.test("Stripe's form is read back into its objects and arrays", () => {
