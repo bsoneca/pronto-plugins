@@ -70,6 +70,7 @@ _terminal: {
 		<?xml version="1.0" encoding="utf-8"?>
 		<resources>
 		    <string name="pronto_sealed_flag"></string>
+		    <bool name="pronto_sealed_flag_default">false</bool>
 		</resources>
 
 		"""

@@ -36,6 +36,7 @@ casesLoader: strings.HasPrefix(_term.files["android/app/src/test/kotlin/dev/pron
 
 // The sealed-storage flag's resource: empty (always sealed) until the app's generate writes its flag there, and then the app's. One Kotlin file holds both stores.
 sealedFlagSeeded: strings.Contains(_term.files["android/app/src/main/res/values/sealed_flag.xml"].text, "<string name=\"pronto_sealed_flag\"></string>") & true
+sealedFlagDefault: strings.Contains(_term.files["android/app/src/main/res/values/sealed_flag.xml"].text, "<bool name=\"pronto_sealed_flag_default\">false</bool>") & true
 sealedFlagTheApps: _term.files["android/app/src/main/res/values/sealed_flag.xml"].seed & true
 sealedKvShips: strings.HasPrefix(_term.files["android/app/src/main/kotlin/dev/pronto/emit/Kv.kt"].text, "package dev.pronto.emit\n") & true
 
