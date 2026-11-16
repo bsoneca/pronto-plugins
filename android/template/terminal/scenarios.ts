@@ -895,7 +895,9 @@ async function main() {
         await runScenario(name, scenarios[name], phone, dir);
         // On an app's released address the run only reads: any request the page made that is not a GET (the driver's log) fails it.
         if (deployed(running.base)) {
-          const writes = writesMade((await phone.fetches(0))?.items ?? []);
+          const log = await phone.fetches(0);
+          if (!log) throw new Fail(`${name}: the driver gave no request log, so the run cannot show that it only read`);
+          const writes = writesMade(log.items ?? []);
           if (writes.length) throw new Fail(`${name} made requests that write on production: ${writes.join(", ")}`);
         }
         results.push(`pass  ${name}  ${((Date.now() - t) / 1000).toFixed(1)} s`);
