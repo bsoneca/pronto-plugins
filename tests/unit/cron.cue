@@ -191,6 +191,11 @@ cases: {
 	]}
 	"the records say whether a commit is good or bad for the failure's kind, the newest evidence counting, a dirty tree none": {suite: "cron", steps: [
 		{call: "cron.verdict", args: ["c1", {kind: "release", names: []}, {releases: [{commit: "c1", dirty: false, outcome: "live", started: "1"}]}], expect: "good"},
+		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: []}, {rehearsals: [{commit: "c1", dirty: false, outcome: "passed", queued: "1"}]}], expect: "good", why: "an app whose records say no mode keeps every clean record"},
+		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: []}, {rehearsals: [{commit: "c1", dirty: false, outcome: "passed", queued: "1"}, {commit: "c2", dirty: false, outcome: "passed", queued: "2", mode: "release"}]}], expect: "unknown", why: "once records say their mode, one from before modes proves nothing"},
+		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: []}, {rehearsals: [{commit: "c1", dirty: false, outcome: "passed", queued: "1", mode: "hand"}]}], expect: "unknown", why: "a hand run is not release evidence"},
+		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: []}, {rehearsals: [{commit: "c1", dirty: false, outcome: "passed", queued: "1", mode: "release", excused: ["new-thing"]}]}], expect: "unknown", why: "a pass that excused a new feature's failure proves nothing of that scenario"},
+		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: []}, {rehearsals: [{commit: "c1", dirty: false, outcome: "passed", queued: "1", mode: "release"}]}], expect: "good"},
 		{call: "cron.verdict", args: ["c1", {kind: "release", names: []}, {releases: [{commit: "c1", dirty: false, outcome: "failed", failure: "the tests failed against https://x", started: "1"}]}], expect: "bad"},
 		{call: "cron.verdict", args: ["c1", {kind: "release", names: ["a"]}, {releases: [{commit: "c1", dirty: false, outcome: "failed", failure: "the tests failed against https://x", started: "1"}]}], expect: "unknown", why: "a failed rc names no scenario: it may be another one"},
 		{call: "cron.verdict", args: ["c1", {kind: "release", names: ["a"]}, {releases: [{commit: "c1", dirty: false, outcome: "live", started: "1"}]}], expect: "good"},
