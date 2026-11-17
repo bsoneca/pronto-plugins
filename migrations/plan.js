@@ -14,10 +14,12 @@ export const FACTS_VERSION = 1;
 // plugin) this one does not read, or an app not generated. Either is refused, saying what to run.
 const foreign = (what, why) => new Error(`${what}: ${why}: a pronto this plugin does not read (rerun bin/pronto-migrations from a pronto-plugins that reads it)`);
 const ungenerated = (what, why) => new Error(`${what}: ${why}: run generate`);
-// A table, column or field may be named as a member every object inherits (`constructor`, `toString`):
-// what is read or kept by such a name is read from, and made as, the object's own key alone.
+// A table, column or field may be named as a member every object inherits (`constructor`, `toString`,
+// `__proto__`): what is read or kept by such a name is read from, and made as, the object's own key
+// alone. `put` defines the key, where `o[k] = v` would call `__proto__`'s setter and keep nothing.
 const own = (o, k) => (o != null && Object.hasOwn(o, k) ? o[k] : undefined);
-const slot = (o, k, make) => (Object.hasOwn(o, k) ? o[k] : (o[k] = make()));
+const put = (o, k, v) => (Object.defineProperty(o, k, { value: v, writable: true, enumerable: true, configurable: true }), v);
+const slot = (o, k, make) => (Object.hasOwn(o, k) ? o[k] : put(o, k, make()));
 
 // --- pronto's names ---
 
@@ -51,7 +53,7 @@ export function parseProto(text) {
       if ((m = line.match(/^message\s+(\w+)\s*\{$/))) {
         // Its own keys alone: a message named as an Object's inherited one (constructor) is no second one.
         if (Object.hasOwn(messages, m[1])) throw new Error(`${at}: message ${m[1]} twice`);
-        cur = messages[m[1]] = { fields: {}, reserved: { numbers: [], names: [] } };
+        cur = put(messages, m[1], { fields: {}, reserved: { numbers: [], names: [] } });
       } else if (!/^(syntax|package|import|option)\b.*;$/.test(line)) {
         throw new Error(`${at}: not what pronto emits: ${line}`);
       }
@@ -89,7 +91,7 @@ export function parseMachines(sql) {
     const suffix = names.check("", col);
     if (!name.endsWith(suffix)) continue;
     const table = name.slice(0, -suffix.length);
-    slot(out, table, () => ({}))[col] = [...list.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replaceAll("''", "'"));
+    put(slot(out, table, () => ({})), col, [...list.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replaceAll("''", "'")));
     read.add(names.machine(table, col));
   }
   for (const [, trigger] of sql.matchAll(/CREATE TRIGGER "(trg_\w+_machine)"/g)) {
@@ -120,7 +122,7 @@ export function parseTables(sql) {
     } else if (table && (m = line.match(/^ {2}"(\w+)" (.*?),?$/))) {
       slot(at(table).columns, m[1], () => columnClause(m[2]));
     } else if ((m = line.match(/^ALTER TABLE (?:"([^"]+)"|(\w+)) ADD COLUMN IF NOT EXISTS "(\w+)" (.*);$/))) {
-      at(m[1] ?? m[2]).columns[m[3]] = columnClause(m[4]);
+      put(at(m[1] ?? m[2]).columns, m[3], columnClause(m[4]));
     } else if ((m = line.match(/^CREATE (UNIQUE )?INDEX IF NOT EXISTS (\w+) ON (?:"([^"]+)"|(\w+))(?: USING (\w+))? \(([^)]*)\)/))) {
       const cols = m[6].split(",").map((c) => c.trim().replace(/^"(.*)"$/, "$1"));
       at(m[3] ?? m[4]).indexes[m[2].toLowerCase()] = m[1] ? { cols, unique: true } : clean({ cols, using: m[5] });
@@ -236,14 +238,14 @@ export function model(protoText, inputs, sql = {}) {
     for (const u of e.uniques) {
       const x = own(written, u.name.toLowerCase());
       if (!x?.unique || JSON.stringify(x.cols) !== JSON.stringify(u.cols)) throw ungenerated(name, `005_create_tables.sql has no unique index ${u.name.toLowerCase()} on (${u.cols.join(", ")})`);
-      indexes[u.name.toLowerCase()] = x;
+      put(indexes, u.name.toLowerCase(), x);
     }
     for (const i of e.indexes ?? []) {
       const found = Object.entries(written).filter(([, x]) => !x.unique && x.cols.length === 1 && x.cols[0] === i.on && x.using === i.using);
       if (found.length !== 1) throw ungenerated(name, `005_create_tables.sql has ${found.length ? "more than one" : "no"} ${i.using} index on ${e.table} (${i.on})`);
-      indexes[found[0][0]] = found[0][1];
+      put(indexes, found[0][0], found[0][1]);
     }
-    out[name] = clean({ table: e.table, id: e.id, fields, retired, indexes });
+    put(out, name, clean({ table: e.table, id: e.id, fields, retired, indexes }));
   }
   return sorted(out);
 }
@@ -580,7 +582,7 @@ export function plan(changes, declared = {}, dropped = {}, inherited = {}) {
       declared: (what) => {
         read.add(`${what}.${c.entity}.${c.field}`);
         const d = own(own(own(declared, what), c.entity), c.field) ?? own(own(own(inherited, what), c.entity), c.field);
-        if (d !== undefined) slot(slot(used, what, () => ({})), c.entity, () => ({}))[c.field] = d;
+        if (d !== undefined) put(slot(slot(used, what, () => ({})), c.entity, () => ({})), c.field, d);
         return d;
       },
     };
@@ -635,7 +637,7 @@ function carrySql(c, x) {
   const stray = Object.entries(carry.values ?? {}).filter(([, to]) => !c.admitted.includes(to)).map(([v, to]) => `${v} → ${to}`);
   const both = carry.values && own(carry.set, c.field) !== undefined;
   const assign = { ...(carry.set ?? {}) };
-  if (carry.values) assign[c.field] = `CASE ${x.col} ${c.removed.map((v) => `WHEN ${lit(v)} THEN ${lit(own(carry.values, v))}`).join(" ")} END`;
+  if (carry.values) put(assign, c.field, `CASE ${x.col} ${c.removed.map((v) => `WHEN ${lit(v)} THEN ${lit(own(carry.values, v))}`).join(" ")} END`);
   // Any trigger on the table may be listed: another machine's, or one of the app's own (a guard that
   // refuses to change a row once final) that the move would trip.
   const triggers = carry.triggers ?? [];
@@ -720,7 +722,7 @@ export function droppedBy(migrations) {
     const sql = (json.operations ?? []).map((o) => o.sql?.up ?? "").join("\n").replace(/DO (\$carry\$|\$fill\$)[\s\S]*?END \1;/g, "").replace(/^--.*$/gm, "");
     const built = new Set([...sql.matchAll(/(?:ADD CONSTRAINT|INDEX) "([^"]+)"/g)].map((m) => m[1]));
     for (const [, n] of sql.matchAll(/DROP (?:INDEX IF EXISTS "[^"]+"\.|CONSTRAINT IF EXISTS |TRIGGER IF EXISTS )"([^"]+)"/g)) {
-      if (!built.has(n)) out[n] ??= name;
+      if (!built.has(n)) slot(out, n, () => name);
     }
     for (const n of built) delete out[n];
   }

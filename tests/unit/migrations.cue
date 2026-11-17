@@ -201,6 +201,19 @@ cases: {
 			{tables: "CREATE TABLE IF NOT EXISTS \"constructor\" (\n  \"id\" uuid PRIMARY KEY,\n  \"toString\" text\n);\n"},
 		], holds: {Thing: {table: "constructor", fields: {"2": {name: "toString", sql: "text", check: "char_length(toString) > 0"}}}}, why: "toString keeps its check, never Object's toString read as its enum"},
 		{get: "Thing.fields.2.enum", matches: "^undefined$", why: "and has no enum"},
+		{call: "migrations.model", args: [
+			"message Thing {\n  optional string id = 1;\n  optional string __proto__ = 2;\n}\n",
+			{version: 1, types: _facts.types, entities: Thing: {
+				server: true, table: "__proto__", id: "0x03"
+				fields: [
+					{name: "id", ordinal: 1, retired: false, type: "uuid", pk: true, required: true},
+					{name: "__proto__", ordinal: 2, retired: false, type: "text", pk: false, required: false},
+				]
+				cel: {enums: {}, checks: {}}
+				uniques: []
+			}},
+			{tables: "CREATE TABLE IF NOT EXISTS \"__proto__\" (\n  \"id\" uuid PRIMARY KEY,\n  \"__proto__\" text\n);\n"},
+		], holds: {Thing: {table: "__proto__", fields: {"2": {name: "__proto__", sql: "text"}}}}, why: "a table and a column named __proto__ are kept as keys, never set as an object's prototype, so the table is found"},
 	]}
 	"a proto, facts and an emitted schema that disagree, or a pronto this does not read, are refused, never guessed": {suite: "migrations", steps: [
 		{call: "migrations.model", args: ["message Order {\n  optional string id = 1;\n  optional string state = 2;\n  reserved 3;\n  reserved \"old\";\n  optional string total = 4;\n  optional string owner = 5;\n}\n", _facts, _sql], throws: "^Order.status: entities.proto has state at 2: run generate$"},
