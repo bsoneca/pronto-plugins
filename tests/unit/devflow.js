@@ -3,7 +3,7 @@
 // seed that logs each write, so a case can say what a run wrote and that a second run wrote nothing. The
 // code under test is devflow/suggestions.ts and devflow/queue.ts, on this Board.
 import { approve, inboxSteps, inboxStatus, show, suggestionLines } from '../../devflow/suggestions.ts';
-import { contextOf, file as fileIssue, mergedStatus, openStatus, pull as pullIssue, queueLines, queueStatus, readyStatus, slotsLine } from '../../devflow/queue.ts';
+import { contextOf, file as fileIssue, pull as pullIssue, status as statusOf } from '../../devflow/queue.ts';
 import * as run from '../../intents/run.ts';
 
 const GROUPS = { Backlog: 'backlog', Todo: 'unstarted', 'In Progress': 'started', Done: 'completed', Cancelled: 'cancelled' };
@@ -49,7 +49,7 @@ function flowOf(seed) {
 /** An in-memory Board of the seed: `inboxMade` (default true) makes the inbox project with its three
  * states (else it is absent, or with Plane's own five when `connect` makes it); `items` the inbox's
  * issues `{seq, state, title, html, created}`; `issues` the board's `{seq, name, state, module, priority, bug, ready, created, completed, moves}` (`ready`
- * an ISO time it moved into Ready, `moves` more `{state, at}`; the Ready queue's cases) and `comments` `{html, at}` already on it, `cycles` `{name, issues: [seq]}` that cycles()/cycleIssues() answer, `failMoves` (stateMoves rejects) and `now` the clock comments are stamped with;
+ * an ISO time it moved into Ready, `moves` more `{state, at}`; the Ready queue's cases) and `comments` `{html, at}` already on it, `cycles` `{name, issues: [seq]}` that cycles()/cycleIssues() answer, `failMoves` (stateMoves rejects), `failLinks` (links rejects), `nows` (the clock of each status run) and `touches` `{after, seq, state, updated, move}` (what happens to an issue after run `after`: its new state, `updated_at` and a move into it `{state, at}`) and `now` the clock comments are stamped with;
  * `modules` its modules; `failOnce` a write method that throws its first call (`issues` instead: the
  * inbox's list of issues, failing as Plane's 500 does, with a body); `failAfter` a method whose first
  * call does its work, writes included, then throws, as a lost answer does. Writes are logged. */
@@ -139,7 +139,10 @@ function boardOf(seed) {
       hit.state = state;
       return { ...hit };
     },
-    links: () => [],
+    links: () => {
+      if (seed.failLinks) throw new Error('plane GET links: 500');
+      return [];
+    },
     // The cycle calls are logged too: a case can say that none was made.
     cycles: () => { write('cycles'); return (seed.cycles ?? []).map((c, n) => ({ id: `c-${n}`, name: c.name })); },
     cycleIssues: (_p, c) => { write('cycleIssues'); return issues['p-acme'].filter((i) => (seed.cycles?.[Number(c.slice(2))]?.issues ?? []).includes(i.sequence_id)).map((i) => ({ ...i })); },
@@ -156,7 +159,7 @@ function boardOf(seed) {
     return r;
   })]));
   const take = () => log.splice(0, log.length);
-  return { board, take, served, projects, states, issues, comments, modIssues, labels, byId, inboxId: () => projects.find((p) => p.identifier === 'SUGEST')?.id };
+  return { board, take, served, moves, projects, states, issues, comments, modIssues, labels, byId, inboxId: () => projects.find((p) => p.identifier === 'SUGEST')?.id };
 }
 
 /** The inbox's status as `status` prints it: the JSON and its lines (null when the flow has no inbox). */
@@ -234,17 +237,6 @@ export async function pulls(seed, lane, n) {
   return { started, error, writes: f.take() };
 }
 
-/** `status` as the verb builds it: the queue's JSON and the lines it prints after the slots and the stuck. */
-export async function queueState(seed) {
-  seed = { now: DEFAULT_NOW, ...seed };
-  const f = boardOf(seed);
-  const flow = flowOf(seed);
-  const ctx = await contextOf(f.board, flow, 'p-acme');
-  const now = new Date(seed.now);
-  const s = await queueStatus(f.board, ctx, await f.board.issues('p-acme', true), now);
-  return { ...s, slotsLine: slotsLine(s), lines: queueLines(s, flow), writes: f.take() };
-}
-
 /** `file` on the seed's board: what it answered, its writes, and the state and labels of what it made. */
 export async function filed(seed, flags) {
   const f = boardOf(seed);
@@ -255,24 +247,29 @@ export async function filed(seed, flags) {
   return { ...r, writes: f.take(), priority: made.priority, labels: made.labels, madeState: ctx.stateName(made.state) };
 }
 
-/** `status`'s reads as the verb makes them, run twice on one board with the cache the verb keeps between
- * runs: each run's requests served (all, and the activity reads among them) and its merged count. */
-export async function statusRequests(seed) {
+/** `status` as the verb runs it (devflow/queue.ts status), `runs` times on one board with the cache the verb
+ * keeps between runs; the git and gh probes answer nothing. Each run: the lines printed in order, the JSON,
+ * the failures, every request the board served (and its activity and links reads among them) and the writes. */
+export async function statusRuns(seed, runs = 1) {
   seed = { now: DEFAULT_NOW, ...seed };
   const f = boardOf(seed);
   const flow = flowOf(seed);
-  const now = new Date(seed.now);
   const kept = new Map();
-  const cache = { get: (k) => kept.get(k), set: (k, v) => kept.set(k, v) };
-  const runs = [];
-  for (let r = 0; r < 2; r++) {
+  const cache = { get: (k) => kept.get(k), set: (k, v) => kept.set(k, v), save: () => {} };
+  const out = [];
+  for (let r = 0; r < runs; r++) {
     for (const k of Object.keys(f.served)) delete f.served[k];
-    const all = await f.board.issues('p-acme', true);
-    const ctx = await contextOf(f.board, flow, 'p-acme');
-    await readyStatus(f.board, ctx, all, now, cache);
-    const merged = await mergedStatus(f.board, ctx, all, now, { cache });
-    openStatus(ctx, all);
-    runs.push({ requests: Object.values(f.served).reduce((a, b) => a + b, 0), activity: f.served.stateMoves ?? 0, merged });
+    const lines = [];
+    const res = await statusOf(f.board, flow, 'p-acme', {
+      now: () => new Date(seed.nows?.[r] ?? seed.now), cache, inbox: f.inboxId(), pr: () => Promise.resolve(null), lastCommit: () => Promise.resolve(null), print: (l) => lines.push(l),
+    });
+    for (const t of (seed.touches ?? []).filter((x) => x.after === r)) {
+      const i = f.issues['p-acme'].find((x) => x.sequence_id === t.seq);
+      i.state = `s-acme-${t.state}`;
+      i.updated_at = t.updated;
+      if (t.move) f.moves[i.id].push({ to: `s-acme-${t.move.state}`, at: t.move.at });
+    }
+    out.push({ lines, json: res.json, failures: res.failures, requests: Object.values(f.served).reduce((a, b) => a + b, 0), activity: f.served.stateMoves ?? 0, links: f.served.links ?? 0, writes: f.take() });
   }
-  return runs;
+  return out;
 }

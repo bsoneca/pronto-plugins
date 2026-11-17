@@ -4,8 +4,9 @@
 // (engineer, SRE, architect) pulls the first of its own. There are no sprints. board.ts parses the
 // arguments, prints and exits; the rules are flow.js's.
 import { type Board, esc, type Issue, type State } from "./board/board.ts";
-import { ageOf, bugPlace, dayOf, claimText, claimWinner, jumps, laneOf, mayStart, mergedByDay, nameOf, priorityOf, pullOrder, readySince, roleOf, staleOf } from "./flow.js";
+import { ageOf, bugPlace, dayOf, claimText, claimWinner, jumps, laneOf, mayStart, mergedByDay, nameOf, priorityOf, pullOrder, readySince, roleOf, staleOf, stuckLine, stuckOf } from "./flow.js";
 import type { DevFlow, Role } from "./spec.ts";
+import { inboxStatus, suggestionLines } from "./suggestions.ts";
 
 const DAY = 86400000;
 
@@ -188,7 +189,12 @@ export type QueueStatus = ReadyStatus & OpenStatus & { merged: Merged };
 
 /** What a history read answered, kept across runs: an issue's Ready time and merge time do not change
  * while its `updated_at` (Ready) or `completed_at` (merge) do not. */
-export interface ReadCache { get(key: string): string | undefined; set(key: string, at: string): void }
+export interface ReadCache {
+  get(key: string): string | undefined;
+  set(key: string, at: string): void;
+  /** Writes what changed, keeping only the answers of the issues in `live` (their ids). */
+  save(live: Set<string>): void;
+}
 
 /** When an issue merged: its first move into a completed state after its last move out of one (an
  * issue sent back and merged again merged at the second). The board's `completed_at` is not it: Plane
@@ -215,10 +221,12 @@ export async function mergedStatus(board: Board, ctx: Ctx, all: Issue[], now: Da
   const today = dayOf(now.getTime(), tz);
   const recent = all.filter((i) => ["merged", "live", "done"].includes(ctx.roleAt(i.state) ?? "") && (i.completed_at ? now.getTime() - Date.parse(i.completed_at) < days * DAY : false));
   const times = await pool(recent, 8, async (i): Promise<string | null> => {
-    if (ctx.roleAt(i.state) === "merged" || dayOf(Date.parse(i.completed_at!), tz) !== today) return i.completed_at ?? null;
+    if (ctx.roleAt(i.state) === "merged") return i.completed_at ?? null;
+    // An answer kept is used on any day, so a day once counted exactly stays so; the history is read on a miss for today alone.
     const k = `merged:${i.id}@${i.completed_at}`;
     const have = opts.cache?.get(k);
     if (have) return have;
+    if (dayOf(Date.parse(i.completed_at!), tz) !== today) return i.completed_at ?? null;
     const at = await mergedAt(board, ctx, i);
     if (at) opts.cache?.set(k, at);
     return at;
@@ -249,12 +257,6 @@ export function openStatus(ctx: Ctx, all: Issue[]): OpenStatus {
   };
 }
 
-/** The whole status: the queue, the slots, merges by day and the open issues by state. */
-export async function queueStatus(board: Board, ctx: Ctx, all: Issue[], now: Date, opts: { cache?: ReadCache } = {}): Promise<QueueStatus> {
-  const [ready, merged] = await Promise.all([readyStatus(board, ctx, all, now, opts.cache), mergedStatus(board, ctx, all, now, opts)]);
-  return { ...ready, ...openStatus(ctx, all), merged };
-}
-
 /** The slots line: `3 of 6 engineer slots busy (PRONTO-1, ...), 0 of 1 SRE slots busy, ...`. */
 export const slotsLine = (s: OpenStatus) =>
   Object.entries(s.slots).map(([l, v]) => `${v.on.length} of ${v.of} ${l} slots busy${v.on.length ? ` (${v.on.join(", ")})` : ""}`).join(", ");
@@ -279,5 +281,76 @@ export function openLines(s: OpenStatus, flow: DevFlow): string[] {
   return out;
 }
 
-/** The lines `status` prints after the slots and the stuck issues, in order. */
-export const queueLines = (s: QueueStatus, flow: DevFlow): string[] => [...readyLines(s, flow), mergedLine(s.merged, flow), ...openLines(s, flow)];
+/** What status asks of its caller: the git and gh probes (a pull request's ci and auto-merge from its
+ * address, null when it is not open or cannot be read; the newest commit on a branch naming a key), the
+ * inbox's project, the clock, the cache kept between runs and where lines go. */
+export interface StatusIO {
+  now: () => Date;
+  cache: ReadCache;
+  inbox?: string;
+  pr: (url: string) => Promise<{ ci: "pass" | "fail" | "pending"; auto: boolean } | null>;
+  lastCommit: (key: string) => Promise<string | null>;
+  print: (line: string) => void;
+}
+
+type Phase<T> = { ok: true; value: T } | { ok: false; error: string };
+
+/** The whole status, the one function the verb prints. Lines go to `io.print` as each phase finishes,
+ * in this order: the slots, each lane's queue, what starves, what is stuck, merges by day, the open
+ * issues, the Backlog, the inbox. A phase that fails prints `<phase>: unavailable (<error>)`, counts in
+ * `failures` and never keeps the others from running: a Plane error is never hidden. `json` is the same
+ * data, a failed phase's part being `{unavailable}`. */
+export async function status(board: Board, flow: DevFlow, project: string, io: StatusIO) {
+  let failures = 0;
+  const phase = async <T>(name: string, run: () => Promise<T>): Promise<Phase<T>> => {
+    try {
+      return { ok: true, value: await run() };
+    } catch (e) {
+      failures++;
+      return { ok: false, error: `${name}: unavailable (${(e as Error).message})` };
+    }
+  };
+  const bad = (r: { ok: false; error: string }) => ({ unavailable: r.error });
+  const [all, ctx] = await Promise.all([board.issues(project, true), contextOf(board, flow, project)]);
+  const now = io.now();
+  const live = new Set(all.map((i) => i.id));
+  const open = openStatus(ctx, all);
+  io.print(slotsLine(open));
+  const ready = await phase("ready to pull", () => readyStatus(board, ctx, all, now, io.cache));
+  io.cache.save(live);
+  for (const l of ready.ok ? readyLines(ready.value, flow) : [ready.error]) io.print(l);
+  // Issues holding a slot (Implementing, or in Review) that no work is moving (flow.js stuckOf). A
+  // board that cannot list an issue's links fails the phase: it is not "no pull request".
+  const held = all.filter((i) => ["implementing", "review"].includes(ctx.roleAt(i.state) ?? ""));
+  const stuck = await phase("stuck", async () => (await Promise.all(held.map(async (i) => {
+    let pr = null;
+    for (const l of await board.links(project, i.id)) {
+      if (!/\/pull\/\d+/.test(l.url)) continue;
+      pr = await io.pr(l.url);
+      if (pr) break;
+    }
+    const k = ctx.key(i);
+    return stuckOf({ key: k, state: ctx.stateName(i.state), since: i.updated_at ?? "", pr, commit: pr ? null : await io.lastCommit(k) }, now, flow.stuckHours);
+  }))).filter((s) => s !== null));
+  for (const l of stuck.ok ? stuck.value.map(stuckLine) : [stuck.error]) io.print(l);
+  const merged = await phase("merged", () => mergedStatus(board, ctx, all, now, { cache: io.cache }));
+  io.cache.save(live);
+  io.print(merged.ok ? mergedLine(merged.value, flow) : merged.error);
+  for (const l of openLines(open, flow)) io.print(l);
+  // The inbox's lines come last, so the lines above are what they were without one.
+  const suggestions = await inboxStatus(board, flow, io.inbox, all.map((i) => i.name), now);
+  if (suggestions) for (const l of suggestionLines(suggestions, flow)) io.print(l);
+  return {
+    failures,
+    json: {
+      slots: open.slots,
+      queue: ready.ok ? ready.value.queue : bad(ready),
+      starving: ready.ok ? ready.value.starving : bad(ready),
+      merged: merged.ok ? merged.value : bad(merged),
+      issues: open.issues,
+      backlog: open.backlog,
+      stuck: stuck.ok ? stuck.value : bad(stuck),
+      ...(suggestions ? { suggestions } : {}),
+    },
+  };
+}
