@@ -735,6 +735,9 @@ try {
           if (Date.now() - said2 >= HEARTBEAT) { said2 = Date.now(); say(`preview: still waiting for ${pv.origin}`); }
           await new Promise((r) => setTimeout(r, 5_000));
         }
+        // A forward that never bound (ExitOnForwardFailure on a port something else holds) has exited by now: what answered was
+        // that other listener, not the preview.
+        if (!bad.length && gone) bad.push(`the preview's forward (${pv.reach.join(" ")}) exited (code ${gone.code}): what answered on ${pv.origin} was not the preview`);
         if (!bad.length) for (const [name, p] of previewProbes(cron.probes)) {
           try {
             const r = await fetch(`${pv.origin}${p.path}`, { headers: p.agent ? { "User-Agent": p.agent } : {}, redirect: p.location ? "manual" : "follow", signal: AbortSignal.timeout(60_000) });
