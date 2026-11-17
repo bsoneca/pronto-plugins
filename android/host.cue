@@ -221,7 +221,7 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 				platform: "android"
 				cmds: [
 					{do: "use tools.nu [run-mise]; 1..30 | each { \"y\" } | str join \"\\n\" | run-mise exec -- sdkmanager --licenses | ignore"},
-					{do: "use tools.nu [run-mise]; run-mise exec -- sdkmanager --install \"platform-tools\" \"platforms;android-36\" \"build-tools;36.0.0\" \"emulator\" \"\(_image)\""},
+					{do: "use tools.nu [run-mise]; let extra = (if $nu.os-info.name == \"macos\" { [\"emulator\" \"\(_image)\"] } else { [] }); run-mise exec -- sdkmanager --install \"platform-tools\" \"platforms;android-36\" \"build-tools;36.0.0\" ...$extra"},
 				]
 			}
 			build: android: {
@@ -243,7 +243,8 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 			// The phone's acceptance: the app's CUE scenarios (named in android/android.json) run on the
 			// emulator through real touches (android/terminal/scenarios.ts). Against PRONTO_BASE when it
 			// names a stack that is up, else against one it brings up on a slot (tests/slot.ts launch,
-			// weight 1) and takes down after. No scenarios named is a failure, never a pass.
+			// weight 1) and takes down after. No scenarios named is a failure, never a pass. PRONTO_ANDROID_EMULATOR=1 starts its own
+			// headless emulator for the run (android/terminal/emulator.ts) and ends it after.
 			if H.mode == "terminal" {
 				integrate: android: {
 					platform: "android"
@@ -251,7 +252,7 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 					// the release's code with the debug key and the driver on.
 					cmds: list.Concat([H._bundle, [
 						{do: "let type = ($env.PRONTO_ANDROID_BUILD? | default \"debug\"); \(H._gradle) $\":app:assemble(($type | str capitalize))\""},
-						{do: "use tools.nu [run-mise]; let type = ($env.PRONTO_ANDROID_BUILD? | default \"debug\"); let apk = $\"android/app/build/outputs/apk/($type)/app-($type).apk\"; let scenarios = (open android/android.json | get scenarios); let base = ($env.PRONTO_BASE? | default \"stack\"); let emulate = (if ($env.PRONTO_ANDROID_EMULATOR? | default \"\" | is-empty) { [] } else { [deno run -A --no-lock android/terminal/emulator.ts \"\(_image)\" \"--\"] }); run-mise exec -- ...$emulate deno run -A --no-lock android/terminal/scenarios.ts \(H.applicationId) $apk $base ...$scenarios"},
+						{do: "use tools.nu [run-mise]; let type = ($env.PRONTO_ANDROID_BUILD? | default \"debug\"); let apk = $\"android/app/build/outputs/apk/($type)/app-($type).apk\"; let scenarios = (open android/android.json | get scenarios); let base = ($env.PRONTO_BASE? | default \"stack\"); let emulate = (if ($env.PRONTO_ANDROID_EMULATOR? | default \"\") != \"1\" { [] } else { [deno run -A --no-lock android/terminal/emulator.ts \"\(_image)\" \"--\"] }); run-mise exec -- ...$emulate deno run -A --no-lock android/terminal/scenarios.ts \(H.applicationId) $apk $base ...$scenarios"},
 					]])
 				}
 			}

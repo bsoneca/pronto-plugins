@@ -108,7 +108,7 @@ existed, so an app that names none of them runs as it did.
    released`) and its bisect says "not bisected", since the bisect's check (`integrate@local`) runs no
    emulator. Where release-cron does not run on a Mac the step is skipped and the log says so; the
    release goes on. `RELEASE_CRON_DRY=android` runs only this step (no rehearsal, no preview) and ends
-   `dry` with its exit code, leaving `last` and the gap as they were and starting no bisect.
+   `dry` with its exit code, leaving `last` and the gap as they were and starting no bisect. A dry android run holds the app's lock while it runs, so a run cd starts meanwhile is skipped.
 4. **release**: `./saytw release@gcp` on the same tree, which reuses the rehearsal's local-gate
    pass and skips the rc preview unless a deploy-shaped file changed.
 5. **confirm**: the new revision takes 100% of the traffic and its live record is this tree's,

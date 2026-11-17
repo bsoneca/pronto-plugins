@@ -27,7 +27,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal, phases, androidSkip, androidFailed } from "./cron.js";
+import { schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 
 const here = new URL("./", import.meta.url).pathname;
@@ -708,25 +708,29 @@ try {
   if (own && !dry) step("rehearse");
   if (gate.code !== 0) end("failed", `the rehearsal failed (exit ${gate.code}): nothing released`, 1);
 
+  // 2a. The android step (releaseCron.android): the app's phone scenarios on an emulator, on a Mac, once the rehearsal
+  // passed. A failure ends the run as a failed rehearsal does, and its bisect says "not bisected" (cron.js).
+  if (androidRuns(cron.android, Deno.build.os)) {
+    active("android");
+    let failedNames: string[] = [];
+    const cmd = cron.android!.command;
+    // The credentials the bisect's env drops are not the step's either.
+    const env = { ...Deno.env.toObject(), STACK_WAIT_MINUTES: "525600" };
+    for (const k of ["GH_TOKEN", "GITHUB_TOKEN", "CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE", "GOOGLE_GHA_CREDS_PATH"]) delete env[k];
+    const phoneRun = await child(cmd[0], cmd.slice(1), dir, env, (l) => { failedNames = [...new Set([...failedNames, ...androidFailed(l)])]; });
+    step("android");
+    if (dry) end("dry", phoneRun.code === 0 ? "the android step passed" : androidWhy(phoneRun.code, failedNames), phoneRun.code === 0 ? 0 : 1);
+    if (phoneRun.code !== 0) end("failed", androidWhy(phoneRun.code, failedNames), 1);
+  } else {
+    const skip = androidSkip(cron.android, Deno.build.os);
+    if (skip) say(skip);
+    if (dry) end("dry", "the android step is not declared, or release-cron is not on a Mac: nothing run");
+  }
+
   // 2b. The release preview (releaseCron.target.preview): the release's whole stack in a namespace of its own on the
   // cluster, asked the probes through a port-forward before the release goes ahead, and removed after, whatever it
   // said. It proves the images, the migrations replayed over a fresh database and the config on the node before
   // any traffic moves; a preview that fails stops the release (nothing released).
-  // 2a. The android step (releaseCron.android): the app's phone scenarios on an emulator, on a Mac, once the rehearsal
-  // passed. A failure ends the run as a failed rehearsal does, and its bisect says "not bisected" (cron.js).
-  const phone = { rehearsal: own, slot: own, preview: !!target?.preview, android: !!cron.android };
-  if (cron.android && !phases(phone, Deno.build.os).includes("android")) say(androidSkip(cron.android, Deno.build.os)!);
-  if (phases(phone, Deno.build.os).includes("android")) {
-    active("android");
-    let failedNames: string[] = [];
-    let text = "";
-    const cmd = cron.android!.command;
-    const phoneRun = await child(cmd[0], cmd.slice(1), dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: "525600" }, (l) => { text += l + "\n"; failedNames = androidFailed(text); });
-    step("android");
-    if (dry) end("dry", `the android step ${phoneRun.code === 0 ? "passed" : `failed (exit ${phoneRun.code}): ${failedNames.join(", ")}`}`, phoneRun.code === 0 ? 0 : 1);
-    if (phoneRun.code !== 0) end("failed", `the android step failed (exit ${phoneRun.code}): ${failedNames.join(", ")}: nothing released`, 1);
-  } else if (dry) end("dry", "the android step is not declared, or release-cron is not on a Mac: nothing run");
-
   if (target?.preview) {
     const pv = target.preview;
     active("preview");

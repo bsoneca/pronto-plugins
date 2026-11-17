@@ -292,10 +292,10 @@ cases: {
 		{call: "cron.hookArgv", args: [{on: "released", command: ["deno", "run", "-A", "--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released"]}, "/state/wt", "brawl-chess", "c9ecd1f7a0b1"], expect: ["deno", "run", "-A", "--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released", "/state/wt", "brawl-chess", "c9ecd1f7a0b1"], why: "the dev flow's released hook, as Bonk Chess's and Book a time's releaseCron names it (PRONTO-1's board step, before hooks)"},
 		{call: "cron.hooksOf", args: [[{on: "released", command: ["a"]}, {on: "other", command: ["b"]}, {on: "released", command: ["c"]}], "released"], expect: [{on: "released", command: ["a"]}, {on: "released", command: ["c"]}], why: "in the order named"},
 	]}
-	"the android step is a phase only where it is declared and the run is on a Mac": {suite: "cron", steps: [
-		{call: "cron.phases", args: [{rehearsal: true, slot: true, preview: false, android: true}, "darwin"], expect: ["prepare", "slot", "rehearse", "android", "release", "confirm"], why: "after the rehearsal, before the release"},
-		{call: "cron.phases", args: [{rehearsal: true, slot: true, preview: true, android: false}, "darwin"], expect: ["prepare", "slot", "rehearse", "preview", "release", "confirm"], why: "none declared: none run"},
-		{call: "cron.phases", args: [{rehearsal: true, slot: true, preview: false, android: true}, "linux"], expect: ["prepare", "slot", "rehearse", "release", "confirm"], why: "the emulator needs a Mac"},
+	"the android step runs only where it is declared and the run is on a Mac": {suite: "cron", steps: [
+		{call: "cron.androidRuns", args: [{command: ["x"]}, "darwin"], expect: true},
+		{call: "cron.androidRuns", args: [null, "darwin"], expect: false, why: "none declared: none run"},
+		{call: "cron.androidRuns", args: [{command: ["x"]}, "linux"], expect: false, why: "the emulator needs a Mac"},
 	]}
 	"a declared android step is skipped, and the log says so, where the run is not on a Mac": {suite: "cron", steps: [
 		{call: "cron.androidSkip", args: [{command: ["x"]}, "linux"], expect: "android: skipped, release-cron runs on linux and the emulator needs a Mac; the release goes on without the phone's scenarios"},
@@ -307,7 +307,10 @@ cases: {
 		{call: "cron.androidFailed", args: ["pass  board  8.1 s"], expect: [], why: "none failed"},
 	]}
 	"a failed android step is its own kind of failure, and its bisect says it does not run it": {suite: "cron", steps: [
-		{call: "cron.signature", args: ["the android step failed (exit 1): sealed: nothing released", "FAIL  sealed  12.3 s  nothing matches #board2d"], holds: {kind: "android", names: ["sealed"]}},
+		{call: "cron.androidWhy", args: [2, []], expect: "the android step failed (exit 2): nothing released", why: "no scenario named: no empty \": :\""},
+		{call: "cron.androidWhy", args: [1, ["sealed", "fullscreen"]], expect: "the android step failed (exit 1): sealed, fullscreen: nothing released"},
+		{keep: "why"},
+		{call: "cron.signature", args: ["$why", "FAIL  sealed  12.3 s  nothing matches #board2d"], holds: {kind: "android", names: ["sealed"]}, why: "the driver's own why is read back as the android kind"},
 		{call: "cron.undecidable", args: [{kind: "android", names: ["sealed"]}, "", [], 0, 18], expect: "the android step runs on an emulator, which the bisect's check (integrate@local) does not: not bisected"},
 	]}
 }
