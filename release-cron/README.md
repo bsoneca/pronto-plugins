@@ -38,6 +38,8 @@ leaves at their defaults:
   <app dir> <what> (weight <w>)`) that marks the rehearsal's main slot. An app whose `verify@local` ends in
   `./saytw integrate@local` sets `holder: "./saytw integrate@local"` (read as
   `rehearsal.holder`, below).
+- For an app with a command target, the rehearsal's env carries `REHEARSE_LIVE=<the commit that serves>` (never for Cloud Run
+  apps), which `gcp/engine/verify.nu classify --live` reads when no `release@gcp` record names the live commit.
 
 ## What an app chooses
 

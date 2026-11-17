@@ -315,10 +315,12 @@ export def classify-failures [sections: list<list<string>>, live_names: list<str
 
 # classify-failures against the tree of the app's last live release (the commit of its release record),
 # read from the checkout at `dir`; unknown when there is no such release or its commit is not in the checkout.
-# Carries the commit and the scenarios the live tree defines.
-export def live-verdict [app: string, dir: string, sections: list<list<string>>]: nothing -> record {
+# Carries the commit and the scenarios the live tree defines. `live`, when not empty, is the commit
+# that serves, given by the caller (a release that is not release@gcp leaves no release record), and
+# is used in place of the record's.
+export def live-verdict [app: string, dir: string, sections: list<list<string>>, live: string = ""]: nothing -> record {
 	try {
-		let commit = (release-record live-commit $app)
+		let commit = if ($live | is-not-empty) { $live } else { release-record live-commit $app }
 		if $commit == null { error make {msg: "no known live release"} }
 		let have = (do { ^git -C $dir cat-file -e $"($commit)^{commit}" } | complete)
 		if $have.exit_code != 0 {
@@ -482,11 +484,12 @@ export def "main classify" [
 	app_dir: string        # The app's directory (its release.cue); its name is the release record's
 	...scenarios: string   # The names of the scenarios that failed
 	--app: string          # The release record's app name; the directory's name when absent
+	--live: string = ""    # The commit that serves, in place of the release record's (empty: the record's)
 ] {
 	let dir = ($app_dir | path expand)
 	let name = ($app | default ($dir | path basename))
 	let sections = [($scenarios | each {|n| $"✗ ($n) \(0s\) at step 0" })]
-	let v = (live-verdict $name $dir $sections)
+	let v = (live-verdict $name $dir $sections $live)
 	let regressions = if $v.verdict == "new" { [] } else if $v.verdict == "regression" { $scenarios | where {|n| $n in $v.live_names } } else { $scenarios }
 	{commit: $v.commit, new: $v.new, regressions: $regressions} | to json --raw
 }

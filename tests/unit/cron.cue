@@ -210,6 +210,13 @@ cases: {
 		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: ["a"]}, {ledger: [{commit: "c1", kind: "rehearsal", names: ["a"], verdict: "bad", at: "1"}]}], expect: "bad", why: "a verdict an earlier bisect ran for the same scenarios"},
 		{call: "cron.verdict", args: ["c1", {kind: "rehearsal", names: ["b"]}, {ledger: [{commit: "c1", kind: "rehearsal", names: ["a"], verdict: "good", at: "1"}]}], expect: "unknown", why: "a pass of other scenarios proves nothing of these"},
 	]}
+	"the rehearsal's env names the serving commit only for a command target": {suite: "cron", steps: [
+		{call: "cron.rehearsalEnv", args: [{A: "1"}, "abc123", true], expect: {A: "1", REHEARSE_LIVE: "abc123"}, why: "a command target with a serving commit"},
+		{call: "cron.rehearsalEnv", args: [{A: "1"}, null, true], expect: {A: "1"}, why: "the serving commit did not resolve"},
+		{call: "cron.rehearsalEnv", args: [{A: "1"}, "abc123", false], expect: {A: "1"}, why: "Cloud Run: the release record serves"},
+		{call: "cron.rehearsalEnv", args: [{A: "1", REHEARSE_LIVE: "stale"}, null, true], expect: {A: "1"}, why: "an inherited value is dropped"},
+		{call: "cron.rehearsalEnv", args: [{REHEARSE_LIVE: "stale"}, "abc123", true], expect: {REHEARSE_LIVE: "abc123"}, why: "and replaced"},
+	]}
 	"the search tests the middle of what the verdicts leave and names the first bad commit after the last good": {suite: "cron", steps: [
 		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}, {sha: "c"}, {sha: "d"}, {sha: "e"}], {e: "bad"}], expect: {test: {sha: "b"}}},
 		{call: "cron.next", args: [[{sha: "a"}, {sha: "b"}, {sha: "c"}, {sha: "d"}, {sha: "e"}], {b: "good", e: "bad"}], expect: {test: {sha: "c"}}},

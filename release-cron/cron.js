@@ -299,6 +299,12 @@ export const merges = (lines) => lines.filter(Boolean).map((l) => {
 export const evidenceOf = (rehearsals, strict = false) => strict || rehearsals.some((r) => r.mode !== undefined) ? rehearsals.filter((r) => r.mode === "release" && !(r.excused ?? []).length) : rehearsals;
 // Whether an app's configured rehearsal (releaseCron.rehearsal.command) runs in release mode, which tags its records:
 // then only its tagged records are evidence, whatever the history holds.
+// The rehearsal child's env: REHEARSE_LIVE names the commit that serves when the app's target is a command
+// (its release leaves no release record for the classifier to read); any inherited one is dropped first.
+export const rehearsalEnv = (env, live, isCommandTarget) => {
+  const { REHEARSE_LIVE: _, ...rest } = env;
+  return isCommandTarget && live ? { ...rest, REHEARSE_LIVE: live } : rest;
+};
 export const releaseModes = (command) => (command ?? []).includes("REHEARSE_RELEASE=1");
 export const verdict = (commit, sig, ev) => {
   const rehearsals = evidenceOf(ev.rehearsals ?? [], !!ev.strict), releases = ev.releases ?? [], ledger = ev.ledger ?? [];

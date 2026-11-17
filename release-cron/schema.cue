@@ -32,7 +32,8 @@ releaseCron: #Cron
 	// run waits until it holds a slot of the machine's pool (tests/slot.ts) whose owner line is `holder`: the `what` the
 	// app's rehearsal claims its main slot as. An app's verify@local may run generate, lint and test, then
 	// `./saytw integrate@local`, which claims it. `slot: false` runs it without waiting for a slot. GCP.rehearsal (the
-	// cloud's) replaces it. The top-level `holder` below is still read, as rehearsal.holder.
+	// cloud's) replaces it. The top-level `holder` below is still read, as rehearsal.holder. For an app with a command
+	// target the command's env carries REHEARSE_LIVE=<the commit that serves>, for a classifier that has no release record.
 	rehearsal: {
 		command: *["./saytw", "verify@local"] | [...string] | null
 		slot:    *true | bool
