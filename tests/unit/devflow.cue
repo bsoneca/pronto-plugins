@@ -64,7 +64,7 @@ cases: {
 		{call: "devflow.mayStart", args: [1, 1, "medium", "architect"], expect: {ok: false, why: "all 1 architect slots are busy"}},
 		{call: "devflow.mayStart", args: [9, 2, "urgent", "engineer"]}, {pick: ["ok"], expect: [true]},
 	]}
-	"a lane pulls a P1 bug first, then the issue that became Ready first": {suite: "devflow", steps: [
+	"a lane pulls a P0 bug, then a P1 bug, then the issue that became Ready first": {suite: "devflow", steps: [
 		{call: "devflow.pullOrder", args: [[
 			{key: "K-3", sequence: 3, jump: false, readyAt: "2026-11-12T10:00:00Z"},
 			{key: "K-9", sequence: 9, jump: false, readyAt: "2026-11-10T10:00:00Z"},
@@ -72,6 +72,12 @@ cases: {
 			{key: "K-1", sequence: 1, jump: false, readyAt: "2026-11-12T10:00:00Z"},
 		]]}, {pick: ["0.key", "1.key", "2.key", "3.key"], expect: ["K-5", "K-9", "K-1", "K-3"], why: "the jump first; then Ready time, whatever the number; a tie by number"},
 		{call: "devflow.pullOrder", args: [[{key: "K-2", sequence: 2, jump: false}, {key: "K-1", sequence: 1, jump: false, readyAt: "2026-11-12T10:00:00Z"}]]}, {pick: ["0.key"], expect: ["K-1"], why: "an issue with no Ready time comes last"},
+		{call: "devflow.pullOrder", args: [[
+			{key: "K-2", sequence: 2, jump: true, p0: false, readyAt: "2026-11-10T10:00:00Z"},
+			{key: "K-8", sequence: 8, jump: true, p0: true, readyAt: "2026-11-16T10:00:00Z"},
+			{key: "K-6", sequence: 6, jump: false, readyAt: "2026-11-11T10:00:00Z"},
+			{key: "K-4", sequence: 4, jump: false, readyAt: "2026-11-11T10:00:00Z"},
+		]]}, {pick: ["0.key", "1.key", "2.key", "3.key"], expect: ["K-8", "K-2", "K-4", "K-6"], why: "a P0 bug before a P1 bug even if it became Ready later; equal Ready times: the number decides"},
 		{call: "devflow.pullOrder", args: [[]], expect: []},
 	]}
 	"an issue became Ready at its latest move into Ready, else when it was made": {suite: "devflow", steps: [
@@ -106,7 +112,7 @@ cases: {
 		{call: "devflow.bugPlace", args: ["P3"], expect: {role: "backlog"}},
 		{call: "devflow.priorityOf", args: ["P4"], throws: "P0, P1, P2 or P3"},
 	]}
-	"a cycle is dated by the day in the flow's time zone": {suite: "devflow", steps: [
+	"a moment's day is the one in the flow's time zone": {suite: "devflow", steps: [
 		{call: "devflow.dayOf", args: ["2026-11-10T02:00:00Z", "America/Sao_Paulo"], expect: "2026-11-09"},
 		{call: "devflow.dayOf", args: ["2026-11-10T16:00:00Z", "America/Sao_Paulo"], expect: "2026-11-10"},
 	]}

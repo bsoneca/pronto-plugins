@@ -94,6 +94,8 @@ export function issueOf(item) {
     state: v[FIELDS.status]?.id ?? "",
     priority: v[FIELDS.priority]?.name ?? "none",
     description_html: c.body ?? "",
+    created_at: c.createdAt ?? undefined,
+    completed_at: c.closedAt ?? undefined,
     modules: v[FIELDS.module] ?? [],
     cycle: v[FIELDS.sprint]?.id ?? null,
     labels: (c.labels?.nodes ?? []).map((l) => l.id),

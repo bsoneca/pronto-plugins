@@ -249,9 +249,13 @@ merged: 5 today, 31 in 7 days (2026-11-17 5, 2026-11-16 9, ...)
 backlog: 40
 ```
 
-`merged` counts by the day each issue first reached a completed state, in the flow's `timeZone`
-(default `America/Sao_Paulo`). `queue.starvingDays` (default 3) is how long an issue may wait in Ready
-before `starving:` names it.
+`merged` counts, over the last `queue.mergedDays` (default 7), by the day each issue merged: its first
+move into a completed state after its last move out of one, read from its activity (one call for each
+issue whose `completed_at` is in the window, since Plane rewrites `completed_at` when the issue is later
+made Done), in the flow's `timeZone` (default `America/Sao_Paulo`). `queue.starvingDays` (default 3) is
+how long an issue may wait in Ready before `starving:` names it. A Ready issue the board cannot date, or
+an activity it cannot read, is an error: nothing is pulled on a guess. Once a lane is full, `pull` goes on
+only for a P0 (it starts past the slots); a P0 bug is pulled before a P1 bug.
 
 `status` also prints a `stuck:` line (and a `stuck` list in `--json`) for each issue in Implementing or Review that no work moves: no linked open pull request and no commit on a branch naming its key in the last `stuckHours` (default 6, devflow.cue), or a pull request whose ci failed or whose auto-merge is not armed, e.g. `stuck: PRONTO-444 Implementing 2d, no PR, no commits` (flow.js `stuckOf`).
 

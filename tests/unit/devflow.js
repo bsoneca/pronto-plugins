@@ -30,7 +30,7 @@ function flowOf(seed) {
     infra: ['infra'],
     design: ['design'],
     priorities: { P0: { plane: 'urgent' }, P1: { plane: 'high' }, P2: { plane: 'medium' }, P3: { plane: 'low' } },
-    queue: { starvingDays: seed.starvingDays ?? 3 },
+    queue: { starvingDays: seed.starvingDays ?? 3, mergedDays: 7 },
     stuckHours: 6,
   };
   if (seed.suggestions !== false) {
@@ -49,7 +49,7 @@ function flowOf(seed) {
 /** An in-memory Board of the seed: `inboxMade` (default true) makes the inbox project with its three
  * states (else it is absent, or with Plane's own five when `connect` makes it); `items` the inbox's
  * issues `{seq, state, title, html, created}`; `issues` the board's `{seq, name, state, module, priority, bug, ready, created, completed, moves}` (`ready`
- * an ISO time it moved into Ready, `moves` more `{state, at}`; the Ready queue's cases) and `now` the clock comments are stamped with;
+ * an ISO time it moved into Ready, `moves` more `{state, at}`; the Ready queue's cases) and `comments` `{html, at}` already on it, `cycles` `{name, issues: [seq]}` that cycles()/cycleIssues() answer, `failMoves` (stateMoves rejects) and `now` the clock comments are stamped with;
  * `modules` its modules; `failOnce` a write method that throws its first call (`issues` instead: the
  * inbox's list of issues, failing as Plane's 500 does, with a body); `failAfter` a method whose first
  * call does its work, writes included, then throws, as a lost answer does. Writes are logged. */
@@ -80,6 +80,7 @@ function boardOf(seed) {
       created_at: i.created, completed_at: i.completed, labels: i.bug ? ['l-bug'] : [],
     });
     moves[`i-acme-${i.seq}`] = [...(i.ready ? [{ to: 's-acme-Ready', at: i.ready }] : []), ...(i.moves ?? []).map((m) => ({ to: `s-acme-${m.state}`, at: m.at }))];
+    if (i.comments) comments[`i-acme-${i.seq}`] = i.comments.map((c) => ({ ...c }));
     if (i.module) (modIssues[i.module] ??= []).push(`i-acme-${i.seq}`);
   }
   for (const i of seed.items ?? []) {
@@ -128,7 +129,10 @@ function boardOf(seed) {
     },
     comment: (_p, iid, html) => { write('comment', iid); (comments[iid] ??= []).push({ html, at: seed.now ?? '2026-11-16T00:00:00Z' }); },
     comments: (_p, iid) => (comments[iid] ?? []).map((c) => ({ ...c })),
-    stateMoves: (_p, iid) => (moves[iid] ?? []).map((m) => ({ ...m })),
+    stateMoves: (_p, iid) => {
+      if (seed.failMoves) throw new Error('plane GET activities: 500');
+      return (moves[iid] ?? []).map((m) => ({ ...m }));
+    },
     moveIssue: (p, iid, state) => {
       const hit = issues[p].find((i) => i.id === iid);
       write('moveIssue', `${byId(p).identifier}-${hit.sequence_id}`, states[p].find((s) => s.id === state).name);
@@ -137,8 +141,8 @@ function boardOf(seed) {
     },
     links: () => [],
     // The cycle calls are logged too: a case can say that none was made.
-    cycles: () => { write('cycles'); return []; },
-    cycleIssues: () => { write('cycleIssues'); return []; },
+    cycles: () => { write('cycles'); return (seed.cycles ?? []).map((c, n) => ({ id: `c-${n}`, name: c.name })); },
+    cycleIssues: (_p, c) => { write('cycleIssues'); return issues['p-acme'].filter((i) => (seed.cycles?.[Number(c.slice(2))]?.issues ?? []).includes(i.sequence_id)).map((i) => ({ ...i })); },
     addToCycle: () => write('addToCycle'),
     createCycle: () => { write('createCycle'); return { id: 'c-1', name: 'x' }; },
   };
@@ -215,21 +219,26 @@ export async function pulls(seed, lane, n) {
   const now = new Date(seed.now);
   const ctx = await contextOf(f.board, flow, 'p-acme');
   const started = [];
-  for (let r = 0; r < n; r++) {
-    const o = await pullIssue(f.board, ctx, lane, { now, nonce: 'nonce-aaaa' });
-    started.push(o.outcome === 'started' ? o.lines[o.lines.length - 1].split(' ')[0] : o.outcome);
+  let error = null;
+  try {
+    for (let r = 0; r < n; r++) {
+      const o = await pullIssue(f.board, ctx, lane, { now: () => now, nonce: 'nonce-aaaa' });
+      started.push(o.outcome === 'started' ? o.lines[o.lines.length - 1].split(' ')[0] : o.outcome);
+    }
+  } catch (e) {
+    error = e.message;
   }
-  return { started, writes: f.take() };
+  return { started, error, writes: f.take() };
 }
 
 /** `status` as the verb builds it: the queue's JSON and the lines it prints after the slots and the stuck. */
-export async function queueState(seed, exact = false) {
+export async function queueState(seed) {
   seed = { now: DEFAULT_NOW, ...seed };
   const f = boardOf(seed);
   const flow = flowOf(seed);
   const ctx = await contextOf(f.board, flow, 'p-acme');
   const now = new Date(seed.now);
-  const s = await queueStatus(f.board, ctx, await f.board.issues('p-acme', true), now, exact);
+  const s = await queueStatus(f.board, ctx, await f.board.issues('p-acme', true), now);
   return { ...s, slotsLine: slotsLine(s), lines: queueLines(s, flow), writes: f.take() };
 }
 

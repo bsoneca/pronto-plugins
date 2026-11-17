@@ -6,14 +6,14 @@ package unit
 
 cases: {
 	"a lane pulls a P1 bug first, then the oldest in Ready, and touches no cycle": {suite: "devflow", steps: [
-		{call: "queue.pulls", args: [{issues: [
+		{call: "queue.pulls", args: [{cycles: [{name: "Sprint 8", issues: [3]}], issues: [
 			{seq: 5, name: "fix crash", state: "Ready", module: "aprende", priority: "high", bug: true, ready: "2026-11-16T10:00:00Z"},
 			{seq: 3, name: "old", state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"},
 			{seq: 2, name: "newer", state: "Ready", module: "aprende", ready: "2026-11-12T10:00:00Z"},
 		]}, "engineer", 3]}, {pick: ["started", "writes"], expect: [
 			["ACME-5", "ACME-3", "ACME-2"],
 			["moveIssue ACME-5 Implementing", "comment i-acme-5", "moveIssue ACME-3 Implementing", "comment i-acme-3", "moveIssue ACME-2 Implementing", "comment i-acme-2"],
-		], why: "the writes are the moves and their comments: no cycles, cycleIssues or addToCycle call"},
+		], why: "an open Sprint 8 holds #3 and cycles() says so, but no verb reads or writes a cycle: the writes are the moves and their comments"},
 	]}
 	"priority and number do not order the queue: a later Ready issue never comes before an earlier one": {suite: "devflow", steps: [
 		{call: "queue.pulls", args: [{issues: [
@@ -70,21 +70,41 @@ cases: {
 		{call: "queue.queueState", args: [{now: "2026-11-17T15:00:00Z", starvingDays: 5, issues: [{seq: 3, state: "Ready", module: "aprende", ready: "2026-11-13T12:00:00Z"}]}]}, {pick: ["starving"], expect: [[]]},
 		{call: "queue.queueState", args: [{now: "2026-11-17T15:00:00Z", starvingDays: 3, issues: [{seq: 3, state: "Ready", module: "aprende", ready: "2026-11-14T15:00:00Z"}]}]}, {pick: ["starving"], expect: [[]], why: "exactly 3 days is not over 3"},
 	]}
-	"status counts merges by completed_at, and by the day each merged when asked to read the moves": {suite: "devflow", steps: [
+	"status counts merges by the day each merged, not by completed_at, which a later flip rewrites": {suite: "devflow", steps: [
 		{call: "queue.queueState", args: [{now: "2026-11-17T15:00:00Z", issues: [
 			{seq: 1, state: "Merged", module: "aprende", completed: "2026-11-17T12:00:00Z"},
 			{seq: 2, state: "Merged", module: "aprende", completed: "2026-11-16T20:00:00Z"},
 			{seq: 3, state: "Live", module: "aprende", completed: "2026-11-12T12:00:00Z"},
 			{seq: 4, state: "Done", module: "aprende", completed: "2026-11-17T14:00:00Z", moves: [{state: "Merged", at: "2026-11-10T10:00:00Z"}, {state: "Done", at: "2026-11-17T14:00:00Z"}]},
 			{seq: 5, state: "Done", module: "aprende", completed: "2026-11-05T14:00:00Z"},
-		]}]}, {pick: ["merged", "writes"], expect: [{today: 2, week: 4, byDay: [{day: "2026-11-17", count: 2}, {day: "2026-11-16", count: 1}, {day: "2026-11-12", count: 1}]}, []], why: "no call for a move: 4 counts on the day its flip rewrote completed_at; 5 is older than a week"},
-		{call: "queue.queueState", args: [{now: "2026-11-17T15:00:00Z", issues: [
-			{seq: 1, state: "Merged", module: "aprende", completed: "2026-11-17T12:00:00Z"},
-			{seq: 2, state: "Merged", module: "aprende", completed: "2026-11-16T20:00:00Z"},
-			{seq: 3, state: "Live", module: "aprende", completed: "2026-11-12T12:00:00Z"},
-			{seq: 4, state: "Done", module: "aprende", completed: "2026-11-17T14:00:00Z", moves: [{state: "Merged", at: "2026-11-10T10:00:00Z"}, {state: "Done", at: "2026-11-17T14:00:00Z"}]},
-			{seq: 5, state: "Done", module: "aprende", completed: "2026-11-05T14:00:00Z"},
-		]}, true]}, {pick: ["merged"], expect: [{today: 1, week: 3, byDay: [{day: "2026-11-17", count: 1}, {day: "2026-11-16", count: 1}, {day: "2026-11-12", count: 1}]}], why: "4 merged on the 10th and was flipped Done today: not this week's"},
+			{seq: 6, state: "Done", module: "aprende", completed: "2026-11-17T13:00:00Z", moves: [{state: "Merged", at: "2026-11-10T10:00:00Z"}, {state: "Review", at: "2026-11-14T10:00:00Z"}, {state: "Merged", at: "2026-11-15T10:00:00Z"}, {state: "Done", at: "2026-11-17T13:00:00Z"}]},
+		]}]}, {pick: ["merged", "writes"], expect: [{today: 1, week: 4, byDay: [{day: "2026-11-17", count: 1}, {day: "2026-11-16", count: 1}, {day: "2026-11-15", count: 1}, {day: "2026-11-12", count: 1}]}, []], why: "4 merged on the 10th and was flipped Done today: not this week's; 6 was sent back and merged again on the 15th; 5 is older than a week"},
+		{call: "queue.queueState", args: [{now: "2026-11-17T15:00:00Z", issues: [{seq: 1, state: "Merged", module: "aprende", completed: "2026-11-17T12:00:00Z"}]}]}, {pick: ["lines.3"], expect: ["merged: 1 today, 1 in 7 days (2026-11-17 1)"], why: "the line names the window queue.mergedDays sets"},
+	]}
+	"a Ready issue the board cannot date, or whose moves cannot be read, is an error and nothing is written": {suite: "devflow", steps: [
+		{call: "queue.pulls", args: [{issues: [{seq: 1, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"}], failMoves: true}, "engineer", 1]}, {pick: ["started", "error", "writes"], expect: [[], "plane GET activities: 500", []]},
+		{call: "queue.pulls", args: [{issues: [{seq: 1, state: "Ready", module: "aprende"}]}, "engineer", 1]}, {pick: ["error", "writes"], expect: ["ACME-1 is Ready but the board gives neither a move into Ready nor a creation time", []], why: "no silent place in the queue"},
+	]}
+	"a P0 starts past a full lane, a P0 bug before a P1 bug, and a claim another session made first is passed over": {suite: "devflow", steps: [
+		{call: "queue.pulls", args: [{team: {engineers: 1, sre: 1, architect: 1, product: 1}, issues: [
+			{seq: 1, state: "Implementing", module: "aprende"},
+			{seq: 2, name: "p1 bug", state: "Ready", module: "aprende", priority: "high", bug: true, ready: "2026-11-10T10:00:00Z"},
+			{seq: 3, name: "p0 feature", state: "Ready", module: "aprende", priority: "urgent", ready: "2026-11-16T10:00:00Z"},
+			{seq: 4, name: "p3", state: "Ready", module: "aprende", priority: "low", ready: "2026-11-11T10:00:00Z"},
+		]}, "engineer", 1]}, {pick: ["started", "writes"], expect: [["ACME-3"], ["moveIssue ACME-3 Implementing", "comment i-acme-3"]], why: "the lane is full: the P1 bug waits, the P3 is not tried, the P0 feature starts past the slots"},
+		{call: "queue.pulls", args: [{team: {engineers: 1, sre: 1, architect: 1, product: 1}, issues: [
+			{seq: 1, state: "Implementing", module: "aprende"},
+			{seq: 2, name: "p1 bug", state: "Ready", module: "aprende", priority: "high", bug: true, ready: "2026-11-10T10:00:00Z"},
+			{seq: 3, name: "p0 bug", state: "Ready", module: "aprende", priority: "urgent", bug: true, ready: "2026-11-16T10:00:00Z"},
+		]}, "engineer", 1]}, {pick: ["started"], expect: [["ACME-3"]], why: "a P0 bug that became Ready after a P1 bug still goes first, and past the full lane"},
+		{call: "queue.pulls", args: [{issues: [
+			{seq: 2, name: "head", state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z", comments: [{html: "<p>claim aaaaaaaa-other</p>", at: "2026-11-17T14:59:00Z"}]},
+			{seq: 3, name: "next", state: "Ready", module: "aprende", ready: "2026-11-11T10:00:00Z"},
+		]}, "engineer", 1]}, {pick: ["started"], expect: [["ACME-3"]], why: "another session's claim on the head issue is earlier than ours: it keeps it, and the pull starts the next"},
+		{call: "queue.pulls", args: [{issues: [
+			{seq: 6, state: "Ready", module: "aprende", ready: "2026-11-13T12:00:00Z"},
+			{seq: 4, state: "Ready", module: "aprende", ready: "2026-11-13T12:00:00Z"},
+		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-4", "ACME-6"]], why: "the same Ready time: the number decides"},
 	]}
 	"file puts a bug where its priority says and joins no cycle": {suite: "devflow", steps: [
 		{call: "queue.filed", args: [{}, {title: "crash", app: "aprende", bug: true, priority: "P1"}]}, {pick: ["key", "state", "module", "madeState", "priority", "labels.length", "writes"], expect: [

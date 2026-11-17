@@ -65,6 +65,8 @@ devFlow: #DevFlow
 	// lead looks at what is in the way.
 	queue: {
 		starvingDays: *3 | (int & >=1)
+		// The window `status` counts merges over, in days.
+		mergedDays: *7 | (int & >=1)
 	}
 	// The time zone the days `status` counts merges by, and the inbox's dates, are in.
 	timeZone: *"America/Sao_Paulo" | string

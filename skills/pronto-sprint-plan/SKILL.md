@@ -41,11 +41,13 @@ issues, `merged:` by day, the open issues by state, the Backlog's size and the i
    owner must do (then move it back to the Backlog with the question, below). Say what you found.
 3. **Watch what is stuck.** A `stuck:` line is an issue holding a slot that no work moves. Tell its
    session (SendMessage), or free the slot by moving the issue back (`move . PRONTO-<n> Ready` or
-   `Backlog`) when its session is gone.
+   `Backlog`) when its session is gone. An issue moved back to Ready queues again from that moment, so it
+   goes to the back of its lane's queue.
 4. **File what the owner approved.** When `status` says `Approved, to file: N`, run
    `pronto-devflow approve . SUGEST-<n>` for each (it files a link-only issue in the Backlog), and
    tell the owner how many suggestions are waiting and how many are stale.
-5. **Report.** Tell the owner in a few lines what merged (`merged: N today, M in 7 days`, by day),
+5. **Report.** Tell the owner in a few lines what merged (`merged: N today, M in 7 days`, by day: each issue counted on the day it merged, read from its
+   activity, not Plane's `completed_at`, which a later flip rewrites),
    what went Live, which flags went on (Done), what starves or is stuck and what you did about it.
    Do not wait for an answer.
 6. **Back to 1.** The loop never ends while the board has work. With the Backlog empty and nothing in

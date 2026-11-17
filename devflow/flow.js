@@ -131,12 +131,12 @@ export function jumps(priority, bug, urgent = ["urgent", "high"]) {
   return !!bug && urgent.includes(priority);
 }
 
-/** The order a lane pulls its Ready issues (PRONTO-658): the jumping bugs first, then first in, first
- * out by when each became Ready, then by number. `issues` are `{key, sequence, jump, readyAt}`; one
+/** The order a lane pulls its Ready issues (PRONTO-658): the jumping bugs first (a P0's before a P1's), then first in, first
+ * out by when each became Ready, then by number. `issues` are `{key, sequence, jump, p0, readyAt}`; one
  * with no `readyAt` comes last of its kind. */
 export function pullOrder(issues) {
   const t = (i) => (Number.isFinite(Date.parse(i.readyAt ?? "")) ? Date.parse(i.readyAt) : Infinity);
-  return [...issues].sort((a, b) => Number(!!b.jump) - Number(!!a.jump) || (t(a) < t(b) ? -1 : t(a) > t(b) ? 1 : 0) || a.sequence - b.sequence);
+  return [...issues].sort((a, b) => Number(!!b.jump && !!b.p0) - Number(!!a.jump && !!a.p0) || Number(!!b.jump) - Number(!!a.jump) || (t(a) < t(b) ? -1 : t(a) > t(b) ? 1 : 0) || a.sequence - b.sequence);
 }
 
 /** What merged and when, by day: `times` are ISO moments an issue merged. `today` and `week` count the

@@ -29,6 +29,8 @@ export interface Ctx {
   slots: Record<string, number>;
   priorities: Record<string, string>;
   bugLabel: string | null;
+  /** Whether the modules and labels were read (a lane and a bug label need them). */
+  lanes: boolean;
   stateId(name: string): string;
   roleId(role: Role): string;
   stateName(id: string): string;
@@ -52,7 +54,8 @@ export async function contextOf(board: Board, flow: DevFlow, project: string, la
     states,
     slots: { engineer: flow.team.engineers, SRE: flow.team.sre, architect: flow.team.architect },
     priorities: Object.fromEntries(Object.entries(flow.priorities).map(([p, v]) => [p, v.plane])),
-    bugLabel: labels.find((l) => l.name === "bug")?.id ?? null,
+    bugLabel: labels.find((l) => l.name.toLowerCase() === "bug")?.id ?? null,
+    lanes,
     stateId,
     roleId: (r) => stateId(nameOf(flow.roles, r)),
     stateName,
@@ -72,28 +75,34 @@ export interface Queued {
   /** The short age in Ready: "3h", "2d". */
   age: string;
   jump: boolean;
+  /** The board's P0: it starts past the slots (flow.js mayStart). */
+  urgent: boolean;
   /** "P1" or "P0" of a jumping bug, else null. */
   priority: string | null;
   starving: boolean;
 }
 
-/** The Ready issues of every lane in the order they are pulled: the jumping bugs, then the oldest in Ready. */
-export async function readyQueue(board: Board, ctx: Ctx, all: Issue[], now: Date): Promise<Queued[]> {
-  const ready = all.filter((i) => ctx.roleAt(i.state) === "ready");
+/** The Ready issues in the order they are pulled: a jumping bug (P0's first), then the oldest in Ready.
+ * `lane` keeps one lane's alone, before any activity is read. A Ready issue the board cannot date (no
+ * move into Ready and no creation time) is an error, never a silent place in the queue. */
+export async function readyQueue(board: Board, ctx: Ctx, all: Issue[], now: Date, lane?: string): Promise<Queued[]> {
+  if (!ctx.lanes) throw new Error("readyQueue needs a context read with its lanes (contextOf(..., true))");
+  const ready = all.filter((i) => ctx.roleAt(i.state) === "ready" && (!lane || ctx.laneOf(i) === lane));
   const readyId = ctx.roleId("ready");
   const urgent = [ctx.priorities.P0, ctx.priorities.P1];
   const pName = (word: string) => Object.entries(ctx.priorities).find(([, w]) => w === word)?.[0] ?? null;
   const queued = await pool(ready, 8, async (i): Promise<Queued> => {
     const moves = board.stateMoves ? await board.stateMoves(ctx.project, i.id) : [];
     const readyAt = readySince(moves, readyId, i.created_at ?? null);
+    if (!readyAt) throw new Error(`${ctx.key(i)} is Ready but the board gives neither a move into Ready nor a creation time`);
     const bug = !!ctx.bugLabel && (i.labels ?? []).includes(ctx.bugLabel);
     const jump = jumps(i.priority, bug, urgent);
     return {
-      key: ctx.key(i), name: i.name, sequence: i.sequence_id, lane: ctx.laneOf(i), readyAt, age: ageOf(readyAt, now), jump,
+      key: ctx.key(i), name: i.name, sequence: i.sequence_id, lane: ctx.laneOf(i), readyAt, age: ageOf(readyAt, now), jump, urgent: i.priority === ctx.priorities.P0,
       priority: jump ? pName(i.priority) : null, starving: readyAt ? staleOf(readyAt, now, ctx.flow.queue.starvingDays) : false,
     };
   });
-  return pullOrder(queued) as Queued[];
+  return pullOrder(queued.map((q) => ({ ...q, p0: q.jump && q.urgent }))) as Queued[];
 }
 
 export interface Outcome { outcome: "started" | "lost" | "waits"; message: string }
@@ -102,7 +111,7 @@ export interface Outcome { outcome: "started" | "lost" | "waits"; message: strin
  * is still Ready, and only for the pull whose claim came first (flow.js claimWinner): a pull that lost
  * answers "lost" and leaves the issue to the other (PRONTO-341). `now` and `nonce` are injected: the
  * claim compares comments' times against the clock. */
-export async function start(board: Board, ctx: Ctx, k: string, opts: { claim?: boolean; now: Date; nonce?: string }): Promise<Outcome> {
+export async function start(board: Board, ctx: Ctx, k: string, opts: { claim?: boolean; now: () => Date; nonce?: string }): Promise<Outcome> {
   const claim = opts.claim ?? false;
   const [issue, all] = await Promise.all([board.issue(k), board.issues(ctx.project, true)]);
   if (claim && ctx.roleAt(issue.state) !== "ready") return { outcome: "lost", message: `${k} is no longer Ready (${ctx.stateName(issue.state)}): another pull took it` };
@@ -116,7 +125,7 @@ export async function start(board: Board, ctx: Ctx, k: string, opts: { claim?: b
   await board.moveIssue(ctx.project, issue.id, ctx.stateId(implementing));
   await board.comment(ctx.project, issue.id, `<p>${esc(from)} → ${esc(implementing)}: ${esc(may.why)}${claim ? ` (${claimText(nonce)})` : ""}</p>`);
   if (claim) {
-    const first = claimWinner(await board.comments(ctx.project, issue.id), opts.now.toISOString());
+    const first = claimWinner(await board.comments(ctx.project, issue.id), opts.now().toISOString());
     if (first !== nonce) return { outcome: "lost", message: `${k} was pulled by another session at the same moment, which keeps it` };
   }
   return { outcome: "started", message: `${k} ${from} → ${implementing} (${may.why})` };
@@ -124,15 +133,20 @@ export async function start(board: Board, ctx: Ctx, k: string, opts: { claim?: b
 
 /** The lane's first Ready issue in the queue, started; one another session took meanwhile is passed
  * over for the next. A lane with no free slot stops there: its next issue would wait the same. */
-export async function pull(board: Board, ctx: Ctx, lane: string, opts: { now: Date; nonce?: string }): Promise<{ outcome: "started" | "waits" | "empty"; lines: string[] }> {
+export async function pull(board: Board, ctx: Ctx, lane: string, opts: { now: () => Date; nonce?: string }): Promise<{ outcome: "started" | "waits" | "empty"; lines: string[] }> {
   if (!(lane in ctx.slots)) throw new Error(`a lane is engineer, SRE or architect, not ${lane}`);
-  const queue = (await readyQueue(board, ctx, await board.issues(ctx.project, true), opts.now)).filter((q) => q.lane === lane);
+  const queue = await readyQueue(board, ctx, await board.issues(ctx.project, true), opts.now(), lane);
   const lines: string[] = [];
+  let full = false;
   for (const q of queue) {
+    // Once the lane is full only a P0 may go on: it starts past the slots (flow.js mayStart).
+    if (full && !q.urgent) continue;
     const r = await start(board, ctx, q.key, { claim: true, ...opts });
     lines.push(r.message);
-    if (r.outcome !== "lost") return { outcome: r.outcome, lines };
+    if (r.outcome === "started") return { outcome: "started", lines };
+    if (r.outcome === "waits") full = true;
   }
+  if (full) return { outcome: "waits", lines };
   lines.push(`nothing Ready for ${lane}`);
   return { outcome: "empty", lines };
 }
@@ -163,19 +177,20 @@ export interface QueueStatus {
   backlog: number;
 }
 
-/** When an issue merged, exactly: its first move into a completed state, which the board keeps where
- * `completed_at` does not (Plane rewrites it when the issue is later made Done, moving a merge to the
- * day of its flip). One read an issue, so `status` does it only when asked (`exact`). Without moves,
- * `completed_at`. */
+/** When an issue merged: its first move into a completed state after its last move out of one (an
+ * issue sent back and merged again merged at the second). The board's `completed_at` is not it: Plane
+ * rewrites it when the issue is later made Done, moving a merge to the day of its flip. One read an
+ * issue, so only for those whose `completed_at` is within the window. Without moves, `completed_at`. */
 async function mergedAt(board: Board, ctx: Ctx, i: Issue): Promise<string | null> {
   const completed = new Set(ctx.states.filter((s) => s.group === "completed").map((s) => s.id));
-  const moves = board.stateMoves ? (await board.stateMoves(ctx.project, i.id)).filter((m) => completed.has(m.to)) : [];
-  const first = moves.map((m) => Date.parse(m.at)).filter(Number.isFinite).sort((a, b) => a - b)[0];
-  return first != null ? new Date(first).toISOString() : i.completed_at ?? null;
+  const moves = board.stateMoves ? (await board.stateMoves(ctx.project, i.id)).map((m) => ({ ...m, t: Date.parse(m.at) })).filter((m) => Number.isFinite(m.t)).sort((a, b) => a.t - b.t) : [];
+  const lastOut = moves.map((m, n) => (completed.has(m.to) ? -1 : n)).reduce((a, b) => Math.max(a, b), -1);
+  const first = moves.slice(lastOut + 1).find((m) => completed.has(m.to));
+  return first ? new Date(first.t).toISOString() : i.completed_at ?? null;
 }
 
 /** The queue per lane, what starves, the slots, merges by day and the open issues by state. */
-export async function queueStatus(board: Board, ctx: Ctx, all: Issue[], now: Date, exact = false): Promise<QueueStatus> {
+export async function queueStatus(board: Board, ctx: Ctx, all: Issue[], now: Date): Promise<QueueStatus> {
   const queued = await readyQueue(board, ctx, all, now);
   const lanes = Object.keys(ctx.slots);
   const busy = all.filter((i) => ctx.roleAt(i.state) === "implementing");
@@ -183,16 +198,16 @@ export async function queueStatus(board: Board, ctx: Ctx, all: Issue[], now: Dat
     .filter((s) => roles.includes(roleOf(ctx.flow.roles, s.name) as Role))
     .map((s) => [s.name, all.filter((i) => ctx.stateName(i.state) === s.name).map((i) => `${ctx.key(i)} ${i.name}`)])
     .filter(([, v]) => (v as string[]).length));
-  // Merges of the last 7 days: an issue whose completed_at is older cannot have merged within them.
-  // By `completed_at` (no calls), which a later move to Done rewrites; `exact` reads each issue's moves.
+  // Merges within `queue.mergedDays`: an issue whose completed_at is older cannot have merged within them.
+  const days = ctx.flow.queue.mergedDays;
   const doneRoles = ["merged", "live", "done"];
-  const recent = all.filter((i) => doneRoles.includes(ctx.roleAt(i.state) ?? "") && (i.completed_at ? now.getTime() - Date.parse(i.completed_at) < 7 * DAY : false));
-  const times = (exact ? await pool(recent, 8, (i) => mergedAt(board, ctx, i)) : recent.map((i) => i.completed_at ?? null)).filter((t): t is string => !!t);
+  const recent = all.filter((i) => doneRoles.includes(ctx.roleAt(i.state) ?? "") && (i.completed_at ? now.getTime() - Date.parse(i.completed_at) < days * DAY : false));
+  const times = (await pool(recent, 8, (i) => mergedAt(board, ctx, i))).filter((t): t is string => !!t);
   return {
     slots: Object.fromEntries(lanes.map((l) => [l, { of: ctx.slots[l], on: busy.filter((i) => ctx.laneOf(i) === l).map(ctx.key) }])),
     queue: Object.fromEntries(lanes.map((l) => [l, queued.filter((q) => q.lane === l).map((q) => ({ key: q.key, title: q.name, age: q.age, readyAt: q.readyAt, jump: q.jump, priority: q.priority, starving: q.starving }))])),
     starving: queued.filter((q) => q.starving).map((q) => ({ key: q.key, age: q.age })),
-    merged: mergedByDay(times, now, ctx.flow.timeZone),
+    merged: mergedByDay(times, now, ctx.flow.timeZone, days),
     issues: byState(["refine", "ready", "implementing", "review"]),
     backlog: all.filter((i) => ctx.roleAt(i.state) === "backlog").length,
   };
@@ -209,7 +224,7 @@ export function queueLines(s: QueueStatus, flow: DevFlow): string[] {
     out.push(`  ready to pull, ${l}: ${is.length ? is.map((i) => `${i.key} ${i.title} (${i.jump ? `${i.priority} bug, ` : ""}${i.age})`).join("; ") : "none"}`);
   }
   if (s.starving.length) out.push(`starving: ${s.starving.map((q) => `${q.key} Ready ${q.age} (over ${flow.queue.starvingDays}d)`).join("; ")}`);
-  out.push(`merged: ${s.merged.today} today, ${s.merged.week} in 7 days${s.merged.byDay.length ? ` (${s.merged.byDay.map((d) => `${d.day} ${d.count}`).join(", ")})` : ""}`);
+  out.push(`merged: ${s.merged.today} today, ${s.merged.week} in ${flow.queue.mergedDays} days${s.merged.byDay.length ? ` (${s.merged.byDay.map((d) => `${d.day} ${d.count}`).join(", ")})` : ""}`);
   for (const [state, is] of Object.entries(s.issues)) if (state !== nameOf(flow.roles, "ready")) out.push(`  open, ${state}: ${is.join("; ")}`);
   out.push(`backlog: ${s.backlog}`);
   return out;

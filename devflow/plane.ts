@@ -23,6 +23,7 @@ export class Plane implements Board {
       let failure: number | "timeout" | "network";
       let text = "";
       let ok = false;
+      let retryAfter: number | null = null;
       try {
         const r = await fetch(url, {
           method,
@@ -32,6 +33,8 @@ export class Plane implements Board {
         });
         text = await r.text();
         ok = r.ok;
+        const ra = Number(r.headers.get("retry-after"));
+        retryAfter = Number.isFinite(ra) && ra > 0 ? ra * 1000 : null;
         failure = r.status;
       } catch (e) {
         failure = e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError") ? "timeout" : "network";
@@ -45,7 +48,9 @@ export class Plane implements Board {
           throw new Error(`${method} ${path}: bad JSON (${failure})`);
         }
       }
-      const wait = askAgain(method, failure, attempt);
+      let wait = askAgain(method, failure, attempt);
+      // A 429 of a read says how long to wait: wait it out (at most 2 minutes), not a guess.
+      if (wait !== null && failure === 429 && method === "GET" && retryAfter) wait = Math.min(retryAfter, 120_000);
       if (wait === null) throw new Error(`plane ${method} ${path}: ${failure} ${text.slice(0, 300)}`);
       await new Promise((ok) => setTimeout(ok, wait));
     }
@@ -104,16 +109,19 @@ export class Plane implements Board {
     this.call("POST", `${this.p(project)}/cycles/`, { name, start_date: start, end_date: end, project_id: project, owned_by: owner }) as Promise<Cycle>;
   cycleIssues = (project: string, cycle: string) => this.all<Issue>(`${this.p(project)}/cycles/${cycle}/cycle-issues/?fields=${LIGHT}`);
   removeFromCycle = (project: string, cycle: string, issue: string) => this.call("DELETE", `${this.p(project)}/cycles/${cycle}/cycle-issues/${issue}/`);
-  // Plane refuses to edit a cycle whose end has passed: it is moved while open (flow.js sprintEndFor).
+  // Plane refuses to edit a cycle whose end has passed. Nothing in the verbs calls this any more (PRONTO-658).
   setCycleEnd = (project: string, cycle: string, end: string) => this.call("PATCH", `${this.p(project)}/cycles/${cycle}/`, { end_date: end });
   addToCycle = (project: string, cycle: string, issues: string[]) => this.call("POST", `${this.p(project)}/cycles/${cycle}/cycle-issues/`, { issues });
 
   /** An issue's moves into each state, from its activity: the rows whose field is `state` carry the
-   * state's id (new_identifier) and when (created_at). One read an issue; Plane's order is not relied on. */
-  stateMoves = async (project: string, id: string): Promise<{ to: string; at: string }[]> =>
-    (await this.all<{ field?: string | null; new_identifier?: string | null; created_at: string }>(`${this.p(project)}/issues/${id}/activities/`))
-      .filter((a) => a.field === "state" && a.new_identifier)
-      .map((a) => ({ to: a.new_identifier!, at: a.created_at }));
+   * state's id (new_identifier) and when (created_at). One read an issue; Plane's order is not relied on.
+   * Every issue's activity holds at least its creation, so an empty list is a failed read, never "no
+   * moves": it throws, as a silent fallback would date every issue by its creation. */
+  stateMoves = async (project: string, id: string): Promise<{ to: string; at: string }[]> => {
+    const rows = await this.all<{ field?: string | null; new_identifier?: string | null; created_at: string }>(`${this.p(project)}/issues/${id}/activities/`);
+    if (!rows.length) throw new Error(`plane: the activity of issue ${id} is empty, though it holds at least its creation`);
+    return rows.filter((a) => a.field === "state" && a.new_identifier).map((a) => ({ to: a.new_identifier!, at: a.created_at }));
+  };
 
   issues = (project: string, light = false) => this.all<Issue>(`${this.p(project)}/issues/${light ? `?fields=${LIGHT}` : ""}`);
   /** An issue by its key, PRONTO-123. */

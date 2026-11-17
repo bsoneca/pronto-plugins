@@ -2,7 +2,7 @@
 // step of the flow, its rule decided in flow.js and its queue logic in queue.ts, so a session never
 // moves an issue by hand. There are no sprints (PRONTO-658): Ready is a queue, first in first out,
 // and a bug at P1 jumps it.
-//   board.ts status <repo> [--json] [--exact-merges]                     the slots busy, what is stuck, each lane's Ready queue with ages, what starves, merges by day (--exact-merges reads each one's moves: one call an issue), the open issues by state
+//   board.ts status <repo> [--json]                     the slots busy, what is stuck, each lane's Ready queue with ages, what starves, merges by day (read from each merged issue's moves: one call an issue), the open issues by state
 //   board.ts start <repo> <KEY>                         Implementing, if its lane (engineer, SRE or architect) has a slot (a P0 always)
 //   board.ts pull <repo> [--lane engineer|SRE|architect]          start the lane's first issue in the Ready queue
 //   board.ts move <repo> <KEY> <State> [--why <text>]   Refine, Ready, Backlog or Cancelled, by the repository's name for the state or its role (the others are the hooks')
@@ -22,7 +22,7 @@ const GONE: Record<string, string> = {
   next: "sprints are gone (PRONTO-658): move . <KEY> Ready puts an issue in the queue, and each lane pulls the oldest",
   close: "sprints are gone (PRONTO-658): status shows what merged by day",
 };
-if (verb in GONE) {
+if (verb && Object.hasOwn(GONE, verb)) {
   console.error(GONE[verb]);
   Deno.exit(2);
 }
@@ -84,7 +84,7 @@ async function status() {
     const pr = await openPr(i);
     return stuckOf({ key: key(i), state: ctx.stateName(i.state), since: i.updated_at ?? "", pr, commit: pr ? null : await lastCommit(key(i)) }, now, flow!.stuckHours);
   }))).filter((s) => s !== null);
-  const q = await queueStatus(board, ctx, all, now, rest.includes("--exact-merges"));
+  const q = await queueStatus(board, ctx, all, now);
   const suggestions = await inboxStatus(board, flow!, inbox, all.map((i) => i.name), now);
   if (rest.includes("--json")) return console.log(JSON.stringify(suggestions ? { ...q, stuck, suggestions } : { ...q, stuck }, null, 2));
   console.log(slotsLine(q));
@@ -95,7 +95,7 @@ async function status() {
 }
 
 async function start(k: string) {
-  const r = await startIssue(board, await contextOf(board, flow!, project), own(k), { now: new Date() });
+  const r = await startIssue(board, await contextOf(board, flow!, project), own(k), { now: () => new Date() });
   console.log(r.message);
   if (r.outcome === "waits") Deno.exit(1);
 }
@@ -103,7 +103,7 @@ async function start(k: string) {
 /** The lane's first Ready issue in the queue, started. What a session does when its pull request
  * opens (review holds no slot), or when it finishes an issue. */
 async function pull(lane: string) {
-  const r = await pullIssue(board, await contextOf(board, flow!, project), lane, { now: new Date() });
+  const r = await pullIssue(board, await contextOf(board, flow!, project), lane, { now: () => new Date() });
   for (const l of r.lines) console.log(l);
   if (r.outcome === "waits") Deno.exit(1);
 }
