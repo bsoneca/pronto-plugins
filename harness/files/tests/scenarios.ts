@@ -19,6 +19,7 @@ import { devices, request, type APIRequestContext, type BrowserContext, type CDP
 import { launch as launchBrowser } from "./browser.ts";
 import { gate, slow, slowCpu, slowDown } from "./slow.ts";
 import { early } from "./scenarios/early.ts";
+import { fileFlake as file } from "./scenarios/flakes.ts";
 
 const URL_ = Deno.env.get("APP_URL") ?? Deno.args[0];
 if (!URL_) throw new Error("APP_URL or an argument names the app");
@@ -976,17 +977,14 @@ async function fileFlake(id: string) {
   const repo = new TextDecoder().decode(top.stdout).trim(), commit = new TextDecoder().decode(head.stdout).trim();
   const run = Deno.env.get("GITHUB_RUN_ID") ? `${Deno.env.get("GITHUB_SERVER_URL")}/${Deno.env.get("GITHUB_REPOSITORY")}/actions/runs/${Deno.env.get("GITHUB_RUN_ID")}` : "a local run";
   const [cmd, ...args] = spec.flakes.file;
-  // A filing that fails fails the run: a flake left unfiled, or filed without its marker (filed again next run), is never only logged.
-  const out = await new Deno.Command(cmd === "deno" ? Deno.execPath() : cmd, {
+  // Filing is bookkeeping (flakes.ts, PRONTO-649): a board that refuses is said and warned, never thrown. The flaked
+  // scenario stays failed, so this run exits 1 either way; the unwritten marker makes the next run try again.
+  await file({
+    id, cmd: cmd === "deno" ? Deno.execPath() : cmd, marks,
     args: [...args, repo, "--app", app, "--bug", "true", "--priority", spec.flakes.priority,
       "--title", `Flake: ${id} fails under load, passes alone`,
       "--body", `Scenario ${id} failed in a pass of ${ran.length} beside others at ${commit} (${run}) and passed run alone right after, on the same head. A flake is a bug in the app or the harness, fixed at its cause (AGENTS.md); the runner's report is in that run's log.`],
     env: { CLOUDSDK_ACTIVE_CONFIG_NAME: Deno.env.get("CLOUDSDK_ACTIVE_CONFIG_NAME") ?? "pronto" },
-    stdout: "piped", stderr: "piped",
-  }).output();
-  const said = new TextDecoder().decode(out.stdout).trim().split("\n").at(-1) ?? "";
-  if (!out.success) throw new Error(`flake ${id} not filed: the board said ${new TextDecoder().decode(out.stderr).trim().split("\n").at(-1)}`);
-  await Deno.mkdir(marks, { recursive: true });
-  await Deno.writeTextFile(mark, said);
-  console.log(`  filed: ${said}`);
+    github: !!Deno.env.get("GITHUB_ACTIONS"),
+  });
 }
