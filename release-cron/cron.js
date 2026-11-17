@@ -294,9 +294,14 @@ export const merges = (lines) => lines.filter(Boolean).map((l) => {
 // the newest evidence counts. Where any rehearsal record says its `mode` (an app's rehearse.ts that writes it, Bonk
 // Chess's since PRONTO-683), only release-cron's own runs (`mode: "release"`) count, and not one that excused a new
 // feature's failing scenario (`excused`): a hand run, a record from before modes or an excused pass proves nothing.
-export const evidenceOf = (rehearsals) => rehearsals.some((r) => r.mode !== undefined) ? rehearsals.filter((r) => r.mode === "release" && !(r.excused ?? []).length) : rehearsals;
+// `strict` (an app whose release rehearsal declares its mode, releaseModes below) applies that rule even to a history that
+// holds no tagged record yet.
+export const evidenceOf = (rehearsals, strict = false) => strict || rehearsals.some((r) => r.mode !== undefined) ? rehearsals.filter((r) => r.mode === "release" && !(r.excused ?? []).length) : rehearsals;
+// Whether an app's configured rehearsal (releaseCron.rehearsal.command) runs in release mode, which tags its records:
+// then only its tagged records are evidence, whatever the history holds.
+export const releaseModes = (command) => (command ?? []).includes("REHEARSE_RELEASE=1");
 export const verdict = (commit, sig, ev) => {
-  const rehearsals = evidenceOf(ev.rehearsals ?? []), releases = ev.releases ?? [], ledger = ev.ledger ?? [];
+  const rehearsals = evidenceOf(ev.rehearsals ?? [], !!ev.strict), releases = ev.releases ?? [], ledger = ev.ledger ?? [];
   const from = sig.kind === "release"
     ? releases.filter((r) => r.commit === commit && !r.dirty).map((r) => [r.started, r.outcome === "live" ? "good" : r.outcome === "failed" && !sig.names.length && /^the tests failed against/.test(r.failure ?? "") ? "bad" : "unknown"])
     : rehearsals.filter((r) => r.commit === commit && !r.dirty).map((r) => [r.queued, r.outcome === "passed" ? "good" : r.outcome === "failed" && !sig.names.length ? "bad" : "unknown"]);
