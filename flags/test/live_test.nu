@@ -466,9 +466,14 @@ check ($nrec.exit_code == 0 and ($nrec.stderr | str contains "no release record"
 let rurl = "gs://shop-prod-flags/released.json"
 let rdry = (livex [released $app] {FAKE_GCLOUD_READONLY: "1", PRONTO_FLAGS_DRY_RUN: "1"})
 check ($rdry.exit_code != 0 and ($rdry.stderr | str contains "dry run: refused a write") and (held | get objects | get -o $rurl | default [] | is-empty)) "released: refused under a dry run, nothing written"
+let rng = (livex [released $app])
+check ($rng.exit_code != 0 and ($rng.stderr | str contains "not in a git tree") and (held | get objects | get -o $rurl | default [] | is-empty)) "released: refused outside a git tree, nothing written"
+^git -C $app init -q
+^git -C $app add -A
+^git -C $app -c user.name=t -c user.email=t@example.com commit -q -m base
 let rw = (livex [released $app])
 let rrec = (held | get objects | get $rurl | first | get data | from json)
-check ($rw.exit_code == 0 and ($rrec.flags | sort) == ["premium" "theme"] and ($rrec.at | str ends-with "Z") and "commit" in ($rrec | columns)) "released, bucket: the record names the tree's flags, with commit and time"
+check ($rw.exit_code == 0 and ($rrec.flags | sort) == ["premium" "theme"] and ($rrec.at | str ends-with "Z") and $rrec.commit == (^git -C $app rev-parse --short HEAD | str trim) and ($rrec.commit | is-not-empty)) "released, bucket: the record names the tree's flags, with the commit's value and the time"
 let nd = (object | length)
 let drop3 = (livex [push $app])
 check ($drop3.exit_code == 0 and (object | length) == $nd + 1 and ((newest 0).data | from json | get flags | columns | sort) == ["premium" "theme"] and ($drop3.stderr | str contains "the release no longer reads it")) "keep-live, bucket: flags the record does not name are dropped"
@@ -478,82 +483,106 @@ check ((open --raw $"($dir)/journal.jsonl" | lines | last | from json | get drop
 let dbsql = $"($dir)/db.sql"
 def kspec [defs: record] {
 	let body = ($defs | items {|k, v| $"flags: ($k): {default: ($v), local: true}\n" } | str join)
-	$"package drill\nflags: drill_break_checkout: {default: false, local: true}\n($body)flagsLive: {dir: \"flagstore\", url: \"https://drill.example\", database: \"cat >> ($dbsql)\"}\n" | save -f $"($drill)/flags_spec.cue"
+	$"package drill\nflags: drill_break_checkout: {default: false, local: true}\n($body)flagsLive: {dir: \"flagstore\", url: \"https://drill.example\", database: \"cat >> ($dbsql)\", mirrors: [{ssh: \"ops@node.example\", namespace: \"drill\", configMap: \"drill-flags\"}]}\n" | save -f $"($drill)/flags_spec.cue"
 }
+def klive [args: list<string>, extra: record = {}] { dlive $args ({PATH: ([$bin] | append $env.PATH)} | merge $extra) }
 def kflags [] { open $"($store)/flags.json" | get flags }
 def kdef [f: string] { (kflags | get $f).variants.default }
 def kputs [] { if ($dbsql | path exists) { open --raw $dbsql | lines | where {|l| $l | str starts-with "SELECT pronto_flags.put(" } } else { [] } }
 def kdoc [line: string] { $line | str replace "SELECT pronto_flags.put('" "" | str replace "'::jsonb, 'drill.example');" "" | str replace -a "''" "'" | from json }
 kspec {}
-dlive [push $drill --untested "base" --flip drill_break_checkout] | ignore
+klive [push $drill --untested "base" --flip drill_break_checkout] | ignore
 kspec {ka: false, kb: false, kc: false}
-let k0 = (dlive [push $drill])
+let k0 = (klive [push $drill])
 check ($k0.exit_code == 0 and (kflags | columns | where {|c| $c in ["ka" "kb" "kc"] } | length) == 3) "keep-live: new flags that are off are written"
 
 # 8: a new flag that is on needs cases, as before.
 kspec {ka: false, kb: false, kc: false, kn: true}
 let nv8 = (dversions)
-let k8 = (dlive [push $drill])
+let k8 = (klive [push $drill])
 check ($k8.exit_code != 0 and ($k8.stderr | str contains "no cases") and (dversions) == $nv8) "keep-live: a new flag that is on still needs its cases"
 
 # 4: defaults that differ, with no --flip: the live entries stay, no cases are asked for, one version is written.
 kspec {ka: true, kb: true, kc: false}
 let nv4 = (dversions)
-let k4 = (dlive [push $drill])
+let k4 = (klive [push $drill])
 check ($k4.exit_code == 0 and (dversions) == $nv4 + 1 and (kdef ka) == false and (kdef kb) == false and ($k4.stderr | str contains "ka kept as live")) "keep-live: a changed default with no --flip is not written"
 check ((djournal | last).kept == "ka+kb" and (djournal | last).flag == "" and (djournal | last).changes == []) "keep-live: the journal names what was kept, and no flip"
 
 # 5: --flip names the one that flips.
-let k5 = (dlive [push $drill --flip ka --untested "flip a"])
+let k5 = (klive [push $drill --flip ka --untested "flip a"])
 check ($k5.exit_code == 0 and (kdef ka) == true and (kdef kb) == false and (djournal | last).flag == "ka" and (djournal | last).kept == "kb") "keep-live: --flip a flips a, b is kept"
 
 # 6: a --flip name the spec lacks is refused, nothing written.
 let nv6 = (dversions)
-let k6 = (dlive [push $drill --flip nope])
+let k6 = (klive [push $drill --flip nope])
 check ($k6.exit_code != 0 and ($k6.stderr | str contains "not in the spec") and (dversions) == $nv6) "keep-live: --flip of an unknown flag is refused, nothing written"
-let k6b = (dlive [push $drill --drop ka])
+let k6b = (klive [push $drill --drop ka])
 check ($k6b.exit_code != 0 and ($k6b.stderr | str contains "is in the spec") and (dversions) == $nv6) "keep-live: --drop of a flag the spec holds is refused"
+
+let k6c = (klive [push $drill --drop nowhere])
+check ($k6c.exit_code != 0 and ($k6c.stderr | str contains "neither live nor in the spec") and (dversions) == $nv6) "keep-live: --drop of a flag that is neither live nor in the spec is refused"
+
+# show and a dry run print the merge, and write nothing: ka is false live and true in the spec.
+def default-shown [out: string, f: string] { $out | parse -r ($f + '\s*│\s*(?<d>\w+)') | get d.0 }
+let sh0 = (klive [show $drill])
+let sh1 = (klive [show $drill --flip kb])
+check ($sh0.exit_code == 0 and (default-shown $sh0.stdout kb) == "false" and ($sh0.stderr | str contains "WARNING: kb kept as live")) "keep-live: show prints the merged result, kb kept as live"
+check ($sh1.exit_code == 0 and (default-shown $sh1.stdout kb) == "true" and not ($sh1.stderr | str contains "kb kept")) "keep-live: show --flip kb prints kb flipped"
+let nvd = (dversions)
+let dr = (klive [push $drill --flip kb --dry-run])
+check ($dr.exit_code == 0 and ($dr.stdout | str contains "dry run: nothing written") and (default-shown $dr.stdout kb) == "true" and (dversions) == $nvd) "keep-live: a dry-run push --flip shows the merge and writes nothing"
 
 # 1: no record, the spec drops a live flag: it is kept, with a warning, in one version.
 kspec {ka: true, kb: false}
 let nv1 = (dversions)
-let k1 = (dlive [push $drill])
+let k1 = (klive [push $drill])
 check ($k1.exit_code == 0 and (dversions) == $nv1 + 1 and "kc" in (kflags | columns) and ($k1.stderr | str contains "no release record") and ($k1.stderr | str contains "kc kept as live")) "keep-live, dir: no record, the dropped flag is kept, with a warning"
 
 # 9: released writes the record from a clean tree, and refuses a dirty tree and a dry run.
 kspec {ka: true, kb: false, kc: false}
-rm -f $"($drill)/flags/flags.json"
+mkdir $"($drill)/flags"
+'{"flags": {"drill_break_checkout": {}, "ka": {}, "kb": {}, "kc": {}}}' | save -f $"($drill)/flags/flags.json"
 ^git -C $drill init -q
 ^git -C $drill add -A
 ^git -C $drill -c user.name=t -c user.email=t@example.com commit -q -m base
 let rfile = $"($store)/released.json"
-let rd = (dlive [released $drill] {PRONTO_FLAGS_DRY_RUN: "1"})
+let rd = (klive [released $drill] {PRONTO_FLAGS_DRY_RUN: "1"})
 check ($rd.exit_code != 0 and ($rd.stderr | str contains "dry run: refused a write") and not ($rfile | path exists)) "released, dir: refused under a dry run"
 "// an edit\n" | save -a $"($drill)/flags_spec.cue"
-let rdirty = (dlive [released $drill])
-check ($rdirty.exit_code != 0 and ($rdirty.stderr | str contains "CUE edits") and not ($rfile | path exists)) "released, dir: refused on a tree with CUE edits"
+let rdirty = (klive [released $drill])
+check ($rdirty.exit_code != 0 and ($rdirty.stderr | str contains "edits") and not ($rfile | path exists)) "released, dir: refused on a tree with CUE edits"
 ^git -C $drill checkout -q -- flags_spec.cue
-let rok = (dlive [released $drill])
+'{"flags": {"ka": {}}}' | save -f $"($drill)/flags/flags.json"
+let rdirty2 = (klive [released $drill])
+check ($rdirty2.exit_code != 0 and ($rdirty2.stderr | str contains "edits") and not ($rfile | path exists)) "released, dir: refused on a tree with an edited flags/flags.json"
+^git -C $drill checkout -q -- flags/flags.json
+"stray\n" | save -f $"($drill)/stray.cue"
+let rstray = (klive [released $drill])
+check ($rstray.exit_code == 0 and ($rfile | path exists)) "released, dir: an untracked leftover does not block it"
+rm $"($drill)/stray.cue" $rfile
+let rok = (klive [released $drill])
 let rec = (open $rfile)
 check ($rok.exit_code == 0 and ($rec.flags | sort) == ["drill_break_checkout" "ka" "kb" "kc"] and ($rec.commit | is-not-empty) and ($rec.commit | str contains "+" | not $in) and ($rec.at | str ends-with "Z")) "released, dir: the record names the flags, with the commit and time"
 
 # 2: the record names the flag the spec drops: it is kept, said as waiting for a release. 11: the database got the merge.
 kspec {ka: true, kb: false}
-let k2 = (dlive [push $drill])
+let k2 = (klive [push $drill])
 check ($k2.exit_code == 0 and "kc" in (kflags | columns) and ($k2.stderr | str contains "waits for a release") and (djournal | last).kept == "kc") "keep-live, dir: a flag the release reads is kept as retired"
 check ((kdoc (kputs | last)) == (open $"($store)/flags.json") and "kc" in ((kdoc (kputs | last)).flags | columns)) "keep-live: the database holds the merged document"
+check ((open --raw $sent | from json | get data."flags.json" | from json) == (open $"($store)/flags.json") and "kc" in (open --raw $sent | from json | get data."flags.json" | from json | get flags | columns)) "keep-live: the mirror receives the merged document"
 check ((open $"($store)/flags.json") == (open $"($store)/versions/((glob $"($store)/versions/*.meta.json" | each {|f| open --raw $f | from json } | where timeDeleted == null | get generation.0)).json")) "keep-live: the live object is the merged document"
 
 # 7: --drop removes it whatever the record says.
-let k7 = (dlive [push $drill --drop kc])
+let k7 = (klive [push $drill --drop kc])
 check ($k7.exit_code == 0 and "kc" not-in (kflags | columns) and ($k7.stderr | str contains "forced by --drop") and (djournal | last).dropped == "kc") "keep-live: --drop removes a flag the record names, noted as forced"
 
 # 3: a flag the record does not name is dropped.
 kspec {ka: true, kb: false, kd: false}
-dlive [push $drill] | ignore
+klive [push $drill] | ignore
 check ("kd" in (kflags | columns)) "keep-live: a flag added after the record is live"
 kspec {ka: true, kb: false}
-let k3 = (dlive [push $drill])
+let k3 = (klive [push $drill])
 check ($k3.exit_code == 0 and "kd" not-in (kflags | columns) and (djournal | last).dropped == "kd" and ($k3.stderr | str contains "no longer reads it")) "keep-live, dir: a flag the record lacks is dropped, the journal says so"
 
 rm -rf $dir

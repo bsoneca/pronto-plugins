@@ -273,6 +273,8 @@ export def keep-live [old: record, doc: record, reads: any, flip: list<string>, 
 	let spec = $doc.flags
 	let named = ($drop | where {|f| $f in ($spec | columns) })
 	if ($named | is-not-empty) { error make {msg: $"flags: --drop ($named | str join ', ') is in the spec: take it out of the spec first"} }
+	let nowhere = ($drop | where {|f| $f not-in ($spec | columns) and $f not-in ($live | columns) })
+	if ($nowhere | is-not-empty) { error make {msg: $"flags: --drop ($nowhere | str join ', ') is neither live nor in the spec; nothing was written"} }
 	let gone = ($live | columns | where {|f| $f not-in ($spec | columns) })
 	let verdicts = ($gone | each {|f|
 		if $f in $drop { {flag: $f, keep: false, why: "forced by --drop"} } else if $reads == null { {flag: $f, keep: true, why: "no released.json, so the release is taken to read it"} } else if $f in $reads.flags { {flag: $f, keep: true, why: "retired from the spec, waits for a release that stops reading it"} } else { {flag: $f, keep: false, why: "the release no longer reads it"} }
@@ -373,7 +375,7 @@ def merge-live [at: record, app: path, doc: record, flip: list<string>, drop: li
 	if $rec == null and ($gone | is-not-empty) { print -e $"flags: WARNING: no release record at (record-url $at) \(`pronto-flags released`\): every live flag counts as read by the release" }
 	if $rec != null { print $"flags: the release record names ($rec.flags | length) flags, from commit ($rec.commit? | default '?') at ($rec.at? | default '?')" }
 	let m = (keep-live $old $doc ($rec) $flip $drop)
-	for k in $m.kept { print -e $"flags: ($k.flag) kept as live: ($k.why)" }
+	for k in $m.kept { print -e $"flags: WARNING: ($k.flag) kept as live: ($k.why)" }
 	for d in $m.dropped { print -e $"flags: ($d.flag) dropped from the live flags: ($d.why)" }
 	$m | insert before $before | insert old $old
 }
@@ -640,8 +642,13 @@ export def released [app: path, --expect: string] {
 	let at = (live $app)
 	target-guard $at $expect | ignore
 	refuse-write $"the release record at (record-url $at)"
-	let p = (provenance $app $at)
-	if ($p.commit | str ends-with "+edits") { error make {msg: $"flags: ($app) has CUE edits: the release record is written from a clean released tree"} }
+	# The tree's commit, and no edit to what the record is made of: the spec's CUE and flags/flags.json, as git tracks them (an
+	# untracked leftover does not block it).
+	let commit = (do { cd $app; ^git rev-parse --short HEAD } | complete)
+	if $commit.exit_code != 0 or ($commit.stdout | str trim | is-empty) { error make {msg: $"flags: ($app) is not in a git tree: the release record names the commit released"} }
+	let dirty = (do { cd $app; ^git status --porcelain --untracked-files=no -- '*.cue' flags/flags.json } | complete | get stdout | str trim)
+	if ($dirty | is-not-empty) { error make {msg: $"flags: ($app) has CUE or flags.json edits: the release record is written from a clean released tree"} }
+	let p = {commit: ($commit.stdout | str trim)}
 	let file = ($app | path expand | path join flags flags.json)
 	let names = if ($file | path exists) { open --raw $file | from json | get flags | columns } else { cue-of $app flagd.document | get flags | columns }
 	record-put $at {commit: $p.commit, at: (now-utc), flags: $names}
