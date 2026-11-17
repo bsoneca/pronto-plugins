@@ -109,7 +109,7 @@ jobs:
           for f in tests/slot.ts tests/unit.ts tests/unit/select.js tests/unit/schema.cue tests/browser.ts tests/lint.ts; do cmp "$app/$f" "harness/files/$f"; done
           test ! -e "$app/tests/scenarios/select.ts"
           touch "$app/tests/scenarios.ts" && ./bin/pronto-harness "$app"
-          for f in tests/scenarios.ts tests/scenarios/schema.cue tests/scenarios/select.ts tests/scenarios/early.ts tests/slow.ts; do cmp "$app/$f" "harness/files/$f"; done
+          for f in tests/scenarios.ts tests/scenarios/schema.cue tests/scenarios/select.ts tests/scenarios/early.ts tests/scenarios/flakes.ts tests/slow.ts; do cmp "$app/$f" "harness/files/$f"; done
           ! ./bin/pronto-harness "$(mktemp -d)"
           for f in tests/unit.ts tests/unit/select.js tests/unit/schema.cue; do cmp "$f" "harness/files/$f"; done
       - name: Opt an app into release-cron, then refresh it keeping its own opt-in
@@ -211,7 +211,7 @@ jobs:
       - name: Parse each nushell script
         run: sayt --script tools.nu nu -c 'let bad = (glob **/*.nu | where {|f| not (nu-check $f) }); if ($bad | is-not-empty) { print $bad; exit 1 }'
       - name: Test the intents (tests/unit/*.cue)
-        run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android probe devflow migrations machine; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
+        run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android probe devflow migrations machine harness; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
       # pronto-api (api/, tests/unit/api_generate.cue): its views run on PGlite, its door in caddy,
       # the version pronto's doors run (caddy:2.11.7-alpine), checked against its release's digest.
       - name: Test pronto-api (caddy 2.11.7)
