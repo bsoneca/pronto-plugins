@@ -619,7 +619,7 @@ flagsLive: {project: "my-project", bucket: "my-project-flags"}
 
 ```sh
 <this repo>/bin/pronto-flags setup <app-dir>               # once: the bucket, its readers, the first push
-<this repo>/bin/pronto-flags push <app-dir>                # the flags as flags_spec.cue says them now, once a changed flag's cases pass
+<this repo>/bin/pronto-flags push <app-dir> [--flip a,b] [--drop a,b]  # flags_spec.cue merged over the live flags: only the flags --flip names change their default, once their cases pass
 <this repo>/bin/pronto-flags cases <app-dir> [flag]        # the cases a flip runs (below)
 <this repo>/bin/pronto-flags history <app-dir>             # every version, newest first: when, by whom, from which commit
 <this repo>/bin/pronto-flags rollback <app-dir> [version]  # the version before the live one, or the one named
@@ -661,13 +661,13 @@ A flag's cases are the scenarios (`tests/scenarios/*.cue`) and unit cases
 builds and launches no stack, since the pull request's gate already ran every case
 with the flag on (at hand every flag reads its `local` value). No tester account is
 needed (the owner, 2026-11-11: "drop the requirement of testers for flag flips",
-PRONTO-284). `pronto-flags push <app-dir>`:
+PRONTO-284). `pronto-flags push <app-dir> --flip <flag>` (a push is a merge over the live flags, PRONTO-680: a flag whose default differs keeps its live entry unless `--flip` names it, and a live flag the spec dropped stays while the served release reads it, as `released.json` records):
 
 1. reads the live object and finds the flags whose default value moves; a flag
    with no cases is refused, or pushed with `--untested "<why>"`, loudly;
 2. refuses, with nothing written, a flip whose flag has `production` scenarios
    while the app lacks `flagsLive.url` or `flagsCases.live`;
-3. writes the flags as the spec says them, for everyone, in one version
+3. writes the merge of the spec over the live flags, for everyone, in one version
    (`stage=all`); with no `production` case to run it stops there
    (`cases=none on production`, or `untested`);
 4. otherwise waits until OFREP at `flagsLive.url` answers the new value (every

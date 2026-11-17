@@ -32,7 +32,7 @@ The hooks, which run without a person:
 | --- | --- | --- | --- |
 | the repository's `plane` workflow | a pull request opens, merges or closes | `pronto-devflow pr` | its issue to Review, Merged, or back to Implementing; a pull request with no key fails the check unless labelled `chore` |
 | release-cron | a run confirmed a release | `pronto-devflow released` | the app's Merged issues the release holds go Live |
-| `pronto-flags push` | a flag went on, or off, for everyone | `pronto-devflow flipped` / `rolledback` | the issues naming it are Done, or Live again |
+| `pronto-flags push --flip <flag>` | a flag went on, or off, for everyone | `pronto-devflow flipped` / `rolledback` | the issues naming it are Done, or Live again |
 
 ### When an issue is Done
 

@@ -23,5 +23,5 @@ run bare from the repository).
 2. Propose the priority with the table's reason; the user may change it.
 3. File it: `pronto-devflow file . --bug --priority P1 --app <app> --title "<what is broken>"
    --body "<steps, what happens, what should>" [--flag <flag>]`. Say its key.
-4. For a P0: the first response is turning its flag off (`pronto-flags push`, with the flag's
-   default false) when it has one; then work it at once with the pronto-issue skill.
+4. For a P0: the first response is turning its flag off (`pronto-flags push <app-dir> --flip <flag>`, with the
+   flag's default false in the spec; a push without `--flip` keeps the live entry and changes nothing) when it has one; then work it at once with the pronto-issue skill.
