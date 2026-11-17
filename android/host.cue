@@ -90,6 +90,7 @@ _terminal: {
 	"terminal/main.js":                    _ @embed(file="template/terminal/main.js", type=text)
 	"terminal/passkeys.js":                _ @embed(file="template/terminal/passkeys.js", type=text)
 	"terminal/scenarios.ts":               _ @embed(file="template/terminal/scenarios.ts", type=text)
+	"terminal/emulator.ts":                _ @embed(file="template/terminal/emulator.ts", type=text)
 	"terminal/trust.ts":                   _ @embed(file="template/terminal/trust.ts", type=text)
 }
 
@@ -124,6 +125,9 @@ _fillManifest: """
 	        </service>
 
 	"""
+
+// The emulator's system image: setup@android installs it and emulator.ts boots it, stated once.
+_image: "system-images;android-36;google_apis;arm64-v8a"
 
 // Kotlin sources, main and test, land under the application id's package path.
 _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/", "app/src/release/kotlin/"]
@@ -217,7 +221,7 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 				platform: "android"
 				cmds: [
 					{do: "use tools.nu [run-mise]; 1..30 | each { \"y\" } | str join \"\\n\" | run-mise exec -- sdkmanager --licenses | ignore"},
-					{do: "use tools.nu [run-mise]; run-mise exec -- sdkmanager --install \"platform-tools\" \"platforms;android-36\" \"build-tools;36.0.0\""},
+					{do: "use tools.nu [run-mise]; run-mise exec -- sdkmanager --install \"platform-tools\" \"platforms;android-36\" \"build-tools;36.0.0\" \"emulator\" \"\(_image)\""},
 				]
 			}
 			build: android: {
@@ -247,7 +251,7 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 					// the release's code with the debug key and the driver on.
 					cmds: list.Concat([H._bundle, [
 						{do: "let type = ($env.PRONTO_ANDROID_BUILD? | default \"debug\"); \(H._gradle) $\":app:assemble(($type | str capitalize))\""},
-						{do: "use tools.nu [run-mise]; let type = ($env.PRONTO_ANDROID_BUILD? | default \"debug\"); let apk = $\"android/app/build/outputs/apk/($type)/app-($type).apk\"; let scenarios = (open android/android.json | get scenarios); let base = ($env.PRONTO_BASE? | default \"stack\"); run-mise exec -- deno run -A --no-lock android/terminal/scenarios.ts \(H.applicationId) $apk $base ...$scenarios"},
+						{do: "use tools.nu [run-mise]; let type = ($env.PRONTO_ANDROID_BUILD? | default \"debug\"); let apk = $\"android/app/build/outputs/apk/($type)/app-($type).apk\"; let scenarios = (open android/android.json | get scenarios); let base = ($env.PRONTO_BASE? | default \"stack\"); let emulate = (if ($env.PRONTO_ANDROID_EMULATOR? | default \"\" | is-empty) { [] } else { [deno run -A --no-lock android/terminal/emulator.ts \"\(_image)\" \"--\"] }); run-mise exec -- ...$emulate deno run -A --no-lock android/terminal/scenarios.ts \(H.applicationId) $apk $base ...$scenarios"},
 					]])
 				}
 			}
