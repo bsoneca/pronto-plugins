@@ -724,13 +724,21 @@ try {
         // is written to it), which is how the remote side knows to stop: it reads it until the connection closes.
         reach = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...pv.reach], cwd: dir, env, stdin: "piped", stdout: "null", stderr: "null" }).spawn();
         // Answering through the forward: `/` is asked until it answers (the forward takes a moment, as a cold pod's first page does).
+        // A forward that exits first (the ssh dropped, the remote port-forward ended) fails the preview: waiting on would hold
+        // the app's release lock for ever.
+        let gone: Deno.CommandStatus | undefined;
+        reach.status.then((s) => { gone = s; });
         let said2 = 0;
         for (;;) {
           try { const r = await fetch(pv.origin + "/", { signal: AbortSignal.timeout(15_000) }); await r.body?.cancel(); if (r.status < 500) break; } catch { /* not up yet */ }
+          if (gone) { bad.push(`the preview's forward (${pv.reach.join(" ")}) exited (code ${gone.code}) before ${pv.origin} answered`); break; }
           if (Date.now() - said2 >= HEARTBEAT) { said2 = Date.now(); say(`preview: still waiting for ${pv.origin}`); }
           await new Promise((r) => setTimeout(r, 5_000));
         }
-        for (const [name, p] of previewProbes(cron.probes)) {
+        // A forward that never bound (ExitOnForwardFailure on a port something else holds) has exited by now: what answered was
+        // that other listener, not the preview.
+        if (!bad.length && gone) bad.push(`the preview's forward (${pv.reach.join(" ")}) exited (code ${gone.code}): what answered on ${pv.origin} was not the preview`);
+        if (!bad.length) for (const [name, p] of previewProbes(cron.probes)) {
           try {
             const r = await fetch(`${pv.origin}${p.path}`, { headers: p.agent ? { "User-Agent": p.agent } : {}, redirect: p.location ? "manual" : "follow", signal: AbortSignal.timeout(60_000) });
             const v = probe(p, r.status, await r.text(), r.headers.get("location"));
@@ -741,7 +749,9 @@ try {
     } finally {
       if (reach) { try { send(reach.pid, "TERM"); await reach.stdin.close().catch(() => {}); } catch { /* already gone */ } }
       const down = await child(pv.down[0], pv.down.slice(1), dir, env);
-      if (down.code !== 0) say(`preview: removing it failed (exit ${down.code}): ${pv.down.join(" ")}`);
+      // A preview left standing fails the run before the release: its namespace and what runs there stay until someone
+      // removes them, which a run that reads as released would hide.
+      if (down.code !== 0) bad.push(`removing the preview (${pv.down.join(" ")}) failed (exit ${down.code})`);
     }
     step("preview");
     say(bad.length ? `preview failed: ${bad.join("; ")}` : "preview answered every probe");
