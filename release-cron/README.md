@@ -77,6 +77,12 @@ existed, so an app that names none of them runs as it did.
   	"https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released"]}]
   ```
 
+- `flagsReleased`: the command that records which flags the served release reads (pronto-flags'
+  `released`, which writes `released.json` beside the live flags so a `pronto-flags push` keeps a
+  flag the release still reads: PRONTO-680), run in the run's worktree with the app's folder
+  appended, once production serves the release's commit and when a run finds main already serving.
+  A failure is logged and never changes the run's outcome. Null by default.
+
 ## A run
 
 1. **prepare**: main is fetched into the run's own worktree (`~/.cache/pronto/release-cron/<app>/wt`,

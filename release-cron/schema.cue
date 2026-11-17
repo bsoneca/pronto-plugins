@@ -81,6 +81,11 @@ releaseCron: #Cron
 	// (The dev flow's board: ["deno", "run", "-A", "--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/",
 	// "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released"].)
 	hooks: [...#Hook]
+	// The command that records which flags the served release reads (pronto-flags: `released`, which writes released.json beside the
+	// live flags, so a `pronto-flags push` keeps a flag the release still reads: PRONTO-680), run in the run's worktree with the app's
+	// folder appended: once production serves the release's commit, and when a run finds main already serving. A command that fails
+	// is logged and never changes the run's outcome. Null (the default): none.
+	flagsReleased: *null | [string, ...string]
 	// What production must answer once the release is serving, each fetched from the release's domain.
 	probes: [Name=string]: #Probe
 }

@@ -410,6 +410,9 @@ export const changedBy = (list, touched) => [...list].reverse().find((c) => touc
 // A hook of releaseCron.hooks as the command run: its own argv, then the run's worktree, the app and the commit
 // released (the dev flow's `released` hook, devflow/hook.ts, takes exactly those). The hooks of one event, in order.
 export const hookArgv = (hook, wt, app, commit) => [...hook.command, wt, app, commit];
+// The command that records which flags the served release reads (releaseCron.flagsReleased) as run: its own argv with the app's
+// folder appended; null where the app names none.
+export const flagsReleasedArgv = (command, dir) => (command ? [...command, dir] : null);
 export const hooksOf = (hooks, on) => (hooks ?? []).filter((h) => h.on === on);
 
 // Who a finding reaches, by the app's `notify`: the log always when nobody else is (`none`); `github-comment` the pull
