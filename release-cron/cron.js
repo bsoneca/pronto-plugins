@@ -429,6 +429,31 @@ export const changedBy = (list, touched) => [...list].reverse().find((c) => touc
 // A hook of releaseCron.hooks as the command run: its own argv, then the run's worktree, the app and the commit
 // released (the dev flow's `released` hook, devflow/hook.ts, takes exactly those). The hooks of one event, in order.
 export const hookArgv = (hook, wt, app, commit) => [...hook.command, wt, app, commit];
+// The command that records which flags the served release reads (releaseCron.flagsReleased) as run: its own argv with the app's
+// folder appended; null where the app names none.
+export const flagsReleasedArgv = (command, dir) => (command ? [...command, dir] : null);
+
+// Whether a run that finds main already serving records the flags again: not when the marker (the commit the last
+// successful record was written for) is the one served.
+export const flagsReleasedDue = (marker, head) => (marker ?? "").trim() !== head;
+
+// Runs that command, with a limit (`timeoutMs`, 120 s by default), and says how it went: "ok", or "failed (...)" with the exit,
+// its last stderr line, or the time limit; null where the app names none. Whatever happens it returns: a record that cannot be
+// written never changes a run's outcome.
+export const recordFlagsReleased = async (command, dir, { cwd, env, timeoutMs = 120_000 } = {}) => {
+  const argv = flagsReleasedArgv(command, dir);
+  if (!argv) return null;
+  try {
+    const signal = AbortSignal.timeout(timeoutMs);
+    const r = await new Deno.Command(argv[0] === "deno" ? Deno.execPath() : argv[0], { args: argv.slice(1), cwd, env, stdin: "null", stdout: "piped", stderr: "piped", signal }).output();
+    if (signal.aborted) return `failed (timed out after ${timeoutMs / 1000}s)`;
+    if (r.success) return "ok";
+    const last = new TextDecoder().decode(r.stderr).trim().split("\n").pop();
+    return `failed (exit ${r.code}${last ? `: ${last}` : ""})`;
+  } catch (e) {
+    return e?.name === "TimeoutError" ? `failed (timed out after ${timeoutMs / 1000}s)` : `failed (${String(e?.message ?? e).split("\n")[0]})`;
+  }
+};
 export const hooksOf = (hooks, on) => (hooks ?? []).filter((h) => h.on === on);
 
 // Who a finding reaches, by the app's `notify`: the log always when nobody else is (`none`); `github-comment` the pull

@@ -108,7 +108,7 @@ advises approvals for sensitive changes ([Unleash, at scale][ul-scale]).
 
 ## Where pronto-flags stands
 
-What a push does today ([flag-flips.md](flag-flips.md)): it writes the spec's flags for everyone in one
+What a push does today ([flag-flips.md](flag-flips.md)): it writes the spec's flags, merged over the live ones (only `--flip` flags change their default), for everyone in one
 versioned object (`stage=all`), waits for OFREP to answer the new value, runs the flag's `production`
 scenarios that sign in as no one, and writes the version before back if one fails. It refuses a flag
 without cases unless `--untested`, and `rollback` restores any version without running cases.
@@ -141,7 +141,7 @@ without cases unless `--untested`, and `rollback` restores any version without r
 5. A weekday daytime window, outside release-cron's run.
 
 **During:**
-1. `pronto-flags push`.
+1. `pronto-flags push --flip <flag>`.
 2. Watch errors, probe journeys and the business dashboard for the window.
 3. On any regression, `pronto-flags rollback` first and investigate after.
 

@@ -122,7 +122,7 @@ check (not ($none | str contains "buy")) "cases: a flag nothing names has none"
 
 full-spec true "light"
 let n0 = (object | length)
-let launched = (live push $app)
+let launched = (live push $app --flip premium)
 check ((object | length) == $n0 + 2) "flip: the version for everyone, then its verdict"
 check ((newest 1).metadata.stage == "all" and (newest 1).metadata.cases == "running" and (newest 1).metadata.flag == "premium") "flip: written for everyone at once, its cases running"
 check ((premium (newest 1)).variants.default == true and ((premium (newest 1)).variants | columns | all {|v| $v != "new" })) "flip: the new value for everyone, no canary"
@@ -139,7 +139,7 @@ check ($hist.0.stage == "all" and $hist.0.cases == "passed" and $hist.1.cases ==
 let n4 = (object | length)
 let ran4 = (ran | length)
 full-spec false "light"
-let off = (livex [push $app])
+let off = (livex [push $app --flip premium])
 check ($off.exit_code == 0 and ($off.stderr | str contains "turned off: no cases run")) "off-flip: pushed, saying its cases did not run"
 check ((object | length) == $n4 + 1 and (ran | length) == $ran4) "off-flip: one version written, no case run"
 check ((newest 0).metadata.stage == "all" and (newest 0).metadata.flag == "premium" and ((newest 0).metadata.note | str contains "turned off: premium")) "off-flip: stage=all, and the note records it"
@@ -149,12 +149,12 @@ check ((premium (newest 0)).variants.default == false and not ((newest 0).data |
 let n5 = (object | length)
 let ran5 = (ran | length)
 full-spec true "light"
-let nc = (livex [push $app --no-canary "the owner's go"])
+let nc = (livex [push $app --no-canary "the owner's go" --flip premium])
 check ($nc.exit_code == 0 and ($nc.stderr | str contains "every push's way")) "--no-canary: pushed, saying it is the only way now"
 check ((object | length) == $n5 + 2 and (ran | length) == $ran5 + 1) "--no-canary: written for everyone, its production cases run"
 check (((newest 0).metadata.note | str contains "no canary: the owner's go")) "--no-canary: the reason kept"
 full-spec false "light"
-livex [push $app] | ignore
+livex [push $app --flip premium] | ignore
 
 # A flag with no production scenario: written for everyone, nothing run. Production cases with no
 # flagsLive.url to run them at: refused, nothing written.
@@ -162,16 +162,16 @@ full-spec true "light"
 let n1 = (object | length)
 let ran1 = (ran | length)
 open --raw $"($app)/tests/scenarios/shop.cue" | str replace -a 'production: true, ' '' | save -f $"($app)/tests/scenarios/shop.cue"
-let np = (livex [push $app])
+let np = (livex [push $app --flip premium])
 check ($np.exit_code == 0 and (object | length) == $n1 + 1 and (ran | length) == $ran1 and (newest 0).metadata.cases == "none on production") "no production scenario: written for everyone, no case run"
 open --raw $"($app)/tests/scenarios/shop.cue" | str replace 'buy: {flags: ["premium"], ' 'buy: {flags: ["premium"], production: true, ' | str replace 'mine: {flags: ["premium"], ' 'mine: {flags: ["premium"], production: true, ' | save -f $"($app)/tests/scenarios/shop.cue"
 full-spec false "light"
-livex [push $app] | ignore
+livex [push $app --flip premium] | ignore
 full-spec true "light"
 let n1 = (object | length)
 let ran1 = (ran | length)
 open --raw $"($app)/flags_spec.cue" | str replace ', url: "https://shop.example"' '' | save -f $"($app)/flags_spec.cue"
-let nourl = (livex [push $app])
+let nourl = (livex [push $app --flip premium])
 check ($nourl.exit_code != 0 and (object | length) == $n1 and (ran | length) == $ran1 and ($nourl.stderr | str contains "flagsLive.url")) "production cases, no url: refused, nothing written"
 full-spec true "light"
 let gone = (livex [push $app --skip-live "no tester yet"])
@@ -180,7 +180,7 @@ check ($gone.exit_code != 0 and (object | length) == $n1) "--skip-live is gone: 
 # Live failure: back to the version read before the flip.
 touch $"($app)/fail-live"
 let pre = (premium (newest 0))
-let lv = (livex [push $app])
+let lv = (livex [push $app --flip premium])
 check ($lv.exit_code != 0 and ($lv.stderr | str contains "rolled back")) "live failure: the push fails"
 check ((object | length) == $n1 + 2 and (premium (newest 0)) == $pre and (newest 0).metadata.stage == "rolled-back" and (newest 1).metadata.stage == "all") "live failure: the flags before the flip are the newest version again"
 rm $"($app)/fail-live"
@@ -188,20 +188,20 @@ rm $"($app)/fail-live"
 # The cases' command dies under the push (killed): the same, back to the version before the flip.
 touch $"($app)/crash-live"
 let n1b = (object | length)
-let cr = (livex [push $app])
+let cr = (livex [push $app --flip premium])
 check ($cr.exit_code != 0 and (object | length) == $n1b + 2 and (premium (newest 0)) == $pre and (newest 0).metadata.stage == "rolled-back") "a crashed live command: rolled back"
 rm $"($app)/crash-live"
 
 # An OFREP that never answers the new value: back as well.
 let n2 = (object | length)
-let st = (livex [push $app] {FAKE_OFREP_STALE: "1"})
+let st = (livex [push $app --flip premium] {FAKE_OFREP_STALE: "1"})
 check ($st.exit_code != 0 and ($st.stderr | str contains "did not answer") and (premium (newest 0)) == $pre and (object | length) == $n2 + 2) "OFREP timeout: rolled back"
 
 # No change to a default value: no cases needed, and none run.
 full-spec false "light"
 let n3 = (object | length)
 let ran3 = (ran | length)
-live push $app | ignore
+live push $app --flip premium | ignore
 check ((object | length) == $n3 + 1 and (ran | length) == $ran3 and (newest 0).metadata.stage == "all") "unchanged defaults: written with no cases run"
 
 # No tester is named anywhere, nor any snooze made: a flip has no testers' stage.
@@ -213,7 +213,7 @@ full-spec false "light"
 "flags: shy: {default: false, local: true}\n" | save -a $"($app)/flags_spec.cue"
 let n6 = (object | length)
 let ran6 = (ran | length)
-live push $app | ignore
+live push $app --flip premium | ignore
 check ((object | length) == $n6 + 1 and (ran | length) == $ran6 and ((newest 0).data | from json | get flags | columns | any {|c| $c == "shy" })) "a new flag that is off: written with no cases run"
 
 # A flag new to the live object and on, through the flip (PRONTO-43, 2026-11-08 18:02 BRT: trial_banner's
@@ -232,12 +232,12 @@ full-spec false "light"
 "flags: fresh: {default: true, local: true}\n" | save -a $"($app)/flags_spec.cue"
 let n7 = (object | length)
 touch $"($app)/fail-live"
-let fresh_fail = (livex [push $app] {PRONTO_DEVFLOW_BIN: $told})
+let fresh_fail = (livex [push $app --flip premium] {PRONTO_DEVFLOW_BIN: $told})
 rm $"($app)/fail-live"
 check ($fresh_fail.exit_code != 0 and ($fresh_fail.stderr | str contains "rolled back") and not ($fresh_fail.stderr | str contains "variants.default")) "a new flag on, its cases failing: the push fails as a rollback, not on the summary"
 check ((object | length) == $n7 + 2 and (newest 1).metadata.stage == "all" and (newest 0).metadata.stage == "rolled-back" and not ((newest 0).data | from json | get flags | columns | any {|c| $c == "fresh" })) "a new flag on, failing: the version before the flip is the newest again"
 check ((board-said) | is-empty) "a failed flip tells the board nothing"
-let fresh_ok = (livex [push $app] {PRONTO_DEVFLOW_BIN: $told})
+let fresh_ok = (livex [push $app --flip premium] {PRONTO_DEVFLOW_BIN: $told})
 check ($fresh_ok.exit_code == 0 and ($fresh_ok.stdout | str contains "fresh")) "a new flag on: its summary is said"
 check ((newest 1).metadata.stage == "all" and (newest 0).metadata.stage == "all" and ((newest 0).data | from json | get flags.fresh.variants.default) == true) "a new flag on: written for everyone, held on"
 check ((board-said | length) == 1 and (board-said | first | str starts-with "flipped ") and (board-said | first | str ends-with "/shop shop fresh")) "a passed flip tells the board, once, after the everyone stage"
@@ -246,7 +246,7 @@ rm -rf $"($app)/.git" $"($app)/devflow"
 # The cases run under the app's own saytw pin, not the SAYT_VERSION this tool runs under.
 full-spec true "light"
 open --raw $"($app)/flags_spec.cue" | str replace 'echo live $FLAG' 'echo sayt=${SAYT_VERSION:-none} live $FLAG' | save -f $"($app)/flags_spec.cue"
-let pinned = (livex [push $app] {SAYT_VERSION: "v0.0.1"})
+let pinned = (livex [push $app --flip premium] {SAYT_VERSION: "v0.0.1"})
 check ($pinned.exit_code == 0 and ((ran | last) | str starts-with "sayt=none")) "the cases don't inherit this tool's SAYT_VERSION"
 
 # A mirror (flagsLive.mirrors): each write of the object is applied to a node's ConfigMap over ssh;
@@ -340,9 +340,9 @@ check ($again.exit_code == 0 and (dversions) == 1) "dir store: setup again pushe
 
 # A flip, with no cases and said so.
 dspec true
-let refused2 = (dlive [push $drill])
+let refused2 = (dlive [push $drill --flip drill_break_checkout])
 check ($refused2.exit_code != 0 and ($refused2.stderr | str contains "no cases") and (dversions) == 1) "dir store: a flip with no cases is refused, nothing written"
-let flip = (dlive [push $drill --untested "the drill"])
+let flip = (dlive [push $drill --untested "the drill" --flip drill_break_checkout])
 check ($flip.exit_code == 0 and (dversions) == 2 and (open $"($store)/flags.json" | get flags.drill_break_checkout.variants.default) == true) "dir store: the flip is written to flags.json"
 let metas = (glob $"($store)/versions/*.meta.json" | each {|f| open --raw $f | from json } | sort-by {|m| $m.generation | into int })
 check ($metas.0.timeDeleted != null and $metas.1.timeDeleted == null and $metas.1.metadata.cases == "untested" and $metas.1.metadata.flag == "drill_break_checkout") "dir store: the replaced version is kept, marked deleted; the new one keeps its stage, cases and flag"
@@ -369,7 +369,7 @@ check ($back.exit_code == 0 and (open $"($store)/flags.json" | get flags.drill_b
 let nov = (dlive [rollback $drill 999])
 check ($nov.exit_code != 0 and (dversions) == 4) "dir store: rollback to a version that isn't there is refused"
 dspec false
-dlive [push $drill] | ignore
+dlive [push $drill --flip drill_break_checkout] | ignore
 
 # The target guard.
 let nv = (dversions)
@@ -381,7 +381,7 @@ check ($wrong_env.exit_code != 0 and (dversions) == $nv) "PRONTO_FLAGS_EXPECT: a
 let wrong_setup = (dlive [setup $drill --expect "gs://brawl-chess-flags/flags.json"])
 check ($wrong_setup.exit_code != 0 and (dversions) == $nv) "--expect on setup too"
 dspec true
-let right = (dlive [push $drill --untested "expected target" --expect $want])
+let right = (dlive [push $drill --untested "expected target" --expect $want --flip drill_break_checkout])
 check ($right.exit_code == 0 and (dversions) == $nv + 1) "--expect: the right target is written"
 let right_env = (dlive [rollback $drill] {PRONTO_FLAGS_EXPECT: $want})
 check ($right_env.exit_code == 0 and (dversions) == $nv + 2) "PRONTO_FLAGS_EXPECT: the right target is written"
@@ -404,13 +404,13 @@ check ($fresh.exit_code == 0 and (dversions) == $nv2 + 1 and ($fresh.stdout | st
 
 # A change to a flag's targeting alone (its `local` gone, so no host rule) names the flag, its default unmoved.
 dspec false
-let base = (dlive [push $drill --untested "the flag back, with its local value"])
+let base = (dlive [push $drill --untested "the flag back, with its local value" --flip drill_break_checkout])
 check ($base.exit_code == 0) "dir store: a push over the stand-in write"
 $"package drill
 flags: drill_break_checkout: {default: false}
 flagsLive: {dir: \"flagstore\"}
 " | save -f $"($drill)/flags_spec.cue"
-let tgt = (dlive [push $drill --untested "targeting only"])
+let tgt = (dlive [push $drill --untested "targeting only" --flip drill_break_checkout])
 let jt = (djournal | last)
 check ($tgt.exit_code == 0 and $jt.flag == "drill_break_checkout" and $jt.changes == []) "journal: a targeting-only change names its flag, with no default change"
 
@@ -435,7 +435,7 @@ flagsLive: {dir: \"flagstore\", url: \"https://drill.example\", database: \"test
 def puts [] { if ($dbsql | path exists) { open --raw $dbsql | lines | where {|l| $l | str starts-with "SELECT pronto_flags.put(" } } else { [] } }
 def put-doc [line: string] { $line | str replace "SELECT pronto_flags.put('" "" | str replace "'::jsonb, 'drill.example');" "" | str replace -a "''" "'" | from json }
 dbspec
-let dp = (dlive [push $drill --untested "the database"])
+let dp = (dlive [push $drill --untested "the database" --flip drill_break_checkout])
 check ($dp.exit_code == 0 and (puts | length) == 1 and ($dp.stdout | str contains "written to the database")) "database: a push puts the document"
 check ((put-doc (puts | last)) == (open $"($store)/flags.json") and ((puts | last) | str ends-with "'drill.example');")) "database: the document written, with flagsLive.url's host"
 let drb = (dlive [rollback $drill])
@@ -445,6 +445,145 @@ let ddry = (dlive [rollback $drill] {PRONTO_FLAGS_DRY_RUN: "1"})
 check ($ddry.exit_code == 0 and (puts | length) == 2 and (dversions) == $nv3) "database: a dry run writes nothing there"
 let dfail = (dlive [rollback $drill] {DB_FAIL: "1"})
 check ($dfail.exit_code != 0 and ($dfail.stderr | str contains "the database write through") and ($dfail.stderr | str contains "refused") and (puts | length) == 2) "database: a write that fails there fails the push"
+
+# ---- PRONTO-680: a push merges over the live flags (keep-live) and a release record lets a retired one go ----
+
+# On a bucket. A flip whose live stage fails goes back to the version read before it, with the flags kept live as they were.
+full-spec false "light"
+livex [push $app --flip premium] | ignore
+let extras = ((newest 0).data | from json | get flags | columns | where {|c| $c not-in ["premium" "theme"] })
+check (($extras | length) > 2) "keep-live: the live flags hold flags the spec no longer names (no record: all kept)"
+full-spec true "light"
+touch $"($app)/fail-live"
+let kf = (livex [push $app --flip premium])
+rm $"($app)/fail-live"
+let flipped = ((newest 1).data | from json | get flags | columns)
+let restored = ((newest 0).data | from json | get flags | columns)
+check ($kf.exit_code != 0 and ($extras | all {|c| $c in $flipped }) and ($extras | all {|c| $c in $restored }) and (premium (newest 0)).variants.default == false and (newest 0).metadata.stage == "rolled-back") "keep-live: a failed flip's restore keeps the kept flags intact"
+full-spec false "light"
+let nrec = (livex [push $app])
+check ($nrec.exit_code == 0 and ($nrec.stderr | str contains "no release record") and ((newest 0).data | from json | get flags | columns | where {|c| $c not-in ["premium" "theme"] } | length) == ($extras | length)) "keep-live, bucket: no record, every live flag kept, with a warning"
+let rurl = "gs://shop-prod-flags/released.json"
+let rdry = (livex [released $app] {FAKE_GCLOUD_READONLY: "1", PRONTO_FLAGS_DRY_RUN: "1"})
+check ($rdry.exit_code != 0 and ($rdry.stderr | str contains "dry run: refused a write") and (held | get objects | get -o $rurl | default [] | is-empty)) "released: refused under a dry run, nothing written"
+let rng = (livex [released $app])
+check ($rng.exit_code != 0 and ($rng.stderr | str contains "not in a git tree") and (held | get objects | get -o $rurl | default [] | is-empty)) "released: refused outside a git tree, nothing written"
+^git -C $app init -q
+^git -C $app add -A
+^git -C $app -c user.name=t -c user.email=t@example.com commit -q -m base
+let rw = (livex [released $app])
+let rrec = (held | get objects | get $rurl | first | get data | from json)
+check ($rw.exit_code == 0 and ($rrec.flags | sort) == ["premium" "theme"] and ($rrec.at | str ends-with "Z") and $rrec.commit == (^git -C $app rev-parse --short HEAD | str trim) and ($rrec.commit | is-not-empty)) "released, bucket: the record names the tree's flags, with the commit's value and the time"
+let nd = (object | length)
+let drop3 = (livex [push $app])
+check ($drop3.exit_code == 0 and (object | length) == $nd + 1 and ((newest 0).data | from json | get flags | columns | sort) == ["premium" "theme"] and ($drop3.stderr | str contains "the release no longer reads it")) "keep-live, bucket: flags the record does not name are dropped"
+check ((open --raw $"($dir)/journal.jsonl" | lines | last | from json | get dropped | split row "+" | sort) == ($extras | sort)) "keep-live: the journal line names what was dropped"
+
+# On a directory store: a drill app under git, its flags a, b, c, d over a push that names flips.
+let dbsql = $"($dir)/db.sql"
+def kspec [defs: record] {
+	let body = ($defs | items {|k, v| $"flags: ($k): {default: ($v), local: true}\n" } | str join)
+	$"package drill\nflags: drill_break_checkout: {default: false, local: true}\n($body)flagsLive: {dir: \"flagstore\", url: \"https://drill.example\", database: \"cat >> ($dbsql)\", mirrors: [{ssh: \"ops@node.example\", namespace: \"drill\", configMap: \"drill-flags\"}]}\n" | save -f $"($drill)/flags_spec.cue"
+}
+def klive [args: list<string>, extra: record = {}] { dlive $args ({PATH: ([$bin] | append $env.PATH)} | merge $extra) }
+def kflags [] { open $"($store)/flags.json" | get flags }
+def kdef [f: string] { (kflags | get $f).variants.default }
+def kputs [] { if ($dbsql | path exists) { open --raw $dbsql | lines | where {|l| $l | str starts-with "SELECT pronto_flags.put(" } } else { [] } }
+def kdoc [line: string] { $line | str replace "SELECT pronto_flags.put('" "" | str replace "'::jsonb, 'drill.example');" "" | str replace -a "''" "'" | from json }
+kspec {}
+klive [push $drill --untested "base" --flip drill_break_checkout] | ignore
+kspec {ka: false, kb: false, kc: false}
+let k0 = (klive [push $drill])
+check ($k0.exit_code == 0 and (kflags | columns | where {|c| $c in ["ka" "kb" "kc"] } | length) == 3) "keep-live: new flags that are off are written"
+
+# 8: a new flag that is on needs cases, as before.
+kspec {ka: false, kb: false, kc: false, kn: true}
+let nv8 = (dversions)
+let k8 = (klive [push $drill])
+check ($k8.exit_code != 0 and ($k8.stderr | str contains "no cases") and (dversions) == $nv8) "keep-live: a new flag that is on still needs its cases"
+
+# 4: defaults that differ, with no --flip: the live entries stay, no cases are asked for, one version is written.
+kspec {ka: true, kb: true, kc: false}
+let nv4 = (dversions)
+let k4 = (klive [push $drill])
+check ($k4.exit_code == 0 and (dversions) == $nv4 + 1 and (kdef ka) == false and (kdef kb) == false and ($k4.stderr | str contains "ka kept as live")) "keep-live: a changed default with no --flip is not written"
+check ((djournal | last).kept == "ka+kb" and (djournal | last).flag == "" and (djournal | last).changes == []) "keep-live: the journal names what was kept, and no flip"
+
+# 5: --flip names the one that flips.
+let k5 = (klive [push $drill --flip ka --untested "flip a"])
+check ($k5.exit_code == 0 and (kdef ka) == true and (kdef kb) == false and (djournal | last).flag == "ka" and (djournal | last).kept == "kb") "keep-live: --flip a flips a, b is kept"
+
+# 6: a --flip name the spec lacks is refused, nothing written.
+let nv6 = (dversions)
+let k6 = (klive [push $drill --flip nope])
+check ($k6.exit_code != 0 and ($k6.stderr | str contains "not in the spec") and (dversions) == $nv6) "keep-live: --flip of an unknown flag is refused, nothing written"
+let k6b = (klive [push $drill --drop ka])
+check ($k6b.exit_code != 0 and ($k6b.stderr | str contains "is in the spec") and (dversions) == $nv6) "keep-live: --drop of a flag the spec holds is refused"
+
+let k6c = (klive [push $drill --drop nowhere])
+check ($k6c.exit_code != 0 and ($k6c.stderr | str contains "neither live nor in the spec") and (dversions) == $nv6) "keep-live: --drop of a flag that is neither live nor in the spec is refused"
+
+# show and a dry run print the merge, and write nothing: ka is false live and true in the spec.
+def default-shown [out: string, f: string] { $out | parse -r ($f + '\s*│\s*(?<d>\w+)') | get d.0 }
+let sh0 = (klive [show $drill])
+let sh1 = (klive [show $drill --flip kb])
+check ($sh0.exit_code == 0 and (default-shown $sh0.stdout kb) == "false" and ($sh0.stderr | str contains "WARNING: kb kept as live")) "keep-live: show prints the merged result, kb kept as live"
+check ($sh1.exit_code == 0 and (default-shown $sh1.stdout kb) == "true" and not ($sh1.stderr | str contains "kb kept")) "keep-live: show --flip kb prints kb flipped"
+let nvd = (dversions)
+let dr = (klive [push $drill --flip kb --dry-run])
+check ($dr.exit_code == 0 and ($dr.stdout | str contains "dry run: nothing written") and (default-shown $dr.stdout kb) == "true" and (dversions) == $nvd) "keep-live: a dry-run push --flip shows the merge and writes nothing"
+
+# 1: no record, the spec drops a live flag: it is kept, with a warning, in one version.
+kspec {ka: true, kb: false}
+let nv1 = (dversions)
+let k1 = (klive [push $drill])
+check ($k1.exit_code == 0 and (dversions) == $nv1 + 1 and "kc" in (kflags | columns) and ($k1.stderr | str contains "no release record") and ($k1.stderr | str contains "kc kept as live")) "keep-live, dir: no record, the dropped flag is kept, with a warning"
+
+# 9: released writes the record from a clean tree, and refuses a dirty tree and a dry run.
+kspec {ka: true, kb: false, kc: false}
+mkdir $"($drill)/flags"
+'{"flags": {"drill_break_checkout": {}, "ka": {}, "kb": {}, "kc": {}}}' | save -f $"($drill)/flags/flags.json"
+^git -C $drill init -q
+^git -C $drill add -A
+^git -C $drill -c user.name=t -c user.email=t@example.com commit -q -m base
+let rfile = $"($store)/released.json"
+let rd = (klive [released $drill] {PRONTO_FLAGS_DRY_RUN: "1"})
+check ($rd.exit_code != 0 and ($rd.stderr | str contains "dry run: refused a write") and not ($rfile | path exists)) "released, dir: refused under a dry run"
+"// an edit\n" | save -a $"($drill)/flags_spec.cue"
+let rdirty = (klive [released $drill])
+check ($rdirty.exit_code != 0 and ($rdirty.stderr | str contains "edits") and not ($rfile | path exists)) "released, dir: refused on a tree with CUE edits"
+^git -C $drill checkout -q -- flags_spec.cue
+'{"flags": {"ka": {}}}' | save -f $"($drill)/flags/flags.json"
+let rdirty2 = (klive [released $drill])
+check ($rdirty2.exit_code != 0 and ($rdirty2.stderr | str contains "edits") and not ($rfile | path exists)) "released, dir: refused on a tree with an edited flags/flags.json"
+^git -C $drill checkout -q -- flags/flags.json
+"stray\n" | save -f $"($drill)/stray.cue"
+let rstray = (klive [released $drill])
+check ($rstray.exit_code == 0 and ($rfile | path exists)) "released, dir: an untracked leftover does not block it"
+rm $"($drill)/stray.cue" $rfile
+let rok = (klive [released $drill])
+let rec = (open $rfile)
+check ($rok.exit_code == 0 and ($rec.flags | sort) == ["drill_break_checkout" "ka" "kb" "kc"] and ($rec.commit | is-not-empty) and ($rec.commit | str contains "+" | not $in) and ($rec.at | str ends-with "Z")) "released, dir: the record names the flags, with the commit and time"
+
+# 2: the record names the flag the spec drops: it is kept, said as waiting for a release. 11: the database got the merge.
+kspec {ka: true, kb: false}
+let k2 = (klive [push $drill])
+check ($k2.exit_code == 0 and "kc" in (kflags | columns) and ($k2.stderr | str contains "waits for a release") and (djournal | last).kept == "kc") "keep-live, dir: a flag the release reads is kept as retired"
+check ((kdoc (kputs | last)) == (open $"($store)/flags.json") and "kc" in ((kdoc (kputs | last)).flags | columns)) "keep-live: the database holds the merged document"
+check ((open --raw $sent | from json | get data."flags.json" | from json) == (open $"($store)/flags.json") and "kc" in (open --raw $sent | from json | get data."flags.json" | from json | get flags | columns)) "keep-live: the mirror receives the merged document"
+check ((open $"($store)/flags.json") == (open $"($store)/versions/((glob $"($store)/versions/*.meta.json" | each {|f| open --raw $f | from json } | where timeDeleted == null | get generation.0)).json")) "keep-live: the live object is the merged document"
+
+# 7: --drop removes it whatever the record says.
+let k7 = (klive [push $drill --drop kc])
+check ($k7.exit_code == 0 and "kc" not-in (kflags | columns) and ($k7.stderr | str contains "forced by --drop") and (djournal | last).dropped == "kc") "keep-live: --drop removes a flag the record names, noted as forced"
+
+# 3: a flag the record does not name is dropped.
+kspec {ka: true, kb: false, kd: false}
+klive [push $drill] | ignore
+check ("kd" in (kflags | columns)) "keep-live: a flag added after the record is live"
+kspec {ka: true, kb: false}
+let k3 = (klive [push $drill])
+check ($k3.exit_code == 0 and "kd" not-in (kflags | columns) and (djournal | last).dropped == "kd" and ($k3.stderr | str contains "no longer reads it")) "keep-live, dir: a flag the record lacks is dropped, the journal says so"
 
 rm -rf $dir
 print "flags: live commands pass"

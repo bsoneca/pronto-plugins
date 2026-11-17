@@ -34,7 +34,7 @@ mkdir -p $app/.flags-live
 bin/pronto-probe run $app          # or: deno run -A probe/probe.ts $app
 
 # 4. the bad release: flip the flag on (edit flags_spec.cue: default: true), then
-bin/pronto-flags push $app
+bin/pronto-flags push $app --flip drill_break_checkout
 
 # 5. the probe prints ALERT with the push as the suspect and the command that undoes it
 bin/pronto-flags rollback $app <the version it names>

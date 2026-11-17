@@ -292,6 +292,21 @@ cases: {
 		{call: "cron.hookArgv", args: [{on: "released", command: ["deno", "run", "-A", "--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released"]}, "/state/wt", "brawl-chess", "c9ecd1f7a0b1"], expect: ["deno", "run", "-A", "--reload=https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/main/devflow/hook.ts", "released", "/state/wt", "brawl-chess", "c9ecd1f7a0b1"], why: "the dev flow's released hook, as Bonk Chess's and Book a time's releaseCron names it (PRONTO-1's board step, before hooks)"},
 		{call: "cron.hooksOf", args: [[{on: "released", command: ["a"]}, {on: "other", command: ["b"]}, {on: "released", command: ["c"]}], "released"], expect: [{on: "released", command: ["a"]}, {on: "released", command: ["c"]}], why: "in the order named"},
 	]}
+	"the flags' released command is the app's own with its folder appended, and none where the app names none": {suite: "cron", steps: [
+		{call: "cron.flagsReleasedArgv", args: [["pronto-flags", "released"], "/state/wt/apps/brawl-chess"], expect: ["pronto-flags", "released", "/state/wt/apps/brawl-chess"], why: "run once production serves the release, and when a run finds main already serving (PRONTO-680)"},
+		{call: "cron.flagsReleasedArgv", args: [null, "/state/wt/apps/brawl-chess"], expect: null, why: "an app with no flagsReleased records nothing, and nothing runs"},
+	]}
+	"a run records the served release's flags with a limit, and a failure of it is only said": {suite: "cron", steps: [
+		{call: "cron.recordFlagsReleased", args: [["true"], "/state/wt/apps/shop"], expect: "ok", why: "a confirmed release calls it, and it succeeds"},
+		{call: "cron.recordFlagsReleased", args: [["sh", "-c", "echo boom >&2; exit 3"], "/state/wt/apps/shop"], expect: "failed (exit 3: boom)", why: "a failing command returns a result and throws nothing, so the run's outcome stays"},
+		{call: "cron.recordFlagsReleased", args: [["sh", "-c", "sleep 5"], "/state/wt/apps/shop", {timeoutMs: 100}], expect: "failed (timed out after 0.1s)", why: "a command that hangs is stopped"},
+		{call: "cron.recordFlagsReleased", args: [null, "/state/wt/apps/shop"], expect: null, why: "an app that names none runs nothing"},
+	]}
+	"a run that finds main already serving records the flags again only when the last record was for another commit": {suite: "cron", steps: [
+		{call: "cron.flagsReleasedDue", args: [null, "c9ecd1f7a0b1"], expect: true, why: "no record yet"},
+		{call: "cron.flagsReleasedDue", args: ["c9ecd1f7a0b1\n", "c9ecd1f7a0b1"], expect: false, why: "recorded for the commit served"},
+		{call: "cron.flagsReleasedDue", args: ["0b2206c3aaaa", "c9ecd1f7a0b1"], expect: true},
+	]}
 	"the android step runs only where it is declared and the run is on a Mac": {suite: "cron", steps: [
 		{call: "cron.androidRuns", args: [{command: ["x"]}, "darwin"], expect: true},
 		{call: "cron.androidRuns", args: [null, "darwin"], expect: false, why: "none declared: none run"},

@@ -7,7 +7,9 @@
 # Where flagsLive says `dir` instead of a bucket, the same store is a local directory (see
 # "The store"): a drill or a laptop, with no gcloud.
 #   bin/pronto-flags setup <app-dir>               # the bucket, its readers, the first push
-#   bin/pronto-flags push <app-dir>                # the flags as flags_spec.cue says them now, once their cases pass
+#   bin/pronto-flags push <app-dir> [--flip a,b] [--drop a,b]
+#                                                  # the flags as flags_spec.cue says them now, merged over the live ones (see `keep-live`), once their cases pass
+#   bin/pronto-flags released <app-dir>            # records which flags the release being served reads (released.json beside the live object)
 #   bin/pronto-flags cases <app-dir> [flag]        # the cases a flip of each flag (or the one) runs
 #   bin/pronto-flags history <app-dir> [--json]    # every version, newest first
 #   bin/pronto-flags rollback <app-dir> [version]  # the version before the live one, or the one named
@@ -110,6 +112,41 @@ def store-version [at: record, gen: string]: nothing -> string {
 		if not ($f | path exists) { error make {msg: $"($at.url) has no version ($gen)"} }
 		open --raw $f
 	} else { gc storage cat $"($at.url)#($gen)" }
+}
+
+# The record of what the served release reads: released.json beside the live object (`pronto-flags released`),
+# {commit, at, flags: [names]}. null where there is none or it cannot be read: then every live flag counts as read.
+def record-url [at: record]: nothing -> string {
+	if (is-dir $at) { $at.dir | path join released.json } else { $at.url | str replace -r '/[^/]*$' '/released.json' }
+}
+def record-read [at: record]: nothing -> any {
+	try {
+		let text = if (is-dir $at) {
+			let f = (record-url $at)
+			if not ($f | path exists) { return null }
+			open --raw $f
+		} else {
+			let r = (run-gcloud storage cat (record-url $at))
+			if $r.exit_code != 0 { return null }
+			$r.stdout
+		}
+		let rec = ($text | from json)
+		if ($rec.flags? | describe | str starts-with "list") { $rec } else { null }
+	} catch { null }
+}
+def record-put [at: record, rec: record] {
+	refuse-write $"the release record at (record-url $at)"
+	let text = ($rec | to json --indent 2)
+	if (is-dir $at) {
+		let tmp = ($at.dir | path join ".released.json.tmp")
+		$text | save -f $tmp
+		mv -f $tmp (record-url $at)
+		return
+	}
+	let file = (mktemp -t --suffix .json)
+	$text | save -f $file
+	gc storage cp $file (record-url $at) --content-type application/json --cache-control no-store | ignore
+	rm $file
 }
 
 # Every version: generation, timeCreated, timeDeleted (null while live), metadata.
@@ -223,6 +260,31 @@ def defs-between [old: record, new: record]: nothing -> list<string> {
 	}
 }
 
+# What a push writes over the live flags `old`: the spec's `doc`, with the live entry kept where a flag is not the
+# push's to change (PRONTO-680: a push wrote main's spec whole, so a flag retired from main vanished from production
+# while the release serving it still read it, and a default changed on main landed unasked).
+#   - live, absent from the spec: kept while the release reads it (`reads`, the names in released.json; null: there is
+#     no record, so every live flag counts as read), dropped once the record does not name it, or when `drop` names it;
+#   - in both, its default differing: kept whole unless `flip` names it;
+#   - new to the live object: the spec's entry.
+# {doc, kept: [{flag, why}], dropped: [{flag, why}]}.
+export def keep-live [old: record, doc: record, reads: any, flip: list<string>, drop: list<string>]: nothing -> record {
+	let live = ($old.flags? | default {})
+	let spec = $doc.flags
+	let named = ($drop | where {|f| $f in ($spec | columns) })
+	if ($named | is-not-empty) { error make {msg: $"flags: --drop ($named | str join ', ') is in the spec: take it out of the spec first"} }
+	let nowhere = ($drop | where {|f| $f not-in ($spec | columns) and $f not-in ($live | columns) })
+	if ($nowhere | is-not-empty) { error make {msg: $"flags: --drop ($nowhere | str join ', ') is neither live nor in the spec; nothing was written"} }
+	let gone = ($live | columns | where {|f| $f not-in ($spec | columns) })
+	let verdicts = ($gone | each {|f|
+		if $f in $drop { {flag: $f, keep: false, why: "forced by --drop"} } else if $reads == null { {flag: $f, keep: true, why: "no released.json, so the release is taken to read it"} } else if $f in $reads.flags { {flag: $f, keep: true, why: "retired from the spec, waits for a release that stops reading it"} } else { {flag: $f, keep: false, why: "the release no longer reads it"} }
+	})
+	let held = (changes-between $old $doc | get flag | where {|f| $f in ($spec | columns) and $f in ($live | columns) and $f not-in $flip })
+	let kept = ($held | each {|f| {flag: $f, why: "its default differs from the live one and no --flip names it"} } | append ($verdicts | where keep | select flag why))
+	let flags = ($spec | merge ($held | each {|f| {$f: ($live | get $f)} } | into record) | merge ($verdicts | where keep | each {|v| {($v.flag): ($live | get $v.flag)} } | into record))
+	{doc: ($doc | upsert flags $flags), kept: $kept, dropped: ($verdicts | where {|v| not $v.keep } | select flag why)}
+}
+
 # Where a write is noted: one JSON line per write, in the operator's state (PRONTO_FLAGS_JOURNAL names the file).
 export def journal-file [app: path]: nothing -> string {
 	let named = ($env.PRONTO_FLAGS_JOURNAL? | default "")
@@ -250,6 +312,7 @@ def commit [at: record, app: path, text: string, meta: record, from: string, --d
 		at: (now-utc), event: "flags.write", app: ($app | path expand | path basename), target: $at.url, version: $gen, from: $from
 		stage: ($meta.stage? | default ""), flag: (if $names != "" { $names } else { $meta.flag? | default "" }), who: $p.who, commit: $p.commit
 		cases: ($meta.cases? | default ""), note: ($meta.note? | default ""), changes: $changes
+		kept: ($meta.kept? | default ""), dropped: ($meta.dropped? | default "")
 	} | to json -r
 	# The flags are written by now: a journal that cannot be written warns and never fails the write.
 	let file = (journal-file $app)
@@ -299,10 +362,41 @@ def summary [doc: record] {
 	$doc.flags | transpose flag def | each {|f| {flag: $f.flag, default: (default-of $f.def), local: ($f.def.variants.local? | default "—"), accounts: (accounts-of $f.def | str join ", ")}}
 }
 
-export def show [app: path] {
+# The live flags a push would write over, and what it would keep of them: the spec merged over the live object
+# (`keep-live`). Said as it goes; the live version it read comes back with the merge. A store with nothing live yet
+# has nothing to keep.
+def merge-live [at: record, app: path, doc: record, flip: list<string>, drop: list<string>]: nothing -> record {
+	let before = (generation $at)
+	let old = if $before == "0" { {flags: {}} } else { store-cat $at | from json }
+	let unknown = ($flip | where {|f| $f not-in ($doc.flags | columns) })
+	if ($unknown | is-not-empty) { error make {msg: $"flags: --flip ($unknown | str join ', ') is not in the spec; nothing was written"} }
+	let rec = (record-read $at)
+	let gone = ($old.flags? | default {} | columns | where {|f| $f not-in ($doc.flags | columns) })
+	if $rec == null and ($gone | is-not-empty) { print -e $"flags: WARNING: no release record at (record-url $at) \(`pronto-flags released`\): every live flag counts as read by the release" }
+	if $rec != null { print $"flags: the release record names ($rec.flags | length) flags, from commit ($rec.commit? | default '?') at ($rec.at? | default '?')" }
+	let m = (keep-live $old $doc ($rec) $flip $drop)
+	for k in $m.kept { print -e $"flags: WARNING: ($k.flag) kept as live: ($k.why)" }
+	for d in $m.dropped { print -e $"flags: ($d.flag) dropped from the live flags: ($d.why)" }
+	$m | insert before $before | insert old $old
+}
+
+# What a push's version keeps of the merge, beside its stage: the flags it left as live, and those it dropped.
+def merge-meta [m: record]: nothing -> record {
+	let kept = ($m.kept | get flag | str join "+")
+	let dropped = ($m.dropped | get flag | str join "+")
+	{} | if $kept != "" { insert kept $kept } else { $in } | if $dropped != "" { insert dropped $dropped } else { $in }
+}
+
+export def show [app: path, --flip: list<string> = [], --drop: list<string> = []] {
 	let at = (live $app)
 	print $"flags: a push writes ($at.url) in ($at.project? | default 'a local directory'):"
-	summary (cue-of $app flagd.document) | print
+	let doc = (cue-of $app flagd.document)
+	let merged = try { (merge-live $at $app $doc $flip $drop).doc } catch {|e|
+		if ($e.msg | str contains "--flip") or ($e.msg | str contains "--drop") { error make {msg: $e.msg} }
+		print -e $"flags: WARNING: the live flags were not read, so this is the spec alone: ($e.msg | lines | first)"
+		$doc
+	}
+	summary $merged | print
 }
 
 # The flags as the spec says them, written with no cases: the first push of `setup`.
@@ -434,15 +528,19 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 #      failure writes the version read before 2 again, and the push fails. A production scenario that signs in
 #      needs a tester's account, which a flip no longer has: it is listed and not run.
 # A flag turned off (default now false) runs no cases: it returns to the path before it, and its cases test it on.
-export def push [app: path, --untested: string, --no-canary: string, --expect: string] {
+export def push [app: path, --untested: string, --no-canary: string, --expect: string, --flip: list<string> = [], --drop: list<string> = []] {
 	let at = (live $app)
-	if (target-guard $at $expect) { show $app; print "flags: dry run: nothing written"; return }
-	let doc = (cue-of $app flagd.document)
-	let before = (generation $at)
-	let old = if $before == "0" { {flags: {}} } else { store-cat $at | from json }
+	if (target-guard $at $expect) { show $app --flip $flip --drop $drop; print "flags: dry run: nothing written"; return }
+	let spec = (cue-of $app flagd.document)
+	# The spec merged over the live flags: what is not this push's to change stays as it is live (see `keep-live`).
+	let m = (merge-live $at $app $spec $flip $drop)
+	let doc = $m.doc
+	let before = $m.before
+	let old = $m.old
+	let kept = (merge-meta $m)
 	let changed = (changed-flags $old $doc)
 	if ($changed | is-empty) {
-		write-flags $at $doc $app --meta {stage: all} --from $before | ignore
+		write-flags $at $doc $app --meta ({stage: all} | merge $kept) --from $before | ignore
 		return
 	}
 	# --no-canary was the way past the testers' stage (pronto-plugins#184); every push is that way now.
@@ -468,13 +566,13 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if $no_canary != null { $"no canary: ($no_canary)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" })] | compact | str join "; ")
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
 	if ($live | is-empty) {
-		write-flags $at $doc $app --meta {stage: all, flag: $names, cases: (if ($bare | is-not-empty) { "untested" } else { "none on production" }), note: $notes} --from $before | ignore
+		write-flags $at $doc $app --meta ({stage: all, flag: $names, cases: (if ($bare | is-not-empty) { "untested" } else { "none on production" }), note: $notes} | merge $kept) --from $before | ignore
 		tell-board $at $app ($changed | where {|f| $f not-in $off }) $off
 		return
 	}
 	# Not `try ... finally`: nu runs what follows it and raises the error only at the end, so a failed flip
 	# told the board its flags were on for everyone (PRONTO-15 Done at 18:02 BRT, 2026-11-08; PRONTO-43).
-	flip-live $at $app $doc $live $cmds $before {stage: all, flag: $names, note: $notes}
+	flip-live $at $app $doc $live $cmds $before ({stage: all, flag: $names, note: $notes} | merge $kept)
 	tell-board $at $app ($changed | where {|f| $f not-in $off }) $off
 }
 
@@ -535,6 +633,26 @@ export def history [app: path, --changes] {
 		let prev = if $e.index == 0 { {flags: {}} } else { $docs | get ($e.index - 1) }
 		$e.item | insert changes (if $cur == null or $prev == null { null } else { changes-between $prev $cur })
 	} | reverse
+}
+
+# Records which flags the release being served reads: the names in the tree's flags/flags.json (the file the flagd
+# image bakes), with the commit and the time, as released.json beside the live object. Run from the tree released
+# (release-cron, once production serves it); a tree with CUE edits is refused, since it is no commit's.
+export def released [app: path, --expect: string] {
+	let at = (live $app)
+	target-guard $at $expect | ignore
+	refuse-write $"the release record at (record-url $at)"
+	# The tree's commit, and no edit to what the record is made of: the spec's CUE and flags/flags.json, as git tracks them (an
+	# untracked leftover does not block it).
+	let commit = (do { cd $app; ^git rev-parse --short HEAD } | complete)
+	if $commit.exit_code != 0 or ($commit.stdout | str trim | is-empty) { error make {msg: $"flags: ($app) is not in a git tree: the release record names the commit released"} }
+	let dirty = (do { cd $app; ^git status --porcelain --untracked-files=no -- '*.cue' flags/flags.json } | complete | get stdout | str trim)
+	if ($dirty | is-not-empty) { error make {msg: $"flags: ($app) has CUE or flags.json edits: the release record is written from a clean released tree"} }
+	let p = {commit: ($commit.stdout | str trim)}
+	let file = ($app | path expand | path join flags flags.json)
+	let names = if ($file | path exists) { open --raw $file | from json | get flags | columns } else { cue-of $app flagd.document | get flags | columns }
+	record-put $at {commit: $p.commit, at: (now-utc), flags: $names}
+	print $"flags: (record-url $at) names ($names | length) flags, from commit ($p.commit)"
 }
 
 # The version before the live one, or the one named, written again as the newest:
@@ -765,11 +883,13 @@ def "main armies show" [app: path, --local] { armies-show $app --local=$local }
 def "main armies history" [app: path, --local, --json] { let h = (armies-history $app --local=$local); if $json { $h | to json | print } else { $h | table -e | print } }
 def "main armies rollback" [app: path, army: string, version?: int, --local, --expect: string, --dry-run] { with-env (dry-env $dry_run) { armies-rollback $app $army $version --local=$local --expect $expect } }
 
-def main [] { print "usage: live.nu setup|push|history|rollback|show|cases <app-dir> [version|flag]; live.nu armies push|show|history|rollback <app-dir>" }
+def main [] { print "usage: live.nu setup|push|released|history|rollback|show|cases <app-dir> [version|flag]; live.nu armies push|show|history|rollback <app-dir>" }
 def "main setup" [app: path, --expect: string, --dry-run] { with-env (dry-env $dry_run) { setup $app --expect $expect } }
-def "main push" [app: path, --untested: string, --no-canary: string, --expect: string, --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --no-canary $no_canary --expect $expect } }
+def "main push" [app: path, --untested: string, --no-canary: string, --expect: string, --flip: string = "", --drop: string = "", --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --no-canary $no_canary --expect $expect --flip (names $flip) --drop (names $drop) } }
+def "main released" [app: path, --expect: string, --dry-run] { with-env (dry-env $dry_run) { released $app --expect $expect } }
+def names [s: string]: nothing -> list<string> { $s | split row "," | each {|n| $n | str trim } | where {|n| $n != "" } }
 def "main history" [app: path, --json] { if $json { history $app --changes | to json | print } else { history $app | table -e | print } }
 def "main rollback" [app: path, version?: string, --expect: string, --dry-run] { with-env (dry-env $dry_run) { rollback $app $version --expect $expect } }
 def dry-env [on: bool]: nothing -> record { if $on { {PRONTO_FLAGS_DRY_RUN: "1"} } else { {} } }
-def "main show" [app: path] { show $app }
+def "main show" [app: path, --flip: string = "", --drop: string = ""] { show $app --flip (names $flip) --drop (names $drop) }
 def "main cases" [app: path, flag?: string] { cases $app $flag | table -e | print }

@@ -62,6 +62,18 @@ A flip therefore needs a test of its own, and it must be:
    only selects them (`ONLY`, `UNIT_ONLY`) and sets the environment.
 7. **`rollback` stays the fast way out.** It runs no cases, since turning a broken feature off must
    not wait on tests.
+8. **A push is a merge, and a flip is named (PRONTO-680).** `pronto-flags push` once wrote main's spec whole
+   over the live object, so a flag retired from main disappeared from production while the release
+   serving it still read it, and a default changed on main landed with no one flipping it.
+   - A flip is named: `--flip a,b`. A flag whose default differs and is not named keeps its live
+     entry, said on stderr; a bare push flips nothing live.
+   - A retirement waits for a release. A live flag the spec drops stays while the release being
+     served reads it; `released.json` beside the live object (`pronto-flags released`, run by
+     release-cron once production serves a release) says what it reads. With no record every flag
+     counts as read, so nothing is removed before a release writes one. `--drop a,b` forces it.
+   - Refusing instead would block every push from main while a retirement or an unflipped default
+     awaits a release, which for a release-cron app is always.
+   - `rollback` still writes an old version whole.
 
 ## The production guarantee
 

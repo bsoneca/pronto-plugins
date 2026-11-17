@@ -68,6 +68,11 @@ schedulerActions: _actions.scheduler & {kind: "actions"}
 hooksDefault: _defaults.hooks & []
 _hook: #Cron & {watch: ["x"], probes: {}, hooks: [{on: "released", command: ["deno", "run", "hook.ts"]}]}
 hook: _hook.hooks[0].command & ["deno", "run", "hook.ts"]
+// The command that records the served release's flags (pronto-flags `released`) is none unless the app names it.
+flagsReleasedDefault: _defaults.flagsReleased & null
+_flagsReleased: #Cron & {watch: ["x"], probes: {}, flagsReleased: ["pronto-flags", "released"]}
+flagsReleasedNamed: _flagsReleased.flagsReleased & ["pronto-flags", "released"]
+noFlagsCommand: [if (#Cron & {watch: ["x"], probes: {}, flagsReleased: []}) == _|_ {"refused"}, "accepted"][0] & "refused"
 noEvent: [if (#Cron & {watch: ["x"], probes: {}, hooks: [{on: "never", command: ["x"]}]}) == _|_ {"refused"}, "accepted"][0] & "refused"
 
 // An app off Cloud Run names a target: the commands that release and read what serves, and the https address the probes ask.

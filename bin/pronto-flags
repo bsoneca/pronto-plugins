@@ -5,8 +5,12 @@
 #   bin/pronto-flags setup <app-dir>               # once: the bucket, its readers, the first push
 #                                                  # (every write says its target, and takes --expect <url> or PRONTO_FLAGS_EXPECT;
 #                                                  #  --dry-run or PRONTO_FLAGS_DRY_RUN=1 shows and writes nothing, refused at each write; each write is noted in the journal)
-#   bin/pronto-flags push <app-dir> [--untested "<why>"] [--no-canary "<why>"]
-#                                                  # the flags as flags_spec.cue says them now, once a changed flag's cases pass
+#   bin/pronto-flags push <app-dir> [--flip a,b] [--drop a,b] [--untested "<why>"] [--no-canary "<why>"]
+#                                                  # the flags as flags_spec.cue says them now, merged over the live ones: a default
+#                                                  # changes only for a flag --flip names; a live flag the spec dropped stays while
+#                                                  # the served release reads it (released.json), unless --drop names it
+#   bin/pronto-flags released <app-dir>            # records which flags the served release reads (released.json beside the live
+#                                                  # object); run from the clean released tree, by release-cron once it serves
 #   bin/pronto-flags cases <app-dir> [flag]        # the cases a flip of each flag (or the one) runs
 #   bin/pronto-flags history <app-dir> [--json]    # every version, newest first
 #   bin/pronto-flags rollback <app-dir> [version]  # the version before the live one, or the one named
@@ -14,7 +18,7 @@
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 case "${1:-}" in
-setup|push|history|rollback|show|cases)
+setup|push|released|history|rollback|show|cases)
 	cmd=$1
 	app=$(cd "$2" && pwd)
 	shift 2

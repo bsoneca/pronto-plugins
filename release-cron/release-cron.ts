@@ -27,7 +27,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
+import { schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 
 const here = new URL("./", import.meta.url).pathname;
@@ -427,7 +427,7 @@ const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() -
 let head = "";
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
 type Command = { release: string[]; serving: string[]; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string } };
-let cron: { scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
+let cron: { scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; flagsReleased: string[] | null; gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
 let mark = Date.now();
@@ -659,7 +659,10 @@ try {
   before = target ? servingNow() : whole(JSON.parse(gcloud(["run", "services", "describe", gcp!.service])).status?.traffic);
   const live = target ? (sh("git", ["cat-file", "-e", `${before}^{commit}`], wt).ok ? before : undefined) : base(jsonl(`${state}/runs.jsonl`), before);
   step("prepare");
-  if (live === head) end("skipped", `main ${head.slice(0, 8)} is serving as ${before}`);
+  if (live === head) {
+    run.flagsReleased = await flagsReleased(`${wt}/${appRel}`, true) ?? undefined;
+    end("skipped", `main ${head.slice(0, 8)} is serving as ${before}`);
+  }
   if (live) {
     const diff = sh("git", ["diff", "--name-only", live, head], wt);
     if (diff.ok && !changed(diff.out.split("\n").filter(Boolean), cron.watch).length) end("skipped", `nothing under ${cron.watch.join(", ")} changed since ${live.slice(0, 8)}, released by a run and serving as ${before}`);
@@ -874,6 +877,8 @@ try {
   }
   step("confirm");
   if (wrong.length) end("failed", `released, production not confirmed: ${wrong.join("; ")}`, 1);
+  // 5b. The flags the release reads (releaseCron.flagsReleased), now that production serves it.
+  run.flagsReleased = await flagsReleased(`${wt}/${appRel}`, false) ?? undefined;
   // 6. The release's notes (release-notes/release-notes.ts), when the app has them and the revision is new: a GitHub Release
   // tagged <app>/<revision>. Its output is in the run's log; whatever it does, the run's outcome stays.
   if (run.revision !== before && exists(`${dir}/release-notes/release-notes.ts`)) {
@@ -921,6 +926,19 @@ try {
 } catch (e) {
   step("error");
   end("failed", (e as Error).message.split("\n")[0], 1);
+}
+
+// releaseCron.flagsReleased: records which flags the release now served reads, so a flag push keeps one it still reads
+// (pronto-flags `released`). Whatever it does, the run's outcome stays: a failure is said and never fails the run. The commit
+// it succeeded for is kept in `flags-released`: a run that finds main already serving records again only when that is not head.
+async function flagsReleased(dir: string, onlyIfDue: boolean): Promise<string | null> {
+  const marker = `${state}/flags-released`;
+  if (onlyIfDue && !flagsReleasedDue(exists(marker) ? Deno.readTextFileSync(marker) : null, head)) return null;
+  const result = await recordFlagsReleased(cron.flagsReleased, dir, { cwd: wt, env: boardEnv(Deno.env.toObject(), Deno.env.get("HOME") ?? "", cueVersions()) });
+  if (result === null) return null;
+  if (result === "ok") { try { Deno.writeTextFileSync(marker, head); } catch { /* the next run records again */ } }
+  say(`flags released ${cron.flagsReleased!.join(" ")}: ${result}${result === "ok" ? "" : "; the flags' push keeps every live flag until it is recorded"}`);
+  return result;
 }
 
 function cueVersions(): string[] {
