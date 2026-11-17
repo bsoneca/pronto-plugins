@@ -8,7 +8,7 @@
 //   deno run -A release-cron/release-cron.ts <app> report      every release measured, the newest's phases against those before
 //   deno run -A release-cron/release-cron.ts <app> bisect [--dry|--no-notify]  the commit that broke the last failed run (a failed run starts it as it ends)
 // RELEASE_CRON_REF names the ref a run takes in place of origin/main (a branch's, to try a change to
-// this script); RELEASE_CRON_DRY=1 ends a run once it knows whether it would rehearse;
+// this script); RELEASE_CRON_DRY=1 ends a run once it knows whether it would rehearse (RELEASE_CRON_DRY=android runs only the android step, ending dry with its exit code);
 // RELEASE_CRON_NOW=1 starts the run without waiting the gap (a CD job's run for the commit it was pushed for).
 // An app whose releaseCron has a `target` (aprende, on Cloudflare Pages, with no release.cue) runs
 // its own release and serving commands in place of `./saytw release@gcp` and gcloud, and its probes ask the target's origin.
@@ -27,7 +27,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal } from "./cron.js";
+import { schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 
 const here = new URL("./", import.meta.url).pathname;
@@ -427,7 +427,7 @@ const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() -
 let head = "";
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
 type Command = { release: string[]; serving: string[]; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string } };
-let cron: { scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; notify: Notify; hooks: { on: string; command: string[] }[]; gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
+let cron: { scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; gap: number; poll: number; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
 let mark = Date.now();
@@ -664,7 +664,9 @@ try {
     const diff = sh("git", ["diff", "--name-only", live, head], wt);
     if (diff.ok && !changed(diff.out.split("\n").filter(Boolean), cron.watch).length) end("skipped", `nothing under ${cron.watch.join(", ")} changed since ${live.slice(0, 8)}, released by a run and serving as ${before}`);
   }
-  if (Deno.env.get("RELEASE_CRON_DRY")) end("dry", `would rehearse and release ${head.slice(0, 8)}: it differs from ${live?.slice(0, 8) ?? "an unknown commit"}, serving as ${before}`);
+  // RELEASE_CRON_DRY=android runs only the android step below, in place of the rehearsal and the preview.
+  const dry = Deno.env.get("RELEASE_CRON_DRY");
+  if (dry && dry !== "android") end("dry", `would rehearse and release ${head.slice(0, 8)}: it differs from ${live?.slice(0, 8) ?? "an unknown commit"}, serving as ${before}`);
   say(`${head.slice(0, 8)} differs from what serves (${live ? live.slice(0, 8) : `unknown: no run that released confirmed ${before}`}): rehearsing`);
 
   // 2. The rehearsal: it waits for its slot as long as it takes (the lock keeps another run from starting meanwhile), then runs to its verdict.
@@ -674,12 +676,12 @@ try {
   const cloud = !!gcp?.rehearsal;
   const rehearse = cron.rehearsal.command;
   const own = !cloud && !!rehearse;
-  const wantSlot = own && cron.rehearsal.slot;
+  const wantSlot = own && cron.rehearsal.slot && !dry;
   if (cloud) say(`GCP.rehearsal: the rehearsal runs in the cloud, job ${gcp!.rehearsal!.job}, inside release@gcp`);
   else if (!rehearse) say("no rehearsal: releaseCron.rehearsal.command is null");
   let got = !wantSlot;
   if (wantSlot) active("slot");
-  else if (own) { step("slot"); active("rehearse"); say("rehearsal.slot is false: run without waiting for a slot"); }
+  else if (own && !dry) { step("slot"); active("rehearse"); say("rehearsal.slot is false: run without waiting for a slot"); }
   // The slot is taken once a live slot of the pool names this rehearsal as its owner.
   const pool = Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks";
   const look = setInterval(() => {
@@ -698,13 +700,32 @@ try {
   // The rehearsal's own output names the new-feature scenarios it passed on and the ones that flaked on their one retry.
   let newFailing: string[] = [];
   let flaked: string[] = [];
-  const gate = !own ? { code: 0 } : await child(rehearse![0], rehearse!.slice(1), dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
+  const gate = !own || dry ? { code: 0 } : await child(rehearse![0], rehearse!.slice(1), dir, { ...Deno.env.toObject(), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
   clearInterval(look);
   // Every check passed already for this tree: the rehearsal took no slot and waited for none.
   if (!got && gate.code === 0) { got = true; step("slot"); active("rehearse"); }
   if (!got) { step("slot"); end("failed", `${rehearse!.slice(1).join(" ") || rehearse![0]} ended before its slot (exit ${gate.code}): nothing released`, 1); }
-  if (own) step("rehearse");
+  if (own && !dry) step("rehearse");
   if (gate.code !== 0) end("failed", `the rehearsal failed (exit ${gate.code}): nothing released`, 1);
+
+  // 2a. The android step (releaseCron.android): the app's phone scenarios on an emulator, on a Mac, once the rehearsal
+  // passed. A failure ends the run as a failed rehearsal does, and its bisect says "not bisected" (cron.js).
+  if (androidRuns(cron.android, Deno.build.os)) {
+    active("android");
+    let failedNames: string[] = [];
+    const cmd = cron.android!.command;
+    // The credentials the bisect's env drops are not the step's either.
+    const env = { ...Deno.env.toObject(), STACK_WAIT_MINUTES: "525600" };
+    for (const k of ["GH_TOKEN", "GITHUB_TOKEN", "CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE", "GOOGLE_GHA_CREDS_PATH"]) delete env[k];
+    const phoneRun = await child(cmd[0], cmd.slice(1), dir, env, (l) => { failedNames = [...new Set([...failedNames, ...androidFailed(l)])]; });
+    step("android");
+    if (dry) end("dry", phoneRun.code === 0 ? "the android step passed" : androidWhy(phoneRun.code, failedNames), phoneRun.code === 0 ? 0 : 1);
+    if (phoneRun.code !== 0) end("failed", androidWhy(phoneRun.code, failedNames), 1);
+  } else {
+    const skip = androidSkip(cron.android, Deno.build.os);
+    if (skip) say(skip);
+    if (dry) end("dry", "the android step is not declared, or release-cron is not on a Mac: nothing run");
+  }
 
   // 2b. The release preview (releaseCron.target.preview): the release's whole stack in a namespace of its own on the
   // cluster, asked the probes through a port-forward before the release goes ahead, and removed after, whatever it

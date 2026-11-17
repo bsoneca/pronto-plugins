@@ -120,3 +120,8 @@ noSshAccepted: _noSsh.target._alive & [true, true]
 sshReleaseBare: [if (#Cron & {watch: ["x"], probes: {}, target: {release: ["sh", "-c", "ssh h r"], serving: ["./s.sh"], origin: "https://x.example"}}) == _|_ {"refused"}, "accepted"][0] & "refused"
 sshServingBare: [if (#Cron & {watch: ["x"], probes: {}, target: {release: ["./r.sh"], serving: ["ssh", "h", "x"], origin: "https://x.example"}}) == _|_ {"refused"}, "accepted"][0] & "refused"
 sshPreviewBare: [if (#Cron & {watch: ["x"], probes: {}, target: {release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example", preview: {up: ["./u.sh"], reach: ["sh", "-c", "ssh -A -L 1:1:1 h"], down: ["./d.sh"]}}}) == _|_ {"refused"}, "accepted"][0] & "refused"
+
+// The android step is none by default, and a declared one names its command.
+noAndroid: [if _defaults.android == _|_ {"none"}, "some"][0] & "none"
+_android: #Cron & {watch: ["x"], probes: {}, android: command: ["sh", "-c", "./saytw integrate@android"]}
+androidDeclared: _android.android.command & ["sh", "-c", "./saytw integrate@android"]

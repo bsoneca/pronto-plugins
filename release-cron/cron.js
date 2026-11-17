@@ -20,7 +20,7 @@ export const local = (ms, tz = zone) => {
 };
 
 // The release-active file's line: the app, the run's pid, when it started and its phase (slot,
-// rehearse, release or confirm). One line of JSON, written whole and renamed into place.
+// rehearse, android, preview, release or confirm). One line of JSON, written whole and renamed into place.
 export const activeLine = (app, pid, started, phase) => JSON.stringify({ app, pid, started, phase }) + "\n";
 
 // The outcomes after which the next run waits the gap.
@@ -252,14 +252,32 @@ WantedBy=timers.target
   return { service, timer };
 };
 
+// --- The android step: the phone's scenarios on an emulator, on a Mac, after the rehearsal. ---
+
+// Whether the android step runs: declared (releaseCron.android) and on a Mac (`os` is Deno.build.os).
+export const androidRuns = (android, os) => !!android && os === "darwin";
+
+// What the log says where a declared android step cannot run, or null when it runs or none is declared.
+export const androidSkip = (android, os) => !android || androidRuns(android, os) ? null
+  : `android: skipped, release-cron runs on ${os} and the emulator needs a Mac; the release goes on without the phone's scenarios`;
+
+// The scenarios the step's output marks failed: scenarios.ts prints `FAIL  <name>  <seconds> s  <why>`.
+export const androidFailed = (text) => [...new Set([...(text ?? "").matchAll(/^FAIL {2}(\S+) {2}/gm)].map((m) => m[1]))];
+
+// Why a failed android step ended the run: the exit and the scenarios named, the prefix `signature` reads.
+export const androidWhy = (code, names) => `the android step failed (exit ${code}): ${names.length ? `${names.join(", ")}: ` : ""}nothing released`;
+
+
 // --- Bisect: a failed run names the commit that broke it. ---
 
 // What a failed run failed on, from its `why` and its output: the kind ("release" when release@gcp,
 // a target's release command (`release (cmd)`) or the confirm failed, else "rehearsal") and the scenarios the output marks failed (`✗ <name> (12s) at step`).
-export const signature = (why, text) => ({
-  kind: /^release@gcp|^release \(|^released, production/.test(why ?? "") ? "release" : "rehearsal",
-  names: [...new Set([...(text ?? "").matchAll(/✗ (\S+) \(\d+s\) at step/g)].map((m) => m[1]))],
-});
+export const signature = (why, text) => /^the android step/.test(why ?? "")
+  ? { kind: "android", names: androidFailed(text) }
+  : {
+    kind: /^release@gcp|^release \(|^released, production/.test(why ?? "") ? "release" : "rehearsal",
+    names: [...new Set([...(text ?? "").matchAll(/✗ (\S+) \(\d+s\) at step/g)].map((m) => m[1]))],
+  };
 
 // The merges of `git log --first-parent --format='%H %s'` lines, oldest first, each with its pull
 // request and branch when the subject is a GitHub merge ("Merge pull request #1 from o/b"); other
@@ -315,6 +333,7 @@ export const unreproduced = (kind, v) => v === "bad" ? null :
 // #771's flag-off menu path, and a check run while the machine sat at load 185 fails by itself.
 // `specs` is [{id, flags, slow}] of the scenarios; `load` the 1-minute load average and `cores` the machine's.
 export const undecidable = (sig, text, specs, load, cores, flaked = []) => {
+  if (sig.kind === "android") return "the android step runs on an emulator, which the bisect's check (integrate@local) does not: not bisected";
   // A release's failure is the cloud's (its rc preview), so the machine's load now says nothing of it;
   // one whose only failed checks are the menu budget's timing is not the commit's either (2026-11-07
   // 10:11 BRT: "menu time 9327 ms > 6000 ms" on the rc, and its bisect ran a whole local check to say so).
