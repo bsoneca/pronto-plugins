@@ -825,13 +825,16 @@ export class Run {
       let json: any = null;
       try { json = JSON.parse(text); } catch { /* not JSON */ }
       const e = h.expect, s = res.status();
+      const texts = Object.entries((h.keepText ?? {}) as Record<string, string>).map(([name, re]) => [name, text.match(new RegExp(re))?.[1]] as const);
       const ok = (e.status === undefined || s === e.status) && (!e.refused || s >= 400)
         && (e.length === undefined || (Array.isArray(json) && json.length === e.length))
         && (e.json === undefined || holds(json, await this.fillAll(e.json)))
         && (e.has === undefined || (await this.fillAll(e.has) as string[]).every((x) => text.includes(x)))
         && (e.lacks === undefined || (await this.fillAll(e.lacks) as string[]).every((x) => !text.includes(x)))
-        && (e.header === undefined || Object.entries(await this.fillAll(e.header) as Record<string, string>).every(([k, v]) => res.headers()[k] === v));
+        && (e.header === undefined || Object.entries(await this.fillAll(e.header) as Record<string, string>).every(([k, v]) => res.headers()[k] === v))
+        && texts.every(([, got]) => got !== undefined);
       if (ok) for (const [name, at] of Object.entries((h.keep ?? {}) as Record<string, string>)) this.vars.set(name, String(at.split(".").reduce((o: any, k) => o?.[k], json)));
+      if (ok) for (const [name, got] of texts) this.vars.set(name, got as string);
       return [ok, `${s} ${text.slice(0, e.has || e.lacks ? 1500 : 300)}`];
     };
     if (st.poll) return this.until(`${h.method} ${path}`, t, ask);
