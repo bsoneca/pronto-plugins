@@ -977,8 +977,8 @@ async function fileFlake(id: string) {
   const repo = new TextDecoder().decode(top.stdout).trim(), commit = new TextDecoder().decode(head.stdout).trim();
   const run = Deno.env.get("GITHUB_RUN_ID") ? `${Deno.env.get("GITHUB_SERVER_URL")}/${Deno.env.get("GITHUB_REPOSITORY")}/actions/runs/${Deno.env.get("GITHUB_RUN_ID")}` : "a local run";
   const [cmd, ...args] = spec.flakes.file;
-  // Filing is bookkeeping: a board that refuses is said and warned (flakes.ts), never the run's failure. The flaked
-  // scenario's own outcome decides the run, and the unwritten marker makes the next run try again.
+  // Filing is bookkeeping (flakes.ts, PRONTO-649): a board that refuses is said and warned, never thrown. The flaked
+  // scenario stays failed, so this run exits 1 either way; the unwritten marker makes the next run try again.
   await file({
     id, cmd: cmd === "deno" ? Deno.execPath() : cmd, marks,
     args: [...args, repo, "--app", app, "--bug", "true", "--priority", spec.flakes.priority,

@@ -13,7 +13,7 @@ cases: "a board that refuses a flake is said with its whole error, never thrown,
 		{use: "r"},
 		{get: "marker", expect: null, why: "no marker, so the next run files it again"},
 		{use: "r"},
-		{get: "said", expect: ["  ⚠ flake demo not filed: the board said:\n    Error: board said no\n        at async board.ts:19:21"], why: "every line of the board's stderr, not its last stack frame"},
+		{get: "said", expect: ["  ⚠ flake demo not filed: the board said:\n    | Error: board said no\n    |     at async board.ts:19:21"], why: "every line of the board's stderr, not its last stack frame"},
 	]
 }
 cases: "a board that refuses a flake on GitHub Actions also warns with an annotation": {
@@ -33,7 +33,7 @@ cases: "a board that is missing is a refusal too": {
 		{use: "r"},
 		{get: "marker", expect: null},
 		{use: "r"},
-		{get: "said", expect: ["  ⚠ flake demo not filed: the board said:\n    board: command not found"]},
+		{get: "said", expect: ["  ⚠ flake demo not filed: the board said:\n    | board: command not found"]},
 	]
 }
 cases: "a board that files a flake gets its marker, holding what it said": {
@@ -46,5 +46,11 @@ cases: "a board that files a flake gets its marker, holding what it said": {
 		{get: "marker", expect: "PRONTO-700 https://board/PRONTO-700"},
 		{use: "r"},
 		{get: "said", expect: ["  filed: PRONTO-700 https://board/PRONTO-700"]},
+	]
+}
+cases: "a filed flake whose marker cannot be written is said, never thrown": {
+	suite: "harness"
+	steps: [
+		{call: "harness.unmarked", expect: {threw: false, filed: true, said: 1}, why: "a cache that cannot be written is bookkeeping too: the next run files it again"},
 	]
 }

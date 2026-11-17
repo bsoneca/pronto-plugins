@@ -1,11 +1,13 @@
-// Files a flake on the board (tests/scenarios.ts, schema.cue's `flakes`). Filing is bookkeeping: the
-// flaked scenario's own outcome decides the run, so a board that refuses (or is missing) is said, with its
-// whole error, and never thrown. No marker is written then, so the next run tries again.
+// Files a flake on the board (tests/scenarios.ts, schema.cue's `flakes`). Filing is bookkeeping (PRONTO-649, the
+// owner's call): a flake is filed only for a scenario that stays failed, so every run that gets here already exits 1
+// and nothing is hidden from the gate. A board that refuses (or is missing), or a marker that cannot be written, is
+// therefore said, with its whole error and a GitHub warning, and never thrown: a throw only cut the run's report and
+// its selection commit short. No marker is written then, so the next run tries again.
 export type Spawned = { success: boolean; stdout: string; stderr: string };
 export type Spawn = (cmd: string, args: string[], env: Record<string, string>) => Promise<Spawned>;
 
 export const spawn: Spawn = async (cmd, args, env) => {
-  const o = await new Deno.Command(cmd === "deno" ? Deno.execPath() : cmd, { args, env, stdout: "piped", stderr: "piped" }).output();
+  const o = await new Deno.Command(cmd, { args, env, stdout: "piped", stderr: "piped" }).output();
   return { success: o.success, stdout: new TextDecoder().decode(o.stdout), stderr: new TextDecoder().decode(o.stderr) };
 };
 
@@ -25,13 +27,20 @@ export async function fileFlake(o: {
   }
   if (!out.success) {
     const error = out.stderr.trim() || "(no error output)";
-    say(`  ⚠ flake ${o.id} not filed: the board said:\n${error.split("\n").map((l) => `    ${l}`).join("\n")}`);
+    say(`  ⚠ flake ${o.id} not filed: the board said:\n${error.split("\n").map((l) => `    | ${l}`).join("\n")}`);
     if (o.github) say(`::warning title=flake not filed::${escape(`flake ${o.id} not filed: the board said: ${error}`)}`);
     return { filed: false, error };
   }
   const said = out.stdout.trim().split("\n").at(-1) ?? "";
-  await Deno.mkdir(o.marks, { recursive: true });
-  await Deno.writeTextFile(`${o.marks}/${o.id}`, said);
+  try {
+    await Deno.mkdir(o.marks, { recursive: true });
+    await Deno.writeTextFile(`${o.marks}/${o.id}`, said);
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    say(`  filed: ${said}, but its marker was not written (${error}): the next run files it again`);
+    if (o.github) say(`::warning title=flake marker not written::${escape(`flake ${o.id} filed as ${said}, marker not written: ${error}`)}`);
+    return { filed: true, said };
+  }
   say(`  filed: ${said}`);
   return { filed: true, said };
 }
