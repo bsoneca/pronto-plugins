@@ -38,6 +38,10 @@ releaseCron: #Cron
 		slot:    *true | bool
 		holder:  *_holder | string
 	}
+	// A Mac-side step run after the rehearsal passes and before the preview and the release: the app's phone scenarios on an
+	// emulator. Run in the app's folder; its exit says pass or fail. Skipped, and said in the run's log, where release-cron
+	// does not run on a Mac. None by default.
+	android?: {command!: [string, ...string]}
 	// The top-level `holder`, kept for the apps that set it: the default of rehearsal.holder.
 	holder: *"verify@local" | string
 	_holder: holder

@@ -108,6 +108,13 @@ existed, so an app that names none of them runs as it did.
    record then carries the job's minutes and its cost (vCPU- and GiB-seconds at Cloud Run's
    prices), shown in the log line and by `report`, which prices it per run and per month at 16
    releases a day.
+   **3b. android** (optional, `releaseCron.android.command`): once the rehearsal passed, the app's phone
+   scenarios on an emulator, run in the app's folder (no limit, as the rehearsal). Its exit says pass or
+   fail; a failure ends the run **failed** (`the android step failed (exit N): <scenarios>: nothing
+   released`) and its bisect says "not bisected", since the bisect's check (`integrate@local`) runs no
+   emulator. Where release-cron does not run on a Mac the step is skipped and the log says so; the
+   release goes on. `RELEASE_CRON_DRY=android` runs only this step (no rehearsal, no preview) and ends
+   `dry` with its exit code, leaving `last` and the gap as they were and starting no bisect. A dry android run holds the app's lock while it runs, so a run cd starts meanwhile is skipped.
 4. **release**: `./saytw release@gcp` on the same tree, which reuses the rehearsal's local-gate
    pass and skips the rc preview unless a deploy-shaped file changed.
 5. **confirm**: the new revision takes 100% of the traffic and its live record is this tree's,
