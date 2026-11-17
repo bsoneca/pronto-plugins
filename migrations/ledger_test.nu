@@ -60,11 +60,16 @@ def main [] {
 		must "pg_ctl start" { ^pg_ctl -D ($data | path join db) -o $"-c listen_addresses='' -c unix_socket_directories=($data)" -l ($data | path join log) start -w } | ignore
 		cases
 	} catch {|e|
-		^pg_ctl -D ($data | path join db) stop -m immediate | complete | ignore
+		# A server that never started (initdb or the start failed) has nothing to stop; one that started
+		# and will not stop is said too, and its folder kept for a look.
+		let stop = (^pg_ctl -D ($data | path join db) stop -m immediate | complete)
+		if $stop.exit_code != 0 and ($data | path join db postmaster.pid | path exists) {
+			error make {msg: $"($e.msg); and the server in ($data) would not stop: ($stop.stderr)"}
+		}
 		rm -rf $data
 		error make {msg: $e.msg}
 	}
-	^pg_ctl -D ($data | path join db) stop -m fast | complete | ignore
+	must "pg_ctl stop" { ^pg_ctl -D ($data | path join db) stop -m fast } | ignore
 	rm -rf $data
 }
 
