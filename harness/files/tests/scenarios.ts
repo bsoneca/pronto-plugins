@@ -948,13 +948,15 @@ await Promise.all(Array.from({ length: Math.min(isDeployed ? spec.deployedParall
 // The flake report (schema.cue's `flakes`): each scenario that failed beside others, run again alone
 // once the pass is over. One that passes alone flaked under load: it stays failed, and is said and filed.
 const flaked: string[] = [];
+const unmarked: unknown[] = [];
 if (!retry && !shared && !pageErrors.length && ran.length > 1) {
   for (const id of failed) {
     const r = new Run(spec.scenarios[id]);
     if (await r.run()) { console.log(`✗ ${id} fails alone too: not a flake`); continue; }
     flaked.push(id);
     console.log(`⚠ ${id} flaked under load: failed beside ${Math.min(spec.parallel, ran.length) - 1} others, passed run alone`);
-    await fileFlake(id);
+    // A marker that could not be written (flakes.ts) is thrown after the report below, not before it.
+    await fileFlake(id).catch((e) => unmarked.push(e));
   }
 }
 sel.commit(ran.filter((id) => !failed.includes(id) && !pageErrors.length), failed);
@@ -963,6 +965,7 @@ await browser.close();
 console.log(`scenarios: ${(shared ? ran.length : runnable.length) - failed.length} passed (${sel.cached.length} cached${shared ? `, ${sel.run.length - ran.length} run by another lane` : ""}${skipped.length ? `, ${skipped.length} skipped` : ""}), ${failed.length} failed, in ${Math.round((Date.now() - t0) / 1000)}s`);
 if (pageErrors.length) console.log(`page errors:\n${pageErrors.join("\n")}`);
 if (flaked.length) console.log(`flakes under load: ${flaked.join(", ")}`);
+if (unmarked.length) throw new AggregateError(unmarked, `flake filing threw (a marker not written, or git): ${unmarked.map(String).join("; ")}`);
 if (failed.length || pageErrors.length) Deno.exit(1);
 
 // Files a flake once a week per scenario (a marker under ~/.cache/pronto/flakes/<app>); FLAKES_FILE=0 files none.

@@ -48,9 +48,9 @@ cases: "a board that files a flake gets its marker, holding what it said": {
 		{get: "said", expect: ["  filed: PRONTO-700 https://board/PRONTO-700"]},
 	]
 }
-cases: "a filed flake whose marker cannot be written is said, never thrown": {
+cases: "a filed flake whose marker cannot be written is thrown (the runner throws it after its report)": {
 	suite: "harness"
 	steps: [
-		{call: "harness.unmarked", expect: {threw: false, filed: true, said: 1}, why: "a cache that cannot be written is bookkeeping too: the next run files it again"},
+		{call: "harness.unmarked", expect: {threw: true, said: 1}, why: "said before it throws, so the issue key is in the log; not the board's error: an unwritten marker would file the same flake every run"},
 	]
 }
