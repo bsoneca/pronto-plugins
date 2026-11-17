@@ -1,5 +1,5 @@
 // The dev flow's rules (devflow/flow.js): which issue a pull request is, where each event moves an
-// issue, an issue's flag, the agent cap, P0..P3, and where the loop of sprints stands. They reason in
+// issue, an issue's flag, the agent cap, P0..P3, and the queue Ready issues are pulled from (PRONTO-658). They reason in
 // roles (backlog, refine, ready, implementing, review, merged, live, done, cancelled); a
 // repository's names for its states are mapped to roles and back (roleOf, nameOf).
 package unit
@@ -64,23 +64,31 @@ cases: {
 		{call: "devflow.mayStart", args: [1, 1, "medium", "architect"], expect: {ok: false, why: "all 1 architect slots are busy"}},
 		{call: "devflow.mayStart", args: [9, 2, "urgent", "engineer"]}, {pick: ["ok"], expect: [true]},
 	]}
-	"a sprint commits perPerson issues to each engineer and each SRE": {suite: "devflow", steps: [
-		{call: "devflow.capacity", args: [{engineers: 4, sre: 1}, 3], expect: {engineer: 12, SRE: 3, architect: 0}, why: "the user, 2026-11-08: 3 issues per engineer, 12 app issues and 3 infra issues"},
-		{call: "devflow.capacity", args: [{engineers: 2, sre: 0}, 3], expect: {engineer: 6, SRE: 0, architect: 0}},
-		{call: "devflow.capacity", args: [{engineers: 4, sre: 1, architect: 1}, 3], expect: {engineer: 12, SRE: 3, architect: 3}, why: "the owner, 2026-11-14: an architect seat, its own lane"},
+	"a lane pulls a P1 bug first, then the issue that became Ready first": {suite: "devflow", steps: [
+		{call: "devflow.pullOrder", args: [[
+			{key: "K-3", sequence: 3, jump: false, readyAt: "2026-11-12T10:00:00Z"},
+			{key: "K-9", sequence: 9, jump: false, readyAt: "2026-11-10T10:00:00Z"},
+			{key: "K-5", sequence: 5, jump: true, readyAt: "2026-11-16T10:00:00Z"},
+			{key: "K-1", sequence: 1, jump: false, readyAt: "2026-11-12T10:00:00Z"},
+		]]}, {pick: ["0.key", "1.key", "2.key", "3.key"], expect: ["K-5", "K-9", "K-1", "K-3"], why: "the jump first; then Ready time, whatever the number; a tie by number"},
+		{call: "devflow.pullOrder", args: [[{key: "K-2", sequence: 2, jump: false}, {key: "K-1", sequence: 1, jump: false, readyAt: "2026-11-12T10:00:00Z"}]]}, {pick: ["0.key"], expect: ["K-1"], why: "an issue with no Ready time comes last"},
+		{call: "devflow.pullOrder", args: [[]], expect: []},
 	]}
-	"next plans up to a lane's capacity and refuses past it": {suite: "devflow", steps: [
-		{call: "devflow.mayPlan", args: [0, 12, 12, "engineer"], expect: {ok: true, why: "engineer: 12 of 12 planned"}},
-		{call: "devflow.mayPlan", args: [10, 12, 3, "engineer"], expect: {ok: false, why: "engineer: 10 of 12 planned, 3 more is 1 over"}},
-		{call: "devflow.mayPlan", args: [3, 3, 1, "SRE"], expect: {ok: false, why: "SRE: 3 of 3 planned, 1 more is 1 over"}},
-		{call: "devflow.mayPlan", args: [3, 3, 1, "architect"], expect: {ok: false, why: "architect: 3 of 3 planned, 1 more is 1 over"}},
-		{call: "devflow.mayPlan", args: [0, 0, 1, "SRE"], expect: {ok: false, why: "the team has no SRE"}},
-		{call: "devflow.mayPlan", args: [3, 3, 0, "SRE"]}, {pick: ["ok"], expect: [true], why: "adding nothing is never over"},
+	"an issue became Ready at its latest move into Ready, else when it was made": {suite: "devflow", steps: [
+		{call: "devflow.readySince", args: [[{to: "s-ready", at: "2026-11-10T10:00:00Z"}, {to: "s-impl", at: "2026-11-11T10:00:00Z"}, {to: "s-ready", at: "2026-11-13T09:00:00Z"}], "s-ready", "2026-11-01T00:00:00Z"], expect: "2026-11-13T09:00:00.000Z", why: "bounced back to Ready: the current stay counts"},
+		{call: "devflow.readySince", args: [[{to: "s-refine", at: "2026-11-10T10:00:00Z"}], "s-ready", "2026-11-01T00:00:00Z"], expect: "2026-11-01T00:00:00Z", why: "made in Ready, no move into it"},
+		{call: "devflow.readySince", args: [[], "s-ready", null], expect: null},
 	]}
-	"a lane pulls its most urgent Ready issue, then the oldest": {suite: "devflow", steps: [
-		{call: "devflow.pullNext", args: [[{key: "PRONTO-31", sequence: 31, priority: "medium"}, {key: "PRONTO-33", sequence: 33, priority: "high"}, {key: "PRONTO-30", sequence: 30, priority: "medium"}]], expect: {key: "PRONTO-33", sequence: 33, priority: "high"}},
-		{call: "devflow.pullNext", args: [[{key: "PRONTO-31", sequence: 31, priority: "medium"}, {key: "PRONTO-30", sequence: 30, priority: "medium"}]], expect: {key: "PRONTO-30", sequence: 30, priority: "medium"}},
-		{call: "devflow.pullNext", args: [[]], expect: null},
+	"a bug at P0 or P1 jumps the queue, nothing else does": {suite: "devflow", steps: [
+		{call: "devflow.jumps", args: ["high", true, ["urgent", "high"]], expect: true},
+		{call: "devflow.jumps", args: ["urgent", true, ["urgent", "high"]], expect: true},
+		{call: "devflow.jumps", args: ["high", false, ["urgent", "high"]], expect: false, why: "a P1 feature waits its turn"},
+		{call: "devflow.jumps", args: ["medium", true, ["urgent", "high"]], expect: false},
+		{call: "devflow.jumps", args: ["major", true, ["critical", "major"]], expect: true, why: "the repository's words"},
+	]}
+	"merges are counted by day in the flow's time zone, the last 7 days": {suite: "devflow", steps: [
+		{call: "devflow.mergedByDay", args: [["2026-11-17T12:00:00Z", "2026-11-17T01:00:00Z", "2026-11-16T20:00:00Z", "2026-11-12T12:00:00Z", "2026-11-09T12:00:00Z", "2026-11-18T12:00:00Z"], "2026-11-17T15:00:00Z", "America/Sao_Paulo"], expect: {today: 1, week: 4, byDay: [{day: "2026-11-17", count: 1}, {day: "2026-11-16", count: 2}, {day: "2026-11-12", count: 1}]}, why: "01:00 UTC on the 17th is the 16th in BRT; a moment before 10 Nov and one after now are not counted"},
+		{call: "devflow.mergedByDay", args: [[], "2026-11-17T15:00:00Z", "America/Sao_Paulo"], expect: {today: 0, week: 0, byDay: []}},
 	]}
 	"a design module's issue is an architect's, an infra module's an SRE's, every other an engineer's": {suite: "devflow", steps: [
 		{call: "devflow.laneOf", args: [["design"], ["infra"], ["design"]], expect: "architect"},
@@ -91,40 +99,12 @@ cases: {
 		{call: "devflow.laneOf", args: [["brawl-chess"], ["infra"]], expect: "engineer"},
 		{call: "devflow.laneOf", args: [[], ["infra"]], expect: "engineer"},
 	]}
-	"P0..P3 are Plane's priorities, and say where a new bug goes": {suite: "devflow", steps: [
+	"P0..P3 are Plane's priorities, and say where a new bug goes (P1: refined at once, queued first once Ready)": {suite: "devflow", steps: [
 		{call: "devflow.priorityOf", args: ["p0"], expect: "urgent"},
-		{call: "devflow.bugPlace", args: ["P0"], expect: {role: "implementing", sprint: true}},
-		{call: "devflow.bugPlace", args: ["P1"], expect: {role: "refine", sprint: true}},
-		{call: "devflow.bugPlace", args: ["P3"], expect: {role: "backlog", sprint: false}},
+		{call: "devflow.bugPlace", args: ["P0"], expect: {role: "implementing"}},
+		{call: "devflow.bugPlace", args: ["P1"], expect: {role: "refine"}},
+		{call: "devflow.bugPlace", args: ["P3"], expect: {role: "backlog"}},
 		{call: "devflow.priorityOf", args: ["P4"], throws: "P0, P1, P2 or P3"},
-	]}
-	"a sprint is a cycle named Sprint <n>, its theme after a colon": {suite: "devflow", steps: [
-		{call: "devflow.sprintNumber", args: ["Sprint 12: payments"], expect: 12},
-		{call: "devflow.sprintNumber", args: ["Sprint 3"], expect: 3},
-		{call: "devflow.sprintNumber", args: ["2026-11-09"], expect: null, why: "a day's cycle from before the loop is not a sprint"},
-		{call: "devflow.sprintNumber", args: ["Sprint 12b"], expect: null},
-		{call: "devflow.sprintName", args: [7, "army pick"], expect: "Sprint 7: army pick"},
-		{call: "devflow.sprintName", args: [7, ""], expect: "Sprint 7"},
-	]}
-	"sprints loop: one ends when all its issues merge, and planning fills the next": {suite: "devflow", steps: [
-		{call: "devflow.loopOf", args: [[]], expect: {current: null, next: null, finished: [], number: 1, plansInto: 1}, why: "the first planning makes Sprint 1, the current"},
-		{call: "devflow.loopOf", args: [[{n: 1, groups: ["completed", "started"]}]], expect: {current: 1, next: null, finished: [], number: 2, plansInto: 2}, why: "a lane runs dry: planning makes the next sprint it pulls from"},
-		{call: "devflow.loopOf", args: [[{n: 1, groups: ["started"]}, {n: 2, groups: ["unstarted"]}]], expect: {current: 1, next: 2, finished: [], number: 3, plansInto: 2}, why: "with a next sprint, planning adds to it, never a third"},
-		{call: "devflow.loopOf", args: [[{n: 1, groups: ["completed", "cancelled"]}, {n: 2, groups: ["started"]}]], expect: {current: 2, next: null, finished: [1], number: 3, plansInto: 3}, why: "merged and cancelled end a sprint, at any hour"},
-		{call: "devflow.loopOf", args: [[{n: 4, groups: []}, {n: 5, groups: ["completed"]}]], expect: {current: null, next: null, finished: [5], number: 6, plansInto: 6}, why: "an emptied sprint is neither open nor finished"},
-		{call: "devflow.loopOf", args: [[{n: 3, groups: ["started"]}, {n: 4, groups: []}]], expect: {current: 3, next: null, finished: [], number: 4, plansInto: 4}, why: "PRONTO-273: an empty highest sprint is the next, filled rather than followed by Sprint 5"},
-		{call: "devflow.loopOf", args: [[{n: 3, groups: ["completed"]}, {n: 4, groups: []}]], expect: {current: null, next: null, finished: [3], number: 4, plansInto: 4}, why: "an empty highest sprint after a finished one becomes the current when filled"},
-		{call: "devflow.loopOf", args: [[{n: 1, groups: ["started"]}, {n: 2, groups: ["unstarted"]}, {n: 3, groups: []}]], expect: {current: 1, next: 2, finished: [], number: 3, plansInto: 2}, why: "with a next sprint open, planning still adds to it"},
-	]}
-	"a sprint's cycle stays open while its work runs (PRONTO-273)": {suite: "devflow", steps: [
-		{call: "devflow.sprintDates", args: ["2026-11-11T02:05:00Z"], expect: {start: "2026-11-11", end: "2027-11-11"}, why: "planned at 23:05 BRT: dated by the UTC day the board compares in, and ending a year on, not at 23:59 UTC of the day it was made"},
-		{call: "devflow.sprintDates", args: ["2026-11-10T15:00:00Z"], expect: {start: "2026-11-10", end: "2027-11-10"}, why: "planned at 12:00 BRT"},
-		{call: "devflow.sprintDates", args: ["2026-11-11T02:05:00Z", 30], expect: {start: "2026-11-11", end: "2026-12-11"}},
-		{call: "devflow.sprintEndFor", args: ["2027-11-11", "2026-11-12T12:00:00Z"], expect: null, why: "the day after it was planned it is open, and left alone"},
-		{call: "devflow.sprintEndFor", args: ["2026-11-10", "2026-11-10T20:00:00Z"], expect: "2027-11-10", why: "a cycle ending today (the old one-day sprint) is moved a year on before it ends"},
-		{call: "devflow.sprintEndFor", args: ["2027-03-01T23:59:00Z", "2026-11-12T12:00:00Z"], expect: "2027-11-12", why: "under half a horizon left: moved forward"},
-		{call: "devflow.sprintEndFor", args: [null, "2026-11-12T12:00:00Z"], expect: "2027-11-12", why: "a cycle with no end gets one"},
-		{call: "devflow.sprintEndFor", args: ["2026-11-10T23:59:00Z", "2026-11-11T02:30:00Z"], expect: null, why: "a cycle that ended already is left: the board refuses to edit it"},
 	]}
 	"a cycle is dated by the day in the flow's time zone": {suite: "devflow", steps: [
 		{call: "devflow.dayOf", args: ["2026-11-10T02:00:00Z", "America/Sao_Paulo"], expect: "2026-11-09"},
@@ -147,11 +127,10 @@ cases: {
 	]}
 	"priorities are the repository's words: P0 is urgent in its own, and the order follows P0..P3": {suite: "devflow", steps: [
 		{call: "devflow.priorityOf", args: ["P1", {P0: "critical", P1: "major", P2: "minor", P3: "trivial"}], expect: "major"},
-		{call: "devflow.bugPlace", args: ["P0", {P0: "critical", P1: "major", P2: "minor", P3: "trivial"}], expect: {role: "implementing", sprint: true}},
+		{call: "devflow.bugPlace", args: ["P0", {P0: "critical", P1: "major", P2: "minor", P3: "trivial"}], expect: {role: "implementing"}},
 		{call: "devflow.bugPlace", args: ["P4", {P0: "critical", P1: "major", P2: "minor", P3: "trivial"}], throws: "P0, P1, P2 or P3"},
 		{call: "devflow.mayStart", args: [9, 2, "critical", "engineer", "critical"]}, {pick: ["ok"], expect: [true]},
 		{call: "devflow.mayStart", args: [2, 2, "urgent", "engineer", "critical"]}, {pick: ["ok"], expect: [false], why: "urgent is not P0 where P0 is critical"},
-		{call: "devflow.pullNext", args: [[{key: "K-1", sequence: 1, priority: "minor"}, {key: "K-2", sequence: 2, priority: "critical"}], ["critical", "major", "minor", "trivial", "none"]], expect: {key: "K-2", sequence: 2, priority: "critical"}},
 	]}
 
 	// GitHub Projects (devflow/board/github.js): a project's fields in the board's words.
