@@ -28,18 +28,14 @@ quoted="\"${record%%.*}\".\"${record#*.}\""
 export LC_ALL=C
 
 # The migrations' names, each checked safe to splice into SQL before any is: lowercase letters, digits and
-# _, and at most the 63 bytes a label holds: Postgres compares a longer one by its first 63 bytes alone, so
-# it would read as had. What a name is otherwise (plan.js isName) is the lint's to hold.
+# _. How long one may be is the database's to say ("The lock" below); what a name is otherwise (plan.js
+# isName) is the lint's to hold.
 names=()
 for f in "$dir"/*.sql; do
 	[ -f "$f" ] || continue
 	name=$(basename "$f" .sql)
 	if ! [[ $name =~ ^[a-z0-9_]+$ ]]; then
 		echo "ledger: $f names no migration ledger.py writes" >&2
-		exit 1
-	fi
-	if [ ${#name} -gt 63 ]; then
-		echo "ledger: $name is longer than the 63 bytes a label holds (plan.js NAME_BYTES)" >&2
 		exit 1
 	fi
 	names+=("$name")
@@ -62,6 +58,17 @@ if [ "$held" != t ]; then
 	echo "SELECT 1 FROM (SELECT pg_advisory_lock(hashtext('ledger.sh $record'))) l;" >&3 &&
 		read -r held <&4 && [ "$held" = 1 ] || { echo "ledger: the lock's session ended" >&2; exit 1; }
 fi
+
+# A label holds the bytes of an identifier, as the database says (63 unless built otherwise), and a longer
+# name is compared by those first bytes alone, so it would read as had: one is refused before any runs.
+max=$(psql -v ON_ERROR_STOP=1 -XtAc "SHOW max_identifier_length")
+[[ $max =~ ^[0-9]+$ ]] || { echo "ledger: the database's max_identifier_length reads '$max'" >&2; exit 1; }
+for name in ${names[@]+"${names[@]}"}; do
+	if [ ${#name} -gt "$max" ]; then
+		echo "ledger: $name is longer than the $max bytes a label holds (max_identifier_length)" >&2
+		exit 1
+	fi
+done
 
 # The lock lasts while its session does: one that ended (a reset, a failover, a kill) stops the run before
 # its next migration, rather than let another run start beside it.

@@ -314,7 +314,8 @@ They keep what pgroll's runner gives:
   renumbers one, and a database that had one branch's would skip the other's. A label holds 63 bytes,
   which is why `make` refuses a longer name and the lint flags one written by hand (`plan.js`
   `NAME_BYTES`, the one place the limit is written). `ledger.sh` refuses one that got past both
-  before it runs any migration, since Postgres compares a longer name by its first 63 bytes alone.
+  before it runs any migration, at the length the database reports (`max_identifier_length`), since
+  Postgres compares a longer name by those first bytes alone.
 - **A migration that sorts before one the database has had is refused**, as pgroll's runner refuses
   it: it was made without that one's change. `rebase` names it after. It is compared with the
   migrations the build holds, so on a database several builds share, a branch's migration that main
