@@ -1,8 +1,8 @@
 // The board the dev flow talks to, as an interface: what board.ts, hook.ts, connect.ts and mcp.ts
 // use of it, and nothing of any one board's API. An adapter implements it (plane.ts is Plane's);
 // spec.ts's boardOf picks the adapter by the repository's `board.kind`. A board with other words
-// (GitHub Projects' items, statuses and iterations) maps them to these: a project holds states, a
-// state a group, an issue a state and a priority, a cycle (a sprint) issues, a module (an app)
+// (GitHub Projects' items and statuses) maps them to these: a project holds states, a
+// state a group, an issue a state and a priority, a module (an app)
 // issues.
 
 export interface Named { id: string; name: string }
@@ -43,7 +43,7 @@ export interface Board {
 
   projects(): Promise<(Named & { identifier: string })[]>;
   createProject(name: string, identifier: string): Promise<Named>;
-  /** Turns on what the flow needs of a project: cycles (sprints) and modules (apps). */
+  /** Turns on what the flow needs of a project: cycles (no longer read: there are no sprints) and modules (apps). */
   enableFeatures(project: string): Promise<void>;
 
   states(project: string): Promise<State[]>;

@@ -43,12 +43,12 @@ architect's slot is full).
    armed (`gh pr merge <n> --auto --squash`), never an admin merge. The design module's issue is
    Done when it merges.
 6. **Pull the next**: `pronto-devflow pull . --lane architect`. Nothing Ready: say so and stop; the
-   architect's lane never calls for a sprint.
+   architect's lane is never urgent.
 
 ## Rules
 
 - Never write the feature's code, open a branch for it, release, or touch production: the follow-up
   issues are the engineers' and the SRE's.
-- Never change an issue's state by hand; never plan a sprint (pronto-sprint-plan does).
+- Never change an issue's state by hand; never refine the queue (pronto-sprint-plan does).
 - A design that needs a decision only the owner can make: put the options and a recommendation on the
   issue and stop there.

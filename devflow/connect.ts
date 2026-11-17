@@ -1,10 +1,10 @@
-// `connect plane` (docs/intents.md): the repository's board, from nothing to a board ready for its first sprint, each step
+// `connect plane` (docs/intents.md): the repository's board, from nothing to a board ready for its first issues, each step
 // checked and applied in order, stopping only where a person must act. With a cluster (devFlow.cluster)
 // the intent installs Plane on the repository's node beside its apps: a CloudNativePG database, the
 // node's gateway, the tunnel's hostname. With none, the board is one that exists (a hosted Plane, or
 // one installed another way): the intent installs nothing and checks only that its host answers and
 // the token signs in. Then the board itself, set up from devFlow: the project, the flow's states, a
-// module per app, the chore label and GitHub's token (the first sprint is planning's, pronto-devflow next).
+// module per app, the chore label and GitHub's token (the Ready queue is the lead's).
 // The install steps are Plane's own; the rest goes through the Board interface (board/board.ts).
 import { cmd } from "../intents/shell.ts";
 import type { Step } from "../intents/run.ts";
