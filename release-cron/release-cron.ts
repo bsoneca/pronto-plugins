@@ -27,7 +27,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedArgv, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal } from "./cron.js";
+import { schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, whole, fixedBy, stopsBisect, concerns, failedRehearsal } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 
 const here = new URL("./", import.meta.url).pathname;
@@ -660,7 +660,7 @@ try {
   const live = target ? (sh("git", ["cat-file", "-e", `${before}^{commit}`], wt).ok ? before : undefined) : base(jsonl(`${state}/runs.jsonl`), before);
   step("prepare");
   if (live === head) {
-    run.flagsReleased = await flagsReleased(`${wt}/${appRel}`);
+    run.flagsReleased = await flagsReleased(`${wt}/${appRel}`, true) ?? undefined;
     end("skipped", `main ${head.slice(0, 8)} is serving as ${before}`);
   }
   if (live) {
@@ -857,7 +857,7 @@ try {
   step("confirm");
   if (wrong.length) end("failed", `released, production not confirmed: ${wrong.join("; ")}`, 1);
   // 5b. The flags the release reads (releaseCron.flagsReleased), now that production serves it.
-  run.flagsReleased = await flagsReleased(`${wt}/${appRel}`);
+  run.flagsReleased = await flagsReleased(`${wt}/${appRel}`, false) ?? undefined;
   // 6. The release's notes (release-notes/release-notes.ts), when the app has them and the revision is new: a GitHub Release
   // tagged <app>/<revision>. Its output is in the run's log; whatever it does, the run's outcome stays.
   if (run.revision !== before && exists(`${dir}/release-notes/release-notes.ts`)) {
@@ -908,16 +908,15 @@ try {
 }
 
 // releaseCron.flagsReleased: records which flags the release now served reads, so a flag push keeps one it still reads
-// (pronto-flags `released`). Whatever it does, the run's outcome stays: a failure is said and never fails the run.
-async function flagsReleased(dir: string): Promise<string | undefined> {
-  const argv = flagsReleasedArgv(cron.flagsReleased, dir);
-  if (!argv) return undefined;
-  let result: string;
-  try {
-    const r = await child(argv[0] === "deno" ? Deno.execPath() : argv[0], argv.slice(1), wt, boardEnv(Deno.env.toObject(), Deno.env.get("HOME") ?? "", cueVersions()));
-    result = r.code === 0 ? "ok" : `failed (exit ${r.code})`;
-  } catch (e) { result = `failed (${(e as Error).message.split("\n")[0]})`; }
-  say(`flags released ${argv.join(" ")}: ${result}${result === "ok" ? "" : "; the flags' push keeps every live flag until it is recorded"}`);
+// (pronto-flags `released`). Whatever it does, the run's outcome stays: a failure is said and never fails the run. The commit
+// it succeeded for is kept in `flags-released`: a run that finds main already serving records again only when that is not head.
+async function flagsReleased(dir: string, onlyIfDue: boolean): Promise<string | null> {
+  const marker = `${state}/flags-released`;
+  if (onlyIfDue && !flagsReleasedDue(exists(marker) ? Deno.readTextFileSync(marker) : null, head)) return null;
+  const result = await recordFlagsReleased(cron.flagsReleased, dir, { cwd: wt, env: boardEnv(Deno.env.toObject(), Deno.env.get("HOME") ?? "", cueVersions()) });
+  if (result === null) return null;
+  if (result === "ok") { try { Deno.writeTextFileSync(marker, head); } catch { /* the next run records again */ } }
+  say(`flags released ${cron.flagsReleased!.join(" ")}: ${result}${result === "ok" ? "" : "; the flags' push keeps every live flag until it is recorded"}`);
   return result;
 }
 
