@@ -1,7 +1,7 @@
 // `connect plane` from a terminal (docs/intents.md), through bin/pronto:
 //   bin/pronto plan|connect plane <repo>
 // <repo> is a repository with a devflow/devflow.cue (bsoneca/pronto's): its board set up, from Plane on
-// its node (or, with no cluster, from a Plane that is there) to a board ready for its first sprint.
+// its node (or, with no cluster, from a Plane that is there) to a board ready for its first issues.
 // Run again, it goes on from the step it stopped at.
 import { resolve } from "jsr:@std/path@1.1.2";
 import { connect, finished, line, plan, waitingOn } from "../intents/run.ts";

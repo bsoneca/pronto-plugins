@@ -108,6 +108,18 @@ priorities: {
 	others:  _prio.priorities.P3.plane & "low"
 }
 
+// The queue and its time zone (PRONTO-658): defaults, a repository's own, and a written `sprint`
+// that still vets and only lends its time zone.
+_queue: #DevFlow & {queue: {starvingDays: 5, mergedDays: 14}, timeZone: "Europe/Lisbon"}
+_oldSprint: #DevFlow & {sprint: {ends: "18:00", perPerson: 3, timeZone: "America/New_York"}}
+queueFlow: {
+	starving: _queue.queue.starvingDays & 5
+	merged:   _queue.queue.mergedDays & 14
+	timeZone: _queue.timeZone & "Europe/Lisbon"
+	carried:  _oldSprint.timeZone & "America/New_York"
+	starvingRefused: ((#DevFlow & {queue: starvingDays: 0}).queue == _|_) & true
+}
+
 // A repository's devflow/devflow.cue, as written at the time of PRONTO-142: it still vets and every
 // value it had is what it was, under the new fields (board beside plane, a token of kind
 // secret-manager, the flow's roles).
@@ -132,7 +144,8 @@ pronto: {
 	cluster: _pronto.cluster & {context: "node", ssh: "pronto@203.0.113.10", namespace: "plane", tunnel: "00000000-0000-4000-8000-000000000000", apiPort: 26443}
 	token: _pronto.token & {kind: "secret-manager", project: "brawl-chess", secret: "plane-api-token"}
 	team: _pronto.team & {engineers: 4, sre: 1, architect: 1, product: 1}
-	sprint: _pronto.sprint & {ends: "18:00", perPerson: 3, timeZone: "America/Sao_Paulo"}
+	queue: _pronto.queue & {starvingDays: 3, mergedDays: 7}
+	timeZone: _pronto.timeZone & "America/Sao_Paulo"
 	infra: _pronto.infra & ["infra"]
 	// The architect seat (the owner, 2026-11-14): one by default, its issues in the module design.
 	design: _pronto.design & ["design"]
@@ -150,9 +163,9 @@ _inbox: #DevFlow & {
 	suggestions: {project: "SUGEST", from: ["aprende"]}
 }
 suggestions: {
-	absent:    (_existing.suggestions == _|_) & true
-	project:   _inbox.suggestions.project & "SUGEST"
-	from:      _inbox.suggestions.from & ["aprende"]
+	absent:  (_existing.suggestions == _|_) & true
+	project: _inbox.suggestions.project & "SUGEST"
+	from: _inbox.suggestions.from & ["aprende"]
 	name:      _inbox.suggestions.name & "Suggestions"
 	staleDays: _inbox.suggestions.staleDays & 14
 	label:     _inbox.suggestions.label & "suggestion"

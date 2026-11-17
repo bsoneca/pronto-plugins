@@ -20,7 +20,7 @@ const FIELD_VALUES = `fieldValues(first: 30) { nodes {
   ... on ProjectV2ItemFieldMultiSelectValue { options { id name } field { ... on ProjectV2FieldCommon { name } } }
   ... on ProjectV2ItemFieldIterationValue { iterationId title field { ... on ProjectV2FieldCommon { name } } }
 } }`;
-const ISSUE = `... on Issue { id number title body repository { nameWithOwner } labels(first: 50) { nodes { id: name } } }`;
+const ISSUE = `... on Issue { id number title body createdAt closedAt repository { nameWithOwner } labels(first: 50) { nodes { id: name } } }`;
 
 export class GitHubProjects implements Board {
   private projectId: string | null = null;

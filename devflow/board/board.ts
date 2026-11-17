@@ -1,8 +1,8 @@
 // The board the dev flow talks to, as an interface: what board.ts, hook.ts, connect.ts and mcp.ts
 // use of it, and nothing of any one board's API. An adapter implements it (plane.ts is Plane's);
 // spec.ts's boardOf picks the adapter by the repository's `board.kind`. A board with other words
-// (GitHub Projects' items, statuses and iterations) maps them to these: a project holds states, a
-// state a group, an issue a state and a priority, a cycle (a sprint) issues, a module (an app)
+// (GitHub Projects' items and statuses) maps them to these: a project holds states, a
+// state a group, an issue a state and a priority, a module (an app)
 // issues.
 
 export interface Named { id: string; name: string }
@@ -17,6 +17,8 @@ export interface Issue {
   updated_at?: string;
   /** When the issue was made (ISO). */
   created_at?: string;
+  /** When it last reached a completed state (ISO); a board may rewrite it on a later move within the group. */
+  completed_at?: string;
   description_html?: string;
   module_ids?: string[];
   labels?: string[];
@@ -41,7 +43,7 @@ export interface Board {
 
   projects(): Promise<(Named & { identifier: string })[]>;
   createProject(name: string, identifier: string): Promise<Named>;
-  /** Turns on what the flow needs of a project: cycles (sprints) and modules (apps). */
+  /** Turns on what the flow needs of a project: cycles (no longer read: there are no sprints) and modules (apps). */
   enableFeatures(project: string): Promise<void>;
 
   states(project: string): Promise<State[]>;
@@ -67,6 +69,11 @@ export interface Board {
   removeFromCycle(project: string, cycle: string, issue: string): Promise<unknown>;
   /** Moves a cycle's end (a board whose cycles never close, as GitHub's iterations, has none). */
   setCycleEnd?(project: string, cycle: string, end: string): Promise<unknown>;
+
+  /** An issue's moves between states, `to` the state's id and `at` when (ISO), in any order: what
+   * says when it became Ready (flow.js readySince). A board that cannot say leaves it out, and the
+   * queue falls back to when the issue was made. */
+  stateMoves?(project: string, id: string): Promise<{ to: string; at: string }[]>;
 
   /** The project's issues; `light`, only id, name, sequence_id, state and priority (the board's
    * verbs read no more, and a board may answer that much faster). */

@@ -1,7 +1,7 @@
-# Dev flow: sprints, issues and releases
+# Dev flow: the Ready queue, issues and releases
 
 The flow is this plugin's [devflow](README.md), and a repository opts in with one file,
-`devflow/devflow.cue`: its board, its team and the sprint's size. This document says how the flow
+`devflow/devflow.cue`: its board and its team. This document says how the flow
 works; the values it gives (the project `PRONTO`, the host `plane.example.com`, four engineers) are
 examples of what a repository writes. `bin/pronto connect plane .`
 sets the board up and says what waits on a person.
@@ -9,48 +9,48 @@ sets the board up and says what waits on a person.
 | piece | where |
 | --- | --- |
 | the flow's states, their roles, P0–P3, Plane's chart values, database and route | `devflow/schema.cue`, `devflow/plane.cue` |
-| the rules (an issue's key, where an event moves it, its flag, whose slot it takes) | `devflow/flow.js`, cases in `tests/unit/devflow.cue` |
+| the rules (an issue's key, where an event moves it, its flag, whose slot it takes, the order of the Ready queue) | `devflow/flow.js`, cases in `tests/unit/devflow.cue` |
+| the verbs' logic: the queue, `start`, `pull`, `file`, `status` | `devflow/queue.ts` (thin verbs in `devflow/board.ts`), cases in `tests/unit/devflow_queue.cue` |
 | the board, as an interface and its adapter | `devflow/board/board.ts`, `devflow/plane.ts` |
 | the board set up | `bin/pronto connect plane .` (`devflow/connect.ts`) |
 | pull requests → the board | `.github/workflows/devflow-board.yml` here, called by the repository's own short `plane.yml` |
 | releases and flips → the board | release-cron's run and `pronto-flags push`, through `pronto-devflow` |
-| the skills | `pronto-sprint-plan`, `pronto-issue`, `pronto-bug`, `pronto-design` |
+| the skills | `pronto-sprint-plan` (the lead's queue loop), `pronto-issue`, `pronto-bug`, `pronto-design`, `pronto-architect` |
 | Claude Code reading the board | the repository's `.mcp.json`: the Plane MCP server, started by `pronto-devflow mcp .` |
 
 Without a flow, work is pull requests and nothing else. Hundreds merge, the issue tracker holds a
 single issue, and nobody can say what the current goal is, what is waiting, or which merged change is
-actually live. This document sets one flow for every app in a repository: work happens in sprints
-that always end, every piece of work is an issue on a board before it is built, every issue is one
+actually live. This document sets one flow for every app in a repository: work waits in one queue and
+is pulled in order, every piece of work is an issue on a board before it is built, every issue is one
 Claude session, and a task is only finished when it is in production behind a flag that was switched
 on.
 
 ## The rules
 
-1. **Always sprints.** Each sprint has a team ([below](#the-team)): engineers and an SRE who build,
-   each driving Claude sessions, and a product manager who designs what later sprints build. The
-   sessions building at once are capped, one per builder, because what limits us is people's review
-   and CPU, not ideas.
-2. **Sprints always end, one after another, for ever.** A sprint is named `Sprint <n>: <theme>` and
-   ends when every one of its issues is merged (or further along) or cancelled: no hour closes it,
-   and nothing holds it open (an issue parked with a question for the owner moves to the Backlog and
-   leaves the sprint). The code is written by Claude, so a sprint is short; every task in one has an
-   objective a session can meet, and one that cannot is split at refinement.
+1. **One queue, no sprints** (the owner, 2026-11-17, PRONTO-658). The team ([below](#the-team)) is
+   engineers, an SRE and an architect who build, each driving Claude sessions, and a product manager
+   who designs what the queue will hold. The sessions building at once are capped, one per builder,
+   because what limits us is people's review and CPU, not ideas.
+2. **Ready is first in, first out.** An issue is in the queue from the moment it moves into Ready, and
+   each lane pulls the issue that has waited longest. The one exception: a **bug at P1 or P0 jumps**
+   the queue. Priority orders nothing else: a P1 feature waits its turn like any other. An issue that
+   waits more than `queue.starvingDays` (default 3) in Ready is **starving**, and `status` says so.
 3. **New features are never built on request.** Every request becomes an issue on the board first.
    This holds for every app and every kind of change.
-4. **The lead plans the next sprint without asking.** Everything on the board is wanted, so no list
-   waits for approval: the lead picks the next sprint's theme (P1s first, then what just got
-   unblocked, one app or feature, then value and age), unless the owner names one, and fills it.
-   `pronto-devflow status` says when the next sprint must be planned (`plan: true`), and an engineer
-   whose sprint has nothing Ready pulls from the next one.
+4. **The lead keeps the queue stocked, and asks no one.** Everything on the board is wanted, so no list
+   waits for approval: the lead refines Backlog issues into Ready ones in value order (P1s first, then
+   what just got unblocked, then value and age) so no lane runs dry, watches what starves or is
+   stuck, and reports what merged each day. `pronto-devflow status` shows each lane's queue.
 5. **One issue, one Claude session.** An issue goes refine → implement → review → merge. Anything new
-   learned along the way becomes a new issue; the session judges whether it belongs in this sprint.
+   learned along the way becomes a new issue; the session judges whether it is done now or left in the Backlog.
    The next issue never waits for the owner to write: when a new session cannot be started without
    the owner (the app refuses it, or asks for approval), the engineer's session takes the next issue
    itself, renamed to it.
-6. **Bugs carry a priority**, P0 to P3 (below), which decides whether they wait for a sprint.
-7. **Releases run on the release cron, independent of sprints.** Every task ships behind a flag.
-8. **A sprint ends when its tasks are merged. A task ends when it is in production and its flag was
-   flipped on successfully.** The two are different on purpose: a sprint never waits on production.
+6. **Bugs carry a priority**, P0 to P3 (below), which decides whether a bug jumps the queue.
+7. **Releases run on the release cron, independent of the queue.** Every task ships behind a flag.
+8. **An issue counts as done for the flow when it is merged. A task ends when it is in production and
+   its flag was flipped on successfully.** The two are different on purpose: the queue never waits on
+   production.
 
 ## The board
 
@@ -59,8 +59,9 @@ interface (`devflow/board/board.ts`), so a repository's board is a choice, not a
 
 | the flow | on the board |
 | --- | --- |
-| a sprint | a **cycle** named `Sprint <n>: <theme>`, with no fixed length; day-named cycles from before the loop are ignored |
-| the same rules for every app | **one project** (identifier `PRONTO`) with a **module per app** (`brawl-chess`, `giselle`, `guestbook`, …) and one for `plugins`; a sprint is one cycle across all of them |
+| when an issue became Ready | the **activity** of the issue: its latest move into the Ready state (`Board.stateMoves`); an issue made in Ready, its creation. No cycles are read or written, and existing ones are left alone |
+| the same rules for every app | **one project** (identifier `PRONTO`) with a **module per app** (`brawl-chess`, `giselle`, `guestbook`, …) and one for `plugins`; one queue across all of them |
+| a bug | an issue with the **label** `bug` |
 | the issue's state | a **state** in one of the board's groups |
 | P0–P3 | the board's priorities |
 
@@ -84,7 +85,7 @@ devFlow: {
 
 A repository written before `board` existed names the same as `plane: {…}`, and still vets: it is a
 board of kind `plane`. Claude reads and moves the board through the official
-[Plane MCP server](https://github.com/makeplane/plane-mcp-server) (work items, cycles, modules).
+[Plane MCP server](https://github.com/makeplane/plane-mcp-server) (work items, modules).
 
 ### The token
 
@@ -130,12 +131,12 @@ repository's states play them. The defaults are:
 
 | state (role) | means | who moves it |
 | --- | --- | --- |
-| **Backlog** | on the board, not planned | anyone; every new request lands here |
-| **Refine** | in the sprint, being turned into an objective that can be met | `/issue` |
-| **Ready** | refined: objective, acceptance, flag name and app written down | `/issue` |
-| **Implementing** | a Claude session is building it; takes an engineer's or the SRE's slot | `/issue` |
+| **Backlog** | on the board, not yet being refined | anyone; every new request lands here |
+| **Refine** | being turned into an objective that can be met | `/issue` |
+| **Ready** | refined: objective, acceptance, flag name and app written down; **in the queue** | `/issue` |
+| **Implementing** | a Claude session is building it; takes an engineer's, the SRE's or the architect's slot | `/issue`, or `pull` |
 | **Review** | its PR is open | the GitHub workflow, on PR opened |
-| **Merged** | its PR merged to `main`; **counts as done for the sprint** | the GitHub workflow, on PR merged |
+| **Merged** | its PR merged to `main`; **counts as done for the flow** | the GitHub workflow, on PR merged |
 | **Live** | released by the release cron, flag still off | the release-cron hook |
 | **Done** | in production and its flag flipped on successfully; **the task is closed** (an issue with no flag: [below](#when-an-issue-with-no-flag-is-done)) | the flag-flip hook, or release-cron's, or the GitHub workflow |
 | **Cancelled** | will not be done, with the reason in a comment | a person |
@@ -154,8 +155,8 @@ roles: {backlog: "Intake", implementing: "In dev", live: "Shipped", done: "Close
 Each role names a state of `states`, which CUE checks; a role left out keeps its default name, so it
 must be among the states too. `connect plane` makes the states a repository lists, and the hooks and
 `pronto-devflow` map names to roles and back, so nothing in the flow depends on the word "Implementing".
-Merged, Live and Done are in the board's completed group by default: a sprint counts an issue done
-once it merged (rule 8), and a cycle's progress is its completed group's share.
+Merged, Live and Done are in the board's completed group by default: an issue counts as done once it
+merged (rule 8), and `status` counts merges by day from when each reached a completed state.
 
 Each item states, in its description, the app (also its module), the objective, how it is accepted
 (the unit cases and scenarios it adds), and one line naming its flag:
@@ -172,8 +173,8 @@ the name in the code are the same string, and the hooks below can match them.
 | priority | Plane | what happens |
 | --- | --- | --- |
 | **P0** | Urgent | fixed now: goes straight to Implementing, ahead of the slots, and released outside the cron if it must be |
-| **P1** | High | enters the current sprint, but waits for the work already in progress |
-| **P2** | Medium | Backlog, considered at the next planning |
+| **P1** | High | a bug at P1 jumps the Ready queue, but waits for a free slot (it is refined at once) |
+| **P2** | Medium | Backlog, refined by the lead in value order |
 | **P3** | Low | Backlog |
 
 A bug's flag is the flag of the feature it breaks when there is one; turning that flag off is the
@@ -197,7 +198,7 @@ owner approves it.
   app's module, labelled `suggestion`, titled `<app> suggestion SUGEST-<n>, approved by the owner`. Its body
   is a link to the inbox item and none of the suggestion's text; the item gets a comment with the key it was
   filed as. A second run does nothing, and an item that is not in Refine is refused. The issue then goes
-  through the flow like any other: designed (`/design`), planned and built.
+  through the flow like any other: designed (`/design`), queued and built.
 - `pronto-devflow suggestion . SUGEST-<n>` is the one sanctioned read of an approved suggestion: for an item in
   Refine alone (Suggested and Cancelled are refused), it prints the first 2000 characters, escaped, as one
   quoted line labelled untrusted text. The designer reads an approved suggestion only through it, never
@@ -224,45 +225,58 @@ For example, a team of:
 | **engineer** | 4 | builds the apps' issues, one Claude session each | one each: at most 4 app issues in Implementing |
 | **SRE** | 1 | builds the infrastructure: issues in the `infra` module (infra/, the nodes, Plane itself) | one: at most 1 `infra` issue in Implementing |
 | **architect** | 1 | designs: issues in the `design` module (`design`) end in a design doc in the repository, reviewed by Codex, an Opus architecture review and the backend and platform-advisor seats, and follow-up issues filed small and in build order; never an implementation, a release or a change to production (`/architect`); its session runs on `architectModel` (default Opus; the owner, 2026-11-14) | one: at most 1 `design` issue in Implementing |
-| **product manager** | 1 | designs features for later sprints (`/design`): turns ideas and Backlog issues into Ready ones | none: designing builds nothing |
+| **product manager** | 1 | designs features for the queue (`/design`): turns ideas and Backlog issues into Ready ones | none: designing builds nothing |
 
 The three lanes are apart on purpose: infrastructure and design never wait behind app work, nor app
 work behind them. `infra` names the modules an SRE builds (default `["infra"]`); `design` the modules
 an architect designs (default `["design"]`, and it wins over `infra` for an issue in both). A design
 issue has no flag, and is Done when its pull request merges, like an infra one. The architect's lane
-is never "dry": an empty design lane does not call for a sprint. `/issue` will not move an item into
+has no urgency: an empty design lane is not a problem to fix. `/issue` will not move an item into
 Implementing while its lane is full; it says which items hold the slots. P0 bugs are the one
 exception.
 
-### Capacity and WIP
+### The queue and WIP
 
-A sprint **commits `sprint.perPerson` issues per person** (default 3): with 4 engineers and 1 SRE
-that is 12 app issues and 3 `infra` issues (and 3 `design` issues for the architect). `pronto-devflow next` refuses a plan past a lane's
-capacity, and `status` prints planned against capacity per lane and the Ready queue waiting to be
-pulled. A split of a lane between apps stays by hand in planning.
+Each lane has its own queue: the Ready issues of its modules, in the order they are pulled. `status`
+prints them, one line a lane, each issue with how long it has been Ready:
+
+```
+3 of 6 engineer slots busy (PRONTO-1, ...), 0 of 1 SRE slots busy, 0 of 1 architect slots busy
+  ready to pull, engineer: PRONTO-9 title (P1 bug, 3h); PRONTO-4 title (2d); ...
+starving: PRONTO-4 Ready 4d (over 3d)
+merged: 5 today, 31 in 7 days (2026-11-17 5, 2026-11-16 9, ...)
+  open, Refine: PRONTO-12 title; ...
+backlog: 40
+```
+
+`merged` counts, over the last `queue.mergedDays` (default 7), by the day each issue merged: its first
+move into a completed state after its last move out of one, read from its activity (one call for each
+issue whose `completed_at` is in the window, since Plane rewrites `completed_at` when the issue is later
+made Done), in the flow's `timeZone` (default `America/Sao_Paulo`). `queue.starvingDays` (default 3) is
+how long an issue may wait in Ready before `starving:` names it. A Ready issue the board cannot date, or
+an activity it cannot read, is an error: nothing is pulled on a guess. Once a lane is full, `pull` goes on
+only for a P0 (it starts past the slots); a P0 bug is pulled before a P1 bug.
 
 `status` also prints a `stuck:` line (and a `stuck` list in `--json`) for each issue in Implementing or Review that no work moves: no linked open pull request and no commit on a branch naming its key in the last `stuckHours` (default 6, devflow.cue), or a pull request whose ci failed or whose auto-merge is not armed, e.g. `stuck: PRONTO-444 Implementing 2d, no PR, no commits` (flow.js `stuckOf`).
 
 **WIP is 1 in Implementing per person** (so `team.engineers` app issues and `team.sre` infra issues
 at once; `start` refuses beyond that, a P0 excepted). Review (gate, ci, automerge) holds no slot, so
 an engineer is never idle after one issue: when its pull request opens, or its issue is cancelled,
-the session runs `pronto-devflow pull . [--lane SRE|architect]`, which starts the lane's next Ready issue of
-the current sprint, else of the next sprint, most urgent first, and works it as its own session.
+the session runs `pronto-devflow pull . [--lane SRE|architect]`, which starts the first issue of the
+lane's queue (a P1 bug first, then the one that has been Ready longest) and works it as its own session.
 
-A **designed** issue is Ready and in no sprint. It stays Ready when a sprint ends without it, and the
-next planning picks from the designed issues first, so the product manager works a sprint or more
-ahead of the engineers.
+A **designed** issue is simply a Ready one: it is in the queue the moment the product manager moves
+it, so the product manager works ahead of the engineers by keeping the queue long. `next` and `close`
+are gone with the sprints: they print what replaced them and exit 2.
 
 ## Claude skills
 
-Four skills, kept in the plugins' `skills/`, all talking to the board through `pronto-devflow`:
+Five skills, kept in the plugins' `skills/`, all talking to the board through `pronto-devflow`:
 
-- **`/sprint-plan`**, the lead's loop. When `pronto-devflow status` says the next sprint must be
-  planned, it picks that sprint's theme (or takes the owner's), reads the designed issues and the
-  backlog, and fills the next sprint with the issues that serve it (`pronto-devflow next --theme`
-  makes the cycle when it does not exist yet); it asks no one. When a sprint's work is merged or
-  cancelled, it reports what merged, what went Live and what flags turned on, and the next sprint
-  becomes current.
+- **`/sprint-plan`**, the lead's queue loop (the name stays; there are no sprints). It keeps each
+  lane's Ready queue stocked by refining Backlog issues in value order, watches `starving:` and
+  `stuck:`, files approved suggestions, and reports what merged by day, what went Live and what flags
+  turned on; it asks no one.
 - **`/issue PRONTO-123`**, one session per issue. Refines the item until it has an objective,
   acceptance and a flag (Ready), takes its lane's slot (Implementing), builds it on a branch named
   `pronto-123/<slug>`, runs the repository's gate, and opens a PR whose title starts with
@@ -270,10 +284,11 @@ Four skills, kept in the plugins' `skills/`, all talking to the board through `p
   the issue, whether it is done now (it is needed for this issue's objective) or left in the Backlog
   (everything else).
 - **`/design`**, the product manager's. Designs a feature with them and cuts it into issues a session
-  can finish, each with an objective, acceptance, app and flag, moved to Ready for a later sprint. It
+  can finish, each with an objective, acceptance, app and flag, moved to Ready, which puts them in the queue. It
   never starts or builds one.
 - **`/bug`** files a bug with its app, how to reproduce it, the flag involved and a priority, and for
   a P0 starts `/issue` on it at once.
+- **`/architect`**, the architect's. Designs in the `design` module and files the follow-up issues.
 
 Requests made to Claude in any other session follow rule 3: Claude files the item and says its key,
 rather than building it.
@@ -298,7 +313,7 @@ the `chore` label (`chore` in `devflow/devflow.cue` names another).
 ## Releases and Done
 
 The release cron ([release-cron](../release-cron/README.md)) is unchanged: it releases `main` on its
-own schedule, whatever the sprint. Two hooks report back to the board, and neither changes when or
+own schedule, whatever the queue holds. Two hooks report back to the board, and neither changes when or
 how anything ships:
 
 1. **After a release-cron run confirms a release**, items in Merged whose PR is in the released
@@ -338,11 +353,9 @@ without the flow.
 3. Add a `plane.yml` that calls this repository's `.github/workflows/devflow-board.yml` (its header
    shows it), the Plane MCP server in `.mcp.json`, and the hooks
    (release-cron's run after confirm, `pronto-flags push`).
-4. Import the open PRs as items in a first catch-up sprint, so the board starts true. Run a week of
-   sprints, then make the missing-key check required (drop `--warn`) and back the board's database up.
+4. Import the open PRs as items, so the board starts true. Run a week of the queue, then make the missing-key check required (drop `--warn`) and back the board's database up.
 
 ## Open questions
 
 - **The team's machines**: on which machines the engineers' and the SRE's sessions run.
-- **A board of another kind**: GitHub Projects' adapter (PRONTO-207) maps its items, statuses and
-  iterations to the interface in `devflow/board/board.ts`.
+- **A board of another kind**: GitHub Projects' adapter (PRONTO-207) maps its items and statuses to the interface in `devflow/board/board.ts`.

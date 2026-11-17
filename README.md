@@ -26,7 +26,7 @@ refuses an app that is not.
 - [gcp](gcp/README.md): release to Cloud Run.
 - [identity](identity/README.md): social sign-in through a shared broker.
 - [infra](infra/README.md): a Google Cloud state kept in CUE, applied by OpenTofu.
-- [devflow](devflow/README.md): a repository's dev flow on a self-hosted Plane board: `bin/pronto connect plane`, the hooks that move issues, and the skills pronto-sprint-plan, pronto-issue, pronto-bug and pronto-design.
+- [devflow](devflow/README.md): a repository's dev flow on a self-hosted Plane board: `bin/pronto connect plane`, the hooks that move issues, and the skills pronto-sprint-plan (the lead's Ready-queue loop), pronto-issue, pronto-bug and pronto-design.
 - [intents](intents/README.md): one-command plumbing behind `bin/pronto`.
 - [journeys](journeys/README.md): user-journey SLOs from the terminal's telemetry.
 - [migrations](migrations/README.md): a live database carried forward by migrations made from pronto's emitted schema: columns paired by their proto field number (a rename, retype or drop refused), pgroll operations for what the replay of the schema never alters.

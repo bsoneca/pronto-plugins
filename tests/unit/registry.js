@@ -1,6 +1,6 @@
 // What the plugins' cases call (tests/unit.ts): each namespace a module of an intent or of their
 // runner (run) or its shell (flagsOf), identity pronto-identity's installer and brokers (identity.js), phone the broker's phone (identity/broker/phone.ts), otp its own codes' (identity/broker/otp.ts), idcore the broker's own decisions (identity/broker/core.ts), probe the
-// measures of probes.js, cron release-cron's rules (release-cron/cron.js), notes release-notes' (release-notes/notes.js), watch prod-watch's (prod-watch/watch.js), prober pronto-probe's (probe/probe.js), runners runners' (runners/plan.js), and devflow the dev flow's rules (devflow/flow.js), inbox the suggestion inbox on a fake Plane (devflow.js), ghboard GitHub Projects in the board's words (devflow/board/github.js), shop the stand-in apps the intents run on, as shops.js sets them up, android the Android terminal's compiler on pages of linkedom (android.js), androidScenarios its phone acceptance's pure rules (android/template/terminal/scenarios.ts), migrations pronto-migrations' rules (migrations/plan.js), and mig those rules on an edited model (migrations.js), apigen pronto-api's generator, views, door and lint on a stand-in app (apigen.js), machine the cue wrapper's and vetted.ts's measures (machine.js), and harness the flake filing of the scenarios' runner (harness.js).
+// measures of probes.js, cron release-cron's rules (release-cron/cron.js), notes release-notes' (release-notes/notes.js), watch prod-watch's (prod-watch/watch.js), prober pronto-probe's (probe/probe.js), runners runners' (runners/plan.js), and devflow the dev flow's rules (devflow/flow.js), inbox the suggestion inbox on a fake Plane (devflow.js), queue the Ready queue's verbs on it (devflow.js), ghboard GitHub Projects in the board's words (devflow/board/github.js), shop the stand-in apps the intents run on, as shops.js sets them up, android the Android terminal's compiler on pages of linkedom (android.js), androidScenarios its phone acceptance's pure rules (android/template/terminal/scenarios.ts), migrations pronto-migrations' rules (migrations/plan.js), and mig those rules on an edited model (migrations.js), apigen pronto-api's generator, views, door and lint on a stand-in app (apigen.js), machine the cue wrapper's and vetted.ts's measures (machine.js), and harness the flake filing of the scenarios' runner (harness.js).
 import * as stripe from '../../billing/connect.ts';
 import * as billing from '../../billing/service.ts';
 import * as deploy from '../../gcp/deploy.ts';
@@ -12,6 +12,7 @@ import * as idcore from '../../identity/broker/core.ts';
 import * as devflow from '../../devflow/flow.js';
 import * as ghboard from '../../devflow/board/github.js';
 import * as inbox from './devflow.js';
+import * as queue from './devflow.js';
 import * as run from '../../intents/run.ts';
 import * as shell from '../../intents/shell.ts';
 import * as probe from './probes.js';
@@ -30,5 +31,5 @@ import * as machine from './machine.js';
 import * as harness from './harness.js';
 
 export function registry(_suite) {
-  return { stripe, billing, devflow, ghboard, inbox, deploy, targets, identity, idcore, phone, otp, run, shell, probe, shop, cron, notes, watch, prober, runners, android, androidScenarios, migrations, mig, apigen, machine, harness };
+  return { stripe, billing, devflow, ghboard, inbox, queue, deploy, targets, identity, idcore, phone, otp, run, shell, probe, shop, cron, notes, watch, prober, runners, android, androidScenarios, migrations, mig, apigen, machine, harness };
 }

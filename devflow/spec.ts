@@ -32,7 +32,9 @@ export interface DevFlow {
   infra: string[];
   design: string[];
   architectModel: string;
-  sprint: { timeZone: string; perPerson: number };
+  /** Where the Ready queue is read, and how long an issue may wait there (schema.cue, queue). */
+  queue: { starvingDays: number; mergedDays: number };
+  timeZone: string;
   /** Hours without a commit or a pull request after which an issue holding a slot is stuck. */
   stuckHours: number;
   chore: string;

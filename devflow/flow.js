@@ -100,30 +100,6 @@ export function mayStart(busy, slots, priority, lane, urgent = "urgent") {
     : { ok: false, why: `all ${slots} ${lane} slots are busy` };
 }
 
-/** What a sprint may commit to, by lane: `perPerson` issues for each engineer, SRE and architect. */
-export function capacity(team, perPerson) {
-  return { engineer: (team?.engineers ?? 0) * perPerson, SRE: (team?.sre ?? 0) * perPerson, architect: (team?.architect ?? 0) * perPerson };
-}
-
-/** Whether a lane may plan `add` more issues when `planned` are in the sprint already, of `cap`. */
-export function mayPlan(planned, cap, add, lane) {
-  if (add <= 0) return { ok: true, why: `${lane}: nothing to add` };
-  if (cap === 0) return { ok: false, why: `the team has no ${lane}` };
-  const room = Math.max(0, cap - planned);
-  return add <= room
-    ? { ok: true, why: `${lane}: ${planned + add} of ${cap} planned` }
-    : { ok: false, why: `${lane}: ${planned} of ${cap} planned, ${add} more is ${add - room} over` };
-}
-
-/** The next Ready issue a lane pulls: the sprint's Ready issues of that lane, most urgent first
- * (`order`: the board's priorities from P0 down, then none), then the oldest. `issues` are
- * `{key, sequence, priority}`. */
-export function pullNext(issues, order = ["urgent", "high", "medium", "low", "none"]) {
-  const rank = (p) => (order.includes(p) ? order.indexOf(p) : order.length);
-  const sorted = [...issues].sort((a, b) => rank(a.priority) - rank(b.priority) || a.sequence - b.sequence);
-  return sorted[0] ?? null;
-}
-
 /** P0..P3 as the board's priority, in `priorities` (P to the board's word; Plane's by default). */
 /** @type {Record<string, string>} */
 const plane = { P0: "urgent", P1: "high", P2: "medium", P3: "low" };
@@ -133,71 +109,58 @@ export function priorityOf(p, priorities = plane) {
   return v;
 }
 
-/** Where a new bug goes by its priority (rule 6), as a role: P0 starts now, P1 joins the current
- * sprint, P2 and P3 wait in the Backlog for a coming sprint. */
+/** Where a new bug goes by its priority (rule 6), as a role: P0 starts now, P1 is refined at once and
+ * jumps the queue once Ready, P2 and P3 wait in the Backlog until the lead refines them. */
 export function bugPlace(p, priorities = plane) {
   priorityOf(p, priorities);
   const n = String(p).toUpperCase();
-  return n === "P0" ? { role: "implementing", sprint: true } : n === "P1" ? { role: "refine", sprint: true } : { role: "backlog", sprint: false };
+  return n === "P0" ? { role: "implementing" } : n === "P1" ? { role: "refine" } : { role: "backlog" };
 }
 
-/** A sprint is a Plane cycle named `Sprint <n>: <theme>`. Its number, or null for another cycle. */
-export function sprintNumber(name) {
-  const m = /^Sprint (\d+)(?::|$)/.exec(name ?? "");
-  return m ? Number(m[1]) : null;
+/** When an issue became Ready (PRONTO-658): the latest of its moves into the Ready state, the stay it
+ * is in now (a bounced issue queues again from its last entry), else `fallback` (made in Ready: its
+ * creation). `moves` are `{to, at}`, `to` a state's id. */
+export function readySince(moves, readyId, fallback) {
+  const at = (moves ?? []).filter((m) => m.to === readyId && Number.isFinite(Date.parse(m.at))).map((m) => Date.parse(m.at));
+  return at.length ? new Date(Math.max(...at)).toISOString() : fallback ?? null;
 }
 
-/** A sprint's cycle name: its number and, when there is one, its theme. */
-export function sprintName(n, theme) {
-  return theme ? `Sprint ${n}: ${theme}` : `Sprint ${n}`;
+/** Whether a Ready issue jumps the queue: a bug (its label) at P0 or P1. `urgent` is the board's words
+ * for P0 and P1. A P1 feature waits its turn like any other. */
+export function jumps(priority, bug, urgent = ["urgent", "high"]) {
+  return !!bug && urgent.includes(priority);
 }
 
-/** Where the endless loop stands (the owner, 2026-11-10: "the eternal loop sprint"). `sprints` are
- * `{n, groups}`, `groups` the Plane state group of each issue in it. A sprint is finished when it has
- * issues and each is completed (merged or past) or cancelled: it ends when its work is done, not at
- * an hour. The current sprint is the oldest one still open, the next the one after it; there are at
- * most these two, and a sprint planned now goes into the next (made when absent, numbered after the
- * last). A sprint with no issues is neither open nor finished. */
-export function loopOf(sprints) {
-  const sorted = [...sprints].sort((a, b) => a.n - b.n);
-  const done = (g) => g === "completed" || g === "cancelled";
-  const open = sorted.filter((s) => s.groups.length && !s.groups.every(done)).map((s) => s.n);
-  const finished = sorted.filter((s) => s.groups.length && s.groups.every(done)).map((s) => s.n);
-  // An empty highest sprint (made, then emptied or never filled) is the one a new sprint would be:
-  // planning fills it rather than making another after it.
-  const top = sorted[sorted.length - 1];
-  const number = !top ? 1 : top.groups.length ? top.n + 1 : top.n;
-  return { current: open[0] ?? null, next: open[1] ?? null, finished, number, plansInto: open[1] ?? number };
+/** The order a lane pulls its Ready issues (PRONTO-658): the jumping bugs first (a P0's before a P1's), then first in, first
+ * out by when each became Ready, then by number. `issues` are `{key, sequence, jump, p0, readyAt}`; one
+ * with no `readyAt` comes last of its kind. */
+export function pullOrder(issues) {
+  const t = (i) => (Number.isFinite(Date.parse(i.readyAt ?? "")) ? Date.parse(i.readyAt) : Infinity);
+  return [...issues].sort((a, b) => Number(!!b.jump && !!b.p0) - Number(!!a.jump && !!a.p0) || Number(!!b.jump) - Number(!!a.jump) || (t(a) < t(b) ? -1 : t(a) > t(b) ? 1 : 0) || a.sequence - b.sequence);
 }
 
-/** The day a moment falls on in `timeZone`, YYYY-MM-DD: a cycle's dates. */
+/** What merged and when, by day: `times` are ISO moments an issue merged. `today` and `week` count the
+ * moments on the day of `now` and in the `days` before it, `byDay` each day with its count, newest
+ * first, days in `timeZone`. */
+export function mergedByDay(times, now, timeZone, days = 7) {
+  const n = now instanceof Date ? now.getTime() : Date.parse(now);
+  const within = (times ?? []).map((t) => Date.parse(t)).filter((t) => Number.isFinite(t) && t <= n && n - t < days * DAY);
+  const counts = new Map();
+  for (const t of within) {
+    const d = dayOf(t, timeZone);
+    counts.set(d, (counts.get(d) ?? 0) + 1);
+  }
+  const byDay = [...counts].sort((a, b) => (a[0] < b[0] ? 1 : -1)).map(([day, count]) => ({ day, count }));
+  return { today: counts.get(dayOf(n, timeZone)) ?? 0, week: within.length, byDay };
+}
+
+/** The day a moment falls on in `timeZone`, YYYY-MM-DD. */
 export function dayOf(at, timeZone) {
   const t = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(at)).reduce((o, p) => ({ ...o, [p.type]: p.value }), {});
   return `${t.year}-${t.month}-${t.day}`;
 }
 
 const DAY = 86400000;
-const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
-
-/** A sprint cycle's dates, YYYY-MM-DD, in UTC as the board compares them. A sprint ends when its work
- * merges, not on a date (loopOf), but a board takes no issues into a cycle past its end (Plane: 400
- * CYCLE_COMPLETED), so a cycle starts on the UTC day it is made and ends `horizon` days later
- * (PRONTO-273: a cycle dated by the local day alone ended at 23:59 UTC of the day it was made,
- * already past when made after 21:00 BRT). */
-export function sprintDates(at, horizon = 365) {
-  const t = new Date(at).getTime();
-  return { start: utcDay(t), end: utcDay(t + horizon * DAY) };
-}
-
-/** The end a sprint's cycle moves to so it stays open, or null to leave it: when it has no end, or
- * less than half of `horizon` days left. A board refuses to edit a cycle once it ended, so it is moved
- * long before, and one that ended already is left (null) for the lead to remake. */
-export function sprintEndFor(end, at, horizon = 365) {
-  const t = new Date(at).getTime();
-  const left = end ? new Date(String(end).slice(0, 10) + "T23:59:59Z").getTime() - t : null;
-  if (left != null && (left < 0 || left >= (horizon / 2) * DAY)) return null;
-  return sprintDates(at, horizon).end;
-}
 
 /** What a pull request event from GitHub is to the flow: merged is a closed event that merged. */
 export function prEvent(action, merged) {
