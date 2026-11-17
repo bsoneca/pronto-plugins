@@ -2,7 +2,7 @@
 // step of the flow, its rule decided in flow.js and its queue logic in queue.ts, so a session never
 // moves an issue by hand. There are no sprints (PRONTO-658): Ready is a queue, first in first out,
 // and a bug at P1 jumps it.
-//   board.ts status <repo> [--json]                     the slots busy, what is stuck, each lane's Ready queue with ages, what starves, merges by day (read from each merged issue's moves: one call an issue), the open issues by state
+//   board.ts status <repo> [--json]                     the slots busy, what is stuck, each lane's Ready queue with ages, what starves, merges by day (from each issue's completed_at; today's from its history), the open issues by state
 //   board.ts start <repo> <KEY>                         Implementing, if its lane (engineer, SRE or architect) has a slot (a P0 always)
 //   board.ts pull <repo> [--lane engineer|SRE|architect]          start the lane's first issue in the Ready queue
 //   board.ts move <repo> <KEY> <State> [--why <text>]   Refine, Ready, Backlog or Cancelled, by the repository's name for the state or its role (the others are the hooks')
@@ -11,11 +11,11 @@
 //   board.ts suggestion <repo> <INBOX-n>                 the text of an item in Refine (and only Refine), as one quoted, untrusted line: the designer's one way to read it
 //   board.ts next, close                                 gone with the sprints: they print what replaced them and exit 2
 import { cmd, flagsOf } from "../intents/shell.ts";
-import { esc, type Issue } from "./board/board.ts";
-import { keyOf, nameOf, roleOf, stuckLine, stuckOf } from "./flow.js";
-import { contextOf, file as fileIssue, pull as pullIssue, queueLines, queueStatus, slotsLine, start as startIssue } from "./queue.ts";
+import { esc } from "./board/board.ts";
+import { keyOf, nameOf, roleOf } from "./flow.js";
+import { contextOf, file as fileIssue, pull as pullIssue, type ReadCache, start as startIssue, status } from "./queue.ts";
 import { boardOf, devflowOf, type Role } from "./spec.ts";
-import { approve, inboxStatus, show, suggestionLines } from "./suggestions.ts";
+import { approve, show } from "./suggestions.ts";
 
 const [verb, repoArg, ...rest] = Deno.args;
 const GONE: Record<string, string> = {
@@ -46,7 +46,6 @@ const own = (k: string) => {
   if (!own) throw new Error(`${k} is not an issue of ${id}`);
   return own;
 };
-const key = (i: Issue) => `${id}-${i.sequence_id}`;
 
 /** The newest commit, an ISO time, on a branch of the repository whose name carries `k` (local and remote refs). */
 async function lastCommit(k: string): Promise<string | null> {
@@ -59,39 +58,61 @@ async function lastCommit(k: string): Promise<string | null> {
   return null;
 }
 
-/** The open pull request linked to an issue, with its ci and auto-merge, or null when there is none. */
-async function openPr(i: Issue): Promise<{ ci: "pass" | "fail" | "pending"; auto: boolean } | null> {
-  for (const l of await board.links(project, i.id).catch(() => [])) {
-    if (!/\/pull\/\d+/.test(l.url)) continue;
-    const r = await cmd("gh", ["pr", "view", l.url, "--json", "state,autoMergeRequest,statusCheckRollup"]);
-    if (!r.ok) continue;
-    const p = JSON.parse(r.out) as { state: string; autoMergeRequest: unknown; statusCheckRollup: { conclusion?: string; status?: string }[] };
-    if (p.state !== "OPEN") continue;
-    const cs = p.statusCheckRollup ?? [];
-    const failed = cs.some((c) => ["FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED"].includes(c.conclusion ?? ""));
-    const pending = cs.some((c) => c.status !== "COMPLETED");
-    return { ci: failed ? "fail" : pending ? "pending" : "pass", auto: !!p.autoMergeRequest };
-  }
-  return null;
+/** A pull request's ci and auto-merge, or null when it is not open or gh cannot read it. */
+async function openPr(url: string): Promise<{ ci: "pass" | "fail" | "pending"; auto: boolean } | null> {
+  const r = await cmd("gh", ["pr", "view", url, "--json", "state,autoMergeRequest,statusCheckRollup"]);
+  if (!r.ok) return null;
+  const p = JSON.parse(r.out) as { state: string; autoMergeRequest: unknown; statusCheckRollup: { conclusion?: string; status?: string }[] };
+  if (p.state !== "OPEN") return null;
+  const cs = p.statusCheckRollup ?? [];
+  const failed = cs.some((c) => ["FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED"].includes(c.conclusion ?? ""));
+  const pending = cs.some((c) => c.status !== "COMPLETED");
+  return { ci: failed ? "fail" : pending ? "pending" : "pass", auto: !!p.autoMergeRequest };
 }
 
-async function status() {
-  const [all, ctx] = await Promise.all([board.issues(project, true), contextOf(board, flow!, project)]);
-  const now = new Date();
-  // Issues holding a slot (Implementing, or in Review) that no work is moving (flow.js stuckOf).
-  const held = all.filter((i) => ["implementing", "review"].includes(ctx.roleAt(i.state) ?? ""));
-  const stuck = (await Promise.all(held.map(async (i) => {
-    const pr = await openPr(i);
-    return stuckOf({ key: key(i), state: ctx.stateName(i.state), since: i.updated_at ?? "", pr, commit: pr ? null : await lastCommit(key(i)) }, now, flow!.stuckHours);
-  }))).filter((s) => s !== null);
-  const q = await queueStatus(board, ctx, all, now);
-  const suggestions = await inboxStatus(board, flow!, inbox, all.map((i) => i.name), now);
-  if (rest.includes("--json")) return console.log(JSON.stringify(suggestions ? { ...q, stuck, suggestions } : { ...q, stuck }, null, 2));
-  console.log(slotsLine(q));
-  for (const s of stuck) console.log(stuckLine(s));
-  for (const l of queueLines(q, flow!)) console.log(l);
-  // The inbox's lines come last, so the lines above are what they were without one.
-  if (suggestions) for (const l of suggestionLines(suggestions, flow!)) console.log(l);
+/** The Ready and merge times status has read, kept between runs (queue.ts): one small JSON file, read
+ * only if it is a plain object of times, written whole to a temporary file and renamed. */
+function readCache(): ReadCache {
+  const dir = `${Deno.env.get("XDG_CACHE_HOME") ?? `${Deno.env.get("HOME") ?? "."}/.cache`}/pronto-devflow`;
+  const file = `${dir}/reads-${flow!.board.workspace}-${id}.json`;
+  const kept = new Map<string, string>();
+  try {
+    const read = JSON.parse(Deno.readTextFileSync(file));
+    if (read && typeof read === "object" && !Array.isArray(read)) {
+      for (const [k, v] of Object.entries(read)) if (typeof v === "string" && Number.isFinite(Date.parse(v))) kept.set(k, v);
+    }
+  } catch { /* no cache yet, or an unreadable one: read afresh */ }
+  let dirty = false;
+  return {
+    get: (k) => kept.get(k),
+    set: (k, v) => void (dirty = true, kept.set(k, v)),
+    save(live) {
+      // Keys are `<kind>:<issue id>@<time>`: an answer of an issue no longer listed goes.
+      for (const k of [...kept.keys()]) if (!live.has(k.slice(k.indexOf(":") + 1, k.lastIndexOf("@")))) (dirty = true, kept.delete(k));
+      if (!dirty) return;
+      const tmp = `${file}.${Deno.pid}.tmp`;
+      try {
+        Deno.mkdirSync(dir, { recursive: true });
+        Deno.writeTextFileSync(tmp, JSON.stringify(Object.fromEntries(kept)));
+        Deno.renameSync(tmp, file);
+        dirty = false;
+      } catch { /* a cache that cannot be written costs the next run its reads */ }
+    },
+  };
+}
+
+async function statusVerb() {
+  const json = rest.includes("--json");
+  const r = await status(board, flow!, project, {
+    now: () => new Date(),
+    cache: readCache(),
+    inbox,
+    pr: openPr,
+    lastCommit,
+    print: (l) => { if (!json) console.log(l); },
+  });
+  if (json) console.log(JSON.stringify(r.json, null, 2));
+  if (r.failures) Deno.exit(1);
 }
 
 async function start(k: string) {
@@ -133,7 +154,7 @@ async function file() {
 }
 
 switch (verb) {
-  case "status": await status(); break;
+  case "status": await statusVerb(); break;
   case "start": await start(rest[0]); break;
   case "pull": await pull(flagsOf(rest).lane ?? "engineer"); break;
   case "move": await move(rest[0], rest[1], flagsOf(rest.slice(2)).why ?? ""); break;
