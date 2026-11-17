@@ -965,7 +965,7 @@ await browser.close();
 console.log(`scenarios: ${(shared ? ran.length : runnable.length) - failed.length} passed (${sel.cached.length} cached${shared ? `, ${sel.run.length - ran.length} run by another lane` : ""}${skipped.length ? `, ${skipped.length} skipped` : ""}), ${failed.length} failed, in ${Math.round((Date.now() - t0) / 1000)}s`);
 if (pageErrors.length) console.log(`page errors:\n${pageErrors.join("\n")}`);
 if (flaked.length) console.log(`flakes under load: ${flaked.join(", ")}`);
-if (unmarked.length) throw new AggregateError(unmarked, `flake markers not written: ${unmarked.map(String).join("; ")}`);
+if (unmarked.length) throw new AggregateError(unmarked, `flake filing threw (a marker not written, or git): ${unmarked.map(String).join("; ")}`);
 if (failed.length || pageErrors.length) Deno.exit(1);
 
 // Files a flake once a week per scenario (a marker under ~/.cache/pronto/flakes/<app>); FLAKES_FILE=0 files none.

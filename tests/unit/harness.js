@@ -20,6 +20,6 @@ export async function unmarked() {
   const said = [];
   try {
     return await fileFlake({ id: "demo", cmd: "board", args: [], marks: `${blocker}/marks`, say: (l) => said.push(l), run: () => Promise.resolve({ success: true, stdout: "PRONTO-700\n", stderr: "" }) })
-      .then((r) => ({ threw: false, filed: r.filed, said: said.length }), () => ({ threw: true }));
+      .then((r) => ({ threw: false, filed: r.filed, said: said.length }), () => ({ threw: true, said: said.length }));
   } finally { await Deno.remove(blocker); }
 }

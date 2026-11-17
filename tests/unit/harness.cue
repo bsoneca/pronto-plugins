@@ -51,6 +51,6 @@ cases: "a board that files a flake gets its marker, holding what it said": {
 cases: "a filed flake whose marker cannot be written is thrown (the runner throws it after its report)": {
 	suite: "harness"
 	steps: [
-		{call: "harness.unmarked", expect: {threw: true}, why: "not the board's error: an unwritten marker would file the same flake every run"},
+		{call: "harness.unmarked", expect: {threw: true, said: 1}, why: "said before it throws, so the issue key is in the log; not the board's error: an unwritten marker would file the same flake every run"},
 	]
 }
