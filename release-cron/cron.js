@@ -291,9 +291,12 @@ export const merges = (lines) => lines.filter(Boolean).map((l) => {
 // failure reads the release records (pronto's, per name): live is good, a failed rc test run is bad.
 // A rehearsal failure reads the rehearsal records (passed good, failed bad). The records do not name the scenarios that failed, so a failure counts as bad only when the failed run named none. A dirty tree proves
 // nothing. `ledger` holds the verdicts earlier bisects ran themselves ({commit, kind, names, verdict, at});
-// the newest evidence counts.
+// the newest evidence counts. Where any rehearsal record says its `mode` (an app's rehearse.ts that writes it, Bonk
+// Chess's since PRONTO-683), only release-cron's own runs (`mode: "release"`) count, and not one that excused a new
+// feature's failing scenario (`excused`): a hand run, a record from before modes or an excused pass proves nothing.
+export const evidenceOf = (rehearsals) => rehearsals.some((r) => r.mode !== undefined) ? rehearsals.filter((r) => r.mode === "release" && !(r.excused ?? []).length) : rehearsals;
 export const verdict = (commit, sig, ev) => {
-  const rehearsals = ev.rehearsals ?? [], releases = ev.releases ?? [], ledger = ev.ledger ?? [];
+  const rehearsals = evidenceOf(ev.rehearsals ?? []), releases = ev.releases ?? [], ledger = ev.ledger ?? [];
   const from = sig.kind === "release"
     ? releases.filter((r) => r.commit === commit && !r.dirty).map((r) => [r.started, r.outcome === "live" ? "good" : r.outcome === "failed" && !sig.names.length && /^the tests failed against/.test(r.failure ?? "") ? "bad" : "unknown"])
     : rehearsals.filter((r) => r.commit === commit && !r.dirty).map((r) => [r.queued, r.outcome === "passed" ? "good" : r.outcome === "failed" && !sig.names.length ? "bad" : "unknown"]);
