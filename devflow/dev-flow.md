@@ -249,11 +249,15 @@ merged: 5 today, 31 in 7 days (2026-11-17 5, 2026-11-16 9, ...)
 backlog: 40
 ```
 
-`merged` counts, over the last `queue.mergedDays` (default 7), by the day each issue merged: its first
-move into a completed state after its last move out of one, read from its activity (one call for each
-issue whose `completed_at` is in the window, since Plane rewrites `completed_at` when the issue is later
-made Done), in the flow's `timeZone` (default `America/Sao_Paulo`). `queue.starvingDays` (default 3) is
-how long an issue may wait in Ready before `starving:` names it. A Ready issue the board cannot date, or
+`merged` counts, over the last `queue.mergedDays` (default 7), by each issue's `completed_at`, which the
+issue list already holds, so it costs no call. For a Merged issue that is the merge; for a Live or Done one
+Plane has rewritten it when the issue was released or flipped, so a day before today may hold the issues
+released or flipped that day, counted days late (the line says so). Today alone is exact: an issue
+Live or Done and completed today has its history read (its first move into a completed state after its
+last move out of one), once, and kept under `~/.cache/pronto-devflow/` with each Ready issue's time, so a
+warm `status` is the issue list plus a few reads. The lines print as each phase finishes, and a phase that fails prints
+`<phase>: unavailable (<error>)` and the run exits 1: nothing is hidden. The flow's `timeZone` (default `America/Sao_Paulo`) sets the days.
+`queue.starvingDays` (default 3) is how long an issue may wait in Ready before `starving:` names it. A Ready issue the board cannot date, or
 an activity it cannot read, is an error: nothing is pulled on a guess. Once a lane is full, `pull` goes on
 only for a P0 (it starts past the slots); a P0 bug is pulled before a P1 bug.
 

@@ -2,7 +2,7 @@
 // step of the flow, its rule decided in flow.js and its queue logic in queue.ts, so a session never
 // moves an issue by hand. There are no sprints (PRONTO-658): Ready is a queue, first in first out,
 // and a bug at P1 jumps it.
-//   board.ts status <repo> [--json]                     the slots busy, what is stuck, each lane's Ready queue with ages, what starves, merges by day (read from each merged issue's moves: one call an issue), the open issues by state
+//   board.ts status <repo> [--json]                     the slots busy, what is stuck, each lane's Ready queue with ages, what starves, merges by day (from each issue's completed_at; today's from its history), the open issues by state
 //   board.ts start <repo> <KEY>                         Implementing, if its lane (engineer, SRE or architect) has a slot (a P0 always)
 //   board.ts pull <repo> [--lane engineer|SRE|architect]          start the lane's first issue in the Ready queue
 //   board.ts move <repo> <KEY> <State> [--why <text>]   Refine, Ready, Backlog or Cancelled, by the repository's name for the state or its role (the others are the hooks')
@@ -13,7 +13,7 @@
 import { cmd, flagsOf } from "../intents/shell.ts";
 import { esc, type Issue } from "./board/board.ts";
 import { keyOf, nameOf, roleOf, stuckLine, stuckOf } from "./flow.js";
-import { contextOf, file as fileIssue, pull as pullIssue, queueLines, queueStatus, slotsLine, start as startIssue } from "./queue.ts";
+import { contextOf, file as fileIssue, type ReadCache, mergedLine, mergedStatus, openLines, openStatus, pull as pullIssue, readyLines, readyStatus, slotsLine, start as startIssue } from "./queue.ts";
 import { boardOf, devflowOf, type Role } from "./spec.ts";
 import { approve, inboxStatus, show, suggestionLines } from "./suggestions.ts";
 
@@ -75,23 +75,76 @@ async function openPr(i: Issue): Promise<{ ci: "pass" | "fail" | "pending"; auto
   return null;
 }
 
+/** The Ready and merge times status has read, kept between runs (queue.ts): one small JSON file. */
+function readCache(): ReadCache & { save(): void } {
+  const dir = `${Deno.env.get("XDG_CACHE_HOME") ?? `${Deno.env.get("HOME") ?? "."}/.cache`}/pronto-devflow`;
+  const file = `${dir}/reads-${flow!.board.workspace}-${id}.json`;
+  let kept: Record<string, string> = {};
+  try {
+    kept = JSON.parse(Deno.readTextFileSync(file));
+  } catch { /* no cache yet, or an unreadable one: read afresh */ }
+  let dirty = false;
+  return {
+    get: (k) => kept[k],
+    set: (k, v) => void (dirty = true, kept[k] = v),
+    save() {
+      if (!dirty) return;
+      try {
+        Deno.mkdirSync(dir, { recursive: true });
+        Deno.writeTextFileSync(file, JSON.stringify(kept));
+      } catch { /* a cache that cannot be written costs the next run its reads */ }
+    },
+  };
+}
+
+/** One phase of status: its result, or what failed. A slow or failing phase never keeps the others
+ * from printing, and a failure is said, never hidden (the run then exits 1). */
+let failed = 0;
+async function phase<T>(name: string, run: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
+  try {
+    return { ok: true, value: await run() };
+  } catch (e) {
+    failed++;
+    return { ok: false, error: `${name}: unavailable (${(e as Error).message})` };
+  }
+}
+
 async function status() {
+  const json = rest.includes("--json");
   const [all, ctx] = await Promise.all([board.issues(project, true), contextOf(board, flow!, project)]);
   const now = new Date();
+  const open = openStatus(ctx, all);
+  const out = (l: string) => { if (!json) console.log(l); };
+  out(slotsLine(open));
+  // Each phase prints as soon as it is done: the Ready queue, the stuck issues, the merges, the rest.
+  const cache = readCache();
+  const ready = await phase("ready to pull", () => readyStatus(board, ctx, all, now, cache));
+  cache.save();
+  if (ready.ok) for (const l of readyLines(ready.value, flow!)) out(l); else out(ready.error);
   // Issues holding a slot (Implementing, or in Review) that no work is moving (flow.js stuckOf).
   const held = all.filter((i) => ["implementing", "review"].includes(ctx.roleAt(i.state) ?? ""));
-  const stuck = (await Promise.all(held.map(async (i) => {
+  const stuck = await phase("stuck", async () => (await Promise.all(held.map(async (i) => {
     const pr = await openPr(i);
     return stuckOf({ key: key(i), state: ctx.stateName(i.state), since: i.updated_at ?? "", pr, commit: pr ? null : await lastCommit(key(i)) }, now, flow!.stuckHours);
-  }))).filter((s) => s !== null);
-  const q = await queueStatus(board, ctx, all, now);
+  }))).filter((s) => s !== null));
+  if (stuck.ok) for (const s of stuck.value) out(stuckLine(s)); else out(stuck.error);
+  const merged = await phase("merged", () => mergedStatus(board, ctx, all, now, { cache }));
+  cache.save();
+  out(merged.ok ? mergedLine(merged.value, flow!) : merged.error);
+  for (const l of openLines(open, flow!)) out(l);
   const suggestions = await inboxStatus(board, flow!, inbox, all.map((i) => i.name), now);
-  if (rest.includes("--json")) return console.log(JSON.stringify(suggestions ? { ...q, stuck, suggestions } : { ...q, stuck }, null, 2));
-  console.log(slotsLine(q));
-  for (const s of stuck) console.log(stuckLine(s));
-  for (const l of queueLines(q, flow!)) console.log(l);
-  // The inbox's lines come last, so the lines above are what they were without one.
-  if (suggestions) for (const l of suggestionLines(suggestions, flow!)) console.log(l);
+  if (json) {
+    const bad = (r: { error?: string }) => ({ unavailable: r.error });
+    console.log(JSON.stringify({
+      slots: open.slots, queue: ready.ok ? ready.value.queue : bad(ready), starving: ready.ok ? ready.value.starving : [],
+      merged: merged.ok ? merged.value : bad(merged), issues: open.issues, backlog: open.backlog,
+      stuck: stuck.ok ? stuck.value : bad(stuck), ...(suggestions ? { suggestions } : {}),
+    }, null, 2));
+  } else if (suggestions) {
+    // The inbox's lines come last, so the lines above are what they were without one.
+    for (const l of suggestionLines(suggestions, flow!)) console.log(l);
+  }
+  if (failed) Deno.exit(1);
 }
 
 async function start(k: string) {

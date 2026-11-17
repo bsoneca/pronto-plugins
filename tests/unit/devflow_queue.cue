@@ -4,6 +4,8 @@
 // `{seq, state, module, priority, bug, ready, created, completed, moves}` and its clock `now`.
 package unit
 
+import "list"
+
 cases: {
 	"a lane pulls a P1 bug first, then the oldest in Ready, and touches no cycle": {suite: "devflow", steps: [
 		{call: "queue.pulls", args: [{cycles: [{name: "Sprint 8", issues: [3]}], issues: [
@@ -59,7 +61,7 @@ cases: {
 				"  ready to pull, SRE: none",
 				"  ready to pull, architect: none",
 				"starving: ACME-3 Ready 4d (over 3d)",
-				"merged: 0 today, 0 in 7 days",
+				"merged: 0 today, 0 in 7 days; days before today by completed_at",
 				"  open, Refine: ACME-10 refine me",
 				"  open, Implementing: ACME-1 busy",
 				"backlog: 1",
@@ -79,7 +81,7 @@ cases: {
 			{seq: 5, state: "Done", module: "aprende", completed: "2026-11-05T14:00:00Z"},
 			{seq: 6, state: "Done", module: "aprende", completed: "2026-11-17T13:00:00Z", moves: [{state: "Merged", at: "2026-11-10T10:00:00Z"}, {state: "Review", at: "2026-11-14T10:00:00Z"}, {state: "Merged", at: "2026-11-15T10:00:00Z"}, {state: "Done", at: "2026-11-17T13:00:00Z"}]},
 		]}]}, {pick: ["merged", "writes"], expect: [{today: 1, week: 4, byDay: [{day: "2026-11-17", count: 1}, {day: "2026-11-16", count: 1}, {day: "2026-11-15", count: 1}, {day: "2026-11-12", count: 1}]}, []], why: "4 merged on the 10th and was flipped Done today: not this week's; 6 was sent back and merged again on the 15th; 5 is older than a week"},
-		{call: "queue.queueState", args: [{now: "2026-11-17T15:00:00Z", issues: [{seq: 1, state: "Merged", module: "aprende", completed: "2026-11-17T12:00:00Z"}]}]}, {pick: ["lines.3"], expect: ["merged: 1 today, 1 in 7 days (2026-11-17 1)"], why: "the line names the window queue.mergedDays sets"},
+		{call: "queue.queueState", args: [{now: "2026-11-17T15:00:00Z", issues: [{seq: 1, state: "Merged", module: "aprende", completed: "2026-11-17T12:00:00Z"}]}]}, {pick: ["lines.3"], expect: ["merged: 1 today, 1 in 7 days (2026-11-17 1); days before today by completed_at"], why: "the line names the window queue.mergedDays sets"},
 	]}
 	"a Ready issue the board cannot date, or whose moves cannot be read, is an error and nothing is written": {suite: "devflow", steps: [
 		{call: "queue.pulls", args: [{issues: [{seq: 1, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"}], failMoves: true}, "engineer", 1]}, {pick: ["started", "error", "writes"], expect: [[], "plane GET activities: 500", []]},
@@ -105,6 +107,22 @@ cases: {
 			{seq: 6, state: "Ready", module: "aprende", ready: "2026-11-13T12:00:00Z"},
 			{seq: 4, state: "Ready", module: "aprende", ready: "2026-11-13T12:00:00Z"},
 		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-4", "ACME-6"]], why: "the same Ready time: the number decides"},
+	]}
+	"status reads merges from completed_at, and the history only of what was completed today": {suite: "devflow", steps: [
+		{call: "queue.queueState", args: [{now: "2026-11-17T15:00:00Z", issues: [
+			{seq: 1, state: "Done", module: "aprende", completed: "2026-11-14T10:00:00Z", moves: [{state: "Merged", at: "2026-11-10T10:00:00Z"}, {state: "Done", at: "2026-11-14T10:00:00Z"}]},
+		]}]}, {pick: ["merged"], expect: [{today: 0, week: 1, byDay: [{day: "2026-11-14", count: 1}]}], why: "before today the flip's day is the one counted: a day or days late, said on the line, and no history read"},
+	]}
+	"status stays within a few requests whatever the number of issues: its history reads are kept, and only today's are made": {suite: "devflow", steps: [
+		{call: "queue.statusRequests", args: [{issues: list.FlattenN([
+			[for n in list.Range(1, 6, 1) {seq: n, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"}],
+			[for n in list.Range(100, 140, 1) {seq: n, state: "Done", module: "aprende", completed: "2026-11-15T10:00:00Z"}],
+			[{seq: 200, state: "Done", module: "aprende", completed: "2026-11-17T12:00:00Z", moves: [{state: "Merged", at: "2026-11-17T11:00:00Z"}, {state: "Done", at: "2026-11-17T12:00:00Z"}]}],
+		], 1)}]}, {pick: ["0.requests", "0.activity", "1.requests", "1.activity", "1.merged.week"], expect: [10, 6, 4, 0, 41], why: "cold: the issue list, states, modules, labels, 5 Ready issues' activity and today's one Done issue's; warm: the same 4 requests and no activity read"},
+		{call: "queue.statusRequests", args: [{issues: list.FlattenN([
+			[for n in list.Range(1, 61, 1) {seq: n, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"}],
+			[for n in list.Range(100, 400, 1) {seq: n, state: "Done", module: "aprende", completed: "2026-11-15T10:00:00Z"}],
+		], 1)}]}, {pick: ["1.requests", "1.activity", "1.merged.week"], expect: [4, 0, 300], why: "60 Ready and 300 merged issues: a warm status makes the same 4 requests"},
 	]}
 	"file puts a bug where its priority says and joins no cycle": {suite: "devflow", steps: [
 		{call: "queue.filed", args: [{}, {title: "crash", app: "aprende", bug: true, priority: "P1"}]}, {pick: ["key", "state", "module", "madeState", "priority", "labels.length", "writes"], expect: [

@@ -3,7 +3,7 @@
 // seed that logs each write, so a case can say what a run wrote and that a second run wrote nothing. The
 // code under test is devflow/suggestions.ts and devflow/queue.ts, on this Board.
 import { approve, inboxSteps, inboxStatus, show, suggestionLines } from '../../devflow/suggestions.ts';
-import { contextOf, file as fileIssue, pull as pullIssue, queueLines, queueStatus, slotsLine } from '../../devflow/queue.ts';
+import { contextOf, file as fileIssue, mergedStatus, openStatus, pull as pullIssue, queueLines, queueStatus, readyStatus, slotsLine } from '../../devflow/queue.ts';
 import * as run from '../../intents/run.ts';
 
 const GROUPS = { Backlog: 'backlog', Todo: 'unstarted', 'In Progress': 'started', Done: 'completed', Cancelled: 'cancelled' };
@@ -77,7 +77,7 @@ function boardOf(seed) {
   for (const i of seed.issues ?? []) {
     issues['p-acme'].push({
       id: `i-acme-${i.seq}`, name: i.name ?? `issue ${i.seq}`, sequence_id: i.seq, state: `s-acme-${i.state ?? 'Backlog'}`, priority: i.priority ?? 'none', project: 'p-acme',
-      created_at: i.created, completed_at: i.completed, labels: i.bug ? ['l-bug'] : [],
+      created_at: i.created, completed_at: i.completed, updated_at: i.updated ?? '2026-11-01T00:00:00Z', labels: i.bug ? ['l-bug'] : [],
     });
     moves[`i-acme-${i.seq}`] = [...(i.ready ? [{ to: 's-acme-Ready', at: i.ready }] : []), ...(i.moves ?? []).map((m) => ({ to: `s-acme-${m.state}`, at: m.at }))];
     if (i.comments) comments[`i-acme-${i.seq}`] = i.comments.map((c) => ({ ...c }));
@@ -91,7 +91,7 @@ function boardOf(seed) {
     if (failing === what) { failing = null; throw new Error(`${what} failed once`); }
     log.push([what, ...rest].join(' '));
   };
-  const light = (i, full) => (full ? { ...i } : { id: i.id, name: i.name, sequence_id: i.sequence_id, state: i.state, priority: i.priority, created_at: i.created_at, completed_at: i.completed_at, labels: i.labels });
+  const light = (i, full) => (full ? { ...i } : { id: i.id, name: i.name, sequence_id: i.sequence_id, state: i.state, priority: i.priority, created_at: i.created_at, completed_at: i.completed_at, updated_at: i.updated_at, labels: i.labels });
   const byId = (p) => projects.find((x) => x.id === p);
   const sync = {
     projects: () => projects.map((p) => ({ ...p })),
@@ -147,13 +147,16 @@ function boardOf(seed) {
     createCycle: () => { write('createCycle'); return { id: 'c-1', name: 'x' }; },
   };
   // Each call answers as a board's does: late, and a failure as a rejection.
+  // Every request the board serves is counted by method (a status case bounds them).
+  const served = {};
   const board = Object.fromEntries(Object.entries(sync).map(([k, f]) => [k, (...a) => Promise.resolve().then(() => {
+    served[k] = (served[k] ?? 0) + 1;
     const r = f(...a);
     if (lost === k) { lost = null; throw new Error(`${k} answer lost`); }
     return r;
   })]));
   const take = () => log.splice(0, log.length);
-  return { board, take, projects, states, issues, comments, modIssues, labels, byId, inboxId: () => projects.find((p) => p.identifier === 'SUGEST')?.id };
+  return { board, take, served, projects, states, issues, comments, modIssues, labels, byId, inboxId: () => projects.find((p) => p.identifier === 'SUGEST')?.id };
 }
 
 /** The inbox's status as `status` prints it: the JSON and its lines (null when the flow has no inbox). */
@@ -250,4 +253,26 @@ export async function filed(seed, flags) {
   const r = await fileIssue(f.board, ctx, flags);
   const made = f.issues['p-acme'].find((i) => i.sequence_id >= 100);
   return { ...r, writes: f.take(), priority: made.priority, labels: made.labels, madeState: ctx.stateName(made.state) };
+}
+
+/** `status`'s reads as the verb makes them, run twice on one board with the cache the verb keeps between
+ * runs: each run's requests served (all, and the activity reads among them) and its merged count. */
+export async function statusRequests(seed) {
+  seed = { now: DEFAULT_NOW, ...seed };
+  const f = boardOf(seed);
+  const flow = flowOf(seed);
+  const now = new Date(seed.now);
+  const kept = new Map();
+  const cache = { get: (k) => kept.get(k), set: (k, v) => kept.set(k, v) };
+  const runs = [];
+  for (let r = 0; r < 2; r++) {
+    for (const k of Object.keys(f.served)) delete f.served[k];
+    const all = await f.board.issues('p-acme', true);
+    const ctx = await contextOf(f.board, flow, 'p-acme');
+    await readyStatus(f.board, ctx, all, now, cache);
+    const merged = await mergedStatus(f.board, ctx, all, now, { cache });
+    openStatus(ctx, all);
+    runs.push({ requests: Object.values(f.served).reduce((a, b) => a + b, 0), activity: f.served.stateMoves ?? 0, merged });
+  }
+  return runs;
 }

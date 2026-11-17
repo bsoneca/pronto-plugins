@@ -46,8 +46,8 @@ issues, `merged:` by day, the open issues by state, the Backlog's size and the i
 4. **File what the owner approved.** When `status` says `Approved, to file: N`, run
    `pronto-devflow approve . SUGEST-<n>` for each (it files a link-only issue in the Backlog), and
    tell the owner how many suggestions are waiting and how many are stale.
-5. **Report.** Tell the owner in a few lines what merged (`merged: N today, M in 7 days`, by day: each issue counted on the day it merged, read from its
-   activity, not Plane's `completed_at`, which a later flip rewrites),
+5. **Report.** Tell the owner in a few lines what merged (`merged: N today, M in 7 days`, by day: from Plane's `completed_at`, so a day before today may hold issues
+   released or flipped that day, counted late; today's number is exact),
    what went Live, which flags went on (Done), what starves or is stuck and what you did about it.
    Do not wait for an answer.
 6. **Back to 1.** The loop never ends while the board has work. With the Backlog empty and nothing in
