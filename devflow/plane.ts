@@ -6,7 +6,7 @@ import type { Board, Comment, Cycle, Issue, Member, Named, NewIssue, State } fro
 import { askAgain } from "./flow.js";
 
 // An issue's fields the board's verbs read (board.ts): a list of issues asks for these alone.
-const LIGHT = "id,name,sequence_id,state,priority,updated_at";
+const LIGHT = "id,name,sequence_id,state,priority,updated_at,created_at,completed_at,labels";
 const timeoutMs = () => Number(Deno.env.get("PLANE_TIMEOUT_MS") ?? "") || 30_000;
 
 export class Plane implements Board {
@@ -107,6 +107,13 @@ export class Plane implements Board {
   // Plane refuses to edit a cycle whose end has passed: it is moved while open (flow.js sprintEndFor).
   setCycleEnd = (project: string, cycle: string, end: string) => this.call("PATCH", `${this.p(project)}/cycles/${cycle}/`, { end_date: end });
   addToCycle = (project: string, cycle: string, issues: string[]) => this.call("POST", `${this.p(project)}/cycles/${cycle}/cycle-issues/`, { issues });
+
+  /** An issue's moves into each state, from its activity: the rows whose field is `state` carry the
+   * state's id (new_identifier) and when (created_at). One read an issue; Plane's order is not relied on. */
+  stateMoves = async (project: string, id: string): Promise<{ to: string; at: string }[]> =>
+    (await this.all<{ field?: string | null; new_identifier?: string | null; created_at: string }>(`${this.p(project)}/issues/${id}/activities/`))
+      .filter((a) => a.field === "state" && a.new_identifier)
+      .map((a) => ({ to: a.new_identifier!, at: a.created_at }));
 
   issues = (project: string, light = false) => this.all<Issue>(`${this.p(project)}/issues/${light ? `?fields=${LIGHT}` : ""}`);
   /** An issue by its key, PRONTO-123. */

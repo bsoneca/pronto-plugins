@@ -53,7 +53,7 @@ export async function suggestionStatus(board: Board, flow: DevFlow, inbox: strin
         key: keyOf(i.sequence_id),
         app: who.app,
         submitter: who.submitter,
-        date: Number.isFinite(made) ? dayOf(made, flow.sprint.timeZone) : "unknown",
+        date: Number.isFinite(made) ? dayOf(made, flow.timeZone) : "unknown",
         days: Number.isFinite(made) ? Math.max(0, Math.floor((now.getTime() - made) / DAY)) : 0,
         stale: staleOf(i.created_at, now, sug.staleDays),
         excerpt: text,

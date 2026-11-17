@@ -17,6 +17,8 @@ export interface Issue {
   updated_at?: string;
   /** When the issue was made (ISO). */
   created_at?: string;
+  /** When it last reached a completed state (ISO); a board may rewrite it on a later move within the group. */
+  completed_at?: string;
   description_html?: string;
   module_ids?: string[];
   labels?: string[];
@@ -67,6 +69,11 @@ export interface Board {
   removeFromCycle(project: string, cycle: string, issue: string): Promise<unknown>;
   /** Moves a cycle's end (a board whose cycles never close, as GitHub's iterations, has none). */
   setCycleEnd?(project: string, cycle: string, end: string): Promise<unknown>;
+
+  /** An issue's moves between states, `to` the state's id and `at` when (ISO), in any order: what
+   * says when it became Ready (flow.js readySince). A board that cannot say leaves it out, and the
+   * queue falls back to when the issue was made. */
+  stateMoves?(project: string, id: string): Promise<{ to: string; at: string }[]>;
 
   /** The project's issues; `light`, only id, name, sequence_id, state and priority (the board's
    * verbs read no more, and a board may answer that much faster). */

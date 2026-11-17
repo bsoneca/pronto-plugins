@@ -16,7 +16,7 @@ const SPEC = [
 function flowOf(seed) {
   const flow = {
     board: { kind: seed.kind ?? 'plane', host: 'plane.example.com', workspace: 'acme', project: { name: 'acme', identifier: 'ACME' } },
-    sprint: { timeZone: 'America/Sao_Paulo', perPerson: 3 },
+    timeZone: 'America/Sao_Paulo',
     roles: { backlog: 'Backlog', refine: 'Refine', ready: 'Ready', cancelled: 'Cancelled' },
     states: SPEC,
   };
