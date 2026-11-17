@@ -125,7 +125,7 @@ export function parseTables(sql) {
       put(at(m[1] ?? m[2]).columns, m[3], columnClause(m[4]));
     } else if ((m = line.match(/^CREATE (UNIQUE )?INDEX IF NOT EXISTS (\w+) ON (?:"([^"]+)"|(\w+))(?: USING (\w+))? \(([^)]*)\)/))) {
       const cols = m[6].split(",").map((c) => c.trim().replace(/^"(.*)"$/, "$1"));
-      at(m[3] ?? m[4]).indexes[m[2].toLowerCase()] = m[1] ? { cols, unique: true } : clean({ cols, using: m[5] });
+      put(at(m[3] ?? m[4]).indexes, m[2].toLowerCase(), m[1] ? { cols, unique: true } : clean({ cols, using: m[5] }));
     }
   }
   return out;
@@ -169,7 +169,7 @@ function outside(text, from, stop) {
 // A column's type as pronto's identity compares it: an alias named by its type (text is string),
 // and a decimal with its precision and scale, which are its column's type too.
 const canonical = (f, types) => {
-  const t = types?.aliases?.[f.type] ?? f.type;
+  const t = own(types?.aliases, f.type) ?? f.type;
   return t === "decimal" ? `decimal(${f.precision ?? ""},${f.scale ?? ""})` : t;
 };
 
@@ -327,11 +327,11 @@ export function diff(before, after) {
       alter(out, at, was, now, machined);
     }
     for (const [x, bi] of Object.entries(b.indexes ?? {})) {
-      const ai = a.indexes?.[x];
+      const ai = own(a.indexes, x);
       if (!ai) out.push({ ...on, index: x, kind: "index-dropped" });
       else if (JSON.stringify(ai) !== JSON.stringify(bi)) out.push({ ...on, index: x, kind: "index-changed", to: ai });
     }
-    for (const [x, ai] of Object.entries(a.indexes ?? {})) if (!b.indexes?.[x]) out.push({ ...on, index: x, kind: "index-added", unique: !!ai.unique });
+    for (const [x, ai] of Object.entries(a.indexes ?? {})) if (!own(b.indexes, x)) out.push({ ...on, index: x, kind: "index-added", unique: !!ai.unique });
   }
   for (const [name, a] of Object.entries(after)) {
     if (!own(before, name) && !(a.id && beforeIds[a.id])) out.push({ entity: name, table: a.table, kind: "entity-added" });
@@ -556,7 +556,7 @@ export function plan(changes, declared = {}, dropped = {}, inherited = {}) {
     // A name an earlier migration dropped, which the replay builds again: every fresh database runs
     // that migration after initdb built the name, and would lose it.
     for (const name of new Set(k.builds?.(c) ?? [])) {
-      if (dropped[name]) refused.push({ at, kind: "rebuilt", why: `${name} was dropped by ${dropped[name]}, which every fresh database still runs after building it: fold ${dropped[name]} (once every database has run it) before building ${name} again` });
+      if (own(dropped, name)) refused.push({ at, kind: "rebuilt", why: `${name} was dropped by ${own(dropped, name)}, which every fresh database still runs after building it: fold ${own(dropped, name)} (once every database has run it) before building ${name} again` });
     }
     const t = `${ident(schema)}.${ident(c.table)}`;
     const op = (phase, why, sql, { drops = [], builds = [] } = {}) => ops.push({ phase, at, why, sql, drops, builds });
@@ -867,7 +867,7 @@ function difference(a, b, path) {
   if (JSON.stringify(a) === JSON.stringify(b)) return null;
   if (a && b && typeof a === "object" && typeof b === "object" && !Array.isArray(a) && !Array.isArray(b)) {
     for (const k of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort(byKey)) {
-      const d = difference(a[k], b[k], path ? `${path}.${k}` : k);
+      const d = difference(own(a, k), own(b, k), path ? `${path}.${k}` : k);
       if (d) return d;
     }
   }

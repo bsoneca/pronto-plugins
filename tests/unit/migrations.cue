@@ -214,6 +214,8 @@ cases: {
 			}},
 			{tables: "CREATE TABLE IF NOT EXISTS \"__proto__\" (\n  \"id\" uuid PRIMARY KEY,\n  \"__proto__\" text\n);\n"},
 		], holds: {Thing: {table: "__proto__", fields: {"2": {name: "__proto__", sql: "text"}}}}, why: "a table and a column named __proto__ are kept as keys, never set as an object's prototype, so the table is found"},
+		{call: "mig.changes", args: [_order & {Order: indexes: constructor: {cols: ["status"], unique: true}}, [["Order.indexes.constructor", null]]], expect: ["index-dropped Order index constructor"], why: "an index named constructor that is gone is dropped, never read as Object's constructor still there"},
+		{call: "mig.plan", args: [_order & {Order: indexes: constructor: {cols: ["status"], unique: true}}, [["Order.indexes.constructor", null]]], holds: {refused: []}, why: "and planned"},
 	]}
 	"a proto, facts and an emitted schema that disagree, or a pronto this does not read, are refused, never guessed": {suite: "migrations", steps: [
 		{call: "migrations.model", args: ["message Order {\n  optional string id = 1;\n  optional string state = 2;\n  reserved 3;\n  reserved \"old\";\n  optional string total = 4;\n  optional string owner = 5;\n}\n", _facts, _sql], throws: "^Order.status: entities.proto has state at 2: run generate$"},
