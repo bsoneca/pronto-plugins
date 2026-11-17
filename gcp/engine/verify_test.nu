@@ -189,6 +189,29 @@ def test_classify_names_regressions_and_new_features [] {
 	rm -r $c.dir
 }
 
+def test_classify_reads_a_live_commit_given_to_it [] {
+	let c = (checkout)
+	let verify = ($gcp_dir | path join verify.nu)
+	"package scenarios\nscenarios: plain: {}\n" | save -f ($c.app | path join tests scenarios plain.cue)
+	let home = ($c.dir | path join home)
+	mkdir $home
+	# No release record at all: the commit comes from --live alone.
+	with-env {HOME: $home} {
+		let run = {|live ...names| ^$nu.current-exe --no-config-file $verify classify $c.app --app t --live $live ...$names | from json }
+		assert equal (do $run $c.commit seek_notify) {commit: $c.commit, new: [seek_notify], regressions: []}
+		assert equal (do $run $c.commit seek) {commit: $c.commit, new: [], regressions: [seek]}
+		assert equal (do $run $c.commit plain) {commit: $c.commit, new: [], regressions: [plain]}
+		let gone = "0000000000000000000000000000000000000000"
+		assert equal (do $run $gone seek_notify seek) {commit: null, new: [], regressions: [seek_notify seek]}
+	}
+	# A given commit wins over the release record, here one that says no known live release.
+	with-record $c true {
+		let run = {|names| ^$nu.current-exe --no-config-file $verify classify $c.app --app t --live $c.commit ...$names | from json }
+		assert equal (do $run [seek_notify]) {commit: $c.commit, new: [seek_notify], regressions: []}
+	}
+	rm -r $c.dir
+}
+
 def test_a_closure_failure_says_its_cause [] {
 	let e = (try { [1 2] | par-each {|x| error make {msg: $"cause ($x)"} } | ignore; null } catch {|e| $e })
 	assert equal $e.msg "Eval block failed with pipeline input"
