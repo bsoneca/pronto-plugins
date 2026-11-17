@@ -1,8 +1,10 @@
 // Files a flake on the board (tests/scenarios.ts, schema.cue's `flakes`). Filing is bookkeeping (PRONTO-649, the
 // owner's call): a flake is filed only for a scenario that stays failed, so every run that gets here already exits 1
-// and nothing is hidden from the gate. A board that refuses (or is missing), or a marker that cannot be written, is
-// therefore said, with its whole error and a GitHub warning, and never thrown: a throw only cut the run's report and
-// its selection commit short. No marker is written then, so the next run tries again.
+// and nothing is hidden from the gate. A board that refuses (or is missing) is therefore said, with its whole error
+// and a GitHub warning, and never thrown: a throw only cut the run's report and its selection commit short. No marker
+// is written then, so the next run tries again. A filed flake whose marker cannot be written is thrown: that error is
+// not the board's to settle, and an unwritten marker would file the same flake every run (the runner throws it once its
+// report is done).
 export type Spawned = { success: boolean; stdout: string; stderr: string };
 export type Spawn = (cmd: string, args: string[], env: Record<string, string>) => Promise<Spawned>;
 
@@ -32,15 +34,8 @@ export async function fileFlake(o: {
     return { filed: false, error };
   }
   const said = out.stdout.trim().split("\n").at(-1) ?? "";
-  try {
-    await Deno.mkdir(o.marks, { recursive: true });
-    await Deno.writeTextFile(`${o.marks}/${o.id}`, said);
-  } catch (e) {
-    const error = e instanceof Error ? e.message : String(e);
-    say(`  filed: ${said}, but its marker was not written (${error}): the next run files it again`);
-    if (o.github) say(`::warning title=flake marker not written::${escape(`flake ${o.id} filed as ${said}, marker not written: ${error}`)}`);
-    return { filed: true, said };
-  }
   say(`  filed: ${said}`);
+  await Deno.mkdir(o.marks, { recursive: true });
+  await Deno.writeTextFile(`${o.marks}/${o.id}`, said);
   return { filed: true, said };
 }
