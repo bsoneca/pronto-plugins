@@ -189,6 +189,14 @@ jobs:
           sayt --script tools.nu nu modular-design/test.nu
       - name: Test migrations (needs deno, for its driver)
         run: sayt --script tools.nu nu migrations/test.nu
+      # The ledger where pgroll cannot run (migrations/README.md), run on the runner's newest Postgres server,
+      # which the test starts on a socket of its own. Not pg_config's bindir: libpq-dev can be newer than the
+      # server, and name a folder with no server in it.
+      - name: Test the migrations ledger without pgroll
+        run: |
+          ctl=$(ls -d /usr/lib/postgresql/*/bin/pg_ctl 2>/dev/null | sort -V | tail -n 1)
+          test -n "$ctl" || { echo "no Postgres server under /usr/lib/postgresql" >&2; exit 1; }
+          PG_BIN=$(dirname "$ctl") sayt --script tools.nu nu migrations/ledger_test.nu
       # The release engine an app holds (gcp/README.md, "The release engine"): its host, and the
       # tests it carried in the pronto fork, run against fakes (no gcloud, no cloud).
       - name: Test the gcp release engine
