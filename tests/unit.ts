@@ -376,7 +376,8 @@ for (const [name, c] of mine) {
       }
       const held = resolveArg(step.holds, now, kept);
       if ("holds" in step && !same(named(now, held), held)) throw new Error(`${why}: expected ${JSON.stringify(held)} in ${JSON.stringify(now)}`);
-      if ("matches" in step && (now === undefined || (typeof now === "number" && Number.isNaN(now)) || !new RegExp(step.matches as string).test(String(now)))) throw new Error(`${why}: expected /${step.matches}/, got ${JSON.stringify(now)}`);
+      // A missing value is matched as "undefined": a case may assert absence so (`matches: "^undefined$"`).
+      if ("matches" in step && !new RegExp(step.matches as string).test(String(now))) throw new Error(`${why}: expected /${step.matches}/, got ${JSON.stringify(now)}`);
     }
     green++;
   });
