@@ -15,9 +15,9 @@ Bins: **A** upstream has it (drop) · **B** goes upstream (the owner opens the P
 |---|---|---|---|---|---|---|---|---|---|
 | omnishell | 0.25.0-fork.2 (`fbba6b9`) | v0.25.0 | 61 | 31 | 8 | 17 | 2 | 4 | 0 |
 | mecha | 0.25.1-host.2 (`30c374c`) | v0.25.1 | 71 | 26 | 3 | 11 | 1 | 11 | 0 |
-| pronto | v1.4.1-gcp.2 (`70da285`) | v1.4.1 | 445 | 61 | 8 | 29 | 11 | 6 | 5 |
+| pronto | v1.4.1-gcp.2 (`70da285`) | v1.4.1 | 445 | 61 | 8 | 29 | 11 | 6 | 4 |
 
-Counts are rows (logical changes); a mixed row counts in both bins. Pronto rows marked
+Counts are rows (logical changes); a mixed row counts in its first-named bin. Pronto rows marked
 "verify" were judged from greps, not from running v1.5.1.
 
 ## Rules until the forks are gone
@@ -135,7 +135,7 @@ Method notes: commits are grouped by feature (follow-ups folded in). 377bc19/747
 | 3 | Verified e-mail in identity_link; identity_link and webauthn_credential closed to app roles; auth tables migrated under an advisory lock | 35f8ed1, a681d22, 94e579a | auth/oidc.ts, main.ts, schema.ts, edge cluster.ts | A | v0.26.0 has `email text` (schema.ts:33), `email_verified` check (oidc.ts:220), `sealAuthTables`/`prepareAuthTables` and `pg_advisory_xact_lock` (main.ts:109, :668); edge `mecha_auth.identity_link ... email` (cluster.ts:163). | Drop (they came in through the v0.25.0 merge). |
 | 4 | Sign in through any lowercase-named provider, issuer from the environment; the edge object serves providers too; stack issuer on service claims | ed8b2be, c2e85fd, 268e458, f7c8c00, 96b1ab7 | cluster.cue (`signIn`), mecha-edge/src/cluster.ts, object.ts, edge tests | B | Upstream deliberately narrowed to Google: v0.26.0 cluster.cue:644 `[!="google"]~(K,_): error("signIn.\(K): field not allowed")`. PR #1 (generic OIDC) was integrated in v0.14 then restricted. | Upstream PR "signIn: any provider name" with the edge half, argued by Studio/other-IdP use. If refused, becomes D. |
 | 5 | Discovery retries a provider that is still starting (5xx, 429, dropped connection) | 1a9ef30 | auth/oidc.ts | B | No retry in v0.26.0 oidc.ts (grep `5xx\|retry` empty). Found by a real 20 s Cloud Run cold start. | Small upstream PR with test. |
-| 6 | `__Host-` session and state cookies over https, with legacy-cookie transition | 07e5330 | auth/main.ts, oidc.ts | B | `__Host-` absent from v0.26.0. Fixes login fixation across sibling subdomains, useful to any multi-site mecha. | Upstream PR (needs #4 or can go first). |
+| 6 | `__Host-` session and state cookies over https, with legacy-cookie transition | 07e5330 | auth/main.ts, oidc.ts | B | `__Host-` absent from v0.26.0; useful to any multi-site mecha. | Upstream PR (needs #4 or can go first). |
 | 7 | System-browser sign-in for native apps via one-time handoff code bound to the app's secret, spent in the database, rides the fragment | 9019d1b, 6696167, 145c4bc | auth/oidc.ts, main.ts, schema.ts, README | D (fits B) | "handoff" not in v0.26.0 auth. Generic OAuth-for-native pattern, but a new public auth surface; upstream auth owner should agree the design. | Owner decides, then PR; fold in oidc-handoff tokens naming the stack issuer. |
 | 8 | Android passkeys: auth admits the app's signing certificates (`WEBAUTHN_ANDROID_ORIGINS`, `capabilities.android`) | 044f7c9, 6c4a751 | auth/origins.ts, main.ts, cluster.cue | D (fits B) | Not in v0.26.0 (0 hits). Generic WebAuthn feature, no bsoneca names. | Owner decides, then PR. |
 | 9 | `/auth/door`: 2xx with the verified session's account, for the door's forward_auth | 01dd0bd | auth/main.ts, mecha-browser/cluster.ts, edge cluster.ts, docs/browser.md | D (fits B) | Not in v0.26.0. Generic with mecha's door; the consumer is pronto's door. | Owner decides; PR with the door contract documented. |
@@ -150,7 +150,7 @@ Method notes: commits are grouped by feature (follow-ups folded in). 377bc19/747
 | 18 | Electric: no CREATE PUBLICATION when tables are published by hand | 1d1a29c | electric/patch.exs, README | B | v0.26.0 patch.exs has no `try_creating_publication?`. | Upstream PR. |
 | 19 | Electric stop waits 2 s, not about 19 s | 85f66ce | cluster.cue | B | Measured: integrate@local 35 s to 18-22 s. Not upstream. Part of the host stack ordering, so rides with #22 if that is refused. | Upstream PR (with #22 or alone). |
 | 20 | cdc-events stream bound (`maxLenApprox` 100000 on redis-streams) | a7f51b7 | mesh/dapr/components/redis-streams.yaml, docs/change-capture.md | B | v0.26.0 has no `maxLen`. Redis has no persistence or maxmemory, so the stream otherwise fills the host. | Upstream PR. |
-| 21 | Database published on host loopback only (5432) | 6f2957a | cluster.cue | B | Trust auth with dev passwords; v0.26.0 cluster.cue still publishes bare 5432. | Upstream PR. |
+| 21 | Database published on host loopback only (5432) | 6f2957a | cluster.cue | B | v0.26.0 cluster.cue publishes 5432 on every interface. | Upstream PR. |
 | 22 | airlock: undici 7.30.2 (cheerio's 7.30.0 had 4 high advisories) | 22f3fc8 | airlock/deno.json, lock | B | v0.26.0 deno.json has no undici pin. Upstream may already be moving; check at PR time. | Upstream PR (or take a later upstream bump). |
 | 23 | Airlock doors: synchronous call that needs its answer now (door.ts, `DOOR_PORT` 9998, `timeoutMs`, ledger holds hashed headers, caller may name the sink's Idempotency-Key) | 8979062, c9db9fe, b19ddb9 | airlock/door.ts, main.ts, reentry.ts, handler.ts, README, cluster.cue allow-net | D (fits B) | `parseDoors` absent from v0.26.0. New airlock surface; v0.26.0 itself reworked airlock (read cache, sealed values, k8s bridges) so the PR must be redone on it. | Owner decides; PR rebased on v0.26.0 airlock. |
 | 24 | Host launch: every service as a host process under process-compose (database initdb, PLV8 built or fetched, electric build, migrate, crud, auth, ticker as host processes, caddy host door, loopback binds, role-passwords step name) | 8a706d5, 0953593, 56aa491, d5ea171, ad06413, 5cdf89e, 8ae1031, 67a8cb4, 9626757 | services/*/host.sh, plv8.sh, prebuilt.*, proxy/host.ts, toolchain/tools.cue, cluster.cue `hostPrepare`/`toolStatics` | D (fits B) | v0.26.0 has no services/*/host.* and no plv8.sh; upstream's "host tier" lives in bayt (`SAYT_PLATFORM=host` branches only in airlock, activepieces, tsbifrost). Large (the biggest generic piece) and ties to the host-tier design upstream owns. | Owner decides with upstream; split into PRs per service. |
@@ -172,7 +172,7 @@ Read the diffstat with care: the diff to v1.5.1 also shows upstream's own v1.4.2
 
 Bins: A upstream has it, B goes upstream, C ours (bsoneca/pronto-plugins or the app), D owner decides, X drop (fork machinery). "verify" = judged from greps and PR text, not from running code at v1.5.1; confirm before relying on it.
 
-Our upstream PRs (bonisoft3/pronto, author us): #1,#2,#3,#4,#5,#6,#7,#9,#14,#15 closed; #8,#10,#11,#12,#13,#16,#17,#18,#19,#20 open. Of the closed: #2,#3,#5 integrated upstream (v0.15.2/v0.16.0); #4 superseded; #14 closed for #20's declarative model; #15 closed as "already covered", with the extras deferred; #1, #6, #7, #9 closed without a comment I could read. Of the open ones: #11 and #17 were answered by upstream's own fixes (v1.4.5), #18 equals upstream b0b33a3 (#2444), #12 equals upstream #2447.
+Our upstream PRs (bonisoft3/pronto, author us): #1,#2,#3,#4,#5,#6,#7,#9,#14,#15 closed; #8,#10,#11,#12,#13,#16,#17,#18,#19,#20 open. Of the closed: #2,#3,#5 integrated upstream (v0.15.2/v0.16.0); #4 superseded; #14 closed for #20's declarative model; #15 closed as "already covered", with the extras deferred; #1, #6, #7, #9 closed with no readable comment. Of the open ones: #11 and #17 were answered by upstream's own fixes (v1.4.5), #18 equals upstream b0b33a3 (#2444), #12 equals upstream #2447.
 
 ### .github/, CI, fork machinery
 
@@ -181,7 +181,7 @@ Our upstream PRs (bonisoft3/pronto, author us): #1,#2,#3,#4,#5,#6,#7,#9,#14,#15 
 | 1 | Fork publish workflows: prerelease-mecha/-omnishell/-gcp, prebuilt-mecha, prerelease.sh, prerelease*.env, mecha/omnishell-snapshot.py, fork-lock.py, bootstrap/fork.lock, MECHA_V/OMNISHELL_V pins | 286c4fe f89742c 9fce774 48e1b26 c459079 | X | exist only to publish forked mecha/omnishell/pronto; upstream has only cd.yml | delete when no app pins a fork version (PRONTO-740); keep until mecha/omnishell rows below are resolved |
 | 2 | ci.yml, monorepo.sh/env, ci-tests.txt, ci-monorepo-tests.txt, ci-not-run.txt, actionlint | 97185e7? 97e350a 0386002 1bd81a6 9706048 | X | CI for the fork line only | drop with the fork; app repos keep their own ci |
 | 3 | plane.yml + devflow/devflow.cue (board hook) | d77dd4d 243558b | C | PRONTO-479: "plane calls pronto-plugins' board workflow" | already in pronto-plugins; delete from fork |
-| 4 | `cue` wrapper, cue-budget/slot.ts+vetted.ts, one id per evaluation, memory-weighted cue | a0dd3fc d3b6347 d94e8c9 ace623e 899c954 | C | AGENTS.md: pronto-plugins `machine` already puts the wrapper first on PATH | confirm `machine/` has the last 3 commits (899c954, ca8b491, 98642d7, PRONTO-736), then drop from fork |
+| 4 | `cue` wrapper, cue-budget/slot.ts+vetted.ts, one id per evaluation, memory-weighted cue | a0dd3fc d3b6347 d94e8c9 ace623e 899c954 ca8b491 98642d7 | C | AGENTS.md: pronto-plugins `machine` already puts the wrapper first on PATH | confirm `machine/` has the last 3 commits (899c954, ca8b491, 98642d7, PRONTO-736), then drop from fork |
 | 5 | generate lock: one generate at a time in a checkout; derive's `exclusive`; docker/Caddyfile written whole | cf2e780 6739dea c111cc9 1a65696 | B | parallel generates corrupt the tree on any machine; v1.5.1 has no generate-lock.sh | small upstream PR; needs owner of write.ts decision (row 54) since it touches write.ts/derive.ts |
 | 6 | bayt 0.66.1->0.68.2 pins, cue.mod, distribution, bootstrap lock/claude settings/fork-aware bootstrap | f5265ae 31474bc 9c88ce8 58a57c8 fd564f4 | X | v1.5.1 already pins bayt 0.73.0, mecha 0.26.0 | drop; the Claude-settings bootstrap (bootstrap/claude.cue, 58a57c8, 8bc236b) is C if we still want it, to pronto-plugins |
 
@@ -191,10 +191,10 @@ Our upstream PRs (bonisoft3/pronto, author us): #1,#2,#3,#4,#5,#6,#7,#9,#14,#15 
 |---|---|---|---|---|---|
 | 7 | Pages bundle size: prose.ts, page-core.ts, seeds/lazy chunks as files, a file whose text another holds rides once, no comments in first load, `meta.firstLoad` budget | d9de798 5187f43 ee5181d 3b9f2ef b33e674 | B | v1.5.1 has none of prose.ts/page-core.ts/firstLoad; generic to any pages app | upstream PR (big: +~600 lines bundle/); split in 2: file split, then budget |
 | 8 | PGlite files beside the page, host-DOM hatch files in a pages release | f9f21b8 da5daa1 | B | generic pages release behaviour | bundle into row 7's PR or a sibling |
-| 9 | Door serves SPA shell when renderer is down/limiting (429/502/503/504), GET+HEAD whole | 8d83d93 74b26f7 4fcf9df | B | open upstream PR #16, no reply; v1.5.1 Caddyfile has no such fallback | ask owner to ping Davi on #16; rebase onto v1.5.1 |
+| 9 | Door serves SPA shell when renderer is down/limiting (429/502/503/504), GET+HEAD whole | 8d83d93 74b26f7 4fcf9df | B | open upstream PR #16, no reply; v1.5.1 Caddyfile has no such fallback | owner follows up on #16; rebase onto v1.5.1 |
 | 10 | Door: gltf compression, `no-transform` on released pages | 5f16fa1 7b503c9 | B | generic Caddy behaviour, absent upstream | small PR with row 9 (same Caddyfile) |
 | 11 | Door answers several sites (origin, client, brand files); `surface.fronts` sites; caddy-blocks/keepBlocks | 80aeead 164a89c cf2e780 | B | v1.5.1 has no caddy-blocks.ts/sites variable; used by Studio but generic | upstream PR; touches write.ts (row 54) |
-| 12 | Door reads the client address through cluster proxies; strips forwarded chain; Electric shape requests pinned by cookie/IP over a headless Service | aefa648 837f772 f03e082 fc69e6d 096e7c4 | B | only useful with Electric replicas (row 29); upstream has replicas but no placement | upstream with HA PR (row 29); else C |
+| 12 | Door reads the client address through cluster proxies; strips forwarded chain; Electric shape requests pinned by cookie/IP over a headless Service | aefa648 837f772 f03e082 fc69e6d 096e7c4 | B | only useful with Electric replicas (rows 37, 42); upstream has replicas but no placement | upstream with HA PR (row 29); else C |
 | 13 | Pages build: missing file 404 / route 200, program names its export, noindex for non-pages, play-screen head, shell.json social title, `access: public` screen behind sign-in | d5287dd f99955b e695ed3 1476ba9 ae53d9d | B | generic pages/screens behaviour; docs/screens.md changes follow | small PRs by theme (SEO, screens access) |
 | 14 | Container hatch: route through the door (#1), form to another site, CSP host-source wildcard | 1e076b9 bcca656 | A/B | #1 closed; `route` is in v1.5.1 schema.cue (101 hits); form handoff and CSP wildcard not found upstream | A for route; B for the other two (tiny); verify route semantics equal |
 | 15 | Effect handler bundles: import program modules, scoped bundle, reserved-locals exports (effect-bundle.ts) | 9366398 6d9d0eb f6a03e3 | B | new file, absent in v1.5.1; upstream isolate-uses landed (#2415) so check overlap first | verify against #2415, then upstream |
@@ -205,10 +205,10 @@ Our upstream PRs (bonisoft3/pronto, author us): #1,#2,#3,#4,#5,#6,#7,#9,#14,#15 
 | # | change | key commits | bin | evidence | next step |
 |---|---|---|---|---|---|
 | 17 | Sign-in providers the compiler builds (#2); identity/ on Ory Hydra (#5); release@gcp auth settings | 85860e0 05c6206 | A | PRs #2, #5 closed "integrated upstream (v0.15.2/v0.16.0)"; #4 superseded | drop |
-| 18 | Each app's local broker on its own ports (over upstream's issuer design) | 47ae28f 9a642bf 0c41f9a | D | identity/broker/main.ts, front.ts; upstream may move to Ory | owner: port-per-app is needed for parallel local stacks; ask Davi how Ory changes the broker |
+| 18 | Each app's local broker on its own ports (over upstream's issuer design) | 47ae28f 9a642bf 0c41f9a | D | identity/broker/main.ts, front.ts; upstream may move to Ory | owner: port-per-app is needed for parallel local stacks; ask upstream how Ory changes the broker |
 | 19 | identity/bearer.ts + identity/issuer.cue (`#Issuer`: another issuer's token exchanged for a session) | 2164fb2 | D | new files, +~600 lines with tests; Studio-shaped | owner: B if generic to any pronto user, else C into Studio |
 | 20 | `capabilities.auth.*` extras: android passkeys, apiKeys/apiKeysGate, keyExchanged, keepGuest, adoptGuest; provider by any word; handoff codes; `auth.keepGuest` | 4c19f41 d91a409 424887d 9604d20 7747a56 403ea67 | D | all need mecha-fork patches (host.9..host.13, omnishell fork.8/.10/.11); not in upstream mecha 0.26.0 | owner: these are mecha PRs first (upstream bonisoft3/mecha), pronto side follows; or app-level C |
-| 21 | Roles migration changes a role only where it lacks what it sets (#14), ADMIN authenticator kept granted | ea2a56c 97185e7 | B | #14 closed for the declarative model #20 (row 45) | do not send as-is; fold into #20's external-provisioning mode |
+| 21 | Roles migration changes a role only where it lacks what it sets (#14), ADMIN authenticator kept granted | ea2a56c 97185e7 | B | #14 closed for the declarative model #20 (row 52) | do not send as-is; fold into #20's external-provisioning mode |
 
 ### gcp/ (release@gcp)
 
@@ -232,7 +232,7 @@ Our upstream PRs (bonisoft3/pronto, author us): #1,#2,#3,#4,#5,#6,#7,#9,#14,#15 
 |---|---|---|---|---|---|
 | 33 | Airlock + daprd as two walled pods; env_file/secret-passing refusals; Cloud DNS; in-cluster sinks over http | 33a107a 2c69d9e a87142c 1dd38b6 604e39f f1b2391 | A | #15 closed: main already deploys them as isolated pods (upstream #2411); extras "deferred" | drop the pods; residual extras (refusals, existing-secret refs) B with e2e only if wanted |
 | 34 | First-effect upgrade: Graphile Worker and airlock steps brought to a built DB; machines' interpreters replayed in app schemas | 0d845d9 f7d203b | B | upstream said first-effect upgrade is open ("leaves step to the operator") | upstream PR with e2e test, if prontoweeper has no effects, low priority |
-| 35 | crud Ready/Live on PostgREST `/live`, `/ready` only gates start; crud serves compose's schemas (`PGRST_DB_SCHEMA`) | 120440 1fffb38 4c336e9 8146845 30a0078 | A | v1.5.1 k8s.cue: liveness+readiness `/live`, startupProbe `/ready` (upstream #2447); PR #12 open but now redundant | close #12; the `PGRST_DB_SCHEMA` part goes with row 42 |
+| 35 | crud Ready/Live on PostgREST `/live`, `/ready` only gates start; crud serves compose's schemas (`PGRST_DB_SCHEMA`) | 120440 1fffb38 4c336e9 8146845 30a0078 | A | v1.5.1 k8s.cue: liveness+readiness `/live`, startupProbe `/ready` (upstream #2447); PR #12 open but now redundant | close #12; the `PGRST_DB_SCHEMA` part goes with row 50 |
 | 36 | `database.smartShutdown` (fast shutdown when standbys exist), bounded primary stop 120/300 s, release waits past it | 87eb34a 0620336 1d20484 | B | not in v1.5.1 (0 hits); PRONTO-715 | upstream PR, small (~40 lines) |
 | 37 | HA: replicas per workload, PDBs, spread, Dapr control plane HA, DB HA settings, edge/operators n+1, release fails if below n-1, readiness probes for app services | 33b945c 6eefd44 365..(dac4988) 49e... c8983df | B | v1.5.1 replicas 5 vs 13 hits, 0 PDB; generic k8s | upstream PR, large; split schema vs release.nu |
 | 38 | CNPG backups: barman-cloud plugin, S3 or Cloud Storage with workload identity, all replicas hot | 18a0b4a 9161181 5f744f6 d02b90e | B | 0 hits for barman in v1.5.1 k8s | upstream PR |
@@ -259,7 +259,7 @@ Our upstream PRs (bonisoft3/pronto, author us): #1,#2,#3,#4,#5,#6,#7,#9,#14,#15 
 | 54 | write.ts: mint through app import, cue read exclusive, targetsSorted, ir.md writer (ir-md.ts), caddy-block keep, bayt.json targets by name | b1af75d 71af74... 01e5052 b8560bf 7ed2b46 | D | known D (write.ts never goes upstream); +62/-22 lines | owner: plugin vs tiny fork; list which hooks write.ts needs |
 | 55 | Emit perf: chart column one map (#9), derive reads fixed names, program reads together | e3ca20b f321d02 c111cc9 | A (verify) | #9 closed 2026-10-31 (memory blow-up fix, 72G->1.5G); fork commits remain so confirm in v1.5.1 | check emit at v1.5.1 for the single column map |
 | 56 | DesignCss and `colorScheme` pin; type-sql PostgREST 14.18; plv8->pljs move; meta.plv8; hybrid SES path | 84aeead da2e40c d9a6113 0f40760 ce8c46c | B | `#DesignCss` has 2 hits upstream, colorScheme only in live | small PRs; verify DesignCss delta |
-| 57 | Local stack tier: host launch under process-compose, integrate@local stamp/slot/upgrade-from-released, local-drivers.ts, render host origin | 80dc401 c12f005 e043e38 9c3cf27 1b27463 | C (A for host launch) | AGENTS.md calls `integrate@host` "upstream's name" for the host tier; our stamp/slot/upgrade parts are the harness's | harness/plugins; confirm host tier exists in v1.5.1 (1 hit `MISE_ENV=host`) |
+| 57 | Local stack tier: host launch under process-compose, integrate@local stamp/slot/upgrade-from-released, local-drivers.ts, render host origin | 80dc401 c12f005 e043e38 9c3cf27 1b27463 | C (A for host launch, verify; see mecha row 24) | AGENTS.md calls `integrate@host` "upstream's name" for the host tier; our stamp/slot/upgrade parts are the harness's | harness/plugins; confirm host tier exists in v1.5.1 (1 hit `MISE_ENV=host`) |
 | 58 | idioms/.bayt: CI/Caddy/process-compose graph files regenerated | (generated) | follow code | 14 files, 251 ins; most of the diff is upstream's Feldera change reversed | regenerate on the v1.5.1 base; no hand work |
 
 ### docs/ and docs/decisions
@@ -272,13 +272,13 @@ Our upstream PRs (bonisoft3/pronto, author us): #1,#2,#3,#4,#5,#6,#7,#9,#14,#15 
 
 ### forks/
 
-No `forks/` directory exists in this repo (rental-pronto holds it per memory). Fork machinery is rows 1-2, 6.
+Fork machinery is rows 1-2, 6.
 
 ---
 
 ### Summary
 
-Counts of rows per bin (61 rows; mixed rows counted in both): A 8 (17, 22, 31?, 33, 35, 49, 14a, 55?), B 29, C 11, D 5 (16, 18, 19, 20, 44; plus 54), X 5. In commit terms, about 150 commits (mostly gcp/ and cluster items) are C/engine, ~120 are B, ~70 are A or X, ~40 are D.
+Counts of rows per bin (61 rows; a mixed row counts in its first-named bin; rows 58-60 follow the code they document): A 8 (17, 22, 31?, 33, 35, 49, 14a, 55?), B 29, C 11, D 6 (16, 18, 19, 20, 44, 54), X 4 (1, 2, 6, 61). In commit terms, roughly: 150 C/engine, 120 B, 70 A or X, 40 D, 65 not yet assigned.
 
 Verify items: 14, 15, 31, 32, 43, 55, 56 (judged from greps, not run at v1.5.1).
 
@@ -289,7 +289,7 @@ Five largest B items:
 4. Pages bundle size work (rows 7-8): prose.ts, page-core.ts, firstLoad budget.
 5. App database schemas (row 50, #13) with access model (row 52, #20) and anon (row 51, #19): three open PRs, #13 blocked on a mecha PR.
 
-What blocks prontoweeper pinning upstream v1.5.1 directly (inferred; I did not read prontoweeper's `release.cue`):
+What blocks prontoweeper pinning upstream v1.5.1 directly (inferred; prontoweeper's `release.cue` not read):
 - Any use of `capabilities.auth.*` extras, `meta.schema`/`#Tenancy`, `meta.firstLoad`, money fields, `access.anon`, or `database.smartShutdown`: these fields do not exist in v1.5.1 and CUE refuses unknown fields.
 - The pinned mecha/omnishell are forks (`0.25.1-host.2`, `0.25.0-fork.2`); upstream is mecha 0.26.0. Its host launch, auth image and schemas support come from those; need a mecha-fork-vs-0.26.0 diff before pinning.
 - release@gcp as used by the app (staged go-live, local gate, rehearsal, release record) is in the fork's `gcp/`, not upstream's; it must come from pronto-plugins `gcp/engine` (PRONTO-494) first.
