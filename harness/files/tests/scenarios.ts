@@ -20,6 +20,7 @@ import { launch as launchBrowser } from "./browser.ts";
 import { gate, slow, slowCpu, slowDown } from "./slow.ts";
 import { early } from "./scenarios/early.ts";
 import { fileFlake as file } from "./scenarios/flakes.ts";
+import { writeVerdict } from "./scenarios/verdict.ts";
 
 const URL_ = Deno.env.get("APP_URL") ?? Deno.args[0];
 if (!URL_) throw new Error("APP_URL or an argument names the app");
@@ -965,6 +966,9 @@ if (!retry && !shared && !pageErrors.length && ran.length > 1) {
 sel.commit(ran.filter((id) => !failed.includes(id) && !pageErrors.length), failed);
 await anon.dispose();
 await browser.close();
+// The verdict as data (scenarios/verdict.ts), for a caller that must not parse the line below.
+const verdictFile = Deno.env.get("SCENARIOS_VERDICT");
+if (verdictFile) writeVerdict(verdictFile, { passed: (shared ? ran.length : runnable.length) - failed.length, cached: sel.cached.length, byOtherLane: shared ? sel.run.length - ran.length : 0, skipped: skipped.length, failed: failed.length });
 console.log(`scenarios: ${(shared ? ran.length : runnable.length) - failed.length} passed (${sel.cached.length} cached${shared ? `, ${sel.run.length - ran.length} run by another lane` : ""}${skipped.length ? `, ${skipped.length} skipped` : ""}), ${failed.length} failed, in ${Math.round((Date.now() - t0) / 1000)}s`);
 if (pageErrors.length) console.log(`page errors:\n${pageErrors.join("\n")}`);
 if (flaked.length) console.log(`flakes under load: ${flaked.join(", ")}`);
