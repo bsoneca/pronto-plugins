@@ -337,7 +337,9 @@ export async function broker(p: {
     // the read went straight to Stripe, so a flip's check sees whether the door answered.
     const route = await (p.stripe as Routed).route?.();
     await subscriptionsOf(await customersOf(t, account));
-    return json(200, { ok: true, direct: route === "direct" });
+    // `door` is the word the tenant sent for its reader (its flag), when it sent one, so a check sees
+    // that the tenant asked even where the broker goes only one way (the stand-in).
+    return json(200, { ok: true, direct: route === "direct", ...(typeof b.door === "boolean" ? { door: b.door } : {}) });
   }
 
   async function checkout(req: Request, client: string): Promise<Response> {
