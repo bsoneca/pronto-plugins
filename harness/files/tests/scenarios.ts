@@ -22,6 +22,9 @@ import { early } from "./scenarios/early.ts";
 import { fileFlake as file } from "./scenarios/flakes.ts";
 import { writeVerdict } from "./scenarios/verdict.ts";
 
+// A verdict left by an earlier run is removed before anything that can fail, so a run that dies early leaves no stale green one.
+const verdictFile = Deno.env.get("SCENARIOS_VERDICT");
+if (verdictFile) try { Deno.removeSync(verdictFile); } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e; }
 const URL_ = Deno.env.get("APP_URL") ?? Deno.args[0];
 if (!URL_) throw new Error("APP_URL or an argument names the app");
 const SHOTS = Deno.env.get("SHOTS");
@@ -151,10 +154,9 @@ function flagOn(name: string): Promise<boolean> {
 
 export type Actor = { key: string; name: string; def: ActorDef; ctx: BrowserContext; page: Page; cdp: CDPSession; auth: string; consoles: string[]; trail: string[]; asked: string[]; hot: boolean; releases: Map<string, () => void>; data: Record<string, any> };
 export const sleep = (s: number) => new Promise((r) => setTimeout(r, s * 1000));
-// A non-finite number would stringify as null: each becomes a distinct marker, so it equals nothing.
-let nonFinite = 0;
-const finite = (_: string, v: unknown) => typeof v === "number" && !Number.isFinite(v) ? `non-finite#${nonFinite++}` : v;
-export const same = (a: unknown, b: unknown) => JSON.stringify(a, finite) === JSON.stringify(b, finite);
+// A non-finite number would stringify as null: a value holding one equals nothing.
+const finiteJson = (v: unknown) => { let bad = false; const j = JSON.stringify(v, (_, x) => { if (typeof x === "number" && !Number.isFinite(x)) bad = true; return x; }); return bad ? null : j; };
+export const same = (a: unknown, b: unknown) => { const x = finiteJson(a), y = finiteJson(b); return x !== null && y !== null && x === y; };
 // Every value of `want` is in `got` (an array's every element, when `want` is a one-element array).
 function holds(got: any, want: any): boolean {
   if (Array.isArray(want)) {
@@ -908,14 +910,12 @@ export class Run {
 // scenario that fails runs again once, at once, beside those still running, and passes if that
 // passes ("⚠ <id> flaked"); its retry overlaps the pass instead of following it. Its first failure
 // is printed indented, so only a scenario that failed twice has a "✗ <id> (" line.
-// A verdict left by an earlier run is removed first, so a run that dies early leaves no stale green one.
-const verdictFile = Deno.env.get("SCENARIOS_VERDICT");
-if (verdictFile) try { Deno.removeSync(verdictFile); } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e; }
 const only = Deno.env.get("ONLY")?.split(",");
 const unknownOnly = only?.filter((id) => !Object.values(spec.scenarios).some((s) => s.id === id)) ?? [];
-// Said, not failed: release-cron's bisect runs ONLY=<the scenarios failing at the head> on older trees,
-// where a scenario not yet written is rightly not run (that tree is good for it).
-if (unknownOnly.length) console.log(`scenarios: ONLY names no scenario of this tree: ${unknownOnly.join(", ")}`);
+// An ONLY id this tree lacks fails the run, unless ONLY_ABSENT=pass: release-cron's bisect runs ONLY=<the scenarios
+// failing at the head> on older trees, where a scenario not yet written is rightly not run (that tree is good for it).
+if (unknownOnly.length && Deno.env.get("ONLY_ABSENT") !== "pass") { console.error(`scenarios: ONLY names no scenario of this tree: ${unknownOnly.join(", ")}`); Deno.exit(1); }
+if (unknownOnly.length) console.log(`scenarios: ONLY names no scenario of this tree (ONLY_ABSENT=pass): ${unknownOnly.join(", ")}`);
 const wanted = Object.values(spec.scenarios).filter((s) => !only || only.includes(s.id));
 // A scenario that needs a stack's stand-in (`standin`: billing's for Stripe, a model's, or one that signs in
 // with Google through the local broker's) runs where the stand-in is, not on a deployed app, whose broker is
