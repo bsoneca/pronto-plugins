@@ -310,10 +310,9 @@ const fnOf = (name: string): (...a: any[]) => any => {
   if (typeof f !== "function") throw new Error(`no function ${name}`);
   return f;
 };
-// A non-finite number would stringify as null: each becomes a distinct marker, so it equals nothing.
-let nonFinite = 0;
-const finite = (_: string, v: unknown) => typeof v === "number" && !Number.isFinite(v) ? `non-finite#${nonFinite++}` : v;
-const same = (a: unknown, b: unknown) => JSON.stringify(a, finite) === JSON.stringify(b, finite);
+// A non-finite number would stringify as null: a value holding one equals nothing.
+const finiteJson = (v: unknown) => { let bad = false; const j = JSON.stringify(v, (_, x) => { if (typeof x === "number" && !Number.isFinite(x)) bad = true; return x; }); return bad ? null : j; };
+const same = (a: unknown, b: unknown) => { const x = finiteJson(a), y = finiteJson(b); return x !== null && y !== null && x === y; };
 // What of `got` `want` names (a `holds` check): an object's fields named, a list's elements one by
 // one when as many, else `got` whole.
 function named(got: unknown, want: unknown): unknown {

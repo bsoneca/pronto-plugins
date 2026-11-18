@@ -251,7 +251,7 @@ if (verb === "bisect") {
     must("git", ["checkout", "-q", "--detach", "-f", sha], bwt);
     must("git", ["clean", "-ffdq"], bwt);
     sh(mise, ["trust", "-q", `${bwt}/${appRel}/.mise.toml`]);
-    const env: Record<string, string> = { ...Deno.env.toObject(), SLOW: "1", INTEGRATE_LOCAL_DRIVERS: "all", STACK_WAIT_MINUTES: "525600", ...(sig.names.length ? { ONLY: sig.names.join(",") } : {}) };
+    const env: Record<string, string> = { ...Deno.env.toObject(), SLOW: "1", INTEGRATE_LOCAL_DRIVERS: "all", STACK_WAIT_MINUTES: "525600", ...(sig.names.length ? { ONLY: sig.names.join(","), ONLY_ABSENT: "pass" } : {}) };
     delete env.STACK_PRIORITY;
     const logf = `${dir}/${sha.slice(0, 8)}.log`;
     const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...lowPriority(["sh", "-c", b.command], Deno.build.os)], cwd: `${bwt}/${appRel}`, env, clearEnv: true, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
