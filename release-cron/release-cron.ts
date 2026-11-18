@@ -275,6 +275,9 @@ if (verb === "bisect") {
     clearInterval(watch);
     group = 0;
     if (yielded) stop(stopsBisect(yielded, starter, true, null, null)!);
+    // Exit 3 is "no verdict" (the scenarios passed but could not write theirs, a full disk): neither good nor
+    // bad, so nothing is recorded and no commit is blamed (PRONTO-683).
+    if (code === 3) stop(`the check on ${sha.slice(0, 8)} gave no verdict (exit 3: it could not write it): the bisect stops, no commit named`);
     return code === 0 ? "good" : "bad";
   };
   // The check must fail here on the failing commit too (an explicit failure: a pass or a timeout is

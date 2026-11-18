@@ -954,11 +954,11 @@ await Promise.all(Array.from({ length: Math.min(isDeployed ? spec.deployedParall
     let r = new Run(s), f = await r.run();
     // A wedged renderer is run again, twice at most, and said so.
     for (let again = 0; r.stuck && again < 2; again++) { console.log(`↻ ${s.id}: ${r.stuck} (a throttled renderer's wedge), run again`); r = new Run(s); f = await r.run(); }
+    // The one retry only tells a flake from a failure: a scenario that failed stays failed either way, since a
+    // retry that makes it pass is not a fix (AGENTS.md); only a wedge (above) is run again for its verdict.
     if (f && retry && !pageErrors.length) {
-      console.log(`↻ ${s.id}: failed, run again once:\n${f.split("\n").map((l) => `  ${l}`).join("\n")}`);
-      r = new Run(s);
-      f = await r.run();
-      if (!f) console.log(`⚠ ${s.id} flaked, passed on its one retry`);
+      console.log(`↻ ${s.id}: failed, run again once to tell a flake:\n${f.split("\n").map((l) => `  ${l}`).join("\n")}`);
+      if (!await new Run(s).run()) console.log(`⚠ ${s.id} flaked, passed on its one retry: it stays failed`);
     }
     if (f) { console.log(f); failed.push(s.id); }
   }
