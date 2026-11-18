@@ -958,7 +958,8 @@ await Promise.all(Array.from({ length: Math.min(isDeployed ? spec.deployedParall
     // retry that makes it pass is not a fix (AGENTS.md); only a wedge (above) is run again for its verdict.
     if (f && retry && !pageErrors.length) {
       console.log(`↻ ${s.id}: failed, run again once to tell a flake:\n${f.split("\n").map((l) => `  ${l}`).join("\n")}`);
-      if (!await new Run(s).run()) console.log(`⚠ ${s.id} flaked, passed on its one retry: it stays failed`);
+      // The line is release-cron's flakedNames' (cron.js): kept word for word; the failure is printed below it.
+      if (!await new Run(s).run()) console.log(`⚠ ${s.id} flaked, passed on its one retry`);
     }
     if (f) { console.log(f); failed.push(s.id); }
   }
