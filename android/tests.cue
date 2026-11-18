@@ -123,7 +123,7 @@ sopsAndProjectRefused: [if (#Host & {app: "emit", release: {file: "x.yaml", proj
 _gcloudScript: _released.files["android/sign-release.sh"].text
 for _s in [_sopsScript, _gcloudScript] {
 	signPassesArgs: strings.Contains(_s, "assembleRelease \"$@\")") & strings.Contains(_s, "--no-daemon") & strings.Contains(_s, "sign-release.sh\" \"$@\"") & true
-	signCleansOnEveryExit: strings.Contains(_s, "trap 'rm -rf \"$dir\"' EXIT") & strings.Contains(_s, "trap 'exit 130' INT") & strings.Contains(_s, "trap 'exit 143' TERM") & true
+	signCleansOnEveryExit: strings.Contains(_s, "trap 'rm -rf \"$dir\"' EXIT") & strings.Contains(_s, "trap 'exit 129' HUP") & strings.Contains(_s, "trap 'exit 130' INT") & strings.Contains(_s, "trap 'exit 131' QUIT") & strings.Contains(_s, "trap 'exit 143' TERM") & true
 	signPrintsUpperColon: strings.Contains(_s, "tr 'a-f' 'A-F'") & strings.Contains(_s, "sed 's/../&:/g; s/:$//'") & true
 }
 

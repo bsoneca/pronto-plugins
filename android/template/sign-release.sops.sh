@@ -23,7 +23,9 @@ get="$root/tools/secrets/get.sh"
 
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
+trap 'exit 131' QUIT
 trap 'exit 143' TERM
 umask 077
 value=$(sh "$get" "$here/__RELEASE_FILE__" __RELEASE_SECRET__ value)

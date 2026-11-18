@@ -22,7 +22,9 @@ SECRET=${ANDROID_SIGNING_SECRET:-__RELEASE_SECRET__}
 
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
+trap 'exit 131' QUIT
 trap 'exit 143' TERM
 umask 077
 value=$(gcloud secrets versions access latest --secret "$SECRET" --project "$PROJECT")
