@@ -358,6 +358,25 @@ Deno.test("a separator-less random temporary folder keeps one id", async () => {
   }
 });
 
+// release.nu passes `mktemp -t roles.XXXXXX.json` to cue export: Studio's Publish ran ~15 such evaluations, each a new id
+// claiming CUE_UNKNOWN_GB in the cue lock, and waited minutes behind large ones for 40 MB evaluations (PRONTO-736).
+Deno.test("a mktemp file with its random part in the middle keeps one id; a fixed name stays itself", async () => {
+  const d = await Deno.makeTempDir({ dir: "/tmp", prefix: "cuetest-" });
+  await Deno.mkdir(`${d}/spec`, { recursive: true });
+  const [a, b, c, e] = ["/tmp/roles.c4qN0s.json", "/tmp/roles.awAixC.json", "/tmp/one.tar.json", "/tmp/two.tar.json"];
+  for (const f of [a, b, c, e]) await Deno.writeTextFile(f, "{}");
+  try {
+    const r = await twice(`${d}`, `${d}`, ["export", "./spec", a], ["export", "./spec", b]);
+    assertEquals(r.claimed, false, "roles.<random>.json is one file to the key, a random part without a digit (mixed case) too");
+    assertEquals(r.ids, 1);
+    const fixed = await twice(`${d}`, `${d}`, ["export", "./spec", c], ["export", "./spec", e]);
+    assertEquals(fixed.ids, 2, "a middle of one case without a digit is a name, not a random part");
+  } finally {
+    for (const f of [a, b, c, e]) await Deno.remove(f);
+    await Deno.remove(d, { recursive: true });
+  }
+});
+
 const repoWith = async (path: string, file: string) => {
   await Deno.mkdir(path, { recursive: true });
   await sh(path, "init", "-q");

@@ -71,8 +71,9 @@ deno=$(command -v deno || ls "$HOME"/.local/share/mise/installs/github-denoland-
 # written in one) is named by its repository and its place in it; a CI runner's clone, a
 # repository of its own whose path holds /actions-runners/<name>/_work/, is named by what follows
 # _work/; a temporary folder's random name (a . or - and 6 or more letters and digits holding a
-# digit, or 8 or more of them holding a digit and a letter, alone) is left out, so /tmp/tmp.gzTXAbh1M8/x
-# is <tmp>/tmp/x and /tmp/pronto-plugins/x stays itself; and pronto's derive, which runs in a
+# digit or both cases, or 8 or more of them holding a digit and a letter, alone) is left out, so
+# /tmp/tmp.gzTXAbh1M8/x is <tmp>/tmp/x and /tmp/pronto-plugins/x stays itself, as is the random middle
+# of a file directly in it (mktemp's roles.XXXXXX.json); and pronto's derive, which runs in a
 # scratch folder named for its run (.pronto-derive-<hash>), has one name for all of them.
 # tmpnorm <path>: the path with its runner clone or temporary folder's name rewritten.
 tmpnorm() {
@@ -93,11 +94,25 @@ tmpnorm() {
     case $suffix in
       *[!A-Za-z0-9]*|?|??|???|????|?????) ;;
       *[0-9]*) name=${first%?"$suffix"} ;;
+      *[A-Z]*) case $suffix in *[a-z]*) name=${first%?"$suffix"} ;; esac ;;
     esac
   else
     case $first in
       *[!A-Za-z0-9]*|?|??|???|????|?????|??????|???????) ;;
       *[0-9]*) case $first in *[A-Za-z]*) name='<rand>' ;; esac ;;
+    esac
+  fi
+  # A file of `mktemp -t <name>.XXXXXX.<ext>` (release.nu's roles and pushed lists) has its random
+  # part in the middle: roles.c4qN0s.json is <tmp>/roles.json (PRONTO-736).
+  if [ -z "$tail" ] && [ "$name" = "$first" ]; then
+    case $first in
+      *.*.*)
+        mid=${first#*.}; mid=${mid%.*}
+        case $mid in
+          *[!A-Za-z0-9]*|?|??|???|????|?????) ;;
+          *[0-9]*) name="${first%%.*}.${first##*.}" ;;
+          *[A-Z]*) case $mid in *[a-z]*) name="${first%%.*}.${first##*.}" ;; esac ;;
+        esac ;;
     esac
   fi
   printf '%s' "<tmp>/$name$tail"
