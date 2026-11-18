@@ -7,6 +7,7 @@ export type Verdict = {
   byOtherLane: number; // scenarios of its selection another lane of a shared queue ran
   skipped: number; // scenarios not run for want of what they need
   failed: number; // scenarios this run ran and failed
+  failedIds: string[]; // their ids (a step that failed or a page that threw), so a caller judges each one
 };
 
 const keys: (keyof Verdict)[] = ["passed", "cached", "byOtherLane", "skipped", "failed"];
@@ -17,7 +18,8 @@ export const parseVerdict = (text: string): Verdict => {
   for (const k of keys) {
     if (!Number.isInteger(v[k]) || v[k] < 0) throw new Error(`verdict.${k} is not a count: ${JSON.stringify(v[k])}`);
   }
-  return Object.fromEntries(keys.map((k) => [k, v[k]])) as Verdict;
+  if (!Array.isArray(v.failedIds) || v.failedIds.length !== v.failed || !v.failedIds.every((x: unknown) => typeof x === "string")) throw new Error(`verdict.failedIds is not the ${v.failed} failed ids: ${JSON.stringify(v.failedIds)}`);
+  return { ...Object.fromEntries(keys.map((k) => [k, v[k]])), failedIds: v.failedIds } as Verdict;
 };
 
 export const writeVerdict = (path: string, v: Verdict) => Deno.writeTextFileSync(path, JSON.stringify(v) + "\n");

@@ -221,7 +221,8 @@ if (verb === "bisect") {
   const stop = (why: string) => {
     say(why);
     // A yield is not recorded: the next bisect takes the same failed run up, on the verdicts kept.
-    if (!/yields/.test(why)) Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify({ of: failed.started, kind: sig.kind, names: sig.names, green: green.commit, failing: failed.commit, ran, fromRecords: 0, why }) + "\n", { append: true });
+    // Nor is a check that gave no verdict (exit 3): the run stays eligible for the next bisect.
+    if (!/yields|gave no verdict/.test(why)) Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify({ of: failed.started, kind: sig.kind, names: sig.names, green: green.commit, failing: failed.commit, ran, fromRecords: 0, why }) + "\n", { append: true });
     unlock(); Deno.exit(0);
   };
   const fromRecords = list.filter((c) => known[c.sha] !== "unknown").length;
