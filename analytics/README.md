@@ -96,6 +96,14 @@ bin/pronto-analytics metal --ssh user@203.0.113.7 --project brawl-chess \
   --dashboards bonk-chess/business=<pronto>/apps/brawl-chess/observability/analytics.business.dashboard.json,…
 ```
 
+Both databases are backed up when `metal` is given `--backup s3://bucket/folder --backup-endpoint https://…`,
+or by `bin/pronto-analytics metal backup` with the same flags on a cluster already running: CloudNativePG's
+barman-cloud plugin archives the WAL as it fills, a base backup runs nightly at 06:00 UTC (and once at
+once), and 30 days are kept, as the node's other databases. The bucket's keys are the operator's Secret
+`analytics-db-backup-s3` (`ACCESS_KEY_ID`, `ACCESS_SECRET_KEY`) in the namespace, put there first: both
+commands refuse to start without it. `metal backup` applies under a field manager of its own, so the
+rest of the Cluster stays as `metal` left it, and waits for the first backup to complete.
+
 `bin/pronto-analytics metal dashboards --ssh user@203.0.113.7 --dashboards app/name=path,…` ships the
 dashboards alone, for an app's release to run after it: each ConfigMap whose file differs from the live one is
 applied (a read that fails fails the command; only a ConfigMap not there reads as empty), and a digest of all
