@@ -321,10 +321,28 @@ Deno.test("the door flag is read for the reader and told to the broker; a flag t
   const missing = await absent.ask(absent.make({ doorFlag: "stripe_door" }), "/billing/trial");
   eq([missing.ok, absent.broker.length], [false, 0], "a flag that is not there fails loudly");
   await missing.body?.cancel();
-  const down = trialStage({ door: () => new Response("", { status: 503 }) });
-  const failed = await down.ask(down.make({ doorFlag: "stripe_door" }), "/billing/trial");
-  eq([failed.ok, down.broker.length], [false, 0], "a flag that does not answer sends nothing to the broker");
-  await failed.body?.cancel();
+  // A lookup that fails in transit says no word: the broker is asked and takes its own way.
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (...a: unknown[]) => { warned.push(a.join(" ")); };
+  try {
+    const down = trialStage({ door: () => new Response("", { status: 503 }) });
+    const failed = await down.ask(down.make({ doorFlag: "stripe_door" }), "/billing/trial");
+    eq([failed.status, down.broker.length, "door" in down.broker[0].body], [200, 1, false], "flagd 5xx: no door word, the call reaches the broker");
+    await failed.body?.cancel();
+    const gone = trialStage({ door: () => Promise.reject(new TypeError("connection refused")) as unknown as Response });
+    const reached = await gone.ask(gone.make({ doorFlag: "stripe_door" }), "/billing/trial");
+    eq([reached.status, gone.broker.length, "door" in gone.broker[0].body], [200, 1, false], "flagd fetch rejects: same");
+    await reached.body?.cancel();
+  } finally {
+    console.warn = warn;
+  }
+  eq(warned.length, 2, "one warning each");
+  eq(warned.every((w) => w.includes("stripe_door") && !w.includes(ANA_ID) && !w.includes("Bearer")), true, "names the flag, no account or token");
+  const odd = trialStage({ door: () => Response.json({ value: "yes" }) });
+  const bad = await odd.ask(odd.make({ doorFlag: "stripe_door" }), "/billing/trial");
+  eq([bad.ok, odd.broker.length], [false, 0], "an answer that is no boolean fails");
+  await bad.body?.cancel();
 });
 
 // The grants loop keeps the startup race out of the logs (PRONTO-295, from Bonk Chess's copy): billing starts
