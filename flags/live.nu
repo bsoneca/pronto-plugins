@@ -204,19 +204,29 @@ def pin-guard [app: path] {
 	let pin = (open --raw $file | str trim)
 	if not ($pin =~ '^[0-9a-f]{40}$') { error make {msg: $"flags: ($file) must hold one commit, 40 hex characters"} }
 	let root = ($flags_dir | path join .. | path expand)
+	let s = ($pin | str substring 0..<9)
 	let head = (do { ^git -C $root rev-parse --short HEAD } | complete)
-	let refuse = {||
-		let h = if $head.exit_code == 0 { $head.stdout | str trim } else { "no git HEAD" }
-		let s = ($pin | str substring 0..<9)
-		error make {msg: $"flags: this pronto-flags \(($root) at ($h)\) is older than the one ($repo)/.github/flags.pin pins \(($s)\): a push from it can turn off flags the release still reads \(PRONTO-680\). Run ($repo)/tools/flags/pronto-flags <verb> … \(the pinned commit\), or bring this checkout up to ($s)."}
+	let refuse = {|why: string|
+		let h = if $head.exit_code == 0 { $head.stdout | str trim } else { "no HEAD" }
+		error make {msg: $"flags: this pronto-flags \(($root) at ($h)\) cannot write for ($repo): ($why). ($repo)/.github/flags.pin pins ($s), and a push from a checkout without it can turn off flags the release still reads \(PRONTO-680\). Run the repo's pinned entry point \(in pronto: tools/flags/pronto-flags\), or bring this checkout to ($s)."}
 	}
-	if $head.exit_code != 0 { do $refuse }
+	if $head.exit_code != 0 { do $refuse $"($root) is not a git checkout" }
 	mut r = (do { ^git -C $root merge-base --is-ancestor $pin HEAD } | complete)
+	mut fetched = ""
 	if $r.exit_code == 128 {
-		do { ^git -C $root fetch -q origin $pin } | complete | ignore
-		$r = (do { ^git -C $root merge-base --is-ancestor $pin HEAD } | complete)
+		# Unknown here. A full clone has nothing more to fetch; a shallow one lacks history below its boundary.
+		let shallow = (do { ^git -C $root rev-parse --is-shallow-repository } | complete | get stdout | str trim)
+		if $shallow == "true" {
+			let f = (with-env {GIT_TERMINAL_PROMPT: "0"} { do { ^git -C $root fetch -q --unshallow origin } | complete })
+			$fetched = ($f.stderr | str trim)
+			$r = (do { ^git -C $root merge-base --is-ancestor $pin HEAD } | complete)
+			if $r.exit_code == 128 { do $refuse $"the pinned commit ($s) is unknown here and at origin: ($fetched)" }
+		} else {
+			do $refuse $"the pinned commit ($s) is unknown here \(a full clone: fetch origin first\)"
+		}
 	}
-	if $r.exit_code != 0 { do $refuse }
+	if $r.exit_code == 1 { do $refuse $"this checkout does not contain the pinned commit ($s) \(older, or on a branch without it\)" }
+	if $r.exit_code != 0 { do $refuse $"git could not compare this checkout with ($s): ($r.stderr | str trim)" }
 }
 
 # Who pushed, and from which commit: kept on each version, which history shows. A directory store
@@ -230,7 +240,10 @@ def provenance [app: path, at: record] {
 	# Any of the app's CUE: a flag's value may come from another spec (pronto-billing's grants, say).
 	let dirty = (do { cd $app; ^git status --porcelain -- '*.cue' } | complete | get stdout | str trim)
 	# The pronto-flags checkout that writes: which version of this plugin wrote the version (PRONTO-718).
-	let plugin = (do { ^git -C ($flags_dir | path join ..) rev-parse --short HEAD } | complete | get stdout | str trim)
+	let proot = ($flags_dir | path join .. | path expand)
+	let pc = (do { ^git -C $proot rev-parse --short HEAD } | complete | get stdout | str trim)
+	let pdirty = (do { ^git -C $proot status --porcelain --untracked-files=no } | complete | get stdout | str trim)
+	let plugin = ($pc + (if ($pdirty | is-empty) { "" } else { "+edits" }))
 	{who: $who, commit: ($commit + (if ($dirty | is-empty) { "" } else { "+edits" })), plugin: $plugin}
 }
 

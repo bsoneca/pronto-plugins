@@ -66,7 +66,7 @@ A flip therefore needs a test of its own, and it must be:
    over the live object, so a flag retired from main disappeared from production while the release
    serving it still read it, and a default changed on main landed with no one flipping it.
    - A repo pins the pronto-flags that may write (`.github/flags.pin`, PRONTO-718) and runs it through
-     its pin entry point (`tools/flags/pronto-flags`); a write from a checkout older than the pin is
+     its pinned entry point (in pronto: `tools/flags/pronto-flags`); a write from a checkout older than the pin is
      refused, since an old one drops retired flags the release still reads. Each version records the
      plugin commit that wrote it.
    - A flip is named: `--flip a,b`. A flag whose default differs and is not named keeps its live

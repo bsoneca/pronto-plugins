@@ -30,7 +30,7 @@ Live flags, run as the operator's own gcloud login:
 <this repo>/bin/pronto-flags setup|push|released|history|rollback|show|cases <app-dir>
 ```
 
-A repo that pins pronto-flags (a commit in its `.github/flags.pin`, 40 hex characters) runs it through its pin entry point, `<repo>/tools/flags/pronto-flags`, never from a checkout of its own. Every write (`setup`, `push`, `released`, `rollback`, and the armies' `push` and `rollback`) first checks that this checkout contains the pinned commit, and refuses, before reading or writing anything, one that does not: a checkout older than the pin can turn off flags the release still reads (PRONTO-680, PRONTO-718). `show`, `history` and `cases` are not checked. Each version and journal line records the commit of the pronto-flags that wrote it (`plugin`).
+A repo that pins pronto-flags (a commit in its `.github/flags.pin`, 40 hex characters) runs it through the repo's pinned entry point (in pronto: `tools/flags/pronto-flags`), never from a checkout of its own. Every write (`setup`, `push`, `released`, `rollback`, and the armies' `push` and `rollback`) first checks that this checkout contains the pinned commit, and refuses, before reading or writing anything, one that does not: a checkout older than the pin can turn off flags the release still reads (PRONTO-680, PRONTO-718). `show`, `history` and `cases` are not checked. Each version and journal line records the commit of the pronto-flags that wrote it (`plugin`).
 
 A `push` is a merge over the live flags, never the spec written whole (PRONTO-680: a flag retired from main vanished from production while the release serving it still read it, and a default changed on main landed unasked):
 

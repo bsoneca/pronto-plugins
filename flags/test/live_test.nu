@@ -38,6 +38,7 @@ def --wrapped live [...args] {
 def held [] { open $state }
 def object [] { held | get objects."gs://shop-prod-flags/flags.json" }
 def premium [v: record] { $v.data | from json | get flags.premium }
+def flat []: string -> string { $in | str replace -a -r '\s*\n\s*\|?\s*' " " }
 def check [ok: bool, what: string] { if not $ok { error make {msg: $"failed: ($what)"} }; print $"ok: ($what)" }
 
 spec []
@@ -599,31 +600,52 @@ flags: premium: {default: false, local: true, accounts: [\"acct-pin\"]}
 flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\"}
 GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
 " | save -f $"($repo)/app/flags_spec.cue"
+# The clone runs the working tree's flags/ and bin/, committed there before the pin, so these cases test the current code.
 let clone = $"($dir)/p"
 ^git clone -q --no-local $"($here)/../.." $clone
-^git -C $clone -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m pin
-let pin = (^git -C $clone rev-parse HEAD | str trim)
-^git -C $clone checkout -q HEAD~1
-def pushfrom [] {
+^rm -rf $"($clone)/flags" $"($clone)/bin"
+cp -r $"($here)/.." $"($clone)/flags"
+cp -r $"($here)/../../bin" $"($clone)/bin"
+def --wrapped gt [...args] { ^git -C $clone -c user.name=t -c user.email=t@example.com ...$args }
+gt add -A
+gt commit -q --allow-empty -m code
+let code = (gt rev-parse HEAD | str trim)
+gt commit -q --allow-empty -m pin
+let pin = (gt rev-parse HEAD | str trim)
+gt commit -q --allow-empty -m after
+# A shallow clone past the pin: its history stops short of the pin, which origin still has.
+let shallow = $"($dir)/s"
+^git clone -q --depth 1 $"file://($clone)" $shallow
+gt checkout -q $code
+def fromat [root: string, args: list<string>] {
 	with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state, FLAGS_OFREP_CMD: $"python3 ($here)/fake_ofrep.py", FLAGS_POLL_SEC: "0.01", FLAGS_WAIT_SEC: "0.1", PRONTO_FLAGS_JOURNAL: $"($dir)/journal.jsonl"} {
-		^$nu.current-exe $"($clone)/flags/live.nu" push $"($repo)/app" | complete
+		^$nu.current-exe $"($root)/flags/live.nu" ...$args | complete
 	}
 }
+def pushfrom [] { fromat $clone [push $"($repo)/app"] }
 let before_pin = (held)
 mkdir $"($repo)/.github"
 $pin | save -f $"($repo)/.github/flags.pin"
 let below = (pushfrom)
-check ($below.exit_code != 0 and ($below.stderr | str contains $"flags.pin pins \(($pin | str substring 0..<9)\)") and ($below.stderr | str contains "PRONTO-680") and (held) == $before_pin) "pin: a push from below the pin is refused, naming it, and the store is unchanged"
+check ($below.exit_code != 0 and ($below.stderr | flat | str contains $"does not contain the pinned commit ($pin | str substring 0..<9)") and ($below.stderr | flat | str contains "PRONTO-680") and (held) == $before_pin) "pin: a push from below the pin is refused, naming it, and the store is unchanged"
+for verb in [rollback released setup] {
+	let r = (fromat $clone [$verb $"($repo)/app"])
+	check ($r.exit_code != 0 and ($r.stderr | flat | str contains "does not contain the pinned commit") and (held) == $before_pin) $"pin: ($verb) from below the pin is refused, the store unchanged"
+}
 ^git -C $clone checkout -q $pin
 let at_pin = (pushfrom)
 check ($at_pin.exit_code == 0 and (premium (object | first)).targeting.if.2.in.1 == ["acct-pin"] and (object | first).metadata.plugin == (^git -C $clone rev-parse --short HEAD | str trim)) "pin: with the pin at HEAD the push goes through, the version names the plugin commit"
 let after_pin = (held)
 (1..40 | each { "f" } | str join) | save -f $"($repo)/.github/flags.pin"
 let unknown = (pushfrom)
-check ($unknown.exit_code != 0 and ($unknown.stderr | str contains "older than") and (held) == $after_pin) "pin: a commit this checkout does not have is refused"
+check ($unknown.exit_code != 0 and ($unknown.stderr | flat | str contains "is unknown here") and (held) == $after_pin) "pin: a commit this checkout does not have is refused"
 "nonsense\n" | save -f $"($repo)/.github/flags.pin"
 let bad = (pushfrom)
 check ($bad.exit_code != 0 and ($bad.stderr | str contains "40 hex") and (held) == $after_pin) "pin: a file that is not a commit is refused"
+# A shallow checkout past the pin fetches its missing history from origin, then writes.
+$pin | save -f $"($repo)/.github/flags.pin"
+let shallow_push = (fromat $shallow [push $"($repo)/app"])
+check ($shallow_push.exit_code == 0 and (^git -C $shallow rev-parse --is-shallow-repository | str trim) == "false") "pin: a shallow checkout past the pin fetches the history and the push goes through"
 rm $"($repo)/.github/flags.pin"
 $"package shop
 flags: premium: {default: false, local: true, accounts: [\"acct-nopin\"]}
