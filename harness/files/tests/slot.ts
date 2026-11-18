@@ -557,15 +557,6 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
         return found.sort((x, y) => x.name < y.name ? -1 : 1);
       };
       const older = line === "none" ? [] : await scan(queue, mine, nested);
-      // A top-level cue reserves cores only at the head of the cue line: the lock lets one run at a time,
-      // so the ones behind it reserve nothing (three of 7 would hold 21 of 15). Its place in the cores'
-      // line is its ticket's name, which is when it asked.
-      if (dual) {
-        if (older.length === 0) await Deno.writeTextFile(`${coresQueue}/${ticket}`, `${weight} ${what}`);
-        else await Deno.remove(`${coresQueue}/${ticket}`).catch(() => {});
-      }
-      // The cores a dual ticket waits behind: its older tickets in the cores' line.
-      const ahead = line === "cue" ? (dual ? (await scan(coresQueue, ticket)).reduce((n, o) => n + o.weight, 0) : 0) : older.reduce((n, o) => n + o.weight, 0);
       const where = `${ordinal(older.length + 1)} in line${older.length ? ` behind ${older.at(-1)!.what} (weight ${older.at(-1)!.weight})` : ""}`;
       const holders: { weight: number; cue: boolean; job: boolean }[] = [];
       for await (const e of Deno.readDir(pool)) {
@@ -577,6 +568,16 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
         else if (staleSlot(false, (await answering(33000 + 100 * (Number(m[2]) - 1))).length > 0)) await Deno.remove(`${pool}/${e.name}`, { recursive: true }).catch(() => {});
       }
       const { used } = held(holders);
+      // A top-level cue reserves cores only at the head of the cue line and while no cue runs: the lock lets one
+      // run at a time, so the next reserves nothing until the one running ends (a running cue's 7 and the next's
+      // 7 would hold 14 of 15, and a rehearsal would no longer fit beside one cue; three would hold 21). Its
+      // place in the cores' line is its ticket's name, which is when it asked.
+      if (dual) {
+        if (older.length === 0 && !holders.some((h) => h.cue)) await Deno.writeTextFile(`${coresQueue}/${ticket}`, `${weight} ${what}`);
+        else await Deno.remove(`${coresQueue}/${ticket}`).catch(() => {});
+      }
+      // The cores a dual ticket waits behind: its older tickets in the cores' line.
+      const ahead = line === "cue" ? (dual ? (await scan(coresQueue, ticket)).reduce((n, o) => n + o.weight, 0) : 0) : older.reduce((n, o) => n + o.weight, 0);
       const why = (s: string) => ({ why: `${where}: ${s}`, ahead: older.length, used });
       if (line === "cue") {
         const holding = holders.filter((h) => h.cue).length;

@@ -693,6 +693,26 @@ Deno.test("queued top-level cues reserve cores once, at the head of the cue line
   }
 });
 
+Deno.test("the next top-level cue reserves no cores while one runs", async () => {
+  const dir = await Deno.makeTempDir();
+  await fake(dir, 0, 6);
+  for (const k of ["a", "b"]) await prime(dir, ["export", `./${k}`], 7);
+  const env = { STACK_BUDGET: "15" };
+  const procs: { child: Deno.ChildProcess; done: Promise<{ code: number; stdout: string; stderr: string }> }[] = [];
+  try {
+    procs.push(start(dir, ["export", "./a"], env));
+    await until(async () => (await names(`${dir}/pool`)).some((n) => n.startsWith("job-")) ? true : undefined, "the first cue runs");
+    procs.push(start(dir, ["export", "./b"], env));
+    await until(async () => (await names(`${dir}/pool/cue-queue`)).length === 1 ? true : undefined, "the second waits in the cue line");
+    await new Promise((r) => setTimeout(r, 2500));
+    assertEquals(await names(`${dir}/pool/queue`), [], "a running cue's 7 and the next's 7 are not both held: a rehearsal still fits beside one cue");
+    const results = await Promise.all(procs.map((p) => p.done));
+    assertEquals(results.map((r) => r.code), [0, 0]);
+  } finally {
+    for (const p of procs) try { p.child.kill("SIGKILL"); } catch { /* done */ }
+  }
+});
+
 Deno.test("a cue inside a holder, through a slot.ts from before the -w tickets, is not made to wait behind a top-level one", async () => {
   const dir = await Deno.makeTempDir();
   const root = new URL("../..", import.meta.url).pathname;
