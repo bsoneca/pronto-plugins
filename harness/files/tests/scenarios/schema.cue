@@ -11,6 +11,10 @@
 // is not the app's, the fields its actors have besides these (`#Actor`), its own step kinds
 // (`#Gestures`, done by tests/scenarios/app.ts) and those a production scenario may not take
 // (`#barred`).
+// Postfix aliases ([string]~(K,_)): the only form cue 0.18 accepts, and cue 0.16 takes it under
+// this experiment, so every app reads this file whichever cue it pins.
+@experiment(aliasv2)
+
 package scenarios
 
 // How many scenarios run at once: at hand (a stack on this machine) the machine's cores are the
@@ -74,7 +78,7 @@ database?: string
 // passkey's button.
 signIn?: {open: [...#Sel], passkey: #Sel}
 
-scenarios: [Id=string]: #Scenario & {id: Id}
+scenarios: [string]~(Id,_): #Scenario & {id: Id}
 
 // A person: each in a browser of its own, a guest the terminal mints at boot, or an account once its
 // steps sign it up. On the app's `screen`, or the one of its `screens` it names; in the app's
@@ -159,10 +163,17 @@ scenarios: [Id=string]: #Scenario & {id: Id}
 	// Asked only on the deployed app ("production") or only on a stack at hand ("local"): what a
 	// listing may be differs, a laptop's naming the stack's own address.
 	on?: "production" | "local"
-	#Action | #Expect | #Http | #Together | #Any | #Repeat | #Gesture
+	_kind
 }
 
-#Action: {open: string} | // a path of the app or a URL, waited for as the app's pages load (`loaded`)
+// The step's kind, as a hidden value that `#Step` embeds: language v0.18 refuses the fields a definition
+// declares beside an embedded definition (or a disjunction of them), so the kinds are embedded as a
+// regular value (each kind is one, `_action` and the others, and stays a definition for the readers that name
+// it: `repeat`, `when`).
+_kind: _action | _expect | _http | _together | _any | _repeat | _gesture
+
+#Action: _action
+_action: {open: string} | // a path of the app or a URL, waited for as the app's pages load (`loaded`)
 	{reload: true} |
 	{revisit: string} | // the tab closed and the app opened again at this path in a new one: what the browser keeps (its storage, its cookies) stays, the tab's own session does not
 	{leave: true} | // the page says it is being left (pagehide), as a closing tab does: what a page reports on leaving goes out
@@ -189,9 +200,10 @@ scenarios: [Id=string]: #Scenario & {id: Id}
 	{google: string} | // the strip's Google button, through the local broker's stand-in, which says it is not Google and signs in the test person named; waits for a session that is no guest. Local stacks only: the runner skips such a scenario on a deployed app
 	{doorProbe: true} | // signin_door's live check: the identity broker's /probe/door, as the actor's session (PRONTO-268): in production the airlock adds Google's credential (`credential`); at hand the stand-in broker has no door (404)
 	{shot: string} | // a screenshot under SHOTS
-	{keep: [Var=string]: {of: #Sel, attr?: string, text?: true, value?: true}}
+	{keep: [string]: {of: #Sel, attr?: string, text?: true, value?: true}}
 
-#Expect: {see: #Sel} | // visible
+#Expect: _expect
+_expect: {see: #Sel} | // visible
 	{hidden: #Sel} | // not visible (or not there)
 	{attached: #Sel} | // in the page, shown or not
 	{never: string} | // no address the page (this tab, since a `revisit`) has asked for so far holds this
@@ -212,7 +224,8 @@ scenarios: [Id=string]: #Scenario & {id: Id}
 	// the element found at its middle.
 	{inView: {of: #Sel, within: #Sel, clear?: [...#Sel]}}
 
-#Http: {
+#Http: _http
+_http: {
 	http: {
 		method: *"GET" | "POST" | "PUT" | "PATCH" | "DELETE"
 		path:   string
@@ -234,8 +247,8 @@ scenarios: [Id=string]: #Scenario & {id: Id}
 			// A response header, by its lower-case name: the whole value.
 			header?: [string]: string
 		}
-		keep?: [Var=string]: string // a dotted path into the JSON answer
-		keepText?: [Var=string]: string // a regular expression over the answer's text: its first group is kept; no match fails the step
+		keep?: [string]: string // a dotted path into the JSON answer
+		keepText?: [string]: string // a regular expression over the answer's text: its first group is kept; no match fails the step
 	}
 	// Asked again until it answers as expected, every second, up to the timeout.
 	poll?: true
@@ -243,18 +256,22 @@ scenarios: [Id=string]: #Scenario & {id: Id}
 
 // Steps of several actors sent at one instant, each before any is answered: two guests confirming
 // one time.
-#Together: {together: [...#Step]}
+#Together: _together
+_together: {together: [...#Step]}
 
 // Holds once one of its steps holds, all asked at once: which of two racing guests won is not for
 // the scenario to say.
-#Any: {any: [...#Step]}
+#Any: _any
+_any: {any: [...#Step]}
 
 // An action done again until an expectation holds, at most `max` times: a game played through to
 // its end, however many moves that takes. The expectation is asked before each action; an
 // expectation's `failing` value ends the step at once.
-#Repeat: {repeat: #Action, until: #Expect, max: int & >0}
+#Repeat: _repeat
+_repeat: {repeat: #Action, until: #Expect, max: int & >0}
 
 // The app's own step kinds, each a field: its name the kind, its value the step's whole shape (Bonk
 // Chess's `play: {play: string, refused?: true}`, a move). tests/scenarios/app.ts says what each does.
-#Gestures: [Kind=string]: {(Kind): _}
-#Gesture: or([for _, g in #Gestures {g}])
+#Gestures: [string]~(Kind,_): {(Kind): _}
+#Gesture: _gesture
+_gesture: or([for _, g in #Gestures {g}])

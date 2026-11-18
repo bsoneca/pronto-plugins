@@ -8,7 +8,7 @@ package unit
 // Which `test` check runs the case (program.cue): the app names its suites in suites.cue.
 #Suite: string
 
-cases: [Name=string]: #Case
+cases: [string]: #Case
 
 // How many processes a suite's cases run over at once (tests/unit.ts), when not one: only for a
 // suite whose cases share nothing outside their own process.
@@ -34,10 +34,15 @@ jobs: [#Suite]: int & >=1
 	matches?: string
 	// Why, when the check is not plain from the case's name.
 	why?: string
-	#Act
+	_act
 }
 
-#Act: {call!: string, args?: [...], throws?: string} | // ns.fn of the registry (tests/unit.ts), awaited; or throwing, its message matching
+// The acts, as a hidden value that `#Step` embeds and `#Act` names for readers: language v0.18
+// refuses the fields a definition declares beside an embedded definition (or a disjunction of
+// definition structs), so the embedded part is a regular value, and an act's absence is written out
+// (every act key `_|_`, the rest refused as unknown) where a closed empty struct once stood.
+#Act: _act
+_act: {call!: string, args?: [...], throws?: string} | // ns.fn of the registry (tests/unit.ts), awaited; or throwing, its message matching
 	{get!: #Path} | // a field of the value
 	{pick!: [...#Path]} | // fields of the value, as a list
 	{filter!: #Path} | // the elements of the value whose field is set
@@ -45,4 +50,4 @@ jobs: [#Suite]: int & >=1
 	{keep!: string} | // the value kept under a name, "$name" after
 	{use!: string} | // a kept value made the value
 	{value!: _} | // a literal made the value
-	close({}) // a check of the value as it is
+	{call?: _|_, get?: _|_, pick?: _|_, filter?: _|_, map?: _|_, keep?: _|_, use?: _|_, value?: _|_, throws?: _|_} // a check of the value as it is: no act
