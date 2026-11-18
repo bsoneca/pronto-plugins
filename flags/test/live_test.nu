@@ -585,5 +585,53 @@ kspec {ka: true, kb: false}
 let k3 = (klive [push $drill])
 check ($k3.exit_code == 0 and "kd" not-in (kflags | columns) and (djournal | last).dropped == "kd" and ($k3.stderr | str contains "no longer reads it")) "keep-live, dir: a flag the record lacks is dropped, the journal says so"
 
+# PRONTO-718: a repo pins the pronto-flags commit its pushes run from (.github/flags.pin); a push from a
+# checkout below the pin is refused before anything is read or written. The scratch clone is this checkout
+# plus one commit, the pin; the checkout the push runs from is that clone one commit back, then at the pin.
+let repo = $"($dir)/repo"
+mkdir $repo
+^git -C $repo init -q
+cp -r $app $"($repo)/app"
+rm -rf $"($repo)/app/.git"
+^$real trust -q $"($repo)/app/.mise.toml"
+$"package shop
+flags: premium: {default: false, local: true, accounts: [\"acct-pin\"]}
+flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\"}
+GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
+" | save -f $"($repo)/app/flags_spec.cue"
+let clone = $"($dir)/p"
+^git clone -q --no-local $"($here)/../.." $clone
+^git -C $clone -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m pin
+let pin = (^git -C $clone rev-parse HEAD | str trim)
+^git -C $clone checkout -q HEAD~1
+def pushfrom [] {
+	with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state, FLAGS_OFREP_CMD: $"python3 ($here)/fake_ofrep.py", FLAGS_POLL_SEC: "0.01", FLAGS_WAIT_SEC: "0.1", PRONTO_FLAGS_JOURNAL: $"($dir)/journal.jsonl"} {
+		^$nu.current-exe $"($clone)/flags/live.nu" push $"($repo)/app" | complete
+	}
+}
+let before_pin = (held)
+mkdir $"($repo)/.github"
+$pin | save -f $"($repo)/.github/flags.pin"
+let below = (pushfrom)
+check ($below.exit_code != 0 and ($below.stderr | str contains $"flags.pin pins \(($pin | str substring 0..<9)\)") and ($below.stderr | str contains "PRONTO-680") and (held) == $before_pin) "pin: a push from below the pin is refused, naming it, and the store is unchanged"
+^git -C $clone checkout -q $pin
+let at_pin = (pushfrom)
+check ($at_pin.exit_code == 0 and (premium (object | first)).targeting.if.2.in.1 == ["acct-pin"] and (object | first).metadata.plugin == (^git -C $clone rev-parse --short HEAD | str trim)) "pin: with the pin at HEAD the push goes through, the version names the plugin commit"
+let after_pin = (held)
+(1..40 | each { "f" } | str join) | save -f $"($repo)/.github/flags.pin"
+let unknown = (pushfrom)
+check ($unknown.exit_code != 0 and ($unknown.stderr | str contains "older than") and (held) == $after_pin) "pin: a commit this checkout does not have is refused"
+"nonsense\n" | save -f $"($repo)/.github/flags.pin"
+let bad = (pushfrom)
+check ($bad.exit_code != 0 and ($bad.stderr | str contains "40 hex") and (held) == $after_pin) "pin: a file that is not a commit is refused"
+rm $"($repo)/.github/flags.pin"
+$"package shop
+flags: premium: {default: false, local: true, accounts: [\"acct-nopin\"]}
+flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\"}
+GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
+" | save -f $"($repo)/app/flags_spec.cue"
+let nopin = (pushfrom)
+check ($nopin.exit_code == 0 and (premium (object | first)).targeting.if.2.in.1 == ["acct-nopin"]) "pin: with no pin file the push runs as before"
+
 rm -rf $dir
 print "flags: live commands pass"
