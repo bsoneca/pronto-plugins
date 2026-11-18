@@ -235,6 +235,7 @@ scenarios: [Id=string]: #Scenario & {id: Id}
 			header?: [string]: string
 		}
 		keep?: [Var=string]: string // a dotted path into the JSON answer
+		keepText?: [Var=string]: string // a regular expression over the answer's text: its first group is kept; no match fails the step
 	}
 	// Asked again until it answers as expected, every second, up to the timeout.
 	poll?: true
