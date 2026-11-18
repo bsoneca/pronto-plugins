@@ -32,6 +32,9 @@ _billingTrialMigration: "billing_03"
 // The flag the trial is behind, off or on per account by pronto-flags (needs _billingFlags);
 // empty, the trial is on wherever `billing.trial` is set:
 // _billingTrialFlag: "free_trial"
+// The flag that sends the broker's Stripe calls through the airlock's door per reader (needs
+// _billingFlags); empty, nothing is asked:
+// _billingDoorFlag: "stripe_door"
 
 // The Subscription table's identity, which pronto's mint stamps here: the
 // rest of it is pronto-billing's (billing_plugin.cue).

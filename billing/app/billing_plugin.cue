@@ -81,6 +81,11 @@ if _billingFlags != "" {
 // on wherever the document has one.
 _billingTrialFlag: *"" | string
 
+// The flag that sends the broker's Stripe calls through the airlock's door, per reader (the service
+// asks it as it asks the trial's, through _billingFlags, and tells the broker `door`; PRONTO-218).
+// Empty, the service asks nothing and says nothing.
+_billingDoorFlag: *"" | string
+
 _billingGrantsChecks: {
 	none: (#billingGrants & {grants: {}}).out & "[]"
 	two: (#billingGrants & {grants: "00000000-0000-4000-8000-00000000000a": {analysis: "2027-01-31", coach: "2026-12-24"}}).out &
@@ -365,6 +370,7 @@ cluster: surface: targets: billing: {
 			BILLING_DOCUMENT:        _billingDocument
 			BILLING_GRANTS:          _billingGrants
 			if _billingTrialFlag != "" {BILLING_TRIAL_FLAG: _billingTrialFlag}
+			if _billingDoorFlag != "" {BILLING_DOOR_FLAG: _billingDoorFlag}
 			if !_billingFlagsPeer {BILLING_FLAGS: _billingFlags}
 			SERVICE_JWT:             "${SERVICE_JWT:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZSIsInN1YiI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIsImV4cCI6MTk4ODE1MDQwMH0.dGYz_sMSnOvZy0eANh7spJbgyr2fEzeynOERIqW7gd4}"
 		}
