@@ -151,7 +151,10 @@ function flagOn(name: string): Promise<boolean> {
 
 export type Actor = { key: string; name: string; def: ActorDef; ctx: BrowserContext; page: Page; cdp: CDPSession; auth: string; consoles: string[]; trail: string[]; asked: string[]; hot: boolean; releases: Map<string, () => void>; data: Record<string, any> };
 export const sleep = (s: number) => new Promise((r) => setTimeout(r, s * 1000));
-export const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+// A non-finite number would stringify as null: each becomes a distinct marker, so it equals nothing.
+let nonFinite = 0;
+const finite = (_: string, v: unknown) => typeof v === "number" && !Number.isFinite(v) ? `non-finite#${nonFinite++}` : v;
+export const same = (a: unknown, b: unknown) => JSON.stringify(a, finite) === JSON.stringify(b, finite);
 // Every value of `want` is in `got` (an array's every element, when `want` is a one-element array).
 function holds(got: any, want: any): boolean {
   if (Array.isArray(want)) {
@@ -836,6 +839,8 @@ export class Run {
         && (e.lacks === undefined || (await this.fillAll(e.lacks) as string[]).every((x) => !text.includes(x)))
         && (e.header === undefined || Object.entries(await this.fillAll(e.header) as Record<string, string>).every(([k, v]) => res.headers()[k] === v))
         && texts.every(([, got]) => got !== undefined);
+      // A `keep` path with no value is kept as "undefined" on purpose, not failed: `ifKept` skips the steps that
+      // use it (an empty production listing before a Publish lists the game, PRONTO-613).
       if (ok) for (const [name, at] of Object.entries((h.keep ?? {}) as Record<string, string>)) this.vars.set(name, String(at.split(".").reduce((o: any, k) => o?.[k], json)));
       if (ok) for (const [name, got] of texts) this.vars.set(name, got as string);
       return [ok, `${s} ${text.slice(0, e.has || e.lacks ? 1500 : 300)}`];
@@ -903,7 +908,14 @@ export class Run {
 // scenario that fails runs again once, at once, beside those still running, and passes if that
 // passes ("⚠ <id> flaked"); its retry overlaps the pass instead of following it. Its first failure
 // is printed indented, so only a scenario that failed twice has a "✗ <id> (" line.
+// A verdict left by an earlier run is removed first, so a run that dies early leaves no stale green one.
+const verdictFile = Deno.env.get("SCENARIOS_VERDICT");
+if (verdictFile) try { Deno.removeSync(verdictFile); } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e; }
 const only = Deno.env.get("ONLY")?.split(",");
+const unknownOnly = only?.filter((id) => !Object.values(spec.scenarios).some((s) => s.id === id)) ?? [];
+// Said, not failed: release-cron's bisect runs ONLY=<the scenarios failing at the head> on older trees,
+// where a scenario not yet written is rightly not run (that tree is good for it).
+if (unknownOnly.length) console.log(`scenarios: ONLY names no scenario of this tree: ${unknownOnly.join(", ")}`);
 const wanted = Object.values(spec.scenarios).filter((s) => !only || only.includes(s.id));
 // A scenario that needs a stack's stand-in (`standin`: billing's for Stripe, a model's, or one that signs in
 // with Google through the local broker's) runs where the stand-in is, not on a deployed app, whose broker is
@@ -965,20 +977,24 @@ if (!retry && !shared && !pageErrors.length && ran.length > 1) {
     await fileFlake(id).catch((e) => unmarked.push(e));
   }
 }
-sel.commit(ran.filter((id) => !failed.includes(id) && !pageErrors.length), failed);
+// A scenario whose page threw counts as failed, in the verdict and in the record alike.
+const failedAll = new Set([...failed, ...[...pageErrorIds].filter((id) => ran.includes(id))]);
+sel.commit(ran.filter((id) => !failedAll.has(id) && !pageErrors.length), [...failedAll]);
 await anon.dispose();
 await browser.close();
 // The verdict as data (scenarios/verdict.ts), for a caller that must not parse the line below.
-const verdictFile = Deno.env.get("SCENARIOS_VERDICT");
 // Passed counts the scenarios this run ran and passed; those cached are counted apart, never as passed again.
-// A scenario whose page threw counts as failed.
-const failedAll = new Set([...failed, ...[...pageErrorIds].filter((id) => ran.includes(id))]);
-if (verdictFile) writeVerdict(verdictFile, { passed: ran.length - failedAll.size, cached: sel.cached.length, byOtherLane: shared ? sel.run.length - ran.length : 0, skipped: skipped.length, failed: failedAll.size });
+// A verdict that cannot be written (a full disk) is said; a run that otherwise passed then exits 3, "no verdict",
+// never 1, so a bisect (rehearse.ts) cannot blame a healthy commit for it (PRONTO-683).
+let verdictUnwritten = false;
+if (verdictFile) try { writeVerdict(verdictFile, { passed: ran.length - failedAll.size, cached: sel.cached.length, byOtherLane: shared ? sel.run.length - ran.length : 0, skipped: skipped.length, failed: failedAll.size }); }
+catch (e) { verdictUnwritten = true; console.error(`scenarios: the verdict could not be written to ${verdictFile}: ${e}`); }
 console.log(`scenarios: ${ran.length - failedAll.size} passed (${sel.cached.length} cached${shared ? `, ${sel.run.length - ran.length} run by another lane` : ""}${skipped.length ? `, ${skipped.length} skipped` : ""}), ${failedAll.size} failed, in ${Math.round((Date.now() - t0) / 1000)}s`);
 if (pageErrors.length) console.log(`page errors:\n${pageErrors.join("\n")}`);
 if (flaked.length) console.log(`flakes under load: ${flaked.join(", ")}`);
 if (unmarked.length) throw new AggregateError(unmarked, `flake filing threw (the board refused, a marker not written, or git): ${unmarked.map(String).join("; ")}`);
-if (failed.length || pageErrors.length) Deno.exit(1);
+if (failedAll.size || pageErrors.length) Deno.exit(1);
+if (verdictUnwritten) Deno.exit(3);
 
 // Files a flake once a week per scenario (a marker under ~/.cache/pronto/flakes/<app>); FLAKES_FILE=0 files none.
 async function fileFlake(id: string) {
