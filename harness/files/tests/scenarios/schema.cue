@@ -33,9 +33,8 @@ flakes: {
 	app?:     string
 	priority: "P0" | "P1" | *"P2" | "P3"
 	file: [...string] | *["deno", "run", "-A", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/17630bc5c541cca31f10921bf30c060a89fb210e/devflow/board.ts", "file"]
-	// An app whose release run (release-cron's rehearsal, RETRY_FAILED, or a deployed preview) runs a failed
-	// scenario again once, at once, and lets a pass on that retry through ("⚠ <id> flaked"): Bonk Chess's
-	// and Prontoweeper's, as they were before the runner was shared. Off by default: a failure stays one.
+	// Runs nothing any more: a failed scenario is never run again for its verdict, only a wedged renderer is
+	// (AGENTS.md). Kept so the apps that set it (Bonk Chess, Prontoweeper) still hold to this schema.
 	retry: bool | *false
 }
 

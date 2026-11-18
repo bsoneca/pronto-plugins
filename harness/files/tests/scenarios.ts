@@ -24,7 +24,8 @@ import { writeVerdict } from "./scenarios/verdict.ts";
 
 // A verdict left by an earlier run is removed before anything that can fail, so a run that dies early leaves no stale green one.
 const verdictFile = Deno.env.get("SCENARIOS_VERDICT");
-if (verdictFile) try { Deno.removeSync(verdictFile); } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e; }
+// One that cannot be removed is no verdict either (exit 3, as an unwritten one below), never a failed check.
+if (verdictFile) try { Deno.removeSync(verdictFile); } catch (e) { if (!(e instanceof Deno.errors.NotFound)) { console.error(`scenarios: the old verdict ${verdictFile} could not be removed: ${e}`); Deno.exit(3); } }
 const URL_ = Deno.env.get("APP_URL") ?? Deno.args[0];
 if (!URL_) throw new Error("APP_URL or an argument names the app");
 const SHOTS = Deno.env.get("SHOTS");
@@ -905,11 +906,8 @@ export class Run {
 }
 
 // At most `parallel` scenarios at once, the longest first, so the short ones fill in beside it.
-// ONLY names some of them, comma-separated. Where the app asks for it (schema.cue's `flakes.retry`), with
-// RETRY_FAILED (the rehearsal's, tests/rehearse.ts), and always against a deployed app (the rc's verify, which has no rehearsal around it to retry): a
-// scenario that fails runs again once, at once, beside those still running, and passes if that
-// passes ("⚠ <id> flaked"); its retry overlaps the pass instead of following it. Its first failure
-// is printed indented, so only a scenario that failed twice has a "✗ <id> (" line.
+// ONLY names some of them, comma-separated. A scenario that fails is never run again for its verdict: only a
+// wedged renderer is (AGENTS.md); `flakes.retry` no longer runs anything (schema.cue).
 const only = Deno.env.get("ONLY")?.split(",");
 const unknownOnly = only?.filter((id) => !Object.values(spec.scenarios).some((s) => s.id === id)) ?? [];
 // An ONLY id this tree lacks fails the run, unless ONLY_ABSENT=pass: release-cron's bisect runs ONLY=<the scenarios
@@ -944,7 +942,6 @@ const shared = Deno.env.get("SCENARIOS_QUEUE");
 const take = (id: string) => { if (!shared) return true; try { Deno.mkdirSync(`${shared}/${id}`, { recursive: false }); return true; } catch (e) { if (e instanceof Deno.errors.AlreadyExists) return false; throw e; } };
 const ran: string[] = [];
 const failed: string[] = [];
-const retry = spec.flakes.retry && (!!Deno.env.get("RETRY_FAILED") || isDeployed);
 const t0 = Date.now();
 if (slow) console.log(`scenarios: ${gate ? "the scenarios marked slow" : "every scenario"}, every page with ${slow}`);
 await Promise.all(Array.from({ length: Math.min(isDeployed ? spec.deployedParallel : spec.parallel, queue.length) }, async () => {
@@ -954,13 +951,6 @@ await Promise.all(Array.from({ length: Math.min(isDeployed ? spec.deployedParall
     let r = new Run(s), f = await r.run();
     // A wedged renderer is run again, twice at most, and said so.
     for (let again = 0; r.stuck && again < 2; again++) { console.log(`↻ ${s.id}: ${r.stuck} (a throttled renderer's wedge), run again`); r = new Run(s); f = await r.run(); }
-    // The one retry only tells a flake from a failure: a scenario that failed stays failed either way, since a
-    // retry that makes it pass is not a fix (AGENTS.md); only a wedge (above) is run again for its verdict.
-    if (f && retry && !pageErrors.length) {
-      console.log(`↻ ${s.id}: failed, run again once to tell a flake:\n${f.split("\n").map((l) => `  ${l}`).join("\n")}`);
-      // The line is release-cron's flakedNames' (cron.js): kept word for word; the failure is printed below it.
-      if (!await new Run(s).run()) console.log(`⚠ ${s.id} flaked, passed on its one retry`);
-    }
     if (f) { console.log(f); failed.push(s.id); }
   }
 }));
@@ -968,7 +958,7 @@ await Promise.all(Array.from({ length: Math.min(isDeployed ? spec.deployedParall
 // once the pass is over. One that passes alone flaked under load: it stays failed, and is said and filed.
 const flaked: string[] = [];
 const unmarked: unknown[] = [];
-if (!retry && !shared && !pageErrors.length && ran.length > 1) {
+if (!shared && !isDeployed && !pageErrors.length && ran.length > 1) {
   for (const id of failed) {
     const r = new Run(spec.scenarios[id]);
     if (await r.run()) { console.log(`✗ ${id} fails alone too: not a flake`); continue; }
@@ -988,7 +978,7 @@ await browser.close();
 // A verdict that cannot be written (a full disk) is said; a run that otherwise passed then exits 3, "no verdict",
 // never 1, so a bisect (rehearse.ts) cannot blame a healthy commit for it (PRONTO-683).
 let verdictUnwritten = false;
-if (verdictFile) try { writeVerdict(verdictFile, { passed: ran.length - failedAll.size, cached: sel.cached.length, byOtherLane: shared ? sel.run.length - ran.length : 0, skipped: skipped.length, failed: failedAll.size }); }
+if (verdictFile) try { writeVerdict(verdictFile, { passed: ran.length - failedAll.size, cached: sel.cached.length, byOtherLane: shared ? sel.run.length - ran.length : 0, skipped: skipped.length, failed: failedAll.size, failedIds: [...failedAll].sort() }); }
 catch (e) { verdictUnwritten = true; console.error(`scenarios: the verdict could not be written to ${verdictFile}: ${e}`); }
 console.log(`scenarios: ${ran.length - failedAll.size} passed (${sel.cached.length} cached${shared ? `, ${sel.run.length - ran.length} run by another lane` : ""}${skipped.length ? `, ${skipped.length} skipped` : ""}), ${failedAll.size} failed, in ${Math.round((Date.now() - t0) / 1000)}s`);
 if (pageErrors.length) console.log(`page errors:\n${pageErrors.join("\n")}`);

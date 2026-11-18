@@ -145,7 +145,10 @@ if (verb === "bisect") {
   // The oldest failed run since the last release not yet bisected: each failed run of a streak is
   // bisected in its turn, on the verdicts the ones before it settled, so a culprit the next run fails on too shows twice.
   const since = runs.slice(runs.findLastIndex((r) => r.outcome === "released") + 1);
-  const failed = only ? runs.find((r) => r.started === only) : since.find((r) => r.outcome === "failed" && r.commit && !bisects.some((b) => b.of === r.started));
+  // A bisect that stopped for want of a verdict (noVerdict) leaves its run eligible, three times at most, so a
+  // disk that stays full cannot loop it for ever.
+  const settled = (r: { started: string }) => bisects.some((b) => b.of === r.started && !b.noVerdict) || bisects.filter((b) => b.of === r.started && b.noVerdict).length >= 3;
+  const failed = only ? runs.find((r) => r.started === only) : since.find((r) => r.outcome === "failed" && r.commit && !settled(r));
   if (!failed) { say("no failed run unbisected"); Deno.exit(0); }
   const at = runs.indexOf(failed);
   const green = runs.slice(0, at).filter((r) => r.outcome === "released" && r.commit).at(-1);
@@ -218,10 +221,11 @@ if (verb === "bisect") {
     const since = (sh("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H", `${failed.commit}..origin/main`], undefined, {}, 60).out ?? "").split("\n").filter(Boolean).reverse();
     return stopsBisect(h, starter, h > 0 && sh("kill", ["-0", String(h)]).ok, after?.commit ?? null, fixedBy(since, sig, evidence()));
   };
-  const stop = (why: string) => {
+  // A yield is not recorded: the next bisect takes the same failed run up, on the verdicts kept. A check that gave
+  // no verdict is recorded as noVerdict, which leaves the run eligible (above).
+  const stop = (why: string, record: "yes" | "no" | "noVerdict" = "yes") => {
     say(why);
-    // A yield is not recorded: the next bisect takes the same failed run up, on the verdicts kept.
-    if (!/yields/.test(why)) Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify({ of: failed.started, kind: sig.kind, names: sig.names, green: green.commit, failing: failed.commit, ran, fromRecords: 0, why }) + "\n", { append: true });
+    if (record !== "no" && !/yields/.test(why)) Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify({ of: failed.started, kind: sig.kind, names: sig.names, green: green.commit, failing: failed.commit, ran, fromRecords: 0, why, ...(record === "noVerdict" ? { noVerdict: true } : {}) }) + "\n", { append: true });
     unlock(); Deno.exit(0);
   };
   const fromRecords = list.filter((c) => known[c.sha] !== "unknown").length;
@@ -251,7 +255,7 @@ if (verb === "bisect") {
     must("git", ["checkout", "-q", "--detach", "-f", sha], bwt);
     must("git", ["clean", "-ffdq"], bwt);
     sh(mise, ["trust", "-q", `${bwt}/${appRel}/.mise.toml`]);
-    const env: Record<string, string> = { ...Deno.env.toObject(), SLOW: "1", INTEGRATE_LOCAL_DRIVERS: "all", STACK_WAIT_MINUTES: "525600", ...(sig.names.length ? { ONLY: sig.names.join(","), ONLY_ABSENT: "pass" } : {}) };
+    const env: Record<string, string> = { ...Deno.env.toObject(), SLOW: "1", INTEGRATE_LOCAL_DRIVERS: "all", STACK_WAIT_MINUTES: "525600", SCENARIOS_ALL: "1", ...(sig.names.length ? { ONLY: sig.names.join(","), ONLY_ABSENT: "pass" } : {}) };
     delete env.STACK_PRIORITY;
     const logf = `${dir}/${sha.slice(0, 8)}.log`;
     const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...lowPriority(["sh", "-c", b.command], Deno.build.os)], cwd: `${bwt}/${appRel}`, env, clearEnv: true, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
@@ -270,14 +274,15 @@ if (verb === "bisect") {
     const f = Deno.openSync(logf, { write: true, create: true, truncate: true });
     await Promise.all([p.stdout, p.stderr].map(async (s) => { for await (const c of s) f.writeSync(c); }));
     f.close();
-    const { code } = await p.status;
+    const { code, signal } = await p.status;
     clearInterval(beat);
     clearInterval(watch);
     group = 0;
     if (yielded) stop(stopsBisect(yielded, starter, true, null, null)!);
     // Exit 3 is "no verdict" (the scenarios passed but could not write theirs, a full disk): neither good nor
     // bad, so nothing is recorded and no commit is blamed (PRONTO-683).
-    if (code === 3) stop(`the check on ${sha.slice(0, 8)} gave no verdict (exit 3: it could not write it): the bisect stops, no commit named`);
+    // So is a check killed by a signal (out of memory, a kill from outside): it says nothing of the commit.
+    if (code === 3 || signal || code >= 128) stop(`the check on ${sha.slice(0, 8)} gave no verdict (${code === 3 ? "exit 3: it could not write it" : `killed: ${signal ?? code}`}): the bisect stops, no commit named`, "noVerdict");
     return code === 0 ? "good" : "bad";
   };
   // The check must fail here on the failing commit too (an explicit failure: a pass or a timeout is
