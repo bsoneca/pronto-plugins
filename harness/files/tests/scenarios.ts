@@ -127,6 +127,8 @@ async function liveBrowser() {
 }
 const anon: APIRequestContext = await request.newContext({ ignoreHTTPSErrors: true });
 const pageErrors: string[] = [];
+// The scenarios whose page threw: failed in the verdict, whatever their steps did.
+const pageErrorIds = new Set<string>();
 
 // A flag (flags_spec.cue) as the door answers it, asked once and held: a step marked with one runs
 // only where that flag is on. A door whose flags do not answer is a failure, never a reason to skip.
@@ -263,7 +265,7 @@ export class Run {
     page.on("request", (r) => { const u = call(r.url()); if (u) mark(`asked ${r.method()} ${u}`); });
     page.on("response", (r) => { const u = call(r.url()); if (u) mark(`answered ${r.status()} ${r.request().method()} ${u}`); });
     page.on("requestfailed", (r) => { const u = call(r.url()); if (u) mark(`failed ${r.method()} ${u}: ${r.failure()?.errorText ?? "?"}`); });
-    page.on("pageerror", (e) => pageErrors.push(`${this.s.id}/${key}: ${e.message}`));
+    page.on("pageerror", (e) => { pageErrorIds.add(this.s.id); pageErrors.push(`${this.s.id}/${key}: ${e.message}`); });
     page.on("console", (m) => { a.consoles.push(`${key} ${m.type()}: ${m.text()}`); if (a.consoles.length > 60) a.consoles.shift(); });
     hooks.tab?.(this, a);
     await cdp.send("WebAuthn.enable");
@@ -927,7 +929,7 @@ if (wanted.length && !queue.length && !sel.cached.length) { console.log("scenari
 // the others pass over it. So a lane whose own check ended helps a pass still going, and every scenario still runs
 // once (PRONTO-37: the Premium lane sat idle ~500 s of the rehearsal's ~860 while lane 1 ran the pass alone).
 const shared = Deno.env.get("SCENARIOS_QUEUE");
-const take = (id: string) => { if (!shared) return true; try { Deno.mkdirSync(`${shared}/${id}`, { recursive: false }); return true; } catch { return false; } };
+const take = (id: string) => { if (!shared) return true; try { Deno.mkdirSync(`${shared}/${id}`, { recursive: false }); return true; } catch (e) { if (e instanceof Deno.errors.AlreadyExists) return false; throw e; } };
 const ran: string[] = [];
 const failed: string[] = [];
 const retry = spec.flakes.retry && (!!Deno.env.get("RETRY_FAILED") || isDeployed);
@@ -969,8 +971,10 @@ await browser.close();
 // The verdict as data (scenarios/verdict.ts), for a caller that must not parse the line below.
 const verdictFile = Deno.env.get("SCENARIOS_VERDICT");
 // Passed counts the scenarios this run ran and passed; those cached are counted apart, never as passed again.
-if (verdictFile) writeVerdict(verdictFile, { passed: ran.length - failed.length, cached: sel.cached.length, byOtherLane: shared ? sel.run.length - ran.length : 0, skipped: skipped.length, failed: failed.length });
-console.log(`scenarios: ${ran.length - failed.length} passed (${sel.cached.length} cached${shared ? `, ${sel.run.length - ran.length} run by another lane` : ""}${skipped.length ? `, ${skipped.length} skipped` : ""}), ${failed.length} failed, in ${Math.round((Date.now() - t0) / 1000)}s`);
+// A scenario whose page threw counts as failed.
+const failedAll = new Set([...failed, ...[...pageErrorIds].filter((id) => ran.includes(id))]);
+if (verdictFile) writeVerdict(verdictFile, { passed: ran.length - failedAll.size, cached: sel.cached.length, byOtherLane: shared ? sel.run.length - ran.length : 0, skipped: skipped.length, failed: failedAll.size });
+console.log(`scenarios: ${ran.length - failedAll.size} passed (${sel.cached.length} cached${shared ? `, ${sel.run.length - ran.length} run by another lane` : ""}${skipped.length ? `, ${skipped.length} skipped` : ""}), ${failedAll.size} failed, in ${Math.round((Date.now() - t0) / 1000)}s`);
 if (pageErrors.length) console.log(`page errors:\n${pageErrors.join("\n")}`);
 if (flaked.length) console.log(`flakes under load: ${flaked.join(", ")}`);
 if (unmarked.length) throw new AggregateError(unmarked, `flake filing threw (the board refused, a marker not written, or git): ${unmarked.map(String).join("; ")}`);
