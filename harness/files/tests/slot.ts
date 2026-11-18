@@ -525,10 +525,13 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
   const queue = `${pool}/${dirOf}`;
   const coresQueue = `${pool}/queue`;
   const ticket = ticketOf(queued, pid);
+  // A top-level cue's ticket in the cue line is named with a `-w` the copies of this file from before it
+  // do not read (their ticket name is digits, a dash and a pid): a nested cue through one of them is
+  // not made to wait behind a ticket that waits for its own holder's cores.
+  const mine = dual ? `${ticket}-w` : ticket;
   await Deno.mkdir(queue, { recursive: true });
   await Deno.mkdir(coresQueue, { recursive: true });
-  if (line !== "none") await Deno.writeTextFile(`${queue}/${ticket}`, `${weight} ${nested ? "nested=1 " : ""}${what}`);
-  if (dual) await Deno.writeTextFile(`${coresQueue}/${ticket}`, `${weight} ${what}`);
+  if (line !== "none") await Deno.writeTextFile(`${queue}/${mine}`, `${weight} ${nested ? "nested=1 " : ""}${what}`);
   const minutes = Number(Deno.env.get("STACK_WAIT_MINUTES") ?? 120);
   let end = Date.now() + minutes * 60_000, fewest = Infinity, lightest = Infinity;
   // What dead postgres left, freed once a claim: the stack this claim starts may need a segment.
@@ -539,13 +542,13 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
     const got = await choosing(async () => {
       // Reclaim, at every claim: the live tickets of this claim's line older than its own (their
       // weights reserved), the dead ones freed; the live holders, the dead jobs and stale slots freed.
-      const scan = async (dir: string, onlyNested = false) => {
+      const scan = async (dir: string, own: string, onlyNested = false) => {
         const found: { name: string; weight: number; what: string }[] = [];
         for await (const e of Deno.readDir(dir)) {
-          const m = e.name.match(/^[0-9]+-([0-9]+)$/);
+          const m = e.name.match(/^[0-9]+-([0-9]+)(?:-w)?$/);
           if (!m) continue;
           if (!await alive(Number(m[1]))) { await Deno.remove(`${dir}/${e.name}`).catch(() => {}); continue; }
-          if (e.name >= ticket) continue;
+          if (e.name >= own) continue;
           const [w, ...rest] = (await Deno.readTextFile(`${dir}/${e.name}`).catch(() => "")).split(" ");
           const isNested = rest[0] === "nested=1";
           if (onlyNested && !isNested) continue;
@@ -553,9 +556,16 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
         }
         return found.sort((x, y) => x.name < y.name ? -1 : 1);
       };
-      const older = line === "none" ? [] : await scan(queue, nested);
+      const older = line === "none" ? [] : await scan(queue, mine, nested);
+      // A top-level cue reserves cores only at the head of the cue line: the lock lets one run at a time,
+      // so the ones behind it reserve nothing (three of 7 would hold 21 of 15). Its place in the cores'
+      // line is its ticket's name, which is when it asked.
+      if (dual) {
+        if (older.length === 0) await Deno.writeTextFile(`${coresQueue}/${ticket}`, `${weight} ${what}`);
+        else await Deno.remove(`${coresQueue}/${ticket}`).catch(() => {});
+      }
       // The cores a dual ticket waits behind: its older tickets in the cores' line.
-      const ahead = line === "cue" ? (dual ? (await scan(coresQueue)).reduce((n, o) => n + o.weight, 0) : 0) : older.reduce((n, o) => n + o.weight, 0);
+      const ahead = line === "cue" ? (dual ? (await scan(coresQueue, ticket)).reduce((n, o) => n + o.weight, 0) : 0) : older.reduce((n, o) => n + o.weight, 0);
       const where = `${ordinal(older.length + 1)} in line${older.length ? ` behind ${older.at(-1)!.what} (weight ${older.at(-1)!.weight})` : ""}`;
       const holders: { weight: number; cue: boolean; job: boolean }[] = [];
       for await (const e of Deno.readDir(pool)) {
@@ -653,7 +663,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
     await new Promise((r) => setTimeout(r, 1000));
   }
   } finally {
-    if (line !== "none") await Deno.remove(`${queue}/${ticket}`).catch(() => {});
+    if (line !== "none") await Deno.remove(`${queue}/${mine}`).catch(() => {});
     if (dual) await Deno.remove(`${coresQueue}/${ticket}`).catch(() => {});
   }
 }

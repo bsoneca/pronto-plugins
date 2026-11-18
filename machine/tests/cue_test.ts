@@ -663,3 +663,80 @@ Deno.test("the watchdog slows a cue outside the pool that keeps many cores busy 
     await spin.status;
   }
 });
+
+const slotPath = await Deno.stat(`${runtime}/cue-budget/slot.ts`).then(() => `${runtime}/cue-budget/slot.ts`, () => `${runtime}/slot.ts`);
+const names = async (d: string) => { try { return (await Array.fromAsync(Deno.readDir(d))).map((e) => e.name).sort(); } catch { return []; } };
+
+Deno.test("queued top-level cues reserve cores once, at the head of the cue line", async () => {
+  const dir = await Deno.makeTempDir();
+  await fake(dir);
+  for (const k of ["a", "b", "c"]) await prime(dir, ["export", `./${k}`], 7);
+  const holder = await hold(dir, 6);
+  const env = { STACK_BUDGET: "8" };
+  const procs: { child: Deno.ChildProcess; done: Promise<{ code: number; stdout: string; stderr: string }> }[] = [];
+  try {
+    for (const k of ["a", "b", "c"]) { procs.push(start(dir, ["export", `./${k}`], env)); await new Promise((r) => setTimeout(r, 300)); }
+    await until(async () => (await names(`${dir}/pool/cue-queue`)).length === 3 ? true : undefined, "three tickets in the cue line");
+    await new Promise((r) => setTimeout(r, 1500));
+    assertEquals((await names(`${dir}/pool/queue`)).length, 1, "one cue reserves cores, not three");
+    // A job behind them sees 7 reserved, not 21.
+    const job = new Deno.Command(`${deno}/deno`, { args: ["run", "-A", "--no-config", "--no-lock", slotPath, "--weight", "2", "--what", "job", "--", "true"], cwd: dir, env: envOf(dir, env), clearEnv: true, stdout: "piped", stderr: "piped" }).spawn();
+    const jobDone = job.output();
+    await new Promise((r) => setTimeout(r, 2500));
+    await holder.release();
+    const results = await Promise.all([...procs.map((p) => p.done), jobDone.then((o) => ({ code: o.code, stdout: text(o.stdout), stderr: text(o.stderr) }))]);
+    assertEquals(results.map((r) => r.code), [0, 0, 0, 0]);
+    assertMatch(results[3].stderr, /weight 6 of 8 held \(STACK_BUDGET\), 7 reserved by those ahead, this needs 2/);
+  } finally {
+    await holder.release();
+    for (const p of procs) try { p.child.kill("SIGKILL"); } catch { /* done */ }
+  }
+});
+
+Deno.test("a cue inside a holder, through a slot.ts from before the -w tickets, is not made to wait behind a top-level one", async () => {
+  const dir = await Deno.makeTempDir();
+  const root = new URL("../..", import.meta.url).pathname;
+  const shown = await new Deno.Command("git", { args: ["show", "origin/main:harness/files/tests/slot.ts"], cwd: root, stdout: "piped", stderr: "piped" }).output();
+  assertEquals(shown.code, 0, text(shown.stderr));
+  await Deno.mkdir(`${dir}/old/tests`, { recursive: true });
+  await Deno.writeFile(`${dir}/old/tests/slot.ts`, shown.stdout);
+  const holder = await hold(dir, 3);
+  try {
+    // A top-level cue waiting for the holder's cores: older than the claim below, live, and named as a new one names it.
+    await Deno.mkdir(`${dir}/pool/cue-queue`, { recursive: true });
+    await Deno.writeTextFile(`${dir}/pool/cue-queue/000000000000001-${holder.pid}-w`, "7 cue waiting");
+    for (const copy of [`${dir}/old/tests/slot.ts`, slotPath]) {
+      const child = new Deno.Command(`${deno}/deno`, {
+        args: ["run", "-A", "--no-config", "--no-lock", copy, "--mem", "1", "--what", "nested", "--", "true"],
+        cwd: dir, env: envOf(dir, { STACK_BUDGET: "6", STACK_JOB: String(holder.pid) }), clearEnv: true, stdout: "piped", stderr: "piped",
+      }).spawn();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const out = child.output();
+      const done = await Promise.race([out.then(() => true), new Promise<boolean>((r) => (timer = setTimeout(() => r(false), 30_000)))]);
+      clearTimeout(timer);
+      if (!done) { child.kill("SIGKILL"); await out; assert.fail(`${copy} waited behind the top-level ticket`); }
+      assertEquals((await out).code, 0, copy);
+    }
+  } finally {
+    await holder.release();
+  }
+});
+
+Deno.test("a partial vet teaches neither its key's cores nor its folder's", async () => {
+  const dir = (await Deno.makeTempDir()) + "/m";
+  await Deno.mkdir(dir);
+  await fake(dir);
+  await Deno.mkdir(`${dir}/cue.mod`, { recursive: true });
+  await Deno.writeTextFile(`${dir}/cue.mod/module.cue`, `module: "t.example/m@v0"\nlanguage: version: "v0.16.0"\n`);
+  for (const p of ["a", "b"]) await Deno.mkdir(`${dir}/${p}`);
+  await Deno.writeTextFile(`${dir}/a/a.cue`, `package a\nx: 1\n`);
+  await Deno.writeTextFile(`${dir}/b/b.cue`, `package b\ny: 1\n`);
+  const vet = () => run(dir, ["vet", "-c", "./..."], { CUE_DIRECT_GB: "0", CUE_UNKNOWN_GB: "0.1" });
+  assertEquals((await vet()).code, 0);
+  await Deno.writeTextFile(`${dir}/.cache/pronto/cue-mem/${await learnedName(dir)}.cores`, "5\n");
+  for (const n of await names(`${dir}/.cache/pronto/cue-mem`)) if (n.startsWith("folder-")) await Deno.remove(`${dir}/.cache/pronto/cue-mem/${n}`);
+  await Deno.writeTextFile(`${dir}/a/a.cue`, `package a\nx: 2\n`);
+  const partial = await vet();
+  assertMatch(partial.stderr, /packages? passed before/);
+  assertEquals((await names(`${dir}/.cache/pronto/cue-mem`)).filter((n) => n.startsWith("folder-")), [], "a part of the vet does not set its folder's largest");
+});

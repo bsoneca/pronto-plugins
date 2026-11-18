@@ -331,6 +331,7 @@ if [ "$1" = vet ] && [ "$CUE_VETTED" != off ] && [ -f "$vetted" ]; then
       echo "cue: vet of ${folder:-.}: $skipped packages passed before with these same inputs; vetting only $*" >&2
       # A part of the vet: its peak is not what the whole vet holds, so it teaches the claim nothing.
       learned=/dev/null
+      cores=/dev/null
     fi
   else
     plan=

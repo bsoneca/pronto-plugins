@@ -109,7 +109,13 @@ EOF2
 
 # The live pids of the pool's holders (slot-<n> and job-<pid> folders): a cue under one was admitted.
 holders=" "
-for p in ${CUE_WATCHDOG_POOLS:-${STACK_POOL:-} /tmp/pronto-stacks $HOME/.cache/pronto-stacks}; do
+if [ -n "${CUE_WATCHDOG_POOLS:-}" ]; then
+  # shellcheck disable=SC2086
+  set -- $CUE_WATCHDOG_POOLS
+else
+  set -- "${STACK_POOL:-/tmp/pronto-stacks}" /tmp/pronto-stacks "$HOME/.cache/pronto-stacks"
+fi
+for p in "$@"; do
   for f in "$p"/slot-*/pid "$p"/job-*/pid; do
     h=$(cat "$f" 2>/dev/null) || continue
     [ "${h:-0}" -gt 1 ] 2>/dev/null && kill -0 "$h" 2>/dev/null && holders="$holders$h "
