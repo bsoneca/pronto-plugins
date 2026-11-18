@@ -968,8 +968,9 @@ await anon.dispose();
 await browser.close();
 // The verdict as data (scenarios/verdict.ts), for a caller that must not parse the line below.
 const verdictFile = Deno.env.get("SCENARIOS_VERDICT");
-if (verdictFile) writeVerdict(verdictFile, { passed: (shared ? ran.length : runnable.length) - failed.length, cached: sel.cached.length, byOtherLane: shared ? sel.run.length - ran.length : 0, skipped: skipped.length, failed: failed.length });
-console.log(`scenarios: ${(shared ? ran.length : runnable.length) - failed.length} passed (${sel.cached.length} cached${shared ? `, ${sel.run.length - ran.length} run by another lane` : ""}${skipped.length ? `, ${skipped.length} skipped` : ""}), ${failed.length} failed, in ${Math.round((Date.now() - t0) / 1000)}s`);
+// Passed counts the scenarios this run ran and passed; those cached are counted apart, never as passed again.
+if (verdictFile) writeVerdict(verdictFile, { passed: ran.length - failed.length, cached: sel.cached.length, byOtherLane: shared ? sel.run.length - ran.length : 0, skipped: skipped.length, failed: failed.length });
+console.log(`scenarios: ${ran.length - failed.length} passed (${sel.cached.length} cached${shared ? `, ${sel.run.length - ran.length} run by another lane` : ""}${skipped.length ? `, ${skipped.length} skipped` : ""}), ${failed.length} failed, in ${Math.round((Date.now() - t0) / 1000)}s`);
 if (pageErrors.length) console.log(`page errors:\n${pageErrors.join("\n")}`);
 if (flaked.length) console.log(`flakes under load: ${flaked.join(", ")}`);
 if (unmarked.length) throw new AggregateError(unmarked, `flake filing threw (the board refused, a marker not written, or git): ${unmarked.map(String).join("; ")}`);
