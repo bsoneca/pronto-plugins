@@ -6,7 +6,7 @@ async function filing(run, github = false) {
   const marks = await Deno.makeTempDir();
   const said = [];
   try {
-    const r = await fileFlake({ id: "demo", cmd: "board", args: [], marks, run, github, say: (l) => said.push(l) }).then((r) => ({ threw: false, filed: r.filed }), () => ({ threw: true, filed: null }));
+    const r = await fileFlake({ id: "demo", cmd: "board", args: [], marks, run, github, say: (l) => said.push(l) }).then((r) => ({ threw: false, filed: r.filed, error: null }), (e) => ({ threw: true, filed: null, error: e.message }));
     const marker = await Deno.readTextFile(`${marks}/demo`).catch(() => null);
     return { ...r, marker, said };
   } finally { await Deno.remove(marks, { recursive: true }); }

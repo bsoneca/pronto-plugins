@@ -958,7 +958,7 @@ if (!retry && !shared && !pageErrors.length && ran.length > 1) {
     if (await r.run()) { console.log(`✗ ${id} fails alone too: not a flake`); continue; }
     flaked.push(id);
     console.log(`⚠ ${id} flaked under load: failed beside ${Math.min(spec.parallel, ran.length) - 1} others, passed run alone`);
-    // A marker that could not be written (flakes.ts) is thrown after the report below, not before it.
+    // A filing that failed (flakes.ts: the board refused, or a marker could not be written) is thrown after the report below, not before it.
     await fileFlake(id).catch((e) => unmarked.push(e));
   }
 }
@@ -968,7 +968,7 @@ await browser.close();
 console.log(`scenarios: ${(shared ? ran.length : runnable.length) - failed.length} passed (${sel.cached.length} cached${shared ? `, ${sel.run.length - ran.length} run by another lane` : ""}${skipped.length ? `, ${skipped.length} skipped` : ""}), ${failed.length} failed, in ${Math.round((Date.now() - t0) / 1000)}s`);
 if (pageErrors.length) console.log(`page errors:\n${pageErrors.join("\n")}`);
 if (flaked.length) console.log(`flakes under load: ${flaked.join(", ")}`);
-if (unmarked.length) throw new AggregateError(unmarked, `flake filing threw (a marker not written, or git): ${unmarked.map(String).join("; ")}`);
+if (unmarked.length) throw new AggregateError(unmarked, `flake filing threw (the board refused, a marker not written, or git): ${unmarked.map(String).join("; ")}`);
 if (failed.length || pageErrors.length) Deno.exit(1);
 
 // Files a flake once a week per scenario (a marker under ~/.cache/pronto/flakes/<app>); FLAKES_FILE=0 files none.
@@ -983,8 +983,8 @@ async function fileFlake(id: string) {
   const repo = new TextDecoder().decode(top.stdout).trim(), commit = new TextDecoder().decode(head.stdout).trim();
   const run = Deno.env.get("GITHUB_RUN_ID") ? `${Deno.env.get("GITHUB_SERVER_URL")}/${Deno.env.get("GITHUB_REPOSITORY")}/actions/runs/${Deno.env.get("GITHUB_RUN_ID")}` : "a local run";
   const [cmd, ...args] = spec.flakes.file;
-  // Filing is bookkeeping (flakes.ts, PRONTO-649): a board that refuses is said and warned, never thrown. The flaked
-  // scenario stays failed, so this run exits 1 either way; the unwritten marker makes the next run try again.
+  // A board that refuses is said and warned, then thrown (flakes.ts), and the runner throws it after its report: a flake
+  // that is never filed is lost. The unwritten marker makes the next run try again.
   await file({
     id, cmd: cmd === "deno" ? Deno.execPath() : cmd, marks,
     args: [...args, repo, "--app", app, "--bug", "true", "--priority", spec.flakes.priority,
