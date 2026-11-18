@@ -451,22 +451,25 @@ async function reapDeadClaims(): Promise<void> {
 // A slot asked for by number is not waited for when its holder is the asker or above it.
 export const heldByAncestor = (holder: number, lineage: number[]) => holder > 0 && lineage.includes(holder);
 // A process and its parents, nearest first: one ps of the whole table, not one per level (stops at
-// init or a loop). Without ps (a sandbox), the process alone.
-const lineage = async (pid: number) => {
+// init or a loop). Lenient (the default): without ps (a sandbox) the process alone. Strict: a ps that fails or a table
+// that cannot be read throws, for a caller that must know whose process this is (rehearse's release attribution).
+export const ancestry = async (pid: number, strict = false) => {
   const out = [pid];
   try {
-    const { stdout } = await new Deno.Command("ps", { args: ["-A", "-o", "pid=,ppid="], stdout: "piped", stderr: "null" }).output();
+    const { success, stdout } = await new Deno.Command("ps", { args: ["-A", "-o", "pid=,ppid="], stdout: "piped", stderr: "null" }).output();
+    if (!success) throw new Error("ps failed");
     const parent = new Map<number, number>();
     for (const l of new TextDecoder().decode(stdout).split("\n")) {
       const [p, pp] = l.trim().split(/\s+/).map(Number);
       if (p > 0) parent.set(p, pp);
     }
+    if (strict && !parent.has(pid)) throw new Error(`process ${pid} is not in the process table`);
     for (let p = pid; out.length < 64;) {
       const up = parent.get(p) ?? 0;
       if (!(up > 1) || out.includes(up)) break;
       out.push(up); p = up;
     }
-  } catch { /* alone */ }
+  } catch (e) { if (strict) throw e; /* alone */ }
   return out;
 };
 // The live holder among the processes above a claim (0: none): a claim with one is nested, and its cores are not waited for.
@@ -476,20 +479,20 @@ export async function claim(pid?: number, what?: string, weight?: number, wait?:
 export async function claim(pid: number, what: string, weight: number, wait: false, job?: boolean, mem?: number): Promise<Slot | undefined>;
 export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight = Number(Deno.env.get("STACK_WEIGHT") ?? weights.stack), wait = true, job = false, mem = 0): Promise<Slot | undefined> {
   await Deno.mkdir(pool, { recursive: true });
-  const ancestry = await lineage(pid);
+  const lineage = await ancestry(pid);
   // STACK_SLOT=<n> names the slot of the command this process runs under (tests/slot.ts <command>): a
   // claim for that number from the command itself would wait for ever, its holder above it. Before the
   // ticket, so the head of the line is never a claim that cannot be admitted.
   if (!job && asked) {
     const held = await holder(`slot-${asked}`);
-    if (heldByAncestor(held, ancestry) && await alive(held)) {
+    if (heldByAncestor(held, lineage) && await alive(held)) {
       throw new Error(`slot ${asked} (STACK_SLOT) is held by ${held}, this process or one above it: ${what} runs on the slot it was given and takes none of its own, so it is not run under tests/slot.ts (verify@local takes its own slot: run it directly)`);
     }
   }
   // A claim is nested when a live holder is above it: by the process tree (not this process, whose
   // own slot a rehearsal's lanes sit beside), or by the environment when the tree was lost (a daemon):
   // STACK_JOB, the job that ran it, and for a job STACK_SLOT, its slot.
-  const above = [...ancestry.slice(1), Number(Deno.env.get("STACK_JOB") ?? 0), job && asked ? await holder(`slot-${asked}`) : 0];
+  const above = [...lineage.slice(1), Number(Deno.env.get("STACK_JOB") ?? 0), job && asked ? await holder(`slot-${asked}`) : 0];
   const live: number[] = [];
   let insideCue = false;
   for await (const e of Deno.readDir(pool)) {

@@ -16,9 +16,10 @@ copy by hand from `apps/brawl-chess` (bsoneca/pronto's AGENTS.md, "Tests are dat
 | `tests/scenarios/select.ts` | which scenarios the runner runs: their inputs as at their last green run |
 | `tests/scenarios/early.ts` | a promise the runner starts before the step that awaits it, marked handled |
 | `tests/scenarios/flakes.ts` | files a flake on the board; a board that refuses is warned, never the run's failure |
+| `tests/scenarios/verdict.ts` | a run's verdict as data (`SCENARIOS_VERDICT=<file>`): the counts a caller reads instead of the summary line |
 | `tests/slow.ts` | the throttling a slowed scenario's pages get, as a preview's |
 
-The last six go only to an app that runs scenarios (it has `tests/scenarios.ts`).
+The last seven go only to an app that runs scenarios (it has `tests/scenarios.ts`).
 
 An app keeps only its own: `tests/unit/suites.cue`, `tests/unit/registry.js`, `tests/unit/probes.js`,
 its cases and its scenarios, and, where its scenarios need them:
