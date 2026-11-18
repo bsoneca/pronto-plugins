@@ -98,6 +98,16 @@ A web hatch is a host-DOM module (three.js, a canvas, Web Audio) that the phone 
 
 `secret` defaults to `android-release-signing`; `project` is the Secret Manager project. With `release`, `pronto-android` writes `android/sign-release.sh` (none without it). Run `sh android/sign-release.sh` signed in to gcloud: it reads the secret's latest version with your own gcloud (`ANDROID_SIGNING_PROJECT` and `ANDROID_SIGNING_SECRET` override the names), writes the keystore to a mode-600 temporary file removed on exit, exports the three variables, runs Gradle as `build@android` does (the app's mise), checks the APK with the SDK's `apksigner verify --print-certs` and prints the signer's SHA-256. That fingerprint is what `signing` lists, so the door admits the release's passkeys. It needs `gcloud` and `jq`.
 
+Or, in the SOPS form an app has used since PRONTO-155, the key is a Secret in a SOPS file (age), by path from `android/`:
+
+```json
+{"release": {"file": "secrets.mac.enc.yaml", "secret": "android-release-signing"}}
+```
+
+`{file, secret}` and `{project, secret}` are alternatives: naming both is refused. For the SOPS form `sign-release.sh` decrypts with `tools/secrets/get.sh` at the repository's root (found with `git rev-parse --show-toplevel`) instead of gcloud. Either form passes its arguments to Gradle (`sh android/sign-release.sh -PprontoBase=<url> -PprontoVersionCode=<n> -PprontoVersionName=<x.y.z>`), runs Gradle with `--no-daemon` (a daemon would outlive the script and keep the key's password in its environment), removes the keystore on every exit path, and prints the signer's SHA-256 upper-case and colon-separated, the form `signing` and the assetlinks take.
+
+With `release`, `build@android-release` runs it: `PRONTO_ANDROID_RELEASE_BASE` (the app's released address), `PRONTO_ANDROID_VERSION_CODE` and `PRONTO_ANDROID_VERSION_NAME` are required, and the rule fails naming any that is missing. It is heavy: run it under `tests/slot.ts`.
+
 Scenario steps beyond the DOM's: `autofillService` (turns a service on, `<package>/<service>`), `launch` (another app's activity), `native` (a view of any app, found with `uiautomator dump` by `id` or `text`, then tapped with `tap` or held to `is`/`has`) and `finger` (the emulator's sensor, once a biometric prompt is up; an `open` with `unlock: true` meets its app's prompt the same way), `signUp`, `pay` (the stand-in checkout), `address`, `response` (a request the page made and what it answered), and a step's `flag`/`unless`.
 
 ## Use
