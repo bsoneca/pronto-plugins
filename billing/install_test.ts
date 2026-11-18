@@ -17,6 +17,22 @@ Deno.test("an app gets billing in its own package, and keeps its spec", async ()
   eq(spec.includes(`owner:  "${"o".repeat(43)}"`), true, "the owner");
   eq(spec.includes(`_billingTrialMigration: "billing_03"`), true, "the trial's migration is named");
   for (const f of ["billing/service.ts", "billing/broker/main.ts", "billing/billing.nu", "pronto/billing.cue"]) await Deno.stat(`${app}/${f}`);
+  // Every module the broker's main.ts reaches (static or dynamic import, not the vendored driver) is
+  // installed and in the broker image's copy list, or the broker fails at start (store.ts, PRONTO-371).
+  const reached = new Set<string>(), todo = ["billing/broker/main.ts"];
+  for (let f = todo.pop(); f; f = todo.pop()) {
+    // rules.ts is the app's generate's, from billing_rules.cue, not the installer's.
+    if (reached.has(f) || f === "billing/rules.ts") continue;
+    reached.add(f);
+    const dir = f.replace(/[^/]+$/, "");
+    for (const m of (await Deno.readTextFile(`${app}/${f}`)).matchAll(/(?:from|import\()\s*["'](\.{1,2}\/[^"']+\.ts)["']/g)) {
+      todo.push(new URL(m[1], `file:///${dir}`).pathname.slice(1));
+    }
+  }
+  for (const f of reached) {
+    await Deno.stat(`${app}/${f}`);
+    if (f.startsWith("billing/broker/")) eq(plugin.includes(`"${f}"`), true, `${f} is in the broker image's copy list`);
+  }
   await Deno.writeTextFile(`${app}/billing_spec.cue`, spec + "// the app's own\n");
   await Deno.writeTextFile(`${app}/billing_plugin.cue`, "edited\n");
   await install(app);
