@@ -20,11 +20,22 @@
 # its own resident memory. A cue run by a cue is its parent's: it claims nothing. CUE_BUDGET=off
 # runs every cue at once.
 #
-# A claimed evaluation weighs cores too (an evaluation keeps 1.5-6 of them busy, and on 2026-11-06
+# A claimed evaluation weighs cores too (an evaluation keeps 1.5-9 of them busy, and on 2026-11-06
 # 13.5 of 15 weight held went with a load average of 104-187): the cores it kept busy on average
-# the last time, learned beside its peak (<id>.cores), 3 the first time (STACK_UNKNOWN_CORES), never
-# above the budget. Inside a gate, a rehearsal or a stack (a holder above it) it is admitted at
-# once, its weight added to the load; run by hand it waits for cores in line like any job.
+# the last time, learned beside its peak (<id>.cores, from slot.ts's --cores-learn, or from time on
+# the direct path), rounded up to half a core and at least 1. One never seen weighs what the largest
+# of its folder did (folder-<id>.cores), else CUE_UNKNOWN_CORES (4). Never above CUE_MAX_CORES (7:
+# the budget less a rehearsal and its Premium lane, so one cue and a rehearsal fit together) or the
+# budget (STACK_BUDGET, else every core but STACK_RESERVE, 3), and GOMAXPROCS is set to that cap
+# (unless set), so what it keeps busy cannot pass what it claimed by much. It is one ticket in the
+# pool's cores line and in its cue lock (slot.ts --weight beside --mem), admitted when both admit,
+# holding nothing while it waits. Inside a gate, a rehearsal or a stack (a holder above it) it
+# weighs none and waits only for the lock, its cores counted in the holder's. One that kept 2 cores
+# busy for 30 CPU seconds (<id>.secs) is claimed even when it held under CUE_DIRECT_GB.
+#
+# A cue started by a mise shim, with no machine wrapper on the PATH before it (a shell that has
+# the shims and not mise's env._.path), is started again through `mise exec`, which puts this
+# folder first, once (CUE_BUDGET_VIA_MISE).
 #
 # Every claimed vet and every export leaves one line in ~/.cache/pronto/cue-cache.log (rotated at 10 MB to
 # cue-cache.log.1), tab-separated: epoch seconds, kind (vet|export), outcome (hit, partial, miss or
@@ -38,14 +49,22 @@ self=$(cd "$(dirname "$0")" && pwd)
 # mise, which puts a wrapper first again); found once, and handed down.
 real=$CUE_BUDGET_REAL
 if [ -z "$real" ]; then
+  sawshim=
   set -f; IFS=:
   for d in $PATH; do
-    case "$d" in */mise/shims) continue ;; esac
+    case "$d" in */mise/shims) [ -x "$d/cue" ] && sawshim=1; continue ;; esac
     [ -f "$d/cue" ] && [ -x "$d/cue" ] || continue
     [ "$(head -c 2 "$d/cue")" = '#!' ] && head -n 2 "$d/cue" | grep -q "^# cue, through the machine's memory budget" && continue
     real=$d/cue; break
   done
   set +f; unset IFS
+  # Only a shim has cue: mise's env, which puts this folder and the tool's cue ahead of the shims,
+  # is one `mise exec` away. Once: a mise that finds no cue either must not run this for ever.
+  if [ -z "$real" ] && [ -n "$sawshim" ] && [ -z "$CUE_BUDGET_VIA_MISE" ]; then
+    mise=$(command -v mise 2>/dev/null) || mise=
+    [ -n "$mise" ] || mise=$(readlink "$HOME/.local/share/mise/shims/cue" 2>/dev/null)
+    [ -x "$mise" ] && CUE_BUDGET_VIA_MISE=1 exec "$mise" exec -- cue "$@"
+  fi
   [ -n "$real" ] || { echo "cue: no cue on PATH beside the budget's wrappers ($self)" >&2; exit 127; }
   export CUE_BUDGET_REAL="$real"
 fi
@@ -122,6 +141,8 @@ where=$(printf '%s\n' "$where" | sed 's|\.pronto-derive-[0-9a-f]*|.pronto-derive
 first=${where%%
 *}
 key=$(tmpnorm "$first")${where#"$first"}
+# The folder, whatever its arguments: what an evaluation never seen weighs, as its siblings did.
+folderkey=$key
 for a in "$@"; do
   case "$a" in
     /*)
@@ -145,10 +166,36 @@ id=$(printf '%s' "$key" | md5 -q 2>/dev/null || printf '%s' "$key" | md5sum | cu
 learned="${HOME:-${TMPDIR:-/tmp}}/.cache/pronto/cue-mem/$id"
 mkdir -p "${learned%/*}" 2>/dev/null || learned=/dev/null
 last=$(cut -d' ' -f1 "$learned" 2>/dev/null)
-mem=$(awk -v l="${last:-}" -v unknown="${CUE_UNKNOWN_GB:-24}" -v direct="${CUE_DIRECT_GB:-1}" 'BEGIN {
+cores=$learned.cores; fcores=${learned%/*}/folder-$(printf '%s' "$folderkey" | md5 -q 2>/dev/null || printf '%s' "$folderkey" | md5sum | cut -d' ' -f1).cores
+if [ "$learned" = /dev/null ]; then cores=/dev/null; fcores=/dev/null; fi
+ownc=$(cat "$cores" 2>/dev/null); ownsecs=$(cat "$learned.secs" 2>/dev/null)
+mem=$(awk -v l="${last:-}" -v unknown="${CUE_UNKNOWN_GB:-24}" -v direct="${CUE_DIRECT_GB:-1}" -v c="${ownc:-0}" -v s="${ownsecs:-0}" 'BEGIN {
   if (l == "") { print unknown; exit }
-  if (l + 0 < direct + 0) { print 0; exit }
-  printf "%.1f\n", l * 1.25 }')
+  if (l + 0 < direct + 0 && !(c + 0 >= 2 && s + 0 >= 30)) { print 0; exit }
+  m = l * 1.25; if (m < 0.1) m = 0.1
+  printf "%.1f\n", m }')
+# What a claimed evaluation weighs: its cores, as above.
+ncpu=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null)
+budget=${STACK_BUDGET:-$(( ${ncpu:-4} - ${STACK_RESERVE:-3} ))}
+foldermax=$(cat "$fcores" 2>/dev/null)
+weight=$(awk -v own="$ownc" -v folder="$foldermax" -v unknown="${CUE_UNKNOWN_CORES:-4}" -v max="${CUE_MAX_CORES:-7}" -v budget="$budget" 'BEGIN {
+  c = (own != "") ? own : (folder != "") ? folder : unknown
+  c = c * 2; c = (c == int(c) ? c : int(c) + 1) / 2
+  if (c < 1) c = 1
+  cap = (max + 0 < budget + 0) ? max : budget
+  if (cap < 1) cap = 1
+  if (c > cap) c = cap
+  printf "%s %d\n", c, (cap == int(cap) ? cap : int(cap) + 1) }')
+gomax=${GOMAXPROCS:-${weight#* }}; weight=${weight%% *}
+# foldermax: this evaluation's cores into its folder's largest, for the ones never seen there.
+foldermax() {
+  [ "$cores" = /dev/null ] && return 0
+  new=$(cat "$cores" 2>/dev/null); [ -n "$new" ] || return 0
+  old=$(cat "$fcores" 2>/dev/null)
+  awk -v n="$new" -v o="${old:-0}" 'BEGIN { print (n + 0 > o + 0) ? n : o }' > "$fcores.$$" 2>/dev/null && mv "$fcores.$$" "$fcores" 2>/dev/null
+  rm -f "$fcores.$$" 2>/dev/null
+  return 0
+}
 
 folder=$(printf '%s\n' "$where" | sed -n 2p)
 
@@ -237,8 +284,14 @@ if [ "$mem" = 0 ]; then
   if [ -n "$measured" ] && [ "$learned" != /dev/null ]; then
     { printf '%s cue %s\n' "${measured%% *}" "$*" > "$learned.$$" && mv "$learned.$$" "$learned"
       printf '%s\n' "${measured##* }" > "$learned.secs.$$" && mv "$learned.secs.$$" "$learned.secs"; } 2>/dev/null
+    # Its cores: CPU seconds over wall seconds, from a run of 5 s or more; a failed one only raises it.
+    awk -v m="$measured" -v old="$ownc" -v failed="$code" 'BEGIN { split(m, a, " "); r = a[2]; c = a[3]
+      if (r + 0 < 5 || c + 0 <= 0) exit
+      v = c / r; if (failed != 0 && old != "" && old + 0 > v) v = old
+      printf "%.2f\n", v }' > "$learned.cores.$$" 2>/dev/null
+    if [ -s "$learned.cores.$$" ]; then mv "$learned.cores.$$" "$learned.cores" 2>/dev/null && foldermax; fi
   fi
-  rm -f "$t" "$learned.$$" "$learned.secs.$$" 2>/dev/null
+  rm -f "$t" "$learned.$$" "$learned.secs.$$" "$learned.cores.$$" 2>/dev/null
   if [ -n "$exportpath" ]; then
     took=$(printf '%s\n' "$measured" | awk '{ print $2 }')
     [ -n "$took" ] || took=$(( $(date +%s) - started ))
@@ -278,6 +331,7 @@ if [ "$1" = vet ] && [ "$CUE_VETTED" != off ] && [ -f "$vetted" ]; then
       echo "cue: vet of ${folder:-.}: $skipped packages passed before with these same inputs; vetting only $*" >&2
       # A part of the vet: its peak is not what the whole vet holds, so it teaches the claim nothing.
       learned=/dev/null
+      cores=/dev/null
     fi
   else
     plan=
@@ -292,24 +346,24 @@ if [ "$(uname)" = Linux ] && systemd-run --user --scope --quiet true 2>/dev/null
   run=systemd-run
 fi
 
-[ -z "$plan" ] && [ -z "$exportpath" ] && [ -z "$logkind" ] && exec "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --mem-learn "$learned" --cores-learn "$learned.cores" --what "cue ${folder:-.}" -- "$run" "$@"
-
+# The claim: its cores beside its memory, and no more of them used than its cap.
+export GOMAXPROCS=$gomax
 # In the background, so a signal to this wrapper reaches the claim (as above), and its pass recorded.
 if { : <&0; } 2>/dev/null; then exec 3<&0; else exec 3</dev/null; fi
-cores=$learned.cores; [ "$learned" = /dev/null ] && cores=/dev/null
 started=$(date +%s)
 if [ -n "$exportpath" ]; then
   # What cue prints, kept to store once it passed, then printed.
-  out=$(mktemp "${TMPDIR:-/tmp}/cue-export.XXXXXX") || exec "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3
-  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 >"$out" &
+  out=$(mktemp "${TMPDIR:-/tmp}/cue-export.XXXXXX") || exec "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --weight "$weight" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3
+  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --weight "$weight" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 >"$out" &
 else
-  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 &
+  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --weight "$weight" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 &
 fi
 pid=$!
 trap 'kill -TERM "$pid" 2>/dev/null' TERM INT HUP
 wait "$pid"; code=$?
 while kill -0 "$pid" 2>/dev/null; do wait "$pid"; code=$?; done
 took=$(( $(date +%s) - started ))
+foldermax
 if [ -n "$exportpath" ]; then
   exportstore "$code" "$took"
 elif [ "$code" = 0 ] && [ -n "$plan" ]; then
@@ -321,5 +375,5 @@ elif [ "$code" = 0 ] && [ -n "$plan" ]; then
 fi
 # A partial vet saved what the packages it skipped took; a miss or an unkeyed one saved nothing.
 [ "$outcome" = partial ] || saved=0
-cachelog "$logkind" "$outcome" "$took" "$saved"
+[ -n "$logkind" ] && cachelog "$logkind" "$outcome" "$took" "$saved"
 exit "$code"

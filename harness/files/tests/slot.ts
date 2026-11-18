@@ -48,10 +48,18 @@
 //
 //   Cue lock. A job that names --mem (the cue wrapper, tools/cue-budget/cue: one evaluation of tens
 //   of GB; 21 at once ran macOS out of memory on 2026-11-05) takes the cue lock: one such evaluation
-//   at a time on the machine, the rest first come first served in <pool>/cue-queue, nested or not. It
-//   weighs no cores. --mem-learn <file> writes its peak (GB) there at the end, for the wrapper's next
-//   run; --cores-learn is accepted and ignored. A job the memory watchdog (tools/cue-budget) killed
-//   under pressure, not for its own size, waits its turn again, once.
+//   at a time on the machine, the rest first come first served in <pool>/cue-queue, nested or not.
+//   --weight <n> beside --mem makes it weigh cores too (an evaluation keeps several busy: a ~9 core
+//   one ran at weight 0 on 2026-11-18): one that is not nested is then one ticket in both lines, the
+//   cores' and the cue lock's, admitted under the pool's lock only when the lock is free and the
+//   cores fit, so it holds nothing while it waits. A nested one (a holder above it) weighs none and
+//   waits for the lock behind the nested tickets older than its own only: waiting behind a top-level
+//   ticket that waits for the cores its own holder keeps would wait for ever. Without --weight a --mem
+//   job weighs none, as before. --mem-learn <file> writes its peak (GB) there at the end, for the
+//   wrapper's next run; --cores-learn <file> the cores it kept busy (the CPU seconds of the command
+//   over its seconds since it started, once it ran 5 s: a run that failed only raises it). A job the
+//   memory watchdog (tools/cue-budget) killed under pressure, not for its own size, waits its turn
+//   again, once.
 //
 //   A claim that does not wait (claim(..., false), as a rehearsal's extra lanes) is asked once, in its
 //   place in the line, and gives back no slot when it is not admitted then. The wait has no
@@ -505,15 +513,25 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
   const parent = nestedUnder(live, above);
   if (parent) weight = 0;
   const line = lineOf(parent, mem, insideCue);
+  // A cue claim that weighs cores and is not nested is one ticket in both lines (the cue lock's and the
+  // cores'), admitted only when both admit; a nested one waits for the lock behind nested tickets only.
+  const dual = line === "cue" && weight > 0;
+  const nested = line === "cue" && parent > 0;
   // A job (--weight) brings up no stack: no process-compose, no ports, no slot number.
   const compose = job ? "" : await Deno.readTextFile(`${app}/.bayt/process-compose.yaml`);
   let told = "";
   const queued = Date.now();
   const dirOf = line === "cue" ? "cue-queue" : "queue";
   const queue = `${pool}/${dirOf}`;
+  const coresQueue = `${pool}/queue`;
   const ticket = ticketOf(queued, pid);
+  // A top-level cue's ticket in the cue line is named with a `-w` the copies of this file from before it
+  // do not read (their ticket name is digits, a dash and a pid): a nested cue through one of them is
+  // not made to wait behind a ticket that waits for its own holder's cores.
+  const mine = dual ? `${ticket}-w` : ticket;
   await Deno.mkdir(queue, { recursive: true });
-  if (line !== "none") await Deno.writeTextFile(`${queue}/${ticket}`, `${weight} ${what}`);
+  await Deno.mkdir(coresQueue, { recursive: true });
+  if (line !== "none") await Deno.writeTextFile(`${queue}/${mine}`, `${weight} ${nested ? "nested=1 " : ""}${what}`);
   const minutes = Number(Deno.env.get("STACK_WAIT_MINUTES") ?? 120);
   let end = Date.now() + minutes * 60_000, fewest = Infinity, lightest = Infinity;
   // What dead postgres left, freed once a claim: the stack this claim starts may need a segment.
@@ -524,19 +542,21 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
     const got = await choosing(async () => {
       // Reclaim, at every claim: the live tickets of this claim's line older than its own (their
       // weights reserved), the dead ones freed; the live holders, the dead jobs and stale slots freed.
-      const older: { name: string; weight: number; what: string }[] = [];
-      if (line !== "none") {
-        for await (const e of Deno.readDir(queue)) {
-          const m = e.name.match(/^[0-9]+-([0-9]+)$/);
+      const scan = async (dir: string, own: string, onlyNested = false) => {
+        const found: { name: string; weight: number; what: string }[] = [];
+        for await (const e of Deno.readDir(dir)) {
+          const m = e.name.match(/^[0-9]+-([0-9]+)(?:-w)?$/);
           if (!m) continue;
-          if (!await alive(Number(m[1]))) { await Deno.remove(`${queue}/${e.name}`).catch(() => {}); continue; }
-          if (e.name >= ticket) continue;
-          const [w, ...rest] = (await Deno.readTextFile(`${queue}/${e.name}`).catch(() => "")).split(" ");
-          older.push({ name: e.name, weight: w !== "" && Number(w) >= 0 ? Number(w) : weights.stack, what: rest.join(" ") });
+          if (!await alive(Number(m[1]))) { await Deno.remove(`${dir}/${e.name}`).catch(() => {}); continue; }
+          if (e.name >= own) continue;
+          const [w, ...rest] = (await Deno.readTextFile(`${dir}/${e.name}`).catch(() => "")).split(" ");
+          const isNested = rest[0] === "nested=1";
+          if (onlyNested && !isNested) continue;
+          found.push({ name: e.name, weight: w !== "" && Number(w) >= 0 ? Number(w) : weights.stack, what: (isNested ? rest.slice(1) : rest).join(" ") });
         }
-        older.sort((x, y) => x.name < y.name ? -1 : 1);
-      }
-      const ahead = older.reduce((n, o) => n + o.weight, 0);
+        return found.sort((x, y) => x.name < y.name ? -1 : 1);
+      };
+      const older = line === "none" ? [] : await scan(queue, mine, nested);
       const where = `${ordinal(older.length + 1)} in line${older.length ? ` behind ${older.at(-1)!.what} (weight ${older.at(-1)!.weight})` : ""}`;
       const holders: { weight: number; cue: boolean; job: boolean }[] = [];
       for await (const e of Deno.readDir(pool)) {
@@ -548,10 +568,23 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
         else if (staleSlot(false, (await answering(33000 + 100 * (Number(m[2]) - 1))).length > 0)) await Deno.remove(`${pool}/${e.name}`, { recursive: true }).catch(() => {});
       }
       const { used } = held(holders);
+      // A top-level cue reserves cores only at the head of the cue line and while no cue runs: the lock lets one
+      // run at a time, so the next reserves nothing until the one running ends (a running cue's 7 and the next's
+      // 7 would hold 14 of 15, and a rehearsal would no longer fit beside one cue; three would hold 21). Its
+      // place in the cores' line is its ticket's name, which is when it asked.
+      if (dual) {
+        if (older.length === 0 && !holders.some((h) => h.cue)) await Deno.writeTextFile(`${coresQueue}/${ticket}`, `${weight} ${what}`);
+        else await Deno.remove(`${coresQueue}/${ticket}`).catch(() => {});
+      }
+      // The cores a dual ticket waits behind: its older tickets in the cores' line.
+      const ahead = line === "cue" ? (dual ? (await scan(coresQueue, ticket)).reduce((n, o) => n + o.weight, 0) : 0) : older.reduce((n, o) => n + o.weight, 0);
       const why = (s: string) => ({ why: `${where}: ${s}`, ahead: older.length, used });
       if (line === "cue") {
         const holding = holders.filter((h) => h.cue).length;
         if (!cueAdmits(older.length, holding)) return why(`the cue lock: ${holding ? "held" : "free"}, ${older.length} ahead (one cue evaluation at a time)`);
+        if (dual && !admitsCores(runnerJob(Deno.env.get("GITHUB_ACTIONS")), used, weight, ahead, budget)) {
+          return why(`weight ${used} of ${budget} held (STACK_BUDGET)${ahead ? `, ${ahead} reserved by those ahead` : ""}, this needs ${weight}`);
+        }
       } else if (!admitsCores(line === "none" || runnerJob(Deno.env.get("GITHUB_ACTIONS")), used, weight, ahead, budget)) {
         return why(`weight ${used} of ${budget} held (STACK_BUDGET)${ahead ? `, ${ahead} reserved by those ahead` : ""}, this needs ${weight}`);
       }
@@ -631,7 +664,8 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
     await new Promise((r) => setTimeout(r, 1000));
   }
   } finally {
-    if (line !== "none") await Deno.remove(`${queue}/${ticket}`).catch(() => {});
+    if (line !== "none") await Deno.remove(`${queue}/${mine}`).catch(() => {});
+    if (dual) await Deno.remove(`${coresQueue}/${ticket}`).catch(() => {});
   }
 }
 
@@ -895,10 +929,16 @@ export const watch = (slot: Slot, pc: (more: string[]) => string[], env: Record<
   return () => watcher.close();
 };
 
-// What a process holds in memory now (GB), its resident set; 0 once it is gone.
+// ps's CPU time, [[dd-]hh:]mm:ss[.cc], in seconds.
+export const cpuSeconds = (time: string): number => {
+  const m = time.trim().match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/);
+  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : 0;
+};
+// What a process holds in memory now (GB), its resident set, and the CPU seconds it has used; 0 once it is gone.
 const residentOf = async (pid: number) => {
-  const r = await new Deno.Command("ps", { args: ["-o", "rss=", "-p", String(pid)], stdout: "piped", stderr: "null" }).output().catch(() => undefined);
-  return (Number(new TextDecoder().decode(r?.stdout ?? new Uint8Array()).trim()) || 0) / 2 ** 20;
+  const r = await new Deno.Command("ps", { args: ["-o", "rss=,time=", "-p", String(pid)], stdout: "piped", stderr: "null" }).output().catch(() => undefined);
+  const [rss, time] = new TextDecoder().decode(r?.stdout ?? new Uint8Array()).trim().split(/\s+/);
+  return { gb: (Number(rss) || 0) / 2 ** 20, cpu: cpuSeconds(time ?? "") };
 };
 // Why the memory watchdog (tools/cue-budget/watchdog.sh) killed a pid, if it did: "over" (its own
 // size, past the ceiling) or "pressure" (the machine's, it the largest).
@@ -917,8 +957,9 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-learn", "--cores-
   const opt = (name: string) => opts[opts.indexOf(name) + 1];
   const mem = opts.includes("--mem") ? Number(opt("--mem")) : 0;
   const learn = opts.includes("--mem-learn") ? opt("--mem-learn") : undefined;
-  // --cores-learn is accepted and ignored: nothing weighs cores by what they used any more.
-  const weight = Number(opts.includes("--weight") ? opt("--weight") : Deno.env.get("STACK_WEIGHT") ?? (mem > 0 ? 0 : weights.stack));
+  const coresLearn = opts.includes("--cores-learn") ? opt("--cores-learn") : undefined;
+  // A --mem job without --weight weighs no cores (the wrappers from before it did not name one).
+  const weight = Number(opts.includes("--weight") ? opt("--weight") : mem > 0 ? 0 : Deno.env.get("STACK_WEIGHT") ?? weights.stack);
   if (!cmd.length || !(mem >= 0) || !(weight > 0 || (weight === 0 && mem > 0))) {
     console.error('usage: deno run -A tests/slot.ts --weight <n> [--mem <GB>] [--mem-learn <file>] --what "<label>" -- <command...>');
     Deno.exit(2);
@@ -938,16 +979,21 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-learn", "--cores-
       Deno.exit(130);
     });
   }
-  let peak = 0, status: Deno.CommandStatus;
+  let peak = 0, cpu = 0, wall = 0, status: Deno.CommandStatus;
   for (let attempt = 1; ; attempt++) {
     slot = await claim(Deno.pid, what, weight, true, true, mem);
     const c = child = new Deno.Command(cmd[0], { args: cmd.slice(1), env: { STACK_JOB: String(Deno.pid) }, stdin: "inherit", stdout: "inherit", stderr: "inherit" }).spawn();
-    // What it holds, every second, for its peak: the next run's --mem and a watchdog kill's verdict.
+    // From its spawn: the wait for the lock and the cores is not its time.
+    const spawned = Date.now();
+    cpu = 0;
+    // What it holds, every second, for its peak: the next run's --mem and a watchdog kill's verdict; and the
+    // CPU seconds it has used, for the cores it keeps busy.
     let running = true;
-    const sample = async () => { const rss = await residentOf(c.pid); if (running) peak = Math.max(peak, rss); };
-    const sampler = learn ? (sample(), setInterval(sample, 1000)) : undefined;
+    const sample = async () => { const r = await residentOf(c.pid); if (running) { peak = Math.max(peak, r.gb); cpu = Math.max(cpu, r.cpu); } };
+    const sampler = learn || coresLearn ? (sample(), setInterval(sample, 1000)) : undefined;
     status = await c.status;
     running = false;
+    wall = (Date.now() - spawned) / 1000;
     clearInterval(sampler);
     child = undefined;
     slot.release();
@@ -966,6 +1012,13 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-learn", "--cores-
     const before = status.success ? 0 : Number((await Deno.readTextFile(learn).catch(() => "")).split(" ")[0]) || 0;
     await Deno.mkdir(learn.replace(/\/[^/]*$/, ""), { recursive: true }).catch(() => {});
     await Deno.writeTextFile(learn, `${round(Math.max(peak, before))} ${what}\n`).catch(() => {});
+  }
+  // The cores it kept busy on average, for the next run's --weight: only from a run of 5 s or more (a
+  // shorter one measures its start), and a run that failed only raises it, as the peak is.
+  if (coresLearn && wall >= 5 && cpu > 0) {
+    const before = status.success ? 0 : Number((await Deno.readTextFile(coresLearn).catch(() => "")).trim()) || 0;
+    await Deno.mkdir(coresLearn.replace(/\/[^/]*$/, ""), { recursive: true }).catch(() => {});
+    await Deno.writeTextFile(coresLearn, `${Math.round(Math.max(cpu / wall, before) * 100) / 100}\n`).catch(() => {});
   }
   Deno.exit(status.code);
 }

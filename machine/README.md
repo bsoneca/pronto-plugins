@@ -10,17 +10,20 @@ not slimmed to fit: the tooling makes room for them.
 What one Mac holds so that every app's specs, stacks and gates share it (PRONTO-484, formerly
 bsoneca/pronto's `tools/cue-budget` and `tools/sysv-shm`). It works on any pronto runtime, upstream
 bonisoft3/pronto's too: nothing in an app or in the runtime has to front `cue`, because the
-installed wrapper stands first on every mise PATH on the machine. pronto-fork's runtime still carries
+installed wrapper stands first on the PATH of every `mise exec`, `mise run` and mise-activated shell.
+A mise shim (`~/.local/share/mise/shims/cue`) does not: it runs the tool's own `cue`, not the PATH's,
+so the wrapper, run first by a shell that has the shims, starts it again through `mise exec` once. pronto-fork's runtime still carries
 the same wrapper at its root (`cue`, with `cue-budget/slot.ts`); the two claim once between them.
 `slot.ts` here is the harness's (`harness/files/tests/slot.ts`, a link), the same file as every app's.
 
-- **The budget** (admission). `cue` here stands first on every mise PATH on the Mac: the installer
-  puts its folder in the global mise config's `env._.path`, which mise puts ahead of every tool
-  (the runtime's wrapper behind it sees the claim already made and passes the call through). So every `cue` an app's tooling runs through mise (bayt's generate rules,
+- **The budget** (admission). `cue` here stands first on the PATH mise builds on the Mac (`mise exec`,
+  `mise run`, an activated shell, not a shim): the installer puts its folder in the global mise
+  config's `env._.path`, which mise puts ahead of every tool (the runtime's wrapper behind it sees
+  the claim already made and passes the call through). So every `cue` an app's tooling runs through mise (bayt's generate rules,
   `tools run-cue`, `run-mise exec -- cue`, lint's `cue vet`, unit tests and drivers, the Studio
   builder, a Studio user's own repository, the CI runners on this Mac) comes through it. A command
   that evaluates (`vet`, `export`, `eval`, `def`, `cmd`, `trim`) claims its memory from the memory
-  budget of the machine-wide pool, `tests/slot.ts --mem` (the same slot.ts every app has, copied
+  budget of the machine-wide pool, `tests/slot.ts --mem --weight` (the same slot.ts every app has, copied
   beside the wrapper), and waits its turn in line when the memory is spoken for. The claim is the
   evaluation's peak the last time, a quarter more, learned per repository, folder and arguments in
   `~/.cache/pronto/cue-mem` (24 GB the first time, `CUE_UNKNOWN_GB`); one that held under 1 GB
@@ -31,12 +34,19 @@ the same wrapper at its root (`cue`, with `cue-budget/slot.ts`); the two claim o
   first is admitted on an empty budget whatever it needs, so a spec larger than the budget still
   runs, alone. While it runs, its holder records its resident memory every second and raises its
   claim to it. A cue weighs the cores it kept busy too (2026-11-06: 13.5 of 15 weight held at a load average
-  of 104-187, since a cue claimed memory and no cores): the average the last time, learned beside the
-  peak (`<id>.cores`), 3 the first time (`STACK_UNKNOWN_CORES`), never above the budget. Inside a gate,
-  a rehearsal or a stack (a live holder above it in the process tree, or named by `STACK_JOB` /
-  `STACK_SLOT`) it is admitted at once, never waiting on its own holder, and its weight is added to
-  the load; run by hand it waits for cores in line. It does not wait for a release (memory counts the
-  release's holders too, and its tickets are ahead). `CUE_BUDGET=off` skips the budget for one command.
+  of 104-187, since a cue claimed memory and no cores): the average the last time (CPU seconds over
+  wall seconds), learned beside the peak (`<id>.cores`, written by slot.ts's `--cores-learn`, or from
+  `time` for one run at once), rounded up to half a core and at least 1. One never seen weighs the
+  largest of its folder (`folder-<id>.cores`), else 4 (`CUE_UNKNOWN_CORES`). It never weighs more than
+  7 (`CUE_MAX_CORES`: the budget less a rehearsal and its Premium lane, so one cue and a rehearsal fit
+  together) or the budget, and runs with `GOMAXPROCS` at that cap, so it cannot keep many more cores
+  busy than it claimed. The claim is one ticket in the pool's cores line and in the cue lock,
+  admitted when both admit, holding nothing while it waits. One that kept 2 cores busy for 30 CPU
+  seconds is claimed even when it held under 1 GB. Inside a gate, a rehearsal or a stack (a live
+  holder above it in the process tree, or named by `STACK_JOB` / `STACK_SLOT`) it is admitted at
+  once, never waiting on its own holder, and weighs none: its cores are counted in the holder's. It
+  does not wait for a release (memory counts the release's holders too, and its tickets are ahead).
+  `CUE_BUDGET=off` skips the budget for one command.
 - **Only what changed is vetted** (`vetted.ts`). Every app's lint runs `cue vet -c ./...`, and the
   same CUE used to be evaluated again in each worktree's gate, on each ci runner that checked the pull
   request, on main after the merge, and in every pull request that touched none of it: for aprende,
@@ -70,7 +80,9 @@ the same wrapper at its root (`cue`, with `cue-budget/slot.ts`); the two claim o
   (`kern.memorystatus_level`) is under 10 % and swap in use over 8 GB, the largest `cue`, one per
   pass. Each kill is a line in `~/Library/Logs/pronto/cue-watchdog.log` (BRT, pid, size, reason,
   level, swap, folder, command). A cue killed under pressure, not for its own size, is put in line
-  again once by its holder, with its peak as its claim, so it is still evaluated.
+  again once by its holder, with its peak as its claim, so it is still evaluated. A `cue` that no
+  pool holder is above, and that used over 200 % CPU (`CUE_WATCHDOG_HOT_PCT`) in two passes in a row,
+  is moved to background priority (`taskpolicy -b`) and logged, never killed.
 
 - **Shared memory** (`sysv-shm.sh`, as root). Every postgres cluster takes one System V segment and
   macOS allows 32 on the whole machine; a full machine of stacks passes that, and the next database
@@ -89,4 +101,4 @@ PATH, HOME and pool: what passes through at once, what claims, what it learns, s
 wrappers on one PATH, and what vet and export replay.
 
 A `cue` run outside mise (a shell without mise, a binary called by path) is not budgeted; the
-watchdog still sees it.
+watchdog still sees it, and slows it when it keeps many cores busy.
