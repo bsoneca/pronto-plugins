@@ -321,23 +321,31 @@ Deno.test("the door flag is read for the reader and told to the broker; a flag t
   const missing = await absent.ask(absent.make({ doorFlag: "stripe_door" }), "/billing/trial");
   eq([missing.ok, absent.broker.length], [false, 0], "a flag that is not there fails loudly");
   await missing.body?.cancel();
-  // A lookup that fails in transit says no word: the broker is asked and takes its own way.
+  // A lookup that fails in transit takes the door: the airlock records the ledger.
   const warned: string[] = [];
   const warn = console.warn;
   console.warn = (...a: unknown[]) => { warned.push(a.join(" ")); };
   try {
     const down = trialStage({ door: () => new Response("", { status: 503 }) });
     const failed = await down.ask(down.make({ doorFlag: "stripe_door" }), "/billing/trial");
-    eq([failed.status, down.broker.length, "door" in down.broker[0].body], [200, 1, false], "flagd 5xx: no door word, the call reaches the broker");
+    eq([failed.status, down.broker.map((b) => b.body.door)], [200, [true]], "flagd 5xx: through the door");
     await failed.body?.cancel();
     const gone = trialStage({ door: () => Promise.reject(new TypeError("connection refused")) as unknown as Response });
     const reached = await gone.ask(gone.make({ doorFlag: "stripe_door" }), "/billing/trial");
-    eq([reached.status, gone.broker.length, "door" in gone.broker[0].body], [200, 1, false], "flagd fetch rejects: same");
+    eq([reached.status, gone.broker.map((b) => b.body.door)], [200, [true]], "flagd fetch rejects: same");
     await reached.body?.cancel();
+    const cut = trialStage({ door: () => new Response(new ReadableStream({ pull(c) { c.error(new TypeError("body interrupted")); } }), { status: 200 }) });
+    const interrupted = await cut.ask(cut.make({ doorFlag: "stripe_door" }), "/billing/trial");
+    eq([interrupted.status, cut.broker.map((b) => b.body.door)], [200, [true]], "a 200 whose body cannot be read: same");
+    await interrupted.body?.cancel();
+    const garbled = trialStage({ door: () => new Response("{not json", { status: 200 }) });
+    const malformed = await garbled.ask(garbled.make({ doorFlag: "stripe_door" }), "/billing/trial");
+    eq([malformed.ok, garbled.broker.length], [false, 0], "a body that is not JSON fails");
+    await malformed.body?.cancel();
   } finally {
     console.warn = warn;
   }
-  eq(warned.length, 2, "one warning each");
+  eq(warned.length, 3, "one warning each");
   eq(warned.every((w) => w.includes("stripe_door") && !w.includes(ANA_ID) && !w.includes("Bearer")), true, "names the flag, no account or token");
   const odd = trialStage({ door: () => Response.json({ value: "yes" }) });
   const bad = await odd.ask(odd.make({ doorFlag: "stripe_door" }), "/billing/trial");

@@ -755,6 +755,9 @@ Deno.test("a probe reads the account at Stripe and writes nothing", async () => 
   assertEquals(asked.some((s) => s.path === "/v1/customers/search"), true, "the account's customers read");
   assertEquals(fake.held.customers.size, customers, "no customer made");
   assertEquals((await post("/probe", { tenant: A })).status, 400, "an account is named");
+  for (const door of [true, false]) {
+    assertEquals(await (await post("/probe", { tenant: A, account: ANA, door })).json(), { ok: true, direct: false, door }, "the tenant's word is said back");
+  }
 });
 
 Deno.test("the stand-in is reached through its door: every call in its ledger, a replayed key answered from it", async () => {
