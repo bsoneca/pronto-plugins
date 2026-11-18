@@ -13,6 +13,7 @@ Deno.test("an app gets billing in its own package, and keeps its spec", async ()
   const plugin = await Deno.readTextFile(`${app}/billing_plugin.cue`);
   eq(plugin.split("\n")[1], "package shop", "the program's package");
   eq(plugin.includes("__PACKAGE__"), false, "no placeholder left");
+  eq(plugin.includes("if _billingDoorFlag != \"\" {BILLING_DOOR_FLAG: _billingDoorFlag}"), true, "the door flag reaches the billing service's environment");
   const spec = await Deno.readTextFile(`${app}/billing_spec.cue`);
   eq(spec.includes(`owner:  "${"o".repeat(43)}"`), true, "the owner");
   eq(spec.includes(`_billingTrialMigration: "billing_03"`), true, "the trial's migration is named");
