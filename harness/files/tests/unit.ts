@@ -140,11 +140,8 @@ function persist(path: string, content: string | null, prune = false) {
   const child = new Deno.Command(Deno.execPath(), { args: ["eval", code], stdin: "piped", stdout: "null", stderr: "piped" }).spawn();
   const w = child.stdin.getWriter();
   return w.write(new TextEncoder().encode(content ?? "")).then(() => w.close()).then(() => child.output()).then((o) => {
-    if (o.success) return;
-    const why = `could not ${content === null ? "remove" : "keep"} ${rel(path)}: ${new TextDecoder().decode(o.stderr)}`;
-    // A green record that cannot be removed would answer a later run as cached green: fail instead.
-    if (content === null) throw new Error(why);
-    console.warn(why);
+    // A record that cannot be removed or written would mislead the next selection: fail instead.
+    if (!o.success) throw new Error(`could not ${content === null ? "remove" : "keep"} ${rel(path)}: ${new TextDecoder().decode(o.stderr)}`);
   });
 }
 
@@ -190,11 +187,12 @@ if (!observedTo) {
   }).spawn());
   const codes: number[] = [];
   for (const child of children) {
-    if (shares === 1) { codes.push((await child.status).code); continue; }
+    // A child killed by a signal has code 1 or none: success is the verdict.
+    if (shares === 1) { const s = await child.status; codes.push(s.success ? 0 : (s.code || 1)); continue; }
     const o = await child.output();
     await Deno.stdout.write(o.stdout);
     await Deno.stderr.write(o.stderr);
-    codes.push(o.code);
+    codes.push(o.success ? 0 : (o.code || 1));
   }
   const code = codes.find((c) => c !== 0) ?? 0;
   if (code === 0 && base) {
@@ -312,7 +310,10 @@ const fnOf = (name: string): (...a: any[]) => any => {
   if (typeof f !== "function") throw new Error(`no function ${name}`);
   return f;
 };
-const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+// A non-finite number would stringify as null: each becomes a distinct marker, so it equals nothing.
+let nonFinite = 0;
+const finite = (_: string, v: unknown) => typeof v === "number" && !Number.isFinite(v) ? `non-finite#${nonFinite++}` : v;
+const same = (a: unknown, b: unknown) => JSON.stringify(a, finite) === JSON.stringify(b, finite);
 // What of `got` `want` names (a `holds` check): an object's fields named, a list's elements one by
 // one when as many, else `got` whole.
 function named(got: unknown, want: unknown): unknown {
@@ -375,7 +376,7 @@ for (const [name, c] of mine) {
       }
       const held = resolveArg(step.holds, now, kept);
       if ("holds" in step && !same(named(now, held), held)) throw new Error(`${why}: expected ${JSON.stringify(held)} in ${JSON.stringify(now)}`);
-      if ("matches" in step && !new RegExp(step.matches as string).test(String(now))) throw new Error(`${why}: expected /${step.matches}/, got ${JSON.stringify(now)}`);
+      if ("matches" in step && (now === undefined || (typeof now === "number" && Number.isNaN(now)) || !new RegExp(step.matches as string).test(String(now)))) throw new Error(`${why}: expected /${step.matches}/, got ${JSON.stringify(now)}`);
     }
     green++;
   });

@@ -326,7 +326,7 @@ const recordOf = (id: string) => join(ledger, `${id}.${envNow.slice(0, 12)}`);
     // Records the scenarios that ran green and forgets the ones that failed, but only on the tree the
     // run started from.
     commit(ran: string[], failed: string[]) {
-      for (const id of failed) try { Deno.removeSync(recordOf(id)); } catch { /* none */ }
+      for (const id of failed) try { Deno.removeSync(recordOf(id)); } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e; }
       if (tree() !== before) { console.log("scenarios: the tree changed during the run: no scenario is recorded green"); return; }
       Deno.mkdirSync(ledger, { recursive: true });
       for (const s of scenarios.filter((x) => ran.includes(x.id))) {
