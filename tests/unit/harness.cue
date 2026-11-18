@@ -1,15 +1,15 @@
 package unit
 
 // The scenarios' flake filing (harness/files/tests/scenarios/flakes.ts) on a fake board (PRONTO-649): filing
-// is bookkeeping, so a board that refuses never throws, shows its whole error and leaves no marker.
-cases: "a board that refuses a flake is said with its whole error, never thrown, and leaves no marker": {
+// is said first, then a board that refuses is thrown (the runner throws it after its report), leaving no marker.
+cases: "a board that refuses a flake is said with its whole error, then thrown, and leaves no marker": {
 	suite: "harness"
 	steps: [
 		{call: "harness.refused"},
 		{keep: "r"},
-		{get: "threw", expect: false, why: "a refusal is logged, never thrown: the run's exit is the scenarios' alone"},
+		{get: "threw", expect: true, why: "an unfiled flake is lost, so the refusal is thrown after it is said"},
 		{use: "r"},
-		{get: "filed", expect: false},
+		{get: "error", matches: "^flake demo not filed: the board said: Error: board said no"},
 		{use: "r"},
 		{get: "marker", expect: null, why: "no marker, so the next run files it again"},
 		{use: "r"},
@@ -24,12 +24,12 @@ cases: "a board that refuses a flake on GitHub Actions also warns with an annota
 		{get: "1", expect: "::warning title=flake not filed::flake demo not filed: the board said: Error: board said no%0A    at async board.ts:19:21"},
 	]
 }
-cases: "a board that is missing is a refusal too": {
+cases: "a board that is missing is a refusal too, thrown": {
 	suite: "harness"
 	steps: [
 		{call: "harness.missing"},
 		{keep: "r"},
-		{get: "threw", expect: false},
+		{get: "threw", expect: true},
 		{use: "r"},
 		{get: "marker", expect: null},
 		{use: "r"},

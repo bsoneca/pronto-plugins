@@ -1,10 +1,10 @@
-// Files a flake on the board (tests/scenarios.ts, schema.cue's `flakes`). Filing is bookkeeping (PRONTO-649, the
-// owner's call): a flake is filed only for a scenario that stays failed, so every run that gets here already exits 1
-// and nothing is hidden from the gate. A board that refuses (or is missing) is therefore said, with its whole error
-// and a GitHub warning, and never thrown: a throw only cut the run's report and its selection commit short. No marker
-// is written then, so the next run tries again. A filed flake whose marker cannot be written is thrown: that error is
-// not the board's to settle, and an unwritten marker would file the same flake every run (the runner throws it once its
-// report is done).
+// Files a flake on the board (tests/scenarios.ts, schema.cue's `flakes`). A flake is filed only for a scenario that
+// stays failed, so the run already exits 1 and nothing is hidden from the gate; but a flake that is never filed is
+// lost (no marker, no record, filed again only if the scenario flakes again), so a board that refuses (or is missing)
+// is said first, with its whole error and a GitHub warning, and then thrown. The runner collects what filing throws and
+// throws it once its selection commit and report are done (scenarios.ts), so the throw cuts nothing short. No marker is
+// written then, so the next run tries again. A filed flake whose marker cannot be written is thrown too: an unwritten
+// marker would file the same flake every run.
 export type Spawned = { success: boolean; stdout: string; stderr: string };
 export type Spawn = (cmd: string, args: string[], env: Record<string, string>) => Promise<Spawned>;
 
@@ -19,7 +19,7 @@ const escape = (s: string) => s.replace(/%/g, "%25").replace(/\r/g, "%0D").repla
 export async function fileFlake(o: {
   id: string; cmd: string; args: string[]; marks: string; env?: Record<string, string>;
   run?: Spawn; say?: (line: string) => void; github?: boolean;
-}): Promise<{ filed: true; said: string } | { filed: false; error: string }> {
+}): Promise<{ filed: true; said: string }> {
   const say = o.say ?? console.log;
   let out: Spawned;
   try {
@@ -31,7 +31,7 @@ export async function fileFlake(o: {
     const error = out.stderr.trim() || "(no error output)";
     say(`  ⚠ flake ${o.id} not filed: the board said:\n${error.split("\n").map((l) => `    | ${l}`).join("\n")}`);
     if (o.github) say(`::warning title=flake not filed::${escape(`flake ${o.id} not filed: the board said: ${error}`)}`);
-    return { filed: false, error };
+    throw new Error(`flake ${o.id} not filed: the board said: ${error}`);
   }
   const said = out.stdout.trim().split("\n").at(-1) ?? "";
   say(`  filed: ${said}`);
