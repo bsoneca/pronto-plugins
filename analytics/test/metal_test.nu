@@ -73,7 +73,7 @@ assert equal $store.spec.retentionPolicy "30d"
 assert equal [$store.spec.configuration.destinationPath $store.spec.configuration.endpointURL] [s3://bucket/analytics https://s3.example.com]
 assert equal $store.spec.configuration.s3Credentials {accessKeyId: {name: analytics-db-backup-s3, key: ACCESS_KEY_ID}, secretAccessKey: {name: analytics-db-backup-s3, key: ACCESS_SECRET_KEY}}
 let sched = ($bdocs | where kind == ScheduledBackup | first).spec
-assert equal [$sched.schedule $sched.immediate $sched.cluster.name $sched.method] ["0 0 6 * * *" true analytics-db plugin]
+assert equal [$sched.schedule $sched.immediate $sched.cluster.name $sched.method] ["0 0 6 * * *" false analytics-db plugin]
 let bcluster = ($bdocs | where kind == Cluster | first).spec
 assert equal $bcluster.plugins [{name: barman-cloud.cloudnative-pg.io, isWALArchiver: true, parameters: {barmanObjectName: analytics-db-backup}}]
 assert equal ($bcluster | reject plugins) $cluster.spec "the backup adds only the plugin to the Cluster"
