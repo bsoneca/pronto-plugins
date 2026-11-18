@@ -29,10 +29,13 @@ deployedParallel: int & >=parallel | *parallel
 // board: `file`, the board's command at a pinned pronto-plugins commit, with the repository, then --app
 // (`app`, the app's folder's name unless said), --bug, --priority, --title and --body appended. Filed
 // once per scenario a week (a marker in ~/.cache/pronto/flakes); FLAKES_FILE=0 files nothing.
+// The pin is also the schema the board reads the repository's devflow/devflow.cue with: a devflow.cue newer than the
+// pinned schema (the architect seat, against 17630bc5) fails `cue export`, so the filing fails (PRONTO-765). Move the pin
+// whenever devflow/schema.cue changes.
 flakes: {
 	app?:     string
 	priority: "P0" | "P1" | *"P2" | "P3"
-	file: [...string] | *["deno", "run", "-A", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/17630bc5c541cca31f10921bf30c060a89fb210e/devflow/board.ts", "file"]
+	file: [...string] | *["deno", "run", "-A", "https://raw.githubusercontent.com/bsoneca/pronto-plugins/e8e32262a51ac2b17b55e8afa0447c9a1301ef2b/devflow/board.ts", "file"]
 	// Runs nothing any more: a failed scenario is never run again for its verdict, only a wedged renderer is
 	// (AGENTS.md). Kept so the apps that set it (Bonk Chess, Prontoweeper) still hold to this schema.
 	retry: bool | *false
