@@ -600,23 +600,26 @@ flags: premium: {default: false, local: true, accounts: [\"acct-pin\"]}
 flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\"}
 GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
 " | save -f $"($repo)/app/flags_spec.cue"
-# The clone runs the working tree's flags/ and bin/, committed there before the pin, so these cases test the current code.
+# The checkouts run the working tree's flags/ and bin/, committed in an origin of its own (base, pin, past), so these
+# cases test the current code and never depend on this checkout's history or depth (CI's is shallow).
+let origin = $"($dir)/origin"
+^git init -q $origin
+cp -r $"($here)/.." $"($origin)/flags"
+cp -r $"($here)/../../bin" $"($origin)/bin"
+def --wrapped ogt [...args] { ^git -C $origin -c user.name=t -c user.email=t@example.com ...$args }
+ogt add -A
+ogt commit -q -m code
+let code = (ogt rev-parse HEAD | str trim)
+ogt commit -q --allow-empty -m pin
+let pin = (ogt rev-parse HEAD | str trim)
+ogt commit -q --allow-empty -m past
+# A full checkout one commit below the pin; and a shallow one past it, whose history stops short of the pin, which origin has.
 let clone = $"($dir)/p"
-^git clone -q --no-local $"($here)/../.." $clone
-^rm -rf $"($clone)/flags" $"($clone)/bin"
-cp -r $"($here)/.." $"($clone)/flags"
-cp -r $"($here)/../../bin" $"($clone)/bin"
-def --wrapped gt [...args] { ^git -C $clone -c user.name=t -c user.email=t@example.com ...$args }
-gt add -A
-gt commit -q --allow-empty -m code
-let code = (gt rev-parse HEAD | str trim)
-gt commit -q --allow-empty -m pin
-let pin = (gt rev-parse HEAD | str trim)
-gt commit -q --allow-empty -m after
-# A shallow clone past the pin: its history stops short of the pin, which origin still has.
-let shallow = $"($dir)/s"
-^git clone -q --depth 1 $"file://($clone)" $shallow
+^git clone -q --no-local $origin $clone
+def --wrapped gt [...args] { ^git -C $clone ...$args }
 gt checkout -q $code
+let shallow = $"($dir)/s"
+^git clone -q --depth 1 $"file://($origin)" $shallow
 def fromat [root: string, args: list<string>] {
 	with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state, FLAGS_OFREP_CMD: $"python3 ($here)/fake_ofrep.py", FLAGS_POLL_SEC: "0.01", FLAGS_WAIT_SEC: "0.1", PRONTO_FLAGS_JOURNAL: $"($dir)/journal.jsonl"} {
 		^$nu.current-exe $"($root)/flags/live.nu" ...$args | complete
