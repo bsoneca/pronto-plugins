@@ -984,12 +984,17 @@ await anon.dispose();
 await browser.close();
 // The verdict as data (scenarios/verdict.ts), for a caller that must not parse the line below.
 // Passed counts the scenarios this run ran and passed; those cached are counted apart, never as passed again.
-if (verdictFile) writeVerdict(verdictFile, { passed: ran.length - failedAll.size, cached: sel.cached.length, byOtherLane: shared ? sel.run.length - ran.length : 0, skipped: skipped.length, failed: failedAll.size });
+// A verdict that cannot be written (a full disk) is said; a run that otherwise passed then exits 3, "no verdict",
+// never 1, so a bisect (rehearse.ts) cannot blame a healthy commit for it (PRONTO-683).
+let verdictUnwritten = false;
+if (verdictFile) try { writeVerdict(verdictFile, { passed: ran.length - failedAll.size, cached: sel.cached.length, byOtherLane: shared ? sel.run.length - ran.length : 0, skipped: skipped.length, failed: failedAll.size }); }
+catch (e) { verdictUnwritten = true; console.error(`scenarios: the verdict could not be written to ${verdictFile}: ${e}`); }
 console.log(`scenarios: ${ran.length - failedAll.size} passed (${sel.cached.length} cached${shared ? `, ${sel.run.length - ran.length} run by another lane` : ""}${skipped.length ? `, ${skipped.length} skipped` : ""}), ${failedAll.size} failed, in ${Math.round((Date.now() - t0) / 1000)}s`);
 if (pageErrors.length) console.log(`page errors:\n${pageErrors.join("\n")}`);
 if (flaked.length) console.log(`flakes under load: ${flaked.join(", ")}`);
 if (unmarked.length) throw new AggregateError(unmarked, `flake filing threw (the board refused, a marker not written, or git): ${unmarked.map(String).join("; ")}`);
-if (failed.length || pageErrors.length) Deno.exit(1);
+if (failedAll.size || pageErrors.length) Deno.exit(1);
+if (verdictUnwritten) Deno.exit(3);
 
 // Files a flake once a week per scenario (a marker under ~/.cache/pronto/flakes/<app>); FLAKES_FILE=0 files none.
 async function fileFlake(id: string) {
