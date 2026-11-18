@@ -62,4 +62,21 @@ assert equal ($gp | get ports | flatten | get port | uniq | sort) [53 443 5432 8
 let dbp = (do $named NetworkPolicy analytics-db).spec.ingress
 assert equal $dbp.0.from.0.podSelector.matchExpressions.0.values [grafana umami]
 
+# Without --backup the database has none; with it, an ObjectStore at the bucket read with the operator's keys,
+# a nightly base backup (one at once), 30 days kept, and the plugin archiving its WAL.
+assert ($docs | where kind in [ObjectStore ScheduledBackup] | is-empty) "no backup unless asked"
+assert equal ($cluster.spec.plugins? | default []) []
+let bdocs = (metal manifests --grafana-domain metrics.example.com --umami-domain umami.example.com --users $users --backup s3://bucket/analytics --backup-endpoint https://s3.example.com | split row "---\n" | each { from yaml })
+let store = ($bdocs | where kind == ObjectStore | first)
+assert equal $store.metadata.name analytics-db-backup
+assert equal $store.spec.retentionPolicy "30d"
+assert equal [$store.spec.configuration.destinationPath $store.spec.configuration.endpointURL] [s3://bucket/analytics https://s3.example.com]
+assert equal $store.spec.configuration.s3Credentials {accessKeyId: {name: analytics-db-backup-s3, key: ACCESS_KEY_ID}, secretAccessKey: {name: analytics-db-backup-s3, key: ACCESS_SECRET_KEY}}
+let sched = ($bdocs | where kind == ScheduledBackup | first).spec
+assert equal [$sched.schedule $sched.immediate $sched.cluster.name $sched.method] ["0 0 6 * * *" false analytics-db plugin]
+let bcluster = ($bdocs | where kind == Cluster | first).spec
+assert equal $bcluster.plugins [{name: barman-cloud.cloudnative-pg.io, isWALArchiver: true, parameters: {barmanObjectName: analytics-db-backup}}]
+assert equal ($bcluster | reject plugins) $cluster.spec "the backup adds only the plugin to the Cluster"
+assert equal (metal backup-objects --bucket s3://bucket/analytics --endpoint https://s3.example.com).cluster {plugins: $bcluster.plugins}
+
 print "metal_test: ok"
