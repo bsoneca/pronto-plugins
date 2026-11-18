@@ -134,13 +134,17 @@ const linesNow = (s: Seen) => linesOf({
 function persist(path: string, content: string | null, prune = false) {
   const to = JSON.stringify(path);
   const code = content === null
-    ? `try { Deno.removeSync(${to}); } catch { /* none */ }`
+    ? `try { Deno.removeSync(${to}); } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e; }`
     : `const d = ${JSON.stringify(dirname(path))}; Deno.mkdirSync(d, { recursive: true }); const t = ${to} + "." + crypto.randomUUID() + ".tmp"; Deno.writeTextFileSync(t, await new Response(Deno.stdin.readable).text()); Deno.renameSync(t, ${to});`
       + (prune ? ` for (const e of [...Deno.readDirSync(d)]) { try { if (Date.now() - Deno.statSync(d + "/" + e.name).mtime!.getTime() > 6048e5) Deno.removeSync(d + "/" + e.name); } catch { /* gone */ } }` : "");
   const child = new Deno.Command(Deno.execPath(), { args: ["eval", code], stdin: "piped", stdout: "null", stderr: "piped" }).spawn();
   const w = child.stdin.getWriter();
   return w.write(new TextEncoder().encode(content ?? "")).then(() => w.close()).then(() => child.output()).then((o) => {
-    if (!o.success) console.warn(`could not keep ${rel(path)}: ${new TextDecoder().decode(o.stderr)}`);
+    if (o.success) return;
+    const why = `could not ${content === null ? "remove" : "keep"} ${rel(path)}: ${new TextDecoder().decode(o.stderr)}`;
+    // A green record that cannot be removed would answer a later run as cached green: fail instead.
+    if (content === null) throw new Error(why);
+    console.warn(why);
   });
 }
 
@@ -367,7 +371,7 @@ for (const [name, c] of mine) {
       if ("expect" in step && !same(now, want)) throw new Error(`${why}: expected ${JSON.stringify(want)}, got ${JSON.stringify(now)}`);
       if ("near" in step) {
         const { value, within } = step.near as { value: number; within: number };
-        if (Math.abs((now as number) - value) > (within ?? 0.05)) throw new Error(`${why}: expected ${value} ± ${within}, got ${now}`);
+        if (typeof now !== "number" || !Number.isFinite(now) || Math.abs(now - value) > (within ?? 0.05)) throw new Error(`${why}: expected ${value} ± ${within}, got ${now}`);
       }
       const held = resolveArg(step.holds, now, kept);
       if ("holds" in step && !same(named(now, held), held)) throw new Error(`${why}: expected ${JSON.stringify(held)} in ${JSON.stringify(now)}`);
