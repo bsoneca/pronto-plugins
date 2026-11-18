@@ -643,7 +643,7 @@ Deno.test("the watchdog slows a cue outside the pool that keeps many cores busy 
     const pass = async (state: string, pools: string) => {
       const o = await new Deno.Command("bash", {
         args: [watchdog],
-        env: { HOME: dir, CUE_WATCHDOG_NAME: "deno", CUE_WATCHDOG_ONLY_PIDS: String(spin.pid), CUE_WATCHDOG_DRY: "1", CUE_WATCHDOG_HOT_PCT: "30", CUE_WATCHDOG_LOG: `${dir}/log`, CUE_WATCHDOG_DIR: `${dir}/${state}`, CUE_WATCHDOG_POOLS: pools },
+        env: { HOME: dir, CUE_WATCHDOG_MAX_GB: "100000", CUE_WATCHDOG_LEVEL: "100", CUE_WATCHDOG_SWAP_GB_NOW: "0", CUE_WATCHDOG_NAME: "deno", CUE_WATCHDOG_ONLY_PIDS: String(spin.pid), CUE_WATCHDOG_DRY: "1", CUE_WATCHDOG_HOT_PCT: "30", CUE_WATCHDOG_LOG: `${dir}/log`, CUE_WATCHDOG_DIR: `${dir}/${state}`, CUE_WATCHDOG_POOLS: pools },
         clearEnv: true, stdout: "piped", stderr: "piped",
       }).output();
       assertEquals(o.code, 0, text(o.stderr));
@@ -716,10 +716,13 @@ Deno.test("the next top-level cue reserves no cores while one runs", async () =>
 Deno.test("a cue inside a holder, through a slot.ts from before the -w tickets, is not made to wait behind a top-level one", async () => {
   const dir = await Deno.makeTempDir();
   const root = new URL("../..", import.meta.url).pathname;
-  const shown = await new Deno.Command("git", { args: ["show", "origin/main:harness/files/tests/slot.ts"], cwd: root, stdout: "piped", stderr: "piped" }).output();
-  assertEquals(shown.code, 0, text(shown.stderr));
+  // A copy from before the -w tickets: this one with the ticket pattern every earlier copy has (ci's checkout is
+  // shallow, so no older commit is there to read).
+  const current = await Deno.readTextFile(`${root}/harness/files/tests/slot.ts`);
+  const old = current.replace("/^[0-9]+-([0-9]+)(?:-w)?$/", "/^[0-9]+-([0-9]+)$/");
+  assert(old !== current, "the ticket pattern is where the old copy differs");
   await Deno.mkdir(`${dir}/old/tests`, { recursive: true });
-  await Deno.writeFile(`${dir}/old/tests/slot.ts`, shown.stdout);
+  await Deno.writeTextFile(`${dir}/old/tests/slot.ts`, old);
   const holder = await hold(dir, 3);
   try {
     // A top-level cue waiting for the holder's cores: older than the claim below, live, and named as a new one names it.
