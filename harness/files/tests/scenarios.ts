@@ -958,7 +958,7 @@ await Promise.all(Array.from({ length: Math.min(isDeployed ? spec.deployedParall
 // once the pass is over. One that passes alone flaked under load: it stays failed, and is said and filed.
 const flaked: string[] = [];
 const unmarked: unknown[] = [];
-if (!shared && !pageErrors.length && ran.length > 1) {
+if (!shared && !isDeployed && !pageErrors.length && ran.length > 1) {
   for (const id of failed) {
     const r = new Run(spec.scenarios[id]);
     if (await r.run()) { console.log(`✗ ${id} fails alone too: not a flake`); continue; }
