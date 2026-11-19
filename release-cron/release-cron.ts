@@ -173,7 +173,7 @@ if (verb === "abandon") {
     // logged with the commits that were still missing, the branch deleted only when none was.
     const rb = (() => { try { return JSON.parse(Deno.readTextFileSync(`${state}/released-branch`)) as { branch: string; tip: string }; } catch { return null; } })();
     if (!rb) { console.log(`${app}: no release branch held`); Deno.exit(0); }
-    const missing = (() => { try { return missingOnMain(rb.tip); } catch (e) { return null; } })();
+    const missing = (() => { try { return missingOnMain(rb.tip); } catch { return null; } })();
     for (const f of ["released-branch", "backport-told"]) { try { Deno.removeSync(`${state}/${f}`); } catch { /* none */ } }
     const l = line({ app, started: local(Date.now()), steps: {}, outcome: `cleared ${rb.branch}`, why: `by hand; ${missing === null ? "the commits missing from main could not be read" : missing.length ? `still missing from main: ${backportWhy(missing)}` : "every commit was on main"}` });
     Deno.writeTextFileSync(`${state}/release-cron.log`, l + "\n", { append: true });
