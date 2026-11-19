@@ -230,7 +230,10 @@ _expect: {see: #Sel} | // visible
 _http: {
 	http: {
 		method: *"GET" | "POST" | "PUT" | "PATCH" | "DELETE"
-		path:   string
+		// On the app's door, or a whole URL on another origin (a published game's address), which is asked
+		// as no one (no session, no header, no body) and keeps nothing. No step follows a redirect onto
+		// another origin: such a 3xx is its answer (scenarios.ts http).
+		path: string
 		// Sent as JSON, or as it is when a string.
 		body?: _
 		headers?: [string]: string
