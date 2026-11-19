@@ -120,3 +120,33 @@ cases: {
 		{call: "cron.heldLine", args: [null], expect: null},
 	]}
 }
+
+cases: {
+	"a release branch's commits are backported when main holds a cherry-pick of each or an equal patch": {suite: "cron", steps: [
+		{call: "cron.parseLog", args: ["aaa\u001ffix a\n\n(cherry picked from commit 111)\n\u001e\nbbb\u001ffix b\n\u001e\n"], expect: [{sha: "aaa", body: "fix a\n\n(cherry picked from commit 111)\n"}, {sha: "bbb", body: "fix b\n"}]},
+		{call: "cron.patchIds", args: ["p1 aaa\np2 bbb\n"], expect: {aaa: "p1", bbb: "p2"}},
+		{call: "cron.backported", args: [[{sha: "111", patch: "p1", body: "x"}, {sha: "222", patch: "p2", body: "y"}, {sha: "333", patch: "p3", body: "z"}], [{sha: "m1", patch: "q", body: "x\n\n(cherry picked from commit 111)\n"}, {sha: "m2", patch: "p2", body: "y, resolved by hand"}]], expect: [{sha: "333", patch: "p3", body: "z"}], why: "111 by its -x line, 222 by its patch id, 333 on neither"},
+		{call: "cron.backported", args: [[{sha: "444", body: "w"}], [{sha: "m3", body: "empty"}]], expect: [{sha: "444", body: "w"}], why: "a commit with no patch id matches only by its line"},
+		{call: "cron.backported", args: [[], [{sha: "m3", patch: "p", body: ""}]], expect: []},
+		{call: "cron.backportWhy", args: [[{sha: "3333333333", body: "fix c\n"}]], expect: "1 commit not on main: 33333333 fix c"},
+	]}
+	"a held branch's tip is run only when it is merged pull requests into the branch and no migration": {suite: "cron", steps: [
+		{call: "cron.unmerged", args: [["a", "b", "c", "d"], {a: [{merged_at: "t", base: {ref: "release/x/1"}}], b: [{merged_at: null, base: {ref: "release/x/1"}}], c: [{merged_at: "t", base: {ref: "main"}}], d: []}, "release/x/1"], expect: ["b", "c", "d"], why: "an open PR, a PR into main and a push with none are not the branch's"},
+		{call: "cron.unmerged", args: [["e"], {}, "release/x/1"], expect: ["e"]},
+		{call: "cron.migrationFiles", args: [["apps/studio/services/database/migrations/0042.sql", "apps/studio/src/a.js", "apps/other/services/database/migrations/1.sql"], "apps/studio"], expect: ["apps/studio/services/database/migrations/0042.sql"]},
+		{call: "cron.refusedTip", args: [{descends: true, unmerged: [], migrations: []}], expect: null},
+		{call: "cron.refusedTip", args: [{descends: false, unmerged: [], migrations: []}], expect: "the tip does not descend from the commit the branch was cut at"},
+		{call: "cron.refusedTip", args: [{descends: true, unmerged: ["abcdef012345"], migrations: ["m/1.sql"]}], expect: "1 commit not brought by a merged pull request into the branch: abcdef01; migrations changed (m/1.sql): migrations go to main only"},
+	]}
+	"last keeps main from being skipped as behind a branch, and a branch's failure out of main's retry": {suite: "cron", steps: [
+		{call: "cron.lastFields", args: ["failed", "c1", false], expect: ["c1", "c1"]},
+		{call: "cron.lastFields", args: ["released", "c1", false], expect: ["-", "c1"]},
+		{call: "cron.lastFields", args: ["abandoned release/x/1", "c1", true], expect: ["-", "-"], why: "the branch tip is not what main tried"},
+		{call: "cron.lastFields", args: ["abandoned release/x/1", null, false], expect: ["-", "-"]},
+		{call: "cron.lastFields", args: ["failed", "c1", true], expect: ["-", "-"], why: "a release or confirm failure on the branch"},
+		{call: "cron.lastFields", args: ["released", "c1", true], expect: ["-", "c1"]},
+	]}
+	"a held release says what a fix merged to main must do": {suite: "cron", steps: [
+		{call: "cron.heldNotice", args: ["release/x/1"], expect: "fixes merged to main do not release until release/x/1 closes: `abandon` releases main again"},
+	]}
+}

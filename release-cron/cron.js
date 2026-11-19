@@ -523,3 +523,47 @@ export const abandoned = (open, now, cfg) =>
 export const heldLine = (open) => open
   ? `held ${open.branch} since ${open.opened}, cut from ${open.base.slice(0, 8)}: ${open.attempts.length} attempt${open.attempts.length === 1 ? "" : "s"} (${open.attempts.map((a) => `${a.tip.slice(0, 8)} ${a.verdict}`).join(", ")}); abandoned after ${open.limits.abandonHours} h or ${open.limits.abandonAttempts} red attempts`
   : null;
+
+// What `git log --format=%H%x1f%B%x1e` prints, as [{sha, body}].
+export const parseLog = (text) => text.split("\x1e").map((r) => r.replace(/^\s*\n/, "")).filter((r) => r.trim())
+  .map((r) => { const [sha, ...body] = r.split("\x1f"); return { sha: sha.trim(), body: body.join("\x1f") }; });
+
+// What `git log -p | git patch-id --stable` prints ("<patch id> <commit>" a line), as {commit: patch id}.
+export const patchIds = (text) => Object.fromEntries(text.split("\n").filter(Boolean).map((l) => l.trim().split(/\s+/)).map(([patch, sha]) => [sha, patch]));
+
+// The branch's commits (`branch`: [{sha, patch, body}]) that main (`main`: the same, since the merge base) holds no counterpart of:
+// a `(cherry picked from commit <sha>)` line naming it (cherry-pick -x), or an equal stable patch id. Those are fixes the next
+// release of main would lose.
+export const backported = (branch, main) => branch.filter((c) => !main.some((m) => (!!c.patch && m.patch === c.patch) || m.body.includes(`(cherry picked from commit ${c.sha})`)));
+
+// The held-backport outcome's reason: how many of the branch's commits are not on main, and which.
+export const backportWhy = (missing) => `${missing.length} commit${missing.length === 1 ? "" : "s"} not on main: ${missing.map((c) => `${c.sha.slice(0, 8)}${c.body ? ` ${c.body.split("\n")[0]}` : ""}`).join("; ")}`;
+
+// The commits (`shas`) of a held branch that did not arrive by a merged pull request into that branch: `pulls` is each commit's
+// `gh api repos/<slug>/commits/<sha>/pulls`; a pull request counts when merged_at is set and its base.ref is the branch.
+export const unmerged = (shas, pulls, branch) => shas.filter((s) => !(pulls[s] ?? []).some((p) => !!p.merged_at && p.base?.ref === branch));
+
+// The files of a change that are the app's database migrations: they go to main only, never to a release branch.
+export const migrationFiles = (files, appRel) => files.filter((f) => f.startsWith(`${appRel}/services/database/migrations/`));
+
+// Why a held branch's new tip is not rehearsed (null: it is). `descends`: the tip descends from the cut; `unmerged`: its commits
+// past the cut that no merged pull request into the branch brought; `migrations`: the migration files base..tip changed.
+export const refusedTip = ({ descends, unmerged, migrations }) => {
+  const why = [
+    ...(descends ? [] : ["the tip does not descend from the commit the branch was cut at"]),
+    ...(unmerged.length ? [`${unmerged.length} commit${unmerged.length === 1 ? "" : "s"} not brought by a merged pull request into the branch: ${unmerged.map((s) => s.slice(0, 8)).join(", ")}`] : []),
+    ...(migrations.length ? [`migrations changed (${migrations.join(", ")}): migrations go to main only`] : []),
+  ];
+  return why.length ? why.join("; ") : null;
+};
+
+// `last`'s two commit fields for a run that ended `outcome` (spaced) on `commit`: the commit a failed run on main failed on (retry),
+// and the commit the run tried (behind). "-" for none: an abandoned run tried nothing main must stay behind, and a failure on a
+// held branch is not a failure of main.
+export const lastFields = (outcome, commit, onBranch) => [
+  outcome === "failed" && commit && !onBranch ? commit : "-",
+  commit && !(outcome ?? "").startsWith("abandoned") && !(onBranch && outcome === "failed") ? commit : "-",
+];
+
+// What the lead is told when a fix merged to main waits on a held release.
+export const heldNotice = (branch) => `fixes merged to main do not release until ${branch} closes: \`abandon\` releases main again`;
