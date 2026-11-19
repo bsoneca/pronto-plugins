@@ -6,28 +6,35 @@
 # own, so every `cue` an app's tooling runs through mise (generate, lint, tests, derive, write)
 # comes through it, in any app, with nothing set up per app or per machine.
 #
-# A command that evaluates (vet, export, eval, def, cmd, trim) claims its memory from the pool's
-# memory budget (cue-budget/slot.ts, the tests/slot.ts of an app, copied unchanged: `--mem`) and
-# waits its turn when the budget is full, rather than failing or taking the machine down. The
-# whole spec is still evaluated at once, in one process: only when it starts changes. The claim is
-# what the same evaluation (the same folder of the same repository, the same arguments) held at
-# its peak the last time, a quarter more, learned in ~/.cache/pronto/cue-mem; CUE_UNKNOWN_GB (24)
-# the first time. One that held under CUE_DIRECT_GB (1) runs at once, outside the pool, its peak
-# measured again (time) so one that grew claims from its next run; a command that evaluates
-# nothing (fmt, mod, version) runs at once. On Linux with systemd, a claimed evaluation also runs
-# in a scope whose memory cannot pass the budget (MemoryMax), the kernel's own ceiling; macOS has
-# none, and a machine there runs a watchdog for it. cue is one process: what an evaluation holds is
-# its own resident memory. A cue run by a cue is its parent's: it claims nothing. CUE_BUDGET=off
-# runs every cue at once.
+# A command that evaluates (vet, export, eval, def, cmd, trim) claims its memory and cores from the
+# machine's cue memory budget (cue-budget/slot.ts, the tests/slot.ts of an app, copied unchanged:
+# `--mem`, `--cores-claim`) and waits its turn when the budget is full, rather than failing or taking
+# the machine down. The whole spec is still evaluated at once, in one process: only when it starts
+# changes. Several evaluations run at once while their claims fit CUE_MEM_GB (64) and CUE_CORES (every
+# core but STACK_RESERVE, 3), first come first served: one waiting ahead keeps its room, so a small
+# claim never passes a large one (PRONTO-870; it replaced the cue lock, which made a gate's generate
+# queue 44 of 92 minutes for about one minute of work). The memory claim is what the same evaluation
+# (the same folder of the same repository, the same arguments) held at its peak the last time, a
+# quarter more, learned in ~/.cache/pronto/cue-mem. An evaluation never seen claims the largest peak
+# learned in its folder (cue-mem/folder/<md5 of repository and folder>) a quarter more, else
+# CUE_UNKNOWN_GB (16). One that held under CUE_DIRECT_GB (1) runs at once, outside the pool, its peak
+# measured again (time) so one that grew claims from its next run; a command that evaluates nothing
+# (fmt, mod, version) runs at once. On Linux with systemd, a claimed evaluation also runs in a scope
+# whose memory cannot pass the budget (MemoryMax), the kernel's own ceiling; macOS has none, and a
+# machine there runs a watchdog for it, and the pool refuses to start another evaluation while the
+# machine's free memory is under 20 %. cue is one process: what an evaluation holds is its own
+# resident memory, which its holder records every second, so one grown past its claim counts at its
+# real size. A cue run by a cue is its parent's: it claims nothing. CUE_BUDGET=off runs every cue at
+# once.
 #
-# A claimed evaluation takes the cue lock only: one at a time (AGENTS.md: memory is a lock, not a
-# budget), holding nothing while it waits. Its cores are bounded, not claimed: GOMAXPROCS is set,
-# unless already set, to CUE_MAX_CORES (7) or the budget (STACK_BUDGET, else every core but
-# STACK_RESERVE, 3), whichever is smaller. e8e3226 (PRONTO-761) claimed cores in the pool's weight
-# too; that is reverted (PRONTO-838): a local cue waited for room in the budget while runner jobs,
-# admitted outside it, held more than all of it, and every local generate stalled. Inside a gate, a
-# rehearsal or a stack (a holder above it) it waits only for the lock. One that kept 2 cores busy for
-# 30 CPU seconds (<id>.cores, <id>.secs) takes the lock even when it held under CUE_DIRECT_GB.
+# The cores a claimed evaluation claims are what it kept busy the last time (<id>.cores, 2 when never
+# measured), at most the cap below, counted in the cue budget's own cores, not in the stacks' weight
+# (PRONTO-838: e8e3226 (PRONTO-761) claimed them in the stacks' weight, and a local cue waited for room
+# in the budget while runner jobs, admitted outside it, held more than all of it). Its parallelism is
+# bounded too: GOMAXPROCS is set, unless already set, to CUE_MAX_CORES (7) or the budget (STACK_BUDGET,
+# else every core but STACK_RESERVE, 3), whichever is smaller. Inside a gate, a rehearsal or a stack (a
+# holder above it) it waits only in the cue line. One that kept 2 cores busy for 30 CPU seconds
+# (<id>.cores, <id>.secs) is claimed even when it held under CUE_DIRECT_GB.
 #
 # A cue started by a mise shim, with no machine wrapper on the PATH before it (a shell that has
 # the shims and not mise's env._.path), is started again through `mise exec`, which puts this
@@ -36,8 +43,9 @@
 # Every claimed vet and every export leaves one line in ~/.cache/pronto/cue-cache.log (rotated at 10 MB to
 # cue-cache.log.1), tab-separated: epoch seconds, kind (vet|export), outcome (hit, partial, miss or
 # unkeyed), the folder, the seconds the evaluation took (0 for a hit; the wait in the pool included) and
-# the seconds a hit saved (what the entries it used took when they were stored). The dashboard reads it
-# (tools/machine). Best effort: it never changes an exit code or what is printed.
+# the seconds a hit saved (what the entries it used took when they were stored), and the seconds the
+# evaluation waited in the pool before it was admitted (0 for a hit and for one run at once; already part
+# of the took column). The dashboard reads it (tools/machine). Best effort: it never changes an exit code or what is printed.
 
 self=$(cd "$(dirname "$0")" && pwd)
 # The real cue: the first on the PATH that is no budget wrapper (this one, a runtime's, a machine's:
@@ -80,9 +88,9 @@ deno=$(command -v deno || ls "$HOME"/.local/share/mise/installs/github-denoland-
 
 # The evaluation's name: its repository (every worktree of it alike), its folder there and its
 # arguments. One evaluation keeps one id in any worktree, runner checkout or temporary copy: an id
-# never seen claims CUE_UNKNOWN_GB and waits in the cue lock, so a name that changes with the
-# checkout's path or a random temporary folder made thousands of small evaluations queue as large
-# ones (PRONTO-683). So an argument that is a path in a git checkout (or where a file will be
+# never seen claims the folder's largest peak or CUE_UNKNOWN_GB and waits in the cue line, so a name
+# that changes with the checkout's path or a random temporary folder made thousands of small
+# evaluations queue as large ones (PRONTO-683). So an argument that is a path in a git checkout (or where a file will be
 # written in one) is named by its repository and its place in it; a CI runner's clone, a
 # repository of its own whose path holds /actions-runners/<name>/_work/, is named by what follows
 # _work/; a temporary folder's random name (a . or - and 6 or more letters and digits holding a
@@ -137,6 +145,8 @@ where=$(printf '%s\n' "$where" | sed 's|\.pronto-derive-[0-9a-f]*|.pronto-derive
 first=${where%%
 *}
 key=$(tmpnorm "$first")${where#"$first"}
+# What names the folder, not the arguments: the repository and the place in it.
+basekey=$key
 for a in "$@"; do
   case "$a" in
     /*)
@@ -158,12 +168,17 @@ for a in "$@"; do
 done
 id=$(printf '%s' "$key" | md5 -q 2>/dev/null || printf '%s' "$key" | md5sum | cut -d' ' -f1)
 learned="${HOME:-${TMPDIR:-/tmp}}/.cache/pronto/cue-mem/$id"
-mkdir -p "${learned%/*}" 2>/dev/null || learned=/dev/null
+mkdir -p "${learned%/*}/folder" 2>/dev/null || learned=/dev/null
+fid=$(printf '%s' "$basekey" | md5 -q 2>/dev/null || printf '%s' "$basekey" | md5sum | cut -d' ' -f1)
+folderfile=${learned%/*}/folder/$fid
+if [ "$learned" = /dev/null ]; then folderfile=/dev/null; fi
 last=$(cut -d' ' -f1 "$learned" 2>/dev/null)
+folderpeak=$(cut -d' ' -f1 "$folderfile" 2>/dev/null)
 cores=$learned.cores
 if [ "$learned" = /dev/null ]; then cores=/dev/null; fi
 ownc=$(cat "$cores" 2>/dev/null); ownsecs=$(cat "$learned.secs" 2>/dev/null)
-mem=$(awk -v l="${last:-}" -v unknown="${CUE_UNKNOWN_GB:-24}" -v direct="${CUE_DIRECT_GB:-1}" -v c="${ownc:-0}" -v s="${ownsecs:-0}" 'BEGIN {
+mem=$(awk -v l="${last:-}" -v f="${folderpeak:-}" -v unknown="${CUE_UNKNOWN_GB:-16}" -v direct="${CUE_DIRECT_GB:-1}" -v c="${ownc:-0}" -v s="${ownsecs:-0}" 'BEGIN {
+  if (l == "" && f != "") { m = f * 1.25; if (m < 0.1) m = 0.1; printf "%.1f\n", m; exit }
   if (l == "") { print unknown; exit }
   if (l + 0 < direct + 0 && !(c + 0 >= 2 && s + 0 >= 30)) { print 0; exit }
   m = l * 1.25; if (m < 0.1) m = 0.1
@@ -177,14 +192,26 @@ gomax=${GOMAXPROCS:-$(awk -v max="${CUE_MAX_CORES:-7}" -v budget="$budget" 'BEGI
   printf "%d\n", (cap == int(cap) ? cap : int(cap) + 1) }')}
 
 folder=$(printf '%s\n' "$where" | sed -n 2p)
+# The cores it claims: what it kept busy the last time (2 when never measured), at most its cap.
+coresclaim=$(awk -v c="${ownc:-}" -v cap="$gomax" 'BEGIN { if (c == "") c = 2; if (c + 0 > cap + 0) c = cap; printf "%.1f\n", c }')
 
-# cachelog <kind> <outcome> <seconds took> <seconds saved>: one line of the cache log, best effort.
+# foldernote: the largest peak learned in this folder, kept beside the ids' for the evaluation never seen.
+foldernote() {
+  { [ "$folderfile" != /dev/null ] && [ -f "$learned" ] || return 0
+    now=$(cut -d' ' -f1 "$learned")
+    awk -v a="$now" -v b="${folderpeak:-0}" 'BEGIN { exit !(a + 0 > b + 0) }' || return 0
+    printf '%s\n' "$now" > "$folderfile.$$" && mv "$folderfile.$$" "$folderfile"
+  } 2>/dev/null
+  return 0
+}
+
+# cachelog <kind> <outcome> <seconds took> <seconds saved> [seconds waited]: one line of the cache log, best effort.
 cachelog() {
   { lf=${HOME:-${TMPDIR:-/tmp}}/.cache/pronto/cue-cache.log
     mkdir -p "${lf%/*}"
     sz=$(wc -c < "$lf" 2>/dev/null | tr -d ' ')
     [ "${sz:-0}" -gt 10485760 ] && mv -f "$lf" "$lf.1"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "${folder:-.}" "$3" "$4" >> "$lf"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "${folder:-.}" "$3" "$4" "${5:-0}" >> "$lf"
   } 2>/dev/null
   return 0
 }
@@ -269,6 +296,7 @@ if [ "$mem" = 0 ]; then
       v = c / r; if (failed != 0 && old != "" && old + 0 > v) v = old
       printf "%.2f\n", v }' > "$learned.cores.$$" 2>/dev/null
     if [ -s "$learned.cores.$$" ]; then mv "$learned.cores.$$" "$learned.cores" 2>/dev/null; fi
+    foldernote
   fi
   rm -f "$t" "$learned.$$" "$learned.secs.$$" "$learned.cores.$$" 2>/dev/null
   if [ -n "$exportpath" ]; then
@@ -325,23 +353,28 @@ if [ "$(uname)" = Linux ] && systemd-run --user --scope --quiet true 2>/dev/null
   run=systemd-run
 fi
 
-# The claim: its memory, and no more cores used than its cap.
+# The claim: its memory and cores, and no more cores used than its cap. The seconds it waited are
+# written to a file of its own by slot.ts, for the cache log.
 export GOMAXPROCS=$gomax
+waitfile=$(mktemp "${TMPDIR:-/tmp}/cue-wait.XXXXXX" 2>/dev/null) || waitfile=/dev/null
 # In the background, so a signal to this wrapper reaches the claim (as above), and its pass recorded.
 if { : <&0; } 2>/dev/null; then exec 3<&0; else exec 3</dev/null; fi
 started=$(date +%s)
 if [ -n "$exportpath" ]; then
   # What cue prints, kept to store once it passed, then printed.
-  out=$(mktemp "${TMPDIR:-/tmp}/cue-export.XXXXXX") || exec "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3
-  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 >"$out" &
+  out=$(mktemp "${TMPDIR:-/tmp}/cue-export.XXXXXX") || exec "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --cores-claim "$coresclaim" --wait-out "$waitfile" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3
+  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --cores-claim "$coresclaim" --wait-out "$waitfile" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 >"$out" &
 else
-  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 &
+  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --cores-claim "$coresclaim" --wait-out "$waitfile" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 &
 fi
 pid=$!
 trap 'kill -TERM "$pid" 2>/dev/null' TERM INT HUP
 wait "$pid"; code=$?
 while kill -0 "$pid" 2>/dev/null; do wait "$pid"; code=$?; done
 took=$(( $(date +%s) - started ))
+waited=$(cat "$waitfile" 2>/dev/null); waited=${waited:-0}
+[ "$waitfile" = /dev/null ] || rm -f "$waitfile"
+foldernote
 if [ -n "$exportpath" ]; then
   exportstore "$code" "$took"
 elif [ "$code" = 0 ] && [ -n "$plan" ]; then
@@ -353,5 +386,5 @@ elif [ "$code" = 0 ] && [ -n "$plan" ]; then
 fi
 # A partial vet saved what the packages it skipped took; a miss or an unkeyed one saved nothing.
 [ "$outcome" = partial ] || saved=0
-[ -n "$logkind" ] && cachelog "$logkind" "$outcome" "$took" "$saved"
+[ -n "$logkind" ] && cachelog "$logkind" "$outcome" "$took" "$saved" "$waited"
 exit "$code"
