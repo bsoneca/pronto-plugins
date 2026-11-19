@@ -874,8 +874,10 @@ export class Run {
     if (foreign && (h.keep || h.keepText || h.body !== undefined)) throw new Error(`${h.method} ${path}: a step to another origin sends no body and keeps nothing`);
     const headers: Record<string, string> = foreign ? {} : await this.fillAll(h.headers ?? {});
     // What a hop onto the app's own other origin carries: of the step's headers, only those that say what asks
-    // (never a credential, nor a secret a scenario put in a header of its own).
-    const owned = Object.fromEntries(Object.entries(headers).filter(([k]) => /^(user-agent|accept|accept-language)$/i.test(k)));
+    // (never a credential, nor a secret a scenario put in a header of its own), and only as the scenario wrote them:
+    // a value filled from a kept one ({token}, a session) never crosses.
+    const owned = Object.fromEntries(Object.entries((h.headers ?? {}) as Record<string, unknown>)
+      .filter(([k, v]) => /^(user-agent|accept|accept-language)$/i.test(k) && typeof v === "string" && !/\{[^}]*\}/.test(v)) as [string, string][]);
     if (!h.anon && !foreign) {
       if (!a) throw new Error("an http step with a session names its actor (by)");
       // A guest's session is minted as the page boots: waited for, as the page itself waits for it.
