@@ -129,8 +129,10 @@ const pool = Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks";
 const budget = Number(Deno.env.get("STACK_BUDGET") ?? Math.max(1, navigator.hardwareConcurrency - Number(Deno.env.get("STACK_RESERVE") ?? 3)));
 const asked = Number(Deno.env.get("STACK_SLOT") ?? "0");
 // The cue memory budget (GB) and cores (PRONTO-870): what the evaluations claimed through --mem and --cores-claim may add up to.
-const cueMem = Number(Deno.env.get("CUE_MEM_GB") ?? 64);
-const cueCores = Number(Deno.env.get("CUE_CORES") ?? Math.max(1, navigator.hardwareConcurrency - Number(Deno.env.get("STACK_RESERVE") ?? 3)));
+// A value that is not a finite number above 0 is the default.
+const positive = (v: string | undefined, def: number) => { const n = v === undefined || v.trim() === "" ? NaN : Number(v); return Number.isFinite(n) && n > 0 ? n : def; };
+const cueMem = positive(Deno.env.get("CUE_MEM_GB"), 64);
+const cueCores = positive(Deno.env.get("CUE_CORES"), Math.max(1, navigator.hardwareConcurrency - Number(Deno.env.get("STACK_RESERVE") ?? 3)));
 const say = (s: string) => console.error(`slot: ${s}`);
 
 // queued and admitted: when the claim asked for its slot and when it got it (ms since the epoch).
@@ -326,9 +328,9 @@ export const commandWeight = (args: string[], env: Record<string, string | undef
 };
 // A holder's record, "<pid> <weight>[ cue mem=<GB> cores=<n>][ in=<holder>]", its holder's only while the
 // pid is the holder's: a holder that wrote none weighs a stack. A cue holder's mem is what it claims (and,
-// as it runs, what it holds when that is more); one whose record has no mem= (a copy of this file from
-// before the budget wrote `cue` alone, or `mem=` as a bare lock) claims the whole of `budget`, which is
-// what the lock was, and no cores.
+// as it runs, what it holds when that is more). A record "<pid> <weight> mem=<GB>" (no `cue`) is a cue
+// holder too, and its number is read; one with no readable mem= (a copy of this file from before the
+// budget wrote `cue` alone) claims the whole of `budget`, which is what the lock was, and no cores.
 export const weightOf = (text: string, pid: number, budget = cueMem) => {
   const [p, w, ...rest] = text.trim().split(" ");
   if (!(p === String(pid) && w !== undefined && w !== "" && Number(w) >= 0)) return { weight: weights.stack, cue: false, mem: 0, cores: 0 };
@@ -619,7 +621,8 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
   const mine = dual ? `${ticket}-w` : ticket;
   await Deno.mkdir(queue, { recursive: true });
   await Deno.mkdir(coresQueue, { recursive: true });
-  if (line !== "none") await Deno.writeTextFile(`${queue}/${mine}`, `${weight} ${nested ? "nested=1 " : ""}${line === "cue" ? `mem=${mem} cores=${cores} ` : ""}${what}`);
+  const put = async (file: string, text: string) => { await Deno.writeTextFile(`${file}.${pid}.tmp`, text); await Deno.rename(`${file}.${pid}.tmp`, file); };
+  if (line !== "none") await put(`${queue}/${mine}`, `${weight} ${nested ? "nested=1 " : ""}${line === "cue" ? `mem=${mem} cores=${cores} ` : ""}${what}`);
   const minutes = Number(Deno.env.get("STACK_WAIT_MINUTES") ?? 120);
   let end = Date.now() + minutes * 60_000, fewest = Infinity, fewestCores = Infinity, lightest = Infinity, leanest = Infinity;
   const warned = new Set<string>();
@@ -643,7 +646,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
           const isNested = rest[0] === "nested=1";
           const words = isNested ? rest.slice(1) : rest;
           // A ticket without mem= (a copy from before the budget) reserves the whole budget; the cores' line's has none.
-          const field = (key: string) => words[0]?.startsWith(`${key}=`) && Number(words[0].slice(key.length + 1)) >= 0 ? Number(words.shift()!.slice(key.length + 1)) : undefined;
+          const field = (key: string) => { const v = words[0]?.startsWith(`${key}=`) ? words[0].slice(key.length + 1) : undefined; return v !== undefined && v !== "" && Number(v) >= 0 ? Number(words.shift()!.slice(key.length + 1)) : undefined; };
           const tmem = field("mem"), tcores = field("cores");
           found.push({ name: e.name, weight: w !== "" && Number(w) >= 0 ? Number(w) : weights.stack, mem: tmem ?? cueMem, cores: tcores ?? 0, what: words.join(" "), weighted: e.name.endsWith("-w") });
         }
@@ -684,12 +687,14 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
         if (!(o.weighted && !admits(used, o.weight, reserved, budget))) older.push(o);
       }
       const where = `${ordinal(older.length + 1)} in line${older.length ? ` behind ${older.at(-1)!.what} (weight ${older.at(-1)!.weight})` : ""}`;
-      // A top-level cue reserves cores only at the head of the cue line and while no cue runs: the lock lets one
-      // run at a time, so the next reserves nothing until the one running ends (a running cue's 7 and the next's
-      // 7 would hold 14 of 15, and a rehearsal would no longer fit beside one cue; three would hold 21). Its
-      // place in the cores' line is its ticket's name, which is when it asked.
+      // A top-level cue reserves cores only once the cue budget admits it (the memory and cores it claims fit
+      // beside the live holders and the tickets ahead): cue holders run side by side, so a claim that waits for
+      // the budget reserves none, and one the budget admits holds its place on the cores' line, which is its
+      // ticket's name, when it asked.
+      const cueFits = line === "cue" && memAdmits(memHeld, older.reduce((n, o) => n + o.mem, 0), mem, cueMem)
+        && memAdmits(coresHeld, older.reduce((n, o) => n + o.cores, 0), cores, cueCores);
       if (dual) {
-        if (older.length === 0 && !holders.some((h) => h.cue)) await Deno.writeTextFile(`${coresQueue}/${ticket}`, `${weight} ${what}`);
+        if (cueFits) await put(`${coresQueue}/${ticket}`, `${weight} ${what}`);
         else await Deno.remove(`${coresQueue}/${ticket}`).catch(() => {});
       }
       // The cores a dual ticket waits behind: its older tickets in the cores' line.
@@ -1146,11 +1151,14 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
         } catch { /* the record is gone: released */ }
       }
     };
-    const sampler = learn || coresLearn || mem > 0 ? (sample(), setInterval(sample, 1000)) : undefined;
+    let inflight: Promise<void> = Promise.resolve();
+    const tick = () => { inflight = sample().catch(() => {}); };
+    const sampler = learn || coresLearn || mem > 0 ? (tick(), setInterval(tick, 1000)) : undefined;
     status = await c.status;
     running = false;
     wall = (Date.now() - spawned) / 1000;
     clearInterval(sampler);
+    await inflight;
     child = undefined;
     slot.release();
     slot = undefined;

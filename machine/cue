@@ -178,8 +178,7 @@ cores=$learned.cores
 if [ "$learned" = /dev/null ]; then cores=/dev/null; fi
 ownc=$(cat "$cores" 2>/dev/null); ownsecs=$(cat "$learned.secs" 2>/dev/null)
 mem=$(awk -v l="${last:-}" -v f="${folderpeak:-}" -v unknown="${CUE_UNKNOWN_GB:-16}" -v direct="${CUE_DIRECT_GB:-1}" -v c="${ownc:-0}" -v s="${ownsecs:-0}" 'BEGIN {
-  if (l == "" && f != "") { m = f * 1.25; if (m < 0.1) m = 0.1; printf "%.1f\n", m; exit }
-  if (l == "") { print unknown; exit }
+  if (l == "") { m = f * 1.25; if (f == "" || m < unknown + 0) m = unknown + 0; if (m == 0) print 0; else printf "%.1f\n", m; exit }
   if (l + 0 < direct + 0 && !(c + 0 >= 2 && s + 0 >= 30)) { print 0; exit }
   m = l * 1.25; if (m < 0.1) m = 0.1
   printf "%.1f\n", m }')
@@ -199,7 +198,9 @@ coresclaim=$(awk -v c="${ownc:-}" -v cap="$gomax" 'BEGIN { if (c == "") c = 2; i
 foldernote() {
   { [ "$folderfile" != /dev/null ] && [ -f "$learned" ] || return 0
     now=$(cut -d' ' -f1 "$learned")
-    awk -v a="$now" -v b="${folderpeak:-0}" 'BEGIN { exit !(a + 0 > b + 0) }' || return 0
+    # Read again, so a writer that finished since this evaluation began, with a larger peak, is not lowered.
+    latest=$(cut -d' ' -f1 "$folderfile" 2>/dev/null)
+    awk -v a="$now" -v b="${latest:-0}" 'BEGIN { exit !(a + 0 > b + 0) }' || return 0
     printf '%s\n' "$now" > "$folderfile.$$" && mv "$folderfile.$$" "$folderfile"
   } 2>/dev/null
   return 0
@@ -362,7 +363,7 @@ if { : <&0; } 2>/dev/null; then exec 3<&0; else exec 3</dev/null; fi
 started=$(date +%s)
 if [ -n "$exportpath" ]; then
   # What cue prints, kept to store once it passed, then printed.
-  out=$(mktemp "${TMPDIR:-/tmp}/cue-export.XXXXXX") || exec "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --cores-claim "$coresclaim" --wait-out "$waitfile" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3
+  out=$(mktemp "${TMPDIR:-/tmp}/cue-export.XXXXXX") || { [ "$waitfile" = /dev/null ] || rm -f "$waitfile"; exec "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --cores-claim "$coresclaim" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3; }
   "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --cores-claim "$coresclaim" --wait-out "$waitfile" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 >"$out" &
 else
   "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --cores-claim "$coresclaim" --wait-out "$waitfile" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 &

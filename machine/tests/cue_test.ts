@@ -768,7 +768,7 @@ const cueEnv = { ...poolEnv, CUE_CORES: "10" };
 
 Deno.test("two 3 GB evaluations overlap", async () => {
   const dir = await Deno.makeTempDir();
-  await fake(dir, 0, 4);
+  await fake(dir, 0, 8);
   await prime(dir, ["export", "./a"], 2, 3);
   await prime(dir, ["export", "./b"], 2, 3);
   const a = start(dir, ["export", "./a"], cueEnv);
@@ -916,4 +916,87 @@ Deno.test("the budget's rules: memAdmits, weightOf, the veto and a stuck holder"
   assertEquals(stuck(0, 1e9), false);
   assertEquals(stuck(1e9 - 30_000, 1e9), false);
   assertEquals(stuck(1e9 - 61_000, 1e9), true);
+});
+
+Deno.test("a top-level cue that weighs cores holds its place on the cores' line while cue holders run beside it", async () => {
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(`${dir}/pool`, { recursive: true });
+  // A cue holder (so the old "no cue runs" condition is false) and a holder of the whole weight budget.
+  const cueHolder = await holdRecord(dir, "0 cue mem=1 cores=1");
+  const full = await hold(dir, 6);
+  const env = { ...envOf(dir, poolEnv), CUE_MEM_GB: "64", CUE_CORES: "10" };
+  const job = new Deno.Command(`${deno}/deno`, { args: ["run", "-A", "--no-config", "--no-lock", slotPath, "--weight", "2", "--mem", "1", "--cores-claim", "1", "--what", "dual", "--", "true"], cwd: dir, env, clearEnv: true, stdout: "piped", stderr: "piped" }).spawn();
+  const done = job.output();
+  try {
+    const ticket = await until(async () => (await names(`${dir}/pool/queue`)).find((n) => /^[0-9]+-[0-9]+$/.test(n)), "its ticket on the cores' line");
+    assert.ok(ticket.endsWith(`-${job.pid}`), `the ticket is the claim's: ${ticket}`);
+    await full.release();
+    const out = await done;
+    assertEquals(out.code, 0, text(out.stderr));
+  } finally {
+    await full.release();
+    await cueHolder.release();
+    try { job.kill("SIGKILL"); } catch { /* done */ }
+  }
+});
+
+Deno.test("an unknown id in a folder that only ran tiny evaluations still claims CUE_UNKNOWN_GB", async () => {
+  const dir = await Deno.makeTempDir();
+  await fake(dir, 64);
+  const first = await run(dir, ["export", "./a"], { CUE_UNKNOWN_GB: "1" });
+  assertEquals(first.code, 0);
+  const folder = `${dir}/.cache/pronto/cue-mem/folder`;
+  assert.ok((await names(folder)).length === 1, "the folder's peak was noted");
+  assert.ok(Number((await Deno.readTextFile(`${folder}/${(await names(folder))[0]}`)).trim()) < 1, "and it is tiny");
+  const second = await run(dir, ["export", "./b"], { CUE_UNKNOWN_GB: "3" });
+  assertEquals(second.code, 0);
+  assertMatch(second.stderr, /cue memory 3 GB/, "the folder's peak only raises the claim");
+});
+
+Deno.test("a ticket with an empty mem= reserves the whole budget, not nothing", async () => {
+  const dir = await Deno.makeTempDir();
+  await fake(dir, 0, 1);
+  await prime(dir, ["export", "./a"], 2, 2);
+  const owner = await hold(dir, 0);
+  try {
+    await Deno.mkdir(`${dir}/pool/cue-queue`, { recursive: true });
+    await Deno.writeTextFile(`${dir}/pool/cue-queue/000000000000001-${owner.pid}`, "0 mem= cores=0 broken");
+    const w = start(dir, ["export", "./a"], cueEnv);
+    await until(async () => (await names(`${dir}/pool/cue-queue`)).length >= 2 ? true : undefined, "it waits behind the ticket");
+    await new Promise((r) => setTimeout(r, 1500));
+    assertEquals((await live(dir)).length, 0, "it is not admitted ahead of a ticket whose mem= is empty");
+    await owner.release();
+    const r = await w.done;
+    assertEquals(r.code, 0);
+    assertMatch(r.stderr, /64 reserved by those ahead/);
+  } finally {
+    await owner.release();
+  }
+});
+
+Deno.test("CUE_MIN_FREE_PCT vetoes a second claim beside a cue holder, and spares the head of an empty pool", async () => {
+  if (Deno.build.os !== "darwin") return; // the veto reads kern.memorystatus_level
+  const dir = await Deno.makeTempDir();
+  await fake(dir);
+  await prime(dir, ["export", "./a"], 2, 2);
+  const veto = { ...cueEnv, CUE_MIN_FREE_PCT: "101" };
+  // The head of an empty pool is admitted whatever the machine has free.
+  const lone = await run(dir, ["export", "./a"], veto);
+  assertEquals(lone.code, 0, lone.stderr);
+  assert.ok(!/waiting:/.test(lone.stderr), "the head of an empty pool did not wait");
+  await Deno.writeTextFile(`${dir}/.cache/pronto/cue-mem/${await learnedName(dir)}`, "2 cue export ./a\n");
+  // With a cue holder, the memory fits but the veto holds the claim until the holder ends.
+  const holder = await holdRecord(dir, "0 cue mem=1 cores=1");
+  try {
+    const w = start(dir, ["export", "./a"], veto);
+    await until(async () => (await names(`${dir}/pool/cue-queue`)).length ? true : undefined, "it waits in the cue line");
+    await new Promise((r) => setTimeout(r, 1500));
+    assertEquals((await live(dir)).filter((j) => !j.includes(" mem=1 ")).length, 0, "it is not admitted beside the holder");
+    await holder.release();
+    const r = await w.done;
+    assertEquals(r.code, 0);
+    assertMatch(r.stderr, /waiting: .*of its memory free, under 101%/);
+  } finally {
+    await holder.release();
+  }
 });
