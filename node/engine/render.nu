@@ -115,23 +115,11 @@ export def placeholder-pushed [services: list<string>, tag: string]: nothing -> 
 	$services | each {|s| [$s {tag: (if $s == "database" { "17" } else { $tag }), digest: $placeholder_digest}] } | into record
 }
 
-# CloudNativePG reads the database image's tag as the Postgres major: read from the pushed image's
-# own PG_MAJOR (`crane config`, with the build's registry login), as upstream's main reads it from
-# the image it built.
-export def database-tag [repo: string, digest: string]: nothing -> string {
-	let host = ($repo | split row "/" | first)
-	let cfg = (mktemp -d -t node-crane.XXXXXX | str trim)
-	try {
-		let t = (with-env {CLOUDSDK_ACTIVE_CONFIG_NAME: ($env.CLOUDSDK_ACTIVE_CONFIG_NAME? | default "pronto")} { ^gcloud auth print-access-token --quiet | complete })
-		if $t.exit_code != 0 { error make {msg: $"gcloud auth print-access-token: ($t.stderr | str trim)"} }
-		with-env {DOCKER_CONFIG: $cfg} {
-			$t.stdout | str trim | ^crane auth login $host -u oauth2accesstoken --password-stdin | ignore
-			let r = (^crane config $"($repo)@($digest)" | complete)
-			if $r.exit_code != 0 { error make {msg: $"crane config ($repo)@($digest): ($r.stderr | str trim)"} }
-			$r.stdout | from json | get config.Env | where {|e| $e starts-with "PG_MAJOR=" } | first | split row "=" | last
-		}
-	} finally {
-		# the login of the registry never outlives the call
-		rm -rf $cfg
-	}
+# CloudNativePG reads the database image's tag as the Postgres major: read from the pushed image's own
+# PG_MAJOR (`crane config` at `registry`, the node's, plain HTTP), as upstream's main reads it from the
+# image it built. The registry needs no login: it is the node's loopback, reached through the tunnel.
+export def database-tag [registry: string, repo: string, digest: string]: nothing -> string {
+	let r = (^crane config --insecure $"($registry)/($repo)@($digest)" | complete)
+	if $r.exit_code != 0 { error make {msg: $"crane config ($registry)/($repo)@($digest): ($r.stderr | str trim)"} }
+	$r.stdout | from json | get config.Env | where {|e| $e starts-with "PG_MAJOR=" } | first | split row "=" | last
 }

@@ -14,7 +14,6 @@ Node: node.#Release & {
 	preview: _preview
 	context: "contabo2"
 	api: ssh: "deploy@node.example"
-	registry: {project: "brawl-chess", location: "europe-west3"}
 	hosts: {production: "aprende.bsoneca.com", rc: "rc.aprende.bsoneca.com"}
 	hooks: afterJobs: [["echo", "restate"]]
 }
@@ -36,7 +35,7 @@ nodeManifests: (node.#Manifests & {
 GKE: k8s.#GKE & {
 	context: "contabo2"
 	environment: {
-		registry:     Node.registry.url
+		registry:     Node.environment.registry
 		domainSuffix: "bsoneca.com"
 		storageClass: "local-path"
 	}

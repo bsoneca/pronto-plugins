@@ -2,7 +2,8 @@
 
 The release of a pronto app onto the Contabo node's k3s: upstream pronto's manifests (the version the app
 pins, bonisoft3/pronto v1.5.1 and later), patched and released by an engine that lives in this repository,
-images built in Cloud Build and pulled from Artifact Registry. No kind, no second cluster.
+images built on the node's own buildkitd and pushed to the node's own registry, which the node pulls from.
+No kind, no second cluster, no Cloud Build, no Artifact Registry, no gcloud.
 
 ## The node release engine
 
@@ -10,10 +11,13 @@ images built in Cloud Build and pulled from Artifact Registry. No kind, no secon
 Mac (a runner, release-cron), never on the node; kubectl reaches the node's API over an ssh tunnel it opens
 and closes itself (`tunnel.nu`: a free local port and a kubeconfig of each release's own, so releases running
 at once share nothing; one BatchMode login, never retried, because a failed login gets the Mac banned by the
-node's CrowdSec).
+node's CrowdSec). The same ssh process carries two more forwards, to the node's operator buildkitd
+(`127.0.0.1:1234`) and its registry (`127.0.0.1:5000`), each to a free local port, never to 5000, which macOS's
+AirPlay receiver holds.
 
-The app pins in its mise the tools the engine runs: `kubectl`, `docker` (compose config only), `sops` (when it
-has a SOPS file), `crane` and `gcloud` (a release that builds). The preflight fails at once on a missing one,
+The app pins in its mise the tools the engine runs: `kubectl`, `docker` (the CLI with its compose plugin, never a
+daemon), `buildx` (`aqua:docker/buildx`, on the node's buildkit v0.29 line), `sops` (when it has a SOPS file) and
+`crane` (a release that builds, or `--check --build`). The preflight fails at once on a missing one,
 and on a pronto runtime that is not in `validated_pins` (runtime.nu, held by contract_test.nu). An existing
 namespace the release did not label (`pronto.dev/release=<app>`) is refused, `--adopt` takes it; `--delete`
 never takes one.
@@ -24,10 +28,10 @@ Write it into an app, byte for byte, with:
 <this repo>/bin/pronto-node --engine <app-dir>...
 ```
 
-which writes `node/{release,render,runtime,build,tunnel,rollback,restore}.nu` and `node/schema/node.cue` into
+which writes `node/{release,render,runtime,build,tunnel,push,registry,rollback,restore}.nu` and `node/schema/node.cue` into
 each app and merges a `release@k8s` rule into its `.say.json` (priority -1, stop: the same mechanism as the
 gcp engine, so it runs before the runtime's own `k8s` rule and stops it). `build.nu` is `gcp/engine/build.nu`
-(a symlink here): one Cloud Build push, two copies to compare. To change the engine: change `node/engine/`
+(a symlink here; the node engine reads only its `stamp`), two copies to compare. To change the engine: change `node/engine/`
 here, merge it, then in the app's repository move the pin to that merge and run `bin/pronto-node --engine`
 on every app that holds it, in one pull request.
 
@@ -39,7 +43,6 @@ Node: node.#Release & {
 	preview: _preview                       // -t preview=<name>, set by the engine
 	context: "contabo2"
 	api: {ssh: "user@node"}                 // a tunnel of the release's own to the node's 127.0.0.1:6443
-	registry: {project: "brawl-chess", location: "europe-west3"}   // repository: node-images
 	hosts: production: "aprende.bsoneca.com"
 	hooks: afterJobs: [["deno", "run", "node-release/restate.ts"]]
 }
@@ -49,6 +52,9 @@ nodeManifests: (node.#Manifests & {
 	upstream: (k8s.#BuildManifests & {release: App, env: Node.environment}).objects
 }).objects
 ```
+
+An app writes no registry: `build` in the schema defaults to the node's (`127.0.0.1:5000`, as the node's k3s and
+buildkitd name it, which `registries.yaml` already mirrors), so every image is `127.0.0.1:5000/<app>-<svc>:<tag>@sha256:...`.
 
 `node/schema/node.cue` imports nothing of upstream: the app renders upstream's objects itself and hands them to
 `#Manifests`, which patches them (the Namespace's `pronto.dev/release` label, the Cluster's Barman Cloud plugin
@@ -61,16 +67,33 @@ a Gateway for another host, an image that is neither in the registry nor pinned 
 
 Upstream's own order (k8s/release.nu `main`), with the engine's extra steps marked: the app and the tunnel;
 preflight (the operators' versions equal `#Operators`, the CRDs, GatewayClass `eg` Accepted, the backups'
-Secret); build in Cloud Build (an unchanged service is not rebuilt); the release data (upstream's own helpers,
+Secret; the node's builder and registry running and answering through the tunnel); build (`push.nu`, below); the release data (upstream's own helpers,
 `runtime.nu`) and CUE's render; the Namespace, then a server dry run of the rest, which stops the release
 on a rejection; SOPS Secrets and the OIDC Secret (extra); every object but the Deployments and Jobs; wait for
 the database's primary on its image; the Jobs in `jobOrder`; `hooks.afterJobs` (extra); the database's roles
 reconciled and the service token; the Deployments (crud always rolls) and their rollouts; the Dapr sidecar of
 every pod; `retire` (extra); the ConfigMap `pronto-release` with `sha` (extra, what release-cron's `serving`
 reads). A failure at or after the objects puts back, with `rollout undo`, only the Deployments whose revision
-moved (`rollback.nu`); the database and a restated seed are not rolled back.
+moved (`rollback.nu`); the database and a restated seed are not rolled back. The last step prunes the node's
+registry (`registry.nu`: the digests the cluster names are kept, the rest garbage-collected); a failure of it is
+a warning, never a failed release.
+
+### The build (`push.nu`)
+
+`docker buildx bake --push` through a buildx `remote` builder at the node's operator buildkitd
+(`pronto-buildkit/buildkitd`, rootless, on the node's loopback), which pushes to the node's registry from the
+node: no Docker daemon runs on the Mac, and the builder, its docker config and the staged context belong to the
+one release and go with it. The context is the app as git sees it (`git ls-files -co --exclude-standard`, no
+`.certs/`), copied to a scratch folder, so ignored files and keys are never uploaded. Every image is tagged
+`release` (a preview's name for a preview), and an unchanged service is a cache hit in the buildkitd, which
+reproduces the same digest. Never the tenants' buildkitd (`pronto-buildkit-tenants`): that one is for untrusted
+Dockerfiles and cannot reach the registry. The node's builder and registry are pronto's services, which a
+release never creates or changes; the preflight refuses when either is down.
 
 `--check` is the first steps with every write a server dry run and no build: an image is a placeholder digest.
+`--check --build` builds and pushes for real under the tag `check` (registry writes only, never the cluster),
+then dry-runs with the real digests: a builder's way to prove an app builds without releasing it. `--build`
+alone is refused.
 Where the namespace does not exist yet, the objects are asked in `default`. `--delete` removes a preview's
 namespace and refuses the release's. `--schema-from` (a preview's copy of a database) is not in this engine yet.
 
@@ -92,7 +115,7 @@ for t in schema release restore contract; do ./saytw --script tools.nu nu node/e
 ```
 
 The CUE cases and `schema_test.nu` need `cue` alone. The release, restore and tunnel tests run against fakes of
-kubectl, sops, ssh, nc and docker (`fixtures/fake-kubectl`); they and the contract test render the fixture
+kubectl, sops, ssh, nc, curl, docker (compose and buildx) and crane (`fixtures/fake-kubectl`); they and the contract test render the fixture
 app (`fixtures/aprende`, a copy of what an app's release.cue holds) with upstream's real schema, so they need
 the CUE registry, and a pronto runtime (`PRONTO_RUNTIME`, or mise's `github:bonisoft3/pronto@1.5.1`) whose six
 helpers run for real. The contract test, per upstream pin (`pronto_pin`), holds that the engine's release

@@ -5,7 +5,8 @@
 #
 # State (all optional): namespaces/<ns> (exists), revision/<deployment> (an int; apply of a Deployment
 # bumps it), reject (a Kind that a server dry run refuses), job_fail, rollout_fail (a name),
-# bare (pods without daprd), operators.json (image tags by deployment), noprimary.
+# bare (pods without daprd), operators.json (image tags by deployment), noprimary, buildkit_down and
+# registry_down (the node's builder or registry has no available replica).
 import json, os, sys
 
 d = os.environ["FAKE_DIR"]
@@ -39,6 +40,8 @@ with open(d + "/calls.jsonl", "a") as f:
     if objs:
         with open(d + "/last_objects.json", "w") as g:
             json.dump(objs, g)
+        with open(d + "/all_objects.jsonl", "a") as g:
+            g.write(json.dumps(objs) + "\n")
 
 def out(x):
     print(json.dumps(x))
@@ -113,7 +116,7 @@ if verb == "get":
             out({"metadata": {"annotations": {"gateway.networking.k8s.io/bundle-version": read("gateway_api", "v1.2.1")}}})
         sys.exit(0)
     if what == "nodes":
-        out({"items": [{"status": {"images": [{"names": ["europe-west3-docker.pkg.dev/brawl-chess/node-images/x@sha256:aa"]}]}}]})
+        out({"items": [{"status": {"images": [{"names": ["127.0.0.1:5000/x@sha256:aa"]}]}}]})
     if what == "namespace":
         if exists("namespaces/" + args[2]):
             if "json" in args:
@@ -131,6 +134,9 @@ if verb == "get":
             "envoy-gateway": "docker.io/envoyproxy/gateway:v1.2.4",
             "barman-cloud": "ghcr.io/cloudnative-pg/plugin-barman-cloud:v0.15.1"}
         ops.update(json.loads(read("operators.json", "{}")))
+        if name in ("buildkitd", "registry"):
+            down = exists("buildkit_down") if name == "buildkitd" else exists("registry_down")
+            out({"status": {"availableReplicas": 0 if down else 1}})
         if name in ops:
             out({"spec": {"template": {"spec": {"containers": [{"image": ops[name]}]}}}})
         if exists("revision/" + name):
