@@ -98,7 +98,7 @@ release never creates or changes; the preflight refuses when either is down.
 `--check --build` builds and pushes for real under the tag `check` (registry writes only, never the cluster),
 then dry-runs with the real digests: a builder's way to prove an app builds without releasing it. `--build`
 alone is refused.
-Where the namespace does not exist yet, the objects are asked in `default`. `--serving` prints `serving <sha>`, the commit the namespace's `pronto-release` ConfigMap records (empty when none), which an app's cd reads before it releases. `--delete` removes a preview's
+Where the namespace does not exist yet, the objects are asked in `default`. `--serving` prints `serving <sha> verified <sha> maintenance <ok|failed|unknown>` from the namespace's `pronto-release` ConfigMap (the commit built, which is empty for a tree that was not a clean commit; the one cd marked verified with `--verified`; the last registry maintenance), which an app's cd reads before it releases. `--delete` removes a preview's
 namespace and refuses the release's. `--schema-from` (a preview's copy of a database) is not in this engine yet.
 
 Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, previews' `--schema-from`, Studio's
@@ -111,12 +111,16 @@ Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, previews' `--
   overwrite any image in it, other apps' included. Only trusted Dockerfiles (this repository's apps, reviewed by
   ci) are built there; untrusted ones belong to the tenants' buildkitd, which cannot reach the registry. Base
   images pinned by digest keep a compromised upstream out of it.
-- Registry garbage collection runs while the registry serves (it is not put in read-only mode). A push whose blobs
-  are uploaded but whose manifest is not yet put when the collector runs loses those blobs, and its manifest then
-  points at nothing: `prune` skips the collection while an upload is open, but a push between its last blob and its
-  manifest is not visible to it. A release that pushed through such a gap fails at its first pull; the next
-  release rebuilds. The registry is restarted after each collection, so its in-memory blob descriptor cache never
-  vouches for a collected layer.
+- Registry garbage collection runs while the registry serves (it is not put in read-only mode), so it is serialized with
+  releases by leases: a release takes a ConfigMap lease in the registry's namespace before its push and holds it to its end,
+  and the collector takes the lock `registry-gc-lock`, then looks for other fresh leases and collects only when there are
+  none (a release takes its lease and then looks for the lock, so one of them always sees the other; a release waits out a
+  collection for 3 min, then fails). A lease or lock older than an hour is a dead release's. A push outside the engine (no
+  lease) is still seen only as an open upload. The registry is restarted after each collection, so its in-memory blob
+  descriptor cache never vouches for a collected layer.
+- A release whose registry maintenance fails is live: the failure is recorded in `pronto-release` (`pruned`, `prune_error`),
+  and the command ends with status 3 once its tunnel is closed. A prune stops before any deletion when a registry answers
+  anything but 200 or 404 for an image the cluster names.
 
 ### Backups (`restore.nu`)
 

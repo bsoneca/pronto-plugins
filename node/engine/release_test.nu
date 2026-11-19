@@ -145,7 +145,7 @@ def calls [w: record]: nothing -> list<string> {
 
 # The calls that change the cluster, as verb and what: no reads, no dry runs.
 def writes [w: record]: nothing -> list<string> {
-	calls $w | where {|c| ($c | split row " " | first) in [apply delete annotate rollout] and not ($c | str contains "--dry-run") and not ($c | str contains "rollout status") }
+	calls $w | where {|c| ($c | split row " " | first) in [apply delete annotate rollout] and not ($c | str contains "--dry-run") and not ($c | str contains "rollout status") and not ($c | str contains "registry-lease-") and not ($c | str contains "registry-gc-lock") }
 }
 
 def script [w: record, body: string]: nothing -> string {
@@ -207,6 +207,11 @@ def main [] {
 	test_preflight_refuses_a_builder_or_a_registry_that_is_not_there
 	test_the_registry_prune_reads_what_the_cluster_names
 	test_a_failed_read_stops_the_prune_before_it_deletes_anything
+	test_a_live_image_that_cannot_be_checked_stops_the_prune
+	test_the_collection_waits_for_releases_in_flight
+	test_the_record_is_the_commit_built_and_serving_agrees
+	test_serving_leaves_no_kubeconfig
+	test_a_template_accepted_before_its_revision_moves_is_rolled_back
 	test_the_registry_restarts_after_its_collection_when_it_caches_blobs
 	test_the_prune_outcome_is_recorded_in_the_release_configmap
 	test_a_database_image_without_pg_major_is_an_explicit_error
@@ -562,7 +567,7 @@ def test_a_failed_read_is_never_taken_for_absent [] {
 	let c = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert ($c.exit_code != 0)
 	assert (has $c.stderr "reading the database cluster aprende-db failed") $c.stderr
-	assert (not ((writes $w) | any {|x| $x | str contains "Deployment/" })) "no Deployment was applied"
+	assert equal (writes $w) [] "a failed read applies nothing at all, not even the namespace"
 	rm -f ($w.state | path join read_fail_cluster)
 	# a refused recovery patch is told with the startup error
 	rm -f ($w.state | path join calls.jsonl)
@@ -685,16 +690,21 @@ def docker-calls [w: record]: nothing -> list<string> {
 }
 
 # The local ports ssh was asked to forward: api, buildkit, registry.
+# A release that went through: exit 0, or 3 where only its registry maintenance failed (the sandbox's registry answers nothing).
+def released [r: record]: nothing -> bool {
+	$r.exit_code == 0 or ($r.exit_code == 3 and ($r.stderr | str contains "MAINTENANCE FAILED"))
+}
+
 def forwarded [w: record]: nothing -> record {
 	let p = (open --raw ($w.dir | path join ssh.log) | lines | first | parse --regex '-L (?<p>[0-9]+):' | get p)
 	{api: $p.0, buildkit: $p.1, registry: $p.2}
 }
 
 def test_a_release_builds_on_the_nodes_buildkitd_and_pushes_to_its_registry [] {
-	print "test a release builds through a remote builder on the tunnel's buildkitd port, tags the node registry's names, reads the database's major, and a failed prune is only a warning..."
+	print "test a release builds through a remote builder on the tunnel's buildkitd port, tags the node registry's names, reads the database's major, and a failed prune ends it with status 3, the release live..."
 	let w = (sandbox)
 	let r = (in-world $w $release_nu --app $w.app)
-	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	assert (released $r)
 	let fwd = (forwarded $w)
 	let docker = (docker-calls $w)
 	let create = ($docker | where {|l| $l | str starts-with "buildx create" })
@@ -718,12 +728,14 @@ def test_a_release_builds_on_the_nodes_buildkitd_and_pushes_to_its_registry [] {
 	assert equal ($docker | where {|l| $l | str starts-with "buildx rm node-" } | length) 2
 	assert (not ((open --raw ($w.dir | path join docker_config) | str trim) | path exists)) "the release's docker config is gone"
 	assert (has $r.stdout "[SUCCESS] Released aprende")
-	# no listener behind the registry's forward: the prune fails, and the release is live all the same
-	assert (has $r.stderr "warning: the node's registry was not pruned") $r.stderr
+	# no listener behind the registry's forward: the prune fails, the release is live all the same, and the command says so
+	# with its own status (3), after the tunnel is closed
+	assert equal $r.exit_code 3 $r.stderr
+	assert (has $r.stderr "MAINTENANCE FAILED: the node's registry was not pruned") $r.stderr
 	assert (not ((open --raw ($w.dir | path join ssh.log) | str contains "-L 5000:")))
 	# a preview is tagged for itself
 	let p = (in-world $w $release_nu --app $w.app --preview rc)
-	assert equal $p.exit_code 0 $"($p.stdout)\n($p.stderr)"
+	assert (released $p) $"($p.stdout)\n($p.stderr)"
 	let pbake = (docker-calls $w | where {|l| $l | str starts-with "buildx bake" } | last)
 	assert (has $pbake "--set crud.tags=127.0.0.1:5000/aprende-crud:rc")
 	rm -rf $w.dir
@@ -868,6 +880,154 @@ def test_a_failed_read_stops_the_prune_before_it_deletes_anything [] {
 	rm -rf $w.dir
 }
 
+# A registry that answers every HEAD with `status`, for as long as `body` runs: {port, pid} to it.
+def with-registry [w: record, status: int, body: closure]: nothing -> any {
+	let script = ($w.dir | path join registry.py)
+	r#'
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(@STATUS@); self.end_headers()
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(('127.0.0.1', 0), H)
+open('@DIR@/port', 'w').write(str(s.server_address[1]))
+s.serve_forever()
+'# | str replace '@STATUS@' ($status | into string) | str replace '@DIR@' $w.dir | save -f $script
+	^sh -c $"python3 ($script) & echo $! > ($w.dir)/pid"
+	mut tries = 0
+	while not ($w.dir | path join port | path exists) and $tries < 50 { sleep 100ms; $tries += 1 }
+	let pid = (open --raw ($w.dir | path join pid) | str trim)
+	try {
+		let r = (do $body (open --raw ($w.dir | path join port) | str trim))
+		^kill $pid
+		$r
+	} catch {|e|
+		^kill $pid
+		error make {msg: $e.msg}
+	}
+}
+
+def test_a_live_image_that_cannot_be_checked_stops_the_prune [] {
+	print "test a registry that answers 503 for an image the cluster names stops the prune before any delete or collection..."
+	let w = (sandbox)
+	let digest = ("sha256:" + (0..63 | each {"a"} | str join))
+	$"127.0.0.1:5000/aprende-crud:release@($digest)" | save -f ($w.state | path join inuse)
+	let r = (with-registry $w 503 {|port|
+		let body = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}}; registry prune '127.0.0.1:($port)' $build"
+		in-world $w -c $body
+	})
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "the registry answered 503 for the live image aprende-crud") $r.stderr
+	assert (not ((calls $w) | any {|c| ($c | str starts-with "exec") or ($c | str contains "registry-gc-lock") })) "no collection, no lock"
+	# a 404: the registry does not hold it, nothing to protect: the prune goes on to the collection
+	let r404 = (with-registry $w 404 {|port|
+		let body = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}}; registry prune '127.0.0.1:($port)' $build"
+		in-world $w -c $body
+	})
+	assert (not (has $r404.stderr "the registry answered")) $r404.stderr
+	rm -rf $w.dir
+}
+
+def test_the_collection_waits_for_releases_in_flight [] {
+	print "test the collection is skipped while another release holds a lease or the collector's lock, runs with only its own, and a release waits out no lock..."
+	let w = (sandbox)
+	let build = "{registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}}"
+	let use = $"use ($engine_dir | path join registry.nu); let build = ($build);"
+	# a release's lease is a labelled configmap, taken before the push
+	let a = (in-world $w -c $"($use) registry lease-acquire $build aprende aprende")
+	assert equal $a.exit_code 0 $a.stderr
+	let a_name = ($a.stdout | str trim)
+	assert ($a_name starts-with "registry-lease-aprende-") $a_name
+	let b = (in-world $w -c $"($use) registry lease-acquire $build studio studio")
+	let b_name = ($b.stdout | str trim)
+	# a collection by the first: the second's lease is in flight, so nothing is collected
+	let c = (in-world $w -c $"($use) registry collect $build '($a_name)'")
+	assert equal $c.exit_code 0 $c.stderr
+	assert (has $c.stdout "releases in flight") $c.stdout
+	assert (not ((calls $w) | any {|x| $x | str contains "garbage-collect" })) "no collection under another release's lease"
+	assert (not (($w.state | path join cm registry-gc-lock) | path exists)) "the lock is released"
+	# the second ends: only the first's own lease is left, and the collection runs
+	in-world $w -c $"($use) registry lease-release $build '($b_name)'" | ignore
+	let d = (in-world $w -c $"($use) registry collect $build '($a_name)'")
+	assert equal $d.exit_code 0 $"($d.stdout)($d.stderr)"
+	assert ((calls $w) | any {|x| $x | str contains "garbage-collect" }) "collected with only its own lease"
+	# a fresh lock held by another collector: skipped, and a lease waits (here, not at all) and refuses
+	mkdir ($w.state | path join cm)
+	{metadata: {name: "registry-gc-lock", labels: {}, annotations: {}}, data: {at: (date now | format date "%s")}} | to json | save -f ($w.state | path join cm registry-gc-lock)
+	rm -f ($w.state | path join calls.jsonl)
+	let e = (in-world $w -c $"($use) registry collect $build ''")
+	assert equal $e.exit_code 0 $e.stderr
+	assert (has $e.stdout "another release is collecting") $e.stdout
+	assert (not ((calls $w) | any {|x| $x | str contains "garbage-collect" })) "a held lock stops the collection"
+	let f = (in-world $w -c $"($use) registry lease-acquire $build aprende aprende --wait 0")
+	assert ($f.exit_code != 0) "a release does not push under a collection"
+	assert (has $f.stderr "is being collected") $f.stderr
+	assert equal (ls ($w.state | path join cm) | length) 2 "the lock and the first lease are left: the refused lease was taken back"
+	rm -rf $w.dir
+}
+
+def git-commit-all [dir: string] {
+	do { cd $dir; ^git add -A; ^git -c user.name=t -c user.email=t@t commit -q -m x } | complete | ignore
+}
+
+def test_the_record_is_the_commit_built_and_serving_agrees [] {
+	print "test a dirty tree records no commit, a clean one records HEAD and --serving prints it, and --verified marks it..."
+	let w = (sandbox)
+	git-commit-all $w.app
+	let head = (do { cd $w.app; ^git rev-parse HEAD } | str trim)
+	# dirty: a file under the app that HEAD does not hold
+	"x" | save -f ($w.app | path join dirty.txt)
+	let dirty = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert ($dirty.exit_code == 0) $dirty.stderr
+	let none = (in-world $w $release_nu --app $w.app --serving)
+	assert (has $none.stdout "serving  verified  maintenance unknown") $none.stdout
+	# clean
+	rm -f ($w.app | path join dirty.txt)
+	rm -f ($w.state | path join calls.jsonl)
+	let clean = (in-world $w $release_nu --app $w.app)
+	assert (released $clean) $"($clean.stdout)($clean.stderr)"
+	let s = (in-world $w $release_nu --app $w.app --serving)
+	assert (has $s.stdout $"serving ($head) verified  maintenance failed") $s.stdout
+	# the app's cd marks the public checks passed for it
+	let v = (in-world $w $release_nu --app $w.app --verified)
+	assert equal $v.exit_code 0 $v.stderr
+	let after = (in-world $w $release_nu --app $w.app --serving)
+	assert (has $after.stdout $"serving ($head) verified ($head) maintenance failed") $after.stdout
+	# nothing recorded: nothing to verify
+	rm -f ($w.state | path join cm pronto-release)
+	let nothing = (in-world $w $release_nu --app $w.app --verified)
+	assert ($nothing.exit_code != 0) "no record, no verification"
+	rm -rf $w.dir
+}
+
+def test_serving_leaves_no_kubeconfig [] {
+	print "test --serving and --verified remove the kubeconfig they made..."
+	let w = (sandbox)
+	let tmp = ($w.dir | path join tmp)
+	mkdir $tmp
+	with-env {TMPDIR: $tmp} {
+		let r = (in-world $w $release_nu --app $w.app --serving)
+		assert equal $r.exit_code 0 $r.stderr
+		let v = (in-world $w $release_nu --app $w.app --verified)
+		assert ($v.exit_code != 0)
+	}
+	assert equal (ls $tmp | where name =~ "kubeconfig" | length) 0 "no kubeconfig is left behind"
+	rm -rf $w.dir
+}
+
+def test_a_template_accepted_before_its_revision_moves_is_rolled_back [] {
+	print "test a Deployment whose template was accepted but whose revision has not moved yet is still rolled back, to its recorded revision..."
+	let w = (sandbox)
+	for n in [crud electric auth caddy] { "3" | save -f ($w.state | path join revision $"aprende-($n)") }
+	"aprende-crud" | save -f ($w.state | path join revision_lag)
+	"aprende-electric" | save -f ($w.state | path join rollout_fail)
+	let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert ($r.exit_code != 0)
+	let undone = (calls $w | where {|c| $c | str starts-with "rollout undo" })
+	assert ("rollout undo deployment/aprende-crud -n aprende --to-revision=3" in $undone) $"the lagging Deployment is undone: ($undone | str join '; ')"
+	rm -rf $w.dir
+}
+
 def test_the_registry_restarts_after_its_collection_when_it_caches_blobs [] {
 	print "test the registry is restarted after garbage collection while it caches blob descriptors, and not when it does not or an upload is open..."
 	let w = (sandbox)
@@ -896,10 +1056,10 @@ def test_the_registry_restarts_after_its_collection_when_it_caches_blobs [] {
 }
 
 def test_the_prune_outcome_is_recorded_in_the_release_configmap [] {
-	print "test a prune that fails is a warning recorded as prune_error, one that works as pruned..."
+	print "test a prune that fails is recorded as prune_error and ends the command with status 3, one that works as pruned..."
 	let w = (sandbox)
 	let r = (in-world $w $release_nu --app $w.app)
-	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	assert (released $r)
 	let patch = (calls $w | where {|c| $c | str starts-with "patch configmap pronto-release -n aprende --type merge" })
 	assert equal ($patch | length) 1
 	assert (has $patch.0 '"pruned":"false"') $patch.0

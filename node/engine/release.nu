@@ -234,17 +234,21 @@ def check-daprd [app: string, namespace: string, components: list<string>] {
 	if ($bare | is-not-empty) { error make {msg: $"Pods running without their Dapr sidecar: ($bare | str join ', ')"} }
 }
 
-# The record of what runs: release-cron's `serving` reads `sha` from it.
+# The record of what runs: `sha` (what `--serving` prints, empty for a tree that was not a commit), and `verified`, empty
+# until the app's cd has checked the public site for it (`--verified`).
 export def record-release [app_dir: string, node: record, pushed: record] {
 	let git_root = (do { cd $app_dir; ^git rev-parse --show-toplevel } | complete)
-	let sha = (do { cd $app_dir; ^git rev-parse HEAD } | complete | if $in.exit_code == 0 { $in.stdout | str trim } else { "" })
+	# The commit is recorded only for a tree that is that commit: a dirty one (modified or untracked files under the app) was
+	# not built from HEAD, and its record would make cd skip a release of what HEAD is.
+	let dirty = (do { cd $app_dir; ^git status --porcelain -- . } | complete | if $in.exit_code == 0 { $in.stdout | str trim | is-not-empty } else { true })
+	let sha = if $dirty { "" } else { do { cd $app_dir; ^git rev-parse HEAD } | complete | if $in.exit_code == 0 { $in.stdout | str trim } else { "" } }
 	let pin = if $git_root.exit_code == 0 { $git_root.stdout | str trim | path join .github node-engine.pin } else { "" }
 	let engine = if ($pin | is-not-empty) and ($pin | path exists) { open --raw $pin | str trim } else { "" }
 	let images = ($pushed | items {|svc, p| [$svc $"($p.tag)@($p.digest)"] } | into record)
 	{
 		apiVersion: "v1", kind: "ConfigMap"
 		metadata: {name: "pronto-release", namespace: $node.namespace}
-		data: {sha: $sha, pin: (runtime version), enginePin: $engine, images: ($images | to json --raw), at: (date now | format date "%Y-%m-%dT%H:%M:%S%z")}
+		data: {sha: $sha, verified: "", pin: (runtime version), enginePin: $engine, images: ($images | to json --raw), at: (date now | format date "%Y-%m-%dT%H:%M:%S%z")}
 	} | to json | kubectl-ok apply -f -
 }
 
@@ -364,6 +368,16 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		print $"node: (stamp) check passed: nothing was written"
 		return
 	}
+	# What the release must know before it writes anything: the database's image (the way back if the new one never
+	# serves) and each Deployment's revision. A read that fails stops it here, with nothing written.
+	let deployments = (of-kind $objects Deployment)
+	let jobs = (of-kind $objects Job)
+	# Only a confirmed absence (an empty, successful answer) means no database to put back: a failed read stops the
+	# release before it changes anything.
+	let cluster_read = (^kubectl get $"cluster.postgresql.cnpg.io/($app)-db" -n $ns --ignore-not-found -o json | complete)
+	if $cluster_read.exit_code != 0 { error make {msg: $"reading the database cluster ($app)-db failed, so its image to put back is unknown: ($cluster_read.stderr | str trim)"} }
+	let previous_image = if ($cluster_read.stdout | str trim | is-empty) { null } else { $cluster_read.stdout | from json | get -o spec.imageName }
+	let before = (rollback revisions ($deployments | get metadata.name) $ns)
 	as-list $parts.namespace | kubectl-ok apply -f -
 	dry-run $parts.rest $ns
 	# 5. secrets
@@ -373,15 +387,6 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		oidc-secret $app $ns $oidc | to json | kubectl-ok apply --server-side --field-manager=pronto-oidc -f -
 	}
 	# 6. everything but the Deployments and Jobs, after the Deployments' revisions are recorded
-	let deployments = (of-kind $objects Deployment)
-	let jobs = (of-kind $objects Job)
-	# The database's image before this release moves it: the way back if the new one never serves.
-	# Only a confirmed absence (an empty, successful answer) means no database to put back: a failed read stops the
-	# release before it changes anything.
-	let cluster_read = (^kubectl get $"cluster.postgresql.cnpg.io/($app)-db" -n $ns --ignore-not-found -o json | complete)
-	if $cluster_read.exit_code != 0 { error make {msg: $"reading the database cluster ($app)-db failed, so its image to put back is unknown: ($cluster_read.stderr | str trim)"} }
-	let previous_image = if ($cluster_read.stdout | str trim | is-empty) { null } else { $cluster_read.stdout | from json | get -o spec.imageName }
-	let before = (rollback revisions ($deployments | get metadata.name) $ns)
 	try {
 		print $"node: (stamp) applying manifests for ($app)"
 		as-list ($objects | where {|o| $o.kind not-in [Deployment Job Namespace] }) | kubectl-ok apply -f -
@@ -442,11 +447,12 @@ def main [
 	--build                    # with --check: build and push the images under the tag `check`, then dry-run with their digests
 	--delete                   # delete the preview's namespace (a preview only)
 	--serving                  # print `serving <sha>`: the commit the release recorded in the namespace (empty when none); writes nothing
+	--verified                 # record that the public site passed cd's checks for the recorded commit (`--serving` then prints it as verified)
 	--adopt                    # take an existing namespace the release did not label (its Namespace object labels it)
 	--schema-from: string = "" # the preview copy of a database (not in this engine yet)
 ] {
 	$env.GCP_T0 = (date now)
-	if $serving and ($check or $build or $delete or $adopt) { error make {msg: "--serving only reads the recorded commit: it goes with no other flag"} }
+	if ($serving or $verified) and ($check or $build or $delete or $adopt or ($serving and $verified)) { error make {msg: "--serving and --verified go with no other flag"} }
 	if $check and $delete { error make {msg: "--check and --delete cannot be given together: a check writes nothing, a delete is a write"} }
 	if $build and not $check { error make {msg: "--build only goes with --check: a release always builds"} }
 	if ($schema_from | is-not-empty) { error make {msg: "--schema-from is not in this engine yet: a preview starts with an empty database"} }
@@ -456,12 +462,39 @@ def main [
 		if ($preview | is-empty) or $node.namespace == $node.name { error make {msg: $"--delete removes a preview's namespace; ($node.namespace) is the release's"} }
 	}
 	if $serving {
-		# What cd asks before it releases: the commit the node's namespace records (an absent record, or namespace, is empty).
+		# What cd asks before it releases: what the node's namespace records (an absent record, or namespace, is empty):
+		# `serving <sha> verified <sha> maintenance <ok|failed|unknown>`.
 		tunnel with-tunnel $node.api $node.build {|fwd|
-			with-env {KUBECONFIG: (tunnel kubeconfig $node.context $fwd.api)} {
-				let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o jsonpath={.data.sha} | complete)
-				if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
-				print $"serving ($r.stdout | str trim)"
+			let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
+			try {
+				with-env {KUBECONFIG: $kubeconfig} {
+					let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o json | complete)
+					if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
+					let data = if ($r.stdout | str trim | is-empty) { {} } else { $r.stdout | from json | get -o data | default {} }
+					let maintenance = match ($data | get -o pruned | default "") { "true" => "ok", "false" => "failed", _ => "unknown" }
+					print $"serving (($data | get -o sha | default '') | str trim) verified (($data | get -o verified | default '') | str trim) maintenance ($maintenance)"
+				}
+			} finally {
+				rm -f $kubeconfig
+			}
+		}
+		return
+	}
+	if $verified {
+		# cd's word that the public site passed its checks for what is recorded: `verified` becomes `sha`.
+		tunnel with-tunnel $node.api $node.build {|fwd|
+			let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
+			try {
+				with-env {KUBECONFIG: $kubeconfig} {
+					let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o json | complete)
+					if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
+					let sha = if ($r.stdout | str trim | is-empty) { "" } else { $r.stdout | from json | get -o data.sha | default "" }
+					if ($sha | is-empty) { error make {msg: $"($node.namespace) records no commit to mark verified (a release of a dirty tree records none)"} }
+					kubectl-ok patch configmap pronto-release -n $node.namespace --type merge -p ({data: {verified: $sha}} | to json --raw)
+					print $"verified ($sha)"
+				}
+			} finally {
+				rm -f $kubeconfig
 			}
 		}
 		return
@@ -470,7 +503,7 @@ def main [
 	let meta = (render app-meta $app_info.cue_path $preview)
 	if not $delete { refuse $app_info $node $meta $compose $meta.render.enabled }
 	let facts = if $delete { {} } else { render facts $app_info.dir }
-	tunnel with-tunnel $node.api $node.build {|fwd|
+	let maintenance_failure = (tunnel with-tunnel $node.api $node.build {|fwd|
 		let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
 		try {
 			with-env {KUBECONFIG: $kubeconfig} {
@@ -481,29 +514,41 @@ def main [
 				} else {
 					let secrets = (preflight $app_info $node $fwd --check=$check --adopt=$adopt --build=$build)
 					let services = (render build-services $compose $meta.render.enabled)
-					# 2. build, or placeholders for a check
-					let preview_tag = if ($node.preview | is-empty) { "release" } else { $node.preview }
-					let pushed = if $check and not $build {
-						render placeholder-pushed $services $preview_tag
-					} else {
-						print $"node: (stamp) building ($services | str join ', ') for ($app_info.name) on the node's buildkitd"
-						build-images $app_info $node $fwd $services (if $check { "check" } else { $preview_tag })
-					}
-					release-app $app_info $node $meta $compose $facts $secrets $pushed --check=$check
-					# 16. prune: the release is live, so a failure here is a warning, recorded beside the release
-					if not $check {
-						let failure = (try { registry prune $"127.0.0.1:($fwd.registry)" $node.build; null } catch {|e|
-							print -e $"node: (stamp) warning: the node's registry was not pruned: ($e.msg)"
-							$e.msg
-						})
-						try { record-prune $node $failure } catch {|e|
-							print -e $"node: (stamp) warning: the prune's outcome was not recorded: ($e.msg)"
+					# The registry's lease (a real release only; a check pushes disposable images and writes nothing to the cluster): held while this release pushes and until it ends, so no other release collects the
+					# registry's garbage under its pushes (registry.nu).
+					let lease = if not $check { registry lease-acquire $node.build $node.name $node.namespace } else { "" }
+					try {
+						# 2. build, or placeholders for a check
+						let preview_tag = if ($node.preview | is-empty) { "release" } else { $node.preview }
+						let pushed = if $check and not $build {
+							render placeholder-pushed $services $preview_tag
+						} else {
+							print $"node: (stamp) building ($services | str join ', ') for ($app_info.name) on the node's buildkitd"
+							build-images $app_info $node $fwd $services (if $check { "check" } else { $preview_tag })
 						}
+						release-app $app_info $node $meta $compose $facts $secrets $pushed --check=$check
+						# 16. prune: the release is live, so a failure here does not undo it; it is recorded beside the release
+						# (`--serving` reports it) and ends the command with a distinct status once the tunnel is closed
+						if not $check {
+							let failure = (try { registry prune $"127.0.0.1:($fwd.registry)" $node.build $lease; null } catch {|e|
+								print -e $"node: (stamp) MAINTENANCE FAILED: the node's registry was not pruned, the release is live: ($e.msg)"
+								$e.msg
+							})
+							let unrecorded = (try { record-prune $node $failure; null } catch {|e| $e.msg })
+							if $unrecorded != null { error make {msg: $"the release is live, but the prune's outcome could not be recorded: ($unrecorded)"} }
+							$failure
+						}
+					} finally {
+						if $lease != "" { try { registry lease-release $node.build $lease } catch {|e| print -e $"node: (stamp) warning: the registry lease ($lease) was not released: ($e.msg)" } }
 					}
 				}
 			}
 		} finally {
 			rm -f $kubeconfig
 		}
+	})
+	if $maintenance_failure != null {
+		print -e $"node: (stamp) released, but the registry maintenance failed, which pronto-release records and --serving reports: ($maintenance_failure)"
+		exit 3
 	}
 }
