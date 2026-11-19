@@ -80,8 +80,11 @@ export def images [app_dir: string, node: record, fwd: record, services: list<st
 		let sets = ($services | each {|s| ["--set" $"($s).tags=($host)/($app)-($s):($tag)"] } | flatten)
 		with-builder $work $fwd {|builder|
 			with-env {SOURCE_DATE_EPOCH: "0"} {
-				let r = (do { cd $staged; open --raw ($work | path join release.compose.yaml) | ^docker buildx bake -f - --builder $builder --push --provenance=false --metadata-file $meta $"--allow=fs.read=($staged)" --set $"*.platform=($node.environment.platform)" ...$sets ...$services } | complete)
+				let r = (do { cd $staged; open --raw ($work | path join release.compose.yaml) | ^docker buildx bake -f - --builder $builder --push --provenance=false --progress=plain --metadata-file $meta $"--allow=fs.read=($staged)" --set $"*.platform=($node.environment.platform)" ...$sets ...$services } | complete)
 				if $r.exit_code != 0 { error make {msg: $"docker buildx bake on the node's buildkitd failed:\n(($r.stdout + $r.stderr) | lines | last 40 | str join (char nl))"} }
+				# what the client sent to the buildkitd, as buildx counted it
+				let sent = (($r.stdout + $r.stderr) | lines | where {|l| $l =~ 'transferring context: [0-9.]+[kMG]?B ' } | each {|l| $l | str replace -r '^#[0-9]+ ' '' } | uniq)
+				if ($sent | is-not-empty) { print $"node: (stamp) ($sent | str join '; ')" }
 			}
 		}
 		let digests = (open $meta)
