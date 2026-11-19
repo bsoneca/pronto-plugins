@@ -414,7 +414,8 @@ Deno.test("an output file not yet written keys by its place in the repository", 
   }
 });
 
-// The wrapper's cores (PRONTO-761). The pool is small (STACK_BUDGET=6) so a weight is easy to hold.
+// The wrapper claims the cue lock only, never cores (PRONTO-838, reverting the cores half of PRONTO-761); its cores are
+// bounded by GOMAXPROCS. The pool is small (STACK_BUDGET=6) so a full pool is easy to hold.
 const poolEnv = { STACK_BUDGET: "6" };
 const envOf = (dir: string, more: Record<string, string> = {}) =>
   ({ PATH: `${runtime}:${dir}/bin:${deno}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: dir, STACK_POOL: `${dir}/pool`, ...more });
@@ -466,62 +467,64 @@ const hold = async (dir: string, weight: number) => {
   return { pid: sleeper.pid, release: async () => { try { sleeper.kill("SIGKILL"); } catch { /* gone */ } await sleeper.status; } };
 };
 
-Deno.test("a learned evaluation claims its cores beside its memory, as one weight in the pool", async () => {
+Deno.test("a learned evaluation takes the cue lock only: weight 0 in the pool, its cores capped by GOMAXPROCS", async () => {
   const dir = await Deno.makeTempDir();
   await fake(dir, 0, 3);
   await prime(dir, ["export", "./spec"], 4);
   const w = start(dir, ["export", "./spec"], poolEnv);
   const [record] = await until(async () => { const j = await jobs(dir); return j.length ? j : undefined; }, "the claim's record");
-  assertMatch(record, /^[0-9]+ 4 cue$/);
+  assertMatch(record, /^[0-9]+ 0 cue$/);
   const r = await w.done;
   assertEquals(r.code, 0);
-  assertMatch(r.stderr, /slot: cue \.: weight 4 of 6 \(cue lock\)/);
+  assertMatch(r.stderr, /slot: cue \.: weight 0 of 6 \(cue lock\)/);
   assertMatch(r.stdout, /gomaxprocs 6\n/, "its parallelism is capped at the cap (the budget here, under CUE_MAX_CORES)");
 });
 
-Deno.test("an evaluation never seen weighs its folder's largest, else CUE_UNKNOWN_CORES; a weight is capped", async () => {
+Deno.test("GOMAXPROCS is the cap whatever is learned; a set GOMAXPROCS stays", async () => {
   const dir = await Deno.makeTempDir();
   await fake(dir);
-  // Another evaluation of this folder, learned at 5 cores: its claimed run leaves it as the folder's largest.
+  // Learned at 5 cores, or never seen: the cap (the budget here, under CUE_MAX_CORES).
   await prime(dir, ["export", "./a"], 5);
-  assertMatch((await run(dir, ["export", "./a"], poolEnv)).stderr, /weight 5 of 6/);
-  const sibling = await run(dir, ["export", "./b"], { ...poolEnv, CUE_UNKNOWN_GB: "1" });
-  assertMatch(sibling.stderr, /weight 5 of 6 \(cue lock\)/, "never seen: what its folder's largest weighed");
-  // Another folder has no sibling: CUE_UNKNOWN_CORES, rounded up to half a core.
-  const other = await Deno.makeTempDir({ dir });
-  const unknown = await run(dir, ["export", "./c"], { ...poolEnv, CUE_UNKNOWN_GB: "1", CUE_UNKNOWN_CORES: "2.2" }, undefined, other);
-  assertMatch(unknown.stderr, /weight 2\.5 of 6/);
-  // A learned weight above the cap is the cap, and GOMAXPROCS says so.
+  assertMatch((await run(dir, ["export", "./a"], poolEnv)).stdout, /gomaxprocs 6\n/, "learned under the cap: the cap");
+  const unseen = await run(dir, ["export", "./b"], { ...poolEnv, CUE_UNKNOWN_GB: "1" });
+  assertMatch(unseen.stderr, /weight 0 of 6 \(cue lock\)/);
+  assertMatch(unseen.stdout, /gomaxprocs 6\n/, "never seen: the cap");
+  // The cap is the smaller of CUE_MAX_CORES and the budget, whatever was learned.
   await prime(dir, ["export", "./big"], 40);
   const big = await run(dir, ["export", "./big"], { ...poolEnv, CUE_MAX_CORES: "3" });
-  assertMatch(big.stderr, /weight 3 of 6/);
+  assertMatch(big.stderr, /weight 0 of 6/);
   assertMatch(big.stdout, /gomaxprocs 3\n/);
   const set = await run(dir, ["export", "./big"], { ...poolEnv, GOMAXPROCS: "2" });
   assertMatch(set.stdout, /gomaxprocs 2\n/, "a GOMAXPROCS already set stays");
 });
 
-Deno.test("an evaluation waits for cores, holding nothing, and runs when they are free", async () => {
+Deno.test("an evaluation is admitted while the pool's weight is full, and waits only for the cue lock", async () => {
   const dir = await Deno.makeTempDir();
-  await fake(dir);
+  await fake(dir, 0, 3);
   await prime(dir, ["export", "./spec"], 3);
+  // A holder of the whole budget (a runner job, admitted outside it, or a gate) does not block the cue.
   const holder = await hold(dir, 6);
   try {
-    const w = start(dir, ["export", "./spec"], poolEnv);
-    // Waiting: it says what is held, and no cue has run.
-    await until(async () => {
-      const j = await jobs(dir);
-      return j.length === 1 && j[0].endsWith(" 6") ? true : undefined;
-    }, "its holder alone in the pool");
-    await new Promise((r) => setTimeout(r, 2500));
-    assertEquals((await jobs(dir)).length, 1, "it holds nothing while it waits");
-    await holder.release();
-    const r = await w.done;
+    const r = await run(dir, ["export", "./spec"], poolEnv);
     assertEquals(r.code, 0);
-    assertMatch(r.stderr, /waiting: .*weight 6 of 6 held \(STACK_BUDGET\).*this needs 3/);
+    assertMatch(r.stderr, /weight 0 of 6 \(cue lock\)/);
+    assert.ok(!/waiting:/.test(r.stderr), "it did not wait for the holder's weight");
     assertMatch(r.stdout, /^real cue export \.\/spec/);
   } finally {
     await holder.release();
   }
+  // Two evaluations take the lock one after the other: the second waits for the first, holding nothing.
+  await prime(dir, ["export", "./one"], 3);
+  await prime(dir, ["export", "./two"], 3);
+  await fake(dir, 0, 8);
+  const first = start(dir, ["export", "./one"], poolEnv);
+  await until(async () => (await jobs(dir)).some((j) => / cue$/.test(j)) ? true : undefined, "the first holds the lock");
+  const second = start(dir, ["export", "./two"], poolEnv);
+  await until(async () => (await names(`${dir}/pool/cue-queue`)).length ? true : undefined, "the second waits in the cue line");
+  assertEquals((await jobs(dir)).filter((j) => / cue$/.test(j)).length, 1, "it holds nothing while it waits");
+  const [a, b] = await Promise.all([first.done, second.done]);
+  assertEquals([a.code, b.code], [0, 0]);
+  assertMatch(b.stderr, /waiting: .*the cue lock: held/);
 });
 
 Deno.test("an evaluation inside a holder weighs none, and adds none to the pool", async () => {
@@ -542,12 +545,12 @@ Deno.test("an evaluation inside a holder weighs none, and adds none to the pool"
   }
 });
 
-Deno.test("a cue inside a holder is not stuck behind a cue that waits for that holder's cores", async () => {
+Deno.test("a cue inside a holder is not stuck behind a cue that waits for that holder", async () => {
   const dir = await Deno.makeTempDir();
   await fake(dir);
   const slot = await Deno.stat(`${runtime}/cue-budget/slot.ts`).then(() => `${runtime}/cue-budget/slot.ts`, () => `${runtime}/slot.ts`);
   // H holds the whole pool and, after a while, runs a cue of its own (a gate's generate); a top-level cue
-  // asked for its cores before that, and so is older in the line.
+  // asked for the lock before that, and so is older in the line.
   const h = new Deno.Command(`${deno}/deno`, {
     args: ["run", "-A", "--no-config", "--no-lock", slot, "--weight", "6", "--what", "H", "--", "sh", "-c", `sleep 3; "${wrapper}" export ./nested`],
     cwd: dir, env: envOf(dir, poolEnv), clearEnv: true, stdin: "null", stdout: "piped", stderr: "piped",
@@ -603,7 +606,7 @@ Deno.test("the cores an evaluation kept busy are learned, from slot.ts when clai
   const quick = await Deno.makeTempDir();
   await fake(quick);
   await run(quick, ["export", "./spec"], { CUE_UNKNOWN_GB: "1" });
-  assertEquals((await Array.fromAsync(Deno.readDir(`${quick}/.cache/pronto/cue-mem`))).filter((e) => e.name.endsWith(".cores") && !e.name.startsWith("folder-")).length, 0);
+  assertEquals((await Array.fromAsync(Deno.readDir(`${quick}/.cache/pronto/cue-mem`))).filter((e) => e.name.endsWith(".cores")).length, 0);
 });
 
 Deno.test("a cue found only as a mise shim is started again through mise exec, once", async () => {
@@ -667,47 +670,22 @@ Deno.test("the watchdog slows a cue outside the pool that keeps many cores busy 
 const slotPath = await Deno.stat(`${runtime}/cue-budget/slot.ts`).then(() => `${runtime}/cue-budget/slot.ts`, () => `${runtime}/slot.ts`);
 const names = async (d: string) => { try { return (await Array.fromAsync(Deno.readDir(d))).map((e) => e.name).sort(); } catch { return []; } };
 
-Deno.test("queued top-level cues reserve cores once, at the head of the cue line", async () => {
+Deno.test("queued top-level cues wait in the cue line only, reserving no cores in the pool's line", async () => {
   const dir = await Deno.makeTempDir();
-  await fake(dir);
+  await fake(dir, 0, 6);
   for (const k of ["a", "b", "c"]) await prime(dir, ["export", `./${k}`], 7);
-  const holder = await hold(dir, 6);
   const env = { STACK_BUDGET: "8" };
   const procs: { child: Deno.ChildProcess; done: Promise<{ code: number; stdout: string; stderr: string }> }[] = [];
   try {
     for (const k of ["a", "b", "c"]) { procs.push(start(dir, ["export", `./${k}`], env)); await new Promise((r) => setTimeout(r, 300)); }
-    await until(async () => (await names(`${dir}/pool/cue-queue`)).length === 3 ? true : undefined, "three tickets in the cue line");
-    await new Promise((r) => setTimeout(r, 1500));
-    assertEquals((await names(`${dir}/pool/queue`)).length, 1, "one cue reserves cores, not three");
-    // A job behind them sees 7 reserved, not 21.
-    const job = new Deno.Command(`${deno}/deno`, { args: ["run", "-A", "--no-config", "--no-lock", slotPath, "--weight", "2", "--what", "job", "--", "true"], cwd: dir, env: envOf(dir, env), clearEnv: true, stdout: "piped", stderr: "piped" }).spawn();
-    const jobDone = job.output();
-    await new Promise((r) => setTimeout(r, 2500));
-    await holder.release();
-    const results = await Promise.all([...procs.map((p) => p.done), jobDone.then((o) => ({ code: o.code, stdout: text(o.stdout), stderr: text(o.stderr) }))]);
-    assertEquals(results.map((r) => r.code), [0, 0, 0, 0]);
-    assertMatch(results[3].stderr, /weight 6 of 8 held \(STACK_BUDGET\), 7 reserved by those ahead, this needs 2/);
-  } finally {
-    await holder.release();
-    for (const p of procs) try { p.child.kill("SIGKILL"); } catch { /* done */ }
-  }
-});
-
-Deno.test("the next top-level cue reserves no cores while one runs", async () => {
-  const dir = await Deno.makeTempDir();
-  await fake(dir, 0, 6);
-  for (const k of ["a", "b"]) await prime(dir, ["export", `./${k}`], 7);
-  const env = { STACK_BUDGET: "15" };
-  const procs: { child: Deno.ChildProcess; done: Promise<{ code: number; stdout: string; stderr: string }> }[] = [];
-  try {
-    procs.push(start(dir, ["export", "./a"], env));
-    await until(async () => (await names(`${dir}/pool`)).some((n) => n.startsWith("job-")) ? true : undefined, "the first cue runs");
-    procs.push(start(dir, ["export", "./b"], env));
-    await until(async () => (await names(`${dir}/pool/cue-queue`)).length === 1 ? true : undefined, "the second waits in the cue line");
-    await new Promise((r) => setTimeout(r, 2500));
-    assertEquals(await names(`${dir}/pool/queue`), [], "a running cue's 7 and the next's 7 are not both held: a rehearsal still fits beside one cue");
+    await until(async () => (await names(`${dir}/pool/cue-queue`)).length >= 1 ? true : undefined, "a cue waiting in the cue line");
+    assertEquals(await names(`${dir}/pool/queue`), [], "no cue reserves cores");
+    // A job beside them is not held back by the cues: the pool's weight is its own.
+    const job = await new Deno.Command(`${deno}/deno`, { args: ["run", "-A", "--no-config", "--no-lock", slotPath, "--weight", "8", "--what", "job", "--", "true"], cwd: dir, env: envOf(dir, env), clearEnv: true, stdout: "piped", stderr: "piped" }).output();
+    assertEquals(job.code, 0);
+    assert.ok(!/waiting:/.test(text(job.stderr)), text(job.stderr));
     const results = await Promise.all(procs.map((p) => p.done));
-    assertEquals(results.map((r) => r.code), [0, 0]);
+    assertEquals(results.map((r) => r.code), [0, 0, 0]);
   } finally {
     for (const p of procs) try { p.child.kill("SIGKILL"); } catch { /* done */ }
   }
@@ -725,7 +703,7 @@ Deno.test("a cue inside a holder, through a slot.ts from before the -w tickets, 
   await Deno.writeTextFile(`${dir}/old/tests/slot.ts`, old);
   const holder = await hold(dir, 3);
   try {
-    // A top-level cue waiting for the holder's cores: older than the claim below, live, and named as a new one names it.
+    // A top-level cue waiting in the cue line: older than the claim below, live, and named as a new one names it.
     await Deno.mkdir(`${dir}/pool/cue-queue`, { recursive: true });
     await Deno.writeTextFile(`${dir}/pool/cue-queue/000000000000001-${holder.pid}-w`, "7 cue waiting");
     for (const copy of [`${dir}/old/tests/slot.ts`, slotPath]) {
@@ -745,7 +723,7 @@ Deno.test("a cue inside a holder, through a slot.ts from before the -w tickets, 
   }
 });
 
-Deno.test("a partial vet teaches neither its key's cores nor its folder's", async () => {
+Deno.test("a partial vet does not teach its key's cores", async () => {
   const dir = (await Deno.makeTempDir()) + "/m";
   await Deno.mkdir(dir);
   await fake(dir);
@@ -757,9 +735,8 @@ Deno.test("a partial vet teaches neither its key's cores nor its folder's", asyn
   const vet = () => run(dir, ["vet", "-c", "./..."], { CUE_DIRECT_GB: "0", CUE_UNKNOWN_GB: "0.1" });
   assertEquals((await vet()).code, 0);
   await Deno.writeTextFile(`${dir}/.cache/pronto/cue-mem/${await learnedName(dir)}.cores`, "5\n");
-  for (const n of await names(`${dir}/.cache/pronto/cue-mem`)) if (n.startsWith("folder-")) await Deno.remove(`${dir}/.cache/pronto/cue-mem/${n}`);
   await Deno.writeTextFile(`${dir}/a/a.cue`, `package a\nx: 2\n`);
   const partial = await vet();
   assertMatch(partial.stderr, /packages? passed before/);
-  assertEquals((await names(`${dir}/.cache/pronto/cue-mem`)).filter((n) => n.startsWith("folder-")), [], "a part of the vet does not set its folder's largest");
+  assertEquals(await Deno.readTextFile(`${dir}/.cache/pronto/cue-mem/${await learnedName(dir)}.cores`), "5\n", "a part of the vet does not teach its key's cores");
 });
