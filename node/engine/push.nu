@@ -48,11 +48,22 @@ export def platforms [builder: string]: nothing -> list<string> {
 	$r.stdout | lines | where {|l| $l starts-with "Platforms:" } | each {|l| $l | str replace "Platforms:" "" | split row "," | each {|p| $p | str trim } } | flatten
 }
 
+# An untracked file that looks like a secret or a key: decrypted SOPS output, dotenv files, plaintext secrets
+# files (SOPS' own `.enc.yaml` are fine), certificates and keys. Tracked files are reviewed; an untracked
+# one is whatever the machine holds, so these are never staged.
+export def looks-secret [path: string]: nothing -> bool {
+	let name = ($path | path basename)
+	($name =~ '\.dec\.') or ($name starts-with ".env") or ($name =~ '^secrets.*\.ya?ml$' and not ($name =~ '\.enc\.ya?ml$')) or ($name =~ '\.(pem|key)$')
+}
+
 # The app as git sees it, copied under `dest`: every tracked and untracked-but-not-ignored file, none of
-# `.certs/`, none that is listed but gone.
+# `.certs/`, none that is listed but gone, no untracked file that looks like a secret (said, not silent).
 def stage-context [app_dir: string, work: string, dest: string] {
+	let untracked = (do { cd $app_dir; ^git ls-files -o --exclude-standard } | lines)
+	let denied = ($untracked | where {|f| looks-secret $f })
+	if ($denied | is-not-empty) { print $"node: (stamp) not in the build context, untracked and secret-looking: ($denied | str join ', ')" }
 	let files = (do { cd $app_dir; ^git ls-files -co --exclude-standard } | lines
-		| where {|f| not ($f starts-with ".certs/") and ($app_dir | path join $f | path exists) })
+		| where {|f| not ($f starts-with ".certs/") and ($f not-in $denied) and ($app_dir | path join $f | path exists) })
 	$files | str join "\n" | save -f ($work | path join files)
 	mkdir $dest
 	# macOS's bsdtar reads -T's list after every -C: one -C only.

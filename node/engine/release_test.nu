@@ -188,6 +188,7 @@ def main [] {
 	test_sops_keeps_secrets_alone_and_no_backup_credentials_for_a_preview
 	test_a_release_builds_on_the_nodes_buildkitd_and_pushes_to_its_registry
 	test_the_build_context_is_the_tree_git_sees
+	test_untracked_secret_looking_files_are_not_staged
 	test_check_build_pushes_under_check_and_writes_nothing_to_the_cluster
 	test_build_alone_is_refused
 	test_a_failed_bake_leaves_no_builder_and_no_scratch_folder
@@ -804,5 +805,25 @@ def test_the_prune_outcome_is_recorded_in_the_release_configmap [] {
 	let p = (calls $w | first)
 	assert (has $p '"pruned":"true"') $p
 	assert (has $p '"prune_error":""') $p
+	rm -rf $w.dir
+}
+
+def test_untracked_secret_looking_files_are_not_staged [] {
+	print "test an untracked file that looks like a secret is not in the build context, a tracked one or a SOPS file is..."
+	let w = (sandbox)
+	for f in [".env" ".env.local" "x.dec.yaml" "secrets.yaml" "secrets.metal.yaml" "k.pem" "id.key" "sub/tls.key"] {
+		mkdir ($w.app | path join $f | path dirname)
+		"S" | save -f ($w.app | path join $f)
+	}
+	for f in ["secrets.other.enc.yaml" "kept.txt" "keyboard.txt" "envelope.txt"] { "x" | save -f ($w.app | path join $f) }
+	# tracked files are reviewed: kept whatever their name
+	".env.sample" | save -f ($w.app | path join .env.sample)
+	do { cd $w.app; ^git add -f .env.sample } | ignore
+	let r = (in-world $w $release_nu --app $w.app --check --build)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let tree = (open --raw ($w.dir | path join bake_tree) | lines)
+	for f in ["./secrets.other.enc.yaml" "./kept.txt" "./keyboard.txt" "./envelope.txt" "./.env.sample"] { assert ($f in $tree) $"($f) is staged: ($tree | str join ' ')" }
+	for f in ["./.env" "./.env.local" "./x.dec.yaml" "./secrets.yaml" "./secrets.metal.yaml" "./k.pem" "./id.key" "./sub/tls.key"] { assert (not ($f in $tree)) $"($f) is not staged" }
+	assert (has $r.stdout "untracked and secret-looking")
 	rm -rf $w.dir
 }
