@@ -18,12 +18,18 @@ const release_nu = (path self release.nu)
 use std/assert
 use runtime.nu [validated_pins]
 
-# The newest pin the engine says it is validated against (runtime.nu): the one this test holds.
+# The newest pin the engine says it is validated against (runtime.nu): the module version this test holds.
 def pronto-pin []: nothing -> string { $validated_pins | last }
 
+# The runtime an app that pins the module `pronto-pin` runs: the tool version that module's distribution
+# config names (an app's mise pins that, which lags the module by a release), or PRONTO_RUNTIME.
 def runtime-dir []: nothing -> string {
-	let d = if ($env.PRONTO_RUNTIME? | is-not-empty) { $env.PRONTO_RUNTIME } else { ^mise where $"github:bonisoft3/pronto@(pronto-pin)" | str trim }
-	assert equal ($d | path basename) (pronto-pin) $"the runtime is ($d), the contract is written for (pronto-pin)"
+	let d = if ($env.PRONTO_RUNTIME? | is-not-empty) { $env.PRONTO_RUNTIME } else {
+		let module = (^mise where $"github:bonisoft3/pronto@(pronto-pin)" | str trim)
+		let tool = (open --raw ($module | path join distribution config.cue) | parse --regex '#Version:\s+"(?<v>[^"]+)"' | get v.0)
+		^mise where $"github:bonisoft3/pronto@($tool)" | str trim
+	}
+	assert ($d | path basename | $in in $validated_pins) $"the runtime is ($d), which is not in validated_pins"
 	$d
 }
 
@@ -45,6 +51,9 @@ def sandbox [fx: record]: nothing -> record {
 	for p in [bin state $fx.name rec] { mkdir ($d | path join $p) }
 	let app = ($d | path join $fx.name)
 	^cp -R ($engine_dir | path join fixtures $"($fx.name)/.") $app
+	# the fixture renders with the upstream schema of the pin under test
+	let mod = ($app | path join cue.mod module.cue)
+	open $mod | str replace -r 'pronto@v1": v: "[^"]+"' $'pronto@v1": v: "v(pronto-pin)"' | save -f $mod
 	mkdir ($app | path join node schema)
 	cp ($engine_dir | path join schema node.cue) ($app | path join node schema node.cue)
 	do { cd $app; ^git init -q . } | ignore
@@ -165,6 +174,14 @@ def main [] {
 def test_the_pin_is_validated [] {
 	print "test the runtime under test is one the engine's preflight accepts..."
 	assert ((runtime-dir | path basename) in $validated_pins)
+	# The engine renders with the module's schema and runs the runtime's helpers: the two releases carry the
+	# same nushell, or the helpers this test runs are not the ones the module's apps get.
+	if ($env.PRONTO_RUNTIME? | is-empty) {
+		let module = (^mise where $"github:bonisoft3/pronto@(pronto-pin)" | str trim)
+		for f in [k8s/release.nu release-schema.nu] {
+			assert equal (open --raw ($module | path join $f)) (open --raw (runtime-dir | path join $f)) $"($f) differs between the module (pronto-pin) and its runtime (runtime-dir | path basename)"
+		}
+	}
 }
 
 def test_upstreams_own_release_test_passes [] {
