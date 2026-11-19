@@ -59,6 +59,29 @@ Counts are rows (logical changes), as found before the owner's decisions below; 
   mecha rows 24-25 (host launch), next round.
 - **Redundant upstream PRs**: pronto #11, #12, #17 and #18 closed, each naming the upstream fix.
 
+## omnishell: the way out (PRONTO-744)
+
+Nothing moves into the apps: no app declares a money field, and the pages bundle already inlines
+every seed when omnishell cannot read seed files (aprende's first load grows about 26 KB; checked
+at cutover). Phone sign-in (row 1) and kept guests (row 24) go with the sign-in work on Ory.
+
+What remains goes upstream, as the owner's pull requests, in this order (rows of the omnishell
+inventory below). Each says what an app loses on upstream v0.25.2 without it.
+
+| # | Proposal | Rows | Without it | Evidence it needs |
+|---|---|---|---|---|
+| 1 | Renderer renews a refused guest token (our PR #5, open) | 17, 21 | a renderer exits when its guest token is refused | already in #5 |
+| 2 | Renderer serves `/ready` (synced, door answers within 2 s) | 18 | our k8s readiness probe has nothing to call | probe test |
+| 3 | Lazy statechart, hatch, render and machine kits | 23 | aprende exceeds its 300 000 B first-load budget | gzip sizes, A/B on v0.25.2 |
+| 4 | `surface.firstPaint` (critical CSS and markup, one hashed inline script) | 16 | Bonk Chess's first paint waits for the whole shell | first-paint timing A/B; no-op when undeclared |
+| 5 | Correctness batch: guest session on an auth app's public screen, a create on another's key refused, a closed store read fails its callers, loopback bind on `local`, documents titled with the program's name | 15, 25, 27, 20, 26 | each a wrong answer or crash today | one test each |
+| 6 | Event-wake and render performance: wakes after submit and the last listener, reduce runs take turns, held early submits, row-context reuse, no per-row validation without a rule | 8, 11, 9, 10, 7, 13 | slower interaction; early submits lost | A/B on v0.25.2 (latency, allocations); Playwright tests |
+| 7 | `check-visual` `SLOW` throttle | 14 | apps keep their own copy (tests/slow.ts) | none beyond the doc |
+| 8 | Hook: cookies the renderer carries from the door (default none) | 19 | our sticky Electric pods need the fork | ours stays app config |
+
+Until each lands, the fork carries it. A row ships in an app only after upstream releases it; then
+the app pins that omnishell and the row leaves the fork.
+
 ## What blocks a direct pin today
 
 - **omnishell v0.25.2**: the two C hooks (phone sign-in provider list from the app, cookies the
