@@ -11,7 +11,7 @@ const engine_dir = path self .
 use std/assert
 use tunnel.nu
 use rollback.nu
-use release.nu [run-hooks decrypt-secrets preflight release-app check-operators dry-run]
+use release.nu [run-hooks decrypt-secrets preflight release-app check-operators dry-run require-tools check-ownership]
 use render.nu
 use runtime.nu
 
@@ -40,11 +40,11 @@ case "$*" in
   *) echo "sops: unexpected $*" >&2; exit 1 ;;
 esac
 '# | str trim --left | save -f ($d | path join bin sops)
-	# nc answers once the fake ssh has started (or when `tunnel_open` exists).
+	# nc answers once the fake ssh has started.
 	r#'
 #!/bin/sh
 d="$(dirname "$0")/.."
-[ -f "$d/tunnel_open" ] || [ -f "$d/ssh_started" ]
+[ -f "$d/ssh_started" ]
 '# | str trim --left | save -f ($d | path join bin nc)
 	r#'
 #!/bin/sh
@@ -64,7 +64,9 @@ case "$*" in
   *"compose"*"config"*) echo "services: {}" ;;
 esac
 '# | str trim --left | save -f ($d | path join bin docker)
-	for t in [kubectl sops nc ssh docker] { ^chmod +x ($d | path join bin $t) }
+	# tools the preflight wants on the PATH: they are not run here
+	for t in [crane gcloud] { "#!/bin/sh\nexit 0\n" | save -f ($d | path join bin $t) }
+	for t in [kubectl sops nc ssh docker crane gcloud] { ^chmod +x ($d | path join bin $t) }
 	let compose = {services: {
 		database: {}, crud: {}, electric: {}, caddy: {}
 		auth: {environment: {OIDC_PROVIDERS: "google"}}
@@ -78,8 +80,6 @@ esac
 def --wrapped in-world [w: record, ...rest]: nothing -> record {
 	let path = ([($w.dir | path join bin)] | append $env.PATH)
 	with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), SOPS_AGE_KEY: "AGE-SECRET-KEY-FAKE"} {
-		# `tunnel_open` stands for an ssh tunnel already there, nc answering.
-		if not ($w.dir | path join tunnel_open | path exists) { "" | save -f ($w.dir | path join tunnel_open) }
 		do { cd $w.app; ^$nu.current-exe --no-config-file ...$rest } | complete
 	}
 }
@@ -129,9 +129,20 @@ def main [] {
 	test_hooks_run_in_the_app_with_the_release_named
 	test_delete_refuses_the_release_namespace
 	test_tunnel_is_opened_once_and_closed_on_a_failure
-	test_tunnel_is_reused_when_open
+	test_each_release_has_its_own_tunnel_port_and_kubeconfig
+	test_ssh_that_is_not_user_at_host_never_runs
 	test_a_refused_login_fails_with_ssh_message_and_is_not_asked_again
 	test_refusals
+	test_retire_is_deleted_as_kind_dot_group
+	test_dry_run_leaves_jobs_an_earlier_release_left_alone
+	test_check_and_delete_cannot_be_given_together
+	test_preflight_refuses_a_pin_nobody_validated
+	test_preflight_needs_its_tools
+	test_a_database_that_never_comes_up_gets_its_old_image_back
+	test_a_namespace_the_release_did_not_label_is_not_its_to_touch
+	test_rollback_goes_through_every_deployment
+	test_barman_and_gateway_api_versions_are_checked
+	test_sops_keeps_secrets_alone_and_no_backup_credentials_for_a_preview
 	print "\nAll node release tests passed."
 }
 
@@ -311,27 +322,47 @@ def test_tunnel_is_opened_once_and_closed_on_a_failure [] {
 	let w = (sandbox)
 	let path = ([($w.dir | path join bin)] | append $env.PATH)
 	let msg = (with-env {PATH: $path} {
-		try { tunnel with-tunnel {ssh: "bruno@node.example", port: 26444, remotePort: 6443} {|| error make {msg: "the release failed"} }; "no error" } catch {|e| $e.msg }
+		try { tunnel with-tunnel {ssh: "deploy@node.example", remotePort: 6443} {|port| error make {msg: "the release failed"} }; "no error" } catch {|e| $e.msg }
 	})
 	assert equal $msg "the release failed"
 	let log = (open --raw ($w.dir | path join ssh.log) | lines)
 	assert equal ($log | length) 1
-	assert (has $log.0 "-N -o BatchMode=yes -o ExitOnForwardFailure=yes")
-	assert (has $log.0 "-L 26444:127.0.0.1:6443 bruno@node.example")
+	assert (has $log.0 "-N -o BatchMode=yes")
+	assert (has $log.0 "-o ExitOnForwardFailure=yes")
+	assert (has $log.0 "-o IdentitiesOnly=yes -o ConnectTimeout=10")
+	assert ($log.0 =~ '-L [0-9]+:127.0.0.1:6443 deploy@node.example')
+	assert (not ($log.0 | str contains "-L 26444:")) "never a port another release may hold"
 	let pid = (open --raw ($w.dir | path join ssh.pid) | str trim | into int)
 	sleep 300ms
 	assert (not (alive $pid)) "the tunnel is closed"
 	rm -rf $w.dir
 }
 
-def test_tunnel_is_reused_when_open [] {
-	print "test a tunnel already open is used and left alone..."
+def test_each_release_has_its_own_tunnel_port_and_kubeconfig [] {
+	print "test a tunnel already open is not shared: each release has its own port and kubeconfig, and the port only counts while its ssh lives..."
 	let w = (sandbox)
-	"" | save -f ($w.dir | path join tunnel_open)
 	let path = ([($w.dir | path join bin)] | append $env.PATH)
-	let got = (with-env {PATH: $path} { tunnel with-tunnel {ssh: "bruno@node.example", port: 26444, remotePort: 6443} {|| "in" } })
-	assert equal $got "in"
-	assert (not ($w.dir | path join ssh.log | path exists)) "no ssh was started"
+	let got = (with-env {PATH: $path, FAKE_DIR: $w.state} {
+		let one = (tunnel with-tunnel {ssh: "deploy@node.example", remotePort: 6443} {|port| {port: $port, cfg: (open --raw (tunnel kubeconfig contabo2 $port))} })
+		rm -f ($w.dir | path join ssh_started)
+		let two = (tunnel with-tunnel {ssh: "deploy@node.example", remotePort: 6443} {|port| {port: $port} })
+		{one: $one, two: $two}
+	})
+	assert ($got.one.cfg | str contains $"https://127.0.0.1:($got.one.port)") "the kubeconfig points at the release's tunnel"
+	assert ($got.one.port != 26444)
+	assert equal (open --raw ($w.dir | path join ssh.log) | lines | length) 2
+	rm -rf $w.dir
+}
+
+def test_ssh_that_is_not_user_at_host_never_runs [] {
+	print "test an api.ssh that is an option or a bare host never reaches ssh..."
+	let w = (sandbox)
+	let path = ([($w.dir | path join bin)] | append $env.PATH)
+	for bad in ["-oProxyCommand=x@y" "node.example"] {
+		let msg = (with-env {PATH: $path} { try { tunnel with-tunnel {ssh: $bad, remotePort: 6443} {|port| "in" }; "no error" } catch {|e| $e.msg } })
+		assert (has $msg "it must be user@host") $msg
+	}
+	assert (not ($w.dir | path join ssh.log | path exists)) "ssh was not started"
 	rm -rf $w.dir
 }
 
@@ -341,7 +372,7 @@ def test_a_refused_login_fails_with_ssh_message_and_is_not_asked_again [] {
 	"" | save -f ($w.dir | path join ssh_denied)
 	let path = ([($w.dir | path join bin)] | append $env.PATH)
 	let msg = (with-env {PATH: $path} {
-		try { tunnel with-tunnel {ssh: "bruno@node.example", port: 26444, remotePort: 6443} {|| "in" }; "no error" } catch {|e| $e.msg }
+		try { tunnel with-tunnel {ssh: "deploy@node.example", remotePort: 6443} {|port| "in" }; "no error" } catch {|e| $e.msg }
 	})
 	assert (has $msg "Permission denied (publickey)") $msg
 	assert equal (open --raw ($w.dir | path join ssh.log) | lines | length) 1
@@ -359,5 +390,147 @@ def test_refusals [] {
 	assert (has $r3.stderr "render.enabled is true but the app's compose project lacks a render service") $r3.stderr
 	let r4 = (in-world $w -c (script $w $"(inputs $w) refuse $app_info \($node | upsert preview 'x'\) $meta $compose false"))
 	assert (has $r4.stderr "the preview x would release into the production namespace aprende") $r4.stderr
+	rm -rf $w.dir
+}
+
+def with-node [w: record, change: string, then: string]: nothing -> string {
+	$"(inputs $w) let node = \($node | ($change)\); ($then)"
+}
+
+def test_retire_is_deleted_as_kind_dot_group [] {
+	print "test retire deletes by kind.group, so no alias can name another resource..."
+	let w = (sandbox)
+	let body = (with-node $w "upsert retire [{kind: Deployment, name: old, resource: deployment.apps}]" $"release-app $app_info $node $meta $compose $facts [] (pushed-json)")
+	let r = (in-world $w -c (script $w $body))
+	assert equal $r.exit_code 0 $"($r.stdout)($r.stderr)"
+	assert ((calls $w) | any {|c| $c == "delete deployment.apps old -n aprende --ignore-not-found" })
+	rm -rf $w.dir
+}
+
+def test_dry_run_leaves_jobs_an_earlier_release_left_alone [] {
+	print "test the server dry run does not apply a Job over the earlier release's (immutable template), it creates it under another name..."
+	let w = (sandbox)
+	"aprende-initdb aprende-migrate" | save -f ($w.state | path join existing_jobs)
+	let r = (in-world $w $release_nu --app $w.app --check)
+	assert equal $r.exit_code 0 $"($r.stdout)($r.stderr)"
+	let log = (calls $w)
+	assert ($log | any {|c| $c =~ "^create --dry-run=server -f - <- Job/aprende-initdb-dryrun,Job/aprende-migrate-dryrun$" }) ($log | str join "\n")
+	assert (not ($log | any {|c| $c =~ "apply --dry-run=server.*Job/" })) "no Job was applied in place"
+	assert equal (writes $w) []
+	# and the release itself goes through
+	let r2 = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $r2.exit_code 0 $"($r2.stdout)($r2.stderr)"
+	rm -rf $w.dir
+}
+
+def test_check_and_delete_cannot_be_given_together [] {
+	print "test --check --delete is refused and writes nothing..."
+	let w = (sandbox)
+	let r = (in-world $w $release_nu --app $w.app --check --delete --preview rc)
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "--check and --delete cannot be given together") $r.stderr
+	assert equal (writes $w) []
+	rm -rf $w.dir
+}
+
+def test_preflight_refuses_a_pin_nobody_validated [] {
+	print "test a pronto runtime outside validated_pins is refused in the preflight..."
+	let w = (sandbox)
+	let r = (in-world $w -c (script $w $"(inputs $w) $env.PRONTO_RUNTIME = '($w.dir)/9.9.9'; preflight $app_info $node --check"))
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "the pronto runtime is 9.9.9; this engine is validated against 1.5.1") $r.stderr
+	assert equal (writes $w) []
+	rm -rf $w.dir
+}
+
+def test_preflight_needs_its_tools [] {
+	print "test a tool missing from the PATH fails the preflight, naming it..."
+	let msg = (try { require-tools ["sh" "no-such-tool-xyz"]; "no error" } catch {|e| $e.msg })
+	assert (has $msg "missing on the PATH: no-such-tool-xyz") $msg
+	let w = (sandbox)
+	# a check needs neither crane nor gcloud
+	let ok = (in-world $w -c (script $w $"(inputs $w) preflight $app_info $node --check"))
+	assert equal $ok.exit_code 0 $ok.stderr
+	rm -rf $w.dir
+}
+
+def test_a_database_that_never_comes_up_gets_its_old_image_back [] {
+	print "test a database that does not come up on the new image is put back on the old one..."
+	let w = (sandbox)
+	"reg/aprende-database:17@sha256:old" | save -f ($w.state | path join previous_image)
+	"" | save -f ($w.state | path join noprimary)
+	let body = (with-node $w "upsert waits.primary 1" $"release-app $app_info $node $meta $compose $facts [] (pushed-json)")
+	let r = (in-world $w -c (script $w $body))
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "has no ready primary on")
+	let patch = (calls $w | where {|c| $c | str starts-with "patch cluster.postgresql.cnpg.io/aprende-db" })
+	assert equal ($patch | length) 1
+	assert (has $patch.0 "imageName") 
+	assert (has $patch.0 "reg/aprende-database:17@sha256:old")
+	rm -rf $w.dir
+}
+
+def test_a_namespace_the_release_did_not_label_is_not_its_to_touch [] {
+	print "test an existing namespace without the release's label is refused (and never deleted), --adopt takes it for a release..."
+	let w = (sandbox)
+	mkdir ($w.state | path join namespaces)
+	"{}" | save -f ($w.state | path join namespaces aprende-rc)
+	"{}" | save -f ($w.state | path join namespaces aprende)
+	let del = (in-world $w $release_nu --app $w.app --delete --preview rc)
+	assert ($del.exit_code != 0)
+	assert (has $del.stderr "namespace aprende-rc exists but is not labelled pronto.dev/release=aprende and pronto.dev/preview=rc") $del.stderr
+	assert equal (writes $w) []
+	let refused = (in-world $w -c (script $w $"(inputs $w) check-ownership aprende $node"))
+	assert ($refused.exit_code != 0)
+	assert (has $refused.stderr "--adopt takes it")
+	let adopted = (in-world $w -c (script $w $"(inputs $w) check-ownership aprende $node --adopt"))
+	assert equal $adopted.exit_code 0 $adopted.stderr
+	let adopted_delete = (in-world $w -c (script $w $"(inputs $w) check-ownership aprende \($node | upsert preview rc\) --adopt --delete"))
+	assert ($adopted_delete.exit_code != 0) "--adopt never takes a namespace to delete it"
+	# labelled, and the preview's name right: passes
+	{"pronto.dev/release": "aprende", "pronto.dev/preview": "rc"} | to json | save -f ($w.state | path join namespaces aprende-rc)
+	let ok = (in-world $w $release_nu --app $w.app --delete --preview rc)
+	assert equal $ok.exit_code 0 $"($ok.stdout)($ok.stderr)"
+	assert equal (writes $w) ["delete namespace aprende-rc --ignore-not-found --wait=true"]
+	rm -rf $w.dir
+}
+
+def test_rollback_goes_through_every_deployment [] {
+	print "test a Deployment that cannot be put back does not stop the others, and every failure is told..."
+	let w = (sandbox)
+	for n in [crud electric auth caddy] { "3" | save -f ($w.state | path join revision $"aprende-($n)") }
+	"aprende-crud" | save -f ($w.state | path join undo_fail)
+	"aprende-electric" | save -f ($w.state | path join rollout_fail)
+	let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert ($r.exit_code != 0)
+	let undone = (calls $w | where {|c| $c | str starts-with "rollout undo" })
+	assert equal ($undone | length) 4 "every Deployment was tried"
+	assert (has $r.stderr "rolled back aprende-electric, aprende-auth, aprende-caddy") $r.stderr
+	assert (has $r.stderr "could not roll back aprende-crud: error: no rollout history found") $r.stderr
+	rm -rf $w.dir
+}
+
+def test_barman_and_gateway_api_versions_are_checked [] {
+	print "test the barman-cloud plugin's and the Gateway API's versions are held to #Operators..."
+	let w = (sandbox)
+	{"barman-cloud": "ghcr.io/cloudnative-pg/plugin-barman-cloud:v0.14.0"} | to json | save -f ($w.state | path join operators.json)
+	let r = (in-world $w -c (script $w $"(inputs $w) check-operators $node"))
+	assert (has $r.stderr "barmanCloud: the node runs 0.14.0, the engine's schema is written for 0.15.1") $r.stderr
+	rm -f ($w.state | path join operators.json)
+	"v1.1.0" | save -f ($w.state | path join gateway_api)
+	let g = (in-world $w -c (script $w $"(inputs $w) check-operators $node"))
+	assert (has $g.stderr "the node's Gateway API CRDs are 1.1.0, the engine's schema is written for 1.2.1") $g.stderr
+	rm -rf $w.dir
+}
+
+def test_sops_keeps_secrets_alone_and_no_backup_credentials_for_a_preview [] {
+	print "test only Secrets of the SOPS file are applied, and a preview gets no backup credentials..."
+	let w = (sandbox)
+	"apiVersion: v1\nkind: Secret\nmetadata:\n  name: keep\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: notasecret\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: aprende-backup-s3\n" | save -f ($w.dir | path join sops.yaml)
+	"" | save -f ($w.app | path join secrets.metal.enc.yaml)
+	let body = (inputs $w --preview rc) + " let node = ($node | upsert backups {credentials: 'aprende-backup-s3', bucket: 'b', path: 'p'}); preflight $app_info $node --check | each {|s| $s.metadata.name + '@' + $s.metadata.namespace } | to json --raw"
+	let r = (in-world $w -c (script $w $body))
+	assert equal $r.exit_code 0 $r.stderr
+	assert equal ($r.stdout | str trim) '["keep@aprende-rc"]'
 	rm -rf $w.dir
 }

@@ -8,8 +8,15 @@ images built in Cloud Build and pulled from Artifact Registry. No kind, no secon
 
 `node/engine/` is the release of an app whose `release.cue` holds `Node: node.#Release`. It runs on the
 Mac (a runner, release-cron), never on the node; kubectl reaches the node's API over an ssh tunnel it opens
-and closes itself (`tunnel.nu`: one BatchMode login, never retried, because a failed login gets the Mac
-banned by the node's CrowdSec).
+and closes itself (`tunnel.nu`: a free local port and a kubeconfig of each release's own, so releases running
+at once share nothing; one BatchMode login, never retried, because a failed login gets the Mac banned by the
+node's CrowdSec).
+
+The app pins in its mise the tools the engine runs: `kubectl`, `docker` (compose config only), `sops` (when it
+has a SOPS file), `crane` and `gcloud` (a release that builds). The preflight fails at once on a missing one,
+and on a pronto runtime that is not in `validated_pins` (runtime.nu, held by contract_test.nu). An existing
+namespace the release did not label (`pronto.dev/release=<app>`) is refused, `--adopt` takes it; `--delete`
+never takes one.
 
 Write it into an app, byte for byte, with:
 
@@ -31,7 +38,7 @@ Node: node.#Release & {
 	name:    "aprende"
 	preview: _preview                       // -t preview=<name>, set by the engine
 	context: "contabo2"
-	api: {ssh: "bruno@node", port: 26444}   // 127.0.0.1:26444 -> the node's 127.0.0.1:6443
+	api: {ssh: "user@node"}                 // a tunnel of the release's own to the node's 127.0.0.1:6443
 	registry: {project: "brawl-chess", location: "europe-west3"}   // repository: node-images
 	hosts: production: "aprende.bsoneca.com"
 	hooks: afterJobs: [["deno", "run", "node-release/restate.ts"]]

@@ -45,6 +45,8 @@ _run: {
 #Host: {
 	rules: {
 		release: "node-engine": {platform: "k8s", priority: -1, stop: true, cmds: [{do: (_run & {#script: "node/release.nu"}).out}]}
+		// verify@k8s is not in this engine yet; the runtime's own would run on a kind cluster that is not here.
+		verify: "node-engine": {platform: "k8s", priority: -1, stop: true, cmds: [{do: "nu -c 'error make {msg: \"verify@k8s is not in the node engine yet\"}'"}]}
 	}
 	files: {
 		for path, body in #Files {(path): {seed: false, text: body}}

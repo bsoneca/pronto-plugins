@@ -121,13 +121,17 @@ export def placeholder-pushed [services: list<string>, tag: string]: nothing -> 
 export def database-tag [repo: string, digest: string]: nothing -> string {
 	let host = ($repo | split row "/" | first)
 	let cfg = (mktemp -d -t node-crane.XXXXXX | str trim)
-	let token = (^gcloud auth print-access-token --quiet | str trim)
-	with-env {DOCKER_CONFIG: $cfg} {
-		$token | ^crane auth login $host -u oauth2accesstoken --password-stdin | ignore
-		let r = (^crane config $"($repo)@($digest)" | complete)
+	try {
+		let t = (with-env {CLOUDSDK_ACTIVE_CONFIG_NAME: ($env.CLOUDSDK_ACTIVE_CONFIG_NAME? | default "pronto")} { ^gcloud auth print-access-token --quiet | complete })
+		if $t.exit_code != 0 { error make {msg: $"gcloud auth print-access-token: ($t.stderr | str trim)"} }
+		with-env {DOCKER_CONFIG: $cfg} {
+			$t.stdout | str trim | ^crane auth login $host -u oauth2accesstoken --password-stdin | ignore
+			let r = (^crane config $"($repo)@($digest)" | complete)
+			if $r.exit_code != 0 { error make {msg: $"crane config ($repo)@($digest): ($r.stderr | str trim)"} }
+			$r.stdout | from json | get config.Env | where {|e| $e starts-with "PG_MAJOR=" } | first | split row "=" | last
+		}
+	} finally {
+		# the login of the registry never outlives the call
 		rm -rf $cfg
-		if $r.exit_code != 0 { error make {msg: $"crane config ($repo)@($digest): ($r.stderr | str trim)"} }
-		let major = ($r.stdout | from json | get config.Env | where {|e| $e starts-with "PG_MAJOR=" } | first | split row "=" | last)
-		$major
 	}
 }

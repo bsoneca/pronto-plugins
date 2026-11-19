@@ -13,7 +13,7 @@ Node: node.#Release & {
 	name:    "aprende"
 	preview: _preview
 	context: "contabo2"
-	api: {ssh: "bruno@node.example", port: 26444}
+	api: ssh: "deploy@node.example"
 	registry: {project: "brawl-chess", location: "europe-west3"}
 	hosts: {production: "aprende.bsoneca.com", rc: "rc.aprende.bsoneca.com"}
 	hooks: afterJobs: [["echo", "restate"]]

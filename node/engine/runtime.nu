@@ -21,6 +21,10 @@ const exports = {
 	fresh-schema-runtime: "release-schema.nu"
 }
 
+# The upstream pronto versions this engine is validated against (contract_test.nu holds each one): a
+# release under another is refused in its preflight, so a pin moves here first.
+export const validated_pins = ["1.5.1"]
+
 # The pronto runtime's directory: PRONTO_RUNTIME (the app's release rule sets it from mise), else mise's.
 export def dir []: nothing -> string {
 	let d = ($env.PRONTO_RUNTIME? | default "")

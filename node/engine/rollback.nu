@@ -20,13 +20,15 @@ export def changed [before: table, namespace: string]: nothing -> list<string> {
 	$before | where revision > 0 | where {|b| (revision $b.name $namespace) != $b.revision } | get name
 }
 
-# Puts back each Deployment the release changed; answers their names.
-export def undo [before: table, namespace: string]: nothing -> list<string> {
+# Puts back each Deployment the release changed, every one even when one fails; answers
+# {undone, failed}, the failures with their messages.
+export def undo [before: table, namespace: string]: nothing -> record {
 	let names = (changed $before $namespace)
-	for n in $names {
+	let results = ($names | each {|n|
 		print $"node: rolling back deployment/($n) in ($namespace)"
-		^kubectl rollout undo $"deployment/($n)" -n $namespace
-		^kubectl rollout status $"deployment/($n)" -n $namespace --timeout=180s
-	}
-	$names
+		let u = (^kubectl rollout undo $"deployment/($n)" -n $namespace | complete)
+		let s = if $u.exit_code == 0 { ^kubectl rollout status $"deployment/($n)" -n $namespace --timeout=180s | complete } else { $u }
+		{name: $n, ok: ($s.exit_code == 0), why: ($s.stderr | str trim)}
+	})
+	{undone: ($results | where ok | get name), failed: ($results | where not ok | select name why)}
 }

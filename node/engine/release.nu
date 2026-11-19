@@ -28,6 +28,7 @@
 # 0 to 4 with every write replaced by a server dry run.
 
 use runtime.nu
+use runtime.nu [validated_pins]
 use render.nu
 use tunnel.nu
 use rollback.nu
@@ -39,6 +40,7 @@ const operator_pods = [
 	{operator: cnpg, namespace: cnpg-system, deployment: cnpg-controller-manager}
 	{operator: externalSecrets, namespace: external-secrets, deployment: external-secrets}
 	{operator: envoyGateway, namespace: envoy-gateway-system, deployment: envoy-gateway}
+	{operator: barmanCloud, namespace: cnpg-system, deployment: barman-cloud}
 ]
 
 # The CRDs an app's render needs, as upstream's release checks them for GKE (and the backups' store).
@@ -85,6 +87,8 @@ export def check-operators [node: record] {
 	if ($wrong | is-not-empty) { error make {msg: $"operator versions differ from #Operators:\n($wrong | str join "\n")\nbumping one is a change of the engine's pin: node/engine/schema/node.cue"} }
 	kubectl-ok get crd ...$crds -o name
 	if ($node.backups? | default null) != null { kubectl-ok get crd objectstores.barmancloud.cnpg.io -o name }
+	let bundle = (kubectl-json get crd gateways.gateway.networking.k8s.io | get metadata.annotations."gateway.networking.k8s.io/bundle-version"? | default "" | str replace -r "^v" "")
+	if $bundle != $node.operators.gatewayAPI { error make {msg: $"the node's Gateway API CRDs are ($bundle), the engine's schema is written for ($node.operators.gatewayAPI)"} }
 	let gc = (kubectl-json get gatewayclass $node.environment.gatewayClassName)
 	let accepted = ($gc.status?.conditions? | default [] | any {|c| $c.type == "Accepted" and $c.status == "True" })
 	if not $accepted { error make {msg: $"GatewayClass ($node.environment.gatewayClassName) is not Accepted"} }
@@ -117,11 +121,13 @@ def age-key []: nothing -> string {
 }
 
 # The SOPS file's Secrets, in memory, each in `namespace` (a preview's is not production's).
-export def decrypt-secrets [file: string, namespace: string]: nothing -> list {
+export def decrypt-secrets [file: string, namespace: string, --without: list<string> = []]: nothing -> list {
 	let r = (with-env {SOPS_AGE_KEY: (age-key)} { ^sops -d $file | complete })
 	if $r.exit_code != 0 { error make {msg: $"sops -d ($file): ($r.stderr | str trim)"} }
 	$r.stdout | split row --regex '(?m)^---\s*$' | where {|d| $d | str trim | is-not-empty }
-		| each {|d| $d | from yaml | upsert metadata.namespace $namespace }
+		| each {|d| $d | from yaml }
+		| where {|d| $d.kind? == "Secret" and ($d.metadata.name not-in $without) }
+		| each {|d| $d | upsert metadata.namespace $namespace }
 }
 
 # The file the app's secrets are in, or null.
@@ -149,15 +155,6 @@ def oidc-secret [name: string, namespace: string, values: record]: nothing -> re
 
 # --- helpers of the flow ---
 
-# The kubeconfig of the node's context, flattened, so every kubectl below is the node's whatever the current one.
-def pin-kubeconfig [context: string]: nothing -> string {
-	let kubeconfig = (mktemp -t kubeconfig.XXXXXX | str trim)
-	let r = (^kubectl config view --minify --flatten --context $context | complete)
-	if $r.exit_code != 0 { error make {msg: $"kubectl config view --context ($context): ($r.stderr | str trim)"} }
-	$r.stdout | save -f $kubeconfig
-	$kubeconfig
-}
-
 # The Namespace's objects and the rest, from the render.
 def namespace-split [objects: list]: nothing -> record {
 	{namespace: (of-kind $objects Namespace), rest: ($objects | where kind != Namespace)}
@@ -169,7 +166,10 @@ export def dry-run [objects: list, namespace: string] {
 	let there = ((^kubectl get namespace $namespace | complete).exit_code == 0)
 	let items = if $there { $objects } else { $objects | each {|o| if $o.kind == "Namespace" { $o } else { $o | upsert metadata.namespace "default" } } }
 	if not $there { print $"node: (stamp) namespace ($namespace) does not exist yet: the server dry run asks the objects in default" }
-	as-list $items | kubectl-ok apply --dry-run=server -f -
+	# A Job a release left holds its template immutably: the new one is asked under a name of its own, created, not applied.
+	let jobs = ($items | where kind == Job | each {|j| $j | upsert metadata.name $"($j.metadata.name)-dryrun" })
+	as-list ($items | where kind != Job) | kubectl-ok apply --dry-run=server -f -
+	if ($jobs | is-not-empty) { as-list $jobs | kubectl-ok create --dry-run=server -f - }
 }
 
 # Waits for the database's primary to run the image the release names and be ready: the cluster's
@@ -258,14 +258,55 @@ def build-images [app_info: record, node: record, compose: record, services: lis
 	} | into record
 }
 
-# Everything that is read before anything is built or written: the operators, the SOPS file, the
-# backups' credentials. Answers the file's Secrets, decrypted, for the release to apply.
-export def preflight [app_info: record, node: record]: nothing -> list {
-	check-operators $node
+# The tools a release runs, which an app pins in its mise (kubectl, sops, crane, docker, gcloud): a missing
+# one fails here, before anything is built, not halfway.
+export def require-tools [tools: list<string>] {
+	let missing = ($tools | where {|t| which $t | is-empty })
+	if ($missing | is-not-empty) { error make {msg: $"missing on the PATH: ($missing | str join ', '): the app's mise pins them, see node/README.md"} }
+}
+
+# A namespace that exists is the release's own only if it says so: `pronto.dev/release=<app>`, and the
+# preview's name for a preview. An unlabelled one (made by hand, or by another tool) is refused for
+# --delete always, and for a release unless `adopt` says the release may take it (its Namespace object
+# then labels it).
+export def check-ownership [app: string, node: record, --adopt, --delete] {
+	let r = (^kubectl get namespace $node.namespace -o json | complete)
+	if $r.exit_code != 0 { return }
+	let labels = ($r.stdout | from json | get metadata.labels? | default {})
+	let owned = (($labels | get -o "pronto.dev/release") == $app) and (($node.preview | is-empty) or (($labels | get -o "pronto.dev/preview") == $node.preview))
+	if $owned { return }
+	if $adopt and not $delete { print $"node: (stamp) adopting namespace ($node.namespace): the release labels it"; return }
+	error make {msg: $"namespace ($node.namespace) exists but is not labelled pronto.dev/release=($app)(if ($node.preview | is-not-empty) { $' and pronto.dev/preview=($node.preview)' } else { '' }): it is not this release's to (if $delete { 'delete' } else { 'change; --adopt takes it' })"}
+}
+
+# Whether the node has pulled from the registry's host before: an image of it among its nodes'. A read
+# cannot prove a pull works (that is the first rollout, which the database's old image survives), so a
+# node that never pulled from it is said, not refused.
+def check-registry-pull [node: record] {
+	let host = ($node.environment.registry | split row "/" | first)
+	let images = (kubectl-json get nodes | get items | each {|n| $n.status?.images? | default [] | get names | flatten } | flatten)
+	if not ($images | any {|i| $i | str starts-with $"($host)/" }) {
+		print $"node: (stamp) no node has pulled from ($host) yet: its k3s registries.yaml must carry it, or the first rollout waits on ImagePullBackOff"
+	}
+}
+
+# Everything that is read before anything is built or written: the pin, the tools, the operators, who owns
+# the namespace, the SOPS file, the backups' credentials. Answers the file's Secrets, decrypted, for the
+# release to apply (a preview's without the backups' credentials).
+export def preflight [app_info: record, node: record, --check, --adopt]: nothing -> list {
+	let pin = (runtime version)
+	if $pin not-in $validated_pins {
+		error make {msg: $"the pronto runtime is ($pin); this engine is validated against ($validated_pins | str join ', '), see node/engine/contract_test.nu: move the pin there first"}
+	}
 	let secrets_file = (secrets-file $app_info.dir $node)
-	let secrets = if $secrets_file == null { [] } else { decrypt-secrets $secrets_file $node.namespace }
+	require-tools (["kubectl" "docker"] | append (if $secrets_file != null { ["sops"] } else { [] }) | append (if $check { [] } else { ["crane" "gcloud"] }))
+	check-operators $node
+	check-registry-pull $node
+	check-ownership $app_info.name $node --adopt=$adopt
 	let backups_on = (($node.backups? | default null) != null and ($node.preview | is-empty))
-	if $backups_on and ($secrets | where {|s| $s.kind == "Secret" and $s.metadata.name == $node.backups.credentials } | is-empty) {
+	let skip = if ($node.backups? | default null) != null and not $backups_on { [$node.backups.credentials] } else { [] }
+	let secrets = if $secrets_file == null { [] } else { decrypt-secrets $secrets_file $node.namespace --without $skip }
+	if $backups_on and ($secrets | where {|s| $s.metadata.name == $node.backups.credentials } | is-empty) {
 		let live = ((^kubectl get secret $node.backups.credentials -n $node.namespace | complete).exit_code == 0)
 		if not $live { error make {msg: $"Node.backups reads the Secret ($node.backups.credentials), which is neither in the SOPS file nor in ($node.namespace)"} }
 	}
@@ -301,13 +342,21 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	# 6. everything but the Deployments and Jobs, after the Deployments' revisions are recorded
 	let deployments = (of-kind $objects Deployment)
 	let jobs = (of-kind $objects Job)
+	# The database's image before this release moves it: the way back if the new one never serves.
+	let previous_image = (let r = (^kubectl get $"cluster.postgresql.cnpg.io/($app)-db" -n $ns -o json | complete); if $r.exit_code == 0 { $r.stdout | from json | get -o spec.imageName } else { null })
 	let before = (rollback revisions ($deployments | get metadata.name) $ns)
 	try {
 		print $"node: (stamp) applying manifests for ($app)"
 		as-list ($objects | where {|o| $o.kind not-in [Deployment Job Namespace] }) | kubectl-ok apply -f -
 		# 8. the database, on its image
 		let db_image = (of-kind $objects Cluster | first | get spec.imageName)
-		wait-primary $app $ns $db_image $node.waits.primary
+		try { wait-primary $app $ns $db_image $node.waits.primary } catch {|e|
+			if $previous_image != null {
+				print -e $"node: (stamp) the database did not come up on the new image: putting back ($previous_image)"
+				^kubectl patch $"cluster.postgresql.cnpg.io/($app)-db" -n $ns --type merge -p ({spec: {imageName: $previous_image}} | to json --raw) | complete | ignore
+			}
+			error make {msg: $e.msg}
+		}
 		# 9. the schema Jobs, in jobOrder
 		for j in $node.jobOrder {
 			let job = ($jobs | where {|o| $o.metadata.name == $"($app)-($j)" })
@@ -335,12 +384,12 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		check-daprd $app $ns $components
 	} catch {|e|
 		print -e $"node: (stamp) the release failed: ($e.msg)"
-		let back = (try { rollback undo $before $ns } catch {|r| print -e $"node: rollback failed: ($r.msg)"; [] })
-		error make {msg: ($e.msg + (if ($back | is-not-empty) { $"; rolled back ($back | str join ', ')" } else { "" }))}
+		let back = (try { rollback undo $before $ns } catch {|r| {undone: [], failed: [{name: "(all)", why: $r.msg}]} })
+		error make {msg: ($e.msg + (if ($back.undone | is-not-empty) { $"; rolled back ($back.undone | str join ', ')" } else { "" }) + (if ($back.failed | is-not-empty) { $"; could not roll back ($back.failed | each {|f| $'($f.name): ($f.why)' } | str join '; ')" } else { "" }))}
 	}
 	# 14. retire what an earlier release left
 	for r in $node.retire {
-		kubectl-ok delete $r.kind $r.name -n $ns --ignore-not-found
+		kubectl-ok delete $r.resource $r.name -n $ns --ignore-not-found
 	}
 	# 15. record
 	record-release $app_info.dir $node $pushed
@@ -353,9 +402,12 @@ def main [
 	--preview: string = ""     # the preview's name: its own namespace beside the release's
 	--check                    # steps 0 to 4 only, every write a server dry run, nothing built
 	--delete                   # delete the preview's namespace (a preview only)
+	--adopt                    # take an existing namespace the release did not label (its Namespace object labels it)
 	--schema-from: string = "" # the preview copy of a database (not in this engine yet)
 ] {
 	$env.GCP_T0 = (date now)
+	$env.CLOUDSDK_ACTIVE_CONFIG_NAME = ($env.CLOUDSDK_ACTIVE_CONFIG_NAME? | default "pronto")
+	if $check and $delete { error make {msg: "--check and --delete cannot be given together: a check writes nothing, a delete is a write"} }
 	if ($schema_from | is-not-empty) { error make {msg: "--schema-from is not in this engine yet: a preview starts with an empty database"} }
 	let app_info = (runtime resolve-app $app)
 	let node = (render node-config $app_info.cue_path $preview)
@@ -366,15 +418,16 @@ def main [
 	let meta = (render app-meta $app_info.cue_path $preview)
 	if not $delete { refuse $app_info $node $meta $compose $meta.render.enabled }
 	let facts = if $delete { {} } else { render facts $app_info.dir }
-	tunnel with-tunnel $node.api {||
-		let kubeconfig = (pin-kubeconfig $node.context)
+	tunnel with-tunnel $node.api {|port|
+		let kubeconfig = (tunnel kubeconfig $node.context $port)
 		try {
 			with-env {KUBECONFIG: $kubeconfig} {
 				if $delete {
+					check-ownership $app_info.name $node --delete
 					print $"node: (stamp) deleting namespace ($node.namespace)"
 					kubectl-ok delete namespace $node.namespace --ignore-not-found --wait=true
 				} else {
-					let secrets = (preflight $app_info $node)
+					let secrets = (preflight $app_info $node --check=$check --adopt=$adopt)
 					let services = (render build-services $compose $meta.render.enabled)
 					# 2. build, or placeholders for a check
 					let pushed = if $check {

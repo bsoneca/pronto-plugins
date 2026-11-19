@@ -64,19 +64,34 @@ verb = args[0] if args else ""
 ns = opt("-n")
 
 if verb == "config":
-    print("apiVersion: v1\nkind: Config\ncurrent-context: contabo2\n")
+    print("apiVersion: v1\nkind: Config\ncurrent-context: contabo2\nclusters:\n- name: contabo2\n  cluster:\n    server: https://127.0.0.1:26444\n    certificate-authority-data: Zg==\ncontexts:\n- name: contabo2\n  context: {cluster: contabo2, user: u}\nusers:\n- name: u\n  user: {token: t}\n")
+    sys.exit(0)
+
+if verb == "create":
+    # a server dry run of a create: refused when the object exists (an earlier release's Job of the same name)
+    for o in objs:
+        if o.get("kind") == "Job" and o["metadata"]["name"] in read("existing_jobs").split():
+            fail(f'Error from server (AlreadyExists): jobs.batch "{o["metadata"]["name"]}" already exists')
+    for o in objs:
+        print(f'{o.get("kind", "").lower()}/{o["metadata"]["name"]} created (server dry run)')
+    sys.exit(0)
+
+if verb == "patch":
     sys.exit(0)
 
 if verb == "apply":
     dry = any(a.startswith("--dry-run") for a in args)
     for o in objs:
+        # a Job an earlier release left holds its pod template immutably: applying a new one in place is refused
+        if dry and o.get("kind") == "Job" and o["metadata"]["name"] in read("existing_jobs").split():
+            fail(f'The Job "{o["metadata"]["name"]}" is invalid: spec.template: Invalid value: field is immutable')
         if dry and o.get("kind") == read("reject"):
             fail(f'Error from server: admission webhook denied the request: {o.get("kind")}/{o["metadata"]["name"]}')
     if not dry:
         for o in objs:
             kind, name = o.get("kind"), o["metadata"]["name"]
             if kind == "Namespace":
-                open(d + "/namespaces/" + name, "w").write("")
+                open(d + "/namespaces/" + name, "w").write(json.dumps(o.get("metadata", {}).get("labels", {})))
             if kind == "Deployment" and name not in read("unchanged").split():
                 p = d + "/revision/" + name
                 rev = int(open(p).read()) if os.path.exists(p) else 0
@@ -94,9 +109,15 @@ if verb == "apply":
 if verb == "get":
     what = args[1]
     if what == "crd":
+        if "json" in args:
+            out({"metadata": {"annotations": {"gateway.networking.k8s.io/bundle-version": read("gateway_api", "v1.2.1")}}})
         sys.exit(0)
+    if what == "nodes":
+        out({"items": [{"status": {"images": [{"names": ["europe-west3-docker.pkg.dev/brawl-chess/node-images/x@sha256:aa"]}]}}]})
     if what == "namespace":
         if exists("namespaces/" + args[2]):
+            if "json" in args:
+                out({"metadata": {"labels": json.loads(read("namespaces/" + args[2], "{}") or "{}")}})
             sys.exit(0)
         fail(f'Error from server (NotFound): namespaces "{args[2]}" not found')
     if what == "gatewayclass":
@@ -107,7 +128,8 @@ if verb == "get":
             "dapr-operator": "docker.io/daprio/operator:1.16.21",
             "cnpg-controller-manager": "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1",
             "external-secrets": "ghcr.io/external-secrets/external-secrets:v0.10.5",
-            "envoy-gateway": "docker.io/envoyproxy/gateway:v1.2.4"}
+            "envoy-gateway": "docker.io/envoyproxy/gateway:v1.2.4",
+            "barman-cloud": "ghcr.io/cloudnative-pg/plugin-barman-cloud:v0.15.1"}
         ops.update(json.loads(read("operators.json", "{}")))
         if name in ops:
             out({"spec": {"template": {"spec": {"containers": [{"image": ops[name]}]}}}})
@@ -139,6 +161,8 @@ if verb == "get":
         name = args[2]
         out({"status": {"failed": 1} if exists("job_fail") else {"succeeded": 1}})
     if what.startswith("cluster.postgresql.cnpg.io"):
+        if exists("previous_image"):
+            out({"spec": {"imageName": read("previous_image")}, "status": {"managedRolesStatus": {"byStatus": {"reconciled": ["authenticator"], "pending-reconciliation": []}}}})
         out({"status": {"managedRolesStatus": {"byStatus": {"reconciled": ["authenticator"], "pending-reconciliation": []}}}})
     if what == "externalsecret":
         sys.exit(0)
@@ -146,6 +170,8 @@ if verb == "get":
 
 if verb == "rollout":
     if args[1] == "undo":
+        if read("undo_fail") == args[2].split("/")[-1]:
+            fail("error: no rollout history found")
         # the Deployment is back on its earlier revision: its rollout no longer fails
         if read("rollout_fail") == args[2].split("/")[-1]:
             os.remove(d + "/rollout_fail")

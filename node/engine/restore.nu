@@ -63,7 +63,8 @@ def copy-store [from: string, to: string, store: string] {
 	let secret = $obj.spec.configuration.s3Credentials.accessKeyId.name
 	let s = (kj -n $from get secret $secret)
 	{apiVersion: $s.apiVersion, kind: $s.kind, type: $s.type, data: $s.data, metadata: {name: $s.metadata.name}} | to json | k -n $to apply -f - | ignore
-	{apiVersion: $obj.apiVersion, kind: $obj.kind, spec: $obj.spec, metadata: {name: $obj.metadata.name}} | to json | k -n $to apply -f - | ignore
+	# no retentionPolicy: a store another namespace reads must never prune the one it copies
+	{apiVersion: $obj.apiVersion, kind: $obj.kind, spec: ($obj.spec | reject -o retentionPolicy), metadata: {name: $obj.metadata.name}} | to json | k -n $to apply -f - | ignore
 }
 
 # The drill: how long a backup and a restore take, and whether every table's rows came back.
@@ -141,9 +142,8 @@ def main [
 	if ($node.backups? | default null) == null { error make {msg: $"($app_info.name) declares no Node.backups"} }
 	if $verb not-in [drill restore] { error make {msg: $"unknown verb ($verb): drill | restore"} }
 	if $verb == "restore" and ($to | is-empty) { error make {msg: "restore needs --to <namespace>"} }
-	tunnel with-tunnel $node.api {||
-		let kubeconfig = (mktemp -t kubeconfig.XXXXXX | str trim)
-		(^kubectl config view --minify --flatten --context $node.context | complete).stdout | save -f $kubeconfig
+	tunnel with-tunnel $node.api {|port|
+		let kubeconfig = (tunnel kubeconfig $node.context $port)
 		try {
 			with-env {KUBECONFIG: $kubeconfig} {
 				if $verb == "drill" { drill $node.name $node.namespace --keep=$keep } else { restore-to $node.name $node.namespace $to --target-time $target_time }
