@@ -27,6 +27,14 @@ cases: {
 		{call: "cron.activeLine", args: ["brawl-chess", 4242, "2026-11-03T20:00:00Z", "slot"], expect: "{\"app\":\"brawl-chess\",\"pid\":4242,\"started\":\"2026-11-03T20:00:00Z\",\"phase\":\"slot\"}\n"},
 		{call: "cron.activeLine", args: ["brawl-chess", 4242, "2026-11-03T20:00:00Z", "confirm"], expect: "{\"app\":\"brawl-chess\",\"pid\":4242,\"started\":\"2026-11-03T20:00:00Z\",\"phase\":\"confirm\"}\n", why: "the phase is the only field that moves"},
 	]}
+	"a release whose ssh dropped counts as landed when the node serves its commit": {suite: "cron", steps: [
+		{call: "cron.sshDropped", args: [255], expect: true, why: "PRONTO-758: ssh's own failure"},
+		{call: "cron.sshDropped", args: [1], expect: false},
+		{call: "cron.landed", args: [255, "f203025f", "f203025f"], expect: true, why: "2026-11-18 11:34 BRT: Studio landed, its ssh dropped"},
+		{call: "cron.landed", args: [255, "ebd25c98", "f203025f"], expect: false},
+		{call: "cron.landed", args: [1, "f203025f", "f203025f"], expect: false, why: "the release command failed: not a drop"},
+		{call: "cron.landed", args: [255, "", "f203025f"], expect: false},
+	]}
 	"only a run that released or failed makes the next one wait": {suite: "cron", steps: [
 		{call: "cron.spaced", args: ["released"], expect: true},
 		{call: "cron.spaced", args: ["failed"], expect: true},
