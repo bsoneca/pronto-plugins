@@ -823,6 +823,7 @@ export class Run {
     // answer, so the runner never reaches an address only its own network reaches. A failure there quotes its status
     // alone, and nothing is kept from what it said.
     const door = new URL(URL_).origin, url = new URL(path, URL_), foreign = url.origin !== door;
+    if (foreign && (h.keep || h.keepText || h.body !== undefined)) throw new Error(`${h.method} ${path}: a step to another origin sends no body and keeps nothing`);
     const headers: Record<string, string> = foreign ? {} : await this.fillAll(h.headers ?? {});
     if (!h.anon && !foreign) {
       if (!a) throw new Error("an http step with a session names its actor (by)");
@@ -864,7 +865,6 @@ export class Run {
         && texts.every(([, got]) => got !== undefined);
       // A `keep` path with no value is kept as "undefined" on purpose, not failed: `ifKept` skips the steps that
       // use it (an empty production listing before a Publish lists the game, PRONTO-613).
-      if (ok && foreign && (h.keep || h.keepText)) throw new Error(`${h.method} ${path}: nothing is kept from another origin's answer`);
       if (ok) for (const [name, at] of Object.entries((h.keep ?? {}) as Record<string, string>)) this.vars.set(name, String(at.split(".").reduce((o: any, k) => o?.[k], json)));
       if (ok) for (const [name, got] of texts) this.vars.set(name, got as string);
       return [ok, foreign ? `${s} (another origin's answer, not quoted)` : `${s} ${text.slice(0, e.has || e.lacks ? 1500 : 300)}`];
