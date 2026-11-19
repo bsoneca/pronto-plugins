@@ -87,7 +87,9 @@ a warning, never a failed release, and its outcome is recorded in the ConfigMap 
 node: no Docker daemon runs on the Mac, and the builder, its docker config and the staged context belong to the
 one release and go with it. The context is the app as git sees it (`git ls-files -co --exclude-standard`, no
 `.certs/`, and no untracked file that looks like a secret: `*.dec.*`, `.env*`, `secrets*.yaml` that is not
-`.enc.yaml`, `*.pem`, `*.key`), copied to a scratch folder, so ignored files and keys are never uploaded. Every image is tagged
+`.enc.yaml`, `*.pem`, `*.key`), copied to a scratch folder, so ignored files and keys are never uploaded, but for the exact files the app's
+`Node.build.include` names (what its `generate` writes and git ignores, and its Dockerfiles COPY: it fails when one is missing
+or looks like a secret). Every image is tagged
 `release` (a preview's name for a preview), and an unchanged service is a cache hit in the buildkitd, which
 reproduces the same digest. Never the tenants' buildkitd (`pronto-buildkit-tenants`): that one is for untrusted
 Dockerfiles and cannot reach the registry. The node's builder and registry are pronto's services, which a
