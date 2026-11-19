@@ -58,13 +58,19 @@ export def looks-secret [path: string]: nothing -> bool {
 }
 
 # The app as git sees it, copied under `dest`: every tracked and untracked-but-not-ignored file, none of
-# `.certs/`, none that is listed but gone, no untracked file that looks like a secret (said, not silent).
-def stage-context [app_dir: string, work: string, dest: string] {
+# `.certs/`, none that is listed but gone, no untracked file that looks like a secret (said, not silent), and
+# the ignored files the app's `build.include` names (generated files its Dockerfiles COPY), which must exist.
+def stage-context [app_dir: string, work: string, dest: string, include: list<string>] {
+	let missing = ($include | where {|f| ($app_dir | path join $f | path type) != "file" })
+	if ($missing | is-not-empty) { error make {msg: $"build.include names ($missing | str join ', '), which is not a file in ($app_dir): the app's generate writes it"} }
+	let secret = ($include | where {|f| looks-secret $f })
+	if ($secret | is-not-empty) { error make {msg: $"build.include names ($secret | str join ', '), which looks like a secret and is never staged"} }
 	let untracked = (do { cd $app_dir; ^git ls-files -o --exclude-standard } | lines)
 	let denied = ($untracked | where {|f| looks-secret $f })
 	if ($denied | is-not-empty) { print $"node: (stamp) not in the build context, untracked and secret-looking: ($denied | str join ', ')" }
 	let files = (do { cd $app_dir; ^git ls-files -co --exclude-standard } | lines
-		| where {|f| not ($f starts-with ".certs/") and ($f not-in $denied) and ($app_dir | path join $f | path exists) })
+		| where {|f| not ($f starts-with ".certs/") and ($f not-in $denied) and ($app_dir | path join $f | path exists) }
+		| append $include | uniq)
 	$files | str join "\n" | save -f ($work | path join files)
 	mkdir $dest
 	# macOS's bsdtar reads -T's list after every -C: one -C only.
@@ -82,7 +88,7 @@ export def images [app_dir: string, node: record, fwd: record, services: list<st
 	let work = (mktemp -d -t node-build.XXXXXX | str trim | path expand)
 	try {
 		let staged = ($work | path join app)
-		let count = (stage-context $dir $work $staged)
+		let count = (stage-context $dir $work $staged $node.build.include)
 		let kib = (^du -sk $staged | split row "\t" | first | into int)
 		print $"node: (stamp) build context: ($count) files, ($kib) KiB"
 		let compose = (do { cd $staged; ^docker compose --profile "*" config } | complete)

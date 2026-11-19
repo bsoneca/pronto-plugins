@@ -194,6 +194,7 @@ def main [] {
 	test_a_release_builds_on_the_nodes_buildkitd_and_pushes_to_its_registry
 	test_the_build_context_is_the_tree_git_sees
 	test_untracked_secret_looking_files_are_not_staged
+	test_build_include_stages_the_ignored_files_it_names
 	test_check_build_pushes_under_check_and_writes_nothing_to_the_cluster
 	test_build_alone_is_refused
 	test_a_failed_bake_leaves_no_builder_and_no_scratch_folder
@@ -831,6 +832,46 @@ def test_untracked_secret_looking_files_are_not_staged [] {
 	for f in ["./secrets.other.enc.yaml" "./kept.txt" "./keyboard.txt" "./envelope.txt" "./.env.sample"] { assert ($f in $tree) $"($f) is staged: ($tree | str join ' ')" }
 	for f in ["./.env" "./.env.local" "./x.dec.yaml" "./secrets.yaml" "./secrets.metal.yaml" "./k.pem" "./id.key" "./sub/tls.key"] { assert (not ($f in $tree)) $"($f) is not staged" }
 	assert (has $r.stdout "untracked and secret-looking")
+	rm -rf $w.dir
+}
+
+def test_build_include_stages_the_ignored_files_it_names [] {
+	print "test build.include stages the ignored generated files it names, and a missing or secret-looking one fails before the build..."
+	let w = (sandbox)
+	mkdir ($w.app | path join gen)
+	"gen/\n" | save -f ($w.app | path join .gitignore)
+	"{}" | save -f ($w.app | path join gen index.json)
+	"{}" | save -f ($w.app | path join gen other.json)
+	let cue = ($w.app | path join release.cue)
+	let base = (open --raw $cue)
+	# ignored: not staged without the include
+	let plain = (in-world $w $release_nu --app $w.app --check --build)
+	assert equal $plain.exit_code 0 $"($plain.stdout)\n($plain.stderr)"
+	assert (not ("./gen/index.json" in (open --raw ($w.dir | path join bake_tree) | lines))) "an ignored file is not staged by itself"
+	# named: staged, and only it
+	$"($base)\nNode: build: include: [\"gen/index.json\"]\n" | save -f $cue
+	let r = (in-world $w $release_nu --app $w.app --check --build)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let tree = (open --raw ($w.dir | path join bake_tree) | lines)
+	assert ("./gen/index.json" in $tree) $"the named file is staged: ($tree | str join ' ')"
+	assert (not ("./gen/other.json" in $tree)) "a file it does not name is not"
+	# missing: says so, builds nothing
+	rm -f ($w.dir | path join bake_tree)
+	$"($base)\nNode: build: include: [\"gen/gone.json\"]\n" | save -f $cue
+	let m = (in-world $w $release_nu --app $w.app --check --build)
+	assert ($m.exit_code != 0) "a missing file fails"
+	assert (has $m.stderr "build.include names gen/gone.json, which is not a file") $m.stderr
+	assert (not (($w.dir | path join bake_tree) | path exists)) "nothing was built"
+	# secret-looking: refused
+	"S" | save -f ($w.app | path join gen secrets.yaml)
+	$"($base)\nNode: build: include: [\"gen/secrets.yaml\"]\n" | save -f $cue
+	let k = (in-world $w $release_nu --app $w.app --check --build)
+	assert ($k.exit_code != 0) "a secret-looking file fails"
+	assert (has $k.stderr "looks like a secret") $k.stderr
+	# not a path inside the app
+	$"($base)\nNode: build: include: [\"../x\"]\n" | save -f $cue
+	let o = (in-world $w $release_nu --app $w.app --check --build)
+	assert ($o.exit_code != 0) "an escaping path fails the schema"
 	rm -rf $w.dir
 }
 

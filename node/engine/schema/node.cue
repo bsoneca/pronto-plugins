@@ -146,6 +146,10 @@ import (
 			namespace:  *"pronto-registry" | string
 			deployment: *"registry" | string
 		}
+		// Files git ignores that the images' Dockerfiles COPY (what the app's `generate` writes and keeps out of
+		// the repository): staged though ignored, each one exact (no glob, no `..`), and a release fails when
+		// one is missing, so a build that needs `generate` says so before it uploads anything.
+		include: *[] | [...=~"^(\\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)(/\\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)*$"]
 		buildkit: {
 			port:       *1234 | int & >0 & <65536
 			namespace:  *"pronto-buildkit" | string
