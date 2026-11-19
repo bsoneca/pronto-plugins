@@ -818,11 +818,14 @@ export class Run {
     const h = st.http, path = await this.fill(h.path);
     sel.observe(this.s.id, h.method ?? "GET", String(h.path).split("?")[0]);
     // A path on another origin than the app's door (a published game's address, read from a listing a maker wrote) is
-    // a page another party controls (PRONTO-837). It is asked as no one: no session, no cookie, no header of the
-    // scenario's. No request follows a redirect onto another origin, whatever origin it started from: such a 3xx is the
-    // answer, so the runner never reaches an address only its own network reaches. A failure there quotes its status
-    // alone, and nothing is kept from what it said.
-    const door = new URL(URL_).origin, url = new URL(path, URL_), foreign = url.origin !== door;
+    // a page another party controls (PRONTO-837). It is asked as no one, in a request context of its own (no session, no
+    // cookie, no header, no body), follows no redirect (a 3xx is its answer, so it cannot send the runner to an address
+    // only the runner's network reaches, nor pass on the door's answer), keeps nothing, and a failure quotes its status
+    // alone. A path on the door follows redirects only onto the door's own host or a name under it, on any port (its
+    // sign-in start sends a browser to the broker: id.<host> where it is released, another port at hand); a redirect
+    // anywhere else is its answer.
+    const door = new URL(URL_), url = new URL(path, URL_), foreign = url.origin !== door.origin;
+    const ours = (u: URL) => u.hostname === door.hostname || u.hostname.endsWith(`.${door.hostname}`);
     if (foreign && (h.keep || h.keepText || h.body !== undefined)) throw new Error(`${h.method} ${path}: a step to another origin sends no body and keeps nothing`);
     const headers: Record<string, string> = foreign ? {} : await this.fillAll(h.headers ?? {});
     if (!h.anon && !foreign) {
@@ -834,34 +837,41 @@ export class Run {
     }
     const body = h.body === undefined ? undefined : await this.fillAll(h.body);
     if (body !== undefined && typeof body !== "string") headers["Content-Type"] ??= "application/json";
-    const ctx = h.anon || !a || foreign ? anon : a.ctx.request;
-    // Redirects followed by hand, on the door's own origin alone, as a browser would (a 303, or a 301/302 after a write,
-    // asks again with GET and no body); twenty at most.
-    const fetchOnDoor = async () => {
-      let at = url, method = h.method ?? "GET", data = typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body);
-      for (let hop = 0;; hop++) {
-        const res = await ctx.fetch(at.href, { method, headers, data, failOnStatusCode: false, maxRedirects: 0 });
-        const to = res.status() >= 300 && res.status() < 400 ? res.headers()["location"] : undefined;
-        if (!to || hop >= 20) return res;
-        const next = new URL(to, at);
-        if (next.origin !== door) return res;
-        if (res.status() === 303 || ((res.status() === 301 || res.status() === 302) && method !== "GET" && method !== "HEAD")) { method = "GET"; data = undefined; }
-        at = next;
-      }
+    const ctx = h.anon || !a ? anon : a.ctx.request;
+    const send = async (): Promise<{ status: number; headers: Record<string, string>; text: string }> => {
+      const via = foreign ? await request.newContext({ ignoreHTTPSErrors: true }) : ctx;
+      try {
+        const res = foreign
+          ? await via.fetch(url.href, { method: h.method, failOnStatusCode: false, maxRedirects: 0 })
+          : await (async () => {
+            let at = url, method = h.method ?? "GET", data = typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body);
+            for (let hop = 0;; hop++) {
+              // The session goes to the door alone, as a browser carries it: a hop on another origin is asked without it.
+              const sent = at.origin === door.origin ? headers : Object.fromEntries(Object.entries(headers).filter(([k]) => k.toLowerCase() !== "authorization"));
+              const res = await via.fetch(at.href, { method, headers: sent, data, failOnStatusCode: false, maxRedirects: 0 });
+              const to = res.status() >= 300 && res.status() < 400 ? res.headers()["location"] : undefined;
+              const next = to === undefined ? undefined : new URL(to, at);
+              if (!next || hop >= 20 || !ours(next)) return res;
+              // As a browser would: a 303, or a 301/302 after a write, asks again with GET and no body.
+              if (res.status() === 303 || ((res.status() === 301 || res.status() === 302) && method !== "GET" && method !== "HEAD")) { method = "GET"; data = undefined; }
+              at = next;
+            }
+          })();
+        return { status: res.status(), headers: res.headers(), text: await res.text() };
+      } finally { if (foreign) await via.dispose(); }
     };
     const ask = async (): Promise<[boolean, unknown]> => {
-      const res = await fetchOnDoor();
-      const text = await res.text();
+      const res = await send(), text = res.text;
       let json: any = null;
       try { json = JSON.parse(text); } catch { /* not JSON */ }
-      const e = h.expect, s = res.status();
+      const e = h.expect, s = res.status;
       const texts = Object.entries((h.keepText ?? {}) as Record<string, string>).map(([name, re]) => [name, text.match(new RegExp(re))?.[1]] as const);
       const ok = (e.status === undefined || s === e.status) && (!e.refused || s >= 400)
         && (e.length === undefined || (Array.isArray(json) && json.length === e.length))
         && (e.json === undefined || holds(json, await this.fillAll(e.json)))
         && (e.has === undefined || (await this.fillAll(e.has) as string[]).every((x) => text.includes(x)))
         && (e.lacks === undefined || (await this.fillAll(e.lacks) as string[]).every((x) => !text.includes(x)))
-        && (e.header === undefined || Object.entries(await this.fillAll(e.header) as Record<string, string>).every(([k, v]) => res.headers()[k] === v))
+        && (e.header === undefined || Object.entries(await this.fillAll(e.header) as Record<string, string>).every(([k, v]) => res.headers[k] === v))
         && texts.every(([, got]) => got !== undefined);
       // A `keep` path with no value is kept as "undefined" on purpose, not failed: `ifKept` skips the steps that
       // use it (an empty production listing before a Publish lists the game, PRONTO-613).
