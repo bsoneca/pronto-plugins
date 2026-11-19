@@ -16,33 +16,45 @@ const engine_dir = path self .
 const release_nu = (path self release.nu)
 
 use std/assert
+use runtime.nu [validated_pins]
 
-const pronto_pin = "1.5.1"
+# The newest pin the engine says it is validated against (runtime.nu): the one this test holds.
+def pronto-pin []: nothing -> string { $validated_pins | last }
 
 def runtime-dir []: nothing -> string {
-	let d = if ($env.PRONTO_RUNTIME? | is-not-empty) { $env.PRONTO_RUNTIME } else { ^mise where $"github:bonisoft3/pronto@($pronto_pin)" | str trim }
-	assert equal ($d | path basename) $pronto_pin $"the runtime is ($d), the contract is written for ($pronto_pin)"
+	let d = if ($env.PRONTO_RUNTIME? | is-not-empty) { $env.PRONTO_RUNTIME } else { ^mise where $"github:bonisoft3/pronto@(pronto-pin)" | str trim }
+	assert equal ($d | path basename) (pronto-pin) $"the runtime is ($d), the contract is written for (pronto-pin)"
 	$d
+}
+
+# The fixture apps: what an app of each shape builds and runs. Studio's has the runtime services,
+# the render service and the service token.
+def fixture-apps []: nothing -> list<record> {
+	[
+		{name: "aprende", services: [database crud electric caddy auth migrate], build: [database crud electric auth caddy migrate]}
+		{name: "studio", services: [database crud electric caddy auth migrate render ticker imgproxy], build: [ticker imgproxy database crud electric auth caddy migrate render]}
+	]
 }
 
 # The engine's own steps and patches, which upstream has no counterpart of.
 const own_kinds = [ObjectStore ScheduledBackup ResourceQuota LimitRange]
 
 # A scratch world: the fixture app, a git repository (upstream's bake asks for its top), the fakes.
-def sandbox []: nothing -> record {
+def sandbox [fx: record]: nothing -> record {
 	let d = (mktemp -d -t node-contract.XXXXXX | str trim)
-	for p in [bin state aprende rec] { mkdir ($d | path join $p) }
-	let app = ($d | path join aprende)
-	^cp -R ($engine_dir | path join fixtures aprende/.) $app
+	for p in [bin state $fx.name rec] { mkdir ($d | path join $p) }
+	let app = ($d | path join $fx.name)
+	^cp -R ($engine_dir | path join fixtures $"($fx.name)/.") $app
 	mkdir ($app | path join node schema)
 	cp ($engine_dir | path join schema node.cue) ($app | path join node schema node.cue)
 	do { cd $app; ^git init -q . } | ignore
 	cp ($engine_dir | path join fixtures fake-kubectl) ($d | path join bin kubectl)
-	let services = [database crud electric caddy auth migrate]
+	let services = $fx.services
 	$services | str join "\n" | save -f ($d | path join services.txt)
 	({services: ($services | each {|s| [$s (match $s {
 		"auth" => {environment: {OIDC_PROVIDERS: "google"}}
 		"migrate" => {environment: {DATABASE_URL: "postgres://x", REQUIRED_TABLES: "a,b"}}
+		"ticker" => {environment: {SERVICE_JWT: "x", TICK: "1"}}
 		_ => {}
 	})] } | into record)} | to json | save -f ($d | path join compose.json))
 	r#'
@@ -75,8 +87,10 @@ for a; do case "$a" in *.json) [ -f "$a" ] && cp "$a" "$d/rec/$n/" ;; esac; done
 echo "$*" > "$d/rec/$n/args"
 exec "$REAL_CUE" "$@"
 '# | str trim --left | save -f ($d | path join bin cue)
-	for t in [kubectl docker cue] { ^chmod +x ($d | path join bin $t) }
-	"" | save -f ($d | path join tunnel_open)
+	# deno signs the service token; both releases ask it, and it is not run for real here
+	"#!/bin/sh\ncat >/dev/null\necho fake.service.token\n" | save -f ($d | path join bin deno)
+	for t in [crane gcloud sops] { "#!/bin/sh\nexit 0\n" | save -f ($d | path join bin $t) }
+	for t in [kubectl docker cue deno crane gcloud sops] { ^chmod +x ($d | path join bin $t) }
 	{dir: $d, app: $app, state: ($d | path join state)}
 }
 
@@ -116,12 +130,36 @@ def writes [w: record]: nothing -> list<string> {
 	} | flatten | where {|l| not ($l starts-with "apply Namespace/") and $l != "apply ConfigMap/pronto-release" }
 }
 
+# The paths of a value with what is at each, one line a leaf: two values' difference is the lines of one only.
+def leaves [prefix: string = ""]: any -> list<string> {
+	let v = $in
+	match ($v | describe | split row "<" | first) {
+		"record" => ($v | items {|k, x| $x | leaves $"($prefix).($k)" } | flatten)
+		"list" | "table" => ($v | enumerate | each {|e| $e.item | leaves $"($prefix)[($e.index)]" } | flatten)
+		_ => [$"($prefix) = ($v | to json --raw)"]
+	}
+}
+
+def differences [a: any, b: any]: nothing -> string {
+	let la = ($a | leaves)
+	let lb = ($b | leaves)
+	$"only in the engine: ($la | where {|l| $l not-in $lb } | str join '; ')\nonly in upstream: ($lb | where {|l| $l not-in $la } | str join '; ')"
+}
+
 def main [] {
-	print $"Running node contract tests against upstream pronto ($pronto_pin)...\n"
+	print $"Running node contract tests against upstream pronto (pronto-pin)...\n"
 	test_upstreams_own_release_test_passes
-	test_objects_change_only_as_declared
-	test_data_and_order_match_upstreams_main
+	test_the_pin_is_validated
+	for fx in (fixture-apps) {
+		test_objects_change_only_as_declared $fx
+		test_data_and_order_match_upstreams_main $fx
+	}
 	print "\nAll node contract tests passed."
+}
+
+def test_the_pin_is_validated [] {
+	print "test the runtime under test is one the engine's preflight accepts..."
+	assert ((runtime-dir | path basename) in $validated_pins)
 }
 
 def test_upstreams_own_release_test_passes [] {
@@ -143,15 +181,22 @@ def undeclared []: list -> list {
 		}
 }
 
-def test_objects_change_only_as_declared [] {
-	print "test the engine's objects are upstream's, but for its declared patches and additions..."
+# The images a release would have pushed, as a CUE file: the engine refuses an image that is not pinned by digest.
+def pushed-cue [fx: record]: nothing -> string {
+	let digest = ("a" | fill -c "a" -w 64)
+	$"package ($fx.name)\nApp: image: pushed: {\n" + ($fx.build | each {|s| $"\t\"($s)\": {tag: \"latest\", digest: \"sha256:($digest)\"}\n" } | str join "") + "}\n"
+}
+
+def test_objects_change_only_as_declared [fx: record] {
+	print $"test ($fx.name): the engine's objects are upstream's, but for its declared patches and additions..."
 	for variant in [
 		""
 		"Node: {backups: {bucket: \"b\", path: \"p\"}, tenant: {egress: [{ports: [{port: 443}]}]}}\n"
 		"Node: {preview: \"rc\"}\n"
 	] {
-		let w = (sandbox)
-		if ($variant | is-not-empty) { $"package aprende\n($variant)" | save -f ($w.app | path join variant.cue) }
+		let w = (sandbox $fx)
+		pushed-cue $fx | save -f ($w.app | path join pushed.cue)
+		if ($variant | is-not-empty) { $"package ($fx.name)\n($variant)" | save -f ($w.app | path join variant.cue) }
 		let tags = if ($variant | str contains "preview") { [-t preview=rc] } else { [] }
 		let r = (in-world $w -c $"cd '($w.app)'; ^cue export -e '{engine: nodeManifests, upstream: upstreamObjects}' --out json ...($tags | to nuon) . | print")
 		# the export wants the hosts the variant names: the preview has its own
@@ -166,10 +211,10 @@ def test_objects_change_only_as_declared [] {
 	}
 }
 
-def test_data_and_order_match_upstreams_main [] {
-	print "test the engine's release data and kubectl order are those of upstream's `main -e gke`..."
+def test_data_and_order_match_upstreams_main [fx: record] {
+	print $"test ($fx.name): the engine's release data and kubectl order are those of upstream's `main -e gke`..."
 	# Upstream's main, over the fakes.
-	let up = (sandbox)
+	let up = (sandbox $fx)
 	let r = (in-world $up ((runtime-dir) | path join k8s release.nu) --app $up.app -e gke)
 	assert equal $r.exit_code 0 $"($r.stdout | lines | last 20 | str join (char nl))\n($r.stderr)"
 	# The data it handed CUE last: the roles and the pushed images, two JSON files of one call.
@@ -177,16 +222,17 @@ def test_data_and_order_match_upstreams_main [] {
 	let last = ($calls | where {|c| (ls $c | where name =~ '\.json$' | length) >= 2 } | last)
 	let upstream_data = (ls $last | where name =~ '\.json$' | get name | each {|f| open $f } | reduce {|it, acc| $acc | merge deep $it })
 	# The engine, over a second world, with the digests the fake docker gave (a hash of the repository).
-	let en = (sandbox)
+	let en = (sandbox $fx)
 	let registry = "europe-west3-docker.pkg.dev/brawl-chess/node-images"
-	let pushed = ([database crud electric auth caddy migrate] | each {|s|
-		[$s {tag: (if $s == "database" { "17" } else { "latest" }), digest: $"sha256:(($"($registry)/aprende-($s)") | hash sha256)"}]
+	let pushed = ($fx.build | each {|s|
+		[$s {tag: (if $s == "database" { "17" } else { "latest" }), digest: $"sha256:(($"($registry)/($fx.name)-($s)") | hash sha256)"}]
 	} | into record)
-	let script = $"use ($engine_dir | path join render.nu); use ($engine_dir | path join runtime.nu); use ($release_nu) [release-app]; let app_info = \(runtime resolve-app '($en.app)'\); let node = \(render node-config $app_info.cue_path ''\); let meta = \(render app-meta $app_info.cue_path ''\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let pushed = ($pushed | to nuon); render release-data $app_info.dir $compose $facts $pushed | save -f ($en.dir | path join data.json); release-app $app_info $node $meta $compose $facts [] $pushed"
+	let script = $"use ($engine_dir | path join render.nu); use ($engine_dir | path join runtime.nu); use ($release_nu) [release-app]; let app_info = \(runtime resolve-app '($en.app)'\); let node = \(render node-config $app_info.cue_path ''\); let meta = \(render app-meta $app_info.cue_path ''\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let pushed = ($pushed | to nuon); use ($release_nu) [preflight]; preflight $app_info $node --check | ignore; render release-data $app_info.dir $compose $facts $pushed | save -f ($en.dir | path join data.json); release-app $app_info $node $meta $compose $facts [] $pushed"
 	let e = (in-world $en -c $script)
 	assert equal $e.exit_code 0 $"($e.stdout | lines | last 20 | str join (char nl))\n($e.stderr)"
 	# 2. data
-	assert equal ((open ($en.dir | path join data.json)) | canon | to json) ($upstream_data | canon | to json)
+	let mine = (open ($en.dir | path join data.json))
+	assert equal ($mine | canon | to json) ($upstream_data | canon | to json) (differences $mine $upstream_data)
 	# 3. order, but for the engine's own Namespace and record
 	let want = (writes $up)
 	let got = (writes $en)
