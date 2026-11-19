@@ -447,12 +447,14 @@ def main [
 	--build                    # with --check: build and push the images under the tag `check`, then dry-run with their digests
 	--delete                   # delete the preview's namespace (a preview only)
 	--serving                  # print `serving <sha>`: the commit the release recorded in the namespace (empty when none); writes nothing
-	--verified                 # record that the public site passed cd's checks for the recorded commit (`--serving` then prints it as verified)
+	--prune                    # only the registry maintenance: prune and collect, and record the outcome (a release's retry); releases nothing
+	--verified: string = ""    # the commit cd's public checks passed for: recorded as verified when it is the one the node serves, refused when not (`--serving` then prints it as verified)
 	--adopt                    # take an existing namespace the release did not label (its Namespace object labels it)
 	--schema-from: string = "" # the preview copy of a database (not in this engine yet)
 ] {
 	$env.GCP_T0 = (date now)
-	if ($serving or $verified) and ($check or $build or $delete or $adopt or ($serving and $verified)) { error make {msg: "--serving and --verified go with no other flag"} }
+	let verifying = ($verified | is-not-empty)
+	if ([$serving $verifying $prune] | where {|f| $f } | length) > 1 or (([$serving $verifying $prune] | any {|f| $f }) and ($check or $build or $delete or $adopt)) { error make {msg: "--serving, --verified and --prune go with no other flag, and one at a time"} }
 	if $check and $delete { error make {msg: "--check and --delete cannot be given together: a check writes nothing, a delete is a write"} }
 	if $build and not $check { error make {msg: "--build only goes with --check: a release always builds"} }
 	if ($schema_from | is-not-empty) { error make {msg: "--schema-from is not in this engine yet: a preview starts with an empty database"} }
@@ -480,7 +482,24 @@ def main [
 		}
 		return
 	}
-	if $verified {
+	if $prune {
+		# The registry maintenance of a release that was live when its own failed: the same prune and collection, outcome recorded.
+		tunnel with-tunnel $node.api $node.build {|fwd|
+			let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
+			try {
+				with-env {KUBECONFIG: $kubeconfig} {
+					let failure = (try { registry prune $"127.0.0.1:($fwd.registry)" $node.build ""; null } catch {|e| $e.msg })
+					record-prune $node $failure
+					if $failure != null { error make {msg: $"the registry maintenance failed: ($failure)"} }
+					print $"node: (stamp) the node's registry maintenance passed"
+				}
+			} finally {
+				rm -f $kubeconfig
+			}
+		}
+		return
+	}
+	if $verifying {
 		# cd's word that the public site passed its checks for what is recorded: `verified` becomes `sha`.
 		tunnel with-tunnel $node.api $node.build {|fwd|
 			let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
@@ -490,8 +509,10 @@ def main [
 					if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
 					let sha = if ($r.stdout | str trim | is-empty) { "" } else { $r.stdout | from json | get -o data.sha | default "" }
 					if ($sha | is-empty) { error make {msg: $"($node.namespace) records no commit to mark verified (a release of a dirty tree records none)"} }
-					kubectl-ok patch configmap pronto-release -n $node.namespace --type merge -p ({data: {verified: $sha}} | to json --raw)
-					print $"verified ($sha)"
+					# cd's checks were of the commit it names: a release since then (another run's) is not what they saw.
+					if $sha != $verified { error make {msg: $"the node now serves ($sha), not ($verified) which the checks passed for: it is not marked verified"} }
+					kubectl-ok patch configmap pronto-release -n $node.namespace --type merge -p ({data: {verified: $verified}} | to json --raw)
+					print $"verified ($verified)"
 				}
 			} finally {
 				rm -f $kubeconfig
@@ -514,9 +535,9 @@ def main [
 				} else {
 					let secrets = (preflight $app_info $node $fwd --check=$check --adopt=$adopt --build=$build)
 					let services = (render build-services $compose $meta.render.enabled)
-					# The registry's lease (a real release only; a check pushes disposable images and writes nothing to the cluster): held while this release pushes and until it ends, so no other release collects the
-					# registry's garbage under its pushes (registry.nu).
-					let lease = if not $check { registry lease-acquire $node.build $node.name $node.namespace } else { "" }
+					# The registry's lease (a release, and a check that builds: both push): held while this release pushes and until it ends, so
+					# no other release collects the registry's garbage under its pushes (registry.nu).
+					let lease = if (not $check) or $build { registry lease-acquire $node.build $node.name $node.namespace } else { "" }
 					try {
 						# 2. build, or placeholders for a check
 						let preview_tag = if ($node.preview | is-empty) { "release" } else { $node.preview }
@@ -526,7 +547,10 @@ def main [
 							print $"node: (stamp) building ($services | str join ', ') for ($app_info.name) on the node's buildkitd"
 							build-images $app_info $node $fwd $services (if $check { "check" } else { $preview_tag })
 						}
+						# the lease renewed after the push, and again after the long phases that follow
+						if $lease != "" { registry lease-renew $node.build $lease }
 						release-app $app_info $node $meta $compose $facts $secrets $pushed --check=$check
+						if $lease != "" { registry lease-renew $node.build $lease }
 						# 16. prune: the release is live, so a failure here does not undo it; it is recorded beside the release
 						# (`--serving` reports it) and ends the command with a distinct status once the tunnel is closed
 						if not $check {

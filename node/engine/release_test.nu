@@ -71,7 +71,7 @@ exec sleep 60
 d="$(dirname "$0")/.."
 echo "$*" >> "$d/docker.log"
 case "$*" in
-  *"compose"*"config --format json"*) cat "$d/compose.json" ;;
+  *"compose"*"config --format json"*) [ -z "$DOCKER_CONFIG" ] || readlink "$DOCKER_CONFIG/cli-plugins/docker-compose" >> "$d/compose_plugins"; cat "$d/compose.json" ;;
   *"compose"*"config"*) echo "services: {}" ;;
   "buildx version") echo "github.com/docker/buildx v0 fake" ;;
   "buildx create "*) echo "$DOCKER_CONFIG" > "$d/docker_config" ;;
@@ -209,6 +209,9 @@ def main [] {
 	test_a_failed_read_stops_the_prune_before_it_deletes_anything
 	test_a_live_image_that_cannot_be_checked_stops_the_prune
 	test_the_collection_waits_for_releases_in_flight
+	test_a_stale_lock_is_taken_over_against_its_resource_version
+	test_prune_runs_only_the_maintenance
+	test_the_apps_compose_plugin_is_the_one_that_renders
 	test_the_record_is_the_commit_built_and_serving_agrees
 	test_serving_leaves_no_kubeconfig
 	test_a_template_accepted_before_its_revision_moves_is_rolled_back
@@ -928,41 +931,110 @@ def test_a_live_image_that_cannot_be_checked_stops_the_prune [] {
 	rm -rf $w.dir
 }
 
+# A Lease as the API server holds it, seeded into the fake's state: renewed `ago` seconds ago by `holder`.
+def seed-lease [w: record, name: string, holder: string, ago: int, --labelled] {
+	mkdir ($w.state | path join lease)
+	let at = ((date now) - ($ago * 1sec) | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%S.%6fZ")
+	{
+		apiVersion: "coordination.k8s.io/v1", kind: "Lease"
+		metadata: ({name: $name, namespace: "pronto-registry", creationTimestamp: ((date now) - ($ago * 1sec) | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%SZ"), resourceVersion: "7", uid: "00000000-0000-0000-0000-000000000007"} | merge (if $labelled { {labels: {"pronto.dev/registry-lease": "true"}} } else { {} }))
+		spec: {holderIdentity: $holder, leaseDurationSeconds: 3600, renewTime: $at}
+	} | to json | save -f ($w.state | path join lease $name)
+}
+
 def test_the_collection_waits_for_releases_in_flight [] {
 	print "test the collection is skipped while another release holds a lease or the collector's lock, runs with only its own, and a release waits out no lock..."
 	let w = (sandbox)
 	let build = "{registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}}"
 	let use = $"use ($engine_dir | path join registry.nu); let build = ($build);"
-	# a release's lease is a labelled configmap, taken before the push
+	# a release's lease is a labelled Lease, taken in one call before the push
 	let a = (in-world $w -c $"($use) registry lease-acquire $build aprende aprende")
 	assert equal $a.exit_code 0 $a.stderr
 	let a_name = ($a.stdout | str trim)
 	assert ($a_name starts-with "registry-lease-aprende-") $a_name
+	assert equal (calls $w | where {|c| $c | str starts-with "create" } | length) 1 "one call makes the lease, labelled"
 	let b = (in-world $w -c $"($use) registry lease-acquire $build studio studio")
 	let b_name = ($b.stdout | str trim)
-	# a collection by the first: the second's lease is in flight, so nothing is collected
+	# a collection by the first: the second's lease is in flight (read from the Lease the server holds), nothing is collected
 	let c = (in-world $w -c $"($use) registry collect $build '($a_name)'")
 	assert equal $c.exit_code 0 $c.stderr
 	assert (has $c.stdout "releases in flight") $c.stdout
 	assert (not ((calls $w) | any {|x| $x | str contains "garbage-collect" })) "no collection under another release's lease"
-	assert (not (($w.state | path join cm registry-gc-lock) | path exists)) "the lock is released"
+	assert (not (($w.state | path join lease registry-gc-lock) | path exists)) "the lock is released"
 	# the second ends: only the first's own lease is left, and the collection runs
 	in-world $w -c $"($use) registry lease-release $build '($b_name)'" | ignore
 	let d = (in-world $w -c $"($use) registry collect $build '($a_name)'")
 	assert equal $d.exit_code 0 $"($d.stdout)($d.stderr)"
 	assert ((calls $w) | any {|x| $x | str contains "garbage-collect" }) "collected with only its own lease"
-	# a fresh lock held by another collector: skipped, and a lease waits (here, not at all) and refuses
-	mkdir ($w.state | path join cm)
-	{metadata: {name: "registry-gc-lock", labels: {}, annotations: {}}, data: {at: (date now | format date "%s")}} | to json | save -f ($w.state | path join cm registry-gc-lock)
+	assert (($w.state | path join lease $a_name) | path exists) "its own lease is left to its release"
+	# a fresh lock held by another collector: skipped and left alone; a lease waits (here, not at all) and refuses
+	seed-lease $w registry-gc-lock collector-other 5
 	rm -f ($w.state | path join calls.jsonl)
 	let e = (in-world $w -c $"($use) registry collect $build ''")
 	assert equal $e.exit_code 0 $e.stderr
 	assert (has $e.stdout "another release is collecting") $e.stdout
 	assert (not ((calls $w) | any {|x| $x | str contains "garbage-collect" })) "a held lock stops the collection"
+	assert ((open --raw ($w.state | path join lease registry-gc-lock) | from json | get spec.holderIdentity) == "collector-other") "another's lock is not deleted"
 	let f = (in-world $w -c $"($use) registry lease-acquire $build aprende aprende --wait 0")
 	assert ($f.exit_code != 0) "a release does not push under a collection"
 	assert (has $f.stderr "is being collected") $f.stderr
-	assert equal (ls ($w.state | path join cm) | length) 2 "the lock and the first lease are left: the refused lease was taken back"
+	assert equal (ls ($w.state | path join lease) | length) 2 "the lock and the first lease are left: the refused lease was taken back"
+	rm -rf $w.dir
+}
+
+def test_a_stale_lock_is_taken_over_against_its_resource_version [] {
+	print "test a stale collector lock is replaced against the resourceVersion read, a conflict leaves it, and a lease is renewed in place..."
+	let w = (sandbox)
+	let use = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}};"
+	seed-lease $w registry-gc-lock collector-dead 7200
+	let r = (in-world $w -c $"($use) registry collect $build ''")
+	assert equal $r.exit_code 0 $"($r.stdout)($r.stderr)"
+	let replace = (calls $w | where {|c| $c | str starts-with "replace -f -" })
+	assert equal ($replace | length) 1 "the stale lock is replaced"
+	assert ((calls $w) | any {|x| $x | str contains "garbage-collect" }) "and the collection runs"
+	assert (not (($w.state | path join lease registry-gc-lock) | path exists)) "its own lock is released"
+	# a conflict: someone else renewed it between the read and the replace
+	seed-lease $w registry-gc-lock collector-dead 7200
+	"" | save -f ($w.state | path join lease_conflict)
+	rm -f ($w.state | path join calls.jsonl)
+	let c = (in-world $w -c $"($use) registry collect $build ''")
+	assert equal $c.exit_code 0 $c.stderr
+	assert (has $c.stdout "another release is collecting") $c.stdout
+	assert (not ((calls $w) | any {|x| $x | str contains "garbage-collect" })) "a lost takeover collects nothing"
+	assert ((open --raw ($w.state | path join lease registry-gc-lock) | from json | get spec.holderIdentity) == "collector-dead") "and deletes nothing of another's"
+	rm -f ($w.state | path join lease_conflict)
+	# a lease renewed in place
+	seed-lease $w registry-lease-aprende-x registry-lease-aprende-x 600 --labelled
+	let before = (open --raw ($w.state | path join lease registry-lease-aprende-x) | from json | get spec.renewTime)
+	let n = (in-world $w -c $"($use) registry lease-renew $build registry-lease-aprende-x")
+	assert equal $n.exit_code 0 $n.stderr
+	let after = (open --raw ($w.state | path join lease registry-lease-aprende-x) | from json | get spec.renewTime)
+	assert ($after > $before) "the renewal moved its renewTime"
+	rm -rf $w.dir
+}
+
+def test_prune_runs_only_the_maintenance [] {
+	print "test --prune records the maintenance outcome and releases nothing, and goes with no other flag..."
+	let w = (sandbox)
+	let bad = (in-world $w $release_nu --app $w.app --prune --check)
+	assert ($bad.exit_code != 0)
+	let r = (in-world $w $release_nu --app $w.app --prune)
+	assert ($r.exit_code != 0) "no registry answers behind the forward: the maintenance fails, and says so"
+	assert (has $r.stderr "the registry maintenance failed") $r.stderr
+	assert (not ((writes $w) | any {|x| $x | str contains "Deployment/" })) "nothing was released"
+	assert ((calls $w) | any {|c| $c | str starts-with "patch configmap pronto-release" }) "the outcome is recorded"
+	rm -rf $w.dir
+}
+
+def test_the_apps_compose_plugin_is_the_one_that_renders [] {
+	print "test the compose plugin the app's mise pins (first on the PATH) is linked into the config docker renders with..."
+	let w = (sandbox)
+	"#!/bin/sh\nexit 0\n" | save -f ($w.dir | path join bin docker-cli-plugin-docker-compose)
+	^chmod +x ($w.dir | path join bin docker-cli-plugin-docker-compose)
+	let r = (in-world $w -c (script $w ((inputs $w) + " let c = (render compose-config $app_info.dir); print ($c.services | columns | length)")))
+	assert equal $r.exit_code 0 $r.stderr
+	assert ((open --raw ($w.dir | path join compose_plugins) | str trim | path basename) == "docker-cli-plugin-docker-compose") "the pinned plugin is linked as docker-compose"
+	assert ((open --raw ($w.dir | path join compose_plugins) | str trim) | str contains ($w.dir | path basename)) "and it is the sandbox's, first on the PATH"
 	rm -rf $w.dir
 }
 
@@ -989,13 +1061,16 @@ def test_the_record_is_the_commit_built_and_serving_agrees [] {
 	let s = (in-world $w $release_nu --app $w.app --serving)
 	assert (has $s.stdout $"serving ($head) verified  maintenance failed") $s.stdout
 	# the app's cd marks the public checks passed for it
-	let v = (in-world $w $release_nu --app $w.app --verified)
+	let wrong = (in-world $w $release_nu --app $w.app --verified deadbeef)
+	assert ($wrong.exit_code != 0) "a commit the node does not serve is not marked verified"
+	assert (has $wrong.stderr "the node now serves") $wrong.stderr
+	let v = (in-world $w $release_nu --app $w.app --verified $head)
 	assert equal $v.exit_code 0 $v.stderr
 	let after = (in-world $w $release_nu --app $w.app --serving)
 	assert (has $after.stdout $"serving ($head) verified ($head) maintenance failed") $after.stdout
 	# nothing recorded: nothing to verify
 	rm -f ($w.state | path join cm pronto-release)
-	let nothing = (in-world $w $release_nu --app $w.app --verified)
+	let nothing = (in-world $w $release_nu --app $w.app --verified $head)
 	assert ($nothing.exit_code != 0) "no record, no verification"
 	rm -rf $w.dir
 }
@@ -1008,7 +1083,7 @@ def test_serving_leaves_no_kubeconfig [] {
 	with-env {TMPDIR: $tmp} {
 		let r = (in-world $w $release_nu --app $w.app --serving)
 		assert equal $r.exit_code 0 $r.stderr
-		let v = (in-world $w $release_nu --app $w.app --verified)
+		let v = (in-world $w $release_nu --app $w.app --verified abc)
 		assert ($v.exit_code != 0)
 	}
 	assert equal (ls $tmp | where name =~ "kubeconfig" | length) 0 "no kubeconfig is left behind"

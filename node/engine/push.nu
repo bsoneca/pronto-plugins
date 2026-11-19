@@ -11,17 +11,13 @@
 
 use build.nu [stamp]
 use render.nu
+export use render.nu [nearest-on-path]
 use runtime.nu
 
 # The buildx plugin the app's mise pins: `docker-buildx`, `docker-cli-plugin-docker-buildx` (what aqua names
 # docker/buildx's binary), or `buildx`. The one whose folder comes first on the PATH wins, not the first
 # name tried: mise puts the app's pin ahead of the machine's, and a Homebrew `docker-buildx` (built with
 # whatever Go is current, 0.38.0 with Go 1.27) must not shadow the pinned `docker-cli-plugin-docker-buildx`.
-export def nearest-on-path [found: list<string>, dirs: list<string>]: nothing -> string {
-	let dirs = ($dirs | each {|d| $d | path expand })
-	$found | each {|p| {path: $p, at: ($dirs | enumerate | where item == ($p | path dirname | path expand) | get index | append 1000000 | first)} } | sort-by at | first | get path
-}
-
 def buildx-binary []: nothing -> string {
 	let found = ([docker-buildx docker-cli-plugin-docker-buildx buildx] | each {|n| which --all $n } | flatten | get path | uniq)
 	if ($found | is-empty) { error make {msg: "missing on the PATH: docker-buildx: the app's mise pins it (aqua:docker/buildx), see node/README.md"} }
@@ -117,7 +113,7 @@ export def images [app_dir: string, node: record, fwd: record, services: list<st
 		let count = (stage-context $dir $work $staged $node.build.include)
 		let kib = (^du -sk $staged | split row "\t" | first | into int)
 		print $"node: (stamp) build context: ($count) files, ($kib) KiB"
-		let compose = (do { cd $staged; ^docker compose --profile "*" config } | complete)
+		let compose = (render compose-run $staged --profile "*" config)
 		if $compose.exit_code != 0 { error make {msg: $"docker compose config failed in ($dir): ($compose.stderr | str trim)"} }
 		runtime release-tree $compose.stdout | save -f ($work | path join release.compose.yaml)
 		let meta = ($work | path join meta.json)

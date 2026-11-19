@@ -6,10 +6,31 @@
 
 use runtime.nu [runtime-services auth-provider-environment]
 
+export def nearest-on-path [found: list<string>, dirs: list<string>]: nothing -> string {
+	let dirs = ($dirs | each {|d| $d | path expand })
+	$found | each {|p| {path: $p, at: ($dirs | enumerate | where item == ($p | path dirname | path expand) | get index | append 1000000 | first)} } | sort-by at | first | get path
+}
+
+# `docker compose` run in `dir` with the compose plugin the app's mise pins (`docker-compose`, or `docker-cli-plugin-docker-compose`
+# as aqua names it), linked into a docker config of this call's own, so the CLI finds it with no daemon and no plugin of the
+# host's. With none on the PATH, the docker CLI's own plugins answer. Answers `complete`'s record.
+export def --wrapped compose-run [dir: string, ...args: string]: nothing -> record {
+	let found = ([docker-compose docker-cli-plugin-docker-compose] | each {|n| which --all $n } | flatten | get path | uniq)
+	if ($found | is-empty) {
+		return (do { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd ($dir | path expand); ^docker compose ...$args } | complete)
+	}
+	let config = (mktemp -d -t node-compose.XXXXXX | str trim)
+	mkdir ($config | path join cli-plugins)
+	^ln -sf (nearest-on-path $found $env.PATH) ($config | path join cli-plugins docker-compose)
+	let r = (with-env {DOCKER_CONFIG: $config} { do { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd ($dir | path expand); ^docker compose ...$args } | complete })
+	rm -rf $config
+	$r
+}
+
 # `docker compose config`'s project for the app, as JSON, read with no seal key in the environment
 # so the airlock's shows the local stack's default, the development key a release refuses.
 export def compose-config [dir: string]: nothing -> record {
-	let r = (do { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd ($dir | path expand); ^docker compose --profile "*" config --format json } | complete)
+	let r = (compose-run $dir --profile "*" config --format json)
 	if $r.exit_code != 0 { error make {msg: $"docker compose config failed in ($dir): ($r.stderr | str trim)"} }
 	$r.stdout | from json
 }
