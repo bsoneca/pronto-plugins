@@ -113,6 +113,56 @@ The rest goes upstream as the owner's pull requests, in this order:
 
 Until each lands, the fork carries it; an app pins upstream mecha once every row it uses has.
 
+## pronto: the way out (PRONTO-746)
+
+Rows of the pronto inventory below, sorted by the owner's decisions.
+
+- **Dropped, upstream has it:** rows 17, 22, 33, 35, 49, and the route half of row 14. Rows 31, 32
+  and 55 (A) and row 43 (B, compared with upstream #2432) are marked "verify": each is checked against v1.5.1 before an app pins it, and what
+  v1.5.1 lacks joins the proposals.
+- **Dropped with the fork:** rows 1, 2, 6 and 61 (fork machinery, pins, link renames); row 58
+  regenerates on the v1.5.1 base.
+- **Dropped by decision:** row 54 (write.ts). Rows 5 and 11 touch write.ts: their write.ts part
+  goes inside their own upstream proposals, or is lost.
+- **Already ours, deleted from the fork:** row 3 (devflow), row 4 (the `cue` wrapper, in
+  pronto-plugins `machine/` through PRONTO-761) and row 57 (the harness's `integrate@local` stamp,
+  slot and upgrade-from-released; its host launch is upstream's `integrate@host`, verify).
+- **Ours, in pronto-plugins `gcp/engine` (PRONTO-494):** rows 26, 27, 28, 30 and the docs of row 59.
+  The engine already has the staged go-live, rollback, local gate, rehearsal, release record and
+  secrets check. Brawl Chess still releases with the fork's `gcp/` and moves last.
+- **Ours, needs a k8s engine in pronto-plugins:** rows 44 (the metal environment, by decision),
+  45 (tenant and preview releases), 46 (the node's database operations; its
+  `containerResources.postgres` joins proposal 5) and row 48's seed-fill part (its
+  `PRONTO_IMAGE_REGISTRY` goes to the plugins' pins, `INTEGRATE_LOCAL_SECRETS` to the harness). pronto-plugins has
+  no k8s engine yet; it is built the way `gcp/engine` was, on one upstream hook: release steps an
+  environment adds to `k8s/release.nu`. Studio and Brawl Chess on the node wait for it.
+- **On Ory, carried until then:** rows 16, 18 and 20 (edge sign-in, per-app broker ports, the
+  `capabilities.auth.*` extras). Row 19 (`identity/bearer.ts`, `issuer.cue`) is rechecked under
+  PRONTO-822.
+- **Waiting on upstream PRs already open:** row 52 is #20, and row 21 folds into it; row 50 waits for
+  mecha #4, then #13; row 51 is #19; rows 23, 24, 25 and 29 are #10, rebased on v1.5.1 and trimmed of
+  its commits 7, 11, 12 and 13 (rows 26, 28 and 30 stay in `gcp/engine`); row 47's k8s replay joins
+  #10 or a k8s sibling PR; row 9 is #16. #8 is the old whole-fork-line PR that the proposals below
+  replace: a candidate to close.
+
+The rest goes upstream as the owner's pull requests, in this order:
+
+| # | Proposal | Rows | Without it | Evidence it needs |
+|---|---|---|---|---|
+| 1 | Door: answers several sites, serves the SPA shell while the renderer is down, gltf compression and `no-transform` | 11, 10 (9 is #16) | Studio's sites and released pages need the fork's door | Caddyfile tests |
+| 2 | Pages bundle size: prose and page-core split, lazy chunks and seed files as files, PGlite beside the page | 7, 8 | aprende and Brawl Chess exceed their first-load budgets | gzip sizes, A/B on v1.5.1 |
+| 3 | k8s services: own host, own database login, clock CronJob, jail, ConfigMap files, exporter port, sidecars | 40 | Studio's games and Brawl Chess cannot run on the node | e2e per feature, 3-4 PRs |
+| 4 | k8s high availability: replicas, PDBs, spread, Dapr HA, Electric slots per replica; client address through proxies | 37, 42, 12 | one node failure takes an app down | failover test |
+| 5 | CNPG backups to S3 or Cloud Storage, `database.smartShutdown`, bounded primary stop | 38, 36 | no backups on k8s; slow switchovers | restore drill |
+| 6 | Observability: vmalert, per-pod scrape, Jaeger sizing (Managed Prometheus export stays ours) | 39 | no alerts on k8s | none beyond the diff |
+| 7 | Dapr 1.16.21 and no mesh-call timeout | 41 | long mesh calls cut off | the dapr issue |
+| 8 | Effect handler bundles (checked against upstream #2415 first) and the first-effect upgrade | 15, 34 | effects lost on a database built before them | e2e test |
+| 9 | Pages build fixes: 404 for a missing file, noindex, play-screen head; container hatch form and CSP | 13, 14 | SEO and screen-access gaps | one test each |
+| 10 | Emit and build: one generate at a time in a checkout, table order, check-sql on unique adds, DesignCss and `colorScheme`, type-sql, pljs | 5, 53, 56 | a program split across files creates a table before the one it references, and 005 is refused; drift in generated CSS | tests per theme |
+
+Row 60's docs ship inside each proposal. Until each lands, the fork carries it. An app pins upstream pronto once every row it uses is
+upstream or ours in pronto-plugins; prontoweeper is the first candidate, Brawl Chess the last.
+
 ## What blocks a direct pin today
 
 - **omnishell v0.25.2**: the two C hooks (phone sign-in provider list from the app, cookies the
