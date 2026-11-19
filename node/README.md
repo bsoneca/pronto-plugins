@@ -16,7 +16,8 @@ node's CrowdSec). The same ssh process carries two more forwards, to the node's 
 AirPlay receiver holds.
 
 The app pins in its mise the tools the engine runs: `kubectl`, `docker` (the CLI with its compose plugin, never a
-daemon), `buildx` (`aqua:docker/buildx`, on the node's buildkit v0.29 line), `sops` (when it has a SOPS file) and
+daemon), `buildx` (`aqua:docker/buildx@0.33.0`, the release built on the node's buildkit v0.29 line, whose binary aqua names
+`docker-cli-plugin-docker-buildx`: a newer one, 0.38, lost its session to the daemon with `PROTOCOL_ERROR`), `sops` (when it has a SOPS file) and
 `crane` (a release that builds, or `--check --build`). The preflight fails at once on a missing one,
 and on a pronto runtime that is not in `validated_pins` (runtime.nu, held by contract_test.nu). An existing
 namespace the release did not label (`pronto.dev/release=<app>`) is refused, `--adopt` takes it; `--delete`

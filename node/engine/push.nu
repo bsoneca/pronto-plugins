@@ -13,9 +13,10 @@ use build.nu [stamp]
 use render.nu
 use runtime.nu
 
-# The buildx plugin the app's mise pins (`docker-buildx`, or `buildx`).
+# The buildx plugin the app's mise pins: `docker-buildx`, `docker-cli-plugin-docker-buildx` (what aqua names
+# docker/buildx's binary), or `buildx`.
 def buildx-binary []: nothing -> string {
-	let found = ([docker-buildx buildx] | each {|n| which $n } | flatten)
+	let found = ([docker-buildx docker-cli-plugin-docker-buildx buildx] | each {|n| which $n } | flatten)
 	if ($found | is-empty) { error make {msg: "missing on the PATH: docker-buildx: the app's mise pins it (aqua:docker/buildx), see node/README.md"} }
 	$found | first | get path
 }
