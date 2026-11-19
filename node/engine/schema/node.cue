@@ -107,7 +107,7 @@ import (
 }
 
 // #Release is an app on the node.
-#Release: R={
+#Release: {
 	// The app's name: its compose project's, and the release's own Kubernetes names.
 	name: =~"^[a-z]([-a-z0-9]{0,28}[a-z0-9])?$"
 	// A pull request's or the rc's own copy of the app, in a namespace of its own beside the
@@ -129,19 +129,20 @@ import (
 		repository: *"node-images" | string
 		url:        "\(location)-docker.pkg.dev/\(project)/\(repository)"
 	}
+	_registryURL: registry.url
 	// Public hosts: production's, and each preview's that has one. A preview without one is served
 	// at <namespace>.<domainSuffix>, which nothing routes to.
 	hosts: {
 		production: string & !=""
 		[string]:   string
 	}
-	namespace: [if R.preview == "" {R.name}, "\(R.name)-\(R.preview)"][0]
+	namespace: [if preview == "" {name}, "\(name)-\(preview)"][0]
 	host: [
-		if R.preview == "" {R.hosts.production},
-		if R.hosts[R.preview] != _|_ {R.hosts[R.preview]},
-		"\(R.namespace).\(R.environment.domainSuffix)",
+		if preview == "" {hosts.production},
+		if hosts[preview] != _|_ {hosts[preview]},
+		"\(namespace).\(environment.domainSuffix)",
 	][0]
-	environment: #Environment & {registry: R.registry.url}
+	environment: #Environment & {registry: _registryURL}
 
 	// Seconds each wait takes: the primary database on its image, a Job, a rollout.
 	waits: {
@@ -150,7 +151,7 @@ import (
 		job:     *600 | int & >0
 	}
 	operators: #Operators
-	backups?:  #Backups & {_name: R.name}
+	backups?:  #Backups & {_name: name}
 	tenant?:   #Tenant
 	// The SOPS file applied into the namespace; absent, `secrets.metal.enc.yaml` when it exists.
 	secrets?: string
@@ -165,21 +166,21 @@ import (
 // #Manifests: what the engine applies. `upstream` is upstream's own render of the app; `objects`
 // is that, patched and added to as the tables below say, and refused (the field is an error) when
 // `violations` is not empty.
-#Manifests: M={
+#Manifests: {
 	app:      {name: string, namespace: string, ...}
 	release:  #Release
 	upstream: [...{apiVersion: string, kind: string, metadata: {name: string, namespace?: string, ...}, ...}]
 
-	let production = M.release.preview == ""
-	let withBackups = M.release.backups != _|_ && production
-	let backupName = "\(M.release.name)-backup"
+	let production = release.preview == ""
+	let withBackups = release.backups != _|_ && production
+	let backupName = "\(release.name)-backup"
 
 	// What the engine changes in upstream's objects, and nothing else.
-	_patched: [for o in M.upstream {
+	_patched: [for o in upstream {
 		o
 		if o.kind == "Namespace" {
-			metadata: labels: "pronto.dev/release": M.release.name
-			if !production {metadata: labels: "pronto.dev/preview": M.release.preview}
+			metadata: labels: "pronto.dev/release": release.name
+			if !production {metadata: labels: "pronto.dev/preview": release.preview}
 		}
 		if o.kind == "Cluster" && withBackups {
 			spec: plugins: [{
@@ -192,66 +193,66 @@ import (
 
 	// What it adds.
 	_added: list.Concat([
-		[if M.release.tenant != _|_ {
+		[if release.tenant != _|_ {
 			apiVersion: "v1"
 			kind:       "ResourceQuota"
-			metadata:   {name: "\(M.release.name)-quota", namespace: M.release.namespace}
+			metadata:   {name: "\(release.name)-quota", namespace: release.namespace}
 			spec: hard: {
-				"requests.cpu":         M.release.tenant.quota.requestsCPU
-				"requests.memory":      M.release.tenant.quota.requestsMemory
-				"limits.cpu":           M.release.tenant.quota.limitsCPU
-				"limits.memory":        M.release.tenant.quota.limitsMemory
-				pods:                   M.release.tenant.quota.pods
-				persistentvolumeclaims: M.release.tenant.quota.pvcs
-				"requests.storage":     M.release.tenant.quota.storage
+				"requests.cpu":         release.tenant.quota.requestsCPU
+				"requests.memory":      release.tenant.quota.requestsMemory
+				"limits.cpu":           release.tenant.quota.limitsCPU
+				"limits.memory":        release.tenant.quota.limitsMemory
+				pods:                   release.tenant.quota.pods
+				persistentvolumeclaims: release.tenant.quota.pvcs
+				"requests.storage":     release.tenant.quota.storage
 			}
 		}],
-		[if M.release.tenant != _|_ {
+		[if release.tenant != _|_ {
 			apiVersion: "v1"
 			kind:       "LimitRange"
-			metadata:   {name: "\(M.release.name)-quota", namespace: M.release.namespace}
+			metadata:   {name: "\(release.name)-quota", namespace: release.namespace}
 			spec: limits: [{
 				type:           "Container"
-				default:        {cpu: M.release.tenant.limitRange.defaultCPU, memory: M.release.tenant.limitRange.defaultMemory}
-				defaultRequest: {cpu: M.release.tenant.limitRange.defaultRequestCPU, memory: M.release.tenant.limitRange.defaultRequestMemory}
-				max:            {cpu: M.release.tenant.limitRange.maxCPU, memory: M.release.tenant.limitRange.maxMemory}
+				default:        {cpu: release.tenant.limitRange.defaultCPU, memory: release.tenant.limitRange.defaultMemory}
+				defaultRequest: {cpu: release.tenant.limitRange.defaultRequestCPU, memory: release.tenant.limitRange.defaultRequestMemory}
+				max:            {cpu: release.tenant.limitRange.maxCPU, memory: release.tenant.limitRange.maxMemory}
 			}]
 		}],
-		[if M.release.tenant != _|_ if len(M.release.tenant.egress) > 0 {
+		[if release.tenant != _|_ if len(release.tenant.egress) > 0 {
 			apiVersion: "networking.k8s.io/v1"
 			kind:       "NetworkPolicy"
-			metadata:   {name: "\(M.release.name)-tenant-egress", namespace: M.release.namespace}
+			metadata:   {name: "\(release.name)-tenant-egress", namespace: release.namespace}
 			spec: {
 				podSelector: {}
 				policyTypes: ["Egress"]
-				egress:      M.release.tenant.egress
+				egress:      release.tenant.egress
 			}
 		}],
 		[if withBackups {
 			apiVersion: "barmancloud.cnpg.io/v1"
 			kind:       "ObjectStore"
-			metadata:   {name: backupName, namespace: M.release.namespace}
+			metadata:   {name: backupName, namespace: release.namespace}
 			spec: {
 				configuration: {
-					destinationPath: "s3://\(M.release.backups.bucket)/\(M.release.backups.path)"
-					endpointURL:     M.release.backups.endpoint
+					destinationPath: "s3://\(release.backups.bucket)/\(release.backups.path)"
+					endpointURL:     release.backups.endpoint
 					s3Credentials: {
-						accessKeyId:     {name: M.release.backups.credentials, key: M.release.backups.keys.accessKeyId}
-						secretAccessKey: {name: M.release.backups.credentials, key: M.release.backups.keys.secretAccessKey}
+						accessKeyId:     {name: release.backups.credentials, key: release.backups.keys.accessKeyId}
+						secretAccessKey: {name: release.backups.credentials, key: release.backups.keys.secretAccessKey}
 					}
 				}
-				retentionPolicy: M.release.backups.retention
+				retentionPolicy: release.backups.retention
 			}
 		}],
 		[if withBackups {
 			apiVersion: "postgresql.cnpg.io/v1"
 			kind:       "ScheduledBackup"
-			metadata:   {name: "\(M.release.name)-nightly", namespace: M.release.namespace}
+			metadata:   {name: "\(release.name)-nightly", namespace: release.namespace}
 			spec: {
-				schedule:             M.release.backups.schedule
+				schedule:             release.backups.schedule
 				backupOwnerReference: "self"
 				method:               "plugin"
-				cluster: name:             "\(M.release.name)-db"
+				cluster: name:             "\(release.name)-db"
 				pluginConfiguration: name: "barman-cloud.cloudnative-pg.io"
 			}
 		}],
@@ -268,29 +269,29 @@ import (
 
 	// Why a render is refused: every entry says which object and what.
 	violations: list.Concat([
-		[if M.app.name != _|_ if M.app.name != M.release.name {"the app is named \(M.app.name), the release \(M.release.name)"}],
-		[if M.app.namespace != _|_ if M.app.namespace != M.release.namespace {"the app's namespace is \(M.app.namespace), the release's \(M.release.namespace)"}],
-		[if M.app.name != _|_ if M.app.name != M.release.name {"the app is named \(M.app.name), the release \(M.release.name)"}],
-		[if M.app.namespace != _|_ if M.app.namespace != M.release.namespace {"the app's namespace is \(M.app.namespace), the release's \(M.release.namespace)"}],
+		[if app.name != _|_ if app.name != release.name {"the app is named \(app.name), the release \(release.name)"}],
+		[if app.namespace != _|_ if app.namespace != release.namespace {"the app's namespace is \(app.namespace), the release's \(release.namespace)"}],
+		[if app.name != _|_ if app.name != release.name {"the app is named \(app.name), the release \(release.name)"}],
+		[if app.namespace != _|_ if app.namespace != release.namespace {"the app's namespace is \(app.namespace), the release's \(release.namespace)"}],
 		[for o in _all if o.kind != "Namespace" if o.metadata.namespace == _|_ {"\(o.kind)/\(o.metadata.name) has no namespace"}],
-		[for o in _all if o.kind != "Namespace" if o.metadata.namespace != _|_ if o.metadata.namespace != M.release.namespace {
-			"\(o.kind)/\(o.metadata.name) is in namespace \(o.metadata.namespace), not \(M.release.namespace)"
+		[for o in _all if o.kind != "Namespace" if o.metadata.namespace != _|_ if o.metadata.namespace != release.namespace {
+			"\(o.kind)/\(o.metadata.name) is in namespace \(o.metadata.namespace), not \(release.namespace)"
 		}],
-		[for o in _all if o.kind == "Namespace" if o.metadata.name != M.release.namespace {
-			"Namespace/\(o.metadata.name) is not the release's namespace \(M.release.namespace)"
+		[for o in _all if o.kind == "Namespace" if o.metadata.name != release.namespace {
+			"Namespace/\(o.metadata.name) is not the release's namespace \(release.namespace)"
 		}],
 		[for o in _all if list.Contains(#ClusterScoped, o.kind) {"\(o.kind)/\(o.metadata.name) is cluster scoped"}],
-		[for o in _all if !list.Contains(M.release.operators.served, "\(o.apiVersion)/\(o.kind)") {
-			"\(o.apiVersion) \(o.kind)/\(o.metadata.name) is not served by the node's operators (\(M.release.operators.dapr) dapr, \(M.release.operators.cnpg) cnpg, \(M.release.operators.externalSecrets) external-secrets, \(M.release.operators.envoyGateway) envoy-gateway)"
+		[for o in _all if !list.Contains(release.operators.served, "\(o.apiVersion)/\(o.kind)") {
+			"\(o.apiVersion) \(o.kind)/\(o.metadata.name) is not served by the node's operators (\(release.operators.dapr) dapr, \(release.operators.cnpg) cnpg, \(release.operators.externalSecrets) external-secrets, \(release.operators.envoyGateway) envoy-gateway)"
 		}],
-		[for o in _all if o.kind == "Job" if !list.Contains(M.release.jobOrder, strings.TrimPrefix(o.metadata.name, "\(M.release.name)-")) {
-			"Job/\(o.metadata.name) is not in jobOrder (\(strings.Join(M.release.jobOrder, ", ")))"
+		[for o in _all if o.kind == "Job" if !list.Contains(release.jobOrder, strings.TrimPrefix(o.metadata.name, "\(release.name)-")) {
+			"Job/\(o.metadata.name) is not in jobOrder (\(strings.Join(release.jobOrder, ", ")))"
 		}],
-		[for o in _all if o.kind == "Gateway" for l in o.spec.listeners if l.hostname != M.release.host {
-			"Gateway/\(o.metadata.name) listens for \(l.hostname), not the release's host \(M.release.host)"
+		[for o in _all if o.kind == "Gateway" for l in o.spec.listeners if l.hostname != release.host {
+			"Gateway/\(o.metadata.name) listens for \(l.hostname), not the release's host \(release.host)"
 		}],
-		[for i in _images if !strings.HasPrefix(i, M.release.environment.registry + "/") if !strings.Contains(i, "@sha256:") {
-			"image \(i) is neither in \(M.release.environment.registry) nor pinned by digest"
+		[for i in _images if !strings.HasPrefix(i, release.environment.registry + "/") if !strings.Contains(i, "@sha256:") {
+			"image \(i) is neither in \(release.environment.registry) nor pinned by digest"
 		}],
 	])
 
@@ -298,5 +299,5 @@ import (
 	_gate:   "" & strings.Join(violations, "; ")
 	objects: [for o in _all {o, if len(_gate) >= 0 {}}]
 	// The Jobs, in the order they run.
-	jobs: [for j in M.release.jobOrder for o in _all if o.kind == "Job" if o.metadata.name == "\(M.release.name)-\(j)" {o.metadata.name}]
+	jobs: [for j in release.jobOrder for o in _all if o.kind == "Job" if o.metadata.name == "\(release.name)-\(j)" {o.metadata.name}]
 }

@@ -129,6 +129,9 @@ if verb == "get":
                 out({"items": []})
             image = read("cluster_image", "none")
             out({"items": [{"metadata": {"name": "db-1"}, "spec": {"containers": [{"name": "postgres", "image": image}]}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]})
+        # what a release's cleanup waits to be gone (the airlock's, a bridge's): none
+        if "pronto.dev/probe!=wall" in sel:
+            out({"items": []})
         # the daprd check
         cs = [{"name": "app"}] + ([] if exists("bare") else [{"name": "daprd"}])
         out({"items": [{"metadata": {"name": "p1"}, "spec": {"containers": cs}}]})
