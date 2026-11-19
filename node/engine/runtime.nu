@@ -23,7 +23,7 @@ const exports = {
 
 # The upstream pronto versions this engine is validated against (contract_test.nu holds each one): a
 # release under another is refused in its preflight, so a pin moves here first.
-export const validated_pins = ["1.5.1"]
+export const validated_pins = ["1.5.1", "1.7.0"]
 
 # The pronto runtime's directory: PRONTO_RUNTIME (the app's release rule sets it from mise), else mise's.
 export def dir []: nothing -> string {

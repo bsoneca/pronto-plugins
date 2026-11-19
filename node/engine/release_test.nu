@@ -1,6 +1,6 @@
 #!/usr/bin/env nu
 # Run with: nu node/engine/release_test.nu   (needs `cue` and the CUE registry, and `PRONTO_RUNTIME` or
-# mise's github:bonisoft3/pronto@1.5.1: the six helpers imported from upstream run for real)
+# mise's github:bonisoft3/pronto@1.7.0: the six helpers imported from upstream run for real)
 #
 # The release flow (release.nu) over fakes of kubectl, sops, ssh, nc, curl, docker (with buildx) and crane on
 # the PATH: kubectl keeps a cluster's state in files and logs every call and the objects it was given, docker
@@ -16,10 +16,11 @@ use render.nu
 use runtime.nu
 use registry.nu
 
-const pin = "1.5.1"
+# The newest validated pin (runtime.nu): the runtime and the schema the fixture renders with.
+const pin = "1.7.0"
 const release_nu = (path self release.nu)
 
-# The runtime upstream pronto 1.5.1 is installed as.
+# The runtime upstream pronto 1.7.0 is installed as.
 def runtime-dir []: nothing -> string {
 	if ($env.PRONTO_RUNTIME? | is-not-empty) { $env.PRONTO_RUNTIME } else { ^mise where $"github:bonisoft3/pronto@($pin)" | str trim }
 }
@@ -32,6 +33,8 @@ def sandbox []: nothing -> record {
 	^cp -R ($engine_dir | path join fixtures aprende/.) ($d | path join aprende)
 	# the build's context is the app as git sees it
 	do { cd ($d | path join aprende); ^git init -q . } | ignore
+	let mod = ($d | path join aprende cue.mod module.cue)
+	open $mod | str replace -r 'pronto@v1": v: "[^"]+"' $'pronto@v1": v: "v($pin)"' | save -f $mod
 	mkdir ($d | path join aprende node schema)
 	cp ($engine_dir | path join schema node.cue) ($d | path join aprende node schema node.cue)
 	cp ($engine_dir | path join fixtures fake-kubectl) ($d | path join bin kubectl)
@@ -501,7 +504,7 @@ def test_preflight_refuses_a_pin_nobody_validated [] {
 	let w = (sandbox)
 	let r = (in-world $w -c (script $w $"(inputs $w) $env.PRONTO_RUNTIME = '($w.dir)/9.9.9'; preflight $app_info $node $fwd --check"))
 	assert ($r.exit_code != 0)
-	assert (has $r.stderr "the pronto runtime is 9.9.9; this engine is validated against 1.5.1") $r.stderr
+	assert (has $r.stderr "the pronto runtime is 9.9.9; this engine is validated against 1.5.1, 1.7.0") $r.stderr
 	assert equal (writes $w) []
 	rm -rf $w.dir
 }

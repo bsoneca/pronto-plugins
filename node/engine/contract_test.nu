@@ -45,6 +45,9 @@ def sandbox [fx: record]: nothing -> record {
 	for p in [bin state $fx.name rec] { mkdir ($d | path join $p) }
 	let app = ($d | path join $fx.name)
 	^cp -R ($engine_dir | path join fixtures $"($fx.name)/.") $app
+	# the fixture renders with the upstream schema of the pin under test
+	let mod = ($app | path join cue.mod module.cue)
+	open $mod | str replace -r 'pronto@v1": v: "[^"]+"' $'pronto@v1": v: "v(pronto-pin)"' | save -f $mod
 	mkdir ($app | path join node schema)
 	cp ($engine_dir | path join schema node.cue) ($app | path join node schema node.cue)
 	do { cd $app; ^git init -q . } | ignore
