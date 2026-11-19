@@ -582,7 +582,9 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       if (line === "cue") {
         const holding = holders.filter((h) => h.cue).length;
         if (!cueAdmits(older.length, holding)) return why(`the cue lock: ${holding ? "held" : "free"}, ${older.length} ahead (one cue evaluation at a time)`);
-        if (dual && !admitsCores(runnerJob(Deno.env.get("GITHUB_ACTIONS")), used, weight, ahead, budget)) {
+        // A top-level cue's cores are the machine's, whoever runs it: an Actions job's too, or a runner's evaluation
+        // would take cores the budget already gave away. Only one nested in a live holder is that holder's.
+        if (dual && !admitsCores(parent > 0, used, weight, ahead, budget)) {
           return why(`weight ${used} of ${budget} held (STACK_BUDGET)${ahead ? `, ${ahead} reserved by those ahead` : ""}, this needs ${weight}`);
         }
       } else if (!admitsCores(line === "none" || runnerJob(Deno.env.get("GITHUB_ACTIONS")), used, weight, ahead, budget)) {
@@ -1016,9 +1018,17 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-learn", "--cores-
   // The cores it kept busy on average, for the next run's --weight: only from a run of 5 s or more (a
   // shorter one measures its start), and a run that failed only raises it, as the peak is.
   if (coresLearn && wall >= 5 && cpu > 0) {
-    const before = status.success ? 0 : Number((await Deno.readTextFile(coresLearn).catch(() => "")).trim()) || 0;
-    await Deno.mkdir(coresLearn.replace(/\/[^/]*$/, ""), { recursive: true }).catch(() => {});
-    await Deno.writeTextFile(coresLearn, `${Math.round(Math.max(cpu / wall, before) * 100) / 100}\n`).catch(() => {});
+    // Only a first measurement has nothing before it; a file that cannot be read or written fails the run, so a
+    // success means the next run's weight was saved.
+    const prior = status.success ? "" : await Deno.readTextFile(coresLearn).catch((e) => { if (e instanceof Deno.errors.NotFound) return ""; throw e; });
+    const before = Number(prior.trim()) || 0;
+    try {
+      await Deno.mkdir(coresLearn.replace(/\/[^/]*$/, ""), { recursive: true });
+      await Deno.writeTextFile(coresLearn, `${Math.round(Math.max(cpu / wall, before) * 100) / 100}\n`);
+    } catch (e) {
+      console.error(`slot: the measured weight was not saved to ${coresLearn}: ${(e as Error).message}`);
+      Deno.exit(status.code || 1);
+    }
   }
   Deno.exit(status.code);
 }
