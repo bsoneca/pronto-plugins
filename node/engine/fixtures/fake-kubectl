@@ -6,7 +6,8 @@
 # State (all optional): namespaces/<ns> (exists), revision/<deployment> (an int; apply of a Deployment
 # bumps it), reject (a Kind that a server dry run refuses), job_fail, rollout_fail (a name),
 # bare (pods without daprd), operators.json (image tags by deployment), noprimary, buildkit_down and
-# registry_down (the node's builder or registry has no available replica).
+# registry_down (the node's builder or registry has no available replica), get_fail_<kind> and missing_<kind>
+# (a read of <kind> in every namespace is refused, or its CRD is not on the node).
 import json, os, sys
 
 d = os.environ["FAKE_DIR"]
@@ -111,6 +112,13 @@ if verb == "apply":
 
 if verb == "get":
     what = args[1]
+    if "-A" in args:
+        # the prune's reads of every namespace's workloads
+        if exists("get_fail_" + what):
+            fail("Error from server (Forbidden): " + what + " is forbidden")
+        if exists("missing_" + what):
+            fail('error: the server doesn\'t have a resource type "' + what + '"')
+        out({"items": []})
     if what == "crd":
         if "json" in args:
             out({"metadata": {"annotations": {"gateway.networking.k8s.io/bundle-version": read("gateway_api", "v1.2.1")}}})

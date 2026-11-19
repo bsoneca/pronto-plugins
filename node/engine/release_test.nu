@@ -193,6 +193,7 @@ def main [] {
 	test_a_failed_bake_leaves_no_builder_and_no_scratch_folder
 	test_preflight_refuses_a_builder_or_a_registry_that_is_not_there
 	test_the_registry_prune_reads_what_the_cluster_names
+	test_a_failed_read_stops_the_prune_before_it_deletes_anything
 	print "\nAll node release tests passed."
 }
 
@@ -735,4 +736,23 @@ def test_the_registry_prune_reads_what_the_cluster_names [] {
 	assert equal (registry in-use $text "127.0.0.1:5000") [{repo: "aprende-crud", digest: $a}]
 	assert equal (registry in-use $text "127.0.0.1:5001") [{repo: "other", digest: $a}]
 	assert equal (registry keep-tag $a) "keep-aaaaaaaaaaaaaaaa"
+}
+
+def test_a_failed_read_stops_the_prune_before_it_deletes_anything [] {
+	print "test a kubectl get that fails stops the prune before any delete or exec, and only a missing CRD is skipped..."
+	let w = (sandbox)
+	"" | save -f ($w.state | path join get_fail_pods)
+	let body = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}}; registry prune '127.0.0.1:1' $build"
+	let r = (in-world $w -c $body)
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "kubectl get pods -A failed, so the prune stops before it deletes anything") $r.stderr
+	assert (not ((calls $w) | any {|c| $c | str starts-with "exec" })) "no exec"
+	rm -f ($w.state | path join get_fail_pods)
+	# a CRD that is not there is skipped: the prune goes on, and stops later, at the registry nothing listens to
+	"" | save -f ($w.state | path join missing_clusters.postgresql.cnpg.io)
+	let r2 = (in-world $w -c $body)
+	assert ($r2.exit_code != 0)
+	assert (not (has $r2.stderr "kubectl get")) $r2.stderr
+	assert (not ((calls $w) | any {|c| $c | str starts-with "exec" })) "no exec before the registry answered"
+	rm -rf $w.dir
 }

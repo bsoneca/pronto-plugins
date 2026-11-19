@@ -47,7 +47,14 @@ export def prune [registry: string, build: record] {
 	let ns = $build.registry.namespace
 	let target = $"deploy/($build.registry.deployment)"
 	let kinds = ["pods" "replicasets" "deployments" "statefulsets" "daemonsets" "jobs" "cronjobs" "clusters.postgresql.cnpg.io"]
-	let objects = ($kinds | each {|k| let r = (do { ^kubectl get $k -A -o json } | complete); if $r.exit_code == 0 { $r.stdout } else { "" } } | str join "\n")
+	# A kind whose CRD is not on the node names no image; any other failure of a read stops the prune, since
+	# an image its objects name would look unused and be collected.
+	let objects = ($kinds | each {|k|
+		let r = (^kubectl get $k -A -o json | complete)
+		if $r.exit_code == 0 { $r.stdout } else if ($r.stderr =~ "the server doesn't have a resource type") { "" } else {
+			error make {msg: $"kubectl get ($k) -A failed, so the prune stops before it deletes anything: ($r.stderr | str trim)"}
+		}
+	} | str join "\n")
 	let used = (in-use $objects $build.registry.host)
 	for it in $used {
 		let there = (http head --full --allow-errors --headers {Accept: $accept} $"http://($registry)/v2/($it.repo)/manifests/($it.digest)" | get status)
