@@ -15,6 +15,7 @@ use release.nu [run-hooks decrypt-secrets preflight release-app check-operators 
 use render.nu
 use runtime.nu
 use registry.nu
+use push.nu
 
 # The newest validated module (runtime.nu) the fixture renders with, and the runtime an app that pins it runs
 # (its distribution config's tool version; contract_test.nu holds that).
@@ -80,7 +81,7 @@ case "$*" in
     pwd > "$d/bake_pwd"
     cat > "$d/bake_compose"
     find . -type f | sort > "$d/bake_tree"
-    if [ -f "$d/bake_fail" ]; then echo "ERROR: failed to solve" >&2; exit 1; fi
+    if [ -f "$d/bake_fail" ]; then { echo "ERROR: failed to solve"; cat "$d/bake_fail"; } >&2; exit 1; fi
     meta=""; targets=""; skip=0
     for a in "$@"; do
       if [ $skip = 1 ]; then skip=0; [ "$prev" = --metadata-file ] && meta="$a"; continue; fi
@@ -201,6 +202,8 @@ def main [] {
 	test_check_build_pushes_under_check_and_writes_nothing_to_the_cluster
 	test_build_alone_is_refused
 	test_a_failed_bake_leaves_no_builder_and_no_scratch_folder
+	test_the_buildx_nearest_the_front_of_the_path_wins
+	test_a_broken_session_names_the_buildx_that_broke_it
 	test_preflight_refuses_a_builder_or_a_registry_that_is_not_there
 	test_the_registry_prune_reads_what_the_cluster_names
 	test_a_failed_read_stops_the_prune_before_it_deletes_anything
@@ -787,6 +790,33 @@ def test_a_failed_bake_leaves_no_builder_and_no_scratch_folder [] {
 	let work = (open --raw ($w.dir | path join bake_pwd) | str trim | path dirname)
 	assert (not ($work | path exists)) "the scratch folder is gone"
 	assert (not ((open --raw ($w.dir | path join docker_config) | str trim) | path exists)) "the docker config is gone"
+	rm -rf $w.dir
+}
+
+def test_the_buildx_nearest_the_front_of_the_path_wins [] {
+	print "test the pinned buildx (the first folder on the PATH) is taken over a Homebrew one named docker-buildx..."
+	let brew = "/opt/homebrew/bin/docker-buildx"
+	let pinned = "/m/installs/aqua-docker-buildx/0.33.0/docker-cli-plugin-docker-buildx"
+	assert equal (push nearest-on-path [$brew $pinned] ["/m/installs/aqua-docker-buildx/0.33.0" "/opt/homebrew/bin"]) $pinned
+	assert equal (push nearest-on-path [$brew $pinned] ["/opt/homebrew/bin" "/m/installs/aqua-docker-buildx/0.33.0"]) $brew
+	assert equal (push nearest-on-path [$brew] ["/usr/bin"]) $brew "off the PATH still answers"
+}
+
+def test_a_broken_session_names_the_buildx_that_broke_it [] {
+	print "test a bake whose session broke says why, and one that failed otherwise does not..."
+	let w = (sandbox)
+	"received prior goaway: code: PROTOCOL_ERROR\n" | save -f ($w.dir | path join bake_fail)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "header values and a buildx built with Go 1.27 caps them at 500") $r.stderr
+	assert (has $r.stderr "docker-buildx") $r.stderr
+	rm -rf $w.dir
+	let w = (sandbox)
+	"#7 0.4 getaddrinfo ENOTFOUND jsr.io\n#7 ERROR: process did not complete successfully: exit code: 255\n" | save -f ($w.dir | path join bake_fail)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert (not (has $r.stderr "caps them at 500")) $r.stderr
+	assert (has $r.stderr "the failed step, #7") $r.stderr
+	assert (has $r.stderr "getaddrinfo ENOTFOUND jsr.io") $r.stderr
 	rm -rf $w.dir
 }
 
