@@ -8,8 +8,7 @@ import "github.com/bsoneca/pronto-plugins/node/engine/schema"
 _base: {
 	name:    "app"
 	context: "contabo2"
-	api: ssh: "deploy@node.example"
-	registry: {project: "proj", location: "europe-west3"}
+	api: ssh:          "deploy@node.example"
 	hosts: production: "app.example.com"
 }
 
@@ -50,3 +49,8 @@ retireClusterRole:    schema.#Release & _base & {retire: [{kind: "ClusterRole", 
 retireFlagName:       schema.#Release & _base & {retire: [{kind: "Service", name: "--all"}]}
 sshOption:            schema.#Release & _base & {api: ssh: "-oProxyCommand=x@y"}
 sshBareHost:          schema.#Release & _base & {api: ssh: "node.example"}
+
+// A preview must not take the live host: named `production`, or given production's own host.
+previewProduction:       schema.#Release & _base & {preview: "production"}
+previewOnProductionHost: schema.#Release & _base & {preview: "rc", hosts: rc: "app.example.com"}
+previewOwnHost:          schema.#Release & _base & {preview: "rc", hosts: rc: "rc.app.example.com"}

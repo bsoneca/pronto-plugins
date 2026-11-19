@@ -5,7 +5,12 @@
 #
 # State (all optional): namespaces/<ns> (exists), revision/<deployment> (an int; apply of a Deployment
 # bumps it), reject (a Kind that a server dry run refuses), job_fail, rollout_fail (a name),
-# bare (pods without daprd), operators.json (image tags by deployment), noprimary.
+# bare (pods without daprd), operators.json (image tags by deployment), noprimary, buildkit_down and
+# registry_down (the node's builder or registry has no available replica), get_fail_<kind> and missing_<kind>
+# (a read of <kind> in every namespace is refused, or its CRD is not on the node), read_fail_namespace and
+# read_fail_cluster (any read of a namespace, or of the database Cluster, fails as an API error) and
+# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch is refused). `--ignore-not-found` answers an absent
+# object with nothing and exit 0, as kubectl does.
 import json, os, sys
 
 d = os.environ["FAKE_DIR"]
@@ -39,6 +44,8 @@ with open(d + "/calls.jsonl", "a") as f:
     if objs:
         with open(d + "/last_objects.json", "w") as g:
             json.dump(objs, g)
+        with open(d + "/all_objects.jsonl", "a") as g:
+            g.write(json.dumps(objs) + "\n")
 
 def out(x):
     print(json.dumps(x))
@@ -77,6 +84,8 @@ if verb == "create":
     sys.exit(0)
 
 if verb == "patch":
+    if exists("patch_fail"):
+        fail("Error from server (Forbidden): patch is forbidden")
     sys.exit(0)
 
 if verb == "apply":
@@ -108,18 +117,34 @@ if verb == "apply":
 
 if verb == "get":
     what = args[1]
+    if "-A" in args:
+        # the prune's reads of every namespace's workloads
+        if exists("get_fail_" + what):
+            fail("Error from server (Forbidden): " + what + " is forbidden")
+        if exists("missing_" + what):
+            fail('error: the server doesn\'t have a resource type "' + what + '"')
+        out({"items": []})
     if what == "crd":
         if "json" in args:
             out({"metadata": {"annotations": {"gateway.networking.k8s.io/bundle-version": read("gateway_api", "v1.2.1")}}})
         sys.exit(0)
     if what == "nodes":
-        out({"items": [{"status": {"images": [{"names": ["europe-west3-docker.pkg.dev/brawl-chess/node-images/x@sha256:aa"]}]}}]})
+        out({"items": [{"status": {"images": [{"names": ["127.0.0.1:5000/x@sha256:aa"]}]}}]})
     if what == "namespace":
+        if exists("read_fail_namespace"):
+            fail("Unable to connect to the server: net/http: TLS handshake timeout")
         if exists("namespaces/" + args[2]):
             if "json" in args:
                 out({"metadata": {"labels": json.loads(read("namespaces/" + args[2], "{}") or "{}")}})
             sys.exit(0)
+        if "--ignore-not-found" in args:
+            sys.exit(0)
         fail(f'Error from server (NotFound): namespaces "{args[2]}" not found')
+    if what == "configmap":
+        if exists("read_fail_cluster"):
+            fail("Unable to connect to the server: net/http: TLS handshake timeout")
+        print(read("serving_sha"))
+        sys.exit(0)
     if what == "gatewayclass":
         out({"status": {"conditions": [{"type": "Accepted", "status": "True"}]}})
     if what == "deployment":
@@ -131,10 +156,18 @@ if verb == "get":
             "envoy-gateway": "docker.io/envoyproxy/gateway:v1.2.4",
             "barman-cloud": "ghcr.io/cloudnative-pg/plugin-barman-cloud:v0.15.1"}
         ops.update(json.loads(read("operators.json", "{}")))
+        if name in ("buildkitd", "registry"):
+            down = exists("buildkit_down") if name == "buildkitd" else exists("registry_down")
+            env = json.loads(read("registry_env", "[]")) if name == "registry" else []
+            out({"status": {"availableReplicas": 0 if down else 1}, "spec": {"template": {"spec": {"containers": [{"env": env}]}}}})
         if name in ops:
             out({"spec": {"template": {"spec": {"containers": [{"image": ops[name]}]}}}})
+        if read("read_fail_deployment") == name:
+            fail("Unable to connect to the server: net/http: TLS handshake timeout")
         if exists("revision/" + name):
             out({"metadata": {"annotations": {"deployment.kubernetes.io/revision": read("revision/" + name)}}})
+        if "--ignore-not-found" in args:
+            sys.exit(0)
         fail(f'Error from server (NotFound): deployments.apps "{name}" not found')
     if what == "secret":
         name = args[2]
@@ -161,6 +194,8 @@ if verb == "get":
         name = args[2]
         out({"status": {"failed": 1} if exists("job_fail") else {"succeeded": 1}})
     if what.startswith("cluster.postgresql.cnpg.io"):
+        if exists("read_fail_cluster"):
+            fail("Unable to connect to the server: net/http: TLS handshake timeout")
         if exists("previous_image"):
             out({"spec": {"imageName": read("previous_image")}, "status": {"managedRolesStatus": {"byStatus": {"reconciled": ["authenticator"], "pending-reconciliation": []}}}})
         out({"status": {"managedRolesStatus": {"byStatus": {"reconciled": ["authenticator"], "pending-reconciliation": []}}}})
@@ -179,6 +214,18 @@ if verb == "rollout":
         target = args[2]
         if exists("rollout_fail") and read("rollout_fail") == target.split("/")[-1]:
             fail(f"error: deployment \"{target.split('/')[-1]}\" exceeded its progress deadline")
+    sys.exit(0)
+
+if verb == "exec":
+    cmd = " ".join(args[args.index("--") + 1:]) if "--" in args else ""
+    if "find " in cmd:
+        print(read("uploads"))
+    elif "du -sh" in cmd:
+        print("1M\t/var/lib/registry")
+    elif "garbage-collect" in cmd:
+        print("12 blobs marked, 3 blobs eligible for deletion")
+    elif cmd.startswith("cat "):
+        print(read("registry_config", "storage:\n  cache:\n    blobdescriptor: inmemory\n"))
     sys.exit(0)
 
 if verb == "logs":

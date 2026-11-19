@@ -142,8 +142,8 @@ def main [
 	if ($node.backups? | default null) == null { error make {msg: $"($app_info.name) declares no Node.backups"} }
 	if $verb not-in [drill restore] { error make {msg: $"unknown verb ($verb): drill | restore"} }
 	if $verb == "restore" and ($to | is-empty) { error make {msg: "restore needs --to <namespace>"} }
-	tunnel with-tunnel $node.api {|port|
-		let kubeconfig = (tunnel kubeconfig $node.context $port)
+	tunnel with-tunnel $node.api $node.build {|fwd|
+		let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
 		try {
 			with-env {KUBECONFIG: $kubeconfig} {
 				if $verb == "drill" { drill $node.name $node.namespace --keep=$keep } else { restore-to $node.name $node.namespace $to --target-time $target_time }

@@ -125,7 +125,8 @@ import (
 	name: =~"^[a-z]([-a-z0-9]{0,28}[a-z0-9])?$"
 	// A pull request's or the rc's own copy of the app, in a namespace of its own beside the
 	// release's (`--preview=rc`, the engine passes `-t preview=<name>`).
-	preview: *"" | =~"^[a-z0-9]([-a-z0-9]{0,14}[a-z0-9])?$"
+	// Never `production`, and its host (below) never production's: a preview must not take the live host.
+	preview: *"" | (=~"^[a-z0-9]([-a-z0-9]{0,14}[a-z0-9])?$" & !="production")
 	// The kubectl context of the node, and how its API is reached: an ssh tunnel from the
 	// Mac, a free local port of the release's own to the node's 127.0.0.1:<remotePort>.
 	context: string & !=""
@@ -134,28 +135,43 @@ import (
 		ssh:        =~"^[A-Za-z_][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.-]*$"
 		remotePort: *6443 | int & >0 & <65536
 	}
-	// The Artifact Registry the images go to (Cloud Build) and the node pulls from, through its k3s
-	// registries.yaml.
-	registry: {
-		project:    string & !=""
-		location:   string & !=""
-		repository: *"node-images" | string
-		url:        "\(location)-docker.pkg.dev/\(project)/\(repository)"
+	// Where the release builds and pushes: the node's operator buildkitd and its registry, both on the
+	// node's loopback alone (pronto's tools/machine/node.cue hostAccess), reached through the release's own
+	// ssh tunnel (tunnel.nu). An app writes nothing here.
+	build: {
+		registry: {
+			// as the node (containerd, buildkitd) names it: the images' manifests carry it
+			host: *"127.0.0.1:5000" | string & !=""
+			// the node-side port the tunnel forwards to
+			port:       *5000 | int & >0 & <65536
+			namespace:  *"pronto-registry" | string
+			deployment: *"registry" | string
+		}
+		// Files git ignores that the images' Dockerfiles COPY (what the app's `generate` writes and keeps out of
+		// the repository): staged though ignored, each one exact (no glob, no `..`), and a release fails when
+		// one is missing, so a build that needs `generate` says so before it uploads anything.
+		include: *[] | [...=~"^(\\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)(/\\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)*$"]
+		buildkit: {
+			port:       *1234 | int & >0 & <65536
+			namespace:  *"pronto-buildkit" | string
+			deployment: *"buildkitd" | string
+		}
 	}
-	_registryURL: registry.url
 	// Public hosts: production's, and each preview's that has one. A preview without one is served
 	// at <namespace>.<domainSuffix>, which nothing routes to.
 	hosts: {
 		production: string & !=""
 		[string]:   string
 	}
-	namespace: [if preview == "" {name}, "\(name)-\(preview)"][0]
+	// A preview named like a host of `hosts` that is production's own is refused (the conflict is the error).
+	_previewHostIsNotProduction: true & [if preview != "" if hosts[preview] != _|_ {hosts[preview] != hosts.production}, true][0]
+	namespace:                   [if preview == "" {name}, "\(name)-\(preview)"][0]
 	host: [
 		if preview == "" {hosts.production},
 		if hosts[preview] != _|_ {hosts[preview]},
 		"\(namespace).\(environment.domainSuffix)",
 	][0]
-	environment: #Environment & {registry: _registryURL}
+	environment: #Environment & {registry: build.registry.host}
 
 	// Seconds each wait takes: the primary database on its image, a Job, a rollout.
 	waits: {

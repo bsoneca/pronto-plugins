@@ -1,17 +1,18 @@
 # release.nu: release@k8s for a pronto app on the Contabo node (README.md, "The node release engine").
-# It replaces upstream's k8s/release.nu `main` for the node's existing k3s: the images are built in
-# Cloud Build (build.nu) and pulled by the node from Artifact Registry, the manifests are upstream's own
+# It replaces upstream's k8s/release.nu `main` for the node's existing k3s: the images are built on the
+# node's own buildkitd and pushed to the node's registry (push.nu), which is where the node pulls them
+# from (127.0.0.1:5000), the manifests are upstream's own
 # (#BuildManifests) patched by the app's Node (schema/node.cue), and the order is upstream's, with the
 # engine's extra steps marked below. It runs on the Mac, never on the node; kubectl reaches the node
 # over an ssh tunnel (tunnel.nu).
 #
-#   nu node/release.nu [--app <dir>] [--preview <name>] [--check] [--delete]
+#   nu node/release.nu [--app <dir>] [--preview <name>] [--check [--build]] [--delete]
 #
 # The steps (design section 3), each a function below:
 #   0  the app, the tunnel, a kubeconfig pinned to the node's context
 #   1  preflight: the operators' versions, CRDs, GatewayClass; refusals (airlock, TRUSTED_JWKS, a folder
 #      that is not the app's name, a preview in the release's namespace)
-#   2  build: Cloud Build, an unchanged service not rebuilt                       (none with --check)
+#   2  build: the node's buildkitd, pushed to the node's registry                 (none with --check)
 #   3  release data, and CUE's render
 #   4  the Namespace; a server dry run of the rest, which stops the release on a rejection
 #   5  SOPS secrets, the OIDC secret                                                              (engine)
@@ -24,15 +25,19 @@
 #  13  the Dapr sidecar of every pod
 #  14  retire                                                                                     (engine)
 #  15  the ConfigMap pronto-release                                                               (engine)
+#  16  prune: the node registry's garbage collection, a warning when it fails                     (engine)
 # A failure at or after step 6 puts back the Deployments it changed (rollback.nu). `--check` is steps
-# 0 to 4 with every write replaced by a server dry run.
+# 0 to 4 with every write replaced by a server dry run; `--check --build` also builds and pushes under
+# the tag `check` (registry writes only, never the cluster).
 
 use runtime.nu
 use runtime.nu [validated_pins]
 use render.nu
 use tunnel.nu
 use rollback.nu
-use build.nu [push-images stamp]
+use build.nu [stamp]
+use push.nu
+use registry.nu
 
 # The operators the preflight reads: where each runs and the image tag that states its version.
 const operator_pods = [
@@ -243,22 +248,21 @@ export def record-release [app_dir: string, node: record, pushed: record] {
 	} | to json | kubectl-ok apply -f -
 }
 
-# --- the release ---
-
-# Builds the images in Cloud Build and answers what was pushed by service: {tag, digest}, the database's tag being its Postgres major.
-def build-images [app_info: record, node: record, compose: record, services: list<string>]: nothing -> record {
-	let plan = ({project: $node.registry.project, registry: $node.environment.registry} | merge (if ($node.preview | is-empty) { {} } else { {preview: $node.preview} }))
-	let text = (do { cd ($app_info.dir | path expand); ^docker compose --profile "*" config } | complete)
-	if $text.exit_code != 0 { error make {msg: $"docker compose config failed in ($app_info.dir): ($text.stderr | str trim)"} }
-	let override = (runtime release-tree $text.stdout)
-	let pushed = (push-images $app_info.dir $plan $app_info.name $services --override $override)
-	$pushed | items {|svc, p|
-		let tag = if $svc == "database" { render database-tag $"($node.environment.registry)/($app_info.name)-($svc)" $p.digest } else { $p.tag }
-		[$svc {tag: $tag, digest: $p.digest}]
-	} | into record
+# What the prune did, in the release's ConfigMap: `pruned` "true" or "false", and `prune_error` (empty on success).
+export def record-prune [node: record, failure: any] {
+	let data = if $failure == null { {pruned: "true", prune_error: ""} } else { {pruned: "false", prune_error: ($failure | into string | str substring 0..499)} }
+	kubectl-ok patch configmap pronto-release -n $node.namespace --type merge -p ({data: $data} | to json --raw)
 }
 
-# The tools a release runs, which an app pins in its mise (kubectl, sops, crane, docker, gcloud): a missing
+# --- the release ---
+
+# Builds the images on the node's buildkitd and answers what was pushed by service: {tag, digest}, the
+# database's tag being its Postgres major. The tag is `release`, a preview's name, or `check`.
+def build-images [app_info: record, node: record, fwd: record, services: list<string>, tag: string]: nothing -> record {
+	push images $app_info.dir $node $fwd $services $tag
+}
+
+# The tools a release runs, which an app pins in its mise (kubectl, sops, crane, docker, buildx): a missing
 # one fails here, before anything is built, not halfway.
 export def require-tools [tools: list<string>] {
 	let missing = ($tools | where {|t| which $t | is-empty })
@@ -270,8 +274,11 @@ export def require-tools [tools: list<string>] {
 # --delete always, and for a release unless `adopt` says the release may take it (its Namespace object
 # then labels it).
 export def check-ownership [app: string, node: record, --adopt, --delete] {
-	let r = (^kubectl get namespace $node.namespace -o json | complete)
-	if $r.exit_code != 0 { return }
+	# Absent is a successful, empty answer; a failed read (timeout, denied, API down) is never taken for absent,
+	# since the write that follows would then change or delete a namespace whose owner was not looked at.
+	let r = (^kubectl get namespace $node.namespace --ignore-not-found -o json | complete)
+	if $r.exit_code != 0 { error make {msg: $"reading namespace ($node.namespace) failed, so its owner is unknown: ($r.stderr | str trim)"} }
+	if ($r.stdout | str trim | is-empty) { return }
 	let labels = ($r.stdout | from json | get metadata.labels? | default {})
 	let owned = (($labels | get -o "pronto.dev/release") == $app) and (($node.preview | is-empty) or (($labels | get -o "pronto.dev/preview") == $node.preview))
 	if $owned { return }
@@ -290,18 +297,44 @@ def check-registry-pull [node: record] {
 	}
 }
 
-# Everything that is read before anything is built or written: the pin, the tools, the operators, who owns
+# What a build needs from the node, read before anything is built: the operator's buildkitd and the registry
+# run, the registry answers through the tunnel (the way the build's push is read back), and the buildkitd
+# answers and builds for the environment's platform. Writes nothing. The services themselves are pronto's
+# (services/buildkit, services/registry): a release never creates or changes them.
+export def check-node-build [node: record, fwd: record] {
+	for s in [
+		{what: "builder", ns: $node.build.buildkit.namespace, name: $node.build.buildkit.deployment}
+		{what: "registry", ns: $node.build.registry.namespace, name: $node.build.registry.deployment}
+	] {
+		let d = (^kubectl get deployment $s.name -n $s.ns -o json | complete)
+		let ready = if $d.exit_code == 0 { $d.stdout | from json | get status?.availableReplicas? | default 0 } else { 0 }
+		if $ready < 1 { error make {msg: $"the node's ($s.what) is not running: deployment ($s.name) in ($s.ns) has no available replica: its manifests are pronto's services/buildkit and services/registry"} }
+	}
+	let code = (^curl -s -o /dev/null -w "%{http_code}" --max-time 10 $"http://127.0.0.1:($fwd.registry)/v2/" | complete)
+	let status = ($code.stdout | str trim)
+	if $status != "200" { error make {msg: $"the node's registry does not answer through the tunnel on 127.0.0.1:($fwd.registry)/v2/ \(HTTP $status\)"} }
+	let work = (mktemp -d -t node-preflight.XXXXXX | str trim)
+	try {
+		let have = (push with-builder $work $fwd {|builder| push platforms $builder })
+		if $node.environment.platform not-in $have { error make {msg: $"the node's buildkitd builds for ($have | str join ', '), not ($node.environment.platform)"} }
+	} finally {
+		rm -rf $work
+	}
+}
+
+# Everything that is read before anything is built or written: the pin, the tools, the operators, the node's builder and registry, who owns
 # the namespace, the SOPS file, the backups' credentials. Answers the file's Secrets, decrypted, for the
 # release to apply (a preview's without the backups' credentials).
-export def preflight [app_info: record, node: record, --check, --adopt]: nothing -> list {
+export def preflight [app_info: record, node: record, fwd: record, --check, --adopt, --build]: nothing -> list {
 	let pin = (runtime version)
 	if $pin not-in $validated_pins {
 		error make {msg: $"the pronto runtime is ($pin); this engine is validated against ($validated_pins | str join ', '), see node/engine/contract_test.nu: move the pin there first"}
 	}
 	let secrets_file = (secrets-file $app_info.dir $node)
-	require-tools (["kubectl" "docker"] | append (if $secrets_file != null { ["sops"] } else { [] }) | append (if $check { [] } else { ["crane" "gcloud"] }))
+	require-tools (["kubectl" "docker"] | append (if $secrets_file != null { ["sops"] } else { [] }) | append (if $check and not $build { [] } else { ["crane"] }))
 	check-operators $node
 	check-registry-pull $node
+	check-node-build $node $fwd
 	check-ownership $app_info.name $node --adopt=$adopt
 	let backups_on = (($node.backups? | default null) != null and ($node.preview | is-empty))
 	let skip = if ($node.backups? | default null) != null and not $backups_on { [$node.backups.credentials] } else { [] }
@@ -343,7 +376,11 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	let deployments = (of-kind $objects Deployment)
 	let jobs = (of-kind $objects Job)
 	# The database's image before this release moves it: the way back if the new one never serves.
-	let previous_image = (let r = (^kubectl get $"cluster.postgresql.cnpg.io/($app)-db" -n $ns -o json | complete); if $r.exit_code == 0 { $r.stdout | from json | get -o spec.imageName } else { null })
+	# Only a confirmed absence (an empty, successful answer) means no database to put back: a failed read stops the
+	# release before it changes anything.
+	let cluster_read = (^kubectl get $"cluster.postgresql.cnpg.io/($app)-db" -n $ns --ignore-not-found -o json | complete)
+	if $cluster_read.exit_code != 0 { error make {msg: $"reading the database cluster ($app)-db failed, so its image to put back is unknown: ($cluster_read.stderr | str trim)"} }
+	let previous_image = if ($cluster_read.stdout | str trim | is-empty) { null } else { $cluster_read.stdout | from json | get -o spec.imageName }
 	let before = (rollback revisions ($deployments | get metadata.name) $ns)
 	try {
 		print $"node: (stamp) applying manifests for ($app)"
@@ -353,7 +390,8 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		try { wait-primary $app $ns $db_image $node.waits.primary } catch {|e|
 			if $previous_image != null {
 				print -e $"node: (stamp) the database did not come up on the new image: putting back ($previous_image)"
-				^kubectl patch $"cluster.postgresql.cnpg.io/($app)-db" -n $ns --type merge -p ({spec: {imageName: $previous_image}} | to json --raw) | complete | ignore
+				let put = (^kubectl patch $"cluster.postgresql.cnpg.io/($app)-db" -n $ns --type merge -p ({spec: {imageName: $previous_image}} | to json --raw) | complete)
+				if $put.exit_code != 0 { error make {msg: $"($e.msg); putting back the database image ($previous_image) failed: ($put.stderr | str trim)"} }
 			}
 			error make {msg: $e.msg}
 		}
@@ -400,26 +438,40 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 def main [
 	--app: string              # the app's directory, or its name in the monorepo
 	--preview: string = ""     # the preview's name: its own namespace beside the release's
-	--check                    # steps 0 to 4 only, every write a server dry run, nothing built
+	--check                    # steps 0 to 4 only, every write a server dry run, nothing built (unless --build)
+	--build                    # with --check: build and push the images under the tag `check`, then dry-run with their digests
 	--delete                   # delete the preview's namespace (a preview only)
+	--serving                  # print `serving <sha>`: the commit the release recorded in the namespace (empty when none); writes nothing
 	--adopt                    # take an existing namespace the release did not label (its Namespace object labels it)
 	--schema-from: string = "" # the preview copy of a database (not in this engine yet)
 ] {
 	$env.GCP_T0 = (date now)
-	$env.CLOUDSDK_ACTIVE_CONFIG_NAME = ($env.CLOUDSDK_ACTIVE_CONFIG_NAME? | default "pronto")
+	if $serving and ($check or $build or $delete or $adopt) { error make {msg: "--serving only reads the recorded commit: it goes with no other flag"} }
 	if $check and $delete { error make {msg: "--check and --delete cannot be given together: a check writes nothing, a delete is a write"} }
+	if $build and not $check { error make {msg: "--build only goes with --check: a release always builds"} }
 	if ($schema_from | is-not-empty) { error make {msg: "--schema-from is not in this engine yet: a preview starts with an empty database"} }
 	let app_info = (runtime resolve-app $app)
 	let node = (render node-config $app_info.cue_path $preview)
 	if $delete {
 		if ($preview | is-empty) or $node.namespace == $node.name { error make {msg: $"--delete removes a preview's namespace; ($node.namespace) is the release's"} }
 	}
+	if $serving {
+		# What cd asks before it releases: the commit the node's namespace records (an absent record, or namespace, is empty).
+		tunnel with-tunnel $node.api $node.build {|fwd|
+			with-env {KUBECONFIG: (tunnel kubeconfig $node.context $fwd.api)} {
+				let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o jsonpath={.data.sha} | complete)
+				if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
+				print $"serving ($r.stdout | str trim)"
+			}
+		}
+		return
+	}
 	let compose = if $delete { {services: {}} } else { render compose-config $app_info.dir }
 	let meta = (render app-meta $app_info.cue_path $preview)
 	if not $delete { refuse $app_info $node $meta $compose $meta.render.enabled }
 	let facts = if $delete { {} } else { render facts $app_info.dir }
-	tunnel with-tunnel $node.api {|port|
-		let kubeconfig = (tunnel kubeconfig $node.context $port)
+	tunnel with-tunnel $node.api $node.build {|fwd|
+		let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
 		try {
 			with-env {KUBECONFIG: $kubeconfig} {
 				if $delete {
@@ -427,16 +479,27 @@ def main [
 					print $"node: (stamp) deleting namespace ($node.namespace)"
 					kubectl-ok delete namespace $node.namespace --ignore-not-found --wait=true
 				} else {
-					let secrets = (preflight $app_info $node --check=$check --adopt=$adopt)
+					let secrets = (preflight $app_info $node $fwd --check=$check --adopt=$adopt --build=$build)
 					let services = (render build-services $compose $meta.render.enabled)
 					# 2. build, or placeholders for a check
-					let pushed = if $check {
-						render placeholder-pushed $services (if ($node.preview | is-empty) { "release" } else { $node.preview })
+					let preview_tag = if ($node.preview | is-empty) { "release" } else { $node.preview }
+					let pushed = if $check and not $build {
+						render placeholder-pushed $services $preview_tag
 					} else {
-						print $"node: (stamp) building ($services | str join ', ') for ($app_info.name)"
-						build-images $app_info $node $compose $services
+						print $"node: (stamp) building ($services | str join ', ') for ($app_info.name) on the node's buildkitd"
+						build-images $app_info $node $fwd $services (if $check { "check" } else { $preview_tag })
 					}
 					release-app $app_info $node $meta $compose $facts $secrets $pushed --check=$check
+					# 16. prune: the release is live, so a failure here is a warning, recorded beside the release
+					if not $check {
+						let failure = (try { registry prune $"127.0.0.1:($fwd.registry)" $node.build; null } catch {|e|
+							print -e $"node: (stamp) warning: the node's registry was not pruned: ($e.msg)"
+							$e.msg
+						})
+						try { record-prune $node $failure } catch {|e|
+							print -e $"node: (stamp) warning: the prune's outcome was not recorded: ($e.msg)"
+						}
+					}
 				}
 			}
 		} finally {

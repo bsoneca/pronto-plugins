@@ -18,12 +18,18 @@ const release_nu = (path self release.nu)
 use std/assert
 use runtime.nu [validated_pins]
 
-# The newest pin the engine says it is validated against (runtime.nu): the one this test holds.
+# The newest pin the engine says it is validated against (runtime.nu): the module version this test holds.
 def pronto-pin []: nothing -> string { $validated_pins | last }
 
+# The runtime an app that pins the module `pronto-pin` runs: the tool version that module's distribution
+# config names (an app's mise pins that, which lags the module by a release), or PRONTO_RUNTIME.
 def runtime-dir []: nothing -> string {
-	let d = if ($env.PRONTO_RUNTIME? | is-not-empty) { $env.PRONTO_RUNTIME } else { ^mise where $"github:bonisoft3/pronto@(pronto-pin)" | str trim }
-	assert equal ($d | path basename) (pronto-pin) $"the runtime is ($d), the contract is written for (pronto-pin)"
+	let d = if ($env.PRONTO_RUNTIME? | is-not-empty) { $env.PRONTO_RUNTIME } else {
+		let module = (^mise where $"github:bonisoft3/pronto@(pronto-pin)" | str trim)
+		let tool = (open --raw ($module | path join distribution config.cue) | parse --regex '#Version:\s+"(?<v>[^"]+)"' | get v.0)
+		^mise where $"github:bonisoft3/pronto@($tool)" | str trim
+	}
+	assert ($d | path basename | $in in $validated_pins) $"the runtime is ($d), which is not in validated_pins"
 	$d
 }
 
@@ -45,6 +51,9 @@ def sandbox [fx: record]: nothing -> record {
 	for p in [bin state $fx.name rec] { mkdir ($d | path join $p) }
 	let app = ($d | path join $fx.name)
 	^cp -R ($engine_dir | path join fixtures $"($fx.name)/.") $app
+	# the fixture renders with the upstream schema of the pin under test
+	let mod = ($app | path join cue.mod module.cue)
+	open $mod | str replace -r 'pronto@v1": v: "[^"]+"' $'pronto@v1": v: "v(pronto-pin)"' | save -f $mod
 	mkdir ($app | path join node schema)
 	cp ($engine_dir | path join schema node.cue) ($app | path join node schema node.cue)
 	do { cd $app; ^git init -q . } | ignore
@@ -69,6 +78,9 @@ case "$*" in
     printf '{"target":{'; sep=""
     for a in "$@"; do case "$a" in -f|-|bake|buildx|--print) ;; *) printf '%s"%s":{"tags":["%s:latest"]}' "$sep" "$a" "$a"; sep="," ;; esac; done
     printf '}}\n' ;;
+  "buildx version") echo "github.com/docker/buildx v0 fake" ;;
+  "buildx create "*|"buildx rm "*) ;;
+  "buildx inspect "*) echo "Platforms: linux/amd64, linux/386" ;;
   "image inspect --format {{json .Config.Env}} "*) echo '["PATH=/bin","PG_MAJOR=17"]' ;;
   "image inspect --format {{json .RepoDigests}} "*)
     for a; do last="$a"; done
@@ -89,8 +101,10 @@ exec "$REAL_CUE" "$@"
 '# | str trim --left | save -f ($d | path join bin cue)
 	# deno signs the service token; both releases ask it, and it is not run for real here
 	"#!/bin/sh\ncat >/dev/null\necho fake.service.token\n" | save -f ($d | path join bin deno)
-	for t in [crane gcloud sops] { "#!/bin/sh\nexit 0\n" | save -f ($d | path join bin $t) }
-	for t in [kubectl docker cue deno crane gcloud sops] { ^chmod +x ($d | path join bin $t) }
+	# the registry answers 200 through the tunnel, which the preflight reads with curl
+	"#!/bin/sh\necho 200\n" | save -f ($d | path join bin curl)
+	for t in [crane docker-buildx sops] { "#!/bin/sh\nexit 0\n" | save -f ($d | path join bin $t) }
+	for t in [kubectl docker cue deno crane docker-buildx sops curl] { ^chmod +x ($d | path join bin $t) }
 	{dir: $d, app: $app, state: ($d | path join state)}
 }
 
@@ -160,6 +174,14 @@ def main [] {
 def test_the_pin_is_validated [] {
 	print "test the runtime under test is one the engine's preflight accepts..."
 	assert ((runtime-dir | path basename) in $validated_pins)
+	# The engine renders with the module's schema and runs the runtime's helpers: the two releases carry the
+	# same nushell, or the helpers this test runs are not the ones the module's apps get.
+	if ($env.PRONTO_RUNTIME? | is-empty) {
+		let module = (^mise where $"github:bonisoft3/pronto@(pronto-pin)" | str trim)
+		for f in [k8s/release.nu release-schema.nu] {
+			assert equal (open --raw ($module | path join $f)) (open --raw (runtime-dir | path join $f)) $"($f) differs between the module (pronto-pin) and its runtime (runtime-dir | path basename)"
+		}
+	}
 }
 
 def test_upstreams_own_release_test_passes [] {
@@ -223,11 +245,11 @@ def test_data_and_order_match_upstreams_main [fx: record] {
 	let upstream_data = (ls $last | where name =~ '\.json$' | get name | each {|f| open $f } | reduce {|it, acc| $acc | merge deep $it })
 	# The engine, over a second world, with the digests the fake docker gave (a hash of the repository).
 	let en = (sandbox $fx)
-	let registry = "europe-west3-docker.pkg.dev/brawl-chess/node-images"
+	let registry = "127.0.0.1:5000"
 	let pushed = ($fx.build | each {|s|
 		[$s {tag: (if $s == "database" { "17" } else { "latest" }), digest: $"sha256:(($"($registry)/($fx.name)-($s)") | hash sha256)"}]
 	} | into record)
-	let script = $"use ($engine_dir | path join render.nu); use ($engine_dir | path join runtime.nu); use ($release_nu) [release-app]; let app_info = \(runtime resolve-app '($en.app)'\); let node = \(render node-config $app_info.cue_path ''\); let meta = \(render app-meta $app_info.cue_path ''\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let pushed = ($pushed | to nuon); use ($release_nu) [preflight]; preflight $app_info $node --check | ignore; render release-data $app_info.dir $compose $facts $pushed | save -f ($en.dir | path join data.json); release-app $app_info $node $meta $compose $facts [] $pushed"
+	let script = $"use ($engine_dir | path join render.nu); use ($engine_dir | path join runtime.nu); use ($release_nu) [release-app]; let app_info = \(runtime resolve-app '($en.app)'\); let node = \(render node-config $app_info.cue_path ''\); let meta = \(render app-meta $app_info.cue_path ''\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let pushed = ($pushed | to nuon); use ($release_nu) [preflight]; let fwd = {api: 1, buildkit: 2, registry: 3}; preflight $app_info $node $fwd --check | ignore; render release-data $app_info.dir $compose $facts $pushed | save -f ($en.dir | path join data.json); release-app $app_info $node $meta $compose $facts [] $pushed"
 	let e = (in-world $en -c $script)
 	assert equal $e.exit_code 0 $"($e.stdout | lines | last 20 | str join (char nl))\n($e.stderr)"
 	# 2. data
