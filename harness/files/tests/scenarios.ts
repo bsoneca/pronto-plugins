@@ -817,8 +817,14 @@ export class Run {
   async http(st: Step, a: Actor | null, t: number) {
     const h = st.http, path = await this.fill(h.path);
     sel.observe(this.s.id, h.method ?? "GET", String(h.path).split("?")[0]);
-    const headers: Record<string, string> = await this.fillAll(h.headers ?? {});
-    if (!h.anon) {
+    // A path on another origin than the app's door (a published game's address, read from a listing a maker wrote) is
+    // a page another party controls (PRONTO-837). It is asked as no one: no session, no cookie, no header of the
+    // scenario's. No request follows a redirect onto another origin, whatever origin it started from: such a 3xx is the
+    // answer, so the runner never reaches an address only its own network reaches. A failure there quotes its status
+    // alone, and nothing is kept from what it said.
+    const door = new URL(URL_).origin, url = new URL(path, URL_), foreign = url.origin !== door;
+    const headers: Record<string, string> = foreign ? {} : await this.fillAll(h.headers ?? {});
+    if (!h.anon && !foreign) {
       if (!a) throw new Error("an http step with a session names its actor (by)");
       // A guest's session is minted as the page boots: waited for, as the page itself waits for it.
       let token = "";
@@ -827,14 +833,23 @@ export class Run {
     }
     const body = h.body === undefined ? undefined : await this.fillAll(h.body);
     if (body !== undefined && typeof body !== "string") headers["Content-Type"] ??= "application/json";
-    const ctx = h.anon || !a ? anon : a.ctx.request;
-    // A path on another origin than the app's door (a published game's address, read from a listing a maker wrote) is
-    // asked as it is and no further (PRONTO-837): a redirect it answers is its answer, never followed, so a page another
-    // party controls cannot send the runner to an address only the runner's network reaches; and a failure quotes its
-    // status alone, never what that page said.
-    const url = new URL(path, URL_), foreign = url.origin !== new URL(URL_).origin;
+    const ctx = h.anon || !a || foreign ? anon : a.ctx.request;
+    // Redirects followed by hand, on the door's own origin alone, as a browser would (a 303, or a 301/302 after a write,
+    // asks again with GET and no body); twenty at most.
+    const fetchOnDoor = async () => {
+      let at = url, method = h.method ?? "GET", data = typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body);
+      for (let hop = 0;; hop++) {
+        const res = await ctx.fetch(at.href, { method, headers, data, failOnStatusCode: false, maxRedirects: 0 });
+        const to = res.status() >= 300 && res.status() < 400 ? res.headers()["location"] : undefined;
+        if (!to || hop >= 20) return res;
+        const next = new URL(to, at);
+        if (next.origin !== door) return res;
+        if (res.status() === 303 || ((res.status() === 301 || res.status() === 302) && method !== "GET" && method !== "HEAD")) { method = "GET"; data = undefined; }
+        at = next;
+      }
+    };
     const ask = async (): Promise<[boolean, unknown]> => {
-      const res = await ctx.fetch(url.href, { method: h.method, headers, data: typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body), failOnStatusCode: false, ...(foreign ? { maxRedirects: 0 } : {}) });
+      const res = await fetchOnDoor();
       const text = await res.text();
       let json: any = null;
       try { json = JSON.parse(text); } catch { /* not JSON */ }
@@ -849,6 +864,7 @@ export class Run {
         && texts.every(([, got]) => got !== undefined);
       // A `keep` path with no value is kept as "undefined" on purpose, not failed: `ifKept` skips the steps that
       // use it (an empty production listing before a Publish lists the game, PRONTO-613).
+      if (ok && foreign && (h.keep || h.keepText)) throw new Error(`${h.method} ${path}: nothing is kept from another origin's answer`);
       if (ok) for (const [name, at] of Object.entries((h.keep ?? {}) as Record<string, string>)) this.vars.set(name, String(at.split(".").reduce((o: any, k) => o?.[k], json)));
       if (ok) for (const [name, got] of texts) this.vars.set(name, got as string);
       return [ok, foreign ? `${s} (another origin's answer, not quoted)` : `${s} ${text.slice(0, e.has || e.lacks ? 1500 : 300)}`];
