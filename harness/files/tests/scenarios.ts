@@ -828,8 +828,13 @@ export class Run {
     const body = h.body === undefined ? undefined : await this.fillAll(h.body);
     if (body !== undefined && typeof body !== "string") headers["Content-Type"] ??= "application/json";
     const ctx = h.anon || !a ? anon : a.ctx.request;
+    // A path on another origin than the app's door (a published game's address, read from a listing a maker wrote) is
+    // asked as it is and no further (PRONTO-837): a redirect it answers is its answer, never followed, so a page another
+    // party controls cannot send the runner to an address only the runner's network reaches; and a failure quotes its
+    // status alone, never what that page said.
+    const url = new URL(path, URL_), foreign = url.origin !== new URL(URL_).origin;
     const ask = async (): Promise<[boolean, unknown]> => {
-      const res = await ctx.fetch(new URL(path, URL_).href, { method: h.method, headers, data: typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body), failOnStatusCode: false });
+      const res = await ctx.fetch(url.href, { method: h.method, headers, data: typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body), failOnStatusCode: false, ...(foreign ? { maxRedirects: 0 } : {}) });
       const text = await res.text();
       let json: any = null;
       try { json = JSON.parse(text); } catch { /* not JSON */ }
@@ -846,7 +851,7 @@ export class Run {
       // use it (an empty production listing before a Publish lists the game, PRONTO-613).
       if (ok) for (const [name, at] of Object.entries((h.keep ?? {}) as Record<string, string>)) this.vars.set(name, String(at.split(".").reduce((o: any, k) => o?.[k], json)));
       if (ok) for (const [name, got] of texts) this.vars.set(name, got as string);
-      return [ok, `${s} ${text.slice(0, e.has || e.lacks ? 1500 : 300)}`];
+      return [ok, foreign ? `${s} (another origin's answer, not quoted)` : `${s} ${text.slice(0, e.has || e.lacks ? 1500 : 300)}`];
     };
     if (st.poll) return this.until(`${h.method} ${path}`, t, ask);
     const [ok, seen] = await ask();
