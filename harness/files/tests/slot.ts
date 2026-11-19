@@ -535,7 +535,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
   await Deno.mkdir(coresQueue, { recursive: true });
   if (line !== "none") await Deno.writeTextFile(`${queue}/${mine}`, `${weight} ${nested ? "nested=1 " : ""}${what}`);
   const minutes = Number(Deno.env.get("STACK_WAIT_MINUTES") ?? 120);
-  let end = Date.now() + minutes * 60_000, fewest = Infinity, lightest = Infinity;
+  let end = Date.now() + minutes * 60_000, fewest = Infinity, fewestCores = Infinity, lightest = Infinity;
   // What dead postgres left, freed once a claim: the stack this claim starts may need a segment.
   await reclaimSegments();
   await reapDeadClaims();
@@ -544,8 +544,8 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
     const got = await choosing(async () => {
       // Reclaim, at every claim: the live tickets of this claim's line older than its own (their
       // weights reserved), the dead ones freed; the live holders, the dead jobs and stale slots freed.
-      const scan = async (dir: string, own: string, onlyNested = false) => {
-        const found: { name: string; weight: number; what: string }[] = [];
+      const scan = async (dir: string, own: string) => {
+        const found: { name: string; weight: number; what: string; weighted: boolean }[] = [];
         for await (const e of Deno.readDir(dir)) {
           const m = e.name.match(/^[0-9]+-([0-9]+)(?:-w)?$/);
           if (!m) continue;
@@ -553,13 +553,11 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
           if (e.name >= own) continue;
           const [w, ...rest] = (await Deno.readTextFile(`${dir}/${e.name}`).catch(() => "")).split(" ");
           const isNested = rest[0] === "nested=1";
-          if (onlyNested && !isNested) continue;
-          found.push({ name: e.name, weight: w !== "" && Number(w) >= 0 ? Number(w) : weights.stack, what: (isNested ? rest.slice(1) : rest).join(" ") });
+          found.push({ name: e.name, weight: w !== "" && Number(w) >= 0 ? Number(w) : weights.stack, what: (isNested ? rest.slice(1) : rest).join(" "), weighted: e.name.endsWith("-w") });
         }
         return found.sort((x, y) => x.name < y.name ? -1 : 1);
       };
-      const older = line === "none" ? [] : await scan(queue, mine, nested);
-      const where = `${ordinal(older.length + 1)} in line${older.length ? ` behind ${older.at(-1)!.what} (weight ${older.at(-1)!.weight})` : ""}`;
+      const inLine = line === "none" ? [] : await scan(queue, mine);
       const holders: { weight: number; cue: boolean; job: boolean }[] = [];
       for await (const e of Deno.readDir(pool)) {
         const m = e.name.match(/^(slot|job)-([0-9]+)$/);
@@ -570,6 +568,15 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
         else if (staleSlot(false, (await answering(33000 + 100 * (Number(m[2]) - 1))).length > 0)) await Deno.remove(`${pool}/${e.name}`, { recursive: true }).catch(() => {});
       }
       const { used } = held(holders);
+      // The tickets this claim waits behind, in order, nested or not: all of the older ones but a weighted cue
+      // ticket (`-w`) blocked on cores, which waits for cores a holder above a nested claim may keep (PRONTO-761,
+      // PRONTO-837: a gate's nested cue behind it, and a zero-weight claim behind that, stalled for ever).
+      const older: typeof inLine = [];
+      for (const o of inLine) {
+        const reserved = o.weighted ? (await scan(coresQueue, o.name.replace(/-w$/, ""))).reduce((n, c) => n + c.weight, 0) : 0;
+        if (!(o.weighted && !admits(used, o.weight, reserved, budget))) older.push(o);
+      }
+      const where = `${ordinal(older.length + 1)} in line${older.length ? ` behind ${older.at(-1)!.what} (weight ${older.at(-1)!.weight})` : ""}`;
       // A top-level cue reserves cores only at the head of the cue line and while no cue runs: the lock lets one
       // run at a time, so the next reserves nothing until the one running ends (a running cue's 7 and the next's
       // 7 would hold 14 of 15, and a rehearsal would no longer fit beside one cue; three would hold 21). Its
@@ -579,8 +586,11 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
         else await Deno.remove(`${coresQueue}/${ticket}`).catch(() => {});
       }
       // The cores a dual ticket waits behind: its older tickets in the cores' line.
-      const ahead = line === "cue" ? (dual ? (await scan(coresQueue, ticket)).reduce((n, o) => n + o.weight, 0) : 0) : older.reduce((n, o) => n + o.weight, 0);
-      const why = (s: string) => ({ why: `${where}: ${s}`, ahead: older.length, used });
+      const coresOlder = line === "cue" ? (dual ? await scan(coresQueue, ticket) : []) : older;
+      const ahead = coresOlder.reduce((n, o) => n + o.weight, 0);
+      // `ahead` counts the lock's line, `coresAhead` the cores': a weighted cue ticket at the lock's head still
+      // moves while the cores' line drains (PRONTO-837).
+      const why = (s: string) => ({ why: `${where}: ${s}`, ahead: older.length, coresAhead: coresOlder.length, used });
       if (line === "cue") {
         const holding = holders.filter((h) => h.cue).length;
         if (!cueAdmits(older.length, holding)) return why(`the cue lock: ${holding ? "held" : "free"}, ${older.length} ahead (one cue evaluation at a time)`);
@@ -660,9 +670,10 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
     // Said again when the reason changes.
     if (got.why !== told) say(`waiting: ${got.why}`);
     told = got.why;
-    // Progress: a ticket ahead left, or the weight held dropped, below the least seen.
-    if (got.ahead < fewest || got.used < lightest) end = Date.now() + minutes * 60_000;
+    // Progress: a ticket ahead left (in either line), or the weight held dropped, below the least seen.
+    if (got.ahead < fewest || got.coresAhead < fewestCores || got.used < lightest) end = Date.now() + minutes * 60_000;
     fewest = Math.min(fewest, got.ahead);
+    fewestCores = Math.min(fewestCores, got.coresAhead);
     lightest = Math.min(lightest, got.used);
     if (Date.now() > end) throw new Error(`no slot, and the line did not move for ${minutes} minutes: ${got.why}`);
     await new Promise((r) => setTimeout(r, 1000));
@@ -962,8 +973,8 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-learn", "--cores-
   const mem = opts.includes("--mem") ? Number(opt("--mem")) : 0;
   const learn = opts.includes("--mem-learn") ? opt("--mem-learn") : undefined;
   const coresLearn = opts.includes("--cores-learn") ? opt("--cores-learn") : undefined;
-  // A --mem job without --weight weighs no cores (the wrappers from before it did not name one).
-  const weight = Number(opts.includes("--weight") ? opt("--weight") : mem > 0 ? 0 : Deno.env.get("STACK_WEIGHT") ?? weights.stack);
+  // Without --weight: STACK_WEIGHT, else a --mem job weighs no cores (the wrappers from before it did not name one).
+  const weight = Number(opts.includes("--weight") ? opt("--weight") : Deno.env.get("STACK_WEIGHT") ?? (mem > 0 ? 0 : weights.stack));
   if (!cmd.length || !(mem >= 0) || !(weight > 0 || (weight === 0 && mem > 0))) {
     console.error('usage: deno run -A tests/slot.ts --weight <n> [--mem <GB>] [--mem-learn <file>] --what "<label>" -- <command...>');
     Deno.exit(2);
@@ -1014,7 +1025,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-learn", "--cores-
   if (learn) {
     if (!(peak > 0)) peak = 0.05;
     const before = status.success ? 0 : Number((await Deno.readTextFile(learn).catch(() => "")).split(" ")[0]) || 0;
-    await Deno.mkdir(learn.replace(/\/[^/]*$/, ""), { recursive: true }).catch(() => {});
+    if (learn.includes("/")) await Deno.mkdir(learn.replace(/\/[^/]*$/, ""), { recursive: true }).catch(() => {});
     await Deno.writeTextFile(learn, `${round(Math.max(peak, before))} ${what}\n`).catch(() => {});
   }
   // The cores it kept busy on average, for the next run's --weight: only from a run of 5 s or more (a
@@ -1026,7 +1037,9 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-learn", "--cores-
     const prior = status.success ? "" : await Deno.readTextFile(coresLearn).catch((e) => { if (e instanceof Deno.errors.NotFound) return ""; throw e; });
     const before = Number(prior.trim()) || 0;
     try {
-      await Deno.mkdir(coresLearn.replace(/\/[^/]*$/, ""), { recursive: true });
+      // A bare filename has no folder to make (mkdir of it would make a directory of that name).
+      const dir = coresLearn.includes("/") ? coresLearn.replace(/\/[^/]*$/, "") : "";
+      if (dir) await Deno.mkdir(dir, { recursive: true });
       await Deno.writeTextFile(coresLearn, `${Math.round(Math.max(cpu / wall, before) * 100) / 100}\n`);
     } catch (e) {
       console.error(`slot: the measured weight was not saved to ${coresLearn}: ${(e as Error).message}`);

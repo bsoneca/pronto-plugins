@@ -865,7 +865,9 @@ export class Run {
     // only the runner's network reaches, nor pass on the door's answer), keeps nothing, and a failure quotes its status
     // alone. A path on the door follows redirects only onto the door's own host or a name under it, on any port (its
     // sign-in start sends a browser to the broker: id.<host> where it is released, another port at hand); a redirect
-    // anywhere else is its answer.
+    // anywhere else is its answer. A hop that leaves the door's origin is asked as a foreign path is: in a context of its
+    // own, with no session, cookie, header or body (a 307/308 that would carry the body is its answer), and an answer
+    // that ends on another origin is neither kept nor quoted.
     const door = new URL(URL_), url = new URL(path, URL_), foreign = url.origin !== door.origin;
     const ours = (u: URL) => u.hostname === door.hostname || u.hostname.endsWith(`.${door.hostname}`);
     if (foreign && (h.keep || h.keepText || h.body !== undefined)) throw new Error(`${h.method} ${path}: a step to another origin sends no body and keeps nothing`);
@@ -880,30 +882,38 @@ export class Run {
     const body = h.body === undefined ? undefined : await this.fillAll(h.body);
     if (body !== undefined && typeof body !== "string") headers["Content-Type"] ??= "application/json";
     const ctx = h.anon || !a ? anon : a.ctx.request;
-    const send = async (): Promise<{ status: number; headers: Record<string, string>; text: string }> => {
+    const send = async (): Promise<{ status: number; headers: Record<string, string>; text: string; away: boolean }> => {
       const via = foreign ? await request.newContext({ ignoreHTTPSErrors: true }) : ctx;
+      // The context a hop off the door's origin is asked in, made at its first such hop.
+      let apart: Awaited<ReturnType<typeof request.newContext>> | undefined;
+      let end = url;
       try {
         const res = foreign
           ? await via.fetch(url.href, { method: h.method, failOnStatusCode: false, maxRedirects: 0 })
           : await (async () => {
             let at = url, method = h.method ?? "GET", data = typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body);
             for (let hop = 0;; hop++) {
-              // The session goes to the door alone, as a browser carries it: a hop on another origin is asked without it.
-              const sent = at.origin === door.origin ? headers : Object.fromEntries(Object.entries(headers).filter(([k]) => k.toLowerCase() !== "authorization"));
-              const res = await via.fetch(at.href, { method, headers: sent, data, failOnStatusCode: false, maxRedirects: 0 });
+              end = at;
+              const home = at.origin === door.origin;
+              const res = home
+                ? await via.fetch(at.href, { method, headers, data, failOnStatusCode: false, maxRedirects: 0 })
+                : await (apart ??= await request.newContext({ ignoreHTTPSErrors: true })).fetch(at.href, { method, failOnStatusCode: false, maxRedirects: 0 });
               const to = res.status() >= 300 && res.status() < 400 ? res.headers()["location"] : undefined;
               const next = to === undefined ? undefined : new URL(to, at);
               if (!next || hop >= 20 || !ours(next)) return res;
               // As a browser would: a 303, or a 301/302 after a write, asks again with GET and no body.
               if (res.status() === 303 || ((res.status() === 301 || res.status() === 302) && method !== "GET" && method !== "HEAD")) { method = "GET"; data = undefined; }
+              // A hop off the door's origin carries no body: one that would (307/308 after a write) is the answer.
+              if (next.origin !== door.origin && data !== undefined) return res;
               at = next;
             }
           })();
-        return { status: res.status(), headers: res.headers(), text: await res.text() };
-      } finally { if (foreign) await via.dispose(); }
+        return { status: res.status(), headers: res.headers(), text: await res.text(), away: foreign || end.origin !== door.origin };
+      } finally { if (foreign) await via.dispose(); await apart?.dispose(); }
     };
     const ask = async (): Promise<[boolean, unknown]> => {
       const res = await send(), text = res.text;
+      if (res.away && (h.keep || h.keepText)) return [false, `${res.status} (ended on another origin, whose answer is not kept)`];
       let json: any = null;
       try { json = JSON.parse(text); } catch { /* not JSON */ }
       const e = h.expect, s = res.status;
@@ -919,7 +929,7 @@ export class Run {
       // use it (an empty production listing before a Publish lists the game, PRONTO-613).
       if (ok) for (const [name, at] of Object.entries((h.keep ?? {}) as Record<string, string>)) this.vars.set(name, String(at.split(".").reduce((o: any, k) => o?.[k], json)));
       if (ok) for (const [name, got] of texts) this.vars.set(name, got as string);
-      return [ok, foreign ? `${s} (another origin's answer, not quoted)` : `${s} ${text.slice(0, e.has || e.lacks ? 1500 : 300)}`];
+      return [ok, res.away ? `${s} (another origin's answer, not quoted)` : `${s} ${text.slice(0, e.has || e.lacks ? 1500 : 300)}`];
     };
     if (st.poll) return this.until(`${h.method} ${path}`, t, ask);
     const [ok, seen] = await ask();
