@@ -62,6 +62,14 @@ const must = (cmd: string, args: string[], cwd?: string, env: Record<string, str
   if (!r.ok) throw new Error(`${cmd} ${args.join(" ")}${cwd ? ` (in ${cwd})` : ""}: ${r.err || r.out}`);
   return r.out;
 };
+// git's arguments for a call that reaches origin. Under CD the job's runner has no user session, so
+// the system's osxkeychain helper fails with -25308 (PRONTO-883): with GH_TOKEN set, a request to https://github.com
+// asks no other helper (the scoped empty value resets the list for it, the global one included) and reads the token
+// from the environment, never from argv; any other host keeps its own helpers and never receives the token, and
+// launchd's run keeps the owner's.
+const remote = (args: string[]) => Deno.env.get("GH_TOKEN")
+  ? ["-c", "credential.https://github.com.helper=", "-c", 'credential.https://github.com.helper=!f() { test "$1" = get && echo username=x-access-token && echo "password=$GH_TOKEN"; }; f', ...args]
+  : args;
 
 // mise, as the shell finds it or sayt's own (which ./saytw installs): a shell or launchd without it on
 // the PATH still finds the app's tools through it.
@@ -145,7 +153,7 @@ const tellNote = (n: Notify, msg: string, note: string, title: string) => {
 const missingOnMain = (tip: string) => {
   const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], exists(wt) ? wt : here);
   const g = (...a: string[]) => must("git", ["--git-dir", repo, ...a], undefined, {}, 300);
-  g("fetch", "-q", "origin");
+  must("git", remote(["--git-dir", repo, "fetch", "-q", "origin"]), undefined, {}, 300);
   const range = (r: string) => {
     const log = parseLog(g("log", "--no-merges", "--reverse", "--format=%H%x1f%B%x1e", r));
     const ids = patchIds(sh("sh", ["-c", 'git --git-dir "$REPO" log -p --no-merges --reverse "$RANGE" | git patch-id --stable'], undefined, { REPO: repo, RANGE: r }, 300).out);
@@ -163,7 +171,7 @@ const dropBranch = (branch: string, notify: Notify) => {
       tellNote(notify, `release-cron (${app}): ${branch} is left on origin: ${backportWhy(missing)}. Cherry-pick them to main (git cherry-pick -x), then delete the branch.`, `release-cron-branch-${branch.split("/").at(-1)}.md`, "release-cron branch kept");
       return false;
     }
-    must("git", ["push", "-q", "origin", "--delete", branch], exists(wt) ? wt : here, {}, 120);
+    must("git", remote(["push", "-q", "origin", "--delete", branch]), exists(wt) ? wt : here, {}, 120);
     return true;
   } catch (e) { console.log(`release-cron: ${branch} not deleted: ${(e as Error).message.split("\n")[0]}`); return false; }
 };
@@ -253,7 +261,7 @@ if (verb === "bisect") {
   const runHolder = () => { try { return Number(Deno.readTextFileSync(`${state}/lock/pid`)); } catch { return 0; } };
   const starter = Number(Deno.env.get("RELEASE_CRON_BISECT_BY") ?? 0);
   const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], here);
-  must("git", ["--git-dir", repo, "fetch", "-q", "origin"]);
+  must("git", remote(["--git-dir", repo, "fetch", "-q", "origin"]));
   const slug = must("git", ["--git-dir", repo, "remote", "get-url", "origin"]).replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1");
   const { gcp: g, cron } = config(top);
   const gcpName = g?.name as string | undefined;
@@ -292,7 +300,7 @@ if (verb === "bisect") {
   const halt = () => {
     const h = runHolder();
     const after = jsonl(`${state}/runs.jsonl`).slice(at + 1).find((r) => r.outcome === "released" && r.commit);
-    sh("git", ["--git-dir", repo, "fetch", "-q", "origin"], undefined, {}, 120);
+    sh("git", remote(["--git-dir", repo, "fetch", "-q", "origin"]), undefined, {}, 120);
     const since = (sh("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H", `${failed.commit}..origin/main`], undefined, {}, 60).out ?? "").split("\n").filter(Boolean).reverse();
     return stopsBisect(h, starter, h > 0 && sh("kill", ["-0", String(h)]).ok, after?.commit ?? null, fixedBy(since, sig, evidence()));
   };
@@ -442,7 +450,7 @@ if (verb === "run" && override) {
 const heldRun = !!open && verb === "run";
 function worktree() {
   const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], exists(wt) ? wt : here);
-  must("git", ["--git-dir", repo, "fetch", "-q", "origin"]);
+  must("git", remote(["--git-dir", repo, "fetch", "-q", "origin"]));
   if (!exists(`${wt}/.git`)) must("git", ["--git-dir", repo, "worktree", "add", "-q", "--detach", wt, ref]);
   must("git", ["checkout", "-q", "--detach", "-f", ref], wt);
   // Clean as main is; what git ignores (builds, caches) is kept, as in any checkout.
@@ -550,7 +558,7 @@ const end = (outcome: string, why = "", code = 0, red = false) => {
       else { outcome = `held ${o.branch}`; why = `${why}; ${heldNotice(o.branch)}`; writeOpen(o); }
     } else if (cron?.branches?.enabled && !override) {
       const branch = branchName(app, Date.now());
-      const pushed = sh("git", ["push", "-q", "origin", `${run.commit}:refs/heads/${branch}`], wt, {}, 120);
+      const pushed = sh("git", remote(["push", "-q", "origin", `${run.commit}:refs/heads/${branch}`]), wt, {}, 120);
       if (pushed.ok) {
         const { abandonHours, abandonAttempts } = cron.branches;
         writeOpen(open = { branch, base: run.commit as string, opened: local(Date.now()), limits: { abandonHours, abandonAttempts }, attempts: [{ tip: run.commit as string, verdict: "red", at: local(Date.now()) }] });
@@ -625,7 +633,7 @@ const [lastAt, lastGap, lastFailed, lastTried, lastHeldTip] = (() => { try { con
   const [at, gap, failed] = [lastAt, lastGap, lastFailed];
   // After a failed run, main as the remote has it now (git ls-remote, no fetch): moved past the
   // failed commit by a change that concerns what failed (judged), the run starts without the gap.
-  const moved = () => { const r = sh("git", ["ls-remote", "origin", "refs/heads/main"], wt, {}, 60); return r.ok ? r.out.split(/\s/)[0] || null : null; };
+  const moved = () => { const r = sh("git", remote(["ls-remote", "origin", "refs/heads/main"]), wt, {}, 60); return r.ok ? r.out.split(/\s/)[0] || null : null; };
   const early = () => { const head = moved(); return !!failed && retry(failed, head) && judged(failed, head!) !== null; };
   // A held release has no gap: it is given up (abandoned) at its limits, else due only when its branch has a tip no attempt judged.
   if (open) {
@@ -637,7 +645,7 @@ const [lastAt, lastGap, lastFailed, lastTried, lastHeldTip] = (() => { try { con
       dropBranch(o.branch, (() => { try { return config(wt).cron.notify as Notify; } catch { return { kind: "none" } as Notify; } })());
       end(`abandoned ${o.branch}`, `held since ${o.opened}, past its ${o.limits.abandonHours} h or ${o.limits.abandonAttempts} red attempts`);
     }
-    const r = sh("git", ["ls-remote", "origin", `refs/heads/${open.branch}`], wt, {}, 60);
+    const r = sh("git", remote(["ls-remote", "origin", `refs/heads/${open.branch}`]), wt, {}, 60);
     const tip = r.ok ? r.out.split(/\s/)[0] || null : null;
     // A tip refused (below) is not run again until another is pushed.
     // A tip that failed outside the rehearsal (no attempt) waits the gap before it runs again; a new tip runs at once.
@@ -663,7 +671,7 @@ function judged(failed: string, head: string): string | null {
     if (f === failed && h === head) return v.join(" ") === "-" ? null : v.join(" ");
   } catch { /* not judged yet */ }
   const verdict = (() => {
-    if (!sh("git", ["fetch", "-q", "origin", "main"], wt, {}, 120).ok) return "main's change could not be fetched";
+    if (!sh("git", remote(["fetch", "-q", "origin", "main"]), wt, {}, 120).ok) return "main's change could not be fetched";
     const diff = sh("git", ["diff", "--name-only", "--no-renames", failed, head], wt, {}, 60);
     if (!diff.ok) return "main's change could not be read";
     const run = jsonl(`${state}/runs.jsonl`).reverse().find((r) => r.outcome === "failed" && r.commit === failed);
@@ -845,7 +853,7 @@ try {
       }
       end(`held-backport ${releasedBranch.branch}`, backportWhy(missing));
     }
-    try { must("git", ["push", "-q", "origin", "--delete", releasedBranch.branch], wt, {}, 120); say(`${releasedBranch.branch}: every commit is on main, the branch deleted from origin`); } catch (e) { say(`${releasedBranch.branch} not deleted: ${(e as Error).message.split("\n")[0]}`); }
+    try { must("git", remote(["push", "-q", "origin", "--delete", releasedBranch.branch]), wt, {}, 120); say(`${releasedBranch.branch}: every commit is on main, the branch deleted from origin`); } catch (e) { say(`${releasedBranch.branch} not deleted: ${(e as Error).message.split("\n")[0]}`); }
     for (const f of ["released-branch", "backport-told"]) { try { Deno.removeSync(`${state}/${f}`); } catch { /* none */ } }
   }
   // RELEASE_CRON_DRY=android runs only the android step below, in place of the rehearsal and the preview.
