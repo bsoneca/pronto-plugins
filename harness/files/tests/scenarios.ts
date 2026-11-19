@@ -186,41 +186,77 @@ export class Run {
   // The app's address, and whether it is production: for the app's own steps.
   readonly url = URL_;
   readonly onProduction = onProduction;
-  // Set when a slowed page stops answering for good: a fault of the browser's CPU throttling (see
-  // tests/slow.ts), not of the app, which the runner runs the scenario again for.
+  // Set when a page stops answering for a minute. Slowed, it is a fault of the browser's CPU throttling
+  // (see tests/slow.ts), which the runner runs the scenario again for; unthrottled, it is the app's (a
+  // loop on its main thread), and the scenario fails. Either way it is never asked anything again: a
+  // call to a page that does not answer waits for ever, even once its renderer crashed (PRONTO-738).
   stuck = "";
+  // The actors whose pages stopped answering.
+  silent = new Set<string>();
+  // Where a silent page's main thread was when paused: its top frames, innermost first. Bounded, as
+  // everything asked of a silent page is: a renderer that does not pause in 15 s says so.
+  // A silent page that paused with frames is a loop in the app's own code, never a throttling wedge (which has no JS
+  // to pause): such a run is not run again.
+  looped = false;
+  async busyAt(a: Actor): Promise<string[]> {
+    type Frame = { functionName: string; url: string; location: { lineNumber: number; columnNumber: number } };
+    const paused = new Promise<string[]>((r) => a.cdp.once("Debugger.paused", (e) => {
+      a.cdp.send("Debugger.resume").catch(() => {});
+      r((e.callFrames as Frame[]).slice(0, 8).map((f) => `${f.functionName || "(anonymous)"} ${f.url || "(inline)"}:${f.location.lineNumber + 1}:${f.location.columnNumber + 1}`));
+    }));
+    const where = (async () => { await a.cdp.send("Debugger.pause"); const frames = await paused; if (frames.length) this.looped = true; return frames; })();
+    return await Promise.race([where, sleep(15).then(() => ["it did not pause in 15 s"])]).catch((e) => [`not paused: ${(e as Error).message.split("\n")[0]}`]);
+  }
+  // Something asked for a failure's report, bounded: one that does not answer in 15 s is said in the report and the
+  // actor asked nothing more for it. Only the minute-long checks (the watch, wedged()) call a page silent: what the
+  // report asks may wait on the server too (an app's hooks.report), and a slow server is no loop of the page's.
+  unanswered = new Set<string>();
+  async asked<T>(a: Actor, call: () => Promise<T>, otherwise: T): Promise<T> {
+    if (this.silent.has(a.key) || this.unanswered.has(a.key)) return otherwise;
+    const r = await Promise.race([call().catch(() => otherwise), sleep(15).then(() => this)]);
+    if (r !== this) return r as T;
+    this.unanswered.add(a.key);
+    return otherwise;
+  }
+  // A page's renderer crashed: its pending calls are never answered (Playwright 1.61 leaves them unrejected), so it is
+  // silent at once, and a step waiting on it fails now (`crashed`, below).
+  crashed: (a: Actor) => void = () => {};
+  // Set once any of its pages' renderer crashed: never a throttling wedge, so never run again.
+  crash = false;
   beat: ReturnType<typeof setInterval> | undefined;
+  // Each actor's probes missed in a row (the watch's).
+  missed = new Map<string, number>();
   stalled: Promise<never>;
   // Slowed as the rehearsal slows it (SLOW named: every scenario), or, in the local gate, only a scenario marked `slow`.
   readonly slowed: boolean;
   constructor(readonly s: Scenario) {
     this.slowed = !!slow && (!gate || !!s.slow);
-    const missed = new Map<string, number>();
     this.stalled = new Promise<never>((_, reject) => {
-      // Only a slowed browser wedges: unthrottled, a page that does not answer is the app's to explain.
-      if (!this.slowed) return;
+      this.crashed = (a) => { this.crash = true; this.silent.add(a.key); this.stuck ||= `${a.key}'s page crashed`; clearInterval(this.beat); reject(new Error(this.stuck)); };
       this.beat = setInterval(async () => {
         for (const a of this.actors.values()) {
+          if (this.silent.has(a.key)) continue;
           const up = await Promise.race([a.page.evaluate(() => true).catch(() => true), sleep(15).then(() => false)]);
-          missed.set(a.key, up ? 0 : (missed.get(a.key) ?? 0) + 1);
-          if ((missed.get(a.key) ?? 0) >= 4) { this.stuck = `${a.key}'s page has not answered for a minute`; clearInterval(this.beat); reject(new Error(this.stuck)); return; }
+          this.missed.set(a.key, up ? 0 : (this.missed.get(a.key) ?? 0) + 1);
+          if ((this.missed.get(a.key) ?? 0) >= 4) { this.silent.add(a.key); this.stuck = `${a.key}'s page has not answered for a minute`; clearInterval(this.beat); reject(new Error(this.stuck)); return; }
         }
       }, 15000);
     });
     this.stalled.catch(() => {});
   }
-  // A step that failed on a slowed page may have lost its race to the watch above: a page that
-  // wedged within the step's own timeout (a click's 30 s, a check's 60 s) fails the step before
-  // the minute is up. Asked again for that minute, a page that never answers is the wedge, and the
-  // scenario is run again; one that answers failed the step itself.
+  // A step that failed may have lost its race to the watch above: a page that stopped answering
+  // within the step's own timeout (a click's 30 s, a check's 60 s) fails the step before the minute
+  // is up. Asked again for that minute, a page that never answers is silent; one that answers failed
+  // the step itself.
+  // Every actor not yet silent is asked, even once one is: two pages in one game can loop together.
   async wedged(): Promise<string> {
-    if (!this.slowed || this.stuck) return this.stuck;
     for (const a of this.actors.values()) {
+      if (this.silent.has(a.key)) continue;
       let up = false;
       for (let n = 0; n < 4 && !up; n++) up = await Promise.race([a.page.evaluate(() => true).catch(() => true), sleep(15).then(() => false)]);
-      if (!up) return this.stuck = `${a.key}'s page has not answered for a minute`;
+      if (!up) { this.silent.add(a.key); this.stuck ||= `${a.key}'s page has not answered for a minute`; }
     }
-    return "";
+    return this.stuck;
   }
 
   async actor(key: string): Promise<Actor> {
@@ -247,6 +283,12 @@ export class Run {
     const cdp = await a.ctx.newCDPSession(page);
     a.page = page;
     a.cdp = cdp;
+    // The debugger, on with its breakpoints off (a `debugger;` in the app never stops it), so a page that
+    // stops answering can be paused and say where its main thread is (busyAt). Enabled later, it waits
+    // behind the busy thread like any call; only `pause` interrupts a running loop (PRONTO-738).
+    await cdp.send("Debugger.enable");
+    await cdp.send("Debugger.setBreakpointsActive", { active: false });
+    page.on("crash", () => this.crashed(a));
     // What this tab asked for (`never`): a new tab starts with nothing asked.
     a.asked = [];
     // Every address the page asked for, for a step that says one was never asked (`never`), and, of the app's,
@@ -891,38 +933,50 @@ export class Run {
           // Why an action never happened, from Playwright's call log: what covered the element, or how it was
           // not yet clickable (a flake that said only "Timeout" hid its cause, PRONTO-122).
           ...[...new Set((e as Error).message.split("\n").filter((l) => /intercepts pointer events|not visible|not stable|not enabled|detached/.test(l)).map((l) => l.trim()))].slice(-3).map((l) => `  ${l}`),
-          ...(this.slowed ? [`  ${stuck || "every page answered"}`] : []), ...took.slice(-12)];
-        // A wedged page answers nothing (tests/slow.ts): asked for a picture or its row, it holds the
-        // report, and the pass with it, for as long as Chrome keeps it (40 minutes on 2026-11-08,
-        // PRONTO-32). It was asked for a minute already; the report says so and asks it nothing more.
+          ...(this.slowed || stuck ? [`  ${stuck || "every page answered"}`] : []), ...took.slice(-12)];
+        // A silent page answers nothing: asked for a picture or its row, it holds the report, and the
+        // pass with it, for as long as Chrome keeps it (40 minutes on 2026-11-08, PRONTO-32; for ever
+        // once its renderer crashed, PRONTO-738). The report asks it nothing, asks every other page
+        // through `asked` (each answer bounded at 15 s), pauses a silent one to say where
+        // its main thread is, and says what the runner already holds of each: its trail and its console.
         for (const a of this.actors.values()) {
-          if (stuck) { lines.push(`  ${a.key}'s page: not asked, wedged`); continue; }
-          if (SHOTS) await a.page.screenshot({ path: `${SHOTS}/failed-${this.s.id}-${a.key}.png` }).catch(() => {});
+          if (SHOTS) await this.asked(a, () => a.page.screenshot({ path: `${SHOTS}/failed-${this.s.id}-${a.key}.png` }), undefined);
           // The dialogs open over its page, which take every click outside them.
-          const open = await a.page.evaluate(() => [...document.querySelectorAll("dialog[open]")].map((d) => d.id || d.getAttribute("data-pronto-ad") || d.className || "dialog")).catch(() => "page gone");
-          lines.push(`  ${a.key}'s open dialogs: ${JSON.stringify(open)}`);
-          if (hooks.report) lines.push(...(await hooks.report(this, a).catch((x) => [`${a.key}'s report: ${(x as Error).message}`])).map((l) => `  ${l}`));
+          const open = await this.asked<unknown>(a, () => a.page.evaluate(() => [...document.querySelectorAll("dialog[open]")].map((d) => d.id || d.getAttribute("data-pronto-ad") || d.className || "dialog")), "page gone");
+          if (!this.silent.has(a.key)) lines.push(`  ${a.key}'s open dialogs: ${JSON.stringify(open)}`);
+          if (hooks.report) {
+            const said = await this.asked(a, () => hooks.report!(this, a).catch((x) => [`${a.key}'s report: ${(x as Error).message}`]), [] as string[]);
+            lines.push(...said.map((l) => `  ${l}`));
+          }
+          if (this.unanswered.has(a.key)) lines.push(`  ${a.key}'s report: no answer in 15 s, the rest not asked`);
+          if (this.silent.has(a.key)) lines.push(`  ${a.key}'s page: silent, asked nothing; its main thread was in:`, ...(await this.busyAt(a)).map((l) => `    ${l}`));
           lines.push(...a.trail.slice(-40).map((l) => "  " + l));
           lines.push(...a.consoles.slice(-15).map((l) => "  " + l));
         }
-        await this.close(!!stuck);
+        await this.close(this.silent.size + this.unanswered.size > 0);
         return lines.join("\n");
       }
     }
     clearInterval(this.beat);
     const off = (this.skipped.size ? `; steps behind ${[...this.skipped].sort().join(", ")} skipped, off here` : "") +
       (this.onHere.size ? `; steps for ${[...this.onHere].sort().join(", ")} off skipped, on here` : "");
+    // Passed only once its contexts closed: a page that stops answering after its last step fails it, named.
+    const open = await this.close();
+    if (open.length) return `✗ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): every step passed, but ${open.join(", ")}'s context did not close in 30 s (a page that stopped answering)`;
     console.log(`✓ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): ${this.s.accepts.join(", ")}${off}`);
-    await this.close();
     return null;
   }
-  // A wedged scenario's contexts are closed without waiting on them: closing waits on its pages, and a
-  // wedged page never answers. The browser disposes of them; the scenario is run again at once.
-  async close(wedged = false) {
+  // A silent page's scenario has its contexts closed without waiting on them: closing waits on its
+  // pages, and a silent page never answers. The browser disposes of them. Any other close is bounded
+  // too, as a page can stop answering after its last step passed.
+  // Returns the actors whose close did not finish in 30 s.
+  async close(wedged = false): Promise<string[]> {
+    const open: string[] = [];
     for (const a of this.actors.values()) {
-      const closing = a.ctx.close().catch(() => {});
-      if (!wedged) await closing;
+      const closing = a.ctx.close().then(() => true, () => true);
+      if (!wedged && !(await Promise.race([closing, sleep(30).then(() => false)]))) open.push(a.key);
     }
+    return open;
   }
 }
 
@@ -963,6 +1017,9 @@ const shared = Deno.env.get("SCENARIOS_QUEUE");
 const take = (id: string) => { if (!shared) return true; try { Deno.mkdirSync(`${shared}/${id}`, { recursive: false }); return true; } catch (e) { if (e instanceof Deno.errors.AlreadyExists) return false; throw e; } };
 const ran: string[] = [];
 const failed: string[] = [];
+// The scenarios that failed on a page that stopped answering in the app's own code, or whose renderer crashed: not run
+// again alone for the flake report.
+const silentFails = new Set<string>();
 const t0 = Date.now();
 if (slow) console.log(`scenarios: ${gate ? "the scenarios marked slow" : "every scenario"}, every page with ${slow}`);
 await Promise.all(Array.from({ length: Math.min(isDeployed ? spec.deployedParallel : spec.parallel, queue.length) }, async () => {
@@ -970,8 +1027,11 @@ await Promise.all(Array.from({ length: Math.min(isDeployed ? spec.deployedParall
     if (!take(s.id)) continue;
     ran.push(s.id);
     let r = new Run(s), f = await r.run();
-    // A wedged renderer is run again, twice at most, and said so.
-    for (let again = 0; r.stuck && again < 2; again++) { console.log(`↻ ${s.id}: ${r.stuck} (a throttled renderer's wedge), run again`); r = new Run(s); f = await r.run(); }
+    // A throttled renderer's wedge is run again, twice at most, and said so. An unthrottled page that stopped
+    // answering, one paused in the app's own loop, or a crashed renderer is never run again: it fails (AGENTS.md: a
+    // flake is fixed at its cause; only a wedged browser is run again).
+    for (let again = 0; r.stuck && r.slowed && !r.looped && !r.crash && again < 2; again++) { console.log(`↻ ${s.id}: ${r.stuck} (a throttled renderer's wedge), run again`); r = new Run(s); f = await r.run(); }
+    if (r.crash || (r.silent.size > 0 && (!r.slowed || r.looped))) silentFails.add(s.id);
     if (f) { console.log(f); failed.push(s.id); }
   }
 }));
@@ -981,6 +1041,7 @@ const flaked: string[] = [];
 const unmarked: unknown[] = [];
 if (!shared && !isDeployed && !pageErrors.length && ran.length > 1) {
   for (const id of failed) {
+    if (silentFails.has(id)) { console.log(`✗ ${id}: a page stopped answering in the app's own code: not a flake, not run again`); continue; }
     const r = new Run(spec.scenarios[id]);
     if (await r.run()) { console.log(`✗ ${id} fails alone too: not a flake`); continue; }
     flaked.push(id);
@@ -991,9 +1052,12 @@ if (!shared && !isDeployed && !pageErrors.length && ran.length > 1) {
 }
 // A scenario whose page threw counts as failed, in the verdict and in the record alike.
 const failedAll = new Set([...failed, ...[...pageErrorIds].filter((id) => ran.includes(id))]);
-sel.commit(ran.filter((id) => !failedAll.has(id) && !pageErrors.length), [...failedAll]);
+// Bounded: a context left to the browser may hold a renderer that never answers. A browser that does not close in
+// 30 s fails the run, and nothing is recorded green from it.
 await anon.dispose();
-await browser.close();
+const browserHung = await Promise.race([browser.close().then(() => false), sleep(30).then(() => true)]);
+if (browserHung) console.log("✗ the browser did not close in 30 s: a page it held stopped answering");
+sel.commit(browserHung ? [] : ran.filter((id) => !failedAll.has(id) && !pageErrors.length), [...failedAll]);
 // The verdict as data (scenarios/verdict.ts), for a caller that must not parse the line below.
 // Passed counts the scenarios this run ran and passed; those cached are counted apart, never as passed again.
 // A verdict that cannot be written (a full disk) is said; a run that otherwise passed then exits 3, "no verdict",
@@ -1005,7 +1069,7 @@ console.log(`scenarios: ${ran.length - failedAll.size} passed (${sel.cached.leng
 if (pageErrors.length) console.log(`page errors:\n${pageErrors.join("\n")}`);
 if (flaked.length) console.log(`flakes under load: ${flaked.join(", ")}`);
 if (unmarked.length) throw new AggregateError(unmarked, `flake filing threw (the board refused, a marker not written, or git): ${unmarked.map(String).join("; ")}`);
-if (failedAll.size || pageErrors.length) Deno.exit(1);
+if (failedAll.size || pageErrors.length || browserHung) Deno.exit(1);
 if (verdictUnwritten) Deno.exit(3);
 
 // Files a flake once a week per scenario (a marker under ~/.cache/pronto/flakes/<app>); FLAKES_FILE=0 files none.
