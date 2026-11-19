@@ -100,6 +100,15 @@ namespace and refuses the release's. `--schema-from` (a preview's copy of a data
 Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, previews' `--schema-from`, Studio's
 `services` and tenant release (P3, P4).
 
+### Known risks
+
+- Registry garbage collection runs while the registry serves (it is not put in read-only mode). A push whose blobs
+  are uploaded but whose manifest is not yet put when the collector runs loses those blobs, and its manifest then
+  points at nothing: `prune` skips the collection while an upload is open, but a push between its last blob and its
+  manifest is not visible to it. A release that pushed through such a gap fails at its first pull; the next
+  release rebuilds. The registry is restarted after each collection, so its in-memory blob descriptor cache never
+  vouches for a collected layer.
+
 ### Backups (`restore.nu`)
 
 `#Backups` emits the ObjectStore `<app>-backup`, the Cluster's plugin and the ScheduledBackup `<app>-nightly`

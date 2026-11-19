@@ -194,6 +194,7 @@ def main [] {
 	test_preflight_refuses_a_builder_or_a_registry_that_is_not_there
 	test_the_registry_prune_reads_what_the_cluster_names
 	test_a_failed_read_stops_the_prune_before_it_deletes_anything
+	test_the_registry_restarts_after_its_collection_when_it_caches_blobs
 	print "\nAll node release tests passed."
 }
 
@@ -754,5 +755,32 @@ def test_a_failed_read_stops_the_prune_before_it_deletes_anything [] {
 	assert ($r2.exit_code != 0)
 	assert (not (has $r2.stderr "kubectl get")) $r2.stderr
 	assert (not ((calls $w) | any {|c| $c | str starts-with "exec" })) "no exec before the registry answered"
+	rm -rf $w.dir
+}
+
+def test_the_registry_restarts_after_its_collection_when_it_caches_blobs [] {
+	print "test the registry is restarted after garbage collection while it caches blob descriptors, and not when it does not or an upload is open..."
+	let w = (sandbox)
+	let body = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}}; registry collect $build"
+	let r = (in-world $w -c $body)
+	assert equal $r.exit_code 0 $"($r.stdout)($r.stderr)"
+	let log = (calls $w)
+	let at = {|pat| $log | enumerate | where {|e| $e.item =~ $pat } | get index }
+	assert ((do $at "garbage-collect" | first) < (do $at "rollout restart -n pronto-registry deploy/registry" | first)) "collected, then restarted"
+	assert ((do $at "rollout restart" | first) < (do $at "rollout status -n pronto-registry deploy/registry" | first)) "and waited for"
+	assert (has $r.stdout "inmemory blob cache")
+	# the cache disabled by the deployment's env: no restart
+	rm -f ($w.state | path join calls.jsonl)
+	'[{"name":"REGISTRY_STORAGE_CACHE_BLOBDESCRIPTOR","value":"disabled"}]' | save -f ($w.state | path join registry_env)
+	let off = (in-world $w -c $body)
+	assert equal $off.exit_code 0 $"($off.stdout)($off.stderr)"
+	assert ((calls $w) | any {|c| $c | str contains "garbage-collect" })
+	assert (not ((calls $w) | any {|c| $c | str starts-with "rollout" })) "no restart without a cache"
+	# an open upload: nothing is collected, nothing restarted
+	rm -f ($w.state | path join calls.jsonl) ($w.state | path join registry_env)
+	"/var/lib/registry/docker/registry/v2/repositories/x/_uploads/u" | save -f ($w.state | path join uploads)
+	let busy = (in-world $w -c $body)
+	assert equal $busy.exit_code 0 $"($busy.stdout)($busy.stderr)"
+	assert (not ((calls $w) | any {|c| ($c | str contains "garbage-collect") or ($c | str starts-with "rollout") })) "an open upload stops the collection"
 	rm -rf $w.dir
 }

@@ -68,9 +68,32 @@ export def prune [registry: string, build: record] {
 			http delete $"http://($registry)/v2/($repo)/manifests/($t)" | ignore
 		}
 	}
+	collect $build
+}
+
+# The blob descriptor cache the registry serves with (storage.cache.blobdescriptor): the deployment's env
+# override, else the config the image runs on. `none` when it is disabled. Reads only.
+export def blob-cache [build: record]: nothing -> string {
+	let ns = $build.registry.namespace
+	let target = $"deploy/($build.registry.deployment)"
+	let vars = (kubectl-out get deployment $build.registry.deployment -n $ns -o json | from json | get spec.template.spec.containers.0.env? | default [])
+	let set = ($vars | where name == "REGISTRY_STORAGE_CACHE_BLOBDESCRIPTOR" | get -o value.0)
+	if ($set | is-not-empty) { return $set }
+	let config = (kubectl-out exec -n $ns $target -- cat /etc/distribution/config.yml)
+	$config | parse --regex '(?m)^\s*blobdescriptor:\s*(?<v>\S+)' | get -o v.0 | default "none"
+}
+
+# Garbage collection of the registry, then its restart when it caches blob descriptors: the cache keeps
+# answering "this layer exists" for a blob the collector deleted, and a push that reuses it would then
+# point at nothing. Known race left: a push whose blobs are uploaded but whose manifest is not yet put
+# when the collector runs loses those blobs (node/README.md, "Known risks"); an open upload is checked
+# first, a push between its blob and its manifest is not visible.
+export def collect [build: record] {
+	let ns = $build.registry.namespace
+	let target = $"deploy/($build.registry.deployment)"
 	let uploads = (kubectl-out exec -n $ns $target -- sh -c "find /var/lib/registry/docker/registry/v2/repositories -path '*/_uploads/*' -mindepth 1 -maxdepth 4 | head -1" | str trim)
 	if ($uploads | is-not-empty) {
-		print $"node: (stamp) the node's registry has an upload open (another release is pushing): its garbage collection waits for the next release"
+		print $"node: (stamp) the node's registry has an upload open \(another release is pushing\): its garbage collection waits for the next release"
 		return
 	}
 	let before = (kubectl-out exec -n $ns $target -- du -sh /var/lib/registry | split row "\t" | first)
@@ -78,4 +101,10 @@ export def prune [registry: string, build: record] {
 	if $gc.exit_code != 0 { error make {msg: $"the node's registry garbage collection failed: ($gc.stderr | lines | last 5 | str join (char nl))"} }
 	let after = (kubectl-out exec -n $ns $target -- du -sh /var/lib/registry | split row "\t" | first)
 	print $"node: (stamp) the node's registry: ($before) before its garbage collection, ($after) after"
+	let cache = (blob-cache $build)
+	if $cache != "none" and $cache != "disabled" {
+		kubectl-out rollout restart -n $ns $target | ignore
+		kubectl-out rollout status -n $ns $target --timeout=120s | ignore
+		print $"node: (stamp) the node's registry restarted, so its ($cache) blob cache holds no collected layer"
+	}
 }

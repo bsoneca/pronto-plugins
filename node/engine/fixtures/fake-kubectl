@@ -144,7 +144,8 @@ if verb == "get":
         ops.update(json.loads(read("operators.json", "{}")))
         if name in ("buildkitd", "registry"):
             down = exists("buildkit_down") if name == "buildkitd" else exists("registry_down")
-            out({"status": {"availableReplicas": 0 if down else 1}})
+            env = json.loads(read("registry_env", "[]")) if name == "registry" else []
+            out({"status": {"availableReplicas": 0 if down else 1}, "spec": {"template": {"spec": {"containers": [{"env": env}]}}}})
         if name in ops:
             out({"spec": {"template": {"spec": {"containers": [{"image": ops[name]}]}}}})
         if exists("revision/" + name):
@@ -193,6 +194,18 @@ if verb == "rollout":
         target = args[2]
         if exists("rollout_fail") and read("rollout_fail") == target.split("/")[-1]:
             fail(f"error: deployment \"{target.split('/')[-1]}\" exceeded its progress deadline")
+    sys.exit(0)
+
+if verb == "exec":
+    cmd = " ".join(args[args.index("--") + 1:]) if "--" in args else ""
+    if "find " in cmd:
+        print(read("uploads"))
+    elif "du -sh" in cmd:
+        print("1M\t/var/lib/registry")
+    elif "garbage-collect" in cmd:
+        print("12 blobs marked, 3 blobs eligible for deletion")
+    elif cmd.startswith("cat "):
+        print(read("registry_config", "storage:\n  cache:\n    blobdescriptor: inmemory\n"))
     sys.exit(0)
 
 if verb == "logs":
