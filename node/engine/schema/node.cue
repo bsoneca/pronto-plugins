@@ -134,15 +134,24 @@ import (
 		ssh:        =~"^[A-Za-z_][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.-]*$"
 		remotePort: *6443 | int & >0 & <65536
 	}
-	// The Artifact Registry the images go to (Cloud Build) and the node pulls from, through its k3s
-	// registries.yaml.
-	registry: {
-		project:    string & !=""
-		location:   string & !=""
-		repository: *"node-images" | string
-		url:        "\(location)-docker.pkg.dev/\(project)/\(repository)"
+	// Where the release builds and pushes: the node's operator buildkitd and its registry, both on the
+	// node's loopback alone (pronto's tools/machine/node.cue hostAccess), reached through the release's own
+	// ssh tunnel (tunnel.nu). An app writes nothing here.
+	build: {
+		registry: {
+			// as the node (containerd, buildkitd) names it: the images' manifests carry it
+			host: *"127.0.0.1:5000" | string & !=""
+			// the node-side port the tunnel forwards to
+			port:       *5000 | int & >0 & <65536
+			namespace:  *"pronto-registry" | string
+			deployment: *"registry" | string
+		}
+		buildkit: {
+			port:       *1234 | int & >0 & <65536
+			namespace:  *"pronto-buildkit" | string
+			deployment: *"buildkitd" | string
+		}
 	}
-	_registryURL: registry.url
 	// Public hosts: production's, and each preview's that has one. A preview without one is served
 	// at <namespace>.<domainSuffix>, which nothing routes to.
 	hosts: {
@@ -155,7 +164,7 @@ import (
 		if hosts[preview] != _|_ {hosts[preview]},
 		"\(namespace).\(environment.domainSuffix)",
 	][0]
-	environment: #Environment & {registry: _registryURL}
+	environment: #Environment & {registry: build.registry.host}
 
 	// Seconds each wait takes: the primary database on its image, a Job, a rollout.
 	waits: {

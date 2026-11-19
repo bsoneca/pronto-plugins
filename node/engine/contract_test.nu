@@ -69,6 +69,9 @@ case "$*" in
     printf '{"target":{'; sep=""
     for a in "$@"; do case "$a" in -f|-|bake|buildx|--print) ;; *) printf '%s"%s":{"tags":["%s:latest"]}' "$sep" "$a" "$a"; sep="," ;; esac; done
     printf '}}\n' ;;
+  "buildx version") echo "github.com/docker/buildx v0 fake" ;;
+  "buildx create "*|"buildx rm "*) ;;
+  "buildx inspect "*) echo "Platforms: linux/amd64, linux/386" ;;
   "image inspect --format {{json .Config.Env}} "*) echo '["PATH=/bin","PG_MAJOR=17"]' ;;
   "image inspect --format {{json .RepoDigests}} "*)
     for a; do last="$a"; done
@@ -89,8 +92,10 @@ exec "$REAL_CUE" "$@"
 '# | str trim --left | save -f ($d | path join bin cue)
 	# deno signs the service token; both releases ask it, and it is not run for real here
 	"#!/bin/sh\ncat >/dev/null\necho fake.service.token\n" | save -f ($d | path join bin deno)
-	for t in [crane gcloud sops] { "#!/bin/sh\nexit 0\n" | save -f ($d | path join bin $t) }
-	for t in [kubectl docker cue deno crane gcloud sops] { ^chmod +x ($d | path join bin $t) }
+	# the registry answers 200 through the tunnel, which the preflight reads with curl
+	"#!/bin/sh\necho 200\n" | save -f ($d | path join bin curl)
+	for t in [crane docker-buildx sops] { "#!/bin/sh\nexit 0\n" | save -f ($d | path join bin $t) }
+	for t in [kubectl docker cue deno crane docker-buildx sops curl] { ^chmod +x ($d | path join bin $t) }
 	{dir: $d, app: $app, state: ($d | path join state)}
 }
 
@@ -223,11 +228,11 @@ def test_data_and_order_match_upstreams_main [fx: record] {
 	let upstream_data = (ls $last | where name =~ '\.json$' | get name | each {|f| open $f } | reduce {|it, acc| $acc | merge deep $it })
 	# The engine, over a second world, with the digests the fake docker gave (a hash of the repository).
 	let en = (sandbox $fx)
-	let registry = "europe-west3-docker.pkg.dev/brawl-chess/node-images"
+	let registry = "127.0.0.1:5000"
 	let pushed = ($fx.build | each {|s|
 		[$s {tag: (if $s == "database" { "17" } else { "latest" }), digest: $"sha256:(($"($registry)/($fx.name)-($s)") | hash sha256)"}]
 	} | into record)
-	let script = $"use ($engine_dir | path join render.nu); use ($engine_dir | path join runtime.nu); use ($release_nu) [release-app]; let app_info = \(runtime resolve-app '($en.app)'\); let node = \(render node-config $app_info.cue_path ''\); let meta = \(render app-meta $app_info.cue_path ''\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let pushed = ($pushed | to nuon); use ($release_nu) [preflight]; preflight $app_info $node --check | ignore; render release-data $app_info.dir $compose $facts $pushed | save -f ($en.dir | path join data.json); release-app $app_info $node $meta $compose $facts [] $pushed"
+	let script = $"use ($engine_dir | path join render.nu); use ($engine_dir | path join runtime.nu); use ($release_nu) [release-app]; let app_info = \(runtime resolve-app '($en.app)'\); let node = \(render node-config $app_info.cue_path ''\); let meta = \(render app-meta $app_info.cue_path ''\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let pushed = ($pushed | to nuon); use ($release_nu) [preflight]; let fwd = {api: 1, buildkit: 2, registry: 3}; preflight $app_info $node $fwd --check | ignore; render release-data $app_info.dir $compose $facts $pushed | save -f ($en.dir | path join data.json); release-app $app_info $node $meta $compose $facts [] $pushed"
 	let e = (in-world $en -c $script)
 	assert equal $e.exit_code 0 $"($e.stdout | lines | last 20 | str join (char nl))\n($e.stderr)"
 	# 2. data

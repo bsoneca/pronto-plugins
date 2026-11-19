@@ -13,7 +13,6 @@ _base: {
 	name:    "app"
 	context: "contabo2"
 	api: ssh: "deploy@node.example"
-	registry: {project: "proj", location: "europe-west3"}
 	hosts: production: "app.example.com"
 }
 
@@ -21,7 +20,7 @@ _kinds: {[for o in _production.objects {o.kind}]}
 
 _production: schema.#Manifests & {
 	release:  schema.#Release & _base
-	upstream: (_fixture & {ns: "app", host: "app.example.com", reg: release.registry.url}).objects
+	upstream: (_fixture & {ns: "app", host: "app.example.com", reg: release.environment.registry}).objects
 }
 
 cases: {
@@ -46,7 +45,15 @@ cases: {
 			policy:   _production.release.environment.imagePullPolicy
 			class:    _production.release.environment.storageClass
 		}
-		_want: {ns: "app", host: "app.example.com", registry: "europe-west3-docker.pkg.dev/proj/node-images", policy: "IfNotPresent", class: "local-path"}
+		_want: {ns: "app", host: "app.example.com", registry: "127.0.0.1:5000", policy: "IfNotPresent", class: "local-path"}
+	}
+	"an app that names its registry gets it in every image, with no violation": {
+		_custom: schema.#Manifests & {
+			release:  schema.#Release & _base & {build: registry: host: "10.0.0.1:5001"}
+			upstream: (_fixture & {ns: "app", host: "app.example.com", reg: release.environment.registry}).objects
+		}
+		_got:  {registry: _custom.release.environment.registry, violations: _custom.violations}
+		_want: {registry: "10.0.0.1:5001", violations: []}
 	}
 	"the jobs run in jobOrder": {
 		_got:  _production.jobs
@@ -58,12 +65,12 @@ cases: {
 _withBackups: _base & {backups: {bucket: "b", path: "app/db"}}
 _preview: schema.#Manifests & {
 	release:  schema.#Release & _withBackups & {preview: "rc", hosts: rc: "rc.example.com"}
-	upstream: (_fixture & {ns: "app-rc", host: "rc.example.com", reg: release.registry.url}).objects
+	upstream: (_fixture & {ns: "app-rc", host: "rc.example.com", reg: release.environment.registry}).objects
 }
 _previewNoHost: schema.#Release & _base & {preview: "pr-3"}
 _prodBackups: schema.#Manifests & {
 	release:  schema.#Release & _withBackups
-	upstream: (_fixture & {ns: "app", host: "app.example.com", reg: release.registry.url}).objects
+	upstream: (_fixture & {ns: "app", host: "app.example.com", reg: release.environment.registry}).objects
 }
 
 cases: {
@@ -106,7 +113,7 @@ cases: {
 	"a tenant gets a quota, a limit range and no more": {
 		_t: schema.#Manifests & {
 			release:  schema.#Release & _base & {tenant: quota: pods: 12}
-			upstream: (_fixture & {ns: "app", host: "app.example.com", reg: release.registry.url}).objects
+			upstream: (_fixture & {ns: "app", host: "app.example.com", reg: release.environment.registry}).objects
 		}
 		_got: {
 			added: [for o in _t.objects if o.kind == "ResourceQuota" || o.kind == "LimitRange" {"\(o.kind)/\(o.metadata.name)"}]
@@ -118,7 +125,7 @@ cases: {
 	"a tenant's extra egress is one more NetworkPolicy": {
 		_t: schema.#Manifests & {
 			release:  schema.#Release & _base & {tenant: egress: [{ports: [{port: 443}]}]}
-			upstream: (_fixture & {ns: "app", host: "app.example.com", reg: release.registry.url}).objects
+			upstream: (_fixture & {ns: "app", host: "app.example.com", reg: release.environment.registry}).objects
 		}
 		_got:  [for o in _t.objects if o.kind == "NetworkPolicy" {o.metadata.name}]
 		_want: ["app-tenant-egress"]

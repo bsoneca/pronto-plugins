@@ -1,9 +1,10 @@
 // The release engine of a pronto app on the Contabo node (README.md, "The node release engine"):
 // release@k8s for an app whose release.cue holds Node: node.#Release, upstream pronto's manifests
-// patched and released to the node's k3s over an ssh tunnel, the images built in Cloud Build. Each
+// patched and released to the node's k3s over an ssh tunnel, the images built on the node's own buildkitd
+// and pushed to its registry. Each
 // file is written byte for byte as this directory holds it, with no header, so the app's copy and
-// this one compare with cmp. build.nu is gcp/engine/build.nu (a symlink here: one build, one source,
-// and pronto's harness.sh compares both copies).
+// this one compare with cmp. build.nu is gcp/engine/build.nu (a symlink here: one source, and pronto's harness.sh
+// compares both copies); the node engine reads only its `stamp` from it.
 //
 // The rule runs before the runtime's own `k8s` rule and stops it (priority -1, stop), as the gcp
 // engine's does: sayt unifies .say.json with the runtime's .say.yaml, so a rule of the same name
@@ -20,6 +21,8 @@ _render:   _ @embed(file="render.nu", type=text)
 _runtime:  _ @embed(file="runtime.nu", type=text)
 _build:    _ @embed(file="build.nu", type=text)
 _tunnel:   _ @embed(file="tunnel.nu", type=text)
+_push:     _ @embed(file="push.nu", type=text)
+_registry: _ @embed(file="registry.nu", type=text)
 _rollback: _ @embed(file="rollback.nu", type=text)
 _restore:  _ @embed(file="restore.nu", type=text)
 _schema:   _ @embed(file="schema/node.cue", type=text)
@@ -31,6 +34,8 @@ _schema:   _ @embed(file="schema/node.cue", type=text)
 	"node/runtime.nu":      _runtime
 	"node/build.nu":        _build
 	"node/tunnel.nu":       _tunnel
+	"node/push.nu":         _push
+	"node/registry.nu":     _registry
 	"node/rollback.nu":     _rollback
 	"node/restore.nu":      _restore
 	"node/schema/node.cue": _schema
