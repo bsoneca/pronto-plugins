@@ -962,6 +962,8 @@ export class Run {
       (this.onHere.size ? `; steps for ${[...this.onHere].sort().join(", ")} off skipped, on here` : "");
     // Passed only once its contexts closed: a page that stops answering after its last step fails it, named.
     const open = await this.close();
+    // A page that crashed or went silent after the last step's answer fails it too: a crash is never a pass.
+    if (this.crash || this.silent.size) return `✗ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): every step passed, but ${this.stuck}`;
     if (open.length) return `✗ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): every step passed, but ${open.join(", ")}'s context did not close in 30 s (a page that stopped answering)`;
     console.log(`✓ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): ${this.s.accepts.join(", ")}${off}`);
     return null;
@@ -1055,9 +1057,11 @@ const failedAll = new Set([...failed, ...[...pageErrorIds].filter((id) => ran.in
 // Bounded: a context left to the browser may hold a renderer that never answers. A browser that does not close in
 // 30 s fails the run, and nothing is recorded green from it.
 await anon.dispose();
-const browserHung = await Promise.race([browser.close().then(() => false), sleep(30).then(() => true)]);
+const browserHung = await Promise.race([browser.close().then(() => false, () => false), sleep(30).then(() => true)]);
 if (browserHung) console.log("✗ the browser did not close in 30 s: a page it held stopped answering");
 sel.commit(browserHung ? [] : ran.filter((id) => !failedAll.has(id) && !pageErrors.length), [...failedAll]);
+// So is the verdict: a caller reading it (rehearse.ts) sees every scenario of a hung browser failed, not passed.
+if (browserHung) for (const id of ran) failedAll.add(id);
 // The verdict as data (scenarios/verdict.ts), for a caller that must not parse the line below.
 // Passed counts the scenarios this run ran and passed; those cached are counted apart, never as passed again.
 // A verdict that cannot be written (a full disk) is said; a run that otherwise passed then exits 3, "no verdict",
