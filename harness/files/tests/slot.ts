@@ -195,11 +195,17 @@ export async function runDir(prefix: string): Promise<string> {
   await Deno.mkdir(base, { recursive: true });
   return Deno.makeTempDir({ dir: base, prefix: `${prefix}${Deno.pid}.` });
 }
-const runsBase = () => Deno.env.get("STACK_RUNS") ?? `${Deno.env.get("HOME")}/.cache/pronto/stacks`;
+const runsBase = () => {
+  const home = Deno.env.get("HOME");
+  if (!Deno.env.get("STACK_RUNS") && !home) throw new Error("slot: neither STACK_RUNS nor HOME is set, so a run folder has nowhere to live");
+  return Deno.env.get("STACK_RUNS") ?? `${home}/.cache/pronto/stacks`;
+};
 // The run folders (<prefix>.<pid>.<suffix>) whose pid is dead and whose mtime (ms, in `mtimes`) is
 // older than keepMs: a failed launch's log is kept a day.
 export function staleRuns(names: string[], isDead: (pid: number) => boolean, mtimes: Record<string, number>, now: number, keepMs: number): string[] {
+  // Only folders runDir made (slot., gate., rehearse.) are ever reaped, wherever STACK_RUNS points.
   return names.filter((name) => {
+    if (!/^(slot|gate|rehearse)\./.test(name)) return false;
     const pid = name.split(".").slice(1).find((part) => /^\d+$/.test(part));
     return pid !== undefined && isDead(Number(pid)) && (mtimes[name] ?? now) < now - keepMs;
   });
