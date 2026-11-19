@@ -2,8 +2,9 @@
 # The hard backstop of the cue memory budget: it kills a runaway `cue` so one can never take the
 # machine down. On 2026-11-05 a 128 GB Mac ran out of memory and swap when 21 cue processes
 # (CUE v0.16.1) held 210 GB between them. macOS has no cgroups and does not enforce ulimit -v,
-# so nothing stopped them; admission control (the budget) keeps this from happening, and this
-# script catches whatever gets past it.
+# so nothing stopped them; admission control (the cue memory budget, CUE_MEM_GB, which the cue wrapper
+# claims from before it starts an evaluation) keeps this from happening, and this script catches
+# whatever gets past it: a claim that was too small, an evaluation grown past it.
 #
 # launchd runs one pass of it every 10 seconds (dev.pronto.cue-watchdog.plist). A pass looks at
 # the current user's processes whose executable is named exactly `cue` (the wrapper script runs

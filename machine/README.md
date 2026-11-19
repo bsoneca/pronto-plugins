@@ -22,21 +22,34 @@ the same wrapper at its root (`cue`, with `cue-budget/slot.ts`); the two claim o
   the claim already made and passes the call through). So every `cue` an app's tooling runs through mise (bayt's generate rules,
   `tools run-cue`, `run-mise exec -- cue`, lint's `cue vet`, unit tests and drivers, the Studio
   builder, a Studio user's own repository, the CI runners on this Mac) comes through it. A command
-  that evaluates (`vet`, `export`, `eval`, `def`, `cmd`, `trim`) claims its memory from the memory
-  budget of the machine-wide pool, `tests/slot.ts --mem` (the same slot.ts every app has, copied
-  beside the wrapper), and waits its turn in line when the memory is spoken for. The claim is the
-  evaluation's peak the last time, a quarter more, learned per repository, folder and arguments in
-  `~/.cache/pronto/cue-mem` (24 GB the first time, `CUE_UNKNOWN_GB`); one that held under 1 GB
-  (`CUE_DIRECT_GB`) and every command that evaluates nothing (`fmt`, `mod`, `version`) runs at
-  once. A cue claims the cue lock only: one evaluation at a time on the machine, first come first
-  served, and it holds nothing while it waits. While it runs, its holder records its resident
-  memory every second for its next claim. Its cores are bounded, not claimed: `GOMAXPROCS` is set,
-  unless already set, to 7 (`CUE_MAX_CORES`) or the budget, whichever is smaller. Claiming cores in
-  the pool's weight too (e8e3226, PRONTO-761) is reverted (PRONTO-838): a local cue waited for room
-  in the budget while runner jobs, admitted outside it, held more than all of it. One that kept 2
-  cores busy for 30 CPU seconds is claimed even when it held under 1 GB. Inside a gate, a rehearsal
-  or a stack (a live holder above it in the process tree, or named by `STACK_JOB` / `STACK_SLOT`) it
-  waits only for the lock, never for its holder's cores.
+  that evaluates (`vet`, `export`, `eval`, `def`, `cmd`, `trim`) claims its memory and cores from the
+  cue memory budget of the machine-wide pool, `tests/slot.ts --mem <GB> --cores-claim <n>` (the same
+  slot.ts every app has, copied beside the wrapper), and waits its turn in line when they are spoken
+  for (PRONTO-870: this replaced the cue lock, one evaluation at a time, which kept a gate's generate
+  in line for 44 of 92 minutes to do about one minute of work; learned peaks on the 128 GB Mac are
+  p95 0.5 GB, p99 2.2 GB, largest 26.7 GB). The budget is `CUE_MEM_GB` (64) of memory and `CUE_CORES`
+  (every core but `STACK_RESERVE`, 3) of cores, so several evaluations run at once while their claims
+  fit. The line is strictly first come first served: a claim is admitted when what the live holders
+  hold, what every older ticket reserves and its own fit, memory and cores alike; so a small claim never
+  passes a large one that waits, and the oldest ticket is admitted on an empty pool whatever it
+  claims. The memory claim is the evaluation's peak the last time, a quarter more, learned per
+  repository, folder and arguments in `~/.cache/pronto/cue-mem`; an evaluation never seen claims the
+  largest peak learned in its folder (`cue-mem/folder/<md5 of repository and folder>`) a quarter more,
+  else 16 GB (`CUE_UNKNOWN_GB`). Its cores are what it kept busy the last time (2 when never measured),
+  at most the cap below. They are counted in the cue budget's own cores, not in the stacks' weight
+  budget (claiming them there, e8e3226 / PRONTO-761, was reverted in PRONTO-838: a local cue waited
+  for room while runner jobs, admitted outside it, held more than all of it). One that held under
+  1 GB (`CUE_DIRECT_GB`) and every command that evaluates nothing (`fmt`, `mod`, `version`) runs at
+  once; one that kept 2 cores busy for 30 CPU seconds is claimed even when it held under 1 GB.
+  While it runs, its holder records its resident memory every second, for its next claim and so that
+  one grown past its claim counts at its real size; a holder alive whose child has been dead for a
+  minute counts for nothing. While the machine's free memory (`kern.memorystatus_level`) is under 20 %
+  (`CUE_MIN_FREE_PCT`) the pool admits nothing but the head of the line on a pool holding no cue memory.
+  A holder record or ticket without a `mem=` (a `slot.ts` from before the budget) claims the whole
+  of `CUE_MEM_GB`: it blocks as the lock did. Its parallelism is bounded, not only claimed: `GOMAXPROCS`
+  is set, unless already set, to 7 (`CUE_MAX_CORES`) or the stacks' budget, whichever is smaller.
+  Inside a gate, a rehearsal or a stack (a live holder above it in the process tree, or named by
+  `STACK_JOB` / `STACK_SLOT`) it waits only in the cue line, never for its holder's cores.
   `CUE_BUDGET=off` skips the budget for one command.
 - **Only what changed is vetted** (`vetted.ts`). Every app's lint runs `cue vet -c ./...`, and the
   same CUE used to be evaluated again in each worktree's gate, on each ci runner that checked the pull
@@ -62,7 +75,9 @@ the same wrapper at its root (`cue`, with `cue-budget/slot.ts`); the two claim o
   `~/.cache/pronto/cue-cache.log` (rotated at 10 MB to `cue-cache.log.1`), tab-separated: epoch seconds,
   kind (`vet`|`export`), outcome (vet: `hit` all packages skipped, `partial` some, `miss` none; export:
   `hit`, `miss`; either: `unkeyed`), the folder (the git prefix), the seconds the evaluation took (0 for a
-  hit; the wait in the pool included) and the seconds saved. What a hit saves is stored when the entry is: an
+  hit; the wait in the pool included), the seconds saved and the seconds waited in the pool before it was
+  admitted (a 7th column, 0 for a hit or one run at once; readers that take the first six columns are
+  unaffected). What a hit saves is stored when the entry is: an
   export's `<key>.secs` beside it, a vet's package's file under `cue-vetted` (the run's seconds over its
   packages); a partial vet saves the sum of the skipped packages'. Logging is best effort and never changes
   an exit code or output. bsoneca/pronto's machine dashboard (tools/machine) counts the log per kind and app over 24 h and 7 d.
@@ -89,7 +104,8 @@ sudo bin/pronto-machine shm          # shared memory, once per Mac (--remove to 
 
 `deno test -A machine/tests/cue_test.ts`: the wrapper against a fake cue, each case with its own
 PATH, HOME and pool: what passes through at once, what claims, what it learns, stdin and signals, two
-wrappers on one PATH, and what vet and export replay.
+wrappers on one PATH, what vet and export replay, and the budget (evaluations that overlap or wait,
+strict first come first served, legacy holders, dead holders).
 
 A `cue` run outside mise (a shell without mise, a binary called by path) is not budgeted; the
 watchdog still sees it, and slows it when it keeps many cores busy.
