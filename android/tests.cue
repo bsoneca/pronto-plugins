@@ -106,6 +106,34 @@ noReleaseNoScript: [for p, _ in _term.files if p == "android/sign-release.sh" {p
 noReleaseNoScriptVault: [for p, _ in _t.files if p == "android/sign-release.sh" {p}] & []
 releaseProjectRefused: [if (#Host & {app: "emit", release: project: "Bad Project"}).release == _|_ {"refused"}, "accepted"][0] & "refused"
 releaseSecretRefused: [if (#Host & {app: "emit", release: {project: "emit-proj", secret: "a/b"}}).release == _|_ {"refused"}, "accepted"][0] & "refused"
+
+// A release key in a SOPS file (PRONTO-155's {file, secret}): the script decrypts with tools/secrets/get.sh from the
+// repository's root, hands Gradle its arguments without a daemon, prints the fingerprint as assetlinks spells it; the
+// gcloud form does the same two things beside its own reading; the two forms are alternatives.
+_sops: #Host & {app: "emit", release: {file: "secrets.mac.enc.yaml"}}
+_sopsScript: _sops.files["android/sign-release.sh"].text
+sopsSecretDefault:  _sops.release.secret & "android-release-signing"
+sopsFile:           strings.Contains(_sopsScript, "\"$here/secrets.mac.enc.yaml\" android-release-signing value") & true
+sopsFromRoot:       strings.Contains(_sopsScript, "git rev-parse --show-toplevel") & strings.Contains(_sopsScript, "tools/secrets/get.sh") & true
+sopsNoGcloud:       strings.Contains(_sopsScript, "gcloud") & false
+sopsNoTokenLeft:    [for p, f in _sops.files if strings.Contains(f.text, "__RELEASE_") {p}] & []
+sopsNamedSecret:    strings.Contains((#Host & {app: "emit", release: {file: "x.enc.yaml", secret: "my-key"}}).files["android/sign-release.sh"].text, "\"$here/x.enc.yaml\" my-key value") & true
+sopsFileRefused:    [if (#Host & {app: "emit", release: file: "../x.yaml"}).release == _|_ {"refused"}, "accepted"][0] & "refused"
+sopsAndProjectRefused: [if (#Host & {app: "emit", release: {file: "x.yaml", project: "emit-proj"}}).release == _|_ {"refused"}, "accepted"][0] & "refused"
+_gcloudScript: _released.files["android/sign-release.sh"].text
+for _s in [_sopsScript, _gcloudScript] {
+	signPassesArgs: strings.Contains(_s, "assembleRelease \"$@\")") & strings.Contains(_s, "--no-daemon") & strings.Contains(_s, "sign-release.sh\" \"$@\"") & true
+	signCleansOnEveryExit: strings.Contains(_s, "trap 'rm -rf \"$dir\"' EXIT") & strings.Contains(_s, "trap 'exit 129' HUP") & strings.Contains(_s, "trap 'exit 130' INT") & strings.Contains(_s, "trap 'exit 131' QUIT") & strings.Contains(_s, "trap 'exit 143' TERM") & true
+	signPrintsUpperColon: strings.Contains(_s, "tr 'a-f' 'A-F'") & strings.Contains(_s, "sed 's/../&:/g; s/:$//'") & true
+}
+
+// build@android-release: only where the app names its key; its three inputs are required, never defaulted.
+_releaseRule: _sops.surface.rules.build."android-release"
+releaseRulePlatform: _releaseRule.platform & "android-release"
+releaseRuleChecksFirst: strings.Contains(_releaseRule.cmds[0].do, "PRONTO_ANDROID_RELEASE_BASE PRONTO_ANDROID_VERSION_CODE PRONTO_ANDROID_VERSION_NAME") & strings.Contains(_releaseRule.cmds[0].do, "exit 1") & true
+releaseRuleSigns: strings.Contains(_releaseRule.cmds[len(_releaseRule.cmds)-1].do, "sh android/sign-release.sh") & strings.Contains(_releaseRule.cmds[len(_releaseRule.cmds)-1].do, "-PprontoBase=") & true
+releaseRuleGcloudToo: (#Host & {app: "emit", release: project: "emit-proj"}).surface.rules.build."android-release".platform & "android-release"
+noReleaseNoRule: [for k, _ in _term.surface.rules.build if k == "android-release" {k}] & []
 _gradleTerm:           _term.files["android/app/build.gradle.kts"].text
 _gradleVault:          _t.files["android/app/build.gradle.kts"].text
 gradleSignsOnEnv:      strings.Contains(_gradleTerm, "System.getenv(\"PRONTO_ANDROID_KEYSTORE\")") & strings.Contains(_gradleTerm, "System.getenv(\"PRONTO_ANDROID_KEYSTORE_PASSWORD\")") & strings.Contains(_gradleTerm, "System.getenv(\"PRONTO_ANDROID_KEY_ALIAS\")") & strings.Contains(_gradleTerm, "if (signed) signingConfig = signingConfigs.getByName(\"release\")") & true

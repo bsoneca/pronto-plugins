@@ -102,6 +102,18 @@ jobs:
           sayt --script tools.nu cue export $decl -e 'code.meta.wellKnown."assetlinks.json".text' --out text \
             | jq -e '[.[].target.package_name] == ["com.bsoneca.prontohost", "dev.pronto.demo"] and .[1].relation == ["delegate_permission/common.get_login_creds", "delegate_permission/common.handle_all_urls"]'
           sayt --script tools.nu cue export $decl -e code.capabilities.auth.android | jq -e --arg fp "$fp" '. == [$fp]'
+      - name: An app whose release key is a SOPS file gets the SOPS sign-release.sh and build@android-release
+        run: |
+          app=$(mktemp -d)/app && mkdir -p "$app/android" && printf 'package demo\n' > "$app/program.cue"
+          printf '{"scenarios": [], "release": {"file": "secrets.mac.enc.yaml", "secret": "android-release-signing"}}\n' > "$app/android/android.json"
+          ./bin/pronto-android "$app" demo
+          grep -q 'tools/secrets/get.sh' "$app/android/sign-release.sh"
+          grep -q '"$here/secrets.mac.enc.yaml" android-release-signing value' "$app/android/sign-release.sh"
+          if grep -q gcloud "$app/android/sign-release.sh"; then exit 1; fi
+          grep -q -- '--no-daemon .*"\$@"' "$app/android/sign-release.sh"
+          jq -e '.say.build.rulemap["android-release"].platform == "android-release"' "$app/.say.json"
+          printf '{"scenarios": [], "release": {"file": "secrets.mac.enc.yaml", "project": "demo-proj"}}\n' > "$app/android/android.json"
+          ! ./bin/pronto-android "$app" demo
       - name: Write the harness into an app, and hold this repository's own copies to it
         run: |
           app=$(mktemp -d)/app && mkdir -p "$app/tests" && printf 'package demo\n' > "$app/program.cue"
