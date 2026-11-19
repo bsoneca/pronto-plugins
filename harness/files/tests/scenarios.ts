@@ -821,8 +821,11 @@ export class Run {
     // a page another party controls (PRONTO-837). It is asked as no one, in a request context of its own (no session, no
     // cookie, no header, no body), follows no redirect (a 3xx is its answer, so it cannot send the runner to an address
     // only the runner's network reaches, nor pass on the door's answer), keeps nothing, and a failure quotes its status
-    // alone. A path on the door follows the door's redirects as before (its sign-in start sends a browser to the broker).
-    const url = new URL(path, URL_), foreign = url.origin !== new URL(URL_).origin;
+    // alone. A path on the door follows redirects only onto the door's own host or a name under it, on any port (its
+    // sign-in start sends a browser to the broker: id.<host> where it is released, another port at hand); a redirect
+    // anywhere else is its answer.
+    const door = new URL(URL_), url = new URL(path, URL_), foreign = url.origin !== door.origin;
+    const ours = (u: URL) => u.hostname === door.hostname || u.hostname.endsWith(`.${door.hostname}`);
     if (foreign && (h.keep || h.keepText || h.body !== undefined)) throw new Error(`${h.method} ${path}: a step to another origin sends no body and keeps nothing`);
     const headers: Record<string, string> = foreign ? {} : await this.fillAll(h.headers ?? {});
     if (!h.anon && !foreign) {
@@ -840,7 +843,18 @@ export class Run {
       try {
         const res = foreign
           ? await via.fetch(url.href, { method: h.method, failOnStatusCode: false, maxRedirects: 0 })
-          : await via.fetch(url.href, { method: h.method, headers, data: typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body), failOnStatusCode: false });
+          : await (async () => {
+            let at = url, method = h.method ?? "GET", data = typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body);
+            for (let hop = 0;; hop++) {
+              const res = await via.fetch(at.href, { method, headers, data, failOnStatusCode: false, maxRedirects: 0 });
+              const to = res.status() >= 300 && res.status() < 400 ? res.headers()["location"] : undefined;
+              const next = to === undefined ? undefined : new URL(to, at);
+              if (!next || hop >= 20 || !ours(next)) return res;
+              // As a browser would: a 303, or a 301/302 after a write, asks again with GET and no body.
+              if (res.status() === 303 || ((res.status() === 301 || res.status() === 302) && method !== "GET" && method !== "HEAD")) { method = "GET"; data = undefined; }
+              at = next;
+            }
+          })();
         return { status: res.status(), headers: res.headers(), text: await res.text() };
       } finally { if (foreign) await via.dispose(); }
     };

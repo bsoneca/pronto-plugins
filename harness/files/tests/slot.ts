@@ -44,7 +44,9 @@
 //   gate.yml's gates) is admitted at once on cores, its weight still held: the runner pools are its
 //   cap (docs/queue.md), and a job holding a runner while it waits here queues twice. Local claims
 //   (a session's own commands) wait behind them. On 2026-11-07 at 23:29 BRT main's ci checks held 6
-//   runners while waiting 8th in line behind sessions' local gates. The cue lock still applies.
+//   runners while waiting 8th in line behind sessions' local gates. The cue lock still applies, and so
+//   does the budget to a top-level cue's cores (--mem with --weight, PRONTO-761/837): a runner's
+//   evaluation waits for them as any other, or it would take cores the budget already gave away.
 //
 //   Cue lock. A job that names --mem (the cue wrapper, tools/cue-budget/cue: one evaluation of tens
 //   of GB; 21 at once ran macOS out of memory on 2026-11-05) takes the cue lock: one such evaluation
@@ -583,8 +585,8 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
         const holding = holders.filter((h) => h.cue).length;
         if (!cueAdmits(older.length, holding)) return why(`the cue lock: ${holding ? "held" : "free"}, ${older.length} ahead (one cue evaluation at a time)`);
         // A top-level cue's cores are the machine's, whoever runs it: an Actions job's too, or a runner's evaluation
-        // would take cores the budget already gave away. Only one nested in a live holder is that holder's.
-        if (dual && !admitsCores(parent > 0, used, weight, ahead, budget)) {
+        // would take cores the budget already gave away. A dual claim is never nested (a nested claim weighs 0).
+        if (dual && !admits(used, weight, ahead, budget)) {
           return why(`weight ${used} of ${budget} held (STACK_BUDGET)${ahead ? `, ${ahead} reserved by those ahead` : ""}, this needs ${weight}`);
         }
       } else if (!admitsCores(line === "none" || runnerJob(Deno.env.get("GITHUB_ACTIONS")), used, weight, ahead, budget)) {
@@ -1017,7 +1019,8 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-learn", "--cores-
   }
   // The cores it kept busy on average, for the next run's --weight: only from a run of 5 s or more (a
   // shorter one measures its start), and a run that failed only raises it, as the peak is.
-  if (coresLearn && wall >= 5 && cpu > 0) {
+  // A wrapper with nowhere to learn passes /dev/null (pronto's cue, its cache unwritable): nothing is learned.
+  if (coresLearn && !coresLearn.startsWith("/dev/null") && wall >= 5 && cpu > 0) {
     // Only a first measurement has nothing before it; a file that cannot be read or written fails the run, so a
     // success means the next run's weight was saved.
     const prior = status.success ? "" : await Deno.readTextFile(coresLearn).catch((e) => { if (e instanceof Deno.errors.NotFound) return ""; throw e; });

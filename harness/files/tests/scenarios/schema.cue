@@ -232,7 +232,8 @@ _http: {
 		method: *"GET" | "POST" | "PUT" | "PATCH" | "DELETE"
 		// On the app's door, or a whole URL on another origin (a published game's address), which is asked
 		// as no one in a request context of its own (no session, cookie, header or body), keeps nothing and
-		// follows no redirect: a 3xx is its answer. A path on the door follows the door's redirects.
+		// follows no redirect: a 3xx is its answer. A path on the door follows redirects onto its own host
+		// or a name under it, on any port, and no further.
 		path: string
 		// Sent as JSON, or as it is when a string.
 		body?: _
