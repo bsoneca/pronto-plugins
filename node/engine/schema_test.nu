@@ -19,7 +19,8 @@ def main [] {
 	test_an_unserved_kind_is_refused
 	test_an_operator_nobody_looked_at_is_refused
 	test_an_app_named_otherwise_is_refused
-	test_retiring_a_cluster_is_refused
+	test_retiring_what_holds_state_is_refused
+	test_ssh_must_be_user_at_host
 	print "\nAll node schema tests passed."
 }
 
@@ -57,7 +58,14 @@ def test_an_app_named_otherwise_is_refused [] {
 	assert ((refused otherApp) | str contains "the app is named other, the release app")
 }
 
-def test_retiring_a_cluster_is_refused [] {
-	print "test retire may not name a Cluster..."
-	assert ((refused retireCluster) | str contains "retire")
+def test_retiring_what_holds_state_is_refused [] {
+	print "test retire refuses state, credentials, archives, aliases, cluster-wide kinds and option-like names..."
+	for e in [retireCluster retirePVC retireAlias retireNamespace retireExternalSecret retireObjectStore retireScheduled retireClusterRole retireFlagName] {
+		assert ((refused $e) | str contains "retire") $e
+	}
+}
+
+def test_ssh_must_be_user_at_host [] {
+	print "test api.ssh is user@host, never an option or a bare host..."
+	for e in [sshOption sshBareHost] { assert ((refused $e) | str contains "api.ssh") $e }
 }

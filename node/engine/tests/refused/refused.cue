@@ -8,7 +8,7 @@ import "github.com/bsoneca/pronto-plugins/node/engine/schema"
 _base: {
 	name:    "app"
 	context: "contabo2"
-	api: ssh: "bruno@node.example"
+	api: ssh: "deploy@node.example"
 	registry: {project: "proj", location: "europe-west3"}
 	hosts: production: "app.example.com"
 }
@@ -38,5 +38,15 @@ otherApp: (schema.#Manifests & {
 	upstream: [_ns]
 }).objects
 
-// Retiring what must never be.
-retireCluster: schema.#Release & _base & {retire: [{kind: "Cluster", name: "app-db"}]}
+// Retiring what must never be: state, credentials, archives, aliases, cluster-wide kinds, option-like names.
+retireCluster:        schema.#Release & _base & {retire: [{kind: "Cluster", name: "app-db"}]}
+retirePVC:            schema.#Release & _base & {retire: [{kind: "PersistentVolumeClaim", name: "data"}]}
+retireAlias:          schema.#Release & _base & {retire: [{kind: "pvc", name: "data"}]}
+retireNamespace:      schema.#Release & _base & {retire: [{kind: "ns", name: "app"}]}
+retireExternalSecret: schema.#Release & _base & {retire: [{kind: "ExternalSecret", name: "app-auth-secrets"}]}
+retireObjectStore:    schema.#Release & _base & {retire: [{kind: "ObjectStore", name: "app-backup"}]}
+retireScheduled:      schema.#Release & _base & {retire: [{kind: "ScheduledBackup", name: "app-nightly"}]}
+retireClusterRole:    schema.#Release & _base & {retire: [{kind: "ClusterRole", name: "x"}]}
+retireFlagName:       schema.#Release & _base & {retire: [{kind: "Service", name: "--all"}]}
+sshOption:            schema.#Release & _base & {api: ssh: "-oProxyCommand=x@y"}
+sshBareHost:          schema.#Release & _base & {api: ssh: "node.example"}

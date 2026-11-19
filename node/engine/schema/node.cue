@@ -47,6 +47,19 @@ import (
 	barmanCloud: "0.15.1":     ["barmancloud.cnpg.io/v1/ObjectStore"]
 }
 
+// What `retire` may delete, with the resource kubectl is told (kind.group, unambiguous). Never an
+// ExternalSecret, an ObjectStore or a ScheduledBackup (they carry the database's credentials and
+// archive), a Cluster, a volume claim, a Secret, or anything cluster-scoped.
+#RetireKinds: {
+	Deployment:           "deployment.apps"
+	Service:              "service"
+	ConfigMap:            "configmap"
+	Job:                  "job.batch"
+	HTTPRoute:            "httproute.gateway.networking.k8s.io"
+	NetworkPolicy:        "networkpolicy.networking.k8s.io"
+	BackendTrafficPolicy: "backendtrafficpolicy.gateway.envoyproxy.io"
+}
+
 // Kinds that live outside a namespace: never rendered by the engine, an app's release has no
 // right to them.
 #ClusterScoped: ["ClusterRole", "ClusterRoleBinding", "CustomResourceDefinition", "StorageClass", "PersistentVolume",
@@ -114,11 +127,11 @@ import (
 	// release's (`--preview=rc`, the engine passes `-t preview=<name>`).
 	preview: *"" | =~"^[a-z0-9]([-a-z0-9]{0,14}[a-z0-9])?$"
 	// The kubectl context of the node, and how its API is reached: an ssh tunnel from the
-	// Mac, 127.0.0.1:<port> to the node's own 127.0.0.1:<remotePort>.
+	// Mac, a free local port of the release's own to the node's 127.0.0.1:<remotePort>.
 	context: string & !=""
 	api: {
-		ssh:        string & !=""
-		port:       *26444 | int & >0 & <65536
+		// user@host: never a bare host or an option (ssh would read `-oProxyCommand=...` as one).
+		ssh:        =~"^[A-Za-z_][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.-]*$"
 		remotePort: *6443 | int & >0 & <65536
 	}
 	// The Artifact Registry the images go to (Cloud Build) and the node pulls from, through its k3s
@@ -159,7 +172,13 @@ import (
 	// upstream Job is noticed, never skipped.
 	jobOrder: *["initdb", "migrate", "restate"] | [...string]
 	// Named deletions after a release that left them behind, never a Cluster, a volume claim, a Secret.
-	retire: *[] | [...{kind: !~"^(Cluster|PersistentVolumeClaim|Secret|Namespace)$", name: string}]
+	// Only what upstream's render makes and nothing that holds state or is cluster-wide: the kinds of
+	// #RetireKinds, each deleted as kind.group so no alias (ns, pvc, all, clusters) can name another.
+	retire: *[] | [...{
+		kind:     or([for k, _ in #RetireKinds {k}])
+		name:     =~"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$"
+		resource: #RetireKinds[kind]
+	}]
 	hooks: afterJobs: *[] | [...[...string]]
 }
 
@@ -271,8 +290,6 @@ import (
 	violations: list.Concat([
 		[if app.name != _|_ if app.name != release.name {"the app is named \(app.name), the release \(release.name)"}],
 		[if app.namespace != _|_ if app.namespace != release.namespace {"the app's namespace is \(app.namespace), the release's \(release.namespace)"}],
-		[if app.name != _|_ if app.name != release.name {"the app is named \(app.name), the release \(release.name)"}],
-		[if app.namespace != _|_ if app.namespace != release.namespace {"the app's namespace is \(app.namespace), the release's \(release.namespace)"}],
 		[for o in _all if o.kind != "Namespace" if o.metadata.namespace == _|_ {"\(o.kind)/\(o.metadata.name) has no namespace"}],
 		[for o in _all if o.kind != "Namespace" if o.metadata.namespace != _|_ if o.metadata.namespace != release.namespace {
 			"\(o.kind)/\(o.metadata.name) is in namespace \(o.metadata.namespace), not \(release.namespace)"
@@ -290,9 +307,10 @@ import (
 		[for o in _all if o.kind == "Gateway" for l in o.spec.listeners if l.hostname != release.host {
 			"Gateway/\(o.metadata.name) listens for \(l.hostname), not the release's host \(release.host)"
 		}],
-		[for i in _images if !strings.HasPrefix(i, release.environment.registry + "/") if !strings.Contains(i, "@sha256:") {
-			"image \(i) is neither in \(release.environment.registry) nor pinned by digest"
+		[for i in _images if !strings.HasPrefix(i, release.environment.registry + "/") {
+			"image \(i) is not in \(release.environment.registry)"
 		}],
+		[for i in _images if !strings.Contains(i, "@sha256:") {"image \(i) is not pinned by digest"}],
 	])
 
 	// The objects: refused whole while `violations` is not empty.

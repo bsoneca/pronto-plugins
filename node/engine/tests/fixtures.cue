@@ -26,15 +26,15 @@ _fixture: {
 			apiVersion: "batch/v1"
 			kind:       "Job"
 			metadata:   {name: "app-migrate", namespace: ns}
-			spec: template: spec: containers: [{name: "migrate", image: "\(reg)/app-migrate:latest"}]
+			spec: template: spec: containers: [{name: "migrate", image: "\(reg)/app-migrate:latest@sha256:\(_d)"}]
 		},
 		{
 			apiVersion: "apps/v1"
 			kind:       "Deployment"
 			metadata:   {name: "app-crud", namespace: ns}
 			spec: template: spec: {
-				initContainers: [{name: "wait", image: "\(reg)/app-crud:latest"}]
-				containers:     [{name: "crud", image: "\(reg)/app-crud:latest"}]
+				initContainers: [{name: "wait", image: "\(reg)/app-crud:latest@sha256:\(_d)"}]
+				containers:     [{name: "crud", image: "\(reg)/app-crud:latest@sha256:\(_d)"}]
 			}
 		},
 		{apiVersion: "v1", kind: "Service", metadata: {name: "crud", namespace: ns}},

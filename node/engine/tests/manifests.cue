@@ -12,7 +12,7 @@ import (
 _base: {
 	name:    "app"
 	context: "contabo2"
-	api: ssh: "bruno@node.example"
+	api: ssh: "deploy@node.example"
 	registry: {project: "proj", location: "europe-west3"}
 	hosts: production: "app.example.com"
 }
