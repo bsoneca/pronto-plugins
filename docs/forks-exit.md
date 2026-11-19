@@ -17,7 +17,7 @@ Bins: **A** upstream has it (drop) · **B** goes upstream (the owner opens the P
 | mecha | 0.25.1-host.2 (`30c374c`) | v0.25.1 | 71 | 26 | 3 | 11 | 1 | 11 | 0 |
 | pronto | v1.4.1-gcp.2 (`70da285`) | v1.4.1 | 445 | 61 | 8 | 29 | 11 | 6 | 4 |
 
-Counts are rows (logical changes); a mixed row counts in its first-named bin. Pronto rows marked
+Counts are rows (logical changes), as found before the owner's decisions below; a mixed row counts in its first-named bin. Pronto rows marked
 "verify" were judged from greps, not from running v1.5.1.
 
 ## Rules until the forks are gone
@@ -39,29 +39,32 @@ Counts are rows (logical changes); a mixed row counts in its first-named bin. Pr
    billing, Android and Unity surfaces and auth in `shell.yaml`; check those rows first.
 5. **Archive** the three forks and their publish workflows (PRONTO-750).
 
-## Decisions for the owner
+## Owner decisions (2026-11-18)
 
-- **write.ts** (pronto row 54): a pronto-plugins plugin, or one tiny fork kept for it?
-- **Sign-in**: edge sign-in, per-app broker ports, `identity/bearer.ts`, `issuer.cue`, the
-  `capabilities.auth.*` extras (pronto D rows) and mecha's handoff codes, Android passkeys,
-  `/auth/door`, guest upgrade, API keys, airlock doors (mecha D rows, all B-shaped). Offer
-  upstream, or wait for upstream's Ory decision?
-- **Studio auth**: `/auth/upgrade` and the play token need an upstream token-verifier hook (C)
-  or go upstream (B)?
-- **Roles managed outside mecha**: v0.26.0's docs say externally managed roles are
-  unsupported. Drop ours, or argue for it upstream?
-- **omnishell**: kept/adopted guest, `money` text format, read-outage retention, seed `{href}`.
-- **The metal environment** (pronto k8s): upstream or plugin?
-- **Our open upstream PRs now redundant**: pronto #11 and #17 (fixed in v1.4.5), #12 (= upstream
-  #2447), #18 (= upstream #2444). Close them?
+- **write.ts**: drop our changes (pronto row 54); apps use upstream's write.ts.
+- **Studio sign-in**: Studio becomes an OIDC provider and games sign players in through mecha's
+  generic OIDC (PRONTO-822). The fork's play token in `studio.ts` (mecha row 13, with its `/auth/studio`
+  route and `studio_jti` table) goes; `/auth/upgrade` (mecha row 11) goes with it. Until upstream accepts provider names other than `google`, a game sets
+  `signIn: google: issuer: <Studio origin>`.
+- **Other sign-in** (API keys, `/auth/door`, handoff codes, Android passkeys, kept and adopted guests, edge
+  sign-in, per-app broker ports): proposed upstream built on Ory once upstream moves auth there;
+  carried until then.
+- **Airlock doors**: dropped. Upstream's reads and effects cover them and no app declares doors.
+- **Roles managed outside mecha**: wait for bonisoft3/pronto#20 (the access model as a value,
+  then generated or checked provisioning); drop mecha row 16 once it lands.
+- **omnishell**: `money` format moves to the apps; seed `{href}` becomes inline seeds in the
+  app; read-outage retention waits for upstream's rewrite.
+- **The metal environment**: ours, a pronto-plugins plugin.
+- **Still open**: pronto row 19 (`identity/bearer.ts`, `issuer.cue`), rechecked under PRONTO-822;
+  mecha rows 24-25 (host launch), next round.
+- **Redundant upstream PRs**: pronto #11, #12, #17 and #18 closed, each naming the upstream fix.
 
 ## What blocks a direct pin today
 
 - **omnishell v0.25.2**: the two C hooks (phone sign-in provider list from the app, cookies the
-  renderer carries from the door), the four D rows, and B rows apps rely on (#5 token renewal,
+  renderer carries from the door), the decided D rows, and B rows apps rely on (#5 token renewal,
   `/ready`, `firstPaint`, lazy statechart and hatch code that keeps aprende under budget).
-- **mecha v0.26.0**: API keys, app schemas and `apiSchemas`, the auth surfaces, airlock doors and
-  the host launch; roles managed outside contradicts upstream's policy.
+- **mecha v0.26.0**: API keys, app schemas and `apiSchemas`, the auth surfaces and the host launch; roles managed outside contradicts upstream's policy.
 - **pronto v1.5.1**: fields it lacks (`capabilities.auth.*`, `meta.schema`/`#Tenancy`,
   `meta.firstLoad`, money, `access.anon`, `database.smartShutdown`) fail CUE in any app using
   them; release@gcp's staged go-live, local gate and rehearsal must be in pronto-plugins
@@ -69,6 +72,9 @@ Counts are rows (logical changes); a mixed row counts in its first-named bin. Pr
 
 
 ---
+
+The inventories below are as found on 2026-11-18. Where a row still says "owner decides" or
+recommends otherwise, **Owner decisions** above wins.
 
 ## Inventory: omnishell
 
@@ -172,7 +178,7 @@ Read the diffstat with care: the diff to v1.5.1 also shows upstream's own v1.4.2
 
 Bins: A upstream has it, B goes upstream, C ours (bsoneca/pronto-plugins or the app), D owner decides, X drop (fork machinery). "verify" = judged from greps and PR text, not from running code at v1.5.1; confirm before relying on it.
 
-Our upstream PRs (bonisoft3/pronto, author us): #1,#2,#3,#4,#5,#6,#7,#9,#14,#15 closed; #8,#10,#11,#12,#13,#16,#17,#18,#19,#20 open. Of the closed: #2,#3,#5 integrated upstream (v0.15.2/v0.16.0); #4 superseded; #14 closed for #20's declarative model; #15 closed as "already covered", with the extras deferred; #1, #6, #7, #9 closed with no readable comment. Of the open ones: #11 and #17 were answered by upstream's own fixes (v1.4.5), #18 equals upstream b0b33a3 (#2444), #12 equals upstream #2447.
+Our upstream PRs (bonisoft3/pronto, author us): #1,#2,#3,#4,#5,#6,#7,#9,#14,#15 closed; #8,#10,#13,#16,#19,#20 open; #11, #12, #17, #18 closed 2026-11-18 as covered upstream. Of the closed: #2,#3,#5 integrated upstream (v0.15.2/v0.16.0); #4 superseded; #14 closed for #20's declarative model; #15 closed as "already covered", with the extras deferred; #1, #6, #7, #9 closed with no readable comment. Of the open ones: #11 and #17 were answered by upstream's own fixes (v1.4.5), #18 equals upstream b0b33a3 (#2444), #12 equals upstream #2447.
 
 ### .github/, CI, fork machinery
 
