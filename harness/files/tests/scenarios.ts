@@ -846,7 +846,9 @@ export class Run {
           : await (async () => {
             let at = url, method = h.method ?? "GET", data = typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body);
             for (let hop = 0;; hop++) {
-              const res = await via.fetch(at.href, { method, headers, data, failOnStatusCode: false, maxRedirects: 0 });
+              // The session goes to the door alone, as a browser carries it: a hop on another origin is asked without it.
+              const sent = at.origin === door.origin ? headers : Object.fromEntries(Object.entries(headers).filter(([k]) => k.toLowerCase() !== "authorization"));
+              const res = await via.fetch(at.href, { method, headers: sent, data, failOnStatusCode: false, maxRedirects: 0 });
               const to = res.status() >= 300 && res.status() < 400 ? res.headers()["location"] : undefined;
               const next = to === undefined ? undefined : new URL(to, at);
               if (!next || hop >= 20 || !ours(next)) return res;
