@@ -217,6 +217,10 @@ go in before the release ends, not into the next run. (The owner's ask: "we crea
 cherry pick fixes to main.") `abandonHours` (12) and `abandonAttempts` (2) are the app's to change. Off, a rehearsal that fails is
 `failed` as ever.
 
+A fix branch starts from the release branch (`git switch -c fix/... origin/release/<app>/<id>`), never from main: a tip
+whose commits came from pull requests into main is refused. Turn branches on for an app only once the repository has a ruleset
+on `refs/heads/release/**` (ci and gate required, a pull request for every change, no force push).
+
 1. **Hold.** A run on main whose rehearsal (or android step, or preview) fails pushes `release/<app>/<YYYYMMDD-HHMM>` (Brasília
    time) at the run's commit and writes `<state>/open`: `{branch, base, opened, limits, attempts: [{tip, verdict, at}]}`, the
    cut's own failure the first attempt. The run's line says `held release/<app>/<id>`. The cut's failure is still bisected on main,
