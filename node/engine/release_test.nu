@@ -98,7 +98,7 @@ esac
 #!/bin/sh
 d="$(dirname "$0")/.."
 echo "$*" >> "$d/crane.log"
-echo '{"config":{"Env":["PATH=/bin","PG_MAJOR=17"]}}'
+if [ -f "$d/crane_nopg" ]; then echo '{"config":{"Env":["PATH=/bin"]}}'; else echo '{"config":{"Env":["PATH=/bin","PG_MAJOR=17"]}}'; fi
 '# | str trim --left | save -f ($d | path join bin crane)
 	# curl: the registry answers 200 through the tunnel, unless it is down
 	r#'
@@ -197,6 +197,7 @@ def main [] {
 	test_a_failed_read_stops_the_prune_before_it_deletes_anything
 	test_the_registry_restarts_after_its_collection_when_it_caches_blobs
 	test_the_prune_outcome_is_recorded_in_the_release_configmap
+	test_a_database_image_without_pg_major_is_an_explicit_error
 	print "\nAll node release tests passed."
 }
 
@@ -825,5 +826,16 @@ def test_untracked_secret_looking_files_are_not_staged [] {
 	for f in ["./secrets.other.enc.yaml" "./kept.txt" "./keyboard.txt" "./envelope.txt" "./.env.sample"] { assert ($f in $tree) $"($f) is staged: ($tree | str join ' ')" }
 	for f in ["./.env" "./.env.local" "./x.dec.yaml" "./secrets.yaml" "./secrets.metal.yaml" "./k.pem" "./id.key" "./sub/tls.key"] { assert (not ($f in $tree)) $"($f) is not staged" }
 	assert (has $r.stdout "untracked and secret-looking")
+	rm -rf $w.dir
+}
+
+def test_a_database_image_without_pg_major_is_an_explicit_error [] {
+	print "test a database image whose config has no PG_MAJOR fails with a message saying so..."
+	let w = (sandbox)
+	"" | save -f ($w.dir | path join crane_nopg)
+	let digest = ("sha256:" + ("a" | fill -c "a" -w 64))
+	let r = (in-world $w -c $"use ($engine_dir | path join render.nu); render database-tag '127.0.0.1:1' aprende-database ($digest)")
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "has no PG_MAJOR in its environment") $r.stderr
 	rm -rf $w.dir
 }

@@ -121,5 +121,7 @@ export def placeholder-pushed [services: list<string>, tag: string]: nothing -> 
 export def database-tag [registry: string, repo: string, digest: string]: nothing -> string {
 	let r = (^crane config --insecure $"($registry)/($repo)@($digest)" | complete)
 	if $r.exit_code != 0 { error make {msg: $"crane config ($registry)/($repo)@($digest): ($r.stderr | str trim)"} }
-	$r.stdout | from json | get config.Env | where {|e| $e starts-with "PG_MAJOR=" } | first | split row "=" | last
+	let majors = ($r.stdout | from json | get config.Env? | default [] | where {|e| $e starts-with "PG_MAJOR=" })
+	if ($majors | is-empty) { error make {msg: $"($registry)/($repo)@($digest) has no PG_MAJOR in its environment: CloudNativePG reads the database image's tag as the Postgres major, so the image must set it"} }
+	$majors | first | split row "=" | last
 }
