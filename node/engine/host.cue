@@ -50,8 +50,8 @@ _run: {
 #Host: {
 	rules: {
 		release: "node-engine": {platform: "k8s", priority: -1, stop: true, cmds: [{do: (_run & {#script: "node/release.nu"}).out}]}
-		// verify@k8s is not in this engine yet; the runtime's own would run on a kind cluster that is not here.
-		verify: "node-engine": {platform: "k8s", priority: -1, stop: true, cmds: [{do: "nu -c 'error make {msg: \"verify@k8s is not in the node engine yet\"}'"}]}
+		// No verify rule: the runtime's own verify@k8s (verify/verify.ts) checks the app's public address (--target,
+		// APP_URL, or the app's meta.domain), which is what a release on the node serves.
 	}
 	files: {
 		for path, body in #Files {(path): {seed: false, text: body}}

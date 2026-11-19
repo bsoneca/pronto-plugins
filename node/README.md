@@ -30,7 +30,7 @@ Write it into an app, byte for byte, with:
 ```
 
 which writes `node/{release,render,runtime,build,tunnel,push,registry,rollback,restore}.nu` and `node/schema/node.cue` into
-each app and merges a `release@k8s` rule into its `.say.json` (priority -1, stop: the same mechanism as the
+each app and merges a `release@k8s` rule into its `.say.json` (verify@k8s is the runtime's own: it checks the app's public address) (priority -1, stop: the same mechanism as the
 gcp engine, so it runs before the runtime's own `k8s` rule and stops it). `build.nu` is `gcp/engine/build.nu`
 (a symlink here; the node engine reads only its `stamp`), two copies to compare. To change the engine: change `node/engine/`
 here, merge it, then in the app's repository move the pin to that merge and run `bin/pronto-node --engine`
@@ -99,7 +99,7 @@ release never creates or changes; the preflight refuses when either is down.
 `--check --build` builds and pushes for real under the tag `check` (registry writes only, never the cluster),
 then dry-runs with the real digests: a builder's way to prove an app builds without releasing it. `--build`
 alone is refused.
-Where the namespace does not exist yet, the objects are asked in `default`. `--delete` removes a preview's
+Where the namespace does not exist yet, the objects are asked in `default`. `--serving` prints `serving <sha>`, the commit the namespace's `pronto-release` ConfigMap records (empty when none), which an app's cd reads before it releases. `--delete` removes a preview's
 namespace and refuses the release's. `--schema-from` (a preview's copy of a database) is not in this engine yet.
 
 Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, previews' `--schema-from`, Studio's
