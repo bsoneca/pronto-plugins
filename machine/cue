@@ -20,18 +20,17 @@
 # its own resident memory. A cue run by a cue is its parent's: it claims nothing. CUE_BUDGET=off
 # runs every cue at once.
 #
-# A claimed evaluation weighs cores too (an evaluation keeps 1.5-9 of them busy, and on 2026-11-06
-# 13.5 of 15 weight held went with a load average of 104-187): the cores it kept busy on average
-# the last time, learned beside its peak (<id>.cores, from slot.ts's --cores-learn, or from time on
-# the direct path), rounded up to half a core and at least 1. One never seen weighs what the largest
-# of its folder did (folder-<id>.cores), else CUE_UNKNOWN_CORES (4). Never above CUE_MAX_CORES (7:
-# the budget less a rehearsal and its Premium lane, so one cue and a rehearsal fit together) or the
-# budget (STACK_BUDGET, else every core but STACK_RESERVE, 3), and GOMAXPROCS is set to that cap
-# (unless set), so what it keeps busy cannot pass what it claimed by much. It is one ticket in the
-# pool's cores line and in its cue lock (slot.ts --weight beside --mem), admitted when both admit,
-# holding nothing while it waits. Inside a gate, a rehearsal or a stack (a holder above it) it
-# weighs none and waits only for the lock, its cores counted in the holder's. One that kept 2 cores
-# busy for 30 CPU seconds (<id>.secs) is claimed even when it held under CUE_DIRECT_GB.
+# A claimed evaluation takes the cue lock only: one at a time (AGENTS.md: memory is a lock, not a
+# budget), holding nothing while it waits. Its cores are bounded, not claimed: GOMAXPROCS is set (unless
+# set) to the cap of the cores it kept busy on average the last time, learned beside its peak
+# (<id>.cores, from slot.ts's --cores-learn, or from time on the direct path), rounded up to half a core
+# and at least 1. One never seen gets the largest of its folder (folder-<id>.cores), else
+# CUE_UNKNOWN_CORES (4); never above CUE_MAX_CORES (7) or the budget (STACK_BUDGET, else every core but
+# STACK_RESERVE, 3). e8e3226 (PRONTO-761) claimed those cores in the pool's weight too; that is reverted
+# (PRONTO-838): a local cue waited for room in the budget while runner jobs, admitted outside it, held
+# more than all of it, and every local generate stalled. Inside a gate, a rehearsal or a stack (a holder
+# above it) it waits only for the lock. One that kept 2 cores busy for 30 CPU seconds (<id>.secs) takes
+# the lock even when it held under CUE_DIRECT_GB.
 #
 # A cue started by a mise shim, with no machine wrapper on the PATH before it (a shell that has
 # the shims and not mise's env._.path), is started again through `mise exec`, which puts this
@@ -174,7 +173,7 @@ mem=$(awk -v l="${last:-}" -v unknown="${CUE_UNKNOWN_GB:-24}" -v direct="${CUE_D
   if (l + 0 < direct + 0 && !(c + 0 >= 2 && s + 0 >= 30)) { print 0; exit }
   m = l * 1.25; if (m < 0.1) m = 0.1
   printf "%.1f\n", m }')
-# What a claimed evaluation weighs: its cores, as above.
+# The cap on a claimed evaluation's cores (GOMAXPROCS), as above.
 ncpu=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null)
 budget=${STACK_BUDGET:-$(( ${ncpu:-4} - ${STACK_RESERVE:-3} ))}
 foldermax=$(cat "$fcores" 2>/dev/null)
@@ -346,17 +345,17 @@ if [ "$(uname)" = Linux ] && systemd-run --user --scope --quiet true 2>/dev/null
   run=systemd-run
 fi
 
-# The claim: its cores beside its memory, and no more of them used than its cap.
+# The claim: its memory, and no more cores used than its cap.
 export GOMAXPROCS=$gomax
 # In the background, so a signal to this wrapper reaches the claim (as above), and its pass recorded.
 if { : <&0; } 2>/dev/null; then exec 3<&0; else exec 3</dev/null; fi
 started=$(date +%s)
 if [ -n "$exportpath" ]; then
   # What cue prints, kept to store once it passed, then printed.
-  out=$(mktemp "${TMPDIR:-/tmp}/cue-export.XXXXXX") || exec "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --weight "$weight" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3
-  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --weight "$weight" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 >"$out" &
+  out=$(mktemp "${TMPDIR:-/tmp}/cue-export.XXXXXX") || exec "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3
+  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 >"$out" &
 else
-  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --weight "$weight" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 &
+  "$deno" run -A --no-config --no-lock "$slot" --mem "$mem" --mem-learn "$learned" --cores-learn "$cores" --what "cue ${folder:-.}" -- "$run" "$@" <&3 &
 fi
 pid=$!
 trap 'kill -TERM "$pid" 2>/dev/null' TERM INT HUP
