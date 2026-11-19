@@ -865,13 +865,17 @@ export class Run {
     // only the runner's network reaches, nor pass on the door's answer), keeps nothing, and a failure quotes its status
     // alone. A path on the door follows redirects only onto the door's own host or a name under it, on any port (its
     // sign-in start sends a browser to the broker: id.<host> where it is released, another port at hand); a redirect
-    // anywhere else is its answer. A hop that leaves the door's origin is asked as a foreign path is: in a context of its
-    // own, with no session, cookie, header or body (a 307/308 that would carry the body is its answer), and an answer
-    // that ends on another origin is neither kept nor quoted.
+    // anywhere else is its answer. A hop that leaves the door's origin is asked in a context of its own, with no session,
+    // cookie or body (a 307/308 that would carry the body is its answer); it carries the step's User-Agent and Accept
+    // headers, nothing else (the broker reads the User-Agent, PRONTO-738: signin_webview_live), since only the app's own names are
+    // followed. An answer that ends on another origin is neither kept nor quoted.
     const door = new URL(URL_), url = new URL(path, URL_), foreign = url.origin !== door.origin;
     const ours = (u: URL) => u.hostname === door.hostname || u.hostname.endsWith(`.${door.hostname}`);
     if (foreign && (h.keep || h.keepText || h.body !== undefined)) throw new Error(`${h.method} ${path}: a step to another origin sends no body and keeps nothing`);
     const headers: Record<string, string> = foreign ? {} : await this.fillAll(h.headers ?? {});
+    // What a hop onto the app's own other origin carries: of the step's headers, only those that say what asks
+    // (never a credential, nor a secret a scenario put in a header of its own).
+    const owned = Object.fromEntries(Object.entries(headers).filter(([k]) => /^(user-agent|accept|accept-language)$/i.test(k)));
     if (!h.anon && !foreign) {
       if (!a) throw new Error("an http step with a session names its actor (by)");
       // A guest's session is minted as the page boots: waited for, as the page itself waits for it.
@@ -897,7 +901,7 @@ export class Run {
               const home = at.origin === door.origin;
               const res = home
                 ? await via.fetch(at.href, { method, headers, data, failOnStatusCode: false, maxRedirects: 0 })
-                : await (apart ??= await request.newContext({ ignoreHTTPSErrors: true })).fetch(at.href, { method, failOnStatusCode: false, maxRedirects: 0 });
+                : await (apart ??= await request.newContext({ ignoreHTTPSErrors: true })).fetch(at.href, { method, headers: owned, failOnStatusCode: false, maxRedirects: 0 });
               const to = res.status() >= 300 && res.status() < 400 ? res.headers()["location"] : undefined;
               const next = to === undefined ? undefined : new URL(to, at);
               if (!next || hop >= 20 || !ours(next)) return res;
