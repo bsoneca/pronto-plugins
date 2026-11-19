@@ -62,8 +62,9 @@ Counts are rows (logical changes), as found before the owner's decisions below; 
 ## omnishell: the way out (PRONTO-744)
 
 Nothing moves into the apps: no app declares a money field, and the pages bundle already inlines
-every seed when omnishell cannot read seed files (aprende's first load grows about 26 KB; checked
-at cutover). Phone sign-in (row 1) and kept guests (row 24) go with the sign-in work on Ory.
+every seed when omnishell cannot read seed files (aprende's first load grows about 26 KB of JSON, about 7 KB
+gzipped; checked at cutover). Phone sign-in (row 1) and kept guests (row 24) go with the sign-in work on Ory. Read-outage retention (row 30)
+waits for upstream's rewrite (our PR #4).
 
 What remains goes upstream, as the owner's pull requests, in this order (rows of the omnishell
 inventory below). Each says what an app loses on upstream v0.25.2 without it.
@@ -71,11 +72,11 @@ inventory below). Each says what an app loses on upstream v0.25.2 without it.
 | # | Proposal | Rows | Without it | Evidence it needs |
 |---|---|---|---|---|
 | 1 | Renderer renews a refused guest token (our PR #5, open) | 17, 21 | a renderer exits when its guest token is refused | already in #5 |
-| 2 | Renderer serves `/ready` (synced, door answers within 2 s) | 18 | our k8s readiness probe has nothing to call | probe test |
-| 3 | Lazy statechart, hatch, render and machine kits | 23 | aprende exceeds its 300 000 B first-load budget | gzip sizes, A/B on v0.25.2 |
+| 2 | Renderer serves `/ready` (synced, door answers within 2 s) | 18 | our k8s readiness probe gets a 404 and render is never Ready | probe test |
+| 3 | Lazy statechart, hatch, render and machine kits | 23 | aprende exceeds its 310 000 B first-load budget (`meta.firstLoad`) | gzip sizes, A/B on v0.25.2 |
 | 4 | `surface.firstPaint` (critical CSS and markup, one hashed inline script) | 16 | Bonk Chess's first paint waits for the whole shell | first-paint timing A/B; no-op when undeclared |
-| 5 | Correctness batch: guest session on an auth app's public screen, a create on another's key refused, a closed store read fails its callers, loopback bind on `local`, documents titled with the program's name | 15, 25, 27, 20, 26 | each a wrong answer or crash today | one test each |
-| 6 | Event-wake and render performance: wakes after submit and the last listener, reduce runs take turns, held early submits, row-context reuse, no per-row validation without a rule | 8, 11, 9, 10, 7, 13 | slower interaction; early submits lost | A/B on v0.25.2 (latency, allocations); Playwright tests |
+| 5 | Correctness batch: a served row of another kind stamped fresh, guest session on an auth app's public screen, a create on another's key refused, a closed store read fails its callers, loopback bind on `local`, documents titled with the program's name | 7, 15, 25, 13, 27, 20, 26 | each a wrong answer or crash today | one test each |
+| 6 | Event-wake and render performance: wakes after submit and the last listener, reduce runs take turns, held early submits, row-context reuse, no per-row validation without a rule | 8, 11, 9, 10 | slower interaction; early submits lost | A/B on v0.25.2 (latency, allocations); Playwright tests |
 | 7 | `check-visual` `SLOW` throttle | 14 | apps keep their own copy (tests/slow.ts) | none beyond the doc |
 | 8 | Hook: cookies the renderer carries from the door (default none) | 19 | our sticky Electric pods need the fork | ours stays app config |
 
@@ -130,7 +131,7 @@ Upstream PRs by us (bonisoft3/omnishell): #1 feat/auth-oidc CLOSED (landed in mo
 | 20 | Renderer binds loopback on SAYT_PLATFORM local too; plane.yml + devflow.cue | 8c7fe473 | server/render.ts; .github/workflows/plane.yml, devflow/ | B (render.ts), C (plane/devflow) | v0.25.2 binds loopback only for "host" | Tiny upstream PR; plane.yml/devflow are fork repo glue, vanish with the fork |
 | 21 | render-server test within() clears its timer | 98bd2826 | test/render-server.test.ts | B | live-only | Ride with 17 |
 | 22 | node_modules never committed | 6543df6b | .gitignore | A | upstream never tracked it; fork artifact | Drop |
-| 23 | Lazy statechart/hatch/render/machine kits (bundle budget), session-posture.js, machine-shape.js | 30596025, c691fcb7, 2ceb7978, debb8467 (+jessie/fragment/cortex-navigation splits) | shell.js, screen.js, jessie.js, terminal.cue, import-closure test | B | v0.25.2 imports all statically (aprende over 300000 B budget without it) | Upstream PR with gzip numbers; biggest merge-conflict source |
+| 23 | Lazy statechart/hatch/render/machine kits (bundle budget), session-posture.js, machine-shape.js | 30596025, c691fcb7, 2ceb7978, debb8467 (+jessie/fragment/cortex-navigation splits) | shell.js, screen.js, jessie.js, terminal.cue, import-closure test | B | v0.25.2 imports all statically (aprende over its 310000 B budget without it) | Upstream PR with gzip numbers; biggest merge-conflict source |
 | 24 | Guest kept across visits, refreshed, handed to auth on provider sign-in (flag-gated: auth.keepGuest, auth.adoptGuest via /ofrep) | 6ab69680, 576a42e4, bd2ed226, c725acb1, 5e767aac, cae4b1a5 | shell.js, kept-guest/adopt-guest tests | D | absent at v0.25.2; needs mecha-fork#27/#28 endpoints and OFREP flag gating (ours) | Owner: generic keep-guest upstream with a boolean, flag gate as app-side hook |
 | 25 | A create whose key is another's row is refused, not reported saved | b32fc1f6 | data-sync.js createLanded | B | v0.25.2 only comments on ignore-duplicates (l.2390), no check | Upstream PR |
 | 26 | Program display name titles documents (appTitle, shell.json title) | 9effe639 | chrome.js, shell.js, terminal.cue | B | absent at v0.25.2 | Upstream PR |
