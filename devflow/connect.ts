@@ -40,6 +40,15 @@ async function sopsSecret(file: string): Promise<Record<string, string>> {
   return { ...Object.fromEntries(Object.entries(s.data ?? {}).map(([k, v]) => [k, atob(String(v))])), ...(s.stringData ?? {}) };
 }
 
+// Plane's two keys from a SOPS file, both required: a Plane restored with only one would not read its data.
+const planeKeyNames = ["secret_key", "live_server_secret_key"];
+async function planeKeys(file: string): Promise<Record<string, string>> {
+  const s = await sopsSecret(file);
+  const missing = planeKeyNames.filter((n) => !s[n]);
+  if (missing.length) throw new Error(`${file} lacks ${missing.join(", ")}`);
+  return Object.fromEntries(planeKeyNames.map((n) => [n, s[n]]));
+}
+
 // The Django program that holds Plane's instance configuration to `want` (key to value): it says
 // which keys differ, and with `apply` writes them (encrypted where Plane keeps them encrypted).
 // Run by `manage.py shell` with the values on its stdin, never in an argument.
@@ -95,6 +104,14 @@ export function steps(repo: string, flow: DevFlow): Step[] {
   // Plane on the node: only when the repository names a cluster.
   const install = (cluster: NonNullable<DevFlow["cluster"]>): Step[] => {
     const ns = cluster.namespace;
+    const keysPath = "devflow/secrets.plane-keys.enc.yaml";
+    const keysFile = (() => {
+      try {
+        return Deno.statSync(`${repo}/${keysPath}`).isFile ? `${repo}/${keysPath}` : null;
+      } catch {
+        return null;
+      }
+    })();
     const kc = (...a: string[]) => ["--context", cluster.context, ...a];
     const k = (...a: string[]) => cmd("kubectl", kc(...a));
     return [
@@ -113,8 +130,25 @@ export function steps(repo: string, flow: DevFlow): Step[] {
       },
       {
         name: "Plane's secret keys",
-        check: async () => ((await k("-n", ns, "get", "secret", "plane-keys")).ok ? ok("kept in the cluster") : todo("make them")),
-        apply: async () => void (await must("kubectl", kc("-n", ns, "create", "secret", "generic", "plane-keys", `--from-literal=secret_key=${random()}`, `--from-literal=live_server_secret_key=${random()}`))),
+        // From the repository's devflow/secrets.plane-keys.enc.yaml when it has one, compared in memory and
+        // never overwritten; otherwise random, made once and kept in the cluster. A path, not a devFlow field,
+        // so a repository's devflow.cue still reads under an older pin of this schema.
+        check: async () => {
+          const have = await k("-n", ns, "get", "secret", "plane-keys", "-o", "json");
+          if (!keysFile) return have.ok ? ok("kept in the cluster") : todo("make them");
+          const want = await planeKeys(keysFile);
+          if (!have.ok) return todo(`install them from ${keysPath}`);
+          const now: Record<string, string> = Object.fromEntries(Object.entries(JSON.parse(have.out).data ?? {}).map(([n, v]) => [n, atob(String(v))]));
+          return planeKeyNames.every((n) => now[n] === want[n])
+            ? ok(`equal to ${keysPath}`)
+            : gate(`the cluster's plane-keys differ from ${keysPath}: Plane's data reads only with the keys it was written with. Decide which is right; connect overwrites neither`);
+        },
+        apply: async () => {
+          if (!keysFile) return void (await must("kubectl", kc("-n", ns, "create", "secret", "generic", "plane-keys", `--from-literal=secret_key=${random()}`, `--from-literal=live_server_secret_key=${random()}`)));
+          const want = await planeKeys(keysFile);
+          const secret = { apiVersion: "v1", kind: "Secret", type: "Opaque", metadata: { name: "plane-keys", namespace: ns }, stringData: want };
+          await must("kubectl", kc("-n", ns, "create", "-f", "-"), { stdin: JSON.stringify(secret) });
+        },
       },
       {
         name: "Plane's database and door (CloudNativePG, the gateway's route)",

@@ -134,6 +134,10 @@ devFlow: #DevFlow
 	// the repository's SOPS file holding its OAuth App (a Secret's stringData `client_id` and
 	// `client_secret`, from the repository's root). The App's callback is
 	// https://<host>/auth/github/callback/. GitHub signs a person in by their primary, verified email.
+	// Plane's own keys (secret_key, live_server_secret_key): a repository whose Plane data must outlive
+	// its cluster (a move, a reinstall) keeps them in devflow/secrets.plane-keys.enc.yaml, a SOPS
+	// Secret with both. `connect plane` installs plane-keys from it, never new ones, and stops where the
+	// cluster's differ. Without it, connect makes random keys once and keeps them in the cluster.
 	access: {
 		signup: *false | bool
 		github?: secrets!: string & =~"(^|/)secrets\\.[a-z0-9-]+\\.enc\\.yaml$"
