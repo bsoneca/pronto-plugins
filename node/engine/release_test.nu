@@ -50,7 +50,7 @@ d="$(dirname "$0")/.."
 #!/bin/sh
 d="$(dirname "$0")/.."
 echo "$*" >> "$d/ssh.log"
-if [ -f "$d/ssh_denied" ]; then echo "bruno@node: Permission denied (publickey)." >&2; exit 255; fi
+if [ -f "$d/ssh_denied" ]; then echo "user@node: Permission denied (publickey)." >&2; exit 255; fi
 echo $$ > "$d/ssh.pid"
 touch "$d/ssh_started"
 exec sleep 60
