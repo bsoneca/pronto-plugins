@@ -210,6 +210,32 @@ own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>
 Each bisect is a line of `bisect/bisects.jsonl` and a `bisect` line of `runs.jsonl` (`detail.bisect`),
 and `report` ends with them; it never reverts, never releases and never calls `release@gcp`.
 
+## Release branches
+
+An app that opts in (`releaseCron: branches: enabled: true`) does not fail a release on a red rehearsal: it holds it, and the fixes
+go in before the release ends, not into the next run. (The owner's ask: "we create a release branch, do the fixes there, and then
+cherry pick fixes to main.") `abandonHours` (12) and `abandonAttempts` (2) are the app's to change. Off, a rehearsal that fails is
+`failed` as ever.
+
+1. **Hold.** A run on main whose rehearsal (or android step, or preview) fails pushes `release/<app>/<YYYYMMDD-HHMM>` (Brasília
+   time) at the run's commit and writes `<state>/open`: `{branch, base, opened, limits, attempts: [{tip, verdict, at}]}`, the
+   cut's own failure the first attempt. The run's line says `held release/<app>/<id>`. The cut's failure is still bisected on main,
+   which reports to the culprit PR; a failure on the branch is not.
+2. **Fix.** While `open` exists the run's ref is `origin/release/<app>/<id>` and the gap is ignored: a wake runs only when the
+   branch tip is a commit no attempt judged. A fix is a pull request into the branch (never a push to main for it). A red attempt
+   is appended to `attempts` and the line says `held` again. Any failure of a run on the branch counts as a red attempt.
+3. **Release.** A green rehearsal releases from the branch as any release does (preview, release, confirm, hooks). `open` is
+   removed, a record `{branch, attempts, released commit}` (outcome `closed`) is appended to runs.jsonl, and the gap restarts from
+   the release's end.
+4. **Abandon.** `open` older than `abandonHours`, or `abandonAttempts` attempts in with the newest red, ends as
+   `abandoned release/<app>/<id>`: `open` is removed, the record is written and the next run cuts from main again, after the gap.
+   `release-cron.ts <app> abandon` does the same by hand (the lead's call), once no run is going. `status` shows the open release.
+
+Every commit on a release branch must be cherry-picked to main, or the next cut from main loses the fix and fails again;
+bsoneca/pronto's ledger check, coming separately, holds that. A pull request into a release branch fixes only: no features and no
+flag changes (a deploy never changes behaviour; a flag is flipped on main's own schedule). The branch is left on origin after the
+release or the abandon, for the record.
+
 ## New-feature scenario failures do not block a release
 
 pronto's gcp release decides this, not release-cron: when only scenarios a release adds fail, it releases

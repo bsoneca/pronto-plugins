@@ -91,6 +91,16 @@ releaseCron: #Cron
 	// folder appended: once production serves the release's commit, and when a run finds main already serving. A command that fails
 	// is logged and never changes the run's outcome. Null (the default): none.
 	flagsReleased: *null | [string, ...string]
+	// Release branches (README.md, "Release branches"): a rehearsal that fails on main holds the release on a branch
+	// `release/<app>/<id>` instead of failing it, the fixes go there as pull requests, and the run releases from the
+	// branch once its rehearsal is green; every fix is cherry-picked to main. Off by default, an app's opt-in. A held
+	// release is abandoned (main is cut again, after the gap) once it is `abandonHours` old, or `abandonAttempts`
+	// attempts (the cut's own failure counts as the first) are red.
+	branches: {
+		enabled:         *false | bool
+		abandonHours:    *12 | (int & >=1)
+		abandonAttempts: *2 | (int & >=1)
+	}
 	// What production must answer once the release is serving, each fetched from the release's domain.
 	probes: [Name=string]: #Probe
 }

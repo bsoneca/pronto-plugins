@@ -82,3 +82,41 @@ cases: {
 		{call: "cron.boardEnv", args: [{PATH: "/usr/bin"}, "/Users/me", []], expect: {PATH: "/usr/bin"}, why: "no cue installed: unchanged, and the hook says what it misses"},
 	]}
 }
+
+_held: {branch: "release/studio/20261119-1015", base: "aaaa1111", opened: "2026-11-19T10:15:00-03:00", limits: {abandonHours: 12, abandonAttempts: 2}}
+_cut: {tip: "aaaa1111", verdict: "red", at: "2026-11-19T10:15:00-03:00"}
+_open: _held & {attempts: [_cut]}
+
+cases: {
+	"a held release's branch is named for the minute it was cut, in Brasília time": {suite: "cron", steps: [
+		{call: "cron.branchName", args: ["studio", 1795094100000], expect: "release/studio/20261119-1015", why: "2026-11-19 13:15 UTC is 10:15 BRT"},
+		{call: "cron.branchName", args: ["studio", 1795137300000], expect: "release/studio/20261119-2215", why: "the zone's day, not UTC's, when they differ"},
+		{call: "cron.branchName", args: ["brawl-chess", 1795094100000], expect: "release/brawl-chess/20261119-1015"},
+	]}
+	"a held release is due only for a branch tip no attempt judged": {suite: "cron", steps: [
+		{call: "cron.heldDue", args: [_open, "aaaa1111"], expect: false, why: "the cut's own failure was this tip: no gap, no run"},
+		{call: "cron.heldDue", args: [_open, "bbbb2222"], expect: true, why: "a fix was pushed"},
+		{call: "cron.heldDue", args: [_open, null], expect: false, why: "the remote could not be read: wait for the next wake"},
+	]}
+	"an attempt is added to the open release without changing it": {suite: "cron", steps: [
+		{call: "cron.attempted", args: [_open, "bbbb2222", "red", "2026-11-19T11:00:00-03:00"], expect: _held & {attempts: [_cut, {tip: "bbbb2222", verdict: "red", at: "2026-11-19T11:00:00-03:00"}]}},
+	]}
+	"a held release is abandoned after its hours or its red attempts": {suite: "cron", steps: [
+		{call: "cron.abandoned", args: [_open, 1795094100000 + 3_600_000, {abandonHours: 12, abandonAttempts: 2}], expect: false, why: "an hour old, one red attempt"},
+		{call: "cron.abandoned", args: [_open, 1795094100000 + 12 * 3_600_000 + 1, {abandonHours: 12, abandonAttempts: 2}], expect: true, why: "past 12 h"},
+		{call: "cron.abandoned", args: [_open, 1795094100000 + 12 * 3_600_000, {abandonHours: 12, abandonAttempts: 2}], expect: false, why: "exactly 12 h is not older"},
+		{call: "cron.abandoned", args: [_held & {attempts: [{tip: "a", verdict: "red", at: "x"}, {tip: "b", verdict: "red", at: "y"}]}, 1795094100000 + 3_600_000, {abandonHours: 12, abandonAttempts: 2}], expect: true, why: "two red attempts"},
+		{call: "cron.abandoned", args: [_held & {attempts: [{tip: "a", verdict: "red", at: "x"}, {tip: "b", verdict: "green", at: "y"}]}, 1795094100000 + 3_600_000, {abandonHours: 12, abandonAttempts: 2}], expect: false, why: "the newest is not red"},
+		{call: "cron.abandoned", args: [_open, 1795094100000 + 3_600_000, {abandonHours: 12, abandonAttempts: 3}], expect: false, why: "the app allows three"},
+	]}
+	"an abandoned run waits the gap, a held one none": {suite: "cron", steps: [
+		{call: "cron.spaced", args: ["abandoned release/studio/20261119-1015"], expect: true},
+		{call: "cron.spaced", args: ["held release/studio/20261119-1015"], expect: false},
+		{call: "cron.spaced", args: ["released"], expect: true},
+		{call: "cron.spaced", args: ["skipped"], expect: false},
+	]}
+	"status says the open release": {suite: "cron", steps: [
+		{call: "cron.heldLine", args: [_open], expect: "held release/studio/20261119-1015 since 2026-11-19T10:15:00-03:00, cut from aaaa1111: 1 attempt (aaaa1111 red); abandoned after 12 h or 2 red attempts"},
+		{call: "cron.heldLine", args: [null], expect: null},
+	]}
+}

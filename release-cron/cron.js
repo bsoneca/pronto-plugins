@@ -31,8 +31,8 @@ export const sshDropped = (code) => code === 255;
 // drop): the release ran to its end on the node, its update-ref too, and only the session died.
 export const landed = (code, serving, head) => sshDropped(code) && !!serving && !!head && serving === head;
 
-// The outcomes after which the next run waits the gap.
-export const spaced = (outcome) => outcome === "released" || outcome === "failed";
+// The outcomes after which the next run waits the gap: a held release (below) waits for none, an abandoned one does.
+export const spaced = (outcome) => outcome === "released" || outcome === "failed" || (outcome ?? "").startsWith("abandoned");
 
 // A failed run's gap is waived once main has moved past the commit it failed on (`failed`; `head`
 // main now, null when it could not be read) by a change that concerns what failed (concerns, below):
@@ -499,3 +499,27 @@ export const boardEnv = (env, home, cues) => {
   }).pop();
   return v ? { ...env, CUE: `${home}/.local/share/mise/installs/github-cue-lang-cue/${v}/cue` } : env;
 };
+
+// Release branches (README.md): a rehearsal that failed on main is held on a branch, `release/<app>/<id>`, <id> the
+// minute it was cut in the operator's zone (20261119-1015). The open release is the JSON in <state>/open:
+// {branch, base (the commit cut from), opened (local time), limits: {abandonHours, abandonAttempts},
+// attempts: [{tip, verdict, at}]}, an attempt for each tip the rehearsal judged; the cut's own failure is the first.
+export const branchName = (app, ms, tz = zone) => `release/${app}/${local(ms, tz).slice(0, 16).replace(/[-:]/g, "").replace("T", "-")}`;
+
+// A held release is due only when its branch tip is a commit no attempt judged (`tip`: the remote's now, null when it
+// could not be read); the gap does not apply to it.
+export const heldDue = (open, tip) => !!tip && tip !== open.attempts.at(-1)?.tip;
+
+// The open release with one more attempt: the tip the rehearsal judged and its verdict (red or green).
+export const attempted = (open, tip, verdict, at) => ({ ...open, attempts: [...open.attempts, { tip, verdict, at }] });
+
+// Whether a held release is given up: it is older than `abandonHours`, or `abandonAttempts` attempts are in and the
+// newest is red. The next run then cuts from main again, after the gap.
+export const abandoned = (open, now, cfg) =>
+  now - Date.parse(open.opened) > cfg.abandonHours * 3_600_000 ||
+  (open.attempts.length >= cfg.abandonAttempts && open.attempts.at(-1)?.verdict === "red");
+
+// What `status` says of the open release, or null.
+export const heldLine = (open) => open
+  ? `held ${open.branch} since ${open.opened}, cut from ${open.base.slice(0, 8)}: ${open.attempts.length} attempt${open.attempts.length === 1 ? "" : "s"} (${open.attempts.map((a) => `${a.tip.slice(0, 8)} ${a.verdict}`).join(", ")}); abandoned after ${open.limits.abandonHours} h or ${open.limits.abandonAttempts} red attempts`
+  : null;
