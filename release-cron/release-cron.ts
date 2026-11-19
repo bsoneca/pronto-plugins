@@ -27,7 +27,7 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, verdict, releaseModes, rehearsalEnv, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
+import { schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, sshDropped, landed, verdict, releaseModes, rehearsalEnv, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 
 const here = new URL("./", import.meta.url).pathname;
@@ -663,7 +663,13 @@ try {
   run.gap = cron.gap;
   // What production serves: the commit the target's serving command prints, else Cloud Run's traffic.
   const target = cron.target.kind === "command" ? cron.target : undefined;
-  const servingNow = () => must(target!.serving[0], target!.serving.slice(1), `${wt}/${appRel}`, Deno.env.toObject(), 120).split(/\s+/)[0];
+  // Read over ssh: a connect that times out (PRONTO-758, 07:05 BRT) is tried twice more, 20 s apart, before it fails the run.
+  const servingNow = () => {
+    for (let i = 1; ; i++) {
+      try { return must(target!.serving[0], target!.serving.slice(1), `${wt}/${appRel}`, Deno.env.toObject(), 120).split(/\s+/)[0]; }
+      catch (e) { if (i >= 3) throw e; say(`serving unread (try ${i} of 3): ${(e as Error).message.split("\n").at(-1)}`); sh("sleep", ["20"], undefined, {}, 30); }
+    }
+  };
   before = target ? servingNow() : whole(JSON.parse(gcloud(["run", "services", "describe", gcp!.service])).status?.traffic);
   const live = target ? (sh("git", ["cat-file", "-e", `${before}^{commit}`], wt).ok ? before : undefined) : base(jsonl(`${state}/runs.jsonl`), before);
   step("prepare");
@@ -818,7 +824,17 @@ try {
   }
 
   // (told above even when the release failed: the flakes happened)
-  if (rel.code !== 0) end("failed", target ? `release (${target.release.join(" ")}) failed (exit ${rel.code})` : `release@gcp failed (exit ${rel.code})`, 1);
+  // An ssh that dropped is not a release that failed (PRONTO-758): what the node serves decides, read for about 15 min
+  // while the node may still be finishing. Landed, the run goes on to confirm, which checks readiness; else it failed.
+  if (rel.code !== 0 && target && sshDropped(rel.code)) {
+    say("the release's ssh exited 255 (its own failure, not the release's): reading what the node serves");
+    for (const t = Date.now(); Date.now() - t < 15 * 60_000; await new Promise((r) => setTimeout(r, 30_000))) {
+      let now = "";
+      try { now = servingNow(); } catch (e) { say(`serving unread: ${(e as Error).message.split("\n").at(-1)}`); continue; }
+      if (landed(rel.code, now, head)) { run.sshDropped = `the release's ssh exited 255; the node serves ${head.slice(0, 8)}`; say(run.sshDropped as string); break; }
+    }
+  }
+  if (rel.code !== 0 && !run.sshDropped) end("failed", target ? `release (${target.release.join(" ")}) failed (exit ${rel.code})` : `release@gcp failed (exit ${rel.code})`, 1);
   // pronto's release ships when only new-feature scenarios fail: the run names them, and the PR that added each is told once.
   if (newFailing.length) {
     run.newFailing = newFailing;

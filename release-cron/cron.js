@@ -23,6 +23,14 @@ export const local = (ms, tz = zone) => {
 // rehearse, android, preview, release or confirm). One line of JSON, written whole and renamed into place.
 export const activeLine = (app, pid, started, phase) => JSON.stringify({ app, pid, started, phase }) + "\n";
 
+// ssh exits 255 for its own failure (a dropped connection, a connect that timed out), or when the remote command exits
+// 255; either way, what the node serves decides (landed)
+// (PRONTO-758: two such drops on 2026-11-18, 07:05 and 11:34 BRT, the path to the node losing packets for minutes).
+export const sshDropped = (code) => code === 255;
+// A release whose ssh dropped has landed when the node serves the commit it was releasing (`serving`, read after the
+// drop): the release ran to its end on the node, its update-ref too, and only the session died.
+export const landed = (code, serving, head) => sshDropped(code) && !!serving && !!head && serving === head;
+
 // The outcomes after which the next run waits the gap.
 export const spaced = (outcome) => outcome === "released" || outcome === "failed";
 
