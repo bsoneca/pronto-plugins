@@ -43,7 +43,7 @@ def failed-step [output: string]: nothing -> string {
 # (Homebrew's 0.38.0, official 0.39.0) refuses more than 500 of them: 431, or a GOAWAY PROTOCOL_ERROR.
 def buildx-hint [output: string]: nothing -> string {
 	if not ($output =~ 'PROTOCOL_ERROR|431 \(Request Header Fields Too Large\)|Request Header Field') { return "" }
-	$"\nthe session between buildx and the buildkitd broke: the Dockerfile's COPY sources travel as header values and a buildx built with Go 1.27 caps them at 500. buildx here: (buildx-binary), see node/README.md \(pin aqua:docker/buildx@0.33.0\)."
+	$"\nthe session between buildx and the buildkitd broke: the Dockerfile's COPY sources travel as header values and a buildx built with Go 1.27 caps them at 500. buildx here: (buildx-binary), see node/README.md \(pin aqua:docker/buildx@0.39.1\)."
 }
 
 # `body` run with a remote builder at the node's buildkitd, given its name: `{|builder| ... }`. The builder
