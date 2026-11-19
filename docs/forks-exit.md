@@ -55,8 +55,8 @@ Counts are rows (logical changes), as found before the owner's decisions below; 
 - **omnishell**: `money` format moves to the apps; seed `{href}` becomes inline seeds in the
   app; read-outage retention waits for upstream's rewrite.
 - **The metal environment**: ours, a pronto-plugins plugin.
-- **Still open**: pronto row 19 (`identity/bearer.ts`, `issuer.cue`), rechecked under PRONTO-822;
-  mecha rows 24-25 (host launch), next round.
+- **Still open**: pronto row 19 (`identity/bearer.ts`, `issuer.cue`), rechecked under PRONTO-822.
+  Mecha row 24 (host launch) turned out to be upstream's already (see mecha's way out).
 - **Redundant upstream PRs**: pronto #11, #12, #17 and #18 closed, each naming the upstream fix.
 
 ## omnishell: the way out (PRONTO-744)
@@ -83,12 +83,42 @@ inventory below). Each says what an app loses on upstream v0.25.2 without it.
 Until each lands, the fork carries it. A row ships in an app only after upstream releases it; then
 the app pins that omnishell and the row leaves the fork.
 
+## mecha: the way out (PRONTO-745)
+
+Rows of the mecha inventory below, sorted by the owner's decisions.
+
+- **Dropped, upstream has it:** rows 1-3, and row 24, the host launch: v0.26.0's
+  `.bayt/process-compose.yaml` runs the same fifteen services as host processes (upstream's host
+  tier). The fork's extras there ride with rows 8, 17 and 25; its loopback bind under
+  `SAYT_PLATFORM=local` is dropped (apps run `host`, which v0.26.0 already binds to loopback).
+- **Dropped by decision:** row 23 (airlock doors); rows 11 and 13 (`/auth/upgrade`, the Studio
+  play token), replaced by Studio as an OIDC provider (PRONTO-822).
+- **On Ory, carried until then:** rows 7-10 and 12 (handoff codes, Android passkeys, `/auth/door`, guest adoption, API keys).
+- **Waiting on upstream PRs already open:** row 14, app schemas (mecha #4, pronto #13); row 15,
+  the `rls_audit` drop (mecha #5); row 16, roles managed outside (pronto #20).
+
+The rest goes upstream as the owner's pull requests, in this order:
+
+| # | Proposal | Rows | Without it | Evidence it needs |
+|---|---|---|---|---|
+| 1 | `signIn` takes any provider name (the auth service already reads `OIDC_<NAME>_*`; only the schema says `google`) | 4 | a Studio sign-in is labelled `google`, and a game cannot offer both | schema test |
+| 2 | The docker stack publishes the database on host loopback only | 21 | the docker stack publishes the dev database on every interface, at a port docker picks | none beyond the diff |
+| 2b | `__Host-` session and state cookies over https | 6 | sibling subdomains share the session cookie's scope | test with two sites |
+| 3 | Bound the change-capture stream (`maxLenApprox` 100 000) | 20 | redis grows until the host fills | memory over a long run |
+| 4 | OIDC discovery retries a provider still starting (5xx, 429, dropped connection) | 5 | auth fails to start behind a cold provider | test with a slow issuer |
+| 5 | imgproxy hardening: presets only, WebP, 1024 px cap, store sources only, and a host stand-in that enforces presets | 17, 25 | an open image resizer | one test per limit |
+| 6 | Electric: no `CREATE PUBLICATION` when tables are published by hand; stop waits 2 s, not 19 s | 18, 19 | Electric fails on a hand-published database; local runs slower (35 s to 18-22 s measured) | timing A/B on v0.26.0 |
+| 7 | airlock's undici pinned past the advisories | 22 | four high advisories in airlock's tree | unless upstream bumps first |
+| 8 | Door hooks: `meta.hostPeers`, `meta.doorEnvironment` | 26 | pronto's door and renderer need the fork | ours stays app config |
+
+Until each lands, the fork carries it; an app pins upstream mecha once every row it uses has.
+
 ## What blocks a direct pin today
 
 - **omnishell v0.25.2**: the two C hooks (phone sign-in provider list from the app, cookies the
   renderer carries from the door), the decided D rows, and B rows apps rely on (#5 token renewal,
   `/ready`, `firstPaint`, lazy statechart and hatch code that keeps aprende under budget).
-- **mecha v0.26.0**: API keys, app schemas and `apiSchemas`, the auth surfaces and the host launch; roles managed outside contradicts upstream's policy.
+- **mecha v0.26.0**: API keys, app schemas and `apiSchemas`, the auth surfaces; roles managed outside contradicts upstream's policy.
 - **pronto v1.5.1**: fields it lacks (`capabilities.auth.*`, `meta.schema`/`#Tenancy`,
   `meta.firstLoad`, money, `access.anon`, `database.smartShutdown`) fail CUE in any app using
   them; release@gcp's staged go-live, local gate and rehearsal must be in pronto-plugins
