@@ -16,8 +16,7 @@ node's CrowdSec). The same ssh process carries two more forwards, to the node's 
 AirPlay receiver holds.
 
 The app pins in its mise the tools the engine runs: `kubectl`, `docker` (the CLI with its compose plugin, never a
-daemon), `buildx` (`aqua:docker/buildx@0.33.0`, the release built on the node's buildkit v0.29 line, whose binary aqua names
-`docker-cli-plugin-docker-buildx`: a Homebrew 0.38.0, built with Go 1.27, lost its session to the daemon with `PROTOCOL_ERROR` or `431`: buildx sends a Dockerfile's COPY sources as gRPC header values, one per path, and Go 1.27's net/http refuses more than 500 of them, fixed in 0.39.1; the engine takes the buildx whose folder is first on the PATH, so the pin wins over Homebrew's), `sops` (when it has a SOPS file) and
+daemon), `buildx` (`aqua:docker/buildx@0.39.1`, whose binary aqua names `docker-cli-plugin-docker-buildx`; run against the node's buildkit v0.29 it loads aprende's 7,933-path context and builds database, crud, electric and auth with the digests 0.33.0 gave. Not older than 0.39.1 once Go 1.27 builds it: buildx sends a Dockerfile's COPY sources as gRPC header values, one per path, and Go 1.27's net/http refuses more than 500 of them, fixed in 0.39.1, so Homebrew's 0.38.0 and the official 0.39.0 lose the session with `PROTOCOL_ERROR` or `431`; 0.33.0, built with Go 1.25, also works; the engine takes the buildx whose folder is first on the PATH, so the pin wins over Homebrew's), `sops` (when it has a SOPS file) and
 `crane` (a release that builds, or `--check --build`). The preflight fails at once on a missing one,
 and on a pronto runtime that is not in `validated_pins` (runtime.nu, held by contract_test.nu). An existing
 namespace the release did not label (`pronto.dev/release=<app>`) is refused, `--adopt` takes it; `--delete`
