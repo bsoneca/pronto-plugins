@@ -31,8 +31,8 @@ export const sshDropped = (code) => code === 255;
 // drop): the release ran to its end on the node, its update-ref too, and only the session died.
 export const landed = (code, serving, head) => sshDropped(code) && !!serving && !!head && serving === head;
 
-// The outcomes after which the next run waits the gap.
-export const spaced = (outcome) => outcome === "released" || outcome === "failed";
+// The outcomes after which the next run waits the gap: a held release (below) waits for none, an abandoned one does.
+export const spaced = (outcome) => outcome === "released" || outcome === "failed" || (outcome ?? "").startsWith("abandoned");
 
 // A failed run's gap is waived once main has moved past the commit it failed on (`failed`; `head`
 // main now, null when it could not be read) by a change that concerns what failed (concerns, below):
@@ -499,3 +499,81 @@ export const boardEnv = (env, home, cues) => {
   }).pop();
   return v ? { ...env, CUE: `${home}/.local/share/mise/installs/github-cue-lang-cue/${v}/cue` } : env;
 };
+
+// Release branches (README.md): a rehearsal that failed on main is held on a branch, `release/<app>/<id>`, <id> the
+// minute it was cut in the operator's zone (20261119-1015). The open release is the JSON in <state>/open:
+// {branch, base (the commit cut from), opened (local time), limits: {abandonHours, abandonAttempts},
+// attempts: [{tip, verdict, at}]}, an attempt for each tip the rehearsal judged; the cut's own failure is the first.
+export const branchName = (app, ms, tz = zone) => `release/${app}/${local(ms, tz).slice(0, 16).replace(/[-:]/g, "").replace("T", "-")}`;
+
+// A held release is due only when its branch tip is a commit no attempt judged (`tip`: the remote's now, null when it
+// could not be read); the gap does not apply to it.
+export const heldDue = (open, tip) => !!tip && tip !== open.attempts.at(-1)?.tip;
+
+// The open release with one more attempt: the tip the rehearsal judged and its verdict (red or green).
+export const attempted = (open, tip, verdict, at) => ({ ...open, attempts: [...open.attempts, { tip, verdict, at }] });
+
+// Whether a held release is given up: it is older than `abandonHours`, or `abandonAttempts` attempts are in and the
+// newest is red. The next run then cuts from main again, after the gap.
+export const abandoned = (open, now, cfg) =>
+  now - Date.parse(open.opened) > cfg.abandonHours * 3_600_000 ||
+  (open.attempts.length >= cfg.abandonAttempts && open.attempts.at(-1)?.verdict === "red");
+
+// What `status` says of the open release, or null.
+export const heldLine = (open) => open
+  ? `held ${open.branch} since ${open.opened}, cut from ${open.base.slice(0, 8)}: ${open.attempts.length} attempt${open.attempts.length === 1 ? "" : "s"} (${open.attempts.map((a) => `${a.tip.slice(0, 8)} ${a.verdict}`).join(", ")}); abandoned after ${open.limits.abandonHours} h or ${open.limits.abandonAttempts} red attempts`
+  : null;
+
+// What `git log --format=%H%x1f%B%x1e` prints, as [{sha, body}].
+export const parseLog = (text) => text.split("\x1e").map((r) => r.replace(/^\s*\n/, "")).filter((r) => r.trim())
+  .map((r) => { const [sha, ...body] = r.split("\x1f"); return { sha: sha.trim(), body: body.join("\x1f") }; });
+
+// What `git log -p | git patch-id --stable` prints ("<patch id> <commit>" a line), as {commit: patch id}.
+export const patchIds = (text) => Object.fromEntries(text.split("\n").filter(Boolean).map((l) => l.trim().split(/\s+/)).map(([patch, sha]) => [sha, patch]));
+
+// The branch's commits (`branch`: [{sha, patch, body}]) that main (`main`: the same, since the merge base) holds no counterpart of:
+// a `(cherry picked from commit <sha>)` line naming it (cherry-pick -x), an equal stable patch id, or, the ledger's rule
+// (bsoneca/pronto's .github/release-ledger.sh), a subject ending `(#n)` that a main commit's message answers with `Backport-of: #n`.
+// Those are fixes the next release of main would lose.
+export const backported = (branch, main) => branch.filter((c) => {
+  const n = (c.body ?? "").split("\n")[0].match(/\(#(\d+)\)\s*$/)?.[1];
+  return !main.some((m) => (!!c.patch && m.patch === c.patch) || m.body.includes(`(cherry picked from commit ${c.sha})`) || (!!n && new RegExp(`Backport-of: #${n}(?!\\d)`).test(m.body)));
+});
+
+// The held-backport outcome's reason: how many of the branch's commits are not on main, and which.
+export const backportWhy = (missing) => `${missing.length} commit${missing.length === 1 ? "" : "s"} not on main: ${missing.map((c) => `${c.sha.slice(0, 8)}${c.body ? ` ${c.body.split("\n")[0]}` : ""}`).join("; ")}`;
+
+// The commits (`shas`, merge commits too) of a held branch that did not arrive by a merged pull request into that branch: `pulls` is each commit's
+// `gh api repos/<slug>/commits/<sha>/pulls`; a pull request counts when merged_at is set and its base.ref is the branch.
+export const unmerged = (shas, pulls, branch) => shas.filter((s) => !(pulls[s] ?? []).some((p) => !!p.merged_at && p.base?.ref === branch));
+
+// The files of a change that are the app's database migrations: they go to main only, never to a release branch.
+export const migrationFiles = (files, appRel) => files.filter((f) => f.startsWith(`${appRel}/services/database/migrations/`));
+
+// Why a held branch's new tip is not rehearsed (null: it is). `descends`: the tip descends from the cut; `unmerged`: its commits
+// past the cut that no merged pull request into the branch brought; `migrations`: the migration files base..tip changed.
+export const refusedTip = ({ descends, unmerged, migrations }) => {
+  const why = [
+    ...(descends ? [] : ["the tip does not descend from the commit the branch was cut at"]),
+    ...(unmerged.length ? [`${unmerged.length} commit${unmerged.length === 1 ? "" : "s"} not brought by a merged pull request into the branch: ${unmerged.map((s) => s.slice(0, 8)).join(", ")}`] : []),
+    ...(migrations.length ? [`migrations changed (${migrations.join(", ")}): migrations go to main only`] : []),
+  ];
+  return why.length ? why.join("; ") : null;
+};
+
+// `last`'s two commit fields for a run that ended `outcome` (spaced) on `commit`: the commit a failed run on main failed on (retry),
+// and the commit the run tried (behind). "-" for none: an abandoned run tried nothing main must stay behind, and a failure on a
+// held branch is not a failure of main.
+// A third: the held branch's tip that failed outside the rehearsal (no attempt), which waits the gap before it runs again (heldWait).
+export const lastFields = (outcome, commit, onBranch) => [
+  outcome === "failed" && commit && !onBranch ? commit : "-",
+  commit && !(outcome ?? "").startsWith("abandoned") && !(onBranch && outcome === "failed") ? commit : "-",
+  outcome === "failed" && commit && onBranch ? commit : "-",
+];
+
+// Whether a held branch's tip waits: it is the one that failed outside the rehearsal at `at` (`lastTip`, from `last`), and the gap
+// (minutes) is not over. A new tip never waits.
+export const heldWait = (lastTip, tip, now, at, gap) => !!tip && tip === lastTip && !due(now, at, gap);
+
+// What the lead is told when a fix merged to main waits on a held release.
+export const heldNotice = (branch) => `fixes merged to main do not release until ${branch} closes: \`abandon\` releases main again`;

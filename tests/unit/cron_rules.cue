@@ -82,3 +82,80 @@ cases: {
 		{call: "cron.boardEnv", args: [{PATH: "/usr/bin"}, "/Users/me", []], expect: {PATH: "/usr/bin"}, why: "no cue installed: unchanged, and the hook says what it misses"},
 	]}
 }
+
+_held: {branch: "release/studio/20261119-1015", base: "aaaa1111", opened: "2026-11-19T10:15:00-03:00", limits: {abandonHours: 12, abandonAttempts: 2}}
+_cut: {tip: "aaaa1111", verdict: "red", at: "2026-11-19T10:15:00-03:00"}
+_open: _held & {attempts: [_cut]}
+
+cases: {
+	"a held release's branch is named for the minute it was cut, in Brasília time": {suite: "cron", steps: [
+		{call: "cron.branchName", args: ["studio", 1795094100000], expect: "release/studio/20261119-1015", why: "2026-11-19 13:15 UTC is 10:15 BRT"},
+		{call: "cron.branchName", args: ["studio", 1795137300000], expect: "release/studio/20261119-2215", why: "the zone's day, not UTC's, when they differ"},
+		{call: "cron.branchName", args: ["brawl-chess", 1795094100000], expect: "release/brawl-chess/20261119-1015"},
+	]}
+	"a held release is due only for a branch tip no attempt judged": {suite: "cron", steps: [
+		{call: "cron.heldDue", args: [_open, "aaaa1111"], expect: false, why: "the cut's own failure was this tip: no gap, no run"},
+		{call: "cron.heldDue", args: [_open, "bbbb2222"], expect: true, why: "a fix was pushed"},
+		{call: "cron.heldDue", args: [_open, null], expect: false, why: "the remote could not be read: wait for the next wake"},
+	]}
+	"an attempt is added to the open release without changing it": {suite: "cron", steps: [
+		{call: "cron.attempted", args: [_open, "bbbb2222", "red", "2026-11-19T11:00:00-03:00"], expect: _held & {attempts: [_cut, {tip: "bbbb2222", verdict: "red", at: "2026-11-19T11:00:00-03:00"}]}},
+	]}
+	"a held release is abandoned after its hours or its red attempts": {suite: "cron", steps: [
+		{call: "cron.abandoned", args: [_open, 1795094100000 + 3_600_000, {abandonHours: 12, abandonAttempts: 2}], expect: false, why: "an hour old, one red attempt"},
+		{call: "cron.abandoned", args: [_open, 1795094100000 + 12 * 3_600_000 + 1, {abandonHours: 12, abandonAttempts: 2}], expect: true, why: "past 12 h"},
+		{call: "cron.abandoned", args: [_open, 1795094100000 + 12 * 3_600_000, {abandonHours: 12, abandonAttempts: 2}], expect: false, why: "exactly 12 h is not older"},
+		{call: "cron.abandoned", args: [_held & {attempts: [{tip: "a", verdict: "red", at: "x"}, {tip: "b", verdict: "red", at: "y"}]}, 1795094100000 + 3_600_000, {abandonHours: 12, abandonAttempts: 2}], expect: true, why: "two red attempts"},
+		{call: "cron.abandoned", args: [_held & {attempts: [{tip: "a", verdict: "red", at: "x"}, {tip: "b", verdict: "green", at: "y"}]}, 1795094100000 + 3_600_000, {abandonHours: 12, abandonAttempts: 2}], expect: false, why: "the newest is not red"},
+		{call: "cron.abandoned", args: [_open, 1795094100000 + 3_600_000, {abandonHours: 12, abandonAttempts: 3}], expect: false, why: "the app allows three"},
+	]}
+	"an abandoned run waits the gap, a held one none": {suite: "cron", steps: [
+		{call: "cron.spaced", args: ["abandoned release/studio/20261119-1015"], expect: true},
+		{call: "cron.spaced", args: ["held release/studio/20261119-1015"], expect: false},
+		{call: "cron.spaced", args: ["released"], expect: true},
+		{call: "cron.spaced", args: ["skipped"], expect: false},
+	]}
+	"status says the open release": {suite: "cron", steps: [
+		{call: "cron.heldLine", args: [_open], expect: "held release/studio/20261119-1015 since 2026-11-19T10:15:00-03:00, cut from aaaa1111: 1 attempt (aaaa1111 red); abandoned after 12 h or 2 red attempts"},
+		{call: "cron.heldLine", args: [null], expect: null},
+	]}
+}
+
+cases: {
+	"a release branch's commits are backported when main holds a cherry-pick of each or an equal patch": {suite: "cron", steps: [
+		{call: "cron.parseLog", args: ["aaa\u001ffix a\n\n(cherry picked from commit 111)\n\u001e\nbbb\u001ffix b\n\u001e\n"], expect: [{sha: "aaa", body: "fix a\n\n(cherry picked from commit 111)\n"}, {sha: "bbb", body: "fix b\n"}]},
+		{call: "cron.patchIds", args: ["p1 aaa\np2 bbb\n"], expect: {aaa: "p1", bbb: "p2"}},
+		{call: "cron.backported", args: [[{sha: "111", patch: "p1", body: "x"}, {sha: "222", patch: "p2", body: "y"}, {sha: "333", patch: "p3", body: "z"}], [{sha: "m1", patch: "q", body: "x\n\n(cherry picked from commit 111)\n"}, {sha: "m2", patch: "p2", body: "y, resolved by hand"}]], expect: [{sha: "333", patch: "p3", body: "z"}], why: "111 by its -x line, 222 by its patch id, 333 on neither"},
+		{call: "cron.backported", args: [[{sha: "444", body: "w"}], [{sha: "m3", body: "empty"}]], expect: [{sha: "444", body: "w"}], why: "a commit with no patch id matches only by its line"},
+		{call: "cron.backported", args: [[], [{sha: "m3", patch: "p", body: ""}]], expect: []},
+		{call: "cron.backportWhy", args: [[{sha: "3333333333", body: "fix c\n"}]], expect: "1 commit not on main: 33333333 fix c"},
+	]}
+	"a held branch's tip is run only when it is merged pull requests into the branch and no migration": {suite: "cron", steps: [
+		{call: "cron.unmerged", args: [["a", "b", "c", "d"], {a: [{merged_at: "t", base: {ref: "release/x/1"}}], b: [{merged_at: null, base: {ref: "release/x/1"}}], c: [{merged_at: "t", base: {ref: "main"}}], d: []}, "release/x/1"], expect: ["b", "c", "d"], why: "an open PR, a PR into main and a push with none are not the branch's"},
+		{call: "cron.unmerged", args: [["e"], {}, "release/x/1"], expect: ["e"]},
+		{call: "cron.migrationFiles", args: [["apps/studio/services/database/migrations/0042.sql", "apps/studio/src/a.js", "apps/other/services/database/migrations/1.sql"], "apps/studio"], expect: ["apps/studio/services/database/migrations/0042.sql"]},
+		{call: "cron.refusedTip", args: [{descends: true, unmerged: [], migrations: []}], expect: null},
+		{call: "cron.refusedTip", args: [{descends: false, unmerged: [], migrations: []}], expect: "the tip does not descend from the commit the branch was cut at"},
+		{call: "cron.refusedTip", args: [{descends: true, unmerged: ["abcdef012345"], migrations: ["m/1.sql"]}], expect: "1 commit not brought by a merged pull request into the branch: abcdef01; migrations changed (m/1.sql): migrations go to main only"},
+	]}
+	"last keeps main from being skipped as behind a branch, and a branch's failure out of main's retry": {suite: "cron", steps: [
+		{call: "cron.lastFields", args: ["failed", "c1", false], expect: ["c1", "c1", "-"]},
+		{call: "cron.lastFields", args: ["released", "c1", false], expect: ["-", "c1", "-"]},
+		{call: "cron.lastFields", args: ["abandoned release/x/1", "c1", true], expect: ["-", "-", "-"], why: "the branch tip is not what main tried"},
+		{call: "cron.lastFields", args: ["abandoned release/x/1", null, false], expect: ["-", "-", "-"]},
+		{call: "cron.lastFields", args: ["failed", "c1", true], expect: ["-", "-", "c1"], why: "a release or confirm failure on the branch: its tip is kept to wait the gap"},
+		{call: "cron.lastFields", args: ["released", "c1", true], expect: ["-", "c1", "-"]},
+	]}
+	"a held tip that failed outside the rehearsal waits the gap, a new tip does not": {suite: "cron", steps: [
+		{call: "cron.heldWait", args: ["t1", "t1", 1000, 0, 60], expect: true, why: "the same tip inside the gap"},
+		{call: "cron.heldWait", args: ["t1", "t1", 3_600_000, 0, 60], expect: false, why: "the gap is over"},
+		{call: "cron.heldWait", args: ["t1", "t2", 1000, 0, 60], expect: false, why: "a pushed fix runs at once"},
+		{call: "cron.heldWait", args: [null, "t1", 1000, 0, 60], expect: false},
+	]}
+	"a branch commit is carried by the ledger's Backport-of line for its pull request": {suite: "cron", steps: [
+		{call: "cron.backported", args: [[{sha: "1", body: "fix the thing (#12)\n"}, {sha: "2", body: "other (#123)\n"}, {sha: "3", body: "no number\n"}], [{sha: "m", patch: "q", body: "fix the thing again (#40)\n\nBackport-of: #12\n"}]], expect: [{sha: "2", body: "other (#123)\n"}, {sha: "3", body: "no number\n"}], why: "#12 is answered; #123 is not #12"},
+	]}
+	"a held release says what a fix merged to main must do": {suite: "cron", steps: [
+		{call: "cron.heldNotice", args: ["release/x/1"], expect: "fixes merged to main do not release until release/x/1 closes: `abandon` releases main again"},
+	]}
+}
