@@ -34,6 +34,10 @@
 //   listens there, its pid and its parent). On a Mac it also removes the System V shared
 //   memory segments dead postgres left (leakedSegments), of which the machine has only 32.
 //
+//   Run folders. A launch's and a gate's work folders (slot.<pid>.*, gate.<pid>.*) live in STACK_RUNS,
+//   else ~/.cache/pronto/stacks, not $TMPDIR, whose old files macOS deletes at 03:35 (PRONTO-851); a
+//   claim removes those whose pid is dead and that are a day old.
+//
 //   Nested. A claim with a live holder above it (by the process tree, or STACK_JOB, the job that ran
 //   it, or STACK_SLOT, the slot of the command it runs under) is admitted at once inside that
 //   holder's weight: it adds none (its record says weight 0 and `in=<holder>`), takes no ticket, and
@@ -183,6 +187,43 @@ const alive = async (pid: number) => {
   const { code, stderr } = await new Deno.Command("kill", { args: ["-0", String(pid)], env: { LC_ALL: "C" }, stderr: "piped" }).output();
   return code === 0 || /not permitted/i.test(new TextDecoder().decode(stderr));
 };
+// Where a stack's and a gate's run folders live: not $TMPDIR, whose files older than 3 days macOS's
+// dirhelper deletes at 03:35, and a running stack's served tree (copied keeping old mtimes) lost its
+// static files that way (PRONTO-851). The names stay short: a unix-socket path has a length limit.
+export async function runDir(prefix: string): Promise<string> {
+  const base = runsBase();
+  await Deno.mkdir(base, { recursive: true });
+  return Deno.makeTempDir({ dir: base, prefix: `${prefix}${Deno.pid}.` });
+}
+const runsBase = () => Deno.env.get("STACK_RUNS") ?? `${Deno.env.get("HOME")}/.cache/pronto/stacks`;
+// The run folders (<prefix>.<pid>.<suffix>) whose pid is dead and whose mtime (ms, in `mtimes`) is
+// older than keepMs: a failed launch's log is kept a day.
+export function staleRuns(names: string[], isDead: (pid: number) => boolean, mtimes: Record<string, number>, now: number, keepMs: number): string[] {
+  return names.filter((name) => {
+    const pid = name.split(".").slice(1).find((part) => /^\d+$/.test(part));
+    return pid !== undefined && isDead(Number(pid)) && (mtimes[name] ?? now) < now - keepMs;
+  });
+}
+// Removes them; cheap, and never throws.
+async function reapRuns(): Promise<void> {
+  try {
+    const base = runsBase(), names: string[] = [], mtimes: Record<string, number> = {};
+    for await (const e of Deno.readDir(base)) {
+      names.push(e.name);
+      const m = (await Deno.stat(`${base}/${e.name}`).catch(() => null))?.mtime;
+      if (m) mtimes[e.name] = m.getTime();
+    }
+    // Only a folder a day old is asked whether its pid lives (a `kill -0` each): fresh ones are kept anyway.
+    const now = Date.now(), keep = 24 * 3600_000, old = names.filter((n) => (mtimes[n] ?? now) < now - keep);
+    const dead = new Set<number>();
+    for (const pid of new Set(old.map((n) => Number(n.split(".").slice(1).find((part) => /^\d+$/.test(part)))))) {
+      if (pid && !await alive(pid)) dead.add(pid);
+    }
+    for (const name of staleRuns(old, (pid) => dead.has(pid), mtimes, now, keep)) {
+      await Deno.remove(`${base}/${name}`, { recursive: true }).catch(() => {});
+    }
+  } catch { /* no runs folder, or unreadable: nothing to reap */ }
+}
 // The System V shared memory segments a dead postgres left. Every postgres cluster takes one (its
 // interlock), and macOS allows 32 on the whole machine (kern.sysv.shmmni): one killed without its
 // cleanup keeps its segment, attached to nothing, until it is removed, and a full machine's next
@@ -538,6 +579,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
   let end = Date.now() + minutes * 60_000, fewest = Infinity, lightest = Infinity;
   // What dead postgres left, freed once a claim: the stack this claim starts may need a segment.
   await reclaimSegments();
+  await reapRuns();
   await reapDeadClaims();
   try {
   for (;;) {
@@ -1094,7 +1136,7 @@ if (import.meta.main) {
   }
   let code: number;
   if (args[0] === "launch") {
-    const tmp = await Deno.makeTempDir({ prefix: "slot." });
+    const tmp = await runDir("slot.");
     const s = stack(slot, tmp, await prepare(slot, tmp));
     // The served folder is made anew: omnishell's addressing refuses a tree that already holds its
     // `_immutable-` copies, so a second `prepare` over the first's folder served nothing new.
@@ -1132,13 +1174,13 @@ if (import.meta.main) {
     // a free one, the door's too, and the stack's default origin follows its door; the slot's would name
     // a door nothing binds.
     const { ORIGIN: _o, APP_URL: _u, ...ports } = slot.env;
-    const tmp = gateSteps ? await Deno.makeTempDir({ prefix: "integrate-local." }) : "";
+    const tmp = hostGate || gateSteps ? await runDir("gate.") : "";
     if (gateSteps) await gateSteps.upgrade(slot.dir, tmp);
     const script = hostGate ? integrating(await Deno.readTextFile(`${slot.dir}/.bayt/Taskfile.integrate.yaml`)) : "";
     // INTEGRATE_LOCAL_RUN marks every host-tier integrate run (integrate@host and its alias), as integrate-local.ts's
     // tag did: Studio's builder reads it to run on the model's recordings and a clone of the repo, not the live model.
     const child = hostGate
-      ? new Deno.Command("sh", { args: ["-c", 'exec mise x -- nu -c "$1"', "sh", gateSteps ? slowVisual(script) : script], cwd: slot.dir, env: { ...ports, PATH: misePath(), MISE_ENV: "host", SAYT_PLATFORM: "host", INTEGRATE_LOCAL_RUN: crypto.randomUUID() }, stdin: "inherit", stdout: "inherit", stderr: "inherit" }).spawn()
+      ? new Deno.Command("sh", { args: ["-c", 'exec mise x -- nu -c "$1"', "sh", gateSteps ? slowVisual(script) : script], cwd: slot.dir, env: { ...ports, PATH: misePath(), TMPDIR: tmp, MISE_ENV: "host", SAYT_PLATFORM: "host", INTEGRATE_LOCAL_RUN: crypto.randomUUID() }, stdin: "inherit", stdout: "inherit", stderr: "inherit" }).spawn()
       : new Deno.Command(cmd, { args: rest, cwd: slot.dir, env: { ...ports, PATH: misePath() }, stdin: "inherit", stdout: "inherit", stderr: "inherit" }).spawn();
     // Its own stack comes down on its own signal handler (integrate-local.ts and rehearse.ts have one).
     stopping = async () => { try { child.kill("SIGTERM"); } catch { /* gone */ } await Promise.race([child.status, new Promise((r) => setTimeout(r, 120_000))]); };
