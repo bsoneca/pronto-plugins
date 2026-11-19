@@ -195,6 +195,7 @@ def main [] {
 	test_the_registry_prune_reads_what_the_cluster_names
 	test_a_failed_read_stops_the_prune_before_it_deletes_anything
 	test_the_registry_restarts_after_its_collection_when_it_caches_blobs
+	test_the_prune_outcome_is_recorded_in_the_release_configmap
 	print "\nAll node release tests passed."
 }
 
@@ -782,5 +783,26 @@ def test_the_registry_restarts_after_its_collection_when_it_caches_blobs [] {
 	let busy = (in-world $w -c $body)
 	assert equal $busy.exit_code 0 $"($busy.stdout)($busy.stderr)"
 	assert (not ((calls $w) | any {|c| ($c | str contains "garbage-collect") or ($c | str starts-with "rollout") })) "an open upload stops the collection"
+	rm -rf $w.dir
+}
+
+def test_the_prune_outcome_is_recorded_in_the_release_configmap [] {
+	print "test a prune that fails is a warning recorded as prune_error, one that works as pruned..."
+	let w = (sandbox)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let patch = (calls $w | where {|c| $c | str starts-with "patch configmap pronto-release -n aprende --type merge" })
+	assert equal ($patch | length) 1
+	assert (has $patch.0 '"pruned":"false"') $patch.0
+	assert (has $patch.0 '"prune_error":"') $patch.0
+	assert (not (has $patch.0 '"prune_error":""')) "the error is told"
+	assert ((calls $w | enumerate | where {|e| $e.item =~ "ConfigMap/pronto-release" } | get index | first) < (calls $w | enumerate | where {|e| $e.item =~ "^patch configmap pronto-release" } | get index | first)) "after the release's record"
+	# a prune that worked
+	rm -f ($w.state | path join calls.jsonl)
+	let ok = (in-world $w -c $"use ($engine_dir | path join release.nu) [record-prune]; record-prune {namespace: aprende} null")
+	assert equal $ok.exit_code 0 $ok.stderr
+	let p = (calls $w | first)
+	assert (has $p '"pruned":"true"') $p
+	assert (has $p '"prune_error":""') $p
 	rm -rf $w.dir
 }

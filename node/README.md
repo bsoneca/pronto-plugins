@@ -76,7 +76,8 @@ every pod; `retire` (extra); the ConfigMap `pronto-release` with `sha` (extra, w
 reads). A failure at or after the objects puts back, with `rollout undo`, only the Deployments whose revision
 moved (`rollback.nu`); the database and a restated seed are not rolled back. The last step prunes the node's
 registry (`registry.nu`: the digests the cluster names are kept, the rest garbage-collected); a failure of it is
-a warning, never a failed release.
+a warning, never a failed release, and its outcome is recorded in the ConfigMap `pronto-release` (`pruned`, and
+`prune_error` when it failed).
 
 ### The build (`push.nu`)
 

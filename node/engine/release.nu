@@ -248,6 +248,12 @@ export def record-release [app_dir: string, node: record, pushed: record] {
 	} | to json | kubectl-ok apply -f -
 }
 
+# What the prune did, in the release's ConfigMap: `pruned` "true" or "false", and `prune_error` (empty on success).
+export def record-prune [node: record, failure: any] {
+	let data = if $failure == null { {pruned: "true", prune_error: ""} } else { {pruned: "false", prune_error: ($failure | into string | str substring 0..499)} }
+	kubectl-ok patch configmap pronto-release -n $node.namespace --type merge -p ({data: $data} | to json --raw)
+}
+
 # --- the release ---
 
 # Builds the images on the node's buildkitd and answers what was pushed by service: {tag, digest}, the
@@ -463,10 +469,14 @@ def main [
 						build-images $app_info $node $fwd $services (if $check { "check" } else { $preview_tag })
 					}
 					release-app $app_info $node $meta $compose $facts $secrets $pushed --check=$check
-					# 16. prune: the release is live, so a failure here is a warning
+					# 16. prune: the release is live, so a failure here is a warning, recorded beside the release
 					if not $check {
-						try { registry prune $"127.0.0.1:($fwd.registry)" $node.build } catch {|e|
+						let failure = (try { registry prune $"127.0.0.1:($fwd.registry)" $node.build; null } catch {|e|
 							print -e $"node: (stamp) warning: the node's registry was not pruned: ($e.msg)"
+							$e.msg
+						})
+						try { record-prune $node $failure } catch {|e|
+							print -e $"node: (stamp) warning: the prune's outcome was not recorded: ($e.msg)"
 						}
 					}
 				}
