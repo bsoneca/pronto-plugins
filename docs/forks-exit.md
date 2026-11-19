@@ -39,21 +39,23 @@ Counts are rows (logical changes); a mixed row counts in its first-named bin. Pr
    billing, Android and Unity surfaces and auth in `shell.yaml`; check those rows first.
 5. **Archive** the three forks and their publish workflows (PRONTO-750).
 
-## Decisions for the owner
+## Owner decisions (2026-11-18)
 
-- **write.ts** (pronto row 54): a pronto-plugins plugin, or one tiny fork kept for it?
-- **Sign-in**: edge sign-in, per-app broker ports, `identity/bearer.ts`, `issuer.cue`, the
-  `capabilities.auth.*` extras (pronto D rows) and mecha's handoff codes, Android passkeys,
-  `/auth/door`, guest upgrade, API keys, airlock doors (mecha D rows, all B-shaped). Offer
-  upstream, or wait for upstream's Ory decision?
-- **Studio auth**: `/auth/upgrade` and the play token need an upstream token-verifier hook (C)
-  or go upstream (B)?
-- **Roles managed outside mecha**: v0.26.0's docs say externally managed roles are
-  unsupported. Drop ours, or argue for it upstream?
-- **omnishell**: kept/adopted guest, `money` text format, read-outage retention, seed `{href}`.
-- **The metal environment** (pronto k8s): upstream or plugin?
-- **Our open upstream PRs now redundant**: pronto #11 and #17 (fixed in v1.4.5), #12 (= upstream
-  #2447), #18 (= upstream #2444). Close them?
+- **write.ts**: drop our changes (pronto row 54); apps use upstream's write.ts.
+- **Studio sign-in**: Studio becomes an OIDC provider and games sign players in through mecha's
+  generic OIDC (PRONTO-822). The fork's `/auth/studio`, `studio.ts` and `studio_jti` go
+  (mecha rows 11, 13). Until upstream accepts provider names other than `google`, a game sets
+  `signIn: google: issuer: <Studio origin>`.
+- **Other sign-in** (API keys, handoff codes, Android passkeys, kept and adopted guests, edge
+  sign-in, per-app broker ports): proposed upstream built on Ory once upstream moves auth there;
+  carried until then.
+- **Airlock doors**: dropped. Upstream's reads and effects cover them and no app declares doors.
+- **Roles managed outside mecha**: wait for bonisoft3/pronto#20 (the access model as a value,
+  then generated or checked provisioning); drop mecha row 16 once it lands.
+- **omnishell**: `money` format moves to the apps; seed `{href}` becomes inline seeds in the
+  app; read-outage retention waits for upstream's rewrite.
+- **The metal environment**: ours, a pronto-plugins plugin.
+- **Redundant upstream PRs**: pronto #11, #12, #17 and #18 closed, each naming the upstream fix.
 
 ## What blocks a direct pin today
 
