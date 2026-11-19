@@ -140,6 +140,11 @@ if verb == "get":
         if "--ignore-not-found" in args:
             sys.exit(0)
         fail(f'Error from server (NotFound): namespaces "{args[2]}" not found')
+    if what == "configmap":
+        if exists("read_fail_cluster"):
+            fail("Unable to connect to the server: net/http: TLS handshake timeout")
+        print(read("serving_sha"))
+        sys.exit(0)
     if what == "gatewayclass":
         out({"status": {"conditions": [{"type": "Accepted", "status": "True"}]}})
     if what == "deployment":

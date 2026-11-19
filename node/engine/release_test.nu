@@ -188,6 +188,7 @@ def main [] {
 	test_preflight_needs_its_tools
 	test_a_database_that_never_comes_up_gets_its_old_image_back
 	test_a_failed_read_is_never_taken_for_absent
+	test_serving_prints_the_recorded_commit
 	test_a_failed_deployment_read_is_neither_unchanged_nor_changed
 	test_a_namespace_the_release_did_not_label_is_not_its_to_touch
 	test_rollback_goes_through_every_deployment
@@ -570,6 +571,25 @@ def test_a_failed_read_is_never_taken_for_absent [] {
 	assert ($p.exit_code != 0)
 	assert (has $p.stderr "has no ready primary on") $p.stderr
 	assert (has $p.stderr "putting back the database image reg/aprende-database:17@sha256:old failed") $p.stderr
+	rm -rf $w.dir
+}
+
+def test_serving_prints_the_recorded_commit [] {
+	print "test --serving prints the recorded commit (empty when none), writes nothing, and a failed read fails..."
+	let w = (sandbox)
+	let none = (in-world $w $release_nu --app $w.app --serving)
+	assert equal $none.exit_code 0 $none.stderr
+	assert (has $none.stdout "serving ") $none.stdout
+	"abc123def" | save -f ($w.state | path join serving_sha)
+	let r = (in-world $w $release_nu --app $w.app --serving)
+	assert equal $r.exit_code 0 $r.stderr
+	assert (has $r.stdout "serving abc123def") $r.stdout
+	assert equal (writes $w) []
+	let both = (in-world $w $release_nu --app $w.app --serving --check)
+	assert ($both.exit_code != 0) "--serving goes with no other flag"
+	"" | save -f ($w.state | path join read_fail_cluster)
+	let bad = (in-world $w $release_nu --app $w.app --serving)
+	assert ($bad.exit_code != 0) "a failed read fails"
 	rm -rf $w.dir
 }
 

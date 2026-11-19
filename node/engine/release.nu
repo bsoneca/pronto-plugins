@@ -441,10 +441,12 @@ def main [
 	--check                    # steps 0 to 4 only, every write a server dry run, nothing built (unless --build)
 	--build                    # with --check: build and push the images under the tag `check`, then dry-run with their digests
 	--delete                   # delete the preview's namespace (a preview only)
+	--serving                  # print `serving <sha>`: the commit the release recorded in the namespace (empty when none); writes nothing
 	--adopt                    # take an existing namespace the release did not label (its Namespace object labels it)
 	--schema-from: string = "" # the preview copy of a database (not in this engine yet)
 ] {
 	$env.GCP_T0 = (date now)
+	if $serving and ($check or $build or $delete or $adopt) { error make {msg: "--serving only reads the recorded commit: it goes with no other flag"} }
 	if $check and $delete { error make {msg: "--check and --delete cannot be given together: a check writes nothing, a delete is a write"} }
 	if $build and not $check { error make {msg: "--build only goes with --check: a release always builds"} }
 	if ($schema_from | is-not-empty) { error make {msg: "--schema-from is not in this engine yet: a preview starts with an empty database"} }
@@ -452,6 +454,17 @@ def main [
 	let node = (render node-config $app_info.cue_path $preview)
 	if $delete {
 		if ($preview | is-empty) or $node.namespace == $node.name { error make {msg: $"--delete removes a preview's namespace; ($node.namespace) is the release's"} }
+	}
+	if $serving {
+		# What cd asks before it releases: the commit the node's namespace records (an absent record, or namespace, is empty).
+		tunnel with-tunnel $node.api $node.build {|fwd|
+			with-env {KUBECONFIG: (tunnel kubeconfig $node.context $fwd.api)} {
+				let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o jsonpath={.data.sha} | complete)
+				if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
+				print $"serving ($r.stdout | str trim)"
+			}
+		}
+		return
 	}
 	let compose = if $delete { {services: {}} } else { render compose-config $app_info.dir }
 	let meta = (render app-meta $app_info.cue_path $preview)
