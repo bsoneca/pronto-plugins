@@ -1,0 +1,17 @@
+#!/bin/sh
+# Writes the node release engine (node/engine/, node/README.md) into apps whose release.cue holds
+# Node: node.#Release, each file regenerated:
+#   bin/pronto-node --engine <app-dir>...
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+[ "${1:-}" = --engine ] || { echo "usage: pronto-node --engine <app-dir>..." >&2; exit 2; }
+shift
+[ $# -ge 1 ] || { echo "usage: pronto-node --engine <app-dir>..." >&2; exit 2; }
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+(cd "$here" && ./saytw --script tools.nu cue export ./node/engine/export -e files --out json) > "$files"
+for dir in "$@"; do
+	app=$(cd "$dir" && pwd)
+	[ -f "$app/release.cue" ] || { echo "pronto-node: $app has no release.cue" >&2; exit 2; }
+	(cd "$here" && ./saytw --script tools.nu nu bin/write.nu "$files" "$app")
+done
