@@ -480,21 +480,16 @@ Deno.test("a learned evaluation takes the cue lock only: weight 0 in the pool, i
   assertMatch(r.stdout, /gomaxprocs 6\n/, "its parallelism is capped at the cap (the budget here, under CUE_MAX_CORES)");
 });
 
-Deno.test("an evaluation never seen is capped at its folder's largest, else CUE_UNKNOWN_CORES; the cap is capped", async () => {
+Deno.test("GOMAXPROCS is the cap whatever is learned; a set GOMAXPROCS stays", async () => {
   const dir = await Deno.makeTempDir();
   await fake(dir);
-  // Another evaluation of this folder, learned at 5 cores: its claimed run leaves it as the folder's largest.
+  // Learned at 5 cores, or never seen: the cap (the budget here, under CUE_MAX_CORES).
   await prime(dir, ["export", "./a"], 5);
-  assertMatch((await run(dir, ["export", "./a"], poolEnv)).stdout, /gomaxprocs 6\n/);
-  const sibling = await run(dir, ["export", "./b"], { ...poolEnv, CUE_UNKNOWN_GB: "1" });
-  assertMatch(sibling.stderr, /weight 0 of 6 \(cue lock\)/);
-  assertMatch(sibling.stdout, /gomaxprocs 6\n/, "never seen: the cap, as its folder's largest is under it");
-  // Another folder has no sibling: CUE_UNKNOWN_CORES, rounded up to half a core.
-  const other = await Deno.makeTempDir({ dir });
-  const unknown = await run(dir, ["export", "./c"], { ...poolEnv, CUE_UNKNOWN_GB: "1", CUE_UNKNOWN_CORES: "2.2" }, undefined, other);
-  assertMatch(unknown.stderr, /weight 0 of 6/);
-  assertMatch(unknown.stdout, /gomaxprocs 6\n/);
-  // A learned count above the cap is the cap, and GOMAXPROCS says so.
+  assertMatch((await run(dir, ["export", "./a"], poolEnv)).stdout, /gomaxprocs 6\n/, "learned under the cap: the cap");
+  const unseen = await run(dir, ["export", "./b"], { ...poolEnv, CUE_UNKNOWN_GB: "1" });
+  assertMatch(unseen.stderr, /weight 0 of 6 \(cue lock\)/);
+  assertMatch(unseen.stdout, /gomaxprocs 6\n/, "never seen: the cap");
+  // The cap is the smaller of CUE_MAX_CORES and the budget, whatever was learned.
   await prime(dir, ["export", "./big"], 40);
   const big = await run(dir, ["export", "./big"], { ...poolEnv, CUE_MAX_CORES: "3" });
   assertMatch(big.stderr, /weight 0 of 6/);
@@ -611,7 +606,7 @@ Deno.test("the cores an evaluation kept busy are learned, from slot.ts when clai
   const quick = await Deno.makeTempDir();
   await fake(quick);
   await run(quick, ["export", "./spec"], { CUE_UNKNOWN_GB: "1" });
-  assertEquals((await Array.fromAsync(Deno.readDir(`${quick}/.cache/pronto/cue-mem`))).filter((e) => e.name.endsWith(".cores") && !e.name.startsWith("folder-")).length, 0);
+  assertEquals((await Array.fromAsync(Deno.readDir(`${quick}/.cache/pronto/cue-mem`))).filter((e) => e.name.endsWith(".cores")).length, 0);
 });
 
 Deno.test("a cue found only as a mise shim is started again through mise exec, once", async () => {
@@ -728,7 +723,7 @@ Deno.test("a cue inside a holder, through a slot.ts from before the -w tickets, 
   }
 });
 
-Deno.test("a partial vet teaches neither its key's cores nor its folder's", async () => {
+Deno.test("a partial vet does not teach its key's cores", async () => {
   const dir = (await Deno.makeTempDir()) + "/m";
   await Deno.mkdir(dir);
   await fake(dir);
@@ -740,9 +735,8 @@ Deno.test("a partial vet teaches neither its key's cores nor its folder's", asyn
   const vet = () => run(dir, ["vet", "-c", "./..."], { CUE_DIRECT_GB: "0", CUE_UNKNOWN_GB: "0.1" });
   assertEquals((await vet()).code, 0);
   await Deno.writeTextFile(`${dir}/.cache/pronto/cue-mem/${await learnedName(dir)}.cores`, "5\n");
-  for (const n of await names(`${dir}/.cache/pronto/cue-mem`)) if (n.startsWith("folder-")) await Deno.remove(`${dir}/.cache/pronto/cue-mem/${n}`);
   await Deno.writeTextFile(`${dir}/a/a.cue`, `package a\nx: 2\n`);
   const partial = await vet();
   assertMatch(partial.stderr, /packages? passed before/);
-  assertEquals((await names(`${dir}/.cache/pronto/cue-mem`)).filter((n) => n.startsWith("folder-")), [], "a part of the vet does not set its folder's largest");
+  assertEquals(await Deno.readTextFile(`${dir}/.cache/pronto/cue-mem/${await learnedName(dir)}.cores`), "5\n", "a part of the vet does not teach its key's cores");
 });

@@ -28,23 +28,15 @@ the same wrapper at its root (`cue`, with `cue-budget/slot.ts`); the two claim o
   evaluation's peak the last time, a quarter more, learned per repository, folder and arguments in
   `~/.cache/pronto/cue-mem` (24 GB the first time, `CUE_UNKNOWN_GB`); one that held under 1 GB
   (`CUE_DIRECT_GB`) and every command that evaluates nothing (`fmt`, `mod`, `version`) runs at
-  once. The pool admits a memory claim while the claims held, the claims ahead and its own fit in
-  the machine's RAM but 32 GB (`STACK_MEM_RESERVE`, or `STACK_MEM_BUDGET`), and while the memory
-  available, less what admitted claims do not hold yet, leaves 8 GB (`STACK_MEM_HEADROOM`); the
-  first is admitted on an empty budget whatever it needs, so a spec larger than the budget still
-  runs, alone. While it runs, its holder records its resident memory every second and raises its
-  claim to it. A cue claims the cue lock only, one at a time (memory is a lock, not a budget), and
-  holds nothing while it waits; its cores are bounded, not claimed: `GOMAXPROCS` is set (unless set) to
-  a cap, the cores it kept busy on average the last time (CPU seconds over wall seconds), learned beside the peak
-  (`<id>.cores`, written by slot.ts's `--cores-learn`, or from `time` for one run at once), rounded up to
-  half a core and at least 1. One never seen gets the largest of its folder (`folder-<id>.cores`), else 4
-  (`CUE_UNKNOWN_CORES`); never more than 7 (`CUE_MAX_CORES`) or the budget. Claiming those cores in the
-  pool's weight too (e8e3226, PRONTO-761) is reverted (PRONTO-838): a local cue waited for room in the
-  budget while runner jobs, admitted outside it, held more than all of it. One that kept 2 cores busy for 30 CPU
-  seconds is claimed even when it held under 1 GB. Inside a gate, a rehearsal or a stack (a live
-  holder above it in the process tree, or named by `STACK_JOB` / `STACK_SLOT`) it is admitted at
-  once, never waiting on its own holder. It
-  does not wait for a release (memory counts the release's holders too, and its tickets are ahead).
+  once. A cue claims the cue lock only: one evaluation at a time on the machine, first come first
+  served, and it holds nothing while it waits. While it runs, its holder records its resident
+  memory every second for its next claim. Its cores are bounded, not claimed: `GOMAXPROCS` is set,
+  unless already set, to 7 (`CUE_MAX_CORES`) or the budget, whichever is smaller. Claiming cores in
+  the pool's weight too (e8e3226, PRONTO-761) is reverted (PRONTO-838): a local cue waited for room
+  in the budget while runner jobs, admitted outside it, held more than all of it. One that kept 2
+  cores busy for 30 CPU seconds is claimed even when it held under 1 GB. Inside a gate, a rehearsal
+  or a stack (a live holder above it in the process tree, or named by `STACK_JOB` / `STACK_SLOT`) it
+  waits only for the lock, never for its holder's cores.
   `CUE_BUDGET=off` skips the budget for one command.
 - **Only what changed is vetted** (`vetted.ts`). Every app's lint runs `cue vet -c ./...`, and the
   same CUE used to be evaluated again in each worktree's gate, on each ci runner that checked the pull
