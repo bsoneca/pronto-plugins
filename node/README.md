@@ -30,7 +30,7 @@ Write it into an app, byte for byte, with:
 ```
 
 which writes `node/{release,render,runtime,build,tunnel,push,registry,rollback,restore}.nu` and `node/schema/node.cue` into
-each app and merges a `release@k8s` rule into its `.say.json` (priority -1, stop: the same mechanism as the
+each app and merges a `release@k8s` rule into its `.say.json` (verify@k8s is the runtime's own: it checks the app's public address) (priority -1, stop: the same mechanism as the
 gcp engine, so it runs before the runtime's own `k8s` rule and stops it). `build.nu` is `gcp/engine/build.nu`
 (a symlink here; the node engine reads only its `stamp`), two copies to compare. To change the engine: change `node/engine/`
 here, merge it, then in the app's repository move the pin to that merge and run `bin/pronto-node --engine`

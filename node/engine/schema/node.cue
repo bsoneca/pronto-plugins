@@ -125,7 +125,8 @@ import (
 	name: =~"^[a-z]([-a-z0-9]{0,28}[a-z0-9])?$"
 	// A pull request's or the rc's own copy of the app, in a namespace of its own beside the
 	// release's (`--preview=rc`, the engine passes `-t preview=<name>`).
-	preview: *"" | =~"^[a-z0-9]([-a-z0-9]{0,14}[a-z0-9])?$"
+	// Never `production`, and its host (below) never production's: a preview must not take the live host.
+	preview: *"" | (=~"^[a-z0-9]([-a-z0-9]{0,14}[a-z0-9])?$" & !="production")
 	// The kubectl context of the node, and how its API is reached: an ssh tunnel from the
 	// Mac, a free local port of the release's own to the node's 127.0.0.1:<remotePort>.
 	context: string & !=""
@@ -162,7 +163,9 @@ import (
 		production: string & !=""
 		[string]:   string
 	}
-	namespace: [if preview == "" {name}, "\(name)-\(preview)"][0]
+	// A preview named like a host of `hosts` that is production's own is refused (the conflict is the error).
+	_previewHostIsNotProduction: true & [if preview != "" if hosts[preview] != _|_ {hosts[preview] != hosts.production}, true][0]
+	namespace:                   [if preview == "" {name}, "\(name)-\(preview)"][0]
 	host: [
 		if preview == "" {hosts.production},
 		if hosts[preview] != _|_ {hosts[preview]},

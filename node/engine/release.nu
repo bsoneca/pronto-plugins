@@ -274,8 +274,11 @@ export def require-tools [tools: list<string>] {
 # --delete always, and for a release unless `adopt` says the release may take it (its Namespace object
 # then labels it).
 export def check-ownership [app: string, node: record, --adopt, --delete] {
-	let r = (^kubectl get namespace $node.namespace -o json | complete)
-	if $r.exit_code != 0 { return }
+	# Absent is a successful, empty answer; a failed read (timeout, denied, API down) is never taken for absent,
+	# since the write that follows would then change or delete a namespace whose owner was not looked at.
+	let r = (^kubectl get namespace $node.namespace --ignore-not-found -o json | complete)
+	if $r.exit_code != 0 { error make {msg: $"reading namespace ($node.namespace) failed, so its owner is unknown: ($r.stderr | str trim)"} }
+	if ($r.stdout | str trim | is-empty) { return }
 	let labels = ($r.stdout | from json | get metadata.labels? | default {})
 	let owned = (($labels | get -o "pronto.dev/release") == $app) and (($node.preview | is-empty) or (($labels | get -o "pronto.dev/preview") == $node.preview))
 	if $owned { return }
@@ -373,7 +376,11 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	let deployments = (of-kind $objects Deployment)
 	let jobs = (of-kind $objects Job)
 	# The database's image before this release moves it: the way back if the new one never serves.
-	let previous_image = (let r = (^kubectl get $"cluster.postgresql.cnpg.io/($app)-db" -n $ns -o json | complete); if $r.exit_code == 0 { $r.stdout | from json | get -o spec.imageName } else { null })
+	# Only a confirmed absence (an empty, successful answer) means no database to put back: a failed read stops the
+	# release before it changes anything.
+	let cluster_read = (^kubectl get $"cluster.postgresql.cnpg.io/($app)-db" -n $ns --ignore-not-found -o json | complete)
+	if $cluster_read.exit_code != 0 { error make {msg: $"reading the database cluster ($app)-db failed, so its image to put back is unknown: ($cluster_read.stderr | str trim)"} }
+	let previous_image = if ($cluster_read.stdout | str trim | is-empty) { null } else { $cluster_read.stdout | from json | get -o spec.imageName }
 	let before = (rollback revisions ($deployments | get metadata.name) $ns)
 	try {
 		print $"node: (stamp) applying manifests for ($app)"
@@ -383,7 +390,8 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		try { wait-primary $app $ns $db_image $node.waits.primary } catch {|e|
 			if $previous_image != null {
 				print -e $"node: (stamp) the database did not come up on the new image: putting back ($previous_image)"
-				^kubectl patch $"cluster.postgresql.cnpg.io/($app)-db" -n $ns --type merge -p ({spec: {imageName: $previous_image}} | to json --raw) | complete | ignore
+				let put = (^kubectl patch $"cluster.postgresql.cnpg.io/($app)-db" -n $ns --type merge -p ({spec: {imageName: $previous_image}} | to json --raw) | complete)
+				if $put.exit_code != 0 { error make {msg: $"($e.msg); putting back the database image ($previous_image) failed: ($put.stderr | str trim)"} }
 			}
 			error make {msg: $e.msg}
 		}

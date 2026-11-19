@@ -187,6 +187,8 @@ def main [] {
 	test_preflight_refuses_a_pin_nobody_validated
 	test_preflight_needs_its_tools
 	test_a_database_that_never_comes_up_gets_its_old_image_back
+	test_a_failed_read_is_never_taken_for_absent
+	test_a_failed_deployment_read_is_neither_unchanged_nor_changed
 	test_a_namespace_the_release_did_not_label_is_not_its_to_touch
 	test_rollback_goes_through_every_deployment
 	test_barman_and_gateway_api_versions_are_checked
@@ -274,7 +276,7 @@ def test_a_failed_rollout_undoes_only_the_changed_deployments [] {
 	assert (has $r.stderr "exceeded its progress deadline") $r.stderr
 	assert (has $r.stderr "rolled back aprende-crud, aprende-electric, aprende-auth") $r.stderr
 	let undone = (calls $w | where {|c| $c | str starts-with "rollout undo" })
-	assert equal $undone ["rollout undo deployment/aprende-crud -n aprende" "rollout undo deployment/aprende-electric -n aprende" "rollout undo deployment/aprende-auth -n aprende"]
+	assert equal $undone ["rollout undo deployment/aprende-crud -n aprende --to-revision=3" "rollout undo deployment/aprende-electric -n aprende --to-revision=3" "rollout undo deployment/aprende-auth -n aprende --to-revision=3"]
 	assert (not ((calls $w) | any {|c| $c | str contains "ConfigMap/pronto-release" })) "a failed release records nothing"
 	rm -rf $w.dir
 }
@@ -536,6 +538,55 @@ def test_a_database_that_never_comes_up_gets_its_old_image_back [] {
 	assert equal ($patch | length) 1
 	assert (has $patch.0 "imageName") 
 	assert (has $patch.0 "reg/aprende-database:17@sha256:old")
+	rm -rf $w.dir
+}
+
+def test_a_failed_read_is_never_taken_for_absent [] {
+	print "test a failed read of the namespace, the database or a Deployment aborts, and only an absent one is absent..."
+	let w = (sandbox)
+	# the namespace: absent passes, a failed read refuses before any delete
+	let absent = (in-world $w -c (script $w $"(inputs $w) check-ownership aprende $node"))
+	assert equal $absent.exit_code 0 $absent.stderr
+	"" | save -f ($w.state | path join read_fail_namespace)
+	let del = (in-world $w $release_nu --app $w.app --delete --preview rc)
+	assert ($del.exit_code != 0)
+	assert (has $del.stderr "reading namespace aprende-rc failed, so its owner is unknown") $del.stderr
+	assert equal (writes $w) []
+	rm -f ($w.state | path join read_fail_namespace)
+	# the database: a failed read stops the release before the Deployments
+	"" | save -f ($w.state | path join read_fail_cluster)
+	let c = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert ($c.exit_code != 0)
+	assert (has $c.stderr "reading the database cluster aprende-db failed") $c.stderr
+	assert (not ((writes $w) | any {|x| $x | str contains "Deployment/" })) "no Deployment was applied"
+	rm -f ($w.state | path join read_fail_cluster)
+	# a refused recovery patch is told with the startup error
+	rm -f ($w.state | path join calls.jsonl)
+	"reg/aprende-database:17@sha256:old" | save -f ($w.state | path join previous_image)
+	"" | save -f ($w.state | path join noprimary)
+	"" | save -f ($w.state | path join patch_fail)
+	let body = (with-node $w "upsert waits.primary 1" $"release-app $app_info $node $meta $compose $facts [] (pushed-json)")
+	let p = (in-world $w -c (script $w $body))
+	assert ($p.exit_code != 0)
+	assert (has $p.stderr "has no ready primary on") $p.stderr
+	assert (has $p.stderr "putting back the database image reg/aprende-database:17@sha256:old failed") $p.stderr
+	rm -rf $w.dir
+}
+
+def test_a_failed_deployment_read_is_neither_unchanged_nor_changed [] {
+	print "test a Deployment whose revision cannot be read is a rollback failure, one that is absent has revision 0..."
+	let w = (sandbox)
+	let r0 = (in-world $w -c (script $w $"use ($engine_dir | path join rollback.nu); rollback revision aprende-crud aprende"))
+	assert (has $r0.stdout "0") $r0.stdout
+	"3" | save -f ($w.state | path join revision aprende-electric)
+	"3" | save -f ($w.state | path join revision aprende-crud)
+	"aprende-crud" | save -f ($w.state | path join read_fail_deployment)
+	let e = (in-world $w -c (script $w $"use ($engine_dir | path join rollback.nu); rollback revision aprende-crud aprende"))
+	assert ($e.exit_code != 0) "a failed read is an error, not revision 0"
+	let u = (in-world $w -c (script $w $"use ($engine_dir | path join rollback.nu); rollback undo [{name: aprende-crud, revision: 3}, {name: aprende-electric, revision: 3}] aprende | to json --raw"))
+	assert equal $u.exit_code 0 $u.stderr
+	assert (has $u.stdout '"failed":[{"name":"aprende-crud"') $u.stdout
+	assert equal (calls $w | where {|c| $c | str starts-with "rollout undo" }) [] "nothing was undone: electric is unchanged, crud could not be read"
 	rm -rf $w.dir
 }
 

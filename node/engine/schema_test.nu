@@ -21,6 +21,7 @@ def main [] {
 	test_an_app_named_otherwise_is_refused
 	test_retiring_what_holds_state_is_refused
 	test_ssh_must_be_user_at_host
+	test_a_preview_cannot_take_the_production_host
 	print "\nAll node schema tests passed."
 }
 
@@ -68,4 +69,13 @@ def test_retiring_what_holds_state_is_refused [] {
 def test_ssh_must_be_user_at_host [] {
 	print "test api.ssh is user@host, never an option or a bare host..."
 	for e in [sshOption sshBareHost] { assert ((refused $e) | str contains "api.ssh") $e }
+}
+
+def test_a_preview_cannot_take_the_production_host [] {
+	print "test a preview named production, or on production's host, is refused; one with its own host is not..."
+	for e in [previewProduction previewOnProductionHost] {
+		assert (refused $e | str contains "preview") $e
+	}
+	let ok = (cue-in export ./node/engine/tests/refused -e previewOwnHost --out json)
+	assert equal $ok.exit_code 0 $ok.stderr
 }
