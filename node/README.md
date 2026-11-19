@@ -104,6 +104,11 @@ Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, previews' `--
 
 ### Known risks
 
+- A `RUN` step of a Dockerfile built on the operator's buildkitd runs without a process sandbox on the node's
+  network, so it can reach the node's loopback, including the registry, which has no authentication: it could
+  overwrite any image in it, other apps' included. Only trusted Dockerfiles (this repository's apps, reviewed by
+  ci) are built there; untrusted ones belong to the tenants' buildkitd, which cannot reach the registry. Base
+  images pinned by digest keep a compromised upstream out of it.
 - Registry garbage collection runs while the registry serves (it is not put in read-only mode). A push whose blobs
   are uploaded but whose manifest is not yet put when the collector runs loses those blobs, and its manifest then
   points at nothing: `prune` skips the collection while an upload is open, but a push between its last blob and its
