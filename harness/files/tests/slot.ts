@@ -292,12 +292,13 @@ export function segmentsFree(ipcs: string, limit: number): number {
   const used = ipcs.split("\n").filter((l) => l.trim().split(/\s+/)[0] === "m").length;
   return limit - used;
 }
+// A system tool's output, or null when it fails (`sysctl`, `ipcs`: what the image needs is held by its own check).
+const run = async (cmd: string, args: string[]) => {
+  const out = await new Deno.Command(cmd, { args, stdout: "piped", stderr: "null" }).output().catch(() => null);
+  return out?.success ? new TextDecoder().decode(out.stdout) : null;
+};
 async function freeSegments(): Promise<{ free: number; limit: number } | null> {
   if (Deno.build.os !== "darwin") return null;
-  const run = async (cmd: string, args: string[]) => {
-    const out = await new Deno.Command(cmd, { args, stdout: "piped", stderr: "null" }).output().catch(() => null);
-    return out?.success ? new TextDecoder().decode(out.stdout) : null;
-  };
   const limit = Number((await run("sysctl", ["-n", "kern.sysv.shmmni"]))?.trim());
   const ipcs = await run("ipcs", ["-m"]);
   return limit > 0 && ipcs !== null ? { free: segmentsFree(ipcs, limit), limit } : null;
@@ -305,8 +306,8 @@ async function freeSegments(): Promise<{ free: number; limit: number } | null> {
 // The share of the machine's memory still available (kern.memorystatus_level, %), on a Mac; null elsewhere or when unreadable.
 const freeMemoryPct = async (): Promise<number | null> => {
   if (Deno.build.os !== "darwin") return null;
-  const out = await new Deno.Command("sysctl", { args: ["-n", "kern.memorystatus_level"], stdout: "piped", stderr: "null" }).output().catch(() => null);
-  const n = out?.success ? Number(new TextDecoder().decode(out.stdout).trim()) : NaN;
+  const out = await run("sysctl", ["-n", "kern.memorystatus_level"]);
+  const n = out === null ? NaN : Number(out.trim());
   return Number.isFinite(n) ? n : null;
 };
 const holder = async (name: string) => Number(await Deno.readTextFile(`${pool}/${name}/pid`).catch(() => "0"));
