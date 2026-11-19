@@ -21,9 +21,12 @@ const exports = {
 	fresh-schema-runtime: "release-schema.nu"
 }
 
-# The upstream pronto versions this engine is validated against (contract_test.nu holds each one): a
-# release under another is refused in its preflight, so a pin moves here first.
-export const validated_pins = ["1.5.1", "1.7.0"]
+# The pronto runtimes (the tool an app's mise pins, which lags the module its CUE pins by a release) this
+# engine runs under. The last is the module contract_test.nu renders with; its runtime is the tool that
+# module's distribution config names, and the test holds that its release.nu and release-schema.nu are
+# the module's. 1.5.0, 1.5.1 and 1.6.0 carry the same two files. A release under another runtime is refused
+# in its preflight, so a pin moves here first.
+export const validated_pins = ["1.5.0", "1.5.1", "1.6.0", "1.7.0"]
 
 # The pronto runtime's directory: PRONTO_RUNTIME (the app's release rule sets it from mise), else mise's.
 export def dir []: nothing -> string {
