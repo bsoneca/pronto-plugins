@@ -532,14 +532,18 @@ export const parseLog = (text) => text.split("\x1e").map((r) => r.replace(/^\s*\
 export const patchIds = (text) => Object.fromEntries(text.split("\n").filter(Boolean).map((l) => l.trim().split(/\s+/)).map(([patch, sha]) => [sha, patch]));
 
 // The branch's commits (`branch`: [{sha, patch, body}]) that main (`main`: the same, since the merge base) holds no counterpart of:
-// a `(cherry picked from commit <sha>)` line naming it (cherry-pick -x), or an equal stable patch id. Those are fixes the next
-// release of main would lose.
-export const backported = (branch, main) => branch.filter((c) => !main.some((m) => (!!c.patch && m.patch === c.patch) || m.body.includes(`(cherry picked from commit ${c.sha})`)));
+// a `(cherry picked from commit <sha>)` line naming it (cherry-pick -x), an equal stable patch id, or, the ledger's rule
+// (bsoneca/pronto's .github/release-ledger.sh), a subject ending `(#n)` that a main commit's message answers with `Backport-of: #n`.
+// Those are fixes the next release of main would lose.
+export const backported = (branch, main) => branch.filter((c) => {
+  const n = (c.body ?? "").split("\n")[0].match(/\(#(\d+)\)\s*$/)?.[1];
+  return !main.some((m) => (!!c.patch && m.patch === c.patch) || m.body.includes(`(cherry picked from commit ${c.sha})`) || (!!n && new RegExp(`Backport-of: #${n}(?!\\d)`).test(m.body)));
+});
 
 // The held-backport outcome's reason: how many of the branch's commits are not on main, and which.
 export const backportWhy = (missing) => `${missing.length} commit${missing.length === 1 ? "" : "s"} not on main: ${missing.map((c) => `${c.sha.slice(0, 8)}${c.body ? ` ${c.body.split("\n")[0]}` : ""}`).join("; ")}`;
 
-// The commits (`shas`) of a held branch that did not arrive by a merged pull request into that branch: `pulls` is each commit's
+// The commits (`shas`, merge commits too) of a held branch that did not arrive by a merged pull request into that branch: `pulls` is each commit's
 // `gh api repos/<slug>/commits/<sha>/pulls`; a pull request counts when merged_at is set and its base.ref is the branch.
 export const unmerged = (shas, pulls, branch) => shas.filter((s) => !(pulls[s] ?? []).some((p) => !!p.merged_at && p.base?.ref === branch));
 
@@ -560,10 +564,16 @@ export const refusedTip = ({ descends, unmerged, migrations }) => {
 // `last`'s two commit fields for a run that ended `outcome` (spaced) on `commit`: the commit a failed run on main failed on (retry),
 // and the commit the run tried (behind). "-" for none: an abandoned run tried nothing main must stay behind, and a failure on a
 // held branch is not a failure of main.
+// A third: the held branch's tip that failed outside the rehearsal (no attempt), which waits the gap before it runs again (heldWait).
 export const lastFields = (outcome, commit, onBranch) => [
   outcome === "failed" && commit && !onBranch ? commit : "-",
   commit && !(outcome ?? "").startsWith("abandoned") && !(onBranch && outcome === "failed") ? commit : "-",
+  outcome === "failed" && commit && onBranch ? commit : "-",
 ];
+
+// Whether a held branch's tip waits: it is the one that failed outside the rehearsal at `at` (`lastTip`, from `last`), and the gap
+// (minutes) is not over. A new tip never waits.
+export const heldWait = (lastTip, tip, now, at, gap) => !!tip && tip === lastTip && !due(now, at, gap);
 
 // What the lead is told when a fix merged to main waits on a held release.
 export const heldNotice = (branch) => `fixes merged to main do not release until ${branch} closes: \`abandon\` releases main again`;

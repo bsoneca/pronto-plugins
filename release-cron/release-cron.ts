@@ -31,7 +31,7 @@
 // the first green one releases from it (README.md, "Release branches"). `abandon` gives a held release up by hand.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { abandoned, attempted, backported, backportWhy, heldNotice, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, sshDropped, landed, verdict, releaseModes, rehearsalEnv, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
+import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, sshDropped, landed, verdict, releaseModes, rehearsalEnv, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 
 const here = new URL("./", import.meta.url).pathname;
@@ -168,7 +168,19 @@ const dropBranch = (branch: string, notify: Notify) => {
   } catch (e) { console.log(`release-cron: ${branch} not deleted: ${(e as Error).message.split("\n")[0]}`); return false; }
 };
 if (verb === "abandon") {
-  if (!open) { console.log(`${app}: no release branch held`); Deno.exit(0); }
+  if (!open) {
+    // No release is held, but a branch released and waiting for its commits on main (held-backport) is cleared by the lead's word:
+    // logged with the commits that were still missing, the branch deleted only when none was.
+    const rb = (() => { try { return JSON.parse(Deno.readTextFileSync(`${state}/released-branch`)) as { branch: string; tip: string }; } catch { return null; } })();
+    if (!rb) { console.log(`${app}: no release branch held`); Deno.exit(0); }
+    const missing = (() => { try { return missingOnMain(rb.tip); } catch (e) { return null; } })();
+    for (const f of ["released-branch", "backport-told"]) { try { Deno.removeSync(`${state}/${f}`); } catch { /* none */ } }
+    const l = line({ app, started: local(Date.now()), steps: {}, outcome: `cleared ${rb.branch}`, why: `by hand; ${missing === null ? "the commits missing from main could not be read" : missing.length ? `still missing from main: ${backportWhy(missing)}` : "every commit was on main"}` });
+    Deno.writeTextFileSync(`${state}/release-cron.log`, l + "\n", { append: true });
+    console.log(l);
+    if (missing && !missing.length) dropBranch(rb.branch, { kind: "none" });
+    Deno.exit(0);
+  }
   const pid = Number((() => { try { return Deno.readTextFileSync(`${state}/lock/pid`); } catch { return "0"; } })());
   if (pid && sh("kill", ["-0", String(pid)]).ok) throw new Error(`run ${pid} is going: abandon when it ends`);
   const branch = open.branch;
@@ -422,10 +434,9 @@ if (verb === "bisect") {
 // A held release (releaseCron.branches) takes its branch in main's place, for a run only.
 const override = Deno.env.get("RELEASE_CRON_REF");
 const ref = override ?? (open && verb === "run" ? `origin/${open.branch}` : "origin/main");
-// RELEASE_CRON_REF skips every branch rule (no cut, no attempt, no close), and a held release is run only by naming its own branch.
+// RELEASE_CRON_REF skips the cut, and a held release is run only by naming its own branch, which then runs as any held run.
 if (verb === "run" && override) {
   if (open && override !== `origin/${open.branch}` && override !== open.branch) throw new Error(`${open.branch} is held: RELEASE_CRON_REF=${override} would release past it; abandon it or name it`);
-  open = null;
 }
 // A run on a held release's branch (a failure there is not main's: no bisect, no failed commit in `last`).
 const heldRun = !!open && verb === "run";
@@ -606,7 +617,7 @@ try { Deno.mkdirSync(`${state}/lock`); } catch {
 }
 Deno.writeTextFileSync(`${state}/lock/pid`, String(Deno.pid));
 
-const [lastAt, lastGap, lastFailed, lastTried] = (() => { try { const [a, g, f, t] = Deno.readTextFileSync(`${state}/last`).trim().split(" "); return [Number(a), Number(g), f === "-" ? undefined : f, t === undefined ? (f === "-" ? undefined : f) : t === "-" ? undefined : t]; } catch { return [NaN, NaN, undefined, undefined]; } })();
+const [lastAt, lastGap, lastFailed, lastTried, lastHeldTip] = (() => { try { const [a, g, f, t, h] = Deno.readTextFileSync(`${state}/last`).trim().split(" "); return [Number(a), Number(g), f === "-" ? undefined : f, t === undefined ? (f === "-" ? undefined : f) : t === "-" ? undefined : t, h === "-" ? undefined : h]; } catch { return [NaN, NaN, undefined, undefined, undefined]; } })();
 
 // Not due: the wake ends here, with no line (it was no run). The gap is the config of the tree last
 // run, kept beside its end; the first run has none.
@@ -629,7 +640,8 @@ const [lastAt, lastGap, lastFailed, lastTried] = (() => { try { const [a, g, f, 
     const r = sh("git", ["ls-remote", "origin", `refs/heads/${open.branch}`], wt, {}, 60);
     const tip = r.ok ? r.out.split(/\s/)[0] || null : null;
     // A tip refused (below) is not run again until another is pushed.
-    if (!heldDue(open, tip) || tip === (() => { try { return Deno.readTextFileSync(`${state}/refused`).trim(); } catch { return ""; } })()) {
+    // A tip that failed outside the rehearsal (no attempt) waits the gap before it runs again; a new tip runs at once.
+    if (!heldDue(open, tip) || heldWait(lastHeldTip, tip, Date.now(), lastAt, Number.isNaN(lastGap) ? 60 : lastGap) || tip === (() => { try { return Deno.readTextFileSync(`${state}/refused`).trim(); } catch { return ""; } })()) {
       try { Deno.removeSync(`${state}/lock`, { recursive: true }); } catch { /* ours, just made */ }
       Deno.exit(0);
     }
@@ -781,7 +793,7 @@ try {
     const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], wt);
     const slug = must("git", ["--git-dir", repo, "remote", "get-url", "origin"]).replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1");
     const descends = sh("git", ["merge-base", "--is-ancestor", open.base, head], wt).ok;
-    const shas = must("git", ["rev-list", "--no-merges", `${open.base}..${head}`], wt).split("\n").filter(Boolean);
+    const shas = must("git", ["rev-list", `${open.base}..${head}`], wt).split("\n").filter(Boolean);
     const pulls: Record<string, { merged_at?: string; base?: { ref: string } }[]> = {};
     for (const sha of descends ? shas : []) {
       const r = sh("gh", ["api", `repos/${slug}/commits/${sha}/pulls`], undefined, {}, 120);
@@ -821,7 +833,9 @@ try {
   // says which. Once they all are, the branch is deleted from origin.
   const releasedBranch = (() => { try { return JSON.parse(Deno.readTextFileSync(`${state}/released-branch`)) as { branch: string; tip: string }; } catch { return null; } })();
   if (!open && !override && releasedBranch) {
-    const missing = missingOnMain(releasedBranch.tip);
+    // A fetch or git failure here is not a failed run: it ends skipped, and the next wake checks again.
+    let missing: { sha: string; body: string }[] = [];
+    try { missing = missingOnMain(releasedBranch.tip); } catch (e) { end("skipped", `the backport check of ${releasedBranch.branch} could not be made (${(e as Error).message.split("\n")[0]}): tried again next wake`); }
     if (missing.length) {
       const key = `${releasedBranch.branch} ${missing.map((c) => c.sha).join(" ")}`;
       const told = (() => { try { return Deno.readTextFileSync(`${state}/backport-told`).trim(); } catch { return ""; } })();

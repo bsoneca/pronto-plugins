@@ -139,12 +139,21 @@ cases: {
 		{call: "cron.refusedTip", args: [{descends: true, unmerged: ["abcdef012345"], migrations: ["m/1.sql"]}], expect: "1 commit not brought by a merged pull request into the branch: abcdef01; migrations changed (m/1.sql): migrations go to main only"},
 	]}
 	"last keeps main from being skipped as behind a branch, and a branch's failure out of main's retry": {suite: "cron", steps: [
-		{call: "cron.lastFields", args: ["failed", "c1", false], expect: ["c1", "c1"]},
-		{call: "cron.lastFields", args: ["released", "c1", false], expect: ["-", "c1"]},
-		{call: "cron.lastFields", args: ["abandoned release/x/1", "c1", true], expect: ["-", "-"], why: "the branch tip is not what main tried"},
-		{call: "cron.lastFields", args: ["abandoned release/x/1", null, false], expect: ["-", "-"]},
-		{call: "cron.lastFields", args: ["failed", "c1", true], expect: ["-", "-"], why: "a release or confirm failure on the branch"},
-		{call: "cron.lastFields", args: ["released", "c1", true], expect: ["-", "c1"]},
+		{call: "cron.lastFields", args: ["failed", "c1", false], expect: ["c1", "c1", "-"]},
+		{call: "cron.lastFields", args: ["released", "c1", false], expect: ["-", "c1", "-"]},
+		{call: "cron.lastFields", args: ["abandoned release/x/1", "c1", true], expect: ["-", "-", "-"], why: "the branch tip is not what main tried"},
+		{call: "cron.lastFields", args: ["abandoned release/x/1", null, false], expect: ["-", "-", "-"]},
+		{call: "cron.lastFields", args: ["failed", "c1", true], expect: ["-", "-", "c1"], why: "a release or confirm failure on the branch: its tip is kept to wait the gap"},
+		{call: "cron.lastFields", args: ["released", "c1", true], expect: ["-", "c1", "-"]},
+	]}
+	"a held tip that failed outside the rehearsal waits the gap, a new tip does not": {suite: "cron", steps: [
+		{call: "cron.heldWait", args: ["t1", "t1", 1000, 0, 60], expect: true, why: "the same tip inside the gap"},
+		{call: "cron.heldWait", args: ["t1", "t1", 3_600_000, 0, 60], expect: false, why: "the gap is over"},
+		{call: "cron.heldWait", args: ["t1", "t2", 1000, 0, 60], expect: false, why: "a pushed fix runs at once"},
+		{call: "cron.heldWait", args: [null, "t1", 1000, 0, 60], expect: false},
+	]}
+	"a branch commit is carried by the ledger's Backport-of line for its pull request": {suite: "cron", steps: [
+		{call: "cron.backported", args: [[{sha: "1", body: "fix the thing (#12)\n"}, {sha: "2", body: "other (#123)\n"}, {sha: "3", body: "no number\n"}], [{sha: "m", patch: "q", body: "fix the thing again (#40)\n\nBackport-of: #12\n"}]], expect: [{sha: "2", body: "other (#123)\n"}, {sha: "3", body: "no number\n"}], why: "#12 is answered; #123 is not #12"},
 	]}
 	"a held release says what a fix merged to main must do": {suite: "cron", steps: [
 		{call: "cron.heldNotice", args: ["release/x/1"], expect: "fixes merged to main do not release until release/x/1 closes: `abandon` releases main again"},

@@ -234,22 +234,26 @@ cherry pick fixes to main.") `abandonHours` (12) and `abandonAttempts` (2) are t
 Guards, each so a branch cannot lose or smuggle a change:
 
 - **Only red counts.** An attempt is a red verdict: the rehearsal, the android step or the preview failed. A failure of the release
-  step, the confirm, an ssh read or the slot records nothing, so the same tip runs again next wake.
-- **Trusted tips.** Before a new tip is rehearsed it must descend from the commit the branch was cut at, and every non-merge commit
-  past the cut must have come by a merged pull request into that branch (`gh api repos/<slug>/commits/<sha>/pulls`: `merged_at` set,
+  step, the confirm, an ssh read or the slot records nothing, so the same tip runs again once the gap is over (below).
+- **Trusted tips.** Before a new tip is rehearsed it must descend from the commit the branch was cut at, and every commit
+  past the cut, merge commits too, must have come by a merged pull request into that branch (`gh api repos/<slug>/commits/<sha>/pulls`: `merged_at` set,
   `base.ref` the branch). A tip that fails this is refused: logged and told as `held-refused`, no attempt, not run again until
   another tip is pushed (a pull-request read that fails is tried again next wake). A branch ruleset is the other half.
 - **No migrations.** A tip whose cut..tip changes a file under the app's `services/database/migrations/` is refused the same way:
   migrations go to main only.
-- **Nothing lost.** Every commit on a release branch must be cherry-picked to main (`git cherry-pick -x`), or an equal patch (`git patch-id --stable`) must be there.
+- **Nothing lost.** Every commit on a release branch must be cherry-picked to main (`git cherry-pick -x`), or an equal patch (`git patch-id --stable`) must be there, or, as bsoneca/pronto's ledger counts it, a main commit's message says
+  `Backport-of: #n` for a branch commit whose subject ends `(#n)`.
   After a branch releases, the next run that would release main first checks that every non-merge commit of the branch since the merge
   base has its counterpart on main; else it ends `held-backport <branch>` (no release, no gap used; told once per set of
-  missing commits) and tries again next wake. When all are there it deletes the branch from origin. An abandoned branch is deleted the
+  missing commits) and tries again next wake (a git or fetch failure in the check ends the run `skipped`, not `failed`). When all are there it deletes the branch from origin. An abandoned branch is deleted the
   same way only when everything on it past the cut is on main; otherwise it stays and the lead is told which commits need a cherry-pick.
+  `abandon` with no release held but a branch waiting on main (held-backport) clears it, logging which commits were still missing.
 - **While a release is held, main does not release.** A fix merged to main waits until the branch closes (released or abandoned);
   the held notice says so, and `release-cron.ts <app> abandon` is how the lead lets main release again.
-- **`RELEASE_CRON_REF`** skips all of this (no cut, no attempt, no close) and is refused while a release is held, unless it names the
-  held branch.
+- **`RELEASE_CRON_REF`** is refused while a release is held, unless it names the held branch, which then runs as any held run (it
+  skips only the cut: with no release held, no branch rule applies).
+- **A failure outside the rehearsal waits.** A held tip that fails in the release step, the confirm, an ssh read or the slot (no
+  attempt) waits the app's gap before it runs again; a new tip runs at once.
 
 bsoneca/pronto's ledger check, coming separately, holds the cherry-picks too. A pull request into a release branch fixes only: no
 features and no flag changes (a deploy never changes behaviour; a flag is flipped on main's own schedule), and no migrations. The
