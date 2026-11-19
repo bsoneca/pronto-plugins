@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+# A kubectl for the node engine's tests: logs every call (and the objects it was given on stdin) to
+# $FAKE_DIR/calls.jsonl and answers from state files in $FAKE_DIR, as a cluster would for the calls a
+# release makes. Nothing here reaches a cluster.
+#
+# State (all optional): namespaces/<ns> (exists), revision/<deployment> (an int; apply of a Deployment
+# bumps it), reject (a Kind that a server dry run refuses), job_fail, rollout_fail (a name),
+# bare (pods without daprd), operators.json (image tags by deployment), noprimary.
+import json, os, sys
+
+d = os.environ["FAKE_DIR"]
+args = sys.argv[1:]
+stdin = sys.stdin.read() if ("-f" in args and "-" in args) else ""
+os.makedirs(d + "/namespaces", exist_ok=True)
+os.makedirs(d + "/revision", exist_ok=True)
+
+def items(text):
+    text = text.strip()
+    if not text:
+        return []
+    if text.startswith("{"):
+        doc = json.loads(text)
+        return doc["items"] if doc.get("kind") == "List" else [doc]
+    # a YAML stream (upstream's): kind/name/namespace of each document by their first lines
+    import re
+    out = []
+    for doc in re.split(r"(?m)^---\s*$", text):
+        if not doc.strip():
+            continue
+        kind = re.search(r"(?m)^kind:\s*(\S+)", doc)
+        name = re.search(r"(?m)^  name:\s*(\S+)", doc)
+        ns = re.search(r"(?m)^  namespace:\s*(\S+)", doc)
+        out.append({"kind": kind.group(1) if kind else "", "metadata": {"name": name.group(1) if name else "", "namespace": ns.group(1) if ns else None}, "_yaml": True, "_raw": doc})
+    return out
+
+objs = items(stdin) if "-f" in args and "-" in args else []
+with open(d + "/calls.jsonl", "a") as f:
+    f.write(json.dumps({"args": args, "objects": [{"kind": o.get("kind"), "name": o.get("metadata", {}).get("name"), "namespace": o.get("metadata", {}).get("namespace")} for o in objs]}) + "\n")
+    if objs:
+        with open(d + "/last_objects.json", "w") as g:
+            json.dump(objs, g)
+
+def out(x):
+    print(json.dumps(x))
+    sys.exit(0)
+
+def fail(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+def opt(flag):
+    return args[args.index(flag) + 1] if flag in args else None
+
+def exists(path):
+    return os.path.exists(d + "/" + path)
+
+def read(path, default=""):
+    try:
+        return open(d + "/" + path).read().strip()
+    except FileNotFoundError:
+        return default
+
+verb = args[0] if args else ""
+ns = opt("-n")
+
+if verb == "config":
+    print("apiVersion: v1\nkind: Config\ncurrent-context: contabo2\n")
+    sys.exit(0)
+
+if verb == "apply":
+    dry = any(a.startswith("--dry-run") for a in args)
+    for o in objs:
+        if dry and o.get("kind") == read("reject"):
+            fail(f'Error from server: admission webhook denied the request: {o.get("kind")}/{o["metadata"]["name"]}')
+    if not dry:
+        for o in objs:
+            kind, name = o.get("kind"), o["metadata"]["name"]
+            if kind == "Namespace":
+                open(d + "/namespaces/" + name, "w").write("")
+            if kind == "Deployment" and name not in read("unchanged").split():
+                p = d + "/revision/" + name
+                rev = int(open(p).read()) if os.path.exists(p) else 0
+                open(p, "w").write(str(rev + 1))
+            if kind == "Cluster" and not o.get("_yaml"):
+                open(d + "/cluster_image", "w").write(o["spec"]["imageName"])
+            if kind == "Cluster" and o.get("_yaml"):
+                m = __import__("re").search(r"(?m)^  imageName:\s*(\S+)", o["_raw"])
+                if m:
+                    open(d + "/cluster_image", "w").write(m.group(1))
+    for o in objs:
+        print(f'{o.get("kind", "").lower()}/{o["metadata"]["name"]} configured')
+    sys.exit(0)
+
+if verb == "get":
+    what = args[1]
+    if what == "crd":
+        sys.exit(0)
+    if what == "namespace":
+        if exists("namespaces/" + args[2]):
+            sys.exit(0)
+        fail(f'Error from server (NotFound): namespaces "{args[2]}" not found')
+    if what == "gatewayclass":
+        out({"status": {"conditions": [{"type": "Accepted", "status": "True"}]}})
+    if what == "deployment":
+        name = args[2]
+        ops = {
+            "dapr-operator": "docker.io/daprio/operator:1.16.21",
+            "cnpg-controller-manager": "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1",
+            "external-secrets": "ghcr.io/external-secrets/external-secrets:v0.10.5",
+            "envoy-gateway": "docker.io/envoyproxy/gateway:v1.2.4"}
+        ops.update(json.loads(read("operators.json", "{}")))
+        if name in ops:
+            out({"spec": {"template": {"spec": {"containers": [{"image": ops[name]}]}}}})
+        if exists("revision/" + name):
+            out({"metadata": {"annotations": {"deployment.kubernetes.io/revision": read("revision/" + name)}}})
+        fail(f'Error from server (NotFound): deployments.apps "{name}" not found')
+    if what == "secret":
+        name = args[2]
+        if name.endswith("-auth-secrets"):
+            import base64
+            out({"data": {"PGRST_JWT_SECRET": base64.b64encode(b"s3cret-s3cret-s3cret-s3cret-s3cret").decode()}})
+        if exists("secrets/" + name):
+            out({"metadata": {"name": name}})
+        fail(f'Error from server (NotFound): secrets "{name}" not found')
+    if what == "pods":
+        sel = opt("-l") or ""
+        if "cnpg.io/instanceRole=primary" in sel:
+            if exists("noprimary"):
+                out({"items": []})
+            image = read("cluster_image", "none")
+            out({"items": [{"metadata": {"name": "db-1"}, "spec": {"containers": [{"name": "postgres", "image": image}]}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]})
+        # the daprd check
+        cs = [{"name": "app"}] + ([] if exists("bare") else [{"name": "daprd"}])
+        out({"items": [{"metadata": {"name": "p1"}, "spec": {"containers": cs}}]})
+    if what == "job":
+        name = args[2]
+        out({"status": {"failed": 1} if exists("job_fail") else {"succeeded": 1}})
+    if what.startswith("cluster.postgresql.cnpg.io"):
+        out({"status": {"managedRolesStatus": {"byStatus": {"reconciled": ["authenticator"], "pending-reconciliation": []}}}})
+    if what == "externalsecret":
+        sys.exit(0)
+    sys.exit(0)
+
+if verb == "rollout":
+    if args[1] == "undo":
+        # the Deployment is back on its earlier revision: its rollout no longer fails
+        if read("rollout_fail") == args[2].split("/")[-1]:
+            os.remove(d + "/rollout_fail")
+    if args[1] == "status":
+        target = args[2]
+        if exists("rollout_fail") and read("rollout_fail") == target.split("/")[-1]:
+            fail(f"error: deployment \"{target.split('/')[-1]}\" exceeded its progress deadline")
+    sys.exit(0)
+
+if verb == "logs":
+    print("fake log")
+    sys.exit(0)
+
+sys.exit(0)
