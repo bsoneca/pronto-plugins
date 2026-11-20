@@ -79,9 +79,12 @@ const staticAsset = /\.(js|mjs|css|html|json|wasm|svg|png|jpg|webp|ico|woff2?|gl
 // above the app (a tool pin, the root's files, `pronto/`, `../x` with no directory) concerns every scenario.
 export function outsideConcerns(f: string, reads: string[] = []): string | null {
   if (!f.startsWith("../")) return null;
+  const why = `${f.replace(/^(\.\.\/)+/, "")} is outside the app`;
+  // A sibling app's file, its documentation too: what the app reads of it is the app's to say (Studio's builder reads
+  // a sibling's brief.md, or its README.md, for the app card), so `reads` is asked before the documentation rule.
+  if (/^\.\.\/[^/.][^/]*\/./.test(f)) return reads.some((r) => new RegExp(r).test(f)) ? why : null;
   if (/\.md$/.test(f) || /^\.\.\/\.\.\/(docs|\.github)\//.test(f) || /^\.\.\/\.\.\/AGENTS\.md$/.test(f)) return null;
-  if (/^\.\.\/[^/.][^/]*\/./.test(f) && !reads.some((r) => new RegExp(r).test(f))) return null;
-  return `${f.replace(/^(\.\.\/)+/, "")} is outside the app`;
+  return why;
 }
 
 // The changed files that key the exact tree beside the app's own: those outside it that concern a scenario
