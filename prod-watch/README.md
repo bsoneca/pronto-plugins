@@ -156,7 +156,7 @@ parse **fails the run** before triage or any write. It is **no window**, and the
   a Cloud Run service the app also watches.
 
 The journal is read from `from - (tail + down + lead)` to `min(now, to + lead + down + tail)` for a report over
-`[from, to]` (`restartRange` in `watch.js`), so every stop whose window can touch an entry, and the crash
+`[from, to]` (`restartRange` in `watch.js`, with the cutoff as its `now`), so every stop whose window can touch an entry, and the crash
 evidence across that window, is read. A `journalctl` or `systemctl show` that fails stops the run with its
 stderr before the ledger, the cursor or `k3s.json` is written, so the next pass reads the window again.
 
@@ -171,12 +171,19 @@ set: a stop line may reach the journal after the pass read it, and its window re
 cursor is the source's own boundary, verbatim, when a read limit cut the pass short; only the lag or a hold gives an earlier one, in milliseconds
 (`settleRun`).
 
-The `NRestarts` read comes first, then the cutoff: the Mac's own clock after that read, rounded up to the whole second,
-used as the journal's `--until` and as the windows' `until`. So a crash the counter counted has its stop line before the
-cutoff, and none raises the counter while its lines wait for the next pass against an equal counter; a crash between the
-read and the cutoff shows in the journal without the counter, and the next pass's rise rejects its window. The node's
-clock is not read: a node clock that runs behind or ahead of the Mac's can place a window or a crash line off by the
-skew, a known limit.
+The `NRestarts` read comes first, then the cutoff, in one node command: `systemctl show`, then a wait on the node until
+its own clock passes the next whole second, then `CUTOFF=<epoch seconds>`. `cutoffOf` parses it (one line, a positive whole
+number, or the run fails) and the cutoff, in ms, is the journal's `--until`, the windows' `until` (`restartRange`'s `now`,
+a required finite number: it never defaults to the clock) and the lead hold's. It is a second the node has reached, at or
+after the counter read: a crash the counter counted has its stop line before the cutoff, so none raises the counter while
+its lines wait for the next pass against an equal counter; a crash between the read and the cutoff shows in the journal
+without the counter, and the next pass's rise rejects its window. The Mac's clock is not used, so a Mac clock ahead of the
+node's cannot put the cutoff in the node's future. The node's entries are read up to `to`: the lead hold starts at
+`min(to, cutoff) - lead` (`leadHold`'s `to`), so with `to` past the cutoff nothing newer than the cutoff minus `lead` is
+released.
+
+A loaded unit's `NRestarts` must be a complete non-negative integer (`counterOf`): missing, empty, `abc`, `-1` or `1.5`
+fails the run before triage or any write. A unit that is not loaded fails it already.
 
 A `k3s.json` whose `nRestarts` is there and is not a non-negative integer fails the run like a bad `voided`. A throw
 from either check keeps failing every pass until the bad line leaves the range read or the operator mends `k3s.json`.

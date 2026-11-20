@@ -424,10 +424,13 @@ export function k3sState(json) {
 }
 // The hold a cursor run keeps for what a restart not yet logged can still reach: a stop line may reach the journal
 // after the run's cutoff, and its lead (seconds) reaches back before it, so the node's entries from `until` - lead
-// are left to the next run too. Merged with restartPending's hold: the earlier of the two.
-/** @param {{hold?: {from: string} | null, until: string | number, lead: number}} input */
-export function leadHold({ hold = null, until, lead }) {
-  const at = (typeof until === "number" ? until : Date.parse(until)) - lead * 1000;
+// are left to the next run too. The node's entries are read up to `to` and the journal to `until`: the hold starts at the
+// earlier of the two (`to` omitted: `until`), so no entry newer than the cutoff minus lead is released when `to` lies past
+// the cutoff. Merged with restartPending's hold: the earlier of the two.
+/** @param {{hold?: {from: string} | null, until: string | number, to?: string | number | null, lead: number}} input */
+export function leadHold({ hold = null, until, to = null, lead }) {
+  const ms = (t) => (typeof t === "number" ? t : Date.parse(t));
+  const at = Math.min(ms(until), to == null ? Infinity : ms(to)) - lead * 1000;
   return hold && Date.parse(hold.from) <= at ? hold : { from: new Date(at).toISOString() };
 }
 /** @param {{voided?: {from: string, to: string}[], windows?: {from: string, to: string}[], restarts?: {was: number | null, now: number | null} | null, committed: string}} input */
@@ -534,12 +537,22 @@ export function restartPending({ journal = "", activeEnter = null, until = null 
   }
   return first === null ? null : { from: new Date(first - cfg.lead * 1000).toISOString() };
 }
-// The journal to read for a report over [from, to] (ISO times), at `now` (floored to the whole second, as the
-// journal's --until is): a window is [stop - lead, start + tail]
+// The cutoff the node printed after its `systemctl show` ("CUTOFF=<epoch seconds>", prod-watch.ts): a whole second the
+// node's clock had reached, read at or after the NRestarts, in ms. A missing, repeated or bad value is an error: a cutoff
+// guessed from another clock could place the journal's end before a crash the counter counted.
+/** @param {string} text */
+export function cutoffOf(text) {
+  const found = [...String(text).matchAll(/^CUTOFF=(.*)$/gm)].map((m) => m[1]);
+  if (found.length !== 1 || !/^\d{1,15}$/.test(found[0]) || Number(found[0]) <= 0) throw new Error(`the node printed no CUTOFF=<epoch seconds> (one line, a positive whole number): ${JSON.stringify(String(text).slice(0, 200))}`);
+  return Number(found[0]) * 1000;
+}
+// The journal to read for a report over [from, to] (ISO times), up to `now` (ms, required: the cutoff cutoffOf read from
+// the node, floored to the whole second as the journal's --until is): a window is [stop - lead, start + tail]
 // with start - stop <= down, so every stop whose window can touch an entry of the report lies in
 // [from - (tail + down), to + lead], and its crash evidence in [from - (tail + down + lead), to + lead + down + tail],
 // cut at now (the journal holds nothing later).
-export function restartRange(from, to, cfg, now = Date.now()) {
+export function restartRange(from, to, cfg, now) {
+  if (typeof now !== "number" || !Number.isFinite(now)) throw new Error(`restartRange needs the cutoff, a finite number of ms: ${JSON.stringify(now)}`);
   const ms = (s) => s * 1000;
   const whole = Math.floor(now / 1000) * 1000;
   return {
@@ -549,12 +562,20 @@ export function restartRange(from, to, cfg, now = Date.now()) {
 }
 // `systemctl show <unit> -p LoadState -p ActiveEnterTimestamp -p NRestarts` (TZ=UTC): whether the unit is
 // loaded (a unit that is not has no journal to trust), when it last became active, and how many times it
-// restarted by itself.
+// restarted by itself (null unless the line is a whole number: counterOf is the strict read).
 export function unitOf(text) {
   const at = text.match(/^ActiveEnterTimestamp=\S+ (\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d) UTC$/m);
-  const n = text.match(/^NRestarts=(\d+)/m);
+  const n = text.match(/^NRestarts=(\d+)$/m);
   const load = text.match(/^LoadState=(\S+)/m);
   return { loadState: load ? load[1] : null, activeEnter: at ? `${at[1]}T${at[2]}Z` : null, nRestarts: n ? Number(n[1]) : null };
+}
+// The NRestarts of a loaded unit: a complete non-negative integer, or an error. A counter that is missing, empty, or
+// not whole ("abc", "-1", "1.5") cannot be compared with the last run's, so the run fails before triage or any write.
+/** @param {string} text */
+export function counterOf(text) {
+  const m = String(text).match(/^NRestarts=(.*)$/m);
+  if (!m || !/^\d+$/.test(m[1])) throw new Error(`the unit's NRestarts is not a non-negative integer: ${JSON.stringify(m ? m[1] : null)}`);
+  return Number(m[1]);
 }
 const inRestart = (entry, windows) => {
   const at = Date.parse(entry.timestamp);

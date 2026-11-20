@@ -179,6 +179,32 @@ cases: {
 		{call: "watch.restartRange", args: ["2026-11-19T19:00:00.000Z", "2026-11-19T19:05:00.000Z", _restart, 1795115160000], expect: {since: "2026-11-19T18:52:55.000Z", until: "2026-11-19T19:06:00.000Z"}, why: "the journal holds nothing past now"},
 		{call: "watch.restartRange", args: ["2026-11-19T19:00:00.000Z", "2026-11-19T19:05:00.000Z", _restart & {lead: 10, tail: 60, down: 100}, 1893456000000], expect: {since: "2026-11-19T18:57:10.000Z", until: "2026-11-19T19:07:50.000Z"}, why: "follows the configured numbers"},
 	]}
+	"restartRange takes its now: a finite number of ms, never the clock's default": {suite: "noise", steps: [
+		{call: "watch.restartRange", args: ["2026-11-19T19:00:00.000Z", "2026-11-19T19:05:00.000Z", _restart], throws: "needs the cutoff", why: "no now: it does not read Date.now()"},
+		{call: "watch.restartRange", args: ["2026-11-19T19:00:00.000Z", "2026-11-19T19:05:00.000Z", _restart, null], throws: "needs the cutoff"},
+		{call: "watch.restartRange", args: ["2026-11-19T19:00:00.000Z", "2026-11-19T19:05:00.000Z", _restart, "1795115160000"], throws: "needs the cutoff", why: "a string is no number"},
+		{call: "watch.restartRange", args: ["2026-11-19T19:00:00.000Z", "2026-11-19T19:05:00.000Z", _restart, 1795115160000], expect: {since: "2026-11-19T18:52:55.000Z", until: "2026-11-19T19:06:00.000Z"}},
+	]}
+	"the node's cutoff is one line of whole seconds, in ms": {suite: "noise", steps: [
+		{call: "watch.cutoffOf", args: ["LoadState=loaded\nNRestarts=0\nCUTOFF=1795115160\n"], expect: 1795115160000},
+		{call: "watch.cutoffOf", args: ["NRestarts=0\n"], throws: "no CUTOFF", why: "missing"},
+		{call: "watch.cutoffOf", args: ["CUTOFF=\n"], throws: "no CUTOFF", why: "empty"},
+		{call: "watch.cutoffOf", args: ["CUTOFF=soon\n"], throws: "no CUTOFF", why: "not a number"},
+		{call: "watch.cutoffOf", args: ["CUTOFF=1795115160.5\n"], throws: "no CUTOFF", why: "not whole seconds"},
+		{call: "watch.cutoffOf", args: ["CUTOFF=-5\n"], throws: "no CUTOFF", why: "negative"},
+		{call: "watch.cutoffOf", args: ["CUTOFF=0\n"], throws: "no CUTOFF", why: "zero"},
+		{call: "watch.cutoffOf", args: ["CUTOFF=1795115160\nCUTOFF=1795115170\n"], throws: "no CUTOFF", why: "two lines say two things"},
+	]}
+	"a loaded unit's NRestarts is a whole non-negative number or the run fails": {suite: "noise", steps: [
+		{call: "watch.counterOf", args: ["LoadState=loaded\nNRestarts=3\n"], expect: 3},
+		{call: "watch.counterOf", args: ["NRestarts=0"], expect: 0, why: "zero is a counter"},
+		{call: "watch.counterOf", args: ["LoadState=loaded\nActiveEnterTimestamp=\n"], throws: "not a non-negative integer", why: "missing"},
+		{call: "watch.counterOf", args: ["NRestarts=\n"], throws: "not a non-negative integer", why: "empty"},
+		{call: "watch.counterOf", args: ["NRestarts=abc\n"], throws: "not a non-negative integer"},
+		{call: "watch.counterOf", args: ["NRestarts=-1\n"], throws: "not a non-negative integer"},
+		{call: "watch.counterOf", args: ["NRestarts=1.5\n"], throws: "not a non-negative integer"},
+		{call: "watch.unitOf", args: ["NRestarts=1.5\n"], expect: {loadState: null, activeEnter: null, nRestarts: null}, why: "unitOf never reads the front of a malformed counter as a number"},
+	]}
 	"a first run, a crash outside the window, a counter reset, two restarts, a crash in the lead margin, a start by ActiveEnterTimestamp alone": {suite: "noise", steps: [
 		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: null, restarts: {was: null, now: 0}, until: _done}, _restart], expect: [_window], why: "first run: no baseline for NRestarts, a clean restart is a window"},
 		{call: "watch.restartWindows", args: [{journal: _journal.outside, activeEnter: null, restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [_window], why: "a crash line ten minutes before the stop is not in the window"},
@@ -348,6 +374,11 @@ cases: {
 		{keep: "lead"},
 		{call: "watch.leadHold", args: [{hold: {from: "2026-11-19T19:02:00.000Z"}, until: "2026-11-19T19:10:00.000Z", lead: 5}], expect: {from: "2026-11-19T19:02:00.000Z"}, why: "an earlier restart hold stays"},
 		{call: "watch.leadHold", args: [{hold: {from: "2026-11-19T19:09:58.000Z"}, until: "2026-11-19T19:10:00.000Z", lead: 5}], expect: {from: "2026-11-19T19:09:55.000Z"}, why: "a later one gives way to the lead"},
+		{call: "watch.leadHold", args: [{hold: null, until: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:03.000Z", lead: 5}], expect: {from: "2026-11-19T19:09:55.000Z"}, why: "the cutoff is earlier than to: the cutoff - lead, so (cutoff - lead, to] is held"},
+		{call: "watch.leadHold", args: [{hold: null, until: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:09:58.000Z", lead: 5}], expect: {from: "2026-11-19T19:09:53.000Z"}, why: "to is earlier than the cutoff: the entries are read only to to"},
+		{call: "watch.leadHold", args: [{hold: null, until: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:03.000Z", lead: 5}], expect: {from: "2026-11-19T19:09:55.000Z"}},
+		{keep: "cut"},
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:09:54.000Z"}).out, (_n & {ts: "2026-11-19T19:09:57.000Z"}).out, (_n & {ts: "2026-11-19T19:10:02.000Z"}).out], hashes: ["h1", "h2", "h3"], hold: "$cut", reached: "2026-11-19T19:10:03.000Z", to: "2026-11-19T19:10:03.000Z", lag: 300000}], expect: {entries: [(_n & {ts: "2026-11-19T19:09:54.000Z"}).out], committed: "2026-11-19T19:05:03.000Z", seen: ["h1"]}, why: "the cutoff 19:10:00 is earlier than to 19:10:03: the entries at 19:09:57 and 19:10:02, newer than cutoff - lead, are held, not counted, not seen (h2, h3 out of seen); the one at 19:09:54 is counted"},
 		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:09:58.000Z"}).out], hashes: ["h1"], hold: "$lead", reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], expect: {entries: [], committed: "2026-11-19T19:05:00.000Z", seen: []}, why: "run 1: an apiserver line 2 s before the cutoff, no stop yet: held, not counted, not seen"},
 		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:09:58.000Z"}).out], hashes: ["h1"], hold: "$lead", since: true, reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {entries: [(_n & {ts: "2026-11-19T19:09:58.000Z"}).out]}, why: "a --since run holds nothing (the driver gives it no lead hold)"},
 		{call: "watch.restartWindows", args: [{journal: "2026-11-19T19:09:59.000995+00:00 host systemd[1]: Stopping k3s.service - x\n2026-11-19T19:10:10.000995+00:00 host systemd[1]: Started k3s.service - x", activeEnter: null, restarts: {was: 0, now: 0}, until: "2026-11-19T19:15:00Z"}, _restart], expect: [{from: "2026-11-19T19:09:54.000Z", to: "2026-11-19T19:12:10.000Z"}], why: "run 2: the stop, 1 s after the line"},
