@@ -130,3 +130,9 @@ sshPreviewBare: [if (#Cron & {watch: ["x"], probes: {}, target: {release: ["./r.
 noAndroid: [if _defaults.android == _|_ {"none"}, "some"][0] & "none"
 _android: #Cron & {watch: ["x"], probes: {}, android: command: ["sh", "-c", "./saytw integrate@android"]}
 androidDeclared: _android.android.command & ["sh", "-c", "./saytw integrate@android"]
+
+// Release branches are an app's opt-in: off, giving a held release up after 12 hours or 2 red attempts, each the app's to change.
+branchesDefault: _defaults.branches & {enabled: false, abandonHours: 12, abandonAttempts: 2}
+_branches: #Cron & {watch: ["x"], probes: {}, branches: {enabled: true, abandonHours: 6}}
+branchesOptIn: _branches.branches & {enabled: true, abandonHours: 6, abandonAttempts: 2}
+noBranchHours: [if (#Cron & {watch: ["x"], probes: {}, branches: abandonHours: 0}) == _|_ {"refused"}, "accepted"][0] & "refused"

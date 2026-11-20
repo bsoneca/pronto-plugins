@@ -19,9 +19,10 @@
 //   /tmp/pronto-stacks); STACK_SLOT=<n> asks for one by number (a command run under tests/slot.ts is
 //   given its slot there; a claim of its own for that number fails at once, naming the holder).
 //
-//   Weight. A holder declares its weight, a plain count: a launch ½ (it idles), a stack 1, a gate 3½
-//   (integrate@local with the few `slow` scenarios throttled: 3.5 cores on average, measured on
-//   2026-11-12 over three runners' process trees, its stack's readiness probes included), a rehearsal 6, a scenarios pass 6,
+//   Weight. A holder declares its weight, a plain count: a launch ½ (it idles), a stack 1, a gate 3
+//   (integrate@local with the few `slow` scenarios throttled: about 2.9 cores on average in a timed Bonk Chess run of
+//   2026-11-19, 3555 s of CPU over the 1225 s it held its claim with every scenario, and 2.25-2.6 per gate by app
+//   from the machine's busy cores against the live claims over 2026-11-08..19, PRONTO-841), a rehearsal 6, a scenarios pass 6,
 //   its Premium lane 2; STACK_WEIGHT=<n> or --weight <n> names another. The budget is fixed:
 //   STACK_BUDGET, else every core but STACK_RESERVE (3): 15 on an 18-core Mac. A claim is admitted
 //   when the weight held, the weight of every live ticket older than its own (they reserve their room)
@@ -314,7 +315,7 @@ const holder = async (name: string) => Number(await Deno.readTextFile(`${pool}/$
 // The weights a holder declares: a launch (idle between the clicks of whoever plays it: 0.32 core on
 // average, 0.53 at p90), a stack, a rehearsal, and each lane a rehearsal adds to its own
 // (tests/rehearse.ts), a scenarios pass's or Premium's.
-export const weights = { launch: 0.5, stack: 1, rehearsal: 6, pass: 6, premium: 2, gate: 3.5 };
+export const weights = { launch: 0.5, stack: 1, rehearsal: 6, pass: 6, premium: 2, gate: 3 };
 // What a command run under slot.ts weighs when STACK_WEIGHT names none: a launch, a stack, or, for an
 // integrate@local whose pages will run throttled, the stack and those pages (weights.pass). It mirrors
 // tests/slow.ts: SLOW named (not 0 or empty) throttles every scenario's pages, weights.pass; SLOW unset

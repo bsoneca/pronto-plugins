@@ -162,8 +162,8 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 	// Only asked once a step has kept this variable (`keep`, to a value that exists): a check of what
 	// a listing names runs once there is a listing, as in production before anyone has published.
 	ifKept?: string
-	// Asked only on the deployed app ("production") or only on a stack at hand ("local"): what a
-	// listing may be differs, a laptop's naming the stack's own address.
+	// Asked only on the deployed app ("production") or only on a stack at hand ("local", never a
+	// deployed preview): what a listing may be differs, a laptop's naming the stack's own address.
 	on?: "production" | "local"
 	_kind
 }

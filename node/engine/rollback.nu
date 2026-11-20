@@ -3,28 +3,37 @@
 # failed verify, `rollout undo` puts back only the Deployments the release changed. The database is
 # not rolled back (migrations go forward), nor a seed that was restated.
 
-# A Deployment's revision: 0 only where it is confirmed absent (a successful, empty answer), so a failed read
-# (timeout, denied) is an error and never a revision.
-export def revision [name: string, namespace: string]: nothing -> int {
+# A Deployment's state: {revision, generation}, both 0 only where it is confirmed absent (a successful, empty answer), so a
+# failed read (timeout, denied) is an error and never a state. The generation moves as soon as the API server accepts a
+# new template; the revision annotation follows when the controller has made its ReplicaSet.
+export def state [name: string, namespace: string]: nothing -> record<revision: int, generation: int> {
 	let r = (^kubectl get deployment $name -n $namespace --ignore-not-found -o json | complete)
 	if $r.exit_code != 0 { error make {msg: $"reading deployment/($name) in ($namespace) failed: ($r.stderr | str trim)"} }
-	if ($r.stdout | str trim | is-empty) { return 0 }
-	($r.stdout | from json | get metadata.annotations."deployment.kubernetes.io/revision"? | default "0" | into int)
+	if ($r.stdout | str trim | is-empty) { return {revision: 0, generation: 0} }
+	let d = ($r.stdout | from json)
+	{
+		revision: ($d | get metadata.annotations."deployment.kubernetes.io/revision"? | default "0" | into int)
+		generation: ($d | get metadata.generation? | default 0 | into int)
+	}
 }
 
-# Each of the namespace's Deployments with its revision now: {name, revision}.
-export def revisions [names: list<string>, namespace: string]: nothing -> table<name: string, revision: int> {
-	$names | each {|n| {name: $n, revision: (revision $n $namespace)} }
+export def revision [name: string, namespace: string]: nothing -> int { (state $name $namespace).revision }
+
+# Each of the namespace's Deployments with its state now: {name, revision, generation}.
+export def revisions [names: list<string>, namespace: string]: nothing -> table<name: string, revision: int, generation: int> {
+	$names | each {|n| {name: $n} | merge (state $n $namespace) }
 }
 
-# The Deployments whose revision moved since `before`, and existed before (a new one has none to go back to):
-# {changed: [{name, revision}], failed: [{name, why}]}, a Deployment whose revision cannot be read being a failure,
-# not unchanged and not changed.
+# The Deployments the release changed since `before`, and existed before (a new one has none to go back to): its revision
+# moved, or its generation did (a template accepted whose rollout the controller has not begun):
+# {changed: [{name, revision}], failed: [{name, why}]}, a Deployment whose state cannot be read being a failure, not
+# unchanged and not changed.
 export def changed [before: table, namespace: string]: nothing -> record {
 	let rows = ($before | where revision > 0 | each {|b|
 		try {
-			let now = (revision $b.name $namespace)
-			{name: $b.name, revision: $b.revision, moved: ($now != $b.revision), why: ""}
+			let now = (state $b.name $namespace)
+			let was_gen = ($b | get -o generation | default $now.generation)
+			{name: $b.name, revision: $b.revision, moved: (($now.revision != $b.revision) or ($now.generation != $was_gen)), why: ""}
 		} catch {|e| {name: $b.name, revision: $b.revision, moved: false, why: $e.msg} }
 	})
 	{changed: ($rows | where moved | select name revision), failed: ($rows | where why != "" | select name why)}
