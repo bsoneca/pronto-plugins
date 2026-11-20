@@ -961,7 +961,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       // Read only when it could admit (a local release holds, none waits); a failure is said in the wait line, with its cause.
       let loadError = "";
       const load = hold && releasing.length && !waitingRelease.length && !foreign
-        ? (() => { try { return Deno.loadavg()[0]; } catch (e) { loadError = (e as Error).message; return null; } })()
+        ? (() => { try { return Deno.loadavg()[0]; } catch (e) { loadError = e instanceof Error ? e.message : String(e); return null; } })()
         : null;
       const beside = hold && besideRelease(releasing.length, waitingRelease.length, load, holdLoad, !!foreign);
       const held_ = heldByRelease(hold, weight, release);

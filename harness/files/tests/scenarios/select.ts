@@ -72,8 +72,8 @@ const staticAsset = /\.(js|mjs|css|html|json|wasm|svg|png|jpg|webp|ico|woff2?|gl
 
 
 // Whether a changed file outside the app (`f` relative to it, `../…`) concerns a scenario: null when it
-// concerns none, else why it does (fail open). None: documentation, the repository's docs/ and .github/,
-// and any file of a sibling app, `../<other>/<path>` with exactly one `../` and a directory that is not
+// concerns none, else why it does (fail open). None: documentation outside a sibling app, the repository's
+// docs/ and .github/, and any file of a sibling app (its documentation too), `../<other>/<path>` with exactly one `../` and a directory that is not
 // hidden (apps/<other>/… from the top), unless `reads` (the app's `outside`, regular expressions as strings)
 // matches it: an app that reads its siblings (Studio's builder scans every apps/*) lists them. Anything else
 // above the app (a tool pin, the root's files, `pronto/`, `../x` with no directory) concerns every scenario.
