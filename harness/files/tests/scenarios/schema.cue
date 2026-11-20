@@ -68,12 +68,14 @@ loaded: {
 // effect on a scenario is the static assets it loads (`client`, path globs from the app's root), those
 // that only build a generated file judged in its turn (`derived`, prefixes), files no scenario can see
 // (`inert`, regular expressions) and files the app runs while a scenario does though the shared list
-// calls them inert (`live`, regular expressions).
+// calls them inert (`live`, regular expressions) and sibling apps' files the app reads (`outside`, regular
+// expressions of `../<other>/…` paths: Studio's builder scans every apps/*, PRONTO-870).
 select: {
 	client: [...string] | *[]
 	derived: [...string] | *[]
 	inert: [...string] | *[]
 	live: [...string] | *[]
+	outside: [...string] | *[]
 }
 // The stack's database, for a `database` step (POSTGRES_DB, where set, wins).
 database?: string
