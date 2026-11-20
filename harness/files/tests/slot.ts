@@ -161,6 +161,19 @@ const asked = Number(Deno.env.get("STACK_SLOT") ?? "0");
 // A value that is not a finite number above 0 is the default.
 const positive = (v: string | undefined, def: number) => { const n = v === undefined || v.trim() === "" ? NaN : Number(v); return Number.isFinite(n) && n > 0 ? n : def; };
 const cueMem = positive(Deno.env.get("CUE_MEM_GB"), 64);
+// The machine's one-minute load, as release-cron reads it. A failed read throws with its cause: a claim a release holds
+// keeps moving its deadline, so a read that failed every poll would hold it through the whole release (PRONTO-1020).
+export function load1(read: () => number[] = () => Deno.loadavg()): number {
+  let v: number | undefined;
+  try {
+    v = read()[0];
+  } catch (e) {
+    throw new Error(`load1 could not be read beside a release (Deno.loadavg): ${e instanceof Error ? e.message : String(e)}`, { cause: e });
+  }
+  if (!Number.isFinite(v)) throw new Error(`load1 could not be read beside a release (Deno.loadavg): no number, got ${v}`);
+  return v as number;
+}
+
 // The load1 under which a claim a release holds is admitted beside a running rehearsal: one per core (besideRelease).
 const holdLoad = positive(Deno.env.get("STACK_HOLD_LOAD"), navigator.hardwareConcurrency);
 const cueCores = positive(Deno.env.get("CUE_CORES"), Math.max(1, navigator.hardwareConcurrency - Number(Deno.env.get("STACK_RESERVE") ?? 3)));
@@ -958,11 +971,9 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       const hold = releaseHolds(holders.filter((h) => h.release).length + (foreign ? 1 : 0), waitingRelease.length ? 1 : 0);
       const blocker = releasing[0] ?? waitingRelease[0];
       // Room beside a running rehearsal: the machine's one-minute load, as release-cron reads it (Deno.loadavg).
-      // Read only when it could admit (a local release holds, none waits); a failure is said in the wait line, with its cause.
-      let loadError = "";
-      const load = hold && weight > 0 && !release && releasing.length && !waitingRelease.length && !foreign
-        ? (() => { try { return Deno.loadavg()[0]; } catch (e) { loadError = e instanceof Error ? e.message : String(e); return null; } })()
-        : null;
+      // Read only when it could admit (a local release holds, none waits). A failed read fails the claim, with its cause,
+      // through the ticket cleanup below: a held claim's deadline moves, so a read that kept failing would wait out the release.
+      const load = hold && weight > 0 && !release && releasing.length && !waitingRelease.length && !foreign ? load1() : null;
       // Only a weighted ordinary claim runs beside: a weight-0 one (a Studio preview inside its slot's work) is not held at
       // all, and keeps counting only the releases ahead of it.
       const beside = hold && weight > 0 && !release && besideRelease(releasing.length, waitingRelease.length, load, holdLoad, !!foreign);
@@ -994,7 +1005,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       // `ahead` counts the lock's line, `coresAhead` the cores': a weighted cue ticket at the lock's head still
       // moves while the cores' line drains (PRONTO-837).
       // Not the live load: the line is said again whenever it changes, and the load changes every poll.
-      const loadNote = releasing.length && !waitingRelease.length && !foreign ? ` (admitted beside it while load1 < ${holdLoad} and the weight fits: STACK_HOLD_LOAD${loadError ? `; load1 could not be read: ${loadError}` : ""})` : "";
+      const loadNote = releasing.length && !waitingRelease.length && !foreign ? ` (admitted beside it while load1 < ${holdLoad} and the weight fits: STACK_HOLD_LOAD)` : "";
       const why = (s: string) => ({ why: held_ ? `held: a release (${blocker.what}, pid ${blocker.pid}) ${releasing.length ? "holds the machine" : "waits for it"}${loadNote}: ${where}: ${s}` : `${where}: ${s}`, ahead: older.length, coresAhead: coresOlder.length, used, memHeld, held: held_ });
       if (line === "cue") {
         const memAhead = cueOlder.reduce((n, o) => n + o.mem, 0), coresAheadCue = cueOlder.reduce((n, o) => n + o.cores, 0);
