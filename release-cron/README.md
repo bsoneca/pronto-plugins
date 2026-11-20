@@ -165,6 +165,30 @@ run, stop it by hand (`kill <pid in <state>/lock/pid>`). An app's old `minutes` 
 launchd never starts a job while it's still running, and a lock (`<state>/lock`, with the
 run's pid) skips a run started by hand while another is going.
 
+## When the preview runs
+
+An app with a `target.preview` chooses `when` (the field of `preview`, default `"after"`):
+
+- `"after"` (the default): as above, once the rehearsal and the android step passed. A preview that fails has cost a full rehearsal first.
+- `"first"`: before the rehearsal takes its slot. A preview that fails ends the run `failed` (a red verdict, as any preview failure) and no
+  rehearsal was paid for.
+- `"beside"`: the preview starts when the rehearsal starts, and the two run at the same time, the first to fail stopping the other
+  (`besideOutcome` in `cron.js`):
+  - the preview fails first: the rehearsal's process group is stopped (TERM, then KILL after 300 s so `rehearse.ts` and integrate@k8s tear
+    down their stacks and cluster; a signal to the run gives 60 s; the rehearsal records `stopped`, which is no verdict) and the run ends
+    `failed`, `the release preview failed: ...; the rehearsal was stopped: nothing released`. That is no attempt and cuts no release branch,
+    and it is never bisected (it says nothing of a commit);
+  - the rehearsal fails first: the preview's `up` is never cancelled (stopping it would only kill the local ssh, leaving the remote
+    release running while `down` starts in the same worktree), so it runs to its end (Bonk Chess's `up` ends with the kill rehearsal, which
+    is acceptable); the waits and probes after it are skipped and `down` runs. A failed `down` is logged and added to the run's reason.
+    The run ends with the rehearsal's own reason, red or no verdict, bisected and branched as ever;
+  - both passed: the android step, then the release, once `git rev-parse HEAD` in the run's worktree is still the commit both started from
+    (else the run fails, nothing released). `"first"` makes the same check.
+
+  The run's lock covers both, so there is still one release per app. The record has one step for the overlap, `rehearse+preview` (their wall
+  time, so `report`'s sum counts it once), and `run.beside = {rehearse, preview, first}` (each one's seconds to its end, and which ended
+  first). `release-active` names the phase `rehearse+preview`.
+
 ## The release holds the machine
 
 While a run works it keeps `~/.cache/pronto/release-active` (`RELEASE_ACTIVE` names another), one
