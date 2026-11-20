@@ -49,7 +49,7 @@
 //
 //   A release holds the machine (PRONTO-894; the owner, 2026-11-19: "Gates wait"). While a claim made
 //   with STACK_PRIORITY=release and a weight above 0 holds or waits (its record says `prio=release`, its
-//   ticket `release=1`), every other claim with a weight above 0 waits, GitHub Actions jobs too (load was
+//   ticket `prio=release`), every other claim with a weight above 0 waits, GitHub Actions jobs too (load was
 //   90-131 on 2026-11-19 with a rehearsal and runner jobs at once). A waiting claim's STACK_WAIT_MINUTES
 //   deadline is reset while a release holds it, and its message names the release. Not held: weight-0
 //   claims (cue memory alone, watches) and nested claims. A release claim waits only for room beside the
@@ -340,8 +340,15 @@ const freeMemoryPct = async (): Promise<number | null> => {
 const releaseReal = async (pid: number, written: number) => {
   const hours = Number(Deno.env.get("STACK_RELEASE_HOLD_MAX") ?? 12);
   if (!releaseFresh(written, Date.now(), Number.isFinite(hours) ? hours : 12)) return false;
-  const r = await new Deno.Command("ps", { args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, stdout: "piped", stderr: "null" }).output().catch(() => undefined);
-  return startedBefore(Date.parse(new TextDecoder().decode(r?.stdout ?? new Uint8Array()).trim()) || 0, written);
+  let ps: { out: string; ok: boolean; error?: string };
+  try {
+    const r = await new Deno.Command("ps", { args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, stdout: "piped", stderr: "piped" }).output();
+    ps = { out: new TextDecoder().decode(r.stdout), ok: r.success, error: new TextDecoder().decode(r.stderr).trim() || undefined };
+  } catch (e) {
+    ps = { out: "", ok: false, error: `ps did not run: ${e instanceof Error ? e.message : e}` };
+  }
+  const started = psStart(ps, pid, await alive(pid));
+  return started !== null && startedBefore(started, written);
 };
 const holder = async (name: string) => Number(await Deno.readTextFile(`${pool}/${name}/pid`).catch(() => "0"));
 // The weights a holder declares: a launch (idle between the clicks of whoever plays it: 0.32 core on
@@ -431,6 +438,45 @@ export const releaseOf = (text: string, pid: number) => {
 // A release record or ticket is real only if its process started no later than the write (`started`, `written`:
 // ms since the epoch; a little slack for ps's whole seconds): a pid reused by another process started after it.
 export const startedBefore = (started: number, written: number) => started > 0 && started <= written + 2000;
+// When pid `pid` started (ms since the epoch), from what `ps -o lstart=` gave. null when the process has exited
+// (`alive` false: its record is stale, not a release). A live process whose start time cannot be read (ps did not
+// run, failed, or printed what is no date) throws, naming the pid and the cause: reading it as 0 would drop a live
+// release's hold and admit the work it holds back.
+export const psStart = (ps: { out: string; ok: boolean; error?: string }, pid: number, alive: boolean): number | null => {
+  const started = ps.ok ? Date.parse(ps.out.trim()) : NaN;
+  if (started > 0) return started;
+  if (!alive) return null;
+  throw new Error(`slot: release pid ${pid} is alive but its start time cannot be read: ${ps.error ?? (ps.ok ? `ps printed ${JSON.stringify(ps.out.trim())}` : "ps failed")}`);
+};
+// A ticket's text: "<weight>[ nested=1][ mem=<GB> cores=<n>] prio=<release|normal> <label>". The priority is a
+// fixed field of its own, written after the numbers and before the free-form label, and always written, so
+// no label can stand where it is read (a label "release ..." or "prio=release ..." follows `prio=normal`).
+// A ticket without it (a copy of this file from before) is ordinary, whatever its label says.
+export const ticketText = (t: { weight: number; nested: boolean; mem?: number; cores?: number; release: boolean; what: string }) =>
+  `${t.weight} ${t.nested ? "nested=1 " : ""}${t.mem !== undefined ? `mem=${t.mem} cores=${t.cores ?? 0} ` : ""}prio=${t.release ? "release" : "normal"} ${t.what}`;
+// What ticketText wrote. `release` is the marked priority alone: a release is real only with a weight above 0
+// (checked here) and a live process that started before the write (releaseReal).
+export const parseTicket = (text: string) => {
+  const [w, ...rest] = text.split(" ");
+  const nested = rest[0] === "nested=1";
+  const words = nested ? rest.slice(1) : rest;
+  const field = (key: string) => { const v = words[0]?.startsWith(`${key}=`) ? words[0].slice(key.length + 1) : undefined; if (v !== undefined && v !== "" && Number(v) >= 0) { words.shift(); return Number(v); } return undefined; };
+  const mem = field("mem"), cores = field("cores");
+  const prio = words[0] === "prio=release" || words[0] === "prio=normal" ? words.shift() : undefined;
+  const weight = w !== "" && Number(w) >= 0 ? Number(w) : weights.stack;
+  return { weight, nested, mem, cores, release: prio === "prio=release" && weight > 0, what: words.join(" ") };
+};
+// The cue tickets a cue claim reserves its memory and cores behind: every older one, but, for a release claim,
+// the older ordinary weighted ones: those wait for the release (it holds the machine), and it must not wait for
+// them (memory they reserve while waiting for it was a deadlock). Eligible release and nested tickets stay.
+export const cueAhead = <T extends { weighted: boolean; release: boolean }>(older: T[], release: boolean) =>
+  release ? older.filter((o) => !(o.weighted && !o.release)) : older;
+// A queue directory's entries; a directory not made yet (nobody has queued in the line) is empty, every other
+// failure to read it propagates: an unreadable queue is not an empty one, and work must not be admitted on it.
+export const readQueue = async (dir: string) => {
+  try { return await Array.fromAsync(Deno.readDir(dir)); }
+  catch (e) { if (e instanceof Deno.errors.NotFound) return [] as Deno.DirEntry[]; throw e; }
+};
 // A release holds for `hours` (STACK_RELEASE_HOLD_MAX) from its record's or ticket's write, then no longer.
 export const releaseFresh = (written: number, now: number, hours: number) => now - written <= hours * 3600_000;
 // The weight a claim waits behind: every older ticket's, but a release claim's, and any claim while a release
@@ -794,7 +840,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
   requireOwnDir(queue);
   requireOwnDir(coresQueue);
   const put = async (file: string, text: string) => { await Deno.writeTextFile(`${file}.${pid}.tmp`, text); await Deno.rename(`${file}.${pid}.tmp`, file); };
-  if (line !== "none") await put(`${queue}/${mine}`, `${weight} ${nested ? "nested=1 " : ""}${line === "cue" ? `mem=${mem} cores=${cores} ` : ""}${release ? "release=1 " : ""}${what}`);
+  if (line !== "none") await put(`${queue}/${mine}`, ticketText({ weight, nested, mem: line === "cue" ? mem : undefined, cores: line === "cue" ? cores : undefined, release, what }));
   const minutes = Number(Deno.env.get("STACK_WAIT_MINUTES") ?? 120);
   let end = Date.now() + minutes * 60_000, fewest = Infinity, fewestCores = Infinity, lightest = Infinity, leanest = Infinity;
   const warned = new Set<string>();
@@ -811,19 +857,15 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       // was queued; a release ticket whose process started after that, or that is too old, is not a release.
       const scan = async (dir: string) => {
         const found: { name: string; weight: number; mem: number; cores: number; what: string; weighted: boolean; release: boolean; pid: number }[] = [];
-        // A line nobody has queued in has no directory yet.
-        for (const e of await Array.fromAsync(Deno.readDir(dir)).catch(() => [] as Deno.DirEntry[])) {
+        // A line nobody has queued in has no directory yet (readQueue); any other failure to read it ends the claim.
+        for (const e of await readQueue(dir)) {
           const m = e.name.match(/^[0-9]+-([0-9]+)(?:-w)?$/);
           if (!m) continue;
           if (!await alive(Number(m[1]))) { await Deno.remove(`${dir}/${e.name}`).catch(() => {}); continue; }
-          const [w, ...rest] = (await Deno.readTextFile(`${dir}/${e.name}`).catch(() => "")).split(" ");
-          const isNested = rest[0] === "nested=1";
-          const words = isNested ? rest.slice(1) : rest;
+          const t = parseTicket(await Deno.readTextFile(`${dir}/${e.name}`).catch(() => ""));
           // A ticket without mem= (a copy from before the budget) reserves the whole budget; the cores' line's has none.
-          const field = (key: string) => { const v = words[0]?.startsWith(`${key}=`) ? words[0].slice(key.length + 1) : undefined; return v !== undefined && v !== "" && Number(v) >= 0 ? Number(words.shift()!.slice(key.length + 1)) : undefined; };
-          const tmem = field("mem"), tcores = field("cores");
-          const isRelease = words[0] === "release=1" && !!words.shift() && await releaseReal(Number(m[1]), Number(e.name.split("-")[0]));
-          found.push({ name: e.name, weight: w !== "" && Number(w) >= 0 ? Number(w) : weights.stack, mem: tmem ?? cueMem, cores: tcores ?? 0, what: words.join(" "), weighted: e.name.endsWith("-w"), release: isRelease, pid: Number(m[1]) });
+          const isRelease = t.release && await releaseReal(Number(m[1]), Number(e.name.split("-")[0]));
+          found.push({ name: e.name, weight: t.weight, mem: t.mem ?? cueMem, cores: t.cores ?? 0, what: t.what, weighted: e.name.endsWith("-w"), release: isRelease, pid: Number(m[1]) });
         }
         return found.sort((x, y) => x.name < y.name ? -1 : 1);
       };
@@ -880,10 +922,11 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       // beside the live holders and the tickets ahead): cue holders run side by side, so a claim that waits for
       // the budget reserves none, and one the budget admits holds its place on the cores' line, which is its
       // ticket's name, when it asked.
-      const cueFits = line === "cue" && memAdmits(memHeld, older.reduce((n, o) => n + o.mem, 0), mem, cueMem)
-        && memAdmits(coresHeld, older.reduce((n, o) => n + o.cores, 0), cores, cueCores);
+      const cueOlder = cueAhead(older, release);
+      const cueFits = line === "cue" && memAdmits(memHeld, cueOlder.reduce((n, o) => n + o.mem, 0), mem, cueMem)
+        && memAdmits(coresHeld, cueOlder.reduce((n, o) => n + o.cores, 0), cores, cueCores);
       if (dual) {
-        if (cueFits) await put(`${coresQueue}/${ticket}`, `${weight} ${release ? "release=1 " : ""}${what}`);
+        if (cueFits) await put(`${coresQueue}/${ticket}`, ticketText({ weight, nested: false, release, what }));
         else await Deno.remove(`${coresQueue}/${ticket}`).catch(() => {});
       }
       // The cores a dual ticket waits behind: its older tickets in the cores' line.
@@ -893,7 +936,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       // moves while the cores' line drains (PRONTO-837).
       const why = (s: string) => ({ why: held_ ? `held: a release (${blocker.what}, pid ${blocker.pid}) ${releasing.length ? "holds the machine" : "waits for it"}: ${where}: ${s}` : `${where}: ${s}`, ahead: older.length, coresAhead: coresOlder.length, used, memHeld, held: held_ });
       if (line === "cue") {
-        const memAhead = older.reduce((n, o) => n + o.mem, 0), coresAheadCue = older.reduce((n, o) => n + o.cores, 0);
+        const memAhead = cueOlder.reduce((n, o) => n + o.mem, 0), coresAheadCue = cueOlder.reduce((n, o) => n + o.cores, 0);
         if (!memAdmits(memHeld, memAhead, mem, cueMem)) {
           return why(`cue memory: ${round(memHeld)} of ${cueMem} GB held${memAhead ? `, ${round(memAhead)} reserved by those ahead` : ""}, this needs ${round(mem)} (CUE_MEM_GB)`);
         }
@@ -902,7 +945,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
         }
         const min = Number(Deno.env.get("CUE_MIN_FREE_PCT") ?? 20);
         const free = await freeMemoryPct();
-        if (vetoed(free, min, older.length === 0 && memHeld === 0)) return why(`the machine has ${free}% of its memory free, under ${min}% (CUE_MIN_FREE_PCT): waiting for it to recover`);
+        if (vetoed(free, min, cueOlder.length === 0 && memHeld === 0)) return why(`the machine has ${free}% of its memory free, under ${min}% (CUE_MIN_FREE_PCT): waiting for it to recover`);
         // A top-level cue's cores are the machine's, whoever runs it: an Actions job's too, or a runner's evaluation
         // would take cores the budget already gave away. A dual claim is never nested (a nested claim weighs 0).
         if (dual && !admitsCores(false, used, weight, ahead, budget, false, release, hold)) {
