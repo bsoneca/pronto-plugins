@@ -6,6 +6,8 @@
 // app's prod_watch.cue gives prodWatch its values.
 package prodwatch
 
+import "regexp"
+
 // An app opts in with `prodWatch: {...}` in its own package (prod_watch.cue): the release's
 // service and its apart sidecars are watched with no more said.
 prodWatch: #Watch
@@ -66,12 +68,13 @@ prodWatch: #Watch
 // since the last run. The journal is read from `tail + down + lead` before the report to
 // `lead + down + tail` after it, so these three numbers say how far.
 #Restart: {
-	// Regular expressions (JavaScript) on the journal's lines of the unit, from systemd itself.
-	stop:  string & !=""
-	start: string & !=""
-	crash: string & !=""
 	// The unit, as journalctl -u names it.
 	unit: =~"^[A-Za-z0-9_][A-Za-z0-9_.@-]*$"
+	// Regular expressions (JavaScript) on the journal's lines of the unit, from systemd itself; derived from
+	// `unit`, and overridable by an app whose journal words them otherwise.
+	stop:  *"systemd\\[1\\]: Stopping \(regexp.QuoteMeta(unit))\\.service" | (string & !="")
+	start: *"systemd\\[1\\]: Started \(regexp.QuoteMeta(unit))\\.service" | (string & !="")
+	crash: *"\(regexp.QuoteMeta(unit))\\.service: (Main process exited|Failed with result|Scheduled restart job)" | (string & !="")
 	lead: *5 | (int & >=0)
 	tail: *120 | (int & >=0)
 	down: *300 | (int & >0)

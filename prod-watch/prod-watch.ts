@@ -9,7 +9,7 @@
 //   deno run -A prod-watch/prod-watch.ts <app> mark <fp> open|watching|noise|fixed [--reason why] [--pr N]
 // `cue` from PATH or $CUE. The state (cursor.json, ledger.json) is <the repository's root>/.omc/prod-watch/<app>/,
 // runtime state no commit carries.
-import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, restartPending, restartRange, restartWindows, triage, unitOf } from "./watch.js";
+import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, restartBaseline, restartPending, restartRange, restartWindows, settleRun, triage, unitOf } from "./watch.js";
 
 // The app's folder: the one this script was written into (prod-watch/ is beside its files).
 const appDir = Deno.realPathSync(new URL("../", import.meta.url).pathname);
@@ -148,7 +148,7 @@ async function onNode(n: Node, script: string, stdin = ""): Promise<{ ok: boolea
 // and a window is taken only as far as that read (until). A read that fails stops the run before anything is
 // written, so the next run reads the window again. The unit is the schema's, held to letters and signs.
 let restartWins: { from: string; to: string }[] = [];
-let restartNow: number | null = null;
+let restartNext: number | null = null;
 let restartHold: { from: string } | null = null;
 if (node?.restart) {
   const r = node.restart;
@@ -161,10 +161,11 @@ if (node?.restart) {
   if (!j.ok || !u.ok) throw new Error(`the node's ${r.unit} restarts were not read (${(j.err || u.err).trim().slice(0, 300) || "no message"}): the ledger and the cursor are where they were`);
   const unit = unitOf(u.out);
   if (unit.loadState !== "loaded") throw new Error(`the node's ${r.unit} is not loaded (LoadState ${unit.loadState ?? "unread"}): the ledger and the cursor are where they were`);
-  restartNow = unit.nRestarts;
   const was = read("k3s.json", {}).nRestarts ?? null;
   restartWins = restartWindows({ journal: j.out, activeEnter: unit.activeEnter, restarts: { was, now: unit.nRestarts }, until: range.until }, r);
   restartHold = restartPending({ journal: j.out, activeEnter: unit.activeEnter, until: range.until }, r);
+  // While a restart is held the old counter stays, so the next run still sees a rise this one saw.
+  restartNext = restartBaseline({ was, now: unit.nRestarts, hold: restartHold });
 }
 const sources: { release?: { at: string; short: string; sha: string } | null; images: Record<string, string>; pods: number } = { images: {}, pods: 0 };
 if (node) {
@@ -223,26 +224,13 @@ entries = entries.filter((e) => Date.parse(e.timestamp) <= Date.parse(reached));
 const lag = 5 * 60e3;
 // The hash is of the entry as the source gave it, without the `source` tag, so a cursor's hashes stay valid.
 const hashOf = async (e: unknown) => [...new Uint8Array(await crypto.subtle.digest("SHA-1", new TextEncoder().encode(hashInput(e))))].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
-const hashes = new Map<unknown, string>();
-for (const e of entries) hashes.set(e, await hashOf(e));
-// A restart not finished at the cutoff (restartPending): the node's entries from its start are not triaged nor
-// counted, and the cursor stops there, so the next run reads them again with the window complete.
-if (restartHold) {
-  const held = Date.parse(restartHold.from);
-  entries = entries.filter((e) => {
-    const hold = e.source === "node" && Date.parse(e.timestamp) >= held;
-    if (hold) hashes.delete(e);
-    return !hold;
-  });
-}
-if (!since) {
-  const counted = new Set<string>(cursor?.seen ?? []);
-  entries = entries.filter((e) => !counted.has(hashes.get(e)!));
-}
-const committed = new Date(Math.min(
-  reached === to ? Date.parse(reached) - lag : Date.parse(reached),
-  restartHold ? Date.parse(restartHold.from) : Infinity,
-)).toISOString();
+const hashes: string[] = [];
+for (const e of entries) hashes.push(await hashOf(e));
+// A cursor run holds back a restart not finished at the cutoff (restartPending): the node's entries from its start
+// are not triaged nor counted, and the cursor stops there, so the next run reads them again with the window
+// complete. A `--since` run holds nothing back. What the run counts, commits and keeps in `seen` is settleRun's.
+const settled = settleRun({ entries, hashes, hold: restartHold, since: !!since, counted: cursor?.seen ?? [], reached, to, lag });
+entries = settled.entries;
 const { report, ledger: next } = triage(group(entries, rules, lifecycle, restartWins), ledger, reached);
 const where = [
   ...(services.length ? [`services ${services.join(", ")} (${project})`] : []),
@@ -255,7 +243,6 @@ else console.log(`${where}, released: ${released}${serving}\n` + render(report, 
 if (!since) {
   write("ledger.json", next);
   // The overlap is read again, so what it holds is what the next run must not count again.
-  const seen = [...hashes].filter(([e]) => Date.parse((e as { timestamp: string }).timestamp) > Date.parse(committed)).map(([, h]) => h);
-  write("cursor.json", { at: committed, seen });
-  if (restartNow !== null) write("k3s.json", { nRestarts: restartNow });
+  write("cursor.json", { at: settled.committed, seen: settled.seen });
+  if (restartNext !== null) write("k3s.json", { nRestarts: restartNext });
 }

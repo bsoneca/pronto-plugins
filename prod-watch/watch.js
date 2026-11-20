@@ -356,16 +356,15 @@ export function windowsOf(entries, lifecycle) {
   }
   return w;
 }
-// The phase an entry falls in, start or shutdown, or "": from two seconds before its instance's
-// marker to its seconds after.
-export function phaseOf(entry, windows, lifecycle) {
+// The phases an entry falls in, any of start and shutdown (from two seconds before its instance's marker to its
+// seconds after; the two can overlap when an instance is stopped as it starts), or none: a list.
+export function phasesOf(entry, windows, lifecycle) {
   const at = Date.parse(entry.timestamp);
   const mine = windows?.[entry.labels?.instanceId] ?? {};
-  for (const [phase, times] of Object.entries(mine)) {
+  return Object.entries(mine).filter(([phase, times]) => {
     const within = (lifecycle?.[phase]?.within ?? 0) * 1000;
-    if (times.some((t) => at >= Date.parse(t) - 2000 && at - Date.parse(t) <= within)) return phase;
-  }
-  return "";
+    return times.some((t) => at >= Date.parse(t) - 2000 && at - Date.parse(t) <= within);
+  }).map(([phase]) => phase);
 }
 // The node's deliberate k3s restarts (prodWatch.node.restart), from what systemd says of the unit: its
 // journal's lines (journalctl -u <unit> _PID=1 --utc -o short-iso-precise) and `systemctl show` (TZ=UTC) for its
@@ -391,6 +390,43 @@ export function restartWindows({ journal = "", activeEnter = null, restarts = nu
     out.push({ from: new Date(from).toISOString(), to: new Date(to).toISOString() });
   }
   return out;
+}
+// What NRestarts the next run compares with: this run's, unless a restart is pending (restartPending): the run
+// that meets a rise while it holds its entries back must leave the old counter, or the next run, which reads
+// those entries again, would find no rise and judge the window deliberate. Null: nothing to write.
+/** @param {{was?: number | null, now?: number | null, hold?: {from: string} | null}} input */
+export const restartBaseline = ({ was = null, now = null, hold = null }) => (hold ? was : now);
+// A time (ISO, Z) as whole seconds and its fraction padded to nanoseconds, so sources of any precision compare exactly.
+const instant = (s) => {
+  const m = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z$/.exec(s);
+  return m ? [Date.parse(`${m[1]}Z`), (m[2] ?? "").padEnd(9, "0")] : [Date.parse(s), "000000000"];
+};
+// Whether time a is strictly after time b, to the nanosecond.
+export const timeAfter = (a, b) => { const [x, fx] = instant(a), [y, fy] = instant(b); return x !== y ? x > y : fx > fy; };
+// What a cursor run counts and commits (prod-watch.ts). `hashes` is each entry's hash (a list, in the entries' order), `counted` the
+// hashes the last cursor holds (`seen`), `reached` where the sources were read to (`to`, or earlier when a limit
+// cut one short), `lag` ms. A cursor run holds back the node's entries from `hold.from` (restartPending): not
+// counted, the cursor stops there, and their hashes stay out of `seen` unless an earlier run already counted
+// them. A `since` run (a window only looked at) holds nothing back and counts what it reads. The cursor is
+// `reached` as the source wrote it (any precision) unless the lag or a hold gives an earlier time, in ms.
+/** @param {{entries: any[], hashes: string[], hold?: {from: string} | null, since?: boolean, counted?: Iterable<string>, reached: string, to: string, lag: number}} input */
+export function settleRun({ entries, hashes, hold = null, since = false, counted = [], reached, to, lag }) {
+  const known = new Set(counted);
+  const kept = new Map(entries.map((e, i) => [e, hashes[i]]));
+  const held = hold && !since ? Date.parse(hold.from) : null;
+  let rest = entries;
+  if (held !== null) {
+    rest = rest.filter((e) => {
+      if (!(e.source === "node" && Date.parse(e.timestamp) >= held)) return true;
+      if (!known.has(kept.get(e))) kept.delete(e);
+      return false;
+    });
+  }
+  if (!since) rest = rest.filter((e) => !known.has(kept.get(e)));
+  const boundary = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
+  const committed = held !== null && held <= Date.parse(boundary) ? hold.from : boundary;
+  const seen = [...kept].filter(([e]) => timeAfter(e.timestamp, committed)).map(([, h]) => h);
+  return { entries: rest, committed, seen };
 }
 // What an entry is hashed as (prod-watch.ts's cursor keeps the hashes of what it counted): the entry as its source
 // gave it, without the `source` tag the driver adds, so a cursor written before the tag still matches.
@@ -479,7 +515,7 @@ export function group(entries, rules, lifecycle = {}, restart = []) {
   const windows = windowsOf(entries, lifecycle);
   for (const e of stitch(entries)) {
     if (isMarker(e, lifecycle)) continue;
-    const phases = [phaseOf(e, windows, lifecycle), ...(e.source === "node" && inRestart(e, restart) ? ["restart"] : [])];
+    const phases = [...phasesOf(e, windows, lifecycle), ...(e.source === "node" && inRestart(e, restart) ? ["restart"] : [])];
     const noise = noiseOf(e, rules, phases);
     const key = keyOf(e) + (noise ? `|noise ${noise}` : "");
     const fp = fingerprint(key);
