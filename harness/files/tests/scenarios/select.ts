@@ -72,16 +72,19 @@ const staticAsset = /\.(js|mjs|css|html|json|wasm|svg|png|jpg|webp|ico|woff2?|gl
 
 
 // Whether a changed file outside the app (`f` relative to it, `../…`) concerns a scenario: null when it
-// concerns none, else why it does (fail open). None: documentation, the repository's docs/ and .github/,
-// and any file of a sibling app, `../<other>/<path>` with exactly one `../` and a directory that is not
+// concerns none, else why it does (fail open). None: documentation outside a sibling app, the repository's
+// docs/ and .github/, and any file of a sibling app (its documentation too), `../<other>/<path>` with exactly one `../` and a directory that is not
 // hidden (apps/<other>/… from the top), unless `reads` (the app's `outside`, regular expressions as strings)
 // matches it: an app that reads its siblings (Studio's builder scans every apps/*) lists them. Anything else
 // above the app (a tool pin, the root's files, `pronto/`, `../x` with no directory) concerns every scenario.
 export function outsideConcerns(f: string, reads: string[] = []): string | null {
   if (!f.startsWith("../")) return null;
+  const why = `${f.replace(/^(\.\.\/)+/, "")} is outside the app`;
+  // A sibling app's file, its documentation too: what the app reads of it is the app's to say (Studio's builder reads
+  // a sibling's brief.md, or its README.md, for the app card), so `reads` is asked before the documentation rule.
+  if (/^\.\.\/[^/.][^/]*\/./.test(f)) return reads.some((r) => new RegExp(r).test(f)) ? why : null;
   if (/\.md$/.test(f) || /^\.\.\/\.\.\/(docs|\.github)\//.test(f) || /^\.\.\/\.\.\/AGENTS\.md$/.test(f)) return null;
-  if (/^\.\.\/[^/.][^/]*\/./.test(f) && !reads.some((r) => new RegExp(r).test(f))) return null;
-  return `${f.replace(/^(\.\.\/)+/, "")} is outside the app`;
+  return why;
 }
 
 // The changed files that key the exact tree beside the app's own: those outside it that concern a scenario

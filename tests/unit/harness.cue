@@ -105,7 +105,10 @@ cases: "an app that reads its siblings lists them, and those fail open again": {
 	steps: [
 		{call: "harness.outsideConcerns", args: ["../studio/builder/x.ts", ["^\\.\\./[^/]+/"]], expect: "studio/builder/x.ts is outside the app", why: "Studio's builder scans every apps/*"},
 		{call: "harness.outsideConcerns", args: ["../other/x.ts", ["^\\.\\./brawl-chess/"]], expect: null, why: "a pattern that does not match the sibling"},
-		{call: "harness.outsideConcerns", args: ["../other/README.md", ["^\\.\\./[^/]+/"]], expect: null, why: "documentation is still nothing"},
+		{call: "harness.outsideConcerns", args: ["../other/README.md", ["^\\.\\./[^/]+/"]], expect: "other/README.md is outside the app", why: "a sibling's documentation the app reads is its input: Studio's builder falls back to README.md for the app card"},
+		{call: "harness.outsideConcerns", args: ["../brawl-chess/brief.md", ["^\\.\\./[^/]+/"]], expect: "brawl-chess/brief.md is outside the app", why: "Studio's builder reads a sibling's brief.md for its app card: the opt-in is asked before the documentation rule"},
+		{call: "harness.outsideConcerns", args: ["../brawl-chess/brief.md"], expect: null, why: "without the opt-in a sibling's brief is nothing"},
+		{call: "harness.outsideConcerns", args: ["../../docs/queue.md", ["^\\.\\./[^/]+/"]], expect: null, why: "the repository's documentation is no sibling's, opt-in or not"},
 	]
 }
 

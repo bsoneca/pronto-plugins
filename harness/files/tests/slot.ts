@@ -958,8 +958,14 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       const hold = releaseHolds(holders.filter((h) => h.release).length + (foreign ? 1 : 0), waitingRelease.length ? 1 : 0);
       const blocker = releasing[0] ?? waitingRelease[0];
       // Room beside a running rehearsal: the machine's one-minute load, as release-cron reads it (Deno.loadavg).
-      const load = (() => { try { return Deno.loadavg()[0]; } catch { return null; } })();
-      const beside = hold && besideRelease(releasing.length, waitingRelease.length, load, holdLoad, !!foreign);
+      // Read only when it could admit (a local release holds, none waits); a failure is said in the wait line, with its cause.
+      let loadError = "";
+      const load = hold && weight > 0 && !release && releasing.length && !waitingRelease.length && !foreign
+        ? (() => { try { return Deno.loadavg()[0]; } catch (e) { loadError = e instanceof Error ? e.message : String(e); return null; } })()
+        : null;
+      // Only a weighted ordinary claim runs beside: a weight-0 one (a Studio preview inside its slot's work) is not held at
+      // all, and keeps counting only the releases ahead of it.
+      const beside = hold && weight > 0 && !release && besideRelease(releasing.length, waitingRelease.length, load, holdLoad, !!foreign);
       const held_ = heldByRelease(hold, weight, release);
       const memHeld = holders.reduce((n, h) => n + h.mem, 0), coresHeld = holders.reduce((n, h) => n + h.cores, 0);
       // The tickets this claim waits behind, in order, nested or not: all of the older ones but a weighted cue
@@ -988,7 +994,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       // `ahead` counts the lock's line, `coresAhead` the cores': a weighted cue ticket at the lock's head still
       // moves while the cores' line drains (PRONTO-837).
       // Not the live load: the line is said again whenever it changes, and the load changes every poll.
-      const loadNote = releasing.length && !waitingRelease.length && !foreign ? ` (admitted beside it while load1 < ${holdLoad} and the weight fits: STACK_HOLD_LOAD)` : "";
+      const loadNote = releasing.length && !waitingRelease.length && !foreign ? ` (admitted beside it while load1 < ${holdLoad} and the weight fits: STACK_HOLD_LOAD${loadError ? `; load1 could not be read: ${loadError}` : ""})` : "";
       const why = (s: string) => ({ why: held_ ? `held: a release (${blocker.what}, pid ${blocker.pid}) ${releasing.length ? "holds the machine" : "waits for it"}${loadNote}: ${where}: ${s}` : `${where}: ${s}`, ahead: older.length, coresAhead: coresOlder.length, used, memHeld, held: held_ });
       if (line === "cue") {
         const memAhead = cueOlder.reduce((n, o) => n + o.mem, 0), coresAheadCue = cueOlder.reduce((n, o) => n + o.cores, 0);
