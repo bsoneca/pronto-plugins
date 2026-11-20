@@ -129,6 +129,7 @@ export class Plane implements Board {
   createIssue = (project: string, fields: NewIssue) => this.call("POST", `${this.p(project)}/issues/`, fields) as Promise<Issue>;
   private updateIssue = (project: string, id: string, fields: Record<string, unknown>) => this.call("PATCH", `${this.p(project)}/issues/${id}/`, fields) as Promise<Issue>;
   moveIssue = (project: string, id: string, state: string) => this.updateIssue(project, id, { state });
+  setLabels = (project: string, id: string, labels: string[]) => this.updateIssue(project, id, { labels });
   describe = (project: string, id: string, html: string) => this.updateIssue(project, id, { description_html: html });
   comment = (project: string, id: string, html: string) => this.call("POST", `${this.p(project)}/issues/${id}/comments/`, { comment_html: html });
   comments = async (project: string, id: string): Promise<Comment[]> =>

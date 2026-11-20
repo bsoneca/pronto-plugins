@@ -83,6 +83,8 @@ export interface Board {
   createIssue(project: string, fields: NewIssue): Promise<Issue>;
   /** Moves an issue to a state, by the state's id. */
   moveIssue(project: string, id: string, state: string): Promise<Issue>;
+  /** Replaces an issue's labels, by the labels' ids; a board that cannot leaves it out. */
+  setLabels?(project: string, id: string, labels: string[]): Promise<unknown>;
   /** Replaces an issue's description (HTML). */
   describe(project: string, id: string, html: string): Promise<Issue>;
   comment(project: string, id: string, html: string): Promise<unknown>;
