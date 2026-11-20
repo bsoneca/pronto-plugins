@@ -9,7 +9,7 @@
 //   deno run -A prod-watch/prod-watch.ts <app> mark <fp> open|watching|noise|fixed [--reason why] [--pr N]
 // `cue` from PATH or $CUE. The state (cursor.json, ledger.json) is <the repository's root>/.omc/prod-watch/<app>/,
 // runtime state no commit carries.
-import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, restartBaseline, restartPending, restartRange, restartWindows, settleRun, triage, unitOf } from "./watch.js";
+import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, restartBaseline, restartPending, restartRange, restartWindows, settleRun, timeAfter, triage, unitOf } from "./watch.js";
 
 // The app's folder: the one this script was written into (prod-watch/ is beside its files).
 const appDir = Deno.realPathSync(new URL("../", import.meta.url).pathname);
@@ -119,7 +119,7 @@ if (services.length) {
     // Cut at the limit: the entries of the last timestamp may go on past it, and the next query reads
     // strictly after the cursor, so they are left for it whole: the cursor is the timestamp before.
     const last = entries[entries.length - 1].timestamp;
-    entries = entries.filter((e) => e.timestamp < last);
+    entries = entries.filter((e) => timeAfter(last, e.timestamp));
     if (!entries.length) throw new Error(`${limit} entries share the timestamp ${last}: narrow the window (--since) to read them`);
     reached = entries[entries.length - 1].timestamp;
   }
@@ -216,7 +216,7 @@ if (node) {
 
 // Each source read up to its own limit: the window ends at the earliest cutoff, for both, and what lies
 // past it is the next run's.
-entries = entries.filter((e) => Date.parse(e.timestamp) <= Date.parse(reached));
+entries = entries.filter((e) => !timeAfter(e.timestamp, reached));
 // A line can reach its source after the run that asked for its window (Vector's buffer, Cloud Logging's
 // ingestion) with a timestamp before the cursor. So a run that read to now commits its cursor a lag behind
 // it, and the next one reads that overlap again: the entries it already counted, kept by hash in the cursor,

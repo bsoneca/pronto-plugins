@@ -393,9 +393,10 @@ export function restartWindows({ journal = "", activeEnter = null, restarts = nu
 }
 // What NRestarts the next run compares with: this run's, unless a restart is pending (restartPending): the run
 // that meets a rise while it holds its entries back must leave the old counter, or the next run, which reads
-// those entries again, would find no rise and judge the window deliberate. Null: nothing to write.
+// those entries again, would find no rise and judge the window deliberate. A reset (systemd zeroes NRestarts on a
+// deliberate restart) lowers it: keeping the old, higher counter would hide a later crash. Null: nothing to write.
 /** @param {{was?: number | null, now?: number | null, hold?: {from: string} | null}} input */
-export const restartBaseline = ({ was = null, now = null, hold = null }) => (hold ? was : now);
+export const restartBaseline = ({ was = null, now = null, hold = null }) => (hold ? (was != null && now != null ? Math.min(was, now) : was) : now);
 // A time (ISO, Z) as whole seconds and its fraction padded to nanoseconds, so sources of any precision compare exactly.
 const instant = (s) => {
   const m = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z$/.exec(s);
@@ -425,7 +426,8 @@ export function settleRun({ entries, hashes, hold = null, since = false, counted
   if (!since) rest = rest.filter((e) => !known.has(kept.get(e)));
   const boundary = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
   const committed = held !== null && held <= Date.parse(boundary) ? hold.from : boundary;
-  const seen = [...kept].filter(([e]) => timeAfter(e.timestamp, committed)).map(([, h]) => h);
+  // In ms: a node's timestamps are cut to ms and the next read starts inclusive at the cursor, so the cursor's own ms is read again.
+  const seen = [...kept].filter(([e]) => Date.parse(e.timestamp) >= Date.parse(committed)).map(([, h]) => h);
   return { entries: rest, committed, seen };
 }
 // What an entry is hashed as (prod-watch.ts's cursor keeps the hashes of what it counted): the entry as its source

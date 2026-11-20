@@ -220,6 +220,7 @@ cases: {
 		{keep: "baseline"},
 		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: "$baseline", now: 6}, until: _done}, _restart], expect: [], why: "run 2: the window is complete, and the rise is still a rise: its entries alert"},
 		{call: "watch.restartBaseline", args: [{was: 5, now: 6, hold: null}], expect: 6, why: "with nothing held the counter moves on"},
+		{call: "watch.restartBaseline", args: [{was: 5, now: 0, hold: {from: "2026-11-19T18:59:49.000Z"}}], expect: 0, why: "a reset lowers it: a later crash making it 1 stays a rise"},
 		{call: "watch.restartBaseline", args: [{was: null, now: 6, hold: {from: "2026-11-19T18:59:49.000Z"}}], expect: null, why: "no earlier counter: none is written"},
 	]}
 	"a --since run holds nothing back and counts what it reads": {suite: "noise", steps: [
@@ -238,8 +239,9 @@ cases: {
 		}, why: "h2 was never counted, so the next run counts it; h3 was, so it stays known"},
 	]}
 	"the cursor is the source's own boundary when a limit cut the read, and no hold or lag gives an earlier one": {suite: "noise", steps: [
-		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:00:05.100000Z"}).out, (_n & {ts: "2026-11-19T19:00:05.123456Z"}).out], hashes: ["h1", "h2"], reached: "2026-11-19T19:00:05.123456Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:00:05.123456Z", seen: []}, why: "verbatim, to the microsecond; nothing is after it"},
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:00:05.100000Z"}).out, (_n & {ts: "2026-11-19T19:00:05.123456Z"}).out], hashes: ["h1", "h2"], reached: "2026-11-19T19:00:05.123456Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:00:05.123456Z", seen: ["h2"]}, why: "verbatim, to the microsecond; the entry in the cursor's own millisecond is read again (the next read starts inclusive), so its hash is kept"},
 		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:05:00.000500Z"}).out, (_n & {ts: "2026-11-19T19:04:59.999999Z"}).out], hashes: ["h1", "h2"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:05:00.000Z", seen: ["h1"]}, why: "a read to now commits to - lag in ms; an entry 0.5 ms after it is still read again, so its hash is kept"},
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:05:00.000Z"}).out], hashes: ["h1"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:05:00.000Z", seen: ["h1"]}, why: "a node entry (ms) at the cursor's millisecond is read again, so its hash is kept"},
 		{call: "watch.settleRun", args: [{entries: [], hashes: [], hold: {from: "2026-11-19T19:08:00.000Z"}, reached: "2026-11-19T19:05:00.123456Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:05:00.123456Z"}, why: "a hold later than the boundary does not move it"},
 		{call: "watch.settleRun", args: [{entries: [], hashes: [], hold: {from: "2026-11-19T19:02:00.000Z"}, reached: "2026-11-19T19:05:00.123456Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:02:00.000Z"}, why: "a hold earlier than it does"},
 		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.123456Z", "2026-11-19T19:00:05.123Z"], expect: true},
