@@ -190,6 +190,45 @@ export def store-put [at: record, text: string, meta: record, from: string]: not
 	$gen
 }
 
+const flags_dir = path self .
+
+# A push from a checkout older than the one the app's repo pins can drop flags the release still reads (PRONTO-680).
+# The repo pins a commit of this plugin in .github/flags.pin (40 hex characters); a write from a checkout that does
+# not contain it is refused, before anything is read or written. No pin file: no check.
+def pin-guard [app: path] {
+	let top = (do { ^git -C $app rev-parse --show-toplevel } | complete)
+	if $top.exit_code != 0 { return }
+	let repo = ($top.stdout | str trim)
+	let file = ($repo | path join .github flags.pin)
+	if not ($file | path exists) { return }
+	let pin = (open --raw $file | str trim)
+	if not ($pin =~ '^[0-9a-f]{40}$') { error make {msg: $"flags: ($file) must hold one commit, 40 hex characters"} }
+	let root = ($flags_dir | path join .. | path expand)
+	let s = ($pin | str substring 0..<9)
+	let head = (do { ^git -C $root rev-parse --short HEAD } | complete)
+	let refuse = {|why: string|
+		let h = if $head.exit_code == 0 { $head.stdout | str trim } else { "no HEAD" }
+		error make {msg: $"flags: this pronto-flags \(($root) at ($h)\) cannot write for ($repo): ($why). ($repo)/.github/flags.pin pins ($s), and a push from a checkout without it can turn off flags the release still reads \(PRONTO-680\). Run the repo's pinned entry point \(in pronto: tools/flags/pronto-flags\), or bring this checkout to ($s)."}
+	}
+	if $head.exit_code != 0 { do $refuse $"($root) is not a git checkout" }
+	mut r = (do { ^git -C $root merge-base --is-ancestor $pin HEAD } | complete)
+	mut fetched = ""
+	if $r.exit_code == 128 {
+		# Unknown here. A full clone has nothing more to fetch; a shallow one lacks history below its boundary.
+		let shallow = (do { ^git -C $root rev-parse --is-shallow-repository } | complete | get stdout | str trim)
+		if $shallow == "true" {
+			let f = (with-env {GIT_TERMINAL_PROMPT: "0"} { do { ^git -C $root fetch -q --unshallow origin } | complete })
+			$fetched = ($f.stderr | str trim)
+			$r = (do { ^git -C $root merge-base --is-ancestor $pin HEAD } | complete)
+			if $r.exit_code == 128 { do $refuse $"the pinned commit ($s) is unknown here and at origin: ($fetched)" }
+		} else {
+			do $refuse $"the pinned commit ($s) is unknown here \(a full clone: fetch origin first\)"
+		}
+	}
+	if $r.exit_code == 1 { do $refuse $"this checkout does not contain the pinned commit ($s) \(older, or on a branch without it\)" }
+	if $r.exit_code != 0 { do $refuse $"git could not compare this checkout with ($s): ($r.stderr | str trim)" }
+}
+
 # Who pushed, and from which commit: kept on each version, which history shows. A directory store
 # needs no gcloud: the account where one is installed, else the login name.
 def provenance [app: path, at: record] {
@@ -200,7 +239,12 @@ def provenance [app: path, at: record] {
 	let commit = (do { cd $app; ^git rev-parse --short HEAD } | complete | get stdout | str trim)
 	# Any of the app's CUE: a flag's value may come from another spec (pronto-billing's grants, say).
 	let dirty = (do { cd $app; ^git status --porcelain -- '*.cue' } | complete | get stdout | str trim)
-	{who: $who, commit: ($commit + (if ($dirty | is-empty) { "" } else { "+edits" }))}
+	# The pronto-flags checkout that writes: which version of this plugin wrote the version (PRONTO-718).
+	let proot = ($flags_dir | path join .. | path expand)
+	let pc = (do { ^git -C $proot rev-parse --short HEAD } | complete | get stdout | str trim)
+	let pdirty = (do { ^git -C $proot status --porcelain --untracked-files=no } | complete | get stdout | str trim)
+	let plugin = ($pc + (if ($pdirty | is-empty) { "" } else { "+edits" }))
+	{who: $who, commit: ($commit + (if ($dirty | is-empty) { "" } else { "+edits" })), plugin: $plugin}
 }
 
 # The flags written where else a flagd reads them (flagsLive.mirrors): a release@k8s node's ConfigMap,
@@ -305,12 +349,12 @@ def commit [at: record, app: path, text: string, meta: record, from: string, --d
 	let names = if $old == null { "" } else { ($changes | each {|c| $c.flag }) | append (defs-between $old ($text | from json)) | uniq | str join "+" }
 	let meta = if $derive_flag and ($meta.flag? | default "" | is-empty) and $names != "" { $meta | upsert flag $names } else { $meta }
 	let p = (provenance $app $at)
-	let gen = (store-put $at $text ({pushed-by: $p.who, commit: $p.commit} | merge $meta) $from)
+	let gen = (store-put $at $text ({pushed-by: $p.who, commit: $p.commit, plugin: $p.plugin} | merge $meta) $from)
 	mirror $at $text
 	database $at $app $text
 	let line = {
 		at: (now-utc), event: "flags.write", app: ($app | path expand | path basename), target: $at.url, version: $gen, from: $from
-		stage: ($meta.stage? | default ""), flag: (if $names != "" { $names } else { $meta.flag? | default "" }), who: $p.who, commit: $p.commit
+		stage: ($meta.stage? | default ""), flag: (if $names != "" { $names } else { $meta.flag? | default "" }), who: $p.who, commit: $p.commit, plugin: $p.plugin
 		cases: ($meta.cases? | default ""), note: ($meta.note? | default ""), changes: $changes
 		kept: ($meta.kept? | default ""), dropped: ($meta.dropped? | default "")
 	} | to json -r
@@ -529,6 +573,7 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 #      needs a tester's account, which a flip no longer has: it is listed and not run.
 # A flag turned off (default now false) runs no cases: it returns to the path before it, and its cases test it on.
 export def push [app: path, --untested: string, --no-canary: string, --expect: string, --flip: list<string> = [], --drop: list<string> = []] {
+	pin-guard $app
 	let at = (live $app)
 	if (target-guard $at $expect) { show $app --flip $flip --drop $drop; print "flags: dry run: nothing written"; return }
 	let spec = (cue-of $app flagd.document)
@@ -578,7 +623,6 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 
 # The dev flow's board, where the app's repository keeps one (its devflow/devflow.cue; devflow/README.md): the
 # issues whose flag went on for everyone are Done, those whose flag went off are Live again. Never fails the push.
-const flags_dir = path self .
 def tell-board [at: record, app: path, on: list<string>, off: list<string>] {
 	if (is-dir $at) { return }
 	try {
@@ -624,7 +668,7 @@ def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: rec
 export def history [app: path, --changes] {
 	let at = (live $app)
 	let rows = (store-versions $at
-	| each {|o| {version: $o.generation, at: $o.timeCreated, live: ($o.timeDeleted? == null), by: ($o.metadata?.pushed-by? | default ""), commit: ($o.metadata?.commit? | default ""), stage: ($o.metadata?.stage? | default ""), flag: ($o.metadata?.flag? | default ""), cases: ($o.metadata?.cases? | default ""), note: ($o.metadata?.note? | default "")}}
+	| each {|o| {version: $o.generation, at: $o.timeCreated, live: ($o.timeDeleted? == null), by: ($o.metadata?.pushed-by? | default ""), commit: ($o.metadata?.commit? | default ""), plugin: ($o.metadata?.plugin? | default ""), stage: ($o.metadata?.stage? | default ""), flag: ($o.metadata?.flag? | default ""), cases: ($o.metadata?.cases? | default ""), note: ($o.metadata?.note? | default "")}}
 	| sort-by {|v| $v.version | into int } --reverse)
 	if not $changes { return $rows }
 	let docs = ($rows | reverse | each {|r| try { store-version $at $r.version | from json } catch { null } })
@@ -639,6 +683,7 @@ export def history [app: path, --changes] {
 # image bakes), with the commit and the time, as released.json beside the live object. Run from the tree released
 # (release-cron, once production serves it); a tree with CUE edits is refused, since it is no commit's.
 export def released [app: path, --expect: string] {
+	pin-guard $app
 	let at = (live $app)
 	target-guard $at $expect | ignore
 	refuse-write $"the release record at (record-url $at)"
@@ -658,6 +703,7 @@ export def released [app: path, --expect: string] {
 # The version before the live one, or the one named, written again as the newest:
 # a rollback is itself a version, which a rollback undoes.
 export def rollback [app: path, version?: string, --expect: string] {
+	pin-guard $app
 	let at = (live $app)
 	if (target-guard $at $expect) { show $app; print "flags: dry run: nothing written"; return }
 	let all = (history $app)
@@ -677,6 +723,7 @@ export def rollback [app: path, version?: string, --expect: string] {
 # service it runs in; and the first push, which flagd needs before a release
 # names the object (flagd stops at start on a source it cannot read).
 export def setup [app: path, --expect: string] {
+	pin-guard $app
 	let at = (live $app)
 	if (target-guard $at $expect) { show $app; print "flags: dry run: nothing written"; return }
 	if (is-dir $at) {
@@ -771,7 +818,7 @@ def army-drop [at: record, army: string, aud: string, expect: any]: nothing -> i
 # Every write is journalled as the flags' are (journal-file), one JSON line.
 def army-journal [app: path, at: record, stage: string, armies: list<string>, cases: string, note: string] {
 	let p = (provenance $app (if $at.local { {dir: "local"} } else { {} }))
-	let line = {at: (now-utc), event: "armies.write", app: ($app | path expand | path basename), target: $at.target, stage: $stage, armies: ($armies | str join "+"), who: $p.who, commit: $p.commit, cases: $cases, note: $note} | to json -r
+	let line = {at: (now-utc), event: "armies.write", app: ($app | path expand | path basename), target: $at.target, stage: $stage, armies: ($armies | str join "+"), who: $p.who, commit: $p.commit, plugin: $p.plugin, cases: $cases, note: $note} | to json -r
 	let file = (journal-file $app)
 	try { mkdir ($file | path dirname); $"($line)\n" | save -a $file } catch {|e| print -e $"armies: WARNING: could not note the write in ($file): ($e.msg)" }
 	print $"armies: journal ($line)"
@@ -797,6 +844,7 @@ export def armies-show [app: path, --local] {
 #      a failure writes what was there before, and the push fails.
 # --local: the stack at hand (armiesLive.local), no cases.
 export def armies-push [app: path, --local, --untested: string, --expect: string] {
+	pin-guard $app
 	let at = (armies-at $app $local)
 	if (target-guard {url: $at.target} $expect) { armies-show $app --local=$local; print "armies: dry run: nothing written"; return }
 	let have = (army-rows $at)
@@ -866,6 +914,7 @@ export def armies-history [app: path, --local] {
 
 # An army's earlier entry written again for everyone, as the newest version: the one before the live one, or `version`.
 export def armies-rollback [app: path, army: string, version?: int, --local, --expect: string] {
+	pin-guard $app
 	let at = (armies-at $app $local)
 	if (target-guard {url: $at.target} $expect) { print "armies: dry run: nothing written"; return }
 	let log = (armies-history $app --local=$local | where key == $army | where {|r| $r.entry != null })

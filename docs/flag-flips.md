@@ -65,6 +65,10 @@ A flip therefore needs a test of its own, and it must be:
 8. **A push is a merge, and a flip is named (PRONTO-680).** `pronto-flags push` once wrote main's spec whole
    over the live object, so a flag retired from main disappeared from production while the release
    serving it still read it, and a default changed on main landed with no one flipping it.
+   - A repo pins the pronto-flags that may write (`.github/flags.pin`, PRONTO-718) and runs it through
+     its pinned entry point (in pronto: `tools/flags/pronto-flags`); a write from a checkout older than the pin is
+     refused, since an old one drops retired flags the release still reads. Each version records the
+     plugin commit that wrote it.
    - A flip is named: `--flip a,b`. A flag whose default differs and is not named keeps its live
      entry, said on stderr; a bare push flips nothing live.
    - A retirement waits for a release. A live flag the spec drops stays while the release being

@@ -46,6 +46,7 @@ def --wrapped armies [...args] {
 }
 def held [] { if ($state | path exists) { open $state } else { {rows: {}, log: []} } }
 def ran [] { if ($"($app)/ran.log" | path exists) { open --raw $"($app)/ran.log" | lines } else { [] } }
+def flat []: string -> string { $in | str replace -a -r '\s*\n\s*\|?\s*' " " }
 def check [ok: bool, what: string] { if not $ok { error make {msg: $"failed: ($what)"} }; print $"ok: ($what)" }
 
 spec "Sparta" false
@@ -127,3 +128,27 @@ armies rollback $app sparta --local | ignore
 check ((held).rows.sparta.entry.label == $want and (held).rows.sparta.version > $live_v) "rollback: the version before the live one, written again"
 let none = (livex [armies rollback $app sparta 999 --local])
 check ($none.exit_code != 0 and ($none.stderr | str contains "no earlier version")) "rollback to a version that isn't there is refused"
+
+# PRONTO-718: the armies' writes refuse a pronto-flags below the pin of the app's repo, with nothing written.
+^git init -q $app
+mkdir $"($app)/.github"
+let aclone = $"($dir)/p"
+^git clone -q --no-local $"($here)/../.." $aclone
+^rm -rf $"($aclone)/flags" $"($aclone)/bin"
+cp -r $"($here)/.." $"($aclone)/flags"
+cp -r $"($here)/../../bin" $"($aclone)/bin"
+def --wrapped agt [...args] { ^git -C $aclone -c user.name=t -c user.email=t@example.com ...$args }
+agt add -A
+agt commit -q --allow-empty -m code
+agt commit -q --allow-empty -m pin
+(agt rev-parse HEAD | str trim) | save -f $"($app)/.github/flags.pin"
+agt checkout -q HEAD~1
+let held_now = (held)
+let jn = (open --raw $"($dir)/journal.jsonl" | lines | length)
+for args in [[push --local] [push] [rollback sparta --local]] {
+	let r = (with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_SQL_STATE: $state, FAKE_GCLOUD_STATE: $"($dir)/gcloud.json", PRONTO_FLAGS_JOURNAL: $"($dir)/journal.jsonl"} {
+		^$nu.current-exe $"($aclone)/flags/live.nu" armies ($args | first) $app ...($args | skip 1) | complete
+	})
+	check ($r.exit_code != 0 and ($r.stderr | flat | str contains "does not contain the pinned commit") and (held) == $held_now and (open --raw $"($dir)/journal.jsonl" | lines | length) == $jn) $"pin: armies ($args | str join ' ') from below the pin is refused, nothing written"
+}
+print "armies: pin guard passes"

@@ -38,6 +38,7 @@ def --wrapped live [...args] {
 def held [] { open $state }
 def object [] { held | get objects."gs://shop-prod-flags/flags.json" }
 def premium [v: record] { $v.data | from json | get flags.premium }
+def flat []: string -> string { $in | str replace -a -r '\s*\n\s*\|?\s*' " " }
 def check [ok: bool, what: string] { if not $ok { error make {msg: $"failed: ($what)"} }; print $"ok: ($what)" }
 
 spec []
@@ -584,6 +585,78 @@ check ("kd" in (kflags | columns)) "keep-live: a flag added after the record is 
 kspec {ka: true, kb: false}
 let k3 = (klive [push $drill])
 check ($k3.exit_code == 0 and "kd" not-in (kflags | columns) and (djournal | last).dropped == "kd" and ($k3.stderr | str contains "no longer reads it")) "keep-live, dir: a flag the record lacks is dropped, the journal says so"
+
+# PRONTO-718: a repo pins the pronto-flags commit its pushes run from (.github/flags.pin); a push from a
+# checkout below the pin is refused before anything is read or written. The scratch clone is this checkout
+# plus one commit, the pin; the checkout the push runs from is that clone one commit back, then at the pin.
+let repo = $"($dir)/repo"
+mkdir $repo
+^git -C $repo init -q
+cp -r $app $"($repo)/app"
+rm -rf $"($repo)/app/.git"
+^$real trust -q $"($repo)/app/.mise.toml"
+$"package shop
+flags: premium: {default: false, local: true, accounts: [\"acct-pin\"]}
+flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\"}
+GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
+" | save -f $"($repo)/app/flags_spec.cue"
+# The checkouts run the working tree's flags/ and bin/, committed in an origin of its own (base, pin, past), so these
+# cases test the current code and never depend on this checkout's history or depth (CI's is shallow).
+let origin = $"($dir)/origin"
+^git init -q $origin
+cp -r $"($here)/.." $"($origin)/flags"
+cp -r $"($here)/../../bin" $"($origin)/bin"
+def --wrapped ogt [...args] { ^git -C $origin -c user.name=t -c user.email=t@example.com ...$args }
+ogt add -A
+ogt commit -q -m code
+let code = (ogt rev-parse HEAD | str trim)
+ogt commit -q --allow-empty -m pin
+let pin = (ogt rev-parse HEAD | str trim)
+ogt commit -q --allow-empty -m past
+# A full checkout one commit below the pin; and a shallow one past it, whose history stops short of the pin, which origin has.
+let clone = $"($dir)/p"
+^git clone -q --no-local $origin $clone
+def --wrapped gt [...args] { ^git -C $clone ...$args }
+gt checkout -q $code
+let shallow = $"($dir)/s"
+^git clone -q --depth 1 $"file://($origin)" $shallow
+def fromat [root: string, args: list<string>] {
+	with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state, FLAGS_OFREP_CMD: $"python3 ($here)/fake_ofrep.py", FLAGS_POLL_SEC: "0.01", FLAGS_WAIT_SEC: "0.1", PRONTO_FLAGS_JOURNAL: $"($dir)/journal.jsonl"} {
+		^$nu.current-exe $"($root)/flags/live.nu" ...$args | complete
+	}
+}
+def pushfrom [] { fromat $clone [push $"($repo)/app"] }
+let before_pin = (held)
+mkdir $"($repo)/.github"
+$pin | save -f $"($repo)/.github/flags.pin"
+let below = (pushfrom)
+check ($below.exit_code != 0 and ($below.stderr | flat | str contains $"does not contain the pinned commit ($pin | str substring 0..<9)") and ($below.stderr | flat | str contains "PRONTO-680") and (held) == $before_pin) "pin: a push from below the pin is refused, naming it, and the store is unchanged"
+for verb in [rollback released setup] {
+	let r = (fromat $clone [$verb $"($repo)/app"])
+	check ($r.exit_code != 0 and ($r.stderr | flat | str contains "does not contain the pinned commit") and (held) == $before_pin) $"pin: ($verb) from below the pin is refused, the store unchanged"
+}
+^git -C $clone checkout -q $pin
+let at_pin = (pushfrom)
+check ($at_pin.exit_code == 0 and (premium (object | first)).targeting.if.2.in.1 == ["acct-pin"] and (object | first).metadata.plugin == (^git -C $clone rev-parse --short HEAD | str trim)) "pin: with the pin at HEAD the push goes through, the version names the plugin commit"
+let after_pin = (held)
+(1..40 | each { "f" } | str join) | save -f $"($repo)/.github/flags.pin"
+let unknown = (pushfrom)
+check ($unknown.exit_code != 0 and ($unknown.stderr | flat | str contains "is unknown here") and (held) == $after_pin) "pin: a commit this checkout does not have is refused"
+"nonsense\n" | save -f $"($repo)/.github/flags.pin"
+let bad = (pushfrom)
+check ($bad.exit_code != 0 and ($bad.stderr | str contains "40 hex") and (held) == $after_pin) "pin: a file that is not a commit is refused"
+# A shallow checkout past the pin fetches its missing history from origin, then writes.
+$pin | save -f $"($repo)/.github/flags.pin"
+let shallow_push = (fromat $shallow [push $"($repo)/app"])
+check ($shallow_push.exit_code == 0 and (^git -C $shallow rev-parse --is-shallow-repository | str trim) == "false") "pin: a shallow checkout past the pin fetches the history and the push goes through"
+rm $"($repo)/.github/flags.pin"
+$"package shop
+flags: premium: {default: false, local: true, accounts: [\"acct-nopin\"]}
+flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\"}
+GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
+" | save -f $"($repo)/app/flags_spec.cue"
+let nopin = (pushfrom)
+check ($nopin.exit_code == 0 and (premium (object | first)).targeting.if.2.in.1 == ["acct-nopin"]) "pin: with no pin file the push runs as before"
 
 rm -rf $dir
 print "flags: live commands pass"
