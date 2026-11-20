@@ -94,10 +94,12 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 	accepts: [...=~"^accept-[a-z0-9-]+$"]
 	actors: [=~"^[a-z]+$"]: #Actor
 	steps: [...#Step]
-	// The steps `together` and `any` hold are steps too, three levels down (`_in1`..`_in3`).
+	// The steps `together` and `any` hold are steps too, three levels down (`_in1`..`_in3`), and no deeper.
 	_in1: [for s in steps for L in ["together", "any"] if s[L] != _|_ for t in s[L] {t}]
 	_in2: [for s in _in1 for L in ["together", "any"] if s[L] != _|_ for t in s[L] {t}]
 	_in3: [for s in _in2 for L in ["together", "any"] if s[L] != _|_ for t in s[L] {t}]
+	// None deeper: a fourth level would be typed but not held to its kind, so it is refused.
+	_in4: [for s in _in3 for L in ["together", "any"] if s[L] != _|_ for t in s[L] {t}] & []
 	// Each holds to its one kind's whole shape, closed (`#Step`), and says what fails: `kinds` that it has
 	// not one, `shape` that a field is not the kind's or has the wrong type, `missing` that a field the kind
 	// requires is not there.
