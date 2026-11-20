@@ -47,7 +47,7 @@ type Spec = {
   locale: string;
   messages: string;
   loaded: { screen?: string; adopted: boolean };
-  select: { client: string[]; derived: string[]; inert: string[]; live: string[] };
+  select: { client: string[]; derived: string[]; inert: string[]; live: string[]; outside: string[] };
   database?: string;
   signIn?: { open: string[]; passkey: string };
   scenarios: Record<string, Scenario>;

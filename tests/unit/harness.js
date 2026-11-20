@@ -70,3 +70,31 @@ export async function stepRefused(step) {
     await Deno.remove(dir, { recursive: true });
   }
 }
+
+// siblingFiles on a small repository of two apps: the sibling's brief.md committed, then edited and staged, then committed.
+// Each step reports the blob siblingFiles keys the brief by and the blob HEAD and the index hold for it.
+import { siblingFiles } from "../../harness/files/tests/scenarios/select.ts";
+export async function siblingStaged() {
+  const dir = await Deno.makeTempDir();
+  const git = async (...a) => new TextDecoder().decode((await new Deno.Command("git", { args: ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...a], stdout: "piped", stderr: "null" }).output()).stdout).trim();
+  const keyed = () => Object.fromEntries(siblingFiles(`${dir}/apps/studio`) ?? [])["../other/brief.md"];
+  try {
+    await git("init", "-q");
+    await Deno.mkdir(`${dir}/apps/studio`, { recursive: true });
+    await Deno.mkdir(`${dir}/apps/other`, { recursive: true });
+    await Deno.writeTextFile(`${dir}/apps/studio/a.ts`, "a");
+    await Deno.writeTextFile(`${dir}/apps/other/brief.md`, "one");
+    await git("add", "-A"); await git("commit", "-qm", "one");
+    const committed = await git("rev-parse", "HEAD:apps/other/brief.md");
+    const first = keyed();
+    await Deno.writeTextFile(`${dir}/apps/other/brief.md`, "two");
+    await git("add", "-A");
+    const staged = keyed();
+    await git("commit", "-qm", "two");
+    const after = keyed();
+    const head = await git("rev-parse", "HEAD:apps/other/brief.md");
+    return { firstIsHead: first === committed, stagedIsHead: staged === committed, afterIsNewHead: after === head && after !== committed };
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
