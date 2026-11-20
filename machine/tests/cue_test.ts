@@ -1012,8 +1012,8 @@ Deno.test("PRONTO-894 review: a ticket's priority is a field of its own, no labe
     }
   }
   // A release's marker, with and without the cue fields, nested or not; the label comes back whole.
-  assertEquals(parseTicket(ticketText(mk({ release: true, what: "release@gcp app" }))), { weight: 2, nested: false, mem: undefined, cores: undefined, release: true, what: "release@gcp app" });
-  assertEquals(parseTicket(ticketText(mk({ release: true, mem: 20, cores: 4 }))), { weight: 2, nested: false, mem: 20, cores: 4, release: true, what: "x" });
+  assertEquals(parseTicket(ticketText(mk({ release: true, what: "release@gcp app" }))), { weight: 2, nested: false, mem: undefined, cores: undefined, release: true, marked: false, what: "release@gcp app" });
+  assertEquals(parseTicket(ticketText(mk({ release: true, mem: 20, cores: 4 }))), { weight: 2, nested: false, mem: 20, cores: 4, release: true, marked: false, what: "x" });
   assertEquals(parseTicket(ticketText(mk({ nested: true, weight: 0, mem: 1, cores: 1 }))).nested, true);
   // Legacy tickets (#354's `release=1`, any before it) are ordinary.
   assertEquals(parseTicket("2 release=1 gate").release, false);
@@ -1021,7 +1021,7 @@ Deno.test("PRONTO-894 review: a ticket's priority is a field of its own, no labe
   // An older copy's ticket whose label itself starts with `prio=release` reads as a release (releaseReal then bounds it).
   assertEquals(parseTicket("2 prio=release gate").release, true);
   assertEquals(parseTicket("2 mem=20 cores=4 prio=release gate").release, true);
-  assertEquals(parseTicket("2 mem=20 cores=4 gate"), { weight: 2, nested: false, mem: 20, cores: 4, release: false, what: "gate" });
+  assertEquals(parseTicket("2 mem=20 cores=4 gate"), { weight: 2, nested: false, mem: 20, cores: 4, release: false, marked: false, what: "gate" });
   // A release needs a positive weight, a memory claim of weight 0 is no release even if marked.
   assertEquals(parseTicket("0 mem=20 cores=4 prio=release cue").release, false);
   assertEquals(parseTicket("prio=release cue").release, false, "no readable weight: a stack's, but the first word was no weight");
