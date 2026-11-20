@@ -54,3 +54,25 @@ cases: "a filed flake whose marker cannot be written is thrown (the runner throw
 		{call: "harness.unmarked", expect: {threw: true, said: 1}, why: "said before it throws, so the issue key is in the log; not the board's error: an unwritten marker would file the same flake every run"},
 	]
 }
+
+// The unit runner's lock (UNIT_LOCK, PRONTO-973): unset, its runs take no lock flag, so nothing changes; set, deno runs frozen to it.
+cases: "a suite with no UNIT_LOCK runs with no lock flag": {
+	suite: "harness"
+	steps: [
+		{call: "harness.lockFlags", args: [null], expect: [], why: "deno's own lookup, as before UNIT_LOCK"},
+		{call: "harness.lockFlags", args: [""], expect: []},
+	]
+}
+cases: "a suite held to a lock runs frozen to it, and a module the lock lacks fails": {
+	suite: "harness"
+	steps: [
+		{call: "harness.lockFlags", args: ["/app/builder/deno.lock"], expect: ["--lock=/app/builder/deno.lock", "--frozen"]},
+		{call: "harness.lockHonoured"},
+		{keep: "r"},
+		{get: "frozen", expect: false, why: "the lock names nothing, so frozen deno refuses the jsr import"},
+		{use: "r"},
+		{get: "said", matches: "lockfile is out of date"},
+		{use: "r"},
+		{get: "free", expect: true, why: "the same module with no lock flag resolves"},
+	]
+}

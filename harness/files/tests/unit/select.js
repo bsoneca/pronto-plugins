@@ -65,6 +65,10 @@ export function reach(graph, roots) {
   return [...seen].sort();
 }
 
+// The flags a suite's deno runs take for the lock it is held to (UNIT_LOCK, PRONTO-973): none when there is none,
+// so deno's own lookup stands; else that lock, frozen, so a module the lock does not name fails the run.
+export const lockArgs = (lock) => lock ? [`--lock=${lock}`, "--frozen"] : [];
+
 // One key for a list of input lines, whatever their order.
 export const key = (lines) => sha([...new Set(lines)].sort().join("\n"));
 

@@ -7,7 +7,7 @@
 // every n-th case ("-- <suite> <k>/<n>" runs the k-th share alone).
 // Every app's copy of this file, tests/unit/select.js and tests/unit/schema.cue is the same; what
 // an app's cases call is its own tests/unit/registry.js, and its suites its tests/unit/suites.cue.
-import { called, holds, imports, key, needed, reach, sha, slotOf } from "./unit/select.js";
+import { called, holds, imports, key, lockArgs, needed, reach, sha, slotOf } from "./unit/select.js";
 import { dirname, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -53,9 +53,13 @@ const rel = (p: string) => relative(app, p) || ".";
 const fs = { readFileSync: Deno.readFileSync.bind(Deno), statSync: Deno.statSync.bind(Deno), readDirSync: Deno.readDirSync.bind(Deno), env: Deno.env.get.bind(Deno.env) };
 const hashOf = (p: string) => { try { return sha(fs.readFileSync(p)); } catch { return "absent"; } };
 const registryUrl = new URL("./unit/registry.js", import.meta.url).href;
+// A lock the suite is held to (UNIT_LOCK, a path from where the run starts): its graph read, and its cases run, frozen to it,
+// and its contents in the record, so a lock that changes runs the suite again. Unset: deno's own lookup, as before.
+const lockAt = Deno.env.get("UNIT_LOCK") ? resolve(Deno.env.get("UNIT_LOCK")!) : null;
+const locked = lockArgs(lockAt);
 // The modules its cases can reach: the registry's imports but those of namespaces never called.
 function modules(): string[] | null {
-  const info = new Deno.Command(Deno.execPath(), { args: ["info", "--json", registryUrl], cwd: app, stdout: "piped", stderr: "null" }).outputSync();
+  const info = new Deno.Command(Deno.execPath(), { args: ["info", "--json", ...locked, registryUrl], cwd: app, stdout: "piped", stderr: "null" }).outputSync();
   if (!info.success) return null;
   // deno-lint-ignore no-explicit-any
   const { modules: ms, redirects }: { modules: any[]; redirects: Record<string, string> } = JSON.parse(new TextDecoder().decode(info.stdout));
@@ -87,6 +91,7 @@ function fixed(): string[] | null {
     `cases ${sha(JSON.stringify(mine))}`,
     `jobs ${jobs[suite] ?? 1}`,
     ...["tests/unit.ts", "tests/unit/select.js", "tests/unit/schema.cue", "mise.lock", "deno.json", "deno.jsonc", "deno.lock", "package.json"].map((f) => `file ${f} ${hashOf(app + f)}`),
+    ...(lockAt ? [`lock ${rel(lockAt)} ${hashOf(lockAt)}`] : []),
     `deno ${Deno.version.deno}`,
     `args ${JSON.stringify(Deno.args.filter((a) => a !== "--all"))}`,
     `allow ${perms.join(" ")}`,
@@ -181,7 +186,7 @@ if (!observedTo) {
   const pendings = Array.from({ length: shares }, (_, i) => shares > 1 ? `${pending}.${i}` : pending);
   if (shares > 1) await Promise.all(pendings.map((to) => persist(to, null)));
   const children = pendings.map((to, i) => new Deno.Command(Deno.execPath(), {
-    args: ["test", "--no-config", ...granted.map((p) => `--allow-${p}`), new URL(import.meta.url).pathname, "--", suite, ...(shares > 1 ? [`${i}/${shares}`] : [])],
+    args: ["test", "--no-config", ...locked, ...granted.map((p) => `--allow-${p}`), new URL(import.meta.url).pathname, "--", suite, ...(shares > 1 ? [`${i}/${shares}`] : [])],
     env: { UNIT_OBSERVED_TO: to, UNIT_CASES_FROM: casesFile },
     ...(shares > 1 ? { stdout: "piped", stderr: "piped" } : {}),
   }).spawn());

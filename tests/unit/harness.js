@@ -1,6 +1,22 @@
 // The harness's flake filing (harness/files/tests/scenarios/flakes.ts) on a fake board: one that
 // refuses, one that is missing, one that files. Each call is one filing into a fresh marks folder.
 import { fileFlake } from "../../harness/files/tests/scenarios/flakes.ts";
+import { lockArgs } from "../../harness/files/tests/unit/select.js";
+
+// The unit runner's lock flags (UNIT_LOCK, PRONTO-973), and what deno does with them: `deno info` on a module importing
+// a jsr package, against a lock that names nothing, with the flags lockArgs gives, and without any.
+export const lockFlags = (lock) => lockArgs(lock);
+export async function lockHonoured() {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(`${dir}/m.ts`, 'import "jsr:@std/path@1.1.2";\n');
+    await Deno.writeTextFile(`${dir}/deno.lock`, '{"version":"5"}\n');
+    const info = (args) => new Deno.Command(Deno.execPath(), { args: ["info", "--no-config", ...args, `${dir}/m.ts`], stdout: "null", stderr: "piped" }).output();
+    const frozen = await info(lockArgs(`${dir}/deno.lock`));
+    const free = await info(lockArgs(undefined));
+    return { frozen: frozen.success, said: new TextDecoder().decode(frozen.stderr), free: free.success };
+  } finally { await Deno.remove(dir, { recursive: true }); }
+}
 
 async function filing(run, github = false) {
   const marks = await Deno.makeTempDir();
