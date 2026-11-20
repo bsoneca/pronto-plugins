@@ -44,6 +44,7 @@ flakes: {
 // The screen an actor reads the app on: a viewport, or a device Playwright knows by name (its
 // viewport, scale, touch and user agent: "Pixel 7").
 #Screen: {viewport: {width: int & >0, height: int & >0}} | {device: string}
+
 // Every actor's, unless it names one of `screens` (its `device`): a phone held upright.
 screen: *{viewport: {width: 390, height: 844}} | #Screen
 screens: [string]: #Screen
@@ -93,6 +94,22 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 	accepts: [...=~"^accept-[a-z0-9-]+$"]
 	actors: [=~"^[a-z]+$"]: #Actor
 	steps: [...#Step]
+	// The steps `together` and `any` hold are steps too, three levels down (`_in1`..`_in3`), and no deeper.
+	_in1: [for s in steps for L in ["together", "any"] if s[L] != _|_ for t in s[L] {t}]
+	_in2: [for s in _in1 for L in ["together", "any"] if s[L] != _|_ for t in s[L] {t}]
+	_in3: [for s in _in2 for L in ["together", "any"] if s[L] != _|_ for t in s[L] {t}]
+	// None deeper: a fourth level would be typed but not held to its kind, so it is refused.
+	_in4: [for s in _in3 for L in ["together", "any"] if s[L] != _|_ for t in s[L] {t}] & []
+	// Each holds to its one kind's whole shape, closed (`#Step`), and says what fails: `kinds` that it has
+	// not one, `shape` that a field is not the kind's or has the wrong type, `missing` that a field the kind
+	// requires is not there.
+	_checked: [for l in [steps, _in1, _in2, _in3] for s in l let ks = [for K in _kindNames if s[K] != _|_ {K}] {
+		if len(ks) != 1 {kinds: "a step has exactly one kind, this one has \(len(ks))" & "one kind"}
+		if len(ks) == 1 {
+			shape: s & close({#Common, _shapes[ks[0]]})
+			missing: {for F, _ in _shapes[ks[0]] if s[F] == _|_ {(F): "a \(ks[0]) step needs \(F)" & "present"}}
+		}
+	}]
 	// A race a slow page loses (a lobby's pairing, a sign-in's boot): a pull request's gate throttles the
 	// pages of the scenarios marked so, as the release rehearsal throttles every scenario (tests/slow.ts).
 	// Those that measure nothing about time run as fast as the machine allows.
@@ -112,6 +129,7 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 		_gated: {for f in flags {"\(f)": [for s in steps for k in ["flag", "unless"] if s[k] != _|_ if s[k] == f {s}]}}
 		_gated: [string]: [_, ...]
 	}
+
 	// Safe to run on the deployed app: one actor at most, and nothing that writes what another person
 	// could see or that spends (no step `#barred` names), only GET requests. A flip (pronto-flags push)
 	// runs, once the flag is on for everyone, only those that sign in as no one (PRONTO-284: a flip has
@@ -142,7 +160,7 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 // A selector, in Playwright's CSS dialect.
 #Sel: string
 
-#Step: {
+#Common: {
 	// Whose page the step acts on or reads; an http step's session too.
 	by?: string
 	// Waited for up to this many seconds (default 30).
@@ -165,66 +183,82 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 	// Asked only on the deployed app ("production") or only on a stack at hand ("local", never a
 	// deployed preview): what a listing may be differs, a laptop's naming the stack's own address.
 	on?: "production" | "local"
-	_kind
 }
 
-// The step's kind, as a hidden value that `#Step` embeds: language v0.18 refuses the fields a definition
-// declares beside an embedded definition (or a disjunction of them), so the kinds are embedded as a
-// regular value (each kind is one, `_action` and the others, and stays a definition for the readers that name
-// it: `repeat`, `when`).
-_kind: _action | _expect | _http | _together | _any | _repeat | _gesture
+// A step is one of the kinds (`_kinds`, below), chosen by its field, never by a disjunction: a disjunction
+// over every kind (about 60 closed structs, unified against every step of every scenario) cost Bonk
+// Chess's scenarios 96 G instructions and 2.9 GB. `#Step` is open: it types each kind's own field, and a
+// scenario (`#Scenario`'s `_checked`) holds every step it lists, those of `together` and `any` too, to the
+// whole shape of its one kind, closed, with the fields every step has (`#Common`). So a field only a kind
+// takes (an http's `poll`, a repeat's `until` and `max`, a gesture's `refused`) is allowed, and required,
+// with that kind alone, and a step of no kind or of two is refused. The check is not in `#Step` because a
+// definition is evaluated bare too, where it has no kind, and one that read its own fields to choose the
+// kind (an embedded comprehension on `self`) took exponential time under cue 0.16.1.
+#Step: {
+	#Common
+	for K, v in _kinds {(K)?: v[K]}
+	together?: [...#Step]
+	any?: [...#Step]
+	...
+}
 
 #Action: _action
-_action: {open: string} | // a path of the app or a URL, waited for as the app's pages load (`loaded`)
-	{reload: true} |
-	{revisit: string} | // the tab closed and the app opened again at this path in a new one: what the browser keeps (its storage, its cookies) stays, the tab's own session does not
-	{leave: true} | // the page says it is being left (pagehide), as a closing tab does: what a page reports on leaving goes out
-	{rush: {open: string, click: #Sel, heldBy?: string, holdPage?: string, drawn?: #Sel}} | // opened without waiting for the boot, and pressed at once: the press lands on what the document drew first and is held (heldBy: the id the document's script records, window.__fp.pressed). holdPage: a pattern of the page's own script, whose request waits until the press is made: the page cannot take the menu over before it, which a click's own round trips (a fast boot is over in 300 ms) would otherwise race. drawn: what the document sets once its menu is drawn and its press recorded (the first paint's own mark), waited for before the press, so the press is never earlier than the document can hold it
-	{click: #Sel | [...#Sel]} | // a list: the first of them shown
-	{trigger: #Sel} | // clicked as a script clicks it, shown or not
-	{drag: {from: #Sel, to: #Sel}} | // a mouse pressed on from's middle, moved onto to's in steps, let go
-	{check: #Sel} |
-	{press: string} | // a key
-	{fill: {in: #Sel, value: string}} |
-	{select: {in: #Sel, value: string}} | // an option of a select, by its value
-	{upload: {in: #Sel, file: string}} | // a file under tests/fixtures
-	{submit: #Sel} | // a form, as the browser submits it
-	{closeDialogs: true} |
-	{throw: string} | // an error thrown uncaught by a script of the page, as a bug would (error tracking's reporter sees it); the message is the string
-	{pay: true} | // at the checkout the page was sent to (tests/checkout.ts): the stand-in's pay button, or Stripe's sandbox card form
-	{database: string} | // SQL run as the local stack's owner (DATABASE_PG_PORT, the app's `database`), never against a deployed app, an actor's `{ana.id}` and a kept value filled in: a row the open page learns of through its shape
-	{pause: number & >0} | // seconds: a person's pace, where the app is waited on by nothing to see
-	{hold: {to: string, method: *"POST" | string, seconds?: number & >0}} | // from now on, each such request of the page waits in the browser before it goes out: this long (seconds), or, with none, until a `release` of the same address: a slow line, or a write that is still on its way when the page leaves
-	{release: string} | // lets go the requests a `hold` of this address (no seconds) keeps waiting, and those still to come: the answer is late until this step, however long the steps before it took
-	{block: string} | // requests whose address matches the pattern are refused from here on, as a network that is down refuses them
-	{signUp: true} | // a passkey account the terminal registers, never shown to a person, on a virtual authenticator, named as its actor
-	{signIn: true} | // signs in with the app's passkey sign-in (`signIn`): at hand the actor makes an account the way signUp does and signs out first; with FLAGS_TESTER_CREDENTIAL, as that passkey's account
-	{google: string} | // the strip's Google button, through the local broker's stand-in, which says it is not Google and signs in the test person named; waits for a session that is no guest. Local stacks only: the runner skips such a scenario on a deployed app
-	{doorProbe: true} | // signin_door's live check: the identity broker's /probe/door, as the actor's session (PRONTO-268): in production the airlock adds Google's credential (`credential`); at hand the stand-in broker has no door (404)
-	{shot: string} | // a screenshot under SHOTS
-	{keep: [string]: {of: #Sel, attr?: string, text?: true, value?: true}}
+_action: or([for _, a in _actions {a}])
+_actions: {
+	open: {open: string} // a path of the app or a URL, waited for as the app's pages load (`loaded`)
+	reload: {reload: true}
+	revisit: {revisit: string} // the tab closed and the app opened again at this path in a new one: what the browser keeps (its storage, its cookies) stays, the tab's own session does not
+	leave: {leave: true} // the page says it is being left (pagehide), as a closing tab does: what a page reports on leaving goes out
+	rush: {rush: {open: string, click: #Sel, heldBy?: string, holdPage?: string, drawn?: #Sel}} // opened without waiting for the boot, and pressed at once: the press lands on what the document drew first and is held (heldBy: the id the document's script records, window.__fp.pressed). holdPage: a pattern of the page's own script, whose request waits until the press is made: the page cannot take the menu over before it, which a click's own round trips (a fast boot is over in 300 ms) would otherwise race. drawn: what the document sets once its menu is drawn and its press recorded (the first paint's own mark), waited for before the press, so the press is never earlier than the document can hold it
+	click: {click: #Sel | [...#Sel]} // a list: the first of them shown
+	trigger: {trigger: #Sel} // clicked as a script clicks it, shown or not
+	drag: {drag: {from: #Sel, to: #Sel}} // a mouse pressed on from's middle, moved onto to's in steps, let go
+	check: {check: #Sel}
+	press: {press: string} // a key
+	fill: {fill: {in: #Sel, value: string}}
+	select: {select: {in: #Sel, value: string}} // an option of a select, by its value
+	upload: {upload: {in: #Sel, file: string}} // a file under tests/fixtures
+	submit: {submit: #Sel} // a form, as the browser submits it
+	closeDialogs: {closeDialogs: true}
+	throw: {throw: string} // an error thrown uncaught by a script of the page, as a bug would (error tracking's reporter sees it); the message is the string
+	pay: {pay: true} // at the checkout the page was sent to (tests/checkout.ts): the stand-in's pay button, or Stripe's sandbox card form
+	database: {database: string} // SQL run as the local stack's owner (DATABASE_PG_PORT, the app's `database`), never against a deployed app, an actor's `{ana.id}` and a kept value filled in: a row the open page learns of through its shape
+	pause: {pause: number & >0} // seconds: a person's pace, where the app is waited on by nothing to see
+	hold: {hold: {to: string, method: *"POST" | string, seconds?: number & >0}} // from now on, each such request of the page waits in the browser before it goes out: this long (seconds), or, with none, until a `release` of the same address: a slow line, or a write that is still on its way when the page leaves
+	release: {release: string} // lets go the requests a `hold` of this address (no seconds) keeps waiting, and those still to come: the answer is late until this step, however long the steps before it took
+	block: {block: string} // requests whose address matches the pattern are refused from here on, as a network that is down refuses them
+	signUp: {signUp: true} // a passkey account the terminal registers, never shown to a person, on a virtual authenticator, named as its actor
+	signIn: {signIn: true} // signs in with the app's passkey sign-in (`signIn`): at hand the actor makes an account the way signUp does and signs out first; with FLAGS_TESTER_CREDENTIAL, as that passkey's account
+	google: {google: string} // the strip's Google button, through the local broker's stand-in, which says it is not Google and signs in the test person named; waits for a session that is no guest. Local stacks only: the runner skips such a scenario on a deployed app
+	doorProbe: {doorProbe: true} // signin_door's live check: the identity broker's /probe/door, as the actor's session (PRONTO-268): in production the airlock adds Google's credential (`credential`); at hand the stand-in broker has no door (404)
+	shot: {shot: string} // a screenshot under SHOTS
+	keep: {keep: [string]: {of: #Sel, attr?: string, text?: true, value?: true}}
+}
 
 #Expect: _expect
-_expect: {see: #Sel} | // visible
-	{hidden: #Sel} | // not visible (or not there)
-	{attached: #Sel} | // in the page, shown or not
-	{never: string} | // no address the page (this tab, since a `revisit`) has asked for so far holds this
-	{asked: string} | // an address the page (this tab, since a `revisit`) has asked for holds this
-	{count: {of: #Sel, is?: int, atLeast?: int}} |
-	{text: {of: #Sel, is?: string, has?: string, msg?: string}} | // msg: a key of the app's `messages`
-	{value: {of: #Sel, is: string}} |
-	{attr: {of: #Sel, name: string, is?: string, matches?: string, below?: number, failing?: string, says?: string}} | // failing: a value that fails the step at once, with the attribute `says` as the reason
-	{attrs: {of: #Sel, name: string, are: [...string]}} |
-	{address: {matches: string}} | // the page's own address, whole
-	{image: {of: #Sel, width: int, height: int}} |
+_expect: or([for _, e in _expects {e}])
+_expects: {
+	see: {see: #Sel} // visible
+	hidden: {hidden: #Sel} // not visible (or not there)
+	attached: {attached: #Sel} // in the page, shown or not
+	never: {never: string} // no address the page (this tab, since a `revisit`) has asked for so far holds this
+	asked: {asked: string} // an address the page (this tab, since a `revisit`) has asked for holds this
+	count: {count: {of: #Sel, is?: int, atLeast?: int}}
+	text: {text: {of: #Sel, is?: string, has?: string, msg?: string}} // msg: a key of the app's `messages`
+	value: {value: {of: #Sel, is: string}}
+	attr: {attr: {of: #Sel, name: string, is?: string, matches?: string, below?: number, failing?: string, says?: string}} // failing: a value that fails the step at once, with the attribute `says` as the reason
+	attrs: {attrs: {of: #Sel, name: string, are: [...string]}}
+	address: {address: {matches: string}} // the page's own address, whole
+	image: {image: {of: #Sel, width: int, height: int}}
 	// A response the page gets while doing `when`; sent: a pattern the request's own body must match.
-	{response: {to: string, method: *"GET" | string, status: int, matches?: string, sent?: string, when: #Action}} |
+	response: {response: {to: string, method: *"GET" | string, status: int, matches?: string, sent?: string, when: #Action}}
 	// Every box inside `of` at least `gutter` px from the side edges, the page never scrolling
 	// sideways, and every button, link, field and select at least `tall` px tall, at each width.
-	{layout: {of: #Sel, gutter: number | *16, tall: number | *44, widths?: [...int]}} |
+	layout: {layout: {of: #Sel, gutter: number | *16, tall: number | *44, widths?: [...int]}}
 	// Read in full: whole inside the box of its nearest `within` ancestor, under none of `clear`, and
 	// the element found at its middle.
-	{inView: {of: #Sel, within: #Sel, clear?: [...#Sel]}}
+	inView: {inView: {of: #Sel, within: #Sel, clear?: [...#Sel]}}
+}
 
 #Http: _http
 _http: {
@@ -253,7 +287,7 @@ _http: {
 			// A response header, by its lower-case name: the whole value.
 			header?: [string]: string
 		}
-		keep?: [string]: string // a dotted path into the JSON answer
+		keep?: [string]:     string // a dotted path into the JSON answer
 		keepText?: [string]: string // a regular expression over the answer's text: its first group is kept; no match fails the step
 	}
 	// Asked again until it answers as expected, every second, up to the timeout.
@@ -281,3 +315,20 @@ _repeat: {repeat: #Action, until: #Expect, max: int & >0}
 #Gestures: [string]~(Kind,_): {(Kind): _}
 #Gesture: _gesture
 _gesture: or([for _, g in #Gestures {g}])
+
+// Every kind a step takes, by its name: each value is the step's whole shape for that kind, so the
+// fields only it takes are written with it. The app's own (`#Gestures`) are kinds too.
+_kinds: {
+	_actions
+	_expects
+	http:   _http
+	repeat: _repeat
+	for K, g in #Gestures {(K): g}
+}
+// `_kinds` and the two kinds that hold steps (which `#Step` declares itself).
+_shapes: {
+	_kinds
+	together: _together
+	any:      _any
+}
+_kindNames: [for K, _ in _shapes {K}]
