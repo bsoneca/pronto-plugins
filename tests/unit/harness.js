@@ -110,3 +110,29 @@ export function served(files) {
 }
 // One RUN of exactly `n` bytes after its keyword.
 export const ofSize = (n) => argSizes("RUN " + "x".repeat(n)).map((a) => a.bytes);
+// A RUN heredoc whose body is `n` bytes.
+export const ofHeredoc = (n) => argSizes("RUN <<EOF\n" + "x".repeat(n - 1) + "\nEOF\n").map((a) => a.bytes);
+export { parseCeiling } from "../../harness/files/tests/lint.ts";
+// runArgProblems on a temp app folder: a .bayt/Dockerfile.x and a root Dockerfile of `bayt` and `root` bytes of command.
+import { runArgProblems } from "../../harness/files/tests/lint.ts";
+async function inApp(fill, ceiling) {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${dir}/.bayt`);
+    await fill(dir);
+    return await runArgProblems(ceiling, dir);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+export const problems = (ceiling, bayt, root) => inApp(async (d) => {
+  await Deno.writeTextFile(`${d}/.bayt/Dockerfile.x`, "RUN " + "x".repeat(bayt) + "\n");
+  await Deno.writeTextFile(`${d}/Dockerfile`, "RUN " + "x".repeat(root) + "\n");
+}, ceiling);
+export const linked = (ceiling) => inApp(async (d) => {
+  await Deno.writeTextFile(`${d}/.bayt/Dockerfile.real`, "RUN " + "x".repeat(ceiling + 1) + "\n");
+  await Deno.symlink("Dockerfile.real", `${d}/.bayt/Dockerfile.link`);
+}, ceiling);
+export const unreadable = () => inApp(async (d) => {
+  await Deno.symlink("nowhere", `${d}/.bayt/Dockerfile.gone`);
+}, 100).then((p) => [p.length === 1 && p[0].startsWith(".bayt/Dockerfile.gone: cannot be read")]);
