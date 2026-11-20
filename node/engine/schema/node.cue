@@ -379,7 +379,7 @@ import (
 #RetargetDapr: {
 	in:     _
 	config: string
-	// every level guarded: a Deployment without a template, metadata or annotations is given what it lacks, never refused
+	// missing metadata or annotations are added; a Deployment with no spec or template is passed on as it is, for the API server to refuse
 	out: {
 		for k, v in in if k != "spec" {(k): v}
 		if in.spec != _|_ {

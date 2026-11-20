@@ -292,8 +292,8 @@ def renew-lease [node: record, lease: string, --before-live] {
 		# lease is gone: a retry cannot bring it back).
 		mut last = ""
 		for attempt in 1..3 {
-			let r = (try { registry lease-renew $node.build $lease; "" } catch {|e| $e.msg })
-			if ($r | is-empty) { return }
+			let r = (try { registry lease-renew $node.build $lease; null } catch {|e| $e.msg | default "unknown error" })
+			if $r == null { return }
 			$last = $r
 			if ($r =~ "NotFound") or $attempt == 3 { break }
 			print -e $"node: (stamp) the registry lease ($lease) was not renewed \(attempt ($attempt) of 3\), trying again: ($r)"

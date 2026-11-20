@@ -194,8 +194,9 @@ def test_upstreams_own_release_test_passes [] {
 # only where the value is the engine's (anything else upstream wrote there is left as it is).
 def restore-shared-dapr [o: record]: nothing -> record {
 	let name = ($o.metadata.name | str replace -r '-caddy$' '')
-	if ($o.spec.template.metadata.annotations | get -o "dapr.io/config") == $"($name)-caddy-invoke-only" {
-		$o | update spec.template.metadata.annotations."dapr.io/config" $"($name)-dapr-config"
+	if ($o | get -o spec.template.metadata.annotations."dapr.io/config") == $"($name)-caddy-invoke-only" {
+		let u = ($o | update spec.template.metadata.annotations."dapr.io/config" $"($name)-dapr-config")
+		if ($u.spec.template.metadata.annotations | columns | is-empty) { $u | reject spec.template.metadata.annotations } else { $u }
 	} else { $o }
 }
 

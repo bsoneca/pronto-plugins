@@ -1290,15 +1290,28 @@ def test_a_renewal_that_fails_after_the_push_applies_nothing [] {
 	assert ($r.exit_code != 0) "the release stops"
 	assert (has $r.stderr "kubectl patch lease") $r.stderr
 	assert (has $r.stderr "trying again") $"it was retried: ($r.stderr)"
+	assert equal ((calls $w) | where {|c| $c | str starts-with "patch lease" } | length) 4 "the first renewal, then three attempts of the second"
 	assert ((docker-calls $w) | any {|c| $c | str starts-with "buildx bake" }) "the images were pushed"
 	assert (not ((calls $w) | any {|c| $c | str contains "Deployment/" })) "and nothing was applied"
 	# a NotFound is not retried: the lease is gone
 	rm -rf $w.dir
 	let v = (sandbox)
-	"1" | save -f ($v.state | path join lease_patch_fail_from)
-	let nf = (in-world $v -c ((script $v ((inputs $v) + " use registry.nu; registry lease-renew {registry: {namespace: 'pronto-registry'}} no-such-lease"))))
-	assert ($nf.exit_code != 0)
+	"2" | save -f ($v.state | path join lease_patch_notfound_from)
+	let nf = (in-world $v $release_nu --app $v.app)
+	assert ($nf.exit_code != 0) "the release stops"
+	assert (has $nf.stderr "NotFound") $nf.stderr
+	assert (not (has $nf.stderr "trying again")) $"no retry after NotFound: ($nf.stderr)"
+	assert equal ((calls $v) | where {|c| $c | str starts-with "patch lease" } | length) 2 "one patch per renewal, no retry"
+	assert (not ((calls $v) | any {|c| $c | str contains "Deployment/" })) "and nothing was applied"
 	rm -rf $v.dir
+	# one blip of the second renewal: retried, and the release goes through
+	let o = (sandbox)
+	"2" | save -f ($o.state | path join lease_patch_fail_once)
+	let ok = (in-world $o $release_nu --app $o.app)
+	assert (released $ok) $"($ok.stdout)\n($ok.stderr)"
+	assert (has $ok.stdout "[SUCCESS] Released aprende") $ok.stdout
+	assert (has $ok.stderr "trying again") $ok.stderr
+	rm -rf $o.dir
 }
 
 def git-commit-all [dir: string] {
