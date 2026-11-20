@@ -211,6 +211,7 @@ def main [] {
 	test_the_collection_waits_for_releases_in_flight
 	test_a_stale_lock_is_taken_over_against_its_resource_version
 	test_prune_runs_only_the_maintenance
+	test_a_deferred_prune_exits_four
 	test_only_a_confirmed_absence_is_created
 	test_the_lock_is_released_against_what_was_read_and_its_failure_is_told
 	test_verification_is_invalidated_before_a_release_changes_what_serves
@@ -1187,6 +1188,20 @@ def test_only_a_confirmed_absence_is_created [] {
 	assert equal $r.exit_code 0 $r.stderr
 	let deletes = (calls $w | where {|c| $c | str starts-with "delete deployment" })
 	assert equal $deletes ["delete deployment aprende-electric -n aprende --ignore-not-found"] "only the one recorded absent is deleted"
+	rm -rf $w.dir
+}
+
+def test_a_deferred_prune_exits_four [] {
+	print "test --prune that is deferred (a release's lease is held) records pending and exits 4, not a failure..."
+	let w = (sandbox)
+	seed-lease $w registry-lease-studio-x registry-lease-studio-x 5 --labelled
+	seed-record $w {sha: "abc", verified: "abc", pruned: "false", prune_error: "x"}
+	# a registry that answers, so the prune reaches the lease check rather than failing on the network
+	let r = (with-registry $w 200 {|port| in-world $w $release_nu --app $w.app --prune })
+	assert equal $r.exit_code 4 $"($r.stdout)\n($r.stderr)"
+	assert (has $r.stderr "deferred, not done") $r.stderr
+	let patch = (calls $w | where {|c| ($c | str starts-with "patch configmap pronto-release") and ($c | str contains "pruned") } | last)
+	assert (has $patch '"pruned":"pending"') $patch
 	rm -rf $w.dir
 }
 

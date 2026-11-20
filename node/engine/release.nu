@@ -466,7 +466,7 @@ def main [
 	--build                    # with --check: build and push the images under the tag `check`, then dry-run with their digests
 	--delete                   # delete the preview's namespace (a preview only)
 	--serving                  # print `serving <sha>`: the commit the release recorded in the namespace (empty when none); writes nothing
-	--prune                    # only the registry maintenance: prune and collect, and record the outcome (a release's retry); releases nothing
+	--prune                    # only the registry maintenance: prune and collect, and record the outcome (a release's retry); releases nothing. Exit 4: deferred (recorded pending), not a failure
 	--verified: string = ""    # the commit cd's public checks passed for: recorded as verified when it is the one the node serves, refused when not (`--serving` then prints it as verified)
 	--adopt                    # take an existing namespace the release did not label (its Namespace object labels it)
 	--schema-from: string = "" # the preview copy of a database (not in this engine yet)
@@ -503,20 +503,26 @@ def main [
 	}
 	if $prune {
 		# The registry maintenance of a release that was live when its own failed: the same prune and collection, outcome recorded.
-		tunnel with-tunnel $node.api $node.build {|fwd|
+		# Exit 0: done. Exit 4: deferred (another release or collector is at the registry), recorded `pending`, to be retried
+		# by the next run, not a failure. Any other failure is an error.
+		let pending = (tunnel with-tunnel $node.api $node.build {|fwd|
 			let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
 			try {
 				with-env {KUBECONFIG: $kubeconfig} {
-					mut pending = ""
-					let failure = (try { $pending = (registry prune $"127.0.0.1:($fwd.registry)" $node.build ""); null } catch {|e| $e.msg })
-					record-prune $node $failure $pending
+					mut deferred = ""
+					let failure = (try { $deferred = (registry prune $"127.0.0.1:($fwd.registry)" $node.build ""); null } catch {|e| $e.msg })
+					record-prune $node $failure $deferred
 					if $failure != null { error make {msg: $"the registry maintenance failed: ($failure)"} }
-					if ($pending | is-not-empty) { error make {msg: $"the registry maintenance was deferred, not done: ($pending)"} }
-					print $"node: (stamp) the node's registry maintenance passed"
+					if ($deferred | is-empty) { print $"node: (stamp) the node's registry maintenance passed" }
+					$deferred
 				}
 			} finally {
 				rm -f $kubeconfig
 			}
+		})
+		if ($pending | is-not-empty) {
+			print -e $"node: (stamp) the registry maintenance was deferred, not done \(($pending)\); recorded pending, the next run retries it"
+			exit 4
 		}
 		return
 	}
