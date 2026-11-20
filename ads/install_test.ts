@@ -19,9 +19,17 @@ Deno.test("an app gets the module, at ads/ads.js or where it names, regenerated"
   eq(await Deno.readTextFile(`${app}/ads/ads.js`), written, "the host's file regenerated");
   await install(app, "web/src/ads.js");
   eq(await Deno.readTextFile(`${app}/web/src/ads.js`), written, "where the app names");
-  for (const f of ["pronto/ads.cue", "ads/ads.nu", "pronto/exports.nu"]) await Deno.stat(`${app}/${f}`);
+  for (const f of ["pronto/ads.cue", "ads/ads.nu", "ads/server.ts", "ads_plugin.cue", "ads/ads_site.js", "pronto/exports.nu"]) await Deno.stat(`${app}/${f}`);
+  eq((await Deno.readTextFile(`${app}/ads_plugin.cue`)).includes("package shop\n"), true, "the ad document's CUE in the program's package");
+  // The rule says where the page's module is, so that generate writes the origins beside it.
+  eq((await Deno.readTextFile(`${app}/pronto/ads.cue`)).includes('ads route \\"web/src\\"'), true, "the rule names the module's folder");
+  await Deno.stat(`${app}/web/src/ads_site.js`);
+  await Deno.writeTextFile(`${app}/ads/ads_site.js`, "// generate's\n");
+  await install(app);
+  eq(await Deno.readTextFile(`${app}/ads/ads_site.js`), "// generate's\n", "the origins are generate's once written, not the installer's");
   const spec = await Deno.readTextFile(`${app}/ads_spec.cue`);
   eq(spec.split("\n")[0], "package shop", "the spec in the program's package");
+  eq(/adsense: site:/.test(spec) && /adsense: frame:/.test(spec), true, "the spec names the origins");
   await Deno.writeTextFile(`${app}/ads_spec.cue`, spec + "// the app's own\n");
   await install(app);
   eq((await Deno.readTextFile(`${app}/ads_spec.cue`)).endsWith("// the app's own\n"), true, "the spec is the app's");
@@ -37,6 +45,7 @@ Deno.test("no pronto app, or a path out of it, is refused", async () => {
   eq((await install(dir)).success, false, "a program that names no package");
   await Deno.writeTextFile(`${dir}/program.cue`, "package shop\n");
   eq((await install(dir, "/tmp/x.js")).success, false, "an absolute path");
+  eq((await install(dir, 'a"b/x.js')).success, false, "a path a rule's quotes cannot hold");
   await Deno.remove(dir, { recursive: true });
 });
 
