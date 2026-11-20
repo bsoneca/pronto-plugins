@@ -112,20 +112,21 @@ export function siblingsMoved(recorded: string | undefined, now: string | null):
   return (recorded ?? "") === now ? null : "a sibling file it reads changed since its last green run";
 }
 
-// The sibling apps' tracked files beside the app (`../*/`), with git's blob hash of each: [path relative to the app,
-// blob]. Null when git cannot say, which runs everything.
-function siblingFiles(root: string): [string, string][] | null {
+// The sibling apps' files beside the app (`../*/`) as HEAD holds them, with git's blob hash of each: [path relative to the
+// app, blob]. HEAD, not the index: Studio's builder clones HEAD, so a staged sibling edit is not what a run tested, and
+// recording its blob would make the commit that follows a cache hit. Null when git cannot say, which runs everything.
+export function siblingFiles(root: string): [string, string][] | null {
   const top = git(root, "rev-parse", "--show-toplevel")?.trim();
   if (!top) return null;
   const parent = relative(Deno.realPathSync(top), dirname(Deno.realPathSync(root)));
   // An app at the repository's top has no siblings in it.
   if (parent.startsWith("..")) return [];
-  const out = git(top, "ls-files", "-s", "-z", "--", parent || ".");
+  const out = git(top, "ls-tree", "-r", "-z", "HEAD", "--", parent || ".");
   if (out === null) return null;
-  const topReal = Deno.realPathSync(top);
+  const topReal = Deno.realPathSync(top), rootReal = Deno.realPathSync(root);
   return out.split("\0").filter(Boolean).map((l) => {
-    const tab = l.indexOf("\t"); // a path may hold a tab itself (-z leaves it unquoted)
-    return [relative(root, join(topReal, l.slice(tab + 1))), l.slice(0, tab).split(" ")[1]] as [string, string];
+    const tab = l.indexOf("\t"); // a path may hold a tab itself (-z leaves it unquoted); before it: <mode> <type> <blob>
+    return [relative(rootReal, join(topReal, l.slice(tab + 1))), l.slice(0, tab).split(" ")[2]] as [string, string];
   }).filter(([f]) => /^\.\.\/[^/.][^/]*\/./.test(f));
 }
 
@@ -279,7 +280,7 @@ export function select<S extends Keyed>(runner: string, url: string, scenarios: 
   // change there is never "cached green" (it hid two failing scenarios, 2026-11-03). Sibling apps' files are
   // left out on purpose (PRONTO-870), unless the app lists them in `more.outside`.
   const outside = () => outsideKeys(changedFiles(root) ?? [], (f) => hashOf(join(root, f)), more.outside);
-  // An app that reads its siblings (`more.outside`) is keyed by every sibling file its patterns name, as it is now.
+  // An app that reads its siblings (`more.outside`) is keyed by every sibling file its patterns name, as HEAD holds it.
   const declared = () => {
     if (!more.outside?.length) return [];
     const files = siblingFiles(root);

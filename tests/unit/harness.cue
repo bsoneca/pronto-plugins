@@ -146,3 +146,12 @@ cases: "a by-hand run after a sibling file the app reads moved on main runs the 
 		{call: "harness.siblingsMoved", args: ["d1", null], expect: "the sibling files it reads cannot be listed", why: "an unreadable list runs it"},
 	]
 }
+
+// A sibling's brief.md staged but not committed: Studio's builder clones HEAD, so the run tests the committed brief and
+// the key is HEAD's blob; committing the edit then changes the key, so it is no cache hit (bsoneca/pronto#1555).
+cases: "a staged sibling edit keys as HEAD holds it until it is committed, then as the new commit": {
+	suite: "harness"
+	steps: [
+		{call: "harness.siblingStaged", expect: {firstIsHead: true, stagedIsHead: true, afterIsNewHead: true}, why: "keyed by HEAD's blob, not the index's"},
+	]
+}
