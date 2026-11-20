@@ -258,7 +258,11 @@ cases: "the run owner plans a run's members from a table, reuses of a pid includ
 		{use: "r"},
 		{get: "deadListError", expect: [1], why: "a dead-run reap on a list that cannot be read fails every record, closed"},
 		{use: "r"},
-		{get: "linuxMembers", expect: [110, 111], why: "on Linux the members are the supervisor's descendants, which a subreaper makes of every orphan (112, whose parent is init, is not one)"},
+		{get: "linuxMembers", expect: [110, 111, 114, 117], why: "on Linux the members are the root's subtree and the orphans re-parented to the supervisor that carry its PRONTO_RUN marker, with theirs; not the supervisor's own children (115), one with another run's marker (118), or one whose parent is init (112)"},
+		{use: "r"},
+		{get: "linuxUnreadable", expect: [116], why: "a child of the supervisor whose environ cannot be read is skipped and said, never signalled"},
+		{use: "r"},
+		{get: "nestedSupervisorGone", expect: 0, why: "a responsible pid whose run's supervisor is gone is not a live run: a claim there owns"},
 		{use: "r"},
 		{get: "nestedByResponsible", expect: 300, why: "a process whose responsible pid is a root with a live record is inside that run"},
 		{use: "r"},
@@ -397,5 +401,49 @@ cases: "the responsibility calls exist and are inherited across setsid": {
 		{get: "inherited", expect: true, why: "a process detached by a double fork and setsid has the root's responsible pid (Linux: it is the root's descendant)"},
 		{use: "r"},
 		{get: "selfNotRoots", expect: true, why: "this process, which started the root, is not attributed to it"},
+	]
+}
+cases: "a keeper killed leaves no run: the command it ran is stopped and the run fails": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownKeeperKilled"},
+		{keep: "r"},
+		{get: "launched", expect: true, why: "the run started"},
+		{use: "r"},
+		{get: "nonzero", expect: true, why: "the run fails, with the cause"},
+		{use: "r"},
+		{get: "cmdGone", expect: true, why: "the command is told TERM and KILL directly, its keeper gone"},
+		{use: "r"},
+		{get: "recordGone", expect: true, why: "the ledger is clean"},
+	]
+}
+cases: "a SIGKILLed supervisor's run is ended by its keeper": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownSupervisorKilled"},
+		{keep: "r"},
+		{get: "launched", expect: true, why: "the run started and its sleeper was detached"},
+		{use: "r"},
+		{get: "cmdGone", expect: true, why: "the keeper sees its supervisor gone and stops the command"},
+		{use: "r"},
+		{get: "sleepGone", expect: true, why: "and what the run left"},
+		{use: "r"},
+		{get: "keeperGone", expect: true, why: "and ends itself, not 12 h later"},
+		{use: "r"},
+		{get: "recordGone", expect: true, why: "removing the run's record and folder"},
+	]
+}
+cases: "a child killed by SIGKILL reads as signal 9, as the memory watchdog's retry needs": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownSignals"},
+		{keep: "r"},
+		{get: "killed", expect: 9, why: "SIGKILL is 9, not 1"},
+		{use: "r"},
+		{get: "term", expect: 15, why: "TERM is 15"},
+		{use: "r"},
+		{get: "hup", expect: 1, why: "HUP is 1"},
+		{use: "r"},
+		{get: "none", expect: 0, why: "no signal is 0"},
 	]
 }

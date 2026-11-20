@@ -1451,31 +1451,36 @@ const killedFor = (pid: number) => {
 // gone), a library or symbol that cannot be opened, fail the run, with their cause. Another uid's EPERM is skipped.
 // The ledger, <pool>/runs/<rootpid>-<rootstart>, says which runs are live: a claim inside one does not own.
 const ESRCH = 3, EPERM = 1;
-export type PidRow = { pid: number; errno?: number; uid?: number; start?: number; ppid?: number; responsible?: number; zombie?: boolean };
+export type PidRow = { pid: number; errno?: number; uid?: number; start?: number; ppid?: number; responsible?: number; zombie?: boolean;
+  // Linux, for a child of the supervisor only: the PRONTO_RUN its environ carries, or that it could not be read.
+  marker?: string; unreadable?: boolean };
 // One read of the machine's processes: `listError` when the list itself failed; a row per listed pid, with the errno
 // of what could not be read of it (start in µs: since the epoch on macOS, since boot on Linux).
 export type PidTable = { os: "darwin" | "linux"; uid: number; listError?: string; rows: PidRow[] };
 export type RunRecord = { rootpid: number; rootstart: number; superpid: number; superstart: number; uid: number; what: string; state: "running" | "done"; run?: string; runner?: string; left?: string[] };
 export type Member = { pid: number; start: number; age?: number };
 export type Plan = { members: Member[]; skipped: { pid: number; why: string }[]; failed: string[] };
-const descendants = (rows: readonly PidRow[], top: number): Set<number> => {
+const descendants = (rows: readonly PidRow[], tops: readonly number[]): Set<number> => {
   const kids = new Map<number, number[]>();
   for (const r of rows) if (r.errno === undefined && r.ppid !== undefined) kids.set(r.ppid, [...(kids.get(r.ppid) ?? []), r.pid]);
-  const out = new Set<number>(), todo = [top];
+  const out = new Set<number>(), todo = [...tops];
   for (let p = todo.pop(); p !== undefined; p = todo.pop()) for (const k of kids.get(p) ?? []) if (!out.has(k)) { out.add(k); todo.push(k); }
   return out;
 };
 // Who a run's members are in `table`, for `record` (pure: the table and the clock are given).
 // macOS: this uid's live processes whose responsible pid is the root, started at or after it, and, when the root's pid
 // is now held by another process Q (a start time that is not the record's), before Q: what is attributed to a reused
-// pid and started after its new holder is the holder's, never ours. Linux: the supervisor's descendants.
+// pid and started after its new holder is the holder's, never ours. Linux: the root's subtree, and the orphans re-parented
+// to the supervisor (a subreaper) that carry its PRONTO_RUN marker, with theirs; never the supervisor's own children.
 // A read error on a live pid of this uid is a failure (fail closed); ESRCH is a pid gone; another uid's, skipped.
 export function planReap(table: PidTable, record: RunRecord, now: number): Plan {
   const plan: Plan = { members: [], skipped: [], failed: [] };
   if (table.listError !== undefined) { plan.failed.push(`the process list could not be read: ${table.listError}`); return plan; }
   const root = table.rows.find((r) => r.pid === record.rootpid);
   const holder = root && root.errno === undefined && root.start !== undefined && root.start !== record.rootstart ? root.start : undefined;
-  const under = table.os === "linux" ? descendants(table.rows, record.superpid) : undefined;
+  const runId = `${record.superpid}-${record.superstart}`;
+  const orphans = table.os === "linux" ? table.rows.filter((r) => r.errno === undefined && r.ppid === record.superpid && r.pid !== record.rootpid && r.marker === runId).map((r) => r.pid) : [];
+  const under = table.os === "linux" ? new Set([...descendants(table.rows, [record.rootpid, ...orphans]), ...orphans]) : undefined;
   for (const r of table.rows) {
     if (r.pid === record.rootpid || r.pid === record.superpid) continue;
     if (r.errno !== undefined) {
@@ -1486,6 +1491,7 @@ export function planReap(table: PidTable, record: RunRecord, now: number): Plan 
     }
     if (r.uid !== table.uid) { plan.skipped.push({ pid: r.pid, why: "another account's" }); continue; }
     if (r.zombie) { plan.skipped.push({ pid: r.pid, why: "a zombie" }); continue; }
+    if (r.unreadable) { plan.skipped.push({ pid: r.pid, why: "its environ could not be read" }); continue; }
     if (r.start === undefined) { plan.failed.push(`pid ${r.pid} has no start time`); continue; }
     const mine = under ? under.has(r.pid) : r.responsible === record.rootpid && r.start >= record.rootstart && (holder === undefined || r.start < holder);
     if (mine) plan.members.push({ pid: r.pid, start: r.start, age: table.os === "darwin" ? Math.max(0, now - r.start / 1000) : undefined });
@@ -1517,7 +1523,8 @@ export function nestedIn(table: PidTable, self: number, records: readonly RunRec
   if (!me || me.errno !== undefined) throw new Error(`this process (${self}) could not be read in the process list${me?.errno !== undefined ? ` (errno ${me.errno})` : ""}`);
   if (table.os === "darwin" && me.responsible !== undefined && me.responsible > 0 && me.responsible !== self) {
     const root = by.get(me.responsible);
-    const rec = records.find((r) => r.rootpid === me.responsible && root !== undefined && root.errno === undefined && root.start === r.rootstart);
+    const rec = records.find((r) => r.rootpid === me.responsible && root !== undefined && root.errno === undefined && root.start === r.rootstart
+      && by.get(r.superpid)?.errno === undefined && by.get(r.superpid)?.start === r.superstart);
     if (rec) return rec;
   }
   for (let p = me.ppid ?? 0, i = 0; p > 1 && i < 64; i++) {
@@ -1534,25 +1541,51 @@ export function nestedIn(table: PidTable, self: number, records: readonly RunRec
 // binary, as deno is: under a root that is an Apple one (sh, perl) the kernel makes every non-Apple process a descendant
 // execs (deno, bash, postgres) responsible for itself, and with it everything it starts, so a keeper written in perl lost
 // all of them (measured 2026-11-20). The signals that end a run are caught here and go to the command, which has them by default.
-// If the supervisor dies instead, it stays, for the dead run's reaper to find, for up to 12 h.
-const KEEPER = String.raw`const [dir, ...cmd] = Deno.args;
+// If the supervisor dies instead (polled every half second), the keeper ends the run itself (orphaned); 12 h is only a backstop.
+const KEEPER = String.raw`const [dir, slotUrl, sp, ss, ...cmd] = Deno.args;
+const superpid = Number(sp), superstart = Number(ss);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const put = (f, text) => { Deno.writeTextFileSync(dir + "/" + f + ".tmp", text); Deno.renameSync(dir + "/" + f + ".tmp", dir + "/" + f); };
+const exists = (f) => { try { Deno.statSync(dir + "/" + f); return true; } catch { return false; } };
 for (const s of ["SIGINT", "SIGTERM", "SIGHUP"]) Deno.addSignalListener(s, () => {});
-let child;
+const nums = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGSEGV: 11, SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15 };
+let child = null, finished = false, code = 127;
 try { child = new Deno.Command(cmd[0], { args: cmd.slice(1), stdin: "inherit", stdout: "inherit", stderr: "inherit" }).spawn(); }
-catch (e) { console.error("slot: " + cmd[0] + ": " + e.message); put("cmd", "1"); put("done", "127 0"); child = null; }
-let code = 127;
+catch (e) { console.error("slot: " + cmd[0] + ": " + e.message); put("cmd", "1"); put("done", "127 0"); finished = true; }
 if (child) {
   put("cmd", String(child.pid));
-  const st = await child.status;
-  const nums = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGSEGV: 11, SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15 };
-  code = st.code;
-  put("done", st.code + " " + (st.signal ? (nums[st.signal] ?? 1) : 0));
+  child.status.then((st) => { code = st.code; put("done", st.code + " " + (st.signal ? (nums[st.signal] ?? 1) : 0)); finished = true; });
 }
-const end = Date.now() + 12 * 3600_000;
-while (Date.now() < end) {
-  try { Deno.statSync(dir + "/release"); break; } catch { /* not yet */ }
-  await new Promise((r) => setTimeout(r, 50));
+// The supervisor is gone without letting go (it was killed, or exited with the run pending): this keeper ends the run,
+// as the supervisor would: the command told TERM and, after 10 s, KILL; then what the run left; then its record.
+const orphaned = async () => {
+  const m = await import(slotUrl), sys = m.ownSys();
+  if (child && !finished) {
+    try { child.kill("SIGTERM"); } catch { /* gone */ }
+    await Promise.race([child.status, sleep(10000)]);
+    if (!finished) { try { child.kill("SIGKILL"); } catch { /* gone */ } await Promise.race([child.status, sleep(5000)]); }
+  }
+  const rec = m.readRecords().find((r) => r.rootpid === Deno.pid);
+  if (rec) {
+    await m.stopMembers(sys, rec);
+    try { Deno.removeSync((Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks") + "/runs/" + rec.rootpid + "-" + rec.rootstart); } catch { /* gone */ }
+  }
+  try { Deno.removeSync(dir, { recursive: true }); } catch { /* gone */ }
+};
+let sys, tick = 0;
+for (const end = Date.now() + 12 * 3600_000; Date.now() < end; await sleep(50)) {
+  if (exists("release")) {
+    // Let go while the command still runs (the supervisor failed on its way): it is killed, so nothing waits on it.
+    if (!finished && child) { try { child.kill("SIGKILL"); } catch { /* gone */ } await Promise.race([child.status, sleep(5000)]); }
+    break;
+  }
+  if (++tick % 10 === 0) {
+    try {
+      sys ??= (await import(slotUrl)).ownSys();
+      const r = sys.row(superpid);
+      if (r.errno === 3 || (r.errno === undefined && (r.start !== superstart || r.zombie))) { await orphaned(); break; }
+    } catch (e) { console.error("slot keeper: " + e.message); }
+  }
 }
 Deno.exit(code);
 `;
@@ -1565,6 +1598,8 @@ export interface Sys {
   // One signal to one process, after checking its start time is still the one read: "sent", "gone", "changed" (the pid is another process now), or the error.
   signal(pid: number, start: number, sig: "SIGTERM" | "SIGKILL" | "SIGINT" | "SIGHUP"): string;
   command(pid: number): string;
+  // Linux: reaps an orphan the subreaper inherited, once it has died.
+  reap?(pid: number): void;
 }
 const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const ageText = (ms?: number) => ms === undefined ? "" : `age ${humanAge(ms)}, `;
@@ -1584,6 +1619,7 @@ export async function stopMembers(sys: Sys, record: RunRecord, termMs = 5000, po
     const first = new Set(now.map(key));
     for (let waited = 0; waited < termMs; waited += pollMs) {
       await sleepMs(pollMs);
+      if (sys.os === "linux") for (const pid of listed.keys()) sys.reap?.(pid);
       now = look().filter((m) => first.has(key(m)));
       if (!now.length) break;
     }
@@ -1593,6 +1629,7 @@ export async function stopMembers(sys: Sys, record: RunRecord, termMs = 5000, po
     if (!now.length) break;
     send(now, "SIGKILL");
     await sleepMs(200);
+    if (sys.os === "linux") for (const pid of listed.keys()) sys.reap?.(pid);
   }
   now = look();
   return { listed: [...listed.values()], survivors: now.map((m) => name(sys, m)), failed };
@@ -1630,7 +1667,7 @@ export interface RealSys extends Sys {
 // not the root: a keeper is (a small perl, disclaimed), the command its child, and the keeper does not exit until
 // `end()` lets it go, after the members have been listed and stopped. Linux needs none: orphans re-parent to the subreaper.
 export type Root = {
-  pid: number; cmd: number;
+  pid: number; cmd: number; cmdStart?: number;
   done: Promise<{ code: number; signal: number }>;
   // Lets the root go, waits until it has exited, and reaps it: last, so its pid stayed ours throughout.
   end(): Promise<void>;
@@ -1719,7 +1756,12 @@ export function ownSys(): RealSys {
       const text = Deno.readTextFileSync(`/proc/${pid}/stat`);
       // pid (comm) state ppid ...: comm may hold spaces and parentheses, so from the last ")".
       const f = text.slice(text.lastIndexOf(")") + 2).split(" ");
-      return { pid, uid: Deno.statSync(`/proc/${pid}`).uid ?? undefined, zombie: f[0] === "Z" || f[0] === "X", ppid: Number(f[1]), start: Number(f[19]) * 1e6 / ticks };
+      const row: PidRow = { pid, uid: Deno.statSync(`/proc/${pid}`).uid ?? undefined, zombie: f[0] === "Z" || f[0] === "X", ppid: Number(f[1]), start: Number(f[19]) * 1e6 / ticks };
+      // A child of this process may be an orphan the subreaper took (marked by PRONTO_RUN) or one of its own (a `ps`, a `down`).
+      if (row.ppid === Deno.pid && !row.zombie) {
+        try { row.marker = /(?:^|\0)PRONTO_RUN=([^\0]*)/.exec(Deno.readTextFileSync(`/proc/${pid}/environ`))?.[1]; } catch { row.unreadable = true; }
+      }
+      return row;
     } catch (e) {
       return { pid, errno: e instanceof Deno.errors.NotFound ? ESRCH : e instanceof Deno.errors.PermissionDenied ? EPERM : -1 };
     }
@@ -1793,6 +1835,8 @@ export function ownSys(): RealSys {
       if (opts.disclaim !== false && !linux) check("responsibility_spawnattrs_setdisclaim", sym.responsibility_spawnattrs_setdisclaim(attr, 1));
       if (cwd) check(`chdir to ${cwd}`, sym.posix_spawn_file_actions_addchdir_np(fa, cstr(cwd)));
       const r = sym.posix_spawn(out, cstr(path), fa, attr, argv, envp) as number;
+      // The strings argv and envp point into are read by the call: kept reachable until it has returned.
+      if (Deno.UnsafePointer.of(arena) === null || addrs.length === 0) throw new Error("slot: spawn arena lost");
       if (r !== 0) throw new Error(`slot: could not start ${cmd[0]}: errno ${r}${r === 2 ? " (no such file)" : r === 13 ? " (permission denied)" : r === 8 ? " (exec format error: a script without #!)" : ""}`);
       return out[0];
     } finally { sym.posix_spawnattr_destroy(attr); sym.posix_spawn_file_actions_destroy(fa); }
@@ -1814,12 +1858,12 @@ export function ownSys(): RealSys {
       // Orphans re-parent to this process, so the command can be the root.
       if (sym.prctl(36, 1n, 0n, 0n, 0n) !== 0) throw new Error(`slot: prctl(PR_SET_CHILD_SUBREAPER) failed: errno ${errno()}`);
       const pid = spawn(cmd, env, cwd, { pgroup: opts.pgroup });
-      return { pid, cmd: pid, done: exited(pid), end: async () => { await exited(pid); reap(pid); } };
+      return { pid, cmd: pid, cmdStart: row(pid).start, done: exited(pid), end: async () => { await exited(pid); reap(pid); } };
     }
     // The keeper talks through two files in a folder of its own: it writes `cmd` (the command's pid) and `done`
     // ("<code> <signal>"), and leaves when `release` appears.
     const dir = Deno.makeTempDirSync({ dir: runsDir(), prefix: "k-" });
-    const pid = spawn([Deno.execPath(), "eval", "--no-config", "--no-lock", "-A", KEEPER, dir, ...cmd], env, cwd, { pgroup: opts.pgroup });
+    const pid = spawn([Deno.execPath(), "eval", "--no-config", "--no-lock", "-A", KEEPER, dir, import.meta.url, String(Deno.pid), String(row(Deno.pid).start), ...cmd], env, cwd, { pgroup: opts.pgroup });
     const read = (f: string) => { try { return Deno.readTextFileSync(`${dir}/${f}`).trim(); } catch { return undefined; } };
     const poll = async (f: string, ms: number) => {
       for (const end = Date.now() + ms; Date.now() < end;) {
@@ -1843,7 +1887,7 @@ export function ownSys(): RealSys {
     })();
     done.catch(() => {});
     return {
-      pid, cmd: Number(first), done,
+      pid, cmd: Number(first), cmdStart: row(Number(first)).start, done,
       end: async () => {
         Deno.writeTextFileSync(`${dir}/release`, "x");
         await exited(pid);
@@ -1877,6 +1921,9 @@ export type OwnOpts = {
   sys?: RealSys;
 };
 export type OwnResult = { code: number; signal: number; rootpid: number; owned: boolean; leftovers: string[]; failed: string[] };
+const SIGNUMS: Record<string, number> = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6, SIGKILL: 9, SIGSEGV: 11, SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15 };
+// The number of a signal Deno names (a child's `status.signal`), 0 for none.
+export const sigNumber = (name: string | null | undefined): number => name ? SIGNUMS[name] ?? 1 : 0;
 // 130 for INT and TERM (as every listener here has ended), 129 for HUP, 124 for the timeout.
 const signalCode = (s: string) => s === "SIGHUP" ? 129 : 130;
 // Calls `on` with the signal's name at the first INT, TERM or HUP; returns what removes the listeners.
@@ -1903,7 +1950,7 @@ async function runPlain(cmd: string[], opts: OwnOpts, env: Record<string, string
   const timer = opts.timeoutMs ? setTimeout(() => { stop(124); }, opts.timeoutMs) : undefined;
   try {
     const st = await c.status;
-    return { code: stopped || st.code, signal: st.signal ? 1 : 0, rootpid: c.pid, owned: false, leftovers: [], failed: [] };
+    return { code: stopped || st.code, signal: sigNumber(st.signal), rootpid: c.pid, owned: false, leftovers: [], failed: [] };
   } finally {
     clearTimeout(timer);
     for (const [s, h] of handlers) Deno.removeSignalListener(s as Deno.Signal, h);
@@ -1924,11 +1971,20 @@ export async function ownRun(cmd: string[], opts: OwnOpts = {}): Promise<OwnResu
   let root: Root | undefined, record: RunRecord | undefined, file = "", finished = false, stopCode = 0, pending = "";
   let timer: ReturnType<typeof setTimeout> | undefined, kill: ReturnType<typeof setTimeout> | undefined;
   const failed: string[] = [];
-  const members = () => record ? listMembers(sys, record).members : [];
-  // Every member told `sig`, each after its start time is read again; the root's command too when it is not one (Linux).
+  // The command told `sig` directly, its pid and start time checked: whatever the table says, and whatever became of the keeper.
+  const cmdSignal = (sig: "SIGTERM" | "SIGKILL") => {
+    if (!root || root.cmdStart === undefined) return;
+    const r = sys.signal(root.cmd, root.cmdStart, sig);
+    if (!["sent", "gone", "changed"].includes(r)) say(`${what}: the command could not be told ${sig} (${r})`);
+  };
+  const cmdAlive = () => { const r = root ? sys.row(root.cmd) : undefined; return !!r && r.errno === undefined && r.start === root?.cmdStart && !r.zombie; };
+  // The command, then every member, told `sig`, each after its start time is read again; a list that failed is said.
   const tell = (sig: "SIGTERM" | "SIGKILL") => {
-    for (const m of members()) sys.signal(m.pid, m.start, sig);
-    if (root && sys.os === "linux") try { Deno.kill(root.pid, sig); } catch { /* gone */ }
+    cmdSignal(sig);
+    if (!record) return;
+    const p = listMembers(sys, record);
+    for (const f of p.failed) say(`${what}: ${f}`);
+    for (const m of p.members) sys.signal(m.pid, m.start, sig);
   };
   try {
     await Deno.mkdir(runsDir(), { recursive: true, mode: 0o755 });
@@ -1940,7 +1996,8 @@ export async function ownRun(cmd: string[], opts: OwnOpts = {}): Promise<OwnResu
     // The record exists before the root does, so a claim the root makes at once finds the run it is inside.
     pending = `${runsDir()}/pending-${Deno.pid}-${me.start}`;
     writeRecord(pending, { ...base, rootpid: 0, rootstart: 0 });
-    root = await sys.root(cmd, env, opts.cwd, { pgroup: opts.pgroup });
+    // PRONTO_RUN marks what this run starts, for the Linux members that re-parent to this process.
+    root = await sys.root(cmd, { ...env, PRONTO_RUN: `${Deno.pid}-${me.start}` }, opts.cwd, { pgroup: opts.pgroup });
     const r = sys.row(root.pid);
     if (r.errno !== undefined || r.start === undefined) throw new Error(`slot: the root ${root.pid} could not be read (errno ${r.errno}): the run is not owned`);
     record = { ...base, rootpid: root.pid, rootstart: r.start };
@@ -1948,14 +2005,16 @@ export async function ownRun(cmd: string[], opts: OwnOpts = {}): Promise<OwnResu
     writeRecord(file, record);
     Deno.removeSync(pending);
     opts.onSpawn?.(root.cmd);
-    if (opts.rootOut) Deno.writeTextFileSync(opts.rootOut, `${root.pid} ${r.start}\n`);
+    if (opts.rootOut) Deno.writeTextFileSync(opts.rootOut, `${root.pid} ${r.start} ${root.cmd}\n`);
     const grace = opts.grace ?? 120_000;
     const go = (code: number) => {
       if (stopCode) return;
       stopCode = code;
       (async () => {
         if (opts.stop) await opts.stop().catch((e) => say(`${what}: its own stop failed: ${e instanceof Error ? e.message : e}`));
-        else tell("SIGTERM");
+        // As before the owner: the command first, to run its own traps in order (integrate-local.ts, rehearse.ts); its members
+        // are stopped once it has exited, or killed with it when its grace has run out.
+        else cmdSignal("SIGTERM");
         kill = setTimeout(() => tell("SIGKILL"), grace);
       })();
     };
@@ -1980,7 +2039,11 @@ export async function ownRun(cmd: string[], opts: OwnOpts = {}): Promise<OwnResu
     clearTimeout(timer); clearTimeout(kill);
     // An error on the way: what the run started is stopped all the same, and the root let go.
     if (root && !finished) {
-      if (record) { tell("SIGKILL"); await stopMembers(sys, record, 1000).catch(() => {}); }
+      // The command is told TERM, given 5 s, and killed, with or without a record, a keeper or a readable table.
+      cmdSignal("SIGTERM");
+      for (let i = 0; i < 50 && cmdAlive(); i++) await sleepMs(100);
+      tell("SIGKILL");
+      if (record) await stopMembers(sys, record, 1000).catch(() => {});
       await root.end().catch(() => {});
       if (file) try { Deno.removeSync(file); } catch { /* gone */ }
     }
@@ -2027,7 +2090,7 @@ export async function ownerVerb(verb: string, args: string[]): Promise<never> {
       if (!row || row.errno !== undefined) Deno.exit(1);
       if (t.os === "darwin") Deno.exit(pid !== root && row.responsible === root ? 0 : 1);
       const rec = readRecords().find((r) => r.rootpid === root);
-      Deno.exit(rec && descendants(t.rows, rec.superpid).has(pid) && pid !== root ? 0 : 1);
+      Deno.exit(rec && descendants(t.rows, [rec.rootpid]).has(pid) && pid !== root ? 0 : 1);
     }
     if (verb === "leftovers") {
       // Reports what runs whose supervisor is gone left behind; it exits 0 whatever it finds (it does not yet fail a gate).
@@ -2271,7 +2334,7 @@ if (import.meta.main) {
     code = (await s.child.status).code;
     await sweep(slot.door);
     if (code === 0) await Deno.remove(tmp, { recursive: true }).catch(() => {});
-    else console.error(whyEnded(await Deno.readTextFile(`${tmp}/process-compose.log`).catch(() => ""), await Deno.readTextFile(`${tmp}/processes.log`).catch(() => "")));
+    else if (code !== 130 && code !== 129) console.error(whyEnded(await Deno.readTextFile(`${tmp}/process-compose.log`).catch(() => ""), await Deno.readTextFile(`${tmp}/processes.log`).catch(() => "")));
   } else {
     const [cmd, ...rest] = args;
     // Not ORIGIN or APP_URL: a command that brings a stack up (integrate-local.ts) moves every port to
