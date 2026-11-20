@@ -49,9 +49,10 @@ export def undo [before: table, namespace: string]: nothing -> record {
 		let s = if $u.exit_code == 0 { ^kubectl rollout status $"deployment/($d.name)" -n $namespace --timeout=180s | complete } else { $u }
 		{name: $d.name, ok: ($s.exit_code == 0), why: ($s.stderr | str trim)}
 	})
-	# A Deployment this release created (none before) is not rolled back to anything: it is deleted, or the failed release's
-	# new template keeps running.
-	let created = ($before | where revision == 0 | each {|b|
+	# A Deployment this release created is not rolled back to anything: it is deleted, or the failed release's new template keeps
+	# running. Only a confirmed absence before the apply (revision 0 and generation 0, which `state` answers for a successful,
+	# empty read alone) counts as created: one that existed and awaited its first revision (generation above 0) is left.
+	let created = ($before | where {|b| $b.revision == 0 and $b.generation == 0 } | each {|b|
 		try {
 			let now = (state $b.name $namespace)
 			if $now.revision == 0 and $now.generation == 0 { {name: $b.name, ok: true, why: "", deleted: false} } else {
@@ -62,7 +63,7 @@ export def undo [before: table, namespace: string]: nothing -> record {
 		} catch {|e| {name: $b.name, ok: false, why: $e.msg, deleted: false} }
 	})
 	{
-		undone: (($results | where ok | get name) | append ($created | where ok and deleted | get name))
+		undone: (($results | where ok | get name) | append ($created | where {|r| $r.ok and $r.deleted } | get name))
 		failed: (($results | where not ok | select name why) | append ($created | where not ok | select name why) | append $c.failed)
 	}
 }

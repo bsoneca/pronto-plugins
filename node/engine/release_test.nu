@@ -211,6 +211,7 @@ def main [] {
 	test_the_collection_waits_for_releases_in_flight
 	test_a_stale_lock_is_taken_over_against_its_resource_version
 	test_prune_runs_only_the_maintenance
+	test_only_a_confirmed_absence_is_created
 	test_the_lock_is_released_against_what_was_read_and_its_failure_is_told
 	test_verification_is_invalidated_before_a_release_changes_what_serves
 	test_a_failed_provider_export_stops_the_release
@@ -1173,6 +1174,19 @@ def test_the_lock_is_released_against_what_was_read_and_its_failure_is_told [] {
 	assert equal $d.exit_code 0 $"($d.stdout)($d.stderr)"
 	assert (has $d.stdout "releases are in flight") $d.stdout
 	assert (not ((calls $w) | any {|x| $x | str starts-with "get pods -A" })) "the cluster is not read outside the lock and the leases' quiet"
+	rm -rf $w.dir
+}
+
+def test_only_a_confirmed_absence_is_created [] {
+	print "test rollback deletes a Deployment recorded absent (revision 0, generation 0), and leaves one that existed awaiting its first revision..."
+	let w = (sandbox)
+	"1" | save -f ($w.state | path join revision aprende-crud)
+	"1" | save -f ($w.state | path join revision aprende-electric)
+	let use = $"use ($engine_dir | path join rollback.nu);"
+	let r = (in-world $w -c ($use + " rollback undo [{name: aprende-crud, revision: 0, generation: 1}, {name: aprende-electric, revision: 0, generation: 0}] aprende | to json --raw"))
+	assert equal $r.exit_code 0 $r.stderr
+	let deletes = (calls $w | where {|c| $c | str starts-with "delete deployment" })
+	assert equal $deletes ["delete deployment aprende-electric -n aprende --ignore-not-found"] "only the one recorded absent is deleted"
 	rm -rf $w.dir
 }
 
