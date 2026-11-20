@@ -104,8 +104,6 @@ export function declaredKeys(entries: [string, string][], reads: string[] = []):
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([f, h]) => `declared ${f} ${h}`);
 }
 
-// The sibling apps' tracked files beside the app (`../*/`), with git's blob hash of each: [path relative to the app,
-// blob]. Null when git cannot say, which runs everything.
 // Why a scenario whose diff against main concerns it not must run anyway: a sibling file the app reads (`declared`, the
 // digest of declaredKeys) is not as it was at its last green run. An app that reads none records and compares nothing; an
 // unreadable list (null) runs it.
@@ -114,6 +112,8 @@ export function siblingsMoved(recorded: string | undefined, now: string | null):
   return (recorded ?? "") === now ? null : "a sibling file it reads changed since its last green run";
 }
 
+// The sibling apps' tracked files beside the app (`../*/`), with git's blob hash of each: [path relative to the app,
+// blob]. Null when git cannot say, which runs everything.
 function siblingFiles(root: string): [string, string][] | null {
   const top = git(root, "rev-parse", "--show-toplevel")?.trim();
   if (!top) return null;
