@@ -87,16 +87,17 @@ def stage-context [app_dir: string, work: string, dest: string, include: list<st
 	if ($missing | is-not-empty) { error make {msg: $"build.include names ($missing | str join ', '), which is not a file in ($app_dir): the app's generate writes it"} }
 	let secret = ($include | where {|f| looks-secret $f })
 	if ($secret | is-not-empty) { error make {msg: $"build.include names ($secret | str join ', '), which looks like a secret and is never staged"} }
-	let untracked = (do { cd $app_dir; ^git ls-files -o --exclude-standard } | lines)
+	# NUL-separated, so a file name with a newline in it is one name
+	let untracked = (do { cd $app_dir; ^git ls-files -z -o --exclude-standard } | split row (char nul) | where {|f| $f != "" })
 	let denied = ($untracked | where {|f| looks-secret $f })
 	if ($denied | is-not-empty) { print $"node: (stamp) not in the build context, untracked and secret-looking: ($denied | str join ', ')" }
-	let files = (do { cd $app_dir; ^git ls-files -co --exclude-standard } | lines
+	let files = (do { cd $app_dir; ^git ls-files -z -co --exclude-standard } | split row (char nul) | where {|f| $f != "" }
 		| where {|f| not ($f starts-with ".certs/") and ($f not-in $denied) and ($app_dir | path join $f | path exists) }
 		| append $include | uniq)
-	$files | str join "\n" | save -f ($work | path join files)
+	$"($files | str join (char nul))(char nul)" | save -f ($work | path join files)
 	mkdir $dest
 	# macOS's bsdtar reads -T's list after every -C: one -C only.
-	with-env {COPYFILE_DISABLE: "1"} { ^tar -cf - -C $app_dir -T ($work | path join files) | ^tar -xf - -C $dest }
+	with-env {COPYFILE_DISABLE: "1"} { ^tar -cf - --null -C $app_dir -T ($work | path join files) | ^tar -xf - -C $dest }
 	$files | length
 }
 

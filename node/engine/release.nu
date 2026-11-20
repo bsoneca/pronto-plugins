@@ -248,13 +248,20 @@ export def record-release [app_dir: string, node: record, pushed: record] {
 	{
 		apiVersion: "v1", kind: "ConfigMap"
 		metadata: {name: "pronto-release", namespace: $node.namespace}
-		data: {sha: $sha, verified: "", pin: (runtime version), enginePin: $engine, images: ($images | to json --raw), at: (date now | format date "%Y-%m-%dT%H:%M:%S%z")}
+		data: {sha: $sha, verified: "", pruned: "", prune_error: "", pin: (runtime version), enginePin: $engine, images: ($images | to json --raw), at: (date now | format date "%Y-%m-%dT%H:%M:%S%z")}
 	} | to json | kubectl-ok apply -f -
 }
 
-# What the prune did, in the release's ConfigMap: `pruned` "true" or "false", and `prune_error` (empty on success).
-export def record-prune [node: record, failure: any] {
-	let data = if $failure == null { {pruned: "true", prune_error: ""} } else { {pruned: "false", prune_error: ($failure | into string | str substring 0..499)} }
+# The registry lease renewed; a renewal that fails is a warning, never a failure of a release that may already be live (the
+# lease's hour is the margin, and the next renewal tries again).
+def renew-lease [node: record, lease: string] {
+	if $lease == "" { return }
+	try { registry lease-renew $node.build $lease } catch {|e| print -e $"node: (stamp) warning: the registry lease ($lease) was not renewed: ($e.msg)" }
+}
+
+# What the prune did, in the release's ConfigMap: `pruned` "true", "false" or "pending" (the collection was deferred, to be retried), and `prune_error` (empty on success).
+export def record-prune [node: record, failure: any, pending: string = ""] {
+	let data = if $failure != null { {pruned: "false", prune_error: ($failure | into string | str substring 0..499)} } else if ($pending | is-not-empty) { {pruned: "pending", prune_error: $"collection deferred: ($pending)" } } else { {pruned: "true", prune_error: ""} }
 	kubectl-ok patch configmap pronto-release -n $node.namespace --type merge -p ({data: $data} | to json --raw)
 }
 
@@ -465,7 +472,7 @@ def main [
 	}
 	if $serving {
 		# What cd asks before it releases: what the node's namespace records (an absent record, or namespace, is empty):
-		# `serving <sha> verified <sha> maintenance <ok|failed|unknown>`.
+		# `serving <sha> verified <sha> maintenance <ok|failed|pending|unknown>`.
 		tunnel with-tunnel $node.api $node.build {|fwd|
 			let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
 			try {
@@ -473,7 +480,7 @@ def main [
 					let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o json | complete)
 					if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
 					let data = if ($r.stdout | str trim | is-empty) { {} } else { $r.stdout | from json | get -o data | default {} }
-					let maintenance = match ($data | get -o pruned | default "") { "true" => "ok", "false" => "failed", _ => "unknown" }
+					let maintenance = match ($data | get -o pruned | default "") { "true" => "ok", "false" => "failed", "pending" => "pending", _ => "unknown" }
 					print $"serving (($data | get -o sha | default '') | str trim) verified (($data | get -o verified | default '') | str trim) maintenance ($maintenance)"
 				}
 			} finally {
@@ -488,9 +495,11 @@ def main [
 			let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
 			try {
 				with-env {KUBECONFIG: $kubeconfig} {
-					let failure = (try { registry prune $"127.0.0.1:($fwd.registry)" $node.build ""; null } catch {|e| $e.msg })
-					record-prune $node $failure
+					mut pending = ""
+					let failure = (try { $pending = (registry prune $"127.0.0.1:($fwd.registry)" $node.build ""); null } catch {|e| $e.msg })
+					record-prune $node $failure $pending
 					if $failure != null { error make {msg: $"the registry maintenance failed: ($failure)"} }
+					if ($pending | is-not-empty) { error make {msg: $"the registry maintenance was deferred, not done: ($pending)"} }
 					print $"node: (stamp) the node's registry maintenance passed"
 				}
 			} finally {
@@ -540,6 +549,7 @@ def main [
 					let lease = if (not $check) or $build { registry lease-acquire $node.build $node.name $node.namespace } else { "" }
 					try {
 						# 2. build, or placeholders for a check
+						renew-lease $node $lease
 						let preview_tag = if ($node.preview | is-empty) { "release" } else { $node.preview }
 						let pushed = if $check and not $build {
 							render placeholder-pushed $services $preview_tag
@@ -548,17 +558,18 @@ def main [
 							build-images $app_info $node $fwd $services (if $check { "check" } else { $preview_tag })
 						}
 						# the lease renewed after the push, and again after the long phases that follow
-						if $lease != "" { registry lease-renew $node.build $lease }
+						renew-lease $node $lease
 						release-app $app_info $node $meta $compose $facts $secrets $pushed --check=$check
-						if $lease != "" { registry lease-renew $node.build $lease }
+						renew-lease $node $lease
 						# 16. prune: the release is live, so a failure here does not undo it; it is recorded beside the release
 						# (`--serving` reports it) and ends the command with a distinct status once the tunnel is closed
 						if not $check {
-							let failure = (try { registry prune $"127.0.0.1:($fwd.registry)" $node.build $lease; null } catch {|e|
+							mut pending = ""
+							let failure = (try { $pending = (registry prune $"127.0.0.1:($fwd.registry)" $node.build $lease); null } catch {|e|
 								print -e $"node: (stamp) MAINTENANCE FAILED: the node's registry was not pruned, the release is live: ($e.msg)"
 								$e.msg
 							})
-							let unrecorded = (try { record-prune $node $failure; null } catch {|e| $e.msg })
+							let unrecorded = (try { record-prune $node $failure $pending; null } catch {|e| $e.msg })
 							if $unrecorded != null { error make {msg: $"the release is live, but the prune's outcome could not be recorded: ($unrecorded)"} }
 							$failure
 						}

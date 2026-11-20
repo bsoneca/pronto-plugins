@@ -22,9 +22,11 @@ export def --wrapped compose-run [dir: string, ...args: string]: nothing -> reco
 	let config = (mktemp -d -t node-compose.XXXXXX | str trim)
 	mkdir ($config | path join cli-plugins)
 	^ln -sf (nearest-on-path $found $env.PATH) ($config | path join cli-plugins docker-compose)
-	let r = (with-env {DOCKER_CONFIG: $config} { do { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd ($dir | path expand); ^docker compose ...$args } | complete })
-	rm -rf $config
-	$r
+	try {
+		with-env {DOCKER_CONFIG: $config} { do { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd ($dir | path expand); ^docker compose ...$args } | complete }
+	} finally {
+		rm -rf $config
+	}
 }
 
 # `docker compose config`'s project for the app, as JSON, read with no seal key in the environment

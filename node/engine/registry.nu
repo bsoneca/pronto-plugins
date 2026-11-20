@@ -48,7 +48,7 @@ def --wrapped kubectl-out [...args: string]: nothing -> string {
 # deletes every untagged manifest and every blob none of the rest reference. `registry` is the
 # registry as this release reaches it (127.0.0.1:<fwd.registry>). Garbage collection deletes the blobs
 # of a push still in flight, so it is skipped while an upload is open: the next release collects.
-export def prune [registry: string, build: record, own: string = ""] {
+export def prune [registry: string, build: record, own: string = ""]: nothing -> string {
 	let ns = $build.registry.namespace
 	let target = $"deploy/($build.registry.deployment)"
 	let kinds = ["pods" "replicasets" "deployments" "statefulsets" "daemonsets" "jobs" "cronjobs" "clusters.postgresql.cnpg.io"]
@@ -97,7 +97,7 @@ export def blob-cache [build: record]: nothing -> string {
 # point at nothing. It runs under the collector's lock and only while no other release holds a lease (a
 # release's lease spans its push), so a collection never meets a release's layers uploaded and not yet
 # published; a push outside the leases (an open upload) is still checked for.
-export def collect [build: record, own: string = ""] {
+export def collect [build: record, own: string = ""]: nothing -> string {
 	let ns = $build.registry.namespace
 	let target = $"deploy/($build.registry.deployment)"
 	# Only one collector at a time, and only while no other release holds a lease (one is held from before a release's push
@@ -106,18 +106,20 @@ export def collect [build: record, own: string = ""] {
 	let holder = (lock-take $build)
 	if ($holder | is-empty) {
 		print $"node: (stamp) another release is collecting the node's registry: its garbage collection waits for the next release"
-		return
+		return "another release is collecting"
 	}
-	try {
+	let reason = (try {
 		let others = (leases $build | where {|l| $l.name != $own })
 		if ($others | is-not-empty) {
 			print $"node: (stamp) the node's registry has releases in flight \(($others | get name | str join ', ')\): its garbage collection waits for the next release"
-			return
+			"releases are in flight"
+		} else {
+			collect-locked $build $ns $target
 		}
-		collect-locked $build $ns $target
 	} finally {
 		lock-release $build $holder
-	}
+	})
+	$reason
 }
 
 # Leases and the lock are coordination.k8s.io Leases of the registry's namespace: the holder's name in
@@ -177,12 +179,13 @@ def lock-take [build: record]: nothing -> any {
 	error make {msg: $"taking over the registry's stale collection lock failed: ($swapped.stderr | str trim)"}
 }
 
-# The lock released, only when it is still this collector's.
+# The lock released, only when it is still this collector's. A failed read, and a failed delete, are errors: a lock left
+# behind blocks the next collection for an hour.
 def lock-release [build: record, holder: string] {
 	let ns = $build.registry.namespace
-	let held = (try { lease-get $ns $lock_name } catch { null })
+	let held = (lease-get $ns $lock_name)
 	if $held != null and ($held | get -o spec.holderIdentity) == $holder {
-		do { ^kubectl delete lease $lock_name -n $ns --ignore-not-found | complete } | ignore
+		kubectl-out delete lease $lock_name -n $ns --ignore-not-found | ignore
 	}
 }
 
@@ -219,11 +222,13 @@ export def lease-release [build: record, name: string] {
 }
 
 # The collection itself, under the lock and with no other lease.
-def collect-locked [build: record, ns: string, target: string] {
-	let uploads = (kubectl-out exec -n $ns $target -- sh -c "find /var/lib/registry/docker/registry/v2/repositories -path '*/_uploads/*' -mindepth 1 -maxdepth 4 | head -1" | str trim)
+def collect-locked [build: record, ns: string, target: string]: nothing -> string {
+	# `find` itself is checked (no pipe to hide its exit): a scan that fails stops the collection, it does not read as no upload.
+	let uploads = (kubectl-out exec -n $ns $target -- find /var/lib/registry/docker/registry/v2/repositories -mindepth 1 -maxdepth 4 -path "*/_uploads/*" -print -quit | str trim)
 	if ($uploads | is-not-empty) {
-		print $"node: (stamp) the node's registry has an upload open \(a push outside the leases, or a dead one\): its garbage collection waits for the next release"
-		return
+		let why = "an upload is open (a push outside the leases, or a dead one)"
+		print $"node: (stamp) the node's registry: ($why): its garbage collection waits for the next release"
+		return $why
 	}
 	let before = (kubectl-out exec -n $ns $target -- du -sh /var/lib/registry | split row "\t" | first)
 	let gc = (do { ^kubectl exec -n $ns $target -- registry garbage-collect --delete-untagged /etc/distribution/config.yml } | complete)
@@ -236,4 +241,5 @@ def collect-locked [build: record, ns: string, target: string] {
 		kubectl-out rollout status -n $ns $target --timeout=120s | ignore
 		print $"node: (stamp) the node's registry restarted, so its ($cache) blob cache holds no collected layer"
 	}
+	""
 }

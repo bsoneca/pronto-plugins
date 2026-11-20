@@ -49,5 +49,20 @@ export def undo [before: table, namespace: string]: nothing -> record {
 		let s = if $u.exit_code == 0 { ^kubectl rollout status $"deployment/($d.name)" -n $namespace --timeout=180s | complete } else { $u }
 		{name: $d.name, ok: ($s.exit_code == 0), why: ($s.stderr | str trim)}
 	})
-	{undone: ($results | where ok | get name), failed: ($results | where not ok | select name why | append $c.failed)}
+	# A Deployment this release created (none before) is not rolled back to anything: it is deleted, or the failed release's
+	# new template keeps running.
+	let created = ($before | where revision == 0 | each {|b|
+		try {
+			let now = (state $b.name $namespace)
+			if $now.revision == 0 and $now.generation == 0 { {name: $b.name, ok: true, why: "", deleted: false} } else {
+				print $"node: deleting deployment/($b.name) in ($namespace), which this release created"
+				let d = (^kubectl delete deployment $b.name -n $namespace --ignore-not-found | complete)
+				{name: $b.name, ok: ($d.exit_code == 0), why: ($d.stderr | str trim), deleted: true}
+			}
+		} catch {|e| {name: $b.name, ok: false, why: $e.msg, deleted: false} }
+	})
+	{
+		undone: (($results | where ok | get name) | append ($created | where ok and deleted | get name))
+		failed: (($results | where not ok | select name why) | append ($created | where not ok | select name why) | append $c.failed)
+	}
 }

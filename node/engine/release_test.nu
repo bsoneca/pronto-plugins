@@ -211,6 +211,9 @@ def main [] {
 	test_the_collection_waits_for_releases_in_flight
 	test_a_stale_lock_is_taken_over_against_its_resource_version
 	test_prune_runs_only_the_maintenance
+	test_a_scan_that_fails_aborts_the_collection_and_a_deferred_one_is_pending
+	test_a_file_name_with_a_newline_is_one_name
+	test_a_failed_lease_renewal_is_a_warning_and_the_record_starts_unknown
 	test_the_apps_compose_plugin_is_the_one_that_renders
 	test_the_record_is_the_commit_built_and_serving_agrees
 	test_serving_leaves_no_kubeconfig
@@ -300,6 +303,7 @@ def test_a_new_deployment_has_nothing_to_undo [] {
 	let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert ($r.exit_code != 0)
 	assert equal (calls $w | where {|c| $c | str starts-with "rollout undo" }) []
+	assert ("delete deployment aprende-crud -n aprende --ignore-not-found" in (calls $w)) "a Deployment the failed release created is deleted, not left rolling out"
 	rm -rf $w.dir
 }
 
@@ -1035,6 +1039,59 @@ def test_the_apps_compose_plugin_is_the_one_that_renders [] {
 	assert equal $r.exit_code 0 $r.stderr
 	assert ((open --raw ($w.dir | path join compose_plugins) | str trim | path basename) == "docker-cli-plugin-docker-compose") "the pinned plugin is linked as docker-compose"
 	assert ((open --raw ($w.dir | path join compose_plugins) | str trim) | str contains ($w.dir | path basename)) "and it is the sandbox's, first on the PATH"
+	rm -rf $w.dir
+}
+
+def test_a_failed_lease_renewal_is_a_warning_and_the_record_starts_unknown [] {
+	print "test a lease renewal that fails is a warning (the release is live), and the record starts with maintenance unknown..."
+	let w = (sandbox)
+	"" | save -f ($w.state | path join lease_patch_fail)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert (released $r) $"($r.stdout)($r.stderr)"
+	assert (has $r.stderr "warning: the registry lease") $r.stderr
+	assert (has $r.stdout "[SUCCESS] Released aprende") $r.stdout
+	# a record written by a release says nothing of the maintenance until the prune has been recorded
+	rm -rf $w.dir
+	let v = (sandbox)
+	let rec = (in-world $v -c (script $v $"(inputs $v) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $rec.exit_code 0 $"($rec.stdout)($rec.stderr)"
+	let data = (open --raw ($v.state | path join cm pronto-release) | from json | get data)
+	assert equal $data.pruned "" "pruned starts empty"
+	assert equal $data.prune_error "" "and so does prune_error"
+	let s = (in-world $v $release_nu --app $v.app --serving)
+	assert (has $s.stdout "maintenance unknown") $s.stdout
+	rm -rf $v.dir
+}
+
+def test_a_scan_that_fails_aborts_the_collection_and_a_deferred_one_is_pending [] {
+	print "test a failed upload scan aborts the collection, and a deferred collection is recorded pending, not pruned..."
+	let w = (sandbox)
+	let use = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}};"
+	"" | save -f ($w.state | path join find_fail)
+	let r = (in-world $w -c $"($use) registry collect $build ''")
+	assert ($r.exit_code != 0) "a scan that fails stops the collection"
+	assert (not ((calls $w) | any {|c| $c | str contains "garbage-collect" })) "and collects nothing"
+	assert (not (($w.state | path join lease registry-gc-lock) | path exists)) "its lock is released all the same"
+	rm -f ($w.state | path join find_fail)
+	# a deferred collection: the record says pending, and --serving says so
+	let body = $"use ($engine_dir | path join release.nu) [record-prune]; record-prune {namespace: aprende} null 'releases are in flight'"
+	let p = (in-world $w -c $body)
+	assert equal $p.exit_code 0 $p.stderr
+	let patch = (calls $w | where {|c| $c | str starts-with "patch configmap pronto-release" } | first)
+	assert (has $patch '"pruned":"pending"') $patch
+	assert (has $patch "collection deferred: releases are in flight") $patch
+	let s = (in-world $w $release_nu --app $w.app --serving)
+	assert (has $s.stdout "maintenance pending") $s.stdout
+	rm -rf $w.dir
+}
+
+def test_a_file_name_with_a_newline_is_one_name [] {
+	print "test a file name with a newline in it is staged as one file..."
+	let w = (sandbox)
+	"x" | save -f ($w.app | path join "two\nlines.txt")
+	let r = (in-world $w $release_nu --app $w.app --check --build)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	assert ((open --raw ($w.dir | path join bake_tree)) | str contains "two") "it is in the build context"
 	rm -rf $w.dir
 }
 

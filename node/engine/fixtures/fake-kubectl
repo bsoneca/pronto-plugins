@@ -9,7 +9,7 @@
 # registry_down (the node's builder or registry has no available replica), get_fail_<kind> and missing_<kind>
 # (a read of <kind> in every namespace is refused, or its CRD is not on the node), read_fail_namespace and
 # read_fail_cluster (any read of a namespace, or of the database Cluster, fails as an API error) and
-# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch is refused), inuse (an image the pods name), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
+# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch is refused), inuse (an image the pods name), find_fail (the registry's upload scan fails), lease_patch_fail (a patch of a Lease fails), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
 # object with nothing and exit 0, as kubectl does.
 import json, os, sys
 
@@ -108,6 +108,8 @@ if verb in ("create", "replace") and any(o.get("kind") == "Lease" for o in objs)
     sys.exit(0)
 
 if verb == "patch" and len(args) > 1 and args[1] == "lease":
+    if exists("lease_patch_fail"):
+        fail("Error from server (ServiceUnavailable): the server is currently unable to handle the request")
     p = lease_path(args[2])
     if not os.path.exists(p):
         fail(f'Error from server (NotFound): leases.coordination.k8s.io "{args[2]}" not found')
@@ -309,6 +311,8 @@ if verb == "rollout":
 
 if verb == "exec":
     cmd = " ".join(args[args.index("--") + 1:]) if "--" in args else ""
+    if "find " in cmd and exists("find_fail"):
+        fail("find: '/var/lib/registry/docker/registry/v2/repositories': Permission denied")
     if "find " in cmd:
         print(read("uploads"))
     elif "du -sh" in cmd:

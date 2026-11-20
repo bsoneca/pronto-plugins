@@ -113,7 +113,11 @@ export def drill [app: string, namespace: string, --scratch: string = "restore-d
 		if ($short | is-not-empty) { error make {msg: $"rows missing after the restore:\n($short | str join "\n")"} }
 		print "every table has at least the rows it had at the backup"
 	} finally {
-		if not $keep { ^kubectl delete namespace $scratch --wait=false | complete | ignore }
+		if not $keep {
+			# checked: a scratch namespace that is not deleted holds a restored database, and says so
+			let d = (^kubectl delete namespace $scratch --wait=false | complete)
+			if $d.exit_code != 0 { error make {msg: $"deleting the scratch namespace ($scratch) failed, so a restored database is still there: ($d.stderr | str trim)"} }
+		}
 	}
 }
 
