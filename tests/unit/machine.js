@@ -79,6 +79,13 @@ printf '#!/bin/sh\nn=$(($(cat "$0.n" 2>/dev/null || echo 0) + 1)); echo $n > "$0
 export async function foreignHold() {
   const slot = await import("../../machine/slot.ts");
   const { heldByForeign, releaseTicketOf, holdUid, dirTrust, readForeign } = slot;
+  const throws = (f) => { try { f(); return "no throw"; } catch (e) { return e.message; } };
+  // Whether a cue claim needing 30 GB is admitted while a release holds 20 GB of the 64, behind one older weighted ordinary
+  // ticket reserving 30 GB, judged as the claim's poll does (olderKeeps, then memAdmits): `nested` for the nested claim of a release.
+  const nestedAdmits = (marked, nested) => {
+    const older = [{ weighted: true, weight: 3, release: false, marked, mem: 30 }].filter((o) => slot.olderKeeps(o, 0, 0, 15, true, true, nested));
+    return slot.memAdmits(20, older.reduce((n, o) => n + o.mem, 0), 30, 64);
+  };
   const now = Date.parse("2026-11-19T12:00:00Z"), uid = 501, hours = 12;
   const record = (more = {}) => ({ ticket: false, dirKind: "dir", dirUid: uid, dirMode: 0o755, fileKind: "file", fileUid: uid, fileMode: 0o644, pid: 4242, text: "4242 3 prio=release", written: now - 60_000, alive: true, started: now - 3600_000, what: "release brawl-chess", ...more });
   const ticket = (more = {}) => record({ ticket: true, text: "3 release=1 a release", written: now - 5_000, ...more });
@@ -166,6 +173,22 @@ echo "${Deno.pid} 3 prio=release" > job-8/weight; chmod 664 job-8/weight`);
       heldBeside: slot.heldByRelease(true, 10, false),
       heldRelease: slot.heldByRelease(true, 6, true),
       heldWeight0: slot.heldByRelease(true, 0, false),
+      holdLoadUnset: slot.holdLoadOf(undefined, 18),
+      holdLoadEmpty: slot.holdLoadOf("", 18),
+      holdLoadSet: slot.holdLoadOf("12", 18),
+      holdLoadZero: throws(() => slot.holdLoadOf("0", 18)),
+      holdLoadNegative: throws(() => slot.holdLoadOf("-3", 18)),
+      holdLoadGarbage: throws(() => slot.holdLoadOf("abc", 18)),
+      nestOfRelease: slot.nestedOfReleaseOf(true, [{ release: true, pid: 5 }], [5]),
+      nestOfUnrelated: slot.nestedOfReleaseOf(true, [{ release: true, pid: 5 }, { release: false, pid: 6 }], [6]),
+      nestTopLevel: slot.nestedOfReleaseOf(false, [{ release: true, pid: 5 }], [5]),
+      nestDeadAncestor: slot.nestedOfReleaseOf(true, [], [5]),
+      nestedUnmarkedAdmitted: nestedAdmits(false, true),
+      nestedMarkedWaits: nestedAdmits(true, true),
+      nestedUnmarkedOrdinaryClaim: nestedAdmits(false, false),
+      ticketMarkRoundTrip: JSON.stringify(slot.parseTicket(slot.ticketText({ weight: 3, nested: false, mem: 4, cores: 2, release: false, marked: true, what: "gate x" }))),
+      ticketOldText: JSON.stringify(slot.parseTicket("3 mem=4 cores=2 prio=normal gate x")),
+      ticketMarkedRelease: JSON.stringify(slot.parseTicket(slot.ticketText({ weight: 8, nested: false, release: true, marked: true, what: "beside=1 r" }))),
       loadRead: slot.load1(() => [7, 5, 4]),
       olderBesideKeeps: slot.olderKeeps({ weighted: true, weight: 3, release: false }, 8, 0, 15, true, true),
       olderHeldSkipped: slot.olderKeeps({ weighted: true, weight: 3, release: false }, 8, 0, 15, true, false),
