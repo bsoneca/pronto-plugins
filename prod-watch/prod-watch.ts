@@ -9,7 +9,7 @@
 //   deno run -A prod-watch/prod-watch.ts <app> mark <fp> open|watching|noise|fixed [--reason why] [--pr N]
 // `cue` from PATH or $CUE. The state (cursor.json, ledger.json) is <the repository's root>/.omc/prod-watch/<app>/,
 // runtime state no commit carries.
-import { brt, group, logEntries, logsQuery, mark, podsOf, releasedOf, render, restartRange, restartWindows, triage, unitOf } from "./watch.js";
+import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, restartPending, restartRange, restartWindows, triage, unitOf } from "./watch.js";
 
 // The app's folder: the one this script was written into (prod-watch/ is beside its files).
 const appDir = Deno.realPathSync(new URL("../", import.meta.url).pathname);
@@ -149,17 +149,22 @@ async function onNode(n: Node, script: string, stdin = ""): Promise<{ ok: boolea
 // written, so the next run reads the window again. The unit is the schema's, held to letters and signs.
 let restartWins: { from: string; to: string }[] = [];
 let restartNow: number | null = null;
+let restartHold: { from: string } | null = null;
 if (node?.restart) {
   const r = node.restart;
   const day = (iso: string) => iso.slice(0, 19).replace("T", " ") + " UTC";
-  const range = restartRange(from, to, r);
-  const j = await onNode(node, `sudo -n journalctl -u ${r.unit} _PID=1 --utc -o short-iso --no-pager -q --since '${day(range.since)}' --until '${day(range.until)}'`);
-  const u = await onNode(node, `TZ=UTC systemctl show ${r.unit} -p ActiveEnterTimestamp -p NRestarts`);
+  // The cutoff is the Mac's now to the whole second, the journal's --until and the windows' alike. The node's own
+  // clock is not read: a skew between the two is a known limit (README).
+  const range = restartRange(from, to, r, Date.parse(to));
+  const j = await onNode(node, `sudo -n journalctl -u ${r.unit} _PID=1 --utc -o short-iso-precise --no-pager -q --since '${day(range.since)}' --until '${day(range.until)}'`);
+  const u = await onNode(node, `TZ=UTC systemctl show ${r.unit} -p LoadState -p ActiveEnterTimestamp -p NRestarts`);
   if (!j.ok || !u.ok) throw new Error(`the node's ${r.unit} restarts were not read (${(j.err || u.err).trim().slice(0, 300) || "no message"}): the ledger and the cursor are where they were`);
   const unit = unitOf(u.out);
+  if (unit.loadState !== "loaded") throw new Error(`the node's ${r.unit} is not loaded (LoadState ${unit.loadState ?? "unread"}): the ledger and the cursor are where they were`);
   restartNow = unit.nRestarts;
   const was = read("k3s.json", {}).nRestarts ?? null;
   restartWins = restartWindows({ journal: j.out, activeEnter: unit.activeEnter, restarts: { was, now: unit.nRestarts }, until: range.until }, r);
+  restartHold = restartPending({ journal: j.out, activeEnter: unit.activeEnter, until: range.until }, r);
 }
 const sources: { release?: { at: string; short: string; sha: string } | null; images: Record<string, string>; pods: number } = { images: {}, pods: 0 };
 if (node) {
@@ -198,7 +203,7 @@ if (node) {
   }
   const lines = logEntries(rows.join("\n"), { from, lifecycle, starts });
   // What the node's entries are, kept through the merge: a restart window is the node's, never a Cloud Run service's.
-  entries.push(...lines.map((l: Record<string, unknown>) => ({ ...l, source: "node" })) as typeof entries);
+  entries.push(...lines.map((l: Record<string, unknown>) => ({ ...l, source: "node" })) as unknown as typeof entries);
   entries.sort((a, b) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)));
   // What is serving: the last release of release-cron's log, else the images the pods run.
   // No log is the one thing to go without (an app release-cron does not release); any other failure to read it fails the run.
@@ -217,14 +222,27 @@ entries = entries.filter((e) => Date.parse(e.timestamp) <= Date.parse(reached));
 // are not counted twice.
 const lag = 5 * 60e3;
 // The hash is of the entry as the source gave it, without the `source` tag, so a cursor's hashes stay valid.
-const hashOf = async (e: unknown) => [...new Uint8Array(await crypto.subtle.digest("SHA-1", new TextEncoder().encode(JSON.stringify({ ...(e as object), source: undefined }))))].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+const hashOf = async (e: unknown) => [...new Uint8Array(await crypto.subtle.digest("SHA-1", new TextEncoder().encode(hashInput(e))))].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
 const hashes = new Map<unknown, string>();
 for (const e of entries) hashes.set(e, await hashOf(e));
+// A restart not finished at the cutoff (restartPending): the node's entries from its start are not triaged nor
+// counted, and the cursor stops there, so the next run reads them again with the window complete.
+if (restartHold) {
+  const held = Date.parse(restartHold.from);
+  entries = entries.filter((e) => {
+    const hold = e.source === "node" && Date.parse(e.timestamp) >= held;
+    if (hold) hashes.delete(e);
+    return !hold;
+  });
+}
 if (!since) {
   const counted = new Set<string>(cursor?.seen ?? []);
   entries = entries.filter((e) => !counted.has(hashes.get(e)!));
 }
-const committed = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
+const committed = new Date(Math.min(
+  reached === to ? Date.parse(reached) - lag : Date.parse(reached),
+  restartHold ? Date.parse(restartHold.from) : Infinity,
+)).toISOString();
 const { report, ledger: next } = triage(group(entries, rules, lifecycle, restartWins), ledger, reached);
 const where = [
   ...(services.length ? [`services ${services.join(", ")} (${project})`] : []),

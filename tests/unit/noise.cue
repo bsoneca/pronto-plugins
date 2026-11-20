@@ -3,6 +3,7 @@
 // window meets its line in that window alone.
 package unit
 
+import "encoding/json"
 import pw "github.com/bsoneca/pronto-plugins/prod-watch:prodwatch"
 
 _rules:     pw.prodWatch.noise
@@ -38,18 +39,37 @@ _window: {from: "2026-11-19T18:59:49.000Z", to: "2026-11-19T19:02:09.000Z"}
 _done: "2026-11-19T19:10:00Z"
 _journal: {
 	deliberate: """
-		2026-11-19T18:59:54+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
-		2026-11-19T18:59:56+00:00 host systemd[1]: Stopped k3s.service - Lightweight Kubernetes.
-		2026-11-19T19:00:09+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T18:59:56.000995+00:00 host systemd[1]: Stopped k3s.service - Lightweight Kubernetes.
+		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
 		"""
 	slow: """
-		2026-11-19T18:59:54+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
-		2026-11-19T18:59:56+00:00 host systemd[1]: Stopped k3s.service - Lightweight Kubernetes.
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T18:59:56.000995+00:00 host systemd[1]: Stopped k3s.service - Lightweight Kubernetes.
 		"""
 	crash: """
-		2026-11-19T18:59:54+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
-		2026-11-19T18:59:55+00:00 host systemd[1]: k3s.service: Main process exited, code=exited, status=1/FAILURE
-		2026-11-19T19:00:09+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T18:59:55.000995+00:00 host systemd[1]: k3s.service: Main process exited, code=exited, status=1/FAILURE
+		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		"""
+	twice: """
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		2026-11-19T19:30:00.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T19:30:10.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		"""
+	outside: """
+		2026-11-19T18:50:00.000995+00:00 host systemd[1]: k3s.service: Main process exited, code=exited, status=1/FAILURE
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		"""
+	lead: """
+		2026-11-19T18:59:50.000995+00:00 host systemd[1]: k3s.service: Main process exited, code=exited, status=1/FAILURE
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		"""
+	stopOnly: """
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
 		"""
 }
 _restartRules: _rules & {"node-restart": {match: "apiserver not ready", during: ["restart"], why: "a case's own rule: the API answers so between k3s's stop and its start"}}
@@ -69,7 +89,7 @@ _apiserver: {
 }
 
 cases: {
-	"every rule says why it is noise, and those held to a window name only start and shutdown": {suite: "noise", steps: [
+	"every rule says why it is noise, and the shared rules held to a window name only start and shutdown": {suite: "noise", steps: [
 		{value: [for n, r in _rules if r.why == "" {n}], expect: []},
 		{value: [for n, r in _rules if r.during != _|_ for p in r.during if _lifecycle[p] == _|_ {n}], expect: []},
 	]}
@@ -122,15 +142,41 @@ cases: {
 		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}, until: "2026-11-19T19:02:09Z"}, _restart], expect: [_window], why: "read to exactly the window's end: complete"},
 		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}}, _restart], expect: [], why: "no cutoff said, none is assumed"},
 	]}
-	"systemctl show's ActiveEnterTimestamp and NRestarts are read from its text": {suite: "noise", steps: [
-		{call: "watch.unitOf", args: ["ActiveEnterTimestamp=Thu 2026-11-19 19:00:09 UTC\nNRestarts=2"], expect: {activeEnter: "2026-11-19T19:00:09Z", nRestarts: 2}},
-		{call: "watch.unitOf", args: ["ActiveEnterTimestamp=Thu 2026-11-19 19:00:09 UTC"], expect: {activeEnter: "2026-11-19T19:00:09Z", nRestarts: null}},
-		{call: "watch.unitOf", args: ["ActiveEnterTimestamp=\nNRestarts=0"], expect: {activeEnter: null, nRestarts: 0}},
+	"systemctl show's ActiveEnterTimestamp and NRestarts are read from its text, a LoadState as null when unasked": {suite: "noise", steps: [
+		{call: "watch.unitOf", args: ["ActiveEnterTimestamp=Thu 2026-11-19 19:00:09 UTC\nNRestarts=2"], expect: {loadState: null, activeEnter: "2026-11-19T19:00:09Z", nRestarts: 2}},
+		{call: "watch.unitOf", args: ["ActiveEnterTimestamp=Thu 2026-11-19 19:00:09 UTC"], expect: {loadState: null, activeEnter: "2026-11-19T19:00:09Z", nRestarts: null}},
+		{call: "watch.unitOf", args: ["ActiveEnterTimestamp=\nNRestarts=0"], expect: {loadState: null, activeEnter: null, nRestarts: 0}},
 	]}
 	"the journal is read as far as lead, down and tail say a window can reach": {suite: "noise", steps: [
 		{call: "watch.restartRange", args: ["2026-11-19T19:00:00.000Z", "2026-11-19T19:05:00.000Z", _restart, 1893456000000], expect: {since: "2026-11-19T18:52:55.000Z", until: "2026-11-19T19:12:05.000Z"}, why: "since = from - (tail 120 + down 300 + lead 5); until = to + (lead + down + tail)"},
 		{call: "watch.restartRange", args: ["2026-11-19T19:00:00.000Z", "2026-11-19T19:05:00.000Z", _restart, 1795115160000], expect: {since: "2026-11-19T18:52:55.000Z", until: "2026-11-19T19:06:00.000Z"}, why: "the journal holds nothing past now"},
 		{call: "watch.restartRange", args: ["2026-11-19T19:00:00.000Z", "2026-11-19T19:05:00.000Z", _restart & {lead: 10, tail: 60, down: 100}, 1893456000000], expect: {since: "2026-11-19T18:57:10.000Z", until: "2026-11-19T19:07:50.000Z"}, why: "follows the configured numbers"},
+	]}
+	"a first run, a crash outside the window, a counter reset, two restarts, a crash in the lead margin, a start by ActiveEnterTimestamp alone": {suite: "noise", steps: [
+		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: null, restarts: {was: null, now: 0}, until: _done}, _restart], expect: [_window], why: "first run: no baseline for NRestarts, a clean restart is a window"},
+		{call: "watch.restartWindows", args: [{journal: _journal.outside, activeEnter: null, restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [_window], why: "a crash line ten minutes before the stop is not in the window"},
+		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: null, restarts: {was: 3, now: 0}, until: _done}, _restart], expect: [_window], why: "NRestarts reset (a reboot): not a rise"},
+		{call: "watch.restartWindows", args: [{journal: _journal.twice, activeEnter: null, restarts: {was: 0, now: 0}, until: "2026-11-19T20:00:00Z"}, _restart], expect: [_window, {from: "2026-11-19T19:29:55.000Z", to: "2026-11-19T19:32:10.000Z"}]},
+		{call: "watch.restartWindows", args: [{journal: _journal.lead, activeEnter: null, restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [], why: "a crash line 4 s before the stop is inside the lead margin (5 s): the window is not deliberate"},
+		{call: "watch.restartWindows", args: [{journal: _journal.stopOnly, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [_window], why: "no start line in the journal read: the unit's ActiveEnterTimestamp is the start"},
+	]}
+	"a restart not finished at the cutoff holds the cursor at its stop minus lead": {suite: "noise", steps: [
+		{call: "watch.restartPending", args: [{journal: _journal.stopOnly, activeEnter: null, until: "2026-11-19T19:00:00Z"}, _restart], expect: {from: "2026-11-19T18:59:49.000Z"}, why: "stopped, no start yet, 6 s down of 300"},
+		{call: "watch.restartPending", args: [{journal: _journal.stopOnly, activeEnter: null, until: "2026-11-19T19:10:00Z"}, _restart], expect: null, why: "no start within down: never a window, nothing to wait for"},
+		{call: "watch.restartPending", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", until: "2026-11-19T19:02:08Z"}, _restart], expect: {from: "2026-11-19T18:59:49.000Z"}, why: "started, tail not yet read to its end"},
+		{call: "watch.restartPending", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", until: _done}, _restart], expect: null, why: "complete"},
+		{call: "watch.restartPending", args: [{journal: _journal.twice, activeEnter: null, until: "2026-11-19T19:30:30Z"}, _restart], expect: {from: "2026-11-19T19:29:55.000Z"}, why: "the first is complete, the second's tail is not"},
+		{call: "watch.restartPending", args: [{journal: _journal.deliberate, activeEnter: null, until: null}, _restart], expect: null, why: "no cutoff said, none is assumed"},
+	]}
+	"systemctl show's LoadState is read, and the cutoff is floored to the second": {suite: "noise", steps: [
+		{call: "watch.unitOf", args: ["LoadState=loaded\nActiveEnterTimestamp=Thu 2026-11-19 19:00:09 UTC\nNRestarts=2"], expect: {loadState: "loaded", activeEnter: "2026-11-19T19:00:09Z", nRestarts: 2}},
+		{call: "watch.unitOf", args: ["LoadState=not-found\nActiveEnterTimestamp=\nNRestarts=0"], expect: {loadState: "not-found", activeEnter: null, nRestarts: 0}},
+		{call: "watch.unitOf", args: ["NRestarts=0"], expect: {loadState: null, activeEnter: null, nRestarts: 0}, why: "unread: the driver refuses it"},
+		{call: "watch.restartRange", args: ["2026-11-19T19:00:00.000Z", "2026-11-19T19:05:00.000Z", _restart, 1795115160999], expect: {since: "2026-11-19T18:52:55.000Z", until: "2026-11-19T19:06:00.000Z"}, why: "now 19:06:00.999 reads to 19:06:00: the whole second the journal's --until takes"},
+	]}
+	"an entry's hash input does not hold the driver's source tag, so a cursor written before it still matches": {suite: "noise", steps: [
+		{call: "watch.hashInput", args: [(_apiserver & {timestamp: "2026-11-19T19:00:05.100Z", service: "studio-db-1", node: false}).out], expect: json.Marshal((_apiserver & {timestamp: "2026-11-19T19:00:05.100Z", service: "studio-db-1", node: false}).out)},
+		{call: "watch.hashInput", args: [(_apiserver & {timestamp: "2026-11-19T19:00:05.100Z", service: "studio-db-1", node: true}).out], expect: json.Marshal((_apiserver & {timestamp: "2026-11-19T19:00:05.100Z", service: "studio-db-1", node: false}).out), why: "the node's entry, tagged source node, hashes as the untagged one did before the tag"},
 	]}
 	"a node's restart window applies to the node's entries, never to a Cloud Run service's": {suite: "noise", steps: [
 		{value: [

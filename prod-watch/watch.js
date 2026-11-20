@@ -368,20 +368,19 @@ export function phaseOf(entry, windows, lifecycle) {
   return "";
 }
 // The node's deliberate k3s restarts (prodWatch.node.restart), from what systemd says of the unit: its
-// journal's lines (journalctl -u <unit> _PID=1 --utc -o short-iso) and `systemctl show` (TZ=UTC) for its
+// journal's lines (journalctl -u <unit> _PID=1 --utc -o short-iso-precise) and `systemctl show` (TZ=UTC) for its
 // ActiveEnterTimestamp and NRestarts. A window is [stop - lead, start + tail] for a stop line followed within
 // `down` seconds by a start (a journal line, or the ActiveEnterTimestamp). A crash line in it, or NRestarts
 // above what the last run saw (`restarts.was`), and it is no window: the same entries alert. `until` is the
 // journal's observation cutoff (what was read, never later than now): a window whose end is past it may still
-// hold a crash that was not read, so it is no window either.
+// hold a crash that was not read, so it is no window either (restartPending says which of those are only unfinished).
+/** @param {{journal?: string, activeEnter?: string | null, restarts?: {was: number | null, now: number | null} | null, until?: string | number | null}} input
+ *  @param {{stop: string, start: string, crash: string, lead: number, tail: number, down: number}} cfg */
 export function restartWindows({ journal = "", activeEnter = null, restarts = null, until = null }, cfg) {
   if (!cfg || !restarts || restarts.now == null || (restarts.was != null && restarts.now > restarts.was)) return [];
   const cutoff = until == null ? NaN : typeof until === "number" ? until : Date.parse(until);
   if (Number.isNaN(cutoff)) return [];
-  const times = (re) => journal.split("\n").filter((l) => new RegExp(re).test(l)).map((l) => Date.parse(l.split(" ")[0])).filter((t) => !Number.isNaN(t));
-  const stops = times(cfg.stop);
-  const crashes = times(cfg.crash);
-  const starts = [...times(cfg.start), ...(activeEnter ? [Date.parse(activeEnter)] : [])].filter((t) => !Number.isNaN(t)).sort((a, b) => a - b);
+  const { stops, crashes, starts } = journalTimes(journal, activeEnter, cfg);
   const out = [];
   for (const stop of stops) {
     const start = starts.find((t) => t >= stop);
@@ -393,23 +392,56 @@ export function restartWindows({ journal = "", activeEnter = null, restarts = nu
   }
   return out;
 }
-// The journal to read for a report over [from, to] (ISO times), at `now`: a window is [stop - lead, start + tail]
+// What an entry is hashed as (prod-watch.ts's cursor keeps the hashes of what it counted): the entry as its source
+// gave it, without the `source` tag the driver adds, so a cursor written before the tag still matches.
+export const hashInput = (entry) => JSON.stringify({ ...entry, source: undefined });
+// The times (ms) of the journal's stop, crash and start lines (a line's first word is its ISO time, with
+// microseconds, trimmed to milliseconds), and of the ActiveEnterTimestamp as a start.
+function journalTimes(journal, activeEnter, cfg) {
+  const times = (re) => journal.split("\n").filter((l) => new RegExp(re).test(l)).map((l) => Date.parse(l.split(" ")[0].replace(/(\.\d{3})\d+/, "$1"))).filter((t) => !Number.isNaN(t));
+  const starts = [...times(cfg.start), ...(activeEnter ? [Date.parse(activeEnter)] : [])].filter((t) => !Number.isNaN(t)).sort((a, b) => a - b);
+  return { stops: times(cfg.stop), crashes: times(cfg.crash), starts };
+}
+// A restart not finished at the cutoff: a stop with no start yet but still within `down` of the cutoff (the start
+// may come), or a start whose window's end (start + tail) is past it (a crash may still be written). The run that
+// meets one holds its cursor and leaves the entries from `from` (the earliest such stop - lead, ISO) out of its
+// count, so the next run reads them again, when the window is complete or is none. Null when none is unfinished.
+// The NRestarts guard does not apply: a run that drops its windows still must not count what it cannot yet judge.
+/** @param {{journal?: string, activeEnter?: string | null, until?: string | number | null}} input
+ *  @param {{stop: string, start: string, crash: string, lead: number, tail: number, down: number}} cfg */
+export function restartPending({ journal = "", activeEnter = null, until = null }, cfg) {
+  const cutoff = until == null ? NaN : typeof until === "number" ? until : Date.parse(until);
+  if (!cfg || Number.isNaN(cutoff)) return null;
+  const { stops, starts } = journalTimes(journal, activeEnter, cfg);
+  let first = null;
+  for (const stop of stops) {
+    const start = starts.find((t) => t >= stop);
+    const unfinished = start === undefined ? cutoff - stop <= cfg.down * 1000 : start - stop <= cfg.down * 1000 && start + cfg.tail * 1000 > cutoff;
+    if (unfinished && (first === null || stop < first)) first = stop;
+  }
+  return first === null ? null : { from: new Date(first - cfg.lead * 1000).toISOString() };
+}
+// The journal to read for a report over [from, to] (ISO times), at `now` (floored to the whole second, as the
+// journal's --until is): a window is [stop - lead, start + tail]
 // with start - stop <= down, so every stop whose window can touch an entry of the report lies in
 // [from - (tail + down), to + lead], and its crash evidence in [from - (tail + down + lead), to + lead + down + tail],
 // cut at now (the journal holds nothing later).
 export function restartRange(from, to, cfg, now = Date.now()) {
   const ms = (s) => s * 1000;
+  const whole = Math.floor(now / 1000) * 1000;
   return {
     since: new Date(Date.parse(from) - ms(cfg.tail + cfg.down + cfg.lead)).toISOString(),
-    until: new Date(Math.min(now, Date.parse(to) + ms(cfg.lead + cfg.down + cfg.tail))).toISOString(),
+    until: new Date(Math.min(whole, Date.parse(to) + ms(cfg.lead + cfg.down + cfg.tail))).toISOString(),
   };
 }
-// `systemctl show <unit> -p ActiveEnterTimestamp -p NRestarts` (TZ=UTC): when it last became active, and how
-// many times it restarted by itself.
+// `systemctl show <unit> -p LoadState -p ActiveEnterTimestamp -p NRestarts` (TZ=UTC): whether the unit is
+// loaded (a unit that is not has no journal to trust), when it last became active, and how many times it
+// restarted by itself.
 export function unitOf(text) {
   const at = text.match(/^ActiveEnterTimestamp=\S+ (\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d) UTC$/m);
   const n = text.match(/^NRestarts=(\d+)/m);
-  return { activeEnter: at ? `${at[1]}T${at[2]}Z` : null, nRestarts: n ? Number(n[1]) : null };
+  const load = text.match(/^LoadState=(\S+)/m);
+  return { loadState: load ? load[1] : null, activeEnter: at ? `${at[1]}T${at[2]}Z` : null, nRestarts: n ? Number(n[1]) : null };
 }
 const inRestart = (entry, windows) => {
   const at = Date.parse(entry.timestamp);
