@@ -366,106 +366,6 @@ export function phasesOf(entry, windows, lifecycle) {
     return times.some((t) => at >= Date.parse(t) - 2000 && at - Date.parse(t) <= within);
   }).map(([phase]) => phase);
 }
-// The node's deliberate k3s restarts (prodWatch.node.restart), from what systemd says of the unit: its
-// journal's lines (journalctl -u <unit> _PID=1 --utc -o short-iso-precise) and `systemctl show` (TZ=UTC) for its
-// ActiveEnterTimestamp and NRestarts. A window is [stop - lead, start + tail] for a stop line followed within
-// `down` seconds by a start (a journal line, or the ActiveEnterTimestamp). A crash line in it, or NRestarts
-// above what the last run saw (`restarts.was`), and it is no window: the same entries alert. `until` is the
-// journal's observation cutoff (what was read, never later than now): a window whose end is past it may still
-// hold a crash that was not read, so it is no window either (restartPending says which of those are only unfinished).
-// A `since` run (a historical report) gets none: the voids that rejected a window were dropped once the cursor passed
-// them, so the report could not tell a window the counter had rejected; its entries are classified without the restart
-// phase and alert, as an unexplained outage would.
-/** @param {{journal?: string, activeEnter?: string | null, restarts?: {was: number | null, now: number | null} | null, until?: string | number | null, voided?: {from: string, to: string}[], since?: boolean}} input
- *  @param {{stop: string, start: string, crash: string, lead: number, tail: number, down: number}} cfg */
-export function restartWindows({ journal = "", activeEnter = null, restarts = null, until = null, voided = [], since = false }, cfg) {
-  if (since || !cfg || !restarts || restarts.now == null || (restarts.was != null && restarts.now > restarts.was)) return [];
-  const { crashes } = journalTimes(journal, activeEnter, cfg);
-  return completeWindows({ journal, activeEnter, until }, cfg)
-    .filter((w) => !crashes.some((c) => c >= Date.parse(w.from) && c <= Date.parse(w.to)))
-    .filter((w) => !overlaps(w, voided));
-}
-// Every stop paired with a start and read to the end of its tail (`until`), whatever a crash line or NRestarts say:
-// the windows a rise of NRestarts rejects (restartVoids).
-/** @param {{journal?: string, activeEnter?: string | null, until?: string | number | null}} input
- *  @param {{stop: string, start: string, crash: string, lead: number, tail: number, down: number}} cfg */
-export function completeWindows({ journal = "", activeEnter = null, until = null }, cfg) {
-  const cutoff = until == null ? NaN : typeof until === "number" ? until : Date.parse(until);
-  if (!cfg || Number.isNaN(cutoff)) return [];
-  const { pairs } = journalTimes(journal, activeEnter, cfg);
-  const out = [];
-  for (const { stop, start } of pairs) {
-    if (start === undefined || start - stop > cfg.down * 1000) continue;
-    const from = stop - cfg.lead * 1000, to = start + cfg.tail * 1000;
-    if (to > cutoff) continue;
-    out.push({ from: new Date(from).toISOString(), to: new Date(to).toISOString() });
-  }
-  return out;
-}
-const overlaps = (w, intervals) => (intervals ?? []).some((v) => Date.parse(w.from) <= Date.parse(v.to) && Date.parse(v.from) <= Date.parse(w.to));
-// The intervals k3s.json keeps beside the counter (`voided`): those of the last run that the cursor has not passed,
-// and, when NRestarts rose, the windows this run's rise rejected (`windows`, completeWindows). A later run compares
-// equal counters, so without them it would accept a window whose entries this run did not read (a row limit cut the
-// read, or a late line reached the overlap) as deliberate. One is dropped once the cursor (`committed`, the time the
-// next run reads from, which already lies the lag behind) is past its end: nothing of it is read again.
-// `restarts` is {was, now}; a k3s.json written before has no `voided`, which is none. One that is there and is no list of
-// {from, to} that parse is an error (checkVoided): reading it as none would accept a window it rejected.
-const checkVoided = (voided) => {
-  if (!Array.isArray(voided) || voided.some((v) => !v || typeof v !== "object" || typeof v.from !== "string" || typeof v.to !== "string" || Number.isNaN(Date.parse(v.from)) || Number.isNaN(Date.parse(v.to)))) {
-    throw new Error(`k3s.json's voided is not a list of {from, to} times: ${JSON.stringify(voided)?.slice(0, 200)}`);
-  }
-  return voided;
-};
-// What k3s.json holds, checked: {nRestarts, voided}. A missing nRestarts is none, else it is a non-negative integer. Only a missing `voided` is none; one that is there must be a
-// list of {from, to} that parse, or the run fails (the driver calls it before it reads anything else).
-/** @param {any} json */
-export function k3sState(json) {
-  if (!json || typeof json !== "object" || Array.isArray(json)) throw new Error(`k3s.json is no object: ${JSON.stringify(json)?.slice(0, 200)}`);
-  const n = json.nRestarts ?? null;
-  if (n !== null && !(Number.isInteger(n) && n >= 0)) throw new Error(`k3s.json's nRestarts is not a non-negative integer: ${JSON.stringify(n)?.slice(0, 200)}`);
-  return { nRestarts: n, voided: "voided" in json ? checkVoided(json.voided) : [] };
-}
-// The hold a cursor run keeps for what a restart not yet logged can still reach: a stop line may reach the journal
-// after the run's cutoff, and its lead (seconds) reaches back before it, so the node's entries from `until` - lead
-// are left to the next run too. The node's entries are read up to `to` and the journal to `until`: the hold starts at the
-// earlier of the two (`to` omitted: `until`), so no entry newer than the cutoff minus lead is released when `to` lies past
-// the cutoff. Merged with restartPending's hold: the earlier of the two.
-/** @param {{hold?: {from: string} | null, until: string | number, to?: string | number | null, lead: number}} input */
-export function leadHold({ hold = null, until, to = null, lead }) {
-  const ms = (t) => (typeof t === "number" ? t : Date.parse(t));
-  const at = Math.min(ms(until), to == null ? Infinity : ms(to)) - lead * 1000;
-  return hold && Date.parse(hold.from) <= at ? hold : { from: new Date(at).toISOString() };
-}
-/** @param {{voided?: {from: string, to: string}[], windows?: {from: string, to: string}[], restarts?: {was: number | null, now: number | null} | null, committed: string}} input */
-export function restartVoids({ voided = [], windows = [], restarts = null, committed }) {
-  checkVoided(voided);
-  const rose = !!restarts && restarts.was != null && restarts.now != null && restarts.now > restarts.was;
-  const passed = Date.parse(committed);
-  const seen = new Set();
-  return [...voided, ...(rose ? windows : [])].filter((v) => {
-    if (Date.parse(v.to) < passed) return false;
-    const key = `${v.from}|${v.to}`;
-    return seen.has(key) ? false : (seen.add(key), true);
-  });
-}
-// What a pass writes to k3s.json (`was` the counter it read, `now` the unit's, `hold` restartPending's, `voided` what
-// k3s.json held, `candidates` completeWindows, `committed` the cursor): the counter restartBaseline gives (the old one
-// when there is none to write but voids remain) and the voids restartVoids keeps, or null when there is nothing to write.
-/** @param {{was?: number | null, now?: number | null, hold?: {from: string} | null, voided?: {from: string, to: string}[], candidates?: {from: string, to: string}[], committed: string}} input */
-export function k3sNext({ was = null, now = null, hold = null, voided = [], candidates = [], committed }) {
-  const next = restartBaseline({ was, now, hold });
-  const voids = restartVoids({ voided, windows: candidates, restarts: { was, now }, committed });
-  if (next === null && !voids.length) return null;
-  return { nRestarts: next ?? was, ...(voids.length ? { voided: voids } : {}) };
-}
-// What NRestarts the next run compares with: this run's, unless a restart is pending (restartPending): the run
-// that meets a rise while it holds its entries back must leave the old counter, or the next run, which reads
-// those entries again, would find no rise and judge the window deliberate. A reset (systemd zeroes NRestarts on a
-// deliberate restart) lowers it: keeping the old, higher counter would hide a later crash. With no old counter the
-// first readable one is saved, or the next run, which finds the same restart, would have none to compare with. Null:
-// nothing to write.
-/** @param {{was?: number | null, now?: number | null, hold?: {from: string} | null}} input */
-export const restartBaseline = ({ was = null, now = null, hold = null }) => (hold ? (was != null && now != null ? Math.min(was, now) : was ?? now) : now);
 // A time (ISO, Z) as whole seconds and its fraction padded to nanoseconds, so sources of any precision compare exactly.
 const instant = (s) => {
   const m = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z$/.exec(s);
@@ -475,128 +375,22 @@ const instant = (s) => {
 export const timeAfter = (a, b) => { const [x, fx] = instant(a), [y, fy] = instant(b); return x !== y ? x > y : fx > fy; };
 // What a cursor run counts and commits (prod-watch.ts). `hashes` is each entry's hash (a list, in the entries' order), `counted` the
 // hashes the last cursor holds (`seen`), `reached` where the sources were read to (`to`, or earlier when a limit
-// cut one short), `lag` ms. A cursor run holds back the node's entries from `hold.from` (restartPending): not
-// counted, the cursor stops there, and their hashes stay out of `seen` unless an earlier run already counted
-// them. A `since` run (a window only looked at) holds nothing back and counts what it reads. The cursor is
-// `reached` as the source wrote it (any precision) unless the lag or a hold gives an earlier time, in ms.
-/** @param {{entries: any[], hashes: string[], hold?: {from: string} | null, since?: boolean, counted?: Iterable<string>, reached: string, to: string, lag: number}} input */
-export function settleRun({ entries, hashes, hold = null, since = false, counted = [], reached, to, lag }) {
+// cut one short), `lag` ms. A `since` run (a window only looked at) counts what it reads, the entries an earlier
+// run counted included. The cursor is `reached` as the source wrote it (any precision) unless a read to now
+// gives the lag before it, in ms.
+/** @param {{entries: any[], hashes: string[], since?: boolean, counted?: Iterable<string>, reached: string, to: string, lag: number}} input */
+export function settleRun({ entries, hashes, since = false, counted = [], reached, to, lag }) {
   const known = new Set(counted);
   const kept = new Map(entries.map((e, i) => [e, hashes[i]]));
-  const held = hold && !since ? Date.parse(hold.from) : null;
-  let rest = entries;
-  if (held !== null) {
-    rest = rest.filter((e) => {
-      if (!(e.source === "node" && Date.parse(e.timestamp) >= held)) return true;
-      if (!known.has(kept.get(e))) kept.delete(e);
-      return false;
-    });
-  }
-  if (!since) rest = rest.filter((e) => !known.has(kept.get(e)));
-  const boundary = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
-  const committed = held !== null && held <= Date.parse(boundary) ? hold.from : boundary;
+  const rest = since ? entries : entries.filter((e) => !known.has(kept.get(e)));
+  const committed = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
   // In ms: a node's timestamps are cut to ms and the next read starts inclusive at the cursor, so the cursor's own ms is read again.
   const seen = [...kept].filter(([e]) => Date.parse(e.timestamp) >= Date.parse(committed)).map(([, h]) => h);
   return { entries: rest, committed, seen };
 }
 // What an entry is hashed as (prod-watch.ts's cursor keeps the hashes of what it counted): the entry as its source
-// gave it, without the `source` tag the driver adds, so a cursor written before the tag still matches.
+// gave it, without a `source` tag, so a cursor written before one still matches.
 export const hashInput = (entry) => JSON.stringify({ ...entry, source: undefined });
-// The journal's stop and crash times (ms; a line's first word is its ISO time, with microseconds, trimmed to
-// milliseconds) and each stop paired with its start, in the order journalctl printed the lines, never by re-sorting
-// the parsed times (two lines in one millisecond would swap). A stop line opens a pending stop (a second stop before
-// any start replaces it: the first has no start of its own); a start line completes the pending stop, if there is
-// one, and clears it, so each start completes at most one stop and a start with no pending stop pairs with nothing.
-// Only the last stop left pending at the end has a second source for its start: the ActiveEnterTimestamp (whole
-// seconds: next to a precise line it would end a window early), when it is strictly after that stop (in ms): within
-// the stop's own second it may be an earlier activation, and no window is better than a false one. A line that matches a
-// pattern and has no time that parses is an error, not a line to skip: the evidence of a crash may be in it.
-// The one pairing restartWindows, completeWindows and restartPending share.
-function journalTimes(journal, activeEnter, cfg) {
-  const at = (l) => {
-    const t = Date.parse(l.split(" ")[0].replace(/(\.\d{3})\d+/, "$1"));
-    if (Number.isNaN(t)) throw new Error(`a journal line has no time that parses: ${l.slice(0, 200)}`);
-    return t;
-  };
-  const [stopRe, startRe, crashRe] = [cfg.stop, cfg.start, cfg.crash].map((re) => new RegExp(re));
-  const enter = activeEnter ? Date.parse(activeEnter) : NaN;
-  const pairs = [], crashes = [];
-  let pending = null;
-  for (const l of journal.split("\n")) {
-    const stop = stopRe.test(l), start = startRe.test(l), crash = crashRe.test(l);
-    if (stop && start) throw new Error(`a journal line matches both the stop and the start pattern: ${l.slice(0, 200)}`);
-    if (!stop && !start && !crash) continue;
-    const t = at(l);
-    if (crash) crashes.push(t);
-    if (stop) pending = t;
-    // A start before its stop (the node's clock stepped back) completes nothing: the stop stays pending.
-    else if (start && pending !== null && t >= pending) { pairs.push({ stop: pending, start: t }); pending = null; }
-  }
-  if (pending !== null) pairs.push({ stop: pending, start: enter > pending ? enter : undefined });
-  return { crashes, pairs };
-}
-// A restart not finished at the cutoff: a stop with no start yet but still within `down` of the cutoff (the start
-// may come), or a start whose window's end (start + tail) is past it (a crash may still be written). The run that
-// meets one holds its cursor and leaves the entries from `from` (the earliest such stop - lead, ISO) out of its
-// count, so the next run reads them again, when the window is complete or is none. Null when none is unfinished.
-// The NRestarts guard does not apply: a run that drops its windows still must not count what it cannot yet judge.
-/** @param {{journal?: string, activeEnter?: string | null, until?: string | number | null}} input
- *  @param {{stop: string, start: string, crash: string, lead: number, tail: number, down: number}} cfg */
-export function restartPending({ journal = "", activeEnter = null, until = null }, cfg) {
-  const cutoff = until == null ? NaN : typeof until === "number" ? until : Date.parse(until);
-  if (!cfg || Number.isNaN(cutoff)) return null;
-  const { pairs } = journalTimes(journal, activeEnter, cfg);
-  let first = null;
-  for (const { stop, start } of pairs) {
-    const unfinished = start === undefined ? cutoff - stop <= cfg.down * 1000 : start - stop <= cfg.down * 1000 && start + cfg.tail * 1000 > cutoff;
-    if (unfinished && (first === null || stop < first)) first = stop;
-  }
-  return first === null ? null : { from: new Date(first - cfg.lead * 1000).toISOString() };
-}
-// The cutoff the node printed after its `systemctl show` ("CUTOFF=<epoch seconds>", prod-watch.ts): a whole second the
-// node's clock had reached, read at or after the NRestarts, in ms. A missing, repeated or bad value is an error: a cutoff
-// guessed from another clock could place the journal's end before a crash the counter counted.
-/** @param {string} text */
-export function cutoffOf(text) {
-  const found = [...String(text).matchAll(/^CUTOFF=(.*)$/gm)].map((m) => m[1]);
-  if (found.length !== 1 || !/^\d{1,15}$/.test(found[0]) || Number(found[0]) <= 0) throw new Error(`the node printed no CUTOFF=<epoch seconds> (one line, a positive whole number): ${JSON.stringify(String(text).slice(0, 200))}`);
-  return Number(found[0]) * 1000;
-}
-// The journal to read for a report over [from, to] (ISO times), up to `now` (ms, required: the cutoff cutoffOf read from
-// the node, floored to the whole second as the journal's --until is): a window is [stop - lead, start + tail]
-// with start - stop <= down, so every stop whose window can touch an entry of the report lies in
-// [from - (tail + down), to + lead], and its crash evidence in [from - (tail + down + lead), to + lead + down + tail],
-// cut at now (the journal holds nothing later).
-export function restartRange(from, to, cfg, now) {
-  if (typeof now !== "number" || !Number.isFinite(now)) throw new Error(`restartRange needs the cutoff, a finite number of ms: ${JSON.stringify(now)}`);
-  const ms = (s) => s * 1000;
-  const whole = Math.floor(now / 1000) * 1000;
-  return {
-    since: new Date(Date.parse(from) - ms(cfg.tail + cfg.down + cfg.lead)).toISOString(),
-    until: new Date(Math.min(whole, Date.parse(to) + ms(cfg.lead + cfg.down + cfg.tail))).toISOString(),
-  };
-}
-// `systemctl show <unit> -p LoadState -p ActiveEnterTimestamp -p NRestarts` (TZ=UTC): whether the unit is
-// loaded (a unit that is not has no journal to trust), when it last became active, and how many times it
-// restarted by itself (null unless the line is a whole number: counterOf is the strict read).
-export function unitOf(text) {
-  const at = text.match(/^ActiveEnterTimestamp=\S+ (\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d) UTC$/m);
-  const n = text.match(/^NRestarts=(\d+)$/m);
-  const load = text.match(/^LoadState=(\S+)/m);
-  return { loadState: load ? load[1] : null, activeEnter: at ? `${at[1]}T${at[2]}Z` : null, nRestarts: n ? Number(n[1]) : null };
-}
-// The NRestarts of a loaded unit: a complete non-negative integer, or an error. A counter that is missing, empty, or
-// not whole ("abc", "-1", "1.5") cannot be compared with the last run's, so the run fails before triage or any write.
-/** @param {string} text */
-export function counterOf(text) {
-  const m = String(text).match(/^NRestarts=(.*)$/m);
-  if (!m || !/^\d+$/.test(m[1])) throw new Error(`the unit's NRestarts is not a non-negative integer: ${JSON.stringify(m ? m[1] : null)}`);
-  return Number(m[1]);
-}
-const inRestart = (entry, windows) => {
-  const at = Date.parse(entry.timestamp);
-  return (windows ?? []).some((w) => at >= Date.parse(w.from) && at <= Date.parse(w.to));
-};
 
 // Whether an entry is a lifecycle marker and no more, read for the windows and reported never: one at
 // WARNING or above (a container killed by signal 11) is reported too.
@@ -605,7 +399,7 @@ export const isMarker = (entry, lifecycle) => (RANK[entry.severity ?? "DEFAULT"]
   Object.values(lifecycle ?? {}).some((l) => new RegExp(l.marker).test(clean(messageOf(entry))));
 
 // The noise rule an entry meets, by service, container, message and phases (schema.cue's #Noise), or null.
-// `phases` are all that apply to it (a pod's start or shutdown and a node's restart can hold at once, a
+// `phases` are all that apply to it (a pod's start and shutdown can hold at once, a
 // phase's name or a list of them); a rule held to `during` meets it when any of its phases applies.
 export function noiseOf(entry, rules, phases = []) {
   const text = clean(messageOf(entry));
@@ -622,17 +416,14 @@ export function noiseOf(entry, rules, phases = []) {
 // The entries as groups, one a fingerprint (the same line noise in its window and not outside it
 // makes two): how many, when first and last, on which revisions, and
 // up to three redacted samples, the first, the last and one between.
-// `restart` are the node's deliberate-restart windows (restartWindows); they apply to the entries read from the
-// node (`source: "node"`), never to a Cloud Run service's. The instances' windows are built from `context`, every
-// entry the run read, not only `entries`, those to count: a shutdown marker counted by an earlier run is not in
-// them, and the line it explains may be.
-export function group(entries, rules, lifecycle = {}, restart = [], context = entries) {
+// The instances' windows are built from `context`, every entry the run read, not only `entries`, those to count:
+// a shutdown marker counted by an earlier run is not in them, and the line it explains may be.
+export function group(entries, rules, lifecycle = {}, context = entries) {
   const groups = {};
   const windows = windowsOf(context, lifecycle);
   for (const e of stitch(entries)) {
     if (isMarker(e, lifecycle)) continue;
-    const phases = [...phasesOf(e, windows, lifecycle), ...(e.source === "node" && inRestart(e, restart) ? ["restart"] : [])];
-    const noise = noiseOf(e, rules, phases);
+    const noise = noiseOf(e, rules, phasesOf(e, windows, lifecycle));
     const key = keyOf(e) + (noise ? `|noise ${noise}` : "");
     const fp = fingerprint(key);
     const at = e.timestamp ?? e.receiveTimestamp ?? "";

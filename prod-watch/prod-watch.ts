@@ -9,7 +9,7 @@
 //   deno run -A prod-watch/prod-watch.ts <app> mark <fp> open|watching|noise|fixed [--reason why] [--pr N]
 // `cue` from PATH or $CUE. The state (cursor.json, ledger.json) is <the repository's root>/.omc/prod-watch/<app>/,
 // runtime state no commit carries.
-import { brt, counterOf, cutoffOf, group, k3sState, leadHold, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, completeWindows, k3sNext, restartPending, restartRange, restartWindows, settleRun, timeAfter, triage, unitOf } from "./watch.js";
+import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, settleRun, timeAfter, triage } from "./watch.js";
 
 // The app's folder: the one this script was written into (prod-watch/ is beside its files).
 const appDir = Deno.realPathSync(new URL("../", import.meta.url).pathname);
@@ -56,8 +56,7 @@ if (verb === "ls") {
   Deno.exit(0);
 }
 
-type Restart = { unit: string; stop: string; start: string; crash: string; lead: number; tail: number; down: number };
-type Node = { restart?: Restart; host: string; kubeconfig: string; namespace: string; containers: string[]; deployments: string[]; logs: { namespace: string; service: string; port: number } };
+type Node = { host: string; kubeconfig: string; namespace: string; containers: string[]; deployments: string[]; logs: { namespace: string; service: string; port: number } };
 // The app's release, its opt-in and the noise, read from CUE in one export: the app's package with
 // its own registry (its .mise.toml's CUE_REGISTRY). prodWatch comes from prod_watch_plugin.cue held
 // to #Watch, with the shared noise and the lifecycle windows in it.
@@ -141,53 +140,6 @@ async function onNode(n: Node, script: string, stdin = ""): Promise<{ ok: boolea
   const o = await p.output();
   return { ok: o.success, out: decode(o.stdout), err: decode(o.stderr) };
 }
-// A deliberate k3s restart (prodWatch.node.restart) is what the node's systemd journal says it was, read-only:
-// `sudo -n journalctl` (the journal is not the login user's to read) for the unit's lines of systemd itself, and
-// `systemctl show` for its ActiveEnterTimestamp and NRestarts, which the last run's is compared with. The journal
-// is read as far as the schema's lead, down and tail say a window touching the report can reach (restartRange),
-// and a window is taken only as far as that read (until). A read that fails stops the run before anything is
-// written, so the next run reads the window again. The unit is the schema's, held to letters and signs.
-let restartWins: { from: string; to: string }[] = [];
-let restartHold: { from: string } | null = null;
-let restartCandidates: { from: string; to: string }[] = [];
-let restartWas: number | null = null;
-let restartNow: number | null = null;
-let restartVoided: { from: string; to: string }[] = [];
-let restartUntil = 0;
-let restartTo = 0;
-let restartLead = 0;
-if (node?.restart) {
-  const r = node.restart;
-  const day = (iso: string) => iso.slice(0, 19).replace("T", " ") + " UTC";
-  // One node command, before the journal read: the counter, then a wait on the node until its own clock passes the next
-  // whole second, and that second (CUTOFF, epoch seconds). The cutoff is a second the node has reached, at or after the
-  // NRestarts read: a crash the counter counted has its stop line before it, so none can raise the counter while its
-  // lines wait for the next run against an equal counter. A crash between the read and the cutoff shows in the journal
-  // without the counter, which the next run's rise rejects. The Mac's clock is not used: it can be ahead of the node's.
-  const u = await onNode(node, `TZ=UTC systemctl show ${r.unit} -p LoadState -p ActiveEnterTimestamp -p NRestarts && c=$(( $(date +%s) + 1 )) && while [ "$(date +%s)" -lt "$c" ]; do sleep 0.1; done; echo "CUTOFF=$c"`);
-  if (!u.ok) throw new Error(`the node's ${r.unit} restarts were not read (${u.err.trim().slice(0, 300) || "no message"}): the ledger and the cursor are where they were`);
-  const cutoff = cutoffOf(u.out);
-  const range = restartRange(from, to, r, cutoff);
-  const j = await onNode(node, `sudo -n journalctl -u ${r.unit} _PID=1 --utc -o short-iso-precise --no-pager -q --since '${day(range.since)}' --until '${day(range.until)}'`);
-  if (!j.ok) throw new Error(`the node's ${r.unit} restarts were not read (${j.err.trim().slice(0, 300) || "no message"}): the ledger and the cursor are where they were`);
-  const unit = unitOf(u.out);
-  if (unit.loadState !== "loaded") throw new Error(`the node's ${r.unit} is not loaded (LoadState ${unit.loadState ?? "unread"}): the ledger and the cursor are where they were`);
-  // A loaded unit's counter is a whole number or the run fails, before triage or any write.
-  const nRestarts = counterOf(u.out);
-  // A k3s.json that is no object, or whose voided is there and is no list of intervals, stops the run before triage or any write.
-  const saved = (() => { try { return k3sState(read("k3s.json", {})); } catch (e) { throw new Error(`${state}/k3s.json is malformed, mend or remove it: ${(e as Error).message}`); } })();
-  const was = saved.nRestarts;
-  // The intervals an earlier rise of NRestarts rejected stay rejected until the cursor passes them; k3sNext decides what is written back (the old counter while a restart is held).
-  restartVoided = saved.voided;
-  restartWas = was;
-  restartNow = nRestarts;
-  restartWins = restartWindows({ journal: j.out, activeEnter: unit.activeEnter, restarts: { was, now: nRestarts }, until: range.until, voided: restartVoided, since: !!since }, r);
-  restartCandidates = completeWindows({ journal: j.out, activeEnter: unit.activeEnter, until: range.until }, r);
-  restartUntil = Date.parse(range.until);
-  restartTo = Date.parse(to);
-  restartLead = r.lead;
-  restartHold = restartPending({ journal: j.out, activeEnter: unit.activeEnter, until: range.until }, r);
-}
 const sources: { release?: { at: string; short: string; sha: string } | null; images: Record<string, string>; pods: number } = { images: {}, pods: 0 };
 if (node) {
   const n: Node = node;
@@ -224,8 +176,7 @@ if (node) {
     if (Date.parse(cut) < Date.parse(reached)) reached = cut;
   }
   const lines = logEntries(rows.join("\n"), { from, lifecycle, starts });
-  // What the node's entries are, kept through the merge: a restart window is the node's, never a Cloud Run service's.
-  entries.push(...lines.map((l: Record<string, unknown>) => ({ ...l, source: "node" })) as unknown as typeof entries);
+  entries.push(...lines);
   entries.sort((a, b) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)));
   // What is serving: the last release of release-cron's log, else the images the pods run.
   // No log is the one thing to go without (an app release-cron does not release); any other failure to read it fails the run.
@@ -243,21 +194,16 @@ entries = entries.filter((e) => !timeAfter(e.timestamp, reached));
 // it, and the next one reads that overlap again: the entries it already counted, kept by hash in the cursor,
 // are not counted twice.
 const lag = 5 * 60e3;
-// The hash is of the entry as the source gave it, without the `source` tag, so a cursor's hashes stay valid.
+// The hash is of the entry as the source gave it, so a cursor's hashes stay valid.
 const hashOf = async (e: unknown) => [...new Uint8Array(await crypto.subtle.digest("SHA-1", new TextEncoder().encode(hashInput(e))))].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
 const hashes: string[] = [];
 for (const e of entries) hashes.push(await hashOf(e));
-// A cursor run holds back a restart not finished at the cutoff (restartPending): the node's entries from its start
-// are not triaged nor counted, and the cursor stops there, so the next run reads them again with the window
-// complete. A `--since` run holds nothing back. What the run counts, commits and keeps in `seen` is settleRun's.
-// And one more, a lead before the cutoff: a stop line may reach the journal after this run read it, and its window
-// reaches that far back, so the node's entries from there are left to the next run too (leadHold).
-const holdBack = node?.restart && !since ? leadHold({ hold: restartHold, until: restartUntil, to: restartTo, lead: restartLead }) : restartHold;
 // Every entry the run read: the instances' windows are built from them, whether or not an earlier run counted them.
 const everyRead = entries;
-const settled = settleRun({ entries, hashes, hold: holdBack, since: !!since, counted: cursor?.seen ?? [], reached, to, lag });
+// What the run counts, commits and keeps in `seen` is settleRun's.
+const settled = settleRun({ entries, hashes, since: !!since, counted: cursor?.seen ?? [], reached, to, lag });
 entries = settled.entries;
-const { report, ledger: next } = triage(group(entries, rules, lifecycle, restartWins, everyRead), ledger, reached);
+const { report, ledger: next } = triage(group(entries, rules, lifecycle, everyRead), ledger, reached);
 const where = [
   ...(services.length ? [`services ${services.join(", ")} (${project})`] : []),
   ...(node ? [`node ${node.namespace} on ${node.host} (${sources.pods} pods)`] : []),
@@ -270,8 +216,4 @@ if (!since) {
   write("ledger.json", next);
   // The overlap is read again, so what it holds is what the next run must not count again.
   write("cursor.json", { at: settled.committed, seen: settled.seen });
-  // k3sNext gets restartHold, not holdBack: holdBack (leadHold) is always set, and with it the counter kept would be
-  // min(was, now), which drops every window after one rise.
-  const k3sOut = k3sNext({ was: restartWas, now: restartNow, hold: restartHold, voided: restartVoided, candidates: restartCandidates, committed: settled.committed });
-  if (k3sOut !== null) write("k3s.json", k3sOut);
 }
