@@ -1018,30 +1018,40 @@ Deno.test("PRONTO-894 review: a ticket's priority is a field of its own, no labe
   // Legacy tickets (#354's `release=1`, any before it) are ordinary.
   assertEquals(parseTicket("2 release=1 gate").release, false);
   assertEquals(parseTicket("2 mem=20 cores=4 release=1 gate").release, false);
+  // An older copy's ticket whose label itself starts with `prio=release` reads as a release (releaseReal then bounds it).
+  assertEquals(parseTicket("2 prio=release gate").release, true);
+  assertEquals(parseTicket("2 mem=20 cores=4 prio=release gate").release, true);
   assertEquals(parseTicket("2 mem=20 cores=4 gate"), { weight: 2, nested: false, mem: 20, cores: 4, release: false, what: "gate" });
   // A release needs a positive weight, a memory claim of weight 0 is no release even if marked.
   assertEquals(parseTicket("0 mem=20 cores=4 prio=release cue").release, false);
   assertEquals(parseTicket("prio=release cue").release, false, "no readable weight: a stack's, but the first word was no weight");
 });
 
-Deno.test("PRONTO-894 review: a release's cue claim is not deadlocked by an older ordinary weighted cue ticket", async () => {
+Deno.test("PRONTO-894 review: cueAhead keeps release and nested tickets, skips ordinary weighted ones for a release", async () => {
   const { cueAhead } = await import(new URL("../../harness/files/tests/slot.ts", import.meta.url).href);
   const older = [{ name: "a", weighted: true, release: false }, { name: "b", weighted: true, release: true }, { name: "c", weighted: false, release: false }];
-  assertEquals(cueAhead(older, true).map((o: { name: string }) => o.name), ["b", "c"], "a release skips ordinary weighted tickets, keeps release and nested ones");
+  assertEquals(cueAhead(older, true).map((o: { name: string }) => o.name), ["b", "c"]);
   assertEquals(cueAhead(older, false).map((o: { name: string }) => o.name), ["a", "b", "c"], "any other claim reserves behind all");
-  // Two requests that fit alone (20 GB each under 30), 40 together: the older ordinary one waits for the release
-  // (which holds the machine), so the release must not wait for it.
+});
+
+// SLOT_TS names another copy of slot.ts for the cases that run it (to run them against an older file).
+const slotUnderTest = Deno.env.get("SLOT_TS") ?? slotPath;
+const slotRun = (dir: string, args: string[], more: Record<string, string> = {}) =>
+  new Deno.Command(`${deno}/deno`, { args: ["run", "-A", "--no-config", "--no-lock", slotUnderTest, ...args], cwd: dir, env: envOf(dir, more), clearEnv: true, stdout: "piped", stderr: "piped" }).spawn();
+const within = <T>(p: Promise<T>, ms: number) => Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), ms))]);
+
+Deno.test("PRONTO-894 review: two cue claims that fit alone but not together do not deadlock a release against an older ordinary ticket", async () => {
+  // 20 GB each under 30: the older ordinary weighted ticket waits for the release (which holds the machine), so
+  // the release must not wait for the memory that ticket reserves while it waits.
   const dir = await Deno.makeTempDir();
-  await fake(dir);
   await Deno.mkdir(`${dir}/pool/cue-queue`, { recursive: true });
   const owner = await hold(dir, 0);
-  const slot = await import(new URL("../../harness/files/tests/slot.ts", import.meta.url).href);
-  await Deno.writeTextFile(`${dir}/pool/cue-queue/000000000000001-${owner.pid}-w`, slot.ticketText({ weight: 2, nested: false, mem: 20, cores: 1, release: false, what: "older gate cue" }));
-  const env = { ...envOf(dir, { STACK_BUDGET: "6", CUE_MEM_GB: "30", CUE_CORES: "10", STACK_PRIORITY: "release", STACK_WAIT_MINUTES: "1" }) };
-  const job = new Deno.Command(`${deno}/deno`, { args: ["run", "-A", "--no-config", "--no-lock", slotPath, "--weight", "2", "--mem", "20", "--cores-claim", "1", "--what", "release cue", "--", "true"], cwd: dir, env, clearEnv: true, stdout: "piped", stderr: "piped" }).spawn();
+  await Deno.writeTextFile(`${dir}/pool/cue-queue/000000000000001-${owner.pid}-w`, "2 mem=20 cores=1 prio=normal older gate cue");
+  const job = slotRun(dir, ["--weight", "2", "--mem", "20", "--cores-claim", "1", "--what", "release cue", "--", "true"],
+    { STACK_BUDGET: "6", CUE_MEM_GB: "30", CUE_CORES: "10", STACK_PRIORITY: "release", STACK_WAIT_MINUTES: "1" });
   const done = job.output();
   try {
-    const out = await Promise.race([done, new Promise<null>((r) => setTimeout(() => r(null), 20_000))]);
+    const out = await within(done, 20_000);
     assert.ok(out !== null, "the release was admitted, not left waiting for the older ticket");
     assertEquals(out.code, 0, text(out.stderr));
   } finally {
@@ -1049,6 +1059,48 @@ Deno.test("PRONTO-894 review: a release's cue claim is not deadlocked by an olde
     await owner.release();
   }
 });
+
+// A `ps` on the PATH that does what `script` says, ahead of the system's.
+const fakePs = async (dir: string, script: string) => {
+  await Deno.mkdir(`${dir}/bin`, { recursive: true });
+  await Deno.writeTextFile(`${dir}/bin/ps`, `#!/bin/sh\n${script}\n`);
+  await Deno.chmod(`${dir}/bin/ps`, 0o755);
+};
+for (const [what, script] of [["exits 1 and prints nothing", "exit 1"], ["prints a non-C date", 'echo "qui 19 nov 10:00:00 2026"']]) {
+  Deno.test(`PRONTO-894 review: a ps that ${what} does not fail claims while a live release waits: they wait, a weight-0 claim runs, nothing is left`, async () => {
+    const dir = await Deno.makeTempDir();
+    await fakePs(dir, script);
+    await Deno.mkdir(`${dir}/pool/queue`, { recursive: true });
+    const release = await hold(dir, 0);
+    const ticketName = `${String(Date.now()).padStart(15, "0")}-${release.pid}`;
+    await Deno.writeTextFile(`${dir}/pool/queue/${ticketName}`, "6 prio=release rehearsal");
+    const env = { STACK_BUDGET: "6", STACK_WAIT_MINUTES: "1", CUE_MEM_GB: "30", CUE_CORES: "10" };
+    const weighted = slotRun(dir, ["--weight", "2", "--what", "gate", "--", "true"], env);
+    const weightedDone = weighted.output();
+    try {
+      // A weight-0 claim (cue memory alone) is not held.
+      const zero = slotRun(dir, ["--weight", "0", "--mem", "1", "--cores-claim", "1", "--what", "cue", "--", "true"], env);
+      const z = await within(zero.output(), 20_000);
+      assert.ok(z !== null, "the weight-0 claim was admitted");
+      assertEquals(z.code, 0, text(z.stderr));
+      // The weighted claim waits, held by the release: it has not ended, and has not errored.
+      assertEquals(await within(weightedDone, 3000), null, "the weighted claim is still waiting");
+      // The release ends: its ticket's process is gone, and the waiter goes through.
+      await release.release();
+      const w = await within(weightedDone, 20_000);
+      assert.ok(w !== null, "the weighted claim ran once the release ended");
+      assertEquals(w.code, 0, text(w.stderr));
+      assertMatch(text(w.stderr), /waiting: held: a release \(rehearsal, pid [0-9]+\) waits for it/);
+      assert.ok(!/cannot be read|did not run/.test(text(w.stderr)) || /counted as a release/.test(text(w.stderr)), "a ps that cannot be read is logged, not thrown");
+      assertEquals(await names(`${dir}/pool/queue`), [], "no ticket left in the cores' line");
+      assertEquals(await names(`${dir}/pool/cue-queue`), [], "no ticket left in the cue line");
+      assert.ok(!(await names(`${dir}/pool`)).includes(".choosing"), "no .choosing lock left");
+    } finally {
+      try { weighted.kill("SIGKILL"); } catch { /* done */ }
+      await release.release();
+    }
+  });
+}
 
 Deno.test("PRONTO-894 review: only a queue not yet made reads as empty", async () => {
   const { readQueue } = await import(new URL("../../harness/files/tests/slot.ts", import.meta.url).href);
@@ -1067,16 +1119,42 @@ Deno.test("PRONTO-894 review: only a queue not yet made reads as empty", async (
   }
 });
 
-Deno.test("PRONTO-894 review: a ps that fails does not drop a live release's hold", async () => {
-  const { psStart } = await import(new URL("../../harness/files/tests/slot.ts", import.meta.url).href);
-  const t = Date.parse("Thu Nov 19 10:00:00 2026");
-  assertEquals(psStart({ out: "Thu Nov 19 10:00:00 2026\n", ok: true }, 7, true), t, "readable: its start");
+Deno.test("PRONTO-894 review: ps's C date is parsed by hand; a live release whose start is unreadable is reported, not thrown", async () => {
+  const { psStart, parseLstart } = await import(new URL("../../harness/files/tests/slot.ts", import.meta.url).href);
+  const t = new Date(2026, 10, 19, 10, 0, 0).getTime();
+  assertEquals(parseLstart("Thu Nov 19 10:00:00 2026\n"), t);
+  assertEquals(parseLstart("Mon Nov  9 08:05:01 2026"), new Date(2026, 10, 9, 8, 5, 1).getTime(), "a day under 10 is padded with a space");
+  for (const bad of ["qui 19 nov 10:00:00 2026", "", "garbage", "Thu Xyz 19 10:00:00 2026"]) assert.ok(Number.isNaN(parseLstart(bad)), bad);
+  assertEquals(psStart({ out: "Thu Nov 19 10:00:00 2026\n", ok: true }, 7, true), { at: t });
   // Exited: stale, whatever ps said.
-  assertEquals(psStart({ out: "", ok: false }, 7, false), null, "ps exits 1 with nothing for a gone pid");
-  assertEquals(psStart({ out: "", ok: false, error: "ps did not run: spawn" }, 7, false), null);
-  assertEquals(psStart({ out: "garbage", ok: true }, 7, false), null);
-  // Alive and unreadable: an error naming the pid and the cause.
-  assert.throws(() => psStart({ out: "", ok: false, error: "ps did not run: EPERM" }, 4242, true), /pid 4242.*EPERM/);
-  assert.throws(() => psStart({ out: "", ok: false }, 4242, true), /pid 4242.*ps failed/);
-  assert.throws(() => psStart({ out: "not a date\n", ok: true }, 4242, true), /pid 4242.*"not a date"/);
+  assertEquals(psStart({ out: "", ok: false }, 7, false), { gone: true });
+  assertEquals(psStart({ out: "", ok: false, error: "ps did not run: spawn" }, 7, false), { gone: true });
+  assertEquals(psStart({ out: "garbage", ok: true }, 7, false), { gone: true });
+  // Alive and unreadable: the cause, naming the pid (the caller counts it a release and says so once).
+  const un = (ps: { out: string; ok: boolean; error?: string }) => (psStart(ps, 4242, true) as { unreadable: string }).unreadable;
+  assertMatch(un({ out: "", ok: false, error: "ps did not run: EPERM" }), /pid 4242.*EPERM/);
+  assertMatch(un({ out: "", ok: false }), /pid 4242.*ps failed/);
+  assertMatch(un({ out: "qui 19 nov 10:00:00 2026\n", ok: true }), /pid 4242.*"qui 19 nov/);
+});
+
+Deno.test("PRONTO-894 review: an unreadable queue is a wait reason, not an error, and the claim goes through once it can be read", async () => {
+  if (Deno.uid() === 0) return; // root reads a 000 directory
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(`${dir}/pool/cue-queue`, { recursive: true });
+  await Deno.chmod(`${dir}/pool/cue-queue`, 0o000);
+  const job = slotRun(dir, ["--weight", "2", "--what", "gate", "--", "true"], { STACK_BUDGET: "6", STACK_WAIT_MINUTES: "1" });
+  const done = job.output();
+  try {
+    assertEquals(await within(done, 3000), null, "it waits: nothing admitted on a queue it cannot read, and no error");
+    await Deno.chmod(`${dir}/pool/cue-queue`, 0o700);
+    const out = await within(done, 20_000);
+    assert.ok(out !== null, "admitted once the queue can be read");
+    assertEquals(out.code, 0, text(out.stderr));
+    assertMatch(text(out.stderr), /waiting: queue unreadable: .*cue-queue/);
+    assertEquals(await names(`${dir}/pool/queue`), []);
+    assert.ok(!(await names(`${dir}/pool`)).includes(".choosing"), "no .choosing lock left");
+  } finally {
+    try { job.kill("SIGKILL"); } catch { /* done */ }
+    await Deno.chmod(`${dir}/pool/cue-queue`, 0o700).catch(() => {});
+  }
 });

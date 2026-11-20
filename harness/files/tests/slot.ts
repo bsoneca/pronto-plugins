@@ -337,18 +337,30 @@ const freeMemoryPct = async (): Promise<number | null> => {
 };
 // Whether the release a record or ticket written at `written` names is real: its process `pid` started before
 // the write, and the write is within STACK_RELEASE_HOLD_MAX hours. Asked only of release-marked entries.
+// What ps says of a (pid, write) is asked once per process: a release's ps outcome does not change.
+const started = new Map<string, Promise<boolean>>();
+const warnedPs = new Set<number>();
 const releaseReal = async (pid: number, written: number) => {
   const hours = Number(Deno.env.get("STACK_RELEASE_HOLD_MAX") ?? 12);
   if (!releaseFresh(written, Date.now(), Number.isFinite(hours) ? hours : 12)) return false;
-  let ps: { out: string; ok: boolean; error?: string };
-  try {
-    const r = await new Deno.Command("ps", { args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, stdout: "piped", stderr: "piped" }).output();
-    ps = { out: new TextDecoder().decode(r.stdout), ok: r.success, error: new TextDecoder().decode(r.stderr).trim() || undefined };
-  } catch (e) {
-    ps = { out: "", ok: false, error: `ps did not run: ${e instanceof Error ? e.message : e}` };
-  }
-  const started = psStart(ps, pid, await alive(pid));
-  return started !== null && startedBefore(started, written);
+  const key = `${pid}:${written}`;
+  if (!started.has(key)) started.set(key, (async () => {
+    let ps: { out: string; ok: boolean; error?: string };
+    try {
+      const r = await new Deno.Command("ps", { args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, stdout: "piped", stderr: "piped" }).output();
+      ps = { out: new TextDecoder().decode(r.stdout), ok: r.success, error: new TextDecoder().decode(r.stderr).trim() || undefined };
+    } catch (e) {
+      ps = { out: "", ok: false, error: `ps did not run: ${e instanceof Error ? e.message : e}` };
+    }
+    const r = psStart(ps, pid, await alive(pid));
+    if ("gone" in r) return false;
+    if ("unreadable" in r) {
+      if (!warnedPs.has(pid)) { warnedPs.add(pid); say(`${r.unreadable}: counted as a release`); }
+      return true;
+    }
+    return startedBefore(r.at, written);
+  })());
+  return await started.get(key)!;
 };
 const holder = async (name: string) => Number(await Deno.readTextFile(`${pool}/${name}/pid`).catch(() => "0"));
 // The weights a holder declares: a launch (idle between the clicks of whoever plays it: 0.32 core on
@@ -438,20 +450,30 @@ export const releaseOf = (text: string, pid: number) => {
 // A release record or ticket is real only if its process started no later than the write (`started`, `written`:
 // ms since the epoch; a little slack for ps's whole seconds): a pid reused by another process started after it.
 export const startedBefore = (started: number, written: number) => started > 0 && started <= written + 2000;
-// When pid `pid` started (ms since the epoch), from what `ps -o lstart=` gave. null when the process has exited
-// (`alive` false: its record is stale, not a release). A live process whose start time cannot be read (ps did not
-// run, failed, or printed what is no date) throws, naming the pid and the cause: reading it as 0 would drop a live
-// release's hold and admit the work it holds back.
-export const psStart = (ps: { out: string; ok: boolean; error?: string }, pid: number, alive: boolean): number | null => {
-  const started = ps.ok ? Date.parse(ps.out.trim()) : NaN;
-  if (started > 0) return started;
-  if (!alive) return null;
-  throw new Error(`slot: release pid ${pid} is alive but its start time cannot be read: ${ps.error ?? (ps.ok ? `ps printed ${JSON.stringify(ps.out.trim())}` : "ps failed")}`);
+// `ps -o lstart=` in the C locale: "Thu Nov 19 10:00:00 2026" (the day padded with a space under 10), local
+// time, in ms since the epoch; NaN for anything else. Parsed here, not by Date.parse, which reads no other locale's.
+export const parseLstart = (text: string) => {
+  const m = /^[A-Za-z]{3}\s+([A-Za-z]{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/.exec(text.trim());
+  const month = m ? ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].indexOf(m[1]) : -1;
+  return m && month >= 0 ? new Date(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])).getTime() : NaN;
+};
+// When pid `pid` started, from what `ps -o lstart=` gave: { at } in ms; { gone } when the process has exited
+// (`alive` false: its record is stale, not a release); { unreadable } with the cause when it is alive and ps did
+// not run, failed or printed no C-format date. The caller then counts it a real release (a live release's hold is
+// not dropped, nor is every claim on the machine failed for a ps that cannot run), bounded by releaseFresh.
+export const psStart = (ps: { out: string; ok: boolean; error?: string }, pid: number, alive: boolean):
+  { at: number } | { gone: true } | { unreadable: string } => {
+  const at = ps.ok ? parseLstart(ps.out) : NaN;
+  if (at > 0) return { at };
+  if (!alive) return { gone: true };
+  return { unreadable: `release pid ${pid} is alive but its start time cannot be read: ${ps.error ?? (ps.ok ? `ps printed ${JSON.stringify(ps.out.trim())}` : "ps failed")}` };
 };
 // A ticket's text: "<weight>[ nested=1][ mem=<GB> cores=<n>] prio=<release|normal> <label>". The priority is a
 // fixed field of its own, written after the numbers and before the free-form label, and always written, so
 // no label can stand where it is read (a label "release ..." or "prio=release ..." follows `prio=normal`).
-// A ticket without it (a copy of this file from before) is ordinary, whatever its label says.
+// A ticket without it (a copy of this file from before) is ordinary, whatever its label says, but for one whose
+// label itself starts with `prio=release`: that copy wrote the label where the field is read, so it reads as a
+// release (releaseReal still asks for a live process that started before the write, within the hold's hours).
 export const ticketText = (t: { weight: number; nested: boolean; mem?: number; cores?: number; release: boolean; what: string }) =>
   `${t.weight} ${t.nested ? "nested=1 " : ""}${t.mem !== undefined ? `mem=${t.mem} cores=${t.cores ?? 0} ` : ""}prio=${t.release ? "release" : "normal"} ${t.what}`;
 // What ticketText wrote. `release` is the marked priority alone: a release is real only with a weight above 0
@@ -850,15 +872,21 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
   await reapDeadClaims();
   try {
   for (;;) {
+    // A poll that admits nothing for a reason that moves no progress counter (all at Infinity: nothing "dropped").
+    const waiting = (why: string): { why: string; ahead: number; coresAhead: number; used: number; memHeld: number; held: boolean } =>
+      ({ why, ahead: Infinity, coresAhead: Infinity, used: Infinity, memHeld: Infinity, held: false });
     const got = await choosing(async () => {
       // Reclaim, at every claim: the live tickets of this claim's line older than its own (their
       // weights reserved), the dead ones freed; the live holders, the dead jobs and stale slots freed.
       // Each queue directory once per poll: its live tickets, in order (the dead ones freed). A ticket's number is when it
       // was queued; a release ticket whose process started after that, or that is too old, is not a release.
+      let unreadable: string | undefined;
       const scan = async (dir: string) => {
         const found: { name: string; weight: number; mem: number; cores: number; what: string; weighted: boolean; release: boolean; pid: number }[] = [];
-        // A line nobody has queued in has no directory yet (readQueue); any other failure to read it ends the claim.
-        for (const e of await readQueue(dir)) {
+        // A line nobody has queued in has no directory yet (readQueue); a queue that cannot be read admits nothing this poll.
+        let entries: Deno.DirEntry[] = [];
+        try { entries = await readQueue(dir); } catch (e) { unreadable ??= `${dir}: ${e instanceof Error ? e.message : e}`; }
+        for (const e of entries) {
           const m = e.name.match(/^[0-9]+-([0-9]+)(?:-w)?$/);
           if (!m) continue;
           if (!await alive(Number(m[1]))) { await Deno.remove(`${dir}/${e.name}`).catch(() => {}); continue; }
@@ -870,6 +898,8 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
         return found.sort((x, y) => x.name < y.name ? -1 : 1);
       };
       const coresTickets = await scan(`${pool}/queue`), cueTickets = await scan(`${pool}/cue-queue`);
+      // An unreadable queue is no empty one: nothing is admitted on it, and the claim fails only if it stays so past its deadline.
+      if (unreadable) return waiting(`queue unreadable: ${unreadable}`);
       const before = (all: typeof coresTickets, own: string) => all.filter((t) => t.name < own);
       const inLine = line === "none" ? [] : before(line === "cue" ? cueTickets : coresTickets, mine);
       const holders: { weight: number; cue: boolean; mem: number; cores: number; job: boolean; release: boolean }[] = [];
