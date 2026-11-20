@@ -379,24 +379,35 @@ const instant = (s) => {
 // Whether time a is strictly after time b, to the nanosecond.
 export const timeAfter = (a, b) => { const [x, fx] = instant(a), [y, fy] = instant(b); return x !== y ? x > y : fx > fy; };
 // What a cursor run counts and commits (prod-watch.ts). `hashes` is each entry's hash (a list, in the entries' order), `counted` the
-// hashes the last cursor holds (`seen`, a multiset: each saved occurrence skips one entry), `reached` where the sources were read to (`to`, or earlier when a limit
-// cut one short), `lag` ms. A `since` run (a window only looked at) counts what it reads, the entries an earlier
-// run counted included. The cursor is `reached` as the source wrote it (any precision) unless a read to now
-// gives the lag before it, in ms.
-/** @param {{entries: any[], hashes: string[], since?: boolean, counted?: Iterable<string>, reached: string, to: string, lag: number}} input */
+// occurrences the last cursor holds (`seen`, a multiset: each saved occurrence skips one entry; a bare hash is a cursor written before
+// occurrences held their time), `reached` where the sources were read to (`to`, or earlier when a limit cut one short), `lag` ms. A
+// `since` run (a window only looked at) counts what it reads, the entries an earlier run counted included. The cursor is `reached` as
+// the source wrote it (any precision) unless a read to now gives the lag before it, in ms. `seen` is what the next run skips, each
+// occurrence with its hash, its time and whether its source reads strictly after the cursor (Cloud Logging) or from its millisecond on
+// (the node's VictoriaLogs): this read's from the cursor on, and the saved occurrences this read did not meet.
+// Only an occurrence the next read can return is kept, so no run carries a hash it can never meet.
+/** @param {{entries: any[], hashes: string[], since?: boolean, counted?: Iterable<string | {h: string, at?: string, strict?: boolean}>, reached: string, to: string, lag: number}} input */
 export function settleRun({ entries, hashes, since = false, counted = [], reached, to, lag }) {
   const known = new Map();
-  for (const h of counted) known.set(h, (known.get(h) ?? 0) + 1);
+  for (const c of counted) {
+    const o = typeof c === "string" ? { h: c } : c;
+    if (o.at !== undefined) instant(o.at);
+    if (!known.has(o.h)) known.set(o.h, []);
+    known.get(o.h).push(o);
+  }
   entries.forEach((e) => instant(e.timestamp));
   instant(reached);
-  const rest = since ? entries : entries.filter((_e, i) => {
-    const n = known.get(hashes[i]) ?? 0;
-    if (n > 0) known.set(hashes[i], n - 1);
-    return n === 0;
-  });
+  const rest = since ? entries : entries.filter((_e, i) => !known.get(hashes[i])?.shift());
   const committed = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
-  // In ms: a node's timestamps are cut to ms and the next read starts inclusive at the cursor, so the cursor's own ms is read again.
-  const seen = hashes.filter((_h, i) => Date.parse(entries[i].timestamp) >= Date.parse(committed));
+  // The next read starts at the cursor: Cloud Logging strictly after it, the node from its millisecond on (its timestamps are cut to
+  // ms and VictoriaLogs' start is inclusive). An occurrence of unknown time (an old cursor's) is kept until a read to now prunes it.
+  const reachable = (o) => o.at === undefined || (o.strict ? timeAfter(o.at, committed) : Date.parse(o.at) >= Date.parse(committed));
+  const seen = entries.map((e, i) => ({ h: hashes[i], at: e.timestamp, ...(e.resource?.type === "cloud_run_revision" ? { strict: true } : {}) })).filter(reachable);
+  // A saved occurrence this read did not meet, which the next read can return, is carried forward, or the run that reads it next counts
+  // it again: a read a limit cut short stops before entries the last run counted, and a read to now that follows one commits a lag
+  // before where it started reading. One of unknown time (an old cursor's bare hash) is carried only by a capped read: a read to now
+  // drops it.
+  if (!since) for (const list of known.values()) for (const o of list) if (o.at !== undefined ? reachable(o) : reached !== to) seen.push(o);
   return { entries: rest, committed, seen };
 }
 // What an entry is hashed as (prod-watch.ts's cursor keeps the hashes of what it counted): the entry as its source
