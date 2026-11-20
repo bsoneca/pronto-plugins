@@ -146,7 +146,7 @@ def with-lock [build: record, body: closure]: nothing -> string {
 		let msg = if $released != null { $"($why); the lock was not released either: ($released)" } else { $why }
 		error make {msg: $msg}
 	}
-	if $released != null { error make {msg: $"collected, but the lock was not released: ($released)"} }
+	if $released != null { error make {msg: $"the maintenance ran \(($outcome.ok | default 'done')\), but the lock was not released: ($released)"} }
 	$outcome.ok
 }
 
@@ -217,6 +217,7 @@ def lock-release [build: record, holder: string] {
 	let options = {kind: "DeleteOptions", apiVersion: "v1", preconditions: {uid: $held.metadata.uid, resourceVersion: $held.metadata.resourceVersion}}
 	let path = $"/apis/coordination.k8s.io/v1/namespaces/($ns)/leases/($lock_name)"
 	let r = ($options | to json | ^kubectl delete --raw $path -f - | complete)
+	if $r.exit_code != 0 and ($r.stderr =~ "Conflict") { print -e $"node: (stamp) warning: the collection lock changed hands before this collector deleted it: left to its new holder" }
 	if $r.exit_code != 0 and not ($r.stderr =~ "Conflict|NotFound") { error make {msg: $"deleting the registry's collection lock failed: ($r.stderr | str trim)"} }
 }
 

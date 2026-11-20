@@ -62,8 +62,10 @@ export def undo [before: table, namespace: string]: nothing -> record {
 			}
 		} catch {|e| {name: $b.name, ok: false, why: $e.msg, deleted: false} }
 	})
+	# One that existed but had no revision yet (generation above 0): not rolled back to anything, and not deleted either; said.
+	let unrevisioned = ($before | where {|b| $b.revision == 0 and $b.generation > 0 } | each {|b| {name: $b.name, why: "existed without a revision; left as the release applied it"} })
 	{
 		undone: (($results | where ok | get name) | append ($created | where {|r| $r.ok and $r.deleted } | get name))
-		failed: (($results | where not ok | select name why) | append ($created | where not ok | select name why) | append $c.failed)
+		failed: (($results | where not ok | select name why) | append ($created | where not ok | select name why) | append $c.failed | append $unrevisioned)
 	}
 }

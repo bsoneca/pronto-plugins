@@ -394,11 +394,12 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	if $cluster_read.exit_code != 0 { error make {msg: $"reading the database cluster ($app)-db failed, so its image to put back is unknown: ($cluster_read.stderr | str trim)"} }
 	let previous_image = if ($cluster_read.stdout | str trim | is-empty) { null } else { $cluster_read.stdout | from json | get -o spec.imageName }
 	let before = (rollback revisions ($deployments | get metadata.name) $ns)
-	# What serves is about to change: the record of the public site's verification, which cd trusts, is invalidated first, so a
-	# release that fails halfway can never leave an old commit marked verified over new images. A first release has no record.
-	invalidate-verified $ns
 	as-list $parts.namespace | kubectl-ok apply -f -
 	dry-run $parts.rest $ns
+	# What serves is about to change (the server accepted the render): the record of the public site's verification, which cd
+	# trusts, is invalidated before the first write that can change it, so a release that fails halfway can never leave an old
+	# commit marked verified over new images. A first release has no record.
+	invalidate-verified $ns
 	# 5. secrets
 	apply-secrets $secrets
 	let oidc = (render oidc-secrets $compose $app_info.dir)
@@ -527,22 +528,30 @@ def main [
 		return
 	}
 	if $verifying {
-		# cd's word that the public site passed its checks for what is recorded: `verified` becomes `sha`.
+		# cd's word that the public site passed its checks for `verified`: recorded when the node serves exactly that commit, as a
+		# compare-and-set on the record's resourceVersion. A conflict (the record was rewritten, by the maintenance's outcome or
+		# a release) is retried while the record still names the commit; one that names another is refused.
 		tunnel with-tunnel $node.api $node.build {|fwd|
 			let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
 			try {
 				with-env {KUBECONFIG: $kubeconfig} {
-					let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o json | complete)
-					if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
-					let record = if ($r.stdout | str trim | is-empty) { {} } else { $r.stdout | from json }
-					let sha = ($record | get -o data.sha | default "")
-					let version = ($record | get -o metadata.resourceVersion | default "")
-					if ($sha | is-empty) { error make {msg: $"($node.namespace) records no commit to mark verified (a release of a dirty tree records none)"} }
-					# cd's checks were of the commit it names: a release since then (another run's) is not what they saw.
-					if $sha != $verified { error make {msg: $"the node now serves ($sha), not ($verified) which the checks passed for: it is not marked verified"} }
-					# compare-and-set: the patch names the resourceVersion it read, so a release that changed the record since is a conflict
-					# and this verification (of what it was) is not written over it
-					kubectl-ok patch configmap pronto-release -n $node.namespace --type merge -p ({metadata: {resourceVersion: $version}, data: {verified: $verified}} | to json --raw)
+					mut done = false
+					mut attempt = 0
+					while not $done {
+						$attempt += 1
+						let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o json | complete)
+						if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
+						let record = if ($r.stdout | str trim | is-empty) { {} } else { $r.stdout | from json }
+						let sha = ($record | get -o data.sha | default "")
+						let version = ($record | get -o metadata.resourceVersion | default "")
+						if ($sha | is-empty) { error make {msg: $"($node.namespace) records no commit to mark verified (a release of a dirty tree records none)"} }
+						# cd's checks were of the commit it names: a release since then (another run's) is not what they saw.
+						if $sha != $verified { error make {msg: $"the node now serves ($sha), not ($verified) which the checks passed for: it is not marked verified"} }
+						let p = (^kubectl patch configmap pronto-release -n $node.namespace --type merge -p ({metadata: {resourceVersion: $version}, data: {verified: $verified}} | to json --raw) | complete)
+						if $p.exit_code == 0 { $done = true } else if ($p.stderr =~ "Conflict") and $attempt < 4 { print -e $"node: (stamp) the record changed while it was being marked; trying again" } else {
+							error make {msg: $"marking ($verified) verified failed: ($p.stderr | str trim)"}
+						}
+					}
 					print $"verified ($verified)"
 				}
 			} finally {
@@ -569,7 +578,8 @@ def main [
 					# The registry's lease (a release, and a check that builds: both push): held while this release pushes and until it ends, so
 					# no other release collects the registry's garbage under its pushes (registry.nu).
 					let lease = if (not $check) or $build { registry lease-acquire $node.build $node.name $node.namespace } else { "" }
-					try {
+					mut maintenance = ""
+					let body_failure = (try {
 						# 2. build, or placeholders for a check
 						renew-lease $node $lease
 						let preview_tag = if ($node.preview | is-empty) { "release" } else { $node.preview }
@@ -593,12 +603,23 @@ def main [
 							})
 							let unrecorded = (try { record-prune $node $failure $pending; null } catch {|e| $e.msg })
 							if $unrecorded != null { error make {msg: $"the release is live, but the prune's outcome could not be recorded: ($unrecorded)"} }
-							$failure
+							$maintenance = ($failure | default "")
 						}
-					} finally {
-						# a lease left behind blocks the next collection for an hour, so a failed release of it fails the command
-						if $lease != "" { registry lease-release $node.build $lease }
+						null
+					} catch {|e| $e.msg })
+					# The lease goes whatever happened, and its release is checked (one left behind blocks the next collection for an
+					# hour) without turning a live release into a plain failure: a body that succeeded and a lease that stayed is
+					# "released, maintenance failed" (status 3, recorded); a body that failed and a lease that stayed say both.
+					let lease_failure = if $lease != "" { try { registry lease-release $node.build $lease; null } catch {|e| $e.msg } } else { null }
+					if $body_failure != null {
+						error make {msg: (if $lease_failure != null { $"($body_failure); the registry lease ($lease) was not released either: ($lease_failure)" } else { $body_failure })}
 					}
+					if $lease_failure != null {
+						let why = $"the registry lease ($lease) was not released: ($lease_failure)"
+						$maintenance = (if ($maintenance | is-not-empty) { $"($maintenance); ($why)" } else { $why })
+						try { record-prune $node $maintenance } catch {|e| print -e $"node: (stamp) warning: that could not be recorded either: ($e.msg)" }
+					}
+					if ($maintenance | is-empty) { null } else { $maintenance }
 				}
 			}
 		} finally {

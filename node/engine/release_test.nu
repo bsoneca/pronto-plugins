@@ -211,6 +211,7 @@ def main [] {
 	test_the_collection_waits_for_releases_in_flight
 	test_a_stale_lock_is_taken_over_against_its_resource_version
 	test_prune_runs_only_the_maintenance
+	test_a_lease_that_stays_does_not_turn_a_live_release_into_a_failure
 	test_a_deferred_prune_exits_four
 	test_only_a_confirmed_absence_is_created
 	test_the_lock_is_released_against_what_was_read_and_its_failure_is_told
@@ -1114,7 +1115,9 @@ def test_verification_is_invalidated_before_a_release_changes_what_serves [] {
 	assert equal $r.exit_code 0 $"($r.stdout)($r.stderr)"
 	let log = (calls $w)
 	let at = {|pat| $log | enumerate | where {|e| $e.item =~ $pat } | get index }
-	assert ((do $at "^patch configmap pronto-release" | first) < (do $at "^apply " | first)) "the record is invalidated before anything is applied"
+	let first_change = ($log | enumerate | where {|e| ($e.item | str starts-with "apply ") and not ($e.item | str contains "--dry-run") and not ($e.item | str contains "Namespace/") } | get index | first)
+	assert ((do $at "^patch configmap pronto-release" | first) < $first_change) "the record is invalidated before the first write that changes what serves (after the server's dry run)"
+	assert ((do $at "^patch configmap pronto-release" | first) > (do $at "--dry-run=server" | first)) "and after the server accepted the render"
 	# a first release has no record: NotFound is not a failure
 	rm -f ($w.state | path join cm pronto-release)
 	"" | save -f ($w.state | path join strict_cm)
@@ -1128,6 +1131,11 @@ def test_verification_is_invalidated_before_a_release_changes_what_serves [] {
 	assert ($lost.exit_code != 0) "a record that changed since it was read is a conflict"
 	assert (has $lost.stderr "Conflict") $lost.stderr
 	rm -f ($w.state | path join cm_race)
+	# a record rewritten once meanwhile (the maintenance's outcome, say) is read again and marked
+	"" | save -f ($w.state | path join cm_race_once)
+	let again = (in-world $w $release_nu --app $w.app --verified abc)
+	assert equal $again.exit_code 0 $"($again.stdout)($again.stderr)"
+	assert (has $again.stderr "trying again") $again.stderr
 	let won = (in-world $w $release_nu --app $w.app --verified abc)
 	assert equal $won.exit_code 0 $"($won.stdout)($won.stderr)"
 	rm -rf $w.dir
@@ -1158,7 +1166,7 @@ def test_the_lock_is_released_against_what_was_read_and_its_failure_is_told [] {
 	"" | save -f ($w.state | path join lock_delete_fail)
 	let b = (in-world $w -c $"($use) registry collect $build ''")
 	assert ($b.exit_code != 0)
-	assert (has $b.stderr "collected, but the lock was not released") $b.stderr
+	assert (has $b.stderr "the maintenance ran") $b.stderr
 	rm -f ($w.state | path join lease registry-gc-lock) ($w.state | path join lock_delete_fail)
 	# a registry never pushed to
 	rm -f ($w.state | path join calls.jsonl)
@@ -1188,6 +1196,8 @@ def test_only_a_confirmed_absence_is_created [] {
 	assert equal $r.exit_code 0 $r.stderr
 	let deletes = (calls $w | where {|c| $c | str starts-with "delete deployment" })
 	assert equal $deletes ["delete deployment aprende-electric -n aprende --ignore-not-found"] "only the one recorded absent is deleted"
+	assert (has $r.stdout "existed without a revision; left as the release applied it") "the one that existed without a revision is said, not deleted"
+	assert (has $r.stdout "aprende-crud") $r.stdout
 	rm -rf $w.dir
 }
 
@@ -1203,6 +1213,28 @@ def test_a_deferred_prune_exits_four [] {
 	let patch = (calls $w | where {|c| ($c | str starts-with "patch configmap pronto-release") and ($c | str contains "pruned") } | last)
 	assert (has $patch '"pruned":"pending"') $patch
 	rm -rf $w.dir
+}
+
+def test_a_lease_that_stays_does_not_turn_a_live_release_into_a_failure [] {
+	print "test a lease that cannot be deleted after a successful release is status 3, recorded; after a failed one both are told..."
+	let w = (sandbox)
+	"" | save -f ($w.state | path join lease_delete_fail)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert equal $r.exit_code 3 $"a live release is not a plain failure: ($r.stdout)\n($r.stderr)"
+	assert (has $r.stdout "[SUCCESS] Released aprende") $r.stdout
+	assert (has $r.stderr "was not released") $r.stderr
+	let patch = (calls $w | where {|c| ($c | str starts-with "patch configmap pronto-release") and ($c | str contains "not released") })
+	assert ($patch | is-not-empty) "recorded in prune_error"
+	# a release that failed, and a lease that stayed: both messages
+	rm -rf $w.dir
+	let v = (sandbox)
+	"" | save -f ($v.state | path join lease_delete_fail)
+	"" | save -f ($v.state | path join job_fail)
+	let f = (in-world $v $release_nu --app $v.app)
+	assert equal $f.exit_code 1 $"($f.stdout)\n($f.stderr)"
+	assert (has $f.stderr "did not complete") $f.stderr
+	assert (has $f.stderr "was not released either") $f.stderr
+	rm -rf $v.dir
 }
 
 def git-commit-all [dir: string] {

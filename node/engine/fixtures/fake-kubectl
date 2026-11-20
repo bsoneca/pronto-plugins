@@ -9,7 +9,7 @@
 # registry_down (the node's builder or registry has no available replica), get_fail_<kind> and missing_<kind>
 # (a read of <kind> in every namespace is refused, or its CRD is not on the node), read_fail_namespace and
 # read_fail_cluster (any read of a namespace, or of the database Cluster, fails as an API error) and
-# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch of the database Cluster is refused), inuse (an image the pods name), cm_race (the record is rewritten between a read and a patch), strict_cm (a patch of a missing record is NotFound), lock_delete_fail (deleting a Lease is refused), lock_taken_over (a lock's resourceVersion moves between a read and a delete), no_repositories (the registry has none yet), find_fail (the registry's upload scan fails), lease_patch_fail (a patch of a Lease fails), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
+# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch of the database Cluster is refused), inuse (an image the pods name), cm_race_once (the same, once), cm_race (the record is rewritten between a read and a patch), strict_cm (a patch of a missing record is NotFound), lease_delete_fail (deleting a release's Lease is refused), lock_delete_fail (deleting the lock by precondition is refused), lock_taken_over (a lock's resourceVersion moves between a read and a delete), no_repositories (the registry has none yet), find_fail (the registry's upload scan fails), lease_patch_fail (a patch of a Lease fails), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
 # object with nothing and exit 0, as kubectl does.
 import json, os, sys
 
@@ -139,6 +139,8 @@ if verb == "delete" and "--raw" in args:
     sys.exit(0)
 
 if verb == "delete" and len(args) > 1 and args[1] == "lease":
+    if exists("lease_delete_fail"):
+        fail("Error from server (Forbidden): leases.coordination.k8s.io is forbidden")
     if os.path.exists(lease_path(args[2])):
         os.remove(lease_path(args[2]))
         print(f'lease.coordination.k8s.io "{args[2]}" deleted')
@@ -165,6 +167,9 @@ if verb == "patch":
         want = body.get("metadata", {}).get("resourceVersion")
         if exists("cm_race") and want is not None:
             server_stamp(o)  # another release wrote the record after it was read
+        if exists("cm_race_once") and want is not None:
+            server_stamp(o)
+            os.remove(d + "/cm_race_once")
         if want is not None and want != o["metadata"].get("resourceVersion"):
             fail('Error from server (Conflict): Operation cannot be fulfilled on configmaps "pronto-release": the object has been modified; please apply your changes to the latest version and try again')
         o["data"].update(body["data"])
