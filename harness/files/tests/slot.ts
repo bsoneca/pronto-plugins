@@ -1728,7 +1728,7 @@ export function ownSys(): RealSys {
   const errno = () => new Deno.UnsafePointerView(sym.errnoloc() as Deno.PointerObject).getInt32();
   const uid = sym.getuid() as number;
   const enc = new TextEncoder();
-  const ptr = (b: ArrayBufferView) => Deno.UnsafePointer.of(b as Uint8Array)!;
+  const ptr = (b: ArrayBufferView) => Deno.UnsafePointer.of(b as Uint8Array<ArrayBuffer>)!;
   const cstr = (s: string) => enc.encode(`${s}\0`);
   const linux = os === "linux";
   const ticks = linux ? Number(sym.sysconf(2)) || 100 : 0;
