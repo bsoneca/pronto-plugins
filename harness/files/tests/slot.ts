@@ -1399,6 +1399,8 @@ if (import.meta.main) {
     Deno.exit(0);
   }
   if (Deno.args[0] === "status" || Deno.args[0] === "renew") {
+    // renew writes deadlines into the pool: only into one that is ours (PRONTO-762), as claim checks.
+    if (Deno.args[0] === "renew") requireOwnDir(pool);
     const asked = Deno.args[1] === undefined ? 0 : Number(Deno.args[1]);
     let found = 0;
     const names: string[] = [];
