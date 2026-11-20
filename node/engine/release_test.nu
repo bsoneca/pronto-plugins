@@ -110,6 +110,13 @@ if [ -f "$d/crane_nopg" ]; then echo '{"config":{"Env":["PATH=/bin"]}}'; else ec
 	r#'
 #!/bin/sh
 d="$(dirname "$0")/.."
+case "$*" in
+  *"/crud/v1.0/metadata"*)
+    out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+    if [ -f "$d/host_unreachable" ]; then printf 000; exit 6; fi
+    if [ -f "$d/metadata_open" ]; then echo '{"id":"caddy","components":[]}' > "$out"; printf 200; exit 0; fi
+    echo "404 page not found" > "$out"; printf 404; exit 0 ;;
+esac
 if [ -f "$d/registry_dead" ]; then printf 000; exit 7; fi
 printf 200
 '# | str trim --left | save -f ($d | path join bin curl)
@@ -217,6 +224,7 @@ def main [] {
 	test_the_lock_is_released_against_what_was_read_and_its_failure_is_told
 	test_verification_is_invalidated_before_a_release_changes_what_serves
 	test_a_failed_provider_export_stops_the_release
+	test_the_door_must_not_answer_the_dapr_api
 	test_a_scan_that_fails_aborts_the_collection_and_a_deferred_one_is_pending
 	test_a_file_name_with_a_newline_is_one_name
 	test_a_failed_lease_renewal_is_a_warning_and_the_record_starts_unknown
@@ -1212,6 +1220,20 @@ def test_a_deferred_prune_exits_four [] {
 	assert (has $r.stderr "deferred, not done") $r.stderr
 	let patch = (calls $w | where {|c| ($c | str starts-with "patch configmap pronto-release") and ($c | str contains "pruned") } | last)
 	assert (has $patch '"pruned":"pending"') $patch
+def test_the_door_must_not_answer_the_dapr_api [] {
+	print "test a release fails when the door answers the Dapr sidecar's metadata, passes on a 404, and says so when the host does not answer..."
+	let w = (sandbox)
+	let ok = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $ok.exit_code 0 $"($ok.stdout)($ok.stderr)"
+	"" | save -f ($w.dir | path join host_unreachable)
+	let unreach = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $unreach.exit_code 0 $"($unreach.stdout)($unreach.stderr)"
+	assert (has $unreach.stderr "so the door's Dapr API was not checked") $unreach.stderr
+	rm -f ($w.dir | path join host_unreachable)
+	"" | save -f ($w.dir | path join metadata_open)
+	let open = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert ($open.exit_code != 0) "the sidecar's metadata fails the release"
+	assert (has $open.stderr "the door answers the Dapr sidecar's own API") $open.stderr
 	rm -rf $w.dir
 }
 

@@ -104,6 +104,15 @@ namespace and refuses the release's. `--schema-from` (a preview's copy of a data
 Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, previews' `--schema-from`, Studio's
 `services` and tenant release (P3, P4).
 
+### The door's Dapr API
+
+The door (caddy) dials its own Dapr sidecar for every upstream, and Dapr answers its own API paths (`/v1.0/metadata`,
+secrets, state, publish, shutdown) before it routes by `dapr-app-id`, so `https://<host>/crud/v1.0/metadata` would answer the
+sidecar's JSON. The engine gives caddy a Configuration of its own, `<app>-caddy-dapr-config` (the app's plus
+`api.allowed` for invocation alone, http and grpc), points the caddy Deployment's `dapr.io/config` at it, and leaves the
+shared one to crud, auth and the rest, which need other APIs. After the rollouts it asks the public door for that path and
+fails the release (rolling the Deployments back) when it returns `"id":"caddy"`; a host that does not answer yet is said, not failed.
+
 ### Known risks
 
 - A `RUN` step of a Dockerfile built on the operator's buildkitd runs without a process sandbox on the node's

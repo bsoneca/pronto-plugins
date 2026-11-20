@@ -239,6 +239,25 @@ def check-daprd [app: string, namespace: string, components: list<string>] {
 
 # The record of what runs: `sha` (what `--serving` prints, empty for a tree that was not a commit), and `verified`, empty
 # until the app's cd has checked the public site for it (`--verified`).
+# The door is public and dials its own Dapr sidecar: its `/crud/v1.0/metadata` must be PostgREST's answer (a 404), never the
+# sidecar's JSON (`"id":"caddy"`). A host that does not answer yet (DNS not moved) cannot be checked and is said, not failed;
+# a preview with no public host of its own has nothing to ask.
+export def check-door [node: record] {
+	if ($node.preview | is-not-empty) and (($node.hosts | get -o $node.preview | default "") | is-empty) { return }
+	let file = (mktemp -t door.XXXXXX | str trim)
+	let url = $"https://($node.host)/crud/v1.0/metadata"
+	let r = (^curl -s -m 20 -o $file -w "%{http_code}" $url | complete)
+	let body = (try { open --raw $file } catch { "" })
+	rm -f $file
+	if $r.exit_code != 0 {
+		print -e $"node: (stamp) warning: ($url) did not answer \(curl ($r.exit_code)\), so the door's Dapr API was not checked"
+		return
+	}
+	if $body =~ '"id"\s*:\s*"caddy"' {
+		error make {msg: $"the door answers the Dapr sidecar's own API: ($url) returned its metadata, status ($r.stdout | str trim); the caddy Dapr configuration did not take"}
+	}
+}
+
 export def record-release [app_dir: string, node: record, pushed: record] {
 	let git_root = (do { cd $app_dir; ^git rev-parse --show-toplevel } | complete)
 	# The commit is recorded only for a tree that is that commit: a dirty one (modified or untracked files under the app) was
@@ -445,6 +464,8 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		}
 		# 13. the mesh is intrinsic: a pod without its sidecar is a failed release
 		check-daprd $app $ns $components
+		# 13b. the public door must not answer the Dapr sidecar's own API
+		check-door $node
 	} catch {|e|
 		print -e $"node: (stamp) the release failed: ($e.msg)"
 		let back = (try { rollback undo $before $ns } catch {|r| {undone: [], failed: [{name: "(all)", why: $r.msg}]} })

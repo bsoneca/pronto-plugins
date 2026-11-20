@@ -12,7 +12,7 @@ import (
 _base: {
 	name:    "app"
 	context: "contabo2"
-	api: ssh: "deploy@node.example"
+	api: ssh:          "deploy@node.example"
 	hosts: production: "app.example.com"
 }
 
@@ -134,6 +134,44 @@ cases: {
 		_ok:   schema.#Release & _base & {retire: [{kind: "Deployment", name: "app-old"}]}
 		_got:  len(_ok.retire)
 		_want: 1
+	}
+	"the door gets a Dapr configuration of its own, with invocation alone allowed: the shared one stays for crud and the rest": {
+		_dapr: (schema.#Manifests & {
+			release: schema.#Release & _base
+			upstream: [
+				{apiVersion: "v1", kind: "Namespace", metadata: name: "app"},
+				{apiVersion: "dapr.io/v1alpha1", kind: "Configuration", metadata: {name: "app-dapr-config", namespace: "app", labels: {"app.kubernetes.io/name": "app"}}, spec: {tracing: samplingRate: "1", metric: enabled: true}},
+				for n in ["caddy", "crud"] {
+					apiVersion: "apps/v1"
+					kind:       "Deployment"
+					metadata:   {name: "app-\(n)", namespace: "app"}
+					spec:       {replicas: 1, template: {metadata: {labels: component: n, annotations: {"dapr.io/enabled": "true", "dapr.io/app-id": n, "dapr.io/config": "app-dapr-config"}}, spec: containers: [{name: n, image: "127.0.0.1:5000/app-\(n):latest@sha256:\(_digest)"}]}}
+				},
+			]
+		}).objects
+		_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		_caddy:  [for o in _dapr if o.kind == "Deployment" && o.metadata.name == "app-caddy" {o}][0]
+		_crud:   [for o in _dapr if o.kind == "Deployment" && o.metadata.name == "app-crud" {o}][0]
+		_shared: [for o in _dapr if o.kind == "Configuration" && o.metadata.name == "app-dapr-config" {o}][0]
+		_own:    [for o in _dapr if o.kind == "Configuration" && o.metadata.name == "app-caddy-dapr-config" {o}][0]
+		_got: {
+			caddyConfig:  _caddy.spec.template.metadata.annotations."dapr.io/config"
+			caddyOtherOK: _caddy.spec.template.metadata.annotations."dapr.io/app-id"
+			crudConfig:   _crud.spec.template.metadata.annotations."dapr.io/config"
+			sharedHasAPI: _shared.spec.api != _|_
+			allowed:      _own.spec.api.allowed
+			tracing:      _own.spec.tracing.samplingRate
+			count:        len(_dapr)
+		}
+		_want: {
+			caddyConfig:  "app-caddy-dapr-config"
+			caddyOtherOK: "caddy"
+			crudConfig:   "app-dapr-config"
+			sharedHasAPI: false
+			allowed:      [{name: "invoke", version: "v1.0", protocol: "http"}, {name: "invoke", version: "v1.0", protocol: "grpc"}]
+			tracing:      "1"
+			count:        5
+		}
 	}
 }
 

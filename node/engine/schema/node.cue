@@ -211,23 +211,45 @@ import (
 	let backupName = "\(release.name)-backup"
 
 	// What the engine changes in upstream's objects, and nothing else.
+	// The door (caddy) dials its own Dapr sidecar for every upstream, and Dapr answers its own API paths (metadata, secrets,
+	// state, publish, shutdown) before it routes by `dapr-app-id`, so the public door would expose the sidecar's API. Caddy gets
+	// a Configuration of its own, the app's plus an allowlist of invocation alone; crud, auth and the rest keep the shared one,
+	// which they need as it is.
+	let caddyName = "\(release.name)-caddy"
+	let caddyConfig = "\(release.name)-caddy-dapr-config"
 	_patched: [for o in upstream {
-		o
-		if o.kind == "Namespace" {
-			metadata: labels: "pronto.dev/release": release.name
-			if !production {metadata: labels: "pronto.dev/preview": release.preview}
+		if !(o.kind == "Deployment" && o.metadata.name == caddyName) {
+			o
+			if o.kind == "Namespace" {
+				metadata: labels: "pronto.dev/release": release.name
+				if !production {metadata: labels: "pronto.dev/preview": release.preview}
+			}
+			if o.kind == "Cluster" && withBackups {
+				spec: plugins: [{
+					name:          "barman-cloud.cloudnative-pg.io"
+					isWALArchiver: true
+					parameters: barmanObjectName: backupName
+				}]
+			}
 		}
-		if o.kind == "Cluster" && withBackups {
-			spec: plugins: [{
-				name:          "barman-cloud.cloudnative-pg.io"
-				isWALArchiver: true
-				parameters: barmanObjectName: backupName
-			}]
+		if o.kind == "Deployment" && o.metadata.name == caddyName {
+			(#RetargetDapr & {in: o, config: caddyConfig}).out
 		}
 	}]
 
 	// What it adds.
 	_added: list.Concat([
+		[for o in upstream if o.kind == "Configuration" && o.metadata.name == "\(release.name)-dapr-config" {
+			apiVersion: o.apiVersion
+			kind:       "Configuration"
+			metadata:   {name: caddyConfig, namespace: o.metadata.namespace, labels: o.metadata.labels}
+			spec: o.spec & {
+				api: allowed: [
+					{name: "invoke", version: "v1.0", protocol: "http"},
+					{name: "invoke", version: "v1.0", protocol: "grpc"},
+				]
+			}
+		}],
 		[if release.tenant != _|_ {
 			apiVersion: "v1"
 			kind:       "ResourceQuota"
@@ -334,4 +356,26 @@ import (
 	objects: [for o in _all {o, if len(_gate) >= 0 {}}]
 	// The Jobs, in the order they run.
 	jobs: [for j in release.jobOrder for o in _all if o.kind == "Job" if o.metadata.name == "\(release.name)-\(j)" {o.metadata.name}]
+}
+
+// A Deployment with its pod template's `dapr.io/config` annotation set to `config`, whatever it was.
+#RetargetDapr: {
+	in:     _
+	config: string
+	out: {
+		for k, v in in if k != "spec" {(k): v}
+		spec: {
+			for k, v in in.spec if k != "template" {(k): v}
+			template: {
+				for k, v in in.spec.template if k != "metadata" {(k): v}
+				metadata: {
+					for k, v in in.spec.template.metadata if k != "annotations" {(k): v}
+					annotations: {
+						for k, v in in.spec.template.metadata.annotations if k != "dapr.io/config" {(k): v}
+						"dapr.io/config": config
+					}
+				}
+			}
+		}
+	}
 }
