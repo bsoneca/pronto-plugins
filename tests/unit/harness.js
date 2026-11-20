@@ -2,7 +2,10 @@
 // refuses, one that is missing, one that files. Each call is one filing into a fresh marks folder.
 import { fileFlake } from "../../harness/files/tests/scenarios/flakes.ts";
 // The scenario selector's rule for files outside the app (select.ts), called by the cases as harness.outsideConcerns.
-export { outsideConcerns } from "../../harness/files/tests/scenarios/select.ts";
+import { outsideConcerns, outsideKeys as keys } from "../../harness/files/tests/scenarios/select.ts";
+export { outsideConcerns };
+// outsideKeys with a hash that is the file's name, so a case can name what it keys.
+export const outsideKeys = (files, reads) => keys(files, (f) => `h:${f}`, reads);
 
 async function filing(run, github = false) {
   const marks = await Deno.makeTempDir();

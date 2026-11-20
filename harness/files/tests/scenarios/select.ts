@@ -74,13 +74,20 @@ const staticAsset = /\.(js|mjs|css|html|json|wasm|svg|png|jpg|webp|ico|woff2?|gl
 // Whether a changed file outside the app (`f` relative to it, `../…`) concerns a scenario: null when it
 // concerns none, else why it does (fail open). None: documentation, the repository's docs/ and .github/,
 // and any file of a sibling app, `../<other>/<path>` with exactly one `../` and a directory that is not
-// hidden (apps/<other>/… from the top). Anything else above the app (a tool pin, the root's files, `pronto/`,
-// `../x` with no directory) still concerns every scenario.
-export function outsideConcerns(f: string): string | null {
+// hidden (apps/<other>/… from the top), unless `reads` (the app's `outside`, regular expressions as strings)
+// matches it: an app that reads its siblings (Studio's builder scans every apps/*) lists them. Anything else
+// above the app (a tool pin, the root's files, `pronto/`, `../x` with no directory) concerns every scenario.
+export function outsideConcerns(f: string, reads: string[] = []): string | null {
   if (!f.startsWith("../")) return null;
   if (/\.md$/.test(f) || /^\.\.\/\.\.\/(docs|\.github)\//.test(f) || /^\.\.\/\.\.\/AGENTS\.md$/.test(f)) return null;
-  if (/^\.\.\/[^/.][^/]*\/./.test(f)) return null;
+  if (/^\.\.\/[^/.][^/]*\/./.test(f) && !reads.some((r) => new RegExp(r).test(f))) return null;
   return `${f.replace(/^(\.\.\/)+/, "")} is outside the app`;
+}
+
+// The changed files that key the exact tree beside the app's own: those outside it that concern a scenario
+// (outsideConcerns), `outside <file> <hash>` by content, hashed by `hash`.
+export function outsideKeys(files: string[], hash: (f: string) => string, reads: string[] = []): string[] {
+  return files.filter((f) => f.startsWith("../") && outsideConcerns(f, reads) !== null).sort().map((f) => `outside ${f} ${hash(f)}`);
 }
 
 // What a scenario's requests say it touched in the database: the tables and functions its `/crud/…`
@@ -193,7 +200,8 @@ function changedFiles(root: string): string[] | null {
 // `more.inert`, regular expressions (as strings) of files no scenario can see (release and deploy files).
 // `more.live`, regular expressions of files the app runs while a scenario does, though the shared list above
 // calls them inert (Studio's Publish starts a game through tests/slot.ts: PRONTO-291, found by no scenario).
-export function select<S extends Keyed>(runner: string, url: string, scenarios: S[], client: string[] = [], more: { derived?: string[]; inert?: string[]; live?: string[] } = {}) {
+// `more.outside`, regular expressions of sibling apps' files (`../<other>/…`) the app reads, which concern it (Studio's builder).
+export function select<S extends Keyed>(runner: string, url: string, scenarios: S[], client: string[] = [], more: { derived?: string[]; inert?: string[]; live?: string[]; outside?: string[] } = {}) {
   const appDir = Deno.realPathSync(new URL("..", runner).pathname);
   const root = Deno.env.get("PRONTO_GATE_DIR") ? Deno.realPathSync(Deno.env.get("PRONTO_GATE_DIR")!) : appDir;
   const local = ["localhost", "127.0.0.1"].includes(new URL(url).hostname);
@@ -228,9 +236,10 @@ export function select<S extends Keyed>(runner: string, url: string, scenarios: 
   if (shared === null) return none;
   const env = () => sha([`deno ${Deno.version.deno}`, `slow ${Deno.env.get("SLOW") ?? ""}${Deno.env.get("SLOW_GATE") ? " gate" : ""}`, `shared ${shared}`, ...own.map(hashOf)].join("\n"));
   // What the app's tree does not hold but its stack may serve: the files outside it that differ from main
-  // and are not documentation (another app's files, a stand-in's version), by content. So a change there
-  // is never "cached green" (it hid two failing scenarios, 2026-11-03).
-  const outside = () => (changedFiles(root) ?? []).filter((f) => f.startsWith("../") && outsideConcerns(f) !== null).sort().map((f) => `outside ${f} ${hashOf(join(root, f))}`);
+  // and are not documentation, by content: tool pins, the root's files, pronto/ (a stand-in's version). So a
+  // change there is never "cached green" (it hid two failing scenarios, 2026-11-03). Sibling apps' files are
+  // left out on purpose (PRONTO-870), unless the app lists them in `more.outside`.
+  const outside = () => outsideKeys(changedFiles(root) ?? [], (f) => hashOf(join(root, f)), more.outside);
   const tree = () => {
     const t = treeKey(root);
     return t && sha([t, env(), ...outside()].join("\n"));
@@ -280,7 +289,7 @@ const recordOf = (id: string) => join(ledger, `${id}.${envNow.slice(0, 12)}`);
     const clientFiles: string[] = [];
     for (const f of files) {
       if (f.startsWith("../")) {
-        const why = outsideConcerns(f);
+        const why = outsideConcerns(f, more.outside);
         if (why === null) continue;
         return why;
       }

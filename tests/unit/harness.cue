@@ -72,6 +72,25 @@ cases: "a file of a sibling app concerns no scenario, and any other file above t
 		{call: "harness.outsideConcerns", args: ["../../tools/x.nu"], expect: "tools/x.nu is outside the app"},
 		{call: "harness.outsideConcerns", args: ["../../apps/other/x.ts"], expect: "apps/other/x.ts is outside the app", why: "a path that climbs to the top and back is not the form the selector gives a sibling"},
 		{call: "harness.outsideConcerns", args: ["../.hidden/x"], expect: ".hidden/x is outside the app", why: "a hidden folder is no app"},
+		{call: "harness.outsideConcerns", args: ["../other/.hidden/x"], expect: null, why: "a hidden folder inside a sibling app is still the sibling's"},
+		{call: "harness.outsideConcerns", args: ["../Makefile"], expect: "Makefile is outside the app", why: "one level up with no directory: fails open"},
 		{call: "harness.outsideConcerns", args: ["tests/scenarios/x.ts"], expect: null, why: "inside the app: not this function's to judge"},
+	]
+}
+
+cases: "an app that reads its siblings lists them, and those fail open again": {
+	suite: "harness"
+	steps: [
+		{call: "harness.outsideConcerns", args: ["../studio/builder/x.ts", ["^\\.\\./[^/]+/"]], expect: "studio/builder/x.ts is outside the app", why: "Studio's builder scans every apps/*"},
+		{call: "harness.outsideConcerns", args: ["../other/x.ts", ["^\\.\\./brawl-chess/"]], expect: null, why: "a pattern that does not match the sibling"},
+		{call: "harness.outsideConcerns", args: ["../other/README.md", ["^\\.\\./[^/]+/"]], expect: null, why: "documentation is still nothing"},
+	]
+}
+
+cases: "the exact-tree key holds the outside files that concern a scenario, not the sibling apps'": {
+	suite: "harness"
+	steps: [
+		{call: "harness.outsideKeys", args: [["../../mise.lock", "../other/a.ts", "../../docs/x.md", "tests/x.ts", "../../pronto/b.cue"]], expect: ["outside ../../mise.lock h:../../mise.lock", "outside ../../pronto/b.cue h:../../pronto/b.cue"], why: "pins and pronto/ key it, sorted; a sibling, documentation and the app's own file do not"},
+		{call: "harness.outsideKeys", args: [["../other/a.ts", "../../mise.lock"], ["^\\.\\./[^/]+/"]], expect: ["outside ../../mise.lock h:../../mise.lock", "outside ../other/a.ts h:../other/a.ts"], why: "an app that reads its siblings keys them too"},
 	]
 }
