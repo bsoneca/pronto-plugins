@@ -2,7 +2,7 @@
 # nu infra/test.nu` from this repository's root. tests.cue holds fields of each plan and passes
 # for a plan that cannot be exported; this exports each in a folder of its own (with the file a
 # secret reads beside it), then runs `tofu init -backend=false` and `tofu validate`, and fails on
-# any error. The example is one of them.
+# any error. The example is one of them. plan_test.nu runs first: the saved-plan lifecycle of plan.nu.
 
 # A step that failed says what it printed.
 def check [what: string, ok: bool, --said: string = ""] {
@@ -36,6 +36,9 @@ const plans = [
 
 def main [] {
 	let root = pwd
+	# The saved-plan lifecycle (plan.nu) against a stub tofu, in a nu of its own.
+	let lifecycle = ^$nu.current-exe infra/plan_test.nu | complete
+	check "infra/plan.nu's saved-plan lifecycle (plan_test.nu)" ($lifecycle.exit_code == 0) --said $"($lifecycle.stdout)($lifecycle.stderr)"
 	let work = mktemp --directory
 	let tofu = ["exec" "opentofu@1.13.2" "--" "tofu"]
 	# The CUE this repository pins, the way tofu is run: nothing is taken from the PATH.

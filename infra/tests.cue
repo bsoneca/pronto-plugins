@@ -90,7 +90,7 @@ hostFiles: [for p, _ in _host.files {p}] & [".say.cue", ".mise.toml", ".gitignor
 hostSeeded: [for p, f in _host.files if f.seed {p}] & ["cue.mod/module.cue", "state.cue"]
 hostPins:           strings.Contains(_host.files[".mise.toml"].text, "opentofu = \"1.13.2\"") & true
 hostVerbs:          strings.Contains(_host.files[".say.cue"].text, "verify: rulemap: infra:") & true
-hostPlanReadsFresh: strings.Contains(_host.files[".say.cue"].text, "plan -input=false -detailed-exitcode") & true
+hostPlanReadsFresh: strings.Contains(_host.files[".say.cue"].text, "saved-plan make") & true
 hostStateBucket:    strings.Contains(_host.files["state.cue"].text, "bucket: \"my-org-infra-tfstate\"") & true
 
 // Validation on real state values, not only on the patterns: each bad project is refused whole.
@@ -108,11 +108,11 @@ publicExplained: _ok & {buckets: "my-app-assets": _bucket & {iam: "roles/storage
 
 // What the plugin did not create is not destroyed by a plan of this state, and what it removes
 // from the state is held by the verbs (say.cue.txt).
-accountKept:        _s.google_service_account.example_project_123_my_app_run.lifecycle.prevent_destroy & true
-bucketKept:         _tofu.resource.google_storage_bucket.my_app_assets.lifecycle.prevent_destroy & true
-secretKept:         _tofu.resource.google_secret_manager_secret.example_project_456_my_app_token.lifecycle.prevent_destroy & true
-verbsRefuseDeletes: strings.Contains(_host.files[".say.cue"].text, "INFRA_ALLOW_DESTROY") & true
-verbsDropOldPlan:   strings.Contains(_host.files[".say.cue"].text, "{do: \"rm -f tofu/infra.tfplan tofu/infra.tfplan.tmp\"}") & true
+accountKept:         _s.google_service_account.example_project_123_my_app_run.lifecycle.prevent_destroy & true
+bucketKept:          _tofu.resource.google_storage_bucket.my_app_assets.lifecycle.prevent_destroy & true
+secretKept:          _tofu.resource.google_secret_manager_secret.example_project_456_my_app_token.lifecycle.prevent_destroy & true
+verbsRefuseDeletes:  strings.Contains(_host.files[".say.cue"].text, "--spare") & strings.Contains(_host.files[".say.cue"].text, "ABANDON") & true
+verbsKeepOtherPlans: strings.Contains(_host.files[".say.cue"].text, "rm -f tofu/infra.tfplan") & false
 
 // A grant that is new is made, not imported; one that is there is imported.
 _new: #Plan & {
@@ -176,18 +176,15 @@ _draft: #Plan & {
 draftReadsLatest: _draft.tofu.resource.google_cloud_run_v2_service.example_project_123_my_app.template.containers[0].env[0].value_source.secret_key_ref.version & "latest"
 draftNoVersion: [for k, _ in _draft.tofu.resource if k == "google_secret_manager_secret_version" {k}] & []
 
-// The verbs: the destroy flag is exactly "1"; a plan is made apart and kept only once read; the
-// whole state is vetted before it is exported; release reads the plan again before applying.
-_verbs:                _host.files[".say.cue"].text
-_verify:               strings.Split(strings.Split(_verbs, "verify: rulemap: infra")[1], "release: rulemap: infra")[0]
-_release:              strings.Split(_verbs, "release: rulemap: infra")[1]
-destroyFlagExact:      strings.Contains(_verbs, "$env.INFRA_ALLOW_DESTROY? != '1'") & true
-planMadeApart:         strings.Contains(_verify, "-out=infra.tfplan.tmp") & true
-planKeptAfterCheck:    strings.Index(_verify, "check-plan infra.tfplan.tmp") < strings.Index(_verify, "mv tofu/infra.tfplan.tmp tofu/infra.tfplan") & true
-tmpRemovedOnFailure:   strings.Count(_verify, "rm -f tofu/infra.tfplan.tmp") & 2
-planMustBeReadable:    strings.Contains(_verbs, "get -o format_version") & true
-vetsBeforeExport:      strings.Index(_verify, "cue vet -c .") < strings.Index(_verify, "cue export . -e plan.tofu") & true
-releaseReadsPlanAgain: strings.Index(_release, "check-plan infra.tfplan;") < strings.Index(_release, "apply -input=false infra.tfplan") & true
+// The verbs: a plan is made, read and kept by plan.nu (its own tests are plan_test.nu), only as
+// tofu/plan-<sha256>.tfplan; the whole state is vetted before it is exported; release applies the
+// plan whose digest INFRA_PLAN_SHA256 names.
+_verbs:               _host.files[".say.cue"].text
+_verify:              strings.Split(strings.Split(_verbs, "verify: rulemap: infra")[1], "release: rulemap: infra")[0]
+_release:             strings.Split(_verbs, "release: rulemap: infra")[1]
+verifyMakesSavedPlan: strings.Contains(_verify, "saved-plan make") & true
+vetsBeforeExport:     strings.Index(_verify, "cue vet -c .") < strings.Index(_verify, "cue export . -e plan.tofu") & true
+releaseAppliesDigest: strings.Contains(_release, "saved-plan apply ($env.INFRA_PLAN_SHA256? | default '')") & true
 
 // fresh marks a binding on its own, so a parent that exists can be given a new binding; and it
 // has no entry for a kind it cannot honour.
