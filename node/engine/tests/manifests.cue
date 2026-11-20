@@ -153,7 +153,7 @@ cases: {
 		_caddy:  [for o in _dapr if o.kind == "Deployment" && o.metadata.name == "app-caddy" {o}][0]
 		_crud:   [for o in _dapr if o.kind == "Deployment" && o.metadata.name == "app-crud" {o}][0]
 		_shared: [for o in _dapr if o.kind == "Configuration" && o.metadata.name == "app-dapr-config" {o}][0]
-		_own:    [for o in _dapr if o.kind == "Configuration" && o.metadata.name == "app-caddy-dapr-config" {o}][0]
+		_own:    [for o in _dapr if o.kind == "Configuration" && o.metadata.name == "app-caddy-invoke-only" {o}][0]
 		_got: {
 			caddyConfig:  _caddy.spec.template.metadata.annotations."dapr.io/config"
 			caddyOtherOK: _caddy.spec.template.metadata.annotations."dapr.io/app-id"
@@ -164,7 +164,7 @@ cases: {
 			count:        len(_dapr)
 		}
 		_want: {
-			caddyConfig:  "app-caddy-dapr-config"
+			caddyConfig:  "app-caddy-invoke-only"
 			caddyOtherOK: "caddy"
 			crudConfig:   "app-dapr-config"
 			sharedHasAPI: false
@@ -191,6 +191,27 @@ cases: {
 			config: [for o in _none if o.kind == "Deployment" {o.spec.template.metadata.annotations."dapr.io/config"}][0]
 		}
 		_want: {count: 2, config: "elsewhere"}
+	}
+	"a Deployment or a Configuration with fields absent is given what the door needs, not refused": {
+		_bare: (schema.#Manifests & {
+			release: schema.#Release & _base
+			upstream: [
+				{apiVersion: "v1", kind: "Namespace", metadata: name: "app"},
+				{apiVersion: "dapr.io/v1alpha1", kind: "Configuration", metadata: {name: "app-dapr-config", namespace: "app"}},
+				{
+					apiVersion: "apps/v1"
+					kind:       "Deployment"
+					metadata:   {name: "app-caddy", namespace: "app"}
+					spec:       {replicas: 1, template: {metadata: labels: component: "caddy", spec: containers: [{name: "caddy", image: "127.0.0.1:5000/app-caddy:latest@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}
+				},
+			]
+		}).objects
+		_got: {
+			config: [for o in _bare if o.kind == "Deployment" {o.spec.template.metadata.annotations."dapr.io/config"}][0]
+			labels: [for o in _bare if o.kind == "Deployment" {o.spec.template.metadata.labels.component}][0]
+			guard:  [for o in _bare if o.kind == "Configuration" && o.metadata.name == "app-caddy-invoke-only" {o.spec.api.allowed[0].name}][0]
+		}
+		_want: {config: "app-caddy-invoke-only", labels: "caddy", guard: "invoke"}
 	}
 }
 

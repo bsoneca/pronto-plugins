@@ -216,7 +216,7 @@ import (
 	// a Configuration of its own, the app's plus an allowlist of invocation alone; crud, auth and the rest keep the shared one,
 	// which they need as it is.
 	let caddyName = "\(release.name)-caddy"
-	let caddyConfig = "\(release.name)-caddy-dapr-config"
+	let caddyConfig = "\(release.name)-caddy-invoke-only"
 	let sharedConfig = "\(release.name)-dapr-config"
 
 	// Only when upstream's shared Configuration exists to copy: the door is retargeted exactly when its own is emitted.
@@ -253,9 +253,11 @@ import (
 			}
 			// The app's configuration as it is, but for `api`, built here: its own other fields kept, `allowed` the door's alone.
 			spec: {
-				for k, v in o.spec if k != "api" {(k): v}
+				if o.spec != _|_ {
+					for k, v in o.spec if k != "api" {(k): v}
+				}
 				api: {
-					if o.spec.api != _|_ {
+					if o.spec != _|_ if o.spec.api != _|_ {
 						for k, v in o.spec.api if k != "allowed" {(k): v}
 					}
 					allowed: [
@@ -377,17 +379,26 @@ import (
 #RetargetDapr: {
 	in:     _
 	config: string
+	// missing metadata or annotations are added; a Deployment with no spec or template is passed on as it is, for the API server to refuse
 	out: {
 		for k, v in in if k != "spec" {(k): v}
-		spec: {
-			for k, v in in.spec if k != "template" {(k): v}
-			template: {
-				for k, v in in.spec.template if k != "metadata" {(k): v}
-				metadata: {
-					for k, v in in.spec.template.metadata if k != "annotations" {(k): v}
-					annotations: {
-						for k, v in in.spec.template.metadata.annotations if k != "dapr.io/config" {(k): v}
-						"dapr.io/config": config
+		if in.spec != _|_ {
+			spec: {
+				for k, v in in.spec if k != "template" {(k): v}
+				if in.spec.template != _|_ {
+					template: {
+						for k, v in in.spec.template if k != "metadata" {(k): v}
+						metadata: {
+							if in.spec.template.metadata != _|_ {
+								for k, v in in.spec.template.metadata if k != "annotations" {(k): v}
+							}
+							annotations: {
+								if in.spec.template.metadata != _|_ if in.spec.template.metadata.annotations != _|_ {
+									for k, v in in.spec.template.metadata.annotations if k != "dapr.io/config" {(k): v}
+								}
+								"dapr.io/config": config
+							}
+						}
 					}
 				}
 			}

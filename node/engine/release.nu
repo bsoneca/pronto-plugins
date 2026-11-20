@@ -287,9 +287,19 @@ def invalidate-verified [ns: string] {
 def renew-lease [node: record, lease: string, --before-live] {
 	if $lease == "" { return }
 	if $before_live {
-		# Nothing is live yet: a lease that cannot be renewed would let a collector take this release for dead mid-push, so it stops here.
-		registry lease-renew $node.build $lease
-		return
+		# Nothing is live yet: a lease that cannot be renewed would let a collector take this release for dead mid-push, so it stops
+		# here. A blip of the API is not the lease's end: three attempts, a second and two apart, and none after a NotFound (the
+		# lease is gone: a retry cannot bring it back).
+		mut last = ""
+		for attempt in 1..3 {
+			let r = (try { registry lease-renew $node.build $lease; null } catch {|e| $e.msg | default "unknown error" })
+			if $r == null { return }
+			$last = $r
+			if ($r =~ "NotFound") or $attempt == 3 { break }
+			print -e $"node: (stamp) the registry lease ($lease) was not renewed \(attempt ($attempt) of 3\), trying again: ($r)"
+			sleep ($attempt * 1sec)
+		}
+		error make {msg: $last}
 	}
 	try { registry lease-renew $node.build $lease } catch {|e| print -e $"node: (stamp) warning: the registry lease ($lease) was not renewed: ($e.msg)" }
 }

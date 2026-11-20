@@ -9,7 +9,7 @@
 # registry_down (the node's builder or registry has no available replica), get_fail_<kind> and missing_<kind>
 # (a read of <kind> in every namespace is refused, or its CRD is not on the node), read_fail_namespace and
 # read_fail_cluster (any read of a namespace, or of the database Cluster, fails as an API error) and
-# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch of the database Cluster is refused), inuse (an image the pods name), cm_race_once (the same, once), cm_race (the record is rewritten between a read and a patch), strict_cm (a patch of a missing record is NotFound), lease_delete_fail (deleting a release's Lease is refused), lock_delete_fail (deleting the lock by precondition is refused), lock_taken_over (a lock's resourceVersion moves between a read and a delete), no_repositories (the registry has none yet), find_fail (the registry's upload scan fails), lease_patch_fail_from (the Nth patch of a Lease and every one after fails), lease_patch_fail (a patch of a Lease fails), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
+# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch of the database Cluster is refused), inuse (an image the pods name), cm_race_once (the same, once), cm_race (the record is rewritten between a read and a patch), strict_cm (a patch of a missing record is NotFound), lease_delete_fail (deleting a release's Lease is refused), lock_delete_fail (deleting the lock by precondition is refused), lock_taken_over (a lock's resourceVersion moves between a read and a delete), no_repositories (the registry has none yet), find_fail (the registry's upload scan fails), lease_patch_fail_from (the Nth patch of a Lease and every one after fails), lease_patch_fail_once (only the Nth patch of a Lease fails), lease_patch_notfound_from (the Lease is gone from the Nth patch on: NotFound), lease_patch_fail (a patch of a Lease fails), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
 # object with nothing and exit 0, as kubectl does.
 import json, os, sys
 
@@ -110,11 +110,15 @@ if verb in ("create", "replace") and any(o.get("kind") == "Lease" for o in objs)
 if verb == "patch" and len(args) > 1 and args[1] == "lease":
     if exists("lease_patch_fail"):
         fail("Error from server (ServiceUnavailable): the server is currently unable to handle the request")
-    if exists("lease_patch_fail_from"):
+    if exists("lease_patch_fail_from") or exists("lease_patch_fail_once") or exists("lease_patch_notfound_from"):
         n = int(read("lease_patch_count", "0")) + 1
         open(d + "/lease_patch_count", "w").write(str(n))
-        if n >= int(read("lease_patch_fail_from")):
+        if exists("lease_patch_fail_from") and n >= int(read("lease_patch_fail_from")):
             fail("Error from server (ServiceUnavailable): the server is currently unable to handle the request")
+        if exists("lease_patch_fail_once") and n == int(read("lease_patch_fail_once")):
+            fail("Error from server (ServiceUnavailable): the server is currently unable to handle the request")
+        if exists("lease_patch_notfound_from") and n >= int(read("lease_patch_notfound_from")) and os.path.exists(lease_path(args[2])):
+            os.remove(lease_path(args[2]))
     p = lease_path(args[2])
     if not os.path.exists(p):
         fail(f'Error from server (NotFound): leases.coordination.k8s.io "{args[2]}" not found')
