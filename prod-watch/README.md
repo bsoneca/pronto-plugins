@@ -100,7 +100,7 @@ traceback, JS frames, Java causes and Go goroutines are put into one entry. A co
 after the last pass opens its pod's start window, as Cloud Run's "Starting new instance" does, so the
 shared noise rules held to `during: ["start"]` work. A pass reads 50000 lines of each source at most; when one stops there the window ends at the earliest
 cutoff, for both sources, and the next pass goes on. A line VictoriaLogs returns that is not JSON fails the pass, the ledger and the
-cursor untouched. The cursor is the source's own boundary, verbatim, when a read limit cut the pass short (`settleRun`). CloudNativePG's records (`record.error_severity`, `record.message`) are read by the database's own severity.
+cursor untouched. The cursor is the source's own boundary, verbatim, when a read limit cut the pass short; a pass read to now commits the lag before it, in milliseconds (`settleRun`). CloudNativePG's records (`record.error_severity`, `record.message`) are read by the database's own severity.
 
 The header's **released** says how fixes reach production; for a node it adds the last release
 release-cron's log holds (`~/.cache/pronto/release-cron/<app>/release-cron.log`, "release 28838831 at

@@ -52,6 +52,8 @@ cases: {
 		{call: "watch.noiseOf", args: [(_at & {container: "gmp-collector", second: 0, text: "error\tprometheusreceiver/metrics_receiver.go:273\tDiscovery manager failed\t{\"error\": \"permission denied\"}"}).out, _rules], expect: null},
 		{call: "watch.noiseOf", args: [(_at & {container: "auth", second: 0, level: "WARNING", text: "Container terminated on signal 11."}).out, _rules], expect: null},
 		{call: "watch.noiseOf", args: [(_at & {container: "gmp-collector", second: 0, text: "error\tinternal/queue_sender.go:50\tExporting failed. Dropping data."}).out, _rules], expect: null},
+		{call: "watch.noiseOf", args: [(_at & {container: "x", second: 0, text: "bye"}).out, {r: {container: "x", match: "bye", during: ["shutdown"]}}, ["start", "shutdown"]], expect: "r", why: "one of the entry's phases meets the rule"},
+		{call: "watch.noiseOf", args: [(_at & {container: "x", second: 0, text: "bye"}).out, {r: {container: "x", match: "bye", during: ["shutdown"]}}, ["start"]], expect: null, why: "no phase the rule is held to"},
 	]}
 	"a neighbour refusing the connection is noise as the instance starts and stops, a bug in between": {suite: "noise", steps: [
 		{value: [
