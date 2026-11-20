@@ -54,3 +54,19 @@ export async function unmarked() {
       .then((r) => ({ threw: false, filed: r.filed, said: said.length }), () => ({ threw: true, said: said.length }));
   } finally { await Deno.remove(blocker); }
 }
+
+// One step of a scenario held to the scenarios' schema (harness/files/tests/scenarios/schema.cue), with a gesture
+// `play: {play: string, refused?: true}` declared as an app declares its own: the schema and the scenario copied to a
+// fresh folder and evaluated by the cue on PATH (CUE, where set). The first line of what cue refused, or null.
+const schema = new URL("../../harness/files/tests/scenarios/schema.cue", import.meta.url).pathname;
+export async function stepRefused(step) {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.copyFile(schema, `${dir}/schema.cue`);
+    await Deno.writeTextFile(`${dir}/app.cue`, `package scenarios\n#Gestures: {play: {play: string, refused?: true}}\nscenarios: t: {accepts: [], actors: {a: {name: "a"}}, steps: [${JSON.stringify(step)}]}\n`);
+    const r = await new Deno.Command(Deno.env.get("CUE") ?? "cue", { args: ["eval", "-e", "scenarios.t._checked", "."], cwd: dir, stdout: "null", stderr: "piped" }).output();
+    return r.success ? null : new TextDecoder().decode(r.stderr).split("\n")[0];
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}

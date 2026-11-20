@@ -17,6 +17,8 @@
 
 package scenarios
 
+import "list"
+
 // How many scenarios run at once: at hand (a stack on this machine) the machine's cores are the
 // limit; against a deployed preview (tests/scenarios.ts: a dotted host that is not this machine's)
 // the machine that drives it is.
@@ -108,7 +110,10 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 	_checked: [for l in [steps, _in1, _in2, _in3] for s in l let ks = [for K in _kindNames if s[K] != _|_ {K}] {
 		if len(ks) != 1 {kinds: "a step has exactly one kind, this one has \(len(ks))" & "one kind"}
 		if len(ks) == 1 {
-			shape: s & close({#Common, _shapes[ks[0]]})
+			// The step's common fields against `_common`, its others against its kind's shape, each closed: a field
+			// neither names is refused, and a kind's optional field (a gesture's `refused`) is kept.
+			common: {for F, v in s if list.Contains(_commonNames, F) {(F): v}} & close(_common)
+			shape: {for F, v in s if !list.Contains(_commonNames, F) {(F): v}} & close(_shapes[ks[0]])
 			missing: {for F, _ in _shapes[ks[0]] if s[F] == _|_ {(F): "a \(ks[0]) step needs \(F)" & "present"}}
 		}
 	}]
@@ -162,45 +167,47 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 // A selector, in Playwright's CSS dialect.
 #Sel: string
 
-#Common: {
+// The fields every step may carry, each written once with its type: `_common` takes them optional, as a step
+// carries them, and `_commonNames` names them, so `_checked` holds them apart from the kind's fields (a comprehension
+// skips optional fields, and under cue 0.18 a closed kind embedded beside them refuses them).
+_commonTypes: {
 	// Whose page the step acts on or reads; an http step's session too.
-	by?: string
+	by: string
 	// Waited for up to this many seconds (default 30).
-	timeout?: number & >0
+	timeout: number & >0
 	// Why, when it is not plain from the step.
-	why?: string
+	why: string
 	// A flag (flags_spec.cue) the step needs on: where the door answers that it is off, the step
 	// is skipped. A door whose flags do not answer is a failure, never a reason to skip.
-	flag?: string
+	flag: string
 	// A flag whose absence the step needs: skipped where the door answers that it is on. The
 	// app as it is with the flag off keeps its steps here, and a flag's flip runs them (`flags`).
-	unless?: string
+	unless: string
 	// On an expectation about what another actor changed, which a page that reads from the server
 	// shows only on its next load: the page is reloaded every few seconds until the expectation
 	// holds or the step's timeout passes.
-	fresh?: true
+	fresh: true
 	// Only asked once a step has kept this variable (`keep`, to a value that exists): a check of what
 	// a listing names runs once there is a listing, as in production before anyone has published.
-	ifKept?: string
+	ifKept: string
 	// Asked only on the deployed app ("production") or only on a stack at hand ("local", never a
 	// deployed preview): what a listing may be differs, a laptop's naming the stack's own address.
-	on?: "production" | "local"
-	// Open here: a step embeds it beside its kind's fields, and `#Scenario._checked` closes the whole
-	// shape. Closed, cue 0.18 would refuse every kind's field on `#Step` (aprende, PRONTO-870).
-	...
+	on: "production" | "local"
 }
+_common: {for F, t in _commonTypes {(F)?: t}}
+_commonNames: [for F, _ in _commonTypes {F}]
 
 // A step is one of the kinds (`_kinds`, below), chosen by its field, never by a disjunction: a disjunction
 // over every kind (about 60 closed structs, unified against every step of every scenario) cost Bonk
 // Chess's scenarios 96 G instructions and 2.9 GB. `#Step` is open: it types each kind's own field, and a
 // scenario (`#Scenario`'s `_checked`) holds every step it lists, those of `together` and `any` too, to the
-// whole shape of its one kind, closed, with the fields every step has (`#Common`). So a field only a kind
+// whole shape of its one kind, closed, with the fields every step has (`_common`). So a field only a kind
 // takes (an http's `poll`, a repeat's `until` and `max`, a gesture's `refused`) is allowed, and required,
 // with that kind alone, and a step of no kind or of two is refused. The check is not in `#Step` because a
 // definition is evaluated bare too, where it has no kind, and one that read its own fields to choose the
 // kind (an embedded comprehension on `self`) took exponential time under cue 0.16.1.
 #Step: {
-	#Common
+	_common
 	for K, v in _kinds {(K)?: v[K]}
 	together?: [...#Step]
 	any?: [...#Step]
@@ -328,7 +335,7 @@ _kinds: {
 	_expects
 	http:   _http
 	repeat: _repeat
-	for K, g in #Gestures {(K): {for F, t in g {(F): t}}} // open: _checked closes the whole shape (cue 0.18)
+	for K, g in #Gestures {(K): g} // whole, as the app declares it: `_checked` holds a step's own fields to it
 }
 // `_kinds` and the two kinds that hold steps (which `#Step` declares itself).
 _shapes: {
