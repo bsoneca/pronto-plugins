@@ -122,3 +122,14 @@ cases: "the exact-tree key holds the outside files that concern a scenario, not 
 		{call: "harness.declaredKeys", args: [[["../other/brief.md", "b1"]]], expect: [], why: "an app with no pattern keys no sibling (PRONTO-870)"},
 	]
 }
+
+// A step's own fields against the scenarios' schema (harness/files/tests/scenarios/schema.cue): its common fields
+// against those every step takes and the rest against its one kind's shape, each closed (bsoneca/pronto#1555).
+cases: "a step keeps its kind's optional field and is refused a field neither its kind nor every step takes": {
+	suite: "harness"
+	steps: [
+		{call: "harness.stepRefused", args: [{play: "e2e4", refused: true, by: "a"}], expect: null, why: "a gesture's optional `refused` and a common `by` are kept"},
+		{call: "harness.stepRefused", args: [{play: "e2e4", bogus: 1}], matches: "_checked\\.0\\.shape\\.bogus: field not allowed", why: "a field no kind names was accepted while the whole shape stayed open"},
+		{call: "harness.stepRefused", args: [{play: "e2e4", poll: 2}], matches: "_checked\\.0\\.shape\\.poll: field not allowed", why: "an http's `poll` is that kind's alone, not a gesture's"},
+	]
+}
