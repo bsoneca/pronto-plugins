@@ -58,6 +58,13 @@
 //   while its process started before its record or ticket was written (a pid reused by another process
 //   is no release) and for STACK_RELEASE_HOLD_MAX hours (else 12) from that write: a hung or stale release
 //   stops holding, and the claims it held then fail at STACK_WAIT_MINUTES as before.
+//   Another account's release (PRONTO-762: pull-request jobs run as pronto-pr, with a pool of its own,
+//   beside the owner's): STACK_HOLD_POOL, a pool path, and STACK_HOLD_UID, the numeric uid that must own it,
+//   make a claim also held by a live release record there, by the same rule and message, with the same wait
+//   deadline reset and the same hours cap. It is read-only and follows no link (every dir and file is lstat-ed
+//   and must be a real one of that uid; the file is opened and its handle's dev and ino must be the lstat's),
+//   reads a few KB of it, and writes nothing there. Its process must live and have started no later than the
+//   record. Either variable unset: no change.
 //   Without a release, a claim made inside a GitHub Actions job (GITHUB_ACTIONS=true: ci's checks,
 //   gate.yml's gates) is admitted at once on cores, its weight still held: the runner pools are its
 //   cap (docs/queue.md), and a job holding a runner while it waits here queues twice. The cue memory
@@ -424,6 +431,60 @@ export const aheadOf = (older: { weight: number; release: boolean }[], release: 
   older.filter((o) => (release || hold ? o.release : true)).reduce((n, o) => n + o.weight, 0);
 // Whether a release holds the machine: one holds a slot, or one waits.
 export const releaseHolds = (holding: number, waiting: number) => holding + waiting > 0;
+// What was read of another account's slot-<n> or job-<pid> record (STACK_HOLD_POOL): the kind of its dir and of
+// its weight file as lstat saw them ("dir", "file", "symlink", "other") and their uids, the pid and weight text,
+// the weight file's mtime (ms), whether the pid is alive, when its process started (ms; 0 unknown), the owner line.
+export type ForeignRecord = { dirKind: string; dirUid: number; fileKind: string; fileUid: number; pid: number; text: string; written: number; alive: boolean; started: number; what: string };
+// The first of them that is a live release of `uid`: real dir and file (no link), that uid's, a release record (weight
+// above 0, `prio=release`), written within `hours`, its process alive and started no later than the write. Anything else
+// is no hold.
+export const heldByForeign = (records: ForeignRecord[], uid: number, now: number, hours: number) =>
+  records.find((r) => r.dirKind === "dir" && r.dirUid === uid && r.fileKind === "file" && r.fileUid === uid
+    && r.alive && Number.isInteger(r.pid) && r.pid > 0 && releaseOf(r.text, r.pid)
+    && releaseFresh(r.written, now, hours) && startedBefore(r.started, r.written));
+const kindOf = (st: Deno.FileInfo) => st.isSymlink ? "symlink" : st.isDirectory ? "dir" : st.isFile ? "file" : "other";
+// A file of the hold pool read without following a link: lstat, open, fstat the handle (dev and ino as lstat's), at most 4 KB.
+const readNoFollow = async (path: string): Promise<{ kind: string; uid: number; text: string; mtime: number } | undefined> => {
+  try {
+    const l = await Deno.lstat(path);
+    if (!l.isFile) return { kind: kindOf(l), uid: l.uid ?? -1, text: "", mtime: 0 };
+    const f = await Deno.open(path, { read: true });
+    try {
+      const st = await f.stat();
+      if (st.dev !== l.dev || st.ino !== l.ino || !st.isFile) return undefined;
+      const buf = new Uint8Array(4096);
+      const n = (await f.read(buf)) ?? 0;
+      return { kind: "file", uid: l.uid ?? -1, text: new TextDecoder().decode(buf.subarray(0, n)).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, " "), mtime: st.mtime?.getTime() ?? 0 };
+    } finally { f.close(); }
+  } catch { return undefined; }
+};
+// The live release in STACK_HOLD_POOL, if any (both variables set; read-only).
+const foreignHold = async (): Promise<{ what: string; pid: number } | undefined> => {
+  const dir = Deno.env.get("STACK_HOLD_POOL"), want = Number(Deno.env.get("STACK_HOLD_UID") ?? "");
+  if (!dir || !Number.isInteger(want) || Deno.build.os === "windows") return undefined;
+  try {
+    const top = await Deno.lstat(dir);
+    if (!top.isDirectory || top.isSymlink || top.uid !== want) return undefined;
+    const records: ForeignRecord[] = [];
+    for await (const e of Deno.readDir(dir)) {
+      if (!/^(slot|job)-[0-9]+$/.test(e.name)) continue;
+      const d = await Deno.lstat(`${dir}/${e.name}`).catch(() => undefined);
+      if (!d || !d.isDirectory || d.isSymlink || d.uid !== want) continue;
+      const [pidFile, weight, owner] = await Promise.all(["pid", "weight", "owner"].map((n) => readNoFollow(`${dir}/${e.name}/${n}`)));
+      if (!pidFile || !weight || !owner || pidFile.kind !== "file" || pidFile.uid !== want || owner.uid !== want) continue;
+      const pid = Number(pidFile.text.trim());
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      if (!releaseOf(weight.text, pid)) continue;
+      const live = await alive(pid);
+      const r = live ? await new Deno.Command("ps", { args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, stdout: "piped", stderr: "null" }).output().catch(() => undefined) : undefined;
+      records.push({ dirKind: "dir", dirUid: d.uid ?? -1, fileKind: weight.kind, fileUid: weight.uid, pid, text: weight.text, written: weight.mtime, alive: live,
+        started: Date.parse(new TextDecoder().decode(r?.stdout ?? new Uint8Array()).trim()) || 0, what: owner.text.replace(/[\u0000-\u001f\u007f]/g, " ").trim().split(" ").slice(2).join(" ").slice(0, 200) });
+    }
+    const hours = Number(Deno.env.get("STACK_RELEASE_HOLD_MAX") ?? 12);
+    const found = heldByForeign(records, want, Date.now(), Number.isFinite(hours) ? hours : 12);
+    return found ? { what: found.what, pid: found.pid } : undefined;
+  } catch { return undefined; }
+};
 // A slot's directory is stale, to be freed at the next claim, when its holder is gone and no port of
 // its range answers: not only its door. A database left by a stack whose door was down kept :33005 from
 // 2026-11-06 on while slot 1 was freed and handed out again, and every stack given it failed to start
@@ -728,9 +789,12 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
         else if (staleSlot(false, (await answering(33000 + 100 * (Number(m[2]) - 1))).length > 0)) await Deno.remove(`${pool}/${e.name}`, { recursive: true }).catch(() => {});
       }
       const { used } = held(holders);
+      // Another account's live release, read-only (STACK_HOLD_POOL), holds as one of this pool's does.
+      const foreign = await foreignHold();
+      if (foreign) releasing.push(foreign);
       // A release holds the machine while one holds a slot or waits, in either line (PRONTO-894).
       const waitingRelease = [...coresTickets, ...cueTickets].filter((t) => t.release && t.name.replace(/-w$/, "") !== ticket);
-      const hold = releaseHolds(holders.filter((h) => h.release).length, waitingRelease.length ? 1 : 0);
+      const hold = releaseHolds(holders.filter((h) => h.release).length + (foreign ? 1 : 0), waitingRelease.length ? 1 : 0);
       const blocker = releasing[0] ?? waitingRelease[0];
       const held_ = hold && weight > 0 && !release;
       const memHeld = holders.reduce((n, h) => n + h.mem, 0), coresHeld = holders.reduce((n, h) => n + h.cores, 0);
@@ -1268,6 +1332,10 @@ if (import.meta.main) {
     let found = 0;
     const names: string[] = [];
     try { for (const e of Deno.readDirSync(pool)) if (/^(slot|job)-[0-9]+$/.test(e.name)) names.push(e.name); } catch { /* no pool */ }
+    if (Deno.args[0] === "status") {
+      const f = await foreignHold();
+      if (f) console.log(`release hold from ${Deno.env.get("STACK_HOLD_POOL")}: pid ${f.pid} ${f.what}`);
+    }
     for (const name of names.sort((a, b) => Number(a.split("-")[1]) - Number(b.split("-")[1]))) {
       const pid = await holder(name);
       if (!await alive(pid)) continue;

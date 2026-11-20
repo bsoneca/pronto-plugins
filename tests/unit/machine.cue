@@ -56,3 +56,41 @@ cases: "the cue wrapper replays an unchanged export it ran at once, outside the 
 		{get: "log", expect: ["export\tmiss", "export\thit", "export\tmiss"], why: "the cache log counts the direct path's exports too: a miss, the hit, the changed input's miss; what skipped the cache logs nothing"},
 	]
 }
+cases: "slot.ts holds a claim for a live release in another account's pool, and only for that (PRONTO-762)": {
+	suite: "machine"
+	steps: [
+		{call: "machine.foreignHold"},
+		{keep: "r"},
+		{get: "live", expect: true, why: "a live release record of the wanted uid, its process started before the write, within the hours"},
+		{use: "r"},
+		{get: "dead", expect: false, why: "a dead pid holds nothing"},
+		{use: "r"},
+		{get: "reused", expect: false, why: "a process that started after the record is a reused pid, no release"},
+		{use: "r"},
+		{get: "unknownStart", expect: false, why: "a start time that cannot be read is never a hold"},
+		{use: "r"},
+		{get: "symlinkFile", expect: false, why: "a weight file that is a link is not read as a hold"},
+		{use: "r"},
+		{get: "symlinkDir", expect: false, why: "a record dir that is a link is not a hold"},
+		{use: "r"},
+		{get: "wrongUid", expect: false, why: "a file another uid than STACK_HOLD_UID owns is not a hold"},
+		{use: "r"},
+		{get: "wrongDirUid", expect: false, why: "nor a dir"},
+		{use: "r"},
+		{get: "older", expect: false, why: "a record older than STACK_RELEASE_HOLD_MAX hours stops holding"},
+		{use: "r"},
+		{get: "weightZero", expect: false, why: "a release record weighs above 0"},
+		{use: "r"},
+		{get: "notRelease", expect: false, why: "a record without prio=release is no release"},
+		{use: "r"},
+		{get: "otherPid", expect: false, why: "a record whose pid is not the dir's holder is no release"},
+		{use: "r"},
+		{get: "badPid", expect: false, why: "an unparsable pid is ignored"},
+		{use: "r"},
+		{get: "none", expect: false, why: "an empty pool holds nothing"},
+		{use: "r"},
+		{get: "claimWeight0", expect: true, why: "a weight-0 claim is admitted while a release holds"},
+		{use: "r"},
+		{get: "claimWeight3", expect: false, why: "a claim with a weight waits while a release holds"},
+	]
+}

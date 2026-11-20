@@ -74,3 +74,31 @@ printf '#!/bin/sh\nn=$(($(cat "$0.n" 2>/dev/null || echo 0) + 1)); echo $n > "$0
     };
   } finally { await sh(`rm -rf '${tmp}'`); }
 }
+// slot.ts's read of another account's release (PRONTO-762): heldByForeign over records as foreignHold reads them.
+// `now` is a fixed instant; a record is a live release of uid 501 written a minute before it unless a case changes it.
+export async function foreignHold() {
+  const { heldByForeign } = await import("../../machine/slot.ts");
+  const now = Date.parse("2026-11-19T12:00:00Z"), uid = 501, hours = 12;
+  const record = (more = {}) => ({ dirKind: "dir", dirUid: uid, fileKind: "file", fileUid: uid, pid: 4242, text: "4242 3 prio=release", written: now - 60_000, alive: true, started: now - 3600_000, what: "release brawl-chess", ...more });
+  const held = (more) => heldByForeign([record(more)], uid, now, hours) !== undefined;
+  return {
+    live: held({}),
+    dead: held({ alive: false }),
+    reused: held({ started: now }),
+    reusedWithinSlack: held({ started: now - 60_000 + 1500 }),
+    unknownStart: held({ started: 0 }),
+    symlinkFile: held({ fileKind: "symlink" }),
+    symlinkDir: held({ dirKind: "symlink" }),
+    wrongUid: held({ fileUid: 502 }),
+    wrongDirUid: held({ dirUid: 502 }),
+    older: held({ written: now - 13 * 3600_000 }),
+    weightZero: held({ text: "4242 0 prio=release" }),
+    notRelease: held({ text: "4242 3" }),
+    otherPid: held({ text: "4243 3 prio=release" }),
+    badPid: held({ pid: NaN, text: "NaN 3 prio=release" }),
+    none: heldByForeign([], uid, now, hours) !== undefined,
+    // The claim side: a claim of weight 0 is not held by a release that holds, a weighted one is (admitsCores' hold rule).
+    claimWeight0: (await import("../../machine/slot.ts")).admitsCores(false, 0, 0, 0, 15, false, false, true),
+    claimWeight3: (await import("../../machine/slot.ts")).admitsCores(false, 0, 3, 0, 15, false, false, true),
+  };
+}
