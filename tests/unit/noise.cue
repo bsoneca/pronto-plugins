@@ -26,14 +26,25 @@ _at: {
 _refused:  "analyst: GET /analysis?select=id: error sending request for url (http://127.0.0.1:3000/analysis): client error (Connect): tcp connect error: Connection refused (os error 111)"
 _stopping: "13:59:12.007 pid=<0.3298.0> [warning] Electric.StatusMonitor condition failed: :supervisor_processes_ready. Status %{conn: :up, shape: :read_only}"
 
-_restart: {
+// What an app says of the restart: its unit; the patterns, lead, tail and down come from the schema.
+_restart: pw.#Restart & {unit: "k3s"}
+// What the three patterns were when each app wrote them out (Studio's prod_watch.cue, before they derived).
+_restartWritten: {
 	stop:  "systemd\\[1\\]: Stopping k3s\\.service"
 	start: "systemd\\[1\\]: Started k3s\\.service"
 	crash: "k3s\\.service: (Main process exited|Failed with result|Scheduled restart job)"
-	unit:  "k3s"
-	lead:  *5 | int
-	tail:  *120 | int
-	down:  *300 | int
+}
+_n: {
+	ts:   string
+	node: *true | bool
+	out: {
+		timestamp:   ts
+		severity:    "ERROR"
+		textPayload: "Error retrieving lease lock: apiserver not ready"
+		resource: labels: service_name: "s"
+		labels: container_name: "postgres"
+		if node {source: "node"}
+	}
 }
 _window: {from: "2026-11-19T18:59:49.000Z", to: "2026-11-19T19:02:09.000Z"}
 _done: "2026-11-19T19:10:00Z"
@@ -195,5 +206,55 @@ cases: {
 		{call: "probe.verdicts", args: ["$"], expect: [{count: 1, noise: "node-restart"}], why: "the entry is in its pod's start phase and in the restart window: the rule held to restart meets it"},
 		{call: "watch.noiseOf", args: [(_at & {container: "x", second: 0, text: "a start line"}).out, {r: {match: "start", during: ["shutdown", "restart"], why: "t"}}, ["start", "restart"]], expect: "r", why: "any of a rule's windows, in any of the entry's phases"},
 		{call: "watch.noiseOf", args: [(_at & {container: "x", second: 0, text: "a start line"}).out, {r: {match: "start", during: ["shutdown"], why: "t"}}, ["start", "restart"]], expect: null},
+	]}
+
+	"the restart's patterns derive from its unit, as the apps wrote them out, and stay overridable": {suite: "noise", steps: [
+		{value: {stop: _restart.stop, start: _restart.start, crash: _restart.crash}, expect: _restartWritten},
+		{value: (pw.#Restart & {unit: "k3s.io"}).stop, expect: "systemd\\[1\\]: Stopping k3s\\.io\\.service", why: "the unit is quoted, its dot is not a wildcard"},
+		{value: (pw.#Restart & {unit: "k3s", stop: "Stopping the lot"}).stop, expect: "Stopping the lot"},
+		{value: {lead: _restart.lead, tail: _restart.tail, down: _restart.down}, expect: {lead: 5, tail: 120, down: 300}},
+	]}
+	"a rise of NRestarts seen while a restart is held is still seen by the run that judges the window": {suite: "noise", steps: [
+		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 5, now: 6}, until: "2026-11-19T19:02:08Z"}, _restart], expect: [], why: "run 1: the rise, and the window not yet complete"},
+		{call: "watch.restartBaseline", args: [{was: 5, now: 6, hold: {from: "2026-11-19T18:59:49.000Z"}}], expect: 5, why: "the held run leaves the old counter"},
+		{keep: "baseline"},
+		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: "$baseline", now: 6}, until: _done}, _restart], expect: [], why: "run 2: the window is complete, and the rise is still a rise: its entries alert"},
+		{call: "watch.restartBaseline", args: [{was: 5, now: 6, hold: null}], expect: 6, why: "with nothing held the counter moves on"},
+		{call: "watch.restartBaseline", args: [{was: 5, now: 0, hold: {from: "2026-11-19T18:59:49.000Z"}}], expect: 0, why: "a reset lowers it: a later crash making it 1 stays a rise"},
+		{call: "watch.restartBaseline", args: [{was: null, now: 6, hold: {from: "2026-11-19T18:59:49.000Z"}}], expect: null, why: "no earlier counter: none is written"},
+	]}
+	"a --since run holds nothing back and counts what it reads": {suite: "noise", steps: [
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T18:59:00.000Z"}).out, (_n & {ts: "2026-11-19T19:00:05.000Z"}).out], hashes: ["h1", "h2"], hold: {from: "2026-11-19T19:00:00.000Z"}, since: true, counted: ["h2"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {entries: [(_n & {ts: "2026-11-19T18:59:00.000Z"}).out, (_n & {ts: "2026-11-19T19:00:05.000Z"}).out]}, why: "the held node entry is reported, windows only if complete (restartWindows)"},
+	]}
+	"a held node entry stays out of the next run's seen unless an earlier run counted it": {suite: "noise", steps: [
+		{call: "watch.settleRun", args: [{entries: [
+			(_n & {ts: "2026-11-19T18:59:00.000Z"}).out,
+			(_n & {ts: "2026-11-19T19:00:05.000Z"}).out,
+			(_n & {ts: "2026-11-19T19:00:06.000Z"}).out,
+			(_n & {ts: "2026-11-19T19:00:07.000Z", node: false}).out,
+		], hashes: ["h1", "h2", "h3", "h4"], hold: {from: "2026-11-19T19:00:00.000Z"}, counted: ["h3"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], expect: {
+			entries: [(_n & {ts: "2026-11-19T18:59:00.000Z"}).out, (_n & {ts: "2026-11-19T19:00:07.000Z", node: false}).out]
+			committed: "2026-11-19T19:00:00.000Z"
+			seen: ["h3", "h4"]
+		}, why: "h2 was never counted, so the next run counts it; h3 was, so it stays known"},
+	]}
+	"the cursor is the source's own boundary when a limit cut the read, and no hold or lag gives an earlier one": {suite: "noise", steps: [
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:00:05.100000Z"}).out, (_n & {ts: "2026-11-19T19:00:05.123456Z"}).out], hashes: ["h1", "h2"], reached: "2026-11-19T19:00:05.123456Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:00:05.123456Z", seen: ["h2"]}, why: "verbatim, to the microsecond; the entry in the cursor's own millisecond is read again (the next read starts inclusive), so its hash is kept"},
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:05:00.000500Z"}).out, (_n & {ts: "2026-11-19T19:04:59.999999Z"}).out], hashes: ["h1", "h2"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:05:00.000Z", seen: ["h1"]}, why: "a read to now commits to - lag in ms; an entry 0.5 ms after it is still read again, so its hash is kept"},
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:05:00.000Z"}).out], hashes: ["h1"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:05:00.000Z", seen: ["h1"]}, why: "a node entry (ms) at the cursor's millisecond is read again, so its hash is kept"},
+		{call: "watch.settleRun", args: [{entries: [], hashes: [], hold: {from: "2026-11-19T19:08:00.000Z"}, reached: "2026-11-19T19:05:00.123456Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:05:00.123456Z"}, why: "a hold later than the boundary does not move it"},
+		{call: "watch.settleRun", args: [{entries: [], hashes: [], hold: {from: "2026-11-19T19:02:00.000Z"}, reached: "2026-11-19T19:05:00.123456Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:02:00.000Z"}, why: "a hold earlier than it does"},
+		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.123456Z", "2026-11-19T19:00:05.123Z"], expect: true},
+		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.1234Z", "2026-11-19T19:00:05.123456Z"], expect: false},
+		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05Z", "2026-11-19T19:00:05.000000000Z"], expect: false, why: "equal is not after"},
+	]}
+	"an entry in its pod's start and shutdown windows at once meets a rule held to shutdown": {suite: "noise", steps: [
+		{value: [
+			(_at & {container: "-", second: 0, text: "Starting new instance. Reason: AUTOSCALING", level: "INFO"}).out,
+			(_at & {container: "-", second: 10, text: "Container terminated on signal 15.", level: "INFO"}).out,
+			(_at & {container: "analyst", second: 12, text: "half-stopped: the queue's lease was dropped"}).out,
+		]},
+		{call: "watch.group", args: ["$", _rules & {"shutdown-only": {match: "half-stopped", during: ["shutdown"], why: "a case's own rule: said only as the instance stops"}}, _lifecycle]},
+		{call: "probe.verdicts", args: ["$"], expect: [{count: 1, noise: "shutdown-only"}], why: "second 12 is a minute-window start entry and a shutdown-window one: both phases apply"},
 	]}
 }

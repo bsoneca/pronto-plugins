@@ -115,15 +115,19 @@ seconds it is down. An app names the unit in `prod_watch.cue` (`node.restart`, `
 [`schema.cue`](schema.cue)) and holds the rules that are only that to `during: ["restart"]`:
 
 ```cue
-prodWatch: node: restart: {
-	unit:  "k3s"                                      // as `journalctl -u` names it
-	stop:  "systemd\\[1\\]: Stopping k3s\\.service"      // JavaScript regular expressions on systemd's own lines
-	start: "systemd\\[1\\]: Started k3s\\.service"
-	crash: "k3s\\.service: (Main process exited|Failed with result|Scheduled restart job)"
-	lead: 5      // seconds before the stop line the window opens
-	tail: 120    // seconds after the start line it closes
-	down: 300    // the longest a stop may stay down
-}
+prodWatch: node: restart: unit: "k3s"            // as `journalctl -u` names it
+```
+
+The rest is derived from the unit and may be overridden (the values below are the defaults, `k3s` standing for the unit,
+quoted with `regexp.QuoteMeta`):
+
+```cue
+stop:  "systemd\\[1\\]: Stopping k3s\\.service"      // JavaScript regular expressions on systemd's own lines
+start: "systemd\\[1\\]: Started k3s\\.service"
+crash: "k3s\\.service: (Main process exited|Failed with result|Scheduled restart job)"
+lead: 5      // seconds before the stop line the window opens
+tail: 120    // seconds after the start line it closes
+down: 300    // the longest a stop may stay down
 ```
 
 Each pass reads, over the node's ssh and read-only, `sudo -n journalctl -u <unit> _PID=1` (the unit's lines of
@@ -133,7 +137,8 @@ ActiveEnterTimestamp). It is **no window**, and the same entries alert, when:
 
 - a crash line is in it, or `NRestarts` rose since the last pass (`k3s.json` in the state folder), or is unread. The
   guard is for a crash systemd restarted that the `crash` pattern misses: any rise since the last pass drops all of
-  this pass's windows;
+  this pass's windows. While a restart is held (below) `k3s.json` keeps the old counter, so the pass that reads the
+  held entries again still sees the rise (`restartBaseline`);
 - its end (`start + tail`) is past what the journal read reached: an incomplete window may hold a crash not read yet;
 - the entry is not the node's. The window applies only to entries read from the node (VictoriaLogs), never to
   a Cloud Run service the app also watches.
@@ -146,15 +151,18 @@ stderr before the ledger, the cursor or `k3s.json` is written, so the next pass 
 A restart that is **not finished** at the cutoff (a stop with no start yet but within `down` of it, or a start
 whose `start + tail` is past it) is held, not judged (`restartPending` in `watch.js`): the pass leaves the
 node's entries from `stop - lead` on out of its report and its counts, commits its cursor no later than that point
-and keeps their hashes out of `seen`, so the next pass reads them again with the window complete (or none).
-`--since` reports leave them out too.
+and keeps their hashes out of `seen` (those an earlier pass already counted stay in it), so the next pass reads them
+again with the window complete (or none). The hold applies to cursor runs alone: a `--since` report holds nothing
+back, and shows the node's entries as they are, a window only if complete. The cursor is the source's own boundary,
+verbatim, when a read limit cut the pass short; only the lag or a hold gives an earlier one, in milliseconds
+(`settleRun`).
 
 The cutoff is the Mac's own now, floored to the whole second, used as the journal's `--until` and as the windows'
 `until`; the node's clock is not read. A node clock that runs behind or ahead of the Mac's can place a window
 or a crash line off by the skew: a known limit.
 
-`during` takes every phase that applies: an entry can be in its pod's `start` or `shutdown` window and in a
-`restart` window at once, and a rule held to `["restart"]` still meets it.
+`during` takes every phase that applies: an entry can be in its pod's `start` and `shutdown` windows (a pod stopped as
+it starts) and in a `restart` window at once, and a rule held to any one of them meets it (`phasesOf`).
 
 ## Noise is a design fact
 
