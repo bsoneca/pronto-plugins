@@ -141,7 +141,7 @@ def writes [w: record]: nothing -> list<string> {
 			"rollout" => (if $a.1 == "status" { [$"rollout ($a.2)"] } else { [] })
 			_ => []
 		}
-	} | flatten | where {|l| not ($l starts-with "apply Namespace/") and $l != "apply ConfigMap/pronto-release" }
+	} | flatten | where {|l| not ($l starts-with "apply Namespace/") and $l != "apply ConfigMap/pronto-release" and not ($l =~ '^apply Configuration/.*-caddy-dapr-config$') }
 }
 
 # The paths of a value with what is at each, one line a leaf: two values' difference is the lines of one only.
@@ -193,11 +193,13 @@ def test_upstreams_own_release_test_passes [] {
 # The engine's objects, with its declared patches undone and its additions dropped, are upstream's.
 def undeclared []: list -> list {
 	$in
-		| where {|o| $o.kind not-in $own_kinds and not ($o.kind == "NetworkPolicy" and ($o.metadata.name | str ends-with "-tenant-egress")) }
+		| where {|o| $o.kind not-in $own_kinds and not ($o.kind == "NetworkPolicy" and ($o.metadata.name | str ends-with "-tenant-egress")) and not ($o.kind == "Configuration" and ($o.metadata.name | str ends-with "-caddy-dapr-config")) }
 		| each {|o|
 			match $o.kind {
 				"Namespace" => ($o | update metadata.labels {|x| $x.metadata.labels | reject -o "pronto.dev/release" "pronto.dev/preview" } | if ($in.metadata.labels | is-empty) { $in | reject metadata.labels } else { $in })
 				"Cluster" => ($o | reject -o spec.plugins)
+				# the door's own Dapr configuration is the engine's (declared patch): upstream points it at the shared one
+				"Deployment" if ($o.metadata.name | str ends-with "-caddy") => ($o | update spec.template.metadata.annotations."dapr.io/config" $"(($o.metadata.name | str replace -r '-caddy$' ''))-dapr-config")
 				_ => $o
 			}
 		}
@@ -225,6 +227,15 @@ def test_objects_change_only_as_declared [fx: record] {
 		assert equal $r.exit_code 0 $"($variant)\n($r.stderr)"
 		let both = ($r.stdout | from json)
 		assert equal ($both.engine | undeclared | canon | to json) ($both.upstream | canon | to json) $"variant ($variant | str trim)"
+		# the door's Dapr configuration: its own, invocation alone allowed; every other Deployment keeps the shared one
+		let own = ($both.engine | where {|o| $o.kind == "Configuration" and ($o.metadata.name | str ends-with "-caddy-dapr-config") })
+		assert equal ($own | length) 1 "one Configuration for the door"
+		assert equal ($own.0.spec.api.allowed | each {|a| $"($a.name) ($a.version) ($a.protocol)" }) ["invoke v1.0 http" "invoke v1.0 grpc"]
+		let caddy = ($both.engine | where {|o| $o.kind == "Deployment" and ($o.metadata.name | str ends-with "-caddy") })
+		assert equal ($caddy | length) 1 "the door's Deployment"
+		assert equal ($caddy.0.spec.template.metadata.annotations | get "dapr.io/config") $own.0.metadata.name
+		let others = ($both.engine | where {|o| $o.kind == "Deployment" and not ($o.metadata.name | str ends-with "-caddy") } | each {|o| $o.spec.template.metadata.annotations | get -o "dapr.io/config" } | uniq)
+		assert (not ($own.0.metadata.name in $others)) "crud, auth and the rest keep the shared configuration"
 		if ($variant | str contains "backups") {
 			let added = ($both.engine | where kind in $own_kinds | get kind | sort)
 			assert equal $added [LimitRange ObjectStore ResourceQuota ScheduledBackup]

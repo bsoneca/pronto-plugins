@@ -237,6 +237,26 @@ def check-daprd [app: string, namespace: string, components: list<string>] {
 	if ($bare | is-not-empty) { error make {msg: $"Pods running without their Dapr sidecar: ($bare | str join ', ')"} }
 }
 
+# The door is public and dials its own Dapr sidecar: its `/crud/v1.0/metadata` must be PostgREST's answer (a 404), never the
+# sidecar's metadata (a 200 JSON body with `"runtimeVersion"`). A host that does not answer yet (DNS not moved) cannot be checked and is said, not failed;
+# a preview with no public host of its own has nothing to ask.
+export def check-door [node: record] {
+	if ($node.preview | is-not-empty) and (($node.hosts | get -o $node.preview | default "") | is-empty) { return }
+	let file = (mktemp -t door.XXXXXX | str trim)
+	let url = $"https://($node.host)/crud/v1.0/metadata"
+	let r = (^curl -s -m 20 -o $file -w "%{http_code}" $url | complete)
+	let body = (try { open --raw $file } catch { "" })
+	rm -f $file
+	if $r.exit_code != 0 {
+		print -e $"node: (stamp) warning: ($url) did not answer \(curl ($r.exit_code)\), so the door's Dapr API was not checked"
+		return
+	}
+	if ($r.stdout | str trim) == "200" and $body =~ '"runtimeVersion"' {
+		error make {msg: $"the door answers the Dapr sidecar's own API: ($url) returned its metadata, status ($r.stdout | str trim); the caddy Dapr configuration did not take"}
+	}
+	print $"node: (stamp) the door's Dapr API is closed: ($url) answers (($r.stdout | str trim)), not the sidecar's metadata"
+}
+
 # The record of what runs: `sha` (what `--serving` prints, empty for a tree that was not a commit), and `verified`, empty
 # until the app's cd has checked the public site for it (`--verified`).
 export def record-release [app_dir: string, node: record, pushed: record] {
@@ -261,10 +281,16 @@ def invalidate-verified [ns: string] {
 	if $r.exit_code != 0 and not ($r.stderr =~ "NotFound") { error make {msg: $"invalidating the verified record of ($ns) failed: ($r.stderr | str trim)"} }
 }
 
-# The registry lease renewed; a renewal that fails is a warning, never a failure of a release that may already be live (the
+# The registry lease renewed. Before the push (and until the images are pushed) a failure stops the release, as nothing is live; after
+# the release is applied a failure is a warning, never a failure of a release that is live (the
 # lease's hour is the margin, and the next renewal tries again).
-def renew-lease [node: record, lease: string] {
+def renew-lease [node: record, lease: string, --before-live] {
 	if $lease == "" { return }
+	if $before_live {
+		# Nothing is live yet: a lease that cannot be renewed would let a collector take this release for dead mid-push, so it stops here.
+		registry lease-renew $node.build $lease
+		return
+	}
 	try { registry lease-renew $node.build $lease } catch {|e| print -e $"node: (stamp) warning: the registry lease ($lease) was not renewed: ($e.msg)" }
 }
 
@@ -445,6 +471,8 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		}
 		# 13. the mesh is intrinsic: a pod without its sidecar is a failed release
 		check-daprd $app $ns $components
+		# 13b. the public door must not answer the Dapr sidecar's own API
+		check-door $node
 	} catch {|e|
 		print -e $"node: (stamp) the release failed: ($e.msg)"
 		let back = (try { rollback undo $before $ns } catch {|r| {undone: [], failed: [{name: "(all)", why: $r.msg}]} })
@@ -581,7 +609,7 @@ def main [
 					mut maintenance = ""
 					let body_failure = (try {
 						# 2. build, or placeholders for a check
-						renew-lease $node $lease
+						renew-lease $node $lease --before-live
 						let preview_tag = if ($node.preview | is-empty) { "release" } else { $node.preview }
 						let pushed = if $check and not $build {
 							render placeholder-pushed $services $preview_tag
@@ -590,7 +618,7 @@ def main [
 							build-images $app_info $node $fwd $services (if $check { "check" } else { $preview_tag })
 						}
 						# the lease renewed after the push, and again after the long phases that follow
-						renew-lease $node $lease
+						renew-lease $node $lease --before-live
 						release-app $app_info $node $meta $compose $facts $secrets $pushed --check=$check
 						renew-lease $node $lease
 						# 16. prune: the release is live, so a failure here does not undo it; it is recorded beside the release

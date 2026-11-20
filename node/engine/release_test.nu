@@ -110,6 +110,13 @@ if [ -f "$d/crane_nopg" ]; then echo '{"config":{"Env":["PATH=/bin"]}}'; else ec
 	r#'
 #!/bin/sh
 d="$(dirname "$0")/.."
+case "$*" in
+  *"/crud/v1.0/metadata"*)
+    out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+    if [ -f "$d/host_unreachable" ]; then printf 000; exit 6; fi
+    if [ -f "$d/metadata_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21","components":[]}' > "$out"; printf 200; exit 0; fi
+    echo "404 page not found" > "$out"; printf 404; exit 0 ;;
+esac
 if [ -f "$d/registry_dead" ]; then printf 000; exit 7; fi
 printf 200
 '# | str trim --left | save -f ($d | path join bin curl)
@@ -212,6 +219,7 @@ def main [] {
 	test_a_stale_lock_is_taken_over_against_its_resource_version
 	test_prune_runs_only_the_maintenance
 	test_a_lease_that_stays_does_not_turn_a_live_release_into_a_failure
+	test_the_door_must_not_answer_the_dapr_api
 	test_a_deferred_prune_exits_four
 	test_only_a_confirmed_absence_is_created
 	test_the_lock_is_released_against_what_was_read_and_its_failure_is_told
@@ -1050,13 +1058,23 @@ def test_the_apps_compose_plugin_is_the_one_that_renders [] {
 }
 
 def test_a_failed_lease_renewal_is_a_warning_and_the_record_starts_unknown [] {
-	print "test a lease renewal that fails is a warning (the release is live), and the record starts with maintenance unknown..."
+	print "test a lease renewal that fails before the push stops the release and after it is a warning, and the record starts with maintenance unknown..."
 	let w = (sandbox)
 	"" | save -f ($w.state | path join lease_patch_fail)
+	# before the push nothing is live: a renewal that fails stops the release, and nothing is built or applied
 	let r = (in-world $w $release_nu --app $w.app)
-	assert (released $r) $"($r.stdout)($r.stderr)"
-	assert (has $r.stderr "warning: the registry lease") $r.stderr
-	assert (has $r.stdout "[SUCCESS] Released aprende") $r.stdout
+	assert ($r.exit_code != 0) "a lease that cannot be renewed before the push stops the release"
+	assert (has $r.stderr "kubectl patch lease") $"($r.stdout)($r.stderr)"
+	assert (not ((calls $w) | any {|c| $c | str contains "Deployment/" })) "nothing was applied"
+	assert (not ((docker-calls $w) | any {|c| $c | str starts-with "buildx bake" })) "and nothing was built"
+	# after the release is applied it is a warning: the third renewal fails, and the release is live all the same
+	rm -rf $w.dir
+	let w = (sandbox)
+	"3" | save -f ($w.state | path join lease_patch_fail_from)
+	let late = (in-world $w $release_nu --app $w.app)
+	assert (released $late) $"($late.stdout)($late.stderr)"
+	assert (has $late.stderr "warning: the registry lease") $late.stderr
+	assert (has $late.stdout "[SUCCESS] Released aprende") $late.stdout
 	# a record written by a release says nothing of the maintenance until the prune has been recorded
 	rm -rf $w.dir
 	let v = (sandbox)
@@ -1212,6 +1230,25 @@ def test_a_deferred_prune_exits_four [] {
 	assert (has $r.stderr "deferred, not done") $r.stderr
 	let patch = (calls $w | where {|c| ($c | str starts-with "patch configmap pronto-release") and ($c | str contains "pruned") } | last)
 	assert (has $patch '"pruned":"pending"') $patch
+	rm -rf $w.dir
+}
+
+def test_the_door_must_not_answer_the_dapr_api [] {
+	print "test a release fails when the door answers the Dapr sidecar's metadata, passes on a 404, and says so when the host does not answer..."
+	let w = (sandbox)
+	let ok = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $ok.exit_code 0 $"($ok.stdout)($ok.stderr)"
+	"" | save -f ($w.dir | path join host_unreachable)
+	let unreach = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $unreach.exit_code 0 $"($unreach.stdout)($unreach.stderr)"
+	assert (has $unreach.stderr "so the door's Dapr API was not checked") $unreach.stderr
+	rm -f ($w.dir | path join host_unreachable)
+	"" | save -f ($w.dir | path join metadata_open)
+	let open = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert ($open.exit_code != 0) "the sidecar's metadata fails the release"
+	assert (has $open.stderr "the door answers the Dapr sidecar's own API") $open.stderr
+	assert ((calls $w) | any {|c| $c | str starts-with "rollout undo" }) "and the Deployments are rolled back"
+	assert (has $ok.stdout "the door's Dapr API is closed") $ok.stdout
 	rm -rf $w.dir
 }
 
