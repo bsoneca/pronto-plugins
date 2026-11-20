@@ -87,10 +87,12 @@ def runtime-names [compose: record]: nothing -> list<string> {
 }
 
 # The providers compose gives the auth service, and each one's client: as upstream's main reads them
-# from the program, an error being none.
+# from the program. An app that declares none gives an empty record; an export that fails is an error.
 export def release-providers [dir: string]: nothing -> record {
 	let r = (do { cd $dir; ^cue export . -e '{if code.capabilities.auth != _|_ {if code.capabilities.auth.provider != _|_ {v: code.capabilities.auth.provider}, if code.capabilities.auth.provider == _|_ {v: {}}}, if code.capabilities.auth == _|_ {v: {}}}.v' --out json } | complete)
-	if $r.exit_code == 0 { $r.stdout | from json } else { {} }
+	# A failed export is not "no providers": the release stops, as it would for any other failed render.
+	if $r.exit_code != 0 { error make {msg: $"the auth providers of ($dir) did not export: ($r.stderr | str trim)"} }
+	$r.stdout | from json
 }
 
 # What upstream's main unifies into the release package, and what its render-manifests adds: the

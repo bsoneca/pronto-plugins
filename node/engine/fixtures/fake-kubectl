@@ -9,7 +9,7 @@
 # registry_down (the node's builder or registry has no available replica), get_fail_<kind> and missing_<kind>
 # (a read of <kind> in every namespace is refused, or its CRD is not on the node), read_fail_namespace and
 # read_fail_cluster (any read of a namespace, or of the database Cluster, fails as an API error) and
-# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch is refused), inuse (an image the pods name), find_fail (the registry's upload scan fails), lease_patch_fail (a patch of a Lease fails), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
+# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch of the database Cluster is refused), inuse (an image the pods name), cm_race (the record is rewritten between a read and a patch), strict_cm (a patch of a missing record is NotFound), find_fail (the registry's upload scan fails), lease_patch_fail (a patch of a Lease fails), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
 # object with nothing and exit 0, as kubectl does.
 import json, os, sys
 
@@ -136,12 +136,21 @@ if verb == "create":
     sys.exit(0)
 
 if verb == "patch":
-    if exists("patch_fail"):
+    if exists("patch_fail") and len(args) > 1 and args[1].startswith("cluster.postgresql"):
         fail("Error from server (Forbidden): patch is forbidden")
     if len(args) > 2 and args[1] == "configmap" and args[2] == "pronto-release":
         p = d + "/cm/pronto-release"
+        if exists("strict_cm") and not os.path.exists(p):
+            fail('Error from server (NotFound): configmaps "pronto-release" not found')
         o = json.load(open(p)) if os.path.exists(p) else {"metadata": {"name": "pronto-release", "labels": {}, "annotations": {}}, "data": {}}
-        o["data"].update(json.loads(opt("-p"))["data"])
+        body = json.loads(opt("-p"))
+        want = body.get("metadata", {}).get("resourceVersion")
+        if exists("cm_race") and want is not None:
+            server_stamp(o)  # another release wrote the record after it was read
+        if want is not None and want != o["metadata"].get("resourceVersion"):
+            fail('Error from server (Conflict): Operation cannot be fulfilled on configmaps "pronto-release": the object has been modified; please apply your changes to the latest version and try again')
+        o["data"].update(body["data"])
+        server_stamp(o)
         os.makedirs(d + "/cm", exist_ok=True)
         json.dump(o, open(p, "w"))
         sys.exit(0)
@@ -173,7 +182,9 @@ if verb == "apply":
                 open(g, "w").write(str(gen + 1))
             if kind == "ConfigMap" and name == "pronto-release":
                 os.makedirs(d + "/cm", exist_ok=True)
-                json.dump({"metadata": {"name": name, "labels": {}, "annotations": {}}, "data": o.get("data", {})}, open(d + "/cm/" + name, "w"))
+                cmo = {"metadata": {"name": name, "labels": {}, "annotations": {}}, "data": o.get("data", {})}
+                server_stamp(cmo)
+                json.dump(cmo, open(d + "/cm/" + name, "w"))
             if kind == "Cluster" and not o.get("_yaml"):
                 open(d + "/cluster_image", "w").write(o["spec"]["imageName"])
             if kind == "Cluster" and o.get("_yaml"):

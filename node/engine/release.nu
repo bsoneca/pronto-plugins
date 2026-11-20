@@ -168,7 +168,10 @@ def namespace-split [objects: list]: nothing -> record {
 # A server dry run of the objects, which stops the release on a rejection. Where the namespace does not
 # exist yet (a first release), they are asked in `default`: admission reads the objects, not where they go.
 export def dry-run [objects: list, namespace: string] {
-	let there = ((^kubectl get namespace $namespace | complete).exit_code == 0)
+	# Absent is a successful, empty answer; a failed read (denied, API down) stops here, it is not "asked in default".
+	let ns_read = (^kubectl get namespace $namespace --ignore-not-found -o name | complete)
+	if $ns_read.exit_code != 0 { error make {msg: $"reading namespace ($namespace) failed, so the server dry run cannot tell where to ask: ($ns_read.stderr | str trim)"} }
+	let there = ($ns_read.stdout | str trim | is-not-empty)
 	let items = if $there { $objects } else { $objects | each {|o| if $o.kind == "Namespace" { $o } else { $o | upsert metadata.namespace "default" } } }
 	if not $there { print $"node: (stamp) namespace ($namespace) does not exist yet: the server dry run asks the objects in default" }
 	# A Job a release left holds its template immutably: the new one is asked under a name of its own, created, not applied.
@@ -250,6 +253,12 @@ export def record-release [app_dir: string, node: record, pushed: record] {
 		metadata: {name: "pronto-release", namespace: $node.namespace}
 		data: {sha: $sha, verified: "", pruned: "", prune_error: "", pin: (runtime version), enginePin: $engine, images: ($images | to json --raw), at: (date now | format date "%Y-%m-%dT%H:%M:%S%z")}
 	} | to json | kubectl-ok apply -f -
+}
+
+# `verified` emptied in the namespace's record before a release changes what serves; an absent record needs none.
+def invalidate-verified [ns: string] {
+	let r = (^kubectl patch configmap pronto-release -n $ns --type merge -p '{"data":{"verified":""}}' | complete)
+	if $r.exit_code != 0 and not ($r.stderr =~ "NotFound") { error make {msg: $"invalidating the verified record of ($ns) failed: ($r.stderr | str trim)"} }
 }
 
 # The registry lease renewed; a renewal that fails is a warning, never a failure of a release that may already be live (the
@@ -385,6 +394,9 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	if $cluster_read.exit_code != 0 { error make {msg: $"reading the database cluster ($app)-db failed, so its image to put back is unknown: ($cluster_read.stderr | str trim)"} }
 	let previous_image = if ($cluster_read.stdout | str trim | is-empty) { null } else { $cluster_read.stdout | from json | get -o spec.imageName }
 	let before = (rollback revisions ($deployments | get metadata.name) $ns)
+	# What serves is about to change: the record of the public site's verification, which cd trusts, is invalidated first, so a
+	# release that fails halfway can never leave an old commit marked verified over new images. A first release has no record.
+	invalidate-verified $ns
 	as-list $parts.namespace | kubectl-ok apply -f -
 	dry-run $parts.rest $ns
 	# 5. secrets
@@ -516,11 +528,15 @@ def main [
 				with-env {KUBECONFIG: $kubeconfig} {
 					let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o json | complete)
 					if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
-					let sha = if ($r.stdout | str trim | is-empty) { "" } else { $r.stdout | from json | get -o data.sha | default "" }
+					let record = if ($r.stdout | str trim | is-empty) { {} } else { $r.stdout | from json }
+					let sha = ($record | get -o data.sha | default "")
+					let version = ($record | get -o metadata.resourceVersion | default "")
 					if ($sha | is-empty) { error make {msg: $"($node.namespace) records no commit to mark verified (a release of a dirty tree records none)"} }
 					# cd's checks were of the commit it names: a release since then (another run's) is not what they saw.
 					if $sha != $verified { error make {msg: $"the node now serves ($sha), not ($verified) which the checks passed for: it is not marked verified"} }
-					kubectl-ok patch configmap pronto-release -n $node.namespace --type merge -p ({data: {verified: $verified}} | to json --raw)
+					# compare-and-set: the patch names the resourceVersion it read, so a release that changed the record since is a conflict
+					# and this verification (of what it was) is not written over it
+					kubectl-ok patch configmap pronto-release -n $node.namespace --type merge -p ({metadata: {resourceVersion: $version}, data: {verified: $verified}} | to json --raw)
 					print $"verified ($verified)"
 				}
 			} finally {
@@ -574,7 +590,8 @@ def main [
 							$failure
 						}
 					} finally {
-						if $lease != "" { try { registry lease-release $node.build $lease } catch {|e| print -e $"node: (stamp) warning: the registry lease ($lease) was not released: ($e.msg)" } }
+						# a lease left behind blocks the next collection for an hour, so a failed release of it fails the command
+						if $lease != "" { registry lease-release $node.build $lease }
 					}
 				}
 			}

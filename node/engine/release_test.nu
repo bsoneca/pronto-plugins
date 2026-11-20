@@ -211,6 +211,8 @@ def main [] {
 	test_the_collection_waits_for_releases_in_flight
 	test_a_stale_lock_is_taken_over_against_its_resource_version
 	test_prune_runs_only_the_maintenance
+	test_verification_is_invalidated_before_a_release_changes_what_serves
+	test_a_failed_provider_export_stops_the_release
 	test_a_scan_that_fails_aborts_the_collection_and_a_deferred_one_is_pending
 	test_a_file_name_with_a_newline_is_one_name
 	test_a_failed_lease_renewal_is_a_warning_and_the_record_starts_unknown
@@ -1095,6 +1097,48 @@ def test_a_file_name_with_a_newline_is_one_name [] {
 	rm -rf $w.dir
 }
 
+def seed-record [w: record, data: record] {
+	mkdir ($w.state | path join cm)
+	{metadata: {name: "pronto-release", labels: {}, annotations: {}, resourceVersion: "50"}, data: $data} | to json | save -f ($w.state | path join cm pronto-release)
+}
+
+def test_verification_is_invalidated_before_a_release_changes_what_serves [] {
+	print "test a release empties the verified record before its first write, tolerates no record, and --verified is compare-and-set..."
+	let w = (sandbox)
+	seed-record $w {sha: "oldsha", verified: "oldsha", pruned: "true", prune_error: ""}
+	let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $r.exit_code 0 $"($r.stdout)($r.stderr)"
+	let log = (calls $w)
+	let at = {|pat| $log | enumerate | where {|e| $e.item =~ $pat } | get index }
+	assert ((do $at "^patch configmap pronto-release" | first) < (do $at "^apply " | first)) "the record is invalidated before anything is applied"
+	# a first release has no record: NotFound is not a failure
+	rm -f ($w.state | path join cm pronto-release)
+	"" | save -f ($w.state | path join strict_cm)
+	let first = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $first.exit_code 0 $"($first.stdout)($first.stderr)"
+	rm -f ($w.state | path join strict_cm)
+	# --verified writes only against the version it read
+	seed-record $w {sha: "abc", verified: "", pruned: "true", prune_error: ""}
+	"" | save -f ($w.state | path join cm_race)
+	let lost = (in-world $w $release_nu --app $w.app --verified abc)
+	assert ($lost.exit_code != 0) "a record that changed since it was read is a conflict"
+	assert (has $lost.stderr "Conflict") $lost.stderr
+	rm -f ($w.state | path join cm_race)
+	let won = (in-world $w $release_nu --app $w.app --verified abc)
+	assert equal $won.exit_code 0 $"($won.stdout)($won.stderr)"
+	rm -rf $w.dir
+}
+
+def test_a_failed_provider_export_stops_the_release [] {
+	print "test an app whose auth providers do not export stops the release instead of releasing without them..."
+	let w = (sandbox)
+	rm -f ($w.app | path join code.cue)
+	let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "auth providers of") $r.stderr
+	rm -rf $w.dir
+}
+
 def git-commit-all [dir: string] {
 	do { cd $dir; ^git add -A; ^git -c user.name=t -c user.email=t@t commit -q -m x } | complete | ignore
 }
@@ -1192,12 +1236,12 @@ def test_the_prune_outcome_is_recorded_in_the_release_configmap [] {
 	let w = (sandbox)
 	let r = (in-world $w $release_nu --app $w.app)
 	assert (released $r)
-	let patch = (calls $w | where {|c| $c | str starts-with "patch configmap pronto-release -n aprende --type merge" })
+	let patch = (calls $w | where {|c| ($c | str starts-with "patch configmap pronto-release -n aprende --type merge") and ($c | str contains "pruned") })
 	assert equal ($patch | length) 1
 	assert (has $patch.0 '"pruned":"false"') $patch.0
 	assert (has $patch.0 '"prune_error":"') $patch.0
 	assert (not (has $patch.0 '"prune_error":""')) "the error is told"
-	assert ((calls $w | enumerate | where {|e| $e.item =~ "ConfigMap/pronto-release" } | get index | first) < (calls $w | enumerate | where {|e| $e.item =~ "^patch configmap pronto-release" } | get index | first)) "after the release's record"
+	assert ((calls $w | enumerate | where {|e| $e.item =~ "ConfigMap/pronto-release" } | get index | first) < (calls $w | enumerate | where {|e| $e.item =~ "^patch configmap pronto-release.*pruned" } | get index | first)) "after the release's record"
 	# a prune that worked
 	rm -f ($w.state | path join calls.jsonl)
 	let ok = (in-world $w -c $"use ($engine_dir | path join release.nu) [record-prune]; record-prune {namespace: aprende} null")
