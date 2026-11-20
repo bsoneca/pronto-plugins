@@ -99,7 +99,8 @@ export function outsideKeys(files: string[], hash: (f: string) => string, reads:
 // (bsoneca/pronto#1555). Only a sibling app's files (`../<app>/…`), and none without a pattern.
 export function declaredKeys(entries: [string, string][], reads: string[] = []): string[] {
   if (!reads.length) return [];
-  return entries.filter(([f]) => /^\.\.\/[^/.][^/]*\/./.test(f) && reads.some((r) => new RegExp(r).test(f)))
+  const res = reads.map((r) => new RegExp(r));
+  return entries.filter(([f]) => /^\.\.\/[^/.][^/]*\/./.test(f) && res.some((r) => r.test(f)))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([f, h]) => `declared ${f} ${h}`);
 }
 
@@ -109,12 +110,14 @@ function siblingFiles(root: string): [string, string][] | null {
   const top = git(root, "rev-parse", "--show-toplevel")?.trim();
   if (!top) return null;
   const parent = relative(Deno.realPathSync(top), dirname(Deno.realPathSync(root)));
+  // An app at the repository's top has no siblings in it.
+  if (parent.startsWith("..")) return [];
   const out = git(top, "ls-files", "-s", "-z", "--", parent || ".");
   if (out === null) return null;
   const topReal = Deno.realPathSync(top);
   return out.split("\0").filter(Boolean).map((l) => {
-    const [meta, path] = l.split("\t");
-    return [relative(root, join(topReal, path)), meta.split(" ")[1]] as [string, string];
+    const tab = l.indexOf("\t"); // a path may hold a tab itself (-z leaves it unquoted)
+    return [relative(root, join(topReal, l.slice(tab + 1))), l.slice(0, tab).split(" ")[1]] as [string, string];
   }).filter(([f]) => /^\.\.\/[^/.][^/]*\/./.test(f));
 }
 
