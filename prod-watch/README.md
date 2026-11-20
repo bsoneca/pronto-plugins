@@ -108,6 +108,54 @@ release-cron's log holds (`~/.cache/pronto/release-cron/<app>/release-cron.log`,
 characters). A fingerprint whose **last** is after that time and whose revisions are the running ones
 (`--json`'s `node.images` has each container's image) is still there after the release.
 
+### A node's deliberate restart of a unit
+
+When the operator restarts the node's k3s on purpose, every client of the Kubernetes API says so for the
+seconds it is down. An app names the unit in `prod_watch.cue` (`node.restart`, `#Restart` in
+[`schema.cue`](schema.cue)) and holds the rules that are only that to `during: ["restart"]`:
+
+```cue
+prodWatch: node: restart: {
+	unit:  "k3s"                                      // as `journalctl -u` names it
+	stop:  "systemd\\[1\\]: Stopping k3s\\.service"      // JavaScript regular expressions on systemd's own lines
+	start: "systemd\\[1\\]: Started k3s\\.service"
+	crash: "k3s\\.service: (Main process exited|Failed with result|Scheduled restart job)"
+	lead: 5      // seconds before the stop line the window opens
+	tail: 120    // seconds after the start line it closes
+	down: 300    // the longest a stop may stay down
+}
+```
+
+Each pass reads, over the node's ssh and read-only, `sudo -n journalctl -u <unit> _PID=1` (the unit's lines of
+systemd itself) and `systemctl show <unit> -p LoadState -p ActiveEnterTimestamp -p NRestarts` (journal lines as `-o short-iso-precise`; a unit whose `LoadState` is not `loaded` stops the run). A window is
+`[stop - lead, start + tail]` for a stop line followed within `down` seconds by a start (a journal line or the
+ActiveEnterTimestamp). It is **no window**, and the same entries alert, when:
+
+- a crash line is in it, or `NRestarts` rose since the last pass (`k3s.json` in the state folder), or is unread. The
+  guard is for a crash systemd restarted that the `crash` pattern misses: any rise since the last pass drops all of
+  this pass's windows;
+- its end (`start + tail`) is past what the journal read reached: an incomplete window may hold a crash not read yet;
+- the entry is not the node's. The window applies only to entries read from the node (VictoriaLogs), never to
+  a Cloud Run service the app also watches.
+
+The journal is read from `from - (tail + down + lead)` to `min(now, to + lead + down + tail)` for a report over
+`[from, to]` (`restartRange` in `watch.js`), so every stop whose window can touch an entry, and the crash
+evidence across that window, is read. A `journalctl` or `systemctl show` that fails stops the run with its
+stderr before the ledger, the cursor or `k3s.json` is written, so the next pass reads the window again.
+
+A restart that is **not finished** at the cutoff (a stop with no start yet but within `down` of it, or a start
+whose `start + tail` is past it) is held, not judged (`restartPending` in `watch.js`): the pass leaves the
+node's entries from `stop - lead` on out of its report and its counts, commits its cursor no later than that point
+and keeps their hashes out of `seen`, so the next pass reads them again with the window complete (or none).
+`--since` reports leave them out too.
+
+The cutoff is the Mac's own now, floored to the whole second, used as the journal's `--until` and as the windows'
+`until`; the node's clock is not read. A node clock that runs behind or ahead of the Mac's can place a window
+or a crash line off by the skew: a known limit.
+
+`during` takes every phase that applies: an entry can be in its pod's `start` or `shutdown` window and in a
+`restart` window at once, and a rule held to `["restart"]` still meets it.
+
 ## Noise is a design fact
 
 A noise rule says, in CUE, a line that is not a bug and why; a case proves it on the line it was
@@ -116,8 +164,8 @@ The rules every app shares, for what pronto's release runs beside every app (Ele
 proxy, the Managed Prometheus collector), come with [`schema.cue`](schema.cue) in `prodWatch.noise`;
 an app's own go beside them in its `prod_watch.cue`.
 
-A rule may be held to an instance's **start** or **shutdown** window (`during`), as `prodWatch.lifecycle`
-defines them: a container calling PostgREST before it listens, or after it stopped on SIGTERM, is how
+A rule may be held to an instance's **start** or **shutdown** window, or to the node's deliberate **restart**
+(`during`; the last above), as `prodWatch.lifecycle` defines the first two: a container calling PostgREST before it listens, or after it stopped on SIGTERM, is how
 an instance starts and stops; the same line an hour into its life is a bug.
 
 A fingerprint judged noise one at a time, with no rule (a one-off), is marked in the ledger with its reason.
