@@ -366,12 +366,14 @@ export function phasesOf(entry, windows, lifecycle) {
     return times.some((t) => at >= Date.parse(t) - 2000 && at - Date.parse(t) <= within);
   }).map(([phase]) => phase);
 }
-// A time (ISO, Z) as whole seconds and its fraction padded to nanoseconds, so sources of any precision compare exactly.
+// A time, only as the sources write it (RFC 3339 in UTC, `Z`, any fraction), as whole seconds and its fraction padded to
+// nanoseconds, so sources of any precision compare exactly. Any other form (an offset, no zone, garbage) throws: comparing it
+// another way could order one instant two ways at the cursor.
 const instant = (s) => {
-  const m = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z$/.exec(s);
-  const t = m ? Date.parse(`${m[1]}Z`) : Date.parse(s);
-  if (Number.isNaN(t)) throw new Error(`an unparseable timestamp ${JSON.stringify(s)}: the ledger and the cursor are where they were; every run stops here until the entry is fixed or cursor.json's at is moved past it`);
-  return [t, m ? (m[2] ?? "").padEnd(9, "0") : "000000000"];
+  const m = typeof s === "string" ? /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z$/.exec(s) : null;
+  const t = m ? Date.parse(`${m[1]}Z`) : NaN;
+  if (Number.isNaN(t)) throw new Error(`an unparseable timestamp ${JSON.stringify(s)} (only RFC 3339 in UTC, Z): the ledger and the cursor are where they were; every run stops here until the entry is fixed or cursor.json's at is moved past it`);
+  return [t, (m[2] ?? "").padEnd(9, "0")];
 };
 // Whether time a is strictly after time b, to the nanosecond.
 export const timeAfter = (a, b) => { const [x, fx] = instant(a), [y, fy] = instant(b); return x !== y ? x > y : fx > fy; };

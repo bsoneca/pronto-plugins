@@ -103,6 +103,13 @@ cases: {
 		{call: "watch.settleRun", args: [{entries: [((_n & {ts: "2026-11-19T19:05:00.000Z"}).out & {insertId: "a"}), ((_n & {ts: "2026-11-19T19:05:00.000Z"}).out & {insertId: "b"}), ((_n & {ts: "2026-11-19T19:05:00.000Z"}).out & {insertId: "a"})], hashes: ["h1", "h2", "h1"], counted: ["h1"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {entries: [((_n & {ts: "2026-11-19T19:05:00.000Z"}).out & {insertId: "b"}), ((_n & {ts: "2026-11-19T19:05:00.000Z"}).out & {insertId: "a"})], seen: ["h1", "h2", "h1"]}, why: "the first a is the saved one; b and the second a count, in order"},
 		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:05:00.000Z"}).out], hashes: ["h1"], counted: ["h1", "h1", "h1"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {entries: [], seen: ["h1"]}, why: "more saved than read counts nothing, and seen holds only what this run read"},
 		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05Z", "not a time"], throws: "an unparseable timestamp"},
+		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.123+00:00", "2026-11-19T19:00:05.123Z"], throws: "an unparseable timestamp", why: "an offset form of the same instant could order differently at the cursor: only Z is read"},
+		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05", "2026-11-19T19:00:04Z"], throws: "only RFC 3339 in UTC", why: "no zone is no instant"},
+		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.1Z", "2026-11-19T19:00:05.099999999Z"], expect: true, why: "Z at every precision still compares"},
+		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.100000Z", "2026-11-19T19:00:05.1Z"], expect: false, why: "the same instant at two precisions is not after"},
+		{call: "watch.timeAfter", args: ["2026-11-19T19:00:06Z", "2026-11-19T19:00:05.999Z"], expect: true},
+		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.1234567890Z", "2026-11-19T19:00:05Z"], throws: "only RFC 3339 in UTC", why: "past nanoseconds is no source's time, and as text it would order wrong"},
+		{call: "watch.settleRun", args: [{entries: [], hashes: [], reached: "2026-11-19T19:10:00.000+00:00", to: "2026-11-19T19:10:00.000Z", lag: 300000}], throws: "only RFC 3339 in UTC", why: "where the cursor is decided, an offset form fails before any state"},
 	]}
 	"an entry in its pod's start and shutdown windows at once meets a rule held to shutdown": {suite: "noise", steps: [
 		{value: [
