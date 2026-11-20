@@ -1,6 +1,31 @@
 // The harness's flake filing (harness/files/tests/scenarios/flakes.ts) on a fake board: one that
 // refuses, one that is missing, one that files. Each call is one filing into a fresh marks folder.
 import { fileFlake } from "../../harness/files/tests/scenarios/flakes.ts";
+import { lockArgs } from "../../harness/files/tests/unit/select.js";
+
+// The unit runner's lock flags (UNIT_LOCK, PRONTO-973), and what deno does with them: `deno info` on a module importing one
+// served here on 127.0.0.1 (no registry, a fresh DENO_DIR), against a lock that names nothing, with the flags lockArgs
+// gives, and without any.
+export const lockFlags = (lock) => lockArgs(lock);
+export async function lockHonoured() {
+  const ac = new AbortController();
+  const server = Deno.serve({ hostname: "127.0.0.1", port: 0, signal: ac.signal, onListen() {} }, () => new Response("export const x = 1;\n", { headers: { "content-type": "application/typescript" } }));
+  const served = `http://127.0.0.1:${server.addr.port}/x.ts`;
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(`${dir}/m.ts`, `import "${served}";\n`);
+    await Deno.writeTextFile(`${dir}/deno.lock`, '{"version":"5"}\n');
+    const info = (args) => new Deno.Command(Deno.execPath(), { args: ["info", "--no-config", "--allow-import=127.0.0.1", ...args, `${dir}/m.ts`], env: { DENO_DIR: `${dir}/cache` }, stdout: "piped", stderr: "piped" }).output();
+    const frozen = await info(lockArgs(`${dir}/deno.lock`));
+    const free = await info(lockArgs(undefined));
+    const text = (b) => new TextDecoder().decode(b);
+    return { frozen: frozen.success, said: text(frozen.stderr), free: free.success && text(free.stdout).includes(served) };
+  } finally {
+    ac.abort();
+    await server.finished;
+    await Deno.remove(dir, { recursive: true });
+  }
+}
 // The scenario selector's rule for files outside the app (select.ts), called by the cases as harness.outsideConcerns.
 import { outsideConcerns, outsideKeys as keys } from "../../harness/files/tests/scenarios/select.ts";
 export { outsideConcerns };

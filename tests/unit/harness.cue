@@ -55,6 +55,28 @@ cases: "a filed flake whose marker cannot be written is thrown (the runner throw
 	]
 }
 
+// The unit runner's lock (UNIT_LOCK, PRONTO-973): unset, its runs take no lock flag, so nothing changes; set, deno runs frozen to it.
+cases: "a suite with no UNIT_LOCK runs with no lock flag": {
+	suite: "harness"
+	steps: [
+		{call: "harness.lockFlags", args: [null], expect: [], why: "deno's own lookup, as before UNIT_LOCK"},
+		{call: "harness.lockFlags", args: [""], expect: []},
+	]
+}
+cases: "a suite held to a lock runs frozen to it, and a module the lock lacks fails": {
+	suite: "harness"
+	steps: [
+		{call: "harness.lockFlags", args: ["/app/builder/deno.lock"], expect: ["--lock=/app/builder/deno.lock", "--frozen"]},
+		{call: "harness.lockHonoured"},
+		{keep: "r"},
+		{get: "frozen", expect: false, why: "the lock names nothing, so frozen deno refuses the import"},
+		{use: "r"},
+		{get: "said", matches: "lockfile is out of date"},
+		{use: "r"},
+		{get: "free", expect: true, why: "the same module with no lock flag resolves, and its import is in deno info's graph"},
+	]
+}
+
 // Which files outside the app concern a scenario (harness/files/tests/scenarios/select.ts, PRONTO-870): the
 // paths are relative to the app, as the selector sees them. null: none; a string: why it does (fail open).
 cases: "a file of a sibling app concerns no scenario, and any other file above the app still concerns every one": {
