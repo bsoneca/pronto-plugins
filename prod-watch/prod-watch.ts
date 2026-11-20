@@ -9,7 +9,7 @@
 //   deno run -A prod-watch/prod-watch.ts <app> mark <fp> open|watching|noise|fixed [--reason why] [--pr N]
 // `cue` from PATH or $CUE. The state (cursor.json, ledger.json) is <the repository's root>/.omc/prod-watch/<app>/,
 // runtime state no commit carries.
-import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, completeWindows, k3sNext, restartPending, restartRange, restartWindows, settleRun, timeAfter, triage, unitOf } from "./watch.js";
+import { brt, group, k3sState, leadHold, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, completeWindows, k3sNext, restartPending, restartRange, restartWindows, settleRun, timeAfter, triage, unitOf } from "./watch.js";
 
 // The app's folder: the one this script was written into (prod-watch/ is beside its files).
 const appDir = Deno.realPathSync(new URL("../", import.meta.url).pathname);
@@ -153,6 +153,8 @@ let restartCandidates: { from: string; to: string }[] = [];
 let restartWas: number | null = null;
 let restartNow: number | null = null;
 let restartVoided: { from: string; to: string }[] = [];
+let restartUntil = 0;
+let restartLead = 0;
 if (node?.restart) {
   const r = node.restart;
   const day = (iso: string) => iso.slice(0, 19).replace("T", " ") + " UTC";
@@ -164,14 +166,17 @@ if (node?.restart) {
   if (!j.ok || !u.ok) throw new Error(`the node's ${r.unit} restarts were not read (${(j.err || u.err).trim().slice(0, 300) || "no message"}): the ledger and the cursor are where they were`);
   const unit = unitOf(u.out);
   if (unit.loadState !== "loaded") throw new Error(`the node's ${r.unit} is not loaded (LoadState ${unit.loadState ?? "unread"}): the ledger and the cursor are where they were`);
-  const k3s = read("k3s.json", {});
-  const was = k3s.nRestarts ?? null;
+  // A k3s.json that is no object, or whose voided is there and is no list of intervals, stops the run before triage or any write.
+  const saved = (() => { try { return k3sState(read("k3s.json", {})); } catch (e) { throw new Error(`${state}/k3s.json is malformed, mend or remove it: ${(e as Error).message}`); } })();
+  const was = saved.nRestarts;
   // The intervals an earlier rise of NRestarts rejected stay rejected until the cursor passes them; k3sNext decides what is written back (the old counter while a restart is held).
-  restartVoided = Array.isArray(k3s.voided) ? k3s.voided : [];
+  restartVoided = saved.voided;
   restartWas = was;
   restartNow = unit.nRestarts;
   restartWins = restartWindows({ journal: j.out, activeEnter: unit.activeEnter, restarts: { was, now: unit.nRestarts }, until: range.until, voided: restartVoided }, r);
   restartCandidates = completeWindows({ journal: j.out, activeEnter: unit.activeEnter, until: range.until }, r);
+  restartUntil = Date.parse(range.until);
+  restartLead = r.lead;
   restartHold = restartPending({ journal: j.out, activeEnter: unit.activeEnter, until: range.until }, r);
 }
 const sources: { release?: { at: string; short: string; sha: string } | null; images: Record<string, string>; pods: number } = { images: {}, pods: 0 };
@@ -236,9 +241,14 @@ for (const e of entries) hashes.push(await hashOf(e));
 // A cursor run holds back a restart not finished at the cutoff (restartPending): the node's entries from its start
 // are not triaged nor counted, and the cursor stops there, so the next run reads them again with the window
 // complete. A `--since` run holds nothing back. What the run counts, commits and keeps in `seen` is settleRun's.
-const settled = settleRun({ entries, hashes, hold: restartHold, since: !!since, counted: cursor?.seen ?? [], reached, to, lag });
+// And one more, a lead before the cutoff: a stop line may reach the journal after this run read it, and its window
+// reaches that far back, so the node's entries from there are left to the next run too (leadHold).
+const holdBack = node?.restart && !since ? leadHold({ hold: restartHold, until: restartUntil, lead: restartLead }) : restartHold;
+// Every entry the run read: the instances' windows are built from them, whether or not an earlier run counted them.
+const everyRead = entries;
+const settled = settleRun({ entries, hashes, hold: holdBack, since: !!since, counted: cursor?.seen ?? [], reached, to, lag });
 entries = settled.entries;
-const { report, ledger: next } = triage(group(entries, rules, lifecycle, restartWins), ledger, reached);
+const { report, ledger: next } = triage(group(entries, rules, lifecycle, restartWins, everyRead), ledger, reached);
 const where = [
   ...(services.length ? [`services ${services.join(", ")} (${project})`] : []),
   ...(node ? [`node ${node.namespace} on ${node.host} (${sources.pods} pods)`] : []),
@@ -251,6 +261,6 @@ if (!since) {
   write("ledger.json", next);
   // The overlap is read again, so what it holds is what the next run must not count again.
   write("cursor.json", { at: settled.committed, seen: settled.seen });
-  const k3sState = k3sNext({ was: restartWas, now: restartNow, hold: restartHold, voided: restartVoided, candidates: restartCandidates, committed: settled.committed });
-  if (k3sState !== null) write("k3s.json", k3sState);
+  const k3sOut = k3sNext({ was: restartWas, now: restartNow, hold: restartHold, voided: restartVoided, candidates: restartCandidates, committed: settled.committed });
+  if (k3sOut !== null) write("k3s.json", k3sOut);
 }

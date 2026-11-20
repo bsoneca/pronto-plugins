@@ -405,14 +405,37 @@ const overlaps = (w, intervals) => (intervals ?? []).some((v) => Date.parse(w.fr
 // equal counters, so without them it would accept a window whose entries this run did not read (a row limit cut the
 // read, or a late line reached the overlap) as deliberate. One is dropped once the cursor (`committed`, the time the
 // next run reads from, which already lies the lag behind) is past its end: nothing of it is read again.
-// `restarts` is {was, now}; a k3s.json written before has no `voided`, which is none.
+// `restarts` is {was, now}; a k3s.json written before has no `voided`, which is none. One that is there and is no list of
+// {from, to} that parse is an error (checkVoided): reading it as none would accept a window it rejected.
+const checkVoided = (voided) => {
+  if (!Array.isArray(voided) || voided.some((v) => !v || typeof v !== "object" || typeof v.from !== "string" || typeof v.to !== "string" || Number.isNaN(Date.parse(v.from)) || Number.isNaN(Date.parse(v.to)))) {
+    throw new Error(`k3s.json's voided is not a list of {from, to} times: ${JSON.stringify(voided)?.slice(0, 200)}`);
+  }
+  return voided;
+};
+// What k3s.json holds, checked: {nRestarts, voided}. Only a missing `voided` is none; one that is there must be a
+// list of {from, to} that parse, or the run fails (the driver calls it before it reads anything else).
+/** @param {any} json */
+export function k3sState(json) {
+  if (!json || typeof json !== "object" || Array.isArray(json)) throw new Error(`k3s.json is no object: ${JSON.stringify(json)?.slice(0, 200)}`);
+  return { nRestarts: json.nRestarts ?? null, voided: "voided" in json ? checkVoided(json.voided) : [] };
+}
+// The hold a cursor run keeps for what a restart not yet logged can still reach: a stop line may reach the journal
+// after the run's cutoff, and its lead (seconds) reaches back before it, so the node's entries from `until` - lead
+// are left to the next run too. Merged with restartPending's hold: the earlier of the two.
+/** @param {{hold?: {from: string} | null, until: string | number, lead: number}} input */
+export function leadHold({ hold = null, until, lead }) {
+  const at = (typeof until === "number" ? until : Date.parse(until)) - lead * 1000;
+  return hold && Date.parse(hold.from) <= at ? hold : { from: new Date(at).toISOString() };
+}
 /** @param {{voided?: {from: string, to: string}[], windows?: {from: string, to: string}[], restarts?: {was: number | null, now: number | null} | null, committed: string}} input */
 export function restartVoids({ voided = [], windows = [], restarts = null, committed }) {
+  checkVoided(voided);
   const rose = !!restarts && restarts.was != null && restarts.now != null && restarts.now > restarts.was;
   const passed = Date.parse(committed);
   const seen = new Set();
-  return [...(Array.isArray(voided) ? voided : []), ...(rose ? windows : [])].filter((v) => {
-    if (Number.isNaN(Date.parse(v?.from)) || Number.isNaN(Date.parse(v?.to)) || Date.parse(v.to) < passed) return false;
+  return [...voided, ...(rose ? windows : [])].filter((v) => {
+    if (Date.parse(v.to) < passed) return false;
     const key = `${v.from}|${v.to}`;
     return seen.has(key) ? false : (seen.add(key), true);
   });
@@ -430,9 +453,11 @@ export function k3sNext({ was = null, now = null, hold = null, voided = [], cand
 // What NRestarts the next run compares with: this run's, unless a restart is pending (restartPending): the run
 // that meets a rise while it holds its entries back must leave the old counter, or the next run, which reads
 // those entries again, would find no rise and judge the window deliberate. A reset (systemd zeroes NRestarts on a
-// deliberate restart) lowers it: keeping the old, higher counter would hide a later crash. Null: nothing to write.
+// deliberate restart) lowers it: keeping the old, higher counter would hide a later crash. With no old counter the
+// first readable one is saved, or the next run, which finds the same restart, would have none to compare with. Null:
+// nothing to write.
 /** @param {{was?: number | null, now?: number | null, hold?: {from: string} | null}} input */
-export const restartBaseline = ({ was = null, now = null, hold = null }) => (hold ? (was != null && now != null ? Math.min(was, now) : was) : now);
+export const restartBaseline = ({ was = null, now = null, hold = null }) => (hold ? (was != null && now != null ? Math.min(was, now) : was ?? now) : now);
 // A time (ISO, Z) as whole seconds and its fraction padded to nanoseconds, so sources of any precision compare exactly.
 const instant = (s) => {
   const m = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z$/.exec(s);
@@ -473,14 +498,20 @@ export const hashInput = (entry) => JSON.stringify({ ...entry, source: undefined
 // trimmed to milliseconds), and each stop paired with its start: the first start line after it, and only when no
 // start line follows, the ActiveEnterTimestamp (whole seconds: next to a precise line it would end a window early),
 // and only for the last stop: it says when the unit last became active, so an earlier stop has no start of its own
-// beyond the journal's. It is compared with the stop's whole second, as the stop line is finer than it.
+// beyond the journal's. It pairs only when it is strictly after the stop (in ms): within the stop's own second it may
+// be an earlier activation, and no window is better than a false one. A line that matches a pattern and has no
+// time that parses is an error, not a line to skip: the evidence of a crash may be in it.
 function journalTimes(journal, activeEnter, cfg) {
-  const times = (re) => journal.split("\n").filter((l) => new RegExp(re).test(l)).map((l) => Date.parse(l.split(" ")[0].replace(/(\.\d{3})\d+/, "$1"))).filter((t) => !Number.isNaN(t));
+  const times = (re) => journal.split("\n").filter((l) => new RegExp(re).test(l)).map((l) => {
+    const t = Date.parse(l.split(" ")[0].replace(/(\.\d{3})\d+/, "$1"));
+    if (Number.isNaN(t)) throw new Error(`a journal line has no time that parses: ${l.slice(0, 200)}`);
+    return t;
+  });
   const starts = times(cfg.start).sort((a, b) => a - b);
   const enter = activeEnter ? Date.parse(activeEnter) : NaN;
   const stops = times(cfg.stop);
   const last = Math.max(...stops);
-  const pairs = stops.map((stop) => ({ stop, start: starts.find((t) => t >= stop) ?? (stop === last && enter >= Math.floor(stop / 1000) * 1000 ? enter : undefined) }));
+  const pairs = stops.map((stop) => ({ stop, start: starts.find((t) => t >= stop) ?? (stop === last && enter > stop ? enter : undefined) }));
   return { stops: pairs.map((p) => p.stop), crashes: times(cfg.crash), pairs };
 }
 // A restart not finished at the cutoff: a stop with no start yet but still within `down` of the cutoff (the start
@@ -553,10 +584,12 @@ export function noiseOf(entry, rules, phases = []) {
 // makes two): how many, when first and last, on which revisions, and
 // up to three redacted samples, the first, the last and one between.
 // `restart` are the node's deliberate-restart windows (restartWindows); they apply to the entries read from the
-// node (`source: "node"`), never to a Cloud Run service's.
-export function group(entries, rules, lifecycle = {}, restart = []) {
+// node (`source: "node"`), never to a Cloud Run service's. The instances' windows are built from `context`, every
+// entry the run read, not only `entries`, those to count: a shutdown marker counted by an earlier run is not in
+// them, and the line it explains may be.
+export function group(entries, rules, lifecycle = {}, restart = [], context = entries) {
   const groups = {};
-  const windows = windowsOf(entries, lifecycle);
+  const windows = windowsOf(context, lifecycle);
   for (const e of stitch(entries)) {
     if (isMarker(e, lifecycle)) continue;
     const phases = [...phasesOf(e, windows, lifecycle), ...(e.source === "node" && inRestart(e, restart) ? ["restart"] : [])];

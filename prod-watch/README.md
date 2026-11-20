@@ -135,18 +135,22 @@ systemd itself) and `systemctl show <unit> -p LoadState -p ActiveEnterTimestamp 
 `[stop - lead, start + tail]` for a stop line followed within `down` seconds by a start: the first start line of
 the journal after the stop, and only when none follows it the ActiveEnterTimestamp of the **last** stop (whole
 seconds, so beside a precise line it would end the tail early; an earlier stop with no start line gets no window, and
-the timestamp is compared with the stop's whole second). It is **no window**, and the same entries alert, when:
+the timestamp pairs only when it is **strictly after** the stop, to the millisecond: one within the stop's own second
+may be an earlier activation). A journal line that matches the stop, start or crash pattern and whose time does not
+parse **fails the run** before triage or any write. It is **no window**, and the same entries alert, when:
 
 - a crash line is in it, or `NRestarts` rose since the last pass (`k3s.json` in the state folder), or is unread. The
   guard is for a crash systemd restarted that the `crash` pattern misses: any rise since the last pass drops all of
   this pass's windows. While a restart is held (below) `k3s.json` keeps the old counter, so the pass that reads the
-  held entries again still sees the rise (`restartBaseline`);
+  held entries again still sees the rise (`restartBaseline`); with no counter saved yet, the held pass saves the
+  first one it reads;
 - it overlaps an interval a rise voided. A pass that sees `NRestarts` rise keeps the windows it rejected in `k3s.json`
   (`{"nRestarts": n, "voided": [{"from", "to"}]}`, `restartVoids`), because the next pass compares equal counters and
   would accept them when its log read was cut by a row limit or the overlap gets late lines. A pass rejects every
   window overlapping a voided interval and drops one once the cursor it commits is past its end. A `k3s.json` of
-  `{"nRestarts": n}` alone has none, as has one whose `voided` is no list; duplicates collapse and an entry whose times
-  do not parse is dropped (`k3sNext` decides what a pass writes);
+  `{"nRestarts": n}` alone has none; a `voided` that is there and is not a list of `{from, to}` that parse (or a
+  `k3s.json` that is no object) **fails the run** before triage or any write (`k3sState`), and duplicates collapse
+  (`k3sNext` decides what a pass writes);
 - its end (`start + tail`) is past what the journal read reached: an incomplete window may hold a crash not read yet;
 - the entry is not the node's. The window applies only to entries read from the node (VictoriaLogs), never to
   a Cloud Run service the app also watches.
@@ -161,13 +165,20 @@ whose `start + tail` is past it) is held, not judged (`restartPending` in `watch
 node's entries from `stop - lead` on out of its report and its counts, commits its cursor no later than that point
 and keeps their hashes out of `seen` (those an earlier pass already counted stay in it), so the next pass reads them
 again with the window complete (or none). The hold applies to cursor runs alone: a `--since` report holds nothing
-back, and shows the node's entries as they are, a window only if complete. The cursor is the source's own boundary,
+back, and shows the node's entries as they are, a window only if complete. A cursor run also holds the node's entries
+from the cutoff minus `lead` (`leadHold`, merged with that hold: the earlier of the two), when `node.restart` is
+set: a stop line may reach the journal after the pass read it, and its window reaches back `lead` before it. The
+cursor is the source's own boundary,
 verbatim, when a read limit cut the pass short; only the lag or a hold gives an earlier one, in milliseconds
 (`settleRun`).
 
 The cutoff is the Mac's own now, floored to the whole second, used as the journal's `--until` and as the windows'
 `until`; the node's clock is not read. A node clock that runs behind or ahead of the Mac's can place a window
 or a crash line off by the skew: a known limit.
+
+The start and shutdown windows of a pod are built from every entry a pass read, the ones an earlier pass counted too
+(`group`'s `context`), and only the new entries are classified and counted: a SIGTERM marker seen last pass still
+opens the window of a late line this pass.
 
 `during` takes every phase that applies: an entry can be in its pod's `start` and `shutdown` windows (a pod stopped as
 it starts) and in a `restart` window at once, and a rule held to any one of them meets it (`phasesOf`).

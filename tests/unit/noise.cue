@@ -206,10 +206,20 @@ cases: {
 		{call: "watch.restartVoids", args: [{windows: "$rejected", restarts: {was: null, now: 6}, committed: "2026-11-19T19:01:00.000Z"}], expect: [], why: "no baseline is no rise"},
 		{call: "watch.restartWindows", args: [{journal: _journal.twice, activeEnter: null, restarts: {was: 0, now: 0}, until: "2026-11-19T20:00:00Z", voided: [_window]}, _restart], expect: [{from: "2026-11-19T19:29:55.000Z", to: "2026-11-19T19:32:10.000Z"}], why: "a void rejects only the windows it overlaps"},
 	]}
-	"voids are deduped, malformed ones dropped, a non-array reads as none": {suite: "noise", steps: [
+	"voids are deduped; a malformed one, or a voided that is no list, fails": {suite: "noise", steps: [
 		{call: "watch.restartVoids", args: [{voided: [_window, _window], windows: [_window], restarts: {was: 5, now: 6}, committed: "2026-11-19T19:01:00.000Z"}], expect: [_window], why: "the kept and the new one are the same interval: one entry"},
-		{call: "watch.restartVoids", args: [{voided: [{from: "nope", to: "2026-11-19T19:02:09.000Z"}, {from: "2026-11-19T18:59:49.000Z"}, {}, null, _window], committed: "2026-11-19T19:01:00.000Z"}], expect: [_window], why: "an entry whose from or to does not parse is dropped"},
-		{call: "watch.restartVoids", args: [{voided: {from: "2026-11-19T18:59:49.000Z", to: "2026-11-19T19:02:09.000Z"}, committed: "2026-11-19T19:01:00.000Z"}], expect: [], why: "a voided that is no array is none"},
+		{call: "watch.restartVoids", args: [{voided: [{from: "nope", to: "2026-11-19T19:02:09.000Z"}, _window], committed: "2026-11-19T19:01:00.000Z"}], throws: "not a list of", why: "an entry whose from does not parse"},
+		{call: "watch.restartVoids", args: [{voided: [{from: "2026-11-19T18:59:49.000Z"}], committed: "2026-11-19T19:01:00.000Z"}], throws: "not a list of", why: "an entry with no to"},
+		{call: "watch.restartVoids", args: [{voided: [null, _window], committed: "2026-11-19T19:01:00.000Z"}], throws: "not a list of"},
+		{call: "watch.restartVoids", args: [{voided: {from: "2026-11-19T18:59:49.000Z", to: "2026-11-19T19:02:09.000Z"}, committed: "2026-11-19T19:01:00.000Z"}], throws: "not a list of", why: "a voided that is no array"},
+		{call: "watch.restartVoids", args: [{voided: null, committed: "2026-11-19T19:01:00.000Z"}], throws: "not a list of", why: "present as null is not absent"},
+		{call: "watch.k3sState", args: [{nRestarts: 4}], expect: {nRestarts: 4, voided: []}, why: "only an absent voided is none"},
+		{call: "watch.k3sState", args: [{nRestarts: 4, voided: [_window]}], expect: {nRestarts: 4, voided: [_window]}},
+		{call: "watch.k3sState", args: [{}], expect: {nRestarts: null, voided: []}},
+		{call: "watch.k3sState", args: [{nRestarts: 4, voided: "garbage"}], throws: "not a list of"},
+		{call: "watch.k3sState", args: [{nRestarts: 4, voided: [{from: "x", to: "y"}]}], throws: "not a list of"},
+		{call: "watch.k3sState", args: [{nRestarts: 4, voided: null}], throws: "not a list of"},
+		{call: "watch.k3sState", args: [[]], throws: "no object"},
 		{call: "watch.restartVoids", args: [{voided: [_window], committed: "2026-11-19T19:02:09.000Z"}], expect: [_window], why: "an interval ending at the cursor is kept: only one the cursor is past is dropped"},
 	]}
 	"k3s.json's next state is a pure decision of the run": {suite: "noise", steps: [
@@ -218,14 +228,15 @@ cases: {
 		{call: "watch.k3sNext", args: [{was: 6, now: 6, hold: null, voided: [_window], candidates: [], committed: "2026-11-19T19:02:10.000Z"}], expect: {nRestarts: 6}, why: "no rise and every void passed: the counter alone"},
 		{call: "watch.k3sNext", args: [{was: 6, now: 6, hold: null, voided: [_window], candidates: [], committed: "2026-11-19T19:02:09.000Z"}], expect: {nRestarts: 6, voided: [_window]}, why: "a void ending at the cursor is kept"},
 		{call: "watch.k3sNext", args: [{was: 5, now: 6, hold: null, voided: [_window], candidates: [_window], committed: "2026-11-19T19:01:00.000Z"}], expect: {nRestarts: 6, voided: [_window]}, why: "duplicates collapse"},
-		{call: "watch.k3sNext", args: [{was: 6, now: 6, hold: null, voided: [{from: "x", to: "y"}, {from: "2026-11-19T18:59:49.000Z"}], candidates: [], committed: "2026-11-19T19:01:00.000Z"}], expect: {nRestarts: 6}, why: "malformed entries are dropped"},
-		{call: "watch.k3sNext", args: [{was: 6, now: 7, hold: null, voided: "garbage", candidates: [_window], committed: "2026-11-19T19:01:00.000Z"}], expect: {nRestarts: 7, voided: [_window]}, why: "a voided that is no array reads as none"},
+		{call: "watch.k3sNext", args: [{was: 6, now: 6, hold: null, voided: [{from: "x", to: "y"}, {from: "2026-11-19T18:59:49.000Z"}], candidates: [], committed: "2026-11-19T19:01:00.000Z"}], throws: "not a list of", why: "malformed entries fail"},
+		{call: "watch.k3sNext", args: [{was: 6, now: 7, hold: null, voided: "garbage", candidates: [_window], committed: "2026-11-19T19:01:00.000Z"}], throws: "not a list of", why: "a voided that is no array fails"},
 		{call: "watch.k3sNext", args: [{was: null, now: null, hold: null, voided: [], candidates: [], committed: "2026-11-19T19:01:00.000Z"}], expect: null, why: "nothing to write"},
 		{call: "watch.k3sNext", args: [{was: null, now: 0, hold: null, voided: [], candidates: [], committed: "2026-11-19T19:01:00.000Z"}], expect: {nRestarts: 0}, why: "a first run writes the counter"},
 	]}
-	"ActiveEnterTimestamp pairs with the last stop only, compared with the stop's whole second": {suite: "noise", steps: [
+	"ActiveEnterTimestamp pairs with the last stop only, and only when strictly after it": {suite: "noise", steps: [
 		{call: "watch.completeWindows", args: [{journal: _journal.stopsOnly, activeEnter: "2026-11-19T19:30:10Z", until: "2026-11-19T20:00:00Z"}, _restart], expect: [{from: "2026-11-19T19:29:55.000Z", to: "2026-11-19T19:32:10.000Z"}], why: "the earlier stop has no start line and is not the last: no window"},
-		{call: "watch.completeWindows", args: [{journal: _journal.stopFraction, activeEnter: "2026-11-19T19:00:00Z", until: _done}, _restart], expect: [{from: "2026-11-19T18:59:55.500Z", to: "2026-11-19T19:02:00.000Z"}], why: "stopped at 19:00:00.5 and active at the whole second 19:00:00: the unit's seconds are cut, so it pairs"},
+		{call: "watch.completeWindows", args: [{journal: _journal.stopFraction, activeEnter: "2026-11-19T19:00:00Z", until: _done}, _restart], expect: [], why: "stopped at 19:00:00.5 and active at the whole second 19:00:00: that may be an earlier activation, so it does not pair"},
+		{call: "watch.completeWindows", args: [{journal: _journal.stopFraction, activeEnter: "2026-11-19T19:00:01Z", until: _done}, _restart], expect: [{from: "2026-11-19T18:59:55.500Z", to: "2026-11-19T19:02:01.000Z"}], why: "active the next second: strictly after the stop, so it pairs"},
 		{call: "watch.completeWindows", args: [{journal: _journal.stopOnly, activeEnter: "2026-11-19T18:59:53Z", until: _done}, _restart], expect: [], why: "an ActiveEnterTimestamp before the stop's second is an earlier start"},
 	]}
 	"a restart not finished at the cutoff holds the cursor at its stop minus lead": {suite: "noise", steps: [
@@ -278,7 +289,17 @@ cases: {
 		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: "$baseline", now: 6}, until: _done}, _restart], expect: [], why: "run 2: the window is complete, and the rise is still a rise: its entries alert"},
 		{call: "watch.restartBaseline", args: [{was: 5, now: 6, hold: null}], expect: 6, why: "with nothing held the counter moves on"},
 		{call: "watch.restartBaseline", args: [{was: 5, now: 0, hold: {from: "2026-11-19T18:59:49.000Z"}}], expect: 0, why: "a reset lowers it: a later crash making it 1 stays a rise"},
-		{call: "watch.restartBaseline", args: [{was: null, now: 6, hold: {from: "2026-11-19T18:59:49.000Z"}}], expect: null, why: "no earlier counter: none is written"},
+		{call: "watch.restartBaseline", args: [{was: null, now: 6, hold: {from: "2026-11-19T18:59:49.000Z"}}], expect: 6, why: "no earlier counter: the first readable one is saved"},
+		{call: "watch.restartBaseline", args: [{was: null, now: null, hold: {from: "2026-11-19T18:59:49.000Z"}}], expect: null, why: "none readable: none is written"},
+	]}
+	"a first run that holds a restart saves the counter it read, so the run that judges the window sees the rise": {suite: "noise", steps: [
+		{call: "watch.k3sNext", args: [{was: null, now: 3, hold: {from: "2026-11-19T18:59:49.000Z"}, voided: [], candidates: [], committed: "2026-11-19T18:59:49.000Z"}], expect: {nRestarts: 3}, why: "run 1: pending, no baseline: 3 is saved"},
+		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 3, now: 4}, until: _done}, _restart], expect: [], why: "run 2: the window is complete and the counter rose: rejected"},
+	]}
+	"a journal line that matches a pattern and has no time that parses fails the run": {suite: "noise", steps: [
+		{call: "watch.restartWindows", args: [{journal: "2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - x\nGARBAGE host systemd[1]: k3s.service: Main process exited, code=exited\n2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - x", activeEnter: null, restarts: {was: 0, now: 0}, until: _done}, _restart], throws: "no time that parses: GARBAGE host"},
+		{call: "watch.restartPending", args: [{journal: "nope host systemd[1]: Stopping k3s.service - x", until: _done}, _restart], throws: "no time that parses"},
+		{call: "watch.restartWindows", args: [{journal: "unrelated line without a time\n" + _journal.deliberate, activeEnter: null, restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [_window], why: "a line no pattern matches is not read"},
 	]}
 	"a --since run holds nothing back and counts what it reads": {suite: "noise", steps: [
 		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T18:59:00.000Z"}).out, (_n & {ts: "2026-11-19T19:00:05.000Z"}).out], hashes: ["h1", "h2"], hold: {from: "2026-11-19T19:00:00.000Z"}, since: true, counted: ["h2"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {entries: [(_n & {ts: "2026-11-19T18:59:00.000Z"}).out, (_n & {ts: "2026-11-19T19:00:05.000Z"}).out]}, why: "the held node entry is reported, windows only if complete (restartWindows)"},
@@ -313,5 +334,31 @@ cases: {
 		]},
 		{call: "watch.group", args: ["$", _rules & {"shutdown-only": {match: "half-stopped", during: ["shutdown"], why: "a case's own rule: said only as the instance stops"}}, _lifecycle]},
 		{call: "probe.verdicts", args: ["$"], expect: [{count: 1, noise: "shutdown-only"}], why: "second 12 is a minute-window start entry and a shutdown-window one: both phases apply"},
+	]}
+
+	// The lead before the cutoff: a stop line may reach the journal after the run read it.
+	"the lead before a run's cutoff is held, and the stop that was not yet logged makes it noise the next run": {suite: "noise", steps: [
+		{call: "watch.leadHold", args: [{hold: null, until: "2026-11-19T19:10:00.000Z", lead: 5}], expect: {from: "2026-11-19T19:09:55.000Z"}, why: "no restart pending: the cutoff - lead"},
+		{keep: "lead"},
+		{call: "watch.leadHold", args: [{hold: {from: "2026-11-19T19:02:00.000Z"}, until: "2026-11-19T19:10:00.000Z", lead: 5}], expect: {from: "2026-11-19T19:02:00.000Z"}, why: "an earlier restart hold stays"},
+		{call: "watch.leadHold", args: [{hold: {from: "2026-11-19T19:09:58.000Z"}, until: "2026-11-19T19:10:00.000Z", lead: 5}], expect: {from: "2026-11-19T19:09:55.000Z"}, why: "a later one gives way to the lead"},
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:09:58.000Z"}).out], hashes: ["h1"], hold: "$lead", reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], expect: {entries: [], committed: "2026-11-19T19:05:00.000Z", seen: []}, why: "run 1: an apiserver line 2 s before the cutoff, no stop yet: held, not counted, not seen"},
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:09:58.000Z"}).out], hashes: ["h1"], hold: "$lead", since: true, reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {entries: [(_n & {ts: "2026-11-19T19:09:58.000Z"}).out]}, why: "a --since run holds nothing (the driver gives it no lead hold)"},
+		{call: "watch.restartWindows", args: [{journal: "2026-11-19T19:09:59.000995+00:00 host systemd[1]: Stopping k3s.service - x\n2026-11-19T19:10:10.000995+00:00 host systemd[1]: Started k3s.service - x", activeEnter: null, restarts: {was: 0, now: 0}, until: "2026-11-19T19:15:00Z"}, _restart], expect: [{from: "2026-11-19T19:09:54.000Z", to: "2026-11-19T19:12:10.000Z"}], why: "run 2: the stop, 1 s after the line"},
+		{keep: "wins"},
+		{call: "watch.group", args: [[(_n & {ts: "2026-11-19T19:09:58.000Z"}).out], _restartRules, _lifecycle, "$wins"]},
+		{call: "probe.verdicts", args: ["$"], expect: [{count: 1, noise: "node-restart"}], why: "the line the first run held is read again and is noise"},
+	]}
+	// The shutdown marker a run saw is not read again as new, and the line it explains may come the next run.
+	"a shutdown marker an earlier run counted still opens its instance's window for a later line": {suite: "noise", steps: [
+		{value: [
+			(_at & {container: "electric", second: 0, text: "13:59:12.001 pid=<0.3051.0> [notice] SIGTERM received - shutting down"}).out,
+			(_at & {container: "analyst", second: 10, text: "scheduler disconnected: the stream was closed"}).out,
+		]},
+		{keep: "read"},
+		{call: "watch.group", args: [[(_at & {container: "analyst", second: 10, text: "scheduler disconnected: the stream was closed"}).out], _rules & {"scheduler-shutdown": {match: "scheduler disconnected", during: ["shutdown"], why: "a case's own rule: the scheduler drops the stream as the instance stops"}}, _lifecycle]},
+		{call: "probe.verdicts", args: ["$"], expect: [{count: 1, noise: null}], why: "the marker was counted by run 1 and is not among run 2's entries: with no context the line is a bug"},
+		{call: "watch.group", args: [[(_at & {container: "analyst", second: 10, text: "scheduler disconnected: the stream was closed"}).out], _rules & {"scheduler-shutdown": {match: "scheduler disconnected", during: ["shutdown"], why: "a case's own rule: the scheduler drops the stream as the instance stops"}}, _lifecycle, [], "$read"]},
+		{call: "probe.verdicts", args: ["$"], expect: [{count: 1, noise: "scheduler-shutdown"}], why: "run 2 reads the marker again in the overlap: its window comes from every entry read, only the new line is counted"},
 	]}
 }
