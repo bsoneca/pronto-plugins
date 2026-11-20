@@ -230,8 +230,15 @@ export function waitRefusal({ key, role, flip, merged, openPr }) {
 /** Whether a waiting issue's fix is released: `prs` are `{merged, held}` of its linked pull requests (held:
  * the released commit holds its merge). True when some merged and every merged one is held. */
 export function fixReleased(prs) {
+  // A pull request whose state could not be read (gh failed) may be a fix not yet released: wait.
+  if ((prs ?? []).some((p) => p.read === false)) return false;
   const merged = (prs ?? []).filter((p) => p.merged);
   return merged.length > 0 && merged.every((p) => p.held);
+}
+
+/** An issue's labels without the wait label (`waitId`), every other label kept (bug, on-hold). */
+export function unwaited(labels, waitId) {
+  return (labels ?? []).filter((l) => l !== waitId);
 }
 
 /** The flip issue of an app's flag among `issues` (`{name, modules}`): titled for the flag, in the

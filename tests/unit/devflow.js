@@ -131,6 +131,7 @@ function boardOf(seed) {
     },
     comment: (_p, iid, html) => { write('comment', iid); (comments[iid] ??= []).push({ html, at: seed.now ?? '2026-11-16T00:00:00Z' }); },
     comments: (_p, iid) => (comments[iid] ?? []).map((c) => ({ ...c })),
+    setLabels: (p, iid, labels) => { const hit = issues[p].find((i) => i.id === iid); write('setLabels', `${byId(p).identifier}-${hit.sequence_id}`, labels.join(',')); hit.labels = [...labels]; },
     stateMoves: (_p, iid) => {
       if (seed.failMoves) throw new Error('plane GET activities: 500');
       return (moves[iid] ?? []).map((m) => ({ ...m }));

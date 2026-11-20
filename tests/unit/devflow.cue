@@ -347,5 +347,7 @@ cases: {
 		{call: "devflow.fixReleased", args: [[{merged: true, held: true}, {merged: true, held: false}]], expect: false, why: "an older fix is held, the newer one is not: the release is not the fix's yet"},
 		{call: "devflow.fixReleased", args: [[]], expect: false},
 		{call: "devflow.fixReleased", args: [[{merged: false, held: false}]], expect: false},
+		{call: "devflow.fixReleased", args: [[{read: true, merged: true, held: true}, {read: false, merged: false, held: false}]], expect: false, why: "a linked pull request gh could not read may be a fix not yet released"},
+		{call: "devflow.unwaited", args: [["l-bug", "l-wait", "l-on-hold"], "l-wait"], expect: ["l-bug", "l-on-hold"], why: "only the wait label goes; bug and on-hold stay"},
 	]}
 }
