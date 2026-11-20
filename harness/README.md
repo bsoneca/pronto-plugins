@@ -10,7 +10,7 @@ copy by hand from `apps/brawl-chess` (bsoneca/pronto's AGENTS.md, "Tests are dat
 | `tests/unit/select.js` | which suites are cached: their inputs as at their last green run |
 | `tests/unit/schema.cue` | what a unit case may say |
 | `tests/browser.ts` | the browsers a run launches, shut down however it ends |
-| `tests/lint.ts` | the release guards `test` runs: generated files, the image's files, the schema |
+| `tests/lint.ts` | the release guards `test` runs: generated files, the image's files, the schema, the size of a Dockerfile instruction's argument (`run [bytes]`, default 65,536; the app's check passes its own ceiling) |
 | `tests/scenarios.ts` | runs an app's scenarios (`tests/scenarios/*.cue`) in browsers against its door |
 | `tests/scenarios/schema.cue` | what a scenario may say, and the facts the runner reads beside the scenarios |
 | `tests/scenarios/select.ts` | which scenarios the runner runs: their inputs as at their last green run |

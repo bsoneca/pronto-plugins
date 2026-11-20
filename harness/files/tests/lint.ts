@@ -1,5 +1,5 @@
-// Three release guards, the same file in every app (copied unchanged from apps/brawl-chess, as
-// tests/unit.ts is): `deno run --allow-read --allow-run [--allow-env] tests/lint.ts generated|image|schema`, run in
+// Four release guards, the same file in every app (copied unchanged from apps/brawl-chess, as
+// tests/unit.ts is): `deno run --allow-read --allow-run [--allow-env] tests/lint.ts generated|image|schema|run`, run in
 // the app's folder by the checks program.cue declares. They are test checks, not lint ones:
 // lint is skipped when the tree is the one it last passed (bayt's fingerprint of the tree's
 // files), and generate returns a hand-edited tree to exactly that, while `image` also reads
@@ -31,6 +31,14 @@
 // rehearsal's driver (release.cue `rehearsal`), the scripts of the checks it replaces and the
 // job's own. Reads are followed statically: relative imports, and any string literal that names
 // a file or folder of the app (resolved from the reading file, or from the app's folder).
+//
+// run: one argument of a Dockerfile instruction must stay under what Linux passes to a process (one
+// argv string is at most 131,071 B, MAX_ARG_STRLEN counting the NUL), and a shell-form RUN is one string: pronto emits a
+// served image as one `install -D` per file, all joined into a single RUN, so a page that grows by a
+// few dozen files breaks the build of the release only (PRONTO-867). The guard measures the largest
+// argument of every RUN, CMD, ENTRYPOINT and HEALTHCHECK in the app's Dockerfiles (continuation lines
+// joined; a heredoc's body counts where a RUN hands it to `sh -c`, not where it is a file) and fails over a ceiling: 65,536 B
+// (half the limit, room for growth between gates), or the number the app's check passes after `run`.
 const app = Deno.cwd();
 const decoder = new TextDecoder();
 
@@ -419,15 +427,156 @@ export async function schemaProblems(): Promise<string[]> {
   return bad;
 }
 
+// ---- run -----------------------------------------------------------------------------------
+
+export const ARG_CEILING = 65536;
+
+export type ArgSize = { file: string; line: number; instruction: string; bytes: number; command: string };
+
+const utf8 = new TextEncoder();
+const byteLength = (s: string) => utf8.encode(s).length;
+const skippable = (l: string) => /^\s*(#.*)?$/.test(l);
+
+// The largest argument of every RUN, CMD, ENTRYPOINT and HEALTHCHECK CMD of a Dockerfile's text, as
+// BuildKit reads it: the `# escape=` directive (default `\`) joins a line to the next, comment lines
+// inside a joined instruction are dropped, a shell form is one string, an exec form (a JSON array) is
+// as large as its largest element, a heredoc (`<<EOF`) of COPY or ADD is a file, not an argument, and so is a RUN's whose body starts with `#!`
+// (BuildKit runs it as a script); any other RUN heredoc goes to `sh -c`, so its command and body count.
+export function argSizes(dockerfile: string, file = "Dockerfile"): ArgSize[] {
+  const lines = dockerfile.split(/\r?\n/);
+  let esc = "\\";
+  for (const l of lines) {
+    const d = l.match(/^\s*#\s*([A-Za-z]+)\s*=\s*(\S+)\s*$/);
+    if (!d) break; // parser directives are only the comments before the first instruction
+    if (d[1].toLowerCase() === "escape") esc = d[2];
+  }
+  const out: ArgSize[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (skippable(lines[i])) continue;
+    const start = i + 1;
+    let text = lines[i];
+    while (text.trimEnd().endsWith(esc) && i + 1 < lines.length) {
+      text = text.trimEnd().slice(0, -esc.length);
+      i++;
+      while (i + 1 < lines.length && skippable(lines[i])) i++;
+      if (!skippable(lines[i])) text += lines[i];
+    }
+    // Heredocs: each `<<WORD` (a word of its own, not `<<<` or a shift) reads its body up to a line that
+    // is WORD; with no such line the instruction ends where it did.
+    const end = i;
+    const heredocs: { word: string; body: string }[] = [];
+    for (const h of text.matchAll(/(?:^|\s)<<(-?)\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_]\w*))/g)) {
+      const word = h[2] ?? h[3] ?? h[4];
+      const body: string[] = [];
+      let found = false;
+      while (i + 1 < lines.length && !found) {
+        i++;
+        if ((h[1] ? lines[i].replace(/^\t+/, "") : lines[i]) === word) found = true;
+        else body.push(h[1] ? lines[i].replace(/^\t+/, "") : lines[i]);
+      }
+      if (!found) { i = end; break; }
+      heredocs.push({ word, body: body.map((l) => l + "\n").join("") });
+    }
+    const m = text.match(/^\s*(RUN|CMD|ENTRYPOINT|HEALTHCHECK)\b\s*([\s\S]*)$/i);
+    if (!m) continue;
+    const instruction = m[1].toUpperCase();
+    let rest = m[2].trim();
+    if (instruction === "HEALTHCHECK") {
+      rest = rest.replace(/^(?:--\S+\s+)*/, "");
+      if (!/^CMD\b/i.test(rest)) continue; // NONE has no command
+      rest = rest.slice(3).trim();
+    } else if (instruction === "RUN") {
+      rest = rest.replace(/^(?:--[a-z-]+(?:=\S+)?\s+)*/, "");
+    }
+    let bytes = byteLength(rest);
+    if (instruction === "RUN") {
+      const alone = /^<<-?\s*(?:"[^"]+"|'[^']+'|[A-Za-z_]\w*)$/.test(rest);
+      for (const h of heredocs) {
+        if (h.body.startsWith("#!")) continue;
+        bytes = Math.max(bytes, alone ? byteLength(h.body) : byteLength(rest + "\n" + h.body + h.word));
+      }
+    }
+    if (rest.startsWith("[")) {
+      try {
+        const arr = JSON.parse(rest);
+        if (Array.isArray(arr) && arr.every((x) => typeof x === "string")) bytes = Math.max(0, ...arr.map(byteLength));
+      } catch { /* not JSON: a shell form that starts with [ */ }
+    }
+    out.push({ file, line: start, instruction, bytes, command: rest });
+  }
+  return out;
+}
+
+// The folders (four levels at most) a long instruction's `install -D` destinations sit in, with the bytes
+// of the statements installing into each, largest first: where a served image's weight is.
+export function heaviest(command: string, top = 3): [string, number][] {
+  const by = new Map<string, number>();
+  for (const stmt of command.split(/;\s*/)) {
+    const d = stmt.match(/install\s+-D\b.*'([^']+)'\s*$/);
+    if (!d) continue;
+    const dirs = d[1].replace(/^\/served\//, "").split("/").slice(0, -1).slice(0, 4);
+    const dir = dirs.length ? dirs.join("/") + "/" : "(root)";
+    by.set(dir, (by.get(dir) ?? 0) + byteLength(stmt) + 2);
+  }
+  return [...by].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, top);
+}
+
+// The ceiling a check passes (`run [bytes]`): digits only, above 0 and under what Linux passes in one string
+// (131,072 B, MAX_ARG_STRLEN, which counts the NUL, so at most 131,071 B of command); null for anything else.
+export function parseCeiling(arg: string | undefined): number | null {
+  if (arg === undefined) return ARG_CEILING;
+  if (!/^\d+$/.test(arg)) return null;
+  const n = Number(arg);
+  return n > 0 && n < 131072 ? n : null;
+}
+
+// The app's Dockerfiles: .bayt/Dockerfile.* and any Dockerfile* beside program.cue (a symlink counts).
+const dockerfiles = async (root: string): Promise<string[]> => {
+  const files: string[] = [];
+  for (const dir of ["", ".bayt"]) {
+    try {
+      for await (const e of Deno.readDir(dir ? `${root}/${dir}` : root)) {
+        if ((e.isFile || e.isSymlink) && /^Dockerfile/.test(e.name)) files.push(dir ? `${dir}/${e.name}` : e.name);
+      }
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  }
+  return files.sort();
+};
+
+// Every instruction of the app's Dockerfiles whose largest argument is over `ceiling` bytes, worded for the
+// gate (file, line, size, and the folders that weigh most); a Dockerfile that cannot be read is a problem too.
+export async function runArgProblems(ceiling = ARG_CEILING, root = app): Promise<string[]> {
+  const bad: string[] = [];
+  for (const f of await dockerfiles(root)) {
+    let df: string;
+    try {
+      df = await Deno.readTextFile(`${root}/${f}`);
+    } catch (err) {
+      bad.push(`${f}: cannot be read (${(err as Error).message})`);
+      continue;
+    }
+    for (const a of argSizes(df, f)) {
+      if (a.bytes <= ceiling) continue;
+      const heavy = heaviest(a.command).map(([d, n]) => `${d} ${n}`);
+      bad.push(`${a.file}:${a.line} ${a.instruction} ${a.bytes} B > ceiling ${ceiling} B${heavy.length ? `  (heaviest: ${heavy.join(", ")})` : ""}`);
+    }
+  }
+  return bad;
+}
+
 if (import.meta.main) {
   const which = Deno.args[0];
   const fix: Record<string, string> = {
     generated: "A generated file differs from what is staged: change its source (program.cue, cue.mod, ...), run ./saytw generate, and `git add` the result. A hand edit to a generated file is overwritten by generate. A shared copy (tests/slot.ts, ...) that differs: copy apps/brawl-chess's over it, in every app.",
     schema: "Put DROP FUNCTION IF EXISTS <name>(<argument types>) before the CREATE of a function that returns rows (its GRANTs after the CREATE stand), and name a new pgroll migration to sort after the last one released (AGENTS.md, #619, #624).",
+    run: "One argument of a Dockerfile instruction is over the app's ceiling (Linux takes at most 131,071 B in one argv string, MAX_ARG_STRLEN counting the NUL, and a shell-form RUN is one): split the instruction (for a served image: fewer served files, or pack them), or, with the reason in a comment beside it, raise the number its guard-run check passes (`tests/lint.ts run <bytes>`, default 65536, under 131072).",
     image: "Add the file to the check's srcs in program.cue (build: checks: \"<name>\": srcs: [...]), then run ./saytw generate: the image the rc runs holds only what its Dockerfile copies.",
   };
-  const bad = which === "generated" ? [...await generated(), ...await sharedDiffers()] : which === "image" ? await missingFromImages() : which === "schema" ? await schemaProblems() : null;
-  if (bad === null) { console.error("usage: tests/lint.ts generated|image|schema"); Deno.exit(2); }
+  const ceiling = which === "run" ? parseCeiling(Deno.args[1]) : 0;
+  const bad = ceiling === null ? null : which === "generated" ? [...await generated(), ...await sharedDiffers()] : which === "image" ? await missingFromImages() : which === "schema" ? await schemaProblems() : which === "run" ? await runArgProblems(ceiling) : null;
+  if (bad === null) { console.error("usage: tests/lint.ts generated|image|schema|run [ceiling: whole bytes, 1 to 131071, default 65536]"); Deno.exit(2); }
   if (bad.length) {
     console.error(`lint ${which}: ${bad.length} problem(s)`);
     for (const b of bad) console.error(`  ${b}`);

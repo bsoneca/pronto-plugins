@@ -155,3 +155,83 @@ cases: "a staged sibling edit keys as HEAD holds it until it is committed, then 
 		{call: "harness.siblingStaged", expect: {firstIsHead: true, stagedIsHead: true, afterIsNewHead: true}, why: "keyed by HEAD's blob, not the index's"},
 	]
 }
+
+// The run guard of tests/lint.ts (PRONTO-867): the largest argument of every RUN, CMD, ENTRYPOINT and HEALTHCHECK of a
+// Dockerfile, as BuildKit reads it. Linux refuses one argv string over 131072 B, and a shell-form RUN is one.
+cases: "a shell-form RUN is one argument, counted in bytes after its keyword": {
+	suite: "harness"
+	steps: [
+		{call: "harness.sizes", args: ["FROM scratch\nRUN echo hi\n"], expect: [[2, "RUN", 7]]},
+		{call: "harness.sizes", args: ["RUN echo é"], expect: [[1, "RUN", 7]], why: "UTF-8 bytes, not characters"},
+		{call: "harness.ofSize", args: [131072], expect: [131072]},
+	]
+}
+cases: "continuation lines are joined as BuildKit joins them, and comments inside them dropped": {
+	suite: "harness"
+	steps: [
+		{call: "harness.sizes", args: ["RUN a \\\n  && b \\\n# a comment\n  && c\nCMD x"], expect: [[1, "RUN", 15], [5, "CMD", 1]], why: "the line is the instruction's first; the escape and newline go, the comment line too"},
+		{call: "harness.sizes", args: ["# escape=`\nRUN a `\n b\\\nRUN c"], expect: [[2, "RUN", 5], [4, "RUN", 1]], why: "with escape=`, a backslash ends nothing"},
+		{call: "harness.sizes", args: ["RUN a\n\n# between\nRUN b"], expect: [[1, "RUN", 1], [4, "RUN", 1]]},
+	]
+}
+cases: "an exec form is as large as its largest element, CMD, ENTRYPOINT and HEALTHCHECK CMD count, other instructions do not": {
+	suite: "harness"
+	steps: [
+		{call: "harness.sizes", args: ["CMD [\"a\", \"bcd\"]\nENTRYPOINT [\"ef\"]"], expect: [[1, "CMD", 3], [2, "ENTRYPOINT", 2]]},
+		{call: "harness.sizes", args: ["HEALTHCHECK --interval=5s --timeout=2s CMD curl -f x\nHEALTHCHECK NONE"], expect: [[1, "HEALTHCHECK", 9]], why: "flags and CMD are not the argument; NONE has none"},
+		{call: "harness.sizes", args: ["RUN --mount=type=cache,target=/c make\nCOPY a b\nENV A=1\nARG B"], expect: [[1, "RUN", 4]], why: "a RUN's flags are not the command"},
+		{call: "harness.sizes", args: ["run lower"], expect: [[1, "RUN", 5]], why: "keywords are case-insensitive"},
+	]
+}
+cases: "a heredoc's body is a file for COPY, ADD and a script, an argument for any other RUN": {
+	suite: "harness"
+	steps: [
+		{call: "harness.sizes", args: ["RUN <<EOF\necho very long body here\nEOF\nRUN b"], expect: [[1, "RUN", 25], [4, "RUN", 1]], why: "RUN <<W alone: the body goes to sh -c"},
+		{call: "harness.sizes", args: ["RUN <<EOF\n#!/bin/sh\nthe script is a file\nEOF\nRUN b"], expect: [[1, "RUN", 5], [5, "RUN", 1]], why: "a body that starts with #! is run as a script, not passed"},
+		{call: "harness.sizes", args: ["COPY <<EOF /f\nlong long long long body\nEOF\nRUN b"], expect: [[4, "RUN", 1]], why: "a COPY heredoc is a file"},
+		{call: "harness.sizes", args: ["RUN cat <<-'X' > /f\n\tbody\n\tX\nCMD c"], expect: [[1, "RUN", 22], [4, "CMD", 1]], why: "command, newline, body (tabs stripped by <<-) and the word; a quoted word is the word"},
+		{call: "harness.sizes", args: ["CMD cat <<EOF\nbody\nEOF"], expect: [[1, "CMD", 9]], why: "only a RUN's heredoc is passed"},
+		{call: "harness.ofHeredoc", args: [70000], expect: [70000], why: "a RUN heredoc body over the ceiling is counted"},
+	]
+}
+cases: "a << that opens no heredoc, or one never closed, swallows nothing": {
+	suite: "harness"
+	steps: [
+		{call: "harness.sizes", args: ["RUN echo $((a<<b))\nRUN y"], expect: [[1, "RUN", 14], [2, "RUN", 1]], why: "a shift is not at the start of a word"},
+		{call: "harness.sizes", args: ["RUN echo $((1<<2)) <<<hi\nRUN y"], expect: [[1, "RUN", 20], [2, "RUN", 1]], why: "a here-string opens none"},
+		{call: "harness.sizes", args: ["RUN cat <<EOF\nRUN y\nCMD z"], expect: [[1, "RUN", 9], [2, "RUN", 1], [3, "CMD", 1]], why: "no terminator: the instruction ends where it did, the next ones are still read"},
+	]
+}
+cases: "the ceiling is whole bytes, above 0 and under what Linux passes in one string": {
+	suite: "harness"
+	steps: [
+		{call: "harness.parseCeiling", args: ["65536"], expect: 65536},
+		{call: "harness.parseCeiling", args: ["131071"], expect: 131071},
+		{call: "harness.parseCeiling", args: ["131072"], expect: null, why: "MAX_ARG_STRLEN counts the NUL"},
+		{call: "harness.parseCeiling", args: ["0"], expect: null},
+		{call: "harness.parseCeiling", args: ["-1"], expect: null},
+		{call: "harness.parseCeiling", args: ["abc"], expect: null},
+		{call: "harness.parseCeiling", args: [""], expect: null, why: "a check that passes nothing gets the default only by passing no argument"},
+		{call: "harness.parseCeiling", args: ["Infinity"], expect: null},
+		{call: "harness.parseCeiling", args: ["1e3"], expect: null},
+		{call: "harness.parseCeiling", args: ["0x10000"], expect: null},
+		{call: "harness.parseCeiling", args: [], expect: 65536, why: "no argument: the default"},
+	]
+}
+cases: "the guard reads .bayt/Dockerfile.* and the root Dockerfile, fails one byte over the ceiling and passes the ceiling itself": {
+	suite: "harness"
+	steps: [
+		{call: "harness.problems", args: [100, 100, 101], expect: ["Dockerfile:1 RUN 101 B > ceiling 100 B"]},
+		{call: "harness.problems", args: [100, 101, 100], expect: [".bayt/Dockerfile.x:1 RUN 101 B > ceiling 100 B"]},
+		{call: "harness.problems", args: [100, 100, 100], expect: [], why: "exactly the ceiling passes"},
+		{call: "harness.linked", args: [100], expect: [".bayt/Dockerfile.link:1 RUN 101 B > ceiling 100 B", ".bayt/Dockerfile.real:1 RUN 101 B > ceiling 100 B"], why: "a symlinked Dockerfile is read too"},
+		{call: "harness.unreadable", args: [], expect: [true], why: "a Dockerfile that cannot be read is a problem, not an empty one"},
+	]
+}
+cases: "a served image's RUN names the folders that weigh most, root files as (root)": {
+	suite: "harness"
+	steps: [
+		{call: "harness.served", args: [[["shell/hatches/fala/voz/", "a.ogg"], ["shell/hatches/fala/voz/", "b.ogg"], ["shell/screens/", "play.html"]]], expect: {bytes: 278, heaviest: [["shell/hatches/fala/voz/", 188], ["shell/screens/", 84]]}, why: "four levels at most, the bytes of the statements installing into each"},
+		{call: "harness.served", args: [[["", "index.html"]]], expect: {bytes: 64, heaviest: [["(root)", 58]]}},
+	]
+}
