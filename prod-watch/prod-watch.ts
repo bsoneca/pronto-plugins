@@ -181,7 +181,7 @@ if (node?.restart) {
   restartVoided = saved.voided;
   restartWas = was;
   restartNow = nRestarts;
-  restartWins = restartWindows({ journal: j.out, activeEnter: unit.activeEnter, restarts: { was, now: nRestarts }, until: range.until, voided: restartVoided }, r);
+  restartWins = restartWindows({ journal: j.out, activeEnter: unit.activeEnter, restarts: { was, now: nRestarts }, until: range.until, voided: restartVoided, since: !!since }, r);
   restartCandidates = completeWindows({ journal: j.out, activeEnter: unit.activeEnter, until: range.until }, r);
   restartUntil = Date.parse(range.until);
   restartTo = Date.parse(to);

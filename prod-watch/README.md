@@ -132,10 +132,13 @@ down: 300    // the longest a stop may stay down
 
 Each pass reads, over the node's ssh and read-only, `sudo -n journalctl -u <unit> _PID=1` (the unit's lines of
 systemd itself) and `systemctl show <unit> -p LoadState -p ActiveEnterTimestamp -p NRestarts` (journal lines as `-o short-iso-precise`; a unit whose `LoadState` is not `loaded` stops the run). A window is
-`[stop - lead, start + tail]` for a stop line followed within `down` seconds by a start: the first start line of
-the journal after the stop, and only when none follows it the ActiveEnterTimestamp of the **last** stop (whole
-seconds, so beside a precise line it would end the tail early; an earlier stop with no start line gets no window, and
-the timestamp pairs only when it is **strictly after** the stop, to the millisecond: one within the stop's own second
+`[stop - lead, start + tail]` for a stop line followed within `down` seconds by a start. Lines pair in the order
+`journalctl` printed them, never by re-sorting their times (a start and a stop in one millisecond would swap): a stop
+line opens a pending stop (a second stop before any start replaces it), a start line completes the pending stop, if
+there is one, and clears it, so each start completes at most one stop and a start with no pending stop pairs with
+nothing. Only when the journal ends with a stop still pending, the ActiveEnterTimestamp is its start (whole
+seconds, so beside a precise line it would end the tail early; it pairs only when it is **strictly after** the
+stop, to the millisecond: one within the stop's own second
 may be an earlier activation). A journal line that matches the stop, start or crash pattern and whose time does not
 parse **fails the run** before triage or any write. It is **no window**, and the same entries alert, when:
 
@@ -152,6 +155,9 @@ parse **fails the run** before triage or any write. It is **no window**, and the
   `k3s.json` that is no object) **fails the run** before triage or any write (`k3sState`), and duplicates collapse
   (`k3sNext` decides what a pass writes);
 - its end (`start + tail`) is past what the journal read reached: an incomplete window may hold a crash not read yet;
+- the run is a `--since` report: it gets **no restart window at all** (`restartWindows`' `since`), because the voids
+  that rejected a window are dropped once the cursor passes them and a report over that range could not tell; its entries
+  are classified without the restart phase and alert, as an unexplained outage would;
 - the entry is not the node's. The window applies only to entries read from the node (VictoriaLogs), never to
   a Cloud Run service the app also watches.
 

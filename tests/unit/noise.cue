@@ -88,6 +88,25 @@ _journal: {
 		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
 		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
 		"""
+	stopStopStart: """
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T18:59:56.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		"""
+	stopStartStart: """
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		2026-11-19T19:00:20.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		"""
+	stopStartStop: """
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		2026-11-19T19:30:00.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		"""
+	startThenStop: """
+		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		"""
 	stopOnly: """
 		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
 		"""
@@ -212,6 +231,20 @@ cases: {
 		{call: "watch.restartWindows", args: [{journal: _journal.twice, activeEnter: null, restarts: {was: 0, now: 0}, until: "2026-11-19T20:00:00Z"}, _restart], expect: [_window, {from: "2026-11-19T19:29:55.000Z", to: "2026-11-19T19:32:10.000Z"}]},
 		{call: "watch.restartWindows", args: [{journal: _journal.lead, activeEnter: null, restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [], why: "a crash line 4 s before the stop is inside the lead margin (5 s): the window is not deliberate"},
 		{call: "watch.restartWindows", args: [{journal: _journal.stopOnly, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [_window], why: "no start line in the journal read: the unit's ActiveEnterTimestamp is the start"},
+	]}
+	"stops and starts pair in journal order: each start completes one stop, a later stop replaces an unfinished one": {suite: "noise", steps: [
+		{call: "watch.completeWindows", args: [{journal: _journal.stopStopStart, activeEnter: null, until: _done}, _restart], expect: [{from: "2026-11-19T18:59:51.000Z", to: "2026-11-19T19:02:09.000Z"}], why: "stop, stop, start: one window, from the second stop"},
+		{call: "watch.completeWindows", args: [{journal: _journal.stopStartStart, activeEnter: null, until: _done}, _restart], expect: [{from: "2026-11-19T18:59:49.000Z", to: "2026-11-19T19:02:09.000Z"}], why: "stop, start, start: the second start pairs with nothing"},
+		{call: "watch.completeWindows", args: [{journal: _journal.stopStartStop, activeEnter: null, until: "2026-11-19T20:00:00Z"}, _restart], expect: [_window], why: "stop A, start, stop B and no later start: A paired, B not"},
+		{call: "watch.restartPending", args: [{journal: _journal.stopStartStop, activeEnter: null, until: "2026-11-19T19:30:30Z"}, _restart], expect: {from: "2026-11-19T19:29:55.000Z"}, why: "B is the pending stop"},
+		{call: "watch.completeWindows", args: [{journal: _journal.startThenStop, activeEnter: null, until: _done}, _restart], expect: [], why: "Started then Stopping in one millisecond, in that line order: no window"},
+		{call: "watch.restartPending", args: [{journal: _journal.startThenStop, activeEnter: null, until: "2026-11-19T19:00:30Z"}, _restart], expect: {from: "2026-11-19T19:00:04.000Z"}, why: "and the stop is pending"},
+	]}
+	"a --since report gives no restart window, so an entry in a restart is not noise": {suite: "noise", steps: [
+		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}, until: _done, voided: [], since: true}, _restart], expect: [], why: "the void that rejected it was dropped once the cursor passed it: the report cannot tell"},
+		{call: "watch.group", args: [[(_n & {ts: "2026-11-19T19:00:05.000Z"}).out], _restartRules, _lifecycle, "$"]},
+		{call: "probe.verdicts", args: ["$"], expect: [{count: 1, noise: null}]},
+		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}, until: _done, voided: []}, _restart], expect: [_window], why: "a cursor run with the same journal accepts it"},
 	]}
 	"a stop pairs with the first journal start after it, never an earlier whole-second ActiveEnterTimestamp": {suite: "noise", steps: [
 		{call: "watch.restartWindows", args: [{journal: _journal.precise, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [{from: "2026-11-19T18:59:49.000Z", to: "2026-11-19T19:02:09.900Z"}], why: "the start is 19:00:09.900: the tail ends there + 120 s, not at ActiveEnter's whole second"},

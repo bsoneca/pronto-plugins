@@ -373,10 +373,13 @@ export function phasesOf(entry, windows, lifecycle) {
 // above what the last run saw (`restarts.was`), and it is no window: the same entries alert. `until` is the
 // journal's observation cutoff (what was read, never later than now): a window whose end is past it may still
 // hold a crash that was not read, so it is no window either (restartPending says which of those are only unfinished).
-/** @param {{journal?: string, activeEnter?: string | null, restarts?: {was: number | null, now: number | null} | null, until?: string | number | null, voided?: {from: string, to: string}[]}} input
+// A `since` run (a historical report) gets none: the voids that rejected a window were dropped once the cursor passed
+// them, so the report could not tell a window the counter had rejected; its entries are classified without the restart
+// phase and alert, as an unexplained outage would.
+/** @param {{journal?: string, activeEnter?: string | null, restarts?: {was: number | null, now: number | null} | null, until?: string | number | null, voided?: {from: string, to: string}[], since?: boolean}} input
  *  @param {{stop: string, start: string, crash: string, lead: number, tail: number, down: number}} cfg */
-export function restartWindows({ journal = "", activeEnter = null, restarts = null, until = null, voided = [] }, cfg) {
-  if (!cfg || !restarts || restarts.now == null || (restarts.was != null && restarts.now > restarts.was)) return [];
+export function restartWindows({ journal = "", activeEnter = null, restarts = null, until = null, voided = [], since = false }, cfg) {
+  if (since || !cfg || !restarts || restarts.now == null || (restarts.was != null && restarts.now > restarts.was)) return [];
   const { crashes } = journalTimes(journal, activeEnter, cfg);
   return completeWindows({ journal, activeEnter, until }, cfg)
     .filter((w) => !crashes.some((c) => c >= Date.parse(w.from) && c <= Date.parse(w.to)))
@@ -499,25 +502,36 @@ export function settleRun({ entries, hashes, hold = null, since = false, counted
 // What an entry is hashed as (prod-watch.ts's cursor keeps the hashes of what it counted): the entry as its source
 // gave it, without the `source` tag the driver adds, so a cursor written before the tag still matches.
 export const hashInput = (entry) => JSON.stringify({ ...entry, source: undefined });
-// The times (ms) of the journal's stop and crash lines (a line's first word is its ISO time, with microseconds,
-// trimmed to milliseconds), and each stop paired with its start: the first start line after it, and only when no
-// start line follows, the ActiveEnterTimestamp (whole seconds: next to a precise line it would end a window early),
-// and only for the last stop: it says when the unit last became active, so an earlier stop has no start of its own
-// beyond the journal's. It pairs only when it is strictly after the stop (in ms): within the stop's own second it may
-// be an earlier activation, and no window is better than a false one. A line that matches a pattern and has no
-// time that parses is an error, not a line to skip: the evidence of a crash may be in it.
+// The journal's stop and crash times (ms; a line's first word is its ISO time, with microseconds, trimmed to
+// milliseconds) and each stop paired with its start, in the order journalctl printed the lines, never by re-sorting
+// the parsed times (two lines in one millisecond would swap). A stop line opens a pending stop (a second stop before
+// any start replaces it: the first has no start of its own); a start line completes the pending stop, if there is
+// one, and clears it, so each start completes at most one stop and a start with no pending stop pairs with nothing.
+// Only the last stop left pending at the end has a second source for its start: the ActiveEnterTimestamp (whole
+// seconds: next to a precise line it would end a window early), when it is strictly after that stop (in ms): within
+// the stop's own second it may be an earlier activation, and no window is better than a false one. A line that matches a
+// pattern and has no time that parses is an error, not a line to skip: the evidence of a crash may be in it.
+// The one pairing restartWindows, completeWindows and restartPending share.
 function journalTimes(journal, activeEnter, cfg) {
-  const times = (re) => journal.split("\n").filter((l) => new RegExp(re).test(l)).map((l) => {
+  const at = (l) => {
     const t = Date.parse(l.split(" ")[0].replace(/(\.\d{3})\d+/, "$1"));
     if (Number.isNaN(t)) throw new Error(`a journal line has no time that parses: ${l.slice(0, 200)}`);
     return t;
-  });
-  const starts = times(cfg.start).sort((a, b) => a - b);
+  };
+  const [stopRe, startRe, crashRe] = [cfg.stop, cfg.start, cfg.crash].map((re) => new RegExp(re));
   const enter = activeEnter ? Date.parse(activeEnter) : NaN;
-  const stops = times(cfg.stop);
-  const last = Math.max(...stops);
-  const pairs = stops.map((stop) => ({ stop, start: starts.find((t) => t >= stop) ?? (stop === last && enter > stop ? enter : undefined) }));
-  return { stops: pairs.map((p) => p.stop), crashes: times(cfg.crash), pairs };
+  const pairs = [], crashes = [];
+  let pending = null;
+  for (const l of journal.split("\n")) {
+    const stop = stopRe.test(l), start = !stop && startRe.test(l), crash = crashRe.test(l);
+    if (!stop && !start && !crash) continue;
+    const t = at(l);
+    if (crash) crashes.push(t);
+    if (stop) pending = t;
+    else if (start && pending !== null) { pairs.push({ stop: pending, start: t }); pending = null; }
+  }
+  if (pending !== null) pairs.push({ stop: pending, start: enter > pending ? enter : undefined });
+  return { crashes, pairs };
 }
 // A restart not finished at the cutoff: a stop with no start yet but still within `down` of the cutoff (the start
 // may come), or a start whose window's end (start + tail) is past it (a crash may still be written). The run that
