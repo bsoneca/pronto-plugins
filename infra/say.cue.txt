@@ -18,7 +18,7 @@ _backend: "(run-mise exec -- cue export . -e plan.backend --out json | from json
 _spare: "{|c| $c.type == 'google_secret_manager_secret_version' and ($c.change.before?.deletion_policy? == 'ABANDON')}"
 _plan:  "use tools.nu [run-mise]; use cue.mod/pkg/github.com/bsoneca/pronto-plugins/infra/plan.nu *"
 _run:   "{|a| run-mise exec -- tofu -chdir=tofu ...$a | complete}"
-_creds: "{|| {GOOGLE_OAUTH_ACCESS_TOKEN: (^gcloud auth print-access-token | str trim)}}"
+_creds: "{|| {GOOGLE_OAUTH_ACCESS_TOKEN: (gcloud-token)}}"
 
 say: {
 	setup: rulemap: tofu: {
