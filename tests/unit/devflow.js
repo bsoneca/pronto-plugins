@@ -32,6 +32,7 @@ function flowOf(seed) {
     priorities: { P0: { plane: 'urgent' }, P1: { plane: 'high' }, P2: { plane: 'medium' }, P3: { plane: 'low' } },
     queue: { starvingDays: seed.starvingDays ?? 3, mergedDays: 7 },
     stuckHours: 6,
+    waitLabel: 'waits-release',
   };
   if (seed.suggestions !== false) {
     flow.suggestions = {
@@ -74,10 +75,11 @@ function boardOf(seed) {
   if (seed.inboxMade !== false) addInbox(true);
   const moves = {};
   if ((seed.issues ?? []).some((i) => i.bug)) labels['p-acme'].push({ id: 'l-bug', name: 'bug' });
+  if ((seed.issues ?? []).some((i) => i.wait)) labels['p-acme'].push({ id: 'l-wait', name: 'waits-release' });
   for (const i of seed.issues ?? []) {
     issues['p-acme'].push({
       id: `i-acme-${i.seq}`, name: i.name ?? `issue ${i.seq}`, sequence_id: i.seq, state: `s-acme-${i.state ?? 'Backlog'}`, priority: i.priority ?? 'none', project: 'p-acme',
-      created_at: i.created, completed_at: i.completed, updated_at: i.updated ?? '2026-11-01T00:00:00Z', labels: i.bug ? ['l-bug'] : [],
+      created_at: i.created, completed_at: i.completed, updated_at: i.updated ?? '2026-11-01T00:00:00Z', labels: [...(i.bug ? ['l-bug'] : []), ...(i.wait ? ['l-wait'] : [])],
     });
     moves[`i-acme-${i.seq}`] = [...(i.ready ? [{ to: 's-acme-Ready', at: i.ready }] : []), ...(i.moves ?? []).map((m) => ({ to: `s-acme-${m.state}`, at: m.at }))];
     if (i.comments) comments[`i-acme-${i.seq}`] = i.comments.map((c) => ({ ...c }));
@@ -129,6 +131,7 @@ function boardOf(seed) {
     },
     comment: (_p, iid, html) => { write('comment', iid); (comments[iid] ??= []).push({ html, at: seed.now ?? '2026-11-16T00:00:00Z' }); },
     comments: (_p, iid) => (comments[iid] ?? []).map((c) => ({ ...c })),
+    setLabels: (p, iid, labels) => { const hit = issues[p].find((i) => i.id === iid); write('setLabels', `${byId(p).identifier}-${hit.sequence_id}`, labels.join(',')); hit.labels = [...labels]; },
     stateMoves: (_p, iid) => {
       if (seed.failMoves) throw new Error('plane GET activities: 500');
       return (moves[iid] ?? []).map((m) => ({ ...m }));

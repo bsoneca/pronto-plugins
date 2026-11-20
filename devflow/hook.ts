@@ -12,7 +12,7 @@
 // happens: a release or a flip never fails for the board.
 import { cmd } from "../intents/shell.ts";
 import { esc, type Issue } from "./board/board.ts";
-import { addedFlags, doneAt, flagNote, flagOf, flipIssueMove, flipIssueOf, flipTitle, keyOf, missingKey, moveFor, nameOf, prEvent, REMOVE_AFTER_DAYS, onSince, removalsDue, removeTitle, roleOf } from "./flow.js";
+import { addedFlags, doneAt, fixReleased, flagNote, flagOf, flipIssueMove, flipIssueOf, flipTitle, keyOf, missingKey, moveFor, nameOf, prEvent, REMOVE_AFTER_DAYS, onSince, removalsDue, removeTitle, roleOf, unwaited, waitsRelease } from "./flow.js";
 import { boardOf, devflowOf, type DevFlow } from "./spec.ts";
 
 type Conn = NonNullable<Awaited<ReturnType<typeof boardOf>>>;
@@ -130,20 +130,52 @@ async function inStates(b: Conn, names: string[]) {
 /** Whether an issue is the app's: it is in the app's module, or in none. */
 const forApp = (modules: string[], app: string) => modules.length === 0 || modules.includes(app);
 
+/** An issue's linked pull requests, each `{url, merged, held}`: merged when gh gives it a merge commit, held
+ * when that commit is in `commit`, the released one, of the checkout `repo`. */
+async function prsOf(repo: string, commit: string, b: Conn, issue: Issue) {
+  const urls = (await b.board.links(b.project, issue.id)).map((l) => l.url).filter((u) => /\/pull\/\d+$/.test(u));
+  const out: { url: string; read: boolean; merged: boolean; held: boolean }[] = [];
+  for (const url of urls) {
+    const v = await cmd("gh", ["pr", "view", url, "--json", "mergeCommit", "-q", ".mergeCommit.oid"]);
+    const sha = v.out.trim();
+    const merged = v.ok && !!sha;
+    out.push({ url, read: v.ok, merged, held: merged && (await cmd("git", ["merge-base", "--is-ancestor", sha, commit], { cwd: repo })).ok });
+  }
+  return out;
+}
+
 async function released(repo: string, app: string, commit: string, b: Conn, flow: DevFlow) {
   for (const { issue, modules } of await inStates(b, [flow.roles.merged, flow.roles.live])) {
     if (modules.length === 0 || !modules.includes(app)) continue;
     // Live waits only for a release that finishes it: a flagless bug fix (a flagged one waits for its flip).
     if (issue.state !== (await stateIds(b)).id(flow.roles.merged) && doneAt(flagOf(issue.description_html), modules, [...flow.infra, ...flow.design]) !== "release") continue;
     // The pull request that merged it: its merge commit is in what was released, or it waits.
-    const prs = (await b.board.links(b.project, issue.id)).map((l) => l.url).filter((u) => /\/pull\/\d+$/.test(u));
-    let held = false;
-    for (const url of prs) {
-      const v = await cmd("gh", ["pr", "view", url, "--json", "mergeCommit", "-q", ".mergeCommit.oid"]);
-      const sha = v.out.trim();
-      if (v.ok && sha && (await cmd("git", ["merge-base", "--is-ancestor", sha, commit], { cwd: repo })).ok) held = true;
+    if ((await prsOf(repo, commit, b, issue)).some((p) => p.held)) console.log(await move(b, issue, "released", `${app} released ${commit.slice(0, 8)}`, flow, modules));
+  }
+  // Freeing waiting flips never costs the release's other hooks (fileRemovals).
+  await freeWaiting(repo, app, commit, b, flow).catch((e) => console.log(`devflow: WARNING: waiting flips not checked: ${(e as Error).message}`));
+}
+
+/** An Implementing flip issue waiting for a release (PRONTO-666) whose fix this release holds loses its
+ * label, so it holds a slot again and the flip can run (flow.js fixReleased). */
+async function freeWaiting(repo: string, app: string, commit: string, b: Conn, flow: DevFlow) {
+  const waitId = (await b.board.labels(b.project)).find((l) => l.name === flow.waitLabel)?.id ?? null;
+  if (!waitId) return;
+  for (const { issue, modules } of await inStates(b, [flow.roles.implementing])) {
+    if (!modules.includes(app) || !waitsRelease("implementing", issue.name, issue.labels, waitId)) continue;
+    // One issue's failure (gh, the board) leaves its label and does not stop the others.
+    try {
+      const prs = await prsOf(repo, commit, b, issue);
+      if (prs.some((p) => !p.read)) console.log(`devflow: WARNING: #${issue.sequence_id}: a linked pull request could not be read, so it still waits`);
+      if (!fixReleased(prs)) continue;
+      if (!b.board.setLabels) throw new Error("this board cannot set an issue's labels");
+      await b.board.setLabels(b.project, issue.id, unwaited(issue.labels, waitId));
+      const fixes = prs.filter((p) => p.merged).map((p) => `#${/\d+$/.exec(p.url)![0]}`).join(", ");
+      await b.board.comment(b.project, issue.id, `<p>${esc(fixes)} released in ${esc(app)} ${esc(commit.slice(0, 8))}: the flip can run</p>`);
+      console.log(`#${issue.sequence_id} no longer waits for a release (${fixes} released)`);
+    } catch (e) {
+      console.log(`devflow: WARNING: #${issue.sequence_id} still waits for a release: ${(e as Error).message}`);
     }
-    if (held) console.log(await move(b, issue, "released", `${app} released ${commit.slice(0, 8)}`, flow, modules));
   }
 }
 

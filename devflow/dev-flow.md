@@ -135,6 +135,7 @@ repository's states play them. The defaults are:
 | **Refine** | being turned into an objective that can be met | `/issue` |
 | **Ready** | refined: objective, acceptance, flag name and app written down; **in the queue** | `/issue` |
 | **Implementing** | a Claude session is building it; takes an engineer's, the SRE's or the architect's slot | `/issue`, or `pull` |
+| **Implementing**, labelled `waits-release` | a flip issue whose fix merged under another issue (its own PR was closed) and waits for the release holding it; **holds no slot**, is never `stuck` | `pronto-devflow wait . <KEY> --pr <url>`; the release-cron hook takes the label off once the release holds the fix (PRONTO-666) |
 | **Review** | its PR is open | the GitHub workflow, on PR opened |
 | **Merged** | its PR merged to `main`; **counts as done for the flow** | the GitHub workflow, on PR merged |
 | **Live** | released by the release cron, flag still off | the release-cron hook |
@@ -260,6 +261,8 @@ warm `status` is the issue list plus a few reads. The lines print as each phase 
 `queue.starvingDays` (default 3) is how long an issue may wait in Ready before `starving:` names it. A Ready issue the board cannot date, or
 an activity it cannot read, is an error: nothing is pulled on a guess. Once a lane is full, `pull` goes on
 only for a P0 (it starts past the slots); a P0 bug is pulled before a P1 bug.
+
+`status` prints a `waiting for release: PRONTO-238 3d, PRONTO-228 3d` line right after the slots (and `waiting` in `--json`) for the Implementing flip issues carrying the `waitLabel` (default `waits-release`): they take no slot, so `start` and `pull` count the lane without them. `wait` refuses anything but an Implementing flip issue whose fix pull request, of this repository, is merged and that has no open pull request linked (flow.js `waitRefusal`). A release that never reaches the fix leaves the label on: the age grows on the line; take it off by hand.
 
 `status` also prints a `stuck:` line (and a `stuck` list in `--json`) for each issue in Implementing or Review that no work moves: no linked open pull request and no commit on a branch naming its key in the last `stuckHours` (default 6, devflow.cue), or a pull request whose ci failed or whose auto-merge is not armed, e.g. `stuck: PRONTO-444 Implementing 2d, no PR, no commits` (flow.js `stuckOf`).
 

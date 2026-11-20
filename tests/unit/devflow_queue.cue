@@ -181,4 +181,22 @@ cases: {
 		{call: "queue.filed", args: [{}, {title: "idea", app: "aprende"}]}, {pick: ["state", "priority", "labels.length", "writes"], expect: ["Backlog", "none", 0, ["createIssue idea", "addToModule aprende"]]},
 		{call: "queue.filed", args: [{}, {title: "idea", app: "nope"}]}, {pick: ["module", "writes"], expect: [null, ["createIssue idea"]]},
 	]}
+	"a flip issue waiting for its release holds no slot, is not stuck, and status lists it apart (PRONTO-666)": {suite: "devflow", steps: [
+		{call: "queue.statusRuns", args: [{issues: [
+			{seq: 1, name: "busy", state: "Implementing", module: "aprende"},
+			{seq: 238, name: "Flip daily_notify on in brawl-chess", state: "Implementing", module: "aprende", wait: true, updated: "2026-11-14T15:00:00Z"},
+		]}]}, {pick: ["0.lines.0", "0.lines.1", "0.json.stuck.length", "0.links", "0.json.waiting"], expect: [
+			"1 of 6 engineer slots busy (ACME-1), 0 of 1 SRE slots busy, 0 of 1 architect slots busy",
+			"waiting for release: ACME-238 3d",
+			1, 1, [{key: "ACME-238", age: "3d"}],
+		], why: "ACME-238 is not in the slots line, has no stuck line and its links were never read"},
+		{call: "queue.pulls", args: [{team: {engineers: 1, sre: 1, architect: 1, product: 1}, issues: [
+			{seq: 1, name: "Flip daily_notify on in brawl-chess", state: "Implementing", module: "aprende", wait: true},
+			{seq: 2, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"},
+		]}, "engineer", 1]}, {pick: ["started"], expect: [["ACME-2"]], why: "the one engineer slot is free: the waiting flip does not hold it"},
+		{call: "queue.pulls", args: [{team: {engineers: 1, sre: 1, architect: 1, product: 1}, issues: [
+			{seq: 1, name: "plain work", state: "Implementing", module: "aprende", wait: true},
+			{seq: 2, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"},
+		]}, "engineer", 1]}, {pick: ["started"], expect: [["waits"]], why: "the label frees a flip issue's slot only"},
+	]}
 }

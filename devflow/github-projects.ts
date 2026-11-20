@@ -279,6 +279,7 @@ export class GitHubProjects implements Board {
     await this.setValue(await this.itemOf(id), FIELDS.status, { singleSelectOptionId: state });
     return await this.byNumber(await this.numberOf(id));
   }
+  setLabels = async (_project: string, id: string, labels: string[]) => await this.rest("PATCH", `${this.repo()}/issues/${await this.numberOf(id)}`, { labels });
   async describe(_project: string, id: string, html: string): Promise<Issue> {
     const n = await this.numberOf(id);
     await this.rest("PATCH", `${this.repo()}/issues/${n}`, { body: html });

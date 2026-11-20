@@ -86,6 +86,9 @@ devFlow: #DevFlow
 	stuckHours: *6 | (number & >0)
 	// A pull request with this label needs no issue (dependency bumps, the CI fingerprint).
 	chore: *"chore" | string
+	// The board label of an Implementing flip issue that waits for the release holding its fix: it holds no
+	// slot (PRONTO-666) until the release clears it.
+	waitLabel: *"waits-release" | string
 	// An inbox project beside the board's, where an app files what its players suggest (PRONTO-544).
 	// Nothing in the loop reads it: the owner approves a suggestion by moving it to Refine, or rejects
 	// it by moving it to Cancelled, and `pronto-devflow approve` files an approved one as an issue of

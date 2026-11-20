@@ -16,6 +16,7 @@ existing: {
 	token: _existing.token & {kind: "secret-manager", project: "acme-prod", secret: "plane-api-token"}
 	// Its states and roles are the flow's.
 	states: len(_existing.states) & 9
+	waitLabel: _existing.waitLabel & "waits-release"
 	roles: _existing.roles & {backlog: "Backlog", implementing: "Implementing", cancelled: "Cancelled"}
 }
 

@@ -4,7 +4,7 @@
 // (engineer, SRE, architect) pulls the first of its own. There are no sprints. board.ts parses the
 // arguments, prints and exits; the rules are flow.js's.
 import { type Board, esc, type Issue, type State } from "./board/board.ts";
-import { ageOf, bugPlace, dayOf, claimText, claimWinner, jumps, laneOf, mayStart, mergedByDay, nameOf, priorityOf, pullOrder, readySince, roleOf, staleOf, stuckLine, stuckOf } from "./flow.js";
+import { ageOf, bugPlace, dayOf, claimText, claimWinner, jumps, laneOf, mayStart, mergedByDay, nameOf, priorityOf, pullOrder, readySince, roleOf, staleOf, stuckLine, stuckOf, waitsRelease } from "./flow.js";
 import type { DevFlow, Role } from "./spec.ts";
 import { inboxStatus, suggestionLines } from "./suggestions.ts";
 
@@ -30,6 +30,8 @@ export interface Ctx {
   slots: Record<string, number>;
   priorities: Record<string, string>;
   bugLabel: string | null;
+  /** The id of the label of a flip issue waiting for a release (flow.waitLabel), when the board has it. */
+  waitLabel: string | null;
   /** Whether the modules and labels were read (a lane and a bug label need them). */
   lanes: boolean;
   stateId(name: string): string;
@@ -56,6 +58,7 @@ export async function contextOf(board: Board, flow: DevFlow, project: string, la
     slots: { engineer: flow.team.engineers, SRE: flow.team.sre, architect: flow.team.architect },
     priorities: Object.fromEntries(Object.entries(flow.priorities).map(([p, v]) => [p, v.plane])),
     bugLabel: labels.find((l) => l.name.toLowerCase() === "bug")?.id ?? null,
+    waitLabel: labels.find((l) => l.name === flow.waitLabel)?.id ?? null,
     lanes,
     stateId,
     roleId: (r) => stateId(nameOf(flow.roles, r)),
@@ -112,6 +115,9 @@ export async function readyQueue(board: Board, ctx: Ctx, all: Issue[], now: Date
   return pullOrder(queued.map((q) => ({ ...q, p0: q.jump && q.urgent }))) as Queued[];
 }
 
+/** Whether an Implementing issue waits for a release and so holds no slot (flow.js waitsRelease). */
+export const waits = (ctx: Ctx, i: Issue) => waitsRelease(ctx.roleAt(i.state), i.name, i.labels, ctx.waitLabel);
+
 export interface Outcome { outcome: "started" | "lost" | "waits"; message: string }
 
 /** Starts an issue: Implementing, if its lane has a slot. From a pull (`claim`), only while the issue
@@ -123,7 +129,7 @@ export async function start(board: Board, ctx: Ctx, k: string, opts: { claim?: b
   const [issue, all] = await Promise.all([board.issue(k), board.issues(ctx.project, true)]);
   if (claim && ctx.roleAt(issue.state) !== "ready") return { outcome: "lost", message: `${k} is no longer Ready (${ctx.stateName(issue.state)}): another pull took it` };
   const l = ctx.laneOf(issue);
-  const busy = all.filter((i) => ctx.roleAt(i.state) === "implementing" && ctx.laneOf(i) === l).length;
+  const busy = all.filter((i) => ctx.roleAt(i.state) === "implementing" && !waits(ctx, i) && ctx.laneOf(i) === l).length;
   const may = mayStart(busy, ctx.slots[l], issue.priority, l, ctx.priorities.P0);
   if (!may.ok) return { outcome: "waits", message: `${k} waits: ${may.why}` };
   const from = ctx.stateName(issue.state);
@@ -179,7 +185,7 @@ export type ReadyStatus = {
   queue: Record<string, { key: string; title: string; age: string; readyAt: string | null; jump: boolean; priority: string | null; starving: boolean }[]>;
   starving: { key: string; age: string }[];
 };
-export type OpenStatus = { slots: Record<string, { of: number; on: string[] }>; issues: Record<string, string[]>; backlog: number };
+export type OpenStatus = { slots: Record<string, { of: number; on: string[] }>; waiting: { key: string; age: string }[]; issues: Record<string, string[]>; backlog: number };
 export type Merged = {
   today: number;
   week: number;
@@ -244,14 +250,15 @@ export async function readyStatus(board: Board, ctx: Ctx, all: Issue[], now: Dat
 }
 
 /** The slots, the open issues by state and the Backlog's size: no board call. */
-export function openStatus(ctx: Ctx, all: Issue[]): OpenStatus {
-  const busy = all.filter((i) => ctx.roleAt(i.state) === "implementing");
+export function openStatus(ctx: Ctx, all: Issue[], now: Date = new Date()): OpenStatus {
+  const busy = all.filter((i) => ctx.roleAt(i.state) === "implementing" && !waits(ctx, i));
   const byState = (roles: Role[]) => Object.fromEntries(ctx.flow.states
     .filter((s) => roles.includes(roleOf(ctx.flow.roles, s.name) as Role))
     .map((s) => [s.name, all.filter((i) => ctx.stateName(i.state) === s.name).map((i) => `${ctx.key(i)} ${i.name}`)])
     .filter(([, v]) => (v as string[]).length));
   return {
     slots: Object.fromEntries(Object.keys(ctx.slots).map((l) => [l, { of: ctx.slots[l], on: busy.filter((i) => ctx.laneOf(i) === l).map(ctx.key) }])),
+    waiting: all.filter((i) => waits(ctx, i)).map((i) => ({ key: ctx.key(i), age: ageOf(i.updated_at ?? "", now) })),
     issues: byState(["refine", "ready", "implementing", "review"]),
     backlog: all.filter((i) => ctx.roleAt(i.state) === "backlog").length,
   };
@@ -260,6 +267,9 @@ export function openStatus(ctx: Ctx, all: Issue[]): OpenStatus {
 /** The slots line: `3 of 6 engineer slots busy (PRONTO-1, ...), 0 of 1 SRE slots busy, ...`. */
 export const slotsLine = (s: OpenStatus) =>
   Object.entries(s.slots).map(([l, v]) => `${v.on.length} of ${v.of} ${l} slots busy${v.on.length ? ` (${v.on.join(", ")})` : ""}`).join(", ");
+
+/** The flip issues waiting for a release: `waiting for release: PRONTO-238 3d, PRONTO-228 3d`; none when none wait. */
+export const waitingLine = (s: OpenStatus) => (s.waiting.length ? [`waiting for release: ${s.waiting.map((w) => `${w.key} ${w.age}`).join(", ")}`] : []);
 
 /** Each lane's queue and what starves, easy to grep. */
 export function readyLines(s: ReadyStatus, flow: DevFlow): string[] {
@@ -314,14 +324,16 @@ export async function status(board: Board, flow: DevFlow, project: string, io: S
   const [all, ctx] = await Promise.all([board.issues(project, true), contextOf(board, flow, project)]);
   const now = io.now();
   const live = new Set(all.map((i) => i.id));
-  const open = openStatus(ctx, all);
+  const open = openStatus(ctx, all, now);
   io.print(slotsLine(open));
+  for (const l of waitingLine(open)) io.print(l);
   const ready = await phase("ready to pull", () => readyStatus(board, ctx, all, now, io.cache));
   io.cache.save(live);
   for (const l of ready.ok ? readyLines(ready.value, flow) : [ready.error]) io.print(l);
   // Issues holding a slot (Implementing, or in Review) that no work is moving (flow.js stuckOf). A
   // board that cannot list an issue's links fails the phase: it is not "no pull request".
-  const held = all.filter((i) => ["implementing", "review"].includes(ctx.roleAt(i.state) ?? ""));
+  // A flip waiting for its release holds no slot and no work moves it: it is not stuck.
+  const held = all.filter((i) => ["implementing", "review"].includes(ctx.roleAt(i.state) ?? "") && !waits(ctx, i));
   const stuck = await phase("stuck", async () => (await Promise.all(held.map(async (i) => {
     let pr = null;
     for (const l of await board.links(project, i.id)) {
@@ -344,6 +356,7 @@ export async function status(board: Board, flow: DevFlow, project: string, io: S
     failures,
     json: {
       slots: open.slots,
+      waiting: open.waiting,
       queue: ready.ok ? ready.value.queue : bad(ready),
       starving: ready.ok ? ready.value.starving : bad(ready),
       merged: merged.ok ? merged.value : bad(merged),

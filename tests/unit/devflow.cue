@@ -332,4 +332,22 @@ cases: {
 		{call: "devflow.stuckOf", args: [{key: "PRONTO-9", state: "Implementing", since: "2026-11-14T08:00:00Z", pr: null, commit: null}, "2026-11-14T12:00:00Z", 3], expect: {key: "PRONTO-9", state: "Implementing", age: "4h", why: "no PR, no commits"}, why: "the hours come from devflow.cue"},
 		{call: "devflow.stuckLine", args: [{key: "PRONTO-444", state: "Implementing", age: "2d", why: "no PR, no commits"}], expect: "stuck: PRONTO-444 Implementing 2d, no PR, no commits"},
 	]}
+	"a flip issue waits for the release holding its fix: Implementing, a flip, labelled; the pull request merged and none open (PRONTO-666)": {suite: "devflow", steps: [
+		{call: "devflow.waitsRelease", args: ["implementing", "Flip daily_notify on in brawl-chess", ["l-wait"], "l-wait"], expect: true, why: "PRONTO-238: its own PRs closed, the fix merged under PRONTO-617"},
+		{call: "devflow.waitsRelease", args: ["implementing", "Flip daily_notify on in brawl-chess", [], "l-wait"], expect: false, why: "no label: it holds its slot"},
+		{call: "devflow.waitsRelease", args: ["implementing", "fix the crash", ["l-wait"], "l-wait"], expect: false, why: "only a flip issue waits"},
+		{call: "devflow.waitsRelease", args: ["review", "Flip daily_notify on in brawl-chess", ["l-wait"], "l-wait"], expect: false, why: "Review holds no slot anyway"},
+		{call: "devflow.waitsRelease", args: ["implementing", "Flip daily_notify on in brawl-chess", ["l-wait"], null], expect: false, why: "the board has no such label"},
+		{call: "devflow.waitRefusal", args: [{key: "#1390", role: "implementing", flip: true, merged: true, openPr: false}], expect: null},
+		{call: "devflow.waitRefusal", args: [{key: "#1390", role: "review", flip: true, merged: true, openPr: false}], expect: "only an Implementing flip waits"},
+		{call: "devflow.waitRefusal", args: [{key: "#1390", role: "implementing", flip: false, merged: true, openPr: false}], expect: "only a flip issue waits for a release"},
+		{call: "devflow.waitRefusal", args: [{key: "#1390", role: "implementing", flip: true, merged: false, openPr: false}], expect: "#1390 is not merged"},
+		{call: "devflow.waitRefusal", args: [{key: "#1390", role: "implementing", flip: true, merged: true, openPr: true}], expect: "it has an open pull request"},
+		{call: "devflow.fixReleased", args: [[{merged: true, held: true}]], expect: true},
+		{call: "devflow.fixReleased", args: [[{merged: true, held: true}, {merged: true, held: false}]], expect: false, why: "an older fix is held, the newer one is not: the release is not the fix's yet"},
+		{call: "devflow.fixReleased", args: [[]], expect: false},
+		{call: "devflow.fixReleased", args: [[{merged: false, held: false}]], expect: false},
+		{call: "devflow.fixReleased", args: [[{read: true, merged: true, held: true}, {read: false, merged: false, held: false}]], expect: false, why: "a linked pull request gh could not read may be a fix not yet released"},
+		{call: "devflow.unwaited", args: [["l-bug", "l-wait", "l-on-hold"], "l-wait"], expect: ["l-bug", "l-on-hold"], why: "only the wait label goes; bug and on-hold stay"},
+	]}
 }

@@ -211,6 +211,36 @@ export function flipOf(title) {
   return m ? m[1] : null;
 }
 
+/** Whether an issue waits for a release (PRONTO-666): an Implementing flip issue with the wait label,
+ * `waitId` the label's id on the board (null when the board has none). It holds no slot. */
+export function waitsRelease(role, name, labels, waitId) {
+  return role === "implementing" && flipOf(name) !== null && !!waitId && (labels ?? []).includes(waitId);
+}
+
+/** Why an issue may not wait for a release, or null when it may: an Implementing flip issue whose fix
+ * `merged` (a pull request, `key` its "#n") and has no `openPr`. */
+export function waitRefusal({ key, role, flip, merged, openPr }) {
+  if (!flip) return "only a flip issue waits for a release";
+  if (role !== "implementing") return "only an Implementing flip waits";
+  if (!merged) return `${key} is not merged`;
+  if (openPr) return "it has an open pull request";
+  return null;
+}
+
+/** Whether a waiting issue's fix is released: `prs` are `{merged, held}` of its linked pull requests (held:
+ * the released commit holds its merge). True when some merged and every merged one is held. */
+export function fixReleased(prs) {
+  // A pull request whose state could not be read (gh failed) may be a fix not yet released: wait.
+  if ((prs ?? []).some((p) => p.read === false)) return false;
+  const merged = (prs ?? []).filter((p) => p.merged);
+  return merged.length > 0 && merged.every((p) => p.held);
+}
+
+/** An issue's labels without the wait label (`waitId`), every other label kept (bug, on-hold). */
+export function unwaited(labels, waitId) {
+  return (labels ?? []).filter((l) => l !== waitId);
+}
+
 /** The flip issue of an app's flag among `issues` (`{name, modules}`): titled for the flag, in the
  * app's module, whatever its state, so one filed by hand (PRONTO-225..264) is never filed twice;
  * null when there is none. */
