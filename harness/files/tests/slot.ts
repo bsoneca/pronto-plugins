@@ -960,10 +960,12 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       // Room beside a running rehearsal: the machine's one-minute load, as release-cron reads it (Deno.loadavg).
       // Read only when it could admit (a local release holds, none waits); a failure is said in the wait line, with its cause.
       let loadError = "";
-      const load = hold && releasing.length && !waitingRelease.length && !foreign
+      const load = hold && weight > 0 && !release && releasing.length && !waitingRelease.length && !foreign
         ? (() => { try { return Deno.loadavg()[0]; } catch (e) { loadError = e instanceof Error ? e.message : String(e); return null; } })()
         : null;
-      const beside = hold && besideRelease(releasing.length, waitingRelease.length, load, holdLoad, !!foreign);
+      // Only a weighted ordinary claim runs beside: a weight-0 one (a Studio preview inside its slot's work) is not held at
+      // all, and keeps counting only the releases ahead of it.
+      const beside = hold && weight > 0 && !release && besideRelease(releasing.length, waitingRelease.length, load, holdLoad, !!foreign);
       const held_ = heldByRelease(hold, weight, release);
       const memHeld = holders.reduce((n, h) => n + h.mem, 0), coresHeld = holders.reduce((n, h) => n + h.cores, 0);
       // The tickets this claim waits behind, in order, nested or not: all of the older ones but a weighted cue
