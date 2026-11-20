@@ -191,6 +191,8 @@ cases: "slot.ts holds a claim for a live release in another account's pool, and 
 		{use: "r"},
 		{get: "loadRead", expect: 7, why: "load1 is the first of the machine's three load averages"},
 		{use: "r"},
-		{get: "loadFails", expect: "load1 could not be read beside a release (Deno.loadavg): Requires sys access", why: "a failed read fails the claim with its cause, never a hold that moves its deadline for the whole release (PRONTO-1020)"},
+		{get: "loadFails", expect: "load1 could not be read beside a release (Deno.loadavg): Requires sys access | cause: Requires sys access", why: "a failed read fails the claim with its cause, never a hold that moves its deadline for the whole release (PRONTO-1020)"},
+		{use: "r"},
+		{get: "loadEmpty", expect: "load1 could not be read beside a release (Deno.loadavg): no number, got undefined", why: "a read with no number fails as a failed read does, never a load that admits nothing or everything"},
 	]
 }

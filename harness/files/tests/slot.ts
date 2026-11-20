@@ -164,11 +164,14 @@ const cueMem = positive(Deno.env.get("CUE_MEM_GB"), 64);
 // The machine's one-minute load, as release-cron reads it. A failed read throws with its cause: a claim a release holds
 // keeps moving its deadline, so a read that failed every poll would hold it through the whole release (PRONTO-1020).
 export function load1(read: () => number[] = () => Deno.loadavg()): number {
+  let v: number | undefined;
   try {
-    return read()[0];
+    v = read()[0];
   } catch (e) {
     throw new Error(`load1 could not be read beside a release (Deno.loadavg): ${e instanceof Error ? e.message : String(e)}`, { cause: e });
   }
+  if (!Number.isFinite(v)) throw new Error(`load1 could not be read beside a release (Deno.loadavg): no number, got ${v}`);
+  return v as number;
 }
 
 // The load1 under which a claim a release holds is admitted beside a running rehearsal: one per core (besideRelease).
