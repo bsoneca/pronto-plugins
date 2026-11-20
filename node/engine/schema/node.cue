@@ -217,8 +217,12 @@ import (
 	// which they need as it is.
 	let caddyName = "\(release.name)-caddy"
 	let caddyConfig = "\(release.name)-caddy-dapr-config"
+	let sharedConfig = "\(release.name)-dapr-config"
+
+	// Only when upstream's shared Configuration exists to copy: the door is retargeted exactly when its own is emitted.
+	let retarget = len([for o in upstream if o.kind == "Configuration" && o.metadata.name == sharedConfig {o}]) > 0
 	_patched: [for o in upstream {
-		if !(o.kind == "Deployment" && o.metadata.name == caddyName) {
+		if !(retarget && o.kind == "Deployment" && o.metadata.name == caddyName) {
 			o
 			if o.kind == "Namespace" {
 				metadata: labels: "pronto.dev/release": release.name
@@ -232,22 +236,33 @@ import (
 				}]
 			}
 		}
-		if o.kind == "Deployment" && o.metadata.name == caddyName {
+		if retarget && o.kind == "Deployment" && o.metadata.name == caddyName {
 			(#RetargetDapr & {in: o, config: caddyConfig}).out
 		}
 	}]
 
 	// What it adds.
 	_added: list.Concat([
-		[for o in upstream if o.kind == "Configuration" && o.metadata.name == "\(release.name)-dapr-config" {
+		[for o in upstream if o.kind == "Configuration" && o.metadata.name == sharedConfig {
 			apiVersion: o.apiVersion
 			kind:       "Configuration"
-			metadata:   {name: caddyConfig, namespace: o.metadata.namespace, labels: o.metadata.labels}
-			spec: o.spec & {
-				api: allowed: [
-					{name: "invoke", version: "v1.0", protocol: "http"},
-					{name: "invoke", version: "v1.0", protocol: "grpc"},
-				]
+			metadata: {
+				name:      caddyConfig
+				namespace: o.metadata.namespace
+				if o.metadata.labels != _|_ {labels: o.metadata.labels}
+			}
+			// The app's configuration as it is, but for `api`, built here: its own other fields kept, `allowed` the door's alone.
+			spec: {
+				for k, v in o.spec if k != "api" {(k): v}
+				api: {
+					if o.spec.api != _|_ {
+						for k, v in o.spec.api if k != "allowed" {(k): v}
+					}
+					allowed: [
+						{name: "invoke", version: "v1.0", protocol: "http"},
+						{name: "invoke", version: "v1.0", protocol: "grpc"},
+					]
+				}
 			}
 		}],
 		[if release.tenant != _|_ {

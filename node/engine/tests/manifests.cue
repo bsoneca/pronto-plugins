@@ -173,6 +173,25 @@ cases: {
 			count:        5
 		}
 	}
+	"without the shared Dapr configuration upstream emits, the door is neither retargeted nor given one": {
+		_none: (schema.#Manifests & {
+			release: schema.#Release & _base
+			upstream: [
+				{apiVersion: "v1", kind: "Namespace", metadata: name: "app"},
+				{
+					apiVersion: "apps/v1"
+					kind:       "Deployment"
+					metadata:   {name: "app-caddy", namespace: "app"}
+					spec:       {replicas: 1, template: {metadata: {labels: component: "caddy", annotations: {"dapr.io/config": "elsewhere"}}, spec: containers: [{name: "caddy", image: "127.0.0.1:5000/app-caddy:latest@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}
+				},
+			]
+		}).objects
+		_got: {
+			count:  len(_none)
+			config: [for o in _none if o.kind == "Deployment" {o.spec.template.metadata.annotations."dapr.io/config"}][0]
+		}
+		_want: {count: 2, config: "elsewhere"}
+	}
 }
 
 // Every case's `got` holds `want`.

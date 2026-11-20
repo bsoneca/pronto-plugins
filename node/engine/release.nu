@@ -237,10 +237,8 @@ def check-daprd [app: string, namespace: string, components: list<string>] {
 	if ($bare | is-not-empty) { error make {msg: $"Pods running without their Dapr sidecar: ($bare | str join ', ')"} }
 }
 
-# The record of what runs: `sha` (what `--serving` prints, empty for a tree that was not a commit), and `verified`, empty
-# until the app's cd has checked the public site for it (`--verified`).
 # The door is public and dials its own Dapr sidecar: its `/crud/v1.0/metadata` must be PostgREST's answer (a 404), never the
-# sidecar's JSON (`"id":"caddy"`). A host that does not answer yet (DNS not moved) cannot be checked and is said, not failed;
+# sidecar's metadata (a 200 JSON body with `"runtimeVersion"`). A host that does not answer yet (DNS not moved) cannot be checked and is said, not failed;
 # a preview with no public host of its own has nothing to ask.
 export def check-door [node: record] {
 	if ($node.preview | is-not-empty) and (($node.hosts | get -o $node.preview | default "") | is-empty) { return }
@@ -253,11 +251,14 @@ export def check-door [node: record] {
 		print -e $"node: (stamp) warning: ($url) did not answer \(curl ($r.exit_code)\), so the door's Dapr API was not checked"
 		return
 	}
-	if $body =~ '"id"\s*:\s*"caddy"' {
+	if ($r.stdout | str trim) == "200" and $body =~ '"runtimeVersion"' {
 		error make {msg: $"the door answers the Dapr sidecar's own API: ($url) returned its metadata, status ($r.stdout | str trim); the caddy Dapr configuration did not take"}
 	}
+	print $"node: (stamp) the door's Dapr API is closed: ($url) answers (($r.stdout | str trim)), not the sidecar's metadata"
 }
 
+# The record of what runs: `sha` (what `--serving` prints, empty for a tree that was not a commit), and `verified`, empty
+# until the app's cd has checked the public site for it (`--verified`).
 export def record-release [app_dir: string, node: record, pushed: record] {
 	let git_root = (do { cd $app_dir; ^git rev-parse --show-toplevel } | complete)
 	# The commit is recorded only for a tree that is that commit: a dirty one (modified or untracked files under the app) was

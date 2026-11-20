@@ -114,7 +114,7 @@ case "$*" in
   *"/crud/v1.0/metadata"*)
     out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
     if [ -f "$d/host_unreachable" ]; then printf 000; exit 6; fi
-    if [ -f "$d/metadata_open" ]; then echo '{"id":"caddy","components":[]}' > "$out"; printf 200; exit 0; fi
+    if [ -f "$d/metadata_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21","components":[]}' > "$out"; printf 200; exit 0; fi
     echo "404 page not found" > "$out"; printf 404; exit 0 ;;
 esac
 if [ -f "$d/registry_dead" ]; then printf 000; exit 7; fi
@@ -219,12 +219,12 @@ def main [] {
 	test_a_stale_lock_is_taken_over_against_its_resource_version
 	test_prune_runs_only_the_maintenance
 	test_a_lease_that_stays_does_not_turn_a_live_release_into_a_failure
+	test_the_door_must_not_answer_the_dapr_api
 	test_a_deferred_prune_exits_four
 	test_only_a_confirmed_absence_is_created
 	test_the_lock_is_released_against_what_was_read_and_its_failure_is_told
 	test_verification_is_invalidated_before_a_release_changes_what_serves
 	test_a_failed_provider_export_stops_the_release
-	test_the_door_must_not_answer_the_dapr_api
 	test_a_scan_that_fails_aborts_the_collection_and_a_deferred_one_is_pending
 	test_a_file_name_with_a_newline_is_one_name
 	test_a_failed_lease_renewal_is_a_warning_and_the_record_starts_unknown
@@ -1220,6 +1220,9 @@ def test_a_deferred_prune_exits_four [] {
 	assert (has $r.stderr "deferred, not done") $r.stderr
 	let patch = (calls $w | where {|c| ($c | str starts-with "patch configmap pronto-release") and ($c | str contains "pruned") } | last)
 	assert (has $patch '"pruned":"pending"') $patch
+	rm -rf $w.dir
+}
+
 def test_the_door_must_not_answer_the_dapr_api [] {
 	print "test a release fails when the door answers the Dapr sidecar's metadata, passes on a 404, and says so when the host does not answer..."
 	let w = (sandbox)
@@ -1234,6 +1237,8 @@ def test_the_door_must_not_answer_the_dapr_api [] {
 	let open = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert ($open.exit_code != 0) "the sidecar's metadata fails the release"
 	assert (has $open.stderr "the door answers the Dapr sidecar's own API") $open.stderr
+	assert ((calls $w) | any {|c| $c | str starts-with "rollout undo" }) "and the Deployments are rolled back"
+	assert (has $ok.stdout "the door's Dapr API is closed") $ok.stdout
 	rm -rf $w.dir
 }
 
