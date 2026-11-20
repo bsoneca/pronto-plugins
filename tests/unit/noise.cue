@@ -94,6 +94,11 @@ cases: {
 		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.123456Z", "2026-11-19T19:00:05.123Z"], expect: true},
 		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.1234Z", "2026-11-19T19:00:05.123456Z"], expect: false},
 		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05Z", "2026-11-19T19:00:05.000000000Z"], expect: false, why: "equal is not after"},
+		{call: "watch.timeAfter", args: ["not a time", "2026-11-19T19:00:05Z"], throws: "an unparseable timestamp", why: "NaN would pass the cursor filter while the run advances"},
+	]}
+	"seen is a multiset: two identical entries in one ms, one counted, leave one to count; a bad timestamp throws before any state": {suite: "noise", steps: [
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:05:00.000Z"}).out, (_n & {ts: "2026-11-19T19:05:00.000Z"}).out], hashes: ["h1", "h1"], counted: ["h1"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {entries: [(_n & {ts: "2026-11-19T19:05:00.000Z"}).out], seen: ["h1", "h1"]}, why: "one saved occurrence skips one entry; the excess goes to triage, and both stay in seen"},
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "nope"}).out], hashes: ["h1"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], throws: "an unparseable timestamp"},
 	]}
 	"an entry in its pod's start and shutdown windows at once meets a rule held to shutdown": {suite: "noise", steps: [
 		{value: [

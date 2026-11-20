@@ -369,7 +369,9 @@ export function phasesOf(entry, windows, lifecycle) {
 // A time (ISO, Z) as whole seconds and its fraction padded to nanoseconds, so sources of any precision compare exactly.
 const instant = (s) => {
   const m = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z$/.exec(s);
-  return m ? [Date.parse(`${m[1]}Z`), (m[2] ?? "").padEnd(9, "0")] : [Date.parse(s), "000000000"];
+  const t = m ? Date.parse(`${m[1]}Z`) : Date.parse(s);
+  if (Number.isNaN(t)) throw new Error(`an unparseable timestamp ${JSON.stringify(s)}: the ledger and the cursor are where they were`);
+  return [t, m ? (m[2] ?? "").padEnd(9, "0") : "000000000"];
 };
 // Whether time a is strictly after time b, to the nanosecond.
 export const timeAfter = (a, b) => { const [x, fx] = instant(a), [y, fy] = instant(b); return x !== y ? x > y : fx > fy; };
@@ -380,9 +382,15 @@ export const timeAfter = (a, b) => { const [x, fx] = instant(a), [y, fy] = insta
 // gives the lag before it, in ms.
 /** @param {{entries: any[], hashes: string[], since?: boolean, counted?: Iterable<string>, reached: string, to: string, lag: number}} input */
 export function settleRun({ entries, hashes, since = false, counted = [], reached, to, lag }) {
-  const known = new Set(counted);
-  const kept = new Map(entries.map((e, i) => [e, hashes[i]]));
-  const rest = since ? entries : entries.filter((e) => !known.has(kept.get(e)));
+  const known = new Map();
+  for (const h of counted) known.set(h, (known.get(h) ?? 0) + 1);
+  entries.forEach((e) => instant(e.timestamp));
+  const kept = entries.map((e, i) => [e, hashes[i]]);
+  const rest = since ? entries : entries.filter((_e, i) => {
+    const n = known.get(hashes[i]) ?? 0;
+    if (n > 0) known.set(hashes[i], n - 1);
+    return n === 0;
+  });
   const committed = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
   // In ms: a node's timestamps are cut to ms and the next read starts inclusive at the cursor, so the cursor's own ms is read again.
   const seen = [...kept].filter(([e]) => Date.parse(e.timestamp) >= Date.parse(committed)).map(([, h]) => h);
