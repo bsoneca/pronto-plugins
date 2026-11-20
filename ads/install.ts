@@ -2,8 +2,10 @@
 //   install.ts <app-dir> [<module-path>]
 // Regenerated every time, marked as this host's: the page's module (ads.js), at
 // <module-path> in the app, ads/ads.js unless named, for the app's page code to
-// import; and the generate step giving the door /ads.txt (pronto/ads.cue,
-// ads/ads.nu). Written once, then the app's own: its publisher (ads_spec.cue).
+// import, with its origins beside it (ads_site.js, written once here and then by generate); the generate
+// step giving the door /ads.txt and its frame protection, and writing the ad document (pronto/ads.cue,
+// ads/ads.nu); the ad document's service (ads/server.ts) and its CUE (ads_plugin.cue). Written once, then
+// the app's own: its publisher and origins (ads_spec.cue).
 const here = new URL(".", import.meta.url).pathname;
 const [appArg, at = "ads/ads.js"] = Deno.args;
 if (!appArg) throw new Error("usage: install.ts <app-dir> [<module-path>]");
@@ -11,7 +13,7 @@ const app = appArg.replace(/\/$/, "");
 const program = await Deno.readTextFile(`${app}/program.cue`).catch(() => { throw new Error(`${app} has no program.cue: not a pronto app`); });
 const pkg = /^package\s+([a-z][a-z0-9_]*)\s*$/m.exec(program)?.[1];
 if (!pkg) throw new Error(`${app}/program.cue names no package`);
-if (at.startsWith("/") || at.split("/").includes("..")) throw new Error(`${at}: a path inside the app`);
+if (at.startsWith("/") || at.split("/").includes("..") || !/^[A-Za-z0-9_./-]+$/.test(at)) throw new Error(`${at}: a path inside the app`);
 
 async function write(path: string, text: string, seed = false) {
   const to = `${app}/${path}`;
@@ -21,7 +23,9 @@ async function write(path: string, text: string, seed = false) {
   await Deno.writeTextFile(to, text);
   console.log(`pronto-ads: wrote ${path}`);
 }
-const template = async (name: string) => (await Deno.readTextFile(`${here}app/${name}`)).replaceAll("__PACKAGE__", pkg);
+// The page module's folder, where generate writes ads_site.js.
+const moduleDir = at.includes("/") ? at.slice(0, at.lastIndexOf("/")) : ".";
+const template = async (name: string) => (await Deno.readTextFile(`${here}app/${name}`)).replaceAll("__PACKAGE__", pkg).replaceAll("__MODULE_DIR__", moduleDir);
 
 // The page's module says which commit of pronto-plugins it was generated from (the last to touch its
 // template), so a reader of an app's diff sees generator output and not a hand edit. Left as the template
@@ -34,6 +38,10 @@ async function stamped(text: string) {
 await write(at, await stamped(await template("ads.js")));
 await write("pronto/ads.cue", await template("pronto_ads.cue"));
 await write("ads/ads.nu", await template("ads.nu"));
+await write("ads/server.ts", await template("server.ts"));
+await write("ads_plugin.cue", await template("ads_plugin.cue"));
+// What generate rewrites from the spec: here only where the page's module has none yet, so a first import works.
+await write(`${moduleDir}/ads_site.js`, await template("ads_site.js"), true);
 // One copy of the program's exports for all the plugins that read them (common/exports.nu).
 await write("pronto/exports.nu", await Deno.readTextFile(`${here}../common/exports.nu`));
 await write("ads_spec.cue", await template("ads_spec.cue"), true);

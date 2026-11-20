@@ -763,16 +763,18 @@ end, `"dismissed"` when it was closed before, and `"none"` with no ad to show.
 
 | Path in the app | |
 | --- | --- |
-| `ads/ads.js`, or the path named | the page's module: `rewarded()` |
-| `pronto/ads.cue`, `ads/ads.nu` | the generate step giving the door `/ads.txt` again after pronto's writer, the publisher's line, which AdSense reads to verify the site |
-| `ads_spec.cue` | written once, then the app's: its publisher, `""` for none |
+| `ads/ads.js`, or the path named, and `ads_site.js` beside it | the page's module: `rewarded()` and `prepare()`; the app's origin and the ad document's, which generate writes |
+| `pronto/ads.cue`, `ads/ads.nu` | the generate step giving the door `/ads.txt` again after pronto's writer, the publisher's line, which AdSense reads to verify the site; `frame-ancestors 'self'` and `X-Frame-Options` on the door's policy; and the ad document's files |
+| `ads_plugin.cue`, `ads/server.ts` | the ad document, its policy, the shell's frame source and the `ads` service that answers it (a cluster target the release routes to its own origin) |
+| `ads_spec.cue` | written once, then the app's: its publisher, `""` for none, and the origins ads play at (`site`) and are answered at (`frame`) |
 
-The ad is always a stand-in that plays at a press, as billing's stand-in Stripe
-pays at one. Real ads are not implemented: naming an AdSense publisher only
-writes its line in `/ads.txt`, and `rewarded()` still shows the stand-in.
-Google's ads for the web tell no server an ad was watched, so the page alone
-knows: whatever a reward gives away, the app's database bounds (one a day an
-account, say, in the app's own migration).
+Off the app's own origin the ad is a stand-in that plays at a press, as billing's
+stand-in Stripe pays at one. On it, with a publisher named, Google's ads (H5 Games Ads) play
+in a document of their own at another origin, which the page frames and talks to by
+`postMessage`: no Google script runs in the page. Google's ads for the web tell no server an
+ad was watched, so the page alone knows: whatever a reward gives away, the app's database
+bounds (one a day an account, say, in the app's own migration). [ads/README.md](ads/README.md)
+has the contract.
 
 ## Hosts share `.say.json`
 
