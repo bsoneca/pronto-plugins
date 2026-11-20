@@ -281,10 +281,16 @@ def invalidate-verified [ns: string] {
 	if $r.exit_code != 0 and not ($r.stderr =~ "NotFound") { error make {msg: $"invalidating the verified record of ($ns) failed: ($r.stderr | str trim)"} }
 }
 
-# The registry lease renewed; a renewal that fails is a warning, never a failure of a release that may already be live (the
+# The registry lease renewed. Before the push (and until the images are pushed) a failure stops the release, as nothing is live; after
+# the release is applied a failure is a warning, never a failure of a release that is live (the
 # lease's hour is the margin, and the next renewal tries again).
-def renew-lease [node: record, lease: string] {
+def renew-lease [node: record, lease: string, --before-live] {
 	if $lease == "" { return }
+	if $before_live {
+		# Nothing is live yet: a lease that cannot be renewed would let a collector take this release for dead mid-push, so it stops here.
+		registry lease-renew $node.build $lease
+		return
+	}
 	try { registry lease-renew $node.build $lease } catch {|e| print -e $"node: (stamp) warning: the registry lease ($lease) was not renewed: ($e.msg)" }
 }
 
@@ -603,7 +609,7 @@ def main [
 					mut maintenance = ""
 					let body_failure = (try {
 						# 2. build, or placeholders for a check
-						renew-lease $node $lease
+						renew-lease $node $lease --before-live
 						let preview_tag = if ($node.preview | is-empty) { "release" } else { $node.preview }
 						let pushed = if $check and not $build {
 							render placeholder-pushed $services $preview_tag
@@ -612,7 +618,7 @@ def main [
 							build-images $app_info $node $fwd $services (if $check { "check" } else { $preview_tag })
 						}
 						# the lease renewed after the push, and again after the long phases that follow
-						renew-lease $node $lease
+						renew-lease $node $lease --before-live
 						release-app $app_info $node $meta $compose $facts $secrets $pushed --check=$check
 						renew-lease $node $lease
 						# 16. prune: the release is live, so a failure here does not undo it; it is recorded beside the release

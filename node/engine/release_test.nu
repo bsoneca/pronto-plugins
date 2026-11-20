@@ -1058,13 +1058,23 @@ def test_the_apps_compose_plugin_is_the_one_that_renders [] {
 }
 
 def test_a_failed_lease_renewal_is_a_warning_and_the_record_starts_unknown [] {
-	print "test a lease renewal that fails is a warning (the release is live), and the record starts with maintenance unknown..."
+	print "test a lease renewal that fails before the push stops the release and after it is a warning, and the record starts with maintenance unknown..."
 	let w = (sandbox)
 	"" | save -f ($w.state | path join lease_patch_fail)
+	# before the push nothing is live: a renewal that fails stops the release, and nothing is built or applied
 	let r = (in-world $w $release_nu --app $w.app)
-	assert (released $r) $"($r.stdout)($r.stderr)"
-	assert (has $r.stderr "warning: the registry lease") $r.stderr
-	assert (has $r.stdout "[SUCCESS] Released aprende") $r.stdout
+	assert ($r.exit_code != 0) "a lease that cannot be renewed before the push stops the release"
+	assert (has $r.stderr "kubectl patch lease") $"($r.stdout)($r.stderr)"
+	assert (not ((calls $w) | any {|c| $c | str contains "Deployment/" })) "nothing was applied"
+	assert (not ((docker-calls $w) | any {|c| $c | str starts-with "buildx bake" })) "and nothing was built"
+	# after the release is applied it is a warning: the third renewal fails, and the release is live all the same
+	rm -rf $w.dir
+	let w = (sandbox)
+	"3" | save -f ($w.state | path join lease_patch_fail_from)
+	let late = (in-world $w $release_nu --app $w.app)
+	assert (released $late) $"($late.stdout)($late.stderr)"
+	assert (has $late.stderr "warning: the registry lease") $late.stderr
+	assert (has $late.stdout "[SUCCESS] Released aprende") $late.stdout
 	# a record written by a release says nothing of the maintenance until the prune has been recorded
 	rm -rf $w.dir
 	let v = (sandbox)
