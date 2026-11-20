@@ -103,7 +103,13 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 	// Each holds to its one kind's whole shape, closed (`#Step`), and says what fails: `kinds` that it has
 	// not one, `shape` that a field is not the kind's or has the wrong type, `missing` that a field the kind
 	// requires is not there.
-	_checked: [for l in [steps, _in1, _in2, _in3] for s in l let ks = [for K in _kindNames if s[K] != _|_ {K}] {kinds: ks & [_], shape: s & close({#Common, _shapes[ks[0]]}), missing: [for F, _ in _shapes[ks[0]] if s[F] == _|_ {F}] & []}]
+	_checked: [for l in [steps, _in1, _in2, _in3] for s in l let ks = [for K in _kindNames if s[K] != _|_ {K}] {
+		if len(ks) != 1 {kinds: "a step has exactly one kind, this one has \(len(ks))" & "one kind"}
+		if len(ks) == 1 {
+			shape: s & close({#Common, _shapes[ks[0]]})
+			missing: {for F, _ in _shapes[ks[0]] if s[F] == _|_ {(F): "a \(ks[0]) step needs \(F)" & "present"}}
+		}
+	}]
 	// A race a slow page loses (a lobby's pairing, a sign-in's boot): a pull request's gate throttles the
 	// pages of the scenarios marked so, as the release rehearsal throttles every scenario (tests/slow.ts).
 	// Those that measure nothing about time run as fast as the machine allows.
