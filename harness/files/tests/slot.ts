@@ -512,11 +512,13 @@ export const releaseHolds = (holding: number, waiting: number) => holding + wait
 // "symlink", "other"), their uids and modes, the pid, the file's text, when it was written (a record's mtime, a
 // ticket's name's ms), whether the pid is alive, when its process started (ms; 0 unknown), and what it names.
 export type ForeignRecord = { ticket: boolean; dirKind: string; dirUid: number; dirMode: number; fileKind: string; fileUid: number; fileMode: number; pid: number; text: string; written: number; alive: boolean; started: number; what: string };
-// A ticket's text, "<weight>[ nested=1][ mem=<GB> cores=<n>][ release=1] <what>", is a release's when its weight is above 0
-// and `release=1` follows the fields before it (as the claim's own scan reads it).
+// A ticket's text is a release's when its weight is above 0 and its priority field says so, as the claim's own scan
+// reads it (parseTicket: "<weight>[ nested=1][ mem=<GB> cores=<n>] prio=release <what>"), or, written by a copy of
+// this file from before the field, `release=1` follows the fields before it ("<weight>[ nested=1][ mem= cores=] release=1 <what>").
 export const releaseTicketOf = (text: string) => {
   const [w, ...rest] = text.trim().split(" ");
   if (!(Number(w) > 0)) return false;
+  if (parseTicket(text.trim()).release) return true;
   let i = 0;
   if (rest[i] === "nested=1") i++;
   if (rest[i]?.startsWith("mem=")) i++;
@@ -527,7 +529,7 @@ export const releaseTicketOf = (text: string) => {
 export const foreignTrusted = (kind: string, want: string, entryUid: number, mode: number, uid: number) =>
   kind === want && entryUid === uid && (mode & 0o022) === 0;
 // The first entry that is a live release of `uid`: real dir and file (no link), that uid's and not group- or
-// other-writable, a release record (weight above 0, `prio=release`) or ticket (`release=1`), written within `hours`,
+// other-writable, a release record (weight above 0, `prio=release`) or ticket (releaseTicketOf), written within `hours`,
 // its process alive and started no later than the write. Anything else is no hold.
 export const heldByForeign = (records: ForeignRecord[], uid: number, now: number, hours: number) =>
   records.find((r) => foreignTrusted(r.dirKind, "dir", r.dirUid, r.dirMode, uid) && foreignTrusted(r.fileKind, "file", r.fileUid, r.fileMode, uid)
@@ -604,7 +606,7 @@ export const readForeign = async (dir: string, want: number, self: number | null
         if (!releaseTicketOf(f.text)) continue;
         const [w, ...rest] = f.text.trim().split(" ");
         records.push({ ticket: true, dirKind: d.kind, dirUid: d.uid, dirMode: d.mode, fileKind: f.kind, fileUid: f.uid, fileMode: f.mode, pid, text: f.text, written: Number(m[1]), alive: live,
-          started: await startOf(pid, live), what: rest.filter((x) => !/^(nested=1|release=1|mem=.*|cores=.*)$/.test(x)).join(" ").slice(0, 200) || `weight ${w}` });
+          started: await startOf(pid, live), what: rest.filter((x) => !/^(nested=1|release=1|prio=(release|normal)|mem=.*|cores=.*)$/.test(x)).join(" ").slice(0, 200) || `weight ${w}` });
       }
     }
     const found = heldByForeign(records, want, now, hours);
