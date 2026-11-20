@@ -11,6 +11,10 @@ package unit
 // break's own.
 let _ready = {frame: {event: "ready", id: null}}
 let _start = {frame: {event: "beforeReward"}}
+// The hosts that serve scripts under paths of their own, or JSONP host-wide, matched as host suffixes: no script source is
+// the host or any name under it. The real sources (pagead2.googlesyndication.com/pagead/, ep2.adtrafficquality.google/sodar/)
+// are under none, so no path-scoped exception is needed.
+let _denied = ["google.com", "googleadservices.com", "doubleclick.net", "googleapis.com", "gstatic.com", "googletagmanager.com", "googleusercontent.com", "youtube.com"]
 
 cases: "an ad viewed to its end is viewed, and the sound is given back": {
 	suite: "ads"
@@ -268,11 +272,13 @@ cases: "off the app's origin the ad is the stand-in, unchanged, and Google is no
 		{keep: "r", holds: {dialog: "stand-in", created: []}, why: "on the app's origin, but no ad document named"},
 	]
 }
-cases: "a stand-in the caller gave a wait to is none when it runs out, and brackets the sound": {
+cases: "a stand-in the caller gave a wait to is not closed by it: it is viewed when Get reward is pressed, and brackets the sound": {
 	suite: "ads"
 	steps: [
-		{call: "ads.standIn", args: [{opts: {seconds: 30, wait: 3}, clicks: [{after: 3}]}]},
-		{keep: "r", holds: {result: "none", audio: ["start", "end"], removed: true}},
+		{call: "ads.standIn", args: [{opts: {seconds: 30, wait: 3}, clicks: [{after: 60}, {press: "reward"}]}]},
+		{keep: "r", holds: {result: "viewed", audio: ["start", "end"], removed: true}, why: "wait bounds only the time before an ad starts; a stand-in starts at once, so one left open past it is still rewarded"},
+		{call: "ads.standIn", args: [{opts: {seconds: 30, wait: 3}, clicks: [{after: 60}]}]},
+		{keep: "r", holds: {result: null, audio: ["start"]}, why: "and it is not closed as none either"},
 		{call: "ads.standIn", args: [{opts: {seconds: 30}, clicks: [{after: 60}]}]},
 		{keep: "r", holds: {result: null, audio: ["start"]}, why: "no wait given, none taken: as before"},
 	]
@@ -321,13 +327,13 @@ cases: "frame-ancestors is the site the spec names": {
 cases: "no Google host that serves scripts under any path of its own is a script source": {
 	suite: "ads"
 	steps: [
-		{call: "ads.auditReal", args: [{deny: ["www.google.com", "googleadservices.com", "doubleclick.net", "googleapis.com", "gstatic.com"]}]},
+		{call: "ads.auditReal", args: [{deny: _denied}]},
 		{keep: "r", expect: {denied: [], wholeHost: []}, why: "the real policy: none of the hosts with JSONP or a script host-wide, and no source a whole host"},
-		{call: "ads.auditReal", args: [{deny: ["www.google.com", "googleadservices.com", "doubleclick.net", "googleapis.com", "gstatic.com"], extra: "https://www.google.com"}]},
+		{call: "ads.auditReal", args: [{deny: _denied, extra: "https://www.google.com"}]},
 		{get: "denied", expect: ["https://www.google.com"], why: "the check fails when www.google.com is a script source"},
-		{call: "ads.auditReal", args: [{deny: ["www.google.com", "googleadservices.com", "doubleclick.net", "googleapis.com", "gstatic.com"], extra: "https://*.doubleclick.net"}]},
+		{call: "ads.auditReal", args: [{deny: _denied, extra: "https://*.doubleclick.net"}]},
 		{get: "denied", expect: ["https://*.doubleclick.net"], why: "or any name under doubleclick.net"},
-		{call: "ads.auditReal", args: [{deny: ["www.google.com", "googleadservices.com", "doubleclick.net", "googleapis.com", "gstatic.com"], extra: "https://googleads.g.doubleclick.net/pagead/"}]},
+		{call: "ads.auditReal", args: [{deny: _denied, extra: "https://googleads.g.doubleclick.net/pagead/"}]},
 		{get: "denied", expect: ["https://googleads.g.doubleclick.net/pagead/"], why: "a path does not make it right"},
 		{call: "ads.auditReal", args: [{deny: ["googleapis.com"], extra: "https://pagead2.googlesyndication.com"}]},
 		{get: "wholeHost", expect: ["https://pagead2.googlesyndication.com"], why: "and the check says a source with no path"},
@@ -490,5 +496,102 @@ cases: "the step fails where it cannot place the policy once, or pronto has done
 		{call: "ads.route", args: [[{caddy: "ancestors", publisher: true}]]},
 		{keep: "r", holds: [{failed: true, complained: true}], why: "the door's policy already says who may frame it: pronto's, and the splice is to go"},
 		{get: "0.caddy", matches: "frame-ancestors 'none'\""},
+	]
+}
+
+cases: "a publisher whose ad document is the game's own origin is refused": {
+	suite: "ads"
+	steps: [
+		{call: "ads.refused", args: [{site: "https://bonkchess.com", frame: "https://bonkchess.com"}]},
+		{keep: "r", expect: "refused", why: "frame == site would let the ad document frame-ancestors and the door's frame-src name one origin"},
+	]
+}
+cases: "an origin or a publisher that is not the shape of one never reaches the bridge or the policy": {
+	suite: "ads"
+	steps: [
+		{call: "ads.refused", args: [{site: "https://bonk\"chess.com"}]},
+		{keep: "r", expect: "refused", why: "a quote would end the string the bridge writes the origin in"},
+		{call: "ads.refused", args: [{frame: "https://ads.bonkchess.com; script-src *"}]},
+		{keep: "r", expect: "refused", why: "or add a directive to the policy"},
+		{call: "ads.refused", args: [{publisher: "pub-1\"+alert(1)+\""}]},
+		{keep: "r", expect: "refused"},
+	]
+}
+cases: "ads play as the stand-in when the ad document is the page's own origin": {
+	suite: "ads"
+	steps: [
+		{call: "ads.mode", args: [{site: "https://bonkchess.com", frame: "https://bonkchess.com", origin: "https://bonkchess.com", search: ""}]},
+		{keep: "r", expect: "stand-in", why: "defence in depth: never frame the game's own origin as the ad document"},
+	]
+}
+
+// The bridge, run as the ad document runs it, on fakes.
+cases: "the bridge asks Google for a break the page asked for, and tells only the page's origin that it is ready": {
+	suite: "ads"
+	steps: [
+		{call: "ads.bridge", args: [{script: [{ready: true}, {send: {op: "break", id: "a", name: "purse"}}]}]},
+		{keep: "r", holds: {breaks: ["purse"], targets: ["https://bonkchess.com"], first: {type: "pronto-ads", v: 1, id: null, event: "ready"}, scripts: 1}, why: "ready is posted to the site with id null"},
+	]
+}
+cases: "the bridge drops a message from the wrong origin or the wrong source": {
+	suite: "ads"
+	steps: [
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "a", name: "purse"}, as: {origin: "https://evil.example"}}]}]},
+		{get: "breaks", expect: [], why: "another origin"},
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "a", name: "purse"}, as: {source: "other"}}]}]},
+		{get: "breaks", expect: [], why: "not the parent's window"},
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "a", name: "purse"}}]}]},
+		{get: "breaks", expect: ["purse"], why: "the control: the same message from the site, by the parent"},
+	]
+}
+cases: "the bridge drops a message of a type or version that is not the contract's, and one that is not an object": {
+	suite: "ads"
+	steps: [
+		{call: "ads.bridge", args: [{script: [{send: {type: "other", op: "break", id: "a", name: "purse"}}]}]},
+		{get: "breaks", expect: []},
+		{call: "ads.bridge", args: [{script: [{send: {v: 2, op: "break", id: "a", name: "purse"}}]}]},
+		{get: "breaks", expect: []},
+		{call: "ads.bridge", args: [{script: [{raw: null}, {raw: "pronto-ads"}]}]},
+		{get: "breaks", expect: []},
+	]
+}
+cases: "the bridge drops an id that is not a string of at most 64 characters, and a name that is not the contract's": {
+	suite: "ads"
+	steps: [
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", name: "purse"}}]}]},
+		{get: "breaks", expect: [], why: "65 characters"},
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", name: "purse"}}]}]},
+		{get: "breaks", expect: ["purse"], why: "64 are taken"},
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: 7, name: "purse"}}]}]},
+		{get: "breaks", expect: []},
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "a", name: "other"}}]}]},
+		{get: "breaks", expect: [], why: "an unknown name"},
+	]
+}
+cases: "the bridge shows an ad only after beforeReward, and only for the break in flight": {
+	suite: "ads"
+	steps: [
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "a", name: "purse"}}, {send: {op: "show", id: "a"}}]}]},
+		{get: "shown", expect: 0, why: "show before beforeReward does nothing"},
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "a", name: "purse"}}, {fire: {config: 0, cb: "beforeReward"}}, {send: {op: "show", id: "zzz"}}]}]},
+		{get: "shown", expect: 0, why: "a stale id does nothing"},
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "a", name: "purse"}}, {fire: {config: 0, cb: "beforeReward"}}, {send: {op: "show", id: "a"}}, {send: {op: "show", id: "a"}}]}]},
+		{keep: "r", holds: {shown: 1, events: ["beforeReward"]}, why: "the control: once, for the break in flight"},
+	]
+}
+cases: "the bridge forwards nothing of an earlier break once a new one has started": {
+	suite: "ads"
+	steps: [
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "a", name: "purse"}}, {send: {op: "break", id: "b", name: "review"}}, {fire: {config: 0, cb: "adViewed"}}, {fire: {config: 0, cb: "adBreakDone", arg: {breakStatus: "viewed"}}}]}]},
+		{keep: "r", holds: {events: [], breaks: ["purse", "review"]}, why: "break a's callbacks are dropped"},
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "a", name: "purse"}}, {fire: {config: 0, cb: "beforeReward"}}, {send: {op: "break", id: "b", name: "review"}}, {send: {op: "show", id: "b"}}, {fire: {config: 1, cb: "adViewed"}}]}]},
+		{keep: "r", holds: {shown: 0, ids: ["a", "b"], events: ["beforeReward", "adViewed"]}, why: "a's show function is not b's; b's own events go out as b's"},
+	]
+}
+cases: "the bridge cuts breakStatus to 32 characters": {
+	suite: "ads"
+	steps: [
+		{call: "ads.bridge", args: [{script: [{send: {op: "break", id: "a", name: "purse"}}, {fire: {config: 0, cb: "adBreakDone", arg: {breakStatus: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}}]}]},
+		{keep: "r", holds: {events: ["done"], statusLength: 32}},
 	]
 }

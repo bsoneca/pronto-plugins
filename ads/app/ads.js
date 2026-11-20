@@ -26,7 +26,7 @@ const SHOWN = 'position:fixed;inset:0;width:100%;height:100%;border:0;z-index:21
 /** Which ads play: "stand-in" off the app's origin or with no ad document named, else "google",
  * and "google-test" with `?ads=google-test` in `search`. */
 export function mode({ site, frame, origin, search }) {
-  if (!site || !frame || origin !== site) return 'stand-in';
+  if (!site || !frame || frame === site || origin !== site) return 'stand-in';
   return new URLSearchParams(search).get('ads') === 'google-test' ? 'google-test' : 'google';
 }
 
@@ -155,15 +155,15 @@ export function adapter(env = {}) {
     return p;
   }
 
-  // The stand-in: a dialog that plays at a press. `wait` (seconds), where the caller gives it, closes an
-  // unfinished one as "none"; `onStart` and `onEnd` bracket it as they bracket a Google ad.
-  function standIn({ seconds = 5, wait, onStart, onEnd } = {}) {
+  // The stand-in: a dialog that plays at a press. `wait` bounds only the time before an ad starts, and the
+  // stand-in starts at once, so it has none to bound; `onStart` and `onEnd` bracket it as they bracket a Google ad.
+  function standIn({ seconds = 5, onStart, onEnd } = {}) {
     showing = new Promise((settle) => {
-      let ad = null, timer = null, gave = null;
+      let ad = null, timer = null;
       // An unexpected failure clears the failed ad away and propagates: the promise rejects.
       // `showing` is cleared once it has been assigned (a failure here is synchronous, before the assignment).
       const fail = (error) => {
-        clearInterval(timer); clearTimeout(gave); ad?.remove();
+        clearInterval(timer); ad?.remove();
         queueMicrotask(() => { showing = null; });
         throw error;
       };
@@ -184,7 +184,10 @@ export function adapter(env = {}) {
           if (n === 0) { clearInterval(timer); reward.hidden = false; reward.focus(); }
           n--;
         };
-        const finish = (how) => { clearInterval(timer); clearTimeout(gave); ad.close(); ad.remove(); showing = null; onEnd?.(); settle(how); };
+        const finish = (how) => {
+          clearInterval(timer); ad.close(); ad.remove(); showing = null;
+          try { onEnd?.(); } finally { settle(how); }
+        };
         close.onclick = () => finish(reward.hidden ? 'dismissed' : 'viewed');
         reward.onclick = () => finish('viewed');
         ad.addEventListener('cancel', (e) => { e.preventDefault(); close.click(); });
@@ -193,7 +196,6 @@ export function adapter(env = {}) {
         onStart?.();
         tick();
         timer = setInterval(tick, 1000);
-        if (wait != null) gave = setTimeout(() => finish('none'), wait * 1000);
       } catch (error) { fail(error); }
     });
     return showing;

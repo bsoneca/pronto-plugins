@@ -37,7 +37,7 @@ async function build(publisher, site, frame) {
     const install = await run(Deno.execPath(), ['run', '--no-config', '--allow-read', '--allow-write', '--allow-run=git', `${here}ads/install.ts`, dir], here);
     if (install.code) throw new Error(`the installer failed: ${install.err}`);
     const spec = await Deno.readTextFile(`${dir}/ads_spec.cue`);
-    const named = publisher ? `adsense: publisher: "${publisher}"\nadsense: site: "${site}"\nadsense: frame: "${frame}"\n` : '';
+    const named = publisher ? `adsense: publisher: ${JSON.stringify(publisher)}\nadsense: site: ${JSON.stringify(site)}\nadsense: frame: ${JSON.stringify(frame)}\n` : '';
     await Deno.writeTextFile(`${dir}/ads_spec.cue`, spec + named);
     const cue = await run(Deno.env.get('CUE') ?? 'cue', ['export', '.', '--out', 'json'], dir);
     if (cue.code) throw new Error(`cue export failed: ${cue.err}`);
@@ -66,6 +66,50 @@ export async function named() {
 /** A spec that names a publisher but no origins is refused by its CUE. */
 export async function refused(spec) {
   try { await exported(spec); return null; } catch (e) { return e.message.includes('adsense') ? 'refused' : e.message; }
+}
+
+// --- The bridge, on a fake ad document -------------------------------------------------------------------
+
+/** The ad document's one inline script, taken from the document the app's CUE exports and run on fakes: a
+ * window that records its listener, a parent that records what is posted to it (and to whom), an
+ * `adsbygoogle` that records what the bridge pushes, and a location. A script of what happens: `{send}` a
+ * page message to the bridge (type, v filled in unless the fields name them), `{as: {origin?, source?}}`
+ * beside it where it comes from elsewhere, `{raw}` a message's whole data, `{ready}` Google's library being
+ * up, `{fire: {config, cb, arg}}` Google calling back the `config`th break's `cb`. What it says: the breaks
+ * the bridge asked Google for (their names), how many times Google's `show` function ran, the events posted
+ * to the page, whom they were addressed to, and the length of the last breakStatus. */
+export async function bridge({ script = [] } = {}) {
+  const { document: html, site } = await page();
+  const inline = html.match(/<script>([^]*?)<\/script>/)[1];
+  const posted = [], configs = [], listeners = [], scripts = [];
+  let shown = 0;
+  const parent = { postMessage: (m, target) => posted.push({ m: JSON.parse(JSON.stringify(m)), target }) };
+  const win = { addEventListener: (t, f) => { if (t === 'message') listeners.push(f); }, adsbygoogle: { push: (o) => configs.push(o) } };
+  const fakeDocument = { createElement: () => { const el = { attrs: {}, setAttribute(k, v) { el.attrs[k] = v; } }; scripts.push(el); return el; }, head: { appendChild() {} } };
+  new Function('window', 'parent', 'location', 'document', 'URLSearchParams', inline)(win, parent, { search: '' }, fakeDocument, URLSearchParams);
+  const breaks = () => configs.filter((c) => c.type === 'reward');
+  for (const s of script) {
+    if ('ready' in s) configs.find((c) => c.onReady).onReady();
+    else if ('fire' in s) {
+      const { config, cb, arg } = s.fire;
+      breaks()[config][cb](cb === 'beforeReward' ? () => { shown++; } : arg);
+    } else {
+      const data = 'raw' in s ? s.raw : { type: 'pronto-ads', v: 1, ...s.send };
+      const from = s.as ?? {};
+      for (const f of listeners) f({ origin: from.origin ?? site, source: from.source === 'other' ? {} : parent, data });
+    }
+  }
+  const last = posted.at(-1)?.m.breakStatus;
+  return {
+    breaks: breaks().map((c) => c.name),
+    shown,
+    events: posted.map((p) => p.m.event),
+    ids: posted.map((p) => p.m.id),
+    targets: [...new Set(posted.map((p) => p.target))],
+    first: posted[0]?.m ?? null,
+    statusLength: last === undefined ? null : last.length,
+    scripts: scripts.length,
+  };
 }
 
 // --- The adapter, on a fake page --------------------------------------------------------------------------

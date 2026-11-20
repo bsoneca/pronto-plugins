@@ -37,7 +37,7 @@ The page drops everything else, Google's own messages to it included. `beforeRew
 
 The ad document's policy is the one list of what Google's ads load (`_adsGoogle`, `_adsPolicy` in `ads_plugin.cue`): `script-src` is the bridge's hash and two path-scoped sources, never a whole Google host (`www.google.com`, `googleadservices.com`, `*.doubleclick.net`, `googleapis.com` and `gstatic.com` have script endpoints and must never be one); no `sandbox`, no `unsafe-eval`, no Trusted Types; `frame-ancestors` is `adsense.site`. The page's own policy only gains `frame-src` of the ad origin.
 
-The stand-in is as it was. Where a caller gives it a `wait` it closes an unfinished ad as `"none"` when it runs out, and it calls `onStart` and `onEnd`.
+The stand-in calls `onStart` and `onEnd`. A `wait` does not close it: `wait` bounds only the time before an ad starts, and the stand-in starts at once, so one left open past `wait` still resolves `"viewed"` at "Get reward".
 
 Only the page sees an ad: Google's ads for the web tell no server one was watched, so what a reward gives away the app's database bounds.
 

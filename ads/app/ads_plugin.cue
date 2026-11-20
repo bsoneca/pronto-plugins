@@ -108,8 +108,12 @@ _adsPolicy: strings.Join([
 // Named a publisher, the app names where its ads play and where their document is answered;
 // then the ad document is made, the service that answers it, and the door lets the game frame it.
 if adsense.publisher != "" {
-	adsense: site:  !=""
-	adsense: frame: !=""
+	// The origins and publisher go into the bridge's source and the policy as text: held to their shapes
+	// here too, so a quote or a space can never reach either, and the ad document is never the game's own origin.
+	adsense: site:      =~"^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$"
+	adsense: frame:     =~"^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$" & !=adsense.site
+	// (The publisher is held by a hidden field: constraining `adsense.publisher` here, inside the `if` that reads it, would be a cycle.)
+	_adsPublisherOK: adsense.publisher & =~"^pub-[0-9]{16}$"
 
 	// What generate writes to ads/break.json, which the service answers /break with.
 	adsense: break: {
@@ -134,9 +138,9 @@ if adsense.publisher != "" {
 		activate: ""
 		"process-compose": activate: "mise x --"
 		entrypoint: {
-			do:    "exec deno run --no-config --allow-net --allow-env --allow-read ads/server.ts"
+			do:    "exec deno run --no-config --allow-net=0.0.0.0:\(_adsPort) --allow-env=ADS_PORT --allow-read=ads/break.json ads/server.ts"
 			shell: "sh"
-			dockerfile: {do: "deno run --no-config --allow-net --allow-env --allow-read /app/ads/server.ts", shell: "exec"}
+			dockerfile: {do: "deno run --no-config --allow-net=0.0.0.0:\(_adsPort) --allow-env=ADS_PORT --allow-read=/app/ads/break.json /app/ads/server.ts", shell: "exec"}
 			env: compose.environment
 		}
 		dockerfile: {
