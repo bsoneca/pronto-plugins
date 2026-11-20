@@ -410,8 +410,10 @@ export class Run {
       const s = who ? await this.session(who).catch(() => null) : null;
       if (s && !s.guest && !(await ofrepAsk(st.flag, s.token))) throw new Error(`${st.flag} is off for the tester ${TESTER}, which this run tests`);
     } else if (st.flag !== undefined && !(await flagOn(st.flag))) { this.skipped.add(st.flag); return; }
-    // Asked only on production or only at hand (`on`), and only once a step has kept a value (`ifKept`).
-    if (st.on && (st.on === "production") !== onProduction) return;
+    // Asked only on production or only at hand (`on`), and only once a step has kept a value (`ifKept`). At hand is a
+    // stack on this machine: a deployed preview is neither (PRONTO-873: a database step there would fail the run).
+    if (st.on === "production" && !onProduction) return;
+    if (st.on === "local" && (onProduction || deployed(new URL(URL_).hostname))) return;
     if (st.ifKept && ["", "undefined", "null"].includes(this.vars.get(st.ifKept) ?? "")) return;
     const t = st.timeout ?? 30, ms = t * 1000;
     if ("http" in st) { await this.heat(null); return this.http(st, st.by ? await this.actor(st.by) : null, t); }
