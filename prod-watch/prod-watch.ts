@@ -9,7 +9,7 @@
 //   deno run -A prod-watch/prod-watch.ts <app> mark <fp> open|watching|noise|fixed [--reason why] [--pr N]
 // `cue` from PATH or $CUE. The state (cursor.json, ledger.json) is <the repository's root>/.omc/prod-watch/<app>/,
 // runtime state no commit carries.
-import { brt, group, logEntries, logsQuery, mark, podsOf, releasedOf, render, triage } from "./watch.js";
+import { brt, group, logEntries, logsQuery, mark, podsOf, releasedOf, render, restartRange, restartWindows, triage, unitOf } from "./watch.js";
 
 // The app's folder: the one this script was written into (prod-watch/ is beside its files).
 const appDir = Deno.realPathSync(new URL("../", import.meta.url).pathname);
@@ -56,7 +56,8 @@ if (verb === "ls") {
   Deno.exit(0);
 }
 
-type Node = { host: string; kubeconfig: string; namespace: string; containers: string[]; deployments: string[]; logs: { namespace: string; service: string; port: number } };
+type Restart = { unit: string; stop: string; start: string; crash: string; lead: number; tail: number; down: number };
+type Node = { restart?: Restart; host: string; kubeconfig: string; namespace: string; containers: string[]; deployments: string[]; logs: { namespace: string; service: string; port: number } };
 // The app's release, its opt-in and the noise, read from CUE in one export: the app's package with
 // its own registry (its .mise.toml's CUE_REGISTRY). prodWatch comes from prod_watch_plugin.cue held
 // to #Watch, with the shared noise and the lifecycle windows in it.
@@ -140,6 +141,26 @@ async function onNode(n: Node, script: string, stdin = ""): Promise<{ ok: boolea
   const o = await p.output();
   return { ok: o.success, out: decode(o.stdout), err: decode(o.stderr) };
 }
+// A deliberate k3s restart (prodWatch.node.restart) is what the node's systemd journal says it was, read-only:
+// `sudo -n journalctl` (the journal is not the login user's to read) for the unit's lines of systemd itself, and
+// `systemctl show` for its ActiveEnterTimestamp and NRestarts, which the last run's is compared with. The journal
+// is read as far as the schema's lead, down and tail say a window touching the report can reach (restartRange),
+// and a window is taken only as far as that read (until). A read that fails stops the run before anything is
+// written, so the next run reads the window again. The unit is the schema's, held to letters and signs.
+let restartWins: { from: string; to: string }[] = [];
+let restartNow: number | null = null;
+if (node?.restart) {
+  const r = node.restart;
+  const day = (iso: string) => iso.slice(0, 19).replace("T", " ") + " UTC";
+  const range = restartRange(from, to, r);
+  const j = await onNode(node, `sudo -n journalctl -u ${r.unit} _PID=1 --utc -o short-iso --no-pager -q --since '${day(range.since)}' --until '${day(range.until)}'`);
+  const u = await onNode(node, `TZ=UTC systemctl show ${r.unit} -p ActiveEnterTimestamp -p NRestarts`);
+  if (!j.ok || !u.ok) throw new Error(`the node's ${r.unit} restarts were not read (${(j.err || u.err).trim().slice(0, 300) || "no message"}): the ledger and the cursor are where they were`);
+  const unit = unitOf(u.out);
+  restartNow = unit.nRestarts;
+  const was = read("k3s.json", {}).nRestarts ?? null;
+  restartWins = restartWindows({ journal: j.out, activeEnter: unit.activeEnter, restarts: { was, now: unit.nRestarts }, until: range.until }, r);
+}
 const sources: { release?: { at: string; short: string; sha: string } | null; images: Record<string, string>; pods: number } = { images: {}, pods: 0 };
 if (node) {
   const n: Node = node;
@@ -176,7 +197,8 @@ if (node) {
     if (Date.parse(cut) < Date.parse(reached)) reached = cut;
   }
   const lines = logEntries(rows.join("\n"), { from, lifecycle, starts });
-  entries.push(...lines);
+  // What the node's entries are, kept through the merge: a restart window is the node's, never a Cloud Run service's.
+  entries.push(...lines.map((l: Record<string, unknown>) => ({ ...l, source: "node" })) as typeof entries);
   entries.sort((a, b) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)));
   // What is serving: the last release of release-cron's log, else the images the pods run.
   // No log is the one thing to go without (an app release-cron does not release); any other failure to read it fails the run.
@@ -194,7 +216,8 @@ entries = entries.filter((e) => Date.parse(e.timestamp) <= Date.parse(reached));
 // it, and the next one reads that overlap again: the entries it already counted, kept by hash in the cursor,
 // are not counted twice.
 const lag = 5 * 60e3;
-const hashOf = async (e: unknown) => [...new Uint8Array(await crypto.subtle.digest("SHA-1", new TextEncoder().encode(JSON.stringify(e))))].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+// The hash is of the entry as the source gave it, without the `source` tag, so a cursor's hashes stay valid.
+const hashOf = async (e: unknown) => [...new Uint8Array(await crypto.subtle.digest("SHA-1", new TextEncoder().encode(JSON.stringify({ ...(e as object), source: undefined }))))].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
 const hashes = new Map<unknown, string>();
 for (const e of entries) hashes.set(e, await hashOf(e));
 if (!since) {
@@ -202,7 +225,7 @@ if (!since) {
   entries = entries.filter((e) => !counted.has(hashes.get(e)!));
 }
 const committed = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
-const { report, ledger: next } = triage(group(entries, rules, lifecycle), ledger, reached);
+const { report, ledger: next } = triage(group(entries, rules, lifecycle, restartWins), ledger, reached);
 const where = [
   ...(services.length ? [`services ${services.join(", ")} (${project})`] : []),
   ...(node ? [`node ${node.namespace} on ${node.host} (${sources.pods} pods)`] : []),
@@ -216,4 +239,5 @@ if (!since) {
   // The overlap is read again, so what it holds is what the next run must not count again.
   const seen = [...hashes].filter(([e]) => Date.parse((e as { timestamp: string }).timestamp) > Date.parse(committed)).map(([, h]) => h);
   write("cursor.json", { at: committed, seen });
+  if (restartNow !== null) write("k3s.json", { nRestarts: restartNow });
 }

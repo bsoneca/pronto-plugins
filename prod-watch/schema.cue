@@ -46,6 +46,10 @@ prodWatch: #Watch
 	// Only these containers and the pods of only these Deployments; none named, all of the namespace's.
 	containers: [...(=~"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")]
 	deployments: [...(=~"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")]
+	// The node's own deliberate restarts of a systemd unit (k3s), read from its journal (sudo -n journalctl,
+	// read-only) when named: noise rules that say during: ["restart"] hold only inside one, and only for the
+	// node's entries.
+	restart?: #Restart
 	// The VictoriaLogs Service: reached from the node by its ClusterIP (kubectl get, then curl on the node),
 	// so no cluster object is made.
 	logs: {
@@ -53,6 +57,24 @@ prodWatch: #Watch
 		service:   *"victoria-logs" | (string & =~"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 		port:      *9428 | (int & >0 & <65536)
 	}
+}
+
+// A deliberate restart of the node's unit: systemd's journal says it stopped the unit and then started it, with
+// no failure between. The window runs from `lead` seconds before the stop line to `tail` seconds after the
+// start line; a stop with no start within `down` seconds opens none, and neither does one with a crash
+// line in it, one whose end the journal read does not yet reach, or one when the unit's NRestarts has risen
+// since the last run. The journal is read from `tail + down + lead` before the report to
+// `lead + down + tail` after it, so these three numbers say how far.
+#Restart: {
+	// Regular expressions (JavaScript) on the journal's lines of the unit, from systemd itself.
+	stop:  string & !=""
+	start: string & !=""
+	crash: string & !=""
+	// The unit, as journalctl -u names it.
+	unit: =~"^[A-Za-z0-9_][A-Za-z0-9_.@-]*$"
+	lead: *5 | (int & >=0)
+	tail: *120 | (int & >=0)
+	down: *300 | (int & >0)
 }
 
 #Noise: {
@@ -64,8 +86,10 @@ prodWatch: #Watch
 	service?:   string
 	container?: string
 	// Only in these windows of an instance (lifecycle, above), when what it says is what starting or
-	// stopping looks like and the same line at any other time is a bug.
-	during?: [...("start" | "shutdown")]
+	// stopping looks like and the same line at any other time is a bug. "restart" is a deliberate restart of the
+	// node's unit (node.restart), and it can hold together with start or shutdown: the rule meets the entry when
+	// any of the rule's windows does.
+	during?: [...("start" | "shutdown" | "restart")]
 	// Why it is not a bug: what makes it, and why nothing is lost. Proved by a case.
 	why!: string & !=""
 }

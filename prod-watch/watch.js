@@ -367,17 +367,69 @@ export function phaseOf(entry, windows, lifecycle) {
   }
   return "";
 }
+// The node's deliberate k3s restarts (prodWatch.node.restart), from what systemd says of the unit: its
+// journal's lines (journalctl -u <unit> _PID=1 --utc -o short-iso) and `systemctl show` (TZ=UTC) for its
+// ActiveEnterTimestamp and NRestarts. A window is [stop - lead, start + tail] for a stop line followed within
+// `down` seconds by a start (a journal line, or the ActiveEnterTimestamp). A crash line in it, or NRestarts
+// above what the last run saw (`restarts.was`), and it is no window: the same entries alert. `until` is the
+// journal's observation cutoff (what was read, never later than now): a window whose end is past it may still
+// hold a crash that was not read, so it is no window either.
+export function restartWindows({ journal = "", activeEnter = null, restarts = null, until = null }, cfg) {
+  if (!cfg || !restarts || restarts.now == null || (restarts.was != null && restarts.now > restarts.was)) return [];
+  const cutoff = until == null ? NaN : typeof until === "number" ? until : Date.parse(until);
+  if (Number.isNaN(cutoff)) return [];
+  const times = (re) => journal.split("\n").filter((l) => new RegExp(re).test(l)).map((l) => Date.parse(l.split(" ")[0])).filter((t) => !Number.isNaN(t));
+  const stops = times(cfg.stop);
+  const crashes = times(cfg.crash);
+  const starts = [...times(cfg.start), ...(activeEnter ? [Date.parse(activeEnter)] : [])].filter((t) => !Number.isNaN(t)).sort((a, b) => a - b);
+  const out = [];
+  for (const stop of stops) {
+    const start = starts.find((t) => t >= stop);
+    if (start === undefined || start - stop > cfg.down * 1000) continue;
+    const from = stop - cfg.lead * 1000, to = start + cfg.tail * 1000;
+    if (to > cutoff) continue;
+    if (crashes.some((c) => c >= from && c <= to)) continue;
+    out.push({ from: new Date(from).toISOString(), to: new Date(to).toISOString() });
+  }
+  return out;
+}
+// The journal to read for a report over [from, to] (ISO times), at `now`: a window is [stop - lead, start + tail]
+// with start - stop <= down, so every stop whose window can touch an entry of the report lies in
+// [from - (tail + down), to + lead], and its crash evidence in [from - (tail + down + lead), to + lead + down + tail],
+// cut at now (the journal holds nothing later).
+export function restartRange(from, to, cfg, now = Date.now()) {
+  const ms = (s) => s * 1000;
+  return {
+    since: new Date(Date.parse(from) - ms(cfg.tail + cfg.down + cfg.lead)).toISOString(),
+    until: new Date(Math.min(now, Date.parse(to) + ms(cfg.lead + cfg.down + cfg.tail))).toISOString(),
+  };
+}
+// `systemctl show <unit> -p ActiveEnterTimestamp -p NRestarts` (TZ=UTC): when it last became active, and how
+// many times it restarted by itself.
+export function unitOf(text) {
+  const at = text.match(/^ActiveEnterTimestamp=\S+ (\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d) UTC$/m);
+  const n = text.match(/^NRestarts=(\d+)/m);
+  return { activeEnter: at ? `${at[1]}T${at[2]}Z` : null, nRestarts: n ? Number(n[1]) : null };
+}
+const inRestart = (entry, windows) => {
+  const at = Date.parse(entry.timestamp);
+  return (windows ?? []).some((w) => at >= Date.parse(w.from) && at <= Date.parse(w.to));
+};
+
 // Whether an entry is a lifecycle marker and no more, read for the windows and reported never: one at
 // WARNING or above (a container killed by signal 11) is reported too.
 const RANK = { DEFAULT: 0, DEBUG: 100, INFO: 200, NOTICE: 300, WARNING: 400, ERROR: 500, CRITICAL: 600, ALERT: 700, EMERGENCY: 800 };
 export const isMarker = (entry, lifecycle) => (RANK[entry.severity ?? "DEFAULT"] ?? 0) < RANK.WARNING &&
   Object.values(lifecycle ?? {}).some((l) => new RegExp(l.marker).test(clean(messageOf(entry))));
 
-// The noise rule an entry meets, by service, container, message and phase (schema.cue's #Noise), or null.
-export function noiseOf(entry, rules, phase = "") {
+// The noise rule an entry meets, by service, container, message and phases (schema.cue's #Noise), or null.
+// `phases` are all that apply to it (a pod's start or shutdown and a node's restart can hold at once, a
+// phase's name or a list of them); a rule held to `during` meets it when any of its phases applies.
+export function noiseOf(entry, rules, phases = []) {
   const text = clean(messageOf(entry));
+  const applies = [].concat(phases).filter(Boolean);
   for (const [name, r] of Object.entries(rules ?? {})) {
-    if (r.during && !r.during.includes(phase)) continue;
+    if (r.during && !r.during.some((p) => applies.includes(p))) continue;
     if (r.service && !new RegExp(`^(?:${r.service})$`).test(entry.resource?.labels?.service_name ?? "")) continue;
     if (r.container && !new RegExp(`^(?:${r.container})$`).test(entry.labels?.container_name ?? "")) continue;
     if (new RegExp(r.match, "m").test(text)) return name;
@@ -388,12 +440,15 @@ export function noiseOf(entry, rules, phase = "") {
 // The entries as groups, one a fingerprint (the same line noise in its window and not outside it
 // makes two): how many, when first and last, on which revisions, and
 // up to three redacted samples, the first, the last and one between.
-export function group(entries, rules, lifecycle = {}) {
+// `restart` are the node's deliberate-restart windows (restartWindows); they apply to the entries read from the
+// node (`source: "node"`), never to a Cloud Run service's.
+export function group(entries, rules, lifecycle = {}, restart = []) {
   const groups = {};
   const windows = windowsOf(entries, lifecycle);
   for (const e of stitch(entries)) {
     if (isMarker(e, lifecycle)) continue;
-    const noise = noiseOf(e, rules, phaseOf(e, windows, lifecycle));
+    const phases = [phaseOf(e, windows, lifecycle), ...(e.source === "node" && inRestart(e, restart) ? ["restart"] : [])];
+    const noise = noiseOf(e, rules, phases);
     const key = keyOf(e) + (noise ? `|noise ${noise}` : "");
     const fp = fingerprint(key);
     const at = e.timestamp ?? e.receiveTimestamp ?? "";
