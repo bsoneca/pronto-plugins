@@ -373,23 +373,44 @@ export function phasesOf(entry, windows, lifecycle) {
 // above what the last run saw (`restarts.was`), and it is no window: the same entries alert. `until` is the
 // journal's observation cutoff (what was read, never later than now): a window whose end is past it may still
 // hold a crash that was not read, so it is no window either (restartPending says which of those are only unfinished).
-/** @param {{journal?: string, activeEnter?: string | null, restarts?: {was: number | null, now: number | null} | null, until?: string | number | null}} input
+/** @param {{journal?: string, activeEnter?: string | null, restarts?: {was: number | null, now: number | null} | null, until?: string | number | null, voided?: {from: string, to: string}[]}} input
  *  @param {{stop: string, start: string, crash: string, lead: number, tail: number, down: number}} cfg */
-export function restartWindows({ journal = "", activeEnter = null, restarts = null, until = null }, cfg) {
+export function restartWindows({ journal = "", activeEnter = null, restarts = null, until = null, voided = [] }, cfg) {
   if (!cfg || !restarts || restarts.now == null || (restarts.was != null && restarts.now > restarts.was)) return [];
+  const { crashes } = journalTimes(journal, activeEnter, cfg);
+  return completeWindows({ journal, activeEnter, until }, cfg)
+    .filter((w) => !crashes.some((c) => c >= Date.parse(w.from) && c <= Date.parse(w.to)))
+    .filter((w) => !overlaps(w, voided));
+}
+// Every stop paired with a start and read to the end of its tail (`until`), whatever a crash line or NRestarts say:
+// the windows a rise of NRestarts rejects (restartVoids).
+/** @param {{journal?: string, activeEnter?: string | null, until?: string | number | null}} input
+ *  @param {{stop: string, start: string, crash: string, lead: number, tail: number, down: number}} cfg */
+export function completeWindows({ journal = "", activeEnter = null, until = null }, cfg) {
   const cutoff = until == null ? NaN : typeof until === "number" ? until : Date.parse(until);
-  if (Number.isNaN(cutoff)) return [];
-  const { stops, crashes, starts } = journalTimes(journal, activeEnter, cfg);
+  if (!cfg || Number.isNaN(cutoff)) return [];
+  const { pairs } = journalTimes(journal, activeEnter, cfg);
   const out = [];
-  for (const stop of stops) {
-    const start = starts.find((t) => t >= stop);
+  for (const { stop, start } of pairs) {
     if (start === undefined || start - stop > cfg.down * 1000) continue;
     const from = stop - cfg.lead * 1000, to = start + cfg.tail * 1000;
     if (to > cutoff) continue;
-    if (crashes.some((c) => c >= from && c <= to)) continue;
     out.push({ from: new Date(from).toISOString(), to: new Date(to).toISOString() });
   }
   return out;
+}
+const overlaps = (w, intervals) => (intervals ?? []).some((v) => Date.parse(w.from) <= Date.parse(v.to) && Date.parse(v.from) <= Date.parse(w.to));
+// The intervals k3s.json keeps beside the counter (`voided`): those of the last run that the cursor has not passed,
+// and, when NRestarts rose, the windows this run's rise rejected (`windows`, completeWindows). A later run compares
+// equal counters, so without them it would accept a window whose entries this run did not read (a row limit cut the
+// read, or a late line reached the overlap) as deliberate. One is dropped once the cursor (`committed`, the time the
+// next run reads from, which already lies the lag behind) is past its end: nothing of it is read again.
+// `restarts` is {was, now}; a k3s.json written before has no `voided`, which is none.
+/** @param {{voided?: {from: string, to: string}[], windows?: {from: string, to: string}[], restarts?: {was: number | null, now: number | null} | null, committed: string}} input */
+export function restartVoids({ voided = [], windows = [], restarts = null, committed }) {
+  const rose = !!restarts && restarts.was != null && restarts.now != null && restarts.now > restarts.was;
+  const passed = Date.parse(committed);
+  return [...(voided ?? []), ...(rose ? windows : [])].filter((v) => !(Date.parse(v.to) < passed));
 }
 // What NRestarts the next run compares with: this run's, unless a restart is pending (restartPending): the run
 // that meets a rise while it holds its entries back must leave the old counter, or the next run, which reads
@@ -433,12 +454,15 @@ export function settleRun({ entries, hashes, hold = null, since = false, counted
 // What an entry is hashed as (prod-watch.ts's cursor keeps the hashes of what it counted): the entry as its source
 // gave it, without the `source` tag the driver adds, so a cursor written before the tag still matches.
 export const hashInput = (entry) => JSON.stringify({ ...entry, source: undefined });
-// The times (ms) of the journal's stop, crash and start lines (a line's first word is its ISO time, with
-// microseconds, trimmed to milliseconds), and of the ActiveEnterTimestamp as a start.
+// The times (ms) of the journal's stop and crash lines (a line's first word is its ISO time, with microseconds,
+// trimmed to milliseconds), and each stop paired with its start: the first start line after it, and only when no
+// start line follows, the ActiveEnterTimestamp (whole seconds: next to a precise line it would end a window early).
 function journalTimes(journal, activeEnter, cfg) {
   const times = (re) => journal.split("\n").filter((l) => new RegExp(re).test(l)).map((l) => Date.parse(l.split(" ")[0].replace(/(\.\d{3})\d+/, "$1"))).filter((t) => !Number.isNaN(t));
-  const starts = [...times(cfg.start), ...(activeEnter ? [Date.parse(activeEnter)] : [])].filter((t) => !Number.isNaN(t)).sort((a, b) => a - b);
-  return { stops: times(cfg.stop), crashes: times(cfg.crash), starts };
+  const starts = times(cfg.start).sort((a, b) => a - b);
+  const enter = activeEnter ? Date.parse(activeEnter) : NaN;
+  const pairs = times(cfg.stop).map((stop) => ({ stop, start: starts.find((t) => t >= stop) ?? (enter >= stop ? enter : undefined) }));
+  return { stops: pairs.map((p) => p.stop), crashes: times(cfg.crash), pairs };
 }
 // A restart not finished at the cutoff: a stop with no start yet but still within `down` of the cutoff (the start
 // may come), or a start whose window's end (start + tail) is past it (a crash may still be written). The run that
@@ -450,10 +474,9 @@ function journalTimes(journal, activeEnter, cfg) {
 export function restartPending({ journal = "", activeEnter = null, until = null }, cfg) {
   const cutoff = until == null ? NaN : typeof until === "number" ? until : Date.parse(until);
   if (!cfg || Number.isNaN(cutoff)) return null;
-  const { stops, starts } = journalTimes(journal, activeEnter, cfg);
+  const { pairs } = journalTimes(journal, activeEnter, cfg);
   let first = null;
-  for (const stop of stops) {
-    const start = starts.find((t) => t >= stop);
+  for (const { stop, start } of pairs) {
     const unfinished = start === undefined ? cutoff - stop <= cfg.down * 1000 : start - stop <= cfg.down * 1000 && start + cfg.tail * 1000 > cutoff;
     if (unfinished && (first === null || stop < first)) first = stop;
   }

@@ -63,6 +63,15 @@ _journal: {
 		2026-11-19T18:59:55.000995+00:00 host systemd[1]: k3s.service: Main process exited, code=exited, status=1/FAILURE
 		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
 		"""
+	precise: """
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T19:00:09.900995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		"""
+	preciseCrash: """
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T19:00:09.900995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		2026-11-19T19:02:09.400995+00:00 host systemd[1]: k3s.service: Main process exited, code=exited, status=1/FAILURE
+		"""
 	twice: """
 		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
 		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
@@ -170,6 +179,25 @@ cases: {
 		{call: "watch.restartWindows", args: [{journal: _journal.twice, activeEnter: null, restarts: {was: 0, now: 0}, until: "2026-11-19T20:00:00Z"}, _restart], expect: [_window, {from: "2026-11-19T19:29:55.000Z", to: "2026-11-19T19:32:10.000Z"}]},
 		{call: "watch.restartWindows", args: [{journal: _journal.lead, activeEnter: null, restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [], why: "a crash line 4 s before the stop is inside the lead margin (5 s): the window is not deliberate"},
 		{call: "watch.restartWindows", args: [{journal: _journal.stopOnly, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [_window], why: "no start line in the journal read: the unit's ActiveEnterTimestamp is the start"},
+	]}
+	"a stop pairs with the first journal start after it, never an earlier whole-second ActiveEnterTimestamp": {suite: "noise", steps: [
+		{call: "watch.restartWindows", args: [{journal: _journal.precise, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [{from: "2026-11-19T18:59:49.000Z", to: "2026-11-19T19:02:09.900Z"}], why: "the start is 19:00:09.900: the tail ends there + 120 s, not at ActiveEnter's whole second"},
+		{call: "watch.restartWindows", args: [{journal: _journal.preciseCrash, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [], why: "a crash at precise start + tail - 0.5 s is in the window: it is no window"},
+		{call: "watch.restartPending", args: [{journal: _journal.precise, activeEnter: "2026-11-19T19:00:09Z", until: "2026-11-19T19:02:09.500Z"}, _restart], expect: {from: "2026-11-19T18:59:49.000Z"}, why: "the tail is read to 19:02:09.5, the precise start's ends at .900: still held"},
+		{call: "watch.restartWindows", args: [{journal: _journal.stopOnly, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}, until: _done}, _restart], expect: [_window], why: "ActiveEnterTimestamp alone still pairs"},
+	]}
+	"a rise of NRestarts voids the windows it rejected until the cursor passes them": {suite: "noise", steps: [
+		{call: "watch.completeWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", until: _done}, _restart], expect: [_window]},
+		{keep: "rejected"},
+		{call: "watch.restartVoids", args: [{voided: [], windows: "$rejected", restarts: {was: 5, now: 6}, committed: "2026-11-19T19:01:00.000Z"}], expect: [_window], why: "run 1: a rise and a completed window, its log page ends before the restart (the cursor is inside the window)"},
+		{keep: "voided"},
+		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 6, now: 6}, until: _done, voided: "$voided"}, _restart], expect: [], why: "run 2: equal counters, the voided window is still rejected"},
+		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 6, now: 6}, until: _done, voided: []}, _restart], expect: [_window], why: "without the void, the same run would accept it"},
+		{call: "watch.restartVoids", args: [{voided: "$voided", windows: [], restarts: {was: 6, now: 6}, committed: "2026-11-19T19:01:30.000Z"}], expect: [_window], why: "run 2 ends with the cursor still inside the window: kept"},
+		{call: "watch.restartVoids", args: [{voided: "$voided", windows: [], restarts: {was: 6, now: 6}, committed: "2026-11-19T19:02:10.000Z"}], expect: [], why: "run 3: the cursor is past its end: dropped"},
+		{call: "watch.restartVoids", args: [{windows: "$rejected", restarts: {was: 6, now: 6}, committed: "2026-11-19T19:01:00.000Z"}], expect: [], why: "no rise and a k3s.json of {nRestarts} alone (no voided): nothing voided"},
+		{call: "watch.restartVoids", args: [{windows: "$rejected", restarts: {was: null, now: 6}, committed: "2026-11-19T19:01:00.000Z"}], expect: [], why: "no baseline is no rise"},
+		{call: "watch.restartWindows", args: [{journal: _journal.twice, activeEnter: null, restarts: {was: 0, now: 0}, until: "2026-11-19T20:00:00Z", voided: [_window]}, _restart], expect: [{from: "2026-11-19T19:29:55.000Z", to: "2026-11-19T19:32:10.000Z"}], why: "a void rejects only the windows it overlaps"},
 	]}
 	"a restart not finished at the cutoff holds the cursor at its stop minus lead": {suite: "noise", steps: [
 		{call: "watch.restartPending", args: [{journal: _journal.stopOnly, activeEnter: null, until: "2026-11-19T19:00:00Z"}, _restart], expect: {from: "2026-11-19T18:59:49.000Z"}, why: "stopped, no start yet, 6 s down of 300"},

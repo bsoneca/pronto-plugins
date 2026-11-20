@@ -9,7 +9,7 @@
 //   deno run -A prod-watch/prod-watch.ts <app> mark <fp> open|watching|noise|fixed [--reason why] [--pr N]
 // `cue` from PATH or $CUE. The state (cursor.json, ledger.json) is <the repository's root>/.omc/prod-watch/<app>/,
 // runtime state no commit carries.
-import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, restartBaseline, restartPending, restartRange, restartWindows, settleRun, timeAfter, triage, unitOf } from "./watch.js";
+import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, completeWindows, restartBaseline, restartPending, restartRange, restartVoids, restartWindows, settleRun, timeAfter, triage, unitOf } from "./watch.js";
 
 // The app's folder: the one this script was written into (prod-watch/ is beside its files).
 const appDir = Deno.realPathSync(new URL("../", import.meta.url).pathname);
@@ -150,6 +150,10 @@ async function onNode(n: Node, script: string, stdin = ""): Promise<{ ok: boolea
 let restartWins: { from: string; to: string }[] = [];
 let restartNext: number | null = null;
 let restartHold: { from: string } | null = null;
+let restartCandidates: { from: string; to: string }[] = [];
+let restartWas: number | null = null;
+let restartNow: number | null = null;
+let restartVoided: { from: string; to: string }[] = [];
 if (node?.restart) {
   const r = node.restart;
   const day = (iso: string) => iso.slice(0, 19).replace("T", " ") + " UTC";
@@ -161,8 +165,14 @@ if (node?.restart) {
   if (!j.ok || !u.ok) throw new Error(`the node's ${r.unit} restarts were not read (${(j.err || u.err).trim().slice(0, 300) || "no message"}): the ledger and the cursor are where they were`);
   const unit = unitOf(u.out);
   if (unit.loadState !== "loaded") throw new Error(`the node's ${r.unit} is not loaded (LoadState ${unit.loadState ?? "unread"}): the ledger and the cursor are where they were`);
-  const was = read("k3s.json", {}).nRestarts ?? null;
-  restartWins = restartWindows({ journal: j.out, activeEnter: unit.activeEnter, restarts: { was, now: unit.nRestarts }, until: range.until }, r);
+  const k3s = read("k3s.json", {});
+  const was = k3s.nRestarts ?? null;
+  // The intervals an earlier rise of NRestarts rejected stay rejected until the cursor passes them (restartVoids).
+  restartVoided = k3s.voided ?? [];
+  restartWas = was;
+  restartNow = unit.nRestarts;
+  restartWins = restartWindows({ journal: j.out, activeEnter: unit.activeEnter, restarts: { was, now: unit.nRestarts }, until: range.until, voided: restartVoided }, r);
+  restartCandidates = completeWindows({ journal: j.out, activeEnter: unit.activeEnter, until: range.until }, r);
   restartHold = restartPending({ journal: j.out, activeEnter: unit.activeEnter, until: range.until }, r);
   // While a restart is held the old counter stays, so the next run still sees a rise this one saw.
   restartNext = restartBaseline({ was, now: unit.nRestarts, hold: restartHold });
@@ -244,5 +254,6 @@ if (!since) {
   write("ledger.json", next);
   // The overlap is read again, so what it holds is what the next run must not count again.
   write("cursor.json", { at: settled.committed, seen: settled.seen });
-  if (restartNext !== null) write("k3s.json", { nRestarts: restartNext });
+  const voided = restartVoids({ voided: restartVoided, windows: restartCandidates, restarts: { was: restartWas, now: restartNow }, committed: settled.committed });
+  if (restartNext !== null || voided.length) write("k3s.json", { nRestarts: restartNext ?? restartWas, ...(voided.length ? { voided } : {}) });
 }
