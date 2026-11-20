@@ -1565,7 +1565,7 @@ const orphaned = async () => {
     await Promise.race([child.status, sleep(10000)]);
     if (!finished) { try { child.kill("SIGKILL"); } catch { /* gone */ } await Promise.race([child.status, sleep(5000)]); }
   }
-  const rec = m.readRecords().find((r) => r.rootpid === Deno.pid);
+  const rec = m.recordOf(m.readRecords(), Deno.pid, superpid, superstart);
   if (rec) {
     await m.stopMembers(sys, rec);
     try { Deno.removeSync((Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks") + "/runs/" + rec.rootpid + "-" + rec.rootstart); } catch { /* gone */ }
@@ -1635,6 +1635,10 @@ export async function stopMembers(sys: Sys, record: RunRecord, termMs = 5000, po
   return { listed: [...listed.values()], survivors: now.map((m) => name(sys, m)), failed };
 }
 
+// The record of the run a keeper (root pid `rootpid`) belongs to: its supervisor's pid and start must match too, since a
+// "done" record of an older run that left survivors can carry the same, reused, root pid.
+export const recordOf = (records: readonly RunRecord[], rootpid: number, superpid: number, superstart: number): RunRecord | undefined =>
+  records.find((r) => r.rootpid === rootpid && r.superpid === superpid && r.superstart === superstart);
 // The ledger: one file a live run, <pool>/runs/<rootpid>-<rootstart> (a `pending-` one between its spawn and its name).
 const runsDir = () => `${pool}/runs`;
 export function readRecords(dir = runsDir()): RunRecord[] {

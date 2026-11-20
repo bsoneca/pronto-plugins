@@ -189,7 +189,7 @@ echo "${Deno.pid} 3 prio=release" > job-8/weight; chmod 664 job-8/weight`);
 const slotUrl = new URL("../../harness/files/tests/slot.ts", import.meta.url).pathname;
 export async function ownPure() {
   const slot = await import("../../harness/files/tests/slot.ts");
-  const { planReap, reapDead, nestedIn, stopMembers } = slot;
+  const { planReap, reapDead, nestedIn, stopMembers, recordOf } = slot;
   const row = (pid, more = {}) => ({ pid, uid: 501, start: 1000, ppid: 1, responsible: 1, zombie: false, ...more });
   const table = (rows, more = {}) => ({ os: "darwin", uid: 501, rows, ...more });
   const rec = { rootpid: 100, rootstart: 1000, superpid: 50, superstart: 900, uid: 501, what: "t", state: "running" };
@@ -257,6 +257,10 @@ export async function ownPure() {
     movedSent: sent, movedSurvivors: stopped.survivors, movedFailed: stopped.failed,
     stubbornSurvivors: left.survivors.length, stubbornNamed: left.survivors[0].replace(/age [0-9hm]+/, "age N"), stubbornListed: left.listed.length,
     deniedFailed: denied.failed.length > 0,
+    // Two records share a root pid (a done one of an older run, and this run's): the keeper's supervisor picks its own.
+    recordOfOwn: recordOf([{ ...rec, superpid: 40, superstart: 800, state: "done" }, rec], 100, 50, 900)?.superpid ?? 0,
+    recordOfOld: recordOf([{ ...rec, superpid: 40, superstart: 800, state: "done" }, rec], 100, 40, 800)?.state ?? "",
+    recordOfNone: recordOf([{ ...rec, superpid: 40, superstart: 800, state: "done" }], 100, 50, 900)?.superpid ?? 0,
   };
 }
 

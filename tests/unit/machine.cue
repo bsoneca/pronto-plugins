@@ -289,6 +289,12 @@ cases: "the run owner plans a run's members from a table, reuses of a pid includ
 		{get: "stubbornListed", expect: 1, why: "and listed as left running"},
 		{use: "r"},
 		{get: "deniedFailed", expect: true, why: "a signal that cannot be sent fails the run, closed"},
+		{use: "r"},
+		{get: "recordOfOwn", expect: 50, why: "a keeper's record is the one of its own supervisor, though an older run's done record has the same root pid"},
+		{use: "r"},
+		{get: "recordOfOld", expect: "done", why: "and the old one is found only by its own supervisor"},
+		{use: "r"},
+		{get: "recordOfNone", expect: 0, why: "with only the old record, a keeper finds none: it plans against and deletes nothing of another run"},
 	]
 }
 cases: "a short-lived parent's detached Apple sleep is stopped when the run passes": {
