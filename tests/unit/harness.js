@@ -75,7 +75,7 @@ export async function stepRefused(step) {
 // Each step reports the blob siblingFiles keys the brief by and the blob HEAD and the index hold for it.
 import { siblingFiles } from "../../harness/files/tests/scenarios/select.ts";
 export async function siblingStaged() {
-  const dir = await Deno.makeTempDir();
+  const dir = Deno.realPathSync(await Deno.makeTempDir()); // real path, so the run keeps its scratch as its own
   const git = async (...a) => new TextDecoder().decode((await new Deno.Command("git", { args: ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...a], stdout: "piped", stderr: "null" }).output()).stdout).trim();
   const keyed = () => Object.fromEntries(siblingFiles(`${dir}/apps/studio`) ?? [])["../other/brief.md"];
   try {

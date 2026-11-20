@@ -280,7 +280,7 @@ export function select<S extends Keyed>(runner: string, url: string, scenarios: 
   // change there is never "cached green" (it hid two failing scenarios, 2026-11-03). Sibling apps' files are
   // left out on purpose (PRONTO-870), unless the app lists them in `more.outside`.
   const outside = () => outsideKeys(changedFiles(root) ?? [], (f) => hashOf(join(root, f)), more.outside);
-  // An app that reads its siblings (`more.outside`) is keyed by every sibling file its patterns name, as it is now.
+  // An app that reads its siblings (`more.outside`) is keyed by every sibling file its patterns name, as HEAD holds it.
   const declared = () => {
     if (!more.outside?.length) return [];
     const files = siblingFiles(root);
