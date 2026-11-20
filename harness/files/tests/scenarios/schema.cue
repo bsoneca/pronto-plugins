@@ -185,6 +185,9 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 	// Asked only on the deployed app ("production") or only on a stack at hand ("local", never a
 	// deployed preview): what a listing may be differs, a laptop's naming the stack's own address.
 	on?: "production" | "local"
+	// Open here: a step embeds it beside its kind's fields, and `#Scenario._checked` closes the whole
+	// shape. Closed, cue 0.18 would refuse every kind's field on `#Step` (aprende, PRONTO-870).
+	...
 }
 
 // A step is one of the kinds (`_kinds`, below), chosen by its field, never by a disjunction: a disjunction
