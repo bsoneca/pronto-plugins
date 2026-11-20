@@ -54,3 +54,24 @@ cases: "a filed flake whose marker cannot be written is thrown (the runner throw
 		{call: "harness.unmarked", expect: {threw: true, said: 1}, why: "said before it throws, so the issue key is in the log; not the board's error: an unwritten marker would file the same flake every run"},
 	]
 }
+
+// Which files outside the app concern a scenario (harness/files/tests/scenarios/select.ts, PRONTO-870): the
+// paths are relative to the app, as the selector sees them. null: none; a string: why it does (fail open).
+cases: "a file of a sibling app concerns no scenario, and any other file above the app still concerns every one": {
+	suite: "harness"
+	steps: [
+		{call: "harness.outsideConcerns", args: ["../other/src/page.html"], expect: null, why: "apps/other/… from the top: the selection against a release's commit no longer runs everything for it"},
+		{call: "harness.outsideConcerns", args: ["../other/deep/er/x.sql"], expect: null},
+		{call: "harness.outsideConcerns", args: ["../other/README.md"], expect: null, why: "documentation"},
+		{call: "harness.outsideConcerns", args: ["../../docs/queue.md"], expect: null},
+		{call: "harness.outsideConcerns", args: ["../../.github/workflows/gate.yml"], expect: null},
+		{call: "harness.outsideConcerns", args: ["../../AGENTS.md"], expect: null},
+		{call: "harness.outsideConcerns", args: ["../mise.toml"], expect: "mise.toml is outside the app", why: "a pin in the apps folder is no sibling app's file"},
+		{call: "harness.outsideConcerns", args: ["../../mise.lock"], expect: "mise.lock is outside the app", why: "a tool pin above the apps"},
+		{call: "harness.outsideConcerns", args: ["../../pronto/runtime.cue"], expect: "pronto/runtime.cue is outside the app", why: "two levels up is the repository's top, not a sibling app"},
+		{call: "harness.outsideConcerns", args: ["../../tools/x.nu"], expect: "tools/x.nu is outside the app"},
+		{call: "harness.outsideConcerns", args: ["../../apps/other/x.ts"], expect: "apps/other/x.ts is outside the app", why: "a path that climbs to the top and back is not the form the selector gives a sibling"},
+		{call: "harness.outsideConcerns", args: ["../.hidden/x"], expect: ".hidden/x is outside the app", why: "a hidden folder is no app"},
+		{call: "harness.outsideConcerns", args: ["tests/scenarios/x.ts"], expect: null, why: "inside the app: not this function's to judge"},
+	]
+}

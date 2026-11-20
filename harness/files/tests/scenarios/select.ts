@@ -40,8 +40,12 @@
 //     defined by a file that does, to a fixpoint (a trigger, a function another calls). A scenario that
 //     read a shape naming no table or whose file cannot be read runs on any SQL change;
 //   - the scenarios' that recorded a request naming it (its path, or its file name);
+//   - nothing, when it is outside the app and in a sibling app (`../<other>/…`, one level up: apps/<other>/…
+//     from the repository's top; outsideConcerns), which a stack of this app does not serve, like the
+//     documentation above (release-cron's `concerns`: files outside the app concern no check);
 //   - otherwise unattributable, and every scenario runs. So is a file outside the app that is not
-//     documentation, a scenario with no record, and a git that cannot say.
+//     documentation or in a sibling app (a tool pin, the root's files, pronto/), a scenario with no record,
+//     and a git that cannot say.
 // The diff trusts main: it assumes a scenario was green on main, which the merge gate keeps true.
 //
 // A green run is recorded under ~/.cache/pronto/scenarios/<app>/<scenario>, once the run is over and
@@ -66,6 +70,18 @@ const everything = [/^tests\/slow\.ts$/, /^tests\/[^/]*\.ts$/, /^tests\/scenario
 // Audio is left out: a page may stop reading it early, so its body is not the file.
 const staticAsset = /\.(js|mjs|css|html|json|wasm|svg|png|jpg|webp|ico|woff2?|glb|gltf)$/;
 
+
+// Whether a changed file outside the app (`f` relative to it, `../…`) concerns a scenario: null when it
+// concerns none, else why it does (fail open). None: documentation, the repository's docs/ and .github/,
+// and any file of a sibling app, `../<other>/<path>` with exactly one `../` and a directory that is not
+// hidden (apps/<other>/… from the top). Anything else above the app (a tool pin, the root's files, `pronto/`,
+// `../x` with no directory) still concerns every scenario.
+export function outsideConcerns(f: string): string | null {
+  if (!f.startsWith("../")) return null;
+  if (/\.md$/.test(f) || /^\.\.\/\.\.\/(docs|\.github)\//.test(f) || /^\.\.\/\.\.\/AGENTS\.md$/.test(f)) return null;
+  if (/^\.\.\/[^/.][^/]*\/./.test(f)) return null;
+  return `${f.replace(/^(\.\.\/)+/, "")} is outside the app`;
+}
 
 // What a scenario's requests say it touched in the database: the tables and functions its `/crud/…`
 // requests name (a table `/crud/<t>`, a function `/crud/rpc/<fn>`, a shape's `?table=`), lowercased; `wild` when it
@@ -214,7 +230,7 @@ export function select<S extends Keyed>(runner: string, url: string, scenarios: 
   // What the app's tree does not hold but its stack may serve: the files outside it that differ from main
   // and are not documentation (another app's files, a stand-in's version), by content. So a change there
   // is never "cached green" (it hid two failing scenarios, 2026-11-03).
-  const outside = () => (changedFiles(root) ?? []).filter((f) => f.startsWith("../") && !/\.md$/.test(f) && !/^\.\.\/\.\.\/(docs|\.github)\//.test(f)).sort().map((f) => `outside ${f} ${hashOf(join(root, f))}`);
+  const outside = () => (changedFiles(root) ?? []).filter((f) => f.startsWith("../") && outsideConcerns(f) !== null).sort().map((f) => `outside ${f} ${hashOf(join(root, f))}`);
   const tree = () => {
     const t = treeKey(root);
     return t && sha([t, env(), ...outside()].join("\n"));
@@ -264,8 +280,9 @@ const recordOf = (id: string) => join(ledger, `${id}.${envNow.slice(0, 12)}`);
     const clientFiles: string[] = [];
     for (const f of files) {
       if (f.startsWith("../")) {
-        if (/\.md$/.test(f) || /^\.\.\/\.\.\/(docs|\.github)\//.test(f) || /^\.\.\/\.\.\/AGENTS\.md$/.test(f)) continue;
-        return `${f.replace(/^(\.\.\/)+/, "")} is outside the app`;
+        const why = outsideConcerns(f);
+        if (why === null) continue;
+        return why;
       }
       if ((more.live ?? []).some((r) => new RegExp(r).test(f))) return `${f} is run by the app while the scenario does`;
       if (inert.some((r) => r.test(f)) || (more.inert ?? []).some((r) => new RegExp(r).test(f))) continue;
