@@ -38,10 +38,12 @@ _configPath:   "shell/hatches/errors/config.js"
 	// The generate rules. The reporter's settings are written before pronto's writer (1) but after
 	// every writer of what the program embeds (-1: a modular app's join/*.json, the spec's files),
 	// since they are an export of the program itself (0, as flags' SQL is); the door's route after
-	// pronto's writer (3), which regenerates the door without it.
+	// pronto's writer (3), which regenerates the door without it. Both read the program's `errors`
+	// from the exports batch (pronto/exports.nu), which evaluates the whole program once for every
+	// plugin's rule: an export of its own cost a second evaluation of the program (PRONTO-870).
 	_write: {
 		priority: 0
-		cmds: [{do: "use tools.nu [run-mise]; \(H._step); run-mise exec -- cue export . -e errors.out --out json | errors write"}]
+		cmds: [{do: "\(H._step); use ./pronto/exports.nu; (exports of errors | from json).out | to json | errors write"}]
 	}
 	_route: {
 		priority: 3

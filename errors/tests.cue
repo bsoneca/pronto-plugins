@@ -90,6 +90,8 @@ standinPeer:      strings.Contains(_h.files["errors_hatch.cue"].text, "PRONTO_UP
 writeAfterEmbeds: strings.Contains(_h.files["pronto/errors.cue"].text, "\"errors-write\": {\"priority\":0") & true
 routeAfterWriter: strings.Contains(_h.files["pronto/errors.cue"].text, "\"priority\":3") & true
 routeFromExports: strings.Contains(_h.files["pronto/errors.cue"].text, "exports of errors") & true
+writeFromExports: strings.Contains(_h.files["pronto/errors.cue"].text, "(exports of errors | from json).out | to json | errors write") & true
+writeNoOwnExport: !strings.Contains(_h.files["pronto/errors.cue"].text, "cue export") & true
 
 // Once it knows whether it reports, it says so on the page (<html data-errors="on|off">), which a check waits for.
 reporterMarks: strings.Contains(_reporter, "document.documentElement.dataset.errors = on ? \"on\" : \"off\";") & true
