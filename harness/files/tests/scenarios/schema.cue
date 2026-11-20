@@ -328,7 +328,7 @@ _kinds: {
 	_expects
 	http:   _http
 	repeat: _repeat
-	for K, g in #Gestures {(K): g}
+	for K, g in #Gestures {(K): {for F, t in g {(F): t}}} // open: _checked closes the whole shape (cue 0.18)
 }
 // `_kinds` and the two kinds that hold steps (which `#Step` declares itself).
 _shapes: {
