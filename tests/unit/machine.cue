@@ -216,3 +216,186 @@ cases: "slot.ts holds a claim for a live release in another account's pool, and 
 		{get: "loadEmpty", expect: "load1 could not be read beside a release (Deno.loadavg): no number, got undefined", why: "a read with no number fails as a failed read does, never a load that admits nothing or everything"},
 	]
 }
+
+// The run owner (harness/files/tests/slot.ts, PRONTO-684): who a run's members are, over tables given as data.
+cases: "the run owner plans a run's members from a table, reuses of a pid included, and fails closed on a read it cannot make": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownPure"},
+		{keep: "r"},
+		{use: "r"},
+		{get: "basic", expect: [101], why: "a live process of this uid attributed to the root and started after it is a member; another's responsible pid, and another uid, are not"},
+		{use: "r"},
+		{get: "beforeRoot", expect: [], why: "a process that started before the root cannot be its member, whatever it says"},
+		{use: "r"},
+		{get: "zombie", expect: [], why: "a zombie is not signalled: its parent reaps it"},
+		{use: "r"},
+		{get: "reusedOurs", expect: [102], why: "the root's pid now held by Q (another start time): what was attributed to it and began before Q is the run's"},
+		{use: "r"},
+		{get: "reusedNamedSkipped", expect: ["103"], why: "and what began after Q is skipped, named: it is Q's own, never ours"},
+		{use: "r"},
+		{get: "reusedHoldersOwn", expect: [], why: "a root whose pid is held by another process, and everything attributed to that pid started after it: nothing is planned"},
+		{use: "r"},
+		{get: "reusedHoldersOwnDead", expect: [], why: "the same for a dead run's record: Q's processes are never reaped as the old run's"},
+		{use: "r"},
+		{get: "errMembers", expect: [109], why: "a read error on one pid does not hide a member that read fine"},
+		{use: "r"},
+		{get: "errSkipped", expect: ["106:gone", "107:another account's", "108:another account's"], why: "ESRCH is a pid gone, EPERM and a read error on another uid's pid are skipped"},
+		{use: "r"},
+		{get: "esrchFails", expect: 0, why: "ESRCH is not a failure"},
+		{use: "r"},
+		{get: "eperm", expect: 0, why: "another uid's EPERM is skipped, not a failure"},
+		{use: "r"},
+		{get: "otherUidRead", expect: 0, why: "a read error on a pid of another uid is skipped"},
+		{use: "r"},
+		{get: "ownUidRead", expect: 1, why: "a read error on a live pid of this uid fails the plan, closed"},
+		{use: "r"},
+		{get: "listError", expect: ["the process list could not be read: proc_listallpids returned -1 (errno 1)"], why: "a list that cannot be read fails with its cause"},
+		{use: "r"},
+		{get: "age", expect: 2000, why: "a member's age is the clock's now less its start (µs to ms)"},
+		{use: "r"},
+		{get: "deadRuns", expect: ["200:201", "300:301"], why: "a run whose supervisor is alive is not dead; one whose supervisor's pid now has another start time is, and its members are planned; the clock and the table are given"},
+		{use: "r"},
+		{get: "deadListError", expect: [1], why: "a dead-run reap on a list that cannot be read fails every record, closed"},
+		{use: "r"},
+		{get: "linuxMembers", expect: [110, 111], why: "on Linux the members are the supervisor's descendants, which a subreaper makes of every orphan (112, whose parent is init, is not one)"},
+		{use: "r"},
+		{get: "nestedByResponsible", expect: 300, why: "a process whose responsible pid is a root with a live record is inside that run"},
+		{use: "r"},
+		{get: "nestedRootReused", expect: 0, why: "a responsible pid whose process now has another start time is no run's root"},
+		{use: "r"},
+		{get: "nestedByAncestry", expect: 300, why: "a live supervisor with a record on the parent chain makes a process nested: the moment before the root's record has its name"},
+		{use: "r"},
+		{get: "nestedSupervisorReused", expect: 0, why: "a supervisor pid with another start time is not one"},
+		{use: "r"},
+		{get: "notNested", expect: 0, why: "a process under no run owns"},
+		{use: "r"},
+		{get: "nestedThrows", expect: true, why: "a table that cannot be read throws: nested or not is not guessed"},
+		{use: "r"},
+		{get: "movedSent", expect: [], why: "a member whose start time changed between the list and the signal is skipped: nothing is sent to its pid"},
+		{use: "r"},
+		{get: "movedSurvivors", expect: [], why: "and it is no survivor"},
+		{use: "r"},
+		{get: "movedFailed", expect: [], why: "and no failure"},
+		{use: "r"},
+		{get: "stubbornSurvivors", expect: 1, why: "a member still there after TERM and KILL is a survivor"},
+		{use: "r"},
+		{get: "stubbornNamed", expect: "pid 101 (age N, stubborn)", why: "named by pid, age and command"},
+		{use: "r"},
+		{get: "stubbornListed", expect: 1, why: "and listed as left running"},
+		{use: "r"},
+		{get: "deniedFailed", expect: true, why: "a signal that cannot be sent fails the run, closed"},
+	]
+}
+cases: "a short-lived parent's detached Apple sleep is stopped when the run passes": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownProbe", args: [{mode: "orphan"}]},
+		{keep: "r"},
+		{get: "launched", expect: true, why: "the root and its detached sleeper started"},
+		{use: "r"},
+		{get: "code", expect: 0, why: "the run passes"},
+		{use: "r"},
+		{get: "sleepGone", expect: true, why: "the sleeper, detached by a double fork and setsid from a parent that had already exited, is gone"},
+		{use: "r"},
+		{get: "named", expect: true, why: "and is said: left running by the run's label"},
+		{use: "r"},
+		{get: "recordGone", expect: true, why: "the run's ledger record is gone"},
+	]
+}
+cases: "a short-lived parent's detached Apple sleep is stopped when the owner gets TERM": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownProbe", args: [{mode: "wait", signal: "SIGTERM"}]},
+		{keep: "r"},
+		{get: "launched", expect: true, why: "the root and its detached sleeper started"},
+		{use: "r"},
+		{get: "nonzero", expect: true, why: "TERM ends the run nonzero"},
+		{use: "r"},
+		{get: "code", expect: 130, why: "130, as every listener here has ended"},
+		{use: "r"},
+		{get: "sleepGone", expect: true, why: "the sleeper is gone"},
+		{use: "r"},
+		{get: "recordGone", expect: true, why: "the ledger is clean"},
+	]
+}
+cases: "a short-lived parent's detached Apple sleep is stopped when the owner gets INT": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownProbe", args: [{mode: "wait", signal: "SIGINT"}]},
+		{keep: "r"},
+		{get: "launched", expect: true, why: "the root and its detached sleeper started"},
+		{use: "r"},
+		{get: "code", expect: 130, why: "INT ends the run 130"},
+		{use: "r"},
+		{get: "sleepGone", expect: true, why: "the sleeper is gone"},
+	]
+}
+cases: "a short-lived parent's detached Apple sleep is stopped when the owner gets HUP": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownProbe", args: [{mode: "wait", signal: "SIGHUP"}]},
+		{keep: "r"},
+		{get: "launched", expect: true, why: "the root and its detached sleeper started"},
+		{use: "r"},
+		{get: "code", expect: 129, why: "HUP ends the run 129"},
+		{use: "r"},
+		{get: "sleepGone", expect: true, why: "the sleeper is gone"},
+	]
+}
+cases: "another run's detached sleep is never signalled": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownProbe", args: [{mode: "wait", signal: "SIGTERM", foreign: true}]},
+		{keep: "r"},
+		{get: "launched", expect: true, why: "the root and its detached sleeper started"},
+		{use: "r"},
+		{get: "sleepGone", expect: true, why: "this run's sleeper is gone"},
+		{use: "r"},
+		{get: "foreignKept", expect: true, why: "the other owned run's sleeper is still running"},
+		{use: "r"},
+		{get: "foreignGone", expect: true, why: "and goes only when its own owner is stopped"},
+	]
+}
+cases: "a member that ignores TERM is KILLed and the run still ends": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownProbe", args: [{mode: "orphan", ignore: true}]},
+		{keep: "r"},
+		{get: "launched", expect: true, why: "the root and its detached sleeper started"},
+		{use: "r"},
+		{get: "code", expect: 0, why: "the run passes"},
+		{use: "r"},
+		{get: "sleepGone", expect: true, why: "the sleeper that ignored TERM is gone after the 5 s and a KILL"},
+		{use: "r"},
+		{get: "named", expect: true, why: "and is said"},
+	]
+}
+cases: "a claim inside a run does not own, and the outer owner stops what it left": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownProbe", args: [{nested: true}]},
+		{keep: "r"},
+		{get: "launched", expect: true, why: "the root and its detached sleeper started"},
+		{use: "r"},
+		{get: "code", expect: 0, why: "the run passes"},
+		{use: "r"},
+		{get: "sleepGone", expect: true, why: "the outer owner stopped the sleeper the inner claim's command left"},
+		{use: "r"},
+		{get: "named", expect: true, why: "as the outer run's"},
+		{use: "r"},
+		{get: "innerNamed", expect: false, why: "the inner one owned nothing, so it names nothing"},
+	]
+}
+cases: "the responsibility calls exist and are inherited across setsid": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownSpi"},
+		{keep: "r"},
+		{get: "symbols", expect: true, why: "the library and its calls (on macOS the responsibility SPI) open: an OS update that breaks them turns this red the same day"},
+		{use: "r"},
+		{get: "inherited", expect: true, why: "a process detached by a double fork and setsid has the root's responsible pid (Linux: it is the root's descendant)"},
+		{use: "r"},
+		{get: "selfNotRoots", expect: true, why: "this process, which started the root, is not attributed to it"},
+	]
+}

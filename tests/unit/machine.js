@@ -182,3 +182,167 @@ echo "${Deno.pid} 3 prio=release" > job-8/weight; chmod 664 job-8/weight`);
     };
   } finally { await sh(`rm -rf '${tmp}'`); }
 }
+
+// The run owner (harness/files/tests/slot.ts, PRONTO-684): who a run's members are, as data (no processes), and the
+// owner on real ones. A table is the machine's processes as one read of them gave; a pid in a case is only ever one a
+// marker file or an exact owner pid named, and every case stops all it started on every path.
+const slotUrl = new URL("../../harness/files/tests/slot.ts", import.meta.url).pathname;
+export async function ownPure() {
+  const slot = await import("../../harness/files/tests/slot.ts");
+  const { planReap, reapDead, nestedIn, stopMembers } = slot;
+  const row = (pid, more = {}) => ({ pid, uid: 501, start: 1000, ppid: 1, responsible: 1, zombie: false, ...more });
+  const table = (rows, more = {}) => ({ os: "darwin", uid: 501, rows, ...more });
+  const rec = { rootpid: 100, rootstart: 1000, superpid: 50, superstart: 900, uid: 501, what: "t", state: "running" };
+  const pids = (p) => p.members.map((m) => m.pid);
+  const root = row(100, { responsible: 100 });
+  // The root's pid reused: Q holds it now, started at 5000. What is attributed to 100 and began after Q is Q's.
+  const reused = table([row(100, { start: 5000, responsible: 100 }), row(102, { start: 1100, responsible: 100 }), row(103, { start: 5100, responsible: 100 })]);
+  const q = table([row(100, { start: 5000, responsible: 100 }), row(103, { start: 5100, responsible: 100 }), row(104, { start: 5200, responsible: 100 })]);
+  const errs = planReap(table([root, { pid: 104, errno: 22, uid: 501 }, { pid: 105, errno: 22 }, { pid: 106, errno: 3 }, { pid: 107, errno: 1 }, { pid: 108, errno: 22, uid: 0 }, row(109, { responsible: 100, start: 1100 })]), rec, 2000);
+  const failedOnly = (rows) => planReap(table([root, ...rows]), rec, 2000).failed.length;
+  const live = row(50, { start: 900 });
+  const dead = { ...rec, rootpid: 200, rootstart: 1000, superpid: 60, superstart: 900 };
+  const reusedSuper = { ...rec, rootpid: 300, rootstart: 1000, superpid: 70, superstart: 900 };
+  const dr = reapDead([rec, dead, reusedSuper], table([live, root, row(201, { responsible: 200, start: 1100 }), row(70, { start: 7000 }), row(301, { responsible: 300, start: 1100 })]), 2000);
+  const linux = (rows) => ({ os: "linux", uid: 501, rows });
+  const lin = planReap(linux([row(50, { start: 900, ppid: 1 }), row(100, { ppid: 50 }), row(110, { ppid: 100 }), row(111, { ppid: 110 }), row(112, { ppid: 1 }), row(113, { ppid: 50, uid: 0 })]), rec, 2000);
+  const outer = { ...rec, rootpid: 300, rootstart: 1000, superpid: 70, superstart: 900 };
+  const mine = (rows, self = 400) => nestedIn(table(rows), self, [outer]);
+  const nestedThrows = (() => { try { nestedIn(table([], { listError: "x" }), 400, []); return false; } catch { return true; } })();
+  // stopMembers on a machine that changes under it: the member read at start 1100 is another process (1200) by the time it is signalled.
+  const sent = [];
+  let reads = 0;
+  const sys = {
+    os: "darwin", uid: 501,
+    table: () => table(reads++ === 0 ? [root, row(101, { responsible: 100, start: 1100 })] : [root]),
+    signal: (pid, start, sig) => { if (start !== 1200) return "changed"; sent.push(`${pid}:${sig}`); return "sent"; },
+    command: () => "x",
+  };
+  const stopped = await stopMembers(sys, rec, 300, 10);
+  // And a survivor: still there after KILL, it is named and fails.
+  const stubborn = { ...sys, table: () => table([root, row(101, { responsible: 100, start: 1100 })]), signal: () => "sent", command: () => "stubborn" };
+  const left = await stopMembers(stubborn, rec, 50, 10);
+  // And a signal that cannot be sent fails, closed.
+  const denied = await stopMembers({ ...stubborn, signal: () => "Operation not permitted" }, rec, 20, 10);
+  return {
+    basic: pids(planReap(table([root, row(101, { responsible: 100, start: 1100 }), row(102, { responsible: 7, start: 1100 }), row(103, { responsible: 100, start: 1100, uid: 0 })]), rec, 2000)),
+    beforeRoot: pids(planReap(table([root, row(101, { responsible: 100, start: 999 })]), rec, 2000)),
+    zombie: pids(planReap(table([root, row(101, { responsible: 100, start: 1100, zombie: true })]), rec, 2000)),
+    reusedOurs: pids(planReap(reused, rec, 2000)),
+    reusedNamedSkipped: planReap(reused, rec, 2000).skipped.map((s) => `${s.pid}`),
+    reusedHoldersOwn: pids(planReap(q, rec, 2000)),
+    reusedHoldersOwnDead: pids(reapDead([rec], q, 2000)[0].plan),
+    errMembers: pids(errs),
+    errFailed: errs.failed,
+    errSkipped: errs.skipped.map((s) => `${s.pid}:${s.why}`),
+    esrchFails: failedOnly([{ pid: 106, errno: 3 }]),
+    eperm: failedOnly([{ pid: 107, errno: 1 }]),
+    otherUidRead: failedOnly([{ pid: 108, errno: 13, uid: 0 }]),
+    ownUidRead: failedOnly([{ pid: 104, errno: 13, uid: 501 }]),
+    listError: planReap(table([], { listError: "proc_listallpids returned -1 (errno 1)" }), rec, 2000).failed,
+    age: planReap(table([root, row(101, { responsible: 100, start: 1_000_000 })]), { ...rec, rootstart: 1000 }, 3000)[ "members" ][0].age,
+    deadRuns: dr.map((d) => `${d.run.rootpid}:${pids(d.plan)}`),
+    deadListError: reapDead([rec], table([], { listError: "x" }), 2000).map((d) => d.plan.failed.length),
+    linuxMembers: pids(lin),
+    linuxSkipped: lin.skipped.map((s) => s.pid),
+    nestedByResponsible: mine([row(300, { start: 1000, responsible: 300 }), row(400, { responsible: 300, ppid: 1 })])?.rootpid ?? 0,
+    nestedRootReused: mine([row(300, { start: 4000, responsible: 300 }), row(400, { responsible: 300, ppid: 1 })])?.rootpid ?? 0,
+    nestedByAncestry: mine([row(70, { start: 900 }), row(80, { ppid: 70, responsible: 5 }), row(400, { ppid: 80, responsible: 5 })])?.rootpid ?? 0,
+    nestedSupervisorReused: mine([row(70, { start: 901 }), row(400, { ppid: 70, responsible: 5 })])?.rootpid ?? 0,
+    notNested: mine([row(400, { ppid: 1, responsible: 5 })])?.rootpid ?? 0,
+    nestedThrows,
+    movedSent: sent, movedSurvivors: stopped.survivors, movedFailed: stopped.failed,
+    stubbornSurvivors: left.survivors.length, stubbornNamed: left.survivors[0].replace(/age [0-9hm]+/, "age N"), stubbornListed: left.listed.length,
+    deniedFailed: denied.failed.length > 0,
+  };
+}
+
+// The owner on real processes (macOS and Linux). `own` is slot.ts's verb, run as a process of its own so a signal can
+// be sent to it. A sleeper (/bin/sleep, an Apple binary) is detached by a short-lived parent with a double fork and
+// setsid and writes its pid to a marker; the root then ends (the run passes) or waits for a signal.
+const decode = (b) => new TextDecoder().decode(b);
+// Gone: no process, or a zombie (a signalled process whose parent has not reaped it yet).
+const gone = async (pid) => { const st = await sh(`ps -o stat= -p ${pid} 2>/dev/null`); return st === "" || st.startsWith("Z"); };
+const until = async (what, ms = 15000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await what()) return true; await new Promise((r) => setTimeout(r, 50)); } return false; };
+const readPid = (f) => { try { const n = Number(Deno.readTextFileSync(f).trim().split(" ")[0]); return n > 0 ? n : 0; } catch { return 0; } };
+// The root's script: detach a sleeper (marker $M), then wait for the sleeper's pid to be written; `pass` ends, else it waits.
+const rootScript = (pass) => `perl -MPOSIX -e 'fork and exit; POSIX::setsid(); $SIG{TERM}="IGNORE" if $ENV{IGN}; open F, ">$ENV{M}.tmp"; print F $$; close F; rename "$ENV{M}.tmp", $ENV{M}; exec "/bin/sleep", "300"'
+i=0; while [ ! -s "$M" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
+${pass ? "exit 0" : "exec /bin/sleep 300"}`;
+export async function ownProbe({ mode = "orphan", signal = "", foreign = false, ignore = false, nested = false } = {}) {
+  const tmp = await sh("mktemp -d");
+  const owners = [], sleepers = [];
+  const out = { launched: false, code: -1, sleepGone: false, named: false, nonzero: false, foreignKept: true, foreignGone: true, innerNamed: false, recordGone: false };
+  const spawnOwner = (tag, script, more = {}) => {
+    const m = `${tmp}/${tag}.sleeper`;
+    const c = new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", "--no-config", "--no-lock", slotUrl, "own", "--what", tag, "--grace", "10", "--root-out", `${tmp}/${tag}.root`, "--", "sh", "-c", script],
+      env: { STACK_POOL: `${tmp}/pool`, M: m, ...more }, stdout: "piped", stderr: "piped",
+    }).spawn();
+    owners.push(c.pid);
+    return { c, m };
+  };
+  try {
+    let other;
+    if (foreign) other = spawnOwner("other", rootScript(false));
+    const inner = nested ? `deno_run=${JSON.stringify(Deno.execPath())}; "$deno_run" run -A --no-config --no-lock '${slotUrl}' own --what inner -- sh -c "$INNER"; ` : "";
+    const script = nested ? `${inner}exit 0` : rootScript(mode === "orphan" && !signal);
+    const mine = spawnOwner("t", script, { ...(ignore ? { IGN: "1" } : {}), ...(nested ? { INNER: rootScript(true) } : {}) });
+    const started = await until(() => readPid(mine.m) > 0 && (!foreign || readPid(other.m) > 0));
+    const sleeper = readPid(mine.m);
+    if (sleeper) sleepers.push(sleeper);
+    if (foreign && readPid(other.m)) sleepers.push(readPid(other.m));
+    out.launched = started;
+    if (signal) Deno.kill(mine.c.pid, signal);
+    const o = await mine.c.output();
+    out.code = o.code;
+    out.nonzero = o.code !== 0;
+    const err = decode(o.stderr);
+    out.named = /left running by "t"/.test(err);
+    out.innerNamed = /left running by "inner"/.test(err);
+    out.sleepGone = sleeper > 0 && await until(() => gone(sleeper), 3000);
+    out.recordGone = (await sh(`ls '${tmp}/pool/runs' 2>/dev/null | wc -l`)) === "0" || foreign;
+    if (foreign) {
+      const fp = readPid(other.m);
+      out.foreignKept = fp > 0 && !(await gone(fp));
+      // Now the other run is ended, by its owner's exact pid, and its sleeper goes with it.
+      Deno.kill(other.c.pid, "SIGTERM");
+      await other.c.output();
+      out.foreignGone = fp > 0 && await until(() => gone(fp), 3000);
+    }
+  } finally {
+    // Every path: each owner we started still running is stopped, then every sleeper a marker named, by exact pid.
+    for (const pid of owners) { if (!(await gone(pid))) { try { Deno.kill(pid, "SIGKILL"); } catch { /* gone */ } } }
+    for (const pid of sleepers) { if (!(await gone(pid)) && /sleep/.test(await sh(`ps -o command= -p ${pid}`))) { try { Deno.kill(pid, "SIGKILL"); } catch { /* gone */ } } }
+    await sh(`rm -rf '${tmp}'`);
+  }
+  return out;
+}
+// The responsibility calls exist and are inherited across setsid: a root started by the owner's spawn, a sleeper
+// detached by a double fork and setsid, and the table says the sleeper is the root's (macOS: its responsible pid; Linux: a descendant).
+export async function ownSpi() {
+  const slot = await import("../../harness/files/tests/slot.ts");
+  const tmp = await sh("mktemp -d");
+  const sleepers = [];
+  let root = 0;
+  const out = { symbols: false, inherited: false, selfNotRoots: false };
+  try {
+    const sys = slot.ownSys();
+    out.symbols = true;
+    const m = `${tmp}/m`;
+    root = sys.spawn(["sh", "-c", `perl -MPOSIX -e 'fork and exit; POSIX::setsid(); open F, ">$ENV{M}.tmp"; print F $$; close F; rename "$ENV{M}.tmp", $ENV{M}; exec "/bin/sleep", "300"'; exec /bin/sleep 300`], { ...Deno.env.toObject(), M: m }, undefined, {});
+    if (!await until(() => readPid(m) > 0)) return out;
+    const sp = readPid(m);
+    sleepers.push(sp);
+    const t = sys.table(), rs = t.rows.find((r) => r.pid === root), ss = t.rows.find((r) => r.pid === sp);
+    out.inherited = t.os === "darwin" ? rs?.responsible === root && ss?.responsible === root && ss?.ppid === 1 : ss?.ppid !== undefined;
+    out.selfNotRoots = t.rows.find((r) => r.pid === Deno.pid)?.responsible !== root;
+  } finally {
+    // The root and its sleeper, by the exact pids this case started.
+    if (root) { try { Deno.kill(root, "SIGKILL"); } catch { /* gone */ } }
+    for (const pid of sleepers) { try { Deno.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+    if (root) { const sys = slot.ownSys(); await sys.exited(root).catch(() => {}); sys.reap(root); }
+    await sh(`rm -rf '${tmp}'`);
+  }
+  return out;
+}
