@@ -162,6 +162,21 @@ cases: {
 		{call: "cron.noVerdictRun", args: ["the rehearsal failed (exit 1): nothing released"], expect: false},
 		{call: "cron.noVerdictRun", args: [null], expect: false},
 	]}
+	"a preview beside the rehearsal: the first to fail stops the other, both pass releases": {suite: "cron", steps: [
+		{call: "cron.besideOutcome", args: [null, {bad: ["home /: 502, expected 200"], at: 40}], expect: {stop: "rehearsal", failed: "preview", why: "the release preview failed: home /: 502, expected 200; the rehearsal was stopped"}, why: "the preview failed first: the rehearsal is stopped, and says so"},
+		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, null], expect: {stop: "preview", failed: "rehearsal", why: "the rehearsal failed (exit 1); the preview was stopped"}, why: "the rehearsal failed first: the preview is stopped"},
+		{call: "cron.besideOutcome", args: [{code: 0, at: 4500}, null], expect: {stop: null, failed: null, why: ""}, why: "the rehearsal passed, the preview still runs"},
+		{call: "cron.besideOutcome", args: [null, {bad: [], at: 840}], expect: {stop: null, failed: null, why: ""}, why: "the preview passed, the rehearsal still runs"},
+		{call: "cron.besideOutcome", args: [{code: 0, at: 4500}, {bad: [], at: 840}], expect: {stop: null, failed: null, why: ""}, why: "both passed: release"},
+		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, {bad: ["up failed"], at: 950}], expect: {stop: null, failed: "rehearsal", why: "the rehearsal failed (exit 1)"}, why: "both failed: the earlier one is the verdict"},
+		{call: "cron.besideOutcome", args: [{code: 143, at: 60}, {bad: ["up failed"], at: 50}], expect: {stop: null, failed: "preview", why: "the release preview failed: up failed"}, why: "a rehearsal that ended after the preview's failure is not the verdict"},
+		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, {bad: [], at: 800}], expect: {stop: null, failed: "rehearsal", why: "the rehearsal failed (exit 1)"}, why: "the preview already passed: nothing to stop"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: home /: 502, expected 200; the rehearsal was stopped: nothing released"], expect: true, why: "a stopped rehearsal says nothing of a commit: never bisected"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: home /: 502, expected 200: nothing released"], expect: false},
+	]}
+	"overlapping phases are one step, counted once": {suite: "cron", steps: [
+		{call: "cron.line", args: [{started: "t", app: "a", outcome: "released", steps: {prepare: 30, "rehearse+preview": 4500, release: 600}}], expect: "t a released: 85.5 min = prepare 0.5, rehearse+preview 75.0, release 10.0", why: "the total sums the wall time once"},
+	]}
 	"a bisect check that judged nothing leaves its run open": {suite: "cron", steps: [
 		for c in [3, 124, 126, 127, 130, 137] {{call: "cron.inconclusiveExit", args: [c], expect: true}},
 		for c in [0, 1, 2] {{call: "cron.inconclusiveExit", args: [c], expect: false}},

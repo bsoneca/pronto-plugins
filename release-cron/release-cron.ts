@@ -31,7 +31,7 @@
 // the first green one releases from it (README.md, "Release branches"). `abandon` gives a held release up by hand.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, sshDropped, landed, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
+import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, sshDropped, landed, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -616,16 +616,20 @@ const enc = new TextEncoder();
 const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() - t0) / 1000)}s ${s}\n`; log(enc.encode(l)); Deno.stdout.writeSync(enc.encode(l)); };
 let head = "";
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
-type Command = { release: string[]; serving: string[]; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string } };
+type Command = { release: string[]; serving: string[]; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string; when?: "after" | "first" | "beside" } };
 let cron: { scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; flagsReleased: string[] | null; gap: number; poll: number; branches?: { enabled: boolean; abandonHours: number; abandonAttempts: number }; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
 let mark = Date.now();
-const step = (name: string) => { steps[name] = Math.round((Date.now() - mark) / 1000); mark = Date.now(); };
+// While the rehearsal and the preview overlap (preview `when: "beside"`) neither is a step of its own: both are the one
+// step "rehearse+preview", their wall time, so `report`'s sum of the steps counts the time once.
+let overlap = false;
+const step = (name: string) => { if (overlap) return; steps[name] = Math.round((Date.now() - mark) / 1000); mark = Date.now(); };
 const run: Record<string, unknown> = { app, started, steps };
 // The release-active file: written whole to a temporary file then renamed, so a reader never sees half.
 const activePath = Deno.env.get("RELEASE_ACTIVE") ?? `${home}/.cache/pronto/release-active`;
 const active = (phase: string) => {
+  if (overlap) return;
   try {
     // One file for the machine: another app's live run keeps it (releases of different apps run in
     // parallel); this run takes it at its next phase once that run is gone.
@@ -663,7 +667,7 @@ const end = (outcome: string, why = "", code = 0, red = false) => {
   try { if (JSON.parse(Deno.readTextFileSync(activePath)).pid === Deno.pid) Deno.removeSync(activePath); } catch { /* none, or not ours */ }
   Object.assign(run, { outcome, why: why || undefined, ended: local(Date.now()) });
   // Inside the steps: the rehearsal's and the release's own records of this commit, since this run began.
-  if (run.commit && ("rehearse" in steps || "release" in steps)) {
+  if (run.commit && ("rehearse" in steps || "rehearse+preview" in steps || "release" in steps)) {
     const d = detail(jsonl(`${home}/.cache/pronto/rehearsals/${app}.jsonl`), gcp ? jsonl(`${home}/.cache/pronto/releases/${gcp.name}.jsonl`) : [], run.commit, new Date(t0).toISOString());
     run.detail = d;
     if (d.rehearsal) run.rehearsal = d.rehearsal;
@@ -803,17 +807,16 @@ function judged(failed: string, head: string): string | null {
   return verdict;
 }
 
-let current: { pgid: number } | undefined;
-// Stopped: the child's group stopped and gone (killed after a minute) before the run ends and its
+// The children running now (the rehearsal and the preview's `up` can run side by side), process group -> tag.
+const children = new Map<number, string>();
+// Stopped: every child's group stopped and gone (killed after a minute) before the run ends and its
 // lock goes, so the next run never starts beside what this one started.
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   Deno.addSignalListener(signal, async () => {
-    if (current) {
-      const pgid = current.pgid;
-      stop(pgid);
-      for (const t = Date.now(); alive(pgid) && Date.now() - t < 60_000;) await new Promise((r) => setTimeout(r, 1000));
-      if (alive(pgid)) send(pgid, "KILL");
-    }
+    const groups = [...children.keys()];
+    for (const pgid of groups) stop(pgid);
+    for (const t = Date.now(); groups.some(alive) && Date.now() - t < 60_000;) await new Promise((r) => setTimeout(r, 1000));
+    for (const pgid of groups) if (alive(pgid)) send(pgid, "KILL");
     end("stopped", signal, 130);
   });
 }
@@ -835,14 +838,16 @@ const send = (root: number, sig: string) => {
 };
 const alive = (root: number) => tree(root).pids.length > 0;
 const HEARTBEAT = 5 * 60_000;
-const killers: ReturnType<typeof setTimeout>[] = [];
+const killers = new Map<number, ReturnType<typeof setTimeout>>();
 function stop(pgid: number) {
   send(pgid, "TERM");
-  killers.push(setTimeout(() => { if (alive(pgid)) send(pgid, "KILL"); }, 60_000));
+  killers.set(pgid, setTimeout(() => { if (alive(pgid)) send(pgid, "KILL"); }, 60_000));
 }
-async function child(cmd: string, args: string[], cwd: string, env: Record<string, string>, watch: (l: string) => void = () => {}) {
+// Every running child that carries `tag` stopped (the loser of the rehearsal and preview's race).
+const stopTagged = (tag: string) => { for (const [pgid, t] of children) if (t === tag) stop(pgid); };
+async function child(cmd: string, args: string[], cwd: string, env: Record<string, string>, watch: (l: string) => void = () => {}, tag = "") {
   const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", cmd, ...args], cwd, env, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
-  current = { pgid: p.pid };
+  children.set(p.pid, tag);
   // No limit: a line every few minutes says it is still running and for how long.
   const beat = setInterval(() => say(`${cmd} ${args.join(" ")}: still running, ${Math.round((Date.now() - t0) / 60_000)} min into the run`), HEARTBEAT);
   const relay = async (from: ReadableStream<Uint8Array>) => {
@@ -858,10 +863,63 @@ async function child(cmd: string, args: string[], cwd: string, env: Record<strin
   await Promise.all([relay(p.stdout), relay(p.stderr)]);
   const { code } = await p.status;
   clearInterval(beat);
-  killers.splice(0).forEach(clearTimeout);
-  current = undefined;
+  clearTimeout(killers.get(p.pid));
+  killers.delete(p.pid);
+  children.delete(p.pid);
   return { code };
 }
+
+// The release preview (releaseCron.target.preview): the release's whole stack in a namespace of its own on the
+// cluster, asked the probes through a port-forward before the release goes ahead, and removed after, whatever it
+// said. It proves the images, the migrations replayed over a fresh database and the config on the node before
+// any traffic moves. Returns what failed (none: it answered every probe). `cancel.stopped` ends it early (the
+// rehearsal beside it failed first): `up` is stopped by its tag, the waits and probes end, and `down` still runs.
+async function previewCheck(pv: NonNullable<Command["preview"]>, dir: string, cancel: { stopped: boolean }): Promise<string[]> {
+  const env = { ...Deno.env.toObject(), STACK_PRIORITY: "release" };
+  const bad: string[] = [];
+  let reach: Deno.ChildProcess | undefined;
+  try {
+    const up = await child(pv.up[0], pv.up.slice(1), dir, env, undefined, "preview");
+    if (up.code !== 0) bad.push(`the preview (${pv.up.join(" ")}) failed (exit ${up.code})`);
+    else {
+      // In a process group of its own, so ending it ends the ssh forward and what it started; its stdin stays open (nothing
+      // is written to it), which is how the remote side knows to stop: it reads it until the connection closes.
+      reach = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...pv.reach], cwd: dir, env, stdin: "piped", stdout: "null", stderr: "null" }).spawn();
+      // Answering through the forward: `/` is asked until it answers (the forward takes a moment, as a cold pod's first page does).
+      // A forward that exits first (the ssh dropped, the remote port-forward ended) fails the preview: waiting on would hold
+      // the app's release lock for ever.
+      let gone: Deno.CommandStatus | undefined;
+      reach.status.then((s) => { gone = s; });
+      let said2 = 0;
+      for (;;) {
+        if (cancel.stopped) break;
+        try { const r = await fetch(pv.origin + "/", { signal: AbortSignal.timeout(15_000) }); await r.body?.cancel(); if (r.status < 500) break; } catch { /* not up yet */ }
+        if (gone) { bad.push(`the preview's forward (${pv.reach.join(" ")}) exited (code ${gone.code}) before ${pv.origin} answered`); break; }
+        if (Date.now() - said2 >= HEARTBEAT) { said2 = Date.now(); say(`preview: still waiting for ${pv.origin}`); }
+        await new Promise((r) => setTimeout(r, 5_000));
+      }
+      // A forward that never bound (ExitOnForwardFailure on a port something else holds) has exited by now: what answered was
+      // that other listener, not the preview.
+      if (!bad.length && gone) bad.push(`the preview's forward (${pv.reach.join(" ")}) exited (code ${gone.code}): what answered on ${pv.origin} was not the preview`);
+      if (!bad.length) for (const [name, p] of previewProbes(cron.probes)) {
+        if (cancel.stopped) break;
+        try {
+          const r = await fetch(`${pv.origin}${p.path}`, { headers: p.agent ? { "User-Agent": p.agent } : {}, redirect: p.location ? "manual" : "follow", signal: AbortSignal.timeout(60_000) });
+          const v = probe(p, r.status, await r.text(), r.headers.get("location"));
+          if (v) bad.push(`${name} ${v}`);
+        } catch (e) { bad.push(`${name} ${p.path}: ${(e as Error).message}`); }
+      }
+    }
+  } finally {
+    if (reach) { try { send(reach.pid, "TERM"); await reach.stdin.close().catch(() => {}); } catch { /* already gone */ } }
+    const down = await child(pv.down[0], pv.down.slice(1), dir, env);
+    // A preview left standing fails the run before the release: its namespace and what runs there stay until someone
+    // removes them, which a run that reads as released would hide.
+    if (down.code !== 0) bad.push(`removing the preview (${pv.down.join(" ")}) failed (exit ${down.code})`);
+  }
+  return bad;
+}
+const sayPreview = (bad: string[]) => say(bad.length ? `preview failed: ${bad.join("; ")}` : "preview answered every probe");
 
 const gcloud = (args: string[], seconds = 120) => must("gcloud", [...args, "--project", gcp!.project, "--region", gcp!.region, "--format=json"], undefined, {}, seconds);
 try {
@@ -962,37 +1020,86 @@ try {
   const wantSlot = own && cron.rehearsal.slot && !dry;
   if (cloud) say(`GCP.rehearsal: the rehearsal runs in the cloud, job ${gcp!.rehearsal!.job}, inside release@gcp`);
   else if (!rehearse) say("no rehearsal: releaseCron.rehearsal.command is null");
-  let got = !wantSlot;
-  if (wantSlot) active("slot");
-  else if (own && !dry) { step("slot"); active("rehearse"); say("rehearsal.slot is false: run without waiting for a slot"); }
-  // The slot is taken once a live slot of the pool names this rehearsal as its owner.
-  const pool = Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks";
-  const look = setInterval(() => {
-    if (got) return;
-    for (const e of (() => { try { return [...Deno.readDirSync(pool)]; } catch { return []; } })()) {
-      if (!/^slot-\d+$/.test(e.name)) continue;
-      const owner = (() => { try { return Deno.readTextFileSync(`${pool}/${e.name}/owner`); } catch { return ""; } })();
-      const pid = (() => { try { return Deno.readTextFileSync(`${pool}/${e.name}/pid`).trim(); } catch { return ""; } })();
-      // The holder alive and started by this run: not a slot a dead or stray rehearsal left.
-      const ours = pid && current && tree(current.pgid).pids.includes(Number(pid));
-      if (ours && holds(owner, dir, cron.rehearsal.holder) && owner.startsWith(`${pid} `)) { got = true; step("slot"); active("rehearse"); say(`slot taken: ${e.name}`); return; }
-    }
-  }, 5000);
-  // STACK_PRIORITY=release puts its claim at the head of the pool's line, ahead of every claim a
-  // pull request's gate or a launch is waiting with (tests/slot.ts).
-  // The rehearsal's own output names the new-feature scenarios it passed on and the ones that flaked on their one retry.
   let newFailing: string[] = [];
   let flaked: string[] = [];
-  const gate = !own || dry ? { code: 0 } : await child(rehearse![0], rehearse!.slice(1), dir, { ...rehearsalEnv(Deno.env.toObject(), live, !!target), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
-  clearInterval(look);
-  // Every check passed already for this tree: the rehearsal took no slot and waited for none.
-  if (!got && gate.code === 0) { got = true; step("slot"); active("rehearse"); }
+  // The rehearsal to its verdict: its slot waited for, then the command run. `got`: whether the slot was taken (or none was wanted).
+  const rehearsalRun = async () => {
+    let got = !wantSlot;
+    if (wantSlot) active("slot");
+    else if (own && !dry) { step("slot"); active("rehearse"); say("rehearsal.slot is false: run without waiting for a slot"); }
+    // The slot is taken once a live slot of the pool names this rehearsal as its owner.
+    const pool = Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks";
+    const look = setInterval(() => {
+      if (got) return;
+      for (const e of (() => { try { return [...Deno.readDirSync(pool)]; } catch { return []; } })()) {
+        if (!/^slot-\d+$/.test(e.name)) continue;
+        const owner = (() => { try { return Deno.readTextFileSync(`${pool}/${e.name}/owner`); } catch { return ""; } })();
+        const pid = (() => { try { return Deno.readTextFileSync(`${pool}/${e.name}/pid`).trim(); } catch { return ""; } })();
+        // The holder alive and started by this run: not a slot a dead or stray rehearsal left.
+        const ours = pid && [...children.keys()].some((g) => tree(g).pids.includes(Number(pid)));
+        if (ours && holds(owner, dir, cron.rehearsal.holder) && owner.startsWith(`${pid} `)) { got = true; step("slot"); active("rehearse"); say(`slot taken: ${e.name}`); return; }
+      }
+    }, 5000);
+    // STACK_PRIORITY=release puts its claim at the head of the pool's line, ahead of every claim a
+    // pull request's gate or a launch is waiting with (tests/slot.ts).
+    // The rehearsal's own output names the new-feature scenarios it passed on and the ones that flaked on their one retry.
+    const gate = !own || dry ? { code: 0 } : await child(rehearse![0], rehearse!.slice(1), dir, { ...rehearsalEnv(Deno.env.toObject(), live, !!target), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; }, "rehearsal");
+    clearInterval(look);
+    // Every check passed already for this tree: the rehearsal took no slot and waited for none.
+    if (!got && gate.code === 0) { got = true; step("slot"); active("rehearse"); }
+    return { gate, got };
+  };
+  // The preview's `when` (schema.cue): "after" runs below, once the rehearsal and the android step passed; "first" here, before
+  // the rehearsal's slot; "beside" at the same time as the rehearsal, the first to fail stopping the other. RELEASE_CRON_DRY=android
+  // runs neither.
+  const pv = target?.preview;
+  const when = pv ? pv.when ?? "after" : "after";
+  if (pv && when === "first" && !dry) {
+    active("preview");
+    const bad = await previewCheck(pv, dir, { stopped: false });
+    step("preview");
+    sayPreview(bad);
+    if (bad.length) end("failed", `the release preview failed: ${bad.join("; ")}: nothing released`, 1, true);
+  }
+  const beside = !!pv && when === "beside" && !dry;
+  let outcome: Awaited<ReturnType<typeof rehearsalRun>>;
+  if (beside) {
+    active("rehearse+preview");
+    overlap = true;
+    const t = Date.now();
+    const cancel = { stopped: false };
+    const race: { r?: { code: number; at: number }; p?: { bad: string[]; at: number } } = {};
+    let rehearsalStopped = false;
+    let rehearsalResult: Awaited<ReturnType<typeof rehearsalRun>> | undefined;
+    // Once one has ended, the other is stopped when that is the verdict (cron.js besideOutcome).
+    const decide = () => {
+      const o = besideOutcome(race.r ?? null, race.p ?? null);
+      if (o.stop === "preview") { cancel.stopped = true; stopTagged("preview"); say(`${o.why}`); }
+      if (o.stop === "rehearsal") { rehearsalStopped = true; stopTagged("rehearsal"); say(`${o.why}`); }
+    };
+    await Promise.all([
+      rehearsalRun().then((x) => { rehearsalResult = x; race.r = { code: x.gate.code, at: Date.now() - t }; decide(); }),
+      previewCheck(pv!, dir, cancel).then((bad) => { race.p = { bad, at: Date.now() - t }; decide(); }),
+    ]);
+    // One step, their wall time: the two overlapped, so the sum of the steps must count it once.
+    overlap = false;
+    steps["rehearse+preview"] = Math.round((Date.now() - mark) / 1000);
+    mark = Date.now();
+    const r = race.r!, p = race.p!;
+    run.beside = { rehearse: Math.round(r.at / 1000), preview: Math.round(p.at / 1000), first: p.at < r.at ? "preview" : "rehearsal" };
+    if (!cancel.stopped) sayPreview(p.bad);
+    const o = besideOutcome(r, p);
+    // A rehearsal stopped for the preview's failure is no verdict of the tree: no attempt, no branch (red), and no bisect (noVerdictRun).
+    if (o.failed === "preview") end("failed", `${o.why}: nothing released`, 1, !rehearsalStopped);
+    outcome = rehearsalResult!;
+  } else outcome = await rehearsalRun();
+  const { gate, got } = outcome;
   // Exit 3 before its slot (a ledger key it could not read, a start mark it could not write) is no verdict as well.
   // So is a rehearsal stopped by a signal (130, or killed: 128 and above), the machine's doing, not the tree's.
   // And a rehearsal its wrapper timed out (124, timeout(1): Studio's integrate@k8s).
   const noVerdict = noVerdictExit(gate.code);
-  if (!got) { step("slot"); end("failed", `${noVerdict ? "the rehearsal gave no verdict: " : ""}${rehearse!.slice(1).join(" ") || rehearse![0]} ended before its slot (exit ${gate.code}): nothing released`, 1); }
-  if (own && !dry) step("rehearse");
+  if (!got) { if (!beside) step("slot"); end("failed", `${noVerdict ? "the rehearsal gave no verdict: " : ""}${rehearse!.slice(1).join(" ") || rehearse![0]} ended before its slot (exit ${gate.code}): nothing released`, 1); }
+  if (own && !dry && !beside) step("rehearse");
   // Exit 3 is the rehearsal's "no verdict" (a verdict or record it could not read or write, the checkout changed): nothing
   // is released, and the bisect never takes it up (noVerdictRun), since it says nothing of a commit; no release branch is cut for it.
   if (noVerdict) end("failed", `the rehearsal gave no verdict (exit ${gate.code}): nothing released`, 1);
@@ -1021,52 +1128,19 @@ try {
   // cluster, asked the probes through a port-forward before the release goes ahead, and removed after, whatever it
   // said. It proves the images, the migrations replayed over a fresh database and the config on the node before
   // any traffic moves; a preview that fails stops the release (nothing released).
-  if (target?.preview) {
-    const pv = target.preview;
+  if (pv && when === "after") {
     active("preview");
-    const env = { ...Deno.env.toObject(), STACK_PRIORITY: "release" };
-    const bad: string[] = [];
-    let reach: Deno.ChildProcess | undefined;
-    try {
-      const up = await child(pv.up[0], pv.up.slice(1), dir, env);
-      if (up.code !== 0) bad.push(`the preview (${pv.up.join(" ")}) failed (exit ${up.code})`);
-      else {
-        // In a process group of its own, so ending it ends the ssh forward and what it started; its stdin stays open (nothing
-        // is written to it), which is how the remote side knows to stop: it reads it until the connection closes.
-        reach = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...pv.reach], cwd: dir, env, stdin: "piped", stdout: "null", stderr: "null" }).spawn();
-        // Answering through the forward: `/` is asked until it answers (the forward takes a moment, as a cold pod's first page does).
-        // A forward that exits first (the ssh dropped, the remote port-forward ended) fails the preview: waiting on would hold
-        // the app's release lock for ever.
-        let gone: Deno.CommandStatus | undefined;
-        reach.status.then((s) => { gone = s; });
-        let said2 = 0;
-        for (;;) {
-          try { const r = await fetch(pv.origin + "/", { signal: AbortSignal.timeout(15_000) }); await r.body?.cancel(); if (r.status < 500) break; } catch { /* not up yet */ }
-          if (gone) { bad.push(`the preview's forward (${pv.reach.join(" ")}) exited (code ${gone.code}) before ${pv.origin} answered`); break; }
-          if (Date.now() - said2 >= HEARTBEAT) { said2 = Date.now(); say(`preview: still waiting for ${pv.origin}`); }
-          await new Promise((r) => setTimeout(r, 5_000));
-        }
-        // A forward that never bound (ExitOnForwardFailure on a port something else holds) has exited by now: what answered was
-        // that other listener, not the preview.
-        if (!bad.length && gone) bad.push(`the preview's forward (${pv.reach.join(" ")}) exited (code ${gone.code}): what answered on ${pv.origin} was not the preview`);
-        if (!bad.length) for (const [name, p] of previewProbes(cron.probes)) {
-          try {
-            const r = await fetch(`${pv.origin}${p.path}`, { headers: p.agent ? { "User-Agent": p.agent } : {}, redirect: p.location ? "manual" : "follow", signal: AbortSignal.timeout(60_000) });
-            const v = probe(p, r.status, await r.text(), r.headers.get("location"));
-            if (v) bad.push(`${name} ${v}`);
-          } catch (e) { bad.push(`${name} ${p.path}: ${(e as Error).message}`); }
-        }
-      }
-    } finally {
-      if (reach) { try { send(reach.pid, "TERM"); await reach.stdin.close().catch(() => {}); } catch { /* already gone */ } }
-      const down = await child(pv.down[0], pv.down.slice(1), dir, env);
-      // A preview left standing fails the run before the release: its namespace and what runs there stay until someone
-      // removes them, which a run that reads as released would hide.
-      if (down.code !== 0) bad.push(`removing the preview (${pv.down.join(" ")}) failed (exit ${down.code})`);
-    }
+    const bad = await previewCheck(pv, dir, { stopped: false });
     step("preview");
-    say(bad.length ? `preview failed: ${bad.join("; ")}` : "preview answered every probe");
+    sayPreview(bad);
     if (bad.length) end("failed", `the release preview failed: ${bad.join("; ")}: nothing released`, 1, true);
+  }
+
+  // The tree the rehearsal and the preview ran on is the tree released: the preview ran before or beside the rehearsal, so
+  // the worktree must not have moved meanwhile.
+  if (pv && when !== "after") {
+    const now = must("git", ["rev-parse", "HEAD"], wt);
+    if (now !== head) end("failed", `the run's tree moved from ${head.slice(0, 8)} to ${now.slice(0, 8)} while the rehearsal and the preview ran: nothing released`, 1);
   }
 
   // 3. The release, on the tree the rehearsal passed.
