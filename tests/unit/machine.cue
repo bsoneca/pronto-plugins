@@ -188,5 +188,9 @@ cases: "slot.ts holds a claim for a live release in another account's pool, and 
 		{get: "heldRelease", expect: false, why: "a release claim is never held by a release"},
 		{use: "r"},
 		{get: "heldWeight0", expect: false, why: "a weight-0 claim is never held"},
+		{use: "r"},
+		{get: "loadRead", expect: 7, why: "load1 is the first of the machine's three load averages"},
+		{use: "r"},
+		{get: "loadFails", expect: "load1 could not be read beside a release (Deno.loadavg): Requires sys access", why: "a failed read fails the claim with its cause, never a hold that moves its deadline for the whole release (PRONTO-1020)"},
 	]
 }
