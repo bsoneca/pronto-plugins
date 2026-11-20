@@ -98,3 +98,15 @@ export async function siblingStaged() {
     await Deno.remove(dir, { recursive: true });
   }
 }
+
+// The run guard of the shared tests/lint.ts (PRONTO-867): the largest argument of every RUN, CMD,
+// ENTRYPOINT and HEALTHCHECK of a Dockerfile, as BuildKit joins them. `sizes` keeps what a case reads.
+import { argSizes, heaviest } from "../../harness/files/tests/lint.ts";
+export const sizes = (dockerfile) => argSizes(dockerfile, "Dockerfile.x").map((a) => [a.line, a.instruction, a.bytes]);
+// A RUN of `n` bytes of one install -D chain, the shape pronto emits for a served image: its size and heaviest folders.
+export function served(files) {
+  const run = "RUN set -e; " + files.map(([dir, name]) => `install -D -m 644 '/src/${dir}${name}' '/served/${dir}${name}'`).join("; ");
+  return { bytes: argSizes(run)[0].bytes, heaviest: heaviest(run.slice(4), 2) };
+}
+// One RUN of exactly `n` bytes after its keyword.
+export const ofSize = (n) => argSizes("RUN " + "x".repeat(n)).map((a) => a.bytes);

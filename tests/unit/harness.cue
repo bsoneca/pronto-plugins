@@ -155,3 +155,45 @@ cases: "a staged sibling edit keys as HEAD holds it until it is committed, then 
 		{call: "harness.siblingStaged", expect: {firstIsHead: true, stagedIsHead: true, afterIsNewHead: true}, why: "keyed by HEAD's blob, not the index's"},
 	]
 }
+
+// The run guard of tests/lint.ts (PRONTO-867): the largest argument of every RUN, CMD, ENTRYPOINT and HEALTHCHECK of a
+// Dockerfile, as BuildKit reads it. Linux refuses one argv string over 131072 B, and a shell-form RUN is one.
+cases: "a shell-form RUN is one argument, counted in bytes after its keyword": {
+	suite: "harness"
+	steps: [
+		{call: "harness.sizes", args: ["FROM scratch\nRUN echo hi\n"], expect: [[2, "RUN", 7]]},
+		{call: "harness.sizes", args: ["RUN echo é"], expect: [[1, "RUN", 7]], why: "UTF-8 bytes, not characters"},
+		{call: "harness.ofSize", args: [131072], expect: [131072]},
+	]
+}
+cases: "continuation lines are joined as BuildKit joins them, and comments inside them dropped": {
+	suite: "harness"
+	steps: [
+		{call: "harness.sizes", args: ["RUN a \\\n  && b \\\n# a comment\n  && c\nCMD x"], expect: [[1, "RUN", 15], [5, "CMD", 1]], why: "the line is the instruction's first; the escape and newline go, the comment line too"},
+		{call: "harness.sizes", args: ["# escape=`\nRUN a `\n b\\\nRUN c"], expect: [[2, "RUN", 5], [4, "RUN", 1]], why: "with escape=`, a backslash ends nothing"},
+		{call: "harness.sizes", args: ["RUN a\n\n# between\nRUN b"], expect: [[1, "RUN", 1], [4, "RUN", 1]]},
+	]
+}
+cases: "an exec form is as large as its largest element, CMD, ENTRYPOINT and HEALTHCHECK CMD count, other instructions do not": {
+	suite: "harness"
+	steps: [
+		{call: "harness.sizes", args: ["CMD [\"a\", \"bcd\"]\nENTRYPOINT [\"ef\"]"], expect: [[1, "CMD", 3], [2, "ENTRYPOINT", 2]]},
+		{call: "harness.sizes", args: ["HEALTHCHECK --interval=5s --timeout=2s CMD curl -f x\nHEALTHCHECK NONE"], expect: [[1, "HEALTHCHECK", 9]], why: "flags and CMD are not the argument; NONE has none"},
+		{call: "harness.sizes", args: ["RUN --mount=type=cache,target=/c make\nCOPY a b\nENV A=1\nARG B"], expect: [[1, "RUN", 4]], why: "a RUN's flags are not the command"},
+		{call: "harness.sizes", args: ["run lower"], expect: [[1, "RUN", 5]], why: "keywords are case-insensitive"},
+	]
+}
+cases: "a heredoc's body is a file, not an argument": {
+	suite: "harness"
+	steps: [
+		{call: "harness.sizes", args: ["RUN <<EOF\necho very long body here\nEOF\nRUN b"], expect: [[1, "RUN", 5], [4, "RUN", 1]]},
+		{call: "harness.sizes", args: ["RUN cat <<-'X' > /f\n\tbody\n\tX\nCMD c"], expect: [[1, "RUN", 15], [4, "CMD", 1]], why: "<<- strips tabs, a quoted word is the word"},
+		{call: "harness.sizes", args: ["RUN echo $((1<<2)) <<<hi"], expect: [[1, "RUN", 20]], why: "a shift and a here-string open no heredoc"},
+	]
+}
+cases: "a served image's RUN names the folders that weigh most": {
+	suite: "harness"
+	steps: [
+		{call: "harness.served", args: [[["shell/hatches/fala/voz/", "a.ogg"], ["shell/hatches/fala/voz/", "b.ogg"], ["shell/screens/", "play.html"]]], expect: {bytes: 278, heaviest: [["shell/hatches/fala/voz/", 188], ["shell/screens/", 84]]}, why: "four levels at most, the bytes of the statements installing into each"},
+	]
+}
