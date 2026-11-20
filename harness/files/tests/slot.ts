@@ -1471,7 +1471,8 @@ const descendants = (rows: readonly PidRow[], tops: readonly number[]): Set<numb
 // macOS: this uid's live processes whose responsible pid is the root, started at or after it, and, when the root's pid
 // is now held by another process Q (a start time that is not the record's), before Q: what is attributed to a reused
 // pid and started after its new holder is the holder's, never ours. Linux: the root's subtree, and the orphans re-parented
-// to the supervisor (a subreaper) that carry its PRONTO_RUN marker, with theirs; never the supervisor's own children.
+// to the supervisor (a subreaper), or to init once it is gone, that carry its PRONTO_RUN marker, with theirs; never the
+// supervisor's own children.
 // A read error on a live pid of this uid is a failure (fail closed); ESRCH is a pid gone; another uid's, skipped.
 export function planReap(table: PidTable, record: RunRecord, now: number): Plan {
   const plan: Plan = { members: [], skipped: [], failed: [] };
@@ -1479,7 +1480,7 @@ export function planReap(table: PidTable, record: RunRecord, now: number): Plan 
   const root = table.rows.find((r) => r.pid === record.rootpid);
   const holder = root && root.errno === undefined && root.start !== undefined && root.start !== record.rootstart ? root.start : undefined;
   const runId = `${record.superpid}-${record.superstart}`;
-  const orphans = table.os === "linux" ? table.rows.filter((r) => r.errno === undefined && r.ppid === record.superpid && r.pid !== record.rootpid && r.marker === runId).map((r) => r.pid) : [];
+  const orphans = table.os === "linux" ? table.rows.filter((r) => r.errno === undefined && r.pid !== record.rootpid && r.pid !== record.superpid && r.marker === runId).map((r) => r.pid) : [];
   const under = table.os === "linux" ? new Set([...descendants(table.rows, [record.rootpid, ...orphans]), ...orphans]) : undefined;
   for (const r of table.rows) {
     if (r.pid === record.rootpid || r.pid === record.superpid) continue;
@@ -1504,13 +1505,11 @@ const supervisorLive = (table: PidTable, record: RunRecord) => {
   return s !== undefined && s.errno === undefined && s.start === record.superstart && !s.zombie;
 };
 // The runs whose supervisor is gone (its pid and start no longer match), each with what it left (pure). A list that
-// cannot be read fails every record, closed. A Linux run's members are found by the environ marker (not here).
+// cannot be read fails every record, closed.
 export function reapDead(records: readonly RunRecord[], table: PidTable, now = Date.now()): { run: RunRecord; plan: Plan }[] {
   return records.filter((r) => r.rootpid > 0 && (table.listError !== undefined || !supervisorLive(table, r))).map((run) => ({
     run,
-    plan: table.os === "linux" && table.listError === undefined
-      ? { members: [], skipped: [{ pid: 0, why: "a dead supervisor's members are found by environ marker" }], failed: [] }
-      : planReap(table, run, now),
+    plan: planReap(table, run, now),
   }));
 }
 // The live run a process is inside, if any (pure): macOS, its responsible pid is a root whose record is live; either
@@ -1761,8 +1760,9 @@ export function ownSys(): RealSys {
       // pid (comm) state ppid ...: comm may hold spaces and parentheses, so from the last ")".
       const f = text.slice(text.lastIndexOf(")") + 2).split(" ");
       const row: PidRow = { pid, uid: Deno.statSync(`/proc/${pid}`).uid ?? undefined, zombie: f[0] === "Z" || f[0] === "X", ppid: Number(f[1]), start: Number(f[19]) * 1e6 / ticks };
-      // A child of this process may be an orphan the subreaper took (marked by PRONTO_RUN) or one of its own (a `ps`, a `down`).
-      if (row.ppid === Deno.pid && !row.zombie) {
+      // What carries PRONTO_RUN belongs to a run: a child of this process (an orphan the subreaper took, or one of its own, a `ps`, a
+      // `down`) or one of init's (an orphan of a supervisor that died). Only this uid's are read; one that cannot be is said.
+      if ((row.ppid === Deno.pid || row.ppid === 1) && row.uid === uid && !row.zombie) {
         try { row.marker = /(?:^|\0)PRONTO_RUN=([^\0]*)/.exec(Deno.readTextFileSync(`/proc/${pid}/environ`))?.[1]; } catch { row.unreadable = true; }
       }
       return row;
@@ -1858,12 +1858,8 @@ export function ownSys(): RealSys {
   };
   const reap = (pid: number) => { sym.waitid(1, pid, new Uint8Array(128), 4 | 1); };
   const root: RealSys["root"] = async (cmd, env, cwd, opts = {}) => {
-    if (linux) {
-      // Orphans re-parent to this process, so the command can be the root.
-      if (sym.prctl(36, 1n, 0n, 0n, 0n) !== 0) throw new Error(`slot: prctl(PR_SET_CHILD_SUBREAPER) failed: errno ${errno()}`);
-      const pid = spawn(cmd, env, cwd, { pgroup: opts.pgroup });
-      return { pid, cmd: pid, cmdStart: row(pid).start, done: exited(pid), end: async () => { await exited(pid); reap(pid); } };
-    }
+    // Orphans of the run re-parent to this process (Linux), and are found by their PRONTO_RUN while it lives and after it is gone.
+    if (linux && sym.prctl(36, 1n, 0n, 0n, 0n) !== 0) throw new Error(`slot: prctl(PR_SET_CHILD_SUBREAPER) failed: errno ${errno()}`);
     // The keeper talks through two files in a folder of its own: it writes `cmd` (the command's pid) and `done`
     // ("<code> <signal>"), and leaves when `release` appears.
     const dir = Deno.makeTempDirSync({ dir: runsDir(), prefix: "k-" });
@@ -1885,7 +1881,7 @@ export function ownSys(): RealSys {
       for (;;) {
         const v = read("done");
         if (v) { const [code, signal] = v.split(" ").map(Number); return { code, signal }; }
-        if (row(pid).errno === ESRCH) throw new Error("slot: the keeper of the run ended before its command did");
+        if (row(pid).errno === ESRCH || row(pid).zombie) throw new Error("slot: the keeper of the run ended before its command did");
         await sleepMs(20);
       }
     })();
