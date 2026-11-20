@@ -54,7 +54,7 @@ import { createHash } from "node:crypto";
 import { basename, dirname, join, relative } from "node:path";
 
 type Keyed = { id: string };
-type Record_ = { key: string; at: string; steps?: string; env?: string; served?: string[]; assets?: Record<string, string> };
+type Record_ = { key: string; at: string; steps?: string; env?: string; declared?: string; served?: string[]; assets?: Record<string, string> };
 export const sha = (b: string | Uint8Array) => createHash("sha256").update(b).digest("hex");
 const apart = [".git", "node_modules", ".task", "dist", ".certs", ".omc", ".claude", ".probe", ".DS_Store"];
 const apartPrefix = ["tests/unit/", "tests/unit.ts"];
@@ -106,6 +106,14 @@ export function declaredKeys(entries: [string, string][], reads: string[] = []):
 
 // The sibling apps' tracked files beside the app (`../*/`), with git's blob hash of each: [path relative to the app,
 // blob]. Null when git cannot say, which runs everything.
+// Why a scenario whose diff against main concerns it not must run anyway: a sibling file the app reads (`declared`, the
+// digest of declaredKeys) is not as it was at its last green run. An app that reads none records and compares nothing; an
+// unreadable list (null) runs it.
+export function siblingsMoved(recorded: string | undefined, now: string | null): string | null {
+  if (now === null) return "the sibling files it reads cannot be listed";
+  return (recorded ?? "") === now ? null : "a sibling file it reads changed since its last green run";
+}
+
 function siblingFiles(root: string): [string, string][] | null {
   const top = git(root, "rev-parse", "--show-toplevel")?.trim();
   if (!top) return null;
@@ -277,6 +285,9 @@ export function select<S extends Keyed>(runner: string, url: string, scenarios: 
     const files = siblingFiles(root);
     return files === null ? null : declaredKeys(files, more.outside);
   };
+  // The sibling files the app reads, as they are now, digested: kept in a green run's record and compared by `skippable`,
+  // so a sibling that moved on main re-runs the scenario on the diff path too, whose diff against main is then empty.
+  const declaredOf = (d: string[] | null) => d === null ? null : d.length ? sha(d.join("\n")) : "";
   const tree = () => {
     const t = treeKey(root);
     const d = declared();
@@ -307,6 +318,7 @@ const recordOf = (id: string) => join(ledger, `${id}.${envNow.slice(0, 12)}`);
   const pending: { s: S; assets: Record<string, string>; byBytes: boolean }[] = [];
   const diff = all || reuse ? null : changedFiles(root);
   const envNow = env();
+  const declaredNow = declaredOf(declared());
   for (const s of scenarios) {
     const l = last(s);
     if (!all && l?.key === keyOf(s)) {
@@ -323,6 +335,8 @@ const recordOf = (id: string) => join(ledger, `${id}.${envNow.slice(0, 12)}`);
   function skippable(l: Record_, s: S, files: string[]): true | { client: string[] } | string {
     if (l.env !== envNow) return "its record is of another runner, schema, SLOW, Deno or shared scenario CUE";
     if (l.steps !== stepsOf(s)) return "its steps changed";
+    const moved = siblingsMoved(l.declared, declaredNow);
+    if (moved) return moved;
     const served = (l.served ?? []).map((x) => x.slice(x.indexOf(" ") + 1));
     const clientFiles: string[] = [];
     for (const f of files) {
@@ -395,7 +409,7 @@ const recordOf = (id: string) => join(ledger, `${id}.${envNow.slice(0, 12)}`);
       Deno.mkdirSync(ledger, { recursive: true });
       for (const s of scenarios.filter((x) => ran.includes(x.id))) {
         const o = seen(s.id);
-        const rec: Record_ = { key: keyOf(s), at: new Date().toISOString(), steps: stepsOf(s), env: envNow, served: [...o.served].sort(), assets: Object.fromEntries([...o.assets].sort()) };
+        const rec: Record_ = { key: keyOf(s), at: new Date().toISOString(), steps: stepsOf(s), env: envNow, ...(declaredNow ? { declared: declaredNow } : {}), served: [...o.served].sort(), assets: Object.fromEntries([...o.assets].sort()) };
         Deno.writeTextFileSync(recordOf(s.id), JSON.stringify(rec));
       }
     },

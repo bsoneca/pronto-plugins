@@ -480,14 +480,14 @@ export const olderKeeps = (o: { weighted: boolean; weight: number; release: bool
 // The pool's room beside a release for judging older tickets (olderKeeps): the arriving claim's own `beside` when it is
 // weighted; false for a release claim, which reads nothing; for a weight-0 one, read only while an older weighted
 // ordinary ticket waits (`olderOrdinary`), by the same rule (besideRelease), its load (`load`, called only then) and
-// another account's release (`foreign`) included. A read that fails keeps every older ticket (`"keep"`): a weight-0
-// claim is never held, so it waits behind them rather than take a reservation it could not judge.
+// another account's release (`foreign`) included. A read that fails throws, with its cause, and fails the claim through
+// the ticket cleanup, as the weighted claim's own read does (load1, pronto-plugins#377): never a silent wait.
 export const poolBesideOf = (weight: number, release: boolean, hold: boolean, olderOrdinary: boolean, beside: boolean,
-  holding: number, waiting: number, foreign: boolean, load: () => number, max: number): boolean | "keep" => {
+  holding: number, waiting: number, foreign: boolean, load: () => number, max: number): boolean => {
   if (weight > 0) return beside;
   if (release || !hold || !olderOrdinary) return false;
   if (foreign || !holding || waiting) return false;
-  try { return besideRelease(holding, waiting, load(), max, false); } catch { return "keep"; }
+  return besideRelease(holding, waiting, load(), max, false);
 };
 // Whether a claim's STACK_PRIORITY makes it a release's.
 export const releaseClaim = (priority: string | undefined) => priority === "release";
@@ -1010,7 +1010,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       const older: typeof inLine = [];
       for (const o of inLine) {
         const reserved = o.weighted ? before(coresTickets, o.name.replace(/-w$/, "")).reduce((n, c) => n + c.weight, 0) : 0;
-        if (poolBeside === "keep" || olderKeeps(o, used, reserved, budget, hold, poolBeside)) older.push(o);
+        if (olderKeeps(o, used, reserved, budget, hold, poolBeside)) older.push(o);
       }
       const where = `${ordinal(older.length + 1)} in line${older.length ? ` behind ${older.at(-1)!.what} (weight ${older.at(-1)!.weight})` : ""}`;
       // A top-level cue reserves cores only once the cue budget admits it (the memory and cores it claims fit
