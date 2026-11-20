@@ -162,6 +162,10 @@ echo "${Deno.pid} 3 prio=release" > job-8/weight; chmod 664 job-8/weight`);
       besideFull: slot.admitsCores(false, 13, 3, 0, 15, false, false, true, true),
       besideRunnerFull: slot.admitsCores(false, 13, 3, 0, 15, true, false, true, true),
       besideAhead: slot.admitsCores(false, 8, 3, 6, 15, false, false, true, true),
+      besideForeign: slot.besideRelease(1, 0, 7, 18, true),
+      heldBeside: slot.heldByRelease(true, 10, false),
+      heldRelease: slot.heldByRelease(true, 6, true),
+      heldWeight0: slot.heldByRelease(true, 0, false),
     };
   } finally { await sh(`rm -rf '${tmp}'`); }
 }

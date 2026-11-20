@@ -450,9 +450,14 @@ export const admitsCores = (nested: boolean, used: number, weight: number, ahead
                      : !(hold && weight > 0) && (runner || admits(used, weight, ahead, budget)));
 // Whether a held claim runs beside a rehearsal (the owner, 2026-11-20: "Admit while there's room"): a release
 // holds a slot, none waits for one (a waiting release keeps its room), and the machine's load1 (`load`, null when
-// unknown) is under `max` (STACK_HOLD_LOAD, else one per core). Its weight must still fit (admitsCores).
-export const besideRelease = (holding: number, waiting: number, load: number | null, max: number) =>
-  holding > 0 && waiting === 0 && load !== null && load < max;
+// unknown) is under `max` (STACK_HOLD_LOAD, else one per core). Its weight must still fit (admitsCores). Never
+// beside another account's release (`foreign`, STACK_HOLD_POOL): its weight is not in this pool's, and whether it
+// holds or waits is not told apart.
+export const besideRelease = (holding: number, waiting: number, load: number | null, max: number, foreign = false) =>
+  !foreign && holding > 0 && waiting === 0 && load !== null && load < max;
+// Whether a claim that is not admitted waits for a release (its STACK_WAIT_MINUTES deadline reset): any weighted
+// claim but a release's while a release holds or waits, beside a rehearsal or not.
+export const heldByRelease = (hold: boolean, weight: number, release: boolean) => hold && weight > 0 && !release;
 // Whether a claim's STACK_PRIORITY makes it a release's.
 export const releaseClaim = (priority: string | undefined) => priority === "release";
 // Whether a holder's record is a release's: its weight above 0 and `prio=release` (a bare `release` word is not the mark).
@@ -954,8 +959,8 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       const blocker = releasing[0] ?? waitingRelease[0];
       // Room beside a running rehearsal: the machine's one-minute load, as release-cron reads it (Deno.loadavg).
       const load = (() => { try { return Deno.loadavg()[0]; } catch { return null; } })();
-      const beside = hold && besideRelease(releasing.length, waitingRelease.length, load, holdLoad);
-      const held_ = hold && weight > 0 && !release && !beside;
+      const beside = hold && besideRelease(releasing.length, waitingRelease.length, load, holdLoad, !!foreign);
+      const held_ = heldByRelease(hold, weight, release);
       const memHeld = holders.reduce((n, h) => n + h.mem, 0), coresHeld = holders.reduce((n, h) => n + h.cores, 0);
       // The tickets this claim waits behind, in order, nested or not: all of the older ones but a weighted cue
       // ticket (`-w`) blocked on cores, which waits for cores a holder above a nested claim may keep (PRONTO-761,
@@ -982,7 +987,8 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       const ahead = aheadOf(coresOlder, release, hold && !beside);
       // `ahead` counts the lock's line, `coresAhead` the cores': a weighted cue ticket at the lock's head still
       // moves while the cores' line drains (PRONTO-837).
-      const loadNote = releasing.length && !waitingRelease.length ? ` (load1 ${load === null ? "unknown" : load.toFixed(1)}, admitted beside it under ${holdLoad}: STACK_HOLD_LOAD)` : "";
+      // Not the live load: the line is said again whenever it changes, and the load changes every poll.
+      const loadNote = releasing.length && !waitingRelease.length && !foreign ? ` (admitted beside it while load1 < ${holdLoad} and the weight fits: STACK_HOLD_LOAD)` : "";
       const why = (s: string) => ({ why: held_ ? `held: a release (${blocker.what}, pid ${blocker.pid}) ${releasing.length ? "holds the machine" : "waits for it"}${loadNote}: ${where}: ${s}` : `${where}: ${s}`, ahead: older.length, coresAhead: coresOlder.length, used, memHeld, held: held_ });
       if (line === "cue") {
         const memAhead = cueOlder.reduce((n, o) => n + o.mem, 0), coresAheadCue = cueOlder.reduce((n, o) => n + o.cores, 0);

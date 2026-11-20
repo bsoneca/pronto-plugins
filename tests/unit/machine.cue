@@ -180,5 +180,13 @@ cases: "slot.ts holds a claim for a live release in another account's pool, and 
 		{get: "besideRunnerFull", expect: false, why: "beside a rehearsal a runner job must fit too"},
 		{use: "r"},
 		{get: "besideAhead", expect: false, why: "beside a rehearsal the older tickets reserve their room"},
+		{use: "r"},
+		{get: "besideForeign", expect: false, why: "never beside another account's release: its weight is not in this pool"},
+		{use: "r"},
+		{get: "heldBeside", expect: true, why: "a claim beside a rehearsal with no room still waits for the release: its deadline resets"},
+		{use: "r"},
+		{get: "heldRelease", expect: false, why: "a release claim is never held by a release"},
+		{use: "r"},
+		{get: "heldWeight0", expect: false, why: "a weight-0 claim is never held"},
 	]
 }

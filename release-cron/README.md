@@ -200,10 +200,13 @@ step and removes it when it ends, on every outcome and on a signal. A file whose
 A job on this Mac checks the file before it starts heavy work and between units of work, and while
 it is live starts nothing new: it waits, polling every 30 s. An app's `tests/slot.ts` does this for
 every claim without `STACK_PRIORITY=release`; the run's own rehearsal and release carry it, so they
-are admitted as before. Work already running keeps its slots. While the run's rehearsal holds a slot and no
-release waits for one, a claim is admitted beside it while the machine's load1 is under `STACK_HOLD_LOAD`
-(one per core) and its weight fits the budget (`tests/slot.ts`, `besideRelease`; the owner, 2026-11-20). There is one file for the machine: when
+are admitted as before. Work already running keeps its slots. There is one file for the machine: when
 releases of two apps overlap, the first run keeps it and the other takes it at its next phase.
+
+`tests/slot.ts` holds the machine for a release too (PRONTO-894): while a release claim holds a slot or
+waits, other weighted claims wait. While the release holds a slot and no release waits for one, a claim
+is admitted beside it while the machine's load1 is under `STACK_HOLD_LOAD` (one per core) and its weight
+fits the budget (`besideRelease`; the owner, 2026-11-20: "Admit while there's room").
 
 ## A failed run is bisected
 
