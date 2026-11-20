@@ -457,3 +457,15 @@ cases: "a child killed by SIGKILL reads as signal 9, as the memory watchdog's re
 		{get: "none", expect: 0, why: "no signal is 0"},
 	]
 }
+cases: "an owned command gets its stdin and gives its stdout, stderr and exit code as a plain child does": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownPlain"},
+		{keep: "r"},
+		{get: "code", expect: 3, why: "its exit code"},
+		{use: "r"},
+		{get: "stdout", expect: "in\n", why: "its stdin reached it, and its stdout came back"},
+		{use: "r"},
+		{get: "stderr", expect: true, why: "and its stderr"},
+	]
+}

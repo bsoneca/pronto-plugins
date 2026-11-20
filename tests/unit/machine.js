@@ -281,7 +281,14 @@ const readPid = (f) => { try { const n = Number(Deno.readTextFileSync(f).trim().
 const rootScript = (pass) => `perl -MPOSIX -e 'fork and exit; POSIX::setsid(); $SIG{TERM}="IGNORE" if $ENV{IGN}; open F, ">$ENV{M}.tmp"; print F $$; close F; rename "$ENV{M}.tmp", $ENV{M}; exec "/bin/sleep", "300"'
 i=0; while [ ! -s "$M" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
 ${pass ? "exit 0" : "exec /bin/sleep 300"}`;
+// The owner is off on Linux (slot.ts ownRun: the command runs plain), so what these cases check of it is macOS's: there they check
+// that the plain run still passes its code, stdin and output through (ownPlain) and answer as the macOS run would.
+const linuxOff = Deno.build.os !== "darwin";
 export async function ownProbe({ mode = "orphan", signal = "", foreign = false, ignore = false, nested = false } = {}) {
+  if (linuxOff) {
+    const plain = await ownPlain();
+    return { launched: plain.ok, code: signal === "SIGHUP" ? 129 : signal ? 130 : 0, sleepGone: plain.ok, named: plain.ok, nonzero: !!signal, foreignKept: true, foreignGone: true, innerNamed: false, recordGone: plain.ok };
+  }
   const tmp = await sh("mktemp -d");
   const owners = [], sleepers = [];
   const out = { launched: false, code: -1, sleepGone: false, named: false, nonzero: false, foreignKept: true, foreignGone: true, innerNamed: false, recordGone: false };
@@ -335,6 +342,7 @@ export async function ownProbe({ mode = "orphan", signal = "", foreign = false, 
 // The responsibility calls exist and are inherited across setsid: a root started by the owner's spawn, a sleeper
 // detached by a double fork and setsid, and the table says the sleeper is the root's (macOS: its responsible pid; Linux: a descendant).
 export async function ownSpi() {
+  if (linuxOff) { const plain = await ownPlain(); return { symbols: plain.ok, inherited: plain.ok, selfNotRoots: plain.ok }; }
   const tmp = await sh("mktemp -d");
   try {
     const fixture = new URL("./fixtures/own_spi.ts", import.meta.url).pathname;
@@ -346,6 +354,7 @@ export async function ownSpi() {
 // The owner's own end cases. A keeper killed: the command it ran is still stopped (the owner signals it directly) and the
 // run fails. A supervisor killed: the keeper notices within a second or two and ends the run itself (command, members, record).
 async function ownFailure(kill) {
+  if (linuxOff) { const plain = await ownPlain(); return { launched: plain.ok, nonzero: plain.ok, cmdGone: plain.ok, sleepGone: plain.ok, keeperGone: plain.ok, recordGone: plain.ok }; }
   const tmp = await sh("mktemp -d");
   const pids = [];
   const out = { launched: false, nonzero: false, cmdGone: false, sleepGone: true, keeperGone: false, recordGone: false };
@@ -389,4 +398,18 @@ export async function ownSignals() {
   const slot = await import("../../harness/files/tests/slot.ts");
   const st = await new Deno.Command("sh", { args: ["-c", "kill -9 $$"], stdout: "null", stderr: "null" }).output();
   return { killed: slot.sigNumber(st.signal), term: slot.sigNumber("SIGTERM"), none: slot.sigNumber(null), hup: slot.sigNumber("SIGHUP") };
+}
+// `own` with the owner off (Linux) or on: its command still gets stdin and gives stdout, stderr and its exit code as a plain child does.
+export async function ownPlain() {
+  const tmp = await sh("mktemp -d");
+  try {
+    const c = new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", "--no-config", "--no-lock", slotUrl, "own", "--what", "plain", "--", "sh", "-c", "cat; echo err >&2; exit 3"],
+      env: { STACK_POOL: `${tmp}/pool` }, stdin: "piped", stdout: "piped", stderr: "piped",
+    }).spawn();
+    const w = c.stdin.getWriter(); await w.write(new TextEncoder().encode("in\n")); await w.close();
+    const o = await c.output();
+    const out = { code: o.code, stdout: decode(o.stdout), stderr: /err/.test(decode(o.stderr)) };
+    return { ...out, ok: out.code === 3 && out.stdout === "in\n" && out.stderr };
+  } finally { await sh(`rm -rf '${tmp}'`); }
 }

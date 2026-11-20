@@ -1966,6 +1966,10 @@ async function runPlain(cmd: string[], opts: OwnOpts, env: Record<string, string
 export async function ownRun(cmd: string[], opts: OwnOpts = {}): Promise<OwnResult> {
   const what = opts.what ?? cmd.join(" ");
   const env = { ...Deno.env.toObject(), ...opts.env };
+  // Off on Linux until it has been run there: the ci of PR 381 broke the cue wrapper's end-to-end cases on it (stdout lost, nested
+  // wrappers looping), which could not be reproduced on a Mac. The command runs as a plain child, as it did before the owner.
+  // The leak PRONTO-684 is about is macOS's.
+  if (Deno.build.os !== "darwin" && !opts.sys) return await runPlain(cmd, opts, env);
   const sys = opts.sys ?? ownSys();
   if (nestedIn(sys.table(), Deno.pid, readRecords())) return await runPlain(cmd, opts, env);
   // From here, before anything is awaited, a signal is this owner's: one that comes before the root exists is acted on once it does.
