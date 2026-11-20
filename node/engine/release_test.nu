@@ -211,6 +211,7 @@ def main [] {
 	test_the_collection_waits_for_releases_in_flight
 	test_a_stale_lock_is_taken_over_against_its_resource_version
 	test_prune_runs_only_the_maintenance
+	test_the_lock_is_released_against_what_was_read_and_its_failure_is_told
 	test_verification_is_invalidated_before_a_release_changes_what_serves
 	test_a_failed_provider_export_stops_the_release
 	test_a_scan_that_fails_aborts_the_collection_and_a_deferred_one_is_pending
@@ -927,7 +928,8 @@ def test_a_live_image_that_cannot_be_checked_stops_the_prune [] {
 	})
 	assert ($r.exit_code != 0)
 	assert (has $r.stderr "the registry answered 503 for the live image aprende-crud") $r.stderr
-	assert (not ((calls $w) | any {|c| ($c | str starts-with "exec") or ($c | str contains "registry-gc-lock") })) "no collection, no lock"
+	assert (not ((calls $w) | any {|c| $c | str starts-with "exec" })) "no collection"
+	assert (not (($w.state | path join lease registry-gc-lock) | path exists)) "and the lock it took is released"
 	# a 404: the registry does not hold it, nothing to protect: the prune goes on to the collection
 	let r404 = (with-registry $w 404 {|port|
 		let body = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}}; registry prune '127.0.0.1:($port)' $build"
@@ -1136,6 +1138,41 @@ def test_a_failed_provider_export_stops_the_release [] {
 	let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert ($r.exit_code != 0)
 	assert (has $r.stderr "auth providers of") $r.stderr
+	rm -rf $w.dir
+}
+
+def test_the_lock_is_released_against_what_was_read_and_its_failure_is_told [] {
+	print "test the collector's lock is deleted against the uid and version read, a refused delete is told, an empty registry has nothing to collect, and a prune reads the cluster only under the lock..."
+	let w = (sandbox)
+	let use = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}};"
+	# the lock taken over between this collector's read and its delete: the delete is refused (409), and nothing of another's is deleted
+	"" | save -f ($w.state | path join lock_taken_over)
+	let a = (in-world $w -c $"($use) registry collect $build ''")
+	assert equal $a.exit_code 0 $"($a.stdout)($a.stderr)"
+	assert ((calls $w) | any {|c| $c | str starts-with "delete --raw" }) "the delete names its preconditions"
+	assert (($w.state | path join lease registry-gc-lock) | path exists) "a lock that changed hands is left"
+	rm -f ($w.state | path join lease registry-gc-lock) ($w.state | path join lock_taken_over)
+	# a refused delete of the lock is told, with the work as done
+	"" | save -f ($w.state | path join lock_delete_fail)
+	let b = (in-world $w -c $"($use) registry collect $build ''")
+	assert ($b.exit_code != 0)
+	assert (has $b.stderr "collected, but the lock was not released") $b.stderr
+	rm -f ($w.state | path join lease registry-gc-lock) ($w.state | path join lock_delete_fail)
+	# a registry never pushed to
+	rm -f ($w.state | path join calls.jsonl)
+	"" | save -f ($w.state | path join no_repositories)
+	let c = (in-world $w -c $"($use) registry collect $build ''")
+	assert equal $c.exit_code 0 $"($c.stdout)($c.stderr)"
+	assert (has $c.stdout "nothing to collect") $c.stdout
+	assert (not ((calls $w) | any {|x| $x | str contains "garbage-collect" })) "nothing is collected"
+	rm -f ($w.state | path join no_repositories)
+	# a prune with another release in flight reads nothing of the cluster and keeps its hands off the keep tags
+	seed-lease $w registry-lease-studio-x registry-lease-studio-x 5 --labelled
+	rm -f ($w.state | path join calls.jsonl)
+	let d = (in-world $w -c ($use + " print (registry prune '127.0.0.1:1' $build 'registry-lease-aprende-y')"))
+	assert equal $d.exit_code 0 $"($d.stdout)($d.stderr)"
+	assert (has $d.stdout "releases are in flight") $d.stdout
+	assert (not ((calls $w) | any {|x| $x | str starts-with "get pods -A" })) "the cluster is not read outside the lock and the leases' quiet"
 	rm -rf $w.dir
 }
 

@@ -9,7 +9,7 @@
 # registry_down (the node's builder or registry has no available replica), get_fail_<kind> and missing_<kind>
 # (a read of <kind> in every namespace is refused, or its CRD is not on the node), read_fail_namespace and
 # read_fail_cluster (any read of a namespace, or of the database Cluster, fails as an API error) and
-# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch of the database Cluster is refused), inuse (an image the pods name), cm_race (the record is rewritten between a read and a patch), strict_cm (a patch of a missing record is NotFound), find_fail (the registry's upload scan fails), lease_patch_fail (a patch of a Lease fails), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
+# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch of the database Cluster is refused), inuse (an image the pods name), cm_race (the record is rewritten between a read and a patch), strict_cm (a patch of a missing record is NotFound), lock_delete_fail (deleting a Lease is refused), lock_taken_over (a lock's resourceVersion moves between a read and a delete), no_repositories (the registry has none yet), find_fail (the registry's upload scan fails), lease_patch_fail (a patch of a Lease fails), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
 # object with nothing and exit 0, as kubectl does.
 import json, os, sys
 
@@ -118,6 +118,24 @@ if verb == "patch" and len(args) > 1 and args[1] == "lease":
     server_stamp(o)
     json.dump(o, open(p, "w"))
     print(f"lease.coordination.k8s.io/{args[2]} patched")
+    sys.exit(0)
+
+if verb == "delete" and "--raw" in args:
+    # a delete with preconditions (uid, resourceVersion), as the API server checks them
+    uri = args[args.index("--raw") + 1] if args[-1] != "--raw" else ""
+    name = [a for a in args if a.startswith("/apis/coordination.k8s.io/v1/namespaces/")][0].rsplit("/", 1)[1]
+    if not os.path.exists(lease_path(name)):
+        fail(f'Error from server (NotFound): leases.coordination.k8s.io "{name}" not found')
+    if exists("lock_delete_fail"):
+        fail("Error from server (Forbidden): leases.coordination.k8s.io is forbidden")
+    cur = json.load(open(lease_path(name)))
+    pre = objs[0].get("preconditions", {}) if objs else {}
+    if exists("lock_taken_over"):
+        cur["metadata"]["resourceVersion"] = "999"
+    if pre.get("uid") != cur["metadata"].get("uid") or pre.get("resourceVersion") != cur["metadata"].get("resourceVersion"):
+        fail(f'Error from server (Conflict): Precondition failed: UID in precondition or ResourceVersion in precondition does not match')
+    os.remove(lease_path(name))
+    print("{\"kind\":\"Status\",\"status\":\"Success\"}")
     sys.exit(0)
 
 if verb == "delete" and len(args) > 1 and args[1] == "lease":
@@ -322,6 +340,8 @@ if verb == "rollout":
 
 if verb == "exec":
     cmd = " ".join(args[args.index("--") + 1:]) if "--" in args else ""
+    if "find " in cmd and "-maxdepth 0" in cmd and exists("no_repositories"):
+        fail("find: '/var/lib/registry/docker/registry/v2/repositories': No such file or directory")
     if "find " in cmd and exists("find_fail"):
         fail("find: '/var/lib/registry/docker/registry/v2/repositories': Permission denied")
     if "find " in cmd:
