@@ -681,18 +681,19 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       // was queued; a release ticket whose process started after that, or that is too old, is not a release.
       const scan = async (dir: string) => {
         const found: { name: string; weight: number; mem: number; cores: number; what: string; weighted: boolean; release: boolean; pid: number }[] = [];
-        for await (const e of Deno.readDir(dir)) {
-          const m = e.name.match(/^([0-9]+)-([0-9]+)(?:-w)?$/);
+        // A line nobody has queued in has no directory yet.
+        for (const e of await Array.fromAsync(Deno.readDir(dir)).catch(() => [] as Deno.DirEntry[])) {
+          const m = e.name.match(/^[0-9]+-([0-9]+)(?:-w)?$/);
           if (!m) continue;
-          if (!await alive(Number(m[2]))) { await Deno.remove(`${dir}/${e.name}`).catch(() => {}); continue; }
+          if (!await alive(Number(m[1]))) { await Deno.remove(`${dir}/${e.name}`).catch(() => {}); continue; }
           const [w, ...rest] = (await Deno.readTextFile(`${dir}/${e.name}`).catch(() => "")).split(" ");
           const isNested = rest[0] === "nested=1";
           const words = isNested ? rest.slice(1) : rest;
           // A ticket without mem= (a copy from before the budget) reserves the whole budget; the cores' line's has none.
           const field = (key: string) => { const v = words[0]?.startsWith(`${key}=`) ? words[0].slice(key.length + 1) : undefined; return v !== undefined && v !== "" && Number(v) >= 0 ? Number(words.shift()!.slice(key.length + 1)) : undefined; };
           const tmem = field("mem"), tcores = field("cores");
-          const isRelease = words[0] === "release=1" && !!words.shift() && await releaseReal(Number(m[2]), Number(m[1]));
-          found.push({ name: e.name, weight: w !== "" && Number(w) >= 0 ? Number(w) : weights.stack, mem: tmem ?? cueMem, cores: tcores ?? 0, what: words.join(" "), weighted: e.name.endsWith("-w"), release: isRelease, pid: Number(m[2]) });
+          const isRelease = words[0] === "release=1" && !!words.shift() && await releaseReal(Number(m[1]), Number(e.name.split("-")[0]));
+          found.push({ name: e.name, weight: w !== "" && Number(w) >= 0 ? Number(w) : weights.stack, mem: tmem ?? cueMem, cores: tcores ?? 0, what: words.join(" "), weighted: e.name.endsWith("-w"), release: isRelease, pid: Number(m[1]) });
         }
         return found.sort((x, y) => x.name < y.name ? -1 : 1);
       };
