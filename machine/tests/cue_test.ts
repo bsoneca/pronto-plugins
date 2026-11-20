@@ -1038,7 +1038,11 @@ Deno.test("PRONTO-894 review: cueAhead keeps release and nested tickets, skips o
 const slotUnderTest = Deno.env.get("SLOT_TS") ?? slotPath;
 const slotRun = (dir: string, args: string[], more: Record<string, string> = {}) =>
   new Deno.Command(`${deno}/deno`, { args: ["run", "-A", "--no-config", "--no-lock", slotUnderTest, ...args], cwd: dir, env: envOf(dir, more), clearEnv: true, stdout: "piped", stderr: "piped" }).spawn();
-const within = <T>(p: Promise<T>, ms: number) => Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), ms))]);
+const within = async <T>(p: Promise<T>, ms: number) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try { return await Promise.race([p, new Promise<null>((r) => (timer = setTimeout(() => r(null), ms)))]); }
+  finally { clearTimeout(timer); }
+};
 
 Deno.test("PRONTO-894 review: two cue claims that fit alone but not together do not deadlock a release against an older ordinary ticket", async () => {
   // 20 GB each under 30: the older ordinary weighted ticket waits for the release (which holds the machine), so
