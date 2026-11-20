@@ -152,6 +152,16 @@ echo "${Deno.pid} 3 prio=release" > job-8/weight; chmod 664 job-8/weight`);
       trustGood: dirTrust({ isDirectory: true, isSymlink: false, uid: 1000, mode: 0o755 }, 1000),
       claimWeight0: slot.admitsCores(false, 0, 0, 0, 15, false, false, true),
       claimWeight3: slot.admitsCores(false, 0, 3, 0, 15, false, false, true),
+      besideUnder: slot.besideRelease(1, 0, 7, 18),
+      besideOver: slot.besideRelease(1, 0, 18, 18),
+      besideWaiting: slot.besideRelease(1, 1, 7, 18),
+      besideUnknown: slot.besideRelease(1, 0, null, 18),
+      besideNoRelease: slot.besideRelease(0, 0, 7, 18),
+      admitUnder: slot.admitsCores(false, 8, 3, 0, 15, false, false, true, slot.besideRelease(1, 0, 7, 18)),
+      holdOver: slot.admitsCores(false, 8, 3, 0, 15, false, false, true, slot.besideRelease(1, 0, 20, 18)),
+      besideFull: slot.admitsCores(false, 13, 3, 0, 15, false, false, true, true),
+      besideRunnerFull: slot.admitsCores(false, 13, 3, 0, 15, true, false, true, true),
+      besideAhead: slot.admitsCores(false, 8, 3, 6, 15, false, false, true, true),
     };
   } finally { await sh(`rm -rf '${tmp}'`); }
 }
