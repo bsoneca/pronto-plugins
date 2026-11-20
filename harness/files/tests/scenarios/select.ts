@@ -93,6 +93,31 @@ export function outsideKeys(files: string[], hash: (f: string) => string, reads:
   return files.filter((f) => f.startsWith("../") && outsideConcerns(f, reads) !== null).sort().map((f) => `outside ${f} ${hash(f)}`);
 }
 
+// The sibling apps' files an app declares it reads (`more.outside`), every one there now, by its content: `declared
+// <file> <blob>`, sorted, from `entries` ([path relative to the app, git's blob hash]). outsideKeys sees only the files
+// that differ from main, so a sibling's brief.md moved on main left the app's key, and its green, unchanged
+// (bsoneca/pronto#1555). Only a sibling app's files (`../<app>/…`), and none without a pattern.
+export function declaredKeys(entries: [string, string][], reads: string[] = []): string[] {
+  if (!reads.length) return [];
+  return entries.filter(([f]) => /^\.\.\/[^/.][^/]*\/./.test(f) && reads.some((r) => new RegExp(r).test(f)))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([f, h]) => `declared ${f} ${h}`);
+}
+
+// The sibling apps' tracked files beside the app (`../*/`), with git's blob hash of each: [path relative to the app,
+// blob]. Null when git cannot say, which runs everything.
+function siblingFiles(root: string): [string, string][] | null {
+  const top = git(root, "rev-parse", "--show-toplevel")?.trim();
+  if (!top) return null;
+  const parent = relative(Deno.realPathSync(top), dirname(Deno.realPathSync(root)));
+  const out = git(top, "ls-files", "-s", "-z", "--", parent || ".");
+  if (out === null) return null;
+  const topReal = Deno.realPathSync(top);
+  return out.split("\0").filter(Boolean).map((l) => {
+    const [meta, path] = l.split("\t");
+    return [relative(root, join(topReal, path)), meta.split(" ")[1]] as [string, string];
+  }).filter(([f]) => /^\.\.\/[^/.][^/]*\/./.test(f));
+}
+
 // What a scenario's requests say it touched in the database: the tables and functions its `/crud/…`
 // requests name (a table `/crud/<t>`, a function `/crud/rpc/<fn>`, a shape's `?table=`), lowercased; `wild` when it
 // read shapes and none named a table.
@@ -243,9 +268,16 @@ export function select<S extends Keyed>(runner: string, url: string, scenarios: 
   // change there is never "cached green" (it hid two failing scenarios, 2026-11-03). Sibling apps' files are
   // left out on purpose (PRONTO-870), unless the app lists them in `more.outside`.
   const outside = () => outsideKeys(changedFiles(root) ?? [], (f) => hashOf(join(root, f)), more.outside);
+  // An app that reads its siblings (`more.outside`) is keyed by every sibling file its patterns name, as it is now.
+  const declared = () => {
+    if (!more.outside?.length) return [];
+    const files = siblingFiles(root);
+    return files === null ? null : declaredKeys(files, more.outside);
+  };
   const tree = () => {
     const t = treeKey(root);
-    return t && sha([t, env(), ...outside()].join("\n"));
+    const d = declared();
+    return t && d !== null && sha([t, env(), ...outside(), ...d].join("\n"));
   };
   const before = tree();
   if (!before) return none;

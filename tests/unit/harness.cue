@@ -117,5 +117,8 @@ cases: "the exact-tree key holds the outside files that concern a scenario, not 
 	steps: [
 		{call: "harness.outsideKeys", args: [["../../mise.lock", "../other/a.ts", "../../docs/x.md", "tests/x.ts", "../../pronto/b.cue"]], expect: ["outside ../../mise.lock h:../../mise.lock", "outside ../../pronto/b.cue h:../../pronto/b.cue"], why: "pins and pronto/ key it, sorted; a sibling, documentation and the app's own file do not"},
 		{call: "harness.outsideKeys", args: [["../other/a.ts", "../../mise.lock"], ["^\\.\\./[^/]+/"]], expect: ["outside ../../mise.lock h:../../mise.lock", "outside ../other/a.ts h:../other/a.ts"], why: "an app that reads its siblings keys them too"},
+		{call: "harness.declaredKeys", args: [[["../other/brief.md", "b1"], ["../brawl-chess/brief.md", "b2"], ["../../mise.lock", "m"], ["tests/x.ts", "t"]], ["^\\.\\./[^/]+/"]], expect: ["declared ../brawl-chess/brief.md b2", "declared ../other/brief.md b1"], why: "every sibling file the pattern names, as it is now, sorted: the app's own and the root's files are outsideKeys' and the tree's"},
+		{call: "harness.declaredKeys", args: [[["../other/brief.md", "b1"], ["../brawl-chess/brief.md", "b3"]], ["^\\.\\./[^/]+/"]], expect: ["declared ../brawl-chess/brief.md b3", "declared ../other/brief.md b1"], why: "only a sibling's brief.md moved on main, no diff against it: the key still changes (bsoneca/pronto#1555)"},
+		{call: "harness.declaredKeys", args: [[["../other/brief.md", "b1"]]], expect: [], why: "an app with no pattern keys no sibling (PRONTO-870)"},
 	]
 }
