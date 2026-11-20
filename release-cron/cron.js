@@ -171,7 +171,7 @@ export const detail = (rehearsals, releases, commit, since) => {
   const r = newest(rehearsals, "queued");
   if (r) {
     out["rehearse.queue"] = r.waited;
-    for (const [k, c] of Object.entries(r.checks ?? {})) if (!c.cached) out[`rehearse.${k}`] = c.s;
+    for (const [k, c] of Object.entries(r.checks ?? {})) if (!c.cached && !c.skipped) out[`rehearse.${k}`] = c.s;
   }
   const g = newest(releases, "started");
   if (g) for (const [k, v] of Object.entries(g.phases ?? {})) if (typeof v === "number" && k !== "total") out[`release.${k}`] = Math.round(v);
@@ -284,7 +284,9 @@ export const signature = (why, text) => /^the android step/.test(why ?? "")
   ? { kind: "android", names: androidFailed(text) }
   : {
     kind: /^release@gcp|^release \(|^released, production/.test(why ?? "") ? "release" : "rehearsal",
-    names: [...new Set([...(text ?? "").matchAll(/✗ (\S+) \(\d+s\) at step/g)].map((m) => m[1]))],
+    // A step's failure line, or the rehearsal's own line for each id its verdicts failed (a page that threw while its
+    // steps completed has no step line).
+    names: [...new Set([...(text ?? "").matchAll(/✗ (\S+) \(\d+s\) at step|^rehearse: scenario failed: (\S+)$/gm)].map((m) => m[1] ?? m[2]))],
   };
 
 // The merges of `git log --first-parent --format='%H %s'` lines, oldest first, each with its pull

@@ -33,6 +33,7 @@
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, sshDropped, landed, verdict, releaseModes, rehearsalEnv, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
+import { readVerdict } from "../tests/scenarios/verdict.ts";
 
 const here = new URL("./", import.meta.url).pathname;
 const decode = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -231,7 +232,9 @@ if (verb === "bisect") {
   // A bisect that stopped for want of a verdict (noVerdict) leaves its run eligible, three times at most, so a
   // disk that stays full cannot loop it for ever.
   const settled = (r: { started: string }) => bisects.some((b) => b.of === r.started && !b.noVerdict) || bisects.filter((b) => b.of === r.started && b.noVerdict).length >= 3;
-  const failed = only ? runs.find((r) => r.started === only) : since.find((r) => (r.outcome === "failed" || r.cut) && r.commit && !settled(r));
+  const noVerdictRun = (r: { why?: string }) => /^the rehearsal gave no verdict/.test(r.why ?? "");
+  const failed = only ? runs.find((r) => r.started === only) : since.find((r) => (r.outcome === "failed" || r.cut) && r.commit && !settled(r) && !noVerdictRun(r));
+  if (failed && noVerdictRun(failed)) { say(`run ${failed.started} gave no verdict: nothing to bisect`); Deno.exit(0); }
   if (!failed) { say("no failed run unbisected"); Deno.exit(0); }
   const at = runs.indexOf(failed);
   const green = runs.slice(0, at).filter((r) => r.outcome === "released" && r.commit).at(-1);
@@ -273,26 +276,55 @@ if (verb === "bisect") {
   const list: Merge[] = merges(must("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H %s", `${green.commit}..${failed.commit}`]).split("\n"));
   say(`${failed.started} failed on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}); last release ${green.commit.slice(0, 8)}; ${list.length} merges between`);
   const home_ = (f: string) => `${home}/.cache/pronto/${f}`;
-  const evidence = () => ({ strict: releaseModes(cron.rehearsal?.command), rehearsals: jsonl(home_(`rehearsals/${app}.jsonl`)), releases: gcpName ? jsonl(home_(`releases/${gcpName}.jsonl`)) : [], ledger: jsonl(`${dir}/verdicts.jsonl`) });
+  // The bisect's own verdict ledger is read strictly: only no file is no verdicts; a line that cannot be read stops the
+  // bisect (unrecorded), rather than dropping every verdict before it.
+  const ledger = () => {
+    const f = `${dir}/verdicts.v2.jsonl`;
+    let text = "";
+    try { text = Deno.readTextFileSync(f); } catch (e) { if (e instanceof Deno.errors.NotFound) return []; say(`${f} could not be read (${e}): the bisect stops`); unlock(); Deno.exit(1); }
+    return text.split("\n").filter(Boolean).map((l, i) => { try { return JSON.parse(l); } catch (e) { say(`${f}:${i + 1} could not be read (${e}): the bisect stops`); unlock(); Deno.exit(1); } });
+  };
+  const evidence = () => ({ strict: releaseModes(cron.rehearsal?.command), rehearsals: jsonl(home_(`rehearsals/${app}.jsonl`)), releases: gcpName ? jsonl(home_(`releases/${gcpName}.jsonl`)) : [], ledger: ledger() });
   const known: Record<string, string> = {};
   const settle = () => { const ev = evidence(); for (const c of list) known[c.sha] ??= "unknown"; for (const c of list) if (known[c.sha] === "unknown") known[c.sha] = verdict(c.sha, sig, ev); known[list.at(-1)!.sha] = "bad"; };
   if (!list.length) { say("no merge between: nothing to bisect"); unlock(); Deno.exit(0); }
   // A failure that flags, time or load decide is not the commit's: say so, bisect nothing.
+  // The failed commit's scenarios as its runner reads them (the same CUE export, in the bisect's checkout at that commit),
+  // asked only for a named rehearsal failure, the one case undecidable reads them for. A flag counts at any depth: the
+  // scenario's flags, or a step's flag or unless. A tree whose scenarios do not export cannot say which failure a flag
+  // decides: the bisect stops, recorded, so the next failed run is taken up.
   const specs = (() => {
-    const out: { id: string; flags: boolean; slow: boolean }[] = [];
-    try {
-      for (const f of Deno.readDirSync(`${top}/tests/scenarios`)) {
-        if (!f.name.endsWith(".cue")) continue;
-        const body = Deno.readTextFileSync(`${top}/tests/scenarios/${f.name}`);
-        for (const m of body.matchAll(/^scenarios:\s+(\w+):\s*\{([\s\S]*?)^\}/gm)) out.push({ id: m[1], flags: /^\tflags:/m.test(m[2]), slow: /^\tslow:\s*true/m.test(m[2]) });
-      }
-    } catch { /* no scenarios to read: only load and the menu budget decide */ }
-    return out;
+    if (sig.kind === "release" || !sig.names.length) return [];
+    // A dry run holds no lock: it never touches the shared checkout, so it does not read the failed commit's scenarios.
+    if (dry) { say(`dry run: the scenarios of ${failed.commit.slice(0, 8)} are not read (that needs the bisect's checkout), so whether a flag or time decides ${sig.names.join(", ")} is unknown: no plan, no culprit`); Deno.exit(0); }
+    // Recorded and stopped: the scenarios could not be read, or do not say what the failure names.
+    const unknown = (what: string): never => {
+      const why = `${what}: which failures a flag decides is unknown, the bisect stops, no commit named`;
+      say(why);
+      Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify({ of: failed.started, kind: sig.kind, names: sig.names, green: green.commit, failing: failed.commit, ran: 0, fromRecords: 0, why }) + "\n", { append: true });
+      unlock(); Deno.exit(0);
+    };
+    if (!exists(`${bwt}/.git`)) must("git", ["--git-dir", repo, "worktree", "add", "-q", "--detach", bwt, failed.commit]);
+    must("git", ["checkout", "-q", "--detach", "-f", failed.commit], bwt);
+    must("git", ["clean", "-ffdq"], bwt);
+    sh(mise, ["trust", "-q", `${bwt}/${appRel}/.mise.toml`]);
+    const sdir = `${bwt}/${appRel}/tests/scenarios`;
+    let files: string[] = [];
+    try { files = [...Deno.readDirSync(sdir)].filter((f) => f.name.endsWith(".cue")).map((f) => `${sdir}/${f.name}`).sort(); } catch (e) { unknown(`${sdir} could not be read (${e})`); }
+    if (!files.length) unknown(`${sdir} holds no scenarios`);
+    const r = sh(mise, ["x", "--", "cue", "export", ...files, "--out", "json"], `${bwt}/${appRel}`, Deno.env.toObject(), 3600);
+    let all: Record<string, { flags?: string[]; slow?: boolean }> | undefined;
+    try { all = r.ok ? JSON.parse(r.out).scenarios : undefined; } catch { all = undefined; }
+    if (!all) unknown(`the scenarios of ${failed.commit.slice(0, 8)} do not export (${(r.err || r.out).split("\n")[0]})`);
+    const missing = sig.names.filter((n) => !(n in all!));
+    if (missing.length) unknown(`${failed.commit.slice(0, 8)} has no scenario ${missing.join(", ")}`);
+    const flagged = (v: unknown): boolean => Array.isArray(v) ? v.some(flagged) : v !== null && typeof v === "object" ? Object.entries(v).some(([k, x]) => ((k === "flag" || k === "unless" || k === "flags") && (Array.isArray(x) ? x.length > 0 : !!x)) || flagged(x)) : false;
+    return Object.entries(all!).map(([id, sc]) => ({ id, flags: flagged(sc), slow: sc.slow === true }));
   })();
   const never = undecidable(sig, text, specs, Deno.loadavg()[0], navigator.hardwareConcurrency, (failed.flaked as string[] | undefined) ?? []);
   if (never) {
     say(never);
-    Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify({ of: failed.started, kind: sig.kind, names: sig.names, green: green.commit, failing: failed.commit, ran: 0, fromRecords: 0, why: never }) + "\n", { append: true });
+    if (!dry) Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify({ of: failed.started, kind: sig.kind, names: sig.names, green: green.commit, failing: failed.commit, ran: 0, fromRecords: 0, why: never }) + "\n", { append: true });
     unlock(); Deno.exit(0);
   }
   settle();
@@ -315,7 +347,7 @@ if (verb === "bisect") {
   let ran = 0, step = next(list, known), why = "";
   // Skipped at the start, not only before a later check: a run holds the lock, a later run released, or main is already green for the failure.
   if (!dry) { const h = halt(); if (h) stop(h); }
-  const verdicts = (sha: string, v: string) => Deno.writeTextFileSync(`${dir}/verdicts.jsonl`, JSON.stringify({ commit: sha, kind: sig.kind, names: sig.names, verdict: v, at: new Date().toISOString() }) + "\n", { append: true });
+  const verdicts = (sha: string, v: string) => Deno.writeTextFileSync(`${dir}/verdicts.v2.jsonl`, JSON.stringify({ commit: sha, kind: sig.kind, names: sig.names, verdict: v, at: new Date().toISOString() }) + "\n", { append: true });
   // The failing check on a commit's tree: ONLY the failed scenarios, slowed as the rehearsal runs
   // them, in its own process group, with no time limit (a line every 5 minutes says it is still running).
   // A signal stops the check's group (TERM, then KILL after 30 s) and gives the lock back first, so a
@@ -338,7 +370,26 @@ if (verb === "bisect") {
     must("git", ["checkout", "-q", "--detach", "-f", sha], bwt);
     must("git", ["clean", "-ffdq"], bwt);
     sh(mise, ["trust", "-q", `${bwt}/${appRel}/.mise.toml`]);
-    const env: Record<string, string> = { ...Deno.env.toObject(), SLOW: "1", INTEGRATE_LOCAL_DRIVERS: "all", STACK_WAIT_MINUTES: "525600", SCENARIOS_ALL: "1", ...(sig.names.length ? { ONLY: sig.names.join(","), ONLY_ABSENT: "pass" } : {}) };
+    // verdicts.v2.jsonl: a check now runs its scenarios fresh (SCENARIOS_ALL) and as asked (no inherited ONLY), so a
+    // verdict an earlier rule saved is never read again (PRONTO-683).
+    // Nothing inherited narrows or hands off the check (ONLY, ONLY_ABSENT, a SCENARIOS_QUEUE another run claims from), and
+    // it runs without INTEGRATE_LOCAL_DRIVERS=all, so integrate@local never stamps the tree for a release (tests/slot.ts
+    // stamps only in that mode); SLOW=1 and SCENARIOS_ALL=1 are what that mode would have given the scenarios.
+    const inherited = Deno.env.toObject();
+    // Nor a slot, stack or runner it was started under (STACK_SLOT, STACK_JOB, the stack's URL, GITHUB_ACTIONS, Studio's
+    // INTEGRATE_K8S_SLOTTED): the check outlives the job that started it, so tests/slot.ts claims its own weight. Nor Studio's diagnostic STUDIO_K8S_ONLY, which ends integrate@k8s before Publish, nor STUDIO_K8S_CANDIDATE_REF,
+    // which would publish another revision than the one checked out.
+    // Nor a flag tester's settings (FLAGS_TESTER and the rest, cleared as the rehearsal clears them): the check runs the
+    // flags as the stack has them locally.
+    for (const k of Object.keys(inherited)) if (/^FLAG/.test(k)) delete inherited[k];
+    for (const k of ["ONLY", "ONLY_ABSENT", "SCENARIOS_QUEUE", "SCENARIOS_VERDICT", "INTEGRATE_LOCAL_DRIVERS", "STACK_SLOT", "STACK_JOB", "STACK_WEIGHT", "APP_URL", "ORIGIN", "PRONTO_GATE_DIR", "STUDIO_K8S_ONLY", "STUDIO_K8S_CANDIDATE_REF", "GITHUB_ACTIONS", "INTEGRATE_K8S_SLOTTED"]) delete inherited[k];
+    // A named check is judged on the scenarios' own verdict, in a directory of its own (no other user can take its path).
+    const verdictDir = sig.names.length ? Deno.makeTempDirSync({ prefix: "bisect-verdict." }) : "";
+    const env: Record<string, string> = { ...inherited, SLOW: "1", STACK_WAIT_MINUTES: "525600", SCENARIOS_ALL: "1", ...(sig.names.length ? { ONLY: sig.names.join(","), ONLY_ABSENT: "pass", SCENARIOS_VERDICT: `${verdictDir}/verdict.json` } : {}) };
+    // SCENARIOS_ALL=1: a named scenario runs whatever an older green record of the same inputs says (release runs no
+    // longer refresh the selection cache, so it can be stale for exactly the scenario that failed).
+    // ONLY_ABSENT=pass: the harness (cddde28) fails a run whose ONLY names a scenario the tree lacks; an older commit
+    // without the failing scenario is no evidence it caused it (PRONTO-778 carries the rest of the bisect's rules).
     delete env.STACK_PRIORITY;
     const logf = `${dir}/${sha.slice(0, 8)}.log`;
     const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...lowPriority(["sh", "-c", b.command], Deno.build.os)], cwd: `${bwt}/${appRel}`, env, clearEnv: true, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
@@ -355,17 +406,59 @@ if (verb === "bisect") {
       setTimeout(() => sh("kill", ["-KILL", "--", `-${p.pid}`], undefined, {}, 10), 30_000);
     }, 30_000);
     const f = Deno.openSync(logf, { write: true, create: true, truncate: true });
-    await Promise.all([p.stdout, p.stderr].map(async (s) => { for await (const c of s) f.writeSync(c); }));
+    // The runner's absence line is kept as the log streams by (a named check only), never by reading the whole log back.
+    const absentRe = /scenarios: ONLY names no scenario of this tree \(ONLY_ABSENT=pass\): ([\w,. -]+)/;
+    let absentLine = "";
+    await Promise.all([p.stdout, p.stderr].map(async (s) => {
+      const dec = new TextDecoder();
+      let carry = "";
+      for await (const c of s) {
+        f.writeSync(c);
+        if (!sig.names.length || absentLine) continue;
+        const lines = (carry + dec.decode(c, { stream: true })).split("\n");
+        carry = lines.pop()!.slice(-4096);
+        absentLine = lines.map((l) => l.match(absentRe)?.[1]).find(Boolean) ?? "";
+      }
+      if (sig.names.length && !absentLine) absentLine = carry.match(absentRe)?.[1] ?? "";
+    }));
     f.close();
     const { code, signal } = await p.status;
     clearInterval(beat);
     clearInterval(watch);
     group = 0;
+    // No file is no verdict; any other read error is the machine's.
+    let unread = "";
+    const named = sig.names.length ? await readVerdict(`${verdictDir}/verdict.json`).catch((e) => { if (!(e instanceof Deno.errors.NotFound)) unread = String(e); return undefined; }) : undefined;
+    if (verdictDir) Deno.removeSync(verdictDir, { recursive: true });
     if (yielded) stop(stopsBisect(yielded, starter, true, null, null)!);
-    // Exit 3 is "no verdict" (the scenarios passed but could not write theirs, a full disk): neither good nor
-    // bad, so nothing is recorded and no commit is blamed (PRONTO-683).
-    // So is a check killed by a signal (out of memory, a kill from outside): it says nothing of the commit.
-    if (code === 3 || signal || code >= 128) stop(`the check on ${sha.slice(0, 8)} gave no verdict (${code === 3 ? "exit 3: it could not write it" : `killed: ${signal ?? code}`}): the bisect stops, no commit named`, "noVerdict");
+    // A check that ended without judging the commit (killed, no verdict, an unreadable one) leaves the run open for the next
+    // bisect, twice; the third such check records the bisect as stopped, so one stuck run never holds back the later ones.
+    const inconclusive = (why: string): never => {
+      Deno.writeTextFileSync(`${dir}/inconclusive.jsonl`, JSON.stringify({ of: failed.started, commit: sha, why, at: new Date().toISOString() }) + "\n", { append: true });
+      // Read strictly: a ledger that cannot be read stops the bisect, recorded, rather than counting as no attempts.
+      let tries: { of?: string }[];
+      try { tries = Deno.readTextFileSync(`${dir}/inconclusive.jsonl`).split("\n").filter(Boolean).map((l) => JSON.parse(l)); }
+      catch (e) { return stop(`${why}; ${dir}/inconclusive.jsonl could not be read (${e}): the bisect stops, no commit named`) as never; }
+      if (tries.filter((r) => r.of === failed.started).length >= 3) return stop(`${why}: the third inconclusive check of run ${failed.started}, the bisect stops, no commit named`) as never;
+      say(`${why}: the bisect stops unrecorded, to be run again`); unlock(); Deno.exit(1);
+    };
+    if (unread) inconclusive(`the check on ${sha.slice(0, 8)} left a verdict that could not be read (${unread})`);
+    // Every named scenario absent from this tree (ONLY_ABSENT=pass, the runner's line, behind any prefix a log adds): it
+    // cannot have failed here.
+    const absent = absentLine.split(",").map((n) => n.trim());
+    // A named failure is judged by the scenarios' verdict alone: integrate@local also runs Premium and the other suites, so
+    // its exit can fail on something that is not the named scenario. With no verdict (a tree older than verdict files, a
+    // runner that died) the commit is not judged.
+    // Good only when every named scenario this tree has ran here and passed (none skipped, cached or run by another lane).
+    if (sig.names.length) {
+      // A tree that writes verdicts but left none died before its scenarios ended: the run stays open for the next bisect.
+      if (!named && exists(`${bwt}/${appRel}/tests/scenarios/verdict.ts`)) inconclusive(`the check on ${sha.slice(0, 8)} left no scenario verdict`);
+      if (!named) stop(`the check on ${sha.slice(0, 8)} left no scenario verdict (its tree writes none): the bisect stops, no commit named`);
+      return named!.failedIds.some((id) => sig.names.includes(id)) ? "bad" : named!.failed === 0 && !named!.skipped && !named!.cached && !named!.byOtherLane && named!.passed >= new Set(sig.names.filter((n) => !absent.includes(n))).size ? "good" : stop(`the check on ${sha.slice(0, 8)} did not run ${sig.names.join(", ")} to an end: the bisect stops, no commit named`) as never;
+    }
+    // An unnamed check killed by a signal or exiting 3 (no verdict) did not judge the commit.
+    // Nor did a command the shell could not run (126, 127).
+    if (code >= 128 || code === 3 || code === 124 || code === 126 || code === 127) inconclusive(`the check on ${sha.slice(0, 8)} ended without a verdict (exit ${code})`);
     return code === 0 ? "good" : "bad";
   };
   // The check must fail here on the failing commit too (an explicit failure: a pass or a timeout is
@@ -377,7 +470,7 @@ if (verb === "bisect") {
   if (!dry) {
     const failing = list.at(-1)!.sha;
     const same = (r: { commit: string; kind: string; names?: string[] }) => r.commit === failing && r.kind === sig.kind && (r.names ?? []).join(",") === sig.names.join(",");
-    const mine = jsonl(`${dir}/verdicts.jsonl`).filter(same).at(-1)?.verdict;
+    const mine = ledger().filter(same).at(-1)?.verdict;
     let v = mine;
     if (!v) { const h = halt(); if (h) stop(h); }
     if (!v) {
@@ -896,8 +989,15 @@ try {
   clearInterval(look);
   // Every check passed already for this tree: the rehearsal took no slot and waited for none.
   if (!got && gate.code === 0) { got = true; step("slot"); active("rehearse"); }
-  if (!got) { step("slot"); end("failed", `${rehearse!.slice(1).join(" ") || rehearse![0]} ended before its slot (exit ${gate.code}): nothing released`, 1); }
+  // Exit 3 before its slot (a ledger key it could not read, a start mark it could not write) is no verdict as well.
+  // So is a rehearsal stopped by a signal (130, or killed: 128 and above), the machine's doing, not the tree's.
+  // And a rehearsal its wrapper timed out (124, timeout(1): Studio's integrate@k8s).
+  const noVerdict = gate.code === 3 || gate.code === 124 || gate.code >= 128;
+  if (!got) { step("slot"); end("failed", `${noVerdict ? "the rehearsal gave no verdict: " : ""}${rehearse!.slice(1).join(" ") || rehearse![0]} ended before its slot (exit ${gate.code}): nothing released`, 1); }
   if (own && !dry) step("rehearse");
+  // Exit 3 is the rehearsal's "no verdict" (a verdict or record it could not read or write, the checkout changed): nothing
+  // is released, and the bisect never takes it up (noVerdictRun), since it says nothing of a commit; no release branch is cut for it.
+  if (noVerdict) end("failed", `the rehearsal gave no verdict (exit ${gate.code}): nothing released`, 1);
   if (gate.code !== 0) end("failed", `the rehearsal failed (exit ${gate.code}): nothing released`, 1, true);
 
   // 2a. The android step (releaseCron.android): the app's phone scenarios on an emulator, on a Mac, once the rehearsal
