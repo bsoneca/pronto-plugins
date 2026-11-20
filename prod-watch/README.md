@@ -190,6 +190,9 @@ released.
 
 A loaded unit's `NRestarts` must be a complete non-negative integer (`counterOf`): missing, empty, `abc`, `-1` or `1.5`
 fails the run before triage or any write. A unit that is not loaded fails it already.
+systemd older than 235 has no `NRestarts`, so `node.restart` needs systemd 235 or later: on an older node every run fails
+and the cursor stays put. A journal line that matches both the stop and the start pattern fails the run too, and a start
+stamped before its pending stop (the node's clock stepped back) completes nothing.
 
 A `k3s.json` whose `nRestarts` is there and is not a non-negative integer fails the run like a bad `voided`. A throw
 from either check keeps failing every pass until the bad line leaves the range read or the operator mends `k3s.json`.

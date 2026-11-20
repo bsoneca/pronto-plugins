@@ -107,6 +107,10 @@ _journal: {
 		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
 		2026-11-19T19:00:09.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
 		"""
+	startBeforeStop: """
+		2026-11-19T18:59:54.500995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T18:59:54.200995+00:00 host systemd[1]: Started k3s.service - Lightweight Kubernetes.
+		"""
 	stopOnly: """
 		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
 		"""
@@ -239,6 +243,8 @@ cases: {
 		{call: "watch.restartPending", args: [{journal: _journal.stopStartStop, activeEnter: null, until: "2026-11-19T19:30:30Z"}, _restart], expect: {from: "2026-11-19T19:29:55.000Z"}, why: "B is the pending stop"},
 		{call: "watch.completeWindows", args: [{journal: _journal.startThenStop, activeEnter: null, until: _done}, _restart], expect: [], why: "Started then Stopping in one millisecond, in that line order: no window"},
 		{call: "watch.restartPending", args: [{journal: _journal.startThenStop, activeEnter: null, until: "2026-11-19T19:00:30Z"}, _restart], expect: {from: "2026-11-19T19:00:04.000Z"}, why: "and the stop is pending"},
+		{call: "watch.completeWindows", args: [{journal: _journal.startBeforeStop, activeEnter: null, until: _done}, _restart], expect: [], why: "a start stamped before its stop (the clock stepped back) completes nothing"},
+		{call: "watch.completeWindows", args: [{journal: _journal.stopStartStart, activeEnter: null, until: _done}, {stop: "k3s\\.service", start: "Started k3s", crash: "^$never", lead: 5, tail: 120, down: 300}], throws: "matches both the stop and the start pattern", why: "a stop pattern that also matches the start line fails loudly, never pairs nothing in silence"},
 	]}
 	"a --since report gives no restart window, so an entry in a restart is not noise": {suite: "noise", steps: [
 		{call: "watch.restartWindows", args: [{journal: _journal.deliberate, activeEnter: "2026-11-19T19:00:09Z", restarts: {was: 0, now: 0}, until: _done, voided: [], since: true}, _restart], expect: [], why: "the void that rejected it was dropped once the cursor passed it: the report cannot tell"},

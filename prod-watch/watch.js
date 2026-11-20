@@ -523,12 +523,14 @@ function journalTimes(journal, activeEnter, cfg) {
   const pairs = [], crashes = [];
   let pending = null;
   for (const l of journal.split("\n")) {
-    const stop = stopRe.test(l), start = !stop && startRe.test(l), crash = crashRe.test(l);
+    const stop = stopRe.test(l), start = startRe.test(l), crash = crashRe.test(l);
+    if (stop && start) throw new Error(`a journal line matches both the stop and the start pattern: ${l.slice(0, 200)}`);
     if (!stop && !start && !crash) continue;
     const t = at(l);
     if (crash) crashes.push(t);
     if (stop) pending = t;
-    else if (start && pending !== null) { pairs.push({ stop: pending, start: t }); pending = null; }
+    // A start before its stop (the node's clock stepped back) completes nothing: the stop stays pending.
+    else if (start && pending !== null && t >= pending) { pairs.push({ stop: pending, start: t }); pending = null; }
   }
   if (pending !== null) pairs.push({ stop: pending, start: enter > pending ? enter : undefined });
   return { crashes, pairs };

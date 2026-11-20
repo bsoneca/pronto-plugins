@@ -164,7 +164,7 @@ if (node?.restart) {
   // NRestarts read: a crash the counter counted has its stop line before it, so none can raise the counter while its
   // lines wait for the next run against an equal counter. A crash between the read and the cutoff shows in the journal
   // without the counter, which the next run's rise rejects. The Mac's clock is not used: it can be ahead of the node's.
-  const u = await onNode(node, `TZ=UTC systemctl show ${r.unit} -p LoadState -p ActiveEnterTimestamp -p NRestarts && c=$(( $(date +%s) + 1 )) && while [ "$(date +%s)" -lt "$c" ]; do sleep 0.1; done && echo "CUTOFF=$c"`);
+  const u = await onNode(node, `TZ=UTC systemctl show ${r.unit} -p LoadState -p ActiveEnterTimestamp -p NRestarts && c=$(( $(date +%s) + 1 )) && while [ "$(date +%s)" -lt "$c" ]; do sleep 0.1; done; echo "CUTOFF=$c"`);
   if (!u.ok) throw new Error(`the node's ${r.unit} restarts were not read (${u.err.trim().slice(0, 300) || "no message"}): the ledger and the cursor are where they were`);
   const cutoff = cutoffOf(u.out);
   const range = restartRange(from, to, r, cutoff);
