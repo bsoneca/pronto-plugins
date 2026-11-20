@@ -158,11 +158,14 @@ let restartLead = 0;
 if (node?.restart) {
   const r = node.restart;
   const day = (iso: string) => iso.slice(0, 19).replace("T", " ") + " UTC";
-  // The cutoff is the Mac's now to the whole second, the journal's --until and the windows' alike. The node's own
-  // clock is not read: a skew between the two is a known limit (README).
-  const range = restartRange(from, to, r, Date.parse(to));
-  const j = await onNode(node, `sudo -n journalctl -u ${r.unit} _PID=1 --utc -o short-iso-precise --no-pager -q --since '${day(range.since)}' --until '${day(range.until)}'`);
+  // The counter is read first and the cutoff is the Mac's clock after that read, up to the whole second (the journal's
+  // --until and the windows' alike): a crash the counter counted has its stop line before the cutoff, so none can
+  // raise the counter while its lines wait for the next run, against an equal counter. A crash between the read and the
+  // cutoff shows in the journal without the counter, which the next run's rise rejects. The node's own clock is not
+  // read: a skew between the two is a known limit (README).
   const u = await onNode(node, `TZ=UTC systemctl show ${r.unit} -p LoadState -p ActiveEnterTimestamp -p NRestarts`);
+  const range = restartRange(from, to, r, Math.ceil(Date.now() / 1000) * 1000);
+  const j = await onNode(node, `sudo -n journalctl -u ${r.unit} _PID=1 --utc -o short-iso-precise --no-pager -q --since '${day(range.since)}' --until '${day(range.until)}'`);
   if (!j.ok || !u.ok) throw new Error(`the node's ${r.unit} restarts were not read (${(j.err || u.err).trim().slice(0, 300) || "no message"}): the ledger and the cursor are where they were`);
   const unit = unitOf(u.out);
   if (unit.loadState !== "loaded") throw new Error(`the node's ${r.unit} is not loaded (LoadState ${unit.loadState ?? "unread"}): the ledger and the cursor are where they were`);
@@ -261,6 +264,8 @@ if (!since) {
   write("ledger.json", next);
   // The overlap is read again, so what it holds is what the next run must not count again.
   write("cursor.json", { at: settled.committed, seen: settled.seen });
+  // k3sNext gets restartHold, not holdBack: holdBack (leadHold) is always set, and with it the counter kept would be
+  // min(was, now), which drops every window after one rise.
   const k3sOut = k3sNext({ was: restartWas, now: restartNow, hold: restartHold, voided: restartVoided, candidates: restartCandidates, committed: settled.committed });
   if (k3sOut !== null) write("k3s.json", k3sOut);
 }

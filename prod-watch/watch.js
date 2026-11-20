@@ -413,12 +413,14 @@ const checkVoided = (voided) => {
   }
   return voided;
 };
-// What k3s.json holds, checked: {nRestarts, voided}. Only a missing `voided` is none; one that is there must be a
+// What k3s.json holds, checked: {nRestarts, voided}. A missing nRestarts is none, else it is a non-negative integer. Only a missing `voided` is none; one that is there must be a
 // list of {from, to} that parse, or the run fails (the driver calls it before it reads anything else).
 /** @param {any} json */
 export function k3sState(json) {
   if (!json || typeof json !== "object" || Array.isArray(json)) throw new Error(`k3s.json is no object: ${JSON.stringify(json)?.slice(0, 200)}`);
-  return { nRestarts: json.nRestarts ?? null, voided: "voided" in json ? checkVoided(json.voided) : [] };
+  const n = json.nRestarts ?? null;
+  if (n !== null && !(Number.isInteger(n) && n >= 0)) throw new Error(`k3s.json's nRestarts is not a non-negative integer: ${JSON.stringify(n)?.slice(0, 200)}`);
+  return { nRestarts: n, voided: "voided" in json ? checkVoided(json.voided) : [] };
 }
 // The hold a cursor run keeps for what a restart not yet logged can still reach: a stop line may reach the journal
 // after the run's cutoff, and its lead (seconds) reaches back before it, so the node's entries from `until` - lead
@@ -443,7 +445,7 @@ export function restartVoids({ voided = [], windows = [], restarts = null, commi
 // What a pass writes to k3s.json (`was` the counter it read, `now` the unit's, `hold` restartPending's, `voided` what
 // k3s.json held, `candidates` completeWindows, `committed` the cursor): the counter restartBaseline gives (the old one
 // when there is none to write but voids remain) and the voids restartVoids keeps, or null when there is nothing to write.
-/** @param {{was?: number | null, now?: number | null, hold?: {from: string} | null, voided?: any, candidates?: {from: string, to: string}[], committed: string}} input */
+/** @param {{was?: number | null, now?: number | null, hold?: {from: string} | null, voided?: {from: string, to: string}[], candidates?: {from: string, to: string}[], committed: string}} input */
 export function k3sNext({ was = null, now = null, hold = null, voided = [], candidates = [], committed }) {
   const next = restartBaseline({ was, now, hold });
   const voids = restartVoids({ voided, windows: candidates, restarts: { was, now }, committed });

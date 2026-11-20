@@ -168,17 +168,22 @@ again with the window complete (or none). The hold applies to cursor runs alone:
 back, and shows the node's entries as they are, a window only if complete. A cursor run also holds the node's entries
 from the cutoff minus `lead` (`leadHold`, merged with that hold: the earlier of the two), when `node.restart` is
 set: a stop line may reach the journal after the pass read it, and its window reaches back `lead` before it. The
-cursor is the source's own boundary,
-verbatim, when a read limit cut the pass short; only the lag or a hold gives an earlier one, in milliseconds
+cursor is the source's own boundary, verbatim, when a read limit cut the pass short; only the lag or a hold gives an earlier one, in milliseconds
 (`settleRun`).
 
-The cutoff is the Mac's own now, floored to the whole second, used as the journal's `--until` and as the windows'
-`until`; the node's clock is not read. A node clock that runs behind or ahead of the Mac's can place a window
-or a crash line off by the skew: a known limit.
+The `NRestarts` read comes first, then the cutoff: the Mac's own clock after that read, rounded up to the whole second,
+used as the journal's `--until` and as the windows' `until`. So a crash the counter counted has its stop line before the
+cutoff, and none raises the counter while its lines wait for the next pass against an equal counter; a crash between the
+read and the cutoff shows in the journal without the counter, and the next pass's rise rejects its window. The node's
+clock is not read: a node clock that runs behind or ahead of the Mac's can place a window or a crash line off by the
+skew, a known limit.
+
+A `k3s.json` whose `nRestarts` is there and is not a non-negative integer fails the run like a bad `voided`. A throw
+from either check keeps failing every pass until the bad line leaves the range read or the operator mends `k3s.json`.
 
 The start and shutdown windows of a pod are built from every entry a pass read, the ones an earlier pass counted too
 (`group`'s `context`), and only the new entries are classified and counted: a SIGTERM marker seen last pass still
-opens the window of a late line this pass.
+opens the window of a late line this pass. A marker older than the overlap (the lag) is no longer read, so it cannot explain a line that arrives more than the lag late.
 
 `during` takes every phase that applies: an entry can be in its pod's `start` and `shutdown` windows (a pod stopped as
 it starts) and in a `restart` window at once, and a rule held to any one of them meets it (`phasesOf`).

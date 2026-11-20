@@ -220,6 +220,11 @@ cases: {
 		{call: "watch.k3sState", args: [{nRestarts: 4, voided: [{from: "x", to: "y"}]}], throws: "not a list of"},
 		{call: "watch.k3sState", args: [{nRestarts: 4, voided: null}], throws: "not a list of"},
 		{call: "watch.k3sState", args: [[]], throws: "no object"},
+		{call: "watch.k3sState", args: [{nRestarts: null}], expect: {nRestarts: null, voided: []}, why: "a null counter is none"},
+		{call: "watch.k3sState", args: [{nRestarts: "4"}], throws: "not a non-negative integer", why: "a string"},
+		{call: "watch.k3sState", args: [{nRestarts: -1}], throws: "not a non-negative integer", why: "a negative number"},
+		{call: "watch.k3sState", args: [{nRestarts: 1.5}], throws: "not a non-negative integer", why: "a float"},
+		{call: "watch.k3sState", args: [{nRestarts: 0}], expect: {nRestarts: 0, voided: []}, why: "zero is a counter"},
 		{call: "watch.restartVoids", args: [{voided: [_window], committed: "2026-11-19T19:02:09.000Z"}], expect: [_window], why: "an interval ending at the cursor is kept: only one the cursor is past is dropped"},
 	]}
 	"k3s.json's next state is a pure decision of the run": {suite: "noise", steps: [
@@ -238,6 +243,7 @@ cases: {
 		{call: "watch.completeWindows", args: [{journal: _journal.stopFraction, activeEnter: "2026-11-19T19:00:00Z", until: _done}, _restart], expect: [], why: "stopped at 19:00:00.5 and active at the whole second 19:00:00: that may be an earlier activation, so it does not pair"},
 		{call: "watch.completeWindows", args: [{journal: _journal.stopFraction, activeEnter: "2026-11-19T19:00:01Z", until: _done}, _restart], expect: [{from: "2026-11-19T18:59:55.500Z", to: "2026-11-19T19:02:01.000Z"}], why: "active the next second: strictly after the stop, so it pairs"},
 		{call: "watch.completeWindows", args: [{journal: _journal.stopOnly, activeEnter: "2026-11-19T18:59:53Z", until: _done}, _restart], expect: [], why: "an ActiveEnterTimestamp before the stop's second is an earlier start"},
+		{call: "watch.completeWindows", args: [{journal: _journal.stopOnly, activeEnter: "2026-11-19T18:59:54Z", until: _done}, _restart], expect: [], why: "an ActiveEnterTimestamp equal to the stop (.000) is not strictly after it: no window"},
 	]}
 	"a restart not finished at the cutoff holds the cursor at its stop minus lead": {suite: "noise", steps: [
 		{call: "watch.restartPending", args: [{journal: _journal.stopOnly, activeEnter: null, until: "2026-11-19T19:00:00Z"}, _restart], expect: {from: "2026-11-19T18:59:49.000Z"}, why: "stopped, no start yet, 6 s down of 300"},
