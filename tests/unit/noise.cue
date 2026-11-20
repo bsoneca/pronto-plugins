@@ -116,6 +116,11 @@ cases: {
 		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.1234567890Z", "2026-11-19T19:00:05Z"], throws: "only RFC 3339 in UTC", why: "past nanoseconds is no source's time, and as text it would order wrong"},
 		{call: "watch.settleRun", args: [{entries: [], hashes: [], reached: "2026-11-19T19:10:00.000+00:00", to: "2026-11-19T19:10:00.000Z", lag: 300000}], throws: "only RFC 3339 in UTC", why: "where the cursor is decided, an offset form fails before any state"},
 	]}
+	"a read a limit cut short keeps the saved occurrences it did not meet, so the catch-up counts nothing twice; a read to now prunes them": {suite: "noise", steps: [
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:06:00.000Z"}).out, (_n & {ts: "2026-11-19T19:08:00.000Z"}).out], hashes: ["hA", "hB"], reached: "2026-11-19T19:10:00.000Z", to: "2026-11-19T19:10:00.000Z", lag: 300000}], holds: {committed: "2026-11-19T19:05:00.000Z", seen: ["hA", "hB"]}, why: "the full read counts A and B and keeps both in its overlap"},
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:05:30.000Z"}).out, (_n & {ts: "2026-11-19T19:06:00.000Z"}).out], hashes: ["hL", "hA"], counted: ["hA", "hB"], reached: "2026-11-19T19:06:00.000Z", to: "2026-11-19T19:40:00.000Z", lag: 300000}], holds: {entries: [(_n & {ts: "2026-11-19T19:05:30.000Z"}).out], committed: "2026-11-19T19:06:00.000Z", seen: ["hA", "hB"]}, why: "Codex on #1531: late lines fill the limit before B; B's saved occurrence is carried, or the next run counts B again"},
+		{call: "watch.settleRun", args: [{entries: [(_n & {ts: "2026-11-19T19:06:00.000Z"}).out, (_n & {ts: "2026-11-19T19:08:00.000Z"}).out, (_n & {ts: "2026-11-19T19:30:00.000Z"}).out], hashes: ["hA", "hB", "hC"], counted: ["hA", "hB"], reached: "2026-11-19T19:50:00.000Z", to: "2026-11-19T19:50:00.000Z", lag: 300000}], holds: {entries: [(_n & {ts: "2026-11-19T19:30:00.000Z"}).out], committed: "2026-11-19T19:45:00.000Z", seen: []}, why: "the catch-up counts only C, and a read to now keeps nothing unmet"},
+	]}
 	"an entry in its pod's start and shutdown windows at once meets a rule held to shutdown": {suite: "noise", steps: [
 		{value: [
 			(_at & {container: "-", second: 0, text: "Starting new instance. Reason: AUTOSCALING", level: "INFO"}).out,

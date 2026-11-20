@@ -382,7 +382,8 @@ export const timeAfter = (a, b) => { const [x, fx] = instant(a), [y, fy] = insta
 // hashes the last cursor holds (`seen`, a multiset: each saved occurrence skips one entry), `reached` where the sources were read to (`to`, or earlier when a limit
 // cut one short), `lag` ms. A `since` run (a window only looked at) counts what it reads, the entries an earlier
 // run counted included. The cursor is `reached` as the source wrote it (any precision) unless a read to now
-// gives the lag before it, in ms.
+// gives the lag before it, in ms. `seen` is what the next run skips: this read's hashes from the cursor on, and, after a read a limit cut
+// short, the saved occurrences this read did not meet.
 /** @param {{entries: any[], hashes: string[], since?: boolean, counted?: Iterable<string>, reached: string, to: string, lag: number}} input */
 export function settleRun({ entries, hashes, since = false, counted = [], reached, to, lag }) {
   const known = new Map();
@@ -397,6 +398,9 @@ export function settleRun({ entries, hashes, since = false, counted = [], reache
   const committed = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
   // In ms: a node's timestamps are cut to ms and the next read starts inclusive at the cursor, so the cursor's own ms is read again.
   const seen = hashes.filter((_h, i) => Date.parse(entries[i].timestamp) >= Date.parse(committed));
+  // A read a limit cut short (reached before to) may stop before entries the last run counted: their saved occurrences, unmet in this read,
+  // are carried forward, or the run that reads them next would count them again. A read to now prunes seen to its own overlap.
+  if (!since && reached !== to) for (const [h, n] of known) for (let k = 0; k < n; k++) seen.push(h);
   return { entries: rest, committed, seen };
 }
 // What an entry is hashed as (prod-watch.ts's cursor keeps the hashes of what it counted): the entry as its source
