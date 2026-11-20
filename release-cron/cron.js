@@ -278,6 +278,17 @@ export const androidWhy = (code, names) => `the android step failed (exit ${code
 
 // --- Bisect: a failed run names the commit that broke it. ---
 
+// A rehearsal that ended without judging the tree: exit 3 (a verdict or record it could not read or write), 124 (its wrapper's
+// timeout) or 128 and above (a signal, the machine's doing). Such a run is never bisected nor cut to a release branch.
+export const noVerdictExit = (code) => code === 3 || code === 124 || code >= 128;
+
+// Whether a run's `why` says its rehearsal gave no verdict: the bisect skips it.
+export const noVerdictRun = (why) => /^the rehearsal gave no verdict/.test(why ?? "");
+
+// A bisect check that ended without judging its commit: no verdict (3), its timeout (124), a shell that could not run it (126, 127)
+// or a signal (128 and above). The run stays open for the next bisect.
+export const inconclusiveExit = (code) => noVerdictExit(code) || code === 126 || code === 127;
+
 // What a failed run failed on, from its `why` and its output: the kind ("release" when release@gcp,
 // a target's release command (`release (cmd)`) or the confirm failed, else "rehearsal") and the scenarios the output marks failed (`✗ <name> (12s) at step`).
 export const signature = (why, text) => /^the android step/.test(why ?? "")

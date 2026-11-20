@@ -155,6 +155,17 @@ cases: {
 		{call: "cron.detail", args: [[{commit: "c1", queued: "2026-11-03T02:00:00Z", waited: 3, checks: {scenarios: {s: 600}, premium: {s: 0, skipped: true}}}], [], "c1", "2026-11-03T02:00:00Z"], expect: {phases: {"rehearse.queue": 3, "rehearse.scenarios": 600}, flaked: [], rc: null}, why: "a check the rehearsal skipped took no time (pronto#1546)"},
 		{call: "cron.detail", args: [[{commit: "c1", queued: "2026-11-03T01:59:59Z", waited: 5}], [], "c1", "2026-11-03T02:00:00Z"], expect: {phases: {}, flaked: [], rc: null}, why: "a record before the run began is an earlier run's"},
 	]}
+	"a rehearsal that ended without judging the tree is no verdict, never bisected or cut": {suite: "cron", steps: [
+		for c in [1, 2] {{call: "cron.noVerdictExit", args: [c], expect: false, why: "a failure of the tree"}},
+		for c in [3, 124, 130, 137] {{call: "cron.noVerdictExit", args: [c], expect: true, why: "no verdict, a timeout or a signal"}},
+		{call: "cron.noVerdictRun", args: ["the rehearsal gave no verdict (exit 3): nothing released"], expect: true, why: "the bisect skips it"},
+		{call: "cron.noVerdictRun", args: ["the rehearsal failed (exit 1): nothing released"], expect: false},
+		{call: "cron.noVerdictRun", args: [null], expect: false},
+	]}
+	"a bisect check that judged nothing leaves its run open": {suite: "cron", steps: [
+		for c in [3, 124, 126, 127, 130, 137] {{call: "cron.inconclusiveExit", args: [c], expect: true}},
+		for c in [0, 1, 2] {{call: "cron.inconclusiveExit", args: [c], expect: false}},
+	]}
 	"a cloud rehearsal is named in the log line with its minutes and cost": {suite: "cron", steps: [
 		{call: "cron.line", args: [{started: "t", app: "a", outcome: "released", steps: {prepare: 30, release: 1500}, rehearsal: {ok: true, seconds: 672, usd: 0.1183}}], expect: "t a released: 25.5 min = prepare 0.5, release 25.0; cloud rehearsal 11.2 min, $0.1183"},
 	]}

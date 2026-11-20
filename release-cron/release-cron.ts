@@ -31,7 +31,7 @@
 // the first green one releases from it (README.md, "Release branches"). `abandon` gives a held release up by hand.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, sshDropped, landed, verdict, releaseModes, rehearsalEnv, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
+import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, sshDropped, landed, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -229,12 +229,9 @@ if (verb === "bisect") {
   // The oldest failed run since the last release not yet bisected: each failed run of a streak is
   // bisected in its turn, on the verdicts the ones before it settled, so a culprit the next run fails on too shows twice.
   const since = runs.slice(runs.findLastIndex((r) => r.outcome === "released") + 1);
-  // A bisect that stopped for want of a verdict (noVerdict) leaves its run eligible, three times at most, so a
-  // disk that stays full cannot loop it for ever.
-  const settled = (r: { started: string }) => bisects.some((b) => b.of === r.started && !b.noVerdict) || bisects.filter((b) => b.of === r.started && b.noVerdict).length >= 3;
-  const noVerdictRun = (r: { why?: string }) => /^the rehearsal gave no verdict/.test(r.why ?? "");
-  const failed = only ? runs.find((r) => r.started === only) : since.find((r) => (r.outcome === "failed" || r.cut) && r.commit && !settled(r) && !noVerdictRun(r));
-  if (failed && noVerdictRun(failed)) { say(`run ${failed.started} gave no verdict: nothing to bisect`); Deno.exit(0); }
+  const settled = (r: { started: string }) => bisects.some((b) => b.of === r.started);
+  const failed = only ? runs.find((r) => r.started === only) : since.find((r) => (r.outcome === "failed" || r.cut) && r.commit && !settled(r) && !noVerdictRun(r.why));
+  if (failed && noVerdictRun(failed.why)) { say(`run ${failed.started} gave no verdict: nothing to bisect`); Deno.exit(0); }
   if (!failed) { say("no failed run unbisected"); Deno.exit(0); }
   const at = runs.indexOf(failed);
   const green = runs.slice(0, at).filter((r) => r.outcome === "released" && r.commit).at(-1);
@@ -294,7 +291,7 @@ if (verb === "bisect") {
   // scenario's flags, or a step's flag or unless. A tree whose scenarios do not export cannot say which failure a flag
   // decides: the bisect stops, recorded, so the next failed run is taken up.
   const specs = (() => {
-    if (sig.kind === "release" || !sig.names.length) return [];
+    if (sig.kind !== "rehearsal" || !sig.names.length) return [];
     // A dry run holds no lock: it never touches the shared checkout, so it does not read the failed commit's scenarios.
     if (dry) { say(`dry run: the scenarios of ${failed.commit.slice(0, 8)} are not read (that needs the bisect's checkout), so whether a flag or time decides ${sig.names.join(", ")} is unknown: no plan, no culprit`); Deno.exit(0); }
     // Recorded and stopped: the scenarios could not be read, or do not say what the failure names.
@@ -336,11 +333,10 @@ if (verb === "bisect") {
     const since = (sh("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H", `${failed.commit}..origin/main`], undefined, {}, 60).out ?? "").split("\n").filter(Boolean).reverse();
     return stopsBisect(h, starter, h > 0 && sh("kill", ["-0", String(h)]).ok, after?.commit ?? null, fixedBy(since, sig, evidence()));
   };
-  // A yield is not recorded: the next bisect takes the same failed run up, on the verdicts kept. A check that gave
-  // no verdict is recorded as noVerdict, which leaves the run eligible (above).
-  const stop = (why: string, record: "yes" | "no" | "noVerdict" = "yes") => {
+  // A yield is not recorded: the next bisect takes the same failed run up, on the verdicts kept.
+  const stop = (why: string, record: "yes" | "no" = "yes") => {
     say(why);
-    if (record !== "no" && !/yields/.test(why)) Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify({ of: failed.started, kind: sig.kind, names: sig.names, green: green.commit, failing: failed.commit, ran, fromRecords: 0, why, ...(record === "noVerdict" ? { noVerdict: true } : {}) }) + "\n", { append: true });
+    if (record !== "no" && !/yields/.test(why)) Deno.writeTextFileSync(`${dir}/bisects.jsonl`, JSON.stringify({ of: failed.started, kind: sig.kind, names: sig.names, green: green.commit, failing: failed.commit, ran, fromRecords: 0, why }) + "\n", { append: true });
     unlock(); Deno.exit(0);
   };
   const fromRecords = list.filter((c) => known[c.sha] !== "unknown").length;
@@ -353,6 +349,7 @@ if (verb === "bisect") {
   // A signal stops the check's group (TERM, then KILL after 30 s) and gives the lock back first, so a
   // later bisect never finds the checkout under a check still running.
   let group = 0;
+  let verdictDir = "";
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     Deno.addSignalListener(signal, async () => {
       if (group) {
@@ -360,6 +357,7 @@ if (verb === "bisect") {
         for (const t = Date.now(); sh("kill", ["-0", "--", `-${group}`], undefined, {}, 10).ok && Date.now() - t < 30_000;) await new Promise((r) => setTimeout(r, 1000));
         sh("kill", ["-KILL", "--", `-${group}`], undefined, {}, 10);
       }
+      if (verdictDir) { try { Deno.removeSync(verdictDir, { recursive: true }); } catch { /* gone */ } }
       unlock();
       Deno.exit(130);
     });
@@ -384,7 +382,7 @@ if (verb === "bisect") {
     for (const k of Object.keys(inherited)) if (/^FLAG/.test(k)) delete inherited[k];
     for (const k of ["ONLY", "ONLY_ABSENT", "SCENARIOS_QUEUE", "SCENARIOS_VERDICT", "INTEGRATE_LOCAL_DRIVERS", "STACK_SLOT", "STACK_JOB", "STACK_WEIGHT", "APP_URL", "ORIGIN", "PRONTO_GATE_DIR", "STUDIO_K8S_ONLY", "STUDIO_K8S_CANDIDATE_REF", "GITHUB_ACTIONS", "INTEGRATE_K8S_SLOTTED"]) delete inherited[k];
     // A named check is judged on the scenarios' own verdict, in a directory of its own (no other user can take its path).
-    const verdictDir = sig.names.length ? Deno.makeTempDirSync({ prefix: "bisect-verdict." }) : "";
+    verdictDir = sig.names.length ? Deno.makeTempDirSync({ prefix: "bisect-verdict." }) : "";
     const env: Record<string, string> = { ...inherited, SLOW: "1", STACK_WAIT_MINUTES: "525600", SCENARIOS_ALL: "1", ...(sig.names.length ? { ONLY: sig.names.join(","), ONLY_ABSENT: "pass", SCENARIOS_VERDICT: `${verdictDir}/verdict.json` } : {}) };
     // SCENARIOS_ALL=1: a named scenario runs whatever an older green record of the same inputs says (release runs no
     // longer refresh the selection cache, so it can be stale for exactly the scenario that failed).
@@ -422,14 +420,14 @@ if (verb === "bisect") {
       if (sig.names.length && !absentLine) absentLine = carry.match(absentRe)?.[1] ?? "";
     }));
     f.close();
-    const { code, signal } = await p.status;
+    const { code } = await p.status;
     clearInterval(beat);
     clearInterval(watch);
     group = 0;
     // No file is no verdict; any other read error is the machine's.
     let unread = "";
     const named = sig.names.length ? await readVerdict(`${verdictDir}/verdict.json`).catch((e) => { if (!(e instanceof Deno.errors.NotFound)) unread = String(e); return undefined; }) : undefined;
-    if (verdictDir) Deno.removeSync(verdictDir, { recursive: true });
+    if (verdictDir) { Deno.removeSync(verdictDir, { recursive: true }); verdictDir = ""; }
     if (yielded) stop(stopsBisect(yielded, starter, true, null, null)!);
     // A check that ended without judging the commit (killed, no verdict, an unreadable one) leaves the run open for the next
     // bisect, twice; the third such check records the bisect as stopped, so one stuck run never holds back the later ones.
@@ -458,7 +456,7 @@ if (verb === "bisect") {
     }
     // An unnamed check killed by a signal or exiting 3 (no verdict) did not judge the commit.
     // Nor did a command the shell could not run (126, 127).
-    if (code >= 128 || code === 3 || code === 124 || code === 126 || code === 127) inconclusive(`the check on ${sha.slice(0, 8)} ended without a verdict (exit ${code})`);
+    if (inconclusiveExit(code)) inconclusive(`the check on ${sha.slice(0, 8)} ended without a verdict (exit ${code})`);
     return code === 0 ? "good" : "bad";
   };
   // The check must fail here on the failing commit too (an explicit failure: a pass or a timeout is
@@ -992,7 +990,7 @@ try {
   // Exit 3 before its slot (a ledger key it could not read, a start mark it could not write) is no verdict as well.
   // So is a rehearsal stopped by a signal (130, or killed: 128 and above), the machine's doing, not the tree's.
   // And a rehearsal its wrapper timed out (124, timeout(1): Studio's integrate@k8s).
-  const noVerdict = gate.code === 3 || gate.code === 124 || gate.code >= 128;
+  const noVerdict = noVerdictExit(gate.code);
   if (!got) { step("slot"); end("failed", `${noVerdict ? "the rehearsal gave no verdict: " : ""}${rehearse!.slice(1).join(" ") || rehearse![0]} ended before its slot (exit ${gate.code}): nothing released`, 1); }
   if (own && !dry) step("rehearse");
   // Exit 3 is the rehearsal's "no verdict" (a verdict or record it could not read or write, the checkout changed): nothing
