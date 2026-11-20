@@ -170,6 +170,13 @@ echo "${Deno.pid} 3 prio=release" > job-8/weight; chmod 664 job-8/weight`);
       olderBesideKeeps: slot.olderKeeps({ weighted: true, weight: 3, release: false }, 8, 0, 15, true, true),
       olderHeldSkipped: slot.olderKeeps({ weighted: true, weight: 3, release: false }, 8, 0, 15, true, false),
       olderBesideFull: slot.olderKeeps({ weighted: true, weight: 9, release: false }, 8, 0, 15, true, true),
+      olderReleaseKept: slot.olderKeeps({ weighted: true, weight: 3, release: true }, 8, 0, 15, true, false),
+      poolWeight0Low: slot.poolBesideOf(0, false, true, true, false, 1, 0, false, () => 7, 18),
+      poolWeight0Foreign: slot.poolBesideOf(0, false, true, true, false, 1, 0, true, () => 7, 18),
+      poolWeight0NoOlder: slot.poolBesideOf(0, false, true, false, false, 1, 0, false, () => { throw new Error("read"); }, 18),
+      poolRelease: slot.poolBesideOf(0, true, true, true, false, 1, 0, false, () => { throw new Error("read"); }, 18),
+      poolWeighted: slot.poolBesideOf(3, false, true, true, true, 1, 0, false, () => { throw new Error("read"); }, 18),
+      poolReadFails: slot.poolBesideOf(0, false, true, true, false, 1, 0, false, () => { throw new Error("denied"); }, 18),
       loadFails: (() => { try { slot.load1(() => { throw new Error("Requires sys access"); }); return "read"; } catch (e) { return `${e.message} | cause: ${e.cause?.message}`; } })(),
       loadEmpty: (() => { try { slot.load1(() => []); return "read"; } catch (e) { return e.message; } })(),
     };
