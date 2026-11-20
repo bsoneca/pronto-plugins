@@ -167,6 +167,9 @@ echo "${Deno.pid} 3 prio=release" > job-8/weight; chmod 664 job-8/weight`);
       heldRelease: slot.heldByRelease(true, 6, true),
       heldWeight0: slot.heldByRelease(true, 0, false),
       loadRead: slot.load1(() => [7, 5, 4]),
+      olderBesideKeeps: slot.olderKeeps({ weighted: true, weight: 3, release: false }, 8, 0, 15, true, true),
+      olderHeldSkipped: slot.olderKeeps({ weighted: true, weight: 3, release: false }, 8, 0, 15, true, false),
+      olderBesideFull: slot.olderKeeps({ weighted: true, weight: 9, release: false }, 8, 0, 15, true, true),
       loadFails: (() => { try { slot.load1(() => { throw new Error("Requires sys access"); }); return "read"; } catch (e) { return `${e.message} | cause: ${e.cause?.message}`; } })(),
       loadEmpty: (() => { try { slot.load1(() => []); return "read"; } catch (e) { return e.message; } })(),
     };

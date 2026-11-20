@@ -470,6 +470,12 @@ export const besideRelease = (holding: number, waiting: number, load: number | n
   !foreign && holding > 0 && waiting === 0 && load !== null && load < max;
 // Whether a claim that is not admitted waits for a release (its STACK_WAIT_MINUTES deadline reset): any weighted
 // claim but a release's while a release holds or waits, beside a rehearsal or not.
+// Whether an older ticket keeps its place ahead of this claim: a weighted one only while its cores would be admitted.
+// Judged by the pool's room beside a release (`poolBeside`), never the arriving claim's: a weight-0 claim is never
+// beside, and judging an older weighted ordinary ticket by it would skip that ticket and take the memory it reserved.
+export const olderKeeps = (o: { weighted: boolean; weight: number; release: boolean }, used: number, reserved: number,
+  budget: number, hold: boolean, poolBeside: boolean) =>
+  !(o.weighted && !admitsCores(false, used, o.weight, reserved, budget, false, o.release, hold, poolBeside && !o.release && o.weight > 0));
 export const heldByRelease = (hold: boolean, weight: number, release: boolean) => hold && weight > 0 && !release;
 // Whether a claim's STACK_PRIORITY makes it a release's.
 export const releaseClaim = (priority: string | undefined) => priority === "release";
@@ -977,6 +983,14 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       // Only a weighted ordinary claim runs beside: a weight-0 one (a Studio preview inside its slot's work) is not held at
       // all, and keeps counting only the releases ahead of it.
       const beside = hold && weight > 0 && !release && besideRelease(releasing.length, waitingRelease.length, load, holdLoad, !!foreign);
+      // The pool's room beside a release, for judging the older tickets: the arriving claim's own when it is weighted and
+      // ordinary; for a weight-0 one, read the same way for its sake whenever an older weighted ordinary ticket waits.
+      // A release claim judges none beside, as before.
+      const olderOrdinary = !release && hold && inLine.some((o) => o.weighted && !o.release);
+      const poolForeign = weight > 0 ? foreign : olderOrdinary ? await foreignHold() : undefined;
+      const poolBeside = weight > 0 ? beside
+        : olderOrdinary && besideRelease(releasing.length, waitingRelease.length,
+          releasing.length && !waitingRelease.length && !poolForeign ? load1() : null, holdLoad, !!poolForeign);
       const held_ = heldByRelease(hold, weight, release);
       const memHeld = holders.reduce((n, h) => n + h.mem, 0), coresHeld = holders.reduce((n, h) => n + h.cores, 0);
       // The tickets this claim waits behind, in order, nested or not: all of the older ones but a weighted cue
@@ -985,7 +999,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       const older: typeof inLine = [];
       for (const o of inLine) {
         const reserved = o.weighted ? before(coresTickets, o.name.replace(/-w$/, "")).reduce((n, c) => n + c.weight, 0) : 0;
-        if (!(o.weighted && !admitsCores(false, used, o.weight, reserved, budget, false, o.release, hold, beside))) older.push(o);
+        if (olderKeeps(o, used, reserved, budget, hold, poolBeside)) older.push(o);
       }
       const where = `${ordinal(older.length + 1)} in line${older.length ? ` behind ${older.at(-1)!.what} (weight ${older.at(-1)!.weight})` : ""}`;
       // A top-level cue reserves cores only once the cue budget admits it (the memory and cores it claims fit
