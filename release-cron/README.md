@@ -174,11 +174,14 @@ An app with a `target.preview` chooses `when` (the field of `preview`, default `
   rehearsal was paid for.
 - `"beside"`: the preview starts when the rehearsal starts, and the two run at the same time, the first to fail stopping the other
   (`besideOutcome` in `cron.js`):
-  - the preview fails first: the rehearsal's process group is stopped (it records `stopped`, which is no verdict) and the run ends
+  - the preview fails first: the rehearsal's process group is stopped (TERM, then KILL after 300 s so `rehearse.ts` and integrate@k8s tear
+    down their stacks and cluster; a signal to the run gives 60 s; the rehearsal records `stopped`, which is no verdict) and the run ends
     `failed`, `the release preview failed: ...; the rehearsal was stopped: nothing released`. That is no attempt and cuts no release branch,
     and it is never bisected (it says nothing of a commit);
-  - the rehearsal fails first: the preview's `up` is stopped, its waits end and `down` still runs. The run ends with the rehearsal's own
-    reason, red or no verdict, bisected and branched as ever;
+  - the rehearsal fails first: the preview's `up` is never cancelled (stopping it would only kill the local ssh, leaving the remote
+    release running while `down` starts in the same worktree), so it runs to its end (Bonk Chess's `up` ends with the kill rehearsal, which
+    is acceptable); the waits and probes after it are skipped and `down` runs. A failed `down` is logged and added to the run's reason.
+    The run ends with the rehearsal's own reason, red or no verdict, bisected and branched as ever;
   - both passed: the android step, then the release, once `git rev-parse HEAD` in the run's worktree is still the commit both started from
     (else the run fails, nothing released). `"first"` makes the same check.
 

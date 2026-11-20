@@ -839,12 +839,14 @@ const send = (root: number, sig: string) => {
 const alive = (root: number) => tree(root).pids.length > 0;
 const HEARTBEAT = 5 * 60_000;
 const killers = new Map<number, ReturnType<typeof setTimeout>>();
-function stop(pgid: number) {
+// `grace`: ms before KILL. A signal gets a minute; a rehearsal stopped for the preview's failure gets more, so its own teardown
+// (rehearse.ts's stacks, integrate@k8s's cluster) can finish.
+function stop(pgid: number, grace = 60_000) {
   send(pgid, "TERM");
-  killers.set(pgid, setTimeout(() => { if (alive(pgid)) send(pgid, "KILL"); }, 60_000));
+  killers.set(pgid, setTimeout(() => { if (alive(pgid)) send(pgid, "KILL"); }, grace));
 }
 // Every running child that carries `tag` stopped (the loser of the rehearsal and preview's race).
-const stopTagged = (tag: string) => { for (const [pgid, t] of children) if (t === tag) stop(pgid); };
+const stopTagged = (tag: string, grace?: number) => { for (const [pgid, t] of children) if (t === tag) stop(pgid, grace); };
 async function child(cmd: string, args: string[], cwd: string, env: Record<string, string>, watch: (l: string) => void = () => {}, tag = "") {
   const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", cmd, ...args], cwd, env, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
   children.set(p.pid, tag);
@@ -873,7 +875,9 @@ async function child(cmd: string, args: string[], cwd: string, env: Record<strin
 // cluster, asked the probes through a port-forward before the release goes ahead, and removed after, whatever it
 // said. It proves the images, the migrations replayed over a fresh database and the config on the node before
 // any traffic moves. Returns what failed (none: it answered every probe). `cancel.stopped` ends it early (the
-// rehearsal beside it failed first): `up` is stopped by its tag, the waits and probes end, and `down` still runs.
+// rehearsal beside it failed first): `up` is never cancelled (stopping it would only kill the local ssh, leaving the remote
+// release running while `down` starts in the same worktree), so it runs to its end (Bonk Chess's ends with the kill rehearsal);
+// the waits and probes after it are skipped, and `down` runs. A failed `down` is always logged.
 async function previewCheck(pv: NonNullable<Command["preview"]>, dir: string, cancel: { stopped: boolean }): Promise<string[]> {
   const env = { ...Deno.env.toObject(), STACK_PRIORITY: "release" };
   const bad: string[] = [];
@@ -881,7 +885,7 @@ async function previewCheck(pv: NonNullable<Command["preview"]>, dir: string, ca
   try {
     const up = await child(pv.up[0], pv.up.slice(1), dir, env, undefined, "preview");
     if (up.code !== 0) bad.push(`the preview (${pv.up.join(" ")}) failed (exit ${up.code})`);
-    else {
+    else if (!cancel.stopped) {
       // In a process group of its own, so ending it ends the ssh forward and what it started; its stdin stays open (nothing
       // is written to it), which is how the remote side knows to stop: it reads it until the connection closes.
       reach = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...pv.reach], cwd: dir, env, stdin: "piped", stdout: "null", stderr: "null" }).spawn();
@@ -915,7 +919,7 @@ async function previewCheck(pv: NonNullable<Command["preview"]>, dir: string, ca
     const down = await child(pv.down[0], pv.down.slice(1), dir, env);
     // A preview left standing fails the run before the release: its namespace and what runs there stay until someone
     // removes them, which a run that reads as released would hide.
-    if (down.code !== 0) bad.push(`removing the preview (${pv.down.join(" ")}) failed (exit ${down.code})`);
+    if (down.code !== 0) { const m = `removing the preview (${pv.down.join(" ")}) failed (exit ${down.code})`; bad.push(m); say(`preview: ${m}`); }
   }
   return bad;
 }
@@ -1063,6 +1067,7 @@ try {
   }
   const beside = !!pv && when === "beside" && !dry;
   let outcome: Awaited<ReturnType<typeof rehearsalRun>>;
+  let downFailed = "";
   if (beside) {
     active("rehearse+preview");
     overlap = true;
@@ -1074,23 +1079,35 @@ try {
     // Once one has ended, the other is stopped when that is the verdict (cron.js besideOutcome).
     const decide = () => {
       const o = besideOutcome(race.r ?? null, race.p ?? null);
-      if (o.stop === "preview") { cancel.stopped = true; stopTagged("preview"); say(`${o.why}`); }
-      if (o.stop === "rehearsal") { rehearsalStopped = true; stopTagged("rehearsal"); say(`${o.why}`); }
+      if (o.stop === "preview") { cancel.stopped = true; say(`${o.why}`); }
+      if (o.stop === "rehearsal") { rehearsalStopped = true; stopTagged("rehearsal", 300_000); say(`${o.why}`); }
     };
-    await Promise.all([
-      rehearsalRun().then((x) => { rehearsalResult = x; race.r = { code: x.gate.code, at: Date.now() - t }; decide(); }),
-      previewCheck(pv!, dir, cancel).then((bad) => { race.p = { bad, at: Date.now() - t }; decide(); }),
-    ]);
+    const rP = rehearsalRun().then((x) => { rehearsalResult = x; race.r = { code: x.gate.code, at: Date.now() - t }; decide(); });
+    const pP = previewCheck(pv!, dir, cancel).then((bad) => { race.p = { bad, at: Date.now() - t }; decide(); });
+    try {
+      await Promise.all([rP, pP]);
+    } catch (e) {
+      // One of them threw: the rehearsal is stopped and the preview's `down` awaited before the run's own handler sees it.
+      cancel.stopped = true;
+      stopTagged("rehearsal", 300_000);
+      await Promise.allSettled([rP, pP]);
+      throw e;
+    } finally {
+      overlap = false;
+    }
     // One step, their wall time: the two overlapped, so the sum of the steps must count it once.
-    overlap = false;
     steps["rehearse+preview"] = Math.round((Date.now() - mark) / 1000);
     mark = Date.now();
     const r = race.r!, p = race.p!;
     run.beside = { rehearse: Math.round(r.at / 1000), preview: Math.round(p.at / 1000), first: p.at < r.at ? "preview" : "rehearsal" };
     if (!cancel.stopped) sayPreview(p.bad);
-    const o = besideOutcome(r, p);
-    // A rehearsal stopped for the preview's failure is no verdict of the tree: no attempt, no branch (red), and no bisect (noVerdictRun).
-    if (o.failed === "preview") end("failed", `${o.why}: nothing released`, 1, !rehearsalStopped);
+    // A rehearsal the preview's failure stopped (it ended without passing) is no verdict of the tree: no attempt, no branch (red),
+    // and no bisect (noVerdictRun). One that passed before the stop landed is a verdict, and the preview's failure is red as in "after".
+    const stopped = rehearsalStopped && r.code !== 0;
+    const o = besideOutcome(r, p, stopped);
+    if (o.failed === "preview") end("failed", `${o.why}: nothing released`, 1, !stopped);
+    // The rehearsal failed first: the preview was cut short, but a failed `down` (a preview left standing) is said in the run's reason.
+    if (cancel.stopped) downFailed = p.bad.filter((b) => b.startsWith("removing the preview")).map((b) => `; ${b}`).join("");
     outcome = rehearsalResult!;
   } else outcome = await rehearsalRun();
   const { gate, got } = outcome;
@@ -1098,12 +1115,12 @@ try {
   // So is a rehearsal stopped by a signal (130, or killed: 128 and above), the machine's doing, not the tree's.
   // And a rehearsal its wrapper timed out (124, timeout(1): Studio's integrate@k8s).
   const noVerdict = noVerdictExit(gate.code);
-  if (!got) { if (!beside) step("slot"); end("failed", `${noVerdict ? "the rehearsal gave no verdict: " : ""}${rehearse!.slice(1).join(" ") || rehearse![0]} ended before its slot (exit ${gate.code}): nothing released`, 1); }
+  if (!got) { if (!beside) step("slot"); end("failed", `${noVerdict ? "the rehearsal gave no verdict: " : ""}${rehearse!.slice(1).join(" ") || rehearse![0]} ended before its slot (exit ${gate.code}): nothing released${downFailed}`, 1); }
   if (own && !dry && !beside) step("rehearse");
   // Exit 3 is the rehearsal's "no verdict" (a verdict or record it could not read or write, the checkout changed): nothing
   // is released, and the bisect never takes it up (noVerdictRun), since it says nothing of a commit; no release branch is cut for it.
-  if (noVerdict) end("failed", `the rehearsal gave no verdict (exit ${gate.code}): nothing released`, 1);
-  if (gate.code !== 0) end("failed", `the rehearsal failed (exit ${gate.code}): nothing released`, 1, true);
+  if (noVerdict) end("failed", `the rehearsal gave no verdict (exit ${gate.code}): nothing released${downFailed}`, 1);
+  if (gate.code !== 0) end("failed", `the rehearsal failed (exit ${gate.code}): nothing released${downFailed}`, 1, true);
 
   // 2a. The android step (releaseCron.android): the app's phone scenarios on an emulator, on a Mac, once the rehearsal
   // passed. A failure ends the run as a failed rehearsal does, and its bisect says "not bisected" (cron.js).

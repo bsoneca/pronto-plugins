@@ -290,13 +290,13 @@ export const noVerdictRun = (why) => /^the rehearsal gave no verdict|; the rehea
 // has ended. Each is null while it runs. `rehearsal`: {code, at}, its exit and when it ended (ms into the race);
 // `preview`: {bad, at}, the reasons it failed (none: it passed). Returns `stop`, the one still running that is no
 // longer worth finishing ("rehearsal" or "preview", else null), `failed` (the one whose failure ends the run: the
-// earlier when both failed) and `why`. A rehearsal stopped for the preview's failure is no verdict of the tree, so
-// the run's reason says so (noVerdictRun).
-export const besideOutcome = (rehearsal, preview) => {
+// earlier when both failed) and `why`. `stopped`: the driver stopped the rehearsal (it was still running when the
+// preview failed) and it ended without passing. A stopped rehearsal is no verdict of the tree, so the run's reason
+// says so (noVerdictRun), also when the call is made once it has ended.
+export const besideOutcome = (rehearsal, preview, stopped = false) => {
   const r = !!rehearsal && rehearsal.code !== 0, p = !!preview && preview.bad.length > 0;
   if (p && (!r || preview.at < rehearsal.at)) {
-    const cut = !rehearsal;
-    return { stop: cut ? "rehearsal" : null, failed: "preview", why: `the release preview failed: ${preview.bad.join("; ")}${cut ? "; the rehearsal was stopped" : ""}` };
+    return { stop: rehearsal ? null : "rehearsal", failed: "preview", why: `the release preview failed: ${preview.bad.join("; ")}${!rehearsal || stopped ? "; the rehearsal was stopped" : ""}` };
   }
   if (r) return { stop: preview ? null : "preview", failed: "rehearsal", why: `the rehearsal failed (exit ${rehearsal.code})${preview ? "" : "; the preview was stopped"}` };
   return { stop: null, failed: null, why: "" };
