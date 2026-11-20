@@ -110,12 +110,11 @@ echo "${Deno.pid} 3 prio=release" > job-8/weight; chmod 664 job-8/weight`);
     const ownUidRefused = (await readForeign(pool, own, own)) !== undefined; // the real reader: want is its own uid
     // This account's own pool: a mode 777 one and a good one.
     await sh(`mkdir '${tmp}/open' '${tmp}/shut' && chmod 777 '${tmp}/open' && chmod 755 '${tmp}/shut'`);
-    // requireOwnDir asks the OS for this account's uid (--allow-sys): run apart, with all permissions.
-    const slotUrl = new URL("../../machine/slot.ts", import.meta.url).href;
-    const tries = async (p) => (await new Deno.Command(Deno.execPath(), { args: ["eval", "--no-config", "-A", `import { requireOwnDir } from "${slotUrl}"; try { requireOwnDir(${JSON.stringify(p)}); Deno.exit(0); } catch { Deno.exit(1); }`], stdout: "null", stderr: "null" }).output()).success;
+    // requireOwnDir with this account's uid (from id -u: the suite runs without --allow-sys, which Deno.uid() needs).
+    const tries = (p) => { try { slot.requireOwnDir(p, own); return true; } catch { return false; } };
     return {
       live, onlyBad, waiting, waitingGroupWritable, groupWritablePool, ownUidRefused,
-      ownGood: await tries(`${tmp}/shut`), ownOpen: await tries(`${tmp}/open`),
+      ownGood: tries(`${tmp}/shut`), ownOpen: tries(`${tmp}/open`),
       dead: held({ alive: false }),
       reused: held({ started: now }),
       reusedWithinSlack: held({ started: now - 60_000 + 1500 }),

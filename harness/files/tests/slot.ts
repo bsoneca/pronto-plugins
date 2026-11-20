@@ -476,9 +476,9 @@ export const dirTrust = (st: { isDirectory: boolean; isSymlink: boolean; uid: nu
   st.isDirectory && !st.isSymlink && (uid === null || st.uid === uid) && ((st.mode ?? 0) & 0o022) === 0;
 // Refuses (fails closed, writes nothing) a directory that is not ours alone to write: after a reboot another account
 // could have made the pool first, or planted links in it, and this account would write its records through them.
-export const requireOwnDir = (path: string) => {
+export const requireOwnDir = (path: string, uid: number | null = Deno.uid()) => {
   if (Deno.build.os === "windows") return;
-  if (!dirTrust(Deno.lstatSync(path), Deno.uid())) throw new Error(`slot: ${path} is not a directory that only this account can write (a link, another account's, or writable by others): refusing to use it`);
+  if (!dirTrust(Deno.lstatSync(path), uid)) throw new Error(`slot: ${path} is not a directory that only this account can write (a link, another account's, or writable by others): refusing to use it`);
 };
 const kindOf = (st: Deno.FileInfo) => st.isSymlink ? "symlink" : st.isDirectory ? "dir" : st.isFile ? "file" : "other";
 // A file of the hold pool read without following a link: lstat, open, fstat the handle (dev and ino as lstat's), at most 4 KB.
