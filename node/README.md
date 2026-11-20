@@ -108,10 +108,10 @@ Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, previews' `--
 
 The door (caddy) dials its own Dapr sidecar for every upstream, and Dapr answers its own API paths (`/v1.0/metadata`,
 secrets, state, publish, shutdown) before it routes by `dapr-app-id`, so `https://<host>/crud/v1.0/metadata` would answer the
-sidecar's JSON. The engine gives caddy a Configuration of its own, `<app>-caddy-dapr-config` (the app's plus
+sidecar's JSON. The engine gives caddy a Configuration of its own, `<app>-caddy-invoke-only` (the app's plus
 `api.allowed` for invocation alone, http and grpc), points the caddy Deployment's `dapr.io/config` at it, and leaves the
 shared one to crud, auth and the rest, which need other APIs. After the rollouts it asks the public door for that path and
-fails the release (rolling the Deployments back) when it returns `"id":"caddy"`; a host that does not answer yet is said, not failed.
+fails the release (rolling the Deployments back) when it answers 200 with the sidecar's metadata (a JSON body with `"runtimeVersion"`); a host that does not answer yet is said, not failed.
 
 ### Known risks
 

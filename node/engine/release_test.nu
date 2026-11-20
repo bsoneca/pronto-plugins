@@ -218,6 +218,7 @@ def main [] {
 	test_the_collection_waits_for_releases_in_flight
 	test_a_stale_lock_is_taken_over_against_its_resource_version
 	test_prune_runs_only_the_maintenance
+	test_a_renewal_that_fails_after_the_push_applies_nothing
 	test_a_lease_that_stays_does_not_turn_a_live_release_into_a_failure
 	test_the_door_must_not_answer_the_dapr_api
 	test_a_deferred_prune_exits_four
@@ -1238,16 +1239,23 @@ def test_the_door_must_not_answer_the_dapr_api [] {
 	let w = (sandbox)
 	let ok = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert equal $ok.exit_code 0 $"($ok.stdout)($ok.stderr)"
+	# the door's own Dapr configuration is applied before the Deployment that names it, or its sidecar starts on a missing one
+	let log = (calls $w)
+	let guard_at = ($log | enumerate | where {|e| ($e.item =~ "^apply .*Configuration/aprende-caddy-invoke-only") and not ($e.item | str contains "--dry-run") } | get index)
+	let caddy_at = ($log | enumerate | where {|e| ($e.item =~ "^apply .*Deployment/aprende-caddy") and not ($e.item | str contains "--dry-run") } | get index)
+	assert (($guard_at | length) > 0 and ($caddy_at | length) > 0) $"both are applied: ($log | str join '; ')"
+	assert (($guard_at | first) < ($caddy_at | first)) "the guard Configuration comes before the caddy Deployment"
 	"" | save -f ($w.dir | path join host_unreachable)
 	let unreach = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert equal $unreach.exit_code 0 $"($unreach.stdout)($unreach.stderr)"
 	assert (has $unreach.stderr "so the door's Dapr API was not checked") $unreach.stderr
 	rm -f ($w.dir | path join host_unreachable)
 	"" | save -f ($w.dir | path join metadata_open)
+	rm -f ($w.state | path join calls.jsonl)
 	let open = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert ($open.exit_code != 0) "the sidecar's metadata fails the release"
 	assert (has $open.stderr "the door answers the Dapr sidecar's own API") $open.stderr
-	assert ((calls $w) | any {|c| $c | str starts-with "rollout undo" }) "and the Deployments are rolled back"
+	assert ((calls $w) | any {|c| $c | str starts-with "rollout undo" }) "and the Deployments of this run are rolled back"
 	assert (has $ok.stdout "the door's Dapr API is closed") $ok.stdout
 	rm -rf $w.dir
 }
@@ -1271,6 +1279,25 @@ def test_a_lease_that_stays_does_not_turn_a_live_release_into_a_failure [] {
 	assert equal $f.exit_code 1 $"($f.stdout)\n($f.stderr)"
 	assert (has $f.stderr "did not complete") $f.stderr
 	assert (has $f.stderr "was not released either") $f.stderr
+	rm -rf $v.dir
+}
+
+def test_a_renewal_that_fails_after_the_push_applies_nothing [] {
+	print "test the second strict renewal (after the push) failing, retried, stops the release with nothing applied..."
+	let w = (sandbox)
+	"2" | save -f ($w.state | path join lease_patch_fail_from)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert ($r.exit_code != 0) "the release stops"
+	assert (has $r.stderr "kubectl patch lease") $r.stderr
+	assert (has $r.stderr "trying again") $"it was retried: ($r.stderr)"
+	assert ((docker-calls $w) | any {|c| $c | str starts-with "buildx bake" }) "the images were pushed"
+	assert (not ((calls $w) | any {|c| $c | str contains "Deployment/" })) "and nothing was applied"
+	# a NotFound is not retried: the lease is gone
+	rm -rf $w.dir
+	let v = (sandbox)
+	"1" | save -f ($v.state | path join lease_patch_fail_from)
+	let nf = (in-world $v -c ((script $v ((inputs $v) + " use registry.nu; registry lease-renew {registry: {namespace: 'pronto-registry'}} no-such-lease"))))
+	assert ($nf.exit_code != 0)
 	rm -rf $v.dir
 }
 
