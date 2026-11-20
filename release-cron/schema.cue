@@ -136,6 +136,10 @@ releaseCron: #Cron
 		reach!: [string, ...string]
 		down!:  [string, ...string]
 		origin: *"http://localhost:18080" | (string & =~"^http://localhost:[0-9]+$")
+		// When the preview runs in a run. "after" (the default): once the rehearsal and the android step passed, as before.
+		// "first": before the rehearsal takes its slot, so a preview that fails costs no rehearsal. "beside": at the same
+		// time as the rehearsal, the first to fail stopping the other (README, "When the preview runs").
+		when: *"after" | "first" | "beside"
 	}
 	_alive: [
 		(#SshAlive & {cmd: release}).ok,

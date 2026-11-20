@@ -1032,7 +1032,7 @@ const unsafe = runnable.filter((s) => !s.production).map((s) => s.id);
 if (onProduction && unsafe.length) throw new Error(`${URL_} is production: only scenarios marked production run there, not ${unsafe.join(", ")} (set ONLY)`);
 // In the local gate, the ones green on these very inputs are cached and not run (scenarios/select.ts), the
 // diff judging the app's client sources by the bytes of the assets they build (`select`).
-const sel = select(import.meta.url, URL_, runnable, spec.select.client, { derived: spec.select.derived, inert: spec.select.inert, live: spec.select.live });
+const sel = select(import.meta.url, URL_, runnable, spec.select.client, { derived: spec.select.derived, inert: spec.select.inert, live: spec.select.live, outside: spec.select.outside });
 await sel.verify(async (path) => {
   const res = await anon.fetch(new URL(path, URL_).href, { failOnStatusCode: false });
   return res.status() !== 200 ? `status ${res.status()}` : sha(await res.body());

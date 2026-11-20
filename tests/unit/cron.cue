@@ -152,7 +152,36 @@ cases: {
 			"c1", "2026-11-03T02:00:00Z"],
 			expect: {phases: {"rehearse.queue": 12, "rehearse.scenarios": 600, "rehearse.premium": 40, "release.build": 120, "release.deploy": 90}, flaked: ["a.cue (scenarios)"], rc: 0}},
 		{call: "cron.detail", args: [[], [], "c1", "2026-11-03T02:00:00Z"], expect: {phases: {}, flaked: [], rc: null}, why: "nothing recorded for the commit"},
+		{call: "cron.detail", args: [[{commit: "c1", queued: "2026-11-03T02:00:00Z", waited: 3, checks: {scenarios: {s: 600}, premium: {s: 0, skipped: true}}}], [], "c1", "2026-11-03T02:00:00Z"], expect: {phases: {"rehearse.queue": 3, "rehearse.scenarios": 600}, flaked: [], rc: null}, why: "a check the rehearsal skipped took no time (pronto#1546)"},
 		{call: "cron.detail", args: [[{commit: "c1", queued: "2026-11-03T01:59:59Z", waited: 5}], [], "c1", "2026-11-03T02:00:00Z"], expect: {phases: {}, flaked: [], rc: null}, why: "a record before the run began is an earlier run's"},
+	]}
+	"a rehearsal that ended without judging the tree is no verdict, never bisected or cut": {suite: "cron", steps: [
+		for c in [1, 2] {{call: "cron.noVerdictExit", args: [c], expect: false, why: "a failure of the tree"}},
+		for c in [3, 124, 130, 137] {{call: "cron.noVerdictExit", args: [c], expect: true, why: "no verdict, a timeout or a signal"}},
+		{call: "cron.noVerdictRun", args: ["the rehearsal gave no verdict (exit 3): nothing released"], expect: true, why: "the bisect skips it"},
+		{call: "cron.noVerdictRun", args: ["the rehearsal failed (exit 1): nothing released"], expect: false},
+		{call: "cron.noVerdictRun", args: [null], expect: false},
+	]}
+	"a preview beside the rehearsal: the first to fail stops the other, both pass releases": {suite: "cron", steps: [
+		{call: "cron.besideOutcome", args: [null, {bad: ["home /: 502, expected 200"], at: 40}], expect: {stop: "rehearsal", failed: "preview", why: "the release preview failed: home /: 502, expected 200; the rehearsal was stopped"}, why: "the preview failed first: the rehearsal is stopped, and says so"},
+		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, null], expect: {stop: "preview", failed: "rehearsal", why: "the rehearsal failed (exit 1); the preview was stopped"}, why: "the rehearsal failed first: the preview is stopped"},
+		{call: "cron.besideOutcome", args: [{code: 0, at: 4500}, null], expect: {stop: null, failed: null, why: ""}, why: "the rehearsal passed, the preview still runs"},
+		{call: "cron.besideOutcome", args: [null, {bad: [], at: 840}], expect: {stop: null, failed: null, why: ""}, why: "the preview passed, the rehearsal still runs"},
+		{call: "cron.besideOutcome", args: [{code: 0, at: 4500}, {bad: [], at: 840}], expect: {stop: null, failed: null, why: ""}, why: "both passed: release"},
+		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, {bad: ["up failed"], at: 950}], expect: {stop: null, failed: "rehearsal", why: "the rehearsal failed (exit 1)"}, why: "both failed: the earlier one is the verdict"},
+		{call: "cron.besideOutcome", args: [{code: 143, at: 60}, {bad: ["up failed"], at: 50}, true], expect: {stop: null, failed: "preview", why: "the release preview failed: up failed; the rehearsal was stopped"}, why: "the rehearsal the driver stopped, asked once it ended (143): still says so"},
+		{call: "cron.besideOutcome", args: [{code: 0, at: 55}, {bad: ["up failed"], at: 50}, false], expect: {stop: null, failed: "preview", why: "the release preview failed: up failed"}, why: "a rehearsal that passed just before its stop landed was not stopped"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: up failed; the rehearsal was stopped: nothing released"], expect: true, why: "so it is never bisected"},
+		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, {bad: [], at: 800}], expect: {stop: null, failed: "rehearsal", why: "the rehearsal failed (exit 1)"}, why: "the preview already passed: nothing to stop"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: home /: 502, expected 200; the rehearsal was stopped: nothing released"], expect: true, why: "a stopped rehearsal says nothing of a commit: never bisected"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: home /: 502, expected 200: nothing released"], expect: false},
+	]}
+	"overlapping phases are one step, counted once": {suite: "cron", steps: [
+		{call: "cron.line", args: [{started: "t", app: "a", outcome: "released", steps: {prepare: 30, "rehearse+preview": 4500, release: 600}}], expect: "t a released: 85.5 min = prepare 0.5, rehearse+preview 75.0, release 10.0", why: "the total sums the wall time once"},
+	]}
+	"a bisect check that judged nothing leaves its run open": {suite: "cron", steps: [
+		for c in [3, 124, 126, 127, 130, 137] {{call: "cron.inconclusiveExit", args: [c], expect: true}},
+		for c in [0, 1, 2] {{call: "cron.inconclusiveExit", args: [c], expect: false}},
 	]}
 	"a cloud rehearsal is named in the log line with its minutes and cost": {suite: "cron", steps: [
 		{call: "cron.line", args: [{started: "t", app: "a", outcome: "released", steps: {prepare: 30, release: 1500}, rehearsal: {ok: true, seconds: 672, usd: 0.1183}}], expect: "t a released: 25.5 min = prepare 0.5, release 25.0; cloud rehearsal 11.2 min, $0.1183"},
@@ -188,6 +217,8 @@ cases: {
 	"a failed run's signature is its kind and the scenarios its output marks failed": {suite: "cron", steps: [
 		{call: "cron.signature", args: ["release@gcp failed (exit 1)", "[pass 2]   ✗ guest (202s) at step 39: {}\n[pass 1] ✗ seek (0s) at step 1: {}\n✗ guest (3s) at step 2"], expect: {kind: "release", names: ["guest", "seek"]}},
 		{call: "cron.signature", args: ["the rehearsal failed (exit 1): nothing released", "verify: failed: integrate"], expect: {kind: "rehearsal", names: []}},
+		{call: "cron.signature", args: ["the rehearsal failed (exit 1): nothing released", "rehearse: scenario failed: chat\n"], expect: {kind: "rehearsal", names: ["chat"]}, why: "a page that threw while its steps completed prints no step line (PRONTO-683)"},
+		{call: "cron.signature", args: ["the rehearsal failed (exit 1): nothing released", "✗ online (12s) at step 3: {}\nrehearse: scenario failed: online\nrehearse: scenario failed: chat\n"], expect: {kind: "rehearsal", names: ["online", "chat"]}, why: "each name once, from step lines and the rehearsal's verdict lines"},
 		{call: "cron.signature", args: ["released, production not confirmed: home 500", ""], expect: {kind: "release", names: []}},
 	]}
 	"merges are read oldest first with their pull request and branch": {suite: "cron", steps: [

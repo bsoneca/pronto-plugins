@@ -43,7 +43,8 @@ other.
    the Backlog, in the app's module, with the flag's note, a `Flag: <flag>` line and the pull request
    linked; one already titled so for that app (filed by hand) is reused, never doubled.
    `pronto-flags push` of the flag for everyone marks it Done (`hook.ts flipped`). Don't file one by
-   hand for a flag a pull request adds; a flip waits for the owner's go, so it is never pulled into a
+   hand for a flag a pull request adds (a repo that pins pronto-flags runs it through its pinned
+   entry point, in pronto `tools/flags/pronto-flags`); a flip waits for the owner's go, so it is never pulled into a
    queue unless the owner says so.
    **A flag on for a week gets its removal issue.** Once a flip issue has been Done for 7 days, the
    released hook (release-cron runs it after each release, so there is no scheduler) files "Remove flag

@@ -68,12 +68,14 @@ loaded: {
 // effect on a scenario is the static assets it loads (`client`, path globs from the app's root), those
 // that only build a generated file judged in its turn (`derived`, prefixes), files no scenario can see
 // (`inert`, regular expressions) and files the app runs while a scenario does though the shared list
-// calls them inert (`live`, regular expressions).
+// calls them inert (`live`, regular expressions) and sibling apps' files the app reads (`outside`, regular
+// expressions of `../<other>/…` paths: Studio's builder scans every apps/*, PRONTO-870).
 select: {
 	client: [...string] | *[]
 	derived: [...string] | *[]
 	inert: [...string] | *[]
 	live: [...string] | *[]
+	outside: [...string] | *[]
 }
 // The stack's database, for a `database` step (POSTGRES_DB, where set, wins).
 database?: string
@@ -183,6 +185,9 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 	// Asked only on the deployed app ("production") or only on a stack at hand ("local", never a
 	// deployed preview): what a listing may be differs, a laptop's naming the stack's own address.
 	on?: "production" | "local"
+	// Open here: a step embeds it beside its kind's fields, and `#Scenario._checked` closes the whole
+	// shape. Closed, cue 0.18 would refuse every kind's field on `#Step` (aprende, PRONTO-870).
+	...
 }
 
 // A step is one of the kinds (`_kinds`, below), chosen by its field, never by a disjunction: a disjunction
@@ -323,7 +328,7 @@ _kinds: {
 	_expects
 	http:   _http
 	repeat: _repeat
-	for K, g in #Gestures {(K): g}
+	for K, g in #Gestures {(K): {for F, t in g {(F): t}}} // open: _checked closes the whole shape (cue 0.18)
 }
 // `_kinds` and the two kinds that hold steps (which `#Step` declares itself).
 _shapes: {

@@ -171,7 +171,7 @@ export const detail = (rehearsals, releases, commit, since) => {
   const r = newest(rehearsals, "queued");
   if (r) {
     out["rehearse.queue"] = r.waited;
-    for (const [k, c] of Object.entries(r.checks ?? {})) if (!c.cached) out[`rehearse.${k}`] = c.s;
+    for (const [k, c] of Object.entries(r.checks ?? {})) if (!c.cached && !c.skipped) out[`rehearse.${k}`] = c.s;
   }
   const g = newest(releases, "started");
   if (g) for (const [k, v] of Object.entries(g.phases ?? {})) if (typeof v === "number" && k !== "total") out[`release.${k}`] = Math.round(v);
@@ -278,13 +278,43 @@ export const androidWhy = (code, names) => `the android step failed (exit ${code
 
 // --- Bisect: a failed run names the commit that broke it. ---
 
+// A rehearsal that ended without judging the tree: exit 3 (a verdict or record it could not read or write), 124 (its wrapper's
+// timeout) or 128 and above (a signal, the machine's doing). Such a run is never bisected nor cut to a release branch.
+export const noVerdictExit = (code) => code === 3 || code === 124 || code >= 128;
+
+// Whether a run's `why` says its rehearsal gave no verdict, or was stopped because the preview failed first
+// (preview `when: "beside"`): the bisect skips it.
+export const noVerdictRun = (why) => /^the rehearsal gave no verdict|; the rehearsal was stopped/.test(why ?? "");
+
+// The rehearsal and the preview run side by side (preview `when: "beside"`): what to do with them once one of them
+// has ended. Each is null while it runs. `rehearsal`: {code, at}, its exit and when it ended (ms into the race);
+// `preview`: {bad, at}, the reasons it failed (none: it passed). Returns `stop`, the one still running that is no
+// longer worth finishing ("rehearsal" or "preview", else null), `failed` (the one whose failure ends the run: the
+// earlier when both failed) and `why`. `stopped`: the driver stopped the rehearsal (it was still running when the
+// preview failed) and it ended without passing. A stopped rehearsal is no verdict of the tree, so the run's reason
+// says so (noVerdictRun), also when the call is made once it has ended.
+export const besideOutcome = (rehearsal, preview, stopped = false) => {
+  const r = !!rehearsal && rehearsal.code !== 0, p = !!preview && preview.bad.length > 0;
+  if (p && (!r || preview.at < rehearsal.at)) {
+    return { stop: rehearsal ? null : "rehearsal", failed: "preview", why: `the release preview failed: ${preview.bad.join("; ")}${!rehearsal || stopped ? "; the rehearsal was stopped" : ""}` };
+  }
+  if (r) return { stop: preview ? null : "preview", failed: "rehearsal", why: `the rehearsal failed (exit ${rehearsal.code})${preview ? "" : "; the preview was stopped"}` };
+  return { stop: null, failed: null, why: "" };
+};
+
+// A bisect check that ended without judging its commit: no verdict (3), its timeout (124), a shell that could not run it (126, 127)
+// or a signal (128 and above). The run stays open for the next bisect.
+export const inconclusiveExit = (code) => noVerdictExit(code) || code === 126 || code === 127;
+
 // What a failed run failed on, from its `why` and its output: the kind ("release" when release@gcp,
 // a target's release command (`release (cmd)`) or the confirm failed, else "rehearsal") and the scenarios the output marks failed (`✗ <name> (12s) at step`).
 export const signature = (why, text) => /^the android step/.test(why ?? "")
   ? { kind: "android", names: androidFailed(text) }
   : {
     kind: /^release@gcp|^release \(|^released, production/.test(why ?? "") ? "release" : "rehearsal",
-    names: [...new Set([...(text ?? "").matchAll(/✗ (\S+) \(\d+s\) at step/g)].map((m) => m[1]))],
+    // A step's failure line, or the rehearsal's own line for each id its verdicts failed (a page that threw while its
+    // steps completed has no step line).
+    names: [...new Set([...(text ?? "").matchAll(/✗ (\S+) \(\d+s\) at step|^rehearse: scenario failed: (\S+)$/gm)].map((m) => m[1] ?? m[2]))],
   };
 
 // The merges of `git log --first-parent --format='%H %s'` lines, oldest first, each with its pull

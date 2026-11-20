@@ -165,6 +165,30 @@ run, stop it by hand (`kill <pid in <state>/lock/pid>`). An app's old `minutes` 
 launchd never starts a job while it's still running, and a lock (`<state>/lock`, with the
 run's pid) skips a run started by hand while another is going.
 
+## When the preview runs
+
+An app with a `target.preview` chooses `when` (the field of `preview`, default `"after"`):
+
+- `"after"` (the default): as above, once the rehearsal and the android step passed. A preview that fails has cost a full rehearsal first.
+- `"first"`: before the rehearsal takes its slot. A preview that fails ends the run `failed` (a red verdict, as any preview failure) and no
+  rehearsal was paid for.
+- `"beside"`: the preview starts when the rehearsal starts, and the two run at the same time, the first to fail stopping the other
+  (`besideOutcome` in `cron.js`):
+  - the preview fails first: the rehearsal's process group is stopped (TERM, then KILL after 300 s so `rehearse.ts` and integrate@k8s tear
+    down their stacks and cluster; a signal to the run gives 60 s; the rehearsal records `stopped`, which is no verdict) and the run ends
+    `failed`, `the release preview failed: ...; the rehearsal was stopped: nothing released`. That is no attempt and cuts no release branch,
+    and it is never bisected (it says nothing of a commit);
+  - the rehearsal fails first: the preview's `up` is never cancelled (stopping it would only kill the local ssh, leaving the remote
+    release running while `down` starts in the same worktree), so it runs to its end (Bonk Chess's `up` ends with the kill rehearsal, which
+    is acceptable); the waits and probes after it are skipped and `down` runs. A failed `down` is logged and added to the run's reason.
+    The run ends with the rehearsal's own reason, red or no verdict, bisected and branched as ever;
+  - both passed: the android step, then the release, once `git rev-parse HEAD` in the run's worktree is still the commit both started from
+    (else the run fails, nothing released). `"first"` makes the same check.
+
+  The run's lock covers both, so there is still one release per app. The record has one step for the overlap, `rehearse+preview` (their wall
+  time, so `report`'s sum counts it once), and `run.beside = {rehearse, preview, first}` (each one's seconds to its end, and which ended
+  first). `release-active` names the phase `rehearse+preview`.
+
 ## The release holds the machine
 
 While a run works it keeps `~/.cache/pronto/release-active` (`RELEASE_ACTIVE` names another), one
@@ -178,6 +202,11 @@ it is live starts nothing new: it waits, polling every 30 s. An app's `tests/slo
 every claim without `STACK_PRIORITY=release`; the run's own rehearsal and release carry it, so they
 are admitted as before. Work already running keeps its slots. There is one file for the machine: when
 releases of two apps overlap, the first run keeps it and the other takes it at its next phase.
+
+`tests/slot.ts` holds the machine for a release too (PRONTO-894): while a release claim holds a slot or
+waits, other weighted claims wait. While the release holds a slot and no release waits for one, a claim
+is admitted beside it while the machine's load1 is under `STACK_HOLD_LOAD` (one per core) and its weight
+fits the budget (`besideRelease`; the owner, 2026-11-20: "Admit while there's room").
 
 ## A failed run is bisected
 
@@ -193,13 +222,25 @@ own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>
 2. Each merge is read from the records first, as good, bad or unknown: pronto's release records
    (`~/.cache/pronto/releases/`: live is good, a failed rc test run bad) for a release failure, the
    rehearsal records (`~/.cache/pronto/rehearsals/`: passed, failed) for a rehearsal failure, a dirty
-   tree none, plus the verdicts earlier bisects ran (`bisect/verdicts.jsonl`).
+   tree none, plus the verdicts earlier bisects ran (`bisect/verdicts.v2.jsonl`, the v2 ledger: a verdict an older rule saved is never
+   read, and a line that cannot be read stops the bisect unrecorded rather than dropping the verdicts before it).
 3. For the middle merge the records leave unknown, `#Cron.bisect.command` (`./saytw integrate@local`)
-   runs in that commit's tree with `ONLY=<the failed scenarios>` and `SLOW=1`, as a plain claim on the
+   runs in that commit's tree with `ONLY=<the failed scenarios>`, `SCENARIOS_ALL=1` and `SLOW=1`, as a plain claim on the
    machine's slots (the app's `tests/slot.ts`): it waits for release-active like any job, never holds
    it, never carries `STACK_PRIORITY=release`. Neither a check nor the bisect has a time limit (an old `bisect.minutes` or
    `bisect.check` is accepted and ignored; the bisect log says every 5 minutes that a check is still running). Every failure first runs it on the failing commit, and only a check that fails there too is bisected. A release failure that passes there shows only in the cloud: nothing is bisected and the range is told to the lead. A rehearsal failure that passes there came from the run's conditions (a service stopped from outside the stack, as when every flagd on the machine was killed mid-rehearsal on 2026-11-06), not from a commit: no pull request is named, and the lead is told so. A cloud-only failure (the
    rc preview) is approximated by the same scenarios run locally.
+   What a check is judged by:
+   - The check starts clean: nothing inherited narrows or hands it off (`ONLY`, `ONLY_ABSENT`, a scenario queue, a slot or
+     stack, `FLAG*`, `INTEGRATE_LOCAL_DRIVERS`), so it never stamps the tree for a release.
+   - A named failure is judged by the scenarios' own verdict (`SCENARIOS_VERDICT`, a private temp dir) alone: bad when a named
+     scenario failed, good only when every named scenario the tree has ran there and passed (none skipped, cached or run by another
+     lane). Named scenarios the tree lacks (`ONLY_ABSENT=pass`) cannot have failed there.
+   - A check that judged nothing (exit 3, 124, 126, 127, a signal or 128 and above, or an unreadable or missing verdict from a
+     tree that writes verdicts) is inconclusive: it is written to `bisect/inconclusive.jsonl` and the run stays open for the next
+     bisect, twice; the third inconclusive check records the bisect as stopped, no commit named.
+   - A rehearsal that gave no verdict (exit 3, 124 or 128 and above) ends the run as `the rehearsal gave no verdict`: it is never
+     bisected, and no release branch is cut for it.
 4. The culprit is mapped to its pull request (`Merge pull request #N from …`). The pull request gets a
    comment; a notes file goes to the author session when the PR body names one (`local_<uuid>`) and
    its notes folder exists, else to `notify.lead`'s
