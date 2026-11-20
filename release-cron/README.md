@@ -193,13 +193,25 @@ own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>
 2. Each merge is read from the records first, as good, bad or unknown: pronto's release records
    (`~/.cache/pronto/releases/`: live is good, a failed rc test run bad) for a release failure, the
    rehearsal records (`~/.cache/pronto/rehearsals/`: passed, failed) for a rehearsal failure, a dirty
-   tree none, plus the verdicts earlier bisects ran (`bisect/verdicts.jsonl`).
+   tree none, plus the verdicts earlier bisects ran (`bisect/verdicts.v2.jsonl`, the v2 ledger: a verdict an older rule saved is never
+   read, and a line that cannot be read stops the bisect unrecorded rather than dropping the verdicts before it).
 3. For the middle merge the records leave unknown, `#Cron.bisect.command` (`./saytw integrate@local`)
-   runs in that commit's tree with `ONLY=<the failed scenarios>` and `SLOW=1`, as a plain claim on the
+   runs in that commit's tree with `ONLY=<the failed scenarios>`, `SCENARIOS_ALL=1` and `SLOW=1`, as a plain claim on the
    machine's slots (the app's `tests/slot.ts`): it waits for release-active like any job, never holds
    it, never carries `STACK_PRIORITY=release`. Neither a check nor the bisect has a time limit (an old `bisect.minutes` or
    `bisect.check` is accepted and ignored; the bisect log says every 5 minutes that a check is still running). Every failure first runs it on the failing commit, and only a check that fails there too is bisected. A release failure that passes there shows only in the cloud: nothing is bisected and the range is told to the lead. A rehearsal failure that passes there came from the run's conditions (a service stopped from outside the stack, as when every flagd on the machine was killed mid-rehearsal on 2026-11-06), not from a commit: no pull request is named, and the lead is told so. A cloud-only failure (the
    rc preview) is approximated by the same scenarios run locally.
+   What a check is judged by:
+   - The check starts clean: nothing inherited narrows or hands it off (`ONLY`, `ONLY_ABSENT`, a scenario queue, a slot or
+     stack, `FLAG*`, `INTEGRATE_LOCAL_DRIVERS`), so it never stamps the tree for a release.
+   - A named failure is judged by the scenarios' own verdict (`SCENARIOS_VERDICT`, a private temp dir) alone: bad when a named
+     scenario failed, good only when every named scenario the tree has ran there and passed (none skipped, cached or run by another
+     lane). Named scenarios the tree lacks (`ONLY_ABSENT=pass`) cannot have failed there.
+   - A check that judged nothing (exit 3, 124, 126, 127, a signal or 128 and above, or an unreadable or missing verdict from a
+     tree that writes verdicts) is inconclusive: it is written to `bisect/inconclusive.jsonl` and the run stays open for the next
+     bisect, twice; the third inconclusive check records the bisect as stopped, no commit named.
+   - A rehearsal that gave no verdict (exit 3, 124 or 128 and above) ends the run as `the rehearsal gave no verdict`: it is never
+     bisected, and no release branch is cut for it.
 4. The culprit is mapped to its pull request (`Merge pull request #N from …`). The pull request gets a
    comment; a notes file goes to the author session when the PR body names one (`local_<uuid>`) and
    its notes folder exists, else to `notify.lead`'s
