@@ -9,7 +9,7 @@
 # registry_down (the node's builder or registry has no available replica), get_fail_<kind> and missing_<kind>
 # (a read of <kind> in every namespace is refused, or its CRD is not on the node), read_fail_namespace and
 # read_fail_cluster (any read of a namespace, or of the database Cluster, fails as an API error) and
-# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch is refused), inuse (an image the pods name). `--ignore-not-found` answers an absent
+# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch of the database Cluster is refused), inuse (an image the pods name), cm_race_once (the same, once), cm_race (the record is rewritten between a read and a patch), strict_cm (a patch of a missing record is NotFound), lease_delete_fail (deleting a release's Lease is refused), lock_delete_fail (deleting the lock by precondition is refused), lock_taken_over (a lock's resourceVersion moves between a read and a delete), no_repositories (the registry has none yet), find_fail (the registry's upload scan fails), lease_patch_fail (a patch of a Lease fails), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
 # object with nothing and exit 0, as kubectl does.
 import json, os, sys
 
@@ -74,30 +74,76 @@ if verb == "config":
     print("apiVersion: v1\nkind: Config\ncurrent-context: contabo2\nclusters:\n- name: contabo2\n  cluster:\n    server: https://127.0.0.1:26444\n    certificate-authority-data: Zg==\ncontexts:\n- name: contabo2\n  context: {cluster: contabo2, user: u}\nusers:\n- name: u\n  user: {token: t}\n")
     sys.exit(0)
 
-if verb == "create" and len(args) > 1 and args[1] == "configmap":
-    name = args[2]
-    os.makedirs(d + "/cm", exist_ok=True)
-    if os.path.exists(d + "/cm/" + name):
-        fail(f'Error from server (AlreadyExists): configmaps "{name}" already exists')
-    data = dict(a[len("--from-literal="):].split("=", 1) for a in args if a.startswith("--from-literal="))
-    json.dump({"metadata": {"name": name, "labels": {}, "annotations": {"at": data.get("at", "0")}}, "data": data}, open(d + "/cm/" + name, "w"))
-    print(f"configmap/{name} created")
+# coordination.k8s.io Leases, as the API server answers them: creationTimestamp, uid and resourceVersion are the server's,
+# a create of an existing name is AlreadyExists, a replace against a stale resourceVersion is a Conflict.
+import datetime
+def lease_path(name):
+    return d + "/lease/" + name
+def server_stamp(o):
+    n = int(read("lease_rv", "100")) + 1
+    open(d + "/lease_rv", "w").write(str(n))
+    o["metadata"]["resourceVersion"] = str(n)
+    o["metadata"]["uid"] = f"00000000-0000-0000-0000-{n:012d}"
+
+if verb in ("create", "replace") and any(o.get("kind") == "Lease" for o in objs):
+    os.makedirs(d + "/lease", exist_ok=True)
+    for o in objs:
+        name = o["metadata"]["name"]
+        if verb == "create":
+            if os.path.exists(lease_path(name)):
+                fail(f'Error from server (AlreadyExists): leases.coordination.k8s.io "{name}" already exists')
+            o["metadata"]["creationTimestamp"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            if exists("lease_conflict"):
+                fail(f'Error from server (Conflict): Operation cannot be fulfilled on leases.coordination.k8s.io "{name}": the object has been modified; please apply your changes to the latest version and try again')
+            if not os.path.exists(lease_path(name)):
+                fail(f'Error from server (NotFound): leases.coordination.k8s.io "{name}" not found')
+            cur = json.load(open(lease_path(name)))
+            if o["metadata"].get("resourceVersion") != cur["metadata"]["resourceVersion"]:
+                fail(f'Error from server (Conflict): Operation cannot be fulfilled on leases.coordination.k8s.io "{name}": the object has been modified; please apply your changes to the latest version and try again')
+            o["metadata"]["creationTimestamp"] = cur["metadata"]["creationTimestamp"]
+        server_stamp(o)
+        json.dump(o, open(lease_path(name), "w"))
+        print(f"lease.coordination.k8s.io/{name} {'created' if verb == 'create' else 'replaced'}")
     sys.exit(0)
 
-if verb == "label" and len(args) > 1 and args[1] == "configmap":
-    p = d + "/cm/" + args[2]
+if verb == "patch" and len(args) > 1 and args[1] == "lease":
+    if exists("lease_patch_fail"):
+        fail("Error from server (ServiceUnavailable): the server is currently unable to handle the request")
+    p = lease_path(args[2])
+    if not os.path.exists(p):
+        fail(f'Error from server (NotFound): leases.coordination.k8s.io "{args[2]}" not found')
     o = json.load(open(p))
-    for a in args[3:]:
-        if "=" in a and not a.startswith("-"):
-            k, v = a.split("=", 1)
-            o["metadata"]["labels"][k] = v
+    o["spec"].update(json.loads(opt("-p"))["spec"])
+    server_stamp(o)
     json.dump(o, open(p, "w"))
+    print(f"lease.coordination.k8s.io/{args[2]} patched")
     sys.exit(0)
 
-if verb == "delete" and len(args) > 1 and args[1] == "configmap":
-    p = d + "/cm/" + args[2]
-    if os.path.exists(p):
-        os.remove(p)
+if verb == "delete" and "--raw" in args:
+    # a delete with preconditions (uid, resourceVersion), as the API server checks them
+    uri = args[args.index("--raw") + 1] if args[-1] != "--raw" else ""
+    name = [a for a in args if a.startswith("/apis/coordination.k8s.io/v1/namespaces/")][0].rsplit("/", 1)[1]
+    if not os.path.exists(lease_path(name)):
+        fail(f'Error from server (NotFound): leases.coordination.k8s.io "{name}" not found')
+    if exists("lock_delete_fail"):
+        fail("Error from server (Forbidden): leases.coordination.k8s.io is forbidden")
+    cur = json.load(open(lease_path(name)))
+    pre = objs[0].get("preconditions", {}) if objs else {}
+    if exists("lock_taken_over"):
+        cur["metadata"]["resourceVersion"] = "999"
+    if pre.get("uid") != cur["metadata"].get("uid") or pre.get("resourceVersion") != cur["metadata"].get("resourceVersion"):
+        fail(f'Error from server (Conflict): Precondition failed: UID in precondition or ResourceVersion in precondition does not match')
+    os.remove(lease_path(name))
+    print("{\"kind\":\"Status\",\"status\":\"Success\"}")
+    sys.exit(0)
+
+if verb == "delete" and len(args) > 1 and args[1] == "lease":
+    if exists("lease_delete_fail"):
+        fail("Error from server (Forbidden): leases.coordination.k8s.io is forbidden")
+    if os.path.exists(lease_path(args[2])):
+        os.remove(lease_path(args[2]))
+        print(f'lease.coordination.k8s.io "{args[2]}" deleted')
     sys.exit(0)
 
 if verb == "create":
@@ -110,12 +156,24 @@ if verb == "create":
     sys.exit(0)
 
 if verb == "patch":
-    if exists("patch_fail"):
+    if exists("patch_fail") and len(args) > 1 and args[1].startswith("cluster.postgresql"):
         fail("Error from server (Forbidden): patch is forbidden")
     if len(args) > 2 and args[1] == "configmap" and args[2] == "pronto-release":
         p = d + "/cm/pronto-release"
+        if exists("strict_cm") and not os.path.exists(p):
+            fail('Error from server (NotFound): configmaps "pronto-release" not found')
         o = json.load(open(p)) if os.path.exists(p) else {"metadata": {"name": "pronto-release", "labels": {}, "annotations": {}}, "data": {}}
-        o["data"].update(json.loads(opt("-p"))["data"])
+        body = json.loads(opt("-p"))
+        want = body.get("metadata", {}).get("resourceVersion")
+        if exists("cm_race") and want is not None:
+            server_stamp(o)  # another release wrote the record after it was read
+        if exists("cm_race_once") and want is not None:
+            server_stamp(o)
+            os.remove(d + "/cm_race_once")
+        if want is not None and want != o["metadata"].get("resourceVersion"):
+            fail('Error from server (Conflict): Operation cannot be fulfilled on configmaps "pronto-release": the object has been modified; please apply your changes to the latest version and try again')
+        o["data"].update(body["data"])
+        server_stamp(o)
         os.makedirs(d + "/cm", exist_ok=True)
         json.dump(o, open(p, "w"))
         sys.exit(0)
@@ -147,7 +205,9 @@ if verb == "apply":
                 open(g, "w").write(str(gen + 1))
             if kind == "ConfigMap" and name == "pronto-release":
                 os.makedirs(d + "/cm", exist_ok=True)
-                json.dump({"metadata": {"name": name, "labels": {}, "annotations": {}}, "data": o.get("data", {})}, open(d + "/cm/" + name, "w"))
+                cmo = {"metadata": {"name": name, "labels": {}, "annotations": {}}, "data": o.get("data", {})}
+                server_stamp(cmo)
+                json.dump(cmo, open(d + "/cm/" + name, "w"))
             if kind == "Cluster" and not o.get("_yaml"):
                 open(d + "/cluster_image", "w").write(o["spec"]["imageName"])
             if kind == "Cluster" and o.get("_yaml"):
@@ -185,17 +245,25 @@ if verb == "get":
         if "--ignore-not-found" in args:
             sys.exit(0)
         fail(f'Error from server (NotFound): namespaces "{args[2]}" not found')
+    if what == "lease" or what == "leases":
+        if exists("read_fail_cluster"):
+            fail("Unable to connect to the server: net/http: TLS handshake timeout")
+        os.makedirs(d + "/lease", exist_ok=True)
+        if what == "leases":
+            sel = (opt("-l") or "").split("=")[0]
+            items = [json.load(open(lease_path(n))) for n in sorted(os.listdir(d + "/lease"))]
+            if sel:
+                items = [i for i in items if sel in i["metadata"].get("labels", {})]
+            out({"apiVersion": "v1", "kind": "List", "items": items, "metadata": {"resourceVersion": ""}})
+        if os.path.exists(lease_path(args[2])):
+            out(json.load(open(lease_path(args[2]))))
+        if "--ignore-not-found" in args:
+            sys.exit(0)
+        fail(f'Error from server (NotFound): leases.coordination.k8s.io "{args[2]}" not found')
     if what == "configmap" or what == "configmaps":
         if exists("read_fail_cluster"):
             fail("Unable to connect to the server: net/http: TLS handshake timeout")
         os.makedirs(d + "/cm", exist_ok=True)
-        if what == "configmaps" or len(args) < 3 or args[2].startswith("-"):
-            sel = opt("-l") or ""
-            items = [json.load(open(d + "/cm/" + n)) for n in sorted(os.listdir(d + "/cm"))]
-            if sel:
-                k = sel.split("=")[0]
-                items = [i for i in items if k in i["metadata"].get("labels", {})]
-            out({"items": items})
         p = d + "/cm/" + args[2]
         if os.path.exists(p):
             out(json.load(open(p)))
@@ -277,6 +345,10 @@ if verb == "rollout":
 
 if verb == "exec":
     cmd = " ".join(args[args.index("--") + 1:]) if "--" in args else ""
+    if "find " in cmd and "-maxdepth 0" in cmd and exists("no_repositories"):
+        fail("find: '/var/lib/registry/docker/registry/v2/repositories': No such file or directory")
+    if "find " in cmd and exists("find_fail"):
+        fail("find: '/var/lib/registry/docker/registry/v2/repositories': Permission denied")
     if "find " in cmd:
         print(read("uploads"))
     elif "du -sh" in cmd:

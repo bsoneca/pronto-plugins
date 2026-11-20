@@ -71,7 +71,7 @@ exec sleep 60
 d="$(dirname "$0")/.."
 echo "$*" >> "$d/docker.log"
 case "$*" in
-  *"compose"*"config --format json"*) cat "$d/compose.json" ;;
+  *"compose"*"config --format json"*) [ -z "$DOCKER_CONFIG" ] || readlink "$DOCKER_CONFIG/cli-plugins/docker-compose" >> "$d/compose_plugins"; cat "$d/compose.json" ;;
   *"compose"*"config"*) echo "services: {}" ;;
   "buildx version") echo "github.com/docker/buildx v0 fake" ;;
   "buildx create "*) echo "$DOCKER_CONFIG" > "$d/docker_config" ;;
@@ -209,6 +209,18 @@ def main [] {
 	test_a_failed_read_stops_the_prune_before_it_deletes_anything
 	test_a_live_image_that_cannot_be_checked_stops_the_prune
 	test_the_collection_waits_for_releases_in_flight
+	test_a_stale_lock_is_taken_over_against_its_resource_version
+	test_prune_runs_only_the_maintenance
+	test_a_lease_that_stays_does_not_turn_a_live_release_into_a_failure
+	test_a_deferred_prune_exits_four
+	test_only_a_confirmed_absence_is_created
+	test_the_lock_is_released_against_what_was_read_and_its_failure_is_told
+	test_verification_is_invalidated_before_a_release_changes_what_serves
+	test_a_failed_provider_export_stops_the_release
+	test_a_scan_that_fails_aborts_the_collection_and_a_deferred_one_is_pending
+	test_a_file_name_with_a_newline_is_one_name
+	test_a_failed_lease_renewal_is_a_warning_and_the_record_starts_unknown
+	test_the_apps_compose_plugin_is_the_one_that_renders
 	test_the_record_is_the_commit_built_and_serving_agrees
 	test_serving_leaves_no_kubeconfig
 	test_a_template_accepted_before_its_revision_moves_is_rolled_back
@@ -297,6 +309,7 @@ def test_a_new_deployment_has_nothing_to_undo [] {
 	let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert ($r.exit_code != 0)
 	assert equal (calls $w | where {|c| $c | str starts-with "rollout undo" }) []
+	assert ("delete deployment aprende-crud -n aprende --ignore-not-found" in (calls $w)) "a Deployment the failed release created is deleted, not left rolling out"
 	rm -rf $w.dir
 }
 
@@ -918,7 +931,8 @@ def test_a_live_image_that_cannot_be_checked_stops_the_prune [] {
 	})
 	assert ($r.exit_code != 0)
 	assert (has $r.stderr "the registry answered 503 for the live image aprende-crud") $r.stderr
-	assert (not ((calls $w) | any {|c| ($c | str starts-with "exec") or ($c | str contains "registry-gc-lock") })) "no collection, no lock"
+	assert (not ((calls $w) | any {|c| $c | str starts-with "exec" })) "no collection"
+	assert (not (($w.state | path join lease registry-gc-lock) | path exists)) "and the lock it took is released"
 	# a 404: the registry does not hold it, nothing to protect: the prune goes on to the collection
 	let r404 = (with-registry $w 404 {|port|
 		let body = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}}; registry prune '127.0.0.1:($port)' $build"
@@ -928,42 +942,299 @@ def test_a_live_image_that_cannot_be_checked_stops_the_prune [] {
 	rm -rf $w.dir
 }
 
+# A Lease as the API server holds it, seeded into the fake's state: renewed `ago` seconds ago by `holder`.
+def seed-lease [w: record, name: string, holder: string, ago: int, --labelled] {
+	mkdir ($w.state | path join lease)
+	let at = ((date now) - ($ago * 1sec) | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%S.%6fZ")
+	{
+		apiVersion: "coordination.k8s.io/v1", kind: "Lease"
+		metadata: ({name: $name, namespace: "pronto-registry", creationTimestamp: ((date now) - ($ago * 1sec) | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%SZ"), resourceVersion: "7", uid: "00000000-0000-0000-0000-000000000007"} | merge (if $labelled { {labels: {"pronto.dev/registry-lease": "true"}} } else { {} }))
+		spec: {holderIdentity: $holder, leaseDurationSeconds: 3600, renewTime: $at}
+	} | to json | save -f ($w.state | path join lease $name)
+}
+
 def test_the_collection_waits_for_releases_in_flight [] {
 	print "test the collection is skipped while another release holds a lease or the collector's lock, runs with only its own, and a release waits out no lock..."
 	let w = (sandbox)
 	let build = "{registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}}"
 	let use = $"use ($engine_dir | path join registry.nu); let build = ($build);"
-	# a release's lease is a labelled configmap, taken before the push
+	# a release's lease is a labelled Lease, taken in one call before the push
 	let a = (in-world $w -c $"($use) registry lease-acquire $build aprende aprende")
 	assert equal $a.exit_code 0 $a.stderr
 	let a_name = ($a.stdout | str trim)
 	assert ($a_name starts-with "registry-lease-aprende-") $a_name
+	assert equal (calls $w | where {|c| $c | str starts-with "create" } | length) 1 "one call makes the lease, labelled"
 	let b = (in-world $w -c $"($use) registry lease-acquire $build studio studio")
 	let b_name = ($b.stdout | str trim)
-	# a collection by the first: the second's lease is in flight, so nothing is collected
+	# a collection by the first: the second's lease is in flight (read from the Lease the server holds), nothing is collected
 	let c = (in-world $w -c $"($use) registry collect $build '($a_name)'")
 	assert equal $c.exit_code 0 $c.stderr
 	assert (has $c.stdout "releases in flight") $c.stdout
 	assert (not ((calls $w) | any {|x| $x | str contains "garbage-collect" })) "no collection under another release's lease"
-	assert (not (($w.state | path join cm registry-gc-lock) | path exists)) "the lock is released"
+	assert (not (($w.state | path join lease registry-gc-lock) | path exists)) "the lock is released"
 	# the second ends: only the first's own lease is left, and the collection runs
 	in-world $w -c $"($use) registry lease-release $build '($b_name)'" | ignore
 	let d = (in-world $w -c $"($use) registry collect $build '($a_name)'")
 	assert equal $d.exit_code 0 $"($d.stdout)($d.stderr)"
 	assert ((calls $w) | any {|x| $x | str contains "garbage-collect" }) "collected with only its own lease"
-	# a fresh lock held by another collector: skipped, and a lease waits (here, not at all) and refuses
-	mkdir ($w.state | path join cm)
-	{metadata: {name: "registry-gc-lock", labels: {}, annotations: {}}, data: {at: (date now | format date "%s")}} | to json | save -f ($w.state | path join cm registry-gc-lock)
+	assert (($w.state | path join lease $a_name) | path exists) "its own lease is left to its release"
+	# a fresh lock held by another collector: skipped and left alone; a lease waits (here, not at all) and refuses
+	seed-lease $w registry-gc-lock collector-other 5
 	rm -f ($w.state | path join calls.jsonl)
 	let e = (in-world $w -c $"($use) registry collect $build ''")
 	assert equal $e.exit_code 0 $e.stderr
 	assert (has $e.stdout "another release is collecting") $e.stdout
 	assert (not ((calls $w) | any {|x| $x | str contains "garbage-collect" })) "a held lock stops the collection"
+	assert ((open --raw ($w.state | path join lease registry-gc-lock) | from json | get spec.holderIdentity) == "collector-other") "another's lock is not deleted"
 	let f = (in-world $w -c $"($use) registry lease-acquire $build aprende aprende --wait 0")
 	assert ($f.exit_code != 0) "a release does not push under a collection"
 	assert (has $f.stderr "is being collected") $f.stderr
-	assert equal (ls ($w.state | path join cm) | length) 2 "the lock and the first lease are left: the refused lease was taken back"
+	assert equal (ls ($w.state | path join lease) | length) 2 "the lock and the first lease are left: the refused lease was taken back"
 	rm -rf $w.dir
+}
+
+def test_a_stale_lock_is_taken_over_against_its_resource_version [] {
+	print "test a stale collector lock is replaced against the resourceVersion read, a conflict leaves it, and a lease is renewed in place..."
+	let w = (sandbox)
+	let use = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}};"
+	seed-lease $w registry-gc-lock collector-dead 7200
+	let r = (in-world $w -c $"($use) registry collect $build ''")
+	assert equal $r.exit_code 0 $"($r.stdout)($r.stderr)"
+	let replace = (calls $w | where {|c| $c | str starts-with "replace -f -" })
+	assert equal ($replace | length) 1 "the stale lock is replaced"
+	assert ((calls $w) | any {|x| $x | str contains "garbage-collect" }) "and the collection runs"
+	assert (not (($w.state | path join lease registry-gc-lock) | path exists)) "its own lock is released"
+	# a conflict: someone else renewed it between the read and the replace
+	seed-lease $w registry-gc-lock collector-dead 7200
+	"" | save -f ($w.state | path join lease_conflict)
+	rm -f ($w.state | path join calls.jsonl)
+	let c = (in-world $w -c $"($use) registry collect $build ''")
+	assert equal $c.exit_code 0 $c.stderr
+	assert (has $c.stdout "another release is collecting") $c.stdout
+	assert (not ((calls $w) | any {|x| $x | str contains "garbage-collect" })) "a lost takeover collects nothing"
+	assert ((open --raw ($w.state | path join lease registry-gc-lock) | from json | get spec.holderIdentity) == "collector-dead") "and deletes nothing of another's"
+	rm -f ($w.state | path join lease_conflict)
+	# a lease renewed in place
+	seed-lease $w registry-lease-aprende-x registry-lease-aprende-x 600 --labelled
+	let before = (open --raw ($w.state | path join lease registry-lease-aprende-x) | from json | get spec.renewTime)
+	let n = (in-world $w -c $"($use) registry lease-renew $build registry-lease-aprende-x")
+	assert equal $n.exit_code 0 $n.stderr
+	let after = (open --raw ($w.state | path join lease registry-lease-aprende-x) | from json | get spec.renewTime)
+	assert ($after > $before) "the renewal moved its renewTime"
+	rm -rf $w.dir
+}
+
+def test_prune_runs_only_the_maintenance [] {
+	print "test --prune records the maintenance outcome and releases nothing, and goes with no other flag..."
+	let w = (sandbox)
+	let bad = (in-world $w $release_nu --app $w.app --prune --check)
+	assert ($bad.exit_code != 0)
+	let r = (in-world $w $release_nu --app $w.app --prune)
+	assert ($r.exit_code != 0) "no registry answers behind the forward: the maintenance fails, and says so"
+	assert (has $r.stderr "the registry maintenance failed") $r.stderr
+	assert (not ((writes $w) | any {|x| $x | str contains "Deployment/" })) "nothing was released"
+	assert ((calls $w) | any {|c| $c | str starts-with "patch configmap pronto-release" }) "the outcome is recorded"
+	rm -rf $w.dir
+}
+
+def test_the_apps_compose_plugin_is_the_one_that_renders [] {
+	print "test the compose plugin the app's mise pins (first on the PATH) is linked into the config docker renders with..."
+	let w = (sandbox)
+	"#!/bin/sh\nexit 0\n" | save -f ($w.dir | path join bin docker-cli-plugin-docker-compose)
+	^chmod +x ($w.dir | path join bin docker-cli-plugin-docker-compose)
+	let r = (in-world $w -c (script $w ((inputs $w) + " let c = (render compose-config $app_info.dir); print ($c.services | columns | length)")))
+	assert equal $r.exit_code 0 $r.stderr
+	assert ((open --raw ($w.dir | path join compose_plugins) | str trim | path basename) == "docker-cli-plugin-docker-compose") "the pinned plugin is linked as docker-compose"
+	assert ((open --raw ($w.dir | path join compose_plugins) | str trim) | str contains ($w.dir | path basename)) "and it is the sandbox's, first on the PATH"
+	rm -rf $w.dir
+}
+
+def test_a_failed_lease_renewal_is_a_warning_and_the_record_starts_unknown [] {
+	print "test a lease renewal that fails is a warning (the release is live), and the record starts with maintenance unknown..."
+	let w = (sandbox)
+	"" | save -f ($w.state | path join lease_patch_fail)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert (released $r) $"($r.stdout)($r.stderr)"
+	assert (has $r.stderr "warning: the registry lease") $r.stderr
+	assert (has $r.stdout "[SUCCESS] Released aprende") $r.stdout
+	# a record written by a release says nothing of the maintenance until the prune has been recorded
+	rm -rf $w.dir
+	let v = (sandbox)
+	let rec = (in-world $v -c (script $v $"(inputs $v) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $rec.exit_code 0 $"($rec.stdout)($rec.stderr)"
+	let data = (open --raw ($v.state | path join cm pronto-release) | from json | get data)
+	assert equal $data.pruned "" "pruned starts empty"
+	assert equal $data.prune_error "" "and so does prune_error"
+	let s = (in-world $v $release_nu --app $v.app --serving)
+	assert (has $s.stdout "maintenance unknown") $s.stdout
+	rm -rf $v.dir
+}
+
+def test_a_scan_that_fails_aborts_the_collection_and_a_deferred_one_is_pending [] {
+	print "test a failed upload scan aborts the collection, and a deferred collection is recorded pending, not pruned..."
+	let w = (sandbox)
+	let use = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}};"
+	"" | save -f ($w.state | path join find_fail)
+	let r = (in-world $w -c $"($use) registry collect $build ''")
+	assert ($r.exit_code != 0) "a scan that fails stops the collection"
+	assert (not ((calls $w) | any {|c| $c | str contains "garbage-collect" })) "and collects nothing"
+	assert (not (($w.state | path join lease registry-gc-lock) | path exists)) "its lock is released all the same"
+	rm -f ($w.state | path join find_fail)
+	# a deferred collection: the record says pending, and --serving says so
+	let body = $"use ($engine_dir | path join release.nu) [record-prune]; record-prune {namespace: aprende} null 'releases are in flight'"
+	let p = (in-world $w -c $body)
+	assert equal $p.exit_code 0 $p.stderr
+	let patch = (calls $w | where {|c| $c | str starts-with "patch configmap pronto-release" } | first)
+	assert (has $patch '"pruned":"pending"') $patch
+	assert (has $patch "collection deferred: releases are in flight") $patch
+	let s = (in-world $w $release_nu --app $w.app --serving)
+	assert (has $s.stdout "maintenance pending") $s.stdout
+	rm -rf $w.dir
+}
+
+def test_a_file_name_with_a_newline_is_one_name [] {
+	print "test a file name with a newline in it is staged as one file..."
+	let w = (sandbox)
+	"x" | save -f ($w.app | path join "two\nlines.txt")
+	let r = (in-world $w $release_nu --app $w.app --check --build)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	assert ((open --raw ($w.dir | path join bake_tree)) | str contains "two") "it is in the build context"
+	rm -rf $w.dir
+}
+
+def seed-record [w: record, data: record] {
+	mkdir ($w.state | path join cm)
+	{metadata: {name: "pronto-release", labels: {}, annotations: {}, resourceVersion: "50"}, data: $data} | to json | save -f ($w.state | path join cm pronto-release)
+}
+
+def test_verification_is_invalidated_before_a_release_changes_what_serves [] {
+	print "test a release empties the verified record before its first write, tolerates no record, and --verified is compare-and-set..."
+	let w = (sandbox)
+	seed-record $w {sha: "oldsha", verified: "oldsha", pruned: "true", prune_error: ""}
+	let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $r.exit_code 0 $"($r.stdout)($r.stderr)"
+	let log = (calls $w)
+	let at = {|pat| $log | enumerate | where {|e| $e.item =~ $pat } | get index }
+	let first_change = ($log | enumerate | where {|e| ($e.item | str starts-with "apply ") and not ($e.item | str contains "--dry-run") and not ($e.item | str contains "Namespace/") } | get index | first)
+	assert ((do $at "^patch configmap pronto-release" | first) < $first_change) "the record is invalidated before the first write that changes what serves (after the server's dry run)"
+	assert ((do $at "^patch configmap pronto-release" | first) > (do $at "--dry-run=server" | first)) "and after the server accepted the render"
+	# a first release has no record: NotFound is not a failure
+	rm -f ($w.state | path join cm pronto-release)
+	"" | save -f ($w.state | path join strict_cm)
+	let first = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $first.exit_code 0 $"($first.stdout)($first.stderr)"
+	rm -f ($w.state | path join strict_cm)
+	# --verified writes only against the version it read
+	seed-record $w {sha: "abc", verified: "", pruned: "true", prune_error: ""}
+	"" | save -f ($w.state | path join cm_race)
+	let lost = (in-world $w $release_nu --app $w.app --verified abc)
+	assert ($lost.exit_code != 0) "a record that changed since it was read is a conflict"
+	assert (has $lost.stderr "Conflict") $lost.stderr
+	rm -f ($w.state | path join cm_race)
+	# a record rewritten once meanwhile (the maintenance's outcome, say) is read again and marked
+	"" | save -f ($w.state | path join cm_race_once)
+	let again = (in-world $w $release_nu --app $w.app --verified abc)
+	assert equal $again.exit_code 0 $"($again.stdout)($again.stderr)"
+	assert (has $again.stderr "trying again") $again.stderr
+	let won = (in-world $w $release_nu --app $w.app --verified abc)
+	assert equal $won.exit_code 0 $"($won.stdout)($won.stderr)"
+	rm -rf $w.dir
+}
+
+def test_a_failed_provider_export_stops_the_release [] {
+	print "test an app whose auth providers do not export stops the release instead of releasing without them..."
+	let w = (sandbox)
+	rm -f ($w.app | path join code.cue)
+	let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "auth providers of") $r.stderr
+	rm -rf $w.dir
+}
+
+def test_the_lock_is_released_against_what_was_read_and_its_failure_is_told [] {
+	print "test the collector's lock is deleted against the uid and version read, a refused delete is told, an empty registry has nothing to collect, and a prune reads the cluster only under the lock..."
+	let w = (sandbox)
+	let use = $"use ($engine_dir | path join registry.nu); let build = {registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}};"
+	# the lock taken over between this collector's read and its delete: the delete is refused (409), and nothing of another's is deleted
+	"" | save -f ($w.state | path join lock_taken_over)
+	let a = (in-world $w -c $"($use) registry collect $build ''")
+	assert equal $a.exit_code 0 $"($a.stdout)($a.stderr)"
+	assert ((calls $w) | any {|c| $c | str starts-with "delete --raw" }) "the delete names its preconditions"
+	assert (($w.state | path join lease registry-gc-lock) | path exists) "a lock that changed hands is left"
+	rm -f ($w.state | path join lease registry-gc-lock) ($w.state | path join lock_taken_over)
+	# a refused delete of the lock is told, with the work as done
+	"" | save -f ($w.state | path join lock_delete_fail)
+	let b = (in-world $w -c $"($use) registry collect $build ''")
+	assert ($b.exit_code != 0)
+	assert (has $b.stderr "the maintenance ran") $b.stderr
+	rm -f ($w.state | path join lease registry-gc-lock) ($w.state | path join lock_delete_fail)
+	# a registry never pushed to
+	rm -f ($w.state | path join calls.jsonl)
+	"" | save -f ($w.state | path join no_repositories)
+	let c = (in-world $w -c $"($use) registry collect $build ''")
+	assert equal $c.exit_code 0 $"($c.stdout)($c.stderr)"
+	assert (has $c.stdout "nothing to collect") $c.stdout
+	assert (not ((calls $w) | any {|x| $x | str contains "garbage-collect" })) "nothing is collected"
+	rm -f ($w.state | path join no_repositories)
+	# a prune with another release in flight reads nothing of the cluster and keeps its hands off the keep tags
+	seed-lease $w registry-lease-studio-x registry-lease-studio-x 5 --labelled
+	rm -f ($w.state | path join calls.jsonl)
+	let d = (in-world $w -c ($use + " print (registry prune '127.0.0.1:1' $build 'registry-lease-aprende-y')"))
+	assert equal $d.exit_code 0 $"($d.stdout)($d.stderr)"
+	assert (has $d.stdout "releases are in flight") $d.stdout
+	assert (not ((calls $w) | any {|x| $x | str starts-with "get pods -A" })) "the cluster is not read outside the lock and the leases' quiet"
+	rm -rf $w.dir
+}
+
+def test_only_a_confirmed_absence_is_created [] {
+	print "test rollback deletes a Deployment recorded absent (revision 0, generation 0), and leaves one that existed awaiting its first revision..."
+	let w = (sandbox)
+	"1" | save -f ($w.state | path join revision aprende-crud)
+	"1" | save -f ($w.state | path join revision aprende-electric)
+	let use = $"use ($engine_dir | path join rollback.nu);"
+	let r = (in-world $w -c ($use + " rollback undo [{name: aprende-crud, revision: 0, generation: 1}, {name: aprende-electric, revision: 0, generation: 0}] aprende | to json --raw"))
+	assert equal $r.exit_code 0 $r.stderr
+	let deletes = (calls $w | where {|c| $c | str starts-with "delete deployment" })
+	assert equal $deletes ["delete deployment aprende-electric -n aprende --ignore-not-found"] "only the one recorded absent is deleted"
+	assert (has $r.stdout "existed without a revision; left as the release applied it") "the one that existed without a revision is said, not deleted"
+	assert (has $r.stdout "aprende-crud") $r.stdout
+	rm -rf $w.dir
+}
+
+def test_a_deferred_prune_exits_four [] {
+	print "test --prune that is deferred (a release's lease is held) records pending and exits 4, not a failure..."
+	let w = (sandbox)
+	seed-lease $w registry-lease-studio-x registry-lease-studio-x 5 --labelled
+	seed-record $w {sha: "abc", verified: "abc", pruned: "false", prune_error: "x"}
+	# a registry that answers, so the prune reaches the lease check rather than failing on the network
+	let r = (with-registry $w 200 {|port| in-world $w $release_nu --app $w.app --prune })
+	assert equal $r.exit_code 4 $"($r.stdout)\n($r.stderr)"
+	assert (has $r.stderr "deferred, not done") $r.stderr
+	let patch = (calls $w | where {|c| ($c | str starts-with "patch configmap pronto-release") and ($c | str contains "pruned") } | last)
+	assert (has $patch '"pruned":"pending"') $patch
+	rm -rf $w.dir
+}
+
+def test_a_lease_that_stays_does_not_turn_a_live_release_into_a_failure [] {
+	print "test a lease that cannot be deleted after a successful release is status 3, recorded; after a failed one both are told..."
+	let w = (sandbox)
+	"" | save -f ($w.state | path join lease_delete_fail)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert equal $r.exit_code 3 $"a live release is not a plain failure: ($r.stdout)\n($r.stderr)"
+	assert (has $r.stdout "[SUCCESS] Released aprende") $r.stdout
+	assert (has $r.stderr "was not released") $r.stderr
+	let patch = (calls $w | where {|c| ($c | str starts-with "patch configmap pronto-release") and ($c | str contains "not released") })
+	assert ($patch | is-not-empty) "recorded in prune_error"
+	# a release that failed, and a lease that stayed: both messages
+	rm -rf $w.dir
+	let v = (sandbox)
+	"" | save -f ($v.state | path join lease_delete_fail)
+	"" | save -f ($v.state | path join job_fail)
+	let f = (in-world $v $release_nu --app $v.app)
+	assert equal $f.exit_code 1 $"($f.stdout)\n($f.stderr)"
+	assert (has $f.stderr "did not complete") $f.stderr
+	assert (has $f.stderr "was not released either") $f.stderr
+	rm -rf $v.dir
 }
 
 def git-commit-all [dir: string] {
@@ -989,13 +1260,16 @@ def test_the_record_is_the_commit_built_and_serving_agrees [] {
 	let s = (in-world $w $release_nu --app $w.app --serving)
 	assert (has $s.stdout $"serving ($head) verified  maintenance failed") $s.stdout
 	# the app's cd marks the public checks passed for it
-	let v = (in-world $w $release_nu --app $w.app --verified)
+	let wrong = (in-world $w $release_nu --app $w.app --verified deadbeef)
+	assert ($wrong.exit_code != 0) "a commit the node does not serve is not marked verified"
+	assert (has $wrong.stderr "the node now serves") $wrong.stderr
+	let v = (in-world $w $release_nu --app $w.app --verified $head)
 	assert equal $v.exit_code 0 $v.stderr
 	let after = (in-world $w $release_nu --app $w.app --serving)
 	assert (has $after.stdout $"serving ($head) verified ($head) maintenance failed") $after.stdout
 	# nothing recorded: nothing to verify
 	rm -f ($w.state | path join cm pronto-release)
-	let nothing = (in-world $w $release_nu --app $w.app --verified)
+	let nothing = (in-world $w $release_nu --app $w.app --verified $head)
 	assert ($nothing.exit_code != 0) "no record, no verification"
 	rm -rf $w.dir
 }
@@ -1008,7 +1282,7 @@ def test_serving_leaves_no_kubeconfig [] {
 	with-env {TMPDIR: $tmp} {
 		let r = (in-world $w $release_nu --app $w.app --serving)
 		assert equal $r.exit_code 0 $r.stderr
-		let v = (in-world $w $release_nu --app $w.app --verified)
+		let v = (in-world $w $release_nu --app $w.app --verified abc)
 		assert ($v.exit_code != 0)
 	}
 	assert equal (ls $tmp | where name =~ "kubeconfig" | length) 0 "no kubeconfig is left behind"
@@ -1060,12 +1334,12 @@ def test_the_prune_outcome_is_recorded_in_the_release_configmap [] {
 	let w = (sandbox)
 	let r = (in-world $w $release_nu --app $w.app)
 	assert (released $r)
-	let patch = (calls $w | where {|c| $c | str starts-with "patch configmap pronto-release -n aprende --type merge" })
+	let patch = (calls $w | where {|c| ($c | str starts-with "patch configmap pronto-release -n aprende --type merge") and ($c | str contains "pruned") })
 	assert equal ($patch | length) 1
 	assert (has $patch.0 '"pruned":"false"') $patch.0
 	assert (has $patch.0 '"prune_error":"') $patch.0
 	assert (not (has $patch.0 '"prune_error":""')) "the error is told"
-	assert ((calls $w | enumerate | where {|e| $e.item =~ "ConfigMap/pronto-release" } | get index | first) < (calls $w | enumerate | where {|e| $e.item =~ "^patch configmap pronto-release" } | get index | first)) "after the release's record"
+	assert ((calls $w | enumerate | where {|e| $e.item =~ "ConfigMap/pronto-release" } | get index | first) < (calls $w | enumerate | where {|e| $e.item =~ "^patch configmap pronto-release.*pruned" } | get index | first)) "after the release's record"
 	# a prune that worked
 	rm -f ($w.state | path join calls.jsonl)
 	let ok = (in-world $w -c $"use ($engine_dir | path join release.nu) [record-prune]; record-prune {namespace: aprende} null")

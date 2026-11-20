@@ -48,18 +48,36 @@ def --wrapped kubectl-out [...args: string]: nothing -> string {
 # deletes every untagged manifest and every blob none of the rest reference. `registry` is the
 # registry as this release reaches it (127.0.0.1:<fwd.registry>). Garbage collection deletes the blobs
 # of a push still in flight, so it is skipped while an upload is open: the next release collects.
-export def prune [registry: string, build: record, own: string = ""] {
-	let ns = $build.registry.namespace
-	let target = $"deploy/($build.registry.deployment)"
+export def prune [registry: string, build: record, own: string = ""]: nothing -> string {
+	# Everything below happens under the collector's lock, and with no other release in flight: the cluster is read after
+	# the lock is held, so the protection of a rollback image is computed from what the cluster names now, and a release
+	# that protects a newer digest cannot interleave with this one's deletion of keep tags.
+	with-lock $build {
+		let others = (leases $build | where {|l| $l.name != $own })
+		if ($others | is-not-empty) {
+			print $"node: (stamp) the node's registry has releases in flight \(($others | get name | str join ', ')\): its maintenance waits for the next release"
+			"releases are in flight"
+		} else {
+			protect-live-images $registry $build
+			collect-locked $build $build.registry.namespace $"deploy/($build.registry.deployment)"
+		}
+	}
+}
+
+# The cluster's images tagged keep-<digest>, and the keep tags of digests nothing names any more deleted. Under the lock.
+def protect-live-images [registry: string, build: record] {
 	let kinds = ["pods" "replicasets" "deployments" "statefulsets" "daemonsets" "jobs" "cronjobs" "clusters.postgresql.cnpg.io"]
 	# A kind whose CRD is not on the node names no image; any other failure of a read stops the prune, since
 	# an image its objects name would look unused and be collected.
-	let objects = ($kinds | each {|k|
+	# (a `for`, not `each`: nushell reports an error raised inside an `each` closure as "Eval block failed" once a `try` catches it)
+	mut parts = []
+	for k in $kinds {
 		let r = (^kubectl get $k -A -o json | complete)
-		if $r.exit_code == 0 { $r.stdout } else if ($r.stderr =~ "the server doesn't have a resource type") { "" } else {
+		if $r.exit_code == 0 { $parts = ($parts | append $r.stdout) } else if not ($r.stderr =~ "the server doesn't have a resource type") {
 			error make {msg: $"kubectl get ($k) -A failed, so the prune stops before it deletes anything: ($r.stderr | str trim)"}
 		}
-	} | str join "\n")
+	}
+	let objects = ($parts | str join "\n")
 	let used = (in-use $objects $build.registry.host)
 	for it in $used {
 		# 200: protect it. 404: the registry does not hold it, so there is nothing to protect. Any other answer (a 503) means
@@ -77,7 +95,6 @@ export def prune [registry: string, build: record, own: string = ""] {
 			http delete $"http://($registry)/v2/($repo)/manifests/($t)" | ignore
 		}
 	}
-	collect $build $own
 }
 
 # The blob descriptor cache the registry serves with (storage.cache.blobdescriptor): the deployment's env
@@ -97,64 +114,125 @@ export def blob-cache [build: record]: nothing -> string {
 # point at nothing. It runs under the collector's lock and only while no other release holds a lease (a
 # release's lease spans its push), so a collection never meets a release's layers uploaded and not yet
 # published; a push outside the leases (an open upload) is still checked for.
-export def collect [build: record, own: string = ""] {
+export def collect [build: record, own: string = ""]: nothing -> string {
 	let ns = $build.registry.namespace
 	let target = $"deploy/($build.registry.deployment)"
-	# Only one collector at a time, and only while no other release holds a lease (one is held from before a release's push
-	# until it ends): the collector takes the lock first and then looks for leases, a release takes its lease first and then
-	# looks for the lock, so one of them always sees the other.
-	if not (lock-take $build) {
-		print $"node: (stamp) another release is collecting the node's registry: its garbage collection waits for the next release"
-		return
-	}
-	try {
+	with-lock $build {
 		let others = (leases $build | where {|l| $l.name != $own })
 		if ($others | is-not-empty) {
 			print $"node: (stamp) the node's registry has releases in flight \(($others | get name | str join ', ')\): its garbage collection waits for the next release"
-			return
+			"releases are in flight"
+		} else {
+			collect-locked $build $ns $target
 		}
-		collect-locked $build $ns $target
-	} finally {
-		do { ^kubectl delete configmap $lock_name -n $ns --ignore-not-found | complete } | ignore
 	}
 }
 
-def epoch []: nothing -> int { (date now | format date "%s" | into int) }
+# `body` run under the collector's lock: only one collector at a time, and (the body checks) only while no other release
+# holds a lease: the collector takes the lock first and then looks for leases, a release takes its lease first and then
+# looks for the lock, so one of them always sees the other. Answers the body's result, or "another release is collecting"
+# when the lock is held. A failure of the lock's release is never hidden: it joins the body's error, or, when the body
+# succeeded, fails the call saying the work was done.
+def with-lock [build: record, body: closure]: nothing -> string {
+	let holder = (lock-take $build)
+	if ($holder | is-empty) {
+		print $"node: (stamp) another release is collecting the node's registry: its maintenance waits for the next release"
+		return "another release is collecting"
+	}
+	let outcome = (try { {ok: (do $body)} } catch {|e| {err: $e.msg} })
+	let released = (try { lock-release $build $holder; null } catch {|e| $e.msg })
+	if ($outcome | get -o err) != null {
+		let why = ($outcome | get err)
+		let msg = if $released != null { $"($why); the lock was not released either: ($released)" } else { $why }
+		error make {msg: $msg}
+	}
+	if $released != null { error make {msg: $"the maintenance ran \(($outcome.ok | default 'done')\), but the lock was not released: ($released)"} }
+	$outcome.ok
+}
 
-# The configmaps of the registry's namespace that are releases' leases, with their age: {name, age}.
+# Leases and the lock are coordination.k8s.io Leases of the registry's namespace: the holder's name in
+# `spec.holderIdentity`, its last renewal in `spec.renewTime` (written by the engine's clock; every engine runs on the same
+# Mac, so one clock), which is what a lease's or the lock's age is read from, and the API server's `resourceVersion`, which a
+# takeover of a stale lock is made against.
+
+def micro-now []: nothing -> string { date now | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%S%.6fZ" }
+
+def lease-object [name: string, ns: string, holder: string, labelled: bool]: nothing -> record {
+	{
+		apiVersion: "coordination.k8s.io/v1", kind: "Lease"
+		metadata: ({name: $name, namespace: $ns} | merge (if $labelled { {labels: {($lease_label): "true"}} } else { {} }))
+		spec: {holderIdentity: $holder, leaseDurationSeconds: $hold_seconds, renewTime: (micro-now)}
+	}
+}
+
+# Seconds since a Lease was last renewed (its creation when it never was).
+def lease-age [item: record]: nothing -> int {
+	let at = ($item | get -o spec.renewTime | default ($item | get -o metadata.creationTimestamp | default ""))
+	if ($at | is-empty) { return $hold_seconds }
+	((date now) - ($at | into datetime)) | into int | $in / 1_000_000_000 | into int
+}
+
+# The registry's namespace's leases that are releases', with their age: {name, age}, the stale ones left out.
 def leases [build: record]: nothing -> list<record<name: string, age: int>> {
 	let ns = $build.registry.namespace
-	let r = (kubectl-out get configmap -n $ns -l $lease_label -o json | from json)
-	$r.items | each {|c| {name: $c.metadata.name, age: ((epoch) - ($c.metadata.annotations?.at? | default "0" | into int))} } | where age < $hold_seconds
+	let r = (kubectl-out get leases -n $ns -l $lease_label -o json | from json)
+	$r.items | each {|l| {name: $l.metadata.name, age: (lease-age $l)} } | where age < $hold_seconds
 }
 
-# The collector's lock: true when this release took it; false when another's fresh one is held (a stale one is taken over).
-def lock-take [build: record]: nothing -> bool {
+# A Lease by name, or null when it does not exist (a failed read is an error).
+def lease-get [ns: string, name: string]: nothing -> any {
+	let r = (kubectl-out get lease $name -n $ns --ignore-not-found -o json)
+	if ($r | str trim | is-empty) { null } else { $r | from json }
+}
+
+def kubectl-stdin [verb: string, object: record]: nothing -> record {
+	$object | to json | ^kubectl $verb -f - | complete
+}
+
+# The collector's lock, as its holder's identity (a new one each call): "" when another's fresh one is held. A stale one is
+# replaced against the resourceVersion read, so a lock renewed or taken over in between wins and this call gets "".
+def lock-take [build: record]: nothing -> any {
 	let ns = $build.registry.namespace
-	let make = {|| ^kubectl create configmap $lock_name -n $ns $"--from-literal=at=(epoch)" | complete }
-	let r = (do $make)
-	if $r.exit_code == 0 { return true }
-	if not ($r.stderr =~ "AlreadyExists") { error make {msg: $"taking the registry's collection lock failed: ($r.stderr | str trim)"} }
-	let held = (kubectl-out get configmap $lock_name -n $ns --ignore-not-found -o json)
-	let at = if ($held | str trim | is-empty) { 0 } else { $held | from json | get -o data.at | default "0" | into int }
-	if ((epoch) - $at) < $hold_seconds { return false }
-	kubectl-out delete configmap $lock_name -n $ns --ignore-not-found | ignore
-	let again = (do $make)
-	$again.exit_code == 0
+	let holder = $"collector-(random chars --length 8 | str lowercase)"
+	let made = (kubectl-stdin create (lease-object $lock_name $ns $holder false))
+	if $made.exit_code == 0 { return $holder }
+	if not ($made.stderr =~ "AlreadyExists") { error make {msg: $"taking the registry's collection lock failed: ($made.stderr | str trim)"} }
+	let held = (lease-get $ns $lock_name)
+	if $held == null { return (lock-take $build) }
+	if (lease-age $held) < $hold_seconds { return "" }
+	let mine = (lease-object $lock_name $ns $holder false | upsert metadata.resourceVersion $held.metadata.resourceVersion)
+	let swapped = (kubectl-stdin replace $mine)
+	if $swapped.exit_code == 0 { return $holder }
+	if $swapped.stderr =~ "Conflict" { return "" }
+	error make {msg: $"taking over the registry's stale collection lock failed: ($swapped.stderr | str trim)"}
 }
 
-# A release's lease on the registry, taken before it pushes: its own configmap, then a look for the collector's lock,
-# waited out (a collection is minutes) and else a failure, since a push under a collection could lose its layers.
+# The lock released, only when it is still this collector's, and deleted against the uid and resourceVersion just read: a
+# lock taken over between the read and the delete is another collector's now, and the delete is refused (409), not done.
+# A failed read, and any other failed delete, are errors: a lock left behind blocks the next collection for an hour.
+def lock-release [build: record, holder: string] {
+	let ns = $build.registry.namespace
+	let held = (lease-get $ns $lock_name)
+	if $held == null or ($held | get -o spec.holderIdentity) != $holder { return }
+	let options = {kind: "DeleteOptions", apiVersion: "v1", preconditions: {uid: $held.metadata.uid, resourceVersion: $held.metadata.resourceVersion}}
+	let path = $"/apis/coordination.k8s.io/v1/namespaces/($ns)/leases/($lock_name)"
+	let r = ($options | to json | ^kubectl delete --raw $path -f - | complete)
+	if $r.exit_code != 0 and ($r.stderr =~ "Conflict") { print -e $"node: (stamp) warning: the collection lock changed hands before this collector deleted it: left to its new holder" }
+	if $r.exit_code != 0 and not ($r.stderr =~ "Conflict|NotFound") { error make {msg: $"deleting the registry's collection lock failed: ($r.stderr | str trim)"} }
+}
+
+# A release's lease on the registry, taken before it pushes: its own Lease (labelled in the one call that makes it), then a
+# look for the collector's lock, waited out (a collection is minutes) and else a failure, since a push under a collection
+# could lose its layers.
 export def lease-acquire [build: record, app: string, namespace: string, --wait: int = 180]: nothing -> string {
 	let ns = $build.registry.namespace
 	let name = $"registry-lease-($namespace)-(random chars --length 6 | str lowercase)"
-	kubectl-out create configmap $name -n $ns $"--from-literal=at=(epoch)" $"--from-literal=app=($app)" | ignore
-	kubectl-out label configmap $name -n $ns $"($lease_label)=true" | ignore
+	let made = (kubectl-stdin create (lease-object $name $ns $name true))
+	if $made.exit_code != 0 { error make {msg: $"taking the registry lease ($name) failed: ($made.stderr | str trim)"} }
 	mut waited = 0
 	loop {
-		let held = (kubectl-out get configmap $lock_name -n $ns --ignore-not-found -o json)
-		let at = if ($held | str trim | is-empty) { null } else { $held | from json | get -o data.at | default "0" | into int }
-		if $at == null or ((epoch) - $at) >= $hold_seconds { break }
+		let lock = (try { lease-get $ns $lock_name } catch {|e| lease-release $build $name; error make {msg: $e.msg} })
+		if $lock == null or (lease-age $lock) >= $hold_seconds { break }
 		if $waited >= $wait {
 			lease-release $build $name
 			error make {msg: $"the node's registry is being collected and still was after ($wait) s: retry the release"}
@@ -165,16 +243,34 @@ export def lease-acquire [build: record, app: string, namespace: string, --wait:
 	$name
 }
 
+# The lease renewed: after the push and after each long phase, so a release that outlives the hour is not taken for dead.
+export def lease-renew [build: record, name: string] {
+	kubectl-out patch lease $name -n $build.registry.namespace --type merge -p ({spec: {renewTime: (micro-now)}} | to json --raw) | ignore
+}
+
+# The release's own lease deleted, by name.
 export def lease-release [build: record, name: string] {
-	kubectl-out delete configmap $name -n $build.registry.namespace --ignore-not-found | ignore
+	kubectl-out delete lease $name -n $build.registry.namespace --ignore-not-found | ignore
 }
 
 # The collection itself, under the lock and with no other lease.
-def collect-locked [build: record, ns: string, target: string] {
-	let uploads = (kubectl-out exec -n $ns $target -- sh -c "find /var/lib/registry/docker/registry/v2/repositories -path '*/_uploads/*' -mindepth 1 -maxdepth 4 | head -1" | str trim)
+def collect-locked [build: record, ns: string, target: string]: nothing -> string {
+	# `find` itself is checked (no pipe to hide its exit): a scan that fails stops the collection, it does not read as no upload.
+	# A registry that has never been pushed to has no repositories directory: nothing to collect.
+	let repos = "/var/lib/registry/docker/registry/v2/repositories"
+	let has_repos = (^kubectl exec -n $ns $target -- find $repos -maxdepth 0 -print -quit | complete)
+	if $has_repos.exit_code != 0 {
+		if ($has_repos.stderr =~ "No such file or directory") {
+			print $"node: (stamp) the node's registry has no repositories yet: nothing to collect"
+			return ""
+		}
+		error make {msg: $"looking for the registry's repositories failed: ($has_repos.stderr | str trim)"}
+	}
+	let uploads = (kubectl-out exec -n $ns $target -- find $repos -mindepth 1 -maxdepth 4 -path "*/_uploads/*" -print -quit | str trim)
 	if ($uploads | is-not-empty) {
-		print $"node: (stamp) the node's registry has an upload open \(a push outside the leases, or a dead one\): its garbage collection waits for the next release"
-		return
+		let why = "an upload is open (a push outside the leases, or a dead one)"
+		print $"node: (stamp) the node's registry: ($why): its garbage collection waits for the next release"
+		return $why
 	}
 	let before = (kubectl-out exec -n $ns $target -- du -sh /var/lib/registry | split row "\t" | first)
 	let gc = (do { ^kubectl exec -n $ns $target -- registry garbage-collect --delete-untagged /etc/distribution/config.yml } | complete)
@@ -187,4 +283,5 @@ def collect-locked [build: record, ns: string, target: string] {
 		kubectl-out rollout status -n $ns $target --timeout=120s | ignore
 		print $"node: (stamp) the node's registry restarted, so its ($cache) blob cache holds no collected layer"
 	}
+	""
 }

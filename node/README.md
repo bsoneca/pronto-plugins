@@ -15,8 +15,8 @@ node's CrowdSec). The same ssh process carries two more forwards, to the node's 
 (`127.0.0.1:1234`) and its registry (`127.0.0.1:5000`), each to a free local port, never to 5000, which macOS's
 AirPlay receiver holds.
 
-The app pins in its mise the tools the engine runs: `kubectl`, `docker` (the CLI with its compose plugin, never a
-daemon), `buildx` (`aqua:docker/buildx@0.39.1`, whose binary aqua names `docker-cli-plugin-docker-buildx`; run against the node's buildkit v0.29 it loads aprende's 7,933-path context and builds database, crud, electric and auth with the digests 0.33.0 gave. Not older than 0.39.1 once Go 1.27 builds it: buildx sends a Dockerfile's COPY sources as gRPC header values, one per path, and Go 1.27's net/http refuses more than 500 of them, fixed in 0.39.1, so Homebrew's 0.38.0 and the official 0.39.0 lose the session with `PROTOCOL_ERROR` or `431`; 0.33.0, built with Go 1.25, also works; the engine takes the buildx whose folder is first on the PATH, so the pin wins over Homebrew's), `sops` (when it has a SOPS file) and
+The app pins in its mise the tools the engine runs: `kubectl`, `docker` (the CLI, never a
+daemon) with its compose plugin (`aqua:docker/compose`, linked into a docker config of the call's own), `buildx` (`aqua:docker/buildx@0.39.1`, whose binary aqua names `docker-cli-plugin-docker-buildx`; run against the node's buildkit v0.29 it loads aprende's 7,933-path context and builds database, crud, electric and auth with the digests 0.33.0 gave. Not older than 0.39.1 once Go 1.27 builds it: buildx sends a Dockerfile's COPY sources as gRPC header values, one per path, and Go 1.27's net/http refuses more than 500 of them, fixed in 0.39.1, so Homebrew's 0.38.0 and the official 0.39.0 lose the session with `PROTOCOL_ERROR` or `431`; 0.33.0, built with Go 1.25, also works; the engine takes the buildx whose folder is first on the PATH, so the pin wins over Homebrew's), `sops` (when it has a SOPS file) and
 `crane` (a release that builds, or `--check --build`). The preflight fails at once on a missing one,
 and on a pronto runtime that is not in `validated_pins` (runtime.nu, held by contract_test.nu). An existing
 namespace the release did not label (`pronto.dev/release=<app>`) is refused, `--adopt` takes it; `--delete`
@@ -98,7 +98,7 @@ release never creates or changes; the preflight refuses when either is down.
 `--check --build` builds and pushes for real under the tag `check` (registry writes only, never the cluster),
 then dry-runs with the real digests: a builder's way to prove an app builds without releasing it. `--build`
 alone is refused.
-Where the namespace does not exist yet, the objects are asked in `default`. `--serving` prints `serving <sha> verified <sha> maintenance <ok|failed|unknown>` from the namespace's `pronto-release` ConfigMap (the commit built, which is empty for a tree that was not a clean commit; the one cd marked verified with `--verified`; the last registry maintenance), which an app's cd reads before it releases. `--delete` removes a preview's
+Where the namespace does not exist yet, the objects are asked in `default`. `--serving` prints `serving <sha> verified <sha> maintenance <ok|failed|pending|unknown>` from the namespace's `pronto-release` ConfigMap (the commit built, which is empty for a tree that was not a clean commit; the one cd marked verified with `--verified <sha>`, refused when the node now serves another; the last registry maintenance). `--prune` runs only the registry maintenance and records its outcome, the retry of a release whose own failed (exit 0 done, exit 4 deferred and recorded `pending`, which is not a failure and is retried by the next run; a failure is an error), which an app's cd reads before it releases. `--delete` removes a preview's
 namespace and refuses the release's. `--schema-from` (a preview's copy of a database) is not in this engine yet.
 
 Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, previews' `--schema-from`, Studio's
@@ -112,8 +112,8 @@ Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, previews' `--
   ci) are built there; untrusted ones belong to the tenants' buildkitd, which cannot reach the registry. Base
   images pinned by digest keep a compromised upstream out of it.
 - Registry garbage collection runs while the registry serves (it is not put in read-only mode), so it is serialized with
-  releases by leases: a release takes a ConfigMap lease in the registry's namespace before its push and holds it to its end,
-  and the collector takes the lock `registry-gc-lock`, then looks for other fresh leases and collects only when there are
+  releases by leases: a release takes a coordination.k8s.io Lease in the registry's namespace before its push, renews it after the push and each long phase, and holds it to its end,
+  and the collector takes the Lease `registry-gc-lock` (a stale one is replaced against its resourceVersion, and only its own holder deletes it), then looks for other fresh leases and collects only when there are
   none (a release takes its lease and then looks for the lock, so one of them always sees the other; a release waits out a
   collection for 3 min, then fails). A lease or lock older than an hour is a dead release's. A push outside the engine (no
   lease) is still seen only as an open upload. The registry is restarted after each collection, so its in-memory blob

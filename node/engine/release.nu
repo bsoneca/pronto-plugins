@@ -168,7 +168,10 @@ def namespace-split [objects: list]: nothing -> record {
 # A server dry run of the objects, which stops the release on a rejection. Where the namespace does not
 # exist yet (a first release), they are asked in `default`: admission reads the objects, not where they go.
 export def dry-run [objects: list, namespace: string] {
-	let there = ((^kubectl get namespace $namespace | complete).exit_code == 0)
+	# Absent is a successful, empty answer; a failed read (denied, API down) stops here, it is not "asked in default".
+	let ns_read = (^kubectl get namespace $namespace --ignore-not-found -o name | complete)
+	if $ns_read.exit_code != 0 { error make {msg: $"reading namespace ($namespace) failed, so the server dry run cannot tell where to ask: ($ns_read.stderr | str trim)"} }
+	let there = ($ns_read.stdout | str trim | is-not-empty)
 	let items = if $there { $objects } else { $objects | each {|o| if $o.kind == "Namespace" { $o } else { $o | upsert metadata.namespace "default" } } }
 	if not $there { print $"node: (stamp) namespace ($namespace) does not exist yet: the server dry run asks the objects in default" }
 	# A Job a release left holds its template immutably: the new one is asked under a name of its own, created, not applied.
@@ -248,13 +251,26 @@ export def record-release [app_dir: string, node: record, pushed: record] {
 	{
 		apiVersion: "v1", kind: "ConfigMap"
 		metadata: {name: "pronto-release", namespace: $node.namespace}
-		data: {sha: $sha, verified: "", pin: (runtime version), enginePin: $engine, images: ($images | to json --raw), at: (date now | format date "%Y-%m-%dT%H:%M:%S%z")}
+		data: {sha: $sha, verified: "", pruned: "", prune_error: "", pin: (runtime version), enginePin: $engine, images: ($images | to json --raw), at: (date now | format date "%Y-%m-%dT%H:%M:%S%z")}
 	} | to json | kubectl-ok apply -f -
 }
 
-# What the prune did, in the release's ConfigMap: `pruned` "true" or "false", and `prune_error` (empty on success).
-export def record-prune [node: record, failure: any] {
-	let data = if $failure == null { {pruned: "true", prune_error: ""} } else { {pruned: "false", prune_error: ($failure | into string | str substring 0..499)} }
+# `verified` emptied in the namespace's record before a release changes what serves; an absent record needs none.
+def invalidate-verified [ns: string] {
+	let r = (^kubectl patch configmap pronto-release -n $ns --type merge -p '{"data":{"verified":""}}' | complete)
+	if $r.exit_code != 0 and not ($r.stderr =~ "NotFound") { error make {msg: $"invalidating the verified record of ($ns) failed: ($r.stderr | str trim)"} }
+}
+
+# The registry lease renewed; a renewal that fails is a warning, never a failure of a release that may already be live (the
+# lease's hour is the margin, and the next renewal tries again).
+def renew-lease [node: record, lease: string] {
+	if $lease == "" { return }
+	try { registry lease-renew $node.build $lease } catch {|e| print -e $"node: (stamp) warning: the registry lease ($lease) was not renewed: ($e.msg)" }
+}
+
+# What the prune did, in the release's ConfigMap: `pruned` "true", "false" or "pending" (the collection was deferred, to be retried), and `prune_error` (empty on success).
+export def record-prune [node: record, failure: any, pending: string = ""] {
+	let data = if $failure != null { {pruned: "false", prune_error: ($failure | into string | str substring 0..499)} } else if ($pending | is-not-empty) { {pruned: "pending", prune_error: $"collection deferred: ($pending)" } } else { {pruned: "true", prune_error: ""} }
 	kubectl-ok patch configmap pronto-release -n $node.namespace --type merge -p ({data: $data} | to json --raw)
 }
 
@@ -380,6 +396,10 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	let before = (rollback revisions ($deployments | get metadata.name) $ns)
 	as-list $parts.namespace | kubectl-ok apply -f -
 	dry-run $parts.rest $ns
+	# What serves is about to change (the server accepted the render): the record of the public site's verification, which cd
+	# trusts, is invalidated before the first write that can change it, so a release that fails halfway can never leave an old
+	# commit marked verified over new images. A first release has no record.
+	invalidate-verified $ns
 	# 5. secrets
 	apply-secrets $secrets
 	let oidc = (render oidc-secrets $compose $app_info.dir)
@@ -447,12 +467,14 @@ def main [
 	--build                    # with --check: build and push the images under the tag `check`, then dry-run with their digests
 	--delete                   # delete the preview's namespace (a preview only)
 	--serving                  # print `serving <sha>`: the commit the release recorded in the namespace (empty when none); writes nothing
-	--verified                 # record that the public site passed cd's checks for the recorded commit (`--serving` then prints it as verified)
+	--prune                    # only the registry maintenance: prune and collect, and record the outcome (a release's retry); releases nothing. Exit 4: deferred (recorded pending), not a failure
+	--verified: string = ""    # the commit cd's public checks passed for: recorded as verified when it is the one the node serves, refused when not (`--serving` then prints it as verified)
 	--adopt                    # take an existing namespace the release did not label (its Namespace object labels it)
 	--schema-from: string = "" # the preview copy of a database (not in this engine yet)
 ] {
 	$env.GCP_T0 = (date now)
-	if ($serving or $verified) and ($check or $build or $delete or $adopt or ($serving and $verified)) { error make {msg: "--serving and --verified go with no other flag"} }
+	let verifying = ($verified | is-not-empty)
+	if ([$serving $verifying $prune] | where {|f| $f } | length) > 1 or (([$serving $verifying $prune] | any {|f| $f }) and ($check or $build or $delete or $adopt)) { error make {msg: "--serving, --verified and --prune go with no other flag, and one at a time"} }
 	if $check and $delete { error make {msg: "--check and --delete cannot be given together: a check writes nothing, a delete is a write"} }
 	if $build and not $check { error make {msg: "--build only goes with --check: a release always builds"} }
 	if ($schema_from | is-not-empty) { error make {msg: "--schema-from is not in this engine yet: a preview starts with an empty database"} }
@@ -463,7 +485,7 @@ def main [
 	}
 	if $serving {
 		# What cd asks before it releases: what the node's namespace records (an absent record, or namespace, is empty):
-		# `serving <sha> verified <sha> maintenance <ok|failed|unknown>`.
+		# `serving <sha> verified <sha> maintenance <ok|failed|pending|unknown>`.
 		tunnel with-tunnel $node.api $node.build {|fwd|
 			let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
 			try {
@@ -471,7 +493,7 @@ def main [
 					let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o json | complete)
 					if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
 					let data = if ($r.stdout | str trim | is-empty) { {} } else { $r.stdout | from json | get -o data | default {} }
-					let maintenance = match ($data | get -o pruned | default "") { "true" => "ok", "false" => "failed", _ => "unknown" }
+					let maintenance = match ($data | get -o pruned | default "") { "true" => "ok", "false" => "failed", "pending" => "pending", _ => "unknown" }
 					print $"serving (($data | get -o sha | default '') | str trim) verified (($data | get -o verified | default '') | str trim) maintenance ($maintenance)"
 				}
 			} finally {
@@ -480,18 +502,57 @@ def main [
 		}
 		return
 	}
-	if $verified {
-		# cd's word that the public site passed its checks for what is recorded: `verified` becomes `sha`.
+	if $prune {
+		# The registry maintenance of a release that was live when its own failed: the same prune and collection, outcome recorded.
+		# Exit 0: done. Exit 4: deferred (another release or collector is at the registry), recorded `pending`, to be retried
+		# by the next run, not a failure. Any other failure is an error.
+		let pending = (tunnel with-tunnel $node.api $node.build {|fwd|
+			let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
+			try {
+				with-env {KUBECONFIG: $kubeconfig} {
+					mut deferred = ""
+					let failure = (try { $deferred = (registry prune $"127.0.0.1:($fwd.registry)" $node.build ""); null } catch {|e| $e.msg })
+					record-prune $node $failure $deferred
+					if $failure != null { error make {msg: $"the registry maintenance failed: ($failure)"} }
+					if ($deferred | is-empty) { print $"node: (stamp) the node's registry maintenance passed" }
+					$deferred
+				}
+			} finally {
+				rm -f $kubeconfig
+			}
+		})
+		if ($pending | is-not-empty) {
+			print -e $"node: (stamp) the registry maintenance was deferred, not done \(($pending)\); recorded pending, the next run retries it"
+			exit 4
+		}
+		return
+	}
+	if $verifying {
+		# cd's word that the public site passed its checks for `verified`: recorded when the node serves exactly that commit, as a
+		# compare-and-set on the record's resourceVersion. A conflict (the record was rewritten, by the maintenance's outcome or
+		# a release) is retried while the record still names the commit; one that names another is refused.
 		tunnel with-tunnel $node.api $node.build {|fwd|
 			let kubeconfig = (tunnel kubeconfig $node.context $fwd.api)
 			try {
 				with-env {KUBECONFIG: $kubeconfig} {
-					let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o json | complete)
-					if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
-					let sha = if ($r.stdout | str trim | is-empty) { "" } else { $r.stdout | from json | get -o data.sha | default "" }
-					if ($sha | is-empty) { error make {msg: $"($node.namespace) records no commit to mark verified (a release of a dirty tree records none)"} }
-					kubectl-ok patch configmap pronto-release -n $node.namespace --type merge -p ({data: {verified: $sha}} | to json --raw)
-					print $"verified ($sha)"
+					mut done = false
+					mut attempt = 0
+					while not $done {
+						$attempt += 1
+						let r = (^kubectl get configmap pronto-release -n $node.namespace --ignore-not-found -o json | complete)
+						if $r.exit_code != 0 { error make {msg: $"reading the recorded release of ($node.namespace) failed: ($r.stderr | str trim)"} }
+						let record = if ($r.stdout | str trim | is-empty) { {} } else { $r.stdout | from json }
+						let sha = ($record | get -o data.sha | default "")
+						let version = ($record | get -o metadata.resourceVersion | default "")
+						if ($sha | is-empty) { error make {msg: $"($node.namespace) records no commit to mark verified (a release of a dirty tree records none)"} }
+						# cd's checks were of the commit it names: a release since then (another run's) is not what they saw.
+						if $sha != $verified { error make {msg: $"the node now serves ($sha), not ($verified) which the checks passed for: it is not marked verified"} }
+						let p = (^kubectl patch configmap pronto-release -n $node.namespace --type merge -p ({metadata: {resourceVersion: $version}, data: {verified: $verified}} | to json --raw) | complete)
+						if $p.exit_code == 0 { $done = true } else if ($p.stderr =~ "Conflict") and $attempt < 4 { print -e $"node: (stamp) the record changed while it was being marked; trying again" } else {
+							error make {msg: $"marking ($verified) verified failed: ($p.stderr | str trim)"}
+						}
+					}
+					print $"verified ($verified)"
 				}
 			} finally {
 				rm -f $kubeconfig
@@ -514,11 +575,13 @@ def main [
 				} else {
 					let secrets = (preflight $app_info $node $fwd --check=$check --adopt=$adopt --build=$build)
 					let services = (render build-services $compose $meta.render.enabled)
-					# The registry's lease (a real release only; a check pushes disposable images and writes nothing to the cluster): held while this release pushes and until it ends, so no other release collects the
-					# registry's garbage under its pushes (registry.nu).
-					let lease = if not $check { registry lease-acquire $node.build $node.name $node.namespace } else { "" }
-					try {
+					# The registry's lease (a release, and a check that builds: both push): held while this release pushes and until it ends, so
+					# no other release collects the registry's garbage under its pushes (registry.nu).
+					let lease = if (not $check) or $build { registry lease-acquire $node.build $node.name $node.namespace } else { "" }
+					mut maintenance = ""
+					let body_failure = (try {
 						# 2. build, or placeholders for a check
+						renew-lease $node $lease
 						let preview_tag = if ($node.preview | is-empty) { "release" } else { $node.preview }
 						let pushed = if $check and not $build {
 							render placeholder-pushed $services $preview_tag
@@ -526,21 +589,37 @@ def main [
 							print $"node: (stamp) building ($services | str join ', ') for ($app_info.name) on the node's buildkitd"
 							build-images $app_info $node $fwd $services (if $check { "check" } else { $preview_tag })
 						}
+						# the lease renewed after the push, and again after the long phases that follow
+						renew-lease $node $lease
 						release-app $app_info $node $meta $compose $facts $secrets $pushed --check=$check
+						renew-lease $node $lease
 						# 16. prune: the release is live, so a failure here does not undo it; it is recorded beside the release
 						# (`--serving` reports it) and ends the command with a distinct status once the tunnel is closed
 						if not $check {
-							let failure = (try { registry prune $"127.0.0.1:($fwd.registry)" $node.build $lease; null } catch {|e|
+							mut pending = ""
+							let failure = (try { $pending = (registry prune $"127.0.0.1:($fwd.registry)" $node.build $lease); null } catch {|e|
 								print -e $"node: (stamp) MAINTENANCE FAILED: the node's registry was not pruned, the release is live: ($e.msg)"
 								$e.msg
 							})
-							let unrecorded = (try { record-prune $node $failure; null } catch {|e| $e.msg })
+							let unrecorded = (try { record-prune $node $failure $pending; null } catch {|e| $e.msg })
 							if $unrecorded != null { error make {msg: $"the release is live, but the prune's outcome could not be recorded: ($unrecorded)"} }
-							$failure
+							$maintenance = ($failure | default "")
 						}
-					} finally {
-						if $lease != "" { try { registry lease-release $node.build $lease } catch {|e| print -e $"node: (stamp) warning: the registry lease ($lease) was not released: ($e.msg)" } }
+						null
+					} catch {|e| $e.msg })
+					# The lease goes whatever happened, and its release is checked (one left behind blocks the next collection for an
+					# hour) without turning a live release into a plain failure: a body that succeeded and a lease that stayed is
+					# "released, maintenance failed" (status 3, recorded); a body that failed and a lease that stayed say both.
+					let lease_failure = if $lease != "" { try { registry lease-release $node.build $lease; null } catch {|e| $e.msg } } else { null }
+					if $body_failure != null {
+						error make {msg: (if $lease_failure != null { $"($body_failure); the registry lease ($lease) was not released either: ($lease_failure)" } else { $body_failure })}
 					}
+					if $lease_failure != null {
+						let why = $"the registry lease ($lease) was not released: ($lease_failure)"
+						$maintenance = (if ($maintenance | is-not-empty) { $"($maintenance); ($why)" } else { $why })
+						try { record-prune $node $maintenance } catch {|e| print -e $"node: (stamp) warning: that could not be recorded either: ($e.msg)" }
+					}
+					if ($maintenance | is-empty) { null } else { $maintenance }
 				}
 			}
 		} finally {

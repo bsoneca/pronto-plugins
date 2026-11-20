@@ -94,7 +94,7 @@ export def drill [app: string, namespace: string, --scratch: string = "restore-d
 	let before = (counts $namespace $primary $db)
 	# 2. The restore, into a scratch Cluster that reads the store and writes none.
 	k create namespace $scratch | ignore
-	try {
+	let failure = (try {
 		copy-store $namespace $scratch $store
 		let source = (kj -n $namespace get cluster $cluster)
 		recovery-cluster $source "drill-db" $cluster $store | to json | k -n $scratch apply -f - | ignore
@@ -112,9 +112,17 @@ export def drill [app: string, namespace: string, --scratch: string = "restore-d
 		let short = (shortfall $before $after)
 		if ($short | is-not-empty) { error make {msg: $"rows missing after the restore:\n($short | str join "\n")"} }
 		print "every table has at least the rows it had at the backup"
-	} finally {
-		if not $keep { ^kubectl delete namespace $scratch --wait=false | complete | ignore }
+		null
+	} catch {|e| $e.msg })
+	# The scratch namespace goes whatever happened, and its deletion is checked: one that is not deleted holds a restored
+	# database. Its failure joins the drill's own, and is never hidden by it or by a pass.
+	let cleanup = if $keep { null } else {
+		let d = (^kubectl delete namespace $scratch --wait=false | complete)
+		if $d.exit_code != 0 { $"deleting the scratch namespace ($scratch) failed, so a restored database is still there: ($d.stderr | str trim)" } else { null }
 	}
+	if $failure != null and $cleanup != null { error make {msg: $"($failure); and ($cleanup)"} }
+	if $failure != null { error make {msg: $failure} }
+	if $cleanup != null { error make {msg: $cleanup} }
 }
 
 # A recovery Cluster for a real incident, in `to`.
