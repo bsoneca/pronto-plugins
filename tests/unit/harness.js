@@ -3,19 +3,28 @@
 import { fileFlake } from "../../harness/files/tests/scenarios/flakes.ts";
 import { lockArgs } from "../../harness/files/tests/unit/select.js";
 
-// The unit runner's lock flags (UNIT_LOCK, PRONTO-973), and what deno does with them: `deno info` on a module importing
-// a jsr package, against a lock that names nothing, with the flags lockArgs gives, and without any.
+// The unit runner's lock flags (UNIT_LOCK, PRONTO-973), and what deno does with them: `deno info` on a module importing one
+// served here on 127.0.0.1 (no registry, a fresh DENO_DIR), against a lock that names nothing, with the flags lockArgs
+// gives, and without any.
 export const lockFlags = (lock) => lockArgs(lock);
 export async function lockHonoured() {
+  const ac = new AbortController();
+  const server = Deno.serve({ hostname: "127.0.0.1", port: 0, signal: ac.signal, onListen() {} }, () => new Response("export const x = 1;\n", { headers: { "content-type": "application/typescript" } }));
+  const served = `http://127.0.0.1:${server.addr.port}/x.ts`;
   const dir = await Deno.makeTempDir();
   try {
-    await Deno.writeTextFile(`${dir}/m.ts`, 'import "jsr:@std/path@1.1.2";\n');
+    await Deno.writeTextFile(`${dir}/m.ts`, `import "${served}";\n`);
     await Deno.writeTextFile(`${dir}/deno.lock`, '{"version":"5"}\n');
-    const info = (args) => new Deno.Command(Deno.execPath(), { args: ["info", "--no-config", ...args, `${dir}/m.ts`], stdout: "null", stderr: "piped" }).output();
+    const info = (args) => new Deno.Command(Deno.execPath(), { args: ["info", "--no-config", "--allow-import=127.0.0.1", ...args, `${dir}/m.ts`], env: { DENO_DIR: `${dir}/cache` }, stdout: "piped", stderr: "piped" }).output();
     const frozen = await info(lockArgs(`${dir}/deno.lock`));
     const free = await info(lockArgs(undefined));
-    return { frozen: frozen.success, said: new TextDecoder().decode(frozen.stderr), free: free.success };
-  } finally { await Deno.remove(dir, { recursive: true }); }
+    const text = (b) => new TextDecoder().decode(b);
+    return { frozen: frozen.success, said: text(frozen.stderr), free: free.success && text(free.stdout).includes(served) };
+  } finally {
+    ac.abort();
+    await server.finished;
+    await Deno.remove(dir, { recursive: true });
+  }
 }
 
 async function filing(run, github = false) {

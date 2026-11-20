@@ -69,10 +69,10 @@ cases: "a suite held to a lock runs frozen to it, and a module the lock lacks fa
 		{call: "harness.lockFlags", args: ["/app/builder/deno.lock"], expect: ["--lock=/app/builder/deno.lock", "--frozen"]},
 		{call: "harness.lockHonoured"},
 		{keep: "r"},
-		{get: "frozen", expect: false, why: "the lock names nothing, so frozen deno refuses the jsr import"},
+		{get: "frozen", expect: false, why: "the lock names nothing, so frozen deno refuses the import"},
 		{use: "r"},
 		{get: "said", matches: "lockfile is out of date"},
 		{use: "r"},
-		{get: "free", expect: true, why: "the same module with no lock flag resolves"},
+		{get: "free", expect: true, why: "the same module with no lock flag resolves, and its import is in deno info's graph"},
 	]
 }
