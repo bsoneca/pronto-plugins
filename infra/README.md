@@ -84,17 +84,26 @@ All run as your own `gcloud` login (a short-lived token handed to OpenTofu), nev
 ./saytw generate       # tofu/main.tf.json from the state
 ./saytw lint           # cue vet, cue fmt, tofu validate
 ./saytw verify@infra   # the plan: read-only, exit 2 when applying would change something
-./saytw release@infra  # applies the plan verify@infra kept, and nothing else
+INFRA_PLAN_SHA256=<digest> ./saytw release@infra  # applies the plan of that digest, and nothing else
 ```
 
-`verify@infra` removes the plan it kept before, vets the whole state (`cue vet -c`, which an
-export alone skips), exports it afresh and plans into a temporary file. It reads that plan with
-`tofu show -json`, and keeps it as `infra.tfplan` only when it reads as a plan and deletes
-nothing; on any failure the temporary plan is removed, so a failed verify leaves nothing to
-release. A plan that deletes anything is refused unless `INFRA_ALLOW_DESTROY=1` (exactly) is set
-for that run: a resource dropped from the state is not a reason to delete it from the project.
-`release@infra` reads the kept plan again by the same rule before it applies, refuses when none
-was kept, and removes the plan once it is applied. Declared accounts, repositories, secrets and
+`verify@infra` vets the whole state (`cue vet -c`, which an export alone skips), exports it
+afresh and plans into a scratch file of its own (`saved-plan make`, [`plan.nu`](plan.nu)). It
+reads that plan with `tofu show -json`, and keeps it as `tofu/plan-<sha256>.tfplan` (mode 600)
+only when it reads as a plan and deletes nothing, printing `plan sha256 <digest>`; on any failure
+only its own scratch file is removed, so a failed verify leaves nothing to release and never
+touches a plan another verify kept. A plan that deletes anything is refused unless
+`INFRA_ALLOW_DESTROY=1` (exactly) is set for that run: a resource dropped from the state is not a
+reason to delete it from the project. `release@infra` needs `INFRA_PLAN_SHA256`, the digest
+`verify@infra` printed for the plan you read:
+
+```sh
+INFRA_PLAN_SHA256=<digest> ./saytw release@infra
+```
+
+It claims that plan by renaming it (so a second release finds none), hashes it again and refuses
+a mismatch, reads it again by the same rule, applies it, and removes only the file it claimed. A
+release of an older digest cannot delete a newer plan. Declared accounts, repositories, secrets and
 buckets also carry `prevent_destroy`. A secret's `file` is added as a new version before the old
 one is left behind, and a service reads that version, so a change to the file rolls a new
 revision.
@@ -111,5 +120,5 @@ once applied: a removed block whose address is in no state does nothing.
 ./saytw --script tools.nu cue vet -c ./infra
 ./saytw --script tools.nu cue vet -c ./examples/infra
 ./saytw --script tools.nu cue vet -c -t module=example.com/infra@v0 -t bucket=my-org-infra-tfstate -t project=my-admin-project ./infra/export
-./saytw --script tools.nu nu infra/test.nu     # each plan exported in its own folder, tofu init and validate
+./saytw --script tools.nu nu infra/test.nu     # the saved-plan lifecycle (plan_test.nu), then each plan exported in its own folder, tofu init and validate
 ```

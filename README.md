@@ -207,7 +207,7 @@ limits.
 Keeps an operator's Google Cloud state in CUE (projects, IAM, service accounts, repositories,
 buckets, secrets, Cloud Run jobs and services) and applies it with OpenTofu, as the operator's
 own `gcloud` login: `verify@infra` plans and changes nothing, `release@infra` applies the plan
-it kept. The schema and the OpenTofu export live here; the state itself is the operator's.
+whose digest `INFRA_PLAN_SHA256` names (the one `verify@infra` printed). The schema and the OpenTofu export live here; the state itself is the operator's.
 [`infra/README.md`](infra/README.md) sets it up.
 
 ## pronto-journeys

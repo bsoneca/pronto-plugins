@@ -36,7 +36,7 @@ _verbs: _ @embed(file="say.cue.txt", type=text)
 		".gitignore": {
 			seed: false
 			text: """
-				# Written by generate (cue export -e plan.tofu) and by verify@infra (the plan release@infra applies).
+				# Written by generate (cue export -e plan.tofu) and by verify@infra (the plans release@infra applies, plan-<sha256>.tfplan).
 				tofu/main.tf.json
 				tofu/*.tfplan*
 				tofu/.terraform/
