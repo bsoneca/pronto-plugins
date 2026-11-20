@@ -491,14 +491,19 @@ export const besideRelease = (holding: number, waiting: number, load: number | n
 // Whether a claim that is not admitted waits for a release (its STACK_WAIT_MINUTES deadline reset): any weighted
 // claim but a release's while a release holds or waits, beside a rehearsal or not.
 export const heldByRelease = (hold: boolean, weight: number, release: boolean) => hold && weight > 0 && !release;
+// Whether the arriving claim is a nested claim of a running release: nested, with a release holder among the live holders above it.
+export const nestedOfReleaseOf = (nested: boolean, holders: { release: boolean; pid: number }[], live: number[]) =>
+  nested && holders.some((h) => h.release && live.includes(h.pid));
 // Whether an older ticket keeps its place ahead of this claim: a weighted one only while its cores would be admitted.
 // Judged by the pool's room beside a release (`poolBeside`), never the arriving claim's: a weight-0 claim is never
 // beside, and judging an older weighted ordinary ticket by it would skip that ticket and take the memory it reserved.
 // `nestedOfRelease`: the arriving claim is a nested claim of a running release. An ordinary weighted ticket without the
-// marker (`beside`, ticketText) was written by a checkout from before gates ran beside a release: that one always waits for
-// the release to end, whatever the load, and it is never admitted beside it. Counting its reserved memory ahead of the
-// release's nested claim would deadlock (the claim waits for it, it waits for the release, the release for the claim),
-// so it is skipped. A marked ticket may be admitted beside the release, so its memory still counts.
+// marker (`beside`, ticketText) was written by a copy without it, which this file assumes always waits for the release to
+// end. Counting its reserved memory ahead of the release's nested claim would deadlock (the claim waits for it, it waits
+// for the release, the release for the claim), so it is skipped. A marked ticket may be admitted beside the release, so its
+// memory still counts. Caveat: copies from pronto-plugins#373 up to the marker's commit could already run beside a release
+// and write no marker. pronto main never pinned one (its pin predates beside), so the skip is safe only while no pronto pin
+// ships a copy between #373 and this commit: every pin moves straight to this commit or later.
 export const olderKeeps = (o: { weighted: boolean; weight: number; release: boolean; marked?: boolean }, used: number, reserved: number,
   budget: number, hold: boolean, poolBeside: boolean, nestedOfRelease = false) =>
   !(nestedOfRelease && o.weighted && !o.release && !o.marked) &&
@@ -1037,7 +1042,7 @@ export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight =
       // ticket (`-w`) blocked on cores, which waits for cores a holder above a nested claim may keep (PRONTO-761,
       // PRONTO-837: a gate's nested cue behind it, and a zero-weight claim behind that, stalled for ever).
       // A nested claim of a running release (a live holder above it that is a release) skips the unmarked ordinary tickets.
-      const nestedOfRelease = nested && holders.some((h) => h.release && live.includes(h.pid));
+      const nestedOfRelease = nestedOfReleaseOf(nested, holders, live);
       const older: typeof inLine = [];
       for (const o of inLine) {
         const reserved = o.weighted ? before(coresTickets, o.name.replace(/-w$/, "")).reduce((n, c) => n + c.weight, 0) : 0;
