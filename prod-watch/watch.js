@@ -372,7 +372,8 @@ export function phasesOf(entry, windows, lifecycle) {
 const instant = (s) => {
   const m = typeof s === "string" ? /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z$/.exec(s) : null;
   const t = m ? Date.parse(`${m[1]}Z`) : NaN;
-  if (Number.isNaN(t)) throw new Error(`an unparseable timestamp ${JSON.stringify(s)} (only RFC 3339 in UTC, Z): the ledger and the cursor are where they were; every run stops here until the entry is fixed or cursor.json's at is moved past it`);
+  // A date the calendar has not (Feb 30, hour 24) parses to another day: the whole second must read back as written.
+  if (Number.isNaN(t) || new Date(t).toISOString().slice(0, 19) !== m[1]) throw new Error(`an unparseable timestamp ${JSON.stringify(s)} (only RFC 3339 in UTC, Z): the ledger and the cursor are where they were; every run stops here until the entry is fixed or cursor.json's at is moved past it`);
   return [t, (m[2] ?? "").padEnd(9, "0")];
 };
 // Whether time a is strictly after time b, to the nanosecond.

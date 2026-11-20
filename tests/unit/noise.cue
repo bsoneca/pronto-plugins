@@ -108,6 +108,11 @@ cases: {
 		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.1Z", "2026-11-19T19:00:05.099999999Z"], expect: true, why: "Z at every precision still compares"},
 		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.100000Z", "2026-11-19T19:00:05.1Z"], expect: false, why: "the same instant at two precisions is not after"},
 		{call: "watch.timeAfter", args: ["2026-11-19T19:00:06Z", "2026-11-19T19:00:05.999Z"], expect: true},
+		{call: "watch.timeAfter", args: ["2026-02-30T00:00:00Z", "2026-03-01T00:00:00Z"], throws: "an unparseable timestamp", why: "Feb 30 would read as 2 March: a date the calendar has not fails the run"},
+		{call: "watch.timeAfter", args: ["2026-11-19T24:00:00Z", "2026-11-19T00:00:00Z"], throws: "an unparseable timestamp", why: "hour 24 would roll to the next day"},
+		{call: "watch.timeAfter", args: ["2028-02-29T00:00:00.5Z", "2028-02-29T00:00:00Z"], expect: true, why: "a real leap day still reads"},
+		{call: "watch.timeAfter", args: ["2026-02-29T00:00:00.5Z", "2026-03-01T00:00:00Z"], throws: "an unparseable timestamp", why: "Feb 29 of a common year, a fraction on it included"},
+		{call: "watch.timeAfter", args: ["2016-12-31T23:59:60Z", "2016-12-31T23:59:59Z"], throws: "an unparseable timestamp", why: "a leap second no source writes (Google smears them) fails rather than reading as the next day"},
 		{call: "watch.timeAfter", args: ["2026-11-19T19:00:05.1234567890Z", "2026-11-19T19:00:05Z"], throws: "only RFC 3339 in UTC", why: "past nanoseconds is no source's time, and as text it would order wrong"},
 		{call: "watch.settleRun", args: [{entries: [], hashes: [], reached: "2026-11-19T19:10:00.000+00:00", to: "2026-11-19T19:10:00.000Z", lag: 300000}], throws: "only RFC 3339 in UTC", why: "where the cursor is decided, an offset form fails before any state"},
 	]}
