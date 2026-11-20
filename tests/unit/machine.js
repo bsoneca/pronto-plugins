@@ -248,6 +248,8 @@ export async function ownPure() {
     linuxMembers: pids(lin),
     // The supervisor (50) is gone: what carries its marker, now init's, is its run's to reap.
     linuxDead: reapDead([rec], linux([row(100, { ppid: 1 }), row(119, { ppid: 1, marker: "50-900" }), row(120, { ppid: 1 })]), 2000).map((d) => pids(d.plan)),
+    // The root pid is reused (start 5000, not the record's): its child is not the run's; an orphan under another subreaper (7) is.
+    linuxDeadReused: reapDead([rec], linux([row(100, { ppid: 1, start: 5000 }), row(121, { ppid: 100 }), row(122, { ppid: 7, marker: "50-900" })]), 2000).map((d) => pids(d.plan)),
     linuxUnreadable: lin.skipped.filter((s) => /environ/.test(s.why)).map((s) => s.pid),
     nestedByResponsible: mine([row(70, { start: 900 }), row(300, { start: 1000, responsible: 300 }), row(400, { responsible: 300, ppid: 1 })])?.rootpid ?? 0,
     nestedRootReused: mine([row(70, { start: 900 }), row(300, { start: 4000, responsible: 300 }), row(400, { responsible: 300, ppid: 1 })])?.rootpid ?? 0,
@@ -338,7 +340,7 @@ export async function ownSpi() {
     const fixture = new URL("./fixtures/own_spi.ts", import.meta.url).pathname;
     // In a process of its own: the machine calls need --allow-ffi, which a unit run does not give.
     const o = await new Deno.Command(Deno.execPath(), { args: ["run", "-A", "--no-config", "--no-lock", fixture, tmp], env: { STACK_POOL: `${tmp}/pool` }, stdout: "piped", stderr: "piped" }).output();
-    try { return JSON.parse(decode(o.stdout).trim().split("\n").pop()); } catch { return { symbols: false, inherited: false, selfNotRoots: false, error: decode(o.stderr).slice(-400) }; }
+    try { return JSON.parse(decode(o.stdout).trim().split("\n").pop()); } catch { throw new Error(`the own_spi fixture printed no JSON (exit ${o.code}): ${decode(o.stderr).slice(-600)}`); }
   } finally { await sh(`rm -rf '${tmp}'`); }
 }
 // The owner's own end cases. A keeper killed: the command it ran is still stopped (the owner signals it directly) and the

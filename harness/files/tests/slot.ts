@@ -1481,7 +1481,9 @@ export function planReap(table: PidTable, record: RunRecord, now: number): Plan 
   const holder = root && root.errno === undefined && root.start !== undefined && root.start !== record.rootstart ? root.start : undefined;
   const runId = `${record.superpid}-${record.superstart}`;
   const orphans = table.os === "linux" ? table.rows.filter((r) => r.errno === undefined && r.pid !== record.rootpid && r.pid !== record.superpid && r.marker === runId).map((r) => r.pid) : [];
-  const under = table.os === "linux" ? new Set([...descendants(table.rows, [record.rootpid, ...orphans]), ...orphans]) : undefined;
+  // The root's own subtree only while the root is the one the record names (a reused pid's children are not the run's).
+  const rootIsOurs = root !== undefined && root.errno === undefined && root.start === record.rootstart;
+  const under = table.os === "linux" ? new Set([...descendants(table.rows, [...(rootIsOurs ? [record.rootpid] : []), ...orphans]), ...orphans]) : undefined;
   for (const r of table.rows) {
     if (r.pid === record.rootpid || r.pid === record.superpid) continue;
     if (r.errno !== undefined) {
@@ -1760,9 +1762,9 @@ export function ownSys(): RealSys {
       // pid (comm) state ppid ...: comm may hold spaces and parentheses, so from the last ")".
       const f = text.slice(text.lastIndexOf(")") + 2).split(" ");
       const row: PidRow = { pid, uid: Deno.statSync(`/proc/${pid}`).uid ?? undefined, zombie: f[0] === "Z" || f[0] === "X", ppid: Number(f[1]), start: Number(f[19]) * 1e6 / ticks };
-      // What carries PRONTO_RUN belongs to a run: a child of this process (an orphan the subreaper took, or one of its own, a `ps`, a
-      // `down`) or one of init's (an orphan of a supervisor that died). Only this uid's are read; one that cannot be is said.
-      if ((row.ppid === Deno.pid || row.ppid === 1) && row.uid === uid && !row.zombie) {
+      // What carries PRONTO_RUN belongs to a run, whoever its parent is (this process, init, or another subreaper: systemd --user,
+      // a container's shim). Every live process of this uid is read; one whose environ cannot be is skipped and said.
+      if (row.uid === uid && !row.zombie) {
         try { row.marker = /(?:^|\0)PRONTO_RUN=([^\0]*)/.exec(Deno.readTextFileSync(`/proc/${pid}/environ`))?.[1]; } catch { row.unreadable = true; }
       }
       return row;
@@ -1862,6 +1864,7 @@ export function ownSys(): RealSys {
     if (linux && sym.prctl(36, 1n, 0n, 0n, 0n) !== 0) throw new Error(`slot: prctl(PR_SET_CHILD_SUBREAPER) failed: errno ${errno()}`);
     // The keeper talks through two files in a folder of its own: it writes `cmd` (the command's pid) and `done`
     // ("<code> <signal>"), and leaves when `release` appears.
+    Deno.mkdirSync(runsDir(), { recursive: true, mode: 0o755 });
     const dir = Deno.makeTempDirSync({ dir: runsDir(), prefix: "k-" });
     const pid = spawn([Deno.execPath(), "eval", "--no-config", "--no-lock", "-A", KEEPER, dir, import.meta.url, String(Deno.pid), String(row(Deno.pid).start), ...cmd], env, cwd, { pgroup: opts.pgroup });
     const read = (f: string) => { try { return Deno.readTextFileSync(`${dir}/${f}`).trim(); } catch { return undefined; } };

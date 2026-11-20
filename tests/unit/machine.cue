@@ -262,6 +262,8 @@ cases: "the run owner plans a run's members from a table, reuses of a pid includ
 		{use: "r"},
 		{get: "linuxDead", expect: [[119]], why: "a dead supervisor's run is reaped by its marker: the orphan init took is found, an unmarked process is not"},
 		{use: "r"},
+		{get: "linuxDeadReused", expect: [[122]], why: "a reused root pid's child is not planned; a marked orphan under a subreaper that is not init is"},
+		{use: "r"},
 		{get: "linuxUnreadable", expect: [116], why: "a child of the supervisor whose environ cannot be read is skipped and said, never signalled"},
 		{use: "r"},
 		{get: "nestedSupervisorGone", expect: 0, why: "a responsible pid whose run's supervisor is gone is not a live run: a claim there owns"},
