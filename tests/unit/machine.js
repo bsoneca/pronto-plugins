@@ -176,7 +176,7 @@ echo "${Deno.pid} 3 prio=release" > job-8/weight; chmod 664 job-8/weight`);
       poolWeight0NoOlder: slot.poolBesideOf(0, false, true, false, false, 1, 0, false, () => { throw new Error("read"); }, 18),
       poolRelease: slot.poolBesideOf(0, true, true, true, false, 1, 0, false, () => { throw new Error("read"); }, 18),
       poolWeighted: slot.poolBesideOf(3, false, true, true, true, 1, 0, false, () => { throw new Error("read"); }, 18),
-      poolReadFails: slot.poolBesideOf(0, false, true, true, false, 1, 0, false, () => { throw new Error("denied"); }, 18),
+      poolReadFails: (() => { try { slot.poolBesideOf(0, false, true, true, false, 1, 0, false, () => slot.load1(() => { throw new Error("Requires sys access"); }), 18); return "kept"; } catch (e) { return `${e.message} | cause: ${e.cause?.message}`; } })(),
       loadFails: (() => { try { slot.load1(() => { throw new Error("Requires sys access"); }); return "read"; } catch (e) { return `${e.message} | cause: ${e.cause?.message}`; } })(),
       loadEmpty: (() => { try { slot.load1(() => []); return "read"; } catch (e) { return e.message; } })(),
     };

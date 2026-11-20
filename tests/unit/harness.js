@@ -31,7 +31,7 @@ import { outsideConcerns, outsideKeys as keys } from "../../harness/files/tests/
 export { outsideConcerns };
 // outsideKeys with a hash that is the file's name, so a case can name what it keys.
 export const outsideKeys = (files, reads) => keys(files, (f) => `h:${f}`, reads);
-export { declaredKeys } from "../../harness/files/tests/scenarios/select.ts";
+export { declaredKeys, siblingsMoved } from "../../harness/files/tests/scenarios/select.ts";
 
 async function filing(run, github = false) {
   const marks = await Deno.makeTempDir();

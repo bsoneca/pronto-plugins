@@ -133,3 +133,16 @@ cases: "a step keeps its kind's optional field and is refused a field neither it
 		{call: "harness.stepRefused", args: [{play: "e2e4", poll: 2}], matches: "_checked\\.0\\.shape\\.poll: field not allowed", why: "an http's `poll` is that kind's alone, not a gesture's"},
 	]
 }
+
+// A scenario green at its last run, then main moves only a sibling's brief.md that Studio reads, then a by-hand run on main:
+// its diff against main is empty, so the diff path asks siblingsMoved with the digest the green run recorded (bsoneca/pronto#1555).
+cases: "a by-hand run after a sibling file the app reads moved on main runs the scenario, though no diff concerns it": {
+	suite: "harness"
+	steps: [
+		{call: "harness.siblingsMoved", args: ["d1", "d2"], expect: "a sibling file it reads changed since its last green run", why: "brief.md moved on main: the digest differs, the scenario runs"},
+		{call: "harness.siblingsMoved", args: ["d1", "d1"], expect: null, why: "the siblings as they were at the green run: nothing to run for them"},
+		{call: "harness.siblingsMoved", args: [null, "d1"], expect: "a sibling file it reads changed since its last green run", why: "a record made before the digest was kept runs once"},
+		{call: "harness.siblingsMoved", args: [null, ""], expect: null, why: "an app that reads no sibling records and compares nothing"},
+		{call: "harness.siblingsMoved", args: ["d1", null], expect: "the sibling files it reads cannot be listed", why: "an unreadable list runs it"},
+	]
+}

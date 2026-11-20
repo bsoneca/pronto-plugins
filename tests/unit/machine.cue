@@ -207,7 +207,7 @@ cases: "slot.ts holds a claim for a live release in another account's pool, and 
 		{use: "r"},
 		{get: "poolWeighted", expect: true, why: "a weighted claim's own beside, already read"},
 		{use: "r"},
-		{get: "poolReadFails", expect: "keep", why: "a weight-0 claim whose load read fails keeps every older ticket: it waits rather than take a reservation"},
+		{get: "poolReadFails", matches: "\\| cause: Requires sys access$", why: "a weight-0 claim whose load read fails is failed with the read's cause, never kept waiting behind every older ticket in silence (bsoneca/pronto#1555)"},
 		{use: "r"},
 		{get: "loadRead", expect: 7, why: "load1 is the first of the machine's three load averages"},
 		{use: "r"},
