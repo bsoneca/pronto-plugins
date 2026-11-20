@@ -9,7 +9,7 @@
 //   deno run -A prod-watch/prod-watch.ts <app> mark <fp> open|watching|noise|fixed [--reason why] [--pr N]
 // `cue` from PATH or $CUE. The state (cursor.json, ledger.json) is <the repository's root>/.omc/prod-watch/<app>/,
 // runtime state no commit carries.
-import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, completeWindows, restartBaseline, restartPending, restartRange, restartVoids, restartWindows, settleRun, timeAfter, triage, unitOf } from "./watch.js";
+import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, completeWindows, k3sNext, restartPending, restartRange, restartWindows, settleRun, timeAfter, triage, unitOf } from "./watch.js";
 
 // The app's folder: the one this script was written into (prod-watch/ is beside its files).
 const appDir = Deno.realPathSync(new URL("../", import.meta.url).pathname);
@@ -148,7 +148,6 @@ async function onNode(n: Node, script: string, stdin = ""): Promise<{ ok: boolea
 // and a window is taken only as far as that read (until). A read that fails stops the run before anything is
 // written, so the next run reads the window again. The unit is the schema's, held to letters and signs.
 let restartWins: { from: string; to: string }[] = [];
-let restartNext: number | null = null;
 let restartHold: { from: string } | null = null;
 let restartCandidates: { from: string; to: string }[] = [];
 let restartWas: number | null = null;
@@ -167,15 +166,13 @@ if (node?.restart) {
   if (unit.loadState !== "loaded") throw new Error(`the node's ${r.unit} is not loaded (LoadState ${unit.loadState ?? "unread"}): the ledger and the cursor are where they were`);
   const k3s = read("k3s.json", {});
   const was = k3s.nRestarts ?? null;
-  // The intervals an earlier rise of NRestarts rejected stay rejected until the cursor passes them (restartVoids).
-  restartVoided = k3s.voided ?? [];
+  // The intervals an earlier rise of NRestarts rejected stay rejected until the cursor passes them; k3sNext decides what is written back (the old counter while a restart is held).
+  restartVoided = Array.isArray(k3s.voided) ? k3s.voided : [];
   restartWas = was;
   restartNow = unit.nRestarts;
   restartWins = restartWindows({ journal: j.out, activeEnter: unit.activeEnter, restarts: { was, now: unit.nRestarts }, until: range.until, voided: restartVoided }, r);
   restartCandidates = completeWindows({ journal: j.out, activeEnter: unit.activeEnter, until: range.until }, r);
   restartHold = restartPending({ journal: j.out, activeEnter: unit.activeEnter, until: range.until }, r);
-  // While a restart is held the old counter stays, so the next run still sees a rise this one saw.
-  restartNext = restartBaseline({ was, now: unit.nRestarts, hold: restartHold });
 }
 const sources: { release?: { at: string; short: string; sha: string } | null; images: Record<string, string>; pods: number } = { images: {}, pods: 0 };
 if (node) {
@@ -254,6 +251,6 @@ if (!since) {
   write("ledger.json", next);
   // The overlap is read again, so what it holds is what the next run must not count again.
   write("cursor.json", { at: settled.committed, seen: settled.seen });
-  const voided = restartVoids({ voided: restartVoided, windows: restartCandidates, restarts: { was: restartWas, now: restartNow }, committed: settled.committed });
-  if (restartNext !== null || voided.length) write("k3s.json", { nRestarts: restartNext ?? restartWas, ...(voided.length ? { voided } : {}) });
+  const k3sState = k3sNext({ was: restartWas, now: restartNow, hold: restartHold, voided: restartVoided, candidates: restartCandidates, committed: settled.committed });
+  if (k3sState !== null) write("k3s.json", k3sState);
 }

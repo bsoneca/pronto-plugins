@@ -91,6 +91,13 @@ _journal: {
 	stopOnly: """
 		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
 		"""
+	stopsOnly: """
+		2026-11-19T18:59:54.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		2026-11-19T19:30:00.000995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		"""
+	stopFraction: """
+		2026-11-19T19:00:00.500995+00:00 host systemd[1]: Stopping k3s.service - Lightweight Kubernetes...
+		"""
 }
 _restartRules: _rules & {"node-restart": {match: "apiserver not ready", during: ["restart"], why: "a case's own rule: the API answers so between k3s's stop and its start"}}
 // An "apiserver not ready" line of a service, read from the node or from Cloud Run.
@@ -198,6 +205,28 @@ cases: {
 		{call: "watch.restartVoids", args: [{windows: "$rejected", restarts: {was: 6, now: 6}, committed: "2026-11-19T19:01:00.000Z"}], expect: [], why: "no rise and a k3s.json of {nRestarts} alone (no voided): nothing voided"},
 		{call: "watch.restartVoids", args: [{windows: "$rejected", restarts: {was: null, now: 6}, committed: "2026-11-19T19:01:00.000Z"}], expect: [], why: "no baseline is no rise"},
 		{call: "watch.restartWindows", args: [{journal: _journal.twice, activeEnter: null, restarts: {was: 0, now: 0}, until: "2026-11-19T20:00:00Z", voided: [_window]}, _restart], expect: [{from: "2026-11-19T19:29:55.000Z", to: "2026-11-19T19:32:10.000Z"}], why: "a void rejects only the windows it overlaps"},
+	]}
+	"voids are deduped, malformed ones dropped, a non-array reads as none": {suite: "noise", steps: [
+		{call: "watch.restartVoids", args: [{voided: [_window, _window], windows: [_window], restarts: {was: 5, now: 6}, committed: "2026-11-19T19:01:00.000Z"}], expect: [_window], why: "the kept and the new one are the same interval: one entry"},
+		{call: "watch.restartVoids", args: [{voided: [{from: "nope", to: "2026-11-19T19:02:09.000Z"}, {from: "2026-11-19T18:59:49.000Z"}, {}, null, _window], committed: "2026-11-19T19:01:00.000Z"}], expect: [_window], why: "an entry whose from or to does not parse is dropped"},
+		{call: "watch.restartVoids", args: [{voided: {from: "2026-11-19T18:59:49.000Z", to: "2026-11-19T19:02:09.000Z"}, committed: "2026-11-19T19:01:00.000Z"}], expect: [], why: "a voided that is no array is none"},
+		{call: "watch.restartVoids", args: [{voided: [_window], committed: "2026-11-19T19:02:09.000Z"}], expect: [_window], why: "an interval ending at the cursor is kept: only one the cursor is past is dropped"},
+	]}
+	"k3s.json's next state is a pure decision of the run": {suite: "noise", steps: [
+		{call: "watch.k3sNext", args: [{was: 5, now: 6, hold: {from: "2026-11-19T18:59:49.000Z"}, voided: [], candidates: [_window], committed: "2026-11-19T18:59:49.000Z"}], expect: {nRestarts: 5, voided: [_window]}, why: "a held rise: the old counter stays, the rejected window is kept (the cursor is the hold's from)"},
+		{call: "watch.k3sNext", args: [{was: 5, now: null, hold: null, voided: [_window], candidates: [], committed: "2026-11-19T19:01:00.000Z"}], expect: {nRestarts: 5, voided: [_window]}, why: "NRestarts unread with voids to keep: the old counter is written back"},
+		{call: "watch.k3sNext", args: [{was: 6, now: 6, hold: null, voided: [_window], candidates: [], committed: "2026-11-19T19:02:10.000Z"}], expect: {nRestarts: 6}, why: "no rise and every void passed: the counter alone"},
+		{call: "watch.k3sNext", args: [{was: 6, now: 6, hold: null, voided: [_window], candidates: [], committed: "2026-11-19T19:02:09.000Z"}], expect: {nRestarts: 6, voided: [_window]}, why: "a void ending at the cursor is kept"},
+		{call: "watch.k3sNext", args: [{was: 5, now: 6, hold: null, voided: [_window], candidates: [_window], committed: "2026-11-19T19:01:00.000Z"}], expect: {nRestarts: 6, voided: [_window]}, why: "duplicates collapse"},
+		{call: "watch.k3sNext", args: [{was: 6, now: 6, hold: null, voided: [{from: "x", to: "y"}, {from: "2026-11-19T18:59:49.000Z"}], candidates: [], committed: "2026-11-19T19:01:00.000Z"}], expect: {nRestarts: 6}, why: "malformed entries are dropped"},
+		{call: "watch.k3sNext", args: [{was: 6, now: 7, hold: null, voided: "garbage", candidates: [_window], committed: "2026-11-19T19:01:00.000Z"}], expect: {nRestarts: 7, voided: [_window]}, why: "a voided that is no array reads as none"},
+		{call: "watch.k3sNext", args: [{was: null, now: null, hold: null, voided: [], candidates: [], committed: "2026-11-19T19:01:00.000Z"}], expect: null, why: "nothing to write"},
+		{call: "watch.k3sNext", args: [{was: null, now: 0, hold: null, voided: [], candidates: [], committed: "2026-11-19T19:01:00.000Z"}], expect: {nRestarts: 0}, why: "a first run writes the counter"},
+	]}
+	"ActiveEnterTimestamp pairs with the last stop only, compared with the stop's whole second": {suite: "noise", steps: [
+		{call: "watch.completeWindows", args: [{journal: _journal.stopsOnly, activeEnter: "2026-11-19T19:30:10Z", until: "2026-11-19T20:00:00Z"}, _restart], expect: [{from: "2026-11-19T19:29:55.000Z", to: "2026-11-19T19:32:10.000Z"}], why: "the earlier stop has no start line and is not the last: no window"},
+		{call: "watch.completeWindows", args: [{journal: _journal.stopFraction, activeEnter: "2026-11-19T19:00:00Z", until: _done}, _restart], expect: [{from: "2026-11-19T18:59:55.500Z", to: "2026-11-19T19:02:00.000Z"}], why: "stopped at 19:00:00.5 and active at the whole second 19:00:00: the unit's seconds are cut, so it pairs"},
+		{call: "watch.completeWindows", args: [{journal: _journal.stopOnly, activeEnter: "2026-11-19T18:59:53Z", until: _done}, _restart], expect: [], why: "an ActiveEnterTimestamp before the stop's second is an earlier start"},
 	]}
 	"a restart not finished at the cutoff holds the cursor at its stop minus lead": {suite: "noise", steps: [
 		{call: "watch.restartPending", args: [{journal: _journal.stopOnly, activeEnter: null, until: "2026-11-19T19:00:00Z"}, _restart], expect: {from: "2026-11-19T18:59:49.000Z"}, why: "stopped, no start yet, 6 s down of 300"},

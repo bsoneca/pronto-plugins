@@ -410,7 +410,22 @@ const overlaps = (w, intervals) => (intervals ?? []).some((v) => Date.parse(w.fr
 export function restartVoids({ voided = [], windows = [], restarts = null, committed }) {
   const rose = !!restarts && restarts.was != null && restarts.now != null && restarts.now > restarts.was;
   const passed = Date.parse(committed);
-  return [...(voided ?? []), ...(rose ? windows : [])].filter((v) => !(Date.parse(v.to) < passed));
+  const seen = new Set();
+  return [...(Array.isArray(voided) ? voided : []), ...(rose ? windows : [])].filter((v) => {
+    if (Number.isNaN(Date.parse(v?.from)) || Number.isNaN(Date.parse(v?.to)) || Date.parse(v.to) < passed) return false;
+    const key = `${v.from}|${v.to}`;
+    return seen.has(key) ? false : (seen.add(key), true);
+  });
+}
+// What a pass writes to k3s.json (`was` the counter it read, `now` the unit's, `hold` restartPending's, `voided` what
+// k3s.json held, `candidates` completeWindows, `committed` the cursor): the counter restartBaseline gives (the old one
+// when there is none to write but voids remain) and the voids restartVoids keeps, or null when there is nothing to write.
+/** @param {{was?: number | null, now?: number | null, hold?: {from: string} | null, voided?: any, candidates?: {from: string, to: string}[], committed: string}} input */
+export function k3sNext({ was = null, now = null, hold = null, voided = [], candidates = [], committed }) {
+  const next = restartBaseline({ was, now, hold });
+  const voids = restartVoids({ voided, windows: candidates, restarts: { was, now }, committed });
+  if (next === null && !voids.length) return null;
+  return { nRestarts: next ?? was, ...(voids.length ? { voided: voids } : {}) };
 }
 // What NRestarts the next run compares with: this run's, unless a restart is pending (restartPending): the run
 // that meets a rise while it holds its entries back must leave the old counter, or the next run, which reads
@@ -456,12 +471,16 @@ export function settleRun({ entries, hashes, hold = null, since = false, counted
 export const hashInput = (entry) => JSON.stringify({ ...entry, source: undefined });
 // The times (ms) of the journal's stop and crash lines (a line's first word is its ISO time, with microseconds,
 // trimmed to milliseconds), and each stop paired with its start: the first start line after it, and only when no
-// start line follows, the ActiveEnterTimestamp (whole seconds: next to a precise line it would end a window early).
+// start line follows, the ActiveEnterTimestamp (whole seconds: next to a precise line it would end a window early),
+// and only for the last stop: it says when the unit last became active, so an earlier stop has no start of its own
+// beyond the journal's. It is compared with the stop's whole second, as the stop line is finer than it.
 function journalTimes(journal, activeEnter, cfg) {
   const times = (re) => journal.split("\n").filter((l) => new RegExp(re).test(l)).map((l) => Date.parse(l.split(" ")[0].replace(/(\.\d{3})\d+/, "$1"))).filter((t) => !Number.isNaN(t));
   const starts = times(cfg.start).sort((a, b) => a - b);
   const enter = activeEnter ? Date.parse(activeEnter) : NaN;
-  const pairs = times(cfg.stop).map((stop) => ({ stop, start: starts.find((t) => t >= stop) ?? (enter >= stop ? enter : undefined) }));
+  const stops = times(cfg.stop);
+  const last = Math.max(...stops);
+  const pairs = stops.map((stop) => ({ stop, start: starts.find((t) => t >= stop) ?? (stop === last && enter >= Math.floor(stop / 1000) * 1000 ? enter : undefined) }));
   return { stops: pairs.map((p) => p.stop), crashes: times(cfg.crash), pairs };
 }
 // A restart not finished at the cutoff: a stop with no start yet but still within `down` of the cutoff (the start

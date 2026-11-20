@@ -133,8 +133,9 @@ down: 300    // the longest a stop may stay down
 Each pass reads, over the node's ssh and read-only, `sudo -n journalctl -u <unit> _PID=1` (the unit's lines of
 systemd itself) and `systemctl show <unit> -p LoadState -p ActiveEnterTimestamp -p NRestarts` (journal lines as `-o short-iso-precise`; a unit whose `LoadState` is not `loaded` stops the run). A window is
 `[stop - lead, start + tail]` for a stop line followed within `down` seconds by a start: the first start line of
-the journal after the stop, and only when none follows it the ActiveEnterTimestamp (whole seconds, so beside a
-precise line it would end the tail early). It is **no window**, and the same entries alert, when:
+the journal after the stop, and only when none follows it the ActiveEnterTimestamp of the **last** stop (whole
+seconds, so beside a precise line it would end the tail early; an earlier stop with no start line gets no window, and
+the timestamp is compared with the stop's whole second). It is **no window**, and the same entries alert, when:
 
 - a crash line is in it, or `NRestarts` rose since the last pass (`k3s.json` in the state folder), or is unread. The
   guard is for a crash systemd restarted that the `crash` pattern misses: any rise since the last pass drops all of
@@ -144,7 +145,8 @@ precise line it would end the tail early). It is **no window**, and the same ent
   (`{"nRestarts": n, "voided": [{"from", "to"}]}`, `restartVoids`), because the next pass compares equal counters and
   would accept them when its log read was cut by a row limit or the overlap gets late lines. A pass rejects every
   window overlapping a voided interval and drops one once the cursor it commits is past its end. A `k3s.json` of
-  `{"nRestarts": n}` alone has none;
+  `{"nRestarts": n}` alone has none, as has one whose `voided` is no list; duplicates collapse and an entry whose times
+  do not parse is dropped (`k3sNext` decides what a pass writes);
 - its end (`start + tail`) is past what the journal read reached: an incomplete window may hold a crash not read yet;
 - the entry is not the node's. The window applies only to entries read from the node (VictoriaLogs), never to
   a Cloud Run service the app also watches.
