@@ -148,8 +148,14 @@ branchesOptIn: _branches.branches & {enabled: true, abandonHours: 6, abandonAtte
 noBranchHours: [if (#Cron & {watch: ["x"], probes: {}, branches: abandonHours: 0}) == _|_ {"refused"}, "accepted"][0] & "refused"
 
 // The phrases a run's `why` carries are written once, here, and never change under an app: runs.jsonl and its readers carry them.
-causeNames: _defaults.causes & {noVerdict: "the rehearsal gave no verdict", rehearsalFailed: "the rehearsal failed", rehearsalStopped: "the rehearsal was stopped", previewFailed: "the release preview failed", previewStopped: "the preview was stopped", endedBeforeSlot: "ended before its slot", signal: "stopped by a signal"}
+causeNames: _defaults.causes & {noVerdict: "the rehearsal gave no verdict", rehearsalFailed: "the rehearsal failed", rehearsalStopped: "the rehearsal was stopped", previewFailed: "the release preview failed", previewStopped: "the preview was stopped", endedBeforeSlot: "ended before its slot", signal: "stopped by a signal", treeMoved: "the run's tree moved"}
 noRenamedCause: [if (#Cron & {watch: ["x"], probes: {}, causes: noVerdict: "no verdict"}) == _|_ {"refused"}, "accepted"][0] & "refused"
 noNewCause: [if (#Cron & {watch: ["x"], probes: {}, causes: other: "x"}) == _|_ {"refused"}, "accepted"][0] & "refused"
 // causes.js, which cron.js and release-cron.ts import, is releaseCron.causes emitted from the schema: the committed file is that text, and an app's copy too.
 causesModule: (_causesFile == _causesJS && _t.files["release-cron/causes.js"].text == _causesJS) & true
+// The outcome names are fixed (records on disk carry them) and closed like the causes.
+outcomeNames: _defaults.outcomes & {released: "released", failed: "failed", skipped: "skipped", dry: "dry", bisect: "bisect", stopped: "stopped", closed: "closed", held: "held", abandoned: "abandoned", heldRefused: "held-refused", heldBackport: "held-backport", cleared: "cleared"}
+noNewOutcome: [if (#Cron & {watch: ["x"], probes: {}, outcomes: other: "x"}) == _|_ {"refused"}, "accepted"][0] & "refused"
+// A preview's `up` may run on 120 minutes after a signal unless the app says otherwise.
+_pv: #Cron & {watch: ["x"], probes: {}, target: {release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example", preview: {up: ["./u"], reach: ["./r"], down: ["./d"]}}}
+upMinutesDefault: _pv.target.preview.upMinutes & 120

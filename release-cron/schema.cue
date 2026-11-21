@@ -70,6 +70,25 @@ releaseCron: #Cron
 		previewStopped:   "the preview was stopped"
 		endedBeforeSlot:  "ended before its slot"
 		signal:           "stopped by a signal"
+		treeMoved:        "the run's tree moved"
+	}
+	// The names a run's `outcome` takes in runs.jsonl and release-cron.log, written once here and exported with the causes
+	// (causes.js, the export package): release-cron.ts and cron.js build every outcome from them, and pronto's metrics imports
+	// them. `held`, `abandoned`, `heldRefused` and `heldBackport` are followed by the branch (`held release/studio/20261119-1015`);
+	// `cleared` is abandon's own line in the log alone. A name is fixed: the records on disk carry it.
+	outcomes: {
+		released:     "released"
+		failed:       "failed"
+		skipped:      "skipped"
+		dry:          "dry"
+		bisect:       "bisect"
+		stopped:      "stopped"
+		closed:       "closed"
+		held:         "held"
+		abandoned:    "abandoned"
+		heldRefused:  "held-refused"
+		heldBackport: "held-backport"
+		cleared:      "cleared"
 	}
 	// The top-level `holder`, kept for the apps that set it: the default of rehearsal.holder.
 	holder: *"verify@local" | string
@@ -173,6 +192,10 @@ releaseCron: #Cron
 		// "first": before the rehearsal takes its slot, so a preview that fails costs no rehearsal. "beside": at the same
 		// time as the rehearsal, the first to fail stopping the other (README, "When the preview runs").
 		when: *"after" | "first" | "beside"
+		// How long `up` may run on after a signal came, counted from when it started (minutes): a signal never stops it at once (that
+		// would end only the local ssh while the remote release goes on, and `down` would start beside it); past this its process
+		// group is stopped, and only then does `down` run.
+		upMinutes: *120 | (int & >0)
 	}
 	_alive: [
 		(#SshAlive & {cmd: release}).ok,

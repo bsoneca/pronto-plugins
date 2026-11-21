@@ -334,6 +334,28 @@ Guards, each so a branch cannot lose or smuggle a change:
   reports the file and why and exits 1, and `abandon --force` removes that file.
 - **Branches off change nothing.** With `branches.enabled: false` there is no `open` or `released-branch`, and every rule above reduces to
   what it was (`missingFromMain` without merges is `backported`; `heldLanded` is false without a held release).
+- **Fourth Codex round (PRONTO-870).** Every refusal below is in the run's log and in the run's `why`/`cause`, never a silent skip, and each
+  decision is a pure function of `cron.js` with cases (`tests/unit/cron_round4.cue`).
+  - The backport check's patch ids come from two git processes whose exits are both checked (`patchIdsOf`); a failure, or a commit that changes
+    the tree yet has no patch id (`patchOf`), stops the check and keeps the branch and its record. A commit is empty only with no tree change.
+  - The released-branch record is checked against the exact commit a run releases on every run that can deploy main, `RELEASE_CRON_REF` too (`backportCheck`).
+  - The migration check reads `git diff --name-only -z` and splits on NUL (`nulPaths`), so a path git would quote is still seen.
+  - `abandon` takes the run's lock (`lockStep`, the same way a run does) before it reads `open` or `released-branch`, and holds it until its changes are done;
+    a live run's lock refuses it, in the log and in the error.
+  - The rehearsal child starts with `clearEnv: true` (`rehearsalSpawn`), so a removed `REHEARSE_LIVE` is not inherited.
+  - A `flags-released` marker that cannot be written fails the bookkeeping with its path (`run.flagsReleased`), apart from the deploy's outcome.
+  - A held release resumes at confirmation only on a post-deployment marker (`servingAfterRelease: true`); otherwise it is run again even when what
+    the node reads equals the tip (`servingPlan`, `run.heldRerun`).
+  - **Held releases run only from a separate trusted checkout.** When the driver is loaded from the run's own worktree (the installed scheduler's
+    `wt`), a held release is refused (`held-refused`): the candidate would supply the settings and script that confirm it (`heldTrusted`).
+  - **Release branches stay linear.** A tip whose merges since the cut have a nonempty combined diff (a conflict resolution) is refused
+    (`resolvedMerges`, `refusedTip`): rebase the branch or cherry-pick onto it. `abandon --force` stays the way out of a branch released earlier.
+  - A signal while a remote preview's `up` runs does not stop it at once (that ends only the local ssh): it waits for `up` to exit, at most
+    `preview.upMinutes` (120) from its start, then stops its process group (the recorded pid, never a pattern), and only then runs `down`
+    (`signalStops`, `previewUpStep`, `upExtra`).
+  - `releaseCron.outcomes` (schema.cue) names every outcome (`released`, `failed`, `skipped`, `dry`, `bisect`, `stopped`, `closed`, `held`, `abandoned`,
+    `held-refused`, `held-backport`, `cleared`), exported in `causes.js` with the causes; the driver and `cron.js` build them from it (`branchOutcome`), and
+    pronto's metrics imports it. A run whose tree moved under the rehearsal ends `failed` with `cause: treeMoved`, an infrastructure failure that gives no verdict.
 - **While a release is held, main does not release.** A fix merged to main waits until the branch closes (released or abandoned);
   the held notice says so, and `release-cron.ts <app> abandon` is how the lead lets main release again.
 - **`RELEASE_CRON_REF`** is refused while a release is held, unless it names the held branch, which then runs as any held run (it
