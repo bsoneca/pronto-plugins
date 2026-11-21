@@ -326,6 +326,13 @@ it skips when `serving` already names main's head, releases with `release`, and 
 `serving` names the head and the probes answer. `ready` is not read. aprende, on Cloudflare Pages,
 uses it. An app without `target` is `{kind: "cloud-run"}` and runs exactly as before.
 
+`servingAfterRelease` (default `false`) says that `serving` reads a ref the release command writes only after the
+release finished. Only then is a `release` that exits 255 (ssh's own failure, PRONTO-758) read as possibly landed: the
+run reads `serving` for about 15 min and goes on to confirm if it names the head. Otherwise 255 fails the release, as
+before PRONTO-758. Studio's `refs/released/studio`, written after `release@k8s` succeeds, qualifies; a deployment
+worktree's HEAD does not (Bonk Chess's moves before `mise install` and `release@k8s`, so a drop after the checkout would
+count as released while the old pods still serve; PRONTO-870).
+
 ## Install, pause, remove
 
 ```sh

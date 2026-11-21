@@ -30,10 +30,18 @@ cases: {
 	"a release whose ssh dropped counts as landed when the node serves its commit": {suite: "cron", steps: [
 		{call: "cron.sshDropped", args: [255], expect: true, why: "PRONTO-758: ssh's own failure"},
 		{call: "cron.sshDropped", args: [1], expect: false},
-		{call: "cron.landed", args: [255, "f203025f", "f203025f"], expect: true, why: "2026-11-18 11:34 BRT: Studio landed, its ssh dropped"},
-		{call: "cron.landed", args: [255, "ebd25c98", "f203025f"], expect: false},
-		{call: "cron.landed", args: [1, "f203025f", "f203025f"], expect: false, why: "the release command failed: not a drop"},
-		{call: "cron.landed", args: [255, "", "f203025f"], expect: false},
+		{call: "cron.landed", args: [255, "f203025f", "f203025f", true], expect: true, why: "2026-11-18 11:34 BRT: Studio landed, its ssh dropped"},
+		{call: "cron.landed", args: [255, "ebd25c98", "f203025f", true], expect: false},
+		{call: "cron.landed", args: [1, "f203025f", "f203025f", true], expect: false, why: "the release command failed: not a drop"},
+		{call: "cron.landed", args: [255, "", "f203025f", true], expect: false},
+	]}
+	"a 255 is rescued only when serving reads a ref written after the release finished": {suite: "cron", steps: [
+		{call: "cron.rescuable", args: [255, true], expect: true, why: "Studio's refs/released/studio"},
+		{call: "cron.rescuable", args: [255, false], expect: false, why: "PRONTO-870: a worktree HEAD moves before the release runs"},
+		{call: "cron.rescuable", args: [255, null], expect: false, why: "unset is the default, false"},
+		{call: "cron.rescuable", args: [1, true], expect: false},
+		{call: "cron.landed", args: [255, "f203025f", "f203025f", false], expect: false, why: "the node's HEAD already names the commit; the old pods still serve"},
+		{call: "cron.landed", args: [255, "f203025f", "f203025f"], expect: false},
 	]}
 	"only a run that released or failed makes the next one wait": {suite: "cron", steps: [
 		{call: "cron.spaced", args: ["released"], expect: true},
