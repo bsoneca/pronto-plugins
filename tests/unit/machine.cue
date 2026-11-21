@@ -501,3 +501,67 @@ cases: "an owned command gets its stdin and gives its stdout, stderr and exit co
 		{get: "stderr", expect: true, why: "and its stderr"},
 	]
 }
+cases: "a leftover is named by its executable, pid and age, never by an argument": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownNames"},
+		{keep: "r"},
+		{get: "noArgs", expect: true, why: "the description of a process whose command line carries a token has no argument text"},
+		{use: "r"},
+		{get: "text", expect: "pid 42 (age 1m, curl)", why: "the pid, the age and the executable's basename"},
+		{use: "r"},
+		{get: "exe", expect: "tool", why: "a path is cut to its basename"},
+		{use: "r"},
+		{get: "realNoSecret", expect: true, why: "the real read of a live process gives its executable only, one word, no token"},
+		{use: "r"},
+		{get: "real", expect: "sleep", why: "the sleep a shell exec'd into"},
+	]
+}
+cases: "a stop that never returns still ends the run in the kill, within the grace": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownStopHangs"},
+		{keep: "r"},
+		{get: "ended", expect: true, why: "the run ends though its stop callback never resolves"},
+		{use: "r"},
+		{get: "code", expect: 124, why: "as a timeout"},
+		{use: "r"},
+		{get: "withinGrace", expect: true, why: "within the grace plus the teardown, not 20 s"},
+	]
+}
+cases: "the ledger is read only from a folder and regular files that are ours, never a link or a FIFO": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownLedger"},
+		{keep: "r"},
+		{get: "entries", expect: [10], why: "the regular file is read; the symlink to it and the FIFO are ignored, the FIFO without blocking"},
+		{use: "r"},
+		{get: "otherUidDir", expect: [], why: "a runs folder that is another uid's is ignored whole"},
+		{use: "r"},
+		{get: "openDir", expect: [], why: "so is one others can write, though its entry is ours"},
+		{use: "r"},
+		{get: "fileOurs", expect: true, why: "our regular file is usable"},
+		{use: "r"},
+		{get: "fileOther", expect: false, why: "another uid's file is not"},
+		{use: "r"},
+		{get: "link", expect: false, why: "a link is not"},
+		{use: "r"},
+		{get: "fifo", expect: false, why: "neither is a FIFO or any other non-regular file"},
+	]
+}
+cases: "the keeper keeps polling while its supervisor is alive, however long, and ends the run once it is gone": {
+	suite: "machine"
+	steps: [
+		{call: "machine.keeperDecides"},
+		{keep: "r"},
+		{get: "alive", expect: "keep", why: "a live supervisor is kept: the keeper has no 12 h exit"},
+		{use: "r"},
+		{get: "gone", expect: "exit", why: "no such pid"},
+		{use: "r"},
+		{get: "reused", expect: "exit", why: "another process at the pid"},
+		{use: "r"},
+		{get: "zombie", expect: "exit", why: "a zombie supervisor is gone"},
+		{use: "r"},
+		{get: "unreadable", expect: "keep", why: "a read that failed says nothing"},
+	]
+}
