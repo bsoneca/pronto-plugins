@@ -179,7 +179,7 @@ const holderOf = (pid: number) => holderKind(sh("ps", ["-o", "command=", "-p", S
 // `up` to the end of `down`. The next run to take the lock over a dead holder first stops that `up` (TERM, then KILL after the grace: the recorded pgid
 // only, never a pattern) and runs the `down`, so the preview is never left for a run to race. What it did is `reaped`, told in the run's record.
 const previewRecord = `${state}/lock.preview`;
-// A process's identity: whether it exists, its start time (`ps -o lstart=`) and the machine's boot (Linux's boot_id, else macOS's kern.boottime), what
+// A process's identity: whether it exists, its start time (`ps -o lstart=`) and the machine's boot (Linux's boot_id, else macOS's kern.bootsessionuuid), what
 // tells it from a later process that reused its pid (cron.js reapSignal).
 const bootId = () => { try { return Deno.readTextFileSync("/proc/sys/kernel/random/boot_id").trim(); } catch { return sh("sysctl", ["-n", "kern.bootsessionuuid"], undefined, {}, 10).out; } };
 const identityOf = (pid: number) => { const r = sh("ps", ["-o", "lstart=", "-p", String(pid)], undefined, { LC_ALL: "C", LANG: "C" }, 10); return { exists: r.ok && r.out !== "", lstart: r.out, boot: bootId() }; };
