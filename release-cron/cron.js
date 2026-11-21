@@ -822,6 +822,10 @@ export const trustNotice = (told, branch, why) => ({ key: `${branch} ${why}`, te
 // What holds the run lock, from the holder's command line (`ps -o command= -p <pid>`): `abandon` when its verb is abandon, else a run.
 export const holderKind = (command) => /\sabandon(\s|$)/.test(command ?? "") ? "abandon" : "run";
 
+// The lock a version before this one left: a plain file holding the holder's pid (`isFile`; its `pid`, `alive`). "busy" while that holder lives,
+// "remove" when it is dead or unreadable (the mkdir lock is then made), "none" when the lock is not a file.
+export const legacyFileLock = (isFile, pid, alive) => !isFile ? "none" : pid && alive ? "busy" : "remove";
+
 // `abandon`: what it does to the hold (`open`, {branch} or null) and the record of a branch already released (`released`,
 // {branch} or null), after the checks of a released branch (`missing`: the commits not on main, null when they could not be read;
 // `gone`: the branch deleted from origin, false it moved, "unknown" origin could not be asked, null not tried). A hold whose branch

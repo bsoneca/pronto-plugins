@@ -32,7 +32,7 @@
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import { causes, outcomes } from "./causes.js";
-import { appendWhy, holderKind, trustNotice, failureOf, abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, servingPlan, rerunWhy, heldTrusted, backportCheck, rehearsalSpawn, flagsBookkeeping, branchOutcome, patchIdsOf, patchOf, nulPaths, resolvedMerges, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, abandonPlan, shippedRecord, releaseAttempt, cutPlan, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
+import { appendWhy, holderKind, legacyFileLock, trustNotice, failureOf, abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, servingPlan, rerunWhy, heldTrusted, backportCheck, rehearsalSpawn, flagsBookkeeping, branchOutcome, patchIdsOf, patchOf, nulPaths, resolvedMerges, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, abandonPlan, shippedRecord, releaseAttempt, cutPlan, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -122,9 +122,25 @@ const jsonl = (f: string) => { try { return Deno.readTextFileSync(f).split("\n")
 const lockPath = `${state}/lock`;
 const lockPid = () => Number((() => { try { return Deno.readTextFileSync(`${lockPath}/pid`); } catch { return "0"; } })());
 const takeLock = (): { got: true } | { got: false; pid: number } => {
-  try { Deno.mkdirSync(lockPath); } catch {
-    const pid = lockPid();
-    if (pid && sh("kill", ["-0", String(pid)]).ok) return { got: false, pid };
+  // A preview record a dead run of the flock version left: said once, loudly; never acted on (its `down` is for a person to run).
+  try {
+    const rec = JSON.parse(Deno.readTextFileSync(`${state}/lock.preview`));
+    console.log(`release-cron: WARNING: ${state}/lock.preview exists: a preview may be left running; remove it with \`${(rec.down ?? []).join(" ")}\` in ${rec.dir ?? "its directory"}, then delete the record; nothing was done`);
+  } catch (e) { if (!(e instanceof Deno.errors.NotFound)) console.log(`release-cron: WARNING: ${state}/lock.preview exists but could not be read (${(e as Error).message.split("\n")[0]}): a preview may be left running`); }
+  const make = () => { try { Deno.mkdirSync(lockPath); return true; } catch { return false; } };
+  if (!make()) {
+    // The plain file the flock version left (never deleted): its content is the holder's pid (cron.js legacyFileLock).
+    let isFile = false;
+    try { isFile = Deno.statSync(lockPath).isFile; } catch { /* none */ }
+    if (isFile) {
+      const pid = (() => { try { return Number(Deno.readTextFileSync(lockPath)) || 0; } catch { return 0; } })();
+      if (legacyFileLock(true, pid, !!pid && sh("kill", ["-0", String(pid)]).ok) === "busy") return { got: false, pid };
+      try { Deno.removeSync(lockPath); } catch { /* gone */ }
+      if (!make()) return { got: false, pid: lockPid() };
+    } else {
+      const pid = lockPid();
+      if (pid && sh("kill", ["-0", String(pid)]).ok) return { got: false, pid };
+    }
   }
   Deno.writeTextFileSync(`${lockPath}/pid`, String(Deno.pid));
   return { got: true };

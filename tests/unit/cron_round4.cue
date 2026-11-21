@@ -98,6 +98,12 @@ cases: {
 		{call: "cron.holderKind", args: ["/usr/bin/deno run -A release-cron.ts studio run"], expect: "run"},
 		{call: "cron.holderKind", args: [""], expect: "run", why: "the holder's command could not be read"},
 	]}
+	"a lock left as a plain file by the flock version keeps its live holder and is removed when dead": {suite: "cron", steps: [
+		{call: "cron.legacyFileLock", args: [true, 4242, true], expect: "busy"},
+		{call: "cron.legacyFileLock", args: [true, 4242, false], expect: "remove"},
+		{call: "cron.legacyFileLock", args: [true, 0, false], expect: "remove", why: "empty or unreadable content"},
+		{call: "cron.legacyFileLock", args: [false, 4242, true], expect: "none", why: "a directory: the mkdir lock decides"},
+	]}
 	"a throw after the run's reason was set appends to it": {suite: "cron", steps: [
 		{call: "cron.appendWhy", args: [null, "boom"], expect: "boom"},
 		{call: "cron.appendWhy", args: ["the rehearsal failed (exit 1)", "writeOpen failed"], expect: "the rehearsal failed (exit 1); writeOpen failed"},

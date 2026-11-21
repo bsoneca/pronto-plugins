@@ -355,10 +355,9 @@ Guards, each so a branch cannot lose or smuggle a change:
     pronto's metrics imports it. A run whose tree moved under the rehearsal ends `failed` with `cause: treeMoved`, an infrastructure failure that gives no verdict.
   - **Review round.** No hold is cut while the scheduler runs from the run's own checkout (`cutPlan`'s trust condition, said in the failed run's `why`), and
     `install` is refused when `branches.enabled` (the job runs from `wt`); the trust refusal of a held release is told once for each branch and reason
-    (`trustNotice`).
-    A refused `abandon` is also appended to runs.jsonl, naming whether a run or an abandon holds
+    (`trustNotice`). A refused `abandon` is also appended to runs.jsonl, naming whether a run or an abandon holds
     the lock (`holderKind`). The watch diff and the retry judgement read `-z` paths too, and a failed red verdict's cause and reason are on the run's record
-    before anything that can throw.
+    before anything that can throw. A `<state>/lock` left as a plain file by the earlier flock version keeps its live holder and is removed when dead (`legacyFileLock`); a leftover `<state>/lock.preview` is logged with its `down` command and never acted on.
 - **While a release is held, main does not release.** A fix merged to main waits until the branch closes (released or abandoned);
   the held notice says so, and `release-cron.ts <app> abandon` is how the lead lets main release again.
 - **`RELEASE_CRON_REF`** is refused while a release is held, unless it names the held branch, which then runs as any held run (it
