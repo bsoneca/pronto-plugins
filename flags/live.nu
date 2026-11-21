@@ -8,7 +8,7 @@
 # "The store"): a drill or a laptop, with no gcloud.
 #   bin/pronto-flags setup <app-dir>               # the bucket, its readers, the first push
 #   bin/pronto-flags push <app-dir> [--flip a,b] [--drop a,b]
-#                                                  # the flags as flags_spec.cue says them now, merged over the live ones (see `keep-live`), once their cases pass
+#                                                  # the flags as flags_spec.cue says them now, merged over the live ones (see `keep-live`): a flag turned on, or its accounts changed, needs --flip and its cases
 #   bin/pronto-flags released <app-dir>            # records which flags the release being served reads (released.json beside the live object)
 #   bin/pronto-flags cases <app-dir> [flag]        # the cases a flip of each flag (or the one) runs
 #   bin/pronto-flags history <app-dir> [--json]    # every version, newest first
@@ -18,7 +18,7 @@
 # Every write (setup, push, rollback) prints its target first and takes --expect <url> (or PRONTO_FLAGS_EXPECT):
 # a target that differs is refused with nothing written. With PRONTO_FLAGS_DRY_RUN set a write shows what it
 # would write and stops, as --dry-run does; a write reached anyway is refused where it happens. Each write is also appended to a journal (see `journal`).
-# A push that changes a flag's default value runs that flag's cases first (see `push`).
+# A push that changes who a flag is on for (its default or its accounts) runs that flag's cases first, and only --flip names such a flag (see `push`).
 
 # A dry run (--dry-run, or PRONTO_FLAGS_DRY_RUN) writes nothing, enforced where each write happens, not only
 # at the top of a command: the gcloud call (only the reads below go through), the ssh mirror and the directory
@@ -306,12 +306,15 @@ def defs-between [old: record, new: record]: nothing -> list<string> {
 
 # What a push writes over the live flags `old`: the spec's `doc`, with the live entry kept where a flag is not the
 # push's to change (PRONTO-680: a push wrote main's spec whole, so a flag retired from main vanished from production
-# while the release serving it still read it, and a default changed on main landed unasked).
-#   - live, absent from the spec: kept while the release reads it (`reads`, the names in released.json; null: there is
-#     no record, so every live flag counts as read), dropped once the record does not name it, or when `drop` names it;
-#   - in both, its default differing: kept whole unless `flip` names it;
-#   - new to the live object: the spec's entry.
-# {doc, kept: [{flag, why}], dropped: [{flag, why}]}.
+# while the release serving it still read it, and a default changed on main landed unasked; PRONTO-1191: so did
+# accounts added to a live flag, and a new flag with an accounts rule):
+#   - live, absent from the spec: kept while the release reads it (`reads`, the names in released.json; null: there
+#     is no record, so every live flag counts as read), dropped once the record does not name it, or when `drop` names it;
+#   - in both, its reach differing (default, accounts or targeting: `reach`): kept whole unless `flip` names it;
+#   - new to the live object, and not fully off: written off (its default false, its accounts and canary gone, the
+#     at-hand branch kept) unless `flip` names it, and an error where it is not a bool, which has no off form.
+#     flagd layers the live object over the release's baked flags.json, so a flag left out would serve the baked rule.
+# {doc, kept: [{flag, why}], written_off: [{flag, why}], dropped: [{flag, why}]}.
 export def keep-live [old: record, doc: record, reads: any, flip: list<string>, drop: list<string>]: nothing -> record {
 	let live = ($old.flags? | default {})
 	let spec = $doc.flags
@@ -323,10 +326,21 @@ export def keep-live [old: record, doc: record, reads: any, flip: list<string>, 
 	let verdicts = ($gone | each {|f|
 		if $f in $drop { {flag: $f, keep: false, why: "forced by --drop"} } else if $reads == null { {flag: $f, keep: true, why: "no released.json, so the release is taken to read it"} } else if $f in $reads.flags { {flag: $f, keep: true, why: "retired from the spec, waits for a release that stops reading it"} } else { {flag: $f, keep: false, why: "the release no longer reads it"} }
 	})
-	let held = (changes-between $old $doc | get flag | where {|f| $f in ($spec | columns) and $f in ($live | columns) and $f not-in $flip })
-	let kept = ($held | each {|f| {flag: $f, why: "its default differs from the live one and no --flip names it"} } | append ($verdicts | where keep | select flag why))
-	let flags = ($spec | merge ($held | each {|f| {$f: ($live | get $f)} } | into record) | merge ($verdicts | where keep | each {|v| {($v.flag): ($live | get $v.flag)} } | into record))
-	{doc: ($doc | upsert flags $flags), kept: $kept, dropped: ($verdicts | where {|v| not $v.keep } | select flag why)}
+	let held = ($spec | columns | where {|f| $f in ($live | columns) and $f not-in $flip and (reach ($live | get $f)) != (reach ($spec | get $f)) })
+	let fresh = ($spec | columns | where {|f| $f not-in ($live | columns) and $f not-in $flip and not (fully-off ($spec | get $f)) })
+	let nonbool = ($fresh | where {|f| (default-of ($spec | get $f) | describe) != "bool" })
+	if ($nonbool | is-not-empty) { error make {msg: $"flags: ($nonbool | str join ', ') is new and not off: name it in --flip; nothing was written"} }
+	let written_off = ($fresh | each {|f|
+		let r = (reach ($spec | get $f))
+		let who = if ($r.accounts | is-not-empty) { "accounts" } else if $r.value != false { "everyone" } else { "its targeting" }
+		{flag: $f, why: $"new and on for ($who): written off; --flip turns it on"}
+	})
+	let kept = ($held | each {|f| {flag: $f, why: "its reach in the spec differs from live (default, accounts or targeting) and no --flip names it"} } | append ($verdicts | where keep | select flag why))
+	let flags = ($spec
+		| merge ($held | each {|f| {$f: ($live | get $f)} } | into record)
+		| merge ($fresh | each {|f| {$f: (off-form ($spec | get $f))} } | into record)
+		| merge ($verdicts | where keep | each {|v| {($v.flag): ($live | get $v.flag)} } | into record))
+	{doc: ($doc | upsert flags $flags), kept: $kept, written_off: $written_off, dropped: ($verdicts | where {|v| not $v.keep } | select flag why)}
 }
 
 # Where a write is noted: one JSON line per write, in the operator's state (PRONTO_FLAGS_JOURNAL names the file).
@@ -399,6 +413,52 @@ def accounts-of [def: record]: nothing -> list<string> {
 	if ($names | describe | str starts-with "list") { $names } else { [] }
 }
 
+# What a flag's entry decides in production: its state, default value, and who else it is on for. The generated
+# at-hand branch (flags_plugin.cue: the hosts, read as `local`) is no part of it but its hosts; accounts are the
+# targetingKey branch, whose value is the `local` variant; `other` is any targeting that is none of those (null
+# where there is none). Null for a flag that is not there.
+def reach [def: any]: nothing -> any {
+	if $def == null { return null }
+	let rule = ($def.targeting? | default null)
+	let branches = if ($rule | describe | str starts-with "record") { $rule | get -o if } else { null }
+	let is_test = {|t, v| ($t | describe | str starts-with "record") and (($t | get -o in | default [] | get -o 0 | default {} | get -o var) == $v) and (($t | get -o in | default [] | get -o 1 | describe | str starts-with "list")) }
+	mut hosts = []
+	mut accounts = []
+	mut i = 0
+	mut other = null
+	if ($branches | describe | str starts-with "list") {
+		if (do $is_test ($branches | get -o 0) host) and ($branches | get -o 1) == "local" { $hosts = ($branches | get 0 | get in | get 1); $i = 2 }
+		if (do $is_test ($branches | get -o $i) targetingKey) and ($branches | get -o ($i + 1)) == "local" { $accounts = ($branches | get $i | get in | get 1); $i = $i + 2 }
+		if ($branches | skip $i) != ["default"] { $other = $rule }
+	} else if ($rule | describe | str starts-with "record") and ($rule | is-not-empty) {
+		$other = $rule
+	}
+	{
+		state: ($def.state? | default null)
+		value: (default-of $def)
+		hosts: ($hosts | sort)
+		accounts: ($accounts | sort)
+		accountValue: (if ($accounts | is-empty) { null } else { $def.variants? | default {} | get -o local })
+		other: $other
+	}
+}
+
+# A flag that is on for no one: its default false, no accounts, no other targeting.
+def fully-off [def: any]: nothing -> bool {
+	let r = (reach $def)
+	$r != null and $r.value == false and ($r.accounts | is-empty) and $r.other == null
+}
+
+# A new flag's entry written off: default false, the at-hand `local` variant and host branch kept, its accounts,
+# canary variants and the rest gone.
+def off-form [def: record]: nothing -> record {
+	let r = (reach $def)
+	let local = ($def.variants? | default {} | get -o local)
+	let variants = if $local == null { {default: false} } else { {default: false, local: $local} }
+	let base = ($def | reject -o targeting | upsert variants $variants | upsert defaultVariant "default")
+	if ($r.hosts | is-empty) { $base } else { $base | insert targeting {"if": [{"in": [{"var": "host"}, $r.hosts]}, "local", "default"]} }
+}
+
 # The flags a push writes, as a table: each flag's values and the accounts it names. A flag's default is the
 # value its default variant holds: a canary's is `old`, with no `default` variant for a flag new to the live
 # object (2026-11-08 18:02 BRT, trial_banner: the push failed past its testers write, PRONTO-43).
@@ -420,13 +480,14 @@ def merge-live [at: record, app: path, doc: record, flip: list<string>, drop: li
 	if $rec != null { print $"flags: the release record names ($rec.flags | length) flags, from commit ($rec.commit? | default '?') at ($rec.at? | default '?')" }
 	let m = (keep-live $old $doc ($rec) $flip $drop)
 	for k in $m.kept { print -e $"flags: WARNING: ($k.flag) kept as live: ($k.why)" }
+	for w in $m.written_off { print -e $"flags: WARNING: ($w.flag) is ($w.why)" }
 	for d in $m.dropped { print -e $"flags: ($d.flag) dropped from the live flags: ($d.why)" }
 	$m | insert before $before | insert old $old
 }
 
 # What a push's version keeps of the merge, beside its stage: the flags it left as live, and those it dropped.
 def merge-meta [m: record]: nothing -> record {
-	let kept = ($m.kept | get flag | str join "+")
+	let kept = ($m.kept | append $m.written_off | get flag | str join "+")
 	let dropped = ($m.dropped | get flag | str join "+")
 	{} | if $kept != "" { insert kept $kept } else { $in } | if $dropped != "" { insert dropped $dropped } else { $in }
 }
@@ -445,7 +506,10 @@ export def show [app: path, --flip: list<string> = [], --drop: list<string> = []
 
 # The flags as the spec says them, written with no cases: the first push of `setup`.
 def push-plain [app: path] {
-	write-flags (live $app) (cue-of $app flagd.document) $app --meta {stage: all, note: "first push"} | ignore
+	# Through keep-live as every push is: a new flag that is on is written off, a non-bool one refused (PRONTO-1191).
+	let m = (keep-live {flags: {}} (cue-of $app flagd.document) null [] [])
+	for w in $m.written_off { print -e $"flags: WARNING: ($w.flag) is ($w.why)" }
+	write-flags (live $app) $m.doc $app --meta ({stage: all, note: "first push"} | merge (merge-meta $m)) | ignore
 }
 
 # ---- A flip runs its flag's cases (flags_plugin.cue: flagsCases) ----
@@ -472,13 +536,13 @@ def default-of [def: any] {
 	$def.variants? | default {} | get -o ($def.defaultVariant? | default "default")
 }
 
-# The flags a push changes: new ones, and those whose default value moves. A flag new to the live
-# object and off changes nothing: absent already reads as off, so it has no flip to test.
+# The flags a push changes: new ones that are not fully off, and those whose reach moves (default, accounts or
+# targeting). A flag new to the live object and fully off changes nothing: absent already reads as off, so it has
+# no flip to test.
 def changed-flags [old: record, doc: record]: nothing -> list<string> {
 	$doc.flags | transpose f def | where {|r|
 		let was = ($old.flags | get -o $r.f)
-		let new = (default-of $r.def)
-		if $was == null { $new != false } else { (default-of $was) != $new }
+		if $was == null { not (fully-off $r.def) } else { (reach $was) != (reach $r.def) }
 	} | each {|r| $r.f }
 }
 
@@ -564,14 +628,14 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 # Changes the live flags, for everyone at once, in one version (the owner, 2026-11-11: "drop the requirement of
 # testers for flag flips"; PRONTO-284). A flip builds and launches no stack: the pull request's gate ran the flag's
 # cases at hand, every flag being on there.
-#   1. a flag whose default value changes (or that is new) needs cases (`cases`: scenarios or unit cases that name
+#   1. a flag whose reach changes (default, accounts or targeting) or that is new and not off needs cases (`cases`: scenarios or unit cases that name
 #      it); with none the push is refused, or goes on with --untested "<why>";
 #   2. the flags as the spec says them are written (stage=all);
 #   3. where a changed flag has `production` scenarios that need no tester (no `signIn` step), the push waits until
 #      OFREP says the new value, runs them against production (flagsCases.live, APP_URL=flagsLive.url), and a
 #      failure writes the version read before 2 again, and the push fails. A production scenario that signs in
 #      needs a tester's account, which a flip no longer has: it is listed and not run.
-# A flag turned off (default now false) runs no cases: it returns to the path before it, and its cases test it on.
+# A flag turned fully off (default false, no accounts) runs no cases: it returns to the path before it, and its cases test it on.
 export def push [app: path, --untested: string, --no-canary: string, --expect: string, --flip: list<string> = [], --drop: list<string> = []] {
 	pin-guard $app
 	let at = (live $app)
@@ -590,9 +654,9 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	}
 	# --no-canary was the way past the testers' stage (pronto-plugins#184); every push is that way now.
 	if $no_canary != null { print -e "flags: --no-canary is every push's way now (PRONTO-284); its reason is kept in the journal" }
-	# A flag turned off (its default now false) returns to the path the app ran before it went on; its
+	# A flag turned fully off (its default false, no accounts) returns to the path the app ran before it went on; its
 	# cases test it on (2026-11-08, card_chess: the user's "Rollback card game"). No cases run.
-	let off = ($changed | where {|f| (default-of ($doc.flags | get $f)) == false })
+	let off = ($changed | where {|f| fully-off ($doc.flags | get $f) })
 	if ($off | is-not-empty) { print -e $"flags: ($off | str join ', ') turned off: no cases run \(they test the flag on\)" }
 	let all = ($changed | where {|f| $f not-in $off } | each {|f| cases-of $app $f })
 	let bare = ($all | where {|c| not (has-cases $c) } | each {|c| $c.flag })
@@ -608,23 +672,27 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 		print -e $"flags: ($c.flag): not run, they sign in as a tester a flip no longer has: ($c.signedIn | str join ', ')"
 	}
 	let names = ($changed | str join "+")
+	# The board hears of default moves only: accounts added to a flag are no flip an issue is done by.
+	let moved = (changes-between $old $doc | where {|c| $c.flag in ($doc.flags | columns) and $c.flag not-in ($m.dropped | get flag) })
 	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if $no_canary != null { $"no canary: ($no_canary)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" })] | compact | str join "; ")
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
 	if ($live | is-empty) {
 		write-flags $at $doc $app --meta ({stage: all, flag: $names, cases: (if ($bare | is-not-empty) { "untested" } else { "none on production" }), note: $notes} | merge $kept) --from $before | ignore
-		tell-board $at $app ($changed | where {|f| $f not-in $off }) $off
+		tell-board $at $app $moved
 		return
 	}
 	# Not `try ... finally`: nu runs what follows it and raises the error only at the end, so a failed flip
 	# told the board its flags were on for everyone (PRONTO-15 Done at 18:02 BRT, 2026-11-08; PRONTO-43).
 	flip-live $at $app $doc $live $cmds $before ({stage: all, flag: $names, note: $notes} | merge $kept)
-	tell-board $at $app ($changed | where {|f| $f not-in $off }) $off
+	tell-board $at $app $moved
 }
 
 # The dev flow's board, where the app's repository keeps one (its devflow/devflow.cue; devflow/README.md): the
 # issues whose flag went on for everyone are Done, those whose flag went off are Live again. Never fails the push.
-def tell-board [at: record, app: path, on: list<string>, off: list<string>] {
+def tell-board [at: record, app: path, moved: list<record>] {
 	if (is-dir $at) { return }
+	let on = ($moved | where {|c| $c.to != false } | get flag)
+	let off = ($moved | where {|c| $c.to == false } | get flag)
 	try {
 		let top = (do { ^git -C $app rev-parse --show-toplevel } | complete)
 		if $top.exit_code != 0 { return }
@@ -715,7 +783,7 @@ export def rollback [app: path, version?: string, --expect: string] {
 	let again = (commit $at $app (store-version $at $to) {stage: rollback, note: $"rolled back from ($live) to ($to)"} $live --derive-flag)
 	print $"flags: ($at.url) is ($to)'s flags again, as version ($again)"
 	# The flags a rollback turned off are rolled back for the board: their Done issues are Live again.
-	tell-board $at $app [] (changes-between $before $target | where {|c| $c.to == false } | each {|c| $c.flag })
+	tell-board $at $app (changes-between $before $target | where {|c| $c.to == false })
 }
 
 # Once per app: the bucket, versioned and private, keeping the last 50 versions;
