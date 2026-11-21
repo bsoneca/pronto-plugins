@@ -2,7 +2,7 @@
 # Writes the test harness into a pronto app (harness/README.md): tests/slot.ts, tests/unit.ts and
 # its tests/unit/select.js and schema.cue, tests/browser.ts, tests/lint.ts, and, in an app that runs
 # scenarios (it has tests/scenarios.ts), tests/scenarios.ts, tests/scenarios/schema.cue, select.ts,
-# early.ts, flakes.ts and verdict.ts, and tests/slow.ts. Each is regenerated.
+# early.ts, flakes.ts, verdict.ts and load.ts, and tests/slow.ts. Each is regenerated.
 #   bin/pronto-harness <app-dir>...
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)

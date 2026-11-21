@@ -136,3 +136,31 @@ export const linked = (ceiling) => inApp(async (d) => {
 export const unreadable = () => inApp(async (d) => {
   await Deno.symlink("nowhere", `${d}/.bayt/Dockerfile.gone`);
 }, 100).then((p) => [p.length === 1 && p[0].startsWith(".bayt/Dockerfile.gone: cannot be read")]);
+
+// The scenarios loader (load.ts, PRONTO-1071): which files of a folder are scenarios, and, with a fake `cue` (a script CUE
+// names), the command it runs and what an abort or a timeout does to it.
+import { loadScenarios, scenarioFiles } from "../../harness/files/tests/scenarios/load.ts";
+export { scenarioFiles };
+export async function loaded(script, opts) {
+  const dir = await Deno.makeTempDir();
+  const prev = Deno.env.get("CUE");
+  try {
+    await Deno.mkdir(`${dir}/scenarios`);
+    for (const n of ["b.cue", "a.cue", "notes.md", "c.cue.bak"]) await Deno.writeTextFile(`${dir}/scenarios/${n}`, "");
+    await Deno.writeTextFile(`${dir}/cue.sh`, `#!/bin/sh\n${script}\n`);
+    await Deno.chmod(`${dir}/cue.sh`, 0o755);
+    Deno.env.set("CUE", `${dir}/cue.sh`);
+    const started = Date.now();
+    const ac = new AbortController();
+    if (opts?.abortAfterMs) setTimeout(() => ac.abort(), opts.abortAfterMs);
+    try {
+      const spec = await loadScenarios(`${dir}/scenarios/`, { signal: opts?.abortAfterMs ? ac.signal : undefined, timeoutMs: opts?.timeoutMs });
+      return { spec, args: (await Deno.readTextFile(`${dir}/args`).catch(() => "")).split("\n").slice(0, -1).map((a) => a.replace(dir, "<dir>")), error: null, fast: Date.now() - started < 5000 };
+    } catch (e) {
+      return { spec: null, error: String(e.message), fast: Date.now() - started < 5000 };
+    }
+  } finally {
+    if (prev === undefined) Deno.env.delete("CUE"); else Deno.env.set("CUE", prev);
+    await Deno.remove(dir, { recursive: true });
+  }
+}

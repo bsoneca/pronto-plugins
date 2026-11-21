@@ -17,9 +17,10 @@ copy by hand from `apps/brawl-chess` (bsoneca/pronto's AGENTS.md, "Tests are dat
 | `tests/scenarios/early.ts` | a promise the runner starts before the step that awaits it, marked handled |
 | `tests/scenarios/flakes.ts` | files a flake on the board; a board that refuses is warned, never the run's failure |
 | `tests/scenarios/verdict.ts` | a run's verdict as data (`SCENARIOS_VERDICT=<file>`): the counts a caller reads instead of the summary line |
+| `tests/scenarios/load.ts` | the scenarios as CUE exports them (`loadScenarios(dir, {signal, timeoutMs})`): the one place that finds, exports and parses them, for the runner and for a caller that plans from the same set |
 | `tests/slow.ts` | the throttling a slowed scenario's pages get, as a preview's |
 
-The last seven go only to an app that runs scenarios (it has `tests/scenarios.ts`).
+The last eight go only to an app that runs scenarios (it has `tests/scenarios.ts`).
 
 An app keeps only its own: `tests/unit/suites.cue`, `tests/unit/registry.js`, `tests/unit/probes.js`,
 its cases and its scenarios, and, where its scenarios need them:
@@ -55,5 +56,5 @@ same files, held to `files/` by ci.
 ## Tests
 
 `cue vet -c ./harness` holds the host to [`tests.cue`](tests.cue): the six files every app gets,
-the scenarios' six only with scenarios, none seeded, no header. ci writes the harness into a
+the scenarios' files only with scenarios, none seeded, no header. ci writes the harness into a
 scratch app and compares each file with `cmp`.

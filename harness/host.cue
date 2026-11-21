@@ -18,6 +18,7 @@ _scenSchema: _ @embed(file="files/tests/scenarios/schema.cue", type=text)
 _early:      _ @embed(file="files/tests/scenarios/early.ts", type=text)
 _flakes:     _ @embed(file="files/tests/scenarios/flakes.ts", type=text)
 _verdict:    _ @embed(file="files/tests/scenarios/verdict.ts", type=text)
+_load:       _ @embed(file="files/tests/scenarios/load.ts", type=text)
 _slow:       _ @embed(file="files/tests/slow.ts", type=text)
 
 #Host: H={
@@ -39,6 +40,7 @@ _slow:       _ @embed(file="files/tests/slow.ts", type=text)
 			"tests/scenarios/early.ts": {seed: false, text: _early}
 			"tests/scenarios/flakes.ts": {seed: false, text: _flakes}
 			"tests/scenarios/verdict.ts": {seed: false, text: _verdict}
+			"tests/scenarios/load.ts": {seed: false, text: _load}
 			"tests/slow.ts": {seed: false, text: _slow}
 		}
 	}

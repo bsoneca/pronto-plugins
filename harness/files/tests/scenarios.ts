@@ -21,6 +21,7 @@ import { gate, slow, slowCpu, slowDown } from "./slow.ts";
 import { early } from "./scenarios/early.ts";
 import { fileFlake as file } from "./scenarios/flakes.ts";
 import { writeVerdict } from "./scenarios/verdict.ts";
+import { loadScenarios, type ActorDef, type Scenario, type Step } from "./scenarios/load.ts";
 
 // A verdict left by an earlier run is removed before anything that can fail, so a run that dies early leaves no stale green one.
 const verdictFile = Deno.env.get("SCENARIOS_VERDICT");
@@ -34,29 +35,9 @@ const here = (p: string) => new URL(p, import.meta.url);
 const appName = decodeURIComponent(here("..").pathname.replace(/\/$/, "").split("/").at(-1)!);
 
 // The scenarios, as CUE exports them.
-export type Step = Record<string, any> & { by?: string; timeout?: number; why?: string };
-type ActorDef = { name: string; device?: string; locale?: string } & Record<string, any>;
-type Scenario = { id: string; slow?: true; accepts: string[]; actors: Record<string, ActorDef>; steps: Step[]; flags?: string[]; production?: true; standin?: true };
-type Screen = { viewport?: { width: number; height: number }; device?: string };
-type Spec = {
-  parallel: number;
-  deployedParallel: number;
-  flakes: { app?: string; priority: string; file: string[]; retry: boolean };
-  screen: Screen;
-  screens?: Record<string, Screen>;
-  locale: string;
-  messages: string;
-  loaded: { screen?: string; adopted: boolean };
-  select: { client: string[]; derived: string[]; inert: string[]; live: string[]; outside: string[] };
-  database?: string;
-  signIn?: { open: string[]; passkey: string };
-  scenarios: Record<string, Scenario>;
-};
+export type { Step };
 const dir = here("./scenarios/").pathname;
-const files = [...Deno.readDirSync(dir)].filter((f) => f.name.endsWith(".cue")).map((f) => dir + f.name).sort();
-const exported = await new Deno.Command(Deno.env.get("CUE") ?? "cue", { args: ["export", ...files, "--out", "json"], stdout: "piped", stderr: "piped" }).output();
-if (!exported.success) throw new Error("the scenarios do not export: " + new TextDecoder().decode(exported.stderr));
-const spec = JSON.parse(new TextDecoder().decode(exported.stdout)) as Spec;
+const spec = await loadScenarios(dir);
 
 // The app's own: its step kinds and the moments it adds to (tests/scenarios/app.ts), when it has any.
 export type Hooks = {
