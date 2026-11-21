@@ -422,18 +422,30 @@ export async function ownSignals() {
   const st = await new Deno.Command("sh", { args: ["-c", "kill -9 $$"], stdout: "null", stderr: "null" }).output();
   return { killed: slot.sigNumber(st.signal), term: slot.sigNumber("SIGTERM"), none: slot.sigNumber(null), hup: slot.sigNumber("SIGHUP") };
 }
-// `own` with the owner off (Linux) or on: its command still gets stdin and gives stdout, stderr and its exit code as a plain child does.
+// A run, owned (macOS: the `own` verb) or plain (Linux, where `own` is refused: a claim's command, which ownRun runs as a plain
+// child there): its command still gets stdin and gives stdout, stderr and its exit code as a plain child does. On Linux the
+// `own` verb itself must refuse, exit 1 with its reason, and run nothing.
 export async function ownPlain() {
   const tmp = await sh("mktemp -d");
   try {
+    const cmd = ["--", "sh", "-c", "cat; echo err >&2; exit 3"];
     const c = new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", "--no-config", "--no-lock", slotUrl, "own", "--what", "plain", "--", "sh", "-c", "cat; echo err >&2; exit 3"],
+      args: ["run", "-A", "--no-config", "--no-lock", slotUrl, ...(linuxOff ? ["--weight", "1", "--what", "plain"] : ["own", "--what", "plain"]), ...cmd],
       env: { STACK_POOL: `${tmp}/pool` }, stdin: "piped", stdout: "piped", stderr: "piped",
     }).spawn();
     const w = c.stdin.getWriter(); await w.write(new TextEncoder().encode("in\n")); await w.close();
     const o = await c.output();
     const out = { code: o.code, stdout: decode(o.stdout), stderr: /err/.test(decode(o.stderr)) };
-    return { ...out, ok: out.code === 3 && out.stdout === "in\n" && out.stderr };
+    let refused = true;
+    if (linuxOff) {
+      const r = await new Deno.Command(Deno.execPath(), {
+        args: ["run", "-A", "--no-config", "--no-lock", slotUrl, "own", "--what", "plain", "--", "sh", "-c", `touch '${tmp}/ran'`],
+        env: { STACK_POOL: `${tmp}/pool` }, stdout: "piped", stderr: "piped",
+      }).output();
+      const ran = await Deno.stat(`${tmp}/ran`).then(() => true, () => false);
+      refused = r.code === 1 && /own needs macOS/.test(decode(r.stderr) + decode(r.stdout)) && !ran;
+    }
+    return { ...out, ok: out.code === 3 && out.stdout === "in\n" && out.stderr && refused };
   } finally { await sh(`rm -rf '${tmp}'`); }
 }
 // What a leftover is called in the job log and the run ledger: the executable's name, the pid and the age, never an argument
