@@ -30,19 +30,26 @@ export const scenarioFiles = (dir: string, names: string[]): string[] => {
 };
 
 // Stops cue and everything it started (the wrapper's slot job holds the pipes, so killing the child alone leaves them
-// open): TERM the whole tree, then, after `graceMs`, KILL what is still the same process. Deno has no process group, so
-// the tree is read from one ps table; the pids are kept, since a child's orphans leave its tree the moment it dies.
+// open): TERM the whole tree, then KILL what is still the same process once `graceMs` has passed (at once when none is).
+// Deno has no process group, so the tree is read from one ps table; the pids are kept, since a child's orphans leave its
+// tree the moment it dies. Resolves when that is done. The wait is a plain timer, so a caller that exits at once lives
+// up to graceMs longer and a TERM-ignoring descendant is killed, not left.
 const stopTree = async (root: number, graceMs = 2000) => {
   const table = await processes();
   const tree = treeOf(table, root).map((pid) => ({ pid, command: table.find((p) => p.pid === pid)?.command }));
   const send = (pid: number, sig: Deno.Signal) => { try { Deno.kill(pid, sig); } catch { /* gone */ } };
+  const alive = async () => { const now = await processes(); return tree.filter(({ pid, command }) => command !== undefined && now.some((p) => p.pid === pid && p.command === command)); };
   for (const { pid } of tree) send(pid, "SIGTERM");
-  // Not unref'd: a caller that rejects and exits at once lives up to graceMs longer, so a TERM-ignoring descendant is KILLed, not left.
-  setTimeout(async () => {
-    const now = await processes();
-    for (const { pid, command } of tree) if (command !== undefined && now.some((p) => p.pid === pid && p.command === command)) send(pid, "SIGKILL");
-  }, graceMs);
+  for (const end = Date.now() + graceMs; Date.now() < end && (await alive()).length; ) await new Promise((r) => setTimeout(r, 50));
+  for (const { pid } of await alive()) send(pid, "SIGKILL");
 };
+
+// What a stopped export rejects with. `settled` resolves once cue has exited, its pipes are finished and the tree is
+// stopped (KILLed after the grace if need be): the rejection itself comes at once, a caller that must leave nothing
+// running awaits `settled`, any other ignores it.
+export class ScenariosStopped extends Error {
+  constructor(message: string, readonly settled: Promise<void>) { super(message); }
+}
 
 const drain = async (r: ReadableStreamDefaultReader<Uint8Array>): Promise<Uint8Array> => {
   const parts: Uint8Array[] = [];
@@ -59,22 +66,22 @@ export const loadScenarios = async (dir: string, opts: { signal?: AbortSignal; t
   const files = scenarioFiles(dir, [...Deno.readDirSync(dir)].map((f) => f.name));
   const signals = [opts.signal, opts.timeoutMs === undefined ? undefined : AbortSignal.timeout(opts.timeoutMs)].filter((s): s is AbortSignal => !!s);
   const signal = signals.length ? AbortSignal.any(signals) : undefined;
-  const stopped = () => new Error(`the scenarios export was stopped (${opts.signal?.aborted ? "aborted" : `no answer in ${opts.timeoutMs} ms`}), cue was killed`);
-  if (signal?.aborted) throw stopped();
+  const stopped = (settled: Promise<void>) => new ScenariosStopped(`the scenarios export was stopped (${opts.signal?.aborted ? "aborted" : `no answer in ${opts.timeoutMs} ms`}), cue was killed`, settled);
+  if (signal?.aborted) throw stopped(Promise.resolve());
   const child = new Deno.Command(Deno.env.get("CUE") ?? "cue", { args: ["export", ...files, "--out", "json"], stdout: "piped", stderr: "piped" }).spawn();
   const readers = [child.stdout.getReader(), child.stderr.getReader()];
+  const finished = Promise.all([child.status, drain(readers[0]), drain(readers[1])]);
+  finished.catch(() => {});
   let onAbort: (() => void) | undefined;
   const aborted = new Promise<never>((_, reject) => {
     if (!signal) return;
     onAbort = () => {
-      reject(stopped());
-      stopTree(child.pid).catch(() => {});
+      const gone = stopTree(child.pid).catch(() => {});
       for (const r of readers) r.cancel().catch(() => {});
+      reject(stopped(Promise.all([gone, finished.catch(() => {})]).then(() => {})));
     };
     signal.addEventListener("abort", onAbort, { once: true });
   });
-  const finished = Promise.all([child.status, drain(readers[0]), drain(readers[1])]);
-  finished.catch(() => {});
   try {
     const [status, stdout, stderr] = await Promise.race([finished, aborted]);
     if (!status.success) throw new Error("the scenarios do not export: " + new TextDecoder().decode(stderr));

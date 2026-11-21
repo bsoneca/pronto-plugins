@@ -157,7 +157,9 @@ export async function loaded(script, opts) {
       const spec = await loadScenarios(`${dir}/scenarios/`, { signal: opts?.abortAfterMs ? ac.signal : undefined, timeoutMs: opts?.timeoutMs });
       return { spec, args: (await Deno.readTextFile(`${dir}/args`).catch(() => "")).split("\n").slice(0, -1).map((a) => a.replace(dir, "<dir>")), error: null, fast: Date.now() - started < 5000 };
     } catch (e) {
-      return { spec: null, error: String(e.message), fast: Date.now() - started < 5000 };
+      const fast = Date.now() - started < 5000; // at the rejection, not once settled
+      await e.settled;
+      return { spec: null, error: String(e.message), fast };
     }
   } finally {
     if (prev === undefined) Deno.env.delete("CUE"); else Deno.env.set("CUE", prev);
@@ -178,9 +180,10 @@ export async function descendant(opts) {
     const started = Date.now();
     const ac = new AbortController();
     if (opts.preAborted) ac.abort();
-    let error = null;
-    try { await loadScenarios(`${dir}/scenarios`, { signal: opts.preAborted ? ac.signal : undefined, timeoutMs: opts.timeoutMs }); } catch (e) { error = String(e.message); }
+    let error = null, settled;
+    try { await loadScenarios(`${dir}/scenarios`, { signal: opts.preAborted ? ac.signal : undefined, timeoutMs: opts.timeoutMs }); } catch (e) { error = String(e.message); settled = e.settled; }
     const ms = Date.now() - started;
+    await settled;
     const pid = Number((await Deno.readTextFile(`${dir}/pid`).catch(() => "0")).trim());
     const alive = (p) => { try { Deno.kill(p, "SIGCONT"); return true; } catch { return false; } };
     let gone = true;
