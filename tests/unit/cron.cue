@@ -1,6 +1,11 @@
 // release-cron's rules (../../release-cron/cron.js) on the inputs they were written for.
 package unit
 
+import "github.com/bsoneca/pronto-plugins/release-cron:releasecron"
+
+// releaseCron.causes: the phrases the cases expect are the schema's, as cron.js's are (causes.js is emitted from them).
+_causes: releasecron.#Cron.causes
+
 _cronRec: {
 	outcome: *"live" | string
 	preview?: string
@@ -176,6 +181,20 @@ cases: {
 		{call: "cron.noVerdictRun", args: ["the rehearsal gave no verdict (exit 3): nothing released"], expect: true, why: "the bisect skips it"},
 		{call: "cron.noVerdictRun", args: ["the rehearsal failed (exit 1): nothing released"], expect: false},
 		{call: "cron.noVerdictRun", args: [null], expect: false},
+		{call: "cron.noVerdictRun", args: ["any reason at all", "noVerdict"], expect: true, why: "a record's cause key is read, not its text"},
+		{call: "cron.noVerdictRun", args: ["\(_causes.noVerdict): x", "rehearsalFailed"], expect: false, why: "the key decides when the record has one"},
+		{call: "cron.noVerdictRun", args: ["x", "rehearsalStopped"], expect: true},
+		{call: "cron.noVerdictRun", args: ["failed: x", "signal"], expect: true, why: "a run a signal stopped says nothing of a commit: never bisected"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: up failed; \(_causes.rehearsalStopped): nothing released", null], expect: true, why: "a record with no cause key (written before it existed) is read by its why"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: up failed: nothing released", null], expect: false},
+	]}
+	"the driver's reasons and cause keys for a failed run come from releaseCron.causes": {suite: "cron", steps: [
+		{call: "cron.failureOf", args: ["beforeSlot", {noVerdict: true, command: "verify@local", code: 3, downFailed: ""}], expect: {why: "\(_causes.noVerdict): verify@local \(_causes.endedBeforeSlot) (exit 3): nothing released", cause: "noVerdict"}},
+		{call: "cron.failureOf", args: ["beforeSlot", {noVerdict: false, command: "verify@local", code: 1, downFailed: "; removing the preview x"}], expect: {why: "verify@local \(_causes.endedBeforeSlot) (exit 1): nothing released; removing the preview x", cause: "endedBeforeSlot"}},
+		{call: "cron.failureOf", args: ["noVerdict", {code: 124, downFailed: ""}], expect: {why: "\(_causes.noVerdict) (exit 124): nothing released", cause: "noVerdict"}},
+		{call: "cron.failureOf", args: ["rehearsalFailed", {code: 1, downFailed: ""}], expect: {why: "\(_causes.rehearsalFailed) (exit 1): nothing released", cause: "rehearsalFailed"}},
+		{call: "cron.failureOf", args: ["previewFailed", {bad: ["home /: 502", "x"], stopped: false}], expect: {why: "\(_causes.previewFailed): home /: 502; x: nothing released", cause: "previewFailed"}, why: "the after and first paths"},
+		{call: "cron.failureOf", args: ["previewFailed", {bad: ["up failed"], stopped: true}], expect: {why: "\(_causes.previewFailed): up failed; \(_causes.rehearsalStopped): nothing released", cause: "rehearsalStopped"}, why: "the beside path with the rehearsal stopped"},
 	]}
 	// The overlap writes no `slot` step, so a beside run keeps the rehearsal's slot wait in run.beside.slot (PRONTO-870).
 	"a beside run's rehearsal splits its time into the slot wait and the run, in seconds": {suite: "cron", steps: [
@@ -404,5 +423,32 @@ cases: {
 		{keep: "why"},
 		{call: "cron.signature", args: ["$why", "FAIL  sealed  12.3 s  nothing matches #board2d"], holds: {kind: "android", names: ["sealed"]}, why: "the driver's own why is read back as the android kind"},
 		{call: "cron.undecidable", args: [{kind: "android", names: ["sealed"]}, "", [], 0, 18], expect: "the android step runs on an emulator, which the bisect's check (integrate@local) does not: not bisected"},
+	]}
+	"a signal gives the lock back only after the children are gone and the preview beside has torn down, each bounded": {suite: "cron", steps: [
+		{call: "cron.signalStep", args: [true, 1, 1000, 60000, 300000], expect: "wait", why: "children still within their grace"},
+		{call: "cron.signalStep", args: [true, 1, 60000, 60000, 300000], expect: "kill", why: "their grace is over"},
+		{call: "cron.signalStep", args: [false, 1, 61000, 60000, 300000], expect: "wait", why: "the children are gone but the preview's down still runs: the lock is held"},
+		{call: "cron.signalStep", args: [false, 0, 61000, 60000, 300000], expect: "done", why: "down finished: the lock goes"},
+		{call: "cron.signalStep", args: [false, 0, 0, 60000, 300000], expect: "done", why: "nothing was running"},
+		{call: "cron.signalStep", args: [false, 1, 360000, 60000, 300000], expect: "done", why: "a down that never ends is waited for a bounded time"},
+	]}
+	"a branch's remote lookup that fails is an error, only a clean empty answer is no branch": {suite: "cron", steps: [
+		{call: "cron.branchTip", args: [true, "abc123\trefs/heads/release/x/1", ""], expect: {tip: "abc123", error: null}},
+		{call: "cron.branchTip", args: [true, "", ""], expect: {tip: null, error: null}, why: "ls-remote ran and found no such ref"},
+		{call: "cron.branchTip", args: [false, "", "fatal: unable to access origin: Could not resolve host\nhint"], expect: {tip: null, error: "fatal: unable to access origin: Could not resolve host"}, why: "a failed lookup is not an absent branch"},
+		{call: "cron.branchTip", args: [false, "", ""], expect: {tip: null, error: "no output"}},
+	]}
+	"the serving command is read again only after an ssh transport failure": {suite: "cron", steps: [
+		{call: "cron.servingRetryable", args: [255], expect: true, why: "ssh's own failure, the case the retry exists for"},
+		{call: "cron.servingRetryable", args: [1], expect: false, why: "the command ran and failed: said at once"},
+		{call: "cron.servingRetryable", args: [127], expect: false},
+		{call: "cron.servingRetryable", args: [142], expect: false, why: "killed by the alarm"},
+	]}
+	"a run that ends after a signal ends as stopped, whatever it reached": {suite: "cron", steps: [
+		{call: "cron.endWhenInterrupted", args: [true, "failed"], expect: "stopped", why: "a killed child's failure is no verdict"},
+		{call: "cron.endWhenInterrupted", args: [true, "skipped"], expect: "stopped"},
+		{call: "cron.endWhenInterrupted", args: [true, "stopped"], expect: "stopped", why: "the handler's own end"},
+		{call: "cron.endWhenInterrupted", args: [true, "released"], expect: "released", why: "a release that landed stays one"},
+		{call: "cron.endWhenInterrupted", args: [false, "failed"], expect: "failed", why: "no signal, no change"},
 	]}
 }

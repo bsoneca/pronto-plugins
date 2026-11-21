@@ -1,0 +1,2 @@
+// generated from release-cron/schema.cue (releaseCron.causes) by host.cue — do not edit
+export const causes = {"noVerdict":"the rehearsal gave no verdict","rehearsalFailed":"the rehearsal failed","rehearsalStopped":"the rehearsal was stopped","previewFailed":"the release preview failed","previewStopped":"the preview was stopped","endedBeforeSlot":"ended before its slot","signal":"stopped by a signal"};

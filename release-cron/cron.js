@@ -1,3 +1,5 @@
+import { causes } from "./causes.js"; // releaseCron.causes, emitted from release-cron/schema.cue (host.cue)
+
 // release-cron's rules, apart from what they act on (release-cron.ts runs git, the rehearsal, the
 // release and curl): whether a run is due, whether a change is the app's, which commit is serving,
 // when the rehearsal got its slot, what a probe's answer means, where a run's time went,
@@ -301,9 +303,23 @@ export const androidWhy = (code, names) => `the android step failed (exit ${code
 // timeout) or 128 and above (a signal, the machine's doing). Such a run is never bisected nor cut to a release branch.
 export const noVerdictExit = (code) => code === 3 || code === 124 || code >= 128;
 
-// Whether a run's `why` says its rehearsal gave no verdict, or was stopped because the preview failed first
-// (preview `when: "beside"`): the bisect skips it.
-export const noVerdictRun = (why) => /^the rehearsal gave no verdict|; the rehearsal was stopped/.test(why ?? "");
+// Whether a run says its rehearsal gave no verdict, or was stopped because the preview failed first (preview `when: "beside"`):
+// the bisect skips it, as it does a run a signal stopped. A record with a `cause` is read by that key; an older one by its `why`.
+export const noVerdictRun = (why, cause) =>
+  cause ? ["noVerdict", "rehearsalStopped", "signal"].includes(cause) : (why ?? "").startsWith(causes.noVerdict) || (why ?? "").includes(`; ${causes.rehearsalStopped}`);
+
+// A run's reason and its cause key, for the failures the driver names itself (releaseCron.causes): `beforeSlot` (the rehearsal
+// ended before its slot: `command` its text, `code` its exit, `noVerdict` whether that is no verdict), `noVerdict`, `rehearsalFailed`
+// (`code`) and `previewFailed` (`bad` what the preview's checks found, `stopped` whether the beside rehearsal was stopped for it).
+// `downFailed` is a failed `down` appended to the reason. The reason is what the records on disk carry.
+export const failureOf = (kind, a) => {
+  const down = a.downFailed ?? "";
+  if (kind === "beforeSlot") return { why: `${a.noVerdict ? `${causes.noVerdict}: ` : ""}${a.command} ${causes.endedBeforeSlot} (exit ${a.code}): nothing released${down}`, cause: a.noVerdict ? "noVerdict" : "endedBeforeSlot" };
+  if (kind === "noVerdict") return { why: `${causes.noVerdict} (exit ${a.code}): nothing released${down}`, cause: "noVerdict" };
+  if (kind === "rehearsalFailed") return { why: `${causes.rehearsalFailed} (exit ${a.code}): nothing released${down}`, cause: "rehearsalFailed" };
+  if (kind === "previewFailed") return { why: `${causes.previewFailed}: ${a.bad.join("; ")}${a.stopped ? `; ${causes.rehearsalStopped}` : ""}: nothing released`, cause: a.stopped ? "rehearsalStopped" : "previewFailed" };
+  throw new Error(`no failure of kind ${kind}`);
+};
 
 // The rehearsal and the preview run side by side (preview `when: "beside"`): what to do with them once one of them
 // has ended. Each is null while it runs. `rehearsal`: {code, at}, its exit and when it ended (ms into the race);
@@ -315,9 +331,9 @@ export const noVerdictRun = (why) => /^the rehearsal gave no verdict|; the rehea
 export const besideOutcome = (rehearsal, preview, stopped = false) => {
   const r = !!rehearsal && rehearsal.code !== 0, p = !!preview && preview.bad.length > 0;
   if (p && (!r || preview.at < rehearsal.at)) {
-    return { stop: rehearsal ? null : "rehearsal", failed: "preview", why: `the release preview failed: ${preview.bad.join("; ")}${!rehearsal || stopped ? "; the rehearsal was stopped" : ""}` };
+    return { stop: rehearsal ? null : "rehearsal", failed: "preview", why: `${causes.previewFailed}: ${preview.bad.join("; ")}${!rehearsal || stopped ? `; ${causes.rehearsalStopped}` : ""}` };
   }
-  if (r) return { stop: preview ? null : "preview", failed: "rehearsal", why: `the rehearsal failed (exit ${rehearsal.code})${preview ? "" : "; the preview was stopped"}` };
+  if (r) return { stop: preview ? null : "preview", failed: "rehearsal", why: `${causes.rehearsalFailed} (exit ${rehearsal.code})${preview ? "" : `; ${causes.previewStopped}`}` };
   return { stop: null, failed: null, why: "" };
 };
 
@@ -711,3 +727,24 @@ export const limitPlan = (dry) => dry ? ["report-abandon"] : ["close-hold", "dro
 export const corruptOpen = (path, why, force) => force
   ? { remove: true, text: `${path} could not be read (${why}): removed by --force` }
   : { remove: false, text: `${path} could not be read (${why}): delete that file by hand, or run \`abandon --force\` to remove it` };
+
+// A branch's tip from `git ls-remote origin refs/heads/<branch>`: only a clean answer with no line is "not found" (tip null); a
+// lookup that failed (a network, auth or git error) is an `error`, never "no branch".
+export const branchTip = (ok, out, err) => ok
+  ? { tip: (out ?? "").split(/\s/)[0] || null, error: null }
+  : { tip: null, error: ((err || out || "no output").split("\n")[0]) };
+
+// A signal's wait, each tick: "kill" the children still alive once their grace is over, "done" when the children are gone and no
+// preview is left to tear down (`previews`), or when `grace` + `teardown` ms have passed (bounded), else "wait". The lock goes at "done".
+export const signalStep = (childrenAlive, previews, elapsed, grace, teardown) =>
+  elapsed >= grace + teardown ? "done"
+  : !childrenAlive && previews === 0 ? "done"
+  : childrenAlive && elapsed >= grace ? "kill"
+  : "wait";
+
+// Only an ssh transport failure (exit 255) is worth reading the serving command again: any other failure says what is wrong.
+export const servingRetryable = (code) => sshDropped(code);
+
+// The outcome a run ends with once a signal came: its stop, never a verdict (no red attempt, no gap, no bisect, no branch cut). A
+// release that had already landed keeps its outcome.
+export const endWhenInterrupted = (interrupted, outcome) => interrupted && outcome !== "released" ? "stopped" : outcome;
