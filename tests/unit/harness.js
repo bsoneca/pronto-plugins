@@ -33,6 +33,14 @@ export { outsideConcerns };
 export const outsideKeys = (files, reads) => keys(files, (f) => `h:${f}`, reads);
 export { declaredKeys, siblingsMoved } from "../../harness/files/tests/scenarios/select.ts";
 
+// A scenario step's gate (harness/files/tests/scenarios/gate.ts) with a flagOn that records what it is asked and answers true.
+import { stepGate } from "../../harness/files/tests/scenarios/gate.ts";
+export async function gate(st, here) {
+  const asked = [];
+  const g = await stepGate(st, { kept: () => undefined, ...here }, (f) => { asked.push(f); return Promise.resolve(true); });
+  return { run: g.run, asked };
+}
+
 async function filing(run, github = false) {
   const marks = await Deno.makeTempDir();
   const said = [];
