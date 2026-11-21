@@ -66,6 +66,7 @@ The rest have defaults:
   (`_work`), the `path` its jobs run with (Homebrew's folders on a Mac only), and `nice` (10), the
   service's CPU priority, so jobs yield to the person's own work. The schema refuses a setup with
   both scale sets and host runners.
+- **accounts**, and a host runner's `user`, `admits` and `env`: see "On a Mac" below.
 - **versions**: the ARC charts and the runner, BuildKit and binfmt images, each pinned by digest;
   the host runner's first download, by version, with a sha256 per platform (`osx-arm64`,
   `linux-x64`, `linux-arm64`); it updates itself afterwards.
@@ -127,10 +128,58 @@ jobs:
 
 ## On a Mac (caveats)
 
-- **A host runner is the person's own account.** Its jobs read their home (gh's login, gcloud's,
+- **A host runner is the person's own account, unless it has one of its own.** A runner with no
+  `user` is a LaunchAgent in the applier's session: its jobs read their home (gh's login, gcloud's,
   the keychain's), so it serves private repositories whose writers they trust, never a public one,
   where a fork's pull request would run on the Mac. A step that changes global state (`git config
   --global`, an install) changes theirs: a job keeps it in `$RUNNER_TEMP` (`GIT_CONFIG_GLOBAL`).
+  A runner with a `user` is a LaunchDaemon (`/Library/LaunchDaemons/<label>.plist`, root's) run as
+  one of the setup's `accounts`: a hidden account with no password, a group of its own and a home of
+  mode 700, in no group of the applier's (never `admin`), so it reads nothing of the applier's. Its
+  runner folder is `/Library/Application Support/pronto-runners/<name>/runner`, outside its home: root's
+  parent, so it can neither rename nor replace it. The folder is `root:<group>` mode 750, readable by the
+  account's own group alone (`.credentials*` included), and root's but `_work` and `_diag`, which are the
+  account's, mode 700. The runner is registered with `--disableupdate`, as the account while the folder is
+  its own (`install-as`, `register-as`), then `lock`ed, with its daemon unloaded for both the lock and
+  the unlock (chowns never follow a symlink, never enter `_work` or `_diag`, and a lock stops at an absolute symlink, a symlink that leaves
+  the folder, or a multiply-linked file outside them; the runner's own relative links into `externals/` are fine). The runner's tarball is copied to a root-only file, checked
+  there against the pinned sha256 and only then extracted as the account. Logs are under
+  `/Library/Logs/pronto-runners/<label>/` (root's; launchd makes the files), and a
+  root-owned `job-started.sh` in `/Library/Application Support/pronto-runners/<name>/` runs before every
+  job (the plist's `ACTIONS_RUNNER_HOOK_JOB_STARTED`, which the account cannot edit), generated from the setup:
+  - a `role: "pr"` account runs pull requests' code. Its hook probes the account on every job and
+    fails the job unless it is that account, in none of `forbiddenGroups`, cannot list any other
+    account's home, finds no gh, gcloud, git or ssh credentials and no keychain item for github.com,
+    cannot write `protectedPaths` (what other accounts execute) and has no token-like variable in
+    its environment. Its `env` defaults to its own slot pool (`STACK_POOL=/tmp/pronto-stacks-<user>`,
+    reading the applier's holds through `STACK_HOLD_POOL` and `STACK_HOLD_UID`).
+  - a `role: "trusted"` account runs what the runner `admits`: workflow files (at a ref, on
+    events). Its hook refuses a `pull_request*` event, anything but a listed (workflow at its ref,
+    event) pair of the runner's repository, and a home that is not mode 700. A trusted runner with
+    no `admits` does not vet: no runner of an account that is not a `pr` one runs without a policy.
+  - a trusted account's PATH is `/usr/local/<account>/bin:/usr/bin:/bin`: that folder is root's, and the
+    hook refuses unless each of `trustedTools` (gh, git, jq) resolves to a file root owns. The one tool put
+    there is gh, pinned like the runner (`versions.gh`: the release asset's sha256, the binary's path in it
+    and the binary's own sha256, per platform): installed beside its place, checked, refused if it links
+    anything outside /usr/lib and /System (`otool -L`), then renamed onto its place; the state check compares
+    the installed file to the pin. git and jq are the system's (/usr/bin), never Homebrew's, whose libraries
+    the applier can write. Which tools are trusted is data in the setup.
+  - every file root installs (hook, plist, gh) is checked against the sha256 the plan renders before it is
+    installed, installed beside its place, checked there and renamed onto it; a registration or removal
+    token goes in on stdin, never in an argument: not an account's, nor the applier's own runners'.
+  - an applier's own runner (no `user`) may `admit` workflows: it stays a LaunchAgent, behind the same hook.
+  - `role: "owner"` (with `existing: true`) names an account already on the machine, the applier's: it
+    is not created, and no runner runs as it. It can write its own home and its LaunchAgents, so it is
+    trusted with nothing; a `pr` account's probe keeps its home out of reach. **A workflow that holds
+    `OWNER_MERGE_TOKEN` or any other environment secret must never be routed to a runner with no `user`,
+    nor to one of an owner account**: such a runner is only as safe as the applier's own account.
+
+  Moving a runner to an account is setting its `user`: `apply` creates the account (`sudo -n`),
+  waits until GitHub says the runner is idle, unregisters it from the old folder (kept) and its agent,
+  registers it again from the account's, under the same name and labels, and writes its hook, then its
+  daemon. Where sudo asks for a password, `apply` prints the exact commands, in order, and stops;
+  it never prompts. Setting `user` back to empty and applying moves it back (the old folder is
+  still there). A setup with no `user` renders exactly what it did before.
 - **A host runner's heavy jobs claim the machine.** A stack, `integrate@local` or a rehearsal on
   a host runner runs through the repository's `tests/slot.ts` (`--weight <n> -- <command>`), so CI
   shares the stack budget with the person's own stacks and waits for a release.

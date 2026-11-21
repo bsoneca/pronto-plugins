@@ -6,6 +6,23 @@ package runners
 setups: "bsoneca-mac": {
 	cluster: host: {}
 	github: {owner: "bsoneca", kind: "user"}
+	// The accounts runners may run as (README, "On a Mac"). Only the applier's own so far, so no runner
+	// has an account yet: a runner moves by naming one as its `user`, and a `pr` account's runner is
+	// probed on every job against what this Mac keeps out of its reach.
+	accounts: bruno: {role: "owner", existing: true, group: "staff"}
+	// What a trusted account's jobs may run: gh, pinned (versions.gh: added with the first trusted account's
+	// runner), git and jq the system's own (/usr/bin), none of them Homebrew's, which bruno can write.
+	trustedTools: ["gh", "git", "jq"]
+	forbiddenGroups: ["admin", "studio"]
+	protectedPaths: ["/opt/homebrew/bin", "/Users/Shared/pronto/mise", "/Library/LaunchDaemons"]
+	// A pr account's runner has a slot pool of its own and reads the applier's holds (pronto's
+	// tests/slot.ts), and the shared mise store read-only.
+	prEnv: {
+		STACK_POOL:               "/tmp/pronto-stacks-{user}"
+		STACK_HOLD_POOL:          "/tmp/pronto-stacks"
+		STACK_HOLD_UID:           "501"
+		MISE_SHARED_INSTALL_DIRS: "/Users/Shared/pronto/mise"
+	}
 	hostRunners: "pronto-mac": repo: "pronto"
 	// Two more ci runners under the same label, so PR checks run three at a time instead of queueing
 	// behind one runner; tests/slot.ts still caps what their heavy steps put on the machine.

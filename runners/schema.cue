@@ -5,7 +5,10 @@
 // runners.ts applies.
 package runners
 
-import "list"
+import (
+	"list"
+	"strings"
+)
 
 setups: [Name=string]: #Setup & {name: Name}
 
@@ -44,12 +47,78 @@ setups: [Name=string]: #Setup & {name: Name}
 		arch: *"arm64" | "amd64"
 	}
 
+	// The macOS accounts a host setup's runners run as, by login: `pr` accounts run pull requests'
+	// code (probed on every job, host.cue), `trusted` ones the workflows `admits` names. Each is
+	// created hidden, with no password, a group of its own and a home of mode 700. An `owner` account
+	// is one already on the machine (the applier's own): it can write its home and its LaunchAgents, so it
+	// is trusted with nothing and no runner runs as it. The setup only names it, so that a `pr` account's
+	// probe keeps that account's home out of reach.
+	accounts: [Login=#Login]: {
+		role!: "pr" | "trusted" | "owner"
+		home:  *"/Users/\(Login)" | #Path
+		// Its primary group: one of its own, created with it, so what the group may read no other account
+		// can; an owner account keeps the group it has.
+		group:    *Login | #Login
+		existing: *false | bool
+		if role == "owner" {existing: true}
+		if existing {role: "owner"}
+		if !existing {group: Login}
+	}
+	// What a `pr` runner's probe hook refuses: groups its account must not be in, paths it must
+	// not be able to write (what other accounts execute), and what a token's name looks like
+	// (shell patterns) among its environment.
+	// (The hooks' own folder is always protected too.) What is the setup's own, such as a group or a
+	// shared tool store, is written in the setup.
+	forbiddenGroups: *["admin"] | [...#Login]
+	protectedPaths:  *["/opt/homebrew/bin", "/Library/LaunchDaemons"] | [...#Path]
+	tokenPatterns:   *["*TOKEN*", "*SECRET*", "*PASSWORD*", "*PASSWD*", "*API_KEY*", "*_KEY", "*CREDENTIAL*", "*_PAT"] | [...=~"^[*A-Za-z0-9_]+$"]
+	// The environment a `pr` account's runner gets, `{user}` being its login.
+	prEnv: [string]: string
+	// What a trusted account's jobs may run. The hook checks that each of `trustedTools` resolves, on a
+	// PATH of a root-owned folder, /usr/bin and /bin, to a file root owns. Root puts the one pinned tool, gh
+	// (versions.gh), in that folder; the rest are the system's own (/usr/bin).
+	trustedTools: *["gh", "git", "jq"] | [...=~"^[A-Za-z0-9._-]+$"]
+	// A Linux unit runs as the applier; accounts are a Mac's.
+	if cluster.host != _|_ {
+		if cluster.host.os == "linux" {
+			accounts: [string]: _|_
+			hostRunners: [string]: user: ""
+		}
+	}
+
 	// A host setup's runners: GitHub's actions/runner for the machine's platform, installed under
 	// the home and run as a service (hostService), so it comes back at every login or boot. Each
 	// takes one job at a time, on the machine itself (its tools, its caches, no container). What
 	// runs-on says: self-hosted, its OS and arch (GitHub's own labels: macOS or Linux, ARM64 or X64)
 	// and the runner's `labels`.
 	hostRunners: [Name=#DNS]: {
+		// The macOS account the runner runs as, a LaunchDaemon's UserName (host.cue). Empty: the
+		// applier's own, a LaunchAgent in their session, exactly as before.
+		user: *"" | #Login
+		// What a runner takes: the workflows (at their ref, on their events) its job-started hook lets
+		// run. A runner of a non-`pr` account must name at least one (it fails closed: such a runner
+		// without a policy cannot be written), and a `repo`, since an organization's runner has no
+		// repository its workflow refs could name. A `pr` account's runner is probed instead and takes
+		// none. The applier's own runner (no `user`) may name some: it stays a LaunchAgent, behind the hook.
+		admits: *[] | [...#Admit]
+		// Added to the daemon's environment (its plist, which the runner's account cannot edit), not
+		// to the runner's .env. A `pr` account's runner gets the setup's `prEnv`.
+		env: [string]: string
+		if user == "" {
+			env: [string]: _|_
+			if len(admits) > 0 {repo!: string}
+		}
+		if user != "" {
+			_role: accounts[user].role & ("pr" | "trusted")
+			if _role == "pr" {
+				admits: []
+				env: {for k, v in prEnv {(k): *strings.Replace(v, "{user}", user, -1) | string}}
+			}
+			if _role != "pr" {
+				admits: [#Admit, ...#Admit]
+				repo!: string
+			}
+		}
 		if github.kind == "user" {repo!: string}
 		repo?: =~"^[A-Za-z0-9_.-]+$"
 		labels: *[Name] | [...=~"^[A-Za-z0-9._-]+$"]
@@ -58,7 +127,9 @@ setups: [Name=string]: #Setup & {name: Name}
 		work: *"_work" | (string & !~"^/")
 		// The PATH its jobs run with (config.sh records it in .path), ~ the home: not the PATH of
 		// whoever ran apply.
-		path: *_defaultPath | [...(=~"^(/|~/)")]
+		// A trusted account's is one no account but root writes.
+		_path: [if user != "" if accounts[user].role == "trusted" {l: ["/usr/local/\(user)/bin", "/usr/bin", "/bin"]}, {l: _defaultPath}][0].l
+		path: *_path | [...(=~"^(/|~/)")]
 		// The service's CPU priority (launchd's and systemd's Nice): its jobs yield to the person's own work.
 		nice: *10 | (int & >=0 & <=20)
 	}
@@ -125,6 +196,15 @@ setups: [Name=string]: #Setup & {name: Name}
 		binfmt:      *"tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0" | string
 		// A host runner's first install; it updates itself afterwards, as GitHub requires. One
 		// tarball per platform, each pinned by its sha256 (the release's notes list them).
+		// The gh a trusted account's PATH holds: pinned like the runner, per platform: the release asset (its
+		// sha256), the `member` of it that is the gh binary, and that binary's own sha256 (what is installed
+		// and checked). Only a setup with a trusted account's runner needs it.
+		gh: [#Platform]: {
+			url!:    string
+			sha256!: =~"^[0-9a-f]{64}$"
+			member!: string
+			binary!: =~"^[0-9a-f]{64}$"
+		}
 		hostRunner: {
 			version: *"2.338.2" | string
 			sha256: [#Platform]: =~"^[0-9a-f]{64}$"
@@ -138,6 +218,19 @@ setups: [Name=string]: #Setup & {name: Name}
 }
 
 #DNS: =~"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+
+#Login: =~"^[a-z_][a-z0-9_.-]*$"
+// A path a script quotes: no shell metacharacters.
+#Path: =~"^/[A-Za-z0-9 ._/-]*$"
+
+// A workflow a trusted runner takes, in the repository its runner serves: the file, the ref it must
+// run at, and the events it may run on. What a hook compares GITHUB_WORKFLOW_REF and
+// GITHUB_EVENT_NAME to; a pull request event is refused whatever is written here.
+#Admit: {
+	workflow!: =~"^\\.github/workflows/[A-Za-z0-9._-]+\\.ya?ml$"
+	ref:       *"refs/heads/main" | =~"^[A-Za-z0-9._/-]+$"
+	events!: [...=~"^[a-z_]+$"]
+}
 
 #Colima: {
 	// A profile of its own, so a VM someone uses for other work is left alone.

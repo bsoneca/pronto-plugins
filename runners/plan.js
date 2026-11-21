@@ -45,13 +45,293 @@ export function hostSteps(plan, seen) {
   const out = [];
   for (const name of Object.keys(plan.host).sort()) {
     const s = seen[name] ?? {};
+    const r = plan.host[name];
+    if (s.unknown) {
+      out.push({ do: 'unknown', name });
+      continue;
+    }
+    if (r.user) {
+      out.push(...accountSteps(r, name, s));
+      continue;
+    }
+    // A runner that has gone back to the applier's own: its daemon, if one is still loaded, goes first.
+    if (s.legacyDaemon) out.push({ do: 'remove-daemon', name });
     if (!s.installed) out.push({ do: 'install', name });
     if (s.registration === 'stale') out.push({ do: 'unregister', name });
     if (s.registration !== 'current') out.push({ do: 'register', name });
-    if (!s.agent || s.registration !== 'current') out.push({ do: 'agent', name });
+    // Its hook, when it admits workflows, is in place before its agent (re)starts.
+    const hook = r.hook && !s.hook;
+    if (hook) out.push({ do: 'hook', name });
+    if (!s.agent || hook || s.registration !== 'current') out.push({ do: 'agent', name });
   }
   return out;
 }
+
+/**
+ * A runner with an account (a LaunchDaemon run as it): `seen` adds whether the `account` exists,
+ * whether the runner is still registered from the applier's own folder (`oldRegistered`), whether
+ * its folder is root's (`locked`), its `tools` and `hook` are in place and its `daemon` is the
+ * plan's. A runner that changes account finishes its job (`drain`) and is unregistered from the old
+ * folder, which is kept, before it registers again from the account's, under the same name and
+ * labels, with the folder then given to root but `_work` and `_diag`; its tools and hook are in place
+ * before its daemon starts, so no job runs unprobed. A daemon that was unloaded to unlock or lock
+ * the folder is loaded again by the `daemon` step that follows.
+ */
+function accountSteps(r, name, s) {
+  const out = [];
+  const stale = s.registration === 'stale';
+  const redo = s.registration !== 'current';
+  let locked = !!s.locked;
+  let drained = false;
+  let bounced = false;
+  const drain = () => {
+    if (!drained) out.push({ do: 'drain', name });
+    drained = true;
+  };
+  const unlock = () => {
+    if (!locked) return;
+    drain();
+    out.push({ do: 'unlock', name });
+    locked = false;
+    bounced = true;
+  };
+  if (!s.account) out.push({ do: 'account', name });
+  if (s.oldRegistered) {
+    drain();
+    out.push({ do: 'unregister-old', name });
+  }
+  if (!s.installed) {
+    out.push({ do: 'install-as', name });
+    locked = false;
+  }
+  if (stale) {
+    drain();
+    unlock();
+    out.push({ do: 'unregister-as', name });
+  }
+  if (redo) {
+    unlock();
+    out.push({ do: 'register-as', name });
+  }
+  if (!locked) {
+    out.push({ do: 'lock', name });
+    bounced = true;
+  }
+  if (r.tools && !s.tools) out.push({ do: 'tools', name });
+  if (!s.hook) out.push({ do: 'hook', name });
+  if (!s.daemon || !s.hook || redo || bounced) out.push({ do: 'daemon', name });
+  return out;
+}
+
+/** The steps that act as root or as a runner's account: all of an account's but `drain` and `unregister-old`, the applier's own. */
+export const needsSudo = (step) => ['account', 'install-as', 'unregister-as', 'unlock', 'register-as', 'lock', 'tools', 'hook', 'daemon', 'remove-daemon'].includes(step.do);
+
+/** Whether a step cuts a runner's job if it is running one: it waits for `busy: false` again right before it acts. */
+const busyGated = ['unregister', 'agent', 'unregister-old', 'unregister-as', 'unlock', 'daemon', 'remove-daemon'];
+export const gatedByBusy = (step) => busyGated.includes(step.do);
+
+/**
+ * A uid for each account to create, chosen once, in order, from `from` up and never one in `usedUids` or
+ * `usedGids` (the account's group takes the same number): so no two accounts of a list printed or run share one.
+ */
+export function allocateUids(accounts, usedUids, usedGids = [], from = 510) {
+  const taken = new Set([...usedUids, ...usedGids]);
+  const out = {};
+  let uid = from;
+  for (const a of accounts) {
+    while (taken.has(uid)) uid++;
+    out[a.login] = uid;
+    taken.add(uid);
+  }
+  return out;
+}
+
+/**
+ * What a runner with an account is found to be, from what runners.ts could read. `f`: `sudo` (whether
+ * sudo -n works), `account`, `oldRegistered`, `hookSame` and `daemonSame` (the root-owned files are
+ * world-readable), `loaded`, GitHub's view of the runner (`gh`: `{status, labels}` or null), and, only
+ * with sudo, what is in its folder (`found`: .runner, .path and the labels, `installed`, `locked`, `tools`).
+ * Without sudo nothing in its folder is read, and none of it is guessed for a runner that already has its
+ * files: online on GitHub with its labels, it is current; otherwise it is left alone (`unknown`). A runner
+ * with none of its files is still to be moved.
+ */
+export function inspectAccount(plan, name, f) {
+  const r = plan.host[name];
+  const base = { account: f.account, oldRegistered: f.oldRegistered, hook: f.hookSame };
+  if (f.sudo) return { ...base, installed: f.installed, registration: registration(plan, name, f.found), locked: f.locked, tools: f.tools, daemon: f.daemonSame && f.loaded };
+  if (f.hookSame && f.daemonSame) {
+    const online = !!f.gh && f.gh.status === 'online' && r.labels.every((l) => f.gh.labels.includes(l));
+    return online ? { ...base, installed: true, registration: 'current', locked: true, tools: true, daemon: true } : { unknown: true };
+  }
+  return { ...base, installed: false, registration: 'none', locked: false, tools: false, daemon: false };
+}
+
+/** The token's place on stdin, never in an argument: read into ACTIONS_RUNNER_INPUT_TOKEN, which config.sh takes as --token. */
+const TOKEN_IN = 'IFS= read -r ACTIONS_RUNNER_INPUT_TOKEN && export ACTIONS_RUNNER_INPUT_TOKEN';
+
+/** A script that checks a file against a sha256 (shasum -c), as its first and its second argument after the digest. */
+const CHECK = 'printf "%s  %s\\n" "$0" "$1" | shasum -a 256 -c - >/dev/null';
+
+/** A script that refuses a binary ($0) that links a library outside /usr/lib and /System, removing it. */
+const LINKS = 'out=$(otool -L "$0") || { rm -f "$0"; exit 1; }; printf "%s\\n" "$out" | tail -n +2 | while read -r lib rest; do case "$lib" in /usr/lib/*|/System/*) ;; *) echo "$0 links $lib" >&2; exit 1;; esac; done || { rm -f "$0"; exit 1; }';
+
+/**
+ * The runner's tarball ($1, the stage's bytes) copied to a root-only file, checked there against the pinned digest
+ * ($0), and only then extracted, as the account ($2), into its folder ($3): what is extracted is what was checked,
+ * whatever the stage becomes after.
+ */
+const TAR = 'set -e; t=$(mktemp); trap "rm -f $t" EXIT; cat "$1" > "$t"; printf "%s  %s\\n" "$0" "$t" | shasum -a 256 -c - >/dev/null; sudo -n -u "$2" -H tar xzf - -C "$3" < "$t"';
+
+/** A group ($0) that must not exist yet: its gid is the account's, and a group that is there is someone's. */
+const GROUP_FREE = '! dscl . -read "/Groups/$0" >/dev/null 2>&1 || { echo "group $0 exists" >&2; exit 1; }';
+
+/** Symlinks ($0 and the rest) removed, so what is made in their place is a folder. */
+const UNLINK = 'for d in "$0" "$@"; do if [ -L "$d" ]; then rm -f "$d"; fi; done';
+
+/**
+ * A runner folder ($0, its _work $1) that holds, outside _work and _diag, a regular file with more than one link, or
+ * a symlink whose target is absolute or, resolved lexically against the link's own folder (never followed), leaves the
+ * folder: refused. A relative symlink that stays inside (the runner's own node/bin/npm) is fine.
+ */
+const CLEAN = [
+  'r=$0; w=$1; f() { find "$r" -xdev \\( -path "$r/$w" -o -path "$r/_diag" \\) -prune -o "$@" -print; }',
+  'out=$(f -type f -links +1) || exit 1',
+  '[ -z "$out" ] || { echo "$out has more than one link" >&2; exit 1; }',
+  'f -type l | while IFS= read -r l; do d=${l%/*}; printf "%s\\t%s\\t%s\\n" "${d#"$r"}" "$(readlink "$l")" "$l"; done | awk -F"\\t" \'' +
+    '{ if (substr($2, 1, 1) == "/") { print $3 " -> " $2 " is absolute" > "/dev/stderr"; bad = 1; next } ' +
+    'n = split($1, a, "/"); depth = 0; for (i = 1; i <= n; i++) if (a[i] != "") depth++; ' +
+    'm = split($2, b, "/"); for (i = 1; i <= m; i++) { if (b[i] == "" || b[i] == ".") continue; ' +
+    'if (b[i] == "..") { depth--; if (depth < 0) { print $3 " -> " $2 " leaves the folder" > "/dev/stderr"; bad = 1; break } } else depth++ } } END { exit bad }\'',
+].join('; ');
+
+/**
+ * The commands a step of a runner with an account (or of the applier's own, behind a hook) runs as root or as
+ * its account, each `{argv}` (and `tolerate` when its failing is fine, `stdin` a file it reads, `token` when
+ * the registration or removal token is its stdin). `ctx`: `uids` (a login's free uid, for `account`) and
+ * `stage` (a folder holding the step's files: `plist` (the plan's XML), `job-started.sh`, `runner.tar.gz`, `gh`).
+ * A file root installs from the stage is checked against the sha256 the plan renders before it is installed,
+ * installed beside its place, checked there, and only then renamed onto it (an atomic rename in a folder of
+ * root's): a staged copy edited since fails the command, and a file is never half in place.
+ */
+export function stepCommands(plan, name, step, ctx) {
+  const r = plan.host[name];
+  const root = (...argv) => ({ argv: ['sudo', '-n', ...argv] });
+  const as = (...argv) => ({ argv: ['sudo', '-n', '-u', r.user, '-H', ...argv] });
+  const dirOf = (p) => p.replace(/\/[^/]*$/, '');
+  const sh = (dir, script, ...argv) => as('env', `PATH=${r.path}`, '/bin/sh', '-c', `cd "$0" && ${script}`, dir, ...argv);
+  const bootout = () => ({ ...root('launchctl', 'bootout', `system/${r.service.label}`), tolerate: true });
+  const put = (sha, staged, dest, mode, extra = () => []) => [
+    root('/bin/sh', '-c', CHECK, sha, staged),
+    root('install', '-m', mode, '-o', 'root', '-g', 'wheel', staged, `${dest}.new`),
+    root('/bin/sh', '-c', `printf "%s  %s\\n" "$0" "$1" | shasum -a 256 -c - >/dev/null || { rm -f "$1"; exit 1; }`, sha, `${dest}.new`),
+    ...extra(`${dest}.new`),
+    root('mv', '-f', `${dest}.new`, dest),
+  ];
+  const keep = `${r.dir}/${r.work}`;
+  // What is in the folder but the two the account writes.
+  const rest = [r.dir, '-mindepth', '1', '-maxdepth', '1', '!', '-name', r.work, '!', '-name', '_diag', '-exec'];
+  switch (step) {
+    case 'account': {
+      const a = plan.accounts.find((x) => x.login === r.user);
+      const u = `/Users/${a.login}`;
+      const g = `/Groups/${a.group}`;
+      const uid = String(ctx.uids[a.login]);
+      return [
+        root('/bin/sh', '-c', GROUP_FREE, a.group),
+        // A group of its own (its gid is its uid): what the group may read, no other account can.
+        ...[
+          ['-create', g],
+          ['-create', g, 'RealName', `Pronto runner (${a.login})`],
+          ['-create', g, 'PrimaryGroupID', uid],
+          ['-create', g, 'Password', '*'],
+          ['-create', u],
+          ['-create', u, 'UserShell', '/bin/bash'],
+          ['-create', u, 'RealName', `Pronto runner (${a.login})`],
+          ['-create', u, 'UniqueID', uid],
+          ['-create', u, 'PrimaryGroupID', uid],
+          ['-create', u, 'NFSHomeDirectory', a.home],
+          ['-create', u, 'IsHidden', '1'],
+          // No password: no login, only a daemon or sudo -u gets in.
+          ['-create', u, 'Password', '*'],
+        ].map((args) => root('dscl', '.', ...args)),
+        root('install', '-d', '-m', a.mode, '-o', a.login, '-g', a.group, a.home),
+      ];
+    }
+    case 'install-as':
+      // The folder is made by root, the account's while it is installed and registered (and locked after).
+      return [
+        root('install', '-d', '-m', '755', '-o', 'root', '-g', 'wheel', dirOf(r.dir)),
+        root('install', '-d', '-m', '750', '-o', r.user, '-g', r.group, r.dir),
+        root('/bin/sh', '-c', TAR, r.download.sha256, `${ctx.stage}/runner.tar.gz`, r.user, r.dir),
+      ];
+    case 'unregister-as':
+      return [{ ...sh(r.dir, `${TOKEN_IN} && exec ./config.sh remove`), token: true }];
+    case 'register-as':
+      // The runner's own updater would rewrite its folder, which is root's: it is told not to.
+      return [{ ...sh(r.dir, `${TOKEN_IN} && exec ./config.sh "$@"`, ...registerArgs(plan, name), '--disableupdate'), token: true }];
+    case 'unlock':
+      // The daemon is unloaded first, so nothing of the account is running while its folder is handed back, and what
+      // is chowned is never followed through a symlink (-h); _work and _diag are not touched.
+      return [
+        bootout(),
+        root('chown', '-h', `${r.user}:${r.group}`, r.dir),
+        root('find', ...rest, 'chown', '-h', '-R', `${r.user}:${r.group}`, '{}', '+'),
+      ];
+    case 'lock':
+      // Root's but for the folders its jobs write, and readable by the account's group alone (the listener only
+      // reads .env, .path, .credentials*, bin/; it writes _work and _diag, the account's, mode 700). The daemon is
+      // unloaded; a _work or _diag that is a symlink is removed to be made again; anything outside them that is a
+      // symlink or a multiply-linked file stops the lock; the folder itself is chowned last.
+      return [
+        bootout(),
+        root('/bin/sh', '-c', UNLINK, keep, `${r.dir}/_diag`),
+        root('/bin/sh', '-c', CLEAN, r.dir, r.work),
+        root('find', ...rest, 'chown', '-h', '-R', `root:${r.group}`, '{}', '+'),
+        root('find', ...rest, 'chmod', '-R', 'g+rX,go-w,o-rwx', '{}', '+'),
+        root('install', '-d', '-m', '700', '-o', r.user, '-g', r.group, keep, `${r.dir}/_diag`),
+        root('chmod', '750', r.dir),
+        root('chown', '-h', `root:${r.group}`, r.dir),
+      ];
+    case 'tools':
+      // gh is the one pinned tool (the setup's versions.gh), checked as staged, as installed and for its links;
+      // the rest of the trusted tools are the system's.
+      return [
+        root('install', '-d', '-m', '755', '-o', 'root', '-g', 'wheel', dirOf(r.tools.dir), r.tools.dir),
+        ...put(r.tools.gh.binary, `${ctx.stage}/gh`, `${r.tools.dir}/gh`, '755', (p) => [root('/bin/sh', '-c', LINKS, p)]),
+      ];
+    case 'hook':
+      return [root('install', '-d', '-m', '755', '-o', 'root', '-g', 'wheel', dirOf(r.hook.path)), ...put(r.hook.sha256, `${ctx.stage}/job-started.sh`, r.hook.path, r.hook.mode)];
+    case 'daemon': {
+      const logs = dirOf(r.service.plist.StandardOutPath);
+      return [
+        root('install', '-d', '-m', '755', '-o', 'root', '-g', 'wheel', dirOf(logs)),
+        root('install', '-d', '-m', '755', '-o', 'root', '-g', 'wheel', logs),
+        ...put(r.service.sha256, `${ctx.stage}/plist`, r.service.path, '644'),
+        bootout(),
+        root('launchctl', 'bootstrap', 'system', r.service.path),
+      ];
+    }
+    case 'remove-daemon': {
+      // A runner that is the applier's own again: the daemon it was, unloaded and its plist removed.
+      const plist = `/Library/LaunchDaemons/${r.service.label}.plist`;
+      return [bootout(), root('rm', '-f', plist)];
+    }
+  }
+  return [];
+}
+
+/** A word as a person types it: quoted unless it is plain. */
+const quote = (a) => /^[A-Za-z0-9_./:=@%+,-]+$/.test(a) ? a : `'${a.replace(/'/g, "'\\''")}'`;
+
+/** A command as a person types it: quoted, `sudo -n` as `sudo`, its token on stdin from `"$t"` (set by tokenHelp), its stdin from `cat`. */
+export function shell(cmd) {
+  const argv = cmd.argv[0] === 'sudo' && cmd.argv[1] === '-n' ? ['sudo', ...cmd.argv.slice(2)] : cmd.argv;
+  const feed = cmd.token ? "printf '%s\\n' \"$t\" | " : cmd.stdin ? `cat ${quote(cmd.stdin)} | ` : '';
+  return `${feed}${argv.map(quote).join(' ')}${cmd.tolerate ? ' || true' : ''}`;
+}
+
+/** What a person runs first, to hold a registration token for the commands that read it. */
+export const tokenHelp = (plan, name, kind) => `t=$(gh api -X POST ${plan.host[name].api}/${kind}-token --jq .token)`;
 
 /**
  * A host runner's registration, from what runners.ts found: its .runner file (`runner`, parsed, or
@@ -74,11 +354,18 @@ export function registerArgs(plan, name) {
   return ['--unattended', '--url', r.url, '--name', name, '--labels', r.labels.join(','), '--work', r.work, '--replace'];
 }
 
+/**
+ * config.sh as a command whose registration or removal token is its stdin, never an argument (another account could
+ * read an argument with ps and register a runner of the same label): read into ACTIONS_RUNNER_INPUT_TOKEN, which
+ * config.sh takes as --token.
+ */
+export const configCommand = (args) => ['/bin/sh', '-c', `${TOKEN_IN} && exec ./config.sh "$@"`, 'sh', ...args];
+
 /** What a person runs when gh can't fetch the registration token (no admin on the repository). */
 export function registerHelp(plan, name) {
   const r = plan.host[name];
   return [
     `A registration token for ${r.url.replace('https://github.com/', '')} needs admin on it. With a gh login that has it:`,
-    `cd ${r.dir} && ./config.sh ${registerArgs(plan, name).join(' ')} --token "$(gh api -X POST ${r.api}/registration-token --jq .token)"`,
+    `cd ${quote(r.dir)} && gh api -X POST ${r.api}/registration-token --jq .token | ( ${TOKEN_IN} && ./config.sh ${registerArgs(plan, name).join(' ')} )`,
   ];
 }
