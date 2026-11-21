@@ -31,12 +31,6 @@ cases: {
 		{call: "cron.nulPaths", args: [""], expect: []},
 		{call: "cron.migrationFiles", args: [["apps/studio/services/database/migrations/m\u00e9.sql"], "apps/studio"], expect: ["apps/studio/services/database/migrations/m\u00e9.sql"]},
 	]}
-	"abandon and a run take the lock the same way": {suite: "cron", steps: [
-		{call: "cron.lockStep", args: [true, 0, false], expect: "take"},
-		{call: "cron.lockStep", args: [false, 4242, true], expect: "busy", why: "a live holder: a run skips, abandon refuses, neither reads or changes anything"},
-		{call: "cron.lockStep", args: [false, 4242, false], expect: "takeover", why: "a dead holder's lock"},
-		{call: "cron.lockStep", args: [false, 0, false], expect: "takeover", why: "no pid written"},
-	]}
 	"the rehearsal child gets the whole environment and inherits nothing else": {suite: "cron", steps: [
 		{call: "cron.rehearsalSpawn", args: [{A: "1", REHEARSE_LIVE: "stale"}, null, true, "def456"], expect: {env: {A: "1", REHEARSE_COMMIT: "def456", STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release"}, clearEnv: true}, why: "a removed REHEARSE_LIVE is not inherited from the parent"},
 		{call: "cron.rehearsalSpawn", args: [{A: "1"}, "abc123", true, "def456"], expect: {env: {A: "1", REHEARSE_LIVE: "abc123", REHEARSE_COMMIT: "def456", STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release"}, clearEnv: true}},
@@ -113,14 +107,12 @@ cases: {
 		{call: "cron.trustNotice", args: ["release/x/1 why", "release/x/1", "other"], expect: {key: "release/x/1 other", tell: true}, why: "another reason"},
 	]}
 	"a dead holder that left a preview is reaped before its lock is taken over": {suite: "cron", steps: [
-		{call: "cron.lockStep", args: [true, 0, false, true], expect: "take"},
-		{call: "cron.lockStep", args: [false, 4242, true, true], expect: "busy", why: "a live holder's preview is its own"},
-		{call: "cron.lockStep", args: [false, 4242, false, true], expect: "reap", why: "a supervisor's kill during up: stop the recorded pgid, run down, then take over"},
-		{call: "cron.lockStep", args: [false, 4242, false, false], expect: "takeover"},
-		{call: "cron.reapStep", args: [true, 0, 60000], expect: "term"},
+						{call: "cron.reapStep", args: [true, 0, 60000], expect: "term"},
 		{call: "cron.reapStep", args: [true, 59000, 60000], expect: "term"},
 		{call: "cron.reapStep", args: [true, 60000, 60000], expect: "kill"},
 		{call: "cron.reapStep", args: [false, 5000, 60000], expect: "gone", why: "then down runs"},
+		{call: "cron.reapStep", args: [true, 120000, 60000], expect: "giveup", why: "still alive a minute after KILL: down runs, said in reaped"},
+		{call: "cron.reapStep", args: [true, 119999, 60000], expect: "kill"},
 	]}
 	"a signal's wait ends a down's grace and teardown after up is gone, not after the signal": {suite: "cron", steps: [
 		{call: "cron.signalDone", args: [null, false, 360000, 0, 0, 60000, 300000], expect: true, why: "no preview: from the signal, as before"},
@@ -131,13 +123,13 @@ cases: {
 		{call: "cron.signalDone", args: [null, true, 7020000, 0, 6660000, 60000, 300000], expect: true, why: "an up never seen gone counts gone at its limit and grace"},
 	]}
 	"the scheduler gives a stopping run at least up's limit and the teardown": {suite: "cron", steps: [
-		{call: "cron.stopSeconds", args: [120], expect: 7560},
-		{call: "cron.stopSeconds", args: [0], expect: 360},
-		{call: "cron.plist", args: [{label: "l", program: "/p", args: ["a"], poll: 10, log: "/l", env: {}, stop: 7560}], matches: "<key>ExitTimeOut</key><integer>7560</integer>"},
+		{call: "cron.stopSeconds", args: [120], expect: 7650},
+		{call: "cron.stopSeconds", args: [0], expect: 450},
+		{call: "cron.plist", args: [{label: "l", program: "/p", args: ["a"], poll: 10, log: "/l", env: {}, stop: 7650}], matches: "<key>ExitTimeOut</key><integer>7650</integer>"},
 		{call: "cron.plist", args: [{label: "l", program: "/p", args: ["a"], poll: 10, log: "/l", env: {}}], matches: "^(?:(?!ExitTimeOut)[\\s\\S])*$", why: "none unless asked"},
-		{call: "cron.systemdUnits", args: [{label: "l", program: "/p", args: ["a"], poll: 10, log: "/l", env: {}, stop: 7560}]},
+		{call: "cron.systemdUnits", args: [{label: "l", program: "/p", args: ["a"], poll: 10, log: "/l", env: {}, stop: 7650}]},
 		{keep: "u"},
-		{get: "service", matches: "TimeoutStopSec=7560"},
+		{get: "service", matches: "TimeoutStopSec=7650"},
 		{use: "u"},
 		{get: "service", matches: "KillMode=mixed"},
 	]}
@@ -151,8 +143,30 @@ cases: {
 		{call: "cron.holderPid", args: [true, "", ""], expect: 0, why: "an unreadable pid file: no holder, the directory is removed"},
 		{call: "cron.holderPid", args: [false, "", "4242"], expect: 4242},
 		{call: "cron.holderPid", args: [false, "", "x"], expect: 0},
-		{call: "cron.lockStep", args: [false, 4242, true, false], expect: "busy", why: "legacyDir with a live pid: busy, as for a live holder"},
-		{call: "cron.lockStep", args: [false, 4242, false, false], expect: "takeover", why: "legacyDir with a dead pid: removed and taken"},
-		{call: "cron.lockStep", args: [false, 0, false, false], expect: "takeover"},
+				]}
+	"the lock is the kernel's flock; the pid decides nothing": {suite: "cron", steps: [
+		{call: "cron.lockStep", args: [true, false], expect: "take"},
+		{call: "cron.lockStep", args: [false, true], expect: "busy", why: "not granted: a live holder, whatever the pid file says"},
+		{call: "cron.lockStep", args: [true, true], expect: "reap", why: "a dead run left a preview: reaped only now that the lock is held"},
+		{call: "cron.lockStep", args: [false, false], expect: "busy"},
+	]}
+	"a lock directory an earlier version made keeps its live holder and is removed when dead": {suite: "cron", steps: [
+		{call: "cron.legacyLock", args: [true, 4242, true], expect: "busy"},
+		{call: "cron.legacyLock", args: [true, 4242, false], expect: "remove"},
+		{call: "cron.legacyLock", args: [true, 0, false], expect: "remove", why: "unreadable pid file"},
+		{call: "cron.legacyLock", args: [false, 4242, true], expect: "none", why: "a file: the flock decides"},
+	]}
+	"a reap signals a group only while its leader is the process recorded": {suite: "cron", steps: [
+		{call: "cron.reapSignal", args: [{pgid: 77, lstart: "Sat Nov 21 10:00:00 2026", boot: "b1", down: ["d"]}, {exists: true, lstart: "Sat Nov 21 10:00:00 2026", boot: "b1"}], expect: true, why: "same start time, same boot"},
+		{call: "cron.reapSignal", args: [{pgid: 77, lstart: "Sat Nov 21 10:00:00 2026", boot: "b1", down: ["d"]}, {exists: true, lstart: "Sat Nov 21 11:30:00 2026", boot: "b1"}], expect: false, why: "the pid was reused by another process"},
+		{call: "cron.reapSignal", args: [{pgid: 77, lstart: "Sat Nov 21 10:00:00 2026", boot: "b1", down: ["d"]}, {exists: true, lstart: "Sat Nov 21 10:00:00 2026", boot: "b2"}], expect: false, why: "the machine rebooted"},
+		{call: "cron.reapSignal", args: [{pgid: 77, lstart: "x", boot: "b1", down: ["d"]}, {exists: false, lstart: "", boot: "b1"}], expect: false, why: "the leader is gone"},
+		{call: "cron.reapSignal", args: [{down: ["d"]}, {exists: true, lstart: "x", boot: "b1"}], expect: false, why: "no pgid: up had exited"},
+		{call: "cron.reapSignal", args: [{pgid: 77, down: ["d"]}, {exists: true, lstart: "x", boot: "b1"}], expect: false, why: "a record with no identity is never signalled"},
+		{call: "cron.reapSignal", args: [{pgid: 77, lstart: "x", boot: "b1", down: ["d"]}, null], expect: false},
+	]}
+	"a throw after the run's reason was set appends to it": {suite: "cron", steps: [
+		{call: "cron.appendWhy", args: [null, "boom"], expect: "boom"},
+		{call: "cron.appendWhy", args: ["the rehearsal failed (exit 1)", "writeOpen failed"], expect: "the rehearsal failed (exit 1); writeOpen failed"},
 	]}
 }

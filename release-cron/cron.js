@@ -873,15 +873,22 @@ export const previewUpStep = (alive, elapsed, timeout, grace) => !alive ? "gone"
 // The ms a signal's wait may take at most while an `up` runs (its remaining time and the grace), on top of the teardown's.
 export const upExtra = (upElapsed, timeout, grace) => Math.max(0, timeout - upElapsed) + grace;
 
-// What the lock decides (`made`: mkdir made it; `pid`: the holder's; `alive`: whether it runs): a run and `abandon` take it the same way.
-// `orphan`: a dead holder left a preview record (its `up` pgid and `down`, <state>/lock.preview): "reap" stops that `up` (TERM, then KILL, the recorded
-// pgid only) and runs the recorded `down` before the lock is taken over, so a supervisor's kill never leaves the preview for the next run to race.
-export const lockStep = (made, pid, alive, orphan = false) => made ? "take" : pid && alive ? "busy" : orphan ? "reap" : "takeover";
+// What the lock decides, from the flock alone (`acquired`: the kernel granted it; the holder's pid is never read for this): "busy" when not, else "reap" when a dead
+// run left a preview record (`orphan`, <state>/lock.preview): its `up` is stopped (TERM, then KILL, the recorded and verified pgid only) and its `down` run, only once the
+// lock is held, else "take". A run, `abandon` and the bisect take it the same way.
+export const lockStep = (acquired, orphan = false) => !acquired ? "busy" : orphan ? "reap" : "take";
+// A lock directory an earlier version made (`isDir`; its `pid` file's `pid`, `alive`): busy while that run lives, else removed so the flock is taken.
+export const legacyLock = (isDir, pid, alive) => !isDir ? "none" : pid && alive ? "busy" : "remove";
+// Whether the group of a preview's `up` is signalled: only a record with a pgid, whose leader still exists as the process recorded (`live`: {exists, lstart, boot}, the
+// system's now): the same start time and the same boot. A reused pid, another boot, a gone leader or no pgid is an `up` that is gone: `down` runs at once.
+export const reapSignal = (rec, live) => !!rec?.pgid && !!rec.lstart && !!rec.boot && !!live?.exists && live.lstart === rec.lstart && live.boot === rec.boot;
+// A reason with another appended (a throw after the run's own reason was set).
+export const appendWhy = (prev, why) => prev ? `${prev}; ${why}` : why;
 // The pid holding a lock, from what is read of it: a lock an earlier version made is a directory holding `pid` (`isDir`: `dirText` is its content), a current one
 // a file holding the pid (`fileText`). A legacy holder that runs keeps its lock (lockStep says busy); only a dead or unreadable one (0) is removed.
 export const holderPid = (isDir, dirText, fileText) => Number((isDir ? dirText : fileText) ?? "") || 0;
 // The sequence that stops an orphaned `up` (alive: its group; elapsed: ms since the sequence began): the same bounded steps as a signal's, with no limit left to wait.
-export const reapStep = (alive, elapsed, grace) => previewUpStep(alive, elapsed, 0, grace);
+export const reapStep = (alive, elapsed, grace) => alive && elapsed >= grace + 60_000 ? "giveup" : previewUpStep(alive, elapsed, 0, grace);
 
 // When a signal's wait is over (`upGoneAt`: when the preview's `up` was seen gone, null while it runs; `ups`: whether one ran at the signal, at `t`; `now`;
 // `upLeft`: upExtra's bound for it): a `down` gets grace + teardown from the moment `up` is gone, not from the signal; a `up` that is never seen gone is
@@ -894,7 +901,7 @@ export const signalDone = (upGoneAt, ups, now, t, upLeft, grace, teardown) => {
 
 // The seconds the scheduler gives a stopping run before it kills it (launchd's ExitTimeOut, systemd's TimeoutStopSec): the preview's `up` limit
 // (`upMinutes`, 0 without a preview), the grace its stop gets and the teardown, as the signal's wait is made of them.
-export const stopSeconds = (upMinutes, grace = 60_000, teardown = 300_000) => upMinutes * 60 + (grace + teardown) / 1000;
+export const stopSeconds = (upMinutes, grace = 60_000, teardown = 300_000) => upMinutes * 60 + (2 * grace + teardown) / 1000 + 30;
 
 // The flags-released bookkeeping's result (`result`: recordFlagsReleased's) once its marker was written or not (`err`: the write's error, null when it
 // was): a marker that could not be written is a bookkeeping failure with its path, apart from the deploy outcome (run.flagsReleased, never `outcome`).

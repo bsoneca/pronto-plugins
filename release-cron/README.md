@@ -169,8 +169,8 @@ each step's minutes stay in `runs.jsonl` and `report`, so the slowest phase stil
 short calls inside prepare (`git fetch`, `gcloud describe`) keep their own hang guards of a few
 minutes; a signal (launchd's, `kill`) still stops the run's children. Because nothing ends a stuck
 run, stop it by hand (`kill <pid in <state>/lock>`). An app's old `minutes` in release_cron.cue is still accepted but ignored; delete it. There's no overall budget. Runs never overlap:
-launchd never starts a job while it's still running, and a lock (`<state>/lock`, a file holding
-the run's pid, made whole by `link(2)` as the bisect's is) skips a run started by hand while another is going.
+launchd never starts a job while it's still running, and a lock (`<state>/lock`, an `flock(2)` the kernel releases when
+its holder dies, the pid in it for messages only) skips a run started by hand while another is going.
 
 ## When the preview runs
 
@@ -361,8 +361,10 @@ Guards, each so a branch cannot lose or smuggle a change:
     (`trustNotice`). A run killed during a preview's `up` leaves `<state>/lock.preview` (the `up` pgid and its `down`, kept until `down` has run clean): the
     next to take the lock over the dead holder stops that group (TERM, then KILL, the recorded pgid only) and runs the `down` first, said in `run.reaped`.
     The launchd `ExitTimeOut` and systemd `TimeoutStopSec` (with `KillMode=mixed`) are at least `upMinutes` plus the teardown (`stopSeconds`). After a signal,
-    `down` gets its grace and teardown from the moment `up` is gone (`signalDone`). The run lock is a file taken with `link(2)` (the bisect's mechanism, one
-    for both), so there is no gap between its making and its pid. A refused `abandon` is also appended to runs.jsonl, naming whether a run or an abandon holds
+    `down` gets its grace and teardown from the moment `up` is gone (`signalDone`). The run lock, `abandon`'s and the bisect's are one `flock(2)` on a file, taken non-blocking by a small perl helper that holds it while its stdin is open
+    (Deno 2.5's `FsFile.lock` only blocks), so a dead holder's lock needs no takeover race; a lock directory an earlier version made keeps its live holder.
+    The reap runs only once the lock is held, and signals the `up` group only while its leader is the process recorded (start time and boot, `reapSignal`);
+    once `up` has exited the record keeps only its `down`, and a reap that finds the group alive a minute after KILL goes on to `down`, said in `run.reaped`. A refused `abandon` is also appended to runs.jsonl, naming whether a run or an abandon holds
     the lock (`holderKind`). The watch diff and the retry judgement read `-z` paths too, and a failed red verdict's cause and reason are on the run's record
     before anything that can throw.
 - **While a release is held, main does not release.** A fix merged to main waits until the branch closes (released or abandoned);
