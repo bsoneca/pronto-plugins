@@ -237,24 +237,58 @@ def check-daprd [app: string, namespace: string, components: list<string>] {
 	if ($bare | is-not-empty) { error make {msg: $"Pods running without their Dapr sidecar: ($bare | str join ', ')"} }
 }
 
-# The door is public and dials its own Dapr sidecar: its `/crud/v1.0/metadata` must be PostgREST's answer (a 404), never the
-# sidecar's metadata (a 200 JSON body with `"runtimeVersion"`). A host that does not answer yet (DNS not moved) cannot be checked and is said, not failed;
-# a preview with no public host of its own has nothing to ask.
+# The door is public and dials its own Dapr sidecar, with `dapr-app-id` set on every route (Dapr takes the target from that
+# header before it reads a `/v1.0/invoke/<id>/` path, so the path never picks a service). Its `/crud/v1.0/metadata` must be
+# PostgREST's answer (a 404), never the sidecar's metadata (a 200 JSON body with `"runtimeVersion"`), and no Dapr API path may
+# reach the sidecar or another service: explicit invocation of the door's own service (`/crud/v1.0/invoke/caddy/method/health`,
+# which would answer `ok`), the same path spelled with encoded dots and slashes, a `..` out of the prefix (sent as is), and the
+# other prefixes that strip and pass the rest on (`/img`, `/blobs`). A probe fails the release when it answers 200 with the
+# sidecar's metadata or a service's bare `ok`. A host that does not answer yet (DNS not moved) cannot be checked and is said, not failed
+# (every probe unreachable); one that answers some and not others fails. A preview with no public host of its own has nothing to ask.
+export def door-probes [] {
+	[
+		{path: "/crud/v1.0/metadata", as_is: false}
+		{path: "/crud/v1.0/invoke/caddy/method/health", as_is: false}
+		{path: "/crud/v1.0/invoke/auth/method/auth/health", as_is: false}
+		{path: "/crud/v1.0/%2e/invoke/caddy/method/health", as_is: false}
+		{path: "/crud/v1.0%2Finvoke%2Fcaddy%2Fmethod%2Fhealth", as_is: false}
+		{path: "/crud/x/../v1.0/invoke/caddy/method/health", as_is: true}
+		{path: "/crud/%2e%2e/v1.0/metadata", as_is: true}
+		{path: "/img/v1.0/metadata", as_is: false}
+		{path: "/blobs/v1.0/metadata", as_is: false}
+	]
+}
+
 export def check-door [node: record] {
 	if ($node.preview | is-not-empty) and (($node.hosts | get -o $node.preview | default "") | is-empty) { return }
 	let file = (mktemp -t door.XXXXXX | str trim)
-	let url = $"https://($node.host)/crud/v1.0/metadata"
-	let r = (^curl -s -m 20 -o $file -w "%{http_code}" $url | complete)
-	let body = (try { open --raw $file } catch { "" })
+	mut asked = 0
+	mut unreachable = []
+	for probe in (door-probes) {
+		let url = $"https://($node.host)($probe.path)"
+		let args = (if $probe.as_is { ["--path-as-is"] } else { [] })
+		let r = (^curl -s -m 20 ...$args -o $file -w "%{http_code}" $url | complete)
+		let body = (try { open --raw $file } catch { "" })
+		if $r.exit_code != 0 {
+			$unreachable = ($unreachable | append $url)
+			continue
+		}
+		$asked = $asked + 1
+		let status = ($r.stdout | str trim)
+		if $status == "200" and (($body =~ '"runtimeVersion"') or ($body =~ '"appConnectionProperties"') or (($body | str trim) == "ok")) {
+			rm -f $file
+			error make {msg: $"the door reaches the Dapr API: ($url) answered 200 with ($body | str substring 0..200); the caddy Dapr configuration did not take"}
+		}
+	}
 	rm -f $file
-	if $r.exit_code != 0 {
-		print -e $"node: (stamp) warning: ($url) did not answer \(curl ($r.exit_code)\), so the door's Dapr API was not checked"
+	if $asked == 0 {
+		print -e $"node: (stamp) warning: https://($node.host) did not answer \(curl\), so the door's Dapr API was not checked"
 		return
 	}
-	if ($r.stdout | str trim) == "200" and $body =~ '"runtimeVersion"' {
-		error make {msg: $"the door answers the Dapr sidecar's own API: ($url) returned its metadata, status ($r.stdout | str trim); the caddy Dapr configuration did not take"}
+	if ($unreachable | is-not-empty) {
+		error make {msg: $"the door answered some Dapr API probes and not ($unreachable | str join ', '): it cannot be certified"}
 	}
-	print $"node: (stamp) the door's Dapr API is closed: ($url) answers (($r.stdout | str trim)), not the sidecar's metadata"
+	print $"node: (stamp) the door's Dapr API is closed: ($asked) probes under /crud, /img and /blobs answer no sidecar and no service"
 }
 
 # The record of what runs: `sha` (what `--serving` prints, empty for a tree that was not a commit), and `verified`, empty

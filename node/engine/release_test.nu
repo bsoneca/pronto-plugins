@@ -111,10 +111,17 @@ if [ -f "$d/crane_nopg" ]; then echo '{"config":{"Env":["PATH=/bin"]}}'; else ec
 #!/bin/sh
 d="$(dirname "$0")/.."
 case "$*" in
-  *"/crud/v1.0/metadata"*)
+  *"/v1.0"*)
     out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
     if [ -f "$d/host_unreachable" ]; then printf 000; exit 6; fi
-    if [ -f "$d/metadata_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21","components":[]}' > "$out"; printf 200; exit 0; fi
+    case "$*" in
+      *"/crud/v1.0/metadata"*) if [ -f "$d/metadata_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21","components":[]}' > "$out"; printf 200; exit 0; fi ;;
+      *"/invoke/"*) if [ -f "$d/invoke_by_path" ]; then echo ok > "$out"; printf 200; exit 0; fi ;;
+      *"/img/v1.0/metadata"*) if [ -f "$d/img_open" ]; then echo '{"id":"imgproxy","runtimeVersion":"1.16.21"}' > "$out"; printf 200; exit 0; fi ;;
+    esac
+    case "$*" in
+      *"--path-as-is"*) echo "$*" >> "$d/path_as_is.log"; if [ -f "$d/dotdot_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21"}' > "$out"; printf 200; exit 0; fi ;;
+    esac
     echo "404 page not found" > "$out"; printf 404; exit 0 ;;
 esac
 if [ -f "$d/registry_dead" ]; then printf 000; exit 7; fi
@@ -1254,9 +1261,20 @@ def test_the_door_must_not_answer_the_dapr_api [] {
 	rm -f ($w.state | path join calls.jsonl)
 	let open = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert ($open.exit_code != 0) "the sidecar's metadata fails the release"
-	assert (has $open.stderr "the door answers the Dapr sidecar's own API") $open.stderr
+	assert (has $open.stderr "the door reaches the Dapr API") $open.stderr
 	assert ((calls $w) | any {|c| $c | str starts-with "rollout undo" }) "and the Deployments of this run are rolled back"
 	assert (has $ok.stdout "the door's Dapr API is closed") $ok.stdout
+	# the probes also send the paths that would reach a service or the sidecar through the prefix, two of them as is
+	assert (($w.dir | path join path_as_is.log | open --raw | lines | length) >= 2) "the `..` probes are sent with --path-as-is"
+	# each other leak fails the release too, naming the path
+	for leak in [[file path]; [invoke_by_path "/crud/v1.0/invoke/caddy/method/health"] [dotdot_open "/crud/x/../v1.0/invoke/caddy/method/health"] [img_open "/img/v1.0/metadata"]] {
+		rm -f ($w.dir | path join metadata_open)
+		"" | save -f ($w.dir | path join $leak.file)
+		let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+		assert ($r.exit_code != 0) $"($leak.file) fails the release"
+		assert (has $r.stderr "the door reaches the Dapr API") $"($leak.file): ($r.stderr)"
+		rm -f ($w.dir | path join $leak.file)
+	}
 	rm -rf $w.dir
 }
 
