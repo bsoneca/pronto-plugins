@@ -135,6 +135,12 @@ noAndroid: [if _defaults.android == _|_ {"none"}, "some"][0] & "none"
 _android: #Cron & {watch: ["x"], probes: {}, android: command: ["sh", "-c", "./saytw integrate@android"]}
 androidDeclared: _android.android.command & ["sh", "-c", "./saytw integrate@android"]
 
+// The step names runs.jsonl carries are written once, here, and never change under an app: the combined step is "rehearse+preview".
+stepNames: _defaults.steps & {prepare: "prepare", slot: "slot", rehearse: "rehearse", android: "android", preview: "preview", beside: "rehearse+preview", release: "release", confirm: "confirm", error: "error"}
+errorStep: _defaults.steps.error & "error"
+besideStep: _defaults.steps.beside & "rehearse+preview"
+noRenamedStep: [if (#Cron & {watch: ["x"], probes: {}, steps: beside: "both"}) == _|_ {"refused"}, "accepted"][0] & "refused"
+
 // Release branches are an app's opt-in: off, giving a held release up after 12 hours or 2 red attempts, each the app's to change.
 branchesDefault: _defaults.branches & {enabled: false, abandonHours: 12, abandonAttempts: 2}
 _branches: #Cron & {watch: ["x"], probes: {}, branches: {enabled: true, abandonHours: 6}}

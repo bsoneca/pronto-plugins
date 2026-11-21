@@ -35,6 +35,13 @@ cases: {
 		{call: "cron.landed", args: [1, "f203025f", "f203025f", true], expect: false, why: "the release command failed: not a drop"},
 		{call: "cron.landed", args: [255, "", "f203025f", true], expect: false},
 	]}
+	"the android step runs in an allowlisted environment: PATH and the SDK's kept, every credential dropped": {suite: "cron", steps: [
+		{call: "cron.androidSpawn", args: [{}], expect: {env: {STACK_WAIT_MINUTES: "525600"}, clearEnv: true}, why: "PRONTO-870: Deno.Command inherits the parent's env unless cleared"},
+		{call: "cron.androidSpawn", args: [{PATH: "/p", ANDROID_HOME: "/sdk", PRONTO_BASE: "http://localhost:1", CUE_MEM_GB: "8", INTEGRATE_LOCAL_DRIVERS: "all", GOMAXPROCS: "4", MISE_TRUSTED_CONFIG_PATHS: "/w"}], expect: {env: {PATH: "/p", ANDROID_HOME: "/sdk", PRONTO_BASE: "http://localhost:1", CUE_MEM_GB: "8", INTEGRATE_LOCAL_DRIVERS: "all", GOMAXPROCS: "4", MISE_TRUSTED_CONFIG_PATHS: "/w", STACK_WAIT_MINUTES: "525600"}, clearEnv: true}, why: "what integrate@android reads"},
+		{call: "cron.androidSpawn", args: [{PATH: "/p", GH_TOKEN: "t", CLOUDFLARE_API_TOKEN: "c", GOOGLE_APPLICATION_CREDENTIALS: "/g", ANDROID_KEYSTORE_PASS: "a", ANDROID_KEY_ALIAS_PWD: "b", STACK_PASSPHRASE: "c", PRONTO_APIKEY: "d", PRONTO_AUTH: "e", PRONTO_STRIPE_SK: "f", DENO_AUTH_TOKENS: "g", MISE_GITHUB_TOKEN: "h", SOPS_AGE_KEY: "i", SSH_AUTH_SOCK: "/s", PRONTO_DATABASE_URL: "postgres://u:p@h/db", STACK_DB_URL: "postgres://u:p@h/db", PRONTO_DB_DSN: "x"}], expect: {env: {PATH: "/p", STACK_WAIT_MINUTES: "525600"}, clearEnv: true}, why: "every name that says it is a secret, and a URL that carries one, is dropped"},
+		{call: "cron.androidSpawn", args: [{PATH: "/p", STACK_ORIGIN: "http://h:8080/x", PRONTO_BASE: "http://localhost:1"}], expect: {env: {PATH: "/p", STACK_ORIGIN: "http://h:8080/x", PRONTO_BASE: "http://localhost:1", STACK_WAIT_MINUTES: "525600"}, clearEnv: true}, why: "a URL with a port and no password stays"},
+		{call: "cron.androidSpawn", args: [{PATH: "/p", PRONTO_OTHER: "x", GRADLE_USER_HOME: "/g", MISE_DATA_DIR: "/m", DENO_DIR: "/d"}], expect: {env: {PATH: "/p", STACK_WAIT_MINUTES: "525600"}, clearEnv: true}, why: "PRONTO_, MISE_, GRADLE_ and DENO_ are exact names, not prefixes"},
+	]}
 	"a 255 is rescued only when serving reads a ref written after the release finished": {suite: "cron", steps: [
 		{call: "cron.rescuable", args: [255, true], expect: true, why: "Studio's refs/released/studio"},
 		{call: "cron.rescuable", args: [255, false], expect: false, why: "PRONTO-870: a worktree HEAD moves before the release runs"},

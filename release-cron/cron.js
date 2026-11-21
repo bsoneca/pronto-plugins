@@ -273,6 +273,21 @@ export const androidRuns = (android, os) => !!android && os === "darwin";
 export const androidSkip = (android, os) => !android || androidRuns(android, os) ? null
   : `android: skipped, release-cron runs on ${os} and the emulator needs a Mac; the release goes on without the phone's scenarios`;
 
+// The environment the android step runs in: PATH, HOME and the rest of a shell's basics, plus what ./saytw integrate@android
+// demonstrably reads (the Android SDK and Java, gradle, mise, sayt, the slot pool's STACK_*, the scenarios' PRONTO_*, SLOW, SHOTS, ADB).
+// Nothing else passes, so GH_TOKEN, the Google credentials and a Cloudflare token never reach it. A name matching a secret's
+// is dropped even where its prefix is let through. Used with clearEnv: the parent's env is not inherited.
+const ANDROID_ENV = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR", "TZ", "JAVA_HOME", "SLOW", "SHOTS", "ADB", "SDKMAN_DIR", "NO_COLOR", "CI", "GOMAXPROCS", "INTEGRATE_LOCAL_DRIVERS", "PRONTO_ANDROID_BUILD", "PRONTO_BASE", "PRONTO_ANDROID_EMULATOR", "PRONTO_ANDROID_PIN", "MISE_TRUSTED_CONFIG_PATHS"]);
+const ANDROID_ENV_PREFIXES = ["ANDROID_", "STACK_", "LC_", "XDG_", "CUE_"];
+// A name that says it is a secret, or a value that carries a password in a URL (user:pass@host), never passes, whichever list let it in.
+const SECRET_NAME = /TOKEN|SECRET|PASS(WORD|PHRASE)?|PWD|CREDENTIAL|AUTH|KEY|_SK$|_DSN$/i;
+const SECRET_VALUE = /:\/\/[^/@\s]+:[^/@\s]+@/;
+export const androidEnv = (env) => Object.fromEntries(Object.entries(env).filter(([k, v]) =>
+  (ANDROID_ENV.has(k) || ANDROID_ENV_PREFIXES.some((p) => k.startsWith(p))) && !SECRET_NAME.test(k) && !SECRET_VALUE.test(v)));
+
+// How the android step is spawned: the allowlisted env (plus the slot wait) and no inheritance of the parent's.
+export const androidSpawn = (env) => ({ env: { ...androidEnv(env), STACK_WAIT_MINUTES: "525600" }, clearEnv: true });
+
 // The scenarios the step's output marks failed: scenarios.ts prints `FAIL  <name>  <seconds> s  <why>`.
 export const androidFailed = (text) => [...new Set([...(text ?? "").matchAll(/^FAIL {2}(\S+) {2}/gm)].map((m) => m[1]))];
 
