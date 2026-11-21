@@ -38,7 +38,7 @@ leaves at their defaults:
   <app dir> <what> (weight <w>)`) that marks the rehearsal's main slot. An app whose `verify@local` ends in
   `./saytw integrate@local` sets `holder: "./saytw integrate@local"` (read as
   `rehearsal.holder`, below).
-- For an app with a command target, the rehearsal's env carries `REHEARSE_LIVE=<the commit that serves>` (never for Cloud Run apps), read once when the rehearsal is started, before its slot wait (20 s at most, no retries; a failed read leaves it out), and `REHEARSE_COMMIT=<the commit it rehearses>`. Both are provided for the rehearsal's selection; nothing reads them yet.
+- For an app with a command target, the rehearsal's env carries `REHEARSE_LIVE=<the commit that serves>` (never for Cloud Run apps), read once when the rehearsal is started, before its slot wait (20 s at most, no retries; a failed read leaves it out), and, for every app (Cloud Run included), `REHEARSE_COMMIT=<the commit it rehearses>`. Both are provided for the rehearsal's selection; nothing reads them yet.
 
 ## What an app chooses
 
@@ -317,7 +317,7 @@ Guards, each so a branch cannot lose or smuggle a change:
   A branch is deleted only as the tip that was checked: the push carries `--force-with-lease=refs/heads/<branch>:<checked sha>` with a
   delete refspec. If the branch moved since (a push nothing checked), the lease fails, the branch and its `released-branch` record are
   kept, and the new tip is told.
-  `abandon` with no release held but a branch waiting on main (held-backport) clears it only once every commit is on main and the branch is gone; else it logs which commits are still missing and keeps the record (`abandonPlan`). A hold whose branch already shipped is closed the same way, its record kept.  A hold whose tip already serves (confirmation never ran) is treated as shipped: its released-branch record is written before the plan, and when what serves cannot be read it is assumed shipped (`shippedRecord`); the automatic give-up does the same.
+  `abandon` with no release held but a branch waiting on main (held-backport) clears it only once every commit is on main and the branch is gone; else it logs which commits are still missing and keeps the record (`abandonPlan`). A hold whose branch already shipped is closed the same way, its record kept.  A hold whose branch shipped though its confirmation never ran (a run of it reached the release step) gets its released-branch record before the plan, from what serves (the serving command, or Cloud Run's traffic, once, 20 s at most): the tip, or a commit on the branch main lacks, is the record's tip; unread, the release attempt's commit is, said as assumed. With no release attempt no record is written, whatever serves. The automatic give-up and a run's own last red attempt do the same (`shippedRecord`). `abandon --force` clears a released-branch record and logs the commits still missing. While a record waits, no new hold is cut (`cutPlan`).
 - **A held tip already serving.** When the held branch's tip is what production serves (its release landed and its confirmation never
   did), the run resumes at confirmation, without rehearsing or releasing again; once confirmed it writes the `released-branch` record
   and closes the hold, in place of ending `skipped` with the hold left open. A held tip confirms itself by the trusted checkout's probes,

@@ -729,28 +729,36 @@ export const backportPlan = (missing, told, dry) => missing.length
 // A held release past its limits: given up, or, dry, reported.
 export const limitPlan = (dry) => dry ? ["report-abandon"] : ["close-hold", "drop-branch", "end-abandoned"];
 
+// A hold abandoned while its tip may already serve: the release landed and only its confirmation did not, so no released-branch
+// record exists. Returns the record to write ({branch, tip, why}) so abandonPlan keeps the fix's backport hold, or null. Evidence `ev`:
+// `released` the commit a run of this branch released (a runs.jsonl row that reached the release step), null when none did, and then
+// no record is written whatever serves; `serving` what serves (null: unread); `tip` origin's tip of the branch; `onBranch` serving is
+// on the branch and not on main (a tip the branch has moved past). With a release attempt: a serving commit that is the tip or on
+// the branch is the record's tip; unread, the attempt's commit is, said as assumed; any other serving commit says nothing shipped.
+export const shippedRecord = (open, released, ev) => {
+  if (!open || released || !ev.released) return null;
+  if (ev.serving) return ev.serving === ev.tip || ev.onBranch ? { branch: open.branch, tip: ev.serving, why: "what serves is on it: it shipped, only its confirmation did not" } : null;
+  return { branch: open.branch, tip: ev.released, why: "what serves could not be read and a run released it: assumed shipped" };
+};
+
+// A new hold is cut only while no released branch's record waits for its commits on main: the record is one file, and cutting
+// would leave a shipped hold nothing to be recorded in.
+export const cutPlan = (enabled, override, released) => !enabled || override ? { cut: false, why: "" }
+  : released ? { cut: false, why: `${released.branch} is released and its commits are not all on main: no new hold until they are (\`abandon --force\` clears the record)` }
+  : { cut: true, why: "" };
+
 // `abandon`: what it does to the hold (`open`, {branch} or null) and the record of a branch already released (`released`,
 // {branch} or null), after the checks of a released branch (`missing`: the commits not on main, null when they could not be read;
 // `gone`: the branch deleted from origin, false it moved, "unknown" origin could not be asked, null not tried). A hold whose branch
 // shipped (the record names it) keeps the record, and its backport hold with it, until every commit is on main and the branch is
-// gone; only a hold that never shipped is dropped, with its branch.
-export const abandonPlan = (open, released, missing, gone) => {
+// gone, or `force` clears it; only a hold that never shipped is dropped, with its branch.
+export const abandonPlan = (open, released, missing, gone, force = false) => {
   const shipped = !!released && (!open || released.branch === open.branch);
   if (!shipped) return { shipped, closeHold: !!open, dropBranch: !!open, removeRecord: false, why: "" };
   const why = missing === null ? "the commits missing from main could not be read"
     : missing.length ? "commits released from it are still missing from main"
     : gone === false ? "it moved since its release" : gone === "unknown" ? "origin could not be asked" : "";
-  return { shipped, closeHold: !!open, dropBranch: false, removeRecord: !why, why };
-};
-
-// A hold abandoned while its tip may already serve: the release landed and only its confirmation did not, so no released-branch
-// record exists. Returns the record to write ({branch, tip, why}) so abandonPlan keeps the fix's backport hold, or null when none is
-// needed: no hold, a record already, no tip, or the tip is not what serves. `serving` null: it could not be read, assumed shipped.
-export const shippedRecord = (open, released, tip, serving) => {
-  if (!open || released || !tip) return null;
-  if (serving === tip) return { branch: open.branch, tip, why: "its tip is serving: it shipped, only its confirmation did not" };
-  if (!serving) return { branch: open.branch, tip, why: "what serves could not be read: assumed shipped" };
-  return null;
+  return { shipped, closeHold: !!open, dropBranch: false, removeRecord: !why || force, why };
 };
 
 // `abandon` with an `open` file that cannot be read: it reports which file and why, and removes it only with --force.

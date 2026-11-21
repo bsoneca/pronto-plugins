@@ -34,7 +34,7 @@ releaseCron: #Cron
 	// `./saytw integrate@local`, which claims it. `slot: false` runs it without waiting for a slot. GCP.rehearsal (the
 	// cloud's) replaces it. The top-level `holder` below is still read, as rehearsal.holder. For an app with a command
 	// target the command's env carries REHEARSE_LIVE=<the commit that serves, read when the rehearsal is started, before its slot wait> and
-	// REHEARSE_COMMIT=<the commit it rehearses>, both provided for the rehearsal's selection (nothing reads them yet).
+	// REHEARSE_COMMIT=<the commit it rehearses, for every app>, both provided for the rehearsal's selection (nothing reads them yet).
 	rehearsal: {
 		command: *["./saytw", "verify@local"] | [...string] | null
 		slot:    *true | bool

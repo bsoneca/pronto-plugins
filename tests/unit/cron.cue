@@ -300,6 +300,7 @@ cases: {
 	"the rehearsal's env carries the commit it rehearses, and a baseline read as it starts": {suite: "cron", steps: [
 		{call: "cron.rehearsalEnv", args: [{A: "1"}, "abc123", true, "def456"], expect: {A: "1", REHEARSE_LIVE: "abc123", REHEARSE_COMMIT: "def456"}, why: "both named"},
 		{call: "cron.rehearsalEnv", args: [{REHEARSE_LIVE: "stale", REHEARSE_COMMIT: "stale"}, null, true, "def456"], expect: {REHEARSE_COMMIT: "def456"}, why: "an inherited baseline is dropped, never left for the child to read"},
+		{call: "cron.rehearsalEnv", args: [{A: "1"}, "abc123", false, "def456"], expect: {A: "1", REHEARSE_COMMIT: "def456"}, why: "Cloud Run: no REHEARSE_LIVE, REHEARSE_COMMIT still set"},
 		{call: "cron.rehearsalBase", args: ["bbb", "aaa", "head1"], expect: {live: "bbb", rehearsed: "head1", moved: true}, why: "another release landed while the run waited: the baseline is the one now"},
 		{call: "cron.rehearsalBase", args: ["aaa", "aaa", "head1"], expect: {live: "aaa", rehearsed: "head1", moved: false}, why: "unchanged"},
 		{call: "cron.rehearsalBase", args: [null, "aaa", "head1"], expect: {live: null, rehearsed: "head1", moved: false}, why: "unread as the rehearsal starts: unknown, not the stale earlier one"},

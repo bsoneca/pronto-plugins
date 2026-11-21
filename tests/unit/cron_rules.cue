@@ -247,13 +247,22 @@ cases: {
 		{call: "cron.abandonPlan", args: [null, {branch: "release/a/1"}, [], "unknown"], expect: {shipped: true, closeHold: false, dropBranch: false, removeRecord: false, why: "origin could not be asked"}},
 		{call: "cron.abandonPlan", args: [null, {branch: "release/a/1"}, [], true], expect: {shipped: true, closeHold: false, dropBranch: false, removeRecord: true, why: ""}, why: "every commit on main and the branch gone: the record goes"},
 	]}
-	"abandon of a held tip that may already serve writes its record first": {suite: "cron", steps: [
-		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, "t1", "t1"], expect: {branch: "release/a/1", tip: "t1", why: "its tip is serving: it shipped, only its confirmation did not"}, why: "open, no record, tip serving"},
-		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, "t1", null], expect: {branch: "release/a/1", tip: "t1", why: "what serves could not be read: assumed shipped"}, why: "open, no record, serving unreadable"},
-		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, "t1", "m1"], expect: null, why: "main serves: the tip never shipped"},
-		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, {branch: "release/a/1", tip: "t1"}, "t1", "t1"], expect: null, why: "a record exists already"},
-		{call: "cron.shippedRecord", args: [null, null, "t1", "t1"], expect: null, why: "no hold"},
+	"abandon of a held tip that may already serve writes its record first, on the evidence of a release attempt": {suite: "cron", steps: [
+		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, {released: "r1", serving: "t1", tip: "t1", onBranch: false}], expect: {branch: "release/a/1", tip: "t1", why: "what serves is on it: it shipped, only its confirmation did not"}, why: "open, no record, tip serving"},
+		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, {released: "r1", serving: "r1", tip: "t2", onBranch: true}], expect: {branch: "release/a/1", tip: "r1", why: "what serves is on it: it shipped, only its confirmation did not"}, why: "the branch moved past the released tip: the serving commit is the record's tip"},
+		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, {released: "r1", serving: null, tip: "t1", onBranch: false}], expect: {branch: "release/a/1", tip: "r1", why: "what serves could not be read and a run released it: assumed shipped"}, why: "unreadable with a release attempt: recorded, the attempt's commit"},
+		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, {released: null, serving: null, tip: "t1", onBranch: false}], expect: null, why: "unreadable with no release attempt: nothing to assume (a Cloud Run read that came back null is this)"},
+		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, {released: null, serving: "t1", tip: "t1", onBranch: false}], expect: null, why: "no release attempt: no record whatever serves says"},
+		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, {released: "r1", serving: "m1", tip: "t1", onBranch: false}], expect: null, why: "main serves: nothing shipped from the branch"},
+		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, {branch: "release/a/0", tip: "t0"}, {released: "r1", serving: "t1", tip: "t1", onBranch: false}], expect: null, why: "a record exists already"},
+		{call: "cron.shippedRecord", args: [null, null, {released: "r1", serving: "t1", tip: "t1", onBranch: false}], expect: null, why: "no hold"},
 		{call: "cron.abandonPlan", args: [{branch: "release/a/1"}, {branch: "release/a/1", tip: "t1"}, [], true], expect: {shipped: true, closeHold: true, dropBranch: false, removeRecord: true, why: ""}, why: "open and record on the same branch, every commit on main, branch gone"},
+		{call: "cron.abandonPlan", args: [null, {branch: "release/a/1", tip: "t1"}, [{sha: "c"}], null, true], expect: {shipped: true, closeHold: false, dropBranch: false, removeRecord: true, why: "commits released from it are still missing from main"}, why: "--force clears the record with commits missing"},
+		{call: "cron.abandonPlan", args: [null, {branch: "release/a/1", tip: "t1"}, [{sha: "c"}], null, false], expect: {shipped: true, closeHold: false, dropBranch: false, removeRecord: false, why: "commits released from it are still missing from main"}, why: "without it the record stays"},
+		{call: "cron.cutPlan", args: [true, false, {branch: "release/a/1"}], expect: {cut: false, why: "release/a/1 is released and its commits are not all on main: no new hold until they are (`abandon --force` clears the record)"}, why: "a released record blocks cutting a new hold"},
+		{call: "cron.cutPlan", args: [true, false, null], expect: {cut: true, why: ""}},
+		{call: "cron.cutPlan", args: [false, false, null], expect: {cut: false, why: ""}, why: "branches off"},
+		{call: "cron.cutPlan", args: [true, true, null], expect: {cut: false, why: ""}, why: "a run on an override ref"},
 	]}
 	"a held tip confirms itself by the trusted checkout's probes and serving command": {suite: "cron", steps: [
 		{call: "cron.heldConfig", args: [{gap: 60, ready: ["a"], probes: {home: {path: "/evil"}}, target: {kind: "command", release: ["./rel"], serving: ["./evil-serving"], origin: "https://evil"}}, {ready: ["b"], probes: {home: {path: "/"}}, target: {kind: "command", release: ["x"], serving: ["ssh", "node", "serving"], origin: "https://app"}}], expect: {gap: 60, ready: ["b"], probes: {home: {path: "/"}}, target: {kind: "command", release: ["./rel"], serving: ["ssh", "node", "serving"], origin: "https://app"}}, why: "the candidate's release command still runs; what says it landed is the trusted one's"},
