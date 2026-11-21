@@ -141,7 +141,7 @@ function persist(path: string, content: string | null, prune = false) {
   const code = content === null
     ? `try { Deno.removeSync(${to}); } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e; }`
     : `const d = ${JSON.stringify(dirname(path))}; Deno.mkdirSync(d, { recursive: true }); const t = ${to} + "." + crypto.randomUUID() + ".tmp"; Deno.writeTextFileSync(t, await new Response(Deno.stdin.readable).text()); Deno.renameSync(t, ${to});`
-      + (prune ? ` for (const e of [...Deno.readDirSync(d)]) { try { if (Date.now() - Deno.statSync(d + "/" + e.name).mtime!.getTime() > 6048e5) Deno.removeSync(d + "/" + e.name); } catch { /* gone */ } }` : "");
+      + (prune ? ` for (const e of [...Deno.readDirSync(d)]) { try { if (Date.now() - Deno.statSync(d + "/" + e.name).mtime!.getTime() > 6048e5) Deno.removeSync(d + "/" + e.name); } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e; } }` : "");
   const child = new Deno.Command(Deno.execPath(), { args: ["eval", code], stdin: "piped", stdout: "null", stderr: "piped" }).spawn();
   const w = child.stdin.getWriter();
   return w.write(new TextEncoder().encode(content ?? "")).then(() => w.close()).then(() => child.output()).then((o) => {
