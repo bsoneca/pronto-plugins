@@ -31,7 +31,7 @@
 // the first green one releases from it (README.md, "Release branches"). `abandon` gives a held release up by hand.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn } from "./cron.js";
+import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -1029,6 +1029,9 @@ try {
   // The rehearsal to its verdict: its slot waited for, then the command run. `got`: whether the slot was taken (or none was wanted).
   const rehearsalRun = async () => {
     let got = !wantSlot;
+    // When the claim began and when the slot admitted it (no slot wanted: at once), for a beside run's `slot` (besideTimes).
+    const began = Date.now();
+    let admitted: number | null = got ? began : null;
     if (wantSlot) active("slot");
     else if (own && !dry) { step(cron.steps.slot); active("rehearse"); say("rehearsal.slot is false: run without waiting for a slot"); }
     // The slot is taken once a live slot of the pool names this rehearsal as its owner.
@@ -1041,7 +1044,7 @@ try {
         const pid = (() => { try { return Deno.readTextFileSync(`${pool}/${e.name}/pid`).trim(); } catch { return ""; } })();
         // The holder alive and started by this run: not a slot a dead or stray rehearsal left.
         const ours = pid && [...children.keys()].some((g) => tree(g).pids.includes(Number(pid)));
-        if (ours && holds(owner, dir, cron.rehearsal.holder) && owner.startsWith(`${pid} `)) { got = true; step(cron.steps.slot); active("rehearse"); say(`slot taken: ${e.name}`); return; }
+        if (ours && holds(owner, dir, cron.rehearsal.holder) && owner.startsWith(`${pid} `)) { got = true; admitted = Date.now(); step(cron.steps.slot); active("rehearse"); say(`slot taken: ${e.name}`); return; }
       }
     }, 5000);
     // STACK_PRIORITY=release puts its claim at the head of the pool's line, ahead of every claim a
@@ -1050,8 +1053,8 @@ try {
     const gate = !own || dry ? { code: 0 } : await child(rehearse![0], rehearse!.slice(1), dir, { ...rehearsalEnv(Deno.env.toObject(), live, !!target), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; }, "rehearsal");
     clearInterval(look);
     // Every check passed already for this tree: the rehearsal took no slot and waited for none.
-    if (!got && gate.code === 0) { got = true; step(cron.steps.slot); active("rehearse"); }
-    return { gate, got };
+    if (!got && gate.code === 0) { got = true; admitted = began; step(cron.steps.slot); active("rehearse"); }
+    return { gate, got, began, admitted };
   };
   // The preview's `when` (schema.cue): "after" runs below, once the rehearsal and the android step passed; "first" here, before
   // the rehearsal's slot; "beside" at the same time as the rehearsal, the first to fail stopping the other. RELEASE_CRON_DRY=android
@@ -1099,7 +1102,7 @@ try {
     steps[cron.steps.beside] = Math.round((Date.now() - mark) / 1000);
     mark = Date.now();
     const r = race.r!, p = race.p!;
-    run.beside = { rehearse: Math.round(r.at / 1000), preview: Math.round(p.at / 1000), first: p.at < r.at ? "preview" : "rehearsal" };
+    run.beside = { ...besideTimes(rehearsalResult!.began, rehearsalResult!.admitted, t + r.at), preview: Math.round(p.at / 1000), first: p.at < r.at ? "preview" : "rehearsal" };
     if (!cancel.stopped) sayPreview(p.bad);
     // A rehearsal the preview's failure stopped (it ended without passing) is no verdict of the tree: no attempt, no branch (red),
     // and no bisect (noVerdictRun). One that passed before the stop landed is a verdict, and the preview's failure is red as in "after".

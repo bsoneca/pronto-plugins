@@ -321,6 +321,15 @@ export const besideOutcome = (rehearsal, preview, stopped = false) => {
   return { stop: null, failed: null, why: "" };
 };
 
+// A beside run's rehearsal times, in seconds (`run.beside.slot` and `.rehearse`): the slot wait, from the moment the rehearsal
+// began to claim to its admission, and the run time, from admission to its end. All three are ms stamps; `admitted` is null when
+// the rehearsal ended before it had a slot (all of it was waiting, none run). Step() writes nothing while the two overlap, so
+// the wait is kept here, as the `slot` step is for a run that is not beside.
+export const besideTimes = (began, admitted, ended) => {
+  const at = admitted ?? ended;
+  return { slot: Math.max(0, Math.round((at - began) / 1000)), rehearse: Math.max(0, Math.round((ended - at) / 1000)) };
+};
+
 // A bisect check that ended without judging its commit: no verdict (3), its timeout (124), a shell that could not run it (126, 127)
 // or a signal (128 and above). The run stays open for the next bisect.
 export const inconclusiveExit = (code) => noVerdictExit(code) || code === 126 || code === 127;

@@ -223,6 +223,10 @@ const norm = (p: string): string | null => {
 const dirOf = (p: string) => p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
 const code = /\.(ts|js|mjs|mts|tsx|jsx)$/;
 const fileLike = /^[\w@./-]+$/;
+// tests/slot.ts is the host tier's (a stack of host processes on a slot): the files it names (".bayt", "cue.mod",
+// .bayt/process-compose.yaml) are read there, never in an image. A driver that imports it (load.ts, for `processes`
+// and `treeOf`) needs slot.ts itself in the image, not what slot.ts opens.
+const hostTier = (f: string) => f === "tests/slot.ts" || f.endsWith("/tests/slot.ts");
 
 // Every file the script reaches, each with the file that read it.
 async function reads(entry: string): Promise<Map<string, string>> {
@@ -252,7 +256,7 @@ async function reads(entry: string): Promise<Map<string, string>> {
           // What the driver imports it runs, so what that reads counts; a path in a string is
           // only read (a page's flags.js, the scripts a child spawns are named by release.cue,
           // below). A file first seen as a string and imported later is still followed.
-          if (imported) queue.push(f);
+          if (imported && !hostTier(f)) queue.push(f);
         }
         break;
       }
