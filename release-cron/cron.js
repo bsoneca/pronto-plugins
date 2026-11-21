@@ -382,11 +382,17 @@ export const evidenceOf = (rehearsals, strict = false) => strict || rehearsals.s
 // Whether an app's configured rehearsal (releaseCron.rehearsal.command) runs in release mode, which tags its records:
 // then only its tagged records are evidence, whatever the history holds.
 // The rehearsal child's env: REHEARSE_LIVE names the commit that serves when the app's target is a command
-// (its release leaves no release record for the classifier to read); any inherited one is dropped first.
-export const rehearsalEnv = (env, live, isCommandTarget) => {
-  const { REHEARSE_LIVE: _, ...rest } = env;
-  return isCommandTarget && live ? { ...rest, REHEARSE_LIVE: live } : rest;
+// (its release leaves no release record for the classifier to read), REHEARSE_COMMIT the commit the rehearsal runs on;
+// any inherited one is dropped first, so the child never reads a value another run left.
+export const rehearsalEnv = (env, live, isCommandTarget, rehearsed) => {
+  const { REHEARSE_LIVE: _, REHEARSE_COMMIT: __, ...rest } = env;
+  return { ...rest, ...(isCommandTarget && live ? { REHEARSE_LIVE: live } : {}), ...(rehearsed ? { REHEARSE_COMMIT: rehearsed } : {}) };
 };
+// The commit offered the rehearsal's selection as production's baseline: the serving commit read when the rehearsal is started, before
+// its slot wait (`read`, a commit that resolved, else null), never the one read at the run's start (`earlier`): a preview run first
+// leaves time for another release to land (the slot wait is not covered). Nothing reads it yet. An unread one is unknown (null, REHEARSE_LIVE omitted), not the stale one. `moved`:
+// production changed since the run began. `rehearsed` is the commit the run goes on to rehearse and release.
+export const rehearsalBase = (read, earlier, head) => ({ live: read || null, rehearsed: head, moved: !!read && !!earlier && read !== earlier });
 export const releaseModes = (command) => (command ?? []).includes("REHEARSE_RELEASE=1");
 export const verdict = (commit, sig, ev) => {
   const rehearsals = evidenceOf(ev.rehearsals ?? [], !!ev.strict), releases = ev.releases ?? [], ledger = ev.ledger ?? [];
@@ -722,6 +728,45 @@ export const backportPlan = (missing, told, dry) => missing.length
   : dry ? ["report-delete"] : ["delete-branch"];
 // A held release past its limits: given up, or, dry, reported.
 export const limitPlan = (dry) => dry ? ["report-abandon"] : ["close-hold", "drop-branch", "end-abandoned"];
+
+// A hold abandoned while its tip may already serve: the release landed and only its confirmation did not, so no released-branch
+// record exists. Returns the record to write ({branch, tip, why}) so abandonPlan keeps the fix's backport hold, or null. Evidence `ev`:
+// `released` the commit a run of this branch released (a runs.jsonl row that reached the release step), null when none did, and then
+// no record is written whatever serves; `serving` what serves (null: unread); `tip` origin's tip of the branch; `onBranch` serving is
+// on the branch and not on main (a tip the branch has moved past). With a release attempt: a serving commit that is the tip or on
+// the branch is the record's tip; unread, the attempt's commit is, said as assumed; any other serving commit says nothing shipped.
+export const shippedRecord = (open, released, ev) => {
+  if (!open || released) return null;
+  // A positive read needs no attempt: a release that landed while its run was stopped or crashed left no release step behind.
+  if (ev.serving) return ev.serving === ev.tip || ev.serving === ev.released || ev.onBranch ? { branch: open.branch, tip: ev.serving, why: "what serves is on it: it shipped, only its confirmation did not" } : null;
+  if (!ev.released) return null;
+  return { branch: open.branch, tip: ev.released, why: "what serves could not be read and a run released it: assumed shipped" };
+};
+
+// The commit a run of `branch` released (the newest), from runs.jsonl rows: one that reached the release step (`releaseStep`) and
+// names a commit, on that branch. A run that cut the branch from main, one on another branch, a stopped one or one with no commit is not.
+export const releaseAttempt = (runs, branch, releaseStep) =>
+  runs.filter((r) => r.branch === branch && r.commit && !r.cut && r.outcome !== "stopped" && releaseStep in (r.steps ?? {})).at(-1)?.commit ?? null;
+
+// A new hold is cut only while no released branch's record waits for its commits on main: the record is one file, and cutting
+// would leave a shipped hold nothing to be recorded in.
+export const cutPlan = (enabled, override, released) => !enabled || override ? { cut: false, why: "" }
+  : released ? { cut: false, why: `${released.branch} is released and its commits are not all on main: no new hold until they are (\`abandon --force\` clears the record)` }
+  : { cut: true, why: "" };
+
+// `abandon`: what it does to the hold (`open`, {branch} or null) and the record of a branch already released (`released`,
+// {branch} or null), after the checks of a released branch (`missing`: the commits not on main, null when they could not be read;
+// `gone`: the branch deleted from origin, false it moved, "unknown" origin could not be asked, null not tried). A hold whose branch
+// shipped (the record names it) keeps the record, and its backport hold with it, until every commit is on main and the branch is
+// gone, or `force` clears it; only a hold that never shipped is dropped, with its branch.
+export const abandonPlan = (open, released, missing, gone, force = false) => {
+  const shipped = !!released && (!open || released.branch === open.branch);
+  if (!shipped) return { shipped, closeHold: !!open, dropBranch: !!open, removeRecord: false, why: "" };
+  const why = missing === null ? "the commits missing from main could not be read"
+    : missing.length ? "commits released from it are still missing from main"
+    : gone === false ? "it moved since its release" : gone === "unknown" ? "origin could not be asked" : "";
+  return { shipped, closeHold: !!open, dropBranch: false, removeRecord: !why || force, why };
+};
 
 // `abandon` with an `open` file that cannot be read: it reports which file and why, and removes it only with --force.
 export const corruptOpen = (path, why, force) => force

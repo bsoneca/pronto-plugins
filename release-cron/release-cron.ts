@@ -32,7 +32,7 @@
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import { causes } from "./causes.js";
-import { failureOf, abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, heldLanded, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
+import { failureOf, abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, heldLanded, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, rehearsalBase, abandonPlan, shippedRecord, releaseAttempt, cutPlan, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -226,33 +226,85 @@ const dropBranch = (branch: string, notify: Notify): "deleted" | "kept" | "moved
     return gone === "unknown" ? "unknown" : gone ? "deleted" : "moved";
   } catch (e) { console.log(`release-cron: ${branch} not deleted: ${(e as Error).message.split("\n")[0]}`); return "kept"; }
 };
+// A held branch that shipped though no record says so (its confirmation never ran) gets its released-branch record, from the evidence
+// shippedRecord names: a run of the branch that reached the release step (runs.jsonl), what serves (read the way a run reads it: the
+// serving command, or Cloud Run's traffic, once, 20 s at most; `known` is what a run already read) and origin's tip. Written so abandoning
+// the hold keeps its backport hold. Returns what it wrote, or "".
+// `known`: what a run already read as serving, and its config (in end(), where the run's is loaded).
+const recordShipped = (o: Open, known?: { live: string | null; cron: { steps: { release: string } } }): string => {
+  const g = (...a: string[]) => sh("git", ["--git-dir", repoDir(), ...a], undefined, {}, 60);
+  let tip: string | null = null, serving: string | null = null, released: string | null = null;
+  // Origin's tip; unread, the local ref of the branch, else its newest attempt's.
+  try { fetchOrigin(); } catch { /* the local ref stands */ }
+  try { tip = must("git", ["--git-dir", repoDir(), "rev-parse", "--verify", `origin/${o.branch}^{commit}`]); } catch { tip = o.attempts.at(-1)?.tip ?? null; }
+  try {
+    // The config once: the run's own (`known`), else the trusted checkout's.
+    const { cron: c, gcp: d } = known ? { cron: known.cron, gcp: undefined } : config(top);
+    released = releaseAttempt(jsonl(`${state}/runs.jsonl`), o.branch, c.steps.release);
+    if (known) serving = known.live;
+    else if (c.target.kind === "command") { const r = sh(c.target.serving[0], c.target.serving.slice(1), `${top}/${appRel}`, Deno.env.toObject(), 20); if (r.ok) serving = r.out.split(/\s+/)[0] || null; }
+    else {
+      const out = sh("gcloud", ["run", "services", "describe", d.service, "--project", d.project, "--region", d.region, "--format=json"], undefined, {}, 20);
+      if (out.ok) serving = base(jsonl(`${state}/runs.jsonl`), whole(JSON.parse(out.out).status?.traffic));
+    }
+  } catch { /* serving unread */ }
+  // A commit of the branch main lacks: serving moved past a tip the branch has since left. Only a full commit id goes to git.
+  const onBranch = isSha(serving) && !!tip && g("merge-base", "--is-ancestor", serving!, `origin/${o.branch}`).ok && !g("merge-base", "--is-ancestor", serving!, "origin/main").ok;
+  const rec = shippedRecord(o, readReleased(), { released, serving, tip, onBranch });
+  if (!rec) return "";
+  Deno.writeTextFileSync(`${state}/released-branch`, JSON.stringify({ branch: rec.branch, tip: rec.tip }) + "\n");
+  return `${o.branch}: ${rec.why}; its record and backport hold are kept`;
+};
 if (verb === "abandon") {
-  if (!open) {
-    // No release is held, but a branch released and waiting for its commits on main (held-backport) is cleared by the lead's word:
-    // logged with the commits that were still missing, the branch deleted only when none was.
-    const rb = readReleased();
-    if (!rb) { console.log(`${app}: no release branch held`); Deno.exit(0); }
-    // Checked against main as it is now, at a commit id read once; the branch is deleted only as the released tip.
-    const missing = (() => { try { fetchOrigin(); return missingOnMain(rb.tip, must("git", ["--git-dir", repoDir(), "rev-parse", "--verify", "origin/main^{commit}"])); } catch { return null; } })();
-    // A branch that moved since its release (a tip nothing checked) is kept with its record, for the next look.
-    const gone = missing && !missing.length ? deleteBranch(rb.branch, rb.tip, { kind: "none" }) : null;
-    if (gone !== false && gone !== "unknown") for (const f of ["released-branch", "backport-told"]) { try { Deno.removeSync(`${state}/${f}`); } catch { /* none */ } }
-    const l = line({ app, started: local(Date.now()), steps: {}, outcome: `cleared ${rb.branch}`, why: `by hand; ${missing === null ? "the commits missing from main could not be read" : missing.length ? `still missing from main: ${backportWhy(missing)}` : gone === false ? "every commit was on main, the branch kept and its record: it moved since its release" : gone === "unknown" ? "every commit was on main, the branch kept and its record: origin could not be asked" : "every commit was on main"}` });
-    Deno.writeTextFileSync(`${state}/release-cron.log`, l + "\n", { append: true });
-    console.log(l);
-    Deno.exit(0);
+  // Held, or released and waiting for its commits on main (held-backport), or both for one branch; abandonPlan says what goes: a hold
+  // that never shipped is dropped with its branch, a released branch's record (its backport hold) only once every commit is on main.
+  // A released-branch record that cannot be read is cleared by --force, as an open one is (corruptOpen).
+  const recordPath = `${state}/released-branch`;
+  try { readReleased(); } catch (e) {
+    const c = corruptOpen(recordPath, (e as Error).message, Deno.args.includes("--force"));
+    console.log(c.text);
+    if (!c.remove) Deno.exit(1);
+    Deno.removeSync(recordPath);
   }
-  const pid = Number((() => { try { return Deno.readTextFileSync(`${state}/lock/pid`); } catch { return "0"; } })());
-  if (pid && sh("kill", ["-0", String(pid)]).ok) throw new Error(`run ${pid} is going: abandon when it ends`);
-  const branch = open.branch;
-  closeOpen("abandoned");
-  // As an abandoned run ends: the gap is waited before main is cut again, the app's, kept beside the last run's end.
-  const gap = (() => { try { return Number(Deno.readTextFileSync(`${state}/last`).split(" ")[1]) || 60; } catch { return 60; } })();
-  Deno.writeTextFileSync(`${state}/last`, `${Date.now()} ${gap} - -`);
-  const l = line({ app, started: local(Date.now()), steps: {}, outcome: `abandoned ${branch}`, why: "by hand" });
+  if (!open && !readReleased()) { console.log(`${app}: no release branch held`); Deno.exit(0); }
+  if (open) {
+    const pid = Number((() => { try { return Deno.readTextFileSync(`${state}/lock/pid`); } catch { return "0"; } })());
+    if (pid && sh("kill", ["-0", String(pid)]).ok) throw new Error(`run ${pid} is going: abandon when it ends`);
+  }
+  const shippedNote = open ? recordShipped(open) : "";
+  if (shippedNote) console.log(shippedNote);
+  const force = Deno.args.includes("--force");
+  const rb = readReleased();
+  const shipped = abandonPlan(open, rb, null, null).shipped;
+  // Checked against main as it is now, at a commit id read once; the branch is deleted only as the released tip, and a branch that moved
+  // since its release (a tip nothing checked) is kept with its record, for the next look.
+  const missing = !shipped ? [] : (() => { try { fetchOrigin(); return missingOnMain(rb!.tip, must("git", ["--git-dir", repoDir(), "rev-parse", "--verify", "origin/main^{commit}"])); } catch { return null; } })();
+  const gone = shipped && missing && !missing.length ? deleteBranch(rb!.branch, rb!.tip, { kind: "none" }) : null;
+  // --force clears a record only when this call did not just write one for a hold that shipped.
+  const plan = abandonPlan(open, rb, missing, gone, force && !shippedNote);
+  if (plan.removeRecord) for (const f of ["released-branch", "backport-told"]) { try { Deno.removeSync(`${state}/${f}`); } catch { /* none */ } }
+  const missingSaid = missing === null ? "the commits missing from main could not be read" : missing.length ? `still missing from main: ${backportWhy(missing)}` : "every commit was on main";
+  let outcome: string, why: string, told: string;
+  // What happened to the branch on origin, from what was done: deleted (gone), or kept and why.
+  const kept = plan.shipped ? (gone === true ? `${rb!.branch} deleted from origin` : `${rb!.branch} kept on origin${plan.why ? `: ${plan.why}` : ""}`) : "";
+  if (plan.closeHold) {
+    const branch = open!.branch;
+    closeOpen("abandoned");
+    // As an abandoned run ends: the gap is waited before main is cut again, the app's, kept beside the last run's end.
+    const gap = (() => { try { return Number(Deno.readTextFileSync(`${state}/last`).split(" ")[1]) || 60; } catch { return 60; } })();
+    Deno.writeTextFileSync(`${state}/last`, `${Date.now()} ${gap} - -`);
+    outcome = `abandoned ${branch}`; why = plan.removeRecord && plan.shipped ? `by hand${force ? " --force" : ""}; ${missingSaid}` : "by hand";
+    told = plan.dropBranch ? (dropBranch(branch, { kind: "none" }) === "deleted" ? `${branch} deleted from origin` : `${branch} kept on origin`)
+      : `${kept}${plan.removeRecord ? ", its record cleared" : ", its record and backport hold stay"}`;
+  } else {
+    outcome = `cleared ${rb!.branch}`;
+    why = `by hand${force ? " --force" : ""}; ${plan.removeRecord && !plan.why ? "every commit was on main" : `${missingSaid}${plan.removeRecord ? ", the record cleared" : `, the branch kept and its record (${plan.why})`}`}`;
+    told = "";
+  }
+  const l = line({ app, started: local(Date.now()), steps: {}, outcome, why });
   Deno.writeTextFileSync(`${state}/release-cron.log`, l + "\n", { append: true });
   console.log(l);
-  console.log(dropBranch(branch, { kind: "none" }) === "deleted" ? `${branch} deleted from origin` : `${branch} kept on origin`);
+  if (told) console.log(told);
   Deno.exit(0);
 }
 
@@ -670,6 +722,8 @@ const log = (b: Uint8Array) => (out ??= Deno.openSync(`${state}/runs/${started}.
 const enc = new TextEncoder();
 const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() - t0) / 1000)}s ${s}\n`; log(enc.encode(l)); Deno.stdout.writeSync(enc.encode(l)); };
 let head = "";
+// What a run read as serving (null: unread), for the abandon in end(); undefined before it read.
+let runLive: string | null | undefined;
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
 type Command = { release: string[]; serving: string[]; servingAfterRelease: boolean; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string; when?: "after" | "first" | "beside" } };
 let cron!: { steps: { prepare: string; slot: string; rehearse: string; android: string; preview: string; beside: string; release: string; confirm: string; error: string }; scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; flagsReleased: string[] | null; gap: number; poll: number; branches?: { enabled: boolean; abandonHours: number; abandonAttempts: number }; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
@@ -709,8 +763,13 @@ const end = (outcome: string, why = "", code = 0, red = false, cause = "") => {
       const o = attempted(open, run.commit as string, "red", local(Date.now()));
       open = o;
       run.branch = o.branch;
-      if (abandoned(o, Date.now(), o.limits)) { outcome = `abandoned ${o.branch}`; why = `${why}; ${o.attempts.length} attempts, abandoned`; closeOpen("abandoned"); dropBranch(o.branch, cron.notify); }
+      if (abandoned(o, Date.now(), o.limits)) {
+        const shippedNote = recordShipped(o, runLive === undefined || !cron ? undefined : { live: runLive, cron });
+        outcome = `abandoned ${o.branch}`; why = `${why}; ${o.attempts.length} attempts, abandoned${shippedNote ? `; ${shippedNote}` : ""}`; closeOpen("abandoned"); dropBranch(o.branch, cron.notify);
+      }
       else { outcome = `held ${o.branch}`; why = `${why}; ${heldNotice(o.branch)}`; writeOpen(o); }
+    } else if (cron?.branches?.enabled && !override && !(() => { let rel: Released | null; try { rel = readReleased(); } catch { rel = { branch: "an unreadable released-branch record", tip: "" }; } const c = cutPlan(true, false, rel); if (!c.cut) why = `${why}; no release branch cut: ${c.why}`; return c.cut; })()) {
+      // cutPlan's refusal, said above: the failure stands, no hold is cut.
     } else if (cron?.branches?.enabled && !override) {
       const branch = branchName(app, Date.now());
       const pushed = sh("git", remote(["push", "-q", "origin", `${run.commit}:refs/heads/${branch}`]), wt, {}, 120);
@@ -798,11 +857,12 @@ const [lastAt, lastGap, lastFailed, lastTried, lastHeldTip] = (() => { try { con
     if (abandoned(open, Date.now(), open.limits)) {
       const o = open;
       if (limitPlan(dry).includes("report-abandon")) end("dry", dryWould(`give up ${o.branch}: held since ${o.opened}, past its ${o.limits.abandonHours} h or ${o.limits.abandonAttempts} red attempts, and delete it from origin only when everything on it is on main`));
+      const shippedNote = recordShipped(o);
       closeOpen("abandoned");
       // The app's gap, kept in `last` (cron.js lastFields), not the default: the main run after it waits as any run does.
       run.gap = Number.isNaN(gap) ? 60 : gap;
       dropBranch(o.branch, (() => { try { return config(wt).cron.notify as Notify; } catch { return { kind: "none" } as Notify; } })());
-      end(`abandoned ${o.branch}`, `held since ${o.opened}, past its ${o.limits.abandonHours} h or ${o.limits.abandonAttempts} red attempts`);
+      end(`abandoned ${o.branch}`, `held since ${o.opened}, past its ${o.limits.abandonHours} h or ${o.limits.abandonAttempts} red attempts${shippedNote ? `; ${shippedNote}` : ""}`);
     }
     const r = sh("git", remote(["ls-remote", "origin", `refs/heads/${open.branch}`]), wt, {}, 60);
     // Only a clean "not found" is no tip; a lookup that failed stops the run, reported, and is tried again next wake.
@@ -1086,6 +1146,7 @@ try {
   };
   before = target ? servingNow() : whole(JSON.parse(gcloud(["run", "services", "describe", gcp!.service])).status?.traffic);
   const live = target ? (sh("git", ["cat-file", "-e", `${before}^{commit}`], wt).ok ? before : undefined) : base(jsonl(`${state}/runs.jsonl`), before);
+  runLive = live ?? null;
   step(cron.steps.prepare);
   // A held branch's tip that is already serving: its release landed and only its confirmation did not (PRONTO-1101). The run resumes
   // at confirmation, which closes the hold and writes the released-branch record, instead of skipping with the hold left open.
@@ -1167,7 +1228,12 @@ try {
       // STACK_PRIORITY=release puts its claim at the head of the pool's line, ahead of every claim a
       // pull request's gate or a launch is waiting with (tests/slot.ts).
       // The rehearsal's own output names the new-feature scenarios it passed on and the ones that flaked on their one retry.
-      const gate = !own || dry ? { code: 0 } : await child(rehearse![0], rehearse!.slice(1), dir, { ...rehearsalEnv(Deno.env.toObject(), live, !!target), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; }, "rehearsal");
+      // What serves is read when the rehearsal is started, before its slot wait (rehearsalBase): once, 20 s at most, no retries; a failed
+      // read is unknown. A wait for the slot, or a preview beside it, can still outlast it.
+      const readLive = (() => { if (!target || !own || dry) return live; const r = sh(target.serving[0], target.serving.slice(1), `${open ? top : wt}/${appRel}`, Deno.env.toObject(), 20); const c = r.ok ? r.out.split(/\s+/)[0] : ""; return c && sh("git", ["cat-file", "-e", `${c}^{commit}`], wt).ok ? c : undefined; })();
+      const base0 = rehearsalBase(readLive, live, head);
+      if (base0.moved) say(`production moved since this run read it: ${live?.slice(0, 8)} then, ${base0.live?.slice(0, 8)} now; the rehearsal takes ${base0.live?.slice(0, 8)} as its baseline`);
+      const gate = !own || dry ? { code: 0 } : await child(rehearse![0], rehearse!.slice(1), dir, { ...rehearsalEnv(Deno.env.toObject(), base0.live, !!target, base0.rehearsed), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; }, "rehearsal");
       clearInterval(look);
       // Every check passed already for this tree: the rehearsal took no slot and waited for none.
       if (!got && gate.code === 0) { got = true; admitted = began; step(cron.steps.slot); active("rehearse"); }
