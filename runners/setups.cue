@@ -21,7 +21,7 @@ setups: "bsoneca-mac": {
 		STACK_POOL:               "/tmp/pronto-stacks-{user}"
 		STACK_HOLD_POOL:          "/tmp/pronto-stacks"
 		STACK_HOLD_UID:           "501"
-		MISE_SHARED_INSTALL_DIRS: "/Users/Shared/pronto/mise"
+		MISE_SHARED_INSTALL_DIRS: "/Users/Shared/pronto/mise/installs"
 	}
 	hostRunners: "pronto-mac": repo: "pronto"
 	// Two more ci runners under the same label, so PR checks run three at a time instead of queueing

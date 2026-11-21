@@ -63,7 +63,7 @@ setups: {
 			STACK_POOL:               "/tmp/pronto-stacks-{user}"
 			STACK_HOLD_POOL:          "/tmp/pronto-stacks"
 			STACK_HOLD_UID:           "501"
-			MISE_SHARED_INSTALL_DIRS: "/Users/Shared/pronto/mise"
+			MISE_SHARED_INSTALL_DIRS: "/Users/Shared/pronto/mise/installs"
 		}
 		hostRunners: {
 			"shop-pr": {repo: "shop", labels: ["shop-pr"], user: "ci-pr"}

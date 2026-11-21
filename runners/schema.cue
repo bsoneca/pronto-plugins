@@ -198,7 +198,8 @@ setups: [Name=string]: #Setup & {name: Name}
 		runnerImage: *"ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232" | string
 		buildkit:    *"moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe" | string
 		binfmt:      *"tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0" | string
-		// A host runner's first install; it updates itself afterwards, as GitHub requires. One
+		// A host runner's first install; it is registered with --disableupdate, so it never updates itself: bump
+		// hostRunner and apply again (before GitHub stops sending jobs to the old version). One
 		// tarball per platform, each pinned by its sha256 (the release's notes list them).
 		// The gh a trusted account's PATH holds: pinned like the runner, per platform: the release asset (its
 		// sha256), the `member` of it that is the gh binary, and that binary's own sha256 (what is installed
