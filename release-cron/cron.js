@@ -728,3 +728,7 @@ export const signalStep = (childrenAlive, previews, elapsed, grace, teardown) =>
 
 // Only an ssh transport failure (exit 255) is worth reading the serving command again: any other failure says what is wrong.
 export const servingRetryable = (code) => sshDropped(code);
+
+// The outcome a run ends with once a signal came: its stop, never a verdict (no red attempt, no gap, no bisect, no branch cut). A
+// release that had already landed keeps its outcome.
+export const endWhenInterrupted = (interrupted, outcome) => interrupted && outcome !== "released" ? "stopped" : outcome;

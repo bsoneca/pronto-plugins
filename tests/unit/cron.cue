@@ -425,4 +425,11 @@ cases: {
 		{call: "cron.servingRetryable", args: [127], expect: false},
 		{call: "cron.servingRetryable", args: [142], expect: false, why: "killed by the alarm"},
 	]}
+	"a run that ends after a signal ends as stopped, whatever it reached": {suite: "cron", steps: [
+		{call: "cron.endWhenInterrupted", args: [true, "failed"], expect: "stopped", why: "a killed child's failure is no verdict"},
+		{call: "cron.endWhenInterrupted", args: [true, "skipped"], expect: "stopped"},
+		{call: "cron.endWhenInterrupted", args: [true, "stopped"], expect: "stopped", why: "the handler's own end"},
+		{call: "cron.endWhenInterrupted", args: [true, "released"], expect: "released", why: "a release that landed stays one"},
+		{call: "cron.endWhenInterrupted", args: [false, "failed"], expect: "failed", why: "no signal, no change"},
+	]}
 }

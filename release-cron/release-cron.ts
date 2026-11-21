@@ -31,7 +31,7 @@
 // the first green one releases from it (README.md, "Release branches"). `abandon` gives a held release up by hand.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, heldLanded, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, branchTip, signalStep, servingRetryable } from "./cron.js";
+import { abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, heldLanded, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -190,8 +190,8 @@ const missingOnMain = (tip: string, main: string) => {
   return missingFromMain(range(`${mb}..${tip}`), range(`${mb}..${main}`), merged, all) as { sha: string; body: string }[];
 };
 // `branch` deleted from origin, only as the tip that was checked (`verified`): an explicit lease on it. A branch pushed to since the check
-// stays, with its new tip said. Returns whether it is gone from origin.
-const deleteBranch = (branch: string, verified: string, notify: Notify) => {
+// stays, with its new tip said. Returns whether it is gone from origin, or "unknown" when origin could not be asked (kept, its record too).
+const deleteBranch = (branch: string, verified: string, notify: Notify): boolean | "unknown" => {
   const pushed = sh("git", remote(["--git-dir", repoDir(), "push", "-q", ...leaseDelete(branch, verified)]), undefined, {}, 120);
   if (pushed.ok) return true;
   const r = sh("git", remote(["--git-dir", repoDir(), "ls-remote", "origin", `refs/heads/${branch}`]), undefined, {}, 60);
@@ -199,7 +199,8 @@ const deleteBranch = (branch: string, verified: string, notify: Notify) => {
   const looked = branchTip(r.ok, r.out, r.err);
   if (looked.error) {
     tellNote(notify, `release-cron (${app}): ${branch} was not deleted: its lookup on origin failed (${looked.error}); the branch and its record are kept.`, `release-cron-branch-${branch.split("/").at(-1)}.md`, "release-cron branch kept");
-    return false;
+    console.log(`release-cron: ${branch}: the lookup on origin failed (${looked.error}): kept`);
+    return "unknown";
   }
   const lost = leaseLost(branch, verified, looked.tip);
   if (!lost.deleted) tellNote(notify, `release-cron (${app}): ${lost.why}; the branch and its record are kept.`, `release-cron-branch-${branch.split("/").at(-1)}.md`, "release-cron branch kept");
@@ -208,8 +209,9 @@ const deleteBranch = (branch: string, verified: string, notify: Notify) => {
 };
 // The branch of a release that ended (abandoned, or released and found on main) is deleted from origin only when everything on it
 // is on main, at the tip and main this checked; else it stays, and the lead is told which commits still need a cherry-pick.
-// Returns "deleted", "kept" (commits missing, or an error) or "moved" (the branch has a tip nothing checked: kept, its record too).
-const dropBranch = (branch: string, notify: Notify): "deleted" | "kept" | "moved" => {
+// Returns "deleted", "kept" (commits missing, or an error), "moved" (the branch has a tip nothing checked: kept, its record too)
+// or "unknown" (origin could not be asked: kept).
+const dropBranch = (branch: string, notify: Notify): "deleted" | "kept" | "moved" | "unknown" => {
   try {
     fetchOrigin();
     const g = (...a: string[]) => must("git", ["--git-dir", repoDir(), ...a], undefined, {}, 60);
@@ -219,7 +221,8 @@ const dropBranch = (branch: string, notify: Notify): "deleted" | "kept" | "moved
       tellNote(notify, `release-cron (${app}): ${branch} is left on origin: ${backportWhy(missing)}. Cherry-pick them to main (git cherry-pick -x), then delete the branch.`, `release-cron-branch-${branch.split("/").at(-1)}.md`, "release-cron branch kept");
       return "kept";
     }
-    return deleteBranch(branch, tip, notify) ? "deleted" : "moved";
+    const gone = deleteBranch(branch, tip, notify);
+    return gone === "unknown" ? "unknown" : gone ? "deleted" : "moved";
   } catch (e) { console.log(`release-cron: ${branch} not deleted: ${(e as Error).message.split("\n")[0]}`); return "kept"; }
 };
 if (verb === "abandon") {
@@ -232,8 +235,8 @@ if (verb === "abandon") {
     const missing = (() => { try { fetchOrigin(); return missingOnMain(rb.tip, must("git", ["--git-dir", repoDir(), "rev-parse", "--verify", "origin/main^{commit}"])); } catch { return null; } })();
     // A branch that moved since its release (a tip nothing checked) is kept with its record, for the next look.
     const gone = missing && !missing.length ? deleteBranch(rb.branch, rb.tip, { kind: "none" }) : null;
-    if (gone !== false) for (const f of ["released-branch", "backport-told"]) { try { Deno.removeSync(`${state}/${f}`); } catch { /* none */ } }
-    const l = line({ app, started: local(Date.now()), steps: {}, outcome: `cleared ${rb.branch}`, why: `by hand; ${missing === null ? "the commits missing from main could not be read" : missing.length ? `still missing from main: ${backportWhy(missing)}` : gone === false ? "every commit was on main, the branch kept and its record: it moved since its release" : "every commit was on main"}` });
+    if (gone !== false && gone !== "unknown") for (const f of ["released-branch", "backport-told"]) { try { Deno.removeSync(`${state}/${f}`); } catch { /* none */ } }
+    const l = line({ app, started: local(Date.now()), steps: {}, outcome: `cleared ${rb.branch}`, why: `by hand; ${missing === null ? "the commits missing from main could not be read" : missing.length ? `still missing from main: ${backportWhy(missing)}` : gone === false ? "every commit was on main, the branch kept and its record: it moved since its release" : gone === "unknown" ? "every commit was on main, the branch kept and its record: origin could not be asked" : "every commit was on main"}` });
     Deno.writeTextFileSync(`${state}/release-cron.log`, l + "\n", { append: true });
     console.log(l);
     Deno.exit(0);
@@ -691,9 +694,14 @@ const active = (phase: string) => {
     Deno.renameSync(`${activePath}.${Deno.pid}.tmp`, activePath);
   } catch (e) { say(`release-active not written: ${(e as Error).message}`); }
 };
+// Previews not yet torn down (up to the end of their `down`), and whether a signal has come.
+let previews = 0, interrupted = false;
 // `red`: a failure of the rehearsal, the android step or the preview, before any release. With releaseCron.branches a run on main
 // holds the release on a new branch (cut); a run on a held release's branch records its failure as an attempt (abandoning at the limits).
 const end = (outcome: string, why = "", code = 0, red = false) => {
+  // After a signal, whatever the run reaches is the stop's doing, not a verdict (cron.js endWhenInterrupted): no red attempt, no gap, no bisect.
+  const mapped = endWhenInterrupted(interrupted, outcome);
+  if (mapped !== outcome) { why = `${outcome}: ${why}`; outcome = mapped; code = 130; red = false; }
   // Only a red verdict is an attempt: any other failure on the held branch (release, confirm, ssh, slot) records nothing, so the tip runs again.
   if (red && outcome === "failed" && run.commit) {
     if (open) {
@@ -869,8 +877,6 @@ function judged(failed: string, head: string): string | null {
 const children = new Map<number, string>();
 // The ms a stopped child gets before KILL, and a preview's `down` after them (it is tagged "down", never stopped by a signal).
 const STOP_GRACE = 60_000, TEARDOWN_GRACE = 300_000;
-// Previews not yet torn down (up to the end of their `down`), and whether a signal has come.
-let previews = 0, interrupted = false;
 // Stopped: every child's group stopped and gone (killed after a minute) before the run ends and its
 // lock goes, so the next run never starts beside what this one started.
 // The lock goes last (signalStep): after the children are gone and a preview beside has finished its `down`, each bounded.
@@ -918,6 +924,8 @@ function stop(pgid: number, grace = 60_000) {
 // Every running child that carries `tag` stopped (the loser of the rehearsal and preview's race).
 const stopTagged = (tag: string, grace?: number) => { for (const [pgid, t] of children) if (t === tag) stop(pgid, grace); };
 async function child(cmd: string, args: string[], cwd: string, env: Record<string, string>, watch: (l: string) => void = () => {}, tag = "", clearEnv = false) {
+  // Nothing new starts once a signal came, but the preview's `down`, which the handler waits for.
+  if (interrupted && tag !== "down") throw new Error("stopped by a signal");
   const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", cmd, ...args], cwd, env, clearEnv, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
   children.set(p.pid, tag);
   // No limit: a line every few minutes says it is still running and for how long.
@@ -987,6 +995,8 @@ async function previewCheck(pv: NonNullable<Command["preview"]>, dir: string, ca
         } catch (e) { bad.push(`${name} ${p.path}: ${(e as Error).message}`); }
       }
     }
+    // Stopped by a signal before its checks ran: no pass to read (a race loser's cancel is no failure).
+    if (interrupted && !bad.length) bad.push("stopped by a signal");
   } finally {
     if (reach) { try { send(reach.pid, "TERM"); await reach.stdin.close().catch(() => {}); } catch { /* already gone */ } }
     let down: { code: number };
@@ -1104,9 +1114,9 @@ try {
       else if (action === "end-held-backport") end(`held-backport ${released.branch}`, backportWhy(missing));
       else if (action === "report-delete") say(dryWould(`delete ${released.branch} from origin as ${released.tip.slice(0, 8)}: every commit is on main`));
       else if (action === "delete-branch") {
-        let gone = false;
+        let gone: boolean | "unknown" = false;
         try { gone = deleteBranch(released.branch, released.tip, cron.notify); } catch (e) { say(`${released.branch} not deleted: ${(e as Error).message.split("\n")[0]}`); }
-        if (gone) {
+        if (gone === true) {
           say(`${released.branch}: every commit is on main, the branch deleted from origin`);
           for (const f of ["released-branch", "backport-told"]) { try { Deno.removeSync(`${state}/${f}`); } catch { /* none */ } }
         } else say(`${released.branch} kept on origin, and its record: the next wake checks again`);
