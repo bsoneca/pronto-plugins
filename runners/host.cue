@@ -277,7 +277,7 @@ plans: {for name, s in setups {(name): #Plan & {setup: s}}}
 					"done",
 					for h in _others {"ls \"\(h)\" >/dev/null 2>&1 && fail \"can list \(h)\""},
 					"security find-generic-password -s gh:github.com >/dev/null 2>&1 && fail \"the keychain holds gh:github.com\"",
-					"for f in \"$HOME/.config/gh/hosts.yml\" \"$HOME/.config/gcloud/credentials.db\" \"$HOME/.git-credentials\" \"$HOME\"/.ssh/id_*; do",
+					"for f in \"$HOME/.config/gh/hosts.yml\" \"$HOME/.config/gcloud/credentials.db\" \"$HOME/.git-credentials\" \"$HOME/.codex/auth.json\" \"$HOME/.codex\" \"$HOME\"/.ssh/id_*; do",
 					"  [ -e \"$f\" ] && fail \"$f exists\"",
 					"done",
 					for p in _protected {"[ -w \"\(p)\" ] && fail \"\(p) is writable\""},

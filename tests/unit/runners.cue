@@ -123,7 +123,7 @@ cases: {
 			STACK_POOL:                      "/tmp/pronto-stacks-ci-pr"
 			STACK_HOLD_POOL:                 "/tmp/pronto-stacks"
 			STACK_HOLD_UID:                  "501"
-			MISE_SHARED_INSTALL_DIRS:        "/Users/Shared/pronto/mise"
+			MISE_SHARED_INSTALL_DIRS:        "/Users/Shared/pronto/mise/installs"
 			HOME:                            "/Users/ci-pr"
 		}},
 	]}
@@ -143,7 +143,7 @@ cases: {
 			"[ -w \"/Library/Application Support/pronto-runners\" ]",
 			"admin|studio) fail",
 			"security find-generic-password -s gh:github.com",
-			"\"$HOME/.config/gh/hosts.yml\" \"$HOME/.config/gcloud/credentials.db\" \"$HOME/.git-credentials\" \"$HOME\"/.ssh/id_*",
+			"\"$HOME/.config/gh/hosts.yml\" \"$HOME/.config/gcloud/credentials.db\" \"$HOME/.git-credentials\" \"$HOME/.codex/auth.json\" \"$HOME/.codex\" \"$HOME\"/.ssh/id_*",
 			"*TOKEN*|*SECRET*",
 		]], expect: [true, true, true, true, true, true, true, true, true, true]},
 		{call: "probe.includes", args: [_rnAcc.host["shop-pr"].hook.text, "ls \"/Users/ci-pr\""], expect: false, why: "its own home is not probed as another's"},
@@ -990,6 +990,8 @@ _rnFaults: {
 	"a gh login": {run: {files: "home/.config/gh/hosts.yml": "x"}, said: "hosts\\.yml exists$"}
 	"a gcloud credential": {run: {files: "home/.config/gcloud/credentials.db": "x"}, said: "credentials\\.db exists$"}
 	"a git credential": {run: {files: "home/.git-credentials": "x"}, said: "\\.git-credentials exists$"}
+	"a Codex login": {run: {files: "home/.codex/auth.json": "x"}, said: "\\.codex/auth\\.json exists$"}
+	"a Codex folder": {run: {files: "home/.codex/config.toml": "x"}, said: "\\.codex exists$"}
 	"an ssh key": {run: {files: "home/.ssh/id_ed25519": "x"}, said: "id_ed25519 exists$"}
 	"a keychain item for github.com": {run: {bin: security: "exit 0"}, said: "the keychain holds gh:github\\.com$"}
 	"a writable /opt/homebrew/bin": {run: {files: "p1/x": ""}, said: "p1 is writable$"}
