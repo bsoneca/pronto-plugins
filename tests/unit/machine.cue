@@ -594,3 +594,20 @@ cases: "two owned runs begun at once in one process keep ledger entries of their
 		{get: "codes", expect: "0,0", why: "neither run fails removing the other's pending file (PRONTO-1199)"},
 	]
 }
+cases: "a holder's unreadable pid file is an error, only a missing one is nobody": {
+	suite: "machine"
+	steps: [
+		{call: "machine.holderRead"},
+		{get: "held", expect: "0,error,4242", why: "missing is 0, unreadable fails loudly, a pid is read"},
+	]
+}
+cases: "the pool's lock is retried only while another chooser holds it": {
+	suite: "machine"
+	steps: [
+		{call: "machine.choosingLock"},
+		{keep: "r"},
+		{get: "broken", expect: "error", why: "a lock that cannot be made fails, it does not retry for ever"},
+		{use: "r"},
+		{get: "free", expect: "ran", why: "a free lock runs the function"},
+	]
+}
