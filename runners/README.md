@@ -141,14 +141,18 @@ jobs:
   account's own group alone (`.credentials*` included), and root's but `_work` and `_diag`, which are the
   account's, mode 700. The runner is registered with `--disableupdate`, as the account while the folder is
   its own (`install-as`, `register-as`), then `lock`ed. Before the lock or the unlock changes who owns the
-  folder, the account is quiesced: its daemon booted out and proven gone from launchd, its crontab removed, and
-  its processes killed (as the account, three tries) until it has none, so nothing it left behind (a setsid, a
-  double fork) races the chowns. An unlock chowns the subtree and then the folder; a lock makes the folder
-  `root:wheel` 700 first, refuses (fails closed) anything but the tarball's own symlinks (`links.manifest`, beside
-  the folder, recorded by root at install from the checked tarball: the same (path, target) pairs, none with a tab
-  or a newline, none into `_work` or `_diag`), a multiply-linked file, a `.path` that is not the plan's or a `.env`
-  that is more than a `LANG`, makes `_work` and `_diag` as the account with `mkdir`, and chowns the folder to
-  `root:<group>` last (chowns never follow a symlink and never enter `_work` or `_diag`). The runner's tarball is copied to a root-only file, checked
+  folder, the account is quiesced, so nothing it left behind (a setsid, a double fork, a crontab, an at job, a
+  user-domain launchd job) races the chowns: the daemon, the user and gui
+  domains are booted out and proven empty, and its processes killed (as the account, three tries). An unlock chowns
+  the subtree and then the folder. A lock makes the folder `root:wheel` 700 first and grants the group nothing until
+  the tree has passed: no mount point, hard link, tab or newline in a name, or link into `_work` or `_diag`; the
+  tree made root's and closed; then the folder held to the tarball's `tree.mtree` (beside the folder, recorded by
+  root at install from the checked tarball: type, sha256 and link of each entry), with `_work`, `_diag` and the
+  state config.sh writes (`.runner*`, `.credentials*`, `.env`, `.path`, `.service`, each a plain file) outside it,
+  so a changed, extra or missing file refuses the lock. Root then writes `.path` itself and checks it and `.env` (a
+  `LANG` at most), the group may read the tree, root makes `_work` and `_diag` (a plain `mkdir -m 700`, then chown
+  to the account) and the folder goes to `root:<group>` last (chowns never follow a symlink and never enter `_work`
+  or `_diag`). config.sh runs as the account with the system's PATH, never the runner's own. The runner's tarball is copied to a root-only file, checked
   there against the pinned sha256 and only then extracted as the account. Logs are under
   `/Library/Logs/pronto-runners/<label>/` (root's; launchd makes the files), and a
   root-owned `job-started.sh` in `/Library/Application Support/pronto-runners/<name>/` runs before every

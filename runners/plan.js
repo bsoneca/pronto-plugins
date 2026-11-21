@@ -189,57 +189,83 @@ const GROUP_FREE = '! dscl . -read "/Groups/$0" >/dev/null 2>&1 || { echo "group
 const UNLINK = 'for d in "$0" "$@"; do if [ -L "$d" ]; then rm -f "$d"; fi; done';
 
 /**
- * `lst DIR WORK DIAG`: the symlinks under DIR outside its WORK and DIAG, one `path<TAB>target` line each, sorted, and
- * a failure (never a partial list) when find or readlink fails, when a name or a link's target holds a tab or a
- * newline (they would shift the fields), or when a target names WORK or DIAG (a link into the folders the account
- * writes would have the listener run account-writable code).
+ * `nm DIR WORK DIAG`: refuses (and fails closed when find or readlink fails) a tab or a newline in a name or in a
+ * link's target outside DIR's WORK and DIAG (they would shift the fields of a listing), and a link whose target
+ * names WORK or DIAG (a link into the folders the account writes would have the listener run account-writable code).
  */
-const LST = [
-  'lst() {',
+const NAMES = [
+  'nm() {',
   '  d=$1; nl=$(printf "\\n_"); nl=${nl%_}; tb=$(printf "\\t"); p="$d/$2"; q="$d/$3"',
-  '  bad=$(find "$d" -xdev \\( -path "$p" -o -path "$q" \\) -prune -o \\( -path "*$nl*" -o -path "*$tb*" -o -lname "*$nl*" -o -lname "*$tb*" \\) -print) || return 1',
+  '  bad=$(find "$d" \\( -path "$p" -o -path "$q" \\) -prune -o \\( -path "*$nl*" -o -path "*$tb*" -o -lname "*$nl*" -o -lname "*$tb*" \\) -print) || return 1',
   '  [ -z "$bad" ] || { echo "a tab or a newline in a name or a link: $bad" >&2; return 1; }',
-  '  links=$(find "$d" -xdev \\( -path "$p" -o -path "$q" \\) -prune -o -type l -print) || return 1',
-  '  raw=$(mktemp) || return 1',
+  '  links=$(find "$d" \\( -path "$p" -o -path "$q" \\) -prune -o -type l -print) || return 1',
   '  printf "%s\\n" "$links" | while IFS= read -r l; do',
   '    [ -n "$l" ] || continue',
   '    t=$(readlink "$l") || exit 1',
   '    case "$t" in *"$2"*|*"$3"*) echo "$l -> $t reaches $2 or $3" >&2; exit 1;; esac',
-  '    printf "%s\\t%s\\n" "${l#"$d"/}" "$t"',
-  '  done > "$raw" || { rm -f "$raw"; return 1; }',
-  '  LC_ALL=C sort "$raw"; s=$?; rm -f "$raw"; return $s',
+  '  done',
   '}',
 ].join('\n');
 
+/** What mtree records of a tree, and so checks: the type, the sha256 of a file and the target of a link. (Not the size: a folder's changes with what is in it.) */
+const MTREE_KEYS = 'type,sha256digest,link';
+
 /**
- * The runner tarball's symlinks ($1, the stage's bytes), recorded root-only at install: copied to a root-only file,
- * checked there against the pinned digest ($0), extracted into a root-only scratch folder and listed (lst) into the
- * manifest ($2, in root's folder, written beside and renamed). $3 is the account's `_work`.
+ * What config.sh and the runner write into the folder's top, the state the lock does not hold to the tarball (it
+ * holds each to being a plain file): registration, credentials, the .env and .path of env.sh, the .service of svc.sh.
+ */
+const STATE = ['.runner', '.runner_migrated', '.credentials', '.credentials_rsaparams', '.env', '.path', '.service'];
+
+/**
+ * The runner tarball ($1, the stage's bytes), recorded root-only at install: copied to a root-only file, checked
+ * there against the pinned digest ($0), extracted into a root-only scratch folder, its names refused if they hold a
+ * tab, a newline or a link into the account's folders ($3 is `_work`), and written as an mtree spec ($2, in
+ * root's folder, beside and renamed).
  */
 const MANIFEST = [
-  'set -e; t=$(mktemp); m=$(mktemp -d); trap "rm -rf $t $m $2.new" EXIT',
+  'set -e; t=$(mktemp); m=$(mktemp -d); trap \'rm -rf "$t" "$m" "$2.new"\' EXIT',
   'cat "$1" > "$t"; printf "%s  %s\\n" "$0" "$t" | shasum -a 256 -c - >/dev/null',
   'tar xzf "$t" -C "$m"',
-  LST,
-  'lst "$m" "$3" _diag > "$2.new"; chmod 644 "$2.new"; mv -f "$2.new" "$2"',
+  NAMES,
+  'nm "$m" "$3" _diag',
+  `/usr/sbin/mtree -c -k ${MTREE_KEYS} -p "$m" > "$2.new"; chmod 644 "$2.new"; mv -f "$2.new" "$2"`,
 ].join('\n');
 
 /**
- * A runner folder ($0, its _work $1, the tarball's manifest $2) that holds, outside _work and _diag, a regular file
- * with more than one link, or any symlink but the tarball's own, each with the target the tarball gave it (lst's
- * lines must equal the manifest's): refused. The runner's own relative links (node/bin/npm and the like) are in it.
- * Everything fails closed: no manifest, a failing find, a tab or newline in a name, a link into _work or _diag.
+ * What must hold before root touches anything in a runner folder ($0, its _work $1), as the account may have left a
+ * hard link in it (a chown or chmod would reach through to the file it names): no entry on another device than the
+ * folder (a mount point: refused, not skipped), no tab or newline in a name, no link into _work or _diag, no file
+ * with more than one link. Fails closed when a command fails.
+ */
+const PRECHECK = [
+  'r=$0; w=$1',
+  NAMES,
+  'rd=$(stat -f %d "$r") || exit 1',
+  'devs=$(find "$r" -xdev \\( -path "$r/$w" -o -path "$r/_diag" \\) -prune -o -exec stat -f %d {} +) || exit 1',
+  'odd=$(printf "%s\\n" "$devs" | grep -vx "$rd")',
+  '[ -z "$odd" ] || { echo "$r holds a mount point" >&2; exit 1; }',
+  'nm "$r" "$w" _diag || exit 1',
+  'out=$(find "$r" \\( -path "$r/$w" -o -path "$r/_diag" \\) -prune -o -type f -links +1 -print) || exit 1',
+  '[ -z "$out" ] || { echo "$out has more than one link" >&2; exit 1; }',
+].join('\n');
+
+/**
+ * A runner folder ($0, its _work $1, the tarball's mtree spec $2) that is not the tarball's, outside _work, _diag and
+ * the state config.sh writes: a changed, an extra or a missing file or link is refused (mtree's exit is 0 for an
+ * extra, so any word it says refuses), and so is a state file that is not a plain file.
  */
 const CLEAN = [
   'r=$0; w=$1; m=$2',
-  '[ -f "$m" ] && [ ! -L "$m" ] || { echo "$m: no manifest of the runner tarball" >&2; exit 1; }',
-  LST,
-  'now=$(mktemp) || exit 1; trap "rm -f $now" EXIT',
-  'lst "$r" "$w" _diag > "$now" || exit 1',
-  'out=$(find "$r" -xdev \\( -path "$r/$w" -o -path "$r/_diag" \\) -prune -o -type f -links +1 -print) || exit 1',
-  '[ -z "$out" ] || { echo "$out has more than one link" >&2; exit 1; }',
-  'cmp -s "$now" "$m" || { diff "$m" "$now" >&2; echo "the symlinks are not the runner tarball\'s" >&2; exit 1; }',
+  '[ -f "$m" ] && [ ! -L "$m" ] || { echo "$m: no mtree of the runner tarball" >&2; exit 1; }',
+  `for f in ${STATE.join(' ')}; do if [ -L "$r/$f" ] || { [ -e "$r/$f" ] && [ ! -f "$r/$f" ]; }; then echo "$r/$f is not a plain file" >&2; exit 1; fi; done`,
+  'x=$(mktemp) || exit 1; trap \'rm -f "$x"\' EXIT',
+  `printf "%s\\n" "./$w" ./_diag ${STATE.map((f) => './' + f).join(' ')} > "$x"`,
+  'out=$(/usr/sbin/mtree -f "$m" -p "$r" -X "$x" 2>&1); s=$?',
+  '[ $s -eq 0 ] && [ -z "$out" ] || { printf "%s\\n" "$out" >&2; echo "the folder is not the runner tarball\'s" >&2; exit 1; }',
 ].join('\n');
+
+/** The folder's `.path` ($1) written by root, over whatever is there (a link is removed, never followed). */
+const WRITEPATH = 'umask 077 && cd "$0" && rm -f .path && printf "%s\\n" "$1" > .path';
 
 /**
  * A runner folder ($0)'s `.path` is the plan's PATH ($1) and its `.env` (optional) holds nothing but a LANG: a hook
@@ -254,19 +280,28 @@ const ENVCHECK = [
 ].join('\n');
 
 /**
- * What stops an account's processes before its folder changes hands, as a runner's account could leave one behind (a
- * setsid or double fork, a cleared RUNNER_TRACKING_ID, a crontab) that bootout doesn't reach: after the daemon is
- * out and the crontab gone, the account's processes are killed (as the account: `kill -KILL -1` as root would kill
- * everything) until none is left, 3 tries; and the daemon must be gone from launchd.
- */
-/**
  * `_work` and `_diag` ($2, $3) made as root with a plain `mkdir -m 700` (never install -d or -p) where nothing is
  * there, then each chowned to the account ($0, group $1) with -h. Anything there that is a symlink or not a folder
  * stops the lock (UNLINK has removed the links); a folder kept from an earlier lock is only chowned.
  */
 const MAKE = 'u=$0; g=$1; shift; for d; do if [ -L "$d" ]; then echo "$d is a symlink" >&2; exit 1; elif [ ! -e "$d" ]; then mkdir -m 700 "$d" || exit 1; fi; [ -d "$d" ] || { echo "$d is not a folder" >&2; exit 1; }; chown -h "$u:$g" "$d" || exit 1; done';
-const REAP = 'i=0; while pgrep -u "$0" >/dev/null; do [ $i -lt 3 ] || { echo "$0 still has processes" >&2; exit 1; }; i=$((i+1)); sudo -n -u "$0" /bin/kill -KILL -1 || true; sleep 1; done';
+
+/**
+ * What stops an account's processes before its folder changes hands, as a runner's account could leave one behind (a
+ * setsid or double fork, a cleared RUNNER_TRACKING_ID, a crontab, an at job, a user-domain launchd job) that bootout
+ * of the daemon doesn't reach. After the daemon is out, the crontab and at jobs gone and the account's user and
+ * gui domains booted out, the account's processes are killed (as the account: `kill -KILL -1` as root would kill
+ * everything) until none is left, 3 tries (a pgrep that fails, exit above 1, fails); and neither the daemon nor
+ * any service of the user domain may remain in launchd.
+ */
+const REAP = 'i=0; while :; do pgrep -u "$0" >/dev/null; s=$?; [ $s -eq 1 ] && break; [ $s -eq 0 ] || { echo "pgrep failed ($s)" >&2; exit 1; }; [ $i -lt 3 ] || { echo "$0 still has processes" >&2; exit 1; }; i=$((i+1)); sudo -n -u "$0" /bin/kill -KILL -1 || true; sleep 1; done';
 const GONE = '! launchctl print "system/$0" >/dev/null 2>&1 || { echo "system/$0 is still loaded" >&2; exit 1; }';
+const BOOTDOM = 'launchctl bootout "$1/$(id -u "$0")"';
+const ATJOBS = '[ ! -d /usr/lib/cron/jobs ] || find /usr/lib/cron/jobs -type f -user "$0" -exec rm -f {} +';
+const GONE_USER = 'u=$(id -u "$0") || exit 1; out=$(launchctl print "user/$u" 2>/dev/null) || exit 0; if printf "%s\\n" "$out" | grep -Eq "^[[:space:]]+(-|[0-9]+)[[:space:]]+(-|[0-9]+)[[:space:]]+[A-Za-z]"; then echo "user/$u still has services" >&2; exit 1; fi';
+
+/** The PATH config.sh runs with as an account: the system's, never the runner's own (its home's folders are the account's). */
+const CONFIG_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 
 /**
  * The commands a step of a runner with an account (or of the applier's own, behind a hook) runs as root or as
@@ -282,17 +317,22 @@ export function stepCommands(plan, name, step, ctx) {
   const root = (...argv) => ({ argv: ['sudo', '-n', ...argv] });
   const as = (...argv) => ({ argv: ['sudo', '-n', '-u', r.user, '-H', ...argv] });
   const dirOf = (p) => p.replace(/\/[^/]*$/, '');
-  const sh = (dir, script, ...argv) => as('env', `PATH=${r.path}`, '/bin/sh', '-c', `cd "$0" && ${script}`, dir, ...argv);
+  const sh = (dir, script, ...argv) => as('env', `PATH=${CONFIG_PATH}`, '/bin/sh', '-c', `cd "$0" && ${script}`, dir, ...argv);
   const bootout = () => ({ ...root('launchctl', 'bootout', `system/${r.service.label}`), tolerate: true });
   // Nothing of the account runs, and nothing can start, before its folder changes hands (REAP): the daemon out (and
-  // proven out), its crontab gone, its processes killed.
+  // proven out), its crontab and at jobs gone, its user and gui domains booted out (and proven empty), its
+  // processes killed.
   const quiesce = () => [
     bootout(),
     { ...root('crontab', '-u', r.user, '-r'), tolerate: true },
+    { ...root('/bin/sh', '-c', BOOTDOM, r.user, 'user'), tolerate: true },
+    { ...root('/bin/sh', '-c', BOOTDOM, r.user, 'gui'), tolerate: true },
+    root('/bin/sh', '-c', ATJOBS, r.user),
     root('/bin/sh', '-c', REAP, r.user),
-    root('/bin/sh', '-c', GONE, `${r.service.label}`),
+    root('/bin/sh', '-c', GONE, r.service.label),
+    root('/bin/sh', '-c', GONE_USER, r.user),
   ];
-  const manifest = `${dirOf(r.dir)}/links.manifest`;
+  const manifest = `${dirOf(r.dir)}/tree.mtree`;
   const put = (sha, staged, dest, mode, extra = () => []) => [
     root('/bin/sh', '-c', CHECK, sha, staged),
     root('install', '-m', mode, '-o', 'root', '-g', 'wheel', staged, `${dest}.new`),
@@ -336,7 +376,7 @@ export function stepCommands(plan, name, step, ctx) {
         root('install', '-d', '-m', '755', '-o', 'root', '-g', 'wheel', dirOf(r.dir)),
         root('install', '-d', '-m', '750', '-o', r.user, '-g', r.group, r.dir),
         root('/bin/sh', '-c', TAR, r.download.sha256, `${ctx.stage}/runner.tar.gz`, r.user, r.dir),
-        // The tarball's symlinks, kept in root's folder for the lock to hold the tree to.
+        // The tarball's tree (types, sha256s, links), kept in root's folder for the lock to hold the folder to.
         root('/bin/sh', '-c', MANIFEST, r.download.sha256, `${ctx.stage}/runner.tar.gz`, manifest, r.work),
       ];
     case 'unregister-as':
@@ -347,8 +387,8 @@ export function stepCommands(plan, name, step, ctx) {
     case 'unlock':
       // Nothing of the account runs while its folder is handed back (quiesce), and what is chowned is never followed
       // through a symlink (-h); _work and _diag are not touched. The subtree goes first and the folder last: the
-      // account reaches nothing by the folder before then, so it can't hard-link a root file into a tree about to be
-      // chowned to it.
+      // folder is root:<group> 750, so the account's group can traverse it throughout, but nothing of the account
+      // runs, and nothing in the folder is the account's before the folder is.
       return [
         ...quiesce(),
         root('find', ...rest, 'chown', '-h', '-R', `${r.user}:${r.group}`, '{}', '+'),
@@ -357,19 +397,24 @@ export function stepCommands(plan, name, step, ctx) {
     case 'lock':
       // Root's but for the folders its jobs write, and readable by the account's group alone (the listener only
       // reads .env, .path, .credentials*, bin/; it writes _work and _diag, the account's, mode 700). Nothing of the
-      // account runs (quiesce) and the folder is root's, mode 700, before anything in it is looked at; a _work or
-      // _diag that is a symlink is removed; the tree must hold the tarball's symlinks and no others, no multiply-linked
-      // file, a .path that is the plan's and a .env that is empty or a LANG. _work and _diag are made by root while
-      // the folder is still root's 700 (MAKE), so the folder is never the account's; it is chowned last.
+      // account runs (quiesce) and the folder is root's, mode 700, before anything in it is read; nothing is
+      // granted to the group until the tree has passed: PRECHECK (mounts, names, hard links, before a chown could
+      // reach through one), the tree made root's and closed, a symlinked _work or _diag removed, the tree held to the
+      // tarball's (CLEAN), .path written by root and checked with .env. Then the group may read it, _work and _diag
+      // are made by root while the folder is still root's 700 (MAKE), and the folder is opened to the group last.
       return [
         ...quiesce(),
         root('chown', '-h', 'root:wheel', r.dir),
         root('chmod', '700', r.dir),
+        root('/bin/sh', '-c', PRECHECK, r.dir, r.work),
+        root('find', ...rest, 'chown', '-h', '-R', 'root:wheel', '{}', '+'),
+        root('find', ...rest, 'chmod', '-R', 'go-rwx,ug-s', '{}', '+'),
         root('/bin/sh', '-c', UNLINK, keep, `${r.dir}/_diag`),
         root('/bin/sh', '-c', CLEAN, r.dir, r.work, manifest),
-        root('find', ...rest, 'chown', '-h', '-R', `root:${r.group}`, '{}', '+'),
-        root('find', ...rest, 'chmod', '-R', 'g+rX,go-w,o-rwx', '{}', '+'),
+        root('/bin/sh', '-c', WRITEPATH, r.dir, r.path),
         root('/bin/sh', '-c', ENVCHECK, r.dir, r.path),
+        root('find', ...rest, 'chown', '-h', '-R', `root:${r.group}`, '{}', '+'),
+        root('find', ...rest, 'chmod', '-R', 'g+rX', '{}', '+'),
         root('/bin/sh', '-c', MAKE, r.user, r.group, keep, `${r.dir}/_diag`),
         root('chmod', '750', r.dir),
         root('chown', '-h', `root:${r.group}`, r.dir),
