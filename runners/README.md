@@ -143,10 +143,10 @@ jobs:
   its own (`install-as`, `register-as`), then `lock`ed. Before the lock or the unlock changes who owns the
   folder, the account is quiesced, so nothing it left behind (a setsid, a double fork, a crontab, an at job, a
   user-domain launchd job) races the chowns: the daemon, the user and gui
-  domains are booted out and proven empty, and its processes killed (as the account, three tries). An unlock chowns
-  the subtree and then the folder. A lock makes the folder `root:wheel` 700 first and grants the group nothing until
-  the tree has passed: no mount point, hard link, tab or newline in a name, or link into `_work` or `_diag`; the
-  tree made root's and closed; then the folder held to the tarball's `tree.mtree` (beside the folder, recorded by
+  domains are booted out and proven empty, and its processes killed (as the account, three tries). An unlock checks the same (no mount, hard link or odd name), strips ACLs and flags, then chowns
+  the subtree and then the folder. Two runners never share an account, and a work folder is a plain name. install-as quiesces first, and register-as and unregister-as check the account quiet again. A lock makes the folder `root:wheel` 700 first and grants the group nothing until
+  the tree has passed: no mount point (the folder itself included), hard link (a FIFO or socket too), tab or newline in a name, or link into `_work` or `_diag`; the
+  ACLs and flags stripped (and none left); the tree made root's and closed; then the folder held to the tarball's `tree.mtree` (beside the folder, recorded by
   root at install from the checked tarball: type, sha256 and link of each entry), with `_work`, `_diag` and the
   state config.sh writes (`.runner*`, `.credentials*`, `.env`, `.path`, `.service`, each a plain file) outside it,
   so a changed, extra or missing file refuses the lock. Root then writes `.path` itself and checks it and `.env` (a

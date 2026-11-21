@@ -91,6 +91,10 @@ setups: [Name=string]: #Setup & {name: Name}
 	// takes one job at a time, on the machine itself (its tools, its caches, no container). What
 	// runs-on says: self-hosted, its OS and arch (GitHub's own labels: macOS or Linux, ARM64 or X64)
 	// and the runner's `labels`.
+	// No two runners share an account: an account's processes are quiesced for one runner's lock, and a second
+	// runner's jobs of the same account would be among them.
+	_hostUsers:     [for _, r in hostRunners if r.user != "" {r.user}]
+	_hostUsersOnce: true & list.UniqueItems(_hostUsers)
 	hostRunners: [Name=#DNS]: {
 		// The macOS account the runner runs as, a LaunchDaemon's UserName (host.cue). Empty: the
 		// applier's own, a LaunchAgent in their session, exactly as before.
@@ -124,7 +128,7 @@ setups: [Name=string]: #Setup & {name: Name}
 		labels: *[Name] | [...=~"^[A-Za-z0-9._-]+$"]
 		// The runner's folder, under the home; its jobs' checkouts go in `work`, under it.
 		dir:  *"actions-runners/\(Name)" | (string & !~"^/")
-		work: *"_work" | (string & !~"^/")
+		work: *"_work" | (=~"^[A-Za-z0-9._-]+$" & !~"^[.]+$")
 		// The PATH its jobs run with (config.sh records it in .path), ~ the home: not the PATH of
 		// whoever ran apply.
 		// A trusted account's is one no account but root writes.

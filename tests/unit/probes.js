@@ -88,9 +88,9 @@ export const verifies = (argv, content) => {
 };
 /**
  * A command of plan.js's (run without sudo) with files and scripts made first, as runHook does, and some of
- * its arguments replaced (an argument equal to a key, @tmp being the scratch folder; `links` are symlinks and `hardlinks` hard links made there): its exit code, what it said, and whether each replaced path is still there (a symlink counts as itself).
+ * its arguments replaced (an argument equal to a key, @tmp being the scratch folder; `fifos` named pipes, `links` symlinks and `hardlinks` hard links made there): its exit code, what it said, and whether each replaced path is still there (a symlink counts as itself).
  */
-export const runCommand = (argv, { bin = {}, files = {}, links = {}, hardlinks = {}, replace = {} } = {}) => {
+export const runCommand = (argv, { bin = {}, files = {}, fifos = [], links = {}, hardlinks = {}, replace = {} } = {}) => {
   const dir = Deno.makeTempDirSync();
   try {
     Deno.mkdirSync(`${dir}/bin`);
@@ -101,6 +101,10 @@ export const runCommand = (argv, { bin = {}, files = {}, links = {}, hardlinks =
     for (const [path, body] of Object.entries(files)) {
       Deno.mkdirSync(`${dir}/${path}`.replace(/\/[^/]*$/, ''), { recursive: true });
       Deno.writeTextFileSync(`${dir}/${path}`, body);
+    }
+    for (const path of fifos) {
+      Deno.mkdirSync(`${dir}/${path}`.replace(/\/[^/]*$/, ''), { recursive: true });
+      if (!new Deno.Command('/usr/bin/mkfifo', { args: [`${dir}/${path}`] }).outputSync().success) throw new Error(`mkfifo ${path}`);
     }
     for (const [path, target] of Object.entries(hardlinks)) Deno.linkSync(`${dir}/${target}`, `${dir}/${path}`);
     for (const [path, target] of Object.entries(links)) {

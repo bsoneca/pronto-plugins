@@ -233,19 +233,20 @@ const MANIFEST = [
 
 /**
  * What must hold before root touches anything in a runner folder ($0, its _work $1), as the account may have left a
- * hard link in it (a chown or chmod would reach through to the file it names): no entry on another device than the
- * folder (a mount point: refused, not skipped), no tab or newline in a name, no link into _work or _diag, no file
- * with more than one link. Fails closed when a command fails.
+ * hard link in it (a chown or chmod would reach through to the file it names): neither the folder nor an entry on
+ * another device than its parent's (a mount point: refused, not skipped), no tab or newline in a name, no link into _work or _diag, no file
+ * but a folder with more than one link (a socket or a FIFO as much as a file). Fails closed when a command fails.
  */
 const PRECHECK = [
   'r=$0; w=$1',
   NAMES,
-  'rd=$(stat -f %d "$r") || exit 1',
+  'rd=$(stat -f %d "$r") || exit 1; pd=$(stat -f %d "$r/..") || exit 1',
+  '[ "$rd" = "$pd" ] || { echo "$r is a mount point" >&2; exit 1; }',
   'devs=$(find "$r" -xdev \\( -path "$r/$w" -o -path "$r/_diag" \\) -prune -o -exec stat -f %d {} +) || exit 1',
   'odd=$(printf "%s\\n" "$devs" | grep -vx "$rd")',
   '[ -z "$odd" ] || { echo "$r holds a mount point" >&2; exit 1; }',
   'nm "$r" "$w" _diag || exit 1',
-  'out=$(find "$r" \\( -path "$r/$w" -o -path "$r/_diag" \\) -prune -o -type f -links +1 -print) || exit 1',
+  'out=$(find "$r" \\( -path "$r/$w" -o -path "$r/_diag" \\) -prune -o ! -type d -links +1 -print) || exit 1',
   '[ -z "$out" ] || { echo "$out has more than one link" >&2; exit 1; }',
 ].join('\n');
 
@@ -262,6 +263,12 @@ const CLEAN = [
   `printf "%s\\n" "./$w" ./_diag ${STATE.map((f) => './' + f).join(' ')} > "$x"`,
   'out=$(/usr/sbin/mtree -f "$m" -p "$r" -X "$x" 2>&1); s=$?',
   '[ $s -eq 0 ] && [ -z "$out" ] || { printf "%s\\n" "$out" >&2; echo "the folder is not the runner tarball\'s" >&2; exit 1; }',
+].join('\n');
+
+/** No ACL left ($0 the folder, $1 its _work), outside _work and _diag: `ls -le` lists each as ` 0: user:...`. */
+const ACLCHECK = [
+  'out=$(find "$0" \\( -path "$0/$1" -o -path "$0/_diag" \\) -prune -o -exec ls -lde {} +) || exit 1',
+  'if printf "%s\\n" "$out" | grep -Eq "^ [0-9]+: "; then echo "$0 still has an ACL" >&2; exit 1; fi',
 ].join('\n');
 
 /** The folder's `.path` ($1) written by root, over whatever is there (a link is removed, never followed). */
@@ -298,7 +305,11 @@ const REAP = 'i=0; while :; do pgrep -u "$0" >/dev/null; s=$?; [ $s -eq 1 ] && b
 const GONE = '! launchctl print "system/$0" >/dev/null 2>&1 || { echo "system/$0 is still loaded" >&2; exit 1; }';
 const BOOTDOM = 'launchctl bootout "$1/$(id -u "$0")"';
 const ATJOBS = '[ ! -d /usr/lib/cron/jobs ] || find /usr/lib/cron/jobs -type f -user "$0" -exec rm -f {} +';
-const GONE_USER = 'u=$(id -u "$0") || exit 1; out=$(launchctl print "user/$u" 2>/dev/null) || exit 0; if printf "%s\\n" "$out" | grep -Eq "^[[:space:]]+(-|[0-9]+)[[:space:]]+(-|[0-9]+)[[:space:]]+[A-Za-z]"; then echo "user/$u still has services" >&2; exit 1; fi';
+const GONE_USER = [
+  'u=$(id -u "$0") || exit 1; out=$(launchctl print "user/$u" 2>/dev/null) || exit 0',
+  'n=$(printf "%s\\n" "$out" | awk \'/^\\tservices = \\{/ {on = 1; next} on && /^\\t\\}/ {on = 0} on && NF {n++} END {print n + 0}\')',
+  '[ "$n" -eq 0 ] || { echo "user/$u still has services ($n)" >&2; exit 1; }',
+].join('\n');
 
 /** The PATH config.sh runs with as an account: the system's, never the runner's own (its home's folders are the account's). */
 const CONFIG_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
@@ -333,6 +344,8 @@ export function stepCommands(plan, name, step, ctx) {
     root('/bin/sh', '-c', GONE_USER, r.user),
   ];
   const manifest = `${dirOf(r.dir)}/tree.mtree`;
+  // The account's, again, before it is asked to act as a registered runner: nothing of it running, no service of its.
+  const still = () => [root('/bin/sh', '-c', REAP, r.user), root('/bin/sh', '-c', GONE_USER, r.user)];
   const put = (sha, staged, dest, mode, extra = () => []) => [
     root('/bin/sh', '-c', CHECK, sha, staged),
     root('install', '-m', mode, '-o', 'root', '-g', 'wheel', staged, `${dest}.new`),
@@ -343,6 +356,15 @@ export function stepCommands(plan, name, step, ctx) {
   const keep = `${r.dir}/${r.work}`;
   // What is in the folder but the two the account writes.
   const rest = [r.dir, '-mindepth', '1', '-maxdepth', '1', '!', '-name', r.work, '!', '-name', '_diag', '-exec'];
+  // No ACL and no flag on the folder or what is in it (outside _work and _diag): an ACL entry or an immutable flag
+  // would outlive the chowns and chmods; none left is then checked.
+  const strip = () => [
+    root('chmod', '-N', r.dir),
+    root('chflags', '-h', '0', r.dir),
+    root('find', ...rest, 'chmod', '-h', '-R', '-N', '{}', '+'),
+    root('find', ...rest, 'chflags', '-h', '-R', '0', '{}', '+'),
+    root('/bin/sh', '-c', ACLCHECK, r.dir, r.work),
+  ];
   switch (step) {
     case 'account': {
       const a = plan.accounts.find((x) => x.login === r.user);
@@ -373,6 +395,7 @@ export function stepCommands(plan, name, step, ctx) {
     case 'install-as':
       // The folder is made by root, the account's while it is installed and registered (and locked after).
       return [
+        ...quiesce(),
         root('install', '-d', '-m', '755', '-o', 'root', '-g', 'wheel', dirOf(r.dir)),
         root('install', '-d', '-m', '750', '-o', r.user, '-g', r.group, r.dir),
         root('/bin/sh', '-c', TAR, r.download.sha256, `${ctx.stage}/runner.tar.gz`, r.user, r.dir),
@@ -380,10 +403,10 @@ export function stepCommands(plan, name, step, ctx) {
         root('/bin/sh', '-c', MANIFEST, r.download.sha256, `${ctx.stage}/runner.tar.gz`, manifest, r.work),
       ];
     case 'unregister-as':
-      return [{ ...sh(r.dir, `${TOKEN_IN} && exec ./config.sh remove`), token: true }];
+      return [...still(), { ...sh(r.dir, `${TOKEN_IN} && exec ./config.sh remove`), token: true }];
     case 'register-as':
       // The runner's own updater would rewrite its folder, which is root's: it is told not to.
-      return [{ ...sh(r.dir, `${TOKEN_IN} && exec ./config.sh "$@"`, ...registerArgs(plan, name), '--disableupdate'), token: true }];
+      return [...still(), { ...sh(r.dir, `${TOKEN_IN} && exec ./config.sh "$@"`, ...registerArgs(plan, name), '--disableupdate'), token: true }];
     case 'unlock':
       // Nothing of the account runs while its folder is handed back (quiesce), and what is chowned is never followed
       // through a symlink (-h); _work and _diag are not touched. The subtree goes first and the folder last: the
@@ -391,6 +414,8 @@ export function stepCommands(plan, name, step, ctx) {
       // runs, and nothing in the folder is the account's before the folder is.
       return [
         ...quiesce(),
+        root('/bin/sh', '-c', PRECHECK, r.dir, r.work),
+        ...strip(),
         root('find', ...rest, 'chown', '-h', '-R', `${r.user}:${r.group}`, '{}', '+'),
         root('chown', '-h', `${r.user}:${r.group}`, r.dir),
       ];
@@ -407,6 +432,7 @@ export function stepCommands(plan, name, step, ctx) {
         root('chown', '-h', 'root:wheel', r.dir),
         root('chmod', '700', r.dir),
         root('/bin/sh', '-c', PRECHECK, r.dir, r.work),
+        ...strip(),
         root('find', ...rest, 'chown', '-h', '-R', 'root:wheel', '{}', '+'),
         root('find', ...rest, 'chmod', '-R', 'go-rwx,ug-s', '{}', '+'),
         root('/bin/sh', '-c', UNLINK, keep, `${r.dir}/_diag`),
@@ -441,7 +467,8 @@ export function stepCommands(plan, name, step, ctx) {
     case 'remove-daemon': {
       // A runner that is the applier's own again: the daemon it was, unloaded and its plist removed.
       const plist = `/Library/LaunchDaemons/${r.service.label}.plist`;
-      return [bootout(), root('rm', '-f', plist)];
+      // Of an account's daemon, its account (when the plan still knows it) is quiesced too.
+      return [...(r.user ? quiesce() : [bootout()]), root('rm', '-f', plist)];
     }
   }
   return [];

@@ -53,5 +53,10 @@ def main [] {
 	check "an owner account is one already on the machine" (refused $"($acc)accounts: me: role: \"owner\", existing: false")
 	check "an owner account, existing, is fine" (not (refused $"($acc)accounts: me: {role: \"owner\", existing: true}\nhostRunners: h: {repo: \"r\"}"))
 	check "no runner runs as an owner account" (refused $"($acc)accounts: me: {role: \"owner\", existing: true}\nhostRunners: h: {repo: \"r\", user: \"me\"}")
+	check "two runners never share an account" (refused $"($acc)hostRunners: {a: {repo: \"r\", user: \"pr\"}, b: {repo: \"r\", user: \"pr\"}}")
+	check "two runners of different accounts are fine" (not (refused $"($acc)hostRunners: {a: {repo: \"r\", user: \"pr\"}, b: {repo: \"r\", user: \"tr\", admits: [($ok)]}}"))
+	check "the applier's own runners may be many" (not (refused $"($acc)hostRunners: {a: {repo: \"r\"}, b: {repo: \"r\"}}"))
+	check "a runner's work folder is a plain name" (refused $"($acc)hostRunners: h: {repo: \"r\", work: \"a b\"}")
+	check "a runner's work folder is not .." (refused $"($acc)hostRunners: h: {repo: \"r\", work: \"..\"}")
 	check "a created account's group is its own" (refused $"($acc)accounts: other: {role: \"pr\", group: \"staff\"}")
 }
