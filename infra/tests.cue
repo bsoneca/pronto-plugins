@@ -46,11 +46,14 @@ badBucket: "A" & matchN(0, [#BucketName])
 badApi: "run" & matchN(0, [=~"^[a-z0-9-]+\\.googleapis\\.com$"])
 
 // Defaults: the display name is the id, nothing is adopted, a made project is adopted whole.
-defaultName:          _plan.state.projects["example-project-123"].name & "example-project-123"
-defaultAdopt:         _plan.state.projects["example-project-123"].adoptAll & false
-createAdopts:         _plan.state.projects["example-project-456"].adoptAll & true
-accountEmail:         _plan.state.projects["example-project-123"].serviceAccounts["my-app-run"].email & "my-app-run@example-project-123.iam.gserviceaccount.com"
-defaultBackendPrefix: _plan.backend.prefix & "infra"
+defaultName:           _plan.state.projects["example-project-123"].name & "example-project-123"
+defaultAdopt:          _plan.state.projects["example-project-123"].adoptAll & false
+createAdopts:          _plan.state.projects["example-project-456"].adoptAll & true
+accountEmail:          _plan.state.projects["example-project-123"].serviceAccounts["my-app-run"].email & "my-app-run@example-project-123.iam.gserviceaccount.com"
+defaultBackendPrefix:  _plan.backend.prefix & "infra"
+defaultBackendCreates: _plan.backend.existing & false
+existingBackend: (#Backend & {bucket: "my-org-infra-tfstate", project: "example-project-123", existing: true}).existing & true
+existingIsBool: "yes" & matchN(0, [#Backend.existing])
 
 // A bucket anyone may read must say why; one nobody reads needs no reason.
 publicNeedsWhy: matchN(0, [#Bucket & {

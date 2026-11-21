@@ -20,6 +20,9 @@ import "list"
 	project!: #ProjectID
 	location: *"us-central1" | string
 	prefix:   *"infra" | string
+	// A bucket another stack made, which this one only uses under its own prefix: setup fails when it cannot read
+	// the bucket and never creates or changes it.
+	existing: *false | bool
 }
 
 #State: {

@@ -27,7 +27,7 @@ say: {
 		stop:     true
 		cmds: [
 			{do: "use tools.nu [run-mise]; run-mise install"},
-			{do: "use tools.nu [run-mise]; let s = \(_backend); let b = $\"gs://($s.bucket)\"; if (^gcloud storage buckets describe $b | complete).exit_code != 0 { ^gcloud storage buckets create $b --project $s.project --location $s.location --uniform-bucket-level-access --public-access-prevention; ^gcloud storage buckets update $b --versioning }"},
+			{do: "\(_plan); state-bucket \(_backend) --gcloud {|a| ^gcloud ...$a | complete}"},
 			{do: "use tools.nu [run-mise]; mkdir tofu; run-mise exec -- cue export . -e plan.tofu --out json | save -f tofu/main.tf.json"},
 			{do: "\(_tofu) init -input=false }"},
 		]

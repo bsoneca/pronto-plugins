@@ -23,6 +23,31 @@ export def guard-deletes [rc: list, spare: closure] {
 	}
 }
 
+# The bucket OpenTofu keeps its state in, before tofu init. `gcloud` runs one gcloud call (args in, `complete` record
+# out). An existing backend (backend.existing, a bucket another stack made and this one only uses) must answer the
+# lookup, and is never created or changed: any lookup error, not found or denied or offline, stops the verb with
+# gcloud's own words. Otherwise a bucket not there is made (versioned, uniform access, public access prevented); a
+# lookup that fails for any other reason than not found stops it too, rather than going down the creation path.
+export def state-bucket [backend: record, --gcloud: closure] {
+	let b = $"gs://($backend.bucket)"
+	let found = (do $gcloud [storage buckets describe $b])
+	if $found.exit_code == 0 { return }
+	let said = $"($found.stdout)($found.stderr)"
+	if ($backend.existing? | default false) {
+		error make {msg: $"the state bucket ($b) is an existing backend and could not be read, so it is not created: ($said)"}
+	}
+	if not (($said | str contains "NOT_FOUND") or ($said | str contains "404") or ($said | str contains "does not exist")) {
+		error make {msg: $"the state bucket ($b) could not be looked up, so it is not created: ($said)"}
+	}
+	for a in [
+		[storage buckets create $b --project $backend.project --location $backend.location --uniform-bucket-level-access --public-access-prevention]
+		[storage buckets update $b --versioning]
+	] {
+		let r = (do $gcloud $a)
+		if $r.exit_code != 0 { error make {msg: $"gcloud ($a | str join ' ') failed: ($r.stdout)($r.stderr)"} }
+	}
+}
+
 def rm-quiet [f: string] { rm --force $f }
 
 # The operator's gcloud access token, for the state bucket (and gcp's provider): a gcloud that fails stops the verb with
