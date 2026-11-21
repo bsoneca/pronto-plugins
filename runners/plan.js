@@ -259,6 +259,12 @@ const ENVCHECK = [
  * out and the crontab gone, the account's processes are killed (as the account: `kill -KILL -1` as root would kill
  * everything) until none is left, 3 tries; and the daemon must be gone from launchd.
  */
+/**
+ * `_work` and `_diag` ($2, $3) made as root with a plain `mkdir -m 700` (never install -d or -p) where nothing is
+ * there, then each chowned to the account ($0, group $1) with -h. Anything there that is a symlink or not a folder
+ * stops the lock (UNLINK has removed the links); a folder kept from an earlier lock is only chowned.
+ */
+const MAKE = 'u=$0; g=$1; shift; for d; do if [ -L "$d" ]; then echo "$d is a symlink" >&2; exit 1; elif [ ! -e "$d" ]; then mkdir -m 700 "$d" || exit 1; fi; [ -d "$d" ] || { echo "$d is not a folder" >&2; exit 1; }; chown -h "$u:$g" "$d" || exit 1; done';
 const REAP = 'i=0; while pgrep -u "$0" >/dev/null; do [ $i -lt 3 ] || { echo "$0 still has processes" >&2; exit 1; }; i=$((i+1)); sudo -n -u "$0" /bin/kill -KILL -1 || true; sleep 1; done';
 const GONE = '! launchctl print "system/$0" >/dev/null 2>&1 || { echo "system/$0 is still loaded" >&2; exit 1; }';
 
@@ -353,9 +359,8 @@ export function stepCommands(plan, name, step, ctx) {
       // reads .env, .path, .credentials*, bin/; it writes _work and _diag, the account's, mode 700). Nothing of the
       // account runs (quiesce) and the folder is root's, mode 700, before anything in it is looked at; a _work or
       // _diag that is a symlink is removed; the tree must hold the tarball's symlinks and no others, no multiply-linked
-      // file, a .path that is the plan's and a .env that is empty or a LANG. _work and _diag are made by the account
-      // itself (mkdir: it never follows a link, never changes what exists), the folder lent to it for that, and
-      // chowned last.
+      // file, a .path that is the plan's and a .env that is empty or a LANG. _work and _diag are made by root while
+      // the folder is still root's 700 (MAKE), so the folder is never the account's; it is chowned last.
       return [
         ...quiesce(),
         root('chown', '-h', 'root:wheel', r.dir),
@@ -365,8 +370,7 @@ export function stepCommands(plan, name, step, ctx) {
         root('find', ...rest, 'chown', '-h', '-R', `root:${r.group}`, '{}', '+'),
         root('find', ...rest, 'chmod', '-R', 'g+rX,go-w,o-rwx', '{}', '+'),
         root('/bin/sh', '-c', ENVCHECK, r.dir, r.path),
-        root('chown', '-h', `${r.user}:${r.group}`, r.dir),
-        as('mkdir', '-p', '-m', '700', keep, `${r.dir}/_diag`),
+        root('/bin/sh', '-c', MAKE, r.user, r.group, keep, `${r.dir}/_diag`),
         root('chmod', '750', r.dir),
         root('chown', '-h', `root:${r.group}`, r.dir),
       ];

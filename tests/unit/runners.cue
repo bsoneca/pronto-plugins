@@ -243,13 +243,13 @@ cases: {
 		{use: "lock"},
 		{get: "10", matches: "^sudo /bin/sh -c 'cd \"\\$0\"[\\s\\S]*\\.env[\\s\\S]* '/Library/Application Support/pronto-runners/shop-pr/runner' /Users/ci-pr/\\.deno/bin:\\S+$"},
 		{use: "lock"},
-		{get: "11", expect: "sudo chown -h ci-pr:ci-pr '/Library/Application Support/pronto-runners/shop-pr/runner'", why: "lent to the account for its mkdir"},
+		{get: "11", matches: "^sudo /bin/sh -c 'u=\\$0; g=\\$1;.*mkdir -m 700 \"\\$d\".*chown -h \"\\$u:\\$g\" \"\\$d\".*' ci-pr ci-pr '/Library/Application Support/pronto-runners/shop-pr/runner/_work' '/Library/Application Support/pronto-runners/shop-pr/runner/_diag'$", why: "_work and _diag are made by root with a plain mkdir while the folder is root's 700, then chowned"},
 		{use: "lock"},
-		{get: "12", expect: "sudo -u ci-pr -H mkdir -p -m 700 '/Library/Application Support/pronto-runners/shop-pr/runner/_work' '/Library/Application Support/pronto-runners/shop-pr/runner/_diag'", why: "_work and _diag are made by the account, never by root's install -d on a path that might be a link"},
+		{get: "12", expect: "sudo chmod 750 '/Library/Application Support/pronto-runners/shop-pr/runner'"},
 		{use: "lock"},
-		{get: "13", expect: "sudo chmod 750 '/Library/Application Support/pronto-runners/shop-pr/runner'"},
-		{use: "lock"},
-		{get: "14", expect: "sudo chown -h root:ci-pr '/Library/Application Support/pronto-runners/shop-pr/runner'", why: "the folder's final chown is last"},
+		{get: "13", expect: "sudo chown -h root:ci-pr '/Library/Application Support/pronto-runners/shop-pr/runner'", why: "the folder's final chown is last"},
+		{call: "probe.includes", args: ["$lock", "sudo chown -h ci-pr:ci-pr '/Library/Application Support/pronto-runners/shop-pr/runner'"], expect: false, why: "the folder is never the account's in a lock"},
+		{call: "probe.includes", args: ["$lock", "sudo -u ci-pr -H mkdir -p -m 700 '/Library/Application Support/pronto-runners/shop-pr/runner/_work' '/Library/Application Support/pronto-runners/shop-pr/runner/_diag'"], expect: false},
 		{call: "probe.includes", args: ["$lock", "sudo install -d -m 700 -o ci-pr -g ci-pr '/Library/Application Support/pronto-runners/shop-pr/runner/_work'"], expect: false},
 	]}
 	"unlocking quiesces the account, then chowns what is in the folder by name and the folder last, never into _work or _diag": {suite: "runners", steps: [
@@ -353,6 +353,26 @@ cases: {
 		{get: "code", expect: 1, why: "links that each stay inside but escape together are not the tarball's"},
 		{call: "probe.runCommand", args: ["$clean", {bin: find: "exit 1", files: {"runner/bin/x": "x", "links.manifest": ""}, replace: _rnRep}]},
 		{get: "code", expect: 1, why: "a find that fails fails the lock"},
+	]}
+	"the lock makes _work and _diag as root with a plain mkdir and chowns them; a symlink or a file there stops it": {suite: "runners", steps: [
+		{call: "runners.stepCommands", args: [_rnAcc, "shop-pr", "lock", {}]},
+		{map: {get: "argv"}},
+		{get: "11"},
+		{keep: "make"},
+		{call: "probe.runCommand", args: ["$make", {bin: chown: "echo \"$@\" >&2", files: "runner/x": "", replace: _rnMk}]},
+		{keep: "ran"},
+		{get: "code", expect: 0},
+		{use: "ran"},
+		{get: "said", matches: "-h ci-pr:ci-pr \\S+/runner/_work\\s+-h ci-pr:ci-pr \\S+/runner/_diag"},
+		{call: "probe.runCommand", args: ["$make", {bin: chown: "exit 0", files: {"runner/_work/keep": "x"}, replace: _rnMk}]},
+		{get: "code", expect: 0, why: "a folder kept from an earlier lock is only chowned"},
+		{call: "probe.runCommand", args: ["$make", {bin: chown: "exit 0", files: "runner/x": "", links: "runner/_work": "/etc", replace: _rnMk}]},
+		{keep: "ran"},
+		{get: "code", expect: 1},
+		{use: "ran"},
+		{get: "said", matches: "is a symlink"},
+		{call: "probe.runCommand", args: ["$make", {bin: chown: "exit 0", files: "runner/_diag": "x", replace: _rnMk}]},
+		{get: "code", expect: 1, why: "a file where the folder goes"},
 	]}
 	"the manifest is the tarball's symlinks, recorded by root from the checked bytes: an edited tarball records nothing": {suite: "runners", steps: [
 		{call: "runners.stepCommands", args: [_rnAcc, "shop-pr", "install-as", {stage: "/s"}]},
@@ -680,6 +700,7 @@ _rnAcc:    rn.plans["check-accounts"]
 // The lock's folder, and the manifest the install recorded beside it, standing in a scratch folder.
 _rnDir: "/Library/Application Support/pronto-runners/shop-pr/runner"
 _rnRep: {(_rnDir): "@tmp/runner", "/Library/Application Support/pronto-runners/shop-pr/links.manifest": "@tmp/links.manifest"}
+_rnMk: {(_rnDir + "/_work"): "@tmp/runner/_work", (_rnDir + "/_diag"): "@tmp/runner/_diag"}
 _rnEnvRep: {(_rnDir): "@tmp/d"}
 // The runner's own links, as the manifest lists them (sorted).
 _rnLinks: "externals/node20/bin/npm\t../lib/node_modules/npm/bin/npm-cli.js\nexternals/node24/bin/npx\t../../node20/lib/node_modules/npm/bin/npm-cli.js\n"
