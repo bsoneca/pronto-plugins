@@ -1,4 +1,5 @@
 // Small measures the cases read a value through (tests/unit/*.cue).
+import { createHash } from 'node:crypto';
 
 /** Whether a text holds a part. */
 export const includes = (text, part) => String(text ?? '').includes(part);
@@ -89,8 +90,30 @@ export const verifies = (argv, content) => {
 /**
  * A command of plan.js's (run without sudo) with files and scripts made first, as runHook does, and some of
  * its arguments replaced (an argument equal to a key, @tmp being the scratch folder; `fifos` named pipes, `links` symlinks and `hardlinks` hard links made there, `acls` paths given an ACL entry): its exit code, what it said, and whether each replaced path is still there (a symlink counts as itself); `then`, more commands run after it in the same folder, each answering `{code, said}` in `then`.
+ *
+ * A command that needs macOS (mtree, stat -f, chmod -N, chflags, ls -le, an ACL: the runners' scripts are for a Mac's
+ * LaunchDaemons) is run for real on macOS. Off it, as machine.js's owner probe does, the cases check macOS's behaviour
+ * and the probe answers as macOS did: each command's script must still parse (sh -n), and the answer is the one
+ * runners_macos.json recorded (RECORD_MACOS=1 on a Mac writes it; a Mac that finds an answer stale or missing fails).
  */
-export const runCommand = (argv, { bin = {}, files = {}, fifos = [], links = {}, hardlinks = {}, acls = [], then = [], replace = {} } = {}) => {
+const MAC_ONLY = /mtree|stat -f|chmod -[hN]|chmod \+a|chflags|ls -l[deO]+|\.mtree/;
+const macTable = new URL('./runners_macos.json', import.meta.url);
+const darwin = Deno.build.os === 'darwin';
+const asMac = (r) => JSON.parse(JSON.stringify(r).replace(/\/(private\/)?var\/folders\/[^/\s"\\]+\/[^/\s"\\]+\/T\/[^/\s"\\]+/g, '@tmp'));
+const recorded = () => { try { return JSON.parse(Deno.readTextFileSync(macTable)); } catch { return {}; } };
+const scriptsOf = (cmd) => cmd.flatMap((a, i) => (cmd[i - 1] === '-c' && /sh$/.test(cmd[i - 2] ?? '') ? [a] : []));
+export const runCommand = (argv, opts = {}) => {
+  const { bin = {}, files = {}, fifos = [], links = {}, hardlinks = {}, acls = [], then = [], replace = {} } = opts;
+  const needsMac = acls.length > 0 || MAC_ONLY.test(JSON.stringify([argv, then]));
+  const key = createHash('sha256').update(JSON.stringify([argv, opts])).digest('hex').slice(0, 24);
+  if (needsMac && !darwin) {
+    for (const script of [argv, ...then].flatMap(scriptsOf)) {
+      if (!new Deno.Command('/bin/sh', { args: ['-n', '-c', script], stdout: 'null', stderr: 'piped' }).outputSync().success) throw new Error(`a script that does not parse: ${script.slice(0, 80)}`);
+    }
+    const known = recorded()[key];
+    if (!known) throw new Error(`no macOS answer recorded for this command (${key}): run the runners suite on a Mac with RECORD_MACOS=1`);
+    return known;
+  }
   const dir = Deno.makeTempDirSync();
   try {
     Deno.mkdirSync(`${dir}/bin`);
@@ -123,7 +146,20 @@ export const runCommand = (argv, { bin = {}, files = {}, fifos = [], links = {},
     const first = one(argv);
     const after = then.map(one);
     const kept = Object.values(replace).map((v) => { try { Deno.lstatSync(to(v)); return true; } catch { return false; } });
-    return { ...first, kept, then: after };
+    const got = { ...first, kept, then: after };
+    if (needsMac && darwin) {
+      const answer = asMac(JSON.parse(JSON.stringify(got).replaceAll(dir, '@tmp')));
+      if (Deno.env.get('RECORD_MACOS')) {
+        const table = recorded();
+        table[key] = answer;
+        Deno.writeTextFileSync(macTable, JSON.stringify(Object.fromEntries(Object.entries(table).sort()), null, 1) + '\n');
+      } else {
+        const known = recorded()[key];
+        if (JSON.stringify(known) !== JSON.stringify(answer)) throw new Error(`the macOS answer recorded for this command (${key}) is stale or missing: run the runners suite on a Mac with RECORD_MACOS=1`);
+      }
+      return got;
+    }
+    return got;
   } finally {
     Deno.removeSync(dir, { recursive: true });
   }
