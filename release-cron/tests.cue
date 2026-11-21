@@ -156,6 +156,3 @@ causesModule: (_causesFile == _causesJS && _t.files["release-cron/causes.js"].te
 // The outcome names are fixed (records on disk carry them) and closed like the causes.
 outcomeNames: _defaults.outcomes & {released: "released", failed: "failed", skipped: "skipped", dry: "dry", bisect: "bisect", stopped: "stopped", closed: "closed", held: "held", abandoned: "abandoned", heldRefused: "held-refused", heldBackport: "held-backport", cleared: "cleared"}
 noNewOutcome: [if (#Cron & {watch: ["x"], probes: {}, outcomes: other: "x"}) == _|_ {"refused"}, "accepted"][0] & "refused"
-// A preview's `up` may run on 120 minutes after a signal unless the app says otherwise.
-_pv: #Cron & {watch: ["x"], probes: {}, target: {release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example", preview: {up: ["./u"], reach: ["./r"], down: ["./d"]}}}
-upMinutesDefault: _pv.target.preview.upMinutes & 120
