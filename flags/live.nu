@@ -625,13 +625,14 @@ def wait-ofrep [at: record, want: list<record>]: nothing -> bool {
 # no verdict ran nothing (cached, or every scenario skipped); one whose verdict says the flipped flag's steps
 # were skipped saw the flag off, so the door never served the new value. A runner that prints
 # `; <n> steps run, <m> skipped` counts them: none run is nothing shown.
+# `flag` "" skips the skipped-flag check (the verdict and step-count checks stay).
 def vacuous [out: string, flag: string]: nothing -> string {
 	let verdicts = ($out | lines | where {|l| $l | str starts-with "✓ " })
 	if ($verdicts | is-empty) { return "the runner printed no passed scenario, so no step ran" }
 	for l in $verdicts {
 		let id = ($l | str replace -r '^✓ (\S+).*$' '$1')
 		let off = ($l | parse -r 'steps behind (?<fl>.+?) skipped, off here' | get -o 0.fl | default "" | split row "," | each {|f| $f | str trim })
-		if $flag in $off { return $"($id) skipped its steps behind ($flag): the site still evaluates it off" }
+		if $flag != "" and $flag in $off { return $"($id) skipped its steps behind ($flag): the site still evaluates it off" }
 		let n = ($l | parse -r '(?<run>\d+) steps run, (?<skip>\d+) skipped' | get -o 0)
 		if $n != null and ($n.run | into int) == 0 { return $"($id) ran no step \(($n.skip) skipped\)" }
 	}
@@ -742,7 +743,10 @@ def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: rec
 			print $"flags: ($c.flag): running its production cases \(($c.production | str join ', ')\)"
 			let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site})
 			if not $r.ok { error make {msg: $"($c.flag)'s production cases failed:\n($r.out)"} }
-			let empty = (vacuous $r.out $c.flag)
+			# The skipped-flag check is for a flag now on for everyone: with accounts only, or turned off, the runner
+			# legitimately skips the steps behind it.
+			let on_for_all = ((default-of ($doc.flags | get $c.flag)) == true)
+			let empty = (vacuous $r.out (if $on_for_all { $c.flag } else { "" }))
 			if $empty != "" { error make {msg: $"($c.flag)'s production cases showed nothing: ($empty)"} }
 		}
 		write-flags $at $doc $app --meta ($meta | insert cases passed) --from $v | ignore
@@ -980,6 +984,9 @@ def armies-live [app: path, at: record, have: list<record>, changed: list<record
 			print $"armies: ($names | str join ', ') is in everyone's page; running its production cases \(($c.production | str join ', ')\)"
 			let r = (run-cases $app $cmds.live {FLAG: $at.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site})
 			if not $r.ok { error make {msg: $"($at.flag)'s production cases failed:\n($r.out)"} }
+			# A push of rows does not move the flag, so only the verdict checks apply.
+			let empty = (vacuous $r.out "")
+			if $empty != "" { error make {msg: $"($at.flag)'s production cases showed nothing: ($empty)"} }
 			army-journal $app $at all $names passed $note
 		}
 	} catch {|e|

@@ -31,7 +31,7 @@ armiesLive: {
 	($livepart)
 }
 flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", url: \"https://shop.example\"}
-flagsCases: live: \"echo live $FLAG $ONLY $APP_URL ${FLAGS_TESTER:-} >> ran.log; test ! -f fail-live\"
+flagsCases: live: \"echo live $FLAG $ONLY $APP_URL ${FLAGS_TESTER:-} >> ran.log; test ! -f fail-live && echo '✓ buy 1s: shop'\"
 " | save -f $"($app)/flags_spec.cue"
 }
 def livex [args: list<string>, extra: record = {}] {

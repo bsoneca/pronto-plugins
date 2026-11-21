@@ -87,8 +87,10 @@ A flip therefore needs a test of its own, and it must be:
    - After each flag's cases, the output is read (`vacuous` in `flags/live.nu`). It is refused,
      and rolled back like a failed case, when it holds no `✓ <scenario>` verdict, when a verdict
      names the flipped flag in `steps behind <flags> skipped, off here` (Bonk Chess's runner
-     prints it), or when a verdict counts `0 steps run`.
-   - Studio's runner prints no skipped-steps clause, and none prints how many steps ran: proposed, one more clause on
+     prints it), or when a verdict counts `0 steps run`. The skipped-flag check applies only to a flag whose
+     new anonymous value is true: with accounts only, or turned off, the runner skips its steps
+     legitimately. The armies' push (rows, not the flag's value) gets the verdict checks alone.
+   - No runner prints how many steps ran: proposed, one more clause on
      each `✓` line, `; <n> steps run, <m> skipped`, a separate pronto change. Until then the
      guard rests on the skipped-flag clause and on the missing verdict.
    - There is still no tester stage (decision 2).
