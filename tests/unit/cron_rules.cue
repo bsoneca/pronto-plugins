@@ -237,6 +237,16 @@ cases: {
 		{call: "cron.backportPlan", args: [[], false, null], expect: ["delete-branch"]},
 		{call: "cron.limitPlan", args: [null], expect: ["close-hold", "drop-branch", "end-abandoned"]},
 	]}
+	"abandon drops a hold that never shipped, and keeps a shipped one's backport hold": {suite: "cron", steps: [
+		{call: "cron.abandonPlan", args: [{branch: "release/a/1"}, null, [], null], expect: {shipped: false, closeHold: true, dropBranch: true, removeRecord: false, why: ""}, why: "never shipped: the hold and its branch go"},
+		{call: "cron.abandonPlan", args: [{branch: "release/a/2"}, {branch: "release/a/1"}, null, null], expect: {shipped: false, closeHold: true, dropBranch: true, removeRecord: false, why: ""}, why: "the record is another branch's: untouched"},
+		{call: "cron.abandonPlan", args: [{branch: "release/a/1"}, {branch: "release/a/1"}, [{sha: "c"}], null], expect: {shipped: true, closeHold: true, dropBranch: false, removeRecord: false, why: "commits released from it are still missing from main"}, why: "shipped, a fix not on main: hold closed, record and branch kept"},
+		{call: "cron.abandonPlan", args: [null, {branch: "release/a/1"}, [{sha: "c"}], null], expect: {shipped: true, closeHold: false, dropBranch: false, removeRecord: false, why: "commits released from it are still missing from main"}, why: "no hold, a fix missing: the record stays"},
+		{call: "cron.abandonPlan", args: [null, {branch: "release/a/1"}, null, null], expect: {shipped: true, closeHold: false, dropBranch: false, removeRecord: false, why: "the commits missing from main could not be read"}, why: "unreadable: kept"},
+		{call: "cron.abandonPlan", args: [null, {branch: "release/a/1"}, [], false], expect: {shipped: true, closeHold: false, dropBranch: false, removeRecord: false, why: "it moved since its release"}, why: "the branch moved: kept"},
+		{call: "cron.abandonPlan", args: [null, {branch: "release/a/1"}, [], "unknown"], expect: {shipped: true, closeHold: false, dropBranch: false, removeRecord: false, why: "origin could not be asked"}},
+		{call: "cron.abandonPlan", args: [null, {branch: "release/a/1"}, [], true], expect: {shipped: true, closeHold: false, dropBranch: false, removeRecord: true, why: ""}, why: "every commit on main and the branch gone: the record goes"},
+	]}
 	"a held tip confirms itself by the trusted checkout's probes and serving command": {suite: "cron", steps: [
 		{call: "cron.heldConfig", args: [{gap: 60, ready: ["a"], probes: {home: {path: "/evil"}}, target: {kind: "command", release: ["./rel"], serving: ["./evil-serving"], origin: "https://evil"}}, {ready: ["b"], probes: {home: {path: "/"}}, target: {kind: "command", release: ["x"], serving: ["ssh", "node", "serving"], origin: "https://app"}}], expect: {gap: 60, ready: ["b"], probes: {home: {path: "/"}}, target: {kind: "command", release: ["./rel"], serving: ["ssh", "node", "serving"], origin: "https://app"}}, why: "the candidate's release command still runs; what says it landed is the trusted one's"},
 		{call: "cron.heldConfig", args: [{ready: ["a"], probes: {}, target: {kind: "cloud-run"}}, {probes: {p: {path: "/"}}, target: {kind: "cloud-run"}}], expect: {ready: ["a"], probes: {p: {path: "/"}}, target: {kind: "cloud-run"}}},

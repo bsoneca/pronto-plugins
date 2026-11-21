@@ -318,7 +318,7 @@ Guards, each so a branch cannot lose or smuggle a change:
   A branch is deleted only as the tip that was checked: the push carries `--force-with-lease=refs/heads/<branch>:<checked sha>` with a
   delete refspec. If the branch moved since (a push nothing checked), the lease fails, the branch and its `released-branch` record are
   kept, and the new tip is told.
-  `abandon` with no release held but a branch waiting on main (held-backport) clears it, logging which commits were still missing.
+  `abandon` with no release held but a branch waiting on main (held-backport) clears it only once every commit is on main and the branch is gone; else it logs which commits are still missing and keeps the record (`abandonPlan`). A hold whose branch already shipped is closed the same way, its record kept. The rehearsal's `REHEARSE_LIVE` is the serving commit read as the rehearsal starts, and `REHEARSE_COMMIT` the commit it rehearses (`rehearsalBase`).
 - **A held tip already serving.** When the held branch's tip is what production serves (its release landed and its confirmation never
   did), the run resumes at confirmation, without rehearsing or releasing again; once confirmed it writes the `released-branch` record
   and closes the hold, in place of ending `skipped` with the hold left open. A held tip confirms itself by the trusted checkout's probes,

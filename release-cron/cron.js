@@ -382,11 +382,17 @@ export const evidenceOf = (rehearsals, strict = false) => strict || rehearsals.s
 // Whether an app's configured rehearsal (releaseCron.rehearsal.command) runs in release mode, which tags its records:
 // then only its tagged records are evidence, whatever the history holds.
 // The rehearsal child's env: REHEARSE_LIVE names the commit that serves when the app's target is a command
-// (its release leaves no release record for the classifier to read); any inherited one is dropped first.
-export const rehearsalEnv = (env, live, isCommandTarget) => {
-  const { REHEARSE_LIVE: _, ...rest } = env;
-  return isCommandTarget && live ? { ...rest, REHEARSE_LIVE: live } : rest;
+// (its release leaves no release record for the classifier to read), REHEARSE_COMMIT the commit the rehearsal runs on;
+// any inherited one is dropped first, so the child never reads a value another run left.
+export const rehearsalEnv = (env, live, isCommandTarget, rehearsed) => {
+  const { REHEARSE_LIVE: _, REHEARSE_COMMIT: __, ...rest } = env;
+  return { ...rest, ...(isCommandTarget && live ? { REHEARSE_LIVE: live } : {}), ...(rehearsed ? { REHEARSE_COMMIT: rehearsed } : {}) };
 };
+// The commit the rehearsal's classifier takes as production's baseline: the serving commit read as the rehearsal starts (`read`, a
+// commit that resolved, else null), never the one read at the run's start (`earlier`): a preview beside it or a wait for the slot
+// leaves time for another release to land. An unread one is unknown (null, REHEARSE_LIVE omitted), not the stale one. `moved`:
+// production changed since the run began. `rehearsed` is the commit the run goes on to rehearse and release.
+export const rehearsalBase = (read, earlier, head) => ({ live: read || null, rehearsed: head, moved: !!read && !!earlier && read !== earlier });
 export const releaseModes = (command) => (command ?? []).includes("REHEARSE_RELEASE=1");
 export const verdict = (commit, sig, ev) => {
   const rehearsals = evidenceOf(ev.rehearsals ?? [], !!ev.strict), releases = ev.releases ?? [], ledger = ev.ledger ?? [];
@@ -722,6 +728,20 @@ export const backportPlan = (missing, told, dry) => missing.length
   : dry ? ["report-delete"] : ["delete-branch"];
 // A held release past its limits: given up, or, dry, reported.
 export const limitPlan = (dry) => dry ? ["report-abandon"] : ["close-hold", "drop-branch", "end-abandoned"];
+
+// `abandon`: what it does to the hold (`open`, {branch} or null) and the record of a branch already released (`released`,
+// {branch} or null), after the checks of a released branch (`missing`: the commits not on main, null when they could not be read;
+// `gone`: the branch deleted from origin, false it moved, "unknown" origin could not be asked, null not tried). A hold whose branch
+// shipped (the record names it) keeps the record, and its backport hold with it, until every commit is on main and the branch is
+// gone; only a hold that never shipped is dropped, with its branch.
+export const abandonPlan = (open, released, missing, gone) => {
+  const shipped = !!released && (!open || released.branch === open.branch);
+  if (!shipped) return { shipped, closeHold: !!open, dropBranch: !!open, removeRecord: false, why: "" };
+  const why = missing === null ? "the commits missing from main could not be read"
+    : missing.length ? "commits released from it are still missing from main"
+    : gone === false ? "it moved since its release" : gone === "unknown" ? "origin could not be asked" : "";
+  return { shipped, closeHold: !!open, dropBranch: false, removeRecord: !why, why };
+};
 
 // `abandon` with an `open` file that cannot be read: it reports which file and why, and removes it only with --force.
 export const corruptOpen = (path, why, force) => force
