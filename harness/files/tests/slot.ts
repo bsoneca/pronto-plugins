@@ -1269,11 +1269,21 @@ const gate = (app: string) => {
     return { ok: r.success, text: new TextDecoder().decode(r.stdout).trim() };
   };
   const pronto = async () => (await out("mise", ["where", "github:bonisoft3/pronto"])).text;
-  const keyOf = async (verb: string, key?: string) => out("mise", ["x", "--", "nu", `${await pronto()}/gcp/local-gate-key.nu`, verb, app, ...(key ? [key] : [])]);
+  // The ledger and the secrets check are the GCP release's, from a runtime that carries gcp/ (the forks'); upstream's has
+  // none, and the gate then holds no ledger (a pass is not recorded) and reads no secrets.
+  const fromRuntime = async (file: string) => { const dir = await pronto(); return dir !== "" && await Deno.stat(`${dir}/${file}`).then(() => true, () => false) ? `${dir}/${file}` : ""; };
+  const keyOf = async (verb: string, key?: string) => {
+    const file = await fromRuntime("gcp/local-gate-key.nu");
+    return file === "" ? { ok: false, text: "" } : out("mise", ["x", "--", "nu", file, verb, app, ...(key ? [key] : [])]);
+  };
   return {
     mode,
     // An app with a GCP release plan reads secrets by name: a missing one fails here, not in release@gcp.
-    secrets: async () => (await new Deno.Command("sh", { args: ["-c", 'exec "$@"', "sh", "mise", "x", "--", "nu", `${await pronto()}/gcp/secrets.nu`, "check", app, "--if-gcp"], cwd: app, env, stdout: "inherit", stderr: "inherit" }).output()).success,
+    secrets: async () => {
+      const file = await fromRuntime("gcp/secrets.nu");
+      if (file === "") return true;
+      return (await new Deno.Command("sh", { args: ["-c", 'exec "$@"', "sh", "mise", "x", "--", "nu", file, "check", app, "--if-gcp"], cwd: app, env, stdout: "inherit", stderr: "inherit" }).output()).success;
+    },
     key: async () => { const r = await keyOf("key"); return r.ok ? r.text : ""; },
     stamp: async (key: string) => (await keyOf("stamp", key)).ok,
     // The stack's database is the last release's, carried forward as the release carries it: the slot's
@@ -1283,7 +1293,8 @@ const gate = (app: string) => {
       // slot.ts outside a `mise exec`, so the app's toolchain (cue) is put on PATH here.
       const cue = (await out("mise", ["which", "cue"])).text;
       Deno.env.set("PATH", `${cue ? cue.slice(0, cue.lastIndexOf("/")) + ":" : ""}${misePath()}`);
-      const { prepare: upgrade } = await import(`${await pronto()}/upgrade-from-released.ts`);
+      // The runtime's own where it has one (the forks'), else the copy every app holds (tests/gate/).
+      const { prepare: upgrade } = await import(await fromRuntime("upgrade-from-released.ts") || new URL("./gate/upgrade-from-released.ts", import.meta.url).href);
       const r = await upgrade(copy, app, tmp);
       if ("skip" in r) { console.error(`integrate@local: NOT TESTING THE UPGRADE FROM THE LAST RELEASE: ${r.skip}; the database is built fresh`); return; }
       console.error(`integrate@local: upgrade from the last release: ${r.note}`);
