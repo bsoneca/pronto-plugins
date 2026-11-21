@@ -140,9 +140,15 @@ jobs:
   parent, so it can neither rename nor replace it. The folder is `root:<group>` mode 750, readable by the
   account's own group alone (`.credentials*` included), and root's but `_work` and `_diag`, which are the
   account's, mode 700. The runner is registered with `--disableupdate`, as the account while the folder is
-  its own (`install-as`, `register-as`), then `lock`ed, with its daemon unloaded for both the lock and
-  the unlock (chowns never follow a symlink, never enter `_work` or `_diag`, and a lock stops at an absolute symlink, a symlink that leaves
-  the folder, or a multiply-linked file outside them; the runner's own relative links into `externals/` are fine). The runner's tarball is copied to a root-only file, checked
+  its own (`install-as`, `register-as`), then `lock`ed. Before the lock or the unlock changes who owns the
+  folder, the account is quiesced: its daemon booted out and proven gone from launchd, its crontab removed, and
+  its processes killed (as the account, three tries) until it has none, so nothing it left behind (a setsid, a
+  double fork) races the chowns. An unlock chowns the subtree and then the folder; a lock makes the folder
+  `root:wheel` 700 first, refuses (fails closed) anything but the tarball's own symlinks (`links.manifest`, beside
+  the folder, recorded by root at install from the checked tarball: the same (path, target) pairs, none with a tab
+  or a newline, none into `_work` or `_diag`), a multiply-linked file, a `.path` that is not the plan's or a `.env`
+  that is more than a `LANG`, makes `_work` and `_diag` as the account with `mkdir`, and chowns the folder to
+  `root:<group>` last (chowns never follow a symlink and never enter `_work` or `_diag`). The runner's tarball is copied to a root-only file, checked
   there against the pinned sha256 and only then extracted as the account. Logs are under
   `/Library/Logs/pronto-runners/<label>/` (root's; launchd makes the files), and a
   root-owned `job-started.sh` in `/Library/Application Support/pronto-runners/<name>/` runs before every
