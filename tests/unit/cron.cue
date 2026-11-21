@@ -405,4 +405,24 @@ cases: {
 		{call: "cron.signature", args: ["$why", "FAIL  sealed  12.3 s  nothing matches #board2d"], holds: {kind: "android", names: ["sealed"]}, why: "the driver's own why is read back as the android kind"},
 		{call: "cron.undecidable", args: [{kind: "android", names: ["sealed"]}, "", [], 0, 18], expect: "the android step runs on an emulator, which the bisect's check (integrate@local) does not: not bisected"},
 	]}
+	"a signal gives the lock back only after the children are gone and the preview beside has torn down, each bounded": {suite: "cron", steps: [
+		{call: "cron.signalStep", args: [true, 1, 1000, 60000, 300000], expect: "wait", why: "children still within their grace"},
+		{call: "cron.signalStep", args: [true, 1, 60000, 60000, 300000], expect: "kill", why: "their grace is over"},
+		{call: "cron.signalStep", args: [false, 1, 61000, 60000, 300000], expect: "wait", why: "the children are gone but the preview's down still runs: the lock is held"},
+		{call: "cron.signalStep", args: [false, 0, 61000, 60000, 300000], expect: "done", why: "down finished: the lock goes"},
+		{call: "cron.signalStep", args: [false, 0, 0, 60000, 300000], expect: "done", why: "nothing was running"},
+		{call: "cron.signalStep", args: [false, 1, 360000, 60000, 300000], expect: "done", why: "a down that never ends is waited for a bounded time"},
+	]}
+	"a branch's remote lookup that fails is an error, only a clean empty answer is no branch": {suite: "cron", steps: [
+		{call: "cron.branchTip", args: [true, "abc123\trefs/heads/release/x/1", ""], expect: {tip: "abc123", error: null}},
+		{call: "cron.branchTip", args: [true, "", ""], expect: {tip: null, error: null}, why: "ls-remote ran and found no such ref"},
+		{call: "cron.branchTip", args: [false, "", "fatal: unable to access origin: Could not resolve host\nhint"], expect: {tip: null, error: "fatal: unable to access origin: Could not resolve host"}, why: "a failed lookup is not an absent branch"},
+		{call: "cron.branchTip", args: [false, "", ""], expect: {tip: null, error: "no output"}},
+	]}
+	"the serving command is read again only after an ssh transport failure": {suite: "cron", steps: [
+		{call: "cron.servingRetryable", args: [255], expect: true, why: "ssh's own failure, the case the retry exists for"},
+		{call: "cron.servingRetryable", args: [1], expect: false, why: "the command ran and failed: said at once"},
+		{call: "cron.servingRetryable", args: [127], expect: false},
+		{call: "cron.servingRetryable", args: [142], expect: false, why: "killed by the alarm"},
+	]}
 }

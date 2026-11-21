@@ -711,3 +711,20 @@ export const limitPlan = (dry) => dry ? ["report-abandon"] : ["close-hold", "dro
 export const corruptOpen = (path, why, force) => force
   ? { remove: true, text: `${path} could not be read (${why}): removed by --force` }
   : { remove: false, text: `${path} could not be read (${why}): delete that file by hand, or run \`abandon --force\` to remove it` };
+
+// A branch's tip from `git ls-remote origin refs/heads/<branch>`: only a clean answer with no line is "not found" (tip null); a
+// lookup that failed (a network, auth or git error) is an `error`, never "no branch".
+export const branchTip = (ok, out, err) => ok
+  ? { tip: (out ?? "").split(/\s/)[0] || null, error: null }
+  : { tip: null, error: ((err || out || "no output").split("\n")[0]) };
+
+// A signal's wait, each tick: "kill" the children still alive once their grace is over, "done" when the children are gone and no
+// preview is left to tear down (`previews`), or when `grace` + `teardown` ms have passed (bounded), else "wait". The lock goes at "done".
+export const signalStep = (childrenAlive, previews, elapsed, grace, teardown) =>
+  elapsed >= grace + teardown ? "done"
+  : !childrenAlive && previews === 0 ? "done"
+  : childrenAlive && elapsed >= grace ? "kill"
+  : "wait";
+
+// Only an ssh transport failure (exit 255) is worth reading the serving command again: any other failure says what is wrong.
+export const servingRetryable = (code) => sshDropped(code);
