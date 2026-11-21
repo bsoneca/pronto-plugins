@@ -290,15 +290,38 @@ Guards, each so a branch cannot lose or smuggle a change:
   past the cut, merge commits too, must have come by a merged pull request into that branch (`gh api repos/<slug>/commits/<sha>/pulls`: `merged_at` set,
   `base.ref` the branch). A tip that fails this is refused: logged and told as `held-refused`, no attempt, not run again until
   another tip is pushed (a pull-request read that fails is tried again next wake). A branch ruleset is the other half.
+  The tip is judged **before it is checked out or trusted**: by the running script's own code, from git objects and GitHub's records,
+  at the commit id read once (`origin/<branch>`), and the refusal's notify settings are the trusted checkout's. Only a tip that passes
+  is checked out into the run's worktree (at that commit id), where its `.mise.toml` is trusted and its config read. A refused tip is
+  never checked out, so the worktree the scheduler's job runs the script from stays where it was and the next wake cannot run the
+  refused tip's script.
 - **No migrations.** A tip whose cut..tip changes a file under the app's `services/database/migrations/` is refused the same way:
-  migrations go to main only.
+  migrations go to main only. The change is listed with `git diff --no-renames --name-only`, so a migration moved out of the folder is
+  caught by its old path.
 - **Nothing lost.** Every commit on a release branch must be cherry-picked to main (`git cherry-pick -x`), or an equal patch (`git patch-id --stable`) must be there, or, as bsoneca/pronto's ledger counts it, a main commit's message says
-  `Backport-of: #n` for a branch commit whose subject ends `(#n)`.
+  `Backport-of: #n` for a branch commit whose subject ends `(#n)`. A merge commit on the branch counts too, by what its conflict
+  resolution changed (`git show --cc`, as the ledger's script does): a resolution that changed code is a fix with no commit of its own, missing
+  until it is carried to main by hand. One rule (`missingFromMain`) answers both a release's authorization and a branch's deletion, and
+  both compare at commit ids (the branch's tip and the commit main is compared at), never at refs that move: a release checks against
+  the commit it is about to deploy.
   After a branch releases, the next run that would release main first checks that every non-merge commit of the branch since the merge
   base has its counterpart on main; else it ends `held-backport <branch>` (no release, no gap used; told once per set of
   missing commits) and tries again next wake (a git or fetch failure in the check ends the run `skipped`, not `failed`). When all are there it deletes the branch from origin. An abandoned branch is deleted the
   same way only when everything on it past the cut is on main; otherwise it stays and the lead is told which commits need a cherry-pick.
+  A branch is deleted only as the tip that was checked: the push carries `--force-with-lease=refs/heads/<branch>:<checked sha>` with a
+  delete refspec. If the branch moved since (a push nothing checked), the lease fails, the branch and its `released-branch` record are
+  kept, and the new tip is told.
   `abandon` with no release held but a branch waiting on main (held-backport) clears it, logging which commits were still missing.
+- **A held tip already serving.** When the held branch's tip is what production serves (its release landed and its confirmation never
+  did), the run resumes at confirmation, without rehearsing or releasing again; once confirmed it writes the `released-branch` record
+  and closes the hold, in place of ending `skipped` with the hold left open.
+- **`RELEASE_CRON_DRY` is read first.** Any value makes the run a dry one before it decides anything: it deletes no branch, abandons or
+  closes no hold, writes no marker (`refused`, `backport-told`, `flags-released`), records no flags and tells nobody; it says what it
+  would have done (`RELEASE_CRON_DRY: would ...`).
+- **An unreadable record stops the run.** `open` and `released-branch` are absent only when the file is not there
+  (`Deno.errors.NotFound`); a parse or I/O error stops the run with the error, never reading as nothing held.
+- **Branches off change nothing.** With `branches.enabled: false` there is no `open` or `released-branch`, and every rule above reduces to
+  what it was (`missingFromMain` without merges is `backported`; `heldLanded` is false without a held release).
 - **While a release is held, main does not release.** A fix merged to main waits until the branch closes (released or abandoned);
   the held notice says so, and `release-cron.ts <app> abandon` is how the lead lets main release again.
 - **`RELEASE_CRON_REF`** is refused while a release is held, unless it names the held branch, which then runs as any held run (it

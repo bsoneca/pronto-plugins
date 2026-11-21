@@ -635,3 +635,44 @@ export const heldWait = (lastTip, tip, now, at, gap) => !!tip && tip === lastTip
 
 // What the lead is told when a fix merged to main waits on a held release.
 export const heldNotice = (branch) => `fixes merged to main do not release until ${branch} closes: \`abandon\` releases main again`;
+
+// --- Release branches, the safety of their path (PRONTO-1099, 1100, 1101). ---
+
+// A full commit id: what a check against main or a branch is made with. A ref (origin/main) is re-fetched and moves under a run, a sha
+// does not, so the comparison and the deletion that follow it name the same commits.
+export const isSha = (s) => /^[0-9a-f]{40}$/.test(s ?? "");
+
+// The branch's commits main holds no counterpart of (backported) and the merges whose conflict resolution changed code, the ledger's rule
+// (bsoneca/pronto's .github/release-ledger.sh: a merge carries only what `git show --cc` prints, and a resolution that changed anything
+// is a fix of its own, to be carried to main by hand). `merges`: [{sha, subject, cc}] for each merge commit of merge base..tip, `cc` the
+// output of `git show --cc --format= <sha>`. The one answer both a release's authorization and a branch's deletion read.
+export const missingFromMain = (branch, main, merges = []) => [
+  ...merges.filter((m) => (m.cc ?? "").trim() !== "").map((m) => ({ sha: m.sha, body: `${m.subject ?? ""} (a merge whose resolution changed code: carry it to main by hand)` })),
+  ...backported(branch, main),
+];
+
+// The diff of a held branch's change, as git is asked: no rename detection, so a migration moved out of the migrations folder lists
+// both its paths and migrationFiles sees the old one.
+export const heldDiffArgs = (base, head) => ["diff", "--no-renames", "--name-only", base, head];
+
+// A branch deleted from origin only when it is still the tip that was checked: the push's arguments (an explicit lease on that sha, and
+// a delete refspec). A branch pushed to since the check fails the lease and stays.
+export const leaseDelete = (branch, tip) => [`--force-with-lease=refs/heads/${branch}:${tip}`, "origin", `:refs/heads/${branch}`];
+
+// What a failed lease means: `now` is the remote's tip read after the failure (null: the branch is gone). A gone branch is deleted as
+// well; a moved one is kept, with its new tip said, and so is the record that tracks it.
+export const leaseLost = (branch, verified, now) => !now
+  ? { deleted: true, why: `${branch} was already gone from origin` }
+  : { deleted: false, tip: now, why: now === verified ? `${branch} was not deleted: the push failed with the tip unchanged at ${verified.slice(0, 8)}` : `${branch} was kept: its tip moved from the checked ${verified.slice(0, 8)} to ${now.slice(0, 8)}, which nothing checked` };
+
+// A held branch whose tip is already what production serves (`live`, as the run reads it): the release landed and its confirmation never did
+// (a run that died, a probe that failed after the deploy). The run resumes at confirmation, not skips as main's own serving commit does.
+export const heldLanded = (open, live, head) => !!open && !!head && live === head;
+
+// RELEASE_CRON_DRY: any value makes the run a rehearsal of its decisions. A dry run deletes no branch, closes no hold, writes no marker
+// (refused, backport-told, flags-released) and tells nobody; it says what it would have done (dryWould).
+export const mutates = (dry) => !dry;
+export const dryWould = (what) => `RELEASE_CRON_DRY: would ${what}; nothing was changed`;
+
+// What the lead is told when a held branch's new tip is refused.
+export const refusal = (app, branch, sha, why) => `release-cron (${app}) refused ${branch} at ${sha.slice(0, 8)}: ${why}. Nothing was rehearsed and no attempt counted; push a tip that is only merged pull requests into the branch.`;
