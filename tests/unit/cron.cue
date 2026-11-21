@@ -55,6 +55,10 @@ cases: {
 		{call: "cron.landed", args: [255, "f203025f", "f203025f", false], expect: false, why: "the node's HEAD already names the commit; the old pods still serve"},
 		{call: "cron.landed", args: [255, "f203025f", "f203025f"], expect: false},
 	]}
+	"only a run that is not dry records or changes anything (the flags record, skips' notes)": {suite: "cron", steps: [
+		{call: "cron.mutates", args: [""], expect: true},
+		{call: "cron.mutates", args: ["1"], expect: false},
+	]}
 	"only a run that released or failed makes the next one wait": {suite: "cron", steps: [
 		{call: "cron.spaced", args: ["released"], expect: true},
 		{call: "cron.spaced", args: ["failed"], expect: true},
