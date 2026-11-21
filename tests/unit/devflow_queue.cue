@@ -44,6 +44,30 @@ cases: {
 			{seq: 2, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"},
 		]}, "engineer", 1]}, {pick: ["started", "writes"], expect: [["waits"], []], why: "the one engineer slot is busy"},
 	]}
+	"the engineer lane keeps its reserved slots for features, and the feature lane pulls only a feature": {suite: "devflow", steps: [
+		{call: "queue.pulls", args: [{team: {engineers: 3, sre: 1, architect: 1, product: 1, featureEngineers: 1}, issues: [
+			{seq: 1, state: "Implementing", module: "aprende"},
+			{seq: 2, state: "Implementing", module: "aprende"},
+			{seq: 3, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"},
+			{seq: 4, state: "Ready", module: "aprende", feature: true, ready: "2026-11-11T10:00:00Z"},
+		]}, "engineer", 1]}, {pick: ["started"], expect: [["ACME-4"]], why: "the engineer lane passes the older bug-or-chore issue, whose slot is kept for features, and takes the feature"},
+		{call: "queue.pulls", args: [{team: {engineers: 3, sre: 1, architect: 1, product: 1, featureEngineers: 1}, issues: [
+			{seq: 1, state: "Implementing", module: "aprende"},
+			{seq: 2, state: "Implementing", module: "aprende"},
+			{seq: 3, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"},
+			{seq: 9, state: "Backlog", module: "aprende", feature: true},
+		]}, "engineer", 1]}, {pick: ["started", "writes"], expect: [["waits"], []], why: "no feature is Ready: the last slot stays free for one (a feature in the Backlog gives the board its label)"},
+		{call: "queue.pulls", args: [{issues: [
+			{seq: 3, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"},
+			{seq: 4, state: "Ready", module: "aprende", feature: true, ready: "2026-11-11T10:00:00Z"},
+		]}, "feature", 1]}, {pick: ["started"], expect: [["ACME-4"]], why: "the older issue is not a feature"},
+	]}
+	"a team of one engineer never reserves its only slot for features": {suite: "devflow", steps: [
+		{call: "queue.pulls", args: [{team: {engineers: 1, sre: 1, architect: 1, product: 1}, issues: [
+			{seq: 3, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"},
+			{seq: 9, state: "Backlog", module: "aprende", feature: true},
+		]}, "engineer", 1]}, {pick: ["started"], expect: [["ACME-3"]], why: "three reserved of one engineer is none: a bug or chore still starts"},
+	]}
 	"status lists each lane's queue in pull order with ages, and flags what starves": {suite: "devflow", steps: [
 		{call: "queue.statusRuns", args: [{now: "2026-11-17T15:00:00Z", starvingDays: 3, issues: [
 			{seq: 1, name: "busy", state: "Implementing", module: "aprende"},

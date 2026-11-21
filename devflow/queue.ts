@@ -4,7 +4,7 @@
 // (engineer, SRE, architect) pulls the first of its own. There are no sprints. board.ts parses the
 // arguments, prints and exits; the rules are flow.js's.
 import { type Board, esc, type Issue, type State } from "./board/board.ts";
-import { ageOf, bugPlace, dayOf, claimText, claimWinner, jumps, laneOf, mayStart, mergedByDay, nameOf, priorityOf, pullOrder, readySince, roleOf, staleOf, stuckLine, stuckOf, waitsRelease } from "./flow.js";
+import { featureOf, ageOf, bugPlace, dayOf, claimText, claimWinner, jumps, laneOf, mayStart, mergedByDay, nameOf, priorityOf, pullOrder, readySince, roleOf, staleOf, stuckLine, stuckOf, waitsRelease } from "./flow.js";
 import type { DevFlow, Role } from "./spec.ts";
 import { inboxStatus, suggestionLines } from "./suggestions.ts";
 
@@ -30,6 +30,10 @@ export interface Ctx {
   slots: Record<string, number>;
   priorities: Record<string, string>;
   bugLabel: string | null;
+  /** The id of the feature label, when the board has it. */
+  featureLabel: string | null;
+  /** The engineer slots only feature issues take: the flow's, as many as the engineers at most, none while the board has no feature label. */
+  reserved: number;
   /** The id of the label of a flip issue waiting for a release (flow.waitLabel), when the board has it. */
   waitLabel: string | null;
   /** Whether the modules and labels were read (a lane and a bug label need them). */
@@ -51,6 +55,7 @@ export async function contextOf(board: Board, flow: DevFlow, project: string, la
   ]);
   const stateName = (id: string) => states.find((s) => s.id === id)?.name ?? "?";
   const stateId = (n: string) => states.find((s) => s.name === n)?.id ?? (() => { throw new Error(`no state ${n}: run bin/pronto connect plane`); })();
+  const featureLabel = labels.find((l) => l.name === flow.featureLabel)?.id ?? null;
   return {
     flow,
     project,
@@ -58,6 +63,9 @@ export async function contextOf(board: Board, flow: DevFlow, project: string, la
     slots: { engineer: flow.team.engineers, SRE: flow.team.sre, architect: flow.team.architect },
     priorities: Object.fromEntries(Object.entries(flow.priorities).map(([p, v]) => [p, v.plane])),
     bugLabel: labels.find((l) => l.name.toLowerCase() === "bug")?.id ?? null,
+    featureLabel,
+    // At least one slot always takes any issue: a small team never reserves all of them for features.
+    reserved: featureLabel ? Math.max(0, Math.min(flow.team.featureEngineers, flow.team.engineers - 1)) : 0,
     waitLabel: labels.find((l) => l.name === flow.waitLabel)?.id ?? null,
     lanes,
     stateId,
@@ -70,6 +78,8 @@ export async function contextOf(board: Board, flow: DevFlow, project: string, la
 }
 
 export interface Queued {
+  /** A feature issue: it may take a slot reserved for features. */
+  feature: boolean;
   key: string;
   name: string;
   sequence: number;
@@ -91,7 +101,8 @@ export interface Queued {
  * move into Ready and no creation time) is an error, never a silent place in the queue. */
 export async function readyQueue(board: Board, ctx: Ctx, all: Issue[], now: Date, lane?: string, cache?: ReadCache): Promise<Queued[]> {
   if (!ctx.lanes) throw new Error("readyQueue needs a context read with its lanes (contextOf(..., true))");
-  const ready = all.filter((i) => ctx.roleAt(i.state) === "ready" && (!lane || ctx.laneOf(i) === lane));
+  // The lane "feature" is the engineer lane's feature issues alone (the session of a slot reserved for them).
+  const ready = all.filter((i) => ctx.roleAt(i.state) === "ready" && (!lane || (lane === "feature" ? ctx.laneOf(i) === "engineer" && featureOf(i.labels, ctx.featureLabel) : ctx.laneOf(i) === lane)));
   const readyId = ctx.roleId("ready");
   const urgent = [ctx.priorities.P0, ctx.priorities.P1];
   const pName = (word: string) => Object.entries(ctx.priorities).find(([, w]) => w === word)?.[0] ?? null;
@@ -108,7 +119,7 @@ export async function readyQueue(board: Board, ctx: Ctx, all: Issue[], now: Date
     const bug = !!ctx.bugLabel && (i.labels ?? []).includes(ctx.bugLabel);
     const jump = jumps(i.priority, bug, urgent);
     return {
-      key: ctx.key(i), name: i.name, sequence: i.sequence_id, lane: ctx.laneOf(i), readyAt, age: ageOf(readyAt, now), jump, urgent: i.priority === ctx.priorities.P0,
+      key: ctx.key(i), name: i.name, sequence: i.sequence_id, lane: ctx.laneOf(i), feature: featureOf(i.labels, ctx.featureLabel), readyAt, age: ageOf(readyAt, now), jump, urgent: i.priority === ctx.priorities.P0,
       priority: jump ? pName(i.priority) : null, starving: readyAt ? staleOf(readyAt, now, ctx.flow.queue.starvingDays) : false,
     };
   });
@@ -118,7 +129,8 @@ export async function readyQueue(board: Board, ctx: Ctx, all: Issue[], now: Date
 /** Whether an Implementing issue waits for a release and so holds no slot (flow.js waitsRelease). */
 export const waits = (ctx: Ctx, i: Issue) => waitsRelease(ctx.roleAt(i.state), i.name, i.labels, ctx.waitLabel);
 
-export interface Outcome { outcome: "started" | "lost" | "waits"; message: string }
+/** `reserved`: it waits only because the free slots are kept for feature issues. */
+export interface Outcome { outcome: "started" | "lost" | "waits"; message: string; reserved?: boolean }
 
 /** Starts an issue: Implementing, if its lane has a slot. From a pull (`claim`), only while the issue
  * is still Ready, and only for the pull whose claim came first (flow.js claimWinner): a pull that lost
@@ -130,8 +142,10 @@ export async function start(board: Board, ctx: Ctx, k: string, opts: { claim?: b
   if (claim && ctx.roleAt(issue.state) !== "ready") return { outcome: "lost", message: `${k} is no longer Ready (${ctx.stateName(issue.state)}): another pull took it` };
   const l = ctx.laneOf(issue);
   const busy = all.filter((i) => ctx.roleAt(i.state) === "implementing" && !waits(ctx, i) && ctx.laneOf(i) === l).length;
-  const may = mayStart(busy, ctx.slots[l], issue.priority, l, ctx.priorities.P0);
-  if (!may.ok) return { outcome: "waits", message: `${k} waits: ${may.why}` };
+  const featureBusy = all.filter((i) => ctx.roleAt(i.state) === "implementing" && !waits(ctx, i) && ctx.laneOf(i) === l && featureOf(i.labels, ctx.featureLabel)).length;
+  const split = l === "engineer" ? { reserved: ctx.reserved, featureBusy, feature: featureOf(issue.labels, ctx.featureLabel) } : null;
+  const may = mayStart(busy, ctx.slots[l], issue.priority, l, ctx.priorities.P0, split);
+  if (!may.ok) return { outcome: "waits", message: `${k} waits: ${may.why}`, reserved: !!may.reserved };
   const from = ctx.stateName(issue.state);
   const implementing = nameOf(ctx.flow.roles, "implementing");
   const nonce = opts.nonce ?? crypto.randomUUID();
@@ -147,19 +161,22 @@ export async function start(board: Board, ctx: Ctx, k: string, opts: { claim?: b
 /** The lane's first Ready issue in the queue, started; one another session took meanwhile is passed
  * over for the next. A lane with no free slot stops there: its next issue would wait the same. */
 export async function pull(board: Board, ctx: Ctx, lane: string, opts: { now: () => Date; nonce?: string }): Promise<{ outcome: "started" | "waits" | "empty"; lines: string[] }> {
-  if (!(lane in ctx.slots)) throw new Error(`a lane is engineer, SRE or architect, not ${lane}`);
+  if (!(lane in ctx.slots) && lane !== "feature") throw new Error(`a lane is engineer, SRE, architect or feature, not ${lane}`);
   const queue = await readyQueue(board, ctx, await board.issues(ctx.project, true), opts.now(), lane);
   const lines: string[] = [];
   let full = false;
+  let kept = false;
   for (const q of queue) {
     // Once the lane is full only a P0 may go on: it starts past the slots (flow.js mayStart).
-    if (full && !q.urgent) continue;
+    if ((full || (kept && !q.feature)) && !q.urgent) continue;
     const r = await start(board, ctx, q.key, { claim: true, ...opts });
     lines.push(r.message);
     if (r.outcome === "started") return { outcome: "started", lines };
+    // A full lane stops it; one that only kept its reserved slots for features goes on to the next issue, a feature may fit.
+    if (r.outcome === "waits" && r.reserved) { kept = true; continue; }
     if (r.outcome === "waits") full = true;
   }
-  if (full) return { outcome: "waits", lines };
+  if (full || kept) return { outcome: "waits", lines };
   lines.push(`nothing Ready for ${lane}`);
   return { outcome: "empty", lines };
 }
@@ -185,7 +202,7 @@ export type ReadyStatus = {
   queue: Record<string, { key: string; title: string; age: string; readyAt: string | null; jump: boolean; priority: string | null; starving: boolean }[]>;
   starving: { key: string; age: string }[];
 };
-export type OpenStatus = { slots: Record<string, { of: number; on: string[] }>; waiting: { key: string; age: string }[]; issues: Record<string, string[]>; backlog: number };
+export type OpenStatus = { slots: Record<string, { of: number; on: string[] }>; featureLanes: { of: number; on: string[] }; waiting: { key: string; age: string }[]; issues: Record<string, string[]>; backlog: number };
 export type Merged = {
   today: number;
   week: number;
@@ -244,7 +261,7 @@ export async function mergedStatus(board: Board, ctx: Ctx, all: Issue[], now: Da
 export async function readyStatus(board: Board, ctx: Ctx, all: Issue[], now: Date, cache?: ReadCache): Promise<ReadyStatus> {
   const queued = await readyQueue(board, ctx, all, now, undefined, cache);
   return {
-    queue: Object.fromEntries(Object.keys(ctx.slots).map((l) => [l, queued.filter((q) => q.lane === l).map((q) => ({ key: q.key, title: q.name, age: q.age, readyAt: q.readyAt, jump: q.jump, priority: q.priority, starving: q.starving }))])),
+    queue: Object.fromEntries([...Object.keys(ctx.slots), ...(ctx.reserved ? ["feature"] : [])].map((l) => [l, queued.filter((q) => (l === "feature" ? q.lane === "engineer" && q.feature : q.lane === l)).map((q) => ({ key: q.key, title: q.name, age: q.age, readyAt: q.readyAt, jump: q.jump, priority: q.priority, starving: q.starving }))])),
     starving: queued.filter((q) => q.starving).map((q) => ({ key: q.key, age: q.age })),
   };
 }
@@ -258,6 +275,8 @@ export function openStatus(ctx: Ctx, all: Issue[], now: Date = new Date()): Open
     .filter(([, v]) => (v as string[]).length));
   return {
     slots: Object.fromEntries(Object.keys(ctx.slots).map((l) => [l, { of: ctx.slots[l], on: busy.filter((i) => ctx.laneOf(i) === l).map(ctx.key) }])),
+    // The engineer slots kept for feature issues, and the feature issues in Implementing (in any engineer slot).
+    featureLanes: { of: ctx.reserved, on: busy.filter((i) => ctx.laneOf(i) === "engineer" && featureOf(i.labels, ctx.featureLabel)).map(ctx.key) },
     waiting: all.filter((i) => waits(ctx, i)).map((i) => ({ key: ctx.key(i), age: ageOf(i.updated_at ?? "", now) })),
     issues: byState(["refine", "ready", "implementing", "review"]),
     backlog: all.filter((i) => ctx.roleAt(i.state) === "backlog").length,
@@ -266,7 +285,10 @@ export function openStatus(ctx: Ctx, all: Issue[], now: Date = new Date()): Open
 
 /** The slots line: `3 of 6 engineer slots busy (PRONTO-1, ...), 0 of 1 SRE slots busy, ...`. */
 export const slotsLine = (s: OpenStatus) =>
-  Object.entries(s.slots).map(([l, v]) => `${v.on.length} of ${v.of} ${l} slots busy${v.on.length ? ` (${v.on.join(", ")})` : ""}`).join(", ");
+  [
+    ...Object.entries(s.slots).map(([l, v]) => `${v.on.length} of ${v.of} ${l} slots busy${v.on.length ? ` (${v.on.join(", ")})` : ""}`),
+    ...(s.featureLanes.of ? [`feature lanes ${s.featureLanes.on.length} of ${s.featureLanes.of}${s.featureLanes.on.length ? ` (${s.featureLanes.on.join(", ")})` : ""}`] : []),
+  ].join(", ");
 
 /** The flip issues waiting for a release: `waiting for release: PRONTO-238 3d, PRONTO-228 3d`; none when none wait. */
 export const waitingLine = (s: OpenStatus) => (s.waiting.length ? [`waiting for release: ${s.waiting.map((w) => `${w.key} ${w.age}`).join(", ")}`] : []);
@@ -356,6 +378,7 @@ export async function status(board: Board, flow: DevFlow, project: string, io: S
     failures,
     json: {
       slots: open.slots,
+      featureLanes: open.featureLanes,
       waiting: open.waiting,
       queue: ready.ok ? ready.value.queue : bad(ready),
       starving: ready.ok ? ready.value.starving : bad(ready),
