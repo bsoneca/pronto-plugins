@@ -1281,7 +1281,7 @@ const gate = (app: string) => {
     // An app with a GCP release plan reads secrets by name: a missing one fails here, not in release@gcp.
     secrets: async () => {
       const file = await fromRuntime("gcp/secrets.nu");
-      if (file === "") return true;
+      if (file === "") { console.error("integrate@local: no secrets check: the runtime has no gcp/secrets.nu (no GCP release to read secrets for)"); return true; }
       return (await new Deno.Command("sh", { args: ["-c", 'exec "$@"', "sh", "mise", "x", "--", "nu", file, "check", app, "--if-gcp"], cwd: app, env, stdout: "inherit", stderr: "inherit" }).output()).success;
     },
     key: async () => { const r = await keyOf("key"); return r.ok ? r.text : ""; },
@@ -2463,7 +2463,7 @@ if (import.meta.main) {
     // A pass stamps the tree as it was before the run, if it still is (gcp/local-gate-key.nu).
     if (gateSteps?.mode === "all" && code === 0) {
       const after = await gateSteps.key();
-      if (!before || before !== after) say(`${before ? "the tree changed during the run" : "the tree's key cannot be read"}: the pass is not recorded`);
+      if (!before || before !== after) say(`${before ? "the tree changed during the run" : "the tree has no key (the runtime keeps no ledger, or it cannot be read)"}: the pass is not recorded`);
       else if (!await gateSteps.stamp(before)) { say("the pass could not be stamped"); code = 1; }
     }
   }
