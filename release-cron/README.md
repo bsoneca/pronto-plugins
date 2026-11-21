@@ -314,12 +314,18 @@ Guards, each so a branch cannot lose or smuggle a change:
   `abandon` with no release held but a branch waiting on main (held-backport) clears it, logging which commits were still missing.
 - **A held tip already serving.** When the held branch's tip is what production serves (its release landed and its confirmation never
   did), the run resumes at confirmation, without rehearsing or releasing again; once confirmed it writes the `released-branch` record
-  and closes the hold, in place of ending `skipped` with the hold left open.
+  and closes the hold, in place of ending `skipped` with the hold left open. A held tip confirms itself by the trusted checkout's probes,
+  `ready` services and serving command (`heldConfig`), never the candidate's own.
 - **`RELEASE_CRON_DRY` is read first.** Any value makes the run a dry one before it decides anything: it deletes no branch, abandons or
   closes no hold, writes no marker (`refused`, `backport-told`, `flags-released`), records no flags and tells nobody; it says what it
-  would have done (`RELEASE_CRON_DRY: would ...`).
+  would have done (`RELEASE_CRON_DRY: would ...`). A held tip is judged (git objects and GitHub's records) but, dry, never checked out,
+  cleaned or trusted: the run says it would check it out. These decisions are pure plans (`heldPlan`, `backportPlan`, `limitPlan`) that
+  the driver executes in order, and the cases hold that a refused tip's plan has no checkout and a dry plan no mutation.
+- **Ledger parity.** The cherry-pick and `Backport-of` lines are read from all of main's history at the deploying commit, not only since the merge base, and a
+  branch commit with no patch id (an empty commit) is nothing to carry, as `.github/release-ledger.sh` counts both.
 - **An unreadable record stops the run.** `open` and `released-branch` are absent only when the file is not there
-  (`Deno.errors.NotFound`); a parse or I/O error stops the run with the error, never reading as nothing held.
+  (`Deno.errors.NotFound`); a parse or I/O error stops the run with the error, never reading as nothing held. The run reads `released-branch` under its lock. `abandon` is how a lead gets past a corrupt `open`: it
+  reports the file and why and exits 1, and `abandon --force` removes that file.
 - **Branches off change nothing.** With `branches.enabled: false` there is no `open` or `released-branch`, and every rule above reduces to
   what it was (`missingFromMain` without merges is `backported`; `heldLanded` is false without a held release).
 - **While a release is held, main does not release.** A fix merged to main waits until the branch closes (released or abandoned);

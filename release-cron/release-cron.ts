@@ -31,7 +31,7 @@
 // the first green one releases from it (README.md, "Release branches"). `abandon` gives a held release up by hand.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { abandoned, attempted, backportWhy, dryWould, heldDiffArgs, heldLanded, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn } from "./cron.js";
+import { abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, heldLanded, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -91,7 +91,15 @@ type Released = { branch: string; tip: string };
 const readOpen = (): Open | null => readJson<Open>(openPath);
 const readReleased = (): Released | null => readJson<Released>(`${state}/released-branch`);
 const writeOpen = (o: Open) => { Deno.writeTextFileSync(`${openPath}.tmp`, JSON.stringify(o) + "\n"); Deno.renameSync(`${openPath}.tmp`, openPath); };
-let open = readOpen();
+// `abandon` is how a lead gets past an `open` file that cannot be read: it reports it and removes it only with --force (corruptOpen).
+let open: Open | null = null;
+try { open = readOpen(); } catch (e) {
+  if (verb !== "abandon") throw e;
+  const c = corruptOpen(openPath, (e as Error).message, Deno.args.includes("--force"));
+  console.log(c.text);
+  if (!c.remove) Deno.exit(1);
+  Deno.removeSync(openPath);
+}
 
 if (verb === "pause") { Deno.writeTextFileSync(`${state}/paused`, local(Date.now()) + "\n"); console.log(`${app}: paused; runs skip until \`resume\``); Deno.exit(0); }
 if (verb === "resume") { Deno.removeSync(`${state}/paused`); console.log(`${app}: resumed`); Deno.exit(0); }
@@ -171,12 +179,15 @@ const missingOnMain = (tip: string, main: string) => {
   const range = (r: string) => {
     const log = parseLog(g("log", "--no-merges", "--reverse", "--format=%H%x1f%B%x1e", r));
     const ids = patchIds(sh("sh", ["-c", 'git --git-dir "$REPO" log -p --no-merges --reverse "$RANGE" | git patch-id --stable'], undefined, { REPO: repo, RANGE: r }, 300).out);
-    return log.map((c: { sha: string; body: string }) => ({ ...c, patch: ids[c.sha] }));
+    // A commit with no patch id (empty) is null: nothing to carry (cron.js, backported).
+    return log.map((c: { sha: string; body: string }) => ({ ...c, patch: ids[c.sha] ?? null }));
   };
+  // The cherry-pick and Backport-of lines are read from all of main's history at that commit, as the ledger does.
+  const all = parseLog(g("log", "--format=%H%x1f%B%x1e", main));
   const mb = g("merge-base", main, tip);
   const merged = g("rev-list", "--merges", `${mb}..${tip}`).split("\n").filter(Boolean)
     .map((sha) => ({ sha, subject: g("log", "-1", "--format=%s", sha), cc: g("show", "--cc", "--format=", sha) }));
-  return missingFromMain(range(`${mb}..${tip}`), range(`${mb}..${main}`), merged) as { sha: string; body: string }[];
+  return missingFromMain(range(`${mb}..${tip}`), range(`${mb}..${main}`), merged, all) as { sha: string; body: string }[];
 };
 // `branch` deleted from origin, only as the tip that was checked (`verified`): an explicit lease on it. A branch pushed to since the check
 // stays, with its new tip said. Returns whether it is gone from origin.
@@ -644,7 +655,6 @@ const t0 = Date.now();
 const started = local(t0);
 // RELEASE_CRON_DRY: read before any scheduling decision (mutates, cron.js); `android` runs only the android step, ending dry as well.
 const dry = Deno.env.get("RELEASE_CRON_DRY");
-const released = readReleased(); // before the lock: a record that cannot be read stops the run loudly, a lock never taken
 let out: Deno.FsFile | undefined;
 const log = (b: Uint8Array) => (out ??= Deno.openSync(`${state}/runs/${started}.log`, { write: true, create: true, append: true })).writeSync(b);
 const enc = new TextEncoder();
@@ -754,6 +764,9 @@ try { Deno.mkdirSync(`${state}/lock`); } catch {
   }
 }
 Deno.writeTextFileSync(`${state}/lock/pid`, String(Deno.pid));
+// Read under the lock, so no other run changes it meanwhile; a record that cannot be read stops the run loudly, the lock let go first.
+let released: Released | null;
+try { released = readReleased(); } catch (e) { try { Deno.removeSync(`${state}/lock`, { recursive: true }); } catch { /* ours */ } throw e; }
 
 const [lastAt, lastGap, lastFailed, lastTried, lastHeldTip] = (() => { try { const [a, g, f, t, h] = Deno.readTextFileSync(`${state}/last`).trim().split(" "); return [Number(a), Number(g), f === "-" ? undefined : f, t === undefined ? (f === "-" ? undefined : f) : t === "-" ? undefined : t, h === "-" ? undefined : h]; } catch { return [NaN, NaN, undefined, undefined, undefined]; } })();
 
@@ -769,7 +782,7 @@ const [lastAt, lastGap, lastFailed, lastTried, lastHeldTip] = (() => { try { con
   if (open) {
     if (abandoned(open, Date.now(), open.limits)) {
       const o = open;
-      if (!mutates(dry)) end("dry", dryWould(`give up ${o.branch}: held since ${o.opened}, past its ${o.limits.abandonHours} h or ${o.limits.abandonAttempts} red attempts, and delete it from origin only when everything on it is on main`));
+      if (limitPlan(dry).includes("report-abandon")) end("dry", dryWould(`give up ${o.branch}: held since ${o.opened}, past its ${o.limits.abandonHours} h or ${o.limits.abandonAttempts} red attempts, and delete it from origin only when everything on it is on main`));
       closeOpen("abandoned");
       // The app's gap, kept in `last` (cron.js lastFields), not the default: the main run after it waits as any run does.
       run.gap = Number.isNaN(gap) ? 60 : gap;
@@ -989,13 +1002,16 @@ try {
     }
     const files = descends ? g(...heldDiffArgs(open.base, candidate)).split("\n").filter(Boolean) : [];
     const why = refusedTip({ descends, unmerged: unmerged(shas, pulls, open.branch), migrations: migrationFiles(files, appRel) });
-    if (why) {
-      // The refusal's channels are the trusted checkout's (this script's own), not the refused tip's.
-      const notify: Notify = (() => { try { return config(top).cron.notify as Notify; } catch (e) { console.log(`release-cron: notify settings unread (${(e as Error).message.split("\n")[0]}): the log alone`); return { kind: "none" }; } })();
-      if (!mutates(dry)) end("dry", dryWould(`refuse ${open.branch} at ${candidate.slice(0, 8)}: ${why}`));
-      Deno.writeTextFileSync(`${state}/refused`, candidate + "\n");
-      tellNote(notify, refusal(app, open.branch, candidate, why), `release-cron-refused-${candidate.slice(0, 8)}.md`, "release-cron branch tip refused");
-      end(`held-refused ${open.branch}`, why);
+    // What is done with the judged tip is heldPlan's, in order: a refused tip is refused before any checkout, and a dry run checks nothing out.
+    for (const action of heldPlan(why, dry)) {
+      if (action === "report-refusal") end("dry", dryWould(`refuse ${open.branch} at ${candidate.slice(0, 8)}: ${why}`));
+      else if (action === "report-checkout") end("dry", dryWould(`check out ${open.branch} at ${candidate.slice(0, 8)} (judged: its own work), then rehearse and release it, or resume its confirmation if it already serves`));
+      else if (action === "mark-refused") Deno.writeTextFileSync(`${state}/refused`, candidate + "\n");
+      else if (action === "notify") {
+        // The refusal's channels are the trusted checkout's (this script's own), not the refused tip's.
+        const notify: Notify = (() => { try { return config(top).cron.notify as Notify; } catch (e) { console.log(`release-cron: notify settings unread (${(e as Error).message.split("\n")[0]}): the log alone`); return { kind: "none" }; } })();
+        tellNote(notify, refusal(app, open.branch, candidate, why!), `release-cron-refused-${candidate.slice(0, 8)}.md`, "release-cron branch tip refused");
+      } else if (action === "end-refused") end(`held-refused ${open.branch}`, why!);
     }
   }
   head = worktree(candidate);
@@ -1015,6 +1031,8 @@ try {
     Deno.exit(again.code);
   }
   ({ gcp, cron } = config(wt));
+  // A held tip confirms itself by the trusted checkout's probes and serving command, not the candidate's (heldConfig).
+  if (open) cron = heldConfig(cron, config(top).cron);
   run.gap = cron.gap;
   if (open) run.branch = open.branch;
   // What production serves: the commit the target's serving command prints, else Cloud Run's traffic.
@@ -1022,7 +1040,7 @@ try {
   // Read over ssh: a connect that times out (PRONTO-758, 07:05 BRT) is tried twice more, 20 s apart, before it fails the run.
   const servingNow = () => {
     for (let i = 1; ; i++) {
-      try { return must(target!.serving[0], target!.serving.slice(1), `${wt}/${appRel}`, Deno.env.toObject(), 120).split(/\s+/)[0]; }
+      try { return must(target!.serving[0], target!.serving.slice(1), `${open ? top : wt}/${appRel}`, Deno.env.toObject(), 120).split(/\s+/)[0]; }
       catch (e) { if (i >= 3) throw e; say(`serving unread (try ${i} of 3): ${(e as Error).message.split("\n").at(-1)}`); sh("sleep", ["20"], undefined, {}, 30); }
     }
   };
@@ -1048,23 +1066,22 @@ try {
     // A fetch or git failure here is not a failed run: it ends skipped, and the next wake checks again.
     let missing: { sha: string; body: string }[] = [];
     try { missing = missingOnMain(released.tip, head); } catch (e) { end("skipped", `the backport check of ${released.branch} could not be made (${(e as Error).message.split("\n")[0]}): tried again next wake`); }
-    if (missing.length) {
-      const key = `${released.branch} ${missing.map((c) => c.sha).join(" ")}`;
-      const told = (() => { try { return Deno.readTextFileSync(`${state}/backport-told`).trim(); } catch { return ""; } })();
-      if (told !== key && mutates(dry)) {
-        tellNote(cron.notify, `release-cron (${app}) will not release main until the fixes released from ${released.branch} are on main: ${backportWhy(missing)}. Cherry-pick each with -x (git cherry-pick -x <sha>) in a PR to main; the next wake checks again.`, `release-cron-backport-${released.branch.split("/").at(-1)}.md`, "release-cron backport missing");
-        Deno.writeTextFileSync(`${state}/backport-told`, key + "\n");
+    // What follows is backportPlan's, in order: wait and tell once, or delete (a dry run reports and does neither).
+    const key = `${released.branch} ${missing.map((c) => c.sha).join(" ")}`;
+    const told = (() => { try { return Deno.readTextFileSync(`${state}/backport-told`).trim(); } catch { return ""; } })();
+    for (const action of backportPlan(missing, told === key, dry)) {
+      if (action === "tell") tellNote(cron.notify, `release-cron (${app}) will not release main until the fixes released from ${released.branch} are on main: ${backportWhy(missing)}. Cherry-pick each with -x (git cherry-pick -x <sha>) in a PR to main; the next wake checks again.`, `release-cron-backport-${released.branch.split("/").at(-1)}.md`, "release-cron backport missing");
+      else if (action === "mark-told") Deno.writeTextFileSync(`${state}/backport-told`, key + "\n");
+      else if (action === "end-held-backport") end(`held-backport ${released.branch}`, backportWhy(missing));
+      else if (action === "report-delete") say(dryWould(`delete ${released.branch} from origin as ${released.tip.slice(0, 8)}: every commit is on main`));
+      else if (action === "delete-branch") {
+        let gone = false;
+        try { gone = deleteBranch(released.branch, released.tip, cron.notify); } catch (e) { say(`${released.branch} not deleted: ${(e as Error).message.split("\n")[0]}`); }
+        if (gone) {
+          say(`${released.branch}: every commit is on main, the branch deleted from origin`);
+          for (const f of ["released-branch", "backport-told"]) { try { Deno.removeSync(`${state}/${f}`); } catch { /* none */ } }
+        } else say(`${released.branch} kept on origin, and its record: the next wake checks again`);
       }
-      end(`held-backport ${released.branch}`, backportWhy(missing));
-    }
-    if (!mutates(dry)) say(dryWould(`delete ${released.branch} from origin as ${released.tip.slice(0, 8)}: every commit is on main`));
-    else {
-      let gone = false;
-      try { gone = deleteBranch(released.branch, released.tip, cron.notify); } catch (e) { say(`${released.branch} not deleted: ${(e as Error).message.split("\n")[0]}`); }
-      if (gone) {
-        say(`${released.branch}: every commit is on main, the branch deleted from origin`);
-        for (const f of ["released-branch", "backport-told"]) { try { Deno.removeSync(`${state}/${f}`); } catch { /* none */ } }
-      } else say(`${released.branch} kept on origin, and its record: the next wake checks again`);
     }
   }
   // RELEASE_CRON_DRY=android runs only the android step below, in place of the rehearsal and the preview.

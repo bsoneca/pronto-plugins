@@ -593,9 +593,14 @@ export const patchIds = (text) => Object.fromEntries(text.split("\n").filter(Boo
 // a `(cherry picked from commit <sha>)` line naming it (cherry-pick -x), an equal stable patch id, or, the ledger's rule
 // (bsoneca/pronto's .github/release-ledger.sh), a subject ending `(#n)` that a main commit's message answers with `Backport-of: #n`.
 // Those are fixes the next release of main would lose.
-export const backported = (branch, main) => branch.filter((c) => {
+// `all`: every commit of main (its `body` alone), where a cherry-pick line or a Backport-of line is read, since a fix may be picked before the
+// branch is even listed (the ledger reads main's whole history for both); `main` (since the merge base) is where patch ids are compared.
+// A branch commit whose `patch` is null is an empty commit (no patch id): nothing to carry, unless a line names it, as the ledger counts it.
+export const backported = (branch, main, all = main) => branch.filter((c) => {
   const n = (c.body ?? "").split("\n")[0].match(/\(#(\d+)\)\s*$/)?.[1];
-  return !main.some((m) => (!!c.patch && m.patch === c.patch) || m.body.includes(`(cherry picked from commit ${c.sha})`) || (!!n && new RegExp(`Backport-of: #${n}(?!\\d)`).test(m.body)));
+  if (all.some((m) => m.body.includes(`(cherry picked from commit ${c.sha})`) || (!!n && new RegExp(`Backport-of: #${n}(?!\\d)`).test(m.body)))) return false;
+  if (c.patch === null) return false;
+  return !main.some((m) => !!c.patch && m.patch === c.patch);
 });
 
 // The held-backport outcome's reason: how many of the branch's commits are not on main, and which.
@@ -646,9 +651,9 @@ export const isSha = (s) => /^[0-9a-f]{40}$/.test(s ?? "");
 // (bsoneca/pronto's .github/release-ledger.sh: a merge carries only what `git show --cc` prints, and a resolution that changed anything
 // is a fix of its own, to be carried to main by hand). `merges`: [{sha, subject, cc}] for each merge commit of merge base..tip, `cc` the
 // output of `git show --cc --format= <sha>`. The one answer both a release's authorization and a branch's deletion read.
-export const missingFromMain = (branch, main, merges = []) => [
+export const missingFromMain = (branch, main, merges = [], all = main) => [
   ...merges.filter((m) => (m.cc ?? "").trim() !== "").map((m) => ({ sha: m.sha, body: `${m.subject ?? ""} (a merge whose resolution changed code: carry it to main by hand)` })),
-  ...backported(branch, main),
+  ...backported(branch, main, all),
 ];
 
 // The diff of a held branch's change, as git is asked: no rename detection, so a migration moved out of the migrations folder lists
@@ -676,3 +681,33 @@ export const dryWould = (what) => `RELEASE_CRON_DRY: would ${what}; nothing was 
 
 // What the lead is told when a held branch's new tip is refused.
 export const refusal = (app, branch, sha, why) => `release-cron (${app}) refused ${branch} at ${sha.slice(0, 8)}: ${why}. Nothing was rehearsed and no attempt counted; push a tip that is only merged pull requests into the branch.`;
+
+// What a held tip's confirmation asks, from the trusted checkout's config (`trusted`), not the candidate's: the probes, the services that must
+// be ready, and where the serving command and the origin point. The candidate's own release commands still run, as a verified tip's.
+export const heldConfig = (cron, trusted) => ({
+  ...cron,
+  probes: trusted.probes,
+  ready: trusted.ready ?? cron.ready,
+  target: cron.target.kind === "command" && trusted.target?.kind === "command" ? { ...cron.target, serving: trusted.target.serving, origin: trusted.target.origin } : cron.target,
+});
+
+// The plans release-cron.ts executes, in order, as action names. A decision made here is tested; the driver only does what the plan says.
+// What a plan does that changes something (a checkout, a marker, a notice, a deletion, a hold): `mutations` lists them, and a dry plan has none.
+const mutating = ["checkout", "trust", "config", "mark-refused", "notify", "tell", "mark-told", "delete-branch", "clear-record", "close-hold", "drop-branch", "end-abandoned", "end-refused", "end-held-backport"];
+export const mutations = (plan) => plan.filter((a) => mutating.includes(a));
+// A held tip, once judged (`why`: refusedTip's answer, null when it passes): refused before any checkout or trust, and a dry run reports where a
+// real run would act, checking nothing out.
+export const heldPlan = (why, dry) => why
+  ? (dry ? ["report-refusal"] : ["mark-refused", "notify", "end-refused"])
+  : (dry ? ["report-checkout"] : ["checkout", "trust", "config"]);
+// The released branch's backport check (`missing`: what is not on main; `told`: this set was told already): wait and tell once, or delete.
+export const backportPlan = (missing, told, dry) => missing.length
+  ? [...(told || dry ? [] : ["tell", "mark-told"]), "end-held-backport"]
+  : dry ? ["report-delete"] : ["delete-branch", "clear-record"];
+// A held release past its limits: given up, or, dry, reported.
+export const limitPlan = (dry) => dry ? ["report-abandon"] : ["close-hold", "drop-branch", "end-abandoned"];
+
+// `abandon` with an `open` file that cannot be read: it reports which file and why, and removes it only with --force.
+export const corruptOpen = (path, why, force) => force
+  ? { remove: true, text: `${path} could not be read (${why}): removed by --force` }
+  : { remove: false, text: `${path} could not be read (${why}): delete that file by hand, or run \`abandon --force\` to remove it` };

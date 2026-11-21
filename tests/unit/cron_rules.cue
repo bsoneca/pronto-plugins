@@ -174,8 +174,6 @@ cases: {
 	"with no merge to resolve, the ledger's answer is backported's: branches off change nothing": {suite: "cron", steps: [
 		{call: "cron.missingFromMain", args: [[{sha: "c1", patch: "p1", body: "a"}, {sha: "c2", patch: "p2", body: "b"}], [{sha: "m", patch: "p2", body: "b"}]], expect: [{sha: "c1", patch: "p1", body: "a"}]},
 		{call: "cron.backported", args: [[{sha: "c1", patch: "p1", body: "a"}, {sha: "c2", patch: "p2", body: "b"}], [{sha: "m", patch: "p2", body: "b"}]], expect: [{sha: "c1", patch: "p1", body: "a"}]},
-		{call: "cron.heldLanded", args: [null, "c1", "c1"], expect: false, why: "no held release: main serving its own commit is skipped as before"},
-		{call: "cron.heldLanded", args: [null, null, "c1"], expect: false},
 	]}
 	"the backport check and the deletion name commits, not refs that move": {suite: "cron", steps: [
 		{call: "cron.isSha", args: [_sha1], expect: true},
@@ -183,9 +181,11 @@ cases: {
 		{call: "cron.isSha", args: ["abc123"], expect: false, why: "short ids are ambiguous"},
 		{call: "cron.isSha", args: [null], expect: false},
 	]}
-	"a held branch's change is listed without rename detection, so a migration moved away is seen": {suite: "cron", steps: [
-		{call: "cron.heldDiffArgs", args: ["base1", _sha1], expect: ["diff", "--no-renames", "--name-only", "base1", _sha1]},
-		{call: "cron.migrationFiles", args: [["apps/studio/services/database/migrations/0042.sql", "apps/studio/db/0042.sql"], "apps/studio"], expect: ["apps/studio/services/database/migrations/0042.sql"], why: "with no rename detection the old path is listed beside the new one"},
+	"a migration moved out of the folder refuses the tip, by its old path (git diff --no-renames lists both)": {suite: "cron", steps: [
+		{call: "cron.migrationFiles", args: [["apps/studio/services/database/migrations/0042.sql", "apps/studio/db/0042.sql"], "apps/studio"]},
+		{keep: "moved"},
+		{use: "moved", expect: ["apps/studio/services/database/migrations/0042.sql"]},
+		{call: "cron.refusedTip", args: [{descends: true, unmerged: [], migrations: "$moved"}], matches: "migrations changed \\(apps/studio/services/database/migrations/0042.sql\\)"},
 	]}
 	"a branch is deleted only as the tip that was checked, by an explicit lease": {suite: "cron", steps: [
 		{call: "cron.leaseDelete", args: ["release/x/1", _sha1], expect: ["--force-with-lease=refs/heads/release/x/1:1111111111111111111111111111111111111111", "origin", ":refs/heads/release/x/1"]},
@@ -198,14 +198,51 @@ cases: {
 		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, "c0", "c1"], expect: false},
 		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, null, "c1"], expect: false, why: "nothing known to serve"},
 	]}
-	"a dry run mutates nothing and says what it would do": {suite: "cron", steps: [
-		{call: "cron.mutates", args: [null], expect: true},
-		{call: "cron.mutates", args: [""], expect: true},
-		{call: "cron.mutates", args: ["1"], expect: false},
-		{call: "cron.mutates", args: ["android"], expect: false, why: "the android dry run is a dry run too"},
-		{call: "cron.dryWould", args: ["delete release/x/1 from origin"], expect: "RELEASE_CRON_DRY: would delete release/x/1 from origin; nothing was changed"},
-	]}
 	"a refused tip's notice names the branch, the commit and why": {suite: "cron", steps: [
 		{call: "cron.refusal", args: ["studio", "release/studio/1", _sha1, "the tip does not descend from the commit the branch was cut at"], expect: "release-cron (studio) refused release/studio/1 at 11111111: the tip does not descend from the commit the branch was cut at. Nothing was rehearsed and no attempt counted; push a tip that is only merged pull requests into the branch."},
+	]}
+}
+
+// The ledger's parity and the plans (the driver executes them in order; the cases hold the decisions).
+_main: [{sha: "m1", patch: "q", body: "unrelated"}]
+_all: [{sha: "m0", body: "fix a\n\n(cherry picked from commit c1)\n"}, {sha: "mb", body: "port (#12)\n\nBackport-of: #7\n"}, {sha: "m1", patch: "q", body: "unrelated"}]
+
+cases: {
+	"a pick or Backport-of line anywhere in main's history carries a branch commit, not only since the merge base": {suite: "cron", steps: [
+		{call: "cron.backported", args: [[{sha: "c1", patch: "p1", body: "fix a\n"}, {sha: "c2", patch: "p2", body: "fix b (#7)\n"}, {sha: "c3", patch: "p3", body: "fix c (#8)\n"}], _main, _all], expect: [{sha: "c3", patch: "p3", body: "fix c (#8)\n"}], why: "a fix picked before the branch was cut is on main; the ledger reads main's whole history for both lines"},
+		{call: "cron.backported", args: [[{sha: "c1", patch: "p1", body: "fix a\n"}], _main], expect: [{sha: "c1", patch: "p1", body: "fix a\n"}], why: "read only since the merge base, the pick is not seen: the gap that was"},
+	]}
+	"an empty commit has no patch id: nothing to carry, as the ledger skips it, unless a line names it": {suite: "cron", steps: [
+		{call: "cron.backported", args: [[{sha: "e1", patch: null, body: "empty\n"}, {sha: "c1", patch: "p1", body: "real\n"}], _main], expect: [{sha: "c1", patch: "p1", body: "real\n"}]},
+		{call: "cron.missingFromMain", args: [[{sha: "e1", patch: null, body: "empty\n"}], _main, []], expect: []},
+	]}
+	"a held tip that fails provenance is refused before any checkout, trust or config read": {suite: "cron", steps: [
+		{call: "cron.heldPlan", args: ["1 commit not brought by a merged pull request into the branch: abcdef01", null], expect: ["mark-refused", "notify", "end-refused"], why: "nothing of the tip is checked out, so the scheduler's entry point stays out of it"},
+		{call: "cron.heldPlan", args: [null, null], expect: ["checkout", "trust", "config"], why: "only a passed tip is checked out, then trusted, then its config read"},
+		{call: "cron.heldPlan", args: ["x", null]},
+		{keep: "refused"},
+		{call: "cron.mutations", args: ["$refused"], expect: ["mark-refused", "notify", "end-refused"]},
+	]}
+	"a dry run's plans list no mutation, and check nothing out": {suite: "cron", steps: [
+		{call: "cron.heldPlan", args: ["x", "1"], expect: ["report-refusal"]},
+		{call: "cron.heldPlan", args: [null, "1"], expect: ["report-checkout"], why: "a dry run of a good tip says it would check it out"},
+		{call: "cron.backportPlan", args: [[{sha: "c"}], false, "1"], expect: ["end-held-backport"], why: "waits but tells nobody and writes no marker"},
+		{call: "cron.backportPlan", args: [[], false, "1"], expect: ["report-delete"]},
+		{call: "cron.limitPlan", args: ["android"], expect: ["report-abandon"]},
+		{call: "cron.mutations", args: [["report-refusal", "report-checkout", "report-delete", "report-abandon"]], expect: []},
+	]}
+	"a real run tells once, then deletes or closes": {suite: "cron", steps: [
+		{call: "cron.backportPlan", args: [[{sha: "c"}], false, null], expect: ["tell", "mark-told", "end-held-backport"]},
+		{call: "cron.backportPlan", args: [[{sha: "c"}], true, null], expect: ["end-held-backport"], why: "this set was told already"},
+		{call: "cron.backportPlan", args: [[], false, null], expect: ["delete-branch", "clear-record"]},
+		{call: "cron.limitPlan", args: [null], expect: ["close-hold", "drop-branch", "end-abandoned"]},
+	]}
+	"a held tip confirms itself by the trusted checkout's probes and serving command": {suite: "cron", steps: [
+		{call: "cron.heldConfig", args: [{gap: 60, ready: ["a"], probes: {home: {path: "/evil"}}, target: {kind: "command", release: ["./rel"], serving: ["./evil-serving"], origin: "https://evil"}}, {ready: ["b"], probes: {home: {path: "/"}}, target: {kind: "command", release: ["x"], serving: ["ssh", "node", "serving"], origin: "https://app"}}], expect: {gap: 60, ready: ["b"], probes: {home: {path: "/"}}, target: {kind: "command", release: ["./rel"], serving: ["ssh", "node", "serving"], origin: "https://app"}}, why: "the candidate's release command still runs; what says it landed is the trusted one's"},
+		{call: "cron.heldConfig", args: [{ready: ["a"], probes: {}, target: {kind: "cloud-run"}}, {probes: {p: {path: "/"}}, target: {kind: "cloud-run"}}], expect: {ready: ["a"], probes: {p: {path: "/"}}, target: {kind: "cloud-run"}}},
+	]}
+	"an unreadable open file is reported by abandon, and removed only with --force": {suite: "cron", steps: [
+		{call: "cron.corruptOpen", args: ["/s/open", "Unexpected token", false], expect: {remove: false, text: "/s/open could not be read (Unexpected token): delete that file by hand, or run `abandon --force` to remove it"}},
+		{call: "cron.corruptOpen", args: ["/s/open", "Unexpected token", true], expect: {remove: true, text: "/s/open could not be read (Unexpected token): removed by --force"}},
 	]}
 }
