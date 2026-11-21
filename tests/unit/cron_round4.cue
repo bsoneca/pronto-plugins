@@ -146,4 +146,13 @@ cases: {
 		{call: "cron.holderKind", args: ["/usr/bin/deno run -A release-cron.ts studio run"], expect: "run"},
 		{call: "cron.holderKind", args: [""], expect: "run", why: "the holder's command could not be read"},
 	]}
+	"a lock directory an earlier version made keeps its live holder": {suite: "cron", steps: [
+		{call: "cron.holderPid", args: [true, "4242\n", ""], expect: 4242, why: "the directory's pid file is read first"},
+		{call: "cron.holderPid", args: [true, "", ""], expect: 0, why: "an unreadable pid file: no holder, the directory is removed"},
+		{call: "cron.holderPid", args: [false, "", "4242"], expect: 4242},
+		{call: "cron.holderPid", args: [false, "", "x"], expect: 0},
+		{call: "cron.lockStep", args: [false, 4242, true, false], expect: "busy", why: "legacyDir with a live pid: busy, as for a live holder"},
+		{call: "cron.lockStep", args: [false, 4242, false, false], expect: "takeover", why: "legacyDir with a dead pid: removed and taken"},
+		{call: "cron.lockStep", args: [false, 0, false, false], expect: "takeover"},
+	]}
 }

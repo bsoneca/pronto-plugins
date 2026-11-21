@@ -32,7 +32,7 @@
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import { causes, outcomes } from "./causes.js";
-import { holderKind, reapStep, signalDone, trustNotice, stopSeconds, failureOf, abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, servingPlan, rerunWhy, heldTrusted, backportCheck, rehearsalSpawn, signalStops, previewUpStep, upExtra, lockStep, flagsBookkeeping, branchOutcome, patchIdsOf, patchOf, nulPaths, resolvedMerges, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, abandonPlan, shippedRecord, releaseAttempt, cutPlan, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
+import { holderPid, holderKind, reapStep, signalDone, trustNotice, stopSeconds, failureOf, abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, servingPlan, rerunWhy, heldTrusted, backportCheck, rehearsalSpawn, signalStops, previewUpStep, upExtra, lockStep, flagsBookkeeping, branchOutcome, patchIdsOf, patchOf, nulPaths, resolvedMerges, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, abandonPlan, shippedRecord, releaseAttempt, cutPlan, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -123,11 +123,18 @@ const STOP_GRACE = 60_000, TEARDOWN_GRACE = 300_000;
 // One mechanism for the run's lock (a run and `abandon`, `<state>/lock`) and the bisect's (`bisect/lock`), decided by cron.js lockStep: a live holder's
 // keeps ("busy": its pid is returned); a dead holder's is removed only if it is still that pid's, then taken, after `reap` when it left a preview
 // behind (`orphan`). A lock directory an earlier version made is a dead holder's.
+// The pid holding `lock` (cron.js holderPid): a file's content, or, for a directory an earlier version made, its `pid` file, so a live old holder keeps it.
+const lockHolder = (lock: string) => {
+  const read = (f: string) => { try { return Deno.readTextFileSync(f); } catch { return ""; } };
+  let isDir = false;
+  try { isDir = Deno.statSync(lock).isDirectory; } catch { /* none */ }
+  return holderPid(isDir, read(`${lock}/pid`), read(lock));
+};
 const linkLock = (lock: string, orphan: () => boolean = () => false, reap: () => void = () => {}): { got: true } | { got: false; pid: number } => {
   const tmp = `${lock}.${Deno.pid}`;
   Deno.writeTextFileSync(tmp, String(Deno.pid));
   const take = () => { try { Deno.linkSync(tmp, lock); return true; } catch { return false; } };
-  const holder = () => { try { return Number(Deno.readTextFileSync(lock)); } catch { return 0; } };
+  const holder = () => lockHolder(lock);
   try {
     if (take()) return { got: true };
     const pid = holder();
@@ -139,7 +146,7 @@ const linkLock = (lock: string, orphan: () => boolean = () => false, reap: () =>
   } finally { try { Deno.removeSync(tmp); } catch { /* gone */ } }
 };
 const lockPath = `${state}/lock`;
-const lockPid = () => { try { return Number(Deno.readTextFileSync(lockPath)); } catch { return 0; } };
+const lockPid = () => lockHolder(lockPath);
 // The run holding the lock named by its pid, from its command line: a run or an abandon (cron.js holderKind).
 const holderOf = (pid: number) => holderKind(sh("ps", ["-o", "command=", "-p", String(pid)], undefined, {}, 10).out);
 // A preview's remote `up` that its run did not live to end: its pgid and the `down` that removes the preview, kept in <state>/lock.preview from the start of

@@ -877,6 +877,9 @@ export const upExtra = (upElapsed, timeout, grace) => Math.max(0, timeout - upEl
 // `orphan`: a dead holder left a preview record (its `up` pgid and `down`, <state>/lock.preview): "reap" stops that `up` (TERM, then KILL, the recorded
 // pgid only) and runs the recorded `down` before the lock is taken over, so a supervisor's kill never leaves the preview for the next run to race.
 export const lockStep = (made, pid, alive, orphan = false) => made ? "take" : pid && alive ? "busy" : orphan ? "reap" : "takeover";
+// The pid holding a lock, from what is read of it: a lock an earlier version made is a directory holding `pid` (`isDir`: `dirText` is its content), a current one
+// a file holding the pid (`fileText`). A legacy holder that runs keeps its lock (lockStep says busy); only a dead or unreadable one (0) is removed.
+export const holderPid = (isDir, dirText, fileText) => Number((isDir ? dirText : fileText) ?? "") || 0;
 // The sequence that stops an orphaned `up` (alive: its group; elapsed: ms since the sequence began): the same bounded steps as a signal's, with no limit left to wait.
 export const reapStep = (alive, elapsed, grace) => previewUpStep(alive, elapsed, 0, grace);
 
