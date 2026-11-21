@@ -693,7 +693,7 @@ export const heldConfig = (cron, trusted) => ({
 
 // The plans release-cron.ts executes, in order, as action names. A decision made here is tested; the driver only does what the plan says.
 // What a plan does that changes something (a checkout, a marker, a notice, a deletion, a hold): `mutations` lists them, and a dry plan has none.
-const mutating = ["checkout", "trust", "config", "mark-refused", "notify", "tell", "mark-told", "delete-branch", "clear-record", "close-hold", "drop-branch", "end-abandoned", "end-refused", "end-held-backport"];
+const mutating = ["checkout", "trust", "config", "mark-refused", "notify", "tell", "mark-told", "delete-branch", "close-hold", "drop-branch", "end-abandoned", "end-refused", "end-held-backport"];
 export const mutations = (plan) => plan.filter((a) => mutating.includes(a));
 // A held tip, once judged (`why`: refusedTip's answer, null when it passes): refused before any checkout or trust, and a dry run reports where a
 // real run would act, checking nothing out.
@@ -703,7 +703,7 @@ export const heldPlan = (why, dry) => why
 // The released branch's backport check (`missing`: what is not on main; `told`: this set was told already): wait and tell once, or delete.
 export const backportPlan = (missing, told, dry) => missing.length
   ? [...(told || dry ? [] : ["tell", "mark-told"]), "end-held-backport"]
-  : dry ? ["report-delete"] : ["delete-branch", "clear-record"];
+  : dry ? ["report-delete"] : ["delete-branch"];
 // A held release past its limits: given up, or, dry, reported.
 export const limitPlan = (dry) => dry ? ["report-abandon"] : ["close-hold", "drop-branch", "end-abandoned"];
 

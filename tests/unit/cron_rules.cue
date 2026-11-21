@@ -234,7 +234,7 @@ cases: {
 	"a real run tells once, then deletes or closes": {suite: "cron", steps: [
 		{call: "cron.backportPlan", args: [[{sha: "c"}], false, null], expect: ["tell", "mark-told", "end-held-backport"]},
 		{call: "cron.backportPlan", args: [[{sha: "c"}], true, null], expect: ["end-held-backport"], why: "this set was told already"},
-		{call: "cron.backportPlan", args: [[], false, null], expect: ["delete-branch", "clear-record"]},
+		{call: "cron.backportPlan", args: [[], false, null], expect: ["delete-branch"]},
 		{call: "cron.limitPlan", args: [null], expect: ["close-hold", "drop-branch", "end-abandoned"]},
 	]}
 	"a held tip confirms itself by the trusted checkout's probes and serving command": {suite: "cron", steps: [
