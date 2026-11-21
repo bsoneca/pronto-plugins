@@ -37,6 +37,48 @@ setups: {
 		github: owner:    "acme"
 		scaleSets: "shop-plain": repo: "shop"
 	}
+	// A Mac's runners as accounts of their own: a `pr` account for pull requests' code, a `trusted`
+	// one that takes only the workflows its runner admits, and the applier's own (an `owner`, no runner
+	// of it) kept out of the pr account's reach; one runner of each, one of the applier's that is only behind a hook, and one
+	// plain. What is a setup's own (groups, paths, the pr environment) is written here as a setup writes it.
+	"check-accounts": {
+		cluster: host: {}
+		github: owner: "acme"
+		accounts: {
+			"ci-pr":      role: "pr"
+			"ci-trusted": role: "trusted"
+			check: {role: "owner", existing: true, group: "staff"}
+		}
+		forbiddenGroups: ["admin", "studio"]
+		protectedPaths: ["/opt/homebrew/bin", "/Users/Shared/pronto/mise", "/Library/LaunchDaemons"]
+		trustedTools: ["gh", "git", "jq"]
+		// A pin as a setup writes one (these values are the fixture's own).
+		versions: gh: "osx-arm64": {
+			url:    "https://example.invalid/gh_2.0.0_macOS_arm64.zip"
+			sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			member: "gh_2.0.0_macOS_arm64/bin/gh"
+			binary: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		}
+		prEnv: {
+			STACK_POOL:               "/tmp/pronto-stacks-{user}"
+			STACK_HOLD_POOL:          "/tmp/pronto-stacks"
+			STACK_HOLD_UID:           "501"
+			MISE_SHARED_INSTALL_DIRS: "/Users/Shared/pronto/mise"
+		}
+		hostRunners: {
+			"shop-pr": {repo: "shop", labels: ["shop-pr"], user: "ci-pr"}
+			"shop-trusted": {
+				repo: "shop", user: "ci-trusted"
+				admits: [
+					{workflow: ".github/workflows/automerge.yml", events: ["workflow_run", "schedule"]},
+					{workflow: ".github/workflows/regenerate.yml", events: ["push"]},
+				]
+			}
+			// The applier's own, still a LaunchAgent, behind the hook.
+			"shop-agent": {repo: "shop", admits: [{workflow: ".github/workflows/cd.yml", events: ["workflow_dispatch"]}]}
+			"shop-own": repo: "shop"
+		}
+	}
 	"check-host": {
 		cluster: host: {}
 		github: owner: "acme"

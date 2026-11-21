@@ -1,0 +1,385 @@
+{
+ "0597321414103e648194f5fa": {
+  "code": 0,
+  "said": "",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "06af051ef1b9d5b28d5bb0b6": {
+  "code": 0,
+  "said": "/set type=file\n.               type=dir\n\nbin             type=dir\n    x           \\\n                sha256digest=2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\n..\n\n\nexternals       type=dir\n\nnode20          type=dir\n\nbin             type=dir\n    npm         type=link link=../lib/npm-cli.js\n..\n\n..\n\n..\n\n..",
+  "kept": [
+   true,
+   false,
+   false
+  ],
+  "then": []
+ },
+ "0e28157dbbd0c2745854ba9c": {
+  "code": 1,
+  "said": "a tab or a newline in a name or a link: @tmp/runner/a\tb\n@tmp/runner/a\tb/x",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "10262e028fa2c486c41cc4cb": {
+  "code": 0,
+  "said": "",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "123fda64040b5d944e6b84b1": {
+  "code": 0,
+  "said": "",
+  "kept": [
+   true,
+   true
+  ],
+  "then": []
+ },
+ "174315a994b4c0dbcf6161e9": {
+  "code": 1,
+  "said": "@tmp/w -> ../_work/x reaches _work or _diag",
+  "kept": [
+   true,
+   false,
+   false
+  ],
+  "then": []
+ },
+ "1d42fe9e939649ee9702244a": {
+  "code": 1,
+  "said": "@tmp/runner is a mount point",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "20f385beacff828ab62ee973": {
+  "code": 0,
+  "said": "",
+  "kept": [
+   true,
+   false,
+   false,
+   true,
+   true
+  ],
+  "then": [
+   {
+    "code": 0,
+    "said": ""
+   },
+   {
+    "code": 0,
+    "said": ""
+   },
+   {
+    "code": 0,
+    "said": ""
+   },
+   {
+    "code": 0,
+    "said": ""
+   },
+   {
+    "code": 0,
+    "said": "0: group:everyone allow read"
+   },
+   {
+    "code": 0,
+    "said": "l"
+   }
+  ]
+ },
+ "29aad4b6cb1f7da41121a2a5": {
+  "code": 1,
+  "said": "evil extra\nthe folder is not the runner tarball's",
+  "kept": [
+   true,
+   true
+  ],
+  "then": []
+ },
+ "2c0eb12f3b387c82e85ea8b3": {
+  "code": 1,
+  "said": "@tmp/runner still has an ACL",
+  "kept": [
+   true,
+   false,
+   false,
+   true,
+   true
+  ],
+  "then": []
+ },
+ "2c46b71b5d4e9c89035c932f": {
+  "code": 1,
+  "said": "@tmp/runner/bin/q\n@tmp/runner/bin/p has more than one link",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "36167499a282b0f504967b3d": {
+  "code": 1,
+  "said": "shasum: WARNING: 1 computed checksum did NOT match",
+  "kept": [
+   true,
+   false,
+   false
+  ],
+  "then": []
+ },
+ "3bb9eabe1393afc59e9690ca": {
+  "code": 1,
+  "said": "externals/node20/bin/npm changed\n\tlink_ref expected ../lib/npm-cli.js found ../../../../../etc\nthe folder is not the runner tarball's",
+  "kept": [
+   true,
+   true
+  ],
+  "then": []
+ },
+ "442da9c6d21552997d173618": {
+  "code": 0,
+  "said": "",
+  "kept": [
+   true,
+   true,
+   true,
+   false,
+   false,
+   true,
+   true
+  ],
+  "then": [
+   {
+    "code": 0,
+    "said": "0: group:everyone allow read\n 0: group:everyone allow read"
+   }
+  ]
+ },
+ "46ac2c01fa3613271d02d0de": {
+  "code": 1,
+  "said": "bin/extra extra\nthe folder is not the runner tarball's",
+  "kept": [
+   true,
+   true
+  ],
+  "then": []
+ },
+ "470df2877888181e61835898": {
+  "code": 1,
+  "said": "@tmp/runner holds a mount point",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "472f80c1bfbe32e7b19ca596": {
+  "code": 0,
+  "said": "",
+  "kept": [
+   true,
+   true
+  ],
+  "then": []
+ },
+ "4e7536cb498d3536612e9df1": {
+  "code": 1,
+  "said": "@tmp/runner/.path is not a plain file",
+  "kept": [
+   true,
+   true
+  ],
+  "then": []
+ },
+ "506262fad2fa8132619c13fd": {
+  "code": 0,
+  "said": "",
+  "kept": [
+   true,
+   true
+  ],
+  "then": []
+ },
+ "6337be8ce6674726e4b56dc1": {
+  "code": 1,
+  "said": "a tab or a newline in a name or a link: @tmp/runner/nt",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "644e36aaff73b372495cd79f": {
+  "code": 1,
+  "said": "./externals missing\n./externals/node20 missing\n./externals/node20/bin missing\n./externals/node20/bin/npm missing\nthe folder is not the runner tarball's",
+  "kept": [
+   true,
+   true
+  ],
+  "then": []
+ },
+ "68f98bd18e08f0b752da4f8a": {
+  "code": 1,
+  "said": "@tmp/runner still has an ACL",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "6977c1c2dc1b7faa06f81605": {
+  "code": 0,
+  "said": "",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "6f8e61d653520ac404d185f5": {
+  "code": 1,
+  "said": "",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "708167f9962dbb011cbf005b": {
+  "code": 1,
+  "said": "",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "7bb223a15ae50f8c161ae363": {
+  "code": 1,
+  "said": "@tmp/runner/.credentials is not a plain file",
+  "kept": [
+   true,
+   true
+  ],
+  "then": []
+ },
+ "7ed9e6a090b3a1f192876511": {
+  "code": 1,
+  "said": "",
+  "kept": [
+   true,
+   false,
+   false,
+   false,
+   false
+  ],
+  "then": []
+ },
+ "8f948d0cad0c46baa61d1cb4": {
+  "code": 1,
+  "said": "bin/y extra\nthe folder is not the runner tarball's",
+  "kept": [
+   true,
+   true
+  ],
+  "then": []
+ },
+ "9028971c0f27a77a56339381": {
+  "code": 1,
+  "said": "bin/x changed\n\tSHA-256 expected 2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881 found a1fce4363854ff888cff4b8e7875d600c2682390412a8cf79b37d0b11148b0fa\nthe folder is not the runner tarball's",
+  "kept": [
+   true,
+   true
+  ],
+  "then": []
+ },
+ "96d1d3df31f0fadeb775ffba": {
+  "code": 1,
+  "said": "@tmp/runner/bin/x\n@tmp/runner/bin/y has more than one link",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "a586696ec78d2afe4654549e": {
+  "code": 1,
+  "said": "@tmp/runner/externals/w -> ../_work/x reaches _work or _diag",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "a9a96b8dc1e13f77b7288d35": {
+  "code": 1,
+  "said": "",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "b21fdc87cb7387039f1d07b5": {
+  "code": 0,
+  "said": "",
+  "kept": [
+   true,
+   true,
+   false,
+   false,
+   false
+  ],
+  "then": []
+ },
+ "cb4a8bb387bd29774ba3f64c": {
+  "code": 1,
+  "said": "a tab or a newline in a name or a link: @tmp/runner/n\nl",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "cd9b641ad0076aeddc720272": {
+  "code": 1,
+  "said": "@tmp/tree.mtree: no mtree of the runner tarball",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "f09ec221f60aa411e09a8a7f": {
+  "code": 1,
+  "said": "@tmp/runner/externals/w -> ../_diag/x reaches _work or _diag",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ },
+ "feae8d4d4590cf7ff26e4ca8": {
+  "code": 0,
+  "said": "",
+  "kept": [
+   true,
+   false
+  ],
+  "then": []
+ }
+}
