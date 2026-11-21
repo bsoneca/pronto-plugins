@@ -194,3 +194,29 @@ export async function descendant(opts) {
     await Deno.remove(dir, { recursive: true });
   }
 }
+
+// The image guard of the shared tests/lint.ts on a stand-in app (PRONTO-870): a scenarios runner whose loader imports
+// tests/slot.ts, which names ".bayt", "cue.mod" and the compose file. `lint image` runs in the app's folder, as the gate does.
+export async function imageGuard() {
+  const dir = await Deno.makeTempDir();
+  const lint = new URL("../../harness/files/tests/lint.ts", import.meta.url).pathname;
+  const put = async (path, text) => {
+    await Deno.mkdir(`${dir}/${path.split("/").slice(0, -1).join("/") || "."}`, { recursive: true });
+    await Deno.writeTextFile(`${dir}/${path}`, text);
+  };
+  try {
+    await put("bayt.json", JSON.stringify({ name: "x" }));
+    await put(".bayt/bayt.integrate.json", JSON.stringify({ name: "integrate", compose: { command: ["deno", "run", "tests/scenarios.ts"] } }));
+    await put(".bayt/Dockerfile.integrate", "FROM scratch AS integrate\nCOPY tests tests\n");
+    await put(".bayt/process-compose.yaml", "processes: {}\n");
+    await put("cue.mod/module.cue", "module: \"x.test\"\n");
+    await put("tests/scenarios.ts", 'import "./scenarios/load.ts";\n');
+    await put("tests/scenarios/load.ts", 'import { treeOf } from "../slot.ts";\nexport const t = treeOf;\n');
+    await put("tests/slot.ts", 'export const treeOf = () => [".bayt", "cue.mod", ".bayt/process-compose.yaml"];\n');
+    const out = await new Deno.Command(Deno.execPath(), { args: ["run", "-A", "--no-config", lint, "image"], cwd: dir, stdout: "piped", stderr: "piped" }).output();
+    const say = new TextDecoder();
+    return { code: out.code, out: say.decode(out.stdout).trim(), err: say.decode(out.stderr).trim() };
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}

@@ -330,3 +330,12 @@ cases: "a descendant that ignores TERM is killed after the grace, the rejection 
 		{get: "gone", expect: true, why: "KILLed after the 2 s grace (the timer keeps the process alive for it)"},
 	]
 }
+
+// The image guard follows what a driver reads, not the folders it names (PRONTO-870): tests/slot.ts holds ".bayt",
+// "cue.mod" and the compose file as strings, load.ts imports it, and the guard asked for them in the image.
+cases: "a scenarios runner importing tests/slot.ts, which names .bayt and cue.mod, reports no image problem": {
+	suite: "harness"
+	steps: [
+		{call: "harness.imageGuard", expect: {code: 0, out: "lint image: ok", err: ""}, why: "slot.ts is the host tier's: what it opens is not read in an image"},
+	]
+}

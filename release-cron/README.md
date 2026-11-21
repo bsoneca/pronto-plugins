@@ -187,8 +187,11 @@ An app with a `target.preview` chooses `when` (the field of `preview`, default `
     (else the run fails, nothing released). `"first"` makes the same check.
 
   The run's lock covers both, so there is still one release per app. The record has one step for the overlap, `rehearse+preview` (`releaseCron.steps.beside`, the names of every step are declared there) (their wall
-  time, so `report`'s sum counts it once), and `run.beside = {rehearse, preview, first}` (each one's seconds to its end, and which ended
-  first). `release-active` names the phase `rehearse+preview`.
+  time, so `report`'s sum counts it once), and `run.beside = {slot, rehearse, preview, first}`: `slot` is the rehearsal's slot wait in seconds (from its claim to its
+  admission, as the `slot` step is for a run that is not beside, which the overlap writes no step for; `besideTimes` in `cron.js`),
+  `rehearse` its run time in seconds (admission to its end), `preview` the preview's seconds to its end (from the start of both),
+  and `first` which ended first. A rehearsal that ended before it had a slot is all `slot`, `rehearse: 0`; one that needed none
+  (nothing to wait for, or every check already green for the tree) has `slot: 0`. `release-active` names the phase `rehearse+preview`.
 
 ## The release holds the machine
 

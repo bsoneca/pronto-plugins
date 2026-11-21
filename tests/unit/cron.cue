@@ -177,6 +177,13 @@ cases: {
 		{call: "cron.noVerdictRun", args: ["the rehearsal failed (exit 1): nothing released"], expect: false},
 		{call: "cron.noVerdictRun", args: [null], expect: false},
 	]}
+	// The overlap writes no `slot` step, so a beside run keeps the rehearsal's slot wait in run.beside.slot (PRONTO-870).
+	"a beside run's rehearsal splits its time into the slot wait and the run, in seconds": {suite: "cron", steps: [
+		{call: "cron.besideTimes", args: [1000000, 1600000, 5200000], expect: {slot: 600, rehearse: 3600}, why: "10 min queued, then 60 min run"},
+		{call: "cron.besideTimes", args: [1000000, 1000000, 1900400], expect: {slot: 0, rehearse: 900}, why: "no slot wanted, or every check already green: no wait"},
+		{call: "cron.besideTimes", args: [1000000, null, 1250000], expect: {slot: 250, rehearse: 0}, why: "ended before it had a slot: all waiting, none run"},
+		{call: "cron.besideTimes", args: [1000000, 1000400, 1000900], expect: {slot: 0, rehearse: 1}, why: "rounded to the second"},
+	]}
 	"a preview beside the rehearsal: the first to fail stops the other, both pass releases": {suite: "cron", steps: [
 		{call: "cron.besideOutcome", args: [null, {bad: ["home /: 502, expected 200"], at: 40}], expect: {stop: "rehearsal", failed: "preview", why: "the release preview failed: home /: 502, expected 200; the rehearsal was stopped"}, why: "the preview failed first: the rehearsal is stopped, and says so"},
 		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, null], expect: {stop: "preview", failed: "rehearsal", why: "the rehearsal failed (exit 1); the preview was stopped"}, why: "the rehearsal failed first: the preview is stopped"},
