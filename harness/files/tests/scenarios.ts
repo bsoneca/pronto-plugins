@@ -19,6 +19,7 @@ import { devices, request, type APIRequestContext, type BrowserContext, type CDP
 import { launch as launchBrowser } from "./browser.ts";
 import { gate, slow, slowCpu, slowDown } from "./slow.ts";
 import { early } from "./scenarios/early.ts";
+import { stepGate, type Gated } from "./scenarios/gate.ts";
 import { fileFlake as file } from "./scenarios/flakes.ts";
 import { writeVerdict } from "./scenarios/verdict.ts";
 import { loadScenarios, type ActorDef, type Scenario, type Step } from "./scenarios/load.ts";
@@ -381,21 +382,20 @@ export class Run {
   }
 
   async step(st: Step): Promise<unknown> {
-    // A step for the app as it is with a flag off (`unless`): skipped where the flag is on, as the flag's own steps are where it is off.
-    if (st.unless !== undefined && await flagOn(st.unless)) { this.onHere.add(st.unless); return; }
-    if (TESTER && st.flag !== undefined && st.flag === Deno.env.get("FLAG")) {
+    // Its place, a kept value, then its flags (scenarios/gate.ts): a step for another place asks the door nothing.
+    const g = await stepGate(st as Gated, { place: onProduction ? "production" : deployed(new URL(URL_).hostname) ? "deployed" : "local",
+      kept: (k) => this.vars.get(k), flip: TESTER ? Deno.env.get("FLAG") : undefined }, flagOn);
+    if (g.onHere) this.onHere.add(g.onHere);
+    if (g.off) this.skipped.add(g.off);
+    if (!g.run) return;
+    if (g.flip && st.flag !== undefined) {
       // A flip tests its flag (FLAG, by `pronto-flags push`) as the tester, for whom alone the canary turns it on:
       // asked with the tester's session once the actor has it (the steps before its sign-in run as they are), and
       // off for the tester is a failure, never a skip.
       const who = st.by ? await this.actor(st.by) : null;
       const s = who ? await this.session(who).catch(() => null) : null;
       if (s && !s.guest && !(await ofrepAsk(st.flag, s.token))) throw new Error(`${st.flag} is off for the tester ${TESTER}, which this run tests`);
-    } else if (st.flag !== undefined && !(await flagOn(st.flag))) { this.skipped.add(st.flag); return; }
-    // Asked only on production or only at hand (`on`), and only once a step has kept a value (`ifKept`). At hand is a
-    // stack on this machine: a deployed preview is neither (PRONTO-873: a database step there would fail the run).
-    if (st.on === "production" && !onProduction) return;
-    if (st.on === "local" && (onProduction || deployed(new URL(URL_).hostname))) return;
-    if (st.ifKept && ["", "undefined", "null"].includes(this.vars.get(st.ifKept) ?? "")) return;
+    }
     const t = st.timeout ?? 30, ms = t * 1000;
     if ("http" in st) { await this.heat(null); return this.http(st, st.by ? await this.actor(st.by) : null, t); }
     // Several actors' steps at one instant: each is sent before any is answered.

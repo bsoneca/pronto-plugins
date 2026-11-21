@@ -16,6 +16,7 @@ _scenarios:  _ @embed(file="files/tests/scenarios/select.ts", type=text)
 _runner:     _ @embed(file="files/tests/scenarios.ts", type=text)
 _scenSchema: _ @embed(file="files/tests/scenarios/schema.cue", type=text)
 _early:      _ @embed(file="files/tests/scenarios/early.ts", type=text)
+_gate:       _ @embed(file="files/tests/scenarios/gate.ts", type=text)
 _flakes:     _ @embed(file="files/tests/scenarios/flakes.ts", type=text)
 _verdict:    _ @embed(file="files/tests/scenarios/verdict.ts", type=text)
 _load:       _ @embed(file="files/tests/scenarios/load.ts", type=text)
@@ -38,6 +39,7 @@ _slow:       _ @embed(file="files/tests/slow.ts", type=text)
 			"tests/scenarios/schema.cue": {seed: false, text: _scenSchema}
 			"tests/scenarios/select.ts": {seed: false, text: _scenarios}
 			"tests/scenarios/early.ts": {seed: false, text: _early}
+			"tests/scenarios/gate.ts": {seed: false, text: _gate}
 			"tests/scenarios/flakes.ts": {seed: false, text: _flakes}
 			"tests/scenarios/verdict.ts": {seed: false, text: _verdict}
 			"tests/scenarios/load.ts": {seed: false, text: _load}

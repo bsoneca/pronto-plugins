@@ -339,3 +339,38 @@ cases: "a scenarios runner importing tests/slot.ts, which names .bayt and cue.mo
 		{call: "harness.imageGuard", expect: {code: 0, out: "lint image: ok", err: ""}, why: "slot.ts is the host tier's: what it opens is not read in an image"},
 	]
 }
+
+// A step's gate (harness/files/tests/scenarios/gate.ts): its place and kept value are asked before its flags, so a
+// step for another place sends the door nothing (a production flip's run: no OFREP request for a local step).
+cases: "a local step on production is skipped and asks no flag": {
+	suite: "harness"
+	steps: [
+		{call: "harness.gate", args: [{on: "local", flag: "f"}, {place: "production"}], expect: {run: false, asked: []}},
+		{call: "harness.gate", args: [{on: "local", unless: "f"}, {place: "production"}], expect: {run: false, asked: []}},
+	]
+}
+cases: "a local step on a deployed preview is skipped and asks no flag": {
+	suite: "harness"
+	steps: [
+		{call: "harness.gate", args: [{on: "local", flag: "f"}, {place: "deployed"}], expect: {run: false, asked: []}},
+	]
+}
+cases: "a step whose kept value is missing is skipped and asks no flag": {
+	suite: "harness"
+	steps: [
+		{call: "harness.gate", args: [{flag: "f", ifKept: "live"}, {place: "local"}], expect: {run: false, asked: []}},
+	]
+}
+cases: "a local step at hand asks its flag, and an unless step there is skipped once the flag is on": {
+	suite: "harness"
+	steps: [
+		{call: "harness.gate", args: [{on: "local", flag: "f"}, {place: "local"}], expect: {run: true, asked: ["f"]}},
+		{call: "harness.gate", args: [{on: "local", unless: "f"}, {place: "local"}], expect: {run: false, asked: ["f"]}},
+	]
+}
+cases: "a production step of the flag a flip tests runs and asks nothing": {
+	suite: "harness"
+	steps: [
+		{call: "harness.gate", args: [{on: "production", flag: "f"}, {place: "production", flip: "f"}], expect: {run: true, asked: []}},
+	]
+}
