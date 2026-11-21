@@ -78,6 +78,20 @@ A flip therefore needs a test of its own, and it must be:
    - Refusing instead would block every push from main while a retirement or an unflipped default
      awaits a release, which for a release-cron app is always.
    - `rollback` still writes an old version whole.
+9. **A pass must have shown the flag at work.** A runner skips a step behind a flag
+   that is off at the door, so a flip whose live site still evaluated the flag false could run
+   green having exercised nothing.
+   - Before the production cases, the push waits until the node's flagd answers each changed
+     flag's new value for the anonymous context (OFREP, no targetingKey), flipped to true or
+     not; if it never does, the push rolls back and runs no case (tested: stale flagd).
+   - After each flag's cases, the output is read (`vacuous` in `flags/live.nu`). It is refused,
+     and rolled back like a failed case, when it holds no `✓ <scenario>` verdict, when a verdict
+     names the flipped flag in `steps behind <flags> skipped, off here` (Bonk Chess's runner
+     prints it), or when a verdict counts `0 steps run`.
+   - Studio's runner prints no skipped-steps clause, and none prints how many steps ran: proposed, one more clause on
+     each `✓` line, `; <n> steps run, <m> skipped`, a separate pronto change. Until then the
+     guard rests on the skipped-flag clause and on the missing verdict.
+   - There is still no tester stage (decision 2).
 
 ## The production guarantee
 

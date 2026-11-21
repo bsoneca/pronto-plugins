@@ -100,7 +100,7 @@ flags: premium: {default: ($premium), local: true}
 flags: theme: {default: \"($theme)\"}
 flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", url: \"https://shop.example\"}
 flagsCases: {
-	live:  \"echo live $FLAG $ONLY $APP_URL ${FLAGS_TESTER:-} >> ran.log; test ! -f crash-live || kill -9 $$; test ! -f fail-live\"
+	live:  \"echo live $FLAG $ONLY $APP_URL ${FLAGS_TESTER:-} >> ran.log; test ! -f crash-live || kill -9 $$; test ! -f fail-live || exit 1; if test -f skipped-live; then echo '✓ buy 1s: shop; steps behind '$FLAG' skipped, off here'; elif test -f silent-live; then :; elif test -f zero-live; then echo '✓ buy 1s: shop; 0 steps run, 3 skipped'; else echo '✓ buy 1s: shop'; fi\"
 }
 GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
 " | save -f $"($app)/flags_spec.cue"
@@ -199,6 +199,29 @@ rm $"($app)/crash-live"
 let n2 = (object | length)
 let st = (livex [push $app --flip premium] {FAKE_OFREP_STALE: "1"})
 check ($st.exit_code != 0 and ($st.stderr | str contains "did not answer") and (premium (newest 0)) == $pre and (object | length) == $n2 + 2) "OFREP timeout: rolled back"
+
+# The door still says the flag is off for everyone (a flagd or door that never took the new object): the
+# push waits on OFREP's answer for no context, fails before any case runs, and writes the version before.
+let n2b = (object | length)
+let ran2b = (ran | length)
+let door = (livex [push $app --flip premium] {FAKE_OFREP_STALE: "1"})
+check ($door.exit_code != 0 and ($door.stderr | str contains "did not answer the new value of premium") and (ran | length) == $ran2b and (object | length) == $n2b + 2 and (premium (newest 0)) == $pre and (newest 0).metadata.stage == "rolled-back") "door says false: no case ran, rolled back"
+
+# A green run that showed nothing is no pass: every step skipped (the flag off where the cases ran), no scenario
+# verdict at all, or a runner that counts its steps and ran none. Each rolls back; one that ran steps passes.
+for v in [{f: skipped-live, why: "skipped its steps behind premium"}, {f: silent-live, why: "no passed scenario"}, {f: zero-live, why: "ran no step"}] {
+	touch $"($app)/($v.f)"
+	let n = (object | length)
+	let e = (livex [push $app --flip premium])
+	check ($e.exit_code != 0 and ($e.stderr | str contains "rolled back") and ($e.stderr | str contains "showed nothing") and ($e.stderr | str contains $v.why) and (object | length) == $n + 2 and (premium (newest 0)) == $pre and (newest 0).metadata.stage == "rolled-back") $"a vacuous run \(($v.f)\): refused and rolled back"
+	rm $"($app)/($v.f)"
+}
+let nok = (object | length)
+let okr = (livex [push $app --flip premium])
+check ($okr.exit_code == 0 and (object | length) == $nok + 2 and (newest 0).metadata.cases == "passed" and (premium (newest 0)).variants.default == true) "a run that executed steps: passes"
+full-spec false "light"
+livex [push $app --flip premium] | ignore
+full-spec true "light"
 
 # No change to a default value: no cases needed, and none run.
 full-spec false "light"

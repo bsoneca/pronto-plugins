@@ -675,6 +675,10 @@ PRONTO-284). `pronto-flags push <app-dir> --flip <flag>` (a push is a merge over
    `production` scenarios that need no tester (no `signIn` step), and writes
    `cases=passed`; a failure, or an OFREP that never answers, writes the version
    read before the push again as the newest, prints the report and exits non-zero.
+   A green run that showed nothing fails the same way: the runner printed no
+   passed scenario, or a scenario's verdict says its steps behind the flipped flag
+   were skipped (`; steps behind <flag> skipped, off here`), i.e. the site still
+   evaluates the flag off (docs/flag-flips.md, decision 9).
 
 A `production` scenario that signs in is listed and not run: a flip has no tester to
 sign in as. `--no-canary "<why>"` (pronto-plugins#184) is still accepted and does
