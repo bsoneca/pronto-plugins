@@ -6,11 +6,18 @@
 
 package releasecron
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 _schema: _ @embed(file="schema.cue", type=text)
 _driver: _ @embed(file="release-cron.ts", type=text)
 _rules:  _ @embed(file="cron.js", type=text)
+// The module cron.js and release-cron.ts import the failure causes from: releaseCron.causes (schema.cue) as JS, so the phrases are
+// written once, in CUE. The committed causes.js is this text (tests.cue checks it), for the unit cases and the driver run in place.
+_causesJS: "// generated from release-cron/schema.cue (releaseCron.causes) by host.cue — do not edit\nexport const causes = \(json.Marshal(#Cron.causes));\n"
+_causesFile: _ @embed(file="causes.js", type=text)
 
 #Host: H={
 	// The program's CUE package, which the schema joins.
@@ -21,6 +28,7 @@ _rules:  _ @embed(file="cron.js", type=text)
 	files: {
 		"release-cron/release-cron.ts": {seed: false, text: _driver}
 		"release-cron/cron.js": {seed: false, text: _rules}
+		"release-cron/causes.js": {seed: false, text: _causesJS}
 		"release_cron_plugin.cue": {
 			seed: false
 			text: H._header + strings.Replace(_schema, "\npackage releasecron\n", "\npackage \(H.package)\n", 1)

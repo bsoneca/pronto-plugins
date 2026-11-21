@@ -1,3 +1,5 @@
+import { causes } from "./causes.js"; // releaseCron.causes, emitted from release-cron/schema.cue (host.cue)
+
 // release-cron's rules, apart from what they act on (release-cron.ts runs git, the rehearsal, the
 // release and curl): whether a run is due, whether a change is the app's, which commit is serving,
 // when the rehearsal got its slot, what a probe's answer means, where a run's time went,
@@ -302,9 +304,22 @@ export const androidWhy = (code, names) => `the android step failed (exit ${code
 export const noVerdictExit = (code) => code === 3 || code === 124 || code >= 128;
 
 // Whether a run says its rehearsal gave no verdict, or was stopped because the preview failed first (preview `when: "beside"`):
-// the bisect skips it. `causes`: releaseCron.causes. A record with a `cause` is read by that key; an older one by its `why`.
-export const noVerdictRun = (why, causes, cause) =>
-  cause ? cause === "noVerdict" || cause === "rehearsalStopped" : (why ?? "").startsWith(causes.noVerdict) || (why ?? "").includes(`; ${causes.rehearsalStopped}`);
+// the bisect skips it, as it does a run a signal stopped. A record with a `cause` is read by that key; an older one by its `why`.
+export const noVerdictRun = (why, cause) =>
+  cause ? ["noVerdict", "rehearsalStopped", "signal"].includes(cause) : (why ?? "").startsWith(causes.noVerdict) || (why ?? "").includes(`; ${causes.rehearsalStopped}`);
+
+// A run's reason and its cause key, for the failures the driver names itself (releaseCron.causes): `beforeSlot` (the rehearsal
+// ended before its slot: `command` its text, `code` its exit, `noVerdict` whether that is no verdict), `noVerdict`, `rehearsalFailed`
+// (`code`) and `previewFailed` (`bad` what the preview's checks found, `stopped` whether the beside rehearsal was stopped for it).
+// `downFailed` is a failed `down` appended to the reason. The reason is what the records on disk carry.
+export const failureOf = (kind, a) => {
+  const down = a.downFailed ?? "";
+  if (kind === "beforeSlot") return { why: `${a.noVerdict ? `${causes.noVerdict}: ` : ""}${a.command} ${causes.endedBeforeSlot} (exit ${a.code}): nothing released${down}`, cause: a.noVerdict ? "noVerdict" : "endedBeforeSlot" };
+  if (kind === "noVerdict") return { why: `${causes.noVerdict} (exit ${a.code}): nothing released${down}`, cause: "noVerdict" };
+  if (kind === "rehearsalFailed") return { why: `${causes.rehearsalFailed} (exit ${a.code}): nothing released${down}`, cause: "rehearsalFailed" };
+  if (kind === "previewFailed") return { why: `${causes.previewFailed}: ${a.bad.join("; ")}${a.stopped ? `; ${causes.rehearsalStopped}` : ""}: nothing released`, cause: a.stopped ? "rehearsalStopped" : "previewFailed" };
+  throw new Error(`no failure of kind ${kind}`);
+};
 
 // The rehearsal and the preview run side by side (preview `when: "beside"`): what to do with them once one of them
 // has ended. Each is null while it runs. `rehearsal`: {code, at}, its exit and when it ended (ms into the race);
@@ -312,8 +327,8 @@ export const noVerdictRun = (why, causes, cause) =>
 // longer worth finishing ("rehearsal" or "preview", else null), `failed` (the one whose failure ends the run: the
 // earlier when both failed) and `why`. `stopped`: the driver stopped the rehearsal (it was still running when the
 // preview failed) and it ended without passing. A stopped rehearsal is no verdict of the tree, so the run's reason
-// says so (noVerdictRun), also when the call is made once it has ended. `causes`: releaseCron.causes, the phrases `why` is built from.
-export const besideOutcome = (rehearsal, preview, stopped, causes) => {
+// says so (noVerdictRun), also when the call is made once it has ended.
+export const besideOutcome = (rehearsal, preview, stopped = false) => {
   const r = !!rehearsal && rehearsal.code !== 0, p = !!preview && preview.bad.length > 0;
   if (p && (!r || preview.at < rehearsal.at)) {
     return { stop: rehearsal ? null : "rehearsal", failed: "preview", why: `${causes.previewFailed}: ${preview.bad.join("; ")}${!rehearsal || stopped ? `; ${causes.rehearsalStopped}` : ""}` };

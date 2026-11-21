@@ -31,7 +31,8 @@
 // the first green one releases from it (README.md, "Release branches"). `abandon` gives a held release up by hand.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, heldLanded, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
+import { causes } from "./causes.js";
+import { failureOf, abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, heldLanded, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -281,10 +282,8 @@ if (verb === "bisect") {
   // bisected in its turn, on the verdicts the ones before it settled, so a culprit the next run fails on too shows twice.
   const since = runs.slice(runs.findLastIndex((r) => r.outcome === "released") + 1);
   const settled = (r: { started: string }) => bisects.some((b) => b.of === r.started);
-  // The config holds the phrases a no-verdict run's reason carries (releaseCron.causes); read only when a run could be bisected.
-  const cfg = only || since.some((r) => r.outcome === "failed" || r.cut) ? config(top) : null;
-  const failed = only ? runs.find((r) => r.started === only) : since.find((r) => (r.outcome === "failed" || r.cut) && r.commit && !settled(r) && !noVerdictRun(r.why, cfg!.cron.causes, r.cause));
-  if (failed && noVerdictRun(failed.why, cfg!.cron.causes, failed.cause)) { say(`run ${failed.started} gave no verdict: nothing to bisect`); Deno.exit(0); }
+  const failed = only ? runs.find((r) => r.started === only) : since.find((r) => (r.outcome === "failed" || r.cut) && r.commit && !settled(r) && !noVerdictRun(r.why, r.cause));
+  if (failed && noVerdictRun(failed.why, failed.cause)) { say(`run ${failed.started} gave no verdict: nothing to bisect`); Deno.exit(0); }
   if (!failed) { say("no failed run unbisected"); Deno.exit(0); }
   const at = runs.indexOf(failed);
   const green = runs.slice(0, at).filter((r) => r.outcome === "released" && r.commit).at(-1);
@@ -316,7 +315,7 @@ if (verb === "bisect") {
   const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], here);
   must("git", remote(["--git-dir", repo, "fetch", "-q", "origin"]));
   const slug = must("git", ["--git-dir", repo, "remote", "get-url", "origin"]).replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1");
-  const { gcp: g, cron } = cfg!;
+  const { gcp: g, cron } = config(top);
   const gcpName = g?.name as string | undefined;
   const b = cron.bisect;
   const notify = cron.notify;
@@ -673,7 +672,7 @@ const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() -
 let head = "";
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
 type Command = { release: string[]; serving: string[]; servingAfterRelease: boolean; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string; when?: "after" | "first" | "beside" } };
-let cron!: { causes: { noVerdict: string; rehearsalFailed: string; rehearsalStopped: string; previewFailed: string; previewStopped: string; endedBeforeSlot: string; signal: string }; steps: { prepare: string; slot: string; rehearse: string; android: string; preview: string; beside: string; release: string; confirm: string; error: string }; scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; flagsReleased: string[] | null; gap: number; poll: number; branches?: { enabled: boolean; abandonHours: number; abandonAttempts: number }; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
+let cron!: { steps: { prepare: string; slot: string; rehearse: string; android: string; preview: string; beside: string; release: string; confirm: string; error: string }; scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; flagsReleased: string[] | null; gap: number; poll: number; branches?: { enabled: boolean; abandonHours: number; abandonAttempts: number }; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
 let mark = Date.now();
@@ -698,8 +697,6 @@ const active = (phase: string) => {
 };
 // Previews not yet torn down (up to the end of their `down`), and whether a signal has come.
 let previews = 0, interrupted = false;
-// What a stop by a signal says (releaseCron.causes.signal), the literal only before the config is read.
-const signalWhy = () => cron?.causes.signal ?? "stopped by a signal";
 // `red`: a failure of the rehearsal, the android step or the preview, before any release. With releaseCron.branches a run on main
 // holds the release on a new branch (cut); a run on a held release's branch records its failure as an attempt (abandoning at the limits).
 const end = (outcome: string, why = "", code = 0, red = false, cause = "") => {
@@ -929,7 +926,7 @@ function stop(pgid: number, grace = 60_000) {
 const stopTagged = (tag: string, grace?: number) => { for (const [pgid, t] of children) if (t === tag) stop(pgid, grace); };
 async function child(cmd: string, args: string[], cwd: string, env: Record<string, string>, watch: (l: string) => void = () => {}, tag = "", clearEnv = false) {
   // Nothing new starts once a signal came, but the preview's `down`, which the handler waits for.
-  if (interrupted && tag !== "down") throw new Error(signalWhy());
+  if (interrupted && tag !== "down") throw new Error(causes.signal);
   const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", cmd, ...args], cwd, env, clearEnv, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
   children.set(p.pid, tag);
   // No limit: a line every few minutes says it is still running and for how long.
@@ -1000,7 +997,7 @@ async function previewCheck(pv: NonNullable<Command["preview"]>, dir: string, ca
       }
     }
     // Stopped by a signal before its checks ran: no pass to read (a race loser's cancel is no failure).
-    if (interrupted && !bad.length) bad.push(signalWhy());
+    if (interrupted && !bad.length) bad.push(causes.signal);
   } finally {
     if (reach) { try { send(reach.pid, "TERM"); await reach.stdin.close().catch(() => {}); } catch { /* already gone */ } }
     let down: { code: number };
@@ -1186,7 +1183,7 @@ try {
       const bad = await previewCheck(pv, dir, { stopped: false });
       step(cron.steps.preview);
       sayPreview(bad);
-      if (bad.length) end("failed", `the release preview failed: ${bad.join("; ")}: nothing released`, 1, true);
+      if (bad.length) { const f = failureOf("previewFailed", { bad, stopped: false }); end("failed", f.why, 1, true, f.cause); }
     }
     const beside = !!pv && when === "beside" && !dry;
     let outcome: Awaited<ReturnType<typeof rehearsalRun>>;
@@ -1201,7 +1198,7 @@ try {
       let rehearsalResult: Awaited<ReturnType<typeof rehearsalRun>> | undefined;
       // Once one has ended, the other is stopped when that is the verdict (cron.js besideOutcome).
       const decide = () => {
-        const o = besideOutcome(race.r ?? null, race.p ?? null, false, cron.causes);
+        const o = besideOutcome(race.r ?? null, race.p ?? null);
         if (o.stop === "preview") { cancel.stopped = true; say(`${o.why}`); }
         if (o.stop === "rehearsal") { rehearsalStopped = true; stopTagged("rehearsal", TEARDOWN_GRACE); say(`${o.why}`); }
       };
@@ -1227,8 +1224,8 @@ try {
       // A rehearsal the preview's failure stopped (it ended without passing) is no verdict of the tree: no attempt, no branch (red),
       // and no bisect (noVerdictRun). One that passed before the stop landed is a verdict, and the preview's failure is red as in "after".
       const stopped = rehearsalStopped && r.code !== 0;
-      const o = besideOutcome(r, p, stopped, cron.causes);
-      if (o.failed === "preview") end("failed", `${o.why}: nothing released`, 1, !stopped, stopped ? "rehearsalStopped" : "previewFailed");
+      const o = besideOutcome(r, p, stopped);
+      if (o.failed === "preview") { const f = failureOf("previewFailed", { bad: p.bad, stopped }); end("failed", f.why, 1, !stopped, f.cause); }
       // The rehearsal failed first: the preview was cut short, but a failed `down` (a preview left standing) is said in the run's reason.
       if (cancel.stopped) downFailed = p.bad.filter((b) => b.startsWith("removing the preview")).map((b) => `; ${b}`).join("");
       outcome = rehearsalResult!;
@@ -1238,12 +1235,12 @@ try {
     // So is a rehearsal stopped by a signal (130, or killed: 128 and above), the machine's doing, not the tree's.
     // And a rehearsal its wrapper timed out (124, timeout(1): Studio's integrate@k8s).
     const noVerdict = noVerdictExit(gate.code);
-    if (!got) { if (!beside) step(cron.steps.slot); end("failed", `${noVerdict ? `${cron.causes.noVerdict}: ` : ""}${rehearse!.slice(1).join(" ") || rehearse![0]} ${cron.causes.endedBeforeSlot} (exit ${gate.code}): nothing released${downFailed}`, 1, false, noVerdict ? "noVerdict" : "endedBeforeSlot"); }
+    if (!got) { if (!beside) step(cron.steps.slot); const f = failureOf("beforeSlot", { noVerdict, command: rehearse!.slice(1).join(" ") || rehearse![0], code: gate.code, downFailed }); end("failed", f.why, 1, false, f.cause); }
     if (own && !dry && !beside) step(cron.steps.rehearse);
     // Exit 3 is the rehearsal's "no verdict" (a verdict or record it could not read or write, the checkout changed): nothing
     // is released, and the bisect never takes it up (noVerdictRun), since it says nothing of a commit; no release branch is cut for it.
-    if (noVerdict) end("failed", `${cron.causes.noVerdict} (exit ${gate.code}): nothing released${downFailed}`, 1, false, "noVerdict");
-    if (gate.code !== 0) end("failed", `${cron.causes.rehearsalFailed} (exit ${gate.code}): nothing released${downFailed}`, 1, true, "rehearsalFailed");
+    if (noVerdict) { const f = failureOf("noVerdict", { code: gate.code, downFailed }); end("failed", f.why, 1, false, f.cause); }
+    if (gate.code !== 0) { const f = failureOf("rehearsalFailed", { code: gate.code, downFailed }); end("failed", f.why, 1, true, f.cause); }
 
     // 2a. The android step (releaseCron.android): the app's phone scenarios on an emulator, on a Mac, once the rehearsal
     // passed. A failure ends the run as a failed rehearsal does, and its bisect says "not bisected" (cron.js).
@@ -1272,7 +1269,7 @@ try {
       const bad = await previewCheck(pv, dir, { stopped: false });
       step(cron.steps.preview);
       sayPreview(bad);
-      if (bad.length) end("failed", `the release preview failed: ${bad.join("; ")}: nothing released`, 1, true);
+      if (bad.length) { const f = failureOf("previewFailed", { bad, stopped: false }); end("failed", f.why, 1, true, f.cause); }
     }
 
     // The tree the rehearsal and the preview ran on is the tree released: the preview ran before or beside the rehearsal, so
@@ -1443,7 +1440,7 @@ try {
 } catch (e) {
   step(cron?.steps.error ?? "error");
   const why = (e as Error).message.split("\n")[0];
-  end("failed", why, 1, false, why === signalWhy() ? "signal" : "");
+  end("failed", why, 1, false, why === causes.signal ? "signal" : "");
 }
 
 // releaseCron.flagsReleased: records which flags the release now served reads, so a flag push keeps one it still reads

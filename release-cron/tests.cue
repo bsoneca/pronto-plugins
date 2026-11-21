@@ -5,7 +5,7 @@ import "strings"
 _t: #Host & {package: "myapp"}
 
 // An opt-in writes the driver, its rules and the schema, and seeds the app's own release_cron.cue.
-written: [for p, f in _t.files if !f.seed {p}] & ["release-cron/release-cron.ts", "release-cron/cron.js", "release_cron_plugin.cue"]
+written: [for p, f in _t.files if !f.seed {p}] & ["release-cron/release-cron.ts", "release-cron/cron.js", "release-cron/causes.js", "release_cron_plugin.cue"]
 seeded: [for p, f in _t.files if f.seed {p}] & ["release_cron.cue"]
 
 // The schema and the opt-in join the app's package, and the schema holds releaseCron to #Cron.
@@ -151,3 +151,5 @@ noBranchHours: [if (#Cron & {watch: ["x"], probes: {}, branches: abandonHours: 0
 causeNames: _defaults.causes & {noVerdict: "the rehearsal gave no verdict", rehearsalFailed: "the rehearsal failed", rehearsalStopped: "the rehearsal was stopped", previewFailed: "the release preview failed", previewStopped: "the preview was stopped", endedBeforeSlot: "ended before its slot", signal: "stopped by a signal"}
 noRenamedCause: [if (#Cron & {watch: ["x"], probes: {}, causes: noVerdict: "no verdict"}) == _|_ {"refused"}, "accepted"][0] & "refused"
 noNewCause: [if (#Cron & {watch: ["x"], probes: {}, causes: other: "x"}) == _|_ {"refused"}, "accepted"][0] & "refused"
+// causes.js, which cron.js and release-cron.ts import, is releaseCron.causes emitted from the schema: the committed file is that text, and an app's copy too.
+causesModule: (_causesFile == _causesJS && _t.files["release-cron/causes.js"].text == _causesJS) & true

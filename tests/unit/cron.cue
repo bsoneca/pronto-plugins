@@ -3,7 +3,7 @@ package unit
 
 import "github.com/bsoneca/pronto-plugins/release-cron:releasecron"
 
-// releaseCron.causes, the phrases a run's `why` is built from: the cases take them from the schema, as the driver does from the config.
+// releaseCron.causes: the phrases the cases expect are the schema's, as cron.js's are (causes.js is emitted from them).
 _causes: releasecron.#Cron.causes
 
 _cronRec: {
@@ -178,12 +178,23 @@ cases: {
 	"a rehearsal that ended without judging the tree is no verdict, never bisected or cut": {suite: "cron", steps: [
 		for c in [1, 2] {{call: "cron.noVerdictExit", args: [c], expect: false, why: "a failure of the tree"}},
 		for c in [3, 124, 130, 137] {{call: "cron.noVerdictExit", args: [c], expect: true, why: "no verdict, a timeout or a signal"}},
-		{call: "cron.noVerdictRun", args: ["the rehearsal gave no verdict (exit 3): nothing released", _causes], expect: true, why: "the bisect skips it"},
-		{call: "cron.noVerdictRun", args: ["the rehearsal failed (exit 1): nothing released", _causes], expect: false},
-		{call: "cron.noVerdictRun", args: [null, _causes], expect: false},
-		{call: "cron.noVerdictRun", args: ["any reason at all", _causes, "noVerdict"], expect: true, why: "a record's cause key is read, not its text"},
-		{call: "cron.noVerdictRun", args: ["the rehearsal gave no verdict: x", _causes, "rehearsalFailed"], expect: false, why: "the key decides when the record has one"},
-		{call: "cron.noVerdictRun", args: ["x", _causes, "rehearsalStopped"], expect: true},
+		{call: "cron.noVerdictRun", args: ["the rehearsal gave no verdict (exit 3): nothing released"], expect: true, why: "the bisect skips it"},
+		{call: "cron.noVerdictRun", args: ["the rehearsal failed (exit 1): nothing released"], expect: false},
+		{call: "cron.noVerdictRun", args: [null], expect: false},
+		{call: "cron.noVerdictRun", args: ["any reason at all", "noVerdict"], expect: true, why: "a record's cause key is read, not its text"},
+		{call: "cron.noVerdictRun", args: ["\(_causes.noVerdict): x", "rehearsalFailed"], expect: false, why: "the key decides when the record has one"},
+		{call: "cron.noVerdictRun", args: ["x", "rehearsalStopped"], expect: true},
+		{call: "cron.noVerdictRun", args: ["failed: x", "signal"], expect: true, why: "a run a signal stopped says nothing of a commit: never bisected"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: up failed; \(_causes.rehearsalStopped): nothing released", null], expect: true, why: "a record with no cause key (written before it existed) is read by its why"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: up failed: nothing released", null], expect: false},
+	]}
+	"the driver's reasons and cause keys for a failed run come from releaseCron.causes": {suite: "cron", steps: [
+		{call: "cron.failureOf", args: ["beforeSlot", {noVerdict: true, command: "verify@local", code: 3, downFailed: ""}], expect: {why: "\(_causes.noVerdict): verify@local \(_causes.endedBeforeSlot) (exit 3): nothing released", cause: "noVerdict"}},
+		{call: "cron.failureOf", args: ["beforeSlot", {noVerdict: false, command: "verify@local", code: 1, downFailed: "; removing the preview x"}], expect: {why: "verify@local \(_causes.endedBeforeSlot) (exit 1): nothing released; removing the preview x", cause: "endedBeforeSlot"}},
+		{call: "cron.failureOf", args: ["noVerdict", {code: 124, downFailed: ""}], expect: {why: "\(_causes.noVerdict) (exit 124): nothing released", cause: "noVerdict"}},
+		{call: "cron.failureOf", args: ["rehearsalFailed", {code: 1, downFailed: ""}], expect: {why: "\(_causes.rehearsalFailed) (exit 1): nothing released", cause: "rehearsalFailed"}},
+		{call: "cron.failureOf", args: ["previewFailed", {bad: ["home /: 502", "x"], stopped: false}], expect: {why: "\(_causes.previewFailed): home /: 502; x: nothing released", cause: "previewFailed"}, why: "the after and first paths"},
+		{call: "cron.failureOf", args: ["previewFailed", {bad: ["up failed"], stopped: true}], expect: {why: "\(_causes.previewFailed): up failed; \(_causes.rehearsalStopped): nothing released", cause: "rehearsalStopped"}, why: "the beside path with the rehearsal stopped"},
 	]}
 	// The overlap writes no `slot` step, so a beside run keeps the rehearsal's slot wait in run.beside.slot (PRONTO-870).
 	"a beside run's rehearsal splits its time into the slot wait and the run, in seconds": {suite: "cron", steps: [
@@ -193,18 +204,18 @@ cases: {
 		{call: "cron.besideTimes", args: [1000000, 1000400, 1000900], expect: {slot: 0, rehearse: 1}, why: "rounded to the second"},
 	]}
 	"a preview beside the rehearsal: the first to fail stops the other, both pass releases": {suite: "cron", steps: [
-		{call: "cron.besideOutcome", args: [null, {bad: ["home /: 502, expected 200"], at: 40}, false, _causes], expect: {stop: "rehearsal", failed: "preview", why: "the release preview failed: home /: 502, expected 200; the rehearsal was stopped"}, why: "the preview failed first: the rehearsal is stopped, and says so"},
-		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, null, false, _causes], expect: {stop: "preview", failed: "rehearsal", why: "the rehearsal failed (exit 1); the preview was stopped"}, why: "the rehearsal failed first: the preview is stopped"},
-		{call: "cron.besideOutcome", args: [{code: 0, at: 4500}, null, false, _causes], expect: {stop: null, failed: null, why: ""}, why: "the rehearsal passed, the preview still runs"},
-		{call: "cron.besideOutcome", args: [null, {bad: [], at: 840}, false, _causes], expect: {stop: null, failed: null, why: ""}, why: "the preview passed, the rehearsal still runs"},
-		{call: "cron.besideOutcome", args: [{code: 0, at: 4500}, {bad: [], at: 840}, false, _causes], expect: {stop: null, failed: null, why: ""}, why: "both passed: release"},
-		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, {bad: ["up failed"], at: 950}, false, _causes], expect: {stop: null, failed: "rehearsal", why: "the rehearsal failed (exit 1)"}, why: "both failed: the earlier one is the verdict"},
-		{call: "cron.besideOutcome", args: [{code: 143, at: 60}, {bad: ["up failed"], at: 50}, true, _causes], expect: {stop: null, failed: "preview", why: "the release preview failed: up failed; the rehearsal was stopped"}, why: "the rehearsal the driver stopped, asked once it ended (143): still says so"},
-		{call: "cron.besideOutcome", args: [{code: 0, at: 55}, {bad: ["up failed"], at: 50}, false, _causes], expect: {stop: null, failed: "preview", why: "the release preview failed: up failed"}, why: "a rehearsal that passed just before its stop landed was not stopped"},
-		{call: "cron.noVerdictRun", args: ["the release preview failed: up failed; the rehearsal was stopped: nothing released", _causes], expect: true, why: "so it is never bisected"},
-		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, {bad: [], at: 800}, false, _causes], expect: {stop: null, failed: "rehearsal", why: "the rehearsal failed (exit 1)"}, why: "the preview already passed: nothing to stop"},
-		{call: "cron.noVerdictRun", args: ["the release preview failed: home /: 502, expected 200; the rehearsal was stopped: nothing released", _causes], expect: true, why: "a stopped rehearsal says nothing of a commit: never bisected"},
-		{call: "cron.noVerdictRun", args: ["the release preview failed: home /: 502, expected 200: nothing released", _causes], expect: false},
+		{call: "cron.besideOutcome", args: [null, {bad: ["home /: 502, expected 200"], at: 40}], expect: {stop: "rehearsal", failed: "preview", why: "the release preview failed: home /: 502, expected 200; the rehearsal was stopped"}, why: "the preview failed first: the rehearsal is stopped, and says so"},
+		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, null], expect: {stop: "preview", failed: "rehearsal", why: "the rehearsal failed (exit 1); the preview was stopped"}, why: "the rehearsal failed first: the preview is stopped"},
+		{call: "cron.besideOutcome", args: [{code: 0, at: 4500}, null], expect: {stop: null, failed: null, why: ""}, why: "the rehearsal passed, the preview still runs"},
+		{call: "cron.besideOutcome", args: [null, {bad: [], at: 840}], expect: {stop: null, failed: null, why: ""}, why: "the preview passed, the rehearsal still runs"},
+		{call: "cron.besideOutcome", args: [{code: 0, at: 4500}, {bad: [], at: 840}], expect: {stop: null, failed: null, why: ""}, why: "both passed: release"},
+		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, {bad: ["up failed"], at: 950}], expect: {stop: null, failed: "rehearsal", why: "the rehearsal failed (exit 1)"}, why: "both failed: the earlier one is the verdict"},
+		{call: "cron.besideOutcome", args: [{code: 143, at: 60}, {bad: ["up failed"], at: 50}, true], expect: {stop: null, failed: "preview", why: "the release preview failed: up failed; the rehearsal was stopped"}, why: "the rehearsal the driver stopped, asked once it ended (143): still says so"},
+		{call: "cron.besideOutcome", args: [{code: 0, at: 55}, {bad: ["up failed"], at: 50}, false], expect: {stop: null, failed: "preview", why: "the release preview failed: up failed"}, why: "a rehearsal that passed just before its stop landed was not stopped"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: up failed; the rehearsal was stopped: nothing released"], expect: true, why: "so it is never bisected"},
+		{call: "cron.besideOutcome", args: [{code: 1, at: 900}, {bad: [], at: 800}], expect: {stop: null, failed: "rehearsal", why: "the rehearsal failed (exit 1)"}, why: "the preview already passed: nothing to stop"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: home /: 502, expected 200; the rehearsal was stopped: nothing released"], expect: true, why: "a stopped rehearsal says nothing of a commit: never bisected"},
+		{call: "cron.noVerdictRun", args: ["the release preview failed: home /: 502, expected 200: nothing released"], expect: false},
 	]}
 	"overlapping phases are one step, counted once": {suite: "cron", steps: [
 		{call: "cron.line", args: [{started: "t", app: "a", outcome: "released", steps: {prepare: 30, "rehearse+preview": 4500, release: 600}}], expect: "t a released: 85.5 min = prepare 0.5, rehearse+preview 75.0, release 10.0", why: "the total sums the wall time once"},
