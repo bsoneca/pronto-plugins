@@ -183,12 +183,11 @@ An app with a `target.preview` chooses `when` (the field of `preview`, default `
   (`besideOutcome` in `cron.js`):
   - the preview fails first: the rehearsal's process group is stopped (TERM, then KILL after 300 s so `rehearse.ts` and integrate@k8s tear
     down their stacks and cluster; a signal to the run gives 60 s; the rehearsal records `stopped`, which is no verdict) and the run ends
-    `failed`, `the release preview failed: ...; the rehearsal was stopped: nothing released`. That is no attempt and cuts no release branch,
-    and it is never bisected (it says nothing of a commit);
+    `failed`, `the release preview failed: ...; the rehearsal was stopped: nothing released`. That is never bisected (it says nothing of a commit);
   - the rehearsal fails first: the preview's `up` is never cancelled (stopping it would only kill the local ssh, leaving the remote
     release running while `down` starts in the same worktree), so it runs to its end (Bonk Chess's `up` ends with the kill rehearsal, which
     is acceptable); the waits and probes after it are skipped and `down` runs. A failed `down` is logged and added to the run's reason.
-    The run ends with the rehearsal's own reason, red or no verdict, bisected and branched as ever;
+    The run ends with the rehearsal's own reason, red or no verdict, bisected as ever;
   - both passed: the android step, then the release, once `git rev-parse HEAD` in the run's worktree is still the commit both started from
     (else the run fails, nothing released). `"first"` makes the same check.
 
@@ -252,7 +251,7 @@ own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>
      tree that writes verdicts) is inconclusive: it is written to `bisect/inconclusive.jsonl` and the run stays open for the next
      bisect, twice; the third inconclusive check records the bisect as stopped, no commit named.
    - A rehearsal that gave no verdict (exit 3, 124 or 128 and above) ends the run as `the rehearsal gave no verdict`: it is never
-     bisected, and no release branch is cut for it.
+     bisected.
 4. The culprit is mapped to its pull request (`Merge pull request #N from …`). The pull request gets a
    comment; a notes file goes to the author session when the PR body names one (`local_<uuid>`) and
    its notes folder exists, else to `notify.lead`'s
@@ -262,112 +261,6 @@ own checkout (`bisect/wt`, never the run's `wt`); `bisect [--dry] [<run's start>
 
 Each bisect is a line of `bisect/bisects.jsonl` and a `bisect` line of `runs.jsonl` (`detail.bisect`),
 and `report` ends with them; it never reverts, never releases and never calls `release@gcp`.
-
-## Release branches
-
-An app that opts in (`releaseCron: branches: enabled: true`) does not fail a release on a red rehearsal: it holds it, and the fixes
-go in before the release ends, not into the next run. (The owner's ask: "we create a release branch, do the fixes there, and then
-cherry pick fixes to main.") `abandonHours` (12) and `abandonAttempts` (2) are the app's to change. Off, a rehearsal that fails is
-`failed` as ever.
-
-A fix branch starts from the release branch (`git switch -c fix/... origin/release/<app>/<id>`), never from main: a tip
-whose commits came from pull requests into main is refused. Turn branches on for an app only once the repository has a ruleset
-on `refs/heads/release/**` (ci and gate required, a pull request for every change, no force push).
-
-1. **Hold.** A run on main whose rehearsal (or android step, or preview) fails pushes `release/<app>/<YYYYMMDD-HHMM>` (Brasília
-   time) at the run's commit and writes `<state>/open`: `{branch, base, opened, limits, attempts: [{tip, verdict, at}]}`, the
-   cut's own failure the first attempt. The run's line says `held release/<app>/<id>`. The cut's failure is still bisected on main,
-   which reports to the culprit PR; a failure on the branch is not.
-2. **Fix.** While `open` exists the run's ref is `origin/release/<app>/<id>` and the gap is ignored: a wake runs only when the
-   branch tip is a commit no attempt judged. A fix is a pull request into the branch (never a push to main for it). A red attempt
-   is appended to `attempts` and the line says `held` again. Any failure of a run on the branch counts as a red attempt.
-3. **Release.** A green rehearsal releases from the branch as any release does (preview, release, confirm, hooks). `open` is
-   removed, a record `{branch, attempts, released commit}` (outcome `closed`) is appended to runs.jsonl, and the gap restarts from
-   the release's end.
-4. **Abandon.** `open` older than `abandonHours`, or `abandonAttempts` attempts in with the newest red, ends as
-   `abandoned release/<app>/<id>`: `open` is removed, the record is written and the next run cuts from main again, after the gap.
-   `release-cron.ts <app> abandon` does the same by hand (the lead's call), once no run is going. `status` shows the open release.
-
-Guards, each so a branch cannot lose or smuggle a change:
-
-- **Only red counts.** An attempt is a red verdict: the rehearsal, the android step or the preview failed. A failure of the release
-  step, the confirm, an ssh read or the slot records nothing, so the same tip runs again once the gap is over (below).
-- **Trusted tips.** Before a new tip is rehearsed it must descend from the commit the branch was cut at, and every commit
-  past the cut, merge commits too, must have come by a merged pull request into that branch (`gh api repos/<slug>/commits/<sha>/pulls`: `merged_at` set,
-  `base.ref` the branch). A tip that fails this is refused: logged and told as `held-refused`, no attempt, not run again until
-  another tip is pushed (a pull-request read that fails is tried again next wake). A branch ruleset is the other half.
-  The tip is judged **before it is checked out or trusted**: by the running script's own code, from git objects and GitHub's records,
-  at the commit id read once (`origin/<branch>`), and the refusal's notify settings are the trusted checkout's. Only a tip that passes
-  is checked out into the run's worktree (at that commit id), where its `.mise.toml` is trusted and its config read. A refused tip is
-  never checked out, so the worktree the scheduler's job runs the script from stays where it was and the next wake cannot run the
-  refused tip's script.
-- **No migrations.** A tip whose cut..tip changes a file under the app's `services/database/migrations/` is refused the same way:
-  migrations go to main only. The change is listed with `git diff --no-renames --name-only`, so a migration moved out of the folder is
-  caught by its old path.
-- **Nothing lost.** Every commit on a release branch must be cherry-picked to main (`git cherry-pick -x`), or an equal patch (`git patch-id --stable`) must be there, or, as bsoneca/pronto's ledger counts it, a main commit's message says
-  `Backport-of: #n` for a branch commit whose subject ends `(#n)`. A merge commit on the branch counts too, by what its conflict
-  resolution changed (`git show --cc`, as the ledger's script does): a resolution that changed code is a fix with no commit of its own, missing
-  until it is carried to main by hand. One rule (`missingFromMain`) answers both a release's authorization and a branch's deletion, and
-  both compare at commit ids (the branch's tip and the commit main is compared at), never at refs that move: a release checks against
-  the commit it is about to deploy.
-  After a branch releases, the next run that would release main first checks that every non-merge commit of the branch since the merge
-  base has its counterpart on main; else it ends `held-backport <branch>` (no release, no gap used; told once per set of
-  missing commits) and tries again next wake (a git or fetch failure in the check ends the run `skipped`, not `failed`). When all are there it deletes the branch from origin. An abandoned branch is deleted the
-  same way only when everything on it past the cut is on main; otherwise it stays and the lead is told which commits need a cherry-pick.
-  A branch is deleted only as the tip that was checked: the push carries `--force-with-lease=refs/heads/<branch>:<checked sha>` with a
-  delete refspec. If the branch moved since (a push nothing checked), the lease fails, the branch and its `released-branch` record are
-  kept, and the new tip is told.
-  `abandon` with no release held but a branch waiting on main (held-backport) clears it only once every commit is on main and the branch is gone; else it logs which commits are still missing and keeps the record (`abandonPlan`). A hold whose branch already shipped is closed the same way, its record kept.  A hold whose branch shipped though its confirmation never ran (a run of it reached the release step) gets its released-branch record before the plan, from what serves (the serving command, or Cloud Run's traffic, once, the read itself 20 s at most): the tip, or a commit on the branch main lacks, is the record's tip; unread, the release attempt's commit is, said as assumed. A serving commit that is the tip or on the branch records with no release attempt needed (a run stopped before its release step's key was written); with none and serving unread, no record is written. The automatic give-up and a run's own last red attempt do the same (`shippedRecord`). `abandon --force` clears a released-branch record (a corrupt one too) and logs the commits still missing: it lets main release without them, and clears nothing a call just wrote for a hold that shipped. While a record waits, no new hold is cut (`cutPlan`).
-- **A held tip already serving.** When the held branch's tip is what production serves (its release landed and its confirmation never
-  did), the run resumes at confirmation, without rehearsing or releasing again; once confirmed it writes the `released-branch` record
-  and closes the hold, in place of ending `skipped` with the hold left open. A held tip confirms itself by the trusted checkout's probes,
-  `ready` services and serving command (`heldConfig`), never the candidate's own.
-- **`RELEASE_CRON_DRY` is read first.** Any value makes the run a dry one before it decides anything: it deletes no branch, abandons or
-  closes no hold, writes no marker (`refused`, `backport-told`, `flags-released`), records no flags and tells nobody; it says what it
-  would have done (`RELEASE_CRON_DRY: would ...`). A held tip is judged (git objects and GitHub's records) but, dry, never checked out,
-  cleaned or trusted: the run says it would check it out. These decisions are pure plans (`heldPlan`, `backportPlan`, `limitPlan`) that
-  the driver executes in order, and the cases hold that a refused tip's plan has no checkout and a dry plan no mutation.
-- **Ledger parity.** The cherry-pick and `Backport-of` lines are read from all of main's history at the deploying commit, not only since the merge base, and a
-  branch commit with no patch id (an empty commit) is nothing to carry, as `.github/release-ledger.sh` counts both.
-- **An unreadable record stops the run.** `open` and `released-branch` are absent only when the file is not there
-  (`Deno.errors.NotFound`); a parse or I/O error stops the run with the error, never reading as nothing held. The run reads `released-branch` under its lock. `abandon` is how a lead gets past a corrupt `open`: it
-  reports the file and why and exits 1, and `abandon --force` removes that file.
-- **Branches off change nothing.** With `branches.enabled: false` there is no `open` or `released-branch`, and every rule above reduces to
-  what it was (`missingFromMain` without merges is `backported`; `heldLanded` is false without a held release).
-- **Fourth Codex round (PRONTO-870).** Every refusal below is in the run's log and in the run's `why`/`cause`, never a silent skip, and each
-  decision is a pure function of `cron.js` with cases (`tests/unit/cron_round4.cue`).
-  - The backport check's patch ids come from two git processes whose exits are both checked (`patchIdsOf`); a failure, or a commit that changes
-    the tree yet has no patch id (`patchOf`), stops the check and keeps the branch and its record. A commit is empty only with no tree change.
-  - The released-branch record is checked against the exact commit a run releases on every run that can deploy main, `RELEASE_CRON_REF` too (`backportCheck`).
-  - The migration check reads `git diff --name-only -z` and splits on NUL (`nulPaths`), so a path git would quote is still seen.
-  - `abandon` takes the run's lock (the same way a run does) before it reads `open` or `released-branch`, and holds it until its changes are done;
-    a live run's lock refuses it, in the log and in the error.
-  - The rehearsal child starts with `clearEnv: true` (`rehearsalSpawn`), so a removed `REHEARSE_LIVE` is not inherited.
-  - A `flags-released` marker that cannot be written fails the bookkeeping with its path (`run.flagsReleased`), apart from the deploy's outcome.
-  - A held release resumes at confirmation only on a post-deployment marker (`servingAfterRelease: true`); otherwise it is run again even when what
-    the node reads equals the tip (`servingPlan`, `run.heldRerun`).
-  - **Held releases run only from a separate trusted checkout.** When the driver is loaded from the run's own worktree (the installed scheduler's
-    `wt`), a held release is refused (`held-refused`): the candidate would supply the settings and script that confirm it (`heldTrusted`).
-  - **Release branches stay linear.** A tip whose merges since the cut have a nonempty combined diff (a conflict resolution) is refused
-    (`resolvedMerges`, `refusedTip`): rebase the branch or cherry-pick onto it. `abandon --force` stays the way out of a branch released earlier.
-  - `releaseCron.outcomes` (schema.cue) names every outcome (`released`, `failed`, `skipped`, `dry`, `bisect`, `stopped`, `closed`, `held`, `abandoned`,
-    `held-refused`, `held-backport`, `cleared`), exported in `causes.js` with the causes; the driver and `cron.js` build them from it (`branchOutcome`), and
-    pronto's metrics imports it. A run whose tree moved under the rehearsal ends `failed` with `cause: treeMoved`, an infrastructure failure that gives no verdict.
-  - **Review round.** No hold is cut while the scheduler runs from the run's own checkout (`cutPlan`'s trust condition, said in the failed run's `why`), and
-    `install` is refused when `branches.enabled` (the job runs from `wt`); the trust refusal of a held release is told once for each branch and reason
-    (`trustNotice`). A refused `abandon` is also appended to runs.jsonl, naming whether a run or an abandon holds
-    the lock (`holderKind`). The watch diff and the retry judgement read `-z` paths too, and a failed red verdict's cause and reason are on the run's record
-    before anything that can throw. A `<state>/lock` left as a plain file by the earlier flock version keeps its live holder and is removed when dead (`legacyFileLock`); a leftover `<state>/lock.preview` is logged with its `down` command and never acted on.
-- **While a release is held, main does not release.** A fix merged to main waits until the branch closes (released or abandoned);
-  the held notice says so, and `release-cron.ts <app> abandon` is how the lead lets main release again.
-- **`RELEASE_CRON_REF`** is refused while a release is held, unless it names the held branch, which then runs as any held run (it
-  skips only the cut: with no release held, no branch rule applies).
-- **A failure outside the rehearsal waits.** A held tip that fails in the release step, the confirm, an ssh read or the slot (no
-  attempt) waits the app's gap before it runs again; a new tip runs at once.
-
-bsoneca/pronto's ledger check, coming separately, holds the cherry-picks too. A pull request into a release branch fixes only: no
-features and no flag changes (a deploy never changes behaviour; a flag is flipped on main's own schedule), and no migrations. The
-branch is deleted when the guards above allow it.
 
 ## New-feature scenario failures do not block a release
 

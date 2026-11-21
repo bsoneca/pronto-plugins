@@ -37,12 +37,8 @@ export const landed = (code, serving, head, afterRelease) => afterRelease === tr
 // Whether a 255 is worth reading `serving` for at all.
 export const rescuable = (code, afterRelease) => afterRelease === true && sshDropped(code);
 
-// The outcomes after which the next run waits the gap: a held release (below) waits for none, an abandoned one does.
-export const spaced = (outcome) => outcome === outcomes.released || outcome === outcomes.failed || (outcome ?? "").startsWith(outcomes.abandoned);
-
-// A branch outcome as it is written (`held release/studio/20261119-1015`): its name from releaseCron.outcomes (`held`, `abandoned`,
-// `heldRefused`, `heldBackport`, `cleared`), a space, the branch.
-export const branchOutcome = (name, branch) => `${outcomes[name]} ${branch}`;
+// The outcomes after which the next run waits the gap.
+export const spaced = (outcome) => outcome === outcomes.released || outcome === outcomes.failed;
 
 // A failed run's gap is waived once main has moved past the commit it failed on (`failed`; `head`
 // main now, null when it could not be read) by a change that concerns what failed (concerns, below):
@@ -304,7 +300,7 @@ export const androidWhy = (code, names) => `the android step failed (exit ${code
 // --- Bisect: a failed run names the commit that broke it. ---
 
 // A rehearsal that ended without judging the tree: exit 3 (a verdict or record it could not read or write), 124 (its wrapper's
-// timeout) or 128 and above (a signal, the machine's doing). Such a run is never bisected nor cut to a release branch.
+// timeout) or 128 and above (a signal, the machine's doing). Such a run is never bisected.
 export const noVerdictExit = (code) => code === 3 || code === 124 || code >= 128;
 
 // Whether a run says its rehearsal gave no verdict, or was stopped because the preview failed first (preview `when: "beside"`):
@@ -592,264 +588,23 @@ export const boardEnv = (env, home, cues) => {
   return v ? { ...env, CUE: `${home}/.local/share/mise/installs/github-cue-lang-cue/${v}/cue` } : env;
 };
 
-// Release branches (README.md): a rehearsal that failed on main is held on a branch, `release/<app>/<id>`, <id> the
-// minute it was cut in the operator's zone (20261119-1015). The open release is the JSON in <state>/open:
-// {branch, base (the commit cut from), opened (local time), limits: {abandonHours, abandonAttempts},
-// attempts: [{tip, verdict, at}]}, an attempt for each tip the rehearsal judged; the cut's own failure is the first.
-export const branchName = (app, ms, tz = zone) => `release/${app}/${local(ms, tz).slice(0, 16).replace(/[-:]/g, "").replace("T", "-")}`;
-
-// A held release is due only when its branch tip is a commit no attempt judged (`tip`: the remote's now, null when it
-// could not be read); the gap does not apply to it.
-export const heldDue = (open, tip) => !!tip && tip !== open.attempts.at(-1)?.tip;
-
-// The open release with one more attempt: the tip the rehearsal judged and its verdict (red or green).
-export const attempted = (open, tip, verdict, at) => ({ ...open, attempts: [...open.attempts, { tip, verdict, at }] });
-
-// Whether a held release is given up: it is older than `abandonHours`, or `abandonAttempts` attempts are in and the
-// newest is red. The next run then cuts from main again, after the gap.
-export const abandoned = (open, now, cfg) =>
-  now - Date.parse(open.opened) > cfg.abandonHours * 3_600_000 ||
-  (open.attempts.length >= cfg.abandonAttempts && open.attempts.at(-1)?.verdict === "red");
-
-// What `status` says of the open release, or null.
-export const heldLine = (open) => open
-  ? `held ${open.branch} since ${open.opened}, cut from ${open.base.slice(0, 8)}: ${open.attempts.length} attempt${open.attempts.length === 1 ? "" : "s"} (${open.attempts.map((a) => `${a.tip.slice(0, 8)} ${a.verdict}`).join(", ")}); abandoned after ${open.limits.abandonHours} h or ${open.limits.abandonAttempts} red attempts`
-  : null;
-
-// What `git log --format=%H%x1f%B%x1e` prints, as [{sha, body}].
-export const parseLog = (text) => text.split("\x1e").map((r) => r.replace(/^\s*\n/, "")).filter((r) => r.trim())
-  .map((r) => { const [sha, ...body] = r.split("\x1f"); return { sha: sha.trim(), body: body.join("\x1f") }; });
-
-// What `git log -p | git patch-id --stable` prints ("<patch id> <commit>" a line), as {commit: patch id}.
-export const patchIds = (text) => Object.fromEntries(text.split("\n").filter(Boolean).map((l) => l.trim().split(/\s+/)).map(([patch, sha]) => [sha, patch]));
-
-// The patch ids of a range, from the two git processes that make them (`git log -p`, then `git patch-id --stable`, each {ok, code, out, err}): both
-// must have succeeded, else the answer is an error and the backport check stops, the branch and its record kept. Output of a failed or
-// timed-out process may be partial, and a commit missing from it must never read as empty.
-export const patchIdsOf = (log, ids) =>
-  !log.ok ? { error: `git log -p failed (exit ${log.code}): ${(log.err || log.out || "no output").split("\n")[0]}` }
-  : !ids.ok ? { error: `git patch-id failed (exit ${ids.code}): ${(ids.err || ids.out || "no output").split("\n")[0]}` }
-  : { ids: patchIds(ids.out) };
-
-// A branch commit's patch: its patch id when it has one; with none, null (empty: nothing to carry) only when the commit has no tree
-// change, read as `git diff-tree --root -r --no-commit-id <sha>` (`tree`, {ok, out, err}) prints nothing. A commit that changes the
-// tree and has no patch id, or a tree check that failed, is an error (the backport check stops).
-export const patchOf = (sha, id, tree) =>
-  id ? { patch: id }
-  : !tree.ok ? { error: `${sha.slice(0, 8)} has no patch id and its tree change could not be read: ${(tree.err || tree.out || "no output").split("\n")[0]}` }
-  : (tree.out ?? "").trim() === "" ? { patch: null }
-  : { error: `${sha.slice(0, 8)} changes the tree but has no patch id` };
-
-// The branch's commits (`branch`: [{sha, patch, body}]) that main (`main`: the same, since the merge base) holds no counterpart of:
-// a `(cherry picked from commit <sha>)` line naming it (cherry-pick -x), an equal stable patch id, or, the ledger's rule
-// (bsoneca/pronto's .github/release-ledger.sh), a subject ending `(#n)` that a main commit's message answers with `Backport-of: #n`.
-// Those are fixes the next release of main would lose.
-// `all`: every commit of main (its `body` alone), where a cherry-pick line or a Backport-of line is read, since a fix may be picked before the
-// branch is even listed (the ledger reads main's whole history for both); `main` (since the merge base) is where patch ids are compared.
-// A branch commit whose `patch` is null is an empty commit (no patch id): nothing to carry, unless a line names it, as the ledger counts it.
-export const backported = (branch, main, all = main) => branch.filter((c) => {
-  const n = (c.body ?? "").split("\n")[0].match(/\(#(\d+)\)\s*$/)?.[1];
-  if (all.some((m) => m.body.includes(`(cherry picked from commit ${c.sha})`) || (!!n && new RegExp(`Backport-of: #${n}(?!\\d)`).test(m.body)))) return false;
-  if (c.patch === null) return false;
-  return !main.some((m) => !!c.patch && m.patch === c.patch);
-});
-
-// The held-backport outcome's reason: how many of the branch's commits are not on main, and which.
-export const backportWhy = (missing) => `${missing.length} commit${missing.length === 1 ? "" : "s"} not on main: ${missing.map((c) => `${c.sha.slice(0, 8)}${c.body ? ` ${c.body.split("\n")[0]}` : ""}`).join("; ")}`;
-
-// The commits (`shas`, merge commits too) of a held branch that did not arrive by a merged pull request into that branch: `pulls` is each commit's
-// `gh api repos/<slug>/commits/<sha>/pulls`; a pull request counts when merged_at is set and its base.ref is the branch.
-export const unmerged = (shas, pulls, branch) => shas.filter((s) => !(pulls[s] ?? []).some((p) => !!p.merged_at && p.base?.ref === branch));
-
-// The files of a change that are the app's database migrations: they go to main only, never to a release branch.
-export const migrationFiles = (files, appRel) => files.filter((f) => f.startsWith(`${appRel}/services/database/migrations/`));
-
-// Why a held branch's new tip is not rehearsed (null: it is). `descends`: the tip descends from the cut; `unmerged`: its commits
-// past the cut that no merged pull request into the branch brought; `migrations`: the migration files base..tip changed; `resolved`: the merge
-// commits of base..tip whose combined diff is not empty (resolvedMerges): a branch stays linear, so a resolution is never kept on it.
-export const refusedTip = ({ descends, unmerged, migrations, resolved = [] }) => {
-  const why = [
-    ...(descends ? [] : ["the tip does not descend from the commit the branch was cut at"]),
-    ...(unmerged.length ? [`${unmerged.length} commit${unmerged.length === 1 ? "" : "s"} not brought by a merged pull request into the branch: ${unmerged.map((s) => s.slice(0, 8)).join(", ")}`] : []),
-    ...(migrations.length ? [`migrations changed (${migrations.join(", ")}): migrations go to main only`] : []),
-    ...(resolved.length ? [`${resolved.length} merge${resolved.length === 1 ? "" : "s"} with a nonempty combined diff (a conflict resolution): ${resolved.map((s) => s.slice(0, 8)).join(", ")}; release branches stay linear: rebase the branch or cherry-pick onto it instead (\`abandon --force\` is the way out)`] : []),
-  ];
-  return why.length ? why.join("; ") : null;
-};
-
-// The merges (`merges`: [{sha, cc}], `cc` the output of `git show --cc --format= <sha>`) whose combined diff is not empty: a conflict resolution.
-export const resolvedMerges = (merges) => merges.filter((m) => (m.cc ?? "").trim() !== "").map((m) => m.sha);
-
-// `last`'s two commit fields for a run that ended `outcome` (spaced) on `commit`: the commit a failed run on main failed on (retry),
-// and the commit the run tried (behind). "-" for none: an abandoned run tried nothing main must stay behind, and a failure on a
-// held branch is not a failure of main.
-// A third: the held branch's tip that failed outside the rehearsal (no attempt), which waits the gap before it runs again (heldWait).
-export const lastFields = (outcome, commit, onBranch) => [
-  outcome === outcomes.failed && commit && !onBranch ? commit : "-",
-  commit && !(outcome ?? "").startsWith(outcomes.abandoned) && !(onBranch && outcome === outcomes.failed) ? commit : "-",
-  outcome === outcomes.failed && commit && onBranch ? commit : "-",
+// `last`'s two commit fields for a run that ended `outcome` (spaced) on `commit`: the commit a failed run failed on (retry), and the
+// commit the run tried (behind). "-" for none.
+export const lastFields = (outcome, commit) => [
+  outcome === outcomes.failed && commit ? commit : "-",
+  commit || "-",
 ];
 
-// Whether a held branch's tip waits: it is the one that failed outside the rehearsal at `at` (`lastTip`, from `last`), and the gap
-// (minutes) is not over. A new tip never waits.
-export const heldWait = (lastTip, tip, now, at, gap) => !!tip && tip === lastTip && !due(now, at, gap);
-
-// What the lead is told when a fix merged to main waits on a held release.
-export const heldNotice = (branch) => `fixes merged to main do not release until ${branch} closes: \`abandon\` releases main again`;
-
-// --- Release branches, the safety of their path (PRONTO-1099, 1100, 1101). ---
-
-// A full commit id: what a check against main or a branch is made with. A ref (origin/main) is re-fetched and moves under a run, a sha
-// does not, so the comparison and the deletion that follow it name the same commits.
-export const isSha = (s) => /^[0-9a-f]{40}$/.test(s ?? "");
-
-// The branch's commits main holds no counterpart of (backported) and the merges whose conflict resolution changed code, the ledger's rule
-// (bsoneca/pronto's .github/release-ledger.sh: a merge carries only what `git show --cc` prints, and a resolution that changed anything
-// is a fix of its own, to be carried to main by hand). `merges`: [{sha, subject, cc}] for each merge commit of merge base..tip, `cc` the
-// output of `git show --cc --format= <sha>`. The one answer both a release's authorization and a branch's deletion read.
-export const missingFromMain = (branch, main, merges = [], all = main) => [
-  ...merges.filter((m) => (m.cc ?? "").trim() !== "").map((m) => ({ sha: m.sha, body: `${m.subject ?? ""} (a merge whose resolution changed code: carry it to main by hand)` })),
-  ...backported(branch, main, all),
-];
-
-// The diff of a held branch's change, as git is asked: no rename detection, so a migration moved out of the migrations folder lists
-// both its paths and migrationFiles sees the old one.
-export const heldDiffArgs = (base, head) => ["diff", "--no-renames", "--name-only", "-z", base, head];
+// RELEASE_CRON_DRY: any value makes the run a rehearsal of its decisions. A dry run writes no marker (flags-released) and says what it would
+// have done instead.
+export const mutates = (dry) => !dry;
 
 // The paths of a `-z` listing: split on NUL, never on a newline, so a path git would quote (a non-ASCII or special name) is read as it is.
 export const nulPaths = (text) => (text ?? "").split("\0").filter(Boolean);
 
-// A branch deleted from origin only when it is still the tip that was checked: the push's arguments (an explicit lease on that sha, and
-// a delete refspec). A branch pushed to since the check fails the lease and stays.
-export const leaseDelete = (branch, tip) => [`--force-with-lease=refs/heads/${branch}:${tip}`, "origin", `:refs/heads/${branch}`];
-
-// What a failed lease means: `now` is the remote's tip read after the failure (null: the branch is gone). A gone branch is deleted as
-// well; a moved one is kept, with its new tip said, and so is the record that tracks it.
-export const leaseLost = (branch, verified, now) => !now
-  ? { deleted: true, why: `${branch} was already gone from origin` }
-  : { deleted: false, tip: now, why: now === verified ? `${branch} was not deleted: the push failed with the tip unchanged at ${verified.slice(0, 8)}` : `${branch} was kept: its tip moved from the checked ${verified.slice(0, 8)} to ${now.slice(0, 8)}, which nothing checked` };
-
-// A held branch whose tip is already what production serves (`live`, as the run reads it): the release landed and its confirmation never did
-// (a run that died, a probe that failed after the deploy). The run resumes at confirmation, not skips as main's own serving commit does.
-// Only when `live` is a post-deployment marker (`afterRelease`, the target's servingAfterRelease: true): a serving command that reads a worktree's HEAD
-// moves before the release runs, so a held release whose checkout landed and whose deploy failed would be confirmed, never deployed.
-export const heldLanded = (open, live, head, afterRelease) => !!open && !!head && live === head && afterRelease === true;
-
-// What a run does once it knows what serves (`live`) and `head`: "proceed" when they differ; "skip" for main serving its own head; for a held
-// release serving its tip, "resume" at confirmation (a post-deployment marker) or "rerun" the held release (the serving read is no proof).
-export const servingPlan = (open, live, head, afterRelease) =>
-  !head || live !== head ? "proceed" : !open ? "skip" : heldLanded(open, live, head, afterRelease) ? "resume" : "rerun";
-export const rerunWhy = (branch, head) => `${branch} at ${head.slice(0, 8)} is what the node's worktree reads, but its serving command has no post-deployment marker (servingAfterRelease is false): the held release is run again, not confirmed`;
-
-// An installed scheduler runs the driver from the run's worktree (`wt`), so a candidate checked out there would supply the settings and script that confirm
-// itself: a held release is refused when the trusted checkout (`top`, where this driver was loaded) is that worktree. Null: it may run.
-export const heldTrusted = (top, wt) => (top ?? "").replace(/\/+$/, "") === (wt ?? "").replace(/\/+$/, "")
-  ? `the scheduler runs from the run's own checkout (${wt}), so the held tip would supply the settings and script that confirm it: run held releases from a separate trusted checkout (a clone of main outside the run's state)`
-  : null;
-
-// Whether the released-branch record is checked against the commit a run releases: on every run that can deploy main (not a held run), whatever ref it names.
-export const backportCheck = (open, released) => !open && !!released;
-
-// RELEASE_CRON_DRY: any value makes the run a rehearsal of its decisions. A dry run deletes no branch, closes no hold, writes no marker
-// (refused, backport-told, flags-released) and tells nobody; it says what it would have done (dryWould).
-export const mutates = (dry) => !dry;
-export const dryWould = (what) => `RELEASE_CRON_DRY: would ${what}; nothing was changed`;
-
-// What the lead is told when a held branch's new tip is refused.
-export const refusal = (app, branch, sha, why) => `release-cron (${app}) refused ${branch} at ${sha.slice(0, 8)}: ${why}. Nothing was rehearsed and no attempt counted; push a tip that is only merged pull requests into the branch.`;
-
-// What a held tip's confirmation asks, from the trusted checkout's config (`trusted`), not the candidate's: the probes, the services that must
-// be ready, and where the serving command and the origin point. The candidate's own release commands still run, as a verified tip's.
-export const heldConfig = (cron, trusted) => ({
-  ...cron,
-  probes: trusted.probes,
-  ready: trusted.ready ?? cron.ready,
-  target: cron.target.kind === "command" && trusted.target?.kind === "command" ? { ...cron.target, serving: trusted.target.serving, origin: trusted.target.origin } : cron.target,
-});
-
-// The plans release-cron.ts executes, in order, as action names. A decision made here is tested; the driver only does what the plan says.
-// What a plan does that changes something (a checkout, a marker, a notice, a deletion, a hold): `mutations` lists them, and a dry plan has none.
-const mutating = ["checkout", "trust", "config", "mark-refused", "notify", "tell", "mark-told", "delete-branch", "close-hold", "drop-branch", "end-abandoned", "end-refused", "end-held-backport"];
-export const mutations = (plan) => plan.filter((a) => mutating.includes(a));
-// A held tip, once judged (`why`: refusedTip's answer, null when it passes): refused before any checkout or trust, and a dry run reports where a
-// real run would act, checking nothing out.
-export const heldPlan = (why, dry) => why
-  ? (dry ? ["report-refusal"] : ["mark-refused", "notify", "end-refused"])
-  : (dry ? ["report-checkout"] : ["checkout", "trust", "config"]);
-// The released branch's backport check (`missing`: what is not on main; `told`: this set was told already): wait and tell once, or delete.
-export const backportPlan = (missing, told, dry) => missing.length
-  ? [...(told || dry ? [] : ["tell", "mark-told"]), "end-held-backport"]
-  : dry ? ["report-delete"] : ["delete-branch"];
-// A held release past its limits: given up, or, dry, reported.
-export const limitPlan = (dry) => dry ? ["report-abandon"] : ["close-hold", "drop-branch", "end-abandoned"];
-
-// A hold abandoned while its tip may already serve: the release landed and only its confirmation did not, so no released-branch
-// record exists. Returns the record to write ({branch, tip, why}) so abandonPlan keeps the fix's backport hold, or null. Evidence `ev`:
-// `released` the commit a run of this branch released (a runs.jsonl row that reached the release step), null when none did, and then
-// no record is written whatever serves; `serving` what serves (null: unread); `tip` origin's tip of the branch; `onBranch` serving is
-// on the branch and not on main (a tip the branch has moved past). With a release attempt: a serving commit that is the tip or on
-// the branch is the record's tip; unread, the attempt's commit is, said as assumed; any other serving commit says nothing shipped.
-export const shippedRecord = (open, released, ev) => {
-  if (!open || released) return null;
-  // A positive read needs no attempt: a release that landed while its run was stopped or crashed left no release step behind.
-  if (ev.serving) return ev.serving === ev.tip || ev.serving === ev.released || ev.onBranch ? { branch: open.branch, tip: ev.serving, why: "what serves is on it: it shipped, only its confirmation did not" } : null;
-  if (!ev.released) return null;
-  return { branch: open.branch, tip: ev.released, why: "what serves could not be read and a run released it: assumed shipped" };
-};
-
-// The commit a run of `branch` released (the newest), from runs.jsonl rows: one that reached the release step (`releaseStep`) and
-// names a commit, on that branch. A run that cut the branch from main, one on another branch, a stopped one or one with no commit is not.
-export const releaseAttempt = (runs, branch, releaseStep) =>
-  runs.filter((r) => r.branch === branch && r.commit && !r.cut && r.outcome !== outcomes.stopped && releaseStep in (r.steps ?? {})).at(-1)?.commit ?? null;
-
-// A new hold is cut only while no released branch's record waits for its commits on main: the record is one file, and cutting
-// would leave a shipped hold nothing to be recorded in.
-// Nor while the scheduler runs from the run's own checkout (`untrusted`, heldTrusted's answer, null when it may): a hold cut there would always be refused,
-// and main would stay blocked behind it.
-/** @param {string | null} [untrusted] */
-export const cutPlan = (enabled, override, released, untrusted = null) => {
-  if (!enabled || override) return { cut: false, why: "" };
-  const why = [
-    ...(released ? [`${released.branch} is released and its commits are not all on main: no new hold until they are (\`abandon --force\` clears the record)`] : []),
-    ...(untrusted ? [`no hold can be cut: ${untrusted}`] : []),
-  ];
-  return why.length ? { cut: false, why: why.join("; ") } : { cut: true, why: "" };
-};
-
-// Whether the trust refusal of a held release is told: once for each branch and reason (`told`: the last one told, "" when none).
-export const trustNotice = (told, branch, why) => ({ key: `${branch} ${why}`, tell: (told ?? "").trim() !== `${branch} ${why}` });
-
-// What holds the run lock, from the holder's command line (`ps -o command= -p <pid>`): `abandon` when its verb is abandon, else a run.
-export const holderKind = (command) => /\sabandon(\s|$)/.test(command ?? "") ? "abandon" : "run";
-
 // The lock a version before this one left: a plain file holding the holder's pid (`isFile`; its `pid`, `alive`). "busy" while that holder lives,
 // "remove" when it is dead or unreadable (the mkdir lock is then made), "none" when the lock is not a file.
 export const legacyFileLock = (isFile, pid, alive) => !isFile ? "none" : pid && alive ? "busy" : "remove";
-
-// `abandon`: what it does to the hold (`open`, {branch} or null) and the record of a branch already released (`released`,
-// {branch} or null), after the checks of a released branch (`missing`: the commits not on main, null when they could not be read;
-// `gone`: the branch deleted from origin, false it moved, "unknown" origin could not be asked, null not tried). A hold whose branch
-// shipped (the record names it) keeps the record, and its backport hold with it, until every commit is on main and the branch is
-// gone, or `force` clears it; only a hold that never shipped is dropped, with its branch.
-export const abandonPlan = (open, released, missing, gone, force = false) => {
-  const shipped = !!released && (!open || released.branch === open.branch);
-  if (!shipped) return { shipped, closeHold: !!open, dropBranch: !!open, removeRecord: false, why: "" };
-  const why = missing === null ? "the commits missing from main could not be read"
-    : missing.length ? "commits released from it are still missing from main"
-    : gone === false ? "it moved since its release" : gone === "unknown" ? "origin could not be asked" : "";
-  return { shipped, closeHold: !!open, dropBranch: false, removeRecord: !why || force, why };
-};
-
-// `abandon` with an `open` file that cannot be read: it reports which file and why, and removes it only with --force.
-export const corruptOpen = (path, why, force) => force
-  ? { remove: true, text: `${path} could not be read (${why}): removed by --force` }
-  : { remove: false, text: `${path} could not be read (${why}): delete that file by hand, or run \`abandon --force\` to remove it` };
-
-// A branch's tip from `git ls-remote origin refs/heads/<branch>`: only a clean answer with no line is "not found" (tip null); a
-// lookup that failed (a network, auth or git error) is an `error`, never "no branch".
-export const branchTip = (ok, out, err) => ok
-  ? { tip: (out ?? "").split(/\s/)[0] || null, error: null }
-  : { tip: null, error: ((err || out || "no output").split("\n")[0]) };
 
 // A signal's wait, each tick: "kill" the children still alive once their grace is over, "done" when the children are gone and no
 // preview is left to tear down (`previews`), or when `grace` + `teardown` ms have passed (bounded), else "wait". The lock goes at "done".
@@ -862,7 +617,7 @@ export const signalStep = (childrenAlive, previews, elapsed, grace, teardown) =>
 // Only an ssh transport failure (exit 255) is worth reading the serving command again: any other failure says what is wrong.
 export const servingRetryable = (code) => sshDropped(code);
 
-// The outcome a run ends with once a signal came: its stop, never a verdict (no red attempt, no gap, no bisect, no branch cut). A
+// The outcome a run ends with once a signal came: its stop, never a verdict (no gap, no bisect). A
 // release that had already landed keeps its outcome.
 export const endWhenInterrupted = (interrupted, outcome) => interrupted && outcome !== outcomes.released ? outcomes.stopped : outcome;
 
