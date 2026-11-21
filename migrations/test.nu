@@ -4,8 +4,9 @@
 # does (a column retired, a machine's state gone) and makes the migration: the lint refuses the moved
 # model, make names the carry it needs, writes the migration once it is declared, and the program reads
 # it. Then a migration edited by hand is refused; an index the migration dropped is refused until the
-# migration is folded; a rename is refused; two branches that each made a migration are merged,
-# rebase making the side's again after main's; and init --from takes the model a git ref held.
+# migration is folded; a rename is refused; a name past 63 bytes is refused by make and by the lint;
+# two branches that each made a migration are merged, rebase making the side's again after main's; and
+# init --from takes the model a git ref held.
 def check [what: string, ok: bool] {
 	if not $ok { error make {msg: $"migrations/test.nu: ($what)"} }
 	print $"ok  ($what)"
@@ -87,6 +88,8 @@ def main [] {
 	check "make names the carry it needs, and writes nothing" ($wanting.exit_code == 1 and ($wanting.stderr | str contains "declare schemaMigrations.carry.Order.status") and not (($app | path join $"migrations/($first).json") | path exists))
 
 	"package demo\n\nschemaMigrations: carry: Order: status: values: draft: \"open\"\n\nloop: surface: checks: schemaMigrations.checks\n" | save --force --raw ($app | path join migrations_spec.cue)
+	let long = (migrate $app make retire_ref_with_a_name_long_enough_to_pass_what_a_label_holds)
+	check "make refuses a name past the 63 bytes a target without pgroll records it in, and writes nothing" ($long.exit_code == 1 and ($long.stderr | str contains "longer than 63 bytes") and not ((ls ($app | path join migrations) | get name | path basename) | any {|n| $n =~ '^\d{8}_\d{4}_' }))
 	let made = (migrate $app make retire_ref)
 	check "make writes the migration once the carry is declared" ($made.exit_code == 0 and (($app | path join $"migrations/($first).json") | path exists))
 	let ops = (open ($app | path join $"migrations/($first).json") | get operations)
@@ -188,6 +191,10 @@ def main [] {
 	"{" | save --raw ($app | path join migrations/broken.json)
 	check "and one that is no JSON, whose message nothing hides" ((migrate $app check).stderr | str contains "migrations/broken.json: migrations_ledger.cue embeds every .json here but the snapshot")
 	rm ($app | path join migrations/broken.json)
+	let long = $"20991231_0001_('x' | fill --character x --width 50)"
+	'{"operations":[{"sql":{"up":"SELECT 1;"}}]}' | save --raw ($app | path join $"migrations/($long).json")
+	check "the lint refuses a migration written by hand with a name past 63 bytes" ((migrate $app check).stderr | str contains $"migrations/($long).json: its name is longer than 63 bytes")
+	rm ($app | path join $"migrations/($long).json")
 
 	# init --from takes the model as a git ref held it: in a copy of the app with no migrations yet,
 	# the snapshot at main's base, so the first make is what changed since.

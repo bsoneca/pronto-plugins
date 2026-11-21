@@ -14,6 +14,12 @@ export const FACTS_VERSION = 1;
 // plugin) this one does not read, or an app not generated. Either is refused, saying what to run.
 const foreign = (what, why) => new Error(`${what}: ${why}: a pronto this plugin does not read (rerun bin/pronto-migrations from a pronto-plugins that reads it)`);
 const ungenerated = (what, why) => new Error(`${what}: ${why}: run generate`);
+// A table, column or field may be named as a member every object inherits (`constructor`, `toString`,
+// `__proto__`): what is read or kept by such a name is read from, and made as, the object's own key
+// alone. `put` defines the key, where `o[k] = v` would call `__proto__`'s setter and keep nothing.
+const own = (o, k) => (o != null && Object.hasOwn(o, k) ? o[k] : undefined);
+const put = (o, k, v) => (Object.defineProperty(o, k, { value: v, writable: true, enumerable: true, configurable: true }), v);
+const slot = (o, k, make) => (Object.hasOwn(o, k) ? o[k] : put(o, k, make()));
 
 // --- pronto's names ---
 
@@ -45,8 +51,9 @@ export function parseProto(text) {
     let m;
     if (!cur) {
       if ((m = line.match(/^message\s+(\w+)\s*\{$/))) {
-        if (messages[m[1]]) throw new Error(`${at}: message ${m[1]} twice`);
-        cur = messages[m[1]] = { fields: {}, reserved: { numbers: [], names: [] } };
+        // Its own keys alone: a message named as an Object's inherited one (constructor) is no second one.
+        if (Object.hasOwn(messages, m[1])) throw new Error(`${at}: message ${m[1]} twice`);
+        cur = put(messages, m[1], { fields: {}, reserved: { numbers: [], names: [] } });
       } else if (!/^(syntax|package|import|option)\b.*;$/.test(line)) {
         throw new Error(`${at}: not what pronto emits: ${line}`);
       }
@@ -84,7 +91,7 @@ export function parseMachines(sql) {
     const suffix = names.check("", col);
     if (!name.endsWith(suffix)) continue;
     const table = name.slice(0, -suffix.length);
-    (out[table] ??= {})[col] = [...list.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replaceAll("''", "'"));
+    put(slot(out, table, () => ({})), col, [...list.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replaceAll("''", "'")));
     read.add(names.machine(table, col));
   }
   for (const [, trigger] of sql.matchAll(/CREATE TRIGGER "(trg_\w+_machine)"/g)) {
@@ -103,7 +110,7 @@ export function parseMachines(sql) {
 // state), and an index's name are read here and never restated.
 export function parseTables(sql) {
   const out = {};
-  const at = (t) => (out[t] ??= { columns: {}, indexes: {} });
+  const at = (t) => slot(out, t, () => ({ columns: {}, indexes: {} }));
   let table = null;
   for (const line of sql.split("\n")) {
     let m;
@@ -113,12 +120,12 @@ export function parseTables(sql) {
     } else if (table && line.startsWith(")")) {
       table = null;
     } else if (table && (m = line.match(/^ {2}"(\w+)" (.*?),?$/))) {
-      at(table).columns[m[1]] ??= columnClause(m[2]);
+      slot(at(table).columns, m[1], () => columnClause(m[2]));
     } else if ((m = line.match(/^ALTER TABLE (?:"([^"]+)"|(\w+)) ADD COLUMN IF NOT EXISTS "(\w+)" (.*);$/))) {
-      at(m[1] ?? m[2]).columns[m[3]] = columnClause(m[4]);
+      put(at(m[1] ?? m[2]).columns, m[3], columnClause(m[4]));
     } else if ((m = line.match(/^CREATE (UNIQUE )?INDEX IF NOT EXISTS (\w+) ON (?:"([^"]+)"|(\w+))(?: USING (\w+))? \(([^)]*)\)/))) {
       const cols = m[6].split(",").map((c) => c.trim().replace(/^"(.*)"$/, "$1"));
-      at(m[3] ?? m[4]).indexes[m[2].toLowerCase()] = m[1] ? { cols, unique: true } : clean({ cols, using: m[5] });
+      put(at(m[3] ?? m[4]).indexes, m[2].toLowerCase(), m[1] ? { cols, unique: true } : clean({ cols, using: m[5] }));
     }
   }
   return out;
@@ -162,7 +169,7 @@ function outside(text, from, stop) {
 // A column's type as pronto's identity compares it: an alias named by its type (text is string),
 // and a decimal with its precision and scale, which are its column's type too.
 const canonical = (f, types) => {
-  const t = types?.aliases?.[f.type] ?? f.type;
+  const t = own(types?.aliases, f.type) ?? f.type;
   return t === "decimal" ? `decimal(${f.precision ?? ""},${f.scale ?? ""})` : t;
 };
 
@@ -182,15 +189,15 @@ export function model(protoText, inputs, sql = {}) {
   const out = {};
   for (const [name, e] of Object.entries(inputs.entities ?? {})) {
     if (!e.server) continue;
-    const msg = proto[name];
+    const msg = own(proto, name);
     if (!msg) throw ungenerated(name, "a table with no message in entities.proto");
     if (!e.cel?.enums || !e.cel?.checks || !Array.isArray(e.uniques)) throw foreign(".pronto/check-inputs.json", `${name} has no cel.enums, cel.checks or uniques`);
-    if (!tables[e.table]) throw ungenerated(name, `005_create_tables.sql creates no table ${e.table}`);
+    if (!own(tables, e.table)) throw ungenerated(name, `005_create_tables.sql creates no table ${e.table}`);
     const { columns, indexes: written } = tables[e.table];
-    const machined = machines[e.table] ?? {};
+    const machined = own(machines, e.table) ?? {};
     const enums = { ...e.cel.enums, ...machined };
     const facts = (f) => {
-      const col = columns[f.name];
+      const col = own(columns, f.name);
       if (!col) throw ungenerated(`${name}.${f.name}`, `005_create_tables.sql has no column ${e.table}.${f.name}`);
       if (col.unread !== undefined) throw foreign("005_create_tables.sql", `${e.table}.${f.name} has the clause "${col.unread}", whose type this does not read`);
       // The replay writes the facts' default, else one pronto adds that they do not state.
@@ -201,9 +208,9 @@ export function model(protoText, inputs, sql = {}) {
         sql: col.sql,
         required: !!f.required,
         default: f.generated ? f.default : col.default,
-        enum: enums[f.name],
-        machine: machined[f.name] ? true : undefined,
-        check: enums[f.name] ? undefined : e.cel.checks[f.name],
+        enum: own(enums, f.name),
+        machine: own(machined, f.name) ? true : undefined,
+        check: own(enums, f.name) ? undefined : own(e.cel.checks, f.name),
         unique: f.unique || undefined,
         ref: f.ref,
         generated: f.generated,
@@ -229,16 +236,16 @@ export function model(protoText, inputs, sql = {}) {
     // index by the one pronto gives it, found by its column.
     const indexes = {};
     for (const u of e.uniques) {
-      const x = written[u.name.toLowerCase()];
+      const x = own(written, u.name.toLowerCase());
       if (!x?.unique || JSON.stringify(x.cols) !== JSON.stringify(u.cols)) throw ungenerated(name, `005_create_tables.sql has no unique index ${u.name.toLowerCase()} on (${u.cols.join(", ")})`);
-      indexes[u.name.toLowerCase()] = x;
+      put(indexes, u.name.toLowerCase(), x);
     }
     for (const i of e.indexes ?? []) {
       const found = Object.entries(written).filter(([, x]) => !x.unique && x.cols.length === 1 && x.cols[0] === i.on && x.using === i.using);
       if (found.length !== 1) throw ungenerated(name, `005_create_tables.sql has ${found.length ? "more than one" : "no"} ${i.using} index on ${e.table} (${i.on})`);
-      indexes[found[0][0]] = found[0][1];
+      put(indexes, found[0][0], found[0][1]);
     }
-    out[name] = clean({ table: e.table, id: e.id, fields, retired, indexes });
+    put(out, name, clean({ table: e.table, id: e.id, fields, retired, indexes }));
   }
   return sorted(out);
 }
@@ -273,7 +280,7 @@ export function diff(before, after) {
   const ids = (m) => Object.fromEntries(Object.entries(m).filter(([, e]) => e.id).map(([n, e]) => [e.id, n]));
   const afterIds = ids(after), beforeIds = ids(before);
   for (const [name, b] of Object.entries(before)) {
-    const a = after[name];
+    const a = own(after, name);
     const on = { entity: name, table: b.table };
     if (!a) {
       out.push(b.id && afterIds[b.id] ? { ...on, kind: "entity-renamed", to: afterIds[b.id] } : { ...on, kind: "entity-dropped" });
@@ -320,14 +327,14 @@ export function diff(before, after) {
       alter(out, at, was, now, machined);
     }
     for (const [x, bi] of Object.entries(b.indexes ?? {})) {
-      const ai = a.indexes?.[x];
+      const ai = own(a.indexes, x);
       if (!ai) out.push({ ...on, index: x, kind: "index-dropped" });
       else if (JSON.stringify(ai) !== JSON.stringify(bi)) out.push({ ...on, index: x, kind: "index-changed", to: ai });
     }
-    for (const [x, ai] of Object.entries(a.indexes ?? {})) if (!b.indexes?.[x]) out.push({ ...on, index: x, kind: "index-added", unique: !!ai.unique });
+    for (const [x, ai] of Object.entries(a.indexes ?? {})) if (!own(b.indexes, x)) out.push({ ...on, index: x, kind: "index-added", unique: !!ai.unique });
   }
   for (const [name, a] of Object.entries(after)) {
-    if (!before[name] && !(a.id && beforeIds[a.id])) out.push({ entity: name, table: a.table, kind: "entity-added" });
+    if (!own(before, name) && !(a.id && beforeIds[a.id])) out.push({ entity: name, table: a.table, kind: "entity-added" });
   }
   return out;
 }
@@ -549,7 +556,7 @@ export function plan(changes, declared = {}, dropped = {}, inherited = {}) {
     // A name an earlier migration dropped, which the replay builds again: every fresh database runs
     // that migration after initdb built the name, and would lose it.
     for (const name of new Set(k.builds?.(c) ?? [])) {
-      if (dropped[name]) refused.push({ at, kind: "rebuilt", why: `${name} was dropped by ${dropped[name]}, which every fresh database still runs after building it: fold ${dropped[name]} (once every database has run it) before building ${name} again` });
+      if (own(dropped, name)) refused.push({ at, kind: "rebuilt", why: `${name} was dropped by ${own(dropped, name)}, which every fresh database still runs after building it: fold ${own(dropped, name)} (once every database has run it) before building ${name} again` });
     }
     const t = `${ident(schema)}.${ident(c.table)}`;
     const op = (phase, why, sql, { drops = [], builds = [] } = {}) => ops.push({ phase, at, why, sql, drops, builds });
@@ -574,8 +581,8 @@ export function plan(changes, declared = {}, dropped = {}, inherited = {}) {
       // One the app declares wins over one inherited from a migration made before (rebase).
       declared: (what) => {
         read.add(`${what}.${c.entity}.${c.field}`);
-        const d = declared[what]?.[c.entity]?.[c.field] ?? inherited[what]?.[c.entity]?.[c.field];
-        if (d !== undefined) ((used[what] ??= {})[c.entity] ??= {})[c.field] = d;
+        const d = own(own(own(declared, what), c.entity), c.field) ?? own(own(own(inherited, what), c.entity), c.field);
+        if (d !== undefined) put(slot(slot(used, what, () => ({})), c.entity, () => ({})), c.field, d);
         return d;
       },
     };
@@ -626,11 +633,11 @@ function carrySql(c, x) {
     x.need("carry", `rows may hold ${gone}, which it no longer admits: what each becomes (values: one of ${c.admitted.map(lit).join(", ")}), or the row's new columns (set)`);
     return null;
   }
-  const missing = carry.values ? c.removed.filter((v) => carry.values[v] === undefined) : [];
+  const missing = carry.values ? c.removed.filter((v) => own(carry.values, v) === undefined) : [];
   const stray = Object.entries(carry.values ?? {}).filter(([, to]) => !c.admitted.includes(to)).map(([v, to]) => `${v} → ${to}`);
-  const both = carry.values && carry.set?.[c.field] !== undefined;
+  const both = carry.values && own(carry.set, c.field) !== undefined;
   const assign = { ...(carry.set ?? {}) };
-  if (carry.values) assign[c.field] = `CASE ${x.col} ${c.removed.map((v) => `WHEN ${lit(v)} THEN ${lit(carry.values[v])}`).join(" ")} END`;
+  if (carry.values) put(assign, c.field, `CASE ${x.col} ${c.removed.map((v) => `WHEN ${lit(v)} THEN ${lit(own(carry.values, v))}`).join(" ")} END`);
   // Any trigger on the table may be listed: another machine's, or one of the app's own (a guard that
   // refuses to change a row once final) that the move would trip.
   const triggers = carry.triggers ?? [];
@@ -641,7 +648,7 @@ function carrySql(c, x) {
   const problem = missing.length ? `values says nothing for ${missing.map(lit).join(", ")}`
     : stray.length ? `values carries to what it does not admit: ${stray.join(", ")}`
     : both ? `both values and set give ${c.field} its value`
-    : assign[c.field] === undefined ? `the carry gives ${c.field} no value: name values, or set ${c.field}`
+    : own(assign, c.field) === undefined ? `the carry gives ${c.field} no value: name values, or set ${c.field}`
     : guarded.length ? `set moves ${guarded.join(", ")}, which a machine guards: list ${guarded.map((k) => names.machine(c.table, k)).join(", ")} in triggers`
     : triggers.some((t) => !TRIGGER.test(t)) ? `triggers names ${triggers.filter((t) => !TRIGGER.test(t)).join(", ")}, which is no trigger's name (letters, digits, _ and $)`
     : Object.values(assign).some((e) => e.includes("$carry$")) ? "set holds $carry$, the carry's own quote"
@@ -661,12 +668,14 @@ function carrySql(c, x) {
 // row matches `where`, so a fresh database, or one moved already, runs nothing. Postgres checks every
 // check on a row it updates, even one NOT VALID, and the replay restates every check NOT VALID, so a
 // row written before a check was restated, on any of its columns, would stop the move. Every check on
-// the table but `kept` is lifted around the update and put back as the database held it, NOT VALID,
-// as the replay leaves it. Of `triggers`, those that exist and are on are turned off around it, and
-// each is put back in the mode it had (origin, always, replica); one already off stays off. With
-// triggers to turn off, the block takes the table's ACCESS EXCLUSIVE lock first, so it never climbs
-// from the triggers' lock to the one lifting a check needs, which deadlocks an app transaction that
-// read the table and then writes it.
+// the table but `kept` is lifted around the update and put back as the database held it: one NOT VALID
+// (as the replay leaves it) NOT VALID, one validated validated again, over every row, so a moved row
+// that breaks it stops the migration rather than commit. Of `triggers`, those that exist and are on are turned off around it, and
+// each is put back in the mode it had (origin, always, replica); one already off stays off. The block
+// takes the table's ACCESS EXCLUSIVE lock first, before it looks for a row to move: what it looks at is
+// what it moves (an app's write waits for the migration), and it never climbs from a lighter lock to the
+// one lifting a check or turning off a trigger needs, which deadlocks an app transaction that read the
+// table and then writes it. A row written after the migration commits is the README's window.
 function moveSql(tag, t, where, update, triggers = [], kept = []) {
   const each = "FOR pronto_i IN 1 .. coalesce(array_length(pronto_lifted, 1), 0) LOOP";
   const eachOff = "FOR pronto_t IN 1 .. coalesce(array_length(pronto_off, 1), 0) LOOP";
@@ -677,16 +686,16 @@ function moveSql(tag, t, where, update, triggers = [], kept = []) {
     "  pronto_defs text[];",
     ...(triggers.length ? ["  pronto_off text[];", "  pronto_modes text[];"] : []),
     "BEGIN",
+    `  LOCK TABLE ${t} IN ACCESS EXCLUSIVE MODE;`,
     `  IF EXISTS (SELECT FROM ${t} WHERE ${where}) THEN`,
     ...(triggers.length ? [
-      `    LOCK TABLE ${t} IN ACCESS EXCLUSIVE MODE;`,
       `    SELECT array_agg(tgname::text ORDER BY tgname), array_agg(tgenabled::text ORDER BY tgname) INTO pronto_off, pronto_modes FROM pg_trigger WHERE tgrelid = ${lit(t)}::regclass AND tgname = ANY (ARRAY[${triggers.map(lit).join(", ")}]) AND tgenabled <> 'D';`,
       `    ${eachOff} EXECUTE ${lit(`ALTER TABLE ${t} DISABLE TRIGGER `)} || quote_ident(pronto_off[pronto_t]); END LOOP;`,
     ] : []),
     `    SELECT array_agg(conname ORDER BY conname), array_agg(pg_get_constraintdef(oid) ORDER BY conname) INTO pronto_lifted, pronto_defs FROM pg_constraint WHERE conrelid = ${lit(t)}::regclass AND contype = 'c'${kept.length ? ` AND conname <> ALL (ARRAY[${kept.map(lit).join(", ")}])` : ""};`,
     `    ${each} EXECUTE ${lit(`ALTER TABLE ${t} DROP CONSTRAINT `)} || quote_ident(pronto_lifted[pronto_i]); END LOOP;`,
     `    ${update}`,
-    `    ${each} EXECUTE ${lit(`ALTER TABLE ${t} ADD CONSTRAINT `)} || quote_ident(pronto_lifted[pronto_i]) || ' ' || pronto_defs[pronto_i] || CASE WHEN pronto_defs[pronto_i] LIKE '%NOT VALID' THEN '' ELSE ' NOT VALID' END; END LOOP;`,
+    `    ${each} EXECUTE ${lit(`ALTER TABLE ${t} ADD CONSTRAINT `)} || quote_ident(pronto_lifted[pronto_i]) || ' ' || pronto_defs[pronto_i]; END LOOP;`,
     ...(triggers.length ? [`    ${eachOff} EXECUTE ${lit(`ALTER TABLE ${t} ENABLE `)} || CASE pronto_modes[pronto_t] WHEN 'A' THEN 'ALWAYS ' WHEN 'R' THEN 'REPLICA ' ELSE '' END || 'TRIGGER ' || quote_ident(pronto_off[pronto_t]); END LOOP;`] : []),
     "  END IF;",
     `END ${tag};`,
@@ -713,7 +722,7 @@ export function droppedBy(migrations) {
     const sql = (json.operations ?? []).map((o) => o.sql?.up ?? "").join("\n").replace(/DO (\$carry\$|\$fill\$)[\s\S]*?END \1;/g, "").replace(/^--.*$/gm, "");
     const built = new Set([...sql.matchAll(/(?:ADD CONSTRAINT|INDEX) "([^"]+)"/g)].map((m) => m[1]));
     for (const [, n] of sql.matchAll(/DROP (?:INDEX IF EXISTS "[^"]+"\.|CONSTRAINT IF EXISTS |TRIGGER IF EXISTS )"([^"]+)"/g)) {
-      if (!built.has(n)) out[n] ??= name;
+      if (!built.has(n)) slot(out, n, () => name);
     }
     for (const n of built) delete out[n];
   }
@@ -751,6 +760,9 @@ export function declaredIn(json) {
 // the snapshot, and the lint refuses one whose name is not this (strays).
 const DATED = /^(\d{8})_(\d{4})_/;
 const SLUG = /^[a-z][a-z0-9_]*$/;
+// The most bytes a name has: a target without pgroll records a migration by its name as a label of an
+// enum (ledger.sh), which Postgres holds to 63.
+export const NAME_BYTES = 63;
 export const isName = (n) => DATED.test(n) && SLUG.test(n.replace(DATED, ""));
 export const slugOf = (n) => isName(n) ? n.replace(DATED, "") : null;
 export const SNAPSHOT_FILE = "snapshot.json";
@@ -768,7 +780,9 @@ export function nextName(made, slug, date, others = []) {
   const all = [...made, ...others];
   const day = all.map((e) => e.match(DATED)?.[1]).filter(Boolean).reduce((a, b) => (b > a ? b : a), date);
   const count = all.map((e) => e.match(DATED)).filter((m) => m && m[1] === day).map((m) => Number(m[2])).reduce((a, b) => Math.max(a, b), 0);
+  if (count >= 9999) throw new Error(`${day} holds 9999 migrations already, the most a four-digit count names: make this one another day`);
   const name = `${day}_${String(count + 1).padStart(4, "0")}_${slug}`;
+  if (new TextEncoder().encode(name).length > NAME_BYTES) throw new Error(`${name} is longer than ${NAME_BYTES} bytes, the most a target without pgroll records a migration's name in (ledger.sh): shorten "${slug}"`);
   const after = all.filter((o) => o > name).sort();
   if (after.length) throw new Error(`${name} sorts before the app's migration ${after.at(-1)}, which pgroll's runner has to run first: a migration written by hand is named <YYYYMMDD>_<NNNN>_<name> too`);
   return name;
@@ -842,7 +856,7 @@ export function upgrade(text, derived) {
 // Each field of a model, live and retired, through `f(field, the same field of derived)`.
 function mapFields(model, f, derived) {
   return Object.fromEntries(Object.entries(model).map(([name, e]) => {
-    const d = derived[name];
+    const d = own(derived, name);
     const each = (group) => Object.fromEntries(Object.entries(e[group] ?? {}).map(([n, x]) => [n, f(x, d?.[group]?.[n])]));
     return [name, { ...e, fields: each("fields"), ...(e.retired ? { retired: each("retired") } : {}) }];
   }));
@@ -853,7 +867,7 @@ function difference(a, b, path) {
   if (JSON.stringify(a) === JSON.stringify(b)) return null;
   if (a && b && typeof a === "object" && typeof b === "object" && !Array.isArray(a) && !Array.isArray(b)) {
     for (const k of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort(byKey)) {
-      const d = difference(a[k], b[k], path ? `${path}.${k}` : k);
+      const d = difference(own(a, k), own(b, k), path ? `${path}.${k}` : k);
       if (d) return d;
     }
   }
