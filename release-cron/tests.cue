@@ -141,12 +141,6 @@ errorStep: _defaults.steps.error & "error"
 besideStep: _defaults.steps.beside & "rehearse+preview"
 noRenamedStep: [if (#Cron & {watch: ["x"], probes: {}, steps: beside: "both"}) == _|_ {"refused"}, "accepted"][0] & "refused"
 
-// Release branches are an app's opt-in: off, giving a held release up after 12 hours or 2 red attempts, each the app's to change.
-branchesDefault: _defaults.branches & {enabled: false, abandonHours: 12, abandonAttempts: 2}
-_branches: #Cron & {watch: ["x"], probes: {}, branches: {enabled: true, abandonHours: 6}}
-branchesOptIn: _branches.branches & {enabled: true, abandonHours: 6, abandonAttempts: 2}
-noBranchHours: [if (#Cron & {watch: ["x"], probes: {}, branches: abandonHours: 0}) == _|_ {"refused"}, "accepted"][0] & "refused"
-
 // The phrases a run's `why` carries are written once, here, and never change under an app: runs.jsonl and its readers carry them.
 causeNames: _defaults.causes & {noVerdict: "the rehearsal gave no verdict", rehearsalFailed: "the rehearsal failed", rehearsalStopped: "the rehearsal was stopped", previewFailed: "the release preview failed", previewStopped: "the preview was stopped", endedBeforeSlot: "ended before its slot", signal: "stopped by a signal", treeMoved: "the run's tree moved"}
 noRenamedCause: [if (#Cron & {watch: ["x"], probes: {}, causes: noVerdict: "no verdict"}) == _|_ {"refused"}, "accepted"][0] & "refused"
@@ -154,5 +148,5 @@ noNewCause: [if (#Cron & {watch: ["x"], probes: {}, causes: other: "x"}) == _|_ 
 // causes.js, which cron.js and release-cron.ts import, is releaseCron.causes emitted from the schema: the committed file is that text, and an app's copy too.
 causesModule: (_causesFile == _causesJS && _t.files["release-cron/causes.js"].text == _causesJS) & true
 // The outcome names are fixed (records on disk carry them) and closed like the causes.
-outcomeNames: _defaults.outcomes & {released: "released", failed: "failed", skipped: "skipped", dry: "dry", bisect: "bisect", stopped: "stopped", closed: "closed", held: "held", abandoned: "abandoned", heldRefused: "held-refused", heldBackport: "held-backport", cleared: "cleared"}
+outcomeNames: _defaults.outcomes & {released: "released", failed: "failed", skipped: "skipped", dry: "dry", bisect: "bisect", stopped: "stopped"}
 noNewOutcome: [if (#Cron & {watch: ["x"], probes: {}, outcomes: other: "x"}) == _|_ {"refused"}, "accepted"][0] & "refused"

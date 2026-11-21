@@ -61,6 +61,11 @@ cases: {
 		{call: "cron.spaced", args: ["skipped"], expect: false},
 		{call: "cron.spaced", args: [""], expect: false},
 	]}
+	"last keeps the commit a failed run failed on, and the commit any spaced run tried": {suite: "cron", steps: [
+		{call: "cron.lastFields", args: ["failed", "c1"], expect: ["c1", "c1"], why: "retry reads the first, behind the second"},
+		{call: "cron.lastFields", args: ["released", "c1"], expect: ["-", "c1"], why: "a release failed on nothing"},
+		{call: "cron.lastFields", args: ["failed", ""], expect: ["-", "-"], why: "a run that never got a commit tried none"},
+	]}
 	"after a failed run, the next starts without the gap once main has moved past the commit it failed on": {suite: "cron", steps: [
 		{call: "cron.retry", args: ["291a52a9", "0b2206c3"], expect: true, why: "a new commit on main: the fix may be in"},
 		{call: "cron.retry", args: ["291a52a9", "291a52a9"], expect: false, why: "the same commit waits the gap"},
@@ -175,7 +180,7 @@ cases: {
 		{call: "cron.detail", args: [[{commit: "c1", queued: "2026-11-03T02:00:00Z", waited: 3, checks: {scenarios: {s: 600}, premium: {s: 0, skipped: true}}}], [], "c1", "2026-11-03T02:00:00Z"], expect: {phases: {"rehearse.queue": 3, "rehearse.scenarios": 600}, flaked: [], rc: null}, why: "a check the rehearsal skipped took no time (pronto#1546)"},
 		{call: "cron.detail", args: [[{commit: "c1", queued: "2026-11-03T01:59:59Z", waited: 5}], [], "c1", "2026-11-03T02:00:00Z"], expect: {phases: {}, flaked: [], rc: null}, why: "a record before the run began is an earlier run's"},
 	]}
-	"a rehearsal that ended without judging the tree is no verdict, never bisected or cut": {suite: "cron", steps: [
+	"a rehearsal that ended without judging the tree is no verdict, never bisected": {suite: "cron", steps: [
 		for c in [1, 2] {{call: "cron.noVerdictExit", args: [c], expect: false, why: "a failure of the tree"}},
 		for c in [3, 124, 130, 137] {{call: "cron.noVerdictExit", args: [c], expect: true, why: "no verdict, a timeout or a signal"}},
 		{call: "cron.noVerdictRun", args: ["the rehearsal gave no verdict (exit 3): nothing released"], expect: true, why: "the bisect skips it"},
@@ -440,12 +445,6 @@ cases: {
 		{call: "cron.signalStep", args: [false, 0, 61000, 60000, 300000], expect: "done", why: "down finished: the lock goes"},
 		{call: "cron.signalStep", args: [false, 0, 0, 60000, 300000], expect: "done", why: "nothing was running"},
 		{call: "cron.signalStep", args: [false, 1, 360000, 60000, 300000], expect: "done", why: "a down that never ends is waited for a bounded time"},
-	]}
-	"a branch's remote lookup that fails is an error, only a clean empty answer is no branch": {suite: "cron", steps: [
-		{call: "cron.branchTip", args: [true, "abc123\trefs/heads/release/x/1", ""], expect: {tip: "abc123", error: null}},
-		{call: "cron.branchTip", args: [true, "", ""], expect: {tip: null, error: null}, why: "ls-remote ran and found no such ref"},
-		{call: "cron.branchTip", args: [false, "", "fatal: unable to access origin: Could not resolve host\nhint"], expect: {tip: null, error: "fatal: unable to access origin: Could not resolve host"}, why: "a failed lookup is not an absent branch"},
-		{call: "cron.branchTip", args: [false, "", ""], expect: {tip: null, error: "no output"}},
 	]}
 	"the serving command is read again only after an ssh transport failure": {suite: "cron", steps: [
 		{call: "cron.servingRetryable", args: [255], expect: true, why: "ssh's own failure, the case the retry exists for"},

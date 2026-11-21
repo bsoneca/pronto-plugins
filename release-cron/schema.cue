@@ -74,21 +74,14 @@ releaseCron: #Cron
 	}
 	// The names a run's `outcome` takes in runs.jsonl and release-cron.log, written once here and exported with the causes
 	// (causes.js, the export package): release-cron.ts and cron.js build every outcome from them, and pronto's metrics imports
-	// them. `held`, `abandoned`, `heldRefused` and `heldBackport` are followed by the branch (`held release/studio/20261119-1015`);
-	// `cleared` is abandon's own line in the log alone. A name is fixed: the records on disk carry it.
+	// them. A name is fixed: the records on disk carry it.
 	outcomes: {
-		released:     "released"
-		failed:       "failed"
-		skipped:      "skipped"
-		dry:          "dry"
-		bisect:       "bisect"
-		stopped:      "stopped"
-		closed:       "closed"
-		held:         "held"
-		abandoned:    "abandoned"
-		heldRefused:  "held-refused"
-		heldBackport: "held-backport"
-		cleared:      "cleared"
+		released: "released"
+		failed:   "failed"
+		skipped:  "skipped"
+		dry:      "dry"
+		bisect:   "bisect"
+		stopped:  "stopped"
 	}
 	// The top-level `holder`, kept for the apps that set it: the default of rehearsal.holder.
 	holder: *"verify@local" | string
@@ -138,16 +131,6 @@ releaseCron: #Cron
 	// folder appended: once production serves the release's commit, and when a run finds main already serving. A command that fails
 	// is logged and never changes the run's outcome. Null (the default): none.
 	flagsReleased: *null | [string, ...string]
-	// Release branches (README.md, "Release branches"): a rehearsal that fails on main holds the release on a branch
-	// `release/<app>/<id>` instead of failing it, the fixes go there as pull requests, and the run releases from the
-	// branch once its rehearsal is green; every fix is cherry-picked to main. Off by default, an app's opt-in. A held
-	// release is abandoned (main is cut again, after the gap) once it is `abandonHours` old, or `abandonAttempts`
-	// attempts (the cut's own failure counts as the first) are red.
-	branches: {
-		enabled:         *false | bool
-		abandonHours:    *12 | (int & >=1)
-		abandonAttempts: *2 | (int & >=1)
-	}
 	// What production must answer once the release is serving, each fetched from the release's domain.
 	probes: [Name=string]: #Probe
 }

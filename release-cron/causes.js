@@ -1,3 +1,3 @@
 // generated from release-cron/schema.cue (releaseCron.causes) by host.cue — do not edit
 export const causes = {"noVerdict":"the rehearsal gave no verdict","rehearsalFailed":"the rehearsal failed","rehearsalStopped":"the rehearsal was stopped","previewFailed":"the release preview failed","previewStopped":"the preview was stopped","endedBeforeSlot":"ended before its slot","signal":"stopped by a signal","treeMoved":"the run's tree moved"};
-export const outcomes = {"released":"released","failed":"failed","skipped":"skipped","dry":"dry","bisect":"bisect","stopped":"stopped","closed":"closed","held":"held","abandoned":"abandoned","heldRefused":"held-refused","heldBackport":"held-backport","cleared":"cleared"};
+export const outcomes = {"released":"released","failed":"failed","skipped":"skipped","dry":"dry","bisect":"bisect","stopped":"stopped"};
