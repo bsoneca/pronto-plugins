@@ -88,9 +88,9 @@ export const verifies = (argv, content) => {
 };
 /**
  * A command of plan.js's (run without sudo) with files and scripts made first, as runHook does, and some of
- * its arguments replaced (an argument equal to a key, @tmp being the scratch folder; `fifos` named pipes, `links` symlinks and `hardlinks` hard links made there): its exit code, what it said, and whether each replaced path is still there (a symlink counts as itself).
+ * its arguments replaced (an argument equal to a key, @tmp being the scratch folder; `fifos` named pipes, `links` symlinks and `hardlinks` hard links made there, `acls` paths given an ACL entry): its exit code, what it said, and whether each replaced path is still there (a symlink counts as itself); `then`, more commands run after it in the same folder, each answering `{code, said}` in `then`.
  */
-export const runCommand = (argv, { bin = {}, files = {}, fifos = [], links = {}, hardlinks = {}, replace = {} } = {}) => {
+export const runCommand = (argv, { bin = {}, files = {}, fifos = [], links = {}, hardlinks = {}, acls = [], then = [], replace = {} } = {}) => {
   const dir = Deno.makeTempDirSync();
   try {
     Deno.mkdirSync(`${dir}/bin`);
@@ -111,11 +111,19 @@ export const runCommand = (argv, { bin = {}, files = {}, fifos = [], links = {},
       Deno.mkdirSync(`${dir}/${path}`.replace(/\/[^/]*$/, ''), { recursive: true });
       Deno.symlinkSync(target, `${dir}/${path}`);
     }
+    for (const path of acls) {
+      if (!new Deno.Command('/bin/chmod', { args: ['+a', 'everyone allow read', `${dir}/${path}`] }).outputSync().success) throw new Error(`chmod +a ${path}`);
+    }
     const to = (v) => v.replaceAll('@tmp', dir);
-    const args = argv.slice(argv[0] === 'sudo' ? 2 : 0).map((a) => (a in replace ? to(replace[a]) : a));
-    const o = new Deno.Command(args[0], { args: args.slice(1), clearEnv: true, env: { PATH: `${dir}/bin:/usr/bin:/bin` }, stdout: 'null', stderr: 'piped' }).outputSync();
+    const one = (cmd) => {
+      const args = cmd.slice(cmd[0] === 'sudo' ? 2 : 0).map((a) => (a in replace ? to(replace[a]) : a));
+      const o = new Deno.Command(args[0], { args: args.slice(1), clearEnv: true, env: { PATH: `${dir}/bin:/usr/bin:/bin` }, stdout: 'null', stderr: 'piped' }).outputSync();
+      return { code: o.code, said: new TextDecoder().decode(o.stderr).trim() };
+    };
+    const first = one(argv);
+    const after = then.map(one);
     const kept = Object.values(replace).map((v) => { try { Deno.lstatSync(to(v)); return true; } catch { return false; } });
-    return { code: o.code, said: new TextDecoder().decode(o.stderr).trim(), kept };
+    return { ...first, kept, then: after };
   } finally {
     Deno.removeSync(dir, { recursive: true });
   }

@@ -344,8 +344,8 @@ export function stepCommands(plan, name, step, ctx) {
     root('/bin/sh', '-c', GONE_USER, r.user),
   ];
   const manifest = `${dirOf(r.dir)}/tree.mtree`;
-  // The account's, again, before it is asked to act as a registered runner: nothing of it running, no service of its.
-  const still = () => [root('/bin/sh', '-c', REAP, r.user), root('/bin/sh', '-c', GONE_USER, r.user)];
+  // The account's, again, before it is asked to act as a registered runner: its daemon out, nothing of it running, no service of its.
+  const still = () => [bootout(), root('/bin/sh', '-c', REAP, r.user), root('/bin/sh', '-c', GONE, r.service.label), root('/bin/sh', '-c', GONE_USER, r.user)];
   const put = (sha, staged, dest, mode, extra = () => []) => [
     root('/bin/sh', '-c', CHECK, sha, staged),
     root('install', '-m', mode, '-o', 'root', '-g', 'wheel', staged, `${dest}.new`),
@@ -357,12 +357,12 @@ export function stepCommands(plan, name, step, ctx) {
   // What is in the folder but the two the account writes.
   const rest = [r.dir, '-mindepth', '1', '-maxdepth', '1', '!', '-name', r.work, '!', '-name', '_diag', '-exec'];
   // No ACL and no flag on the folder or what is in it (outside _work and _diag): an ACL entry or an immutable flag
-  // would outlive the chowns and chmods; none left is then checked.
+  // would outlive the chowns and chmods; none left is then checked. find recurses (it never follows a link) and
+  // each entry gets the non-recursive -h form: chmod and chflags refuse -R with -h, and -R alone follows links.
   const strip = () => [
     root('chmod', '-N', r.dir),
     root('chflags', '-h', '0', r.dir),
-    root('find', ...rest, 'chmod', '-h', '-R', '-N', '{}', '+'),
-    root('find', ...rest, 'chflags', '-h', '-R', '0', '{}', '+'),
+    ...['chmod -h -N', 'chflags -h 0'].map((c) => root('find', r.dir, '-mindepth', '1', '(', '-path', keep, '-o', '-path', `${r.dir}/_diag`, ')', '-prune', '-o', '-exec', ...c.split(' '), '{}', '+')),
     root('/bin/sh', '-c', ACLCHECK, r.dir, r.work),
   ];
   switch (step) {
