@@ -32,7 +32,7 @@
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import { causes } from "./causes.js";
-import { failureOf, abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, heldLanded, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, rehearsalBase, abandonPlan, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
+import { failureOf, abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, heldLanded, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, rehearsalBase, abandonPlan, shippedRecord, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -226,16 +226,33 @@ const dropBranch = (branch: string, notify: Notify): "deleted" | "kept" | "moved
     return gone === "unknown" ? "unknown" : gone ? "deleted" : "moved";
   } catch (e) { console.log(`release-cron: ${branch} not deleted: ${(e as Error).message.split("\n")[0]}`); return "kept"; }
 };
+// A held tip that already serves has shipped though no record says so (its confirmation never ran): its released-branch record is
+// written, from what origin and the serving command say now, so abandoning the hold keeps its backport hold (shippedRecord). A serving
+// command that cannot be read (one try, 20 s) counts as shipped. Returns what it wrote, or "".
+const recordShipped = (o: Open): string => {
+  let tip: string | null = null, serving: string | null = null;
+  try { fetchOrigin(); tip = must("git", ["--git-dir", repoDir(), "rev-parse", "--verify", `origin/${o.branch}^{commit}`]); } catch { /* tip unread */ }
+  try {
+    const t = config(top).cron.target;
+    if (t.kind === "command") { const r = sh(t.serving[0], t.serving.slice(1), `${top}/${appRel}`, Deno.env.toObject(), 20); if (r.ok) serving = r.out.split(/\s+/)[0] || null; }
+  } catch { /* serving unread */ }
+  const rec = shippedRecord(o, readReleased(), tip ?? o.attempts.at(-1)?.tip ?? null, serving);
+  if (!rec) return "";
+  Deno.writeTextFileSync(`${state}/released-branch`, JSON.stringify({ branch: rec.branch, tip: rec.tip }) + "\n");
+  return `${o.branch}: ${rec.why}; its record and backport hold are kept`;
+};
 if (verb === "abandon") {
   // Held, or released and waiting for its commits on main (held-backport), or both for one branch; abandonPlan says what goes: a hold
   // that never shipped is dropped with its branch, a released branch's record (its backport hold) only once every commit is on main.
-  const rb = readReleased();
-  if (!open && !rb) { console.log(`${app}: no release branch held`); Deno.exit(0); }
+  if (!open && !readReleased()) { console.log(`${app}: no release branch held`); Deno.exit(0); }
   if (open) {
     const pid = Number((() => { try { return Deno.readTextFileSync(`${state}/lock/pid`); } catch { return "0"; } })());
     if (pid && sh("kill", ["-0", String(pid)]).ok) throw new Error(`run ${pid} is going: abandon when it ends`);
   }
-  const shipped = !!rb && (!open || rb.branch === open.branch);
+  const shippedNote = open ? recordShipped(open) : "";
+  if (shippedNote) console.log(shippedNote);
+  const rb = readReleased();
+  const shipped = abandonPlan(open, rb, null, null).shipped;
   // Checked against main as it is now, at a commit id read once; the branch is deleted only as the released tip, and a branch that moved
   // since its release (a tip nothing checked) is kept with its record, for the next look.
   const missing = !shipped ? [] : (() => { try { fetchOrigin(); return missingOnMain(rb!.tip, must("git", ["--git-dir", repoDir(), "rev-parse", "--verify", "origin/main^{commit}"])); } catch { return null; } })();
@@ -249,7 +266,7 @@ if (verb === "abandon") {
     const gap = (() => { try { return Number(Deno.readTextFileSync(`${state}/last`).split(" ")[1]) || 60; } catch { return 60; } })();
     Deno.writeTextFileSync(`${state}/last`, `${Date.now()} ${gap} - -`);
     outcome = `abandoned ${branch}`; why = "by hand";
-    told = plan.dropBranch ? (dropBranch(branch, { kind: "none" }) === "deleted" ? `${branch} deleted from origin` : `${branch} kept on origin`) : `${branch} kept on origin: it shipped, its backport hold stays${plan.why ? ` (${plan.why})` : ""}`;
+    told = shippedNote || (plan.dropBranch ? (dropBranch(branch, { kind: "none" }) === "deleted" ? `${branch} deleted from origin` : `${branch} kept on origin`) : `${branch} kept on origin: it shipped, its backport hold stays${plan.why ? ` (${plan.why})` : ""}`);
   } else {
     if (plan.removeRecord) for (const f of ["released-branch", "backport-told"]) { try { Deno.removeSync(`${state}/${f}`); } catch { /* none */ } }
     outcome = `cleared ${rb!.branch}`;
@@ -805,11 +822,12 @@ const [lastAt, lastGap, lastFailed, lastTried, lastHeldTip] = (() => { try { con
     if (abandoned(open, Date.now(), open.limits)) {
       const o = open;
       if (limitPlan(dry).includes("report-abandon")) end("dry", dryWould(`give up ${o.branch}: held since ${o.opened}, past its ${o.limits.abandonHours} h or ${o.limits.abandonAttempts} red attempts, and delete it from origin only when everything on it is on main`));
+      const shippedNote = recordShipped(o);
       closeOpen("abandoned");
       // The app's gap, kept in `last` (cron.js lastFields), not the default: the main run after it waits as any run does.
       run.gap = Number.isNaN(gap) ? 60 : gap;
       dropBranch(o.branch, (() => { try { return config(wt).cron.notify as Notify; } catch { return { kind: "none" } as Notify; } })());
-      end(`abandoned ${o.branch}`, `held since ${o.opened}, past its ${o.limits.abandonHours} h or ${o.limits.abandonAttempts} red attempts`);
+      end(`abandoned ${o.branch}`, `held since ${o.opened}, past its ${o.limits.abandonHours} h or ${o.limits.abandonAttempts} red attempts${shippedNote ? `; ${shippedNote}` : ""}`);
     }
     const r = sh("git", remote(["ls-remote", "origin", `refs/heads/${open.branch}`]), wt, {}, 60);
     // Only a clean "not found" is no tip; a lookup that failed stops the run, reported, and is tried again next wake.
@@ -1174,11 +1192,11 @@ try {
       // STACK_PRIORITY=release puts its claim at the head of the pool's line, ahead of every claim a
       // pull request's gate or a launch is waiting with (tests/slot.ts).
       // The rehearsal's own output names the new-feature scenarios it passed on and the ones that flaked on their one retry.
-      // What serves is read as the rehearsal starts, not at the run's start (rehearsalBase): a preview beside it or a wait for the slot
-      // leaves time for another release to land.
-      const readLive = (() => { if (!target || !own || dry) return live; try { const s = servingNow(); return sh("git", ["cat-file", "-e", `${s}^{commit}`], wt).ok ? s : undefined; } catch { return undefined; } })();
+      // What serves is read when the rehearsal is started, before its slot wait (rehearsalBase): once, 20 s at most, no retries; a failed
+      // read is unknown. A wait for the slot, or a preview beside it, can still outlast it.
+      const readLive = (() => { if (!target || !own || dry) return live; const r = sh(target.serving[0], target.serving.slice(1), `${open ? top : wt}/${appRel}`, Deno.env.toObject(), 20); const c = r.ok ? r.out.split(/\s+/)[0] : ""; return c && sh("git", ["cat-file", "-e", `${c}^{commit}`], wt).ok ? c : undefined; })();
       const base0 = rehearsalBase(readLive, live, head);
-      if (base0.moved) say(`production moved while this run waited: ${live?.slice(0, 8)} then, ${base0.live?.slice(0, 8)} now; the rehearsal takes ${base0.live?.slice(0, 8)} as its baseline`);
+      if (base0.moved) say(`production moved since this run read it: ${live?.slice(0, 8)} then, ${base0.live?.slice(0, 8)} now; the rehearsal takes ${base0.live?.slice(0, 8)} as its baseline`);
       const gate = !own || dry ? { code: 0 } : await child(rehearse![0], rehearse!.slice(1), dir, { ...rehearsalEnv(Deno.env.toObject(), base0.live, !!target, base0.rehearsed), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; }, "rehearsal");
       clearInterval(look);
       // Every check passed already for this tree: the rehearsal took no slot and waited for none.

@@ -388,9 +388,9 @@ export const rehearsalEnv = (env, live, isCommandTarget, rehearsed) => {
   const { REHEARSE_LIVE: _, REHEARSE_COMMIT: __, ...rest } = env;
   return { ...rest, ...(isCommandTarget && live ? { REHEARSE_LIVE: live } : {}), ...(rehearsed ? { REHEARSE_COMMIT: rehearsed } : {}) };
 };
-// The commit the rehearsal's classifier takes as production's baseline: the serving commit read as the rehearsal starts (`read`, a
-// commit that resolved, else null), never the one read at the run's start (`earlier`): a preview beside it or a wait for the slot
-// leaves time for another release to land. An unread one is unknown (null, REHEARSE_LIVE omitted), not the stale one. `moved`:
+// The commit offered the rehearsal's selection as production's baseline: the serving commit read when the rehearsal is started, before
+// its slot wait (`read`, a commit that resolved, else null), never the one read at the run's start (`earlier`): a preview run first
+// leaves time for another release to land (the slot wait is not covered). Nothing reads it yet. An unread one is unknown (null, REHEARSE_LIVE omitted), not the stale one. `moved`:
 // production changed since the run began. `rehearsed` is the commit the run goes on to rehearse and release.
 export const rehearsalBase = (read, earlier, head) => ({ live: read || null, rehearsed: head, moved: !!read && !!earlier && read !== earlier });
 export const releaseModes = (command) => (command ?? []).includes("REHEARSE_RELEASE=1");
@@ -741,6 +741,16 @@ export const abandonPlan = (open, released, missing, gone) => {
     : missing.length ? "commits released from it are still missing from main"
     : gone === false ? "it moved since its release" : gone === "unknown" ? "origin could not be asked" : "";
   return { shipped, closeHold: !!open, dropBranch: false, removeRecord: !why, why };
+};
+
+// A hold abandoned while its tip may already serve: the release landed and only its confirmation did not, so no released-branch
+// record exists. Returns the record to write ({branch, tip, why}) so abandonPlan keeps the fix's backport hold, or null when none is
+// needed: no hold, a record already, no tip, or the tip is not what serves. `serving` null: it could not be read, assumed shipped.
+export const shippedRecord = (open, released, tip, serving) => {
+  if (!open || released || !tip) return null;
+  if (serving === tip) return { branch: open.branch, tip, why: "its tip is serving: it shipped, only its confirmation did not" };
+  if (!serving) return { branch: open.branch, tip, why: "what serves could not be read: assumed shipped" };
+  return null;
 };
 
 // `abandon` with an `open` file that cannot be read: it reports which file and why, and removes it only with --force.

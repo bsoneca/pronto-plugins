@@ -247,6 +247,14 @@ cases: {
 		{call: "cron.abandonPlan", args: [null, {branch: "release/a/1"}, [], "unknown"], expect: {shipped: true, closeHold: false, dropBranch: false, removeRecord: false, why: "origin could not be asked"}},
 		{call: "cron.abandonPlan", args: [null, {branch: "release/a/1"}, [], true], expect: {shipped: true, closeHold: false, dropBranch: false, removeRecord: true, why: ""}, why: "every commit on main and the branch gone: the record goes"},
 	]}
+	"abandon of a held tip that may already serve writes its record first": {suite: "cron", steps: [
+		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, "t1", "t1"], expect: {branch: "release/a/1", tip: "t1", why: "its tip is serving: it shipped, only its confirmation did not"}, why: "open, no record, tip serving"},
+		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, "t1", null], expect: {branch: "release/a/1", tip: "t1", why: "what serves could not be read: assumed shipped"}, why: "open, no record, serving unreadable"},
+		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, null, "t1", "m1"], expect: null, why: "main serves: the tip never shipped"},
+		{call: "cron.shippedRecord", args: [{branch: "release/a/1"}, {branch: "release/a/1", tip: "t1"}, "t1", "t1"], expect: null, why: "a record exists already"},
+		{call: "cron.shippedRecord", args: [null, null, "t1", "t1"], expect: null, why: "no hold"},
+		{call: "cron.abandonPlan", args: [{branch: "release/a/1"}, {branch: "release/a/1", tip: "t1"}, [], true], expect: {shipped: true, closeHold: true, dropBranch: false, removeRecord: true, why: ""}, why: "open and record on the same branch, every commit on main, branch gone"},
+	]}
 	"a held tip confirms itself by the trusted checkout's probes and serving command": {suite: "cron", steps: [
 		{call: "cron.heldConfig", args: [{gap: 60, ready: ["a"], probes: {home: {path: "/evil"}}, target: {kind: "command", release: ["./rel"], serving: ["./evil-serving"], origin: "https://evil"}}, {ready: ["b"], probes: {home: {path: "/"}}, target: {kind: "command", release: ["x"], serving: ["ssh", "node", "serving"], origin: "https://app"}}], expect: {gap: 60, ready: ["b"], probes: {home: {path: "/"}}, target: {kind: "command", release: ["./rel"], serving: ["ssh", "node", "serving"], origin: "https://app"}}, why: "the candidate's release command still runs; what says it landed is the trusted one's"},
 		{call: "cron.heldConfig", args: [{ready: ["a"], probes: {}, target: {kind: "cloud-run"}}, {probes: {p: {path: "/"}}, target: {kind: "cloud-run"}}], expect: {ready: ["a"], probes: {p: {path: "/"}}, target: {kind: "cloud-run"}}},
