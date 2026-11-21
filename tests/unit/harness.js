@@ -136,3 +136,61 @@ export const linked = (ceiling) => inApp(async (d) => {
 export const unreadable = () => inApp(async (d) => {
   await Deno.symlink("nowhere", `${d}/.bayt/Dockerfile.gone`);
 }, 100).then((p) => [p.length === 1 && p[0].startsWith(".bayt/Dockerfile.gone: cannot be read")]);
+
+// The scenarios loader (load.ts, PRONTO-1071): which files of a folder are scenarios, and, with a fake `cue` (a script CUE
+// names), the command it runs and what an abort or a timeout does to it.
+import { loadScenarios, scenarioFiles } from "../../harness/files/tests/scenarios/load.ts";
+export { scenarioFiles };
+export async function loaded(script, opts) {
+  const dir = await Deno.makeTempDir();
+  const prev = Deno.env.get("CUE");
+  try {
+    await Deno.mkdir(`${dir}/scenarios`);
+    for (const n of ["b.cue", "a.cue", "notes.md", "c.cue.bak"]) await Deno.writeTextFile(`${dir}/scenarios/${n}`, "");
+    await Deno.writeTextFile(`${dir}/cue.sh`, `#!/bin/sh\n${script}\n`);
+    await Deno.chmod(`${dir}/cue.sh`, 0o755);
+    Deno.env.set("CUE", `${dir}/cue.sh`);
+    const started = Date.now();
+    const ac = new AbortController();
+    if (opts?.abortAfterMs) setTimeout(() => ac.abort(), opts.abortAfterMs);
+    try {
+      const spec = await loadScenarios(`${dir}/scenarios/`, { signal: opts?.abortAfterMs ? ac.signal : undefined, timeoutMs: opts?.timeoutMs });
+      return { spec, args: (await Deno.readTextFile(`${dir}/args`).catch(() => "")).split("\n").slice(0, -1).map((a) => a.replace(dir, "<dir>")), error: null, fast: Date.now() - started < 5000 };
+    } catch (e) {
+      const fast = Date.now() - started < 5000; // at the rejection, not once settled
+      await e.settled;
+      return { spec: null, error: String(e.message), fast };
+    }
+  } finally {
+    if (prev === undefined) Deno.env.delete("CUE"); else Deno.env.set("CUE", prev);
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+// A cue that starts a descendant holding its pipes (the wrapper's slot job does), under a deadline: how soon it rejects,
+// and whether the descendant (its pid is in a file; opts.ignoreTerm: one that ignores TERM) is gone within 4 s.
+export async function descendant(opts) {
+  const dir = await Deno.makeTempDir();
+  const prev = Deno.env.get("CUE");
+  try {
+    await Deno.mkdir(`${dir}/scenarios`);
+    await Deno.writeTextFile(`${dir}/cue.sh`, `#!/bin/sh\n${opts.ignoreTerm ? "sh -c 'trap \"\" TERM; while :; do sleep 1; done' &" : "sleep 30 &"}\necho $! > "$(dirname "$0")/pid"\nwait\n`);
+    await Deno.chmod(`${dir}/cue.sh`, 0o755);
+    Deno.env.set("CUE", `${dir}/cue.sh`);
+    const started = Date.now();
+    const ac = new AbortController();
+    if (opts.preAborted) ac.abort();
+    let error = null, settled;
+    try { await loadScenarios(`${dir}/scenarios`, { signal: opts.preAborted ? ac.signal : undefined, timeoutMs: opts.timeoutMs }); } catch (e) { error = String(e.message); settled = e.settled; }
+    const ms = Date.now() - started;
+    await settled;
+    const pid = Number((await Deno.readTextFile(`${dir}/pid`).catch(() => "0")).trim());
+    const alive = (p) => { try { Deno.kill(p, "SIGCONT"); return true; } catch { return false; } };
+    let gone = true;
+    if (pid) { for (let i = 0; i < 40 && alive(pid); i++) await new Promise((r) => setTimeout(r, 100)); gone = !alive(pid); if (!gone) Deno.kill(pid, "SIGKILL"); }
+    return { error, quick: ms < 2500, started: pid > 0, gone };
+  } finally {
+    if (prev === undefined) Deno.env.delete("CUE"); else Deno.env.set("CUE", prev);
+    await Deno.remove(dir, { recursive: true });
+  }
+}

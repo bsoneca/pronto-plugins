@@ -238,3 +238,92 @@ cases: "a served image's RUN names the folders that weigh most, root files as (r
 		{call: "harness.served", args: [[["", "index.html"]]], expect: {bytes: 64, heaviest: [["(root)", 58]]}},
 	]
 }
+
+// The scenarios loader (harness/files/tests/scenarios/load.ts, PRONTO-1071): the runner's file list and `cue export`
+// command, in one place for the runner and a rehearsal.
+cases: "scenario files are the folder's .cue files, sorted, whether or not the folder ends in a slash": {
+	suite: "harness"
+	steps: [
+		{call: "harness.scenarioFiles", args: ["/app/tests/scenarios/", ["b.cue", "notes.md", "a.cue", "c.cue.bak", "app.ts"]]},
+		{get: "0", expect: "/app/tests/scenarios/a.cue"},
+		{call: "harness.scenarioFiles", args: ["/app/tests/scenarios", ["b.cue", "a.cue"]]},
+		{get: "1", expect: "/app/tests/scenarios/b.cue"},
+	]
+}
+cases: "the loader runs cue export on the sorted files with --out json and parses what it prints": {
+	suite: "harness"
+	steps: [
+		{call: "harness.loaded", args: ["for a in \"$@\"; do echo \"$a\"; done > \"$(dirname \"$0\")/args\"; echo '{\"parallel\": 3, \"scenarios\": {}}'"]},
+		{keep: "r"},
+		{get: "spec.parallel", expect: 3},
+		{use: "r"},
+		{get: "args", expect: ["export", "<dir>/scenarios/a.cue", "<dir>/scenarios/b.cue", "--out", "json"]},
+	]
+}
+cases: "a cue that fails is the scenarios not exporting, with cue's words": {
+	suite: "harness"
+	steps: [
+		{call: "harness.loaded", args: ["echo 'bad field' >&2; exit 1"]},
+		{get: "error", matches: "^the scenarios do not export: bad field"},
+	]
+}
+cases: "a timeout kills a cue that does not answer, and says so": {
+	suite: "harness"
+	steps: [
+		{call: "harness.loaded", args: ["exec sleep 30", {timeoutMs: 300}]},
+		{keep: "r"},
+		{get: "error", matches: "stopped \\(no answer in 300 ms\\), cue was killed"},
+		{use: "r"},
+		{get: "fast", expect: true, why: "the child was killed, not waited out"},
+	]
+}
+cases: "an aborted signal kills cue and says so": {
+	suite: "harness"
+	steps: [
+		{call: "harness.loaded", args: ["exec sleep 30", {abortAfterMs: 300}]},
+		{keep: "r"},
+		{get: "error", matches: "stopped \\(aborted\\), cue was killed"},
+		{use: "r"},
+		{get: "fast", expect: true},
+	]
+}
+cases: "a deadline rejects at once though a descendant of cue holds its pipes, and leaves that descendant dead": {
+	suite: "harness"
+	steps: [
+		{call: "harness.descendant", args: [{timeoutMs: 1000}]},
+		{keep: "r"},
+		{get: "error", matches: "stopped \\(no answer in 1000 ms\\), cue was killed"},
+		{use: "r"},
+		{get: "quick", expect: true, why: "not after the descendant's 30 s, nor its pipes' EOF"},
+		{use: "r"},
+		{get: "started", expect: true},
+		{use: "r"},
+		{get: "gone", expect: true, why: "the whole tree is stopped, not only cue"},
+	]
+}
+cases: "a signal already aborted rejects before cue is started": {
+	suite: "harness"
+	steps: [
+		{call: "harness.descendant", args: [{preAborted: true}]},
+		{keep: "r"},
+		{get: "error", matches: "stopped \\(aborted\\), cue was killed"},
+		{use: "r"},
+		{get: "quick", expect: true},
+		{use: "r"},
+		{get: "started", expect: false, why: "cue never ran"},
+	]
+}
+cases: "a descendant that ignores TERM is killed after the grace, the rejection still at once": {
+	suite: "harness"
+	steps: [
+		{call: "harness.descendant", args: [{timeoutMs: 1000, ignoreTerm: true}]},
+		{keep: "r"},
+		{get: "error", matches: "stopped \\(no answer in 1000 ms\\), cue was killed"},
+		{use: "r"},
+		{get: "quick", expect: true},
+		{use: "r"},
+		{get: "started", expect: true},
+		{use: "r"},
+		{get: "gone", expect: true, why: "KILLed after the 2 s grace (the timer keeps the process alive for it)"},
+	]
+}
