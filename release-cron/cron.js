@@ -219,7 +219,7 @@ export const report = (runs) => {
 // The launchd job (a LaunchAgent's plist): `program` with `args`, every `poll` minutes (launchd
 // never starts it while it runs, and after a sleep runs it once), its output appended to `log`,
 // with PATH and the variables in `env`.
-export const plist = ({ label, program, args, poll, log, env, stop }) => {
+export const plist = ({ label, program, args, poll, log, env }) => {
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const str = (s) => `<string>${esc(s)}</string>`;
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -234,8 +234,7 @@ export const plist = ({ label, program, args, poll, log, env, stop }) => {
 	<dict>${Object.entries(env).map(([k, v]) => `<key>${esc(k)}</key>${str(v)}`).join("")}</dict>
 	<key>StandardOutPath</key>${str(log)}
 	<key>StandardErrorPath</key>${str(log)}
-	<key>ProcessType</key><string>Standard</string>${stop ? `
-	<key>ExitTimeOut</key><integer>${stop}</integer>` : ""}
+	<key>ProcessType</key><string>Standard</string>
 </dict>
 </plist>
 `;
@@ -245,7 +244,7 @@ export const plist = ({ label, program, args, poll, log, env, stop }) => {
 // scheduler's: the service runs `program` with `args` once and its output is appended to `log`, with the
 // variables in `env`; the timer starts it `poll` minutes after the last start (OnUnitActiveSec; systemd never
 // starts a service while it runs) and once a minute after boot, so a run follows a restart.
-export const systemdUnits = ({ label, program, args, poll, log, env, stop }) => {
+export const systemdUnits = ({ label, program, args, poll, log, env }) => {
   // A word of a unit file in double quotes: \ and " escaped, and % and $ doubled (specifiers, variables).
   const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\$/g, "$$$$")}"`;
   const service = `[Unit]
@@ -256,7 +255,7 @@ Type=oneshot
 ExecStart=${[program, ...args].map(q).join(" ")}
 ${Object.entries(env).map(([k, v]) => `Environment=${q(`${k}=${v}`)}\n`).join("")}StandardOutput=append:${log}
 StandardError=append:${log}
-${stop ? `TimeoutStopSec=${stop}\nKillMode=mixed\n` : ""}`;
+`;
   const timer = `[Unit]
 Description=release-cron ${label}, every ${poll} min
 
@@ -823,6 +822,10 @@ export const trustNotice = (told, branch, why) => ({ key: `${branch} ${why}`, te
 // What holds the run lock, from the holder's command line (`ps -o command= -p <pid>`): `abandon` when its verb is abandon, else a run.
 export const holderKind = (command) => /\sabandon(\s|$)/.test(command ?? "") ? "abandon" : "run";
 
+// The lock a version before this one left: a plain file holding the holder's pid (`isFile`; its `pid`, `alive`). "busy" while that holder lives,
+// "remove" when it is dead or unreadable (the mkdir lock is then made), "none" when the lock is not a file.
+export const legacyFileLock = (isFile, pid, alive) => !isFile ? "none" : pid && alive ? "busy" : "remove";
+
 // `abandon`: what it does to the hold (`open`, {branch} or null) and the record of a branch already released (`released`,
 // {branch} or null), after the checks of a released branch (`missing`: the commits not on main, null when they could not be read;
 // `gone`: the branch deleted from origin, false it moved, "unknown" origin could not be asked, null not tried). A hold whose branch
@@ -863,46 +866,8 @@ export const servingRetryable = (code) => sshDropped(code);
 // release that had already landed keeps its outcome.
 export const endWhenInterrupted = (interrupted, outcome) => interrupted && outcome !== outcomes.released ? outcomes.stopped : outcome;
 
-// A signal and the preview's remote `up`: not stopped at once (that ends the local ssh while the remote release runs on, and `down` would
-// start beside it). `tag`: a child's tag; only "down" and "preview" (up) are left to previewUpStep.
-export const signalStops = (tag) => tag !== "down" && tag !== "preview";
-// Each tick while `up` runs after a signal (`alive`; `elapsed`: ms since it started; `timeout`: its own limit, `grace`: ms between TERM and KILL):
-// "wait" until its timeout, then "term" its process group (the recorded pid only), "kill" after the grace, "gone" once it has exited, and only
-// then does `down` run.
-export const previewUpStep = (alive, elapsed, timeout, grace) => !alive ? "gone" : elapsed < timeout ? "wait" : elapsed < timeout + grace ? "term" : "kill";
-// The ms a signal's wait may take at most while an `up` runs (its remaining time and the grace), on top of the teardown's.
-export const upExtra = (upElapsed, timeout, grace) => Math.max(0, timeout - upElapsed) + grace;
-
-// What the lock decides, from the flock alone (`acquired`: the kernel granted it; the holder's pid is never read for this): "busy" when not, else "reap" when a dead
-// run left a preview record (`orphan`, <state>/lock.preview): its `up` is stopped (TERM, then KILL, the recorded and verified pgid only) and its `down` run, only once the
-// lock is held, else "take". A run, `abandon` and the bisect take it the same way.
-export const lockStep = (acquired, orphan = false) => !acquired ? "busy" : orphan ? "reap" : "take";
-// A lock directory an earlier version made (`isDir`; its `pid` file's `pid`, `alive`): busy while that run lives, else removed so the flock is taken.
-export const legacyLock = (isDir, pid, alive) => !isDir ? "none" : pid && alive ? "busy" : "remove";
-// Whether the group of a preview's `up` is signalled: only a record with a pgid, whose leader still exists as the process recorded (`live`: {exists, lstart, boot}, the
-// system's now): the same start time and the same boot. A reused pid, another boot, a gone leader or no pgid is an `up` that is gone: `down` runs at once.
-export const reapSignal = (rec, live) => !!rec?.pgid && !!rec.lstart && !!rec.boot && !!live?.exists && live.lstart === rec.lstart && live.boot === rec.boot;
 // A reason with another appended (a throw after the run's own reason was set).
 export const appendWhy = (prev, why) => prev ? `${prev}; ${why}` : why;
-// The pid holding a lock, from what is read of it: a lock an earlier version made is a directory holding `pid` (`isDir`: `dirText` is its content), a current one
-// a file holding the pid (`fileText`). A legacy holder that runs keeps its lock (lockStep says busy); only a dead or unreadable one (0) is removed.
-export const holderPid = (isDir, dirText, fileText) => Number((isDir ? dirText : fileText) ?? "") || 0;
-// The sequence that stops an orphaned `up` (alive: its group; elapsed: ms since the sequence began): the same bounded steps as a signal's, with no limit left to wait.
-export const reapStep = (alive, elapsed, grace) => alive && elapsed >= grace + 60_000 ? "giveup" : previewUpStep(alive, elapsed, 0, grace);
-
-// When a signal's wait is over (`upGoneAt`: when the preview's `up` was seen gone, null while it runs; `ups`: whether one ran at the signal, at `t`; `now`;
-// `upLeft`: upExtra's bound for it): a `down` gets grace + teardown from the moment `up` is gone, not from the signal; a `up` that is never seen gone is
-// counted gone when its own limit and the grace have passed. Without a preview, grace + teardown from the signal.
-export const signalDone = (upGoneAt, ups, now, t, upLeft, grace, teardown) => {
-  if (!ups) return now - t >= grace + teardown;
-  const gone = upGoneAt ?? (now - t >= upLeft ? t + upLeft : null);
-  return gone !== null && now - gone >= grace + teardown;
-};
-
-// The seconds the scheduler gives a stopping run before it kills it (launchd's ExitTimeOut, systemd's TimeoutStopSec): the preview's `up` limit
-// (`upMinutes`, 0 without a preview), the grace its stop gets and the teardown, as the signal's wait is made of them.
-export const stopSeconds = (upMinutes, grace = 60_000, teardown = 300_000) => upMinutes * 60 + (2 * grace + teardown) / 1000 + 30;
-
 // The flags-released bookkeeping's result (`result`: recordFlagsReleased's) once its marker was written or not (`err`: the write's error, null when it
 // was): a marker that could not be written is a bookkeeping failure with its path, apart from the deploy outcome (run.flagsReleased, never `outcome`).
 export const flagsBookkeeping = (result, path, err) => result === "ok" && err ? `failed (the marker ${path} was not written: ${String(err).split("\n")[0]})` : result;

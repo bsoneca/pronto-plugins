@@ -61,19 +61,6 @@ cases: {
 		{call: "cron.refusedTip", args: [{descends: true, unmerged: [], migrations: [], resolved: []}], expect: null},
 		{call: "cron.refusedTip", args: [{descends: true, unmerged: [], migrations: []}], expect: null, why: "no merges read"},
 	]}
-	"a signal waits for the preview's up, stops its group only past its own limit, and down runs after": {suite: "cron", steps: [
-		{call: "cron.signalStops", args: ["rehearsal"], expect: true},
-		{call: "cron.signalStops", args: ["preview"], expect: false, why: "up is not stopped at the signal: stopping it ends only the local ssh while the remote release goes on"},
-		{call: "cron.signalStops", args: ["down"], expect: false},
-		{call: "cron.previewUpStep", args: [true, 600000, 7200000, 60000], expect: "wait", why: "a signal 10 min into up"},
-		{call: "cron.previewUpStep", args: [true, 7199999, 7200000, 60000], expect: "wait"},
-		{call: "cron.previewUpStep", args: [true, 7200000, 7200000, 60000], expect: "term", why: "its own limit is over: its process group (the recorded pid) is stopped"},
-		{call: "cron.previewUpStep", args: [true, 7260000, 7200000, 60000], expect: "kill", why: "still there past the grace"},
-		{call: "cron.previewUpStep", args: [false, 900000, 7200000, 60000], expect: "gone", why: "up ended by itself: down runs"},
-		{call: "cron.upExtra", args: [600000, 7200000, 60000], expect: 6660000, why: "the lock waits at most the rest of up's limit and the grace, beside the teardown"},
-		{call: "cron.upExtra", args: [8000000, 7200000, 60000], expect: 60000},
-		{call: "cron.signalStep", args: [false, 1, 61000, 60000, 300000 + 6660000], expect: "wait", why: "up has ended but down still runs: the lock is held"},
-	]}
 	"release-cron's outcome names come from releaseCron.outcomes": {suite: "cron", steps: [
 		{call: "cron.branchOutcome", args: ["held", "release/x/1"], expect: "\(_outcomes.held) release/x/1"},
 		{call: "cron.branchOutcome", args: ["abandoned", "release/x/1"], expect: "\(_outcomes.abandoned) release/x/1"},
@@ -106,64 +93,16 @@ cases: {
 		{call: "cron.trustNotice", args: ["release/x/1 why", "release/x/2", "why"], expect: {key: "release/x/2 why", tell: true}, why: "another branch"},
 		{call: "cron.trustNotice", args: ["release/x/1 why", "release/x/1", "other"], expect: {key: "release/x/1 other", tell: true}, why: "another reason"},
 	]}
-	"a dead holder that left a preview is reaped before its lock is taken over": {suite: "cron", steps: [
-						{call: "cron.reapStep", args: [true, 0, 60000], expect: "term"},
-		{call: "cron.reapStep", args: [true, 59000, 60000], expect: "term"},
-		{call: "cron.reapStep", args: [true, 60000, 60000], expect: "kill"},
-		{call: "cron.reapStep", args: [false, 5000, 60000], expect: "gone", why: "then down runs"},
-		{call: "cron.reapStep", args: [true, 120000, 60000], expect: "giveup", why: "still alive a minute after KILL: down runs, said in reaped"},
-		{call: "cron.reapStep", args: [true, 119999, 60000], expect: "kill"},
-	]}
-	"a signal's wait ends a down's grace and teardown after up is gone, not after the signal": {suite: "cron", steps: [
-		{call: "cron.signalDone", args: [null, false, 360000, 0, 0, 60000, 300000], expect: true, why: "no preview: from the signal, as before"},
-		{call: "cron.signalDone", args: [null, false, 359999, 0, 0, 60000, 300000], expect: false},
-		{call: "cron.signalDone", args: [null, true, 3000000, 0, 6660000, 60000, 300000], expect: false, why: "up still runs"},
-		{call: "cron.signalDone", args: [3000000, true, 3359999, 0, 6660000, 60000, 300000], expect: false, why: "up went at 50 min: down has until 56 min"},
-		{call: "cron.signalDone", args: [3000000, true, 3360000, 0, 6660000, 60000, 300000], expect: true},
-		{call: "cron.signalDone", args: [null, true, 7020000, 0, 6660000, 60000, 300000], expect: true, why: "an up never seen gone counts gone at its limit and grace"},
-	]}
-	"the scheduler gives a stopping run at least up's limit and the teardown": {suite: "cron", steps: [
-		{call: "cron.stopSeconds", args: [120], expect: 7650},
-		{call: "cron.stopSeconds", args: [0], expect: 450},
-		{call: "cron.plist", args: [{label: "l", program: "/p", args: ["a"], poll: 10, log: "/l", env: {}, stop: 7650}], matches: "<key>ExitTimeOut</key><integer>7650</integer>"},
-		{call: "cron.plist", args: [{label: "l", program: "/p", args: ["a"], poll: 10, log: "/l", env: {}}], matches: "^(?:(?!ExitTimeOut)[\\s\\S])*$", why: "none unless asked"},
-		{call: "cron.systemdUnits", args: [{label: "l", program: "/p", args: ["a"], poll: 10, log: "/l", env: {}, stop: 7650}]},
-		{keep: "u"},
-		{get: "service", matches: "TimeoutStopSec=7650"},
-		{use: "u"},
-		{get: "service", matches: "KillMode=mixed"},
-	]}
 	"a lock's holder is an abandon when its command says so": {suite: "cron", steps: [
 		{call: "cron.holderKind", args: ["/usr/bin/deno run -A release-cron.ts studio abandon --force"], expect: "abandon"},
 		{call: "cron.holderKind", args: ["/usr/bin/deno run -A release-cron.ts studio run"], expect: "run"},
 		{call: "cron.holderKind", args: [""], expect: "run", why: "the holder's command could not be read"},
 	]}
-	"a lock directory an earlier version made keeps its live holder": {suite: "cron", steps: [
-		{call: "cron.holderPid", args: [true, "4242\n", ""], expect: 4242, why: "the directory's pid file is read first"},
-		{call: "cron.holderPid", args: [true, "", ""], expect: 0, why: "an unreadable pid file: no holder, the directory is removed"},
-		{call: "cron.holderPid", args: [false, "", "4242"], expect: 4242},
-		{call: "cron.holderPid", args: [false, "", "x"], expect: 0},
-				]}
-	"the lock is the kernel's flock; the pid decides nothing": {suite: "cron", steps: [
-		{call: "cron.lockStep", args: [true, false], expect: "take"},
-		{call: "cron.lockStep", args: [false, true], expect: "busy", why: "not granted: a live holder, whatever the pid file says"},
-		{call: "cron.lockStep", args: [true, true], expect: "reap", why: "a dead run left a preview: reaped only now that the lock is held"},
-		{call: "cron.lockStep", args: [false, false], expect: "busy"},
-	]}
-	"a lock directory an earlier version made keeps its live holder and is removed when dead": {suite: "cron", steps: [
-		{call: "cron.legacyLock", args: [true, 4242, true], expect: "busy"},
-		{call: "cron.legacyLock", args: [true, 4242, false], expect: "remove"},
-		{call: "cron.legacyLock", args: [true, 0, false], expect: "remove", why: "unreadable pid file"},
-		{call: "cron.legacyLock", args: [false, 4242, true], expect: "none", why: "a file: the flock decides"},
-	]}
-	"a reap signals a group only while its leader is the process recorded": {suite: "cron", steps: [
-		{call: "cron.reapSignal", args: [{pgid: 77, lstart: "Sat Nov 21 10:00:00 2026", boot: "b1", down: ["d"]}, {exists: true, lstart: "Sat Nov 21 10:00:00 2026", boot: "b1"}], expect: true, why: "same start time, same boot"},
-		{call: "cron.reapSignal", args: [{pgid: 77, lstart: "Sat Nov 21 10:00:00 2026", boot: "b1", down: ["d"]}, {exists: true, lstart: "Sat Nov 21 11:30:00 2026", boot: "b1"}], expect: false, why: "the pid was reused by another process"},
-		{call: "cron.reapSignal", args: [{pgid: 77, lstart: "Sat Nov 21 10:00:00 2026", boot: "b1", down: ["d"]}, {exists: true, lstart: "Sat Nov 21 10:00:00 2026", boot: "b2"}], expect: false, why: "the machine rebooted"},
-		{call: "cron.reapSignal", args: [{pgid: 77, lstart: "x", boot: "b1", down: ["d"]}, {exists: false, lstart: "", boot: "b1"}], expect: false, why: "the leader is gone"},
-		{call: "cron.reapSignal", args: [{down: ["d"]}, {exists: true, lstart: "x", boot: "b1"}], expect: false, why: "no pgid: up had exited"},
-		{call: "cron.reapSignal", args: [{pgid: 77, down: ["d"]}, {exists: true, lstart: "x", boot: "b1"}], expect: false, why: "a record with no identity is never signalled"},
-		{call: "cron.reapSignal", args: [{pgid: 77, lstart: "x", boot: "b1", down: ["d"]}, null], expect: false},
+	"a lock left as a plain file by the flock version keeps its live holder and is removed when dead": {suite: "cron", steps: [
+		{call: "cron.legacyFileLock", args: [true, 4242, true], expect: "busy"},
+		{call: "cron.legacyFileLock", args: [true, 4242, false], expect: "remove"},
+		{call: "cron.legacyFileLock", args: [true, 0, false], expect: "remove", why: "empty or unreadable content"},
+		{call: "cron.legacyFileLock", args: [false, 4242, true], expect: "none", why: "a directory: the mkdir lock decides"},
 	]}
 	"a throw after the run's reason was set appends to it": {suite: "cron", steps: [
 		{call: "cron.appendWhy", args: [null, "boom"], expect: "boom"},

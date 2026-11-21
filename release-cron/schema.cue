@@ -192,10 +192,6 @@ releaseCron: #Cron
 		// "first": before the rehearsal takes its slot, so a preview that fails costs no rehearsal. "beside": at the same
 		// time as the rehearsal, the first to fail stopping the other (README, "When the preview runs").
 		when: *"after" | "first" | "beside"
-		// How long `up` may run on after a signal came, counted from when it started (minutes): a signal never stops it at once (that
-		// would end only the local ssh while the remote release goes on, and `down` would start beside it); past this its process
-		// group is stopped, and only then does `down` run.
-		upMinutes: *120 | (int & >0)
 	}
 	_alive: [
 		(#SshAlive & {cmd: release}).ok,

@@ -32,7 +32,7 @@
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import { causes, outcomes } from "./causes.js";
-import { legacyLock, reapSignal, appendWhy, holderPid, holderKind, reapStep, signalDone, trustNotice, stopSeconds, failureOf, abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, servingPlan, rerunWhy, heldTrusted, backportCheck, rehearsalSpawn, signalStops, previewUpStep, upExtra, lockStep, flagsBookkeeping, branchOutcome, patchIdsOf, patchOf, nulPaths, resolvedMerges, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, abandonPlan, shippedRecord, releaseAttempt, cutPlan, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
+import { appendWhy, holderKind, legacyFileLock, trustNotice, failureOf, abandoned, attempted, backportPlan, backportWhy, corruptOpen, dryWould, heldConfig, heldDiffArgs, heldPlan, limitPlan, servingPlan, rerunWhy, heldTrusted, backportCheck, rehearsalSpawn, flagsBookkeeping, branchOutcome, patchIdsOf, patchOf, nulPaths, resolvedMerges, isSha, leaseDelete, leaseLost, missingFromMain, mutates, refusal, heldNotice, heldWait, lastFields, migrationFiles, parseLog, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, abandonPlan, shippedRecord, releaseAttempt, cutPlan, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, branchTip, signalStep, servingRetryable } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -117,105 +117,37 @@ if (verb === "status") {
   Deno.exit(0);
 }
 const jsonl = (f: string) => { try { return Deno.readTextFileSync(f).split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
-// The ms a stopped child gets before KILL, and a preview's `down` after them (it is tagged "down", never stopped by a signal).
-const STOP_GRACE = 60_000, TEARDOWN_GRACE = 300_000;
-// A lock: an flock(2) on a file (`<state>/lock` for a run and `abandon`, `bisect/lock` for the bisect), which the kernel releases when its holder dies, so a
-// dead holder's lock is never taken over by a race. Deno 2.5's FsFile.lock/lockSync only block (no try-lock), so a small perl helper takes it with
-// LOCK_NB and holds it for as long as its stdin stays open: when this process ends, however, the pipe closes and the helper exits. The holder's pid is
-// written into the file for messages and `holderKind` only, never for the decision. The reap of a dead run's preview runs only once the lock is held.
-// A lock directory an earlier version made keeps its live holder (legacyLock): busy while its `lock/pid` is alive, removed when it is dead or unreadable.
-const FLOCK_HELPER = 'use Fcntl qw(:flock); open(F, ">>", $ARGV[0]) or exit 4; flock(F, LOCK_EX | LOCK_NB) or exit 3; $| = 1; print "ok\n"; <STDIN>; exit 0;';
-const heldLocks = new Map<string, Deno.ChildProcess>();
-const flockTry = async (path: string): Promise<boolean> => {
-  const p = new Deno.Command("perl", { args: ["-e", FLOCK_HELPER, path], stdin: "piped", stdout: "piped", stderr: "null" }).spawn();
-  const reader = p.stdout.getReader();
-  const first = await reader.read();
-  if (first.value && decode(first.value).startsWith("ok")) { reader.releaseLock(); p.unref(); heldLocks.set(path, p); return true; }
-  const { code } = await p.status;
-  if (code !== 3) throw new Error(`the lock ${path} could not be opened (the flock helper exited ${code})`);
-  return false;
-};
-// The pid in a lock (cron.js holderPid): a file's content, or, for a directory an earlier version made, its `pid` file.
-const lockHolder = (lock: string) => {
-  const read = (f: string) => { try { return Deno.readTextFileSync(f); } catch { return ""; } };
-  let isDir = false;
-  try { isDir = Deno.statSync(lock).isDirectory; } catch { /* none */ }
-  return holderPid(isDir, read(`${lock}/pid`), read(lock));
-};
-const lockAcquire = async (lock: string, orphan: () => boolean = () => false, reap: () => void = () => {}): Promise<{ got: true } | { got: false; pid: number }> => {
-  // A directory an earlier version made: looked at again after each removal (another run may remove it first, or make it anew), never crashing on a NotFound.
-  for (;;) {
-    let isDir = false;
-    try { isDir = Deno.statSync(lock).isDirectory; } catch { /* none */ }
-    if (!isDir) break;
-    const pid = lockHolder(lock);
-    const legacy = legacyLock(true, pid, !!pid && sh("kill", ["-0", String(pid)]).ok);
-    if (legacy === "busy") return { got: false, pid };
-    try { Deno.removeSync(lock, { recursive: true }); } catch { /* gone, or taken anew: the next look decides */ }
-  }
-  const acquired = await flockTry(lock);
-  const step = lockStep(acquired, acquired && orphan());
-  if (step === "busy") return { got: false, pid: lockHolder(lock) };
-  // The holder's pid first (for messages and holderKind), so a reader during a long reap sees who holds the lock.
-  Deno.writeTextFileSync(lock, String(Deno.pid));
-  if (step === "reap") reap();
-  return { got: true };
-};
-// Let the lock go: the pid emptied (a reader sees no holder), then the helper's stdin closed so it exits and the kernel releases the flock. `await`ed where
-// another process takes the lock next (the hand-over to main's script); a process that exits next needs no wait.
-const lockRelease = async (lock: string) => {
-  const p = heldLocks.get(lock);
-  if (!p) return;
-  heldLocks.delete(lock);
-  try { Deno.writeTextFileSync(lock, ""); } catch { /* gone */ }
-  try { await p.stdin.close(); } catch { /* closed */ }
-  await p.status;
-};
+// The lock: a directory (made or not, atomically) holding the run's pid, taken by a run and by `abandon`. A lock whose holder is gone is
+// taken over; one whose holder lives is busy: launchd never overlaps its own job, and this keeps a run started by hand from overlapping it.
 const lockPath = `${state}/lock`;
-const lockPid = () => lockHolder(lockPath);
-// The run holding the lock named by its pid, from its command line: a run or an abandon (cron.js holderKind).
-const holderOf = (pid: number) => holderKind(sh("ps", ["-o", "command=", "-p", String(pid)], undefined, {}, 10).out);
-// A preview's remote `up` that its run did not live to end: its pgid and the `down` that removes the preview, kept in <state>/lock.preview from the start of
-// `up` to the end of `down`. The next run to take the lock over a dead holder first stops that `up` (TERM, then KILL after the grace: the recorded pgid
-// only, never a pattern) and runs the `down`, so the preview is never left for a run to race. What it did is `reaped`, told in the run's record.
-const previewRecord = `${state}/lock.preview`;
-// A process's identity: whether it exists, its start time (`ps -o lstart=`) and the machine's boot (Linux's boot_id, else macOS's kern.bootsessionuuid), what
-// tells it from a later process that reused its pid (cron.js reapSignal).
-const bootId = () => { try { return Deno.readTextFileSync("/proc/sys/kernel/random/boot_id").trim(); } catch { return sh("sysctl", ["-n", "kern.bootsessionuuid"], undefined, {}, 10).out; } };
-const identityOf = (pid: number) => { const r = sh("ps", ["-o", "lstart=", "-p", String(pid)], undefined, { LC_ALL: "C", LANG: "C" }, 10); return { exists: r.ok && r.out !== "", lstart: r.out, boot: bootId() }; };
-let reaped = "";
-const reapPreview = () => {
-  let rec: { pgid?: number; lstart?: string; boot?: string; down: string[]; dir: string } | null = null;
-  try { rec = JSON.parse(Deno.readTextFileSync(previewRecord)); } catch (e) {
-    reaped = `the preview record ${previewRecord} could not be read (${(e as Error).message.split("\n")[0]}): removed, its preview may still stand`;
-    console.log(`release-cron: ${reaped}`);
-    try { Deno.removeSync(previewRecord); } catch { /* gone */ }
-    return;
-  }
-  // The group is signalled only when its leader is still the process recorded (same start time, same boot): a pgid is reused, and a record with no pgid
-  // (its `up` had exited) or a leader that is gone or another process is an `up` that is gone, and `down` runs at once (cron.js reapSignal).
-  const pg = rec!.pgid;
-  const signal = reapSignal(rec, pg ? identityOf(pg) : null);
-  let note = pg ? (signal ? `its up (group ${pg}) stopped` : `its up (group ${pg}) was gone or not the recorded process: not signalled`) : "its up had exited";
-  if (signal) {
-    const group = (sig: string) => sh("kill", [`-${sig}`, "--", `-${pg}`], undefined, {}, 10);
-    let termed = false;
-    for (const t = Date.now();;) {
-      const a = reapStep(group("0").ok, Date.now() - t, STOP_GRACE);
-      if (a === "gone") break;
-      if (a === "giveup") { note = `WARNING: its up (group ${pg}) was still alive a minute after KILL: gone on to down`; break; }
-      if (a === "term" && !termed) { termed = true; console.log(`release-cron: a dead run left the preview's up (group ${pg}): stopped`); group("TERM"); }
-      else if (a === "kill") group("KILL");
-      sh("sleep", ["1"], undefined, {}, 5);
+const lockPid = () => Number((() => { try { return Deno.readTextFileSync(`${lockPath}/pid`); } catch { return "0"; } })());
+const takeLock = (): { got: true } | { got: false; pid: number } => {
+  // A preview record a dead run of the flock version left: said once, loudly; never acted on (its `down` is for a person to run).
+  try {
+    const rec = JSON.parse(Deno.readTextFileSync(`${state}/lock.preview`));
+    console.log(`release-cron: WARNING: ${state}/lock.preview exists: a preview may be left running; remove it with \`${(rec.down ?? []).join(" ")}\` in ${rec.dir ?? "its directory"}, then delete the record; nothing was done`);
+  } catch (e) { if (!(e instanceof Deno.errors.NotFound)) console.log(`release-cron: WARNING: ${state}/lock.preview exists but could not be read (${(e as Error).message.split("\n")[0]}): a preview may be left running`); }
+  const make = () => { try { Deno.mkdirSync(lockPath); return true; } catch { return false; } };
+  if (!make()) {
+    // The plain file the flock version left (never deleted): its content is the holder's pid (cron.js legacyFileLock).
+    let isFile = false;
+    try { isFile = Deno.statSync(lockPath).isFile; } catch { /* none */ }
+    if (isFile) {
+      const pid = (() => { try { return Number(Deno.readTextFileSync(lockPath)) || 0; } catch { return 0; } })();
+      if (legacyFileLock(true, pid, !!pid && sh("kill", ["-0", String(pid)]).ok) === "busy") return { got: false, pid };
+      try { Deno.removeSync(lockPath); } catch { /* gone */ }
+      if (!make()) return { got: false, pid: lockPid() };
+    } else {
+      const pid = lockPid();
+      if (pid && sh("kill", ["-0", String(pid)]).ok) return { got: false, pid };
     }
   }
-  const d = sh(rec!.down[0], rec!.down.slice(1), rec!.dir, { STACK_PRIORITY: "release" }, TEARDOWN_GRACE / 1000);
-  reaped = d.ok ? `a dead run left a preview: ${note} and ${rec!.down.join(" ")} ran` : `a dead run left a preview: ${note} but ${rec!.down.join(" ")} failed (exit ${d.code}): the preview may still stand, the record is kept`;
-  console.log(`release-cron: ${reaped}`);
-  if (d.ok) { try { Deno.removeSync(previewRecord); } catch { /* gone */ } }
+  Deno.writeTextFileSync(`${lockPath}/pid`, String(Deno.pid));
+  return { got: true };
 };
-const takeLock = () => lockAcquire(lockPath, () => exists(previewRecord), reapPreview);
-const dropLock = () => { lockRelease(lockPath); };
+const dropLock = () => { try { if (Deno.readTextFileSync(`${lockPath}/pid`) === String(Deno.pid)) Deno.removeSync(lockPath, { recursive: true }); } catch { /* none, or not ours */ } };
+// The run holding the lock named by its pid, from its command line: a run or an abandon (cron.js holderKind).
+const holderOf = (pid: number) => holderKind(sh("ps", ["-o", "command=", "-p", String(pid)], undefined, {}, 10).out);
 // A held release ends: removed, and its record (the branch, its attempts, how it ended and the commit released, if any) appended to
 // runs.jsonl beside the runs, in an outcome of its own that no rule of the schedule reads.
 const closeOpen = (result: "released" | "abandoned", commit?: string) => {
@@ -381,11 +313,11 @@ const recordShipped = (o: Open, known?: { live: string | null; cron: { steps: { 
 // `abandon` holds the run's lock (takeLock) from before it reads `open` or `released-branch` until every change is done, so a scheduled wake
 // that starts meanwhile skips as it does beside any run, and never rehearses or deploys the branch being closed. A lock held by a live run
 // refuses: said in the log and the error, nothing read or changed.
-const abandonRun = async (): Promise<number> => {
+const abandonRun = (): number => {
   // Held, or released and waiting for its commits on main (held-backport), or both for one branch; abandonPlan says what goes: a hold
   // that never shipped is dropped with its branch, a released branch's record (its backport hold) only once every commit is on main.
   // A released-branch record that cannot be read is cleared by --force, as an open one is (corruptOpen).
-  const taken = await takeLock();
+  const taken = takeLock();
   if (!taken.got) {
     const why = `${holderOf(taken.pid)} ${taken.pid} is going and holds the run lock: abandon when it ends; nothing was read or changed`;
     const rec = { app, started: local(Date.now()), steps: {}, outcome: outcomes.skipped, why: `abandon: ${why}` };
@@ -442,7 +374,7 @@ const abandonRun = async (): Promise<number> => {
 };
 if (verb === "abandon") {
   let code: number;
-  try { code = await abandonRun(); } finally { dropLock(); }
+  try { code = abandonRun(); } finally { dropLock(); }
   Deno.exit(code);
 }
 
@@ -481,14 +413,26 @@ if (verb === "bisect") {
   if (!green) { say(`no run released before ${failed.started}: no good commit to start from`); Deno.exit(0); }
   // One bisect at a time: a lock directory holding the pid, a dead holder's taken over.
   if (!dry) {
-    // The same lock as the run's (lockAcquire).
-    const l = await lockAcquire(`${dir}/lock`);
-    if (!l.got) { say(l.pid ? `bisect ${l.pid} still going` : "another bisect took the lock"); Deno.exit(0); }
+    // The lock is a file holding the pid, made whole by link(2) (it exists with its content or not at
+    // all). A live holder's keeps; a dead holder's is removed only if it is still that pid's, then taken.
+    const lock = `${dir}/lock`, tmp = `${dir}/lock.${Deno.pid}`;
+    Deno.writeTextFileSync(tmp, String(Deno.pid));
+    const take = () => { try { Deno.linkSync(tmp, lock); return true; } catch { return false; } };
+    const holder = () => { try { return Number(Deno.readTextFileSync(lock)); } catch { return 0; } };
+    let ok = take();
+    if (!ok) {
+      const pid = holder();
+      if (pid && sh("kill", ["-0", String(pid)]).ok) { Deno.removeSync(tmp); say(`bisect ${pid} still going`); Deno.exit(0); }
+      if (holder() === pid) { try { Deno.removeSync(lock); } catch { /* another took it */ } }
+      ok = take();
+    }
+    Deno.removeSync(tmp);
+    if (!ok) { say("another bisect took the lock"); Deno.exit(0); }
   }
-  const unlock = () => { lockRelease(`${dir}/lock`); };
+  const unlock = () => { try { if (Deno.readTextFileSync(`${dir}/lock`) === String(Deno.pid)) Deno.removeSync(`${dir}/lock`); } catch { /* none, or not ours */ } };
   // The run's lock holder. The run that started this bisect (RELEASE_CRON_BISECT_BY, its pid) lets it go
   // as it ends; any other live holder is a run this bisect yields to, one by hand's too.
-  const runHolder = () => lockPid();
+  const runHolder = () => { try { return Number(Deno.readTextFileSync(`${state}/lock/pid`)); } catch { return 0; } };
   const starter = Number(Deno.env.get("RELEASE_CRON_BISECT_BY") ?? 0);
   const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], here);
   must("git", remote(["--git-dir", repo, "fetch", "-q", "origin"]));
@@ -820,9 +764,7 @@ if (verb === "install") {
   // gcloud's `pronto` configuration, never this Mac's default one, which is the owner's other work
   // and asks to sign in again where launchd cannot answer (integrate@local's check-secrets).
   const env = { PATH: path, HOME: home, ...schedulerEnv(Deno.env.toObject(), Deno.build.os) };
-  const job = { label, program: Deno.execPath(), args: ["run", "-A", `${wt}/${appRel}/release-cron/release-cron.ts`, app, "run"], poll: cron.poll,
-    // Seconds the scheduler gives a stopping run before it kills it: at least the preview's `up` limit and the signal's teardown (stopSeconds), so a stop is never cut short.
-    stop: stopSeconds((cron.target as { preview?: { upMinutes: number } }).preview?.upMinutes ?? 0) };
+  const job = { label, program: Deno.execPath(), args: ["run", "-A", `${wt}/${appRel}/release-cron/release-cron.ts`, app, "run"], poll: cron.poll };
   if (cron.scheduler.kind === "systemd") {
     const u = systemdUnits({ ...job, log: `${state}/systemd.log`, env });
     Deno.mkdirSync(`${home}/.config/systemd/user`, { recursive: true });
@@ -857,7 +799,7 @@ let head = "";
 // What a run read as serving (null: unread), for the abandon in end(); undefined before it read.
 let runLive: string | null | undefined;
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
-type Command = { release: string[]; serving: string[]; servingAfterRelease: boolean; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string; upMinutes: number; when?: "after" | "first" | "beside" } };
+type Command = { release: string[]; serving: string[]; servingAfterRelease: boolean; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string; when?: "after" | "first" | "beside" } };
 let cron!: { steps: { prepare: string; slot: string; rehearse: string; android: string; preview: string; beside: string; release: string; confirm: string; error: string }; scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; flagsReleased: string[] | null; gap: number; poll: number; branches?: { enabled: boolean; abandonHours: number; abandonAttempts: number }; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
@@ -962,12 +904,11 @@ const end = (outcome: string, why = "", code = 0, red = false, cause = "") => {
 
 if (exists(`${state}/paused`)) end(outcomes.skipped, "paused");
 
-// The lock: an flock on <state>/lock (lockAcquire). A lock whose run is gone is free (the kernel
-// released it); one whose run lives means this run skips: launchd never overlaps its own job, and
-// this keeps a run started by hand from overlapping it.
-// `abandon` takes it the same way (takeLock).
+// The lock (takeLock): a directory holding the run's pid. A lock whose run is gone is
+// taken over; one whose run lives means this run skips: launchd never overlaps its own job, and
+// this keeps a run started by hand from overlapping it. `abandon` takes it the same way.
 {
-  const taken = await takeLock();
+  const taken = takeLock();
   if (!taken.got) {
     // Logged as any run, but the lock is the other run's: left alone.
     const l = line({ app, started, steps: {}, outcome: outcomes.skipped, why: `${holderOf(taken.pid)} ${taken.pid} still going` });
@@ -975,8 +916,6 @@ if (exists(`${state}/paused`)) end(outcomes.skipped, "paused");
     console.log(l);
     Deno.exit(0);
   }
-  // A preview a dead run left behind was stopped and removed before this lock was taken (reapPreview): said in this run's record.
-  if (reaped) run.reaped = reaped;
 }
 // Read under the lock, so no other run changes it meanwhile; a record that cannot be read stops the run loudly, the lock let go first.
 let released: Released | null;
@@ -1076,11 +1015,8 @@ function judged(failed: string, head: string): string | null {
 
 // The children running now (the rehearsal and the preview's `up` can run side by side), process group -> tag.
 const children = new Map<number, string>();
-// When each child started (ms), and how long a preview's `up` may run on after a signal (its own limit, previewUpStep): the preview's upMinutes.
-const childStart = new Map<number, number>();
-let upTimeoutMs = 120 * 60_000;
-// The `down` and directory of the preview now running, written beside its `up`'s pgid (previewRecord).
-let previewDown: { down: string[]; dir: string } | null = null;
+// The ms a stopped child gets before KILL, and a preview's `down` after them (it is tagged "down", never stopped by a signal).
+const STOP_GRACE = 60_000, TEARDOWN_GRACE = 300_000;
 // Stopped: every child's group stopped and gone (killed after a minute) before the run ends and its
 // lock goes, so the next run never starts beside what this one started.
 // The lock goes last (signalStep): after the children are gone and a preview beside has finished its `down`, each bounded.
@@ -1088,26 +1024,11 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   Deno.addSignalListener(signal, async () => {
     if (interrupted) return;
     interrupted = true;
-    const termed = new Set<number>();
-    // A preview's remote `up` is not stopped now (signalStops): stopping it would end only the local ssh, the remote release going on while
-    // `down` starts in the same worktree. It is waited for until its own limit (previewUpStep), its group stopped then (the recorded pid, never a
-    // pattern), and `down` runs once it has exited (previewCheck awaits it); the lock goes after.
-    const groups = [...children].filter(([, tag]) => signalStops(tag)).map(([pgid]) => pgid);
-    const ups = [...children].filter(([, tag]) => tag === "preview").map(([pgid]) => pgid);
+    const groups = [...children].filter(([, tag]) => tag !== "down").map(([pgid]) => pgid);
     for (const pgid of groups) stop(pgid, STOP_GRACE);
-    if (ups.length) say(`signal: waiting for the preview's up to end (at most ${Math.round(upTimeoutMs / 60_000)} min from its start), then its process group is stopped and down runs`);
-    const upLeft = Math.max(0, ...ups.map((pgid) => upExtra(Date.now() - (childStart.get(pgid) ?? Date.now()), upTimeoutMs, STOP_GRACE)));
-    // `down` is given its grace and teardown from the moment `up` is gone, not from the signal (signalDone).
-    let upGoneAt: number | null = null;
     for (const t = Date.now();;) {
-      if (ups.length && upGoneAt === null && !ups.some((pgid) => children.has(pgid) && alive(pgid))) upGoneAt = Date.now();
-      for (const pgid of ups) {
-        const a = previewUpStep(children.has(pgid) && alive(pgid), Date.now() - (childStart.get(pgid) ?? Date.now()), upTimeoutMs, STOP_GRACE);
-        if (a === "term" && !termed.has(pgid)) { termed.add(pgid); say(`signal: the preview's up passed its limit: its process group ${pgid} is stopped`); send(pgid, "TERM"); }
-        else if (a === "kill") send(pgid, "KILL");
-      }
-      const s = signalStep(groups.some(alive), previews, Date.now() - t, STOP_GRACE, Number.MAX_SAFE_INTEGER / 2);
-      if (s === "done" || signalDone(upGoneAt, ups.length > 0, Date.now(), t, upLeft, STOP_GRACE, TEARDOWN_GRACE)) break;
+      const s = signalStep(groups.some(alive), previews, Date.now() - t, STOP_GRACE, TEARDOWN_GRACE);
+      if (s === "done") break;
       if (s === "kill") for (const pgid of groups) if (alive(pgid)) send(pgid, "KILL");
       await new Promise((r) => setTimeout(r, 1000));
     }
@@ -1147,11 +1068,6 @@ async function child(cmd: string, args: string[], cwd: string, env: Record<strin
   if (interrupted && tag !== "down") throw new Error(causes.signal);
   const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", cmd, ...args], cwd, env, clearEnv, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
   children.set(p.pid, tag);
-  childStart.set(p.pid, Date.now());
-  // The preview's `up` is recorded with the `down` that removes it, until that `down` has run (previewCheck): a run killed meanwhile leaves it for the
-  // next lock-taker to stop and remove (reapPreview).
-  // With the leader's identity (start time and boot), so a later reap signals the group only while that process is still the leader (reapSignal).
-  if (tag === "preview" && previewDown) { try { const id = identityOf(p.pid); Deno.writeTextFileSync(previewRecord, JSON.stringify({ pgid: p.pid, lstart: id.lstart, boot: id.boot, ...previewDown }) + "\n"); } catch (e) { say(`the preview record ${previewRecord} was not written: ${(e as Error).message}`); } }
   // No limit: a line every few minutes says it is still running and for how long.
   const beat = setInterval(() => say(`${cmd} ${args.join(" ")}: still running, ${Math.round((Date.now() - t0) / 60_000)} min into the run`), HEARTBEAT);
   const relay = async (from: ReadableStream<Uint8Array>) => {
@@ -1170,9 +1086,6 @@ async function child(cmd: string, args: string[], cwd: string, env: Record<strin
   clearTimeout(killers.get(p.pid));
   killers.delete(p.pid);
   children.delete(p.pid);
-  childStart.delete(p.pid);
-  // `up` has exited: the record keeps only its `down`, so a reap never signals a group the system may have given to another process.
-  if (tag === "preview" && previewDown) { try { Deno.writeTextFileSync(previewRecord, JSON.stringify(previewDown) + "\n"); } catch { /* the record stays as it was */ } }
   return { code };
 }
 
@@ -1188,8 +1101,6 @@ async function previewCheck(pv: NonNullable<Command["preview"]>, dir: string, ca
   const bad: string[] = [];
   let reach: Deno.ChildProcess | undefined;
   previews++;
-  upTimeoutMs = pv.upMinutes * 60_000;
-  previewDown = { down: pv.down, dir };
   // A signal ends the preview as `cancel` does: its `down` still runs, and the run's lock waits for it.
   const stopped = () => cancel.stopped || interrupted;
   try {
@@ -1230,9 +1141,6 @@ async function previewCheck(pv: NonNullable<Command["preview"]>, dir: string, ca
     if (reach) { try { send(reach.pid, "TERM"); await reach.stdin.close().catch(() => {}); } catch { /* already gone */ } }
     let down: { code: number };
     try { down = await child(pv.down[0], pv.down.slice(1), dir, env, undefined, "down"); } finally { previews--; }
-    // The record is kept until `down` has run clean, so a run that dies in between leaves it for the next lock-taker.
-    if (down.code === 0) { try { Deno.removeSync(previewRecord); } catch { /* none */ } }
-    previewDown = null;
     // A preview left standing fails the run before the release: its namespace and what runs there stay until someone
     // removes them, which a run that reads as released would hide.
     if (down.code !== 0) { const m = `removing the preview (${pv.down.join(" ")}) failed (exit ${down.code})`; bad.push(m); say(`preview: ${m}`); }
@@ -1314,7 +1222,7 @@ try {
   // the next run, not the one after. RELEASE_CRON_AGAIN keeps it to one hand-over.
   if (!open && here.startsWith(wt) && !Deno.env.get("RELEASE_CRON_AGAIN") && ["release-cron.ts", "cron.js"].map(here_).join("\0") !== loaded) {
     say("the script changed on main: running main's");
-    await lockRelease(lockPath);
+    dropLock();
     const again = await new Deno.Command(Deno.execPath(), { args: ["run", "-A", `${here}release-cron.ts`, ...Deno.args], env: { RELEASE_CRON_AGAIN: "1" }, stdin: "null", stdout: "inherit", stderr: "inherit" }).spawn().status;
     Deno.exit(again.code);
   }
