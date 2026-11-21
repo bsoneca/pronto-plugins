@@ -35,7 +35,7 @@ gcloud auth login                                     # in a terminal of your ow
 
 The arguments are the folder, its CUE module path, the bucket OpenTofu keeps its own state in
 and the project that holds the bucket. `setup` makes the bucket (versioned, uniform access,
-public access prevented) when it is not there. `bin/pronto-infra` writes `state.cue`, `cue.mod/module.cue` and
+public access prevented) when it is not there. A backend another stack made (`existing: true` in the backend) is only read: `setup` fails when the bucket cannot be read, and never creates or changes it. `bin/pronto-infra` writes `state.cue`, `cue.mod/module.cue` and
 the `saytw` launcher once and leaves them yours; it rewrites `.say.cue`, `.mise.toml` and
 `.gitignore` each run.
 

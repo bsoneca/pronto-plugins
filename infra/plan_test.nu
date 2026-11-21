@@ -165,6 +165,31 @@ def main [] {
 	saved-plan make --dir $d --tofu (stub $d A)
 	check "make leaves the plan folder mode 700" ((ls --long --directory $d | get mode.0) == "rwx------")
 
+	# The state bucket: made when not there, never when the backend exists or the lookup failed for another reason.
+	let be = {bucket: "b", project: "p", location: "l", prefix: "x", existing: false}
+	let gc = {|d: string, describe: record|
+		{|a|
+			$"($a | str join ' ')\n" | save --append ($d | path join gcloud.log)
+			if $a.1 == "buckets" and $a.2 == "describe" { $describe } else { {exit_code: 0, stdout: "", stderr: ""} }
+		}
+	}
+	let missing = {exit_code: 1, stdout: "", stderr: "ERROR: 404 gs://b bucket does not exist."}
+	let denied = {exit_code: 1, stdout: "", stderr: "ERROR: 403 caller does not have storage.buckets.get access"}
+	let calls = {|d| if ($d | path join gcloud.log | path exists) { open --raw ($d | path join gcloud.log) | lines | each {|l| $l | split row " " | get 2} } else { [] } }
+	let d = fresh
+	state-bucket $be --gcloud (do $gc $d {exit_code: 0, stdout: "", stderr: ""})
+	check "a bucket that is there is left as it is" ((do $calls $d) == ["describe"])
+	let d = fresh
+	state-bucket $be --gcloud (do $gc $d $missing)
+	check "a bucket that is not there is made and versioned" ((do $calls $d) == ["describe" "create" "update"])
+	let d = fresh
+	check "a lookup denied is not a reason to create" ((refuses {|| state-bucket $be --gcloud (do $gc $d $denied)} "not created") and (do $calls $d) == ["describe"])
+	let d = fresh
+	check "an existing backend that cannot be read stops, and is never created" ((refuses {|| state-bucket ($be | merge {existing: true}) --gcloud (do $gc $d $missing)} "existing backend") and (do $calls $d) == ["describe"])
+	let d = fresh
+	state-bucket ($be | merge {existing: true}) --gcloud (do $gc $d {exit_code: 0, stdout: "", stderr: ""})
+	check "an existing backend that is there changes nothing" ((do $calls $d) == ["describe"])
+
 	rm --recursive --force $env.PLAN_TEST_ROOT
 	print "infra/plan_test.nu: all passed"
 }
