@@ -146,3 +146,8 @@ branchesDefault: _defaults.branches & {enabled: false, abandonHours: 12, abandon
 _branches: #Cron & {watch: ["x"], probes: {}, branches: {enabled: true, abandonHours: 6}}
 branchesOptIn: _branches.branches & {enabled: true, abandonHours: 6, abandonAttempts: 2}
 noBranchHours: [if (#Cron & {watch: ["x"], probes: {}, branches: abandonHours: 0}) == _|_ {"refused"}, "accepted"][0] & "refused"
+
+// The phrases a run's `why` carries are written once, here, and never change under an app: runs.jsonl and its readers carry them.
+causeNames: _defaults.causes & {noVerdict: "the rehearsal gave no verdict", rehearsalFailed: "the rehearsal failed", rehearsalStopped: "the rehearsal was stopped", previewFailed: "the release preview failed", previewStopped: "the preview was stopped", endedBeforeSlot: "ended before its slot", signal: "stopped by a signal"}
+noRenamedCause: [if (#Cron & {watch: ["x"], probes: {}, causes: noVerdict: "no verdict"}) == _|_ {"refused"}, "accepted"][0] & "refused"
+noNewCause: [if (#Cron & {watch: ["x"], probes: {}, causes: other: "x"}) == _|_ {"refused"}, "accepted"][0] & "refused"

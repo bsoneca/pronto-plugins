@@ -57,6 +57,19 @@ releaseCron: #Cron
 		confirm:  "confirm"
 		error:    "error"
 	}
+	// The phrases a run's `why` carries for the failures release-cron itself names, written once here: release-cron.ts and cron.js
+	// build `why` from them and recognise it by them, and so does whatever reads runs.jsonl (pronto's tools/metrics). Each is
+	// also the value of the key in the run's `cause` (`run.cause: "noVerdict"`), so a reader can match the key, not the text. A
+	// phrase is fixed: the records on disk carry it.
+	causes: {
+		noVerdict:        "the rehearsal gave no verdict"
+		rehearsalFailed:  "the rehearsal failed"
+		rehearsalStopped: "the rehearsal was stopped"
+		previewFailed:    "the release preview failed"
+		previewStopped:   "the preview was stopped"
+		endedBeforeSlot:  "ended before its slot"
+		signal:           "stopped by a signal"
+	}
 	// The top-level `holder`, kept for the apps that set it: the default of rehearsal.holder.
 	holder: *"verify@local" | string
 	_holder: holder

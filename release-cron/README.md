@@ -148,6 +148,13 @@ the `paused` file) is Brasília's, with its offset (`cron.js`'s `local`):
 
 ## Measured, every release
 
+The reasons release-cron itself gives a failed run are declared once, as `releaseCron.causes` (schema.cue; fixed, like `steps`, and tested in
+tests.cue): `noVerdict` "the rehearsal gave no verdict", `rehearsalFailed` "the rehearsal failed", `rehearsalStopped` "the rehearsal was stopped",
+`previewFailed` "the release preview failed", `previewStopped` "the preview was stopped", `endedBeforeSlot` "ended before its slot" and `signal`
+"stopped by a signal". `release-cron.ts` and `cron.js` build a run's `why` from these phrases (the pure rules take them as an argument), and the
+record carries the key beside it as `run.cause` (`"noVerdict"`, `"rehearsalStopped"`, ...): a reader (the bisect, pronto's tools/metrics) matches
+the key; a record written before `cause` existed is read by its `why` and the phrases above. `why` is unchanged, byte for byte.
+
 Each run records its steps, and inside them where the time went: the rehearsal's queue wait
 and each check (`~/.cache/pronto/rehearsals/<app>.jsonl`), and the release's phases
 (lock, rc, stage, schema, deploy, from `~/.cache/pronto/releases/<name>.jsonl`), as

@@ -301,9 +301,10 @@ export const androidWhy = (code, names) => `the android step failed (exit ${code
 // timeout) or 128 and above (a signal, the machine's doing). Such a run is never bisected nor cut to a release branch.
 export const noVerdictExit = (code) => code === 3 || code === 124 || code >= 128;
 
-// Whether a run's `why` says its rehearsal gave no verdict, or was stopped because the preview failed first
-// (preview `when: "beside"`): the bisect skips it.
-export const noVerdictRun = (why) => /^the rehearsal gave no verdict|; the rehearsal was stopped/.test(why ?? "");
+// Whether a run says its rehearsal gave no verdict, or was stopped because the preview failed first (preview `when: "beside"`):
+// the bisect skips it. `causes`: releaseCron.causes. A record with a `cause` is read by that key; an older one by its `why`.
+export const noVerdictRun = (why, causes, cause) =>
+  cause ? cause === "noVerdict" || cause === "rehearsalStopped" : (why ?? "").startsWith(causes.noVerdict) || (why ?? "").includes(`; ${causes.rehearsalStopped}`);
 
 // The rehearsal and the preview run side by side (preview `when: "beside"`): what to do with them once one of them
 // has ended. Each is null while it runs. `rehearsal`: {code, at}, its exit and when it ended (ms into the race);
@@ -311,13 +312,13 @@ export const noVerdictRun = (why) => /^the rehearsal gave no verdict|; the rehea
 // longer worth finishing ("rehearsal" or "preview", else null), `failed` (the one whose failure ends the run: the
 // earlier when both failed) and `why`. `stopped`: the driver stopped the rehearsal (it was still running when the
 // preview failed) and it ended without passing. A stopped rehearsal is no verdict of the tree, so the run's reason
-// says so (noVerdictRun), also when the call is made once it has ended.
-export const besideOutcome = (rehearsal, preview, stopped = false) => {
+// says so (noVerdictRun), also when the call is made once it has ended. `causes`: releaseCron.causes, the phrases `why` is built from.
+export const besideOutcome = (rehearsal, preview, stopped, causes) => {
   const r = !!rehearsal && rehearsal.code !== 0, p = !!preview && preview.bad.length > 0;
   if (p && (!r || preview.at < rehearsal.at)) {
-    return { stop: rehearsal ? null : "rehearsal", failed: "preview", why: `the release preview failed: ${preview.bad.join("; ")}${!rehearsal || stopped ? "; the rehearsal was stopped" : ""}` };
+    return { stop: rehearsal ? null : "rehearsal", failed: "preview", why: `${causes.previewFailed}: ${preview.bad.join("; ")}${!rehearsal || stopped ? `; ${causes.rehearsalStopped}` : ""}` };
   }
-  if (r) return { stop: preview ? null : "preview", failed: "rehearsal", why: `the rehearsal failed (exit ${rehearsal.code})${preview ? "" : "; the preview was stopped"}` };
+  if (r) return { stop: preview ? null : "preview", failed: "rehearsal", why: `${causes.rehearsalFailed} (exit ${rehearsal.code})${preview ? "" : `; ${causes.previewStopped}`}` };
   return { stop: null, failed: null, why: "" };
 };
 
