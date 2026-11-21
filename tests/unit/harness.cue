@@ -287,9 +287,9 @@ cases: "an aborted signal kills cue and says so": {
 cases: "a deadline rejects at once though a descendant of cue holds its pipes, and leaves that descendant dead": {
 	suite: "harness"
 	steps: [
-		{call: "harness.descendant", args: [{timeoutMs: 300}]},
+		{call: "harness.descendant", args: [{timeoutMs: 1000}]},
 		{keep: "r"},
-		{get: "error", matches: "stopped \\(no answer in 300 ms\\), cue was killed"},
+		{get: "error", matches: "stopped \\(no answer in 1000 ms\\), cue was killed"},
 		{use: "r"},
 		{get: "quick", expect: true, why: "not after the descendant's 30 s, nor its pipes' EOF"},
 		{use: "r"},
@@ -308,5 +308,19 @@ cases: "a signal already aborted rejects before cue is started": {
 		{get: "quick", expect: true},
 		{use: "r"},
 		{get: "started", expect: false, why: "cue never ran"},
+	]
+}
+cases: "a descendant that ignores TERM is killed after the grace, the rejection still at once": {
+	suite: "harness"
+	steps: [
+		{call: "harness.descendant", args: [{timeoutMs: 1000, ignoreTerm: true}]},
+		{keep: "r"},
+		{get: "error", matches: "stopped \\(no answer in 1000 ms\\), cue was killed"},
+		{use: "r"},
+		{get: "quick", expect: true},
+		{use: "r"},
+		{get: "started", expect: true},
+		{use: "r"},
+		{get: "gone", expect: true, why: "KILLed after the 2 s grace (the timer keeps the process alive for it)"},
 	]
 }

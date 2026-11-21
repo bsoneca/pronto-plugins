@@ -166,13 +166,13 @@ export async function loaded(script, opts) {
 }
 
 // A cue that starts a descendant holding its pipes (the wrapper's slot job does), under a deadline: how soon it rejects,
-// and whether the descendant (its pid is in a file) is gone within 3 s.
+// and whether the descendant (its pid is in a file; opts.ignoreTerm: one that ignores TERM) is gone within 4 s.
 export async function descendant(opts) {
   const dir = await Deno.makeTempDir();
   const prev = Deno.env.get("CUE");
   try {
     await Deno.mkdir(`${dir}/scenarios`);
-    await Deno.writeTextFile(`${dir}/cue.sh`, `#!/bin/sh\nsleep 30 &\necho $! > "$(dirname "$0")/pid"\nwait\n`);
+    await Deno.writeTextFile(`${dir}/cue.sh`, `#!/bin/sh\n${opts.ignoreTerm ? "sh -c 'trap \"\" TERM; while :; do sleep 1; done' &" : "sleep 30 &"}\necho $! > "$(dirname "$0")/pid"\nwait\n`);
     await Deno.chmod(`${dir}/cue.sh`, 0o755);
     Deno.env.set("CUE", `${dir}/cue.sh`);
     const started = Date.now();
@@ -184,8 +184,8 @@ export async function descendant(opts) {
     const pid = Number((await Deno.readTextFile(`${dir}/pid`).catch(() => "0")).trim());
     const alive = (p) => { try { Deno.kill(p, "SIGCONT"); return true; } catch { return false; } };
     let gone = true;
-    if (pid) { for (let i = 0; i < 30 && alive(pid); i++) await new Promise((r) => setTimeout(r, 100)); gone = !alive(pid); if (!gone) Deno.kill(pid, "SIGKILL"); }
-    return { error, quick: ms < 2000, started: pid > 0, gone };
+    if (pid) { for (let i = 0; i < 40 && alive(pid); i++) await new Promise((r) => setTimeout(r, 100)); gone = !alive(pid); if (!gone) Deno.kill(pid, "SIGKILL"); }
+    return { error, quick: ms < 2500, started: pid > 0, gone };
   } finally {
     if (prev === undefined) Deno.env.delete("CUE"); else Deno.env.set("CUE", prev);
     await Deno.remove(dir, { recursive: true });

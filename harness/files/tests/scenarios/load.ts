@@ -1,3 +1,4 @@
+// Needs --allow-run (cue, ps), --allow-env (CUE, and slot.ts's) and --allow-read (the folder).
 // The scenarios of an app, as CUE exports them: the one place that finds tests/scenarios/*.cue, runs `cue export` on
 // them and reads the result, for the runner (tests/scenarios.ts) and for a caller that plans from the same set (a
 // rehearsal's order of pass 1), so none copies it.
@@ -36,11 +37,11 @@ const stopTree = async (root: number, graceMs = 2000) => {
   const tree = treeOf(table, root).map((pid) => ({ pid, command: table.find((p) => p.pid === pid)?.command }));
   const send = (pid: number, sig: Deno.Signal) => { try { Deno.kill(pid, sig); } catch { /* gone */ } };
   for (const { pid } of tree) send(pid, "SIGTERM");
-  const timer = setTimeout(async () => {
+  // Not unref'd: a caller that rejects and exits at once lives up to graceMs longer, so a TERM-ignoring descendant is KILLed, not left.
+  setTimeout(async () => {
     const now = await processes();
     for (const { pid, command } of tree) if (command !== undefined && now.some((p) => p.pid === pid && p.command === command)) send(pid, "SIGKILL");
   }, graceMs);
-  Deno.unrefTimer(timer);
 };
 
 const drain = async (r: ReadableStreamDefaultReader<Uint8Array>): Promise<Uint8Array> => {
