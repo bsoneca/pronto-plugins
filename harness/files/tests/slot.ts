@@ -1682,7 +1682,8 @@ export async function stopMembers(sys: Sys, record: RunRecord, termMs = 5000, po
 // "done" record of an older run that left survivors can carry the same, reused, root pid.
 export const recordOf = (records: readonly RunRecord[], rootpid: number, superpid: number, superstart: number): RunRecord | undefined =>
   records.find((r) => r.rootpid === rootpid && r.superpid === superpid && r.superstart === superstart);
-// The ledger: one file a live run, <pool>/runs/<rootpid>-<rootstart> (a `pending-` one between its spawn and its name).
+// The ledger: one file a live run, <pool>/runs/<rootpid>-<rootstart> (a `pending-<pid>-<start>-<n>` one between its spawn and its name; n counts this process's runs, since two
+// runs of one process (rehearse's stacks and its Premium lane) are pending at once and must not share a file).
 const runsDir = () => `${pool}/runs`;
 // Whether a ledger entry may be read: a regular file (not a link, a FIFO or a device, which are never opened) that is ours.
 export const ledgerUsable = (st: { isFile: boolean; isSymlink: boolean; uid: number | null }, uid: number | null) =>
@@ -1696,7 +1697,7 @@ export function readRecords(dir = runsDir(), uid: number | null = Deno.uid()): R
     names = [...Deno.readDirSync(dir)].map((e) => e.name);
   } catch (e) { if (e instanceof Deno.errors.NotFound) return out; throw e; }
   for (const n of names) {
-    if (!/^(pending-)?[0-9]+-[0-9]+$/.test(n)) continue;
+    if (!/^(pending-[0-9]+-[0-9]+-[0-9]+|[0-9]+-[0-9]+)$/.test(n)) continue;
     try {
       const l = Deno.lstatSync(`${dir}/${n}`);
       if (!ledgerUsable(l, uid)) continue;
@@ -2027,6 +2028,7 @@ async function runPlain(cmd: string[], opts: OwnOpts, env: Record<string, string
 // INT, TERM or HUP, TERM the members (the root too, which has its grace to run its own traps), and once the root has
 // exited list what is left, TERM, wait, KILL, list again; what survives that fails the run, named. The root's zombie is
 // reaped last. A passing root that left processes running still passes: each is said, as "left running by <what>".
+let pendingSeq = 0;
 export async function ownRun(cmd: string[], opts: OwnOpts = {}): Promise<OwnResult> {
   const what = opts.what ?? defaultWhat(cmd);
   const env = { ...Deno.env.toObject(), ...opts.env };
@@ -2066,7 +2068,7 @@ export async function ownRun(cmd: string[], opts: OwnOpts = {}): Promise<OwnResu
     if (me.errno !== undefined || me.start === undefined) throw new Error(`slot: this process could not be read (errno ${me.errno}): a run cannot be owned`);
     const base = { superpid: Deno.pid, superstart: me.start, uid: sys.uid, what, state: "running" as const, run: env.GITHUB_RUN_ID, runner: env.RUNNER_NAME };
     // The record exists before the root does, so a claim the root makes at once finds the run it is inside.
-    pending = `${runsDir()}/pending-${Deno.pid}-${me.start}`;
+    pending = `${runsDir()}/pending-${Deno.pid}-${me.start}-${++pendingSeq}`;
     writeRecord(pending, { ...base, rootpid: 0, rootstart: 0 });
     // PRONTO_RUN marks what this run starts, for the Linux members that re-parent to this process.
     root = await sys.root(cmd, { ...env, PRONTO_RUN: `${Deno.pid}-${me.start}` }, opts.cwd, { pgroup: opts.pgroup });
@@ -2075,7 +2077,7 @@ export async function ownRun(cmd: string[], opts: OwnOpts = {}): Promise<OwnResu
     record = { ...base, rootpid: root.pid, rootstart: r.start };
     file = `${runsDir()}/${root.pid}-${r.start}`;
     writeRecord(file, record);
-    Deno.removeSync(pending);
+    try { Deno.removeSync(pending); } catch { /* the finally below says nothing more of it */ }
     opts.onSpawn?.(root.cmd);
     if (opts.rootOut) Deno.writeTextFileSync(opts.rootOut, `${root.pid} ${r.start} ${root.cmd}\n`);
     const grace = opts.grace ?? 120_000;
