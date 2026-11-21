@@ -143,19 +143,22 @@ const lockHolder = (lock: string) => {
   return holderPid(isDir, read(`${lock}/pid`), read(lock));
 };
 const lockAcquire = async (lock: string, orphan: () => boolean = () => false, reap: () => void = () => {}): Promise<{ got: true } | { got: false; pid: number }> => {
-  let isDir = false;
-  try { isDir = Deno.statSync(lock).isDirectory; } catch { /* none */ }
-  if (isDir) {
+  // A directory an earlier version made: looked at again after each removal (another run may remove it first, or make it anew), never crashing on a NotFound.
+  for (;;) {
+    let isDir = false;
+    try { isDir = Deno.statSync(lock).isDirectory; } catch { /* none */ }
+    if (!isDir) break;
     const pid = lockHolder(lock);
     const legacy = legacyLock(true, pid, !!pid && sh("kill", ["-0", String(pid)]).ok);
     if (legacy === "busy") return { got: false, pid };
-    Deno.removeSync(lock, { recursive: true });
+    try { Deno.removeSync(lock, { recursive: true }); } catch { /* gone, or taken anew: the next look decides */ }
   }
   const acquired = await flockTry(lock);
   const step = lockStep(acquired, acquired && orphan());
   if (step === "busy") return { got: false, pid: lockHolder(lock) };
-  if (step === "reap") reap();
+  // The holder's pid first (for messages and holderKind), so a reader during a long reap sees who holds the lock.
   Deno.writeTextFileSync(lock, String(Deno.pid));
+  if (step === "reap") reap();
   return { got: true };
 };
 // Let the lock go: the pid emptied (a reader sees no holder), then the helper's stdin closed so it exits and the kernel releases the flock. `await`ed where
@@ -178,8 +181,8 @@ const holderOf = (pid: number) => holderKind(sh("ps", ["-o", "command=", "-p", S
 const previewRecord = `${state}/lock.preview`;
 // A process's identity: whether it exists, its start time (`ps -o lstart=`) and the machine's boot (Linux's boot_id, else macOS's kern.boottime), what
 // tells it from a later process that reused its pid (cron.js reapSignal).
-const bootId = () => { try { return Deno.readTextFileSync("/proc/sys/kernel/random/boot_id").trim(); } catch { return sh("sysctl", ["-n", "kern.boottime"], undefined, {}, 10).out; } };
-const identityOf = (pid: number) => { const r = sh("ps", ["-o", "lstart=", "-p", String(pid)], undefined, {}, 10); return { exists: r.ok && r.out !== "", lstart: r.out, boot: bootId() }; };
+const bootId = () => { try { return Deno.readTextFileSync("/proc/sys/kernel/random/boot_id").trim(); } catch { return sh("sysctl", ["-n", "kern.bootsessionuuid"], undefined, {}, 10).out; } };
+const identityOf = (pid: number) => { const r = sh("ps", ["-o", "lstart=", "-p", String(pid)], undefined, { LC_ALL: "C", LANG: "C" }, 10); return { exists: r.ok && r.out !== "", lstart: r.out, boot: bootId() }; };
 let reaped = "";
 const reapPreview = () => {
   let rec: { pgid?: number; lstart?: string; boot?: string; down: string[]; dir: string } | null = null;
@@ -200,7 +203,7 @@ const reapPreview = () => {
     for (const t = Date.now();;) {
       const a = reapStep(group("0").ok, Date.now() - t, STOP_GRACE);
       if (a === "gone") break;
-      if (a === "giveup") { note = `its up (group ${pg}) was still alive a minute after KILL: gone on to down`; break; }
+      if (a === "giveup") { note = `WARNING: its up (group ${pg}) was still alive a minute after KILL: gone on to down`; break; }
       if (a === "term" && !termed) { termed = true; console.log(`release-cron: a dead run left the preview's up (group ${pg}): stopped`); group("TERM"); }
       else if (a === "kill") group("KILL");
       sh("sleep", ["1"], undefined, {}, 5);

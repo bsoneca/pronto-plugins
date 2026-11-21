@@ -364,7 +364,8 @@ Guards, each so a branch cannot lose or smuggle a change:
     `down` gets its grace and teardown from the moment `up` is gone (`signalDone`). The run lock, `abandon`'s and the bisect's are one `flock(2)` on a file, taken non-blocking by a small perl helper that holds it while its stdin is open
     (Deno 2.5's `FsFile.lock` only blocks), so a dead holder's lock needs no takeover race; a lock directory an earlier version made keeps its live holder.
     The reap runs only once the lock is held, and signals the `up` group only while its leader is the process recorded (start time and boot, `reapSignal`);
-    once `up` has exited the record keeps only its `down`, and a reap that finds the group alive a minute after KILL goes on to `down`, said in `run.reaped`. A refused `abandon` is also appended to runs.jsonl, naming whether a run or an abandon holds
+    once `up` has exited the record keeps only its `down`, and a reap that finds the group alive a minute after KILL goes on to `down`, said in `run.reaped` as a
+    `WARNING`. Survivors of a group whose leader has exited are not reaped: the record names the leader only, and a pgid without it is never signalled. A refused `abandon` is also appended to runs.jsonl, naming whether a run or an abandon holds
     the lock (`holderKind`). The watch diff and the retry judgement read `-z` paths too, and a failed red verdict's cause and reason are on the run's record
     before anything that can throw.
 - **While a release is held, main does not release.** A fix merged to main waits until the branch closes (released or abandoned);
