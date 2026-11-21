@@ -7,13 +7,14 @@
 //   board.ts pull <repo> [--lane engineer|SRE|architect]          start the lane's first issue in the Ready queue
 //   board.ts move <repo> <KEY> <State> [--why <text>]   Refine, Ready, Backlog or Cancelled, by the repository's name for the state or its role (the others are the hooks')
 //   board.ts file <repo> --title <t> --app <app> [--bug] [--priority P0..P3] [--flag <f>] [--body <text>]
-//   board.ts wait <repo> <KEY> --pr <url>               an Implementing flip issue whose fix merged under another issue waits for the release holding it: it takes no slot until the released hook frees it (PRONTO-666)
+//   board.ts wait <repo> <KEY> --pr <url>               the issue's fix merged under another issue's pull request: a flip issue in Implementing waits for the release holding it (PRONTO-666); any other moves as that merge would have moved it (Merged, or Done for infra, design and plugins), and the release or flip hook finishes it (PRONTO-1050). Neither holds a slot.
 //   board.ts approve <repo> <INBOX-n>                    an inbox item the owner moved to Refine, filed as an issue in the Backlog (a link to it, none of its text)
 //   board.ts suggestion <repo> <INBOX-n>                 the text of an item in Refine (and only Refine), as one quoted, untrusted line: the designer's one way to read it
 //   board.ts next, close                                 gone with the sprints: they print what replaced them and exit 2
 import { cmd, flagsOf } from "../intents/shell.ts";
 import { esc } from "./board/board.ts";
-import { flipOf, keyOf, nameOf, roleOf, waitRefusal } from "./flow.js";
+import { doneAt, flagOf, flipOf, keyOf, nameOf, roleOf, waitPlan } from "./flow.js";
+import { move as hookMove } from "./hook.ts";
 import { contextOf, file as fileIssue, pull as pullIssue, type ReadCache, start as startIssue, status } from "./queue.ts";
 import { boardOf, devflowOf, type Role } from "./spec.ts";
 import { approve, show } from "./suggestions.ts";
@@ -154,12 +155,12 @@ async function file() {
   console.log(`${r.key} filed in ${r.state}${r.module ? `, module ${r.module}` : ` (no module ${f.app})`}`);
 }
 
-/** An Implementing flip issue waits for the release that holds its fix (flow.js waitRefusal): the merged
- * pull request linked, the wait label put on (made on first use) and a comment saying what it waits for. */
+/** An issue whose fix merged under another issue's pull request (flow.js waitPlan): an Implementing flip issue
+ * waits for the release holding it (the merged pull request linked, the wait label put on, made on first use,
+ * and a comment saying what it waits for); any other moves as its own merge would have, and the hooks finish it. */
 async function wait(k: string, url: string) {
   k = own(k);
   if (!/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(url)) throw new Error("wait needs --pr <the fix's pull request address>");
-  if (!board.setLabels) throw new Error("this board cannot set an issue's labels");
   const issue = await board.issue(k);
   const states = await board.states(project);
   const role = roleOf(flow!.roles, states.find((s) => s.id === issue.state)?.name ?? "");
@@ -170,14 +171,27 @@ async function wait(k: string, url: string) {
   const n = `#${/\d+$/.exec(url)![0]}`;
   const links = (await board.links(project, issue.id)).map((l) => l.url).filter((u) => /\/pull\/\d+$/.test(u));
   const open = (await Promise.all(links.map(openPr))).some((p) => p !== null);
-  const why = waitRefusal({ key: n, role, flip: flipOf(issue.name) !== null, merged: JSON.parse(pr.out).state === "MERGED", openPr: open });
-  if (why) throw new Error(`${k} does not wait: ${why}`);
+  const mods = (await board.modulesByIssue(project)).get(issue.id) ?? [];
+  const done = doneAt(flagOf(issue.description_html), mods, [...flow!.infra, ...flow!.design]);
+  const plan = waitPlan({ key: n, role, flip: flipOf(issue.name) !== null, merged: JSON.parse(pr.out).state === "MERGED", openPr: open, done, modules: mods });
+  if (plan.refused) throw new Error(`${k} does not wait: ${plan.refused}`);
+  if (plan.wait && !board.setLabels) throw new Error("this board cannot set an issue's labels");
   if (!links.includes(url)) await board.link(project, issue.id, url, n);
-  const have = (await board.labels(project)).find((l) => l.name === flow!.waitLabel);
-  const label = have ?? await board.createLabel(project, flow!.waitLabel, "#f59e0b");
-  await board.setLabels(project, issue.id, [...new Set([...(issue.labels ?? []), label.id])]);
-  await board.comment(project, issue.id, `<p>waits for the release holding ${esc(n)}</p>`);
-  console.log(`${k} waits for the release holding ${n}: it holds no slot until then`);
+  if (plan.wait) {
+    if (!board.setLabels) throw new Error("this board cannot set an issue's labels");
+    const have = (await board.labels(project)).find((l) => l.name === flow!.waitLabel);
+    const label = have ?? await board.createLabel(project, flow!.waitLabel, "#f59e0b");
+    await board.setLabels(project, issue.id, [...new Set([...(issue.labels ?? []), label.id])]);
+    await board.comment(project, issue.id, `<p>waits for the release holding ${esc(n)}</p>`);
+    console.log(`${k} waits for the release holding ${n}: it holds no slot until then`);
+    return;
+  }
+  console.log(await hookMove({ board, project }, issue, "merged", `${n} merged its fix under another issue (wait --pr)`, flow!, mods));
+  if (plan.to === "done") return;
+  // A flagged issue goes Done on its flag's next flip; one whose flag is already on for everyone gets no new flip event.
+  console.log(done === "flip"
+    ? `${k} holds no slot; its flag's flip finishes it (if the flag is on for everyone already: hook.ts flipped <repo> <app> <flag>)`
+    : `${k} holds no slot; its app's next release finishes it`);
 }
 
 switch (verb) {

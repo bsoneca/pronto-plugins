@@ -25,7 +25,7 @@ async function stateIds(b: Conn) {
 }
 
 /** Moves an issue for an event, with a comment saying why; what it did, as a line. */
-async function move(b: Conn, issue: Issue, event: string, why: string, flow: DevFlow, modules?: string[]): Promise<string> {
+export async function move(b: Conn, issue: Issue, event: string, why: string, flow: DevFlow, modules?: string[]): Promise<string> {
   const s = await stateIds(b);
   const from = s.name(issue.state);
   // Where it ends: its flag's flip, or without a flag its release or merge (flow.js doneAt).

@@ -217,14 +217,18 @@ export function waitsRelease(role, name, labels, waitId) {
   return role === "implementing" && flipOf(name) !== null && !!waitId && (labels ?? []).includes(waitId);
 }
 
-/** Why an issue may not wait for a release, or null when it may: an Implementing flip issue whose fix
- * `merged` (a pull request, `key` its "#n") and has no `openPr`. */
-export function waitRefusal({ key, role, flip, merged, openPr }) {
-  if (!flip) return "only a flip issue waits for a release";
-  if (role !== "implementing") return "only an Implementing flip waits";
-  if (!merged) return `${key} is not merged`;
-  if (openPr) return "it has an open pull request";
-  return null;
+/** What `wait --pr` does with an issue whose fix merged under another issue's pull request (`key` its "#n"):
+ * an Implementing flip issue waits for the release holding it ({wait: true}, PRONTO-666); any other issue
+ * moves as its own merge would have ({to: <role>}, moveFor "merged", PRONTO-1050), so the release and flip
+ * hooks finish it; else {refused: why}. `done` is doneAt's answer, `modules` the issue's. */
+export function waitPlan({ key, role, flip, merged, openPr, done, modules }) {
+  if (!merged) return { refused: `${key} is not merged` };
+  if (openPr) return { refused: "it has an open pull request" };
+  if (flip) return role === "implementing" ? { wait: true } : { refused: "only an Implementing flip waits" };
+  if (done === "release" && !(modules ?? []).length) return { refused: "it is in no app's module, so no release would finish it" };
+  const to = moveFor("merged", role, done);
+  if (to) return { to };
+  return { refused: role === "cancelled" ? "a cancelled issue is never moved" : rank(role) < 0 ? "its state plays no role in the flow" : `it is ${role} already` };
 }
 
 /** Whether a waiting issue's fix is released: `prs` are `{merged, held}` of its linked pull requests (held:
