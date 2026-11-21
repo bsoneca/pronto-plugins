@@ -896,7 +896,7 @@ export const nestedUnder = (holders: number[], above: number[]) => holders.find(
 
 export async function claim(pid?: number, what?: string, weight?: number, wait?: true, job?: boolean, mem?: number, cores?: number): Promise<Slot>;
 export async function claim(pid: number, what: string, weight: number, wait: false, job?: boolean, mem?: number, cores?: number): Promise<Slot | undefined>;
-export async function claim(pid = Deno.pid, what = Deno.args.join(" "), weight = Number(Deno.env.get("STACK_WEIGHT") ?? weights.stack), wait = true, job = false, mem = 0, cores = 0): Promise<Slot | undefined> {
+export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weight = Number(Deno.env.get("STACK_WEIGHT") ?? weights.stack), wait = true, job = false, mem = 0, cores = 0): Promise<Slot | undefined> {
   await Deno.mkdir(pool, { recursive: true, mode: 0o755 });
   requireOwnDir(pool);
   const lineage = await ancestry(pid);
@@ -1636,6 +1636,12 @@ export const listMembers = (sys: Sys, record: RunRecord): Plan => planReap(sys.t
 // The executable's name only (`ps -o comm=`, its basename), never an argument: a token or a signed URL in a command line
 // must not reach a log or the ledger.
 export const exeName = (comm: string): string => comm.trim().split("/").pop() ?? "";
+// The label a run carries when none is given: the command's executable alone, never an argument (a token or signed URL in
+// one would reach the ledger and the logs).
+export const defaultWhat = (argv: string[]): string => exeName(argv[0] ?? "") || "command";
+// Whether the explicit `own` verb is refused: only macOS owns a run's descendants; ownRun on Linux is a plain child.
+export const ownRefusal = (os: string): string | undefined =>
+  os === "darwin" ? undefined : "slot: own needs macOS; on Linux a run's descendants are not owned";
 export const memberName = (pid: number, age: number | undefined, comm: string): string => `pid ${pid} (${ageText(age)}${exeName(comm) || "?"})`;
 const name = (sys: Sys, m: Member) => memberName(m.pid, m.age, sys.command(m.pid));
 // Stops what a run left, once its root has exited: list the members, TERM, wait `termMs`, KILL, list again, and again
@@ -2017,7 +2023,7 @@ async function runPlain(cmd: string[], opts: OwnOpts, env: Record<string, string
 // exited list what is left, TERM, wait, KILL, list again; what survives that fails the run, named. The root's zombie is
 // reaped last. A passing root that left processes running still passes: each is said, as "left running by <what>".
 export async function ownRun(cmd: string[], opts: OwnOpts = {}): Promise<OwnResult> {
-  const what = opts.what ?? cmd.join(" ");
+  const what = opts.what ?? defaultWhat(cmd);
   const env = { ...Deno.env.toObject(), ...opts.env };
   // Off on Linux until it has been run there: the ci of PR 381 broke the cue wrapper's end-to-end cases on it (stdout lost, nested
   // wrappers looping), which could not be reproduced on a Mac. The command runs as a plain child, as it did before the owner.
@@ -2123,6 +2129,8 @@ export async function ownerVerb(verb: string, args: string[]): Promise<never> {
   const { cmd, flag } = splitArgs(args);
   try {
     if (verb === "own") {
+      const refusal = ownRefusal(Deno.build.os);
+      if (refusal) { console.error(refusal); Deno.exit(1); }
       if (!cmd.length) { console.error("usage: deno run -A tests/slot.ts own [--what <label>] [--grace <s>] [--timeout <s>] [--root-out <file>] -- <command...>"); Deno.exit(2); }
       const grace = seconds(flag("--grace")), timeoutMs = seconds(flag("--timeout"));
       if ((grace !== undefined && !(grace >= 0)) || (timeoutMs !== undefined && !(timeoutMs > 0))) { console.error("slot own: --grace and --timeout are seconds"); Deno.exit(2); }
@@ -2190,7 +2198,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
     console.error('usage: deno run -A tests/slot.ts --weight <n> [--mem <GB>] [--cores-claim <n>] [--wait-out <file>] [--mem-learn <file>] --what "<label>" -- <command...>');
     Deno.exit(2);
   }
-  const what = opts.includes("--what") ? opt("--what") : cmd.join(" ");
+  const what = opts.includes("--what") ? opt("--what") : defaultWhat(cmd);
   // Before the command runs (waiting in the line) a signal only gives the claim back; once it runs, its owner (ownRun) ends it.
   let slot: Slot | undefined, owned = false;
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
@@ -2340,7 +2348,7 @@ if (import.meta.main) {
   // Under a claim of its own (a job: no stack, no ports), so the build takes its weight from the budget
   // like any heavy work; the stack's slot is claimed after, once generate has written its definition.
   if (args !== Deno.args || hostGate) {
-    const prep = await claim(Deno.pid, `generate and build for ${args.join(" ")}`, weights.stack, true, true);
+    const prep = await claim(Deno.pid, `generate and build for ${defaultWhat(args)}`, weights.stack, true, true);
     for (const verb of ["generate", "build"]) {
       say(`${verb}, in the checkout, as ${hostGate ? "integrate@host" : "launch@local"} does before its stack`);
       const { code } = await new Deno.Command("./saytw", { args: [verb], cwd: app, stdin: "null", stdout: "inherit", stderr: "inherit" }).output();
@@ -2350,7 +2358,7 @@ if (import.meta.main) {
   }
   // The tree as it is when its stack starts: generate and build have written what they write.
   const before = gateSteps?.mode === "all" ? await gateSteps.key() : "";
-  const slot = await claim(Deno.pid, args.join(" "), Number(Deno.env.get("STACK_WEIGHT") ?? commandWeight(args, Deno.env.toObject())));
+  const slot = await claim(Deno.pid, defaultWhat(args), Number(Deno.env.get("STACK_WEIGHT") ?? commandWeight(args, Deno.env.toObject())));
   let stopping: (() => Promise<void>) | undefined;
   // Where the command was run from: the owner dir an expiry names (the cwd, not the slot's copy).
   const checkout = Deno.cwd();
@@ -2381,7 +2389,7 @@ if (import.meta.main) {
         const deadline = Number(await Deno.readTextFile(deadlineFile).catch(() => "0"));
         if (!expired({ kind: "launch", deadline }, Date.now())) return;
         clearInterval(timer);
-        const line = `the launch timed out and is stopped: ${args.join(" ")}, slot ${slot.n}, pid ${Deno.pid}, started ${started}, owner dir ${checkout}`;
+        const line = `the launch timed out and is stopped: ${defaultWhat(args)}, slot ${slot.n}, pid ${Deno.pid}, started ${started}, owner dir ${checkout}`;
         say(line);
         await Deno.writeTextFile(`${slotDir}/owner`, `${line}\n`, { append: true }).catch(() => {});
         await stopping?.();
@@ -2412,7 +2420,7 @@ if (import.meta.main) {
       : { ...ports, PATH: misePath() };
     const argv = hostGate ? ["sh", "-c", 'exec mise x -- nu -c "$1"', "sh", gateSteps ? slowVisual(script) : script] : [cmd, ...rest];
     owned = true;
-    code = (await ownRun(argv, { what: args.join(" "), cwd: slot.dir, env })).code;
+    code = (await ownRun(argv, { what: defaultWhat(args), cwd: slot.dir, env })).code;
     if (tmp) await Deno.remove(tmp, { recursive: true }).catch(() => {});
     // A pass stamps the tree as it was before the run, if it still is (gcp/local-gate-key.nu).
     if (gateSteps?.mode === "all" && code === 0) {

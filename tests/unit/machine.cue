@@ -501,6 +501,24 @@ cases: "an owned command gets its stdin and gives its stdout, stderr and exit co
 		{get: "stderr", expect: true, why: "and its stderr"},
 	]
 }
+cases: "a run with no label is named by its executable, never by an argument; own is refused off macOS": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownLabel"},
+		{keep: "r"},
+		{get: "clean", expect: true, why: "neither the derived label nor the record text carries the token"},
+		{use: "r"},
+		{get: "what", expect: "curl", why: "the label is the executable's basename"},
+		{use: "r"},
+		{get: "record", expect: "1 prio=normal curl", why: "the ledger's record text has the label alone"},
+		{use: "r"},
+		{get: "empty", expect: "command", why: "an empty argv still has a label"},
+		{use: "r"},
+		{get: "linux", expect: "slot: own needs macOS; on Linux a run's descendants are not owned", why: "the own verb says why it refuses on Linux"},
+		{use: "r"},
+		{get: "mac", expect: "ok", why: "and does not refuse on macOS"},
+	]
+}
 cases: "a leftover is named by its executable, pid and age, never by an argument": {
 	suite: "machine"
 	steps: [

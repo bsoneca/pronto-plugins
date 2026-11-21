@@ -450,6 +450,16 @@ export async function ownNames() {
     return { text, noArgs: !text.includes(secret), real, realNoSecret: !real.includes(secret) && !/\s/.test(real), exe: slot.exeName("/opt/x/bin/tool") };
   } finally { try { c.kill("SIGKILL"); } catch { /* gone */ } await c.status; }
 }
+// The label a run gets when none is named is its executable alone: neither the label nor the ledger's record text of it (what
+// ticketText writes) carries an argument. And the explicit `own` verb is refused off macOS, pure by OS.
+export async function ownLabel() {
+  const slot = await import("../../harness/files/tests/slot.ts");
+  const secret = "tok-SECRET-0123456789";
+  const argv = ["/usr/bin/curl", "-H", `Authorization: ${secret}`, `https://x.example/?sig=${secret}`];
+  const what = slot.defaultWhat(argv);
+  const record = slot.ticketText({ weight: 1, nested: false, release: false, what });
+  return { what, record, clean: !what.includes(secret) && !record.includes(secret), empty: slot.defaultWhat([]), linux: slot.ownRefusal("linux"), mac: slot.ownRefusal("darwin") ?? "ok" };
+}
 // An owner whose stop never returns still ends its run in the kill, within the grace: here a timeout starts the stop, the
 // grace is 700 ms, and the command (a real sleep that nobody has told TERM) is killed. A hang is bounded by 25 s and reported.
 export async function ownStopHangs() {

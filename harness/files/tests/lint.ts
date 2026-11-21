@@ -442,6 +442,8 @@ const skippable = (l: string) => /^\s*(#.*)?$/.test(l);
 // inside a joined instruction are dropped, a shell form is one string, an exec form (a JSON array) is
 // as large as its largest element, a heredoc (`<<EOF`) of COPY or ADD is a file, not an argument, and so is a standalone `RUN <<WORD` whose body starts with `#!`
 // (BuildKit runs it as a script); any other RUN heredoc goes to `sh -c`, so its command and body count.
+// A heredoc's delimiter as BuildKit reads it: any word without whitespace or shell operators, optionally quoted, after `<<` or `<<-`.
+const HEREDOC = String.raw`<<(-?)\s*(?:"([^"]+)"|'([^']+)'|([^\s"'<>|&;()]+))`;
 export function argSizes(dockerfile: string, file = "Dockerfile"): ArgSize[] {
   const lines = dockerfile.split(/\r?\n/);
   let esc = "\\";
@@ -465,7 +467,7 @@ export function argSizes(dockerfile: string, file = "Dockerfile"): ArgSize[] {
     // is WORD; with no such line the instruction ends where it did.
     const end = i;
     const heredocs: { word: string; body: string }[] = [];
-    for (const h of text.matchAll(/(?:^|\s)<<(-?)\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_]\w*))/g)) {
+    for (const h of text.matchAll(new RegExp(String.raw`(?:^|\s)` + HEREDOC, "g"))) {
       const word = h[2] ?? h[3] ?? h[4];
       const body: string[] = [];
       let found = false;
@@ -490,7 +492,7 @@ export function argSizes(dockerfile: string, file = "Dockerfile"): ArgSize[] {
     }
     let bytes = byteLength(rest);
     if (instruction === "RUN") {
-      const alone = /^<<-?\s*(?:"[^"]+"|'[^']+'|[A-Za-z_]\w*)$/.test(rest);
+      const alone = new RegExp(`^${HEREDOC}$`).test(rest);
       if (heredocs.length) {
         // A standalone `RUN <<EOF` is a script file when its body starts with `#!`, else the body is the command; an inline
         // shell command (`RUN cat <<EOF > /f`) is one argument: the command with every body and word, whatever a body starts with.

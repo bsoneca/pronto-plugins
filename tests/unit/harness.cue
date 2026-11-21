@@ -195,6 +195,9 @@ cases: "a heredoc's body is a file for COPY, ADD and a script, an argument for a
 		{call: "harness.sizes", args: ["RUN cat <<EOF > /out\n#!/bin/sh\nbody\nEOF\nCMD c"], expect: [[1, "RUN", 35], [5, "CMD", 1]], why: "an inline command is one argument, so a body that starts with #! still counts"},
 		{call: "harness.sizes", args: ["RUN cat <<A > /a && cat <<B > /b\naa\nA\nbbbb\nB\nCMD c"], expect: [[1, "RUN", 40], [6, "CMD", 1]], why: "two heredocs of one command count together: the command, both bodies and both words"},
 		{call: "harness.sizes", args: ["RUN <<EOF\n#!/bin/sh\n#!/bin/sh\nEOF"], expect: [[1, "RUN", 5]], why: "a standalone script heredoc with a shebang stays exempt"},
+		{call: "harness.sizes", args: ["RUN <<END-SCRIPT\necho very long body here\nEND-SCRIPT\nRUN b"], expect: [[1, "RUN", 25], [4, "RUN", 1]], why: "a hyphenated delimiter is read whole, so its body is measured"},
+		{call: "harness.sizes", args: ["RUN <<-'END-SCRIPT'\n\techo very long body here\n\tEND-SCRIPT\nRUN b"], expect: [[1, "RUN", 25], [4, "RUN", 1]], why: "quoted and tab-stripped, still the whole word"},
+		{call: "harness.sizes", args: ["RUN <<END-SCRIPT\n#!/bin/sh\nthe script is a file\nEND-SCRIPT\nRUN b"], expect: [[1, "RUN", 12], [5, "RUN", 1]], why: "a hyphenated standalone #! script is still a file, exempt"},
 	]
 }
 cases: "a << that opens no heredoc, or one never closed, swallows nothing": {
