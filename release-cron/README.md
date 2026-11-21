@@ -168,9 +168,9 @@ saying it is still running and how long into the run it is (confirm says what is
 each step's minutes stay in `runs.jsonl` and `report`, so the slowest phase still shows. Only the
 short calls inside prepare (`git fetch`, `gcloud describe`) keep their own hang guards of a few
 minutes; a signal (launchd's, `kill`) still stops the run's children. Because nothing ends a stuck
-run, stop it by hand (`kill <pid in <state>/lock/pid>`). An app's old `minutes` in release_cron.cue is still accepted but ignored; delete it. There's no overall budget. Runs never overlap:
-launchd never starts a job while it's still running, and a lock (`<state>/lock`, with the
-run's pid) skips a run started by hand while another is going.
+run, stop it by hand (`kill <pid in <state>/lock>`). An app's old `minutes` in release_cron.cue is still accepted but ignored; delete it. There's no overall budget. Runs never overlap:
+launchd never starts a job while it's still running, and a lock (`<state>/lock`, a file holding
+the run's pid, made whole by `link(2)` as the bisect's is) skips a run started by hand while another is going.
 
 ## When the preview runs
 
@@ -356,6 +356,15 @@ Guards, each so a branch cannot lose or smuggle a change:
   - `releaseCron.outcomes` (schema.cue) names every outcome (`released`, `failed`, `skipped`, `dry`, `bisect`, `stopped`, `closed`, `held`, `abandoned`,
     `held-refused`, `held-backport`, `cleared`), exported in `causes.js` with the causes; the driver and `cron.js` build them from it (`branchOutcome`), and
     pronto's metrics imports it. A run whose tree moved under the rehearsal ends `failed` with `cause: treeMoved`, an infrastructure failure that gives no verdict.
+  - **Review round.** No hold is cut while the scheduler runs from the run's own checkout (`cutPlan`'s trust condition, said in the failed run's `why`), and
+    `install` is refused when `branches.enabled` (the job runs from `wt`); the trust refusal of a held release is told once for each branch and reason
+    (`trustNotice`). A run killed during a preview's `up` leaves `<state>/lock.preview` (the `up` pgid and its `down`, kept until `down` has run clean): the
+    next to take the lock over the dead holder stops that group (TERM, then KILL, the recorded pgid only) and runs the `down` first, said in `run.reaped`.
+    The launchd `ExitTimeOut` and systemd `TimeoutStopSec` (with `KillMode=mixed`) are at least `upMinutes` plus the teardown (`stopSeconds`). After a signal,
+    `down` gets its grace and teardown from the moment `up` is gone (`signalDone`). The run lock is a file taken with `link(2)` (the bisect's mechanism, one
+    for both), so there is no gap between its making and its pid. A refused `abandon` is also appended to runs.jsonl, naming whether a run or an abandon holds
+    the lock (`holderKind`). The watch diff and the retry judgement read `-z` paths too, and a failed red verdict's cause and reason are on the run's record
+    before anything that can throw.
 - **While a release is held, main does not release.** A fix merged to main waits until the branch closes (released or abandoned);
   the held notice says so, and `release-cron.ts <app> abandon` is how the lead lets main release again.
 - **`RELEASE_CRON_REF`** is refused while a release is held, unless it names the held branch, which then runs as any held run (it

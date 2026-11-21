@@ -219,7 +219,7 @@ export const report = (runs) => {
 // The launchd job (a LaunchAgent's plist): `program` with `args`, every `poll` minutes (launchd
 // never starts it while it runs, and after a sleep runs it once), its output appended to `log`,
 // with PATH and the variables in `env`.
-export const plist = ({ label, program, args, poll, log, env }) => {
+export const plist = ({ label, program, args, poll, log, env, stop }) => {
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const str = (s) => `<string>${esc(s)}</string>`;
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -234,7 +234,8 @@ export const plist = ({ label, program, args, poll, log, env }) => {
 	<dict>${Object.entries(env).map(([k, v]) => `<key>${esc(k)}</key>${str(v)}`).join("")}</dict>
 	<key>StandardOutPath</key>${str(log)}
 	<key>StandardErrorPath</key>${str(log)}
-	<key>ProcessType</key><string>Standard</string>
+	<key>ProcessType</key><string>Standard</string>${stop ? `
+	<key>ExitTimeOut</key><integer>${stop}</integer>` : ""}
 </dict>
 </plist>
 `;
@@ -244,7 +245,7 @@ export const plist = ({ label, program, args, poll, log, env }) => {
 // scheduler's: the service runs `program` with `args` once and its output is appended to `log`, with the
 // variables in `env`; the timer starts it `poll` minutes after the last start (OnUnitActiveSec; systemd never
 // starts a service while it runs) and once a minute after boot, so a run follows a restart.
-export const systemdUnits = ({ label, program, args, poll, log, env }) => {
+export const systemdUnits = ({ label, program, args, poll, log, env, stop }) => {
   // A word of a unit file in double quotes: \ and " escaped, and % and $ doubled (specifiers, variables).
   const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\$/g, "$$$$")}"`;
   const service = `[Unit]
@@ -255,7 +256,7 @@ Type=oneshot
 ExecStart=${[program, ...args].map(q).join(" ")}
 ${Object.entries(env).map(([k, v]) => `Environment=${q(`${k}=${v}`)}\n`).join("")}StandardOutput=append:${log}
 StandardError=append:${log}
-`;
+${stop ? `TimeoutStopSec=${stop}\nKillMode=mixed\n` : ""}`;
   const timer = `[Unit]
 Description=release-cron ${label}, every ${poll} min
 
@@ -804,9 +805,23 @@ export const releaseAttempt = (runs, branch, releaseStep) =>
 
 // A new hold is cut only while no released branch's record waits for its commits on main: the record is one file, and cutting
 // would leave a shipped hold nothing to be recorded in.
-export const cutPlan = (enabled, override, released) => !enabled || override ? { cut: false, why: "" }
-  : released ? { cut: false, why: `${released.branch} is released and its commits are not all on main: no new hold until they are (\`abandon --force\` clears the record)` }
-  : { cut: true, why: "" };
+// Nor while the scheduler runs from the run's own checkout (`untrusted`, heldTrusted's answer, null when it may): a hold cut there would always be refused,
+// and main would stay blocked behind it.
+/** @param {string | null} [untrusted] */
+export const cutPlan = (enabled, override, released, untrusted = null) => {
+  if (!enabled || override) return { cut: false, why: "" };
+  const why = [
+    ...(released ? [`${released.branch} is released and its commits are not all on main: no new hold until they are (\`abandon --force\` clears the record)`] : []),
+    ...(untrusted ? [`no hold can be cut: ${untrusted}`] : []),
+  ];
+  return why.length ? { cut: false, why: why.join("; ") } : { cut: true, why: "" };
+};
+
+// Whether the trust refusal of a held release is told: once for each branch and reason (`told`: the last one told, "" when none).
+export const trustNotice = (told, branch, why) => ({ key: `${branch} ${why}`, tell: (told ?? "").trim() !== `${branch} ${why}` });
+
+// What holds the run lock, from the holder's command line (`ps -o command= -p <pid>`): `abandon` when its verb is abandon, else a run.
+export const holderKind = (command) => /\sabandon(\s|$)/.test(command ?? "") ? "abandon" : "run";
 
 // `abandon`: what it does to the hold (`open`, {branch} or null) and the record of a branch already released (`released`,
 // {branch} or null), after the checks of a released branch (`missing`: the commits not on main, null when they could not be read;
@@ -859,7 +874,24 @@ export const previewUpStep = (alive, elapsed, timeout, grace) => !alive ? "gone"
 export const upExtra = (upElapsed, timeout, grace) => Math.max(0, timeout - upElapsed) + grace;
 
 // What the lock decides (`made`: mkdir made it; `pid`: the holder's; `alive`: whether it runs): a run and `abandon` take it the same way.
-export const lockStep = (made, pid, alive) => made ? "take" : pid && alive ? "busy" : "takeover";
+// `orphan`: a dead holder left a preview record (its `up` pgid and `down`, <state>/lock.preview): "reap" stops that `up` (TERM, then KILL, the recorded
+// pgid only) and runs the recorded `down` before the lock is taken over, so a supervisor's kill never leaves the preview for the next run to race.
+export const lockStep = (made, pid, alive, orphan = false) => made ? "take" : pid && alive ? "busy" : orphan ? "reap" : "takeover";
+// The sequence that stops an orphaned `up` (alive: its group; elapsed: ms since the sequence began): the same bounded steps as a signal's, with no limit left to wait.
+export const reapStep = (alive, elapsed, grace) => previewUpStep(alive, elapsed, 0, grace);
+
+// When a signal's wait is over (`upGoneAt`: when the preview's `up` was seen gone, null while it runs; `ups`: whether one ran at the signal, at `t`; `now`;
+// `upLeft`: upExtra's bound for it): a `down` gets grace + teardown from the moment `up` is gone, not from the signal; a `up` that is never seen gone is
+// counted gone when its own limit and the grace have passed. Without a preview, grace + teardown from the signal.
+export const signalDone = (upGoneAt, ups, now, t, upLeft, grace, teardown) => {
+  if (!ups) return now - t >= grace + teardown;
+  const gone = upGoneAt ?? (now - t >= upLeft ? t + upLeft : null);
+  return gone !== null && now - gone >= grace + teardown;
+};
+
+// The seconds the scheduler gives a stopping run before it kills it (launchd's ExitTimeOut, systemd's TimeoutStopSec): the preview's `up` limit
+// (`upMinutes`, 0 without a preview), the grace its stop gets and the teardown, as the signal's wait is made of them.
+export const stopSeconds = (upMinutes, grace = 60_000, teardown = 300_000) => upMinutes * 60 + (grace + teardown) / 1000;
 
 // The flags-released bookkeeping's result (`result`: recordFlagsReleased's) once its marker was written or not (`err`: the write's error, null when it
 // was): a marker that could not be written is a bookkeeping failure with its path, apart from the deploy outcome (run.flagsReleased, never `outcome`).

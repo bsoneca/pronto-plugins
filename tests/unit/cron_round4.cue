@@ -97,4 +97,53 @@ cases: {
 		{call: "cron.noVerdictRun", args: ["x", "treeMoved"], expect: true, why: "infrastructure, not a failed rehearsal"},
 		{call: "cron.noVerdictRun", args: ["the run's tree moved from a to b while the rehearsal and the preview ran: nothing released", null], expect: true, why: "an older record, read by its why"},
 	]}
+	"no hold is cut while the scheduler runs from the run's own checkout": {suite: "cron", steps: [
+		{call: "cron.cutPlan", args: [true, false, null, null], expect: {cut: true, why: ""}},
+		{call: "cron.cutPlan", args: [true, false, null, "the scheduler runs from the run's own checkout (/wt)"], expect: {cut: false, why: "no hold can be cut: the scheduler runs from the run's own checkout (/wt)"}, why: "top === wt: a cut hold would always be refused, and main stays blocked behind it"},
+		{call: "cron.cutPlan", args: [true, false, {branch: "release/a/1"}, "u"], expect: {cut: false, why: "release/a/1 is released and its commits are not all on main: no new hold until they are (`abandon --force` clears the record); no hold can be cut: u"}, why: "both reasons are said"},
+		{call: "cron.cutPlan", args: [false, false, null, "u"], expect: {cut: false, why: ""}, why: "branches off: nothing to say"},
+	]}
+	"installing the scheduler with branches enabled is refused with the trust message": {suite: "cron", steps: [
+		{call: "cron.heldTrusted", args: ["/h/.cache/pronto/release-cron/studio/wt", "/h/.cache/pronto/release-cron/studio/wt"], matches: "run held releases from a separate trusted checkout", why: "the job runs the script from wt, so its top is wt"},
+	]}
+	"the trust refusal is told once for each branch and reason": {suite: "cron", steps: [
+		{call: "cron.trustNotice", args: ["", "release/x/1", "why"], expect: {key: "release/x/1 why", tell: true}},
+		{call: "cron.trustNotice", args: ["release/x/1 why\n", "release/x/1", "why"], expect: {key: "release/x/1 why", tell: false}},
+		{call: "cron.trustNotice", args: ["release/x/1 why", "release/x/2", "why"], expect: {key: "release/x/2 why", tell: true}, why: "another branch"},
+		{call: "cron.trustNotice", args: ["release/x/1 why", "release/x/1", "other"], expect: {key: "release/x/1 other", tell: true}, why: "another reason"},
+	]}
+	"a dead holder that left a preview is reaped before its lock is taken over": {suite: "cron", steps: [
+		{call: "cron.lockStep", args: [true, 0, false, true], expect: "take"},
+		{call: "cron.lockStep", args: [false, 4242, true, true], expect: "busy", why: "a live holder's preview is its own"},
+		{call: "cron.lockStep", args: [false, 4242, false, true], expect: "reap", why: "a supervisor's kill during up: stop the recorded pgid, run down, then take over"},
+		{call: "cron.lockStep", args: [false, 4242, false, false], expect: "takeover"},
+		{call: "cron.reapStep", args: [true, 0, 60000], expect: "term"},
+		{call: "cron.reapStep", args: [true, 59000, 60000], expect: "term"},
+		{call: "cron.reapStep", args: [true, 60000, 60000], expect: "kill"},
+		{call: "cron.reapStep", args: [false, 5000, 60000], expect: "gone", why: "then down runs"},
+	]}
+	"a signal's wait ends a down's grace and teardown after up is gone, not after the signal": {suite: "cron", steps: [
+		{call: "cron.signalDone", args: [null, false, 360000, 0, 0, 60000, 300000], expect: true, why: "no preview: from the signal, as before"},
+		{call: "cron.signalDone", args: [null, false, 359999, 0, 0, 60000, 300000], expect: false},
+		{call: "cron.signalDone", args: [null, true, 3000000, 0, 6660000, 60000, 300000], expect: false, why: "up still runs"},
+		{call: "cron.signalDone", args: [3000000, true, 3359999, 0, 6660000, 60000, 300000], expect: false, why: "up went at 50 min: down has until 56 min"},
+		{call: "cron.signalDone", args: [3000000, true, 3360000, 0, 6660000, 60000, 300000], expect: true},
+		{call: "cron.signalDone", args: [null, true, 7020000, 0, 6660000, 60000, 300000], expect: true, why: "an up never seen gone counts gone at its limit and grace"},
+	]}
+	"the scheduler gives a stopping run at least up's limit and the teardown": {suite: "cron", steps: [
+		{call: "cron.stopSeconds", args: [120], expect: 7560},
+		{call: "cron.stopSeconds", args: [0], expect: 360},
+		{call: "cron.plist", args: [{label: "l", program: "/p", args: ["a"], poll: 10, log: "/l", env: {}, stop: 7560}], matches: "<key>ExitTimeOut</key><integer>7560</integer>"},
+		{call: "cron.plist", args: [{label: "l", program: "/p", args: ["a"], poll: 10, log: "/l", env: {}}], matches: "^(?:(?!ExitTimeOut)[\\s\\S])*$", why: "none unless asked"},
+		{call: "cron.systemdUnits", args: [{label: "l", program: "/p", args: ["a"], poll: 10, log: "/l", env: {}, stop: 7560}]},
+		{keep: "u"},
+		{get: "service", matches: "TimeoutStopSec=7560"},
+		{use: "u"},
+		{get: "service", matches: "KillMode=mixed"},
+	]}
+	"a lock's holder is an abandon when its command says so": {suite: "cron", steps: [
+		{call: "cron.holderKind", args: ["/usr/bin/deno run -A release-cron.ts studio abandon --force"], expect: "abandon"},
+		{call: "cron.holderKind", args: ["/usr/bin/deno run -A release-cron.ts studio run"], expect: "run"},
+		{call: "cron.holderKind", args: [""], expect: "run", why: "the holder's command could not be read"},
+	]}
 }
