@@ -136,7 +136,8 @@ _android: #Cron & {watch: ["x"], probes: {}, android: command: ["sh", "-c", "./s
 androidDeclared: _android.android.command & ["sh", "-c", "./saytw integrate@android"]
 
 // The step names runs.jsonl carries are written once, here, and never change under an app: the combined step is "rehearse+preview".
-stepNames: _defaults.steps & {prepare: "prepare", slot: "slot", rehearse: "rehearse", android: "android", preview: "preview", beside: "rehearse+preview", release: "release", confirm: "confirm"}
+stepNames: _defaults.steps & {prepare: "prepare", slot: "slot", rehearse: "rehearse", android: "android", preview: "preview", beside: "rehearse+preview", release: "release", confirm: "confirm", error: "error"}
+errorStep: _defaults.steps.error & "error"
 besideStep: _defaults.steps.beside & "rehearse+preview"
 noRenamedStep: [if (#Cron & {watch: ["x"], probes: {}, steps: beside: "both"}) == _|_ {"refused"}, "accepted"][0] & "refused"
 

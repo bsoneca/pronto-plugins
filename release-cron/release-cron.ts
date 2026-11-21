@@ -31,7 +31,7 @@
 // the first green one releases from it (README.md, "Release branches"). `abandon` gives a held release up by hand.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidEnv } from "./cron.js";
+import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -617,7 +617,7 @@ const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() -
 let head = "";
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
 type Command = { release: string[]; serving: string[]; servingAfterRelease: boolean; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string; when?: "after" | "first" | "beside" } };
-let cron: { steps: { prepare: string; slot: string; rehearse: string; android: string; preview: string; beside: string; release: string; confirm: string }; scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; flagsReleased: string[] | null; gap: number; poll: number; branches?: { enabled: boolean; abandonHours: number; abandonAttempts: number }; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
+let cron: { steps: { prepare: string; slot: string; rehearse: string; android: string; preview: string; beside: string; release: string; confirm: string; error: string }; scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; flagsReleased: string[] | null; gap: number; poll: number; branches?: { enabled: boolean; abandonHours: number; abandonAttempts: number }; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
 let mark = Date.now();
@@ -1128,9 +1128,9 @@ try {
     active("android");
     let failedNames: string[] = [];
     const cmd = cron.android!.command;
-    // Only what cron.js's androidEnv lets through: the credentials the bisect's env drops, and a Cloudflare token, are not the step's.
-    const env = { ...androidEnv(Deno.env.toObject()), STACK_WAIT_MINUTES: "525600" };
-    const phoneRun = await child(cmd[0], cmd.slice(1), dir, env, (l) => { failedNames = [...new Set([...failedNames, ...androidFailed(l)])]; }, "", true);
+    // Only what cron.js's androidSpawn lets through: the credentials the bisect's env drops, and a Cloudflare token, are not the step's.
+    const { env, clearEnv } = androidSpawn(Deno.env.toObject());
+    const phoneRun = await child(cmd[0], cmd.slice(1), dir, env, (l) => { failedNames = [...new Set([...failedNames, ...androidFailed(l)])]; }, "", clearEnv);
     step(cron.steps.android);
     if (dry) end("dry", phoneRun.code === 0 ? "the android step passed" : androidWhy(phoneRun.code, failedNames), phoneRun.code === 0 ? 0 : 1);
     if (phoneRun.code !== 0) end("failed", androidWhy(phoneRun.code, failedNames), 1, true);
@@ -1316,7 +1316,7 @@ try {
   // does not read as a deploy that never went out.
   end("released", !target && run.revision === before ? `same image, nothing served changed: ${before} kept` : "");
 } catch (e) {
-  step("error");
+  step(cron?.steps.error ?? "error");
   end("failed", (e as Error).message.split("\n")[0], 1);
 }
 

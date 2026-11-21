@@ -55,6 +55,7 @@ releaseCron: #Cron
 		beside:   "rehearse+preview"
 		release:  "release"
 		confirm:  "confirm"
+		error:    "error"
 	}
 	// The top-level `holder`, kept for the apps that set it: the default of rehearsal.holder.
 	holder: *"verify@local" | string
