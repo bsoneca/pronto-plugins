@@ -194,9 +194,10 @@ cases: {
 		{call: "cron.leaseLost", args: ["release/x/1", _sha1, _sha1], expect: {deleted: false, tip: _sha1, why: "release/x/1 was not deleted: the push failed with the tip unchanged at 11111111"}},
 	]}
 	"a held tip that is already serving resumes at confirmation": {suite: "cron", steps: [
-		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, "c1", "c1"], expect: true, why: "the release landed, its confirmation did not"},
-		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, "c0", "c1"], expect: false},
-		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, null, "c1"], expect: false, why: "nothing known to serve"},
+		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, "c1", "c1", true], expect: true, why: "the release landed, its confirmation did not: the serving ref is written after the release"},
+		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, "c0", "c1", true], expect: false},
+		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, null, "c1", true], expect: false, why: "nothing known to serve"},
+		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, "c1", "c1", false], expect: false, why: "a worktree's HEAD moves before the release runs: no proof it landed"},
 	]}
 	"a refused tip's notice names the branch, the commit and why": {suite: "cron", steps: [
 		{call: "cron.refusal", args: ["studio", "release/studio/1", _sha1, "the tip does not descend from the commit the branch was cut at"], expect: "release-cron (studio) refused release/studio/1 at 11111111: the tip does not descend from the commit the branch was cut at. Nothing was rehearsed and no attempt counted; push a tip that is only merged pull requests into the branch."},

@@ -1,4 +1,4 @@
-import { causes } from "./causes.js"; // releaseCron.causes, emitted from release-cron/schema.cue (host.cue)
+import { causes, outcomes } from "./causes.js"; // releaseCron.causes and .outcomes, emitted from release-cron/schema.cue (host.cue)
 
 // release-cron's rules, apart from what they act on (release-cron.ts runs git, the rehearsal, the
 // release and curl): whether a run is due, whether a change is the app's, which commit is serving,
@@ -38,7 +38,11 @@ export const landed = (code, serving, head, afterRelease) => afterRelease === tr
 export const rescuable = (code, afterRelease) => afterRelease === true && sshDropped(code);
 
 // The outcomes after which the next run waits the gap: a held release (below) waits for none, an abandoned one does.
-export const spaced = (outcome) => outcome === "released" || outcome === "failed" || (outcome ?? "").startsWith("abandoned");
+export const spaced = (outcome) => outcome === outcomes.released || outcome === outcomes.failed || (outcome ?? "").startsWith(outcomes.abandoned);
+
+// A branch outcome as it is written (`held release/studio/20261119-1015`): its name from releaseCron.outcomes (`held`, `abandoned`,
+// `heldRefused`, `heldBackport`, `cleared`), a space, the branch.
+export const branchOutcome = (name, branch) => `${outcomes[name]} ${branch}`;
 
 // A failed run's gap is waived once main has moved past the commit it failed on (`failed`; `head`
 // main now, null when it could not be read) by a change that concerns what failed (concerns, below):
@@ -120,7 +124,7 @@ export const whole = (traffic) => {
 // confirm failed is released again, not skipped from then on. A revision that changed since (a
 // rollback, a release from elsewhere) is not known to serve it either.
 export const base = (runs, now) => {
-  const r = runs.filter((x) => x.outcome === "released").at(-1);
+  const r = runs.filter((x) => x.outcome === outcomes.released).at(-1);
   return r && now && r.revision === now ? r.commit ?? null : null;
 };
 
@@ -192,9 +196,9 @@ export const perDay = 16;
 export const report = (runs) => {
   const min = (s) => (Math.round(s / 6) / 10).toFixed(1);
   const median = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? (s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : null; };
-  const released = runs.filter((r) => r.outcome === "released");
+  const released = runs.filter((r) => r.outcome === outcomes.released);
   // The bisects of failed runs (runs.jsonl lines of their own), after the releases.
-  const bisected = runs.filter((r) => r.outcome === "bisect" && r.detail?.bisect).map((r) => `bisect ${bisectLine(r.detail.bisect)}`);
+  const bisected = runs.filter((r) => r.outcome === outcomes.bisect && r.detail?.bisect).map((r) => `bisect ${bisectLine(r.detail.bisect)}`);
   if (!released.length) return ["no released run yet", ...bisected].join("\n");
   const total = (r) => Object.values(r.steps).reduce((a, b) => a + b, 0);
   const rows = released.map((r) => `${r.started} ${r.commit?.slice(0, 8) ?? ""} ${min(total(r))} min = ${Object.entries(r.steps).map(([k, s]) => `${k} ${min(s)}`).join(", ")}${r.newFailing?.length ? `; new-feature scenarios failing: ${r.newFailing.join(", ")}` : ""}`);
@@ -215,7 +219,7 @@ export const report = (runs) => {
 // The launchd job (a LaunchAgent's plist): `program` with `args`, every `poll` minutes (launchd
 // never starts it while it runs, and after a sleep runs it once), its output appended to `log`,
 // with PATH and the variables in `env`.
-export const plist = ({ label, program, args, poll, log, env }) => {
+export const plist = ({ label, program, args, poll, log, env, stop }) => {
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const str = (s) => `<string>${esc(s)}</string>`;
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -230,7 +234,8 @@ export const plist = ({ label, program, args, poll, log, env }) => {
 	<dict>${Object.entries(env).map(([k, v]) => `<key>${esc(k)}</key>${str(v)}`).join("")}</dict>
 	<key>StandardOutPath</key>${str(log)}
 	<key>StandardErrorPath</key>${str(log)}
-	<key>ProcessType</key><string>Standard</string>
+	<key>ProcessType</key><string>Standard</string>${stop ? `
+	<key>ExitTimeOut</key><integer>${stop}</integer>` : ""}
 </dict>
 </plist>
 `;
@@ -240,7 +245,7 @@ export const plist = ({ label, program, args, poll, log, env }) => {
 // scheduler's: the service runs `program` with `args` once and its output is appended to `log`, with the
 // variables in `env`; the timer starts it `poll` minutes after the last start (OnUnitActiveSec; systemd never
 // starts a service while it runs) and once a minute after boot, so a run follows a restart.
-export const systemdUnits = ({ label, program, args, poll, log, env }) => {
+export const systemdUnits = ({ label, program, args, poll, log, env, stop }) => {
   // A word of a unit file in double quotes: \ and " escaped, and % and $ doubled (specifiers, variables).
   const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\$/g, "$$$$")}"`;
   const service = `[Unit]
@@ -251,7 +256,7 @@ Type=oneshot
 ExecStart=${[program, ...args].map(q).join(" ")}
 ${Object.entries(env).map(([k, v]) => `Environment=${q(`${k}=${v}`)}\n`).join("")}StandardOutput=append:${log}
 StandardError=append:${log}
-`;
+${stop ? `TimeoutStopSec=${stop}\nKillMode=mixed\n` : ""}`;
   const timer = `[Unit]
 Description=release-cron ${label}, every ${poll} min
 
@@ -306,7 +311,7 @@ export const noVerdictExit = (code) => code === 3 || code === 124 || code >= 128
 // Whether a run says its rehearsal gave no verdict, or was stopped because the preview failed first (preview `when: "beside"`):
 // the bisect skips it, as it does a run a signal stopped. A record with a `cause` is read by that key; an older one by its `why`.
 export const noVerdictRun = (why, cause) =>
-  cause ? ["noVerdict", "rehearsalStopped", "signal"].includes(cause) : (why ?? "").startsWith(causes.noVerdict) || (why ?? "").includes(`; ${causes.rehearsalStopped}`);
+  cause ? ["noVerdict", "rehearsalStopped", "signal", "treeMoved"].includes(cause) : (why ?? "").startsWith(causes.noVerdict) || (why ?? "").startsWith(causes.treeMoved) || (why ?? "").includes(`; ${causes.rehearsalStopped}`);
 
 // A run's reason and its cause key, for the failures the driver names itself (releaseCron.causes): `beforeSlot` (the rehearsal
 // ended before its slot: `command` its text, `code` its exit, `noVerdict` whether that is no verdict), `noVerdict`, `rehearsalFailed`
@@ -318,6 +323,8 @@ export const failureOf = (kind, a) => {
   if (kind === "noVerdict") return { why: `${causes.noVerdict} (exit ${a.code}): nothing released${down}`, cause: "noVerdict" };
   if (kind === "rehearsalFailed") return { why: `${causes.rehearsalFailed} (exit ${a.code}): nothing released${down}`, cause: "rehearsalFailed" };
   if (kind === "previewFailed") return { why: `${causes.previewFailed}: ${a.bad.join("; ")}${a.stopped ? `; ${causes.rehearsalStopped}` : ""}: nothing released`, cause: a.stopped ? "rehearsalStopped" : "previewFailed" };
+  // The tree the run checked out moved while the rehearsal and the preview ran (`from`, `to`): an infrastructure failure, no verdict of the tree.
+  if (kind === "treeMoved") return { why: `${causes.treeMoved} from ${a.from} to ${a.to} while the rehearsal and the preview ran: nothing released`, cause: "treeMoved" };
   throw new Error(`no failure of kind ${kind}`);
 };
 
@@ -388,6 +395,12 @@ export const rehearsalEnv = (env, live, isCommandTarget, rehearsed) => {
   const { REHEARSE_LIVE: _, REHEARSE_COMMIT: __, ...rest } = env;
   return { ...rest, ...(isCommandTarget && live ? { REHEARSE_LIVE: live } : {}), ...(rehearsed ? { REHEARSE_COMMIT: rehearsed } : {}) };
 };
+// The rehearsal child as started: the whole environment is supplied (rehearsalEnv removed the stale keys from it), so nothing the parent has is inherited
+// in its place.
+export const rehearsalSpawn = (env, live, isCommandTarget, rehearsed) => ({
+  env: { ...rehearsalEnv(env, live, isCommandTarget, rehearsed), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" },
+  clearEnv: true,
+});
 // The commit offered the rehearsal's selection as production's baseline: the serving commit read when the rehearsal is started, before
 // its slot wait (`read`, a commit that resolved, else null), never the one read at the run's start (`earlier`): a preview run first
 // leaves time for another release to land (the slot wait is not covered). Nothing reads it yet. An unread one is unknown (null, REHEARSE_LIVE omitted), not the stale one. `moved`:
@@ -611,6 +624,23 @@ export const parseLog = (text) => text.split("\x1e").map((r) => r.replace(/^\s*\
 // What `git log -p | git patch-id --stable` prints ("<patch id> <commit>" a line), as {commit: patch id}.
 export const patchIds = (text) => Object.fromEntries(text.split("\n").filter(Boolean).map((l) => l.trim().split(/\s+/)).map(([patch, sha]) => [sha, patch]));
 
+// The patch ids of a range, from the two git processes that make them (`git log -p`, then `git patch-id --stable`, each {ok, code, out, err}): both
+// must have succeeded, else the answer is an error and the backport check stops, the branch and its record kept. Output of a failed or
+// timed-out process may be partial, and a commit missing from it must never read as empty.
+export const patchIdsOf = (log, ids) =>
+  !log.ok ? { error: `git log -p failed (exit ${log.code}): ${(log.err || log.out || "no output").split("\n")[0]}` }
+  : !ids.ok ? { error: `git patch-id failed (exit ${ids.code}): ${(ids.err || ids.out || "no output").split("\n")[0]}` }
+  : { ids: patchIds(ids.out) };
+
+// A branch commit's patch: its patch id when it has one; with none, null (empty: nothing to carry) only when the commit has no tree
+// change, read as `git diff-tree --root -r --no-commit-id <sha>` (`tree`, {ok, out, err}) prints nothing. A commit that changes the
+// tree and has no patch id, or a tree check that failed, is an error (the backport check stops).
+export const patchOf = (sha, id, tree) =>
+  id ? { patch: id }
+  : !tree.ok ? { error: `${sha.slice(0, 8)} has no patch id and its tree change could not be read: ${(tree.err || tree.out || "no output").split("\n")[0]}` }
+  : (tree.out ?? "").trim() === "" ? { patch: null }
+  : { error: `${sha.slice(0, 8)} changes the tree but has no patch id` };
+
 // The branch's commits (`branch`: [{sha, patch, body}]) that main (`main`: the same, since the merge base) holds no counterpart of:
 // a `(cherry picked from commit <sha>)` line naming it (cherry-pick -x), an equal stable patch id, or, the ledger's rule
 // (bsoneca/pronto's .github/release-ledger.sh), a subject ending `(#n)` that a main commit's message answers with `Backport-of: #n`.
@@ -636,24 +666,29 @@ export const unmerged = (shas, pulls, branch) => shas.filter((s) => !(pulls[s] ?
 export const migrationFiles = (files, appRel) => files.filter((f) => f.startsWith(`${appRel}/services/database/migrations/`));
 
 // Why a held branch's new tip is not rehearsed (null: it is). `descends`: the tip descends from the cut; `unmerged`: its commits
-// past the cut that no merged pull request into the branch brought; `migrations`: the migration files base..tip changed.
-export const refusedTip = ({ descends, unmerged, migrations }) => {
+// past the cut that no merged pull request into the branch brought; `migrations`: the migration files base..tip changed; `resolved`: the merge
+// commits of base..tip whose combined diff is not empty (resolvedMerges): a branch stays linear, so a resolution is never kept on it.
+export const refusedTip = ({ descends, unmerged, migrations, resolved = [] }) => {
   const why = [
     ...(descends ? [] : ["the tip does not descend from the commit the branch was cut at"]),
     ...(unmerged.length ? [`${unmerged.length} commit${unmerged.length === 1 ? "" : "s"} not brought by a merged pull request into the branch: ${unmerged.map((s) => s.slice(0, 8)).join(", ")}`] : []),
     ...(migrations.length ? [`migrations changed (${migrations.join(", ")}): migrations go to main only`] : []),
+    ...(resolved.length ? [`${resolved.length} merge${resolved.length === 1 ? "" : "s"} with a nonempty combined diff (a conflict resolution): ${resolved.map((s) => s.slice(0, 8)).join(", ")}; release branches stay linear: rebase the branch or cherry-pick onto it instead (\`abandon --force\` is the way out)`] : []),
   ];
   return why.length ? why.join("; ") : null;
 };
+
+// The merges (`merges`: [{sha, cc}], `cc` the output of `git show --cc --format= <sha>`) whose combined diff is not empty: a conflict resolution.
+export const resolvedMerges = (merges) => merges.filter((m) => (m.cc ?? "").trim() !== "").map((m) => m.sha);
 
 // `last`'s two commit fields for a run that ended `outcome` (spaced) on `commit`: the commit a failed run on main failed on (retry),
 // and the commit the run tried (behind). "-" for none: an abandoned run tried nothing main must stay behind, and a failure on a
 // held branch is not a failure of main.
 // A third: the held branch's tip that failed outside the rehearsal (no attempt), which waits the gap before it runs again (heldWait).
 export const lastFields = (outcome, commit, onBranch) => [
-  outcome === "failed" && commit && !onBranch ? commit : "-",
-  commit && !(outcome ?? "").startsWith("abandoned") && !(onBranch && outcome === "failed") ? commit : "-",
-  outcome === "failed" && commit && onBranch ? commit : "-",
+  outcome === outcomes.failed && commit && !onBranch ? commit : "-",
+  commit && !(outcome ?? "").startsWith(outcomes.abandoned) && !(onBranch && outcome === outcomes.failed) ? commit : "-",
+  outcome === outcomes.failed && commit && onBranch ? commit : "-",
 ];
 
 // Whether a held branch's tip waits: it is the one that failed outside the rehearsal at `at` (`lastTip`, from `last`), and the gap
@@ -680,7 +715,10 @@ export const missingFromMain = (branch, main, merges = [], all = main) => [
 
 // The diff of a held branch's change, as git is asked: no rename detection, so a migration moved out of the migrations folder lists
 // both its paths and migrationFiles sees the old one.
-export const heldDiffArgs = (base, head) => ["diff", "--no-renames", "--name-only", base, head];
+export const heldDiffArgs = (base, head) => ["diff", "--no-renames", "--name-only", "-z", base, head];
+
+// The paths of a `-z` listing: split on NUL, never on a newline, so a path git would quote (a non-ASCII or special name) is read as it is.
+export const nulPaths = (text) => (text ?? "").split("\0").filter(Boolean);
 
 // A branch deleted from origin only when it is still the tip that was checked: the push's arguments (an explicit lease on that sha, and
 // a delete refspec). A branch pushed to since the check fails the lease and stays.
@@ -694,7 +732,24 @@ export const leaseLost = (branch, verified, now) => !now
 
 // A held branch whose tip is already what production serves (`live`, as the run reads it): the release landed and its confirmation never did
 // (a run that died, a probe that failed after the deploy). The run resumes at confirmation, not skips as main's own serving commit does.
-export const heldLanded = (open, live, head) => !!open && !!head && live === head;
+// Only when `live` is a post-deployment marker (`afterRelease`, the target's servingAfterRelease: true): a serving command that reads a worktree's HEAD
+// moves before the release runs, so a held release whose checkout landed and whose deploy failed would be confirmed, never deployed.
+export const heldLanded = (open, live, head, afterRelease) => !!open && !!head && live === head && afterRelease === true;
+
+// What a run does once it knows what serves (`live`) and `head`: "proceed" when they differ; "skip" for main serving its own head; for a held
+// release serving its tip, "resume" at confirmation (a post-deployment marker) or "rerun" the held release (the serving read is no proof).
+export const servingPlan = (open, live, head, afterRelease) =>
+  !head || live !== head ? "proceed" : !open ? "skip" : heldLanded(open, live, head, afterRelease) ? "resume" : "rerun";
+export const rerunWhy = (branch, head) => `${branch} at ${head.slice(0, 8)} is what the node's worktree reads, but its serving command has no post-deployment marker (servingAfterRelease is false): the held release is run again, not confirmed`;
+
+// An installed scheduler runs the driver from the run's worktree (`wt`), so a candidate checked out there would supply the settings and script that confirm
+// itself: a held release is refused when the trusted checkout (`top`, where this driver was loaded) is that worktree. Null: it may run.
+export const heldTrusted = (top, wt) => (top ?? "").replace(/\/+$/, "") === (wt ?? "").replace(/\/+$/, "")
+  ? `the scheduler runs from the run's own checkout (${wt}), so the held tip would supply the settings and script that confirm it: run held releases from a separate trusted checkout (a clone of main outside the run's state)`
+  : null;
+
+// Whether the released-branch record is checked against the commit a run releases: on every run that can deploy main (not a held run), whatever ref it names.
+export const backportCheck = (open, released) => !open && !!released;
 
 // RELEASE_CRON_DRY: any value makes the run a rehearsal of its decisions. A dry run deletes no branch, closes no hold, writes no marker
 // (refused, backport-told, flags-released) and tells nobody; it says what it would have done (dryWould).
@@ -746,13 +801,27 @@ export const shippedRecord = (open, released, ev) => {
 // The commit a run of `branch` released (the newest), from runs.jsonl rows: one that reached the release step (`releaseStep`) and
 // names a commit, on that branch. A run that cut the branch from main, one on another branch, a stopped one or one with no commit is not.
 export const releaseAttempt = (runs, branch, releaseStep) =>
-  runs.filter((r) => r.branch === branch && r.commit && !r.cut && r.outcome !== "stopped" && releaseStep in (r.steps ?? {})).at(-1)?.commit ?? null;
+  runs.filter((r) => r.branch === branch && r.commit && !r.cut && r.outcome !== outcomes.stopped && releaseStep in (r.steps ?? {})).at(-1)?.commit ?? null;
 
 // A new hold is cut only while no released branch's record waits for its commits on main: the record is one file, and cutting
 // would leave a shipped hold nothing to be recorded in.
-export const cutPlan = (enabled, override, released) => !enabled || override ? { cut: false, why: "" }
-  : released ? { cut: false, why: `${released.branch} is released and its commits are not all on main: no new hold until they are (\`abandon --force\` clears the record)` }
-  : { cut: true, why: "" };
+// Nor while the scheduler runs from the run's own checkout (`untrusted`, heldTrusted's answer, null when it may): a hold cut there would always be refused,
+// and main would stay blocked behind it.
+/** @param {string | null} [untrusted] */
+export const cutPlan = (enabled, override, released, untrusted = null) => {
+  if (!enabled || override) return { cut: false, why: "" };
+  const why = [
+    ...(released ? [`${released.branch} is released and its commits are not all on main: no new hold until they are (\`abandon --force\` clears the record)`] : []),
+    ...(untrusted ? [`no hold can be cut: ${untrusted}`] : []),
+  ];
+  return why.length ? { cut: false, why: why.join("; ") } : { cut: true, why: "" };
+};
+
+// Whether the trust refusal of a held release is told: once for each branch and reason (`told`: the last one told, "" when none).
+export const trustNotice = (told, branch, why) => ({ key: `${branch} ${why}`, tell: (told ?? "").trim() !== `${branch} ${why}` });
+
+// What holds the run lock, from the holder's command line (`ps -o command= -p <pid>`): `abandon` when its verb is abandon, else a run.
+export const holderKind = (command) => /\sabandon(\s|$)/.test(command ?? "") ? "abandon" : "run";
 
 // `abandon`: what it does to the hold (`open`, {branch} or null) and the record of a branch already released (`released`,
 // {branch} or null), after the checks of a released branch (`missing`: the commits not on main, null when they could not be read;
@@ -792,4 +861,48 @@ export const servingRetryable = (code) => sshDropped(code);
 
 // The outcome a run ends with once a signal came: its stop, never a verdict (no red attempt, no gap, no bisect, no branch cut). A
 // release that had already landed keeps its outcome.
-export const endWhenInterrupted = (interrupted, outcome) => interrupted && outcome !== "released" ? "stopped" : outcome;
+export const endWhenInterrupted = (interrupted, outcome) => interrupted && outcome !== outcomes.released ? outcomes.stopped : outcome;
+
+// A signal and the preview's remote `up`: not stopped at once (that ends the local ssh while the remote release runs on, and `down` would
+// start beside it). `tag`: a child's tag; only "down" and "preview" (up) are left to previewUpStep.
+export const signalStops = (tag) => tag !== "down" && tag !== "preview";
+// Each tick while `up` runs after a signal (`alive`; `elapsed`: ms since it started; `timeout`: its own limit, `grace`: ms between TERM and KILL):
+// "wait" until its timeout, then "term" its process group (the recorded pid only), "kill" after the grace, "gone" once it has exited, and only
+// then does `down` run.
+export const previewUpStep = (alive, elapsed, timeout, grace) => !alive ? "gone" : elapsed < timeout ? "wait" : elapsed < timeout + grace ? "term" : "kill";
+// The ms a signal's wait may take at most while an `up` runs (its remaining time and the grace), on top of the teardown's.
+export const upExtra = (upElapsed, timeout, grace) => Math.max(0, timeout - upElapsed) + grace;
+
+// What the lock decides, from the flock alone (`acquired`: the kernel granted it; the holder's pid is never read for this): "busy" when not, else "reap" when a dead
+// run left a preview record (`orphan`, <state>/lock.preview): its `up` is stopped (TERM, then KILL, the recorded and verified pgid only) and its `down` run, only once the
+// lock is held, else "take". A run, `abandon` and the bisect take it the same way.
+export const lockStep = (acquired, orphan = false) => !acquired ? "busy" : orphan ? "reap" : "take";
+// A lock directory an earlier version made (`isDir`; its `pid` file's `pid`, `alive`): busy while that run lives, else removed so the flock is taken.
+export const legacyLock = (isDir, pid, alive) => !isDir ? "none" : pid && alive ? "busy" : "remove";
+// Whether the group of a preview's `up` is signalled: only a record with a pgid, whose leader still exists as the process recorded (`live`: {exists, lstart, boot}, the
+// system's now): the same start time and the same boot. A reused pid, another boot, a gone leader or no pgid is an `up` that is gone: `down` runs at once.
+export const reapSignal = (rec, live) => !!rec?.pgid && !!rec.lstart && !!rec.boot && !!live?.exists && live.lstart === rec.lstart && live.boot === rec.boot;
+// A reason with another appended (a throw after the run's own reason was set).
+export const appendWhy = (prev, why) => prev ? `${prev}; ${why}` : why;
+// The pid holding a lock, from what is read of it: a lock an earlier version made is a directory holding `pid` (`isDir`: `dirText` is its content), a current one
+// a file holding the pid (`fileText`). A legacy holder that runs keeps its lock (lockStep says busy); only a dead or unreadable one (0) is removed.
+export const holderPid = (isDir, dirText, fileText) => Number((isDir ? dirText : fileText) ?? "") || 0;
+// The sequence that stops an orphaned `up` (alive: its group; elapsed: ms since the sequence began): the same bounded steps as a signal's, with no limit left to wait.
+export const reapStep = (alive, elapsed, grace) => alive && elapsed >= grace + 60_000 ? "giveup" : previewUpStep(alive, elapsed, 0, grace);
+
+// When a signal's wait is over (`upGoneAt`: when the preview's `up` was seen gone, null while it runs; `ups`: whether one ran at the signal, at `t`; `now`;
+// `upLeft`: upExtra's bound for it): a `down` gets grace + teardown from the moment `up` is gone, not from the signal; a `up` that is never seen gone is
+// counted gone when its own limit and the grace have passed. Without a preview, grace + teardown from the signal.
+export const signalDone = (upGoneAt, ups, now, t, upLeft, grace, teardown) => {
+  if (!ups) return now - t >= grace + teardown;
+  const gone = upGoneAt ?? (now - t >= upLeft ? t + upLeft : null);
+  return gone !== null && now - gone >= grace + teardown;
+};
+
+// The seconds the scheduler gives a stopping run before it kills it (launchd's ExitTimeOut, systemd's TimeoutStopSec): the preview's `up` limit
+// (`upMinutes`, 0 without a preview), the grace its stop gets and the teardown, as the signal's wait is made of them.
+export const stopSeconds = (upMinutes, grace = 60_000, teardown = 300_000) => upMinutes * 60 + (2 * grace + teardown) / 1000 + 30;
+
+// The flags-released bookkeeping's result (`result`: recordFlagsReleased's) once its marker was written or not (`err`: the write's error, null when it
+// was): a marker that could not be written is a bookkeeping failure with its path, apart from the deploy outcome (run.flagsReleased, never `outcome`).
+export const flagsBookkeeping = (result, path, err) => result === "ok" && err ? `failed (the marker ${path} was not written: ${String(err).split("\n")[0]})` : result;
