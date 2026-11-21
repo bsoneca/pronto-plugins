@@ -159,3 +159,90 @@ cases: {
 		{call: "cron.heldNotice", args: ["release/x/1"], expect: "fixes merged to main do not release until release/x/1 closes: `abandon` releases main again"},
 	]}
 }
+
+// The safety of the release-branch path (PRONTO-1099, 1100, 1101).
+_sha1: "1111111111111111111111111111111111111111"
+_sha2: "2222222222222222222222222222222222222222"
+
+cases: {
+	"a merge whose resolution changed code is missing from main, as the ledger counts it (git show --cc)": {suite: "cron", steps: [
+		{call: "cron.missingFromMain", args: [[], [], [{sha: "m1", subject: "Merge fix into branch", cc: "diff --cc a.js\n+fixed\n"}]], expect: [{sha: "m1", body: "Merge fix into branch (a merge whose resolution changed code: carry it to main by hand)"}], why: "a fix made in a conflict resolution has no commit of its own"},
+		{call: "cron.missingFromMain", args: [[], [], [{sha: "m2", subject: "Merge main into branch", cc: ""}, {sha: "m3", subject: "Merge", cc: "\n"}]], expect: [], why: "a merge that carries nothing of its own is nothing to carry"},
+		{call: "cron.missingFromMain", args: [[{sha: "c1", patch: "p1", body: "fix (#1)\n"}], [{sha: "m", patch: "q", body: "x"}], [{sha: "m1", subject: "Merge", cc: "+x"}]], holds: [{sha: "m1"}, {sha: "c1"}], why: "the merges first, then the commits main has no counterpart of"},
+		{call: "cron.missingFromMain", args: [[{sha: "c1", patch: "p1", body: "x"}], [{sha: "m", patch: "p1", body: "y"}], []], expect: [], why: "an equal patch id is a counterpart"},
+	]}
+	"with no merge to resolve, the ledger's answer is backported's: branches off change nothing": {suite: "cron", steps: [
+		{call: "cron.missingFromMain", args: [[{sha: "c1", patch: "p1", body: "a"}, {sha: "c2", patch: "p2", body: "b"}], [{sha: "m", patch: "p2", body: "b"}]], expect: [{sha: "c1", patch: "p1", body: "a"}]},
+		{call: "cron.backported", args: [[{sha: "c1", patch: "p1", body: "a"}, {sha: "c2", patch: "p2", body: "b"}], [{sha: "m", patch: "p2", body: "b"}]], expect: [{sha: "c1", patch: "p1", body: "a"}]},
+	]}
+	"the backport check and the deletion name commits, not refs that move": {suite: "cron", steps: [
+		{call: "cron.isSha", args: [_sha1], expect: true},
+		{call: "cron.isSha", args: ["origin/main"], expect: false, why: "re-fetched under the check"},
+		{call: "cron.isSha", args: ["abc123"], expect: false, why: "short ids are ambiguous"},
+		{call: "cron.isSha", args: [null], expect: false},
+	]}
+	"a migration moved out of the folder refuses the tip, by its old path (git diff --no-renames lists both)": {suite: "cron", steps: [
+		{call: "cron.migrationFiles", args: [["apps/studio/services/database/migrations/0042.sql", "apps/studio/db/0042.sql"], "apps/studio"]},
+		{keep: "moved"},
+		{use: "moved", expect: ["apps/studio/services/database/migrations/0042.sql"]},
+		{call: "cron.refusedTip", args: [{descends: true, unmerged: [], migrations: "$moved"}], matches: "migrations changed \\(apps/studio/services/database/migrations/0042.sql\\)"},
+	]}
+	"a branch is deleted only as the tip that was checked, by an explicit lease": {suite: "cron", steps: [
+		{call: "cron.leaseDelete", args: ["release/x/1", _sha1], expect: ["--force-with-lease=refs/heads/release/x/1:1111111111111111111111111111111111111111", "origin", ":refs/heads/release/x/1"]},
+		{call: "cron.leaseLost", args: ["release/x/1", _sha1, _sha2], expect: {deleted: false, tip: _sha2, why: "release/x/1 was kept: its tip moved from the checked 11111111 to 22222222, which nothing checked"}, why: "a push since the check: the branch and its record stay, the new tip is said"},
+		{call: "cron.leaseLost", args: ["release/x/1", _sha1, null], expect: {deleted: true, why: "release/x/1 was already gone from origin"}},
+		{call: "cron.leaseLost", args: ["release/x/1", _sha1, _sha1], expect: {deleted: false, tip: _sha1, why: "release/x/1 was not deleted: the push failed with the tip unchanged at 11111111"}},
+	]}
+	"a held tip that is already serving resumes at confirmation": {suite: "cron", steps: [
+		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, "c1", "c1"], expect: true, why: "the release landed, its confirmation did not"},
+		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, "c0", "c1"], expect: false},
+		{call: "cron.heldLanded", args: [{branch: "release/x/1"}, null, "c1"], expect: false, why: "nothing known to serve"},
+	]}
+	"a refused tip's notice names the branch, the commit and why": {suite: "cron", steps: [
+		{call: "cron.refusal", args: ["studio", "release/studio/1", _sha1, "the tip does not descend from the commit the branch was cut at"], expect: "release-cron (studio) refused release/studio/1 at 11111111: the tip does not descend from the commit the branch was cut at. Nothing was rehearsed and no attempt counted; push a tip that is only merged pull requests into the branch."},
+	]}
+}
+
+// The ledger's parity and the plans (the driver executes them in order; the cases hold the decisions).
+_main: [{sha: "m1", patch: "q", body: "unrelated"}]
+_all: [{sha: "m0", body: "fix a\n\n(cherry picked from commit c1)\n"}, {sha: "mb", body: "port (#12)\n\nBackport-of: #7\n"}, {sha: "m1", patch: "q", body: "unrelated"}]
+
+cases: {
+	"a pick or Backport-of line anywhere in main's history carries a branch commit, not only since the merge base": {suite: "cron", steps: [
+		{call: "cron.backported", args: [[{sha: "c1", patch: "p1", body: "fix a\n"}, {sha: "c2", patch: "p2", body: "fix b (#7)\n"}, {sha: "c3", patch: "p3", body: "fix c (#8)\n"}], _main, _all], expect: [{sha: "c3", patch: "p3", body: "fix c (#8)\n"}], why: "a fix picked before the branch was cut is on main; the ledger reads main's whole history for both lines"},
+		{call: "cron.backported", args: [[{sha: "c1", patch: "p1", body: "fix a\n"}], _main], expect: [{sha: "c1", patch: "p1", body: "fix a\n"}], why: "read only since the merge base, the pick is not seen: the gap that was"},
+	]}
+	"an empty commit has no patch id: nothing to carry, as the ledger skips it, unless a line names it": {suite: "cron", steps: [
+		{call: "cron.backported", args: [[{sha: "e1", patch: null, body: "empty\n"}, {sha: "c1", patch: "p1", body: "real\n"}], _main], expect: [{sha: "c1", patch: "p1", body: "real\n"}]},
+		{call: "cron.missingFromMain", args: [[{sha: "e1", patch: null, body: "empty\n"}], _main, []], expect: []},
+	]}
+	"a held tip that fails provenance is refused before any checkout, trust or config read": {suite: "cron", steps: [
+		{call: "cron.heldPlan", args: ["1 commit not brought by a merged pull request into the branch: abcdef01", null], expect: ["mark-refused", "notify", "end-refused"], why: "nothing of the tip is checked out, so the scheduler's entry point stays out of it"},
+		{call: "cron.heldPlan", args: [null, null], expect: ["checkout", "trust", "config"], why: "only a passed tip is checked out, then trusted, then its config read"},
+		{call: "cron.heldPlan", args: ["x", null]},
+		{keep: "refused"},
+		{call: "cron.mutations", args: ["$refused"], expect: ["mark-refused", "notify", "end-refused"]},
+	]}
+	"a dry run's plans list no mutation, and check nothing out": {suite: "cron", steps: [
+		{call: "cron.heldPlan", args: ["x", "1"], expect: ["report-refusal"]},
+		{call: "cron.heldPlan", args: [null, "1"], expect: ["report-checkout"], why: "a dry run of a good tip says it would check it out"},
+		{call: "cron.backportPlan", args: [[{sha: "c"}], false, "1"], expect: ["end-held-backport"], why: "waits but tells nobody and writes no marker"},
+		{call: "cron.backportPlan", args: [[], false, "1"], expect: ["report-delete"]},
+		{call: "cron.limitPlan", args: ["android"], expect: ["report-abandon"]},
+		{call: "cron.mutations", args: [["report-refusal", "report-checkout", "report-delete", "report-abandon"]], expect: []},
+	]}
+	"a real run tells once, then deletes or closes": {suite: "cron", steps: [
+		{call: "cron.backportPlan", args: [[{sha: "c"}], false, null], expect: ["tell", "mark-told", "end-held-backport"]},
+		{call: "cron.backportPlan", args: [[{sha: "c"}], true, null], expect: ["end-held-backport"], why: "this set was told already"},
+		{call: "cron.backportPlan", args: [[], false, null], expect: ["delete-branch"]},
+		{call: "cron.limitPlan", args: [null], expect: ["close-hold", "drop-branch", "end-abandoned"]},
+	]}
+	"a held tip confirms itself by the trusted checkout's probes and serving command": {suite: "cron", steps: [
+		{call: "cron.heldConfig", args: [{gap: 60, ready: ["a"], probes: {home: {path: "/evil"}}, target: {kind: "command", release: ["./rel"], serving: ["./evil-serving"], origin: "https://evil"}}, {ready: ["b"], probes: {home: {path: "/"}}, target: {kind: "command", release: ["x"], serving: ["ssh", "node", "serving"], origin: "https://app"}}], expect: {gap: 60, ready: ["b"], probes: {home: {path: "/"}}, target: {kind: "command", release: ["./rel"], serving: ["ssh", "node", "serving"], origin: "https://app"}}, why: "the candidate's release command still runs; what says it landed is the trusted one's"},
+		{call: "cron.heldConfig", args: [{ready: ["a"], probes: {}, target: {kind: "cloud-run"}}, {probes: {p: {path: "/"}}, target: {kind: "cloud-run"}}], expect: {ready: ["a"], probes: {p: {path: "/"}}, target: {kind: "cloud-run"}}},
+	]}
+	"an unreadable open file is reported by abandon, and removed only with --force": {suite: "cron", steps: [
+		{call: "cron.corruptOpen", args: ["/s/open", "Unexpected token", false], expect: {remove: false, text: "/s/open could not be read (Unexpected token): delete that file by hand, or run `abandon --force` to remove it"}},
+		{call: "cron.corruptOpen", args: ["/s/open", "Unexpected token", true], expect: {remove: true, text: "/s/open could not be read (Unexpected token): removed by --force"}},
+	]}
+}
