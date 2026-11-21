@@ -43,6 +43,19 @@ releaseCron: #Cron
 	// emulator. Run in the app's folder; its exit says pass or fail. Skipped, and said in the run's log, where release-cron
 	// does not run on a Mac. None by default.
 	android?: {command!: [string, ...string]}
+	// The names of the steps a run writes into runs.jsonl's `steps`, written once here: release-cron.ts reads them from this
+	// config, and so does whatever reads runs.jsonl (pronto's tools/metrics). `beside` is the one step the rehearsal and the
+	// preview share while they overlap (preview `when: "beside"`). A name is fixed: the records on disk carry it.
+	steps: {
+		prepare:  "prepare"
+		slot:     "slot"
+		rehearse: "rehearse"
+		android:  "android"
+		preview:  "preview"
+		beside:   "rehearse+preview"
+		release:  "release"
+		confirm:  "confirm"
+	}
 	// The top-level `holder`, kept for the apps that set it: the default of rehearsal.holder.
 	holder: *"verify@local" | string
 	_holder: holder

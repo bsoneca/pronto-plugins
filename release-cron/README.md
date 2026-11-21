@@ -117,6 +117,7 @@ existed, so an app that names none of them runs as it did.
    emulator. Where release-cron does not run on a Mac the step is skipped and the log says so; the
    release goes on. `RELEASE_CRON_DRY=android` runs only this step (no rehearsal, no preview) and ends
    `dry` with its exit code, leaving `last` and the gap as they were and starting no bisect. A dry android run holds the app's lock while it runs, so a run cd starts meanwhile is skipped.
+   The step runs in an allowlisted environment (`androidEnv` in cron.js, `clearEnv`): PATH, HOME, the Android SDK, Java, gradle, mise, sayt, `STACK_*` and `PRONTO_*`, never a token or a credential (`GH_TOKEN`, the Google credentials, `CLOUDFLARE_API_TOKEN`).
 4. **release**: `./saytw release@gcp` on the same tree, which reuses the rehearsal's local-gate
    pass and skips the rc preview unless a deploy-shaped file changed.
 5. **confirm**: the new revision takes 100% of the traffic and its live record is this tree's,
@@ -185,7 +186,7 @@ An app with a `target.preview` chooses `when` (the field of `preview`, default `
   - both passed: the android step, then the release, once `git rev-parse HEAD` in the run's worktree is still the commit both started from
     (else the run fails, nothing released). `"first"` makes the same check.
 
-  The run's lock covers both, so there is still one release per app. The record has one step for the overlap, `rehearse+preview` (their wall
+  The run's lock covers both, so there is still one release per app. The record has one step for the overlap, `rehearse+preview` (`releaseCron.steps.beside`, the names of every step are declared there) (their wall
   time, so `report`'s sum counts it once), and `run.beside = {rehearse, preview, first}` (each one's seconds to its end, and which ended
   first). `release-active` names the phase `rehearse+preview`.
 

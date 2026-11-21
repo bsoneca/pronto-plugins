@@ -35,6 +35,12 @@ cases: {
 		{call: "cron.landed", args: [1, "f203025f", "f203025f", true], expect: false, why: "the release command failed: not a drop"},
 		{call: "cron.landed", args: [255, "", "f203025f", true], expect: false},
 	]}
+	"the android step runs in an allowlisted environment: PATH and the SDK's kept, every credential dropped": {suite: "cron", steps: [
+		{call: "cron.androidEnv", args: [{PATH: "/usr/bin", HOME: "/Users/x", GH_TOKEN: "t", GITHUB_TOKEN: "t", CLOUDFLARE_API_TOKEN: "c", GOOGLE_APPLICATION_CREDENTIALS: "/g.json", CLOUDSDK_CONFIG: "/c", AWS_SECRET_ACCESS_KEY: "a"}], expect: {PATH: "/usr/bin", HOME: "/Users/x"}, why: "PRONTO-870: Deno.Command inherits the parent's env unless cleared; the step gets only this"},
+		{call: "cron.androidEnv", args: [{PATH: "/p", ANDROID_HOME: "/sdk", JAVA_HOME: "/jdk", GRADLE_USER_HOME: "/g", STACK_WAIT_MINUTES: "1", PRONTO_BASE: "http://localhost:1", MISE_DATA_DIR: "/m", LANG: "C", TMPDIR: "/t"}], expect: {PATH: "/p", ANDROID_HOME: "/sdk", JAVA_HOME: "/jdk", GRADLE_USER_HOME: "/g", STACK_WAIT_MINUTES: "1", PRONTO_BASE: "http://localhost:1", MISE_DATA_DIR: "/m", LANG: "C", TMPDIR: "/t"}, why: "what integrate@android reads"},
+		{call: "cron.androidEnv", args: [{PATH: "/p", PRONTO_API_TOKEN: "x", STACK_SECRET: "y", GRADLE_SIGNING_PASSWORD: "z"}], expect: {PATH: "/p"}, why: "a secret's name is dropped under an allowed prefix"},
+		{call: "cron.androidEnv", args: [{}], expect: {}},
+	]}
 	"a 255 is rescued only when serving reads a ref written after the release finished": {suite: "cron", steps: [
 		{call: "cron.rescuable", args: [255, true], expect: true, why: "Studio's refs/released/studio"},
 		{call: "cron.rescuable", args: [255, false], expect: false, why: "PRONTO-870: a worktree HEAD moves before the release runs"},

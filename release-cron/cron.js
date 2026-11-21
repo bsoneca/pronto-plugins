@@ -273,6 +273,15 @@ export const androidRuns = (android, os) => !!android && os === "darwin";
 export const androidSkip = (android, os) => !android || androidRuns(android, os) ? null
   : `android: skipped, release-cron runs on ${os} and the emulator needs a Mac; the release goes on without the phone's scenarios`;
 
+// The environment the android step runs in: PATH, HOME and the rest of a shell's basics, plus what ./saytw integrate@android
+// demonstrably reads (the Android SDK and Java, gradle, mise, sayt, the slot pool's STACK_*, the scenarios' PRONTO_*, SLOW, SHOTS, ADB).
+// Nothing else passes, so GH_TOKEN, the Google credentials and a Cloudflare token never reach it. A name matching a secret's
+// is dropped even where its prefix is let through. Used with clearEnv: the parent's env is not inherited.
+const ANDROID_ENV = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR", "TZ", "JAVA_HOME", "SLOW", "SHOTS", "ADB", "SDKMAN_DIR", "NO_COLOR", "CI"]);
+const ANDROID_ENV_PREFIXES = ["ANDROID_", "GRADLE_", "MISE_", "SAYT_", "STACK_", "PRONTO_", "LC_", "XDG_", "DENO_"];
+export const androidEnv = (env) => Object.fromEntries(Object.entries(env).filter(([k]) =>
+  (ANDROID_ENV.has(k) || ANDROID_ENV_PREFIXES.some((p) => k.startsWith(p))) && !/TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE_KEY|_KEY$/i.test(k)));
+
 // The scenarios the step's output marks failed: scenarios.ts prints `FAIL  <name>  <seconds> s  <why>`.
 export const androidFailed = (text) => [...new Set([...(text ?? "").matchAll(/^FAIL {2}(\S+) {2}/gm)].map((m) => m[1]))];
 

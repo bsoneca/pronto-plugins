@@ -31,7 +31,7 @@
 // the first green one releases from it (README.md, "Release branches"). `abandon` gives a held release up by hand.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the open release, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
-import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy } from "./cron.js";
+import { abandoned, attempted, backported, backportWhy, heldNotice, heldWait, lastFields, migrationFiles, parseLog, patchIds, refusedTip, unmerged, branchName, heldDue, heldLine, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalEnv, noVerdictExit, noVerdictRun, besideOutcome, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidEnv } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -617,7 +617,7 @@ const say = (s: string) => { const l = `release-cron: ${Math.round((Date.now() -
 let head = "";
 let gcp: { name: string; service: string; project: string; region: string; domain?: string; rehearsal?: { job: string } } | undefined;
 type Command = { release: string[]; serving: string[]; servingAfterRelease: boolean; origin: string; preview?: { up: string[]; reach: string[]; down: string[]; origin: string; when?: "after" | "first" | "beside" } };
-let cron: { scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; flagsReleased: string[] | null; gap: number; poll: number; branches?: { enabled: boolean; abandonHours: number; abandonAttempts: number }; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
+let cron: { steps: { prepare: string; slot: string; rehearse: string; android: string; preview: string; beside: string; release: string; confirm: string }; scheduler: { kind: string }; target: ({ kind: "command" } & Command) | { kind: "cloud-run" }; rehearsal: { command: string[] | null; slot: boolean; holder: string }; android?: { command: string[] }; notify: Notify; hooks: { on: string; command: string[] }[]; flagsReleased: string[] | null; gap: number; poll: number; branches?: { enabled: boolean; abandonHours: number; abandonAttempts: number }; watch: string[]; ready: string[]; holder: string; bisect: { command: string }; probes: Record<string, { path: string; agent?: string; status: number; has: string[]; location?: string; preview?: false }> };
 let before: string | null = null;
 const steps: Record<string, number> = {};
 let mark = Date.now();
@@ -667,7 +667,7 @@ const end = (outcome: string, why = "", code = 0, red = false) => {
   try { if (JSON.parse(Deno.readTextFileSync(activePath)).pid === Deno.pid) Deno.removeSync(activePath); } catch { /* none, or not ours */ }
   Object.assign(run, { outcome, why: why || undefined, ended: local(Date.now()) });
   // Inside the steps: the rehearsal's and the release's own records of this commit, since this run began.
-  if (run.commit && ("rehearse" in steps || "rehearse+preview" in steps || "release" in steps)) {
+  if (run.commit && (cron && (cron.steps.rehearse in steps || cron.steps.beside in steps || cron.steps.release in steps))) {
     const d = detail(jsonl(`${home}/.cache/pronto/rehearsals/${app}.jsonl`), gcp ? jsonl(`${home}/.cache/pronto/releases/${gcp.name}.jsonl`) : [], run.commit, new Date(t0).toISOString());
     run.detail = d;
     if (d.rehearsal) run.rehearsal = d.rehearsal;
@@ -847,8 +847,8 @@ function stop(pgid: number, grace = 60_000) {
 }
 // Every running child that carries `tag` stopped (the loser of the rehearsal and preview's race).
 const stopTagged = (tag: string, grace?: number) => { for (const [pgid, t] of children) if (t === tag) stop(pgid, grace); };
-async function child(cmd: string, args: string[], cwd: string, env: Record<string, string>, watch: (l: string) => void = () => {}, tag = "") {
-  const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", cmd, ...args], cwd, env, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
+async function child(cmd: string, args: string[], cwd: string, env: Record<string, string>, watch: (l: string) => void = () => {}, tag = "", clearEnv = false) {
+  const p = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", cmd, ...args], cwd, env, clearEnv, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
   children.set(p.pid, tag);
   // No limit: a line every few minutes says it is still running and for how long.
   const beat = setInterval(() => say(`${cmd} ${args.join(" ")}: still running, ${Math.round((Date.now() - t0) / 60_000)} min into the run`), HEARTBEAT);
@@ -980,7 +980,7 @@ try {
   };
   before = target ? servingNow() : whole(JSON.parse(gcloud(["run", "services", "describe", gcp!.service])).status?.traffic);
   const live = target ? (sh("git", ["cat-file", "-e", `${before}^{commit}`], wt).ok ? before : undefined) : base(jsonl(`${state}/runs.jsonl`), before);
-  step("prepare");
+  step(cron.steps.prepare);
   if (live === head) {
     run.flagsReleased = await flagsReleased(`${wt}/${appRel}`, true) ?? undefined;
     end("skipped", `main ${head.slice(0, 8)} is serving as ${before}`);
@@ -1030,7 +1030,7 @@ try {
   const rehearsalRun = async () => {
     let got = !wantSlot;
     if (wantSlot) active("slot");
-    else if (own && !dry) { step("slot"); active("rehearse"); say("rehearsal.slot is false: run without waiting for a slot"); }
+    else if (own && !dry) { step(cron.steps.slot); active("rehearse"); say("rehearsal.slot is false: run without waiting for a slot"); }
     // The slot is taken once a live slot of the pool names this rehearsal as its owner.
     const pool = Deno.env.get("STACK_POOL") ?? "/tmp/pronto-stacks";
     const look = setInterval(() => {
@@ -1041,7 +1041,7 @@ try {
         const pid = (() => { try { return Deno.readTextFileSync(`${pool}/${e.name}/pid`).trim(); } catch { return ""; } })();
         // The holder alive and started by this run: not a slot a dead or stray rehearsal left.
         const ours = pid && [...children.keys()].some((g) => tree(g).pids.includes(Number(pid)));
-        if (ours && holds(owner, dir, cron.rehearsal.holder) && owner.startsWith(`${pid} `)) { got = true; step("slot"); active("rehearse"); say(`slot taken: ${e.name}`); return; }
+        if (ours && holds(owner, dir, cron.rehearsal.holder) && owner.startsWith(`${pid} `)) { got = true; step(cron.steps.slot); active("rehearse"); say(`slot taken: ${e.name}`); return; }
       }
     }, 5000);
     // STACK_PRIORITY=release puts its claim at the head of the pool's line, ahead of every claim a
@@ -1050,7 +1050,7 @@ try {
     const gate = !own || dry ? { code: 0 } : await child(rehearse![0], rehearse!.slice(1), dir, { ...rehearsalEnv(Deno.env.toObject(), live, !!target), STACK_WAIT_MINUTES: "525600", STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; }, "rehearsal");
     clearInterval(look);
     // Every check passed already for this tree: the rehearsal took no slot and waited for none.
-    if (!got && gate.code === 0) { got = true; step("slot"); active("rehearse"); }
+    if (!got && gate.code === 0) { got = true; step(cron.steps.slot); active("rehearse"); }
     return { gate, got };
   };
   // The preview's `when` (schema.cue): "after" runs below, once the rehearsal and the android step passed; "first" here, before
@@ -1061,7 +1061,7 @@ try {
   if (pv && when === "first" && !dry) {
     active("preview");
     const bad = await previewCheck(pv, dir, { stopped: false });
-    step("preview");
+    step(cron.steps.preview);
     sayPreview(bad);
     if (bad.length) end("failed", `the release preview failed: ${bad.join("; ")}: nothing released`, 1, true);
   }
@@ -1069,7 +1069,7 @@ try {
   let outcome: Awaited<ReturnType<typeof rehearsalRun>>;
   let downFailed = "";
   if (beside) {
-    active("rehearse+preview");
+    active(cron.steps.beside);
     overlap = true;
     const t = Date.now();
     const cancel = { stopped: false };
@@ -1096,7 +1096,7 @@ try {
       overlap = false;
     }
     // One step, their wall time: the two overlapped, so the sum of the steps must count it once.
-    steps["rehearse+preview"] = Math.round((Date.now() - mark) / 1000);
+    steps[cron.steps.beside] = Math.round((Date.now() - mark) / 1000);
     mark = Date.now();
     const r = race.r!, p = race.p!;
     run.beside = { rehearse: Math.round(r.at / 1000), preview: Math.round(p.at / 1000), first: p.at < r.at ? "preview" : "rehearsal" };
@@ -1115,8 +1115,8 @@ try {
   // So is a rehearsal stopped by a signal (130, or killed: 128 and above), the machine's doing, not the tree's.
   // And a rehearsal its wrapper timed out (124, timeout(1): Studio's integrate@k8s).
   const noVerdict = noVerdictExit(gate.code);
-  if (!got) { if (!beside) step("slot"); end("failed", `${noVerdict ? "the rehearsal gave no verdict: " : ""}${rehearse!.slice(1).join(" ") || rehearse![0]} ended before its slot (exit ${gate.code}): nothing released${downFailed}`, 1); }
-  if (own && !dry && !beside) step("rehearse");
+  if (!got) { if (!beside) step(cron.steps.slot); end("failed", `${noVerdict ? "the rehearsal gave no verdict: " : ""}${rehearse!.slice(1).join(" ") || rehearse![0]} ended before its slot (exit ${gate.code}): nothing released${downFailed}`, 1); }
+  if (own && !dry && !beside) step(cron.steps.rehearse);
   // Exit 3 is the rehearsal's "no verdict" (a verdict or record it could not read or write, the checkout changed): nothing
   // is released, and the bisect never takes it up (noVerdictRun), since it says nothing of a commit; no release branch is cut for it.
   if (noVerdict) end("failed", `the rehearsal gave no verdict (exit ${gate.code}): nothing released${downFailed}`, 1);
@@ -1128,11 +1128,10 @@ try {
     active("android");
     let failedNames: string[] = [];
     const cmd = cron.android!.command;
-    // The credentials the bisect's env drops are not the step's either.
-    const env = { ...Deno.env.toObject(), STACK_WAIT_MINUTES: "525600" };
-    for (const k of ["GH_TOKEN", "GITHUB_TOKEN", "CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE", "GOOGLE_GHA_CREDS_PATH"]) delete env[k];
-    const phoneRun = await child(cmd[0], cmd.slice(1), dir, env, (l) => { failedNames = [...new Set([...failedNames, ...androidFailed(l)])]; });
-    step("android");
+    // Only what cron.js's androidEnv lets through: the credentials the bisect's env drops, and a Cloudflare token, are not the step's.
+    const env = { ...androidEnv(Deno.env.toObject()), STACK_WAIT_MINUTES: "525600" };
+    const phoneRun = await child(cmd[0], cmd.slice(1), dir, env, (l) => { failedNames = [...new Set([...failedNames, ...androidFailed(l)])]; }, "", true);
+    step(cron.steps.android);
     if (dry) end("dry", phoneRun.code === 0 ? "the android step passed" : androidWhy(phoneRun.code, failedNames), phoneRun.code === 0 ? 0 : 1);
     if (phoneRun.code !== 0) end("failed", androidWhy(phoneRun.code, failedNames), 1, true);
   } else {
@@ -1148,7 +1147,7 @@ try {
   if (pv && when === "after") {
     active("preview");
     const bad = await previewCheck(pv, dir, { stopped: false });
-    step("preview");
+    step(cron.steps.preview);
     sayPreview(bad);
     if (bad.length) end("failed", `the release preview failed: ${bad.join("; ")}: nothing released`, 1, true);
   }
@@ -1163,7 +1162,7 @@ try {
   // 3. The release, on the tree the rehearsal passed.
   active("release");
   const rel = await child(target ? target.release[0] : "./saytw", target ? target.release.slice(1) : ["release@gcp"], dir, { ...Deno.env.toObject(), STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
-  step("release");
+  step(cron.steps.release);
   // A scenario that flaked and passed only on a rerun (the rehearsal's, or the cloud tests' in release@gcp) is told to the PR that added or last changed it, once per scenario
   // (its own ledger, apart from the new-feature one): the rerun is never a fix.
   if (flaked.length) {
@@ -1263,7 +1262,7 @@ try {
     if (Date.now() - said >= HEARTBEAT) { said = Date.now(); say(`confirm: still waiting on production: ${wrong.join("; ")}`); }
     await new Promise((r) => setTimeout(r, 15_000));
   }
-  step("confirm");
+  step(cron.steps.confirm);
   if (wrong.length) end("failed", `released, production not confirmed: ${wrong.join("; ")}`, 1);
   // The held release, if this run was it, is released: closed with the commit it released.
   if (open) {
