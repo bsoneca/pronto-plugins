@@ -1637,8 +1637,13 @@ export const listMembers = (sys: Sys, record: RunRecord): Plan => planReap(sys.t
 // must not reach a log or the ledger.
 export const exeName = (comm: string): string => comm.trim().split("/").pop() ?? "";
 // The label a run carries when none is given: the command's executable alone, never an argument (a token or signed URL in
-// one would reach the ledger and the logs).
-export const defaultWhat = (argv: string[]): string => exeName(argv[0] ?? "") || "command";
+// one would reach the ledger and the logs). sayt's target is kept (`saytw integrate@local`): a fixed verb, never data,
+// which the machine's lanes read (pronto's tools/machine laneOf: a gate is `integrate@local`).
+const SAYT_TARGET = /^[a-z][a-z0-9-]*(@[a-z0-9-]+)?$/;
+export const defaultWhat = (argv: string[]): string => {
+  const exe = exeName(argv[0] ?? "") || "command";
+  return /^saytw?$/.test(exe) && SAYT_TARGET.test(argv[1] ?? "") ? `${exe} ${argv[1]}` : exe;
+};
 // Whether the explicit `own` verb is refused: only macOS owns a run's descendants; ownRun on Linux is a plain child.
 export const ownRefusal = (os: string): string | undefined =>
   os === "darwin" ? undefined : "slot: own needs macOS; on Linux a run's descendants are not owned";

@@ -458,7 +458,7 @@ export async function ownLabel() {
   const argv = ["/usr/bin/curl", "-H", `Authorization: ${secret}`, `https://x.example/?sig=${secret}`];
   const what = slot.defaultWhat(argv);
   const record = slot.ticketText({ weight: 1, nested: false, release: false, what });
-  return { what, record, clean: !what.includes(secret) && !record.includes(secret), empty: slot.defaultWhat([]), linux: slot.ownRefusal("linux"), mac: slot.ownRefusal("darwin") ?? "ok" };
+  return { what, record, clean: !what.includes(secret) && !record.includes(secret), empty: slot.defaultWhat([]), gate: slot.defaultWhat(["./saytw", "integrate@local"]), gateArg: slot.defaultWhat(["./saytw", `--token=${secret}`]), linux: slot.ownRefusal("linux"), mac: slot.ownRefusal("darwin") ?? "ok" };
 }
 // An owner whose stop never returns still ends its run in the kill, within the grace: here a timeout starts the stop, the
 // grace is 700 ms, and the command (a real sleep that nobody has told TERM) is killed. A hang is bounded by 25 s and reported.
