@@ -4,7 +4,7 @@
 // and a bug at P1 jumps it.
 //   board.ts status <repo> [--json]                     the slots busy, what is stuck, each lane's Ready queue with ages, what starves, merges by day (from each issue's completed_at; today's from its history), the open issues by state
 //   board.ts start <repo> <KEY>                         Implementing, if its lane (engineer, SRE or architect) has a slot (a P0 always)
-//   board.ts pull <repo> [--lane engineer|SRE|architect]          start the lane's first issue in the Ready queue
+//   board.ts pull <repo> [--lane engineer|SRE|architect|feature]  start the lane's first issue in the Ready queue (feature: an engineer's feature issue alone; the engineer lane's reserved slots take only those)
 //   board.ts move <repo> <KEY> <State> [--why <text>]   Refine, Ready, Backlog or Cancelled, by the repository's name for the state or its role (the others are the hooks')
 //   board.ts file <repo> --title <t> --app <app> [--bug] [--priority P0..P3] [--flag <f>] [--body <text>]
 //   board.ts wait <repo> <KEY> --pr <url>               the issue's fix merged under another issue's pull request: a flip issue in Implementing waits for the release holding it (PRONTO-666); any other moves as that merge would have moved it (Merged, or Done for infra, design and plugins), and the release or flip hook finishes it (PRONTO-1050). Neither holds a slot.

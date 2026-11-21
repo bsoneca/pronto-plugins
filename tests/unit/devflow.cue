@@ -64,6 +64,18 @@ cases: {
 		{call: "devflow.mayStart", args: [1, 1, "medium", "architect"], expect: {ok: false, why: "all 1 architect slots are busy"}},
 		{call: "devflow.mayStart", args: [9, 2, "urgent", "engineer"]}, {pick: ["ok"], expect: [true]},
 	]}
+	"a slot reserved for features takes only a feature; the others take any issue": {suite: "devflow", steps: [
+		{call: "devflow.mayStart", args: [5, 9, "high", "engineer", "urgent", {reserved: 3, featureBusy: 0, feature: false}], expect: {ok: true, why: "engineer slot 6 of 9"}},
+		{call: "devflow.mayStart", args: [6, 9, "high", "engineer", "urgent", {reserved: 3, featureBusy: 0, feature: false}], expect: {ok: false, reserved: true, why: "the 6 engineer slots open to any issue are busy; 3 are kept for feature issues"}},
+		{call: "devflow.mayStart", args: [6, 9, "high", "engineer", "urgent", {reserved: 3, featureBusy: 0, feature: true}], expect: {ok: true, why: "engineer slot 7 of 9"}, why: "a feature takes a reserved slot"},
+		{call: "devflow.mayStart", args: [8, 9, "high", "engineer", "urgent", {reserved: 3, featureBusy: 3, feature: false}], expect: {ok: true, why: "engineer slot 9 of 9"}, why: "features in three slots: the other six are all that is left, and one is free"},
+		{call: "devflow.mayStart", args: [9, 9, "high", "engineer", "urgent", {reserved: 3, featureBusy: 3, feature: true}], expect: {ok: false, why: "all 9 engineer slots are busy"}},
+		{call: "devflow.mayStart", args: [9, 9, "urgent", "engineer", "urgent", {reserved: 3, featureBusy: 0, feature: false}]}, {pick: ["ok"], expect: [true], why: "a P0 starts past the slots"},
+		{call: "devflow.mayStart", args: [1, 2, "high", "engineer", "urgent", {reserved: 5, featureBusy: 0, feature: false}], expect: {ok: false, reserved: true, why: "the 0 engineer slots open to any issue are busy; 2 are kept for feature issues"}, why: "reserving more than the slots reserves them all"},
+		{call: "devflow.featureOf", args: [["l-feature", "l-x"], "l-feature"], expect: true},
+		{call: "devflow.featureOf", args: [["l-x"], "l-feature"], expect: false},
+		{call: "devflow.featureOf", args: [["l-feature"], null], expect: false, why: "a board with no feature label has no features"},
+	]}
 	"a lane pulls a P0 bug, then a P1 bug, then the issue that became Ready first": {suite: "devflow", steps: [
 		{call: "devflow.pullOrder", args: [[
 			{key: "K-3", sequence: 3, jump: false, readyAt: "2026-11-12T10:00:00Z"},
