@@ -598,7 +598,7 @@ cases: "a holder's unreadable pid file is an error, only a missing one is nobody
 	suite: "machine"
 	steps: [
 		{call: "machine.holderRead"},
-		{get: "held", expect: "0,error,4242", why: "missing is 0, unreadable fails loudly, a pid is read"},
+		{get: "held", expect: "0,error,4242,error", why: "missing is 0, unreadable or not a pid fails loudly, a pid is read"},
 	]
 }
 cases: "the pool's lock is retried only while another chooser holds it": {

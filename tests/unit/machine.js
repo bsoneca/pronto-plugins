@@ -514,8 +514,8 @@ async function inPool(pool, body, ms) {
 export async function holderRead() {
   const tmp = await sh("mktemp -d");
   try {
-    await sh(`mkdir -p '${tmp}/pool/slot-1' '${tmp}/pool/slot-2/pid' '${tmp}/pool/slot-3'; echo 4242 > '${tmp}/pool/slot-3/pid'`);
-    const body = `const r = []; for (const n of ["slot-1", "slot-2", "slot-3"]) r.push(await s.holder(n).then(String, () => "error")); console.log(r.join(","))`;
+    await sh(`mkdir -p '${tmp}/pool/slot-1' '${tmp}/pool/slot-2/pid' '${tmp}/pool/slot-3' '${tmp}/pool/slot-4'; echo 4242 > '${tmp}/pool/slot-3/pid'; echo abc > '${tmp}/pool/slot-4/pid'`);
+    const body = `const r = []; for (const n of ["slot-1", "slot-2", "slot-3", "slot-4"]) r.push(await s.holder(n).then(String, () => "error")); console.log(r.join(","))`;
     return { held: await inPool(`${tmp}/pool`, body, 20_000) };
   } finally { await sh(`rm -rf '${tmp}'`); }
 }

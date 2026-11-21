@@ -874,7 +874,7 @@ async function reapDeadClaims(): Promise<void> {
     for await (const e of Deno.readDir(pool)) {
       const m = e.name.match(/^(slot|job)-([0-9]+)$/);
       if (!m) continue;
-      const pid = await holder(e.name);
+      const pid = await holder(e.name).catch(() => 0);
       if (pid > 0 && !await alive(pid)) began = Math.min(began, (await Deno.stat(`${pool}/${e.name}/pid`).catch(() => null))?.mtime?.getTime() ?? Infinity);
     }
   } catch { /* no pool yet */ }
@@ -1007,7 +1007,9 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       for await (const e of Deno.readDir(pool)) {
         const m = e.name.match(/^(slot|job)-([0-9]+)$/);
         if (!m) continue;
-        const pid = await holder(e.name);
+        // A pid file that cannot be read says nothing of its holder: nothing is admitted on it, never reclaimed, and the claim fails only past its deadline.
+        let pid: number;
+        try { pid = await holder(e.name); } catch (err) { return waiting((err as Error).message); }
         if (await alive(pid)) {
           const w = await weighs(e.name, pid);
           // A holder alive whose child has been dead for a minute holds nothing: noted when first seen dead.
@@ -1118,7 +1120,9 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       }
       const busy: string[] = [];
       for (const n of asked ? [asked] : Array.from({ length: 160 }, (_, i) => i + 1)) {
-        if (await alive(await holder(`slot-${n}`))) { busy.push(`${n} held by ${await holder(`slot-${n}`)}`); continue; }
+        let held: number;
+        try { held = await holder(`slot-${n}`); } catch (err) { busy.push(`${n}: ${(err as Error).message}`); continue; }
+        if (await alive(held)) { busy.push(`${n} held by ${held}`); continue; }
         const { door, ports, moved, text } = layout(compose, n);
         // Every port of the slot's range, not only the ones this app's stack derives: a stack another
         // app left behind (a live postgres on its database port, its door long gone) blocks whatever
@@ -2340,7 +2344,8 @@ if (import.meta.main) {
       if (f) console.log(`release hold from ${Deno.env.get("STACK_HOLD_POOL")}: pid ${f.pid} ${f.what}`);
     }
     for (const name of names.sort((a, b) => Number(a.split("-")[1]) - Number(b.split("-")[1]))) {
-      const pid = await holder(name);
+      let pid: number;
+      try { pid = await holder(name); } catch (err) { console.log(`${name}: ${(err as Error).message}`); continue; }
       if (!await alive(pid)) continue;
       const owner = (await Deno.readTextFile(`${pool}/${name}/owner`).catch(() => "")).trim();
       const deadline = Number(await Deno.readTextFile(`${pool}/${name}/deadline`).catch(() => "0"));
