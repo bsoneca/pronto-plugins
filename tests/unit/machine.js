@@ -445,9 +445,8 @@ export async function ownNames() {
   const c = new Deno.Command("sh", { args: ["-c", "exec sleep 20", secret], stdout: "null", stderr: "null" }).spawn();
   try {
     await new Promise((r) => setTimeout(r, 300));
-    // ownSys needs ffi, which the suite's own process is not given: the read runs in one that is.
-    const o = await new Deno.Command(Deno.execPath(), { args: ["eval", "-A", "--no-config", "--no-lock", `const s = await import(${JSON.stringify(slotUrl)}); console.log(s.ownSys().command(${c.pid})); Deno.exit(0);`], stdout: "piped", stderr: "null" }).output();
-    const real = decode(o.stdout).trim();
+    // The read ownSys().command makes (slot.exeOf), which needs no ffi.
+    const real = slot.exeOf(c.pid);
     return { text, noArgs: !text.includes(secret), real, realNoSecret: !real.includes(secret) && !/\s/.test(real), exe: slot.exeName("/opt/x/bin/tool") };
   } finally { try { c.kill("SIGKILL"); } catch { /* gone */ } await c.status; }
 }

@@ -1729,6 +1729,13 @@ export type Root = {
 // deno-lint-ignore no-explicit-any
 type Fn = (...a: any[]) => any;
 let realSys: RealSys | undefined;
+// A live process's executable, as `ps -o comm=` names it (its basename, exeName), never its arguments; "" when it is gone.
+export function exeOf(pid: number): string {
+  try {
+    const o = new Deno.Command("ps", { args: ["-o", "comm=", "-p", String(pid)], stdout: "piped", stderr: "null" }).outputSync();
+    return exeName(new TextDecoder().decode(o.stdout));
+  } catch { return ""; }
+}
 export function ownSys(): RealSys {
   if (realSys) return realSys;
   const os = Deno.build.os;
@@ -1858,12 +1865,7 @@ export function ownSys(): RealSys {
     }
     try { Deno.kill(pid, sig); return "sent"; } catch (e) { return e instanceof Deno.errors.NotFound ? "gone" : e instanceof Error ? e.message : String(e); }
   };
-  const command = (pid: number): string => {
-    try {
-      const o = new Deno.Command("ps", { args: ["-o", "comm=", "-p", String(pid)], stdout: "piped", stderr: "null" }).outputSync();
-      return exeName(new TextDecoder().decode(o.stdout));
-    } catch { return ""; }
-  };
+  const command = exeOf;
   const spawn: RealSys["spawn"] = (cmd, env, cwd, opts = {}) => {
     const path = find(cmd[0], env.PATH ?? "");
     const attr = new Uint8Array(512), fa = new Uint8Array(512), sigs = new Uint8Array(128), none = new Uint8Array(128), out = new Int32Array(1);
