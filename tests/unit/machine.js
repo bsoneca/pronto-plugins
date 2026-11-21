@@ -489,6 +489,21 @@ Deno.exit(0);`;
   } catch { return { ended: false, code: -1, withinGrace: false }; }
   finally { await sh(`rm -rf '${tmp}'`); }
 }
+// Two owned runs begun at once in one process (a rehearsal's two lanes) each keep a ledger entry of their own: both end 0 and
+// neither fails removing the other's pending file (PRONTO-1199).
+export async function ownConcurrent() {
+  const tmp = await sh("mktemp -d");
+  const code = `const s = await import(${JSON.stringify(slotUrl)});
+const r = await Promise.allSettled([s.ownRun(["sleep", "1"], { what: "a" }), s.ownRun(["sleep", "1"], { what: "b" })]);
+console.log(JSON.stringify(r.map((x) => x.status === "fulfilled" ? x.value.code : String(x.reason))));
+Deno.exit(0);`;
+  const c = new Deno.Command(Deno.execPath(), { args: ["eval", "--no-config", "--no-lock", code], env: { STACK_POOL: `${tmp}/pool` }, stdout: "piped", stderr: "null", signal: AbortSignal.timeout(25_000) });
+  try {
+    const o = await c.output();
+    return { codes: JSON.parse(decode(o.stdout).trim().split("\n").pop()).join(",") };
+  } catch { return { codes: "no result" }; }
+  finally { await sh(`rm -rf '${tmp}'`); }
+}
 // The ledger is read only from a runs folder that is ours and only from regular files that are ours, never through a link
 // and never opening a FIFO (which would block): a valid entry, a symlink to it, a FIFO, and a folder asked for as another uid's.
 export async function ownLedger() {

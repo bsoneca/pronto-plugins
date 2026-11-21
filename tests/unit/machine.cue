@@ -587,3 +587,10 @@ cases: "the keeper keeps polling while its supervisor is alive, however long, an
 		{get: "unreadable", expect: "keep", why: "a read that failed says nothing"},
 	]
 }
+cases: "two owned runs begun at once in one process keep ledger entries of their own": {
+	suite: "machine"
+	steps: [
+		{call: "machine.ownConcurrent"},
+		{get: "codes", expect: "0,0", why: "neither run fails removing the other's pending file (PRONTO-1199)"},
+	]
+}
