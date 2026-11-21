@@ -192,6 +192,9 @@ cases: "a heredoc's body is a file for COPY, ADD and a script, an argument for a
 		{call: "harness.sizes", args: ["RUN cat <<-'X' > /f\n\tbody\n\tX\nCMD c"], expect: [[1, "RUN", 22], [4, "CMD", 1]], why: "command, newline, body (tabs stripped by <<-) and the word; a quoted word is the word"},
 		{call: "harness.sizes", args: ["CMD cat <<EOF\nbody\nEOF"], expect: [[1, "CMD", 9]], why: "only a RUN's heredoc is passed"},
 		{call: "harness.ofHeredoc", args: [70000], expect: [70000], why: "a RUN heredoc body over the ceiling is counted"},
+		{call: "harness.sizes", args: ["RUN cat <<EOF > /out\n#!/bin/sh\nbody\nEOF\nCMD c"], expect: [[1, "RUN", 35], [5, "CMD", 1]], why: "an inline command is one argument, so a body that starts with #! still counts"},
+		{call: "harness.sizes", args: ["RUN cat <<A > /a && cat <<B > /b\naa\nA\nbbbb\nB\nCMD c"], expect: [[1, "RUN", 40], [6, "CMD", 1]], why: "two heredocs of one command count together: the command, both bodies and both words"},
+		{call: "harness.sizes", args: ["RUN <<EOF\n#!/bin/sh\n#!/bin/sh\nEOF"], expect: [[1, "RUN", 5]], why: "a standalone script heredoc with a shebang stays exempt"},
 	]
 }
 cases: "a << that opens no heredoc, or one never closed, swallows nothing": {

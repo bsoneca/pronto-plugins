@@ -440,7 +440,7 @@ const skippable = (l: string) => /^\s*(#.*)?$/.test(l);
 // The largest argument of every RUN, CMD, ENTRYPOINT and HEALTHCHECK CMD of a Dockerfile's text, as
 // BuildKit reads it: the `# escape=` directive (default `\`) joins a line to the next, comment lines
 // inside a joined instruction are dropped, a shell form is one string, an exec form (a JSON array) is
-// as large as its largest element, a heredoc (`<<EOF`) of COPY or ADD is a file, not an argument, and so is a RUN's whose body starts with `#!`
+// as large as its largest element, a heredoc (`<<EOF`) of COPY or ADD is a file, not an argument, and so is a standalone `RUN <<WORD` whose body starts with `#!`
 // (BuildKit runs it as a script); any other RUN heredoc goes to `sh -c`, so its command and body count.
 export function argSizes(dockerfile: string, file = "Dockerfile"): ArgSize[] {
   const lines = dockerfile.split(/\r?\n/);
@@ -491,9 +491,11 @@ export function argSizes(dockerfile: string, file = "Dockerfile"): ArgSize[] {
     let bytes = byteLength(rest);
     if (instruction === "RUN") {
       const alone = /^<<-?\s*(?:"[^"]+"|'[^']+'|[A-Za-z_]\w*)$/.test(rest);
-      for (const h of heredocs) {
-        if (h.body.startsWith("#!")) continue;
-        bytes = Math.max(bytes, alone ? byteLength(h.body) : byteLength(rest + "\n" + h.body + h.word));
+      if (heredocs.length) {
+        // A standalone `RUN <<EOF` is a script file when its body starts with `#!`, else the body is the command; an inline
+        // shell command (`RUN cat <<EOF > /f`) is one argument: the command with every body and word, whatever a body starts with.
+        if (alone) { if (!heredocs[0].body.startsWith("#!")) bytes = Math.max(bytes, byteLength(heredocs[0].body)); }
+        else bytes = Math.max(bytes, byteLength(rest + "\n" + heredocs.map((h) => h.body + h.word).join("\n")));
       }
     }
     if (rest.startsWith("[")) {

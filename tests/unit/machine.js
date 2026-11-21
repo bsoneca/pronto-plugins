@@ -436,3 +436,74 @@ export async function ownPlain() {
     return { ...out, ok: out.code === 3 && out.stdout === "in\n" && out.stderr };
   } finally { await sh(`rm -rf '${tmp}'`); }
 }
+// What a leftover is called in the job log and the run ledger: the executable's name, the pid and the age, never an argument
+// (PRONTO-684 review): a token or a signed URL in a command line must not leak. Pure, and on a real process that has one.
+export async function ownNames() {
+  const slot = await import("../../harness/files/tests/slot.ts");
+  const secret = "tok-SECRET-0123456789";
+  const text = slot.memberName(42, 61_000, "/usr/bin/curl");
+  const c = new Deno.Command("sh", { args: ["-c", "exec sleep 20", secret], stdout: "null", stderr: "null" }).spawn();
+  try {
+    await new Promise((r) => setTimeout(r, 300));
+    // The read ownSys().command makes (slot.exeOf), which needs no ffi.
+    const real = slot.exeOf(c.pid);
+    return { text, noArgs: !text.includes(secret), real, realNoSecret: !real.includes(secret) && !/\s/.test(real), exe: slot.exeName("/opt/x/bin/tool") };
+  } finally { try { c.kill("SIGKILL"); } catch { /* gone */ } await c.status; }
+}
+// An owner whose stop never returns still ends its run in the kill, within the grace: here a timeout starts the stop, the
+// grace is 700 ms, and the command (a real sleep that nobody has told TERM) is killed. A hang is bounded by 25 s and reported.
+export async function ownStopHangs() {
+  const tmp = await sh("mktemp -d");
+  const code = `const s = await import(${JSON.stringify(slotUrl)});
+const t = Date.now();
+const r = await s.ownRun(["sleep", "20"], { what: "hang", grace: 700, timeoutMs: 200, termMs: 300, stop: () => new Promise(() => {}) });
+console.log(JSON.stringify({ code: r.code, ms: Date.now() - t }));
+Deno.exit(0);`;
+  const c = new Deno.Command(Deno.execPath(), { args: ["eval", "--no-config", "--no-lock", code], env: { STACK_POOL: `${tmp}/pool` }, stdout: "piped", stderr: "null", signal: AbortSignal.timeout(25_000) });
+  try {
+    const o = await c.output();
+    const r = JSON.parse(decode(o.stdout).trim().split("\n").pop());
+    return { ended: true, code: r.code, withinGrace: r.ms < 6000 };
+  } catch { return { ended: false, code: -1, withinGrace: false }; }
+  finally { await sh(`rm -rf '${tmp}'`); }
+}
+// The ledger is read only from a runs folder that is ours and only from regular files that are ours, never through a link
+// and never opening a FIFO (which would block): a valid entry, a symlink to it, a FIFO, and a folder asked for as another uid's.
+export async function ownLedger() {
+  const slot = await import("../../harness/files/tests/slot.ts");
+  const tmp = await sh("mktemp -d");
+  try {
+    const dir = `${tmp}/runs`;
+    await sh(`mkdir -m 755 '${dir}'; mkfifo '${dir}/12-22'; ln -s '${dir}/10-20' '${dir}/11-21'`);
+    await Deno.writeTextFile(`${dir}/10-20`, JSON.stringify({ rootpid: 10, rootstart: 20, superpid: 5, superstart: 6, uid: 1, what: "t", state: "running" }));
+    // A symlink entry that points at a valid ledger file of its own: only the file itself is read.
+    // Read in a process of its own, bounded: a ledger that opened the FIFO would block it for good.
+    await sh(`mkdir -m 777 '${tmp}/open'; chmod 777 '${tmp}/open'; cp '${dir}/10-20' '${tmp}/open/10-20'`);
+    const read = async (uid, d = dir) => {
+      const code = `const s = await import(${JSON.stringify(slotUrl)}); console.log(JSON.stringify(s.readRecords(${JSON.stringify(d)}, ${uid}).map((r) => r.rootpid))); Deno.exit(0);`;
+      try { return JSON.parse(decode((await new Deno.Command(Deno.execPath(), { args: ["eval", "--no-config", "--no-lock", code], stdout: "piped", stderr: "null", signal: AbortSignal.timeout(10_000) }).output()).stdout).trim()); } catch { return "blocked"; }
+    };
+    const mine = Deno.lstatSync(dir).uid;
+    const st = (o) => ({ isFile: false, isSymlink: false, uid: 7, ...o });
+    return {
+      entries: await read(mine),
+      otherUidDir: await read(mine + 1),
+      openDir: await read(mine, `${tmp}/open`),
+      fileOurs: slot.ledgerUsable(st({ isFile: true }), 7),
+      fileOther: slot.ledgerUsable(st({ isFile: true }), 8),
+      link: slot.ledgerUsable(st({ isFile: true, isSymlink: true }), 7),
+      fifo: slot.ledgerUsable(st({}), 7),
+    };
+  } finally { await sh(`rm -rf '${tmp}'`); }
+}
+// What the keeper does on reading its supervisor: it has no deadline, so a supervisor alive after any time is kept.
+export async function keeperDecides() {
+  const { keeperDecision } = await import("../../harness/files/tests/slot.ts");
+  return {
+    alive: keeperDecision({ start: 900 }, 900),
+    gone: keeperDecision({ errno: 3 }, 900),
+    reused: keeperDecision({ start: 901 }, 900),
+    zombie: keeperDecision({ start: 900, zombie: true }, 900),
+    unreadable: keeperDecision({ errno: 1 }, 900),
+  };
+}
