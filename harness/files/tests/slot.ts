@@ -401,7 +401,19 @@ const releaseReal = async (pid: number, written: number) => {
   })());
   return await started.get(key)!;
 };
-const holder = async (name: string) => Number(await Deno.readTextFile(`${pool}/${name}/pid`).catch(() => "0"));
+// A holder's pid: 0 only when its pid file is not there (nobody holds it, or it is not written yet). A file that is there but cannot
+// be read says nothing of whether its holder lives, so it fails loudly, never as a dead holder whose claim is reclaimed.
+export const holder = async (name: string) => {
+  const file = `${pool}/${name}/pid`;
+  let text: string;
+  try { text = await Deno.readTextFile(file); } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return 0;
+    throw new Error(`slot: ${file} cannot be read (${(e as Error).message}): its holder is not known to be gone`);
+  }
+  const pid = Number(text);
+  if (!Number.isInteger(pid) || pid < 0) throw new Error(`slot: ${file} holds ${JSON.stringify(text.slice(0, 40))}, not a pid`);
+  return pid;
+};
 // The weights a holder declares: a launch (idle between the clicks of whoever plays it: 0.32 core on
 // average, 0.53 at p90), a stack, a rehearsal, and each lane a rehearsal adds to its own
 // (tests/rehearse.ts), a scenarios pass's or Premium's.
@@ -758,10 +770,13 @@ const listening = async (door: number, open: number[]) => {
 
 // The pool's own lock, held only while a slot is chosen; one older than a minute is a crashed
 // chooser's.
-const choosing = async <T>(f: () => Promise<T>): Promise<T> => {
+// Only another chooser holding it is waited for; a lock that cannot be made (a full or read-only disk, a missing pool) fails loudly.
+export const choosing = async <T>(f: () => Promise<T>): Promise<T> => {
   const lock = `${pool}/.choosing`;
   for (;;) {
-    try { Deno.mkdirSync(lock); break; } catch { /* held */ }
+    try { Deno.mkdirSync(lock); break; } catch (e) {
+      if (!(e instanceof Deno.errors.AlreadyExists)) throw new Error(`slot: the pool's lock ${lock} cannot be made (${(e as Error).message})`);
+    }
     const age = Date.now() - ((await Deno.stat(lock).catch(() => undefined))?.mtime?.getTime() ?? Date.now());
     if (age > 60_000) await Deno.remove(lock, { recursive: true }).catch(() => {});
     await new Promise((r) => setTimeout(r, 200));
@@ -859,7 +874,7 @@ async function reapDeadClaims(): Promise<void> {
     for await (const e of Deno.readDir(pool)) {
       const m = e.name.match(/^(slot|job)-([0-9]+)$/);
       if (!m) continue;
-      const pid = await holder(e.name);
+      const pid = await holder(e.name).catch(() => 0);
       if (pid > 0 && !await alive(pid)) began = Math.min(began, (await Deno.stat(`${pool}/${e.name}/pid`).catch(() => null))?.mtime?.getTime() ?? Infinity);
     }
   } catch { /* no pool yet */ }
@@ -992,7 +1007,9 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       for await (const e of Deno.readDir(pool)) {
         const m = e.name.match(/^(slot|job)-([0-9]+)$/);
         if (!m) continue;
-        const pid = await holder(e.name);
+        // A pid file that cannot be read says nothing of its holder: nothing is admitted on it, never reclaimed, and the claim fails only past its deadline.
+        let pid: number;
+        try { pid = await holder(e.name); } catch (err) { return waiting((err as Error).message); }
         if (await alive(pid)) {
           const w = await weighs(e.name, pid);
           // A holder alive whose child has been dead for a minute holds nothing: noted when first seen dead.
@@ -1103,7 +1120,9 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       }
       const busy: string[] = [];
       for (const n of asked ? [asked] : Array.from({ length: 160 }, (_, i) => i + 1)) {
-        if (await alive(await holder(`slot-${n}`))) { busy.push(`${n} held by ${await holder(`slot-${n}`)}`); continue; }
+        let held: number;
+        try { held = await holder(`slot-${n}`); } catch (err) { busy.push(`${n}: ${(err as Error).message}`); continue; }
+        if (await alive(held)) { busy.push(`${n} held by ${held}`); continue; }
         const { door, ports, moved, text } = layout(compose, n);
         // Every port of the slot's range, not only the ones this app's stack derives: a stack another
         // app left behind (a live postgres on its database port, its door long gone) blocks whatever
@@ -2325,7 +2344,8 @@ if (import.meta.main) {
       if (f) console.log(`release hold from ${Deno.env.get("STACK_HOLD_POOL")}: pid ${f.pid} ${f.what}`);
     }
     for (const name of names.sort((a, b) => Number(a.split("-")[1]) - Number(b.split("-")[1]))) {
-      const pid = await holder(name);
+      let pid: number;
+      try { pid = await holder(name); } catch (err) { console.log(`${name}: ${(err as Error).message}`); continue; }
       if (!await alive(pid)) continue;
       const owner = (await Deno.readTextFile(`${pool}/${name}/owner`).catch(() => "")).trim();
       const deadline = Number(await Deno.readTextFile(`${pool}/${name}/deadline`).catch(() => "0"));

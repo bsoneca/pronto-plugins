@@ -504,6 +504,31 @@ Deno.exit(0);`;
   } catch { return { codes: "no result" }; }
   finally { await sh(`rm -rf '${tmp}'`); }
 }
+// Runs `body` (module `s` imported, STACK_POOL set to `pool`) in a process of its own, capped at `ms`, and gives its last stdout line.
+async function inPool(pool, body, ms) {
+  const code = `const s = await import(${JSON.stringify(slotUrl)}); ${body}; Deno.exit(0);`;
+  const c = new Deno.Command(Deno.execPath(), { args: ["eval", "--no-config", "--no-lock", code], env: { STACK_POOL: pool }, stdout: "piped", stderr: "null", signal: AbortSignal.timeout(ms) });
+  try { return decode((await c.output()).stdout).trim().split("\n").pop(); } catch { return "hung"; }
+}
+// A holder whose pid file is gone is 0; one whose file is there but cannot be read is an error, never a dead holder (PRONTO-1199, Codex P1).
+export async function holderRead() {
+  const tmp = await sh("mktemp -d");
+  try {
+    await sh(`mkdir -p '${tmp}/pool/slot-1' '${tmp}/pool/slot-2/pid' '${tmp}/pool/slot-3' '${tmp}/pool/slot-4'; echo 4242 > '${tmp}/pool/slot-3/pid'; echo abc > '${tmp}/pool/slot-4/pid'`);
+    const body = `const r = []; for (const n of ["slot-1", "slot-2", "slot-3", "slot-4"]) r.push(await s.holder(n).then(String, () => "error")); console.log(r.join(","))`;
+    return { held: await inPool(`${tmp}/pool`, body, 20_000) };
+  } finally { await sh(`rm -rf '${tmp}'`); }
+}
+// The pool's lock is waited for only while another chooser holds it: one that cannot be made at all (the pool is not a folder) fails at once
+// instead of retrying for ever (PRONTO-1199, Codex P1); a free lock runs its function.
+export async function choosingLock() {
+  const tmp = await sh("mktemp -d");
+  try {
+    await sh(`touch '${tmp}/notadir'; mkdir '${tmp}/pool'`);
+    const body = `console.log(await s.choosing(async () => "ran").catch(() => "error"))`;
+    return { broken: await inPool(`${tmp}/notadir`, body, 15_000), free: await inPool(`${tmp}/pool`, body, 15_000) };
+  } finally { await sh(`rm -rf '${tmp}'`); }
+}
 // The ledger is read only from a runs folder that is ours and only from regular files that are ours, never through a link
 // and never opening a FIFO (which would block): a valid entry, a symlink to it, a FIFO, and a folder asked for as another uid's.
 export async function ownLedger() {
