@@ -736,10 +736,17 @@ export const limitPlan = (dry) => dry ? ["report-abandon"] : ["close-hold", "dro
 // on the branch and not on main (a tip the branch has moved past). With a release attempt: a serving commit that is the tip or on
 // the branch is the record's tip; unread, the attempt's commit is, said as assumed; any other serving commit says nothing shipped.
 export const shippedRecord = (open, released, ev) => {
-  if (!open || released || !ev.released) return null;
-  if (ev.serving) return ev.serving === ev.tip || ev.onBranch ? { branch: open.branch, tip: ev.serving, why: "what serves is on it: it shipped, only its confirmation did not" } : null;
+  if (!open || released) return null;
+  // A positive read needs no attempt: a release that landed while its run was stopped or crashed left no release step behind.
+  if (ev.serving) return ev.serving === ev.tip || ev.serving === ev.released || ev.onBranch ? { branch: open.branch, tip: ev.serving, why: "what serves is on it: it shipped, only its confirmation did not" } : null;
+  if (!ev.released) return null;
   return { branch: open.branch, tip: ev.released, why: "what serves could not be read and a run released it: assumed shipped" };
 };
+
+// The commit a run of `branch` released (the newest), from runs.jsonl rows: one that reached the release step (`releaseStep`) and
+// names a commit, on that branch. A run that cut the branch from main, one on another branch, a stopped one or one with no commit is not.
+export const releaseAttempt = (runs, branch, releaseStep) =>
+  runs.filter((r) => r.branch === branch && r.commit && !r.cut && r.outcome !== "stopped" && releaseStep in (r.steps ?? {})).at(-1)?.commit ?? null;
 
 // A new hold is cut only while no released branch's record waits for its commits on main: the record is one file, and cutting
 // would leave a shipped hold nothing to be recorded in.
