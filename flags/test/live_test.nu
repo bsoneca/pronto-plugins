@@ -496,6 +496,14 @@ full-spec false "light"
 "flags: lone: {default: false, local: true, accounts: [\"u9\"]}\n" | save -a $"($app)/flags_spec.cue"
 let acc_only = (livex [push $app --flip lone --untested "accounts only"] {PRONTO_DEVFLOW_BIN: $told2})
 check ($acc_only.exit_code == 0 and (((newest 0).data | from json).flags.lone.targeting.if.2.in.1 == ["u9"]) and not ($board2 | path exists)) "an accounts-only flip is written, and tells the board nothing"
+# A flag dropped in a push that flips another is no `rolledback` to the board.
+full-spec false "light"
+"flags: yon: {default: true, local: true}\n" | save -a $"($app)/flags_spec.cue"
+livex [push $app --flip yon --untested "yon on"] | ignore
+full-spec false "light"
+"flags: lone: {default: false, local: true, accounts: [\"u8\"]}\n" | save -a $"($app)/flags_spec.cue"
+let dropped_on = (livex [push $app --flip lone --drop yon --untested "accounts, and yon dropped"] {PRONTO_DEVFLOW_BIN: $told2})
+check ($dropped_on.exit_code == 0 and "yon" not-in ((newest 0).data | from json).flags and not (($board2 | path exists) and (open --raw $board2 | str contains "rolledback"))) "a dropped flag that was on tells the board no rolledback"
 rm -rf $"($app)/devflow"
 
 # On a directory store: a drill app under git, its flags a, b, c, d over a push that names flips.
@@ -593,6 +601,8 @@ let shw = (klive [show $drill])
 check ($shw.exit_code == 0 and (default-shown $shw.stdout kw) == "false" and ($shw.stderr | str contains "kw is new and on for accounts")) "keep-live: show prints the new flag off"
 let kc1 = (klive [push $drill])
 check ($kc1.exit_code == 0 and (kdef kw) == false and ((kflags | get kw).targeting.if | length) == 3 and ((kdoc (kputs | last)).flags.kw.variants.default == false) and ((kdoc (kputs | last)).flags.kw.targeting.if | length) == 3) "keep-live: a new flag on for accounts is written off, in the store and the database"
+let kc2 = (klive [push $drill])
+check ($kc2.exit_code == 0 and (kdef kw) == false and ($kc2.stderr | str contains "kw kept as live")) "keep-live: a second plain push keeps the written-off flag held, with the warning again"
 # (h) a new flag that is not a bool has no off form: refused, nothing written.
 kspec {ka: {default: true, accounts: ["u2" "u1"]}, kb: false, kc: false}
 "flags: ks: {default: \"dark\"}\n" | save -a $"($drill)/flags_spec.cue"
@@ -660,6 +670,15 @@ check ("kd" in (kflags | columns)) "keep-live: a flag added after the record is 
 kspec {ka: true, kb: false}
 let k3 = (klive [push $drill])
 check ($k3.exit_code == 0 and "kd" not-in (kflags | columns) and (djournal | last).dropped == "kd" and ($k3.stderr | str contains "no longer reads it")) "keep-live, dir: a flag the record lacks is dropped, the journal says so"
+
+# setup's first push is merged like any: a new flag that is on, or has accounts, lands off; a non-bool one is refused.
+$"package drill\nflags: son: {default: true, local: true}\nflags: sacc: {default: false, local: true, accounts: [\"u1\"]}\nflagsLive: {dir: \"setupstore\"}\n" | save -f $"($drill)/flags_spec.cue"
+let sset = (klive [setup $drill])
+let sdoc = (open $"($drill)/setupstore/flags.json").flags
+check ($sset.exit_code == 0 and $sdoc.son.variants.default == false and ($sdoc.son.targeting.if | length) == 3 and $sdoc.sacc.variants.default == false and ($sdoc.sacc.targeting.if | length) == 3) "setup: a new flag on, or with accounts, is written off"
+$"package drill\nflags: ss: {default: \"dark\"}\nflagsLive: {dir: \"setupstore2\"}\n" | save -f $"($drill)/flags_spec.cue"
+let sbad = (klive [setup $drill])
+check ($sbad.exit_code != 0 and ($sbad.stderr | str contains "is new and not off") and not ($"($drill)/setupstore2/flags.json" | path exists)) "setup: a new flag that is not a bool is refused, nothing written"
 
 # PRONTO-718: a repo pins the pronto-flags commit its pushes run from (.github/flags.pin); a push from a
 # checkout below the pin is refused before anything is read or written. The scratch clone is this checkout

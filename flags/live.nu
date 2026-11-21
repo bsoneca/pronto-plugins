@@ -335,7 +335,7 @@ export def keep-live [old: record, doc: record, reads: any, flip: list<string>, 
 		let who = if ($r.accounts | is-not-empty) { "accounts" } else if $r.value != false { "everyone" } else { "its targeting" }
 		{flag: $f, why: $"new and on for ($who): written off; --flip turns it on"}
 	})
-	let kept = ($held | each {|f| {flag: $f, why: "where released it differs from live (default, accounts or targeting) and no --flip names it"} } | append ($verdicts | where keep | select flag why))
+	let kept = ($held | each {|f| {flag: $f, why: "its reach in the spec differs from live (default, accounts or targeting) and no --flip names it"} } | append ($verdicts | where keep | select flag why))
 	let flags = ($spec
 		| merge ($held | each {|f| {$f: ($live | get $f)} } | into record)
 		| merge ($fresh | each {|f| {$f: (off-form ($spec | get $f))} } | into record)
@@ -506,7 +506,10 @@ export def show [app: path, --flip: list<string> = [], --drop: list<string> = []
 
 # The flags as the spec says them, written with no cases: the first push of `setup`.
 def push-plain [app: path] {
-	write-flags (live $app) (cue-of $app flagd.document) $app --meta {stage: all, note: "first push"} | ignore
+	# Through keep-live as every push is: a new flag that is on is written off, a non-bool one refused (PRONTO-1191).
+	let m = (keep-live {flags: {}} (cue-of $app flagd.document) null [] [])
+	for w in $m.written_off { print -e $"flags: WARNING: ($w.flag) is ($w.why)" }
+	write-flags (live $app) $m.doc $app --meta ({stage: all, note: "first push"} | merge (merge-meta $m)) | ignore
 }
 
 # ---- A flip runs its flag's cases (flags_plugin.cue: flagsCases) ----
@@ -670,7 +673,7 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	}
 	let names = ($changed | str join "+")
 	# The board hears of default moves only: accounts added to a flag are no flip an issue is done by.
-	let moved = (changes-between $old $doc)
+	let moved = (changes-between $old $doc | where {|c| $c.flag in ($doc.flags | columns) and $c.flag not-in ($m.dropped | get flag) })
 	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if $no_canary != null { $"no canary: ($no_canary)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" })] | compact | str join "; ")
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
 	if ($live | is-empty) {
