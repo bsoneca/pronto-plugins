@@ -48,6 +48,10 @@ _old: #Cron & {watch: ["x"], probes: {}, target: {release: ["./r.sh"], serving: 
 oldTarget: _old.target & {kind: "command", release: ["./r.sh"]}
 _kind: #Cron & {watch: ["x"], probes: {}, target: {kind: "command", release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example"}}
 kindTarget: _kind.target & {kind: "command"}
+// The ssh-255 rescue is off unless the target says its serving ref is written after the release (PRONTO-758).
+rescueOff: _kind.target.servingAfterRelease & false
+_after: #Cron & {watch: ["x"], probes: {}, target: {release: ["./r.sh"], serving: ["./s.sh"], origin: "https://x.example", servingAfterRelease: true}}
+rescueOn: _after.target.servingAfterRelease & true
 // A cloud-run target has nothing of a command's.
 cloudWithRelease: [if (#Cron & {watch: ["x"], probes: {}, target: {kind: "cloud-run", release: ["r"]}}) == _|_ {"refused"}, "accepted"][0] & "refused"
 

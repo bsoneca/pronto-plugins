@@ -126,6 +126,11 @@ releaseCron: #Cron
 	kind: *"command" | "command"
 	release!: [string, ...string]
 	serving!: [string, ...string]
+	// True only when `serving` reads a ref the release command writes after the release finished (Studio's
+	// refs/released/studio, written once release@k8s succeeded). Only then may an ssh exit 255 be rescued as "landed"
+	// (PRONTO-758) by what `serving` prints. A `serving` that reads a worktree's HEAD does not qualify: the release
+	// moves that HEAD first, so a drop after the checkout would count as released while the old pods still serve.
+	servingAfterRelease: *false | true
 	origin!:  string & =~"^https://"
 	// A release preview (rc) proven before the release: `up` releases it (the node's release@k8s --preview=rc), `reach`
 	// makes it answer at `origin` for as long as it runs (a port-forward, killed when the check is done), `down`

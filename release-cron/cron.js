@@ -28,8 +28,12 @@ export const activeLine = (app, pid, started, phase) => JSON.stringify({ app, pi
 // (PRONTO-758: two such drops on 2026-11-18, 07:05 and 11:34 BRT, the path to the node losing packets for minutes).
 export const sshDropped = (code) => code === 255;
 // A release whose ssh dropped has landed when the node serves the commit it was releasing (`serving`, read after the
-// drop): the release ran to its end on the node, its update-ref too, and only the session died.
-export const landed = (code, serving, head) => sshDropped(code) && !!serving && !!head && serving === head;
+// drop): the release ran to its end on the node, its update-ref too, and only the session died. That holds only when
+// `serving` reads what is written after the release finished (`afterRelease`, the target's servingAfterRelease); a
+// worktree's HEAD moves before the release runs, so for it a 255 stays a failure (PRONTO-870).
+export const landed = (code, serving, head, afterRelease) => afterRelease === true && sshDropped(code) && !!serving && !!head && serving === head;
+// Whether a 255 is worth reading `serving` for at all.
+export const rescuable = (code, afterRelease) => afterRelease === true && sshDropped(code);
 
 // The outcomes after which the next run waits the gap: a held release (below) waits for none, an abandoned one does.
 export const spaced = (outcome) => outcome === "released" || outcome === "failed" || (outcome ?? "").startsWith("abandoned");
