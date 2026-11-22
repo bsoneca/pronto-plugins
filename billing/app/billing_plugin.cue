@@ -52,20 +52,22 @@ _billingDocument: json.Marshal({owner: _billing.owner, plans: _billing.plans, if
 _billingGrants: (#billingGrants & {grants: _billing.grants}).out
 
 // Where the service reads the grants live, when the app has pronto-flags: the
-// origin of a flagd that serves OFREP; "mesh" for the app's flagd through the
+// origin of a flagd that serves OFREP, or "mesh" for the app's flagd through the
 // pod's dapr sidecar, as the door reaches it on a node (its release.cue says
-// `services: billing: env: BILLING_FLAGS: "mesh"`); or "origin" for the app's
-// own door, which routes /ofrep/ to its flagd but takes the account from a
-// session alone, so the trial's per-account flag, which the broker's consent
-// check asks with none, answers for no account there (PRONTO-82). Set, the grants are the flag billing_grants too, which
+// `services: billing: env: BILLING_FLAGS: "mesh"`). Not the app's own door: it serves pages
+// the flags marked `client` alone (PRONTO-1518), so billing's flags (the grants, the trial's, the
+// stripe door's) are not there, and it takes the account from a session alone. Set, the grants are the flag billing_grants too, which
 // `pronto-flags push` changes with no deploy, and the service reads it every
-// minute; unset, it takes them once, from BILLING_GRANTS, as it starts. A
-// flag is read by anyone who asks the door for it: so are the grants.
-_billingFlags: *"" | "origin" | "mesh" | =~"^https?://[^/]+$"
+// minute; unset, it takes them once, from BILLING_GRANTS, as it starts. The grants name every
+// grantee's account, so the flag is never `client`: no page can read it.
+_billingFlags: *"" | "mesh" | =~"^https?://[^/]+$"
 if _billingFlags != "" {
 	flags: billing_grants: {
 		note:    "pronto-billing's grants (billing_spec.cue's billing.grants), which the billing service reads every minute: a push gives or takes a plan with no deploy. Not a switch: edit billing.grants, never this."
 		default: _billingGrants
+		// Never a page's: it holds every grantee's account, plan and expiry. Concrete, so an app that says
+		// client: true for it fails to unify.
+		client: false
 	}
 }
 

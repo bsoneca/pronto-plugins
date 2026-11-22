@@ -525,13 +525,13 @@ day in UTC: `grants: "<account>": {analysis: "2027-01-31"}`, refused by
 `cue vet` for a plan the app does not sell, a day that is no day or an account
 that is no uuid. The billing service hands the whole set to `billing_grant`.
 In an app with pronto-flags, the grants are the flag `billing_grants` too
-(`_billingFlags`: flagd's address at hand, `"mesh"` on a node, which asks the
-app's flagd through the pod's dapr sidecar, or `"origin"`, through the app's own door), and the service reads that flag every minute: a
+(`_billingFlags`: flagd's address at hand, or `"mesh"` on a node, which asks the
+app's flagd through the pod's dapr sidecar; never the app's own door, which serves pages the flags marked `client` alone), and the service reads that flag every minute: a
 new grant, a moved day or one taken out reaches the database within a minute of
 `pronto-flags push`, with no deploy, and a flagd that can't be reached takes no
 grant away. Without pronto-flags, the service takes the set as it starts, so a
-release brings it. A grant past its day is no plan, either way. A flag is read
-by anyone who asks the door for it, so the grants are public too. A grant's row is the broker's
+release brings it. A grant past its day is no plan, either way. The flag is never `client`
+(`billing_plugin.cue` says `client: false`, which an app cannot unify with true), so no page can read the grants. A grant's row is the broker's
 `subscription` row with `ver` 0, so the gate and the pages read it as they read
 a payment, and a payment always outranks it: a grant takes no row the broker
 holds while it is paid through.
@@ -749,6 +749,22 @@ A page reads them with OpenFeature's web SDK and its OFREP provider
 (`@openfeature/web-sdk`, `@openfeature/ofrep-web-provider`), the provider's
 `baseUrl` the page's own origin. A flag the door cannot answer reads its
 default, so a feature behind one is off until flagd says otherwise.
+
+A page reads the flags marked `client` and no others (PRONTO-1518):
+`flags: <name>: {client: true, ...}` puts a flag in flagd's flag set `client`
+(`metadata.flagSetId` in `flags/flags.json`, and in the live object), and the
+door's `/ofrep/` route sets the header `Flagd-Selector: flagSetId=client` on
+every request, over any a page sent, so a flag that is not `client` is a 404
+there and is left out of bulk evaluation. `client` defaults to false: the
+app's own services (the database's `flag_on`, billing over the dapr mesh,
+which sends no selector) read every flag, and a page reads only what it was
+meant to. The door always sets the selector because an empty one
+(`flagSetId=`) returns flagd's default set, which holds exactly the
+server-only flags. Moving a flag into or out of `client` is a change to its
+metadata alone: `pronto-flags push` carries it whole (a flag held live keeps
+its live value but takes the spec's metadata), and it is no flip. A flip's
+wait for OFREP skips a server-only flag when it would have to ask the site's
+door; a node's flagd, asked itself, answers for every flag.
 
 A gcp release carries flagd as a sidecar: in `release.cue`,
 `sidecars: flagd: {port: 8693, cpu: 80}`, with the live source above. flagd holds ports

@@ -314,7 +314,8 @@ def defs-between [old: record, new: record]: nothing -> list<string> {
 # accounts added to a live flag, and a new flag with an accounts rule):
 #   - live, absent from the spec: kept while the release reads it (`reads`, the names in released.json; null: there
 #     is no record, so every live flag counts as read), dropped once the record does not name it, or when `drop` names it;
-#   - in both, its reach differing (default, accounts or targeting: `reach`): kept whole unless `flip` names it;
+#   - in both, its reach differing (default, accounts or targeting: `reach`): kept whole unless `flip` names it, but
+#     with the spec's metadata (the flag set it is served in: `client`), since metadata is no part of its reach;
 #   - new to the live object, and not fully off: written off (its default false, its accounts and canary gone, the
 #     at-hand branch kept) unless `flip` names it, and an error where it is not a bool, which has no off form.
 #     flagd layers the live object over the release's baked flags.json, so a flag left out would serve the baked rule.
@@ -347,11 +348,20 @@ export def keep-live [old: record, doc: record, reads: any, flip: list<string>, 
 	})
 	let kept = ($held | each {|f| {flag: $f, why: "its reach in the spec differs from live (default, accounts or targeting) and no --flip or --sync names it"} } | append ($verdicts | where keep | select flag why))
 	let flags = ($spec
-		| merge ($held | each {|f| {$f: ($live | get $f)} } | into record)
+		| merge ($held | each {|f| {$f: (with-spec-metadata ($live | get $f) ($spec | get $f))} } | into record)
 		| merge ($fresh | each {|f| {$f: (off-form ($spec | get $f))} } | into record)
 		| merge ($verdicts | where keep | each {|v| {($v.flag): ($live | get $v.flag)} } | into record)
 		| merge ($sets | each {|s| {($s.flag): (set-default ($spec | get $s.flag) $s.value)} } | into record))
 	{doc: ($doc | upsert flags $flags), kept: $kept, written_off: $written_off, dropped: ($verdicts | where {|v| not $v.keep } | select flag why)}
+}
+
+# A live entry kept whole, but with the metadata the spec says (the spec's, or none): flagd namespaces flags by
+# flagSetId across its sources, so a baked entry with metadata layered over a live one without it would make the
+# client selector read the baked value instead of the live one (PRONTO-1518). Metadata is not reach: a change to it
+# alone is a definition change (`defs-between`), which asks for no flip cases.
+def with-spec-metadata [live: record, spec: record]: nothing -> record {
+	let m = ($spec | get -o metadata)
+	if $m == null { $live | reject -o metadata } else { $live | upsert metadata $m }
 }
 
 # The entry of a flag with its default set to `value`: the spec's own, every other field as it is.
@@ -792,6 +802,12 @@ def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: rec
 	print $"flags: ($on | str join ', ') is on for everyone; waiting for OFREP to say so"
 	try {
 		let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f))} })
+		# The site's /ofrep/ serves the flags marked `client` alone (PRONTO-1518): it cannot say what a server-only flag now
+		# reads. A node's flagd, asked itself, and a stand-in (FLAGS_OFREP_CMD) can.
+		let by_door = (($at.mirrors? | default [] | is-empty) and (($env.FLAGS_OFREP_CMD? | default "") == ""))
+		let hidden = if $by_door { $want | where {|w| ($doc.flags | get $w.flag | get -o metadata.flagSetId) != "client" } } else { [] }
+		if ($hidden | is-not-empty) { print $"flags: ($hidden | get flag | str join ', ') is not a client flag: the site's /ofrep/ does not serve it, so its new value is not waited for there" }
+		let want = ($want | where {|w| $w not-in $hidden })
 		if not (wait-ofrep $at $want) { error make {msg: $"OFREP did not answer the new value of ($on | str join ', ') within the wait"} }
 		for c in $live {
 			print $"flags: ($c.flag): running its production cases \(($c.production | str join ', ')\)"

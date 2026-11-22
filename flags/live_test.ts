@@ -7,6 +7,8 @@
 import { request } from "node:http";
 const eq = (a: unknown, b: unknown, m: string) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); };
 const dec = new TextDecoder();
+// What an OFREP evaluation answers: one flag's value or error, or the bulk list.
+type Body = { flags?: { key: string }[]; value?: unknown; errorCode?: string };
 
 async function app(spec: string): Promise<string> {
   const dir = await Deno.makeTempDir();
@@ -23,9 +25,10 @@ async function cue(dir: string, expr: string) {
 }
 const SPEC = `
 flags: {
-  premium: {default: false, local: true, accounts: ["acct-me"]}
-  banner: {default: "off", local: "on"}
+  premium: {default: false, local: true, accounts: ["acct-me"], client: true}
+  banner: {default: "off", local: "on", client: true}
   quiet: {default: 3}
+  secret: {default: "grantees", local: "grantees"}
 }
 flagsLive: {project: "shop-prod", bucket: "shop-prod-flags"}
 `;
@@ -37,6 +40,8 @@ Deno.test("a flag's accounts read its local value beside the hosts at hand; othe
   eq(doc.flags.premium.targeting, { if: [local, "local", { in: [{ var: "targetingKey" }, ["acct-me"]] }, "local", "default"] }, "premium's targeting");
   eq(doc.flags.banner.targeting, { if: [local, "local", "default"] }, "a flag without accounts");
   eq(doc.flags.quiet.targeting, undefined, "a flag with one value everywhere");
+  eq([doc.flags.premium.metadata, doc.flags.banner.metadata], [{ flagSetId: "client" }, { flagSetId: "client" }], "a client flag is in flagd's client flag set");
+  eq([doc.flags.quiet.metadata, doc.flags.secret.metadata], [undefined, undefined], "a flag not marked client is in no flag set");
   eq(await cue(dir, "flagsLive.sources"), '[{"uri":"gs://shop-prod-flags/flags.json","provider":"gcs"}]', "the live source");
   await Deno.writeTextFile(`${dir}/flags_spec.cue`, `package shop\n${SPEC.replace(/flagsLive: \{.*\}/, 'flagsLive: {dir: "flagstore"}')}`);
   eq(await cue(dir, "flagsLive.sources"), '[{"uri":"flagstore/flags.json","provider":"file"}]', "a directory store is a file source");
@@ -157,7 +162,37 @@ Deno.test({ name: "the door gives flagd the account of the verified session, nev
       return [status, JSON.parse(text || "{}").value];
     }
   };
+  // Any path, method and headers through the door: what a page that wants a server-only flag would try.
+  const raw = async (path: string, headers: Record<string, string> = {}, body = "{}"): Promise<[number, Body]> => {
+    for (let i = 0; ; i++) {
+      const [status, text] = await new Promise<[number, string]>((resolve, reject) => {
+        const req = request({ host: "127.0.0.1", port: door, path, method: "POST", headers: { "content-type": "application/json", host: "shop.example", ...headers } },
+          (res) => { let t = ""; res.on("data", (c) => t += c); res.on("end", () => resolve([res.statusCode!, t])); });
+        req.on("error", reject);
+        req.end(body);
+      }).catch(() => [0, ""] as [number, string]);
+      if ((status === 0 || status === 502) && i < 50) { await new Promise((r) => setTimeout(r, 100)); continue; }
+      return [status, JSON.parse(text || "{}")];
+    }
+  };
   try {
+    // PRONTO-1518: a page reads the flags marked client and nothing else, whatever selector it sends.
+    const keys = (b: Body) => (b.flags ?? []).map((f) => f.key).sort();
+    eq((await raw("/ofrep/v1/evaluate/flags/secret"))[0], 404, "a server-only flag is not found through the door");
+    for (const [what, path, headers, body] of [
+      ["a selector header that names the default set", "/ofrep/v1/evaluate/flags/secret", { "flagd-selector": "flagSetId=" }, "{}"],
+      ["an empty selector header", "/ofrep/v1/evaluate/flags/secret", { "flagd-selector": "" }, "{}"],
+      ["a selector header for a flag source", "/ofrep/v1/evaluate/flags/secret", { "flagd-selector": "source=flags.json" }, "{}"],
+      ["a selector in the query", "/ofrep/v1/evaluate/flags/secret?selector=flagSetId%3D", {}, "{}"],
+      ["a selector in the body", "/ofrep/v1/evaluate/flags/secret", {}, JSON.stringify({ selector: "flagSetId=", context: {} })],
+    ] as [string, string, Record<string, string>, string][]) {
+      eq((await raw(path, headers, body))[0], 404, `${what}, for a server-only flag`);
+    }
+    for (const headers of [{}, { "flagd-selector": "flagSetId=" }, { "flagd-selector": "flagSetId=other" }] as Record<string, string>[]) {
+      eq(keys((await raw("/ofrep/v1/evaluate/flags", headers))[1]), ["banner", "premium"], `bulk through the door lists the client flags alone (${JSON.stringify(headers)})`);
+    }
+    eq(keys((await raw("/ofrep/v1/evaluate/flags?selector=flagSetId%3D"))[1]), ["banner", "premium"], "bulk with a query selector lists the client flags alone");
+    eq((await raw("/ofrep/v1/evaluate/flags/banner"))[0], 200, "a client flag is served");
     eq(await ask({ key: "acct-me" }), [200, false], "a page naming a tester in its body, with no session");
     eq(await ask({ key: "acct-me", claim: "acct-me" }), [200, false], "a page naming a tester in the header the door sets");
     eq(await ask({ key: "acct-me", token: "not-a-token" }), [200, false], "a page naming a tester with a token that verifies as no one");
@@ -199,6 +234,54 @@ Deno.test({ name: "flagd's header context overrides the body's targetingKey unle
   try {
     eq([await ask("acct-x", "acct-me"), await ask("acct-me", "acct-x"), await ask("no session", "acct-me")], [false, true, false], "the header wins");
     eq([await ask(null, "acct-me"), await ask("", "acct-me")], [true, true], "an absent or empty header leaves the body's: the door always sets one");
+  } finally {
+    proc.kill();
+    await proc.status;
+    await Deno.remove(dir, { recursive: true });
+  }
+} });
+
+// PRONTO-1518, as flagd 0.18.0 answers it: the flags marked client are in the flag set "client", and the door's
+// selector header reads that set alone. Billing reaches flagd over the dapr mesh with no selector, so it reads all.
+Deno.test({ name: "flagd's flag sets: the client selector reads the client flags alone, no selector reads every flag, an empty one the default set", ignore: !flagd, async fn() {
+  const dir = await app(SPEC);
+  await Deno.writeTextFile(`${dir}/flags.json`, JSON.stringify(await cue(dir, "flagd.document")));
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const proc = new Deno.Command(flagd!, {
+    args: ["start", "--uri", `file:${dir}/flags.json`, "--port", `${port + 1}`, "--management-port", `${port + 2}`, "--sync-port", `${port + 3}`, "--ofrep-sse-enabled=false",
+      "--context-from-header", "X-Pronto-Host=host", "--context-from-header", "X-Pronto-Account=targetingKey"],
+    env: { FLAGD_OFREP_PORT: `${port}` }, stdout: "null", stderr: "null",
+  }).spawn();
+  const ask = async (path: string, headers: Record<string, string> = {}, body: unknown = { context: {} }): Promise<[number, Body]> => {
+    for (let i = 0; ; i++) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/ofrep/v1/evaluate/flags${path}`, {
+          method: "POST", headers: { "content-type": "application/json", "x-pronto-host": "shop.example", ...headers }, body: JSON.stringify(body),
+        });
+        return [res.status, await res.json()];
+      } catch (e) { if (i > 50) throw e; await new Promise((r) => setTimeout(r, 100)); }
+    }
+  };
+  const keys = (b: Body) => (b.flags ?? []).map((f) => f.key).sort();
+  const client = { "flagd-selector": "flagSetId=client" };
+  try {
+    eq(keys((await ask("", client))[1]), ["banner", "premium"], "bulk with the client selector: the client flags alone");
+    const single = await ask("/secret", client);
+    eq([single[0], single[1].errorCode], [404, "FLAG_NOT_FOUND"], "a server-only flag with the client selector: not found");
+    eq((await ask("/premium", client))[0], 200, "a client flag with the client selector");
+    // Billing's path: no selector.
+    eq(keys((await ask(""))[1]), ["banner", "premium", "quiet", "secret"], "bulk with no selector: every flag");
+    const open = await ask("/secret");
+    eq([open[0], open[1].value], [200, "grantees"], "a server-only flag with no selector: read");
+    // What the door must never leave to a page: an empty selector is the default set, which holds the server-only flags.
+    const empty = await ask("/secret", { "flagd-selector": "flagSetId=" });
+    eq([empty[0], empty[1].value], [200, "grantees"], "an empty flagSetId selector reads the default set, so the door always sets the selector");
+    eq(keys((await ask("", { "flagd-selector": "flagSetId=" }))[1]), ["quiet", "secret"], "bulk with an empty flagSetId selector: the default set");
+    // A selector anywhere but the header is not one.
+    const query = await ask("/secret?selector=flagSetId%3Dclient");
+    eq([query[0], query[1].value], [200, "grantees"], "a query selector is ignored");
+    const inBody = await ask("/secret", {}, { selector: "flagSetId=client", context: {} });
+    eq([inBody[0], inBody[1].value], [200, "grantees"], "a body selector is ignored");
   } finally {
     proc.kill();
     await proc.status;

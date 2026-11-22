@@ -424,6 +424,33 @@ livex [push $app --sync "premium,theme" --untested "back"] | ignore
 let num = (^$nu.current-exe -c $"use ($here)/../live.nu keep-live; let spec = {flags: {n: {state: 'ENABLED', variants: {default: 1.5}, defaultVariant: 'default'}, m: {state: 'ENABLED', variants: {default: 3}, defaultVariant: 'default'}}}; let r = \(keep-live {flags: {}} $spec null ['n=2' 'm=4.5'] []); $r.doc.flags | to json -r" | complete)
 check ($num.exit_code == 0 and ($num.stdout | str contains "\"default\":2}") and ($num.stdout | str contains "\"default\":4.5}")) "--flip on an int or a float default: one numeric kind"
 
+# PRONTO-1518: a flag's metadata (the flag set it is served in: `client`) is the spec's whatever the push keeps of live. flagd namespaces
+# flags by flagSetId across its sources, so a baked entry with metadata over a live one without it would serve the baked value to a page.
+let kl = $"($dir)/keep_live_metadata.nu"
+(r#'
+let set = {flagSetId: client}
+def entry [v: any, meta: any = null] {
+	let e = {state: ENABLED, variants: {default: $v, local: true}, defaultVariant: default}
+	if $meta == null { $e } else { $e | insert metadata $meta }
+}
+# held: live differs in default, has no metadata; the spec says client. off: the spec's flag is new and on. flipped: named in --flip.
+# dropmeta: live has the metadata and the spec no longer says client. gone: live only, with its own metadata.
+let spec = {flags: {held: (entry true $set), off: (entry true $set), flipped: (entry false $set), dropmeta: (entry false), same: (entry false $set)}}
+let live = {flags: {held: (entry false), dropmeta: (entry true $set), gone: (entry true $set), flipped: (entry false), same: (entry false)}}
+let r = (keep-live $live $spec null ['flipped=true'] [])
+let f = $r.doc.flags
+{
+	held: ($f.held.metadata? == $set and $f.held.variants.default == false)
+	off: ($f.off.metadata? == $set and $f.off.variants.default == false)
+	flipped: ($f.flipped.metadata? == $set and $f.flipped.variants.default == true)
+	dropmeta: (($f.dropmeta | get -o metadata) == null and $f.dropmeta.variants.default == true)
+	gone: ($f.gone.metadata? == $set)
+	same: ($f.same.metadata? == $set)
+} | to json -r
+'#) | $"use ($here)/../live.nu keep-live\n($in)" | save -f $kl
+let klr = (^$nu.current-exe $kl | complete)
+check ($klr.exit_code == 0 and ($klr.stdout | from json | transpose k v | where v == false | is-empty)) $"keep-live: held, off-form, flipped and set-default entries carry the spec's metadata, a live-only flag its own \(($klr.stdout | str trim) ($klr.stderr | str trim)\)"
+
 # (3) The record is of the version the push wrote: where live has moved on, it is skipped, said and noted.
 let rec3 = (recorded | length)
 let sk = (rlive [record $app --version $v_f1 --flags premium])
