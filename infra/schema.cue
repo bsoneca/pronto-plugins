@@ -89,6 +89,17 @@ import "list"
 		"alert policies \(nm) name no channel \(c)": _|_
 	}
 
+	for nm, a in alertPolicies if a.file == _|_ && len(a.policies) == 0 {
+		"alert policies \(nm) name neither a file nor policies": _|_
+	}
+
+	// Outside uptime checks of Cloud Monitoring (#UptimeCheck), by a name of your own, each with a
+	// policy that mails the channels named when it fails from enough regions. Made here, never imported.
+	uptimeChecks: [Name=string]: #UptimeCheck
+	for nm, u in uptimeChecks for c in u.channels if notificationChannels[c] == _|_ {
+		"uptime check \(nm) names no channel \(c)": _|_
+	}
+
 	// What OpenTofu applies: the whole project, or, while the rest is still a draft the live
 	// project has not been checked against, these resources by kind and name (a role for iam;
 	// a repository's name for repositoryIam, its grants without the repository itself).
@@ -141,7 +152,7 @@ import "list"
 #Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases" | "sqlUsers" | "apiKeys" | "budgets" | "hostingSites"
 
 // identityPlatform is adopted by naming "config": a project has one.
-#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "sqlUsers" | "sqlBackups" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies" | "workloadIdentityPools"
+#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "sqlUsers" | "sqlBackups" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies" | "uptimeChecks" | "workloadIdentityPools"
 
 #Found: "serviceAccounts" | "members"
 
@@ -313,12 +324,44 @@ import "list"
 	email!: =~"^[^@\\s]+@[^@\\s]+$"
 }
 
-// PromQL alerting policies, one per entry of a JSON file of the operator's repository, beside the
-// state folder (as #Secret.file): a list of {name, displayName, expr, duration, severity
-// ("page" is CRITICAL, any other WARNING), documentation, labels, and optionally interval, the
-// evaluation interval, 60s by default}, which is what pronto-journeys writes. Each goes to every channel named.
+// PromQL alerting policies, from a JSON file of the operator's repository, beside the state
+// folder (as #Secret.file), and/or written inline in `policies`. The file is a list of {name,
+// displayName, expr, duration, severity ("page" is CRITICAL, any other WARNING), documentation,
+// labels, and optionally interval, the evaluation interval, 60s by default}, which is what
+// pronto-journeys writes; `policies` holds the same entries by name, in the state itself.
+// Each goes to every channel named.
 #AlertPolicies: {
-	file!: string & =~"\\.json$"
+	file?: string & =~"\\.json$"
+	policies: [Name=string]: #AlertPolicy
+	channels: [...string]
+}
+
+#AlertPolicy: {
+	displayName:   string
+	expr:          string
+	duration:      =~"^[0-9]+s$"
+	interval:      *"60s" | =~"^[0-9]+s$"
+	severity:      *"warning" | "page"
+	documentation: string
+	labels: [string]: string
+}
+
+// An outside HTTPS check of one host's path, from Google's checkers in several regions, and the
+// policy that mails the channels when it fails from at least `failingRegions` of them for `window`.
+#UptimeCheck: {
+	host!: =~"^[a-z0-9.-]+$"
+	path:  *"/" | =~"^/"
+	// How often each region checks, and how long one waits for an answer.
+	period:  *"60s" | "300s" | "600s" | "900s"
+	timeout: *"10s" | =~"^[0-9]+s$"
+	// Google's region groups, each checked from every location it holds; fewer than three would
+	// make one checker's bad route an outage.
+	regions: *["USA", "EUROPE", "SOUTH_AMERICA", "ASIA_PACIFIC"] | [...("USA" | "EUROPE" | "SOUTH_AMERICA" | "ASIA_PACIFIC")] & list.MinItems(3)
+	// The policy fires when at least this many regions fail.
+	failingRegions: *2 | int & >=1
+	window:         *"300s" | =~"^[0-9]+s$"
+	severity:       *"page" | "warning"
+	documentation:  *"The check of \(host)\(path) fails from several regions: the node, its tunnel or the app is down, or Cloudflare blocks the checkers." | string
 	channels: [...string]
 }
 

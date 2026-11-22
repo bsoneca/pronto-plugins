@@ -420,6 +420,52 @@ loneContainerUnnamed: [for c in _s.google_cloud_run_v2_service.example_project_1
 // A policy naming a channel the project lacks is refused.
 unknownChannel: _ok & {alertPolicies: x: {file: "a.json", channels: ["nobody"]}} & matchN(0, [#Project])
 
+// Inline policies (the state's own, no file) and outside uptime checks with their policy.
+_uptime: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adoptAll: true
+		apis: "monitoring.googleapis.com": true
+		notificationChannels: oncall: email: "oncall@example.com"
+		alertPolicies: heartbeat: {
+			channels: ["oncall"]
+			policies: silent: {
+				displayName:   "Heartbeat silent"
+				expr:          "absent_over_time(vector(1)[15m:])"
+				duration:      "600s"
+				severity:      "page"
+				documentation: "The node sends no heartbeat."
+				labels: {app: "node"}
+			}
+		}
+		uptimeChecks: "example-com": {host: "example.com", path: "/healthz", channels: ["oncall"]}
+	}
+}
+_u:      _uptime.tofu.resource
+_inline: _u.google_monitoring_alert_policy.example_project_123_heartbeat_silent
+inlineNoFile: [for k, _ in _inline if k == "for_each" {k}] & []
+inlineQuery:    _inline.conditions[0].condition_prometheus_query_language.query & "absent_over_time(vector(1)[15m:])"
+inlineSeverity: _inline.severity & "CRITICAL"
+inlineInterval: _inline.conditions[0].condition_prometheus_query_language.evaluation_interval & "60s"
+inlineToChannel: _inline.notification_channels & ["$" + "{google_monitoring_notification_channel.example_project_123_oncall.id}"]
+_check: _u.google_monitoring_uptime_check_config.example_project_123_example_com
+checkHttps: _check.http_check & {path: "/healthz", port: 443, use_ssl: true, validate_ssl: true}
+checkIsTwoXX: _check.http_check.accepted_response_status_codes & [{status_class: "STATUS_CLASS_2XX"}]
+checkEveryMinute: _check.period & "60s"
+checkRegions:     list.MinItems(_check.selected_regions, 3) & true
+checkHost: _check.monitored_resource.labels & {host: "example.com", project_id: "example-project-123"}
+_uptimePolicy: _u.google_monitoring_alert_policy.example_project_123_example_com
+uptimePolicyTwoRegions: _uptimePolicy.conditions[0].condition_threshold & {threshold_value: 1, duration: "300s", comparison: "COMPARISON_GT"}
+uptimePolicyOnCheck: strings.Contains(_uptimePolicy.conditions[0].condition_threshold.filter, "google_monitoring_uptime_check_config.example_project_123_example_com.uptime_check_id") & true
+uptimePolicyToChannel: _uptimePolicy.notification_channels & ["$" + "{google_monitoring_notification_channel.example_project_123_oncall.id}"]
+uptimeNeverImported: [for i in _uptime.tofu.import if strings.HasPrefix(i.to, "google_monitoring") {i}] & []
+// Fewer than three regions, and a channel the project lacks, are refused.
+twoRegionsRefused: _ok & {notificationChannels: o: email: "a@b.co", uptimeChecks: x: {host: "a.co", channels: ["o"], regions: ["USA", "EUROPE"]}} & matchN(0, [#Project])
+uptimeUnknownChannel: _ok & {uptimeChecks: x: {host: "a.co", channels: ["nobody"]}} & matchN(0, [#Project])
+// A policy group with neither a file nor policies is refused.
+emptyPolicies: _ok & {notificationChannels: o: email: "a@b.co", alertPolicies: x: {channels: ["o"]}} & matchN(0, [#Project])
+
 // A file's secret version replaced is abandoned, not deleted: the verbs let it through.
 abandonNoDeletion: strings.Contains(_verbs, "$c.change.before?.deletion_policy? == 'ABANDON'") & true
 
