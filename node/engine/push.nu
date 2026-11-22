@@ -106,8 +106,13 @@ def stage-context [app_dir: string, work: string, dest: string, include: list<st
 export def verify-door-guard [staged: string] {
 	let file = ($staged | path join docker Caddyfile)
 	if not ($file | path exists) { return }
-	if not ((open --raw $file) | str contains "# PRONTO-1307: no public prefix reaches a Dapr API path of its sidecar") {
+	let text = (open --raw $file)
+	if not ($text | str contains "# PRONTO-1307: no public prefix reaches a Dapr API path of its sidecar") {
 		error make {msg: "docker/Caddyfile lacks the Dapr guard (PRONTO-1307): /img, /blobs, /crud and /electric would proxy /v1.0 paths to the sidecar. Add the doorguard plugin (`bin/pronto-doorguard <app-dir>` in pronto-plugins, then the app's generate) and commit the Caddyfile"}
+	}
+	# A guard whose pattern is case-sensitive is the bypass of PRONTO-916: Caddy's `handle /crud/*` ignores case, so /CRUD/v1.0/metadata reaches the sidecar.
+	if not ($text | str contains 'path_regexp daprapi (?i)^/(crud|img|blobs|electric)/v1\.0(-alpha1)?(/|$)') {
+		error make {msg: "docker/Caddyfile carries an older Dapr guard whose pattern is case-sensitive (PRONTO-916): /CRUD/v1.0/metadata would reach the sidecar. Refresh the doorguard plugin (`bin/pronto-doorguard <app-dir>`, then the app's generate) and commit the Caddyfile it writes."}
 	}
 }
 
