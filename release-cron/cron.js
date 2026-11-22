@@ -611,8 +611,8 @@ export const legacyFileLock = (isFile, pid, alive) => !isFile ? "none" : pid && 
 // symlink(2) fails EEXIST when anything is at the path, an empty directory the base driver (before #433) has just made with mkdir included, so
 // a new driver can never replace one; the base driver's mkdir(lock) fails EEXIST on the symlink, and it reads lock/pid through it, so it sees a
 // live owner from the first instant. That is the whole of the overlap with the base driver: no window on either side, and no rollout rule.
-// A lock that is a real directory or the flock version's file is an older driver's: handled as before (a pid-less directory is an acquisition in
-// progress, then an unresolved one that stops the run).
+// A lock that is a real directory or the flock version's file is an older driver's: its live holder is respected, a pid-less directory is an
+// acquisition in progress then an unresolved one, and a STALE one is never recovered (an old driver may be about to write through it).
 // A stale lock is removed only under an exclusive flock (`io.recovering`: the lock of an open file, which dies with its process, so no stale
 // recovery state and no delayed removal by pathname can exist), after the observed holder is read again, and by renaming it to a name of its own
 // whose holder is verified to be the observed one before anything is deleted. Whatever is ambiguous stops the run with an error naming the path;
@@ -734,6 +734,10 @@ export const lockAcquire = (io, path, { tries = 5, graceMs = 10000, pollMs = 250
     if (v === "busy") return { got: false, pid: look.pid };
     if (v === "unknown") throw unknownHolder(path, look);
     if (v === "pending") { io.sleep(pollMs); continue; }
+    // A stale lock of an older driver (a real directory, or the flock version's file) is never recovered here: that driver may have read the dead
+    // holder and be about to write its own pid through whatever stands at the path, and only this driver takes the recovery flock. A person
+    // removes it once every old launcher is stopped.
+    if (!look.isLink) throw new Error(`release-cron lock: ${path} is a stale lock of an older driver (${look.pid > 0 ? `holder ${look.pid} is gone` : "no holder"}): not removed; stop every old launcher of this app, then remove ${path} by hand`);
     n++;
     // Stale: one run at a time recovers, and what it removes is what it observed.
     const out = io.recovering(() => {
