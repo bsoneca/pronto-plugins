@@ -27,8 +27,9 @@
 // (an app's tests/slot.ts) starts no new heavy work while it is live and polls every 30 s.
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
+import process from "node:process";
 import { causes, outcomes } from "./causes.js";
-import { appendWhy, mutates, lockAcquire, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit } from "./cron.js";
+import { appendWhy, mutates, lockAcquire, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -103,10 +104,12 @@ const takeLock = (): { got: true } | { got: false; pid: number } => {
     mkdir: (p: string) => wrap(() => Deno.mkdirSync(p)),
     writeFile: (p: string, t: string) => wrap(() => Deno.writeTextFileSync(p, t)),
     rename: (a: string, b: string) => wrap(() => Deno.renameSync(a, b)),
+    link: (a: string, b: string) => wrap(() => Deno.linkSync(a, b)),
     readFile: (p: string) => wrap(() => Deno.readTextFileSync(p)),
     stat: (p: string) => wrap(() => { const st = Deno.statSync(p); return { isFile: st.isFile, mtimeMs: st.mtime?.getTime() ?? 0 }; }),
     remove: (p: string) => wrap(() => Deno.removeSync(p, { recursive: true })),
-    alive: (pid: number) => sh("kill", ["-0", String(pid)]).ok,
+    // kill(pid, 0): ESRCH is a holder that is gone, EPERM one alive under another user, any other error propagates (aliveFromKill).
+    alive: (pid: number) => { try { process.kill(pid, 0); return aliveFromKill(null); } catch (e) { return aliveFromKill((e as { code?: string }).code ?? "EUNKNOWN"); } },
   }, lockPath) as { got: true } | { got: false; pid: number };
 };
 const dropLock = () => { try { if (Deno.readTextFileSync(`${lockPath}/pid`) === String(Deno.pid)) Deno.removeSync(lockPath, { recursive: true }); } catch { /* none, or not ours */ } };
@@ -887,7 +890,7 @@ try {
       const r = sh(target!.serving[0], target!.serving.slice(1), `${wt}/${appRel}`, Deno.env.toObject(), 120);
       if (r.ok) return r.out.split(/\s+/)[0];
       const why = `${target!.serving.join(" ")} failed (exit ${r.code}): ${r.err || r.out}`;
-      if (i >= 3 || !servingRetryable(r.code)) throw new Error(why);
+      if (i >= 3 || !servingRetryable(r.code)) throw Object.assign(new Error(why), { exit: r.code, permanent: !servingRetryable(r.code) });
       say(`serving unread (try ${i} of 3): ${why.split("\n").at(-1)}`); sh("sleep", ["20"], undefined, {}, 30);
     }
   };
@@ -1095,7 +1098,12 @@ try {
     say("the release's ssh exited 255 (its own failure, not the release's): reading what the node serves");
     for (const t = Date.now(); Date.now() - t < 15 * 60_000; await new Promise((r) => setTimeout(r, 30_000))) {
       let now = "";
-      try { now = servingNow(); } catch (e) { say(`serving unread: ${(e as Error).message.split("\n").at(-1)}`); continue; }
+      try { now = servingNow(); } catch (e) {
+        // A failure that is not ssh's own (the serving command ran and failed) says what is wrong at once: the run fails with that exit, not the ssh's.
+        const x = e as Error & { exit?: number; permanent?: boolean };
+        if (rescueReadStep(x.permanent ? x.exit : 255) === "fail") end(outcomes.failed, `serving (${target!.serving.join(" ")}) failed (exit ${x.exit}) after the release's ssh exited ${rel.code}: ${x.message.split("\n").at(-1)}`, 1);
+        say(`serving unread: ${x.message.split("\n").at(-1)}`); continue;
+      }
       if (landed(rel.code, now, head, target!.servingAfterRelease)) { run.sshDropped = `the release's ssh exited 255; the node serves ${head.slice(0, 8)}`; say(run.sshDropped as string); break; }
     }
   }
