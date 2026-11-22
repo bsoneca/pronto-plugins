@@ -114,6 +114,22 @@ export function tracked<A extends unknown[]>(handler: (req: Request, ...rest: A)
  * webhook (/stripe) names no caller and is never read here. */
 const BODY_PATHS = ["/checkout", "/trial/offer", "/trial/checkout", "/portal", "/resync", "/onboard", "/probe", "/route"];
 
+/** What the broker serves: each path and the one method it takes. Anything else is refused before a byte of a body is read. */
+const ENDPOINTS: Record<string, string> = {
+  "/jwks": "GET", "/health": "GET", "/onboarded": "GET", "/onboard": "POST", "/checkout": "POST", "/trial/offer": "POST",
+  "/trial/checkout": "POST", "/portal": "POST", "/probe": "POST", "/route": "POST", "/resync": "POST", "/stripe": "POST",
+};
+
+/** A 404 for a path that is not an endpoint (and for /route unless the door is asked: a fixed-route broker has none), a
+ * 405 for a method the path does not take; undefined for a request to serve. Made before any body is read or anything
+ * allocated for the request. */
+export function endpointRefusal(method: string, path: string, doorAsked: boolean): Response | undefined {
+  const allowed = Object.hasOwn(ENDPOINTS, path) ? ENDPOINTS[path] : undefined;
+  if (!allowed || (path === "/route" && !doorAsked)) return json(404, { error: "not found" });
+  if (method !== allowed) return json(405, { error: "method not allowed" });
+  return undefined;
+}
+
 /** The most of a request's body the broker reads, from rules.cue (bodyLimits, routeLimits.bodyMax): the webhook's, the
  * route probe's, or the ordinary request's; undefined for a path that reads no body. One owner for the dispatcher
  * and the caller wrapper. */
@@ -126,7 +142,10 @@ export function bodyLimitOf(method: string, path: string): number | undefined {
 
 /** Reads the capped body of `req` once, and hands back a request that carries the text already read, or a 413 the
  * moment the cap is passed (the rest of a client's stream is not read). A request with no body path is returned as is. */
-export async function withCappedBody(req: Request): Promise<Request | Response> {
+export async function withCappedBody(req: Request, doorAsked: boolean): Promise<Request | Response> {
+  // First of all: no body is read, nor anything allocated, for a path that is no endpoint.
+  const refusal = endpointRefusal(req.method, new URL(req.url).pathname, doorAsked);
+  if (refusal) return refusal;
   const limit = bodyLimitOf(req.method, new URL(req.url).pathname);
   if (limit === undefined) return req;
   const text = await readCapped(req.body, limit, req.headers.get("content-length"));
@@ -142,7 +161,7 @@ export function forAccount<A extends unknown[]>(handler: (req: Request, ...rest:
     const who: { account?: string; door?: boolean } = {};
     if (req.method === "POST" && new URL(req.url).pathname !== "/stripe") {
       // The body is read once, up to the CUE limit; past it the answer is a 413 at once.
-      const capped = await withCappedBody(req);
+      const capped = await withCappedBody(req, true);
       if (capped instanceof Response) return capped;
       req = capped;
       const text = await req.text();

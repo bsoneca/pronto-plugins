@@ -379,7 +379,7 @@ export function service(s: Settings) {
     const t = Date.now();
     const take = (key: string, per: number): boolean => {
       let held = routeSeen.get(key);
-      if (!held || t - held.at >= 60_000) held = { n: 0, at: t };
+      if (!held || t - held.at >= RULES.routeLimits.windowMs) held = { n: 0, at: t };
       routeSeen.delete(key);
       routeSeen.set(key, held);
       if (routeSeen.size > 10_000) routeSeen.delete(routeSeen.keys().next().value!);

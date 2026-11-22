@@ -88,7 +88,7 @@ async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: numb
   // Replicas sign with one key, as the node's pods read BILLING_SIGNING_KEY from one Secret.
   const signingKey = (o.replicas ?? 1) > 1 ? await newSigningKey() : undefined;
   const replicas = await Promise.all(Array.from({ length: o.replicas ?? 1 }, () =>
-    broker({ issuer: ISSUER, secret: "s".repeat(32), stripe: routed, webhookSecret: fake.webhookSecret, fetcher, cacheMs: 0, feePercent: 10, store, signingKey, mode: o.mode }).then((h) => fixed ? tracked(h) : o.switched ? forAccount(h) : h)));
+    broker({ issuer: ISSUER, secret: "s".repeat(32), stripe: routed, webhookSecret: fake.webhookSecret, fetcher, cacheMs: 0, feePercent: 10, store, signingKey, mode: o.mode, doorAsked: o.switched === "asked" || o.switched === "never" }).then((h) => fixed ? tracked(h) : o.switched ? forAccount(h) : h)));
   let turn = 0;
   const handler = (req: Request) => replicas[turn++ % replicas.length](req);
   const keys = brokerKeys(ISSUER, fetcher, 0);
@@ -1154,12 +1154,10 @@ Deno.test("a tenant's refusal is a loud non-2xx on every delivery and never mark
 });
 
 // The route probe: which transport a call would take for a door word, from the real selection, with no call to Stripe.
-const ROUTE_CASES: { name: string; switched: "asked" | "direct" | "door"; door?: boolean; transport: string }[] = [
+const ROUTE_CASES: { name: string; switched: "asked"; door?: boolean; transport: string }[] = [
   { name: "door true: door", switched: "asked", door: true, transport: "door" },
   { name: "door false: direct", switched: "asked", door: false, transport: "direct" },
   { name: "no word: direct", switched: "asked", transport: "direct" },
-  { name: "a direct-only broker reports direct whatever is asked", switched: "direct", door: true, transport: "direct" },
-  { name: "a door-only broker reports door whatever is asked", switched: "door", door: false, transport: "door" },
 ];
 for (const c of ROUTE_CASES) {
   Deno.test(`route probe, ${c.name}`, async () => {
@@ -1224,7 +1222,7 @@ Deno.test("the route probe and a real call choose the same transport, for door t
 Deno.test("the dispatcher enforces the body limit (413) before it picks a broker, for every body-reading endpoint", async () => {
   const seen: string[] = [];
   const mode = (name: string) => async (req: Request) => { seen.push(name); await req.body?.cancel(); return new Response(name); };
-  const handler = twoModes({ live: mode("live"), sandbox: mode("sandbox"), sandboxed: (t) => t.includes("-rc-"), sandboxWebhookSecret: "whsec_sandbox" });
+  const handler = twoModes({ live: mode("live"), sandbox: mode("sandbox"), sandboxed: (t) => t.includes("-rc-"), sandboxWebhookSecret: "whsec_sandbox", doorAsked: true });
   const post = (path: string, body: string, declared = true) => handler(new Request(`${ISSUER}${path}`, {
     method: "POST", headers: { "content-type": "application/json", ...(declared ? {} : {}) }, body,
   }));
@@ -1258,4 +1256,34 @@ Deno.test("the dispatcher reads the body once and hands the chosen broker that t
   clearTimeout(timer);
   assertEquals(answered instanceof Response ? answered.status : answered, 413);
   assertEquals(got.length, 1, "no broker saw it");
+});
+
+Deno.test("a fixed-route broker has no /route: 404 whatever the request says", async () => {
+  for (const switched of ["direct", "door"] as const) {
+    const s = await setup({ switched });
+    const res = await s.post("/route", { tenant: A, door: true });
+    assertEquals([switched, res.status], [switched, 404]);
+    await res.body?.cancel();
+  }
+});
+
+// An unknown path, or a method a path does not take, is refused before any body is read or allocated for.
+const endless = (reads: { n: number }) => new ReadableStream<Uint8Array>({ pull(c) { reads.n++; c.enqueue(new TextEncoder().encode("x".repeat(512))); } });
+Deno.test("an unknown path, a wrong method and /route without the door asked are 404 and 405 and the body is never read", async () => {
+  const s = await setup({ switched: "asked" });
+  const sandboxed = twoModes({ live: () => Promise.resolve(new Response("live")), sandbox: () => Promise.resolve(new Response("sandbox")), sandboxed: () => false, sandboxWebhookSecret: "w", doorAsked: false });
+  const cases: [string, string, number, "broker" | "dispatcher"][] = [
+    ["POST", "/nope", 404, "broker"], ["POST", "/admin/anything", 404, "broker"], ["GET", "/checkout", 405, "broker"], ["POST", "/jwks", 405, "broker"],
+    ["POST", "/nope", 404, "dispatcher"], ["GET", "/stripe", 405, "dispatcher"], ["POST", "/route", 404, "dispatcher"],
+  ];
+  for (const [method, path, status, who] of cases) {
+    const reads = { n: 0 };
+    const req = new Request(`${ISSUER}${path}`, { method, headers: { "content-type": "application/json" }, ...(method === "POST" ? { body: endless(reads) } : {}) });
+    const res = who === "broker" ? await s.call(path, { method, headers: { "content-type": "application/json" }, ...(method === "POST" ? { body: endless(reads) } : {}) }) : await sandboxed(req);
+    assertEquals([method, path, who, res.status], [method, path, who, status]);
+    await res.body?.cancel();
+    // A stream is primed by the runtime when the request is built (a chunk or two of its own queue); a body that was
+    // read would have pulled without end until the cap or the end.
+    assertEquals(reads.n <= 2, true, `${method} ${path}: the body was not read (${reads.n} chunks pulled)`);
+  }
 });

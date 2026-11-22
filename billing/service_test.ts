@@ -3,6 +3,7 @@
 // away because flagd could not be asked.
 import { grantsLoop, grantVerdict, NotReady, service } from "./service.ts";
 import { entitlementClaims } from "./broker/core.ts";
+import { RULES } from "./rules.ts";
 import { signEs256 } from "./shared.ts";
 
 const eq = (a: unknown, b: unknown, m = "") => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); };
@@ -682,4 +683,21 @@ Deno.test("a failed first strict-flag lookup, with a grants error outstanding, i
     eq(await legacy.attempt(1000), false);
     eq((await legacy(new Request("https://a.example/billing/health"))).status, 200, "no strict flag configured: legacy");
   });
+});
+
+Deno.test("the route meter's window is rules.cue's: a client is let through again once it has passed", async () => {
+  const t = trialStage();
+  const svc = t.make({ doorFlag: "stripe_door" });
+  const now = Date.now;
+  let skew = 0;
+  Date.now = () => now() + skew;
+  try {
+    const get = async () => { const r = await svc(new Request("https://a.example/billing/route", { headers: { "x-forwarded-for": "8.8.8.8" } })); await r.body?.cancel(); return r.status; };
+    for (let i = 0; i < RULES.routeLimits.perClient; i++) await get();
+    eq(await get(), 429, "past the quota");
+    skew = RULES.routeLimits.windowMs;
+    eq(await get(), 200, "a new window after the declared one");
+  } finally {
+    Date.now = now;
+  }
 });
