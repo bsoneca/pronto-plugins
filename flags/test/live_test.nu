@@ -479,13 +479,17 @@ elif cmd == "pr list":
     out = []
     if os.path.exists(created):
         out.append({"number": 7, "url": "https://example.test/pull/7", "isCrossRepository": False, "author": {"login": "me"}, "body": open(bodyfile).read()})
+    if os.path.exists(D + "/rgh.foreign"):
+        out.append({"number": 11, "url": "https://example.test/pull/11", "isCrossRepository": False, "author": {"login": "someone-else"}, "body": "theirs"})
     if os.path.exists(D + "/rgh.fork"):
         out.append({"number": 9, "url": "https://example.test/pull/9", "isCrossRepository": True, "author": {"login": "evil"}, "body": "- second: x\nRecords: {\"second\": true}"})
     print(json.dumps(out))
     if os.path.exists(D + "/rgh.moveref"):
         # A concurrent record lands after this list: the branch moves and a pull request of its own appears.
         os.remove(D + "/rgh.moveref")
-        os.system("git --git-dir=" + D + "/rorigin.git update-ref refs/heads/fix/flags-record-rec main")
+        g = "git --git-dir=" + D + "/rorigin.git "
+        sha = os.popen(g + "commit-tree main^{tree} -p main -m 'record' -m 'Records: {\"premium\": true}'").read().strip()
+        os.system(g + "update-ref refs/heads/fix/flags-record-rec " + sha)
         open(bodyfile, "w").write("Records: {\"premium\": true}")
         open(created, "w").close()
 elif cmd == "pr view":
@@ -563,12 +567,12 @@ rm $"($dir)/rgh.fork"
 check ($r2f.exit_code == 0 and (ghcount "pr create") == $creates + 1 and (ghcount "pr edit 9") == 0) "record: a fork's pull request is not edited; the tool opens its own"
 
 # A default that is a reference is refused: the push stands, the failure is said and noted, drift lists it.
-rspec false "flags: bad: {default: _d, local: true}\nflags: gen: {default: false, local: true}\nflags: slow: {default: false, local: true}\n_d: false\n"
+rspec false "flags: bad: {default: _d, local: true}\nflags: gen: {default: false, local: true}\nflags: slow: {default: false, local: true}\nflags: two: {default: false, local: true}\n_d: false\n"
 rg add -A
 rg commit -q -m "bad default"
 rg push -q origin HEAD:main
 rg fetch -q origin
-rrun [push $rapp --sync "bad,gen,slow" --untested "rec"] | ignore
+rrun [push $rapp --sync "bad,gen,slow,two" --untested "rec"] | ignore
 let created_before = (open --raw $ghlog | lines | where {|l| $l | str starts-with "pr create" } | length)
 let r3 = (rrun [push $rapp --flip bad --untested "rec"])
 check ($r3.exit_code == 0 and (open $"($rapp)/flagstore/flags.json" | get flags.bad.variants.default) == true and ($r3.stderr | str contains "NOT recorded")) "record refused: the push exits 0 and the flag stays live, with a warning"
@@ -582,7 +586,7 @@ check ($d0.exit_code == 0) "drift: exit 0 once the spec says what is live"
 
 # The branch moves between the attempt's reads and its push (a concurrent record): the lease fails, the attempt is made again
 # over the fresh pull request, and both flags end on the branch and in its Records: line.
-rspec false "flags: gen: {default: false, local: true}\nflags: slow: {default: false, local: true}\n"
+rspec false "flags: gen: {default: false, local: true}\nflags: slow: {default: false, local: true}\nflags: two: {default: false, local: true}\n"
 rrun [push $rapp --flip premium --untested "rec"] | ignore
 rm -f $"($dir)/rgh.created"
 touch $"($dir)/rgh.moveref"
@@ -594,22 +598,62 @@ let recs = (open --raw $"($dir)/rgh.body" | lines | where {|l| $l | str starts-w
 check ($rm1.exit_code == 0 and ($moved | str contains "gen: {default: true") and ($moved | str contains "premium: {default: true") and $recs.gen == true and $recs.premium == true and (ghcount "pr edit 7") == $edits_m + 1 and (ghcount "pr merge") == $merges_m + 1) "record: the branch moved under the attempt: retried over the fresh pull request, both flags on the branch and in Records:, auto-merge armed on the edit"
 
 # A Records: line that cannot be read carries nothing, with a word, and fails nothing.
-"Records: {nope" | save -f $"($dir)/rgh.body"
+let bad_head = (^git --git-dir $rorigin commit-tree main^{tree} -p main -m "record" -m "Records: {nope" | str trim)
+^git --git-dir $rorigin update-ref refs/heads/fix/flags-record-rec $bad_head
 let r_bad = (rrun [push $rapp --flip gen=false --untested "rec"])
-check ($r_bad.exit_code == 0 and ($r_bad.stderr | str contains "Records: line is unparsable") and (rjournal | last).record == "none") "record: an unparsable Records: line carries nothing and fails nothing"
+check ($r_bad.exit_code == 0 and ($r_bad.stderr | str contains "Records: line that is unparsable") and (rjournal | last).record == "none") "record: an unparsable Records: line on the branch head carries nothing and fails nothing"
 
 # A pull request that is no longer open when the branch is pushed: a new one is created.
+# The flip back off closed the pull request, as it should: a record commit and a pull request listed as open again.
+let ours = (^git --git-dir $rorigin commit-tree main^{tree} -p main -m "rec: record live flag defaults" -m "Records: {}" | str trim)
+^git --git-dir $rorigin update-ref refs/heads/fix/flags-record-rec $ours
+touch $"($dir)/rgh.created"
+"- other: false to true" | save -f $"($dir)/rgh.body"
 touch $"($dir)/rgh.closedview"
 let creates_v = (ghcount "pr create")
 let r_view = (rrun [push $rapp --flip gen --untested "rec"])
 rm $"($dir)/rgh.closedview"
 check ($r_view.exit_code == 0 and (ghcount "pr create") == $creates_v + 1) "record: a listed pull request that is no longer open is not edited; a new one is created"
 
+# The carry is read from the branch head's commit, not the pull request body: a body not yet updated changes nothing.
+"an older body, with no Records line" | save -f $"($dir)/rgh.body"
+let r_head = (rrun [push $rapp --flip two --untested "rec"])
+let by_head = (^git -C $rorigin show "fix/flags-record-rec:apps/rec/flags_spec.cue")
+check ($r_head.exit_code == 0 and ($by_head | str contains "gen: {default: true") and ($by_head | str contains "two: {default: true")) "record: the carry comes from the branch head's commit: a stale pull request body does not lose the first flag"
+
+# A stale carried flag leaves no armed pull request behind: its flags no longer live, and the flip has nothing to record,
+# the pull request is closed.
+rrun [push $rapp --sync "gen,two" --untested "rec"] | ignore
+check ((open $"($rapp)/flagstore/flags.json" | get flags.two.variants.default) == false and (open $"($rapp)/flagstore/flags.json" | get flags.gen.variants.default) == false) "record: both carried flags are off live behind the open pull request's back"
+let closes_s = (ghcount "pr close")
+let r_stale = (rrun [push $rapp --flip premium=false --untested "rec"])
+check ($r_stale.exit_code == 0 and (rjournal | last).record == "none" and (ghcount "pr close") == $closes_s + 1) "record: the carried flags went stale and the flip has no diff: the open pull request is closed"
+touch $"($dir)/rgh.created"
+
 # The app's generate gets a time limit: past it the record fails, the push stands.
 rspec true "flags: slow: {default: false, local: true}\n"
 let closes_f = (ghcount "pr close")
-let tm = (rrun [push $rapp --flip slow --untested "rec"] {PRONTO_FLAGS_GENERATE_CMD: "exec sleep 30", PRONTO_FLAGS_GENERATE_TIMEOUT_SEC: "1"})
+let tm = (rrun [push $rapp --flip slow --untested "rec"] {PRONTO_FLAGS_GENERATE_CMD: $"sleep 300 & echo $! > ($dir)/gen.pid; wait", PRONTO_FLAGS_GENERATE_TIMEOUT_SEC: "1"})
 check ($tm.exit_code == 0 and (open $"($rapp)/flagstore/flags.json" | get flags.slow.variants.default) == true and (rjournal | last).record == "failed" and (ghcount "pr close") == $closes_f and ((rjournal | last).note | str contains "generate failed or ran past")) "record: a generate past its limit fails the record, never the push, and a failed record leaves the open pull request open"
+# The whole process group goes with the timeout: the child the generate started is gone.
+let gen_pid = (open --raw $"($dir)/gen.pid" | str trim)
+mut gone = false
+for _ in 1..30 { if (do { ^kill -0 $gen_pid } | complete).exit_code != 0 { $gone = true; break }; sleep 100ms }
+check $gone "record: the generate's child process is killed with its group at the timeout"
+
+# Another author's open pull request on the branch, or a branch that is not ours with no pull request of ours: nothing is pushed.
+rspec true "flags: two: {default: false, local: true}\nflags: gen: {default: false, local: true}\n"
+let head0 = (^git --git-dir $rorigin rev-parse refs/heads/fix/flags-record-rec | str trim)
+touch $"($dir)/rgh.foreign"
+let creates_f = (ghcount "pr create")
+let r_for = (rrun [push $rapp --flip two --untested "rec"])
+rm $"($dir)/rgh.foreign"
+check ($r_for.exit_code == 0 and (rjournal | last).record == "failed" and ((rjournal | last).note | str contains "open pull request of another author") and (^git --git-dir $rorigin rev-parse refs/heads/fix/flags-record-rec | str trim) == $head0 and (ghcount "pr create") == $creates_f) "record: another author's open pull request on the branch: refused, nothing pushed, the push stands"
+let theirs = (^git --git-dir $rorigin commit-tree main^{tree} -p main -m "their work" | str trim)
+^git --git-dir $rorigin update-ref refs/heads/fix/flags-record-rec $theirs
+rm -f $"($dir)/rgh.created"
+let r_own = (rrun [push $rapp --flip gen --untested "rec"])
+check ($r_own.exit_code == 0 and (rjournal | last).record == "failed" and ((rjournal | last).note | str contains "not a record commit") and (^git --git-dir $rorigin rev-parse refs/heads/fix/flags-record-rec | str trim) == $theirs) "record: a branch that is not ours and no pull request of ours: refused, nothing pushed"
 
 # A mirror (flagsLive.mirrors): each write of the object is applied to a node's ConfigMap over ssh;
 # a failing mirror warns, unless it is required. ssh is a stand-in that keeps what it was sent.

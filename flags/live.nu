@@ -895,9 +895,12 @@ def record-want [at: record, version: string, owned: any]: nothing -> record {
 # nothing else touched. The block opens at `flags: <name>: {` in column 0 and ends at its matching `}`. Refused, with
 # the text unchanged, where the block is not there exactly once, or the default is not there exactly once at depth 1,
 # or is no literal (a reference, an expression): the tool does not guess what such a default means.
+# A name as a regular expression's literal.
+def re-escape [name: string]: nothing -> string { $name | str replace -a -r '([.\-+*?()\[\]{}|^$\\])' '\$1' }
+
 export def splice-default [text: string, flag: string, value: any]: nothing -> string {
 	let lines = ($text | split row "\n")
-	let esc = ($flag | str replace -a -r '([.\-+*?()\[\]{}|^$\\])' '\$1')
+	let esc = (re-escape $flag)
 	let opens = ($lines | enumerate | where {|l| $l.item =~ $'^flags:\s+"?($esc)"?:\s*\{' } | get index)
 	if ($opens | length) != 1 { error make {msg: $"flags: record: ($flag) has ($opens | length) blocks opening `flags: ($flag): \{` in column 0, not one"} }
 	let rendered = match ($value | describe) {
@@ -967,13 +970,17 @@ def record-branch [app: path]: nothing -> string { $"fix/flags-record-($app | pa
 # The record pull request, as far as git and gh know it: {number, url, body} or null. The operator's gh, in the app's repo.
 # Only a pull request from this repository by the current gh user counts: a fork's pull request of the same branch name is
 # never edited, force-pushed over or closed.
-def record-open-pr [repo: string, branch: string]: nothing -> any {
+def record-open-pr [repo: string, branch: string, --strict]: nothing -> any {
 	let me = (do { cd $repo; ^gh api user --jq .login } | complete)
 	if $me.exit_code != 0 { error make {msg: $"flags: record: gh api user: ($me.stderr | str trim)"} }
 	let r = (do { cd $repo; ^gh pr list --head $branch --state open --json number,url,isCrossRepository,author,body } | complete)
 	if $r.exit_code != 0 { error make {msg: $"flags: record: gh pr list: ($r.stderr | str trim)"} }
 	let who = ($me.stdout | str trim)
-	$r.stdout | from json | where {|p| not ($p.isCrossRepository? | default true) and (($p.author?.login? | default "") == $who) } | get -o 0
+	let same = ($r.stdout | from json | where {|p| not ($p.isCrossRepository? | default true) })
+	# Another author's pull request on this branch is not ours to force-push over: with --strict it is refused.
+	let others = ($same | where {|p| ($p.author?.login? | default "") != $who })
+	if $strict and ($others | is-not-empty) { error make {msg: $"flags: record: ($branch) has an open pull request of another author \(($others | first | get url)\): refused, nothing was pushed"} }
+	$same | where {|p| ($p.author?.login? | default "") == $who } | get -o 0
 }
 
 # The pull request itself, in a scratch worktree from a fresh origin/main (never the operator's checkout):
@@ -1013,7 +1020,8 @@ def record-work [at: record, app: path, version: string, cases: string, want: li
 		# The app's generate may wait on the machine's slots: it gets PRONTO_FLAGS_GENERATE_TIMEOUT_SEC (600), then it is
 		# stopped and the record fails, never the push.
 		let limit = ($env.PRONTO_FLAGS_GENERATE_TIMEOUT_SEC? | default 600 | into int)
-		let watched = 'sh -c "$PRONTO_GEN" & p=$!; (sleep $PRONTO_GEN_LIMIT; kill $p 2>/dev/null) & w=$!; wait $p; rc=$?; kill $w 2>/dev/null; exit $rc'
+		# Its own process group (job control), killed whole: a child the generate started goes with it.
+		let watched = 'set -m; sh -c "$PRONTO_GEN" & p=$!; (sleep $PRONTO_GEN_LIMIT; kill -TERM -- -$p 2>/dev/null) & w=$!; wait $p; rc=$?; kill $w 2>/dev/null; exit $rc'
 		let g = (run-cases $wapp $watched ($trust | merge {PRONTO_GEN: $gen, PRONTO_GEN_LIMIT: ($limit | into string)}))
 		if not $g.ok { error make {msg: $"flags: record: generate failed or ran past its ($limit) s in the scratch tree: ($g.out)"} }
 	} else { print -e $"flags: record: ($wapp) has no tests/slot.ts, so generate was not run" }
@@ -1066,21 +1074,32 @@ def record-context [app: path]: nothing -> record {
 	let top = (git-must (git-in $app rev-parse --show-toplevel) "not in a git tree" | path expand)
 	let branch = (record-branch $app)
 	let remote = (git-must (git-in $top ls-remote origin $"refs/heads/($branch)") "git ls-remote" | split row "\t" | first | default "")
-	{remote: $remote, open: (record-open-pr $top $branch)}
+	let open = (record-open-pr $top $branch --strict)
+	# The carry is read from the branch head's own commit message (its Records: line), the object the lease is on; the pull
+	# request only says whether there is one to edit. A branch that is there with no pull request of ours is ours only if
+	# its head is a record commit of this tool: anything else is someone's work, and is not force-pushed over.
+	let message = if $remote == "" { "" } else {
+		git-must (git-in $top fetch -q origin $branch) "git fetch origin branch" | ignore
+		git-must (git-in $top log -1 --format=%B $remote) "git log of the branch head"
+	}
+	if $remote != "" and $open == null and not (($message | lines | first | default "") | str ends-with ": record live flag defaults") {
+		error make {msg: $"flags: record: ($branch) exists on origin and its head is not a record commit of this tool: refused, nothing was pushed"}
+	}
+	{remote: $remote, open: $open, message: (if $open == null { "" } else { $message })}
 }
 
-# The flags the open record pull request already changes against main (its `Records:` line: flag to value), carried into
+# The flags the open record pull request's branch head already changes against main (the `Records:` line of its commit message: flag to value), carried into
 # the rebuilt branch for as long as live still holds their value: {keep: [{flag, value}], stale: [flags live has moved on from]}.
 # `have` is what the push itself records, which wins.
-def record-carry [at: record, open: any, have: list<record>]: nothing -> record {
-	let line = if $open == null { [] } else { $open.body? | default "" | lines | where {|l| $l | str starts-with "Records: " } }
+def record-carry [at: record, message: string, have: list<record>]: nothing -> record {
+	let line = ($message | lines | where {|l| $l | str starts-with "Records: " })
 	if ($line | is-empty) { return {keep: [], stale: []} }
 	# A line that is not ours to read carries nothing, and fails nothing.
 	let parsed = try {
 		let r = ($line | first | str substring 9.. | from json)
 		if ($r | describe | str starts-with "record") and ($r | values | all {|v| ($v | describe) in ["bool" "string" "int" "float"] }) { $r } else { null }
 	} catch { null }
-	if $parsed == null { print -e "flags: WARNING: the open record pull request's Records: line is unparsable, so it carries nothing into the rebuilt branch"; return {keep: [], stale: []} }
+	if $parsed == null { print -e "flags: WARNING: the open record pull request's branch head has a Records: line that is unparsable, so it carries nothing into the rebuilt branch"; return {keep: [], stale: []} }
 	let recs = ($parsed | transpose flag value | where {|r| $r.flag not-in ($have | get flag) })
 	let now = (store-cat $at | from json)
 	let live = ($recs | each {|r| $r | insert live (default-of ($now.flags? | default {} | get -o $r.flag)) })
@@ -1092,8 +1111,8 @@ def record-attempt [at: record, app: path, version: string, cases: string, owned
 	let w = (record-want $at $version $owned)
 	if ($w.moved | is-not-empty) { print -e $"flags: WARNING: live has moved on since version ($version): ($w.moved | str join ', ') no longer hold its value and are not recorded" }
 	# The pull request already open keeps its flags that live still holds: a second flip does not unmake the first's record.
-	let ctx = if $stand != "" { {remote: "", open: null} } else { record-context $app }
-	let carry = if $stand != "" { {keep: [], stale: []} } else { record-carry $at $ctx.open $w.want }
+	let ctx = if $stand != "" { {remote: "", open: null, message: ""} } else { record-context $app }
+	let carry = if $stand != "" { {keep: [], stale: []} } else { record-carry $at $ctx.message $w.want }
 	let w = ($w | upsert want ($w.want | append $carry.keep))
 	if ($w.want | is-empty) {
 		return (if ($carry.stale | is-not-empty) { {record: "none", flags: "", pr: "", stale: $carry.stale} } else if ($w.moved | is-not-empty) { {record: "skipped", flags: "", pr: "", note: $"live moved on since version ($version): ($w.moved | str join '+')"} } else { {record: "none", flags: "", pr: ""} })
@@ -1107,6 +1126,8 @@ def record-attempt [at: record, app: path, version: string, cases: string, owned
 		{record: (if ($diffs | is-empty) { "none" } else { "stand-in" }), flags: ($diffs | get flag | str join "+"), pr: ""}
 	} else { record-pr $at $app $version $cases $w.want $ctx }
 	if ($carry.stale | is-not-empty) { print -e $"flags: record: the open record pull request's ($carry.stale | str join ', ') no longer hold their value live, and are dropped from it" }
+	# Whatever the outcome, record-back knows which flags of the open pull request went stale: with nothing left to record it is closed.
+	let r = ($r | upsert stale $carry.stale)
 	if ($w.moved | is-not-empty) { $r | insert note $"live moved on since version ($version): ($w.moved | str join '+') not recorded" } else { $r }
 }
 
@@ -1119,7 +1140,7 @@ def record-close [app: path, owned: any, stale: list<string>]: nothing -> string
 		let repo = ($top.stdout | str trim)
 		let open = (record-open-pr $repo (record-branch $app))
 		if $open == null { return "" }
-		let named = ($owned == null) or ($stale | is-not-empty) or ($owned | any {|f| ($open.body? | default "") =~ ("(?m)^- " + $f + ":") })
+		let named = ($owned == null) or ($stale | is-not-empty) or ($owned | any {|f| ($open.body? | default "") =~ ("(?m)^- " + (re-escape $f) + ":") })
 		if not $named { return "" }
 		let c = (do { cd $repo; ^gh pr close $open.number --delete-branch --comment "The flags this recorded no longer differ from the spec, or the record failed: closed by pronto-flags." } | complete)
 		if $c.exit_code == 0 { print $"flags: closed the stale record pull request ($open.url)"; $open.url } else { print -e $"flags: WARNING: could not close ($open.url): ($c.stderr | str trim)"; "" }
