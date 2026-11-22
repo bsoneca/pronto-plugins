@@ -135,7 +135,9 @@ import (
 	// Seconds a stopping instance waits for its sessions (CloudNativePG's smartShutdownTimeout) before a fast
 	// shutdown. With standbys none: no standby is promoted while the old primary waits. Below the Cluster's
 	// stopDelay (120): the operator reads one at or past it as 0.
-	smartShutdown: int & >=0 & <120 | *[if instances > 1 {0}, 15][0]
+	// Set only when named or with standbys (then 0): else CloudNativePG's own stop settings stay, and nothing
+	// restarts the primary for them. Setting either writes stopDelay 120 beside it.
+	smartShutdown?: int & >=0 & <120
 	// With standbys, quorum-based synchronous replication: a commit waits for `number` standbys, and a primary
 	// that lost them keeps writing under "preferred".
 	synchronous: {
@@ -143,7 +145,8 @@ import (
 		number:         int & >=1 | *1
 		dataDurability: *"preferred" | "required"
 	}
-	// Replication slots kept on every instance, so a standby promoted keeps the others'.
+	// Replication slots kept on every instance, so a standby promoted keeps the others' (with standbys, `false`
+	// is written too; with one instance only `true` is).
 	haSlots: bool | *(instances > 1)
 	// CloudNativePG's own PodDisruptionBudgets (on by default; with one instance a budget blocks a drain).
 	enablePDB: bool | *true
@@ -218,8 +221,10 @@ import (
 	// Seconds each wait takes: the primary database on its image, a Job, a rollout.
 	waits: {
 		primary: *300 | int & >0
-		rollout: *180 | int & >0
-		job:     *600 | int & >0
+		// for a database with standbys, after the primary: every instance ready on the image (its own wait)
+		standbys: *300 | int & >0
+		rollout:  *180 | int & >0
+		job:      *600 | int & >0
 	}
 	operators: #Operators
 	backups?:  #Backups & {_name: name}
@@ -428,6 +433,15 @@ import (
 		[for o in _all if o.kind == "Gateway" for l in o.spec.listeners if l.hostname != release.host {
 			"Gateway/\(o.metadata.name) listens for \(l.hostname), not the release's host \(release.host)"
 		}],
+		[for n, _ in release.scale if n == "\(release.name)-electric" {
+			"scale names \(n), a single writer: Electric holds one replication slot and advisory lock per database, so more than one pod needs per-pod slots and sticky routing, which upstream does not render"
+		}],
+		[if release.database != _|_ for l, _ in release.database.logins if list.Contains(["postgres", "streaming_replica", "electric", "authenticator"], l) {
+			"database.logins names \(l), a role of upstream's own"
+		}],
+		[for o in _logins if len([for u in _pre if u.kind == o.kind && u.metadata.name == o.metadata.name {u}]) > 0 {
+			"database.logins would emit \(o.kind)/\(o.metadata.name), which the render already has"
+		}],
 		[for n, _ in release.scale if len([for o in _pre if o.kind == "Deployment" if o.metadata.name == n {o}]) == 0 {
 			"scale names \(n), which is no Deployment of the render (\(strings.Join([for o in _pre if o.kind == "Deployment" {o.metadata.name}], ", ")))"
 		}],
@@ -542,7 +556,9 @@ import (
 	release: #Release
 	let production = release.preview == ""
 	let n = in.metadata.name
-	let recreate = len([if in.spec.strategy != _|_ if in.spec.strategy.type == "Recreate" {true}]) > 0
+
+	// single writers: a Recreate strategy, and Electric (one replication slot and advisory lock per database)
+	let recreate = n == "\(release.name)-electric" || len([if in.spec.strategy != _|_ if in.spec.strategy.type == "Recreate" {true}]) > 0
 	let sc = [if release.scale[n] != _|_ {release.scale[n]}]
 
 	// the first that applies: the Deployment's own number for the case, then the release's default for it
@@ -594,6 +610,7 @@ import (
 		if db.slotWalKeepMB != _|_ {db.slotWalKeepMB},
 		if len(sizeOf) > 0 {div(strconv.Atoi(sizeOf[0][1]) * {Mi: 1, Gi: 1024, Ti: 1048576}[sizeOf[0][2]], 4)},
 	]
+	let smart = [if db.smartShutdown != _|_ {db.smartShutdown}, if db.instances > 1 {0}]
 	let own = {
 		if len(slotKeep) > 0 {max_slot_wal_keep_size: "\(list.Max([64, slotKeep[0]]))MB"}
 		db.parameters
@@ -633,12 +650,15 @@ import (
 				primaryUpdateStrategy: "unsupervised"
 				primaryUpdateMethod:   "switchover"
 			}
-			if db.haSlots {replicationSlots: highAvailability: enabled: true}
+			if db.instances > 1 || db.haSlots {replicationSlots: highAvailability: enabled: db.haSlots}
 			if db.instances > 1 || !db.enablePDB {enablePDB: db.enablePDB}
 
-			// A stop is bounded: a smart shutdown for `smartShutdown` seconds, a fast one after, the pod killed at stopDelay.
-			smartShutdownTimeout: db.smartShutdown
-			stopDelay:            120
+			// A stop is bounded: a smart shutdown for `smartShutdown` seconds, a fast one after, the pod killed at
+			// stopDelay. Written only where named or with standbys; else CloudNativePG's defaults stay.
+			if len(smart) > 0 {
+				smartShutdownTimeout: smart[0]
+				stopDelay:            120
+			}
 			if release.containerResources["postgres"] != _|_ {resources: release.containerResources["postgres"]}
 		}
 	}

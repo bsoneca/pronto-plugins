@@ -32,21 +32,35 @@ _tunedPreview: {
 cases: {
 	"scale sets the named Deployments' replicas and leaves the rest as upstream renders them": {
 		_got:  (_tuned & {release: scale: {"app-crud": {replicas: 3, preview: 2}, "app-caddy": {replicas: 2}}}).replicas
-		_want: {"app-crud": 3, "app-caddy": 2, "app-ticker": 1}
+		_want: {"app-crud": 3, "app-caddy": 2, "app-ticker": 1, "app-electric": 1}
 	}
 	"in a preview scale takes its preview number, and a Deployment with none keeps upstream's": {
 		_got:  (_tunedPreview & {release: scale: {"app-crud": {replicas: 3, preview: 2}, "app-caddy": {replicas: 3}}}).replicas
-		_want: {"app-crud": 2, "app-caddy": 1, "app-ticker": 1}
+		_want: {"app-crud": 2, "app-caddy": 1, "app-ticker": 1, "app-electric": 1}
 	}
 	"the default replicas apply to every Deployment but a single writer's, which only scale names": {
 		_prod: (_tuned & {release: {replicas: 3, scale: "app-ticker": replicas: 2}}).replicas
 		_rc:   (_tunedPreview & {release: {replicas: 3, previewReplicas: 2}}).replicas
 		_got:  {prod: _prod, rc: _rc}
-		_want: {prod: {"app-crud": 3, "app-caddy": 3, "app-ticker": 2}, rc: {"app-crud": 2, "app-caddy": 2, "app-ticker": 1}}
+		_want: {prod: {"app-crud": 3, "app-caddy": 3, "app-ticker": 2, "app-electric": 1}, rc: {"app-crud": 2, "app-caddy": 2, "app-ticker": 1, "app-electric": 1}}
 	}
 	"scale beats the default": {
 		_got:  (_tuned & {release: {replicas: 3, scale: "app-crud": replicas: 5}}).replicas
-		_want: {"app-crud": 5, "app-caddy": 3, "app-ticker": 1}
+		_want: {"app-crud": 5, "app-caddy": 3, "app-ticker": 1, "app-electric": 1}
+	}
+	"Electric is a single writer: the defaults leave it at one and scale refuses it": {
+		_got: {
+			default: (_tuned & {release: replicas: 3}).replicas."app-electric"
+			scaled:  (_tuned & {release: scale: "app-electric": replicas: 3}).violations
+		}
+		_want: {default: 1, scaled: [=~"^scale names app-electric, a single writer"]}
+	}
+	"a login named for one of upstream's roles, or whose objects the render has, is refused": {
+		_got: [
+			(_tuned & {release: database: logins: electric: inRoles: []}).violations,
+			(_tuned & {release: database: logins: postgres: inRoles: []}).violations,
+		]
+		_want: [[=~"^database.logins names electric, a role of upstream's own"], [=~"^database.logins names postgres, a role of upstream's own"]]
 	}
 	"scale naming a Deployment the render has not is refused": {
 		_got:  (_tuned & {release: scale: "app-nope": replicas: 2}).violations
@@ -71,15 +85,15 @@ cases: {
 		_got:  (_tuned & {release: {database: {}, containerResources: {nope: limits: cpu: "1", postgres: limits: cpu: "1"}}}).violations
 		_want: ["containerResources names nope, which is no container of the render's Deployments (or postgres)"]
 	}
-	"a database that is set but asks for little changes little: one instance, its shutdown bounded": {
+	"a database that is set but asks for little changes little: one instance, CloudNativePG's own stop settings stay": {
 		_c: (_tuned & {release: database: {}}).cluster
 		_got: {
 			instances: _c.spec.instances
 			storage:   _c.spec.storage
 			params:    _c.spec.postgresql.parameters
 			sync:      _c.spec.postgresql.synchronous != _|_
-			smart:     _c.spec.smartShutdownTimeout
-			stop:      _c.spec.stopDelay
+			smart:     _c.spec.smartShutdownTimeout != _|_
+			stop:      _c.spec.stopDelay != _|_
 			pdb:       _c.spec.enablePDB != _|_
 			slots:     _c.spec.replicationSlots != _|_
 			update:    _c.spec.primaryUpdateStrategy != _|_
@@ -90,8 +104,8 @@ cases: {
 			storage:   {size: "1Gi", storageClass: "local-path"}
 			params:    {wal_level: "logical", max_connections: "200", max_replication_slots: "128"}
 			sync:      false
-			smart:     15
-			stop:      120
+			smart:     false
+			stop:      false
 			pdb:       false
 			slots:     false
 			update:    false
@@ -125,7 +139,7 @@ cases: {
 	}
 	"a database's synchronous settings, PDB, slots and shutdown are the app's to change": {
 		_c:    (_tuned & {release: database: {instances: 2, enablePDB: false, haSlots: false, smartShutdown: 30, synchronous: {number: 1, dataDurability: "required"}}}).cluster
-		_got:  {pdb: _c.spec.enablePDB, slots: _c.spec.replicationSlots != _|_, smart: _c.spec.smartShutdownTimeout, durability: _c.spec.postgresql.synchronous.dataDurability}
+		_got:  {pdb: _c.spec.enablePDB, slots: _c.spec.replicationSlots.highAvailability.enabled, smart: _c.spec.smartShutdownTimeout, durability: _c.spec.postgresql.synchronous.dataDurability}
 		_want: {pdb: false, slots: false, smart: 30, durability: "required"}
 	}
 	"postgres's resources go to the Cluster, and without a database set they are refused": {

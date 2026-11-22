@@ -182,23 +182,28 @@ export def dry-run [objects: list, namespace: string] {
 
 # Waits for the database's primary to run the image the release names and be ready: the cluster's
 # status names a new image as soon as it starts rolling onto it, and Ready stays true through the restart.
-# With standbys (`instances` over one) it also waits for every instance to be ready on that image, so a
-# release is not done while a standby is still rolling or its volume is being cloned.
-def wait-primary [app: string, namespace: string, image: string, seconds: int, instances: int = 1] {
-	print $"node: (stamp) waiting for CloudNativePG cluster ($app)-db in ($namespace) on ($image)(if $instances > 1 { ' (' + ($instances | into string) + ' instances)' } else { '' })"
+def wait-primary [app: string, namespace: string, image: string, seconds: int] {
+	print $"node: (stamp) waiting for CloudNativePG cluster ($app)-db in ($namespace) on ($image)"
 	let deadline = ((date now) + ($seconds * 1sec))
-	let ready_on_image = {|p| $p.metadata.deletionTimestamp? == null and ($p.spec.containers | where name == "postgres" | first | get image) == $image and ($p.status.conditions? | default [] | any {|c| $c.type == "Ready" and $c.status == "True" }) }
 	loop {
-		let primary = (kubectl-json get pods -n $namespace -l $"cnpg.io/cluster=($app)-db,cnpg.io/instanceRole=primary" | get items | where $ready_on_image)
-		if ($primary | is-not-empty) { break }
+		let primary = (kubectl-json get pods -n $namespace -l $"cnpg.io/cluster=($app)-db,cnpg.io/instanceRole=primary" | get items
+			| where {|p| $p.metadata.deletionTimestamp? == null and ($p.spec.containers | where name == "postgres" | first | get image) == $image and ($p.status.conditions? | default [] | any {|c| $c.type == "Ready" and $c.status == "True" }) })
+		if ($primary | is-not-empty) { return }
 		if (date now) > $deadline { error make {msg: $"cluster/($app)-db has no ready primary on ($image)"} }
 		sleep 3sec
 	}
-	if $instances <= 1 { return }
+}
+
+# With standbys: every instance ready on the image, in a wait of its own after the primary's. The primary is up and
+# serving by now, so a slow standby (a volume being cloned) is no reason to put the old image back: it only stops the release.
+def wait-standbys [app: string, namespace: string, image: string, instances: int, seconds: int] {
+	print $"node: (stamp) waiting for the ($instances) instances of ($app)-db in ($namespace) on ($image)"
+	let deadline = ((date now) + ($seconds * 1sec))
 	loop {
-		let ready = (kubectl-json get pods -n $namespace -l $"cnpg.io/cluster=($app)-db,cnpg.io/podRole=instance" | get items | where $ready_on_image)
+		let ready = (kubectl-json get pods -n $namespace -l $"cnpg.io/cluster=($app)-db,cnpg.io/podRole=instance" | get items
+			| where {|p| $p.metadata.deletionTimestamp? == null and ($p.spec.containers | where name == "postgres" | first | get image) == $image and ($p.status.conditions? | default [] | any {|c| $c.type == "Ready" and $c.status == "True" }) })
 		if ($ready | length) >= $instances { return }
-		if (date now) > $deadline { error make {msg: $"cluster/($app)-db has ($ready | length) of its ($instances) instances ready on ($image)"} }
+		if (date now) > $deadline { error make {msg: $"cluster/($app)-db has ($ready | length) of its ($instances) instances ready on ($image) after ($seconds) s; the primary is up, so the database image stays"} }
 		sleep 3sec
 	}
 }
@@ -551,7 +556,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		# 8. the database, on its image
 		let db_image = (of-kind $objects Cluster | first | get spec.imageName)
 		let db_instances = (of-kind $objects Cluster | first | get spec.instances? | default 1)
-		try { wait-primary $app $ns $db_image $node.waits.primary $db_instances } catch {|e|
+		try { wait-primary $app $ns $db_image $node.waits.primary } catch {|e|
 			if $previous_image != null {
 				print -e $"node: (stamp) the database did not come up on the new image: putting back ($previous_image)"
 				let put = (^kubectl patch $"cluster.postgresql.cnpg.io/($app)-db" -n $ns --type merge -p ({spec: {imageName: $previous_image}} | to json --raw) | complete)
@@ -559,6 +564,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 			}
 			error make {msg: $e.msg}
 		}
+		if $db_instances > 1 { wait-standbys $app $ns $db_image $db_instances $node.waits.standbys }
 		# 9. the schema Jobs, in jobOrder
 		for j in $node.jobOrder {
 			let job = ($jobs | where {|o| $o.metadata.name == $"($app)-($j)" })

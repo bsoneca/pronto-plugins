@@ -600,15 +600,19 @@ def test_a_database_of_standbys_is_waited_for_whole [] {
 	let w = (sandbox)
 	"\nNode: database: instances: 3\n" | save --append ($w.app | path join release.cue)
 	"2" | save -f ($w.state | path join cluster_instances_ready)
-	let body = (with-node $w "upsert waits.primary 1" $"release-app $app_info $node $meta $compose $facts [] (pushed-json)")
+	"reg/aprende-database:17@sha256:old" | save -f ($w.state | path join previous_image)
+	let body = (with-node $w "upsert waits.standbys 1" $"release-app $app_info $node $meta $compose $facts [] (pushed-json)")
 	let short = (in-world $w -c (script $w $body))
 	assert ($short.exit_code != 0)
 	assert (has $short.stderr "has 2 of its 3 instances ready on") $short.stderr
+	assert (has $short.stderr "the database image stays") $short.stderr
+	assert equal (calls $w | where {|c| $c | str starts-with "patch cluster.postgresql.cnpg.io" } | length) 0 "a slow standby does not put the old image back"
+	rm -f ($w.state | path join previous_image)
 	rm -f ($w.state | path join calls.jsonl)
 	rm -f ($w.state | path join cluster_instances_ready)
-	let whole = (in-world $w -c (script $w $body))
+	let whole = (in-world $w -c (script $w (with-node $w "upsert waits.primary 1" $"release-app $app_info $node $meta $compose $facts [] (pushed-json)")))
 	assert equal $whole.exit_code 0 $"($whole.stdout)($whole.stderr)"
-	assert (has $whole.stdout "(3 instances)") $whole.stdout
+	assert (has $whole.stdout "the 3 instances of aprende-db") $whole.stdout
 	rm -rf $w.dir
 }
 

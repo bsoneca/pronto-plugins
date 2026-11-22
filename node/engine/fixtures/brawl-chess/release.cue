@@ -18,15 +18,15 @@ Node: node.#Release & {
 	context: "contabo2"
 	api: ssh: "deploy@node.example"
 	hosts: {production: "bonk.bsoneca.com", rc: "rc.bonk.bsoneca.com"}
-	// n+1 (the services' Deployments, by upstream's names): three pods, the rc preview two.
+	// n+1 (the stateless Deployments, by upstream's names): three pods, the rc preview two. Electric stays at one: it holds
+	// a replication slot and an advisory lock per database.
 	scale: {
-		"brawl-chess-electric": {replicas: 3, preview: 2}
-		"brawl-chess-render":   {replicas: 3, preview: 2}
-		"brawl-chess-caddy":    {replicas: 3, preview: 2}
-		"brawl-chess-crud":     {replicas: 3, preview: 2}
-		"brawl-chess-auth":     {replicas: 3, preview: 2}
+		"brawl-chess-render": {replicas: 3, preview: 2}
+		"brawl-chess-caddy":  {replicas: 3, preview: 2}
+		"brawl-chess-crud":   {replicas: 3, preview: 2}
+		"brawl-chess-auth":   {replicas: 3, preview: 2}
 	}
-	// One primary and two standbys, the volume stated, connections for three Electric pods, a login for the exporter.
+	// One primary and two standbys, the volume stated, connections, a login for the exporter.
 	database: {
 		instances: 3
 		storage:   "1Gi"

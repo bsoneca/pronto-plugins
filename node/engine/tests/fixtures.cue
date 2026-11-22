@@ -56,6 +56,16 @@ _fixture: {
 			}
 		},
 		{
+			// Electric: a plain Deployment upstream, one writer all the same
+			apiVersion: "apps/v1"
+			kind:       "Deployment"
+			metadata:   {name: "app-electric", namespace: ns}
+			spec: {
+				replicas: 1
+				template: spec: containers: [{name: "electric", image: "\(reg)/app-electric:latest@sha256:\(_d)"}]
+			}
+		},
+		{
 			// a single-writer runtime service: the release's default replicas leave it alone
 			apiVersion: "apps/v1"
 			kind:       "Deployment"

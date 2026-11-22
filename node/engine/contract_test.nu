@@ -38,7 +38,7 @@ def runtime-dir []: nothing -> string {
 def fixture-apps []: nothing -> list<record> {
 	[
 		{name: "aprende", services: [database crud electric caddy auth migrate], build: [database crud electric auth caddy migrate]}
-		{name: "brawl-chess", package: "brawlchess", tuned: true, services: [database crud electric caddy auth migrate render], build: [database crud electric auth caddy migrate render]}
+		{name: "brawl-chess", package: "brawlchess", tuned: {logins: [analytics_reader], parameters: [max_connections], resources: [electric caddy crud], replicas: [crud auth caddy render]}, services: [database crud electric caddy auth migrate render], build: [database crud electric auth caddy migrate render]}
 		{name: "studio", services: [database crud electric caddy auth migrate render ticker imgproxy], build: [ticker imgproxy database crud electric auth caddy migrate render]}
 	]
 }
@@ -133,7 +133,7 @@ def canon []: any -> any {
 # first by the engine and with the rest by upstream, the engine's record, and the generator and Secret of a database login
 # (the brawl-chess fixture's analytics_reader) are the engine's own;
 # upstream's cleanup of an earlier airlock (the engine refuses the airlock) is upstream's.
-def writes [w: record]: nothing -> list<string> {
+def writes [w: record, logins: list<string> = []]: nothing -> list<string> {
 	let f = ($w.state | path join calls.jsonl)
 	open --raw $f | lines | each {|l| $l | from json } | each {|c|
 		let a = $c.args
@@ -144,7 +144,7 @@ def writes [w: record]: nothing -> list<string> {
 			"rollout" => (if $a.1 == "status" { [$"rollout ($a.2)"] } else { [] })
 			_ => []
 		}
-	} | flatten | where {|l| not ($l starts-with "apply Namespace/") and $l != "apply ConfigMap/pronto-release" and not ($l =~ '^apply Configuration/.*-caddy-invoke-only$') and not ($l =~ '^apply (Password|ExternalSecret)/.*-analytics-reader-(password|db)$') }
+	} | flatten | where {|l| not ($l starts-with "apply Namespace/") and $l != "apply ConfigMap/pronto-release" and not ($l =~ '^apply Configuration/.*-caddy-invoke-only$') and not ($logins | any {|g| let d = ($g | str replace -a "_" "-"); $l =~ $"^apply \(Password|ExternalSecret\)/.*-($d)-\(password|db\)$" }) }
 }
 
 # The paths of a value with what is at each, one line a leaf: two values' difference is the lines of one only.
@@ -218,15 +218,28 @@ def undeclared []: list -> list {
 		}
 }
 
-# What the engine's tunings (replicas, containers' resources, the database's settings and logins: node.cue's #Tune) may
-# change, taken out of both sides of a comparison for an app that sets them: an app that sets none is compared whole.
-def without-tunings []: list -> list {
+# What a fixture's tunings (node.cue's #Tune) changed, and only that, taken out of both sides of a comparison: the
+# replicas of the Deployments it scales, the resources of the containers it names, the Cluster's instances, volume size,
+# synchronous replication, stop and update settings, the parameters it names (and the WAL cap the volume gives), the roles
+# of its logins, and the generator and Secret of each login. Everything else of upstream's must come through as it is.
+# An app that sets none is compared whole.
+def without-tunings [app: string, t: record]: list -> list {
+	let dashed = ($t.logins | each {|l| $l | str replace -a "_" "-" })
+	let params = ($t.parameters | append max_slot_wal_keep_size)
 	$in
-		| where {|o| not ($o.kind in [Password ExternalSecret] and ($o.metadata.name | str contains "analytics-reader")) }
+		| where {|o| not ($o.kind in [Password ExternalSecret] and ($dashed | any {|d| $o.metadata.name ends-with $"($app)-($d)-password" or $o.metadata.name ends-with $"($app)-($d)-db" })) }
 		| each {|o|
 			match $o.kind {
-				"Deployment" => ($o | reject -o spec.replicas | update spec.template.spec.containers {|d| $d.spec.template.spec.containers | each {|c| $c | reject -o resources } })
-				"Cluster" => ($o | reject -o spec.instances spec.storage.size spec.postgresql.parameters spec.postgresql.synchronous spec.managed.roles spec.primaryUpdateStrategy spec.primaryUpdateMethod spec.replicationSlots spec.enablePDB spec.smartShutdownTimeout spec.stopDelay spec.resources)
+				"Deployment" => {
+					let scaled = ($o.metadata.name | str replace $"($app)-" "") in $t.replicas
+					let d = (if $scaled { $o | reject -o spec.replicas } else { $o })
+					$d | update spec.template.spec.containers {|x| $x.spec.template.spec.containers | each {|c| if $c.name in $t.resources { $c | reject -o resources } else { $c } } }
+				}
+				"Cluster" => {
+					let c = ($o | reject -o spec.instances spec.storage.size spec.postgresql.synchronous spec.primaryUpdateStrategy spec.primaryUpdateMethod spec.replicationSlots spec.enablePDB spec.smartShutdownTimeout spec.stopDelay spec.resources)
+					let c = ($c | update spec.postgresql.parameters {|x| $x.spec.postgresql.parameters | reject -o ...$params })
+					$c | update spec.managed.roles {|x| $x.spec.managed.roles | where {|r| $r.name not-in $t.logins } }
+				}
 				_ => $o
 			}
 		}
@@ -256,14 +269,20 @@ def test_objects_change_only_as_declared [fx: record] {
 		let tuned = ($fx.tuned? | default false)
 		let engine = ($both.engine | undeclared)
 		let upstream = $both.upstream
-		assert equal (if $tuned { $engine | without-tunings } else { $engine } | canon | to json) (if $tuned { $upstream | without-tunings } else { $upstream } | canon | to json) $"variant ($variant | str trim)"
-		if $tuned {
+		let mine = (if $tuned != false { $engine | without-tunings $fx.name $tuned } else { $engine })
+		let theirs = (if $tuned != false { $upstream | without-tunings $fx.name $tuned } else { $upstream })
+		assert equal ($mine | canon | to json) ($theirs | canon | to json) $"variant ($variant | str trim): (differences $mine $theirs)"
+		if $tuned != false {
 			# the tunings themselves: the numbers the fixture's release.cue names, in production and in the preview
 			let crud = ($both.engine | where {|o| $o.kind == "Deployment" and $o.metadata.name == $"($fx.name)-crud" } | first)
 			let db = ($both.engine | where kind == Cluster | first)
 			assert equal $crud.spec.replicas (if ($variant | str contains "preview") { 2 } else { 3 }) "crud's replicas"
 			assert equal $db.spec.instances 3 "the database's instances"
-			assert ($db.spec.managed.roles | any {|r| $r.name == "analytics_reader" }) "the login is a managed role"
+			let up_db = ($upstream | where kind == Cluster | first)
+			assert equal ($db.spec.managed.roles | get name) (($up_db.spec.managed.roles | get name) | append $tuned.logins) "upstream's roles come through, the logins are added"
+			assert equal ($db.spec.postgresql.parameters | reject -o ...$tuned.parameters max_slot_wal_keep_size) ($up_db.spec.postgresql.parameters | reject -o ...$tuned.parameters) "upstream's parameters come through but the ones named"
+			assert equal ($db.spec.postgresql.parameters.max_connections) "200" "the app's parameter wins"
+			assert equal ($engine | where kind == Deployment | where {|o| $o.metadata.name == $"($fx.name)-electric" } | first | get spec.replicas) 1 "Electric stays at one"
 		}
 		# the door's Dapr configuration: its own, invocation alone allowed; every other Deployment keeps the shared one
 		let own = ($both.engine | where {|o| $o.kind == "Configuration" and ($o.metadata.name | str ends-with "-caddy-invoke-only") })
@@ -306,7 +325,7 @@ def test_data_and_order_match_upstreams_main [fx: record] {
 	assert equal ($mine | canon | to json) ($upstream_data | canon | to json) (differences $mine $upstream_data)
 	# 3. order, but for the engine's own Namespace and record
 	let want = (writes $up)
-	let got = (writes $en)
+	let got = (writes $en ($fx.tuned?.logins? | default []))
 	assert (($want | length) > 10) "upstream applied something"
 	print $"  ($want | length) writes and ((open ($en.dir | path join data.json) | columns | length)) data fields compared"
 	assert equal $got $want
