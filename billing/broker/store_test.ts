@@ -3,7 +3,7 @@
 // store tests do. PGlite has one connection, so two Postgres locks at once are shown by the statements
 // that take them (an advisory lock held by a transaction); the memory store shows the waiting itself.
 import { PGlite } from "npm:@electric-sql/pglite@0.3.7";
-import { MemoryStore, PostgresStore, SQL, type Sql, type Store } from "./store.ts";
+import { MemoryStore, PostgresStore, SCHEMA, SQL, type Sql, type Store } from "./store.ts";
 
 function assertEquals(a: unknown, b: unknown, m = "") {
   if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m} expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
@@ -171,6 +171,28 @@ for (const [name, make] of claimable) {
     assertEquals((await s.claim("stripe event", "evt_2", 120_000)).state, "claimed", "after forget(token)");
   });
 
+  Deno.test(`${name} store: a completed event is done for its whole retention, even in the last seconds of it`, async () => {
+    const { s } = await make();
+    const c = await s.claim("stripe event", "evt_1", 120_000) as { token: string };
+    // A retention shorter than a lease: the old inference (time left above a lease) read it as busy.
+    assertEquals(await s.complete("stripe event", "evt_1", c.token, 60_000), true);
+    assertEquals((await s.claim("stripe event", "evt_1", 120_000)).state, "done", "done, not busy");
+    assertEquals(await s.complete("stripe event", "evt_1", c.token, 60_000), false, "a finished claim completes no more");
+  });
+
+  Deno.test(`${name} store: only the current claim's token completes it`, async () => {
+    const { s, expire } = await make();
+    const old = await s.claim("stripe event", "evt_1", 120_000) as { token: string };
+    await expire("stripe event", "evt_1");
+    const newer = await s.claim("stripe event", "evt_1", 120_000) as { token: string };
+    assertEquals(await s.complete("stripe event", "evt_1", old.token, 600_000), false, "a stale token completes nothing");
+    assertEquals((await s.claim("stripe event", "evt_1", 120_000)).state, "busy", "the newer claim is still the holder");
+    assertEquals(await s.complete("stripe event", "evt_1", newer.token, 600_000), true);
+    assertEquals((await s.claim("stripe event", "evt_1", 120_000)).state, "done");
+    await s.forget("stripe event", "evt_2");
+    assertEquals(await s.complete("stripe event", "evt_2", "no such", 600_000), false, "nothing claimed, nothing completed");
+  });
+
   Deno.test(`${name} store: an expired lease is claimable again, and the old claim's token deletes nothing of the new one`, async () => {
     const { s, expire } = await make();
     const old = await s.claim("stripe event", "evt_1", 120_000) as { token: string };
@@ -190,5 +212,28 @@ Deno.test("postgres store: claim is one statement that takes only a row nobody h
   const fake: Sql = { unsafe: (q) => { sql.push(q.replace(/\s+/g, " ")); return Promise.resolve([{ token: "2026-11-21 10:00:00.123456+00" }]); }, begin: (fn) => fn(fake) };
   const c = await new PostgresStore(fake).claim("stripe event", "evt", 120_000);
   assertEquals(c, { state: "claimed", token: "2026-11-21 10:00:00.123456+00" }, "the token is the row's own text, microseconds kept");
-  assertEquals(/^INSERT INTO billing_seen .* ON CONFLICT \(kind, id\) DO UPDATE SET expires = EXCLUDED\.expires WHERE billing_seen\.expires <= now\(\) RETURNING expires::text AS token$/.test(sql[0]), true);
+  assertEquals(/^INSERT INTO billing_seen .* ON CONFLICT \(kind, id\) DO UPDATE SET expires = EXCLUDED\.expires, state = 'claimed' WHERE billing_seen\.expires <= now\(\) RETURNING expires::text AS token$/.test(sql[0]), true);
+});
+
+Deno.test("postgres store: a table made before the claim state column gets it, and its rows are done", async () => {
+  const sql = pglite(new PGlite());
+  await sql.unsafe(`CREATE TABLE billing_seen (kind text NOT NULL, id text NOT NULL, expires timestamptz NOT NULL, PRIMARY KEY (kind, id))`);
+  await sql.unsafe(`INSERT INTO billing_seen VALUES ('stripe event', 'evt_old', now() + interval '3 days')`);
+  const s = new PostgresStore(sql);
+  await s.migrate();
+  await s.migrate();
+  assertEquals((await s.claim("stripe event", "evt_old", 120_000)).state, "done", "an old row is a finished one");
+});
+
+Deno.test("postgres store: migrate tries again only after a concurrent creation, and rethrows any other failure at once", async () => {
+  let tries = 0;
+  const failing = (error: unknown): Sql => ({ unsafe: () => { tries++; return Promise.reject(error); }, begin: (fn) => fn(failing(error)) });
+  const refused = Object.assign(new Error("password authentication failed"), { code: "28P01" });
+  await new PostgresStore(failing(refused)).migrate().then(() => { throw new Error("should fail"); }, (e) => assertEquals(e, refused));
+  assertEquals(tries, 1, "no second try for a refused login");
+  tries = 0;
+  const raced = Object.assign(new Error('duplicate key value violates unique constraint "pg_type_typname_nsp_index"'), { code: "23505" });
+  await new PostgresStore(failing(raced)).migrate().then(() => { throw new Error("should fail"); }, (e) => assertEquals(e, raced));
+  assertEquals(tries, 3, "the creation race is tried again, three times in all");
+  assertEquals(SCHEMA.some((q) => /ADD COLUMN IF NOT EXISTS state/.test(q)), true);
 });

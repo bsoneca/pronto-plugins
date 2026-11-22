@@ -31,9 +31,13 @@ export interface Store {
   /** Remember (kind, id) for `ttlMs`. */
   remember(kind: string, id: string, ttlMs: number): Promise<void>;
   /** Take (kind, id) for `leaseMs`, for one caller of all the replicas: claimed (with the token of this claim),
-   * busy (another holds it, its lease not yet ended) or done (remembered for longer than a lease). A lease
-   * that ran out is claimable again. `remember` with a ttl above `leaseMs` marks it done. */
+   * busy (another holds it, its lease not yet ended) or done (finished: `complete`, or `remember`). The state
+   * is kept beside the expiry, never read off the time left: expiry only decides when a claim may be taken
+   * again, so a finished event stays done to the end of its retention. */
   claim(kind: string, id: string, leaseMs: number): Promise<Claim>;
+  /** Mark the claim `token` names finished, remembered for `ttlMs`: whether it was the current claim (a newer
+   * one, or a forget, leaves the row as it is and answers false). */
+  complete(kind: string, id: string, token: string, ttlMs: number): Promise<boolean>;
   /** Forget (kind, id) now; with `token`, only the claim that token names (a newer claim, or a remember, stays). */
   forget(kind: string, id: string, token?: string): Promise<void>;
 }
@@ -58,8 +62,7 @@ export class MemoryStore implements Store {
   #running = new Set<string>();
   #counters = new Map<string, number>();
   #windows = new Map<string, Window>();
-  #seen = new Map<string, number>();
-  #claims = new Map<string, string>();
+  #seen = new Map<string, { until: number; state: "claimed" | "done"; token?: string }>();
   #claimed = 0;
   constructor(readonly now: () => number = Date.now) {}
 
@@ -93,29 +96,30 @@ export class MemoryStore implements Store {
     return Promise.resolve(w.take(key, per, windowMs));
   }
   seen(kind: string, id: string): Promise<boolean> {
-    const until = this.#seen.get(`${kind}\u0000${id}`);
-    return Promise.resolve(until !== undefined && until > this.now());
+    const held = this.#seen.get(`${kind}\u0000${id}`);
+    return Promise.resolve(held !== undefined && held.until > this.now());
   }
   remember(kind: string, id: string, ttlMs: number): Promise<void> {
-    for (const [k, until] of this.#seen) if (until <= this.now()) this.#seen.delete(k);
-    this.#seen.set(`${kind}\u0000${id}`, this.now() + ttlMs);
-    this.#claims.delete(`${kind}\u0000${id}`);
+    for (const [k, held] of this.#seen) if (held.until <= this.now()) this.#seen.delete(k);
+    this.#seen.set(`${kind}\u0000${id}`, { until: this.now() + ttlMs, state: "done" });
     return Promise.resolve();
   }
   claim(kind: string, id: string, leaseMs: number): Promise<Claim> {
-    const key = `${kind}\u0000${id}`, now = this.now(), until = this.#seen.get(key);
-    if (until !== undefined && until > now) return Promise.resolve({ state: until > now + leaseMs ? "done" : "busy" } as Claim);
+    const key = `${kind}\u0000${id}`, now = this.now(), held = this.#seen.get(key);
+    if (held !== undefined && held.until > now) return Promise.resolve({ state: held.state === "done" ? "done" : "busy" });
     const token = `${now + leaseMs}#${++this.#claimed}`;
-    this.#seen.set(key, now + leaseMs);
-    this.#claims.set(key, token);
+    this.#seen.set(key, { until: now + leaseMs, state: "claimed", token });
     return Promise.resolve({ state: "claimed", token });
+  }
+  complete(kind: string, id: string, token: string, ttlMs: number): Promise<boolean> {
+    const key = `${kind}\u0000${id}`, held = this.#seen.get(key);
+    if (held?.state !== "claimed" || held.token !== token) return Promise.resolve(false);
+    this.#seen.set(key, { until: this.now() + ttlMs, state: "done" });
+    return Promise.resolve(true);
   }
   forget(kind: string, id: string, token?: string): Promise<void> {
     const key = `${kind}\u0000${id}`;
-    if (token === undefined || this.#claims.get(key) === token) {
-      this.#seen.delete(key);
-      this.#claims.delete(key);
-    }
+    if (token === undefined || this.#seen.get(key)?.token === token) this.#seen.delete(key);
     return Promise.resolve();
   }
 }
@@ -137,6 +141,9 @@ export const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS billing_window_started ON billing_window (started)`,
   `CREATE TABLE IF NOT EXISTS billing_seen (kind text NOT NULL, id text NOT NULL, expires timestamptz NOT NULL, PRIMARY KEY (kind, id))`,
   `CREATE INDEX IF NOT EXISTS billing_seen_expires ON billing_seen (expires)`,
+  // A row says whether it is a claim in progress or finished, beside when it expires; a table made before
+  // the column holds only finished rows and remembered ones, so they default to done.
+  `ALTER TABLE billing_seen ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT 'done'`,
 ];
 
 // A lock's key is hashed to the 64-bit number Postgres's advisory locks take, under the broker's own
@@ -157,18 +164,27 @@ export const SQL = {
     RETURNING n`,
   sweepWindows: `DELETE FROM billing_window WHERE ctid IN (SELECT ctid FROM billing_window WHERE started <= now() - interval '${WINDOW_KEEP_S} seconds' LIMIT 100)`,
   seen: `SELECT 1 AS seen FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
-  remember: `INSERT INTO billing_seen (kind, id, expires) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000))
-    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires`,
+  remember: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), 'done')
+    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = 'done'`,
   // One statement takes a row nobody holds: absent, or its lease (or memory) ended. The token is the row's
   // expires as text, microseconds and all: a client's Date would round it to milliseconds.
-  claim: `INSERT INTO billing_seen (kind, id, expires) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000))
-    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires WHERE billing_seen.expires <= now()
+  claim: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), 'claimed')
+    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = 'claimed' WHERE billing_seen.expires <= now()
     RETURNING expires::text AS token`,
-  claimed: `SELECT expires > now() + make_interval(secs => $3::double precision / 1000) AS done FROM billing_seen
-    WHERE kind = $1 AND id = $2 AND expires > now()`,
+  claimed: `SELECT state = 'done' AS done FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
+  complete: `UPDATE billing_seen SET expires = now() + make_interval(secs => $4::double precision / 1000), state = 'done'
+    WHERE kind = $1 AND id = $2 AND state = 'claimed' AND expires::text = $3::text RETURNING 1 AS completed`,
   forget: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND ($3::text IS NULL OR expires::text = $3::text)`,
   sweepSeen: `DELETE FROM billing_seen WHERE ctid IN (SELECT ctid FROM billing_seen WHERE expires <= now() LIMIT 100)`,
 };
+
+/** Whether `e` is Postgres saying a concurrent CREATE/ALTER won: a unique violation on the catalog (23505), a
+ * duplicate table, index or column (42P07, 42701) or a concurrent update of a catalog row. */
+export function concurrentCreation(e: unknown): boolean {
+  const x = e as { code?: unknown; message?: unknown } | null;
+  if (x && typeof x.code === "string" && ["23505", "42P07", "42701"].includes(x.code)) return true;
+  return typeof x?.message === "string" && /already exists|tuple concurrently updated|duplicate key value/i.test(x.message);
+}
 
 export class PostgresStore implements Store {
   constructor(readonly sql: Sql) {}
@@ -190,7 +206,8 @@ export class PostgresStore implements Store {
         for (const statement of SCHEMA) await this.sql.unsafe(statement);
         return;
       } catch (e) {
-        if (attempt >= 3) throw e;
+        // Only that race is tried again; any other failure (a refused login, bad SQL) is the caller's at once.
+        if (attempt >= 3 || !concurrentCreation(e)) throw e;
       }
     }
   }
@@ -231,10 +248,13 @@ export class PostgresStore implements Store {
     for (let attempt = 0; attempt < 3; attempt++) {
       const [won] = await this.sql.unsafe(SQL.claim, [kind, id, leaseMs]);
       if (won) return { state: "claimed", token: String(won.token) };
-      const [held] = await this.sql.unsafe(SQL.claimed, [kind, id, leaseMs]);
+      const [held] = await this.sql.unsafe(SQL.claimed, [kind, id]);
       if (held) return { state: held.done === true ? "done" : "busy" } as Claim;
     }
     return { state: "busy" };
+  }
+  async complete(kind: string, id: string, token: string, ttlMs: number): Promise<boolean> {
+    return (await this.sql.unsafe(SQL.complete, [kind, id, token, ttlMs])).length > 0;
   }
   async forget(kind: string, id: string, token?: string): Promise<void> {
     await this.sql.unsafe(SQL.forget, [kind, id, token ?? null]);

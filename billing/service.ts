@@ -189,36 +189,18 @@ export function service(s: Settings) {
   // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag
   // for them now: through the door, with the reader's own session, which its OFREP route reads the
   // account from; asked directly, for the reader's account. Unset flag: no word, the broker's own
-  // way. The door is chosen only on a real true from flagd. A lookup that fails in transit (the
-  // fetch throws or times out, flagd answers 5xx, the body of a 200 cannot be read) takes the
-  // flag-off path, the broker's own key, with one warning naming the flag: a deploy or a flagd
-  // outage must not make checkout depend on flagd, and a lookup that told us nothing is no true.
-  // While the broker runs with STRIPE_DOOR_ASKED, that sends the call straight to Stripe and skips
-  // the airlock's ledger: the agreed trade-off. An answer flagd gave keeps its meaning (true,
-  // false); one that is no boolean, a body that is not JSON, and a flag that is not there
-  // (FLAG_NOT_FOUND, a 404 or other 4xx: a misconfiguration, since BILLING_DOOR_FLAG is set only
-  // once a push has published it, release.cue) fail the request, never pick a way.
+  // way. The door is chosen only on an answer flagd gave: true or false. Every other outcome fails the
+  // request (the 502 handler), never picks a way: a lookup that fails in transit (the fetch throws or
+  // times out, flagd answers 5xx, the body of a 200 cannot be read), an answer that is no boolean, a
+  // body that is not JSON, and a flag that is not there (FLAG_NOT_FOUND, a 404 or other 4xx: a
+  // misconfiguration, since BILLING_DOOR_FLAG is set only once a push has published it, release.cue).
+  // A false from a lookup that told us nothing would send the call straight to Stripe while the broker
+  // runs with STRIPE_DOOR_ASKED, skipping the airlock's ledger.
   async function doorOn(account: string, auth: string | null): Promise<boolean | undefined> {
     if (!s.doorFlag) return undefined;
     if (!s.flags) throw new Error("BILLING_DOOR_FLAG needs BILLING_FLAGS: where to ask it");
-    let res: Response;
-    let text = "";
-    try {
-      res = await ofrep(s.doorFlag, account, auth);
-      if (res.ok) text = await res.text();
-      else await res.body?.cancel();
-    } catch {
-      console.warn(`flag ${s.doorFlag}: flagd not reached, the broker's own key`);
-      return false;
-    }
-    if (res.status >= 500) {
-      console.warn(`flag ${s.doorFlag}: flagd answered ${res.status}, the broker's own key`);
-      return false;
-    }
-    let answer: { value?: unknown } | null = null;
-    if (res.ok) {
-      try { answer = JSON.parse(text); } catch { /* no boolean: fails below */ }
-    }
+    const res = await ofrep(s.doorFlag, account, auth);
+    const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
     if (!res.ok || typeof answer?.value !== "boolean") throw new Error(`flag ${s.doorFlag}: flagd answered ${res.status}`);
     return answer.value;
   }
