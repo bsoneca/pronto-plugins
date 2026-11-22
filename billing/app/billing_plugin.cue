@@ -385,7 +385,7 @@ if _billingLocal {
 	cluster: surface: targets: "billing-broker": bayt.healthcheck.http & {
 		cmd: builtin: null
 		activate: ""
-		srcs: globs: ["billing/*.ts", "billing/broker/*.ts"]
+		srcs: globs: ["billing/*.ts", "billing/broker/*.ts", "billing/broker/vendor/*.js"]
 		healthcheck: {port: _billingLocalPort, path: "/health"}
 		// The port a launch hands it, so stacks side by side never share one.
 		expose: http: {port: _billingLocalPort, env: "PORT"}
@@ -406,6 +406,7 @@ if _billingLocal {
 			copy: [
 				{srcs: ["billing/shared.ts", "billing/rules.ts"], dst: "/app/billing/"},
 				{srcs: ["billing/broker/core.ts", "billing/broker/main.ts", "billing/broker/stripe.ts", "billing/broker/door.ts", "billing/broker/fake.ts", "billing/broker/store.ts"], dst: "/app/billing/broker/"},
+				{srcs: ["billing/broker/vendor/postgres.js"], dst: "/app/billing/broker/vendor/"},
 			]
 		}
 		compose: {

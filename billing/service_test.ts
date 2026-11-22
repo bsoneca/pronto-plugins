@@ -301,7 +301,7 @@ Deno.test("asked directly, flagd is told the account and the host; through the m
     [["https://a.example/ofrep/v1/evaluate/flags/free_trial", undefined, undefined]], "the door says both itself: the page's headers would be stripped");
 });
 
-Deno.test("the door flag is read for the reader and told to the broker; a flag that does not answer fails the call", async () => {
+Deno.test("the door flag is read for the reader and told to the broker; a lookup that fails in transit is off, a flag that is not there fails the call", async () => {
   const on = trialStage();
   const res = await on.ask(on.make({ doorFlag: "stripe_door" }), "/billing/trial");
   eq(res.status, 200, "on");
@@ -321,22 +321,30 @@ Deno.test("the door flag is read for the reader and told to the broker; a flag t
   const missing = await absent.ask(absent.make({ doorFlag: "stripe_door" }), "/billing/trial");
   eq([missing.ok, absent.broker.length], [false, 0], "a flag that is not there fails loudly");
   await missing.body?.cancel();
-  // A lookup that fails in transit takes the door: the airlock records the ledger.
+  // A lookup that fails in transit takes the flag-off path (the broker's own key), never the door.
   const warned: string[] = [];
   const warn = console.warn;
   console.warn = (...a: unknown[]) => { warned.push(a.join(" ")); };
   try {
     const down = trialStage({ door: () => new Response("", { status: 503 }) });
     const failed = await down.ask(down.make({ doorFlag: "stripe_door" }), "/billing/trial");
-    eq([failed.status, down.broker.map((b) => b.body.door)], [200, [true]], "flagd 5xx: through the door");
+    eq([failed.status, down.broker.map((b) => b.body.door)], [200, [false]], "flagd 503: the broker's own key");
     await failed.body?.cancel();
+    const broken = trialStage({ door: () => new Response("", { status: 500 }) });
+    const errored = await broken.ask(broken.make({ doorFlag: "stripe_door" }), "/billing/trial");
+    eq([errored.status, broken.broker.map((b) => b.body.door)], [200, [false]], "flagd 500: same");
+    await errored.body?.cancel();
     const gone = trialStage({ door: () => Promise.reject(new TypeError("connection refused")) as unknown as Response });
     const reached = await gone.ask(gone.make({ doorFlag: "stripe_door" }), "/billing/trial");
-    eq([reached.status, gone.broker.map((b) => b.body.door)], [200, [true]], "flagd fetch rejects: same");
+    eq([reached.status, gone.broker.map((b) => b.body.door)], [200, [false]], "flagd fetch rejects: same");
     await reached.body?.cancel();
+    const slow = trialStage({ door: () => Promise.reject(new DOMException("The signal timed out", "TimeoutError")) as unknown as Response });
+    const timedOut = await slow.ask(slow.make({ doorFlag: "stripe_door" }), "/billing/trial");
+    eq([timedOut.status, slow.broker.map((b) => b.body.door)], [200, [false]], "flagd times out: same");
+    await timedOut.body?.cancel();
     const cut = trialStage({ door: () => new Response(new ReadableStream({ pull(c) { c.error(new TypeError("body interrupted")); } }), { status: 200 }) });
     const interrupted = await cut.ask(cut.make({ doorFlag: "stripe_door" }), "/billing/trial");
-    eq([interrupted.status, cut.broker.map((b) => b.body.door)], [200, [true]], "a 200 whose body cannot be read: same");
+    eq([interrupted.status, cut.broker.map((b) => b.body.door)], [200, [false]], "a 200 whose body cannot be read: same");
     await interrupted.body?.cancel();
     const garbled = trialStage({ door: () => new Response("{not json", { status: 200 }) });
     const malformed = await garbled.ask(garbled.make({ doorFlag: "stripe_door" }), "/billing/trial");
@@ -345,7 +353,7 @@ Deno.test("the door flag is read for the reader and told to the broker; a flag t
   } finally {
     console.warn = warn;
   }
-  eq(warned.length, 3, "one warning each");
+  eq(warned.length, 5, "one warning each");
   eq(warned.every((w) => w.includes("stripe_door") && !w.includes(ANA_ID) && !w.includes("Bearer")), true, "names the flag, no account or token");
   const odd = trialStage({ door: () => Response.json({ value: "yes" }) });
   const bad = await odd.ask(odd.make({ doorFlag: "stripe_door" }), "/billing/trial");
