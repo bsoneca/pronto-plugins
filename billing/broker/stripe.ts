@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { json, readCapped } from "../shared.ts";
+import { RULES } from "../rules.ts";
 import { DoorError, doorKey, throughDoor as callDoor } from "./door.ts";
 
 // The little of Stripe's API the broker speaks: form-encoded requests under
@@ -111,18 +112,40 @@ export function tracked<A extends unknown[]>(handler: (req: Request, ...rest: A)
  * the same text (no copy whose cancelling would wait on the handler's read). A larger one is handed
  * on empty, which the handler's own capped read makes of it anyway, and says nothing here. Stripe's
  * webhook (/stripe) names no caller and is never read here. */
-const CALLER_BODY_MAX = 4096;
+const BODY_PATHS = ["/checkout", "/trial/offer", "/trial/checkout", "/portal", "/resync", "/onboard", "/probe", "/route"];
+
+/** The most of a request's body the broker reads, from rules.cue (bodyLimits, routeLimits.bodyMax): the webhook's, the
+ * route probe's, or the ordinary request's; undefined for a path that reads no body. One owner for the dispatcher
+ * and the caller wrapper. */
+export function bodyLimitOf(method: string, path: string): number | undefined {
+  if (method !== "POST") return undefined;
+  if (path === "/stripe") return RULES.bodyLimits.webhook;
+  if (path === "/route") return RULES.routeLimits.bodyMax;
+  return BODY_PATHS.includes(path) ? RULES.bodyLimits.request : undefined;
+}
+
+/** Reads the capped body of `req` once, and hands back a request that carries the text already read, or a 413 the
+ * moment the cap is passed (the rest of a client's stream is not read). A request with no body path is returned as is. */
+export async function withCappedBody(req: Request): Promise<Request | Response> {
+  const limit = bodyLimitOf(req.method, new URL(req.url).pathname);
+  if (limit === undefined) return req;
+  const text = await readCapped(req.body, limit, req.headers.get("content-length"));
+  if (text === null) return json(413, { error: "too large" });
+  const headers = new Headers(req.headers);
+  headers.delete("content-length");
+  return new Request(req.url, { method: req.method, headers, body: text, signal: req.signal });
+}
 
 /** Runs `handler` with what its request's JSON body says of its caller (`account`, `door`). */
 export function forAccount<A extends unknown[]>(handler: (req: Request, ...rest: A) => Promise<Response>) {
   return async (req: Request, ...rest: A): Promise<Response> => {
     const who: { account?: string; door?: boolean } = {};
     if (req.method === "POST" && new URL(req.url).pathname !== "/stripe") {
-      const read = await readCapped(req.body, CALLER_BODY_MAX, req.headers.get("content-length"));
-      // The route probe is anonymous and takes nothing but a tenant: a body past the cap is refused here, where the
-      // request is still whole (any other path hands its handler the empty body its own capped read makes of it).
-      if (read === null && new URL(req.url).pathname === "/route") return json(413, { error: "too large" });
-      const text = read ?? "";
+      // The body is read once, up to the CUE limit; past it the answer is a 413 at once.
+      const capped = await withCappedBody(req);
+      if (capped instanceof Response) return capped;
+      req = capped;
+      const text = await req.text();
       if ((req.headers.get("content-type") ?? "").startsWith("application/json")) {
         try {
           const b = JSON.parse(text);
@@ -130,9 +153,7 @@ export function forAccount<A extends unknown[]>(handler: (req: Request, ...rest:
           if (typeof b?.door === "boolean") who.door = b.door;
         } catch { /* not JSON: nothing said, and the handler refuses it as before */ }
       }
-      const headers = new Headers(req.headers);
-      headers.delete("content-length");
-      req = new Request(req.url, { method: req.method, headers, body: text, signal: req.signal });
+      req = new Request(req.url, { method: req.method, headers: req.headers, body: text, signal: req.signal });
     }
     return await caller.run(who, () => handler(req, ...rest));
   };

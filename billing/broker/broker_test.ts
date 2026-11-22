@@ -1241,3 +1241,21 @@ Deno.test("the dispatcher enforces the body limit (413) before it picks a broker
   const ok = await post("/route", JSON.stringify({ tenant: "https://shop-rc-123456789012.us-central1.run.app" }));
   assertEquals([await ok.text(), seen], ["sandbox", ["sandbox"]], "a body within the limit still goes to its broker");
 });
+
+Deno.test("the dispatcher reads the body once and hands the chosen broker that text; an endless body is a 413 at once", async () => {
+  const got: string[] = [];
+  const mode = (name: string) => async (req: Request) => { got.push(`${name} ${await req.text()}`); return new Response(name); };
+  const handler = twoModes({ live: mode("live"), sandbox: mode("sandbox"), sandboxed: (t) => t.includes("-rc-"), sandboxWebhookSecret: "whsec_sandbox" });
+  const text = JSON.stringify({ tenant: "https://shop-rc-123456789012.us-central1.run.app", account: "a" });
+  const res = await handler(new Request(`${ISSUER}/checkout`, { method: "POST", headers: { "content-type": "application/json" }, body: text }));
+  assertEquals([await res.text(), got], ["sandbox", [`sandbox ${text}`]], "the broker chosen gets the body already read");
+  const never = new ReadableStream<Uint8Array>({ pull(c) { c.enqueue(new TextEncoder().encode("x".repeat(1024))); } });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const answered = await Promise.race([
+    handler(new Request(`${ISSUER}/checkout`, { method: "POST", headers: { "content-type": "application/json" }, body: never })),
+    new Promise<string>((r) => { timer = setTimeout(() => r("hung"), 3000); }),
+  ]);
+  clearTimeout(timer);
+  assertEquals(answered instanceof Response ? answered.status : answered, 413);
+  assertEquals(got.length, 1, "no broker saw it");
+});

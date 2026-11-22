@@ -21,7 +21,7 @@ import {
   firstChargeFailed, lookupKeyOf, manageTokenOf, ownerOf, parsePublished, type Plan, type Published, returnTo, same, type Subscription,
   tenantOf, trialOf, trialSpent,
 } from "./core.ts";
-import { type Routed, type Stripe, StripeError, transportUsed, webhookSigned } from "./stripe.ts";
+import { bodyLimitOf, type Routed, type Stripe, StripeError, transportUsed, webhookSigned, withCappedBody } from "./stripe.ts";
 import { MemoryStore, type Store } from "./store.ts";
 import { RULES } from "../rules.ts";
 
@@ -731,32 +731,25 @@ export function twoModes(p: {
   sandboxed: (tenant: string) => boolean;
   sandboxWebhookSecret: string;
 }) {
-  return async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
+  return async function handler(request: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
+    // The capped body is read once, here, before a broker is chosen, and the chosen broker is handed the request with
+    // that body already read: no second read, and an oversized one is a 413 as soon as the cap is passed.
+    const capped = await withCappedBody(request);
+    if (capped instanceof Response) return capped;
+    const req = capped;
     const url = new URL(req.url), path = url.pathname;
     let tenant: unknown = null;
     if (req.method === "GET" && path === "/onboarded") tenant = url.searchParams.get("tenant");
-    else if (req.method === "POST" && ["/checkout", "/trial/offer", "/trial/checkout", "/portal", "/resync", "/onboard", "/probe", "/route"].includes(path)) {
-      // The body limit is enforced here first (rules.cue's bodyLimits), before a broker is picked: a body past it
-      // is refused whole, never read to the end to find a tenant.
-      const limit = path === "/route" ? RULES.routeLimits.bodyMax : RULES.bodyLimits.request;
-      const text = await readCapped(req.clone().body, limit, req.headers.get("content-length"));
-      if (text === null) {
-        await req.body?.cancel();
-        return json(413, { error: "too large" });
-      }
+    else if (req.method === "POST" && path === "/stripe") {
+      const payload = await req.clone().text();
+      const sandboxSigned = await webhookSigned(p.sandboxWebhookSecret, payload, req.headers.get("stripe-signature"));
+      return (sandboxSigned ? p.sandbox : p.live)(req, info);
+    } else if (bodyLimitOf(req.method, path) !== undefined) {
       try {
-        tenant = JSON.parse(text)?.tenant;
+        tenant = JSON.parse(await req.clone().text())?.tenant;
       } catch {
         tenant = null;
       }
-    } else if (req.method === "POST" && path === "/stripe") {
-      const payload = await readCapped(req.clone().body, RULES.bodyLimits.webhook, req.headers.get("content-length"));
-      if (payload === null) {
-        await req.body?.cancel();
-        return json(413, { error: "too large" });
-      }
-      const sandboxSigned = await webhookSigned(p.sandboxWebhookSecret, payload, req.headers.get("stripe-signature"));
-      return (sandboxSigned ? p.sandbox : p.live)(req, info);
     }
     return (typeof tenant === "string" && p.sandboxed(tenant.replace(/\/$/, "")) ? p.sandbox : p.live)(req, info);
   };
