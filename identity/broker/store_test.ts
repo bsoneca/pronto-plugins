@@ -6,8 +6,8 @@
 import { PGlite } from "npm:@electric-sql/pglite@0.3.7";
 import { jwkThumbprint } from "../oidc.ts";
 import { MemoryStore, PostgresStore, SCHEMA, SQL, type Sql, type Store, sealedOnce, sharedKeyPair } from "./store.ts";
-import { Otp } from "./otp.ts";
-import { phoneConfig, phoneUpstream } from "./phone.ts";
+import { type Message, Otp } from "./otp.ts";
+import { messageText, phoneConfig, phoneUpstream } from "./phone.ts";
 import { broker } from "./main.ts";
 
 function assertEquals(a: unknown, b: unknown, m = "") {
@@ -145,7 +145,8 @@ const TENANT = "https://app.example.com";
 /** One replica: the phone and the broker around it, the store shared, the SMS captured in `texts`. */
 async function replica(store: Store, texts: string[]) {
   const cfg = phoneConfig((k) => PHONE_ENV[k], "http://localhost:19000")!;
-  cfg.sender = { send: (_to, text) => { texts.push(text); return Promise.resolve(); } };
+  const capture = (channel: "whatsapp" | "sms") => ({ channel, send: (_to: string, m: Message) => { texts.push(messageText(m)); return Promise.resolve(); } });
+  cfg.senders = { whatsapp: capture("whatsapp"), sms: capture("sms") };
   const up = await phoneUpstream(ISSUER, cfg, { secret: SECRET, store, fetcher: () => Promise.resolve(new Response("{}")) });
   const handle = await broker({ issuer: ISSUER, secret: SECRET, providers: [up.provider], extra: up.handle, store });
   return { up, handle };
@@ -175,16 +176,16 @@ Deno.test("phone sign-in across two replicas: one visit, one count of wrong gues
   // Wrong guesses are counted once across them: the fifth, on whichever replica, is the last.
   const wrong = right === "000000" ? "111111" : "000000";
   const said = [];
-  for (const h of [a, b, a, b, a]) said.push((await (await post(h.handle, "/phone/approve", { id, code: wrong })).json()).error);
+  for (const h of [a, b, a, b, a]) said.push((await (await post(h.handle, "/phone/approve", { id, phone, code: wrong })).json()).error);
   assertEquals(said, ["wrong_code", "wrong_code", "wrong_code", "wrong_code", "too_many"]);
-  assertEquals((await (await post(b.handle, "/phone/approve", { id, code: right })).json()).error, "expired", "a dead code stays dead on the other replica");
+  assertEquals((await (await post(b.handle, "/phone/approve", { id, phone, code: right })).json()).error, "expired", "a dead code stays dead on the other replica");
 
   // A fresh visit: approved on A, its code redeemed on B, and only once.
   const id2 = await visit();
-  await store.del("otp-next", phone); // past the resend wait
-  assertEquals((await post(a.handle, "/phone/send", { id: id2, phone })).status, 200);
+  const phone2 = "+5511912345679"; // another number: the first one's wait has not run out
+  assertEquals((await post(a.handle, "/phone/send", { id: id2, phone: phone2 })).status, 200);
   const code2 = /\b[0-9]{6}\b/.exec(texts[1])![0];
-  const approved = await (await post(a.handle, "/phone/approve", { id: id2, code: code2 })).json();
+  const approved = await (await post(a.handle, "/phone/approve", { id: id2, phone: phone2, code: code2 })).json();
   const bridge = new URL(approved.to).searchParams.get("code")!;
   const exchange = (h: typeof a.handle, secret: string) => h(new Request(`${ISSUER}/phone/token`, {
     method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -208,9 +209,9 @@ Deno.test("an OTP's wrong guesses and resend wait are shared by Otp instances ov
   assertEquals("code" in made, true);
   assertEquals("wait" in await y.issue("w", "+55"), true, "one text per number inside the wait");
   const code = (made as { code: string }).code;
-  assertEquals((await y.check("v", code)).result, "ok", "a code made by one is checked by the other");
-  assertEquals((await x.check("v", code)).result, "expired", "and spent once");
-  await x.revoke("v");
+  assertEquals((await y.check("v", "+55", code)).result, "ok", "a code made by one is checked by the other");
+  assertEquals((await x.check("v", "+55", code)).result, "expired", "and spent once");
+  await x.revoke("v", "+55");
 });
 
 Deno.test("two broker replicas serve one ID-token key", async () => {

@@ -97,6 +97,7 @@ export def main [
 	mkdir $"($work)/broker/vendor"
 	cp $"($here)/oidc.ts" $work
 	cp $"($here)/broker/main.ts" $"($here)/broker/core.ts" $"($here)/broker/phone.ts" $"($here)/broker/otp.ts" $"($here)/broker/door.ts" $"($here)/broker/store.ts" $"($work)/broker/"
+	cp $"($here)/broker/phone_spec.json" $"($work)/broker/"
 	cp $"($here)/broker/vendor/postgres.js" $"($work)/broker/vendor/"
 	$"FROM ($deno)\nWORKDIR /app\nCOPY oidc.ts /app/\nCOPY broker /app/broker\nRUN [\"deno\", \"cache\", \"/app/broker/main.ts\"]\nENV PORT=8080\nCMD [\"run\", \"--allow-net\", \"--allow-env\", \"/app/broker/main.ts\"]\n" | save $"($work)/Dockerfile"
 	let host = $"($region)-docker.pkg.dev"

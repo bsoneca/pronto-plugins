@@ -6,6 +6,8 @@
 // on a localhost broker.
 package unit
 
+import idspec "github.com/bsoneca/pronto-plugins/identity:identity"
+
 cases: {
 	"a phone sign-in gives the tenant a pairwise subject and never the number": {suite: "identity", steps: [
 		{call: "identity.phoneBrokered"}, {keep: "out"},
@@ -172,7 +174,7 @@ cases: {
 		{call: "identity.otpFlow", args: [{ops: [["send"], ["advance", 60000], ["send"], ["approve", "right"]]}], holds: {log: [{status: 200}, {status: 200}, {op: "approve", status: 200}]}},
 	]}
 	"the stand-in's reader route answers the last code for a number, and nothing for another": {suite: "identity", steps: [
-		{call: "identity.otpFlow", args: [{ops: [["codes"], ["send"], ["codes"]]}], holds: {log: [{op: "codes", status: 404}, {op: "send"}, {op: "codes", status: 200, shape: "code"}]}},
+		{call: "identity.otpFlow", args: [{ops: [["codes"], ["send"], ["codes"]]}], holds: {log: [{op: "codes", status: 404}, {op: "send"}, {op: "codes", status: 200, shape: "code,channel", channel: "whatsapp"}]}},
 	]}
 	"the gate's refusal means no SMS, and the page is told too many; no answer, that it is down": {suite: "identity", steps: [
 		{call: "identity.otpFlow", args: [{gate: 403, sender: "capture", ops: [["send"]]}], holds: {log: [{status: 429, error: "too_many"}], gateCalls: 1, texts: []}},
@@ -189,7 +191,7 @@ cases: {
 		{call: "identity.otpFlow", args: [{sender: "capture", lang: "en", ops: [["send"]]}], holds: {texts: [{text: "localhost:19000: your sign-in code is CODE", length: 44}]}, why: "far under 70, one segment even as UCS-2 for the accent"},
 	]}
 	"the page in broker mode loads nothing of Google's and keeps its look": {suite: "identity", steps: [
-		{call: "identity.otpFlow", args: [{ops: []}], holds: {firebaseInPage: false, hasRecaptchaBox: false, config: ["admit", "id", "mode", "pattern", "resendSeconds", "strings"]}}, {keep: "out"},
+		{call: "identity.otpFlow", args: [{ops: []}], holds: {firebaseInPage: false, hasRecaptchaBox: false, config: ["admit", "channels", "id", "mode", "pattern", "resendSeconds", "strings"]}}, {keep: "out"},
 		{use: "out"}, {get: "csp", expect: "default-src 'none'; script-src 'self'; connect-src 'self' https://app.example.com; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"},
 		{use: "out"}, {get: "script", holds: {firebase: false, sends: true, approves: true}},
 	]}
@@ -229,5 +231,64 @@ cases: {
 	]}
 	"the prove tenants are for broker mode alone": {suite: "identity", steps: [
 		{call: "identity.phoneSettings", args: [{PHONE_PROVE_TENANTS: "https://app.example.com"}], throws: "PHONE_PROVE_TENANTS is for PHONE_OTP=broker"},
+	]}
+}
+
+// PRONTO-607 PR 1 (changes nothing live): the numbers written once in identity/phone.cue, the number as one string, the channels a code leaves by.
+cases: {
+	"the phone's numbers are written once in identity/phone.cue, and the file the broker reads is that export": {suite: "identity", steps: [
+		{call: "identity.specFile", expect: idspec.phone, why: "phone_spec.json is `cue export ./identity -e phone`: a change to one without the other fails here (and in ci)"},
+	]}
+	"the code's life, its tries, the resend wait and the channels are read from the spec": {suite: "identity", steps: [
+		{call: "identity.specInUse", expect: {ttlMs: idspec.phone.ttl_s * 1000, tries: idspec.phone.tries, resend: idspec.phone.resend_s, channels: idspec.phone.channels, countries: idspec.phone.countries}},
+		{call: "identity.specInUse", holds: {ttlMs: 300000, tries: 5, resend: 60, channels: ["whatsapp", "sms"], countries: ["BR"]}, why: "what the numbers are today: nothing live changes"},
+		{call: "identity.otpFlow", args: [{ops: [["send"], ["advance", 300000], ["approve", "right"]]}], holds: {log: [{op: "send"}, {op: "approve", status: 400, error: "expired"}]}, why: "ttl_s"},
+		{call: "identity.otpFlow", args: [{env: {PHONE_RESEND_SECONDS: "10"}, ops: [["send"], ["advance", 10000], ["send"]]}], holds: {log: [{status: 200}, {status: 200}]}, why: "the environment still overrides resend_s"},
+	]}
+	"a typed number is one E.164 string, however it is written, before anything reads it": {suite: "identity", steps: [
+		{call: "identity.normalized", args: [["(11) 91234-5678", "011 91234-5678", "11912345678", "5511912345678", "+55 11 91234-5678", "55 (11) 91234 5678", "0055 11 91234-5678", " 11.91234.5678 "], "BR"], expect: ["+5511912345678", "+5511912345678", "+5511912345678", "+5511912345678", "+5511912345678", "+5511912345678", "+5511912345678", "+5511912345678"]},
+		{call: "identity.normalized", args: [["55 91234-5678", "(55) 3123-4567", "+1 (415) 555-0100", "001 415 555 0100", "", "abc", "+", null], "BR"], expect: ["+5555912345678", "+555531234567", "+14155550100", "+14155550100", "", "", "", ""], why: "55 is also a Brazilian area code: a national number of 10 or 11 digits is one; an international prefix names the country"},
+	]}
+	"every way of writing one number is one number the broker accepts, and one pairwise subject": {suite: "identity", steps: [
+		{call: "identity.accepted", args: [["(11) 91234-5678", "011 91234-5678", "5511912345678", "+55 11 91234-5678"]], expect: ["+5511912345678", "+5511912345678", "+5511912345678", "+5511912345678"]},
+		{call: "identity.otpFlow", args: [{phone: "(11) 91234-5678", ops: [["send"]]}], holds: {log: [{op: "send", status: 200, phone: "+5511912345678"}]}, why: "the broker's answer carries the number it read"},
+		{call: "identity.otpFlow", args: [{phone: "011 91234-5678", approvePhone: "+5511912345678", ops: [["send"], ["approve", "right"]]}], holds: {log: [{op: "send", phone: "+5511912345678"}, {op: "approve", status: 200}]}},
+	]}
+	"a number outside the allowed countries, or none at all, is refused with the same answer, before the gate": {suite: "identity", steps: [
+		{call: "identity.otpFlow", args: [{phone: "+14155550100", ops: [["send"]]}], holds: {log: [{op: "send", status: 400, error: "region"}], gateCalls: 0}},
+		{call: "identity.otpFlow", args: [{phone: "+541123456789", ops: [["send"]]}], holds: {log: [{op: "send", status: 400, error: "region"}], gateCalls: 0}},
+		{call: "identity.otpFlow", args: [{phone: "001 415 555 0100", ops: [["send"]]}], holds: {log: [{op: "send", status: 400, error: "region"}], gateCalls: 0}},
+		{call: "identity.otpFlow", args: [{phone: "+5511812345678", ops: [["send"]]}], holds: {log: [{op: "send", status: 400, error: "region"}], gateCalls: 0}, why: "a Brazilian number that is not a mobile: the same word as a number of another country, so the answer says nothing about the number"},
+		{call: "identity.otpFlow", args: [{phone: "abc", ops: [["send"]]}], holds: {log: [{op: "send", status: 400, error: "region"}], gateCalls: 0}},
+	]}
+	"the first send is by WhatsApp, and the stand-in records the channel with the code": {suite: "identity", steps: [
+		{call: "identity.otpFlow", args: [{ops: [["codes"], ["send"], ["codes"]]}], holds: {log: [{op: "codes", status: 404}, {op: "send", status: 200, channel: "whatsapp"}, {op: "codes", status: 200, shape: "code,channel", channel: "whatsapp"}]}},
+		{call: "identity.otpFlow", args: [{sender: "capture", ops: [["send"]]}], holds: {sent: ["whatsapp"], texts: [{text: "localhost:19000: seu código para entrar é CODE"}]}, why: "one short message for every channel, in the page's language"},
+	]}
+	"after the resend wait the person may choose SMS: the code then goes by SMS, and signs in as before": {suite: "identity", steps: [
+		{call: "identity.otpFlow", args: [{ops: [["send"], ["advance", 60000], ["send", {channel: "sms"}], ["codes"], ["approve", "right"]]}], holds: {log: [
+			{op: "send", status: 200, channel: "whatsapp"}, {op: "send", status: 200, channel: "sms"}, {op: "codes", channel: "sms"}, {op: "approve", status: 200},
+		], gateCalls: 2}},
+		{call: "identity.otpFlow", args: [{ops: [["send"], ["send", {channel: "sms"}]]}], holds: {log: [{op: "send", status: 200}, {op: "send", status: 429, error: "cooldown"}], gateCalls: 1}, why: "the choice waits for the resend wait like any other send, and costs the gate nothing before it"},
+		{call: "identity.otpFlow", args: [{ops: [["send"], ["advance", 60000], ["send"], ["codes"]]}], holds: {log: [{channel: "whatsapp"}, {status: 200, channel: "whatsapp"}, {channel: "whatsapp"}]}, why: "a plain resend keeps the channel"},
+	]}
+	"a deployment with an SMS sender alone sends by SMS, and refuses a channel it has none for": {suite: "identity", steps: [
+		{call: "identity.otpFlow", args: [{only: ["sms"], ops: [["send"], ["codes"]]}], holds: {log: [{op: "send", status: 200, channel: "sms"}, {op: "codes", channel: "sms"}]}, why: "what an existing deployment does: nothing changes"},
+		{call: "identity.otpFlow", args: [{only: ["sms"], ops: [["send", {channel: "whatsapp"}]]}], holds: {log: [{op: "send", status: 400, error: "channel"}], gateCalls: 0}},
+		{call: "identity.otpFlow", args: [{ops: [["send", {channel: "carrier-pigeon"}]]}], holds: {log: [{op: "send", status: 400, error: "channel"}], gateCalls: 0}},
+	]}
+	"the sixth try after five wrong ones finds the code dead, the right one included": {suite: "identity", steps: [
+		{call: "identity.otpFlow", args: [{ops: [["send"], ["approve", "000000"], ["approve", "000000"], ["approve", "000000"], ["approve", "000000"], ["approve", "000000"], ["approve", "000000"], ["approve", "right"]]}], holds: {log: [
+			{op: "send"}, {error: "wrong_code"}, {error: "wrong_code"}, {error: "wrong_code"}, {error: "wrong_code"}, {error: "too_many"}, {error: "expired"}, {error: "expired"},
+		]}, why: "tries is 5 in the spec: 000000 is a guess"},
+	]}
+	"the broker keeps no row, key or wait with the number in it, and a code is only good for the number it was sent to": {suite: "identity", steps: [
+		{call: "identity.otpFlow", args: [{ops: [["send"], ["approve", "right"]]}], holds: {holdsNumber: false, log: [{op: "send"}, {op: "approve", status: 200}]}},
+		{call: "identity.otpFlow", args: [{approvePhone: "+5511987654321", ops: [["send"], ["approve", "right"]]}], holds: {log: [{op: "send"}, {op: "approve", status: 400, error: "wrong_code"}], sub: null}, why: "the hash binds the number: the row cannot tell another number's subject into being"},
+		{call: "identity.proveFlow", holds: {log: [{op: "send", status: 200}, {op: "check", status: 200}]}},
+		{call: "identity.proveFlow", args: [{checkPhone: "+5511987654321"}], holds: {log: [{op: "send"}, {op: "check", status: 400, error: "wrong_code"}], proof: null}},
+	]}
+	"the prove step sends by WhatsApp first and by SMS when the person chooses it after the wait": {suite: "identity", steps: [
+		{call: "identity.proveFlow", args: [{ops: [["send", "https://app.example.com"], ["advance", 60000], ["send", ["https://app.example.com", {channel: "sms"}]], ["check", "right"]]}], holds: {log: [{op: "send", channel: "whatsapp"}, {op: "send", channel: "sms"}, {op: "check", status: 200}]}},
 	]}
 }

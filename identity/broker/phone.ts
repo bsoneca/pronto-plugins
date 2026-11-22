@@ -27,7 +27,7 @@ import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refu
 import { esc, json } from "./core.ts";
 import type { Provider } from "./main.ts";
 import { MemoryStore, sharedKeyPair, sharedSecret, type Store } from "./store.ts";
-import { Otp, phoneSubject, type SmsSender, smsSender, Standin } from "./otp.ts";
+import { type Channel, type Message, Otp, type OtpSender, otpSenders, PHONE_SPEC, phoneSubject, type Standin } from "./otp.ts";
 
 const enc = new TextEncoder();
 
@@ -39,12 +39,41 @@ export const SDK = "13.1.0";
 /** A Brazilian mobile, in E.164: +55, a two-digit area code, a 9 and eight digits. */
 export const BRAZIL_MOBILE = "^\\+55[1-9][1-9]9[0-9]{8}$";
 
+/**
+ * A number as a person types it, in E.164 (`+<country><number>`): spaces and punctuation stripped; a leading `+` or `00` names the country;
+ * otherwise it is a number of `defaultCountry`, written with or without its calling code and with a leading trunk 0 dropped (`(011) 91234-5678`,
+ * `11 91234-5678` and `55 11 91234-5678` are one number). "" for what has no digits. It decides nothing about whether the number is accepted
+ * (the pattern and the countries do): it only makes one real number one string, so the subject derived from it is one.
+ */
+export function normalizeE164(input: unknown, defaultCountry: string = PHONE_SPEC.countries[0]): string {
+  const raw = typeof input === "string" ? input.trim() : "";
+  const digits = raw.replace(/\D/g, "");
+  if (digits === "") return "";
+  if (raw.startsWith("+")) return "+" + digits;
+  if (digits.startsWith("00")) return "+" + digits.slice(2);
+  const dial = PHONE_SPEC.dial[defaultCountry];
+  if (dial === undefined) return "";
+  // A national number has 10 or 11 digits (area code and number), so one that begins with the calling code and has 10 or more digits after it carries it.
+  if (digits.startsWith(dial) && digits.length >= dial.length + 10) return "+" + digits;
+  return "+" + dial + digits.replace(/^0+/, "");
+}
+
+/** Whether an E.164 number belongs to one of the countries the spec allows (identity/phone.cue). */
+export const countryAllowed = (e164: string): boolean => PHONE_SPEC.countries.some((c) => e164.startsWith("+" + PHONE_SPEC.dial[c]));
+
+/** The number a request names, normalized, or null: no number, not one the pattern accepts, or a country not allowed. Every refusal is the same one. */
+export function acceptedPhone(cfg: { pattern: string }, input: unknown): string | null {
+  const n = normalizeE164(input);
+  return n !== "" && new RegExp(cfg.pattern).test(n) && countryAllowed(n) ? n : null;
+}
+
 export interface PhoneConfig {
   /** Who issues and checks the codes: Firebase (the default) or the broker itself. */
   otp: "firebase" | "broker";
-  /** Broker mode: the sender's name (PHONE_SMS), the sender, and the gate asked before each SMS. */
+  /** Broker mode: the sender's name (PHONE_SMS), the sender of each channel it serves, the stand-in where it is the sender, and the gate asked before each send. */
   sms: string | null;
-  sender: SmsSender | null;
+  senders: Partial<Record<Channel, OtpSender>>;
+  standin: Standin | null;
   smsGate: string | null;
   /** The Firebase project whose Identity Platform sends the codes (the emulator's demo- project locally). */
   project: string;
@@ -92,19 +121,20 @@ export function phoneConfig(env: (k: string) => string | undefined, issuer: stri
   const admit = need("PHONE_ADMIT");
   if (!/^https?:\/\//.test(admit)) throw new Error("PHONE_ADMIT is an http(s) URL");
   const tenants = need("PHONE_TENANTS").split(",").map((t) => t.trim()).filter((t) => t !== "");
-  const resendSeconds = Number(env("PHONE_RESEND_SECONDS") || "60");
+  const resendSeconds = Number(env("PHONE_RESEND_SECONDS") || PHONE_SPEC.resend_s);
   if (!Number.isInteger(resendSeconds) || resendSeconds <= 0) throw new Error("PHONE_RESEND_SECONDS is a whole number of seconds");
-  let sms: string | null = null, sender: SmsSender | null = null, smsGate: string | null = null;
+  let sms: string | null = null, smsGate: string | null = null, senders: Partial<Record<Channel, OtpSender>> = {}, standin: Standin | null = null;
   if (otp === "broker") {
     sms = need("PHONE_SMS");
     smsGate = need("PHONE_SMS_GATE");
     if (!/^https?:\/\//.test(smsGate)) throw new Error("PHONE_SMS_GATE is an http(s) URL");
-    sender = smsSender(sms, env, issuer);
+    ({ senders, standin } = otpSenders(sms, env, issuer, messageText));
   }
   return {
     otp,
     sms,
-    sender,
+    senders,
+    standin,
     smsGate,
     project: project ?? "",
     apiKey: otp === "broker" ? "" : emulator ? env("PHONE_API_KEY") || "emulator" : need("PHONE_API_KEY"),
@@ -140,6 +170,7 @@ export const STRINGS = {
     code: "6-digit code",
     confirm: "Sign in",
     resend: "Text a new code",
+    sms_choice: "Receive by SMS",
     resend_in: "You can ask for a new code in {s} s",
     wrong_number: "Type a Brazilian mobile with its area code, such as (11) 91234-5678.",
     wrong_code: "That code is wrong. Check it and try again.",
@@ -166,6 +197,7 @@ export const STRINGS = {
     code: "Código de 6 dígitos",
     confirm: "Entrar",
     resend: "Enviar novo código",
+    sms_choice: "Receber por SMS",
     resend_in: "Você pode pedir um novo código em {s} s",
     wrong_number: "Digite um celular do Brasil com DDD, como (11) 91234-5678.",
     wrong_code: "Código errado. Confira e tente de novo.",
@@ -184,6 +216,12 @@ export const STRINGS = {
   },
 } as const;
 export type Lang = keyof typeof STRINGS;
+
+/** The one short message a code is sent in, in the page's language, with the broker's host and the code (every channel, every provider). */
+export function messageText(m: Message): string {
+  const s = STRINGS[m.lang in STRINGS ? m.lang as Lang : "en"];
+  return s.sms.replace("{host}", m.host).replace("{code}", m.code);
+}
 
 /** The page's language from the reader's Accept-Language: the first of ours it names. */
 export function langOf(accept: string | null): Lang {
@@ -277,7 +315,7 @@ export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { ke
     const s = STRINGS[lang];
     const cancel = `${callback}?${new URLSearchParams({ error: "access_denied", state: q.get("state")! })}`;
     const config = brokerMode
-      ? { id, mode: "broker", admit: cfg.admit, resendSeconds: cfg.resendSeconds, pattern: cfg.pattern, strings: s }
+      ? { id, mode: "broker", admit: cfg.admit, resendSeconds: cfg.resendSeconds, pattern: cfg.pattern, channels, strings: s }
       : {
         id, admit: cfg.admit, project: cfg.project, apiKey: cfg.apiKey, authDomain: cfg.authDomain, appId: cfg.appId, sdk: cfg.sdk,
         emulator: cfg.emulator ? `http://${cfg.emulator}` : null, resendSeconds: cfg.resendSeconds, pattern: cfg.pattern, strings: s,
@@ -305,7 +343,7 @@ export async function phoneUpstream(issuer: string, cfg: PhoneConfig, opts: { ke
   <p class="notice wrong-code" role="alert" hidden></p>
   <button type="submit" class="primary" id="phone-confirm">${esc(s.confirm)}</button>
   <button type="button" id="phone-resend" disabled></button>
-  <button type="button" class="link" id="phone-change">${esc(s.change)}</button>
+  ${brokerMode ? `<button type="button" id="phone-sms" data-channel="sms" hidden>${esc(s.sms_choice)}</button>\n  ` : ""}<button type="button" class="link" id="phone-change">${esc(s.change)}</button>
 </form>
 ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-back" href="${esc(cancel)}">${esc(s.back)}</a></p>
 <p><small>${esc(s.footer)}</small></p>
@@ -352,31 +390,43 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
 
   // Broker mode: a code for `visit` and `phone`. The wait is checked first (a refused number costs the
   // gate nothing), then the gate admits the SMS, then the code is made and sent.
-  async function deliver(visit: string, phone: string, lang: Lang): Promise<Response> {
+  // The channels this broker can send by, in the spec's order (identity/phone.cue): the first is the first send's.
+  const channels = PHONE_SPEC.channels.filter((c) => cfg.senders[c] !== undefined);
+
+  async function deliver(visit: string, phone: string, lang: Lang, channel: Channel = channels[0]): Promise<Response> {
+    const sender = cfg.senders[channel];
+    if (!sender) return json(400, { error: "channel" });
     if (await otp.wait(phone) > 0) return json(429, { error: "cooldown" });
     const verdict = await gate(phone);
     if (verdict !== "go") return json(verdict === "too_many" ? 429 : 503, { error: verdict });
     const made = await otp.issue(visit, phone);
     if ("wait" in made) return json(429, { error: "cooldown" });
     try {
-      await cfg.sender!.send(phone, STRINGS[lang].sms.replace("{host}", new URL(issuer).host).replace("{code}", made.code));
+      await sender.send(phone, { code: made.code, lang, host: new URL(issuer).host });
     } catch (e) {
-      await otp.revoke(visit);
+      await otp.revoke(visit, phone);
       // The sender's failure, never the number or the code.
-      console.error(`broker: phone SMS not sent: ${e instanceof Error ? e.name : "error"}`);
+      console.error(`broker: phone ${channel} not sent: ${e instanceof Error ? e.name : "error"}`);
       return json(503, { error: "down" });
     }
-    return json(200, {});
+    // The number as the broker read it, which the page then keeps for the code (the rows hold only a hash of it).
+    return json(200, { phone, channel });
   }
+
+  /** The channel a request names (none: the first), or null for one this broker cannot send by. */
+  const channelOf = (v: unknown): Channel | null => v === undefined ? channels[0] : channels.find((c) => c === v) ?? null;
 
   async function send(req: Request): Promise<Response> {
     const body = await jsonBody(req);
     if (body instanceof Response) return body;
     const a = typeof body.id === "string" ? await store.get<Asked>("phone-asked", body.id) : undefined;
     if (!a) return json(400, { error: "expired" });
-    const phone = body.phone;
-    if (typeof phone !== "string" || !new RegExp(cfg.pattern).test(phone)) return json(400, { error: "region" });
-    return deliver(body.id as string, phone, a.lang);
+    // Normalized before anything reads it, so one real number is one string, one subject, one wait.
+    const phone = acceptedPhone(cfg, body.phone);
+    if (phone === null) return json(400, { error: "region" });
+    const channel = channelOf(body.channel);
+    if (channel === null) return json(400, { error: "channel" });
+    return deliver(body.id as string, phone, a.lang, channel);
   }
 
   const codeError = (result: string) => json(400, { error: result === "dead" ? "too_many" : result === "wrong" ? "wrong_code" : "expired" });
@@ -388,26 +438,29 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
     if (body instanceof Response) return body;
     const origin = body.return_origin;
     if (typeof origin !== "string" || !tenantAdmitted(cfg.proveTenants, origin)) return json(403, { error: "tenant" });
-    const phone = body.phone;
-    if (typeof phone !== "string" || !new RegExp(cfg.pattern).test(phone)) return json(400, { error: "region" });
+    const phone = acceptedPhone(cfg, body.phone);
+    if (phone === null) return json(400, { error: "region" });
+    const channel = channelOf(body.channel);
+    if (channel === null) return json(400, { error: "channel" });
     const visit = randomToken(16);
-    const res = await deliver(visit, phone, langOf(req.headers.get("accept-language")));
+    const res = await deliver(visit, phone, langOf(req.headers.get("accept-language")), channel);
     if (!res.ok) return res;
     await store.put("phone-proving", visit, { origin }, 600_000);
-    return json(200, { visit });
+    return json(200, { visit, channel });
   }
 
   async function proveCheck(req: Request): Promise<Response> {
     const body = await jsonBody(req);
     if (body instanceof Response) return body;
     const v = typeof body.visit === "string" ? await store.get<{ origin: string }>("phone-proving", body.visit) : undefined;
-    if (!v || typeof body.code !== "string") return json(400, { error: "expired" });
-    const checked = await otp.check(body.visit as string, body.code);
+    const phone = acceptedPhone(cfg, body.phone);
+    if (!v || typeof body.code !== "string" || phone === null) return json(400, { error: "expired" });
+    const checked = await otp.check(body.visit as string, phone, body.code);
     if (checked.result === "dead" || checked.result === "ok") await store.del("phone-proving", body.visit as string);
     if (checked.result !== "ok") return codeError(checked.result);
     const t = Math.floor(now() / 1000);
     const id_token = await signJwt({
-      iss: root, aud: v.origin, sub: await phoneSubject(opts.secret!, checked.phone!), phone_number: checked.phone, auth_time: t, iat: t, exp: t + 300, amr: ["sms"], event: "phone_proof",
+      iss: root, aud: v.origin, sub: await phoneSubject(opts.secret!, phone), phone_number: phone, auth_time: t, iat: t, exp: t + 300, amr: ["sms"], event: "phone_proof",
     });
     return json(200, { id_token });
   }
@@ -422,7 +475,7 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
   function provePage(req: Request): Response {
     const lang = langOf(req.headers.get("accept-language"));
     const s = STRINGS[lang];
-    const config = { resendSeconds: cfg.resendSeconds, pattern: cfg.pattern, tenants: cfg.proveTenants.map(tenantPattern), strings: s };
+    const config = { resendSeconds: cfg.resendSeconds, pattern: cfg.pattern, channels, tenants: cfg.proveTenants.map(tenantPattern), strings: s };
     const data = JSON.stringify(config).replace(/</g, "\\u003c");
     return html(`<!doctype html>
 <html lang="${lang}">
@@ -444,6 +497,7 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
   <p class="notice wrong-code" role="alert" hidden></p>
   <button type="submit" class="primary" id="phone-confirm">${esc(s.confirm)}</button>
   <button type="button" id="phone-resend" disabled></button>
+  <button type="button" id="phone-sms" data-channel="sms" hidden>${esc(s.sms_choice)}</button>
 </form>
 <p><button type="button" class="link" id="phone-back">${esc(s.back)}</button></p>
 </main>
@@ -480,11 +534,13 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
     const a = typeof body.id === "string" ? await store.get<Asked>("phone-asked", body.id) : undefined;
     let sub: string;
     if (brokerMode) {
-      if (!a || typeof body.code !== "string") return json(400, { error: "expired" });
-      const checked = await otp.check(body.id as string, body.code);
+      // The page says which number the code is for; the code's hash is bound to it, so a number that is not the one asked is a wrong code.
+      const phone = acceptedPhone(cfg, body.phone);
+      if (!a || typeof body.code !== "string" || phone === null) return json(400, { error: "expired" });
+      const checked = await otp.check(body.id as string, phone, body.code);
       if (checked.result !== "ok") return codeError(checked.result);
       // Firebase-mode users had Firebase's uid as their subject: they get different ones here (a migration, not solved here).
-      sub = await phoneSubject(opts.secret!, checked.phone!);
+      sub = await phoneSubject(opts.secret!, phone);
     } else {
       if (!a || typeof body.token !== "string") return json(400, { error: "expired" });
       let claims;
@@ -542,10 +598,10 @@ ${brokerMode ? "" : `<div id="recaptcha"></div>\n`}<p><a class="back" id="phone-
       }
       if (brokerMode && req.method === "GET" && url.pathname === "/phone/jwks") return Promise.resolve(json(200, { keys: [{ ...jwk, alg: "RS256", use: "sig" }] }));
       // A local scenario reads the code the stand-in "sent", as it reads the Firebase emulator's.
-      if (cfg.sender instanceof Standin && req.method === "GET" && url.pathname === "/phone/fake/codes") {
+      if (cfg.standin && req.method === "GET" && url.pathname === "/phone/fake/codes") {
         const phone = (url.searchParams.get("phone") ?? "").replace(/^ /, "+");
-        const code = cfg.sender.last(phone);
-        return Promise.resolve(code ? json(200, { code }) : json(404, { error: "no code" }));
+        const last = cfg.standin.last(phone);
+        return Promise.resolve(last ? json(200, { code: last.code, channel: last.channel }) : json(404, { error: "no code" }));
       }
       if (req.method === "POST" && url.pathname === "/phone/token") return req.text().then((t) => token(new URLSearchParams(t)));
       return null;
@@ -607,7 +663,12 @@ function countdown(seconds) {
   clearInterval(timer);
   const b = $('#phone-resend');
   let left = seconds;
-  const draw = () => { b.disabled = left > 0; b.textContent = left > 0 ? t.resend_in.replace('{s}', left) : t.resend; };
+  const sms = $('#phone-sms');
+  const draw = () => {
+    b.disabled = left > 0; b.textContent = left > 0 ? t.resend_in.replace('{s}', left) : t.resend;
+    // After the wait the person may choose SMS, when the code went by another channel and SMS is one this broker has (their choice: no webhook).
+    if (sms) sms.hidden = !(left <= 0 && typeof offerSms === 'function' && offerSms());
+  };
   draw();
   timer = setInterval(() => { left -= 1; draw(); if (left <= 0) clearInterval(timer); }, 1000);
 }
@@ -750,10 +811,11 @@ try {
 
 // The page's script in broker mode: no SDK, no reCAPTCHA. The gate's owner is asked for a code first
 // (unchanged), then the broker is asked to send it, and the code typed is the broker's to check.
-const BROKER_SCRIPT = `${COMMON_TOP}let e164 = '', timer = 0;
+const BROKER_SCRIPT = `${COMMON_TOP}let e164 = '', timer = 0, lastChannel = '';
+const offerSms = () => config.channels.length > 1 && config.channels.includes('sms') && lastChannel !== 'sms';
 ${COMMON_COUNTDOWN}
-// The gate's word on a code for this number ('' to go), then the broker sends it.
-async function ask() {
+// The gate's word on a code for this number ('' to go), then the broker sends it, by \`channel\` (none: the first it has).
+async function ask(channel) {
   let said;
   try {
     const res = await fetch(config.admit, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone: e164 }), credentials: 'omit' });
@@ -768,10 +830,10 @@ async function ask() {
   if (said === 'phone-region') return t.region;
   if (said !== '') return t.down;
   try {
-    const res = await fetch(location.pathname.replace(/\\/auth$/, '/send'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: config.id, phone: e164 }) });
-    if (res.ok) return '';
-    const error = (await res.json()).error;
-    return error === 'cooldown' ? t.cooldown : error === 'too_many' ? t.too_many : error === 'region' ? t.wrong_number : t.down;
+    const res = await fetch(location.pathname.replace(/\\/auth$/, '/send'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: config.id, phone: e164, channel }) });
+    const out = await res.json();
+    if (res.ok) { e164 = out.phone || e164; lastChannel = out.channel || ''; return ''; }
+    return out.error === 'cooldown' ? t.cooldown : out.error === 'too_many' ? t.too_many : out.error === 'region' ? t.wrong_number : t.down;
   } catch {
     return t.down;
   }
@@ -799,8 +861,19 @@ $('#phone-resend').addEventListener('click', async () => {
   b.disabled = true;
   $('.wrong-code').hidden = true;
   notice('');
-  const problem = await ask();
+  const problem = await ask(lastChannel || undefined);
   if (problem) { notice(problem); b.disabled = false; return; }
+  countdown(config.resendSeconds);
+});
+
+$('#phone-sms').addEventListener('click', async () => {
+  const b = $('#phone-sms');
+  b.disabled = true;
+  $('.wrong-code').hidden = true;
+  notice('');
+  const problem = await ask('sms');
+  b.disabled = false;
+  if (problem) { notice(problem); return; }
   countdown(config.resendSeconds);
 });
 
@@ -822,7 +895,7 @@ $('#phone-check').addEventListener('submit', async (ev) => {
   if (!/^[0-9]{6}$/.test(code)) { wrong.textContent = t.wrong_code; wrong.hidden = false; return; }
   confirm.disabled = true;
   try {
-    const res = await fetch(location.pathname.replace(/\\/auth$/, '/approve'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: config.id, code }) });
+    const res = await fetch(location.pathname.replace(/\\/auth$/, '/approve'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: config.id, phone: e164, code }) });
     const out = await res.json();
     if (res.ok && out.to) { location.replace(out.to); return; }
     wrong.textContent = out.error === 'expired' ? t.expired : out.error === 'too_many' ? t.too_many : t.wrong_code;
@@ -841,7 +914,8 @@ const PROVE_SCRIPT = `const $ = (s) => document.querySelector(s);
 const config = JSON.parse($('#phone-config').textContent);
 const t = config.strings;
 const notice = (text) => { const el = $('#phone-notice'); el.textContent = text; el.hidden = !text; };
-let timer = 0;
+let timer = 0, lastChannel = '';
+const offerSms = () => config.channels.length > 1 && config.channels.includes('sms') && lastChannel !== 'sms';
 ${COMMON_COUNTDOWN}
 // The fragment is the app's word, read once and gone from the address.
 const frag = new URLSearchParams(location.hash.slice(1));
@@ -870,11 +944,11 @@ if (!ret || !new RegExp(config.pattern).test(phone)) {
   $('#phone-back').hidden = !ret;
 }
 
-async function ask() {
+async function ask(channel) {
   try {
-    const res = await fetch(location.pathname + '/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone, return_origin: ret.origin }) });
+    const res = await fetch(location.pathname + '/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone, return_origin: ret.origin, channel }) });
     const out = await res.json();
-    if (res.ok) { visit = out.visit; return ''; }
+    if (res.ok) { visit = out.visit; lastChannel = out.channel || ''; return ''; }
     return failure(out.error);
   } catch {
     return t.down;
@@ -900,8 +974,19 @@ $('#phone-resend').addEventListener('click', async () => {
   b.disabled = true;
   $('.wrong-code').hidden = true;
   notice('');
-  const problem = await ask();
+  const problem = await ask(lastChannel || undefined);
   if (problem) { notice(problem); b.disabled = false; return; }
+  countdown(config.resendSeconds);
+});
+
+$('#phone-sms').addEventListener('click', async () => {
+  const b = $('#phone-sms');
+  b.disabled = true;
+  $('.wrong-code').hidden = true;
+  notice('');
+  const problem = await ask('sms');
+  b.disabled = false;
+  if (problem) { notice(problem); return; }
   countdown(config.resendSeconds);
 });
 
@@ -914,7 +999,7 @@ $('#phone-check').addEventListener('submit', async (ev) => {
   if (!/^[0-9]{6}$/.test(code)) { wrong.textContent = t.wrong_code; wrong.hidden = false; return; }
   confirm.disabled = true;
   try {
-    const res = await fetch(location.pathname + '/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ visit, code }) });
+    const res = await fetch(location.pathname + '/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ visit, phone, code }) });
     const out = await res.json();
     if (res.ok && out.id_token) { leave({ id_token: out.id_token }); return; }
     wrong.textContent = out.error === 'expired' ? t.expired : out.error === 'too_many' ? t.too_many : t.wrong_code;
