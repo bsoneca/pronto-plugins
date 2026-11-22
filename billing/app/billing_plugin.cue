@@ -83,7 +83,9 @@ _billingTrialFlag: *"" | string
 
 // The flag that sends the broker's Stripe calls through the airlock's door, per reader (the service
 // asks it as it asks the trial's, through _billingFlags, and tells the broker `door`; PRONTO-218).
-// Empty, the service asks nothing and says nothing.
+// Empty, the service asks nothing and says nothing. Only a lookup that succeeds with true uses the door: one that
+// fails, or does not answer in 300 ms, takes the direct route (the released one) and logs
+// billing_alert=stripe_door_lookup_failed, so a flagd outage never breaks a paid checkout.
 _billingDoorFlag: *"" | string
 
 // The flag that turns the service's stricter handling on (needs _billingFlags): a failed grants write turns

@@ -484,3 +484,19 @@ Deno.test("postgres store, two replicas: takeover, completion, release and expir
   assertEquals(await b.forget("stripe event", "t5"), false, "invalidate refuses a claim in progress");
   assertEquals(await state("t5"), "claimed");
 });
+
+// One data case for both stores: by the declared transitions an expired row is absent, so invalidating it is refused
+// (false) and a live finished row is invalidated (true), whichever store keeps it.
+for (const [name, make] of claimable) {
+  Deno.test(`${name} store: an invalidation of an expired, unswept done row is refused; of a live one it lands`, async () => {
+    const { s, expire } = await make();
+    const c = await s.claim("stripe event", "live", 120_000) as { token: string };
+    await s.complete("stripe event", "live", c.token, 600_000);
+    assertEquals(await s.forget("stripe event", "live"), true, "a live finished row is dropped");
+    const d = await s.claim("stripe event", "old", 120_000) as { token: string };
+    await s.complete("stripe event", "old", d.token, 600_000);
+    await expire("stripe event", "old");
+    assertEquals(await s.forget("stripe event", "old"), false, "an expired row is absent: nothing to invalidate");
+    assertEquals(step("invalidate", "absent", false), null, "which is the declaration's word for it");
+  });
+}
