@@ -761,14 +761,17 @@ Deno.test("a completion that lost the claim is answered retryably, unless the st
   store.mode = "done";
   const done = await deliver(s, "evt_done", sub)();
   assertEquals([done.status, await done.json()], [200, { delivered: "evt_done" }], "the store says it is finished");
-  // The refused path checks too.
-  store.mode = "taken";
-  const before = t.got.length;
+  // A tenant's refusal is answered but not remembered: the claim is released, so a resend tries the tenant again.
+  store.mode = "off";
   t.refuse = true;
   const refused = await deliver(s, "evt_refused", sub)();
-  assertEquals(refused.status, 409, "refused for good, but the claim was lost");
+  assertEquals([refused.status, await refused.json()], [200, { refused: "evt_refused" }]);
   t.refuse = false;
-  assertEquals(t.got.length, before);
+  const before = t.got.length;
+  const resent = await deliver(s, "evt_refused", sub)();
+  assertEquals([resent.status, await resent.json(), t.got.length], [200, { delivered: "evt_refused" }, before + 1], "the resend is pushed, not answered as a duplicate");
+  const dup = await deliver(s, "evt_refused", sub)();
+  assertEquals(await dup.json(), { duplicate: "evt_refused" }, "a delivery stays remembered");
 });
 
 

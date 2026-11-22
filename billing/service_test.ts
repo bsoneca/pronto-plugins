@@ -87,6 +87,7 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
       flagAsks.push({ url, headers: Object.fromEntries(new Headers(init?.headers)) });
       return Promise.resolve(o.flag ? o.flag() : Response.json({ value: true }));
     }
+    if (url.endsWith("/ofrep/v1/evaluate/flags/billing_strict")) return Promise.resolve(Response.json({ value: true }));
     if (/^(http:\/\/flagd:8693|https:\/\/a\.example)\/ofrep\/v1\/evaluate\/flags\/stripe_door$/.test(url)) {
       const h = new Headers(init?.headers);
       doorAsks.push({ auth: h.get("authorization"), account: h.get("x-pronto-account"), body });
@@ -111,7 +112,7 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
 const fns = (calls: { fn: string }[]) => calls.map((c) => c.fn);
 const CONSENT = { plan: "analysis", amount: 1990, currency: "brl", charges_at: "2027-02-05T12:00:00Z", terms: "Free until Feb 5, then R$ 19,90 a month.", consent: true, locale: "pt-BR", return: "/?premium=trial" };
 
-Deno.test("the trial is off when its flag is off: 404; on the door path a flag that cannot be asked fails the request: 502, off it the trial is off; nothing asked of the broker", async () => {
+Deno.test("the trial is off when its flag is off: 404; with the strict flag on a flag that cannot be asked fails the request: 502, with it off the trial is off; nothing asked of the broker", async () => {
   const cases: [string, () => Response, number][] = [
     ["false", () => Response.json({ value: false }), 404],
     ["not a boolean", () => Response.json({ value: "true" }), 502],
@@ -124,7 +125,7 @@ Deno.test("the trial is off when its flag is off: 404; on the door path a flag t
   try {
     for (const [why, flag, status] of cases) {
       // The door path (stripe_door true for the reader) is strict; any other reader keeps the trial off, as before the door.
-      for (const [way, settings, expected] of [["door path", { doorFlag: "stripe_door" }, status], ["not the door path", {}, 404]] as const) {
+      for (const [way, settings, expected] of [["strict flag on", { strictFlag: "billing_strict" }, status], ["strict flag off", {}, 404]] as const) {
         const t = trialStage({ flag });
         for (const [path, body] of [["/billing/trial", {}], ["/billing/trial/checkout", CONSENT], ["/billing/trial/consent", { account: ANA_ID, ticket: "t".repeat(32) }]] as const) {
           const res = await t.ask(t.make(settings), path, body);
@@ -176,8 +177,8 @@ Deno.test("an account that holds a plan or has a trial is offered none, and the 
   }
   // An old broker has no /trial/offer: its refusal is the answer, never an ineligible account.
   const old = trialStage({ offer: () => Response.json({ error: "not found" }, { status: 404 }) });
-  const res = await old.ask(old.make({ doorFlag: "stripe_door" }), "/billing/trial");
-  eq(res.status, 404, "on the door path an old broker's refusal is passed on");
+  const res = await old.ask(old.make({ strictFlag: "billing_strict" }), "/billing/trial");
+  eq(res.status, 404, "with the strict flag on an old broker's refusal is passed on");
   await res.body?.cancel();
 });
 
@@ -370,10 +371,16 @@ Deno.test("a neighbour not up yet is waited for in the startup window; any other
   eq(grantVerdict(false, 2000, false), "fail", "a refusal no wait can mend fails at once");
 });
 
-function healthStage(answer: () => Response | Promise<Response>) {
-  const fetcher = ((input: string | URL | Request) =>
-    String(input) === "http://crud/rpc/billing_grant" ? Promise.resolve().then(answer) : Promise.resolve(new Response("", { status: 404 }))) as typeof fetch;
-  const s = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), grants: "[]", fetcher });
+// `strict`: whether the strict flag evaluates true (the strict handling) or false (the earlier behaviour, exactly).
+function healthStage(answer: () => Response | Promise<Response>, strict = true) {
+  const fetcher = ((input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "http://crud/rpc/billing_grant") return Promise.resolve().then(answer);
+    if (url.endsWith("/billing_strict")) return Promise.resolve(Response.json({ value: strict }));
+    if (url.endsWith("/billing_grants")) return Promise.resolve(Response.json({ value: "[]" }));
+    return Promise.resolve(new Response("", { status: 404 }));
+  }) as typeof fetch;
+  const s = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), flags: "http://flagd:8693", strictFlag: "billing_strict", fetcher });
   const health = async () => {
     const r = await s(new Request("https://a.example/billing/health"));
     const body = await r.json();
@@ -409,10 +416,11 @@ Deno.test("a failure after a first success turns /billing/health 503, a later su
   const fetcher = ((input: string | URL | Request) => {
     const url = String(input);
     if (url === "http://crud/rpc/billing_grant") return Promise.resolve(new Response(null, { status: 204 }));
+    if (url.endsWith("/billing_strict")) return Promise.resolve(Response.json({ value: true }));
     if (url.endsWith("/billing_grants")) return Promise.resolve(flags.value === "down" ? new Response("", { status: 500 }) : Response.json({ value: flags.value }));
     return Promise.resolve(new Response("", { status: 404 }));
   }) as typeof fetch;
-  const f = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), flags: "http://flagd:8693", fetcher });
+  const f = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), flags: "http://flagd:8693", strictFlag: "billing_strict", fetcher });
   const h = async () => (await f(new Request("https://a.example/billing/health"))).status;
   eq(await f.attempt(0), true, "flag read and written");
   flags.value = "down";
@@ -443,7 +451,7 @@ Deno.test("what a failed grants call is: not up yet, or a failure", async () => 
   for (const [why, answer, notReady] of cases) {
     const fetcher = (() => Promise.resolve().then(answer)) as typeof fetch;
     const s = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), grants: "[]", fetcher });
-    const e = await s.grant().then(() => null, (x) => x);
+    const e = await s.grant(true).then(() => null, (x) => x);
     eq([why, e instanceof Error, e instanceof NotReady], [why, true, notReady], why);
   }
 });
@@ -460,13 +468,13 @@ Deno.test("a changed grant write that times out is written again when the flag g
     return Promise.resolve(Response.json({ value }));
   }) as typeof fetch;
   const s = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), flags: "http://flagd:8693", fetcher });
-  await s.grant();
+  await s.grant(true);
   value = "[]";
   timeout = true; // the write of [] may have committed
-  await s.grant().then(() => { throw new Error("should time out"); }, () => {});
+  await s.grant(true).then(() => { throw new Error("should time out"); }, () => {});
   value = JSON.stringify(ANA);
   timeout = false;
-  await s.grant();
+  await s.grant(true);
   eq(handed, [ANA, [], ANA], "the old set is written again: the database may hold []");
 });
 
@@ -500,12 +508,50 @@ Deno.test("a probe whose door lookup fails gets a 502 and neither transport is c
   }
 });
 
-Deno.test("a broker that does not know trials: no offers off the door path, a failed request on it", async () => {
-  for (const [way, settings, status] of [["not the door path", {}, 200], ["door path", { doorFlag: "stripe_door" }, 404]] as const) {
+Deno.test("a broker that does not know trials: no offers with the strict flag off, a failed request with it on", async () => {
+  for (const [way, settings, status] of [["strict flag off", {}, 200], ["strict flag on", { strictFlag: "billing_strict" }, 404]] as const) {
     const t = trialStage({ offer: () => Response.json({ error: "not found" }, { status: 404 }) });
     const res = await t.ask(t.make(settings), "/billing/trial");
     eq([way, res.status], [way, status]);
     if (status === 200) eq(await res.json(), { state: null, plan: null, amount: null, currency: null, charges_at: null, holds: false, eligible: false, offers: [] }, "none offered");
     else await res.body?.cancel();
   }
+});
+
+Deno.test("a failed door lookup fails both trial requests before the flag is asked and before any ticket is evaluated, issued or consumed", async () => {
+  const quietly = console.error;
+  console.error = () => {};
+  try {
+    for (const [why, door] of [["flagd 503", () => new Response("", { status: 503 })], ["fetch rejects", () => Promise.reject(new TypeError("connection refused")) as unknown as Response]] as const) {
+      const t = trialStage({ door });
+      for (const [path, body] of [["/billing/trial", {}], ["/billing/trial/checkout", CONSENT]] as const) {
+        const res = await t.ask(t.make({ doorFlag: "stripe_door" }), path, body);
+        eq([why, path, res.status], [why, path, 502]);
+        await res.body?.cancel();
+      }
+      eq(t.flagBodies, [], `${why}: the trial flag was not asked`);
+      eq(fns(t.calls).filter((f) => f === "billing_trial_ask" || f === "billing_trial_take"), [], `${why}: the ticket is still available`);
+      eq(t.broker, [], `${why}: the broker was not called`);
+    }
+  } finally {
+    console.error = quietly;
+  }
+});
+
+Deno.test("with no strict flag set, the service behaves as it did: health stays 200 on a failed grants write, trial lookups are off on failure", async () => {
+  const { s, health } = healthStage(() => Response.json({ code: "X" }, { status: 401 }), false);
+  const logged: string[] = [];
+  const error = console.error;
+  console.error = (...a: unknown[]) => { logged.push(a.join(" ")); };
+  try {
+    eq(await s.attempt(1000, 4), false, "not written");
+    eq(await health(), [200, { ok: true }], "health is as it was");
+    eq(logged, [], "inside the window nothing is logged, as before");
+  } finally {
+    console.error = error;
+  }
+  // No strictFlag at all: the same.
+  const none = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), grants: "[]", fetcher: (() => Promise.resolve(Response.json({}, { status: 401 }))) as typeof fetch });
+  await quiet(async () => { eq(await none.attempt(1000), false); });
+  eq((await none(new Request("https://a.example/billing/health"))).status, 200, "no strict flag: health is as it was");
 });
