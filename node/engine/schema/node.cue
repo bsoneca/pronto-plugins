@@ -260,6 +260,11 @@ import (
 					if o.spec != _|_ if o.spec.api != _|_ {
 						for k, v in o.spec.api if k != "allowed" {(k): v}
 					}
+					// Invoke is allowed and not exploitable: every route to the sidecar sets `dapr-app-id` with `header_up` (the
+					// generated Caddyfile), and Dapr resolves the target from that header before it reads a `/v1.0/invoke/<id>/`
+					// path, so a client-chosen path is only the method on `crud`. The release's door probes
+					// (`door-probes` in release.nu) are the proof: they ask the public door for those paths and fail the release
+					// when one reaches the sidecar or another service.
 					allowed: [
 						{name: "invoke", version: "v1.0", protocol: "http"},
 						{name: "invoke", version: "v1.0", protocol: "grpc"},

@@ -239,12 +239,14 @@ def check-daprd [app: string, namespace: string, components: list<string>] {
 
 # The door is public and dials its own Dapr sidecar, with `dapr-app-id` set on every route (Dapr takes the target from that
 # header before it reads a `/v1.0/invoke/<id>/` path, so the path never picks a service). Its `/crud/v1.0/metadata` must be
-# PostgREST's answer (a 404), never the sidecar's metadata (a 200 JSON body with `"runtimeVersion"`), and no Dapr API path may
-# reach the sidecar or another service: explicit invocation of the door's own service (`/crud/v1.0/invoke/caddy/method/health`,
+# PostgREST's answer (a 404, `PGRST125`), never the sidecar's metadata (a 200 JSON body with `"runtimeVersion"`), and no Dapr API
+# path may reach the sidecar or another service: explicit invocation of the door's own service (`/crud/v1.0/invoke/caddy/method/health`,
 # which would answer `ok`), the same path spelled with encoded dots and slashes, a `..` out of the prefix (sent as is), and the
-# other prefixes that strip and pass the rest on (`/img`, `/blobs`). A probe fails the release when it answers 200 with the
-# sidecar's metadata or a service's bare `ok`. A host that does not answer yet (DNS not moved) cannot be checked and is said, not failed
-# (every probe unreachable); one that answers some and not others fails. A preview with no public host of its own has nothing to ask.
+# other prefixes that strip and pass the rest on (`/img`, `/blobs`). Every `/crud` probe must answer PostgREST's 404; the others
+# fail on a 200 with the sidecar's metadata or a service's bare `ok`. A curl failure, a timeout or any 5xx fails the release
+# (inconclusive is a failure). Nothing here depends on DNS: the probes dial the Envoy Gateway data-plane Service of the release's
+# Gateway through a `kubectl port-forward` and plain HTTP with the public `Host` (the way the node's cloudflared dials it; the
+# Gateway has no HTTPS listener). A preview with no public host of its own has nothing to ask.
 export def door-probes [] {
 	[
 		{path: "/crud/v1.0/metadata", as_is: false}
@@ -259,35 +261,69 @@ export def door-probes [] {
 	]
 }
 
-export def check-door [node: record] {
-	if ($node.preview | is-not-empty) and (($node.hosts | get -o $node.preview | default "") | is-empty) { return }
+# Waits until the port-forward `pid` answers on `port`; fails with kubectl's message when it died or never did.
+def wait-forward [pid: int, port: int, log: string, --seconds: int = 30] {
+	let deadline = ((date now) + ($seconds * 1sec))
+	loop {
+		let up = ((^kill -0 $pid | complete).exit_code == 0)
+		if $up and (tunnel answers $port) { return }
+		if not $up { error make {msg: $"the door check's kubectl port-forward closed: (open --raw $log | str trim)"} }
+		if (date now) > $deadline { error make {msg: $"the door check's kubectl port-forward did not answer on 127.0.0.1:($port) in ($seconds) s: (open --raw $log | str trim)"} }
+		sleep 250ms
+	}
+}
+
+# The probes, each through `http://127.0.0.1:<port>` with the public Host; the first that fails ends the check.
+def run-door-probes [node: record, port: int]: nothing -> int {
 	let file = (mktemp -t door.XXXXXX | str trim)
 	mut asked = 0
-	mut unreachable = []
-	for probe in (door-probes) {
-		let url = $"https://($node.host)($probe.path)"
-		let args = (if $probe.as_is { ["--path-as-is"] } else { [] })
-		let r = (^curl -s -m 20 ...$args -o $file -w "%{http_code}" $url | complete)
-		let body = (try { open --raw $file } catch { "" })
-		if $r.exit_code != 0 {
-			$unreachable = ($unreachable | append $url)
-			continue
+	try {
+		for probe in (door-probes) {
+			let url = $"http://127.0.0.1:($port)($probe.path)"
+			let args = (if $probe.as_is { ["--path-as-is"] } else { [] })
+			let r = (^curl -s -m 20 ...$args -H $"Host: ($node.host)" -o $file -w "%{http_code}" $url | complete)
+			if $r.exit_code != 0 { error make {msg: $"the door check could not ask ($probe.path) of ($node.host): curl exit ($r.exit_code), so the door cannot be certified"} }
+			let body = (try { open --raw $file } catch { "" })
+			let status = ($r.stdout | str trim)
+			if $status =~ '^5\d\d$' or $status !~ '^\d{3}$' { error make {msg: $"the door check could not ask ($probe.path) of ($node.host): it answered ($status), so the door cannot be certified"} }
+			if $status == "200" and (($body =~ '"runtimeVersion"') or ($body =~ '"appConnectionProperties"') or (($body | str trim) == "ok")) {
+				error make {msg: $"the door reaches the Dapr API: ($node.host)($probe.path) answered 200 with ($body | str substring 0..200); the caddy Dapr configuration did not take"}
+			}
+			if ($probe.path | str starts-with "/crud") and ($status != "404" or ($body !~ "PGRST125")) {
+				error make {msg: $"the door's ($probe.path) answered ($status), not PostgREST's 404 \(PGRST125\): ($body | str substring 0..200)"}
+			}
+			$asked = $asked + 1
 		}
-		$asked = $asked + 1
-		let status = ($r.stdout | str trim)
-		if $status == "200" and (($body =~ '"runtimeVersion"') or ($body =~ '"appConnectionProperties"') or (($body | str trim) == "ok")) {
-			rm -f $file
-			error make {msg: $"the door reaches the Dapr API: ($url) answered 200 with ($body | str substring 0..200); the caddy Dapr configuration did not take"}
-		}
+	} catch {|e|
+		rm -f $file
+		error make {msg: $e.msg}
 	}
 	rm -f $file
-	if $asked == 0 {
-		print -e $"node: (stamp) warning: https://($node.host) did not answer \(curl\), so the door's Dapr API was not checked"
-		return
-	}
-	if ($unreachable | is-not-empty) {
-		error make {msg: $"the door answered some Dapr API probes and not ($unreachable | str join ', '): it cannot be certified"}
-	}
+	$asked
+}
+
+export def check-door [node: record, gateway: string] {
+	if ($node.preview | is-not-empty) and (($node.hosts | get -o $node.preview | default "") | is-empty) { return }
+	let selector = $"gateway.envoyproxy.io/owning-gateway-name=($gateway),gateway.envoyproxy.io/owning-gateway-namespace=($node.namespace)"
+	let services = (kubectl-json get service -n envoy-gateway-system -l $selector | get items)
+	if ($services | is-empty) { error make {msg: $"the door check found no Envoy Gateway Service for Gateway ($gateway) in ($node.namespace) \(envoy-gateway-system, ($selector)\), so the door cannot be certified"} }
+	let service = ($services | first)
+	let remote = ($service.spec.ports | first | get port)
+	let local = (tunnel free-ports 1 | first)
+	let log = (mktemp -t door-forward.XXXXXX | str trim)
+	let started = (^sh -c $"kubectl port-forward -n envoy-gateway-system 'service/($service.metadata.name)' '($local):($remote)' >'($log)' 2>&1 & echo $!" | complete)
+	if $started.exit_code != 0 { rm -f $log; error make {msg: $"kubectl port-forward did not start: ($started.stderr | str trim)"} }
+	let pid = ($started.stdout | str trim | into int)
+	let asked = (try {
+		wait-forward $pid $local $log
+		run-door-probes $node $local
+	} catch {|e|
+		^kill $pid | complete | ignore
+		rm -f $log
+		error make {msg: $e.msg}
+	})
+	^kill $pid | complete | ignore
+	rm -f $log
 	print $"node: (stamp) the door's Dapr API is closed: ($asked) probes under /crud, /img and /blobs answer no sidecar and no service"
 }
 
@@ -516,7 +552,9 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		# 13. the mesh is intrinsic: a pod without its sidecar is a failed release
 		check-daprd $app $ns $components
 		# 13b. the public door must not answer the Dapr sidecar's own API
-		check-door $node
+		let gateways = (of-kind $objects Gateway)
+		if ($gateways | is-empty) { error make {msg: "the render has no Gateway, so the door cannot be checked"} }
+		check-door $node ($gateways | first | get metadata.name)
 	} catch {|e|
 		print -e $"node: (stamp) the release failed: ($e.msg)"
 		let back = (try { rollback undo $before $ns } catch {|r| {undone: [], failed: [{name: "(all)", why: $r.msg}]} })

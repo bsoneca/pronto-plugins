@@ -53,7 +53,7 @@ esac
 	r#'
 #!/bin/sh
 d="$(dirname "$0")/.."
-[ -f "$d/ssh_started" ]
+[ -f "$d/ssh_started" ] || [ -f "$d/state/portforward.pid" ]
 '# | str trim --left | save -f ($d | path join bin nc)
 	r#'
 #!/bin/sh
@@ -113,7 +113,10 @@ d="$(dirname "$0")/.."
 case "$*" in
   *"/v1.0"*)
     out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+    echo "$*" >> "$d/door_curl.log"
     if [ -f "$d/host_unreachable" ]; then printf 000; exit 6; fi
+    if [ -f "$d/probe_502" ]; then echo "bad gateway" > "$out"; printf 502; exit 0; fi
+    if [ -f "$d/probe_timeout" ]; then printf 000; exit 28; fi
     case "$*" in
       *"/crud/v1.0/metadata"*) if [ -f "$d/metadata_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21","components":[]}' > "$out"; printf 200; exit 0; fi ;;
       *"/invoke/"*) if [ -f "$d/invoke_by_path" ]; then echo ok > "$out"; printf 200; exit 0; fi ;;
@@ -121,6 +124,9 @@ case "$*" in
     esac
     case "$*" in
       *"--path-as-is"*) echo "$*" >> "$d/path_as_is.log"; if [ -f "$d/dotdot_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21"}' > "$out"; printf 200; exit 0; fi ;;
+    esac
+    case "$*" in
+      *"/crud/"*) echo '{"code":"PGRST125","message":"Invalid path specified in request URL"}' > "$out"; printf 404; exit 0 ;;
     esac
     echo "404 page not found" > "$out"; printf 404; exit 0 ;;
 esac
@@ -1242,7 +1248,7 @@ def test_a_deferred_prune_exits_four [] {
 }
 
 def test_the_door_must_not_answer_the_dapr_api [] {
-	print "test a release fails when the door answers the Dapr sidecar's metadata, passes on a 404, and says so when the host does not answer..."
+	print "test a release fails when the door answers the Dapr sidecar's metadata, passes on PostgREST's 404, and fails on a curl failure, a timeout or a 502..."
 	let w = (sandbox)
 	let ok = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert equal $ok.exit_code 0 $"($ok.stdout)($ok.stderr)"
@@ -1252,11 +1258,36 @@ def test_the_door_must_not_answer_the_dapr_api [] {
 	let caddy_at = ($log | enumerate | where {|e| ($e.item =~ "^apply .*Deployment/aprende-caddy") and not ($e.item | str contains "--dry-run") } | get index)
 	assert (($guard_at | length) > 0 and ($caddy_at | length) > 0) $"both are applied: ($log | str join '; ')"
 	assert (($guard_at | first) < ($caddy_at | first)) "the guard Configuration comes before the caddy Deployment"
-	"" | save -f ($w.dir | path join host_unreachable)
-	let unreach = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
-	assert equal $unreach.exit_code 0 $"($unreach.stdout)($unreach.stderr)"
-	assert (has $unreach.stderr "so the door's Dapr API was not checked") $unreach.stderr
-	rm -f ($w.dir | path join host_unreachable)
+	# the probes dial the node's ingress through a port-forward to the Gateway's Envoy Service, plain HTTP, the public Host
+	let door_log = ($w.dir | path join door_curl.log | open --raw | lines)
+	assert (($door_log | length) == 9) $"nine probes: ($door_log | length)"
+	assert ($door_log | all {|l| ($l | str contains "http://127.0.0.1:") and ($l | str contains "-H Host: ")}) ($door_log | str join "\n")
+	assert (not ($door_log | any {|l| $l | str contains "https://" })) "no probe uses https or DNS"
+	assert (calls $w | any {|c| $c | str starts-with "get service -n envoy-gateway-system -l gateway.envoyproxy.io/owning-gateway-name=aprende-gateway,gateway.envoyproxy.io/owning-gateway-namespace=aprende" }) "the Service is found by the Gateway's owning labels"
+	assert (open --raw ($w.state | path join portforward.args) | str contains "port-forward -n envoy-gateway-system service/envoy-aprende-gateway") "the forward goes to that Service"
+	assert (not ($w.state | path join portforward.pid | path exists)) "the port-forward is killed: no pid file is left"
+	# a curl failure, a timeout and a 502 each fail the release, naming the probe, and the forward is killed all the same
+	for fail in [host_unreachable probe_timeout probe_502] {
+		"" | save -f ($w.dir | path join $fail)
+		let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+		assert ($r.exit_code != 0) $"($fail) fails the release"
+		assert (has $r.stderr "so the door cannot be certified") $"($fail): ($r.stderr)"
+		assert (not ($w.state | path join portforward.pid | path exists)) $"($fail): the port-forward is killed"
+		rm -f ($w.dir | path join $fail)
+	}
+	# a forward that cannot start, or a Gateway with no data-plane Service, fails too
+	for fail in [port_forward_fail no_gateway_service] {
+		"" | save -f ($w.state | path join $fail)
+		let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+		assert ($r.exit_code != 0) $"($fail) fails the release"
+		rm -f ($w.state | path join $fail)
+		assert (not ($w.state | path join portforward.pid | path exists)) $"($fail): no pid file is left"
+	}
+	# a preview with no public host of its own is skipped: nothing is looked up, nothing forwarded
+	rm -f ($w.state | path join calls.jsonl)
+	let skipped = (in-world $w -c (script $w $"(inputs $w) check-door \($node | upsert preview 'nohost' | upsert hosts {production: 'x.example.com'}\) 'app-gateway'"))
+	assert equal $skipped.exit_code 0 $"($skipped.stdout)($skipped.stderr)"
+	assert (not ((calls $w) | any {|c| ($c | str starts-with "port-forward") or ($c | str starts-with "get service") })) "a preview without a host asks for nothing"
 	"" | save -f ($w.dir | path join metadata_open)
 	rm -f ($w.state | path join calls.jsonl)
 	let open = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))

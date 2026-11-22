@@ -227,8 +227,31 @@ if verb == "apply":
         print(f'{o.get("kind", "").lower()}/{o["metadata"]["name"]} configured')
     sys.exit(0)
 
+if verb == "port-forward":
+    # the door check's forward: its pid is recorded and removed when it is stopped, so a leftover pid file is a leak
+    if exists("port_forward_fail"):
+        fail("error: unable to forward port because pod is not running")
+    import signal, time
+    open(d + "/portforward.pid", "w").write(str(os.getpid()))
+    open(d + "/portforward.args", "w").write(" ".join(args))
+    def stop(*_):
+        try:
+            os.remove(d + "/portforward.pid")
+        except FileNotFoundError:
+            pass
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, stop)
+    time.sleep(60)
+    stop()
+
 if verb == "get":
     what = args[1]
+    if what == "service" and ns == "envoy-gateway-system":
+        # the Envoy Gateway data-plane Service of a Gateway, found by its owning labels
+        sel = opt("-l") or ""
+        if exists("no_gateway_service") or "owning-gateway-name=" not in sel or "owning-gateway-namespace=" not in sel:
+            out({"items": []})
+        out({"items": [{"metadata": {"name": "envoy-" + sel.split("owning-gateway-name=")[1].split(",")[0]}, "spec": {"ports": [{"port": 80}]}}]})
     if "-A" in args:
         # the prune's reads of every namespace's workloads
         if what == "pods" and exists("inuse"):
