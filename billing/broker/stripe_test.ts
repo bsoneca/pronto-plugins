@@ -180,9 +180,9 @@ Deno.test("every body-reading endpoint refuses a body over its emitted limit wit
   const text = (n: number) => head + "x".repeat(n - head.length - tail.length) + tail;
   for (const [path, limit] of limits) {
     assertEquals(bodyLimitOf("POST", path), limit, `${path}: the limit is the emitted one`);
-    const at = await withCappedBody(new Request(`https://b${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: text(limit) }));
+    const at = await withCappedBody(new Request(`https://b${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: text(limit) }), true);
     assertEquals(at instanceof Request ? (await at.text()).length : -1, limit, `${path}: a body at the limit is read, once, and handed on`);
-    const over = await withCappedBody(new Request(`https://b${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: text(limit + 1) }));
+    const over = await withCappedBody(new Request(`https://b${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: text(limit + 1) }), true);
     assertEquals(over instanceof Response ? over.status : 0, 413, `${path}: a byte over is refused`);
     if (over instanceof Response) await over.body?.cancel();
   }
@@ -192,7 +192,7 @@ Deno.test("every body-reading endpoint refuses a body over its emitted limit wit
   const never = new ReadableStream<Uint8Array>({ pull(c) { c.enqueue(new TextEncoder().encode("x".repeat(1024))); } });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const answered = await Promise.race([
-    withCappedBody(new Request("https://b/route", { method: "POST", headers: { "content-type": "application/json" }, body: never })),
+    withCappedBody(new Request("https://b/route", { method: "POST", headers: { "content-type": "application/json" }, body: never }), true),
     new Promise<string>((r) => { timer = setTimeout(() => r("hung"), 3000); }),
   ]);
   clearTimeout(timer);

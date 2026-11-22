@@ -21,7 +21,7 @@ import {
   firstChargeFailed, lookupKeyOf, manageTokenOf, ownerOf, parsePublished, type Plan, type Published, returnTo, same, type Subscription,
   tenantOf, trialOf, trialSpent,
 } from "./core.ts";
-import { bodyLimitOf, type Routed, type Stripe, StripeError, transportUsed, webhookSigned, withCappedBody } from "./stripe.ts";
+import { bodyLimitOf, endpointRefusal, type Routed, type Stripe, StripeError, transportUsed, webhookSigned, withCappedBody } from "./stripe.ts";
 import { MemoryStore, type Store } from "./store.ts";
 import { RULES } from "../rules.ts";
 
@@ -108,6 +108,9 @@ export async function broker(p: {
   /** Which Stripe account this broker answers for: the live broker and its sandbox share one store, so the
    * per-client limits are kept apart by it. */
   mode?: "live" | "sandbox";
+  /** Whether this broker is asked which way each call goes (STRIPE_DOOR_ASKED). Only then does it have a /route: a
+   * fixed-route broker has none. */
+  doorAsked?: boolean;
 }) {
   const issuer = p.issuer.replace(/\/$/, "");
   // A broker on a developer's machine serves tenants there too.
@@ -124,8 +127,8 @@ export async function broker(p: {
   const perTenant = (t: string) => store.take("tenant", t, 120, 60_000);
   const mode = p.mode ?? "live";
   // The anonymous route probe has limiters of its own: it never spends a player's checkout, trial or probe quota.
-  const routeClient = (c: string) => store.take(`route client ${mode}`, c, RULES.routeLimits.perClient, 60_000);
-  const routeAll = () => store.take(`route all ${mode}`, "all", RULES.routeLimits.global, 60_000);
+  const routeClient = (c: string) => store.take(`route client ${mode}`, c, RULES.routeLimits.perClient, RULES.routeLimits.windowMs);
+  const routeAll = () => store.take(`route all ${mode}`, "all", RULES.routeLimits.global, RULES.routeLimits.windowMs);
   const perClient = (c: string) => store.take(`client ${mode}`, c, 20, 60_000);
   // A trial route's own: a tenant's calls all leave from one address, so this is generous, and it is
   // taken before a ticket is tried, which a junk one must not spend the tenant's bucket on.
@@ -682,6 +685,10 @@ export async function broker(p: {
   return async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
+    // An unknown path, a method that path does not take, and /route without the door asked are answered before any
+    // body is read.
+    const refusal = endpointRefusal(req.method, path, p.doorAsked === true);
+    if (refusal) return refusal;
     try {
       if (req.method === "GET" && path === "/jwks") return json(200, { keys: [signing.publicJwk] });
       if (req.method === "POST" && path === "/onboard") return await onboard(req);
@@ -730,11 +737,13 @@ export function twoModes(p: {
   sandbox: (req: Request, info?: Deno.ServeHandlerInfo) => Promise<Response>;
   sandboxed: (tenant: string) => boolean;
   sandboxWebhookSecret: string;
+  /** As broker's: whether /route exists. */
+  doorAsked?: boolean;
 }) {
   return async function handler(request: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
     // The capped body is read once, here, before a broker is chosen, and the chosen broker is handed the request with
     // that body already read: no second read, and an oversized one is a 413 as soon as the cap is passed.
-    const capped = await withCappedBody(request);
+    const capped = await withCappedBody(request, p.doorAsked === true);
     if (capped instanceof Response) return capped;
     const req = capped;
     const url = new URL(req.url), path = url.pathname;
@@ -782,7 +791,7 @@ if (import.meta.main) {
   if (env("DATABASE_URL") && !env("BILLING_SIGNING_KEY")) {
     throw new Error("BILLING_SIGNING_KEY is required with DATABASE_URL: replicas of one database must sign with one key");
   }
-  const settings = { issuer, secret, signingKey: env("BILLING_SIGNING_KEY"), feePercent: Number(env("BILLING_FEE_PERCENT") ?? 0), store: await storeFrom(env) };
+  const settings = { issuer, secret, signingKey: env("BILLING_SIGNING_KEY"), feePercent: Number(env("BILLING_FEE_PERCENT") ?? 0), store: await storeFrom(env), doorAsked: env("STRIPE_DOOR_ASKED") === "1" };
   const key = env("STRIPE_SECRET_KEY");
   // Off by default: set (by metal.nu --airlock), every Stripe call goes through the airlock's door at
   // this address, which holds the keys, and the broker holds none (PRONTO-135).
@@ -817,7 +826,7 @@ if (import.meta.main) {
       const pattern = new RegExp(sandboxTenants);
       const sandbox = await broker({ ...settings, stripe: client(sandboxKey, `${door}/door/stripe-sandbox`), webhookSecret: sandboxWebhookSecret, mode: "sandbox" });
       console.warn(`billing: tenants matching ${sandboxTenants} sell through the sandbox`);
-      Deno.serve({ port }, asked(twoModes({ live, sandbox, sandboxed: (t) => pattern.test(t), sandboxWebhookSecret })));
+      Deno.serve({ port }, asked(twoModes({ live, sandbox, sandboxed: (t) => pattern.test(t), sandboxWebhookSecret, doorAsked })));
     } else {
       Deno.serve({ port }, asked(live));
     }
