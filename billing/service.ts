@@ -188,13 +188,15 @@ export function service(s: Settings) {
   // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag
   // for them now: through the door, with the reader's own session, which its OFREP route reads the
   // account from; asked directly, for the reader's account. Unset flag: no word, the broker's own
-  // way. A lookup that fails in transit (the fetch throws or times out, flagd answers 5xx, the body
-  // of a 200 cannot be read) takes the door, with one warning: the airlock records the ledger of
-  // every Stripe call, and a straight call to Stripe would skip it for an account enrolled in it,
-  // so a flagd outage blocks no checkout and leaves no call unrecorded. An answer flagd gave keeps
-  // its meaning (true, false); one that is no boolean, a body that is not JSON, and a flag that is
-  // not there (FLAG_NOT_FOUND, a 404 or other 4xx: a misconfiguration, since BILLING_DOOR_FLAG is
-  // set only once a push has published it, release.cue) fail the request, never pick a way.
+  // way. The door is chosen only on a real true from flagd. A lookup that fails in transit (the
+  // fetch throws or times out, flagd answers 5xx, the body of a 200 cannot be read) takes the
+  // flag-off path, the broker's own key, with one warning naming the flag: a deploy or a flagd
+  // outage must not make checkout depend on flagd, and a lookup that told us nothing is no true.
+  // While the broker runs with STRIPE_DOOR_ASKED, that sends the call straight to Stripe and skips
+  // the airlock's ledger: the agreed trade-off. An answer flagd gave keeps its meaning (true,
+  // false); one that is no boolean, a body that is not JSON, and a flag that is not there
+  // (FLAG_NOT_FOUND, a 404 or other 4xx: a misconfiguration, since BILLING_DOOR_FLAG is set only
+  // once a push has published it, release.cue) fail the request, never pick a way.
   async function doorOn(account: string, auth: string | null): Promise<boolean | undefined> {
     if (!s.doorFlag) return undefined;
     if (!s.flags) throw new Error("BILLING_DOOR_FLAG needs BILLING_FLAGS: where to ask it");
@@ -205,12 +207,12 @@ export function service(s: Settings) {
       if (res.ok) text = await res.text();
       else await res.body?.cancel();
     } catch {
-      console.warn(`flag ${s.doorFlag}: flagd not reached, through the door`);
-      return true;
+      console.warn(`flag ${s.doorFlag}: flagd not reached, the broker's own key`);
+      return false;
     }
     if (res.status >= 500) {
-      console.warn(`flag ${s.doorFlag}: flagd answered ${res.status}, through the door`);
-      return true;
+      console.warn(`flag ${s.doorFlag}: flagd answered ${res.status}, the broker's own key`);
+      return false;
     }
     let answer: { value?: unknown } | null = null;
     if (res.ok) {
