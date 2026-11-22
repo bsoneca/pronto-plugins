@@ -110,7 +110,7 @@ The door (caddy) dials its own Dapr sidecar for every upstream, and Dapr answers
 secrets, state, publish, shutdown) before it routes by `dapr-app-id`, so `https://<host>/crud/v1.0/metadata` would answer the
 sidecar's JSON. The engine gives caddy a Configuration of its own, `<app>-caddy-invoke-only` (the app's plus
 `api.allowed` for invocation alone, http and grpc), points the caddy Deployment's `dapr.io/config` at it, and leaves the
-shared one to crud, auth and the rest, which need other APIs. After the rollouts the door check (`check-door`, nine probes:
+shared one to crud, auth and the rest, which need other APIs. After the rollouts the door check (`check-door`, eleven probes:
 `door-probes` in `release.nu`) asks the door for the Dapr API paths and fails the release (rolling the Deployments back) when
 one reaches the sidecar or a service (a 200 with its metadata or a bare `ok`), when a `/crud` probe does not answer PostgREST's 404
 (`PGRST125`), and when a probe cannot be asked: a curl failure, a timeout or any 5xx is a failure, never a warning. It does not
@@ -118,6 +118,13 @@ depend on DNS: it finds the Envoy Gateway data-plane Service of the release's Ga
 `gateway.envoyproxy.io/owning-gateway-name` and `-namespace`), runs `kubectl port-forward` to it on a free local port and asks
 over plain HTTP with the public `Host`, the way the node's cloudflared dials it (the Gateway has no HTTPS listener). The
 port-forward's pid is recorded and killed on every exit path. Only a preview with no public host of its own is skipped.
+
+No public prefix reaches a Dapr API path at all (PRONTO-1307). The door's `/img` and `/blobs` handlers strip the prefix and proxy
+the rest to the sidecar with a `dapr-app-id`, so `/img/v1.0/metadata` was a 500 from Dapr where the app runs no imgproxy. The
+[doorguard](../doorguard/README.md) plugin splices a block into the app's `docker/Caddyfile` at generate time that answers 404 for
+`/(crud|img|blobs|electric)/v1.0…` and `/v1.0-alpha1…` before any handler. The build only verifies it: a `docker/Caddyfile` without the
+block fails the build (`verify-door-guard` in `push.nu`), naming the plugin. The door check asks `/img` and `/blobs` (and
+`-alpha1`) and fails on anything but the door's own 404, a 5xx included.
 
 ### Known risks
 

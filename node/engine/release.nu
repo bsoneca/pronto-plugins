@@ -256,8 +256,10 @@ export def door-probes [] {
 		{path: "/crud/v1.0%2Finvoke%2Fcaddy%2Fmethod%2Fhealth", as_is: false, strict: false}
 		{path: "/crud/x/../v1.0/invoke/caddy/method/health", as_is: true, strict: false}
 		{path: "/crud/%2e%2e/v1.0/metadata", as_is: true, strict: false}
-		{path: "/img/v1.0/metadata", as_is: false, strict: false, lenient: true}
-		{path: "/blobs/v1.0/metadata", as_is: false, strict: false, lenient: true}
+		{path: "/img/v1.0/metadata", as_is: false, strict: false, guard: true}
+		{path: "/img/v1.0-alpha1/metadata", as_is: false, strict: false, guard: true}
+		{path: "/blobs/v1.0/metadata", as_is: false, strict: false, guard: true}
+		{path: "/blobs/v1.0-alpha1/metadata", as_is: false, strict: false, guard: true}
 	]
 }
 
@@ -285,10 +287,7 @@ def run-door-probes [node: record, port: int]: nothing -> int {
 			if $r.exit_code != 0 { error make {msg: $"the door check could not ask ($probe.path) of ($node.host): curl exit ($r.exit_code), so the door cannot be certified"} }
 			let body = (try { open --raw $file } catch { "" })
 			let status = ($r.stdout | str trim)
-			# /img and /blobs are the door's routes to imgproxy and the blob store, which an app may not run: there Caddy answers a 5xx for the
-			# upstream that is absent, which reaches neither the sidecar nor a service (the leak check below still runs on any answer).
-			let lenient = ($probe.lenient? | default false)
-			if ($status =~ '^5\d\d$' and not $lenient) or $status !~ '^\d{3}$' { error make {msg: $"the door check could not ask ($probe.path) of ($node.host): it answered ($status), so the door cannot be certified"} }
+			if $status =~ '^5\d\d$' or $status !~ '^\d{3}$' { error make {msg: $"the door check could not ask ($probe.path) of ($node.host): it answered ($status), so the door cannot be certified"} }
 			if $status == "200" and (($body =~ '"runtimeVersion"') or ($body =~ '"appConnectionProperties"') or (($body | str trim) == "ok")) {
 				error make {msg: $"the door reaches the Dapr API: ($node.host)($probe.path) answered 200 with ($body | str substring 0..200); the caddy Dapr configuration did not take"}
 			}
@@ -296,6 +295,10 @@ def run-door-probes [node: record, port: int]: nothing -> int {
 			# (a redirect to the clean path, or the file server): they only must not reach the sidecar or a service, which the 200 check above refuses.
 			if $probe.strict and ($status != "404" or ($body !~ "PGRST125")) {
 				error make {msg: $"the door's ($probe.path) answered ($status), not PostgREST's 404 \(PGRST125\): ($body | str substring 0..200)"}
+			}
+			# A Dapr API path under /img or /blobs is the door's own 404 (doorguard): never a proxied answer, whatever the app runs.
+			if ($probe.guard? | default false) and $status != "404" {
+				error make {msg: $"the door's ($probe.path) answered ($status), not the door's own 404: the doorguard block is missing from its Caddyfile"}
 			}
 			$asked = $asked + 1
 		}
