@@ -88,8 +88,10 @@ _billingDoorFlag: *"" | string
 
 // The flag that turns the service's stricter handling on (needs _billingFlags): a failed grants write turns
 // /billing/health 503 and is retried with backoff, grants writes have a deadline, a trial whose flag cannot be
-// asked fails the request, a broker that does not know trials fails an offer. Empty, false or unanswered: the
-// service behaves as it did before, exactly.
+// asked fails the request, a broker that does not know trials fails an offer. Empty or false: the service
+// behaves as it did before, exactly. A flag that cannot be answered: the first lookup (no previous answer to
+// keep) counts as on, so a failed grants write is never healthy by default; later failed lookups keep the last
+// answer's mode; a trial request fails while it cannot be answered.
 _billingStrictFlag: *"" | string
 
 _billingGrantsChecks: {
