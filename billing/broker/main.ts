@@ -104,6 +104,9 @@ export async function broker(p: {
   cacheMs?: number;
   /** What every replica shares (store.ts): this process's memory unless the broker has a database. */
   store?: Store;
+  /** Which Stripe account this broker answers for: the live broker and its sandbox share one store, so the
+   * per-client limits are kept apart by it. */
+  mode?: "live" | "sandbox";
 }) {
   const issuer = p.issuer.replace(/\/$/, "");
   // A broker on a developer's machine serves tenants there too.
@@ -118,10 +121,11 @@ export async function broker(p: {
   const store = p.store ?? new MemoryStore();
   // What a caller nobody signed in may make the broker ask of Stripe, counted over every replica.
   const perTenant = (t: string) => store.take("tenant", t, 120, 60_000);
-  const perClient = (c: string) => store.take("client", c, 20, 60_000);
+  const mode = p.mode ?? "live";
+  const perClient = (c: string) => store.take(`client ${mode}`, c, 20, 60_000);
   // A trial route's own: a tenant's calls all leave from one address, so this is generous, and it is
   // taken before a ticket is tried, which a junk one must not spend the tenant's bucket on.
-  const trialClient = (c: string) => store.take("trial client", c, 60, 60_000);
+  const trialClient = (c: string) => store.take(`trial client ${mode}`, c, 60, 60_000);
   // Each entitlement newer than every one before it, from any replica, though two are signed in one
   // millisecond.
   const nextVer = () => store.tick("ver", Date.now());
@@ -510,6 +514,26 @@ export async function broker(p: {
   // lags a subscription already ended asks nothing. One subscription's end is handled by one caller at
   // a time, in any replica; another event for it meanwhile leaves it to that one.
   // Whether it ran: false when another caller holds the subscription, so the event is not done.
+  // An invoice call tried again (three times in all) when it fails in a way that may pass: a 429, a 5xx or no answer.
+  async function invoiceCall<T>(call: () => Promise<T>): Promise<T> {
+    for (let attempt = 1;; attempt++) {
+      try {
+        return await call();
+      } catch (e) {
+        const transient = e instanceof StripeError ? e.status === 429 || e.status >= 500 : e instanceof TypeError;
+        if (!transient || attempt >= 3) throw e;
+        await new Promise((r) => setTimeout(r, 50 * attempt));
+      }
+    }
+  }
+  // Record the event finished under this caller's claim. False when the claim was lost (another caller took the
+  // row after the lease ran out) and the store does not say the event is finished: not recorded, so not answered 200.
+  async function finished(id: string, token: string): Promise<boolean> {
+    if (await store.complete("stripe event", id, token, EVENT_KEPT_MS)) return true;
+    const again = await store.claim("stripe event", id, EVENT_LEASE_MS);
+    if (again.state === "done") return true;
+    return again.state === "claimed" && await store.complete("stripe event", id, again.token, EVENT_KEPT_MS);
+  }
   const ending = async (id: string, fn: () => Promise<void>): Promise<boolean> =>
     (await store.exclusive(`ending ${id}`, async () => { await fn(); return true; })) === true;
   async function endFailedTrial(event: Subscription): Promise<boolean> {
@@ -518,13 +542,20 @@ export async function broker(p: {
       const fresh = await p.stripe<Subscription>("GET", `/v1/subscriptions/${event.id}`);
       if (!firstChargeFailed(fresh)) return;
       // The failed first invoice must not stay payable: one that was paid since means the charge
-      // recovered and the trial stands; an open one is voided. Any error here, a key without
-      // Invoices access (403) included, fails the event, which Stripe sends again: nothing is
-      // cancelled until the invoice is known paid or void.
+      // recovered and the trial stands; an open one is voided. A transient error (429, 5xx, no answer) is
+      // tried again and then fails the event, which Stripe sends again: nothing is cancelled until the
+      // invoice is known paid or void. A key without Invoices access (403) cannot know it: that is logged
+      // loudly, for the operator to grant the permission, and the trial is cancelled anyway.
       if (typeof fresh.latest_invoice === "string") {
-        const inv = await p.stripe<{ status: string }>("GET", `/v1/invoices/${fresh.latest_invoice}`);
-        if (inv.status === "paid") return;
-        if (inv.status === "open") await p.stripe("POST", `/v1/invoices/${fresh.latest_invoice}/void`);
+        const invoice = fresh.latest_invoice;
+        try {
+          const inv = await invoiceCall(() => p.stripe<{ status: string }>("GET", `/v1/invoices/${invoice}`));
+          if (inv.status === "paid") return;
+          if (inv.status === "open") await invoiceCall(() => p.stripe("POST", `/v1/invoices/${invoice}/void`));
+        } catch (e) {
+          if (!(e instanceof StripeError && e.status === 403)) throw e;
+          console.error(`billing: error: the Stripe key has no Invoices permission (403): ${invoice} of ${event.id} is not voided; cancelling the failed trial anyway. Grant the restricted key Invoices write.`);
+        }
       }
       await p.stripe("POST", `/v1/subscriptions/${event.id}`, { metadata: { trial_failed: "1" } }, `trial failed ${event.id}`);
       await p.stripe("DELETE", `/v1/subscriptions/${event.id}`);
@@ -588,7 +619,7 @@ export async function broker(p: {
         const r = await push(t, token);
         if (r.refused) {
           console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}; not sent again`);
-          await store.complete("stripe event", event.id, claimToken, EVENT_KEPT_MS);
+          if (!(await finished(event.id, claimToken))) return json(409, { error: "claim lost", event: event.id });
           kept = true;
           return json(200, { refused: event.id });
         }
@@ -598,7 +629,7 @@ export async function broker(p: {
         }
         sent = held;
       }
-      await store.complete("stripe event", event.id, claimToken, EVENT_KEPT_MS);
+      if (!(await finished(event.id, claimToken))) return json(409, { error: "claim lost", event: event.id });
       kept = true;
       return json(200, { delivered: event.id });
     };
@@ -744,7 +775,7 @@ if (import.meta.main) {
       const sandboxWebhookSecret = env("STRIPE_SANDBOX_WEBHOOK_SECRET");
       if (!sandboxWebhookSecret || !sandboxTenants) throw new Error("a sandbox (STRIPE_SANDBOX_SECRET_KEY, or BILLING_SANDBOX_TENANTS through the door) needs STRIPE_SANDBOX_WEBHOOK_SECRET and BILLING_SANDBOX_TENANTS");
       const pattern = new RegExp(sandboxTenants);
-      const sandbox = await broker({ ...settings, stripe: client(sandboxKey, `${door}/door/stripe-sandbox`), webhookSecret: sandboxWebhookSecret });
+      const sandbox = await broker({ ...settings, stripe: client(sandboxKey, `${door}/door/stripe-sandbox`), webhookSecret: sandboxWebhookSecret, mode: "sandbox" });
       console.warn(`billing: tenants matching ${sandboxTenants} sell through the sandbox`);
       Deno.serve({ port }, asked(twoModes({ live, sandbox, sandboxed: (t) => pattern.test(t), sandboxWebhookSecret })));
     } else {

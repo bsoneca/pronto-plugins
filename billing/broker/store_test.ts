@@ -144,7 +144,8 @@ const claimable: [string, () => Promise<{ s: Store; expire: (kind: string, id: s
     const sql = pglite(new PGlite());
     const s = new PostgresStore(sql);
     await s.migrate();
-    return { s, expire: async (kind, id) => { await sql.unsafe(`UPDATE billing_seen SET expires = now() - interval '1 second' WHERE kind = $1 AND id = $2`, [kind, id]); } };
+    // PGlite's clock ticks in milliseconds, and a token is the row's expiry as text: let one pass so a new claim's differs.
+    return { s, expire: async (kind, id) => { await sleep(5); await sql.unsafe(`UPDATE billing_seen SET expires = now() - interval '1 second' WHERE kind = $1 AND id = $2`, [kind, id]); } };
   }],
 ];
 
@@ -236,4 +237,57 @@ Deno.test("postgres store: migrate tries again only after a concurrent creation,
   await new PostgresStore(failing(raced)).migrate().then(() => { throw new Error("should fail"); }, (e) => assertEquals(e, raced));
   assertEquals(tries, 3, "the creation race is tried again, three times in all");
   assertEquals(SCHEMA.some((q) => /ADD COLUMN IF NOT EXISTS state/.test(q)), true);
+});
+
+// The claim lifecycle as data, for each store: a step is [what is done, what it answers]. A claim is named
+// (`a`, `b`) so a later step can use its token; `expire` ends the lease; `retention` is the ttl a completion keeps.
+type Step =
+  | ["claim", string, "claimed" | "busy" | "done"]
+  | ["expire"]
+  | ["complete", string, boolean]
+  | ["forget", string]
+  | ["remember"];
+const lifecycle: [string, Step[]][] = [
+  ["a claim is busy to another, then done once completed", [["claim", "a", "claimed"], ["claim", "x", "busy"], ["complete", "a", true], ["claim", "x", "done"]]],
+  ["a lease that ended is claimable again", [["claim", "a", "claimed"], ["expire"], ["claim", "b", "claimed"]]],
+  ["a stale token completes nothing and the new claim holds", [["claim", "a", "claimed"], ["expire"], ["claim", "b", "claimed"], ["complete", "a", false], ["claim", "x", "busy"], ["complete", "b", true], ["claim", "x", "done"]]],
+  ["a completed claim cannot complete twice", [["claim", "a", "claimed"], ["complete", "a", true], ["complete", "a", false], ["claim", "x", "done"]]],
+  ["a forgotten claim cannot be completed", [["claim", "a", "claimed"], ["forget", "a"], ["complete", "a", false], ["claim", "b", "claimed"]]],
+  ["a remembered event is done, whatever claimed it", [["claim", "a", "claimed"], ["remember"], ["claim", "x", "done"], ["complete", "a", false]]],
+];
+for (const [name, make] of claimable) {
+  for (const [what, steps] of lifecycle) {
+    Deno.test(`${name} store, claim lifecycle: ${what}`, async () => {
+      const { s, expire } = await make();
+      const tokens = new Map<string, string>();
+      for (const step of steps) {
+        const label = `${what} / ${JSON.stringify(step)}`;
+        if (step[0] === "claim") {
+          const c = await s.claim("stripe event", "evt", 120_000);
+          assertEquals(c.state, step[2], label);
+          if (c.state === "claimed") tokens.set(step[1], c.token);
+        } else if (step[0] === "expire") await expire("stripe event", "evt");
+        else if (step[0] === "complete") assertEquals(await s.complete("stripe event", "evt", tokens.get(step[1])!, 60_000), step[2], label);
+        else if (step[0] === "forget") await s.forget("stripe event", "evt", tokens.get(step[1]));
+        else await s.remember("stripe event", "evt", 60_000);
+      }
+    });
+  }
+}
+
+Deno.test("postgres store: the state column only takes the declared states, and the constraint is made once", async () => {
+  const sql = pglite(new PGlite());
+  const s = new PostgresStore(sql);
+  await s.migrate();
+  await s.migrate();
+  await sql.unsafe(`INSERT INTO billing_seen (kind, id, expires, state) VALUES ('k', 'ok', now(), 'claimed')`);
+  const bad = await sql.unsafe(`INSERT INTO billing_seen (kind, id, expires, state) VALUES ('k', 'bad', now(), 'busy')`).then(() => "accepted", (e) => String((e as Error).message));
+  assertEquals(/billing_seen_state/.test(bad), true, `refused by the constraint: ${bad}`);
+  // A table that #431 made, with the column and no constraint, gets it; its rows pass.
+  const old = pglite(new PGlite());
+  await old.unsafe(`CREATE TABLE billing_seen (kind text NOT NULL, id text NOT NULL, expires timestamptz NOT NULL, state text NOT NULL DEFAULT 'done', PRIMARY KEY (kind, id))`);
+  await old.unsafe(`INSERT INTO billing_seen (kind, id, expires, state) VALUES ('k', 'a', now(), 'claimed')`);
+  await new PostgresStore(old).migrate();
+  const refused = await old.unsafe(`INSERT INTO billing_seen (kind, id, expires, state) VALUES ('k', 'b', now(), 'x')`).then(() => "accepted", () => "refused");
+  assertEquals(refused, "refused");
 });

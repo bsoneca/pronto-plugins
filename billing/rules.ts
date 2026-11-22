@@ -32,5 +32,9 @@ export const RULES = {
     "converted",
     "ended",
     "failed"
+  ],
+  "claimStates": [
+    "claimed",
+    "done"
   ]
 } as const;
