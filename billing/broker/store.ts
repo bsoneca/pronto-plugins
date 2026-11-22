@@ -202,7 +202,9 @@ const fromStates = (event: ClaimEvent, to: Where = "absent") =>
 const TABLES = ["billing_counter", "billing_window", "billing_seen"];
 /** The login role the broker connects as (metal.nu's database user): the schema is applied by the cluster's superuser,
  * so it hands the tables to this role, or the broker could not see their columns. */
-const BROKER_ROLE = "billing";
+const BROKER_ROLE = RULES.brokerRole;
+/** What the broker does to its tables, each checked at start. */
+const PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE"];
 
 /** The schema, each statement add-only and idempotent: billing/broker/schema.sql is exactly these, `;`-ended. */
 export const SCHEMA = [
@@ -291,15 +293,19 @@ export class PostgresStore implements Store {
       const [row] = await this.sql.unsafe(`SELECT to_regclass($1) IS NOT NULL AS there`, [table]);
       if (row?.there !== true) missing.push(`table ${table}`);
       else {
-        // A table that is there but that this role may not use is not a missing one: its owner is said.
-        const [priv] = await this.sql.unsafe(
-          `SELECT has_table_privilege(current_user, $1, 'SELECT, INSERT, UPDATE, DELETE') AS ok, pg_get_userbyid(c.relowner) AS owner, current_user AS me
-           FROM pg_class c WHERE c.oid = $1::regclass`, [table]);
-        if (priv?.ok !== true) unusable.push(`${table} (owned by ${priv?.owner}, used as ${priv?.me})`);
+        // A table that is there but that this role may not use is not a missing one: each privilege the broker uses is
+        // checked on its own (has_table_privilege with a list is true if ANY of them is held), and the one lacking is named.
+        // The tables have no sequences, and a table privilege covers its columns.
+        for (const privilege of PRIVILEGES) {
+          const [priv] = await this.sql.unsafe(
+            `SELECT has_table_privilege(current_user, $1, $2) AS ok, pg_get_userbyid(c.relowner) AS owner, current_user AS me FROM pg_class c WHERE c.oid = $1::regclass`,
+            [table, privilege]);
+          if (priv?.ok !== true) unusable.push(`${privilege} on ${table} (owned by ${priv?.owner}, used as ${priv?.me})`);
+        }
       }
     }
     if (unusable.length) {
-      throw new Error(`billing broker: no privilege on ${unusable.join(", ")}: the tables must belong to the broker's role (${BROKER_ROLE}); apply broker/schema.sql, which hands them over, as the cluster's superuser`);
+      throw new Error(`billing broker: missing privilege ${unusable.join(", ")}: the tables must belong to the broker's role (${BROKER_ROLE}); apply broker/schema.sql, which hands them over, as the cluster's superuser`);
     }
     if (!missing.includes("table billing_seen")) {
       // pg_catalog, not information_schema: the latter hides the columns of a table the role has no privilege on.

@@ -106,5 +106,6 @@ export const RULES = {
     "request": 4096,
     "webhook": 262144
   },
-  "doorLookupTimeoutMs": 300
+  "doorLookupTimeoutMs": 300,
+  "brokerRole": "billing"
 } as const;

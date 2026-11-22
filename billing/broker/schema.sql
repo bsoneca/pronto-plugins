@@ -1,6 +1,7 @@
 -- The billing broker's tables (broker/store.ts's SCHEMA): add-only and idempotent, so it may be applied
 -- again on any database that has them. The broker makes no tables itself and checks at start that these
 -- exist. Nothing here drops or rewrites anything. Generated: deno run -A billing/broker/schema_gen.ts
+-- broker-role: billing
 SET lock_timeout = '5s';
 SET statement_timeout = '60s';
 CREATE TABLE IF NOT EXISTS billing_counter (name text PRIMARY KEY, value bigint NOT NULL);

@@ -61,6 +61,9 @@ rules: {
 	bodyLimits: {request: 4096, webhook: 262144}
 	// How long the service waits for flagd's answer on the stripe_door flag before it takes the direct route.
 	doorLookupTimeoutMs: 300
+	// The broker's login role and database name on its own Postgres: metal.nu creates the database with this owner, the
+	// broker connects as it, and schema.sql hands the tables to it. Declared once, emitted into schema.sql, which metal.nu reads.
+	brokerRole: "billing"
 }
 
 rules: {
@@ -77,6 +80,7 @@ rules: {
 	routeLimits: {perClient: int & >0, global: int & >perClient, bodyMax: int & >0, windowMs: int & >0}
 	bodyLimits: {request: int & >0, webhook: int & >request}
 	doorLookupTimeoutMs: int & >0
+	brokerRole: =~"^[a-z_][a-z0-9_]*$"
 	claimTransitions: [...{
 		event: "claim" | "complete" | "release" | "remember" | "expire" | "invalidate"
 		from:  "absent" | or(claimStates)

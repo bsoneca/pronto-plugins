@@ -21,6 +21,13 @@
 # the stand-in on a localhost issuer.
 
 const here = path self .
+
+# The broker's login role and database name: rules.cue's brokerRole, which schema_gen.ts emits into broker/schema.sql's
+# `-- broker-role:` line, so the database metal.nu creates, the role the broker connects as and the owner the schema hands
+# its tables to are one declaration.
+def broker-role []: nothing -> string {
+	open --raw $"($here)/broker/schema.sql" | lines | where {|l| $l | str starts-with "-- broker-role: " } | first | str replace "-- broker-role: " "" | str trim
+}
 use ../common/sops.nu
 use ../common/airlock.nu [airlock-objects door_port]
 use ../common/broker_db.nu
@@ -87,7 +94,7 @@ export def manifests [
 	let meta = {namespace: $namespace, labels: $labels}
 	# The broker's database (common/broker_db.nu).
 	let db = $"($name)-db"
-	let database = (broker_db objects $namespace $db "pronto-billing" "billing" $labels)
+	let database = (broker_db objects $namespace $db "pronto-billing" (broker-role) $labels)
 	if $database_only { return ([{apiVersion: "v1", kind: "Namespace", metadata: {name: $namespace, labels: $labels}}] ++ $database | each { to yaml } | str join "---\n") }
 	# A change to a file is a new pod: the files' digest is the template's.
 	let digest = ($files | each {|f| $sources | at $f.key } | str join "\n" | hash sha256 | str substring 0..15)
@@ -226,7 +233,7 @@ export def main [
 	# broker is replaced: the broker runs no DDL and fails at start when they are missing.
 	let primary = (do $remote $"($kubectl) get cluster.postgresql.cnpg.io/($service)-db -n ($namespace) -o jsonpath='{.status.currentPrimary}'" | str trim)
 	if ($primary | is-empty) { error make {msg: $"the broker's database ($service)-db names no primary"} }
-	open --raw $"($here)/broker/schema.sql" | do $remote $"($kubectl) exec -i -n ($namespace) ($primary) -c postgres -- psql -X -v ON_ERROR_STOP=1 -U postgres -d billing" | print
+	open --raw $"($here)/broker/schema.sql" | do $remote $"($kubectl) exec -i -n ($namespace) ($primary) -c postgres -- psql -X -v ON_ERROR_STOP=1 -U postgres -d (broker-role)" | print
 	$yaml | do $remote $"($kubectl) apply -f -" | print
 	do $remote $"($kubectl) rollout restart deployment/($service)-airlock -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service)-airlock -n ($namespace) --timeout=300s" | print
 	do $remote $"($kubectl) rollout restart deployment/($service) -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service) -n ($namespace) --timeout=120s" | print

@@ -521,10 +521,40 @@ Deno.test("postgres store: tables applied by the superuser are usable by the bro
   for (const statement of SCHEMA.filter((q) => !/OWNER TO/.test(q))) await oldSql.unsafe(statement);
   await old.exec(`SET ROLE billing`);
   const err = await new PostgresStore(oldSql).verify().then(() => "started", (e) => (e as Error).message);
-  assertEquals(/no privilege on billing_counter \(owned by postgres, used as billing\)/.test(err) && !/missing column/.test(err), true, err);
+  assertEquals(/missing privilege SELECT on billing_counter \(owned by postgres, used as billing\)/.test(err) && !/missing column/.test(err), true, err);
   // Applying the schema again, as the superuser, repairs it.
   await old.exec(`RESET ROLE`);
   await applySchema(oldSql);
   await old.exec(`SET ROLE billing`);
   await new PostgresStore(oldSql).verify();
+});
+
+// has_table_privilege with a list is true if ANY is held: each privilege is checked alone, and the one lacking is named.
+Deno.test("postgres store: a role lacking one privilege on one table fails at start naming the table and the privilege", async () => {
+  for (const missing of ["SELECT", "INSERT", "UPDATE", "DELETE"]) {
+    const pg = new PGlite();
+    const sql = pglite(pg);
+    await pg.exec(`CREATE ROLE other LOGIN`);
+    await applySchema(sql); // owned by the broker role only if it exists: here it does not, so the superuser owns them
+    const held = ["SELECT", "INSERT", "UPDATE", "DELETE"].filter((x) => x !== missing).join(", ");
+    for (const t of ["billing_counter", "billing_window", "billing_seen"]) await pg.exec(`GRANT ${held} ON ${t} TO other`);
+    await pg.exec(`GRANT ALL ON billing_counter, billing_window TO other`);
+    await pg.exec(`SET ROLE other`);
+    const err = await new PostgresStore(sql).verify().then(() => "started", (e) => (e as Error).message);
+    assertEquals(err.includes(`missing privilege ${missing} on billing_seen (owned by postgres, used as other)`), true, `${missing}: ${err}`);
+    assertEquals(/on billing_counter|on billing_window/.test(err), false, "only the table that lacks it is named");
+    await pg.exec(`RESET ROLE`);
+    await pg.exec(`GRANT ${missing} ON billing_seen TO other`);
+    await pg.exec(`SET ROLE other`);
+    await new PostgresStore(sql).verify();
+  }
+});
+
+Deno.test("the broker's role is declared once: rules.cue's brokerRole is in schema.sql, which metal.nu reads", async () => {
+  const sql = await Deno.readTextFile(new URL("./schema.sql", import.meta.url));
+  assertEquals(sql.includes(`-- broker-role: ${RULES.brokerRole}\n`), true, "emitted into the header metal.nu reads");
+  assertEquals(sql.includes(`ALTER TABLE billing_seen OWNER TO ${RULES.brokerRole};`), true, "and the owner the tables are handed to");
+  const nu = await Deno.readTextFile(new URL("../metal.nu", import.meta.url));
+  assertEquals(/"billing"/.test(nu.replace(/"billing"\s*#/g, "")) && /broker_db objects[^\n]*"billing"/.test(nu), false, "metal.nu names no literal role for the database");
+  assertEquals(nu.includes("(broker-role)"), true, "metal.nu takes the role from schema.sql");
 });

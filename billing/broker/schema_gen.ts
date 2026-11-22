@@ -2,10 +2,12 @@
 // add-only, idempotent script, or with
 // --check fails when it is not what SCHEMA says: deno run --allow-read --allow-write billing/broker/schema_gen.ts [--check]
 import { SCHEMA } from "./store.ts";
+import { RULES } from "../rules.ts";
 
 const HEADER = `-- The billing broker's tables (broker/store.ts's SCHEMA): add-only and idempotent, so it may be applied
 -- again on any database that has them. The broker makes no tables itself and checks at start that these
--- exist. Nothing here drops or rewrites anything. Generated: deno run -A billing/broker/schema_gen.ts\n`;
+-- exist. Nothing here drops or rewrites anything. Generated: deno run -A billing/broker/schema_gen.ts
+-- broker-role: ${RULES.brokerRole}\n`;
 // As the app's other raw migrations start (the app's squawk lint requires both timeouts), and an index on these new,
 // empty tables is made without CONCURRENTLY: IF NOT EXISTS makes a rerun a no-op.
 const TIMEOUTS = "SET lock_timeout = '5s';\nSET statement_timeout = '60s';\n";
