@@ -5,7 +5,7 @@
 #
 # State (all optional): namespaces/<ns> (exists), revision/<deployment> (an int; apply of a Deployment
 # bumps it), reject (a Kind that a server dry run refuses), job_fail, rollout_fail (a name),
-# bare (pods without daprd), operators.json (image tags by deployment), noprimary, buildkit_down and
+# bare (pods without daprd), cluster_instances_ready (how many of the database's instances are ready, a number: all of the Cluster's by default), operators.json (image tags by deployment), noprimary, buildkit_down and
 # registry_down (the node's builder or registry has no available replica), get_fail_<kind> and missing_<kind>
 # (a read of <kind> in every namespace is refused, or its CRD is not on the node), read_fail_namespace and
 # read_fail_cluster (any read of a namespace, or of the database Cluster, fails as an API error) and
@@ -219,6 +219,7 @@ if verb == "apply":
                 json.dump(cmo, open(d + "/cm/" + name, "w"))
             if kind == "Cluster" and not o.get("_yaml"):
                 open(d + "/cluster_image", "w").write(o["spec"]["imageName"])
+                open(d + "/cluster_instances", "w").write(str(o["spec"].get("instances", 1)))
             if kind == "Cluster" and o.get("_yaml"):
                 m = __import__("re").search(r"(?m)^  imageName:\s*(\S+)", o["_raw"])
                 if m:
@@ -343,6 +344,10 @@ if verb == "get":
         fail(f'Error from server (NotFound): secrets "{name}" not found')
     if what == "pods":
         sel = opt("-l") or ""
+        if "cnpg.io/podRole=instance" in sel:
+            image = read("cluster_image", "none")
+            n = int(read("cluster_instances_ready", read("cluster_instances", "1")))
+            out({"items": [{"metadata": {"name": "db-%d" % i}, "spec": {"containers": [{"name": "postgres", "image": image}]}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}} for i in range(1, n + 1)]})
         if "cnpg.io/instanceRole=primary" in sel:
             if exists("noprimary"):
                 out({"items": []})

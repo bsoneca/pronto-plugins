@@ -216,6 +216,7 @@ def main [] {
 	test_preflight_refuses_a_pin_nobody_validated
 	test_preflight_needs_its_tools
 	test_a_database_that_never_comes_up_gets_its_old_image_back
+	test_a_database_of_standbys_is_waited_for_whole
 	test_a_failed_read_is_never_taken_for_absent
 	test_serving_prints_the_recorded_commit
 	test_a_failed_deployment_read_is_neither_unchanged_nor_changed
@@ -591,6 +592,27 @@ def test_a_database_that_never_comes_up_gets_its_old_image_back [] {
 	assert equal ($patch | length) 1
 	assert (has $patch.0 "imageName") 
 	assert (has $patch.0 "reg/aprende-database:17@sha256:old")
+	rm -rf $w.dir
+}
+
+def test_a_database_of_standbys_is_waited_for_whole [] {
+	print "test a release of a database with standbys waits for every instance, and fails when one is missing..."
+	let w = (sandbox)
+	"\nNode: database: instances: 3\n" | save --append ($w.app | path join release.cue)
+	"2" | save -f ($w.state | path join cluster_instances_ready)
+	"reg/aprende-database:17@sha256:old" | save -f ($w.state | path join previous_image)
+	let body = (with-node $w "upsert waits.standbys 1" $"release-app $app_info $node $meta $compose $facts [] (pushed-json)")
+	let short = (in-world $w -c (script $w $body))
+	assert ($short.exit_code != 0)
+	assert (has $short.stderr "has 2 of its 3 instances ready on") $short.stderr
+	assert (has $short.stderr "the database image stays") $short.stderr
+	assert equal (calls $w | where {|c| $c | str starts-with "patch cluster.postgresql.cnpg.io" } | length) 0 "a slow standby does not put the old image back"
+	rm -f ($w.state | path join previous_image)
+	rm -f ($w.state | path join calls.jsonl)
+	rm -f ($w.state | path join cluster_instances_ready)
+	let whole = (in-world $w -c (script $w (with-node $w "upsert waits.primary 1" $"release-app $app_info $node $meta $compose $facts [] (pushed-json)")))
+	assert equal $whole.exit_code 0 $"($whole.stdout)($whole.stderr)"
+	assert (has $whole.stdout "the 3 instances of aprende-db") $whole.stdout
 	rm -rf $w.dir
 }
 

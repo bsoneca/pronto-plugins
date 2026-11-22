@@ -194,6 +194,20 @@ def wait-primary [app: string, namespace: string, image: string, seconds: int] {
 	}
 }
 
+# With standbys: every instance ready on the image, in a wait of its own after the primary's. The primary is up and
+# serving by now, so a slow standby (a volume being cloned) is no reason to put the old image back: it only stops the release.
+def wait-standbys [app: string, namespace: string, image: string, instances: int, seconds: int] {
+	print $"node: (stamp) waiting for the ($instances) instances of ($app)-db in ($namespace) on ($image)"
+	let deadline = ((date now) + ($seconds * 1sec))
+	loop {
+		let ready = (kubectl-json get pods -n $namespace -l $"cnpg.io/cluster=($app)-db,cnpg.io/podRole=instance" | get items
+			| where {|p| $p.metadata.deletionTimestamp? == null and ($p.spec.containers | where name == "postgres" | first | get image) == $image and ($p.status.conditions? | default [] | any {|c| $c.type == "Ready" and $c.status == "True" }) })
+		if ($ready | length) >= $instances { return }
+		if (date now) > $deadline { error make {msg: $"cluster/($app)-db has ($ready | length) of its ($instances) instances ready on ($image) after ($seconds) s; the primary is up, so the database image stays"} }
+		sleep 3sec
+	}
+}
+
 # The commands of hooks.afterJobs, in the app's folder, told where the release is.
 export def run-hooks [hooks: list, app_dir: string, context: string, namespace: string, app: string] {
 	for h in $hooks {
@@ -541,6 +555,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		as-list ($objects | where {|o| $o.kind not-in [Deployment Job Namespace] }) | kubectl-ok apply -f -
 		# 8. the database, on its image
 		let db_image = (of-kind $objects Cluster | first | get spec.imageName)
+		let db_instances = (of-kind $objects Cluster | first | get spec.instances? | default 1)
 		try { wait-primary $app $ns $db_image $node.waits.primary } catch {|e|
 			if $previous_image != null {
 				print -e $"node: (stamp) the database did not come up on the new image: putting back ($previous_image)"
@@ -549,6 +564,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 			}
 			error make {msg: $e.msg}
 		}
+		if $db_instances > 1 { wait-standbys $app $ns $db_image $db_instances $node.waits.standbys }
 		# 9. the schema Jobs, in jobOrder
 		for j in $node.jobOrder {
 			let job = ($jobs | where {|o| $o.metadata.name == $"($app)-($j)" })
