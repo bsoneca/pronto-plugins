@@ -253,6 +253,9 @@ Deno.test("schema.sql is the add-only, idempotent script store.ts's SCHEMA says"
   assertEquals(await Deno.readTextFile(new URL("./schema.sql", import.meta.url)), schemaSql());
   assertEquals(SCHEMA.some((q) => /\bDROP\b|\bDELETE\b|\bTRUNCATE\b/i.test(q)), false, "nothing is dropped");
   assertEquals(SCHEMA.every((q) => /IF NOT EXISTS/.test(q)), true, "every statement checks first");
+  const sql = schemaSql();
+  assertEquals(/^SET lock_timeout = '5s';\nSET statement_timeout = '60s';$/m.test(sql), true, "the timeouts squawk requires");
+  assertEquals(sql.split("\n").every((l, i, ls) => !/^CREATE INDEX/.test(l) || ls[i - 1] === "-- squawk-ignore require-concurrent-index-creation"), true, "each index says why it is not concurrent");
 });
 
 // The claim lifecycle as data, for each store: a step is [what is done, what it answers]. A claim is named
