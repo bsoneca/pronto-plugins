@@ -57,15 +57,14 @@ export function refused(e: unknown): boolean {
   return e instanceof TypeError && /connection refused|ECONNREFUSED/i.test(said(e));
 }
 
-// What the grants loop logs of a failed call. Billing starts before its neighbours listen, so its
-// first calls can meet one still starting (a NotReady): the first says so once, as a line of its
-// own, and the loop retries; one still failing after the startup window is an error, as is any
-// other failure (a refused token, an SQL error, a flag that holds no grants, an address that does
-// not resolve) and any failure after one success, each time.
+// What the grants loop does with a failed call. Billing starts before its neighbours listen, so its
+// first calls can meet one still starting (a NotReady): the loop waits and retries until the startup
+// window ends. Every other failure (a refused token, an SQL error, a flag that holds no grants, an
+// address that does not resolve), a NotReady past the window and any failure after one success is a
+// "fail": the grants are not written, /billing/health answers 503 and the error is logged each time.
 export const grantsWindowMs = 60_000;
-export function grantLog(served: boolean, sinceStartMs: number, notReady: boolean, waiting: boolean): "none" | "info" | "error" {
-  if (served || !notReady || sinceStartMs >= grantsWindowMs) return "error";
-  return waiting ? "none" : "info";
+export function grantVerdict(served: boolean, sinceStartMs: number, notReady: boolean): "wait" | "fail" {
+  return !served && notReady && sinceStartMs < grantsWindowMs ? "wait" : "fail";
 }
 
 export function service(s: Settings) {
@@ -99,6 +98,8 @@ export function service(s: Settings) {
   async function rpc(fn: string, auth: string, args: Record<string, unknown> = {}): Promise<Response> {
     return await fetcher(`${crud}/rpc/${fn}`, {
       method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: JSON.stringify(args),
+      // A write that hangs must fail (a TimeoutError is no NotReady, so a "fail" verdict), never keep health at 200 and stall the loop.
+      signal: AbortSignal.timeout(30_000),
     });
   }
   const asService = (fn: string, args: Record<string, unknown>) => rpc(fn, `Bearer ${s.serviceJwt}`, args);
@@ -328,7 +329,9 @@ export function service(s: Settings) {
         if (!res.ok) return res;
         return await entitle((await res.json()).token);
       }
-      if (req.method === "GET" && path === "/billing/health") return json(200, { ok: true });
+      if (req.method === "GET" && path === "/billing/health") {
+        return grantsError === null ? json(200, { ok: true }) : json(503, { error: "grants not written" });
+      }
       // The reader's own account read at Stripe through the broker, nothing written: what a flag's live
       // check asks as the tester (PRONTO-218).
       if (req.method === "GET" && path === "/billing/probe") {
@@ -342,7 +345,31 @@ export function service(s: Settings) {
       return json(502, { error: "billing unavailable" });
     }
   };
-  return Object.assign(handler, { grant });
+  // One try at the grants, as the loop makes it: a success clears the error /billing/health reports, a
+  // failure no wait can mend sets it, so a revoked grant never stays effective on a healthy-looking
+  // deployment. The loop retries either way, so a corrected flag push recovers with no deploy.
+  let grantsError: string | null = null, served = false, waiting = false;
+  async function attempt(sinceStartMs: number): Promise<boolean> {
+    try {
+      await grant();
+      served = true;
+      waiting = false;
+      grantsError = null;
+      return true;
+    } catch (e) {
+      const notReady = e instanceof NotReady;
+      if (grantVerdict(served, sinceStartMs, notReady) === "fail") {
+        grantsError = (e as Error).message;
+        // The word "error" is what the log shipper reads a line's level by: without it this line is counted as info and no alert sees it.
+        console.error(`billing: error: grants not written (a revoked grant may still be honoured): ${grantsError}`);
+      } else if (!waiting) {
+        console.log(`billing: waiting for the gateway to write the grants, retrying until ${grantsWindowMs / 1000} s after start: ${(e as Error).message}`);
+      }
+      waiting = notReady;
+      return false;
+    }
+  }
+  return Object.assign(handler, { grant, attempt });
 }
 
 if (import.meta.main) {
@@ -360,21 +387,12 @@ if (import.meta.main) {
   Deno.serve({ port: Number(Deno.env.get("BILLING_PORT") ?? 8688) }, billing);
   // Until the gateway serves billing_grant, as it does once it has reloaded its schema; with
   // flags, every minute after, so a push reaches the database with no deploy.
-  let served = false, waiting = false;
   const started = Date.now();
   for (let wait = 1; ; ) {
-    try {
-      await billing.grant();
-      served = true;
+    if (await billing.attempt(Date.now() - started)) {
       if (!Deno.env.get("BILLING_FLAGS")) break;
       wait = 60;
-    } catch (e) {
-      wait = Math.min(wait * 2, 60);
-      const log = grantLog(served, Date.now() - started, e instanceof NotReady, waiting);
-      if (log === "error") console.error(`billing: grants not written: ${(e as Error).message}`);
-      else if (log === "info") console.log(`billing: waiting for the gateway to write the grants, retrying until ${grantsWindowMs / 1000} s after start: ${(e as Error).message}`);
-      waiting = e instanceof NotReady;
-    }
+    } else wait = Math.min(wait * 2, 60);
     await new Promise((r) => setTimeout(r, wait * 1000));
   }
 }

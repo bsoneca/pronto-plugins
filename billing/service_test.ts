@@ -1,7 +1,7 @@
 // The service hands the author's grants to the database: the release's set, or
 // the flag billing_grants as flagd serves it now; each set once, and none taken
 // away because flagd could not be asked.
-import { grantLog, NotReady, service } from "./service.ts";
+import { grantVerdict, NotReady, service } from "./service.ts";
 import { entitlementClaims } from "./broker/core.ts";
 import { signEs256 } from "./shared.ts";
 
@@ -361,15 +361,76 @@ Deno.test("the door flag is read for the reader and told to the broker; a lookup
   await bad.body?.cancel();
 });
 
-// The grants loop keeps the startup race out of the logs (PRONTO-295, from Bonk Chess's copy): billing starts
-// before crud listens, so a neighbour not up yet says nothing in the first minute and warns after it; any
-// other failure, and any after a success, is an error.
-Deno.test("a neighbour not up yet is said once in the startup window, an error after it; any other failure is an error", () => {
-  eq(grantLog(false, 2000, true, false), "info", "crud is not listening yet at every instance start: said once");
-  eq(grantLog(false, 4000, true, true), "none", "the same wait, already said");
-  eq(grantLog(false, 70000, true, true), "error", "still not written after the window");
-  eq(grantLog(true, 2000, true, false), "error", "after a success it is real trouble");
-  eq(grantLog(false, 2000, false, true), "error", "a refusal no wait can mend is an error at once");
+// The grants loop waits out the startup race (PRONTO-295, from Bonk Chess's copy): billing starts before crud
+// listens, so a neighbour not up yet is waited for in the first minute. Any other failure, a wait past the
+// window and any failure after a success is a fail: /billing/health goes 503.
+Deno.test("a neighbour not up yet is waited for in the startup window; any other failure fails", () => {
+  eq(grantVerdict(false, 2000, true), "wait", "crud is not listening yet at every instance start");
+  eq(grantVerdict(false, 4000, true), "wait", "the same wait, later in the window");
+  eq(grantVerdict(false, 70000, true), "fail", "still not written after the window");
+  eq(grantVerdict(true, 2000, true), "fail", "after a success it is real trouble");
+  eq(grantVerdict(false, 2000, false), "fail", "a refusal no wait can mend fails at once");
+});
+
+function healthStage(answer: () => Response | Promise<Response>) {
+  const fetcher = ((input: string | URL | Request) =>
+    String(input) === "http://crud/rpc/billing_grant" ? Promise.resolve().then(answer) : Promise.resolve(new Response("", { status: 404 }))) as typeof fetch;
+  const s = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), grants: "[]", fetcher });
+  const health = async () => {
+    const r = await s(new Request("https://a.example/billing/health"));
+    const body = await r.json();
+    return [r.status, body];
+  };
+  return { s, health };
+}
+
+async function quiet<T>(f: () => Promise<T>): Promise<T> {
+  const error = console.error, log = console.log;
+  console.error = () => {};
+  console.log = () => {};
+  try { return await f(); } finally { console.error = error; console.log = log; }
+}
+
+Deno.test("a grants write no wait can mend turns /billing/health 503 until a success", async () => {
+  for (const [why, status] of [["token refused", 401], ["SQL error", 400]] as const) {
+    let ok = false;
+    const { s, health } = healthStage(() => ok ? new Response(null, { status: 204 }) : Response.json({ code: "X" }, { status }));
+    eq(await health(), [200, { ok: true }], `${why}: healthy before the first try`);
+    await quiet(async () => { eq(await s.attempt(1000), false, `${why}: not written`); });
+    eq(await health(), [503, { error: "grants not written" }], `${why}: unhealthy`);
+    await quiet(async () => { eq(await s.attempt(2000), false, `${why}: still refused`); });
+    eq(await health(), [503, { error: "grants not written" }], `${why}: still unhealthy`);
+    ok = true;
+    eq(await s.attempt(3000), true, `${why}: written`);
+    eq(await health(), [200, { ok: true }], `${why}: a later success is healthy again`);
+  }
+});
+
+Deno.test("a failure after a first success turns /billing/health 503, a later success clears it", async () => {
+  const flags = { value: "[]" };
+  const fetcher = ((input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "http://crud/rpc/billing_grant") return Promise.resolve(new Response(null, { status: 204 }));
+    if (url.endsWith("/billing_grants")) return Promise.resolve(flags.value === "down" ? new Response("", { status: 500 }) : Response.json({ value: flags.value }));
+    return Promise.resolve(new Response("", { status: 404 }));
+  }) as typeof fetch;
+  const f = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), flags: "http://flagd:8693", fetcher });
+  const h = async () => (await f(new Request("https://a.example/billing/health"))).status;
+  eq(await f.attempt(0), true, "flag read and written");
+  flags.value = "down";
+  await quiet(async () => { eq(await f.attempt(1000), false, "flagd down after a success"); });
+  eq(await h(), 503, "a failure after a success fails even inside the window");
+  flags.value = JSON.stringify(ANA);
+  eq(await f.attempt(2000), true, "a corrected push is written");
+  eq(await h(), 200, "healthy again, no deploy");
+});
+
+Deno.test("a neighbour not up yet keeps /billing/health 200 in the window and 503 after it", async () => {
+  const { s, health } = healthStage(() => new Response("", { status: 503 }));
+  await quiet(async () => { eq(await s.attempt(2000), false, "not written yet"); });
+  eq(await health(), [200, { ok: true }], "waiting inside the window is healthy");
+  await quiet(async () => { eq(await s.attempt(70000), false, "still not written"); });
+  eq(await health(), [503, { error: "grants not written" }], "past the window it is not");
 });
 
 Deno.test("what a failed grants call is: not up yet, or a failure", async () => {
