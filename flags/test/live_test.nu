@@ -655,6 +655,16 @@ rm -f $"($dir)/rgh.created"
 let r_own = (rrun [push $rapp --flip gen --untested "rec"])
 check ($r_own.exit_code == 0 and (rjournal | last).record == "failed" and ((rjournal | last).note | str contains "not a record commit") and (^git --git-dir $rorigin rev-parse refs/heads/fix/flags-record-rec | str trim) == $theirs) "record: a branch that is not ours and no pull request of ours: refused, nothing pushed"
 
+# A generate that succeeds does not wait out its limit, and the watcher's sleep is not left behind.
+let fast_head = (^git --git-dir $rorigin commit-tree main^{tree} -p main -m "rec: record live flag defaults" -m "Records: {}" | str trim)
+^git --git-dir $rorigin update-ref refs/heads/fix/flags-record-rec $fast_head
+rm -f $"($dir)/rgh.created"
+let t0 = (date now)
+let r_fast = (rrun [push $rapp --flip premium --untested "rec"] {PRONTO_FLAGS_GENERATE_CMD: "echo hi", PRONTO_FLAGS_GENERATE_TIMEOUT_SEC: "777"})
+let took = ((date now) - $t0)
+let left = (^ps -axo command | lines | where {|l| ($l | str contains "sleep 777") and not ($l | str contains "ps -axo") })
+check ($r_fast.exit_code == 0 and (rjournal | last).record == "pr" and $took < 10sec and ($left | is-empty)) "record: a generate that succeeds returns at once and leaves no watcher sleep behind"
+
 # A mirror (flagsLive.mirrors): each write of the object is applied to a node's ConfigMap over ssh;
 # a failing mirror warns, unless it is required. ssh is a stand-in that keeps what it was sent.
 let bin = $"($dir)/bin"

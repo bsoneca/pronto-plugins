@@ -1021,7 +1021,7 @@ def record-work [at: record, app: path, version: string, cases: string, want: li
 		# stopped and the record fails, never the push.
 		let limit = ($env.PRONTO_FLAGS_GENERATE_TIMEOUT_SEC? | default 600 | into int)
 		# Its own process group (job control), killed whole: a child the generate started goes with it.
-		let watched = 'set -m; sh -c "$PRONTO_GEN" & p=$!; (sleep $PRONTO_GEN_LIMIT; kill -TERM -- -$p 2>/dev/null) & w=$!; wait $p; rc=$?; kill $w 2>/dev/null; exit $rc'
+		let watched = 'set -m; sh -c "$PRONTO_GEN" & p=$!; (sleep $PRONTO_GEN_LIMIT; kill -TERM -- -$p 2>/dev/null) >/dev/null 2>&1 & w=$!; wait $p; rc=$?; kill -- -$w 2>/dev/null; exit $rc'
 		let g = (run-cases $wapp $watched ($trust | merge {PRONTO_GEN: $gen, PRONTO_GEN_LIMIT: ($limit | into string)}))
 		if not $g.ok { error make {msg: $"flags: record: generate failed or ran past its ($limit) s in the scratch tree: ($g.out)"} }
 	} else { print -e $"flags: record: ($wapp) has no tests/slot.ts, so generate was not run" }
