@@ -249,6 +249,24 @@ cases: {
 		{call: "apigen.as", args: ["$db", _ada, "DELETE FROM public.api_v1_note WHERE name = $1 RETURNING name", ["notes/" + _n1]], expect: [{name: "notes/" + _n1}], why: "an exported Delete"},
 		{call: "apigen.replayed", args: ["$db", "$app"], expect: "replayed"},
 	]}
+	"api_v1_grants.sql narrows the views' grants as soon as an earlier migration's blanket grants reapply them, and leaves a new database alone": {suite: "api", steps: [
+		{call: "apigen.app"}, {keep: "app"},
+		{call: "apigen.generated", args: ["$app"]},
+		{call: "apigen.files", args: ["$app"]},
+		{call: "apigen.dbReplay", args: ["$app", false]}, {keep: "blanket"},
+		{call: "apigen.holds", args: ["$blanket", "app_user", "public.api_v1_tag", "INSERT"], expect: true, why: "without it a read-only view lets app_user INSERT between the blanket grants and the views' own migration"},
+		{call: "apigen.holds", args: ["$blanket", "anon", "public.api_v1_note", "SELECT"], expect: true, why: "and anon reads"},
+		{call: "apigen.dbReplay", args: ["$app", true]}, {keep: "narrow"},
+		{call: "apigen.holds", args: ["$narrow", "app_user", "public.api_v1_tag", "INSERT"], expect: false, why: "with it a SELECT-only view refuses a write"},
+		{call: "apigen.holds", args: ["$narrow", "app_user", "public.api_v1_tag", "SELECT"], expect: true},
+		{call: "apigen.holds", args: ["$narrow", "app_user", "api_v1.tag", "INSERT"], expect: false, why: "in api_v1 too"},
+		{call: "apigen.holds", args: ["$narrow", "app_user", "public.api_v1_note", "INSERT"], expect: true, why: "an exported Create stays granted"},
+		{call: "apigen.holds", args: ["$narrow", "anon", "public.api_v1_note", "SELECT"], expect: false, why: "anon holds nothing on a view"},
+		{call: "apigen.holds", args: ["$narrow", "service", "public.api_v1_note", "SELECT"], expect: false, why: "nor does a role the blanket granted"},
+		{call: "apigen.as", args: ["$narrow", _ada, "INSERT INTO public.api_v1_tag (id, label) VALUES ($1, 'x')", [_n2]], throws: "42501", why: "the write is refused"},
+		{call: "apigen.dbReplay", args: ["$app", true, true]}, {keep: "fresh"},
+		{call: "apigen.holds", args: ["$fresh", "app_user", "public.tag", "SELECT"], expect: true, why: "a database with no view yet is left alone: the grants ran and changed nothing"},
+	]}
 	"a name in public that is not a view of the API stops the release: a table, a function, never replaced": {suite: "api", steps: [
 		{call: "apigen.app"}, {keep: "app"},
 		{call: "apigen.generated", args: ["$app"]},

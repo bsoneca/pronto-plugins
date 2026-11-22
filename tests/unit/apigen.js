@@ -155,6 +155,30 @@ export async function dbBlanket(dir) {
   return pg;
 }
 
+/** A database that already holds the views from a past release (api_v1.sql), over which one migration at a time is replayed in an app's
+ * order: its blanket grants (002_grants.sql: every table of public, views included, to its roles and by default), then, with `regrant`,
+ * the grants migration (api_v1_grants.sql, the app's 003_api_regrant) that narrows them straight away. `fresh` runs the grants on a
+ * database that has no view yet instead (a new one), which they leave alone. */
+export async function dbReplay(dir, regrant, fresh = false) {
+  const pg = new PGlite();
+  await pg.exec(TABLES + MACHINE);
+  await pg.exec(`CREATE ROLE service NOLOGIN;`);
+  if (!fresh) await pg.exec(await Deno.readTextFile(`${dir}/api/v1/api_v1.sql`));
+  await pg.exec(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user, service, anon;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user, service, anon;`);
+  if (regrant) {
+    const grants = await Deno.readTextFile(`${dir}/api/v1/api_v1_grants.sql`);
+    await pg.exec(grants);
+    await pg.exec(grants);
+  }
+  return pg;
+}
+
+/** Whether `role` holds `privilege` on the relation `rel`, on the table or on any column of it (as the catalog says). */
+export async function holds(pg, role, rel, privilege) {
+  return (await pg.query('SELECT has_any_column_privilege($1, $2, $3) AS held', [role, rel, privilege])).rows[0].held;
+}
+
 /** The generated SQL run over a database where `ddl` already made something named like a view of
  * the API: the error it ends in, "<SQLSTATE>: <message>". */
 export async function clashed(dir, ddl) {

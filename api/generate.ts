@@ -139,8 +139,7 @@ export function columnsOf(r: Resource, released: string[] = []): Column[] {
  * ones the database holds an ACL entry for on the view (table or column level), read from the
  * catalog, never a list kept here: a role the app's migrations add later is revoked too. The
  * owner's own rights stay. */
-const revokeBlanket = (v: string) => [
-  `DO $r$ DECLARE r text; BEGIN`,
+const blanketBody = (v: string) => [
   `  REVOKE ALL ON ${v} FROM PUBLIC;`,
   `  FOR r IN SELECT DISTINCT g.grantee::regrole::text FROM (`,
   `    SELECT a.grantee, c.relowner FROM pg_catalog.pg_class c, pg_catalog.aclexplode(c.relacl) a WHERE c.oid = to_regclass('${v}')`,
@@ -149,13 +148,23 @@ const revokeBlanket = (v: string) => [
   `  ) g WHERE g.grantee <> g.relowner AND g.grantee <> 0 LOOP`,
   `    EXECUTE format('REVOKE ALL ON %s FROM %s', '${v}', r);`,
   `  END LOOP;`,
-  `END $r$;`,
-].join("\n");
+];
+const revokeBlanket = (v: string) => [`DO $r$ DECLARE r text; BEGIN`, ...blanketBody(v), `END $r$;`].join("\n");
+
+/** What each view's grants are, as statements a plpgsql block runs (a blanket revoke's body, not its DO): collected as the views are written, so the
+ * grants a replay applies are the very ones the views were created with (api_v1_grants.sql, grantsSqlOf). */
+export type Grants = Map<string, string[]>;
+/** A view's grants: the revoke of PUBLIC and anon, the blanket revoke for a view in public, the grant itself. */
+const grantLines = (v: string, privileges: string, blanket: boolean) => [
+  `REVOKE ALL ON ${v} FROM PUBLIC, anon;`,
+  ...(blanket ? blanketBody(v) : []),
+  `GRANT ${privileges} ON ${v} TO app_user;`,
+];
 
 /** The view of a resource and its grants: security_invoker, so the table's RLS judges every read
  * and write as the caller. A public field stays a plain column reference, so the view is
  * auto-updatable and Postgres maps a write back onto the table. */
-export function viewSql(r: Resource, schema: string, released: string[] = [], gated = false, prefix = ""): string {
+export function viewSql(r: Resource, schema: string, released: string[] = [], gated = false, prefix = "", grants?: Grants): string {
   const cols = columnsOf(r, released);
   // Writes are granted column by column: only the public fields, never a stamp, and never the key
   // after Create; a write naming another column is refused (42501) before RLS is asked.
@@ -170,6 +179,7 @@ export function viewSql(r: Resource, schema: string, released: string[] = [], ga
     ...(r.methods.includes("delete") ? ["DELETE"] : []),
   ];
   const v = `${ident(schema)}.${ident(prefix + r.view)}`;
+  grants?.set(v, grantLines(v, privileges.join(", "), !!prefix));
   return [
     `CREATE OR REPLACE VIEW ${v} WITH (security_invoker = true${gated ? ", check_option = local" : ""}) AS`,
     `  SELECT ${cols.map((c) => `${c.sql} AS ${ident(c.name)}`).join(",\n         ")}`,
@@ -221,14 +231,17 @@ const lit = (s: string) => `'${s.replaceAll("'", "''")}'`;
  *                   outcome; a rejection raises, so nothing is stored
  *   <view>_open     Create and join, the same way over the open table
  * Idempotency is the machine's: the command id carries request_id, so a retry is the stored row. */
-export function machineSql(m: Machine, schema: string, gated: boolean, prefix = ""): string {
+export function machineSql(m: Machine, schema: string, gated: boolean, prefix = "", grants?: Grants): string {
   const v = (n: string) => `${ident(schema)}.${ident(prefix + n)}`;
   const t = (n: string) => `public.${ident(n)}`;
   const where = gated ? `\n  WHERE ${GATE}(public.auth_uid())` : "";
   const opts = `WITH (security_invoker = true)`;
   const room = `(${lit(m.collection + "/")} || t."instance_id"::text)`;
   const out: string[] = [];
-  const grant = (n: string, extra = "") => out.push(`REVOKE ALL ON ${v(n)} FROM PUBLIC, anon;`, ...(prefix ? [revokeBlanket(v(n))] : []), `GRANT SELECT${extra} ON ${v(n)} TO app_user;`);
+  const grant = (n: string, extra = "") => {
+    out.push(`REVOKE ALL ON ${v(n)} FROM PUBLIC, anon;`, ...(prefix ? [revokeBlanket(v(n))] : []), `GRANT SELECT${extra} ON ${v(n)} TO app_user;`);
+    grants?.set(v(n), grantLines(v(n), `SELECT${extra}`, !!prefix));
+  };
   // Get: the caller's seat (the table's RLS shows a player only their own).
   out.push(
     `CREATE OR REPLACE VIEW ${v(m.view)} ${opts} AS`,
@@ -422,6 +435,25 @@ export function sqlOf(spec: Spec, released?: Contract): string {
     ...spec.resources.map((r) => viewSql(r, "public", releasedColumns(released, r), !!spec.flag, publicPrefix(spec))),
     ...(spec.machines ?? []).map((m) => machineSql(m, "public", !!spec.flag, publicPrefix(spec))),
     `NOTIFY pgrst, 'reload schema';`,
+    "",
+  ].join("\n\n");
+}
+
+/** api_v1_grants.sql: each view's grants again, on their own, for a migration that sorts right after the app's blanket grants (an app's
+ * `ALL TABLES IN SCHEMA public` and default privileges, which a replay of an earlier migration applies to a view the database already holds
+ * from a past release and which the views' own migration narrows only when it runs). One DO per view, guarded by to_regclass so a database
+ * that does not hold the view yet (a new one) is left alone, and made of the very statements the view's creation carries, so the two
+ * cannot differ. Idempotent: it only narrows. */
+export function grantsSqlOf(spec: Spec, released?: Contract): string {
+  const grants: Grants = new Map();
+  for (const r of spec.resources) viewSql(r, spec.schema, releasedColumns(released, r), !!spec.flag, "", grants);
+  for (const m of spec.machines ?? []) machineSql(m, spec.schema, !!spec.flag, "", grants);
+  for (const r of spec.resources) viewSql(r, "public", releasedColumns(released, r), !!spec.flag, publicPrefix(spec), grants);
+  for (const m of spec.machines ?? []) machineSql(m, "public", !!spec.flag, publicPrefix(spec), grants);
+  return [
+    `-- pronto-api: the grants of the app's ${spec.schema} views, replayed (api/${spec.version}/${spec.schema}_grants.sql). Generated, do not edit.`,
+    `SET lock_timeout = '30s';\nSET statement_timeout = '60s';`,
+    ...[...grants].map(([v, lines]) => [`DO $g$ DECLARE r text; BEGIN`, `  IF to_regclass(${lit(v)}) IS NOT NULL THEN`, ...lines.map((l) => `    ${l.replaceAll("\n", "\n    ")}`), `  END IF;`, `END $g$;`].join("\n")),
     "",
   ].join("\n\n");
 }
@@ -699,9 +731,11 @@ export async function generate(app: string) {
   await Deno.mkdir(dir, { recursive: true });
   const released = await releasedOf(dir);
   const sql = sqlOf(spec, released);
+  const grantsSql = grantsSqlOf(spec, released);
   const contract = contractOf(spec, routes, released);
   const door = doorOf(spec, routes).replace("__PACKAGE__", await pkg(app));
   await save(`${dir}/${spec.schema}.sql`, sql);
+  await save(`${dir}/${spec.schema}_grants.sql`, grantsSql);
   await save(`${app}/api_door.cue`, door);
   await save(`${dir}/openapi.json`, JSON.stringify(openapiOf(spec, routes), null, 2) + "\n");
   await save(`${dir}/contract.json`, JSON.stringify(contract, null, 2) + "\n");
