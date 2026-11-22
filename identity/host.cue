@@ -158,6 +158,7 @@ import (
 						BROKER_ISSUER:        "\(H.broker)"
 						BROKER_SECRET:        "${BROKER_SECRET:-pronto-identity-local-launch-secret-0000}"
 						BROKER_FAKE_GOOGLE:   "1"
+						BROKER_FAKE_FACEBOOK: "1"
 						GOOGLE_CLIENT_ID:     "${GOOGLE_CLIENT_ID:-}"
 						GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
 						PORT:                 "\(H.localPort)"

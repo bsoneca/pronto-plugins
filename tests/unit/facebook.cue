@@ -134,4 +134,15 @@ cases: {
 	"a body past the limit is refused with a 413 before it is read whole": {suite: "identity", steps: [
 		{call: "fb.callbacks", args: ["huge"], expect: {status: 413}},
 	]}
+	"the local broker signs a test person in with the stand-in for Facebook, learning a pairwise subject and a name and picture, and never an e-mail or the Facebook id": {suite: "identity", steps: [
+		{call: "fb.hydraFacebook", holds: {rejected: null, accepted: true, idp: "facebook", name: "Test tester", hasEmail: false, subjectIsFacebookId: false}},
+		{call: "fb.hydraFacebook", holds: {dialog: {pkce: "S256", scope: "public_profile", nonce: false}}, why: "the local front's dialog is the broker's: PKCE, the public profile alone, no nonce"},
+		{call: "fb.hydraFacebook", args: [{scope: "openid"}], holds: {name: null, picture: null}, why: "a tenant that asked for no profile learns none"},
+	]}
+	"the local broker, with the tenant's flag off, rejects the login as unauthorized_client and sends no one to the stand-in": {suite: "identity", steps: [
+		{call: "fb.hydraFacebook", args: [{flag: "off"}], expect: {rejected: "unauthorized_client", accepted: false}},
+	]}
+	"the local broker refuses a callback made twice: the verifier is used once": {suite: "identity", steps: [
+		{call: "fb.hydraFacebook", args: [{replay: true}], holds: {accepted: "refused"}},
+	]}
 }

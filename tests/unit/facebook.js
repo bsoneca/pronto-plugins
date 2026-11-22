@@ -6,6 +6,8 @@ import { broker } from '../../identity/broker/main.ts';
 import { appSecretProof, facebook, facebookConfig, facebookRoutes, FACEBOOK, verifySignedRequest } from '../../identity/broker/facebook.ts';
 import { pairwiseKey, pairwiseSubject } from '../../identity/broker/core.ts';
 import { MemoryStore } from '../../identity/broker/store.ts';
+import { front } from '../../identity/hydra/front.ts';
+import { fakeFacebook } from '../../identity/hydra/fake_facebook.ts';
 
 const TENANT = 'https://app.example.com';
 const APP_ID = '1234567890123';
@@ -208,4 +210,52 @@ export async function callbacks(call) {
     if (call === 'badCode') { const u = new URL(`${issuer}/facebook/deletion?code=../../etc`); const p = await routes(new Request(u), u); return { status: p.status }; }
     return null;
   } finally { console.log = real; }
+}
+
+/**
+ * The local broker (hydra/front.ts) signing a person in with the stand-in for Facebook (hydra/fake_facebook.ts), over a stand-in for Hydra's
+ * admin API: `flag` is what the tenant's flag answers ('on', 'off'); the test person picked is `who`. What the front told Hydra (the reject, or
+ * the accepted subject and context), and what Meta's stand-in was asked.
+ */
+export async function hydraFacebook(p = {}) {
+  const { flag = 'on', who = 'tester', scope = 'openid profile', replay = false } = p;
+  const issuer = 'http://localhost:19000';
+  const tenant = TENANT;
+  const callback = `${tenant}/auth/oidc/facebook/callback`;
+  const asked = scope.split(' ');
+  let accepted = null, rejected = null, route = null;
+  const routed = (req) => route(req, new URL(req.url));
+  const fetcher = (input, init = {}) => {
+    const req = new Request(input, init);
+    const url = new URL(req.url);
+    if (url.pathname.startsWith('/fake/facebook/')) return routed(req) ?? Promise.resolve(new Response('no', { status: 404 }));
+    if (url.pathname.includes('/ofrep/')) return Promise.resolve(Response.json({ value: flag === 'on' }));
+    const method = init.method ?? 'GET';
+    const body = init.body ? JSON.parse(String(init.body)) : undefined;
+    if (url.pathname.startsWith('/admin/clients')) return Promise.resolve(method === 'GET' ? new Response('{}', { status: 404 }) : Response.json(body));
+    if (url.pathname === '/admin/oauth2/auth/requests/login') return Promise.resolve(Response.json({ client: { client_id: tenant }, request_url: `${issuer}/oauth2/auth?provider=facebook`, requested_scope: asked }));
+    if (url.pathname === '/admin/oauth2/auth/requests/login/accept') { accepted = body; return Promise.resolve(Response.json({ redirect_to: `${issuer}/consent?consent_challenge=K1` })); }
+    if (url.pathname === '/admin/oauth2/auth/requests/login/reject') { rejected = body.error; return Promise.resolve(Response.json({ redirect_to: callback })); }
+    if (url.pathname === '/oauth2/auth') return Promise.resolve(new Response(null, { status: 302, headers: { location: `${issuer}/login?login_challenge=C1` } }));
+    return Promise.resolve(new Response('not found', { status: 404 }));
+  };
+  const fake = fakeFacebook(issuer, fetcher);
+  route = fake.handle;
+  const handle = await front({ issuer, secret: 's'.repeat(40), providers: [fake.provider], hydra: { public: 'http://hydra', admin: 'http://hydra' }, fetcher, extra: fake.handle });
+  await handle(new Request(`${issuer}/oauth2/auth?${new URLSearchParams({ client_id: tenant, provider: 'facebook', redirect_uri: callback })}`));
+  const page = await (await handle(new Request(`${issuer}/login?login_challenge=C1`))).text();
+  if (rejected) return { rejected, accepted: false };
+  const toMeta = new URL((await handle(new Request(linkOf(page, '/login/continue')))).headers.get('location'));
+  const dialog = await handle(new Request(toMeta));
+  const choose = linkOf(await dialog.text(), `who=${who}`);
+  const back = new URL((await handle(new Request(choose))).headers.get('location'));
+  const arrive = () => handle(new Request(`${issuer}/callback/facebook?code=${back.searchParams.get('code')}&state=${encodeURIComponent(back.searchParams.get('state'))}`));
+  await arrive();
+  let again = null;
+  if (replay) { accepted = null; await arrive(); again = accepted === null ? 'refused' : 'accepted'; }
+  return {
+    rejected, accepted: replay ? again : accepted !== null, idp: accepted?.context?.idp ?? null, name: accepted?.context?.name ?? null, picture: accepted?.context?.picture ?? null,
+    hasEmail: JSON.stringify(accepted ?? {}).includes('example.com') || 'email' in (accepted?.context ?? {}), subjectIsFacebookId: /^9[0-9]{14}$/.test(accepted?.subject ?? ''),
+    dialog: { pkce: toMeta.searchParams.get('code_challenge_method'), scope: toMeta.searchParams.get('scope'), nonce: toMeta.searchParams.has('nonce') },
+  };
 }
