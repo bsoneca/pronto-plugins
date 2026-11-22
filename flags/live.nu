@@ -619,6 +619,26 @@ def wait-ofrep [at: record, want: list<record>]: nothing -> bool {
 	false
 }
 
+# Why a green run of a flag's production cases proved nothing, or "" when it showed the flag at work. The runner
+# (apps' tests/scenarios.ts) prints one verdict per scenario: `✓ <id> (<n>s): <accepts>`, and where it skipped
+# steps behind a flag that is off at the door, `; steps behind <flag>, ... skipped, off here`. A run that prints
+# no verdict ran nothing (cached, or every scenario skipped); one whose verdict says the flipped flag's steps
+# were skipped saw the flag off, so the door never served the new value. A runner that prints
+# `; <n> steps run, <m> skipped` counts them: none run is nothing shown.
+# `flag` "" skips the skipped-flag check (the verdict and step-count checks stay).
+def vacuous [out: string, flag: string]: nothing -> string {
+	let verdicts = ($out | lines | where {|l| $l | str starts-with "✓ " })
+	if ($verdicts | is-empty) { return "the runner printed no passed scenario, so no step ran" }
+	for l in $verdicts {
+		let id = ($l | str replace -r '^✓ (\S+).*$' '$1')
+		let off = ($l | parse -r 'steps behind (?<fl>.+?) skipped, off here' | get -o 0.fl | default "" | split row "," | each {|f| $f | str trim })
+		if $flag != "" and $flag in $off { return $"($id) skipped its steps behind ($flag): the site still evaluates it off" }
+		let n = ($l | parse -r '(?<run>\d+) steps run, (?<skip>\d+) skipped' | get -o 0)
+		if $n != null and ($n.run | into int) == 0 { return $"($id) ran no step \(($n.skip) skipped\)" }
+	}
+	""
+}
+
 # The version a push read, written again as the newest after a failed live stage.
 def restore [at: record, app: path, to: string, now: string, names: string, why: string] {
 	let again = (commit $at $app (store-version $at $to) {stage: rolled-back, flag: $names, cases: failed, note: $why} $now)
@@ -633,7 +653,8 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 #   2. the flags as the spec says them are written (stage=all);
 #   3. where a changed flag has `production` scenarios that need no tester (no `signIn` step), the push waits until
 #      OFREP says the new value, runs them against production (flagsCases.live, APP_URL=flagsLive.url), and a
-#      failure writes the version read before 2 again, and the push fails. A production scenario that signs in
+#      failure writes the version read before 2 again, and the push fails. So does a green run that showed nothing
+#      (`vacuous`: no scenario verdict, or the flag's own steps skipped as off at the door). A production scenario that signs in
 #      needs a tester's account, which a flip no longer has: it is listed and not run.
 # A flag turned fully off (default false, no accounts) runs no cases: it returns to the path before it, and its cases test it on.
 export def push [app: path, --untested: string, --no-canary: string, --expect: string, --flip: list<string> = [], --drop: list<string> = []] {
@@ -722,6 +743,11 @@ def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: rec
 			print $"flags: ($c.flag): running its production cases \(($c.production | str join ', ')\)"
 			let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site})
 			if not $r.ok { error make {msg: $"($c.flag)'s production cases failed:\n($r.out)"} }
+			# The skipped-flag check is for a flag now on for everyone: with accounts only, or turned off, the runner
+			# legitimately skips the steps behind it.
+			let on_for_all = ((default-of ($doc.flags | get $c.flag)) == true)
+			let empty = (vacuous $r.out (if $on_for_all { $c.flag } else { "" }))
+			if $empty != "" { error make {msg: $"($c.flag)'s production cases showed nothing: ($empty)"} }
 		}
 		write-flags $at $doc $app --meta ($meta | insert cases passed) --from $v | ignore
 	} catch {|e|
@@ -958,6 +984,9 @@ def armies-live [app: path, at: record, have: list<record>, changed: list<record
 			print $"armies: ($names | str join ', ') is in everyone's page; running its production cases \(($c.production | str join ', ')\)"
 			let r = (run-cases $app $cmds.live {FLAG: $at.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site})
 			if not $r.ok { error make {msg: $"($at.flag)'s production cases failed:\n($r.out)"} }
+			# A push of rows does not move the flag, so only the verdict checks apply.
+			let empty = (vacuous $r.out "")
+			if $empty != "" { error make {msg: $"($at.flag)'s production cases showed nothing: ($empty)"} }
 			army-journal $app $at all $names passed $note
 		}
 	} catch {|e|

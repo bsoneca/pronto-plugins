@@ -100,7 +100,7 @@ flags: premium: {default: ($premium), local: true}
 flags: theme: {default: \"($theme)\"}
 flagsLive: {project: \"shop-prod\", bucket: \"shop-prod-flags\", url: \"https://shop.example\"}
 flagsCases: {
-	live:  \"echo live $FLAG $ONLY $APP_URL ${FLAGS_TESTER:-} >> ran.log; test ! -f crash-live || kill -9 $$; test ! -f fail-live\"
+	live:  \"echo live $FLAG $ONLY $APP_URL ${FLAGS_TESTER:-} >> ran.log; test ! -f crash-live || kill -9 $$; test ! -f fail-live || exit 1; if test -f skipped-live; then echo '✓ buy 1s: shop; steps behind '$FLAG' skipped, off here'; elif test -f other-live; then echo '✓ buy 1s: shop; steps behind other skipped, off here'; elif test -f comma-live; then echo '✓ buy 1s: shop; steps behind a, '$FLAG' skipped, off here'; elif test -f multi-live; then echo '✓ buy 1s: shop'; echo '✓ mine 1s: shop; steps behind '$FLAG' skipped, off here'; elif test -f silent-live; then :; elif test -f zero-live; then echo '✓ buy 1s: shop; 0 steps run, 3 skipped'; else echo '✓ buy 1s: shop'; fi\"
 }
 GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\", region: \"europe-west1\"}
 " | save -f $"($app)/flags_spec.cue"
@@ -197,8 +197,45 @@ rm $"($app)/crash-live"
 
 # An OFREP that never answers the new value: back as well.
 let n2 = (object | length)
+let ran2 = (ran | length)
 let st = (livex [push $app --flip premium] {FAKE_OFREP_STALE: "1"})
-check ($st.exit_code != 0 and ($st.stderr | str contains "did not answer") and (premium (newest 0)) == $pre and (object | length) == $n2 + 2) "OFREP timeout: rolled back"
+check ($st.exit_code != 0 and ($st.stderr | str contains "did not answer the new value of premium") and (premium (newest 0)) == $pre and (object | length) == $n2 + 2 and (newest 0).metadata.stage == "rolled-back" and (ran | length) == $ran2) "OFREP timeout (the door still says false): no case ran, rolled back"
+
+# A green run that showed nothing is no pass: every step skipped (the flag off where the cases ran), no scenario
+# verdict at all, or a runner that counts its steps and ran none. Each rolls back; one that ran steps passes.
+for v in [{f: skipped-live, why: "skipped its steps behind premium"}, {f: silent-live, why: "no passed scenario"}, {f: zero-live, why: "ran no step"}, {f: comma-live, why: "skipped its steps behind premium"}, {f: multi-live, why: "mine skipped its steps behind premium"}] {
+	touch $"($app)/($v.f)"
+	let n = (object | length)
+	let e = (livex [push $app --flip premium])
+	check ($e.exit_code != 0 and ($e.stderr | str contains "rolled back") and ($e.stderr | str contains "showed nothing") and ($e.stderr | str contains $v.why) and (object | length) == $n + 2 and (premium (newest 0)) == $pre and (newest 0).metadata.stage == "rolled-back") $"a vacuous run \(($v.f)\): refused and rolled back"
+	rm $"($app)/($v.f)"
+}
+# A verdict naming another flag skipped is no finding against this one.
+touch $"($app)/other-live"
+let nother = (object | length)
+let oth = (livex [push $app --flip premium])
+check ($oth.exit_code == 0 and (object | length) == $nother + 2 and (newest 0).metadata.cases == "passed") "a verdict skipping a different flag: passes"
+rm $"($app)/other-live"
+full-spec false "light"
+livex [push $app --flip premium] | ignore
+full-spec true "light"
+let nok = (object | length)
+let okr = (livex [push $app --flip premium])
+check ($okr.exit_code == 0 and (object | length) == $nok + 2 and (newest 0).metadata.cases == "passed" and (premium (newest 0)).variants.default == true) "a run that executed steps: passes"
+full-spec false "light"
+livex [push $app --flip premium] | ignore
+full-spec true "light"
+
+# Accounts only on a default-false flag: the runner legitimately skips the flag's steps, so that is no finding.
+full-spec false "light"
+open --raw $"($app)/flags_spec.cue" | str replace 'flags: premium: {default: false, local: true}' 'flags: premium: {default: false, local: true, accounts: ["acct-1"]}' | save -f $"($app)/flags_spec.cue"
+touch $"($app)/skipped-live"
+let nacc = (object | length)
+let acc = (livex [push $app --flip premium])
+check ($acc.exit_code == 0 and (object | length) == $nacc + 2 and (newest 0).metadata.cases == "passed") "accounts only on a default-false flag: its skipped steps pass"
+rm $"($app)/skipped-live"
+full-spec false "light"
+livex [push $app --flip premium] | ignore
 
 # No change to a default value: no cases needed, and none run.
 full-spec false "light"
