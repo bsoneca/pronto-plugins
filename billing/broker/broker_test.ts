@@ -1249,11 +1249,13 @@ Deno.test("the dispatcher reads the body once and hands the chosen broker that t
   const text = JSON.stringify({ tenant: "https://shop-rc-123456789012.us-central1.run.app", account: "a" });
   const res = await handler(new Request(`${ISSUER}/checkout`, { method: "POST", headers: { "content-type": "application/json" }, body: text }));
   assertEquals([await res.text(), got], ["sandbox", [`sandbox ${text}`]], "the broker chosen gets the body already read");
-  const never = new ReadableStream<Uint8Array>({ pull(c) { c.enqueue(new TextEncoder().encode("x".repeat(1024))); return new Promise((r) => setTimeout(r, 1)); } });
+  const never = new ReadableStream<Uint8Array>({ pull(c) { c.enqueue(new TextEncoder().encode("x".repeat(1024))); } });
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const answered = await Promise.race([
     handler(new Request(`${ISSUER}/checkout`, { method: "POST", headers: { "content-type": "application/json" }, body: never })),
-    new Promise<string>((r) => setTimeout(() => r("hung"), 3000)),
+    new Promise<string>((r) => { timer = setTimeout(() => r("hung"), 3000); }),
   ]);
+  clearTimeout(timer);
   assertEquals(answered instanceof Response ? answered.status : answered, 413);
   assertEquals(got.length, 1, "no broker saw it");
 });

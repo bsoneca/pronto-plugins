@@ -189,10 +189,12 @@ Deno.test("every body-reading endpoint refuses a body over its emitted limit wit
   assertEquals(bodyLimitOf("GET", "/checkout"), undefined);
   assertEquals(bodyLimitOf("POST", "/jwks"), undefined, "a path that reads no body has no limit");
   // A client that keeps streaming is not waited for: the 413 comes as soon as the cap is passed.
-  const never = new ReadableStream<Uint8Array>({ pull(c) { c.enqueue(new TextEncoder().encode("x".repeat(1024))); return new Promise((r) => setTimeout(r, 1)); } });
+  const never = new ReadableStream<Uint8Array>({ pull(c) { c.enqueue(new TextEncoder().encode("x".repeat(1024))); } });
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const answered = await Promise.race([
     withCappedBody(new Request("https://b/route", { method: "POST", headers: { "content-type": "application/json" }, body: never })),
-    new Promise<string>((r) => setTimeout(() => r("hung"), 3000)),
+    new Promise<string>((r) => { timer = setTimeout(() => r("hung"), 3000); }),
   ]);
+  clearTimeout(timer);
   assertEquals(answered instanceof Response ? answered.status : answered, 413, "no hang on an endless body");
 });
