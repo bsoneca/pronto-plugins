@@ -7,8 +7,12 @@
 # Where flagsLive says `dir` instead of a bucket, the same store is a local directory (see
 # "The store"): a drill or a laptop, with no gcloud.
 #   bin/pronto-flags setup <app-dir>               # the bucket, its readers, the first push
-#   bin/pronto-flags push <app-dir> [--flip a,b] [--drop a,b]
-#                                                  # the flags as flags_spec.cue says them now, merged over the live ones (see `keep-live`): a flag turned on, or its accounts changed, needs --flip and its cases
+#   bin/pronto-flags push <app-dir> [--flip a,b|a=<value>] [--sync a,b] [--drop a,b]
+#                                                  # the flags as flags_spec.cue says them now, merged over the live ones (see `keep-live`): --flip X (X=true) or --flip X=<value>
+#                                                  # sets a flag live and needs its cases; --sync X writes the spec's whole reach (accounts too); the flip is then recorded
+#                                                  # into flags_spec.cue by a pull request this tool opens (see `record-back`)
+#   bin/pronto-flags record <app-dir>              # the live flags into the spec, by hand: what a flip does after its write
+#   bin/pronto-flags drift <app-dir>               # what the spec says differently from live; exit 1 when it differs
 #   bin/pronto-flags released <app-dir>            # records which flags the release being served reads (released.json beside the live object)
 #   bin/pronto-flags cases <app-dir> [flag]        # the cases a flip of each flag (or the one) runs
 #   bin/pronto-flags history <app-dir> [--json]    # every version, newest first
@@ -18,7 +22,7 @@
 # Every write (setup, push, rollback) prints its target first and takes --expect <url> (or PRONTO_FLAGS_EXPECT):
 # a target that differs is refused with nothing written. With PRONTO_FLAGS_DRY_RUN set a write shows what it
 # would write and stops, as --dry-run does; a write reached anyway is refused where it happens. Each write is also appended to a journal (see `journal`).
-# A push that changes who a flag is on for (its default or its accounts) runs that flag's cases first, and only --flip names such a flag (see `push`).
+# A push that changes who a flag is on for (its default or its accounts) runs that flag's cases first, and only --flip or --sync names such a flag (see `push`).
 
 # A dry run (--dry-run, or PRONTO_FLAGS_DRY_RUN) writes nothing, enforced where each write happens, not only
 # at the top of a command: the gcloud call (only the reads below go through), the ssh mirror and the directory
@@ -314,12 +318,18 @@ def defs-between [old: record, new: record]: nothing -> list<string> {
 #   - new to the live object, and not fully off: written off (its default false, its accounts and canary gone, the
 #     at-hand branch kept) unless `flip` names it, and an error where it is not a bool, which has no off form.
 #     flagd layers the live object over the release's baked flags.json, so a flag left out would serve the baked rule.
+# `flip` turns flags on or sets them: "X" is X=true, "X=<value>" a bool, string or number checked against the kind of the
+# spec's default. The value comes from the command line and the spec supplies the flag's shape (local, hosts, accounts):
+# the entry is the spec's with its default set (`set-default`). `sync` names flags whose whole reach is written as the
+# spec says it (default, accounts, targeting: PRONTO-1191), as --flip did before it took a value.
 # {doc, kept: [{flag, why}], written_off: [{flag, why}], dropped: [{flag, why}]}.
-export def keep-live [old: record, doc: record, reads: any, flip: list<string>, drop: list<string>]: nothing -> record {
+export def keep-live [old: record, doc: record, reads: any, flip: list<string>, drop: list<string>, sync: list<string> = []]: nothing -> record {
 	let live = ($old.flags? | default {})
 	let spec = $doc.flags
+	let sets = (flip-values $flip $spec $live)
+	let flip = ($sets | get flag | append $sync | uniq)
 	let named = ($drop | where {|f| $f in ($spec | columns) })
-	if ($named | is-not-empty) { error make {msg: $"flags: --drop ($named | str join ', ') is in the spec: take it out of the spec first"} }
+	if ($named | is-not-empty) { error make {msg: $"flags: --drop ($named | str join ', ') is in the spec: to turn it off say --flip <flag>=false \(a spec flag stays; --drop is for a live flag the spec no longer names\)"} }
 	let nowhere = ($drop | where {|f| $f not-in ($spec | columns) and $f not-in ($live | columns) })
 	if ($nowhere | is-not-empty) { error make {msg: $"flags: --drop ($nowhere | str join ', ') is neither live nor in the spec; nothing was written"} }
 	let gone = ($live | columns | where {|f| $f not-in ($spec | columns) })
@@ -329,18 +339,53 @@ export def keep-live [old: record, doc: record, reads: any, flip: list<string>, 
 	let held = ($spec | columns | where {|f| $f in ($live | columns) and $f not-in $flip and (reach ($live | get $f)) != (reach ($spec | get $f)) })
 	let fresh = ($spec | columns | where {|f| $f not-in ($live | columns) and $f not-in $flip and not (fully-off ($spec | get $f)) })
 	let nonbool = ($fresh | where {|f| (default-of ($spec | get $f) | describe) != "bool" })
-	if ($nonbool | is-not-empty) { error make {msg: $"flags: ($nonbool | str join ', ') is new and not off: name it in --flip; nothing was written"} }
+	if ($nonbool | is-not-empty) { error make {msg: $"flags: ($nonbool | str join ', ') is new and not off: name it in --flip with its value \(--flip <flag>=<value>\); nothing was written"} }
 	let written_off = ($fresh | each {|f|
 		let r = (reach ($spec | get $f))
 		let who = if ($r.accounts | is-not-empty) { "accounts" } else if $r.value != false { "everyone" } else { "its targeting" }
-		{flag: $f, why: $"new and on for ($who): written off; --flip turns it on"}
+		{flag: $f, why: $"new and on for ($who): written off; --flip or --sync turns it on"}
 	})
-	let kept = ($held | each {|f| {flag: $f, why: "its reach in the spec differs from live (default, accounts or targeting) and no --flip names it"} } | append ($verdicts | where keep | select flag why))
+	let kept = ($held | each {|f| {flag: $f, why: "its reach in the spec differs from live (default, accounts or targeting) and no --flip or --sync names it"} } | append ($verdicts | where keep | select flag why))
 	let flags = ($spec
 		| merge ($held | each {|f| {$f: ($live | get $f)} } | into record)
 		| merge ($fresh | each {|f| {$f: (off-form ($spec | get $f))} } | into record)
-		| merge ($verdicts | where keep | each {|v| {($v.flag): ($live | get $v.flag)} } | into record))
+		| merge ($verdicts | where keep | each {|v| {($v.flag): ($live | get $v.flag)} } | into record)
+		| merge ($sets | each {|s| {($s.flag): (set-default ($spec | get $s.flag) $s.value)} } | into record))
 	{doc: ($doc | upsert flags $flags), kept: $kept, written_off: $written_off, dropped: ($verdicts | where {|v| not $v.keep } | select flag why)}
+}
+
+# The entry of a flag with its default set to `value`: the spec's own, every other field as it is.
+def set-default [def: record, value: any]: nothing -> record {
+	$def | upsert variants ($def.variants? | default {} | upsert default $value) | upsert defaultVariant "default"
+}
+
+# What --flip names: [{flag, value}], the value read as the kind of the flag's default in the spec. A bare name is
+# true, and only a bool can be bare; and where the spec says false while live says true a bare name is refused, for
+# it would either undo the flip or leave the spec behind it. A flag the spec lacks is left for the caller to refuse.
+def flip-values [flip: list<string>, spec: record, live: record]: nothing -> list<record> {
+	$flip | each {|e|
+		let at = ($e | str index-of "=")
+		let flag = if $at < 0 { $e } else { $e | str substring 0..<$at }
+		let raw = if $at < 0 { null } else { $e | str substring ($at + 1).. }
+		let def = ($spec | get -o $flag)
+		let kind = (default-of $def | describe)
+		let bad = {|why| error make {msg: $"flags: --flip ($e): ($why); nothing was written"} }
+		if $def == null {
+			{flag: $flag, value: null}
+		} else if $raw == null {
+			if $kind != "bool" { do $bad $"($flag) is a ($kind), so say --flip ($flag)=<value>" }
+			if (default-of $def) == false and (default-of ($live | get -o $flag)) == true { do $bad $"the spec says ($flag) false and live says true: say ($flag)=true or ($flag)=false" }
+			{flag: $flag, value: true}
+		} else {
+			let value = match $kind {
+				"bool" => { if $raw in ["true" "false"] { $raw == "true" } else { do $bad $"($flag) is a bool: true or false" } }
+				"string" => { $raw }
+				"int" | "float" => { try { if $raw =~ '^-?\d+$' { $raw | into int } else { $raw | into float } } catch { do $bad $"($flag) is a number" } }
+				_ => { do $bad $"($flag) has a ($kind) default, which --flip cannot set" }
+			}
+			{flag: $flag, value: $value}
+		}
+	} | where {|s| $s.value != null }
 }
 
 # Where a write is noted: one JSON line per write, in the operator's state (PRONTO_FLAGS_JOURNAL names the file).
@@ -469,16 +514,19 @@ def summary [doc: record] {
 # The live flags a push would write over, and what it would keep of them: the spec merged over the live object
 # (`keep-live`). Said as it goes; the live version it read comes back with the merge. A store with nothing live yet
 # has nothing to keep.
-def merge-live [at: record, app: path, doc: record, flip: list<string>, drop: list<string>]: nothing -> record {
+def merge-live [at: record, app: path, doc: record, flip: list<string>, drop: list<string>, sync: list<string> = []]: nothing -> record {
 	let before = (generation $at)
 	let old = if $before == "0" { {flags: {}} } else { store-cat $at | from json }
-	let unknown = ($flip | where {|f| $f not-in ($doc.flags | columns) })
+	let flipped = ($flip | each {|e| $e | split row "=" | first })
+	let unknown = ($flipped | where {|f| $f not-in ($doc.flags | columns) })
 	if ($unknown | is-not-empty) { error make {msg: $"flags: --flip ($unknown | str join ', ') is not in the spec; nothing was written"} }
+	let unsynced = ($sync | where {|f| $f not-in ($doc.flags | columns) })
+	if ($unsynced | is-not-empty) { error make {msg: $"flags: --sync ($unsynced | str join ', ') is not in the spec; nothing was written"} }
 	let rec = (record-read $at)
 	let gone = ($old.flags? | default {} | columns | where {|f| $f not-in ($doc.flags | columns) })
 	if $rec == null and ($gone | is-not-empty) { print -e $"flags: WARNING: no release record at (record-url $at) \(`pronto-flags released`\): every live flag counts as read by the release" }
 	if $rec != null { print $"flags: the release record names ($rec.flags | length) flags, from commit ($rec.commit? | default '?') at ($rec.at? | default '?')" }
-	let m = (keep-live $old $doc ($rec) $flip $drop)
+	let m = (keep-live $old $doc ($rec) $flip $drop $sync)
 	for k in $m.kept { print -e $"flags: WARNING: ($k.flag) kept as live: ($k.why)" }
 	for w in $m.written_off { print -e $"flags: WARNING: ($w.flag) is ($w.why)" }
 	for d in $m.dropped { print -e $"flags: ($d.flag) dropped from the live flags: ($d.why)" }
@@ -492,12 +540,12 @@ def merge-meta [m: record]: nothing -> record {
 	{} | if $kept != "" { insert kept $kept } else { $in } | if $dropped != "" { insert dropped $dropped } else { $in }
 }
 
-export def show [app: path, --flip: list<string> = [], --drop: list<string> = []] {
+export def show [app: path, --flip: list<string> = [], --drop: list<string> = [], --sync: list<string> = []] {
 	let at = (live $app)
 	print $"flags: a push writes ($at.url) in ($at.project? | default 'a local directory'):"
 	let doc = (cue-of $app flagd.document)
-	let merged = try { (merge-live $at $app $doc $flip $drop).doc } catch {|e|
-		if ($e.msg | str contains "--flip") or ($e.msg | str contains "--drop") { error make {msg: $e.msg} }
+	let merged = try { (merge-live $at $app $doc $flip $drop $sync).doc } catch {|e|
+		if ($e.msg | str contains "--flip") or ($e.msg | str contains "--drop") or ($e.msg | str contains "--sync") { error make {msg: $e.msg} }
 		print -e $"flags: WARNING: the live flags were not read, so this is the spec alone: ($e.msg | lines | first)"
 		$doc
 	}
@@ -657,20 +705,23 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 #      (`vacuous`: no scenario verdict, or the flag's own steps skipped as off at the door). A production scenario that signs in
 #      needs a tester's account, which a flip no longer has: it is listed and not run.
 # A flag turned fully off (default false, no accounts) runs no cases: it returns to the path before it, and its cases test it on.
-export def push [app: path, --untested: string, --no-canary: string, --expect: string, --flip: list<string> = [], --drop: list<string> = []] {
+export def push [app: path, --untested: string, --no-canary: string, --expect: string, --flip: list<string> = [], --drop: list<string> = [], --sync: list<string> = []] {
 	pin-guard $app
 	let at = (live $app)
-	if (target-guard $at $expect) { show $app --flip $flip --drop $drop; print "flags: dry run: nothing written"; return }
+	if (target-guard $at $expect) { show $app --flip $flip --drop $drop --sync $sync; print "flags: dry run: nothing written"; return }
 	let spec = (cue-of $app flagd.document)
 	# The spec merged over the live flags: what is not this push's to change stays as it is live (see `keep-live`).
-	let m = (merge-live $at $app $spec $flip $drop)
+	let m = (merge-live $at $app $spec $flip $drop $sync)
 	let doc = $m.doc
 	let before = $m.before
 	let old = $m.old
 	let kept = (merge-meta $m)
+	# The flags this push writes on purpose: the only ones it records back into the spec.
+	let owned = ($flip | each {|e| $e | split row "=" | first } | append $sync | uniq)
 	let changed = (changed-flags $old $doc)
 	if ($changed | is-empty) {
-		write-flags $at $doc $app --meta ({stage: all} | merge $kept) --from $before | ignore
+		let v = (write-flags $at $doc $app --meta ({stage: all} | merge $kept) --from $before)
+		if ($flip | is-not-empty) { record-back $at $app $v "none" $owned }
 		return
 	}
 	# --no-canary was the way past the testers' stage (pronto-plugins#184); every push is that way now.
@@ -698,14 +749,17 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if $no_canary != null { $"no canary: ($no_canary)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" })] | compact | str join "; ")
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
 	if ($live | is-empty) {
-		write-flags $at $doc $app --meta ({stage: all, flag: $names, cases: (if ($bare | is-not-empty) { "untested" } else { "none on production" }), note: $notes} | merge $kept) --from $before | ignore
+		let cases = if ($bare | is-not-empty) { "untested" } else { "none on production" }
+		let v = (write-flags $at $doc $app --meta ({stage: all, flag: $names, cases: $cases, note: $notes} | merge $kept) --from $before)
 		tell-board $at $app $moved
+		if ($flip | is-not-empty) { record-back $at $app $v $cases $owned }
 		return
 	}
 	# Not `try ... finally`: nu runs what follows it and raises the error only at the end, so a failed flip
 	# told the board its flags were on for everyone (PRONTO-15 Done at 18:02 BRT, 2026-11-08; PRONTO-43).
-	flip-live $at $app $doc $live $cmds $before ({stage: all, flag: $names, note: $notes} | merge $kept)
+	let v = (flip-live $at $app $doc $live $cmds $before ({stage: all, flag: $names, note: $notes} | merge $kept))
 	tell-board $at $app $moved
+	if ($flip | is-not-empty) { record-back $at $app $v "passed" $owned }
 }
 
 # The dev flow's board, where the app's repository keeps one (its devflow/devflow.cue; devflow/README.md): the
@@ -749,7 +803,7 @@ def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: rec
 			let empty = (vacuous $r.out (if $on_for_all { $c.flag } else { "" }))
 			if $empty != "" { error make {msg: $"($c.flag)'s production cases showed nothing: ($empty)"} }
 		}
-		write-flags $at $doc $app --meta ($meta | insert cases passed) --from $v | ignore
+		write-flags $at $doc $app --meta ($meta | insert cases passed) --from $v
 	} catch {|e|
 		try { restore $at $app $before $v ($on | str join "+") ($e.msg | lines | first) } catch {|r| print -e $"flags: WARNING: could not restore version ($before): ($r.msg); `pronto-flags rollback` does" }
 		error make {msg: $"rolled back to version ($before): ($e.msg)"}
@@ -810,6 +864,360 @@ export def rollback [app: path, version?: string, --expect: string] {
 	print $"flags: ($at.url) is ($to)'s flags again, as version ($again)"
 	# The flags a rollback turned off are rolled back for the board: their Done issues are Live again.
 	tell-board $at $app (changes-between $before $target | where {|c| $c.to == false })
+	record-back $at $app $again "rollback" (changes-between $before $target | get flag)
+}
+
+# ---- Recording a flip in the spec (PRONTO-1191's sequel: a flip needs no spec PR) ----
+# A flip changes production first. What is live is the truth and flags_spec.cue its record, so once the final write
+# of a push or a rollback stands, the flags where the spec and the live object both hold a different default are
+# written into the spec through a pull request this tool opens itself (`record-back`). A record that cannot be made
+# is said loudly and noted in the journal and never fails the push, and a failed or closed record pull request never
+# reverts live. `pronto-flags drift` says what the spec still lacks.
+
+# What a record may write: of the flags `want` ({flag, value}: the version a push wrote, the flags it owns), those the
+# spec holds with another default: {flag, live (the value to write), spec}.
+def record-diffs [want: list<record>, spec: record]: nothing -> list<record> {
+	let b = ($spec.flags? | default {})
+	$want | where {|w| $w.flag in ($b | columns) } | each {|w| {flag: $w.flag, live: $w.value, spec: (default-of ($b | get $w.flag))} } | where {|d| $d.live != $d.spec }
+}
+
+# The values of the version a push (or rollback) wrote, for the flags it owns, kept only where live still holds them.
+# {want: [{flag, value}], moved: [flags live no longer agrees on]}. `owned` null: every flag of the version.
+def record-want [at: record, version: string, owned: any]: nothing -> record {
+	let wdoc = (store-version $at $version | from json)
+	let now = (store-cat $at | from json)
+	let names = if $owned == null { $wdoc.flags? | default {} | columns } else { $owned | where {|f| $f in ($wdoc.flags? | default {} | columns) } }
+	let rows = ($names | each {|f| {flag: $f, value: (default-of ($wdoc.flags | get $f)), live: (default-of ($now.flags? | default {} | get -o $f))} } | where {|r| $r.value != null })
+	{want: ($rows | where {|r| $r.value == $r.live } | select flag value), moved: ($rows | where {|r| $r.value != $r.live } | get flag)}
+}
+
+# The text of a flag's block in flags_spec.cue with the literal of its depth-1 `default:` replaced by `value`, and
+# nothing else touched. The block opens at `flags: <name>: {` in column 0 and ends at its matching `}`. Refused, with
+# the text unchanged, where the block is not there exactly once, or the default is not there exactly once at depth 1,
+# or is no literal (a reference, an expression): the tool does not guess what such a default means.
+# A name as a regular expression's literal.
+def re-escape [name: string]: nothing -> string { $name | str replace -a -r '([.\-+*?()\[\]{}|^$\\])' '\$1' }
+
+export def splice-default [text: string, flag: string, value: any]: nothing -> string {
+	let lines = ($text | split row "\n")
+	let esc = (re-escape $flag)
+	let opens = ($lines | enumerate | where {|l| $l.item =~ $'^flags:\s+"?($esc)"?:\s*\{' } | get index)
+	if ($opens | length) != 1 { error make {msg: $"flags: record: ($flag) has ($opens | length) blocks opening `flags: ($flag): \{` in column 0, not one"} }
+	let rendered = match ($value | describe) {
+		"bool" => { if $value { "true" } else { "false" } }
+		"string" => { $value | to json }
+		"int" | "float" => { $value | into string }
+		_ => { error make {msg: $"flags: record: ($flag)'s value is a ($value | describe), which is no literal to write"} }
+	}
+	mut depth = 0
+	mut closed = false
+	mut hits = []
+	mut i = $opens.0
+	while $i < ($lines | length) and not $closed {
+		let cs = ($lines | get $i | split chars)
+		mut j = 0
+		mut instr = false
+		while $j < ($cs | length) {
+			let c = ($cs | get $j)
+			if $instr {
+				if $c == "\\" { $j = $j + 1 } else if $c == "\"" { $instr = false }
+			} else if $c == "\"" {
+				$instr = true
+			} else if $c == "/" and ($cs | get -o ($j + 1)) == "/" {
+				break
+			} else if $c == "{" {
+				$depth = $depth + 1
+			} else if $c == "}" {
+				$depth = $depth - 1
+				if $depth == 0 { $closed = true; break }
+			} else if $depth == 1 and $c == "d" and (($cs | skip $j | take 8 | str join) == "default:") {
+				let before = ($cs | take $j | str join | str trim --right)
+				let at_start = ($before == "" or ($before | str ends-with "{") or ($before | str ends-with ","))
+				let glued = ($j > 0 and (($cs | get ($j - 1)) =~ '[A-Za-z0-9_$#]'))
+				if $at_start and not $glued {
+					let rest = ($cs | skip ($j + 8) | str join)
+					let m = ($rest | parse -r '^(?<sp>\s*)(?<lit>true|false|-?\d+(?:\.\d+)?|"(?:\\.|[^"\\])*")(?<tail>\s*(?:,.*|//.*|\}.*|$))')
+					if ($m | is-empty) { $hits = ($hits | append {line: $i, lit: null}) } else {
+						let from = ($j + 8 + ($m.0.sp | str length --grapheme-clusters))
+						$hits = ($hits | append {line: $i, lit: $m.0.lit, from: $from, to: ($from + ($m.0.lit | str length --grapheme-clusters))})
+					}
+				}
+			}
+			$j = $j + 1
+		}
+		$i = $i + 1
+	}
+	if not $closed { error make {msg: $"flags: record: ($flag)'s block is never closed"} }
+	if ($hits | length) != 1 { error make {msg: $"flags: record: ($flag) has ($hits | length) depth-1 `default:` fields in its block, not one"} }
+	let h = ($hits | first)
+	if $h.lit == null { error make {msg: $"flags: record: ($flag)'s default is no literal \(a reference or an expression\): it is not rewritten"} }
+	let cs = ($lines | get $h.line | split chars)
+	let edited = (($cs | take $h.from | str join) + $rendered + ($cs | skip $h.to | str join))
+	$lines | update $h.line $edited | str join "\n"
+}
+
+def --wrapped git-in [dir: string, ...args] {
+	with-env {GIT_TERMINAL_PROMPT: "0"} { ^git -C $dir ...$args | complete }
+}
+def git-must [r: record, what: string]: nothing -> string {
+	if $r.exit_code != 0 { error make {msg: $"flags: record: ($what): ($r.stderr | str trim)"} }
+	$r.stdout | str trim
+}
+
+# The branch a record is rebuilt on, one per app.
+def record-branch [app: path]: nothing -> string { $"fix/flags-record-($app | path expand | path basename)" }
+
+# The record pull request, as far as git and gh know it: {number, url, body} or null. The operator's gh, in the app's repo.
+# Only a pull request from this repository by the current gh user counts: a fork's pull request of the same branch name is
+# never edited, force-pushed over or closed.
+def record-open-pr [repo: string, branch: string, --strict]: nothing -> any {
+	let me = (do { cd $repo; ^gh api user --jq .login } | complete)
+	if $me.exit_code != 0 { error make {msg: $"flags: record: gh api user: ($me.stderr | str trim)"} }
+	let r = (do { cd $repo; ^gh pr list --head $branch --state open --json number,url,isCrossRepository,author,body } | complete)
+	if $r.exit_code != 0 { error make {msg: $"flags: record: gh pr list: ($r.stderr | str trim)"} }
+	let who = ($me.stdout | str trim)
+	let same = ($r.stdout | from json | where {|p| not ($p.isCrossRepository? | default true) })
+	# Another author's pull request on this branch is not ours to force-push over: with --strict it is refused.
+	let others = ($same | where {|p| ($p.author?.login? | default "") != $who })
+	if $strict and ($others | is-not-empty) { error make {msg: $"flags: record: ($branch) has an open pull request of another author \(($others | first | get url)\): refused, nothing was pushed"} }
+	$same | where {|p| ($p.author?.login? | default "") == $who } | get -o 0
+}
+
+# The pull request itself, in a scratch worktree from a fresh origin/main (never the operator's checkout):
+# splice each flag's default, accept only a change that moves nothing else in flagd.document, run the app's generate,
+# touch nothing outside the app, and push the branch for the app. {record, flags, pr}.
+def record-pr [at: record, app: path, version: string, cases: string, want: list<record>, ctx: record]: nothing -> record {
+	let top = (git-must (git-in $app rev-parse --show-toplevel) "not in a git tree" | path expand)
+	let prefix = (git-must (git-in $app rev-parse --show-prefix) "no prefix" | str trim --char "/")
+	let branch = (record-branch $app)
+	git-must (git-in $top fetch -q origin main) "git fetch origin main" | ignore
+	let scratch = (mktemp -d -t flagsrec.XXXXXX)
+	git-must (git-in $top worktree add -q --detach $scratch origin/main) "git worktree add" | ignore
+	let done = try { record-work $at $app $version $cases $want $ctx $top $scratch $prefix $branch } catch {|e| {error: $e.msg} }
+	git-in $top worktree remove --force $scratch | ignore
+	rm -rf $scratch
+	if $done.error? != null { error make {msg: $done.error} }
+	$done
+}
+
+def record-work [at: record, app: path, version: string, cases: string, want: list<record>, ctx: record, top: string, scratch: string, prefix: string, branch: string]: nothing -> record {
+	let wapp = if $prefix == "" { $scratch } else { $scratch | path join $prefix }
+	let trust = {MISE_TRUSTED_CONFIG_PATHS: $scratch}
+	let spec = (with-env $trust { cue-of $wapp flagd.document })
+	let diffs = (record-diffs $want $spec)
+	if ($diffs | is-empty) { return {record: "none", flags: "", pr: ""} }
+	let file = ($wapp | path join flags_spec.cue)
+	mut text = (open --raw $file)
+	for d in $diffs { $text = (splice-default $text $d.flag $d.live) }
+	$text | save -f --raw $file
+	let after = (with-env $trust { cue-of $wapp flagd.document })
+	let expected = ($diffs | reduce --fold $spec {|d, acc| $acc | upsert ([flags $d.flag variants default] | into cell-path) $d.live })
+	if $after != $expected { error make {msg: $"flags: record: the spec's flagd.document changes at more than ($diffs | get flag | each {|f| $'flags.($f).variants.default' } | str join ', ') once the defaults are written: refused"} }
+	let vet = (do { cd $wapp; with-env $trust { ^$env.SAYT_MISE_BIN exec -- cue vet . } } | complete)
+	if $vet.exit_code != 0 { error make {msg: $"flags: record: cue vet fails after the defaults are written: ($vet.stderr | str trim)"} }
+	let gen = ($env.PRONTO_FLAGS_GENERATE_CMD? | default "deno run -A tests/slot.ts --weight 1 -- ./saytw generate")
+	if ($wapp | path join tests slot.ts | path exists) or ($env.PRONTO_FLAGS_GENERATE_CMD? | default "") != "" {
+		# The app's generate may wait on the machine's slots: it gets PRONTO_FLAGS_GENERATE_TIMEOUT_SEC (600), then it is
+		# stopped and the record fails, never the push.
+		let limit = ($env.PRONTO_FLAGS_GENERATE_TIMEOUT_SEC? | default 600 | into int)
+		# Its own session, killed whole on the limit or when it ends (python3, which behaves alike on macOS and Linux where
+		# `sh`'s job control does not): a child the generate started goes with it, and none holds the output open.
+		let watched = 'python3 -c "import os,sys,subprocess,signal
+p=subprocess.Popen([\"sh\",\"-c\",os.environ[\"PRONTO_GEN\"]],start_new_session=True)
+try:
+    rc=p.wait(timeout=float(os.environ[\"PRONTO_GEN_LIMIT\"]))
+except subprocess.TimeoutExpired:
+    rc=124
+try:
+    os.killpg(p.pid,signal.SIGKILL)
+except ProcessLookupError:
+    pass
+p.wait()
+sys.exit(rc)"'
+		let g = (run-cases $wapp $watched ($trust | merge {PRONTO_GEN: $gen, PRONTO_GEN_LIMIT: ($limit | into string)}))
+		if not $g.ok { error make {msg: $"flags: record: generate failed or ran past its ($limit) s in the scratch tree: ($g.out)"} }
+	} else { print -e $"flags: record: ($wapp) has no tests/slot.ts, so generate was not run" }
+	let status = (git-in $scratch status --porcelain --untracked-files=all)
+	if $status.exit_code != 0 { error make {msg: $"flags: record: git status: ($status.stderr | str trim)"} }
+	let changed = ($status.stdout | lines | each {|l| $l | str substring 3.. })
+	let allowed = {|p| $p | str starts-with (if $prefix == "" { "" } else { $"($prefix)/" }) }
+	let strays = ($changed | where {|p| ($p | str starts-with ".github/") or not (do $allowed $p) })
+	if ($strays | is-not-empty) { error make {msg: $"flags: record: the change touches ($strays | str join ', '), outside the app's own files: refused, no pull request opened"} }
+	let title = $"($app | path expand | path basename): record live flag defaults"
+	let body = ($"Writes what production serves into flags_spec.cue, so the spec says it. No deploy, no change in behaviour: live already has these values.\n\n" + ($diffs | each {|d| $"- ($d.flag): ($d.spec) to ($d.live)" } | str join "\n") + $"\n\nRecords: ($diffs | each {|d| {($d.flag): $d.live} } | into record | to json -r)\n\nJournal: version ($version), flags ($diffs | get flag | str join '+'), values ($diffs | get live | each {|v| $v | to json -r } | str join ' '), cases ($cases).\n")
+	git-must (git-in $scratch checkout -q -B $branch) "git checkout" | ignore
+	git-must (git-in $scratch add -A -- (if $prefix == "" { "." } else { $prefix })) "git add" | ignore
+	# A machine with no git identity (a CI runner, a fresh box) still commits: the tool's own, only when none is set.
+	let ident = if ((git-in $scratch config user.name).stdout | str trim) == "" { ["-c", "user.name=pronto-flags", "-c", "user.email=pronto-flags@users.noreply.github.com"] } else { [] }
+	git-must (git-in $scratch ...$ident commit -q -m $title -m $body) "git commit" | ignore
+	# The lease is the branch as it was when this attempt began (`ctx`): a record that landed since fails the push with
+	# "stale info", and record-back builds once more, over the fresh pull request.
+	git-must (git-in $scratch push -q origin $"HEAD:refs/heads/($branch)" $"--force-with-lease=refs/heads/($branch):($ctx.remote)") "git push" | ignore
+	let flags = ($diffs | get flag | str join "+")
+	let arm = {|url: string|
+		let a = (do { cd $scratch; ^gh pr merge $url --auto --squash } | complete)
+		if $a.exit_code != 0 { print -e $"flags: WARNING: auto-merge was not armed on ($url): ($a.stderr | str trim)" }
+	}
+	let edit = {|pr: record|
+		let e = (do { cd $scratch; ^gh pr edit $pr.number --body $body } | complete)
+		if $e.exit_code != 0 { error make {msg: $"flags: record: gh pr edit: ($e.stderr | str trim)"} }
+		do $arm $pr.url
+		{record: "pr", flags: $flags, pr: $pr.url}
+	}
+	# A pull request closed or merged since it was listed is no pull request to edit.
+	let open = if $ctx.open == null { null } else {
+		let v = (do { cd $scratch; ^gh pr view $ctx.open.number --json state --jq .state } | complete)
+		if $v.exit_code == 0 and ($v.stdout | str trim) == "OPEN" { $ctx.open } else { null }
+	}
+	if $open != null { return (do $edit $open) }
+	let c = (do { cd $scratch; ^gh pr create --title $title --body $body --base main --head $branch } | complete)
+	if $c.exit_code != 0 {
+		# Another record opened it since the list: it is the one to edit.
+		let again = if ($c.stderr | str contains "already exists") { record-open-pr $scratch $branch } else { null }
+		if $again != null { return (do $edit $again) }
+		error make {msg: $"flags: record: gh pr create: ($c.stderr | str trim)"}
+	}
+	let url = ($c.stdout | str trim | lines | last)
+	do $arm $url
+	{record: "pr", flags: $flags, pr: $url}
+}
+
+# What the attempt starts from, read once and together: the repository, the branch's head on origin (the lease) and the
+# open record pull request with its Records: line.
+def record-context [app: path]: nothing -> record {
+	let top = (git-must (git-in $app rev-parse --show-toplevel) "not in a git tree" | path expand)
+	let branch = (record-branch $app)
+	let remote = (git-must (git-in $top ls-remote origin $"refs/heads/($branch)") "git ls-remote" | split row "\t" | first | default "")
+	let open = (record-open-pr $top $branch --strict)
+	# The carry is read from the branch head's own commit message (its Records: line), the object the lease is on; the pull
+	# request only says whether there is one to edit. A branch that is there with no pull request of ours is ours only if
+	# its head is a record commit of this tool: anything else is someone's work, and is not force-pushed over.
+	let message = if $remote == "" { "" } else {
+		git-must (git-in $top fetch -q origin $branch) "git fetch origin branch" | ignore
+		git-must (git-in $top log -1 --format=%B $remote) "git log of the branch head"
+	}
+	if $remote != "" and $open == null and not (($message | lines | first | default "") | str ends-with ": record live flag defaults") {
+		error make {msg: $"flags: record: ($branch) exists on origin and its head is not a record commit of this tool: refused, nothing was pushed"}
+	}
+	{remote: $remote, open: $open, message: (if $open == null { "" } else { $message })}
+}
+
+# The flags the open record pull request's branch head already changes against main (the `Records:` line of its commit message: flag to value), carried into
+# the rebuilt branch for as long as live still holds their value: {keep: [{flag, value}], stale: [flags live has moved on from]}.
+# `have` is what the push itself records, which wins.
+def record-carry [at: record, message: string, have: list<record>]: nothing -> record {
+	let line = ($message | lines | where {|l| $l | str starts-with "Records: " })
+	if ($line | is-empty) { return {keep: [], stale: []} }
+	# A line that is not ours to read carries nothing, and fails nothing.
+	let parsed = try {
+		let r = ($line | first | str substring 9.. | from json)
+		if ($r | describe | str starts-with "record") and ($r | values | all {|v| ($v | describe) in ["bool" "string" "int" "float"] }) { $r } else { null }
+	} catch { null }
+	if $parsed == null { print -e "flags: WARNING: the open record pull request's branch head has a Records: line that is unparsable, so it carries nothing into the rebuilt branch"; return {keep: [], stale: []} }
+	let recs = ($parsed | transpose flag value | where {|r| $r.flag not-in ($have | get flag) })
+	let now = (store-cat $at | from json)
+	let live = ($recs | each {|r| $r | insert live (default-of ($now.flags? | default {} | get -o $r.flag)) })
+	{keep: ($live | where {|r| $r.value == $r.live } | select flag value), stale: ($live | where {|r| $r.value != $r.live } | get flag)}
+}
+
+# One attempt: what the version wrote for the flags it owns, read against live now, then the record itself.
+def record-attempt [at: record, app: path, version: string, cases: string, owned: any, stand: string]: nothing -> record {
+	let w = (record-want $at $version $owned)
+	if ($w.moved | is-not-empty) { print -e $"flags: WARNING: live has moved on since version ($version): ($w.moved | str join ', ') no longer hold its value and are not recorded" }
+	# The pull request already open keeps its flags that live still holds: a second flip does not unmake the first's record.
+	let ctx = if $stand != "" { {remote: "", open: null, message: ""} } else { record-context $app }
+	let carry = if $stand != "" { {keep: [], stale: []} } else { record-carry $at $ctx.message $w.want }
+	let w = ($w | upsert want ($w.want | append $carry.keep))
+	if ($w.want | is-empty) {
+		return (if ($carry.stale | is-not-empty) { {record: "none", flags: "", pr: "", stale: $carry.stale} } else if ($w.moved | is-not-empty) { {record: "skipped", flags: "", pr: "", note: $"live moved on since version ($version): ($w.moved | str join '+')"} } else { {record: "none", flags: "", pr: ""} })
+	}
+	let r = if $stand != "" {
+		let diffs = (record-diffs $w.want (cue-of $app flagd.document))
+		for d in $diffs {
+			let c = (do { ^$stand $d.flag ($d.live | to json -r) $version } | complete)
+			if $c.exit_code != 0 { error make {msg: $"flags: record: ($stand) ($d.flag): ($c.stderr | str trim)"} }
+		}
+		{record: (if ($diffs | is-empty) { "none" } else { "stand-in" }), flags: ($diffs | get flag | str join "+"), pr: ""}
+	} else { record-pr $at $app $version $cases $w.want $ctx }
+	if ($carry.stale | is-not-empty) { print -e $"flags: record: the open record pull request's ($carry.stale | str join ', ') no longer hold their value live, and are dropped from it" }
+	# Whatever the outcome, record-back knows which flags of the open pull request went stale: with nothing left to record it is closed.
+	let r = ($r | upsert stale $carry.stale)
+	if ($w.moved | is-not-empty) { $r | insert note $"live moved on since version ($version): ($w.moved | str join '+') not recorded" } else { $r }
+}
+
+# An open record pull request that names one of these flags is stale once there is nothing to record (a failed record is
+# transient and leaves it open): closed with its branch, so a merge cannot write what is no longer live. Never fails the caller.
+def record-close [app: path, owned: any, stale: list<string>]: nothing -> string {
+	try {
+		let top = (git-in $app rev-parse --show-toplevel)
+		if $top.exit_code != 0 { return "" }
+		let repo = ($top.stdout | str trim)
+		let open = (record-open-pr $repo (record-branch $app))
+		if $open == null { return "" }
+		let named = ($owned == null) or ($stale | is-not-empty) or ($owned | any {|f| ($open.body? | default "") =~ ("(?m)^- " + (re-escape $f) + ":") })
+		if not $named { return "" }
+		let c = (do { cd $repo; ^gh pr close $open.number --delete-branch --comment "The flags this recorded no longer differ from the spec, or the record failed: closed by pronto-flags." } | complete)
+		if $c.exit_code == 0 { print $"flags: closed the stale record pull request ($open.url)"; $open.url } else { print -e $"flags: WARNING: could not close ($open.url): ($c.stderr | str trim)"; "" }
+	} catch { "" }
+}
+
+# After the final write of a push or a rollback: what that version wrote, for the flags the push owns (`owned`: its --flip
+# and --sync names; for a rollback, the flags whose default moved; null for every flag of the version), into the spec. A
+# flag the spec holds differently and the push did not write is `drift`'s, never recorded. Values come from the version
+# written, and only where live still holds them (else record: skipped). Skipped under a dry run, and where
+# PRONTO_FLAGS_RECORD says off. PRONTO_FLAGS_RECORD_BIN stands in for the pull request, in tests: it is run once
+# per flag to record, as `<bin> <flag> <value as JSON> <version>`. Never fails the caller, whose write stands.
+def record-back [at: record, app: path, version: string, cases: string, owned: any] {
+	if (dry) or ($env.PRONTO_FLAGS_RECORD? | default "") in ["0" "off"] { return }
+	if $owned != null and ($owned | is-empty) { return }
+	let stand = ($env.PRONTO_FLAGS_RECORD_BIN? | default "")
+	let base = {event: "flags.record", app: ($app | path expand | path basename), target: $at.url, version: $version, cases: $cases}
+	let file = (journal-file $app)
+	let note = {|rec: record|
+		let line = ($base | upsert at (now-utc) | merge $rec | to json -r)
+		try { mkdir ($file | path dirname); $"($line)\n" | save -a $file } catch {|e| print -e $"flags: WARNING: could not note the record in ($file): ($e.msg)" }
+	}
+	do $note {record: "pending", flags: ($owned | default [] | str join "+")}
+	let r = try {
+		# A lost lease means another record landed first: read live again and build once more.
+		try { record-attempt $at $app $version $cases $owned $stand } catch {|e|
+			if ($e.msg | str contains "stale info") { record-attempt $at $app $version $cases $owned $stand } else { error make {msg: $e.msg} }
+		}
+	} catch {|e|
+		print -e $"flags: WARNING: version ($version) is live but was NOT recorded in flags_spec.cue \(`pronto-flags drift` says what is missing\): ($e.msg | lines | first)"
+		{record: "failed", flags: "", pr: "", note: ($e.msg | lines | first)}
+	}
+	let closed = if $stand == "" and $r.record == "none" { record-close $app $owned ($r.stale? | default []) } else { "" }
+	do $note ($r | merge (if $closed != "" { {closed: $closed} } else { {} }))
+	if $r.record == "pr" { print $"flags: recorded in the spec by ($r.pr)" } else if $r.record == "stand-in" { print $"flags: recorded ($r.flags)" }
+}
+
+# The live flags into the spec, by hand: what a flip does after its write. Without --version, the version live now and
+# every flag it holds; --version names the version a flip wrote and --flags (comma-separated) the flags to record from it.
+export def record [app: path, --expect: string, --version: string, --flags: list<string> = []] {
+	pin-guard $app
+	let at = (live $app)
+	if (target-guard $at $expect) { print "flags: dry run: nothing written"; return }
+	record-back $at $app ($version | default (generation $at)) "manual" (if ($flags | is-empty) { null } else { $flags })
+}
+
+# What the spec says differently from what is live: for every flag both hold, its reach (default, accounts,
+# targeting). Read-only; the number of differences, and the open record pull request where there is one.
+export def drift [app: path]: nothing -> int {
+	let at = (live $app)
+	let liv = (store-cat $at | from json)
+	let spec = (cue-of $app flagd.document)
+	let both = ($spec.flags | columns | where {|f| $f in ($liv.flags | columns) })
+	let rows = ($both | each {|f| {flag: $f, live: (reach ($liv.flags | get $f)), spec: (reach ($spec.flags | get $f))} } | where {|r| $r.live != $r.spec })
+	if ($rows | is-empty) { print $"flags: the spec says what ($at.url) holds"; return 0 }
+	print $"flags: the spec differs from ($at.url) in ($rows | length) flags:"
+	$rows | each {|r| {flag: $r.flag, live: ($r.live | select value accounts | to json -r), spec: ($r.spec | select value accounts | to json -r), moved: (if $r.live.value != $r.spec.value { "default" } else { "accounts or targeting" })} } | print
+	let pr = try {
+		let top = (git-in $app rev-parse --show-toplevel)
+		if $top.exit_code == 0 and (git-in $app remote get-url origin).exit_code == 0 { record-open-pr ($top.stdout | str trim) (record-branch $app) } else { null }
+	} catch { null }
+	if $pr != null { print $"flags: an open record pull request: ($pr.url)" }
+	$rows | length
 }
 
 # Once per app: the bucket, versioned and private, keeping the last 50 versions;
@@ -1029,13 +1437,25 @@ def "main armies show" [app: path, --local] { armies-show $app --local=$local }
 def "main armies history" [app: path, --local, --json] { let h = (armies-history $app --local=$local); if $json { $h | to json | print } else { $h | table -e | print } }
 def "main armies rollback" [app: path, army: string, version?: int, --local, --expect: string, --dry-run] { with-env (dry-env $dry_run) { armies-rollback $app $army $version --local=$local --expect $expect } }
 
-def main [] { print "usage: live.nu setup|push|released|history|rollback|show|cases <app-dir> [version|flag]; live.nu armies push|show|history|rollback <app-dir>" }
+def main [] { print "usage: live.nu setup|push|released|history|rollback|show|cases|record|drift <app-dir> [version|flag]; live.nu armies push|show|history|rollback <app-dir>" }
 def "main setup" [app: path, --expect: string, --dry-run] { with-env (dry-env $dry_run) { setup $app --expect $expect } }
-def "main push" [app: path, --untested: string, --no-canary: string, --expect: string, --flip: string = "", --drop: string = "", --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --no-canary $no_canary --expect $expect --flip (names $flip) --drop (names $drop) } }
+def "main push" [app: path, --untested: string, --no-canary: string, --expect: string, --flip: string = "", --drop: string = "", --sync: string = "", --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --no-canary $no_canary --expect $expect --flip (flip-names $flip) --drop (names $drop) --sync (names $sync) } }
 def "main released" [app: path, --expect: string, --dry-run] { with-env (dry-env $dry_run) { released $app --expect $expect } }
+# --flip's entries: names split at commas, but `name=value` is one entry whose value may hold commas; one that mixes it
+# with other names is refused, since it cannot be told from a value.
+def flip-names [s: string]: nothing -> list<string> {
+	if not ($s | str contains "=") { return (names $s) }
+	let at = ($s | str index-of "=")
+	let name = ($s | str substring 0..<$at)
+	let value = ($s | str substring ($at + 1)..)
+	if ($name | str contains ",") or ($value =~ ',\s*[A-Za-z0-9_.-]+=') { error make {msg: "flags: --flip takes one flag with a value; repeat the command for the next: nothing was written"} }
+	[($s | str trim)]
+}
 def names [s: string]: nothing -> list<string> { $s | split row "," | each {|n| $n | str trim } | where {|n| $n != "" } }
 def "main history" [app: path, --json] { if $json { history $app --changes | to json | print } else { history $app | table -e | print } }
 def "main rollback" [app: path, version?: string, --expect: string, --dry-run] { with-env (dry-env $dry_run) { rollback $app $version --expect $expect } }
 def dry-env [on: bool]: nothing -> record { if $on { {PRONTO_FLAGS_DRY_RUN: "1"} } else { {} } }
-def "main show" [app: path, --flip: string = "", --drop: string = ""] { show $app --flip (names $flip) --drop (names $drop) }
+def "main show" [app: path, --flip: string = "", --drop: string = "", --sync: string = ""] { show $app --flip (flip-names $flip) --drop (names $drop) --sync (names $sync) }
+def "main record" [app: path, --expect: string, --version: string, --flags: string = "", --dry-run] { with-env (dry-env $dry_run) { record $app --expect $expect --version $version --flags (names $flags) } }
+def "main drift" [app: path] { if (drift $app) > 0 { exit 1 } }
 def "main cases" [app: path, flag?: string] { cases $app $flag | table -e | print }
