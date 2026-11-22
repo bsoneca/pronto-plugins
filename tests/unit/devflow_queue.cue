@@ -36,6 +36,59 @@ cases: {
 			{seq: 8, state: "Ready", module: "aprende", created: "2026-11-01T10:00:00Z", ready: "2026-11-02T10:00:00Z", moves: [{state: "Ready", at: "2026-11-15T10:00:00Z"}]},
 		]}, "engineer", 4]}, {pick: ["started"], expect: [["ACME-4", "ACME-6", "ACME-7", "ACME-8"]], why: "7 and 4 were made in Ready; 8 went back to Ready on the 15th, and queues from there"},
 	]}
+	"order filed: the oldest filed first, whenever each became Ready, and moving into Ready again changes nothing (PRONTO-1538)": {suite: "devflow", steps: [
+		{call: "queue.pulls", args: [{order: "filed", issues: [
+			{seq: 9, state: "Ready", module: "aprende", created: "2026-11-14T10:00:00Z", ready: "2026-11-14T10:00:00Z"},
+			{seq: 5, state: "Ready", module: "aprende", created: "2026-11-01T10:00:00Z", ready: "2026-11-15T10:00:00Z"},
+		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-5", "ACME-9"]], why: "a new ask made Ready first sorts after the older issue made Ready later"},
+		{call: "queue.pulls", args: [{issues: [
+			{seq: 9, state: "Ready", module: "aprende", created: "2026-11-14T10:00:00Z", ready: "2026-11-14T10:00:00Z"},
+			{seq: 5, state: "Ready", module: "aprende", created: "2026-11-01T10:00:00Z", ready: "2026-11-15T10:00:00Z"},
+		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-9", "ACME-5"]], why: "the default order, ready, is the old one: first into Ready first"},
+		{call: "queue.pulls", args: [{order: "filed", issues: [
+			{seq: 5, state: "Ready", module: "aprende", created: "2026-11-01T10:00:00Z", ready: "2026-11-10T10:00:00Z", moves: [{state: "Ready", at: "2026-11-20T10:00:00Z"}]},
+			{seq: 6, state: "Ready", module: "aprende", created: "2026-11-05T10:00:00Z", ready: "2026-11-12T10:00:00Z"},
+		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-5", "ACME-6"]], why: "5 went back into Ready on the 20th and keeps its place"},
+		{call: "queue.pulls", args: [{order: "ready", issues: [
+			{seq: 5, state: "Ready", module: "aprende", created: "2026-11-01T10:00:00Z", ready: "2026-11-10T10:00:00Z", moves: [{state: "Ready", at: "2026-11-20T10:00:00Z"}]},
+			{seq: 6, state: "Ready", module: "aprende", created: "2026-11-05T10:00:00Z", ready: "2026-11-12T10:00:00Z"},
+		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-6", "ACME-5"]], why: "order ready: the same issues, the latest move into Ready decides"},
+	]}
+	"order filed: a design's children sort at their umbrella's place when queue.childrenAtUmbrella is on, at their own when it is off": {suite: "devflow", steps: [
+		{call: "queue.pulls", args: [{order: "filed", childrenAtUmbrella: true, issues: [
+			{seq: 2, name: "design", state: "Done", module: "design", created: "2026-11-02T10:00:00Z"},
+			{seq: 3, state: "Ready", module: "aprende", created: "2026-11-03T10:00:00Z", ready: "2026-11-03T10:00:00Z"},
+			{seq: 10, state: "Ready", module: "aprende", created: "2026-11-20T10:00:00Z", ready: "2026-11-20T10:00:00Z", parent: 2},
+			{seq: 9, state: "Ready", module: "aprende", created: "2026-11-21T10:00:00Z", ready: "2026-11-21T10:00:00Z", parent: 2},
+		]}, "engineer", 3]}, {pick: ["started"], expect: [["ACME-9", "ACME-10", "ACME-3"]], why: "both children sort at the umbrella's creation, before 3 which was filed after it; the siblings by number"},
+		{call: "queue.pulls", args: [{order: "filed", childrenAtUmbrella: false, issues: [
+			{seq: 2, name: "design", state: "Done", module: "design", created: "2026-11-02T10:00:00Z"},
+			{seq: 3, state: "Ready", module: "aprende", created: "2026-11-03T10:00:00Z", ready: "2026-11-03T10:00:00Z"},
+			{seq: 10, state: "Ready", module: "aprende", created: "2026-11-20T10:00:00Z", ready: "2026-11-20T10:00:00Z", parent: 2},
+			{seq: 9, state: "Ready", module: "aprende", created: "2026-11-21T10:00:00Z", ready: "2026-11-21T10:00:00Z", parent: 2},
+		]}, "engineer", 3]}, {pick: ["started"], expect: [["ACME-3", "ACME-10", "ACME-9"]], why: "off: each child at its own creation"},
+		{call: "queue.pulls", args: [{order: "ready", childrenAtUmbrella: true, issues: [
+			{seq: 2, name: "design", state: "Done", module: "design", created: "2026-11-02T10:00:00Z"},
+			{seq: 3, state: "Ready", module: "aprende", created: "2026-11-03T10:00:00Z", ready: "2026-11-03T10:00:00Z"},
+			{seq: 10, state: "Ready", module: "aprende", created: "2026-11-20T10:00:00Z", ready: "2026-11-20T10:00:00Z", parent: 2},
+		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-3", "ACME-10"]], why: "inheritance is read in order filed alone"},
+		{call: "queue.pulls", args: [{order: "filed", childrenAtUmbrella: true, issues: [
+			{seq: 3, state: "Ready", module: "aprende", created: "2026-11-03T10:00:00Z", ready: "2026-11-21T10:00:00Z"},
+			{seq: 7, state: "Ready", module: "aprende", created: "2026-11-04T10:00:00Z", ready: "2026-11-21T10:00:00Z", parent: 99},
+			{seq: 4, state: "Ready", module: "aprende", created: "2026-11-05T10:00:00Z", ready: "2026-11-21T10:00:00Z"},
+		]}, "engineer", 3]}, {pick: ["started"], expect: [["ACME-3", "ACME-7", "ACME-4"]], why: "a parent the board did not list: the child's own creation"},
+	]}
+	"order filed: a bug at P0 or P1 still jumps, a P0's first, and queue.jump says which priorities jump": {suite: "devflow", steps: [
+		{call: "queue.pulls", args: [{order: "filed", issues: [
+			{seq: 1, state: "Ready", module: "aprende", created: "2026-11-01T10:00:00Z", ready: "2026-11-01T10:00:00Z"},
+			{seq: 5, state: "Ready", module: "aprende", priority: "high", bug: true, created: "2026-11-19T10:00:00Z", ready: "2026-11-19T10:00:00Z"},
+			{seq: 6, state: "Ready", module: "aprende", priority: "urgent", bug: true, created: "2026-11-20T10:00:00Z", ready: "2026-11-20T10:00:00Z"},
+		]}, "engineer", 3]}, {pick: ["started"], expect: [["ACME-6", "ACME-5", "ACME-1"]], why: "the P0 bug, the P1 bug, then the oldest filed"},
+		{call: "queue.pulls", args: [{order: "filed", jump: ["P0"], issues: [
+			{seq: 1, state: "Ready", module: "aprende", created: "2026-11-01T10:00:00Z", ready: "2026-11-01T10:00:00Z"},
+			{seq: 5, state: "Ready", module: "aprende", priority: "high", bug: true, created: "2026-11-19T10:00:00Z", ready: "2026-11-19T10:00:00Z"},
+		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-1", "ACME-5"]], why: "the flow lists P0 alone: a P1 bug waits its turn"},
+	]}
 	"a lane pulls its own issues only, and none when its slots are busy": {suite: "devflow", steps: [
 		{call: "queue.pulls", args: [{modules: ["aprende", "infra"], issues: [{seq: 1, state: "Ready", module: "infra", ready: "2026-11-10T10:00:00Z"}]}, "engineer", 1]}, {pick: ["started", "writes"], expect: [["empty"], []], why: "an infra issue is an SRE's"},
 		{call: "queue.pulls", args: [{modules: ["aprende", "infra"], issues: [{seq: 1, state: "Ready", module: "infra", ready: "2026-11-10T10:00:00Z"}]}, "SRE", 1]}, {pick: ["started"], expect: [["ACME-1"]]},

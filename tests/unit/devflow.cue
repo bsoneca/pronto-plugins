@@ -91,6 +91,27 @@ cases: {
 			{key: "K-4", sequence: 4, jump: false, readyAt: "2026-11-11T10:00:00Z"},
 		]]}, {pick: ["0.key", "1.key", "2.key", "3.key"], expect: ["K-8", "K-2", "K-4", "K-6"], why: "a P0 bug before a P1 bug even if it became Ready later; equal Ready times: the number decides"},
 		{call: "devflow.pullOrder", args: [[]], expect: []},
+		{call: "devflow.pullOrder", args: [[
+			{key: "K-9", sequence: 9, jump: false, readyAt: "2026-11-14T10:00:00Z", filedAt: "2026-11-14T10:00:00Z"},
+			{key: "K-5", sequence: 5, jump: false, readyAt: "2026-11-15T10:00:00Z", filedAt: "2026-11-01T10:00:00Z"},
+			{key: "K-7", sequence: 7, jump: true, p0: false, readyAt: "2026-11-16T10:00:00Z", filedAt: "2026-11-20T10:00:00Z"},
+		], "filed"]}, {pick: ["0.key", "1.key", "2.key"], expect: ["K-7", "K-5", "K-9"], why: "order filed: the jump, then the oldest filed, not the first Ready"},
+		{call: "devflow.pullOrder", args: [[
+			{key: "K-9", sequence: 9, jump: false, readyAt: "2026-11-14T10:00:00Z", filedAt: "2026-11-14T10:00:00Z"},
+			{key: "K-5", sequence: 5, jump: false, readyAt: "2026-11-15T10:00:00Z", filedAt: "2026-11-01T10:00:00Z"},
+		], "ready"]}, {pick: ["0.key", "1.key"], expect: ["K-9", "K-5"], why: "order ready ignores filedAt"},
+		{call: "devflow.pullOrder", args: [[
+			{key: "K-3", sequence: 3, jump: false, filedAt: "2026-11-03T10:00:00Z"},
+			{key: "K-10", sequence: 10, umbrella: 2, jump: false, filedAt: "2026-11-02T10:00:00Z"},
+			{key: "K-9", sequence: 9, umbrella: 2, jump: false, filedAt: "2026-11-02T10:00:00Z"},
+			{key: "K-4", sequence: 4, jump: false},
+		], "filed"]}, {pick: ["0.key", "1.key", "2.key", "3.key"], expect: ["K-9", "K-10", "K-3", "K-4"], why: "children at the umbrella's time, siblings by number; no filing time comes last"},
+	]}
+	"filedPlace puts a child at its umbrella's place only when asked, one level, and not on a cycle": {suite: "devflow", steps: [
+		{call: "devflow.filedPlace", args: [{id: "c", sequence_id: 9, created_at: "2026-11-21T10:00:00Z", parent: "u"}, [{id: "u", sequence_id: 2, created_at: "2026-11-02T10:00:00Z", parent: "g"}, {id: "g", sequence_id: 1, created_at: "2026-11-01T10:00:00Z"}], true], expect: {filedAt: "2026-11-02T10:00:00Z", umbrella: 2}, why: "one level: the umbrella's, not its parent's"},
+		{call: "devflow.filedPlace", args: [{id: "c", sequence_id: 9, created_at: "2026-11-21T10:00:00Z", parent: "u"}, [{id: "u", sequence_id: 2, created_at: "2026-11-02T10:00:00Z"}], false], expect: {filedAt: "2026-11-21T10:00:00Z", umbrella: 9}, why: "off: its own"},
+		{call: "devflow.filedPlace", args: [{id: "c", sequence_id: 9, created_at: "2026-11-21T10:00:00Z", parent: "x"}, [], true], expect: {filedAt: "2026-11-21T10:00:00Z", umbrella: 9}, why: "a parent not listed"},
+		{call: "devflow.filedPlace", args: [{id: "a", sequence_id: 1, created_at: "2026-11-01T10:00:00Z", parent: "b"}, [{id: "b", sequence_id: 2, created_at: "2026-11-02T10:00:00Z", parent: "a"}], true], expect: {filedAt: "2026-11-02T10:00:00Z", umbrella: 2}, why: "a cycle ends after one step"},
 	]}
 	"an issue became Ready at its latest move into Ready, else when it was made": {suite: "devflow", steps: [
 		{call: "devflow.readySince", args: [[{to: "s-ready", at: "2026-11-10T10:00:00Z"}, {to: "s-impl", at: "2026-11-11T10:00:00Z"}, {to: "s-ready", at: "2026-11-13T09:00:00Z"}], "s-ready", "2026-11-01T00:00:00Z"], expect: "2026-11-13T09:00:00.000Z", why: "bounced back to Ready: the current stay counts"},

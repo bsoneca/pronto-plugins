@@ -33,7 +33,7 @@ export interface DevFlow {
   design: string[];
   architectModel: string;
   /** Where the Ready queue is read, and how long an issue may wait there (schema.cue, queue). */
-  queue: { starvingDays: number; mergedDays: number };
+  queue: { starvingDays: number; mergedDays: number; order?: "ready" | "filed"; jump?: string[]; childrenAtUmbrella?: boolean };
   timeZone: string;
   /** Hours without a commit or a pull request after which an issue holding a slot is stuck. */
   stuckHours: number;

@@ -31,9 +31,14 @@ on.
    engineers, an SRE and an architect who build, each driving Claude sessions, and a product manager
    who designs what the queue will hold. The sessions building at once are capped, one per builder,
    because what limits us is people's review and CPU, not ideas.
-2. **Ready is first in, first out.** An issue is in the queue from the moment it moves into Ready, and
-   each lane pulls the issue that has waited longest. The one exception: a **bug at P1 or P0 jumps**
-   the queue. Priority orders nothing else: a P1 feature waits its turn like any other. An issue that
+2. **Ready is pulled in the order the flow's `queue.order` sets.** `"ready"` (the default) is first in,
+   first out: an issue is in the queue from the moment it moves into Ready, and each lane pulls the
+   issue that has waited longest. `"filed"` (PRONTO-1538; this repository's) pulls the oldest filed
+   first, by the issue's creation time and then its number: moving an issue into Ready again changes
+   nothing, and a new ask made Ready today waits behind an older issue made Ready later. With
+   `queue.childrenAtUmbrella`, a child split from a design sorts at its umbrella's place (its parent's
+   creation time and number), its siblings by their own number. The one exception: a **bug at a
+   priority of `queue.jump` (default P1 or P0) jumps** the queue, a P0's before a P1's. Priority orders nothing else: a P1 feature waits its turn like any other. An issue that
    waits more than `queue.starvingDays` (default 3) in Ready is **starving**, and `status` says so.
 3. **New features are never built on request.** Every request becomes an issue on the board first.
    This holds for every app and every kind of change.
@@ -258,7 +263,7 @@ Live or Done and completed today has its history read (its first move into a com
 last move out of one), once, and kept under `~/.cache/pronto-devflow/` with each Ready issue's time, so a
 warm `status` is the issue list plus a few reads. The lines print as each phase finishes, and a phase that fails prints
 `<phase>: unavailable (<error>)` and the run exits 1: nothing is hidden. The flow's `timeZone` (default `America/Sao_Paulo`) sets the days.
-`queue.starvingDays` (default 3) is how long an issue may wait in Ready before `starving:` names it. A Ready issue the board cannot date, or
+`queue.order` (`"ready"` by default, or `"filed"`), `queue.jump` (the bug priorities that jump, default `["P0", "P1"]`) and `queue.childrenAtUmbrella` (default false; read in `"filed"` order, a child's place is its parent's, which the board gives as the issue's `parent`) set how `pull` orders the queue. `queue.starvingDays` (default 3) is how long an issue may wait in Ready before `starving:` names it. A Ready issue the board cannot date, or
 an activity it cannot read, is an error: nothing is pulled on a guess. Once a lane is full, `pull` goes on
 only for a P0 (it starts past the slots); a P0 bug is pulled before a P1 bug.
 

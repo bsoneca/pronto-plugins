@@ -1,7 +1,7 @@
 // The board as the skills use it (skills/pronto-sprint-plan, pronto-issue, pronto-bug): each verb one
 // step of the flow, its rule decided in flow.js and its queue logic in queue.ts, so a session never
-// moves an issue by hand. There are no sprints (PRONTO-658): Ready is a queue, first in first out,
-// and a bug at P1 jumps it.
+// moves an issue by hand. There are no sprints (PRONTO-658): Ready is a queue, pulled in the flow's queue.order (ready: first in first out; filed: oldest filed first),
+// and a bug at a queue.jump priority (P1 or P0) jumps it.
 //   board.ts status <repo> [--json]                     the slots busy, what is stuck, each lane's Ready queue with ages, what starves, merges by day (from each issue's completed_at; today's from its history), the open issues by state
 //   board.ts start <repo> <KEY>                         Implementing, if its lane (engineer, SRE or architect) has a slot (a P0 always)
 //   board.ts pull <repo> [--lane engineer|SRE|architect|feature]  start the lane's first issue in the Ready queue (feature: an engineer's feature issue alone; the engineer lane's reserved slots take only those)
@@ -21,7 +21,7 @@ import { approve, show } from "./suggestions.ts";
 
 const [verb, repoArg, ...rest] = Deno.args;
 const GONE: Record<string, string> = {
-  next: "sprints are gone (PRONTO-658): move . <KEY> Ready puts an issue in the queue, and each lane pulls the oldest",
+  next: "sprints are gone (PRONTO-658): move . <KEY> Ready puts an issue in the queue, and each lane pulls the first of the queue (queue.order: the oldest in Ready, or the oldest filed)",
   close: "sprints are gone (PRONTO-658): status shows what merged by day",
 };
 if (verb && Object.hasOwn(GONE, verb)) {

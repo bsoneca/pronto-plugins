@@ -142,12 +142,25 @@ export function jumps(priority, bug, urgent = ["urgent", "high"]) {
   return !!bug && urgent.includes(priority);
 }
 
-/** The order a lane pulls its Ready issues (PRONTO-658): the jumping bugs first (a P0's before a P1's), then first in, first
- * out by when each became Ready, then by number. `issues` are `{key, sequence, jump, p0, readyAt}`; one
- * with no `readyAt` comes last of its kind. */
-export function pullOrder(issues) {
-  const t = (i) => (Number.isFinite(Date.parse(i.readyAt ?? "")) ? Date.parse(i.readyAt) : Infinity);
-  return [...issues].sort((a, b) => Number(!!b.jump && !!b.p0) - Number(!!a.jump && !!a.p0) || Number(!!b.jump) - Number(!!a.jump) || (t(a) < t(b) ? -1 : t(a) > t(b) ? 1 : 0) || a.sequence - b.sequence);
+/** The order a lane pulls its Ready issues, by the flow's `queue.order` (devflow/schema.cue): the jumping bugs first
+ * (a P0's before a P1's), then, in order "ready" (PRONTO-658, the default), first in, first out by when each became
+ * Ready, or, in order "filed" (PRONTO-1538), by when each was filed (`filedAt`, and `umbrella`, the number of the
+ * issue it is a child of, before its own number), then by number. `issues` are `{key, sequence, jump, p0, readyAt,
+ * filedAt, umbrella}`; one with no time for the order comes last of its kind. */
+export function pullOrder(issues, order = "ready") {
+  const at = (i) => (order === "filed" ? i.filedAt : i.readyAt);
+  const t = (i) => (Number.isFinite(Date.parse(at(i) ?? "")) ? Date.parse(at(i)) : Infinity);
+  const u = (i) => (order === "filed" ? i.umbrella ?? i.sequence : 0);
+  return [...issues].sort((a, b) => Number(!!b.jump && !!b.p0) - Number(!!a.jump && !!a.p0) || Number(!!b.jump) - Number(!!a.jump) || (t(a) < t(b) ? -1 : t(a) > t(b) ? 1 : 0) || u(a) - u(b) || a.sequence - b.sequence);
+}
+
+/** Where an issue sorts in "filed" order: when it was filed and the number it sorts at. With `inherit`
+ * (`queue.childrenAtUmbrella`), a child takes its umbrella's creation time and number, found by the id
+ * its `parent` names among `all` (`{id, sequence_id, created_at, parent}`); one level only, so a cycle
+ * of parents ends at once. A parent the board did not list leaves the child at its own. */
+export function filedPlace(issue, all, inherit) {
+  const up = inherit && issue.parent ? (all ?? []).find((x) => x.id === issue.parent && x.id !== issue.id) : null;
+  return up ? { filedAt: up.created_at ?? null, umbrella: up.sequence_id } : { filedAt: issue.created_at ?? null, umbrella: issue.sequence_id };
 }
 
 /** What merged and when, by day: `times` are ISO moments an issue merged. `today` and `week` count the

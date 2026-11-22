@@ -30,7 +30,7 @@ function flowOf(seed) {
     infra: ['infra'],
     design: ['design'],
     priorities: { P0: { plane: 'urgent' }, P1: { plane: 'high' }, P2: { plane: 'medium' }, P3: { plane: 'low' } },
-    queue: { starvingDays: seed.starvingDays ?? 3, mergedDays: 7 },
+    queue: { starvingDays: seed.starvingDays ?? 3, mergedDays: 7, order: seed.order ?? 'ready', jump: seed.jump ?? ['P0', 'P1'], childrenAtUmbrella: seed.childrenAtUmbrella ?? false },
     stuckHours: 6,
     waitLabel: 'waits-release',
     featureLabel: 'feature',
@@ -50,7 +50,7 @@ function flowOf(seed) {
 
 /** An in-memory Board of the seed: `inboxMade` (default true) makes the inbox project with its three
  * states (else it is absent, or with Plane's own five when `connect` makes it); `items` the inbox's
- * issues `{seq, state, title, html, created}`; `issues` the board's `{seq, name, state, module, priority, bug, feature, ready, created, completed, moves}` (`ready`
+ * issues `{seq, state, title, html, created}`; `issues` the board's `{seq, name, state, module, priority, bug, feature, ready, created, parent (a seq), completed, moves}; `order`, `jump` and `childrenAtUmbrella` set the flow's queue` (`ready`
  * an ISO time it moved into Ready, `moves` more `{state, at}`; the Ready queue's cases) and `comments` `{html, at}` already on it, `cycles` `{name, issues: [seq]}` that cycles()/cycleIssues() answer, `failMoves` (stateMoves rejects), `failLinks` (links rejects), `nows` (the clock of each status run) and `touches` `{after, seq, state, updated, move}` (what happens to an issue after run `after`: its new state, `updated_at` and a move into it `{state, at}`) and `now` the clock comments are stamped with;
  * `modules` its modules; `failOnce` a write method that throws its first call (`issues` instead: the
  * inbox's list of issues, failing as Plane's 500 does, with a body); `failAfter` a method whose first
@@ -81,7 +81,7 @@ function boardOf(seed) {
   for (const i of seed.issues ?? []) {
     issues['p-acme'].push({
       id: `i-acme-${i.seq}`, name: i.name ?? `issue ${i.seq}`, sequence_id: i.seq, state: `s-acme-${i.state ?? 'Backlog'}`, priority: i.priority ?? 'none', project: 'p-acme',
-      created_at: i.created, completed_at: i.completed, updated_at: i.updated ?? '2026-11-01T00:00:00Z', labels: [...(i.bug ? ['l-bug'] : []), ...(i.wait ? ['l-wait'] : []), ...(i.feature ? ['l-feature'] : [])],
+      created_at: i.created, parent: i.parent ? `i-acme-${i.parent}` : undefined, completed_at: i.completed, updated_at: i.updated ?? '2026-11-01T00:00:00Z', labels: [...(i.bug ? ['l-bug'] : []), ...(i.wait ? ['l-wait'] : []), ...(i.feature ? ['l-feature'] : [])],
     });
     moves[`i-acme-${i.seq}`] = [...(i.ready ? [{ to: 's-acme-Ready', at: i.ready }] : []), ...(i.moves ?? []).map((m) => ({ to: `s-acme-${m.state}`, at: m.at }))];
     if (i.comments) comments[`i-acme-${i.seq}`] = i.comments.map((c) => ({ ...c }));
@@ -95,7 +95,7 @@ function boardOf(seed) {
     if (failing === what) { failing = null; throw new Error(`${what} failed once`); }
     log.push([what, ...rest].join(' '));
   };
-  const light = (i, full) => (full ? { ...i } : { id: i.id, name: i.name, sequence_id: i.sequence_id, state: i.state, priority: i.priority, created_at: i.created_at, completed_at: i.completed_at, updated_at: i.updated_at, labels: i.labels });
+  const light = (i, full) => (full ? { ...i } : { id: i.id, name: i.name, sequence_id: i.sequence_id, state: i.state, priority: i.priority, created_at: i.created_at, parent: i.parent, completed_at: i.completed_at, updated_at: i.updated_at, labels: i.labels });
   const byId = (p) => projects.find((x) => x.id === p);
   const sync = {
     projects: () => projects.map((p) => ({ ...p })),

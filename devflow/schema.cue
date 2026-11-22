@@ -69,6 +69,21 @@ devFlow: #DevFlow
 	// lead looks at what is in the way.
 	queue: {
 		starvingDays: *3 | (int & >=1)
+		// The order a lane pulls its Ready issues in (PRONTO-1538). "ready": by when each issue
+		// became Ready (its latest move into Ready), the order of PRONTO-658, which a board that
+		// sets nothing keeps. "filed": by when each issue was filed (its creation time), then its
+		// number; moving an issue into Ready again changes nothing, and a new ask made Ready today
+		// waits behind an older one made Ready later.
+		order: *"ready" | "filed"
+		// The priorities at which a bug jumps the queue, each pulled before any issue that does not
+		// (a P0's before a P1's, as the P0 starts past the slots). Only a bug jumps: a feature at P1
+		// waits its turn.
+		jump: *["P0", "P1"] | [...("P0" | "P1" | "P2" | "P3")]
+		// Whether a child issue split from a design is ordered at its umbrella's place (the issue
+		// the board gives as its parent): in "filed" order it sorts at the umbrella's creation time
+		// and number, its siblings by their own number. A child whose parent the board did not
+		// list sorts by its own creation. Read in "filed" order alone.
+		childrenAtUmbrella: *false | bool
 		// The window `status` counts merges over, in days.
 		mergedDays: *7 | (int & >=1)
 	}

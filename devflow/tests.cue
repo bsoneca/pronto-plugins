@@ -118,6 +118,11 @@ queueFlow: {
 	merged:   _queue.queue.mergedDays & 14
 	timeZone: _queue.timeZone & "Europe/Lisbon"
 	carried:  _oldSprint.timeZone & "America/New_York"
+	orderDefault:  (#DevFlow & {}).queue.order & "ready"
+	jumpDefault:   (#DevFlow & {}).queue.jump & ["P0", "P1"]
+	childrenOff:   (#DevFlow & {}).queue.childrenAtUmbrella & false
+	orderFiled:    (#DevFlow & {queue: {order: "filed", childrenAtUmbrella: true}}).queue.order & "filed"
+	orderRefused:  ((#DevFlow & {queue: order: "newest"}).queue == _|_) & true
 	starvingRefused: ((#DevFlow & {queue: starvingDays: 0}).queue == _|_) & true
 }
 

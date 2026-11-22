@@ -1,10 +1,12 @@
 // The board's Ready queue (PRONTO-658), the verbs' logic behind board.ts so a unit case can run it on a
-// fake Board (tests/unit/devflow_queue.cue): Ready is first in, first out by when each issue became
-// Ready (flow.js readySince, from the board's state moves), a bug at P1 or P0 jumps it, and each lane
-// (engineer, SRE, architect) pulls the first of its own. There are no sprints. board.ts parses the
+// fake Board (tests/unit/devflow_queue.cue): the flow's `queue.order` says how Ready is pulled, "ready"
+// first in, first out by when each issue became Ready (flow.js readySince, from the board's state moves),
+// "filed" by when each was filed, a design's children at their umbrella's place (PRONTO-1538); a bug at
+// a priority of `queue.jump` (P1 or P0) jumps it, and each lane (engineer, SRE, architect) pulls the
+// first of its own. There are no sprints. board.ts parses the
 // arguments, prints and exits; the rules are flow.js's.
 import { type Board, esc, type Issue, type State } from "./board/board.ts";
-import { featureOf, ageOf, bugPlace, dayOf, claimText, claimWinner, jumps, laneOf, mayStart, mergedByDay, nameOf, priorityOf, pullOrder, readySince, roleOf, staleOf, stuckLine, stuckOf, waitsRelease } from "./flow.js";
+import { featureOf, ageOf, bugPlace, dayOf, claimText, claimWinner, filedPlace, jumps, laneOf, mayStart, mergedByDay, nameOf, priorityOf, pullOrder, readySince, roleOf, staleOf, stuckLine, stuckOf, waitsRelease } from "./flow.js";
 import type { DevFlow, Role } from "./spec.ts";
 import { inboxStatus, suggestionLines } from "./suggestions.ts";
 
@@ -86,6 +88,10 @@ export interface Queued {
   lane: string;
   /** When it became Ready (ISO), or null when the board cannot say. */
   readyAt: string | null;
+  /** What order "filed" sorts by (ISO): its creation, or its umbrella's with `queue.childrenAtUmbrella`; null when the board cannot say. */
+  filedAt: string | null;
+  /** The number it sorts at in "filed" order: its umbrella's, or its own. */
+  umbrella: number;
   /** The short age in Ready: "3h", "2d". */
   age: string;
   jump: boolean;
@@ -96,7 +102,7 @@ export interface Queued {
   starving: boolean;
 }
 
-/** The Ready issues in the order they are pulled: a jumping bug (P0's first), then the oldest in Ready.
+/** The Ready issues in the order they are pulled (`queue.order`): a jumping bug (P0's first), then the oldest in Ready, or the oldest filed.
  * `lane` keeps one lane's alone, before any activity is read. A Ready issue the board cannot date (no
  * move into Ready and no creation time) is an error, never a silent place in the queue. */
 export async function readyQueue(board: Board, ctx: Ctx, all: Issue[], now: Date, lane?: string, cache?: ReadCache): Promise<Queued[]> {
@@ -104,7 +110,8 @@ export async function readyQueue(board: Board, ctx: Ctx, all: Issue[], now: Date
   // The lane "feature" is the engineer lane's feature issues alone (the session of a slot reserved for them).
   const ready = all.filter((i) => ctx.roleAt(i.state) === "ready" && (!lane || (lane === "feature" ? ctx.laneOf(i) === "engineer" && featureOf(i.labels, ctx.featureLabel) : ctx.laneOf(i) === lane)));
   const readyId = ctx.roleId("ready");
-  const urgent = [ctx.priorities.P0, ctx.priorities.P1];
+  const q = ctx.flow.queue;
+  const urgent = (q.jump ?? ["P0", "P1"]).map((p) => ctx.priorities[p]);
   const pName = (word: string) => Object.entries(ctx.priorities).find(([, w]) => w === word)?.[0] ?? null;
   const queued = await pool(ready, 8, async (i): Promise<Queued> => {
     // One activity read an issue, kept while the issue is unchanged (`updated_at`): a warm status reads none.
@@ -118,12 +125,14 @@ export async function readyQueue(board: Board, ctx: Ctx, all: Issue[], now: Date
     if (!readyAt) throw new Error(`${ctx.key(i)} is Ready but the board gives neither a move into Ready nor a creation time`);
     const bug = !!ctx.bugLabel && (i.labels ?? []).includes(ctx.bugLabel);
     const jump = jumps(i.priority, bug, urgent);
+    const place = filedPlace(i, all, q.order === "filed" && !!q.childrenAtUmbrella);
     return {
+      ...place,
       key: ctx.key(i), name: i.name, sequence: i.sequence_id, lane: ctx.laneOf(i), feature: featureOf(i.labels, ctx.featureLabel), readyAt, age: ageOf(readyAt, now), jump, urgent: i.priority === ctx.priorities.P0,
       priority: jump ? pName(i.priority) : null, starving: readyAt ? staleOf(readyAt, now, ctx.flow.queue.starvingDays) : false,
     };
   });
-  return pullOrder(queued.map((q) => ({ ...q, p0: q.jump && q.urgent }))) as Queued[];
+  return pullOrder(queued.map((x) => ({ ...x, p0: x.jump && x.urgent })), q.order ?? "ready") as Queued[];
 }
 
 /** Whether an Implementing issue waits for a release and so holds no slot (flow.js waitsRelease). */
