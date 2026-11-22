@@ -30,7 +30,7 @@ refuses an app that is not.
 - [devflow](devflow/README.md): a repository's dev flow on a self-hosted Plane board: `bin/pronto connect plane`, the hooks that move issues, and the skills pronto-sprint-plan (the lead's Ready-queue loop), pronto-issue, pronto-bug and pronto-design.
 - [intents](intents/README.md): one-command plumbing behind `bin/pronto`.
 - [journeys](journeys/README.md): user-journey SLOs from the terminal's telemetry.
-- [migrations](migrations/README.md): a live database carried forward by migrations made from pronto's emitted schema: columns paired by their proto field number (a rename, retype or drop refused), pgroll operations for what the replay of the schema never alters.
+- [migrations](migrations/README.md): a live database carried forward by migrations made from pronto's emitted schema: columns paired by their proto field number (a rename, retype or drop refused), pgroll operations for what the replay of the schema never alters, and `ledger.sh` to run them where pgroll cannot.
 - [modular-design](modular-design/README.md): an app's design split into modules, each exported alone, so a change rebuilds only its module.
 - [perf](perf/README.md): frame, interaction and paint timings on readers' devices.
 - [prod-watch](prod-watch/README.md): what production logged that may be a bug, triaged by an agent on a loop.

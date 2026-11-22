@@ -261,6 +261,8 @@ async function main(command: string | undefined, args: string[]) {
       problems.push(...(await rules.verify(exists(SUM) ? read(SUM) : "", summed())).map((p) => `${DIR}/${p}`));
       const names = migrations();
       for (const f of rules.strays(files())) problems.push(`${DIR}/${f}: migrations_ledger.cue embeds every .json here but the snapshot, and this is no migration's name (<YYYYMMDD>_<NNNN>_<name>.json)`);
+      // make never writes one; a migration written by hand may.
+      for (const n of names) if (new TextEncoder().encode(n).length > rules.NAME_BYTES) problems.push(`${DIR}/${n}.json: its name is longer than ${rules.NAME_BYTES} bytes, the most a target without pgroll records a migration's name in (ledger.sh): rename it before any database has had it`);
       const list = rules.diff(before, modelAt());
       // With the model at the snapshot, every declaration left in migrations_spec.cue is one no
       // change reads, which the next make would refuse: it is caught here, in the change that left it.

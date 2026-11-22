@@ -138,6 +138,9 @@ deno run --no-config -A migrations/migrate.ts fold 20261109_0001_retire_ref   # 
 deno run --no-config -A migrations/migrate.ts upgrade             # after a plugin update changes the snapshot's format
 ```
 
+`make`'s name is `<YYYYMMDD>_<NNNN>_<name>`: 63 bytes at most, so a name of 49 at most, and 9999
+migrations a day at most.
+
 | Path in the app | Owner |
 | --- | --- |
 | `migrations/migrate.ts`, `migrations/plan.js`, `migrations/.gitattributes` | regenerated: the driver, its rules, and LF line ends for what the sum covers |
@@ -232,23 +235,32 @@ events. Its changes run in three phases, whatever order the columns come in:
 **A carry, a backfill or a copy is a `DO` block.** It runs only where a row needs moving: one holding
 a value gone, a `NULL` in a column made required, or, in a column added, a row that still holds what
 the replay gave it (`NULL`, or a constant default: a literal, cast or not) and differs from its copy.
-So a fresh database, one copied already, and a row written or seeded with a value of its own run
-nothing. A row written between the replay and the migration with the default itself cannot be told
-from one the replay filled, and takes the copy. Any other default (`now()`, a function) marks no
-row, so that copy touches every row that differs, which is noted. A `json` column is compared as
-`jsonb`. A copy into a required column must give every row a value (`coalesce(placed, 'epoch')`,
-say): one `NULL` fails the migration whole. Seed rows meet it too.
+So a fresh database, one copied already, and a row written or seeded with a value of its own move
+nothing (the block still takes its table's lock: "Locks"). A row written between the replay and the
+migration with the default itself cannot be told from one the replay filled, and takes the copy. Any
+other default (`now()`, a function) marks no row, so that copy touches every row that differs, which
+is noted. A `json` column is compared as `jsonb`. A copy into a required column must give every row a
+value (`coalesce(placed, 'epoch')`, say): one `NULL` fails the migration whole. Seed rows meet it too.
 
 **Triggers.** A machine's column is copied with its trigger off, as a copy is no transition, and a
 backfill or a carry may name any other trigger on its table, an app's own guard too. A block turns
-off only those that exist and are on when it runs, and puts each back in the mode it had. A block
-that turns triggers off takes its table's `ACCESS EXCLUSIVE` lock first, so it never climbs locks
-against an app transaction that read the table and then writes it.
+off only those that exist and are on when it runs, and puts each back in the mode it had.
+
+**Locks.** Every block takes its table's `ACCESS EXCLUSIVE` lock first, before it looks for a row to
+move: what it looks at is what it moves, as an app's write waits for the migration, and it never climbs
+from a lighter lock against an app transaction that read the table and then writes it (a deadlock).
+Across tables a deadlock remains: a migration that moves rows of two tables locks the second while it
+holds the first, and an app transaction that read the second and then writes the first meets it the
+other way round. Postgres ends one of them; when it ends the migration, the whole migration rolls back
+and the release fails, with nothing half done. A row written once the migration commits, by code that
+does not write the new column yet, is the window "Limits" names, which no lock closes.
 
 **Checks.** Postgres checks every check on a row it updates, even one `NOT VALID`, and the replay
 restates every check `NOT VALID`. So a row written before a check was restated, on any of its
 columns, would stop the move. The block lifts every check on the table around the update and puts
-each back as the database held it, `NOT VALID`:
+each back as the database held it (`pg_get_constraintdef`): one `NOT VALID`, as the replay leaves it,
+`NOT VALID`; one validated, validated again over every row, so a moved row that breaks it stops the
+migration instead of committing. Like Postgres, this takes a check's condition to be immutable:
 - a carry also lifts its own column's check, since a database that skipped releases already holds the
   newest check from the replay, and an earlier carry's destination (one a later migration carries on)
   is outside it;
@@ -274,11 +286,54 @@ Folding old migrations keeps this short.
 This is how the plugin keeps pronto's rule that the two paths, initdb and the ledger, do not claim the
 same thing: initdb and the replay add, and a migration only alters what an earlier model left.
 
+### Where pgroll cannot run
+
+pgroll's runner calls `pgroll init` at every run, and that creates two event triggers, which only a
+superuser may create (or a login a managed Postgres grants that right through a role of its own). A
+release target whose migrate login holds neither can still run the ledger, because every migration
+this plugin writes is one raw SQL operation. Two files do it, with nothing of any target in them:
+
+- **`ledger.py <pgroll dir> <out dir>`**, where the target's image is built: each migration of the
+  app's ledger (pronto's `code.state.migrations`, one JSON each) as `<name>.sql`, its operations' `up`
+  in order. A migration with an operation that is not raw SQL, or one marked `onComplete` (which
+  pgroll runs after the others), stops the build. A `.sql` in `<out dir>` that no migration wrote this
+  run, such as one a `rebase` renamed, is removed, since `ledger.sh` runs every one it finds.
+- **`ledger.sh apply|record <dir> <schema>.<type>`**, where the target migrates, with libpq's
+  variables naming the database, a Postgres 14 or later. Its login needs `USAGE` and `CREATE` on the
+  record's schema, and owns the record it makes there: a record another role made stops the run.
+  `apply` runs after the replay, `record` on a database initdb has just built. Each migration goes
+  through `psql`, which reads a `\` command or a `:name` variable outside quotes, where pgroll sends
+  the SQL as written; the SQL a plan writes has neither.
+
+They keep what pgroll's runner gives:
+- **After the replay**, never instead of it.
+- **Each migration once, in name order** (byte order), in one transaction with its record, so one
+  that fails leaves neither. A short lock timeout, and three tries, ride out live traffic.
+- **Recorded by its whole name**, as a label of an enum type of the target's own. The day and count
+  alone are not enough: two branches that each made a migration the same day share them until `rebase`
+  renumbers one, and a database that had one branch's would skip the other's. A label holds 63 bytes,
+  which is why `make` refuses a longer name and the lint flags one written by hand (`plan.js`
+  `NAME_BYTES`, the one place the limit is written). `ledger.sh` refuses one that got past both
+  before it runs any migration, at the length the database reports (`max_identifier_length`), since
+  Postgres compares a longer name by those first bytes alone.
+- **A migration that sorts before one the database has had is refused**, as pgroll's runner refuses
+  it: it was made without that one's change. `rebase` names it after. It is compared with the
+  migrations the build holds, so on a database several builds share, a branch's migration that main
+  never took does not refuse every release of main after it.
+- **One run at a time**: an advisory lock, held by a session of the run's own until it ends.
+
+A database built new records every migration without running one (`record`): initdb gave it the
+latest model, so each would only relax what is relaxed, carry no row and tighten to a model the latest
+restates. The seed rows are the exception above: a target whose seed holds a value an old migration
+carries away runs the migrations instead.
+
 ## Limits
 
-- **The target must replay the emitted schema.** Additions are the replay's. A database carried only
-  by its ledger would need the additions as migrations too, and pronto's emitter, not this plugin,
-  writes a table's policies, grants and publication.
+- **The target must replay the emitted schema, then run the ledger.** Additions are the replay's. A
+  database carried only by its ledger would need the additions as migrations too, and pronto's
+  emitter, not this plugin, writes a table's policies, grants and publication. A target that replays
+  and skips the ledger reports success and leaves every change in the first table of "Why" undone: a
+  retired column keeps its `NOT NULL`, and the first insert that no longer writes it fails.
 - **k8s does not replay `010_machines.sql`.** On k8s, a machine's new states and trigger reach only a
   fresh database. A carry to the new states fails against the old check, and the old chart may refuse
   a move out of a removed state. Closing that is k8s's job, as gcp does.
@@ -299,10 +354,11 @@ same thing: initdb and the replay add, and a migration only alters what an earli
   before then that a live database still holds `NOT NULL`. The snapshot starts from the model, not
   from the database.
 - **Some things are left as they are:**
-  - no constraint is validated: a check stays `NOT VALID` as the replay leaves it, and a reference is
-    added `NOT VALID`;
+  - no `NOT VALID` constraint is validated: a check stays `NOT VALID` as the replay leaves it, and a
+    reference is added `NOT VALID` (a check the database held validated, a move validates again over
+    every row: "Checks");
   - no index is built `CONCURRENTLY`;
-  - a name longer than Postgres's 63 bytes is not matched.
+  - a constraint or index name longer than Postgres's 63 bytes is not matched.
 
 ## The snapshot's format
 
@@ -326,11 +382,23 @@ if that is the model at the commit exactly. Then it sums it again.
   - the names a migration dropped;
   - the copy into a column added, the note on a volatile default, and a declaration no change reads;
   - a kind with no rule, and each op's names against what `droppedBy` reads;
-  - the migration, its name and the strays, the sum with a fold, the snapshot's format and its
-    upgrade.
-- The SQL a plan writes is run on Postgres by hand (CI has none): each block on rows that break an
-  unrelated `NOT VALID` check, a second run, a fresh table, triggers in every mode, an app trigger
-  named and not, and a concurrent app transaction against a block that turns triggers off.
+  - the migration, its name (63 bytes at most) and the strays, the sum with a fold, the snapshot's
+    format and its upgrade.
+- The SQL a plan writes is run on Postgres by hand (the unit cases have none): each block on rows that
+  break an unrelated `NOT VALID` check, a second run, a fresh table, triggers in every mode, an app
+  trigger named and not, and a concurrent app transaction against a block, which takes its table's lock
+  first; and each kind of check lifted and put back as it was held (validated, `NOT VALID`,
+  `NO INHERIT`), on a plain, a partitioned and an inherited table, a validated one that a moved row
+  breaks stopping the block with the rows as they were.
+- [`ledger_test.nu`](ledger_test.nu): `ledger.py` and `ledger.sh` against a throwaway Postgres, its
+  server binaries in `PG_BIN` (CI hands it its runner's newest): each migration once, in order, by
+  name, two of one day apart; one sorting before a migration the database had, refused; one of another
+  build, not; `record`; a failing migration leaving nothing, and a name past 63 bytes running none; a
+  run waiting on another's lock, and one stopping once its lock's session ends; a record in a schema
+  named as a keyword; a name unsafe in SQL, a record that is not `<schema>.<type>`, or no database,
+  refused; and `ledger.py`'s SQL, each migration's `up` in order, a stale `.sql` removed, and its
+  refusal of an operation that is not raw SQL, of one marked `onComplete` and of a file with no
+  operations.
 - [`test.nu`](test.nu): the installer and the driver in a fresh example app:
   - `init`, then a lint that refuses a moved model;
   - a `make` that names the carry it needs, then writes one operation;
@@ -342,6 +410,7 @@ if that is the model at the commit exactly. Then it sums it again.
   - two branches that each made a migration, merged: `rebase` remakes the side's after main's, with
     the copy its migration recorded, and the ledger embeds both with nothing to settle;
   - a `.json` in `migrations/` that is no migration, refused;
+  - a name past 63 bytes, refused by `make` and by the lint;
   - `init --from` a git ref, taking the model the ref held.
 
 ```sh
@@ -349,9 +418,11 @@ if that is the model at the commit exactly. Then it sums it again.
 ./saytw --script tools.nu cue vet -c -t package=check ./migrations/export
 deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- migrations
 ./saytw --script tools.nu nu migrations/test.nu
+PG_BIN=<postgres bin> ./saytw --script tools.nu nu migrations/ledger_test.nu
 ```
 
-CI has neither Postgres nor pgroll, so the database runs below were done by hand.
+CI runs them all, `ledger_test.nu` on its runner's Postgres. pgroll is not in CI, so the pgroll runs
+below were done by hand.
 
 ## Measured (2026-11-09)
 

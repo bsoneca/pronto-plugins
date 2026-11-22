@@ -33,7 +33,8 @@ _stageNarrowed: [["Order.fields.5.enum", ["new", "settled"]]]
 
 // A move's block (a carry, a backfill, a copy) on order: it runs only where a row matches, and every
 // check on the table but those kept is lifted around the update and put back as the database held
-// it, NOT VALID. Of `triggers`, those on are turned off around it and put back in their mode.
+// it, NOT VALID or validated. Of `triggers`, those on are turned off around it and put back in their
+// mode. The table's lock comes first, before the block looks for a row.
 _move: {
 	tag:    "$carry$" | "$fill$"
 	where:  string
@@ -51,14 +52,14 @@ _move: {
 		if len(triggers) > 0 {"  pronto_off text[];"},
 		if len(triggers) > 0 {"  pronto_modes text[];"},
 		"BEGIN",
+		"  LOCK TABLE \"public\".\"order\" IN ACCESS EXCLUSIVE MODE;",
 		"  IF EXISTS (SELECT FROM \"public\".\"order\" WHERE \(where)) THEN",
-		if len(triggers) > 0 {"    LOCK TABLE \"public\".\"order\" IN ACCESS EXCLUSIVE MODE;"},
 		if len(triggers) > 0 {"    SELECT array_agg(tgname::text ORDER BY tgname), array_agg(tgenabled::text ORDER BY tgname) INTO pronto_off, pronto_modes FROM pg_trigger WHERE tgrelid = '\"public\".\"order\"'::regclass AND tgname = ANY (ARRAY[\(_names)]) AND tgenabled <> 'D';"},
 		if len(triggers) > 0 {"    \(_eachOff) EXECUTE 'ALTER TABLE \"public\".\"order\" DISABLE TRIGGER ' || quote_ident(pronto_off[pronto_t]); END LOOP;"},
 		"    SELECT array_agg(conname ORDER BY conname), array_agg(pg_get_constraintdef(oid) ORDER BY conname) INTO pronto_lifted, pronto_defs FROM pg_constraint WHERE conrelid = '\"public\".\"order\"'::regclass AND contype = 'c'\(kept);",
 		"    \(_each) EXECUTE 'ALTER TABLE \"public\".\"order\" DROP CONSTRAINT ' || quote_ident(pronto_lifted[pronto_i]); END LOOP;",
 		"    \(update)",
-		"    \(_each) EXECUTE 'ALTER TABLE \"public\".\"order\" ADD CONSTRAINT ' || quote_ident(pronto_lifted[pronto_i]) || ' ' || pronto_defs[pronto_i] || CASE WHEN pronto_defs[pronto_i] LIKE '%NOT VALID' THEN '' ELSE ' NOT VALID' END; END LOOP;",
+		"    \(_each) EXECUTE 'ALTER TABLE \"public\".\"order\" ADD CONSTRAINT ' || quote_ident(pronto_lifted[pronto_i]) || ' ' || pronto_defs[pronto_i]; END LOOP;",
 		if len(triggers) > 0 {"    \(_eachOff) EXECUTE 'ALTER TABLE \"public\".\"order\" ENABLE ' || CASE pronto_modes[pronto_t] WHEN 'A' THEN 'ALWAYS ' WHEN 'R' THEN 'REPLICA ' ELSE '' END || 'TRIGGER ' || quote_ident(pronto_off[pronto_t]); END LOOP;"},
 		"  END IF;",
 		"END \(tag);",
@@ -165,6 +166,8 @@ cases: {
 		}}},
 		{call: "migrations.parseProto", args: ["message A {\n  enum K { X = 0; }\n}\n"], throws: "entities.proto:2: not what pronto emits", why: "an enum is not read as a field"},
 		{call: "migrations.parseProto", args: ["message A {\n  optional string id = 1;\n"], throws: "not closed"},
+		{call: "migrations.parseProto", args: ["message constructor {\n  optional string id = 1;\n}\nmessage toString {\n}\n"], holds: {constructor: {fields: {"1": {name: "id"}}}, toString: {fields: {}}}, why: "a message named as an Object's inherited key is no second one"},
+		{call: "migrations.parseProto", args: ["message A {\n}\nmessage A {\n}\n"], throws: "message A twice"},
 		{call: "migrations.parseProto", args: ["message A {\n  optional string id = 1;\n  optional string other = 1;\n}\n"], throws: "number 1 twice"},
 	]}
 	"the model: the proto names a column, pronto's facts say what it holds, a retired one included, and the machines their states": {suite: "migrations", steps: [
@@ -182,6 +185,37 @@ cases: {
 		}}, why: "an alias is its type (text is string), a column keeps the type and the default 005 writes (status's, a machine's initial state, which the facts do not state), a decimal carries its precision and scale, and an index's name is as Postgres keeps an unquoted one"
 		},
 		{get: "Draft", matches: "^undefined$", why: "an entity with no table is not the database's"},
+	]}
+	"a table or field named as a member every object inherits is read by its own key": {suite: "migrations", steps: [
+		{call: "migrations.model", args: [
+			"message Thing {\n  optional string id = 1;\n  optional string toString = 2;\n}\n",
+			{version: 1, types: _facts.types, entities: Thing: {
+				server: true, table: "constructor", id: "0x03"
+				fields: [
+					{name: "id", ordinal: 1, retired: false, type: "uuid", pk: true, required: true},
+					{name: "toString", ordinal: 2, retired: false, type: "text", pk: false, required: false},
+				]
+				cel: {enums: {}, checks: {toString: "char_length(toString) > 0"}}
+				uniques: []
+			}},
+			{tables: "CREATE TABLE IF NOT EXISTS \"constructor\" (\n  \"id\" uuid PRIMARY KEY,\n  \"toString\" text\n);\n"},
+		], holds: {Thing: {table: "constructor", fields: {"2": {name: "toString", sql: "text", check: "char_length(toString) > 0"}}}}, why: "toString keeps its check, never Object's toString read as its enum"},
+		{get: "Thing.fields.2.enum", matches: "^undefined$", why: "and has no enum"},
+		{call: "migrations.model", args: [
+			"message Thing {\n  optional string id = 1;\n  optional string __proto__ = 2;\n}\n",
+			{version: 1, types: _facts.types, entities: Thing: {
+				server: true, table: "__proto__", id: "0x03"
+				fields: [
+					{name: "id", ordinal: 1, retired: false, type: "uuid", pk: true, required: true},
+					{name: "__proto__", ordinal: 2, retired: false, type: "text", pk: false, required: false},
+				]
+				cel: {enums: {}, checks: {}}
+				uniques: []
+			}},
+			{tables: "CREATE TABLE IF NOT EXISTS \"__proto__\" (\n  \"id\" uuid PRIMARY KEY,\n  \"__proto__\" text\n);\n"},
+		], holds: {Thing: {table: "__proto__", fields: {"2": {name: "__proto__", sql: "text"}}}}, why: "a table and a column named __proto__ are kept as keys, never set as an object's prototype, so the table is found"},
+		{call: "mig.changes", args: [_order & {Order: indexes: constructor: {cols: ["status"], unique: true}}, [["Order.indexes.constructor", null]]], expect: ["index-dropped Order index constructor"], why: "an index named constructor that is gone is dropped, never read as Object's constructor still there"},
+		{call: "mig.plan", args: [_order & {Order: indexes: constructor: {cols: ["status"], unique: true}}, [["Order.indexes.constructor", null]]], holds: {refused: []}, why: "and planned"},
 	]}
 	"a proto, facts and an emitted schema that disagree, or a pronto this does not read, are refused, never guessed": {suite: "migrations", steps: [
 		{call: "migrations.model", args: ["message Order {\n  optional string id = 1;\n  optional string state = 2;\n  reserved 3;\n  reserved \"old\";\n  optional string total = 4;\n  optional string owner = 5;\n}\n", _facts, _sql], throws: "^Order.status: entities.proto has state at 2: run generate$"},
@@ -375,7 +409,7 @@ cases: {
 	"a value gone from an enum is carried, only where a row holds one: what each becomes, or the row's new columns, else it is a need": {suite: "migrations", steps: [
 		{call: "mig.changes", args: [_order, _stageNarrowed], expect: ["enum-narrowed Order.stage"]},
 		{call: "mig.plan", args: [_order, _stageNarrowed], holds: {ops: [], needs: [{at: "Order.stage", declare: "carry.Order.stage"}]}},
-		{call: "mig.sql", args: [_order, _stageNarrowed, _carryValues], expect: [(_move & {tag: "$carry$", where: #""stage" IN ('paid')"#, update: #"UPDATE "public"."order" SET "stage" = CASE "stage" WHEN 'paid' THEN 'settled' END WHERE "stage" IN ('paid');"#}).text], why: "a fresh database, or one carried already, holds no such row and runs nothing; every check on the table is lifted around the move and put back NOT VALID: Postgres checks a row it updates against every check, even one NOT VALID, which a row written before the replay restated it may break, and a database that skipped releases holds a later migration's check, which an earlier carry's destination is outside"},
+		{call: "mig.sql", args: [_order, _stageNarrowed, _carryValues], expect: [(_move & {tag: "$carry$", where: #""stage" IN ('paid')"#, update: #"UPDATE "public"."order" SET "stage" = CASE "stage" WHEN 'paid' THEN 'settled' END WHERE "stage" IN ('paid');"#}).text], why: "a fresh database, or one carried already, holds no such row and runs nothing; every check on the table is lifted around the move and put back as the database held it: Postgres checks a row it updates against every check, even one NOT VALID, which a row written before the replay restated it may break, and a database that skipped releases holds a later migration's check, which an earlier carry's destination is outside"},
 		{call: "mig.sql", args: [_order, _stageNarrowed, {carry: Order: stage: {set: {stage: "'settled'", status: "'open'"}, triggers: ["trg_order_status_machine"]}}], expect: [(_move & {
 			tag:    "$carry$"
 			where:  #""stage" IN ('paid')"#
@@ -444,6 +478,9 @@ cases: {
 		{call: "migrations.nextName", args: [[], "a", "20261109", ["zz_hand"]], throws: "20261109_0001_a sorts before the app's migration zz_hand", why: "no dated name can follow it"},
 		{call: "migrations.nextName", args: [[], "Relax-Ref", "20261109"], throws: "lowercase letters, digits and _", why: "pgroll's ledger takes these names"},
 		{call: "migrations.nextName", args: [[], "0001", "20261109"], throws: "starting with a letter", why: "the name says what the migration does"},
+		{call: "migrations.nextName", args: [[], "relax_ref_and_every_other_column_the_change_touche", "20261109"], throws: "longer than 63 bytes", why: "a target without pgroll records a migration by its name, a label of an enum (migrations/ledger.sh), which holds 63 bytes"},
+		{call: "migrations.nextName", args: [[], "relax_ref_and_every_other_column_the_change_touch", "20261109"], expect: "20261109_0001_relax_ref_and_every_other_column_the_change_touch", why: "63 bytes, the most"},
+		{call: "migrations.nextName", args: [["20261109_9999_full"], "one_more", "20261109"], throws: "holds 9999 migrations already", why: "a five-digit count would make a name isName refuses, outside the sum"},
 		{call: "migrations.nextName", args: [[], "a", "2026-11-09"], throws: "YYYYMMDD"},
 	]}
 	"a migration's name is the day, its count and what it does; every other .json the ledger would embed is a stray": {suite: "migrations", steps: [
