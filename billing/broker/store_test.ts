@@ -130,3 +130,65 @@ Deno.test("postgres store: the statements are the ones that make the operations 
   assertEquals(/^DELETE FROM billing_window WHERE ctid IN \(SELECT ctid .* LIMIT \d+\)$/.test(seen[0]), true, "a take first sweeps a bounded few old windows");
   assertEquals(/^INSERT INTO billing_window .* ON CONFLICT \(name, key\) DO UPDATE SET n = CASE .* RETURNING n$/.test(seen[1]), true, "and counts in one statement");
 });
+
+// A webhook event is claimed by one caller at a time (PRONTO-371's replicas): each store, and the expiry of
+// a lease shown as that store keeps time (the memory one's clock, Postgres's row).
+const claimable: [string, () => Promise<{ s: Store; expire: (kind: string, id: string) => Promise<void> }>][] = [
+  ["memory", () => {
+    let t = 1_000_000;
+    const s = new MemoryStore(() => t);
+    // A lease's end is the clock moving past it.
+    return Promise.resolve({ s, expire: () => { t += 1_000_000; return Promise.resolve(); } });
+  }],
+  ["postgres", async () => {
+    const sql = pglite(new PGlite());
+    const s = new PostgresStore(sql);
+    await s.migrate();
+    return { s, expire: async (kind, id) => { await sql.unsafe(`UPDATE billing_seen SET expires = now() - interval '1 second' WHERE kind = $1 AND id = $2`, [kind, id]); } };
+  }],
+];
+
+for (const [name, make] of claimable) {
+  Deno.test(`${name} store: two claims at once on one event give one claimed and one busy`, async () => {
+    const { s } = await make();
+    const got = await Promise.all([s.claim("stripe event", "evt_1", 120_000), s.claim("stripe event", "evt_1", 120_000)]);
+    assertEquals(got.map((c) => c.state).sort(), ["busy", "claimed"]);
+    assertEquals((await s.claim("stripe event", "evt_other", 120_000)).state, "claimed", "ids are apart");
+    assertEquals((await s.claim("no account", "evt_1", 120_000)).state, "claimed", "kinds are apart");
+  });
+
+  Deno.test(`${name} store: a remembered event is done, a forgotten claim is claimable again`, async () => {
+    const { s } = await make();
+    const first = await s.claim("stripe event", "evt_1", 120_000);
+    assertEquals(first.state, "claimed");
+    await s.remember("stripe event", "evt_1", 7 * 24 * 3600_000);
+    assertEquals((await s.claim("stripe event", "evt_1", 120_000)).state, "done", "after remember");
+    // A stale token cannot undo what was remembered.
+    await s.forget("stripe event", "evt_1", (first as { token: string }).token);
+    assertEquals((await s.claim("stripe event", "evt_1", 120_000)).state, "done", "a claim's token does not forget a remember");
+    const second = await s.claim("stripe event", "evt_2", 120_000);
+    await s.forget("stripe event", "evt_2", (second as { token: string }).token);
+    assertEquals((await s.claim("stripe event", "evt_2", 120_000)).state, "claimed", "after forget(token)");
+  });
+
+  Deno.test(`${name} store: an expired lease is claimable again, and the old claim's token deletes nothing of the new one`, async () => {
+    const { s, expire } = await make();
+    const old = await s.claim("stripe event", "evt_1", 120_000) as { token: string };
+    assertEquals((await s.claim("stripe event", "evt_1", 120_000)).state, "busy");
+    await expire("stripe event", "evt_1");
+    const newer = await s.claim("stripe event", "evt_1", 120_000) as { state: string; token: string };
+    assertEquals([newer.state, newer.token === old.token], ["claimed", false], "a new claim, a new token");
+    await s.forget("stripe event", "evt_1", old.token);
+    assertEquals((await s.claim("stripe event", "evt_1", 120_000)).state, "busy", "the stale token left the newer claim");
+    await s.forget("stripe event", "evt_1", newer.token);
+    assertEquals((await s.claim("stripe event", "evt_1", 120_000)).state, "claimed", "its own token lets go");
+  });
+}
+
+Deno.test("postgres store: claim is one statement that takes only a row nobody holds", async () => {
+  const sql: string[] = [];
+  const fake: Sql = { unsafe: (q) => { sql.push(q.replace(/\s+/g, " ")); return Promise.resolve([{ token: "2026-11-21 10:00:00.123456+00" }]); }, begin: (fn) => fn(fake) };
+  const c = await new PostgresStore(fake).claim("stripe event", "evt", 120_000);
+  assertEquals(c, { state: "claimed", token: "2026-11-21 10:00:00.123456+00" }, "the token is the row's own text, microseconds kept");
+  assertEquals(/^INSERT INTO billing_seen .* ON CONFLICT \(kind, id\) DO UPDATE SET expires = EXCLUDED\.expires WHERE billing_seen\.expires <= now\(\) RETURNING expires::text AS token$/.test(sql[0]), true);
+});

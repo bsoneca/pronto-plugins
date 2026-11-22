@@ -101,6 +101,16 @@ def stage-context [app_dir: string, work: string, dest: string, include: list<st
 	$files | length
 }
 
+# The door's Caddyfile must carry the Dapr guard doorguard splices in (PRONTO-1307): no public prefix may reach a Dapr API
+# path of the sidecar. Verified, never patched: the Caddyfile is generated, so the fix belongs to the app's generate.
+export def verify-door-guard [staged: string] {
+	let file = ($staged | path join docker Caddyfile)
+	if not ($file | path exists) { return }
+	if not ((open --raw $file) | str contains "# PRONTO-1307: no public prefix reaches a Dapr API path of its sidecar") {
+		error make {msg: "docker/Caddyfile lacks the Dapr guard (PRONTO-1307): /img, /blobs, /crud and /electric would proxy /v1.0 paths to the sidecar. Add the doorguard plugin (`bin/pronto-doorguard <app-dir>` in pronto-plugins, then the app's generate) and commit the Caddyfile"}
+	}
+}
+
 # Builds the services' images on the node's buildkitd and pushes them to its registry, tagged `tag`
 # (`release`, a preview's name, or `check`). Answers {<svc>: {tag, digest}}, the database's tag being
 # its Postgres major (CloudNativePG reads it as one). `fwd` is the tunnel's local ports.
@@ -112,6 +122,7 @@ export def images [app_dir: string, node: record, fwd: record, services: list<st
 	try {
 		let staged = ($work | path join app)
 		let count = (stage-context $dir $work $staged $node.build.include)
+		verify-door-guard $staged
 		let kib = (^du -sk $staged | split row "\t" | first | into int)
 		print $"node: (stamp) build context: ($count) files, ($kib) KiB"
 		let compose = (render compose-run $staged --profile "*" config)

@@ -26,13 +26,14 @@ function flowOf(seed) {
     timeZone: 'America/Sao_Paulo',
     roles: { backlog: 'Backlog', refine: 'Refine', ready: 'Ready', implementing: 'Implementing', review: 'Review', merged: 'Merged', live: 'Live', done: 'Done', cancelled: 'Cancelled' },
     states: SPEC,
-    team: seed.team ?? { engineers: 6, sre: 1, architect: 1, product: 1 },
+    team: { featureEngineers: 3, ...(seed.team ?? { engineers: 6, sre: 1, architect: 1, product: 1 }) },
     infra: ['infra'],
     design: ['design'],
     priorities: { P0: { plane: 'urgent' }, P1: { plane: 'high' }, P2: { plane: 'medium' }, P3: { plane: 'low' } },
     queue: { starvingDays: seed.starvingDays ?? 3, mergedDays: 7 },
     stuckHours: 6,
     waitLabel: 'waits-release',
+    featureLabel: 'feature',
   };
   if (seed.suggestions !== false) {
     flow.suggestions = {
@@ -49,7 +50,7 @@ function flowOf(seed) {
 
 /** An in-memory Board of the seed: `inboxMade` (default true) makes the inbox project with its three
  * states (else it is absent, or with Plane's own five when `connect` makes it); `items` the inbox's
- * issues `{seq, state, title, html, created}`; `issues` the board's `{seq, name, state, module, priority, bug, ready, created, completed, moves}` (`ready`
+ * issues `{seq, state, title, html, created}`; `issues` the board's `{seq, name, state, module, priority, bug, feature, ready, created, completed, moves}` (`ready`
  * an ISO time it moved into Ready, `moves` more `{state, at}`; the Ready queue's cases) and `comments` `{html, at}` already on it, `cycles` `{name, issues: [seq]}` that cycles()/cycleIssues() answer, `failMoves` (stateMoves rejects), `failLinks` (links rejects), `nows` (the clock of each status run) and `touches` `{after, seq, state, updated, move}` (what happens to an issue after run `after`: its new state, `updated_at` and a move into it `{state, at}`) and `now` the clock comments are stamped with;
  * `modules` its modules; `failOnce` a write method that throws its first call (`issues` instead: the
  * inbox's list of issues, failing as Plane's 500 does, with a body); `failAfter` a method whose first
@@ -76,10 +77,11 @@ function boardOf(seed) {
   const moves = {};
   if ((seed.issues ?? []).some((i) => i.bug)) labels['p-acme'].push({ id: 'l-bug', name: 'bug' });
   if ((seed.issues ?? []).some((i) => i.wait)) labels['p-acme'].push({ id: 'l-wait', name: 'waits-release' });
+  if ((seed.issues ?? []).some((i) => i.feature)) labels['p-acme'].push({ id: 'l-feature', name: 'feature' });
   for (const i of seed.issues ?? []) {
     issues['p-acme'].push({
       id: `i-acme-${i.seq}`, name: i.name ?? `issue ${i.seq}`, sequence_id: i.seq, state: `s-acme-${i.state ?? 'Backlog'}`, priority: i.priority ?? 'none', project: 'p-acme',
-      created_at: i.created, completed_at: i.completed, updated_at: i.updated ?? '2026-11-01T00:00:00Z', labels: [...(i.bug ? ['l-bug'] : []), ...(i.wait ? ['l-wait'] : [])],
+      created_at: i.created, completed_at: i.completed, updated_at: i.updated ?? '2026-11-01T00:00:00Z', labels: [...(i.bug ? ['l-bug'] : []), ...(i.wait ? ['l-wait'] : []), ...(i.feature ? ['l-feature'] : [])],
     });
     moves[`i-acme-${i.seq}`] = [...(i.ready ? [{ to: 's-acme-Ready', at: i.ready }] : []), ...(i.moves ?? []).map((m) => ({ to: `s-acme-${m.state}`, at: m.at }))];
     if (i.comments) comments[`i-acme-${i.seq}`] = i.comments.map((c) => ({ ...c }));

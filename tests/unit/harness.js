@@ -79,6 +79,19 @@ export async function stepRefused(step) {
   }
 }
 
+// Steps of a scenario marked `production`, held to the schema the same way: the first line of what cue refused, or null.
+export async function productionRefused(steps) {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.copyFile(schema, `${dir}/schema.cue`);
+    await Deno.writeTextFile(`${dir}/app.cue`, `package scenarios\n#Gestures: {}\nscenarios: t: {accepts: [], production: true, actors: {}, steps: ${JSON.stringify(steps)}}\n`);
+    const r = await new Deno.Command(Deno.env.get("CUE") ?? "cue", { args: ["vet", "-c", "."], cwd: dir, stdout: "null", stderr: "piped" }).output();
+    return r.success ? null : new TextDecoder().decode(r.stderr).split("\n")[0];
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
 // siblingFiles on a small repository of two apps: the sibling's brief.md committed, then edited and staged, then committed.
 // Each step reports the blob siblingFiles keys the brief by and the blob HEAD and the index hold for it.
 import { siblingFiles } from "../../harness/files/tests/scenarios/select.ts";

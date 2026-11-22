@@ -318,6 +318,17 @@ export function steps(repo: string, flow: DevFlow): Step[] {
         await p.createLabel((await project(p))!.id, flow.chore, "#a3a3a3");
       },
     },
+    {
+      name: `label ${flow.featureLabel}`,
+      check: async () => {
+        const p = (await need());
+        return (await p.labels((await project(p))!.id)).some((l) => l.name === flow.featureLabel) ? ok() : todo("create it");
+      },
+      apply: async () => {
+        const p = (await need());
+        await p.createLabel((await project(p))!.id, flow.featureLabel, "#2563eb");
+      },
+    },
     // The suggestion inbox, when the repository names one (PRONTO-544).
     ...(flow.suggestions ? inboxSteps(flow, need) : []),
     {

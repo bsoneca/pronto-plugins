@@ -9,6 +9,7 @@ copy by hand from `apps/brawl-chess` (bsoneca/pronto's AGENTS.md, "Tests are dat
 | `tests/unit.ts` | runs an app's unit cases (`tests/unit/*.cue`) as Deno tests, a suite at a time |
 | `tests/unit/select.js` | which suites are cached: their inputs as at their last green run |
 | `tests/unit/schema.cue` | what a unit case may say |
+| `tests/gate/upgrade-from-released.ts` | the last release's database, carried forward for `integrate@local`'s gate (from the runtime that has one, else this copy) |
 | `tests/browser.ts` | the browsers a run launches, shut down however it ends |
 | `tests/lint.ts` | the release guards `test` runs: generated files, the image's files, the schema, the size of a Dockerfile instruction's argument (`run [bytes]`, default 65,536; the app's check passes its own ceiling) |
 | `tests/scenarios.ts` | runs an app's scenarios (`tests/scenarios/*.cue`) in browsers against its door |

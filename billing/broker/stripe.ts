@@ -39,6 +39,10 @@ export type Stripe = <T = Record<string, unknown>>(
   idempotencyKey?: string,
 ) => Promise<T>;
 
+/** No try of a call to Stripe, direct or through the door, waits longer: a webhook's claim on its event
+ * (main.ts EVENT_LEASE_MS) is sized past it. */
+export const CALL_TIMEOUT_MS = 15_000;
+
 /** Which way a call to Stripe goes: straight with the broker's key, or through the airlock's door. */
 export type Route = "direct" | "door";
 /** A client that can say which way its calls go now. A client without it (the stand-in) goes neither way. */
@@ -70,7 +74,7 @@ function throughDoor(door: string, fetcher: typeof fetch): Stripe {
     };
     let answer;
     try {
-      answer = await callDoor(door, request, fetcher);
+      answer = await callDoor(door, request, ((u, init) => fetcher(u, { ...init, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) })) as typeof fetch);
     } catch (e) {
       if (e instanceof DoorError) throw new StripeError(e.status, "airlock", e.message);
       throw e;
@@ -146,6 +150,7 @@ export function stripe(p: { key: string; api?: string; fetcher?: typeof fetch } 
         ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
       },
       ...(method === "POST" ? { body: v2 ? JSON.stringify(params) : query } : {}),
+      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
     });
     const data = await res.json();
     if (!res.ok) throw new StripeError(res.status, data?.error?.code ?? data?.error?.type ?? "error", data?.error?.message ?? `stripe ${res.status}`);

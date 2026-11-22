@@ -1,0 +1,8 @@
+#!/bin/sh
+# Adds or refreshes the door's Dapr guard in a pronto app (doorguard/README.md):
+#   bin/pronto-doorguard <app-dir>
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+cd "$here"
+exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write doorguard/install.ts "$app"

@@ -89,15 +89,26 @@ export function laneOf(modules, infra, design = []) {
   return (modules ?? []).some((m) => (infra ?? []).includes(m)) ? "SRE" : "engineer";
 }
 
+/** Whether an issue carries the feature label (`labelId`, the board's id for it, null when the board has none). */
+export function featureOf(labels, labelId) {
+  return !!labelId && (labels ?? []).includes(labelId);
+}
+
 /** Whether an issue may start (move to Implementing): its lane has `slots`, the lane's issues already
  * Implementing take one each, and an urgent one (P0, `urgent` in the board's own word) starts
- * regardless. */
-export function mayStart(busy, slots, priority, lane, urgent = "urgent") {
+ * regardless. `split`, for the engineer lane, is `{reserved, featureBusy, feature}`: `reserved` of the
+ * slots take only feature issues, `featureBusy` of the busy ones are features, and `feature` says whether
+ * this issue is one. A feature takes any free slot; another issue only one of the slots left open to it. */
+/** @param {{reserved: number, featureBusy: number, feature: boolean} | null} [split] */
+export function mayStart(busy, slots, priority, lane, urgent = "urgent", split = null) {
   if (priority === urgent) return { ok: true, why: "P0: starts past the slots" };
   if (slots === 0) return { ok: false, why: `the team has no ${lane}` };
-  return busy < slots
-    ? { ok: true, why: `${lane} slot ${busy + 1} of ${slots}` }
-    : { ok: false, why: `all ${slots} ${lane} slots are busy` };
+  if (busy >= slots) return { ok: false, why: `all ${slots} ${lane} slots are busy` };
+  if (split && split.reserved > 0 && !split.feature) {
+    const open = slots - Math.min(split.reserved, slots);
+    if (busy - split.featureBusy >= open) return { ok: false, reserved: true, why: `the ${open} ${lane} slots open to any issue are busy; ${slots - open} are kept for feature issues` };
+  }
+  return { ok: true, why: `${lane} slot ${busy + 1} of ${slots}` };
 }
 
 /** P0..P3 as the board's priority, in `priorities` (P to the board's word; Plane's by default). */

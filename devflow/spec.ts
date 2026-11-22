@@ -28,7 +28,7 @@ export interface DevFlow {
   /** Absent in a repository that only reports to a board set up from another (schema.cue). */
   cluster?: { context: string; ssh: string; namespace: string; tunnel: string; apiPort: number };
   token: { kind: "secret-manager"; project: string; secret: string } | { kind: "env"; name: string };
-  team: { engineers: number; sre: number; architect: number; product: number };
+  team: { engineers: number; sre: number; architect: number; product: number; featureEngineers: number };
   infra: string[];
   design: string[];
   architectModel: string;
@@ -40,6 +40,8 @@ export interface DevFlow {
   chore: string;
   /** The board label of a flip issue waiting for the release of its fix (schema.cue). */
   waitLabel: string;
+  /** The board label of a feature issue (schema.cue). */
+  featureLabel: string;
   /** The inbox project beside the board's, when the repository names one (schema.cue #Suggestions). */
   suggestions?: { project: string; name: string; from: string[]; staleDays: number; label: string; states: { name: string; group: string; color: string; means: string }[] };
   states: { name: string; group: string; color: string; means: string }[];

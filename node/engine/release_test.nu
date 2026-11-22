@@ -53,7 +53,7 @@ esac
 	r#'
 #!/bin/sh
 d="$(dirname "$0")/.."
-[ -f "$d/ssh_started" ]
+[ -f "$d/ssh_started" ] || [ -f "$d/state/portforward.pid" ]
 '# | str trim --left | save -f ($d | path join bin nc)
 	r#'
 #!/bin/sh
@@ -111,10 +111,27 @@ if [ -f "$d/crane_nopg" ]; then echo '{"config":{"Env":["PATH=/bin"]}}'; else ec
 #!/bin/sh
 d="$(dirname "$0")/.."
 case "$*" in
-  *"/crud/v1.0/metadata"*)
+  *"/v1.0"*)
     out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+    echo "$*" >> "$d/door_curl.log"
     if [ -f "$d/host_unreachable" ]; then printf 000; exit 6; fi
-    if [ -f "$d/metadata_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21","components":[]}' > "$out"; printf 200; exit 0; fi
+    if [ -f "$d/probe_502" ]; then echo "bad gateway" > "$out"; printf 502; exit 0; fi
+    if [ -f "$d/probe_timeout" ]; then printf 000; exit 28; fi
+    case "$*" in
+      *"/img/v1.0/metadata"*) if [ -f "$d/img_500" ]; then echo 'ERR_DIRECT_INVOKE failed to resolve address' > "$out"; printf 500; exit 0; fi ;;
+      *"/blobs/v1.0-alpha1/metadata"*) if [ -f "$d/blobs_alpha_proxied" ]; then echo 'upstream' > "$out"; printf 403; exit 0; fi ;;
+    esac
+    case "$*" in
+      *"/crud/v1.0/metadata"*) if [ -f "$d/metadata_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21","components":[]}' > "$out"; printf 200; exit 0; fi ;;
+      *"/invoke/"*) if [ -f "$d/invoke_by_path" ]; then echo ok > "$out"; printf 200; exit 0; fi ;;
+      *"/img/v1.0/metadata"*) if [ -f "$d/img_open" ]; then echo '{"id":"imgproxy","runtimeVersion":"1.16.21"}' > "$out"; printf 200; exit 0; fi ;;
+    esac
+    case "$*" in
+      *"--path-as-is"*) echo "$*" >> "$d/path_as_is.log"; if [ -f "$d/dotdot_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21"}' > "$out"; printf 200; exit 0; fi ;;
+    esac
+    case "$*" in
+      *"/crud/"*) echo '{"code":"PGRST125","message":"Invalid path specified in request URL"}' > "$out"; printf 404; exit 0 ;;
+    esac
     echo "404 page not found" > "$out"; printf 404; exit 0 ;;
 esac
 if [ -f "$d/registry_dead" ]; then printf 000; exit 7; fi
@@ -204,6 +221,7 @@ def main [] {
 	test_sops_keeps_secrets_alone_and_no_backup_credentials_for_a_preview
 	test_a_release_builds_on_the_nodes_buildkitd_and_pushes_to_its_registry
 	test_the_build_context_is_the_tree_git_sees
+	test_the_door_image_is_built_only_with_the_dapr_guard
 	test_untracked_secret_looking_files_are_not_staged
 	test_build_include_stages_the_ignored_files_it_names
 	test_check_build_pushes_under_check_and_writes_nothing_to_the_cluster
@@ -782,6 +800,24 @@ def test_the_build_context_is_the_tree_git_sees [] {
 	rm -rf $w.dir
 }
 
+def test_the_door_image_is_built_only_with_the_dapr_guard [] {
+	print "test a build refuses a docker/Caddyfile without the doorguard block, naming the plugin, and accepts one with it..."
+	let w = (sandbox)
+	mkdir ($w.app | path join docker)
+	"(app) {\n  handle /img/* {\n    respond 200\n  }\n}\n" | save -f ($w.app | path join docker Caddyfile)
+	let bad = (in-world $w $release_nu --app $w.app --check --build)
+	assert ($bad.exit_code != 0) "a Caddyfile without the guard fails the build"
+	assert (has $bad.stderr "lacks the Dapr guard") $bad.stderr
+	assert (has $bad.stderr "doorguard") $bad.stderr
+	"(app) {\n  # PRONTO-1307: no public prefix reaches a Dapr API path of its sidecar\n  @daprapi path_regexp daprapi ^/(crud|img|blobs|electric)/v1\\.0(-alpha1)?(/|$)\n  handle @daprapi {\n    respond 404\n  }\n  handle /img/* {\n    respond 200\n  }\n}\n" | save -f ($w.app | path join docker Caddyfile)
+	let ok = (in-world $w $release_nu --app $w.app --check --build)
+	assert equal $ok.exit_code 0 $"($ok.stdout)\n($ok.stderr)"
+	rm -rf ($w.app | path join docker)
+	let none = (in-world $w $release_nu --app $w.app --check --build)
+	assert equal $none.exit_code 0 "an app with no Caddyfile is not asked for a guard"
+	rm -rf $w.dir
+}
+
 def test_check_build_pushes_under_check_and_writes_nothing_to_the_cluster [] {
 	print "test --check --build builds under the tag check, dry-runs with the real digests and writes nothing to the cluster..."
 	let w = (sandbox)
@@ -1235,7 +1271,7 @@ def test_a_deferred_prune_exits_four [] {
 }
 
 def test_the_door_must_not_answer_the_dapr_api [] {
-	print "test a release fails when the door answers the Dapr sidecar's metadata, passes on a 404, and says so when the host does not answer..."
+	print "test a release fails when the door answers the Dapr sidecar's metadata, passes on PostgREST's 404, and fails on a curl failure, a timeout or a 502..."
 	let w = (sandbox)
 	let ok = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert equal $ok.exit_code 0 $"($ok.stdout)($ok.stderr)"
@@ -1245,18 +1281,73 @@ def test_the_door_must_not_answer_the_dapr_api [] {
 	let caddy_at = ($log | enumerate | where {|e| ($e.item =~ "^apply .*Deployment/aprende-caddy") and not ($e.item | str contains "--dry-run") } | get index)
 	assert (($guard_at | length) > 0 and ($caddy_at | length) > 0) $"both are applied: ($log | str join '; ')"
 	assert (($guard_at | first) < ($caddy_at | first)) "the guard Configuration comes before the caddy Deployment"
-	"" | save -f ($w.dir | path join host_unreachable)
-	let unreach = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
-	assert equal $unreach.exit_code 0 $"($unreach.stdout)($unreach.stderr)"
-	assert (has $unreach.stderr "so the door's Dapr API was not checked") $unreach.stderr
-	rm -f ($w.dir | path join host_unreachable)
+	# the probes dial the node's ingress through a port-forward to the Gateway's Envoy Service, plain HTTP, the public Host
+	let door_log = ($w.dir | path join door_curl.log | open --raw | lines)
+	assert (($door_log | length) == 11) $"eleven probes: ($door_log | length)"
+	assert ($door_log | all {|l| ($l | str contains "http://127.0.0.1:") and ($l | str contains "-H Host: ")}) ($door_log | str join "\n")
+	assert (not ($door_log | any {|l| $l | str contains "https://" })) "no probe uses https or DNS"
+	assert (calls $w | any {|c| $c | str starts-with "get service -n envoy-gateway-system -l gateway.envoyproxy.io/owning-gateway-name=aprende-gateway,gateway.envoyproxy.io/owning-gateway-namespace=aprende" }) "the Service is found by the Gateway's owning labels"
+	assert (open --raw ($w.state | path join portforward.args) | str contains "port-forward -n envoy-gateway-system service/envoy-aprende-gateway") "the forward goes to that Service"
+	assert (not ($w.state | path join portforward.pid | path exists)) "the port-forward is killed: no pid file is left"
+	# a curl failure, a timeout and a 502 each fail the release, naming the probe, and the forward is killed all the same
+	for fail in [host_unreachable probe_timeout probe_502] {
+		"" | save -f ($w.dir | path join $fail)
+		let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+		assert ($r.exit_code != 0) $"($fail) fails the release"
+		assert (has $r.stderr "so the door cannot be certified") $"($fail): ($r.stderr)"
+		assert (not ($w.state | path join portforward.pid | path exists)) $"($fail): the port-forward is killed"
+		rm -f ($w.dir | path join $fail)
+	}
+	# on the node the Gateways of every app are merged into one Service of the GatewayClass: the door check falls back to it
+	"" | save -f ($w.state | path join shared_gateway)
+	rm -f ($w.state | path join calls.jsonl)
+	let shared = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $shared.exit_code 0 $"($shared.stdout)($shared.stderr)"
+	assert (open --raw ($w.state | path join portforward.args) | str contains "port-forward -n envoy-gateway-system service/pronto-gateway") "the forward goes to the GatewayClass's shared Service"
+	assert (calls $w | any {|c| $c | str starts-with "get service -n envoy-gateway-system -l gateway.envoyproxy.io/owning-gatewayclass=eg" }) "found by the GatewayClass label"
+	rm -f ($w.state | path join shared_gateway)
+	# a forward that cannot start, or a Gateway with no data-plane Service, fails too
+	for fail in [port_forward_fail no_gateway_service] {
+		"" | save -f ($w.state | path join $fail)
+		let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+		assert ($r.exit_code != 0) $"($fail) fails the release"
+		rm -f ($w.state | path join $fail)
+		assert (not ($w.state | path join portforward.pid | path exists)) $"($fail): no pid file is left"
+	}
+	# a preview with no public host of its own is skipped: nothing is looked up, nothing forwarded
+	rm -f ($w.state | path join calls.jsonl)
+	let skipped = (in-world $w -c (script $w $"(inputs $w) check-door \($node | upsert preview 'nohost' | upsert hosts {production: 'x.example.com'}\) 'app-gateway'"))
+	assert equal $skipped.exit_code 0 $"($skipped.stdout)($skipped.stderr)"
+	assert (not ((calls $w) | any {|c| ($c | str starts-with "port-forward") or ($c | str starts-with "get service") })) "a preview without a host asks for nothing"
 	"" | save -f ($w.dir | path join metadata_open)
 	rm -f ($w.state | path join calls.jsonl)
 	let open = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
 	assert ($open.exit_code != 0) "the sidecar's metadata fails the release"
-	assert (has $open.stderr "the door answers the Dapr sidecar's own API") $open.stderr
+	assert (has $open.stderr "the door reaches the Dapr API") $open.stderr
 	assert ((calls $w) | any {|c| $c | str starts-with "rollout undo" }) "and the Deployments of this run are rolled back"
 	assert (has $ok.stdout "the door's Dapr API is closed") $ok.stdout
+	# the probes also send the paths that would reach a service or the sidecar through the prefix, two of them as is
+	assert (($w.dir | path join path_as_is.log | open --raw | lines | length) >= 2) "the `..` probes are sent with --path-as-is"
+	# PRONTO-1307: a Dapr API path under /img or /blobs is the door's own 404; a 5xx from Dapr, or any proxied answer, fails
+	assert (($w.dir | path join door_curl.log | open --raw | lines | where {|l| $l | str contains "/img/v1.0-alpha1/metadata" } | length) >= 1) "the -alpha1 probes are asked"
+	assert (($w.dir | path join door_curl.log | open --raw | lines | where {|l| $l | str contains "/blobs/v1.0-alpha1/metadata" } | length) >= 1) "the blobs -alpha1 probe is asked"
+	for case in [[file text]; [img_500 "answered 500"] [blobs_alpha_proxied "not the door's own 404"]] {
+		rm -f ($w.dir | path join metadata_open)
+		"" | save -f ($w.dir | path join $case.file)
+		let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+		assert ($r.exit_code != 0) $"($case.file) fails the release"
+		assert (has $r.stderr $case.text) $"($case.file): ($r.stderr)"
+		rm -f ($w.dir | path join $case.file)
+	}
+	# each other leak fails the release too, naming the path
+	for leak in [[file path]; [invoke_by_path "/crud/v1.0/invoke/caddy/method/health"] [dotdot_open "/crud/x/../v1.0/invoke/caddy/method/health"] [img_open "/img/v1.0/metadata"]] {
+		rm -f ($w.dir | path join metadata_open)
+		"" | save -f ($w.dir | path join $leak.file)
+		let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+		assert ($r.exit_code != 0) $"($leak.file) fails the release"
+		assert (has $r.stderr "the door reaches the Dapr API") $"($leak.file): ($r.stderr)"
+		rm -f ($w.dir | path join $leak.file)
+	}
 	rm -rf $w.dir
 }
 

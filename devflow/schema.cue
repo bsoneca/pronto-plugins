@@ -49,6 +49,10 @@ devFlow: #DevFlow
 		sre:       *1 | (int & >=0)
 		architect: *1 | (int & >=0)
 		product:   *1 | (int & >=0)
+		// How many of the engineer slots take only feature issues (the label `featureLabel`); the others take any
+		// engineer issue. Bugs and security fixes cannot fill every lane while features wait (the owner, 2026-11-21).
+		// More than the engineers is as many as the engineers.
+		featureEngineers: *3 | (int & >=0)
 	}
 	// The modules an SRE builds: the cloud's configuration (infra/) and the nodes. Made beside a
 	// module per app.
@@ -89,6 +93,8 @@ devFlow: #DevFlow
 	// The board label of an Implementing flip issue that waits for the release holding its fix: it holds no
 	// slot (PRONTO-666) until the release clears it.
 	waitLabel: *"waits-release" | string
+	// The board label of a feature issue: one of the slots the team reserves for them (team.featureEngineers).
+	featureLabel: *"feature" | string
 	// An inbox project beside the board's, where an app files what its players suggest (PRONTO-544).
 	// Nothing in the loop reads it: the owner approves a suggestion by moving it to Refine, or rejects
 	// it by moving it to Cancelled, and `pronto-devflow approve` files an approved one as an issue of
