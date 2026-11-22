@@ -8,7 +8,7 @@
 // text: the lock renamed away turns out to hold that pid, as when another run replaced it). The result is the outcome, or the thrown message, the
 // lock's pid file (read through a link) and kind as they end, `linkedWhole` (every symlink onto the lock pointed at a directory already holding a
 // pid) and `madeLockDir` (the lock itself was ever made empty, with mkdir).
-import { lockAcquire, lockRelease, aliveFromKill, previewRecordStop } from '../../release-cron/cron.js';
+import { lockAcquire, lockRelease, aliveFromKill, previewRecordStop, previewRecorded, previewRecord } from '../../release-cron/cron.js';
 
 const err = (code, msg) => Object.assign(new Error(`${code}: ${msg}`), { code });
 const dirOf = (p) => p.slice(0, p.lastIndexOf('/'));
@@ -46,6 +46,7 @@ function fs(init, fail, path) {
       if (p === path && !nodes.has(`${dirOf(p)}/${target}/pid`)) st.linkedWhole = false;
       nodes.set(p, { link: target, mtime: st.t });
     },
+    link: (a, b) => { check('link', a); const x = nodes.get(res(a)); if (!x) throw err('ENOENT', a); if (nodes.has(res(b, false))) throw err('EEXIST', b); nodes.set(res(b, false), { ...x }); },
     unlink: (p) => { check('unlink', p); const q = res(p, false); if (!nodes.has(q)) throw err('ENOENT', p); nodes.delete(q); },
     rename: (a, b) => {
       check('rename', a);
@@ -99,3 +100,30 @@ export function release(c = {}) {
 
 // The preview record's stop: `err` the read's error code (null when it read), `text` the content.
 export const preview = (err, text) => previewRecordStop(err, text, 'state/lock.preview');
+
+// The release preview under its record (cron.js previewRecorded) on the same file system: `existing` a record already there, `up`/`down` the exits of
+// the two commands, `throwAfterUp` the run killed after `up` (the body never reaches its `down`), `fail` the system's errors. `order` is what happened
+// in sequence, `recordedBeforeUp` whether the record stood when `up` started; `record` is the record's state at the end ("kept", "removed" when there
+// is none) and `next` what the next run that takes the lock is told of it (previewRecordStop).
+export async function previewCycle(c = {}) {
+  const { existing = null, up = 0, down = 0, throwAfterUp = false, fail = [], pid = 500 } = c;
+  const path = 'state/lock.preview';
+  const f = fs({ dirs: { state: 0 }, files: existing === null ? {} : { [path]: existing } }, fail, 'state/lock');
+  Object.assign(f.io, { pid, uuid: () => `u${++f.st.n}` });
+  const order = [];
+  let recordedBeforeUp = null, threw = null;
+  const pv = { up: ['mise', 'run', 'up'], down: ['mise', 'run', 'down'] };
+  try {
+    await previewRecorded(f.io, path, previewRecord(pv, '/w/app', pid, 'at'), async () => {
+      await Promise.resolve(); // `up` is a child process in the driver
+      order.push('up'); recordedBeforeUp = f.nodes.has(path);
+      if (throwAfterUp) throw new Error('killed');
+      order.push('down');
+      return { downCode: down, upCode: up };
+    });
+  } catch (e) { threw = e.message; }
+  const rec = f.nodes.get(path);
+  let next = null;
+  if (rec) next = previewRecordStop(null, rec.text, path);
+  return { order, recordedBeforeUp, record: rec ? 'kept' : 'removed', threw, next, stray: [...f.nodes.keys()].some((k) => k.endsWith('.tmp')) };
+}
