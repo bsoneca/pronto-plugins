@@ -15,9 +15,9 @@
 // provider (core.ts). Hydra then holds the tenant to them. The subject is the
 // broker's pairwise one, under the same secret, so a person keeps the subject
 // each application already linked.
-import { Refused, randomToken, verifyIdToken } from "../oidc.ts";
+import { Refused, randomToken, sha256url, verifyIdToken } from "../oidc.ts";
 import { callbackOf, emailOf, learnsMore, openInBrowserBody, pairwiseKey, pairwiseSubject, profileOf, providerScope, sectorOf, sectorsOf, signInFlow, startOf, tenantOf, webviewOf } from "../broker/core.ts";
-import { esc, google, hmacKey, json, page, type Provider, seal, unseal } from "../broker/main.ts";
+import { askedFlag, esc, google, hmacKey, json, page, type Provider, seal, unseal } from "../broker/main.ts";
 import { fakeGoogle } from "./fake.ts";
 import { phoneConfig, phoneUpstream } from "../broker/phone.ts";
 
@@ -53,6 +53,7 @@ export async function front(p: {
   const sectors = p.sectors ?? new Map<string, string>();
   const stateKey = await hmacKey(p.secret, "hydra login round trip");
   const callback = (provider: string) => `${issuer}/callback/${provider}`;
+  const verifiers = new Map<string, string>();
 
   async function admin(method: string, path: string, body?: unknown): Promise<Response> {
     return await fetcher(`${p.hydra.admin}/admin${path}`, {
@@ -136,6 +137,17 @@ export async function front(p: {
       });
       return go(redirect_to as string);
     }
+    // A provider with its own flag (Facebook's): asked of the tenant first; off, missing or unreadable, no one is sent to it (broker/main.ts authorize).
+    if (provider.flag !== undefined) {
+      let on = false;
+      try { on = await askedFlag(provider.flag, fetcher)(tenant); } catch (e) { console.error(`sign-in for ${tenant}: ${(e as Error).message}`); }
+      if (!on) {
+        const { redirect_to } = await adminJson("PUT", `/oauth2/auth/requests/login/reject?login_challenge=${encodeURIComponent(challenge)}`, {
+          error: "unauthorized_client", error_description: `${name} is not on for ${tenant}`,
+        });
+        return go(redirect_to as string);
+      }
+    }
     // Whether the tenant asked for the person's name and picture, which only then the provider is asked for.
     const asked = (r.requested_scope as string[]) ?? [];
     const sp = asked.includes("profile");
@@ -159,10 +171,19 @@ export async function front(p: {
     if (!leg) return page("Sign-in expired", `<h1>This sign-in expired</h1><p>Go back to the app and start again.</p>`, 400);
     const provider = providers.get(leg.p as string)!;
     const to = new URL(provider.authUrl);
-    to.search = new URLSearchParams({
+    const dialog: Record<string, string> = {
       client_id: provider.clientId, redirect_uri: callback(provider.name), response_type: "code",
-      scope: providerScope({ profile: leg.sp === true, email: leg.se === true }), state: url.searchParams.get("leg")!, nonce: leg.pn as string, prompt: "select_account",
-    }).toString();
+      scope: provider.scope ?? providerScope({ profile: leg.sp === true, email: leg.se === true }), state: url.searchParams.get("leg")!,
+      ...(provider.claims ? {} : { nonce: leg.pn as string, prompt: "select_account" }),
+    };
+    if (provider.pkce) {
+      // PKCE toward the provider, as the broker's: the verifier waits under the leg's id, here in this process (the local front is one).
+      const verifier = randomToken(32);
+      verifiers.set(`${provider.name}:${leg.pn as string}`, verifier);
+      dialog.code_challenge = await sha256url(verifier);
+      dialog.code_challenge_method = "S256";
+    }
+    to.search = new URLSearchParams(dialog).toString();
     return go(to.toString());
   }
 
@@ -184,16 +205,25 @@ export async function front(p: {
       grant_type: "authorization_code", code: url.searchParams.get("code") ?? "", client_id: provider.clientId,
       ...(provider.clientSecret ? { client_secret: provider.clientSecret } : {}), redirect_uri: callback(provider.name),
     });
+    if (provider.pkce) {
+      const verifier = verifiers.get(`${name}:${leg.pn as string}`);
+      verifiers.delete(`${name}:${leg.pn as string}`);
+      if (verifier === undefined) return await refuse(`${name}'s callback has no verifier waiting`);
+      form.set("code_verifier", verifier);
+    }
     const exchanged = provider.exchange ? await provider.exchange(form) : await fetcher(provider.tokenUrl, {
       method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form,
     });
     if (!exchanged.ok) return await refuse(`${name}'s token exchange answered ${exchanged.status}: ${await exchanged.text()}`);
     let claims: Record<string, unknown> & { sub: string };
     try {
-      const { id_token } = await exchanged.json();
-      claims = await verifyIdToken(String(id_token ?? ""), {
-        alg: "RS256", issuers: provider.issuers, audience: provider.clientId, nonce: leg.pn as string, keys: provider.keys,
-      });
+      if (provider.claims) claims = await provider.claims(exchanged, { profile: leg.sp === true, pn: leg.pn as string });
+      else {
+        const { id_token } = await exchanged.json();
+        claims = await verifyIdToken(String(id_token ?? ""), {
+          alg: "RS256", issuers: provider.issuers, audience: provider.clientId, nonce: leg.pn as string, keys: provider.keys,
+        });
+      }
     } catch (e) {
       if (!(e instanceof Refused)) throw e;
       return await refuse(`${name}'s id token refused: ${e.message}`);
@@ -268,6 +298,15 @@ if (import.meta.main) {
     providers.push(fake.provider);
     routes.push(fake.handle);
     console.error("broker: no Google client, so it signs in test people (hydra/fake.ts)");
+  }
+  // The stand-in for Facebook, as for Google: asked for by name, only on the developer's own machine (hydra/fake_facebook.ts).
+  if (env("BROKER_FAKE_FACEBOOK") === "1") {
+    if (new URL(issuer).hostname !== "localhost") throw new Error(`BROKER_FAKE_FACEBOOK is for a localhost broker, not ${issuer}`);
+    const { fakeFacebook } = await import("./fake_facebook.ts");
+    const fake = fakeFacebook(issuer);
+    providers.push(fake.provider);
+    routes.push(fake.handle);
+    console.error("broker: Facebook signs in test people (hydra/fake_facebook.ts)");
   }
   // The phone, where the launch configured it (broker/phone.ts), against the Firebase Auth emulator
   // on a developer's machine (PHONE_EMULATOR) or the operator's project.

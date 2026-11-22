@@ -30,12 +30,14 @@ if [ -f "$env_file" ]; then
 	set +a
 fi
 if [ -z "${GOOGLE_CLIENT_ID:-}" ]; then BROKER_FAKE_GOOGLE=1; fi
+# Facebook, as Google: a test person signs in unless the operator's Meta app is configured (an app that offers it asks for it by name).
+BROKER_FAKE_FACEBOOK=1
 BROKER_ISSUER=$issuer
 PORT=$port
 # A launch's own secrets: a subject it vouches for is a test's, and Hydra's
 # keys live as long as the process.
 BROKER_SECRET=${BROKER_SECRET:-pronto-identity-local-launch-secret-0000}
-export BROKER_ISSUER PORT BROKER_SECRET BROKER_FAKE_GOOGLE
+export BROKER_ISSUER PORT BROKER_SECRET BROKER_FAKE_GOOGLE BROKER_FAKE_FACEBOOK
 HYDRA_PUBLIC=$hydra_public
 HYDRA_ADMIN=$hydra_admin
 export HYDRA_PUBLIC HYDRA_ADMIN
