@@ -98,6 +98,8 @@ export function service(s: Settings) {
   async function rpc(fn: string, auth: string, args: Record<string, unknown> = {}): Promise<Response> {
     return await fetcher(`${crud}/rpc/${fn}`, {
       method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: JSON.stringify(args),
+      // A write that hangs must fail (a TimeoutError is no NotReady, so a "fail" verdict), never keep health at 200 and stall the loop.
+      signal: AbortSignal.timeout(30_000),
     });
   }
   const asService = (fn: string, args: Record<string, unknown>) => rpc(fn, `Bearer ${s.serviceJwt}`, args);
@@ -358,7 +360,8 @@ export function service(s: Settings) {
       const notReady = e instanceof NotReady;
       if (grantVerdict(served, sinceStartMs, notReady) === "fail") {
         grantsError = (e as Error).message;
-        console.error(`billing: grants not written: ${grantsError}`);
+        // The word "error" is what the log shipper reads a line's level by: without it this line is counted as info and no alert sees it.
+        console.error(`billing: error: grants not written (a revoked grant may still be honoured): ${grantsError}`);
       } else if (!waiting) {
         console.log(`billing: waiting for the gateway to write the grants, retrying until ${grantsWindowMs / 1000} s after start: ${(e as Error).message}`);
       }
