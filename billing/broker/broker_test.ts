@@ -24,7 +24,7 @@ const TRIAL = { months: 3, plans: ["analysis"], remindDays: 7 };
 
 // `replicas` brokers share one store (store.ts), as the node's pods share their database: each
 // request goes to the next, round robin.
-async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: number; store?: Store } = {}) {
+async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: number; store?: Store; mode?: "live" | "sandbox" } = {}) {
   const fake = fakeStripe(ISSUER, { searchLagMs: o.searchLagMs ?? 0 });
   // Every request the broker makes to Stripe, as the stand-in is asked it.
   const sent: { method: string; path: string; params?: Record<string, unknown> }[] = [];
@@ -39,7 +39,7 @@ async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: numb
     return (door as (...a: unknown[]) => unknown)(method, path, ...rest);
   }) as typeof fake.stripe & { route?: typeof door.route };
   stripe.route = door.route;
-  const tenants = new Map<string, { doc?: unknown; up: boolean; got: Entitlement[]; hold?: Promise<void>; tickets: Map<string, Consent>; consentFails?: number }>([
+  const tenants = new Map<string, { doc?: unknown; up: boolean; got: Entitlement[]; hold?: Promise<void>; refuse?: boolean; tickets: Map<string, Consent>; consentFails?: number }>([
     [A, { up: true, got: [], tickets: new Map() }], [B, { up: true, got: [], tickets: new Map() }],
   ]);
   // The tenants, as the broker reaches them: each serves what it publishes and
@@ -54,6 +54,7 @@ async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: numb
       try {
         const e = await verifyEntitlement(String(init?.body), { issuer: ISSUER, tenant: url.origin, keys });
         if (t.hold) await t.hold;
+        if (t.refuse) return new Response("refused", { status: 400 });
         t.got.push(e);
         return new Response(null, { status: 204 });
       } catch (e) {
@@ -75,7 +76,7 @@ async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: numb
   // Replicas sign with one key, as the node's pods read BILLING_SIGNING_KEY from one Secret.
   const signingKey = (o.replicas ?? 1) > 1 ? await newSigningKey() : undefined;
   const replicas = await Promise.all(Array.from({ length: o.replicas ?? 1 }, () =>
-    broker({ issuer: ISSUER, secret: "s".repeat(32), stripe, webhookSecret: fake.webhookSecret, fetcher, cacheMs: 0, feePercent: 10, store, signingKey })));
+    broker({ issuer: ISSUER, secret: "s".repeat(32), stripe, webhookSecret: fake.webhookSecret, fetcher, cacheMs: 0, feePercent: 10, store, signingKey, mode: o.mode })));
   let turn = 0;
   const handler = (req: Request) => replicas[turn++ % replicas.length](req);
   const keys = brokerKeys(ISSUER, fetcher, 0);
@@ -666,22 +667,98 @@ Deno.test("a failed first charge voids its open invoice before the cancel", asyn
   s.fake.close();
 });
 
-Deno.test("an invoice that cannot be read or voided, a key without Invoices access included, fails the event and cancels nothing until it can", async () => {
+Deno.test("an invoice that cannot be read or voided for a transient reason is tried again, then fails the event and cancels nothing until it can", async () => {
   const s = await setup();
   await s.prove(A, TRIAL);
   await s.payouts(A);
-  for (const [who, status] of [[ANA, 403], [BEA, 500]] as const) {
-    const sub = await startTrial(s, who);
-    const portal = await portalOf(s, who);
-    s.stripeDown.invoices = status;
-    await s.press(`${portal}?sub=${sub.id}`, "trial_fail");
-    assertEquals(sub.status, "past_due", `${status}: nothing cancelled while the invoice is unknown`);
-    s.stripeDown.invoices = 0;
-    assertEquals(await s.fake.emit("customer.subscription.updated", sub), true, `${status}: Stripe's next send`);
-    assertEquals([sub.status, [...s.fake.held.invoices.values()].at(-1)!.status], ["canceled", "void"], `${status}: cancelled once voided`);
-  }
+  const sub = await startTrial(s, BEA);
+  const portal = await portalOf(s, BEA);
+  s.stripeDown.invoices = 500;
+  const before = s.sent.length;
+  await s.press(`${portal}?sub=${sub.id}`, "trial_fail");
+  assertEquals(s.sent.slice(before).filter((r) => r.path.startsWith("/v1/invoices/")).length, 3, "tried three times");
+  assertEquals(sub.status, "past_due", "nothing cancelled while the invoice is unknown");
+  s.stripeDown.invoices = 0;
+  assertEquals(await s.fake.emit("customer.subscription.updated", sub), true, "Stripe's next send");
+  assertEquals([sub.status, [...s.fake.held.invoices.values()].at(-1)!.status], ["canceled", "void"], "cancelled once voided");
   s.fake.close();
 });
+
+Deno.test("a key without Invoices access (403) is logged loudly and the failed trial is cancelled anyway", async () => {
+  const s = await setup();
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const sub = await startTrial(s, ANA);
+  const portal = await portalOf(s, ANA);
+  s.stripeDown.invoices = 403;
+  const logged: string[] = [];
+  const error = console.error;
+  console.error = (...a: unknown[]) => { logged.push(a.join(" ")); };
+  try {
+    await s.press(`${portal}?sub=${sub.id}`, "trial_fail");
+  } finally {
+    console.error = error;
+  }
+  assertEquals(sub.status, "canceled", "cancelled without the invoice known");
+  assertEquals(logged.some((l) => l.includes("Invoices permission")), true, "the missing permission is named");
+  s.fake.close();
+});
+
+Deno.test("the per-client limits are kept apart by Stripe mode", async () => {
+  const names: string[] = [];
+  class Spy extends MemoryStore {
+    override take(name: string, ...a: [string, number, number]): Promise<boolean> {
+      names.push(name);
+      return super.take(name, ...a);
+    }
+  }
+  for (const mode of ["live", "sandbox"] as const) {
+    names.length = 0;
+    const s = await setup({ store: new Spy(), mode });
+    await s.prove(A, TRIAL);
+    await s.post("/checkout", { tenant: A, account: ANA, plan: "analysis" });
+    await s.post("/trial/offer", { tenant: A, account: ANA, ticket: s.ticket(A) });
+    assertEquals(names.filter((n) => n.includes("client")).sort(), [`client ${mode}`, `trial client ${mode}`], mode);
+  }
+});
+
+// A completion that finds the claim taken by another caller is not a 200: Stripe sends the event again.
+class Lost extends MemoryStore {
+  mode: "off" | "taken" | "done" = "off";
+  override complete(kind: string, id: string, token: string, ttlMs: number): Promise<boolean> {
+    if (this.mode === "off") return super.complete(kind, id, token, ttlMs);
+    // Another worker's claim replaced this one, or finished the event.
+    return super.forget(kind, id).then(async () => {
+      if (this.mode === "done") await this.remember(kind, id, ttlMs);
+      else await this.claim(kind, id, 120_000);
+      return false;
+    });
+  }
+}
+
+Deno.test("a completion that lost the claim is answered retryably, unless the store says the event is done", async () => {
+  const store = new Lost();
+  const s = await setup({ store });
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const sub = await startTrial(s);
+  const t = s.tenants.get(A)!;
+  store.mode = "taken";
+  const taken = await deliver(s, "evt_taken", sub)();
+  assertEquals([taken.status, (await taken.json()).error], [409, "claim lost"], "delivered, but another holds the claim");
+  store.mode = "done";
+  const done = await deliver(s, "evt_done", sub)();
+  assertEquals([done.status, await done.json()], [200, { delivered: "evt_done" }], "the store says it is finished");
+  // The refused path checks too.
+  store.mode = "taken";
+  const before = t.got.length;
+  t.refuse = true;
+  const refused = await deliver(s, "evt_refused", sub)();
+  assertEquals(refused.status, 409, "refused for good, but the claim was lost");
+  t.refuse = false;
+  assertEquals(t.got.length, before);
+});
+
 
 Deno.test("a first charge that was paid since is no failed trial: nothing is voided or cancelled", async () => {
   const s = await setup();

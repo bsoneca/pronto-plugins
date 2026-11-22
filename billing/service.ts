@@ -67,6 +67,23 @@ export function grantVerdict(served: boolean, sinceStartMs: number, notReady: bo
   return !served && notReady && sinceStartMs < grantsWindowMs ? "wait" : "fail";
 }
 
+/** The grants loop: `attempt` until the first success, then (with `repeat`, flags) every minute. Only a wait
+ * (the startup condition inside its window) is retried; a failure propagates out, to end the process. */
+export async function grantsLoop(
+  billing: { attempt(sinceStartMs: number): Promise<boolean> },
+  o: { repeat: boolean; sleep?: (ms: number) => Promise<void>; now?: () => number },
+): Promise<void> {
+  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))), now = o.now ?? Date.now;
+  const started = now();
+  for (let wait = 1;;) {
+    if (await billing.attempt(now() - started)) {
+      if (!o.repeat) return;
+      wait = 60;
+    } else wait = Math.min(wait * 2, 60);
+    await sleep(wait * 1000);
+  }
+}
+
 export function service(s: Settings) {
   const fetcher = s.fetcher ?? fetch;
   const origin = s.origin.replace(/\/$/, "");
@@ -127,6 +144,9 @@ export function service(s: Settings) {
     const up = <T>(p: Promise<T>) => p.catch((e) => { throw refused(e) ? new NotReady(e.message) : e; });
     const set = s.flags ? await up(flagged()) : s.grants ?? "[]";
     if (set === granted) return;
+    // A changed write that times out may still have committed: what is held is unknown until a write is
+    // confirmed, so a flag going back to the old set writes again.
+    granted = null;
     const res = await up(asService("billing_grant", { grants: JSON.parse(set) }));
     if (!res.ok) {
       const text = await res.text();
@@ -331,6 +351,8 @@ export function service(s: Settings) {
   // failure no wait can mend sets it, so a revoked grant never stays effective on a healthy-looking
   // deployment. The loop retries either way, so a corrected flag push recovers with no deploy.
   let grantsError: string | null = null, served = false, waiting = false;
+  // A "wait" (a neighbour not up yet, inside the startup window) answers false and is tried again; a "fail"
+  // is logged, turns health 503 and is thrown: the caller's loop ends with the underlying error.
   async function attempt(sinceStartMs: number): Promise<boolean> {
     try {
       await grant();
@@ -344,6 +366,7 @@ export function service(s: Settings) {
         grantsError = (e as Error).message;
         // The word "error" is what the log shipper reads a line's level by: without it this line is counted as info and no alert sees it.
         console.error(`billing: error: grants not written (a revoked grant may still be honoured): ${grantsError}`);
+        throw e;
       } else if (!waiting) {
         console.log(`billing: waiting for the gateway to write the grants, retrying until ${grantsWindowMs / 1000} s after start: ${(e as Error).message}`);
       }
@@ -368,13 +391,12 @@ if (import.meta.main) {
   });
   Deno.serve({ port: Number(Deno.env.get("BILLING_PORT") ?? 8688) }, billing);
   // Until the gateway serves billing_grant, as it does once it has reloaded its schema; with
-  // flags, every minute after, so a push reaches the database with no deploy.
-  const started = Date.now();
-  for (let wait = 1; ; ) {
-    if (await billing.attempt(Date.now() - started)) {
-      if (!Deno.env.get("BILLING_FLAGS")) break;
-      wait = 60;
-    } else wait = Math.min(wait * 2, 60);
-    await new Promise((r) => setTimeout(r, wait * 1000));
+  // flags, every minute after, so a push reaches the database with no deploy. A failure no wait can
+  // mend ends the process with its error.
+  try {
+    await grantsLoop(billing, { repeat: !!Deno.env.get("BILLING_FLAGS") });
+  } catch (e) {
+    console.error(`billing: error: exiting, grants not written: ${(e as Error).message}`);
+    Deno.exit(1);
   }
 }

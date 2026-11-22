@@ -13,6 +13,11 @@
 // The broker has no migration runner, so it creates its tables itself at start, idempotently (CREATE
 // TABLE IF NOT EXISTS, tried again if a replica starting at the same moment made a table first).
 
+import { RULES } from "../rules.ts";
+
+const [CLAIMED, DONE] = RULES.claimStates;
+const STATES = RULES.claimStates.map((x) => `'${x}'`).join(", ");
+
 /** What a claim came to: this caller's (with its token), another's still running, or finished for good. */
 export type Claim = { state: "claimed"; token: string } | { state: "busy" } | { state: "done" };
 
@@ -62,7 +67,7 @@ export class MemoryStore implements Store {
   #running = new Set<string>();
   #counters = new Map<string, number>();
   #windows = new Map<string, Window>();
-  #seen = new Map<string, { until: number; state: "claimed" | "done"; token?: string }>();
+  #seen = new Map<string, { until: number; state: typeof RULES.claimStates[number]; token?: string }>();
   #claimed = 0;
   constructor(readonly now: () => number = Date.now) {}
 
@@ -101,20 +106,20 @@ export class MemoryStore implements Store {
   }
   remember(kind: string, id: string, ttlMs: number): Promise<void> {
     for (const [k, held] of this.#seen) if (held.until <= this.now()) this.#seen.delete(k);
-    this.#seen.set(`${kind}\u0000${id}`, { until: this.now() + ttlMs, state: "done" });
+    this.#seen.set(`${kind}\u0000${id}`, { until: this.now() + ttlMs, state: DONE });
     return Promise.resolve();
   }
   claim(kind: string, id: string, leaseMs: number): Promise<Claim> {
     const key = `${kind}\u0000${id}`, now = this.now(), held = this.#seen.get(key);
-    if (held !== undefined && held.until > now) return Promise.resolve({ state: held.state === "done" ? "done" : "busy" });
+    if (held !== undefined && held.until > now) return Promise.resolve({ state: held.state === DONE ? "done" : "busy" });
     const token = `${now + leaseMs}#${++this.#claimed}`;
-    this.#seen.set(key, { until: now + leaseMs, state: "claimed", token });
+    this.#seen.set(key, { until: now + leaseMs, state: CLAIMED, token });
     return Promise.resolve({ state: "claimed", token });
   }
   complete(kind: string, id: string, token: string, ttlMs: number): Promise<boolean> {
     const key = `${kind}\u0000${id}`, held = this.#seen.get(key);
-    if (held?.state !== "claimed" || held.token !== token) return Promise.resolve(false);
-    this.#seen.set(key, { until: this.now() + ttlMs, state: "done" });
+    if (held?.state !== CLAIMED || held.token !== token) return Promise.resolve(false);
+    this.#seen.set(key, { until: this.now() + ttlMs, state: DONE });
     return Promise.resolve(true);
   }
   forget(kind: string, id: string, token?: string): Promise<void> {
@@ -143,7 +148,13 @@ export const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS billing_seen_expires ON billing_seen (expires)`,
   // A row says whether it is a claim in progress or finished, beside when it expires; a table made before
   // the column holds only finished rows and remembered ones, so they default to done.
-  `ALTER TABLE billing_seen ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT 'done'`,
+  `ALTER TABLE billing_seen ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT '${DONE}'`,
+  // The states are rules.cue's claimStates; added once, valid for every row a table made before it holds.
+  `DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'billing_seen_state' AND conrelid = 'billing_seen'::regclass) THEN
+      ALTER TABLE billing_seen ADD CONSTRAINT billing_seen_state CHECK (state IN (${STATES}));
+    END IF;
+  END $$`,
 ];
 
 // A lock's key is hashed to the 64-bit number Postgres's advisory locks take, under the broker's own
@@ -164,16 +175,16 @@ export const SQL = {
     RETURNING n`,
   sweepWindows: `DELETE FROM billing_window WHERE ctid IN (SELECT ctid FROM billing_window WHERE started <= now() - interval '${WINDOW_KEEP_S} seconds' LIMIT 100)`,
   seen: `SELECT 1 AS seen FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
-  remember: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), 'done')
-    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = 'done'`,
+  remember: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), '${DONE}')
+    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${DONE}'`,
   // One statement takes a row nobody holds: absent, or its lease (or memory) ended. The token is the row's
   // expires as text, microseconds and all: a client's Date would round it to milliseconds.
-  claim: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), 'claimed')
-    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = 'claimed' WHERE billing_seen.expires <= now()
+  claim: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), '${CLAIMED}')
+    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${CLAIMED}' WHERE billing_seen.expires <= now()
     RETURNING expires::text AS token`,
-  claimed: `SELECT state = 'done' AS done FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
-  complete: `UPDATE billing_seen SET expires = now() + make_interval(secs => $4::double precision / 1000), state = 'done'
-    WHERE kind = $1 AND id = $2 AND state = 'claimed' AND expires::text = $3::text RETURNING 1 AS completed`,
+  claimed: `SELECT state = '${DONE}' AS done FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
+  complete: `UPDATE billing_seen SET expires = now() + make_interval(secs => $4::double precision / 1000), state = '${DONE}'
+    WHERE kind = $1 AND id = $2 AND state = '${CLAIMED}' AND expires::text = $3::text RETURNING 1 AS completed`,
   forget: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND ($3::text IS NULL OR expires::text = $3::text)`,
   sweepSeen: `DELETE FROM billing_seen WHERE ctid IN (SELECT ctid FROM billing_seen WHERE expires <= now() LIMIT 100)`,
 };
@@ -182,7 +193,7 @@ export const SQL = {
  * duplicate table, index or column (42P07, 42701) or a concurrent update of a catalog row. */
 export function concurrentCreation(e: unknown): boolean {
   const x = e as { code?: unknown; message?: unknown } | null;
-  if (x && typeof x.code === "string" && ["23505", "42P07", "42701"].includes(x.code)) return true;
+  if (x && typeof x.code === "string" && ["23505", "42P07", "42701", "42710"].includes(x.code)) return true;
   return typeof x?.message === "string" && /already exists|tuple concurrently updated|duplicate key value/i.test(x.message);
 }
 

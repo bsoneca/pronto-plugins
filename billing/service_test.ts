@@ -1,7 +1,7 @@
 // The service hands the author's grants to the database: the release's set, or
 // the flag billing_grants as flagd serves it now; each set once, and none taken
 // away because flagd could not be asked.
-import { grantVerdict, NotReady, service } from "./service.ts";
+import { grantsLoop, grantVerdict, NotReady, service } from "./service.ts";
 import { entitlementClaims } from "./broker/core.ts";
 import { signEs256 } from "./shared.ts";
 
@@ -372,6 +372,9 @@ function healthStage(answer: () => Response | Promise<Response>) {
   return { s, health };
 }
 
+// An attempt that fails throws its error, as the loop ends the process with it.
+const fails = (p: Promise<boolean>) => p.then(() => "returned", (e) => (e as Error).message);
+
 async function quiet<T>(f: () => Promise<T>): Promise<T> {
   const error = console.error, log = console.log;
   console.error = () => {};
@@ -384,9 +387,9 @@ Deno.test("a grants write no wait can mend turns /billing/health 503 until a suc
     let ok = false;
     const { s, health } = healthStage(() => ok ? new Response(null, { status: 204 }) : Response.json({ code: "X" }, { status }));
     eq(await health(), [200, { ok: true }], `${why}: healthy before the first try`);
-    await quiet(async () => { eq(await s.attempt(1000), false, `${why}: not written`); });
+    await quiet(async () => { eq((await fails(s.attempt(1000))).startsWith("billing_grant answered"), true, `${why}: not written`); });
     eq(await health(), [503, { error: "grants not written" }], `${why}: unhealthy`);
-    await quiet(async () => { eq(await s.attempt(2000), false, `${why}: still refused`); });
+    await quiet(async () => { eq((await fails(s.attempt(2000))).startsWith("billing_grant answered"), true, `${why}: still refused`); });
     eq(await health(), [503, { error: "grants not written" }], `${why}: still unhealthy`);
     ok = true;
     eq(await s.attempt(3000), true, `${why}: written`);
@@ -406,7 +409,7 @@ Deno.test("a failure after a first success turns /billing/health 503, a later su
   const h = async () => (await f(new Request("https://a.example/billing/health"))).status;
   eq(await f.attempt(0), true, "flag read and written");
   flags.value = "down";
-  await quiet(async () => { eq(await f.attempt(1000), false, "flagd down after a success"); });
+  await quiet(async () => { eq((await fails(f.attempt(1000))).startsWith("flag billing_grants answered 500"), true, "flagd down after a success"); });
   eq(await h(), 503, "a failure after a success fails even inside the window");
   flags.value = JSON.stringify(ANA);
   eq(await f.attempt(2000), true, "a corrected push is written");
@@ -417,7 +420,7 @@ Deno.test("a neighbour not up yet keeps /billing/health 200 in the window and 50
   const { s, health } = healthStage(() => new Response("", { status: 503 }));
   await quiet(async () => { eq(await s.attempt(2000), false, "not written yet"); });
   eq(await health(), [200, { ok: true }], "waiting inside the window is healthy");
-  await quiet(async () => { eq(await s.attempt(70000), false, "still not written"); });
+  await quiet(async () => { eq((await fails(s.attempt(70000))).startsWith("billing_grant answered 503"), true, "past the window it fails"); });
   eq(await health(), [503, { error: "grants not written" }], "past the window it is not");
 });
 
@@ -436,4 +439,40 @@ Deno.test("what a failed grants call is: not up yet, or a failure", async () => 
     const e = await s.grant().then(() => null, (x) => x);
     eq([why, e instanceof Error, e instanceof NotReady], [why, true, notReady], why);
   }
+});
+
+Deno.test("a changed grant write that times out is written again when the flag goes back to the old set", async () => {
+  let value = JSON.stringify(ANA), timeout = false;
+  const handed: unknown[] = [];
+  const fetcher = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "http://crud/rpc/billing_grant") {
+      handed.push(JSON.parse(String(init?.body)).grants);
+      return timeout ? Promise.reject(new DOMException("The signal timed out", "TimeoutError")) : Promise.resolve(new Response(null, { status: 204 }));
+    }
+    return Promise.resolve(Response.json({ value }));
+  }) as typeof fetch;
+  const s = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), flags: "http://flagd:8693", fetcher });
+  await s.grant();
+  value = "[]";
+  timeout = true; // the write of [] may have committed
+  await s.grant().then(() => { throw new Error("should time out"); }, () => {});
+  value = JSON.stringify(ANA);
+  timeout = false;
+  await s.grant();
+  eq(handed, [ANA, [], ANA], "the old set is written again: the database may hold []");
+});
+
+Deno.test("the grants loop retries a wait inside its window and ends with the error of a failure", async () => {
+  const slept: number[] = [];
+  const sleep = (ms: number) => { slept.push(ms); return Promise.resolve(); };
+  const script = (steps: (boolean | Error)[]) => ({ attempt: (_: number) => { const r = steps.shift()!; return r instanceof Error ? Promise.reject(r) : Promise.resolve(r); } });
+  await grantsLoop(script([false, false, true]), { repeat: false, sleep });
+  eq(slept, [2000, 4000], "waits back off, then it returns once written");
+  slept.length = 0;
+  const err = await grantsLoop(script([false, new Error("billing_grant answered 401: x")]), { repeat: true, sleep }).then(() => "returned", (e) => e.message);
+  eq(err, "billing_grant answered 401: x", "a failure propagates, never retried for ever");
+  slept.length = 0;
+  const err2 = await grantsLoop(script([true, new Error("flag down")]), { repeat: true, sleep }).then(() => "returned", (e) => e.message);
+  eq([err2, slept], ["flag down", [60000]], "a failure after a success ends it too");
 });

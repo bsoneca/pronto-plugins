@@ -24,6 +24,8 @@ rules: {
 	trial: {monthsMin: 1, monthsMax: 23, remindDays: 7}
 	// Where a trial stands, as the broker words it in an entitlement and billing.trial keeps it.
 	trialStates: ["running", "cancelled", "converted", "ended", "failed"]
+	// Where a row of the broker's claim table stands: a claim in progress, or finished for good.
+	claimStates: ["claimed", "done"]
 }
 
 rules: {
@@ -33,4 +35,5 @@ rules: {
 	price: {min: int & >0, max: int & >price.min}
 	trial: {monthsMin: int & >=1, monthsMax: int & >=trial.monthsMin, remindDays: int & >=1}
 	trialStates: [...=~"^[a-z]+$"]
+	claimStates: [...=~"^[a-z]+$"]
 }
