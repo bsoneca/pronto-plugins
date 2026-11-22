@@ -664,9 +664,11 @@ export async function noOverlap() {
 }
 // The chooser lock's owner is a pid and its start time: a pid reused by another process (another start time) is not the chooser.
 export async function chooserIdentity() {
-  const { chooserOwner, sameProcess } = await import("../../harness/files/tests/slot.ts");
+  const { chooserOwner, sameProcess, procStart } = await import("../../harness/files/tests/slot.ts");
   return {
     both: chooserOwner("123 1700000000000\n"), pidOnly: chooserOwner("123"), none: chooserOwner(""), junk: chooserOwner("abc def"),
+    // /proc/<pid>/stat field 22 (after the ")" of a name that may hold spaces and parentheses) over the boot time: 1000 + 2.5 s
+    procStart: procStart("1 (a b) c) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 250 0", "cpu 1 2\nbtime 1000\n"), procStartBad: procStart("x", "btime 1000"),
     same: sameProcess(1_700_000_000_000, 1_700_000_001_500), reused: sameProcess(1_700_000_000_000, 1_700_000_090_000), unwritten: sameProcess(0, 5), unreadable: sameProcess(5, 0),
   };
 }
@@ -675,7 +677,10 @@ export async function choosingReused() {
   const tmp = await sh("mktemp -d");
   const sleeper = new Deno.Command("sleep", { args: ["60"] }).spawn();
   try {
-    const startMs = Number(await sh(`date -j -f '%a %b %e %T %Y' "$(LC_ALL=C ps -o lstart= -p ${sleeper.pid})" +%s`)) * 1000;
+    // The start time as the lock reads it (slot.ts startOf: /proc on Linux, ps's lstart elsewhere): the same read, on either platform.
+    const { startOf } = await import(slotUrl);
+    const startMs = await startOf(sleeper.pid, true);
+    if (!(startMs > 0)) throw new Error(`the start of pid ${sleeper.pid} could not be read`);
     const mk = async (name, text) => { await sh(`mkdir -p '${tmp}/${name}/.choosing'; echo '${text}' > '${tmp}/${name}/.choosing/pid'; touch -t 202001010000 '${tmp}/${name}/.choosing'`); };
     await mk("same", `${sleeper.pid} ${startMs}`);
     await mk("reused", `${sleeper.pid} ${startMs - 3_600_000}`);

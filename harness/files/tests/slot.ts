@@ -702,8 +702,20 @@ const readNoFollow = async (path: string): Promise<{ kind: string; uid: number; 
     } finally { f.close(); }
   } catch { return undefined; }
 };
-const startOf = async (pid: number, live: boolean) => {
-  const r = live ? await new Deno.Command("ps", { args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, stdout: "piped", stderr: "null" }).output().catch(() => undefined) : undefined;
+// When a process started, in ms since the epoch (0 when it cannot be read). On Linux from /proc (field 22 of /proc/<pid>/stat, in clock ticks
+// after the boot time of /proc/stat: no ps needed, and the same value at every read); elsewhere, and where /proc cannot be read, from
+// `ps -o lstart=` in the C locale, whole seconds. Callers compare two reads of the same process, never one platform's against the other's.
+export const procStart = (stat: string, btime: string, ticks = 100): number => {
+  const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  const start = Number(rest[19]), boot = Number(/^btime (\d+)$/m.exec(btime)?.[1]);
+  return Number.isFinite(start) && start > 0 && Number.isFinite(boot) && boot > 0 ? boot * 1000 + Math.round(start * 1000 / ticks) : 0;
+};
+export const startOf = async (pid: number, live: boolean): Promise<number> => {
+  if (!live) return 0;
+  if (Deno.build.os === "linux") {
+    try { const t = procStart(await Deno.readTextFile(`/proc/${pid}/stat`), await Deno.readTextFile("/proc/stat")); if (t > 0) return t; } catch { /* no /proc: ps */ }
+  }
+  const r = await new Deno.Command("ps", { args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, stdout: "piped", stderr: "null" }).output().catch(() => undefined);
   return Date.parse(new TextDecoder().decode(r?.stdout ?? new Uint8Array()).trim()) || 0;
 };
 // The live release in the pool `dir` of account `want` (never this account, `self`), read-only: its slot and job records and
