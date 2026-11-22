@@ -29,7 +29,7 @@
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import process from "node:process";
 import { causes, outcomes } from "./causes.js";
-import { appendWhy, mutates, lockAcquire, lockRelease, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit } from "./cron.js";
+import { appendWhy, mutates, lockAcquire, lockRelease, previewRecordStop, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -98,6 +98,10 @@ const lockIo = {
   rename: (a: string, b: string) => wrap(() => Deno.renameSync(a, b)),
   readFile: (p: string) => wrap(() => Deno.readTextFileSync(p)),
   stat: (p: string) => wrap(() => { const st = Deno.statSync(p); return { isFile: st.isFile, mtimeMs: st.mtime?.getTime() ?? 0 }; }),
+  lstat: (p: string) => wrap(() => { const st = Deno.lstatSync(p); return { isFile: st.isFile, isLink: st.isSymlink, mtimeMs: st.mtime?.getTime() ?? 0 }; }),
+  symlink: (target: string, p: string) => wrap(() => Deno.symlinkSync(target, p)),
+  readlink: (p: string) => wrap(() => Deno.readLinkSync(p)),
+  unlink: (p: string) => wrap(() => Deno.removeSync(p)),
   remove: (p: string) => wrap(() => Deno.removeSync(p, { recursive: true })),
   // kill(pid, 0): ESRCH is a holder that is gone, EPERM one alive under another user, any other error propagates (aliveFromKill).
   alive: (pid: number) => { try { process.kill(pid, 0); return aliveFromKill(null); } catch (e) { return aliveFromKill((e as { code?: string }).code ?? "EUNKNOWN"); } },
@@ -107,19 +111,25 @@ const lockIo = {
     try { file.lockSync(true); return f(); } finally { try { file.unlockSync(); } catch { /* closed below */ } file.close(); }
   },
 };
+let heldStage: string | undefined;
 const takeLock = (): { got: true } | { got: false; pid: number } => {
-  // A preview record a dead run of the flock version left: said once, loudly; never acted on (its `down` is for a person to run).
-  try {
-    const rec = JSON.parse(Deno.readTextFileSync(`${state}/lock.preview`));
-    console.log(`release-cron: WARNING: ${state}/lock.preview exists: a preview may be left running; remove it with \`${(rec.down ?? []).join(" ")}\` in ${rec.dir ?? "its directory"}, then delete the record; nothing was done`);
-  } catch (e) { if (!(e instanceof Deno.errors.NotFound)) console.log(`release-cron: WARNING: ${state}/lock.preview exists but could not be read (${(e as Error).message.split("\n")[0]}): a preview may be left running`); }
-  // Taking is cron.js's lockAcquire: a whole staging directory (with this run's pid) renamed onto the lock, so the base driver's reader never
-  // sees it without an owner; a stale lock removed only under an exclusive flock and only if it is still the one observed; a holder that
-  // cannot be told, a failure to take or an ambiguous state throws, so the run exits nonzero and a person clears it.
-  return lockAcquire(lockIo, lockPath) as { got: true } | { got: false; pid: number };
+  // A preview record a dead run of the flock version left: a preview may still be running, so the run stops (nonzero) naming the record and
+  // what a person does (cron.js previewRecordStop); only no record lets it go on.
+  const recPath = `${state}/lock.preview`;
+  let recErr: string | null = null, recText = "";
+  try { recText = Deno.readTextFileSync(recPath); } catch (e) { recErr = errCode(e) ?? "EUNKNOWN"; }
+  const stop = previewRecordStop(recErr, recText, recPath);
+  if (stop) throw new Error(stop);
+  // Taking is cron.js's lockAcquire: a symlink to a staging directory that already holds this run's pid (symlink(2) refuses anything at the
+  // path, an empty directory of the base driver included, and the base driver reads lock/pid through it); a stale lock removed only under an
+  // exclusive flock and only if it is still the one observed; a holder that cannot be told, a failure to take or an ambiguous state throws,
+  // so the run exits nonzero and a person clears it.
+  const got = lockAcquire(lockIo, lockPath);
+  if (got.got) heldStage = got.stage;
+  return got as { got: true } | { got: false; pid: number };
 };
 // Gives the lock back (cron.js lockRelease): a lock this run holds and cannot remove throws.
-const dropLock = () => { lockRelease(lockIo, lockPath); };
+const dropLock = () => { lockRelease(lockIo, lockPath, heldStage); };
 if (verb === "report") { console.log(report(jsonl(`${state}/runs.jsonl`))); Deno.exit(0); }
 if (verb === "uninstall") {
   // Whichever scheduler installed it: its files say.
