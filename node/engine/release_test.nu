@@ -1275,6 +1275,14 @@ def test_the_door_must_not_answer_the_dapr_api [] {
 		assert (not ($w.state | path join portforward.pid | path exists)) $"($fail): the port-forward is killed"
 		rm -f ($w.dir | path join $fail)
 	}
+	# on the node the Gateways of every app are merged into one Service of the GatewayClass: the door check falls back to it
+	"" | save -f ($w.state | path join shared_gateway)
+	rm -f ($w.state | path join calls.jsonl)
+	let shared = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $shared.exit_code 0 $"($shared.stdout)($shared.stderr)"
+	assert (open --raw ($w.state | path join portforward.args) | str contains "port-forward -n envoy-gateway-system service/pronto-gateway") "the forward goes to the GatewayClass's shared Service"
+	assert (calls $w | any {|c| $c | str starts-with "get service -n envoy-gateway-system -l gateway.envoyproxy.io/owning-gatewayclass=eg" }) "found by the GatewayClass label"
+	rm -f ($w.state | path join shared_gateway)
 	# a forward that cannot start, or a Gateway with no data-plane Service, fails too
 	for fail in [port_forward_fail no_gateway_service] {
 		"" | save -f ($w.state | path join $fail)

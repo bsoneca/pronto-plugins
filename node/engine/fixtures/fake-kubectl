@@ -249,7 +249,12 @@ if verb == "get":
     if what == "service" and ns == "envoy-gateway-system":
         # the Envoy Gateway data-plane Service of a Gateway, found by its owning labels
         sel = opt("-l") or ""
-        if exists("no_gateway_service") or "owning-gateway-name=" not in sel or "owning-gateway-namespace=" not in sel:
+        # on the node one Service of the GatewayClass serves every merged Gateway (`shared_gateway`)
+        if exists("no_gateway_service"):
+            out({"items": []})
+        if "owning-gatewayclass=" in sel:
+            out({"items": [{"metadata": {"name": "pronto-gateway"}, "spec": {"ports": [{"port": 80}]}}] if exists("shared_gateway") else []})
+        if exists("shared_gateway") or "owning-gateway-name=" not in sel or "owning-gateway-namespace=" not in sel:
             out({"items": []})
         out({"items": [{"metadata": {"name": "envoy-" + sel.split("owning-gateway-name=")[1].split(",")[0]}, "spec": {"ports": [{"port": 80}]}}]})
     if "-A" in args:
