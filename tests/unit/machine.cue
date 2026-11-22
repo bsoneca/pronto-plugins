@@ -721,3 +721,77 @@ cases: "the pool's lock a minute old is reclaimed only once its owner is gone": 
 		{get: "none", expect: "ran", why: "no owner to verify (an older copy made it): by age, as before"},
 	]
 }
+
+// PRONTO-892, round 2 (Codex on bsoneca/pronto#1673, slot.ts).
+cases: "a gate's nested evaluation reserves behind neither the weighted ticket waiting for the gate nor the zero-weight one queued behind it": {
+	suite: "machine"
+	steps: [
+		{call: "machine.gateNested"},
+		{keep: "r"},
+		{get: "kept", expect: ["002-2"], why: "olderKeeps leaves the weighted ticket out, the zero-weight one stays"},
+		{use: "r"},
+		{get: "blocked", expect: ["001-1-w", "002-2"], why: "the zero-weight ticket waits behind the weighted one, which waits for weight the gate owns"},
+		{use: "r"},
+		{get: "nestedReserves", expect: []},
+		{use: "r"},
+		{get: "nestedAdmitted", expect: true},
+		{use: "r"},
+		{get: "withoutTheFix", expect: ["002-2"], why: "its reservation of the whole budget blocks the nested work: all three wait until a timeout"},
+		{use: "r"},
+		{get: "withoutTheFixAdmitted", expect: false},
+		{use: "r"},
+		{get: "topLevelReserves", expect: ["001-1-w", "002-2"], why: "FIFO holds for top-level claims"},
+		{use: "r"},
+		{get: "unrelatedKept", expect: ["001-1-w"], why: "a ticket that fits beside it does not wait for it"},
+		{use: "r"},
+		{get: "siblingKept", expect: ["001-1-w"], why: "the holder's own nested work is never excluded"},
+	]
+}
+cases: "the chooser lock names a process by its pid and start time, so a reused pid is not the chooser": {
+	suite: "machine"
+	steps: [
+		{call: "machine.chooserIdentity"},
+		{keep: "r"},
+		{get: "both", expect: {pid: 123, start: 1700000000000}},
+		{use: "r"},
+		{get: "pidOnly", expect: {pid: 123, start: 0}, why: "an older copy's file: the pid alone"},
+		{use: "r"},
+		{get: "none", expect: {pid: 0, start: 0}},
+		{use: "r"},
+		{get: "junk", expect: {pid: 0, start: 0}},
+		{use: "r"},
+		{get: "same", expect: true, why: "ps reads whole seconds"},
+		{use: "r"},
+		{get: "reused", expect: false},
+		{use: "r"},
+		{get: "unwritten", expect: true, why: "fail closed: no start to compare"},
+		{use: "r"},
+		{get: "unreadable", expect: true},
+	]
+}
+cases: "a pid reused by an unrelated process does not hold the pool's lock; the same process does": {
+	suite: "machine"
+	steps: [
+		{call: "machine.choosingReused"},
+		{keep: "r"},
+		{get: "same", expect: "held"},
+		{use: "r"},
+		{get: "reused", expect: "ran", why: "the pid lives but it is another process: the lock is reclaimed after a minute"},
+	]
+}
+cases: "the memory sampler never overlaps itself: a tick while one runs starts nothing, and the claim waits for the one in flight": {
+	suite: "machine"
+	steps: [
+		{call: "machine.noOverlap"},
+		{keep: "r"},
+		{get: "whileRunning", expect: 1, why: "three ticks while the first writes: one sample"},
+		{use: "r"},
+		{get: "second", expect: 2},
+		{use: "r"},
+		{get: "started", expect: 3},
+		{use: "r"},
+		{get: "finished", expect: 3},
+		{use: "r"},
+		{get: "errors", expect: 1, why: "a genuine failure still reaches the owner"},
+	]
+}
