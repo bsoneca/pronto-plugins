@@ -10,13 +10,34 @@
 //   Postgres advisory lock held by a transaction, so it goes with the pod that held it; every count is
 //   one SQL statement, so two replicas cannot both win it.
 //
-// The broker has no migration runner, so it creates its tables itself at start, idempotently (CREATE
-// TABLE IF NOT EXISTS, tried again if a replica starting at the same moment made a table first).
+// The broker runs no DDL: its tables are made by billing/broker/schema.sql (add-only, idempotent: the
+// release applies it to the broker's database before replacing the broker, and pronto-billing's install
+// writes it into an app as a raw migration), and the store only checks at start that they are there.
 
 import { RULES } from "../rules.ts";
 
 const [CLAIMED, DONE] = RULES.claimStates;
 const STATES = RULES.claimStates.map((x) => `'${x}'`).join(", ");
+
+// A row's life as rules.cue's claimTransitions declare it: both stores ask `step` what an event does to
+// the state it finds, and the SQL names its states by `target`, so the declaration is the one owner.
+export type RowState = typeof RULES.claimStates[number];
+type Where = RowState | "absent";
+type ClaimEvent = typeof RULES.claimTransitions[number]["event"];
+
+/** The state `event` leaves a row in that is `from` ("absent": no row, or one whose time ended), or null when
+ * the declaration refuses it: `holds` says whether the caller names the row's current token. */
+export function step(event: ClaimEvent, from: Where, holds: boolean): Where | null {
+  const t = RULES.claimTransitions.find((x) => x.event === event && x.from === from);
+  return !t || (t.token === "holder" && !holds) ? null : t.to;
+}
+
+/** The state `event` leaves a row `from` in, which the declaration must have: the SQL's own words for it. */
+export function target(event: ClaimEvent, from: Where): Where {
+  const to = step(event, from, true);
+  if (to === null) throw new Error(`rules.cue declares no ${event} of a row ${from}`);
+  return to;
+}
 
 /** What a claim came to: this caller's (with its token), another's still running, or finished for good. */
 export type Claim = { state: "claimed"; token: string } | { state: "busy" } | { state: "done" };
@@ -40,8 +61,8 @@ export interface Store {
    * is kept beside the expiry, never read off the time left: expiry only decides when a claim may be taken
    * again, so a finished event stays done to the end of its retention. */
   claim(kind: string, id: string, leaseMs: number): Promise<Claim>;
-  /** Mark the claim `token` names finished, remembered for `ttlMs`: whether it was the current claim (a newer
-   * one, or a forget, leaves the row as it is and answers false). */
+  /** Mark the claim `token` names finished, remembered for `ttlMs`: whether it was the live current claim (a
+   * newer one, a lease that ended, or a release leaves the row as it is and answers false). */
   complete(kind: string, id: string, token: string, ttlMs: number): Promise<boolean>;
   /** Forget (kind, id) now; with `token`, only the claim that token names (a newer claim, or a remember, stays). */
   forget(kind: string, id: string, token?: string): Promise<void>;
@@ -67,7 +88,7 @@ export class MemoryStore implements Store {
   #running = new Set<string>();
   #counters = new Map<string, number>();
   #windows = new Map<string, Window>();
-  #seen = new Map<string, { until: number; state: typeof RULES.claimStates[number]; token?: string }>();
+  #seen = new Map<string, { until: number; state: RowState; token?: string }>();
   #claimed = 0;
   constructor(readonly now: () => number = Date.now) {}
 
@@ -100,31 +121,44 @@ export class MemoryStore implements Store {
     if (!w) this.#windows.set(name, w = new Window(10_000, this.now));
     return Promise.resolve(w.take(key, per, windowMs));
   }
+  /** The live row, whose time has not ended. */
+  #live(key: string) {
+    const held = this.#seen.get(key);
+    return held !== undefined && held.until > this.now() ? held : undefined;
+  }
   seen(kind: string, id: string): Promise<boolean> {
-    const held = this.#seen.get(`${kind}\u0000${id}`);
-    return Promise.resolve(held !== undefined && held.until > this.now());
+    return Promise.resolve(this.#live(`${kind}\u0000${id}`) !== undefined);
   }
   remember(kind: string, id: string, ttlMs: number): Promise<void> {
     for (const [k, held] of this.#seen) if (held.until <= this.now()) this.#seen.delete(k);
-    this.#seen.set(`${kind}\u0000${id}`, { until: this.now() + ttlMs, state: DONE });
+    const key = `${kind}\u0000${id}`;
+    this.#seen.set(key, { until: this.now() + ttlMs, state: step("remember", this.#live(key)?.state ?? "absent", false) as RowState });
     return Promise.resolve();
   }
   claim(kind: string, id: string, leaseMs: number): Promise<Claim> {
-    const key = `${kind}\u0000${id}`, now = this.now(), held = this.#seen.get(key);
-    if (held !== undefined && held.until > now) return Promise.resolve({ state: held.state === DONE ? "done" : "busy" });
+    const key = `${kind}\u0000${id}`, now = this.now(), held = this.#live(key);
+    const to = step("claim", held?.state ?? "absent", false);
+    if (to === null) return Promise.resolve({ state: held!.state === DONE ? "done" : "busy" });
     const token = `${now + leaseMs}#${++this.#claimed}`;
-    this.#seen.set(key, { until: now + leaseMs, state: CLAIMED, token });
+    this.#seen.set(key, { until: now + leaseMs, state: to as RowState, token });
     return Promise.resolve({ state: "claimed", token });
   }
   complete(kind: string, id: string, token: string, ttlMs: number): Promise<boolean> {
-    const key = `${kind}\u0000${id}`, held = this.#seen.get(key);
-    if (held?.state !== CLAIMED || held.token !== token) return Promise.resolve(false);
-    this.#seen.set(key, { until: this.now() + ttlMs, state: DONE });
+    const key = `${kind}\u0000${id}`, held = this.#live(key);
+    const to = step("complete", held?.state ?? "absent", held?.token === token);
+    if (to === null) return Promise.resolve(false);
+    this.#seen.set(key, { until: this.now() + ttlMs, state: to as RowState });
     return Promise.resolve(true);
   }
   forget(kind: string, id: string, token?: string): Promise<void> {
     const key = `${kind}\u0000${id}`;
-    if (token === undefined || this.#seen.get(key)?.token === token) this.#seen.delete(key);
+    // Without a token, the row goes whatever it is (a kind that is only remembered); with one, only the
+    // holder's claim is released.
+    if (token === undefined) this.#seen.delete(key);
+    else {
+      const held = this.#live(key);
+      if (step("release", held?.state ?? "absent", held?.token === token) === "absent") this.#seen.delete(key);
+    }
     return Promise.resolve();
   }
 }
@@ -137,6 +171,10 @@ export interface Sql {
   end?(): Promise<void>;
 }
 
+/** The tables the broker needs, checked at start. */
+const TABLES = ["billing_counter", "billing_window", "billing_seen"];
+
+/** The schema, each statement add-only and idempotent: billing/broker/schema.sql is exactly these, `;`-ended. */
 export const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS billing_counter (name text PRIMARY KEY, value bigint NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS billing_window (
@@ -175,51 +213,48 @@ export const SQL = {
     RETURNING n`,
   sweepWindows: `DELETE FROM billing_window WHERE ctid IN (SELECT ctid FROM billing_window WHERE started <= now() - interval '${WINDOW_KEEP_S} seconds' LIMIT 100)`,
   seen: `SELECT 1 AS seen FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
-  remember: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), '${DONE}')
-    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${DONE}'`,
+  remember: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), '${target("remember", "absent")}')
+    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${target("remember", "claimed")}'`,
   // One statement takes a row nobody holds: absent, or its lease (or memory) ended. The token is the row's
   // expires as text, microseconds and all: a client's Date would round it to milliseconds.
-  claim: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), '${CLAIMED}')
-    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${CLAIMED}' WHERE billing_seen.expires <= now()
+  claim: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), '${target("claim", "absent")}')
+    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${target("claim", "absent")}' WHERE billing_seen.expires <= now()
     RETURNING expires::text AS token`,
   claimed: `SELECT state = '${DONE}' AS done FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
-  complete: `UPDATE billing_seen SET expires = now() + make_interval(secs => $4::double precision / 1000), state = '${DONE}'
-    WHERE kind = $1 AND id = $2 AND state = '${CLAIMED}' AND expires::text = $3::text RETURNING 1 AS completed`,
-  forget: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND ($3::text IS NULL OR expires::text = $3::text)`,
+  complete: `UPDATE billing_seen SET expires = now() + make_interval(secs => $4::double precision / 1000), state = '${target("complete", "claimed")}'
+    WHERE kind = $1 AND id = $2 AND state = '${CLAIMED}' AND expires > now() AND expires::text = $3::text RETURNING 1 AS completed`,
+  // With a token, only the holder's live claim is released (the declaration's release); without, the row goes.
+  forget: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND ($3::text IS NULL OR (state = '${CLAIMED}' AND expires > now() AND expires::text = $3::text))`,
   sweepSeen: `DELETE FROM billing_seen WHERE ctid IN (SELECT ctid FROM billing_seen WHERE expires <= now() LIMIT 100)`,
 };
-
-/** Whether `e` is Postgres saying a concurrent CREATE/ALTER won: a unique violation on the catalog (23505), a
- * duplicate table, index or column (42P07, 42701) or a concurrent update of a catalog row. */
-export function concurrentCreation(e: unknown): boolean {
-  const x = e as { code?: unknown; message?: unknown } | null;
-  if (x && typeof x.code === "string" && ["23505", "42P07", "42701", "42710"].includes(x.code)) return true;
-  return typeof x?.message === "string" && /already exists|tuple concurrently updated|duplicate key value/i.test(x.message);
-}
 
 export class PostgresStore implements Store {
   constructor(readonly sql: Sql) {}
 
-  /** Connect to `url` and make sure the tables are there. */
+  /** Connect to `url` and check that the tables are there: the broker makes none. */
   static async connect(url: string): Promise<PostgresStore> {
     const { default: postgres } = await import("./vendor/postgres.js");
     // A held lock keeps its connection for as long as its Checkout takes: room for several at once.
     const store = new PostgresStore(postgres(url, { max: 10, idle_timeout: 30, connect_timeout: 10, onnotice: () => {} }) as unknown as Sql);
-    await store.migrate();
+    await store.verify();
     return store;
   }
 
-  async migrate(): Promise<void> {
-    // Replicas starting together can both find a table missing, and one's CREATE then fails on the
-    // other's; the second try finds it there.
-    for (let attempt = 1;; attempt++) {
-      try {
-        for (const statement of SCHEMA) await this.sql.unsafe(statement);
-        return;
-      } catch (e) {
-        // Only that race is tried again; any other failure (a refused login, bad SQL) is the caller's at once.
-        if (attempt >= 3 || !concurrentCreation(e)) throw e;
-      }
+  /** Fails, naming what is missing, unless the schema (schema.sql) has been applied. */
+  async verify(): Promise<void> {
+    const missing: string[] = [];
+    for (const table of TABLES) {
+      const [row] = await this.sql.unsafe(`SELECT to_regclass($1) IS NOT NULL AS there`, [table]);
+      if (row?.there !== true) missing.push(`table ${table}`);
+    }
+    if (!missing.includes("table billing_seen")) {
+      const [col] = await this.sql.unsafe(`SELECT 1 AS there FROM information_schema.columns WHERE table_name = 'billing_seen' AND column_name = 'state'`);
+      if (!col) missing.push("column billing_seen.state");
+      const [check] = await this.sql.unsafe(`SELECT 1 AS there FROM pg_constraint WHERE conname = 'billing_seen_state' AND conrelid = 'billing_seen'::regclass`);
+      if (!check) missing.push("constraint billing_seen_state");
+    }
+    if (missing.length) {
+      throw new Error(`billing broker: the database is missing ${missing.join(", ")}: apply billing/broker/schema.sql (add-only, idempotent) before the broker starts; the broker makes no tables`);
     }
   }
 

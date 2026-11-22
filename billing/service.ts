@@ -67,8 +67,10 @@ export function grantVerdict(served: boolean, sinceStartMs: number, notReady: bo
   return !served && notReady && sinceStartMs < grantsWindowMs ? "wait" : "fail";
 }
 
-/** The grants loop: `attempt` until the first success, then (with `repeat`, flags) every minute. Only a wait
- * (the startup condition inside its window) is retried; a failure propagates out, to end the process. */
+/** The grants loop: `attempt` until the first success, then (with `repeat`, flags) every minute. A failed attempt
+ * is tried again after a wait that doubles to a minute, and the process never exits over it: /billing/health says
+ * 503 while it lasts and the rest of the billing path keeps serving. It sits behind stripe_door like the rest of
+ * the billing path, so it has no flag of its own. */
 export async function grantsLoop(
   billing: { attempt(sinceStartMs: number): Promise<boolean> },
   o: { repeat: boolean; sleep?: (ms: number) => Promise<void>; now?: () => number },
@@ -351,8 +353,9 @@ export function service(s: Settings) {
   // failure no wait can mend sets it, so a revoked grant never stays effective on a healthy-looking
   // deployment. The loop retries either way, so a corrected flag push recovers with no deploy.
   let grantsError: string | null = null, served = false, waiting = false;
-  // A "wait" (a neighbour not up yet, inside the startup window) answers false and is tried again; a "fail"
-  // is logged, turns health 503 and is thrown: the caller's loop ends with the underlying error.
+  // False when the grants were not written: a "wait" (a neighbour not up yet, inside the startup window) is
+  // quiet; a "fail" is logged and turns /billing/health 503. Neither stops the loop (grantsLoop): the process
+  // keeps serving and tries again, with backoff.
   async function attempt(sinceStartMs: number): Promise<boolean> {
     try {
       await grant();
@@ -366,7 +369,6 @@ export function service(s: Settings) {
         grantsError = (e as Error).message;
         // The word "error" is what the log shipper reads a line's level by: without it this line is counted as info and no alert sees it.
         console.error(`billing: error: grants not written (a revoked grant may still be honoured): ${grantsError}`);
-        throw e;
       } else if (!waiting) {
         console.log(`billing: waiting for the gateway to write the grants, retrying until ${grantsWindowMs / 1000} s after start: ${(e as Error).message}`);
       }
@@ -391,12 +393,7 @@ if (import.meta.main) {
   });
   Deno.serve({ port: Number(Deno.env.get("BILLING_PORT") ?? 8688) }, billing);
   // Until the gateway serves billing_grant, as it does once it has reloaded its schema; with
-  // flags, every minute after, so a push reaches the database with no deploy. A failure no wait can
-  // mend ends the process with its error.
-  try {
-    await grantsLoop(billing, { repeat: !!Deno.env.get("BILLING_FLAGS") });
-  } catch (e) {
-    console.error(`billing: error: exiting, grants not written: ${(e as Error).message}`);
-    Deno.exit(1);
-  }
+  // flags, every minute after, so a push reaches the database with no deploy. A failure is retried with
+  // backoff and reported on /billing/health; it never exits the process.
+  await grantsLoop(billing, { repeat: !!Deno.env.get("BILLING_FLAGS") });
 }

@@ -372,9 +372,6 @@ function healthStage(answer: () => Response | Promise<Response>) {
   return { s, health };
 }
 
-// An attempt that fails throws its error, as the loop ends the process with it.
-const fails = (p: Promise<boolean>) => p.then(() => "returned", (e) => (e as Error).message);
-
 async function quiet<T>(f: () => Promise<T>): Promise<T> {
   const error = console.error, log = console.log;
   console.error = () => {};
@@ -387,9 +384,9 @@ Deno.test("a grants write no wait can mend turns /billing/health 503 until a suc
     let ok = false;
     const { s, health } = healthStage(() => ok ? new Response(null, { status: 204 }) : Response.json({ code: "X" }, { status }));
     eq(await health(), [200, { ok: true }], `${why}: healthy before the first try`);
-    await quiet(async () => { eq((await fails(s.attempt(1000))).startsWith("billing_grant answered"), true, `${why}: not written`); });
+    await quiet(async () => { eq((await s.attempt(1000)), false, `${why}: not written`); });
     eq(await health(), [503, { error: "grants not written" }], `${why}: unhealthy`);
-    await quiet(async () => { eq((await fails(s.attempt(2000))).startsWith("billing_grant answered"), true, `${why}: still refused`); });
+    await quiet(async () => { eq((await s.attempt(2000)), false, `${why}: still refused`); });
     eq(await health(), [503, { error: "grants not written" }], `${why}: still unhealthy`);
     ok = true;
     eq(await s.attempt(3000), true, `${why}: written`);
@@ -409,7 +406,7 @@ Deno.test("a failure after a first success turns /billing/health 503, a later su
   const h = async () => (await f(new Request("https://a.example/billing/health"))).status;
   eq(await f.attempt(0), true, "flag read and written");
   flags.value = "down";
-  await quiet(async () => { eq((await fails(f.attempt(1000))).startsWith("flag billing_grants answered 500"), true, "flagd down after a success"); });
+  await quiet(async () => { eq((await f.attempt(1000)), false, "flagd down after a success"); });
   eq(await h(), 503, "a failure after a success fails even inside the window");
   flags.value = JSON.stringify(ANA);
   eq(await f.attempt(2000), true, "a corrected push is written");
@@ -420,7 +417,7 @@ Deno.test("a neighbour not up yet keeps /billing/health 200 in the window and 50
   const { s, health } = healthStage(() => new Response("", { status: 503 }));
   await quiet(async () => { eq(await s.attempt(2000), false, "not written yet"); });
   eq(await health(), [200, { ok: true }], "waiting inside the window is healthy");
-  await quiet(async () => { eq((await fails(s.attempt(70000))).startsWith("billing_grant answered 503"), true, "past the window it fails"); });
+  await quiet(async () => { eq((await s.attempt(70000)), false, "past the window it fails"); });
   eq(await health(), [503, { error: "grants not written" }], "past the window it is not");
 });
 
@@ -463,16 +460,32 @@ Deno.test("a changed grant write that times out is written again when the flag g
   eq(handed, [ANA, [], ANA], "the old set is written again: the database may hold []");
 });
 
-Deno.test("the grants loop retries a wait inside its window and ends with the error of a failure", async () => {
+Deno.test("the grants loop backs off and keeps going after a failure, never ending the process", async () => {
   const slept: number[] = [];
   const sleep = (ms: number) => { slept.push(ms); return Promise.resolve(); };
-  const script = (steps: (boolean | Error)[]) => ({ attempt: (_: number) => { const r = steps.shift()!; return r instanceof Error ? Promise.reject(r) : Promise.resolve(r); } });
+  const script = (steps: boolean[]) => ({ attempt: (_: number) => Promise.resolve(steps.shift()!) });
   await grantsLoop(script([false, false, true]), { repeat: false, sleep });
-  eq(slept, [2000, 4000], "waits back off, then it returns once written");
+  eq(slept, [2000, 4000], "waits double, then it returns once written");
   slept.length = 0;
-  const err = await grantsLoop(script([false, new Error("billing_grant answered 401: x")]), { repeat: true, sleep }).then(() => "returned", (e) => e.message);
-  eq(err, "billing_grant answered 401: x", "a failure propagates, never retried for ever");
-  slept.length = 0;
-  const err2 = await grantsLoop(script([true, new Error("flag down")]), { repeat: true, sleep }).then(() => "returned", (e) => e.message);
-  eq([err2, slept], ["flag down", [60000]], "a failure after a success ends it too");
+  // With flags it never returns: the script ends the run by throwing from its sleep.
+  const steps = [false, false, false, false, false, false, false, true, false];
+  const stop = new Error("test over");
+  let rounds = 0;
+  const err = await grantsLoop(script(steps), { repeat: true, sleep: (ms) => { slept.push(ms); if (++rounds === 9) throw stop; return Promise.resolve(); } }).then(() => "returned", (e) => e);
+  eq([err === stop, slept], [true, [2000, 4000, 8000, 16000, 32000, 60000, 60000, 60000, 60000]], "capped at a minute, a success waits a minute, a failure after one backs off again");
+});
+
+Deno.test("a probe whose door lookup fails gets a 502 and neither transport is called", async () => {
+  const quietly = console.error;
+  console.error = () => {};
+  try {
+    for (const [why, door] of [["flagd 503", () => new Response("", { status: 503 })], ["fetch rejects", () => Promise.reject(new TypeError("connection refused")) as unknown as Response]] as const) {
+      const t = trialStage({ door });
+      const res = await t.make({ doorFlag: "stripe_door" })(new Request("https://a.example/billing/probe", { headers: { authorization: "Bearer reader" } }));
+      eq([why, res.status, t.broker.length], [why, 502, 0], "a 502, and nothing sent to the broker (so to neither transport)");
+      await res.body?.cancel();
+    }
+  } finally {
+    console.error = quietly;
+  }
 });

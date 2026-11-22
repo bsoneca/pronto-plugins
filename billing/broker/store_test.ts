@@ -3,7 +3,9 @@
 // store tests do. PGlite has one connection, so two Postgres locks at once are shown by the statements
 // that take them (an advisory lock held by a transaction); the memory store shows the waiting itself.
 import { PGlite } from "npm:@electric-sql/pglite@0.3.7";
-import { MemoryStore, PostgresStore, SCHEMA, SQL, type Sql, type Store } from "./store.ts";
+import { MemoryStore, PostgresStore, SCHEMA, SQL, type Sql, step, type Store, target } from "./store.ts";
+import { schemaSql } from "./schema_gen.ts";
+import { RULES } from "../rules.ts";
 
 function assertEquals(a: unknown, b: unknown, m = "") {
   if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m} expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
@@ -19,12 +21,19 @@ function pglite(pg: PGlite): Sql {
   return of(pg);
 }
 
+/** The schema as the release (or an app's migration) applies it: the broker itself makes no tables. */
+async function applySchema(sql: Sql): Promise<void> {
+  for (const statement of SCHEMA) await sql.unsafe(statement);
+}
+
 const stores: [string, () => Promise<Store>][] = [
   ["memory", () => Promise.resolve(new MemoryStore())],
   ["postgres", async () => {
-    const s = new PostgresStore(pglite(new PGlite()));
-    await s.migrate();
-    await s.migrate(); // idempotent: a second start finds the tables there
+    const sql = pglite(new PGlite());
+    await applySchema(sql);
+    await applySchema(sql); // idempotent: applied again, nothing changes
+    const s = new PostgresStore(sql);
+    await s.verify();
     return s;
   }],
 ];
@@ -94,7 +103,7 @@ Deno.test("memory store: an exclusive caller is skipped while another runs under
 Deno.test("postgres store: two stores on one database share what is in it", async () => {
   const sql = pglite(new PGlite());
   const a = new PostgresStore(sql), b = new PostgresStore(sql);
-  await a.migrate();
+  await applySchema(sql);
   const v = await a.tick("ver", 1000);
   assertEquals(await b.tick("ver", 1000), v + 1);
   for (let i = 0; i < 2; i++) await a.take("client", "ip", 3, 60_000);
@@ -143,7 +152,7 @@ const claimable: [string, () => Promise<{ s: Store; expire: (kind: string, id: s
   ["postgres", async () => {
     const sql = pglite(new PGlite());
     const s = new PostgresStore(sql);
-    await s.migrate();
+    await applySchema(sql);
     // PGlite's clock ticks in milliseconds, and a token is the row's expiry as text: let one pass so a new claim's differs.
     return { s, expire: async (kind, id) => { await sleep(5); await sql.unsafe(`UPDATE billing_seen SET expires = now() - interval '1 second' WHERE kind = $1 AND id = $2`, [kind, id]); } };
   }],
@@ -221,22 +230,29 @@ Deno.test("postgres store: a table made before the claim state column gets it, a
   await sql.unsafe(`CREATE TABLE billing_seen (kind text NOT NULL, id text NOT NULL, expires timestamptz NOT NULL, PRIMARY KEY (kind, id))`);
   await sql.unsafe(`INSERT INTO billing_seen VALUES ('stripe event', 'evt_old', now() + interval '3 days')`);
   const s = new PostgresStore(sql);
-  await s.migrate();
-  await s.migrate();
+  await applySchema(sql);
+  await applySchema(sql);
   assertEquals((await s.claim("stripe event", "evt_old", 120_000)).state, "done", "an old row is a finished one");
 });
 
-Deno.test("postgres store: migrate tries again only after a concurrent creation, and rethrows any other failure at once", async () => {
-  let tries = 0;
-  const failing = (error: unknown): Sql => ({ unsafe: () => { tries++; return Promise.reject(error); }, begin: (fn) => fn(failing(error)) });
-  const refused = Object.assign(new Error("password authentication failed"), { code: "28P01" });
-  await new PostgresStore(failing(refused)).migrate().then(() => { throw new Error("should fail"); }, (e) => assertEquals(e, refused));
-  assertEquals(tries, 1, "no second try for a refused login");
-  tries = 0;
-  const raced = Object.assign(new Error('duplicate key value violates unique constraint "pg_type_typname_nsp_index"'), { code: "23505" });
-  await new PostgresStore(failing(raced)).migrate().then(() => { throw new Error("should fail"); }, (e) => assertEquals(e, raced));
-  assertEquals(tries, 3, "the creation race is tried again, three times in all");
-  assertEquals(SCHEMA.some((q) => /ADD COLUMN IF NOT EXISTS state/.test(q)), true);
+Deno.test("postgres store: the broker makes no tables and says what is missing", async () => {
+  const bare = pglite(new PGlite());
+  const err = await new PostgresStore(bare).verify().then(() => "started", (e) => (e as Error).message);
+  assertEquals(/missing table billing_counter, table billing_window, table billing_seen/.test(err) && /schema\.sql/.test(err), true, err);
+  assertEquals((await bare.unsafe(`SELECT to_regclass('billing_seen') IS NOT NULL AS there`))[0].there, false, "nothing was created");
+  // A table without the state column or its constraint is named too.
+  const old = pglite(new PGlite());
+  for (const t of ["billing_counter (name text)", "billing_window (name text, started timestamptz)", "billing_seen (kind text, id text, expires timestamptz)"]) await old.unsafe(`CREATE TABLE ${t}`);
+  const partial = await new PostgresStore(old).verify().then(() => "started", (e) => (e as Error).message);
+  assertEquals(/column billing_seen\.state, constraint billing_seen_state/.test(partial), true, partial);
+  await applySchema(old);
+  await new PostgresStore(old).verify();
+});
+
+Deno.test("schema.sql is the add-only, idempotent script store.ts's SCHEMA says", async () => {
+  assertEquals(await Deno.readTextFile(new URL("./schema.sql", import.meta.url)), schemaSql());
+  assertEquals(SCHEMA.some((q) => /\bDROP\b|\bDELETE\b|\bTRUNCATE\b/i.test(q)), false, "nothing is dropped");
+  assertEquals(SCHEMA.every((q) => /IF NOT EXISTS/.test(q)), true, "every statement checks first");
 });
 
 // The claim lifecycle as data, for each store: a step is [what is done, what it answers]. A claim is named
@@ -246,6 +262,7 @@ type Step =
   | ["expire"]
   | ["complete", string, boolean]
   | ["forget", string]
+  | ["release", string]
   | ["remember"];
 const lifecycle: [string, Step[]][] = [
   ["a claim is busy to another, then done once completed", [["claim", "a", "claimed"], ["claim", "x", "busy"], ["complete", "a", true], ["claim", "x", "done"]]],
@@ -253,6 +270,9 @@ const lifecycle: [string, Step[]][] = [
   ["a stale token completes nothing and the new claim holds", [["claim", "a", "claimed"], ["expire"], ["claim", "b", "claimed"], ["complete", "a", false], ["claim", "x", "busy"], ["complete", "b", true], ["claim", "x", "done"]]],
   ["a completed claim cannot complete twice", [["claim", "a", "claimed"], ["complete", "a", true], ["complete", "a", false], ["claim", "x", "done"]]],
   ["a forgotten claim cannot be completed", [["claim", "a", "claimed"], ["forget", "a"], ["complete", "a", false], ["claim", "b", "claimed"]]],
+  ["a holder releases its claim; a stale or no longer live one releases nothing", [["claim", "a", "claimed"], ["expire"], ["claim", "b", "claimed"], ["release", "a"], ["claim", "x", "busy"], ["release", "b"], ["claim", "c", "claimed"]]],
+  ["a lease that ended completes nothing until it is claimed again", [["claim", "a", "claimed"], ["expire"], ["complete", "a", false], ["claim", "b", "claimed"], ["complete", "b", true]]],
+  ["done is terminal: not claimable, not releasable", [["claim", "a", "claimed"], ["complete", "a", true], ["release", "a"], ["claim", "x", "done"]]],
   ["a remembered event is done, whatever claimed it", [["claim", "a", "claimed"], ["remember"], ["claim", "x", "done"], ["complete", "a", false]]],
 ];
 for (const [name, make] of claimable) {
@@ -268,7 +288,7 @@ for (const [name, make] of claimable) {
           if (c.state === "claimed") tokens.set(step[1], c.token);
         } else if (step[0] === "expire") await expire("stripe event", "evt");
         else if (step[0] === "complete") assertEquals(await s.complete("stripe event", "evt", tokens.get(step[1])!, 60_000), step[2], label);
-        else if (step[0] === "forget") await s.forget("stripe event", "evt", tokens.get(step[1]));
+        else if (step[0] === "forget" || step[0] === "release") await s.forget("stripe event", "evt", tokens.get(step[1]));
         else await s.remember("stripe event", "evt", 60_000);
       }
     });
@@ -277,9 +297,8 @@ for (const [name, make] of claimable) {
 
 Deno.test("postgres store: the state column only takes the declared states, and the constraint is made once", async () => {
   const sql = pglite(new PGlite());
-  const s = new PostgresStore(sql);
-  await s.migrate();
-  await s.migrate();
+  await applySchema(sql);
+  await applySchema(sql);
   await sql.unsafe(`INSERT INTO billing_seen (kind, id, expires, state) VALUES ('k', 'ok', now(), 'claimed')`);
   const bad = await sql.unsafe(`INSERT INTO billing_seen (kind, id, expires, state) VALUES ('k', 'bad', now(), 'busy')`).then(() => "accepted", (e) => String((e as Error).message));
   assertEquals(/billing_seen_state/.test(bad), true, `refused by the constraint: ${bad}`);
@@ -287,7 +306,74 @@ Deno.test("postgres store: the state column only takes the declared states, and 
   const old = pglite(new PGlite());
   await old.unsafe(`CREATE TABLE billing_seen (kind text NOT NULL, id text NOT NULL, expires timestamptz NOT NULL, state text NOT NULL DEFAULT 'done', PRIMARY KEY (kind, id))`);
   await old.unsafe(`INSERT INTO billing_seen (kind, id, expires, state) VALUES ('k', 'a', now(), 'claimed')`);
-  await new PostgresStore(old).migrate();
+  await applySchema(old);
   const refused = await old.unsafe(`INSERT INTO billing_seen (kind, id, expires, state) VALUES ('k', 'b', now(), 'x')`).then(() => "accepted", () => "refused");
   assertEquals(refused, "refused");
+});
+
+// The transition contract: every sequence of up to `depth` operations, run on each store and on the
+// declaration itself (`step`), must answer alike. The model keeps only what rules.cue declares: a state, whether its
+// time ended, and which token is current.
+type Op = "claim" | "complete-holder" | "complete-stale" | "release-holder" | "release-stale" | "remember" | "expire";
+const OPS: Op[] = ["claim", "complete-holder", "complete-stale", "release-holder", "release-stale", "remember", "expire"];
+function sequences(depth: number): Op[][] {
+  let out: Op[][] = [[]];
+  for (let d = 0; d < depth; d++) out = out.flatMap((q) => OPS.map((o) => [...q, o]));
+  return out;
+}
+for (const [name, make] of claimable) {
+  Deno.test(`${name} store: every sequence of claim, completion, release, remember and expiry follows rules.cue's transitions`, async () => {
+    const { s, expire } = await make();
+    const depth = name === "memory" ? 4 : 3;
+    let n = 0;
+    for (const seq of sequences(depth)) {
+      const id = `seq-${n++}`;
+      let where = "absent" as "absent" | "claimed" | "done", token = 0, held: string | null = null, issued = 0;
+      for (const op of seq) {
+        const label = `${id} ${seq.join(",")} at ${op}`;
+        if (op === "claim") {
+          const want = step("claim", where, false);
+          const got = await s.claim("stripe event", id, 120_000);
+          if (want === null) assertEquals(got.state, where === "done" ? "done" : "busy", label);
+          else {
+            assertEquals(got.state, "claimed", label);
+            held = (got as { token: string }).token;
+            token = ++issued;
+            where = want as typeof where;
+          }
+        } else if (op === "complete-holder" || op === "complete-stale") {
+          const mine = op === "complete-holder" && held !== null;
+          const want = step("complete", where, mine);
+          const got = await s.complete("stripe event", id, mine ? held! : "stale", 60_000);
+          assertEquals(got, want !== null, label);
+          if (want !== null) where = want as typeof where;
+        } else if (op === "release-holder" || op === "release-stale") {
+          const mine = op === "release-holder" && held !== null;
+          const want = step("release", where, mine);
+          await s.forget("stripe event", id, mine ? held! : "stale");
+          if (want !== null) where = want as typeof where;
+        } else if (op === "remember") {
+          await s.remember("stripe event", id, 600_000);
+          where = step("remember", where, false) as typeof where;
+        } else {
+          await expire("stripe event", id);
+          if (where !== "absent") where = step("expire", where, false) as typeof where;
+        }
+      }
+      void token;
+    }
+  });
+}
+
+Deno.test("rules.cue's transitions leave no state without a way in and name every event the stores use", () => {
+  const states = new Set<string>(RULES.claimStates);
+  for (const t of RULES.claimTransitions) {
+    assertEquals([t.from === "absent" || states.has(t.from), t.to === "absent" || states.has(t.to)], [true, true], JSON.stringify(t));
+  }
+  for (const to of RULES.claimStates) assertEquals(RULES.claimTransitions.some((t) => t.to === to), true, `${to} is reached`);
+  assertEquals(RULES.claimTransitions.filter((t) => t.from === "done").every((t) => t.event === "remember" || t.event === "expire"), true, "done is terminal until retention expires");
+  assertEquals(target("claim", "absent"), "claimed");
+  assertEquals(target("complete", "claimed"), "done");
+  assertEquals(step("complete", "claimed", false), null, "completion needs the holder's token");
+  assertEquals(step("claim", "claimed", false), null, "a live claim is not claimable");
 });
