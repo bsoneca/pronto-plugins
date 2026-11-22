@@ -65,3 +65,32 @@ Deno.test("the installer writes the state lists as a spec package, never the bro
   eq([...Deno.readDirSync(dir)].some((e) => /^9\d\d_billing_broker\.sql$/.test(e.name)), false, "a reinstall writes none");
   await Deno.remove(app, { recursive: true });
 });
+
+// PRONTO-1518: the grants name every grantee's account, so the flag that carries them is never one a page reads
+// (flags_plugin.cue's `client`, which the door's OFREP serves alone). billing_plugin.cue imports bayt, which needs the
+// module registry, so the test evaluates the plugin's own `flags: billing_grants` block with the flags plugin alone,
+// the grants stubbed. cue comes from PATH, as the plugins tree pins it.
+Deno.test("the flag billing_grants is not a client flag, and an app cannot make it one", async () => {
+  const dec = new TextDecoder();
+  const plugin = await Deno.readTextFile(new URL("./app/billing_plugin.cue", import.meta.url));
+  eq(plugin.includes(`"origin"`), false, "_billingFlags has no origin: through the door billing's flags are not there");
+  const from = plugin.indexOf("\tflags: billing_grants: {");
+  const block = plugin.slice(from, plugin.indexOf("\n\t}\n", from) + 4);
+  eq(from > 0 && block.includes("client: false"), true, "the plugin says billing_grants is not client");
+  const app = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${app}/program.cue`, "package shop\n");
+  const flags = await new Deno.Command(Deno.execPath(), { args: ["run", "--no-config", "--allow-read", "--allow-write", new URL("../flags/install.ts", import.meta.url).pathname, app] }).output();
+  if (!flags.success) throw new Error(dec.decode(flags.stderr));
+  const cue = async (extra: string) => {
+    await Deno.writeTextFile(`${app}/flags_spec.cue`, `package shop\n_billingGrants: "[]"\n${block}\n${extra}\n`);
+    return await new Deno.Command("cue", { args: ["export", `${app}/flags_plugin.cue`, `${app}/flags_spec.cue`, "-e", "flagd.document.flags.billing_grants", "--out", "json"], stdout: "piped", stderr: "piped" }).output();
+  };
+  try {
+    const ok = await cue("");
+    if (!ok.success) throw new Error(dec.decode(ok.stderr));
+    eq(JSON.parse(dec.decode(ok.stdout)).metadata, undefined, "billing_grants is in no flag set, so no page reads it");
+    eq((await cue("flags: billing_grants: client: true")).success, false, "client: true on billing_grants fails to unify");
+  } finally {
+    await Deno.remove(app, { recursive: true });
+  }
+});

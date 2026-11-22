@@ -11,8 +11,10 @@ Feature flags for a pronto app, on [OpenFeature](https://openfeature.dev) and [f
 - The flags in the app's database: generate also writes `flags/flags.sql`, which an app with a database lists among its raw migrations. It adds `pronto_flags.flag_on(flag, player)`, which answers as flagd does (default, local at hand, accounts), so the database can refuse a feature's writes while its flag is off; a targeting that yields null or a variant the flag lacks reads the default variant (flagd's documented behaviour), but one the evaluator cannot evaluate (an operator it lacks, a malformed rule, a database error) raises, never the default. `pronto_flags.flag_on_strict(flag, player)` is the same read under the access gate's name (pronto-api's `api_on`, an app's key gate). A flag the database holds no document for is off. With `flagsLive.database` (the app's command that runs SQL on its stdin in the released database), every write of the live flags (push, its restore, rollback) is written there too, through `pronto_flags.put()`, with flagsLive.url's host; a write that fails there fails the push. A test database holds the flags baked into the image instead: one whose fixture inserts `pronto_flags.at_hand` and calls `pronto_flags.fill_local()` (a release's database never has the marker). To adopt it: reinstall, run `generate` twice (the first writes the rule that writes `flags/flags.sql` before pronto's writer, the second writes the file), then list it among the raw migrations, numbered before any migration that reads it.
 
 ```cue
-flags: premium: {default: false, local: true}
+flags: premium: {default: false, local: true, client: true}
 ```
+
+- **`client`** (default false, PRONTO-1518) says whether pages read the flag. The door's `/ofrep/` route sets flagd's selector `flagSetId=client` on every request, replacing a page's own, and `client: true` puts the flag in that flag set (`metadata.flagSetId`), so a flag that is not `client` is a 404 through the door and absent from bulk evaluation. The app's services reach flagd without a selector and read every flag. Billing's `billing_grants` is `client: false` for good: it names every grantee's account.
 
 ## Use
 

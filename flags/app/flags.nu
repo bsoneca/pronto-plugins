@@ -48,6 +48,11 @@ export def route [] {
 		"        header_up dapr-app-id flagd"
 		"        header_up Host {upstream_hostport}"
 		"        header_up X-Pronto-Host {host}"
+		# Only the flags marked `client` are a page's to read (PRONTO-1518). header_up sets the value, replacing
+		# a page's own. An absent or empty selector (`flagSetId=` empty) returns flagd's default set, which holds
+		# the server-only flags, so the door always sets it. Billing reaches flagd over the dapr mesh with no
+		# selector, so it keeps reading everything.
+		"        header_up Flagd-Selector \"flagSetId=client\""
 		"      }"
 		"    }"
 		"  }"

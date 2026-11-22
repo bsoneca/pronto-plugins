@@ -33,6 +33,10 @@ import (
 	// but a flag still opens a feature and never guards it: what an account
 	// may do stays the database's.
 	accounts?: [...string & =~"^[A-Za-z0-9_-]{1,64}$"]
+	// Whether pages read it: the door serves /ofrep/ from flagd's flag set "client" alone, so a flag
+	// that is not `client` is read by the app's own services (the database, billing over the mesh) and
+	// never by a page: a page asking for it gets 404, and bulk evaluation leaves it out (PRONTO-1518).
+	client: *false | bool
 }
 #Flags: [=~"^[a-z][a-z0-9_-]{0,63}$"]: #Flag
 flags: #Flags
@@ -41,6 +45,10 @@ flags: #Flags
 // request reached and which account it is from (flagd's --context-from-header,
 // over a targetingKey in the body): a page cannot claim either.
 _flagsLocal: ["localhost", "127.0.0.1", "caddy"]
+
+// The flagd flag set the door's OFREP serves (flags.nu's route sets the selector flagSetId=client). The one
+// place it is spelled in CUE; a flag's `client` puts it in this set.
+_flagsClientSet: "client"
 
 // flagd's flag definitions (https://flagd.dev/reference/flag-definitions/),
 // which generate writes to flags/flags.json for the flagd image to carry.
@@ -57,6 +65,7 @@ flagd: document: {
 					if f.accounts != _|_ {local: f.local}
 				}
 				defaultVariant: "default"
+				if f.client {metadata: flagSetId: _flagsClientSet}
 				if f.local != _|_ && f.accounts == _|_ {
 					targeting: {"if": [{"in": [{"var": "host"}, _flagsLocal]}, "local", "default"]}
 				}
