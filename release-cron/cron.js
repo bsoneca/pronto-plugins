@@ -612,7 +612,7 @@ export const legacyFileLock = (isFile, pid, alive) => !isFile ? "none" : pid && 
 // onto an empty directory replaces it on macOS, which let a run take a lock that the older driver had just made). The pid is written to a
 // file of its own and renamed to `pid`, so a reader sees none or the whole of it. A directory with no pid yet is an acquisition in
 // progress (the older driver's gap between its mkdir and its write): waited for `graceMs` by the directory's age, then stale.
-// `io` is the file system and the clock (the driver's, or the fake of tests/unit/cronlock.js): mkdir, writeFile, rename, readFile, stat
+// `io` is the file system and the clock (the driver's, or the fake of tests/unit/cronlock.js): mkdir, writeFile, link, rename, readFile, stat
 // (`{ isFile, mtimeMs }`), remove, alive, now, sleep, uuid, pid. Its errors carry `code` ("EEXIST", "ENOENT", ...).
 
 // A claim that failed: contention only where the destination already exists; anything else is an error to report, never to swallow.
@@ -628,13 +628,24 @@ export const holderOf = (err, text) => {
   return /^[0-9]+$/.test(t) && Number(t) > 0 ? { kind: "pid", pid: Number(t) } : { kind: "malformed", text: t.slice(0, 40) };
 };
 
-// What a lock's holder means for a run: "busy" (a live pid), "stale" (a dead pid, a legacy file with none, or an acquisition that has
-// lasted `graceMs`), "pending" (a directory not yet holding a pid, within the grace) or "unknown" (the holder cannot be read or is not a pid:
-// fail closed, the lock is neither taken nor removed). `isFile`: the plain file the flock version left. `alive`: the pid answers a signal.
+// What a lock's holder means for a run: "busy" (a live pid), "stale" (a verified dead pid, or the flock version's file with none),
+// "pending" (a directory not yet holding a pid, within `graceMs` of its making) or "unknown" (the holder cannot be read or is not a pid, or a
+// directory has had no pid for the grace: its maker may only be paused and would still write its pid, so it is an unresolved acquisition,
+// fail closed: the lock is neither taken nor removed, and a person removes a directory whose maker is gone). `isFile`: the plain file the
+// flock version left. `alive`: the pid is confirmed alive (a probe that could not tell throws, see aliveFromKill).
 export const lockVerdict = (holder, alive, ageMs, graceMs, isFile) =>
   holder.kind === "pid" ? (isFile ? (legacyFileLock(true, holder.pid, alive) === "busy" ? "busy" : "stale") : alive ? "busy" : "stale")
-  : holder.kind === "empty" || holder.kind === "absent" ? (isFile || ageMs >= graceMs ? "stale" : "pending")
+  : holder.kind === "empty" || holder.kind === "absent" ? (isFile ? "stale" : ageMs >= graceMs ? "unknown" : "pending")
   : "unknown";
+
+// What `kill -0 pid` (process.kill(pid, 0)) says, from its error `code` (null when it succeeded): the process exists (null, EPERM: a live
+// process of another user), is confirmed missing (ESRCH: only that lets a lock be reclaimed), or cannot be told (anything else throws:
+// fail closed, a live release is never evicted on a probe that failed).
+export const aliveFromKill = (code) => {
+  if (code === null || code === undefined || code === "EPERM") return true;
+  if (code === "ESRCH") return false;
+  throw new Error(`release-cron lock: cannot tell whether the holder is alive (kill -0: ${code}); not taken, not removed`);
+};
 
 const lockFail = (op, path, e) => new Error(`release-cron lock: ${op} ${path}: ${e && e.code ? `${e.code}: ` : ""}${e && e.message ? e.message : e}`);
 
@@ -643,10 +654,20 @@ const lockFail = (op, path, e) => new Error(`release-cron lock: ${op} ${path}: $
 export const lockClaim = (io, path) => {
   try { io.mkdir(path); } catch (e) { if (claimError(e && e.code) === "contention") return false; throw lockFail("mkdir", path, e); }
   const tmp = `${path}/pid.${io.pid}.${io.uuid()}.tmp`;
-  try { io.writeFile(tmp, String(io.pid)); io.rename(tmp, `${path}/pid`); } catch (e) {
-    try { io.remove(path); } catch { /* left for the stale rule */ }
+  // Published with link(2), which refuses a pid file that exists (rename would replace another run's): of two runs that made the directory
+  // (the slower one paused after its mkdir, the directory since replaced), only one pid file is ever linked, and the other throws.
+  try { io.writeFile(tmp, String(io.pid)); io.link(tmp, `${path}/pid`); } catch (e) {
+    if (e && e.code === "EEXIST") throw new Error(`release-cron lock: ${path}/pid already names another run: the lock was taken while this one was paused; run not started`);
+    // Only a directory with no pid is removed: one another run has put its pid in since (this run was paused) is left alone.
+    try { io.readFile(`${path}/pid`); } catch (re) { if (re && re.code === "ENOENT") { try { io.remove(path); } catch { /* left */ } } }
     throw lockFail("write pid in", path, e);
   }
+  try { io.remove(tmp); } catch { /* a stray file in the lock, harmless */ }
+  // Ownership is the pid as it stands now: a run that was paused after its mkdir, whose directory another run has since replaced, must not
+  // report success because its write landed somewhere (PRONTO-1032).
+  let owner;
+  try { owner = io.readFile(`${path}/pid`).trim(); } catch (e) { throw lockFail("verify pid in", path, e); }
+  if (owner !== String(io.pid)) throw new Error(`release-cron lock: ${path}/pid names ${JSON.stringify(owner.slice(0, 40))}, not this run (${io.pid}): the lock was taken by another run while this one was paused; run not started`);
   return true;
 };
 
@@ -722,6 +743,8 @@ export const signalStep = (childrenAlive, previews, elapsed, grace, teardown) =>
 
 // Only an ssh transport failure (exit 255) is worth reading the serving command again: any other failure says what is wrong.
 export const servingRetryable = (code) => sshDropped(code);
+// While the node is read for a release whose ssh dropped: "wait" for the next read after an ssh transport failure, "fail" at once for any other exit (the serving command ran and failed).
+export const rescueReadStep = (code) => servingRetryable(code) ? "wait" : "fail";
 
 // The outcome a run ends with once a signal came: its stop, never a verdict (no gap, no bisect). A
 // release that had already landed keeps its outcome.
