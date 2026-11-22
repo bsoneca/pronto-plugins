@@ -38,7 +38,7 @@ def runtime-dir []: nothing -> string {
 def fixture-apps []: nothing -> list<record> {
 	[
 		{name: "aprende", services: [database crud electric caddy auth migrate], build: [database crud electric auth caddy migrate]}
-		{name: "brawl-chess", package: "brawlchess", services: [database crud electric caddy auth migrate render], build: [database crud electric auth caddy migrate render]}
+		{name: "brawl-chess", package: "brawlchess", tuned: true, services: [database crud electric caddy auth migrate render], build: [database crud electric auth caddy migrate render]}
 		{name: "studio", services: [database crud electric caddy auth migrate render ticker imgproxy], build: [ticker imgproxy database crud electric auth caddy migrate render]}
 	]
 }
@@ -130,7 +130,8 @@ def canon []: any -> any {
 
 # What upstream or the engine wrote to the cluster, as the order a release makes it in: each object
 # applied, each Job replaced, the cluster annotated, each rollout waited on. The Namespace, applied
-# first by the engine and with the rest by upstream, and the engine's record, are the engine's own;
+# first by the engine and with the rest by upstream, the engine's record, and the generator and Secret of a database login
+# (the brawl-chess fixture's analytics_reader) are the engine's own;
 # upstream's cleanup of an earlier airlock (the engine refuses the airlock) is upstream's.
 def writes [w: record]: nothing -> list<string> {
 	let f = ($w.state | path join calls.jsonl)
@@ -143,7 +144,7 @@ def writes [w: record]: nothing -> list<string> {
 			"rollout" => (if $a.1 == "status" { [$"rollout ($a.2)"] } else { [] })
 			_ => []
 		}
-	} | flatten | where {|l| not ($l starts-with "apply Namespace/") and $l != "apply ConfigMap/pronto-release" and not ($l =~ '^apply Configuration/.*-caddy-invoke-only$') }
+	} | flatten | where {|l| not ($l starts-with "apply Namespace/") and $l != "apply ConfigMap/pronto-release" and not ($l =~ '^apply Configuration/.*-caddy-invoke-only$') and not ($l =~ '^apply (Password|ExternalSecret)/.*-analytics-reader-(password|db)$') }
 }
 
 # The paths of a value with what is at each, one line a leaf: two values' difference is the lines of one only.
@@ -217,6 +218,20 @@ def undeclared []: list -> list {
 		}
 }
 
+# What the engine's tunings (replicas, containers' resources, the database's settings and logins: node.cue's #Tune) may
+# change, taken out of both sides of a comparison for an app that sets them: an app that sets none is compared whole.
+def without-tunings []: list -> list {
+	$in
+		| where {|o| not ($o.kind in [Password ExternalSecret] and ($o.metadata.name | str contains "analytics-reader")) }
+		| each {|o|
+			match $o.kind {
+				"Deployment" => ($o | reject -o spec.replicas | update spec.template.spec.containers {|d| $d.spec.template.spec.containers | each {|c| $c | reject -o resources } })
+				"Cluster" => ($o | reject -o spec.instances spec.storage.size spec.postgresql.parameters spec.postgresql.synchronous spec.managed.roles spec.primaryUpdateStrategy spec.primaryUpdateMethod spec.replicationSlots spec.enablePDB spec.smartShutdownTimeout spec.stopDelay spec.resources)
+				_ => $o
+			}
+		}
+}
+
 # The images a release would have pushed, as a CUE file: the engine refuses an image that is not pinned by digest.
 def pushed-cue [fx: record]: nothing -> string {
 	let digest = ("a" | fill -c "a" -w 64)
@@ -238,7 +253,18 @@ def test_objects_change_only_as_declared [fx: record] {
 		# the export wants the hosts the variant names: the preview has its own
 		assert equal $r.exit_code 0 $"($variant)\n($r.stderr)"
 		let both = ($r.stdout | from json)
-		assert equal ($both.engine | undeclared | canon | to json) ($both.upstream | canon | to json) $"variant ($variant | str trim)"
+		let tuned = ($fx.tuned? | default false)
+		let engine = ($both.engine | undeclared)
+		let upstream = $both.upstream
+		assert equal (if $tuned { $engine | without-tunings } else { $engine } | canon | to json) (if $tuned { $upstream | without-tunings } else { $upstream } | canon | to json) $"variant ($variant | str trim)"
+		if $tuned {
+			# the tunings themselves: the numbers the fixture's release.cue names, in production and in the preview
+			let crud = ($both.engine | where {|o| $o.kind == "Deployment" and $o.metadata.name == $"($fx.name)-crud" } | first)
+			let db = ($both.engine | where kind == Cluster | first)
+			assert equal $crud.spec.replicas (if ($variant | str contains "preview") { 2 } else { 3 }) "crud's replicas"
+			assert equal $db.spec.instances 3 "the database's instances"
+			assert ($db.spec.managed.roles | any {|r| $r.name == "analytics_reader" }) "the login is a managed role"
+		}
 		# the door's Dapr configuration: its own, invocation alone allowed; every other Deployment keeps the shared one
 		let own = ($both.engine | where {|o| $o.kind == "Configuration" and ($o.metadata.name | str ends-with "-caddy-invoke-only") })
 		assert equal ($own | length) 1 "one Configuration for the door"

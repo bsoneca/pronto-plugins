@@ -14,7 +14,13 @@ _fixture: {
 			apiVersion: "postgresql.cnpg.io/v1"
 			kind:       "Cluster"
 			metadata:   {name: "app-db", namespace: ns}
-			spec:       {instances: 1, imageName: "\(reg)/app-database:17@sha256:\(_d)"}
+			spec: {
+				instances: 1
+				postgresql: parameters: {wal_level: "logical", max_connections: "200", max_replication_slots: "128"}
+				imageName: "\(reg)/app-database:17@sha256:\(_d)"
+				managed: roles: [{name: "electric", ensure: "present", login: true}, {name: "authenticator", ensure: "present", login: true, inRoles: ["anon"]}]
+				storage: {size: "1Gi", storageClass: "local-path"}
+			}
 		},
 		{
 			apiVersion: "batch/v1"
@@ -32,9 +38,32 @@ _fixture: {
 			apiVersion: "apps/v1"
 			kind:       "Deployment"
 			metadata:   {name: "app-crud", namespace: ns}
-			spec: template: spec: {
-				initContainers: [{name: "wait", image: "\(reg)/app-crud:latest@sha256:\(_d)"}]
-				containers:     [{name: "crud", image: "\(reg)/app-crud:latest@sha256:\(_d)"}]
+			spec: {
+				replicas: 1
+				template: spec: {
+					initContainers: [{name: "wait", image: "\(reg)/app-crud:latest@sha256:\(_d)"}]
+					containers:     [{name: "crud", image: "\(reg)/app-crud:latest@sha256:\(_d)", resources: {requests: {cpu: "50m", memory: "64Mi"}, limits: {cpu: "500m", memory: "256Mi"}}}]
+				}
+			}
+		},
+		{
+			apiVersion: "apps/v1"
+			kind:       "Deployment"
+			metadata:   {name: "app-caddy", namespace: ns}
+			spec: {
+				replicas: 1
+				template: spec: containers: [{name: "caddy", image: "\(reg)/app-caddy:latest@sha256:\(_d)", resources: {requests: {cpu: "50m", memory: "64Mi"}, limits: {cpu: "500m", memory: "256Mi"}}}]
+			}
+		},
+		{
+			// a single-writer runtime service: the release's default replicas leave it alone
+			apiVersion: "apps/v1"
+			kind:       "Deployment"
+			metadata:   {name: "app-ticker", namespace: ns}
+			spec: {
+				replicas: 1
+				strategy: type: "Recreate"
+				template: spec: containers: [{name: "ticker", image: "\(reg)/app-ticker:latest@sha256:\(_d)"}]
 			}
 		},
 		{apiVersion: "v1", kind: "Service", metadata: {name: "crud", namespace: ns}},

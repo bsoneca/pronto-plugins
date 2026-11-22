@@ -63,6 +63,21 @@ production only) and refuses them, as the `violations` field and an error in `ob
 serves (`#Served`, per operator version), a cluster-scoped object, another namespace, a Job outside `jobOrder`,
 a Gateway for another host, an image that is neither in the registry nor pinned by digest.
 
+Replicas and the database are patches over upstream's objects, each present only where the app sets the field (an app
+that sets none gets upstream's render as it is, which the contract test holds):
+
+- `replicas` / `previewReplicas`: the pod count of every Deployment but a single writer's (upstream's `Recreate`
+  strategy); `scale: "<app>-caddy": {replicas, preview}` for the one named (upstream's full name; an unknown name is
+  refused). A preview without a number keeps upstream's one pod.
+- `containerResources: <container>: {requests, limits}`: the fields named replace upstream's in that container, in
+  every Deployment that has one; `postgres` is the database's own (and needs `database`, even `{}`).
+- `database: {instances, storage, parameters, synchronous, smartShutdown, enablePDB, haSlots, logins, backup}`:
+  the CloudNativePG Cluster's instances, volume (with a WAL cap per slot of a quarter of it), Postgres parameters,
+  synchronous replication, a bounded stop, PodDisruptionBudget and slots; with standbys a switchover, not a restart,
+  moves the primary. A `logins` entry is a managed role with a generated password in a Secret of its own
+  (`<app>-<login>-db`, which also carries the `url` a service reads). `backup` is `backups` (one emitter, `#Backups`).
+  The release waits for the primary and then for every instance ready on the image.
+
 ### The flow (`release.nu`)
 
 Upstream's own order (k8s/release.nu `main`), with the engine's extra steps marked: the app and the tunnel;

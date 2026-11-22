@@ -2,6 +2,8 @@ package schema
 
 import (
 	"list"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -119,6 +121,46 @@ import (
 	egress: *[] | [...{to?: [...{...}], ports?: [...{...}]}]
 }
 
+// The database's replicas and settings, as patches over upstream's CloudNativePG Cluster (`<app>-db`). Each field
+// is a patch: where `database` is not set, upstream's Cluster is applied as it renders.
+#Database: {
+	// One primary and instances-1 standbys; the operator keeps their PodDisruptionBudget. A preview runs as many.
+	instances: int & >=1 | *1
+	// The volume of each instance. Each replication slot may hold a quarter of it in WAL (max_slot_wal_keep_size,
+	// below), so a hung replica gives its slot up before it fills the disk.
+	storage?:       =~"^[1-9][0-9]*(Mi|Gi|Ti)$"
+	slotWalKeepMB?: int & >=64
+	// Postgres parameters of the app's own over upstream's.
+	parameters: {[string]: string}
+	// Seconds a stopping instance waits for its sessions (CloudNativePG's smartShutdownTimeout) before a fast
+	// shutdown. With standbys none: no standby is promoted while the old primary waits. Below the Cluster's
+	// stopDelay (120): the operator reads one at or past it as 0.
+	smartShutdown: int & >=0 & <120 | *[if instances > 1 {0}, 15][0]
+	// With standbys, quorum-based synchronous replication: a commit waits for `number` standbys, and a primary
+	// that lost them keeps writing under "preferred".
+	synchronous: {
+		method:         *"any" | "first"
+		number:         int & >=1 | *1
+		dataDurability: *"preferred" | "required"
+	}
+	// Replication slots kept on every instance, so a standby promoted keeps the others'.
+	haSlots: bool | *(instances > 1)
+	// CloudNativePG's own PodDisruptionBudgets (on by default; with one instance a budget blocks a drain).
+	enablePDB: bool | *true
+	// Logins of the app's own (a service's `database.login`): each a LOGIN role, a member of the roles the app's
+	// migrations made, its password generated in the namespace (Secret `<app>-<login, dashes>-db`, which
+	// also carries the `url` a service reads) and set by the operator.
+	logins: {[=~"^[a-z][a-z0-9_]*$"]: {inRoles: [...string]}}
+	// The nightly backups: the same as `Release.backups` (set one, not both unequal).
+	backup?: #Backups
+}
+
+// The requests and limits of a container, as patches over upstream's: a field named replaces upstream's, the rest stay.
+#ContainerResources: {
+	requests?: {[string]: string}
+	limits?:   {[string]: string}
+}
+
 // #Release is an app on the node.
 #Release: {
 	// The app's name: its compose project's, and the release's own Kubernetes names.
@@ -181,7 +223,19 @@ import (
 	}
 	operators: #Operators
 	backups?:  #Backups & {_name: name}
-	tenant?:   #Tenant
+	if database != _|_ if database.backup != _|_ {backups: database.backup}
+
+	// How many pods each Deployment of upstream's render runs, in production and in a preview: `replicas` and
+	// `previewReplicas` for every one, `scale` for the one named (its full name, `<app>-caddy`). A Deployment
+	// that upstream renders with a Recreate strategy (one writer) is left at one by the defaults and scaled
+	// by `scale` alone. Absent a number for the case, upstream's own count stays.
+	replicas?:        int & >=1
+	previewReplicas?: int & >=1
+	scale:            {[=~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"]: {replicas?: int & >=1, preview?: int & >=1}}
+	// Requests and limits by container name (crud, caddy, ...), and `postgres` for the database's.
+	containerResources: {[string]: #ContainerResources}
+	database?:          #Database
+	tenant?:            #Tenant
 	// The SOPS file applied into the namespace; absent, `secrets.metal.enc.yaml` when it exists.
 	secrets?: string
 	// The order the schema Jobs run in. A rendered Job not named here refuses the release: a new
@@ -260,6 +314,7 @@ import (
 					if o.spec != _|_ if o.spec.api != _|_ {
 						for k, v in o.spec.api if k != "allowed" {(k): v}
 					}
+
 					// Invoke is allowed and not exploitable: every route to the sidecar sets `dapr-app-id` with `header_up` (the
 					// generated Caddyfile), and Dapr resolves the target from that header before it reads a `/v1.0/invoke/<id>/`
 					// path, so a client-chosen path is only the method on `crud`. The release's door probes
@@ -337,7 +392,13 @@ import (
 		}],
 	])
 
-	_all: list.Concat([_patched, _added])
+	// What each of the database's logins needs: a generated password, and the Secret the operator and a service read.
+	_logins: [if release.database != _|_ for l, _ in release.database.logins for o in (#LoginObjects & {"release": release, login: l}).out {o}]
+
+	// Then the tunings of the release: replicas, the database's settings, the containers' resources, over everything
+	// above (a Deployment or the Cluster, whoever added it).
+	_pre: list.Concat([_patched, _added])
+	_all: list.Concat([[for o in _pre {(#Tune & {in: o, "release": release}).out}], _logins])
 
 	// The images a pod template or a database names.
 	_images: list.Concat([
@@ -366,6 +427,18 @@ import (
 		}],
 		[for o in _all if o.kind == "Gateway" for l in o.spec.listeners if l.hostname != release.host {
 			"Gateway/\(o.metadata.name) listens for \(l.hostname), not the release's host \(release.host)"
+		}],
+		[for n, _ in release.scale if len([for o in _pre if o.kind == "Deployment" if o.metadata.name == n {o}]) == 0 {
+			"scale names \(n), which is no Deployment of the render (\(strings.Join([for o in _pre if o.kind == "Deployment" {o.metadata.name}], ", ")))"
+		}],
+		[for n, _ in release.containerResources if n != "postgres" if len([for o in _pre if o.kind == "Deployment" for c in o.spec.template.spec.containers if c.name == n {c}]) == 0 {
+			"containerResources names \(n), which is no container of the render's Deployments (or postgres)"
+		}],
+		[if release.database == _|_ if release.containerResources["postgres"] != _|_ {
+			"containerResources.postgres needs `database` to be set, even as {}"
+		}],
+		[if release.database != _|_ if len(release.database.logins) > 0 if app.externalSecrets != _|_ if app.externalSecrets.enabled {
+			"database.logins generate their passwords in the namespace, which the app's externalSecrets store does not do yet"
 		}],
 		[for i in _images if !strings.HasPrefix(i, release.environment.registry + "/") {
 			"image \(i) is not in \(release.environment.registry)"
@@ -407,6 +480,166 @@ import (
 					}
 				}
 			}
+		}
+	}
+}
+
+// What a login's password and Secret are, as upstream makes the database roles' own: a Password generator and an
+// ExternalSecret that renames its value into a basic-auth Secret, with the URL a service reads beside it.
+#LoginObjects: {
+	release: #Release
+	login:   string
+	let dashed = strings.Replace(login, "_", "-", -1)
+	let generator = "\(release.name)-\(dashed)-password"
+	let key = "\(strings.ToUpper(login))_PASSWORD"
+	let labels = {"app.kubernetes.io/name": release.name, "app.kubernetes.io/instance": release.name, "app.kubernetes.io/managed-by": "cue"}
+	out: [{
+		apiVersion: "generators.external-secrets.io/v1alpha1"
+		kind:       "Password"
+		metadata:   {name: generator, namespace: release.namespace, "labels": labels}
+		spec:       {length: 32, digits: 8, symbols: 0, noUpper: false, allowRepeat: true}
+	}, {
+		apiVersion: "external-secrets.io/v1beta1"
+		kind:       "ExternalSecret"
+		metadata:   {name: "\(release.name)-\(dashed)-db", namespace: release.namespace, "labels": labels}
+		spec: {
+			refreshInterval: "0"
+			target: {
+				name:           "\(release.name)-\(dashed)-db"
+				creationPolicy: "Owner"
+				template: {
+					type: "kubernetes.io/basic-auth"
+					data: {
+						username: login
+						password: "{{ .\(key) }}"
+						url:      "postgres://\(login):{{ .\(key) }}@database:5432/\(release.name)?sslmode=disable"
+					}
+				}
+			}
+			dataFrom: [{
+				sourceRef: generatorRef: {apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", name: generator}
+				rewrite: [{regexp: {source: "password", target: key}}]
+			}]
+		}
+	}]
+}
+
+// The release's tunings of one object of the render: a Deployment's replicas and containers' resources, the
+// database Cluster's replicas and settings. Anything else passes as it is. Upstream's values are concrete, so
+// each field a tuning sets is rebuilt without upstream's, never unified with it.
+#Tune: {
+	in:      _
+	release: #Release
+	out: [
+		if in.kind == "Deployment" {(#TuneDeployment & {"in": in, "release": release}).out},
+		if in.kind == "Cluster" if release.database != _|_ {(#TuneCluster & {"in": in, "release": release}).out},
+		in,
+	][0]
+}
+
+#TuneDeployment: {
+	in:      _
+	release: #Release
+	let production = release.preview == ""
+	let n = in.metadata.name
+	let recreate = len([if in.spec.strategy != _|_ if in.spec.strategy.type == "Recreate" {true}]) > 0
+	let sc = [if release.scale[n] != _|_ {release.scale[n]}]
+
+	// the first that applies: the Deployment's own number for the case, then the release's default for it
+	let wanted = [
+		if production if len(sc) > 0 if sc[0].replicas != _|_ {sc[0].replicas},
+		if !production if len(sc) > 0 if sc[0].preview != _|_ {sc[0].preview},
+		if production if release.replicas != _|_ if !recreate {release.replicas},
+		if !production if release.previewReplicas != _|_ if !recreate {release.previewReplicas},
+	]
+	out: {
+		for k, v in in if k != "spec" {(k): v}
+		spec: {
+			for k, v in in.spec if k != "replicas" && k != "template" {(k): v}
+			if len(wanted) > 0 {replicas: wanted[0]}
+			if len(wanted) == 0 if in.spec.replicas != _|_ {replicas: in.spec.replicas}
+			template: {
+				for k, v in in.spec.template if k != "spec" {(k): v}
+				spec: {
+					for k, v in in.spec.template.spec if k != "containers" {(k): v}
+					containers: [for c in in.spec.template.spec.containers {
+						for k, v in c if k != "resources" {(k): v}
+						let given = release.containerResources[c.name]
+						if given == _|_ {if c.resources != _|_ {resources: c.resources}}
+						if given != _|_ {
+							resources: {
+								for sec in ["requests", "limits"] if c.resources[sec] != _|_ || given[sec] != _|_ {
+									(sec): {
+										if c.resources[sec] != _|_ for k, v in c.resources[sec] if given[sec] == _|_ || given[sec][k] == _|_ {(k): v}
+										if given[sec] != _|_ for k, v in given[sec] {(k): v}
+									}
+								}
+							}
+						}
+					}]
+				}
+			}
+		}
+	}
+}
+
+#TuneCluster: {
+	in:      _
+	release: #Release
+	let db = release.database
+
+	// a quarter of the volume, in MB, for each slot's WAL
+	let sizeOf = [if db.storage != _|_ {regexp.FindSubmatch("^([0-9]+)(Mi|Gi|Ti)$", db.storage)}]
+	let slotKeep = [
+		if db.slotWalKeepMB != _|_ {db.slotWalKeepMB},
+		if len(sizeOf) > 0 {div(strconv.Atoi(sizeOf[0][1]) * {Mi: 1, Gi: 1024, Ti: 1048576}[sizeOf[0][2]], 4)},
+	]
+	let own = {
+		if len(slotKeep) > 0 {max_slot_wal_keep_size: "\(list.Max([64, slotKeep[0]]))MB"}
+		db.parameters
+	}
+	out: {
+		for k, v in in if k != "spec" {(k): v}
+		spec: {
+			for k, v in in.spec if !list.Contains(["instances", "storage", "postgresql", "managed"], k) {(k): v}
+			instances: db.instances
+			storage: {
+				for k, v in in.spec.storage if k != "size" {(k): v}
+				if db.storage != _|_ {size: db.storage}
+				if db.storage == _|_ if in.spec.storage.size != _|_ {size: in.spec.storage.size}
+			}
+			postgresql: {
+				for k, v in in.spec.postgresql if k != "parameters" {(k): v}
+				parameters: {
+					for k, v in in.spec.postgresql.parameters if own[k] == _|_ {(k): v}
+					for k, v in own {(k): v}
+				}
+				if db.instances > 1 {synchronous: db.synchronous}
+			}
+			managed: {
+				for k, v in in.spec.managed if k != "roles" {(k): v}
+				roles: list.Concat([in.spec.managed.roles, [for l, d in db.logins {
+					name:    l
+					ensure:  "present"
+					login:   true
+					inherit: true
+					inRoles: d.inRoles
+					passwordSecret: name: "\(release.name)-\(strings.Replace(l, "_", "-", -1))-db"
+				}]])
+			}
+			// A change the primary must restart for promotes a synchronised standby first and restarts the old
+			// primary after it; one instance has no standby to promote.
+			if db.instances > 1 {
+				primaryUpdateStrategy: "unsupervised"
+				primaryUpdateMethod:   "switchover"
+			}
+			if db.haSlots {replicationSlots: highAvailability: enabled: true}
+			if db.instances > 1 || !db.enablePDB {enablePDB: db.enablePDB}
+
+			// A stop is bounded: a smart shutdown for `smartShutdown` seconds, a fast one after, the pod killed at stopDelay.
+			smartShutdownTimeout: db.smartShutdown
+			stopDelay:            120
+			if release.containerResources["postgres"] != _|_ {resources: release.containerResources["postgres"]}
 		}
 	}
 }
