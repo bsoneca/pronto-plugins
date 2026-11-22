@@ -754,7 +754,6 @@ Deno.test("a completion that lost the claim is answered retryably, unless the st
   await s.prove(A, TRIAL);
   await s.payouts(A);
   const sub = await startTrial(s);
-  const t = s.tenants.get(A)!;
   store.mode = "taken";
   const taken = await deliver(s, "evt_taken", sub)();
   assertEquals([taken.status, (await taken.json()).error], [409, "claim lost"], "delivered, but another holds the claim");
