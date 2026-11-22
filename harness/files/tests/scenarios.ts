@@ -21,7 +21,7 @@ import { gate, slow, slowCpu, slowDown } from "./slow.ts";
 import { early } from "./scenarios/early.ts";
 import { stepGate, type Gated } from "./scenarios/gate.ts";
 import { fileFlake as file } from "./scenarios/flakes.ts";
-import { writeVerdict } from "./scenarios/verdict.ts";
+import { closing, settleRun, writeVerdict } from "./scenarios/verdict.ts";
 import { loadScenarios, type ActorDef, type Scenario, type Step } from "./scenarios/load.ts";
 
 // A verdict left by an earlier run is removed before anything that can fail, so a run that dies early leaves no stale green one.
@@ -970,24 +970,30 @@ export class Run {
     const off = (this.skipped.size ? `; steps behind ${[...this.skipped].sort().join(", ")} skipped, off here` : "") +
       (this.onHere.size ? `; steps for ${[...this.onHere].sort().join(", ")} off skipped, on here` : "");
     // Passed only once its contexts closed: a page that stops answering after its last step fails it, named.
-    const open = await this.close();
+    const { open, rejected } = await this.close();
     // A page that crashed or went silent after the last step's answer fails it too: a crash is never a pass.
     if (this.crash || this.silent.size) return `✗ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): every step passed, but ${this.stuck}`;
     if (open.length) return `✗ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): every step passed, but ${open.join(", ")}'s context did not close in 30 s (a page that stopped answering)`;
+    // A close Playwright rejected is no close: the scenario fails, named, and is never recorded green.
+    if (rejected.length) return `✗ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): every step passed, but ${rejected.join("; ")}`;
     console.log(`✓ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): ${this.s.accepts.join(", ")}${off}`);
     return null;
   }
   // A silent page's scenario has its contexts closed without waiting on them: closing waits on its
   // pages, and a silent page never answers. The browser disposes of them. Any other close is bounded
   // too, as a page can stop answering after its last step passed.
-  // Returns the actors whose close did not finish in 30 s.
-  async close(wedged = false): Promise<string[]> {
-    const open: string[] = [];
+  // Returns the actors whose close did not finish in 30 s (`open`) and those whose close Playwright rejected (`rejected`, each with its
+  // error): the two are kept apart, and neither is a close that finished.
+  async close(wedged = false): Promise<{ open: string[]; rejected: string[] }> {
+    const open: string[] = [], rejected: string[] = [];
     for (const a of this.actors.values()) {
-      const closing = a.ctx.close().then(() => true, () => true);
-      if (!wedged && !(await Promise.race([closing, sleep(30).then(() => false)]))) open.push(a.key);
+      const c = closing(a.ctx.close(), 30_000);
+      if (wedged) continue;
+      const r = await c;
+      if (r.state === "timeout") open.push(a.key);
+      else if (r.state === "rejected") rejected.push(`${a.key}'s context failed to close: ${r.error}`);
     }
-    return open;
+    return { open, rejected };
   }
 }
 
@@ -1061,16 +1067,17 @@ if (!shared && !isDeployed && !pageErrors.length && ran.length > 1) {
     await fileFlake(id).catch((e) => unmarked.push(e));
   }
 }
-// A scenario whose page threw counts as failed, in the verdict and in the record alike.
-const failedAll = new Set([...failed, ...[...pageErrorIds].filter((id) => ran.includes(id))]);
-// Bounded: a context left to the browser may hold a renderer that never answers. A browser that does not close in
-// 30 s fails the run, and nothing is recorded green from it.
+// Bounded: a context left to the browser may hold a renderer that never answers. A browser that does not close in 30 s, or whose close
+// Playwright rejects, fails the run, and nothing is recorded green from it.
 await anon.dispose();
-const browserHung = await Promise.race([browser.close().then(() => false, () => false), sleep(30).then(() => true)]);
-if (browserHung) console.log("✗ the browser did not close in 30 s: a page it held stopped answering");
-sel.commit(browserHung ? [] : ran.filter((id) => !failedAll.has(id) && !pageErrors.length), [...failedAll]);
-// So is the verdict: a caller reading it (rehearse.ts) sees every scenario of a hung browser failed, not passed.
-if (browserHung) for (const id of ran) failedAll.add(id);
+const browserClosing = await closing(browser.close(), 30_000);
+if (browserClosing.state === "timeout") console.log("✗ the browser did not close in 30 s: a page it held stopped answering");
+if (browserClosing.state === "rejected") console.log(`✗ the browser failed to close: ${browserClosing.error}`);
+const browserHung = browserClosing.state !== "closed";
+// The failed set is settled before the record is written, and the record, the verdict and the summary all use it (verdict.ts settleRun):
+// a scenario whose page threw, and every scenario of a browser that did not close, counts as failed in all three, and its old green record goes.
+const { failedAll, green } = settleRun({ ran, failed, pageErrorIds: [...pageErrorIds], pageErrors, browser: browserClosing });
+sel.commit(green, [...failedAll]);
 // The verdict as data (scenarios/verdict.ts), for a caller that must not parse the line below.
 // Passed counts the scenarios this run ran and passed; those cached are counted apart, never as passed again.
 // A verdict that cannot be written (a full disk) is said; a run that otherwise passed then exits 3, "no verdict",

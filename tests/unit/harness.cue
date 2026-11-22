@@ -395,3 +395,24 @@ cases: "a production scenario may evaluate a flag by POST and make no other writ
 		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/f", anon: true, body: "{}", expect: {}}}]], matches: "_writes", why: "the body is the context object, not text"},
 	]
 }
+
+// PRONTO-892 (Codex on bsoneca/pronto#1520): the browser's and the contexts' closes keep a finished close, a rejected one and a timeout apart,
+// and the record, the verdict and the summary share one failed set.
+cases: "a close that finished, one Playwright rejected and one that never answers are three different results": {
+	suite: "harness"
+	steps: [
+		{call: "harness.closeOf", args: ["ok"], expect: {state: "closed"}},
+		{call: "harness.closeOf", args: ["reject"], expect: {state: "rejected", error: "Target page, context or browser has been closed"}, why: "its first line, the rejection kept: it was once read as a close that finished"},
+		{call: "harness.closeOf", args: ["never"], expect: {state: "timeout"}},
+	]
+}
+cases: "a browser that did not close cleanly fails every scenario that ran and records none green, the record and the verdict sharing the set": {
+	suite: "harness"
+	steps: [
+		{call: "harness.settled", args: [{ran: ["a", "b"], browser: {state: "closed"}}], expect: {failedAll: [], green: ["a", "b"]}},
+		{call: "harness.settled", args: [{ran: ["a", "b"], browser: {state: "rejected", error: "boom"}}], expect: {failedAll: ["a", "b"], green: []}, why: "all assertions passed and the close was rejected: not a success, and the old green records of both go (the selector deletes those it is told failed)"},
+		{call: "harness.settled", args: [{ran: ["a", "b"], browser: {state: "timeout"}}], expect: {failedAll: ["a", "b"], green: []}, why: "every affected id is in the set the record is given, not added after it"},
+		{call: "harness.settled", args: [{ran: ["a", "b"], failed: ["b"], browser: {state: "closed"}}], expect: {failedAll: ["b"], green: ["a"]}},
+		{call: "harness.settled", args: [{ran: ["a", "b"], pageErrorIds: ["a", "z"], pageErrors: ["x"], browser: {state: "closed"}}], expect: {failedAll: ["a"], green: []}, why: "a scenario whose page threw is failed, and a page error records no green"},
+	]
+}
