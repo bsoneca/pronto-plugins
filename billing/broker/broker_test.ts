@@ -612,7 +612,9 @@ Deno.test("a cancel Stripe refused is tried again when Stripe sends the event ag
   stripeDown.delete = true;
   await press(`${portal}?sub=${sub.id}`, "trial_fail");
   assertEquals(sub.status, "past_due", "not cancelled while Stripe is down");
-  assertEquals(lastGot(s).active, false, "past due holds nothing meanwhile");
+  // The overlapping delivery (Stripe's own event for the metadata the broker just set) is told to wait, not
+  // recorded delivered with its cancellation skipped: nothing is pushed until the cancel can be made.
+  assertEquals(s.tenants.get(A)!.got.length, 1, "nothing pushed while the cancel cannot be made");
   stripeDown.delete = false;
   // The webhook was answered 502, so Stripe sends it again.
   assertEquals(await fake.emit("customer.subscription.updated", sub), true);
@@ -846,4 +848,75 @@ Deno.test("two replicas: every entitlement is newer than the one before, whichev
     vers.push(JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)))).ver);
   }
   assertEquals(vers.every((v, i) => i === 0 || v > vers[i - 1]), true, `increasing over both replicas: ${vers}`);
+});
+
+// One Stripe event reaches every replica at once, and is pushed to the tenant by one.
+const deliver = (s: Awaited<ReturnType<typeof setup>>, id: string, sub: unknown, type = "customer.subscription.updated") => async () => {
+  const payload = JSON.stringify({ id, type, created: 1, data: { object: sub } });
+  return await s.call("/stripe", { method: "POST", body: payload, headers: { "stripe-signature": await signWebhook(s.fake.webhookSecret, payload) } });
+};
+
+Deno.test("two replicas: one event arriving at both at once is pushed once, and the other is told to wait", async () => {
+  const s = await setup({ replicas: 2 });
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const sub = await startTrial(s);
+  const t = s.tenants.get(A)!;
+  const before = t.got.length;
+  // The tenant takes its time over the push: the second delivery arrives while the first is in it.
+  let release!: () => void;
+  t.hold = new Promise<void>((r) => (release = r));
+  const send = deliver(s, "evt_race", sub);
+  const first = send();
+  await new Promise((r) => setTimeout(r, 20));
+  const second = await send();
+  assertEquals([second.status, (await second.json()).error], [409, "in progress"], "Stripe sends it again");
+  assertEquals(t.got.length, before, "nothing pushed yet by the first, nothing by the second");
+  release();
+  t.hold = undefined;
+  const done = await first;
+  assertEquals([done.status, await done.json()], [200, { delivered: "evt_race" }]);
+  assertEquals(t.got.length, before + 1, "pushed once");
+  const again = await send();
+  assertEquals([again.status, await again.json()], [200, { duplicate: "evt_race" }]);
+  assertEquals(t.got.length, before + 1, "and not again once it is done");
+});
+
+Deno.test("a push the tenant failed leaves the event claimable for Stripe's next send", async () => {
+  const s = await setup({ replicas: 2 });
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const sub = await startTrial(s);
+  const t = s.tenants.get(A)!;
+  const before = t.got.length;
+  const send = deliver(s, "evt_502", sub);
+  t.up = false;
+  assertEquals((await send()).status, 502);
+  t.up = true;
+  const retry = await send();
+  assertEquals([retry.status, await retry.json()], [200, { delivered: "evt_502" }], "not held for its lease, not done");
+  assertEquals(t.got.length, before + 1);
+});
+
+Deno.test("an event whose subscription is being ended by another caller is not recorded delivered", async () => {
+  const store = new MemoryStore();
+  const s = await setup({ store });
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const sub = await startTrial(s);
+  const t = s.tenants.get(A)!;
+  const before = t.got.length;
+  const failing = { ...structuredClone(sub), status: "past_due" };
+  const send = deliver(s, "evt_overlap", failing);
+  // Another delivery is in the middle of ending this subscription.
+  let release!: () => void;
+  const holder = store.exclusive(`ending ${sub.id}`, () => new Promise<void>((r) => (release = r)));
+  const res = await send();
+  assertEquals([res.status, (await res.json()).error], [409, "subscription busy"], "a retryable answer, not delivered");
+  assertEquals([t.got.length, sub.status], [before, "trialing"], "nothing pushed, nothing cancelled");
+  release();
+  await holder;
+  const retry = await send();
+  assertEquals([retry.status, await retry.json()], [200, { delivered: "evt_overlap" }], "the retry is not a duplicate: the first was never recorded");
+  assertEquals(t.got.length, before + 1);
 });
