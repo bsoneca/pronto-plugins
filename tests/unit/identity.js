@@ -6,7 +6,9 @@ import { base64url, fromBase64url, randomToken, sha256url } from '../../identity
 import { broker } from '../../identity/broker/main.ts';
 import { front } from '../../identity/hydra/front.ts';
 import { fakeGoogle } from '../../identity/hydra/fake.ts';
-import { phoneConfig, phoneUpstream, sendCode } from '../../identity/broker/phone.ts';
+import { acceptedPhone, messageText, normalizeE164, phoneConfig, phoneUpstream, sendCode } from '../../identity/broker/phone.ts';
+import { CODE_TTL_MS, MAX_TRIES, PHONE_SPEC } from '../../identity/broker/otp.ts';
+import { MemoryStore } from '../../identity/broker/store.ts';
 
 const bin = new URL('../../bin/pronto-identity', import.meta.url).pathname;
 
@@ -323,7 +325,7 @@ const OTP_ENV = {
 export function otpSettings(over = {}, issuer = 'http://localhost:19000') {
   const env = { ...OTP_ENV, ...over };
   const cfg = phoneConfig((k) => env[k] ?? undefined, issuer);
-  return { otp: cfg.otp, sms: cfg.sms, smsGate: cfg.smsGate, project: cfg.project, hasSender: cfg.sender !== null, resendSeconds: cfg.resendSeconds };
+  return { otp: cfg.otp, sms: cfg.sms, smsGate: cfg.smsGate, project: cfg.project, hasSender: Object.keys(cfg.senders).length > 0, channels: Object.keys(cfg.senders), resendSeconds: cfg.resendSeconds };
 }
 
 /** A sign-in by phone with the broker's own codes, as the page drives it: `ops` in order, each
@@ -341,9 +343,18 @@ export async function otpFlow(p = {}) {
   };
   const cfg = phoneConfig((k) => ({ ...OTP_ENV, ...env })[k] ?? undefined, issuer);
   const texts = [];
-  if (sender === 'capture') cfg.sender = { send: (_to, text) => { texts.push(text); return Promise.resolve(); } };
-  if (sender === 'fails') cfg.sender = { send: () => Promise.reject(new Error('provider down')) };
-  const up = await phoneUpstream(issuer, cfg, { secret, now: () => clock, fetcher });
+  // `only`: the channels the broker has senders for (a deployment with an SMS provider alone has just sms); the stand-in serves both.
+  const channels = p.only ?? ['whatsapp', 'sms'];
+  const sent = [];
+  const via = (make) => { const have = {}; for (const c of channels) have[c] = make(c); cfg.senders = have; };
+  if (sender === 'capture') via((channel) => ({ channel, send: (_to, m) => { texts.push(messageText(m)); sent.push(channel); return Promise.resolve(); } }));
+  if (sender === 'fails') via((channel) => ({ channel, send: () => Promise.reject(new Error('provider down')) }));
+  if (sender === 'standin' && p.only) { const all = cfg.senders; cfg.senders = Object.fromEntries(Object.entries(all).filter(([c]) => p.only.includes(c))); }
+  // Everything the broker puts to or asks of its store, as text, so a case can look for the number in it.
+  const seen = [];
+  const inner = new MemoryStore(() => clock);
+  const store = new Proxy(inner, { get: (t, k) => typeof t[k] === 'function' ? (...a) => { seen.push(JSON.stringify(a)); return t[k](...a); } : t[k] });
+  const up = await phoneUpstream(issuer, cfg, { secret, now: () => clock, fetcher, store });
   const handle = await broker({ issuer, secret, providers: [up.provider], extra: up.handle });
   const callback = `${tenant}/auth/oidc/phone/callback`;
   const verifier = randomToken(32);
@@ -354,9 +365,11 @@ export async function otpFlow(p = {}) {
   const page = await pageRes.text();
   const config = JSON.parse(/<script type="application\/json" id="phone-config">([^<]*)<\/script>/.exec(page)[1]);
   const post = (path, body) => handle(new Request(`${issuer}/phone/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+  // The number as the broker read it (its answer to the first send): the stand-in keeps the code under that one.
+  let read164 = phone;
   const readCode = async () => {
     if (sender === 'capture') return /\b[0-9]{6}\b/.exec(texts.at(-1) ?? '')?.[0] ?? '';
-    const res = await handle(new Request(`${issuer}/phone/fake/codes?phone=${encodeURIComponent(phone)}`));
+    const res = await handle(new Request(`${issuer}/phone/fake/codes?phone=${encodeURIComponent(read164)}`));
     return res.ok ? (await res.json()).code : '';
   };
   const log = [];
@@ -365,12 +378,15 @@ export async function otpFlow(p = {}) {
     if (op === 'advance') { clock += arg; continue; }
     if (op === 'codes') {
       const res = await handle(new Request(`${issuer}/phone/fake/codes?phone=${encodeURIComponent(phone)}`));
-      log.push({ op, status: res.status, shape: Object.keys(await res.json()).join() });
+      const said = await res.json();
+      log.push({ op, status: res.status, shape: Object.keys(said).join(), ...(res.ok ? { channel: said.channel } : {}) });
       continue;
     }
-    const res = op === 'send' ? await post('send', { id: config.id, phone }) : await post('approve', { id: config.id, code: arg === 'right' ? await readCode() : arg });
+    const asked = op === 'send' ? { id: config.id, phone, ...(typeof arg === 'object' && arg !== null ? arg : {}) } : null;
+    const res = op === 'send' ? await post('send', asked) : await post('approve', { id: config.id, phone: p.approvePhone ?? phone, code: arg === 'right' ? await readCode() : arg });
     const out = await res.json();
-    log.push({ op, status: res.status, error: out.error ?? null });
+    if (op === 'send' && res.ok) read164 = out.phone;
+    log.push({ op, status: res.status, error: out.error ?? null, ...(op === 'send' && res.ok ? { channel: out.channel, phone: out.phone } : {}) });
     if (op === 'approve' && out.to) {
       const back = new URL((await handle(new Request(out.to))).headers.get('location'));
       const form = new URLSearchParams({ grant_type: 'authorization_code', code: back.searchParams.get('code') ?? '', client_id: tenant, redirect_uri: callback, code_verifier: verifier });
@@ -387,7 +403,7 @@ export async function otpFlow(p = {}) {
     gateJwt = { signed: await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, fromBase64url(s), new TextEncoder().encode(`${h}.${b}`)), claims: Object.keys(c).sort(), iss: c.iss, aud: c.aud, event: c.event, phone: c.phone_number, ttl: c.exp - c.iat, url: gateCalls[0].url, type: gateCalls[0].type };
   }
   return {
-    log, sub, gateCalls: gateCalls.length, gateJwt, texts: texts.map((t) => ({ text: t.replace(/[0-9]{6}/, 'CODE'), length: t.length })),
+    log, sub, sent, holdsNumber: seen.some((t) => t.includes(phone.slice(1)) || t.includes(phone.slice(3))), gateCalls: gateCalls.length, gateJwt, texts: texts.map((t) => ({ text: t.replace(/[0-9]{6}/, 'CODE'), length: t.length })),
     csp: pageRes.headers.get('content-security-policy'), config: Object.keys(config).sort(), firebaseInPage: /gstatic|firebase|recaptcha/i.test(page),
     hasRecaptchaBox: page.includes('id="recaptcha"'), script: await (await handle(new Request(`${issuer}/phone/page.js`))).text().then((js) => ({ firebase: /firebase|gstatic|recaptcha/i.test(js), sends: js.includes("'/send'"), approves: js.includes('code }') })),
   };
@@ -425,14 +441,14 @@ export async function proveFlow(p = {}) {
       continue;
     }
     if (op === 'send') {
-      const res = await post('send', { phone, return_origin: arg });
+      const res = await post('send', { phone, return_origin: Array.isArray(arg) ? arg[0] : arg, ...(Array.isArray(arg) ? arg[1] : {}) });
       const out = await res.json();
       if (out.visit) visit = out.visit;
-      log.push({ op, status: res.status, error: out.error ?? null });
+      log.push({ op, status: res.status, error: out.error ?? null, ...(res.ok ? { channel: out.channel } : {}) });
       continue;
     }
     const code = arg === 'right' ? ((await (await handle(new Request(`${issuer}/phone/fake/codes?phone=${encodeURIComponent(phone)}`))).json()).code ?? '') : arg;
-    const res = await post('check', { visit, code });
+    const res = await post('check', { visit, phone: p.checkPhone ?? phone, code });
     const out = await res.json();
     log.push({ op, status: res.status, error: out.error ?? null });
     if (out.id_token) token = out.id_token;
@@ -480,3 +496,17 @@ export async function webviewSignIn(ua, refuses = true) {
     await server.shutdown();
   }
 }
+
+
+// PRONTO-607 PR 1: the phone's numbers written once (identity/phone.cue) and what the broker reads of them, the normalisation of a typed number,
+// and the channels a code leaves by.
+/** What phone_spec.json holds (the file the broker reads), for the case that holds it to the CUE export. */
+export const specFile = () => JSON.parse(Deno.readTextFileSync(new URL('../../identity/broker/phone_spec.json', import.meta.url)));
+/** The numbers the broker took from the spec: the code's life in ms, the tries, and the resend seconds a default broker waits. */
+export function specInUse() {
+  return { ttlMs: CODE_TTL_MS, tries: MAX_TRIES, resend: phoneConfig((k) => ({ ...OTP_ENV })[k] ?? undefined, 'http://localhost:19000').resendSeconds, channels: PHONE_SPEC.channels, countries: PHONE_SPEC.countries };
+}
+/** normalizeE164 over typed numbers: [input, ...] to [normalized, ...]. */
+export const normalized = (inputs, country) => inputs.map((i) => normalizeE164(i, country));
+/** What the broker accepts of typed numbers (acceptedPhone with the Brazilian pattern): the normalized number, or null. */
+export const accepted = (inputs) => inputs.map((i) => acceptedPhone({ pattern: '^\\+55[1-9][1-9]9[0-9]{8}$' }, i));

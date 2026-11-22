@@ -1,0 +1,21 @@
+{
+    "ttl_s": 300,
+    "tries": 5,
+    "resend_s": 60,
+    "channels": [
+        "whatsapp",
+        "sms"
+    ],
+    "countries": [
+        "BR"
+    ],
+    "caps": {
+        "per_phone_hour": 6,
+        "per_ip_hour": 20,
+        "global_day": 1000,
+        "budget_cents": 5000
+    },
+    "dial": {
+        "BR": "55"
+    }
+}

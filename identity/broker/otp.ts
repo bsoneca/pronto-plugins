@@ -5,29 +5,44 @@
 // (store.ts), so the replica that sent a code need not be the one that checks it, and the counts and
 // the wait hold across replicas.
 //
-// Neither the number nor the code is ever logged here.
+// Neither the number nor the code is ever logged here, and the number is never kept as it is: the rows hold keyed hashes of it.
 import { base64url, fromBase64url } from "../oidc.ts";
 import { MemoryStore, sharedSecret, type Store } from "./store.ts";
+import spec from "./phone_spec.json" with { type: "json" };
 
 const enc = new TextEncoder();
 
-export const CODE_TTL_MS = 300_000;
-export const MAX_TRIES = 5;
+/** The phone sign-in's numbers, written once in identity/phone.cue and exported to phone_spec.json (PRONTO-607). */
+export const PHONE_SPEC = spec as {
+  ttl_s: number; tries: number; resend_s: number; channels: Channel[]; countries: string[];
+  caps: { per_phone_hour: number; per_ip_hour: number; global_day: number; budget_cents: number }; dial: Record<string, string>;
+};
+export const CODE_TTL_MS = PHONE_SPEC.ttl_s * 1000;
+export const MAX_TRIES = PHONE_SPEC.tries;
 
-/** How an SMS leaves: one small function per provider, chosen by PHONE_SMS. */
+/** How a code leaves. */
+export type Channel = "whatsapp" | "sms";
+/** What a sender is given to say: the code, the page's language and the broker's host. */
+export type Message = { code: string; lang: string; host: string };
+/** A way a code leaves, per channel: `send` delivers it to the number (a message in the sender's own words). */
+export interface OtpSender {
+  channel: Channel;
+  send(e164: string, m: Message): Promise<void>;
+}
+
+/** How an SMS leaves, for the providers registered by name (SMS_PROVIDERS): one small function per provider, chosen by PHONE_SMS. */
 export interface SmsSender {
   send(e164: string, text: string): Promise<void>;
 }
 
-/** The stand-in for a local broker: sends nothing, keeps the last code texted to each number. */
-export class Standin implements SmsSender {
-  #last = new Map<string, string>();
-  send(e164: string, text: string): Promise<void> {
-    const code = /\b[0-9]{6}\b/.exec(text)?.[0];
-    if (code) this.#last.set(e164, code);
-    return Promise.resolve();
+/** The stand-in for a local broker: sends nothing, keeps the last code and the channel it went by for each number, for either channel. */
+export class Standin {
+  #last = new Map<string, { code: string; channel: Channel }>();
+  /** The sender of one channel, over this stand-in's record. */
+  as(channel: Channel): OtpSender {
+    return { channel, send: (e164, m) => { this.#last.set(e164, { code: m.code, channel }); return Promise.resolve(); } };
   }
-  last(e164: string): string | undefined {
+  last(e164: string): { code: string; channel: Channel } | undefined {
     return this.#last.get(e164);
   }
 }
@@ -41,15 +56,21 @@ export class Standin implements SmsSender {
  */
 export const SMS_PROVIDERS: Record<string, (env: (k: string) => string | undefined) => SmsSender> = {};
 
-/** The sender PHONE_SMS names for a broker at `issuer`, or why not. */
-export function smsSender(name: string, env: (k: string) => string | undefined, issuer: string): SmsSender {
+/**
+ * The senders PHONE_SMS names for a broker at `issuer`, or why not: the stand-in serves every channel; a registered SMS provider serves
+ * SMS (its text is `text`, the page's words for a message), and WhatsApp has none until a provider for it is registered.
+ */
+export function otpSenders(name: string, env: (k: string) => string | undefined, issuer: string, text: (m: Message) => string):
+  { senders: Partial<Record<Channel, OtpSender>>; standin: Standin | null } {
   if (name === "standin") {
     if (new URL(issuer).hostname !== "localhost") throw new Error(`PHONE_SMS=standin is for a localhost broker, not ${issuer}`);
-    return new Standin();
+    const standin = new Standin();
+    return { senders: { whatsapp: standin.as("whatsapp"), sms: standin.as("sms") }, standin };
   }
   const make = Object.hasOwn(SMS_PROVIDERS, name) ? SMS_PROVIDERS[name] : undefined;
   if (!make) throw new Error(`PHONE_SMS=${name} is not a sender this broker has (${["standin", ...Object.keys(SMS_PROVIDERS)].join(", ")})`);
-  return make(env);
+  const sms = make(env);
+  return { senders: { sms: { channel: "sms", send: (to, m) => sms.send(to, text(m)) } }, standin: null };
 }
 
 /** A six-digit code with no modulo bias: bytes at or above the largest multiple of 10 are redrawn. */
@@ -83,35 +104,46 @@ export class Otp {
     return new Uint8Array(await crypto.subtle.sign("HMAC", await this.#key, data));
   }
 
+  /** The number as the store keeps it: a keyed hash, so no row holds the number itself (the same number, the same key, on every replica). */
+  async #who(phone: string): Promise<string> {
+    return base64url(new Uint8Array(await crypto.subtle.sign("HMAC", await this.#key, enc.encode(`phone\u0000${phone}`))));
+  }
+
   /** Seconds before `phone` may be texted again, 0 for now. */
   async wait(phone: string): Promise<number> {
-    return Math.ceil(await this.store.left("otp-next", phone) / 1000);
+    return Math.ceil(await this.store.left("otp-next", await this.#who(phone)) / 1000);
   }
 
   /** A new code for this visit and number (replacing any earlier one), or the wait left. */
   async issue(id: string, phone: string): Promise<{ code: string } | { wait: number }> {
     // Claimed in one step: of two replicas asked at once for one number, one texts and the other waits.
-    if (!await this.store.claim("otp-next", phone, this.resendSeconds * 1000)) return { wait: Math.max(1, await this.wait(phone)) };
+    const who = await this.#who(phone);
+    if (!await this.store.claim("otp-next", who, this.resendSeconds * 1000)) return { wait: Math.max(1, await this.wait(phone)) };
     const code = randomCode();
     const salt = crypto.getRandomValues(new Uint8Array(16));
-    await this.store.put("otp", id, { phone, salt: base64url(salt), hash: base64url(await this.#hash(salt, id, phone, code)) }, CODE_TTL_MS);
+    // The row holds the number's keyed hash and the code's, bound to the visit and the number: never the number.
+    await this.store.put("otp", id, { who, salt: base64url(salt), hash: base64url(await this.#hash(salt, id, phone, code)) }, CODE_TTL_MS);
     return { code };
   }
 
   /** A code that was never sent: forget it and the wait it started. */
-  async revoke(id: string) {
+  async revoke(id: string, phone: string) {
     const c = await this.store.take<Held>("otp", id);
-    if (c) await this.store.del("otp-next", c.phone);
+    if (c) await this.store.del("otp-next", c.who);
+    else await this.store.del("otp-next", await this.#who(phone));
   }
 
-  /** The visit's code checked: spent when right, dead after MAX_TRIES wrong ones. */
-  async check(id: string, code: string): Promise<{ result: Checked; phone?: string }> {
+  /**
+   * The visit's code checked against the number it was sent to (the caller says which: the row keeps only a hash of it): spent when right,
+   * dead after MAX_TRIES wrong ones. A number other than the one the code was made for is a wrong code, as any other wrong guess.
+   */
+  async check(id: string, phone: string, code: string): Promise<{ result: Checked }> {
     const c = await this.store.get<Held>("otp", id);
     if (!c) return { result: "expired" };
-    const ok = same(await this.#hash(fromBase64url(c.salt), id, c.phone, code), fromBase64url(c.hash));
+    const ok = same(await this.#hash(fromBase64url(c.salt), id, phone, code), fromBase64url(c.hash));
     if (ok) {
       // Taken, not deleted: of two replicas checking the right code at once, one is told ok.
-      return await this.store.take("otp", id) ? { result: "ok", phone: c.phone } : { result: "expired" };
+      return await this.store.take("otp", id) ? { result: "ok" } : { result: "expired" };
     }
     const tries = await this.store.bump("otp", id);
     if (tries === undefined) return { result: "expired" };
@@ -123,7 +155,7 @@ export class Otp {
   }
 }
 
-type Held = { phone: string; salt: string; hash: string };
+type Held = { who: string; salt: string; hash: string };
 
 /** The subject of a phone number under the broker's secret: stable across restarts, one per number. */
 export async function phoneSubject(secret: string, e164: string): Promise<string> {
