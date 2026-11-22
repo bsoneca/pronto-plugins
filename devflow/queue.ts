@@ -126,6 +126,7 @@ export async function readyQueue(board: Board, ctx: Ctx, all: Issue[], now: Date
     const bug = !!ctx.bugLabel && (i.labels ?? []).includes(ctx.bugLabel);
     const jump = jumps(i.priority, bug, urgent);
     const place = filedPlace(i, all, q.order === "filed" && !!q.childrenAtUmbrella);
+    if (q.order === "filed" && !place.filedAt) throw new Error(`${ctx.key(i)} is Ready but the board gives no creation time to file it by`);
     return {
       ...place,
       key: ctx.key(i), name: i.name, sequence: i.sequence_id, lane: ctx.laneOf(i), feature: featureOf(i.labels, ctx.featureLabel), readyAt, age: ageOf(readyAt, now), jump, urgent: i.priority === ctx.priorities.P0,

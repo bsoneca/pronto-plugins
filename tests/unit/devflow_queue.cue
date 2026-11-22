@@ -73,6 +73,23 @@ cases: {
 			{seq: 10, state: "Ready", module: "aprende", created: "2026-11-20T10:00:00Z", ready: "2026-11-20T10:00:00Z", parent: 2},
 		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-3", "ACME-10"]], why: "inheritance is read in order filed alone"},
 		{call: "queue.pulls", args: [{order: "filed", childrenAtUmbrella: true, issues: [
+			{seq: 8, name: "design b", state: "Done", module: "design", created: "2026-11-02T10:00:00Z"},
+			{seq: 7, name: "design a", state: "Done", module: "design", created: "2026-11-02T10:00:00Z"},
+			{seq: 5, state: "Ready", module: "aprende", created: "2026-11-20T10:00:00Z", ready: "2026-11-20T10:00:00Z", parent: 8},
+			{seq: 6, state: "Ready", module: "aprende", created: "2026-11-21T10:00:00Z", ready: "2026-11-21T10:00:00Z", parent: 7},
+		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-6", "ACME-5"]], why: "umbrellas filed at the same moment: the umbrella's number decides, not the child's (5 before 6)"},
+		{call: "queue.pulls", args: [{order: "filed", childrenAtUmbrella: true, issues: [
+			{seq: 3, state: "Ready", module: "aprende", created: "2026-11-03T10:00:00Z", ready: "2026-11-03T10:00:00Z"},
+			{seq: 10, state: "Ready", module: "aprende", created: "2026-11-20T10:00:00Z", ready: "2026-11-20T10:00:00Z", parent: 2},
+			{seq: 2, name: "design", state: "Ready", module: "aprende", created: "2026-11-02T10:00:00Z", ready: "2026-11-22T10:00:00Z"},
+			{seq: 9, state: "Ready", module: "aprende", created: "2026-11-21T10:00:00Z", ready: "2026-11-21T10:00:00Z", parent: 2},
+		]}, "engineer", 4]}, {pick: ["started"], expect: [["ACME-2", "ACME-9", "ACME-10", "ACME-3"]], why: "the umbrella itself in Ready: it first, then its children by number, then the next filed"},
+		{call: "queue.pulls", args: [{order: "filed", issues: [{seq: 1, state: "Ready", module: "aprende", ready: "2026-11-10T10:00:00Z"}]}, "engineer", 1]}, {pick: ["error", "writes"], expect: ["ACME-1 is Ready but the board gives no creation time to file it by", []], why: "order filed cannot place an undated issue: an error, not a silent last place"},
+		{call: "queue.pulls", args: [{order: "filed", childrenAtUmbrella: true, issues: [
+			{seq: 2, name: "design", state: "Done", module: "design"},
+			{seq: 9, state: "Ready", module: "aprende", created: "2026-11-21T10:00:00Z", ready: "2026-11-21T10:00:00Z", parent: 2},
+		]}, "engineer", 1]}, {pick: ["started"], expect: [["ACME-9"]], why: "an umbrella with no creation time: the child's own"},
+		{call: "queue.pulls", args: [{order: "filed", childrenAtUmbrella: true, issues: [
 			{seq: 3, state: "Ready", module: "aprende", created: "2026-11-03T10:00:00Z", ready: "2026-11-21T10:00:00Z"},
 			{seq: 7, state: "Ready", module: "aprende", created: "2026-11-04T10:00:00Z", ready: "2026-11-21T10:00:00Z", parent: 99},
 			{seq: 4, state: "Ready", module: "aprende", created: "2026-11-05T10:00:00Z", ready: "2026-11-21T10:00:00Z"},
@@ -88,6 +105,10 @@ cases: {
 			{seq: 1, state: "Ready", module: "aprende", created: "2026-11-01T10:00:00Z", ready: "2026-11-01T10:00:00Z"},
 			{seq: 5, state: "Ready", module: "aprende", priority: "high", bug: true, created: "2026-11-19T10:00:00Z", ready: "2026-11-19T10:00:00Z"},
 		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-1", "ACME-5"]], why: "the flow lists P0 alone: a P1 bug waits its turn"},
+		{call: "queue.pulls", args: [{order: "filed", jump: ["P2"], issues: [
+			{seq: 1, state: "Ready", module: "aprende", created: "2026-11-01T10:00:00Z", ready: "2026-11-01T10:00:00Z"},
+			{seq: 5, state: "Ready", module: "aprende", priority: "medium", bug: true, created: "2026-11-19T10:00:00Z", ready: "2026-11-19T10:00:00Z"},
+		]}, "engineer", 2]}, {pick: ["started"], expect: [["ACME-5", "ACME-1"]], why: "the flow lists P2: a P2 bug jumps"},
 	]}
 	"a lane pulls its own issues only, and none when its slots are busy": {suite: "devflow", steps: [
 		{call: "queue.pulls", args: [{modules: ["aprende", "infra"], issues: [{seq: 1, state: "Ready", module: "infra", ready: "2026-11-10T10:00:00Z"}]}, "engineer", 1]}, {pick: ["started", "writes"], expect: [["empty"], []], why: "an infra issue is an SRE's"},

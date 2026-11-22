@@ -123,6 +123,9 @@ queueFlow: {
 	childrenOff: (#DevFlow & {}).queue.childrenAtUmbrella & false
 	orderFiled: (#DevFlow & {queue: {order: "filed", childrenAtUmbrella: true}}).queue.order & "filed"
 	orderRefused: ((#DevFlow & {queue: order: "newest"}).queue == _|_) & true
+	jumpP0Only: (#DevFlow & {queue: jump: ["P0"]}).queue.jump & ["P0"]
+	jumpP2: (#DevFlow & {queue: jump: ["P2"]}).queue.jump & ["P2"]
+	jumpRefused: ((#DevFlow & {queue: jump: ["P5"]}).queue == _|_) & true
 	starvingRefused: ((#DevFlow & {queue: starvingDays: 0}).queue == _|_) & true
 }
 

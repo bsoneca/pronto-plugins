@@ -160,7 +160,7 @@ export function pullOrder(issues, order = "ready") {
  * of parents ends at once. A parent the board did not list leaves the child at its own. */
 export function filedPlace(issue, all, inherit) {
   const up = inherit && issue.parent ? (all ?? []).find((x) => x.id === issue.parent && x.id !== issue.id) : null;
-  return up ? { filedAt: up.created_at ?? null, umbrella: up.sequence_id } : { filedAt: issue.created_at ?? null, umbrella: issue.sequence_id };
+  return up ? { filedAt: up.created_at ?? issue.created_at ?? null, umbrella: up.sequence_id } : { filedAt: issue.created_at ?? null, umbrella: issue.sequence_id };
 }
 
 /** What merged and when, by day: `times` are ISO moments an issue merged. `today` and `week` count the
