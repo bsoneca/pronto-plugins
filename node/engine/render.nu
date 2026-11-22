@@ -4,7 +4,7 @@
 # (runtime.nu) and the rendering by CUE: upstream's #BuildManifests, over the engine's patches
 # (schema/node.cue), exported as `nodeManifests` from the app's release.cue.
 
-use runtime.nu [runtime-services auth-provider-environment]
+use runtime.nu [runtime-services auth-provider-environment program-providers-expr]
 
 export def nearest-on-path [found: list<string>, dirs: list<string>]: nothing -> string {
 	let dirs = ($dirs | each {|d| $d | path expand })
@@ -88,8 +88,10 @@ def runtime-names [compose: record]: nothing -> list<string> {
 
 # The providers compose gives the auth service, and each one's client: as upstream's main reads them
 # from the program. An app that declares none gives an empty record; an export that fails is an error.
-export def release-providers [dir: string]: nothing -> record {
-	let r = (do { cd $dir; ^cue export . -e '{if code.capabilities.auth != _|_ {if code.capabilities.auth.provider != _|_ {v: code.capabilities.auth.provider}, if code.capabilities.auth.provider == _|_ {v: {}}}, if code.capabilities.auth == _|_ {v: {}}}.v' --out json } | complete)
+export def release-providers [dir: string]: nothing -> any {
+	# From pronto 1.10 the runtime names the expression (the providers are a list of names).
+	let expr = (program-providers-expr | default `{if code.capabilities.auth != _|_ {if code.capabilities.auth.provider != _|_ {v: code.capabilities.auth.provider}, if code.capabilities.auth.provider == _|_ {v: {}}}, if code.capabilities.auth == _|_ {v: {}}}.v`)
+	let r = (do { cd $dir; ^cue export . -e $expr --out json } | complete)
 	# A failed export is not "no providers": the release stops, as it would for any other failed render.
 	if $r.exit_code != 0 { error make {msg: $"the auth providers of ($dir) did not export: ($r.stderr | str trim)"} }
 	$r.stdout | from json

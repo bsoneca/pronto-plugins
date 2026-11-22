@@ -26,7 +26,8 @@ const exports = {
 # module's distribution config names, and the test holds that its release.nu and release-schema.nu are
 # the module's. 1.5.0, 1.5.1 and 1.6.0 carry the same two files. A release under another runtime is refused
 # in its preflight, so a pin moves here first.
-export const validated_pins = ["1.5.0", "1.5.1", "1.6.0", "1.7.0"]
+# 1.10.0 is the tool module v1.10.1 names, and 1.10.1 the tool an app's mise may pin beside it (the two carry the same files).
+export const validated_pins = ["1.5.0", "1.5.1", "1.6.0", "1.7.0", "1.10.0", "1.10.1"]
 
 # The pronto runtime's directory: PRONTO_RUNTIME (the app's release rule sets it from mise), else mise's.
 export def dir []: nothing -> string {
@@ -77,8 +78,16 @@ export def runtime-services [compose: record]: nothing -> record {
 }
 
 # upstream's auth-provider-environment: the OIDC settings, secrets and their digest of the auth service's environment.
-export def auth-provider-environment [environment: record, release_providers: record]: nothing -> record {
+# From 1.10 upstream's second argument is the list of provider names the program offers; before, the record of
+# each provider's release settings (`release-providers` of render.nu hands the shape the runtime reads).
+export def auth-provider-environment [environment: record, release_providers: any]: nothing -> record {
 	(call auth-provider-environment 'auth-provider-environment $p.environment $p.providers | to json' {environment: $environment, providers: $release_providers}).stdout | from json
+}
+
+# The expression that reads the providers the program offers, when the runtime has it (1.10 on): else null.
+export def program-providers-expr []: nothing -> any {
+	let r = (^$nu.current-exe --no-config-file -c $"use '((dir) | path join k8s release.nu)' [PROGRAM_PROVIDERS]; print $PROGRAM_PROVIDERS" | complete)
+	if $r.exit_code == 0 { $r.stdout | str trim } else { null }
 }
 
 # upstream's release-tree: the compose project (YAML text) with the door's tree as a release ships it.
