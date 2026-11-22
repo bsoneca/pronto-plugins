@@ -218,7 +218,7 @@ cases: {
 		{call: "apigen.app"}, {keep: "app"},
 		{call: "apigen.generated", args: ["$app"]},
 		{call: "apigen.files", args: ["$app"]}, {keep: "f"},
-		{get: "sql", matches: #"CREATE OR REPLACE VIEW "public"\."api_v1_note" WITH \(security_invoker = true\) AS\n  SELECT \('notes/' \|\| t\."id"::text\) AS "name",[\s\S]*REVOKE ALL ON "public"\."api_v1_note" FROM PUBLIC, anon;\nGRANT SELECT, INSERT \("id", "body", "owner", "stars"\), UPDATE \("body", "owner", "stars"\), DELETE ON "public"\."api_v1_note" TO app_user;"#},
+		{get: "sql", matches: #"CREATE OR REPLACE VIEW "public"\."api_v1_note" WITH \(security_invoker = true\) AS\n  SELECT \('notes/' \|\| t\."id"::text\) AS "name",[\s\S]*REVOKE ALL ON "public"\."api_v1_note" FROM PUBLIC, anon;\nDO \$r\$[\s\S]*?END \$r\$;\nGRANT SELECT, INSERT \("id", "body", "owner", "stars"\), UPDATE \("body", "owner", "stars"\), DELETE ON "public"\."api_v1_note" TO app_user;"#},
 		{use: "f"}, {get: "sql", matches: #"CREATE OR REPLACE TRIGGER "write" INSTEAD OF INSERT ON "public"\."api_v1_counter_command" FOR EACH ROW EXECUTE FUNCTION api_private\."counter_command"\(\);"#, why: "a public view fires the machine's one trigger function"},
 		{use: "f"}, {get: "door", matches: #"rewrite \* /api_v1_note\?"#},
 		{use: "f"}, {get: "door", matches: #"^(?:(?!Accept-Profile api_v1|Content-Profile api_v1)[\s\S])*$"#, why: "no route names the api_v1 profile"},
@@ -232,6 +232,37 @@ cases: {
 		{call: "apigen.sent", args: ["$db", _ada, _room, "add", "INSERT INTO public.api_v1_counter_command (request_id, etag, payload) VALUES ('r1', '1', '{\"n\": 2}') RETURNING etag, outcome"], expect: [{etag: "2", outcome: "accepted"}], why: "a machine event through the public command view"},
 		{call: "apigen.as", args: ["$db", _ada, "SELECT total FROM public.api_v1_counter_public"], expect: [{total: 2}]},
 		{call: "apigen.replayed", args: ["$db", "$app"], expect: "replayed"},
+	]}
+	"an app's blanket grants on public reach no API view: a stamp, the key, a write the resource does not export are 42501 on the public copy, the exported writes work": {suite: "api", steps: [
+		{call: "apigen.app"}, {keep: "app"},
+		{call: "apigen.generated", args: ["$app"]},
+		{call: "apigen.files", args: ["$app"]}, {get: "sql", matches: #"REVOKE ALL ON %s FROM %I', '"public"\."api_v1_note"'"#},
+		{call: "apigen.dbBlanket", args: ["$app"]}, {keep: "db"},
+		{call: "apigen.as", args: ["$db", _ada, "INSERT INTO public.api_v1_note (id, body) VALUES ($1, 'x') RETURNING name", [_n1]], expect: [{name: "notes/" + _n1}], why: "an exported Create"},
+		{call: "apigen.as", args: ["$db", _ada, "UPDATE public.api_v1_note SET body = 'y' WHERE name = $1 RETURNING body", ["notes/" + _n1]], expect: [{body: "y"}], why: "an exported Update"},
+		{call: "apigen.as", args: ["$db", _ada, "UPDATE public.api_v1_note SET create_time = now() WHERE name = $1", ["notes/" + _n1]], throws: "42501", why: "a stamp is not the caller's"},
+		{call: "apigen.as", args: ["$db", _ada, "UPDATE public.api_v1_note SET id = $1 WHERE name = $2", [_n2, "notes/" + _n1]], throws: "42501", why: "nor is the key"},
+		{call: "apigen.as", args: ["$db", _ada, "INSERT INTO public.api_v1_tag (id, label) VALUES ($1, 'x')", [_n2]], throws: "42501", why: "tags export no Create"},
+		{call: "apigen.as", args: ["$db", _ada, "DELETE FROM public.api_v1_tag"], throws: "42501", why: "nor a Delete"},
+		{call: "apigen.as", args: ["$db", _ada, "UPDATE public.api_v1_tag SET label = 'z'"], throws: "42501", why: "nor an Update"},
+		{call: "apigen.as", args: ["$db", "anon", "SELECT 1 FROM public.api_v1_note"], throws: "42501", why: "anon holds nothing on a view"},
+		{call: "apigen.as", args: ["$db", _ada, "DELETE FROM public.api_v1_note WHERE name = $1 RETURNING name", ["notes/" + _n1]], expect: [{name: "notes/" + _n1}], why: "an exported Delete"},
+		{call: "apigen.replayed", args: ["$db", "$app"], expect: "replayed"},
+	]}
+	"a name in public that is not a view of the API stops the release: a table, a function, never replaced": {suite: "api", steps: [
+		{call: "apigen.app"}, {keep: "app"},
+		{call: "apigen.generated", args: ["$app"]},
+		{call: "apigen.clashed", args: ["$app", "CREATE TABLE public.api_v1_note (id int)"], expect: "42710: api: public.api_v1_note is not a view of the API"},
+		{call: "apigen.clashed", args: ["$app", "CREATE FUNCTION public.api_v1_tag() RETURNS int LANGUAGE sql AS 'SELECT 1'"], expect: "42710: api: public.api_v1_tag is not a view of the API"},
+		{call: "apigen.clashed", args: ["$app", "CREATE TABLE public.other (id int)"], expect: "replayed", why: "an unrelated name is no clash"},
+	]}
+	"the door's X-Api headers and profiles are stripped from /crud too, the block sitting after its handle": {suite: "api", steps: [
+		{call: "apigen.app"}, {keep: "app"},
+		{call: "apigen.generated", args: ["$app"]},
+		{call: "apigen.routedDoor", args: ["$app"]}, {keep: "d"},
+		{call: "apigen.call", args: ["$d", "GET", "/crud/api_v1_counter", {"X-Api-Name": "counters/x", "X-Api-Event": "add", "Accept-Profile": "api_v1"}], holds: {status: 200, seen: {path: "/crud/api_v1_counter", api_name: null, api_event: null, accept_profile: null}}, why: "a /crud client names neither a room, an event nor a schema"},
+		{call: "apigen.call", args: ["$d", "GET", "/api/v1/counters/c1", {"X-Api-Name": "counters/x"}], holds: {status: 200, seen: {path: "/api_v1_counter", api_name: null}}},
+		{call: "apigen.stopped", args: ["$d"]},
 	]}
 	"a public view name that is a table of the app's fails generate": {suite: "api", steps: [
 		{call: "apigen.app"}, {keep: "app"},
