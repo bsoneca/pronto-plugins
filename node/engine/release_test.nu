@@ -130,7 +130,7 @@ case "$*" in
       *"--path-as-is"*) echo "$*" >> "$d/path_as_is.log"; if [ -f "$d/dotdot_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21"}' > "$out"; printf 200; exit 0; fi ;;
     esac
     case "$*" in
-      *"/crud/"*) echo '{"code":"PGRST125","message":"Invalid path specified in request URL"}' > "$out"; printf 404; exit 0 ;;
+      *"/crud/"*) if [ -f "$d/crud_guard" ]; then : > "$out"; printf 404; exit 0; fi; echo '{"code":"PGRST125","message":"Invalid path specified in request URL"}' > "$out"; printf 404; exit 0 ;;
     esac
     echo "404 page not found" > "$out"; printf 404; exit 0 ;;
 esac
@@ -1306,6 +1306,12 @@ def test_the_door_must_not_answer_the_dapr_api [] {
 	assert (open --raw ($w.state | path join portforward.args) | str contains "port-forward -n envoy-gateway-system service/pronto-gateway") "the forward goes to the GatewayClass's shared Service"
 	assert (calls $w | any {|c| $c | str starts-with "get service -n envoy-gateway-system -l gateway.envoyproxy.io/owning-gatewayclass=eg" }) "found by the GatewayClass label"
 	rm -f ($w.state | path join shared_gateway)
+	# the doorguard answers /crud's Dapr paths with its own empty 404 before PostgREST sees them: that passes too
+	"" | save -f ($w.dir | path join crud_guard)
+	rm -f ($w.state | path join calls.jsonl)
+	let guarded = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
+	assert equal $guarded.exit_code 0 $"the doorguard's own 404 passes the /crud probes: ($guarded.stdout)($guarded.stderr)"
+	rm -f ($w.dir | path join crud_guard)
 	# a forward that cannot start, or a Gateway with no data-plane Service, fails too
 	for fail in [port_forward_fail no_gateway_service] {
 		"" | save -f ($w.state | path join $fail)

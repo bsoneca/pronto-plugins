@@ -294,10 +294,12 @@ def run-door-probes [node: record, port: int]: nothing -> int {
 			if $status == "200" and (($body =~ '"runtimeVersion"') or ($body =~ '"appConnectionProperties"') or (($body | str trim) == "ok")) {
 				error make {msg: $"the door reaches the Dapr API: ($node.host)($probe.path) answered 200 with ($body | str substring 0..200); the caddy Dapr configuration did not take"}
 			}
-			# The plain spellings reach PostgREST, which answers 404 PGRST125. The normalized ones are cleaned by Caddy before they route
-			# (a redirect to the clean path, or the file server): they only must not reach the sidecar or a service, which the 200 check above refuses.
-			if $probe.strict and ($status != "404" or ($body !~ "PGRST125")) {
-				error make {msg: $"the door's ($probe.path) answered ($status), not PostgREST's 404 \(PGRST125\): ($body | str substring 0..200)"}
+			# The plain spellings answer 404: the doorguard's own (an empty body; it matches first and covers /crud too) or PostgREST's
+			# (PGRST125) where an older door has no guard. Never the sidecar's or a service's answer, which the 200 check above refuses.
+			# The normalized ones are cleaned by Caddy before they route (a redirect to the clean path, or the file server): they only
+			# must not reach the sidecar or a service.
+			if $probe.strict and $status != "404" {
+				error make {msg: $"the door's ($probe.path) answered ($status), not a 404 \(the doorguard's, or PostgREST's PGRST125\): ($body | str substring 0..200)"}
 			}
 			# A Dapr API path under /img or /blobs is the door's own 404 (doorguard): never a proxied answer, whatever the app runs.
 			if ($probe.guard? | default false) and $status != "404" {
