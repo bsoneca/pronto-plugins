@@ -116,10 +116,35 @@ On a metal cluster, `metal --airlock` puts mecha's airlock beside the broker (th
 - The door probe (`POST <broker>/probe/door`, body `{"tenant": "<origin>"}`, `Authorization: Bearer <the tenant's session token>`) proves the door for one session before its flag reaches everyone. A sign-in asks the flag for no account (the broker knows none when it begins), so a flag on for a flip's testers alone never sends a real sign-in through the door. The probe asks the tenant's flag with the caller's session, at the tenant's door, which names the account from it. Where the flag is on for that session, the probe exchanges a code no one was given through the door. It answers 200 `{door: "credential"}` when Google says `invalid_grant` (the client authenticated, so the airlock added the credential), and 502 `{door: "refused"}` with Google's error otherwise (`invalid_client`: no credential). It answers 409 when the flag is off for the session, 404 for a tenant `--door-tenants` does not list, and 429 within 5 s of the last probe for the tenant. Read-only: the code is refused and no one signs in; each probe is one row in the airlock's ledger. An app's `production` scenario for `signin_door` calls it as its signed-in tester.
 - An app declares the flag in its `flags_spec.cue` (`flags: signin_door: {note: "...", default: false, local: true}`) and must route `/ofrep/` to its flagd from its origin, as its door does.
 
+## Facebook (PRONTO-449)
+
+A broker whose operator sets `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET` and `FACEBOOK_TENANTS` also offers `facebook`. The person is sent to Meta's dialog by a plain redirect with PKCE (no script, no popup: the in-app browsers of Facebook and Instagram follow it as any browser does, so there is no "open in your browser" detour), comes back with a code, and the broker exchanges it, asks Graph's `/me` who they are with the app-secret proof, and forgets the access token. The tenant learns a pairwise subject made from the app-scoped id (`facebook` is its own provider: no account is joined to a Google one by an address), a name and a picture when it asked for a profile, and never an e-mail: Meta does not say an address is verified, and `public_profile` alone needs no App Review.
+
+- The facts are written once, in [`facebook.cue`](facebook.cue): the Graph version (`v24.0`), Meta's three endpoints, the permission (`public_profile`), the flag (`facebook_signin`), the callback path and the limits. `cue export ./identity -e facebook --out json > identity/broker/facebook_spec.json` writes the file the broker reads; ci fails when it differs, and a case holds the two together. `cue export ./identity -e facebook.console` prints what the owner types into Meta's console.
+- Behind a flag: a sign-in asks the tenant's `facebook_signin` (through its `/ofrep/` door, as the airlock's `signin_door` is asked) when it begins. A flag that is off sends the tenant `unauthorized_client`; one that cannot be read, or is not there, shows a "can't continue right now" page: it fails closed, and nothing reaches Meta. A tenant that is not in `FACEBOOK_TENANTS` is refused before the flag is asked (Meta's consent dialog shows one app name, so the operator lists the tenants).
+- A half-set configuration stops the broker at start: an app id without its secret or its tenants, or a secret that is not 32 hex characters. The secret is the broker's, from a SOPS file applied by the release, never a plain value in a file or a command line.
+- The cases: [`tests/unit/facebook.cue`](../tests/unit/facebook.cue) (suite `identity`), against a stand-in for Meta that checks the secret, the verifier and the proof as Meta does.
+- Meta's two callbacks (data deletion, deauthorize) and the deployment flags (`--facebook-app-id`, `--facebook-tenants`, the secret) are the next change.
+
+### What the owner does in Meta's developer console
+
+The values come from `cue export ./identity -e facebook.console` (`domain` and `site` are the operator's).
+
+1. developers.facebook.com/apps → **Create app**. Name: the app's (the consent dialog shows it; for Bonk Chess, "Bonk Chess"). Use case: **Authenticate and request data from users with Facebook Login** (classic, not Login for Business). Business portfolio: the operator's. A new app, not an ads one.
+2. **Facebook Login → Permissions**: only `public_profile`. Do not add `email`.
+3. **Facebook Login → Settings**: Client OAuth login **On**, Web OAuth login **On**, Enforce HTTPS **On**, Use Strict Mode for redirect URIs **On**, Login with the JavaScript SDK **Off**, Embedded browser OAuth login **Off**, Login from devices **Off**. **Valid OAuth Redirect URIs**: `https://<domain>/callback/facebook`. (The deauthorize and data-deletion callback URLs are set when the next change is deployed.)
+4. **App settings → Basic**: App Domains `<domain>` and the site's host; Privacy Policy URL `<site>/privacy`; Terms of Service URL `<site>/terms`; Category **Games**; an icon of 1024×1024; **Add platform → Website** with the site URL; Save.
+5. **App settings → Advanced**: Require App Secret **On**.
+6. **App roles → Roles**: add yourself and one tester account (Development mode).
+7. Give the operator the **App ID** (it is public). The **App Secret** is never pasted in chat: Show it, copy it, and the operator pipes it from the clipboard into the SOPS file (`tools/secrets/import.nu`).
+8. **Business Settings → Security Center → Business verification**: finish it if the dashboard asks for it before going Live.
+9. Once deployed, the tester signs in from inside Instagram and Facebook on Android and iOS; then **App Mode: Live**. No App Review is needed for `public_profile` alone. The return from Meta's dialog may open another browser on some Android builds (the broker's state cookie then does not follow): check it on a device before the flag is flipped.
+10. Every year: complete the **Data Use Checkup** when the dashboard asks.
+
 ## Tests
 
 - [`tests.cue`](tests.cue): the exported declaration, checked with `cue vet`.
-- The phone's cases: [`tests/unit/phone.cue`](../tests/unit/phone.cue) (suite `identity`).
+- The phone's cases: [`tests/unit/phone.cue`](../tests/unit/phone.cue) (suite `identity`); Facebook's: [`tests/unit/facebook.cue`](../tests/unit/facebook.cue).
 - Deno tests: [`oidc_test.ts`](oidc_test.ts), [`broker/`](broker) (`core_test.ts`, `broker_test.ts`) and [`hydra/`](hydra).
 
 ```sh

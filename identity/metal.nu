@@ -39,6 +39,8 @@ const files = [
 	{key: "phone.ts", from: "broker/phone.ts", path: "broker/phone.ts"}
 	{key: "otp.ts", from: "broker/otp.ts", path: "broker/otp.ts"}
 	{key: "phone_spec.json", from: "broker/phone_spec.json", path: "broker/phone_spec.json"}
+	{key: "facebook.ts", from: "broker/facebook.ts", path: "broker/facebook.ts"}
+	{key: "facebook_spec.json", from: "broker/facebook_spec.json", path: "broker/facebook_spec.json"}
 	{key: "door.ts", from: "broker/door.ts", path: "broker/door.ts"}
 	{key: "store.ts", from: "broker/store.ts", path: "broker/store.ts"}
 	{key: "postgres.js", from: "broker/vendor/postgres.js", path: "broker/vendor/postgres.js"}
