@@ -66,7 +66,8 @@ export interface Store {
   /** Mark the claim `token` names finished, remembered for `ttlMs`: whether it was the live current claim (a
    * newer one, a lease that ended, or a release leaves the row as it is and answers false). */
   complete(kind: string, id: string, token: string, ttlMs: number): Promise<boolean>;
-  /** Forget (kind, id) now; with `token`, only the claim that token names (a newer claim, or a remember, stays). */
+  /** Forget (kind, id) now. With `token`: the holder's release of its claim (a newer claim, a remember or another
+   * caller's token leaves the row). Without: a cache invalidation of a finished row, never of a claim in progress. */
   forget(kind: string, id: string, token?: string): Promise<void>;
 }
 
@@ -123,12 +124,23 @@ export class MemoryStore implements Store {
     if (!w) this.#windows.set(name, w = new Window(10_000, this.now));
     return Promise.resolve(w.take(key, per, windowMs));
   }
-  /** Drops rows whose time ended: at most `SWEEP` looked at a call, from the oldest inserted, so no caller pays for a backlog. */
+  /** How many rows are held, live or not yet swept. */
+  get rows(): number {
+    return this.#seen.size;
+  }
+  #cursor: Iterator<[string, { until: number; state: RowState; token?: string }]> | null = null;
+  /** Drops rows whose time ended by the declared `expire`: at most SWEEP looked at a call, continuing where the
+   * last call stopped, so no caller pays for a backlog and no row is skipped for ever. */
   #sweep(): void {
-    let n = 0;
-    for (const [k, held] of this.#seen) {
-      if (n++ >= SWEEP) return;
-      if (held.until <= this.now()) this.#seen.delete(k);
+    for (let n = 0; n < SWEEP; n++) {
+      this.#cursor ??= this.#seen[Symbol.iterator]();
+      const next = this.#cursor.next();
+      if (next.done) {
+        this.#cursor = null;
+        return;
+      }
+      const [k, held] = next.value;
+      if (held.until <= this.now() && step("expire", held.state, false) === "absent") this.#seen.delete(k);
     }
   }
   /** The live row, whose time has not ended. */
@@ -163,10 +175,12 @@ export class MemoryStore implements Store {
   }
   forget(kind: string, id: string, token?: string): Promise<void> {
     const key = `${kind}\u0000${id}`;
-    // Without a token, the row goes whatever it is (a kind that is only remembered); with one, only the
-    // holder's claim is released.
-    if (token === undefined) this.#seen.delete(key);
-    else {
+    // Without a token, the declared cache invalidation (a finished row, never a claim in progress); with one,
+    // the holder's declared release.
+    if (token === undefined) {
+      const held = this.#live(key);
+      if (step("invalidate", held?.state ?? "absent", false) === "absent") this.#seen.delete(key);
+    } else {
       const held = this.#live(key);
       if (step("release", held?.state ?? "absent", held?.token === token) === "absent") this.#seen.delete(key);
     }
@@ -182,8 +196,11 @@ export interface Sql {
   end?(): Promise<void>;
 }
 
-/** How many rows a call may look at to drop the ones whose time ended. */
-const SWEEP = 100;
+/** How many rows a call may look at to drop the ones whose time ended (rules.cue's claimSweep, for both stores). */
+const SWEEP = RULES.claimSweep;
+/** The states a row may be in for `event` to apply to it, from the declaration. */
+const fromStates = (event: ClaimEvent, to: Where = "absent") =>
+  RULES.claimTransitions.filter((t) => t.event === event && t.to === to).map((t) => `'${t.from}'`).join(", ");
 
 /** The tables the broker needs, checked at start. */
 const TABLES = ["billing_counter", "billing_window", "billing_seen"];
@@ -238,8 +255,11 @@ export const SQL = {
   complete: `UPDATE billing_seen SET expires = now() + make_interval(secs => $4::double precision / 1000), state = '${target("complete", "claimed")}'
     WHERE kind = $1 AND id = $2 AND state = '${CLAIMED}' AND expires > now() AND expires::text = $3::text RETURNING 1 AS completed`,
   // With a token, only the holder's live claim is released (the declaration's release); without, the row goes.
-  forget: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND ($3::text IS NULL OR (state = '${CLAIMED}' AND expires > now() AND expires::text = $3::text))`,
-  sweepSeen: `DELETE FROM billing_seen WHERE ctid IN (SELECT ctid FROM billing_seen WHERE expires <= now() LIMIT 100)`,
+  // The declared release (holder's token, a live claim) and invalidation (a finished row only).
+  forget: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND $3::text IS NOT NULL AND state IN (${fromStates("release")}) AND expires > now() AND expires::text = $3::text`,
+  invalidate: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND state IN (${fromStates("invalidate")})`,
+  // The declared expiry: rows whose time ended, in the states `expire` names, a bounded few at a time.
+  sweepSeen: `DELETE FROM billing_seen WHERE ctid IN (SELECT ctid FROM billing_seen WHERE expires <= now() AND state IN (${fromStates("expire")}) LIMIT ${SWEEP})`,
 };
 
 export class PostgresStore implements Store {
@@ -319,7 +339,7 @@ export class PostgresStore implements Store {
     return (await this.sql.unsafe(SQL.complete, [kind, id, token, ttlMs])).length > 0;
   }
   async forget(kind: string, id: string, token?: string): Promise<void> {
-    await this.sql.unsafe(SQL.forget, [kind, id, token ?? null]);
+    await this.sql.unsafe(token === undefined ? SQL.invalidate : SQL.forget, token === undefined ? [kind, id] : [kind, id, token]);
   }
 }
 

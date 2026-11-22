@@ -244,21 +244,24 @@ export function service(s: Settings) {
     return answer.value;
   }
 
-  // Whether the strict flag evaluates true now (for `account`, with the reader's `auth`, where there is one). No
-  // flag configured, no flagd, a lookup that fails or an answer that is no true: the earlier behaviour.
-  async function strictOn(account?: string, auth?: string | null): Promise<boolean> {
+  // What the strict flag says now (for `account`, with the reader's `auth`, where there is one): true, false, or
+  // undefined when it cannot say (a lookup that fails, an answer that is no boolean). No flag configured, or no
+  // flagd to ask: false. Callers that only act on a true use `strictOn`.
+  async function strictAnswer(account?: string, auth?: string | null): Promise<boolean | undefined> {
     if (!s.strictFlag || !s.flags) return false;
     try {
       const res = await ofrep(s.strictFlag, account, auth);
       if (!res.ok) {
         await res.body?.cancel();
-        return false;
+        return undefined;
       }
-      return (await res.json() as { value?: unknown }).value === true;
+      const { value } = await res.json() as { value?: unknown };
+      return typeof value === "boolean" ? value : undefined;
     } catch {
-      return false;
+      return undefined;
     }
   }
+  const strictOn = async (account?: string, auth?: string | null): Promise<boolean> => (await strictAnswer(account, auth)) === true;
 
   // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag
   // for them now: through the door, with the reader's own session, which its OFREP route reads the
@@ -270,7 +273,7 @@ export function service(s: Settings) {
   // misconfiguration, since BILLING_DOOR_FLAG is set only once a push has published it, release.cue).
   // A false from a lookup that told us nothing would send the call straight to Stripe while the broker
   // runs with STRIPE_DOOR_ASKED, skipping the airlock's ledger.
-  async function doorOn(account: string, auth: string | null): Promise<boolean | undefined> {
+  async function doorOn(account: string | undefined, auth: string | null): Promise<boolean | undefined> {
     if (!s.doorFlag) return undefined;
     if (!s.flags) throw new Error("BILLING_DOOR_FLAG needs BILLING_FLAGS: where to ask it");
     const res = await ofrep(s.doorFlag, account, auth);
@@ -397,6 +400,17 @@ export function service(s: Settings) {
       }
       // The reader's own account read at Stripe through the broker, nothing written: what a flag's live
       // check asks as the tester (PRONTO-218).
+      // Which way the broker would send a call to Stripe for the door flag as evaluated for no one: anonymous, no
+      // account, nothing read or written, and no call to Stripe (the broker's /route runs its real route selection
+      // and stops there). A production scenario asserts {door: true, transport: "door"} once the flag is on.
+      if (req.method === "GET" && path === "/billing/route") {
+        // The usual 502 for a lookup that fails, before the broker is asked.
+        const door = await doorOn(undefined, null);
+        const res = await toBroker("/route", {}, null, { door });
+        if (!res.ok) return res;
+        const { transport } = await res.json() as { transport?: unknown };
+        return json(200, { ok: true, door: door ?? null, transport: transport ?? null });
+      }
       if (req.method === "GET" && path === "/billing/probe") {
         const account = await reader(req);
         if (account instanceof Response) return account;
@@ -411,12 +425,17 @@ export function service(s: Settings) {
   // One try at the grants, as the loop makes it: a success clears the error /billing/health reports, a
   // failure no wait can mend sets it, so a revoked grant never stays effective on a healthy-looking
   // deployment. The loop retries either way, so a corrected flag push recovers with no deploy.
-  let grantsError: string | null = null, served = false, waiting = false;
+  let grantsError: string | null = null, served = false, waiting = false, lastStrict = false;
   // False when the grants were not written. With the strict flag on: a "wait" (a neighbour not up yet, inside the
   // startup window) is quiet, a "fail" is logged and turns /billing/health 503, and neither stops the loop
   // (grantsLoop). Otherwise the earlier behaviour: the failure is logged by grantLog and health stays as it was.
   async function attempt(sinceStartMs: number, retryInS = 0): Promise<boolean> {
-    const strict = await strictOn();
+    // A flagd that cannot say keeps the mode the last answer gave: a failed flag read is not a way out of the strict
+    // mode, and so never clears the error it holds. Only a flag that answers false leaves it.
+    const answer = await strictAnswer();
+    const strict = answer ?? lastStrict;
+    lastStrict = strict;
+    if (answer === false) grantsError = null;
     try {
       await grant(strict);
       served = true;
@@ -425,7 +444,6 @@ export function service(s: Settings) {
       return true;
     } catch (e) {
       if (!strict) {
-        grantsError = null;
         const log = grantLog(served, sinceStartMs);
         if (log === "error") console.error(`billing: grants not written: ${(e as Error).message}`);
         else if (log === "warn") console.warn(`billing: grants not written yet, retrying in ${retryInS} s: ${(e as Error).message}`);

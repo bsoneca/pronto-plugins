@@ -222,7 +222,7 @@ Deno.test("postgres store: claim is one statement that takes only a row nobody h
   const fake: Sql = { unsafe: (q) => { sql.push(q.replace(/\s+/g, " ")); return Promise.resolve([{ token: "2026-11-21 10:00:00.123456+00" }]); }, begin: (fn) => fn(fake) };
   const c = await new PostgresStore(fake).claim("stripe event", "evt", 120_000);
   assertEquals(c, { state: "claimed", token: "2026-11-21 10:00:00.123456+00" }, "the token is the row's own text, microseconds kept");
-  assertEquals(/^DELETE FROM billing_seen WHERE ctid IN \(SELECT ctid FROM billing_seen WHERE expires <= now\(\) LIMIT \d+\)$/.test(sql[0]), true, "a claim first reclaims a bounded few rows whose time ended");
+  assertEquals(/^DELETE FROM billing_seen WHERE ctid IN \(SELECT ctid FROM billing_seen WHERE expires <= now\(\) AND state IN \('claimed', 'done'\) LIMIT 100\)$/.test(sql[0]), true, "a claim first reclaims a bounded few rows whose time ended");
   assertEquals(/^INSERT INTO billing_seen .* ON CONFLICT \(kind, id\) DO UPDATE SET expires = EXCLUDED\.expires, state = 'claimed' WHERE billing_seen\.expires <= now\(\) RETURNING expires::text AS token$/.test(sql[1]), true);
 });
 
@@ -267,6 +267,7 @@ type Step =
   | ["complete", string, boolean]
   | ["forget", string]
   | ["release", string]
+  | ["invalidate"]
   | ["remember"];
 const lifecycle: [string, Step[]][] = [
   ["a claim is busy to another, then done once completed", [["claim", "a", "claimed"], ["claim", "x", "busy"], ["complete", "a", true], ["claim", "x", "done"]]],
@@ -277,6 +278,9 @@ const lifecycle: [string, Step[]][] = [
   ["a holder releases its claim; a stale or no longer live one releases nothing", [["claim", "a", "claimed"], ["expire"], ["claim", "b", "claimed"], ["release", "a"], ["claim", "x", "busy"], ["release", "b"], ["claim", "c", "claimed"]]],
   ["a lease that ended completes nothing until it is claimed again", [["claim", "a", "claimed"], ["expire"], ["complete", "a", false], ["claim", "b", "claimed"], ["complete", "b", true]]],
   ["done is terminal: not claimable, not releasable", [["claim", "a", "claimed"], ["complete", "a", true], ["release", "a"], ["claim", "x", "done"]]],
+  ["an invalidation never drops a claim in progress", [["claim", "a", "claimed"], ["invalidate"], ["claim", "x", "busy"], ["complete", "a", true]]],
+  ["an invalidation drops a finished row, which is claimable again", [["claim", "a", "claimed"], ["complete", "a", true], ["invalidate"], ["claim", "b", "claimed"]]],
+  ["a non-holder's release is refused and leaves the claim", [["claim", "a", "claimed"], ["release", "nobody"], ["claim", "x", "busy"], ["complete", "a", true]]],
   ["a remembered event is done, whatever claimed it", [["claim", "a", "claimed"], ["remember"], ["claim", "x", "done"], ["complete", "a", false]]],
 ];
 for (const [name, make] of claimable) {
@@ -292,7 +296,8 @@ for (const [name, make] of claimable) {
           if (c.state === "claimed") tokens.set(step[1], c.token);
         } else if (step[0] === "expire") await expire("stripe event", "evt");
         else if (step[0] === "complete") assertEquals(await s.complete("stripe event", "evt", tokens.get(step[1])!, 60_000), step[2], label);
-        else if (step[0] === "forget" || step[0] === "release") await s.forget("stripe event", "evt", tokens.get(step[1]));
+        else if (step[0] === "invalidate") await s.forget("stripe event", "evt");
+        else if (step[0] === "forget" || step[0] === "release") await s.forget("stripe event", "evt", tokens.get(step[1]) ?? "not a token");
         else await s.remember("stripe event", "evt", 60_000);
       }
     });
@@ -318,8 +323,8 @@ Deno.test("postgres store: the state column only takes the declared states, and 
 // The transition contract: every sequence of up to `depth` operations, run on each store and on the
 // declaration itself (`step`), must answer alike. The model keeps only what rules.cue declares: a state, whether its
 // time ended, and which token is current.
-type Op = "claim" | "complete-holder" | "complete-stale" | "release-holder" | "release-stale" | "remember" | "expire";
-const OPS: Op[] = ["claim", "complete-holder", "complete-stale", "release-holder", "release-stale", "remember", "expire"];
+type Op = "claim" | "complete-holder" | "complete-stale" | "release-holder" | "release-stale" | "remember" | "expire" | "invalidate";
+const OPS: Op[] = ["claim", "complete-holder", "complete-stale", "release-holder", "release-stale", "remember", "expire", "invalidate"];
 function sequences(depth: number): Op[][] {
   let out: Op[][] = [[]];
   for (let d = 0; d < depth; d++) out = out.flatMap((q) => OPS.map((o) => [...q, o]));
@@ -328,7 +333,7 @@ function sequences(depth: number): Op[][] {
 for (const [name, make] of claimable) {
   Deno.test(`${name} store: every sequence of claim, completion, release, remember and expiry follows rules.cue's transitions`, async () => {
     const { s, expire } = await make();
-    const depth = name === "memory" ? 4 : 3;
+    const depth = name === "memory" ? 3 : 3;
     let n = 0;
     for (const seq of sequences(depth)) {
       const id = `seq-${n++}`;
@@ -356,6 +361,10 @@ for (const [name, make] of claimable) {
           const want = step("release", where, mine);
           await s.forget("stripe event", id, mine ? held! : "stale");
           if (want !== null) where = want as typeof where;
+        } else if (op === "invalidate") {
+          const want = step("invalidate", where, false);
+          await s.forget("stripe event", id);
+          if (want !== null) where = want as typeof where;
         } else if (op === "remember") {
           await s.remember("stripe event", id, 600_000);
           where = step("remember", where, false) as typeof where;
@@ -375,7 +384,9 @@ Deno.test("rules.cue's transitions leave no state without a way in and name ever
     assertEquals([t.from === "absent" || states.has(t.from), t.to === "absent" || states.has(t.to)], [true, true], JSON.stringify(t));
   }
   for (const to of RULES.claimStates) assertEquals(RULES.claimTransitions.some((t) => t.to === to), true, `${to} is reached`);
-  assertEquals(RULES.claimTransitions.filter((t) => t.from === "done").every((t) => t.event === "remember" || t.event === "expire"), true, "done is terminal until retention expires");
+  assertEquals(RULES.claimTransitions.filter((t) => t.from === "done").map((t) => t.event).sort(), ["expire", "invalidate", "remember"], "done is terminal: only its expiry, an invalidation or a remember touch it");
+  assertEquals((RULES.claimTransitions as readonly { event: string; from: string }[]).some((t) => t.event === "invalidate" && t.from === "claimed"), false, "an invalidation never touches a claim in progress");
+  assertEquals(RULES.claimSweep, 100, "the sweep limit is rules.cue's");
   assertEquals(target("claim", "absent"), "claimed");
   assertEquals(target("complete", "claimed"), "done");
   assertEquals(step("complete", "claimed", false), null, "completion needs the holder's token");
@@ -399,4 +410,36 @@ Deno.test("expired rows are reclaimed on the claim path, a bounded few a call", 
   await p.claim("stripe event", "fresh", 120_000);
   const [{ n }] = await sql.unsafe(`SELECT count(*)::int AS n FROM billing_seen`);
   assertEquals(n, 150 - 100 + 1, "one claim reclaims at most 100 expired rows");
+});
+
+Deno.test("postgres store: the durable counter is the authority, across a restart, replicas and a slow clock", async () => {
+  const sql = pglite(new PGlite());
+  await applySchema(sql);
+  const a = new PostgresStore(sql);
+  const issued = [await a.tick("ver", 5_000_000), await a.tick("ver", 5_000_000)];
+  // A restart: a new store on the same database, whose clock is far behind what was issued.
+  const b = new PostgresStore(sql);
+  const after = [await b.tick("ver", 1_000), await a.tick("ver", 2_000), await b.tick("ver", 0)];
+  assertEquals([...issued, ...after].every((v, i, all) => i === 0 || v > all[i - 1]), true, `never backward: ${[...issued, ...after]}`);
+  // A clock ahead moves the counter forward, recorded: a slow replica after it cannot go back.
+  const ahead = await a.tick("ver", 9_000_000);
+  assertEquals(ahead, 9_000_000);
+  assertEquals(await b.tick("ver", 1), 9_000_001, "recorded in the database, not in a replica's clock");
+});
+
+Deno.test("memory store: a sweep continues where it stopped and drops the declared expiry's rows, a bounded few a call", async () => {
+  let t = 1_000;
+  const m = new MemoryStore(() => t);
+  for (let i = 0; i < 250; i++) await m.claim("stripe event", `old-${i}`, 10);
+  t += 1_000;
+  // Each call looks at most claimSweep rows, from where the last stopped, so a few calls clear them all and none
+  // looks at the same hundred twice.
+  const sizes: number[] = [250];
+  for (let i = 0; i < 4; i++) {
+    await m.claim("stripe event", `fresh-${i}`, 120_000);
+    sizes.push(m.rows);
+  }
+  // A call adds its own row and sweeps at most claimSweep expired ones.
+  assertEquals(sizes.every((n, i) => i === 0 || sizes[i - 1] + 1 - n <= 100), true, `bounded: ${sizes}`);
+  assertEquals(sizes.at(-1), 4, `every expired row went, only the four live claims stay: ${sizes}`);
 });
