@@ -106,4 +106,11 @@ assert error { $"($plain)---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name
 let two = ($"($plain)---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: other\ndata:\n  K: YQ==\n" | sops secret-manifests identity-broker identity [BROKER_SECRET] | split row "---\n" | each { from yaml })
 assert equal ($two | get metadata.namespace) [identity identity]
 assert ((sops apply-command "kubectl" identity) =~ "--server-side --force-conflicts --field-manager=pronto-sops")
+# Facebook (PRONTO-449): the id and the tenants are plain env, the app secret is the Secret's FACEBOOK_APP_SECRET, and a broker with no Facebook names none.
+let fb = (metal manifests --domain id.example.com --sources (metal sources) --settings [{name: "FACEBOOK_APP_ID", value: "1848912399584947"}] --facebook | split row "---\n" | each { from yaml })
+let fbc = (($fb | where kind == Deployment and metadata.name == identity-broker | first).spec.template.spec.containers | first)
+assert equal ($fbc.env | where name == FACEBOOK_APP_SECRET | first).valueFrom.secretKeyRef {name: "identity-broker", key: FACEBOOK_APP_SECRET}
+assert equal ($fbc.env | where name == FACEBOOK_APP_ID | first).value "1848912399584947"
+assert equal ($c.env | where name == FACEBOOK_APP_SECRET | length) 0 "a broker with no Facebook holds no Facebook secret"
+print "identity metal: facebook"
 print "identity metal: --secrets"

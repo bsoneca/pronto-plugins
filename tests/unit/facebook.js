@@ -1,9 +1,11 @@
 // The broker's Facebook sign-in (identity/broker/facebook.ts, PRONTO-449) end to end, against a stand-in for Meta this module serves
 // (its token endpoint and Graph's /me, checking the secret, the PKCE verifier and the app-secret proof as Meta does) and a stand-in for the
 // tenant's flag: measured by what Meta was asked, what the tenant's ID token says, and what a refused sign-in answered.
-import { fromBase64url, randomToken, sha256url } from '../../identity/oidc.ts';
+import { base64url, fromBase64url, randomToken, sha256url } from '../../identity/oidc.ts';
 import { broker } from '../../identity/broker/main.ts';
-import { appSecretProof, facebook, facebookConfig, FACEBOOK } from '../../identity/broker/facebook.ts';
+import { appSecretProof, facebook, facebookConfig, facebookRoutes, FACEBOOK, verifySignedRequest } from '../../identity/broker/facebook.ts';
+import { pairwiseKey, pairwiseSubject } from '../../identity/broker/core.ts';
+import { MemoryStore } from '../../identity/broker/store.ts';
 
 const TENANT = 'https://app.example.com';
 const APP_ID = '1234567890123';
@@ -128,3 +130,70 @@ export async function brokered(p = {}) {
 
 /** The facts the broker reads (facebook_spec.json), as the file holds them. */
 export const specFile = () => ({ ...FACEBOOK });
+
+const enc = new TextEncoder();
+/** A signed_request as Meta makes one: base64url(HMAC-SHA256 of the payload under `secret`) "." base64url(payload). */
+async function signedRequest(payload, secret = SECRET) {
+  const body = base64url(enc.encode(JSON.stringify(payload)));
+  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = base64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(body))));
+  return `${sig}.${body}`;
+}
+const form = (signed) => new URLSearchParams({ signed_request: signed }).toString();
+
+/** verifySignedRequest for a request made as `kind` says: the user id it accepts, or null. */
+export async function signed(kind) {
+  const good = { algorithm: 'HMAC-SHA256', user_id: '1000000000001', issued_at: 1 };
+  const bodies = {
+    good: async () => form(await signedRequest(good)),
+    otherSecret: async () => form(await signedRequest(good, 'cd'.repeat(16))),
+    algorithm: async () => form(await signedRequest({ ...good, algorithm: 'HMAC-SHA1' })),
+    noId: async () => form(await signedRequest({ algorithm: 'HMAC-SHA256' })),
+    badId: async () => form(await signedRequest({ ...good, user_id: '12ab' })),
+    oversized: async () => form(await signedRequest({ ...good, pad: 'x'.repeat(9000) })),
+    noDot: () => form('abcdef'),
+    twoDots: async () => form(`${await signedRequest(good)}.extra`),
+    none: () => '',
+    notBase64: () => form('!!!.???'),
+  };
+  return await verifySignedRequest(await bodies[kind](), SECRET);
+}
+
+/** Meta's callbacks (facebookRoutes) on an in-memory store: what `call` answers (status, body or page), and what the store then holds. */
+export async function callbacks(call) {
+  const issuer = 'https://id.example.com';
+  const store = new MemoryStore();
+  const pairwise = await pairwiseKey('s'.repeat(40));
+  const cfg = facebookConfig((k) => ({ ...ENV, FACEBOOK_TENANTS: `${TENANT},https://other.example.com,https://localhost:*` })[k] ?? undefined);
+  const routes = facebookRoutes(cfg, { issuer, secret: 's'.repeat(40), store, pairwise, now: () => Date.UTC(2026, 10, 22) });
+  const user = '1000000000001';
+  const signedBody = async (over = {}, secret = SECRET) => form(await signedRequest({ algorithm: 'HMAC-SHA256', user_id: user, ...over }, secret));
+  const post = async (path, body) => (await routes(new Request(`${issuer}${path}`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body }), new URL(`${issuer}${path}`)));
+  const logs = [];
+  const real = console.log;
+  console.log = (...a) => { logs.push(a.map(String).join(' ')); };
+  try {
+    if (call === 'other') return { routed: routes(new Request(`${issuer}/health`), new URL(`${issuer}/health`)) === null };
+    if (call === 'deauthorize') { const r = await post('/facebook/deauthorize', await signedBody()); return { status: r.status, body: await r.json(), stored: await store.get('fb-deletion', 'x') ?? null }; }
+    if (call === 'deauthorizeBad') { const r = await post('/facebook/deauthorize', await signedBody({}, 'cd'.repeat(16))); return { status: r.status, body: await r.json() }; }
+    if (call === 'deletionBad') { const r = await post('/facebook/data-deletion', await signedBody({}, 'cd'.repeat(16))); return { status: r.status, body: await r.json() }; }
+    const r = await post('/facebook/data-deletion', await signedBody());
+    const answer = await r.json();
+    if (call === 'deletion') {
+      const code = answer.confirmation_code;
+      const held = await store.get('fb-deletion', code);
+      const expected = await Promise.all([TENANT, 'https://other.example.com'].map(async (t) => ({ tenant: t, sub: await pairwiseSubject(pairwise, t, 'facebook', user) })));
+      const page = await routes(new Request(answer.url), new URL(answer.url));
+      const html = await page.text();
+      return {
+        status: r.status, shape: Object.keys(answer).sort(), urlOk: answer.url === `${issuer}/facebook/deletion?code=${code}`, codeLen: code.length,
+        at: held.at, subjectsOk: JSON.stringify(held.subjects) === JSON.stringify(expected), wildcardSkipped: held.subjects.length === 2, holdsFacebookId: JSON.stringify(held).includes(user),
+        page: page.status, pageHasId: html.includes(user) || expected.some((e) => html.includes(e.sub)), pageHasDate: html.includes('2026-11-22'), csp: page.headers.get('content-security-policy'), loggedId: logs.join(' ').includes(user),
+      };
+    }
+    if (call === 'twice') { const second = await post('/facebook/data-deletion', await signedBody()); return { first: r.status, second: second.status }; }
+    if (call === 'unknown') { const u = new URL(`${issuer}/facebook/deletion?code=nonexistentcode1`); const p = await routes(new Request(u), u); return { status: p.status }; }
+    if (call === 'badCode') { const u = new URL(`${issuer}/facebook/deletion?code=../../etc`); const p = await routes(new Request(u), u); return { status: p.status }; }
+    return null;
+  } finally { console.log = real; }
+}

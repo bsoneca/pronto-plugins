@@ -11,7 +11,9 @@
 // version, the endpoints, the permission, the flag, the limits) are facebook.cue's, exported to
 // facebook_spec.json.
 import spec from "./facebook_spec.json" with { type: "json" };
-import { Refused } from "../oidc.ts";
+import { fromBase64url, randomToken, Refused } from "../oidc.ts";
+import { esc, pairwiseSubject, sectorOf } from "./core.ts";
+import type { Store } from "./store.ts";
 import type { KeySource } from "../oidc.ts";
 import type { Provider } from "./main.ts";
 import { tenantAdmitted } from "./phone.ts";
@@ -119,5 +121,91 @@ export function facebook(cfg: FacebookConfig, fetcher: typeof fetch = fetch): Pr
     pkce: spec.pkce,
     scope: spec.permissions.join(" "),
     claims: (exchanged, ctx) => claimsFrom(cfg, exchanged, ctx.profile, fetcher),
+  };
+}
+
+// Meta's two server callbacks (PRONTO-449, PR 2)
+// Meta POSTs a `signed_request` (base64url(HMAC-SHA256 of the payload under the app secret) "." base64url(JSON payload)) to the
+// Deauthorize callback when a person removes the app from their Facebook, and to the Data Deletion callback when they ask Facebook
+// to delete what the app has. The broker keeps no profile of anyone: its only trace is the pairwise subjects it handed tenants, so a
+// deletion request is recorded as those subjects, per listed tenant, for the tenants (and the operator) to act on. Nothing is read
+// from a request whose signature does not verify.
+
+const PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
+const SIGNED_REQUEST_MAX = 8192;
+
+/** The app-scoped user id in Meta's signed request, or null when the body is not one: too big, no signature that verifies under the secret (constant time), another algorithm, or no plain id. */
+export async function verifySignedRequest(body: string, secret: string): Promise<string | null> {
+  if (body.length > SIGNED_REQUEST_MAX) return null;
+  const signed = new URLSearchParams(body).get("signed_request") ?? "";
+  const dot = signed.indexOf(".");
+  if (dot < 1 || signed.indexOf(".", dot + 1) !== -1) return null;
+  const [sig, payload] = [signed.slice(0, dot), signed.slice(dot + 1)];
+  if (!/^[A-Za-z0-9_-]+$/.test(sig) || !/^[A-Za-z0-9_-]+$/.test(payload)) return null;
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+  let signature: Uint8Array<ArrayBuffer>;
+  try { signature = Uint8Array.from(fromBase64url(sig)); } catch { return null; }
+  if (!(await crypto.subtle.verify("HMAC", key, signature, new TextEncoder().encode(payload)))) return null;
+  let data: { algorithm?: unknown; user_id?: unknown };
+  try { data = JSON.parse(new TextDecoder().decode(fromBase64url(payload))); } catch { return null; }
+  if (data.algorithm !== "HMAC-SHA256" || typeof data.user_id !== "string" || !/^[0-9]{1,30}$/.test(data.user_id)) return null;
+  return data.user_id;
+}
+
+/** What the deletion callback records (and the status page reads): when, and the pairwise subject of each listed tenant. */
+export interface DeletionRecord { at: number; subjects: { tenant: string; sub: string }[] }
+
+/** The routes Meta calls and the status page its deletion answer links to, for the broker's `extra` (null for any other path). */
+export function facebookRoutes(
+  cfg: FacebookConfig, p: { issuer: string; secret: string; store: Store; pairwise: CryptoKey; sectors?: ReadonlyMap<string, string>; now?: () => number },
+): (req: Request, url: URL) => Promise<Response> | null {
+  const issuer = p.issuer.replace(/\/$/, "");
+  const now = p.now ?? Date.now;
+  const sectors = p.sectors ?? new Map<string, string>();
+  const reply = (status: number, body: unknown) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
+  // Only concrete origins have subjects to name: an entry with a port pattern (`*`) stands for tenants the broker cannot list here.
+  const tenants = cfg.tenants.filter((t) => !t.includes("*"));
+
+  async function signed(req: Request): Promise<string | Response> {
+    const user = await verifySignedRequest(await req.text(), cfg.secret);
+    return user ?? reply(400, { error: "not a signed request of this app" });
+  }
+
+  async function deauthorize(req: Request): Promise<Response> {
+    const user = await signed(req);
+    if (user instanceof Response) return user;
+    // Nothing is kept of a person: their subjects were never stored. The broker only notes that Meta called.
+    console.log("broker: facebook deauthorize callback");
+    return reply(200, {});
+  }
+
+  async function deletion(req: Request): Promise<Response> {
+    const user = await signed(req);
+    if (user instanceof Response) return user;
+    // One request per person a minute: a verified request writes a record, and a replayed one adds none.
+    if (!(await p.store.claim("fb-deletion-rate", user, 60_000))) return reply(429, { error: "a request for this person ran just now" });
+    const code = randomToken(16);
+    const subjects = await Promise.all(tenants.map(async (tenant) => ({ tenant, sub: await pairwiseSubject(p.pairwise, sectorOf(sectors, tenant), "facebook", user) })));
+    await p.store.put("fb-deletion", code, { at: now(), subjects } satisfies DeletionRecord, 90 * 86_400_000);
+    console.log(`broker: facebook data deletion requested (${code})`);
+    return reply(200, { url: `${issuer}/facebook/deletion?code=${code}`, confirmation_code: code });
+  }
+
+  async function status(url: URL): Promise<Response> {
+    const code = url.searchParams.get("code") ?? "";
+    const record = /^[A-Za-z0-9_-]{8,64}$/.test(code) ? await p.store.get<DeletionRecord>("fb-deletion", code) : undefined;
+    const html = (title: string, body: string, status: number) => new Response(
+      `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><body style="font:16px system-ui;max-width:32rem;margin:3rem auto;padding:0 1rem">${body}`,
+      { status, headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": PAGE_CSP, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+    if (!record) return html("Deletion request", `<h1>We have no such request</h1><p>Check the link Facebook gave you.</p>`, 404);
+    // No one's data on this page: when it was received, and that the apps are told.
+    return html("Deletion request", `<h1>Your request was received</h1><p>Received on ${esc(new Date(record.at).toISOString().slice(0, 10))}. The apps you signed in to with Facebook were asked to delete what they keep of you; the broker itself keeps nothing but the record of this request.</p><p>Request code: <code>${esc(code)}</code></p>`, 200);
+  }
+
+  return (req, url) => {
+    if (req.method === "POST" && url.pathname === "/facebook/deauthorize") return deauthorize(req);
+    if (req.method === "POST" && url.pathname === "/facebook/data-deletion") return deletion(req);
+    if (req.method === "GET" && url.pathname === "/facebook/deletion") return status(url);
+    return null;
   };
 }

@@ -437,8 +437,11 @@ if (import.meta.main) {
   const { facebook, facebookConfig } = await import("./facebook.ts");
   const facebookCfg = facebookConfig(env);
   if (facebookCfg) providers.push(facebook(facebookCfg));
+  // Meta's callbacks (deauthorize, data deletion) and the status page its deletion answer links to, beside the phone's routes.
+  const { facebookRoutes } = await import("./facebook.ts");
+  const facebookRoute = facebookCfg ? facebookRoutes(facebookCfg, { issuer, secret, store, pairwise: await pairwiseKey(secret), sectors: sectorsOf(env("BROKER_SECTORS")) }) : null;
   if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT, or PHONE_OTP=broker, or FACEBOOK_APP_ID");
   Deno.serve({ port: Number(env("PORT") ?? 28443) }, await broker({
-    issuer, secret, providers, store, sectors: sectorsOf(env("BROKER_SECTORS")), extra: phone?.handle, askDoor: askedFlag(env("GOOGLE_DOOR_FLAG") || "signin_door"),
+    issuer, secret, providers, store, sectors: sectorsOf(env("BROKER_SECTORS")), extra: (req, url) => phone?.handle(req, url) ?? facebookRoute?.(req, url) ?? null, askDoor: askedFlag(env("GOOGLE_DOOR_FLAG") || "signin_door"),
   }));
 }

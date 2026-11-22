@@ -93,4 +93,35 @@ cases: {
 		{call: "fb.specFile", expect: idspec.facebook, why: "a change to one without the other fails here (and in ci)"},
 		{call: "fb.specFile", holds: {graph: "v24.0", flag: "facebook_signin", pkce: true, refusesWebviews: false, permissions: ["public_profile"]}, why: "what the spec says today"},
 	]}
+	"a signed request is believed only when its HMAC verifies under the app secret, it names HMAC-SHA256 and a plain id, and it is not oversized": {suite: "identity", steps: [
+		{call: "fb.signed", args: ["good"], expect: "1000000000001"},
+		{call: "fb.signed", args: ["otherSecret"], expect: null, why: "another app's secret signs another app's requests"},
+		{call: "fb.signed", args: ["algorithm"], expect: null},
+		{call: "fb.signed", args: ["noId"], expect: null},
+		{call: "fb.signed", args: ["badId"], expect: null},
+		{call: "fb.signed", args: ["oversized"], expect: null},
+		{call: "fb.signed", args: ["noDot"], expect: null},
+		{call: "fb.signed", args: ["twoDots"], expect: null},
+		{call: "fb.signed", args: ["none"], expect: null},
+		{call: "fb.signed", args: ["notBase64"], expect: null},
+	]}
+	"Meta's deauthorize callback answers 200 to a signed request, keeps nothing of the person, and refuses an unsigned one": {suite: "identity", steps: [
+		{call: "fb.callbacks", args: ["deauthorize"], expect: {status: 200, body: {}, stored: null}},
+		{call: "fb.callbacks", args: ["deauthorizeBad"], expect: {status: 400, body: {error: "not a signed request of this app"}}},
+	]}
+	"Meta's data-deletion callback records the pairwise subject of each listed tenant, never Facebook's id, and answers with a status page that shows no one's data": {suite: "identity", steps: [
+		{call: "fb.callbacks", args: ["deletion"], holds: {status: 200, shape: ["confirmation_code", "url"], urlOk: true, codeLen: 22}},
+		{call: "fb.callbacks", args: ["deletion"], holds: {at: 1795305600000, subjectsOk: true, wildcardSkipped: true}, why: "the entry with a port pattern has no subject to name"},
+		{call: "fb.callbacks", args: ["deletion"], holds: {holdsFacebookId: false, pageHasId: false, loggedId: false}, why: "the record, the page and the log name no Facebook id"},
+		{call: "fb.callbacks", args: ["deletion"], holds: {page: 200, pageHasDate: true, csp: "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"}},
+	]}
+	"a deletion request for the same person twice in a minute is answered 429 the second time, and an unsigned one writes nothing": {suite: "identity", steps: [
+		{call: "fb.callbacks", args: ["twice"], expect: {first: 200, second: 429}},
+		{call: "fb.callbacks", args: ["deletionBad"], expect: {status: 400, body: {error: "not a signed request of this app"}}},
+	]}
+	"the deletion status page of a code that is not there, or not a code, is a 404; any other path is not Meta's": {suite: "identity", steps: [
+		{call: "fb.callbacks", args: ["unknown"], expect: {status: 404}},
+		{call: "fb.callbacks", args: ["badCode"], expect: {status: 404}},
+		{call: "fb.callbacks", args: ["other"], expect: {routed: true}},
+	]}
 }

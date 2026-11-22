@@ -58,6 +58,7 @@ export def manifests [
 	--airlock # Google's token exchange through the airlock's door: the airlock holds the client's credential, the broker no secret
 	--door-asked # With --airlock, while it moves (PRONTO-268): each exchange through the door when its tenant asks (its flag signin_door), the broker keeping its secret
 	--door-tenants: string = "" # With --door-asked: the tenants whose flag is asked, PHONE_TENANTS' syntax; every other tenant goes straight to Google, unasked
+	--facebook # The broker offers Facebook (FACEBOOK_APP_ID in --settings): its Secret also holds FACEBOOK_APP_SECRET
 ]: nothing -> string {
 	let labels = {"app.kubernetes.io/name": $name, "app.kubernetes.io/part-of": "pronto-identity"}
 	let lock = $"($name)-airlock"
@@ -68,7 +69,7 @@ export def manifests [
 	if ($door_tenants | is-not-empty) and not $door_asked { error make {msg: "--door-tenants is for --door-asked"} }
 	# Through the door the broker's env names no client secret, and the airlock's names the credential it holds.
 	# While the flag moves it, the broker keeps its secret beside the door; after, the airlock alone holds it.
-	let secret_vars = if $airlock and not $door_asked { [BROKER_SECRET] } else { [BROKER_SECRET GOOGLE_CLIENT_SECRET] }
+	let secret_vars = (if $airlock and not $door_asked { [BROKER_SECRET] } else { [BROKER_SECRET GOOGLE_CLIENT_SECRET] }) ++ (if $facebook { [FACEBOOK_APP_SECRET] } else { [] })
 	let settings = ($settings ++ (if $airlock { [{name: "GOOGLE_DOOR", value: $"http://($lock):($door_port)"}] } else { [] })
 		++ (if $door_asked { [{name: "GOOGLE_DOOR_ASKED", value: "1"} {name: "GOOGLE_DOOR_TENANTS", value: $door_tenants}] } else { [] }))
 	let meta = {namespace: $namespace, labels: $labels}
@@ -190,6 +191,8 @@ export def main [
 	--phone-sms: string = ""
 	--phone-sms-gate: string = ""
 	--phone-prove-tenants: string = "" # With --phone-otp broker: the origins that may learn a proven number (the prove step); none, off
+	--facebook-app-id: string = ""  # Meta's app id (public) for Facebook sign-in (PRONTO-449); with --facebook-tenants; none, no Facebook. The app secret is in the --secrets file as FACEBOOK_APP_SECRET
+	--facebook-tenants: string = "" # The origins that may offer Facebook, comma separated (`*` for a port)
 	--sectors: string = ""         # Apps that moved address, each keeping its people's subjects: https://new=https://old, comma separated (broker/core.ts sectorsOf); none, every app is its own sector
 	--namespace: string = "identity"
 	--service: string = "identity-broker" # The secrets' names in Secret Manager are <service>-secret and <service>-google-client-secret
@@ -199,6 +202,11 @@ export def main [
 ] {
 	if ([$ssh $kubeconfig $domain $google_client_id] | any { is-empty }) { error make {msg: "--ssh, --kubeconfig, --domain and --google-client-id are all required"} }
 	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
+	# Facebook: the id and the tenants are plain env; the secret is read from the SOPS file, and only from there (Secret Manager holds none).
+	if ($facebook_app_id | is-empty) != ($facebook_tenants | is-empty) { error make {msg: "--facebook-app-id and --facebook-tenants go together"} }
+	let facebook = ($facebook_app_id | is-not-empty)
+	if $facebook and ($secrets | is-empty) { error make {msg: "--facebook-app-id needs --secrets: the app secret is FACEBOOK_APP_SECRET in the SOPS file, never in Secret Manager's three names"} }
+	let facebook_env = if $facebook { [{name: "FACEBOOK_APP_ID", value: $facebook_app_id}, {name: "FACEBOOK_TENANTS", value: $facebook_tenants}] } else { [] }
 	let phone = if $phone_otp == "broker" {
 		if ([$phone_sms $phone_sms_gate $phone_admit $phone_tenants] | any { is-empty }) {
 			error make {msg: "--phone-otp broker needs --phone-sms, --phone-sms-gate, --phone-admit and --phone-tenants"}
@@ -225,12 +233,12 @@ export def main [
 			{name: "PHONE_TENANTS", value: $phone_tenants}
 		]
 	}
-	let keys = ([BROKER_SECRET GOOGLE_CLIENT_SECRET] ++ (if $airlock { [GOOGLE_CLIENT_BASIC] } else { [] }))
+	let keys = ([BROKER_SECRET GOOGLE_CLIENT_SECRET] ++ (if $airlock { [GOOGLE_CLIENT_BASIC] } else { [] }) ++ (if $facebook { [FACEBOOK_APP_SECRET] } else { [] }))
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
 	# A malformed list stops the broker at start, so the rollout below fails rather than serve new subjects.
 	let sector = if ($sectors | is-empty) { [] } else { [{name: "BROKER_SECTORS", value: $sectors}] }
-	let yaml = (manifests --domain $domain --sources (sources) --settings ([{name: "GOOGLE_CLIENT_ID", value: $google_client_id}] ++ $phone ++ $sector) --namespace $namespace --name $service --airlock=$airlock --door-asked=$door_asked --door-tenants=$door_tenants)
+	let yaml = (manifests --domain $domain --sources (sources) --settings ([{name: "GOOGLE_CLIENT_ID", value: $google_client_id}] ++ $phone ++ $facebook_env ++ $sector) --namespace $namespace --name $service --airlock=$airlock --door-asked=$door_asked --door-tenants=$door_tenants --facebook=$facebook)
 	# The namespace first, so the Secret has somewhere to go before the pod that reads it.
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# The secrets through ssh's stdin alone: never a file, never an argument.
