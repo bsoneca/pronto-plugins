@@ -33,6 +33,12 @@ export const CONSENT_PATH = "/billing/trial/consent";
 
 // How long a delivered Stripe event is known: past Stripe's three days of sending it again.
 const EVENT_KEPT_MS = 7 * 24 * 3600_000;
+// How long one replica holds a Stripe event while it works on it, and short enough that a pod that died
+// with one leaves the event to Stripe's next send. Work inside is bounded below it: each call to Stripe
+// or the door waits 15 s a try, a push 10 s, and no round starts after a quarter of the lease, so a
+// round in an ordinary outage ends before the lease does; a stalled one that outlives it is at worst
+// pushed by a second replica too, which the tenant takes as one entitlement newer than the other.
+const EVENT_LEASE_MS = 120_000;
 
 export const SUBSCRIPTION_EVENTS = new Set([
   "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted",
@@ -502,10 +508,12 @@ export async function broker(p: {
   // of the operator's dashboard would make later. Read again from Stripe, so an event that
   // lags a subscription already ended asks nothing. One subscription's end is handled by one caller at
   // a time, in any replica; another event for it meanwhile leaves it to that one.
-  const ending = <T>(id: string, fn: () => Promise<T>) => store.exclusive(`ending ${id}`, fn);
-  async function endFailedTrial(event: Subscription): Promise<void> {
-    if (event.metadata?.trial !== "1" || (event.status !== "past_due" && event.status !== "unpaid")) return;
-    await ending(event.id, async () => {
+  // Whether it ran: false when another caller holds the subscription, so the event is not done.
+  const ending = async (id: string, fn: () => Promise<void>): Promise<boolean> =>
+    (await store.exclusive(`ending ${id}`, async () => { await fn(); return true; })) === true;
+  async function endFailedTrial(event: Subscription): Promise<boolean> {
+    if (event.metadata?.trial !== "1" || (event.status !== "past_due" && event.status !== "unpaid")) return true;
+    return await ending(event.id, async () => {
       const fresh = await p.stripe<Subscription>("GET", `/v1/subscriptions/${event.id}`);
       if (!firstChargeFailed(fresh)) return;
       // The failed first invoice must not stay payable: one that was paid since means the charge
@@ -525,9 +533,9 @@ export async function broker(p: {
   // Two Checkouts that raced past the lock (a customer Stripe's search had not found yet, or a lock
   // that gave up waiting) can each start a trial: the newer, still trialing and uncharged, is cancelled
   // at once and marked, so it never shows as the account's trial. The older keeps its trial.
-  async function endDuplicateTrial(event: Subscription & { customer: string }, t: string, account: string): Promise<void> {
-    if (event.metadata.trial !== "1") return;
-    await ending(event.id, async () => {
+  async function endDuplicateTrial(event: Subscription & { customer: string }, t: string, account: string): Promise<boolean> {
+    if (event.metadata.trial !== "1") return true;
+    return await ending(event.id, async () => {
       const subs = await subscriptionsOf(await customersOf(t, account, event.customer));
       const mine = subs.find((x) => x.id === event.id);
       if (mine?.status !== "trialing") return;
@@ -546,34 +554,52 @@ export async function broker(p: {
     if (!(await webhookSigned(p.webhookSecret, payload, req.headers.get("stripe-signature")))) return json(400, { error: "signature" });
     const event = JSON.parse(payload) as { id: string; type: string; data: { object: Subscription & { customer: string } } };
     if (!SUBSCRIPTION_EVENTS.has(event.type)) return json(200, { ignored: event.type });
-    // Stripe sends an event again until it is answered, for up to three days, and to every replica
-    // alike: one delivered (or refused for good) already is answered so without a second push.
-    if (await store.seen("stripe event", event.id)) return json(200, { duplicate: event.id });
     const sub = event.data.object;
     const t = tenantOf(sub.metadata?.tenant, true);
     const account = accountOf(sub.metadata?.account);
     const plan = sub.metadata?.plan;
     if (!t || !account || !plan) return json(200, { ignored: "not a pronto subscription" });
-    await endFailedTrial(sub);
-    if (event.type === "customer.subscription.created") await endDuplicateTrial(sub, t, account);
-    let sent: { active: boolean; through: number } | null = null;
-    for (let round = 0; round < 3; round++) {
-      const { held, token } = await entitlement(t, account, plan, sub.customer);
-      if (sent && sent.active === held.active && sent.through === held.through) break;
-      const r = await push(t, token);
-      if (r.refused) {
-        console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}; not sent again`);
-        await store.remember("stripe event", event.id, EVENT_KEPT_MS);
-        return json(200, { refused: event.id });
+    // Stripe sends an event again until it is answered, for up to three days, and to every replica
+    // alike: one delivered (or refused for good) already is answered so without a second push, and one
+    // another replica is working on now is answered 409, for Stripe to send again if that one fails.
+    const claim = await store.claim("stripe event", event.id, EVENT_LEASE_MS);
+    if (claim.state === "done") return json(200, { duplicate: event.id });
+    if (claim.state === "busy") return json(409, { error: "in progress", event: event.id });
+    const claimToken = claim.token;
+    let kept = false;
+    try {
+      // A subscription another caller is ending now is not ended for this event: it is not done.
+      if (!(await endFailedTrial(sub))) return json(409, { error: "subscription busy", event: event.id });
+      if (event.type === "customer.subscription.created" && !(await endDuplicateTrial(sub, t, account))) {
+        return json(409, { error: "subscription busy", event: event.id });
       }
-      if (!r.taken) {
-        console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}`);
-        return json(502, { error: `tenant ${r.why}` });
+      let sent: { active: boolean; through: number } | null = null;
+      const began = Date.now();
+      for (let round = 0; round < 3; round++) {
+        if (Date.now() - began > EVENT_LEASE_MS / 4) return json(502, { error: "too slow" });
+        const { held, token } = await entitlement(t, account, plan, sub.customer);
+        if (sent && sent.active === held.active && sent.through === held.through) break;
+        const r = await push(t, token);
+        if (r.refused) {
+          console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}; not sent again`);
+          await store.remember("stripe event", event.id, EVENT_KEPT_MS);
+          kept = true;
+          return json(200, { refused: event.id });
+        }
+        if (!r.taken) {
+          console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}`);
+          return json(502, { error: `tenant ${r.why}` });
+        }
+        sent = held;
       }
-      sent = held;
+      await store.remember("stripe event", event.id, EVENT_KEPT_MS);
+      kept = true;
+      return json(200, { delivered: event.id });
+    } finally {
+      // Anything but delivered or refused for good (a 502, a throw, a busy subscription) gives the claim back,
+      // so Stripe's next send is not made to wait out the lease. Only this claim's own token is let go.
+      if (!kept) await store.forget("stripe event", event.id, claimToken).catch(() => {});
     }
-    await store.remember("stripe event", event.id, EVENT_KEPT_MS);
-    return json(200, { delivered: event.id });
   }
 
   return async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
