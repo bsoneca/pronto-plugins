@@ -33,15 +33,14 @@ export const EVENTS_PATH = "/billing/events";
 export const CONSENT_PATH = "/billing/trial/consent";
 
 // How long a delivered Stripe event is known: past Stripe's three days of sending it again.
-const EVENT_KEPT_MS = 7 * 24 * 3600_000;
+// One source for the webhook's retention and lease (rules.cue).
+const EVENT_KEPT_MS = RULES.claimRetentionMs;
 // How long one replica holds a Stripe event while it works on it, and short enough that a pod that died
 // with one leaves the event to Stripe's next send. Work inside is bounded below it: each call to Stripe
 // or the door waits 15 s a try, a push 10 s, and no round starts after a quarter of the lease, so a
 // round in an ordinary outage ends before the lease does; a stalled one that outlives it is at worst
 // pushed by a second replica too, which the tenant takes as one entitlement newer than the other.
-const EVENT_LEASE_MS = 120_000;
-/** The refused deliveries of one event after which it is answered 200 and marked done, with the alert. */
-const REFUSALS_MAX = 5;
+const EVENT_LEASE_MS = RULES.claimLeaseMs;
 
 export const SUBSCRIPTION_EVENTS = new Set([
   "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted",
@@ -124,6 +123,9 @@ export async function broker(p: {
   // What a caller nobody signed in may make the broker ask of Stripe, counted over every replica.
   const perTenant = (t: string) => store.take("tenant", t, 120, 60_000);
   const mode = p.mode ?? "live";
+  // The anonymous route probe has limiters of its own: it never spends a player's checkout, trial or probe quota.
+  const routeClient = (c: string) => store.take(`route client ${mode}`, c, RULES.routeLimits.perClient, 60_000);
+  const routeAll = () => store.take(`route all ${mode}`, "all", RULES.routeLimits.global, 60_000);
   const perClient = (c: string) => store.take(`client ${mode}`, c, 20, 60_000);
   // A trial route's own: a tenant's calls all leave from one address, so this is generous, and it is
   // taken before a ticket is tried, which a junk one must not spend the tenant's bucket on.
@@ -358,12 +360,18 @@ export async function broker(p: {
   }
 
   // Which transport a call to Stripe would take for the door word this request carries, from the same route
-  // selection the calls use, and nothing else: no read of Stripe, no write, no account. Rate limited as /probe is.
+  // selection (the very function a call's dispatch asks), and nothing else: no read of Stripe, no write, no
+  // account. Limited apart from every other route, with a capped body.
   async function routeOf(req: Request, client: string): Promise<Response> {
-    const b = await body(req);
-    const t = tenant(b.tenant);
-    if (!t) return json(400, { error: "tenant required" });
-    if (!(await perClient(client)) || !(await perTenant(t))) return json(429, { error: "too many requests; try again in a minute" });
+    const text = await readCapped(req.body, RULES.routeLimits.bodyMax, req.headers.get("content-length"));
+    if (text === null) return json(413, { error: "too large" });
+    if (!(await routeClient(client)) || !(await routeAll())) return json(429, { error: "too many requests; try again in a minute" });
+    let b: { tenant?: unknown } = {};
+    try {
+      const v = JSON.parse(text || "{}");
+      if (typeof v === "object" && v !== null) b = v;
+    } catch { /* no tenant: refused below */ }
+    if (!tenant(b.tenant)) return json(400, { error: "tenant required" });
     return json(200, { transport: (await (p.stripe as Routed).route?.()) ?? null });
   }
 
@@ -636,20 +644,11 @@ export async function broker(p: {
         if (slow) return json(502, { error: "too slow" });
         const r = await push(t, token);
         if (r.refused) {
-          // A refusal is never a quiet 200. The delivery is answered non-2xx so Stripe sends it again, the claim is
-          // released (the finally below) so the resend tries the tenant again, and each refusal logs the alert token.
-          // Bounded: the store counts the refused deliveries of this event, and at REFUSALS_MAX the event is
-          // answered 200 and marked done, with the alert, so a permanent refusal is not retried for ever.
-          const refusals = await store.tick(`refused ${event.id}`, 1);
-          const ids = `account=${account} event=${event.id} tenant=${t}`;
-          if (refusals < REFUSALS_MAX) {
-            console.error(`billing: error: billing_alert=entitlement_refused ${ids} delivery=${refusals}/${REFUSALS_MAX} ${r.why}; answering non-2xx so Stripe sends it again`);
-            return json(502, { error: "tenant refused the entitlement", event: event.id, delivery: refusals });
-          }
-          console.error(`billing: error: billing_alert=entitlement_refused ${ids} delivery=${refusals}/${REFUSALS_MAX} ${r.why}; giving up: marked done`);
-          if (!(await finished(event.id, claimToken))) return json(409, { error: "claim lost", event: event.id });
-          kept = true;
-          return json(200, { refused: event.id, gaveUp: true });
+          // A refusal is never a quiet 200, and never final: the delivery is answered non-2xx so Stripe sends it
+          // again, the claim is released (the finally below) so the resend tries the tenant again, and every refusal
+          // logs the alert token. The event is never marked done by a refusal; Stripe's own retry horizon ends it.
+          console.error(`billing: error: billing_alert=entitlement_refused account=${account} event=${event.id} tenant=${t} ${r.why}; answering non-2xx so Stripe sends it again`);
+          return json(502, { error: "tenant refused the entitlement", event: event.id });
         }
         if (!r.taken) {
           console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}`);

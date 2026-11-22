@@ -93,5 +93,12 @@ export const RULES = {
       "to": "absent"
     }
   ],
-  "claimSweep": 100
+  "claimSweep": 100,
+  "claimRetentionMs": 604800000,
+  "claimLeaseMs": 120000,
+  "routeLimits": {
+    "perClient": 30,
+    "global": 120,
+    "bodyMax": 4096
+  }
 } as const;

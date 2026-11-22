@@ -49,6 +49,13 @@ rules: {
 	]
 	// How many rows a call may look at to sweep the ones whose time ended, in both stores.
 	claimSweep: 100
+	// How long a Stripe event is remembered as delivered (Stripe retries for up to three days), and how long one
+	// caller's claim on it lasts before another may take it: main.ts and both stores read these, nowhere else.
+	claimRetentionMs: 604800000
+	claimLeaseMs:     120000
+	// The anonymous route probe's own limits, apart from every checkout, trial and probe limit: calls a minute for
+	// each client, and for all anonymous probes together, and the biggest body it reads.
+	routeLimits: {perClient: 30, global: 120, bodyMax: 4096}
 }
 
 rules: {
@@ -60,6 +67,9 @@ rules: {
 	trialStates: [...=~"^[a-z]+$"]
 	claimStates: [...=~"^[a-z]+$"]
 	claimSweep: int & >0
+	claimRetentionMs: int & >0
+	claimLeaseMs: int & >0 & <claimRetentionMs
+	routeLimits: {perClient: int & >0, global: int & >perClient, bodyMax: int & >0}
 	claimTransitions: [...{
 		event: "claim" | "complete" | "release" | "remember" | "expire" | "invalidate"
 		from:  "absent" | or(claimStates)

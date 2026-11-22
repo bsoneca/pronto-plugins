@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readCapped } from "../shared.ts";
+import { json, readCapped } from "../shared.ts";
 import { DoorError, doorKey, throughDoor as callDoor } from "./door.ts";
 
 // The little of Stripe's API the broker speaks: form-encoded requests under
@@ -118,7 +118,11 @@ export function forAccount<A extends unknown[]>(handler: (req: Request, ...rest:
   return async (req: Request, ...rest: A): Promise<Response> => {
     const who: { account?: string; door?: boolean } = {};
     if (req.method === "POST" && new URL(req.url).pathname !== "/stripe") {
-      const text = await readCapped(req.body, CALLER_BODY_MAX, req.headers.get("content-length")) ?? "";
+      const read = await readCapped(req.body, CALLER_BODY_MAX, req.headers.get("content-length"));
+      // The route probe is anonymous and takes nothing but a tenant: a body past the cap is refused here, where the
+      // request is still whole (any other path hands its handler the empty body its own capped read makes of it).
+      if (read === null && new URL(req.url).pathname === "/route") return json(413, { error: "too large" });
+      const text = read ?? "";
       if ((req.headers.get("content-type") ?? "").startsWith("application/json")) {
         try {
           const b = JSON.parse(text);
@@ -143,13 +147,16 @@ export const askedDoor = (): boolean => caller.getStore()?.door === true;
 export function switched(p: { direct: Stripe; door: Stripe; on: () => boolean }): Routed {
   // Both ways send Stripe the broker's own key: the direct way as before the door, the door as its
   // `sinkKey` (its ledger keeps a hashed one), so a call retried the other way across a flip is one.
+  // The one selection: a call's transport and the route probe's answer are both this function's, never two
+  // computations that could differ.
+  const choose = (): Route => p.on() ? "door" : "direct";
   const s: Routed = async (method, path, params, idempotencyKey) => {
-    const route: Route = p.on() ? "door" : "direct";
+    const route = choose();
     const answer = await (route === "door" ? p.door : p.direct)(method, path, params, idempotencyKey);
     markTransport(route);
     return answer as never;
   };
-  s.route = () => Promise.resolve<Route>(p.on() ? "door" : "direct");
+  s.route = () => Promise.resolve<Route>(choose());
   return s;
 }
 
