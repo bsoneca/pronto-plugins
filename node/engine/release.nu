@@ -249,15 +249,17 @@ def check-daprd [app: string, namespace: string, components: list<string>] {
 # Gateway has no HTTPS listener). A preview with no public host of its own has nothing to ask.
 export def door-probes [] {
 	[
-		{path: "/crud/v1.0/metadata", as_is: false}
-		{path: "/crud/v1.0/invoke/caddy/method/health", as_is: false}
-		{path: "/crud/v1.0/invoke/auth/method/auth/health", as_is: false}
-		{path: "/crud/v1.0/%2e/invoke/caddy/method/health", as_is: false}
-		{path: "/crud/v1.0%2Finvoke%2Fcaddy%2Fmethod%2Fhealth", as_is: false}
-		{path: "/crud/x/../v1.0/invoke/caddy/method/health", as_is: true}
-		{path: "/crud/%2e%2e/v1.0/metadata", as_is: true}
-		{path: "/img/v1.0/metadata", as_is: false}
-		{path: "/blobs/v1.0/metadata", as_is: false}
+		{path: "/crud/v1.0/metadata", as_is: false, strict: true}
+		{path: "/crud/v1.0/invoke/caddy/method/health", as_is: false, strict: true}
+		{path: "/crud/v1.0/invoke/auth/method/auth/health", as_is: false, strict: true}
+		{path: "/crud/v1.0/%2e/invoke/caddy/method/health", as_is: false, strict: false}
+		{path: "/crud/v1.0%2Finvoke%2Fcaddy%2Fmethod%2Fhealth", as_is: false, strict: false}
+		{path: "/crud/x/../v1.0/invoke/caddy/method/health", as_is: true, strict: false}
+		{path: "/crud/%2e%2e/v1.0/metadata", as_is: true, strict: false}
+		{path: "/img/v1.0/metadata", as_is: false, strict: false, guard: true}
+		{path: "/img/v1.0-alpha1/metadata", as_is: false, strict: false, guard: true}
+		{path: "/blobs/v1.0/metadata", as_is: false, strict: false, guard: true}
+		{path: "/blobs/v1.0-alpha1/metadata", as_is: false, strict: false, guard: true}
 	]
 }
 
@@ -289,8 +291,14 @@ def run-door-probes [node: record, port: int]: nothing -> int {
 			if $status == "200" and (($body =~ '"runtimeVersion"') or ($body =~ '"appConnectionProperties"') or (($body | str trim) == "ok")) {
 				error make {msg: $"the door reaches the Dapr API: ($node.host)($probe.path) answered 200 with ($body | str substring 0..200); the caddy Dapr configuration did not take"}
 			}
-			if ($probe.path | str starts-with "/crud") and ($status != "404" or ($body !~ "PGRST125")) {
+			# The plain spellings reach PostgREST, which answers 404 PGRST125. The normalized ones are cleaned by Caddy before they route
+			# (a redirect to the clean path, or the file server): they only must not reach the sidecar or a service, which the 200 check above refuses.
+			if $probe.strict and ($status != "404" or ($body !~ "PGRST125")) {
 				error make {msg: $"the door's ($probe.path) answered ($status), not PostgREST's 404 \(PGRST125\): ($body | str substring 0..200)"}
+			}
+			# A Dapr API path under /img or /blobs is the door's own 404 (doorguard): never a proxied answer, whatever the app runs.
+			if ($probe.guard? | default false) and $status != "404" {
+				error make {msg: $"the door's ($probe.path) answered ($status), not the door's own 404: the doorguard block is missing from its Caddyfile"}
 			}
 			$asked = $asked + 1
 		}
@@ -304,8 +312,13 @@ def run-door-probes [node: record, port: int]: nothing -> int {
 
 export def check-door [node: record, gateway: string] {
 	if ($node.preview | is-not-empty) and (($node.hosts | get -o $node.preview | default "") | is-empty) { return }
-	let selector = $"gateway.envoyproxy.io/owning-gateway-name=($gateway),gateway.envoyproxy.io/owning-gateway-namespace=($node.namespace)"
-	let services = (kubectl-json get service -n envoy-gateway-system -l $selector | get items)
+	# The Gateway's own data-plane Service where Envoy Gateway makes one per Gateway; on the node the Gateways of every app are
+	# merged into the one Service of the GatewayClass (`pronto-gateway`, owning-gatewayclass=eg), which then serves this host.
+	let own = $"gateway.envoyproxy.io/owning-gateway-name=($gateway),gateway.envoyproxy.io/owning-gateway-namespace=($node.namespace)"
+	let shared = $"gateway.envoyproxy.io/owning-gatewayclass=($node.environment.gatewayClassName)"
+	let by_gateway = (kubectl-json get service -n envoy-gateway-system -l $own | get items)
+	let selector = (if ($by_gateway | is-empty) { $shared } else { $own })
+	let services = (if ($by_gateway | is-empty) { kubectl-json get service -n envoy-gateway-system -l $shared | get items } else { $by_gateway })
 	if ($services | is-empty) { error make {msg: $"the door check found no Envoy Gateway Service for Gateway ($gateway) in ($node.namespace) \(envoy-gateway-system, ($selector)\), so the door cannot be certified"} }
 	let service = ($services | first)
 	let remote = ($service.spec.ports | first | get port)
