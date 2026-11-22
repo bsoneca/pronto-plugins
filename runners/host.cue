@@ -12,8 +12,7 @@ import (
 	"encoding/hex"
 )
 
-// Where every hook lives, in a folder only root writes, and what an XML plist escapes.
-_hookRoot: "/Library/Application Support/pronto-runners"
+// What an XML plist escapes. Where every hook lives, in a folder only root writes, is the setup's hookRoot.
 #Esc: {
 	s:   string
 	out: strings.Replace(strings.Replace(strings.Replace(s, "&", "&amp;", -1), "<", "&lt;", -1), ">", "&gt;", -1)
@@ -186,7 +185,7 @@ plans: {for name, s in setups {(name): #Plan & {setup: s}}}
 				_home:  [if r.user != "" {setup.accounts[r.user].home}, P.home][0]
 				// An account's runner lives outside its home, where its parent is root's and it can neither
 				// rename nor replace the folder.
-				dir: [if r.user != "" {l: "\(_hookRoot)/\(name)/runner"}, {l: "\(_home)/\(r.dir)"}][0].l
+				dir: [if r.user != "" {l: "\(P.setup.hookRoot)/\(name)/runner"}, {l: "\(_home)/\(r.dir)"}][0].l
 				work:   r.work
 				path: strings.Join([for p in r.path {[if strings.HasPrefix(p, "~/") {_home + strings.TrimPrefix(p, "~")}, p][0]}], ":")
 				download: {
@@ -216,7 +215,7 @@ plans: {for name, s in setups {(name): #Plan & {setup: s}}}
 				// What a hook is, for a runner with an account or one of the applier's that admits workflows:
 				// root's file in a folder no account can write, named by the service's environment, which the
 				// account cannot edit either, so its jobs cannot drop it.
-				_hookDir:  "\(_hookRoot)/\(name)"
+				_hookDir:  "\(P.setup.hookRoot)/\(name)"
 				_hookPath: "\(_hookDir)/job-started.sh"
 				_toolsDir: "/usr/local/\(r.user)/bin"
 				_role: [if r.user != "" {setup.accounts[r.user].role}, "agent"][0]
@@ -268,7 +267,7 @@ plans: {for name, s in setups {(name): #Plan & {setup: s}}}
 				// other accounts' homes, the credentials, the paths other accounts execute, the token-like
 				// environment. The lists are the setup's, not written here.
 				_others: [for l, a in setup.accounts if l != r.user {a.home}]
-				_protected: list.Concat([setup.protectedPaths, [_hookRoot]])
+				_protected: list.Concat([setup.protectedPaths, [P.setup.hookRoot]])
 				_probe: strings.Join([
 					"for g in $(id -Gn); do",
 					"  case \"$g\" in",

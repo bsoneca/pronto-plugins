@@ -71,6 +71,9 @@ setups: [Name=string]: #Setup & {name: Name}
 	// shared tool store, is written in the setup.
 	forbiddenGroups: *["admin"] | [...#Login]
 	protectedPaths:  *["/opt/homebrew/bin", "/Library/LaunchDaemons"] | [...#Path]
+	// Where the root-owned hooks and runner folders live. No space in the default: a runner reads its own path through
+	// `import.meta.url`, whose `pathname` keeps a space as `%20`, which breaks a unit gate run from such a folder.
+	hookRoot: *"/Library/pronto-runners" | #Path
 	tokenPatterns:   *["*TOKEN*", "*SECRET*", "*PASSWORD*", "*PASSWD*", "*API_KEY*", "*_KEY", "*CREDENTIAL*", "*_PAT"] | [...=~"^[*A-Za-z0-9_]+$"]
 	// The environment a `pr` account's runner gets, `{user}` being its login.
 	prEnv: [string]: string

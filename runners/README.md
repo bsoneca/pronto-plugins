@@ -136,7 +136,7 @@ jobs:
   A runner with a `user` is a LaunchDaemon (`/Library/LaunchDaemons/<label>.plist`, root's) run as
   one of the setup's `accounts`: a hidden account with no password, a group of its own and a home of
   mode 700, in no group of the applier's (never `admin`), so it reads nothing of the applier's. Its
-  runner folder is `/Library/Application Support/pronto-runners/<name>/runner`, outside its home: root's
+  runner folder is `/Library/pronto-runners/<name>/runner`, outside its home: root's
   parent, so it can neither rename nor replace it. The folder is `root:<group>` mode 750, readable by the
   account's own group alone (`.credentials*` included), and root's but `_work` and `_diag`, which are the
   account's, mode 700. The runner is registered with `--disableupdate`, as the account while the folder is
@@ -155,7 +155,7 @@ jobs:
   or `_diag`). config.sh runs as the account with the system's PATH, never the runner's own. The runner's tarball is copied to a root-only file, checked
   there against the pinned sha256 and only then extracted as the account. Logs are under
   `/Library/Logs/pronto-runners/<label>/` (root's; launchd makes the files), and a
-  root-owned `job-started.sh` in `/Library/Application Support/pronto-runners/<name>/` runs before every
+  root-owned `job-started.sh` in `/Library/pronto-runners/<name>/` runs before every
   job (the plist's `ACTIONS_RUNNER_HOOK_JOB_STARTED`, which the account cannot edit), generated from the setup:
   - a `role: "pr"` account runs pull requests' code. Its hook probes the account on every job and
     fails the job unless it is that account, in none of `forbiddenGroups`, cannot list any other
