@@ -69,8 +69,9 @@ A flip therefore needs a test of its own, and it must be:
      its pinned entry point (in pronto: `tools/flags/pronto-flags`); a write from a checkout older than the pin is
      refused, since an old one drops retired flags the release still reads. Each version records the
      plugin commit that wrote it.
-   - A flip is named: `--flip a,b`. A flag whose default differs and is not named keeps its live
-     entry, said on stderr; a bare push flips nothing live.
+   - A flip is named: `--flip a,b` (decision 10 says what it sets). A flag whose default differs and is not named
+     keeps its live entry, said on stderr; a bare push flips nothing live. What `--flip` meant until decision 10
+     (write the spec's whole reach: default, accounts, targeting; PRONTO-1191) is now `--sync a,b`.
    - A retirement waits for a release. A live flag the spec drops stays while the release being
      served reads it; `released.json` beside the live object (`pronto-flags released`, run by
      release-cron once production serves a release) says what it reads. With no record every flag
@@ -94,6 +95,31 @@ A flip therefore needs a test of its own, and it must be:
      each `✓` line, `; <n> steps run, <m> skipped`, a separate pronto change. Until then the
      guard rests on the skipped-flag clause and on the missing verdict.
    - There is still no tester stage (decision 2).
+
+10. **A flip needs no spec PR: record-back (the owner: "flag flips must not need a pronto PR").** Live is the truth
+    and the spec is its record, so a flip changes production first and the spec follows.
+    - `--flip X` turns X on and `--flip X=<value>` sets a bool, a string or a number, the value checked against
+      the kind of the spec's default. The value comes from the command line; the spec still supplies the flag's shape
+      (its `local` value, hosts and accounts), and the cases, the rollback on failure and the journal work as before.
+      A bare name on a non-bool is refused, and so is a bare name where the spec says false and live says true
+      (say `X=true` or `X=false`). `--flip X=false` turns it off and runs no case (decision 3). `--sync X` is the old
+      meaning of `--flip`; `--drop X` stays for a live flag the spec no longer names and points a spec flag to
+      `--flip X=false`.
+    - After the final successful write (cases passed, a write with no production case, an off flip, a `rollback`; never
+      the automatic restore after a failure; not under a dry run) `record` writes what is live into the app's
+      `flags_spec.cue` through a pull request the tool opens: in a scratch worktree from a fresh `origin/main`
+      (never the operator's checkout), for every flag the spec and live both hold, only the literal of that flag's
+      depth-1 `default:`. It is accepted only if `cue export -e flagd.document` moves nowhere but
+      `flags.<name>.variants.default` and `cue vet` passes; then the app's generate runs, and a diff that touches
+      anything outside the app (or `.github/`) is refused. One branch per app, `fix/flags-record-<app>`, rebuilt from
+      main and live each time, with auto-merge armed; an open pull request gets the new head (force with lease, once
+      more after a lost lease) and its body edited.
+    - A record that cannot be made (a default that is a reference or appears twice, a refused diff, no network) is
+      said loudly, noted with `record: failed` in the journal, and never fails the push or reverts live. A closed
+      record pull request reverts nothing either. `pronto-flags drift <app>` is the read-only check: it compares the
+      reach of every flag both hold, lists the differences and the open record pull request, and exits 1 when they
+      differ.
+    - A plain push after an unrecorded flip leaves the flag live as it is (decision 8: a default the spec differs on is kept).
 
 ## The production guarantee
 

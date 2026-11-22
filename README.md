@@ -620,11 +620,13 @@ flagsLive: {project: "my-project", bucket: "my-project-flags"}
 
 ```sh
 <this repo>/bin/pronto-flags setup <app-dir>               # once: the bucket, its readers, the first push
-<this repo>/bin/pronto-flags push <app-dir> [--flip a,b] [--drop a,b]  # flags_spec.cue merged over the live flags: only the flags --flip names change their default, once their cases pass
+<this repo>/bin/pronto-flags push <app-dir> [--flip a,b|a=<value>] [--sync a,b] [--drop a,b]  # flags_spec.cue merged over the live flags: --flip X sets X live (X=true; X=<value>; X=false turns it off) once its cases pass, then a pull request the tool opens records it in flags_spec.cue; --sync X writes the spec's whole reach
 <this repo>/bin/pronto-flags cases <app-dir> [flag]        # the cases a flip runs (below)
 <this repo>/bin/pronto-flags history <app-dir>             # every version, newest first: when, by whom, from which commit
 <this repo>/bin/pronto-flags rollback <app-dir> [version]  # the version before the live one, or the one named
 <this repo>/bin/pronto-flags show <app-dir>                # what a push would write, and where: nothing written
+<this repo>/bin/pronto-flags record <app-dir>              # the live flags into flags_spec.cue by a pull request, by hand
+<this repo>/bin/pronto-flags drift <app-dir>               # what the spec says differently from live: exit 1 listing it, 0 when equal
 ```
 
 Each runs as the operator's own gcloud login. `setup` makes `flagsLive`'s
@@ -662,7 +664,7 @@ A flag's cases are the scenarios (`tests/scenarios/*.cue`) and unit cases
 builds and launches no stack, since the pull request's gate already ran every case
 with the flag on (at hand every flag reads its `local` value). No tester account is
 needed (the owner, 2026-11-11: "drop the requirement of testers for flag flips",
-PRONTO-284). `pronto-flags push <app-dir> --flip <flag>` (a push is a merge over the live flags, PRONTO-680: a flag whose default differs keeps its live entry unless `--flip` names it, and a live flag the spec dropped stays while the served release reads it, as `released.json` records):
+PRONTO-284). `pronto-flags push <app-dir> --flip <flag>` (a push is a merge over the live flags, PRONTO-680: a flag whose default differs keeps its live entry unless `--flip` or `--sync` names it, and a live flag the spec dropped stays while the served release reads it, as `released.json` records):
 
 1. reads the live object and finds the flags whose default value moves; a flag
    with no cases is refused, or pushed with `--untested "<why>"`, loudly;
