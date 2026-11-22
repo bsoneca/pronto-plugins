@@ -101,6 +101,12 @@ export const markTransport = (route: Route): void => {
 /** The transport of the last call this request made to Stripe: undefined when it made none. */
 export const transportUsed = (): Route | undefined => caller.getStore()?.transport;
 
+/** Runs `handler` with transport tracking on and nothing read of the request: for a broker that goes one way
+ * (direct only, or door only), whose /probe must still say which transport answered. */
+export function tracked<A extends unknown[]>(handler: (req: Request, ...rest: A) => Promise<Response>) {
+  return (req: Request, ...rest: A): Promise<Response> => caller.run({}, () => handler(req, ...rest));
+}
+
 /** A body this size or under is read for its caller, declared or not, once: the handler is handed
  * the same text (no copy whose cancelling would wait on the handler's read). A larger one is handed
  * on empty, which the handler's own capped read makes of it anyway, and says nothing here. Stripe's

@@ -10,9 +10,11 @@
 //   Postgres advisory lock held by a transaction, so it goes with the pod that held it; every count is
 //   one SQL statement, so two replicas cannot both win it.
 //
-// The broker runs no DDL: its tables are made by billing/broker/schema.sql (add-only, idempotent: the
-// release applies it to the broker's database before replacing the broker, and pronto-billing's install
-// writes it into an app as a raw migration), and the store only checks at start that they are there.
+// The broker runs no DDL: its tables are made by billing/broker/schema.sql (add-only, idempotent), which
+// `metal.nu release` applies to the broker's own database before replacing the broker. The schema is declared
+// once, in SCHEMA below, and schema_gen.ts emits schema.sql from it. It is never an app's migration: the
+// broker's database is the operator's, and an app's roles must not reach these tables. The store only checks
+// at start that they are there.
 
 import { RULES } from "../rules.ts";
 
@@ -254,7 +256,7 @@ export class PostgresStore implements Store {
       if (!check) missing.push("constraint billing_seen_state");
     }
     if (missing.length) {
-      throw new Error(`billing broker: the database is missing ${missing.join(", ")}: apply billing/broker/schema.sql (add-only, idempotent) before the broker starts; the broker makes no tables`);
+      throw new Error(`billing broker: the database is missing ${missing.join(", ")}: apply broker/schema.sql to the broker database (add-only, idempotent; metal.nu release does it) before the broker starts; the broker makes no tables`);
     }
   }
 

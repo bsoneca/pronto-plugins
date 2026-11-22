@@ -1,4 +1,5 @@
-// Writes schema.sql, the broker's tables as an add-only, idempotent script (store.ts's SCHEMA), or with
+// The broker's schema is declared once, as SCHEMA in store.ts; this emits it. Writes schema.sql, the broker's tables as an
+// add-only, idempotent script, or with
 // --check fails when it is not what SCHEMA says: deno run --allow-read --allow-write billing/broker/schema_gen.ts [--check]
 import { SCHEMA } from "./store.ts";
 

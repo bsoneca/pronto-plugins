@@ -522,7 +522,9 @@ export async function broker(p: {
       try {
         return await call();
       } catch (e) {
-        const transient = e instanceof StripeError ? e.status === 429 || e.status >= 500 : e instanceof TypeError;
+        // A 429, a 5xx, no answer (TypeError) or the transport's own deadline (TimeoutError) may pass.
+        const transient = e instanceof StripeError ? e.status === 429 || e.status >= 500
+          : e instanceof TypeError || (e instanceof DOMException && e.name === "TimeoutError");
         if (!transient || attempt >= 3) throw e;
         await new Promise((r) => setTimeout(r, 50 * attempt));
       }
@@ -546,12 +548,10 @@ export async function broker(p: {
       // The failed first invoice must not stay payable: one that was paid since means the charge
       // recovered and the trial stands; an open one is voided. A transient error (429, 5xx, no answer) is
       // tried again and then fails the event, which Stripe sends again: nothing is cancelled until the
-      // invoice is known paid or void. A key without Invoices access (403) cannot know it: that is logged
-      // loudly, for the operator to grant the permission, and the trial is cancelled anyway.
-      // Decided by the owner's lead 2026-11-22: a missing invoice permission never keeps a failed trial
-      // collectible or a player in a paid plan; review rounds that ask to stop here have been answered.
-      // The log line carries a stable token, `billing_alert=stripe_invoices_permission_missing`, for the
-      // alert rules (the shipper reads "error" as the level) to match.
+      // invoice is known paid or void. A missing invoice permission never keeps a failed trial collectible or
+      // a paid plan trapped: a key without Invoices access (403) cannot know the invoice, so the 403 is logged
+      // with billing_alert=stripe_invoices_permission_missing (the shipper reads "error" as the level, alert
+      // rules match the token) and the cancellation proceeds.
       if (typeof fresh.latest_invoice === "string") {
         const invoice = fresh.latest_invoice;
         try {
@@ -735,7 +735,7 @@ if (import.meta.main) {
   const secret = env("BROKER_SECRET");
   if (!issuer || !secret) throw new Error("BROKER_ISSUER and BROKER_SECRET are required");
   const port = Number(env("PORT") ?? 28463);
-  const { stripe, switched, askedDoor, forAccount } = await import("./stripe.ts");
+  const { stripe, switched, askedDoor, forAccount, tracked } = await import("./stripe.ts");
   // Once per platform account: the one endpoint Stripe sends every app's
   // subscriptions to, whose secret STRIPE_WEBHOOK_SECRET then holds.
   if (Deno.args[0] === "webhook") {
@@ -760,8 +760,9 @@ if (import.meta.main) {
   const doorAsked = env("STRIPE_DOOR_ASKED") === "1";
   if (doorAsked && !(door && key)) throw new Error("STRIPE_DOOR_ASKED moves the broker between its key and the door: it needs STRIPE_DOOR and STRIPE_SECRET_KEY");
   if (door && key && !doorAsked) throw new Error("STRIPE_DOOR and STRIPE_SECRET_KEY: through the door, the airlock holds the key and the broker none");
-  // Only a broker that is asked which way reads its callers' bodies for it; any other serves as before.
-  const asked = <A extends unknown[]>(h: (req: Request, ...rest: A) => Promise<Response>) => doorAsked ? forAccount(h) : h;
+  // Only a broker that is asked which way reads its callers' bodies for it; every request, asked or not, notes the
+  // transport that answered its Stripe calls, which /probe reports.
+  const asked = <A extends unknown[]>(h: (req: Request, ...rest: A) => Promise<Response>) => doorAsked ? forAccount(h) : tracked(h);
   const client = (k: string | undefined, d: string) =>
     doorAsked ? switched({ direct: stripe({ key: k! }), door: stripe({ door: d }), on: askedDoor }) : door ? stripe({ door: d }) : stripe({ key: k! });
   // A door with no webhook secret on a localhost issuer is the stand-in's (PRONTO-270): the real
@@ -801,6 +802,7 @@ if (import.meta.main) {
     const handler = await broker({ ...settings, stripe: stripe({ door: `${standInDoor}/door/stripe` }), webhookSecret: fake.webhookSecret });
     fake.connect(handler);
     console.warn(`billing: no STRIPE_SECRET_KEY, so the stand-in at /fake/stripe takes payments, through its door at ${standInDoor}/door/stripe`);
-    Deno.serve({ hostname: "127.0.0.1", port }, (req, info) => fake.handle(req) ?? handler(req, info));
+    const served = tracked(handler);
+    Deno.serve({ hostname: "127.0.0.1", port }, (req, info) => fake.handle(req) ?? served(req, info));
   }
 }

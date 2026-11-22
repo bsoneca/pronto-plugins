@@ -48,24 +48,20 @@ Deno.test("an app gets billing in its own package, and keeps its spec", async ()
   await Deno.remove(app, { recursive: true });
 });
 
-Deno.test("the installer writes the state lists as a spec package and the broker's schema as an add-only migration after the app's latest", async () => {
+Deno.test("the installer writes the state lists as a spec package, never the broker's schema into the app, and removes the one an earlier install wrote", async () => {
   const app = await Deno.makeTempDir();
   await Deno.writeTextFile(`${app}/program.cue`, "package shop\n");
-  await Deno.mkdir(`${app}/services/database/migrations`, { recursive: true });
-  for (const n of ["005_tables.sql", "790_cutover.sql", "950_fixture.sql"]) await Deno.writeTextFile(`${app}/services/database/migrations/${n}`, "-- app\n");
+  const dir = `${app}/services/database/migrations`;
+  await Deno.mkdir(dir, { recursive: true });
+  for (const n of ["005_tables.sql", "790_cutover.sql", "950_fixture.sql"]) await Deno.writeTextFile(`${dir}/${n}`, "-- app\n");
+  // What the earlier install wrote, and an app's own file that merely shares the ending.
+  await Deno.writeTextFile(`${dir}/960_billing_broker.sql`, await Deno.readTextFile(new URL("./broker/schema.sql", import.meta.url)));
+  await Deno.writeTextFile(`${dir}/970_other_billing_broker.sql`, "-- the app's own\n");
   await install(app, "o".repeat(43));
   const rules = await Deno.readTextFile(`${app}/spec/billing_rules.cue`);
   eq(rules.includes("package spec") && rules.includes(`billingTrialStates: ["running", "cancelled", "converted", "ended", "failed"]`) && rules.includes(`billingClaimStates: ["claimed", "done"]`), true, "the lists, from rules.cue");
-  const names = [...Deno.readDirSync(`${app}/services/database/migrations`)].map((e) => e.name);
-  const sorted = [...names].sort();
-  eq(sorted.at(-1), "960_billing_broker.sql", "sorts after the app's latest, byte order");
-  const sql = await Deno.readTextFile(`${app}/services/database/migrations/960_billing_broker.sql`);
-  eq(sql, await Deno.readTextFile(new URL("./broker/schema.sql", import.meta.url)), "the schema, as the plugin has it");
-  eq(/\bDROP\b|\bTRUNCATE\b|\bDELETE\b/i.test(sql), false, "add-only");
-  eq(sql.includes("CREATE TABLE IF NOT EXISTS billing_seen") && sql.includes("ADD COLUMN IF NOT EXISTS state") && sql.includes("billing_seen_state"), true, "idempotent forms, the state check added only if missing");
-  // A second install writes the same file, not another; a later app migration does not move it.
-  await Deno.writeTextFile(`${app}/services/database/migrations/990_later.sql`, "-- app\n");
+  eq([...Deno.readDirSync(dir)].map((e) => e.name).sort(), ["005_tables.sql", "790_cutover.sql", "950_fixture.sql", "970_other_billing_broker.sql"], "the broker's schema is not an app migration; the app's own files stay");
   await install(app);
-  eq([...Deno.readDirSync(`${app}/services/database/migrations`)].map((e) => e.name).filter((n) => n.endsWith("billing_broker.sql")), ["960_billing_broker.sql"], "one migration, kept in place");
+  eq([...Deno.readDirSync(dir)].some((e) => /^9\d\d_billing_broker\.sql$/.test(e.name)), false, "a reinstall writes none");
   await Deno.remove(app, { recursive: true });
 });
