@@ -9,7 +9,7 @@
 // the phone's visits, its signing keys) is in the store (store.ts), a database
 // of its own when DATABASE_URL names one, so any replica answers any request;
 // without one it is this process's memory, and the broker runs as one.
-import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, signEs256, verifyIdToken } from "../oidc.ts";
+import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refused, sha256url, signEs256, verifyIdToken } from "../oidc.ts";
 import { doorKey, throughDoor } from "./door.ts";
 import { tenantAdmitted } from "./phone.ts";
 import { type Store, MemoryStore, sealedOnce, sharedKeyPair, storeFrom } from "./store.ts";
@@ -50,6 +50,14 @@ export interface Provider {
   /** Whether the provider refuses in-app browsers (Google's 403 disallowed_useragent): there the
    * broker's page offers the reader's own browser instead (core.ts signInFlow, PRONTO-448). */
   refusesWebviews?: boolean;
+  /** The scope the provider's dialog is asked for, where it is not the OpenID one built from what the tenant asked (Facebook's, PRONTO-449). */
+  scope?: string;
+  /** The tenant flag that turns this provider on, asked of the tenant when a sign-in begins: a flag that cannot be read, or is off, refuses the sign-in. */
+  flag?: string;
+  /** PKCE toward the provider: the leg's verifier waits in the store under its id, and the challenge goes in the dialog's URL. */
+  pkce?: boolean;
+  /** Who the provider says the person is, read from its token response, for a provider that gives no ID token to verify (Facebook's Graph). A Refused ends the sign-in as access_denied. */
+  claims?: (exchanged: Response, ctx: { profile: boolean; pn: string }) => Promise<Record<string, unknown> & { sub: string }>;
 }
 
 export function google(env: (k: string) => string | undefined): Provider | null {
@@ -185,6 +193,9 @@ export async function broker(p: {
   // The ID-token key is the store's, so every replica signs with, and serves at /jwks, the same one.
   const { privateKey: signingKey, jwk: publicJwk } = await sharedKeyPair(store, "id-token-es256", "ES256");
   const callback = (provider: string) => `${issuer}/callback/${provider}`;
+  // A provider's own flag, asked through the tenant's door as the airlock's is (askedFlag), one asker per flag name.
+  const flagAskers = new Map<string, ReturnType<typeof askedFlag>>();
+  const askFlag = (flag: string) => flagAskers.get(flag) ?? (flagAskers.set(flag, askedFlag(flag, p.fetcher)), flagAskers.get(flag)!);
 
   async function authorize(url: URL, ua: string | null): Promise<Response> {
     const parsed = parseAuthorize(url.searchParams, [...providers.keys()]);
@@ -195,6 +206,15 @@ export async function broker(p: {
     const r = parsed.request;
     const provider = providers.get(r.provider)!;
     if (provider.admits && !provider.admits(r.tenant)) return back(r.redirectUri, { error: "unauthorized_client", state: r.state });
+    // A provider with its own flag (Facebook's): asked of the tenant first, and a flag that is off, missing or unreadable sends no one to the provider.
+    if (provider.flag !== undefined) {
+      let on: boolean;
+      try { on = await askFlag(provider.flag)(r.tenant); } catch (e) {
+        console.error(`sign-in for ${r.tenant}: ${(e as Error).message}`);
+        return page("Sign-in unavailable", `<h1>This sign-in can't continue right now</h1><p class="err">Try again in a moment.</p>`, 503);
+      }
+      if (!on) return back(r.redirectUri, { error: "unauthorized_client", state: r.state });
+    }
     // Asked once, here: a sign-in goes the way its tenant's flag said when it began, whatever the flag does meanwhile.
     let door = false;
     if (provider.door !== undefined && provider.doorAsked === true && p.askDoor && tenantAdmitted(provider.doorTenants ?? [], r.tenant)) {
@@ -270,10 +290,19 @@ export async function broker(p: {
     const r = leg.r as AuthRequest;
     const provider = providers.get(r.provider)!;
     const to = new URL(provider.authUrl);
-    to.search = new URLSearchParams({
+    const dialog: Record<string, string> = {
       client_id: provider.clientId, redirect_uri: callback(provider.name), response_type: "code",
-      scope: providerScope(r), state: url.searchParams.get("leg")!, nonce: leg.pn as string, prompt: "select_account",
-    }).toString();
+      scope: provider.scope ?? providerScope(r), state: url.searchParams.get("leg")!,
+      // An OpenID provider is given the nonce its ID token must carry, and the account chooser; a Graph one has neither.
+      ...(provider.claims ? {} : { nonce: leg.pn as string, prompt: "select_account" }),
+    };
+    if (provider.pkce) {
+      const verifier = randomToken(32);
+      await store.put("pkce", `${provider.name}:${leg.pn as string}`, verifier, 600_000);
+      dialog.code_challenge = await sha256url(verifier);
+      dialog.code_challenge_method = "S256";
+    }
+    to.search = new URLSearchParams(dialog).toString();
     return new Response(null, { status: 302, headers: { location: to.toString(), "cache-control": "no-store" } });
   }
 
@@ -293,6 +322,15 @@ export async function broker(p: {
       grant_type: "authorization_code", code: url.searchParams.get("code") ?? "", client_id: provider.clientId,
       ...(provider.clientSecret ? { client_secret: provider.clientSecret } : {}), redirect_uri: callback(provider.name),
     });
+    if (provider.pkce) {
+      // The verifier of this very leg, once: a callback replayed, or one whose verifier has expired, is refused.
+      const verifier = await store.take<string>("pkce", `${name}:${leg.pn as string}`);
+      if (verifier === undefined) {
+        console.error(`broker: ${name}'s callback has no verifier waiting (replayed or expired)`);
+        return back(r.redirectUri, { error: "access_denied", state: r.state });
+      }
+      form.set("code_verifier", verifier);
+    }
     const viaDoor = provider.door !== undefined && (!provider.doorAsked || leg.door === true);
     const exchanged = provider.exchange ? await provider.exchange(form) : viaDoor ? await exchangeThroughDoor(provider.door!, form, p.fetcher).catch((e) => {
       // The door could not answer (its ledger holds the attempt): the sign-in fails as a refused exchange does.
@@ -307,10 +345,13 @@ export async function broker(p: {
     }
     let claims: Record<string, unknown> & { sub: string };
     try {
-      const { id_token } = await exchanged.json();
-      claims = await verifyIdToken(String(id_token ?? ""), {
-        alg: "RS256", issuers: provider.issuers, audience: provider.clientId, nonce: leg.pn as string, keys: provider.keys,
-      });
+      if (provider.claims) claims = await provider.claims(exchanged, { profile: r.profile === true, pn: leg.pn as string });
+      else {
+        const { id_token } = await exchanged.json();
+        claims = await verifyIdToken(String(id_token ?? ""), {
+          alg: "RS256", issuers: provider.issuers, audience: provider.clientId, nonce: leg.pn as string, keys: provider.keys,
+        });
+      }
     } catch (e) {
       if (!(e instanceof Refused)) throw e;
       console.error(`broker: ${name}'s id token refused: ${e.message}`);
@@ -384,7 +425,11 @@ if (import.meta.main) {
   const store = await sealedOnce(await storeFrom(env), secret);
   const phone = phoneCfg ? await phoneUpstream(issuer, phoneCfg, { secret, store }) : null;
   if (phone) providers.push(phone.provider);
-  if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT, or PHONE_OTP=broker");
+  // Facebook, where the operator configured it (facebook.ts): behind a flag each tenant turns on.
+  const { facebook, facebookConfig } = await import("./facebook.ts");
+  const facebookCfg = facebookConfig(env);
+  if (facebookCfg) providers.push(facebook(facebookCfg));
+  if (providers.length === 0) throw new Error("no provider is configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or PHONE_PROJECT, or PHONE_OTP=broker, or FACEBOOK_APP_ID");
   Deno.serve({ port: Number(env("PORT") ?? 28443) }, await broker({
     issuer, secret, providers, store, sectors: sectorsOf(env("BROKER_SECTORS")), extra: phone?.handle, askDoor: askedFlag(env("GOOGLE_DOOR_FLAG") || "signin_door"),
   }));

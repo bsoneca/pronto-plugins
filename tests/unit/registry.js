@@ -34,7 +34,8 @@ import * as apigen from './apigen.js';
 import * as machine from './machine.js';
 import * as harness from './harness.js';
 import * as ads from './ads.js';
+import * as fb from './facebook.js';
 
 export function registry(_suite) {
-  return { stripe, billing, billingNames, devflow, ghboard, inbox, queue, deploy, targets, identity, idcore, phone, otp, run, shell, probe, shop, cron, cronlock, notes, watch, watchruns, prober, runners, android, androidScenarios, androidEmulator, migrations, mig, apigen, machine, harness, ads };
+  return { stripe, billing, billingNames, devflow, ghboard, inbox, queue, deploy, targets, identity, idcore, phone, otp, fb, run, shell, probe, shop, cron, cronlock, notes, watch, watchruns, prober, runners, android, androidScenarios, androidEmulator, migrations, mig, apigen, machine, harness, ads };
 }

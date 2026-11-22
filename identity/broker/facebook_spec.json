@@ -1,0 +1,43 @@
+{
+    "label": "Facebook",
+    "graph": "v24.0",
+    "flag": "facebook_signin",
+    "dialog": "https://www.facebook.com/v24.0/dialog/oauth",
+    "token": "https://graph.facebook.com/v24.0/oauth/access_token",
+    "me": "https://graph.facebook.com/v24.0/me",
+    "permissions": [
+        "public_profile"
+    ],
+    "fields": {
+        "base": [
+            "id"
+        ],
+        "profile": [
+            "name",
+            "picture.width(256).height(256)"
+        ]
+    },
+    "pkce": true,
+    "refusesWebviews": false,
+    "paths": {
+        "callback": "/callback/facebook"
+    },
+    "limits": {
+        "verifier_s": 600,
+        "exchange_ms": 8000,
+        "me_ms": 8000
+    },
+    "console": {
+        "domain": "id.example.com",
+        "site": "https://example.com",
+        "redirect_uris": [
+            "https://id.example.com/callback/facebook"
+        ],
+        "app_domains": [
+            "id.example.com",
+            "example.com"
+        ],
+        "privacy": "https://example.com/privacy",
+        "terms": "https://example.com/terms"
+    }
+}

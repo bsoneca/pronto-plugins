@@ -25,6 +25,7 @@ mkdir -p "$work/src/broker/vendor" "$work/src/hydra"
 cp "$here/oidc.ts" "$work/src/"
 cp "$here/broker/core.ts" "$here/broker/main.ts" "$here/broker/phone.ts" "$here/broker/otp.ts" "$here/broker/door.ts" "$here/broker/store.ts" "$work/src/broker/"
 cp "$here/broker/phone_spec.json" "$work/src/broker/"
+cp "$here/broker/facebook.ts" "$here/broker/facebook_spec.json" "$work/src/broker/"
 cp "$here/broker/vendor/postgres.js" "$work/src/broker/vendor/"
 cp "$here/hydra/front.ts" "$here/hydra/fake.ts" "$here/hydra/local.sh" "$work/src/hydra/"
 cat > "$work/src/README.md" <<EOF
