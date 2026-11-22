@@ -85,7 +85,9 @@ Scenarios that run on production must never touch real players, real money, or w
 
 - **The schema.** Only scenarios marked `production: true` run on production. The app's scenario
   schema limits such a scenario to one actor who never signs up. The schema allows no `pay` step,
-  no other player, no table, move or game, and only GET requests. Since nothing pays, Stripe
+  no other player, no table, move or game, and only GET requests, plus an anonymous POST to
+  `/ofrep/v1/evaluate/flags/<name>` with only its evaluation context (it reads a flag, so a flip can hold the flag to
+  answering `"value": true`). Since nothing pays, Stripe
   (live) charges nothing.
 - **No sign-in.** A flip runs only the `production` scenarios with no `signIn` step, so no
   account is used at all; one that signs in (written for the tester's stage) is listed, not run.

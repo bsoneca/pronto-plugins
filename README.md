@@ -683,7 +683,8 @@ what every push does now; its reason is kept in the journal.
 
 What runs on production is held narrow. Only scenarios marked `production: true`
 run there, and the scenario schema allows one actor, no sign-up, no payment step
-(`pay`), no other player and no move, table or game, and only GET requests. The
+(`pay`), no other player and no move, table or game, and only GET requests (and an anonymous
+POST that evaluates a flag, `/ofrep/v1/evaluate/flags/<name>`, which reads a value and writes nothing). The
 runner refuses a scenario that isn't marked `production` against the host
 `flagsLive.url` names.
 
