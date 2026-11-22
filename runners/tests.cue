@@ -43,6 +43,8 @@ setups: {
 	// plain. What is a setup's own (groups, paths, the pr environment) is written here as a setup writes it.
 	"check-accounts": {
 		cluster: host: {}
+		// The folder's name has a space on purpose: the quoting cases below need one (the default has none).
+		hookRoot: "/Library/Application Support/pronto-runners"
 		github: owner: "acme"
 		accounts: {
 			"ci-pr":      role: "pr"
