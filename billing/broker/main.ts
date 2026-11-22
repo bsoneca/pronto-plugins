@@ -568,8 +568,9 @@ export async function broker(p: {
     if (claim.state === "busy") return json(409, { error: "in progress", event: event.id });
     const claimToken = claim.token;
     let kept = false;
-    let failed: { error: unknown } | null = null;
-    try {
+    // The processing, then the claim given back unless it was kept; a release that fails is reported, never
+    // swallowed: with the processing's own failure, both.
+    const run = async (): Promise<Response> => {
       // A subscription another caller is ending now is not ended for this event: it is not done.
       if (!(await endFailedTrial(sub))) return json(409, { error: "subscription busy", event: event.id });
       if (event.type === "customer.subscription.created" && !(await endDuplicateTrial(sub, t, account))) {
@@ -600,21 +601,24 @@ export async function broker(p: {
       await store.complete("stripe event", event.id, claimToken, EVENT_KEPT_MS);
       kept = true;
       return json(200, { delivered: event.id });
+    };
+    let response: Response, failure: { error: unknown } | null = null;
+    try {
+      response = await run();
     } catch (e) {
-      failed = { error: e };
-      throw e;
-    } finally {
-      // Anything but delivered or refused for good (a 502, a throw, a busy subscription) gives the claim back,
-      // so Stripe's next send is not made to wait out the lease. Only this claim's own token is let go. A
-      // release that fails is reported, never swallowed: with the processing's own failure, both.
-      if (!kept) {
-        try {
-          await store.forget("stripe event", event.id, claimToken);
-        } catch (release) {
-          throw failed ? new AggregateError([failed.error, release], `event ${event.id}: processing failed and its lease was not released`) : release;
-        }
+      failure = { error: e };
+    }
+    // Anything but delivered or refused for good (a 502, a throw, a busy subscription) gives the claim back,
+    // so Stripe's next send is not made to wait out the lease. Only this claim's own token is let go.
+    if (!kept) {
+      try {
+        await store.forget("stripe event", event.id, claimToken);
+      } catch (release) {
+        throw failure ? new AggregateError([failure.error, release], `event ${event.id}: processing failed and its lease was not released`) : release;
       }
     }
+    if (failure) throw failure.error;
+    return response!;
   }
 
   return async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
