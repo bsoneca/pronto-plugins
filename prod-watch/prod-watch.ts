@@ -9,7 +9,7 @@
 //   deno run -A prod-watch/prod-watch.ts <app> mark <fp> open|watching|noise|fixed [--reason why] [--pr N]
 // `cue` from PATH or $CUE. The state (cursor.json, ledger.json) is <the repository's root>/.omc/prod-watch/<app>/,
 // runtime state no commit carries.
-import { brt, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, settleRun, timeAfter, triage } from "./watch.js";
+import { brt, countedOf, cursorOf, group, hashInput, logEntries, logsQuery, mark, podsOf, releasedOf, render, settleRun, timeAfter, triage } from "./watch.js";
 
 // The app's folder: the one this script was written into (prod-watch/ is beside its files).
 const appDir = Deno.realPathSync(new URL("../", import.meta.url).pathname);
@@ -201,7 +201,7 @@ for (const e of entries) hashes.push(await hashOf(e));
 // Every entry the run read: the instances' windows are built from them, whether or not an earlier run counted them.
 const everyRead = entries;
 // What the run counts, commits and keeps in `seen` is settleRun's.
-const settled = settleRun({ entries, hashes, since: !!since, counted: cursor?.seen ?? [], reached, to, lag });
+const settled = settleRun({ entries, hashes, since: !!since, counted: countedOf(cursor), reached, to, lag, cursor: cursor?.at });
 entries = settled.entries;
 const { report, ledger: next } = triage(group(entries, rules, lifecycle, everyRead), ledger, reached);
 const where = [
@@ -215,5 +215,5 @@ else console.log(`${where}, released: ${released}${serving}\n` + render(report, 
 if (!since) {
   write("ledger.json", next);
   // The overlap is read again, so what it holds is what the next run must not count again.
-  write("cursor.json", { at: settled.committed, seen: settled.seen });
+  write("cursor.json", cursorOf(settled));
 }

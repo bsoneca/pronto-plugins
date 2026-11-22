@@ -135,6 +135,12 @@ fingerprint's status: open, watching, noise with why, fixed with its PR and when
 `<the repository's root>/.omc/prod-watch/<app>/`, runtime state no commit carries. A watching agent
 also keeps its `log.md` there, a line a pass.
 
+`cursor.json` holds `at`, `seen` (the hashes of the entries the overlap will read again, as strings, which an older
+watcher on the same state reads too) and `occurrences` (each with its time and source rule, for this version; used only
+while it matches `seen`, so a cursor an older watcher saved after this one is read as bare hashes). The cursor never moves
+behind the one a run started from: a read a limit cut short commits where it stopped, and a read to now after it keeps that
+time instead of a lag before where it started.
+
 Samples are redacted before they are printed (`redact` in `watch.js`): emails, phone numbers,
 addresses, uuids, bearer tokens, JWTs, long tokens, and the values of keys that name a secret or a
 person. Even so, a pull request quotes a sample only as far as it needs to.

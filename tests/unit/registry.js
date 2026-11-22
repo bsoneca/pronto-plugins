@@ -1,6 +1,6 @@
 // What the plugins' cases call (tests/unit.ts): each namespace a module of an intent or of their
 // runner (run) or its shell (flagsOf), identity pronto-identity's installer and brokers (identity.js), phone the broker's phone (identity/broker/phone.ts), otp its own codes' (identity/broker/otp.ts), idcore the broker's own decisions (identity/broker/core.ts), probe the
-// measures of probes.js, cron release-cron's rules (release-cron/cron.js), cronlock its lock on an in-memory file system with links (cronlock.js), notes release-notes' (release-notes/notes.js), watch prod-watch's (prod-watch/watch.js), prober pronto-probe's (probe/probe.js), runners runners' (runners/plan.js), and devflow the dev flow's rules (devflow/flow.js), inbox the suggestion inbox on a fake Plane (devflow.js), queue the Ready queue's verbs on it (devflow.js), ghboard GitHub Projects in the board's words (devflow/board/github.js), shop the stand-in apps the intents run on, as shops.js sets them up, android the Android terminal's compiler on pages of linkedom (android.js), androidScenarios its phone acceptance's pure rules (android/template/terminal/scenarios.ts), androidEmulator its emulator starter's (android/template/terminal/emulator.ts), migrations pronto-migrations' rules (migrations/plan.js), and mig those rules on an edited model (migrations.js), apigen pronto-api's generator, views, door and lint on a stand-in app (apigen.js), machine the cue wrapper's and vetted.ts's measures (machine.js), harness the flake filing of the scenarios' runner and the scenario selector's rule for files outside the app (harness.js), and ads pronto-ads' adapter, ad document service, policy and Caddyfile splice (ads.js).
+// measures of probes.js, cron release-cron's rules (release-cron/cron.js), cronlock its lock on an in-memory file system with links (cronlock.js), notes release-notes' (release-notes/notes.js), watch prod-watch's (prod-watch/watch.js), watchruns its cursor runs on a fake log (watchruns.js), prober pronto-probe's (probe/probe.js), runners runners' (runners/plan.js), and devflow the dev flow's rules (devflow/flow.js), inbox the suggestion inbox on a fake Plane (devflow.js), queue the Ready queue's verbs on it (devflow.js), ghboard GitHub Projects in the board's words (devflow/board/github.js), shop the stand-in apps the intents run on, as shops.js sets them up, android the Android terminal's compiler on pages of linkedom (android.js), androidScenarios its phone acceptance's pure rules (android/template/terminal/scenarios.ts), androidEmulator its emulator starter's (android/template/terminal/emulator.ts), migrations pronto-migrations' rules (migrations/plan.js), and mig those rules on an edited model (migrations.js), apigen pronto-api's generator, views, door and lint on a stand-in app (apigen.js), machine the cue wrapper's and vetted.ts's measures (machine.js), harness the flake filing of the scenarios' runner and the scenario selector's rule for files outside the app (harness.js), and ads pronto-ads' adapter, ad document service, policy and Caddyfile splice (ads.js).
 import * as stripe from '../../billing/connect.ts';
 import * as billing from '../../billing/service.ts';
 import * as billingNames from './billing.js';
@@ -22,6 +22,7 @@ import * as cron from '../../release-cron/cron.js';
 import * as cronlock from './cronlock.js';
 import * as notes from '../../release-notes/notes.js';
 import * as watch from '../../prod-watch/watch.js';
+import * as watchruns from './watchruns.js';
 import * as runners from '../../runners/plan.js';
 import * as shop from './shops.js';
 import * as android from './android.js';
@@ -35,5 +36,5 @@ import * as harness from './harness.js';
 import * as ads from './ads.js';
 
 export function registry(_suite) {
-  return { stripe, billing, billingNames, devflow, ghboard, inbox, queue, deploy, targets, identity, idcore, phone, otp, run, shell, probe, shop, cron, cronlock, notes, watch, prober, runners, android, androidScenarios, androidEmulator, migrations, mig, apigen, machine, harness, ads };
+  return { stripe, billing, billingNames, devflow, ghboard, inbox, queue, deploy, targets, identity, idcore, phone, otp, run, shell, probe, shop, cron, cronlock, notes, watch, watchruns, prober, runners, android, androidScenarios, androidEmulator, migrations, mig, apigen, machine, harness, ads };
 }
