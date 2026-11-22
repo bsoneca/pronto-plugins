@@ -19,7 +19,8 @@ replaced them and exit 2.
 
 `pronto-devflow status .` is the lead's whole view: the slots busy, `stuck:` issues, each lane's
 queue (`ready to pull, <lane>: KEY title (age); ...`, a jumping bug marked `P1 bug`), `starving:`
-issues, `merged:` by day, the open issues by state, the Backlog's size and the inbox.
+issues, `merged:` by day, the open issues by state, the Backlog's size and the inbox, and a
+`forgotten PRs:` line.
 
 1. **Keep every lane's queue stocked.** An engineer that finds its lane's queue empty has nothing to
    start (the pronto-issue skill, 5b), so refine before that happens: whenever a lane's
@@ -44,14 +45,24 @@ issues, `merged:` by day, the open issues by state, the Backlog's size and the i
    session (SendMessage), or free the slot by moving the issue back (`move . PRONTO-<n> Ready` or
    `Backlog`) when its session is gone. An issue moved back to Ready queues again from that moment, so it
    goes to the back of its lane's queue.
-4. **File what the owner approved.** When `status` says `Approved, to file: N`, run
+4. **Watch the pull requests.** Every hour the lead's scheduled check runs `pronto-devflow prs .`
+   (it prints `forgotten PRs:` and exits 1 when there are any; `status` prints the same line). A
+   forgotten PR is an open, non-draft PR of `prs.repos` (`bsoneca/pronto` and `bsoneca/pronto-plugins`)
+   with no commit, comment, review or finished check for `prs.idleHours` (1), or a failed check
+   (Codex's reviews included) and no push since. Each entry reads `repo#n (age) idle 2h` or
+   `red: review (security) 2h, no push since`. Give every one to a lane: tell the session that owns it
+   (SendMessage), or start an engineer on it when its session is gone. That lane drives the PR to
+   merged or closed under the repository's rules: no admin merge without the owner's yes at a pinned
+   head, and past two Codex rounds, P1s on code a PR merely touches become follow-ups. Never leave a
+   forgotten PR to the next hour.
+5. **File what the owner approved.** When `status` says `Approved, to file: N`, run
    `pronto-devflow approve . SUGEST-<n>` for each (it files a link-only issue in the Backlog), and
    tell the owner how many suggestions are waiting and how many are stale.
-5. **Report.** Tell the owner in a few lines what merged (`merged: N today, M in 7 days`, by day: from Plane's `completed_at`, so a day before today may hold issues
+6. **Report.** Tell the owner in a few lines what merged (`merged: N today, M in 7 days`, by day: from Plane's `completed_at`, so a day before today may hold issues
    released or flipped that day, counted late; today's number is exact),
-   what went Live, which flags went on (Done), what starves or is stuck and what you did about it.
+   what went Live, which flags went on (Done), what starves or is stuck, which PRs were forgotten and what you did about it.
    Do not wait for an answer.
-6. **Back to 1.** The loop never ends while the board has work. With the Backlog empty and nothing in
+7. **Back to 1.** The loop never ends while the board has work. With the Backlog empty and nothing in
    Refine, say so to the owner and stop; the next issue filed starts it again.
 
 ## The team
@@ -87,4 +98,5 @@ only when the owner asks; a change there is a pull request.
   his, spending money, anything sent outside. Everything else goes on.
 - Without a board token, `pronto-devflow` says so: point the user at `pronto connect plane .`.
 - A scheduled task may run this skill as a safety net (every few hours: `status`, then refine or
-  file as it says). The loop does not depend on it.
+  file as it says). The loop does not depend on it. The PR watch is the exception: the lead's
+  scheduled check runs `pronto-devflow prs .` every hour, so no PR is forgotten between turns.

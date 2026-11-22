@@ -195,3 +195,11 @@ suggestions: {
 		suggestions: {project: "ACME", from: ["aprende"]}
 	}).suggestions == _|_) & true
 }
+
+// The pull request watch: pronto and pronto-plugins, idle after an hour, unless the repository writes its own.
+prsWatch: {
+	default: _existing.prs & {repos: ["bsoneca/pronto", "bsoneca/pronto-plugins"], idleHours: 1}
+	own:     (_existing & {prs: {repos: ["acme/app"], idleHours: 2}}).prs & {repos: ["acme/app"], idleHours: 2}
+	// A repository that is not owner/name is refused.
+	refused: ((#DevFlow & {prs: repos: ["acme"]}).prs == _|_) & true
+}

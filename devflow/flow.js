@@ -430,6 +430,42 @@ export function stuckOf(facts, now, hours = 6) {
   return why ? { key, state, age, why } : null;
 }
 
+/** The pull requests nobody is driving (the owner, 2026-11-22: PR 1647 sat two hours red with no session). `prs`:
+ * open pull requests as `{repo, number, isDraft, commits: [{committedDate}], comments: [{createdAt}],
+ * reviews: [{submittedAt}], checks: [{name, conclusion, completedAt}]}` (gh's `statusCheckRollup`, its `status` and
+ * `conclusion` upper case). A draft is never listed. One is forgotten when (a) nothing happened on it in `hours`
+ * (a commit, a comment, a review or a check completing), or (b) a check failed and no commit came after the
+ * failure. `[{repo, number, age, why}]`, `age` since its last activity; `why` is `idle 2h`, `red: review (security)
+ * 2h, no push since`, or both joined by `; `. A cancelled or skipped check is no failure. */
+export function forgottenPrs(prs, now, hours = 1) {
+  const t = (at) => Date.parse(at ?? "");
+  const at = (list, field) => list.map((x) => t(x[field])).filter(Number.isFinite);
+  const late = ["FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED"];
+  const out = [];
+  for (const p of prs) {
+    if (p.isDraft) continue;
+    const checks = p.checks ?? [];
+    const commits = at(p.commits ?? [], "committedDate");
+    const last = Math.max(...commits, ...at(p.comments ?? [], "createdAt"), ...at(p.reviews ?? [], "submittedAt"), ...at(checks, "completedAt"));
+    const pushed = Math.max(...commits);
+    const whys = [];
+    const since = Number.isFinite(last) ? new Date(last).toISOString() : null;
+    if (!since || new Date(now).getTime() - last >= hours * 3600000) whys.push(`idle ${since ? ageOf(since, now) : "?"}`);
+    const red = checks.filter((c) => late.includes(c.conclusion) && Number.isFinite(t(c.completedAt)) && !(t(c.completedAt) < pushed));
+    if (red.length) {
+      const first = red.reduce((a, c) => (t(c.completedAt) < t(a.completedAt) ? c : a));
+      whys.push(`red: ${red.map((c) => c.name).join(", ")} ${ageOf(first.completedAt, now)}, no push since`);
+    }
+    if (whys.length) out.push({ repo: p.repo, number: p.number, age: since ? ageOf(since, now) : "?", why: whys.join("; ") });
+  }
+  return out;
+}
+
+/** The line `status` and `prs` print: `forgotten PRs: repo#n (age) why | ...`, or `forgotten PRs: none`. */
+export function forgottenLine(list) {
+  return `forgotten PRs: ${list.length ? list.map((f) => `${f.repo}#${f.number} (${f.age}) ${f.why}`).join(" | ") : "none"}`;
+}
+
 /** The line status prints for a stuck issue. */
 export function stuckLine(s) {
   return `stuck: ${s.key} ${s.state} ${s.age}, ${s.why}`;

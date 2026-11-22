@@ -10,6 +10,7 @@
 //   board.ts wait <repo> <KEY> --pr <url>               the issue's fix merged under another issue's pull request: a flip issue in Implementing waits for the release holding it (PRONTO-666); any other moves as that merge would have moved it (Merged, or Done for infra, design and plugins), and the release or flip hook finishes it (PRONTO-1050). Neither holds a slot.
 //   board.ts approve <repo> <INBOX-n>                    an inbox item the owner moved to Refine, filed as an issue in the Backlog (a link to it, none of its text)
 //   board.ts suggestion <repo> <INBOX-n>                 the text of an item in Refine (and only Refine), as one quoted, untrusted line: the designer's one way to read it
+//   board.ts prs <repo>                                 the open pull requests nobody is driving (`forgotten PRs:`, devflow/prs.ts), each repository of the flow's prs.repos; exit 1 when there are any, for the hourly scheduled check. Needs no board token. `status` prints the same line.
 //   board.ts next, close                                 gone with the sprints: they print what replaced them and exit 2
 import { cmd, flagsOf } from "../intents/shell.ts";
 import { esc } from "./board/board.ts";
@@ -17,6 +18,7 @@ import { doneAt, flagOf, flipOf, keyOf, nameOf, roleOf, waitPlan } from "./flow.
 import { move as hookMove } from "./hook.ts";
 import { contextOf, file as fileIssue, pull as pullIssue, type ReadCache, start as startIssue, status } from "./queue.ts";
 import { boardOf, devflowOf, type Role } from "./spec.ts";
+import { watchPrs } from "./prs.ts";
 import { approve, show } from "./suggestions.ts";
 
 const [verb, repoArg, ...rest] = Deno.args;
@@ -31,8 +33,19 @@ if (verb && Object.hasOwn(GONE, verb)) {
 const repo = repoArg ? await Deno.realPath(repoArg) : "";
 const flow = repo ? await devflowOf(repo) : null;
 if (!verb || !flow) {
-  console.error(flow === null && repo ? `${repo} has no devflow/devflow.cue` : "usage: board.ts status|start|pull|move|file|wait|approve|suggestion <repo> ...");
+  console.error(flow === null && repo ? `${repo} has no devflow/devflow.cue` : "usage: board.ts status|prs|start|pull|move|file|wait|approve|suggestion <repo> ...");
   Deno.exit(2);
+}
+if (verb === "prs") {
+  try {
+    const w = await watchPrs(flow, new Date());
+    console.log(w.line);
+    if (w.list.length) Deno.exit(1);
+    Deno.exit(0);
+  } catch (e) {
+    console.log(`forgotten PRs: unavailable (${(e as Error).message})`);
+    Deno.exit(1);
+  }
 }
 const b = await boardOf(flow);
 if (!b) {
@@ -113,8 +126,20 @@ async function statusVerb() {
     lastCommit,
     print: (l) => { if (!json) console.log(l); },
   });
-  if (json) console.log(JSON.stringify(r.json, null, 2));
-  if (r.failures) Deno.exit(1);
+  // The pull requests nobody drives come after the board's lines; a gh error is shown, never taken for none.
+  let prs: unknown;
+  let failures = r.failures;
+  try {
+    const w = await watchPrs(flow!, new Date());
+    prs = w.list;
+    if (!json) console.log(w.line);
+  } catch (e) {
+    failures++;
+    prs = { unavailable: (e as Error).message };
+    if (!json) console.log(`forgotten PRs: unavailable (${(e as Error).message})`);
+  }
+  if (json) console.log(JSON.stringify({ ...r.json, forgottenPrs: prs }, null, 2));
+  if (failures) Deno.exit(1);
 }
 
 async function start(k: string) {

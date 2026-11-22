@@ -35,6 +35,8 @@ export interface DevFlow {
   /** Where the Ready queue is read, and how long an issue may wait there (schema.cue, queue). */
   queue: { starvingDays: number; mergedDays: number; order?: "ready" | "filed"; jump?: string[]; childrenAtUmbrella?: boolean };
   timeZone: string;
+  /** The pull requests the hourly watch reads (schema.cue, prs). */
+  prs: { repos: string[]; idleHours: number };
   /** Hours without a commit or a pull request after which an issue holding a slot is stuck. */
   stuckHours: number;
   chore: string;

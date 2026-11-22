@@ -103,6 +103,13 @@ devFlow: #DevFlow
 	// Hours an issue holding a slot (Implementing or Review) may go with no linked open pull request and no
 	// commit on a branch naming its key before `status` calls it stuck.
 	stuckHours: *6 | (number & >0)
+	// The pull requests the hourly watch reads (`pronto-devflow prs`, and a line of `status`): the open,
+	// non-draft ones of these repositories (owner/name) that nobody has touched in `idleHours`, or
+	// whose check failed with no push since (flow.js forgottenPrs).
+	prs: {
+		repos:     *["bsoneca/pronto", "bsoneca/pronto-plugins"] | [...(string & =~"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
+		idleHours: *1 | (number & >0)
+	}
 	// A pull request with this label needs no issue (dependency bumps, the CI fingerprint).
 	chore: *"chore" | string
 	// The board label of an Implementing flip issue that waits for the release holding its fix: it holds no
