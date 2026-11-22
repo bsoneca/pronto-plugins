@@ -20,7 +20,7 @@ cases: {
 		{call: "fb.brokered", args: [{scope: "openid"}]}, {keep: "out"},
 		{get: "name", expect: null},
 		{use: "out"}, {get: "picture", expect: null},
-		{use: "out"}, {get: "me", expect: {fields: "id", proofOk: true, tokenOk: true}, why: "Graph is asked for the id alone, with the app-secret proof"},
+		{use: "out"}, {get: "me", expect: {fields: "id", proofOk: true, tokenOk: true, tokenInUrl: false}, why: "Graph is asked for the id alone, with the app-secret proof"},
 	]}
 	"the same person signs in as the same subject, and as another one in another tenant": {suite: "identity", steps: [
 		{call: "fb.brokered"}, {get: "sub"}, {keep: "first"},
@@ -70,6 +70,10 @@ cases: {
 		{call: "fb.brokered", args: [{meta: "me403"}], holds: {error: "access_denied"}},
 		{call: "fb.brokered", args: [{meta: "noId"}], holds: {error: "access_denied"}},
 	]}
+	"Graph failing at the network level is a refusal, and the person's token never reaches an error": {suite: "identity", steps: [
+		{call: "fb.meUnreachable", expect: {refused: "Refused", leaked: false}},
+		{call: "fb.brokered", holds: {me: {tokenOk: true, tokenInUrl: false, proofOk: true}}, why: "the token goes in an Authorization header, never in the URL"},
+	]}
 	"a callback made twice is refused the second time: the verifier is used once": {suite: "identity", steps: [
 		{call: "fb.brokered", args: [{replay: true}], holds: {replayed: "access_denied"}},
 	]}
@@ -79,6 +83,7 @@ cases: {
 		{call: "fb.settings", args: [{FACEBOOK_APP_SECRET: ""}], expect: {refused: "FACEBOOK_APP_ID needs FACEBOOK_APP_SECRET: the broker keeps the secret, the airlock does not hold it"}},
 		{call: "fb.settings", args: [{FACEBOOK_TENANTS: ""}], holds: {refused: "FACEBOOK_APP_ID needs FACEBOOK_TENANTS: Meta's consent dialog shows one app name, so the operator lists the tenants that may offer it"}},
 		{call: "fb.settings", args: [{FACEBOOK_APP_SECRET: "short"}], holds: {refused: "FACEBOOK_APP_SECRET is not an app secret (32 hex characters)"}},
+		{call: "fb.settings", args: [{FACEBOOK_TOKEN_URL: "http://staging.example/token", FACEBOOK_TEST_ENDPOINTS: ""}], holds: {refused: "FACEBOOK_TOKEN_URL is not https: the app secret and people's tokens would go in the clear"}},
 		{call: "fb.settings", args: [{FACEBOOK_APP_ID: "abc"}], holds: {refused: "FACEBOOK_APP_ID is Meta's app id, digits only (the public one)"}},
 	]}
 	"the app-secret proof is a hex HMAC of the token, different for another token": {suite: "identity", steps: [

@@ -1,7 +1,7 @@
 // The broker's Facebook sign-in (identity/broker/facebook.ts, PRONTO-449) end to end, against a stand-in for Meta this module serves
 // (its token endpoint and Graph's /me, checking the secret, the PKCE verifier and the app-secret proof as Meta does) and a stand-in for the
 // tenant's flag: measured by what Meta was asked, what the tenant's ID token says, and what a refused sign-in answered.
-import { base64url, fromBase64url, randomToken, sha256url } from '../../identity/oidc.ts';
+import { fromBase64url, randomToken, sha256url } from '../../identity/oidc.ts';
 import { broker } from '../../identity/broker/main.ts';
 import { appSecretProof, facebook, facebookConfig, FACEBOOK } from '../../identity/broker/facebook.ts';
 
@@ -22,6 +22,20 @@ export function settings(over = {}) {
   } catch (e) {
     return { refused: e.message };
   }
+}
+
+/** Graph's /me failing at the network level with an error that names the URL (as Deno's does): what the tenant is told, and whether the token went to the log. */
+export async function meUnreachable() {
+  const logged = [];
+  const real = console.error;
+  console.error = (...a) => { logged.push(a.map(String).join(' ')); };
+  try {
+    const cfg = facebookConfig((k) => ({ ...ENV })[k] ?? undefined);
+    const provider = facebook(cfg, () => Promise.reject(new TypeError('fetch failed', { cause: new Error('error sending request for url (https://graph.facebook.com/v24.0/me?access_token=LEAKME)') })));
+    let refused = null;
+    try { await provider.claims(Response.json({ access_token: 'LEAKME' }), { profile: false, pn: 'x' }); } catch (e) { refused = e.constructor.name; }
+    return { refused, leaked: logged.join(' ').includes('LEAKME') || String(refused).includes('LEAKME') };
+  } finally { console.error = real; }
 }
 
 /** The settings with every variable unset. */
@@ -58,7 +72,7 @@ export async function brokered(p = {}) {
     if (url.pathname === '/me') {
       seen.meCalls++;
       const q = url.searchParams;
-      seen.me = { fields: q.get('fields'), proofOk: q.get('appsecret_proof') === (await appSecretProof('AT1', SECRET)), tokenOk: q.get('access_token') === 'AT1' };
+      seen.me = { fields: q.get('fields'), proofOk: q.get('appsecret_proof') === (await appSecretProof('AT1', SECRET)), tokenOk: req.headers.get('authorization') === 'Bearer AT1', tokenInUrl: q.has('access_token') };
       if (meta === 'me403' || !seen.me.proofOk || !seen.me.tokenOk) return Response.json({ error: { code: 190 } }, { status: 403 });
       if (meta === 'noId') return Response.json({ name });
       const asks = (q.get('fields') ?? '').split(',');
@@ -69,7 +83,7 @@ export async function brokered(p = {}) {
   try {
     const issuer = 'https://id.example.com';
     const base = `http://127.0.0.1:${server.addr.port}`;
-    const cfg = facebookConfig((k) => ({ ...ENV, FACEBOOK_DIALOG_URL: 'https://www.facebook.example/dialog/oauth', FACEBOOK_TOKEN_URL: `${base}/token`, FACEBOOK_ME_URL: `${base}/me`, FACEBOOK_TENANTS: `${TENANT},https://other.example.com` })[k] ?? undefined);
+    const cfg = facebookConfig((k) => ({ ...ENV, FACEBOOK_TEST_ENDPOINTS: '1', FACEBOOK_DIALOG_URL: 'https://www.facebook.example/dialog/oauth', FACEBOOK_TOKEN_URL: `${base}/token`, FACEBOOK_ME_URL: `${base}/me`, FACEBOOK_TENANTS: `${TENANT},https://other.example.com` })[k] ?? undefined);
     const asked = [];
     const flagFetcher = (url) => {
       asked.push(String(url));

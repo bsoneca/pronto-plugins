@@ -36,14 +36,23 @@ export function facebookConfig(env: (k: string) => string | undefined): Facebook
   if (appId === "" && secret === "" && tenants.length === 0) return null;
   if (!/^[0-9]{5,20}$/.test(appId)) throw new Error("FACEBOOK_APP_ID is Meta's app id, digits only (the public one)");
   if (secret === "") throw new Error("FACEBOOK_APP_ID needs FACEBOOK_APP_SECRET: the broker keeps the secret, the airlock does not hold it");
-  if (!/^[0-9a-f]{32}$/.test(secret) && env("FACEBOOK_SECRET_ANY") !== "1") throw new Error("FACEBOOK_APP_SECRET is not an app secret (32 hex characters)");
+  if (!/^[0-9a-f]{32}$/.test(secret) && env("FACEBOOK_TEST_ENDPOINTS") !== "1") throw new Error("FACEBOOK_APP_SECRET is not an app secret (32 hex characters)");
   if (tenants.length === 0) throw new Error("FACEBOOK_APP_ID needs FACEBOOK_TENANTS: Meta's consent dialog shows one app name, so the operator lists the tenants that may offer it");
   return {
     appId, secret, tenants,
-    dialog: env("FACEBOOK_DIALOG_URL") || spec.dialog,
-    token: env("FACEBOOK_TOKEN_URL") || spec.token,
-    me: env("FACEBOOK_ME_URL") || spec.me,
+    dialog: endpoint(env, "FACEBOOK_DIALOG_URL", spec.dialog),
+    token: endpoint(env, "FACEBOOK_TOKEN_URL", spec.token),
+    me: endpoint(env, "FACEBOOK_ME_URL", spec.me),
   };
+}
+
+/** One of Meta's endpoints: the spec's, or the operator's override, which is https unless FACEBOOK_TEST_ENDPOINTS=1 (a test's stand-in): the secret and the people's tokens never go over plain http by a forgotten staging value. */
+function endpoint(env: (k: string) => string | undefined, name: string, spec: string): string {
+  const v = env(name);
+  if (!v) return spec;
+  if (!v.startsWith("https://") && env("FACEBOOK_TEST_ENDPOINTS") !== "1") throw new Error(`${name} is not https: the app secret and people's tokens would go in the clear`);
+  console.warn(`broker: ${name} overrides Meta's endpoint with ${new URL(v).origin}`);
+  return v;
 }
 
 const hex = (buf: ArrayBuffer) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -71,8 +80,14 @@ export async function claimsFrom(
   if (typeof access !== "string" || access === "") throw new Refused("facebook's exchange gave no access token");
   const fields = [...spec.fields.base, ...(wantProfile ? spec.fields.profile : [])].join(",");
   const to = new URL(cfg.me);
-  to.search = new URLSearchParams({ fields, access_token: access, appsecret_proof: await appSecretProof(access, cfg.secret) }).toString();
-  const res = await fetcher(to, { signal: AbortSignal.timeout(spec.limits.me_ms), redirect: "error" });
+  // The token goes in a header, not the URL: a failed request's error names its URL, and the log must never hold a person's token.
+  to.search = new URLSearchParams({ fields, appsecret_proof: await appSecretProof(access, cfg.secret) }).toString();
+  let res: Response;
+  try {
+    res = await fetcher(to, { headers: { authorization: `Bearer ${access}` }, signal: AbortSignal.timeout(spec.limits.me_ms), redirect: "error" });
+  } catch (e) {
+    throw new Refused(`facebook's /me did not answer (${e instanceof Error ? e.name : "error"})`);
+  }
   if (!res.ok) {
     await res.body?.cancel();
     throw new Refused(`facebook's /me answered ${res.status}`);

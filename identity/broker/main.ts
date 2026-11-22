@@ -313,6 +313,8 @@ export async function broker(p: {
       return page("Sign-in refused", `<h1>This sign-in can't continue</h1><p>Go back to the app and start again.</p>`, 400);
     }
     const r = leg.r as AuthRequest;
+    // The list is static: a tenant taken off it stops its legs at once (the flag was asked once, when the sign-in began).
+    if (provider.admits && !provider.admits(r.tenant)) return back(r.redirectUri, { error: "unauthorized_client", state: r.state });
     // Each refusal says why on the broker's log: the app is told only access_denied.
     if (url.searchParams.get("error")) {
       console.error(`broker: ${name} refused: ${url.searchParams.get("error")}`);
@@ -338,6 +340,12 @@ export async function broker(p: {
       return new Response("door", { status: 502 });
     }) : await fetch(provider.tokenUrl, {
       method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form,
+      // A provider read through Graph (no ID token) is held to a timeout and no redirect: the secret and the verifier go to one address only.
+      ...(provider.claims ? { signal: AbortSignal.timeout(8_000), redirect: "error" as const } : {}),
+    }).catch((e) => {
+      if (!provider.claims) throw e;
+      console.error(`broker: ${name}'s token exchange did not answer (${e instanceof Error ? e.name : "error"})`);
+      return new Response("unanswered", { status: 502 });
     });
     if (!exchanged.ok) {
       console.error(`broker: ${name}'s token exchange answered ${exchanged.status}: ${await exchanged.text()}`);
