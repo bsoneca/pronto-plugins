@@ -29,7 +29,7 @@
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import process from "node:process";
 import { causes, outcomes } from "./causes.js";
-import { appendWhy, mutates, lockAcquire, lockRelease, previewRecordStop, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit } from "./cron.js";
+import { appendWhy, mutates, lockAcquire, lockRelease, previewRecordStop, previewRecorded, previewRecord, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -102,6 +102,7 @@ const lockIo = {
   symlink: (target: string, p: string) => wrap(() => Deno.symlinkSync(target, p)),
   readlink: (p: string) => wrap(() => Deno.readLinkSync(p)),
   unlink: (p: string) => wrap(() => Deno.removeSync(p)),
+  link: (a: string, b: string) => wrap(() => Deno.linkSync(a, b)),
   remove: (p: string) => wrap(() => Deno.removeSync(p, { recursive: true })),
   // kill(pid, 0): ESRCH is a holder that is gone, EPERM one alive under another user, any other error propagates (aliveFromKill).
   alive: (pid: number) => { try { process.kill(pid, 0); return aliveFromKill(null); } catch (e) { return aliveFromKill((e as { code?: string }).code ?? "EUNKNOWN"); } },
@@ -113,20 +114,22 @@ const lockIo = {
 };
 let heldStage: string | undefined;
 const takeLock = (): { got: true } | { got: false; pid: number } => {
-  // A preview record a dead run of the flock version left: a preview may still be running, so the run stops (nonzero) naming the record and
-  // what a person does (cron.js previewRecordStop); only no record lets it go on.
-  const recPath = `${state}/lock.preview`;
-  let recErr: string | null = null, recText = "";
-  try { recText = Deno.readTextFileSync(recPath); } catch (e) { recErr = errCode(e) ?? "EUNKNOWN"; }
-  const stop = previewRecordStop(recErr, recText, recPath);
-  if (stop) throw new Error(stop);
   // Taking is cron.js's lockAcquire: a symlink to a staging directory that already holds this run's pid (symlink(2) refuses anything at the
   // path, an empty directory of the base driver included, and the base driver reads lock/pid through it); a stale lock removed only under an
   // exclusive flock and only if it is still the one observed; a holder that cannot be told, a failure to take or an ambiguous state throws,
   // so the run exits nonzero and a person clears it.
   const got = lockAcquire(lockIo, lockPath);
-  if (got.got) heldStage = got.stage;
-  return got as { got: true } | { got: false; pid: number };
+  if (!got.got) return got as { got: false; pid: number };
+  heldStage = got.stage;
+  // The previous run's preview record, looked for under the lock (a live run's own record is its lock's business, not an error): any record,
+  // readable or not, is a preview that may still be running, so the run gives the lock back and stops (nonzero) naming the record and its
+  // cleanup (cron.js previewRecordStop); only no record lets it go on. A record is never deleted here.
+  const recPath = `${state}/lock.preview`;
+  let recErr: string | null = null, recText = "";
+  try { recText = Deno.readTextFileSync(recPath); } catch (e) { recErr = errCode(e) ?? "EUNKNOWN"; }
+  const stop = previewRecordStop(recErr, recText, recPath);
+  if (stop) { dropLock(); throw new Error(stop); }
+  return got as { got: true };
 };
 // Gives the lock back (cron.js lockRelease): a lock this run holds and cannot remove throws.
 const dropLock = () => { lockRelease(lockIo, lockPath, heldStage); };
@@ -824,7 +827,17 @@ async function child(cmd: string, args: string[], cwd: string, env: Record<strin
 // rehearsal beside it failed first): `up` is never cancelled (stopping it would only kill the local ssh, leaving the remote
 // release running while `down` starts in the same worktree), so it runs to its end (Bonk Chess's ends with the kill rehearsal);
 // the waits and probes after it are skipped, and `down` runs. A failed `down` is always logged.
+// The record (cron.js previewRecorded) is written before `up` and removed only after `down` exited 0: a run killed in between leaves it for the next run's take of the lock.
 async function previewCheck(pv: NonNullable<Command["preview"]>, dir: string, cancel: { stopped: boolean }): Promise<string[]> {
+  let bad: string[] = [];
+  await previewRecorded(lockIo, `${state}/lock.preview`, previewRecord(pv, dir, Deno.pid, local(Date.now())), async () => {
+    const out: { downCode: number | null } = { downCode: null };
+    bad = await previewBody(pv, dir, cancel, out);
+    return out;
+  });
+  return bad;
+}
+async function previewBody(pv: NonNullable<Command["preview"]>, dir: string, cancel: { stopped: boolean }, out: { downCode: number | null }): Promise<string[]> {
   const env = { ...Deno.env.toObject(), STACK_PRIORITY: "release" };
   const bad: string[] = [];
   let reach: Deno.ChildProcess | undefined;
@@ -869,6 +882,7 @@ async function previewCheck(pv: NonNullable<Command["preview"]>, dir: string, ca
     if (reach) { try { send(reach.pid, "TERM"); await reach.stdin.close().catch(() => {}); } catch { /* already gone */ } }
     let down: { code: number };
     try { down = await child(pv.down[0], pv.down.slice(1), dir, env, undefined, "down"); } finally { previews--; }
+    out.downCode = down.code;
     // A preview left standing fails the run before the release: its namespace and what runs there stay until someone
     // removes them, which a run that reads as released would hide.
     if (down.code !== 0) { const m = `removing the preview (${pv.down.join(" ")}) failed (exit ${down.code})`; bad.push(m); say(`preview: ${m}`); }

@@ -783,6 +783,36 @@ export const lockRelease = (io, path, stage) => {
   return "released";
 };
 
+// The release preview's record (`<state>/lock.preview`, PRONTO-1032): written while the run holds the app's lock and BEFORE the preview's `up`
+// starts, removed only once its `down` has succeeded. A run killed meanwhile (SIGKILL, power) leaves it, and the next run that takes the
+// lock finds it (previewRecordStop) and stops with the cleanup, never deleting it itself: the namespace and worktree of that preview may still
+// be in use. `text` is previewRecord's JSON; `io`: writeFile, link, unlink, remove, uuid, pid. It is written whole (a file of its own, then
+// link(2), which refuses a record that exists), so a reader sees none or all of it, and an existing record is never overwritten.
+export const previewRecord = (pv, dir, pid, at) => JSON.stringify({ up: pv.up, down: pv.down, dir, pid, at });
+
+export const previewRecordWrite = (io, path, text) => {
+  const tmp = `${path}.${io.pid}.${io.uuid()}.tmp`;
+  try { io.writeFile(tmp, text); io.link(tmp, path); } catch (e) {
+    try { io.remove(tmp); } catch { /* none */ }
+    throw lockFail("write preview record", path, e);
+  }
+  try { io.remove(tmp); } catch { /* a stray file beside the record, harmless */ }
+};
+
+export const previewRecordClear = (io, path) => {
+  try { io.unlink(path); } catch (e) { if (!e || e.code !== "ENOENT") throw lockFail("remove preview record", path, e); }
+};
+
+// A preview run under its record: the record is written first (a failure to write stops the run before `up`), `body` runs the preview
+// (up, the checks, down) and reports `{ downCode }` (the exit of `down`, null if it never ran); the record goes only on a `down` that exited 0.
+// A throw from `body`, or a `down` that failed, keeps it.
+export const previewRecorded = async (io, path, text, body) => {
+  previewRecordWrite(io, path, text);
+  const out = await body();
+  if (out && out.downCode === 0) previewRecordClear(io, path);
+  return out;
+};
+
 // A signal's wait, each tick: "kill" the children still alive once their grace is over, "done" when the children are gone and no
 // preview is left (`previews`: its `up`, which a signal never stops, and its `down`), or when `grace` + `teardown` ms have passed with no
 // preview left (a stuck child is bounded; a preview's remote operation is waited for, since a lock given back under it would let the next
