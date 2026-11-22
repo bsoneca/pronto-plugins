@@ -37,6 +37,9 @@ export interface DevFlow {
   timeZone: string;
   /** The pull requests the hourly watch reads (schema.cue, prs). */
   prs: { repos: string[]; idleHours: number };
+  /** The repository whose apps' flags the pending-flags watch reads, and the flags the owner holds back (schema.cue). */
+  flagsRepo: string;
+  flagsHeld: { app: string; flag: string; why: string }[];
   /** Hours without a commit or a pull request after which an issue holding a slot is stuck. */
   stuckHours: number;
   chore: string;

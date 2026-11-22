@@ -466,6 +466,51 @@ export function forgottenLine(list) {
   return `forgotten PRs: ${list.length ? list.map((f) => `${f.repo}#${f.number} (${f.age}) ${f.why}`).join(" | ") : "none"}`;
 }
 
+/** The flags merged to main and not on for everyone in production (the owner, 2026-11-22: "A watcher for pending
+ * flags"). `apps`: `[{app, flags: {name: {default, note?}}, live: {name: value}, added: {name: ISO time | null},
+ * cases: {name: boolean}}]`: each app's flags as main says them, the value OFREP answers for each (absent or null:
+ * it answers none, as a flag that is not `client` does), when the commit that added each landed, and whether a
+ * scenario or unit case names it. A flag is pending when its `default` is false and it is not live true. `held`:
+ * `[{app, flag}]` the owner is holding (devFlow.flagsHeld), never listed. `[{app, flag, age, note, cases}]`, in the
+ * order of `apps` and each app's flags by name; `age` since it was added (`?` when no commit says), `note` its first line. */
+export function pendingFlags(apps, held, now) {
+  const out = [];
+  for (const a of apps) {
+    for (const flag of Object.keys(a.flags).sort()) {
+      const f = a.flags[flag];
+      if (f.default !== false || a.live[flag] === true) continue;
+      if (held.some((h) => h.app === a.app && h.flag === flag)) continue;
+      const since = a.added[flag] ?? null;
+      out.push({ app: a.app, flag, age: since ? ageOf(since, now) : "?", note: String(f.note ?? "").trim().split("\n")[0].trim(), cases: a.cases[flag] === true });
+    }
+  }
+  return out;
+}
+
+/** The flags live true while main's spec says `default: false`: flipped, never recorded (`apps` as pendingFlags reads
+ * them; held flags too, a hold is no excuse for a record that is wrong). Live keys that are no flag of the spec
+ * (pronto-armies' rows) are never read. `[{app, flag}]`. */
+export function driftFlags(apps) {
+  const out = [];
+  for (const a of apps) {
+    for (const flag of Object.keys(a.flags).sort()) if (a.flags[flag].default === false && a.live[flag] === true) out.push({ app: a.app, flag });
+  }
+  return out;
+}
+
+/** The pending flags (or drifts) a report has not made: those whose `app/flag` is not among `seen`. */
+export function newPending(list, seen) {
+  return list.filter((f) => !seen.includes(`${f.app}/${f.flag}`));
+}
+
+/** The line `status` and `flags` print: `pending flags: app/flag (age, cases: yes|no) | ...`, or `pending flags: none`
+ * (`none new` for a report of the new ones alone, so it never reads as no flag pending), then, when `drift` has any,
+ * `; drift: app/flag live=true spec=false | ...`. */
+export function pendingLine(list, fresh = false, drift = []) {
+  const d = drift.length ? `; drift: ${drift.map((f) => `${f.app}/${f.flag} live=true spec=false`).join(" | ")}` : "";
+  return `pending flags: ${list.length ? list.map((f) => `${f.app}/${f.flag} (${f.age}, cases: ${f.cases ? "yes" : "no"})`).join(" | ") : fresh ? "none new" : "none"}${d}`;
+}
+
 /** The line status prints for a stuck issue. */
 export function stuckLine(s) {
   return `stuck: ${s.key} ${s.state} ${s.age}, ${s.why}`;

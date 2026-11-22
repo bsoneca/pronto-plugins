@@ -203,3 +203,11 @@ prsWatch: {
 	// A repository that is not owner/name is refused.
 	refused: ((#DevFlow & {prs: repos: ["acme"]}).prs == _|_) & true
 }
+
+// The pending-flags watch: bsoneca/pronto's apps, with the one flag the owner holds seeded, unless the repository writes its own.
+flagsWatch: {
+	default: _existing.flagsRepo & "bsoneca/pronto"
+	seeded:  _existing.flagsHeld[0] & {app: "brawl-chess", flag: "capture_fights"}
+	own:     (_existing & {flagsHeld: [{app: "acme", flag: "beta", why: "not yet"}]}).flagsHeld[0].app & "acme"
+	none:    len((_existing & {flagsHeld: []}).flagsHeld) & 0
+}
