@@ -624,9 +624,9 @@ export async function broker(p: {
         if (slow) return json(502, { error: "too slow" });
         const r = await push(t, token);
         if (r.refused) {
-          console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}; not sent again`);
-          if (!(await finished(event.id, claimToken))) return json(409, { error: "claim lost", event: event.id });
-          kept = true;
+          // Answered so Stripe stops sending it, but not marked done: the claim is released (the finally below),
+          // so a resend, or a later delivery of the event, tries the tenant again. Only a delivery is remembered.
+          console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}; not marked done, a resend may retry`);
           return json(200, { refused: event.id });
         }
         if (!r.taken) {
@@ -749,6 +749,9 @@ if (import.meta.main) {
   }
   // One store for the live broker and its sandbox: the database at DATABASE_URL (metal.nu), else memory.
   const { storeFrom } = await import("./store.ts");
+  if (env("DATABASE_URL") && !env("BILLING_SIGNING_KEY")) {
+    throw new Error("BILLING_SIGNING_KEY is required with DATABASE_URL: replicas of one database must sign with one key");
+  }
   const settings = { issuer, secret, signingKey: env("BILLING_SIGNING_KEY"), feePercent: Number(env("BILLING_FEE_PERCENT") ?? 0), store: await storeFrom(env) };
   const key = env("STRIPE_SECRET_KEY");
   // Off by default: set (by metal.nu --airlock), every Stripe call goes through the airlock's door at

@@ -123,6 +123,14 @@ export class MemoryStore implements Store {
     if (!w) this.#windows.set(name, w = new Window(10_000, this.now));
     return Promise.resolve(w.take(key, per, windowMs));
   }
+  /** Drops rows whose time ended: at most `SWEEP` looked at a call, from the oldest inserted, so no caller pays for a backlog. */
+  #sweep(): void {
+    let n = 0;
+    for (const [k, held] of this.#seen) {
+      if (n++ >= SWEEP) return;
+      if (held.until <= this.now()) this.#seen.delete(k);
+    }
+  }
   /** The live row, whose time has not ended. */
   #live(key: string) {
     const held = this.#seen.get(key);
@@ -132,12 +140,13 @@ export class MemoryStore implements Store {
     return Promise.resolve(this.#live(`${kind}\u0000${id}`) !== undefined);
   }
   remember(kind: string, id: string, ttlMs: number): Promise<void> {
-    for (const [k, held] of this.#seen) if (held.until <= this.now()) this.#seen.delete(k);
+    this.#sweep();
     const key = `${kind}\u0000${id}`;
     this.#seen.set(key, { until: this.now() + ttlMs, state: step("remember", this.#live(key)?.state ?? "absent", false) as RowState });
     return Promise.resolve();
   }
   claim(kind: string, id: string, leaseMs: number): Promise<Claim> {
+    this.#sweep();
     const key = `${kind}\u0000${id}`, now = this.now(), held = this.#live(key);
     const to = step("claim", held?.state ?? "absent", false);
     if (to === null) return Promise.resolve({ state: held!.state === DONE ? "done" : "busy" });
@@ -172,6 +181,9 @@ export interface Sql {
   begin<T>(fn: (tx: Sql) => Promise<T>): Promise<T>;
   end?(): Promise<void>;
 }
+
+/** How many rows a call may look at to drop the ones whose time ended. */
+const SWEEP = 100;
 
 /** The tables the broker needs, checked at start. */
 const TABLES = ["billing_counter", "billing_window", "billing_seen"];
@@ -292,6 +304,8 @@ export class PostgresStore implements Store {
     await this.sql.unsafe(SQL.remember, [kind, id, ttlMs]);
   }
   async claim(kind: string, id: string, leaseMs: number): Promise<Claim> {
+    // Rows whose time ended are reclaimed here as they are on a remember: a bounded few a call.
+    await this.sql.unsafe(SQL.sweepSeen);
     // A row deleted between the two statements leaves neither: the claim is tried again.
     for (let attempt = 0; attempt < 3; attempt++) {
       const [won] = await this.sql.unsafe(SQL.claim, [kind, id, leaseMs]);

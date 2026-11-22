@@ -222,7 +222,8 @@ Deno.test("postgres store: claim is one statement that takes only a row nobody h
   const fake: Sql = { unsafe: (q) => { sql.push(q.replace(/\s+/g, " ")); return Promise.resolve([{ token: "2026-11-21 10:00:00.123456+00" }]); }, begin: (fn) => fn(fake) };
   const c = await new PostgresStore(fake).claim("stripe event", "evt", 120_000);
   assertEquals(c, { state: "claimed", token: "2026-11-21 10:00:00.123456+00" }, "the token is the row's own text, microseconds kept");
-  assertEquals(/^INSERT INTO billing_seen .* ON CONFLICT \(kind, id\) DO UPDATE SET expires = EXCLUDED\.expires, state = 'claimed' WHERE billing_seen\.expires <= now\(\) RETURNING expires::text AS token$/.test(sql[0]), true);
+  assertEquals(/^DELETE FROM billing_seen WHERE ctid IN \(SELECT ctid FROM billing_seen WHERE expires <= now\(\) LIMIT \d+\)$/.test(sql[0]), true, "a claim first reclaims a bounded few rows whose time ended");
+  assertEquals(/^INSERT INTO billing_seen .* ON CONFLICT \(kind, id\) DO UPDATE SET expires = EXCLUDED\.expires, state = 'claimed' WHERE billing_seen\.expires <= now\(\) RETURNING expires::text AS token$/.test(sql[1]), true);
 });
 
 Deno.test("postgres store: a table made before the claim state column gets it, and its rows are done", async () => {
@@ -379,4 +380,23 @@ Deno.test("rules.cue's transitions leave no state without a way in and name ever
   assertEquals(target("complete", "claimed"), "done");
   assertEquals(step("complete", "claimed", false), null, "completion needs the holder's token");
   assertEquals(step("claim", "claimed", false), null, "a live claim is not claimable");
+});
+
+Deno.test("expired rows are reclaimed on the claim path, a bounded few a call", async () => {
+  // Memory: a clock that moves past every lease; each claim drops at most 100 of the expired.
+  let t = 1_000;
+  const m = new MemoryStore(() => t);
+  for (let i = 0; i < 250; i++) await m.claim("stripe event", `old-${i}`, 10);
+  t += 1_000;
+  await m.claim("stripe event", "fresh-1", 10);
+  const left = async () => { let n = 0; for (let i = 0; i < 250; i++) if (await m.seen("stripe event", `old-${i}`)) n++; return n; };
+  assertEquals(await left(), 0, "expired rows are never seen");
+  // Postgres: the rows themselves go, a bounded few a claim.
+  const sql = pglite(new PGlite());
+  await applySchema(sql);
+  const p = new PostgresStore(sql);
+  for (let i = 0; i < 150; i++) await sql.unsafe(`INSERT INTO billing_seen (kind, id, expires, state) VALUES ('stripe event', $1, now() - interval '1 hour', 'done')`, [`old-${i}`]);
+  await p.claim("stripe event", "fresh", 120_000);
+  const [{ n }] = await sql.unsafe(`SELECT count(*)::int AS n FROM billing_seen`);
+  assertEquals(n, 150 - 100 + 1, "one claim reclaims at most 100 expired rows");
 });

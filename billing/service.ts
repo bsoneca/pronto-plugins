@@ -32,6 +32,12 @@ export interface Settings {
   // The flag that sends this tenant's calls to Stripe through the operator's airlock (PRONTO-218):
   // asked for each request's own reader, its value told to the broker as `door`.
   doorFlag?: string;
+  /** The name of a pronto-flags flag, asked of flagd as the door flag is. While it evaluates true the service
+   * behaves strictly where it once did not: a failed grants write turns /billing/health 503 and is retried with
+   * backoff, a grants write has a deadline and an unconfirmed one is redone, a trial whose flag cannot be asked fails
+   * the request and a broker that does not know trials fails an offer. Unset, false or a failed lookup: the
+   * behaviour this service had before, exactly. */
+  strictFlag?: string;
   fetcher?: typeof fetch;
 }
 
@@ -63,22 +69,27 @@ export function refused(e: unknown): boolean {
 // address that does not resolve), a NotReady past the window and any failure after one success is a
 // "fail": the grants are not written, /billing/health answers 503 and the error is logged each time.
 export const grantsWindowMs = 60_000;
+// What the grants loop logs of a failed call when the strict flag is off (the earlier behaviour): nothing in the
+// startup window (billing starts before its neighbour listens), a warning past it, an error after one success.
+export function grantLog(served: boolean, sinceStartMs: number): "none" | "warn" | "error" {
+  if (served) return "error";
+  return sinceStartMs < grantsWindowMs ? "none" : "warn";
+}
 export function grantVerdict(served: boolean, sinceStartMs: number, notReady: boolean): "wait" | "fail" {
   return !served && notReady && sinceStartMs < grantsWindowMs ? "wait" : "fail";
 }
 
 /** The grants loop: `attempt` until the first success, then (with `repeat`, flags) every minute. A failed attempt
- * is tried again after a wait that doubles to a minute, and the process never exits over it: /billing/health says
- * 503 while it lasts and the rest of the billing path keeps serving. It sits behind stripe_door like the rest of
- * the billing path, so it has no flag of its own. */
+ * is tried again after a wait that doubles to a minute, and the process never exits over it. With the strict flag
+ * on, /billing/health says 503 while a failure lasts and the rest of the billing path keeps serving. */
 export async function grantsLoop(
-  billing: { attempt(sinceStartMs: number): Promise<boolean> },
+  billing: { attempt(sinceStartMs: number, retryInS?: number): Promise<boolean> },
   o: { repeat: boolean; sleep?: (ms: number) => Promise<void>; now?: () => number },
 ): Promise<void> {
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))), now = o.now ?? Date.now;
   const started = now();
   for (let wait = 1;;) {
-    if (await billing.attempt(now() - started)) {
+    if (await billing.attempt(now() - started, Math.min(wait * 2, 60))) {
       if (!o.repeat) return;
       wait = 60;
     } else wait = Math.min(wait * 2, 60);
@@ -114,14 +125,14 @@ export function service(s: Settings) {
     });
   }
 
-  async function rpc(fn: string, auth: string, args: Record<string, unknown> = {}): Promise<Response> {
+  async function rpc(fn: string, auth: string, args: Record<string, unknown> = {}, deadline = false): Promise<Response> {
     return await fetcher(`${crud}/rpc/${fn}`, {
       method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: JSON.stringify(args),
-      // A write that hangs must fail (a TimeoutError is no NotReady, so a "fail" verdict), never keep health at 200 and stall the loop.
-      signal: AbortSignal.timeout(30_000),
+      // Strict only: a grants write that hangs must fail (a TimeoutError is no NotReady, so a "fail" verdict), never keep health at 200 and stall the loop.
+      ...(deadline ? { signal: AbortSignal.timeout(30_000) } : {}),
     });
   }
-  const asService = (fn: string, args: Record<string, unknown>) => rpc(fn, `Bearer ${s.serviceJwt}`, args);
+  const asService = (fn: string, args: Record<string, unknown>, deadline = false) => rpc(fn, `Bearer ${s.serviceJwt}`, args, deadline);
 
   // Who asks, as the gateway reads the reader's own session: an account, never a guest.
   async function reader(req: Request): Promise<string | Response> {
@@ -142,14 +153,24 @@ export function service(s: Settings) {
   // flags, the set is the flag billing_grants as flagd serves it now; without,
   // the one the release carried. A set already handed over is not sent again.
   let granted: string | null = null;
-  async function grant(): Promise<void> {
+  async function grant(strict = false): Promise<void> {
+    if (!strict) {
+      // The earlier behaviour: any failure is the loop's to log and retry.
+      const set = s.flags ? await flagged() : s.grants ?? "[]";
+      if (set === granted) return;
+      const res = await asService("billing_grant", { grants: JSON.parse(set) });
+      if (!res.ok) throw new Error(`billing_grant answered ${res.status}: ${brief(await res.text())}`);
+      await res.body?.cancel();
+      granted = set;
+      return;
+    }
     const up = <T>(p: Promise<T>) => p.catch((e) => { throw refused(e) ? new NotReady(e.message) : e; });
     const set = s.flags ? await up(flagged()) : s.grants ?? "[]";
     if (set === granted) return;
     // A changed write that times out may still have committed: what is held is unknown until a write is
     // confirmed, so a flag going back to the old set writes again.
     granted = null;
-    const res = await up(asService("billing_grant", { grants: JSON.parse(set) }));
+    const res = await up(asService("billing_grant", { grants: JSON.parse(set) }, true));
     if (!res.ok) {
       const text = await res.text();
       const why = `billing_grant answered ${res.status}: ${brief(text)}`;
@@ -193,44 +214,51 @@ export function service(s: Settings) {
     return new Response(null, { status: 204 });
   }
 
-  // The free trial is off unless the document has one and its flag, if any, is true for this
-  // account as flagd evaluates it now. A flag that cannot be asked (no flagd, flagd down or erroring,
-  // the flag not there, an answer that is no boolean) fails the request, as doorOn's does: never on,
-  // and never mistaken for a trial turned off. The broker's consent check carries no session, so a
-  // flag that names accounts needs flagd asked directly.
+  // The free trial is off unless the document has one and its flag, if any, is true for this account as flagd
+  // evaluates it now. A flag that cannot be asked is off, never on. The broker's consent check carries no
+  // session, so a flag that names accounts needs flagd asked directly.
   //
-  // That strictness belongs to the door path (the reader's stripe_door evaluates true): for every other
-  // reader the trial is off when its flag cannot be asked, as before the door, so a deploy of this service
-  // changes nothing for them. `strict` says which.
+  // While the strict flag is on (`strict`), a flag that cannot be asked (no flagd, flagd down or erroring, the
+  // flag not there, an answer that is no boolean) fails the request instead, never mistaken for a trial turned
+  // off. Otherwise it is the earlier behaviour, exactly: off.
   async function trialOn(account: string, strict: boolean): Promise<boolean> {
     if (!doc.trial) return false;
     if (!s.trialFlag) return true;
+    if (!strict) {
+      if (!s.flags) return false;
+      try {
+        const res = await ofrep(s.trialFlag, account);
+        if (!res.ok) {
+          await res.body?.cancel();
+          return false;
+        }
+        return (await res.json() as { value?: unknown }).value === true;
+      } catch {
+        return false;
+      }
+    }
+    if (!s.flags) throw new Error("BILLING_TRIAL_FLAG needs BILLING_FLAGS: where to ask it");
+    const res = await ofrep(s.trialFlag, account);
+    const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
+    if (!res.ok || typeof answer?.value !== "boolean") throw new Error(`flag ${s.trialFlag}: flagd answered ${res.status}`);
+    return answer.value;
+  }
+
+  // Whether the strict flag evaluates true now (for `account`, with the reader's `auth`, where there is one). No
+  // flag configured, no flagd, a lookup that fails or an answer that is no true: the earlier behaviour.
+  async function strictOn(account?: string, auth?: string | null): Promise<boolean> {
+    if (!s.strictFlag || !s.flags) return false;
     try {
-      if (!s.flags) throw new Error("BILLING_TRIAL_FLAG needs BILLING_FLAGS: where to ask it");
-      const res = await ofrep(s.trialFlag, account);
-      const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
-      if (!res.ok || typeof answer?.value !== "boolean") throw new Error(`flag ${s.trialFlag}: flagd answered ${res.status}`);
-      return answer.value;
-    } catch (e) {
-      if (strict) throw e;
-      console.warn(`billing: ${(e as Error).message}: the trial is off`);
+      const res = await ofrep(s.strictFlag, account, auth);
+      if (!res.ok) {
+        await res.body?.cancel();
+        return false;
+      }
+      return (await res.json() as { value?: unknown }).value === true;
+    } catch {
       return false;
     }
   }
-
-  // Whether the door path is on for this reader: their stripe_door evaluates true now. A lookup that cannot
-  // say, and no flag at all, are not the door path.
-  // The lookup is made once for the request: its answer, or the failure it is (which a call to the broker, as
-  // any door-path call, still raises).
-  type Lookup = { value: boolean | undefined } | { error: unknown };
-  async function lookupDoor(account: string, auth: string | null): Promise<Lookup> {
-    try {
-      return { value: await doorOn(account, auth) };
-    } catch (error) {
-      return { error };
-    }
-  }
-  const onDoorPath = (l: Lookup): boolean => "value" in l && l.value === true;
 
   // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag
   // for them now: through the door, with the reader's own session, which its OFREP route reads the
@@ -271,7 +299,7 @@ export function service(s: Settings) {
     if (path === "/billing/trial/consent") {
       // The broker's: the ticket is the proof, so there is no reader.
       const a = await args(req);
-      if (typeof a.account !== "string" || typeof a.ticket !== "string" || !(await trialOn(a.account, onDoorPath(await lookupDoor(a.account, null))))) return json(404, { error: "not found" });
+      if (typeof a.account !== "string" || typeof a.ticket !== "string" || !(await trialOn(a.account, await strictOn(a.account, null)))) return json(404, { error: "not found" });
       const res = await asService("billing_trial_take", { account: a.account, ticket: a.ticket });
       if (!res.ok) throw new Error(`billing_trial_take answered ${res.status}: ${brief(await res.text())}`);
       const consent = await res.json();
@@ -279,18 +307,21 @@ export function service(s: Settings) {
     }
     const account = await reader(req);
     if (account instanceof Response) return account;
-    const lookup = await lookupDoor(account, req.headers.get("authorization"));
-    const strict = onDoorPath(lookup);
+    // The door lookup comes first: a lookup that fails fails the request (the 502 handler) before a trial flag is
+    // asked and before any ticket is evaluated, issued or consumed. Its answer (undefined when no door flag is
+    // configured) goes on to the broker as it is.
+    const door = { door: await doorOn(account, req.headers.get("authorization")) };
+    const strict = await strictOn(account, req.headers.get("authorization"));
     if (!(await trialOn(account, strict))) return json(404, { error: "not found" });
     const a = await args(req, 8192);
     const held = await trialStatus(account);
     if (path === "/billing/trial") {
       const none = { ...held, eligible: false, offers: [] };
       if (held.holds || held.state) return json(200, none);
-      const res = await toBroker("/trial/offer", { account, ticket: await trialTicket(account), currency: a.currency }, req.headers.get("authorization"), lookup);
-      // On the door path, a broker that does not know trials (404) fails the request as any refusal does: a
-      // trial's flag is turned on only where the broker offers trials, so this is no account's ineligibility.
-      // Off it, as before the door, such a broker offers none.
+      const res = await toBroker("/trial/offer", { account, ticket: await trialTicket(account), currency: a.currency }, req.headers.get("authorization"), door);
+      // With the strict flag on, a broker that does not know trials (404) fails the request as any refusal does:
+      // a trial's flag is turned on only where the broker offers trials, so this is no account's ineligibility.
+      // Otherwise, as before, such a broker offers none.
       if (res.status === 404 && !strict) return json(200, none);
       return res.ok ? json(200, { ...held, ...(await res.json()) }) : res;
     }
@@ -302,17 +333,13 @@ export function service(s: Settings) {
     if (typeof a.terms !== "string" || a.terms.trim() === "" || a.terms.length > 1000) return json(400, { error: "terms required, at most 1000 characters" });
     if (held.holds || held.state) return json(409, { error: held.holds ? "holds" : "used" });
     const ticket = await trialTicket(account, { plan, amount: a.amount, currency: a.currency, charges_at: a.charges_at, terms: a.terms });
-    return await toBroker("/trial/checkout", { account, ticket, locale: a.locale, return: a.return }, req.headers.get("authorization"), lookup);
+    return await toBroker("/trial/checkout", { account, ticket, locale: a.locale, return: a.return }, req.headers.get("authorization"), door);
   }
 
   // `auth`: the reader's session, for a call made on the reader's behalf, which then says which way
   // its Stripe calls go (doorOn); a call with none (the broker's own consent check) says nothing.
-  async function toBroker(path: string, args: Record<string, unknown>, auth?: string | null, known?: Lookup): Promise<Response> {
-    let door: boolean | undefined;
-    if (known) {
-      if ("error" in known) throw known.error;
-      door = known.value;
-    } else door = auth !== undefined && typeof args.account === "string" ? await doorOn(args.account, auth) : undefined;
+  async function toBroker(path: string, args: Record<string, unknown>, auth?: string | null, known?: { door: boolean | undefined }): Promise<Response> {
+    const door = known ? known.door : auth !== undefined && typeof args.account === "string" ? await doorOn(args.account, auth) : undefined;
     const res = await fetcher(`${brokerAt}${path}`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tenant: origin, ...args, ...(door === undefined ? {} : { door }) }),
       signal: AbortSignal.timeout(20_000),
@@ -385,17 +412,25 @@ export function service(s: Settings) {
   // failure no wait can mend sets it, so a revoked grant never stays effective on a healthy-looking
   // deployment. The loop retries either way, so a corrected flag push recovers with no deploy.
   let grantsError: string | null = null, served = false, waiting = false;
-  // False when the grants were not written: a "wait" (a neighbour not up yet, inside the startup window) is
-  // quiet; a "fail" is logged and turns /billing/health 503. Neither stops the loop (grantsLoop): the process
-  // keeps serving and tries again, with backoff.
-  async function attempt(sinceStartMs: number): Promise<boolean> {
+  // False when the grants were not written. With the strict flag on: a "wait" (a neighbour not up yet, inside the
+  // startup window) is quiet, a "fail" is logged and turns /billing/health 503, and neither stops the loop
+  // (grantsLoop). Otherwise the earlier behaviour: the failure is logged by grantLog and health stays as it was.
+  async function attempt(sinceStartMs: number, retryInS = 0): Promise<boolean> {
+    const strict = await strictOn();
     try {
-      await grant();
+      await grant(strict);
       served = true;
       waiting = false;
       grantsError = null;
       return true;
     } catch (e) {
+      if (!strict) {
+        grantsError = null;
+        const log = grantLog(served, sinceStartMs);
+        if (log === "error") console.error(`billing: grants not written: ${(e as Error).message}`);
+        else if (log === "warn") console.warn(`billing: grants not written yet, retrying in ${retryInS} s: ${(e as Error).message}`);
+        return false;
+      }
       const notReady = e instanceof NotReady;
       if (grantVerdict(served, sinceStartMs, notReady) === "fail") {
         grantsError = (e as Error).message;
@@ -421,7 +456,7 @@ if (import.meta.main) {
     origin: env("ORIGIN"), broker: env("BILLING_BROKER"), brokerInternal: Deno.env.get("BILLING_BROKER_INTERNAL"),
     crud: env("CRUD_URL"), serviceJwt: env("SERVICE_JWT"), document: env("BILLING_DOCUMENT"), grants: Deno.env.get("BILLING_GRANTS"),
     flags: Deno.env.get("BILLING_FLAGS") || undefined, trialFlag: Deno.env.get("BILLING_TRIAL_FLAG") || undefined,
-    doorFlag: Deno.env.get("BILLING_DOOR_FLAG") || undefined,
+    doorFlag: Deno.env.get("BILLING_DOOR_FLAG") || undefined, strictFlag: Deno.env.get("BILLING_STRICT_FLAG") || undefined,
   });
   Deno.serve({ port: Number(Deno.env.get("BILLING_PORT") ?? 8688) }, billing);
   // Until the gateway serves billing_grant, as it does once it has reloaded its schema; with
