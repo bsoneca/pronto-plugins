@@ -11,10 +11,10 @@
 //   one SQL statement, so two replicas cannot both win it.
 //
 // The broker runs no DDL: its tables are made by billing/broker/schema.sql (add-only, idempotent), which
-// `metal.nu release` applies to the broker's own database before replacing the broker. The schema is declared
-// once, in SCHEMA below, and schema_gen.ts emits schema.sql from it. It is never an app's migration: the
-// broker's database is the operator's, and an app's roles must not reach these tables. The store only checks
-// at start that they are there.
+// `metal.nu release` applies to the broker's own database before replacing the broker: broker/schema.sql is the
+// schema that initializes the broker database, and the one place to point an operator at. It is declared once, in
+// SCHEMA below, and schema_gen.ts emits it. It is never an app's migration: the broker's database is the
+// operator's, and an app's roles must not reach these tables. The store only checks at start that they are there.
 
 import { RULES } from "../rules.ts";
 
@@ -68,7 +68,7 @@ export interface Store {
   complete(kind: string, id: string, token: string, ttlMs: number): Promise<boolean>;
   /** Forget (kind, id) now. With `token`: the holder's release of its claim (a newer claim, a remember or another
    * caller's token leaves the row). Without: a cache invalidation of a finished row, never of a claim in progress. */
-  forget(kind: string, id: string, token?: string): Promise<void>;
+  forget(kind: string, id: string, token?: string): Promise<boolean>;
 }
 
 /** At most `per` calls a `windowMs` for each key, the oldest keys forgotten past `keys`. */
@@ -173,18 +173,14 @@ export class MemoryStore implements Store {
     this.#seen.set(key, { until: this.now() + ttlMs, state: to as RowState });
     return Promise.resolve(true);
   }
-  forget(kind: string, id: string, token?: string): Promise<void> {
+  forget(kind: string, id: string, token?: string): Promise<boolean> {
     const key = `${kind}\u0000${id}`;
     // Without a token, the declared cache invalidation (a finished row, never a claim in progress); with one,
-    // the holder's declared release.
-    if (token === undefined) {
-      const held = this.#live(key);
-      if (step("invalidate", held?.state ?? "absent", false) === "absent") this.#seen.delete(key);
-    } else {
-      const held = this.#live(key);
-      if (step("release", held?.state ?? "absent", held?.token === token) === "absent") this.#seen.delete(key);
-    }
-    return Promise.resolve();
+    // the holder's declared release. False when the declaration refused it and the row stays.
+    const held = this.#live(key);
+    const to = token === undefined ? step("invalidate", held?.state ?? "absent", false) : step("release", held?.state ?? "absent", held?.token === token);
+    if (to === "absent" && held) this.#seen.delete(key);
+    return Promise.resolve(to === "absent" && held !== undefined);
   }
 }
 
@@ -245,7 +241,8 @@ export const SQL = {
   sweepWindows: `DELETE FROM billing_window WHERE ctid IN (SELECT ctid FROM billing_window WHERE started <= now() - interval '${WINDOW_KEEP_S} seconds' LIMIT 100)`,
   seen: `SELECT 1 AS seen FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
   remember: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), '${target("remember", "absent")}')
-    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${target("remember", "claimed")}'`,
+    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${target("remember", "claimed")}'
+    WHERE billing_seen.state IN (${fromStates("remember", "done")}) RETURNING 1 AS remembered`,
   // One statement takes a row nobody holds: absent, or its lease (or memory) ended. The token is the row's
   // expires as text, microseconds and all: a client's Date would round it to milliseconds.
   claim: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), '${target("claim", "absent")}')
@@ -256,8 +253,8 @@ export const SQL = {
     WHERE kind = $1 AND id = $2 AND state = '${CLAIMED}' AND expires > now() AND expires::text = $3::text RETURNING 1 AS completed`,
   // With a token, only the holder's live claim is released (the declaration's release); without, the row goes.
   // The declared release (holder's token, a live claim) and invalidation (a finished row only).
-  forget: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND $3::text IS NOT NULL AND state IN (${fromStates("release")}) AND expires > now() AND expires::text = $3::text`,
-  invalidate: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND state IN (${fromStates("invalidate")})`,
+  forget: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND $3::text IS NOT NULL AND state IN (${fromStates("release")}) AND expires > now() AND expires::text = $3::text RETURNING 1 AS released`,
+  invalidate: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND state IN (${fromStates("invalidate")}) RETURNING 1 AS invalidated`,
   // The declared expiry: rows whose time ended, in the states `expire` names, a bounded few at a time.
   sweepSeen: `DELETE FROM billing_seen WHERE ctid IN (SELECT ctid FROM billing_seen WHERE expires <= now() AND state IN (${fromStates("expire")}) LIMIT ${SWEEP})`,
 };
@@ -321,6 +318,7 @@ export class PostgresStore implements Store {
   }
   async remember(kind: string, id: string, ttlMs: number): Promise<void> {
     await this.sql.unsafe(SQL.sweepSeen);
+    // One conditional statement; the declaration lets a remember find any state, so it always lands.
     await this.sql.unsafe(SQL.remember, [kind, id, ttlMs]);
   }
   async claim(kind: string, id: string, leaseMs: number): Promise<Claim> {
@@ -338,8 +336,9 @@ export class PostgresStore implements Store {
   async complete(kind: string, id: string, token: string, ttlMs: number): Promise<boolean> {
     return (await this.sql.unsafe(SQL.complete, [kind, id, token, ttlMs])).length > 0;
   }
-  async forget(kind: string, id: string, token?: string): Promise<void> {
-    await this.sql.unsafe(token === undefined ? SQL.invalidate : SQL.forget, token === undefined ? [kind, id] : [kind, id, token]);
+  async forget(kind: string, id: string, token?: string): Promise<boolean> {
+    // One conditional statement: a stale holder, or a row in the wrong state, deletes nothing and says so.
+    return (await this.sql.unsafe(token === undefined ? SQL.invalidate : SQL.forget, token === undefined ? [kind, id] : [kind, id, token])).length > 0;
   }
 }
 

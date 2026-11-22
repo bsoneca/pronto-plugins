@@ -7,6 +7,7 @@
 // through that gateway, by functions billing_spec's migration made.
 import { brokerKeys, verifyEntitlement } from "./entitlement.ts";
 import { readCapped, Refused } from "./shared.ts";
+import { RULES } from "./rules.ts";
 
 export interface Settings {
   /** The app's own origin: its tenant at the broker. */
@@ -372,6 +373,21 @@ export function service(s: Settings) {
     }
   }
 
+  // The route probe's own meter, ahead of any lookup: calls a minute for each client and for all of them, in this process.
+  const routeSeen = new Map<string, { n: number; at: number }>();
+  function routeTaken(client: string): boolean {
+    const t = Date.now();
+    const take = (key: string, per: number): boolean => {
+      let held = routeSeen.get(key);
+      if (!held || t - held.at >= 60_000) held = { n: 0, at: t };
+      routeSeen.delete(key);
+      routeSeen.set(key, held);
+      if (routeSeen.size > 10_000) routeSeen.delete(routeSeen.keys().next().value!);
+      return ++held.n <= per;
+    };
+    return take(`client ${client}`, RULES.routeLimits.perClient) && take("all", RULES.routeLimits.global);
+  }
+
   const handler = async function handler(req: Request): Promise<Response> {
     const path = new URL(req.url).pathname;
     try {
@@ -410,8 +426,13 @@ export function service(s: Settings) {
       // account, nothing read or written, and no call to Stripe (the broker's /route runs its real route selection
       // and stops there). A production scenario asserts {door: true, transport: "door"} once the flag is on.
       if (req.method === "GET" && path === "/billing/route") {
+        // Off until its flag: absent (404) unless the door flag is configured and evaluates true for no one.
+        if (!s.doorFlag) return json(404, { error: "not found" });
+        // The limiter comes first: an anonymous probe is metered before it reaches flagd or the broker.
+        if (!routeTaken(req.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() || "")) return json(429, { error: "too many requests; try again in a minute" });
         // The usual 502 for a lookup that fails, before the broker is asked.
         const door = await doorOn(undefined, null);
+        if (door !== true) return json(404, { error: "not found" });
         const res = await toBroker("/route", {}, null, { door });
         if (!res.ok) return res;
         const { transport } = await res.json() as { transport?: unknown };
@@ -431,7 +452,7 @@ export function service(s: Settings) {
   // One try at the grants, as the loop makes it: a success clears the error /billing/health reports, a
   // failure no wait can mend sets it, so a revoked grant never stays effective on a healthy-looking
   // deployment. The loop retries either way, so a corrected flag push recovers with no deploy.
-  let grantsError: string | null = null, served = false, waiting = false, lastStrict = false;
+  let grantsError: string | null = null, served = false, waiting = false, lastStrict: boolean | undefined;
   // False when the grants were not written. With the strict flag on: a "wait" (a neighbour not up yet, inside the
   // startup window) is quiet, a "fail" is logged and turns /billing/health 503, and neither stops the loop
   // (grantsLoop). Otherwise the earlier behaviour: the failure is logged by grantLog and health stays as it was.
@@ -439,8 +460,10 @@ export function service(s: Settings) {
     // A flagd that cannot say keeps the mode the last answer gave: a failed flag read is not a way out of the strict
     // mode, and so never clears the error it holds. Only a flag that answers false leaves it.
     const answer = await strictAnswer();
-    const strict = answer ?? lastStrict;
-    lastStrict = strict;
+    // With no answer yet to keep, a configured strict flag counts as on: a failed first lookup never leaves a failed
+    // grants write healthy. Unset, it is the earlier behaviour.
+    const strict = answer ?? lastStrict ?? Boolean(s.strictFlag);
+    if (answer !== undefined) lastStrict = answer;
     if (answer === false) grantsError = null;
     try {
       await grant(strict);

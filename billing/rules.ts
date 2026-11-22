@@ -100,5 +100,9 @@ export const RULES = {
     "perClient": 30,
     "global": 120,
     "bodyMax": 4096
+  },
+  "bodyLimits": {
+    "request": 4096,
+    "webhook": 262144
   }
 } as const;

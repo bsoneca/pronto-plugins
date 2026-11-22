@@ -79,7 +79,7 @@ export async function newSigningKey(): Promise<string> {
 }
 
 async function body(req: Request): Promise<Record<string, unknown>> {
-  const text = await readCapped(req.body, 4096, req.headers.get("content-length"));
+  const text = await readCapped(req.body, RULES.bodyLimits.request, req.headers.get("content-length"));
   if (text === null) return {};
   if ((req.headers.get("content-type") ?? "").startsWith("application/json")) {
     try {
@@ -607,7 +607,7 @@ export async function broker(p: {
   }
 
   async function webhook(req: Request): Promise<Response> {
-    const payload = await readCapped(req.body, 262_144, req.headers.get("content-length"));
+    const payload = await readCapped(req.body, RULES.bodyLimits.webhook, req.headers.get("content-length"));
     if (payload === null) return json(413, { error: "too large" });
     if (!(await webhookSigned(p.webhookSecret, payload, req.headers.get("stripe-signature")))) return json(400, { error: "signature" });
     const event = JSON.parse(payload) as { id: string; type: string; data: { object: Subscription & { customer: string } } };
@@ -736,13 +736,25 @@ export function twoModes(p: {
     let tenant: unknown = null;
     if (req.method === "GET" && path === "/onboarded") tenant = url.searchParams.get("tenant");
     else if (req.method === "POST" && ["/checkout", "/trial/offer", "/trial/checkout", "/portal", "/resync", "/onboard", "/probe", "/route"].includes(path)) {
+      // The body limit is enforced here first (rules.cue's bodyLimits), before a broker is picked: a body past it
+      // is refused whole, never read to the end to find a tenant.
+      const limit = path === "/route" ? RULES.routeLimits.bodyMax : RULES.bodyLimits.request;
+      const text = await readCapped(req.clone().body, limit, req.headers.get("content-length"));
+      if (text === null) {
+        await req.body?.cancel();
+        return json(413, { error: "too large" });
+      }
       try {
-        tenant = (await req.clone().json())?.tenant;
+        tenant = JSON.parse(text)?.tenant;
       } catch {
         tenant = null;
       }
     } else if (req.method === "POST" && path === "/stripe") {
-      const payload = await req.clone().text();
+      const payload = await readCapped(req.clone().body, RULES.bodyLimits.webhook, req.headers.get("content-length"));
+      if (payload === null) {
+        await req.body?.cancel();
+        return json(413, { error: "too large" });
+      }
       const sandboxSigned = await webhookSigned(p.sandboxWebhookSecret, payload, req.headers.get("stripe-signature"));
       return (sandboxSigned ? p.sandbox : p.live)(req, info);
     }

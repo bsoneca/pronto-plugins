@@ -608,16 +608,22 @@ Deno.test("a strict flag that answers false leaves the strict mode and its error
 });
 
 Deno.test("GET /billing/route asks the broker for the transport of the door word evaluated for no one, and answers it", async () => {
-  for (const [door, word, transport] of [[true, true, "door"], [false, false, "direct"]] as const) {
+  for (const [door, word, transport] of [[true, true, "door"]] as const) {
     const t = trialStage({ door: () => Response.json({ value: door }) });
     const res = await t.make({ doorFlag: "stripe_door" })(new Request("https://a.example/billing/route"));
     eq([res.status, await res.json()], [200, { ok: true, door: word, transport }], `door ${door}`);
     eq(t.doorAsks.map((a) => [a.auth, a.account]), [[null, null]], "asked as no one: no session, no account");
     eq(t.broker, [{ path: "/route", body: { tenant: "https://a.example", door: word } }], "the broker is asked, with the door word");
   }
+  // Off until its flag: no door flag configured, or the flag off for no one, is 404 and the broker is never asked.
   const unset = trialStage();
-  const res = await unset.make()(new Request("https://a.example/billing/route"));
-  eq(await res.json(), { ok: true, door: null, transport: "direct" }, "no door flag: door null");
+  const none = await unset.make()(new Request("https://a.example/billing/route"));
+  eq([none.status, unset.broker.length, unset.doorAsks.length], [404, 0, 0], "unset flag: absent, nothing asked");
+  await none.body?.cancel();
+  const off = trialStage({ door: () => Response.json({ value: false }) });
+  const gone = await off.make({ doorFlag: "stripe_door" })(new Request("https://a.example/billing/route"));
+  eq([gone.status, off.broker.length], [404, 0], "flag off: absent");
+  await gone.body?.cancel();
 });
 
 Deno.test("GET /billing/route with a failed door lookup is a 502 and the broker is not asked", async () => {
@@ -644,4 +650,36 @@ Deno.test("a configured strict flag that cannot be asked fails a trial request i
   }
   const unset = trialStage({ strict: () => new Response("", { status: 500 }) });
   eq((await unset.ask(unset.make(), "/billing/trial")).status, 200, "no strict flag configured: nothing is asked");
+});
+
+Deno.test("GET /billing/route meters an anonymous probe before it reaches flagd or the broker", async () => {
+  const t = trialStage();
+  const svc = t.make({ doorFlag: "stripe_door" });
+  const get = () => svc(new Request("https://a.example/billing/route", { headers: { "x-forwarded-for": "9.9.9.9" } }));
+  const statuses: number[] = [];
+  for (let i = 0; i < 31; i++) {
+    const r = await get();
+    statuses.push(r.status);
+    await r.body?.cancel();
+  }
+  eq([statuses.filter((x) => x === 200).length, statuses.at(-1)], [30, 429], "30 a client a minute, then refused");
+  eq([t.doorAsks.length, t.broker.length], [30, 30], "the refused one reached neither flagd nor the broker");
+});
+
+Deno.test("a failed first strict-flag lookup, with a grants error outstanding, is strict: health stays 503; unset stays legacy", async () => {
+  const fetcher = ((input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "http://crud/rpc/billing_grant") return Promise.resolve(Response.json({ code: "22P02" }, { status: 400 }));
+    if (url.endsWith("/billing_strict")) return Promise.resolve(new Response("", { status: 500 }));
+    return Promise.resolve(Response.json({ value: "[]" }));
+  }) as typeof fetch;
+  const base = { origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), flags: "http://flagd:8693", fetcher };
+  const strict = service({ ...base, strictFlag: "billing_strict" });
+  await quiet(async () => {
+    eq(await strict.attempt(1000), false);
+    eq((await strict(new Request("https://a.example/billing/health"))).status, 503, "no previous answer: counted as strict");
+    const legacy = service(base);
+    eq(await legacy.attempt(1000), false);
+    eq((await legacy(new Request("https://a.example/billing/health"))).status, 200, "no strict flag configured: legacy");
+  });
 });
