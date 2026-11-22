@@ -29,7 +29,7 @@
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import process from "node:process";
 import { causes, outcomes } from "./causes.js";
-import { appendWhy, mutates, lockAcquire, lockRelease, previewRecordStop, previewRecorded, previewRecord, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit } from "./cron.js";
+import { appendWhy, mutates, lockAcquire, lockRelease, previewRecordStop, previewRecorded, previewRecord, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit, fetchWait } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -60,6 +60,17 @@ const must = (cmd: string, args: string[], cwd?: string, env: Record<string, str
   const r = sh(cmd, args, cwd, env, seconds);
   if (!r.ok) throw new Error(`${cmd} ${args.join(" ")}${cwd ? ` (in ${cwd})` : ""}: ${r.err || r.out}`);
   return r.out;
+};
+// A fetch of origin into the bare repository `repo`, tried again when it loses a ref's lock (PRONTO-704: three
+// sites fetch, and a lock another git holds for a moment failed a run, or a bisect's halt check). `args` are the
+// fetch's own (default: all of origin); `seconds` the alarm of each try. Any other failure is returned at once.
+const fetchOrigin = (repo: string, args: string[] = [], seconds = 300) => {
+  for (let n = 1;; n++) {
+    const r = sh("git", remote(["--git-dir", repo, "fetch", "-q", "origin", ...args]), undefined, {}, seconds);
+    const wait = r.ok ? null : fetchWait(n, r.err);
+    if (wait === null) return r;
+    lockIo.sleep(wait * 1000);
+  }
 };
 // git's arguments for a call that reaches origin. Under CD the job's runner has no user session, so
 // the system's osxkeychain helper fails with -25308 (PRONTO-883): with GH_TOKEN set, a request to https://github.com
@@ -238,7 +249,7 @@ if (verb === "bisect") {
   const runHolder = () => { try { return Number(Deno.readTextFileSync(`${state}/lock/pid`)); } catch { return 0; } };
   const starter = Number(Deno.env.get("RELEASE_CRON_BISECT_BY") ?? 0);
   const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], here);
-  must("git", remote(["--git-dir", repo, "fetch", "-q", "origin"]));
+  { const f = fetchOrigin(repo); if (!f.ok) throw new Error(`git fetch origin: ${f.err || f.out}`); }
   const slug = must("git", ["--git-dir", repo, "remote", "get-url", "origin"]).replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1");
   const { gcp: g, cron } = config(top);
   const gcpName = g?.name as string | undefined;
@@ -306,7 +317,7 @@ if (verb === "bisect") {
   const halt = () => {
     const h = runHolder();
     const after = jsonl(`${state}/runs.jsonl`).slice(at + 1).find((r) => r.outcome === outcomes.released && r.commit);
-    sh("git", remote(["--git-dir", repo, "fetch", "-q", "origin"]), undefined, {}, 120);
+    fetchOrigin(repo, [], 120);
     const since = (sh("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H", `${failed.commit}..origin/main`], undefined, {}, 60).out ?? "").split("\n").filter(Boolean).reverse();
     return stopsBisect(h, starter, h > 0 && sh("kill", ["-0", String(h)]).ok, after?.commit ?? null, fixedBy(since, sig, evidence()));
   };
@@ -510,7 +521,7 @@ if (verb === "bisect") {
 const ref = Deno.env.get("RELEASE_CRON_REF") ?? "origin/main";
 function worktree() {
   const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], exists(wt) ? wt : here);
-  must("git", remote(["--git-dir", repo, "fetch", "-q", "origin"]));
+  { const f = fetchOrigin(repo); if (!f.ok) throw new Error(`git fetch origin: ${f.err || f.out}`); }
   if (!exists(`${wt}/.git`)) must("git", ["--git-dir", repo, "worktree", "add", "-q", "--detach", wt, ref]);
   must("git", ["checkout", "-q", "--detach", "-f", ref], wt);
   // Clean as main is; what git ignores (builds, caches) is kept, as in any checkout.
