@@ -374,3 +374,21 @@ cases: "a production step of the flag a flip tests runs and asks nothing": {
 		{call: "harness.gate", args: [{on: "production", flag: "f"}, {place: "production", flip: "f"}], expect: {run: true, asked: []}},
 	]
 }
+
+// A production scenario's one non-GET call: a flag's evaluation (an anonymous POST to /ofrep/v1/evaluate/flags/<name> with only its
+// context), which reads and writes nothing; every other write stays barred (bsoneca/pronto#1600: a flip's check of an enabled flag).
+cases: "a production scenario may evaluate a flag by POST and make no other write": {
+	suite: "harness"
+	steps: [
+		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/preview_pointer_lock", anon: true, body: {context: {}}, expect: {status: 200, json: {value: true}}}}]], expect: null, why: "an anonymous flag evaluation with its context is a read"},
+		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/f", anon: true, expect: {status: 200}}}]], expect: null, why: "and needs no body"},
+		{call: "harness.productionRefused", args: [[{http: {method: "GET", path: "/anything", anon: true, expect: {status: 200}}}]], expect: null, why: "a GET is as before"},
+		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/crud/rpc/billing_grant", anon: true, body: {context: {}}, expect: {status: 200}}}]], matches: "_writes", why: "any other POST is still a write"},
+		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/f/../../crud/x", anon: true, expect: {status: 200}}}]], matches: "_writes", why: "a path that climbs out of the flag's is another POST"},
+		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/f?x=1", anon: true, expect: {status: 200}}}]], matches: "_writes", why: "no query"},
+		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/f", expect: {status: 200}}, by: "a"}]], matches: "_writes", why: "a signed-in evaluation is another session's"},
+		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/f", anon: true, body: {context: {}, extra: 1}, expect: {status: 200}}}]], matches: "_writes", why: "nothing in the body but the context"},
+		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/f", anon: true, headers: {authorization: "Bearer x"}, expect: {status: 200}}}]], matches: "_writes", why: "no header of its own"},
+		{call: "harness.productionRefused", args: [[{http: {method: "PUT", path: "/ofrep/v1/evaluate/flags/f", anon: true, expect: {status: 200}}}]], matches: "_writes", why: "only POST"},
+	]
+}
