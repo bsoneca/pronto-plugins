@@ -21,6 +21,7 @@ _flakes:     _ @embed(file="files/tests/scenarios/flakes.ts", type=text)
 _verdict:    _ @embed(file="files/tests/scenarios/verdict.ts", type=text)
 _load:       _ @embed(file="files/tests/scenarios/load.ts", type=text)
 _slow:       _ @embed(file="files/tests/slow.ts", type=text)
+_upgrade:    _ @embed(file="files/tests/gate/upgrade-from-released.ts", type=text)
 
 #Host: H={
 	// Whether the app runs scenarios (tests/scenarios.ts): only then does it get their runner, schema,
@@ -34,6 +35,7 @@ _slow:       _ @embed(file="files/tests/slow.ts", type=text)
 		"tests/unit/schema.cue": {seed: false, text: _schema}
 		"tests/browser.ts": {seed: false, text: _browser}
 		"tests/lint.ts": {seed: false, text: _lint}
+		"tests/gate/upgrade-from-released.ts": {seed: false, text: _upgrade}
 		if H.scenarios {
 			"tests/scenarios.ts": {seed: false, text: _runner}
 			"tests/scenarios/schema.cue": {seed: false, text: _scenSchema}
