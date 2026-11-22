@@ -611,3 +611,113 @@ cases: "the pool's lock is retried only while another chooser holds it": {
 		{get: "free", expect: "ran", why: "a free lock runs the function"},
 	]
 }
+
+// PRONTO-892 (Codex on bsoneca/pronto#1520, slot.ts).
+cases: "a job whose reservation cannot be rewritten fails, stopping its command before it gives its claim back": {
+	suite: "machine"
+	steps: [
+		{call: "machine.samplerFails"},
+		{keep: "r"},
+		{get: "code", expect: 125, why: "the sampler's failure is the job's, not swallowed as a released record"},
+		{use: "r"},
+		{get: "said", expect: true},
+		{use: "r"},
+		{get: "stoppedEarly", expect: true, why: "the command, which sleeps 25 s, was stopped"},
+		{use: "r"},
+		{get: "childGone", expect: true},
+	]
+}
+cases: "a claim reaps only the run folders runDir made: directories of this account, named whole, with a dead pid": {
+	suite: "machine"
+	steps: [
+		{call: "machine.runFoldersReaped"},
+		{keep: "r"},
+		{get: "dir", expect: "reaped"},
+		{use: "r"},
+		{get: "gate", expect: "reaped"},
+		{use: "r"},
+		{get: "backup", expect: "kept", why: "gate.backup.<pid> is no run folder: a pid is read from its one place only"},
+		{use: "r"},
+		{get: "extra", expect: "kept"},
+		{use: "r"},
+		{get: "short", expect: "kept"},
+		{use: "r"},
+		{get: "live", expect: "kept", why: "its pid lives"},
+		{use: "r"},
+		{get: "file", expect: "kept", why: "a file named like a run folder is not one"},
+		{use: "r"},
+		{get: "link", expect: "kept", why: "nor is a link"},
+	]
+}
+cases: "a run folder's pid is read from its one place in a name in runDir's format": {
+	suite: "machine"
+	steps: [
+		{call: "machine.runPids"},
+		{keep: "r"},
+		{get: "slot_123_0123456789abcdef", expect: 123},
+		{use: "r"},
+		{get: "gate_9_abcdef", expect: 9},
+		{use: "r"},
+		{get: "rehearse_55_89abcdef01", expect: 55},
+		{use: "r"},
+		{get: "gate_backup_123", expect: null},
+		{use: "r"},
+		{get: "slot_123", expect: null},
+		{use: "r"},
+		{get: "slot_123_x_y", expect: null},
+		{use: "r"},
+		{get: "slot_123_abc", expect: null},
+		{use: "r"},
+		{get: "x_slot_123_abcdef", expect: null},
+		{use: "r"},
+		{get: "slot_12a_abcdef", expect: null},
+		{use: "r"},
+		{get: "slot_123_ABCDEF", expect: null},
+	]
+}
+cases: "a top-level cue claim reserves behind a weighted ticket blocked on stack weight; only a nested claim passes it": {
+	suite: "machine"
+	steps: [
+		{call: "machine.cueReserved"},
+		{keep: "r"},
+		{get: "topLevel", expect: ["blocked", "plain"], why: "an unrelated job must not take the memory reserved for the older evaluation"},
+		{use: "r"},
+		{get: "nested", expect: ["plain"], why: "the work a holder above it needs to finish: the exception"},
+		{use: "r"},
+		{get: "topLevelRelease", expect: ["plain"], why: "a release claim never waits behind an ordinary weighted ticket"},
+		{use: "r"},
+		{get: "topLevelAdmitted", expect: false, why: "40 GB beside the blocked ticket's 30 and the plain one's 4 does not fit 64"},
+		{use: "r"},
+		{get: "nestedAdmitted", expect: true},
+	]
+}
+cases: "the cue memory budget defaults to half the machine's memory, and to one evaluation at a time where that cannot be read": {
+	suite: "machine"
+	steps: [
+		{call: "machine.cueMemDefaults"},
+		{keep: "r"},
+		{get: "g128", expect: 64},
+		{use: "r"},
+		{get: "g36", expect: 18},
+		{use: "r"},
+		{get: "g8", expect: 4},
+		{use: "r"},
+		{get: "unknown", expect: 0.001, why: "a budget only the oldest claim fits in"},
+		{use: "r"},
+		{get: "zero", expect: 0.001},
+		{use: "r"},
+		{get: "nan", expect: 0.001},
+	]
+}
+cases: "the pool's lock a minute old is reclaimed only once its owner is gone": {
+	suite: "machine"
+	steps: [
+		{call: "machine.choosingStale"},
+		{keep: "r"},
+		{get: "live", expect: "held", why: "a chooser slow on a long queue still holds it: the wait is bounded here, the lock is not taken"},
+		{use: "r"},
+		{get: "dead", expect: "ran"},
+		{use: "r"},
+		{get: "none", expect: "ran", why: "no owner to verify (an older copy made it): by age, as before"},
+	]
+}

@@ -569,3 +569,81 @@ export async function keeperDecides() {
     unreadable: keeperDecision({ errno: 1 }, 900),
   };
 }
+
+// PRONTO-892 (Codex on bsoneca/pronto#1520, slot.ts).
+// A job whose reservation record cannot be rewritten while its command runs (the command makes it unreadable, as a full disk or a permission
+// would): the job fails (125), says why, the command is stopped before the job ends, and it does not run to its end. The command holds more
+// than the 0.01 GB it claimed, so the sampler has a record to rewrite.
+export async function samplerFails() {
+  const tmp = await sh("mktemp -d");
+  try {
+    await sh(`mkdir '${tmp}/pool'`);
+    const script = `const d = Deno.env.get("STACK_POOL") + "/job-" + Deno.env.get("STACK_JOB"); Deno.writeTextFileSync(${JSON.stringify(`${tmp}/child`)}, String(Deno.pid)); Deno.removeSync(d + "/weight"); Deno.mkdirSync(d + "/weight"); const a = new Uint8Array(300e6).fill(1); await new Promise((r) => setTimeout(r, 25000)); console.log(a.length);`;
+    const t0 = Date.now();
+    const o = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", "--no-config", "--no-lock", slotUrl, "--mem", "0.01", "--what", "sampler", "--", Deno.execPath(), "eval", "--no-config", "--no-lock", script],
+      env: { STACK_POOL: `${tmp}/pool`, CUE_MIN_FREE_PCT: "0" }, stdout: "piped", stderr: "piped", signal: AbortSignal.timeout(60_000),
+    }).output().catch(() => undefined);
+    const secs = (Date.now() - t0) / 1000;
+    const child = Number(await sh(`cat '${tmp}/child' 2>/dev/null`)) || 0;
+    return {
+      code: o?.code ?? -1,
+      said: /memory reservation could not be kept true/.test(decode(o?.stderr ?? new Uint8Array())),
+      stoppedEarly: secs < 20,
+      childGone: child > 0 && await until(() => gone(child), 5000),
+    };
+  } finally { await sh(`rm -rf '${tmp}'`); }
+}
+// The run folders a claim reaps: only directories of this account, named exactly <slot|gate|rehearse>.<pid>.<suffix>, with a dead pid and a
+// day's age. A file, a link, a folder with another pid position and one with a live pid are left; `reaped` is what is gone after a claim.
+export async function runFoldersReaped() {
+  const tmp = await sh("mktemp -d");
+  try {
+    const dead = 999999;
+    const names = { dir: `slot.${dead}.0123456789abcdef`, gate: `gate.${dead}.89abcdef01234567`, backup: `gate.backup.${dead}`, extra: `slot.${dead}.x.0123456789`, short: `slot.${dead}.abc`, live: `slot.${Deno.pid}.0123456789abcdef`, file: `slot.${dead}.fedcba9876543210`, link: `gate.${dead}.aaaaaaaaaaaaaaaa` };
+    await sh(`mkdir -p '${tmp}/runs' '${tmp}/pool' && cd '${tmp}/runs' && mkdir '${names.dir}' '${names.gate}' '${names.backup}' '${names.extra}' '${names.short}' '${names.live}' && : > '${names.file}' && ln -s '${names.dir}' '${names.link}' && touch -t 202001010000 '${names.dir}' '${names.gate}' '${names.backup}' '${names.extra}' '${names.short}' '${names.live}' '${names.file}' && touch -h -t 202001010000 '${names.link}'`);
+    await new Deno.Command(Deno.execPath(), { args: ["run", "-A", "--no-config", "--no-lock", slotUrl, "--weight", "1", "--what", "reap", "--", "true"], env: { STACK_POOL: `${tmp}/pool`, STACK_RUNS: `${tmp}/runs` }, stdout: "null", stderr: "null", signal: AbortSignal.timeout(60_000) }).output().catch(() => undefined);
+    const left = (await sh(`ls '${tmp}/runs'`)).split("\n");
+    return Object.fromEntries(Object.entries(names).map(([k, n]) => [k, left.includes(n) ? "kept" : "reaped"]));
+  } finally { await sh(`rm -rf '${tmp}'`); }
+}
+// The run folder's name, read only as a whole in runDir's format.
+export async function runPids() {
+  const { runPid } = await import("../../harness/files/tests/slot.ts");
+  return Object.fromEntries(["slot.123.0123456789abcdef", "gate.9.abcdef", "rehearse.55.89abcdef01", "gate.backup.123", "slot.123", "slot.123.x.y", "slot.123.abc", "x.slot.123.abcdef", "slot.12a.abcdef", "slot.123.ABCDEF"].map((n) => [n.replaceAll(".", "_"), runPid(n) ?? null]));
+}
+// Which older tickets a cue claim reserves memory behind: a top-level claim all of them, a nested claim only those a holder above it
+// does not make wait (olderKeeps' leave-outs). `blocked` is a weighted ticket whose stack weight is not admitted.
+export async function cueReserved() {
+  const slot = await import("../../harness/files/tests/slot.ts");
+  const blocked = { name: "blocked", weighted: true, weight: 9, release: false, mem: 30 }, plain = { name: "plain", weighted: false, weight: 0, release: false, mem: 4 };
+  const inLine = [blocked, plain], older = [plain];
+  const names = (l) => l.map((t) => t.name);
+  return {
+    topLevel: names(slot.cueReserves(inLine, older, false, false)),
+    nested: names(slot.cueReserves(inLine, older, true, false)),
+    topLevelRelease: names(slot.cueReserves(inLine, older, false, true)),
+    // the memory an unrelated top-level claim of 40 GB finds free on a 64 GB budget with nothing held, as the poll judges it
+    topLevelAdmitted: slot.memAdmits(0, slot.cueReserves(inLine, older, false, false).reduce((n, o) => n + o.mem, 0), 40, 64),
+    nestedAdmitted: slot.memAdmits(0, slot.cueReserves(inLine, older, true, false).reduce((n, o) => n + o.mem, 0), 40, 64),
+  };
+}
+// The default cue memory budget: half the physical memory in GB, or one evaluation at a time where it cannot be read.
+export async function cueMemDefaults() {
+  const { cueMemDefault } = await import("../../harness/files/tests/slot.ts");
+  const GiB = 2 ** 30;
+  return { g128: cueMemDefault(128 * GiB), g36: cueMemDefault(36 * GiB), g8: cueMemDefault(8 * GiB), unknown: cueMemDefault(undefined), zero: cueMemDefault(0), nan: cueMemDefault(NaN) };
+}
+// The pool's lock is reclaimed after a minute only once its owner is verified gone: a live owner's stays (the call waits, bounded), a dead owner's
+// and one with no owner file (an older copy made it) are reclaimed.
+export async function choosingStale() {
+  const tmp = await sh("mktemp -d");
+  const sleeper = new Deno.Command("sleep", { args: ["60"] }).spawn();
+  try {
+    const mk = async (name, pid) => { await sh(`mkdir -p '${tmp}/${name}/.choosing'; ${pid === null ? "" : `echo ${pid} > '${tmp}/${name}/.choosing/pid';`} touch -t 202001010000 '${tmp}/${name}/.choosing'`); };
+    await mk("live", sleeper.pid); await mk("dead", 999999); await mk("none", null);
+    const body = `console.log(await s.choosing(async () => "ran"))`;
+    const took = (r) => r === "ran" ? "ran" : "held";
+    return { live: took(await inPool(`${tmp}/live`, body, 3000)), dead: took(await inPool(`${tmp}/dead`, body, 15_000)), none: took(await inPool(`${tmp}/none`, body, 15_000)) };
+  } finally { try { sleeper.kill("SIGKILL"); } catch { /* gone */ } await sh(`rm -rf '${tmp}'`); }
+}

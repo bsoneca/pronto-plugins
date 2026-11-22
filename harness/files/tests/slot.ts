@@ -87,12 +87,14 @@
 //   behind it for about one minute of work, on a 128 GB Mac whose learned peaks are p95 0.5 GB, p99
 //   2.2 GB, largest 26.7 GB). A job that names --mem <GB> (the cue wrapper, machine/cue: an evaluation
 //   of up to tens of GB; 21 at once ran macOS out of memory on 2026-11-05) claims that memory from a
-//   budget of its own, CUE_MEM_GB (64), and --cores-claim <n> of CUE_CORES (every core but
+//   budget of its own, CUE_MEM_GB (half the machine's memory; one evaluation at a time where that cannot be read), and --cores-claim <n> of CUE_CORES (every core but
 //   STACK_RESERVE): several evaluations run at once while their claims fit. The line is <pool>/cue-queue,
 //   nested or not, strictly first come first served: a claim is admitted when the memory held by the live
 //   holders, the memory reserved by every ticket older than its own and its own fit the budget, and the
 //   same for its cores; the oldest ticket is admitted on an empty pool whatever it claims. A small claim
-//   never passes a large one waiting ahead (no starvation). A holder's record is
+//   never passes a large one waiting ahead (no starvation). The one exception: a weighted ticket blocked on stack weight keeps its
+//   reserved memory against every top-level claim, and only a NESTED claim (the work a holder above it needs to finish before
+//   it frees the cores the ticket waits for) passes it (cueReserves, PRONTO-892). A holder's record is
 //   "<pid> <weight> cue mem=<GB> cores=<n>", its ticket "<weight> [nested=1 ]mem=<GB> cores=<n> <what>":
 //   a record or ticket without mem= (a copy of this file from before the budget) claims the whole of
 //   CUE_MEM_GB, which is the old lock. While the job runs it rewrites its record every second with
@@ -173,7 +175,12 @@ const asked = Number(Deno.env.get("STACK_SLOT") ?? "0");
 // The cue memory budget (GB) and cores (PRONTO-870): what the evaluations claimed through --mem and --cores-claim may add up to.
 // A value that is not a finite number above 0 is the default.
 const positive = (v: string | undefined, def: number) => { const n = v === undefined || v.trim() === "" ? NaN : Number(v); return Number.isFinite(n) && n > 0 ? n : def; };
-const cueMem = positive(Deno.env.get("CUE_MEM_GB"), 64);
+// The default cue memory budget is half the machine's physical memory (GB; CUE_MEM_GB overrides it). Where the memory cannot be read it is one
+// evaluation at a time (a budget no claim but the oldest fits in): never a number written for another machine.
+export const cueMemDefault = (totalBytes: number | undefined): number =>
+  totalBytes !== undefined && Number.isFinite(totalBytes) && totalBytes > 0 ? Math.max(0.1, Math.floor((totalBytes / 2 ** 30 / 2) * 10) / 10) : 0.001;
+const physicalMemory = (): number | undefined => { try { return Deno.systemMemoryInfo().total; } catch { return undefined; } };
+const cueMem = positive(Deno.env.get("CUE_MEM_GB"), cueMemDefault(physicalMemory()));
 // The machine's one-minute load, as release-cron reads it. A failed read throws with its cause: a claim a release holds
 // keeps moving its deadline, so a read that failed every poll would hold it through the whole release (PRONTO-1020).
 export function load1(read: () => number[] = () => Deno.loadavg()): number {
@@ -285,14 +292,19 @@ const runsBase = () => {
   if (!Deno.env.get("STACK_RUNS") && !home) throw new Error("slot: neither STACK_RUNS nor HOME is set, so a run folder has nowhere to live");
   return Deno.env.get("STACK_RUNS") ?? `${home}/.cache/pronto/stacks`;
 };
-// The run folders (<prefix>.<pid>.<suffix>) whose pid is dead and whose mtime (ms, in `mtimes`) is
-// older than keepMs: a failed launch's log is kept a day.
+// The pid a run folder's name carries, or undefined where the name is not one runDir makes: <slot|gate|rehearse>.<pid>.<suffix>, the whole
+// name, the pid read from its one designated component, the suffix runDir's (letters and digits). `gate.backup.123`, `slot.123.x.y` and
+// `slot.123` are not run folders, and nothing here ever reads a pid from anywhere else in a name.
+export const runPid = (name: string): number | undefined => {
+  const m = /^(?:slot|gate|rehearse)\.([0-9]+)\.[0-9a-z]{6,32}$/.exec(name);
+  return m ? Number(m[1]) : undefined;
+};
+// The run folders whose pid is dead and whose mtime (ms, in `mtimes`) is older than keepMs: a failed launch's log is kept a day.
+// Only folders runDir made (runPid) are ever reaped, wherever STACK_RUNS points.
 export function staleRuns(names: string[], isDead: (pid: number) => boolean, mtimes: Record<string, number>, now: number, keepMs: number): string[] {
-  // Only folders runDir made (slot., gate., rehearse.) are ever reaped, wherever STACK_RUNS points.
   return names.filter((name) => {
-    if (!/^(slot|gate|rehearse)\./.test(name)) return false;
-    const pid = name.split(".").slice(1).find((part) => /^\d+$/.test(part));
-    return pid !== undefined && isDead(Number(pid)) && (mtimes[name] ?? now) < now - keepMs;
+    const pid = runPid(name);
+    return pid !== undefined && isDead(pid) && (mtimes[name] ?? now) < now - keepMs;
   });
 }
 // Removes them; cheap, and never throws.
@@ -300,14 +312,18 @@ async function reapRuns(): Promise<void> {
   try {
     const base = runsBase(), names: string[] = [], mtimes: Record<string, number> = {};
     for await (const e of Deno.readDir(base)) {
+      // Folders only, of this account, never through a link: a file or a link named like a run folder is not one, and a shared STACK_RUNS holds
+      // other accounts' folders that are theirs to reap.
+      if (runPid(e.name) === undefined) continue;
+      const st = await Deno.lstat(`${base}/${e.name}`).catch(() => null);
+      if (!st || !st.isDirectory || st.isSymlink || (Deno.build.os !== "windows" && st.uid !== Deno.uid())) continue;
       names.push(e.name);
-      const m = (await Deno.stat(`${base}/${e.name}`).catch(() => null))?.mtime;
-      if (m) mtimes[e.name] = m.getTime();
+      if (st.mtime) mtimes[e.name] = st.mtime.getTime();
     }
     // Only a folder a day old is asked whether its pid lives (a `kill -0` each): fresh ones are kept anyway.
     const now = Date.now(), keep = 24 * 3600_000, old = names.filter((n) => (mtimes[n] ?? now) < now - keep);
     const dead = new Set<number>();
-    for (const pid of new Set(old.map((n) => Number(n.split(".").slice(1).find((part) => /^\d+$/.test(part)))))) {
+    for (const pid of new Set(old.map((n) => runPid(n)))) {
       if (pid && !await alive(pid)) dead.add(pid);
     }
     for (const name of staleRuns(old, (pid) => dead.has(pid), mtimes, now, keep)) {
@@ -588,6 +604,13 @@ export const parseTicket = (text: string) => {
 // them (memory they reserve while waiting for it was a deadlock). Eligible release and nested tickets stay.
 export const cueAhead = <T extends { weighted: boolean; release: boolean }>(older: T[], release: boolean) =>
   release ? older.filter((o) => !(o.weighted && !o.release)) : older;
+// The older tickets a cue claim reserves behind. `older` is the line without the weighted tickets whose cores would not be admitted now
+// (olderKeeps): the bypass that lets a nested claim, the work a holder above it needs to finish before that holder frees the cores
+// the ticket waits for, pass such a ticket (PRONTO-761, PRONTO-837). That is an exception for NESTED claims alone. A top-level claim
+// reserves behind every older ticket (`inLine`), the ones blocked on stack weight included: their memory is reserved for them, and an
+// unrelated job passing them would take it (PRONTO-892).
+export const cueReserves = <T extends { weighted: boolean; release: boolean }>(inLine: T[], older: T[], nested: boolean, release: boolean) =>
+  cueAhead(nested ? older : inLine, release);
 // A queue directory's entries; a directory not made yet (nobody has queued in the line) is empty, every other
 // failure to read it propagates: an unreadable queue is not an empty one, and work must not be admitted on it.
 export const readQueue = async (dir: string) => {
@@ -774,11 +797,16 @@ const listening = async (door: number, open: number[]) => {
 export const choosing = async <T>(f: () => Promise<T>): Promise<T> => {
   const lock = `${pool}/.choosing`;
   for (;;) {
-    try { Deno.mkdirSync(lock); break; } catch (e) {
+    try { Deno.mkdirSync(lock); Deno.writeTextFileSync(`${lock}/pid`, String(Deno.pid)); break; } catch (e) {
       if (!(e instanceof Deno.errors.AlreadyExists)) throw new Error(`slot: the pool's lock ${lock} cannot be made (${(e as Error).message})`);
     }
+    // A lock a minute old is the chooser's no more only once its owner is verified gone: a chooser slow on a long queue still holds it. One
+    // with no readable owner (its maker died between the mkdir and the write, or an older copy made it) is reclaimed by age alone, as it was.
     const age = Date.now() - ((await Deno.stat(lock).catch(() => undefined))?.mtime?.getTime() ?? Date.now());
-    if (age > 60_000) await Deno.remove(lock, { recursive: true }).catch(() => {});
+    if (age > 60_000) {
+      const owner = Number((await Deno.readTextFile(`${lock}/pid`).catch(() => "")).trim());
+      if (!(owner > 0) || !await alive(owner)) await Deno.remove(lock, { recursive: true }).catch(() => {});
+    }
     await new Promise((r) => setTimeout(r, 200));
   }
   try { return await f(); } finally { await Deno.remove(lock, { recursive: true }).catch(() => {}); }
@@ -1070,7 +1098,7 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       // beside the live holders and the tickets ahead): cue holders run side by side, so a claim that waits for
       // the budget reserves none, and one the budget admits holds its place on the cores' line, which is its
       // ticket's name, when it asked.
-      const cueOlder = cueAhead(older, release);
+      const cueOlder = cueReserves(inLine, older, nested, release);
       const cueFits = line === "cue" && memAdmits(memHeld, cueOlder.reduce((n, o) => n + o.mem, 0), mem, cueMem)
         && memAdmits(coresHeld, cueOlder.reduce((n, o) => n + o.cores, 0), cores, cueCores);
       if (dual) {
@@ -2013,6 +2041,9 @@ export type OwnOpts = {
   onSpawn?: (pid: number) => void;
   // How the caller stops its own run orderly (a stack's `down`), in place of the TERM to the root and its members.
   stop?: () => Promise<void>;
+  // Set by ownRun once it can be told: `control.stop(code)` ends the run as a signal would (the command and everything it started stopped, the
+  // run ending with `code`). For a caller that must stop its command from the inside (the job's memory sampler), and release its claim after.
+  control?: { stop?: (code: number) => void };
   // The root in a process group of its own (a signal to this process's group does not reach it).
   pgroup?: boolean;
   sys?: RealSys;
@@ -2046,6 +2077,7 @@ async function runPlain(cmd: string[], opts: OwnOpts, env: Record<string, string
     if (!gone) try { c.kill("SIGKILL"); } catch { /* gone */ }
   };
   for (const s of ["SIGINT", "SIGTERM", "SIGHUP"] as const) { const h = () => { stop(signalCode(s)); }; handlers.set(s, h); Deno.addSignalListener(s, h); }
+  if (opts.control) opts.control.stop = (code) => { void stop(code); };
   const timer = opts.timeoutMs ? setTimeout(() => { stop(124); }, opts.timeoutMs) : undefined;
   try {
     const st = await c.status;
@@ -2075,6 +2107,7 @@ export async function ownRun(cmd: string[], opts: OwnOpts = {}): Promise<OwnResu
   // From here, before anything is awaited, a signal is this owner's: one that comes before the root exists is acted on once it does.
   let begin: ((code: number) => void) | undefined, early = 0;
   let removeListeners = onStop((s) => { if (begin) begin(signalCode(s)); else early ||= signalCode(s); });
+  if (opts.control) opts.control.stop = (code) => { if (begin) begin(code); else early ||= code; };
   let root: Root | undefined, record: RunRecord | undefined, file = "", finished = false, stopCode = 0, pending = "";
   let timer: ReturnType<typeof setTimeout> | undefined, kill: ReturnType<typeof setTimeout> | undefined;
   const failed: string[] = [];
@@ -2258,6 +2291,18 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
     // A cue claim's record also says what it holds if that is more than it claimed, so the budget counts it at its real size.
     const record = `${held.dir}/weight`;
     let written = mem;
+    // The sampler keeps the reservation true to what the command holds. Only a record that is gone once the run is over (confirmed teardown)
+    // says it was released; any other failure (a full disk, a permission, a record gone while the command runs) leaves a smaller claim
+    // visible while the command occupies more, so others would be admitted against memory it holds: it is the job's failure. The command
+    // is stopped (control.stop) and its claim given back only after that (ownRun waits for what it started).
+    let samplerError: Error | undefined;
+    const control: { stop?: (code: number) => void } = {};
+    const sampleFailed = (e: unknown) => {
+      if (samplerError) return;
+      samplerError = e instanceof Error ? e : new Error(String(e));
+      console.error(`slot: ${what}: its memory reservation could not be kept true (${samplerError.message}): the command is stopped and its claim given back after it`);
+      control.stop?.(125);
+    };
     const sample = async () => {
       const r = await residentOf(childPid);
       if (!running) return;
@@ -2270,18 +2315,21 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
             await Deno.writeTextFile(`${record}.${Deno.pid}`, text.replace(/ mem=[0-9.]+/, ` mem=${want}`));
             if (running) { await Deno.rename(`${record}.${Deno.pid}`, record); written = want; } else await Deno.remove(`${record}.${Deno.pid}`);
           }
-        } catch { /* the record is gone: released */ }
+        } catch (e) {
+          if (e instanceof Deno.errors.NotFound && !running) return;
+          throw e;
+        }
       }
     };
     let inflight: Promise<void> = Promise.resolve();
-    const tick = () => { inflight = sample().catch(() => {}); };
+    const tick = () => { inflight = sample().catch(sampleFailed); };
     let sampler: ReturnType<typeof setInterval> | undefined;
     // The command runs as the root of a run this process owns: when it ends, so does everything it started. Its
     // weight is given back only once none of it is running (ownRun waits for that, and KILLs what ignores TERM).
     cpu = 0;
     owned = true;
     const ran = await ownRun(cmd, {
-      what, env: { STACK_JOB: String(Deno.pid) },
+      what, env: { STACK_JOB: String(Deno.pid) }, control,
       onSpawn: (pid) => {
         childPid = pid;
         // The process the claim runs, for a holder that outlives it (a stuck claim holds no memory after a minute).
@@ -2298,6 +2346,8 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
     slot.release();
     slot = undefined;
     status = { success: ran.code === 0, code: ran.code, signal: ran.signal === 9 ? "SIGKILL" : null };
+    // A sampler that failed fails the job, whatever the command's own end: its reservation was not true while it ran.
+    if (samplerError) status = { success: false, code: 125, signal: null };
     // A signal to this process ended the run (ownRun's 130, 129 or 124): the claim is given back above, and the code is the run's.
     if (mem > 0 && attempt === 1 && status.signal === "SIGKILL" && killedFor(ran.rootpid) === "pressure") {
       say(`${what}: the memory watchdog killed it under the machine's pressure at ${round(peak)} GB; in line again`);
