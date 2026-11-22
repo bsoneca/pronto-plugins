@@ -6,7 +6,7 @@ import type { Board, Comment, Cycle, Issue, Member, Named, NewIssue, State } fro
 import { askAgain } from "./flow.js";
 
 // An issue's fields the board's verbs read (board.ts): a list of issues asks for these alone.
-const LIGHT = "id,name,sequence_id,state,priority,updated_at,created_at,completed_at,labels";
+const LIGHT = "id,name,sequence_id,state,priority,updated_at,created_at,completed_at,labels,parent";
 const timeoutMs = () => Number(Deno.env.get("PLANE_TIMEOUT_MS") ?? "") || 30_000;
 
 export class Plane implements Board {

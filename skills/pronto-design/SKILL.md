@@ -6,7 +6,7 @@ description: "The product manager's session on the dev-flow board (Plane), in a 
 # pronto-design
 
 The team has product managers (devFlow.team.product in devflow/devflow.cue) who build nothing and
-take no slot: they design what the engineers will build (devflow/dev-flow.md, The team). A designed issue is simply **Ready**: it is in the queue (first in, first out) the moment it moves, and the engineers pull it in its turn (`pronto-sprint-plan` keeps the queue stocked). Moved through `pronto-devflow` (this plugin's `bin/pronto-devflow`, run
+take no slot: they design what the engineers will build (devflow/dev-flow.md, The team). A designed issue is simply **Ready**: it is in the queue (ordered by `queue.order`: oldest filed, or longest in Ready) the moment it moves, and the engineers pull it in its turn (`pronto-sprint-plan` keeps the queue stocked). Moved through `pronto-devflow` (this plugin's `bin/pronto-devflow`, run
 bare from the repository): never move an issue on the board by hand.
 
 ## Steps

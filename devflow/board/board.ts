@@ -22,6 +22,8 @@ export interface Issue {
   description_html?: string;
   module_ids?: string[];
   labels?: string[];
+  /** The id of the issue this one is a child of (a design's umbrella), when the board has the link. */
+  parent?: string | null;
   project?: string;
 }
 export interface Cycle extends Named { start_date: string | null; end_date: string | null }

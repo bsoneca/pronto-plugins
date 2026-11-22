@@ -5,9 +5,10 @@ description: "The lead's loop over the Ready queue of the dev-flow board (Plane)
 
 # pronto-sprint-plan
 
-The name stays; there are no sprints (the owner, 2026-11-17, PRONTO-658). Ready is a queue, first in,
-first out: an issue is in it from the moment it moves into Ready, each lane (engineer, SRE,
-architect) pulls the issue that has been Ready longest, and a bug at P1 or P0 jumps it. Everything on
+The name stays; there are no sprints (the owner, 2026-11-17, PRONTO-658). Ready is a queue ordered by
+the flow's `queue.order`: `filed` pulls the oldest filed first, `ready` the issue that has been Ready longest;
+each lane (engineer, SRE, architect) pulls the first of its own, a bug at a `queue.jump` priority (P1 or P0)
+jumps it, and a design's children sort at their umbrella's place when `queue.childrenAtUmbrella`. Everything on
 the board is work the owner wants built, so the queue needs no one's yes: the lead (this session)
 keeps it stocked, and the engineers pull from it. Everything here goes through `pronto-devflow`
 (this plugin's `bin/pronto-devflow`, on the PATH while the plugin is enabled), run bare from the

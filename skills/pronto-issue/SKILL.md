@@ -58,10 +58,10 @@ other.
 5b. **Pull the next one, always.** An idle engineer is money spent for nothing (the owner,
    2026-11-09), so the moment an issue leaves your hands (its pull request opens, or it is
    cancelled or abandoned) you start the next one in the same turn; you never end a turn idle
-   while the board has work. Ready is one queue, first in first out (the owner, 2026-11-17,
-   PRONTO-658). Review holds no slot. In this order:
+   while the board has work. Ready is one queue, ordered by the flow's `queue.order` (the owner, 2026-11-17,
+   PRONTO-658; PRONTO-1538). Review holds no slot. In this order:
    1. `pronto-devflow pull . [--lane SRE|architect]` (engineer by default): it starts the first issue of the lane's
-      Ready queue: a bug at P1 first, then the one that has been Ready longest.
+      Ready queue: a bug at a `queue.jump` priority (P1 or P0) first, then by `queue.order`: `filed` the oldest filed (a design's children at their umbrella's place when `queue.childrenAtUmbrella`), `ready` the one Ready longest.
    2. Nothing Ready: take the most urgent issue still in Refine in your lane
       (`pronto-devflow status .`, `open, Refine`) that no
       one else is refining and that waits on nothing the owner must do. Refine it yourself
