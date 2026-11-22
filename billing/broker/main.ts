@@ -21,7 +21,7 @@ import {
   firstChargeFailed, lookupKeyOf, manageTokenOf, ownerOf, parsePublished, type Plan, type Published, returnTo, same, type Subscription,
   tenantOf, trialOf, trialSpent,
 } from "./core.ts";
-import { type Routed, type Stripe, StripeError, webhookSigned } from "./stripe.ts";
+import { type Stripe, StripeError, transportUsed, webhookSigned } from "./stripe.ts";
 import { MemoryStore, type Store } from "./store.ts";
 import { RULES } from "../rules.ts";
 
@@ -344,13 +344,15 @@ export async function broker(p: {
     const account = accountOf(b.account);
     if (!t || !account) return json(400, { error: "tenant and account required" });
     if (!(await perClient(client)) || !(await perTenant(t))) return json(429, { error: "too many probes; try again in a minute" });
-    // Which way this read goes, as its tenant asked for its reader just now; `direct` is true only when
-    // the read went straight to Stripe, so a flip's check sees whether the door answered.
-    const route = await (p.stripe as Routed).route?.();
+    // `transport` is the way the read actually went ("direct" to Stripe, or through the "door"), as noted by
+    // the client that answered it; `direct` is its older word for the same, so a flip's check sees whether the
+    // door answered.
     await subscriptionsOf(await customersOf(t, account));
+    // The transport that actually answered the read, noted by the client that made it: never the request's word.
+    const transport = transportUsed();
     // `door` is the word the tenant sent for its reader (its flag), when it sent one, so a check sees
     // that the tenant asked even where the broker goes only one way (the stand-in).
-    return json(200, { ok: true, direct: route === "direct", ...(typeof b.door === "boolean" ? { door: b.door } : {}) });
+    return json(200, { ok: true, direct: transport === "direct", ...(transport ? { transport } : {}), ...(typeof b.door === "boolean" ? { door: b.door } : {}) });
   }
 
   async function checkout(req: Request, client: string): Promise<Response> {
@@ -546,6 +548,10 @@ export async function broker(p: {
       // tried again and then fails the event, which Stripe sends again: nothing is cancelled until the
       // invoice is known paid or void. A key without Invoices access (403) cannot know it: that is logged
       // loudly, for the operator to grant the permission, and the trial is cancelled anyway.
+      // Decided by the owner's lead 2026-11-22: a missing invoice permission never keeps a failed trial
+      // collectible or a player in a paid plan; review rounds that ask to stop here have been answered.
+      // The log line carries a stable token, `billing_alert=stripe_invoices_permission_missing`, for the
+      // alert rules (the shipper reads "error" as the level) to match.
       if (typeof fresh.latest_invoice === "string") {
         const invoice = fresh.latest_invoice;
         try {
@@ -554,7 +560,7 @@ export async function broker(p: {
           if (inv.status === "open") await invoiceCall(() => p.stripe("POST", `/v1/invoices/${invoice}/void`));
         } catch (e) {
           if (!(e instanceof StripeError && e.status === 403)) throw e;
-          console.error(`billing: error: the Stripe key has no Invoices permission (403): ${invoice} of ${event.id} is not voided; cancelling the failed trial anyway. Grant the restricted key Invoices write.`);
+          console.error(`billing: error: billing_alert=stripe_invoices_permission_missing the Stripe key has no Invoices permission (403): ${invoice} of ${event.id} is not voided; cancelling the failed trial anyway. Grant the restricted key Invoices write.`);
         }
       }
       await p.stripe("POST", `/v1/subscriptions/${event.id}`, { metadata: { trial_failed: "1" } }, `trial failed ${event.id}`);

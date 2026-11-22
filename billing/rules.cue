@@ -26,6 +26,21 @@ rules: {
 	trialStates: ["running", "cancelled", "converted", "ended", "failed"]
 	// Where a row of the broker's claim table stands: a claim in progress, or finished for good.
 	claimStates: ["claimed", "done"]
+	// What may happen to a Stripe event's row (store.ts claims it, one caller at a time, over every replica),
+	// declared once and read by both stores: an event (claim, complete, release, remember, expire), the state it
+	// finds ("absent" is no row, or none that is live), whether the caller must hold the row's current token, and
+	// the state it leaves. Anything not listed is refused: a live claim is busy to every other caller; done is
+	// terminal until its retention expires; a stale token completes or releases nothing.
+	claimTransitions: [
+		{event: "claim", from: "absent", token: "none", to: "claimed"},
+		{event: "complete", from: "claimed", token: "holder", to: "done"},
+		{event: "release", from: "claimed", token: "holder", to: "absent"},
+		{event: "remember", from: "absent", token: "none", to: "done"},
+		{event: "remember", from: "claimed", token: "none", to: "done"},
+		{event: "remember", from: "done", token: "none", to: "done"},
+		{event: "expire", from: "claimed", token: "none", to: "absent"},
+		{event: "expire", from: "done", token: "none", to: "absent"},
+	]
 }
 
 rules: {
@@ -36,4 +51,10 @@ rules: {
 	trial: {monthsMin: int & >=1, monthsMax: int & >=trial.monthsMin, remindDays: int & >=1}
 	trialStates: [...=~"^[a-z]+$"]
 	claimStates: [...=~"^[a-z]+$"]
+	claimTransitions: [...{
+		event: "claim" | "complete" | "release" | "remember" | "expire"
+		from:  "absent" | or(claimStates)
+		token: "none" | "holder"
+		to:    "absent" | or(claimStates)
+	}]
 }

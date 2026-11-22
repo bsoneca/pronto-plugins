@@ -222,6 +222,11 @@ export def main [
 	# (its login's Secret is made in the cluster, then the cluster starts).
 	manifests --database-only --domain $domain --sources (sources) --namespace $namespace --name $service | do $remote $"($kubectl) apply -f -" | print
 	do $remote $"($kubectl) wait --for=condition=Ready cluster.postgresql.cnpg.io/($service)-db -n ($namespace) --timeout=300s" | print
+	# The broker's tables, from broker/schema.sql (add-only, idempotent), on the database's primary, before the
+	# broker is replaced: the broker runs no DDL and fails at start when they are missing.
+	let primary = (do $remote $"($kubectl) get cluster.postgresql.cnpg.io/($service)-db -n ($namespace) -o jsonpath='{.status.currentPrimary}'" | str trim)
+	if ($primary | is-empty) { error make {msg: $"the broker's database ($service)-db names no primary"} }
+	open --raw $"($here)/broker/schema.sql" | do $remote $"($kubectl) exec -i -n ($namespace) ($primary) -c postgres -- psql -X -v ON_ERROR_STOP=1 -U postgres -d billing" | print
 	$yaml | do $remote $"($kubectl) apply -f -" | print
 	do $remote $"($kubectl) rollout restart deployment/($service)-airlock -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service)-airlock -n ($namespace) --timeout=300s" | print
 	do $remote $"($kubectl) rollout restart deployment/($service) -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service) -n ($namespace) --timeout=120s" | print

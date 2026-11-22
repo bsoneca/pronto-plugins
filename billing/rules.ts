@@ -36,5 +36,55 @@ export const RULES = {
   "claimStates": [
     "claimed",
     "done"
+  ],
+  "claimTransitions": [
+    {
+      "event": "claim",
+      "from": "absent",
+      "token": "none",
+      "to": "claimed"
+    },
+    {
+      "event": "complete",
+      "from": "claimed",
+      "token": "holder",
+      "to": "done"
+    },
+    {
+      "event": "release",
+      "from": "claimed",
+      "token": "holder",
+      "to": "absent"
+    },
+    {
+      "event": "remember",
+      "from": "absent",
+      "token": "none",
+      "to": "done"
+    },
+    {
+      "event": "remember",
+      "from": "claimed",
+      "token": "none",
+      "to": "done"
+    },
+    {
+      "event": "remember",
+      "from": "done",
+      "token": "none",
+      "to": "done"
+    },
+    {
+      "event": "expire",
+      "from": "claimed",
+      "token": "none",
+      "to": "absent"
+    },
+    {
+      "event": "expire",
+      "from": "done",
+      "token": "none",
+      "to": "absent"
+    }
   ]
 } as const;

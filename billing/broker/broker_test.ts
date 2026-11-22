@@ -8,7 +8,7 @@ import { brokerKeys, type Entitlement, verifyEntitlement } from "../entitlement.
 import { broker, newSigningKey, twoModes } from "./main.ts";
 import { chargesAt, checkoutLocale, type Consent, ownerOf, tenantOf } from "./core.ts";
 import { fakeStripe, unform } from "./fake.ts";
-import { form, signWebhook, stripe as stripeClient, StripeError } from "./stripe.ts";
+import { askedDoor, forAccount, form, markTransport, signWebhook, stripe as stripeClient, StripeError, type Stripe, switched } from "./stripe.ts";
 import { MemoryStore, type Store } from "./store.ts";
 
 function assertEquals(a: unknown, b: unknown, m = "") {
@@ -24,7 +24,7 @@ const TRIAL = { months: 3, plans: ["analysis"], remindDays: 7 };
 
 // `replicas` brokers share one store (store.ts), as the node's pods share their database: each
 // request goes to the next, round robin.
-async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: number; store?: Store; mode?: "live" | "sandbox" } = {}) {
+async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: number; store?: Store; mode?: "live" | "sandbox"; switched?: "asked" | "never" } = {}) {
   const fake = fakeStripe(ISSUER, { searchLagMs: o.searchLagMs ?? 0 });
   // Every request the broker makes to Stripe, as the stand-in is asked it.
   const sent: { method: string; path: string; params?: Record<string, unknown> }[] = [];
@@ -39,6 +39,16 @@ async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: numb
     return (door as (...a: unknown[]) => unknown)(method, path, ...rest);
   }) as typeof fake.stripe & { route?: typeof door.route };
   stripe.route = door.route;
+  // Two transports a probe can tell apart (PRONTO-218): each is the stand-in's door under its own name, and the
+  // switched client sends a call by the request's word (`asked`) or always one way (`never`: the door is off whatever the request says).
+  const transportCalls: string[] = [];
+  const tagged = (name: "direct" | "door"): Stripe => (async (...a: unknown[]) => {
+    transportCalls.push(name);
+    const answer = await (stripe as (...a: unknown[]) => Promise<unknown>)(...a);
+    markTransport(name);
+    return answer;
+  }) as Stripe;
+  const routed = o.switched ? switched({ direct: tagged("direct"), door: tagged("door"), on: o.switched === "asked" ? askedDoor : () => false }) : stripe;
   const tenants = new Map<string, { doc?: unknown; up: boolean; got: Entitlement[]; hold?: Promise<void>; refuse?: boolean; tickets: Map<string, Consent>; consentFails?: number }>([
     [A, { up: true, got: [], tickets: new Map() }], [B, { up: true, got: [], tickets: new Map() }],
   ]);
@@ -76,7 +86,7 @@ async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: numb
   // Replicas sign with one key, as the node's pods read BILLING_SIGNING_KEY from one Secret.
   const signingKey = (o.replicas ?? 1) > 1 ? await newSigningKey() : undefined;
   const replicas = await Promise.all(Array.from({ length: o.replicas ?? 1 }, () =>
-    broker({ issuer: ISSUER, secret: "s".repeat(32), stripe, webhookSecret: fake.webhookSecret, fetcher, cacheMs: 0, feePercent: 10, store, signingKey, mode: o.mode })));
+    broker({ issuer: ISSUER, secret: "s".repeat(32), stripe: routed, webhookSecret: fake.webhookSecret, fetcher, cacheMs: 0, feePercent: 10, store, signingKey, mode: o.mode }).then((h) => o.switched ? forAccount(h) : h)));
   let turn = 0;
   const handler = (req: Request) => replicas[turn++ % replicas.length](req);
   const keys = brokerKeys(ISSUER, fetcher, 0);
@@ -116,7 +126,7 @@ async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: numb
     assertEquals(back, `${ISSUER}/onboarded?tenant=${encodeURIComponent(tenant)}`);
     assertEquals((await call(new URL(back).pathname + new URL(back).search)).status, 200, "set up");
   };
-  return { fake, door, sent, stripeDown, tenants, call, post, press, prove, payouts, secrets, ticket, consentTo, OFFER, replicas };
+  return { fake, door, sent, stripeDown, tenants, call, post, press, prove, payouts, secrets, ticket, consentTo, OFFER, replicas, transportCalls };
 }
 
 Deno.test("an account subscribes, its tenant alone is told, and it lapses when it cancels", async () => {
@@ -832,7 +842,7 @@ Deno.test("a probe reads the account at Stripe and writes nothing", async () => 
   await payouts(A);
   const before = sent.length, customers = fake.held.customers.size;
   const res = await post("/probe", { tenant: A, account: ANA });
-  assertEquals([res.status, await res.json()], [200, { ok: true, direct: false }], "the stand-in is reached through its door");
+  assertEquals([res.status, await res.json()], [200, { ok: true, direct: false }], "a broker outside a request notes no transport");
   const asked = sent.slice(before);
   assertEquals(asked.map((s) => s.method).every((m) => m === "GET"), true, "only reads");
   assertEquals(asked.some((s) => s.path === "/v1/customers/search"), true, "the account's customers read");
@@ -1077,3 +1087,23 @@ Deno.test("a resync takes a plan id by the one rule, rules.cue's", async () => {
   assertEquals(good.status, 200);
   await good.body?.cancel();
 });
+
+// The probe says which transport answered its read, as the switched client noted it, never what the request said.
+const PROBE_CASES: { name: string; switched: "asked" | "never"; door?: boolean; transport: string; calls: string[] }[] = [
+  { name: "door true: the door answers", switched: "asked", door: true, transport: "door", calls: ["door"] },
+  { name: "door false: the broker's own key answers", switched: "asked", door: false, transport: "direct", calls: ["direct"] },
+  { name: "no word: straight to Stripe", switched: "asked", transport: "direct", calls: ["direct"] },
+  { name: "the request says door but the client goes direct: said as it went", switched: "never", door: true, transport: "direct", calls: ["direct"] },
+];
+for (const c of PROBE_CASES) {
+  Deno.test(`probe transport, ${c.name}`, async () => {
+    const s = await setup({ switched: c.switched });
+    await s.prove(A);
+    await s.payouts(A);
+    s.transportCalls.length = 0;
+    const res = await s.post("/probe", { tenant: A, account: ANA, ...(c.door === undefined ? {} : { door: c.door }) });
+    const body = await res.json();
+    assertEquals([res.status, body.transport, body.direct, [...new Set(s.transportCalls)]], [200, c.transport, c.transport === "direct", c.calls], c.name);
+    assertEquals(body.door, c.door, "the request's word is said back as its own, apart from the transport");
+  });
+}

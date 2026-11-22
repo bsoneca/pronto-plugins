@@ -89,7 +89,17 @@ function throughDoor(door: string, fetcher: typeof fetch): Stripe {
  * tenant's flag sends that account's Stripe calls through the airlock's door (PRONTO-218: the tenant's
  * billing service asks its flagd with the reader's own session and says `door`). Neither, for what
  * names no account (Stripe's webhook, say). Set by `forAccount` around the broker's handler. */
-const caller = new AsyncLocalStorage<{ account?: string; door?: boolean }>();
+const caller = new AsyncLocalStorage<{ account?: string; door?: boolean; transport?: Route }>();
+
+/** Notes, on the request being answered, the transport that answered a call to Stripe (a client's own word,
+ * made once the call has answered). A call outside a request notes nothing. */
+export const markTransport = (route: Route): void => {
+  const who = caller.getStore();
+  if (who) who.transport = route;
+};
+
+/** The transport of the last call this request made to Stripe: undefined when it made none. */
+export const transportUsed = (): Route | undefined => caller.getStore()?.transport;
 
 /** A body this size or under is read for its caller, declared or not, once: the handler is handed
  * the same text (no copy whose cancelling would wait on the handler's read). A larger one is handed
@@ -127,13 +137,26 @@ export const askedDoor = (): boolean => caller.getStore()?.door === true;
 export function switched(p: { direct: Stripe; door: Stripe; on: () => boolean }): Routed {
   // Both ways send Stripe the broker's own key: the direct way as before the door, the door as its
   // `sinkKey` (its ledger keeps a hashed one), so a call retried the other way across a flip is one.
-  const s: Routed = (method, path, params, idempotencyKey) => (p.on() ? p.door : p.direct)(method, path, params, idempotencyKey);
+  const s: Routed = async (method, path, params, idempotencyKey) => {
+    const route: Route = p.on() ? "door" : "direct";
+    const answer = await (route === "door" ? p.door : p.direct)(method, path, params, idempotencyKey);
+    markTransport(route);
+    return answer as never;
+  };
   s.route = () => Promise.resolve<Route>(p.on() ? "door" : "direct");
   return s;
 }
 
 export function stripe(p: { key: string; api?: string; fetcher?: typeof fetch } | { door: string; fetcher?: typeof fetch }): Routed {
-  if ("door" in p) return Object.assign(throughDoor(p.door, p.fetcher ?? fetch), { route: () => Promise.resolve<Route>("door") });
+  if ("door" in p) {
+    const through = throughDoor(p.door, p.fetcher ?? fetch);
+    const viaDoor: Routed = async (method, path, params, idempotencyKey) => {
+      const answer = await through(method, path, params, idempotencyKey);
+      markTransport("door");
+      return answer as never;
+    };
+    return Object.assign(viaDoor, { route: () => Promise.resolve<Route>("door") });
+  }
   const api = (p.api ?? "https://api.stripe.com").replace(/\/$/, "");
   const fetcher = p.fetcher ?? fetch;
   const direct: Routed = async (method, path, params = {}, idempotencyKey) => {
@@ -154,6 +177,7 @@ export function stripe(p: { key: string; api?: string; fetcher?: typeof fetch } 
     });
     const data = await res.json();
     if (!res.ok) throw new StripeError(res.status, data?.error?.code ?? data?.error?.type ?? "error", data?.error?.message ?? `stripe ${res.status}`);
+    markTransport("direct");
     return data;
   };
   direct.route = () => Promise.resolve<Route>("direct");
