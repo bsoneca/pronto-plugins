@@ -115,6 +115,7 @@ export async function previewCycle(c = {}) {
   const pv = { up: ['mise', 'run', 'up'], down: ['mise', 'run', 'down'] };
   try {
     await previewRecorded(f.io, path, previewRecord(pv, '/w/app', pid, 'at'), async () => {
+      await Promise.resolve(); // `up` is a child process in the driver
       order.push('up'); recordedBeforeUp = f.nodes.has(path);
       if (throwAfterUp) throw new Error('killed');
       order.push('down');
