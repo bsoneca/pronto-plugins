@@ -241,3 +241,16 @@ export async function imageGuard() {
     await Deno.remove(dir, { recursive: true });
   }
 }
+
+// How a close ends (harness/files/tests/scenarios/verdict.ts closing): a close that finishes, one Playwright rejects (with a stack behind its
+// first line) and one that never answers, waited for 20 ms.
+import { closing, settleRun } from "../../harness/files/tests/scenarios/verdict.ts";
+export function closeOf(kind) {
+  const p = kind === "ok" ? Promise.resolve() : kind === "reject" ? Promise.reject(new Error("Target page, context or browser has been closed\n    at stack")) : new Promise(() => {});
+  return closing(p, 20);
+}
+// The ids a run reports failed and records green once the browser's close is known (verdict.ts settleRun), as sorted lists.
+export function settled(o) {
+  const r = settleRun({ failed: [], pageErrorIds: [], pageErrors: [], ...o });
+  return { failedAll: [...r.failedAll].sort(), green: r.green };
+}

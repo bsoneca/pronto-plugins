@@ -26,3 +26,26 @@ export const writeVerdict = (path: string, v: Verdict) => Deno.writeTextFileSync
 
 // Throws when the file is missing, unreadable or malformed.
 export const readVerdict = async (path: string): Promise<Verdict> => parseVerdict(await Deno.readTextFile(path));
+
+// How one close ended (a context's, the browser's): finished, rejected by Playwright (its first line kept) or still pending after the wait. The
+// three are kept apart: a rejected close is a failure the runner reports, not a close that finished, and a timeout is not a rejection.
+export type Closing = { state: "closed" } | { state: "rejected"; error: string } | { state: "timeout" };
+
+export const closing = async (p: Promise<unknown>, ms: number): Promise<Closing> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<Closing>((r) => { timer = setTimeout(() => r({ state: "timeout" }), ms); });
+  // Both outcomes of `p` are handled here, so a close that settles after the wait is no unhandled rejection.
+  const done = p.then((): Closing => ({ state: "closed" }), (e): Closing => ({ state: "rejected", error: String((e as Error)?.message ?? e).split("\n")[0] }));
+  try { return await Promise.race([done, late]); } finally { clearTimeout(timer); }
+};
+
+// What the run reports and records once every scenario has run and the browser has been closed: the failed ids, and the green ones the selector
+// records. One set serves the verdict, the summary and the record, so they cannot disagree. A browser that did not close cleanly (rejected, or
+// still open after the wait) fails every scenario that ran: nothing is recorded green from it, and the old green records of all of them are
+// invalidated (the selector deletes only the ids it is told failed). A scenario whose page threw counts as failed; any page error records no green.
+export const settleRun = (o: { ran: string[]; failed: string[]; pageErrorIds: string[]; pageErrors: string[]; browser: Closing }) => {
+  const failedAll = new Set([...o.failed, ...o.pageErrorIds.filter((id) => o.ran.includes(id))]);
+  if (o.browser.state !== "closed") for (const id of o.ran) failedAll.add(id);
+  const green = o.browser.state !== "closed" || o.pageErrors.length ? [] : o.ran.filter((id) => !failedAll.has(id));
+  return { failedAll, green };
+};
