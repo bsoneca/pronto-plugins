@@ -264,6 +264,9 @@ cases: {
 		{call: "apigen.holds", args: ["$narrow", "anon", "public.api_v1_note", "SELECT"], expect: false, why: "anon holds nothing on a view"},
 		{call: "apigen.holds", args: ["$narrow", "service", "public.api_v1_note", "SELECT"], expect: false, why: "nor does a role the blanket granted"},
 		{call: "apigen.as", args: ["$narrow", _ada, "INSERT INTO public.api_v1_tag (id, label) VALUES ($1, 'x')", [_n2]], throws: "42501", why: "the write is refused"},
+		// A column the spec gained since the last release is not on the old view yet: the replay grants what the view holds and does not fail.
+		{call: "apigen.dbReplay", args: ["$app", true, false, true]}, {keep: "older"},
+		{call: "apigen.holds", args: ["$older", "app_user", "public.api_v1_note", "INSERT"], expect: true, why: "the columns the old view holds are granted"},
 		{call: "apigen.dbReplay", args: ["$app", true, true]}, {keep: "fresh"},
 		{call: "apigen.holds", args: ["$fresh", "app_user", "public.tag", "SELECT"], expect: true, why: "a database with no view yet is left alone: the grants ran and changed nothing"},
 	]}

@@ -154,12 +154,22 @@ const revokeBlanket = (v: string) => [`DO $r$ DECLARE r text; BEGIN`, ...blanket
 /** What each view's grants are, as statements a plpgsql block runs (a blanket revoke's body, not its DO): collected as the views are written, so the
  * grants a replay applies are the very ones the views were created with (api_v1_grants.sql, grantsSqlOf). */
 export type Grants = Map<string, string[]>;
-/** A view's grants: the revoke of PUBLIC and anon, the blanket revoke for a view in public, the grant itself. */
-const grantLines = (v: string, privileges: string, blanket: boolean) => [
-  `REVOKE ALL ON ${v} FROM PUBLIC, anon;`,
-  ...(blanket ? blanketBody(v) : []),
-  `GRANT ${privileges} ON ${v} TO app_user;`,
-];
+/** A view's grants, for the replay (api_v1_grants.sql): the revoke of PUBLIC and anon, the blanket revoke for a view in public, then the
+ * grant itself, its column privileges each only on the columns the view holds now: the replay runs before `api_v1.sql` has added a column the
+ * spec gained since the last release to the old view, and a grant naming it would fail the release (the view's own migration grants it). */
+const grantLines = (v: string, privileges: string, blanket: boolean) => {
+  const items = [...privileges.matchAll(/(SELECT|INSERT|UPDATE|DELETE)(?: \(([^)]*)\))?/g)].map((m) => ({ priv: m[1], cols: m[2] ? m[2].split(",").map((c) => c.trim().replace(/^"|"$/g, "")) : undefined }));
+  const whole = items.filter((i) => !i.cols).map((i) => i.priv);
+  return [
+    `REVOKE ALL ON ${v} FROM PUBLIC, anon;`,
+    ...(blanket ? blanketBody(v) : []),
+    ...(whole.length ? [`GRANT ${whole.join(", ")} ON ${v} TO app_user;`] : []),
+    ...items.filter((i) => i.cols).map((i) => [
+      `SELECT string_agg(quote_ident(a.attname), ', ') INTO cols FROM pg_catalog.pg_attribute a WHERE a.attrelid = to_regclass('${v}') AND a.attnum > 0 AND NOT a.attisdropped AND a.attname = ANY (ARRAY[${i.cols!.map(lit).join(", ")}]);`,
+      `IF cols IS NOT NULL THEN EXECUTE format('GRANT ${i.priv} (%s) ON ${v} TO app_user', cols); END IF;`,
+    ].join("\n")),
+  ];
+};
 
 /** The view of a resource and its grants: security_invoker, so the table's RLS judges every read
  * and write as the caller. A public field stays a plain column reference, so the view is
@@ -441,7 +451,7 @@ export function sqlOf(spec: Spec, released?: Contract): string {
 
 /** api_v1_grants.sql: each view's grants again, on their own, for a migration that sorts right after the app's blanket grants (an app's
  * `ALL TABLES IN SCHEMA public` and default privileges, which a replay of an earlier migration applies to a view the database already holds
- * from a past release and which the views' own migration narrows only when it runs). One DO per view, guarded by to_regclass so a database
+ * from a past release and which the views' own migration narrows only when it runs). One DO per view, guarded by to_regclass and relkind 'v' (a table of the app's that merely bears a view's name is never touched) so a database
  * that does not hold the view yet (a new one) is left alone, and made of the very statements the view's creation carries, so the two
  * cannot differ. Idempotent: it only narrows. */
 export function grantsSqlOf(spec: Spec, released?: Contract): string {
@@ -453,7 +463,7 @@ export function grantsSqlOf(spec: Spec, released?: Contract): string {
   return [
     `-- pronto-api: the grants of the app's ${spec.schema} views, replayed (api/${spec.version}/${spec.schema}_grants.sql). Generated, do not edit.`,
     `SET lock_timeout = '30s';\nSET statement_timeout = '60s';`,
-    ...[...grants].map(([v, lines]) => [`DO $g$ DECLARE r text; BEGIN`, `  IF to_regclass(${lit(v)}) IS NOT NULL THEN`, ...lines.map((l) => `    ${l.replaceAll("\n", "\n    ")}`), `  END IF;`, `END $g$;`].join("\n")),
+    ...[...grants].map(([v, lines]) => [`DO $g$ DECLARE r text; cols text; BEGIN`, `  IF EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE oid = to_regclass(${lit(v)}) AND relkind = 'v') THEN`, ...lines.map((l) => `    ${l.replaceAll("\n", "\n    ")}`), `  END IF;`, `END $g$;`].join("\n")),
     "",
   ].join("\n\n");
 }
