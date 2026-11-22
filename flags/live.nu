@@ -1024,7 +1024,7 @@ def record-work [at: record, app: path, version: string, cases: string, want: li
 	let strays = ($changed | where {|p| ($p | str starts-with ".github/") or not (do $allowed $p) })
 	if ($strays | is-not-empty) { error make {msg: $"flags: record: the change touches ($strays | str join ', '), outside the app's own files: refused, no pull request opened"} }
 	let title = $"($app | path expand | path basename): record live flag defaults"
-	let body = ($"Writes what production serves into flags_spec.cue, so the spec says it. No deploy, no change in behaviour: live already has these values.\n\n" + ($diffs | each {|d| $"- ($d.flag): ($d.spec) to ($d.live)" } | str join "\n") + $"\n\nJournal: version ($version), flags ($diffs | get flag | str join '+'), values ($diffs | get live | each {|v| $v | to json -r } | str join ' '), cases ($cases).\n")
+	let body = ($"Writes what production serves into flags_spec.cue, so the spec says it. No deploy, no change in behaviour: live already has these values.\n\n" + ($diffs | each {|d| $"- ($d.flag): ($d.spec) to ($d.live)" } | str join "\n") + $"\n\nRecords: ($diffs | each {|d| {($d.flag): $d.live} } | into record | to json -r)\n\nJournal: version ($version), flags ($diffs | get flag | str join '+'), values ($diffs | get live | each {|v| $v | to json -r } | str join ' '), cases ($cases).\n")
 	git-must (git-in $scratch checkout -q -B $branch) "git checkout" | ignore
 	git-must (git-in $scratch add -A -- (if $prefix == "" { "." } else { $prefix })) "git add" | ignore
 	git-must (git-in $scratch commit -q -m $title -m $body) "git commit" | ignore
@@ -1051,12 +1051,29 @@ def record-work [at: record, app: path, version: string, cases: string, want: li
 	{record: "pr", flags: $flags, pr: $url}
 }
 
+# The flags the open record pull request already changes against main (its `Records:` line: flag to value), carried into
+# the rebuilt branch for as long as live still holds their value: {keep: [{flag, value}], stale: [flags live has moved on from]}.
+# `have` is what the push itself records, which wins.
+def record-carry [app: path, at: record, have: list<record>]: nothing -> record {
+	let top = (git-must (git-in $app rev-parse --show-toplevel) "not in a git tree")
+	let open = (record-open-pr $top (record-branch $app))
+	let line = if $open == null { [] } else { $open.body? | default "" | lines | where {|l| $l | str starts-with "Records: " } }
+	if ($line | is-empty) { return {keep: [], stale: []} }
+	let recs = ($line | first | str substring 9.. | from json | transpose flag value | where {|r| $r.flag not-in ($have | get flag) })
+	let now = (store-cat $at | from json)
+	let live = ($recs | each {|r| $r | insert live (default-of ($now.flags? | default {} | get -o $r.flag)) })
+	{keep: ($live | where {|r| $r.value == $r.live } | select flag value), stale: ($live | where {|r| $r.value != $r.live } | get flag)}
+}
+
 # One attempt: what the version wrote for the flags it owns, read against live now, then the record itself.
 def record-attempt [at: record, app: path, version: string, cases: string, owned: any, stand: string]: nothing -> record {
 	let w = (record-want $at $version $owned)
 	if ($w.moved | is-not-empty) { print -e $"flags: WARNING: live has moved on since version ($version): ($w.moved | str join ', ') no longer hold its value and are not recorded" }
+	# The pull request already open keeps its flags that live still holds: a second flip does not unmake the first's record.
+	let carry = if $stand != "" { {keep: [], stale: []} } else { record-carry $app $at $w.want }
+	let w = ($w | upsert want ($w.want | append $carry.keep))
 	if ($w.want | is-empty) {
-		return (if ($w.moved | is-not-empty) { {record: "skipped", flags: "", pr: "", note: $"live moved on since version ($version): ($w.moved | str join '+')"} } else { {record: "none", flags: "", pr: ""} })
+		return (if ($carry.stale | is-not-empty) { {record: "none", flags: "", pr: "", stale: $carry.stale} } else if ($w.moved | is-not-empty) { {record: "skipped", flags: "", pr: "", note: $"live moved on since version ($version): ($w.moved | str join '+')"} } else { {record: "none", flags: "", pr: ""} })
 	}
 	let r = if $stand != "" {
 		let diffs = (record-diffs $w.want (cue-of $app flagd.document))
@@ -1066,19 +1083,20 @@ def record-attempt [at: record, app: path, version: string, cases: string, owned
 		}
 		{record: (if ($diffs | is-empty) { "none" } else { "stand-in" }), flags: ($diffs | get flag | str join "+"), pr: ""}
 	} else { record-pr $at $app $version $cases $w.want }
+	if ($carry.stale | is-not-empty) { print -e $"flags: record: the open record pull request's ($carry.stale | str join ', ') no longer hold their value live, and are dropped from it" }
 	if ($w.moved | is-not-empty) { $r | insert note $"live moved on since version ($version): ($w.moved | str join '+') not recorded" } else { $r }
 }
 
 # An open record pull request that names one of these flags is stale once there is nothing to record, or the record
 # failed: closed with its branch, so a merge cannot write what is no longer live. Never fails the caller.
-def record-close [app: path, owned: any]: nothing -> string {
+def record-close [app: path, owned: any, stale: list<string>]: nothing -> string {
 	try {
 		let top = (git-in $app rev-parse --show-toplevel)
 		if $top.exit_code != 0 { return "" }
 		let repo = ($top.stdout | str trim)
 		let open = (record-open-pr $repo (record-branch $app))
 		if $open == null { return "" }
-		let named = ($owned == null) or ($owned | any {|f| ($open.body? | default "") =~ ("(?m)^- " + $f + ":") })
+		let named = ($owned == null) or ($stale | is-not-empty) or ($owned | any {|f| ($open.body? | default "") =~ ("(?m)^- " + $f + ":") })
 		if not $named { return "" }
 		let c = (do { cd $repo; ^gh pr close $open.number --delete-branch --comment "The flags this recorded no longer differ from the spec, or the record failed: closed by pronto-flags." } | complete)
 		if $c.exit_code == 0 { print $"flags: closed the stale record pull request ($open.url)"; $open.url } else { print -e $"flags: WARNING: could not close ($open.url): ($c.stderr | str trim)"; "" }
@@ -1111,7 +1129,7 @@ def record-back [at: record, app: path, version: string, cases: string, owned: a
 		print -e $"flags: WARNING: version ($version) is live but was NOT recorded in flags_spec.cue \(`pronto-flags drift` says what is missing\): ($e.msg | lines | first)"
 		{record: "failed", flags: "", pr: "", note: ($e.msg | lines | first)}
 	}
-	let closed = if $stand == "" and $r.record in ["none" "failed"] { record-close $app $owned } else { "" }
+	let closed = if $stand == "" and $r.record in ["none" "failed"] { record-close $app $owned ($r.stale? | default []) } else { "" }
 	do $note ($r | merge (if $closed != "" { {closed: $closed} } else { {} }))
 	if $r.record == "pr" { print $"flags: recorded in the spec by ($r.pr)" } else if $r.record == "stand-in" { print $"flags: recorded ($r.flags)" }
 }

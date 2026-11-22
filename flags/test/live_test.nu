@@ -464,22 +464,35 @@ rg push -q origin HEAD:main
 rg fetch -q origin
 # gh: lists the branch's pull request once one was created (rgh.created), a fork's too (rgh.fork), says who the user is,
 # refuses a create as already existing (rgh.race: another record opened it first), and logs every call.
-let ghscript = r##'#!/bin/sh
-echo "$@" >> LOG
-D=DIR
-case "$1 $2" in
-"api user") echo me;;
-"pr list")
-	out=""
-	if [ -f $D/rgh.created ]; then out='{"number":7,"url":"https://example.test/pull/7","isCrossRepository":false,"author":{"login":"me"},"body":"- second: false to true"}'; fi
-	if [ -f $D/rgh.fork ]; then [ -n "$out" ] && out="$out,"; out="$out"'{"number":9,"url":"https://example.test/pull/9","isCrossRepository":true,"author":{"login":"evil"},"body":"- second: x"}'; fi
-	echo "[$out]";;
-"pr create")
-	touch $D/rgh.created
-	if [ -f $D/rgh.race ]; then echo "a pull request for branch already exists" >&2; exit 1; fi
-	echo https://example.test/pull/7;;
-"pr close") rm -f $D/rgh.created;;
-esac
+let ghscript = r##'#!/usr/bin/env python3
+import sys, os, json
+D = "DIR"
+a = sys.argv[1:]
+open("LOG", "a").write(" ".join(a) + "\n")
+cmd = " ".join(a[:2])
+bodyfile = D + "/rgh.body"
+created = D + "/rgh.created"
+body = a[a.index("--body") + 1] if "--body" in a else ""
+if cmd == "api user":
+    print("me")
+elif cmd == "pr list":
+    out = []
+    if os.path.exists(created):
+        out.append({"number": 7, "url": "https://example.test/pull/7", "isCrossRepository": False, "author": {"login": "me"}, "body": open(bodyfile).read()})
+    if os.path.exists(D + "/rgh.fork"):
+        out.append({"number": 9, "url": "https://example.test/pull/9", "isCrossRepository": True, "author": {"login": "evil"}, "body": "- second: x\nRecords: {\"second\": true}"})
+    print(json.dumps(out))
+elif cmd == "pr create":
+    open(created, "w").close()
+    open(bodyfile, "w").write(body)
+    if os.path.exists(D + "/rgh.race"):
+        sys.stderr.write("a pull request for branch already exists\n")
+        sys.exit(1)
+    print("https://example.test/pull/7")
+elif cmd == "pr edit":
+    open(bodyfile, "w").write(body)
+elif cmd == "pr close":
+    os.remove(created)
 '##
 let ghlog = $"($dir)/rgh.log"
 $ghscript | str replace LOG $ghlog | str replace -a DIR $dir | save -f $"($fakegh)/gh"
@@ -510,7 +523,14 @@ rrun [push $rapp --sync second --untested "rec"] | ignore
 check ((open $"($rapp)/flagstore/flags.json" | get flags.held.variants.default) == false) "record: a new flag on in the spec is written off live"
 let r2b = (rrun [push $rapp --flip second --untested "rec"])
 let two = (^git -C $rorigin show "fix/flags-record-rec:apps/rec/flags_spec.cue")
-check ($r2b.exit_code == 0 and ($two | str contains "second: {default: true") and ($two | str contains "held: {default: true") and ($two | str contains "premium: {default: false") and (open --raw $ghlog | str contains "pr edit 7 --body")) "record: a second flip rebuilds the branch over main, records only its own flag, and edits the open pull request"
+check ($r2b.exit_code == 0 and ($two | str contains "second: {default: true") and ($two | str contains "premium: {default: true") and ($two | str contains "held: {default: true") and (open --raw $ghlog | str contains "pr edit 7 --body")) "record: a second flip before the first's pull request merged: the branch carries both, and the held spec edit stays as main has it"
+
+# A flag the open pull request carried whose live value has moved on is dropped from it, with a word.
+rrun [push $rapp --sync premium --untested "rec"] | ignore
+check ((open $"($rapp)/flagstore/flags.json" | get flags.premium.variants.default) == false) "record: premium is back off live, behind the open pull request's back"
+let r2g = (rrun [push $rapp --flip second=true --untested "rec"])
+let three = (^git -C $rorigin show "fix/flags-record-rec:apps/rec/flags_spec.cue")
+check ($r2g.exit_code == 0 and ($three | str contains "second: {default: true") and ($three | str contains "premium: {default: false") and ($r2g.stderr | str contains "premium no longer hold their value live")) "record: a carried flag whose live value moved on is dropped from the rebuilt branch"
 
 # Flipped back before the PR merged: nothing is left to record, so the stale pull request is closed with its branch.
 let closes = (ghcount "pr close")
@@ -547,8 +567,8 @@ check ($r3.exit_code == 0 and (open $"($rapp)/flagstore/flags.json" | get flags.
 check ((rjournal | last).record == "failed" and ((rjournal | last).note | str contains "is no literal")) "record refused: record failed in the journal"
 check ((open --raw $ghlog | lines | where {|l| $l | str starts-with "pr create" } | length) == $created_before) "record refused: no pull request opened for it"
 let d1 = (rrun [drift $rapp])
-check ($d1.exit_code == 1 and ($d1.stdout | str contains "bad") and ($d1.stdout | str contains "premium")) "drift: exit 1, listing the flags the spec lacks"
-rspec true "flags: second: {default: true, local: true}\nflags: bad: {default: true, local: true}\n"
+check ($d1.exit_code == 1 and ($d1.stdout | str contains "bad")) "drift: exit 1, listing the flags the spec lacks"
+rspec false "flags: second: {default: true, local: true}\nflags: bad: {default: true, local: true}\n"
 let d0 = (rrun [drift $rapp])
 check ($d0.exit_code == 0) "drift: exit 0 once the spec says what is live"
 
