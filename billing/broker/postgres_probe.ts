@@ -26,4 +26,6 @@ try {
 }
 await sql.end({ timeout: 1 }).catch(() => {});
 server.close();
-console.log(JSON.stringify({ globals: [typeof Buffer, typeof process, typeof setImmediate, typeof clearImmediate], rejected }));
+// By name on globalThis: the point is whether the runtime provides them, not that this file imports them.
+const names = ["Buffer", "process", "setImmediate", "clearImmediate"];
+console.log(JSON.stringify({ globals: names.map((n) => typeof (globalThis as Record<string, unknown>)[n]), rejected }));
