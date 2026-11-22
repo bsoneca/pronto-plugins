@@ -108,12 +108,12 @@ A flip therefore needs a test of its own, and it must be:
     - After the final successful write (cases passed, a write with no production case, an off flip, a `rollback`; never
       the automatic restore after a failure; not under a dry run) `record` writes what is live into the app's
       `flags_spec.cue` through a pull request the tool opens: in a scratch worktree from a fresh `origin/main`
-      (never the operator's checkout), for every flag the spec and live both hold, only the literal of that flag's
-      depth-1 `default:`. It is accepted only if `cue export -e flagd.document` moves nowhere but
+      (never the operator's checkout), only the literal of each such flag's
+      depth-1 `default:`, and only for the flags that push wrote (`--flip`/`--sync` names; for a rollback the flags it moved), with the values of the version it wrote, kept only while live still holds them; anything else is `drift`'s. It is accepted only if `cue export -e flagd.document` moves nowhere but
       `flags.<name>.variants.default` and `cue vet` passes; then the app's generate runs, and a diff that touches
       anything outside the app (or `.github/`) is refused. One branch per app, `fix/flags-record-<app>`, rebuilt from
       main and live each time, with auto-merge armed; an open pull request gets the new head (force with lease, once
-      more after a lost lease) and its body edited.
+      more after a lost lease) and its body edited; where there is nothing to record or the record fails, an open record pull request naming the flags is closed. Only this repository's pull request by the current gh user counts.
     - A record that cannot be made (a default that is a reference or appears twice, a refused diff, no network) is
       said loudly, noted with `record: failed` in the journal, and never fails the push or reverts live. A closed
       record pull request reverts nothing either. `pronto-flags drift <app>` is the read-only check: it compares the

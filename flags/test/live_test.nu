@@ -313,6 +313,7 @@ let n_a = (object | length)
 let f1 = (rlive [push $app --flip premium])
 check ($f1.exit_code == 0 and (premium (newest 0)).variants.default == true and (newest 0).metadata.cases == "passed" and (object | length) == $n_a + 2) "--flip X, spec false: live true, written in two versions"
 check ((ran | length) == $ran_a + 1 and ((ran | last) | str starts-with "live premium buy")) "--flip X: the production cases ran"
+let v_f1 = (newgen)
 check ((recorded) == [$"premium true (newgen)"] and (open --raw $"($app)/flags_spec.cue") == $spec_text) "--flip X: record called with {X, true, version}, the operator's spec untouched"
 check ((open --raw $"($dir)/journal.jsonl" | lines | last | from json | get record) == "stand-in") "--flip X: the record is noted in the journal"
 
@@ -364,13 +365,12 @@ check ($f5b.exit_code != 0 and ($f5b.stderr | str contains "premium is a bool") 
 let f5c = (rlive [push $app --flip theme])
 check ($f5c.exit_code != 0 and ($f5c.stderr | str contains "theme=<value>") and (object | length) == $n5b) "bare --flip on a non-bool: refused, nothing written"
 
-# (10) Two flips, X then Y: the second record covers both (the spec is still behind on both).
+# (10) Two flips, X then Y: each record covers what its own push wrote, and no more.
 pspec false "light"
 let f10 = (rlive [push $app --flip premium])
 let rec10 = (recorded | length)
 let f10b = (rlive [push $app --flip theme=dark --untested "a theme"])
-let last2 = (recorded | last 2)
-check ($f10.exit_code == 0 and $f10b.exit_code == 0 and ($last2 | sort) == ([$"premium true (newgen)" $"theme \"dark\" (newgen)"] | sort) and (recorded | length) == $rec10 + 2) "two flips: the second record covers both"
+check ($f10.exit_code == 0 and $f10b.exit_code == 0 and (recorded | length) == $rec10 + 1 and (recorded | last) == $"theme \"dark\" (newgen)") "two flips: the second record covers its own flag only, not the first's"
 
 # (11) A rollback records what it restored.
 pspec false "dark"
@@ -397,6 +397,31 @@ let acc = (rlive [push $app --sync premium --untested "accounts"])
 check ($acc.exit_code == 0 and (premium (newest 0)).targeting.if.2.in.1 == ["acct-sync"] and (recorded | length) == $rec13) "--sync: the spec's reach is written, nothing to record"
 pspec false "light"
 livex [push $app --sync "premium,theme" --untested "back"] | ignore
+
+# (2) A held spec edit (spec true, live false, not flipped) is left to drift: recording another flip never touches it.
+pspec true "light"
+let rec2 = (recorded | length)
+let fh = (rlive [push $app --flip theme=dark --untested "a theme"])
+check ($fh.exit_code == 0 and (recorded | length) == $rec2 + 1 and ((recorded | last) | str starts-with "theme ") and (premium (newest 0)).variants.default == false) "a held spec edit is not recorded with another flip"
+pspec false "light"
+livex [push $app --sync "premium,theme" --untested "back"] | ignore
+
+# (7) --flip with a comma in its value is one entry; a value mixed with other names is refused; int and float are one kind.
+let nc = (object | length)
+let fc = (rlive [push $app --flip "theme=a,b" --untested "comma"])
+check ($fc.exit_code == 0 and ((newest 0).data | from json | get flags.theme.variants.default) == "a,b" and (recorded | last) == $"theme \"a,b\" (newgen)") "--flip theme=a,b: the comma is in the value"
+let nm = (object | length)
+let fm = (rlive [push $app --flip "premium,theme=dark"])
+check ($fm.exit_code != 0 and ($fm.stderr | str contains "takes one flag with a value; repeat the command") and (object | length) == $nm) "--flip a,b=v: refused, nothing written"
+pspec false "light"
+livex [push $app --sync "premium,theme" --untested "back"] | ignore
+let num = (^$nu.current-exe -c $"use ($here)/../live.nu keep-live; let spec = {flags: {n: {state: 'ENABLED', variants: {default: 1.5}, defaultVariant: 'default'}, m: {state: 'ENABLED', variants: {default: 3}, defaultVariant: 'default'}}}; let r = \(keep-live {flags: {}} $spec null ['n=2' 'm=4.5'] []); $r.doc.flags | to json -r" | complete)
+check ($num.exit_code == 0 and ($num.stdout | str contains "\"default\":2}") and ($num.stdout | str contains "\"default\":4.5}")) "--flip on an int or a float default: one numeric kind"
+
+# (3) The record is of the version the push wrote: where live has moved on, it is skipped, said and noted.
+let rec3 = (recorded | length)
+let sk = (rlive [record $app --version $v_f1 --flags premium])
+check ($sk.exit_code == 0 and ($sk.stderr | str contains "moved on") and (recorded | length) == $rec3 and ((open --raw $"($dir)/journal.jsonl" | lines | last | from json).record == "skipped")) "record: live moved on since the version: skipped, said, noted"
 
 # (7) The splice: a canonical block changes only the literal; a reference, a second default or no default is refused.
 let canon = $"($dir)/canon.cue"
@@ -437,11 +462,30 @@ rg add -A
 rg commit -q -m base
 rg push -q origin HEAD:main
 rg fetch -q origin
-# gh: lists the branch's pull request once one was created, and logs every call.
+# gh: lists the branch's pull request once one was created (rgh.created), a fork's too (rgh.fork), says who the user is,
+# refuses a create as already existing (rgh.race: another record opened it first), and logs every call.
+let ghscript = r##'#!/bin/sh
+echo "$@" >> LOG
+D=DIR
+case "$1 $2" in
+"api user") echo me;;
+"pr list")
+	out=""
+	if [ -f $D/rgh.created ]; then out='{"number":7,"url":"https://example.test/pull/7","isCrossRepository":false,"author":{"login":"me"},"body":"- second: false to true"}'; fi
+	if [ -f $D/rgh.fork ]; then [ -n "$out" ] && out="$out,"; out="$out"'{"number":9,"url":"https://example.test/pull/9","isCrossRepository":true,"author":{"login":"evil"},"body":"- second: x"}'; fi
+	echo "[$out]";;
+"pr create")
+	touch $D/rgh.created
+	if [ -f $D/rgh.race ]; then echo "a pull request for branch already exists" >&2; exit 1; fi
+	echo https://example.test/pull/7;;
+"pr close") rm -f $D/rgh.created;;
+esac
+'##
 let ghlog = $"($dir)/rgh.log"
-$"#!/bin/sh\necho \"$@\" >> ($ghlog)\ncase \"$1 $2\" in\n\"pr list\") if [ -f ($dir)/rgh.created ]; then echo '[{\"number\":7,\"url\":\"https://example.test/pull/7\"}]'; else echo '[]'; fi;;\n\"pr create\") touch ($dir)/rgh.created; echo https://example.test/pull/7;;\nesac\n" | save -f $"($fakegh)/gh"
-def rrun [args: list<string>] { livex $args ({GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com", PRONTO_FLAGS_RECORD: "", PATH: ([$fakegh] | append $env.PATH), PRONTO_FLAGS_JOURNAL: $"($dir)/rjournal.jsonl"}) }
+$ghscript | str replace LOG $ghlog | str replace -a DIR $dir | save -f $"($fakegh)/gh"
+def rrun [args: list<string>, extra: record = {}] { livex $args ({GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com", PRONTO_FLAGS_RECORD: "", PATH: ([$fakegh] | append $env.PATH), PRONTO_FLAGS_JOURNAL: $"($dir)/rjournal.jsonl"} | merge $extra) }
 def rjournal [] { open --raw $"($dir)/rjournal.jsonl" | lines | each {|l| $l | from json } }
+def ghcount [prefix: string] { open --raw $ghlog | lines | where {|l| $l | str starts-with $prefix } | length }
 let rspec_before = (open --raw $"($rapp)/flags_spec.cue")
 rrun [setup $rapp] | ignore
 let r1 = (rrun [push $rapp --flip premium --untested "rec"])
@@ -454,23 +498,49 @@ check ((^git -C $rorigin show main:apps/rec/flags_spec.cue | str trim) == ($rspe
 check ((rjournal | last).record == "pr" and (rjournal | last).pr == "https://example.test/pull/7" and (rjournal | last).flags == "premium") "record: the journal says the pull request"
 check (not ((^git -C $rwork worktree list) | str contains "flagsrec")) "record: the scratch worktree is gone"
 
-# A second flip rebuilds the same branch and edits the open pull request.
-rspec false "flags: second: {default: false, local: true}\n"
+check (rjournal | any {|j| ($j.event == "flags.record") and $j.record == "pending" }) "record: a pending line is noted before the record starts"
+
+# A second flip rebuilds the branch from main and records its own flag only: premium (flipped before) and the held spec
+# edit (held: true in the spec, off live) stay as main has them.
+rspec false "flags: second: {default: false, local: true}\nflags: held: {default: true, local: true}\n"
 rg add -A
 rg commit -q -m second
 rg push -q origin HEAD:main
 rrun [push $rapp --sync second --untested "rec"] | ignore
+check ((open $"($rapp)/flagstore/flags.json" | get flags.held.variants.default) == false) "record: a new flag on in the spec is written off live"
 let r2b = (rrun [push $rapp --flip second --untested "rec"])
 let two = (^git -C $rorigin show "fix/flags-record-rec:apps/rec/flags_spec.cue")
-check ($r2b.exit_code == 0 and ($two | str contains "premium: {default: true") and ($two | str contains "second: {default: true") and (open --raw $ghlog | str contains "pr edit 7 --body")) "record: a second flip rebuilds the branch over main, covers both flips, and edits the open pull request"
+check ($r2b.exit_code == 0 and ($two | str contains "second: {default: true") and ($two | str contains "held: {default: true") and ($two | str contains "premium: {default: false") and (open --raw $ghlog | str contains "pr edit 7 --body")) "record: a second flip rebuilds the branch over main, records only its own flag, and edits the open pull request"
+
+# Flipped back before the PR merged: nothing is left to record, so the stale pull request is closed with its branch.
+let closes = (ghcount "pr close")
+let r2c = (rrun [push $rapp --flip second=false --untested "rec"])
+check ($r2c.exit_code == 0 and (ghcount "pr close") == $closes + 1 and (open --raw $ghlog | str contains "pr close 7 --delete-branch") and (rjournal | last).record == "none" and (rjournal | last).closed == "https://example.test/pull/7") "record: nothing to record and an open record pull request: it is closed with its branch"
+
+# gh create refused as already existing: the pull request is read again and edited.
+touch $"($dir)/rgh.race"
+let edits = (ghcount "pr edit 7")
+let r2d = (rrun [push $rapp --flip second --untested "rec"])
+rm $"($dir)/rgh.race"
+check ($r2d.exit_code == 0 and (ghcount "pr edit 7") == $edits + 1 and (rjournal | last).record == "pr") "record: a create that finds the pull request already there edits it"
+
+# A fork's pull request of the same branch name is never edited or closed; a new one is opened.
+rm $"($dir)/rgh.created"
+touch $"($dir)/rgh.fork"
+let r2e = (rrun [push $rapp --flip second=false --untested "rec"])
+check ($r2e.exit_code == 0 and (ghcount "pr close 9") == 0 and (ghcount "pr edit 9") == 0) "record: a fork's pull request is not closed"
+let creates = (ghcount "pr create")
+let r2f = (rrun [push $rapp --flip second --untested "rec"])
+rm $"($dir)/rgh.fork"
+check ($r2f.exit_code == 0 and (ghcount "pr create") == $creates + 1 and (ghcount "pr edit 9") == 0) "record: a fork's pull request is not edited; the tool opens its own"
 
 # A default that is a reference is refused: the push stands, the failure is said and noted, drift lists it.
-rspec false "flags: bad: {default: _d, local: true}\n_d: false\n"
+rspec false "flags: bad: {default: _d, local: true}\nflags: gen: {default: false, local: true}\n_d: false\n"
 rg add -A
 rg commit -q -m "bad default"
 rg push -q origin HEAD:main
 rg fetch -q origin
-rrun [push $rapp --sync bad --untested "rec"] | ignore
+rrun [push $rapp --sync "bad,gen" --untested "rec"] | ignore
 let created_before = (open --raw $ghlog | lines | where {|l| $l | str starts-with "pr create" } | length)
 let r3 = (rrun [push $rapp --flip bad --untested "rec"])
 check ($r3.exit_code == 0 and (open $"($rapp)/flagstore/flags.json" | get flags.bad.variants.default) == true and ($r3.stderr | str contains "NOT recorded")) "record refused: the push exits 0 and the flag stays live, with a warning"
@@ -481,6 +551,11 @@ check ($d1.exit_code == 1 and ($d1.stdout | str contains "bad") and ($d1.stdout 
 rspec true "flags: second: {default: true, local: true}\nflags: bad: {default: true, local: true}\n"
 let d0 = (rrun [drift $rapp])
 check ($d0.exit_code == 0) "drift: exit 0 once the spec says what is live"
+
+# The app's generate gets a time limit: past it the record fails, the push stands.
+rspec true "flags: gen: {default: false, local: true}\n"
+let tm = (rrun [push $rapp --flip gen --untested "rec"] {PRONTO_FLAGS_GENERATE_CMD: "exec sleep 30", PRONTO_FLAGS_GENERATE_TIMEOUT_SEC: "1"})
+check ($tm.exit_code == 0 and (open $"($rapp)/flagstore/flags.json" | get flags.gen.variants.default) == true and (rjournal | last).record == "failed" and ((rjournal | last).note | str contains "generate failed or ran past")) "record: a generate past its limit fails the record, never the push"
 
 # A mirror (flagsLive.mirrors): each write of the object is applied to a node's ConfigMap over ssh;
 # a failing mirror warns, unless it is required. ssh is a stand-in that keeps what it was sent.
