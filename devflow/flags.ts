@@ -10,7 +10,37 @@ type Run = (c: string, args: string[], cwd?: string, env?: Record<string, string
 type Flags = Record<string, { default: unknown; note?: string }>;
 type Entries = Record<string, { flags?: string[]; steps?: { flag?: string }[] }>;
 
-const cacheDir = () => `${Deno.env.get("XDG_CACHE_HOME") ?? `${Deno.env.get("HOME") ?? "."}/.cache`}/pronto-devflow`;
+const cacheDir = () => {
+  const base = Deno.env.get("XDG_CACHE_HOME") ?? (Deno.env.get("HOME") ? `${Deno.env.get("HOME")}/.cache` : "");
+  if (!base.startsWith("/")) throw new Error("no HOME or XDG_CACHE_HOME to keep the clone in");
+  return `${base}/pronto-devflow`;
+};
+
+/** `fn` holding the clone's lock (a directory made, so two runs never share the tree): waits up to 10 min, and takes over one older than 30. */
+async function locked<T>(repo: string, fn: () => Promise<T>): Promise<T> {
+  Deno.mkdirSync(cacheDir(), { recursive: true });
+  const lock = `${cacheDir()}/flags-${repo.replace("/", "-")}.lock`;
+  for (let waited = 0;; waited += 5) {
+    try {
+      Deno.mkdirSync(lock);
+      break;
+    } catch (e) {
+      if (!(e instanceof Deno.errors.AlreadyExists)) throw e;
+      const age = Date.now() - (Deno.statSync(lock).mtime?.getTime() ?? 0);
+      if (age > 30 * 60000) {
+        try { Deno.removeSync(lock); } catch { /* another run took it over */ }
+        continue;
+      }
+      if (waited >= 600) throw new Error(`the clone of ${repo} is in use by another run`);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    try { Deno.removeSync(lock); } catch { /* gone already */ }
+  }
+}
 const first = (s: string) => s.trim().split("\n")[0];
 
 /** The dedicated clone of `repo`, at its origin/main: made on first use, then fetched. A failure throws, naming the call. */
@@ -68,7 +98,8 @@ async function exportOf<T>(dir: string, pkg: string, expr: string, run: Run): Pr
       Deno.writeTextFileSync(at, "{}");
       continue;
     }
-    if (/undefined field|not found|incomplete/.test(r.err)) return null;
+    // A tests folder with no `scenarios` or `cases` field has none; the app's own package says its flags, or the run fails.
+    if (pkg !== "." && /undefined field|incomplete/.test(r.err)) return null;
     throw new Error(`cue export ${pkg} in ${dir}: ${r.err.trim().split("\n").pop()}`);
   }
 }
@@ -85,7 +116,7 @@ async function liveValue(url: string, flag: string): Promise<unknown> {
 
 /** When the commit that added `flag` to the app's flags_spec.cue landed (the oldest that changes the count of `flag:` there), or null. */
 async function addedAt(dir: string, app: string, flag: string, run: Run): Promise<string | null> {
-  const r = await run("git", ["-C", dir, "log", "--format=%cI", `-S${flag}:`, "--", `apps/${app}/flags_spec.cue`]);
+  const r = await run("git", ["-C", dir, "log", "--format=%cI", "--pickaxe-regex", `-S(^|[^A-Za-z0-9_])${flag}:`, "--", `apps/${app}/flags_spec.cue`]);
   if (!r.ok) throw new Error(`git log ${app}/${flag}: ${first(r.err)}`);
   return r.out.trim().split("\n").filter(Boolean).pop() ?? null;
 }
@@ -101,7 +132,11 @@ async function casesOf(dir: string, names: string[], run: Run): Promise<Record<s
 }
 
 /** The pending flags of every app of the flow's `flagsRepo` at origin/main, held ones left out, and the drift (live true, spec false). A failure anywhere throws, naming it. */
-export async function pendingNow(flow: DevFlow, now: Date, run: Run = (c, a, cwd, env) => cmd(c, a, { cwd, env })) {
+export function pendingNow(flow: DevFlow, now: Date, run: Run = (c, a, cwd, env) => cmd(c, a, { cwd, env })) {
+  return locked(flow.flagsRepo, () => pendingIn(flow, now, run));
+}
+
+async function pendingIn(flow: DevFlow, now: Date, run: Run) {
   const root = await cloneAt(flow.flagsRepo, run);
   const tree = await run("git", ["-C", root, "ls-tree", "-r", "--name-only", "origin/main"]);
   if (!tree.ok) throw new Error(`git ls-tree ${flow.flagsRepo}: ${first(tree.err)}`);
@@ -155,7 +190,7 @@ export async function watchFlags(flow: DevFlow, now: Date, fresh = false, run?: 
   const seen = seenFile(flow);
   const was = seen.read();
   const list = newPending(pending, was);
-  const newDrift = newPending(drift, was);
-  seen.write([...pending, ...drift].map((f) => `${f.app}/${f.flag}`));
+  const newDrift = newPending(drift, was, "drift");
+  seen.write([...pending.map((f) => `pending:${f.app}/${f.flag}`), ...drift.map((f) => `drift:${f.app}/${f.flag}`)]);
   return { list, drift: newDrift, line: pendingLine(list, true, newDrift) };
 }

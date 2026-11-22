@@ -498,9 +498,10 @@ export function driftFlags(apps) {
   return out;
 }
 
-/** The pending flags (or drifts) a report has not made: those whose `app/flag` is not among `seen`. */
-export function newPending(list, seen) {
-  return list.filter((f) => !seen.includes(`${f.app}/${f.flag}`));
+/** The pending flags (or, with `kind` "drift", the drifts) a report has not made: those whose `kind:app/flag` is not among `seen`. A flag that was
+ * pending and is now drift is a new report. */
+export function newPending(list, seen, kind = "pending") {
+  return list.filter((f) => !seen.includes(`${kind}:${f.app}/${f.flag}`));
 }
 
 /** The line `status` and `flags` print: `pending flags: app/flag (age, cases: yes|no) | ...`, or `pending flags: none`
