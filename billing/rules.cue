@@ -59,6 +59,8 @@ rules: {
 	// The most a request body is read for, in bytes: any request the broker reads a body of, and Stripe's webhook.
 	// The live/sandbox dispatcher enforces it (413) before it picks a broker.
 	bodyLimits: {request: 4096, webhook: 262144}
+	// How long the service waits for flagd's answer on the stripe_door flag before it takes the direct route.
+	doorLookupTimeoutMs: 300
 }
 
 rules: {
@@ -74,6 +76,7 @@ rules: {
 	claimLeaseMs: int & >0 & <claimRetentionMs
 	routeLimits: {perClient: int & >0, global: int & >perClient, bodyMax: int & >0, windowMs: int & >0}
 	bodyLimits: {request: int & >0, webhook: int & >request}
+	doorLookupTimeoutMs: int & >0
 	claimTransitions: [...{
 		event: "claim" | "complete" | "release" | "remember" | "expire" | "invalidate"
 		from:  "absent" | or(claimStates)

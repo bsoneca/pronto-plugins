@@ -105,5 +105,6 @@ export const RULES = {
   "bodyLimits": {
     "request": 4096,
     "webhook": 262144
-  }
+  },
+  "doorLookupTimeoutMs": 300
 } as const;
