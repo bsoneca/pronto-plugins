@@ -287,7 +287,10 @@ def run-door-probes [node: record, port: int]: nothing -> int {
 			if $r.exit_code != 0 { error make {msg: $"the door check could not ask ($probe.path) of ($node.host): curl exit ($r.exit_code), so the door cannot be certified"} }
 			let body = (try { open --raw $file } catch { "" })
 			let status = ($r.stdout | str trim)
-			if $status =~ '^5\d\d$' or $status !~ '^\d{3}$' { error make {msg: $"the door check could not ask ($probe.path) of ($node.host): it answered ($status), so the door cannot be certified"} }
+			# /img and /blobs are the door's routes to imgproxy and the blob store, which an app may not run: there Caddy answers a 5xx for the
+			# upstream that is absent, which reaches neither the sidecar nor a service (the leak check below still runs on any answer).
+			let lenient = ($probe.lenient? | default false)
+			if ($status =~ '^5\d\d$' and not $lenient) or $status !~ '^\d{3}$' { error make {msg: $"the door check could not ask ($probe.path) of ($node.host): it answered ($status), so the door cannot be certified"} }
 			if $status == "200" and (($body =~ '"runtimeVersion"') or ($body =~ '"appConnectionProperties"') or (($body | str trim) == "ok")) {
 				error make {msg: $"the door reaches the Dapr API: ($node.host)($probe.path) answered 200 with ($body | str substring 0..200); the caddy Dapr configuration did not take"}
 			}
