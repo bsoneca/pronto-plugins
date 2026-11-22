@@ -386,8 +386,11 @@ export const timeAfter = (a, b) => { const [x, fx] = instant(a), [y, fy] = insta
 // occurrence with its hash, its time and whether its source reads strictly after the cursor (Cloud Logging) or from its millisecond on
 // (the node's VictoriaLogs): this read's from the cursor on, and the saved occurrences this read did not meet.
 // Only an occurrence the next read can return is kept, so no run carries a hash it can never meet.
-/** @param {{entries: any[], hashes: string[], since?: boolean, counted?: Iterable<string | {h: string, at?: string, strict?: boolean}>, reached: string, to: string, lag: number}} input */
-export function settleRun({ entries, hashes, since = false, counted = [], reached, to, lag }) {
+// `cursor` is the cursor the run started from (its `at`): the committed time never moves behind it. A read a limit cut short commits where it
+// stopped, and the next read to now would commit a lag before where IT started reading, which is before that: the entries between were
+// already counted and the run after would read, and count, them again (PRONTO-1531).
+/** @param {{entries: any[], hashes: string[], since?: boolean, counted?: Iterable<string | {h: string, at?: string, strict?: boolean}>, reached: string, to: string, lag: number, cursor?: string}} input */
+export function settleRun({ entries, hashes, since = false, counted = [], reached, to, lag, cursor }) {
   const known = new Map();
   for (const c of counted) {
     const o = typeof c === "string" ? { h: c } : c;
@@ -398,7 +401,9 @@ export function settleRun({ entries, hashes, since = false, counted = [], reache
   entries.forEach((e) => instant(e.timestamp));
   instant(reached);
   const rest = since ? entries : entries.filter((_e, i) => !known.get(hashes[i])?.shift());
-  const committed = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
+  if (cursor !== undefined && cursor !== null) instant(cursor);
+  const lagged = reached === to ? new Date(Date.parse(reached) - lag).toISOString() : reached;
+  const committed = cursor !== undefined && cursor !== null && timeAfter(cursor, lagged) ? cursor : lagged;
   // The next read starts at the cursor: Cloud Logging strictly after it, the node from its millisecond on (its timestamps are cut to
   // ms and VictoriaLogs' start is inclusive). An occurrence of unknown time (an old cursor's) is kept until a read to now prunes it.
   const reachable = (o) => o.at === undefined || (o.strict ? timeAfter(o.at, committed) : Date.parse(o.at) >= Date.parse(committed));
@@ -410,6 +415,20 @@ export function settleRun({ entries, hashes, since = false, counted = [], reache
   if (!since) for (const list of known.values()) for (const o of list) if (o.at !== undefined ? reachable(o) : reached !== to) seen.push(o);
   return { entries: rest, committed, seen };
 }
+// What cursor.json holds after a run: `at`, `seen` (the hashes of the occurrences kept, as STRINGS: the older watcher loads `seen` into a Set and looks
+// up string hashes, so a different shape in it would miss every lookup and count the overlap twice) and `occurrences` (each with its time and whether
+// its source reads strictly after the cursor, for this version's reader).
+export const cursorOf = (settled) => ({ at: settled.committed, seen: settled.seen.map((o) => o.h), occurrences: settled.seen });
+
+// The occurrences a cursor holds, for settleRun's `counted`. `occurrences` is trusted only while it matches `seen` hash for hash: an older writer
+// that saved the cursor after this one rewrote `seen` alone, and its `occurrences` are then another run's. A cursor with `seen` alone (an older
+// writer's, bare hashes) or one whose `seen` holds objects (this version's first form) is read as it is.
+export const countedOf = (cursor) => {
+  const seen = cursor?.seen ?? [];
+  const occ = cursor?.occurrences;
+  if (Array.isArray(occ) && occ.length === seen.length && occ.every((o, i) => o && typeof o === "object" && o.h === seen[i])) return occ;
+  return seen;
+};
 // What an entry is hashed as (prod-watch.ts's cursor keeps the hashes of what it counted): the entry as its source
 // gave it, without a `source` tag, so a cursor written before one still matches.
 export const hashInput = (entry) => JSON.stringify({ ...entry, source: undefined });
