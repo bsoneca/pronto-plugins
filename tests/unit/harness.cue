@@ -390,5 +390,8 @@ cases: "a production scenario may evaluate a flag by POST and make no other writ
 		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/f", anon: true, body: {context: {}, extra: 1}, expect: {status: 200}}}]], matches: "_writes", why: "nothing in the body but the context"},
 		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/f", anon: true, headers: {authorization: "Bearer x"}, expect: {status: 200}}}]], matches: "_writes", why: "no header of its own"},
 		{call: "harness.productionRefused", args: [[{http: {method: "PUT", path: "/ofrep/v1/evaluate/flags/f", anon: true, expect: {status: 200}}}]], matches: "_writes", why: "only POST"},
+		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/f%2F..%2F..%2Fcrud%2Fx", anon: true, expect: {}}}]], matches: "_writes", why: "no encoded climb"},
+		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "https://x.example/ofrep/v1/evaluate/flags/f", anon: true, expect: {}}}]], matches: "_writes", why: "only the door's own path"},
+		{call: "harness.productionRefused", args: [[{http: {method: "POST", path: "/ofrep/v1/evaluate/flags/f", anon: true, body: "{}", expect: {}}}]], matches: "_writes", why: "the body is the context object, not text"},
 	]
 }
