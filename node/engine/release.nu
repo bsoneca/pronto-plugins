@@ -242,7 +242,7 @@ def check-daprd [app: string, namespace: string, components: list<string>] {
 # PostgREST's answer (a 404, `PGRST125`), never the sidecar's metadata (a 200 JSON body with `"runtimeVersion"`), and no Dapr API
 # path may reach the sidecar or another service: explicit invocation of the door's own service (`/crud/v1.0/invoke/caddy/method/health`,
 # which would answer `ok`), the same path spelled with encoded dots and slashes, a `..` out of the prefix (sent as is), and the
-# other prefixes that strip and pass the rest on (`/img`, `/blobs`). Every `/crud` probe must answer PostgREST's 404; the others
+# other prefixes that strip and pass the rest on (`/img`, `/blobs`), also spelled in upper case (the door's matchers ignore case). Every `/crud` probe must answer PostgREST's 404; the others
 # fail on a 200 with the sidecar's metadata or a service's bare `ok`. A curl failure, a timeout or any 5xx fails the release
 # (inconclusive is a failure). Nothing here depends on DNS: the probes dial the Envoy Gateway data-plane Service of the release's
 # Gateway through a `kubectl port-forward` and plain HTTP with the public `Host` (the way the node's cloudflared dials it; the
@@ -260,6 +260,11 @@ export def door-probes [] {
 		{path: "/img/v1.0-alpha1/metadata", as_is: false, strict: false, guard: true}
 		{path: "/blobs/v1.0/metadata", as_is: false, strict: false, guard: true}
 		{path: "/blobs/v1.0-alpha1/metadata", as_is: false, strict: false, guard: true}
+		# Caddy's path matchers ignore case, so the upper-case spellings must meet the guard too (PRONTO-916): a case-sensitive guard
+		# lets `/CRUD/v1.0/metadata` through to the sidecar as `/v1.0/metadata`. Each must be the door's own 404.
+		{path: "/CRUD/v1.0/metadata", as_is: false, strict: true, guard: true}
+		{path: "/Img/v1.0-alpha1/metadata", as_is: false, strict: false, guard: true}
+		{path: "/BLOBS/v1.0/metadata", as_is: false, strict: false, guard: true}
 	]
 }
 

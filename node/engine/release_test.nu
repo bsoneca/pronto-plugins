@@ -118,6 +118,10 @@ case "$*" in
     if [ -f "$d/probe_502" ]; then echo "bad gateway" > "$out"; printf 502; exit 0; fi
     if [ -f "$d/probe_timeout" ]; then printf 000; exit 28; fi
     case "$*" in
+      *"/CRUD/v1.0/metadata"*) if [ -f "$d/upper_open" ]; then echo '{"id":"caddy","runtimeVersion":"1.16.21","components":[]}' > "$out"; printf 200; exit 0; fi ;;
+      *"/Img/v1.0-alpha1/metadata"*) if [ -f "$d/upper_img_proxied" ]; then echo 'upstream' > "$out"; printf 403; exit 0; fi ;;
+    esac
+    case "$*" in
       *"/img/v1.0/metadata"*) if [ -f "$d/img_500" ]; then echo 'ERR_DIRECT_INVOKE failed to resolve address' > "$out"; printf 500; exit 0; fi ;;
       *"/blobs/v1.0-alpha1/metadata"*) if [ -f "$d/blobs_alpha_proxied" ]; then echo 'upstream' > "$out"; printf 403; exit 0; fi ;;
     esac
@@ -809,9 +813,15 @@ def test_the_door_image_is_built_only_with_the_dapr_guard [] {
 	assert ($bad.exit_code != 0) "a Caddyfile without the guard fails the build"
 	assert (has $bad.stderr "lacks the Dapr guard") $bad.stderr
 	assert (has $bad.stderr "doorguard") $bad.stderr
-	"(app) {\n  # PRONTO-1307: no public prefix reaches a Dapr API path of its sidecar\n  @daprapi path_regexp daprapi ^/(crud|img|blobs|electric)/v1\\.0(-alpha1)?(/|$)\n  handle @daprapi {\n    respond 404\n  }\n  handle /img/* {\n    respond 200\n  }\n}\n" | save -f ($w.app | path join docker Caddyfile)
+	"(app) {\n  # PRONTO-1307: no public prefix reaches a Dapr API path of its sidecar\n  @daprapi path_regexp daprapi (?i)^/(crud|img|blobs|electric)/v1\\.0(-alpha1)?(/|$)\n  handle @daprapi {\n    respond 404\n  }\n  handle /img/* {\n    respond 200\n  }\n}\n" | save -f ($w.app | path join docker Caddyfile)
 	let ok = (in-world $w $release_nu --app $w.app --check --build)
 	assert equal $ok.exit_code 0 $"($ok.stdout)\n($ok.stderr)"
+	# PRONTO-916: a guard whose pattern is case-sensitive is the bypass: the build refuses it, naming the refresh
+	"(app) {\n  # PRONTO-1307: no public prefix reaches a Dapr API path of its sidecar\n  @daprapi path_regexp daprapi ^/(crud|img|blobs|electric)/v1\\.0(-alpha1)?(/|$)\n  handle @daprapi {\n    respond 404\n  }\n  handle /img/* {\n    respond 200\n  }\n}\n" | save -f ($w.app | path join docker Caddyfile)
+	let stale = (in-world $w $release_nu --app $w.app --check --build)
+	assert ($stale.exit_code != 0) "a case-sensitive guard fails the build"
+	assert (has $stale.stderr "case-sensitive") $stale.stderr
+	assert (has $stale.stderr "doorguard") $stale.stderr
 	rm -rf ($w.app | path join docker)
 	let none = (in-world $w $release_nu --app $w.app --check --build)
 	assert equal $none.exit_code 0 "an app with no Caddyfile is not asked for a guard"
@@ -1283,7 +1293,7 @@ def test_the_door_must_not_answer_the_dapr_api [] {
 	assert (($guard_at | first) < ($caddy_at | first)) "the guard Configuration comes before the caddy Deployment"
 	# the probes dial the node's ingress through a port-forward to the Gateway's Envoy Service, plain HTTP, the public Host
 	let door_log = ($w.dir | path join door_curl.log | open --raw | lines)
-	assert (($door_log | length) == 11) $"eleven probes: ($door_log | length)"
+	assert (($door_log | length) == 14) $"fourteen probes, the three upper-case spellings among them: ($door_log | length)"
 	assert ($door_log | all {|l| ($l | str contains "http://127.0.0.1:") and ($l | str contains "-H Host: ")}) ($door_log | str join "\n")
 	assert (not ($door_log | any {|l| $l | str contains "https://" })) "no probe uses https or DNS"
 	assert (calls $w | any {|c| $c | str starts-with "get service -n envoy-gateway-system -l gateway.envoyproxy.io/owning-gateway-name=aprende-gateway,gateway.envoyproxy.io/owning-gateway-namespace=aprende" }) "the Service is found by the Gateway's owning labels"
@@ -1337,7 +1347,11 @@ def test_the_door_must_not_answer_the_dapr_api [] {
 	# PRONTO-1307: a Dapr API path under /img or /blobs is the door's own 404; a 5xx from Dapr, or any proxied answer, fails
 	assert (($w.dir | path join door_curl.log | open --raw | lines | where {|l| $l | str contains "/img/v1.0-alpha1/metadata" } | length) >= 1) "the -alpha1 probes are asked"
 	assert (($w.dir | path join door_curl.log | open --raw | lines | where {|l| $l | str contains "/blobs/v1.0-alpha1/metadata" } | length) >= 1) "the blobs -alpha1 probe is asked"
-	for case in [[file text]; [img_500 "answered 500"] [blobs_alpha_proxied "not the door's own 404"]] {
+	# PRONTO-916: the upper-case spellings are asked too, and must be the door's own 404
+	for upper in ["/CRUD/v1.0/metadata" "/Img/v1.0-alpha1/metadata" "/BLOBS/v1.0/metadata"] {
+		assert (($w.dir | path join door_curl.log | open --raw | lines | where {|l| $l | str contains $upper } | length) >= 1) $"the ($upper) probe is asked"
+	}
+	for case in [[file text]; [img_500 "answered 500"] [blobs_alpha_proxied "not the door's own 404"] [upper_img_proxied "not the door's own 404"]] {
 		rm -f ($w.dir | path join metadata_open)
 		"" | save -f ($w.dir | path join $case.file)
 		let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
@@ -1346,7 +1360,7 @@ def test_the_door_must_not_answer_the_dapr_api [] {
 		rm -f ($w.dir | path join $case.file)
 	}
 	# each other leak fails the release too, naming the path
-	for leak in [[file path]; [invoke_by_path "/crud/v1.0/invoke/caddy/method/health"] [dotdot_open "/crud/x/../v1.0/invoke/caddy/method/health"] [img_open "/img/v1.0/metadata"]] {
+	for leak in [[file path]; [invoke_by_path "/crud/v1.0/invoke/caddy/method/health"] [dotdot_open "/crud/x/../v1.0/invoke/caddy/method/health"] [img_open "/img/v1.0/metadata"] [upper_open "/CRUD/v1.0/metadata"]] {
 		rm -f ($w.dir | path join metadata_open)
 		"" | save -f ($w.dir | path join $leak.file)
 		let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json)"))
