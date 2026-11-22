@@ -489,7 +489,7 @@ import (
 		}
 
 		// An outside check per entry, and a policy on it: it mails the channels when the check
-		// fails from at least failingRegions regions for the window. Never imported.
+		// fails from at least failingLocations checker locations for the window. Never imported.
 		for nm, u in P.uptimeChecks if P.adoptAll || list.Contains(*P.adopt["uptimeChecks"] | [], nm) {
 			let k = (#name & {in: "\(P.id)_\(nm)"}).out
 			tofu: resource: google_monitoring_uptime_check_config: (k): {
@@ -512,7 +512,7 @@ import (
 					labels: {project_id: P.id, host: u.host}
 				}
 			}
-			tofu: resource: google_monitoring_alert_policy: (k): {
+			tofu: resource: google_monitoring_alert_policy: "\(k)_uptime": {
 				depends_on: list.Concat([deps, [for c in u.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
 				project:      P.id
 				display_name: "Uptime: \(nm)"
@@ -521,11 +521,11 @@ import (
 				notification_channels: [for c in u.channels {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
 				documentation: {content: u.documentation, mime_type: "text/markdown"}
 				conditions: [{
-					display_name: "\(u.host)\(u.path) fails from \(u.failingRegions) or more regions"
+					display_name: "\(u.host)\(u.path) fails from \(u.failingLocations) or more checker locations"
 					condition_threshold: {
 						filter:          "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND metric.label.check_id=\"${google_monitoring_uptime_check_config.\(k).uptime_check_id}\" AND resource.type=\"uptime_url\""
 						comparison:      "COMPARISON_GT"
-						threshold_value: u.failingRegions - 1
+						threshold_value: u.failingLocations - 1
 						duration:        u.window
 						trigger: count: 1
 						aggregations: [{

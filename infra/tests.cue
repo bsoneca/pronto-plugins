@@ -455,7 +455,7 @@ checkIsTwoXX: _check.http_check.accepted_response_status_codes & [{status_class:
 checkEveryMinute: _check.period & "60s"
 checkRegions:     list.MinItems(_check.selected_regions, 3) & true
 checkHost: _check.monitored_resource.labels & {host: "example.com", project_id: "example-project-123"}
-_uptimePolicy: _u.google_monitoring_alert_policy.example_project_123_example_com
+_uptimePolicy: _u.google_monitoring_alert_policy.example_project_123_example_com_uptime
 uptimePolicyTwoRegions: _uptimePolicy.conditions[0].condition_threshold & {threshold_value: 1, duration: "300s", comparison: "COMPARISON_GT"}
 uptimePolicyOnCheck: strings.Contains(_uptimePolicy.conditions[0].condition_threshold.filter, "google_monitoring_uptime_check_config.example_project_123_example_com.uptime_check_id") & true
 uptimePolicyToChannel: _uptimePolicy.notification_channels & ["$" + "{google_monitoring_notification_channel.example_project_123_oncall.id}"]

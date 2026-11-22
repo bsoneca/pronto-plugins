@@ -347,7 +347,7 @@ import "list"
 }
 
 // An outside HTTPS check of one host's path, from Google's checkers in several regions, and the
-// policy that mails the channels when it fails from at least `failingRegions` of them for `window`.
+// policy that mails the channels when it fails from at least `failingLocations` checker locations (a region group such as USA runs from several) for `window`.
 #UptimeCheck: {
 	host!: =~"^[a-z0-9.-]+$"
 	path:  *"/" | =~"^/"
@@ -358,10 +358,10 @@ import "list"
 	// make one checker's bad route an outage.
 	regions: *["USA", "EUROPE", "SOUTH_AMERICA", "ASIA_PACIFIC"] | [...("USA" | "EUROPE" | "SOUTH_AMERICA" | "ASIA_PACIFIC")] & list.MinItems(3)
 	// The policy fires when at least this many regions fail.
-	failingRegions: *2 | int & >=1
-	window:         *"300s" | =~"^[0-9]+s$"
-	severity:       *"page" | "warning"
-	documentation:  *"The check of \(host)\(path) fails from several regions: the node, its tunnel or the app is down, or Cloudflare blocks the checkers." | string
+	failingLocations: *2 | int & >=1
+	window:           *"300s" | =~"^[0-9]+s$"
+	severity:         *"page" | "warning"
+	documentation:    *"The check of \(host)\(path) fails from several regions: the node, its tunnel or the app is down, or Cloudflare blocks the checkers." | string
 	channels: [...string]
 }
 
