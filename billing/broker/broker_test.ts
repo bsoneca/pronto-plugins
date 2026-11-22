@@ -1120,7 +1120,7 @@ Deno.test("an invoice call that hits the transport's deadline is tried again, th
   s.fake.close();
 });
 
-Deno.test("a tenant's refusal is a loud non-2xx Stripe resends, bounded: after five refused deliveries the event is answered 200 and marked done, with the alert", async () => {
+Deno.test("a tenant's refusal is a loud non-2xx on every delivery and never marks the event done", async () => {
   const s = await setup();
   await s.prove(A, TRIAL);
   await s.payouts(A);
@@ -1131,25 +1131,23 @@ Deno.test("a tenant's refusal is a loud non-2xx Stripe resends, bounded: after f
   console.error = (...a: unknown[]) => { logged.push(a.join(" ")); };
   try {
     t.refuse = true;
-    const answers: [number, unknown][] = [];
-    for (let i = 0; i < 5; i++) {
+    const statuses: number[] = [];
+    for (let i = 0; i < 8; i++) {
       const res = await deliver(s, "evt_refused", sub)();
-      answers.push([res.status, (await res.json()).delivery ?? "done"]);
+      statuses.push(res.status);
+      await res.body?.cancel();
     }
-    assertEquals(answers, [[502, 1], [502, 2], [502, 3], [502, 4], [200, "done"]], "four resends asked for, the fifth gives up");
+    assertEquals(statuses, Array(8).fill(502), "Stripe is asked to send it again every time; no count ends it");
     const alerts = logged.filter((l) => l.includes("billing_alert=entitlement_refused"));
-    assertEquals(alerts.length, 5, "every refusal is a loud, distinctive line");
+    assertEquals(alerts.length, 8, "every refusal is a loud, distinctive line");
     assertEquals(alerts.every((l) => l.includes(`account=${ANA}`) && l.includes("event=evt_refused")), true, "naming the account and the event");
-    const after = await deliver(s, "evt_refused", sub)();
-    assertEquals(await after.json(), { duplicate: "evt_refused" }, "marked done once it gave up");
-    // A tenant that takes it on a resend is delivered, and the count stays apart per event.
-    t.refuse = true;
-    const first = await deliver(s, "evt_flaky", sub)();
-    assertEquals(first.status, 502);
+    // The tenant takes it on a later resend: delivered, and only then remembered.
     t.refuse = false;
     const before = t.got.length;
-    const again = await deliver(s, "evt_flaky", sub)();
-    assertEquals([again.status, await again.json(), t.got.length], [200, { delivered: "evt_flaky" }, before + 1], "the resend is pushed");
+    const again = await deliver(s, "evt_refused", sub)();
+    assertEquals([again.status, await again.json(), t.got.length], [200, { delivered: "evt_refused" }, before + 1], "still eligible for redelivery");
+    const dup = await deliver(s, "evt_refused", sub)();
+    assertEquals(await dup.json(), { duplicate: "evt_refused" }, "a delivery is remembered");
   } finally {
     console.error = error;
   }
@@ -1174,3 +1172,51 @@ for (const c of ROUTE_CASES) {
     assertEquals((await s.post("/route", {})).status, 400, "a tenant is named");
   });
 }
+
+// The route probe has limiters of its own, a capped body, and chooses by the very function a call's dispatch uses.
+Deno.test("route probes never spend a player's checkout, trial or probe quota, and have a cap of their own", async () => {
+  const names: string[] = [];
+  class Spy extends MemoryStore {
+    override take(name: string, ...a: [string, number, number]): Promise<boolean> {
+      names.push(name);
+      return super.take(name, ...a);
+    }
+  }
+  const s = await setup({ store: new Spy(), switched: "asked" });
+  for (let i = 0; i < 5; i++) await (await s.post("/route", { tenant: A, door: true })).body?.cancel();
+  assertEquals([...new Set(names)].sort(), ["route all live", "route client live"], "only its own limiters are taken");
+  // Past the per-client cap, a route probe is refused; a checkout from the same client is not.
+  let refused = 0;
+  for (let i = 0; i < 40; i++) {
+    const r = await s.post("/route", { tenant: A, door: true });
+    if (r.status === 429) refused++;
+    await r.body?.cancel();
+  }
+  assertEquals(refused > 0, true, "capped");
+  await s.prove(A);
+  await s.payouts(A);
+  const checkout = await s.post("/checkout", { tenant: A, account: ANA, plan: "analysis" });
+  assertEquals(checkout.status, 200, "the checkout quota is untouched by route probes");
+  await checkout.body?.cancel();
+});
+
+Deno.test("a route probe reads a capped body: over the cap is a 413", async () => {
+  const s = await setup({ switched: "asked" });
+  const big = await s.call("/route", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tenant: A, pad: "x".repeat(5000) }) });
+  assertEquals(big.status, 413);
+  await big.body?.cancel();
+});
+
+Deno.test("the route probe and a real call choose the same transport, for door true, false and absent", async () => {
+  for (const door of [true, false, undefined]) {
+    const s = await setup({ switched: "asked" });
+    await s.prove(A);
+    await s.payouts(A);
+    const word = door === undefined ? {} : { door };
+    const probe = await (await s.post("/route", { tenant: A, ...word })).json();
+    s.transportCalls.length = 0;
+    const res = await s.post("/probe", { tenant: A, account: ANA, ...word });
+    await res.body?.cancel();
+    assertEquals([...new Set(s.transportCalls)], [probe.transport], `door ${door}: the dispatch took what /route said`);
+  }
+});

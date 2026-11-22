@@ -63,7 +63,7 @@ Deno.test("in a release, the flag through the app's own door", async () => {
 // The free trial: what the service answers and asks of the database and the broker, with the
 // flag, the account's status and the broker as each test sets them.
 const ANA_ID = "00000000-0000-4000-8000-00000000000a";
-function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>; offer?: () => Response; checkout?: () => Response; document?: unknown; consent?: unknown; door?: () => Response } = {}) {
+function trialStage(o: { strict?: () => Response; flag?: () => Response; status?: Record<string, unknown>; offer?: () => Response; checkout?: () => Response; document?: unknown; consent?: unknown; door?: () => Response } = {}) {
   const calls: { fn: string; args: Record<string, unknown> }[] = [];
   const broker: { path: string; body: Record<string, unknown> }[] = [];
   const flagBodies: unknown[] = [];
@@ -87,7 +87,7 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
       flagAsks.push({ url, headers: Object.fromEntries(new Headers(init?.headers)) });
       return Promise.resolve(o.flag ? o.flag() : Response.json({ value: true }));
     }
-    if (url.endsWith("/ofrep/v1/evaluate/flags/billing_strict")) return Promise.resolve(Response.json({ value: true }));
+    if (url.endsWith("/ofrep/v1/evaluate/flags/billing_strict")) return Promise.resolve(o.strict ? o.strict() : Response.json({ value: true }));
     if (/^(http:\/\/flagd:8693|https:\/\/a\.example)\/ofrep\/v1\/evaluate\/flags\/stripe_door$/.test(url)) {
       const h = new Headers(init?.headers);
       doorAsks.push({ auth: h.get("authorization"), account: h.get("x-pronto-account"), body });
@@ -633,4 +633,15 @@ Deno.test("GET /billing/route with a failed door lookup is a 502 and the broker 
   } finally {
     console.error = quietly;
   }
+});
+
+Deno.test("a configured strict flag that cannot be asked fails a trial request instead of reading as off", async () => {
+  for (const strict of [() => new Response("", { status: 500 }), () => Response.json({ value: "yes" })]) {
+    const t = trialStage({ strict });
+    const res = await t.ask(t.make({ strictFlag: "billing_strict" }), "/billing/trial");
+    eq([res.status, t.broker.length], [502, 0], "no answer is a failure, and nothing is asked of the broker");
+    await res.body?.cancel();
+  }
+  const unset = trialStage({ strict: () => new Response("", { status: 500 }) });
+  eq((await unset.ask(unset.make(), "/billing/trial")).status, 200, "no strict flag configured: nothing is asked");
 });

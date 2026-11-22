@@ -261,7 +261,13 @@ export function service(s: Settings) {
       return undefined;
     }
   }
-  const strictOn = async (account?: string, auth?: string | null): Promise<boolean> => (await strictAnswer(account, auth)) === true;
+  // Where the strict path needs an answer: a configured strict flag that cannot be asked fails the request, never
+  // quietly reads as off. (The grants health keeps the last mode instead: see `attempt`.)
+  const strictOn = async (account?: string, auth?: string | null): Promise<boolean> => {
+    const answer = await strictAnswer(account, auth);
+    if (answer === undefined) throw new Error(`flag ${s.strictFlag}: cannot be asked`);
+    return answer;
+  };
 
   // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag
   // for them now: through the door, with the reader's own session, which its OFREP route reads the
