@@ -1020,8 +1020,20 @@ def record-work [at: record, app: path, version: string, cases: string, want: li
 		# The app's generate may wait on the machine's slots: it gets PRONTO_FLAGS_GENERATE_TIMEOUT_SEC (600), then it is
 		# stopped and the record fails, never the push.
 		let limit = ($env.PRONTO_FLAGS_GENERATE_TIMEOUT_SEC? | default 600 | into int)
-		# Its own process group (job control), killed whole: a child the generate started goes with it.
-		let watched = 'set -m; sh -c "$PRONTO_GEN" & p=$!; (sleep $PRONTO_GEN_LIMIT; kill -TERM -- -$p 2>/dev/null) >/dev/null 2>&1 & w=$!; wait $p; rc=$?; kill -- -$w 2>/dev/null; exit $rc'
+		# Its own session, killed whole on the limit or when it ends (python3, which behaves alike on macOS and Linux where
+		# `sh`'s job control does not): a child the generate started goes with it, and none holds the output open.
+		let watched = 'python3 -c "import os,sys,subprocess,signal
+p=subprocess.Popen([\"sh\",\"-c\",os.environ[\"PRONTO_GEN\"]],start_new_session=True)
+try:
+    rc=p.wait(timeout=float(os.environ[\"PRONTO_GEN_LIMIT\"]))
+except subprocess.TimeoutExpired:
+    rc=124
+try:
+    os.killpg(p.pid,signal.SIGKILL)
+except ProcessLookupError:
+    pass
+p.wait()
+sys.exit(rc)"'
 		let g = (run-cases $wapp $watched ($trust | merge {PRONTO_GEN: $gen, PRONTO_GEN_LIMIT: ($limit | into string)}))
 		if not $g.ok { error make {msg: $"flags: record: generate failed or ran past its ($limit) s in the scratch tree: ($g.out)"} }
 	} else { print -e $"flags: record: ($wapp) has no tests/slot.ts, so generate was not run" }
