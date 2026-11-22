@@ -600,6 +600,9 @@ Deno.test("a trial whose first charge fails is cancelled at once, exactly once",
   await fake.emit("customer.subscription.deleted", sub);
   assertEquals(s.sent.filter((r) => r.method === "DELETE").length, 1, "idempotent");
   assertEquals(s.sent.filter((r) => r.method === "POST" && r.path === `/v1/subscriptions/${sub.id}`).length, 1);
+  // Stripe's own event for the metadata the broker sets while it ends the trial overlaps the first delivery and is answered 409,
+  // so the fake keeps sending it every few seconds: let it go.
+  fake.close();
 });
 
 Deno.test("a cancel Stripe refused is tried again when Stripe sends the event again", async () => {
@@ -660,6 +663,7 @@ Deno.test("a failed first charge voids its open invoice before the cancel", asyn
   assertEquals([inv.status, sub.status], ["void", "canceled"]);
   const order = s.sent.filter((r) => r.path.startsWith("/v1/invoices/") || r.method === "DELETE").map((r) => `${r.method} ${r.path.replace(inv.id, "IN")}`);
   assertEquals(order, ["GET /v1/invoices/IN", "POST /v1/invoices/IN/void", `DELETE /v1/subscriptions/${sub.id}`]);
+  s.fake.close();
 });
 
 Deno.test("an invoice that cannot be read or voided, a key without Invoices access included, fails the event and cancels nothing until it can", async () => {
