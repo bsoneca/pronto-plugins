@@ -482,6 +482,14 @@ elif cmd == "pr list":
     if os.path.exists(D + "/rgh.fork"):
         out.append({"number": 9, "url": "https://example.test/pull/9", "isCrossRepository": True, "author": {"login": "evil"}, "body": "- second: x\nRecords: {\"second\": true}"})
     print(json.dumps(out))
+    if os.path.exists(D + "/rgh.moveref"):
+        # A concurrent record lands after this list: the branch moves and a pull request of its own appears.
+        os.remove(D + "/rgh.moveref")
+        os.system("git --git-dir=" + D + "/rorigin.git update-ref refs/heads/fix/flags-record-rec main")
+        open(bodyfile, "w").write("Records: {\"premium\": true}")
+        open(created, "w").close()
+elif cmd == "pr view":
+    print("CLOSED" if os.path.exists(D + "/rgh.closedview") else "OPEN")
 elif cmd == "pr create":
     open(created, "w").close()
     open(bodyfile, "w").write(body)
@@ -555,12 +563,12 @@ rm $"($dir)/rgh.fork"
 check ($r2f.exit_code == 0 and (ghcount "pr create") == $creates + 1 and (ghcount "pr edit 9") == 0) "record: a fork's pull request is not edited; the tool opens its own"
 
 # A default that is a reference is refused: the push stands, the failure is said and noted, drift lists it.
-rspec false "flags: bad: {default: _d, local: true}\nflags: gen: {default: false, local: true}\n_d: false\n"
+rspec false "flags: bad: {default: _d, local: true}\nflags: gen: {default: false, local: true}\nflags: slow: {default: false, local: true}\n_d: false\n"
 rg add -A
 rg commit -q -m "bad default"
 rg push -q origin HEAD:main
 rg fetch -q origin
-rrun [push $rapp --sync "bad,gen" --untested "rec"] | ignore
+rrun [push $rapp --sync "bad,gen,slow" --untested "rec"] | ignore
 let created_before = (open --raw $ghlog | lines | where {|l| $l | str starts-with "pr create" } | length)
 let r3 = (rrun [push $rapp --flip bad --untested "rec"])
 check ($r3.exit_code == 0 and (open $"($rapp)/flagstore/flags.json" | get flags.bad.variants.default) == true and ($r3.stderr | str contains "NOT recorded")) "record refused: the push exits 0 and the flag stays live, with a warning"
@@ -572,10 +580,36 @@ rspec false "flags: second: {default: true, local: true}\nflags: bad: {default: 
 let d0 = (rrun [drift $rapp])
 check ($d0.exit_code == 0) "drift: exit 0 once the spec says what is live"
 
+# The branch moves between the attempt's reads and its push (a concurrent record): the lease fails, the attempt is made again
+# over the fresh pull request, and both flags end on the branch and in its Records: line.
+rspec false "flags: gen: {default: false, local: true}\nflags: slow: {default: false, local: true}\n"
+rrun [push $rapp --flip premium --untested "rec"] | ignore
+rm -f $"($dir)/rgh.created"
+touch $"($dir)/rgh.moveref"
+let edits_m = (ghcount "pr edit 7")
+let merges_m = (ghcount "pr merge")
+let rm1 = (rrun [push $rapp --flip gen --untested "rec"])
+let moved = (^git -C $rorigin show "fix/flags-record-rec:apps/rec/flags_spec.cue")
+let recs = (open --raw $"($dir)/rgh.body" | lines | where {|l| $l | str starts-with "Records: " } | first | str substring 9.. | from json)
+check ($rm1.exit_code == 0 and ($moved | str contains "gen: {default: true") and ($moved | str contains "premium: {default: true") and $recs.gen == true and $recs.premium == true and (ghcount "pr edit 7") == $edits_m + 1 and (ghcount "pr merge") == $merges_m + 1) "record: the branch moved under the attempt: retried over the fresh pull request, both flags on the branch and in Records:, auto-merge armed on the edit"
+
+# A Records: line that cannot be read carries nothing, with a word, and fails nothing.
+"Records: {nope" | save -f $"($dir)/rgh.body"
+let r_bad = (rrun [push $rapp --flip gen=false --untested "rec"])
+check ($r_bad.exit_code == 0 and ($r_bad.stderr | str contains "Records: line is unparsable") and (rjournal | last).record == "none") "record: an unparsable Records: line carries nothing and fails nothing"
+
+# A pull request that is no longer open when the branch is pushed: a new one is created.
+touch $"($dir)/rgh.closedview"
+let creates_v = (ghcount "pr create")
+let r_view = (rrun [push $rapp --flip gen --untested "rec"])
+rm $"($dir)/rgh.closedview"
+check ($r_view.exit_code == 0 and (ghcount "pr create") == $creates_v + 1) "record: a listed pull request that is no longer open is not edited; a new one is created"
+
 # The app's generate gets a time limit: past it the record fails, the push stands.
-rspec true "flags: gen: {default: false, local: true}\n"
-let tm = (rrun [push $rapp --flip gen --untested "rec"] {PRONTO_FLAGS_GENERATE_CMD: "exec sleep 30", PRONTO_FLAGS_GENERATE_TIMEOUT_SEC: "1"})
-check ($tm.exit_code == 0 and (open $"($rapp)/flagstore/flags.json" | get flags.gen.variants.default) == true and (rjournal | last).record == "failed" and ((rjournal | last).note | str contains "generate failed or ran past")) "record: a generate past its limit fails the record, never the push"
+rspec true "flags: slow: {default: false, local: true}\n"
+let closes_f = (ghcount "pr close")
+let tm = (rrun [push $rapp --flip slow --untested "rec"] {PRONTO_FLAGS_GENERATE_CMD: "exec sleep 30", PRONTO_FLAGS_GENERATE_TIMEOUT_SEC: "1"})
+check ($tm.exit_code == 0 and (open $"($rapp)/flagstore/flags.json" | get flags.slow.variants.default) == true and (rjournal | last).record == "failed" and (ghcount "pr close") == $closes_f and ((rjournal | last).note | str contains "generate failed or ran past")) "record: a generate past its limit fails the record, never the push, and a failed record leaves the open pull request open"
 
 # A mirror (flagsLive.mirrors): each write of the object is applied to a node's ConfigMap over ssh;
 # a failing mirror warns, unless it is required. ssh is a stand-in that keeps what it was sent.
