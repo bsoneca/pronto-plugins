@@ -110,6 +110,17 @@ devFlow: #DevFlow
 		repos:     *["bsoneca/pronto", "bsoneca/pronto-plugins"] | [...(string & =~"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
 		idleHours: *1 | (number & >0)
 	}
+	// The repository whose apps' flags the pending-flags watch reads (`pronto-devflow flags`, and a line of
+	// `status`): every apps/<app> with a flags_spec.cue at its origin/main (owner/name).
+	flagsRepo: *"bsoneca/pronto" | (string & =~"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+	// Flags the owner holds back: merged and off, but not to be flipped, so the watch never lists them. The
+	// list is the flow's, not the flag's: a held flag stays an ordinary one in its app, and flags_plugin.cue's
+	// #Flag, generated into every app, is not changed for a watcher. Seeded with the one the owner holds.
+	flagsHeld: *[{app: "brawl-chess", flag: "capture_fights", why: "the owner, 2026-11-22: \"If the capture_flags change to those boring fights, I don't want them.\""}] | [...{
+		app:  string & !=""
+		flag: string & !=""
+		why:  string & !=""
+	}]
 	// A pull request with this label needs no issue (dependency bumps, the CI fingerprint).
 	chore: *"chore" | string
 	// The board label of an Implementing flip issue that waits for the release holding its fix: it holds no

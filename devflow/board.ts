@@ -11,6 +11,7 @@
 //   board.ts approve <repo> <INBOX-n>                    an inbox item the owner moved to Refine, filed as an issue in the Backlog (a link to it, none of its text)
 //   board.ts suggestion <repo> <INBOX-n>                 the text of an item in Refine (and only Refine), as one quoted, untrusted line: the designer's one way to read it
 //   board.ts prs <repo>                                 the open pull requests nobody is driving (`forgotten PRs:`, devflow/prs.ts), each repository of the flow's prs.repos; exit 1 when there are any, for the hourly scheduled check. Needs no board token. `status` prints the same line.
+//   board.ts flags <repo> [--new] [--notes]             the flags merged to main and not on for everyone in production (`pending flags:`, devflow/flags.ts): the apps of the flow's flagsRepo at origin/main, minus the flags the owner holds (flagsHeld), and `; drift:` for a flag live true that the spec says off; exit 1 when there are any, for the hourly scheduled check. --new lists only those not reported before; --notes adds each one's note. `status` prints the same line.
 //   board.ts next, close                                 gone with the sprints: they print what replaced them and exit 2
 import { cmd, flagsOf } from "../intents/shell.ts";
 import { esc } from "./board/board.ts";
@@ -18,6 +19,7 @@ import { doneAt, flagOf, flipOf, keyOf, nameOf, roleOf, waitPlan } from "./flow.
 import { move as hookMove } from "./hook.ts";
 import { contextOf, file as fileIssue, pull as pullIssue, type ReadCache, start as startIssue, status } from "./queue.ts";
 import { boardOf, devflowOf, type Role } from "./spec.ts";
+import { watchFlags } from "./flags.ts";
 import { watchPrs } from "./prs.ts";
 import { approve, show } from "./suggestions.ts";
 
@@ -33,7 +35,7 @@ if (verb && Object.hasOwn(GONE, verb)) {
 const repo = repoArg ? await Deno.realPath(repoArg) : "";
 const flow = repo ? await devflowOf(repo) : null;
 if (!verb || !flow) {
-  console.error(flow === null && repo ? `${repo} has no devflow/devflow.cue` : "usage: board.ts status|prs|start|pull|move|file|wait|approve|suggestion <repo> ...");
+  console.error(flow === null && repo ? `${repo} has no devflow/devflow.cue` : "usage: board.ts status|prs|flags|start|pull|move|file|wait|approve|suggestion <repo> ...");
   Deno.exit(2);
 }
 if (verb === "prs") {
@@ -44,6 +46,18 @@ if (verb === "prs") {
     Deno.exit(0);
   } catch (e) {
     console.log(`forgotten PRs: unavailable (${(e as Error).message})`);
+    Deno.exit(1);
+  }
+}
+if (verb === "flags") {
+  try {
+    const f = flagsOf(rest);
+    const w = await watchFlags(flow, new Date(), f.new === "true");
+    console.log(w.line);
+    if (f.notes === "true") for (const p of w.list) console.log(`  ${p.app}/${p.flag}: ${p.note || "(no note)"}`);
+    Deno.exit(w.list.length || w.drift.length ? 1 : 0);
+  } catch (e) {
+    console.log(`pending flags: unavailable (${(e as Error).message})`);
     Deno.exit(1);
   }
 }
@@ -138,7 +152,18 @@ async function statusVerb() {
     prs = { unavailable: (e as Error).message };
     if (!json) console.log(`forgotten PRs: unavailable (${(e as Error).message})`);
   }
-  if (json) console.log(JSON.stringify({ ...r.json, forgottenPrs: prs }, null, 2));
+  // The flags merged and not yet flipped come after them, the same way.
+  let pending: unknown;
+  try {
+    const w = await watchFlags(flow!, new Date());
+    pending = { pending: w.list, drift: w.drift };
+    if (!json) console.log(w.line);
+  } catch (e) {
+    failures++;
+    pending = { unavailable: (e as Error).message };
+    if (!json) console.log(`pending flags: unavailable (${(e as Error).message})`);
+  }
+  if (json) console.log(JSON.stringify({ ...r.json, forgottenPrs: prs, pendingFlags: pending }, null, 2));
   if (failures) Deno.exit(1);
 }
 
