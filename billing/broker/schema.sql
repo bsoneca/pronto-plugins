@@ -19,3 +19,10 @@ DO $$ BEGIN
       ALTER TABLE billing_seen ADD CONSTRAINT billing_seen_state CHECK (state IN ('claimed', 'done'));
     END IF;
   END $$;
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'billing') THEN
+      ALTER TABLE billing_counter OWNER TO billing;
+      ALTER TABLE billing_window OWNER TO billing;
+      ALTER TABLE billing_seen OWNER TO billing;
+    END IF;
+  END $$;

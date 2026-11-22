@@ -253,7 +253,7 @@ Deno.test("postgres store: the broker makes no tables and says what is missing",
 Deno.test("schema.sql is the add-only, idempotent script store.ts's SCHEMA says", async () => {
   assertEquals(await Deno.readTextFile(new URL("./schema.sql", import.meta.url)), schemaSql());
   assertEquals(SCHEMA.some((q) => /\bDROP\b|\bDELETE\b|\bTRUNCATE\b/i.test(q)), false, "nothing is dropped");
-  assertEquals(SCHEMA.every((q) => /IF NOT EXISTS/.test(q)), true, "every statement checks first");
+  assertEquals(SCHEMA.every((q) => /IF (NOT )?EXISTS/.test(q)), true, "every statement checks first");
   const sql = schemaSql();
   assertEquals(/^SET lock_timeout = '5s';\nSET statement_timeout = '60s';$/m.test(sql), true, "the timeouts squawk requires");
   assertEquals(sql.split("\n").every((l, i, ls) => !/^CREATE INDEX/.test(l) || ls[i - 1] === "-- squawk-ignore require-concurrent-index-creation"), true, "each index says why it is not concurrent");
@@ -500,3 +500,31 @@ for (const [name, make] of claimable) {
     assertEquals(step("invalidate", "absent", false), null, "which is the declaration's word for it");
   });
 }
+
+// The schema is applied by the cluster's superuser and the broker connects as its own role: the tables must be the role's.
+Deno.test("postgres store: tables applied by the superuser are usable by the broker's role, and a lack of privilege is not called missing", async () => {
+  const pg = new PGlite();
+  const sql = pglite(pg);
+  await pg.exec(`CREATE ROLE billing LOGIN`);
+  await applySchema(sql); // as the superuser, like metal.nu's psql -U postgres
+  assertEquals((await sql.unsafe(`SELECT pg_get_userbyid(relowner) AS o FROM pg_class WHERE relname IN ('billing_counter', 'billing_window', 'billing_seen') ORDER BY relname`)).map((r) => r.o), ["billing", "billing", "billing"], "handed to the broker's role");
+  await pg.exec(`SET ROLE billing`);
+  await new PostgresStore(sql).verify(); // the role sees the tables, the state column and the constraint
+  const s = new PostgresStore(sql);
+  assertEquals(await s.tick("ver", 5), 5, "and may use them");
+  await pg.exec(`RESET ROLE`);
+
+  // Tables as the first release left them (owned by the superuser), seen by the role: said as a lack of privilege.
+  const old = new PGlite();
+  const oldSql = pglite(old);
+  await old.exec(`CREATE ROLE billing LOGIN`);
+  for (const statement of SCHEMA.filter((q) => !/OWNER TO/.test(q))) await oldSql.unsafe(statement);
+  await old.exec(`SET ROLE billing`);
+  const err = await new PostgresStore(oldSql).verify().then(() => "started", (e) => (e as Error).message);
+  assertEquals(/no privilege on billing_counter \(owned by postgres, used as billing\)/.test(err) && !/missing column/.test(err), true, err);
+  // Applying the schema again, as the superuser, repairs it.
+  await old.exec(`RESET ROLE`);
+  await applySchema(oldSql);
+  await old.exec(`SET ROLE billing`);
+  await new PostgresStore(oldSql).verify();
+});

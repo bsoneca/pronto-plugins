@@ -200,6 +200,9 @@ const fromStates = (event: ClaimEvent, to: Where = "absent") =>
 
 /** The tables the broker needs, checked at start. */
 const TABLES = ["billing_counter", "billing_window", "billing_seen"];
+/** The login role the broker connects as (metal.nu's database user): the schema is applied by the cluster's superuser,
+ * so it hands the tables to this role, or the broker could not see their columns. */
+const BROKER_ROLE = "billing";
 
 /** The schema, each statement add-only and idempotent: billing/broker/schema.sql is exactly these, `;`-ended. */
 export const SCHEMA = [
@@ -218,6 +221,14 @@ export const SCHEMA = [
   `DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'billing_seen_state' AND conrelid = 'billing_seen'::regclass) THEN
       ALTER TABLE billing_seen ADD CONSTRAINT billing_seen_state CHECK (state IN (${STATES}));
+    END IF;
+  END $$`,
+  // The tables belong to the broker's login role, whoever applied the schema (the cluster's superuser does): a role that
+  // owns nothing it was not given sees neither the tables' columns nor their rows. Only where the role exists; owning
+  // them already is a no-op, so it is as safe to apply again.
+  `DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${BROKER_ROLE}') THEN
+${TABLES.map((t) => `      ALTER TABLE ${t} OWNER TO ${BROKER_ROLE};`).join("\n")}
     END IF;
   END $$`,
 ];
@@ -275,13 +286,24 @@ export class PostgresStore implements Store {
 
   /** Fails, naming what is missing, unless the schema (schema.sql) has been applied. */
   async verify(): Promise<void> {
-    const missing: string[] = [];
+    const missing: string[] = [], unusable: string[] = [];
     for (const table of TABLES) {
       const [row] = await this.sql.unsafe(`SELECT to_regclass($1) IS NOT NULL AS there`, [table]);
       if (row?.there !== true) missing.push(`table ${table}`);
+      else {
+        // A table that is there but that this role may not use is not a missing one: its owner is said.
+        const [priv] = await this.sql.unsafe(
+          `SELECT has_table_privilege(current_user, $1, 'SELECT, INSERT, UPDATE, DELETE') AS ok, pg_get_userbyid(c.relowner) AS owner, current_user AS me
+           FROM pg_class c WHERE c.oid = $1::regclass`, [table]);
+        if (priv?.ok !== true) unusable.push(`${table} (owned by ${priv?.owner}, used as ${priv?.me})`);
+      }
+    }
+    if (unusable.length) {
+      throw new Error(`billing broker: no privilege on ${unusable.join(", ")}: the tables must belong to the broker's role (${BROKER_ROLE}); apply broker/schema.sql, which hands them over, as the cluster's superuser`);
     }
     if (!missing.includes("table billing_seen")) {
-      const [col] = await this.sql.unsafe(`SELECT 1 AS there FROM information_schema.columns WHERE table_name = 'billing_seen' AND column_name = 'state'`);
+      // pg_catalog, not information_schema: the latter hides the columns of a table the role has no privilege on.
+      const [col] = await this.sql.unsafe(`SELECT 1 AS there FROM pg_attribute WHERE attrelid = 'billing_seen'::regclass AND attname = 'state' AND NOT attisdropped`);
       if (!col) missing.push("column billing_seen.state");
       const [check] = await this.sql.unsafe(`SELECT 1 AS there FROM pg_constraint WHERE conname = 'billing_seen_state' AND conrelid = 'billing_seen'::regclass`);
       if (!check) missing.push("constraint billing_seen_state");
