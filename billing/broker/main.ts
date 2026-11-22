@@ -21,7 +21,7 @@ import {
   firstChargeFailed, lookupKeyOf, manageTokenOf, ownerOf, parsePublished, type Plan, type Published, returnTo, same, type Subscription,
   tenantOf, trialOf, trialSpent,
 } from "./core.ts";
-import { type Stripe, StripeError, transportUsed, webhookSigned } from "./stripe.ts";
+import { type Routed, type Stripe, StripeError, transportUsed, webhookSigned } from "./stripe.ts";
 import { MemoryStore, type Store } from "./store.ts";
 import { RULES } from "../rules.ts";
 
@@ -40,6 +40,8 @@ const EVENT_KEPT_MS = 7 * 24 * 3600_000;
 // round in an ordinary outage ends before the lease does; a stalled one that outlives it is at worst
 // pushed by a second replica too, which the tenant takes as one entitlement newer than the other.
 const EVENT_LEASE_MS = 120_000;
+/** The refused deliveries of one event after which it is answered 200 and marked done, with the alert. */
+const REFUSALS_MAX = 5;
 
 export const SUBSCRIPTION_EVENTS = new Set([
   "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted",
@@ -355,6 +357,16 @@ export async function broker(p: {
     return json(200, { ok: true, direct: transport === "direct", ...(transport ? { transport } : {}), ...(typeof b.door === "boolean" ? { door: b.door } : {}) });
   }
 
+  // Which transport a call to Stripe would take for the door word this request carries, from the same route
+  // selection the calls use, and nothing else: no read of Stripe, no write, no account. Rate limited as /probe is.
+  async function routeOf(req: Request, client: string): Promise<Response> {
+    const b = await body(req);
+    const t = tenant(b.tenant);
+    if (!t) return json(400, { error: "tenant required" });
+    if (!(await perClient(client)) || !(await perTenant(t))) return json(429, { error: "too many requests; try again in a minute" });
+    return json(200, { transport: (await (p.stripe as Routed).route?.()) ?? null });
+  }
+
   async function checkout(req: Request, client: string): Promise<Response> {
     const b = await body(req);
     const t = tenant(b.tenant);
@@ -624,10 +636,20 @@ export async function broker(p: {
         if (slow) return json(502, { error: "too slow" });
         const r = await push(t, token);
         if (r.refused) {
-          // Answered so Stripe stops sending it, but not marked done: the claim is released (the finally below),
-          // so a resend, or a later delivery of the event, tries the tenant again. Only a delivery is remembered.
-          console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}; not marked done, a resend may retry`);
-          return json(200, { refused: event.id });
+          // A refusal is never a quiet 200. The delivery is answered non-2xx so Stripe sends it again, the claim is
+          // released (the finally below) so the resend tries the tenant again, and each refusal logs the alert token.
+          // Bounded: the store counts the refused deliveries of this event, and at REFUSALS_MAX the event is
+          // answered 200 and marked done, with the alert, so a permanent refusal is not retried for ever.
+          const refusals = await store.tick(`refused ${event.id}`, 1);
+          const ids = `account=${account} event=${event.id} tenant=${t}`;
+          if (refusals < REFUSALS_MAX) {
+            console.error(`billing: error: billing_alert=entitlement_refused ${ids} delivery=${refusals}/${REFUSALS_MAX} ${r.why}; answering non-2xx so Stripe sends it again`);
+            return json(502, { error: "tenant refused the entitlement", event: event.id, delivery: refusals });
+          }
+          console.error(`billing: error: billing_alert=entitlement_refused ${ids} delivery=${refusals}/${REFUSALS_MAX} ${r.why}; giving up: marked done`);
+          if (!(await finished(event.id, claimToken))) return json(409, { error: "claim lost", event: event.id });
+          kept = true;
+          return json(200, { refused: event.id, gaveUp: true });
         }
         if (!r.taken) {
           console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}`);
@@ -676,6 +698,10 @@ export async function broker(p: {
         return await (path === "/trial/offer" ? trialOffer(req, client) : trialCheckout(req, client));
       }
       if (req.method === "POST" && path === "/portal") return await portal(req);
+      if (req.method === "POST" && path === "/route") {
+        const addr = info?.remoteAddr as Deno.NetAddr | undefined;
+        return await routeOf(req, req.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() || addr?.hostname || "");
+      }
       if (req.method === "POST" && path === "/probe") {
         const addr = info?.remoteAddr as Deno.NetAddr | undefined;
         return await probe(req, req.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() || addr?.hostname || "");
@@ -710,7 +736,7 @@ export function twoModes(p: {
     const url = new URL(req.url), path = url.pathname;
     let tenant: unknown = null;
     if (req.method === "GET" && path === "/onboarded") tenant = url.searchParams.get("tenant");
-    else if (req.method === "POST" && ["/checkout", "/trial/offer", "/trial/checkout", "/portal", "/resync", "/onboard", "/probe"].includes(path)) {
+    else if (req.method === "POST" && ["/checkout", "/trial/offer", "/trial/checkout", "/portal", "/resync", "/onboard", "/probe", "/route"].includes(path)) {
       try {
         tenant = (await req.clone().json())?.tenant;
       } catch {

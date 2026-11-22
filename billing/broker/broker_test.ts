@@ -43,12 +43,12 @@ async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: numb
   // Two transports a probe can tell apart (PRONTO-218): each is the stand-in's door under its own name, and the
   // switched client sends a call by the request's word (`asked`) or always one way (`never`: the door is off whatever the request says).
   const transportCalls: string[] = [];
-  const tagged = (name: "direct" | "door"): Stripe => (async (...a: unknown[]) => {
+  const tagged = (name: "direct" | "door"): Stripe => Object.assign((async (...a: unknown[]) => {
     transportCalls.push(name);
     const answer = await (stripe as (...a: unknown[]) => Promise<unknown>)(...a);
     markTransport(name);
     return answer;
-  }) as Stripe;
+  }) as Stripe, { route: () => Promise.resolve(name) });
   const fixed = o.switched === "direct" || o.switched === "door";
   const routed = fixed ? tagged(o.switched as "direct" | "door") : o.switched ? switched({ direct: tagged("direct"), door: tagged("door"), on: o.switched === "asked" ? askedDoor : () => false }) : stripe;
   const tenants = new Map<string, { doc?: unknown; up: boolean; got: Entitlement[]; hold?: Promise<void>; refuse?: boolean; tickets: Map<string, Consent>; consentFails?: number }>([
@@ -761,17 +761,6 @@ Deno.test("a completion that lost the claim is answered retryably, unless the st
   store.mode = "done";
   const done = await deliver(s, "evt_done", sub)();
   assertEquals([done.status, await done.json()], [200, { delivered: "evt_done" }], "the store says it is finished");
-  // A tenant's refusal is answered but not remembered: the claim is released, so a resend tries the tenant again.
-  store.mode = "off";
-  t.refuse = true;
-  const refused = await deliver(s, "evt_refused", sub)();
-  assertEquals([refused.status, await refused.json()], [200, { refused: "evt_refused" }]);
-  t.refuse = false;
-  const before = t.got.length;
-  const resent = await deliver(s, "evt_refused", sub)();
-  assertEquals([resent.status, await resent.json(), t.got.length], [200, { delivered: "evt_refused" }, before + 1], "the resend is pushed, not answered as a duplicate");
-  const dup = await deliver(s, "evt_refused", sub)();
-  assertEquals(await dup.json(), { duplicate: "evt_refused" }, "a delivery stays remembered");
 });
 
 
@@ -1131,3 +1120,58 @@ Deno.test("an invoice call that hits the transport's deadline is tried again, th
   assertEquals(sub.status, "canceled");
   s.fake.close();
 });
+
+Deno.test("a tenant's refusal is a loud non-2xx Stripe resends, bounded: after five refused deliveries the event is answered 200 and marked done, with the alert", async () => {
+  const s = await setup();
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const sub = await startTrial(s);
+  const t = s.tenants.get(A)!;
+  const logged: string[] = [];
+  const error = console.error;
+  console.error = (...a: unknown[]) => { logged.push(a.join(" ")); };
+  try {
+    t.refuse = true;
+    const answers: [number, unknown][] = [];
+    for (let i = 0; i < 5; i++) {
+      const res = await deliver(s, "evt_refused", sub)();
+      answers.push([res.status, (await res.json()).delivery ?? "done"]);
+    }
+    assertEquals(answers, [[502, 1], [502, 2], [502, 3], [502, 4], [200, "done"]], "four resends asked for, the fifth gives up");
+    const alerts = logged.filter((l) => l.includes("billing_alert=entitlement_refused"));
+    assertEquals(alerts.length, 5, "every refusal is a loud, distinctive line");
+    assertEquals(alerts.every((l) => l.includes(`account=${ANA}`) && l.includes("event=evt_refused")), true, "naming the account and the event");
+    const after = await deliver(s, "evt_refused", sub)();
+    assertEquals(await after.json(), { duplicate: "evt_refused" }, "marked done once it gave up");
+    // A tenant that takes it on a resend is delivered, and the count stays apart per event.
+    t.refuse = true;
+    const first = await deliver(s, "evt_flaky", sub)();
+    assertEquals(first.status, 502);
+    t.refuse = false;
+    const before = t.got.length;
+    const again = await deliver(s, "evt_flaky", sub)();
+    assertEquals([again.status, await again.json(), t.got.length], [200, { delivered: "evt_flaky" }, before + 1], "the resend is pushed");
+  } finally {
+    console.error = error;
+  }
+});
+
+// The route probe: which transport a call would take for a door word, from the real selection, with no call to Stripe.
+const ROUTE_CASES: { name: string; switched: "asked" | "direct" | "door"; door?: boolean; transport: string }[] = [
+  { name: "door true: door", switched: "asked", door: true, transport: "door" },
+  { name: "door false: direct", switched: "asked", door: false, transport: "direct" },
+  { name: "no word: direct", switched: "asked", transport: "direct" },
+  { name: "a direct-only broker reports direct whatever is asked", switched: "direct", door: true, transport: "direct" },
+  { name: "a door-only broker reports door whatever is asked", switched: "door", door: false, transport: "door" },
+];
+for (const c of ROUTE_CASES) {
+  Deno.test(`route probe, ${c.name}`, async () => {
+    const s = await setup({ switched: c.switched });
+    s.transportCalls.length = 0;
+    const before = s.sent.length;
+    const res = await s.post("/route", { tenant: A, ...(c.door === undefined ? {} : { door: c.door }) });
+    assertEquals([res.status, await res.json()], [200, { transport: c.transport }], c.name);
+    assertEquals([s.transportCalls, s.sent.length - before], [[], 0], "Stripe is not called");
+    assertEquals((await s.post("/route", {})).status, 400, "a tenant is named");
+  });
+}

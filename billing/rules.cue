@@ -34,13 +34,21 @@ rules: {
 	claimTransitions: [
 		{event: "claim", from: "absent", token: "none", to: "claimed"},
 		{event: "complete", from: "claimed", token: "holder", to: "done"},
+		// Release by the holder: the one way a claim is given back before its lease ends. A caller that is not the
+		// holder is refused.
 		{event: "release", from: "claimed", token: "holder", to: "absent"},
 		{event: "remember", from: "absent", token: "none", to: "done"},
 		{event: "remember", from: "claimed", token: "none", to: "done"},
 		{event: "remember", from: "done", token: "none", to: "done"},
+		// Expiry (the sweep): a row whose time ended goes, claimed or done.
 		{event: "expire", from: "claimed", token: "none", to: "absent"},
 		{event: "expire", from: "done", token: "none", to: "absent"},
+		// Cache invalidation (a remembered marker dropped on purpose, `forget` with no token): a finished row only,
+		// never a claim in progress.
+		{event: "invalidate", from: "done", token: "none", to: "absent"},
 	]
+	// How many rows a call may look at to sweep the ones whose time ended, in both stores.
+	claimSweep: 100
 }
 
 rules: {
@@ -51,8 +59,9 @@ rules: {
 	trial: {monthsMin: int & >=1, monthsMax: int & >=trial.monthsMin, remindDays: int & >=1}
 	trialStates: [...=~"^[a-z]+$"]
 	claimStates: [...=~"^[a-z]+$"]
+	claimSweep: int & >0
 	claimTransitions: [...{
-		event: "claim" | "complete" | "release" | "remember" | "expire"
+		event: "claim" | "complete" | "release" | "remember" | "expire" | "invalidate"
 		from:  "absent" | or(claimStates)
 		token: "none" | "holder"
 		to:    "absent" | or(claimStates)

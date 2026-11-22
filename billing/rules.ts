@@ -85,6 +85,13 @@ export const RULES = {
       "from": "done",
       "token": "none",
       "to": "absent"
+    },
+    {
+      "event": "invalidate",
+      "from": "done",
+      "token": "none",
+      "to": "absent"
     }
-  ]
+  ],
+  "claimSweep": 100
 } as const;

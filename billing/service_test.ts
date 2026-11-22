@@ -93,6 +93,10 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
       doorAsks.push({ auth: h.get("authorization"), account: h.get("x-pronto-account"), body });
       return Promise.resolve(o.door ? o.door() : Response.json({ value: true }));
     }
+    if (url === "https://b.example/route") {
+      broker.push({ path: "/route", body });
+      return Promise.resolve(Response.json({ transport: (body as { door?: boolean }).door ? "door" : "direct" }));
+    }
     if (url.startsWith("https://b.example/trial/")) {
       broker.push({ path: url.slice("https://b.example".length), body });
       if (url.endsWith("/offer")) return Promise.resolve(o.offer ? o.offer() : Response.json({ eligible: true, offers: [{ plan: "analysis", amount: 1990 }] }));
@@ -554,4 +558,79 @@ Deno.test("with no strict flag set, the service behaves as it did: health stays 
   const none = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), grants: "[]", fetcher: (() => Promise.resolve(Response.json({}, { status: 401 }))) as typeof fetch });
   await quiet(async () => { eq(await none.attempt(1000), false); });
   eq((await none(new Request("https://a.example/billing/health"))).status, 200, "no strict flag: health is as it was");
+});
+
+Deno.test("a flagd that cannot say whether the strict flag is on keeps the mode and the error: health stays 503 until a write is confirmed", async () => {
+  const flagd = { strict: "true" as "true" | "down", grants: "ok" as "ok" | "down" }, writes = { ok: false };
+  const fetcher = ((input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "http://crud/rpc/billing_grant") return Promise.resolve(writes.ok ? new Response(null, { status: 204 }) : Response.json({ code: "22P02" }, { status: 400 }));
+    if (url.endsWith("/billing_strict")) return Promise.resolve(flagd.strict === "down" ? new Response("", { status: 500 }) : Response.json({ value: true }));
+    if (url.endsWith("/billing_grants")) return Promise.resolve(flagd.grants === "down" ? new Response("", { status: 500 }) : Response.json({ value: "[]" }));
+    return Promise.resolve(new Response("", { status: 404 }));
+  }) as typeof fetch;
+  const svc = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), flags: "http://flagd:8693", strictFlag: "billing_strict", fetcher });
+  const health = async () => (await svc(new Request("https://a.example/billing/health"))).status;
+  await quiet(async () => {
+    eq(await svc.attempt(1000), false, "a write refused");
+    eq(await health(), 503, "unhealthy");
+    // flagd now down for everything: the strict flag cannot be read, nor the grants flag, nor can the write be made.
+    flagd.strict = "down";
+    flagd.grants = "down";
+    eq(await svc.attempt(2000), false, "still not written");
+    eq(await health(), 503, "a failed flag read does not clear the error");
+    // The strict flag unreadable, the grants flag back, the write still refused: still unhealthy.
+    flagd.grants = "ok";
+    eq(await svc.attempt(3000), false);
+    eq(await health(), 503, "the error stays until a write is confirmed");
+    writes.ok = true;
+    eq(await svc.attempt(4000), true, "written");
+    eq(await health(), 200, "a confirmed write clears it");
+  });
+});
+
+Deno.test("a strict flag that answers false leaves the strict mode and its error, as the earlier behaviour", async () => {
+  const state = { strict: true };
+  const fetcher = ((input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "http://crud/rpc/billing_grant") return Promise.resolve(Response.json({ code: "22P02" }, { status: 400 }));
+    if (url.endsWith("/billing_strict")) return Promise.resolve(Response.json({ value: state.strict }));
+    return Promise.resolve(Response.json({ value: "[]" }));
+  }) as typeof fetch;
+  const svc = service({ origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }), flags: "http://flagd:8693", strictFlag: "billing_strict", fetcher });
+  await quiet(async () => {
+    await svc.attempt(1000);
+    eq((await svc(new Request("https://a.example/billing/health"))).status, 503);
+    state.strict = false;
+    await svc.attempt(2000);
+    eq((await svc(new Request("https://a.example/billing/health"))).status, 200, "answered false: health as it was");
+  });
+});
+
+Deno.test("GET /billing/route asks the broker for the transport of the door word evaluated for no one, and answers it", async () => {
+  for (const [door, word, transport] of [[true, true, "door"], [false, false, "direct"]] as const) {
+    const t = trialStage({ door: () => Response.json({ value: door }) });
+    const res = await t.make({ doorFlag: "stripe_door" })(new Request("https://a.example/billing/route"));
+    eq([res.status, await res.json()], [200, { ok: true, door: word, transport }], `door ${door}`);
+    eq(t.doorAsks.map((a) => [a.auth, a.account]), [[null, null]], "asked as no one: no session, no account");
+    eq(t.broker, [{ path: "/route", body: { tenant: "https://a.example", door: word } }], "the broker is asked, with the door word");
+  }
+  const unset = trialStage();
+  const res = await unset.make()(new Request("https://a.example/billing/route"));
+  eq(await res.json(), { ok: true, door: null, transport: "direct" }, "no door flag: door null");
+});
+
+Deno.test("GET /billing/route with a failed door lookup is a 502 and the broker is not asked", async () => {
+  const quietly = console.error;
+  console.error = () => {};
+  try {
+    for (const door of [() => new Response("", { status: 503 }), () => Promise.reject(new TypeError("connection refused")) as unknown as Response]) {
+      const t = trialStage({ door });
+      const res = await t.make({ doorFlag: "stripe_door" })(new Request("https://a.example/billing/route"));
+      eq([res.status, t.broker.length], [502, 0]);
+      await res.body?.cancel();
+    }
+  } finally {
+    console.error = quietly;
+  }
 });
