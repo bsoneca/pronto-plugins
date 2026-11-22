@@ -10,7 +10,7 @@
 # machine's cue memory budget (cue-budget/slot.ts, the tests/slot.ts of an app, copied unchanged:
 # `--mem`, `--cores-claim`) and waits its turn when the budget is full, rather than failing or taking
 # the machine down. The whole spec is still evaluated at once, in one process: only when it starts
-# changes. Several evaluations run at once while their claims fit CUE_MEM_GB (64) and CUE_CORES (every
+# changes. Several evaluations run at once while their claims fit CUE_MEM_GB (half the machine's memory) and CUE_CORES (every
 # core but STACK_RESERVE, 3), first come first served: one waiting ahead keeps its room, so a small
 # claim never passes a large one (PRONTO-870; it replaced the cue lock, which made a gate's generate
 # queue 44 of 92 minutes for about one minute of work). The memory claim is what the same evaluation

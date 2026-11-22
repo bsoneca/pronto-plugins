@@ -419,8 +419,9 @@ Deno.test("an output file not yet written keys by its place in the repository", 
 // The wrapper claims cue memory and cue cores, never the stacks' weight (PRONTO-838, reverting the weight half of
 // PRONTO-761); its parallelism is bounded by GOMAXPROCS. The pool is small (STACK_BUDGET=6) so a full pool is easy to hold.
 const poolEnv = { STACK_BUDGET: "6" };
+// CUE_MEM_GB is 64 here unless a test says otherwise: the default is half of the machine's memory, which these cases must not depend on.
 const envOf = (dir: string, more: Record<string, string> = {}) =>
-  ({ PATH: `${runtime}:${dir}/bin:${deno}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: dir, STACK_POOL: `${dir}/pool`, CUE_MIN_FREE_PCT: "0", ...more });
+  ({ PATH: `${runtime}:${dir}/bin:${deno}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: dir, STACK_POOL: `${dir}/pool`, CUE_MIN_FREE_PCT: "0", CUE_MEM_GB: "64", ...more });
 const text = (b: Uint8Array) => new TextDecoder().decode(b);
 // The wrapper started, not waited for: its output is read when it ends.
 const start = (dir: string, args: string[], more: Record<string, string> = {}) => {

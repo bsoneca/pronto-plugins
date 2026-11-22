@@ -27,7 +27,7 @@ the same wrapper at its root (`cue`, with `cue-budget/slot.ts`); the two claim o
   slot.ts every app has, copied beside the wrapper), and waits its turn in line when they are spoken
   for (PRONTO-870: this replaced the cue lock, one evaluation at a time, which kept a gate's generate
   in line for 44 of 92 minutes to do about one minute of work; learned peaks on the 128 GB Mac are
-  p95 0.5 GB, p99 2.2 GB, largest 26.7 GB). The budget is `CUE_MEM_GB` (64) of memory and `CUE_CORES`
+  p95 0.5 GB, p99 2.2 GB, largest 26.7 GB). The budget is `CUE_MEM_GB` (half the machine's memory; one evaluation at a time where that cannot be read) of memory and `CUE_CORES`
   (every core but `STACK_RESERVE`, 3) of cores, so several evaluations run at once while their claims
   fit. The line is strictly first come first served: a claim is admitted when what the live holders
   hold, what every older ticket reserves and its own fit, memory and cores alike; so a small claim never
