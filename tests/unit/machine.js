@@ -647,3 +647,70 @@ export async function choosingStale() {
     return { live: took(await inPool(`${tmp}/live`, body, 3000)), dead: took(await inPool(`${tmp}/dead`, body, 15_000)), none: took(await inPool(`${tmp}/none`, body, 15_000)) };
   } finally { try { sleeper.kill("SIGKILL"); } catch { /* gone */ } await sh(`rm -rf '${tmp}'`); }
 }
+
+// PRONTO-892, round 2 (Codex on bsoneca/pronto#1673).
+// A periodic task that never overlaps itself: a tick while the last run is still going starts nothing; once it ends the next tick runs; idle waits for the one in flight.
+export async function noOverlap() {
+  const { oneAtATime } = await import("../../harness/files/tests/slot.ts");
+  let started = 0, finished = 0, errors = 0, release;
+  const gate = () => new Promise((r) => { release = r; });
+  const t = oneAtATime(async () => { started++; await gate(); finished++; if (started === 3) throw new Error("boom"); }, () => { errors++; });
+  t.tick(); t.tick(); t.tick();
+  const whileRunning = started;
+  release(); await t.idle();
+  t.tick(); const second = started; release(); await t.idle();
+  t.tick(); release(); await t.idle();
+  return { whileRunning, second, started, finished, errors };
+}
+// The chooser lock's owner is a pid and its start time: a pid reused by another process (another start time) is not the chooser.
+export async function chooserIdentity() {
+  const { chooserOwner, sameProcess, procStart } = await import("../../harness/files/tests/slot.ts");
+  return {
+    both: chooserOwner("123 1700000000000\n"), pidOnly: chooserOwner("123"), none: chooserOwner(""), junk: chooserOwner("abc def"),
+    // /proc/<pid>/stat field 22 (after the ")" of a name that may hold spaces and parentheses) over the boot time: 1000 + 2.5 s
+    procStart: procStart("1 (a b) c) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 250 0", "cpu 1 2\nbtime 1000\n"), procStartBad: procStart("x", "btime 1000"),
+    same: sameProcess(1_700_000_000_000, 1_700_000_001_500), reused: sameProcess(1_700_000_000_000, 1_700_000_090_000), unwritten: sameProcess(0, 5), unreadable: sameProcess(5, 0),
+  };
+}
+// The lock's owner is a live pid that is a different process (its start time is not the recorded one): reclaimed after a minute. The same live process stays.
+export async function choosingReused() {
+  const tmp = await sh("mktemp -d");
+  const sleeper = new Deno.Command("sleep", { args: ["60"] }).spawn();
+  try {
+    // The start time as the lock reads it (slot.ts startOf: /proc on Linux, ps's lstart elsewhere): the same read, on either platform.
+    const { startOf } = await import(slotUrl);
+    const startMs = await startOf(sleeper.pid, true);
+    if (!(startMs > 0)) throw new Error(`the start of pid ${sleeper.pid} could not be read`);
+    const mk = async (name, text) => { await sh(`mkdir -p '${tmp}/${name}/.choosing'; echo '${text}' > '${tmp}/${name}/.choosing/pid'; touch -t 202001010000 '${tmp}/${name}/.choosing'`); };
+    await mk("same", `${sleeper.pid} ${startMs}`);
+    await mk("reused", `${sleeper.pid} ${startMs - 3_600_000}`);
+    const body = `console.log(await s.choosing(async () => "ran"))`;
+    const took = (r) => r === "ran" ? "ran" : "held";
+    return { same: took(await inPool(`${tmp}/same`, body, 3000)), reused: took(await inPool(`${tmp}/reused`, body, 15_000)) };
+  } finally { try { sleeper.kill("SIGKILL"); } catch { /* gone */ } await sh(`rm -rf '${tmp}'`); }
+}
+// A gate holds every stack weight; a weighted cue ticket asks the whole memory budget and waits for it; a zero-weight top-level ticket asks the whole budget behind it;
+// the gate's nested evaluation then asks for memory. FIFO holds for top-level claims (the zero-weight one waits behind the weighted one), but the nested claim reserves
+// behind neither: both wait for weight its holder owns, directly or through the other.
+export async function gateNested() {
+  const slot = await import("../../harness/files/tests/slot.ts");
+  const W = { name: "001-1-w", weighted: true, weight: 6, release: false, nested: false, mem: 64, cores: 0 };
+  const Z = { name: "002-2", weighted: false, weight: 0, release: false, nested: false, mem: 64, cores: 0 };
+  const inLine = [W, Z];
+  // the gate holds the whole budget of stack weight (6 of 6): the weighted ticket's cores are not admitted, so olderKeeps leaves it out; the zero-weight one stays
+  const kept = inLine.filter((o) => slot.olderKeeps(o, 6, 0, 6, false, false, false));
+  const blocked = slot.blockedOnHolder(inLine, kept, 0, 0, 64, 10);
+  const names = (l) => l.map((t) => t.name);
+  const behind = (l) => l.reduce((n, o) => n + o.mem, 0);
+  const nestedClaim = slot.cueReserves(inLine, kept, true, false, blocked);
+  const noBlocked = slot.cueReserves(inLine, kept, true, false);
+  return {
+    kept: names(kept), blocked: [...blocked].sort(),
+    nestedReserves: names(nestedClaim), nestedAdmitted: slot.memAdmits(0, behind(nestedClaim), 10, 64),
+    withoutTheFix: names(noBlocked), withoutTheFixAdmitted: slot.memAdmits(0, behind(noBlocked), 10, 64),
+    topLevelReserves: names(slot.cueReserves(inLine, kept, false, false, blocked)),
+    // a zero-weight ticket that does not wait on the weighted one (it fits beside it) is kept, and so is a nested ticket of the holder
+    unrelatedKept: (() => { const z = { ...Z, mem: 0.5 }; return [...slot.blockedOnHolder([{ ...W, mem: 30 }, z], [z], 0, 0, 64, 10)].sort(); })(),
+    siblingKept: (() => { const z = { ...Z, nested: true }; return [...slot.blockedOnHolder([W, z], [z], 0, 0, 64, 10)].sort(); })(),
+  };
+}

@@ -609,8 +609,25 @@ export const cueAhead = <T extends { weighted: boolean; release: boolean }>(olde
 // the ticket waits for, pass such a ticket (PRONTO-761, PRONTO-837). That is an exception for NESTED claims alone. A top-level claim
 // reserves behind every older ticket (`inLine`), the ones blocked on stack weight included: their memory is reserved for them, and an
 // unrelated job passing them would take it (PRONTO-892).
-export const cueReserves = <T extends { weighted: boolean; release: boolean }>(inLine: T[], older: T[], nested: boolean, release: boolean) =>
-  cueAhead(nested ? older : inLine, release);
+export const cueReserves = <T extends { name: string; weighted: boolean; release: boolean }>(inLine: T[], older: T[], nested: boolean, release: boolean, blocked: Set<string> = new Set()) =>
+  cueAhead(nested ? older.filter((o) => !blocked.has(o.name)) : inLine, release);
+// The tickets a NESTED claim must not reserve behind: those blocked on the stack weight its holder owns, directly (the weighted ones olderKeeps
+// left out of `kept`) or through another such ticket. A top-level ticket queued after one of them waits behind its reservation (the line is first
+// come first served), so keeping it would make the nested work wait for a ticket that waits for the holder that waits for the nested work: a gate
+// that holds every stack weight, a weighted cue ticket asking the whole memory budget for it, a zero-weight one asking the whole budget behind it,
+// and the gate's own nested evaluation, wait for each other until a timeout (PRONTO-892). A ticket is added when it does not fit beside the
+// reservations ahead of it but would without the excluded ones; nested tickets (the holder's own work) are never excluded.
+export const blockedOnHolder = <T extends { name: string; nested?: boolean; mem: number; cores: number }>(inLine: T[], kept: T[], memHeld: number, coresHeld: number, memBudget: number, coresBudget: number): Set<string> => {
+  const out = new Set(inLine.filter((t) => !kept.includes(t)).map((t) => t.name));
+  const fits = (t: T, ahead: T[]) => memAdmits(memHeld, ahead.reduce((n, o) => n + o.mem, 0), t.mem, memBudget) && memAdmits(coresHeld, ahead.reduce((n, o) => n + o.cores, 0), t.cores, coresBudget);
+  for (let i = 0; i < inLine.length; i++) {
+    const t = inLine[i];
+    if (out.has(t.name) || t.nested) continue;
+    const before = inLine.slice(0, i);
+    if (!fits(t, before) && fits(t, before.filter((b) => !out.has(b.name)))) out.add(t.name);
+  }
+  return out;
+};
 // A queue directory's entries; a directory not made yet (nobody has queued in the line) is empty, every other
 // failure to read it propagates: an unreadable queue is not an empty one, and work must not be admitted on it.
 export const readQueue = async (dir: string) => {
@@ -685,8 +702,20 @@ const readNoFollow = async (path: string): Promise<{ kind: string; uid: number; 
     } finally { f.close(); }
   } catch { return undefined; }
 };
-const startOf = async (pid: number, live: boolean) => {
-  const r = live ? await new Deno.Command("ps", { args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, stdout: "piped", stderr: "null" }).output().catch(() => undefined) : undefined;
+// When a process started, in ms since the epoch (0 when it cannot be read). On Linux from /proc (field 22 of /proc/<pid>/stat, in clock ticks
+// after the boot time of /proc/stat: no ps needed, and the same value at every read); elsewhere, and where /proc cannot be read, from
+// `ps -o lstart=` in the C locale, whole seconds. Callers compare two reads of the same process, never one platform's against the other's.
+export const procStart = (stat: string, btime: string, ticks = 100): number => {
+  const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  const start = Number(rest[19]), boot = Number(/^btime (\d+)$/m.exec(btime)?.[1]);
+  return Number.isFinite(start) && start > 0 && Number.isFinite(boot) && boot > 0 ? boot * 1000 + Math.round(start * 1000 / ticks) : 0;
+};
+export const startOf = async (pid: number, live: boolean): Promise<number> => {
+  if (!live) return 0;
+  if (Deno.build.os === "linux") {
+    try { const t = procStart(await Deno.readTextFile(`/proc/${pid}/stat`), await Deno.readTextFile("/proc/stat")); if (t > 0) return t; } catch { /* no /proc: ps */ }
+  }
+  const r = await new Deno.Command("ps", { args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, stdout: "piped", stderr: "null" }).output().catch(() => undefined);
   return Date.parse(new TextDecoder().decode(r?.stdout ?? new Uint8Array()).trim()) || 0;
 };
 // The live release in the pool `dir` of account `want` (never this account, `self`), read-only: its slot and job records and
@@ -794,19 +823,30 @@ const listening = async (door: number, open: number[]) => {
 // The pool's own lock, held only while a slot is chosen; one older than a minute is a crashed
 // chooser's.
 // Only another chooser holding it is waited for; a lock that cannot be made (a full or read-only disk, a missing pool) fails loudly.
+// Whether the chooser a lock's `pid` file names still holds it: its pid lives and the process started when the file says (ps's whole
+// seconds, a little slack). An unreadable owner is nobody; a start that cannot be read now, or was not written, is the pid alone (fail closed).
+export const chooserOwner = (text: string): { pid: number; start: number } => {
+  const [pid, start] = text.trim().split(/\s+/).map(Number);
+  return { pid: pid > 0 ? pid : 0, start: start > 0 ? start : 0 };
+};
+export const sameProcess = (recorded: number, now: number) => recorded <= 0 || now <= 0 || Math.abs(recorded - now) <= 2000;
+const chooserLives = async (text: string) => {
+  const o = chooserOwner(text);
+  if (!(o.pid > 0) || !await alive(o.pid)) return false;
+  return sameProcess(o.start, await startOf(o.pid, true));
+};
 export const choosing = async <T>(f: () => Promise<T>): Promise<T> => {
   const lock = `${pool}/.choosing`;
   for (;;) {
-    try { Deno.mkdirSync(lock); Deno.writeTextFileSync(`${lock}/pid`, String(Deno.pid)); break; } catch (e) {
+    try { Deno.mkdirSync(lock); Deno.writeTextFileSync(`${lock}/pid`, `${Deno.pid} ${await startOf(Deno.pid, true)}`); break; } catch (e) {
       if (!(e instanceof Deno.errors.AlreadyExists)) throw new Error(`slot: the pool's lock ${lock} cannot be made (${(e as Error).message})`);
     }
-    // A lock a minute old is the chooser's no more only once its owner is verified gone: a chooser slow on a long queue still holds it. One
-    // with no readable owner (its maker died between the mkdir and the write, or an older copy made it) is reclaimed by age alone, as it was.
+    // A lock a minute old is the chooser's no more only once its owner is verified gone: a chooser slow on a long queue still holds it. The
+    // owner is a pid and the time that process started (`<pid> <start ms>`), so a pid reused by an unrelated process is not the chooser: the
+    // identity is gone, and the lock is reclaimed. One with no readable owner (its maker died between the mkdir and the write, or an older
+    // copy made it) is reclaimed by age alone, as it was.
     const age = Date.now() - ((await Deno.stat(lock).catch(() => undefined))?.mtime?.getTime() ?? Date.now());
-    if (age > 60_000) {
-      const owner = Number((await Deno.readTextFile(`${lock}/pid`).catch(() => "")).trim());
-      if (!(owner > 0) || !await alive(owner)) await Deno.remove(lock, { recursive: true }).catch(() => {});
-    }
+    if (age > 60_000 && !await chooserLives(await Deno.readTextFile(`${lock}/pid`).catch(() => ""))) await Deno.remove(lock, { recursive: true }).catch(() => {});
     await new Promise((r) => setTimeout(r, 200));
   }
   try { return await f(); } finally { await Deno.remove(lock, { recursive: true }).catch(() => {}); }
@@ -1010,7 +1050,7 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       // was queued; a release ticket whose process started after that, or that is too old, is not a release.
       let unreadable: string | undefined;
       const scan = async (dir: string) => {
-        const found: { name: string; weight: number; mem: number; cores: number; what: string; weighted: boolean; release: boolean; marked: boolean; pid: number }[] = [];
+        const found: { nested: boolean; name: string; weight: number; mem: number; cores: number; what: string; weighted: boolean; release: boolean; marked: boolean; pid: number }[] = [];
         // A line nobody has queued in has no directory yet (readQueue); a queue that cannot be read admits nothing this poll.
         let entries: Deno.DirEntry[] = [];
         try { entries = await readQueue(dir); } catch (e) { unreadable ??= `${dir}: ${e instanceof Error ? e.message : e}`; }
@@ -1021,7 +1061,7 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
           const t = parseTicket(await Deno.readTextFile(`${dir}/${e.name}`).catch(() => ""));
           // A ticket without mem= (a copy from before the budget) reserves the whole budget; the cores' line's has none.
           const isRelease = t.release && await releaseReal(Number(m[1]), Number(e.name.split("-")[0]));
-          found.push({ name: e.name, weight: t.weight, mem: t.mem ?? cueMem, cores: t.cores ?? 0, what: t.what, weighted: e.name.endsWith("-w"), release: isRelease, marked: t.marked, pid: Number(m[1]) });
+          found.push({ nested: t.nested, name: e.name, weight: t.weight, mem: t.mem ?? cueMem, cores: t.cores ?? 0, what: t.what, weighted: e.name.endsWith("-w"), release: isRelease, marked: t.marked, pid: Number(m[1]) });
         }
         return found.sort((x, y) => x.name < y.name ? -1 : 1);
       };
@@ -1098,7 +1138,7 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       // beside the live holders and the tickets ahead): cue holders run side by side, so a claim that waits for
       // the budget reserves none, and one the budget admits holds its place on the cores' line, which is its
       // ticket's name, when it asked.
-      const cueOlder = cueReserves(inLine, older, nested, release);
+      const cueOlder = cueReserves(inLine, older, nested, release, nested ? blockedOnHolder(inLine, older, memHeld, coresHeld, cueMem, cueCores) : undefined);
       const cueFits = line === "cue" && memAdmits(memHeld, cueOlder.reduce((n, o) => n + o.mem, 0), mem, cueMem)
         && memAdmits(coresHeld, cueOlder.reduce((n, o) => n + o.cores, 0), cores, cueCores);
       if (dual) {
@@ -1502,6 +1542,14 @@ export const watch = (slot: Slot, pc: (more: string[]) => string[], env: Record<
 export const cpuSeconds = (time: string): number => {
   const m = time.trim().match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/);
   return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : 0;
+};
+// A periodic task that never overlaps itself: `tick` starts it unless the last run is still going, `idle` resolves once none is.
+export const oneAtATime = (f: () => Promise<void>, onError: (e: unknown) => void) => {
+  let running: Promise<void> | undefined;
+  return {
+    tick: () => { if (!running) running = f().catch(onError).finally(() => { running = undefined; }); },
+    idle: async () => { while (running) await running; },
+  };
 };
 // What a process holds in memory now (GB), its resident set, and the CPU seconds it has used; 0 once it is gone.
 const residentOf = async (pid: number) => {
@@ -2321,8 +2369,11 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
         }
       }
     };
-    let inflight: Promise<void> = Promise.resolve();
-    const tick = () => { inflight = sample().catch(sampleFailed); };
+    // At most one sample at a time (oneAtATime): a tick that finds the last one still writing is skipped. Two overlapping samples that both saw a
+    // changed reservation would write the same temp file, and the rename of the second would find it gone: a failure that is not one. The claim
+    // is given back only after the one in flight (`samples.idle()` below), and a genuine write failure stays the job's.
+    const samples = oneAtATime(sample, sampleFailed);
+    const tick = samples.tick;
     let sampler: ReturnType<typeof setInterval> | undefined;
     // The command runs as the root of a run this process owns: when it ends, so does everything it started. Its
     // weight is given back only once none of it is running (ownRun waits for that, and KILLs what ignores TERM).
@@ -2342,7 +2393,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
     running = false;
     wall = (Date.now() - spawned) / 1000;
     clearInterval(sampler);
-    await inflight;
+    await samples.idle();
     slot.release();
     slot = undefined;
     status = { success: ran.code === 0, code: ran.code, signal: ran.signal === 9 ? "SIGKILL" : null };
