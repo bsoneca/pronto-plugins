@@ -12,7 +12,4 @@ devFlow: {
 		project: {name: "pronto", identifier: "PRONTO"}
 	}
 	token: project: "brawl-chess"
-	// The queue is pulled in filing order (the owner, PRONTO-1538): a design's children sort at
-	// their umbrella's place, and a bug at P1 or P0 still jumps.
-	queue: {order: "filed", childrenAtUmbrella: true}
 }
