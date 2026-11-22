@@ -55,10 +55,12 @@ rules: {
 	claimLeaseMs:     120000
 	// The anonymous route probe's own limits, apart from every checkout, trial and probe limit: calls a minute for
 	// each client, and for all anonymous probes together, and the biggest body it reads.
-	routeLimits: {perClient: 30, global: 120, bodyMax: 4096}
+	routeLimits: {perClient: 30, global: 120, bodyMax: 4096, windowMs: 60000}
 	// The most a request body is read for, in bytes: any request the broker reads a body of, and Stripe's webhook.
 	// The live/sandbox dispatcher enforces it (413) before it picks a broker.
 	bodyLimits: {request: 4096, webhook: 262144}
+	// How long the service waits for flagd's answer on the stripe_door flag before it takes the direct route.
+	doorLookupTimeoutMs: 300
 }
 
 rules: {
@@ -72,8 +74,9 @@ rules: {
 	claimSweep: int & >0
 	claimRetentionMs: int & >0
 	claimLeaseMs: int & >0 & <claimRetentionMs
-	routeLimits: {perClient: int & >0, global: int & >perClient, bodyMax: int & >0}
+	routeLimits: {perClient: int & >0, global: int & >perClient, bodyMax: int & >0, windowMs: int & >0}
 	bodyLimits: {request: int & >0, webhook: int & >request}
+	doorLookupTimeoutMs: int & >0
 	claimTransitions: [...{
 		event: "claim" | "complete" | "release" | "remember" | "expire" | "invalidate"
 		from:  "absent" | or(claimStates)

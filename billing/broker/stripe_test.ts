@@ -2,7 +2,8 @@
 // sends, that every call carries a key, what a retry keeps, and how Stripe's answers come back.
 
 import { assertEquals, assertRejects } from "jsr:@std/assert@1";
-import { askedDoor, forAccount, STRIPE_V2_VERSION, STRIPE_VERSION, stripe, StripeError, switched, type Stripe } from "./stripe.ts";
+import { askedDoor, bodyLimitOf, forAccount, STRIPE_V2_VERSION, STRIPE_VERSION, stripe, StripeError, switched, type Stripe, withCappedBody } from "./stripe.ts";
+import { RULES } from "../rules.ts";
 
 type Sent = { url: string; body: Record<string, unknown> };
 function door(answers: { status: number; body: unknown }[]): { sent: Sent[]; fetcher: typeof fetch } {
@@ -98,20 +99,20 @@ Deno.test("a request that asks for the door sends its calls through it; one that
   assertEquals(await stripe({ door: "http://d" }).route!(), "door");
 });
 
-Deno.test("a body too large or of no declared length asks for nothing", async () => {
+Deno.test("a body over the CUE limit is a 413 and asks for nothing; one of no declared length is read like a declared one", async () => {
   const seen: string[] = [];
   const s = switched({ direct: via("direct", seen), door: via("door", seen), on: askedDoor });
   const handler = forAccount(async () => {
     await s("GET", "/v1/prices");
     return new Response("ok");
   });
-  await handler(post(JSON.stringify({ account: "tess", door: true, pad: "x".repeat(5000) })));
+  assertEquals((await handler(post(JSON.stringify({ account: "tess", door: true, pad: "x".repeat(5000) })))).status, 413);
   await handler(new Request("https://b/checkout", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ door: true }) }));
   await handler(post(JSON.stringify({ door: true })));
-  assertEquals(seen, ["direct GET /v1/prices", "door GET /v1/prices", "door GET /v1/prices"], "an undeclared length is read like a declared one");
+  assertEquals(seen, ["door GET /v1/prices", "door GET /v1/prices"], "an undeclared length is read like a declared one");
 });
 
-Deno.test("a large body is never copied, and Stripe's webhook is never read for a caller", async () => {
+Deno.test("a large body is refused at once, and Stripe's webhook is never read for a caller", async () => {
   const seen: string[] = [];
   const s = switched({ direct: via("direct", seen), door: via("door", seen), on: askedDoor });
   const handler = forAccount(async (req: Request) => {
@@ -121,10 +122,11 @@ Deno.test("a large body is never copied, and Stripe's webhook is never read for 
   });
   const big = JSON.stringify({ door: true, pad: "x".repeat(300_000) });
   const res = await handler(post(big));
-  assertEquals(await res.text(), "ok", "the handler reads it all; nothing waits on a cancelled copy");
+  assertEquals(res.status, 413, "the handler is never run for it");
+  await res.body?.cancel();
   const hook = JSON.stringify({ door: true });
   await handler(new Request("https://b/stripe", { method: "POST", headers: { "content-type": "application/json" }, body: hook }));
-  assertEquals(seen, ["direct GET /v1/prices", "direct GET /v1/prices"]);
+  assertEquals(seen, ["direct GET /v1/prices"]);
 });
 
 Deno.test("a chunked body is read once for its caller, and the handler gets the same text", async () => {
@@ -141,9 +143,10 @@ Deno.test("a chunked body is read once for its caller, and the handler gets the 
   await handler(new Request("https://b/checkout", { method: "POST", headers: { "content-type": "application/json" }, body: chunked }));
   const over = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode(JSON.stringify({ door: true, pad: "x".repeat(5000) }))); c.close(); } });
   const res = await handler(new Request("https://b/checkout", { method: "POST", headers: { "content-type": "application/json" }, body: over }));
-  assertEquals(await res.text(), "ok", "an undeclared body over the cap never waits");
-  assertEquals(got, [text, ""]);
-  assertEquals(seen, ["door GET /v1/prices", "direct GET /v1/prices"]);
+  assertEquals(res.status, 413, "an undeclared body over the cap is refused as soon as it passes it");
+  await res.body?.cancel();
+  assertEquals(got, [text]);
+  assertEquals(seen, ["door GET /v1/prices"]);
 });
 
 Deno.test("the door sends Stripe the broker's own key as its sinkKey; its ledger keeps a hashed one", async () => {
@@ -163,4 +166,35 @@ Deno.test("the direct way sends the broker's own idempotency key, as before the 
   const s = switched({ direct, door: via("door", []), on: askedDoor });
   await s("POST", "/v1/customers", {}, "customer t ana");
   assertEquals(keys, ["customer t ana"]);
+});
+
+// The limits are rules.cue's, emitted to rules.ts: each body-reading endpoint takes a body of exactly its limit and
+// refuses one a byte over with a 413, through the dispatcher and through the caller wrapper alike.
+Deno.test("every body-reading endpoint refuses a body over its emitted limit with a 413, and takes one at it", async () => {
+  const limits: [string, number][] = [
+    ...["/checkout", "/trial/offer", "/trial/checkout", "/portal", "/resync", "/onboard", "/probe"].map((p) => [p, RULES.bodyLimits.request] as [string, number]),
+    ["/route", RULES.routeLimits.bodyMax],
+    ["/stripe", RULES.bodyLimits.webhook],
+  ];
+  const head = '{"tenant":"https://a.example","pad":"', tail = '"}';
+  const text = (n: number) => head + "x".repeat(n - head.length - tail.length) + tail;
+  for (const [path, limit] of limits) {
+    assertEquals(bodyLimitOf("POST", path), limit, `${path}: the limit is the emitted one`);
+    const at = await withCappedBody(new Request(`https://b${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: text(limit) }), true);
+    assertEquals(at instanceof Request ? (await at.text()).length : -1, limit, `${path}: a body at the limit is read, once, and handed on`);
+    const over = await withCappedBody(new Request(`https://b${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: text(limit + 1) }), true);
+    assertEquals(over instanceof Response ? over.status : 0, 413, `${path}: a byte over is refused`);
+    if (over instanceof Response) await over.body?.cancel();
+  }
+  assertEquals(bodyLimitOf("GET", "/checkout"), undefined);
+  assertEquals(bodyLimitOf("POST", "/jwks"), undefined, "a path that reads no body has no limit");
+  // A client that keeps streaming is not waited for: the 413 comes as soon as the cap is passed.
+  const never = new ReadableStream<Uint8Array>({ pull(c) { c.enqueue(new TextEncoder().encode("x".repeat(1024))); } });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const answered = await Promise.race([
+    withCappedBody(new Request("https://b/route", { method: "POST", headers: { "content-type": "application/json" }, body: never }), true),
+    new Promise<string>((r) => { timer = setTimeout(() => r("hung"), 3000); }),
+  ]);
+  clearTimeout(timer);
+  assertEquals(answered instanceof Response ? answered.status : answered, 413, "no hang on an endless body");
 });

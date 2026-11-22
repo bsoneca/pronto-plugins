@@ -5,10 +5,14 @@
 #   bin/pronto-flags setup <app-dir>               # once: the bucket, its readers, the first push
 #                                                  # (every write says its target, and takes --expect <url> or PRONTO_FLAGS_EXPECT;
 #                                                  #  --dry-run or PRONTO_FLAGS_DRY_RUN=1 shows and writes nothing, refused at each write; each write is noted in the journal)
-#   bin/pronto-flags push <app-dir> [--flip a,b] [--drop a,b] [--untested "<why>"] [--no-canary "<why>"]
-#                                                  # the flags as flags_spec.cue says them now, merged over the live ones: a default
-#                                                  # changes only for a flag --flip names; a live flag the spec dropped stays while
+#   bin/pronto-flags push <app-dir> [--flip a,b|a=<value>] [--sync a,b] [--drop a,b] [--untested "<why>"] [--no-canary "<why>"]
+#                                                  # the flags as flags_spec.cue says them now, merged over the live ones: --flip X turns X on live
+#                                                  # (--flip X=<value> sets a bool, string or number; X=false turns it off), with the flag's cases, and
+#                                                  # the flip is recorded into flags_spec.cue by a pull request the tool opens; --sync X writes the
+#                                                  # spec's whole reach for X (accounts too); a live flag the spec dropped stays while
 #                                                  # the served release reads it (released.json), unless --drop names it
+#   bin/pronto-flags record <app-dir>              # the live flags into flags_spec.cue by a pull request (what a flip does after its write)
+#   bin/pronto-flags drift <app-dir>               # what the spec says differently from live; exit 1 when it differs, 0 when equal
 #   bin/pronto-flags released <app-dir>            # records which flags the served release reads (released.json beside the live
 #                                                  # object); run from the clean released tree, by release-cron once it serves
 #   bin/pronto-flags cases <app-dir> [flag]        # the cases a flip of each flag (or the one) runs
@@ -18,7 +22,7 @@
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 case "${1:-}" in
-setup|push|released|history|rollback|show|cases)
+setup|push|released|history|rollback|show|cases|record|drift)
 	cmd=$1
 	app=$(cd "$2" && pwd)
 	shift 2

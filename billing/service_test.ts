@@ -3,6 +3,7 @@
 // away because flagd could not be asked.
 import { grantsLoop, grantVerdict, NotReady, service } from "./service.ts";
 import { entitlementClaims } from "./broker/core.ts";
+import { RULES } from "./rules.ts";
 import { signEs256 } from "./shared.ts";
 
 const eq = (a: unknown, b: unknown, m = "") => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); };
@@ -92,6 +93,10 @@ function trialStage(o: { strict?: () => Response; flag?: () => Response; status?
       const h = new Headers(init?.headers);
       doorAsks.push({ auth: h.get("authorization"), account: h.get("x-pronto-account"), body });
       return Promise.resolve(o.door ? o.door() : Response.json({ value: true }));
+    }
+    if (url === "https://b.example/probe") {
+      broker.push({ path: "/probe", body });
+      return Promise.resolve(Response.json({ ok: true }));
     }
     if (url === "https://b.example/route") {
       broker.push({ path: "/route", body });
@@ -316,7 +321,7 @@ Deno.test("asked directly, flagd is told the account and the host; through the m
     [["https://a.example/ofrep/v1/evaluate/flags/free_trial", undefined, undefined]], "the door says both itself: the page's headers would be stripped");
 });
 
-Deno.test("the door flag is read for the reader and told to the broker; a lookup that fails in transit fails the call, a flag that is not there fails the call", async () => {
+Deno.test("the door flag is read for the reader and told to the broker; a lookup that fails or is slow takes the direct route", async () => {
   const on = trialStage();
   const res = await on.ask(on.make({ doorFlag: "stripe_door" }), "/billing/trial");
   eq(res.status, 200, "on");
@@ -334,10 +339,10 @@ Deno.test("the door flag is read for the reader and told to the broker; a lookup
   eq([none.doorAsks.length, "door" in none.broker[0].body], [0, false], "no door flag: nothing asked, nothing told");
   const absent = trialStage({ door: () => Response.json({ key: "stripe_door", errorCode: "FLAG_NOT_FOUND" }, { status: 404 }) });
   const missing = await absent.ask(absent.make({ doorFlag: "stripe_door" }), "/billing/trial");
-  eq([missing.ok, absent.broker.length], [false, 0], "a flag that is not there fails loudly");
+  eq([missing.status, absent.broker.map((b) => b.body.door)], [200, [false]], "a flag that is not there: direct, never the door");
   await missing.body?.cancel();
-  // A lookup that fails in transit fails the request, never the flag-off path: the broker would call
-  // Stripe straight, past the airlock's ledger. Only an answer flagd gave picks a way.
+  // A lookup that fails in transit takes the direct route (door false), with one warning that carries the alert
+  // token: only a lookup that succeeds with true uses the door.
   const transit: [string, () => Response][] = [
     ["flagd 503", () => new Response("", { status: 503 })],
     ["flagd 500", () => new Response("", { status: 500 })],
@@ -346,22 +351,25 @@ Deno.test("the door flag is read for the reader and told to the broker; a lookup
     ["body cannot be read", () => new Response(new ReadableStream({ pull(c) { c.error(new TypeError("body interrupted")); } }), { status: 200 })],
     ["body not JSON", () => new Response("{not json", { status: 200 })],
   ];
-  const quiet = console.error;
-  console.error = () => {};
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (...a: unknown[]) => { warned.push(a.join(" ")); };
   try {
     for (const [why, door] of transit) {
       const t = trialStage({ door });
       const r = await t.ask(t.make({ doorFlag: "stripe_door" }), "/billing/trial");
-      eq([why, r.status, t.broker.length], [why, 502, 0], "fails the request, the broker is not called");
+      eq([why, r.status, t.broker.map((b) => b.body.door)], [why, 200, [false]], "the request goes on, and the broker is told direct");
       await r.body?.cancel();
     }
+    const odd = trialStage({ door: () => Response.json({ value: "yes" }) });
+    const bad = await odd.ask(odd.make({ doorFlag: "stripe_door" }), "/billing/trial");
+    eq([bad.status, odd.broker.map((b) => b.body.door)], [200, [false]], "an answer that is no boolean goes direct");
+    await bad.body?.cancel();
   } finally {
-    console.error = quiet;
+    console.warn = warn;
   }
-  const odd = trialStage({ door: () => Response.json({ value: "yes" }) });
-  const bad = await odd.ask(odd.make({ doorFlag: "stripe_door" }), "/billing/trial");
-  eq([bad.ok, odd.broker.length], [false, 0], "an answer that is no boolean fails");
-  await bad.body?.cancel();
+  eq(warned.length, transit.length + 1, "one warning each");
+  eq(warned.every((w) => w.includes("billing_alert=stripe_door_lookup_failed") && w.includes("taking the direct route") && !w.includes(ANA_ID) && !w.includes("Bearer")), true, "the alert token, no account or token");
 });
 
 // The grants loop waits out the startup race (PRONTO-295, from Bonk Chess's copy): billing starts before crud
@@ -497,18 +505,18 @@ Deno.test("the grants loop backs off and keeps going after a failure, never endi
   eq([err === stop, slept], [true, [2000, 4000, 8000, 16000, 32000, 60000, 60000, 60000, 60000]], "capped at a minute, a success waits a minute, a failure after one backs off again");
 });
 
-Deno.test("a probe whose door lookup fails gets a 502 and neither transport is called", async () => {
-  const quietly = console.error;
-  console.error = () => {};
+Deno.test("a probe whose door lookup fails goes direct: the broker is told door false", async () => {
+  const quietly = console.warn;
+  console.warn = () => {};
   try {
     for (const [why, door] of [["flagd 503", () => new Response("", { status: 503 })], ["fetch rejects", () => Promise.reject(new TypeError("connection refused")) as unknown as Response]] as const) {
       const t = trialStage({ door });
       const res = await t.make({ doorFlag: "stripe_door" })(new Request("https://a.example/billing/probe", { headers: { authorization: "Bearer reader" } }));
-      eq([why, res.status, t.broker.length], [why, 502, 0], "a 502, and nothing sent to the broker (so to neither transport)");
+      eq([why, res.status, t.broker.map((b) => b.body.door)], [why, 200, [false]], "the direct route, never the door");
       await res.body?.cancel();
     }
   } finally {
-    console.error = quietly;
+    console.warn = quietly;
   }
 });
 
@@ -522,23 +530,51 @@ Deno.test("a broker that does not know trials: no offers with the strict flag of
   }
 });
 
-Deno.test("a failed door lookup fails both trial requests before the flag is asked and before any ticket is evaluated, issued or consumed", async () => {
-  const quietly = console.error;
-  console.error = () => {};
+Deno.test("a failed door lookup no longer stops the trial requests: the ticket check goes on with the door off", async () => {
+  const quietly = console.warn;
+  console.warn = () => {};
   try {
     for (const [why, door] of [["flagd 503", () => new Response("", { status: 503 })], ["fetch rejects", () => Promise.reject(new TypeError("connection refused")) as unknown as Response]] as const) {
       const t = trialStage({ door });
       for (const [path, body] of [["/billing/trial", {}], ["/billing/trial/checkout", CONSENT]] as const) {
         const res = await t.ask(t.make({ doorFlag: "stripe_door" }), path, body);
-        eq([why, path, res.status], [why, path, 502]);
+        eq([why, path, res.status], [why, path, 200]);
         await res.body?.cancel();
       }
-      eq(t.flagBodies, [], `${why}: the trial flag was not asked`);
-      eq(fns(t.calls).filter((f) => f === "billing_trial_ask" || f === "billing_trial_take"), [], `${why}: the ticket is still available`);
-      eq(t.broker, [], `${why}: the broker was not called`);
+      eq(t.flagBodies.length > 0, true, `${why}: the trial flag was asked`);
+      eq(fns(t.calls).includes("billing_trial_ask"), true, `${why}: the ticket was issued`);
+      eq(t.broker.map((b) => b.body.door), [false, false], `${why}: both calls go direct`);
     }
   } finally {
-    console.error = quietly;
+    console.warn = quietly;
+  }
+});
+
+Deno.test("a door lookup that does not answer within the declared deadline goes direct, and /billing/route says 502", async () => {
+  eq(RULES.doorLookupTimeoutMs, 300, "the deadline is rules.cue's");
+  const slow = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/stripe_door")) {
+      return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal!.reason)));
+    }
+    return Promise.resolve(new Response("", { status: 404 }));
+  }) as typeof fetch;
+  const svc = service({
+    origin: "https://a.example", broker: "https://b.example", crud: "http://crud", serviceJwt: "t", document: JSON.stringify({ owner: "o", plans: { analysis: {} } }),
+    flags: "http://flagd:8693", doorFlag: "stripe_door", fetcher: slow,
+  });
+  const warn = console.warn, error = console.error;
+  console.warn = () => {};
+  console.error = () => {};
+  try {
+    const started = Date.now();
+    const res = await svc(new Request("https://a.example/billing/route"));
+    eq(res.status, 502, "a diagnostic, no payment path: the usual 502");
+    await res.body?.cancel();
+    eq(Date.now() - started < 3000, true, "it did not wait the old ten seconds");
+  } finally {
+    console.warn = warn;
+    console.error = error;
   }
 });
 
@@ -682,4 +718,21 @@ Deno.test("a failed first strict-flag lookup, with a grants error outstanding, i
     eq(await legacy.attempt(1000), false);
     eq((await legacy(new Request("https://a.example/billing/health"))).status, 200, "no strict flag configured: legacy");
   });
+});
+
+Deno.test("the route meter's window is rules.cue's: a client is let through again once it has passed", async () => {
+  const t = trialStage();
+  const svc = t.make({ doorFlag: "stripe_door" });
+  const now = Date.now;
+  let skew = 0;
+  Date.now = () => now() + skew;
+  try {
+    const get = async () => { const r = await svc(new Request("https://a.example/billing/route", { headers: { "x-forwarded-for": "8.8.8.8" } })); await r.body?.cancel(); return r.status; };
+    for (let i = 0; i < RULES.routeLimits.perClient; i++) await get();
+    eq(await get(), 429, "past the quota");
+    skew = RULES.routeLimits.windowMs;
+    eq(await get(), 200, "a new window after the declared one");
+  } finally {
+    Date.now = now;
+  }
 });

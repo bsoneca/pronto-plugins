@@ -185,7 +185,7 @@ An app with a `target.preview` chooses `when` (the field of `preview`, default `
     `failed`, `the release preview failed: ...; the rehearsal was stopped: nothing released`. That is never bisected (it says nothing of a commit);
   - the rehearsal fails first: the preview's `up` is never cancelled (stopping it would only kill the local ssh, leaving the remote
     release running while `down` starts in the same worktree), so it runs to its end (Bonk Chess's `up` ends with the kill rehearsal, which
-    is acceptable); the waits and probes after it are skipped and `down` runs. A failed `down` is logged and added to the run's reason.
+    is acceptable); the waits and probes after it are skipped and `down` runs. A failed `down` is tried again after 15 s, 30 s and 60 s (it is idempotent, and ssh's own failure, exit 255, is a dropped connection, not a verdict on the preview), then logged and added to the run's reason.
     The run ends with the rehearsal's own reason, red or no verdict, bisected as ever;
   - both passed: the android step, then the release, once `git rev-parse HEAD` in the run's worktree is still the commit both started from
     (else the run fails, nothing released). `"first"` makes the same check.

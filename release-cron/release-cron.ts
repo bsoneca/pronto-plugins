@@ -881,7 +881,18 @@ async function previewBody(pv: NonNullable<Command["preview"]>, dir: string, can
   } finally {
     if (reach) { try { send(reach.pid, "TERM"); await reach.stdin.close().catch(() => {}); } catch { /* already gone */ } }
     let down: { code: number };
-    try { down = await child(pv.down[0], pv.down.slice(1), dir, env, undefined, "down"); } finally { previews--; }
+    // `down` is idempotent (a preview already gone is removed), so a failure, most often ssh's own 255 when the connection to the node dropped
+    // ("Read from remote host: Operation timed out", the 2026-11-22 02:09 run, which had passed its kill rehearsal), is tried again after a pause:
+    // 15 s, 30 s, 60 s. A preview still standing after the last try fails the run, as ever.
+    try {
+      down = await child(pv.down[0], pv.down.slice(1), dir, env, undefined, "down");
+      for (const wait of [15, 30, 60]) {
+        if (down.code === 0) break;
+        say(`preview: removing the preview failed (exit ${down.code}); again in ${wait} s`);
+        await new Promise((r) => setTimeout(r, wait * 1000));
+        down = await child(pv.down[0], pv.down.slice(1), dir, env, undefined, "down");
+      }
+    } finally { previews--; }
     out.downCode = down.code;
     // A preview left standing fails the run before the release: its namespace and what runs there stay until someone
     // removes them, which a run that reads as released would hide.

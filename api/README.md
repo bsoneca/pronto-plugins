@@ -18,6 +18,13 @@ of the generator they run. The app then:
 
 - lists `{name: "<NNN>_api_v1.sql", src: "api/v1/api_v1.sql"}` among its `rawMigrations`, after
   its flags' SQL (the gate calls `pronto_flags.flag_on_strict`, which fails closed on a broken rule, as flag_on now does too);
+- lists `{name: "<NNN>_api_regrant.sql", src: "api/v1/api_v1_grants.sql"}` too, once right after each earlier migration that grants
+  `ALL TABLES IN SCHEMA public` to its roles (and their default privileges), which a replay over a database that already holds the views
+  applies to them, views included: a SELECT-only view would hold INSERT for `app_user` (and `anon` read it) from that migration until
+  `<NNN>_api_v1.sql` runs. `api_v1_grants.sql` is each view's REVOKE and GRANT, taken from the same statements the views are created with,
+  one `DO` per view guarded by `to_regclass` (a database with no view yet is left alone), so the replay narrows them straight away and
+  running it again changes nothing. Name it so it sorts (`LC_ALL=C`) right after the migration it follows (a `003_api_regrant.sql` after
+  `002_grants.sql`);
 - declares the spec's flag (`api_export`, default `false`, local `true`) in `flags_spec.cue`.
 
 The door carries the block always (Caddy's file is baked at generate time, so nothing could mount

@@ -99,10 +99,12 @@ export const RULES = {
   "routeLimits": {
     "perClient": 30,
     "global": 120,
-    "bodyMax": 4096
+    "bodyMax": 4096,
+    "windowMs": 60000
   },
   "bodyLimits": {
     "request": 4096,
     "webhook": 262144
-  }
+  },
+  "doorLookupTimeoutMs": 300
 } as const;

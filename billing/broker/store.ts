@@ -254,7 +254,9 @@ export const SQL = {
   // With a token, only the holder's live claim is released (the declaration's release); without, the row goes.
   // The declared release (holder's token, a live claim) and invalidation (a finished row only).
   forget: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND $3::text IS NOT NULL AND state IN (${fromStates("release")}) AND expires > now() AND expires::text = $3::text RETURNING 1 AS released`,
-  invalidate: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND state IN (${fromStates("invalidate")}) RETURNING 1 AS invalidated`,
+  // A row whose time ended is absent to every caller (the declared `expire`), so an invalidation of it is refused, as the memory
+  // store refuses it: the sweep, not an invalidation, removes it.
+  invalidate: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now() AND state IN (${fromStates("invalidate")}) RETURNING 1 AS invalidated`,
   // The declared expiry: rows whose time ended, in the states `expire` names, a bounded few at a time.
   sweepSeen: `DELETE FROM billing_seen WHERE ctid IN (SELECT ctid FROM billing_seen WHERE expires <= now() AND state IN (${fromStates("expire")}) LIMIT ${SWEEP})`,
 };

@@ -31,7 +31,8 @@ export interface Settings {
    * document with a trial is all it takes. */
   trialFlag?: string;
   // The flag that sends this tenant's calls to Stripe through the operator's airlock (PRONTO-218):
-  // asked for each request's own reader, its value told to the broker as `door`.
+  // asked for each request's own reader, its value told to the broker as `door`. Only a lookup that succeeds with
+  // true sends the reader through the door; a lookup that fails or is slow goes direct, with a logged warning.
   doorFlag?: string;
   /** The name of a pronto-flags flag, asked of flagd as the door flag is. While it evaluates true the service
    * behaves strictly where it once did not: a failed grants write turns /billing/health 503 and is retried with
@@ -114,7 +115,7 @@ export function service(s: Settings) {
   // through the door, the door says both, the account from the session `auth` carries.
   const flagsAt = !s.flags ? "" : s.flags === "origin" ? origin : s.flags === "mesh" ? "http://localhost:3500" : s.flags.replace(/\/$/, "");
   const host = new URL(origin).hostname;
-  function ofrep(key: string, account?: string, auth?: string | null): Promise<Response> {
+  function ofrep(key: string, account?: string, auth?: string | null, timeoutMs = 10_000): Promise<Response> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (s.flags === "mesh") headers["dapr-app-id"] = "flagd";
     if (s.flags !== "origin") {
@@ -122,7 +123,7 @@ export function service(s: Settings) {
       if (account) headers["x-pronto-account"] = account;
     } else if (auth) headers.authorization = auth;
     return fetcher(`${flagsAt}/ofrep/v1/evaluate/flags/${encodeURIComponent(key)}`, {
-      method: "POST", headers, body: JSON.stringify({ context: account ? { targetingKey: account } : {} }), signal: AbortSignal.timeout(10_000),
+      method: "POST", headers, body: JSON.stringify({ context: account ? { targetingKey: account } : {} }), signal: AbortSignal.timeout(timeoutMs),
     });
   }
 
@@ -270,23 +271,29 @@ export function service(s: Settings) {
     return answer;
   };
 
-  // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag
-  // for them now: through the door, with the reader's own session, which its OFREP route reads the
-  // account from; asked directly, for the reader's account. Unset flag: no word, the broker's own
-  // way. The door is chosen only on an answer flagd gave: true or false. Every other outcome fails the
-  // request (the 502 handler), never picks a way: a lookup that fails in transit (the fetch throws or
-  // times out, flagd answers 5xx, the body of a 200 cannot be read), an answer that is no boolean, a
-  // body that is not JSON, and a flag that is not there (FLAG_NOT_FOUND, a 404 or other 4xx: a
-  // misconfiguration, since BILLING_DOOR_FLAG is set only once a push has published it, release.cue).
-  // A false from a lookup that told us nothing would send the call straight to Stripe while the broker
-  // runs with STRIPE_DOOR_ASKED, skipping the airlock's ledger.
-  async function doorOn(account: string | undefined, auth: string | null): Promise<boolean | undefined> {
+  // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag for them now:
+  // through the door, with the reader's own session, which its OFREP route reads the account from; asked
+  // directly, for the reader's account. Unset flag: no word, the broker's own way.
+  //
+  // Only a lookup that succeeds with true uses the door. A deploy never changes behaviour, only a flag does, and the
+  // released path is direct: with stripe_door off, a flagd outage must not break a paid checkout. So a lookup that
+  // fails (the fetch throws, flagd answers 5xx or 4xx, an answer that is no boolean, a body that is not JSON), or
+  // does not answer within rules.cue's doorLookupTimeoutMs, takes the direct route (false) and logs one warning
+  // carrying billing_alert=stripe_door_lookup_failed, the line an alert rule counts. `failOpen` false (the route
+  // probe, a diagnostic and no payment path) throws instead, for the usual 502.
+  async function doorOn(account: string | undefined, auth: string | null, failOpen = true): Promise<boolean | undefined> {
     if (!s.doorFlag) return undefined;
     if (!s.flags) throw new Error("BILLING_DOOR_FLAG needs BILLING_FLAGS: where to ask it");
-    const res = await ofrep(s.doorFlag, account, auth);
-    const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
-    if (!res.ok || typeof answer?.value !== "boolean") throw new Error(`flag ${s.doorFlag}: flagd answered ${res.status}`);
-    return answer.value;
+    try {
+      const res = await ofrep(s.doorFlag, account, auth, RULES.doorLookupTimeoutMs);
+      const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
+      if (!res.ok || typeof answer?.value !== "boolean") throw new Error(`flag ${s.doorFlag}: flagd answered ${res.status}`);
+      return answer.value;
+    } catch (e) {
+      if (!failOpen) throw e;
+      console.warn(`billing: warn: billing_alert=stripe_door_lookup_failed stripe_door lookup failed, taking the direct route: ${(e as Error).message}`);
+      return false;
+    }
   }
 
   async function trialStatus(account: string): Promise<{ state: string | null; holds: boolean } & Record<string, unknown>> {
@@ -317,9 +324,9 @@ export function service(s: Settings) {
     }
     const account = await reader(req);
     if (account instanceof Response) return account;
-    // The door lookup comes first: a lookup that fails fails the request (the 502 handler) before a trial flag is
-    // asked and before any ticket is evaluated, issued or consumed. Its answer (undefined when no door flag is
-    // configured) goes on to the broker as it is.
+    // The door lookup comes first, and fails open: a lookup that fails takes the direct route and the ticket check
+    // goes on as it would with the flag off. Its answer (undefined when no door flag is configured) goes on to the
+    // broker as it is.
     const door = { door: await doorOn(account, req.headers.get("authorization")) };
     const strict = await strictOn(account, req.headers.get("authorization"));
     if (!(await trialOn(account, strict))) return json(404, { error: "not found" });
@@ -379,7 +386,7 @@ export function service(s: Settings) {
     const t = Date.now();
     const take = (key: string, per: number): boolean => {
       let held = routeSeen.get(key);
-      if (!held || t - held.at >= 60_000) held = { n: 0, at: t };
+      if (!held || t - held.at >= RULES.routeLimits.windowMs) held = { n: 0, at: t };
       routeSeen.delete(key);
       routeSeen.set(key, held);
       if (routeSeen.size > 10_000) routeSeen.delete(routeSeen.keys().next().value!);
@@ -430,8 +437,8 @@ export function service(s: Settings) {
         if (!s.doorFlag) return json(404, { error: "not found" });
         // The limiter comes first: an anonymous probe is metered before it reaches flagd or the broker.
         if (!routeTaken(req.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() || "")) return json(429, { error: "too many requests; try again in a minute" });
-        // The usual 502 for a lookup that fails, before the broker is asked.
-        const door = await doorOn(undefined, null);
+        // A diagnostic, no payment path: a lookup that fails is the usual 502, before the broker is asked.
+        const door = await doorOn(undefined, null, false);
         if (door !== true) return json(404, { error: "not found" });
         const res = await toBroker("/route", {}, null, { door });
         if (!res.ok) return res;
