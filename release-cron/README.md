@@ -169,8 +169,7 @@ each step's minutes stay in `runs.jsonl` and `report`, so the slowest phase stil
 short calls inside prepare (`git fetch`, `gcloud describe`) keep their own hang guards of a few
 minutes; a signal (launchd's, `kill`) still stops the run's children, but never a preview's `up` (that would only kill the local ssh, leaving the node running release@k8s): the probes are skipped, `down` runs once `up` has ended, and the lock goes only then. Because nothing ends a stuck
 run, stop it by hand (`kill <pid in <state>/lock/pid>`). An app's old `minutes` in release_cron.cue is still accepted but ignored; delete it. There's no overall budget. Runs never overlap:
-launchd never starts a job while it's still running, and a lock (`<state>/lock`, a directory made whole with the
-run's pid and renamed into place, so only one run holds it; a dead holder's is taken over by one run at a time) skips a run started by hand while another is going.
+launchd never starts a job while it's still running, and a lock (`<state>/lock`, a directory made with `mkdir`, which refuses an existing one even empty, as the older driver's does, then the run's pid written whole; a directory with no pid yet is an acquisition in progress, waited for 10 s, then stale; a dead holder's is taken over by one run at a time; a holder whose pid cannot be read, or a write the system refuses, stops the run with an error and a nonzero exit, never a skip) skips a run started by hand while another is going.
 
 ## When the preview runs
 
