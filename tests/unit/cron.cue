@@ -467,6 +467,16 @@ cases: {
 		{call: "cron.servingRetryable", args: [127], expect: false},
 		{call: "cron.servingRetryable", args: [142], expect: false, why: "killed by the alarm"},
 	]}
+	"a fetch is tried again only after it lost a ref's lock": {suite: "cron", steps: [
+		{call: "cron.lockedRef", args: ["error: cannot lock ref 'refs/remotes/origin/main': is at abc but expected def"], expect: true, why: "the race PRONTO-704 saw"},
+		{call: "cron.lockedRef", args: ["fatal: Unable to create '/r/refs/remotes/origin/main.lock': File exists."], expect: true},
+		{call: "cron.lockedRef", args: ["fatal: could not read Username for 'https://github.com'"], expect: false, why: "auth: said at once"},
+		{call: "cron.lockedRef", args: [""], expect: false},
+		{call: "cron.fetchWait", args: [1, "cannot lock ref 'x'"], expect: 2},
+		{call: "cron.fetchWait", args: [2, "cannot lock ref 'x'"], expect: 5},
+		{call: "cron.fetchWait", args: [3, "cannot lock ref 'x'"], expect: null, why: "the third try is the last"},
+		{call: "cron.fetchWait", args: [1, "fatal: unable to access"], expect: null},
+	]}
 	"a run that ends after a signal ends as stopped, whatever it reached": {suite: "cron", steps: [
 		{call: "cron.endWhenInterrupted", args: [true, "failed"], expect: "stopped", why: "a killed child's failure is no verdict"},
 		{call: "cron.endWhenInterrupted", args: [true, "skipped"], expect: "stopped"},

@@ -823,6 +823,13 @@ export const signalStep = (childrenAlive, previews, elapsed, grace, teardown) =>
   : childrenAlive && elapsed >= grace ? "kill"
   : "wait";
 
+// A git fetch that lost a race for a ref's lock file (another fetch of the same repository, a gc, or a concurrent
+// run's own): git says "cannot lock ref" or "Unable to create '<ref>.lock': File exists". The lock is held for
+// milliseconds, so the fetch is tried again; any other failure (auth, network, a bad ref) is said at once (PRONTO-704).
+export const lockedRef = (err) => /cannot lock ref|unable to create '[^']*\.lock': file exists/i.test(err ?? "");
+// Seconds to wait before fetch attempt n+1 after attempt n (1-based) lost a ref lock, or null when it is over: 3 tries.
+export const fetchWait = (n, err) => lockedRef(err) && n < 3 ? [2, 5][n - 1] : null;
+
 // Only an ssh transport failure (exit 255) is worth reading the serving command again: any other failure says what is wrong.
 export const servingRetryable = (code) => sshDropped(code);
 // While the node is read for a release whose ssh dropped: "wait" for the next read after an ssh transport failure, "fail" at once for any other exit (the serving command ran and failed).
