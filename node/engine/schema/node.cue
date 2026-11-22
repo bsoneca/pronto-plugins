@@ -1,6 +1,10 @@
 package schema
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/yaml"
 	"list"
 	"regexp"
 	"strconv"
@@ -39,7 +43,7 @@ import (
 #Served: {
 	core: [
 		"v1/Namespace", "v1/Service", "v1/ConfigMap", "v1/Secret", "v1/ResourceQuota", "v1/LimitRange",
-		"apps/v1/Deployment", "batch/v1/Job", "networking.k8s.io/v1/NetworkPolicy",
+		"apps/v1/Deployment", "batch/v1/Job", "batch/v1/CronJob", "v1/ServiceAccount", "networking.k8s.io/v1/NetworkPolicy",
 	]
 	dapr: "1.16.21":           ["dapr.io/v1alpha1/Configuration", "dapr.io/v1alpha1/Resiliency"]
 	cnpg: "1.30.1":            ["postgresql.cnpg.io/v1/Cluster", "postgresql.cnpg.io/v1/ScheduledBackup", "postgresql.cnpg.io/v1/Backup"]
@@ -57,6 +61,8 @@ import (
 	Service:              "service"
 	ConfigMap:            "configmap"
 	Job:                  "job.batch"
+	CronJob:              "cronjob.batch"
+	ServiceAccount:       "serviceaccount"
 	HTTPRoute:            "httproute.gateway.networking.k8s.io"
 	NetworkPolicy:        "networkpolicy.networking.k8s.io"
 	BackendTrafficPolicy: "backendtrafficpolicy.gateway.envoyproxy.io"
@@ -164,6 +170,82 @@ import (
 	limits?:   {[string]: string}
 }
 
+// The images the engine itself emits that are not the app's: the metrics export's collector and a clock's curl, pinned by
+// digest and pulled from where they are published, not built on the node's buildkitd. Nothing else may leave the registry.
+#External: [
+	"docker.io/otel/opentelemetry-collector-contrib:0.160.0@sha256:799dc6cf12c96192af37b5bdba804da8c10b3bc563b43cb90c3f3c58d9572ad6",
+	"docker.io/curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777",
+]
+
+// What a pod's sidecar listens on (Dapr's HTTP and gRPC APIs, its internal gRPC, its metrics and its profiler): never a service's.
+#FreePort: int & !=3500 & !=3501 & !=9090 & !=50001 & !=50002 & !=7777
+
+// A Deployment of the app's own beside upstream's (billing, a collector, a flag server: a service of its compose project that
+// upstream does not render), built and pushed as upstream's images are, in the mesh under its name. Its environment is stated
+// here, whole: the compose project's is not read.
+#Service: {
+	port!: int & >1024 & <65536 & #FreePort
+	// PORT, SERVICE_JWT and the telemetry's variables are the engine's (the port above, the service role's token from `<app>-service-token`); ORIGIN
+	// is the release's public origin unless named here.
+	env: {[=~"^[A-Z_][A-Z0-9_]*$" & !~"^(PORT|SERVICE_JWT|OTEL_DENO|OTEL_SERVICE_NAME|OTEL_EXPORTER_OTLP_ENDPOINT)$"]: string}
+	// Variables read from a Secret of the namespace, each under its variable's name (a sender's VAPID key): from the SOPS
+	// file or put there by hand, and the pod does not start until it is there.
+	secrets: {[=~"^[A-Z_][A-Z0-9_]*$" & !~"^(PORT|SERVICE_JWT|ORIGIN|OTEL_DENO|OTEL_SERVICE_NAME|OTEL_EXPORTER_OTLP_ENDPOINT)$"]: =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}
+	// Files read from a ConfigMap of the namespace, mounted read-only at each directory, its keys the file names (flagd's live
+	// flags, which `pronto-flags push` writes): the pod does not start until it is there, and a change reaches the files in
+	// about a minute.
+	files: {[=~"^/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$" & !~"(^|/)\\.\\.?(/|$)"]: =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" & strings.MaxRunes(50)}
+	// What a ConfigMap of `files` is made from when it is not there yet, by name: a file of the app, its key the file's name.
+	// Once, on the release that finds it missing; a release never writes over one that exists (a push owns it after).
+	seed: {[=~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"]: =~"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$" & !~"(^|/)\\.\\.(/|$)"}
+	// Where it exports Prometheus metrics, scraped by the node's VictoriaMetrics and by `metricsExport`.
+	metrics?: {
+		port!: int & >1024 & <65536 & #FreePort
+		path:  *"/metrics" | =~"^/"
+	}
+	// A CronJob that POSTs to `path` on its port each `schedule` (five fields, UTC) with the service role's token as its
+	// bearer, as Cloud Scheduler pokes mecha's ticker on Cloud Run. A missed minute is the next one's: no retry.
+	clock?: {
+		schedule: *"* * * * *" | string
+		path:     *"/poke" | =~"^/"
+	}
+	// Connects to the app's own database as one of `database.logins`, its URL in the variable `env` (an exporter's
+	// SQLEXPORTER_TARGET_DSN), read from the login's Secret.
+	database?: {
+		login!: string
+		env:    *"DATABASE_URL" | (=~"^[A-Z_][A-Z0-9_]*$" & !~"^(PORT|SERVICE_JWT|ORIGIN|OTEL_DENO|OTEL_SERVICE_NAME|OTEL_EXPORTER_OTLP_ENDPOINT)$")
+	}
+	// One writer: a Recreate strategy, which the release's default replicas leave at one (mecha's ticker; two would fire a
+	// timer twice). Only `scale` changes its count.
+	singleWriter: *false | bool
+}
+
+// The blob plane mecha's profile pictures live on (the door's /blobs and /img): rclone serving the Cloud Storage `bucket` as
+// the S3 bucket every app names, and imgproxy over it, in the mesh as the app-ids rclone-s3 and imgproxy, built from the
+// app's compose services of those names. rclone signs in with no key: the token of the service account `<app>-blobs`
+// (subject system:serviceaccount:<namespace>:<app>-blobs) is traded at the workload identity `provider` for
+// `serviceAccount`'s, which may read and write the bucket.
+#Blobs: {
+	bucket!:         =~"^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$"
+	provider!:       =~"^projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+$"
+	serviceAccount!: =~"^[a-z0-9-]+@[a-z0-9-]+\\.iam\\.gserviceaccount\\.com$"
+	audience:        string | *"https://iam.googleapis.com/\(provider)"
+}
+
+// The services' metrics (`services.<n>.metrics`) sent on to Google Cloud Monitoring's Managed Service for Prometheus, where
+// Cloud Run's sidecars send theirs: an OpenTelemetry collector of the app's own scrapes them and writes them under `project`,
+// `location` and `cluster`. It signs in with no key, as the blob plane does: the token of the service account
+// `<app>-metrics-export` is traded at a workload identity `provider` that trusts the node's issuer for `serviceAccount`'s.
+#MetricsExport: {
+	project!:        =~"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
+	provider!:       =~"^projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+$"
+	serviceAccount!: =~"^[a-z0-9-]+@[a-z0-9-]+\\.iam\\.gserviceaccount\\.com$"
+	audience:        string | *"https://iam.googleapis.com/\(provider)"
+	location:        string | *"europe-west3"
+	cluster:         string | *"metal"
+	interval:        =~"^[0-9]+s$" | *"30s"
+}
+
 // #Release is an app on the node.
 #Release: {
 	// The app's name: its compose project's, and the release's own Kubernetes names.
@@ -241,6 +323,11 @@ import (
 	containerResources: {[string]: #ContainerResources}
 	database?:          #Database
 	tenant?:            #Tenant
+	// The app's own Deployments beside upstream's, by name (`<app>-<name>`, in the mesh as `<name>`), and the blob plane and
+	// the metrics export, which are emitted as services of the engine's own. `scale` and `containerResources` take their names.
+	services:       {[=~"^[a-z]([-a-z0-9]{0,22}[a-z0-9])?$" & !~"-clock$"]: #Service}
+	blobs?:         #Blobs
+	metricsExport?: #MetricsExport
 	// The SOPS file applied into the namespace; absent, `secrets.metal.enc.yaml` when it exists.
 	secrets?: string
 	// The order the schema Jobs run in. A rendered Job not named here refuses the release: a new
@@ -402,13 +489,18 @@ import (
 
 	// Then the tunings of the release: replicas, the database's settings, the containers' resources, over everything
 	// above (a Deployment or the Cluster, whoever added it).
-	_pre: list.Concat([_patched, _added])
-	_all: list.Concat([[for o in _pre {(#Tune & {in: o, "release": release}).out}], _logins])
+	// The app's own services, the blob plane and the metrics export: Deployments, Services, a clock's CronJob and what they read.
+	_services: (#ServiceObjects & {"release": release, "app": app}).out
+
+	_pre:  list.Concat([_patched, _added])
+	_with: list.Concat([_pre, _services])
+	_all:  list.Concat([[for o in _with {(#Tune & {in: o, "release": release}).out}], _logins])
 
 	// The images a pod template or a database names.
 	_images: list.Concat([
 		[for o in _all if o.kind == "Deployment" || o.kind == "Job" for c in o.spec.template.spec.containers {c.image}],
 		[for o in _all if o.kind == "Deployment" || o.kind == "Job" if o.spec.template.spec.initContainers != _|_ for c in o.spec.template.spec.initContainers {c.image}],
+		[for o in _all if o.kind == "CronJob" for c in o.spec.jobTemplate.spec.template.spec.containers {c.image}],
 		[for o in _all if o.kind == "Cluster" if o.spec.imageName != _|_ {o.spec.imageName}],
 	])
 
@@ -442,10 +534,10 @@ import (
 		[for o in _logins if len([for u in _pre if u.kind == o.kind && u.metadata.name == o.metadata.name {u}]) > 0 {
 			"database.logins would emit \(o.kind)/\(o.metadata.name), which the render already has"
 		}],
-		[for n, _ in release.scale if len([for o in _pre if o.kind == "Deployment" if o.metadata.name == n {o}]) == 0 {
-			"scale names \(n), which is no Deployment of the render (\(strings.Join([for o in _pre if o.kind == "Deployment" {o.metadata.name}], ", ")))"
+		[for n, _ in release.scale if len([for o in _with if o.kind == "Deployment" if o.metadata.name == n {o}]) == 0 {
+			"scale names \(n), which is no Deployment of the render (\(strings.Join([for o in _with if o.kind == "Deployment" {o.metadata.name}], ", ")))"
 		}],
-		[for n, _ in release.containerResources if n != "postgres" if len([for o in _pre if o.kind == "Deployment" for c in o.spec.template.spec.containers if c.name == n {c}]) == 0 {
+		[for n, _ in release.containerResources if n != "postgres" if len([for o in _with if o.kind == "Deployment" for c in o.spec.template.spec.containers if c.name == n {c}]) == 0 {
 			"containerResources names \(n), which is no container of the render's Deployments (or postgres)"
 		}],
 		[if release.database == _|_ if release.containerResources["postgres"] != _|_ {
@@ -454,7 +546,44 @@ import (
 		[if release.database != _|_ if len(release.database.logins) > 0 if app.externalSecrets != _|_ if app.externalSecrets.enabled {
 			"database.logins generate their passwords in the namespace, which the app's externalSecrets store does not do yet"
 		}],
-		[for i in _images if !strings.HasPrefix(i, release.environment.registry + "/") {
+		// what an app's services may not be
+		[for i, o in _services for j, p in _services if j > i if o.kind == p.kind && o.metadata.name == p.metadata.name {
+			"services, blobs and metricsExport would emit \(o.kind)/\(o.metadata.name) twice"
+		}],
+		[for o in _services if len([for u in _pre if u.kind == o.kind && u.metadata.name == o.metadata.name {u}]) > 0 {
+			"services, blobs or metricsExport would emit \(o.kind)/\(o.metadata.name), which the render already has"
+		}],
+		[for n, s in release.services if s.database != _|_ if release.database == _|_ || release.database.logins[s.database.login] == _|_ {
+			"services.\(n).database names the login \(s.database.login), which database.logins does not declare"
+		}],
+		[for n, s in release.services for cm, _ in s.seed if len([for _, c in s.files if c == cm {c}]) == 0 {
+			"services.\(n).seed names the ConfigMap \(cm), which no directory of its files reads"
+		}],
+		[for n, s in release.services for v, _ in s.secrets if s.env[v] != _|_ {
+			"services.\(n).env and secrets both name \(v)"
+		}],
+		[for n, s in release.services if s.database != _|_ if s.env[s.database.env] != _|_ {
+			"services.\(n).env names \(s.database.env), which its database login fills"
+		}],
+		[for n, s in release.services if s.clock != _|_ if len("\(release.name)-\(n)-clock") > 52 {
+			"services.\(n).clock would be the CronJob \(release.name)-\(n)-clock, whose name a Job's pods cannot carry past 52 characters"
+		}],
+		[for n, _ in release.scale if n == "\(release.name)-metrics-export" {
+			"scale names \(n), a single writer: two collectors would write the same series"
+		}],
+		[if release.metricsExport != _|_ for n, s in release.services if s.metrics != _|_ for o in _all if o.kind == "Deployment" && o.metadata.name == "\(release.name)-\(n)" if o.spec.replicas > 1 {
+			"metricsExport scrapes services.\(n) through its Service, which mixes the counters of its pods: it must run one (scale names it)"
+		}],
+		[for n, s in release.services for v, _ in s.secrets if s.database != _|_ if s.database.env == v {
+			"services.\(n).secrets names \(v), which its database login fills"
+		}],
+		[for n, s in release.services for cm, _ in s.seed if cm == "pronto-release" || len([for o in _all if o.kind == "ConfigMap" && o.metadata.name == cm {o}]) > 0 {
+			"services.\(n).seed names the ConfigMap \(cm), which the release writes itself"
+		}],
+		[if release.metricsExport != _|_ if len([for _, s in release.services if s.metrics != _|_ {s}]) == 0 {
+			"metricsExport needs a service with `metrics` to scrape"
+		}],
+		[for i in _images if !list.Contains(#External, i) if !strings.HasPrefix(i, release.environment.registry + "/") {
 			"image \(i) is not in \(release.environment.registry)"
 		}],
 		[for i in _images if !strings.Contains(i, "@sha256:") {"image \(i) is not pinned by digest"}],
@@ -536,6 +665,447 @@ import (
 			}]
 		}
 	}]
+}
+
+// What the release's services, blob plane and metrics export are as objects, by the shapes upstream's own Deployments have:
+// in the mesh (a Dapr sidecar under the app's shared Configuration), reached by name, a policy of the services' own. `app`
+// is upstream's ReleaseSpec, read for the pushed images (`image.pushed`) and the shared resources.
+#ServiceObjects: {
+	release: #Release
+	app:     {...}
+	let ns = release.namespace
+	let appLabels = {"app.kubernetes.io/name": release.name, "app.kubernetes.io/instance": release.name, "app.kubernetes.io/managed-by": "cue"}
+	let selects = {component: string, out: {"app.kubernetes.io/name": release.name, "app.kubernetes.io/component": component}}
+	let origin = "https://\(release.host)"
+	let netpol = [if app.networkPolicy != _|_ if app.networkPolicy.enabled != _|_ {app.networkPolicy.enabled}, true][0]
+	let podResources = [if app.resources != _|_ {app.resources}, {requests: {cpu: "50m", memory: "64Mi"}, limits: {cpu: "500m", memory: "256Mi"}}][0]
+	let blobsPorts = {rcloneS3: 3900, imgproxy: 8081}
+
+	// The image the build pushed for `svc`: by digest, which the render refuses to go without.
+	let imageOf = {
+		svc: string
+		let ref = [
+			if app.image != _|_ if app.image.pushed != _|_ if app.image.pushed[svc] != _|_ {":\(app.image.pushed[svc].tag)@\(app.image.pushed[svc].digest)"},
+			if app.image != _|_ if app.image.tag != _|_ {":\(app.image.tag)"},
+			":latest",
+		]
+		out: "\(release.environment.registry)/\(release.name)-\(svc)\(ref[0])"
+	}
+
+	// Every pod joins the mesh, as upstream's do: its sidecar under the shared Configuration.
+	let sidecar = {
+		id:   string
+		port: int
+		out: {
+			"dapr.io/enabled":                 "true"
+			"dapr.io/app-id":                  id
+			"dapr.io/app-port":                "\(port)"
+			"dapr.io/config":                  "\(release.name)-dapr-config"
+			"dapr.io/enable-metrics":          "true"
+			"dapr.io/metrics-port":            "9090"
+			"dapr.io/block-shutdown-duration": "20s"
+		}
+	}
+
+	// A Google identity with no key: the projected token of the pod's service account, traded at the workload identity.
+	let credentials = {
+		provider:       string
+		serviceAccount: string
+		out: {
+			type:               "external_account"
+			audience:           "//iam.googleapis.com/\(provider)"
+			subject_token_type: "urn:ietf:params:oauth:token-type:jwt"
+			token_url:          "https://sts.googleapis.com/v1/token"
+			credential_source: file: "/var/run/secrets/gcp/token"
+			service_account_impersonation_url: "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/\(serviceAccount):generateAccessToken"
+		}
+	}
+
+	let serviceObjs = [for n, s in release.services for o in list.Concat([
+		[{
+			apiVersion: "apps/v1"
+			kind:       "Deployment"
+			metadata:   {name: "\(release.name)-\(n)", namespace: ns, labels: appLabels & {"app.kubernetes.io/component": n}}
+			spec: {
+				replicas: 1
+				if s.singleWriter {strategy: type: "Recreate"}
+				selector: matchLabels: (selects & {component: n}).out
+				template: {
+					metadata: {
+						labels:      appLabels & {"app.kubernetes.io/component": n}
+						annotations: (sidecar & {id: n, port: s.port}).out
+						if s.metrics != _|_ {
+							annotations: {
+								"prometheus.io/scrape": "true"
+								"prometheus.io/port":   "\(s.metrics.port)"
+								"prometheus.io/path":   s.metrics.path
+							}
+						}
+					}
+					spec: {
+						// A Service's links would give AUTH_PORT=tcp://... to a pod that reads AUTH_PORT as its port.
+						enableServiceLinks: false
+						containers: [{
+							name:            n
+							image:           (imageOf & {svc: n}).out
+							imagePullPolicy: release.environment.imagePullPolicy
+							// A pod going away keeps serving while the mesh learns of its successor.
+							lifecycle: preStop: sleep: seconds: 15
+							ports: [{name: "http", containerPort: s.port}, if s.metrics != _|_ if s.metrics.port != s.port {{name: "metrics", containerPort: s.metrics.port}}]
+							env: list.Concat([
+								[for k, v in s.env if k != "ORIGIN" {name: k, value: v}],
+								[
+									{name: "PORT", value: "\(s.port)"},
+									{name: "ORIGIN", value: [if s.env["ORIGIN"] != _|_ {s.env["ORIGIN"]}, origin][0]},
+									{name: "SERVICE_JWT", valueFrom: secretKeyRef: {name: "\(release.name)-service-token", key: "SERVICE_JWT"}},
+									for k, v in s.secrets {name: k, valueFrom: secretKeyRef: {name: v, key: k}},
+									if s.database != _|_ {{name: s.database.env, valueFrom: secretKeyRef: {name: "\(release.name)-\(strings.Replace(s.database.login, "_", "-", -1))-db", key: "url"}}},
+									// Deno's spans, to the node's Jaeger.
+									{name: "OTEL_DENO", value: "true"},
+									{name: "OTEL_SERVICE_NAME", value: n},
+									{name: "OTEL_EXPORTER_OTLP_ENDPOINT", value: "http://jaeger.observability.svc.cluster.local:4318"},
+								],
+							])
+							startupProbe:   {tcpSocket: port: s.port, periodSeconds: 2, failureThreshold: 60}
+							readinessProbe: {tcpSocket: port: s.port, periodSeconds: 5}
+							"resources":    podResources
+							if len(s.files) > 0 {volumeMounts: [for dir, cm in s.files {name: "files-\(cm)", mountPath: dir, readOnly: true}]}
+						}]
+						// one volume a ConfigMap, whatever directories read it
+						if len(s.files) > 0 {volumes: [for cm, _ in {for _, c in s.files {(c): true}} {name: "files-\(cm)", configMap: "name": cm}]}
+					}
+				}
+			}
+		}, {
+			apiVersion: "v1"
+			kind:       "Service"
+			metadata:   {name: n, namespace: ns, labels: appLabels & {"app.kubernetes.io/component": n}}
+			spec: {
+				type:     "ClusterIP"
+				selector: (selects & {component: n}).out
+				ports:    [{name: "http", port: s.port, targetPort: s.port, protocol: "TCP"}, if s.metrics != _|_ if s.metrics.port != s.port {{name: "metrics", port: s.metrics.port, targetPort: s.metrics.port, protocol: "TCP"}}]
+			}
+		}],
+		// The clock: each schedule, a pod that POSTs to the service's path with the service role's token.
+		[if s.clock != _|_ {
+			apiVersion: "batch/v1"
+			kind:       "CronJob"
+			metadata:   {name: "\(release.name)-\(n)-clock", namespace: ns, labels: appLabels & {"app.kubernetes.io/component": "\(n)-clock"}}
+			spec: {
+				schedule:                   s.clock.schedule
+				timeZone:                   "Etc/UTC"
+				concurrencyPolicy:          "Forbid"
+				startingDeadlineSeconds:    50
+				successfulJobsHistoryLimit: 1
+				failedJobsHistoryLimit:     3
+				jobTemplate: spec: {
+					backoffLimit:            0
+					activeDeadlineSeconds:   60
+					ttlSecondsAfterFinished: 600
+					template: {
+						// It carries the app's name label, which the services' network policy admits on their ports.
+						metadata: labels: appLabels & {"app.kubernetes.io/component": "\(n)-clock"}
+						spec: {
+							restartPolicy:      "Never"
+							enableServiceLinks: false
+							containers: [{
+								name:  "poke"
+								image: #External[1]
+								env:   [{name: "SERVICE_JWT", valueFrom: secretKeyRef: {name: "\(release.name)-service-token", key: "SERVICE_JWT"}}]
+								// A new pod's address reaches the network policies a few seconds after it starts (k3s's
+								// kube-router refuses it until then): it waits, up to 30s, for the service to take a connection,
+								// then pokes once.
+								command: ["sh", "-c", """
+									u=http://\(n).\(ns).svc.cluster.local:\(s.port)
+									for i in $(seq 10); do [ "$(curl -s -o /dev/null -m 1 -w '%{http_code}' "$u/")" != 000 ] && break; sleep 2; done
+									exec curl -fsS -m 50 -X POST -H "Authorization: Bearer $SERVICE_JWT" "$u\(s.clock.path)?caller=k8s-cronjob"
+									"""]
+								resources: limits: {cpu: "100m", memory: "32Mi"}
+							}]
+						}
+					}
+				}
+			}
+		}],
+		// The service's own reach of the database: a policy of its own, since policies add up.
+		[if netpol if s.database != _|_ {
+			apiVersion: "networking.k8s.io/v1"
+			kind:       "NetworkPolicy"
+			metadata:   {name: "\(release.name)-\(n)-database-egress", namespace: ns, labels: appLabels}
+			spec: {
+				podSelector: matchLabels: (selects & {component: n}).out
+				policyTypes: ["Egress"]
+				egress: [{
+					to:    [{podSelector: matchLabels: "cnpg.io/cluster": "\(release.name)-db"}]
+					ports: [{port: 5432, protocol: "TCP"}]
+				}]
+			}
+		}],
+	]) {o}]
+
+	// The blob plane: rclone over the bucket, and imgproxy over rclone (on the cluster network, not through the mesh, whose
+	// invoke path would be part of what the S3 client signs).
+	let blobsObjs = [if release.blobs != _|_ {
+		let x = release.blobs
+		let blobsName = "\(release.name)-blobs"
+		let cred = (credentials & {provider: x.provider, serviceAccount: x.serviceAccount}).out
+		let rcloneLabels = appLabels & {"app.kubernetes.io/component": "rclone-s3"}
+		let imgproxyLabels = appLabels & {"app.kubernetes.io/component": "imgproxy"}
+		[{
+			apiVersion: "v1"
+			kind:       "ServiceAccount"
+			metadata:   {name: blobsName, namespace: ns, labels: rcloneLabels}
+		}, {
+			apiVersion: "v1"
+			kind:       "ConfigMap"
+			metadata:   {name: blobsName, namespace: ns, labels: rcloneLabels}
+			data: "credentials.json": json.Marshal(cred)
+		}, {
+			apiVersion: "apps/v1"
+			kind:       "Deployment"
+			metadata:   {name: "\(release.name)-rclone-s3", namespace: ns, labels: rcloneLabels}
+			spec: {
+				replicas: 1
+				selector: matchLabels: (selects & {component: "rclone-s3"}).out
+				template: {
+					metadata: {
+						labels:      rcloneLabels
+						annotations: (sidecar & {id: "rclone-s3", port: blobsPorts.rcloneS3}).out
+						// A changed credential rolls the pods.
+						annotations: "pronto.dev/config": hex.Encode(sha256.Sum256(json.Marshal(cred)))
+					}
+					spec: {
+						serviceAccountName: blobsName
+						enableServiceLinks: false
+						containers: [{
+							name:            "rclone-s3"
+							image:           (imageOf & {svc: "rclone-s3"}).out
+							imagePullPolicy: release.environment.imagePullPolicy
+							command:         ["rclone"]
+							args:            ["serve", "s3", "--addr=0.0.0.0:\(blobsPorts.rcloneS3)", "--vfs-cache-mode=off", "objects:"]
+							lifecycle: preStop: sleep: seconds: 15
+							ports: [{name: "http", containerPort: blobsPorts.rcloneS3}]
+							// mecha's blob plane over the bucket: a combine remote names its root mecha-objects, and the pod's
+							// service account reaches it with no key.
+							env: [
+								{name: "RCLONE_CONFIG_OBJECTS_TYPE", value: "combine"},
+								{name: "RCLONE_CONFIG_OBJECTS_UPSTREAMS", value: "mecha-objects=gcs:\(x.bucket)"},
+								{name: "RCLONE_CONFIG_GCS_TYPE", value: "google cloud storage"},
+								{name: "RCLONE_CONFIG_GCS_ENV_AUTH", value: "true"},
+								{name: "RCLONE_CONFIG_GCS_BUCKET_POLICY_ONLY", value: "true"},
+								{name: "GOOGLE_APPLICATION_CREDENTIALS", value: "/etc/gcp/credentials.json"},
+							]
+							startupProbe: {tcpSocket: port: blobsPorts.rcloneS3, periodSeconds: 2, failureThreshold: 60}
+							"resources":  podResources
+							volumeMounts: [
+								{name: "credentials", mountPath: "/etc/gcp", readOnly: true},
+								{name: "token", mountPath: "/var/run/secrets/gcp", readOnly: true},
+							]
+						}]
+						volumes: [
+							{name: "credentials", configMap: "name": blobsName},
+							{name: "token", projected: sources: [{serviceAccountToken: {path: "token", audience: x.audience, expirationSeconds: 3600}}]},
+						]
+					}
+				}
+			}
+		}, {
+			apiVersion: "v1"
+			kind:       "Service"
+			metadata:   {name: "rclone-s3", namespace: ns, labels: rcloneLabels}
+			spec: {
+				type:     "ClusterIP"
+				selector: (selects & {component: "rclone-s3"}).out
+				ports:    [{name: "http", port: blobsPorts.rcloneS3, targetPort: blobsPorts.rcloneS3, protocol: "TCP"}]
+			}
+		}, {
+			apiVersion: "apps/v1"
+			kind:       "Deployment"
+			metadata:   {name: "\(release.name)-imgproxy", namespace: ns, labels: imgproxyLabels}
+			spec: {
+				replicas: 1
+				selector: matchLabels: (selects & {component: "imgproxy"}).out
+				template: {
+					metadata: {
+						labels:      imgproxyLabels
+						annotations: (sidecar & {id: "imgproxy", port: blobsPorts.imgproxy}).out
+					}
+					spec: {
+						enableServiceLinks: false
+						containers: [{
+							name:            "imgproxy"
+							image:           (imageOf & {svc: "imgproxy"}).out
+							imagePullPolicy: release.environment.imagePullPolicy
+							lifecycle: preStop: sleep: seconds: 15
+							ports: [{name: "http", containerPort: blobsPorts.imgproxy}]
+							// As the app's compose: mecha's presets alone, no key signs a URL.
+							env: [
+								{name: "IMGPROXY_USE_S3", value: "true"},
+								{name: "IMGPROXY_S3_ENDPOINT", value: "http://rclone-s3.\(ns).svc.cluster.local:\(blobsPorts.rcloneS3)"},
+								// The store takes any key pair; imgproxy's S3 client insists on one.
+								{name: "AWS_ACCESS_KEY_ID", value: "GK000000000000000000000000"},
+								{name: "AWS_SECRET_ACCESS_KEY", value: "0000000000000000000000000000000000000000000000000000000000000000"},
+								{name: "AWS_REGION", value: "rclone"},
+								{name: "IMGPROXY_BIND", value: ":\(blobsPorts.imgproxy)"},
+								{name: "IMGPROXY_MAX_SRC_RESOLUTION", value: "50"},
+								// The store and Google's photo host, as mecha's #ImgproxySources.
+								{name: "IMGPROXY_ALLOWED_SOURCES", value: "s3://mecha-objects/,https://lh3.googleusercontent.com/"},
+								{name: "IMGPROXY_ONLY_PRESETS", value: "true"},
+								{name: "IMGPROXY_PRESETS", value: "thumb=rs:fill:128:128/f:webp,avatar=rs:fill:256:256/f:webp,picture=rs:fit:1024:1024/f:webp"},
+								{name: "IMGPROXY_MAX_RESULT_DIMENSION", value: "1024"},
+								{name: "IMGPROXY_SET_CANONICAL_HEADER", value: "false"},
+								{name: "IMGPROXY_CACHE_CONTROL_PASSTHROUGH", value: "true"},
+							]
+							startupProbe: {tcpSocket: port: blobsPorts.imgproxy, periodSeconds: 2, failureThreshold: 60}
+							"resources":  podResources
+						}]
+					}
+				}
+			}
+		}, {
+			apiVersion: "v1"
+			kind:       "Service"
+			metadata:   {name: "imgproxy", namespace: ns, labels: imgproxyLabels}
+			spec: {
+				type:     "ClusterIP"
+				selector: (selects & {component: "imgproxy"}).out
+				ports:    [{name: "http", port: blobsPorts.imgproxy, targetPort: blobsPorts.imgproxy, protocol: "TCP"}]
+			}
+		}]
+	}]
+
+	// The metrics export: an OpenTelemetry collector scraping each service's metrics port through its Service and writing to
+	// Managed Service for Prometheus, signed in through workload identity.
+	let exportObjs = [if release.metricsExport != _|_ {
+		let x = release.metricsExport
+		let exportName = "\(release.name)-metrics-export"
+		let labels = appLabels & {"app.kubernetes.io/component": "metrics-export"}
+		let cred = (credentials & {provider: x.provider, serviceAccount: x.serviceAccount}).out
+		let config = {
+			receivers: prometheus: config: scrape_configs: [for sn, s in release.services if s.metrics != _|_ {
+				job_name:        sn
+				scrape_interval: x.interval
+				metrics_path:    s.metrics.path
+				static_configs:  [{targets: ["\(sn).\(ns).svc.cluster.local:\(s.metrics.port)"]}]
+			}]
+			processors: {
+				resource: attributes: [
+					{key: "cloud.region", value: x.location, action: "upsert"},
+					{key: "k8s.cluster.name", value: x.cluster, action: "upsert"},
+					{key: "k8s.namespace.name", value: ns, action: "upsert"},
+				]
+				batch: {}
+			}
+			exporters: googlemanagedprometheus: project: x.project
+			service: pipelines: metrics: {
+				receivers:  ["prometheus"]
+				processors: ["resource", "batch"]
+				exporters:  ["googlemanagedprometheus"]
+			}
+		}
+		[{
+			apiVersion: "v1"
+			kind:       "ServiceAccount"
+			metadata:   {name: exportName, namespace: ns, "labels": labels}
+		}, {
+			apiVersion: "v1"
+			kind:       "ConfigMap"
+			metadata:   {name: exportName, namespace: ns, "labels": labels}
+			data: {
+				"config.yaml":      yaml.Marshal(config)
+				"credentials.json": json.Marshal(cred)
+			}
+		}, {
+			apiVersion: "apps/v1"
+			kind:       "Deployment"
+			metadata:   {name: exportName, namespace: ns, "labels": labels}
+			spec: {
+				// one collector: two would write the same series
+				replicas: 1
+				strategy: type:        "Recreate"
+				selector: matchLabels: (selects & {component: "metrics-export"}).out
+				template: {
+					metadata: {
+						"labels": labels
+						// A changed config rolls the collector.
+						annotations: "pronto.dev/config": hex.Encode(sha256.Sum256(yaml.Marshal(config) + json.Marshal(cred)))
+					}
+					spec: {
+						serviceAccountName: exportName
+						enableServiceLinks: false
+						containers: [{
+							name:        "otelcol"
+							image:       #External[0]
+							args:        ["--config=/etc/otelcol/config.yaml"]
+							env:         [{name: "GOOGLE_APPLICATION_CREDENTIALS", value: "/etc/otelcol/credentials.json"}]
+							"resources": podResources
+							volumeMounts: [
+								{name: "config", mountPath: "/etc/otelcol", readOnly: true},
+								{name: "token", mountPath: "/var/run/secrets/gcp", readOnly: true},
+							]
+						}]
+						volumes: [
+							{name: "config", configMap: "name": exportName},
+							{name: "token", projected: sources: [{serviceAccountToken: {path: "token", audience: x.audience, expirationSeconds: 3600}}]},
+						]
+					}
+				}
+			}
+		}]
+	}]
+
+	// What each takes and reaches: the door's requests on its port and the mesh's, the node's metrics scrapers on the metrics
+	// ports, the mesh, Jaeger, and the internet on 443 (a broker). The backends' policy of upstream's holds the cluster's own.
+	let components = list.Concat([[for n, _ in release.services {n}], [if release.blobs != _|_ for c in ["rclone-s3", "imgproxy"] {c}]])
+	let metricPorts = [for _, s in release.services if s.metrics != _|_ {port: s.metrics.port, protocol: "TCP"}]
+	let policyObjs = [if netpol if len(components) > 0 {
+		apiVersion: "networking.k8s.io/v1"
+		kind:       "NetworkPolicy"
+		metadata:   {name: "\(release.name)-services-netpol", namespace: ns, labels: appLabels}
+		spec: {
+			podSelector: matchExpressions: [{key: "app.kubernetes.io/component", operator: "In", values: components}]
+			policyTypes: ["Ingress", "Egress"]
+			ingress: list.Concat([
+				[{
+					from: [{podSelector: matchLabels: "app.kubernetes.io/name": release.name}]
+					ports: list.Concat([
+						[for _, s in release.services {port: s.port, protocol: "TCP"}],
+						[if release.blobs != _|_ for _, p in blobsPorts {port: p, protocol: "TCP"}],
+						[{port: 50002, protocol: "TCP"}, {port: 3500, protocol: "TCP"}],
+					])
+				}, {
+					from:  [{namespaceSelector: matchLabels: "kubernetes.io/metadata.name": "observability"}]
+					ports: list.Concat([[{port: 9090, protocol: "TCP"}], metricPorts])
+				}],
+				// the metrics export's own scrape
+				[if len(metricPorts) > 0 {
+					from:  [{podSelector: matchLabels: (selects & {component: "metrics-export"}).out}]
+					ports: metricPorts
+				}],
+			])
+			egress: [
+				{ports: [{port: 53, protocol: "UDP"}, {port: 53, protocol: "TCP"}]},
+				{
+					to:    [{podSelector: matchLabels: "app.kubernetes.io/name": release.name}]
+					ports: list.Concat([[{port: 50002, protocol: "TCP"}, {port: 3500, protocol: "TCP"}], [if release.blobs != _|_ {{port: blobsPorts.rcloneS3, protocol: "TCP"}}]])
+				},
+				{
+					to:    [{namespaceSelector: matchLabels: "kubernetes.io/metadata.name": "observability"}]
+					ports: [{port: 4317, protocol: "TCP"}, {port: 4318, protocol: "TCP"}, {port: 9411, protocol: "TCP"}]
+				},
+				{
+					to:    [{namespaceSelector: matchLabels: "kubernetes.io/metadata.name": "dapr-system"}]
+					ports: [for p in [4000, 50001, 50005, 50006, 6500] {port: p, protocol: "TCP"}]
+				},
+				{
+					to:    [{ipBlock: {cidr: "0.0.0.0/0", except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]}}]
+					ports: [{port: 443, protocol: "TCP"}]
+				},
+			]
+		}
+	}]
+
+	out: list.Concat([serviceObjs, list.Concat(blobsObjs), list.Concat(exportObjs), policyObjs])
 }
 
 // The release's tunings of one object of the render: a Deployment's replicas and containers' resources, the

@@ -185,9 +185,9 @@ def inputs [w: record, --preview: string = ""]: nothing -> string {
 	$"let app_info = \(runtime resolve-app '($w.app)'\); let node = \(render node-config $app_info.cue_path '($preview)'\); let meta = \(render app-meta $app_info.cue_path '($preview)'\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let fwd = {api: 1, buildkit: 2, registry: 3};"
 }
 
-def pushed-json []: nothing -> string {
+def pushed-json [...extra: string]: nothing -> string {
 	let digest = "sha256:" + ("a" | fill -c "a" -w 64)
-	let svcs = [database crud electric auth caddy migrate]
+	let svcs = [database crud electric auth caddy migrate] | append $extra
 	($svcs | each {|s| [$s {tag: (if $s == "database" { "17" } else { "release" }), digest: $digest}] } | into record) | to nuon
 }
 
@@ -217,6 +217,9 @@ def main [] {
 	test_preflight_needs_its_tools
 	test_a_database_that_never_comes_up_gets_its_old_image_back
 	test_a_database_of_standbys_is_waited_for_whole
+	test_services_are_built_seeded_rolled_out_and_checked_for_their_sidecar
+	test_a_service_secret_must_be_in_the_sops_file_or_the_namespace
+	test_a_seed_file_stays_in_the_app_and_one_configmap_has_one_file
 	test_a_failed_read_is_never_taken_for_absent
 	test_serving_prints_the_recorded_commit
 	test_a_failed_deployment_read_is_neither_unchanged_nor_changed
@@ -613,6 +616,91 @@ def test_a_database_of_standbys_is_waited_for_whole [] {
 	let whole = (in-world $w -c (script $w (with-node $w "upsert waits.primary 1" $"release-app $app_info $node $meta $compose $facts [] (pushed-json)")))
 	assert equal $whole.exit_code 0 $"($whole.stdout)($whole.stderr)"
 	assert (has $whole.stdout "the 3 instances of aprende-db") $whole.stdout
+	rm -rf $w.dir
+}
+
+# An aprende whose Node declares two services and the blob plane: flagd (a seeded ConfigMap mounted, a clock) and a notifier
+# (a Secret it reads).
+def with-services [w: record] {
+	r#'
+Node: services: {flagd: {port: 8693, files: "/etc/flags-live": "aprende-flags", seed: "aprende-flags": "flags/flags.json", clock: {}, metrics: port: 9599}, notifier: {port: 8698, secrets: VAPID_PRIVATE_KEY: "notify-vapid"}}
+Node: blobs: {bucket: "b-blobs", provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "b@p.iam.gserviceaccount.com"}
+Node: metricsExport: {project: "my-project", provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "m@p.iam.gserviceaccount.com"}
+'# | save --append ($w.app | path join release.cue)
+	mkdir ($w.app | path join flags)
+	'{"flags": {}}' | save -f ($w.app | path join flags flags.json)
+	mkdir ($w.state | path join secrets)
+	"" | save -f ($w.state | path join secrets notify-vapid)
+}
+
+def test_services_are_built_seeded_rolled_out_and_checked_for_their_sidecar [] {
+	print "test a release builds its services' images, seeds a missing ConfigMap once, signs the token, and waits for each Deployment and its sidecar..."
+	let w = (sandbox)
+	with-services $w
+	let extra = [flagd notifier rclone-s3 imgproxy]
+	# the images: the services' and the blob plane's, once each, beside upstream's
+	let built = (in-world $w -c (script $w $"(inputs $w) render build-services $compose false \(render own-images $node\) | to json --raw"))
+	assert equal $built.exit_code 0 $built.stderr
+	assert equal ($built.stdout | str trim | from json | sort) ([database crud electric auth caddy migrate flagd notifier rclone-s3 imgproxy] | sort)
+	let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json ...$extra)"))
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let log = (calls $w)
+	let at = {|pat| $log | enumerate | where {|e| $e.item =~ $pat } | get index }
+	# the seed: a create of the ConfigMap, once, before the objects that mount it
+	assert equal (do $at "^create -f - <- ConfigMap/aprende-flags$" | length) 1 "the ConfigMap is made once"
+	assert ((do $at "^create -f - <- ConfigMap/aprende-flags$" | first) < (do $at "^apply -f - <-.*Deployment/aprende-flagd" | first)) "the seed comes before the Deployments"
+	assert (has $r.stdout "seeding the ConfigMap aprende-flags from flags/flags.json")
+	# the service token, then every service's rollout and the sidecar check
+	assert ((do $at "Secret/aprende-service-token" | length) > 0) "the service token was applied"
+	for d in [aprende-flagd aprende-notifier aprende-rclone-s3 aprende-imgproxy aprende-metrics-export] {
+		assert ($log | any {|c| $c | str contains $"rollout status deployment/($d) " }) $"($d) was waited for"
+	}
+	assert ($log | any {|c| $c | str contains "app.kubernetes.io/component in (crud,electric,auth,caddy,flagd,notifier,rclone-s3,imgproxy)" }) ($log | str join "\n")
+	assert ($log | any {|c| ($c | str contains "apply -f - <-") and ($c | str contains "CronJob/aprende-flagd-clock") }) "the clock is applied"
+	# a ConfigMap that is there is never written over
+	rm -f ($w.state | path join calls.jsonl)
+	mkdir ($w.state | path join cm)
+	'{"metadata": {"name": "aprende-flags"}, "data": {"flags.json": "live"}}' | save -f ($w.state | path join cm aprende-flags)
+	let again = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json ...$extra)"))
+	assert equal $again.exit_code 0 $"($again.stdout)\n($again.stderr)"
+	assert equal (calls $w | where {|c| $c == "create -f - <- ConfigMap/aprende-flags" } | length) 0 "a ConfigMap that exists is left alone"
+	rm -rf $w.dir
+}
+
+def test_a_service_secret_must_be_in_the_sops_file_or_the_namespace [] {
+	print "test a Secret a service reads that is neither in the SOPS file nor in the namespace refuses the release before any write, and a seed with no file is refused..."
+	let w = (sandbox)
+	with-services $w
+	rm -f ($w.state | path join secrets notify-vapid)
+	let r = (in-world $w -c (script $w $"(inputs $w) preflight $app_info $node $fwd"))
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "Node.services read the Secret notify-vapid, which is neither in the SOPS file nor in aprende") $r.stderr
+	assert equal (writes $w) []
+	"" | save -f ($w.state | path join secrets notify-vapid)
+	let ok = (in-world $w -c (script $w $"(inputs $w) preflight $app_info $node $fwd | ignore"))
+	assert equal $ok.exit_code 0 $ok.stderr
+	rm -f ($w.app | path join flags flags.json)
+	let seed = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json flagd notifier rclone-s3 imgproxy)"))
+	assert ($seed.exit_code != 0)
+	assert (has $seed.stderr "seeds the ConfigMap aprende-flags from flags/flags.json, which is not in") $seed.stderr
+	assert equal (writes $w | where {|c| $c | str contains "Deployment/" } | length) 0 "nothing rolled"
+	rm -rf $w.dir
+}
+
+def test_a_seed_file_stays_in_the_app_and_one_configmap_has_one_file [] {
+	print "test a seed file that resolves outside the app, or two files for one ConfigMap, are refused..."
+	let w = (sandbox)
+	mkdir ($w.app | path join flags)
+	'{}' | save -f ($w.app | path join flags a.json)
+	'{}' | save -f ($w.app | path join flags b.json)
+	^ln -sf /etc/hosts ($w.app | path join flags link.json)
+	let ask = {|seeds| in-world $w -c (script $w $"seed-files '($w.app)' {services: ($seeds)} | length") }
+	let ok = (do $ask '{x: {seed: {cm: "flags/a.json"}}, y: {seed: {cm: "flags/a.json"}}}')
+	assert equal ($ok.stdout | str trim) "1" $"($ok.stdout)($ok.stderr)"
+	let link = (do $ask '{x: {seed: {cm: "flags/link.json"}}}')
+	assert (has $link.stderr "resolves outside") $link.stderr
+	let clash = (do $ask '{x: {seed: {cm: "flags/a.json"}}, y: {seed: {cm: "flags/b.json"}}}')
+	assert (has $clash.stderr "seed the ConfigMap cm from more than one file") $clash.stderr
 	rm -rf $w.dir
 }
 

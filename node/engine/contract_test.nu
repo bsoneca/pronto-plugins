@@ -38,7 +38,7 @@ def runtime-dir []: nothing -> string {
 def fixture-apps []: nothing -> list<record> {
 	[
 		{name: "aprende", services: [database crud electric caddy auth migrate], build: [database crud electric auth caddy migrate]}
-		{name: "brawl-chess", package: "brawlchess", tuned: {logins: [analytics_reader], parameters: [max_connections], resources: [electric caddy crud], replicas: [crud auth caddy render]}, services: [database crud electric caddy auth migrate render], build: [database crud electric auth caddy migrate render]}
+		{name: "brawl-chess", package: "brawlchess", tuned: {logins: [analytics_reader], parameters: [max_connections], resources: [electric caddy crud], replicas: [crud auth caddy render], own: [billing analyst flagd perf-collector journeys-collector ticker standin notifier exporter], images: [billing analyst flagd perf-collector journeys-collector ticker standin notifier exporter rclone-s3 imgproxy], secrets: [notify-vapid-private-key]}, services: [database crud electric caddy auth migrate render], build: [database crud electric auth caddy migrate render]}
 		{name: "studio", services: [database crud electric caddy auth migrate render ticker imgproxy], build: [ticker imgproxy database crud electric auth caddy migrate render]}
 	]
 }
@@ -59,6 +59,9 @@ def sandbox [fx: record]: nothing -> record {
 	cp ($engine_dir | path join schema node.cue) ($app | path join node schema node.cue)
 	do { cd $app; ^git init -q . } | ignore
 	cp ($engine_dir | path join fixtures fake-kubectl) ($d | path join bin kubectl)
+	# the Secrets the fixture's services read are in the namespace
+	mkdir ($d | path join state secrets)
+	for n in ($fx.tuned?.secrets? | default []) { "" | save -f ($d | path join state secrets $n) }
 	let services = $fx.services
 	$services | str join "\n" | save -f ($d | path join services.txt)
 	({services: ($services | each {|s| [$s (match $s {
@@ -133,7 +136,7 @@ def canon []: any -> any {
 # first by the engine and with the rest by upstream, the engine's record, and the generator and Secret of a database login
 # (the brawl-chess fixture's analytics_reader) are the engine's own;
 # upstream's cleanup of an earlier airlock (the engine refuses the airlock) is upstream's.
-def writes [w: record, logins: list<string> = []]: nothing -> list<string> {
+def writes [w: record, logins: list<string> = [], own: list<string> = [], app: string = ""]: nothing -> list<string> {
 	let f = ($w.state | path join calls.jsonl)
 	open --raw $f | lines | each {|l| $l | from json } | each {|c|
 		let a = $c.args
@@ -144,7 +147,15 @@ def writes [w: record, logins: list<string> = []]: nothing -> list<string> {
 			"rollout" => (if $a.1 == "status" { [$"rollout ($a.2)"] } else { [] })
 			_ => []
 		}
-	} | flatten | where {|l| not ($l starts-with "apply Namespace/") and $l != "apply ConfigMap/pronto-release" and not ($l =~ '^apply Configuration/.*-caddy-invoke-only$') and not ($logins | any {|g| let d = ($g | str replace -a "_" "-"); $l =~ $"^apply \(Password|ExternalSecret\)/.*-($d)-\(password|db\)$" }) }
+	} | flatten | where {|l| not ($l starts-with "apply Namespace/") and $l != "apply ConfigMap/pronto-release" and not ($l =~ '^apply Configuration/.*-caddy-invoke-only$') and not ($logins | any {|g| let d = ($g | str replace -a "_" "-"); $l =~ $"^apply \(Password|ExternalSecret\)/.*-($d)-\(password|db\)$" }) and not (own-write $l $own $app) }
+}
+
+# A write of the engine's own services: an object or a rollout of one of the app's services, the blob plane or the metrics
+# export (named `<app>-<name>` or by the bare name of its Service), and the service token their pods read.
+def own-write [line: string, own: list<string>, app: string]: nothing -> bool {
+	if ($own | is-empty) { return false }
+	let name = ($line | split row "/" | last | str replace -r $"^($app)-" "")
+	$name in ($own | each {|s| [$s $"($s)-clock" $"($s)-database-egress"] } | flatten | append [blobs rclone-s3 imgproxy metrics-export services-netpol service-token])
 }
 
 # The paths of a value with what is at each, one line a leaf: two values' difference is the lines of one only.
@@ -226,8 +237,10 @@ def undeclared []: list -> list {
 def without-tunings [app: string, t: record]: list -> list {
 	let dashed = ($t.logins | each {|l| $l | str replace -a "_" "-" })
 	let params = ($t.parameters | append max_slot_wal_keep_size)
+	let own = ($t.own? | default [])
 	$in
 		| where {|o| not ($o.kind in [Password ExternalSecret] and ($dashed | any {|d| $o.metadata.name ends-with $"($app)-($d)-password" or $o.metadata.name ends-with $"($app)-($d)-db" })) }
+		| where {|o| not (own-write $"($o.kind)/($o.metadata.name)" $own $app) }
 		| each {|o|
 			match $o.kind {
 				"Deployment" => {
@@ -248,7 +261,7 @@ def without-tunings [app: string, t: record]: list -> list {
 # The images a release would have pushed, as a CUE file: the engine refuses an image that is not pinned by digest.
 def pushed-cue [fx: record]: nothing -> string {
 	let digest = ("a" | fill -c "a" -w 64)
-	$"package ($fx.package? | default $fx.name)\nApp: image: pushed: {\n" + ($fx.build | each {|s| $"\t\"($s)\": {tag: \"latest\", digest: \"sha256:($digest)\"}\n" } | str join "") + "}\n"
+	$"package ($fx.package? | default $fx.name)\nApp: image: pushed: {\n" + ($fx.build | append ($fx.tuned?.images? | default []) | each {|s| $"\t\"($s)\": {tag: \"latest\", digest: \"sha256:($digest)\"}\n" } | str join "") + "}\n"
 }
 
 def test_objects_change_only_as_declared [fx: record] {
@@ -284,6 +297,18 @@ def test_objects_change_only_as_declared [fx: record] {
 			assert equal ($db.spec.postgresql.parameters.max_connections) "200" "the app's parameter wins"
 			assert equal ($engine | where kind == Deployment | where {|o| $o.metadata.name == $"($fx.name)-electric" } | first | get spec.replicas) 1 "Electric stays at one"
 		}
+		# the app's own services, the blob plane and the metrics export: each a Deployment, in the mesh with the shared Configuration
+		let svcs = (if $tuned != false { $tuned.own? | default [] } else { [] })
+		if ($svcs | is-not-empty) {
+			let deployments = ($both.engine | where kind == Deployment)
+			for s in ($svcs | append [rclone-s3 imgproxy metrics-export]) {
+				assert (($deployments | where {|o| $o.metadata.name == $"($fx.name)-($s)" } | length) == 1) $"the service ($s) is one Deployment"
+			}
+			let billing = ($deployments | where {|o| $o.metadata.name == $"($fx.name)-billing" } | first)
+			assert equal ($billing.spec.template.metadata.annotations | get "dapr.io/config") $"($fx.name)-dapr-config"
+			assert equal ($both.engine | where kind == CronJob | get metadata.name) [$"($fx.name)-ticker-clock"]
+			assert equal ($deployments | where {|o| $o.metadata.name == $"($fx.name)-ticker" } | first | get spec.strategy.type) "Recreate"
+		}
 		# the door's Dapr configuration: its own, invocation alone allowed; every other Deployment keeps the shared one
 		let own = ($both.engine | where {|o| $o.kind == "Configuration" and ($o.metadata.name | str ends-with "-caddy-invoke-only") })
 		assert equal ($own | length) 1 "one Configuration for the door"
@@ -314,19 +339,29 @@ def test_data_and_order_match_upstreams_main [fx: record] {
 	# The engine, over a second world, with the digests the fake docker gave (a hash of the repository).
 	let en = (sandbox $fx)
 	let registry = "127.0.0.1:5000"
-	let pushed = ($fx.build | each {|s|
+	let pushed = ($fx.build | append ($fx.tuned?.images? | default []) | each {|s|
 		[$s {tag: (if $s == "database" { "17" } else { "latest" }), digest: $"sha256:(($"($registry)/($fx.name)-($s)") | hash sha256)"}]
 	} | into record)
 	let script = $"use ($engine_dir | path join render.nu); use ($engine_dir | path join runtime.nu); use ($release_nu) [release-app]; let app_info = \(runtime resolve-app '($en.app)'\); let node = \(render node-config $app_info.cue_path ''\); let meta = \(render app-meta $app_info.cue_path ''\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let pushed = ($pushed | to nuon); use ($release_nu) [preflight]; let fwd = {api: 1, buildkit: 2, registry: 3}; preflight $app_info $node $fwd --check | ignore; render release-data $app_info.dir $compose $facts $pushed | save -f ($en.dir | path join data.json); release-app $app_info $node $meta $compose $facts [] $pushed"
 	let e = (in-world $en -c $script)
 	assert equal $e.exit_code 0 $"($e.stdout | lines | last 20 | str join (char nl))\n($e.stderr)"
 	# 2. data
-	let mine = (open ($en.dir | path join data.json))
+	# the images of the engine's own services are not upstream's to push: the rest of the data is compared
+	let mine = (open ($en.dir | path join data.json) | update App.image.pushed {|d| $d.App.image.pushed | reject -o ...($fx.tuned?.images? | default []) })
 	assert equal ($mine | canon | to json) ($upstream_data | canon | to json) (differences $mine $upstream_data)
 	# 3. order, but for the engine's own Namespace and record
 	let want = (writes $up)
-	let got = (writes $en ($fx.tuned?.logins? | default []))
+	let got = (writes $en ($fx.tuned?.logins? | default []) ($fx.tuned?.own? | default []) $fx.name)
 	assert (($want | length) > 10) "upstream applied something"
+	# what the engine adds for its own services is written: the token, and each Deployment rolled out
+	let svcs = ($fx.tuned?.own? | default [])
+	if ($svcs | is-not-empty) {
+		let all = (writes $en ($fx.tuned.logins) [] $fx.name)
+		assert ($"apply Secret/($fx.name)-service-token" in $all) "the service token is applied"
+		for s in ($svcs | append [rclone-s3 imgproxy metrics-export]) {
+			assert ($"rollout deployment/($fx.name)-($s)" in $all) $"($s) is rolled out"
+		}
+	}
 	print $"  ($want | length) writes and ((open ($en.dir | path join data.json) | columns | length)) data fields compared"
 	assert equal $got $want
 	rm -rf $up.dir $en.dir

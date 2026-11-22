@@ -81,6 +81,36 @@ that sets none gets upstream's render as it is, which the contract test holds):
   The release waits for the primary (`waits.primary`; a failure puts the old image back), then for every instance
   ready on the image (`waits.standbys`; a failure stops the release but leaves the image: the primary is serving).
 
+The app's own services, the blob plane and the metrics export are Deployments the engine adds beside upstream's (PRONTO-740 PP3):
+
+- `services: <name>: {port, env, secrets, files, seed, metrics, clock, database, singleWriter}`: a compose service of the app that
+  upstream does not render (billing, a collector, a flag server), built and pushed with the cluster's images, a Deployment
+  `<app>-<name>` and a Service `<name>` in the mesh (Dapr app-id `<name>`, the shared Configuration, probes on its port). Its
+  environment is the `env` stated, whole (compose's is not read), plus `PORT`, `SERVICE_JWT` (the service role's token, from
+  `<app>-service-token`, which the release signs when any service is declared) and `ORIGIN` (the release's public origin unless
+  `env` names it). `secrets: {VAR: <Secret>}` reads each variable from that Secret under its own name (it must be in the SOPS file
+  or already in the namespace: the preflight refuses the release when it is neither). `files: {<dir>: <ConfigMap>}` mounts a
+  ConfigMap read-only; `seed: {<ConfigMap>: <file of the app>}` makes a missing one from that file, once, on the release that
+  finds it missing (a release never writes over one that exists). `metrics: {port, path}` is scraped by the node's
+  VictoriaMetrics and the metrics export; `clock: {schedule, path}` is a CronJob POSTing to the service with the token (the
+  pinned curl image); `database: {login, env}` reads the URL of one of `database.logins` into `env` and opens the database to
+  it; `singleWriter` is a `Recreate` Deployment that the default replicas leave at one. A policy of the services' own admits the
+  door and the mesh on their ports, the node's scrapers on the metrics ports, and the internet on 443 (a broker).
+  `scale: "<app>-<name>"` and `containerResources: <name>` take their names. A name that upstream's render has (a Deployment or a
+  Service), or two services emitting one object, is refused, and so is a login the app does not declare.
+- `blobs: {bucket, provider, serviceAccount}`: rclone serving the Cloud Storage bucket as S3 and imgproxy over it (the compose
+  services `rclone-s3` and `imgproxy`, built), signed in through workload identity with no key (the token of the service account
+  `<app>-blobs`, traded at the pool's `provider`).
+- `metricsExport: {project, provider, serviceAccount}`: an OpenTelemetry collector scraping each service's `metrics` port into
+  Managed Service for Prometheus, signed in the same way (`<app>-metrics-export`). The collector's and the clock's images are
+  the engine's own constants, pinned by digest and pulled from where they are published (`#External`); every other image is
+  the registry's and pinned.
+
+After the Deployments the release waits for each of the services' rollouts and checks their sidecars. A service that leaves
+`Node.services` leaves its objects behind until `retire` names them (a Deployment, Service, CronJob, ConfigMap, ServiceAccount or
+NetworkPolicy). The metrics export scrapes through each Service, so a service with `metrics` runs one pod while it is set, and the
+collector is a single writer (`scale` refuses it); a service's port is never one of its sidecar's (3500, 3501, 9090, 50001, 50002, 7777).
+
 ### The flow (`release.nu`)
 
 Upstream's own order (k8s/release.nu `main`), with the engine's extra steps marked: the app and the tunnel;
@@ -120,7 +150,7 @@ Where the namespace does not exist yet, the objects are asked in `default`. `--s
 namespace and refuses the release's. `--schema-from` (a preview's copy of a database) is not in this engine yet.
 
 Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, previews' `--schema-from`, Studio's
-`services` and tenant release (P3, P4).
+tenant release (P3, P4).
 
 ### The door's Dapr API
 

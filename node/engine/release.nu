@@ -506,7 +506,43 @@ export def preflight [app_info: record, node: record, fwd: record, --check, --ad
 		let live = ((^kubectl get secret $node.backups.credentials -n $node.namespace | complete).exit_code == 0)
 		if not $live { error make {msg: $"Node.backups reads the Secret ($node.backups.credentials), which is neither in the SOPS file nor in ($node.namespace)"} }
 	}
+	# the files the services seed, before anything is built or written
+	seed-files $app_info.dir $node | ignore
+	# the Secrets the services read: in the SOPS file or already in the namespace
+	for name in ($node.services? | default {} | values | each {|s| $s.secrets? | default {} | values } | flatten | uniq) {
+		if ($secrets | where {|s| $s.metadata.name == $name } | is-empty) {
+			let live = ((^kubectl get secret $name -n $node.namespace | complete).exit_code == 0)
+			if not $live { error make {msg: $"Node.services read the Secret ($name), which is neither in the SOPS file nor in ($node.namespace)"} }
+		}
+	}
 	$secrets
+}
+
+# The files the services' `seed` names, by ConfigMap: each in the app's folder (a link out of it is refused) and present, and
+# one ConfigMap seeded from one file only.
+export def seed-files [app_dir: string, node: record]: nothing -> list {
+	let root = ($app_dir | path expand)
+	let seeds = ($node.services? | default {} | items {|n, s| $s.seed? | default {} | transpose name path | insert service $n } | flatten)
+	let clash = ($seeds | group-by name | items {|name, g| {name: $name, paths: ($g | get path | uniq)} } | where {|g| ($g.paths | length) > 1 })
+	if ($clash | is-not-empty) { error make {msg: $"Node.services seed the ConfigMap ($clash.0.name) from more than one file: ($clash.0.paths | str join ', ')"} }
+	$seeds | uniq-by name | each {|s|
+		let file = ($root | path join $s.path | path expand)
+		if not ($file | path exists) { error make {msg: $"Node.services seeds the ConfigMap ($s.name) from ($s.path), which is not in ($app_dir): generate the app first"} }
+		if not ($file | str starts-with $"($root)/") { error make {msg: $"Node.services seeds the ConfigMap ($s.name) from ($s.path), which resolves outside ($app_dir)"} }
+		{name: $s.name, path: $s.path, file: $file}
+	}
+}
+
+# The ConfigMaps a service's `seed` names, made from the app's file (its key the file's name) where the namespace has none:
+# once, on the release that finds it missing. One that exists is never written over, whoever made it (a push owns it after).
+export def seed-configmaps [app_dir: string, node: record] {
+	for s in (seed-files $app_dir $node) {
+		let there = (^kubectl get configmap $s.name -n $node.namespace --ignore-not-found -o name | complete)
+		if $there.exit_code != 0 { error make {msg: $"reading the ConfigMap ($s.name) failed, so whether to seed it is unknown: ($there.stderr | str trim)"} }
+		if ($there.stdout | str trim | is-not-empty) { continue }
+		print $"node: (stamp) seeding the ConfigMap ($s.name) from ($s.path)"
+		{apiVersion: "v1", kind: "ConfigMap", metadata: {name: $s.name, namespace: $node.namespace}, data: {($s.file | path basename): (open --raw $s.file)}} | to json | kubectl-ok create -f -
+	}
 }
 
 # The release itself, with the node reachable and the kubeconfig pinned, over what `preflight`
@@ -549,6 +585,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	if ($oidc | is-not-empty) {
 		oidc-secret $app $ns $oidc | to json | kubectl-ok apply --server-side --field-manager=pronto-oidc -f -
 	}
+	seed-configmaps $app_info.dir $node
 	# 6. everything but the Deployments and Jobs, after the Deployments' revisions are recorded
 	try {
 		print $"node: (stamp) applying manifests for ($app)"
@@ -575,7 +612,8 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		# 11. roles, the service token
 		wait-roles $app $ns $node.waits.primary
 		let runtime_services = (runtime runtime-services $compose)
-		if ($runtime_services | values | any {|r| $r.serviceToken }) { apply-service-token $app $ns }
+		let own = (render own-images $node)
+		if ($runtime_services | values | any {|r| $r.serviceToken }) or (($node.services? | default {} | columns) | is-not-empty) { apply-service-token $app $ns }
 		# 12. the Deployments: crud rolls after the schema Jobs even with an unchanged image
 		let rolled = ($deployments | each {|d| if $d.metadata.name == $"($app)-crud" { runtime fresh-schema-runtime ($d | to json) | from yaml } else { $d } })
 		as-list $rolled | kubectl-ok apply -f -
@@ -583,8 +621,9 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		for name in $runtime_names {
 			kubectl-ok rollout status $"deployment/($app)-($name)" -n $ns $"--timeout=($node.waits.rollout * 5)s"
 		}
-		let components = ["crud" "electric" "auth" "caddy"] | append ($runtime_names | where {|s| $s in ["ticker" "rclone-s3" "imgproxy"] }) | append (if $meta.render.enabled { ["render"] } else { [] })
-		for d in ($components | each {|c| $"deployment/($app)-($c)" }) {
+		let components = ["crud" "electric" "auth" "caddy"] | append ($runtime_names | where {|s| $s in ["ticker" "rclone-s3" "imgproxy"] }) | append (if $meta.render.enabled { ["render"] } else { [] }) | append $own | uniq
+		# the metrics export has no sidecar: its rollout alone
+		for d in ($components | each {|c| $"deployment/($app)-($c)" } | append (if ($node.metricsExport? | default null) != null { [$"deployment/($app)-metrics-export"] } else { [] })) {
 			print $"node: (stamp) waiting for ($d) rollout"
 			kubectl-ok rollout status $d -n $ns $"--timeout=($node.waits.rollout)s"
 		}
@@ -723,7 +762,7 @@ def main [
 					kubectl-ok delete namespace $node.namespace --ignore-not-found --wait=true
 				} else {
 					let secrets = (preflight $app_info $node $fwd --check=$check --adopt=$adopt --build=$build)
-					let services = (render build-services $compose $meta.render.enabled)
+					let services = (render build-services $compose $meta.render.enabled (render own-images $node))
 					# The registry's lease (a release, and a check that builds: both push): held while this release pushes and until it ends, so
 					# no other release collects the registry's garbage under its pushes (registry.nu).
 					let lease = if (not $check) or $build { registry lease-acquire $node.build $node.name $node.namespace } else { "" }
