@@ -18,4 +18,12 @@ cases: {
 		{call: "probe.length", args: ["$cut"], expect: 120},
 		{call: "probe.includes", args: ["$cut", "..."], expect: true},
 	]}
+	"a neighbour not up yet is waited for in the startup window, any other failure fails": {suite: "billing", steps: [
+		{call: "billing.grantVerdict", args: [false, 2000, true], expect: "wait"},
+		{call: "billing.grantVerdict", args: [false, 59999, true], expect: "wait"},
+		{call: "billing.grantVerdict", args: [false, 60000, true], expect: "fail"},
+		{call: "billing.grantVerdict", args: [false, 70000, true], expect: "fail"},
+		{call: "billing.grantVerdict", args: [true, 2000, true], expect: "fail"},
+		{call: "billing.grantVerdict", args: [false, 2000, false], expect: "fail"},
+	]}
 }
