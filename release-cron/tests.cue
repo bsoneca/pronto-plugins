@@ -142,7 +142,7 @@ besideStep: _defaults.steps.beside & "rehearse+preview"
 noRenamedStep: [if (#Cron & {watch: ["x"], probes: {}, steps: beside: "both"}) == _|_ {"refused"}, "accepted"][0] & "refused"
 
 // The phrases a run's `why` carries are written once, here, and never change under an app: runs.jsonl and its readers carry them.
-causeNames: _defaults.causes & {noVerdict: "the rehearsal gave no verdict", rehearsalFailed: "the rehearsal failed", rehearsalStopped: "the rehearsal was stopped", previewFailed: "the release preview failed", previewStopped: "the preview was stopped", endedBeforeSlot: "ended before its slot", signal: "stopped by a signal", treeMoved: "the run's tree moved"}
+causeNames: _defaults.causes & {noVerdict: "the rehearsal gave no verdict", rehearsalFailed: "the rehearsal failed", rehearsalStopped: "the rehearsal was stopped", previewFailed: "the release preview failed", previewStopped: "the preview was stopped", endedBeforeSlot: "ended before its slot", signal: "stopped by a signal", treeMoved: "the run's tree moved", androidFailed: "the android step failed"}
 noRenamedCause: [if (#Cron & {watch: ["x"], probes: {}, causes: noVerdict: "no verdict"}) == _|_ {"refused"}, "accepted"][0] & "refused"
 noNewCause: [if (#Cron & {watch: ["x"], probes: {}, causes: other: "x"}) == _|_ {"refused"}, "accepted"][0] & "refused"
 // causes.js, which cron.js and release-cron.ts import, is releaseCron.causes emitted from the schema: the committed file is that text, and an app's copy too.

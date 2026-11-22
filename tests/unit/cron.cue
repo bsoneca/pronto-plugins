@@ -440,15 +440,26 @@ cases: {
 		{call: "cron.androidWhy", args: [1, ["sealed", "fullscreen"]], expect: "the android step failed (exit 1): sealed, fullscreen: nothing released"},
 		{keep: "why"},
 		{call: "cron.signature", args: ["$why", "FAIL  sealed  12.3 s  nothing matches #board2d"], holds: {kind: "android", names: ["sealed"]}, why: "the driver's own why is read back as the android kind"},
+		{call: "cron.signature", args: ["anything", "FAIL  sealed  12.3 s  x", "androidFailed"], holds: {kind: "android", names: ["sealed"]}, why: "a record with the cause key is classified by the key, not its text"},
+		{call: "cron.signature", args: ["the android step failed (exit 1): nothing released", "", "rehearsalFailed"], holds: {kind: "rehearsal", names: []}, why: "another cause key is not android, whatever the text says"},
+		{call: "cron.signature", args: ["\(_causes.androidFailed) (exit 1): nothing released", "FAIL  sealed  1 s  x"], holds: {kind: "android", names: ["sealed"]}, why: "an older record without a key is read by the phrase releaseCron.causes holds"},
 		{call: "cron.undecidable", args: [{kind: "android", names: ["sealed"]}, "", [], 0, 18], expect: "the android step runs on an emulator, which the bisect's check (integrate@local) does not: not bisected"},
 	]}
-	"a signal gives the lock back only after the children are gone and the preview beside has torn down, each bounded": {suite: "cron", steps: [
+	"a signal gives the lock back only after the children are gone (bounded) and the preview's up and down have finished (not bounded)": {suite: "cron", steps: [
 		{call: "cron.signalStep", args: [true, 1, 1000, 60000, 300000], expect: "wait", why: "children still within their grace"},
 		{call: "cron.signalStep", args: [true, 1, 60000, 60000, 300000], expect: "kill", why: "their grace is over"},
 		{call: "cron.signalStep", args: [false, 1, 61000, 60000, 300000], expect: "wait", why: "the children are gone but the preview's down still runs: the lock is held"},
 		{call: "cron.signalStep", args: [false, 0, 61000, 60000, 300000], expect: "done", why: "down finished: the lock goes"},
 		{call: "cron.signalStep", args: [false, 0, 0, 60000, 300000], expect: "done", why: "nothing was running"},
-		{call: "cron.signalStep", args: [false, 1, 360000, 60000, 300000], expect: "done", why: "a down that never ends is waited for a bounded time"},
+		{call: "cron.signalStep", args: [false, 1, 360000, 60000, 300000], expect: "wait", why: "a preview's remote operation is never given up on: the lock is held until its down has finished (PRONTO-1585 P1)"},
+		{call: "cron.signalStep", args: [true, 0, 360000, 60000, 300000], expect: "done", why: "a child that outlives its KILL is bounded"},
+		{call: "cron.signalStep", args: [true, 1, 360000, 60000, 300000], expect: "kill", why: "children are still killed after their grace while a preview is waited for"},
+	]}
+	"failed flags bookkeeping is the job's nonzero exit, a written or absent one is not": {suite: "cron", steps: [
+		{call: "cron.flagsExit", args: [null], expect: 0, why: "the app names no command"},
+		{call: "cron.flagsExit", args: ["ok"], expect: 0},
+		{call: "cron.flagsExit", args: ["failed (exit 1: boom)"], expect: 1},
+		{call: "cron.flagsExit", args: ["failed (the marker /x was not written: EACCES)"], expect: 1},
 	]}
 	"the serving command is read again only after an ssh transport failure": {suite: "cron", steps: [
 		{call: "cron.servingRetryable", args: [255], expect: true, why: "ssh's own failure, the case the retry exists for"},

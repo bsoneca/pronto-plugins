@@ -71,6 +71,7 @@ releaseCron: #Cron
 		endedBeforeSlot:  "ended before its slot"
 		signal:           "stopped by a signal"
 		treeMoved:        "the run's tree moved"
+		androidFailed:    "the android step failed"
 	}
 	// The names a run's `outcome` takes in runs.jsonl and release-cron.log, written once here and exported with the causes
 	// (causes.js, the export package): release-cron.ts and cron.js build every outcome from them, and pronto's metrics imports

@@ -82,7 +82,7 @@ existed, so an app that names none of them runs as it did.
   `released`, which writes `released.json` beside the live flags so a `pronto-flags push` keeps a
   flag the release still reads: PRONTO-680), run in the run's worktree with the app's folder
   appended, once production serves the release's commit and when a run finds main already serving.
-  A failure is logged and never changes the run's outcome. Null by default.
+  A failure is logged and kept in the run's `flagsReleased`; it never changes the run's outcome or the revision kept in the ledger, but the job exits nonzero (`flagsExit`), so CD sees it, and the next wake writes the marker again on the already-serving path without redeploying. Null by default.
 
 ## A run
 
@@ -111,7 +111,7 @@ existed, so an app that names none of them runs as it did.
    releases a day.
    **3b. android** (optional, `releaseCron.android.command`): once the rehearsal passed, the app's phone
    scenarios on an emulator, run in the app's folder (no limit, as the rehearsal). Its exit says pass or
-   fail; a failure ends the run **failed** (`the android step failed (exit N): <scenarios>: nothing
+   fail; a failure ends the run **failed** with cause `androidFailed` (`the android step failed (exit N): <scenarios>: nothing
    released`) and its bisect says "not bisected", since the bisect's check (`integrate@local`) runs no
    emulator. Where release-cron does not run on a Mac the step is skipped and the log says so; the
    release goes on. `RELEASE_CRON_DRY=android` runs only this step (no rehearsal, no preview) and ends
@@ -167,10 +167,10 @@ stopped. While a step runs, the run's log (`<state>/runs/<start>.log`) gets a li
 saying it is still running and how long into the run it is (confirm says what is still wrong), and
 each step's minutes stay in `runs.jsonl` and `report`, so the slowest phase still shows. Only the
 short calls inside prepare (`git fetch`, `gcloud describe`) keep their own hang guards of a few
-minutes; a signal (launchd's, `kill`) still stops the run's children. Because nothing ends a stuck
+minutes; a signal (launchd's, `kill`) still stops the run's children, but never a preview's `up` (that would only kill the local ssh, leaving the node running release@k8s): the probes are skipped, `down` runs once `up` has ended, and the lock goes only then. Because nothing ends a stuck
 run, stop it by hand (`kill <pid in <state>/lock/pid>`). An app's old `minutes` in release_cron.cue is still accepted but ignored; delete it. There's no overall budget. Runs never overlap:
-launchd never starts a job while it's still running, and a lock (`<state>/lock`, with the
-run's pid) skips a run started by hand while another is going.
+launchd never starts a job while it's still running, and a lock (`<state>/lock`, a directory made whole with the
+run's pid and renamed into place, so only one run holds it; a dead holder's is taken over by one run at a time) skips a run started by hand while another is going.
 
 ## When the preview runs
 
