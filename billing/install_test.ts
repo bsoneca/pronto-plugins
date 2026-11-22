@@ -34,6 +34,12 @@ Deno.test("an app gets billing in its own package, and keeps its spec", async ()
     await Deno.stat(`${app}/${f}`);
     if (f.startsWith("billing/broker/")) eq(plugin.includes(`"${f}"`), true, `${f} is in the broker image's copy list`);
   }
+  // store.ts imports the vendored postgres driver for a DATABASE_URL broker: a real file in the app
+  // (the plugin's is a symlink) and in the broker image's srcs and copy list.
+  const driver = await Deno.lstat(`${app}/billing/broker/vendor/postgres.js`);
+  eq(driver.isFile && !driver.isSymlink && driver.size > 0, true, "the postgres driver is a real file in the app");
+  eq(plugin.includes(`{srcs: ["billing/broker/vendor/postgres.js"], dst: "/app/billing/broker/vendor/"}`), true, "the driver is in the broker image's copy list");
+  eq(plugin.includes(`"billing/broker/vendor/*.js"`), true, "the driver is in the broker target's srcs");
   await Deno.writeTextFile(`${app}/billing_spec.cue`, spec + "// the app's own\n");
   await Deno.writeTextFile(`${app}/billing_plugin.cue`, "edited\n");
   await install(app);
