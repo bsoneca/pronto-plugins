@@ -38,6 +38,7 @@ def runtime-dir []: nothing -> string {
 def fixture-apps []: nothing -> list<record> {
 	[
 		{name: "aprende", services: [database crud electric caddy auth migrate], build: [database crud electric auth caddy migrate]}
+		{name: "brawl-chess", package: "brawlchess", services: [database crud electric caddy auth migrate render], build: [database crud electric auth caddy migrate render]}
 		{name: "studio", services: [database crud electric caddy auth migrate render ticker imgproxy], build: [ticker imgproxy database crud electric auth caddy migrate render]}
 	]
 }
@@ -102,9 +103,10 @@ exec "$REAL_CUE" "$@"
 	# deno signs the service token; both releases ask it, and it is not run for real here
 	"#!/bin/sh\ncat >/dev/null\necho fake.service.token\n" | save -f ($d | path join bin deno)
 	# the registry answers 200 through the tunnel, which the preflight reads with curl
-	"#!/bin/sh\necho 200\n" | save -f ($d | path join bin curl)
-	for t in [crane docker-buildx sops] { "#!/bin/sh\nexit 0\n" | save -f ($d | path join bin $t) }
-	for t in [kubectl docker cue deno crane docker-buildx sops curl] { ^chmod +x ($d | path join bin $t) }
+	# and the door check's probes (a path of the Dapr API) answer the door's own 404; nc finds the port-forward up
+	"#!/bin/sh\ncase \"$*\" in *\"/v1.0\"*) printf 404 ;; *) echo 200 ;; esac\n" | save -f ($d | path join bin curl)
+	for t in [crane docker-buildx sops nc] { "#!/bin/sh\nexit 0\n" | save -f ($d | path join bin $t) }
+	for t in [kubectl docker cue deno crane docker-buildx sops curl nc] { ^chmod +x ($d | path join bin $t) }
 	{dir: $d, app: $app, state: ($d | path join state)}
 }
 
@@ -218,7 +220,7 @@ def undeclared []: list -> list {
 # The images a release would have pushed, as a CUE file: the engine refuses an image that is not pinned by digest.
 def pushed-cue [fx: record]: nothing -> string {
 	let digest = ("a" | fill -c "a" -w 64)
-	$"package ($fx.name)\nApp: image: pushed: {\n" + ($fx.build | each {|s| $"\t\"($s)\": {tag: \"latest\", digest: \"sha256:($digest)\"}\n" } | str join "") + "}\n"
+	$"package ($fx.package? | default $fx.name)\nApp: image: pushed: {\n" + ($fx.build | each {|s| $"\t\"($s)\": {tag: \"latest\", digest: \"sha256:($digest)\"}\n" } | str join "") + "}\n"
 }
 
 def test_objects_change_only_as_declared [fx: record] {
@@ -230,7 +232,7 @@ def test_objects_change_only_as_declared [fx: record] {
 	] {
 		let w = (sandbox $fx)
 		pushed-cue $fx | save -f ($w.app | path join pushed.cue)
-		if ($variant | is-not-empty) { $"package ($fx.name)\n($variant)" | save -f ($w.app | path join variant.cue) }
+		if ($variant | is-not-empty) { $"package ($fx.package? | default $fx.name)\n($variant)" | save -f ($w.app | path join variant.cue) }
 		let tags = if ($variant | str contains "preview") { [-t preview=rc] } else { [] }
 		let r = (in-world $w -c $"cd '($w.app)'; ^cue export -e '{engine: nodeManifests, upstream: upstreamObjects}' --out json ...($tags | to nuon) . | print")
 		# the export wants the hosts the variant names: the preview has its own
