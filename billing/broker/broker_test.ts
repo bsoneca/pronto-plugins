@@ -924,3 +924,79 @@ Deno.test("an event whose subscription is being ended by another caller is not r
   assertEquals([retry.status, await retry.json()], [200, { delivered: "evt_overlap" }], "the retry is not a duplicate: the first was never recorded");
   assertEquals(t.got.length, before + 1);
 });
+
+Deno.test("a lease that cannot be released is reported, with the failure that made it necessary", async () => {
+  let completeFails = false, releaseFails = false;
+  class Stuck extends MemoryStore {
+    override forget(...a: Parameters<MemoryStore["forget"]>): Promise<void> {
+      return releaseFails ? Promise.reject(new Error("release failed")) : super.forget(...a);
+    }
+    override complete(...a: Parameters<MemoryStore["complete"]>): Promise<boolean> {
+      return completeFails ? Promise.reject(new Error("complete failed")) : super.complete(...a);
+    }
+  }
+  const s = await setup({ store: new Stuck() });
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const sub = await startTrial(s);
+  const t = s.tenants.get(A)!;
+  const logged: unknown[] = [];
+  const error = console.error;
+  console.error = (...a: unknown[]) => { logged.push(...a); };
+  try {
+    releaseFails = true;
+    // A push the tenant did not take: the answer is a 502, and the release that follows fails alone.
+    t.up = false;
+    const alone = await deliver(s, "evt_alone", sub)();
+    assertEquals([alone.status, logged.some((x) => x instanceof Error && x.message === "release failed")], [500, true], "a failed release is reported, not swallowed");
+    t.up = true;
+    // Processing and release both fail: both are reported.
+    logged.length = 0;
+    completeFails = true;
+    const both = await deliver(s, "evt_both", sub)();
+    assertEquals(both.status, 500);
+    const e = logged.find((x): x is AggregateError => x instanceof AggregateError);
+    assertEquals(e?.errors.map((x: Error) => x.message), ["complete failed", "release failed"], "both failures are named");
+  } finally {
+    console.error = error;
+  }
+});
+
+Deno.test("a push that succeeds but takes long is still verified, not answered too slow", async () => {
+  const s = await setup();
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const sub = await startTrial(s);
+  const t = s.tenants.get(A)!;
+  const before = t.got.length;
+  const now = Date.now;
+  let skew = 0;
+  Date.now = () => now() + skew;
+  try {
+    let release!: () => void;
+    t.hold = new Promise<void>((r) => (release = r));
+    const sending = deliver(s, "evt_long", sub)();
+    await new Promise((r) => setTimeout(r, 10));
+    skew = 40_000; // the push took longer than a quarter of the lease
+    release();
+    t.hold = undefined;
+    const res = await sending;
+    assertEquals([res.status, await res.json()], [200, { delivered: "evt_long" }], "read back and found as pushed");
+    assertEquals(t.got.length, before + 1, "pushed once");
+  } finally {
+    Date.now = now;
+  }
+});
+
+Deno.test("a resync takes a plan id by the one rule, rules.cue's", async () => {
+  const s = await setup();
+  await s.prove(A);
+  await s.payouts(A);
+  await s.press((await (await s.post("/checkout", { tenant: A, account: ANA, plan: "analysis" })).json()).url, "pay");
+  const { manage } = s.tenants.get(A)!.got[0];
+  const bad = await s.post("/resync", { tenant: A, account: ANA, plan: "Bad Plan", manage });
+  assertEquals([bad.status, (await bad.json()).error], [400, "plan required"]);
+  const good = await s.post("/resync", { tenant: A, account: ANA, plan: "analysis", manage });
+  assertEquals(good.status, 200);
+  await good.body?.cancel();
+});

@@ -23,6 +23,7 @@ import {
 } from "./core.ts";
 import { type Routed, type Stripe, StripeError, webhookSigned } from "./stripe.ts";
 import { MemoryStore, type Store } from "./store.ts";
+import { RULES } from "../rules.ts";
 
 /** Where a tenant publishes its owner and its plans. */
 export const PUBLISHED_PATH = "/.well-known/pronto-billing.json";
@@ -496,7 +497,7 @@ export async function broker(p: {
     const b = await body(req);
     const m = await managed(b);
     if (m instanceof Response) return m;
-    if (typeof b.plan !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(b.plan)) return json(400, { error: "plan required" });
+    if (typeof b.plan !== "string" || !new RegExp(RULES.plan.id).test(b.plan)) return json(400, { error: "plan required" });
     return json(200, { token: (await entitlement(m.t, m.account, b.plan)).token });
   }
 
@@ -567,7 +568,9 @@ export async function broker(p: {
     if (claim.state === "busy") return json(409, { error: "in progress", event: event.id });
     const claimToken = claim.token;
     let kept = false;
-    try {
+    // The processing, then the claim given back unless it was kept; a release that fails is reported, never
+    // swallowed: with the processing's own failure, both.
+    const run = async (): Promise<Response> => {
       // A subscription another caller is ending now is not ended for this event: it is not done.
       if (!(await endFailedTrial(sub))) return json(409, { error: "subscription busy", event: event.id });
       if (event.type === "customer.subscription.created" && !(await endDuplicateTrial(sub, t, account))) {
@@ -576,13 +579,16 @@ export async function broker(p: {
       let sent: { active: boolean; through: number } | null = null;
       const began = Date.now();
       for (let round = 0; round < 3; round++) {
-        if (Date.now() - began > EVENT_LEASE_MS / 4) return json(502, { error: "too slow" });
+        // Too slow to push again, never to read what a push that succeeded left: the verification read decides.
+        const slow = Date.now() - began > EVENT_LEASE_MS / 4;
+        if (slow && !sent) return json(502, { error: "too slow" });
         const { held, token } = await entitlement(t, account, plan, sub.customer);
         if (sent && sent.active === held.active && sent.through === held.through) break;
+        if (slow) return json(502, { error: "too slow" });
         const r = await push(t, token);
         if (r.refused) {
           console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${event.id}; not sent again`);
-          await store.remember("stripe event", event.id, EVENT_KEPT_MS);
+          await store.complete("stripe event", event.id, claimToken, EVENT_KEPT_MS);
           kept = true;
           return json(200, { refused: event.id });
         }
@@ -592,14 +598,27 @@ export async function broker(p: {
         }
         sent = held;
       }
-      await store.remember("stripe event", event.id, EVENT_KEPT_MS);
+      await store.complete("stripe event", event.id, claimToken, EVENT_KEPT_MS);
       kept = true;
       return json(200, { delivered: event.id });
-    } finally {
-      // Anything but delivered or refused for good (a 502, a throw, a busy subscription) gives the claim back,
-      // so Stripe's next send is not made to wait out the lease. Only this claim's own token is let go.
-      if (!kept) await store.forget("stripe event", event.id, claimToken).catch(() => {});
+    };
+    let response: Response, failure: { error: unknown } | null = null;
+    try {
+      response = await run();
+    } catch (e) {
+      failure = { error: e };
     }
+    // Anything but delivered or refused for good (a 502, a throw, a busy subscription) gives the claim back,
+    // so Stripe's next send is not made to wait out the lease. Only this claim's own token is let go.
+    if (!kept) {
+      try {
+        await store.forget("stripe event", event.id, claimToken);
+      } catch (release) {
+        throw failure ? new AggregateError([failure.error, release], `event ${event.id}: processing failed and its lease was not released`) : release;
+      }
+    }
+    if (failure) throw failure.error;
+    return response!;
   }
 
   return async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
