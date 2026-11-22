@@ -56,7 +56,7 @@ What is missing for an external client: a stable contract (raw `/crud` exposes t
 flowchart LR
   bot["Bot<br/>API key, then JWT"] --> door["Door (Caddy)<br/>generated /api/v1 routes"]
   browser["Browser shell<br/>session JWT"] --> door
-  door -- "/api/v1/* → /{view}<br/>Accept-Profile: api_v1" --> crud
+  door -- "/api/v1/* → /api_v1_{view}" --> crud
   door -. "/crud/*, unchanged" .-> crud
   door -- "/auth/key*" --> auth
   subgraph mecha["mecha stack"]
@@ -72,13 +72,15 @@ Three layers, each generated from `api_spec.cue` and `program.cue`:
 
 1. **Views** (`api_v1.<resource>`). One per exported resource: the columns the API shows, renamed to public field names, plus the standard fields `name`, `create_time`, `update_time` and `etag`. A view is `security_invoker` over the app's tables, so RLS on the tables still filters what the caller sees. It is the only place an internal table or column name meets a public one. A machine also gets a command view (`api_v1.match_command`), whose columns are the event's public fields.
 2. **Methods** (reads and writes on those views, no functions). `Get` and `List` are reads of the view. `Create`, `Update` and `Delete` are writes through the view: a simple view over one table is auto-updatable, so Postgres maps the public columns back to the table's columns, and RLS and CHECK constraints judge the write as now. A machine event is an insert into its command view.
-3. **Routes** (a generated door hatch). Each Google route, a verb plus a path template, is rewritten to one PostgREST call on a view, with `Accept-Profile`/`Content-Profile: api_v1`:
+3. **Routes** (a generated door hatch). Each Google route, a verb plus a path template, is rewritten to one PostgREST call on the view's twin in `public`, `public.api_v1_<view>` (PostgREST on pronto upstream serves `public` only, so no profile is named; PRONTO-740):
    - `GET /api/v1/matches/{id}` becomes `GET /match?name=eq.matches/{id}` with `Accept: application/vnd.pgrst.object+json`, a filtered singular read.
    - `GET /api/v1/matches?page_size=&after=` becomes `GET /match?order=name.asc&limit=<page_size>&name=gt.<after>`, a keyset read; a nested list adds `name=like.players/{player}/games/*`.
    - `POST`, `PATCH` and `DELETE` become the same verb on the view (`PATCH` and `DELETE` filtered by `name=eq.…`), with `Prefer: return=representation`.
    - `POST /api/v1/matches/{id}:move` becomes `POST /match_command`, and the door passes the resource name and the event in `X-Api-Name` and `X-Api-Event`, since Caddy does not edit a JSON body (the command table's BEFORE trigger, below, fills them in).
 
    The door builds the whole PostgREST query from the route and the query parameters the route declares (`page_size`, `after`, and an `If-Match` header turned into `etag=eq.…`), and drops everything else, including any `Prefer` header from the client, so no PostgREST grammar (`select=`, `or=`, embeds) reaches PostgREST from a client. `page_size` is passed only when it matches 1 to 200, else the default is 50. A path not generated is `404` at the door; the raw views are never routed under `/api` by their own name, and the `/crud` block strips `Accept-Profile` and `Content-Profile`, so `/crud` cannot reach `api_v1` either.
+
+**Views in `public` (PRONTO-740).** `api_v1.sql` writes every view twice: in `api_v1`, as before, and in `public` as `api_v1_<view>` (same body, `security_invoker`, check option, grants to `app_user`, the flag's gate, and the same INSTEAD OF trigger functions in `api_private`). The door calls the `public` ones, with no `Accept-Profile`; the `api_v1` ones stay, unused, so a rollback or an older door keeps working. Only additions, so `contract.json` is unchanged. Generate fails when `api_v1_<view>` is a table of the app's, or two views would share a name. A client of `/crud` can now name `api_v1_<view>` itself; it gets the same columns under the same grants, RLS and gate as through `/api/v1`, nothing more.
 
 ### Why views, with no functions
 

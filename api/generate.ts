@@ -136,7 +136,7 @@ export function columnsOf(r: Resource, released: string[] = []): Column[] {
 /** The view of a resource and its grants: security_invoker, so the table's RLS judges every read
  * and write as the caller. A public field stays a plain column reference, so the view is
  * auto-updatable and Postgres maps a write back onto the table. */
-export function viewSql(r: Resource, schema: string, released: string[] = [], gated = false): string {
+export function viewSql(r: Resource, schema: string, released: string[] = [], gated = false, prefix = ""): string {
   const cols = columnsOf(r, released);
   // Writes are granted column by column: only the public fields, never a stamp, and never the key
   // after Create; a write naming another column is refused (42501) before RLS is asked.
@@ -150,7 +150,7 @@ export function viewSql(r: Resource, schema: string, released: string[] = [], ga
     ...(r.methods.includes("update") && updatable.length ? [`UPDATE (${list(updatable)})`] : []),
     ...(r.methods.includes("delete") ? ["DELETE"] : []),
   ];
-  const v = `${ident(schema)}.${ident(r.view)}`;
+  const v = `${ident(schema)}.${ident(prefix + r.view)}`;
   return [
     `CREATE OR REPLACE VIEW ${v} WITH (security_invoker = true${gated ? ", check_option = local" : ""}) AS`,
     `  SELECT ${cols.map((c) => `${c.sql} AS ${ident(c.name)}`).join(",\n         ")}`,
@@ -201,8 +201,8 @@ const lit = (s: string) => `'${s.replaceAll("'", "''")}'`;
  *                   outcome; a rejection raises, so nothing is stored
  *   <view>_open     Create and join, the same way over the open table
  * Idempotency is the machine's: the command id carries request_id, so a retry is the stored row. */
-export function machineSql(m: Machine, schema: string, gated: boolean): string {
-  const v = (n: string) => `${ident(schema)}.${ident(n)}`;
+export function machineSql(m: Machine, schema: string, gated: boolean, prefix = ""): string {
+  const v = (n: string) => `${ident(schema)}.${ident(prefix + n)}`;
   const t = (n: string) => `public.${ident(n)}`;
   const where = gated ? `\n  WHERE ${GATE}(public.auth_uid())` : "";
   const opts = `WITH (security_invoker = true)`;
@@ -251,7 +251,9 @@ export function machineSql(m: Machine, schema: string, gated: boolean): string {
     `    ${raise("P0001", "rejected", "got.\"reason\"")}`,
     `  END IF;`,
   ];
-  const fn = (name: string, body: string[]) => [
+  // The trigger functions are written once, with the api schema's views; the views in public
+  // (a prefix) fire the same ones.
+  const fn = (name: string, body: string[]) => prefix ? [] : [
     `CREATE OR REPLACE FUNCTION api_private.${ident(name)}() RETURNS trigger`,
     `LANGUAGE plpgsql SET search_path = pg_catalog AS $f$`,
     ...body,
@@ -344,6 +346,24 @@ export function machineSql(m: Machine, schema: string, gated: boolean): string {
   return out.join("\n");
 }
 
+/** The prefix of an API view's name in public: `api_v1_note` for the view `note` of `api_v1`. */
+export const publicPrefix = (spec: Spec) => `${spec.schema}_`;
+const viewsOf = (spec: Spec) => [...spec.resources.map((r) => r.view), ...(spec.machines ?? []).flatMap((m) => [m.view, `${m.view}_public`, `${m.view}_command`, `${m.view}_open`])];
+/** The names the API's views take in public, failing when one is a table of the app's (or when
+ * two views would share a name, or one is longer than Postgres keeps). */
+function publicViews(spec: Spec): string[] {
+  const names = viewsOf(spec).map((n) => publicPrefix(spec) + n);
+  const tables = new Set([...spec.resources.map((r) => r.table), ...(spec.machines ?? []).flatMap((m) => Object.values(m.tables).filter((t): t is string => !!t))]);
+  const seen = new Set<string>();
+  for (const n of names) {
+    if (tables.has(n)) throw new Error(`api: public.${n} (a view of the API) is a table of the app's`);
+    if (seen.has(n)) throw new Error(`api: two views of the API are public.${n}`);
+    if (n.length > 63) throw new Error(`api: public.${n} is longer than a Postgres name`);
+    seen.add(n);
+  }
+  return names;
+}
+
 /** The whole api_v1.sql: the schema, the flag's gate, each view and its grants, and PostgREST told
  * to reload. */
 export function sqlOf(spec: Spec, released?: Contract): string {
@@ -359,6 +379,12 @@ export function sqlOf(spec: Spec, released?: Contract): string {
     ...spec.resources.map((r) => viewSql(r, spec.schema, releasedColumns(released, r), !!spec.flag)),
     ...(spec.machines?.length ? [`CREATE SCHEMA IF NOT EXISTS api_private;\nREVOKE ALL ON SCHEMA api_private FROM PUBLIC;\nGRANT USAGE ON SCHEMA api_private TO app_user;`] : []),
     ...(spec.machines ?? []).map((m) => machineSql(m, spec.schema, !!spec.flag)),
+    // The same views again in public as <schema>_<view>: PostgREST on a runtime that serves only
+    // public (pronto upstream) reaches them there. Only added, so the schema's own stay for a door
+    // or a rollback that still asks for them.
+    `-- public.${publicPrefix(spec)}<view>: ${publicViews(spec).join(", ")}`,
+    ...spec.resources.map((r) => viewSql(r, "public", releasedColumns(released, r), !!spec.flag, publicPrefix(spec))),
+    ...(spec.machines ?? []).map((m) => machineSql(m, "public", !!spec.flag, publicPrefix(spec))),
     `NOTIFY pgrst, 'reload schema';`,
     "",
   ].join("\n\n");
@@ -396,10 +422,11 @@ export function routesOf(spec: Spec): Route[] {
 }
 
 /** The routes as a Caddyfile block: a route the spec does not generate is 404, the client's query,
- * Prefer and Accept-Profile never reach PostgREST, and the profile is the API's schema. */
+ * Prefer and Accept-Profile never reach PostgREST, and each route is a call on the API's view in
+ * public (`api_v1_<view>`), where PostgREST serves, so no profile is named. */
 export function caddyOf(spec: Spec, routes: Route[]): string {
-  // No request picks PostgREST's schema itself: /crud stays on public, and the API's handles name
-  // theirs below (request_header runs before any handle).
+  // No request picks PostgREST's schema itself: /crud stays on public, and so does every handle
+  // is public (request_header runs before any handle).
   const strip = [`request_header -Accept-Profile`, `request_header -Content-Profile`, ...(spec.machines?.length ? [`request_header -X-Api-Name`, `request_header -X-Api-Event`] : [])];
   // A handle, so it sits beside the door's /crud handle; inside, a route keeps the written order.
   const lines = [`handle /api/${spec.version}/* {`, `  route {`];
@@ -420,12 +447,10 @@ export function caddyOf(spec: Spec, routes: Route[]): string {
       // The room a Create names, kept before the rewrite drops the query.
       if (r.createId) lines.push(`    vars api_room {query.${r.createId}}`);
       // Always a `?`: a rewrite without one keeps the client's query.
-      lines.push(`    rewrite * /${r.view}?${q}`);
+      lines.push(`    rewrite * /${publicPrefix(spec)}${r.view}?${q}`);
       lines.push(`    request_header -Prefer`, `    request_header -Accept-Profile`, `    request_header -Content-Profile`, `    request_header -Range`, `    request_header -Range-Unit`);
       // JSON only: PostgREST would take CSV or a form as a bulk write.
       if (r.verb === "POST" || r.verb === "PATCH") lines.push(`    request_header Content-Type application/json`);
-      lines.push(r.verb === "GET" ? `    request_header Accept-Profile ${spec.schema}` : `    request_header Content-Profile ${spec.schema}`);
-      if (r.verb !== "GET") lines.push(`    request_header Accept-Profile ${spec.schema}`);
       lines.push(`    request_header Accept ${r.object ? "application/vnd.pgrst.object+json" : "application/json"}`);
       if (r.prefer) lines.push(`    request_header Prefer ${r.prefer}`);
       // A machine's room and event, for its trigger: the door's, never the client's.
