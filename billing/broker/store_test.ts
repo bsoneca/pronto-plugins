@@ -443,3 +443,44 @@ Deno.test("memory store: a sweep continues where it stopped and drops the declar
   assertEquals(sizes.every((n, i) => i === 0 || sizes[i - 1] + 1 - n <= 100), true, `bounded: ${sizes}`);
   assertEquals(sizes.at(-1), 4, `every expired row went, only the four live claims stay: ${sizes}`);
 });
+
+// Two replicas on one database: every write is one conditional statement, so a conflicting write changes nothing
+// and says so. (PGlite has one connection; the two stores interleave their statements on it, as two pods' would.)
+Deno.test("postgres store, two replicas: takeover, completion, release and expiry conflict without overwriting", async () => {
+  const sql = pglite(new PGlite());
+  await applySchema(sql);
+  const a = new PostgresStore(sql), b = new PostgresStore(sql);
+  const expire = (id: string) => sql.unsafe(`UPDATE billing_seen SET expires = now() - interval '1 second' WHERE kind = 'stripe event' AND id = $1`, [id]);
+  const state = async (id: string) => (await sql.unsafe(`SELECT state FROM billing_seen WHERE kind = 'stripe event' AND id = $1`, [id]))[0]?.state ?? "absent";
+
+  // Takeover vs completion: A's lease ends, B takes over, A's late completion changes nothing; B's lands.
+  const first = await a.claim("stripe event", "t1", 120_000) as { token: string };
+  await expire("t1");
+  await sleep(5);
+  const second = await b.claim("stripe event", "t1", 120_000) as { token: string };
+  assertEquals(await a.complete("stripe event", "t1", first.token, 60_000), false, "the stale holder's completion affects no row");
+  assertEquals(await state("t1"), "claimed", "B's claim stands");
+  assertEquals(await b.complete("stripe event", "t1", second.token, 60_000), true);
+  assertEquals(await a.complete("stripe event", "t1", first.token, 60_000), false, "and a finished row takes no second completion");
+
+  // Release vs completion: the holder completes, then a late release (its own or another's) deletes nothing.
+  const c = await a.claim("stripe event", "t2", 120_000) as { token: string };
+  assertEquals(await b.forget("stripe event", "t2", "not the token"), false, "a non-holder's release is refused");
+  assertEquals(await a.complete("stripe event", "t2", c.token, 60_000), true);
+  assertEquals(await a.forget("stripe event", "t2", c.token), false, "release after completion deletes nothing");
+  assertEquals(await state("t2"), "done");
+  // And the other order: released first, then the completion finds no claim.
+  const d = await a.claim("stripe event", "t3", 120_000) as { token: string };
+  assertEquals(await a.forget("stripe event", "t3", d.token), true);
+  assertEquals(await b.complete("stripe event", "t3", d.token, 60_000), false, "completion after release affects no row");
+
+  // Expiry vs completion: the lease ended before the completion arrived; it is refused, never revived.
+  const e = await a.claim("stripe event", "t4", 120_000) as { token: string };
+  await expire("t4");
+  assertEquals(await b.complete("stripe event", "t4", e.token, 60_000), false, "an expired claim completes nothing");
+  assertEquals(await state("t4"), "claimed", "the row is untouched by the refused write");
+  // An invalidation never takes a claim in progress, whichever replica asks.
+  await a.claim("stripe event", "t5", 120_000);
+  assertEquals(await b.forget("stripe event", "t5"), false, "invalidate refuses a claim in progress");
+  assertEquals(await state("t5"), "claimed");
+});

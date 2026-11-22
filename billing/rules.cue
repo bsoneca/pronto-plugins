@@ -56,6 +56,9 @@ rules: {
 	// The anonymous route probe's own limits, apart from every checkout, trial and probe limit: calls a minute for
 	// each client, and for all anonymous probes together, and the biggest body it reads.
 	routeLimits: {perClient: 30, global: 120, bodyMax: 4096}
+	// The most a request body is read for, in bytes: any request the broker reads a body of, and Stripe's webhook.
+	// The live/sandbox dispatcher enforces it (413) before it picks a broker.
+	bodyLimits: {request: 4096, webhook: 262144}
 }
 
 rules: {
@@ -70,6 +73,7 @@ rules: {
 	claimRetentionMs: int & >0
 	claimLeaseMs: int & >0 & <claimRetentionMs
 	routeLimits: {perClient: int & >0, global: int & >perClient, bodyMax: int & >0}
+	bodyLimits: {request: int & >0, webhook: int & >request}
 	claimTransitions: [...{
 		event: "claim" | "complete" | "release" | "remember" | "expire" | "invalidate"
 		from:  "absent" | or(claimStates)

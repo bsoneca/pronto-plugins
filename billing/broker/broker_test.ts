@@ -1008,7 +1008,7 @@ Deno.test("an event whose subscription is being ended by another caller is not r
 Deno.test("a lease that cannot be released is reported, with the failure that made it necessary", async () => {
   let completeFails = false, releaseFails = false;
   class Stuck extends MemoryStore {
-    override forget(...a: Parameters<MemoryStore["forget"]>): Promise<void> {
+    override forget(...a: Parameters<MemoryStore["forget"]>): Promise<boolean> {
       return releaseFails ? Promise.reject(new Error("release failed")) : super.forget(...a);
     }
     override complete(...a: Parameters<MemoryStore["complete"]>): Promise<boolean> {
@@ -1219,4 +1219,25 @@ Deno.test("the route probe and a real call choose the same transport, for door t
     await res.body?.cancel();
     assertEquals([...new Set(s.transportCalls)], [probe.transport], `door ${door}: the dispatch took what /route said`);
   }
+});
+
+Deno.test("the dispatcher enforces the body limit (413) before it picks a broker, for every body-reading endpoint", async () => {
+  const seen: string[] = [];
+  const mode = (name: string) => async (req: Request) => { seen.push(name); await req.body?.cancel(); return new Response(name); };
+  const handler = twoModes({ live: mode("live"), sandbox: mode("sandbox"), sandboxed: (t) => t.includes("-rc-"), sandboxWebhookSecret: "whsec_sandbox" });
+  const post = (path: string, body: string, declared = true) => handler(new Request(`${ISSUER}${path}`, {
+    method: "POST", headers: { "content-type": "application/json", ...(declared ? {} : {}) }, body,
+  }));
+  const big = JSON.stringify({ tenant: "https://shop-rc-123456789012.us-central1.run.app", pad: "x".repeat(5000) });
+  for (const path of ["/checkout", "/trial/offer", "/trial/checkout", "/portal", "/resync", "/onboard", "/probe", "/route"]) {
+    const res = await post(path, big);
+    assertEquals([path, res.status], [path, 413], "over the limit is refused whole");
+    await res.body?.cancel();
+  }
+  const webhook = await post("/stripe", "x".repeat(262_145));
+  assertEquals(webhook.status, 413);
+  await webhook.body?.cancel();
+  assertEquals(seen, [], "no broker was picked or asked");
+  const ok = await post("/route", JSON.stringify({ tenant: "https://shop-rc-123456789012.us-central1.run.app" }));
+  assertEquals([await ok.text(), seen], ["sandbox", ["sandbox"]], "a body within the limit still goes to its broker");
 });
