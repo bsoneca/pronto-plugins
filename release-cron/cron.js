@@ -293,8 +293,9 @@ export const androidSpawn = (env) => ({ env: { ...androidEnv(env), STACK_WAIT_MI
 // The scenarios the step's output marks failed: scenarios.ts prints `FAIL  <name>  <seconds> s  <why>`.
 export const androidFailed = (text) => [...new Set([...(text ?? "").matchAll(/^FAIL {2}(\S+) {2}/gm)].map((m) => m[1]))];
 
-// Why a failed android step ended the run: the exit and the scenarios named, the prefix `signature` reads.
-export const androidWhy = (code, names) => `the android step failed (exit ${code}): ${names.length ? `${names.join(", ")}: ` : ""}nothing released`;
+// Why a failed android step ended the run: the exit and the scenarios named, led by releaseCron.causes.androidFailed (the cause key
+// `androidFailed` is written on the run; an older record is read by that phrase, `signature`).
+export const androidWhy = (code, names) => `${causes.androidFailed} (exit ${code}): ${names.length ? `${names.join(", ")}: ` : ""}nothing released`;
 
 
 // --- Bisect: a failed run names the commit that broke it. ---
@@ -354,7 +355,7 @@ export const inconclusiveExit = (code) => noVerdictExit(code) || code === 126 ||
 
 // What a failed run failed on, from its `why` and its output: the kind ("release" when release@gcp,
 // a target's release command (`release (cmd)`) or the confirm failed, else "rehearsal") and the scenarios the output marks failed (`✗ <name> (12s) at step`).
-export const signature = (why, text) => /^the android step/.test(why ?? "")
+export const signature = (why, text, cause) => (cause ? cause === "androidFailed" : (why ?? "").startsWith(causes.androidFailed))
   ? { kind: "android", names: androidFailed(text) }
   : {
     kind: /^release@gcp|^release \(|^released, production/.test(why ?? "") ? "release" : "rehearsal",
@@ -607,9 +608,11 @@ export const nulPaths = (text) => (text ?? "").split("\0").filter(Boolean);
 export const legacyFileLock = (isFile, pid, alive) => !isFile ? "none" : pid && alive ? "busy" : "remove";
 
 // A signal's wait, each tick: "kill" the children still alive once their grace is over, "done" when the children are gone and no
-// preview is left to tear down (`previews`), or when `grace` + `teardown` ms have passed (bounded), else "wait". The lock goes at "done".
+// preview is left (`previews`: its `up`, which a signal never stops, and its `down`), or when `grace` + `teardown` ms have passed with no
+// preview left (a stuck child is bounded; a preview's remote operation is waited for, since a lock given back under it would let the next
+// run start beside it), else "wait". The lock goes at "done".
 export const signalStep = (childrenAlive, previews, elapsed, grace, teardown) =>
-  elapsed >= grace + teardown ? "done"
+  previews === 0 && elapsed >= grace + teardown ? "done"
   : !childrenAlive && previews === 0 ? "done"
   : childrenAlive && elapsed >= grace ? "kill"
   : "wait";
@@ -625,4 +628,8 @@ export const endWhenInterrupted = (interrupted, outcome) => interrupted && outco
 export const appendWhy = (prev, why) => prev ? `${prev}; ${why}` : why;
 // The flags-released bookkeeping's result (`result`: recordFlagsReleased's) once its marker was written or not (`err`: the write's error, null when it
 // was): a marker that could not be written is a bookkeeping failure with its path, apart from the deploy outcome (run.flagsReleased, never `outcome`).
+// The job's exit once the flags-released bookkeeping ran (`result`: flagsBookkeeping's, null where the app names none): nonzero when it failed, so CD
+// sees it. The run's outcome and its confirmed revision stay what they were (a deploy that served is released or skipped); the next wake writes the
+// marker again without redeploying (flagsReleasedDue).
+export const flagsExit = (result) => result && result !== "ok" ? 1 : 0;
 export const flagsBookkeeping = (result, path, err) => result === "ok" && err ? `failed (the marker ${path} was not written: ${String(err).split("\n")[0]})` : result;

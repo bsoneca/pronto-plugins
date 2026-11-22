@@ -28,7 +28,7 @@
 // Its state is ~/.cache/pronto/release-cron/<app>/: the worktree (wt), the lock, the pause, the
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import { causes, outcomes } from "./causes.js";
-import { appendWhy, mutates, legacyFileLock, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable } from "./cron.js";
+import { appendWhy, mutates, legacyFileLock, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -92,23 +92,51 @@ const takeLock = (): { got: true } | { got: false; pid: number } => {
     const rec = JSON.parse(Deno.readTextFileSync(`${state}/lock.preview`));
     console.log(`release-cron: WARNING: ${state}/lock.preview exists: a preview may be left running; remove it with \`${(rec.down ?? []).join(" ")}\` in ${rec.dir ?? "its directory"}, then delete the record; nothing was done`);
   } catch (e) { if (!(e instanceof Deno.errors.NotFound)) console.log(`release-cron: WARNING: ${state}/lock.preview exists but could not be read (${(e as Error).message.split("\n")[0]}): a preview may be left running`); }
-  const make = () => { try { Deno.mkdirSync(lockPath); return true; } catch { return false; } };
-  if (!make()) {
+  // Taking is one atomic step: a directory holding this run's pid is made whole under a name of its own, then renamed onto the
+  // lock (rename(2) refuses a directory that exists and is not empty), so a lock is never seen without its holder and only the
+  // run whose rename succeeded has it.
+  const claimAt = (path: string) => {
+    const tmp = `${path}.new.${Deno.pid}.${crypto.randomUUID()}`;
+    try {
+      Deno.mkdirSync(tmp);
+      Deno.writeTextFileSync(`${tmp}/pid`, String(Deno.pid));
+      Deno.renameSync(tmp, path);
+      return true;
+    } catch { try { Deno.removeSync(tmp, { recursive: true }); } catch { /* none */ } return false; }
+  };
+  // Removed by renaming it to a name of its own first: of several runs that read the same stale lock, one rename wins.
+  const discard = (path: string) => {
+    const gone = `${path}.gone.${Deno.pid}.${crypto.randomUUID()}`;
+    try { Deno.renameSync(path, gone); } catch { return false; }
+    try { Deno.removeSync(gone, { recursive: true }); } catch { /* left for a later sweep */ }
+    return true;
+  };
+  const pidOf = (path: string) => { try { return Number(Deno.readTextFileSync(path).trim()) || 0; } catch { return 0; } };
+  const alive = (pid: number) => !!pid && sh("kill", ["-0", String(pid)]).ok;
+  for (let tries = 0; tries < 5; tries++) {
+    if (claimAt(lockPath)) return { got: true };
     // The plain file the flock version left (never deleted): its content is the holder's pid (cron.js legacyFileLock).
-    let isFile = false;
-    try { isFile = Deno.statSync(lockPath).isFile; } catch { /* none */ }
-    if (isFile) {
-      const pid = (() => { try { return Number(Deno.readTextFileSync(lockPath)) || 0; } catch { return 0; } })();
-      if (legacyFileLock(true, pid, !!pid && sh("kill", ["-0", String(pid)]).ok) === "busy") return { got: false, pid };
-      try { Deno.removeSync(lockPath); } catch { /* gone */ }
-      if (!make()) return { got: false, pid: lockPid() };
-    } else {
-      const pid = lockPid();
-      if (pid && sh("kill", ["-0", String(pid)]).ok) return { got: false, pid };
+    let isFile = false, exists_ = true;
+    try { isFile = Deno.statSync(lockPath).isFile; } catch { exists_ = false; }
+    if (!exists_) continue; // released between the claim and this look: claim again
+    const pid = isFile ? pidOf(lockPath) : pidOf(`${lockPath}/pid`);
+    if (isFile ? legacyFileLock(true, pid, alive(pid)) === "busy" : alive(pid)) return { got: false, pid };
+    // A stale lock (its holder gone, or a directory with no pid, which only an older version left): taken over by one run at a time,
+    // the recovery itself a lock claimed the same way, so no run removes a lock another has just taken.
+    const recovery = `${lockPath}.recover`;
+    if (!claimAt(recovery)) {
+      const other = pidOf(`${recovery}/pid`);
+      if (!alive(other)) discard(recovery); // a recovery whose run died: cleared, the next wake takes the lock
+      return { got: false, pid: other || pid };
     }
+    try {
+      const again = (() => { try { return Deno.statSync(lockPath).isFile ? pidOf(lockPath) : pidOf(`${lockPath}/pid`); } catch { return -1; } })();
+      if (again === pid) discard(lockPath);
+      else if (again > 0 && alive(again)) return { got: false, pid: again };
+      if (claimAt(lockPath)) return { got: true };
+    } finally { discard(recovery); }
   }
-  Deno.writeTextFileSync(`${lockPath}/pid`, String(Deno.pid));
-  return { got: true };
+  return { got: false, pid: lockPid() };
 };
 const dropLock = () => { try { if (Deno.readTextFileSync(`${lockPath}/pid`) === String(Deno.pid)) Deno.removeSync(lockPath, { recursive: true }); } catch { /* none, or not ours */ } };
 if (verb === "report") { console.log(report(jsonl(`${state}/runs.jsonl`))); Deno.exit(0); }
@@ -223,7 +251,7 @@ if (verb === "bisect") {
   const b = cron.bisect;
   const notify = cron.notify;
   const text = (() => { try { return Deno.readTextFileSync(`${state}/runs/${failed.started}.log`); } catch { return ""; } })();
-  const sig = signature(failed.why, text);
+  const sig = signature(failed.why, text, failed.cause);
   type Merge = { sha: string; subject: string; pr: number | null; branch: string | null };
   const list: Merge[] = merges(must("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H %s", `${green.commit}..${failed.commit}`]).split("\n"));
   say(`${failed.started} failed on ${failed.commit.slice(0, 8)} (${sig.kind}${sig.names.length ? `: ${sig.names.join(", ")}` : ""}); last release ${green.commit.slice(0, 8)}; ${list.length} merges between`);
@@ -682,7 +710,7 @@ function judged(failed: string, head: string): string | null {
     if (!diff.ok) return "main's change could not be read";
     const run = jsonl(`${state}/runs.jsonl`).reverse().find((r) => r.outcome === outcomes.failed && r.commit === failed);
     const text = (() => { try { return run ? Deno.readTextFileSync(`${state}/runs/${run.started}.log`) : ""; } catch { return ""; } })();
-    const sig = signature(run?.why, text), flaked = flakedNames(text);
+    const sig = signature(run?.why, text, run?.cause as string | undefined), flaked = flakedNames(text);
     const names = sig.names.filter((n) => !flaked.includes(n));
     // A SQL file and the failed scenarios: by what their newest green records touched, at `head`.
     const sqlHot = (file: string) => {
@@ -724,12 +752,16 @@ const children = new Map<number, string>();
 const STOP_GRACE = 60_000, TEARDOWN_GRACE = 300_000;
 // Stopped: every child's group stopped and gone (killed after a minute) before the run ends and its
 // lock goes, so the next run never starts beside what this one started.
-// The lock goes last (signalStep): after the children are gone and a preview beside has finished its `down`, each bounded.
+// The lock goes last (signalStep): after the children are gone (bounded) and a preview has finished its `up` and its `down` (not bounded: its remote
+// operation is never cut off by a signal).
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   Deno.addSignalListener(signal, async () => {
     if (interrupted) return;
     interrupted = true;
-    const groups = [...children].filter(([, tag]) => tag !== "down").map(([pgid]) => pgid);
+    // The preview's `up` is never stopped (cancel's own rule, previewCheck): killing the local ssh would leave the node running
+    // release@k8s while the preview's `down` starts on the same namespace. It runs to its end, the probes are skipped (`interrupted`),
+    // `down` runs, and the lock waits for all of it (signalStep).
+    const groups = [...children].filter(([, tag]) => tag !== "down" && tag !== "preview").map(([pgid]) => pgid);
     for (const pgid of groups) stop(pgid, STOP_GRACE);
     for (const t = Date.now();;) {
       const s = signalStep(groups.some(alive), previews, Date.now() - t, STOP_GRACE, TEARDOWN_GRACE);
@@ -737,7 +769,7 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
       if (s === "kill") for (const pgid of groups) if (alive(pgid)) send(pgid, "KILL");
       await new Promise((r) => setTimeout(r, 1000));
     }
-    for (const pgid of children.keys()) if (alive(pgid)) send(pgid, "KILL");
+    for (const [pgid, tag] of children) if (tag !== "preview" && alive(pgid)) send(pgid, "KILL");
     end(outcomes.stopped, signal, 130);
   });
 }
@@ -893,7 +925,8 @@ try {
   step(cron.steps.prepare);
   if (live === head) {
     if (mutates(dry)) run.flagsReleased = await flagsReleased(`${wt}/${appRel}`, true) ?? undefined;
-    end(outcomes.skipped, `main ${head.slice(0, 8)} is serving as ${before}${mutates(dry) ? "" : "; flags not recorded (RELEASE_CRON_DRY)"}`);
+    // The marker is written again here when an earlier write failed (flagsReleasedDue), without a deploy; a write that fails again is the job's nonzero exit.
+    end(outcomes.skipped, `main ${head.slice(0, 8)} is serving as ${before}${mutates(dry) ? "" : "; flags not recorded (RELEASE_CRON_DRY)"}${flagsExit(run.flagsReleased as string | undefined) ? `; flags bookkeeping ${run.flagsReleased}` : ""}`, flagsExit(run.flagsReleased as string | undefined));
   }
   if (live) {
     const diff = sh("git", ["diff", "--name-only", "-z", live, head], wt);
@@ -1031,7 +1064,7 @@ try {
     const phoneRun = await child(cmd[0], cmd.slice(1), dir, env, (l) => { failedNames = [...new Set([...failedNames, ...androidFailed(l)])]; }, "", clearEnv);
     step(cron.steps.android);
     if (dry) end(outcomes.dry, phoneRun.code === 0 ? "the android step passed" : androidWhy(phoneRun.code, failedNames), phoneRun.code === 0 ? 0 : 1);
-    if (phoneRun.code !== 0) end(outcomes.failed, androidWhy(phoneRun.code, failedNames), 1);
+    if (phoneRun.code !== 0) end(outcomes.failed, androidWhy(phoneRun.code, failedNames), 1, "androidFailed");
   } else {
     const skip = androidSkip(cron.android, Deno.build.os);
     if (skip) say(skip);
@@ -1208,7 +1241,9 @@ try {
   if (hooked.length) run.hooks = hooked;
   // A release that changed nothing Cloud Run runs (tests, config) keeps the revision: said, so it
   // does not read as a deploy that never went out.
-  end(outcomes.released, !target && run.revision === before ? `same image, nothing served changed: ${before} kept` : "");
+  // The revision stays in the ledger as released; failed flag bookkeeping is the job's nonzero exit, retried by the next wake on the already-serving path.
+  const flagsFailed = flagsExit(run.flagsReleased as string | undefined);
+  end(outcomes.released, (!target && run.revision === before ? `same image, nothing served changed: ${before} kept` : "") + (flagsFailed ? `${!target && run.revision === before ? "; " : ""}flags bookkeeping ${run.flagsReleased}` : ""), flagsFailed);
 } catch (e) {
   step(cron?.steps.error ?? "error");
   const why = (e as Error).message.split("\n")[0];
@@ -1216,7 +1251,7 @@ try {
 }
 
 // releaseCron.flagsReleased: records which flags the release now served reads, so a flag push keeps one it still reads
-// (pronto-flags `released`). Whatever it does, the run's outcome stays: a failure is said and never fails the run. The commit
+// (pronto-flags `released`). Its outcome never changes the run's outcome or the confirmed revision, but a failure is the job's nonzero exit (flagsExit). The commit
 // it succeeded for is kept in `flags-released`: a run that finds main already serving records again only when that is not head.
 async function flagsReleased(dir: string, onlyIfDue: boolean): Promise<string | null> {
   const marker = `${state}/flags-released`;
