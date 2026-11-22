@@ -607,16 +607,23 @@ export const nulPaths = (text) => (text ?? "").split("\0").filter(Boolean);
 // "remove" when it is dead or unreadable (the mkdir lock is then made), "none" when the lock is not a file.
 export const legacyFileLock = (isFile, pid, alive) => !isFile ? "none" : pid && alive ? "busy" : "remove";
 
-// The lock's acquisition (PRONTO-1032, Codex P1s of #433). The older driver takes the lock with mkdir(lock) and then writes lock/pid, so this
-// one does the same and the two exclude each other: mkdir is atomic and refuses a directory that exists, even an empty one (rename(2)
-// onto an empty directory replaces it on macOS, which let a run take a lock that the older driver had just made). The pid is written to a
-// file of its own and renamed to `pid`, so a reader sees none or the whole of it. A directory with no pid yet is an acquisition in
-// progress (the older driver's gap between its mkdir and its write): waited for `graceMs` by the directory's age, then stale.
-// `io` is the file system and the clock (the driver's, or the fake of tests/unit/cronlock.js): mkdir, writeFile, link, rename, readFile, stat
-// (`{ isFile, mtimeMs }`), remove, alive, now, sleep, uuid, pid. Its errors carry `code` ("EEXIST", "ENOENT", ...).
+// The lock's acquisition (PRONTO-1032). The lock is a directory holding the run's pid, and it is made whole before it exists: a staging directory
+// holding this run's pid is renamed onto the lock, so the lock is never seen without its owner. The base driver (before #433) reads a lock
+// directory with no live pid as free and writes its own pid over it, so a lock directory that ever existed empty (mkdir, then write) would be
+// taken from under a new driver that is in that gap; the whole directory is what the base reader treats as a live owner from its first instant.
+// What stays open, and is the rollout's rule (release-cron/README.md, "Rollout"): rename(2) replaces an EMPTY destination directory, so a base
+// driver that is itself between its mkdir and its pid write (a few microseconds) can have its directory replaced by a new driver's, and then
+// writes its pid over it; and two base drivers overlap likewise. No code on this side closes that: old drivers must have none running when the
+// new copies land. Any pre-existing lock is looked at first, so a new driver never renames onto one it could see.
+// A stale lock is removed only under an exclusive flock (`io.recovering`: the lock of an open file, which dies with its process, so no stale
+// recovery state and no delayed removal by pathname can exist), after the observed holder is read again, and by renaming it to a name of its own
+// whose holder is verified to be the observed one before anything is deleted. Whatever is ambiguous stops the run with an error naming the path;
+// a person clears it.
+// `io` is the file system and the clock (the driver's, or the fake of tests/unit/cronlock.js): mkdir, writeFile, rename, readFile, stat
+// (`{ isFile, mtimeMs }`), remove, alive, recovering, now, sleep, uuid, pid. Its errors carry `code` ("EEXIST", "ENOENT", ...).
 
 // A claim that failed: contention only where the destination already exists; anything else is an error to report, never to swallow.
-export const claimError = (code) => code === "EEXIST" || code === "ENOTEMPTY" ? "contention" : "error";
+export const claimError = (code) => code === "EEXIST" || code === "ENOTEMPTY" || code === "ENOTDIR" ? "contention" : "error";
 
 // Who a holder file names, from the read's error code (`err`, null when it read) and its `text`: "absent" (no such file), "empty" (nothing
 // written yet), "pid", "malformed" (not a pid) or "unreadable" (any other error): the last two are an unknown owner, never a dead one.
@@ -629,10 +636,9 @@ export const holderOf = (err, text) => {
 };
 
 // What a lock's holder means for a run: "busy" (a live pid), "stale" (a verified dead pid, or the flock version's file with none),
-// "pending" (a directory not yet holding a pid, within `graceMs` of its making) or "unknown" (the holder cannot be read or is not a pid, or a
-// directory has had no pid for the grace: its maker may only be paused and would still write its pid, so it is an unresolved acquisition,
-// fail closed: the lock is neither taken nor removed, and a person removes a directory whose maker is gone). `isFile`: the plain file the
-// flock version left. `alive`: the pid is confirmed alive (a probe that could not tell throws, see aliveFromKill).
+// "pending" (a directory with no pid yet, within `graceMs` of its making: the base driver's gap) or "unknown" (the holder cannot be read or is
+// not a pid, or a directory has had no pid for the grace: fail closed, the lock is neither taken nor removed, and a person removes it).
+// `isFile`: the plain file the flock version left. `alive`: the pid is confirmed alive (a probe that could not tell throws, see aliveFromKill).
 export const lockVerdict = (holder, alive, ageMs, graceMs, isFile) =>
   holder.kind === "pid" ? (isFile ? (legacyFileLock(true, holder.pid, alive) === "busy" ? "busy" : "stale") : alive ? "busy" : "stale")
   : holder.kind === "empty" || holder.kind === "absent" ? (isFile ? "stale" : ageMs >= graceMs ? "unknown" : "pending")
@@ -649,25 +655,22 @@ export const aliveFromKill = (code) => {
 
 const lockFail = (op, path, e) => new Error(`release-cron lock: ${op} ${path}: ${e && e.code ? `${e.code}: ` : ""}${e && e.message ? e.message : e}`);
 
-// One claim of `path`: true when this run made it and holds its pid, false when it exists, an error (thrown, with the operation and path)
-// for anything else. A failed pid write removes the directory this run made, so no half lock is left behind.
+// One claim of `path`: true when this run's whole staging directory is now the lock, false when something exists there, an error (thrown, with
+// the operation and path) for anything else. The staging directory is this run's alone and is removed whenever it did not become the lock.
 export const lockClaim = (io, path) => {
-  try { io.mkdir(path); } catch (e) { if (claimError(e && e.code) === "contention") return false; throw lockFail("mkdir", path, e); }
-  const tmp = `${path}/pid.${io.pid}.${io.uuid()}.tmp`;
-  // Published with link(2), which refuses a pid file that exists (rename would replace another run's): of two runs that made the directory
-  // (the slower one paused after its mkdir, the directory since replaced), only one pid file is ever linked, and the other throws.
-  try { io.writeFile(tmp, String(io.pid)); io.link(tmp, `${path}/pid`); } catch (e) {
-    if (e && e.code === "EEXIST") throw new Error(`release-cron lock: ${path}/pid already names another run: the lock was taken while this one was paused; run not started`);
-    // Only a directory with no pid is removed: one another run has put its pid in since (this run was paused) is left alone.
-    try { io.readFile(`${path}/pid`); } catch (re) { if (re && re.code === "ENOENT") { try { io.remove(path); } catch { /* left */ } } }
-    throw lockFail("write pid in", path, e);
+  const stage = `${path}.new.${io.pid}.${io.uuid()}`;
+  const clear = () => { try { io.remove(stage); } catch { /* a stray staging directory, harmless */ } };
+  try { io.mkdir(stage); io.writeFile(`${stage}/pid`, String(io.pid)); } catch (e) { clear(); throw lockFail("stage pid in", stage, e); }
+  try { io.stat(path); clear(); return false; } catch (e) { if (!e || e.code !== "ENOENT") { clear(); throw lockFail("stat", path, e); } }
+  try { io.rename(stage, path); } catch (e) {
+    clear();
+    if (claimError(e && e.code) === "contention") return false;
+    throw lockFail("rename", `${stage} to ${path}`, e);
   }
-  try { io.remove(tmp); } catch { /* a stray file in the lock, harmless */ }
-  // Ownership is the pid as it stands now: a run that was paused after its mkdir, whose directory another run has since replaced, must not
-  // report success because its write landed somewhere (PRONTO-1032).
+  // Ownership is the pid as it stands now.
   let owner;
   try { owner = io.readFile(`${path}/pid`).trim(); } catch (e) { throw lockFail("verify pid in", path, e); }
-  if (owner !== String(io.pid)) throw new Error(`release-cron lock: ${path}/pid names ${JSON.stringify(owner.slice(0, 40))}, not this run (${io.pid}): the lock was taken by another run while this one was paused; run not started`);
+  if (owner !== String(io.pid)) throw new Error(`release-cron lock: ${path}/pid names ${JSON.stringify(owner.slice(0, 40))}, not this run (${io.pid}): another driver wrote over it; run not started`);
   return true;
 };
 
@@ -684,20 +687,23 @@ const lockLook = (io, path) => {
 const unknownHolder = (path, look) => new Error(`release-cron lock: ${path} has a holder that cannot be told (${look.holder.kind}${look.holder.err ? ` ${look.holder.err}` : ""}${look.holder.text ? ` ${JSON.stringify(look.holder.text)}` : ""}); not taken, not removed`);
 const sameHolder = (a, b) => a.holder.kind === b.holder.kind && a.pid === b.pid && a.isFile === b.isFile;
 
-// Removed by renaming it to a name of its own first: of several runs that read the same stale lock, one rename wins.
-const lockDiscard = (io, path) => {
+// Removes the stale lock `look` (observed under the recovery flock): renamed to a name of its own, its holder read there and compared with the
+// observed one, and only then deleted. A lock that is not the observed one is put back and the run stops: it is never deleted.
+const lockRemoveStale = (io, path, look) => {
   const gone = `${path}.gone.${io.pid}.${io.uuid()}`;
-  try { io.rename(path, gone); } catch (e) { if (e && e.code === "ENOENT") return false; throw lockFail("rename", path, e); }
-  try { io.remove(gone); } catch { /* left for a later sweep */ }
-  return true;
+  try { io.rename(path, gone); } catch (e) { if (e && e.code === "ENOENT") return; throw lockFail("rename", path, e); }
+  const was = lockLook(io, gone);
+  if (!was || !sameHolder(look, was)) {
+    try { io.rename(gone, path); } catch (e) { throw new Error(`release-cron lock: ${path} was not the lock observed stale and could not be put back from ${gone} (${e && e.code ? e.code : e}); a person must restore or remove it`); }
+    throw new Error(`release-cron lock: ${path} changed while it was being removed; put back, not taken`);
+  }
+  try { io.remove(gone); } catch { /* left for a person: it is no longer the lock */ }
 };
 
 // Takes the lock at `path`: `{ got: true }`, or `{ got: false, pid }` while another run holds it. A holder that cannot be told, a failed
 // write and more attempts than `tries` throw: a run that does not hold the lock must not go on, nor report itself as skipped for a holder
-// that does not exist. A stale lock is taken over by one run at a time, the recovery itself a lock claimed the same way, and only when its
-// holder is the one just judged stale.
+// that does not exist.
 export const lockAcquire = (io, path, { tries = 5, graceMs = 10000, pollMs = 250 } = {}) => {
-  const recovery = `${path}.recover`;
   const deadline = io.now() + graceMs + 30000;
   for (let n = 0; n < tries && io.now() < deadline;) {
     if (lockClaim(io, path)) return { got: true };
@@ -708,28 +714,40 @@ export const lockAcquire = (io, path, { tries = 5, graceMs = 10000, pollMs = 250
     if (v === "unknown") throw unknownHolder(path, look);
     if (v === "pending") { io.sleep(pollMs); continue; }
     n++;
-    if (!lockClaim(io, recovery)) {
-      const other = lockLook(io, recovery);
-      if (other) {
-        const ov = lockVerdict(other.holder, other.pid > 0 && io.alive(other.pid), other.ageMs, graceMs, other.isFile);
-        if (ov === "unknown") throw unknownHolder(recovery, other);
-        if (ov === "stale") lockDiscard(io, recovery); // a recovery whose run died: cleared, the next wake takes the lock
-      }
-      return { got: false, pid: (other && other.pid) || look.pid };
-    }
-    try {
+    // Stale: one run at a time recovers, and what it removes is what it observed.
+    const out = io.recovering(() => {
       const again = lockLook(io, path);
       if (again) {
         const av = lockVerdict(again.holder, again.pid > 0 && io.alive(again.pid), again.ageMs, graceMs, again.isFile);
         if (av === "unknown") throw unknownHolder(path, again);
         if (av === "busy") return { got: false, pid: again.pid };
-        if (av === "stale" && sameHolder(look, again)) lockDiscard(io, path);
+        if (av === "pending") return null;
+        if (!sameHolder(look, again)) return null; // another holder than the one judged stale: judged again
+        lockRemoveStale(io, path, again);
       }
-      if (lockClaim(io, path)) return { got: true };
-    } finally { lockDiscard(io, recovery); }
+      return lockClaim(io, path) ? { got: true } : null;
+    });
+    if (out) return out;
   }
   throw new Error(`release-cron lock: ${path}: not taken after ${tries} attempts; run not started`);
 };
+
+// Gives the lock back: the lock is removed only when it holds this run's pid, by renaming it away first so the lock is gone in one step.
+// A lock that is not there or is another run's is left; a pid file that cannot be read, or a lock that cannot be removed, throws (the
+// run holds a lock it cannot give back: a replacement would find a live holder and skip, silently).
+export const lockRelease = (io, path) => {
+  let text;
+  try { text = io.readFile(`${path}/pid`); } catch (e) {
+    if (e && e.code === "ENOENT") return "none";
+    throw lockFail("read pid in", path, e);
+  }
+  if (text.trim() !== String(io.pid)) return "not ours";
+  const gone = `${path}.gone.${io.pid}.${io.uuid()}`;
+  try { io.rename(path, gone); } catch (e) { throw lockFail("give back", path, e); }
+  try { io.remove(gone); } catch { /* litter beside a released lock */ }
+  return "released";
+};
+
 
 // A signal's wait, each tick: "kill" the children still alive once their grace is over, "done" when the children are gone and no
 // preview is left (`previews`: its `up`, which a signal never stops, and its `down`), or when `grace` + `teardown` ms have passed with no

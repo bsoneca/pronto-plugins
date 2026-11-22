@@ -169,7 +169,7 @@ each step's minutes stay in `runs.jsonl` and `report`, so the slowest phase stil
 short calls inside prepare (`git fetch`, `gcloud describe`) keep their own hang guards of a few
 minutes; a signal (launchd's, `kill`) still stops the run's children, but never a preview's `up` (that would only kill the local ssh, leaving the node running release@k8s): the probes are skipped, `down` runs once `up` has ended, and the lock goes only then. Because nothing ends a stuck
 run, stop it by hand (`kill <pid in <state>/lock/pid>`). An app's old `minutes` in release_cron.cue is still accepted but ignored; delete it. There's no overall budget. Runs never overlap:
-launchd never starts a job while it's still running, and a lock (`<state>/lock`, a directory made with `mkdir`, which refuses an existing one even empty, as the older driver's does, then the run's pid written whole; the pid is published with `link(2)`, which never replaces another run's, and read back; a directory with no pid yet is an acquisition in progress, waited for 10 s, then an unresolved one the run stops on (its maker may only be paused; a person removes it if it is gone); a holder is dead only when `kill -0` says ESRCH (EPERM is alive; any other error stops the run), and then its lock is taken over by one run at a time; a holder whose pid cannot be read, or a write the system refuses, stops the run with an error and a nonzero exit, never a skip) skips a run started by hand while another is going.
+launchd never starts a job while it's still running, and a lock (`<state>/lock`, a directory holding the run's pid, made whole in a staging directory and renamed onto the lock, so it never exists without its owner; a holder is dead only when `kill -0` says ESRCH (EPERM is alive, any other error stops the run); a dead holder's lock is removed under an exclusive flock (`<state>/lock.recover.flock`, which goes with the process), only if it is still the one observed, and a holder that cannot be read, a directory with no pid after 10 s, or any other ambiguity stops the run with an error naming the path, for a person to clear; a lock that the run holds and cannot give back is an error too) skips a run started by hand while another is going.
 
 ## When the preview runs
 
@@ -344,3 +344,9 @@ deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow
 ```
 
 `deno run -A tests/unit.ts cron` runs the same cases (the runner starts the `deno test` itself); a suite with no cases fails with "no cases ran".
+
+## Rollout of the lock (PRONTO-1032)
+
+The driver before #433 takes the lock with `mkdir` and then writes `lock/pid` over whatever is there, and reads a directory with no live pid as free. Nothing on the new side can close the overlap with it: `rename(2)` replaces an empty destination directory, so an old driver caught between its `mkdir` and its pid write (microseconds) can have its directory replaced by a new driver's and then writes its pid over it, and two old drivers overlap the same way. The new driver never makes an empty lock and looks at an existing lock before renaming onto it, which leaves only that window.
+
+So the rule: **drain before landing.** A release-cron is run by one driver per app (launchd, or the `cd` job). When new copies of `release-cron/` land in an app, no old-version run is going and none starts meanwhile: pause the app (`release-cron.ts <app> pause`), wait for its lock to go (`status`), land the copies, then `resume`. A lock directory left with no pid (an old driver's crash) stops the new driver with an error naming it; remove it by hand.

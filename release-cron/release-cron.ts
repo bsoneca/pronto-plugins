@@ -29,7 +29,7 @@
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import process from "node:process";
 import { causes, outcomes } from "./causes.js";
-import { appendWhy, mutates, lockAcquire, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit } from "./cron.js";
+import { appendWhy, mutates, lockAcquire, lockRelease, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -86,33 +86,40 @@ const jsonl = (f: string) => { try { return Deno.readTextFileSync(f).split("\n")
 // The lock: a directory (made or not, atomically) holding the run's pid, taken by a run. A lock whose holder is gone is
 // taken over; one whose holder lives is busy: launchd never overlaps its own job, and this keeps a run started by hand from overlapping it.
 const lockPath = `${state}/lock`;
+const errCode = (e: unknown) => (e as { code?: string }).code ?? (e instanceof Deno.errors.AlreadyExists ? "EEXIST" : e instanceof Deno.errors.NotFound ? "ENOENT" : undefined);
+const wrap = <T>(f: () => T): T => { try { return f(); } catch (e) { const c = errCode(e); if (c && !(e as { code?: string }).code) (e as { code?: string }).code = c; throw e; } };
+const lockIo = {
+  pid: Deno.pid,
+  uuid: () => crypto.randomUUID(),
+  now: () => Date.now(),
+  sleep: (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+  mkdir: (p: string) => wrap(() => Deno.mkdirSync(p)),
+  writeFile: (p: string, t: string) => wrap(() => Deno.writeTextFileSync(p, t)),
+  rename: (a: string, b: string) => wrap(() => Deno.renameSync(a, b)),
+  readFile: (p: string) => wrap(() => Deno.readTextFileSync(p)),
+  stat: (p: string) => wrap(() => { const st = Deno.statSync(p); return { isFile: st.isFile, mtimeMs: st.mtime?.getTime() ?? 0 }; }),
+  remove: (p: string) => wrap(() => Deno.removeSync(p, { recursive: true })),
+  // kill(pid, 0): ESRCH is a holder that is gone, EPERM one alive under another user, any other error propagates (aliveFromKill).
+  alive: (pid: number) => { try { process.kill(pid, 0); return aliveFromKill(null); } catch (e) { return aliveFromKill((e as { code?: string }).code ?? "EUNKNOWN"); } },
+  // One recovering run at a time: an exclusive flock on a file of its own, which goes with the process (no stale recovery state to clear).
+  recovering: <T>(f: () => T): T => {
+    const file = wrap(() => Deno.openSync(`${lockPath}.recover.flock`, { create: true, write: true }));
+    try { file.lockSync(true); return f(); } finally { try { file.unlockSync(); } catch { /* closed below */ } file.close(); }
+  },
+};
 const takeLock = (): { got: true } | { got: false; pid: number } => {
   // A preview record a dead run of the flock version left: said once, loudly; never acted on (its `down` is for a person to run).
   try {
     const rec = JSON.parse(Deno.readTextFileSync(`${state}/lock.preview`));
     console.log(`release-cron: WARNING: ${state}/lock.preview exists: a preview may be left running; remove it with \`${(rec.down ?? []).join(" ")}\` in ${rec.dir ?? "its directory"}, then delete the record; nothing was done`);
   } catch (e) { if (!(e instanceof Deno.errors.NotFound)) console.log(`release-cron: WARNING: ${state}/lock.preview exists but could not be read (${(e as Error).message.split("\n")[0]}): a preview may be left running`); }
-  // Taking is cron.js's lockAcquire: mkdir (atomic, refuses an existing directory even an empty one, as the older driver's own take does),
-  // then the pid written whole; a holder that cannot be read is never taken from, and a failure to take throws, so the run exits nonzero.
-  const errCode = (e: unknown) => (e as { code?: string }).code ?? (e instanceof Deno.errors.AlreadyExists ? "EEXIST" : e instanceof Deno.errors.NotFound ? "ENOENT" : undefined);
-  const wrap = <T>(f: () => T): T => { try { return f(); } catch (e) { const c = errCode(e); if (c && !(e as { code?: string }).code) (e as { code?: string }).code = c; throw e; } };
-  return lockAcquire({
-    pid: Deno.pid,
-    uuid: () => crypto.randomUUID(),
-    now: () => Date.now(),
-    sleep: (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
-    mkdir: (p: string) => wrap(() => Deno.mkdirSync(p)),
-    writeFile: (p: string, t: string) => wrap(() => Deno.writeTextFileSync(p, t)),
-    rename: (a: string, b: string) => wrap(() => Deno.renameSync(a, b)),
-    link: (a: string, b: string) => wrap(() => Deno.linkSync(a, b)),
-    readFile: (p: string) => wrap(() => Deno.readTextFileSync(p)),
-    stat: (p: string) => wrap(() => { const st = Deno.statSync(p); return { isFile: st.isFile, mtimeMs: st.mtime?.getTime() ?? 0 }; }),
-    remove: (p: string) => wrap(() => Deno.removeSync(p, { recursive: true })),
-    // kill(pid, 0): ESRCH is a holder that is gone, EPERM one alive under another user, any other error propagates (aliveFromKill).
-    alive: (pid: number) => { try { process.kill(pid, 0); return aliveFromKill(null); } catch (e) { return aliveFromKill((e as { code?: string }).code ?? "EUNKNOWN"); } },
-  }, lockPath) as { got: true } | { got: false; pid: number };
+  // Taking is cron.js's lockAcquire: a whole staging directory (with this run's pid) renamed onto the lock, so the base driver's reader never
+  // sees it without an owner; a stale lock removed only under an exclusive flock and only if it is still the one observed; a holder that
+  // cannot be told, a failure to take or an ambiguous state throws, so the run exits nonzero and a person clears it.
+  return lockAcquire(lockIo, lockPath) as { got: true } | { got: false; pid: number };
 };
-const dropLock = () => { try { if (Deno.readTextFileSync(`${lockPath}/pid`) === String(Deno.pid)) Deno.removeSync(lockPath, { recursive: true }); } catch { /* none, or not ours */ } };
+// Gives the lock back (cron.js lockRelease): a lock this run holds and cannot remove throws.
+const dropLock = () => { lockRelease(lockIo, lockPath); };
 if (verb === "report") { console.log(report(jsonl(`${state}/runs.jsonl`))); Deno.exit(0); }
 if (verb === "uninstall") {
   // Whichever scheduler installed it: its files say.

@@ -44,40 +44,42 @@ cases: {
 		{call: "cron.appendWhy", args: ["the rehearsal failed (exit 1)", "a write failed"], expect: "the rehearsal failed (exit 1); a write failed"},
 	]}
 
-	// PRONTO-1032: the three Codex P1s on the lock of #433 (cron.js lockAcquire, on tests/unit/cronlock.js's in-memory file system).
-	"a lock is taken with mkdir and a whole pid file; a free lock is ours": {suite: "cron", steps: [
-		{call: "cronlock.run", args: [{}], expect: {got: true, pid_file: "500", lock_kind: "dir"}},
+	// PRONTO-1032: the lock (cron.js lockAcquire and lockRelease, on tests/unit/cronlock.js's in-memory file system).
+	"a lock is a whole staging directory renamed onto the lock: never made empty, never renamed without its pid": {suite: "cron", steps: [
+		{call: "cronlock.run", args: [{}], expect: {got: true, pid_file: "500", lock_kind: "dir", renamedWhole: true, madeLockDir: false}, why: "the base driver's reader sees a live owner from the lock's first instant"},
 	]}
-	"a write the file system refuses is an error naming the operation and path, never a skip behind a holder 0": {suite: "cron", steps: [
-		{call: "cronlock.run", args: [{fail: [{op: "writeFile", code: "ENOSPC"}]}], expect: {threw: "release-cron lock: write pid in state/lock: ENOSPC: ENOSPC: writeFile state/lock/pid.500.u1.tmp", pid_file: null, lock_kind: null}, why: "the half lock this run made is removed too"},
-		{call: "cronlock.run", args: [{fail: [{op: "mkdir", code: "EACCES"}]}], expect: {threw: "release-cron lock: mkdir state/lock: EACCES: EACCES: mkdir state/lock", pid_file: null, lock_kind: null}, why: "a mkdir that is not an existing lock is not contention"},
-		{call: "cronlock.run", args: [{fail: [{op: "link", path: "pid.", code: "EIO"}]}], expect: {threw: "release-cron lock: write pid in state/lock: EIO: EIO: link state/lock/pid.500.u1.tmp", pid_file: null, lock_kind: null}},
+	"a failure to stage, rename or verify is an error naming the operation and path, never a skip behind a holder 0": {suite: "cron", steps: [
+		{call: "cronlock.run", args: [{fail: [{op: "writeFile", code: "ENOSPC"}]}], expect: {threw: "release-cron lock: stage pid in state/lock.new.500.u1: ENOSPC: ENOSPC: writeFile state/lock.new.500.u1/pid", pid_file: null, lock_kind: null, renamedWhole: true, madeLockDir: false}, why: "the staging directory is removed too"},
+		{call: "cronlock.run", args: [{fail: [{op: "mkdir", code: "EACCES"}]}], expect: {threw: "release-cron lock: stage pid in state/lock.new.500.u1: EACCES: EACCES: mkdir state/lock.new.500.u1", pid_file: null, lock_kind: null, renamedWhole: true, madeLockDir: false}, why: "a mkdir that is not an existing lock is not contention"},
+		{call: "cronlock.run", args: [{fail: [{op: "rename", path: "lock.new", code: "EIO"}]}], expect: {threw: "release-cron lock: rename state/lock.new.500.u1 to state/lock: EIO: EIO: rename state/lock.new.500.u1", pid_file: null, lock_kind: null, renamedWhole: true, madeLockDir: false}},
 		{call: "cron.claimError", args: ["EEXIST"], expect: "contention"},
 		{call: "cron.claimError", args: ["ENOTEMPTY"], expect: "contention"},
 		{call: "cron.claimError", args: ["EACCES"], expect: "error"},
 		{call: "cron.claimError", args: [null], expect: "error"},
 	]}
 	"a holder whose pid file cannot be read is an unknown owner: the lock is neither taken nor removed": {suite: "cron", steps: [
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}, alive: [4242], fail: [{op: "readFile", path: "state/lock/pid", code: "EACCES"}]}], expect: {threw: "release-cron lock: state/lock has a holder that cannot be told (unreadable EACCES); not taken, not removed", pid_file: "4242", lock_kind: "dir"}, why: "a run that lives behind a pid file this one cannot read"},
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "not a pid"}}], expect: {threw: "release-cron lock: state/lock has a holder that cannot be told (malformed \"not a pid\"); not taken, not removed", pid_file: "not a pid", lock_kind: "dir"}},
-		{call: "cronlock.run", args: [{files: {"state/lock": "x1"}}], expect: {threw: "release-cron lock: state/lock has a holder that cannot be told (malformed \"x1\"); not taken, not removed", pid_file: null, lock_kind: "file"}, why: "the flock version's file, unreadable as a pid"},
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}, alive: [4242], fail: [{op: "readFile", path: "state/lock/pid", code: "EACCES"}]}], expect: {threw: "release-cron lock: state/lock has a holder that cannot be told (unreadable EACCES); not taken, not removed", pid_file: "4242", lock_kind: "dir", renamedWhole: true, madeLockDir: false}},
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "not a pid"}}], expect: {threw: "release-cron lock: state/lock has a holder that cannot be told (malformed \"not a pid\"); not taken, not removed", pid_file: "not a pid", lock_kind: "dir", renamedWhole: true, madeLockDir: false}},
+		{call: "cronlock.run", args: [{files: {"state/lock": "x1"}}], expect: {threw: "release-cron lock: state/lock has a holder that cannot be told (malformed \"x1\"); not taken, not removed", pid_file: null, lock_kind: "file", renamedWhole: true, madeLockDir: false}, why: "the flock version's file, unreadable as a pid"},
 	]}
 	"a live holder is busy, a verified dead one is taken over, in the directory form and the flock version's file": {suite: "cron", steps: [
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}, alive: [4242]}], expect: {got: false, pid: 4242, pid_file: "4242", lock_kind: "dir"}},
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}}], expect: {got: true, pid_file: "500", lock_kind: "dir"}, why: "4242 is gone"},
-		{call: "cronlock.run", args: [{files: {"state/lock": "4242\n"}, alive: [4242]}], expect: {got: false, pid: 4242, pid_file: null, lock_kind: "file"}},
-		{call: "cronlock.run", args: [{files: {"state/lock": "4242\n"}}], expect: {got: true, pid_file: "500", lock_kind: "dir"}},
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}, alive: [4242]}], expect: {got: false, pid: 4242, pid_file: "4242", lock_kind: "dir", renamedWhole: true, madeLockDir: false}},
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}}], expect: {got: true, pid_file: "500", lock_kind: "dir", renamedWhole: true, madeLockDir: false}, why: "4242 is gone"},
+		{call: "cronlock.run", args: [{files: {"state/lock": "4242\n"}, alive: [4242]}], expect: {got: false, pid: 4242, pid_file: null, lock_kind: "file", renamedWhole: true, madeLockDir: false}},
+		{call: "cronlock.run", args: [{files: {"state/lock": "4242\n"}}], expect: {got: true, pid_file: "500", lock_kind: "dir", renamedWhole: true, madeLockDir: false}},
 	]}
-	"a recovery held by a live run leaves the stale lock to it; a recovery whose run died is cleared": {suite: "cron", steps: [
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000, "state/lock.recover": 600000}, files: {"state/lock/pid": "4242", "state/lock.recover/pid": "7000"}, alive: [7000]}], expect: {got: false, pid: 7000, pid_file: "4242", lock_kind: "dir"}},
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000, "state/lock.recover": 600000}, files: {"state/lock/pid": "4242", "state/lock.recover/pid": "7000"}}], expect: {got: false, pid: 7000, pid_file: "4242", lock_kind: "dir"}, why: "cleared now, taken by the next wake"},
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000, "state/lock.recover": 600000}, files: {"state/lock/pid": "4242", "state/lock.recover/pid": "7000"}, alive: [7000]}], expect: {got: false, pid: 7000, pid_file: "4242", lock_kind: "dir"}},
+	"recovery removes only the lock it observed: one recovered meanwhile by another run, now held by a live run, is left": {suite: "cron", steps: [
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}, after: {inRecovery: {pid: "7000"}}, alive: [7000]}], expect: {got: false, pid: 7000, pid_file: "7000", lock_kind: "dir", renamedWhole: true, madeLockDir: false}, why: "the stale lock this run judged is gone; a live run's lock stands in its place"},
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}, after: {inRecovery: {pid: "7000"}}}], expect: {got: true, pid_file: "500", lock_kind: "dir", renamedWhole: true, madeLockDir: false}, why: "a new holder that is itself dead is judged again on its own, not removed on the old judgement"},
 	]}
-	"the older driver's mkdir-then-write gap: an empty directory is an acquisition in progress, never replaced, and its holder wins": {suite: "cron", steps: [
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 100}, after: {files: {"state/lock/pid": "4242"}}, alive: [4242]}], expect: {got: false, pid: 4242, pid_file: "4242", lock_kind: "dir"}, why: "the old run writes its pid after this one looked: both must not proceed"},
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 100}, files: {"state/lock/pid": ""}, after: {files: {"state/lock/pid": "4242"}}, alive: [4242]}], expect: {got: false, pid: 4242, pid_file: "4242", lock_kind: "dir"}, why: "its write has begun and is still empty"},
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 100}}], expect: {threw: "release-cron lock: state/lock has a holder that cannot be told (absent); not taken, not removed", pid_file: null, lock_kind: "dir"}, why: "no pid after the bounded wait: its maker may only be paused, so an unresolved acquisition is never taken over silently"},
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}}], expect: {threw: "release-cron lock: state/lock has a holder that cannot be told (absent); not taken, not removed", pid_file: null, lock_kind: "dir"}, why: "a pid-less directory an older version left: a person removes it"},
+	"a lock renamed away for removal that is not the observed one is put back, and the run stops": {suite: "cron", steps: [
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}, after: {renameSwaps: "7000"}}], expect: {threw: "release-cron lock: state/lock changed while it was being removed; put back, not taken", pid_file: "7000", lock_kind: "dir", renamedWhole: true, madeLockDir: false}},
+	]}
+	"the base driver's mkdir-then-write gap: an empty directory is an acquisition in progress, never replaced, and its holder wins": {suite: "cron", steps: [
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 100}, after: {files: {"state/lock/pid": "4242"}}, alive: [4242]}], expect: {got: false, pid: 4242, pid_file: "4242", lock_kind: "dir", renamedWhole: true, madeLockDir: false}, why: "the base run writes its pid after this one looked: this one waits, never renames onto the directory"},
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 100}, files: {"state/lock/pid": ""}, after: {files: {"state/lock/pid": "4242"}}, alive: [4242]}], expect: {got: false, pid: 4242, pid_file: "4242", lock_kind: "dir", renamedWhole: true, madeLockDir: false}, why: "its write has begun and is still empty"},
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 100}}], expect: {threw: "release-cron lock: state/lock has a holder that cannot be told (absent); not taken, not removed", pid_file: null, lock_kind: "dir", renamedWhole: true, madeLockDir: false}, why: "no pid after the bounded wait: its maker may only be paused, so it is never taken over silently"},
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}}], expect: {threw: "release-cron lock: state/lock has a holder that cannot be told (absent); not taken, not removed", pid_file: null, lock_kind: "dir", renamedWhole: true, madeLockDir: false}, why: "a pid-less directory an older version left: a person removes it"},
 	]}
 	"the lock's holder is read as the platform gives it: no file, empty, a pid, nonsense, or an error": {suite: "cron", steps: [
 		{call: "cron.holderOf", args: ["ENOENT", ""], expect: {kind: "absent"}},
@@ -91,16 +93,19 @@ cases: {
 		{call: "cron.lockVerdict", args: [{kind: "empty"}, false, 10000, 10000, false], expect: "unknown", why: "an acquisition that has lasted the grace is unresolved, not dead"},
 		{call: "cron.lockVerdict", args: [{kind: "unreadable"}, false, 99999, 10000, false], expect: "unknown"},
 	]}
-	// PRONTO-1032, Codex P1s of #1585 on #439's copies.
-	"a run paused after its mkdir, whose directory another run has replaced, fails instead of also releasing": {suite: "cron", steps: [
-		{call: "cronlock.run", args: [{after: {during: {pid: "7000"}}, alive: [7000]}], expect: {threw: "release-cron lock: state/lock/pid already names another run: the lock was taken while this one was paused; run not started", pid_file: "7000", lock_kind: "dir"}, why: "its pid is never linked over the other run's, so one run holds the lock"},
-	]}
 	"a holder is alive unless kill -0 confirms it missing; a probe that cannot tell fails closed": {suite: "cron", steps: [
 		{call: "cron.aliveFromKill", args: [null], expect: true},
 		{call: "cron.aliveFromKill", args: ["EPERM"], expect: true, why: "a live process of another user"},
 		{call: "cron.aliveFromKill", args: ["ESRCH"], expect: false, why: "the only way a lock is reclaimed"},
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}, kill: {"4242": "EPERM"}}], expect: {got: false, pid: 4242, pid_file: "4242", lock_kind: "dir"}, why: "a release of another uid is not evicted"},
-		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}, kill: {"4242": "EINVAL"}}], expect: {threw: "release-cron lock: cannot tell whether the holder is alive (kill -0: EINVAL); not taken, not removed", pid_file: "4242", lock_kind: "dir"}},
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}, kill: {"4242": "EPERM"}}], expect: {got: false, pid: 4242, pid_file: "4242", lock_kind: "dir", renamedWhole: true, madeLockDir: false}, why: "a release of another uid is not evicted"},
+		{call: "cronlock.run", args: [{dirs: {"state/lock": 600000}, files: {"state/lock/pid": "4242"}, kill: {"4242": "EINVAL"}}], expect: {threw: "release-cron lock: cannot tell whether the holder is alive (kill -0: EINVAL); not taken, not removed", pid_file: "4242", lock_kind: "dir", renamedWhole: true, madeLockDir: false}},
+	]}
+	"giving the lock back removes only this run's, and a lock it holds but cannot remove is an error": {suite: "cron", steps: [
+		{call: "cronlock.release", args: [{dirs: {"state/lock": 0}, files: {"state/lock/pid": "500"}}], expect: {result: "released", lock_kind: null}},
+		{call: "cronlock.release", args: [{dirs: {"state/lock": 0}, files: {"state/lock/pid": "7000"}}], expect: {result: "not ours", lock_kind: "dir"}},
+		{call: "cronlock.release", args: [{}], expect: {result: "none", lock_kind: null}},
+		{call: "cronlock.release", args: [{dirs: {"state/lock": 0}, files: {"state/lock/pid": "500"}, fail: [{op: "readFile", code: "EACCES"}]}], expect: {threw: "release-cron lock: read pid in state/lock: EACCES: EACCES: readFile state/lock/pid", lock_kind: "dir"}, why: "an unreadable pid file is not 'not ours'"},
+		{call: "cronlock.release", args: [{dirs: {"state/lock": 0}, files: {"state/lock/pid": "500"}, fail: [{op: "rename", code: "EBUSY"}]}], expect: {threw: "release-cron lock: give back state/lock: EBUSY: EBUSY: rename state/lock", lock_kind: "dir"}, why: "a replacement would find a live holder and skip, silently"},
 	]}
 	"a serving read after a dropped ssh fails at once on any exit but ssh's own": {suite: "cron", steps: [
 		{call: "cron.rescueReadStep", args: [255], expect: "wait", why: "the node may still be finishing"},
