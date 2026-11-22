@@ -133,15 +133,21 @@ export function columnsOf(r: Resource, released: string[] = []): Column[] {
   return [...base].sort((a, b) => at(a) - at(b));
 }
 
-/** Everything a role may hold on a view in `public` taken away, before the view's own grants: an
+/** Everything any role may hold on a view in `public` taken away, before the view's own grants: an
  * app's migrations grant `ALL TABLES IN SCHEMA public` (and ALTER DEFAULT PRIVILEGES) to its roles,
- * views included, which would open every column and write the API's grants close. A role the
- * database lacks is skipped. */
-const BLANKET_ROLES = ["anon", "app_user", "service", "electric"];
+ * views included, which would open every column and write the API's grants close. The roles are the
+ * ones the database holds an ACL entry for on the view (table or column level), read from the
+ * catalog, never a list kept here: a role the app's migrations add later is revoked too. The
+ * owner's own rights stay. */
 const revokeBlanket = (v: string) => [
   `DO $r$ DECLARE r text; BEGIN`,
-  `  FOREACH r IN ARRAY ARRAY[${BLANKET_ROLES.map((x) => `'${x}'`).join(", ")}] LOOP`,
-  `    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = r) THEN EXECUTE format('REVOKE ALL ON %s FROM %I', '${v}', r); END IF;`,
+  `  REVOKE ALL ON ${v} FROM PUBLIC;`,
+  `  FOR r IN SELECT DISTINCT g.grantee::regrole::text FROM (`,
+  `    SELECT a.grantee, c.relowner FROM pg_catalog.pg_class c, pg_catalog.aclexplode(c.relacl) a WHERE c.oid = to_regclass('${v}')`,
+  `    UNION ALL`,
+  `    SELECT a.grantee, c.relowner FROM pg_catalog.pg_class c JOIN pg_catalog.pg_attribute t ON t.attrelid = c.oid, pg_catalog.aclexplode(t.attacl) a WHERE c.oid = to_regclass('${v}')`,
+  `  ) g WHERE g.grantee <> g.relowner AND g.grantee <> 0 LOOP`,
+  `    EXECUTE format('REVOKE ALL ON %s FROM %s', '${v}', r);`,
   `  END LOOP;`,
   `END $r$;`,
 ].join("\n");
