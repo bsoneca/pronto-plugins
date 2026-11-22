@@ -11,7 +11,7 @@
 // version, the endpoints, the permission, the flag, the limits) are facebook.cue's, exported to
 // facebook_spec.json.
 import spec from "./facebook_spec.json" with { type: "json" };
-import { fromBase64url, randomToken, Refused } from "../oidc.ts";
+import { fromBase64url, randomToken, Refused, sha256url } from "../oidc.ts";
 import { esc, pairwiseSubject, sectorOf } from "./core.ts";
 import type { Store } from "./store.ts";
 import type { KeySource } from "../oidc.ts";
@@ -134,8 +134,36 @@ export function facebook(cfg: FacebookConfig, fetcher: typeof fetch = fetch): Pr
 const PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
 const SIGNED_REQUEST_MAX = 8192;
 
-/** The app-scoped user id in Meta's signed request, or null when the body is not one: too big, no signature that verifies under the secret (constant time), another algorithm, or no plain id. */
-export async function verifySignedRequest(body: string, secret: string): Promise<string | null> {
+/** How old a signed request may be, and how far ahead of the clock: Meta retries a callback for a while, so a week; a replay older than that is refused, as is one signed for a time to come. */
+const MAX_AGE_S = 7 * 86_400, SKEW_S = 300;
+
+/** The text of a request's body, at most `max` bytes: null when it is bigger, read no further than the limit (a body is never buffered whole before it is judged). */
+async function boundedText(req: Request, max: number): Promise<string | null> {
+  if (Number(req.headers.get("content-length") ?? "0") > max) return null;
+  const reader = req.body?.getReader();
+  if (!reader) return "";
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) { await reader.cancel(); return null; }
+    parts.push(value);
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) { all.set(part, at); at += part.byteLength; }
+  return new TextDecoder().decode(all);
+}
+
+/** The app-scoped user id in Meta's signed request, or null when the body is not one: too big, no signature that verifies under the secret (constant time), another algorithm, no plain id, or not issued within the last week. */
+export async function verifySignedRequest(body: string, secret: string, now: () => number = Date.now): Promise<string | null> {
+  return (await readSignedRequest(body, secret, now))?.user ?? null;
+}
+
+/** As verifySignedRequest, with the authenticated payload text (what the signature covers), which names the request once: the key replays are refused by. */
+export async function readSignedRequest(body: string, secret: string, now: () => number = Date.now): Promise<{ user: string; payload: string } | null> {
   if (body.length > SIGNED_REQUEST_MAX) return null;
   const signed = new URLSearchParams(body).get("signed_request") ?? "";
   const dot = signed.indexOf(".");
@@ -146,10 +174,13 @@ export async function verifySignedRequest(body: string, secret: string): Promise
   let signature: Uint8Array<ArrayBuffer>;
   try { signature = Uint8Array.from(fromBase64url(sig)); } catch { return null; }
   if (!(await crypto.subtle.verify("HMAC", key, signature, new TextEncoder().encode(payload)))) return null;
-  let data: { algorithm?: unknown; user_id?: unknown };
+  let data: { algorithm?: unknown; user_id?: unknown; issued_at?: unknown };
   try { data = JSON.parse(new TextDecoder().decode(fromBase64url(payload))); } catch { return null; }
   if (data.algorithm !== "HMAC-SHA256" || typeof data.user_id !== "string" || !/^[0-9]{1,30}$/.test(data.user_id)) return null;
-  return data.user_id;
+  // Fresh: a captured request is no key to a later deletion.
+  const t = Math.floor(now() / 1000);
+  if (typeof data.issued_at !== "number" || data.issued_at > t + SKEW_S || data.issued_at < t - MAX_AGE_S) return null;
+  return { user: data.user_id, payload };
 }
 
 /** What the deletion callback records (and the status page reads): when, and the pairwise subject of each listed tenant. */
@@ -166,25 +197,40 @@ export function facebookRoutes(
   // Only concrete origins have subjects to name: an entry with a port pattern (`*`) stands for tenants the broker cannot list here.
   const tenants = cfg.tenants.filter((t) => !t.includes("*"));
 
-  async function signed(req: Request): Promise<string | Response> {
-    const user = await verifySignedRequest(await req.text(), cfg.secret);
-    return user ?? reply(400, { error: "not a signed request of this app" });
+  // One request, one use: the payload the signature covers is claimed for an endpoint, and the other endpoint refuses it (a deauthorize request is no deletion request).
+  const window = (MAX_AGE_S + SKEW_S) * 1000;
+  async function signed(req: Request, endpoint: "deauthorize" | "deletion"): Promise<{ user: string; seen: string; again: boolean } | Response> {
+    const body = await boundedText(req, SIGNED_REQUEST_MAX);
+    if (body === null) return reply(413, { error: "too large" });
+    const read = await readSignedRequest(body, cfg.secret, now);
+    if (!read) return reply(400, { error: "not a signed request of this app" });
+    const seen = await sha256url(read.payload);
+    const other = endpoint === "deletion" ? "deauthorize" : "deletion";
+    if ((await p.store.left("fb-seen", `${other}:${seen}`)) > 0) return reply(400, { error: "this request was made for another callback" });
+    return { user: read.user, seen, again: !(await p.store.claim("fb-seen", `${endpoint}:${seen}`, window)) };
   }
 
   async function deauthorize(req: Request): Promise<Response> {
-    const user = await signed(req);
-    if (user instanceof Response) return user;
+    const read = await signed(req, "deauthorize");
+    if (read instanceof Response) return read;
     // Nothing is kept of a person: their subjects were never stored. The broker only notes that Meta called.
     console.log("broker: facebook deauthorize callback");
     return reply(200, {});
   }
 
   async function deletion(req: Request): Promise<Response> {
-    const user = await signed(req);
-    if (user instanceof Response) return user;
-    // One request per person a minute: a verified request writes a record, and a replayed one adds none.
+    const read = await signed(req, "deletion");
+    if (read instanceof Response) return read;
+    const user = read.user;
+    // The same request again (Meta retries) is answered as before, and adds no record.
+    if (read.again) {
+      const earlier = await p.store.get<string>("fb-deletion-code", read.seen);
+      return earlier ? reply(200, { url: `${issuer}/facebook/deletion?code=${earlier}`, confirmation_code: earlier }) : reply(409, { error: "this request is being handled" });
+    }
+    // One new request per person a minute: a fresh request writes a record, however many a person makes.
     if (!(await p.store.claim("fb-deletion-rate", user, 60_000))) return reply(429, { error: "a request for this person ran just now" });
     const code = randomToken(16);
+    await p.store.put("fb-deletion-code", read.seen, code, window);
     const subjects = await Promise.all(tenants.map(async (tenant) => ({ tenant, sub: await pairwiseSubject(p.pairwise, sectorOf(sectors, tenant), "facebook", user) })));
     await p.store.put("fb-deletion", code, { at: now(), subjects } satisfies DeletionRecord, 90 * 86_400_000);
     console.log(`broker: facebook data deletion requested (${code})`);

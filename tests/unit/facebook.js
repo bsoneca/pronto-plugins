@@ -143,11 +143,14 @@ const form = (signed) => new URLSearchParams({ signed_request: signed }).toStrin
 
 /** verifySignedRequest for a request made as `kind` says: the user id it accepts, or null. */
 export async function signed(kind) {
-  const good = { algorithm: 'HMAC-SHA256', user_id: '1000000000001', issued_at: 1 };
+  const good = { algorithm: 'HMAC-SHA256', user_id: '1000000000001', issued_at: Math.floor(Date.now() / 1000) };
   const bodies = {
     good: async () => form(await signedRequest(good)),
     otherSecret: async () => form(await signedRequest(good, 'cd'.repeat(16))),
     algorithm: async () => form(await signedRequest({ ...good, algorithm: 'HMAC-SHA1' })),
+    stale: async () => form(await signedRequest({ ...good, issued_at: good.issued_at - 8 * 86400 })),
+    future: async () => form(await signedRequest({ ...good, issued_at: good.issued_at + 3600 })),
+    noIssued: async () => form(await signedRequest({ algorithm: 'HMAC-SHA256', user_id: good.user_id })),
     noId: async () => form(await signedRequest({ algorithm: 'HMAC-SHA256' })),
     badId: async () => form(await signedRequest({ ...good, user_id: '12ab' })),
     oversized: async () => form(await signedRequest({ ...good, pad: 'x'.repeat(9000) })),
@@ -161,19 +164,21 @@ export async function signed(kind) {
 
 /** Meta's callbacks (facebookRoutes) on an in-memory store: what `call` answers (status, body or page), and what the store then holds. */
 export async function callbacks(call) {
+  const clock = { t: Date.UTC(2026, 10, 22) };
   const issuer = 'https://id.example.com';
   const store = new MemoryStore();
   const pairwise = await pairwiseKey('s'.repeat(40));
   const cfg = facebookConfig((k) => ({ ...ENV, FACEBOOK_TENANTS: `${TENANT},https://other.example.com,https://localhost:*` })[k] ?? undefined);
-  const routes = facebookRoutes(cfg, { issuer, secret: 's'.repeat(40), store, pairwise, now: () => Date.UTC(2026, 10, 22) });
+  const routes = facebookRoutes(cfg, { issuer, secret: 's'.repeat(40), store, pairwise, now: () => clock.t });
   const user = '1000000000001';
-  const signedBody = async (over = {}, secret = SECRET) => form(await signedRequest({ algorithm: 'HMAC-SHA256', user_id: user, ...over }, secret));
+  const signedBody = async (over = {}, secret = SECRET) => form(await signedRequest({ algorithm: 'HMAC-SHA256', user_id: user, issued_at: Math.floor(clock.t / 1000), ...over }, secret));
   const post = async (path, body) => (await routes(new Request(`${issuer}${path}`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body }), new URL(`${issuer}${path}`)));
   const logs = [];
   const real = console.log;
   console.log = (...a) => { logs.push(a.map(String).join(' ')); };
   try {
     if (call === 'other') return { routed: routes(new Request(`${issuer}/health`), new URL(`${issuer}/health`)) === null };
+    if (call === 'huge') { const x = await post('/facebook/data-deletion', 'signed_request=' + 'a'.repeat(20000)); return { status: x.status }; }
     if (call === 'deauthorize') { const r = await post('/facebook/deauthorize', await signedBody()); return { status: r.status, body: await r.json(), stored: await store.get('fb-deletion', 'x') ?? null }; }
     if (call === 'deauthorizeBad') { const r = await post('/facebook/deauthorize', await signedBody({}, 'cd'.repeat(16))); return { status: r.status, body: await r.json() }; }
     if (call === 'deletionBad') { const r = await post('/facebook/data-deletion', await signedBody({}, 'cd'.repeat(16))); return { status: r.status, body: await r.json() }; }
@@ -191,7 +196,14 @@ export async function callbacks(call) {
         page: page.status, pageHasId: html.includes(user) || expected.some((e) => html.includes(e.sub)), pageHasDate: html.includes('2026-11-22'), csp: page.headers.get('content-security-policy'), loggedId: logs.join(' ').includes(user),
       };
     }
-    if (call === 'twice') { const second = await post('/facebook/data-deletion', await signedBody()); return { first: r.status, second: second.status }; }
+    if (call === 'twice') { const second = await post('/facebook/data-deletion', await signedBody({ issued_at: Math.floor(clock.t / 1000) + 1 })); return { first: r.status, second: second.status }; }
+    if (call === 'replay') {
+      clock.t += 61_000;
+      const again = await post('/facebook/data-deletion', await signedBody({ issued_at: Math.floor((clock.t - 61_000) / 1000) }));
+      const body = await again.json();
+      return { status: again.status, sameCode: body.confirmation_code === answer.confirmation_code, records: [...(await Promise.all([answer.confirmation_code].map((c) => store.get('fb-deletion', c))))].length };
+    }
+    if (call === 'swap') { const own = { issued_at: Math.floor(clock.t / 1000) + 2 }; const d = await post('/facebook/deauthorize', await signedBody(own)); const x = await post('/facebook/data-deletion', await signedBody(own)); return { deauth: d.status, deletion: x.status, error: (await x.json()).error ?? null }; }
     if (call === 'unknown') { const u = new URL(`${issuer}/facebook/deletion?code=nonexistentcode1`); const p = await routes(new Request(u), u); return { status: p.status }; }
     if (call === 'badCode') { const u = new URL(`${issuer}/facebook/deletion?code=../../etc`); const p = await routes(new Request(u), u); return { status: p.status }; }
     return null;

@@ -97,6 +97,9 @@ cases: {
 		{call: "fb.signed", args: ["good"], expect: "1000000000001"},
 		{call: "fb.signed", args: ["otherSecret"], expect: null, why: "another app's secret signs another app's requests"},
 		{call: "fb.signed", args: ["algorithm"], expect: null},
+		{call: "fb.signed", args: ["stale"], expect: null, why: "a request older than a week is no key to a deletion"},
+		{call: "fb.signed", args: ["future"], expect: null},
+		{call: "fb.signed", args: ["noIssued"], expect: null},
 		{call: "fb.signed", args: ["noId"], expect: null},
 		{call: "fb.signed", args: ["badId"], expect: null},
 		{call: "fb.signed", args: ["oversized"], expect: null},
@@ -123,5 +126,12 @@ cases: {
 		{call: "fb.callbacks", args: ["unknown"], expect: {status: 404}},
 		{call: "fb.callbacks", args: ["badCode"], expect: {status: 404}},
 		{call: "fb.callbacks", args: ["other"], expect: {routed: true}},
+	]}
+	"the same signed request again, after the rate window, is answered with the same code and adds no record; a deauthorize request is refused at the deletion callback": {suite: "identity", steps: [
+		{call: "fb.callbacks", args: ["replay"], expect: {status: 200, sameCode: true, records: 1}},
+		{call: "fb.callbacks", args: ["swap"], expect: {deauth: 200, deletion: 400, error: "this request was made for another callback"}},
+	]}
+	"a body past the limit is refused with a 413 before it is read whole": {suite: "identity", steps: [
+		{call: "fb.callbacks", args: ["huge"], expect: {status: 413}},
 	]}
 }
