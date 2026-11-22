@@ -54,3 +54,17 @@ sshBareHost:          schema.#Release & _base & {api: ssh: "node.example"}
 previewProduction:       schema.#Release & _base & {preview: "production"}
 previewOnProductionHost: schema.#Release & _base & {preview: "rc", hosts: rc: "app.example.com"}
 previewOwnHost:          schema.#Release & _base & {preview: "rc", hosts: rc: "rc.app.example.com"}
+
+// A service is only what #Service says: no field it does not know, no reserved variable, no seed out of the app.
+serviceUnknownField:    schema.#Release & _base & {services: billing: {port: 8688, jail: true}}
+serviceReservedEnv:     schema.#Release & _base & {services: billing: {port: 8688, env: SERVICE_JWT: "x"}}
+serviceSeedClimbs:      schema.#Release & _base & {services: billing: {port: 8688, files: "/etc/f": "cm", seed: cm: "../x.json"}}
+servicePrivilegedPort:  schema.#Release & _base & {services: billing: port: 80}
+blobsUnknownField:      schema.#Release & _base & {blobs: {bucket: "b-blobs", provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "b@p.iam.gserviceaccount.com", key: "x"}}
+serviceDaprPort:        schema.#Release & _base & {services: billing: port: 3500}
+serviceMetricsDaprPort: schema.#Release & _base & {services: billing: {port: 8688, metrics: port: 9090}}
+serviceSecretReserved:  schema.#Release & _base & {services: billing: {port: 8688, secrets: PORT: "x"}}
+serviceFilesDotDot:     schema.#Release & _base & {services: billing: {port: 8688, files: "/etc/../x": "cm"}}
+serviceSeedAbsolute:    schema.#Release & _base & {services: billing: {port: 8688, files: "/etc/f": "cm", seed: cm: "/etc/passwd"}}
+serviceNamedClock:      schema.#Release & _base & {services: "pulse-clock": port: 8688}
+metricsExportUnknown:   schema.#Release & _base & {metricsExport: {project: "my-project", provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "m@p.iam.gserviceaccount.com", key: "x"}}

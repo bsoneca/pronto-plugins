@@ -75,11 +75,18 @@ export def app-meta [cue_path: string, preview: string]: nothing -> record {
 
 # The services whose images the release builds: the runtime's, the base five, migrate and render
 # where the project has them (as upstream's main builds them).
-export def build-services [compose: record, has_render: bool]: nothing -> list<string> {
+export def build-services [compose: record, has_render: bool, own: list<string> = []]: nothing -> list<string> {
 	let names = ($compose.services | columns)
 	(runtime-names $compose) | append [database crud electric auth caddy]
 		| append (if "migrate" in $names { ["migrate"] } else { [] })
 		| append (if $has_render { ["render"] } else { [] })
+		| append $own | uniq
+}
+
+# The images the release's own services run (Node.services, and the blob plane's rclone-s3 and imgproxy), which the
+# engine builds beside upstream's: compose services of those names.
+export def own-images [node: record]: nothing -> list<string> {
+	($node.services? | default {} | columns) | append (if ($node.blobs? | default null) != null { [rclone-s3 imgproxy] } else { [] })
 }
 
 def runtime-names [compose: record]: nothing -> list<string> {
