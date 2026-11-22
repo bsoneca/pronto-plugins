@@ -236,7 +236,7 @@ cases: {
 	"an app's blanket grants on public reach no API view: a stamp, the key, a write the resource does not export are 42501 on the public copy, the exported writes work": {suite: "api", steps: [
 		{call: "apigen.app"}, {keep: "app"},
 		{call: "apigen.generated", args: ["$app"]},
-		{call: "apigen.files", args: ["$app"]}, {get: "sql", matches: #"REVOKE ALL ON %s FROM %I', '"public"\."api_v1_note"'"#},
+		{call: "apigen.files", args: ["$app"]}, {get: "sql", matches: #"aclexplode\(c\.relacl\)[\s\S]*aclexplode\(t\.attacl\)[\s\S]*REVOKE ALL ON %s FROM %s', '"public"\."api_v1_note"', r\)"#},
 		{call: "apigen.dbBlanket", args: ["$app"]}, {keep: "db"},
 		{call: "apigen.as", args: ["$db", _ada, "INSERT INTO public.api_v1_note (id, body) VALUES ($1, 'x') RETURNING name", [_n1]], expect: [{name: "notes/" + _n1}], why: "an exported Create"},
 		{call: "apigen.as", args: ["$db", _ada, "UPDATE public.api_v1_note SET body = 'y' WHERE name = $1 RETURNING body", ["notes/" + _n1]], expect: [{body: "y"}], why: "an exported Update"},
