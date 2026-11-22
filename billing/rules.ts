@@ -5,6 +5,7 @@ export const RULES = {
   "plan": {
     "id": "^[a-z][a-z0-9-]{0,31}$",
     "nameMax": 80,
+    "nameText": "[^\\t\\n\\f\\r ]",
     "interval": [
       "month",
       "year"
