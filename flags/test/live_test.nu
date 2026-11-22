@@ -5,6 +5,12 @@
 # a rollback writes an earlier one again as the newest. The app's cue is real.
 #   ./saytw --script tools.nu nu flags/test/live_test.nu
 
+# Commits the tests make directly (commit-tree on a bare origin) need an identity on a runner with none.
+$env.GIT_AUTHOR_NAME = "t"
+$env.GIT_AUTHOR_EMAIL = "t@example.com"
+$env.GIT_COMMITTER_NAME = "t"
+$env.GIT_COMMITTER_EMAIL = "t@example.com"
+
 const here = path self .
 let real = $env.SAYT_MISE_BIN
 let dir = (mktemp -d)
