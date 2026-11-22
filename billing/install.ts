@@ -44,22 +44,19 @@ billingTrialStates: ${list(RULES.trialStates)}
 // Where a row of the broker's claim table stands.
 billingClaimStates: ${list(RULES.claimStates)}
 `);
-// The broker's tables, as an add-only, idempotent raw migration in the app's database migrations: the broker runs
-// no DDL itself and checks at start that they are there. Named to sort (LC_ALL=C) after the app's latest raw
-// migration when first written, and rewritten in place under that name on every later install.
+// The broker's tables are NOT written into the app: its database is the operator's, and an app's roles would reach
+// them. An earlier install wrote them as a raw migration (<n>_billing_broker.sql); it is removed here.
 {
-  const dir = "services/database/migrations";
-  const names: string[] = [];
+  const dir = `${app}/services/database/migrations`;
   try {
-    for await (const e of Deno.readDir(`${app}/${dir}`)) if (e.isFile && e.name.endsWith(".sql")) names.push(e.name);
-  } catch { /* no migrations yet: the first is the app's to number */ }
-  const held = names.find((n) => n.endsWith("_billing_broker.sql"));
-  let name = held;
-  if (!name) {
-    const latest = names.map((n) => /^(\d+)_/.exec(n)?.[1]).filter((n): n is string => !!n).sort().at(-1);
-    name = `${String(latest ? Number(latest) + 10 : 10).padStart(Math.max(3, latest?.length ?? 3), "0")}_billing_broker.sql`;
-  }
-  await write(`${dir}/${name}`, await Deno.readTextFile(`${here}broker/schema.sql`));
+    for await (const e of Deno.readDir(dir)) {
+      if (!e.isFile || !e.name.endsWith("_billing_broker.sql")) continue;
+      if ((await Deno.readTextFile(`${dir}/${e.name}`)).includes("The billing broker's tables")) {
+        await Deno.remove(`${dir}/${e.name}`);
+        console.log(`pronto-billing: removed services/database/migrations/${e.name} (the broker's schema is applied to the broker's database by metal.nu release)`);
+      }
+    }
+  } catch { /* no migrations dir */ }
 }
 for (const f of ["service.ts", "entitlement.ts", "shared.ts", "broker/core.ts", "broker/main.ts", "broker/stripe.ts", "broker/door.ts", "broker/fake.ts", "broker/store.ts", "broker/vendor/postgres.js"]) {
   await write(`billing/${f}`, await Deno.readTextFile(`${here}${f}`));

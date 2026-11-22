@@ -8,7 +8,7 @@ import { brokerKeys, type Entitlement, verifyEntitlement } from "../entitlement.
 import { broker, newSigningKey, twoModes } from "./main.ts";
 import { chargesAt, checkoutLocale, type Consent, ownerOf, tenantOf } from "./core.ts";
 import { fakeStripe, unform } from "./fake.ts";
-import { askedDoor, forAccount, form, markTransport, signWebhook, stripe as stripeClient, StripeError, type Stripe, switched } from "./stripe.ts";
+import { askedDoor, forAccount, form, markTransport, signWebhook, stripe as stripeClient, StripeError, type Stripe, switched, tracked } from "./stripe.ts";
 import { MemoryStore, type Store } from "./store.ts";
 
 function assertEquals(a: unknown, b: unknown, m = "") {
@@ -24,16 +24,17 @@ const TRIAL = { months: 3, plans: ["analysis"], remindDays: 7 };
 
 // `replicas` brokers share one store (store.ts), as the node's pods share their database: each
 // request goes to the next, round robin.
-async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: number; store?: Store; mode?: "live" | "sandbox"; switched?: "asked" | "never" } = {}) {
+async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: number; store?: Store; mode?: "live" | "sandbox"; switched?: "asked" | "never" | "direct" | "door" } = {}) {
   const fake = fakeStripe(ISSUER, { searchLagMs: o.searchLagMs ?? 0 });
   // Every request the broker makes to Stripe, as the stand-in is asked it.
   const sent: { method: string; path: string; params?: Record<string, unknown> }[] = [];
   // What Stripe should refuse, for a test of the broker's retries.
-  const stripeDown = { delete: false, invoices: 0 };
+  const stripeDown = { delete: false, invoices: 0, invoicesTimeout: false };
   // The broker reaches the stand-in as it reaches Stripe on the node: through its door (PRONTO-270).
   const door = stripeClient({ door: `${ISSUER}/door/stripe`, fetcher: ((u: string | URL | Request, init?: RequestInit) => fake.handle(new Request(u, init))!) as typeof fetch });
   const stripe = ((method: string, path: string, ...rest: unknown[]) => {
     sent.push({ method, path, params: rest[0] as Record<string, unknown> | undefined });
+    if (path.startsWith("/v1/invoices/") && stripeDown.invoicesTimeout) return Promise.reject(new DOMException("The signal timed out", "TimeoutError"));
     if (path.startsWith("/v1/invoices/") && stripeDown.invoices) return Promise.reject(new StripeError(stripeDown.invoices, stripeDown.invoices === 403 ? "permission" : "api_error", "invoices refused"));
     if (method === "DELETE" && stripeDown.delete) return Promise.reject(new StripeError(500, "api_error", "Stripe is down"));
     return (door as (...a: unknown[]) => unknown)(method, path, ...rest);
@@ -48,7 +49,8 @@ async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: numb
     markTransport(name);
     return answer;
   }) as Stripe;
-  const routed = o.switched ? switched({ direct: tagged("direct"), door: tagged("door"), on: o.switched === "asked" ? askedDoor : () => false }) : stripe;
+  const fixed = o.switched === "direct" || o.switched === "door";
+  const routed = fixed ? tagged(o.switched as "direct" | "door") : o.switched ? switched({ direct: tagged("direct"), door: tagged("door"), on: o.switched === "asked" ? askedDoor : () => false }) : stripe;
   const tenants = new Map<string, { doc?: unknown; up: boolean; got: Entitlement[]; hold?: Promise<void>; refuse?: boolean; tickets: Map<string, Consent>; consentFails?: number }>([
     [A, { up: true, got: [], tickets: new Map() }], [B, { up: true, got: [], tickets: new Map() }],
   ]);
@@ -86,7 +88,7 @@ async function setup(o: { searchLagMs?: number; issuer?: string; replicas?: numb
   // Replicas sign with one key, as the node's pods read BILLING_SIGNING_KEY from one Secret.
   const signingKey = (o.replicas ?? 1) > 1 ? await newSigningKey() : undefined;
   const replicas = await Promise.all(Array.from({ length: o.replicas ?? 1 }, () =>
-    broker({ issuer: ISSUER, secret: "s".repeat(32), stripe: routed, webhookSecret: fake.webhookSecret, fetcher, cacheMs: 0, feePercent: 10, store, signingKey, mode: o.mode }).then((h) => o.switched ? forAccount(h) : h)));
+    broker({ issuer: ISSUER, secret: "s".repeat(32), stripe: routed, webhookSecret: fake.webhookSecret, fetcher, cacheMs: 0, feePercent: 10, store, signingKey, mode: o.mode }).then((h) => fixed ? tracked(h) : o.switched ? forAccount(h) : h)));
   let turn = 0;
   const handler = (req: Request) => replicas[turn++ % replicas.length](req);
   const keys = brokerKeys(ISSUER, fetcher, 0);
@@ -1089,7 +1091,9 @@ Deno.test("a resync takes a plan id by the one rule, rules.cue's", async () => {
 });
 
 // The probe says which transport answered its read, as the switched client noted it, never what the request said.
-const PROBE_CASES: { name: string; switched: "asked" | "never"; door?: boolean; transport: string; calls: string[] }[] = [
+const PROBE_CASES: { name: string; switched: "asked" | "never" | "direct" | "door"; door?: boolean; transport: string; calls: string[] }[] = [
+  { name: "a direct-only broker says direct", switched: "direct", transport: "direct", calls: ["direct"] },
+  { name: "a door-only broker says door, whatever the request says", switched: "door", door: false, transport: "door", calls: ["door"] },
   { name: "door true: the door answers", switched: "asked", door: true, transport: "door", calls: ["door"] },
   { name: "door false: the broker's own key answers", switched: "asked", door: false, transport: "direct", calls: ["direct"] },
   { name: "no word: straight to Stripe", switched: "asked", transport: "direct", calls: ["direct"] },
@@ -1107,3 +1111,20 @@ for (const c of PROBE_CASES) {
     assertEquals(body.door, c.door, "the request's word is said back as its own, apart from the transport");
   });
 }
+
+Deno.test("an invoice call that hits the transport's deadline is tried again, three times in all", async () => {
+  const s = await setup();
+  await s.prove(A, TRIAL);
+  await s.payouts(A);
+  const sub = await startTrial(s, BEA);
+  const portal = await portalOf(s, BEA);
+  s.stripeDown.invoicesTimeout = true;
+  const before = s.sent.length;
+  await s.press(`${portal}?sub=${sub.id}`, "trial_fail");
+  assertEquals(s.sent.slice(before).filter((r) => r.path.startsWith("/v1/invoices/")).length, 3, "a timeout is transient");
+  assertEquals(sub.status, "past_due", "nothing cancelled while the invoice is unknown");
+  s.stripeDown.invoicesTimeout = false;
+  assertEquals(await s.fake.emit("customer.subscription.updated", sub), true);
+  assertEquals(sub.status, "canceled");
+  s.fake.close();
+});

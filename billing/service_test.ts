@@ -111,7 +111,7 @@ function trialStage(o: { flag?: () => Response; status?: Record<string, unknown>
 const fns = (calls: { fn: string }[]) => calls.map((c) => c.fn);
 const CONSENT = { plan: "analysis", amount: 1990, currency: "brl", charges_at: "2027-02-05T12:00:00Z", terms: "Free until Feb 5, then R$ 19,90 a month.", consent: true, locale: "pt-BR", return: "/?premium=trial" };
 
-Deno.test("the trial is off when its flag is off: 404; a flag that cannot be asked fails the request: 502; nothing asked of the broker", async () => {
+Deno.test("the trial is off when its flag is off: 404; on the door path a flag that cannot be asked fails the request: 502, off it the trial is off; nothing asked of the broker", async () => {
   const cases: [string, () => Response, number][] = [
     ["false", () => Response.json({ value: false }), 404],
     ["not a boolean", () => Response.json({ value: "true" }), 502],
@@ -119,19 +119,29 @@ Deno.test("the trial is off when its flag is off: 404; a flag that cannot be ask
     ["flagd down", () => new Response("", { status: 503 }), 502],
     ["flagd unreachable", () => { throw new TypeError("connection refused"); }, 502],
   ];
-  for (const [why, flag, status] of cases) {
-    const t = trialStage({ flag });
-    for (const [path, body] of [["/billing/trial", {}], ["/billing/trial/checkout", CONSENT], ["/billing/trial/consent", { account: ANA_ID, ticket: "t".repeat(32) }]] as const) {
-      const res = await t.ask(t.make(), path, body);
-      eq([why, path, res.status], [why, path, status], status === 404 ? "off" : "no answer is no trial, and says so");
-      await res.body?.cancel();
+  const quietly = console.warn;
+  console.warn = () => {};
+  try {
+    for (const [why, flag, status] of cases) {
+      // The door path (stripe_door true for the reader) is strict; any other reader keeps the trial off, as before the door.
+      for (const [way, settings, expected] of [["door path", { doorFlag: "stripe_door" }, status], ["not the door path", {}, 404]] as const) {
+        const t = trialStage({ flag });
+        for (const [path, body] of [["/billing/trial", {}], ["/billing/trial/checkout", CONSENT], ["/billing/trial/consent", { account: ANA_ID, ticket: "t".repeat(32) }]] as const) {
+          const res = await t.ask(t.make(settings), path, body);
+          eq([why, way, path, res.status], [why, way, path, expected], expected === 404 ? "off" : "no answer is no trial, and says so");
+          await res.body?.cancel();
+        }
+        eq(t.broker, [], `${why}, ${way}: no broker call`);
+        eq(fns(t.calls).filter((f) => f.startsWith("billing_trial")), [], `${why}, ${way}: no trial function called`);
+      }
     }
-    eq(t.broker, [], `${why}: no broker call`);
-    eq(fns(t.calls).filter((f) => f.startsWith("billing_trial")), [], `${why}: no trial function called`);
+  } finally {
+    console.warn = quietly;
   }
-  // A flag configured with nowhere to ask it fails too; a document that has no trial is off.
+  // A flag configured with nowhere to ask it fails too on the door path (the door flag itself needs flagd, so
+  // there it is its own 502); a document that has no trial is off.
   const noFlagd = trialStage();
-  eq((await noFlagd.ask(noFlagd.make({ flags: undefined }), "/billing/trial")).status, 502, "no flagd to ask");
+  eq((await noFlagd.ask(noFlagd.make({ flags: undefined }), "/billing/trial")).status, 404, "no flagd to ask: off, as before the door");
   const noTrial = trialStage({ document: { owner: "o", plans: { analysis: {} } } });
   eq((await noTrial.ask(noTrial.make({ trialFlag: undefined }), "/billing/trial")).status, 404, "no trial in the document");
 });
@@ -166,8 +176,8 @@ Deno.test("an account that holds a plan or has a trial is offered none, and the 
   }
   // An old broker has no /trial/offer: its refusal is the answer, never an ineligible account.
   const old = trialStage({ offer: () => Response.json({ error: "not found" }, { status: 404 }) });
-  const res = await old.ask(old.make(), "/billing/trial");
-  eq(res.status, 404, "an old broker's refusal, passed on");
+  const res = await old.ask(old.make({ doorFlag: "stripe_door" }), "/billing/trial");
+  eq(res.status, 404, "on the door path an old broker's refusal is passed on");
   await res.body?.cancel();
 });
 
@@ -487,5 +497,15 @@ Deno.test("a probe whose door lookup fails gets a 502 and neither transport is c
     }
   } finally {
     console.error = quietly;
+  }
+});
+
+Deno.test("a broker that does not know trials: no offers off the door path, a failed request on it", async () => {
+  for (const [way, settings, status] of [["not the door path", {}, 200], ["door path", { doorFlag: "stripe_door" }, 404]] as const) {
+    const t = trialStage({ offer: () => Response.json({ error: "not found" }, { status: 404 }) });
+    const res = await t.ask(t.make(settings), "/billing/trial");
+    eq([way, res.status], [way, status]);
+    if (status === 200) eq(await res.json(), { state: null, plan: null, amount: null, currency: null, charges_at: null, holds: false, eligible: false, offers: [] }, "none offered");
+    else await res.body?.cancel();
   }
 });

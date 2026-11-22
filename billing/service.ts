@@ -198,15 +198,39 @@ export function service(s: Settings) {
   // the flag not there, an answer that is no boolean) fails the request, as doorOn's does: never on,
   // and never mistaken for a trial turned off. The broker's consent check carries no session, so a
   // flag that names accounts needs flagd asked directly.
-  async function trialOn(account: string): Promise<boolean> {
+  //
+  // That strictness belongs to the door path (the reader's stripe_door evaluates true): for every other
+  // reader the trial is off when its flag cannot be asked, as before the door, so a deploy of this service
+  // changes nothing for them. `strict` says which.
+  async function trialOn(account: string, strict: boolean): Promise<boolean> {
     if (!doc.trial) return false;
     if (!s.trialFlag) return true;
-    if (!s.flags) throw new Error("BILLING_TRIAL_FLAG needs BILLING_FLAGS: where to ask it");
-    const res = await ofrep(s.trialFlag, account);
-    const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
-    if (!res.ok || typeof answer?.value !== "boolean") throw new Error(`flag ${s.trialFlag}: flagd answered ${res.status}`);
-    return answer.value;
+    try {
+      if (!s.flags) throw new Error("BILLING_TRIAL_FLAG needs BILLING_FLAGS: where to ask it");
+      const res = await ofrep(s.trialFlag, account);
+      const answer = res.ok ? await res.json() as { value?: unknown } : (await res.body?.cancel(), null);
+      if (!res.ok || typeof answer?.value !== "boolean") throw new Error(`flag ${s.trialFlag}: flagd answered ${res.status}`);
+      return answer.value;
+    } catch (e) {
+      if (strict) throw e;
+      console.warn(`billing: ${(e as Error).message}: the trial is off`);
+      return false;
+    }
   }
+
+  // Whether the door path is on for this reader: their stripe_door evaluates true now. A lookup that cannot
+  // say, and no flag at all, are not the door path.
+  // The lookup is made once for the request: its answer, or the failure it is (which a call to the broker, as
+  // any door-path call, still raises).
+  type Lookup = { value: boolean | undefined } | { error: unknown };
+  async function lookupDoor(account: string, auth: string | null): Promise<Lookup> {
+    try {
+      return { value: await doorOn(account, auth) };
+    } catch (error) {
+      return { error };
+    }
+  }
+  const onDoorPath = (l: Lookup): boolean => "value" in l && l.value === true;
 
   // Whether the reader's calls to Stripe go through the airlock's door, as flagd evaluates the flag
   // for them now: through the door, with the reader's own session, which its OFREP route reads the
@@ -247,7 +271,7 @@ export function service(s: Settings) {
     if (path === "/billing/trial/consent") {
       // The broker's: the ticket is the proof, so there is no reader.
       const a = await args(req);
-      if (typeof a.account !== "string" || typeof a.ticket !== "string" || !(await trialOn(a.account))) return json(404, { error: "not found" });
+      if (typeof a.account !== "string" || typeof a.ticket !== "string" || !(await trialOn(a.account, onDoorPath(await lookupDoor(a.account, null))))) return json(404, { error: "not found" });
       const res = await asService("billing_trial_take", { account: a.account, ticket: a.ticket });
       if (!res.ok) throw new Error(`billing_trial_take answered ${res.status}: ${brief(await res.text())}`);
       const consent = await res.json();
@@ -255,15 +279,19 @@ export function service(s: Settings) {
     }
     const account = await reader(req);
     if (account instanceof Response) return account;
-    if (!(await trialOn(account))) return json(404, { error: "not found" });
+    const lookup = await lookupDoor(account, req.headers.get("authorization"));
+    const strict = onDoorPath(lookup);
+    if (!(await trialOn(account, strict))) return json(404, { error: "not found" });
     const a = await args(req, 8192);
     const held = await trialStatus(account);
     if (path === "/billing/trial") {
       const none = { ...held, eligible: false, offers: [] };
       if (held.holds || held.state) return json(200, none);
-      const res = await toBroker("/trial/offer", { account, ticket: await trialTicket(account), currency: a.currency }, req.headers.get("authorization"));
-      // A broker that does not know trials (404) fails the request as any refusal does: a trial's
-      // flag is turned on only where the broker offers trials, so this is no account's ineligibility.
+      const res = await toBroker("/trial/offer", { account, ticket: await trialTicket(account), currency: a.currency }, req.headers.get("authorization"), lookup);
+      // On the door path, a broker that does not know trials (404) fails the request as any refusal does: a
+      // trial's flag is turned on only where the broker offers trials, so this is no account's ineligibility.
+      // Off it, as before the door, such a broker offers none.
+      if (res.status === 404 && !strict) return json(200, none);
       return res.ok ? json(200, { ...held, ...(await res.json()) }) : res;
     }
     if (a.consent !== true) return json(400, { error: "consent is required" });
@@ -274,13 +302,17 @@ export function service(s: Settings) {
     if (typeof a.terms !== "string" || a.terms.trim() === "" || a.terms.length > 1000) return json(400, { error: "terms required, at most 1000 characters" });
     if (held.holds || held.state) return json(409, { error: held.holds ? "holds" : "used" });
     const ticket = await trialTicket(account, { plan, amount: a.amount, currency: a.currency, charges_at: a.charges_at, terms: a.terms });
-    return await toBroker("/trial/checkout", { account, ticket, locale: a.locale, return: a.return }, req.headers.get("authorization"));
+    return await toBroker("/trial/checkout", { account, ticket, locale: a.locale, return: a.return }, req.headers.get("authorization"), lookup);
   }
 
   // `auth`: the reader's session, for a call made on the reader's behalf, which then says which way
   // its Stripe calls go (doorOn); a call with none (the broker's own consent check) says nothing.
-  async function toBroker(path: string, args: Record<string, unknown>, auth?: string | null): Promise<Response> {
-    const door = auth !== undefined && typeof args.account === "string" ? await doorOn(args.account, auth) : undefined;
+  async function toBroker(path: string, args: Record<string, unknown>, auth?: string | null, known?: Lookup): Promise<Response> {
+    let door: boolean | undefined;
+    if (known) {
+      if ("error" in known) throw known.error;
+      door = known.value;
+    } else door = auth !== undefined && typeof args.account === "string" ? await doorOn(args.account, auth) : undefined;
     const res = await fetcher(`${brokerAt}${path}`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tenant: origin, ...args, ...(door === undefined ? {} : { door }) }),
       signal: AbortSignal.timeout(20_000),
