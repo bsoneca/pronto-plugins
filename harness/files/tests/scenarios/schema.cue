@@ -138,7 +138,7 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 	}
 
 	// Safe to run on the deployed app: one actor at most, and nothing that writes what another person
-	// could see or that spends (no step `#barred` names), only GET requests. A flip (pronto-flags push)
+	// could see or that spends (no step `#barred` names), only GET requests (and a flag's evaluation, #OfrepEvaluation). A flip (pronto-flags push)
 	// runs, once the flag is on for everyone, only those that sign in as no one (PRONTO-284: a flip has
 	// no tester); those open no page (a page boots a guest, which the database keeps) and read only with
 	// anonymous `http` steps, as a crawler. One that signs in (`signIn`, with FLAGS_TESTER_CREDENTIAL's
@@ -149,7 +149,10 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 		_one: true & (len(actors) <= 1)
 		_barred: [for s in steps for k, _ in #barred if s[k] != _|_ {k}]
 		_barred: []
-		_writes: [for s in steps if s.http != _|_ if s.http.method != "GET" {s}]
+		// The one write-shaped call a production scenario may make is a flag's evaluation, read-only by what it is: an anonymous POST
+		// to /ofrep/v1/evaluate/flags/<name> with no body but the evaluation context, which reads a flag's value and changes nothing
+		// (#OfrepEvaluation). Any other non-GET step is a write.
+		_writes: [for s in steps if s.http != _|_ if s.http.method != "GET" if !(s.http.anon != _|_ && (s.http & #OfrepEvaluation) != _|_) {s}]
 		_writes: []
 		_signsIn: [for s in steps if s.signIn != _|_ {s}]
 		if len(_signsIn) == 0 {
@@ -159,6 +162,19 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 			_signed: []
 		}
 	}
+}
+
+// A flag's evaluation (OpenFeature's OFREP): asked as no one, of one flag by name (no query, no other path), with nothing sent
+// but the context it is evaluated in. What a production scenario reads a flag's value with: `expect: json: {value: true}` holds
+// a flip to the flag answering on.
+#OfrepEvaluation: {
+	method: "POST"
+	path:   =~"^/ofrep/v1/evaluate/flags/[A-Za-z0-9_-]+$"
+	anon:   true
+	body?: {context: {targetingKey?: string}}
+	expect: _
+	keep?:     _
+	keepText?: _
 }
 
 // The step kinds a production scenario never takes: they write or spend. An app adds its own.

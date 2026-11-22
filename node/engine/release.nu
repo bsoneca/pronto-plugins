@@ -256,8 +256,10 @@ export def door-probes [] {
 		{path: "/crud/v1.0%2Finvoke%2Fcaddy%2Fmethod%2Fhealth", as_is: false, strict: false}
 		{path: "/crud/x/../v1.0/invoke/caddy/method/health", as_is: true, strict: false}
 		{path: "/crud/%2e%2e/v1.0/metadata", as_is: true, strict: false}
-		{path: "/img/v1.0/metadata", as_is: false, strict: false, lenient: true}
-		{path: "/blobs/v1.0/metadata", as_is: false, strict: false, lenient: true}
+		{path: "/img/v1.0/metadata", as_is: false, strict: false, guard: true}
+		{path: "/img/v1.0-alpha1/metadata", as_is: false, strict: false, guard: true}
+		{path: "/blobs/v1.0/metadata", as_is: false, strict: false, guard: true}
+		{path: "/blobs/v1.0-alpha1/metadata", as_is: false, strict: false, guard: true}
 	]
 }
 
@@ -296,6 +298,10 @@ def run-door-probes [node: record, port: int]: nothing -> int {
 			# (a redirect to the clean path, or the file server): they only must not reach the sidecar or a service, which the 200 check above refuses.
 			if $probe.strict and ($status != "404" or ($body !~ "PGRST125")) {
 				error make {msg: $"the door's ($probe.path) answered ($status), not PostgREST's 404 \(PGRST125\): ($body | str substring 0..200)"}
+			}
+			# A Dapr API path under /img or /blobs is the door's own 404 (doorguard): never a proxied answer, whatever the app runs.
+			if ($probe.guard? | default false) and $status != "404" {
+				error make {msg: $"the door's ($probe.path) answered ($status), not the door's own 404: the doorguard block is missing from its Caddyfile"}
 			}
 			$asked = $asked + 1
 		}

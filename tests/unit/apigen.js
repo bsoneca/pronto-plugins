@@ -139,6 +139,63 @@ export async function db(dir) {
   return pg;
 }
 
+/** As `db`, but over an app whose migrations grant every table of public to its roles, and by
+ * default (what apps' 002_grants.sql does): the views come after, as in a release. */
+export async function dbBlanket(dir) {
+  const pg = new PGlite();
+  await pg.exec(TABLES + MACHINE);
+  await pg.exec(`CREATE ROLE service NOLOGIN;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user, service;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user, service;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO anon;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO anon;`);
+  const sql = await Deno.readTextFile(`${dir}/api/v1/api_v1.sql`);
+  await pg.exec(sql);
+  await pg.exec(sql);
+  return pg;
+}
+
+/** The generated SQL run over a database where `ddl` already made something named like a view of
+ * the API: the error it ends in, "<SQLSTATE>: <message>". */
+export async function clashed(dir, ddl) {
+  const pg = new PGlite();
+  await pg.exec(TABLES + MACHINE);
+  await pg.exec(ddl);
+  try {
+    await pg.exec(await Deno.readTextFile(`${dir}/api/v1/api_v1.sql`));
+  } catch (e) {
+    return `${e.code ?? '?'}: ${e.message}`;
+  }
+  return 'replayed';
+}
+
+/** The door as an app has it: the API's block routed into a Caddyfile that has a /crud handle
+ * before it, in front of a stand-in PostgREST. */
+export async function routedDoor(dir) {
+  const upstream = Deno.serve({ port: 0, hostname: '127.0.0.1', onListen() {} }, (req) => {
+    const h = (n) => req.headers.get(n);
+    return Response.json({ path: new URL(req.url).pathname, api_name: h('x-api-name'), api_event: h('x-api-event'), accept_profile: h('accept-profile') });
+  });
+  await Deno.mkdir(`${dir}/docker`, { recursive: true });
+  await Deno.writeTextFile(`${dir}/docker/Caddyfile`, '(app) {\n  handle /crud/* {\n    reverse_proxy {$PRONTO_UPSTREAM_CRUD}\n  }\n  # The auth service.\n  handle /auth/* {\n    respond "auth" 200\n  }\n}\n');
+  await route(dir);
+  const port = freePort();
+  const conf = await Deno.makeTempFile({ suffix: '.Caddyfile' });
+  await Deno.writeTextFile(conf, `{\n  admin off\n  auto_https off\n}\n(bounded-crud) {\n}\n${await Deno.readTextFile(`${dir}/docker/Caddyfile`)}\nhttp://127.0.0.1:${port} {\n  import app\n  handle {\n    respond "shell" 200\n  }\n}\n`);
+  const child = new Deno.Command(Deno.env.get('CADDY') ?? 'caddy', { args: ['run', '--config', conf, '--adapter', 'caddyfile'], env: { PRONTO_UPSTREAM_CRUD: `127.0.0.1:${upstream.addr.port}`, PRONTO_UPSTREAM_CRUD_X: '' }, stdout: 'null', stderr: 'null' }).spawn();
+  const url = `http://127.0.0.1:${port}`;
+  for (let i = 0; ; i++) {
+    try {
+      await (await fetch(`${url}/`)).body?.cancel();
+      break;
+    } catch {
+      if (i > 100) throw new Error('caddy did not start');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  return { url, stop: async () => { child.kill(); await child.status; await upstream.shutdown(); } };
+}
+
 /** pronto-flags' api_export turned on for the account `uid` (the fixture's stand-in of its
  * flag_on_strict); "on". */
 export async function flagOn(pg, uid) {

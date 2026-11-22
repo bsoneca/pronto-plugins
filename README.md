@@ -18,6 +18,7 @@ refuses an app that is not.
 - [ads](ads/README.md): rewarded ads a player chooses to watch.
 - [analytics](analytics/README.md): business numbers (users, paying users, games, funnels) and visits, read not alerted.
 - [api](api/README.md): pronto-api's spike: one Deno service serving a runtime descriptor set over gRPC, Connect and REST on one port, behind `api_export`.
+- [doorguard](doorguard/README.md): the door's Dapr guard (PRONTO-1307), a block in the app's docker/Caddyfile that answers 404 for Dapr API paths under every public prefix.
 - [android](android/README.md): a native Android host, no WebView.
 - [billing](billing/README.md): paid plans through a shared Stripe broker.
 - [errors](errors/README.md): what the pages throw, reported to a self-hosted GlitchTip (Sentry protocol): the node's server, the page's reporter, the door's route.
@@ -683,7 +684,8 @@ what every push does now; its reason is kept in the journal.
 
 What runs on production is held narrow. Only scenarios marked `production: true`
 run there, and the scenario schema allows one actor, no sign-up, no payment step
-(`pay`), no other player and no move, table or game, and only GET requests. The
+(`pay`), no other player and no move, table or game, and only GET requests (and an anonymous
+POST that evaluates a flag, `/ofrep/v1/evaluate/flags/<name>`, which reads a value and writes nothing). The
 runner refuses a scenario that isn't marked `production` against the host
 `flagsLive.url` names.
 

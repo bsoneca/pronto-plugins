@@ -13,6 +13,9 @@
 // The broker has no migration runner, so it creates its tables itself at start, idempotently (CREATE
 // TABLE IF NOT EXISTS, tried again if a replica starting at the same moment made a table first).
 
+/** What a claim came to: this caller's (with its token), another's still running, or finished for good. */
+export type Claim = { state: "claimed"; token: string } | { state: "busy" } | { state: "done" };
+
 export interface Store {
   /** Run `fn` while no other caller, in this replica or another, runs one under `key`: callers wait their turn.
    * In Postgres the lock holds a connection for as long as `fn` runs, so `fn` asks Stripe, never the store. */
@@ -27,8 +30,12 @@ export interface Store {
   seen(kind: string, id: string): Promise<boolean>;
   /** Remember (kind, id) for `ttlMs`. */
   remember(kind: string, id: string, ttlMs: number): Promise<void>;
-  /** Forget (kind, id) now. */
-  forget(kind: string, id: string): Promise<void>;
+  /** Take (kind, id) for `leaseMs`, for one caller of all the replicas: claimed (with the token of this claim),
+   * busy (another holds it, its lease not yet ended) or done (remembered for longer than a lease). A lease
+   * that ran out is claimable again. `remember` with a ttl above `leaseMs` marks it done. */
+  claim(kind: string, id: string, leaseMs: number): Promise<Claim>;
+  /** Forget (kind, id) now; with `token`, only the claim that token names (a newer claim, or a remember, stays). */
+  forget(kind: string, id: string, token?: string): Promise<void>;
 }
 
 /** At most `per` calls a `windowMs` for each key, the oldest keys forgotten past `keys`. */
@@ -52,6 +59,8 @@ export class MemoryStore implements Store {
   #counters = new Map<string, number>();
   #windows = new Map<string, Window>();
   #seen = new Map<string, number>();
+  #claims = new Map<string, string>();
+  #claimed = 0;
   constructor(readonly now: () => number = Date.now) {}
 
   async locked<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -90,10 +99,23 @@ export class MemoryStore implements Store {
   remember(kind: string, id: string, ttlMs: number): Promise<void> {
     for (const [k, until] of this.#seen) if (until <= this.now()) this.#seen.delete(k);
     this.#seen.set(`${kind}\u0000${id}`, this.now() + ttlMs);
+    this.#claims.delete(`${kind}\u0000${id}`);
     return Promise.resolve();
   }
-  forget(kind: string, id: string): Promise<void> {
-    this.#seen.delete(`${kind}\u0000${id}`);
+  claim(kind: string, id: string, leaseMs: number): Promise<Claim> {
+    const key = `${kind}\u0000${id}`, now = this.now(), until = this.#seen.get(key);
+    if (until !== undefined && until > now) return Promise.resolve({ state: until > now + leaseMs ? "done" : "busy" } as Claim);
+    const token = `${now + leaseMs}#${++this.#claimed}`;
+    this.#seen.set(key, now + leaseMs);
+    this.#claims.set(key, token);
+    return Promise.resolve({ state: "claimed", token });
+  }
+  forget(kind: string, id: string, token?: string): Promise<void> {
+    const key = `${kind}\u0000${id}`;
+    if (token === undefined || this.#claims.get(key) === token) {
+      this.#seen.delete(key);
+      this.#claims.delete(key);
+    }
     return Promise.resolve();
   }
 }
@@ -137,7 +159,14 @@ export const SQL = {
   seen: `SELECT 1 AS seen FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
   remember: `INSERT INTO billing_seen (kind, id, expires) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000))
     ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires`,
-  forget: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2`,
+  // One statement takes a row nobody holds: absent, or its lease (or memory) ended. The token is the row's
+  // expires as text, microseconds and all: a client's Date would round it to milliseconds.
+  claim: `INSERT INTO billing_seen (kind, id, expires) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000))
+    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires WHERE billing_seen.expires <= now()
+    RETURNING expires::text AS token`,
+  claimed: `SELECT expires > now() + make_interval(secs => $3::double precision / 1000) AS done FROM billing_seen
+    WHERE kind = $1 AND id = $2 AND expires > now()`,
+  forget: `DELETE FROM billing_seen WHERE kind = $1 AND id = $2 AND ($3::text IS NULL OR expires::text = $3::text)`,
   sweepSeen: `DELETE FROM billing_seen WHERE ctid IN (SELECT ctid FROM billing_seen WHERE expires <= now() LIMIT 100)`,
 };
 
@@ -197,8 +226,18 @@ export class PostgresStore implements Store {
     await this.sql.unsafe(SQL.sweepSeen);
     await this.sql.unsafe(SQL.remember, [kind, id, ttlMs]);
   }
-  async forget(kind: string, id: string): Promise<void> {
-    await this.sql.unsafe(SQL.forget, [kind, id]);
+  async claim(kind: string, id: string, leaseMs: number): Promise<Claim> {
+    // A row deleted between the two statements leaves neither: the claim is tried again.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const [won] = await this.sql.unsafe(SQL.claim, [kind, id, leaseMs]);
+      if (won) return { state: "claimed", token: String(won.token) };
+      const [held] = await this.sql.unsafe(SQL.claimed, [kind, id, leaseMs]);
+      if (held) return { state: held.done === true ? "done" : "busy" } as Claim;
+    }
+    return { state: "busy" };
+  }
+  async forget(kind: string, id: string, token?: string): Promise<void> {
+    await this.sql.unsafe(SQL.forget, [kind, id, token ?? null]);
   }
 }
 

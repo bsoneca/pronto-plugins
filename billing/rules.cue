@@ -7,10 +7,13 @@ package billing
 rules: {
 	// ownerOf the author's payout secret: its hash, base64url.
 	owner: "^[A-Za-z0-9_-]{43}$"
-	// A plan's id, its name's length, and how often it charges.
+	// A plan's id, its name (at most nameMax code points, holding a character nameText matches: one
+	// that is not tab, newline, form feed, carriage return or space; spelled out because RE2's \s is
+	// ASCII-only while JS's \s and trim() are Unicode), and how often it charges.
 	plan: {
 		id:       "^[a-z][a-z0-9-]{0,31}$"
 		nameMax:  80
+		nameText: "[^\\t\\n\\f\\r ]"
 		interval: ["month", "year"]
 	}
 	// The currencies a plan may be priced in, as Stripe names them, and a price in minor units.
@@ -25,7 +28,7 @@ rules: {
 
 rules: {
 	owner: string
-	plan: {id: string, nameMax: int & >0, interval: [...string]}
+	plan: {id: string, nameMax: int & >0, nameText: string, interval: [...string]}
 	currencies: [...=~"^[a-z]{3}$"]
 	price: {min: int & >0, max: int & >price.min}
 	trial: {monthsMin: int & >=1, monthsMax: int & >=trial.monthsMin, remindDays: int & >=1}

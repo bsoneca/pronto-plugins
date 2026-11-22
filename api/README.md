@@ -51,8 +51,8 @@ It writes:
 
 | File | What |
 | --- | --- |
-| `api/v1/api_v1.sql` | schema `api_v1`: per resource a `security_invoker` view (`name`, the key as `id` unless a field names it, the public fields, the stamps, `etag`), `SELECT` and the exported writes granted to `app_user` column by column, nothing to `PUBLIC` or `anon`. Replayed by every release; `CREATE OR REPLACE VIEW` refuses a dropped, renamed or retyped column |
-| `api_door.cue` | `apiDoor`: the routes, the Caddyfile block (`handle /api/v1/*`) that rewrites each onto its view, and the headers the `/crud` block strips (`Accept-Profile`, `Content-Profile`) |
+| `api/v1/api_v1.sql` | schema `api_v1`: per resource a `security_invoker` view (`name`, the key as `id` unless a field names it, the public fields, the stamps, `etag`), `SELECT` and the exported writes granted to `app_user` column by column, nothing to `PUBLIC` or `anon`. Every view is also written to `public` as `api_v1_<view>` (PostgREST on upstream serves `public` only; PRONTO-740). Replayed by every release; `CREATE OR REPLACE VIEW` refuses a dropped, renamed or retyped column |
+| `api_door.cue` | `apiDoor`: the routes, the Caddyfile block (`handle /api/v1/*`) that rewrites each onto its view's twin in `public` (`api_v1_<view>`, no profile header), and the headers the `/crud` block strips (`Accept-Profile`, `Content-Profile`) |
 | `api/v1/openapi.json` | OpenAPI 3.1 for the routes, PostgREST's error body |
 | `api/v1/contract.json` | every resource, field, type and route, sorted |
 
