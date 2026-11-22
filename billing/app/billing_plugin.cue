@@ -21,7 +21,7 @@ import (
 	// ownerOf the author's secret (pronto-billing's billing/owner.ts new).
 	owner: =~_billingRules.owner
 	plans: [=~_billingRules.plan.id]: {
-		name:     strings.MinRunes(1) & strings.MaxRunes(_billingRules.plan.nameMax)
+		name:     =~_billingRules.plan.nameText & strings.MaxRunes(_billingRules.plan.nameMax)
 		interval: *_billingRules.plan.interval[0] | or(_billingRules.plan.interval)
 		// In minor units, the first the default: {usd: 499, brl: 1990}.
 		prices: [or(_billingRules.currencies)]: int & >=_billingRules.price.min & <=_billingRules.price.max

@@ -112,6 +112,9 @@ export interface Published {
   trial?: Trial;
 }
 
+/** The blank a plan name is trimmed of: what RULES.plan.nameText does not match, at either end. */
+const NAME_EDGES = new RegExp(`^${RULES.plan.nameText.replace("[^", "[")}+|${RULES.plan.nameText.replace("[^", "[")}+$`, "g");
+
 /** The tenant's published document, or why it is refused. */
 export function parsePublished(doc: unknown): { ok: true; published: Published } | { ok: false; error: string } {
   if (typeof doc !== "object" || doc === null) return { ok: false, error: "not an object" };
@@ -122,7 +125,7 @@ export function parsePublished(doc: unknown): { ok: true; published: Published }
   for (const [id, raw] of Object.entries(d.plans as Record<string, unknown>)) {
     if (!new RegExp(RULES.plan.id).test(id)) return { ok: false, error: `plan ${id}: a lowercase name` };
     const p = raw as Record<string, unknown>;
-    if (typeof p?.name !== "string" || p.name.trim() === "" || p.name.length > RULES.plan.nameMax) return { ok: false, error: `plan ${id}: a name` };
+    if (typeof p?.name !== "string" || !new RegExp(RULES.plan.nameText).test(p.name) || [...p.name].length > RULES.plan.nameMax) return { ok: false, error: `plan ${id}: a name` };
     if (!(RULES.plan.interval as readonly unknown[]).includes(p.interval)) return { ok: false, error: `plan ${id}: interval ${RULES.plan.interval.join(" or ")}` };
     const prices: Partial<Record<Currency, number>> = {};
     for (const [c, amount] of Object.entries((p.prices ?? {}) as Record<string, unknown>)) {
@@ -131,7 +134,7 @@ export function parsePublished(doc: unknown): { ok: true; published: Published }
       prices[c as Currency] = amount as number;
     }
     if (Object.keys(prices).length === 0) return { ok: false, error: `plan ${id}: a price` };
-    plans[id] = { name: p.name.trim(), interval: p.interval as Plan["interval"], prices };
+    plans[id] = { name: p.name.replace(NAME_EDGES, ""), interval: p.interval as Plan["interval"], prices };
   }
   if (Object.keys(plans).length === 0) return { ok: false, error: "no plans" };
   if (d.trial === undefined) return { ok: true, published: { owner: d.owner, plans } };

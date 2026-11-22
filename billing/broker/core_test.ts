@@ -25,6 +25,17 @@ Deno.test("a manage token is one account's of one tenant", async () => {
   assertEquals((await manageTokenOf(m, A, acct)) === (await manageTokenOf(other, A, acct)), false, "another broker's");
 });
 
+Deno.test("a plan name is counted in code points and must hold a non-blank character", () => {
+  const O = "o".repeat(43);
+  const named = (name: string) => parsePublished({ owner: O, plans: { a: { name, interval: "month", prices: { usd: 499 } } } });
+  assertEquals(named("𝐀".repeat(80)).ok, true);
+  assertEquals(named("𝐀".repeat(81)).ok, false);
+  assertEquals(named("   ").ok, false);
+  assertEquals(named("\u00a0").ok, true);
+  const trimmed = named("  Plus\n");
+  assertEquals(trimmed.ok && trimmed.published.plans.a.name, "Plus");
+});
+
 Deno.test("a published document names its plans and their prices", () => {
   const O = "o".repeat(43);
   const ok = parsePublished({ owner: O, plans: { analysis: { name: "Analysis", interval: "month", prices: { usd: 499, brl: 1990 } } } });
