@@ -1035,7 +1035,9 @@ def record-work [at: record, app: path, version: string, cases: string, want: li
 	let body = ($"Writes what production serves into flags_spec.cue, so the spec says it. No deploy, no change in behaviour: live already has these values.\n\n" + ($diffs | each {|d| $"- ($d.flag): ($d.spec) to ($d.live)" } | str join "\n") + $"\n\nRecords: ($diffs | each {|d| {($d.flag): $d.live} } | into record | to json -r)\n\nJournal: version ($version), flags ($diffs | get flag | str join '+'), values ($diffs | get live | each {|v| $v | to json -r } | str join ' '), cases ($cases).\n")
 	git-must (git-in $scratch checkout -q -B $branch) "git checkout" | ignore
 	git-must (git-in $scratch add -A -- (if $prefix == "" { "." } else { $prefix })) "git add" | ignore
-	git-must (git-in $scratch commit -q -m $title -m $body) "git commit" | ignore
+	# A machine with no git identity (a CI runner, a fresh box) still commits: the tool's own, only when none is set.
+	let ident = if ((git-in $scratch config user.name).stdout | str trim) == "" { ["-c", "user.name=pronto-flags", "-c", "user.email=pronto-flags@users.noreply.github.com"] } else { [] }
+	git-must (git-in $scratch ...$ident commit -q -m $title -m $body) "git commit" | ignore
 	# The lease is the branch as it was when this attempt began (`ctx`): a record that landed since fails the push with
 	# "stale info", and record-back builds once more, over the fresh pull request.
 	git-must (git-in $scratch push -q origin $"HEAD:refs/heads/($branch)" $"--force-with-lease=refs/heads/($branch):($ctx.remote)") "git push" | ignore
