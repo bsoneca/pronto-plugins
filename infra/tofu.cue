@@ -616,6 +616,7 @@ import (
 			}
 			_imports: "google_cloud_scheduler_job.\(k)": {id: "projects/\(P.id)/locations/\(r.location)/jobs/\(nm)", project: P.id}
 		}
+
 		// A bucket is held with force_destroy on and every other setting left as it is, so the drop's destroy empties it.
 		for nm, r in P.retire.buckets if r.phase == "hold" {
 			let k = (#name & {in: nm}).out
