@@ -364,6 +364,22 @@ def with-spec-metadata [live: record, spec: record]: nothing -> record {
 	if $m == null { $live | reject -o metadata } else { $live | upsert metadata $m }
 }
 
+# An older version's flags text with the metadata the spec says now, flag by flag (a flag the spec does not name keeps its own): what a
+# restore or a rollback writes, so that the door's flag-set selector never meets entries a restored document lacks the mark on (PRONTO-1518).
+# Only the metadata is the spec's: values, targeting and every other field are the old version's.
+export def with-current-metadata [old: record, spec: record]: nothing -> record {
+	let fl = ($old.flags? | default {})
+	let now = ($spec.flags? | default {})
+	$old | upsert flags ($fl | columns | reduce --fold $fl {|f, acc|
+		if $f in ($now | columns) { $acc | upsert $f (with-spec-metadata ($fl | get $f) ($now | get $f)) } else { $acc }
+	})
+}
+
+# An older version's text, so rewritten, for the app whose spec is `app`.
+def current-metadata-text [text: string, app: path]: nothing -> string {
+	with-current-metadata ($text | from json) (cue-of $app flagd.document) | to json
+}
+
 # The entry of a flag with its default set to `value`: the spec's own, every other field as it is.
 def set-default [def: record, value: any]: nothing -> record {
 	$def | upsert variants ($def.variants? | default {} | upsert default $value) | upsert defaultVariant "default"
@@ -699,7 +715,7 @@ def vacuous [out: string, flag: string]: nothing -> string {
 
 # The version a push read, written again as the newest after a failed live stage.
 def restore [at: record, app: path, to: string, now: string, names: string, why: string] {
-	let again = (commit $at $app (store-version $at $to) {stage: rolled-back, flag: $names, cases: failed, note: $why} $now)
+	let again = (commit $at $app (current-metadata-text (store-version $at $to) $app) {stage: rolled-back, flag: $names, cases: failed, note: $why} $now)
 	print -e $"flags: ($at.url) is version ($to)'s flags again, as version ($again)"
 }
 
@@ -876,7 +892,7 @@ export def rollback [app: path, version?: string, --expect: string] {
 	if $to == null or ($all | where version == $to | is-empty) { error make {msg: $"no version ($to) of ($at.url) to roll back to: `pronto-flags history` lists them"} }
 	let before = if $live == "" { {flags: {}} } else { store-version $at $live | from json }
 	let target = (store-version $at $to | from json)
-	let again = (commit $at $app (store-version $at $to) {stage: rollback, note: $"rolled back from ($live) to ($to)"} $live --derive-flag)
+	let again = (commit $at $app (current-metadata-text (store-version $at $to) $app) {stage: rollback, note: $"rolled back from ($live) to ($to)"} $live --derive-flag)
 	print $"flags: ($at.url) is ($to)'s flags again, as version ($again)"
 	# The flags a rollback turned off are rolled back for the board: their Done issues are Live again.
 	tell-board $at $app (changes-between $before $target | where {|c| $c.to == false })
