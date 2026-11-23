@@ -22,9 +22,10 @@ import { parseHTML } from "npm:linkedom@0.18.4";
 import { localRoots } from "./trust.ts";
 
 // `flag` and `unless` say where a step runs (skips); they are not what it does. `unlock` says an `open` meets the
-// biometric prompt of an app that asks for one (android.json's "unlock"): the sensor is touched once it is shown.
+// biometric prompt of an app that asks for one (android.json's "unlock"): the sensor is touched once it is shown, or,
+// for "cancel", the prompt is dismissed and the terminal is left shut, and for "touch" the sensor is touched and nothing waits for the terminal.
 const META = ["by", "timeout", "why", "fresh", "flag", "unless", "unlock"];
-export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response", "undisclosed", "fills", "autofillService", "launch", "native", "finger"];
+export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response", "undisclosed", "fills", "autofillService", "launch", "native", "finger", "log"];
 
 export type Probed = { id: string | null; text: string; value?: string; attrs: Record<string, string>; hidden: boolean; shown?: boolean };
 export type Step = Record<string, unknown>;
@@ -318,6 +319,19 @@ async function finger(seconds: number) {
   await adb("emu", "finger", "touch", "1");
 }
 
+/** What the app's own log lines (the `pronto` tag) hold against a `log` step: a string some line has, or `{absent}` no line has. Null when it holds. */
+export function logHolds(arg: unknown, log: string): string | null {
+  if (typeof arg === "string") return log.includes(arg) ? null : `no log line has ${JSON.stringify(arg)}`;
+  const absent = (arg as { absent?: unknown } | null)?.absent;
+  if (typeof absent === "string") return log.includes(absent) ? `a log line has ${JSON.stringify(absent)}` : null;
+  throw new Fail("a log step is a string a line has, or {absent: a string no line has}");
+}
+
+/** The app's log lines so far (the `pronto` tag, cleared at the scenario's start). */
+async function appLog(): Promise<string> {
+  return await run(adbPath(), ["logcat", "-d", "-s", "pronto:*"], { check: false });
+}
+
 /** A view of any app, found by `uiautomator dump` once it is on the screen. */
 function native(what: string, seconds: number, arg: { id?: string; text?: string }): Promise<Native> {
   return until(what, seconds, async () => {
@@ -450,7 +464,7 @@ class Phone {
     return out;
   }
 
-  async start(path: string, actor: string, unlock = false) {
+  async start(path: string, actor: string, unlock: boolean | "cancel" | "touch" = false, boot = 30) {
     // The device's ports to this machine are tied to adb's connection, which a busy emulator drops
     // and remakes: they are made again before every start, so the app always reaches the stack.
     await adb("forward", "tcp:8765", "tcp:8765");
@@ -459,8 +473,19 @@ class Phone {
     this.page = null;
     await sh(`am start -S -n ${this.id}/.MainActivity --es base ${quote(this.base)} --es path ${quote(seeded(path, `${this.scenario}/${actor}`))} --es actor ${quote(actor)} --es browser standin`);
     // The prompt of an app that asks for its owner (Unlock.kt) shows before the driver answers: the sensor is touched once it is up.
+    if (unlock === "cancel") {
+      // The person dismisses the prompt: the terminal never starts, so nothing waits for it.
+      await native("a biometric prompt", 30, { id: PROMPT });
+      await sh("input keyevent KEYCODE_BACK");
+      return;
+    }
+    if (unlock === "touch") {
+      // The sensor is touched and the outcome is the app's log line: nothing waits for the terminal, which is not what is held.
+      await finger(30);
+      return;
+    }
     if (unlock) await finger(30);
-    await until(`${actor}'s terminal at ${path}`, 30, async () => {
+    await until(`${actor}'s terminal at ${path}`, boot, async () => {
       const ready = await this.find("html[data-terminal-ready]", false);
       return [ready && ready.length > 0 ? ready : null, ready ? "the terminal has not booted" : "the driver does not answer"];
     });
@@ -610,7 +635,7 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
         const path = sub(arg as string);
         opened[actor] = path;
         current = actor;
-        await phone.start(path, actor, raw.unlock === true);
+        await phone.start(path, actor, raw.unlock === "cancel" || raw.unlock === "touch" ? raw.unlock : raw.unlock === true, raw.timeout === undefined ? 30 : timeout);
         return;
       }
       if (actor !== current) {
@@ -680,6 +705,13 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
           break;
         case "launch": await sh(`am start -W -S -n ${quote(sub(arg))}`); break;
         case "finger": await finger(timeout); break;
+        case "log": {
+          // A line is waited for (the app says it a moment after the prompt); an absence is held after a short wait, so a late line is not missed.
+          const want = typeof arg === "string" ? sub(arg) : { absent: sub(String(arg?.absent ?? "")) };
+          if (typeof want === "string") await until(`the app's log: ${want}`, timeout, async () => { const why = logHolds(want, await appLog()); return [why === null ? true : null, why ?? ""]; });
+          else { await sleep(3000 * slow()); const why = logHolds(want, await appLog()); if (why !== null) throw new Fail(why); }
+          break;
+        }
         case "native": {
           // A view of another app (uiautomator's dump): tapped at its middle, or its text held, as asked.
           const want = { id: arg.id === undefined ? undefined : sub(arg.id), text: arg.text === undefined ? undefined : sub(arg.text) };

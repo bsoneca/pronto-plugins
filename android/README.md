@@ -108,7 +108,7 @@ Or, in the SOPS form an app has used since PRONTO-155, the key is a Secret in a 
 
 With `release`, `build@android-release` runs it: `PRONTO_ANDROID_RELEASE_BASE` (the app's released address), `PRONTO_ANDROID_VERSION_CODE` and `PRONTO_ANDROID_VERSION_NAME` are required, and the rule fails naming any that is missing. It is heavy: run it under `tests/slot.ts`.
 
-Scenario steps beyond the DOM's: `autofillService` (turns a service on, `<package>/<service>`), `launch` (another app's activity), `native` (a view of any app, found with `uiautomator dump` by `id` or `text`, then tapped with `tap` or held to `is`/`has`) and `finger` (the emulator's sensor, once a biometric prompt is up; an `open` with `unlock: true` meets its app's prompt the same way), `signUp`, `pay` (the stand-in checkout), `address`, `response` (a request the page made and what it answered), and a step's `flag`/`unless`.
+Scenario steps beyond the DOM's: `autofillService` (turns a service on, `<package>/<service>`), `launch` (another app's activity), `native` (a view of any app, found with `uiautomator dump` by `id` or `text`, then tapped with `tap` or held to `is`/`has`) and `finger` (the emulator's sensor, once a biometric prompt is up; an `open` with `unlock: true` meets its app's prompt the same way, `unlock: "touch"` touches the sensor without waiting for the terminal, and `unlock: "cancel"` dismisses the prompt and leaves the terminal shut), `log` (the app's own log lines: a string some line has, or `{absent: ...}`, as `PRONTO UNLOCK opened` and `PRONTO UNLOCK canceled` say the prompt's outcome), `signUp`, `pay` (the stand-in checkout), `address`, `response` (a request the page made and what it answered), and a step's `flag`/`unless`.
 
 ## Use
 
