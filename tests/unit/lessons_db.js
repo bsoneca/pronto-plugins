@@ -377,7 +377,7 @@ export async function pageHolds() {
   const text = JSON.stringify(courses);
   const moves = ['a1', 'b1', 'a2', 'b2', 'a3', "b'1$"];
   const plies = {};
-  for (const p of courses.toy.parts) for (const c of p.chapters) plies[c.id] = { plies: c.plies, hasMoves: 'moves' in c };
+  for (const p of courses.toy.parts) for (const c of p.chapters) plies[c.id] = { plies: c.plies, hasMoves: 'moves' in c, hasClaim: 'claim' in c };
   return { leaked: moves.filter((m) => text.includes(JSON.stringify(m))), plies };
 }
 

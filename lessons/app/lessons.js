@@ -129,14 +129,21 @@ export function createLesson({ course, part, chapter, adapter, server, state }) 
       } finally {
         inflight = false;
       }
+      // A reconcile that landed while the move was out moved the lesson on: the server's row is the one to show.
+      if (s.step !== ply) {
+        adopt(row);
+        return { kind: "stale" };
+      }
       const played = row.played ?? [];
-      if (row.step > ply && played[ply] === token) {
-        const replies = played.slice(ply + 1, row.step);
-        board = adapter.apply(board, token);
-        for (const reply of replies) board = adapter.apply(board, reply);
+      // Right: the server took the token at this ply and went on to the player's next ply (or the end).
+      let next = ply + 1;
+      while (next < chapter.plies && next % 2 !== part.player) next++;
+      if (row.step === next && played[ply] === token) {
+        board = adapter.start();
+        for (const t of played) board = adapter.apply(board, t);
         s = { step: row.step, wrongs: row.wrongs, step_wrongs: row.step_wrongs, pool_said: row.pool_said, done: row.over === true };
         adapter.render(board);
-        return { kind: "right", say: chapter.steps?.[ply]?.say ?? null, replies, done: s.done };
+        return { kind: "right", say: chapter.steps?.[ply]?.say ?? null, replies: played.slice(ply + 1), done: s.done };
       }
       if (row.step !== ply) {
         adopt(row);

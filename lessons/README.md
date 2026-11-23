@@ -139,7 +139,10 @@ steps or counters nobody played) and decide what to do with them.
 2. Supplies the content: its courses in `lessons_spec.cue` (`lessons: courses: <id>: {...}`, held to `#Course`, each naming its flag), and
    `./saytw generate`.
 3. Writes the board adapter for its page, `{start, legal, token, apply, render}` (the contract above), and calls
-   `createLesson({course, part, chapter, adapter, server})` with `courses` from `lessons_spec.js`.
+   `createLesson({course, part, chapter, adapter, server, state})` with `courses` from `lessons_spec.js`, `state` the row
+   `lesson_start` returned and `server.move(step, token)` a promise of the row `lesson_move` returns. The page holds no move
+   (no `moves`, no `claim`), but the lines of the message catalogues ship whole: a line must not name a move at or after its own
+   ply (cue vet does not check the words).
 4. Defines the three SQL hooks in a raw migration of its own, named after the plugin's two, in schema `lessons_app`:
    `price(who uuid) returns int`, `pay(who uuid, entry text, amount int) returns void`, `reward(who uuid, entry text, amount
    int) returns int`; each `DROP FUNCTION IF EXISTS` then `CREATE FUNCTION`, then `REVOKE ALL ... FROM PUBLIC` again (a CREATE gives

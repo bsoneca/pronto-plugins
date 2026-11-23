@@ -140,6 +140,19 @@ export async function inflight() {
   return { during, first: answered.kind, replies: answered.replies, after: { busy: l.busy(), state: l.state(), board: l.board() } };
 }
 
+/** A reconcile that lands while a move is out (a row of another tab at step 4): the move's answer is shown as the server's row, not applied on the reconciled board. */
+export async function reconcileDuring() {
+  let release;
+  const gate = { promise: new Promise((r) => (release = r)) };
+  const { l } = lesson(8, undefined, 0, undefined, undefined, undefined, gate);
+  const first = l.play("a1");
+  l.reconcile({ step: 4, wrongs: 0, step_wrongs: 0, pool_said: 0, over: false, played: SCRIPT.slice(0, 4) });
+  const during = { state: l.state(), board: l.board() };
+  release();
+  const answered = await first;
+  return { during, kind: answered.kind, state: l.state(), board: l.board() };
+}
+
 /** A failed call: the error's text, and that the lesson is as it was and not busy. */
 export async function failed() {
   const c = course(8);

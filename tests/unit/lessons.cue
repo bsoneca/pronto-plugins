@@ -117,6 +117,10 @@ cases: {
 	"a move in flight makes the next one busy, and the page shows the server's answer when it comes": {suite: "lessons", steps: [
 		{call: "toy.inflight", holds: {during: {busy: true, second: "busy", board: ""}, first: "right", replies: ["b1"], after: {busy: false, state: {step: 2}, board: "a1 b1"}}, why: "the board waits for the server: nothing is drawn before it says right"},
 	]}
+	"a move the server took after another tab had gone further is stale, and a reconcile during a move leaves the answer to show the server's row": {suite: "lessons", steps: [
+		{call: "toy.stale", args: [[[0, "a1"], [2, "a2"]], "a1"], holds: {kind: "stale", state: {step: 4}, board: "a1 b1 a2 b2"}, why: "the token is the one played at ply 0, but the server is two moves on: no reply is drawn"},
+		{call: "toy.reconcileDuring", holds: {during: {state: {step: 4}, board: "a1 b1 a2 b2"}, kind: "stale", state: {step: 2}, board: "a1 b1"}},
+	]}
 	"a call that fails leaves the lesson as it was, and it is not left busy": {suite: "lessons", steps: [
 		{call: "toy.failed", holds: {error: "offline", busy: false, same: true}},
 	]}
@@ -241,7 +245,7 @@ cases: {
 	]])
 	}
 	"the emitted page holds no move of the script, only each chapter's plies": {suite: "lessons", steps: [
-		{call: "lessonsdb.pageHolds", expect: {leaked: [], plies: {one: {plies: 5, hasMoves: false}, one_b: {plies: 3, hasMoves: false}, two: {plies: 4, hasMoves: false}}}},
+		{call: "lessonsdb.pageHolds", expect: {leaked: [], plies: {one: {plies: 5, hasMoves: false, hasClaim: false}, one_b: {plies: 3, hasMoves: false, hasClaim: false}, two: {plies: 4, hasMoves: false, hasClaim: false}}}},
 	]}
 	"a wrong move counts, the page's pool counter advances only past the ply's own lines, and a right move starts the step again": {suite: "lessons", steps: list.Concat([_lsDb, [
 		{call: "lessonsdb.call", args: ["$pg", "FREE", "start", ["toy", "one"]]},

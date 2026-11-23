@@ -193,7 +193,6 @@ _lessonsPage: {for cid, c in lessons.courses {(cid): {
 			// How many plies the script has, never the moves: the database judges, and tells the page the plies played.
 			plies: len(ch.moves)
 			shown: ch.shown
-			claim: ch.claim
 			intro: "lesson_\(cid)_ch_\(ch.id)_intro"
 			outro: "lesson_\(cid)_ch_\(ch.id)_outro"
 			steps: {for k, s in ch.steps {(k): {
