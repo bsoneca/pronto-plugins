@@ -22,7 +22,7 @@ _creds: "{|| {GOOGLE_OAUTH_ACCESS_TOKEN: (gcloud-token)}}"
 // A folder's own refusal of a plan (PRONTO-696): when the folder holds an executable-by-sh `infra-check`, it runs, under the
 // folder's tools, after each plan is read and before it is kept (verify@infra) and again before it is applied (release@infra); a
 // non-zero exit refuses the plan and its output is the reason. A folder without one is as it was.
-_check: "{|rc| if ('infra-check' | path exists) { let r = (run-mise exec -- sh infra-check | complete); if $r.exit_code != 0 { error make {msg: $'infra-check refused the plan: ($r.stdout) ($r.stderr)'} } } }"
+_check: "{|rc| if ('infra-check' | path exists) { let f = (mktemp); $rc | to json | save -f $f; let r = (with-env {INFRA_PLAN_CHANGES: $f} { run-mise exec -- sh infra-check | complete }); rm -f $f; if $r.exit_code != 0 { error make {msg: $'infra-check refused the plan: ($r.stdout) ($r.stderr)'} } } }"
 
 say: {
 	setup: rulemap: tofu: {
