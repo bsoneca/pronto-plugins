@@ -115,6 +115,7 @@ accountKept:         _s.google_service_account.example_project_123_my_app_run.li
 bucketKept:          _tofu.resource.google_storage_bucket.my_app_assets.lifecycle.prevent_destroy & true
 secretKept:          _tofu.resource.google_secret_manager_secret.example_project_456_my_app_token.lifecycle.prevent_destroy & true
 verbsRefuseDeletes:  strings.Contains(_host.files[".say.cue"].text, "--spare") & strings.Contains(_host.files[".say.cue"].text, "ABANDON") & true
+verbsRunTheFoldersCheck: strings.Contains(_host.files[".say.cue"].text, "--check") & strings.Contains(_host.files[".say.cue"].text, "infra-check") & true
 verbsKeepOtherPlans: strings.Contains(_host.files[".say.cue"].text, "rm -f tofu/infra.tfplan") & false
 
 // A grant that is new is made, not imported; one that is there is imported.
