@@ -1,1 +1,1 @@
-{"unlock": "biometric", "autofill": true, "scenarios": ["scenarios/autofill.cue"]}
+{"unlock": "biometric", "autofill": true, "scenarios": ["scenarios/autofill.cue", "scenarios/unlock.cue"]}
