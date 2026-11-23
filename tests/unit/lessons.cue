@@ -453,7 +453,7 @@ cases: {
 
 // The installer (lessons/install.ts, bin/pronto-lessons) on a temporary app (tests/unit/lessons_install.js): an app with
 // pronto-flags, raw migrations 001, 005 and 799 in its CUE (three digits) and pgroll names 16 and 41 (two).
-_lsRaw: ["001_roles.sql", "005_create_tables.sql", "799_blob_claims.sql"]
+_lsRaw: ["001_roles.sql", "005_create_tables.sql", "790_blob_claims.sql"]
 _lsApp: [{call: "lessonsinstall.app", args: [{raw: _lsRaw, pgroll: ["16_billing", "41_attribution"], list: false}]}, {keep: "dir"}]
 _lsInstalled: [
 	{call: "lessonsinstall.install", args: ["$dir"]},
@@ -467,7 +467,7 @@ _lsDone: {call: "lessonsinstall.remove", args: ["$dir"]}
 cases: {
 	"the installer writes the plugin's files, the functions as a source of the app's and not in pronto's migrations": {suite: "lessons", steps: list.Concat([_lsApp, _lsInstalled, [
 		{call: "lessonsinstall.paths", args: ["$snap"], expect: [
-			"billing_spec.cue", "flags_plugin.cue", "lessons/lessons.js", "lessons/lessons.nu", "lessons/lessons.sql", "lessons/lessons_spec.js",
+			"billing_spec.cue", "flags_plugin.cue", "lessons/lessons.js", "lessons/lessons.nu", "lessons/lessons.sql", "lessons/lessons_spec.js", "lessons/lessons_spec.sql",
 			"lessons_plugin.cue", "lessons_schema.cue", "lessons_spec.cue", "program.cue", "pronto/lessons.cue", "spec/raw.cue",
 		]},
 		{call: "lessonsinstall.has", args: ["$snap", "lessons_plugin.cue", "package shop\n"], expect: true, why: "the templates in the program's package"},
@@ -482,11 +482,59 @@ cases: {
 	]])
 	}
 	"the plugin lists both raw migrations, after the app's own, and the pgroll name follows the app's pgroll names at their own width": {suite: "lessons", steps: list.Concat([_lsApp, _lsInstalled, [
-		{call: "lessonsinstall.names", args: ["$snap"], expect: {spec: "800_lessons_spec.sql", fns: "801_lessons.sql", pgroll: "42_lessons"}, why: "raw 799 at three digits, pgroll 41 at two: each sequence its own"},
+		{call: "lessonsinstall.names", args: ["$snap"], expect: {spec: "791_lessons_spec.sql", fns: "792_lessons.sql", pgroll: "42_lessons"}, why: "raw 790 at three digits, pgroll 41 at two: each sequence its own"},
 		{call: "lessonsinstall.has", args: ["$snap", "lessons_plugin.cue", "{name: _lessonsRawNames.spec, src: \"lessons/lessons_spec.sql\"}"], expect: true},
 		{call: "lessonsinstall.has", args: ["$snap", "lessons_plugin.cue", "{name: _lessonsRawNames.fns, src: \"lessons/lessons.sql\"}"], expect: true},
 		{call: "lessonsinstall.has", args: ["$snap", "lessons_plugin.cue", "\ncode: state: rawMigrations: _lessonsRawMigrations\n"], expect: true, why: "an app that lists none gets the list"},
 		{call: "lessonsinstall.has", args: ["$snap", "lessons_spec.cue", "_lessonsMigration: \"42_lessons\""], expect: true},
+		_lsDone,
+	]])
+	}
+	"the installer's raw names stay below 800 (pronto reserves the 8xx), ignoring 8xx and the fixture, and take the next two free numbers": {suite: "lessons", steps: [
+		{call: "lessonsinstall.app", args: [{raw: ["790_x.sql", "792_y.sql", "802_signals.sql", "950_fixture.sql"], pgroll: ["1_x"], list: false}]},
+		{keep: "dir"},
+		{call: "lessonsinstall.install", args: ["$dir"]},
+		{get: "ok", expect: true},
+		{call: "lessonsinstall.snapshot", args: ["$dir"]},
+		{call: "lessonsinstall.names", args: ["$"], holds: {spec: "793_lessons_spec.sql", fns: "794_lessons.sql"}, why: "above the highest below 800, never 80x or 95x"},
+		_lsDone,
+		{call: "lessonsinstall.app", args: [{raw: ["801_a.sql", "810_b.sql"], pgroll: ["1_x"], list: false}]},
+		{keep: "only8"},
+		{call: "lessonsinstall.install", args: ["$only8"]},
+		{call: "lessonsinstall.snapshot", args: ["$only8"]},
+		{call: "lessonsinstall.names", args: ["$"], holds: {spec: "100_lessons_spec.sql", fns: "101_lessons.sql"}, why: "only 8xx: they are not the app's, so the start of three digits"},
+		{call: "lessonsinstall.remove", args: ["$only8"]},
+	]}
+	"with no two numbers left above the highest below 800, the two highest free ones are taken (Bonk Chess: 799 is used, 793 and 796 are not)": {suite: "lessons", steps: [
+		{call: "lessonsinstall.app", args: [{raw: ["790_cutover.sql", "792_trophies.sql", "794_puzzle.sql", "795_api_keys.sql", "797_bots.sql", "798_api_v1.sql", "799_arena_game.sql", "802_signals.sql", "950_fixture.sql"], pgroll: ["1_x"], list: false}]},
+		{keep: "dir"},
+		{call: "lessonsinstall.install", args: ["$dir"]},
+		{get: "ok", expect: true},
+		{call: "lessonsinstall.snapshot", args: ["$dir"]},
+		{call: "lessonsinstall.names", args: ["$"], holds: {spec: "793_lessons_spec.sql", fns: "796_lessons.sql"}},
+		_lsDone,
+	]}
+	"three-digit raw names with fewer than two free numbers below 800 are refused, nothing written": {suite: "lessons", steps: [
+		{call: "lessonsinstall.app", args: [{full: 798, pgroll: ["1_x"], list: false}]},
+		{keep: "wide"},
+		{call: "lessonsinstall.install", args: ["$wide"]},
+		{get: "err", matches: "leave no two free numbers below 800"},
+		{call: "lessonsinstall.snapshot", args: ["$wide"]},
+		{call: "lessonsinstall.paths", args: ["$"], expect: ["billing_spec.cue", "flags_plugin.cue", "program.cue", "spec/raw.cue"], why: "nothing written"},
+		{call: "lessonsinstall.remove", args: ["$wide"]},
+	]}
+	"the installer writes lessons/lessons_spec.sql once, equal to the emitter's output for no courses, and generate's later text is kept": {suite: "lessons", steps: list.Concat([_lsApp, _lsInstalled, [
+		{call: "lessonsinstall.has", args: ["$snap", "lessons/lessons_spec.sql", "SELECT '{\"courses\":{}}'::jsonb"], expect: true},
+		{call: "lessonsinstall.has", args: ["$snap", "lessons/lessons_spec.sql", "SET lock_timeout = '5s';\nSET statement_timeout = '30s';\n"], expect: true},
+		{call: "lessonsinstall.text", args: ["$snap", "lessons/lessons_spec.sql"]},
+		{keep: "sql"},
+		{call: "lessonsdb.emptySpecSql", args: ["$sql"], expect: true, why: "byte-equal to `_lessonsOut.sql` for courses: {}"},
+		{call: "lessonsinstall.put", args: ["$dir", "lessons/lessons_spec.sql", "-- generate's\n"]},
+		{call: "lessonsinstall.install", args: ["$dir"]},
+		{call: "lessonsinstall.snapshot", args: ["$dir"]},
+		{keep: "after"},
+		{call: "lessonsinstall.has", args: ["$after", "lessons/lessons_spec.sql", "-- generate's"], expect: true, why: "a seed: never overwritten by a later install"},
+		{call: "lessonsinstall.has", args: ["$after", "lessons/lessons.sql", "SET lock_timeout = '5s';\nSET statement_timeout = '30s';\n"], expect: true, why: "pronto's lint sql wants both on every replayed file"},
 		_lsDone,
 	]])
 	}
@@ -498,7 +546,7 @@ cases: {
 		{call: "lessonsinstall.snapshot", args: ["$dir"]},
 		{keep: "snap"},
 		{call: "lessonsinstall.has", args: ["$snap", "lessons_plugin.cue", "\ncode: state: rawMigrations: _lessonsRawMigrations\n"], expect: false, why: "two lists of one field cannot be unified"},
-		{call: "lessonsinstall.names", args: ["$snap"], holds: {spec: "800_lessons_spec.sql", fns: "801_lessons.sql"}, why: "a list in program.cue is read too"},
+		{call: "lessonsinstall.names", args: ["$snap"], holds: {spec: "791_lessons_spec.sql", fns: "792_lessons.sql"}, why: "a list in program.cue is read too"},
 		_lsDone,
 	]}
 	"two-digit raw names stay two digits: 09 and 10 are followed by 11 and 12": {suite: "lessons", steps: [
@@ -537,7 +585,7 @@ cases: {
 		{call: "lessonsinstall.snapshot", args: ["$dir"]},
 		{keep: "again"},
 		{call: "lessonsinstall.changed", args: ["$snap", "$again"], expect: ["late.cue"], why: "only the app's own new file: the stamped names are reused verbatim, nothing renamed, no duplicate"},
-		{call: "lessonsinstall.names", args: ["$again"], expect: {spec: "800_lessons_spec.sql", fns: "801_lessons.sql", pgroll: "42_lessons"}},
+		{call: "lessonsinstall.names", args: ["$again"], expect: {spec: "791_lessons_spec.sql", fns: "792_lessons.sql", pgroll: "42_lessons"}},
 		_lsDone,
 	]])
 	}

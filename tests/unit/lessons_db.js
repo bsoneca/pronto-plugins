@@ -58,6 +58,16 @@ function make() {
   return built;
 }
 
+/** Whether `text` is what the emitter makes of an app with no courses (the SQL the installer writes once, so a first generate finds it). */
+export function emptySpecSql(text) {
+  const dir = pkg('package lessons\n');
+  try {
+    return JSON.parse(cue(['export', '.', '-e', '_lessonsOut.sql', '--out', 'json'], dir)) === text;
+  } finally {
+    Deno.removeSync(dir, { recursive: true });
+  }
+}
+
 /** The files `lessons write` writes: sql, js and messages (a text per locale), and the courses' ids. */
 export const emit = () => make().out;
 
