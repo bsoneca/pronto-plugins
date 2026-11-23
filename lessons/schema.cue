@@ -7,6 +7,7 @@ package lessons
 import (
 	"list"
 	"strconv"
+	"strings"
 )
 
 #Course: {
@@ -19,6 +20,22 @@ import (
 
 	// One line of speech: one non-empty text per locale of the course, no more and no fewer.
 	#Line: {for l in locales {(l): string & !=""}}
+
+	// No line names a move the player has yet to find (PRONTO-1736). The page holds no answer, but every line of every chapter ships
+	// whole in the message catalogues, so no line of the course, whenever it is read, may contain the token of a ply the
+	// player moves (from `shown` on, in any chapter), in any locale, whatever its case. An app whose players read moves in another
+	// notation (SAN) adds its own check for that notation.
+	_playerTokens: [for pt in parts for ch in pt.chapters for p in list.Range(ch.shown, len(ch.moves), 1) if p mod 2 == pt.player if ch.moves[p] != "" {strings.ToLower(ch.moves[p])}]
+	_lines: {for l in locales {(l): list.Concat([
+		[for pt in parts for c in pt.complaints {strings.ToLower(c[l])}],
+		[for pt in parts for ch in pt.chapters {strings.ToLower(ch.intro[l])}],
+		[for pt in parts for ch in pt.chapters {strings.ToLower(ch.outro[l])}],
+		[for pt in parts for ch in pt.chapters for _, st in ch.steps if st.say != _|_ {strings.ToLower(st.say[l])}],
+		[for pt in parts for ch in pt.chapters for _, st in ch.steps if st.wrong != _|_ for w in st.wrong {strings.ToLower(w[l])}],
+	])}}
+	_noTokenSpoken: {for l in locales for t in _playerTokens {
+		"\(l)/\(t)": true & (len([for x in _lines[l] if strings.Contains(x, t) {x}]) == 0)
+	}}
 
 	// A chapter id is unique within the course, whichever part holds it.
 	_uniqueChapters: [for p in parts for c in p.chapters {c.id}] & list.UniqueItems()
