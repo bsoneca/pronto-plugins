@@ -185,6 +185,57 @@ check ((newest 0).metadata.pushed-by == "operator@example.com") "WHO: unset, the
 full-spec false "light"
 livex [push $app --sync premium] | ignore
 
+# --stages "5,25,100" (PRONTO-412): a version per stage through flagd's fractional on targetingKey, the flag's production cases
+# at each below 100 and the dwell, then the flip. A failure writes the version read before the first stage again.
+full-spec true "light"
+let ns = (object | length)
+let rans = (ran | length)
+let stg = (livex [push $app --flip premium --stages "5,25,100" --dwell 0sec] {FLAGS_STAGE_SETTLE_SEC: "0"})
+check ($stg.exit_code == 0) $"stages: pushed: ($stg.stderr | str trim | lines | last 3 | str join ' / '); ($stg.stdout | str trim | lines | last 3 | str join ' / ')"
+check ((object | length) == $ns + 4) "stages: a version for 5%, one for 25%, then the flip's two"
+check ([(newest 3).metadata.stage (newest 2).metadata.stage (newest 1).metadata.stage (newest 0).metadata.stage] == ["5%" "25%" "all" "all"] and (newest 0).metadata.cases == "passed") "stages: each version says its stage; the last passed"
+let at5 = (premium (newest 3))
+check ($at5.targeting.if.2.fractional == [["on" 5] ["off" 95]] and $at5.variants.default == false and $at5.variants.on == true and $at5.variants.off == false and $at5.defaultVariant == "default") "stages: 5% is flagd's fractional on targetingKey after the at-hand branch; the default and a reader with no key read the value before"
+check ((premium (newest 2)).targeting.if.2.fractional == [["on" 25] ["off" 75]]) "stages: 25%"
+check ((premium (newest 0)).variants.default == true and (premium (newest 0)).defaultVariant == "default" and not ((newest 0).data | str contains "fractional")) "stages: the last version is the flip, for everyone"
+check ((ran | length) == $rans + 3) "stages: the production cases ran at 5%, at 25% and after the flip"
+let sh = (with-env {SAYT_MISE_BIN: $"($here)/fake_mise.sh", REAL_MISE: $real, FAKE_GCLOUD_STATE: $state} {
+	^$nu.current-exe -c $"use ($here)/../live.nu history; history ($app) | to json" | complete
+}).stdout | from json
+check (($sh | first 4 | get stage) == ["all" "all" "25%" "5%"]) "stages: history shows stage=5%|25%|all"
+check ((open --raw $"($dir)/journal.jsonl" | lines | last 4 | each {|l| $l | from json | get stage }) == ["5%" "25%" "all" "all"]) "stages: the journal has a line per stage"
+full-spec false "light"
+livex [push $app --sync premium] | ignore
+
+# A stage whose cases fail at the second stage writes the version read before the first again, not the 5% one.
+full-spec true "light"
+let nf = (object | length)
+let before_stages = (newest 0)
+rm -f $"($app)/wrapn.log"
+let wrap2 = "sh -c 'echo x >> wrapn.log; test $(wc -l < wrapn.log) -lt 2 || exit 3; exec \"$0\" \"$@\"'"
+let sf = (livex [push $app --flip premium --stages "5,25,100" --dwell 0sec] {FLAGS_STAGE_SETTLE_SEC: "0", PRONTO_FLAGS_CASES_WRAP: $wrap2})
+check ($sf.exit_code != 0 and ($sf.stderr | str contains "rolled back") and ($sf.stderr | str contains "at 25%")) "stages: a failing case at the second stage fails the push, rolled back"
+check ((object | length) == $nf + 3 and (newest 0).metadata.stage == "rolled-back" and (premium (newest 0)) == (premium $before_stages)) "stages: 5%, 25%, then the version before the first stage written again"
+
+# Refusals write nothing: one flag only, percentages rising to 100, a client flag with no key unless said to have one.
+let nr = (object | length)
+let two = (livex [push $app --flip premium --sync theme --stages "5,100"])
+check ($two.exit_code != 0 and ($two.stderr | str contains "one flag")) "stages: a second flag (--sync) is refused"
+let low = (livex [push $app --flip premium --stages "25,5,100"])
+check ($low.exit_code != 0 and ($low.stderr | str contains "rising and ending at 100")) "stages: percentages that do not rise are refused"
+let open_end = (livex [push $app --flip premium --stages "5,25"])
+check ($open_end.exit_code != 0 and ($open_end.stderr | str contains "ending at 100")) "stages: a last stage below 100 is refused"
+let dry_bad = (livex [push $app --flip premium --stages "5,25" --dry-run])
+check ($dry_bad.exit_code != 0 and ($dry_bad.stderr | str contains "ending at 100")) "stages: a dry run refuses what the real push refuses"
+let dry_ok = (livex [push $app --flip premium --stages "5,25,100" --dry-run])
+check ($dry_ok.exit_code == 0 and ($dry_ok.stdout | str contains "would go to 5%, 25%, 100%") and (object | length) == $nr) "stages: a dry run says the stages and writes nothing"
+open --raw $"($app)/flags_spec.cue" | str replace 'local: true}' 'local: true, client: true}' | save -f $"($app)/flags_spec.cue"
+let cl = (livex [push $app --flip premium --stages "5,100"] {FLAGS_STAGE_SETTLE_SEC: "0"})
+check ($cl.exit_code != 0 and ($cl.stderr | str contains "client flag") and ($cl.stderr | str contains "no targetingKey")) "stages: a client flag with no stated key is refused"
+check ((object | length) == $nr) "stages: a refusal writes nothing"
+full-spec false "light"
+livex [push $app --sync premium] | ignore
+
 # A flag with no production scenario: written for everyone, nothing run. Production cases with no
 # flagsLive.url to run them at: refused, nothing written.
 full-spec true "light"
