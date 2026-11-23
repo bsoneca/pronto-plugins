@@ -48,6 +48,8 @@ cluster: surface: targets: keys: {
 			// The stack's secret, the auth service's own (a release overrides it with the project's).
 			PGRST_JWT_SECRET: "${PGRST_JWT_SECRET:-mecha-dev-secret-please-override-32ch}"
 			AUTH_API_KEYS:    "true"
+			// The auth service's statement bound, in ms (identity/keys/README.md).
+			AUTH_STATEMENT_TIMEOUT_MS: "5000"
 			if keysGate != "" {AUTH_API_KEYS_GATE: keysGate}
 			if keysHook != "" {AUTH_KEY_EXCHANGED_HOOK: keysHook}
 		}

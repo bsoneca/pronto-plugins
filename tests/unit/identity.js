@@ -10,6 +10,8 @@ import { acceptedPhone, messageText, normalizeE164, phoneConfig, phoneUpstream, 
 import { CODE_TTL_MS, MAX_TRIES, PHONE_SPEC } from '../../identity/broker/otp.ts';
 import { MemoryStore } from '../../identity/broker/store.ts';
 
+import { BLOCK } from '../../identity/keys/route.ts';
+
 const bin = new URL('../../bin/pronto-identity', import.meta.url).pathname;
 
 /** The installer's run on an app named `package shop`, with `args`; `signin` its identity_signin.cue
@@ -510,3 +512,13 @@ export function specInUse() {
 export const normalized = (inputs, country) => inputs.map((i) => normalizeE164(i, country));
 /** What the broker accepts of typed numbers (acceptedPhone with the Brazilian pattern): the normalized number, or null. */
 export const accepted = (inputs) => inputs.map((i) => acceptedPhone({ pattern: '^\\+55[1-9][1-9]9[0-9]{8}$' }, i));
+
+/** What the keys plugin's block says to the door's Dapr sidecar: the lines that set the app id (`header_up`, which
+ * replaces a client's own), how many bounded-auth imports, and any `header_up` that adds beside or deletes instead. */
+export function keysRoute() {
+  return {
+    appId: BLOCK.filter((l) => l.includes('dapr-app-id')).map((l) => l.trim()),
+    bounded: BLOCK.filter((l) => l.includes('import bounded-auth')).length,
+    nonReplacing: BLOCK.filter((l) => /header_up\s+[+\-?]/.test(l)).length,
+  };
+}
