@@ -1,16 +1,20 @@
 """A stand-in for flagd's OFREP answer (live.nu's FLAGS_OFREP_CMD), reading the live object of the fake
 gcloud (FAKE_GCLOUD_STATE) and evaluating its targeting for the context given in the environment
-(FLAG, TARGETING_KEY; empty is no context). FAKE_OFREP_STALE=1 answers from the version before the live one,
+(FLAG, TARGETING_KEY; empty is no context), or the file FAKE_OFREP_FILE names. FAKE_OFREP_STALE=1 answers from the version before the live one,
 as a flagd that has not read the new object yet."""
 import json, os
 
-state = json.load(open(os.environ["FAKE_GCLOUD_STATE"]))
-versions = state["objects"]["gs://shop-prod-flags/flags.json"]
-live = [v for v in versions if v["timeDeleted"] is None][0]
-if os.environ.get("FAKE_OFREP_STALE"):
-    older = sorted((v for v in versions if v["timeDeleted"] is not None), key=lambda v: int(v["generation"]), reverse=True)
-    live = older[0] if older else live
-flag = json.loads(live["data"])["flags"].get(os.environ["FLAG"], {"variants": {"default": None}, "defaultVariant": "default"})
+if os.environ.get("FAKE_OFREP_FILE"):  # a directory store's live document (flagsLive.dir), as a file flagd reads
+    doc = json.load(open(os.environ["FAKE_OFREP_FILE"]))
+else:
+    state = json.load(open(os.environ["FAKE_GCLOUD_STATE"]))
+    versions = state["objects"]["gs://shop-prod-flags/flags.json"]
+    live = [v for v in versions if v["timeDeleted"] is None][0]
+    if os.environ.get("FAKE_OFREP_STALE"):
+        older = sorted((v for v in versions if v["timeDeleted"] is not None), key=lambda v: int(v["generation"]), reverse=True)
+        live = older[0] if older else live
+    doc = json.loads(live["data"])
+flag = doc["flags"].get(os.environ["FLAG"], {"variants": {"default": None}, "defaultVariant": "default"})
 ctx = {"targetingKey": os.environ.get("TARGETING_KEY") or None}
 
 

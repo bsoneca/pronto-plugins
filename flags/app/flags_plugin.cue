@@ -384,6 +384,11 @@ flagsLive?: {
 	watchMax:    *"2h" | =~"^[1-9][0-9]*[smh]$"
 	sample:      *"5m" | =~"^[1-9][0-9]*[smh]$"
 	minSessions: *50 | (int & >=1)
+	// The longest, in seconds, a write may take to reach every flagd: a push waits that long for each to say the new value
+	// (before its cases run, and after a restore or rollback) and fails with a named error after it. A node's flagd reads a
+	// ConfigMap its pod mounts: kubelet refreshes the mount every minute, a cache holds the object up to another, and flagd
+	// polls the file's stat every 5 s, so 180 covers it. A staged push settles that long after each stage.
+	syncSec: *180 | (int & >=1)
 	mirrors: [...{
 		ssh?:        =~"^[a-z_][a-z0-9_-]*@[A-Za-z0-9.-]+$"
 		kubeconfig?: string & !=""

@@ -683,11 +683,14 @@ PRONTO-284). `pronto-flags push <app-dir> --flip <flag>` (a push is a merge over
 3. writes the merge of the spec over the live flags, for everyone, in one version
    (`stage=all`); with no `production` case to run (a waived flag, or one turned off) it stops there
    (`cases=none on production`, or `untested`);
-4. otherwise waits until OFREP at `flagsLive.url` answers the new value (every
-   2 s, 90 s at most), runs `flagsCases.live` against production with the flag's
+4. otherwise waits until every flagd answers the new value (each pod of the node's
+   flagd Service, and OFREP at `flagsLive.url` for a client flag; every 2 s,
+   `flagsLive.syncSec` (180) at most, failing with "flagd did not pick up
+   <flag>=<v> within Ns"), runs `flagsCases.live` against production with the flag's
    `production` scenarios that need no tester (no `signIn` step), and writes
    `cases=passed`; a failure, or an OFREP that never answers, writes the version
-   read before the push again as the newest, prints the report and exits non-zero.
+   read before the push again as the newest (and waits for every flagd to say that
+   too), prints the report and exits non-zero.
    A green run that showed nothing fails the same way: the runner printed no
    passed scenario, or a scenario's verdict says its steps behind the flipped flag
    were skipped (`; steps behind <flag> skipped, off here`), i.e. the site still

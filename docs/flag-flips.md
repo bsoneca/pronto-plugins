@@ -50,8 +50,10 @@ A flip therefore needs a test of its own, and it must be:
 4. **A push stops if any check fails, and rolls back on its own.**
    - A flag with `production` scenarios whose app lacks `flagsLive.url` or `flagsCases.live` is
      refused before anything is written.
-   - A live failure, or an OFREP that never answers the new value within 90 s, writes the version
-     read before the push again as the newest. The push then prints the report and exits non-zero.
+   - A live failure, or a flagd that has not picked the new value up within `flagsLive.syncSec`
+     (180 s: "flagd did not pick up <flag>=<v> within Ns"), writes the version read before the push
+     again as the newest, and waits the same way for every flagd to say the old value again (a
+     failure to confirm is printed as an error). The push then prints the report and exits non-zero.
    - The rollback is an ordinary version, so `history` shows it and `rollback` can undo it.
 5. **No cases means no flip.** A changed flag without cases is refused.
    - `--untested "<why>"` pushes it anyway, with a loud warning.
@@ -82,9 +84,13 @@ A flip therefore needs a test of its own, and it must be:
 9. **A pass must have shown the flag at work.** A runner skips a step behind a flag
    that is off at the door, so a flip whose live site still evaluated the flag false could run
    green having exercised nothing.
-   - Before the production cases, the push waits until the node's flagd answers each changed
-     flag's new value for the anonymous context (OFREP, no targetingKey), flipped to true or
-     not; if it never does, the push rolls back and runs no case (tested: stale flagd).
+   - Before the production cases, the push waits until every flagd pod on the node (each endpoint
+     of the flagd Service, not the Service, which picks one at random) answers each changed
+     flag's new value for the anonymous context (OFREP, no targetingKey), and the site's /ofrep/
+     for a client flag too; if one never does, the push rolls back and runs no case (tested:
+     slow pickup, never, a rollback). The ConfigMap a pod mounts reaches it a minute or two after
+     the write, pod by pod (kubelet's refresh and cache), so the first pod to answer proves nothing
+     about the rest (2026-11-23, capture_fights: the cases read a pod that had not caught up).
    - After each flag's cases, the output is read (`vacuous` in `flags/live.nu`). It is refused,
      and rolled back like a failed case, when it holds no `✓ <scenario>` verdict, when a verdict
      names the flipped flag in `steps behind <flags> skipped, off here` (Bonk Chess's runner

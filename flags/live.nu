@@ -496,7 +496,7 @@ def write-flags [at: record, doc: record, app: path, --meta: record = {}, --from
 	if not ($doc.flags? | describe | str starts-with "record") { error make {msg: "flagd.document has no flags"} }
 	let from = if $from == "" { generation $at } else { $from }
 	let now = (commit $at $app ($doc | to json --indent 2) $meta $from)
-	print $"flags: ($at.url) is version ($now) \(was ($from)\); flagd reads it within seconds, and a page on its next load"
+	print $"flags: ($at.url) is version ($now) \(was ($from)\); every flagd reads it within `flagsLive.syncSec` \(180 s\), and a page on its next load"
 	# Written: what is said of it never fails the push, whose caller holds the version to roll back from.
 	try { summary $doc | print } catch {|e| print -e $"flags: WARNING: no summary of version ($now): ($e.msg | lines | first)" }
 	$now
@@ -699,49 +699,76 @@ def run-cases [app: path, cmd: string, vars: record, --wrap: string = ""] {
 	{ok: ($r.exit_code == 0), out: ($r.stdout + $r.stderr | str trim), stdout: ($r.stdout | str trim)}
 }
 
-# What OFREP answers for a flag and a targetingKey (none: no context); null where it doesn't answer.
-# Where the flags are mirrored to a node over ssh (flagsLive.mirrors), its flagd is asked itself, from the node, at its
-# Service's address (the mirror's `flagd`, default "flagd", port `ofrepPort`, default 8693): the app's door names
-# the account from a verified session alone and drops a body's targetingKey (pronto-plugins#113), so the site's
-# /ofrep/ answers every request as no account (PRONTO-257), and the node's flagd answers before a cache could. Elsewhere, the
-# site's /ofrep/. FLAGS_OFREP_CMD stands in for the request in tests: an sh command printing the reply, given
-# OFREP_URL, FLAG and TARGETING_KEY.
-def ofrep-ask [at: record, flag: string, key: any] {
+# What OFREP answers for a flag and a targetingKey (none: no context), one value per flagd that answers (null where one doesn't).
+# Where the flags are mirrored to a node over ssh (flagsLive.mirrors), each flagd pod is asked itself, from the node, at its
+# endpoint's address (the mirror's `flagd` Service, default "flagd", port `ofrepPort`, default 8693): the Service picks a pod at
+# random and each pod's ConfigMap mount catches up on its own (kubelet's sync, a minute or two), so one pod's new answer says
+# nothing of the others (2026-11-23, capture_fights). The app's door names the account from a verified session alone and drops a
+# body's targetingKey (pronto-plugins#113), so the site's /ofrep/ answers every request as no account (PRONTO-257), and a node's
+# flagd answers before a cache could. A client flag (`site`) is asked at the site's /ofrep/ too, the address the cases use.
+# Elsewhere, the site's /ofrep/. FLAGS_OFREP_CMD stands in for the request in tests: an sh command printing the reply, a line of
+# JSON for each flagd, given OFREP_URL, FLAG and TARGETING_KEY.
+def ofrep-all [at: record, flag: string, key: any, client: bool]: nothing -> list<any> {
 	let cmd = ($env.FLAGS_OFREP_CMD? | default "")
 	let ctx = if $key == null { {} } else { {targetingKey: $key} }
+	let values = {|out: string| let v = ($out | lines | where {|l| ($l | str trim) != "" } | each {|l| {v: (try { $l | from json | get -o value } catch { null })} } | get v); if ($v | is-empty) { [null] } else { $v } }
 	# A kubeconfig mirror has no node to ask from (its identity has no pods/portforward): the site's /ofrep/ answers.
 	let m = ($at.mirrors? | default [] | where {|x| ($x.ssh? | default null) != null } | get -o 0)
+	let site = {||
+		try { [(http post --content-type application/json --max-time 10sec $"($at.site)/ofrep/v1/evaluate/flags/($flag)" {context: $ctx}).value?] } catch { [null] }
+	}
 	try {
 		if $cmd != "" {
-			let r = (with-env {OFREP_URL: $at.site, FLAG: $flag, TARGETING_KEY: ($key | default "")} { ^sh -c $cmd } | from json)
-			$r.value?
+			do $values (with-env {OFREP_URL: $at.site, FLAG: $flag, TARGETING_KEY: ($key | default "")} { ^sh -c $cmd })
 		} else if $m != null {
 			let kubectl = ($m.kubectl? | default 'sudo k3s kubectl')
 			let svc = ($m.flagd? | default "flagd")
 			let port = ($m.ofrepPort? | default 8693)
 			let body = ({context: $ctx} | to json -r)
-			let remote = $"ip=$\(($kubectl) -n ($m.namespace) get svc ($svc) -o jsonpath={.spec.clusterIP}\) && curl -sS -m 10 -X POST -H content-type:application/json --data-binary @- http://$ip:($port)/ofrep/v1/evaluate/flags/($flag)"
-			($body | ^ssh -o BatchMode=yes -o ConnectTimeout=20 $m.ssh $remote | from json).value?
+			let remote = $"for ip in $\(($kubectl) -n ($m.namespace) get endpoints ($svc) -o jsonpath='{.subsets[*].addresses[*].ip}'\); do curl -sS -m 10 -X POST -H content-type:application/json -d '($body)' http://$ip:($port)/ofrep/v1/evaluate/flags/($flag) || printf '{}'; echo; done"
+			let pods = (do $values (^ssh -o BatchMode=yes -o ConnectTimeout=20 $m.ssh $remote))
+			if $client and ($at.site? | default "" | is-not-empty) { $pods | append (do $site) } else { $pods }
 		} else {
-			(http post --content-type application/json --max-time 10sec $"($at.site)/ofrep/v1/evaluate/flags/($flag)" {context: $ctx}).value?
+			do $site
 		}
-	} catch { null }
+	} catch { [null] }
 }
 
-# Waits until OFREP answers each flag's new value for everyone (no context): polls every FLAGS_POLL_SEC (2),
-# gives up at FLAGS_WAIT_SEC (90). Whether it did.
-def wait-ofrep [at: record, want: list<record>]: nothing -> bool {
-	let poll = ($env.FLAGS_POLL_SEC? | default 2 | into float)
-	let limit = ($env.FLAGS_WAIT_SEC? | default 90 | into float)
-	mut waited = 0.0
-	loop {
-		let ok = ($want | all {|w| (ofrep-ask $at $w.flag null) == $w.new })
-		if $ok { return true }
-		if $waited >= $limit { return false }
-		sleep ($poll * 1sec)
-		$waited = $waited + $poll
+# The flags a write moves, as {flag, new, client}: those of `new` whose default value differs from `old`'s. A flag dropped, or one
+# whose reach moves with no default moving (accounts, a fractional stage), reads the same for everyone and is no word to wait for.
+def want-of [old: record, new: record]: nothing -> list<record> {
+	changes-between $old $new | where {|c| $c.flag in ($new.flags | columns) and $c.to != null } | each {|c|
+		{flag: $c.flag, new: $c.to, client: (($new.flags | get $c.flag | get -o metadata.flagSetId) == "client")}
 	}
-	false
+}
+
+# How long a write may take to reach every flagd, in seconds: FLAGS_WAIT_SEC, else the app's flagsLive.syncSec. A node's flagd
+# reads a ConfigMap its pod mounts, which kubelet refreshes every minute and a cache holds up to another, plus flagd's own 5 s
+# poll of the file's stat: 180 covers it. The wait for pickup, and a staged push's settle, give up there.
+def sync-sec [at: record]: nothing -> float {
+	$env.FLAGS_WAIT_SEC? | default ($at.syncSec? | default 180) | into float
+}
+
+# Waits until every flagd answers each flag's written value for everyone (no context), polling every FLAGS_POLL_SEC (2), and
+# fails with a named error where `sync-sec` passes first. Where the site's /ofrep/ is all there is to ask (no mirror, no stand-in),
+# a flag it does not serve (not `client`) is not waited for: PRONTO-1518.
+export def await-live [at: record, want: list<record>] {
+	let poll = ($env.FLAGS_POLL_SEC? | default 2 | into float)
+	let limit = (sync-sec $at)
+	let by_door = (($at.mirrors? | default [] | where {|x| ($x.ssh? | default null) != null } | is-empty) and (($env.FLAGS_OFREP_CMD? | default "") == ""))
+	if $by_door and ($at.site? | default "" | is-empty) { print "flags: no site to ask and no node: the new value is not waited for"; return }
+	let hidden = if $by_door { $want | where {|w| not $w.client } } else { [] }
+	if ($hidden | is-not-empty) { print $"flags: ($hidden | get flag | str join ', ') is not a client flag: the site's /ofrep/ does not serve it, so its new value is not waited for there" }
+	let want = ($want | where {|w| $w not-in $hidden })
+	let start = (date now)
+	mut pending = $want
+	loop {
+		$pending = ($want | where {|w| not (ofrep-all $at $w.flag null $w.client | all {|v| $v == $w.new }) })
+		if ($pending | is-empty) { return }
+		if ((date now) - $start) >= ($limit * 1sec) { break }
+		sleep ($poll * 1sec)
+	}
+	error make {msg: $"flagd did not pick up ($pending | each {|w| $'($w.flag)=($w.new | to json -r)' } | str join ', ') within (($limit | math round))s"}
 }
 
 # Why a green run of a flag's production cases proved nothing, or "" when it showed the flag at work. The runner
@@ -768,6 +795,17 @@ def vacuous [out: string, flag: string]: nothing -> string {
 def restore [at: record, app: path, to: string, now: string, names: string, why: string] {
 	let again = (commit $at $app (current-metadata-text (store-version $at $to) $app) {stage: rolled-back, flag: $names, cases: failed, note: ($why | str substring 0..<500)} $now)
 	print -e $"flags: ($at.url) is version ($to)'s flags again, as version ($again)"
+	# The restore is confirmed live, as the write was: until every flagd says the old value, the flag is still on for some.
+	try { await-live $at (want-of (store-version $at $now | from json) (store-version $at $to | from json)) } catch {|e| print -e $"flags: ERROR: version ($again) holds version ($to)'s flags but a flagd does not say so yet: ($e.msg); check the flagd pods" }
+}
+
+# After a write that has no cases to run (or before a watch opens): every flagd must say its new value, else the version read before
+# is written again from `written`, the generation just written, and the push fails. A flag no flagd reads is no flip to leave on.
+def live-or-restore [at: record, app: path, old: record, doc: record, before: string, written: string, names: string] {
+	try { await-live $at (want-of $old $doc) } catch {|e|
+		try { restore $at $app $before $written $names $e.msg } catch {|r| print -e $"flags: WARNING: could not restore version ($before): ($r.msg); `pronto-flags rollback` does" }
+		error make {msg: $"rolled back to version ($before): ($e.msg)"}
+	}
 }
 
 # ---- The watch (PRONTO-413): guardrails sampled over a window after a flip, a breach written back ----
@@ -957,7 +995,8 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 		let cases = $cases_none
 		let meta = ({stage: all, flag: $names, cases: $cases, note: $notes} | merge $kept)
 		# A watched flip's first version is already `watching`: no version of it reads finished before its verdict.
-		let v = if $guard == null { write-flags $at $doc $app --meta $meta --from $before } else { watch-flip $at $app $doc $names $before $before $meta $guard (cases-wrap $at) $cases }
+		# Written, then live on every flagd: a flag with no cases to run is still waited for, and a flip that is not live in time fails the push.
+		let v = if $guard == null { let w = (write-flags $at $doc $app --meta $meta --from $before); live-or-restore $at $app $old $doc $before $w $names; $w } else { watch-flip $at $app $doc $names $before $before $meta $guard (cases-wrap $at) $cases }
 		tell-board $at $app $moved
 		if ($flip | is-not-empty) { record-back $at $app $v $cases $owned }
 		return
@@ -1008,14 +1047,14 @@ def stage-def [new: record, oldv: any, w: int]: nothing -> record {
 	$new | upsert variants $variants | upsert defaultVariant "default" | upsert targeting $rule
 }
 
-# The staged live push: each stage below 100 is a version of its own (`stage` 5%), then its settle (FLAGS_STAGE_SETTLE_SEC,
-# 15: flagd reads a write within seconds), the flag's production cases as the players outside the cohort, who read the
+# The staged live push: each stage below 100 is a version of its own (`stage` 5%), then its settle (FLAGS_STAGE_SETTLE_SEC, the
+# sync bound: a cohort reads the same for everyone with no key, so no answer shows the stage live), the flag's production cases as the players outside the cohort, who read the
 # value before, and the dwell; the last stage is the flip (`flip-live`: everyone, OFREP's word, the cases). Where a stage's
 # cases fail, or anything else does, the version read before the first stage is written again, not the previous stage's.
 # Guardrails that watch the dwell (PRONTO-413) plug in after a stage's cases.
 def staged-live [at: record, app: path, doc: record, st: record, live: list<record>, cmds: record, before: string, stages: list<int>, dwell: duration, meta: record, none: string, guard: any] {
 	let wrap = (cases-wrap $at)
-	let settle = ($env.FLAGS_STAGE_SETTLE_SEC? | default 15 | into float)
+	let settle = ($env.FLAGS_STAGE_SETTLE_SEC? | default (sync-sec $at) | into float)
 	# Each write is over the generation the one before returned (the first, over the one read before the push), so a write
 	# another operator makes during a dwell (a rollback, a kill switch) fails ours instead of being overwritten.
 	mut last = $before
@@ -1067,6 +1106,7 @@ def staged-live [at: record, app: path, doc: record, st: record, live: list<reco
 	try {
 		if ($live | is-empty) {
 			let v = (write-flags $at $doc $app --meta ($meta | upsert cases $none) --from $last_gen)
+			live-or-restore $at $app $last_doc $doc $before $v $st.flag
 			if $guard == null { $v } else { watch-flip $at $app $doc $st.flag $before $v ($meta | upsert cases $none) $guard $wrap $none }
 		} else { flip-live $at $app $doc $live $cmds $before $meta --from $last_gen --guard $guard }
 	} catch {|e|
@@ -1102,6 +1142,8 @@ def tell-board [at: record, app: path, moved: list<record>] {
 # on and fails the push, never green; a pass writes the final version (`final`) with the readings. The generation returned is the last.
 def watch-flip [at: record, app: path, doc: record, names: string, before: string, from: string, meta: record, guard: record, wrap: string, final: string] {
 	let w = (write-flags $at $doc $app --meta ($meta | upsert cases watching | upsert before $before | upsert final $final) --from $from)
+	# Live on every flagd before the window opens: readings of a flag some pods still read off would pass it unseen.
+	live-or-restore $at $app (store-version $at $before | from json) $doc $before $w $names
 	let r = (watch-window $app $guard $names ($meta.stage? | default all) $wrap)
 	print $"flags: ($r.text)"
 	match $r.verdict {
@@ -1149,16 +1191,11 @@ def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: rec
 	let on = ($live | get flag)
 	let wrap = (cases-wrap $at)
 	let v = (write-flags $at $doc $app --meta ($meta | insert cases running) --from (if $from == "" { $before } else { $from }))
-	print $"flags: ($on | str join ', ') is on for everyone; waiting for OFREP to say so"
+	print $"flags: ($on | str join ', ') is on for everyone; waiting for every flagd to say so"
 	let ran = (try {
-		let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f))} })
-		# The site's /ofrep/ serves the flags marked `client` alone (PRONTO-1518): it cannot say what a server-only flag now
-		# reads. A node's flagd, asked itself, and a stand-in (FLAGS_OFREP_CMD) can.
-		let by_door = (($at.mirrors? | default [] | where {|x| ($x.ssh? | default null) != null } | is-empty) and (($env.FLAGS_OFREP_CMD? | default "") == ""))
-		let hidden = if $by_door { $want | where {|w| ($doc.flags | get $w.flag | get -o metadata.flagSetId) != "client" } } else { [] }
-		if ($hidden | is-not-empty) { print $"flags: ($hidden | get flag | str join ', ') is not a client flag: the site's /ofrep/ does not serve it, so its new value is not waited for there" }
-		let want = ($want | where {|w| $w not-in $hidden })
-		if not (wait-ofrep $at $want) { error make {msg: $"OFREP did not answer the new value of ($on | str join ', ') within the wait"} }
+		# Every flagd, and the site's /ofrep/ for a client flag, must say the new value before a case reads it: a pod that
+		# has not caught up would answer a case with the old one and roll a correct flip back (2026-11-23, capture_fights).
+		await-live $at (want-of (store-version $at $before | from json) $doc)
 		for c in $live {
 			print $"flags: ($c.flag): running its production cases \(($c.production | str join ', ')\)"
 			let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site} --wrap $wrap)
@@ -1232,6 +1269,9 @@ export def rollback [app: path, version?: string, --expect: string] {
 	# The flags a rollback turned off are rolled back for the board: their Done issues are Live again.
 	tell-board $at $app (changes-between $before $target | where {|c| $c.to == false })
 	record-back $at $app $again "rollback" (changes-between $before $target | get flag)
+	# Confirmed live last: the rollback stands whether or not a flagd has caught up, and a wait that fails is the exit.
+	print "flags: waiting for every flagd to say so"
+	await-live $at (want-of $before $target)
 }
 
 # ---- Recording a flip in the spec (PRONTO-1191's sequel: a flip needs no spec PR) ----
