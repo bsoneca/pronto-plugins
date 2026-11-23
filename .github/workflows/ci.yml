@@ -227,6 +227,8 @@ jobs:
         run: deno test --allow-read --allow-env android/test/host_test.ts android/test/bound_test.ts
       - name: Test the identity broker
         run: deno test --no-config --allow-net --allow-read --allow-env identity/oidc_test.ts identity/broker
+      - name: Test the keys service (PGlite)
+        run: deno lint --no-config identity/keys && deno test --no-config --allow-net --allow-read --allow-write --allow-env identity/keys
       - name: Test the billing broker
         run: deno lint --no-config billing doorguard intents gcp devflow release-cron release-notes prod-watch probe runners migrations tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run --allow-env billing doorguard
       # A script that does not parse fails only when it is run, and a release script runs rarely
