@@ -7,6 +7,15 @@ No kind, no second cluster, no Cloud Build, no Artifact Registry, no gcloud.
 
 ## The node release engine
 
+The Cluster's image does not move with the app's database files (PRONTO-615, as PRONTO-537 for Bonk Chess's gcp
+path): CloudNativePG recreates an instance for any change to `imageName`, and the database image carries the app's
+SQL (and the `.bayt` files its stage copies) for the schema Jobs to replay, so its digest moves with most releases.
+Where the database's Dockerfile stage only copies files onto a base pinned by digest (`database-base` in
+`render.nu`: no RUN, no ADD, no copy from another stage), the build copies that base into the node's registry as
+`<app>-database-base:<postgres major>` (`crane copy`, digest unchanged) and `#Manifests` points the Cluster at it;
+the Jobs keep the full image. A stage that adds anything, or a base not pinned, keeps the Cluster on the full
+image. The first release after an app moves onto the base restarts the primary once.
+
 `node/engine/` is the release of an app whose `release.cue` holds `Node: node.#Release`. It runs on the
 Mac (a runner, release-cron), never on the node; kubectl reaches the node's API over an ssh tunnel it opens
 and closes itself (`tunnel.nu`: a free local port and a kubeconfig of each release's own, so releases running
@@ -59,7 +68,7 @@ buildkitd name it, which `registries.yaml` already mirrors), so every image is `
 
 `node/schema/node.cue` imports nothing of upstream: the app renders upstream's objects itself and hands them to
 `#Manifests`, which patches them (the Namespace's `pronto.dev/release` label, the Cluster's Barman Cloud plugin
-in production), adds to them (a tenant's quota and LimitRange, backups' ObjectStore and ScheduledBackup,
+in production, and its `imageName`: the database's base image where the release pushed one, below), adds to them (a tenant's quota and LimitRange, backups' ObjectStore and ScheduledBackup,
 production only) and refuses them, as the `violations` field and an error in `objects`: a kind no operator
 serves (`#Served`, per operator version), a cluster-scoped object, another namespace, a Job outside `jobOrder`,
 a Gateway for another host, an image that is neither in the registry nor pinned by digest.

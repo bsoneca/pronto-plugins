@@ -96,24 +96,33 @@ cases: {
 		{call: "toy.mixedReport", args: [9, 3, 7], holds: {enough: true, usedOwn: true, cyclesComplete: true, noneTwiceInARow: true}},
 		{call: "toy.mixedReport", args: [9, 3, 8], holds: {enough: true, usedOwn: true, cyclesComplete: true, noneTwiceInARow: true}},
 	]}
-	"a stale step is reconciled: the server's step and counters win and nothing is replayed": {suite: "lessons", steps: [
-		{call: "toy.reconcile", args: [[], {step: 2, wrongs: 3, step_wrongs: 1, pool_said: 2}], holds: {state: {step: 2, wrongs: 3, step_wrongs: 1, pool_said: 2, done: false}, board: "a1 b1", out: {step: 2, wrongs: 3}}},
-		{call: "toy.reconcile", args: [["a1", "a2"], {step: 2, wrongs: 1, step_wrongs: 1, pool_said: 1}], holds: {state: {step: 2, wrongs: 1, pool_said: 1}, board: "a1 b1"}, why: "the server is behind: its step wins"},
+	"a stale page reconciles to the server's row: its step, counters and board win, and nothing is replayed": {suite: "lessons", steps: [
+		{call: "toy.stale", args: [[[0, "a1"]]], holds: {before: {state: {step: 0}, board: ""}, state: {step: 2, wrongs: 0, step_wrongs: 0, pool_said: 0, done: false}, board: "a1 b1", out: {step: 2}}, why: "another tab played a1: the page's board is rebuilt from the plies the server says were played"},
+		{call: "toy.stale", args: [[[0, "a1"], [2, "zz"]]], holds: {state: {step: 2, wrongs: 1, step_wrongs: 1, pool_said: 1}, board: "a1 b1"}},
+		{call: "toy.stale", args: [[[0, "a1"], [2, "a2"], [4, "a3"]]], holds: {state: {step: 5, done: true}, board: "a1 b1 a2 b2 a3"}, why: "a chapter finished elsewhere"},
 	]}
 	"the same step: the server's counters are adopted, the board stays": {suite: "lessons", steps: [
-		{call: "toy.reconcile", args: [["a1"], {step: 2, wrongs: 5, step_wrongs: 0, pool_said: 4}], holds: {state: {step: 2, wrongs: 5, step_wrongs: 0, pool_said: 4}, board: "a1 b1", boardBefore: "a1 b1"}},
+		{call: "toy.stale", args: [[[0, "zz"], [0, "yy"]]], holds: {state: {step: 0, wrongs: 2, step_wrongs: 2, pool_said: 2}, board: "", before: {board: ""}}},
 	]}
-	"a lesson resumed at the server's state keeps the complaint sequence going, as after a reload": {suite: "lessons", steps: [
-		{call: "toy.resume", args: [{step: 2, wrongs: 6, step_wrongs: 0, pool_said: 6}], holds: {board: "a1 b1", expected: "a2", after: {wrongs: 7, pool_said: 7}}},
+	"a move at a step the server has left judges nothing: the page adopts the server's row and says it is stale": {suite: "lessons", steps: [
+		{call: "toy.stale", args: [[[0, "a1"]], "zz"], holds: {kind: "stale", state: {step: 2, wrongs: 0}, board: "a1 b1"}, why: "a wrong move at a step already passed counts for nothing"},
+		{call: "toy.stale", args: [[[0, "a1"]], "a1"], holds: {kind: "right", state: {step: 2, wrongs: 0}, board: "a1 b1"}, why: "the same move the other tab played: its outcome is what the server says"},
+	]}
+	"a lesson resumed at the server's row keeps the complaint sequence going, as after a reload": {suite: "lessons", steps: [
+		{call: "toy.resume", args: [{step: 2, wrongs: 6, step_wrongs: 0, pool_said: 6}], holds: {board: "a1 b1", after: {wrongs: 7, pool_said: 7}}},
 		{get: "line", matches: "^c[0-7]$"},
 		{call: "toy.resume", args: [{step: 2, wrongs: 0, step_wrongs: 0, pool_said: 0}]},
 		{get: "line", expect: "c4", why: "a fresh pool starts at its first line"},
 	]}
-	"a reconciled step is played forward to the player's turn, within the script": {suite: "lessons", steps: [
-		{call: "toy.reconcile", args: [[], {step: 1, wrongs: 0, step_wrongs: 0, pool_said: 0}, 2], holds: {state: {step: 2}, board: "a1 b1", expected: "a2"}, why: "below shown: the shown plies play"},
-		{call: "toy.reconcile", args: [[], {step: 1, wrongs: 0, step_wrongs: 0, pool_said: 0}, 1], holds: {state: {step: 2}, board: "a1 b1", expected: "a2"}, why: "the opponent's ply: its scripted move plays"},
-		{call: "toy.reconcile", args: [[], {step: 99, wrongs: 0, step_wrongs: 0, pool_said: 0}], holds: {state: {step: 5, done: true}, expected: null}},
-		{call: "toy.reconcile", args: [[], {step: -3, wrongs: 0, step_wrongs: 0, pool_said: 0}], holds: {state: {step: 0}, expected: "a1"}},
+	"a move in flight makes the next one busy, and the page shows the server's answer when it comes": {suite: "lessons", steps: [
+		{call: "toy.inflight", holds: {during: {busy: true, second: "busy", board: ""}, first: "right", replies: ["b1"], after: {busy: false, state: {step: 2}, board: "a1 b1"}}, why: "the board waits for the server: nothing is drawn before it says right"},
+	]}
+	"a move the server took after another tab had gone further is stale, and a reconcile during a move leaves the answer to show the server's row": {suite: "lessons", steps: [
+		{call: "toy.stale", args: [[[0, "a1"], [2, "a2"]], "a1"], holds: {kind: "stale", state: {step: 4}, board: "a1 b1 a2 b2"}, why: "the token is the one played at ply 0, but the server is two moves on: no reply is drawn"},
+		{call: "toy.reconcileDuring", holds: {during: {state: {step: 4}, board: "a1 b1 a2 b2"}, kind: "stale", state: {step: 2}, board: "a1 b1"}},
+	]}
+	"a call that fails leaves the lesson as it was, and it is not left busy": {suite: "lessons", steps: [
+		{call: "toy.failed", holds: {error: "offline", busy: false, same: true}},
 	]}
 	"FNV-1a of the text's bytes is pinned": {suite: "lessons", steps: [
 		{call: "lessons.fnv1a", args: [""], expect: 2166136261},
@@ -221,6 +230,23 @@ cases: {
 		{call: "lessonsdb.call", args: ["$pg", "FREE", "move", ["toy", "one", 0, "zz"]], holds: {state: {step: 2, wrongs: 0, step_wrongs: 0}}, why: "a stale wrong move is not counted either"},
 	]])
 	}
+	"the row holds the plies played up to its step and no ply after it, and a stale or wrong move answers with the same": {suite: "lessons", steps: list.Concat([_lsDb, [
+		{call: "lessonsdb.call", args: ["$pg", "FREE", "start", ["toy", "one"]], holds: {state: {step: 0, played: []}}, why: "nothing is played before the player's first move"},
+		{call: "lessonsdb.call", args: ["$pg", "FREE", "move", ["toy", "one", 0, "zz"]], holds: {state: {step: 0, wrongs: 1, played: []}}, why: "a wrong move: the board keeps, the answer's count is the server's"},
+		{call: "lessonsdb.call", args: ["$pg", "FREE", "move", ["toy", "one", 0, "a1"]], holds: {state: {step: 2, played: ["a1", "b1"]}}, why: "the player's move and the script's reply"},
+		{call: "lessonsdb.call", args: ["$pg", "FREE", "move", ["toy", "one", 0, "yy"]], holds: {state: {step: 2, wrongs: 1, played: ["a1", "b1"]}}, why: "a stale step: the row as it is, with what is played (a2 is not)"},
+		{call: "lessonsdb.call", args: ["$pg", "FREE", "move", ["toy", "one", 2, "a2"]], holds: {state: {step: 4, played: ["a1", "b1", "a2", "b2"]}}},
+		{call: "lessonsdb.call", args: ["$pg", "FREE", "move", ["toy", "one", 4, "a3"]], holds: {state: {step: 5, over: true, played: ["a1", "b1", "a2", "b2", "a3"]}}},
+		{call: "lessonsdb.call", args: ["$pg", "FREE", "start", ["toy", "one"]], holds: {state: {step: 0, played: []}}, why: "a replay starts again from nothing"},
+	]])
+	}
+	"the page of a chapter whose player moves from ply 1 starts with the script's first ply played": {suite: "lessons", steps: list.Concat([_lsDb, (#LessonsPlay & {who: "FREE"}).one, (#LessonsPlay & {who: "FREE"}).oneB, [
+		{call: "lessonsdb.call", args: ["$pg", "FREE", "start", ["toy", "two"]], holds: {state: {step: 1, played: ["a1"]}}},
+	]])
+	}
+	"the emitted page holds no move of the script, only each chapter's plies": {suite: "lessons", steps: [
+		{call: "lessonsdb.pageHolds", expect: {leaked: [], plies: {one: {plies: 5, hasMoves: false, hasClaim: false}, one_b: {plies: 3, hasMoves: false, hasClaim: false}, two: {plies: 4, hasMoves: false, hasClaim: false}}}},
+	]}
 	"a wrong move counts, the page's pool counter advances only past the ply's own lines, and a right move starts the step again": {suite: "lessons", steps: list.Concat([_lsDb, [
 		{call: "lessonsdb.call", args: ["$pg", "FREE", "start", ["toy", "one"]]},
 		{call: "lessonsdb.call", args: ["$pg", "FREE", "move", ["toy", "one", 0, "a1"]]},

@@ -145,11 +145,15 @@ export def images [app_dir: string, node: record, fwd: record, services: list<st
 			}
 		}
 		let digests = (open $meta)
-		$services | each {|s|
+		let built = ($services | each {|s|
 			let digest = ($digests | get $s | get "containerimage.digest")
 			let final = if $s == "database" { render database-tag $"127.0.0.1:($fwd.registry)" $"($app)-($s)" $digest } else { $tag }
 			[$s {tag: $final, digest: $digest}]
-		} | into record
+		} | into record)
+		# The primary runs the database's base where the stage only copies files onto it (PRONTO-615): the image
+		# CloudNativePG recreates the instance for then never moves with the app's SQL.
+		let base = if "database" in $services { $compose.stdout | render database-base } else { null }
+		if ($base | is-empty) { $built } else { $built | insert "database-base" (render database-base-copy $base $app $"127.0.0.1:($fwd.registry)") }
 	} finally {
 		rm -rf $work
 	}

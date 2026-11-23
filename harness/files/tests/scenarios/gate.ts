@@ -32,10 +32,19 @@ export async function stepGate(st: Gated, here: Here, flagOn: (flag: string) => 
 // #OfrepEvaluation: a POST to the door's own /ofrep/v1/evaluate/flags/<name>); `refuse` a write to the app's own /auth/ or /crud/, aborted
 // and failing the run, since a page that needs one to show its feature is no read; `abort` any other write (a beacon: analytics, errors, a
 // third party), aborted and ignored.
-export type Sent = "pass" | "abort" | "refuse";
-export function sentOf(method: string, own: boolean, pathname: string): Sent {
+function evaluationBody(body: string | null): boolean {
+  if (!body) return true;
+  try {
+    const b = JSON.parse(body);
+    const ok = (o: unknown, keys: string[]) => !!o && typeof o === "object" && !Array.isArray(o) && Object.keys(o).every((k) => keys.includes(k));
+    return ok(b, ["context"]) && (b.context === undefined || (ok(b.context, ["targetingKey"]) && (b.context.targetingKey === undefined || typeof b.context.targetingKey === "string")));
+  } catch { return false; }
+}
+export type Sent ="pass" | "abort" | "refuse";
+// A flag's evaluation is, as schema.cue's #OfrepEvaluation has it, with no query and a body that is at most {context: {targetingKey?}}.
+export function sentOf(method: string, own: boolean, pathname: string, search = "", body: string | null = null): Sent {
   if (["GET", "HEAD", "OPTIONS"].includes(method)) return "pass";
-  if (method === "POST" && own && /^\/ofrep\/v1\/evaluate\/flags\/[A-Za-z0-9_-]+$/.test(pathname)) return "pass";
+  if (method === "POST" && own && search === "" && /^\/ofrep\/v1\/evaluate\/flags\/[A-Za-z0-9_-]+$/.test(pathname) && evaluationBody(body)) return "pass";
   return own && /^\/(auth|crud)\//.test(pathname) ? "refuse" : "abort";
 }
 

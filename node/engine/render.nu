@@ -159,3 +159,64 @@ export def database-tag [registry: string, repo: string, digest: string]: nothin
 	if ($majors | is-empty) { error make {msg: $"($registry)/($repo)@($digest) has no PG_MAJOR in its environment: CloudNativePG reads the database image's tag as the Postgres major, so the image must set it"} }
 	$majors | first | split row "=" | last
 }
+
+# The image the database's Dockerfile stage starts from, when the stage only copies files onto it: `{ref, name}` (the
+# pinned docker-image:// reference of its additional context, and that context's name), else null. The text piped in is
+# the `docker compose config` of the app as staged. The primary then runs the base and the schema Jobs the full image
+# (schema/node.cue's dbBase), so the app's own SQL, which the image carries for them to replay, cannot recreate the
+# primary. The base has every extension the full image's postgres needs, since the stage adds none: a RUN, an ADD, a copy
+# from any other stage, or a base not pinned by digest gives null, and the Cluster keeps running the full image.
+export def database-base []: string -> any {
+	let build = ($in | from yaml | get -o services.database.build)
+	if ($build | is-empty) { return null }
+	let target = ($build | get -o target | default "")
+	let file = ($build.context | path join ($build | get -o dockerfile | default "Dockerfile"))
+	if not ($file | path exists) { return null }
+	# One instruction a line, each with its continuation lines, comments gone.
+	let steps = (open --raw $file | str replace --all --regex '\\\n' ' ' | lines | each { str trim } | where {|l| $l != "" and not ($l | str starts-with "#") })
+	let stages = ($steps | enumerate | where {|s| $s.item =~ '(?i)^FROM\s' })
+	let stage = ($stages | where {|s| ($s.item | parse --regex '(?i)\sAS\s+(?<n>\S+)\s*$' | get -o n.0 | default "") == $target } | get -o 0)
+	# With no target compose builds the last stage, which this does not read: left to the full image.
+	if ($target | is-empty) or ($stage | is-empty) { return null }
+	let from = ($stage.item | split row " " | where $it != "" | get 1)
+	let upto = ($stages | where {|s| $s.index > $stage.index } | get -o 0.index | default ($steps | length))
+	let body = ($steps | skip ($stage.index + 1) | first (($upto - $stage.index - 1) | into int))
+	let ctx = ($build | get -o additional_contexts | default {} | get -o $from | default "")
+	if not ($ctx | str starts-with "docker-image://") or not ($ctx | str contains "@sha256:") { return null }
+	for line in $body {
+		let op = ($line | split row " " | first)
+		# An ENV the base lacks would change what postgres reads, so it disqualifies like a RUN.
+		if not ($op =~ '(?i)^(ARG|WORKDIR|ENTRYPOINT|CMD|HEALTHCHECK|EXPOSE|LABEL|USER|STOPSIGNAL|COPY)$') { return null }
+		if ($op =~ '(?i)^COPY$') {
+			let src = ($line | parse --regex '--from=(?<f>\S+)' | get -o f.0)
+			if ($src | is-not-empty) and $src != $from { return null }
+			# Files land where the schema Jobs replay them (initdb.d) or in the stage's own working folder; a file placed
+			# in postgres's own folders (an extension's library or control file) is something the base lacks.
+			let dest = ($line | split row " " | where $it != "" | last)
+			if not ($dest =~ '^(/docker-entrypoint-initdb\.d/|[^/])') { return null }
+		}
+	}
+	{ref: ($ctx | str replace "docker-image://" ""), name: $from}
+}
+
+# `database-base`'s image put in the node's registry as `<app>-database-base`, tagged with its Postgres major as the
+# database's is (CloudNativePG reads it), the digest the one it has everywhere: crane copies it as it is, so the image the
+# primary runs is the same on every release until the base itself is moved. `registry` is the node's registry as this
+# release reaches it (127.0.0.1:<fwd.registry>). Answers the image's `{tag, digest}`.
+export def database-base-copy [base: record, app: string, registry: string]: nothing -> record {
+	let digest = ($base.ref | split row "@" | last)
+	# The digest already in the node's registry (the last release put it there) is read from there: no call to the base's
+	# own registry, and no copy, while the base has not moved.
+	let there = $"($registry)/($app)-database-base@($digest)"
+	let present = ((^crane manifest --insecure $there | complete).exit_code == 0)
+	let source = if $present { $there } else { $base.ref }
+	let cfg = (^crane config --insecure $source | complete)
+	if $cfg.exit_code != 0 { error make {msg: $"crane config ($source): ($cfg.stderr | str trim)"} }
+	let majors = ($cfg.stdout | from json | get config.Env? | default [] | where {|e| $e starts-with "PG_MAJOR=" })
+	if ($majors | is-empty) { error make {msg: $"($base.ref) has no PG_MAJOR in its environment: CloudNativePG reads the database image's tag as the Postgres major"} }
+	let major = ($majors | first | split row "=" | last)
+	# Copied each time, too: it puts the manifest under the major's tag again, which is cheap when the blobs are there.
+	let copy = (^crane copy --insecure $source $"($registry)/($app)-database-base:($major)" | complete)
+	if $copy.exit_code != 0 { error make {msg: $"crane copy ($source) to the node's registry: ($copy.stderr | str trim)"} }
+	{tag: $major, digest: $digest}
+}

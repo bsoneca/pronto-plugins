@@ -22,13 +22,18 @@ The app supplies five functions over an opaque board:
 
 ## Loop
 
-`createLesson({course, part, chapter, adapter, server})`: the first `shown` plies play by themselves, then the other
-side's scripted replies until it is the player's turn. `play(gesture)` judges by token equality with the expected
-token: right advances and plays the reply; wrong counts (`wrongs`, `step_wrongs`), returns the teacher's line and keeps
-the board before the move (take-back). `pick` gives the line: the ply's own `wrong` lines in order, then
+`createLesson({course, part, chapter, adapter, server, state})`: the page holds no answer (PRONTO-1711). The built page's
+chapter has `plies` (the script's length) and `shown`, never the moves; the database judges, and a server row
+(`lessons.view`) carries `played`, the plies on the board up to its `step` and none after. `state` is the row the lesson
+starts at (`lesson_start`'s). `play(gesture)` is async: it sends `server.move(step, token)` and shows the answer. Right
+(the row's `played` holds the token at that ply): the move and the replies after it, up to the row's step, are drawn. Wrong:
+the board keeps (take-back, `tried` is the one after the move, only to be shown) and the counters are the server's. Stale (the
+server's step is not the page's): nothing is judged and the row is adopted. A move in flight makes the next `play` `busy`;
+a failed call throws and leaves the lesson as it was. `pick` gives the line: the ply's own `wrong` lines in order, then
 `pool[perm[(wrongs-1) mod N]]`, `perm` a Fisher-Yates shuffle seeded by FNV-1a of `course/chapter` per cycle, with the
 boundary fixed so no line repeats before all N were said or twice in a row (algorithm in the code's comments).
-`reconcile(serverState)`: when the server's step differs, its step and counters win.
+`reconcile(row)`: when the row's step differs, it wins and the board is rebuilt from its `played`. A hint is the one place
+a token reaches the page (`lesson_hint`, paid).
 
 ## Cases
 
@@ -134,7 +139,10 @@ steps or counters nobody played) and decide what to do with them.
 2. Supplies the content: its courses in `lessons_spec.cue` (`lessons: courses: <id>: {...}`, held to `#Course`, each naming its flag), and
    `./saytw generate`.
 3. Writes the board adapter for its page, `{start, legal, token, apply, render}` (the contract above), and calls
-   `createLesson({course, part, chapter, adapter, server})` with `courses` from `lessons_spec.js`.
+   `createLesson({course, part, chapter, adapter, server, state})` with `courses` from `lessons_spec.js`, `state` the row
+   `lesson_start` returned and `server.move(step, token)` a promise of the row `lesson_move` returns. The page holds no move
+   (no `moves`, no `claim`), but the lines of the message catalogues ship whole: a line must not name a move at or after its own
+   ply (cue vet does not check the words).
 4. Defines the three SQL hooks in a raw migration of its own, named after the plugin's two, in schema `lessons_app`:
    `price(who uuid) returns int`, `pay(who uuid, entry text, amount int) returns void`, `reward(who uuid, entry text, amount
    int) returns int`; each `DROP FUNCTION IF EXISTS` then `CREATE FUNCTION`, then `REVOKE ALL ... FROM PUBLIC` again (a CREATE gives

@@ -371,9 +371,29 @@ import (
 
 	// Only when upstream's shared Configuration exists to copy: the door is retargeted exactly when its own is emitted.
 	let retarget = len([for o in upstream if o.kind == "Configuration" && o.metadata.name == sharedConfig {o}]) > 0
+	// The database's base image, where the release pushed one (render.nu's database-base): the primary runs it, and the
+	// schema Jobs keep upstream's full image, which carries the app's SQL. So a change to the SQL, or to anything else the
+	// full image copies, moves the Jobs' image and leaves the Cluster's: CloudNativePG recreates the instance on any change
+	// to `imageName` (PRONTO-615, as PRONTO-537 for Bonk Chess).
+	let dbBase = [
+		if app.image != _|_ if app.image.pushed != _|_ if app.image.pushed["database-base"] != _|_ {
+			"\(release.environment.registry)/\(release.name)-database-base:\(app.image.pushed["database-base"].tag)@\(app.image.pushed["database-base"].digest)"
+		},
+	]
 	_patched: [for o in upstream {
 		if !(retarget && o.kind == "Deployment" && o.metadata.name == caddyName) {
-			o
+			[
+				if o.kind == "Cluster" if len(dbBase) > 0 {
+					{
+						for k, v in o if k != "spec" {(k): v}
+						spec: {
+							for k, v in o.spec if k != "imageName" {(k): v}
+							imageName: dbBase[0]
+						}
+					}
+				},
+				o,
+			][0]
 			if o.kind == "Namespace" {
 				metadata: labels: "pronto.dev/release": release.name
 				if !production {metadata: labels: "pronto.dev/preview": release.preview}
