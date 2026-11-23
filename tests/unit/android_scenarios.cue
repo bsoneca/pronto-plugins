@@ -89,6 +89,8 @@ cases: {
 		{call: "androidScenarios.skips", args: [{click: "a", flag: "pro"}, {pro: false}], expect: true},
 		{call: "androidScenarios.skips", args: [{click: "a", unless: "pro"}, {pro: true}], expect: true},
 		{call: "androidScenarios.skips", args: [{click: "a", unless: "pro"}, {pro: false}], expect: false},
+		{call: "androidScenarios.skips", args: [{click: "a", flag: "pro", with: "ads"}, {pro: true, ads: true}], expect: false, why: "a step with a second flag runs where both are on"},
+		{call: "androidScenarios.skips", args: [{click: "a", flag: "pro", with: "ads"}, {pro: true, ads: false}], expect: true},
 		{call: "androidScenarios.normalize", args: [{by: "ana", flag: "pro", hidden: "#b", why: "x"}], holds: {by: "ana", kind: "hidden", arg: "#b"}},
 	]}
 	"the steps that sign up, pay, check the address and read a response are known kinds": {suite: "android", steps: [

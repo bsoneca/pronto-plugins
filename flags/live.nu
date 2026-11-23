@@ -654,7 +654,7 @@ def changed-flags [old: record, doc: record]: nothing -> list<string> {
 # which of them are marked `production`, and the unit cases (tests/unit/*.cue) that name it.
 def cases-of [app: path, flag: string] {
 	let scen = (entries (cue-dir $app tests/scenarios scenarios) | where {|e|
-		let named = ($e.v.flags? | default []) | append ($e.v.steps? | default [] | each {|st| $st.flag? | default null } | compact)
+		let named = ($e.v.flags? | default []) | append ($e.v.steps? | default [] | each {|st| [($st.flag? | default null), ($st.with? | default null)] } | flatten | compact)
 		$flag in $named
 	})
 	let unit = (entries (cue-dir $app tests/unit cases) | where {|e| $flag in ($e.v.flags? | default []) })

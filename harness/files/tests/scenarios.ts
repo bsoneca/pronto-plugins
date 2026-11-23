@@ -409,6 +409,7 @@ export class Run {
       kept: (k) => this.vars.get(k), flip: TESTER ? Deno.env.get("FLAG") : undefined }, flagOn);
     if (g.onHere) this.onHere.add(g.onHere);
     if (g.off) this.skipped.add(g.off);
+    if (g.also) this.skipped.add(g.also);
     if (!g.run) return;
     if (g.flip && st.flag !== undefined) {
       // A flip tests its flag (FLAG, by `pronto-flags push`) as the tester, for whom alone the canary turns it on:
