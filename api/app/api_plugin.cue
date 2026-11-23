@@ -172,10 +172,6 @@ apiContract: {
 	types: _apiTypes
 }
 
-// PostgREST serves the API's schema after public (mecha's capabilities.apiSchemas), so /crud keeps
-// public as its default and the door's /api routes name theirs.
-cluster: capabilities: apiSchemas: [apiContract.schema]
-
 // The auth service asks the flag's gate (api_v1.sql's api_private.api_on) before it makes, lists or
 // exchanges a key, unless the app names a gate of its own.
 if api.flag != _|_ {
