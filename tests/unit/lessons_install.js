@@ -6,7 +6,7 @@ const installer = `${here}../../lessons/install.ts`;
 /** A temporary app: its program's package, pronto-flags' plugin file unless `flags` is false, the raw migrations its CUE lists
  * (`raw`, as program.cue's rawMigrations does unless `list` is false) and the pgroll names its plugins use (`pgroll`, as
  * `_xMigration` constants); `files` more. */
-export function app({ pkg = 'shop', flags = true, raw = [], pgroll = [], list = true, files = {} } = {}) {
+export function app({ pkg = 'shop', flags = true, full = 0, raw = full ? Array.from({ length: full + 1 }, (_, n) => `${String(n).padStart(3, '0')}_x.sql`) : [], pgroll = [], list = true, files = {} } = {}) {
   const dir = Deno.makeTempDirSync();
   Deno.writeTextFileSync(`${dir}/program.cue`, `package ${pkg}\n${raw.length && list ? `code: state: rawMigrations: [${raw.map((n) => `{name: "${n}", src: "sql/${n}"}`).join(', ')}]\n` : ''}`);
   if (raw.length && !list) put(dir, 'spec/raw.cue', `package ${pkg}\n_x: [${raw.map((n) => `{name: "${n}", src: "sql/${n}"}`).join(', ')}]\n`);

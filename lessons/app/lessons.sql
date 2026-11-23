@@ -1,3 +1,5 @@
+SET lock_timeout = '5s';
+SET statement_timeout = '30s';
 -- pronto-lessons' functions (lessons/README.md, "L2"): the player's whole write path. A raw migration, replayed at every
 -- release: a function whose signature changes is dropped before it is created.
 --
