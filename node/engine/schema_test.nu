@@ -23,7 +23,13 @@ def main [] {
 	test_ssh_must_be_user_at_host
 	test_a_preview_cannot_take_the_production_host
 	test_a_service_is_only_what_it_says
+	test_an_origin_must_be_https
 	print "\nAll node schema tests passed."
+}
+
+def test_an_origin_must_be_https [] {
+	print "test a release's origin that is not https is refused..."
+	assert ((refused plainOrigin) | str contains "origin")
 }
 
 def refused [expr: string]: nothing -> string {

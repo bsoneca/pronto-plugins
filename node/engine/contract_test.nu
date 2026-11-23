@@ -182,6 +182,8 @@ def main [] {
 		test_objects_change_only_as_declared $fx
 		test_data_and_order_match_upstreams_main $fx
 	}
+	# --adopt changes how the objects are applied (server-side, forced), never which or in what order
+	test_data_and_order_match_upstreams_main (fixture-apps | first) --adopt
 	print "\nAll node contract tests passed."
 }
 
@@ -326,8 +328,8 @@ def test_objects_change_only_as_declared [fx: record] {
 	}
 }
 
-def test_data_and_order_match_upstreams_main [fx: record] {
-	print $"test ($fx.name): the engine's release data and kubectl order are those of upstream's `main -e gke`..."
+def test_data_and_order_match_upstreams_main [fx: record, --adopt] {
+	print $"test ($fx.name): the engine's release data and kubectl order are those of upstream's `main -e gke`(if $adopt { ' with --adopt' } else { '' })..."
 	# Upstream's main, over the fakes.
 	let up = (sandbox $fx)
 	let r = (in-world $up ((runtime-dir) | path join k8s release.nu) --app $up.app -e gke)
@@ -342,7 +344,7 @@ def test_data_and_order_match_upstreams_main [fx: record] {
 	let pushed = ($fx.build | append ($fx.tuned?.images? | default []) | each {|s|
 		[$s {tag: (if $s == "database" { "17" } else { "latest" }), digest: $"sha256:(($"($registry)/($fx.name)-($s)") | hash sha256)"}]
 	} | into record)
-	let script = $"use ($engine_dir | path join render.nu); use ($engine_dir | path join runtime.nu); use ($release_nu) [release-app]; let app_info = \(runtime resolve-app '($en.app)'\); let node = \(render node-config $app_info.cue_path ''\); let meta = \(render app-meta $app_info.cue_path ''\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let pushed = ($pushed | to nuon); use ($release_nu) [preflight]; let fwd = {api: 1, buildkit: 2, registry: 3}; preflight $app_info $node $fwd --check | ignore; render release-data $app_info.dir $compose $facts $pushed | save -f ($en.dir | path join data.json); release-app $app_info $node $meta $compose $facts [] $pushed"
+	let script = $"use ($engine_dir | path join render.nu); use ($engine_dir | path join runtime.nu); use ($release_nu) [release-app]; let app_info = \(runtime resolve-app '($en.app)'\); let node = \(render node-config $app_info.cue_path ''\); let meta = \(render app-meta $app_info.cue_path ''\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let pushed = ($pushed | to nuon); use ($release_nu) [preflight]; let fwd = {api: 1, buildkit: 2, registry: 3}; preflight $app_info $node $fwd --check | ignore; render release-data $app_info.dir $compose $facts $pushed | save -f ($en.dir | path join data.json); release-app $app_info $node $meta $compose $facts [] $pushed (if $adopt { '--adopt' } else { '' })"
 	let e = (in-world $en -c $script)
 	assert equal $e.exit_code 0 $"($e.stdout | lines | last 20 | str join (char nl))\n($e.stderr)"
 	# 2. data

@@ -9,7 +9,7 @@ import (
 // release on the Contabo node, with the fields the engine supports: replicas (`scale`), the database's instances, volume,
 // parameters and logins, containers' resources (PP2), and the app's own services (billing, analyst, flagd, collectors,
 // ticker, standin, notifier, an exporter on a database login), the blob plane and the metrics export (PP3). What
-// apps/brawl-chess still asks of it (PRONTO-740 PP4): preview --schema-from, and TRUSTED_JWKS. The GKE half is upstream's
+// apps/brawl-chess still asks of it (PRONTO-740): TRUSTED_JWKS. The GKE half is upstream's
 // own `main -e gke`, which the contract test runs for comparison.
 _preview: *"" | =~"^[a-z0-9-]+$" @tag(preview)
 
