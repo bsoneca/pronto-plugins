@@ -31,8 +31,13 @@ export function routed(caddyfile: string): string {
   if (from >= 0 && to > from) lines = [...lines.slice(0, from), ...lines.slice(to + 1)];
   const at = lines.findIndex((l) => /^\s*handle (\/|@)/.test(l));
   if (at < 0) throw new Error("keys: docker/Caddyfile has no top-level `handle /…` or `handle @…` to place the keys routes before");
-  let start = at;
-  while (start > 0 && /^\s*#/.test(lines[start - 1]) && !lines[start - 1].endsWith(":end")) start--;
+  // The first handle may be another host's own (doorguard's `handle @daprapi`), inside its begin and end markers: the
+  // block goes after its end, so that host's next run does not take it out.
+  const open = lines.slice(0, at).findLastIndex((l) => /^\s*# [a-z-]+:begin\b/.test(l));
+  const inside = open >= 0 && !lines.slice(open, at).some((l) => /^\s*# [a-z-]+:end$/.test(l));
+  const close = inside ? lines.findIndex((l, i) => i >= at && /^\s*# [a-z-]+:end$/.test(l)) : -1;
+  let start = close >= 0 ? close + 1 : at;
+  if (close < 0) while (start > 0 && /^\s*#/.test(lines[start - 1]) && !lines[start - 1].endsWith(":end")) start--;
   return [...lines.slice(0, start), BEGIN, ...BLOCK, END, ...lines.slice(start)].join("\n");
 }
 

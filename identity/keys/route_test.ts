@@ -25,6 +25,21 @@ Deno.test("the block goes before the first top-level handle and its comment, aft
   assert(out.indexOf("  handle /favicon.ico {") > out.indexOf(END));
 });
 
+// doorguard's block as it writes it: its own `handle @daprapi` is the first handle of the file.
+const guarded = caddy.replace("  # doorguard:begin — x\n  @daprapi path_regexp daprapi ^/crud\n  # doorguard:end\n", [
+  "  # doorguard:begin — x", "  # PRONTO-1307: the guard", "  @daprapi path_regexp daprapi ^/crud", "  handle @daprapi {", "    respond 404", "  }", "  # doorguard:end", "",
+].join("\n"));
+
+Deno.test("the block goes after the end of a host whose own handle is the first, never inside its markers", () => {
+  const out = routed(guarded).split("\n");
+  assert(out.indexOf(BEGIN) > out.indexOf("  # doorguard:end"), out.join("\n"));
+  assert(out.indexOf("  handle @daprapi {") < out.indexOf("  # doorguard:end"));
+  assertEquals(routed(routed(guarded)), routed(guarded));
+  // That host's own run takes out what is between its markers: none of ours.
+  const without = out.slice(0, out.indexOf("  # doorguard:begin — x")).concat(out.slice(out.indexOf("  # doorguard:end") + 1));
+  assert(without.includes(BEGIN) && without.includes("  handle /auth/keys* {"));
+});
+
 Deno.test("it guards every /auth/* path and sends the keys paths to the service, one path to a handle", () => {
   const text = BLOCK.join("\n");
   assert(text.includes("@keysauth path /auth/*"));
