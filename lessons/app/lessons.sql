@@ -13,6 +13,37 @@ SET statement_timeout = '30s';
 CREATE SCHEMA IF NOT EXISTS lessons;
 REVOKE ALL ON SCHEMA lessons FROM PUBLIC;
 
+-- The progress table is written by the functions below alone. pronto's schema job grants the table's writes and the owner's
+-- write policies (from the entity) before the plugin's pgroll migration, which makes the read-only trigger, has run, so this
+-- file closes that window itself, at every replay: (a) the session roles lose every write on the table (the functions are
+-- SECURITY DEFINER and run as its owner, which keeps its own), (b) the trigger is made when it is missing. The trigger function
+-- is the pgroll migration's (lessons_plugin.cue, `_lessonsUp`): keep both texts the same. Before the table exists, as on a first
+-- replay, there is nothing to guard. Rows written in the window are not touched: an app upgrading from a state with no guard
+-- checks public.lesson_progress itself (lessons/README.md).
+CREATE OR REPLACE FUNCTION lessons.progress_read_only() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $f$
+BEGIN
+  IF current_user <> (SELECT pg_catalog.pg_get_userbyid(c.relowner) FROM pg_catalog.pg_class c WHERE c.oid = TG_RELID) THEN
+    RAISE EXCEPTION 'lesson progress is the lessons functions'' to write' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN coalesce(NEW, OLD);
+END $f$;
+DO $guard$
+DECLARE roles text;
+BEGIN
+  IF pg_catalog.to_regclass('public.lesson_progress') IS NULL THEN
+    RETURN;
+  END IF;
+  SELECT pg_catalog.string_agg(pg_catalog.quote_ident(r.rolname), ', ') INTO roles
+    FROM pg_catalog.pg_roles r WHERE r.rolname IN ('app_user', 'anon', 'service');
+  IF roles IS NOT NULL THEN
+    EXECUTE pg_catalog.format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.lesson_progress FROM %s', roles);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = 'public.lesson_progress'::pg_catalog.regclass AND t.tgname = 'lesson_progress_read_only' AND NOT t.tgisinternal) THEN
+    CREATE TRIGGER lesson_progress_read_only BEFORE INSERT OR UPDATE OR DELETE ON public.lesson_progress
+      FOR EACH ROW EXECUTE FUNCTION lessons.progress_read_only();
+  END IF;
+END $guard$;
+
 -- The ply a script's replies are played to: the next at or after `p_step` that the player moves (the player moves
 -- the plies p_step % 2 = p_player), or the end.
 DROP FUNCTION IF EXISTS lessons.advance(int, int, int);

@@ -120,6 +120,14 @@ whose highest is 799, gets 793 and 796); fewer than two free numbers is refused,
 highest of the app's own pgroll names (`_xMigration: "NN_x"`, `migrations: "NN_x"`) at that width, a sequence of its own. When the
 app names no pgroll migration, `--migration <name>` gives it; a number that would need more digits than the width is refused.
 
+**The write guard.** The progress table is written by the plugin's functions alone. On a live upgrade pronto's schema job commits the
+table's grants and the owner's write policies before pgroll applies the plugin's migration (which makes the read-only trigger), and
+the raw migrations replay in between; `lessons.sql` therefore revokes `INSERT, UPDATE, DELETE, TRUNCATE` on `public.lesson_progress`
+from `app_user`, `anon` and `service` (those that exist) and makes the trigger when it is missing, at every replay. It needs the table
+to exist (its functions take the row type), which the app's own migrations guarantee. Rows written in a window before the guard are
+not touched: **an app upgrading from a state without the guard should check `lesson_progress` for rows no function wrote** (unlocks,
+steps or counters nobody played) and decide what to do with them.
+
 ### How an app opts in
 
 1. Has pronto-flags, then adds the plugin with `bin/pronto-lessons <app-dir>` (and lists the raw migrations if it has its own list).
