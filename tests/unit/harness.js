@@ -67,6 +67,7 @@ export async function unmarked() {
 
 // What a read-only production page's request becomes (scenarios/gate.ts's sentOf).
 export { sentOf };
+export const evaluated = (search, body) => sentOf("POST", true, "/ofrep/v1/evaluate/flags/f", search, body);
 import { sentOf } from "../../harness/files/tests/scenarios/gate.ts";
 
 // One step of a scenario held to the scenarios' schema (harness/files/tests/scenarios/schema.cue), with a gesture
