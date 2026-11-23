@@ -55,7 +55,7 @@ if (verb === "flags") {
     const w = await watchFlags(flow, new Date(), f.new === "true");
     console.log(w.line);
     if (f.notes === "true") for (const p of w.list) console.log(`  ${p.app}/${p.flag}: ${p.note || "(no note)"}`);
-    Deno.exit(w.list.length || w.drift.length ? 1 : 0);
+    Deno.exit(w.list.length || w.drift.length || w.unavailable.length ? 1 : 0);
   } catch (e) {
     console.log(`pending flags: unavailable (${(e as Error).message})`);
     Deno.exit(1);
@@ -156,8 +156,9 @@ async function statusVerb() {
   let pending: unknown;
   try {
     const w = await watchFlags(flow!, new Date());
-    pending = { pending: w.list, drift: w.drift };
+    pending = { pending: w.list, drift: w.drift, unavailable: w.unavailable };
     if (!json) console.log(w.line);
+    if (w.unavailable.length) failures++;
   } catch (e) {
     failures++;
     pending = { unavailable: (e as Error).message };

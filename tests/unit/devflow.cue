@@ -425,6 +425,8 @@ cases: {
 		{call: "devflow.newPending", args: [[{app: "a", flag: "x"}], ["pending:a/x"], "drift"], expect: [{app: "a", flag: "x"}], why: "a flag reported as pending, then flipped and not recorded, is a new report as drift"},
 		{call: "devflow.newPending", args: [[{app: "a", flag: "x"}], ["pending:a/x", "drift:a/x"], "drift"], expect: []},
 		{call: "devflow.pendingLine", args: [[]], expect: "pending flags: none"},
+		{call: "devflow.unavailableLines", args: [[{app: "aprende", reason: "ofrep https://aprende.bsoneca.com geografia_6_9: 405"}, {app: "studio", reason: "cue export . in x: boom"}]], expect: ["pending flags: aprende unavailable (ofrep https://aprende.bsoneca.com geografia_6_9: 405)", "pending flags: studio unavailable (cue export . in x: boom)"], why: "an app whose flags cannot be read is its own line, so the others are still reported"},
+		{call: "devflow.unavailableLines", args: [[]], expect: []},
 		{call: "devflow.pendingLine", args: [[], true], expect: "pending flags: none new", why: "--new with nothing new does not read as no flag pending"},
 		{call: "devflow.pendingLine", args: [[{app: "brawl-chess", flag: "ads", age: "3d", cases: true}, {app: "studio", flag: "b", age: "?", cases: false}]], expect: "pending flags: brawl-chess/ads (3d, cases: yes) | studio/b (?, cases: no)"},
 		{call: "devflow.pendingLine", args: [[], false, [{app: "brawl-chess", flag: "seek_notify"}, {app: "brawl-chess", flag: "daily_notify"}]], expect: "pending flags: none; drift: brawl-chess/seek_notify live=true spec=false | brawl-chess/daily_notify live=true spec=false", why: "drift is its own part of the line, so the lead opens a record PR"},

@@ -504,6 +504,11 @@ export function newPending(list, seen, kind = "pending") {
   return list.filter((f) => !seen.includes(`${kind}:${f.app}/${f.flag}`));
 }
 
+/** The lines for apps whose flags could not be read, one each: `pending flags: <app> unavailable (<reason>)`. */
+export function unavailableLines(list) {
+  return list.map((u) => `pending flags: ${u.app} unavailable (${u.reason})`);
+}
+
 /** The line `status` and `flags` print: `pending flags: app/flag (age, cases: yes|no) | ...`, or `pending flags: none`
  * (`none new` for a report of the new ones alone, so it never reads as no flag pending), then, when `drift` has any,
  * `; drift: app/flag live=true spec=false | ...`. */
