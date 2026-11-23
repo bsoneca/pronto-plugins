@@ -19,6 +19,10 @@ planeValues: {
 	// Cloudflare ends TLS: Plane's links are https.
 	ssl: externalTermination: true
 	postgres: local_setup: false
+	// The API runs one gunicorn worker per pod: at the chart's 500m limit a burst of devflow calls
+	// was throttled for 10-100 s and the readiness probe (1 s) dropped the pod, so /api/ answered
+	// 503 (2026-11-23). Two pods with room to burst.
+	api: {replicas: 2, cpuLimit: "1000m", cpuRequest: "250m"}
 	redis: {local_setup: true, volumeSize: "1Gi"}
 	rabbitmq: {local_setup: true, volumeSize: "1Gi"}
 	minio: {local_setup: true, volumeSize: "10Gi"}
