@@ -3,7 +3,7 @@
 // app's flags and where they are live, the live value is asked of production's OFREP, and flow.js pendingFlags says
 // which wait for their flip. The line is what `status` and `pronto-devflow flags` print.
 import { cmd } from "../intents/shell.ts";
-import { driftFlags, newPending, pendingFlags, pendingLine } from "./flow.js";
+import { driftFlags, newPending, pendingFlags, pendingLine, unavailableLines } from "./flow.js";
 import { cueBin, type DevFlow } from "./spec.ts";
 
 type Run = (c: string, args: string[], cwd?: string, env?: Record<string, string>) => Promise<{ ok: boolean; out: string; err: string }>;
@@ -131,7 +131,8 @@ async function casesOf(dir: string, names: string[], run: Run): Promise<Record<s
   return Object.fromEntries(names.map((n) => [n, named.has(n)]));
 }
 
-/** The pending flags of every app of the flow's `flagsRepo` at origin/main, held ones left out, and the drift (live true, spec false). A failure anywhere throws, naming it. */
+/** The pending flags of every app of the flow's `flagsRepo` at origin/main, held ones left out, and the drift (live true, spec false). A failure of the clone throws, naming it; a failure inside one app (its CUE, its OFREP) leaves
+ * that app out and lists it in `unavailable` with the reason, so the other apps are still reported. */
 export function pendingNow(flow: DevFlow, now: Date, run: Run = (c, a, cwd, env) => cmd(c, a, { cwd, env })) {
   return locked(flow.flagsRepo, () => pendingIn(flow, now, run));
 }
@@ -142,21 +143,26 @@ async function pendingIn(flow: DevFlow, now: Date, run: Run) {
   if (!tree.ok) throw new Error(`git ls-tree ${flow.flagsRepo}: ${first(tree.err)}`);
   const names = tree.out.split("\n").map((l) => /^apps\/([^/]+)\/flags_spec\.cue$/.exec(l)?.[1]).filter((a): a is string => !!a);
   const apps = [];
+  const unavailable: { app: string; reason: string }[] = [];
   for (const app of names) {
-    const dir = `${root}/apps/${app}`;
-    // A spec that says no flag (aprende's is only its production address, generated from release.cue) has nothing to flip, and its package may need a generate step to evaluate at all.
-    if (!/^flags\b/m.test(Deno.readTextFileSync(`${dir}/flags_spec.cue`))) continue;
-    const spec = await exportOf<{ f: Flags; url: string | null }>(dir, ".", "{f: flags, url: *flagsLive.url | null}", run);
-    // An app with no production address has no live value to wait on.
-    if (!spec?.url) continue;
-    const off = Object.entries(spec.f).filter(([, f]) => f.default === false).map(([n]) => n);
-    const live = Object.fromEntries(await Promise.all(off.map(async (n) => [n, await liveValue(spec.url!, n)] as const)));
-    const pending = off.filter((n) => live[n] !== true);
-    const added: Record<string, string | null> = {};
-    for (const n of pending) added[n] = await addedAt(root, app, n, run);
-    apps.push({ app, flags: spec.f, live, added, cases: pending.length ? await casesOf(dir, pending, run) : {} });
+    try {
+      const dir = `${root}/apps/${app}`;
+      // A spec that says no flag (aprende's is only its production address, generated from release.cue) has nothing to flip, and its package may need a generate step to evaluate at all.
+      if (!/^flags\b/m.test(Deno.readTextFileSync(`${dir}/flags_spec.cue`))) continue;
+      const spec = await exportOf<{ f: Flags; url: string | null }>(dir, ".", "{f: flags, url: *flagsLive.url | null}", run);
+      // An app with no production address has no live value to wait on.
+      if (!spec?.url) continue;
+      const off = Object.entries(spec.f).filter(([, f]) => f.default === false).map(([n]) => n);
+      const live = Object.fromEntries(await Promise.all(off.map(async (n) => [n, await liveValue(spec.url!, n)] as const)));
+      const pending = off.filter((n) => live[n] !== true);
+      const added: Record<string, string | null> = {};
+      for (const n of pending) added[n] = await addedAt(root, app, n, run);
+      apps.push({ app, flags: spec.f, live, added, cases: pending.length ? await casesOf(dir, pending, run) : {} });
+    } catch (e) {
+      unavailable.push({ app, reason: (e as Error).message });
+    }
   }
-  return { pending: pendingFlags(apps, flow.flagsHeld, now), drift: driftFlags(apps) };
+  return { pending: pendingFlags(apps, flow.flagsHeld, now), drift: driftFlags(apps), unavailable };
 }
 
 /** The flags `--new` has reported, kept between runs: one small JSON file of `app/flag` names, written whole to a temporary file and renamed. */
@@ -185,12 +191,14 @@ function seenFile(flow: DevFlow) {
 /** The pending flags and the line to print. With `fresh` (`--new`) the list is only those not reported before, and what is
  * pending now is kept as reported; a flag that leaves and returns is reported again. */
 export async function watchFlags(flow: DevFlow, now: Date, fresh = false, run?: Run) {
-  const { pending, drift } = await pendingNow(flow, now, run);
-  if (!fresh) return { list: pending, drift, line: pendingLine(pending, false, drift) };
+  const { pending, drift, unavailable } = await pendingNow(flow, now, run);
+  const down = unavailableLines(unavailable);
+  const line = (l: string) => [l, ...down].join("\n");
+  if (!fresh) return { list: pending, drift, unavailable, line: line(pendingLine(pending, false, drift)) };
   const seen = seenFile(flow);
   const was = seen.read();
   const list = newPending(pending, was);
   const newDrift = newPending(drift, was, "drift");
   seen.write([...pending.map((f) => `pending:${f.app}/${f.flag}`), ...drift.map((f) => `drift:${f.app}/${f.flag}`)]);
-  return { list, drift: newDrift, line: pendingLine(list, true, newDrift) };
+  return { list, drift: newDrift, unavailable, line: line(pendingLine(list, true, newDrift)) };
 }
