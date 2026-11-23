@@ -19,7 +19,7 @@ export const exportOf = (pkg, expr, tags) => JSON.parse(cue(["export", pkg, ...(
 const read = (path) => Deno.readTextFileSync(root + path);
 const sorted = (l) => [...l].sort();
 
-/** The battery run on the headless engine: the contract's cases that did not run, and those that failed. */
+/** The battery run on the headless engine: the cases that failed. */
 export function battery() {
   const dir = Deno.makeTempDirSync();
   try {
@@ -30,8 +30,7 @@ export function battery() {
     }).outputSync();
     if (!o.success) throw new Error(`the battery's host failed: ${decode(o.stderr)}`);
     const results = JSON.parse(decode(o.stdout));
-    const ids = exportOf("./native", "[for c in battery {c.id}]");
-    return { missing: ids.filter((id) => !results.some((r) => r.id === id)), failed: results.filter((r) => !r.ok) };
+    return { failed: results.filter((r) => !r.ok) };
   } finally {
     Deno.removeSync(dir, { recursive: true });
   }

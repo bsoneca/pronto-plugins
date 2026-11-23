@@ -2,8 +2,9 @@
 // a host defines on the engine's global before the terminal bundle runs, each by name, argument types and
 // result, and the functions the bundle defines for the host to call back. The bundle (browser.js, display.js,
 // main.js) is one JS artifact for every platform, so these names and shapes are what a host implements.
-// Android's are Kotlin's `qjs.function` calls (TerminalEngine.kt); a host that defines another set, or
-// another shape, fails the battery (native/battery.cue).
+// Android's are Kotlin's `qjs.function` calls (TerminalEngine.kt); tests/unit/native.cue holds the set of names to
+// them, and the battery (native/battery.cue) holds the behaviour of the storage bridges. Argument types are the contract's
+// alone for now: nothing checks a host's arity against them.
 package native
 
 // A value on the bridge: text, an integer, a boolean, text that holds JSON, or nothing.
@@ -15,7 +16,7 @@ package native
 	group: #Group
 	// The arguments, in order; `nullable` lists the positions that may be null.
 	args: *[] | [...#Type]
-	nullable: *[] | [...int]
+	nullable: *[] | [...int & >=0 & <len(args)]
 	result: #Type | *"void"
 	// Whether the result may be null (a key with no value).
 	resultNullable: *false | bool
@@ -89,10 +90,3 @@ callbacks: {
 for _, b in bridges if b.answers != _|_ {
 	callbacks: (b.answers.name): args: b.answers.args
 }
-
-// The page globals the terminal's browser (browser.js) needs after SES locks the engine down. It fills in each one the
-// engine lacks (`??=`), so a host owes them only where its engine has a broken one, and `console` always (prelude.js).
-globalsOwed: ["console", "URL", "URLSearchParams", "TextEncoder", "TextDecoder", "Intl", "queueMicrotask", "setTimeout"]
-
-// The sealed storage's unlock (Unlock.kt, its state): what a launch finds. Rows with no wrapped key are lost, never fresh.
-#UnlockState: "FRESH" | "SEALED" | "LOST"

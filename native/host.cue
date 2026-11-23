@@ -19,8 +19,8 @@ import "encoding/json"
 	// The app's CUE package (program.cue's), which the host's surface file joins.
 	package: *"" | string
 	unlock:  *"none" | #Unlock
-	// The scenarios (the app's CUE, by path from its root) the host's integrate runs on a device; none is a
-	// failure there, never a pass.
+	// The scenarios (the app's CUE, by path from its root) the config file starts with; the app's config file names
+	// the ones a host's integrate runs on a device, and none is a failure there, never a pass.
 	scenarios: *[] | [...string]
 	// The host's config file as it is first written, and then the app's.
 	configSeed: json.Indent(json.Marshal({scenarios: C.scenarios}), "", "  ") + "\n"

@@ -2,7 +2,7 @@
 //   deno run --no-config --allow-read --allow-env native/deno_host.ts <battery.json>
 // <battery.json> is `cue export ./native -e battery --out json`. Prints the runner's answers as JSON. It runs in a
 // process of its own because lockdown() freezes the intrinsics of the realm it runs in.
-import { run } from "./battery.js";
+import { memoryKv, run } from "./battery.js";
 import * as passkeys from "../android/template/terminal/passkeys.js";
 
 const ses = Deno.readTextFileSync(new URL("../android/template/app/src/main/assets/ses.umd.min.js", import.meta.url));
@@ -20,5 +20,8 @@ const engine = {
     return indirect(source) as string;
   },
 };
+
+// Deno has no sealed store: the headless engine's storage bridges are the contract's behaviour in memory.
+for (const [name, fn] of Object.entries(memoryKv())) engine.define(name, fn);
 
 console.log(JSON.stringify(run({ engine, passkeys, cases })));

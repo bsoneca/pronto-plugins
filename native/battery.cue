@@ -21,6 +21,12 @@ package native
 	script: string
 	want:   _
 } | {
+	// A handler's source folded over events, in a Compartment of its own each run: `want` is the list of trees, the same twice.
+	kind:   "handler"
+	source: string
+	events: [...string]
+	want: [...string]
+} | {
 	// The passkey bridge's two forms (WebAuthn options out, the response back in), a buffer as a list of bytes.
 	kind: "passkey"
 	options: {...}
@@ -56,15 +62,11 @@ battery: [
 		want: ["undefined", "undefined", "undefined", "undefined", "undefined"]
 	},
 	{
-		id:  "one-event-list-one-tree-list", kind: "compartment"
-		why: "the same events fold to the same trees, twice: a handler's output is a function of its inputs"
-		script: #"""
-			const fold = (events) => { let n = 0; return events.map((e) => { n += 1; return { n, tree: `<p>${e}</p>` }; }); };
-			const events = ["open", "tap", "tap"];
-			const once = fold(events), twice = fold(events);
-			JSON.stringify([once.length, once.map((t) => t.tree), JSON.stringify(once) === JSON.stringify(twice)])
-			"""#
-		want: [3, ["<p>open</p>", "<p>tap</p>", "<p>tap</p>"], true]
+		id:     "one-event-list-one-tree-list", kind: "handler"
+		why:    "a handler, caged, folds one event list to one tree list, the same each time: its output is a function of its inputs"
+		source: #"(state, event) => { const n = (state === null ? 0 : state.n) + 1; return { state: { n }, tree: `<p data-n="${n}">${event}</p>` }; }"#
+		events: ["open", "tap", "tap"]
+		want: ["<p data-n=\"1\">open</p>", "<p data-n=\"2\">tap</p>", "<p data-n=\"3\">tap</p>"]
 	},
 	{
 		id:  "storage-round-trip", kind: "script"

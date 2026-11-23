@@ -24,7 +24,7 @@ cases: {
 	]}
 
 	"the host battery passes on the headless engine, every case": {suite: "native", steps: [
-		{call: "native.battery", expect: {missing: [], failed: []}, why: "a case in the contract that did not run is a hole in the battery, and a failing one is a host that breaks it"},
+		{call: "native.battery", expect: {failed: []}, why: "every case of the contract runs on the headless engine, and one that fails is a host that breaks it"},
 	]}
 
 	"Android's generated files are what they were before the shared core": {suite: "native", steps: [

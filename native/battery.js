@@ -4,14 +4,15 @@
 //            already past SES's lockdown(), nothing of the program loaded;
 //   passkeys the terminal's passkeys.js (optionsToJson, credentialOf), the one module of the bridge's two forms;
 //   cases    the battery, as `cue export ./native -e battery` gives it.
-// The runner puts a sealed-storage stand-in on the engine from the contract's storage group (native/bridges.cue), runs
-// each case, and answers a list of {id, ok, why, got?}. It never throws for a failing case: the host asserts `ok`.
+// The engine already has the host's own bridges (native/bridges.cue): the runner defines none, so a storage case reads the
+// host's real store. Deno's host, which has none, defines `memoryKv` first. The runner answers a list of {id, ok, why, got?}
+// and never throws for a failing case: the host asserts `ok`.
 
 // Equal as JSON, whatever order an object's keys came in.
 const canon = (x) => JSON.stringify(x, (_, v) => (v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1))) : v));
 const same = (a, b) => canon(a) === canon(b);
 
-/** The storage bridges' stand-in, in memory, over the contract's own names: what a host's sealed store must behave as. */
+/** The storage bridges in memory, for an engine that has no store of its own (the headless one): the behaviour a host's sealed store must match. */
 export function memoryKv() {
   const spaces = new Map();
   const space = (ns) => spaces.get(ns) ?? spaces.set(ns, new Map()).get(ns);
@@ -43,6 +44,14 @@ const plain = (c) => ({
 
 const runOne = (c, { engine, passkeys }) => {
   if (c.kind === "script") return JSON.parse(engine.eval(c.script));
+  if (c.kind === "handler") {
+    // The caged path a program's handler takes: its source evaluated in a Compartment with no endowments, a fresh one per
+    // run, folded over the events. Two runs over one event list must give one tree list.
+    const fold = `((source, events) => { const handler = new Compartment({}).evaluate(source); let state = null; return events.map((e) => { const out = handler(state, e); state = out.state; return out.tree; }); })`;
+    const call = `${fold}(${JSON.stringify(c.source)}, ${JSON.stringify(c.events)})`;
+    const [a, b] = [JSON.parse(engine.eval(`JSON.stringify(${call})`)), JSON.parse(engine.eval(`JSON.stringify(${call})`))];
+    return same(a, b) ? a : { first: a, second: b };
+  }
   if (c.kind === "compartment") return JSON.parse(engine.eval(`new Compartment({}).evaluate(${JSON.stringify(c.script)})`));
   if (c.kind === "passkey") {
     return { options: JSON.parse(passkeys.optionsToJson(optionsOf(c.options))), credential: plain(passkeys.credentialOf(c.response)) };
@@ -52,7 +61,6 @@ const runOne = (c, { engine, passkeys }) => {
 
 /** Runs the cases on the engine; each answer {id, why, ok, got?}. */
 export function run({ engine, passkeys, cases }) {
-  for (const [name, fn] of Object.entries(memoryKv())) engine.define(name, fn);
   return cases.map((c) => {
     try {
       const got = runOne(c, { engine, passkeys });
