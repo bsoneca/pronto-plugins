@@ -362,6 +362,23 @@ flagsLive?: {
 	// app's namespace); exactly one. Such a mirror takes no `database`, no record-back and no
 	// flip without PRONTO_FLAGS_CASES_WRAP, since app code must not run beside its credential. With a kubeconfig there is no node to ask, so a flip waits
 	// for the site's /ofrep/ (`url`), which serves the client flags.
+	// A watch after a flip (PRONTO-413): each guardrail's reader is sampled every `sample` for `watch` after a flip's cases
+	// (and after each stage of a `--stages` push), and a breach writes the version before the push again, with the reading
+	// as its reason. A reading with fewer than `minSessions` sessions says it saw too little, and the window extends, up to
+	// `watchMax`; then the push ends `watch-inconclusive`, the flag left on, non-zero. Silence never passes. A guardrail is
+	// `cmd`, an sh command run in the app's folder with env FLAG, STAGE, GUARDRAIL, WINDOW_START, WINDOW_END and the same
+	// hours a day before (BASELINE_START, BASELINE_END), as UTC times, and printing as its last line
+	// {"value": n, "baseline": n, "sessions": n} (a probe needs no baseline and sessions). By kind:
+	//   errors: prod-watch's error count; a breach is value > baseline * maxRatio and more than `floor` above the baseline
+	//           (the floor keeps a 2-against-0 at low traffic from rolling back);
+	//   probe:  the probe plugin's failed journeys; any is a breach;
+	//   sql:    one business metric from the dashboard's SQL, higher is better; a breach is value < baseline * minRatio and more
+	//           than `floor` below it.
+	guardrails: [...#Guardrail]
+	watch:       *"30m" | =~"^[1-9][0-9]*[smh]$"
+	watchMax:    *"2h" | =~"^[1-9][0-9]*[smh]$"
+	sample:      *"5m" | =~"^[1-9][0-9]*[smh]$"
+	minSessions: *50 | (int & >=1)
 	mirrors: [...{
 		ssh?:        =~"^[a-z_][a-z0-9_-]*@[A-Za-z0-9.-]+$"
 		kubeconfig?: string & !=""
@@ -379,6 +396,14 @@ flagsLive?: {
 			kubectl: "kubectl"
 		}
 	}]
+}
+
+#Guardrail: {
+	name: =~"^[a-z][a-z0-9_]*$"
+	cmd:  string & !=""
+	{kind: "errors", maxRatio: *2 | (number & >1), floor: *5 | (number & >=0)} |
+	{kind: "probe"} |
+	{kind: "sql", minRatio: *0.8 | (number & >0 & <1), floor: *0 | (number & >=0)}
 }
 
 // The app's command for a flip's cases (`pronto-flags push`), run with `sh -c` in the app's

@@ -236,6 +236,99 @@ check ((object | length) == $nr) "stages: a refusal writes nothing"
 full-spec false "light"
 livex [push $app --sync premium] | ignore
 
+# The watch (PRONTO-413): guardrails sampled after a flip's cases, a breach written back, silence never green, a dead watch seen.
+'#!/bin/sh
+echo x >> $1.tick
+n=$(wc -l < $1.tick)
+if [ -f $1.killfrom ] && [ "$n" -ge "$(cat $1.killfrom)" ]; then kill -9 $PPID; fi
+if [ -f $1.badfrom ] && [ "$n" -ge "$(cat $1.badfrom)" ]; then cat $1-bad.json; else cat $1.json; fi
+' | save -f $"($app)/reader.sh"
+def wspec [premium: bool, errs_cmd: string = "sh reader.sh errs"] {
+	full-spec $premium "light"
+	$"\nflagsLive: guardrails: [{name: \"errs\", kind: \"errors\", cmd: \"($errs_cmd)\"}, {name: \"probe\", kind: \"probe\", cmd: \"sh reader.sh probe\"}, {name: \"rev\", kind: \"sql\", cmd: \"sh reader.sh rev\"}]\n" | save --append $"($app)/flags_spec.cue"
+}
+def wreaders [errs_sessions: int = 100] {
+	for f in (glob $"($app)/*.tick" | append (glob $"($app)/*.badfrom") | append (glob $"($app)/*.killfrom")) { rm -f $f }
+	{value: 1, baseline: 1, sessions: $errs_sessions} | to json -r | save -f $"($app)/errs.json"
+	{value: 50, baseline: 1, sessions: $errs_sessions} | to json -r | save -f $"($app)/errs-bad.json"
+	{value: 0} | to json -r | save -f $"($app)/probe.json"
+	{value: 10, baseline: 10, sessions: 100} | to json -r | save -f $"($app)/rev.json"
+}
+let wenv = {FLAGS_WATCH_SEC: "0.3", FLAGS_WATCH_SAMPLE_SEC: "0.1", FLAGS_WATCH_MAX_SEC: "1"}
+def off-again [] { full-spec false "light"; livex [push $app --sync premium] | ignore }
+
+# A quiet window passes: running, watching, then the verdict with its readings.
+wspec true
+wreaders
+let nw = (object | length)
+let wq = (livex [push $app --sync premium] $wenv)
+check ($wq.exit_code == 0 and (object | length) == $nw + 3) $"watch: a quiet window passes: ($wq.stderr | str trim | lines | last 2 | str join ' / ')"
+check ((newest 1).metadata.cases == "watching" and (newest 0).metadata.cases == "passed" and ((newest 0).metadata.reading | str contains "errs 1/1") and ((newest 0).metadata.reading | str contains "probe 0/0")) "watch: written watching first, then passed with the readings on the version"
+check ((open --raw $"($dir)/journal.jsonl" | lines | last | from json | get reading) | str contains "rev=10/10") "watch: the journal holds the reading"
+off-again
+
+# A breach after the first sample: the version before the push is written again, the reading its reason.
+wspec true
+wreaders
+"3" | save -f $"($app)/errs.badfrom"
+let nb = (object | length)
+let before_b = (newest 0)
+let wb = (livex [push $app --sync premium] $wenv)
+check ($wb.exit_code != 0 and ($wb.stderr | str contains "guardrail breach") and ($wb.stderr | str contains "errs=50/1")) "watch: a breach fails the push, naming the reading"
+check ((newest 0).metadata.stage == "rolled-back" and (premium (newest 0)) == (premium $before_b) and ((newest 0).metadata.note | str contains "errs 50/1")) "watch: the breach restored the version before the push, the reading as its reason"
+check ((open --raw $"($dir)/journal.jsonl" | lines | last | from json | get note) | str contains "errs=50/1") "watch: the journal holds the breach's reading"
+
+# Too few sessions never passes: the window extends to watchMax, then inconclusive, the flag left on, non-zero.
+wspec true
+wreaders 3
+let wi = (livex [push $app --sync premium] $wenv)
+check ($wi.exit_code != 0 and ($wi.stderr | str contains "watch-inconclusive") and ($wi.stderr | str contains "too little to say")) "watch: a quiet window is inconclusive, with a non-zero exit"
+check ((newest 0).metadata.stage == "watch-inconclusive" and (newest 0).metadata.cases == "inconclusive" and (premium (newest 0)).variants.default == true) "watch: the flag is left on, the version says inconclusive"
+off-again
+
+# A reader that cannot run is refused before any write, never read as no breach.
+wspec true "nonexistent-reader-xyz"
+wreaders
+let nm = (object | length)
+let wm = (livex [push $app --sync premium] $wenv)
+check ($wm.exit_code != 0 and ($wm.stderr | str contains "reader cannot be run") and (object | length) == $nm) "watch: a missing reader is refused, nothing written"
+
+# A watch that dies leaves `cases: watching`: the next push refuses until it is resumed (or rolled back).
+wspec true
+wreaders
+"3" | save -f $"($app)/errs.killfrom"
+let wk = (livex [push $app --sync premium] $wenv)
+check ($wk.exit_code != 0 and (newest 0).metadata.cases == "watching") "watch: a killed watch leaves the version watching"
+let wr = (livex [push $app --sync premium] $wenv)
+check ($wr.exit_code != 0 and ($wr.stderr | str contains "unfinished watch") and ($wr.stderr | str contains "watch --resume")) "watch: the next push refuses"
+rm -f $"($app)/errs.killfrom"
+let wres = (livex [watch $app --resume] $wenv)
+check ($wres.exit_code == 0 and (newest 0).metadata.cases == "passed") $"watch --resume: takes the watch up and passes: ($wres.stderr | str trim | lines | last 2 | str join ' / ')"
+off-again
+
+# A flip with no production case (here --untested) is watched too, and a bad --watch is refused.
+wspec true
+wreaders
+let nu0 = (object | length)
+let wu = (livex [push $app --flip "theme=dark" --untested "no cases"] $wenv)
+check ($wu.exit_code == 0 and (object | length) == $nu0 + 3 and (newest 1).metadata.cases == "watching" and (newest 0).metadata.cases == "untested" and ((newest 0).metadata.reading | str contains "errs 1/1")) $"watch: a flip with no production case is watched: ($wu.stderr | str trim | lines | last 2 | str join ' / ')"
+check ((newest 1).metadata.before == ((object | get 3).generation)) "watch: the version before the push is on the watching version"
+let wbad = (livex [push $app --flip "theme=light" --untested "back" --watch 90] $wenv)
+check ($wbad.exit_code != 0 and ($wbad.stderr | str contains "say a window like 10m")) "watch: a --watch that is no window is refused"
+livex [push $app --flip "theme=light" --untested "back"] $wenv | ignore
+full-spec false "light"
+let wnone = (livex [push $app --sync premium --watch 10m] $wenv)
+check ($wnone.exit_code != 0 and ($wnone.stderr | str contains "names no flagsLive.guardrails")) "watch: --watch with no guardrails in the spec is refused"
+
+# After each stage of a staged push: a breach at 5% restores the version before the first stage.
+wspec true
+wreaders
+"2" | save -f $"($app)/errs.badfrom"
+let ng = (object | length)
+let wg = (livex [push $app --flip premium --stages "5,100" --dwell 0sec] ($wenv | merge {FLAGS_STAGE_SETTLE_SEC: "0"}))
+check ($wg.exit_code != 0 and ($wg.stderr | str contains "guardrail breach") and (object | length) == $ng + 2 and (newest 0).metadata.stage == "rolled-back") "watch: a breach at the 5% stage restores the version before the first stage"
+check ((newest 1).metadata.stage == "5%" and (newest 1).metadata.cases == "watching") "watch: a stage's version is written watching"
+
 # A flag with no production scenario: written for everyone, nothing run. Production cases with no
 # flagsLive.url to run them at: refused, nothing written.
 full-spec true "light"
