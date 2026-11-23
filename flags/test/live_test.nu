@@ -1220,5 +1220,59 @@ GCP: {name: \"shop\", project: \"shop-prod\", previewProject: \"shop-previews\",
 let nopin = (pushfrom)
 check ($nopin.exit_code == 0 and (premium (object | first)).targeting.if.2.in.1 == ["acct-nopin"]) "pin: with no pin file the push runs as before"
 
+# ---- Where the record writes: flags_spec.cue by default, or the file flagsRecord names (a generated spec's source) ----
+# An app that generates flags_spec.cue from spec/flags.cue names the source, so the next generate does not revert the record:
+# the record edits the source and runs the app's generate (here a stand-in script) before it checks the spec.
+for f in [rgh.created rgh.foreign rgh.fork rgh.race rgh.moveref rgh.closedview] { rm -f $"($dir)/($f)" }
+rg fetch -q origin
+rg reset -q --hard origin/main
+let gapp = $"($rwork)/apps/gen"
+mkdir $"($gapp)/spec"
+"package gen\n" | save $"($gapp)/program.cue"
+'[tools]
+"github:cue-lang/cue" = "0.16.1"
+' | save $"($gapp)/.mise.toml"
+^$real trust -q $"($gapp)/.mise.toml"
+^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $gapp | ignore
+# The generator: flags_spec.cue says what spec/flags.cue says (its default), as aprende's generate does from its spec.
+let gen_sh = $"($dir)/gen.sh"
+'#!/bin/sh
+d=$(grep -o "default: [a-z]*" spec/flags.cue | cut -d" " -f2)
+printf "package gen\nflagsRecord: file: \"%s\"\nflagsLive: {dir: \"flagstore\"}\nflags: premium: {default: %s, local: true}\n" "$REC_FILE" "$d" > flags_spec.cue
+' | save -f $gen_sh
+def gspec [file: string, d: string = "false"] {
+	$"package gen\nflagsRecord: file: \"($file)\"\nflagsLive: {dir: \"flagstore\"}\nflags: premium: {default: ($d), local: true}\n" | save -f $"($gapp)/flags_spec.cue"
+}
+"flags: premium: {default: false, local: true}\n" | save -f $"($gapp)/spec/flags.cue"
+gspec "spec/flags.cue"
+rg add -A
+rg commit -q -m gen
+rg push -q origin HEAD:main
+rg fetch -q origin
+rrun [setup $gapp] | ignore
+let g1 = (rrun [push $gapp --flip premium --untested "gen"] {PRONTO_FLAGS_GENERATE_CMD: $"REC_FILE=spec/flags.cue sh ($gen_sh)"})
+check ($g1.exit_code == 0 and (open $"($gapp)/flagstore/flags.json" | get flags.premium.variants.default) == true) "record source: the flip is live"
+let gfiles = (^git -C $rorigin diff --name-only main fix/flags-record-gen | lines | sort)
+check ($gfiles == ["apps/gen/flags_spec.cue" "apps/gen/spec/flags.cue"]) "record source: the branch changes the declared source, and the generate rewrites the spec from it"
+check ((^git -C $rorigin show "fix/flags-record-gen:apps/gen/spec/flags.cue") | str contains "premium: {default: true, local: true}") "record source: the declared file holds the new default"
+check ((^git -C $rorigin show "fix/flags-record-gen:apps/gen/flags_spec.cue") | str contains "default: true") "record source: the generated spec follows, so a later generate keeps the record"
+check ((rjournal | last).record == "pr" and (rjournal | last).flags == "premium") "record source: the journal says the pull request"
+# A declaration that leaves the app, or names no file, is refused softly: the push stands and nothing is pushed.
+for bad in ["../rec/flags_spec.cue" "/etc/hosts" "spec/missing.cue" "spec/link.cue"] {
+	"flags: premium: {default: false, local: true}\n" | save -f $"($gapp)/spec/flags.cue"
+	if $bad == "spec/link.cue" { ^ln -sf /etc/hosts $"($gapp)/spec/link.cue" }
+	gspec $bad
+	rg add -A
+	rg commit -q -m $"bad ($bad)"
+	rg push -q origin HEAD:main
+	rg fetch -q origin
+	let head_before = (^git --git-dir $rorigin rev-parse refs/heads/fix/flags-record-gen | str trim)
+	let rb = (rrun [record $gapp])
+	# The schema refuses an absolute path or a `..` outright (the tool stops, nothing is read); a path that is no file is the record's own soft failure.
+	let hard = ($bad | str starts-with "/") or ($bad | str starts-with "..")
+	let refused = if $hard { $rb.exit_code != 0 and ($rb.stderr | str contains "flagsRecord.file") } else { $rb.exit_code == 0 and (rjournal | last).record == "failed" and ((rjournal | last).note | str contains "flagsRecord.file") }
+	check ($refused and (^git --git-dir $rorigin rev-parse refs/heads/fix/flags-record-gen | str trim) == $head_before) $"record source: ($bad) is refused, nothing pushed"
+}
+
 rm -rf $dir
 print "flags: live commands pass"

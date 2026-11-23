@@ -1015,6 +1015,19 @@ def record-open-pr [repo: string, branch: string, --strict]: nothing -> any {
 	$same | where {|p| ($p.author?.login? | default "") == $who } | get -o 0
 }
 
+# The file the recorder edits, relative to the app's folder: flagsRecord.file (flags_plugin.cue), else flags_spec.cue.
+# An app whose flags_spec.cue is generated names its source of truth there. Refused where it is absolute, leaves the
+# app's folder, or is no file in the scratch tree.
+def record-source [wapp: path, trust: record]: nothing -> string {
+	let rec = (with-env $trust { cue-of $wapp flagsRecord })
+	let src = if $rec == null { "flags_spec.cue" } else { $rec.file? | default "flags_spec.cue" }
+	if ($src | str starts-with "/") or ($src | path split | any {|c| $c == ".." }) { error make {msg: $"flags: record: flagsRecord.file ($src) must be a path inside the app's folder"} }
+	let there = ($wapp | path join $src | path expand)
+	if not ($there | str starts-with $"($wapp | path expand)/") { error make {msg: $"flags: record: flagsRecord.file ($src) resolves outside the app's folder \(a symlink is followed\)"} }
+	if ($there | path type) != "file" { error make {msg: $"flags: record: flagsRecord.file ($src) is no file in the app"} }
+	$src
+}
+
 # The pull request itself, in a scratch worktree from a fresh origin/main (never the operator's checkout):
 # splice each flag's default, accept only a change that moves nothing else in flagd.document, run the app's generate,
 # touch nothing outside the app, and push the branch for the app. {record, flags, pr}.
@@ -1032,21 +1045,17 @@ def record-pr [at: record, app: path, version: string, cases: string, want: list
 	$done
 }
 
-def record-work [at: record, app: path, version: string, cases: string, want: list<record>, ctx: record, top: string, scratch: string, prefix: string, branch: string]: nothing -> record {
-	let wapp = if $prefix == "" { $scratch } else { $scratch | path join $prefix }
-	let trust = {MISE_TRUSTED_CONFIG_PATHS: $scratch}
-	let spec = (with-env $trust { cue-of $wapp flagd.document })
-	let diffs = (record-diffs $want $spec)
-	if ($diffs | is-empty) { return {record: "none", flags: "", pr: ""} }
-	let file = ($wapp | path join flags_spec.cue)
-	mut text = (open --raw $file)
-	for d in $diffs { $text = (splice-default $text $d.flag $d.live) }
-	$text | save -f --raw $file
+# The spec's flagd.document moves only at the flipped defaults, and the app still vets.
+def record-verify [wapp: path, trust: record, spec: record, diffs: list<record>] {
 	let after = (with-env $trust { cue-of $wapp flagd.document })
 	let expected = ($diffs | reduce --fold $spec {|d, acc| $acc | upsert ([flags $d.flag variants default] | into cell-path) $d.live })
 	if $after != $expected { error make {msg: $"flags: record: the spec's flagd.document changes at more than ($diffs | get flag | each {|f| $'flags.($f).variants.default' } | str join ', ') once the defaults are written: refused"} }
 	let vet = (do { cd $wapp; with-env $trust { ^$env.SAYT_MISE_BIN exec -- cue vet . } } | complete)
 	if $vet.exit_code != 0 { error make {msg: $"flags: record: cue vet fails after the defaults are written: ($vet.stderr | str trim)"} }
+}
+
+# The app's generate, in the scratch tree. For a declared source it is what writes flags_spec.cue from it.
+def record-generate [wapp: path, trust: record] {
 	let gen = ($env.PRONTO_FLAGS_GENERATE_CMD? | default "deno run -A tests/slot.ts --weight 1 -- ./saytw generate")
 	if ($wapp | path join tests slot.ts | path exists) or ($env.PRONTO_FLAGS_GENERATE_CMD? | default "") != "" {
 		# The app's generate may wait on the machine's slots: it gets PRONTO_FLAGS_GENERATE_TIMEOUT_SEC (600), then it is
@@ -1069,6 +1078,23 @@ sys.exit(rc)"'
 		let g = (run-cases $wapp $watched ($trust | merge {PRONTO_GEN: $gen, PRONTO_GEN_LIMIT: ($limit | into string)}))
 		if not $g.ok { error make {msg: $"flags: record: generate failed or ran past its ($limit) s in the scratch tree: ($g.out)"} }
 	} else { print -e $"flags: record: ($wapp) has no tests/slot.ts, so generate was not run" }
+}
+
+def record-work [at: record, app: path, version: string, cases: string, want: list<record>, ctx: record, top: string, scratch: string, prefix: string, branch: string]: nothing -> record {
+	let wapp = if $prefix == "" { $scratch } else { $scratch | path join $prefix }
+	let trust = {MISE_TRUSTED_CONFIG_PATHS: $scratch}
+	let spec = (with-env $trust { cue-of $wapp flagd.document })
+	let diffs = (record-diffs $want $spec)
+	if ($diffs | is-empty) { return {record: "none", flags: "", pr: ""} }
+	let src = (record-source $wapp $trust)
+	let file = ($wapp | path join $src)
+	mut text = (open --raw $file)
+	for d in $diffs { $text = (splice-default $text $d.flag $d.live) }
+	$text | save -f --raw $file
+	let declared = ($src != "flags_spec.cue")
+	if not $declared { record-verify $wapp $trust $spec $diffs }
+	record-generate $wapp $trust
+	if $declared { record-verify $wapp $trust $spec $diffs }
 	let status = (git-in $scratch status --porcelain --untracked-files=all)
 	if $status.exit_code != 0 { error make {msg: $"flags: record: git status: ($status.stderr | str trim)"} }
 	let changed = ($status.stdout | lines | each {|l| $l | str substring 3.. })
@@ -1076,7 +1102,7 @@ sys.exit(rc)"'
 	let strays = ($changed | where {|p| ($p | str starts-with ".github/") or not (do $allowed $p) })
 	if ($strays | is-not-empty) { error make {msg: $"flags: record: the change touches ($strays | str join ', '), outside the app's own files: refused, no pull request opened"} }
 	let title = $"($app | path expand | path basename): record live flag defaults"
-	let body = ($"Writes what production serves into flags_spec.cue, so the spec says it. No deploy, no change in behaviour: live already has these values.\n\n" + ($diffs | each {|d| $"- ($d.flag): ($d.spec) to ($d.live)" } | str join "\n") + $"\n\nRecords: ($diffs | each {|d| {($d.flag): $d.live} } | into record | to json -r)\n\nJournal: version ($version), flags ($diffs | get flag | str join '+'), values ($diffs | get live | each {|v| $v | to json -r } | str join ' '), cases ($cases).\n")
+	let body = ($"Writes what production serves into ($src), so the spec says it. No deploy, no change in behaviour: live already has these values.\n\n" + ($diffs | each {|d| $"- ($d.flag): ($d.spec) to ($d.live)" } | str join "\n") + $"\n\nRecords: ($diffs | each {|d| {($d.flag): $d.live} } | into record | to json -r)\n\nJournal: version ($version), flags ($diffs | get flag | str join '+'), values ($diffs | get live | each {|v| $v | to json -r } | str join ' '), cases ($cases).\n")
 	git-must (git-in $scratch checkout -q -B $branch) "git checkout" | ignore
 	git-must (git-in $scratch add -A -- (if $prefix == "" { "." } else { $prefix })) "git add" | ignore
 	# A machine with no git identity (a CI runner, a fresh box) still commits: the tool's own, only when none is set.
