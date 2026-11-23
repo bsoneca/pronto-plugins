@@ -451,6 +451,28 @@ let f = $r.doc.flags
 let klr = (^$nu.current-exe $kl | complete)
 check ($klr.exit_code == 0 and ($klr.stdout | from json | transpose k v | where v == false | is-empty)) $"keep-live: held, off-form, flipped and set-default entries carry the spec's metadata, a live-only flag its own \(($klr.stdout | str trim) ($klr.stderr | str trim)\)"
 
+# PRONTO-1518: a restore or a rollback writes an older version's flags with the metadata the spec says now (values and targeting kept), so a
+# restored document never lacks the mark the door's selector asks for.
+let wm = $"($dir)/with_metadata.nu"
+(r#'
+let set = {flagSetId: client}
+def entry [v: any, meta: any = null] {
+	let e = {state: ENABLED, variants: {default: $v, local: true}, defaultVariant: default, targeting: {if: [1]}}
+	if $meta == null { $e } else { $e | insert metadata $meta }
+}
+let old = {flags: {a: (entry true), b: (entry false $set), c: (entry true), gone: (entry true)}}
+let spec = {flags: {a: (entry false $set), b: (entry false), c: (entry false $set)}}
+let f = (with-current-metadata $old $spec).flags
+{
+	marked: ($f.a.metadata? == $set and $f.a.variants.default == true and $f.a.targeting == {if: [1]})
+	unmarked: (($f.b | get -o metadata) == null and $f.b.variants.default == false)
+	marked2: ($f.c.metadata? == $set)
+	unnamed: (($f.gone | get -o metadata) == null and $f.gone.variants.default == true)
+} | to json -r
+'#) | $"use ($here)/../live.nu with-current-metadata\n($in)" | save -f $wm
+let wmr = (^$nu.current-exe $wm | complete)
+check ($wmr.exit_code == 0 and ($wmr.stdout | from json | transpose k v | where v == false | is-empty)) $"with-current-metadata: an older version takes the spec's metadata and keeps its values \((if $wmr.exit_code != 0 { $wmr.stderr } else { $wmr.stdout }))"
+
 # (3) The record is of the version the push wrote: where live has moved on, it is skipped, said and noted.
 let rec3 = (recorded | length)
 let sk = (rlive [record $app --version $v_f1 --flags premium])
