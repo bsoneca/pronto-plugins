@@ -156,7 +156,7 @@ export async function reconcileDuring() {
 /** A failed call: the error's text, and that the lesson is as it was and not busy. */
 export async function failed() {
   const c = course(8);
-  const server = { move: async () => Promise.reject(new Error("offline")) };
+  const server = { move: () => Promise.reject(new Error("offline")) };
   const l = createLesson({ course: c, part: c.parts[0], chapter: c.parts[0].chapters[0], adapter, server, state: fakeServer().row() });
   const before = { state: l.state(), board: l.board() };
   let error;
