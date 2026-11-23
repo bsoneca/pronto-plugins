@@ -141,10 +141,11 @@ for (const [path, text, seed] of files) {
   const was = await Deno.readTextFile(`${app}/${path}`).catch(() => null);
   if (was !== null && was !== text && !header.test(was.split("\n").slice(0, 2).join("\n"))) fail(`${path} exists and is not pronto-lessons' (no header): it is not overwritten`);
 }
-// An earlier version put its files in the migrations folder, which pronto's generate owns: two copies would be replayed.
+// An earlier version put its files in the migrations folder, which pronto's generate owns: two copies would be replayed. The two
+// names held in _lessonsRawNames are generate's own copies of lessons/ (header and all), overwritten by the next generate: skipped.
 try {
   for await (const e of Deno.readDir(`${app}/services/database/migrations`)) {
-    if (!/_lessons(_spec)?\.sql$/.test(e.name)) continue;
+    if (!/_lessons(_spec)?\.sql$/.test(e.name) || e.name === rawSpec || e.name === rawFns) continue;
     const first = (await Deno.readTextFile(`${app}/services/database/migrations/${e.name}`)).split("\n")[0];
     if (header.test(first)) fail(`services/database/migrations/${e.name} is an earlier install's copy: remove it, the raw migrations are listed from lessons/`);
   }
