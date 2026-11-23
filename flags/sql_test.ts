@@ -143,3 +143,62 @@ Deno.test("a value holding a quote or a backslash reads back as written", async 
   eq(await value(pg, "x"), "it's \\ on", "the local value");
   await pg.close();
 });
+
+// What real flagd v0.18 answered for these rules and keys (OFREP, one run per key), pinned: the database must bucket a
+// player as the page does. A flagd upgrade that moves them (v0.15 and v0.18 both did) fails here before it splits a cohort.
+Deno.test("fractional buckets as flagd v0.18 does: murmur3 of the CBOR of [flagKey, targetingKey], (hash * weights) >> 32", async () => {
+  const pg = await db(await exported(SPEC, "flagd.sql"), false);
+  const variants = { a: "a", b: "b", c: "c" };
+  const flag = (fractional: unknown) => ({ state: "ENABLED", variants, defaultVariant: "a", targeting: { fractional } });
+  await put(pg, {
+    flags: {
+      three: flag([["a", 20], ["b", 30], ["c", 50]]),
+      own: flag([{ var: "targetingKey" }, ["a", 50], ["b", 50]]),
+      bare: flag([["a"], ["b"], ["c"]]),
+      long: flag([["a", 1], ["b", 1]]),
+      none: flag([["b", 0], ["c", 0]]),
+      later: { state: "ENABLED", variants, defaultVariant: "a", targeting: { if: [{ in: [{ var: "host" }, ["elsewhere"]] }, "c", { fractional: [["b", 100], ["c", 0]] }] } },
+    },
+  }, "bonk.example");
+  const nums = [...Array(25)].map((_, i) => `${i + 1}`);
+  const keys30 = [...nums, ME, TESTER, OTHER, "5f8d3c2e-1111-4222-8333-444455556666", "é☃"];
+  const keys21 = [...nums.slice(0, 20), "k".repeat(40)];
+  // The page's keys are player uuids and flag_value takes a uuid, so the table of other strings goes through the rule itself.
+  const raw = async (flag: string, keys: string[]) => {
+    const out: string[] = [];
+    for (const k of keys) {
+      const r = await pg.query<{ v: unknown }>(
+        "SELECT pronto_flags.rule((SELECT doc -> 'flags' -> $1::text -> 'targeting' FROM pronto_flags.live), jsonb_build_object('host', 'x', 'targetingKey', $2::text, '$flagd', jsonb_build_object('flagKey', $1::text))) AS v",
+        [flag, k],
+      );
+      out.push(String(r.rows[0].v));
+    }
+    return out.join("");
+  };
+  eq(await raw("three", keys30), "bccaccccabcaccbbaaccccccbbaccb", "20/30/50 across 30 keys");
+  eq(await raw("own", keys21), "abaaabbbbbaaaaababbaa", "a bucketing value of its own is hashed alone");
+  eq(await raw("bare", keys21), "babbcaaccccacabbbbbac", "weights left out are 1 each; a 40-byte key takes CBOR's one-byte length");
+  eq(await raw("long", keys21), "abaaabaaabbabbabaabaa", "a flag key of another length");
+  eq(await [ME, TESTER, OTHER].reduce(async (s, p) => (await s) + await value(pg, "three", p), Promise.resolve("")), "bac", "flag_value through a player uuid: the same buckets");
+  eq(await value(pg, "three"), "a", "no targetingKey reads the default variant, as flagd's TARGETING_KEY_MISSING does");
+  eq(await value(pg, "none"), "a", "weights summing to 0 read the default variant");
+  eq(await value(pg, "later", ME), "b", "a fractional as a branch of an if");
+  eq(await value(pg, "own"), "a", "a null bucketing value reads the default variant");
+  await pg.close();
+});
+
+Deno.test("a fractional rule that is malformed raises", async () => {
+  const pg = await db(await exported(SPEC, "flagd.sql"), false);
+  const bad = (fractional: unknown) => ({ state: "ENABLED", variants: { a: 1 }, defaultVariant: "a", targeting: { fractional } });
+  await put(pg, { flags: { empty: bad([]), notlist: bad([["a", 1], "b"]), wide: bad([["a", 2147483647], ["a", 1]]), num: bad([{ var: "x" }, ["a", 1]]), text: bad([["a", "5"]]), half: bad([["a", 1.5]]), huge: bad([["a", 1e30]]) } }, "localhost");
+  const refusal = async (f: string) => { try { await pg.query("SELECT pronto_flags.flag_on($1, $2::uuid)", [f, ME]); } catch (e) { return (e as Error).message; } return "answered"; };
+  eq(await refusal("empty"), "pronto_flags: a fractional rule needs a distribution: []", "no distribution");
+  eq(await refusal("notlist"), 'pronto_flags: a fractional distribution is [variant, weight]: "b"', "an element that is no pair");
+  eq(await refusal("wide"), "pronto_flags: the weights of a fractional rule sum past 2147483647", "weights past the limit");
+  const whole = "pronto_flags: a fractional weight is a whole number up to 2147483647: ";
+  eq(await refusal("text"), `${whole}"5"`, "a weight that is a string");
+  eq(await refusal("half"), `${whole}1.5`, "a weight that is not whole");
+  eq(await refusal("huge"), `${whole}1000000000000000000000000000000`, "a weight past the limit");
+  eq(await refusal("num"), "answered", "a bucketing value the context lacks reads the default variant");
+  await pg.close();
+});
