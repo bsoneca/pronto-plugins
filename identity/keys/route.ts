@@ -9,16 +9,26 @@ export const UPSTREAM = "{$PRONTO_UPSTREAM_KEYS:keys:8702}";
 // forward_auth runs before every `handle`, so the guard covers each `/auth/*` path whichever handle takes it: 0.32's
 // auth accepts a key's token as a session, and its rename answers a session with no `kid`, so a key could make keys of
 // its own that outlive it. The guard answers 403 for a key's token and 204 for anything else.
+// On k8s the upstream is the door's Dapr sidecar, which routes by `dapr-app-id`: each of the three sets it with `header_up`,
+// which replaces a client's own value, so a client cannot steer the guard or the keys paths to another app.
 export const BLOCK = [
   "  @keysauth path /auth/*",
   `  forward_auth @keysauth ${UPSTREAM} {`,
   "    uri /auth/keyguard",
+  "    header_up dapr-app-id keys",
+  "    import bounded-auth",
   "  }",
   "  handle /auth/keys* {",
-  `    reverse_proxy ${UPSTREAM}`,
+  `    reverse_proxy ${UPSTREAM} {`,
+  "      header_up dapr-app-id keys",
+  "      import bounded-auth",
+  "    }",
   "  }",
   "  handle /auth/key {",
-  `    reverse_proxy ${UPSTREAM}`,
+  `    reverse_proxy ${UPSTREAM} {`,
+  "      header_up dapr-app-id keys",
+  "      import bounded-auth",
+  "    }",
   "  }",
 ];
 

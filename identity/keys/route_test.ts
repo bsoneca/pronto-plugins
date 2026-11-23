@@ -43,11 +43,21 @@ Deno.test("the block goes after the end of a host whose own handle is the first,
 Deno.test("it guards every /auth/* path and sends the keys paths to the service, one path to a handle", () => {
   const text = BLOCK.join("\n");
   assert(text.includes("@keysauth path /auth/*"));
-  assert(text.includes("forward_auth @keysauth {$PRONTO_UPSTREAM_KEYS:keys:8702} {\n    uri /auth/keyguard\n  }"));
-  assert(text.includes("handle /auth/keys* {\n    reverse_proxy {$PRONTO_UPSTREAM_KEYS:keys:8702}\n  }"));
-  assert(text.includes("handle /auth/key {\n    reverse_proxy {$PRONTO_UPSTREAM_KEYS:keys:8702}\n  }"));
+  const via = "header_up dapr-app-id keys\n";
+  assert(text.includes(`forward_auth @keysauth {$PRONTO_UPSTREAM_KEYS:keys:8702} {\n    uri /auth/keyguard\n    ${via}    import bounded-auth\n  }`));
+  assert(text.includes(`handle /auth/keys* {\n    reverse_proxy {$PRONTO_UPSTREAM_KEYS:keys:8702} {\n      ${via}      import bounded-auth\n    }\n  }`));
+  assert(text.includes(`handle /auth/key {\n    reverse_proxy {$PRONTO_UPSTREAM_KEYS:keys:8702} {\n      ${via}      import bounded-auth\n    }\n  }`));
   // The guard comes first: forward_auth runs before every handle.
   assert(text.indexOf("forward_auth") < text.indexOf("handle /auth/keys*"));
+});
+
+Deno.test("all three set the Dapr app id with header_up, which replaces a client's own, and none passes it through", () => {
+  const lines = BLOCK.filter((l) => l.includes("dapr-app-id"));
+  assertEquals(lines.map((l) => l.trim()), Array(3).fill("header_up dapr-app-id keys"));
+  assertEquals(BLOCK.filter((l) => l.includes("import bounded-auth")).length, 3);
+  // `header_up +` adds beside a client's value and `-` deletes: only the bare form replaces it.
+  assert(!BLOCK.some((l) => /header_up\s+[+\-?]/.test(l)));
+  assert(!BLOCK.some((l) => /copy_headers|header_down|trusted_proxies/.test(l)));
 });
 
 Deno.test("it is idempotent, and replaces an earlier block", () => {

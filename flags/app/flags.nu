@@ -59,11 +59,11 @@ export def route [] {
 		$end
 	]
 	# Where the keys plugin is installed (its rule, pronto/keys.cue), the session is read from the keys service's
-	# /auth/door, the one a mecha without its own serves. The auth service's Dapr header goes with the auth service.
+	# /auth/door, the one a mecha without its own serves. The Dapr header names the keys service too: on k8s the upstream is the door's sidecar, which routes by it, and
+	# without one a client's own would choose the app.
 	let route = if ("pronto/keys.cue" | path exists) {
 		$route
-		| where {|l| $l != "        header_up dapr-app-id auth"}
-		| each {|l| $l | str replace '{$PRONTO_UPSTREAM_AUTH:auth:9999}' '{$PRONTO_UPSTREAM_KEYS:keys:8702}'}
+		| each {|l| $l | str replace '{$PRONTO_UPSTREAM_AUTH:auth:9999}' '{$PRONTO_UPSTREAM_KEYS:keys:8702}' | str replace "header_up dapr-app-id auth" "header_up dapr-app-id keys"}
 	} else { $route }
 	let all = open --raw docker/Caddyfile | lines
 	let from = $all | enumerate | where item == $begin | get index.0?

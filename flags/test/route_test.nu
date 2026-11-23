@@ -29,7 +29,7 @@ def main [] {
 	let keyed = (routed true)
 	check "with the keys plugin it asks the keys service's door" ($keyed | str contains 'forward_auth {$PRONTO_UPSTREAM_KEYS:keys:8702} {')
 	check "at /auth/door" ($keyed | str contains "uri /auth/door")
-	check "with no Dapr header for the auth service" (not ($keyed | str contains "dapr-app-id auth"))
+	check "with the keys service's Dapr header, never the auth service's" (($keyed | str contains "header_up dapr-app-id keys") and not ($keyed | str contains "dapr-app-id auth"))
 	check "the auth service is not asked" (not ($keyed | str contains PRONTO_UPSTREAM_AUTH))
 	check "flagd's own Dapr header stays" ($keyed | str contains "header_up dapr-app-id flagd")
 	check "the route is still before /auth/*" (($keyed | str index-of "handle /ofrep/*") < ($keyed | str index-of "handle /auth/*"))
