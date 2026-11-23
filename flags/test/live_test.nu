@@ -382,7 +382,7 @@ rm $"($app)/crash-live"
 let n2 = (object | length)
 let ran2 = (ran | length)
 let st = (livex [push $app --sync premium] {FAKE_OFREP_STALE: "1"})
-check ($st.exit_code != 0 and ($st.stderr | str contains "did not answer the new value of premium") and (premium (newest 0)) == $pre and (object | length) == $n2 + 2 and (newest 0).metadata.stage == "rolled-back" and (ran | length) == $ran2) "OFREP timeout (the door still says false): no case ran, rolled back"
+check ($st.exit_code != 0 and ($st.stderr | str contains "flagd did not pick up premium=true within") and (premium (newest 0)) == $pre and (object | length) == $n2 + 2 and (newest 0).metadata.stage == "rolled-back" and (ran | length) == $ran2) "OFREP timeout (the door still says false): no case ran, rolled back"
 
 # A green run that showed nothing is no pass: every step skipped (the flag off where the cases ran), no scenario
 # verdict at all, or a runner that counts its steps and ran none. Each rolls back; one that ran steps passes.
@@ -536,7 +536,7 @@ let f4 = (rlive [push $app --flip premium])
 rm $"($app)/fail-live"
 check ($f4.exit_code != 0 and ($f4.stderr | str contains "rolled back") and (premium (newest 0)).variants.default == false and (recorded | length) == $rec4) "a failing production case: rolled back, record not called"
 let f4b = (rlive [push $app --flip premium] {FAKE_OFREP_STALE: "1"})
-check ($f4b.exit_code != 0 and ($f4b.stderr | str contains "OFREP did not answer") and (premium (newest 0)).variants.default == false and (recorded | length) == $rec4) "an OFREP that never answers: rolled back, record not called"
+check ($f4b.exit_code != 0 and ($f4b.stderr | str contains "flagd did not pick up premium=true within") and (premium (newest 0)).variants.default == false and (recorded | length) == $rec4) "an OFREP that never answers: rolled back, record not called"
 
 # (5) A value for a string flag; a value of the wrong kind, or a bare name on a non-bool, is refused with nothing written.
 let n5 = (object | length)
@@ -741,7 +741,7 @@ elif cmd == "pr close":
 '##
 let ghlog = $"($dir)/rgh.log"
 $ghscript | str replace LOG $ghlog | str replace -a DIR $dir | save -f $"($fakegh)/gh"
-def rrun [args: list<string>, extra: record = {}] { livex $args ({GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com", PRONTO_FLAGS_RECORD: "", PATH: ([$fakegh] | append $env.PATH), PRONTO_FLAGS_JOURNAL: $"($dir)/rjournal.jsonl"} | merge $extra) }
+def rrun [args: list<string>, extra: record = {}] { livex $args ({GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com", PRONTO_FLAGS_RECORD: "", FLAGS_OFREP_CMD: "", PATH: ([$fakegh] | append $env.PATH), PRONTO_FLAGS_JOURNAL: $"($dir)/rjournal.jsonl"} | merge $extra) }
 def rjournal [] { open --raw $"($dir)/rjournal.jsonl" | lines | each {|l| $l | from json } }
 def ghcount [prefix: string] { open --raw $ghlog | lines | where {|l| $l | str starts-with $prefix } | length }
 let rspec_before = (open --raw $"($rapp)/flags_spec.cue")
@@ -1013,7 +1013,7 @@ flagsLive: {dir: \"flagstore\"}
 let store = $"(($drill | path expand))/flagstore"
 let want = $"file://($store)/flags.json"
 let jfile = $"($dir)/drill-journal.jsonl"
-def dlive [args: list<string>, extra: record = {}] { livex $args ({PRONTO_FLAGS_JOURNAL: $jfile} | merge $extra) }
+def dlive [args: list<string>, extra: record = {}] { livex $args ({PRONTO_FLAGS_JOURNAL: $jfile, FLAGS_OFREP_CMD: ""} | merge $extra) }
 def djournal [] { if ($jfile | path exists) { open --raw $jfile | lines | each {|l| $l | from json } } else { [] } }
 def dversions [] { glob $"($store)/versions/*.meta.json" | length }
 
@@ -1203,7 +1203,7 @@ def kspec [defs: record] {
 		$"flags: ($k): {default: ($d.default), local: true($acc)}\n" } | str join)
 	$"package drill\nflags: drill_break_checkout: {default: false, local: true}\n($body)flagsLive: {dir: \"flagstore\", url: \"https://drill.example\", database: \"cat >> ($dbsql)\", mirrors: [{ssh: \"ops@node.example\", namespace: \"drill\", configMap: \"drill-flags\"}]}\n" | save -f $"($drill)/flags_spec.cue"
 }
-def klive [args: list<string>, extra: record = {}] { dlive $args ({PATH: ([$bin] | append $env.PATH)} | merge $extra) }
+def klive [args: list<string>, extra: record = {}] { dlive $args ({PATH: ([$bin] | append $env.PATH), FLAGS_OFREP_CMD: $"python3 ($here)/fake_ofrep.py", FAKE_OFREP_FILE: $"($store)/flags.json"} | merge $extra) }
 def kflags [] { open $"($store)/flags.json" | get flags }
 def kdef [f: string] { (kflags | get $f).variants.default }
 def kputs [] { if ($dbsql | path exists) { open --raw $dbsql | lines | where {|l| $l | str starts-with "SELECT pronto_flags.put(" } } else { [] } }
@@ -1531,7 +1531,7 @@ flagsCases: {live: \"echo '✓ look 1s: pc'\"}
 }
 let pcj = $"($dir)/pc-journal.jsonl"
 let pcstore = $"(($pc | path expand))/flagstore"
-def pclive [args: list<string>] { livex $args {PRONTO_FLAGS_JOURNAL: $pcj, FLAGS_OFREP_CMD: "echo '{\"value\": true}'"} }
+def pclive [args: list<string>] { livex $args {PRONTO_FLAGS_JOURNAL: $pcj, FLAGS_OFREP_CMD: $"python3 ($here)/fake_ofrep.py", FAKE_OFREP_FILE: $"($pcstore)/flags.json"} }
 def pcgen [] { glob $"($pcstore)/versions/*.meta.json" | length }
 def pcflag [f: string] { open $"($pcstore)/flags.json" | get flags | get $f | get variants.default }
 def pcj-last [] { open --raw $pcj | lines | each {|l| $l | from json } | last }
