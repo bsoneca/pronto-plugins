@@ -4,7 +4,7 @@
 import { parseHTML } from "npm:linkedom@0.18.4";
 import { bound, checkView, elementOf as viewElement } from "../../android/template/terminal/bound.js";
 import { compile, elementOf, idOf } from "../../android/template/terminal/compile.js";
-import { length, parseColor } from "../../android/template/terminal/css.js";
+import { inlineImports, length, parseColor } from "../../android/template/terminal/css.js";
 import { atobOf, b64u, btoaOf, credentialOf, errorOf, optionsToJson, unb64u } from "../../android/template/terminal/passkeys.js";
 
 const pageOf = (body, base) =>
@@ -343,3 +343,6 @@ export function held(input, hz, moves) {
   return { controls, inputs, buttons, faults, padAfterStop: screen.querySelector("#hatch-probe-pad") !== null };
 }
 
+
+/** A stylesheet with its @imports inlined from the files given (path under the shell directory: text), as bundle.ts does. */
+export const inlined = (file, files) => inlineImports(files[file], file, (path) => files[path] ?? null);

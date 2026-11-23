@@ -28,6 +28,42 @@ export function splitTop(s, sep) {
   return out;
 }
 
+/**
+ * A stylesheet with its plain `@import "x";` / `@import url(x);` rules replaced, where they stand, by
+ * the imported sheet (cascade order kept), at build time: `file` is the sheet's path under the shell
+ * directory and `read(path)` its text, or null when the shell ships no such file. A relative import is
+ * looked for beside the importing file, then under the shell directory itself: omnishell injects a
+ * screen's sheet into the page as a style, so on the web its imports are the page's. An import that
+ * names another origin, leaves the shell directory, repeats a sheet being inlined (a cycle), carries
+ * a media, layer or supports condition, or names a missing file is left in place, which the compiler
+ * reports as unsupported.
+ */
+export function inlineImports(text, file, read, chain) {
+  const seen = (chain || []).concat(file);
+  const dir = file.includes("/") ? file.slice(0, file.lastIndexOf("/") + 1) : "";
+  const re = /\/\*[\s\S]*?\*\/|@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s"']*))\s*\)|"([^"]*)"|'([^']*)')\s*;/gi;
+  const inside = (rel) => {
+    const parts = [];
+    for (const seg of rel.split("/")) {
+      if (seg === "..") { if (!parts.length) return null; parts.pop(); } else if (seg !== "." && seg !== "") parts.push(seg);
+    }
+    return parts.join("/") || null;
+  };
+  return text.replace(re, (m, a, b, c, d, e) => {
+    const href = [a, b, c, d, e].find((v) => v !== undefined);
+    if (!href || /^([a-z][a-z0-9+.-]*:|\/\/)/i.test(href)) return m;
+    const clean = href.split(/[?#]/)[0];
+    const wanted = clean.startsWith("/shell/") ? [clean.slice("/shell/".length)] : clean.startsWith("/") ? [] : [dir + clean, clean];
+    for (const rel of wanted) {
+      const path = inside(rel);
+      if (!path || seen.includes(path)) continue;
+      const body = read(path);
+      if (body !== null && body !== undefined) return inlineImports(body, path, read, seen);
+    }
+    return m;
+  });
+}
+
 /** Splits a text at whitespace that is outside parentheses and strings. */
 export function splitWs(s) {
   const out = [];

@@ -240,6 +240,55 @@ cases: {
 		{get: "items.0.type", expect: "container", why: "14rem = 224 and 300 holds one column: a vertical container, not a grid"},
 	]}
 
+	"a grid of fixed and flexible tracks is rows of weighted and fixed cells": {suite: "android", steps: [
+		{call: "android.render", args: [#"<div class="g"><p>1</p><p>2</p><p>3</p><p>4</p><p>5</p></div>"#, ".g { display: grid; grid-template-columns: 1fr 2fr; gap: 10px 6px } .g p { margin: 0 }"]},
+		{keep: "page"},
+		{get: "items.0"},
+		{value: "$", holds: {type: "container", orientation: "vertical", item_spacing: 10}},
+		{pick: ["items.length", "items.0.items.0.width", "items.0.items.0.margins", "items.0.items.1.width", "items.0.items.1.margins", "items.2.items.0.width", "items.2.items.1.width"], expect: [3, {type: "match_parent", weight: 1}, {right: 6}, {type: "match_parent", weight: 2}, null, {type: "match_parent", weight: 1}, {type: "match_parent", weight: 2}], why: "five cells in two columns: three rows; the last holds one cell, the empty track keeps its weight"},
+		{use: "page"},
+		{call: "android.reported", args: ["$"], expect: []},
+		{call: "android.render", args: [#"<div class="g"><p>a</p><p>b</p></div>"#, ".g { display: grid; grid-template-columns: 120px 1fr }"]},
+		{pick: ["items.0.items.0.items.0.width", "items.0.items.0.items.1.width"], expect: [{type: "fixed", value: 120}, {type: "match_parent", weight: 1}]},
+		{call: "android.render", args: [#"<div class="g"><p>a</p><p>b</p><p>c</p></div>"#, ".g { display: grid; grid-template-columns: repeat(2, 1fr) 5rem }"]},
+		{pick: ["items.0.items.0.items.length", "items.0.items.0.items.0.width", "items.0.items.0.items.2.width"], expect: [3, {type: "match_parent", weight: 1}, {type: "fixed", value: 80}]},
+		{call: "android.render", args: [#"<div class="g"><p>a</p><p>b</p></div>"#, ".g { display: grid; grid-template-columns: auto 1fr }"]},
+		{call: "android.reported", args: ["$"], expect: ["grid-template-columns with tracks of unequal size | div.g"], why: "auto has no peer: still reported"},
+	]}
+
+	"position: fixed with every inset is a layer over the screen; one edge pinned is pinned; the rest is reported": {suite: "android", steps: [
+		{call: "android.render", args: [#"<p>page</p><div class="m"><p>modal</p></div>"#, ".m { position: fixed; inset: 0; background: #000000 }"]},
+		{keep: "page"},
+		{pick: ["root.orientation", "root.items.length", "root.items.0.id", "root.items.0.items.0.items.0.text", "root.items.1.width", "root.items.1.height", "root.items.1.margins", "root.items.1.items.0.text"], expect: ["overlap", 2, "page", "page", {type: "match_parent"}, {type: "match_parent"}, null, "modal"]},
+		{use: "page"},
+		{call: "android.reported", args: ["$"], expect: []},
+		{call: "android.render", args: [#"<p>page</p><nav class="b">bar</nav><aside class="c">x</aside>"#, ".b { position: fixed; left: 0; right: 0; bottom: 0; height: 48px } .c { position: fixed; top: 8px; right: 12px }"]},
+		{keep: "page"},
+		{pick: ["root.items.length", "root.items.1.width", "root.items.1.alignment_vertical", "root.items.1.height", "root.items.2.alignment_horizontal", "root.items.2.alignment_vertical", "root.items.2.margins", "root.items.2.width"], expect: [3, {type: "match_parent"}, "bottom", {type: "fixed", value: 48}, "right", "top", {right: 12, top: 8}, {type: "wrap_content"}]},
+		{use: "page"},
+		{call: "android.reported", args: ["$"], expect: []},
+		{call: "android.render", args: [#"<p>page</p><p class="n">no inset</p>"#, ".n { position: fixed; top: 0 }"]},
+		{keep: "page"},
+		{pick: ["root.orientation", "root.items.length"], expect: ["vertical", 1]},
+		{use: "page"},
+		{call: "android.reported", args: ["$"], expect: ["position: fixed | p.n"], why: "no horizontal inset: where it would stand is unknown, so not drawn as a layer"},
+	]}
+
+	"a stylesheet's @import is inlined where it stood, by file, inside the shell directory": {suite: "android", steps: [
+		{call: "android.inlined", args: ["screens/a.css", {
+			"screens/a.css": "@import url(\"shared/strip.css\");\n.a { color: red }\n@import 'b.css';\n/* @import \"commented.css\"; */\n",
+			"screens/shared/strip.css": ".strip { color: blue }\n@import \"../deep.css\";",
+			"screens/b.css": ".b { color: green }",
+			"screens/deep.css": ".deep { color: pink }",
+			"commented.css": "SHOULD NOT APPEAR",
+		}], expect: ".strip { color: blue }\n.deep { color: pink }\n.a { color: red }\n.b { color: green }\n/* @import \"commented.css\"; */\n", why: "each import sits where its @import was, relative to the importing file; a comment is left alone"},
+		{call: "android.inlined", args: ["x.css", {"x.css": "@import \"y.css\"; .x{}", "y.css": "@import \"x.css\"; .y{}"}], expect: "@import \"x.css\"; .y{} .x{}", why: "a cycle is cut at the sheet being inlined: that import stays, and is reported"},
+		{call: "android.inlined", args: ["screens/p.css", {"screens/p.css": "@import url(\"shared/s.css\");.p{}", "shared/s.css": ".s{}"}], expect: ".s{}.p{}", why: "a screen's sheet is injected as a style on the web, so its relative import is also tried from the shell directory"},
+		{call: "android.inlined", args: ["s/x.css", {"s/x.css": "@import \"../../../out.css\"; @import \"/etc/p.css\"; @import url(https://e.com/a.css); @import \"y.css\" screen; @import \"gone.css\"; @import \"/shell/s/z.css\";", "s/z.css": ".z{}", "out.css": "OUT"}], expect: "@import \"../../../out.css\"; @import \"/etc/p.css\"; @import url(https://e.com/a.css); @import \"y.css\" screen; @import \"gone.css\"; .z{}", why: "outside the shell directory, another origin, a condition, a missing file: left, so reported; /shell/ is the root"},
+		{call: "android.render", args: ["<p>a</p>", "@import url(\"shared/strip.css\"); p { color: red }"]},
+		{call: "android.reported", args: ["$"], expect: ["@import | url(\"shared/strip.css\")"], why: "one that was not inlined is still reported"},
+	]}
+
 	"a single-column grid is a vertical container spaced by the row gap; justify-self places a child": {suite: "android", steps: [
 		{call: "android.render", args: [#"<form class="f"><label>Name <input></label><button>Go</button></form>"#, ".f { display: grid; gap: 12px } .f label { display: grid; gap: 4px } .f button { justify-self: start; min-height: 2.75rem }"]},
 		{get: "items.0"},

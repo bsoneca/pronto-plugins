@@ -87,6 +87,9 @@ function newState(document, opts, styler, rules) {
     noBg: null,
     edges: new Map(),
     bevels: new Map(),
+    // position: fixed elements drawn as a layer over the screen (overlays), and the ones being placed there
+    overlays: [],
+    pinned: new Set(),
   };
 }
 
@@ -691,7 +694,7 @@ function checkProps(el, st, C, par) {
   const p = st.p;
   const sel = desc(el);
   const pos = p.position;
-  if (pos === "absolute" || pos === "fixed" || pos === "sticky") C.rep("position: " + pos, sel);
+  if ((pos === "absolute" || pos === "fixed" || pos === "sticky") && !C.pinned.has(el)) C.rep("position: " + pos, sel);
   if (p.float === "left" || p.float === "right") C.rep("float", sel);
   for (const name of ["transform", "filter", "backdrop-filter", "clip-path", "mix-blend-mode", "text-shadow", "column-count", "columns", "mask", "mask-image"]) {
     const v = p[name];
@@ -763,7 +766,60 @@ function bevel(el, divs, C) {
   return [wrap];
 }
 
+// A position: fixed element that names an inset on each axis is drawn as a layer over the screen, not
+// where it stands: `{h, v}`, each {from: "start" | "end", both, a, z}: pinned to that edge, or to both
+// (and stretched, when its size is auto), the insets a and z in dp. Null for one that is not: no
+// inset on an axis leaves it where it would have stood, and an inset it cannot measure is no inset.
+function fixedLayer(st, C) {
+  if (st.p.position !== "fixed") return null;
+  let bad = false;
+  const inset = (name, basis) => {
+    const v = st.p[name];
+    if (v === undefined || v === "auto") return null;
+    const n = length(v, { fs: st.fs, basis, width: C.width, vh: C.vh });
+    if (n === null) bad = true;
+    return n;
+  };
+  const axis = (first, last, basis, dim) => {
+    const a = inset(first, basis), z = inset(last, basis);
+    const auto = !st.p[dim] || st.p[dim] === "auto";
+    if (a !== null && z !== null) return { from: "start", both: auto, a, z };
+    if (a !== null) return { from: "start", both: false, a, z: 0 };
+    if (z !== null) return { from: "end", both: false, a: 0, z };
+    return null;
+  };
+  const h = axis("left", "right", C.width, "width"), v = axis("top", "bottom", C.vh, "height");
+  return h && v && !bad ? { h, v } : null;
+}
+
 function convert(el, pctx, C) {
+  if (!C.pinned.has(el) && drawn(el, C)) {
+    const layer = fixedLayer(C.style(el), C);
+    if (layer) {
+      C.pinned.add(el);
+      const divs = convertAt(el, { kind: "block", avail: C.width, ta: undefined }, C);
+      for (const d of divs) {
+        const mg = Object.assign({}, d.margins);
+        const place = (ax, side, size, lo, hi, align) => {
+          if (ax.both) d[size] = { type: "match_parent" };
+          else if (d[size] && d[size].type === "match_parent") d[size] = { type: "wrap_content" };
+          if (ax.from === "end" && !ax.both) d[align] = side === "x" ? "right" : "bottom";
+          else if (!ax.both) d[align] = side === "x" ? "left" : "top";
+          if (ax.a) mg[lo] = (mg[lo] || 0) + round(ax.a);
+          if (ax.z) mg[hi] = (mg[hi] || 0) + round(ax.z);
+        };
+        place(layer.h, "x", "width", "left", "right", "alignment_horizontal");
+        place(layer.v, "y", "height", "top", "bottom", "alignment_vertical");
+        if (Object.keys(mg).length) d.margins = mg;
+        C.overlays.push(d);
+      }
+      return [];
+    }
+  }
+  return convertAt(el, pctx, C);
+}
+
+function convertAt(el, pctx, C) {
   let out = convertOne(el, pctx, C);
   if (C.edges.size) out = decorate(el, out, C);
   if (C.bevels.size) out = bevel(el, out, C);
@@ -869,6 +925,32 @@ function childItems(el, st, cctx, C, flexish, parentId) {
   return out;
 }
 
+// The tracks of a grid-template-columns written out, each {fr: n} or {px: n}; null when one is not a
+// fixed length or a flexible one (auto, min-content, a minmax that is not minmax(x, Nfr), auto-fit...).
+function trackSizes(v, lctx) {
+  const out = [];
+  for (const t of splitWs(v.trim().toLowerCase())) {
+    const rep = /^repeat\(\s*(\d+)\s*,\s*([\s\S]+)\)$/.exec(t);
+    if (rep) {
+      const inner = trackSizes(rep[2], lctx);
+      if (!inner) return null;
+      for (let k = 0; k < parseInt(rep[1], 10); k++) out.push(...inner);
+      continue;
+    }
+    const mm = /^minmax\(([\s\S]+)\)$/.exec(t);
+    const one = mm ? (splitTop(mm[1], ",")[1] || "").trim() : t;
+    const fr = /^(\d*\.?\d+)fr$/.exec(one);
+    if (fr) { out.push({ fr: parseFloat(fr[1]) }); continue; }
+    const px = mm ? null : length(one, lctx);
+    if (px === null) return null;
+    out.push({ px });
+  }
+  return out;
+}
+
+// Whether the tracks differ in size, so a grid view (equal columns only) cannot draw them.
+const unequalTracks = (tracks) => tracks && tracks.length > 1 && !tracks.every((t) => t.fr !== undefined && t.fr === tracks[0].fr);
+
 function gridColumns(st, gap, avail, el, C) {
   const v = (st.p["grid-template-columns"] || "").trim().toLowerCase();
   if (!v || v === "none") return 1;
@@ -940,8 +1022,57 @@ function containerElement(el, st, pctx, C, kind) {
     else if (reverse && !jc) div[row ? "content_alignment_horizontal" : "content_alignment_vertical"] = row ? "right" : "bottom";
     items = childItems(el, st, childCtx, C, true, id);
   } else if (kind === "grid") {
-    const cols = gridColumns(st, colGap, b.contentW, el, C);
-    if (cols <= 1) {
+    const tracks = trackSizes(p["grid-template-columns"] || "", lctx);
+    const weighted = unequalTracks(tracks);
+    const cols = weighted ? tracks.length : gridColumns(st, colGap, b.contentW, el, C);
+    if (weighted) {
+      // Tracks of unequal size: each grid row is a horizontal container, its cells a fixed width or a weight.
+      const frs = tracks.reduce((a, t) => a + (t.fr || 0), 0);
+      const fixed = tracks.reduce((a, t) => a + (t.px || 0), 0);
+      const unit = frs > 0 ? Math.max(0, (b.contentW - fixed - colGap * (cols - 1)) / frs) : 0;
+      const least = Math.min(...tracks.map((t) => (t.fr !== undefined ? t.fr * unit : t.px)));
+      childCtx = { kind: "grid", avail: Math.max(0, least), ai: p["align-items"], ji: p["justify-items"], ta: p["text-align"] };
+      div.orientation = "vertical";
+      if (rowGap) div.item_spacing = round(rowGap);
+      const cells = childItems(el, st, childCtx, C, true, id);
+      const rows = [];
+      let at = 0, row = null;
+      for (const n of el.childNodes) {
+        if (n.nodeType !== 1 || !drawn(n, C)) continue;
+        const d = cells.find((x) => x.id === idOf(n));
+        if (!d) continue;
+        const sp = spanOf(n, C.style(n), cols);
+        if (!row || at + sp > cols) { row = []; rows.push({ from: 0, cells: row }); at = 0; }
+        row.push({ d, from: at, sp });
+        at += sp;
+      }
+      const trackWidth = (span) => span.every((t) => t.fr !== undefined)
+        ? { type: "match_parent", weight: span.reduce((a, t) => a + t.fr, 0) }
+        : span.every((t) => t.px !== undefined) ? { type: "fixed", value: round(span.reduce((a, t) => a + t.px, 0)) } : null;
+      // what the grid draws that is not a child element (a pseudo-element's text) keeps its place after the rows
+      const placed = new Set(rows.flatMap((r) => r.cells.map((c) => c.d)));
+      items = rows.map((r, n) => {
+        const line = { type: "container", id: id + "_r" + n, orientation: "horizontal", width: { type: "match_parent" }, height: { type: "wrap_content" }, items: [] };
+        let used = 0;
+        for (const c of r.cells) {
+          const span = tracks.slice(c.from, c.from + c.sp);
+          let w = trackWidth(span);
+          if (!w) { C.rep("a grid cell spanning fixed and flexible tracks", desc(el)); w = { type: "match_parent", weight: 1 }; }
+          else if (w.type === "fixed" && c.sp > 1) w.value = round(w.value + colGap * (c.sp - 1));
+          c.d.width = w;
+          if (colGap && c.from + c.sp < cols) c.d.margins = Object.assign({}, c.d.margins, { right: ((c.d.margins || {}).right || 0) + round(colGap) });
+          line.items.push(c.d);
+          used = c.from + c.sp;
+        }
+        // tracks a short last row leaves empty keep their share
+        if (used < cols) {
+          const rest = trackWidth(tracks.slice(used));
+          if (rest) line.items.push({ type: "container", id: id + "_r" + n + "_e", width: rest, height: { type: "wrap_content" }, items: [] });
+          else C.rep("a grid row that ends on fixed and flexible empty tracks", desc(el));
+        }
+        return line;
+      }).concat(cells.filter((x) => !placed.has(x)));
+    } else if (cols <= 1) {
       childCtx = { kind: "col", g: true, avail: b.contentW, ai: p["justify-items"], ji: p["justify-items"], ta: p["text-align"] };
       div.orientation = "vertical";
       if (rowGap) div.item_spacing = round(rowGap);
@@ -1255,6 +1386,13 @@ export function compile(document, opts) {
     try { items = convert(body, { kind: "block", avail, ta: undefined }, C); } catch (e) { C.rep("compile error: " + (e && e.message), "body"); }
     for (const d of items) d.width = { type: "match_parent" };
     root.items = items;
+    if (C.overlays.length) {
+      // position: fixed layers lie over the screen, whole: the page keeps the html element's margin and padding in a view of its own
+      const page = { type: "container", id: "page", orientation: "vertical", width: { type: "match_parent" }, height: { type: "match_parent" }, items };
+      if (root.paddings) { page.paddings = root.paddings; delete root.paddings; }
+      root.orientation = "overlap";
+      root.items = [page, ...C.overlays];
+    }
     checkProps(html, hs, C, null);
   }
   live = C.seen;

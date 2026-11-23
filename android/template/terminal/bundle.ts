@@ -3,6 +3,7 @@
 // from the app's root: deno run -A --no-lock android/terminal/bundle.ts <omnishell-dir>.
 import { transform, stop } from "npm:esbuild@0.25.12";
 import { localRoots } from "./trust.ts";
+import { inlineImports } from "./css.js";
 
 const [omnishell] = Deno.args;
 if (!omnishell) throw new Error("bundle: name omnishell's directory");
@@ -87,6 +88,35 @@ for (const [name, { src }] of Object.entries(hostDom)) {
 await Deno.remove(hatchMap);
 // SES at omnishell's own pin, so the phone's cage is the page's.
 await Deno.copyFile(`${omnishell}/interpreter/vendor/ses.umd.min.js`, `${dir}/ses.umd.min.js`);
+// A stylesheet that @imports another is shipped with the import inlined where it stood: the compiler
+// reads each sheet whole and does not follow an import. The rewritten copy lands in this generated
+// directory, the last of the app's asset directories, so it answers at the sheet's own path.
+const readSheet = (path: string): string | null => {
+  try { return Deno.readTextFileSync(`shell/${path}`); } catch { return null; }
+};
+const sheetsOf = (sub: string): string[] => {
+  const out: string[] = [];
+  try {
+    for (const f of Deno.readDirSync(`shell/${sub}`)) {
+      const path = sub ? `${sub}/${f.name}` : f.name;
+      if (f.isDirectory) out.push(...sheetsOf(path));
+      else if (f.isFile && f.name.endsWith(".css")) out.push(path);
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  return out;
+};
+for (const path of sheetsOf("")) {
+  await Deno.remove(`${dir}/${path}`).catch(() => {});
+  const text = readSheet(path)!;
+  if (!/@import\b/i.test(text)) continue;
+  const inlined = inlineImports(text, path, readSheet);
+  if (inlined === text) continue;
+  await Deno.mkdir(`${dir}/${path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "."}`, { recursive: true });
+  await Deno.writeTextFile(`${dir}/${path}`, inlined);
+  console.log(`stylesheet ${path}: @import inlined`);
+}
 // The catalogues the interpreter fetches beside the screens, under the same names.
 try {
   for await (const f of Deno.readDir("messages")) if (f.name.endsWith(".json")) await Deno.copyFile(`messages/${f.name}`, `${dir}/messages/${f.name}`);
