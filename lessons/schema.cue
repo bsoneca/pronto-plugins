@@ -13,7 +13,7 @@ import (
 	id:   =~"^[a-z][a-z0-9_]*$"
 	flag: =~"^[a-z][a-z0-9_]*$"
 	// The languages every line carries, exactly.
-	locales: [string, ...string]
+	locales: [=~"^[a-z]{2}(-[A-Z]{2})?$", ...=~"^[a-z]{2}(-[A-Z]{2})?$"]
 	hint: price: int & >=0
 	parts: [#Part, ...#Part]
 

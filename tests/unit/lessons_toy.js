@@ -98,8 +98,20 @@ export function resume(initial) {
 export { fnv1a };
 
 // The schema's refusals: the example's JSON changed in one way, vetted as a #Course by the module's cue.
+// Every key `from` of the object and its children renamed `to`: a locale spelt another way, in the course's list and in every line.
+const rename = (o, from, to) => {
+  if (Array.isArray(o)) o.forEach((v, i) => (typeof v === 'string' && v === from ? (o[i] = to) : rename(v, from, to)));
+  else if (o && typeof o === 'object') for (const k of Object.keys(o)) {
+    rename(o[k], from, to);
+    if (k === from) { o[to] = o[k]; delete o[k]; }
+  }
+};
+
 const mutations = {
   none: () => {},
+  badLocale: (c) => rename(c, 'es', 'ES'),
+  longLocale: (c) => rename(c, 'es', 'esp'),
+  regionLocale: (c) => rename(c, 'es', 'es-MX'),
   dropTranslation: (c) => delete c.parts[0].chapters[0].intro["pt-BR"],
   extraLocale: (c) => (c.parts[0].chapters[0].outro.fr = "x"),
   shortPool: (c) => c.parts[0].complaints.pop() && c.parts[0].complaints.pop(),
