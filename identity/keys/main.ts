@@ -17,7 +17,7 @@ if (import.meta.main) {
   if (!url) throw new Error("DATABASE_URL is required");
   const timeout = Number(env("AUTH_STATEMENT_TIMEOUT_MS") || 0);
   if (!(timeout >= 0)) throw new Error(`AUTH_STATEMENT_TIMEOUT_MS is ${timeout}, not milliseconds`);
-  const { default: postgres } = await import("../broker/vendor/postgres.js");
+  const { default: postgres } = await import("./vendor/postgres.js");
   const sql = postgres(url, {
     max: 5,
     idle_timeout: 30,

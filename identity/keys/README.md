@@ -2,7 +2,7 @@
 
 An account's API keys and the door's account check, for an app on a mecha whose auth service has neither (mecha 0.32 serves no `/auth/keys*` and no `/auth/door`; PRONTO-740). It matches the fork's auth service route for route (its README, "API keys"), signs with the stack's secret and reads `mecha_auth.api_key` in place, so no key moves.
 
-Files: [`keys.ts`](keys.ts) (handlers over a `Db`), [`main.ts`](main.ts) (Postgres, the server), [`keys_test.ts`](keys_test.ts) (PGlite).
+Files: [`keys.ts`](keys.ts) (handlers over a `Db`), [`main.ts`](main.ts) (Postgres, the server), [`route.ts`](route.ts) (the door's routes), [`install.ts`](install.ts) and [`app/`](app) (what an app gets), [`keys_test.ts`](keys_test.ts) (PGlite) and [`route_test.ts`](route_test.ts).
 
 ## Routes
 
@@ -38,14 +38,23 @@ It keeps no secret of its own: the signing secret and `DATABASE_URL` are the sta
 
 ## Adopting it
 
-Run it beside the stack, declared as billing's service is (`billing/app/billing_plugin.cue`): a target `keys` with `expose: http: {port: 8702, env: "KEYS_PORT"}`, `deno run --no-config --allow-net --allow-env identity/keys/main.ts` (copy `identity/keys/*.ts` and `identity/broker/vendor/postgres.js` beside the app), `after: migrate: "completed"`, and `PRONTO_UPSTREAM_KEYS: {peer: "keys", port: "http"}` on the door's entrypoint. In the door's Caddyfile:
+```sh
+<this repo>/bin/pronto-keys <app-dir>   # then the app's generate, and commit what it writes
+```
 
-- Point `/ofrep/`'s `forward_auth` at `{$PRONTO_UPSTREAM_KEYS:keys:8702}` (`uri /auth/door`), not at auth.
-- Put `forward_auth {$PRONTO_UPSTREAM_KEYS:keys:8702} { uri /auth/keyguard }` on every `/auth/*` path that goes to 0.32's auth: its auth takes a key's token as a session and its rename answers a new session without `kid`, so without the guard a key could make keys of its own that outlive it.
-- Route `/auth/keys*` and `/auth/key` to it, one path to a `handle`, before `/auth/*` (Caddy sorts a `handle`'s single path longest first; a named matcher of several paths is not sorted).
+It writes, regenerated each time: `keys_plugin.cue` (the `keys` target on 8702 beside the stack, the door's `PRONTO_UPSTREAM_KEYS`), `pronto/keys.cue` (the generate step `keys-route`, priority 6, after pronto's writer), `keys/` (the service and `route.ts`, which the step runs). The step splices a `# keys:begin` … `# keys:end` block into `docker/Caddyfile`, before the first top-level `handle`:
+
+- `forward_auth @keysauth … { uri /auth/keyguard }` on every `/auth/*` path, ahead of every `handle` (forward_auth runs first): 0.32's auth takes a key's token as a session and its rename answers a new session without `kid`, so without the guard a key could make keys of its own that outlive it.
+- `/auth/keys*` and `/auth/key` to the service, one path to a `handle` (Caddy sorts a `handle`'s single path longest first).
+
+The app sets, in its own CUE beside them: `keysGate: "schema.name"` (AUTH_API_KEYS_GATE), `keysHook: "schema.name"` (AUTH_KEY_EXCHANGED_HOOK) and `keysDb` (the database a launch at hand is made in, by default the package's name).
+
+With the plugin installed, pronto-flags' route (`flags/app/flags.nu`) sends `/ofrep/`'s `forward_auth` to `{$PRONTO_UPSTREAM_KEYS:keys:8702}` `/auth/door` in place of the auth service, with no Dapr header; the keys plugin's `pronto/keys.cue` is what it looks for.
+
+The door depends on the service: with it down every `/auth/*` answers 502. A release needs it as a sidecar beside the door (`PRONTO_UPSTREAM_KEYS`, and `DATABASE_URL` as the auth service's `AUTH_DATABASE_URL` and `PGRST_JWT_SECRET` as secrets), which this plugin does not write.
 
 ## Known limit
 
 0.32's tenancy floor does not read a key token's `scp`, so a `read` key is not held to reading through `/crud`. Keep keys behind the gate (the flag off) until the floor enforces `scp`.
 
-Test: `deno test --no-config --allow-net --allow-read --allow-write --allow-env identity/keys`.
+Test: `deno test --no-config --allow-net --allow-read --allow-write --allow-env --allow-run identity/keys` and `./saytw --script tools.nu nu flags/test/route_test.nu`.
