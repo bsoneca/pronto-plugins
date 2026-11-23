@@ -324,8 +324,8 @@ wspec true
 wreaders
 let nu0 = (object | length)
 let wu = (livex [push $app --flip "theme=dark" --untested "no cases"] $wenv)
-check ($wu.exit_code == 0 and (object | length) == $nu0 + 3 and (newest 1).metadata.cases == "watching" and (newest 0).metadata.cases == "untested" and ((newest 0).metadata.reading | str contains "errs 1/1")) $"watch: a flip with no production case is watched: ($wu.stderr | str trim | lines | last 2 | str join ' / ')"
-check ((newest 1).metadata.before == ((object | get 3).generation)) "watch: the version before the push is on the watching version"
+check ($wu.exit_code == 0 and (object | length) == $nu0 + 2 and (newest 1).metadata.cases == "watching" and (newest 0).metadata.cases == "untested" and ((newest 0).metadata.reading | str contains "errs 1/1")) $"watch: a flip with no production case is watched: ($wu.stderr | str trim | lines | last 2 | str join ' / ')"
+check ((newest 1).metadata.before == ((object | get 2).generation)) "watch: the version before the push is on the watching version"
 let wbad = (livex [push $app --flip "theme=light" --untested "back" --watch 90] $wenv)
 check ($wbad.exit_code != 0 and ($wbad.stderr | str contains "say a window like 10m")) "watch: a --watch that is no window is refused"
 livex [push $app --flip "theme=light" --untested "back"] $wenv | ignore

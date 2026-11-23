@@ -766,7 +766,7 @@ def vacuous [out: string, flag: string]: nothing -> string {
 
 # The version a push read, written again as the newest after a failed live stage.
 def restore [at: record, app: path, to: string, now: string, names: string, why: string] {
-	let again = (commit $at $app (current-metadata-text (store-version $at $to) $app) {stage: rolled-back, flag: $names, cases: failed, note: $why} $now)
+	let again = (commit $at $app (current-metadata-text (store-version $at $to) $app) {stage: rolled-back, flag: $names, cases: failed, note: ($why | str substring 0..<500)} $now)
 	print -e $"flags: ($at.url) is version ($to)'s flags again, as version ($again)"
 }
 
@@ -796,7 +796,7 @@ def read-guard [app: path, g: record, flag: string, stage: string, from: datetim
 	let iso = {|d: datetime| $d | date to-timezone utc | format date "%Y-%m-%dT%H:%M:%SZ" }
 	let vars = {FLAG: $flag, STAGE: $stage, GUARDRAIL: $g.name, WINDOW_START: (do $iso $from), WINDOW_END: (do $iso $to), BASELINE_START: (do $iso ($from - 1day)), BASELINE_END: (do $iso ($to - 1day))}
 	let r = (run-cases $app $g.cmd $vars --wrap $wrap)
-	if not $r.ok { error make {msg: $"the reader of ($g.name) failed: ($r.out | lines | last 2 | str join ' / ')"} }
+	if not $r.ok { error make {msg: $"the reader of ($g.name) failed: ($r.out | lines | last 2 | str join ' / ' | str substring 0..<300)"} }
 	let j = (try { $r.stdout | lines | last | from json } catch { null })
 	if ($j | describe | str starts-with "record") == false or ($j | get -o value | describe) not-in ["int" "float"] { error make {msg: $"the reader of ($g.name) printed no {\"value\": n} last line"} }
 	if $g.kind != "probe" and ($j | get -o baseline | describe) not-in ["int" "float"] { error make {msg: $"the reader of ($g.name) printed no baseline: a reading with nothing to compare to proves nothing \(0 is a baseline\)"} }
@@ -892,6 +892,9 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 		# The production check is asked of a dry run too.
 		let dm = (merge-live $at $app (cue-of $app flagd.document) $flip $drop $sync)
 		production-check $app $dm.old $dm.doc (changed-flags $dm.old $dm.doc) | ignore
+		# The watch's refusals too: a bad --watch, or a reader that cannot be run.
+		let dg = (guard-of $at $watch)
+		if $dg != null { guard-check $app $dg (cases-wrap $at) }
 		if ($stages | is-not-empty) {
 			let st = (staged-checks $stages $flip $sync (changed-flags $dm.old $dm.doc) $dm.doc $dm.old $keyed)
 			print $"flags: dry run: ($st.flag) would go to ($stages | each {|s| $'($s)%' } | str join ', '), by targetingKey, from ($st.oldv)"
@@ -952,8 +955,9 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	}
 	if ($live | is-empty) {
 		let cases = $cases_none
-		let v = (write-flags $at $doc $app --meta ({stage: all, flag: $names, cases: $cases, note: $notes} | merge $kept) --from $before)
-		let v = if $guard == null { $v } else { watch-flip $at $app $doc $names $before $v ({stage: all, flag: $names, cases: $cases, note: $notes} | merge $kept) $guard (cases-wrap $at) $cases }
+		let meta = ({stage: all, flag: $names, cases: $cases, note: $notes} | merge $kept)
+		# A watched flip's first version is already `watching`: no version of it reads finished before its verdict.
+		let v = if $guard == null { write-flags $at $doc $app --meta $meta --from $before } else { watch-flip $at $app $doc $names $before $before $meta $guard (cases-wrap $at) $cases }
 		tell-board $at $app $moved
 		if ($flip | is-not-empty) { record-back $at $app $v $cases $owned }
 		return
@@ -1135,6 +1139,7 @@ export def watch-resume [app: path, --expect: string] {
 	guard-check $app $guard (cases-wrap $at)
 	let doc = (store-version $at $cur.generation | from json)
 	watch-flip $at $app $doc ($m | get -o flag | default "") $prev $cur.generation ({stage: ($m | get -o stage | default all), flag: ($m | get -o flag | default ""), note: "watch resumed"}) $guard (cases-wrap $at) ($m | get -o final | default passed) | ignore
+	print -e "flags: the resumed watch passed; the board was not told and the spec was not recorded back from the original push: tell it and flip the spec by hand"
 }
 
 # The live stage: the flags written for everyone, OFREP's word, then the production cases that need no tester, as
