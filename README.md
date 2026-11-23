@@ -5,6 +5,8 @@ beyond the browser, and beside them, on unmodified pronto. Why and how they are 
 [a native terminal](docs/native-terminal.md). Designed, not built yet:
 [pronto-api](docs/pronto-api.md), a plugin that exports any app as a Google-style REST API, PostgREST over table projections.
 
+How one Mac's queue, budgets and test caches work, and how to adopt them: [the queue and ci](docs/queue-and-ci.md).
+
 ## Plugins
 
 The plugins that run a service beside the app on a host launch (journeys, perf, analytics, flags,
