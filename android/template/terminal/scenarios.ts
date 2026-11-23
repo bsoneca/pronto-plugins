@@ -24,7 +24,7 @@ import { localRoots } from "./trust.ts";
 // `flag` and `unless` say where a step runs (skips); they are not what it does. `unlock` says an `open` meets the
 // biometric prompt of an app that asks for one (android.json's "unlock"): the sensor is touched once it is shown, or,
 // for "cancel", the prompt is dismissed and the terminal is left shut, and for "touch" the sensor is touched and nothing waits for the terminal.
-const META = ["by", "timeout", "why", "fresh", "flag", "unless", "unlock"];
+const META = ["by", "timeout", "why", "fresh", "flag", "unless", "with", "unlock"];
 export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response", "undisclosed", "fills", "autofillService", "launch", "native", "finger", "log"];
 
 export type Probed = { id: string | null; text: string; value?: string; attrs: Record<string, string>; hidden: boolean; shown?: boolean };
@@ -152,6 +152,7 @@ export function backTo(url: string, base: string): boolean {
 /** Whether a step does not run: it names a flag that is off (`flag`) or one that is on (`unless`), as the door answered. */
 export function skips(step: Step, flags: Record<string, boolean>): boolean {
   if (typeof step.unless === "string" && flags[step.unless]) return true;
+  if (typeof step.with === "string" && !flags[step.with]) return true;
   return typeof step.flag === "string" && !flags[step.flag];
 }
 
@@ -805,7 +806,7 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
   try {
     for (; i < sc.steps.length; i++) {
       const raw = sc.steps[i];
-      for (const f of [raw.flag, raw.unless]) if (typeof f === "string") flagsOn.set(f, await phone.flagOn(f));
+      for (const f of [raw.flag, raw.unless, raw.with]) if (typeof f === "string") flagsOn.set(f, await phone.flagOn(f));
       if (skips(raw, Object.fromEntries(flagsOn))) continue;
       await perform(raw);
     }

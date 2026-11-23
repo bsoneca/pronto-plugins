@@ -199,7 +199,7 @@ _commonTypes: {
 	// A flag whose absence the step needs: skipped where the door answers that it is on. The
 	// app as it is with the flag off keeps its steps here, and a flag's flip runs them (`flags`).
 	unless: string
-	// A second flag the step needs on beside `flag` (PRONTO-1688): skipped where the door answers that it is off. For a flow
+	// A second flag the step needs on beside `flag` (PRONTO-1688; always with a `flag`, which a release's bisect and a flag's cases read): skipped where the door answers that it is off. For a flow
 	// two flags make possible together, so a scenario is not run, nor failed, where either is off.
 	with: string
 	// On an expectation about what another actor changed, which a page that reads from the server

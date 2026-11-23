@@ -8,11 +8,13 @@
 export type Place = "production" | "local" | "deployed";
 export type Gated = { on?: "production" | "local"; ifKept?: string; unless?: string; flag?: string; with?: string };
 export type Here = { place: Place; kept: (name: string) => string | undefined; flip?: string };
-export type Gate = { run: boolean; flip?: boolean; onHere?: string; off?: string };
+export type Gate = { run: boolean; flip?: boolean; onHere?: string; off?: string; also?: string };
 
 // `with` is a second flag the step needs on beside `flag` (PRONTO-1688: a flow that two flags both make possible, such as
 // a trial's return, which needs the trial and its return flag): skipped where it is off, and asked after `flag`, so a flip's
 // own flag still decides first. A flip tests `flag` alone: `with` is asked of the door as it is, never forced on.
+// A step skipped for `with` names `flag` too (`also`), so a push of `flag` whose steps all sat behind a `with` that is off
+// reads as vacuous (flags/live.nu), never as a pass.
 
 export async function stepGate(st: Gated, here: Here, flagOn: (flag: string) => Promise<boolean>): Promise<Gate> {
   if (st.on === "production" && here.place !== "production") return { run: false };
@@ -22,6 +24,6 @@ export async function stepGate(st: Gated, here: Here, flagOn: (flag: string) => 
   if (st.unless !== undefined && await flagOn(st.unless)) return { run: false, onHere: st.unless };
   const flipping = here.flip !== undefined && st.flag !== undefined && st.flag === here.flip;
   if (!flipping && st.flag !== undefined && !(await flagOn(st.flag))) return { run: false, off: st.flag };
-  if (st.with !== undefined && !(await flagOn(st.with))) return { run: false, off: st.with };
+  if (st.with !== undefined && !(await flagOn(st.with))) return { run: false, off: st.with, also: st.flag };
   return flipping ? { run: true, flip: true } : { run: true };
 }
