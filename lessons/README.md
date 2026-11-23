@@ -102,7 +102,7 @@ Cases: `tests/unit/lessons.cue` (suite `lessons`), the database on PGlite (`test
 
 The app must already hold pronto-flags (`flags_plugin.cue`, from `bin/pronto-flags <app-dir>`): a course names a flag and the
 database refuses a chapter whose flag is off for the account, so the installer refuses an app without it, naming
-`bin/pronto-flags`, and writes nothing (every refusal comes before the first write). A re-run changes nothing. The module path
+`bin/pronto-flags`, and writes nothing (every refusal comes before the first write). A re-run changes nothing. A headed `*_lessons.sql` or `*_lessons_spec.sql` in `services/database/migrations/` is refused as an earlier install's copy, except the two names `_lessonsRawNames` holds: generate writes those itself. The module path
 is a `.js`, `.mjs` or `.ts` inside the app and never another file the installer writes; a file already there that is not
 pronto-lessons' (no header) is never overwritten.
 
