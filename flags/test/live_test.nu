@@ -793,7 +793,8 @@ let nowrap = (livex [push $app --sync premium] {PATH: ([$bin] | append $env.PATH
 check ($nowrap.exit_code != 0 and ($nowrap.stderr | str contains "must run jailed") and (object | length) == $kn0) "kubeconfig mirror: a flip with cases and no wrap is refused before a write"
 let sep = (livex [push $app --sync premium] {PATH: ([$bin] | append $env.PATH), FLAGS_OFREP_CMD: "", PRONTO_FLAGS_CASES_WRAP: "env ;"})
 check ($sep.exit_code != 0 and ($sep.stderr | str contains "shell separator") and (object | length) == $kn0) "kubeconfig mirror: a wrap ending in a separator is refused"
-let kf = (livex [push $app --sync premium] ({PATH: ([$bin] | append $env.PATH), FLAGS_OFREP_CMD: ""} | merge $kwrap))check ($kf.exit_code == 0 and ($kf.stdout | str contains "premium is not a client flag: the site's /ofrep/ does not serve it") and (open --raw $"($sent).args" | lines | length) == $ssh_before) "kubeconfig mirror: a flip asks the site's /ofrep/, never ssh"
+let kf = (livex [push $app --sync premium] ({PATH: ([$bin] | append $env.PATH), FLAGS_OFREP_CMD: ""} | merge $kwrap))
+check ($kf.exit_code == 0 and ($kf.stdout | str contains "premium is not a client flag: the site's /ofrep/ does not serve it") and (open --raw $"($sent).args" | lines | length) == $ssh_before) "kubeconfig mirror: a flip asks the site's /ofrep/, never ssh"
 # One of the two, never both nor none.
 "flagsLive: mirrors: [{ssh: \"ops@node.example\", kubeconfig: \"/run/kc.yaml\", namespace: \"game\", configMap: \"game-flags\"}]\n" | save -a $"($app)/flags_spec.cue"
 let two = (do { cd $app; ^$real exec -- cue export . -e flagsLive.mirrors --out json } | complete)
