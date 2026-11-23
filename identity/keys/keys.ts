@@ -37,8 +37,10 @@ const KEY_LABEL_MAX = 64;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PLAIN = /^[a-z_][a-z0-9_]*$/;
 const NAMED = /^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$/;
-// Claims of `/auth/upgrade`'s tokens; a session carrying one is an upgraded session.
-const UPGRADED = ["operation_kind", "operation_id", "amr", "idp"];
+// Claims of `/auth/upgrade`'s tokens; a session carrying one is an upgraded session. Not `amr` or `idp`:
+// in 0.32 a passkey's or a provider's session carries `amr` as any session does.
+const UPGRADED = ["operation_kind", "operation_id"];
+const BODY_MAX = 4096;
 
 /** A configuration read from the environment, refusing what the fork's auth refuses at start. */
 export function configFrom(env: (name: string) => string | undefined): Config {
@@ -107,13 +109,29 @@ export async function verify(secret: string, token: string): Promise<Record<stri
 // --- Responses ---
 
 const json = (status: number, body: unknown): Response =>
-  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 const fail = (status: number, error: string): Response => json(status, { error });
 const notFound = () => fail(404, "not found");
 
+/** The JSON object of a body of at most BODY_MAX bytes, else null: read as it arrives, never whole. */
 async function readBody(req: Request): Promise<Record<string, unknown> | null> {
   try {
-    const body = await req.json();
+    const declared = Number(req.headers.get("content-length") ?? 0);
+    if (!(declared <= BODY_MAX) || req.body === null) return null;
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for await (const chunk of req.body) {
+      size += chunk.length;
+      if (size > BODY_MAX) return null;
+      chunks.push(chunk);
+    }
+    const bytes = new Uint8Array(size);
+    let at = 0;
+    for (const c of chunks) {
+      bytes.set(c, at);
+      at += c.length;
+    }
+    const body = JSON.parse(dec.decode(bytes));
     return typeof body === "object" && body !== null && !Array.isArray(body) ? body : null;
   } catch {
     return null;
@@ -164,6 +182,10 @@ export async function migrate(db: Db, cfg: Config): Promise<void> {
   if (!cfg.keysOn) return;
   await db.tx(async (q) => {
     await q("select pg_advisory_xact_lock(hashtext('pronto-keys:migrate'))");
+    // Where the auth service or an app's migration made the table and its reader, they stay as they are: they
+    // may belong to another role, which could not replace them.
+    const [have] = await q("select to_regclass('mecha_auth.api_key') is not null and to_regprocedure('mecha_auth.api_key_owner(bytea)') is not null as made");
+    if (have?.made === true) return;
     for (const statement of tableSql(cfg)) await q(statement);
   });
 }
@@ -196,6 +218,15 @@ export async function door(cfg: Config, req: Request): Promise<Response> {
   const headers = new Headers();
   if (typeof sub === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(sub)) headers.set("x-pronto-account", sub);
   return new Response(null, { status: 204, headers });
+}
+
+/** GET /auth/keyguard, for the door's forward_auth before every other `/auth/*` path: 403 for a key's token,
+ * else 204. 0.32's auth takes any session, a key's token among them, and its rename answers a session with
+ * no `kid`, so a key could make keys of its own that outlive it; the door refuses a key's token there. */
+export async function keyguard(cfg: Config, req: Request): Promise<Response> {
+  const subject = await subjectOf(cfg, req);
+  if (subject !== "refused" && subject.claims && "kid" in subject.claims) return fail(403, "key token");
+  return new Response(null, { status: 204 });
 }
 
 /** The caller who may hold keys: a signed-in account's own session. A key's token, an upgraded one and
@@ -283,10 +314,14 @@ async function exchangeKey(cfg: Config, db: Db, req: Request): Promise<Response>
   const owner = k.owner as string;
   if (!(await allowed(cfg, db.query, owner))) return notFound();
   // The use and the hook are one transaction: a hook that throws leaves no use and issues no token.
-  await db.tx(async (q) => {
-    await q("update mecha_auth.api_key set last_used = now() where id = $1", [k.id]);
+  // A key revoked since it was read is no key: the update names a live one.
+  const live = await db.tx(async (q) => {
+    const [used] = await q("update mecha_auth.api_key set last_used = now() where id = $1 and revoked_at is null returning id", [k.id]);
+    if (!used) return false;
     if (cfg.hook !== null) await q(`select ${quoted(cfg.hook)}($1::uuid)`, [owner]);
+    return true;
   });
+  if (!live) return fail(401, "invalid key");
   const token = await sign(cfg.secret, {
     role: "app_user",
     iss: STACK_ISSUER,
@@ -306,6 +341,7 @@ export function keys(cfg: Config, db: Db): (req: Request) => Promise<Response> {
     const path = new URL(req.url).pathname;
     try {
       if (req.method === "GET" && path === "/auth/door") return await door(cfg, req);
+      if (req.method === "GET" && path === "/auth/keyguard") return await keyguard(cfg, req);
       if (cfg.keysOn) {
         if (req.method === "POST" && path === "/auth/keys") return await createKey(cfg, db, req);
         if (req.method === "GET" && path === "/auth/keys") return await listKeys(cfg, db, req);

@@ -14,11 +14,12 @@ Paths carry their `/auth` prefix, as the auth service's do.
 | `POST /auth/keys {label, scopes}` | 201 `{id, key, label, scopes, created_at}`; `key` (`pk_live_…`) is shown once, the table keeps its SHA-256. Scopes: `read`, `write`, `machines:<name>`. At most 5 live keys an account (409; a revoke frees one). |
 | `GET /auth/keys` | `{keys: [{id, label, scopes, created_at, last_used}]}`, never a key or hash. |
 | `DELETE /auth/keys/<id>` | 204; another's key, a revoked one or a non-UUID is 404. Never gated. |
+| `GET /auth/keyguard` | 403 `key token` for a key's token, else 204. For the door's `forward_auth` before 0.32's other `/auth/*` paths (see Adopting it). |
 | `POST /auth/key {key}` | `{token, expires_in: 900}`: a user token of the key's owner with `kid`, `scp`, `guest: false` and `iss: "mecha:stack"`. An unknown, revoked or malformed key is the same 401. |
 
-Make, list and revoke take an account's own session: no token or a bad one is 401; a guest (`guest: true`, or `acr: "0"` as 0.32 says it) is 403 `guest`; a key's token is 403 `key token`; an upgraded one (`operation_kind`, `operation_id`, `amr` or `idp`) is 403 `upgraded token`. With `AUTH_API_KEYS` off every key route is 404.
+Make, list and revoke take an account's own session: no token or a bad one is 401; a guest (`guest: true`, or `acr: "0"` as 0.32 says it) is 403 `guest`; a key's token is 403 `key token`; an upgraded one (`operation_kind` or `operation_id`; not `amr`, which every 0.32 passkey session carries) is 403 `upgraded token`. With `AUTH_API_KEYS` off every key route is 404.
 
-Differences from the fork, each a tightening: the token header must say HS256; guests are read by `acr` as well; the key's token carries `iss`; an exchange's `last_used` and the hook are one transaction, so a hook that throws leaves no use and issues no token; the table is made by the service when keys are on and it is absent.
+Differences from the fork, each a tightening: the token header must say HS256; guests are read by `acr` as well; the key's token carries `iss`; an exchange's `last_used` and the hook are one transaction, so a hook that throws leaves no use and issues no token; a key revoked while it is exchanged gets no token; bodies are held to 4 KB; answers carry `cache-control: no-store`; the table is made by the service when keys are on and it is absent (never replaced where it exists).
 
 ## Environment
 
@@ -40,6 +41,7 @@ It keeps no secret of its own: the signing secret and `DATABASE_URL` are the sta
 Run it beside the stack, declared as billing's service is (`billing/app/billing_plugin.cue`): a target `keys` with `expose: http: {port: 8702, env: "KEYS_PORT"}`, `deno run --no-config --allow-net --allow-env identity/keys/main.ts` (copy `identity/keys/*.ts` and `identity/broker/vendor/postgres.js` beside the app), `after: migrate: "completed"`, and `PRONTO_UPSTREAM_KEYS: {peer: "keys", port: "http"}` on the door's entrypoint. In the door's Caddyfile:
 
 - Point `/ofrep/`'s `forward_auth` at `{$PRONTO_UPSTREAM_KEYS:keys:8702}` (`uri /auth/door`), not at auth.
+- Put `forward_auth {$PRONTO_UPSTREAM_KEYS:keys:8702} { uri /auth/keyguard }` on every `/auth/*` path that goes to 0.32's auth: its auth takes a key's token as a session and its rename answers a new session without `kid`, so without the guard a key could make keys of its own that outlive it.
 - Route `/auth/keys*` and `/auth/key` to it, one path to a `handle`, before `/auth/*` (Caddy sorts a `handle`'s single path longest first; a named matcher of several paths is not sorted).
 
 ## Known limit

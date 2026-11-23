@@ -109,7 +109,7 @@ Deno.test("who may hold keys: an account's own session, not a guest, a key's tok
     [await session(ANA, { acr: "0" }), 403, "guest"],
     [key.token, 403, "key token"],
     [await session(ANA, { operation_kind: "payout" }), 403, "upgraded token"],
-    [await session(ANA, { amr: ["pwd"] }), 403, "upgraded token"],
+    [await session(ANA, { operation_id: "7" }), 403, "upgraded token"],
   ];
   for (const [token, status, error] of cases) {
     for (const [method, path, b] of [["POST", "/auth/keys", body], ["GET", "/auth/keys", undefined], ["DELETE", `/auth/keys/${k.id}`, undefined]] as const) {
@@ -117,7 +117,8 @@ Deno.test("who may hold keys: an account's own session, not a guest, a key's tok
       assertEquals([r.status, (await r.json()).error], [status, error], `${method} ${path} ${error}`);
     }
   }
-  assertEquals((await call("GET", "/auth/keys", await session(ANA, { acr: "phr" }))).status, 200);
+  // A 0.32 passkey's session carries amr and acr, and is an account's own.
+  assertEquals((await call("GET", "/auth/keys", await session(ANA, { acr: "phr", amr: ["pop", "mfa"], idp: "google" }))).status, 200);
 });
 
 Deno.test("a token signed another way, or with no exp, is no session", async () => {
@@ -212,15 +213,17 @@ Deno.test("the door always answers 204, naming the account only of a live sessio
 
 Deno.test("the table is made once, beside an app's own, and where it is the migration changes nothing", async () => {
   const { pg, db, conf } = await stand();
-  const k = await made((await stand()).call);
-  assert(k.id);
+  await pg.exec("CREATE SCHEMA mecha; CREATE TABLE mecha.rls_exempt (table_name text primary key, reason text not null)");
+  await pg.exec("DROP SCHEMA mecha_auth CASCADE");
+  await migrate(db, conf);
+  assertEquals((await pg.query("select table_name from mecha.rls_exempt")).rows, [{ table_name: "mecha_auth.api_key" }]);
   await pg.exec(`INSERT INTO mecha_auth.api_key (id, owner, label, scopes, sha256) VALUES ('${crypto.randomUUID()}', '${BEN}', 'old', ARRAY['read'], '\\x01')`);
   await migrate(db, conf);
   await migrate(db, conf);
   assertEquals((await pg.query("select count(*)::int as n from mecha_auth.api_key")).rows[0], { n: 1 });
   // The reader by hash is owner-only: no one else is granted it.
   const acl = (await pg.query("select proacl::text as a from pg_proc where proname = 'api_key_owner'")).rows[0] as { a: string | null };
-  assert(acl.a === null || !acl.a.startsWith("="), `execute is held back from PUBLIC: ${acl.a}`);
+  assert(acl.a !== null && !/(^|[{,])=X\//.test(acl.a), `execute is held back from PUBLIC: ${acl.a}`);
 });
 
 Deno.test("the environment is held to what the fork's auth holds it to", () => {
@@ -237,4 +240,36 @@ Deno.test("the environment is held to what the fork's auth holds it to", () => {
     }
     assertNotEquals(said, "", JSON.stringify(bad));
   }
+});
+
+Deno.test("the key guard refuses a key's token and passes every other request", async () => {
+  const { call } = await stand();
+  const k = await made(call);
+  const { token } = await (await call("POST", "/auth/key", undefined, { key: k.key })).json();
+  assertEquals((await call("GET", "/auth/keyguard", token)).status, 403);
+  for (const t of [undefined, "garbage", await session(ANA), await session(ANA, { guest: true })]) assertEquals((await call("GET", "/auth/keyguard", t)).status, 204);
+});
+
+Deno.test("a key revoked between its reading and its use gets no token", async () => {
+  const { pg, db, conf, call } = await stand();
+  const k = await made(call);
+  const racing = keys(conf, {
+    ...db,
+    query: async (t, p) => {
+      const rows = await db.query(t, p);
+      if (t.includes("api_key_owner")) await pg.exec("update mecha_auth.api_key set revoked_at = now()");
+      return rows;
+    },
+  });
+  const r = await racing(new Request("http://keys/auth/key", { method: "POST", headers: { "content-length": "100" }, body: JSON.stringify({ key: k.key }) }));
+  assertEquals(r.status, 401);
+});
+
+Deno.test("a body over its bound, declared or not, is read as none; secrets are not cached", async () => {
+  const { call } = await stand();
+  const big = { label: "x", scopes: ["read"], pad: "p".repeat(5000) };
+  assertEquals((await call("POST", "/auth/keys", await session(ANA), big)).status, 400);
+  assertEquals((await call("POST", "/auth/key", undefined, { key: "pk_live_" + "A".repeat(5000) })).status, 401);
+  const r = await call("POST", "/auth/keys", await session(ANA), { label: "x", scopes: ["read"] });
+  assertEquals(r.headers.get("cache-control"), "no-store");
 });
