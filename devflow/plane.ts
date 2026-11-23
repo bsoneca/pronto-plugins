@@ -3,11 +3,67 @@
 // token, X-API-Key; the token is a member's, made once in Plane's profile settings. The adapter of
 // the Board interface (board/board.ts) for kind plane.
 import type { Board, Comment, Cycle, Issue, Member, Named, NewIssue, State } from "./board/board.ts";
-import { askAgain } from "./flow.js";
+import { breakerOpen, retryVerdict, tripsBreaker } from "./flow.js";
 
 // An issue's fields the board's verbs read (board.ts): a list of issues asks for these alone.
 const LIGHT = "id,name,sequence_id,state,priority,updated_at,created_at,completed_at,labels,parent";
 const timeoutMs = () => Number(Deno.env.get("PLANE_TIMEOUT_MS") ?? "") || 30_000;
+
+// PRONTO-1707: ~35 board.ts processes, each retrying on a timeout, kept Plane's one API pod at its CPU
+// limit. So every process on the machine shares, in a directory of files: a cap on requests in flight
+// (a token file each, held only while a fetch runs), a breaker (down-until) that stops new calls
+// while Plane is answering 502, 503, 504 or nothing, and each process has a budget of retries.
+const callsDir = () => Deno.env.get("PLANE_CALLS_DIR") || `${Deno.env.get("HOME") ?? "/tmp"}/.cache/pronto/devflow/plane-calls`;
+const concurrency = () => Number(Deno.env.get("PLANE_CONCURRENCY") ?? "") || 4;
+const retryBudget = () => Number(Deno.env.get("PLANE_RETRY_BUDGET") ?? "") || 6;
+let retriesSpent = 0;
+
+const brt = (ms: number) => new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" }).format(ms);
+const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
+
+async function downUntil(dir: string): Promise<number | null> {
+  try {
+    return Number(await Deno.readTextFile(`${dir}/down-until`));
+  } catch {
+    return null;
+  }
+}
+
+/** Takes one of the machine's request slots, or throws when none is free by `deadline`. A token file
+ * holds its owner's nonce and is older than the call's own timeout (+ 5 s) only when its process was
+ * killed: it is then moved aside (a rename, which one process wins) and the slot taken. */
+async function takeToken(dir: string, deadline: number): Promise<{ path: string; nonce: string }> {
+  await Deno.mkdir(dir, { recursive: true });
+  const nonce = crypto.randomUUID();
+  for (;;) {
+    for (let i = 0; i < concurrency(); i++) {
+      const path = `${dir}/call-${i}`;
+      try {
+        const f = await Deno.open(path, { write: true, createNew: true });
+        await f.write(new TextEncoder().encode(nonce));
+        f.close();
+        return { path, nonce };
+      } catch (e) {
+        if (!(e instanceof Deno.errors.AlreadyExists)) throw e;
+        try {
+          if (Date.now() - ((await Deno.stat(path)).mtime?.getTime() ?? Date.now()) > timeoutMs() + 5000) {
+            await Deno.rename(path, `${path}.stale-${nonce}`);
+            await Deno.remove(`${path}.stale-${nonce}`);
+          }
+        } catch { /* released or taken over by another process meanwhile */ }
+      }
+    }
+    if (Date.now() >= deadline) throw new Error(`plane: no request slot free in ${timeoutMs() / 1000} s (${concurrency()} in flight on this machine, ${dir})`);
+    await sleep(50 + Math.random() * 100);
+  }
+}
+
+/** Gives a slot back, only if the file is still ours: a taken-over token is another call's now. */
+async function giveToken(t: { path: string; nonce: string }) {
+  try {
+    if ((await Deno.readTextFile(t.path)) === t.nonce) await Deno.remove(t.path);
+  } catch { /* already gone */ }
+}
 
 export class Plane implements Board {
   constructor(readonly origin: string, readonly workspace: string, private readonly token: string) {}
@@ -15,7 +71,17 @@ export class Plane implements Board {
   // deno-lint-ignore no-explicit-any
   private async call(method: string, path: string, body?: unknown): Promise<any> {
     const url = path.startsWith("http") ? path : `${this.origin}/api/v1${path}`;
+    const dir = callsDir();
     for (let attempt = 0; ; attempt++) {
+      // The breaker is read before a call is first made, never between its retries (they are already
+      // backing off), and it expires on its own.
+      if (attempt === 0) {
+        const until = await downUntil(dir);
+        if (until !== null && breakerOpen(until, Date.now())) throw new Error(`plane unavailable until ${brt(until)} BRT (${method} ${path})`);
+      }
+      // Waiting for a slot has its own timeout; the fetch gets the whole of PLANE_TIMEOUT_MS once it holds one,
+      // so a busy machine never reads as a slow Plane (and never trips the breaker).
+      const token = await takeToken(dir, Date.now() + timeoutMs());
       // Each call waits PLANE_TIMEOUT_MS at most (30 s): one that never answers held a verb for ever
       // (PRONTO-341). flow.js askAgain says which failures are asked again: a 429 (Plane limits a
       // token's calls a minute, env.api_key_rate_limit), and a timeout, a lost connection or a 5xx of
@@ -39,7 +105,10 @@ export class Plane implements Board {
       } catch (e) {
         failure = e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError") ? "timeout" : "network";
         text = String(e);
+      } finally {
+        await giveToken(token);
       }
+      if (tripsBreaker(failure)) await Deno.writeTextFile(`${dir}/down-until`, String(Date.now() + 30_000)).catch(() => {});
       if (ok) {
         if (!text) return null;
         try {
@@ -48,11 +117,13 @@ export class Plane implements Board {
           throw new Error(`${method} ${path}: bad JSON (${failure})`);
         }
       }
-      let wait = askAgain(method, failure, attempt);
+      let wait = retryVerdict(method, failure, attempt, retriesSpent, retryBudget());
+      wait = wait === null ? null : wait * (0.5 + Math.random() / 2); // jitter, so processes that failed together do not ask together
       // A 429 of a read says how long to wait: wait it out (at most 2 minutes), not a guess.
       if (wait !== null && failure === 429 && method === "GET" && retryAfter) wait = Math.min(retryAfter, 120_000);
-      if (wait === null) throw new Error(`plane ${method} ${path}: ${failure} ${text.slice(0, 300)}`);
-      await new Promise((ok) => setTimeout(ok, wait));
+      if (wait === null) throw new Error(`plane ${method} ${path}: ${failure} ${text.slice(0, 300)}${retriesSpent >= retryBudget() ? ` (retry budget of ${retryBudget()} spent)` : ""}`);
+      retriesSpent++;
+      await sleep(wait);
     }
   }
 
