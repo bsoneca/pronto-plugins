@@ -58,6 +58,16 @@ code: state: entities: {
 _lessonsMigration: string
 code: state: migrations: "\(_lessonsMigration)": operations: [{sql: up: _lessonsUp}]
 
+// The two raw migrations, replayed every release (the app lists them in `code: state: rawMigrations`: pronto's generate does not
+// own them): the courses' spec, written by `lessons write` from the courses, then the functions that read it. The names are
+// stamped once in lessons_spec.cue, after the app's own, so the order holds under LC_ALL=C.
+_lessonsRawNames: {spec: string, fns: string}
+_lessonsRawMigrations: [
+	{name: _lessonsRawNames.spec, src: "lessons/lessons_spec.sql"},
+	{name: _lessonsRawNames.fns, src: "lessons/lessons.sql"},
+]
+// __LESSONS_RAW__
+
 _lessonsUp: """
 	CREATE SCHEMA IF NOT EXISTS lessons;
 	REVOKE ALL ON SCHEMA lessons FROM PUBLIC;

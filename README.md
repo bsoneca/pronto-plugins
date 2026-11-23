@@ -801,6 +801,15 @@ ad was watched, so the page alone knows: whatever a reward gives away, the app's
 bounds (one a day an account, say, in the app's own migration). [ads/README.md](ads/README.md)
 has the contract.
 
+## pronto-lessons
+
+Guided lessons: courses of chapters played on the app's own board, judged by the database, paid through the app's hooks,
+behind a pronto-flags flag. Needs pronto-flags in the app. [lessons/README.md](lessons/README.md) has the contract.
+
+```sh
+<this repo>/bin/pronto-lessons <app-dir> [<module-path>]   # lessons/lessons.js unless named
+```
+
 ## Hosts share `.say.json`
 
 sayt reads one `.say.json` beside pronto's `.say.yaml`, so every host marks it

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Adds or refreshes pronto-lessons in a pronto app that has pronto-flags:
+#   bin/pronto-lessons <app-dir> [<module-path>] [--migration <name>]
+# module-path: where the page's lessons.js goes, lessons/lessons.js unless named.
+# --migration: the pgroll migration's name, when the app names none to number after.
+set -eu
+[ $# -ge 1 ] || { echo "usage: bin/pronto-lessons <app-dir> [<module-path>] [--migration <name>]" >&2; exit 2; }
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+shift
+cd "$here"
+# Deno as CI pins it for the plugins tree (.github/workflows/ci.yml).
+exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write --allow-run=git lessons/install.ts "$app" "$@"
