@@ -11,6 +11,7 @@
 #                                                  # the flags as flags_spec.cue says them now, merged over the live ones (see `keep-live`): --flip X (X=true) or --flip X=<value>
 #                                                  # sets a flag live and needs its cases; --sync X writes the spec's whole reach (accounts too); the flip is then recorded
 #                                                  # into flags_spec.cue by a pull request this tool opens (see `record-back`)
+#                                                  # --stages 5,25,100 (one --flip flag) goes through flagd's fractional on targetingKey, a version per stage: its cases, --dwell (10min), then on
 #   bin/pronto-flags record <app-dir>              # the live flags into the spec, by hand: what a flip does after its write
 #   bin/pronto-flags drift <app-dir>               # what the spec says differently from live; exit 1 when it differs
 #   bin/pronto-flags released <app-dir>            # records which flags the release being served reads (released.json beside the live object)
@@ -517,7 +518,9 @@ def accounts-of [def: record]: nothing -> list<string> {
 # What a flag's entry decides in production: its state, default value, and who else it is on for. The generated
 # at-hand branch (flags_plugin.cue: the hosts, read as `local`) is no part of it but its hosts; accounts are the
 # targetingKey branch, whose value is the `local` variant; `other` is any targeting that is none of those (null
-# where there is none). Null for a flag that is not there.
+# where there is none). `split` is the percent of players a staged push (`--stages`) has the flag on for: the weight of the
+# first variant of a `fractional` branch after the generated ones (flagd's, bucketed by targetingKey), null where there is none.
+# Null for a flag that is not there.
 def reach [def: any]: nothing -> any {
 	if $def == null { return null }
 	let rule = ($def.targeting? | default null)
@@ -527,10 +530,19 @@ def reach [def: any]: nothing -> any {
 	mut accounts = []
 	mut i = 0
 	mut other = null
+	mut split = null
+	# Only a staged push's own shape counts as a split ([["on", w], ["off", 100 - w]]); any other fractional rule is `other`.
+	let frac = {|t|
+		let f = if ($t | describe | str starts-with "record") { $t | get -o fractional } else { null }
+		if ($f | describe | str starts-with "list") and ($f | length) == 2 and ($f | all {|v| ($v | describe | str starts-with "list") and ($v | length) == 2 }) and ($f.0.0 == "on") and ($f.1.0 == "off") and (($f.0.1 | describe) == "int") and ($f.1.1 == (100 - $f.0.1)) { $f } else { null }
+	}
 	if ($branches | describe | str starts-with "list") {
 		if (do $is_test ($branches | get -o 0) host) and ($branches | get -o 1) == "local" { $hosts = ($branches | get 0 | get in | get 1); $i = 2 }
 		if (do $is_test ($branches | get -o $i) targetingKey) and ($branches | get -o ($i + 1)) == "local" { $accounts = ($branches | get $i | get in | get 1); $i = $i + 2 }
-		if ($branches | skip $i) != ["default"] { $other = $rule }
+		let rest = ($branches | skip $i)
+		if ($rest | length) == 1 and (do $frac ($rest | first)) != null { $split = (do $frac ($rest | first) | get -o 0.1) } else if $rest != ["default"] { $other = $rule }
+	} else if (do $frac $rule) != null {
+		$split = (do $frac $rule | get -o 0.1)
 	} else if ($rule | describe | str starts-with "record") and ($rule | is-not-empty) {
 		$other = $rule
 	}
@@ -541,13 +553,14 @@ def reach [def: any]: nothing -> any {
 		accounts: ($accounts | sort)
 		accountValue: (if ($accounts | is-empty) { null } else { $def.variants? | default {} | get -o local })
 		other: $other
+		split: $split
 	}
 }
 
 # A flag that is on for no one: its default false, no accounts, no other targeting.
 def fully-off [def: any]: nothing -> bool {
 	let r = (reach $def)
-	$r != null and $r.value == false and ($r.accounts | is-empty) and $r.other == null
+	$r != null and $r.value == false and ($r.accounts | is-empty) and $r.other == null and $r.split == null
 }
 
 # A new flag's entry written off: default false, the at-hand `local` variant and host branch kept, its accounts,
@@ -769,10 +782,20 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 #      (`vacuous`: no scenario verdict, or the flag's own steps skipped as off at the door). A production scenario that signs in
 #      needs a tester's account, which a flip no longer has: it is listed and not run.
 # A flag turned fully off (default false, no accounts) runs no cases: it returns to the path before it, and its cases test it on.
-export def push [app: path, --untested: string, --no-canary: string, --expect: string, --flip: list<string> = [], --drop: list<string> = [], --sync: list<string> = []] {
+export def push [app: path, --untested: string, --no-canary: string, --expect: string, --flip: list<string> = [], --drop: list<string> = [], --sync: list<string> = [], --stages: list<int> = [], --dwell: duration = 10min, --keyed: string] {
 	pin-guard $app
 	let at = (live $app)
-	if (target-guard $at $expect) { show $app --flip $flip --drop $drop --sync $sync; print "flags: dry run: nothing written"; return }
+	if (target-guard $at $expect) {
+		show $app --flip $flip --drop $drop --sync $sync
+		# A staged push is checked as the real one is (its refusals), writing nothing.
+		if ($stages | is-not-empty) {
+			let dm = (merge-live $at $app (cue-of $app flagd.document) $flip $drop $sync)
+			let st = (staged-checks $stages $flip $sync (changed-flags $dm.old $dm.doc) $dm.doc $dm.old $keyed)
+			print $"flags: dry run: ($st.flag) would go to ($stages | each {|s| $'($s)%' } | str join ', '), by targetingKey, from ($st.oldv)"
+		}
+		print "flags: dry run: nothing written"
+		return
+	}
 	let spec = (cue-of $app flagd.document)
 	# The spec merged over the live flags: what is not this push's to change stays as it is live (see `keep-live`).
 	let m = (merge-live $at $app $spec $flip $drop $sync)
@@ -783,6 +806,7 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	# The flags this push writes on purpose: the only ones it records back into the spec.
 	let owned = ($flip | each {|e| $e | split row "=" | first } | append $sync | uniq)
 	let changed = (changed-flags $old $doc)
+	let staged = if ($stages | is-not-empty) { staged-checks $stages $flip $sync $changed $doc $old $keyed } else { null }
 	if ($changed | is-empty) {
 		let v = (write-flags $at $doc $app --meta ({stage: all} | merge $kept) --from $before)
 		if ($flip | is-not-empty) { record-back $at $app $v "none" $owned }
@@ -812,8 +836,16 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	let moved = (changes-between $old $doc | where {|c| $c.flag in ($doc.flags | columns) and $c.flag not-in ($m.dropped | get flag) })
 	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if $no_canary != null { $"no canary: ($no_canary)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" })] | compact | str join "; ")
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
+	let cases_none = if ($bare | is-not-empty) { "untested" } else { "none on production" }
+	if $staged != null {
+		let verdict = if ($live | is-empty) { $cases_none } else { "passed" }
+		let v = (staged-live $at $app $doc $staged $live $cmds $before $stages $dwell ({flag: $names, note: $notes} | merge $kept) $cases_none)
+		tell-board $at $app $moved
+		record-back $at $app $v $verdict $owned
+		return
+	}
 	if ($live | is-empty) {
-		let cases = if ($bare | is-not-empty) { "untested" } else { "none on production" }
+		let cases = $cases_none
 		let v = (write-flags $at $doc $app --meta ({stage: all, flag: $names, cases: $cases, note: $notes} | merge $kept) --from $before)
 		tell-board $at $app $moved
 		if ($flip | is-not-empty) { record-back $at $app $v $cases $owned }
@@ -824,6 +856,96 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	let v = (flip-live $at $app $doc $live $cmds $before ({stage: all, flag: $names, note: $notes} | merge $kept))
 	tell-board $at $app $moved
 	if ($flip | is-not-empty) { record-back $at $app $v "passed" $owned }
+}
+
+# What a staged push (`--stages`) checks before it writes anything, and the flag it stages with the value it reads now.
+# One flag, named by a single --flip, whose value moves (a flag turned off needs no stages), read by readers that all carry
+# a targetingKey: flagd's fractional buckets by it and, with none, answers the default variant. A `client` flag is read by pages,
+# some of which have no session and so no key; --keyed "<why>" says they all do.
+def staged-checks [stages: list<int>, flip: list<string>, sync: list<string>, changed: list<string>, doc: record, old: record, keyed: any]: nothing -> record {
+	let bad = {|why| error make {msg: $"flags: --stages: ($why); nothing was written"} }
+	if ($stages | any {|s| $s < 1 or $s > 100 }) or ($stages | sort | uniq) != $stages or ($stages | last) != 100 { do $bad "say the percentages rising and ending at 100, e.g. 5,25,100" }
+	if ($flip | length) != 1 or ($sync | is-not-empty) { do $bad "it stages one flag, named by a single --flip (no --sync)" }
+	let flag = ($flip | first | split row "=" | first)
+	if $changed != [$flag] { do $bad $"it would change ($changed | str join ', '); a staged push changes the one flag it names" }
+	let new = ($doc.flags | get $flag)
+	if (fully-off $new) { do $bad $"($flag) is turned off, which needs no stages" }
+	let was = ($old.flags | get -o $flag)
+	let newv = (default-of $new)
+	let oldv = if $was != null { default-of $was } else if ($newv | describe) == "bool" { false } else { null }
+	if $oldv == null { do $bad $"($flag) is new and not a bool, so it has no off value to stage from" }
+	if $oldv == $newv { do $bad $"($flag) is already ($newv) live: only its accounts or targeting would move" }
+	if ($new | get -o metadata.flagSetId) == "client" and $keyed == null {
+		do $bad $"($flag) is a client flag, read by pages: one with no session sends no targetingKey, and a fractional rule answers it the default. Say --keyed \"<why every reader has a key>\" if they all do"
+	}
+	{flag: $flag, oldv: $oldv}
+}
+
+# A flag's entry at a stage: the generated at-hand and accounts branches as they were, then flagd's fractional on
+# targetingKey, `on` (the new value) for w percent of players and `off` (the value before) for the rest. A reader with no
+# targetingKey, and the default variant, read the value before.
+def stage-def [new: record, oldv: any, w: int]: nothing -> record {
+	let r = (reach $new)
+	let local = ($new.variants? | default {} | get -o local)
+	let base = {default: $oldv, on: (default-of $new), off: $oldv}
+	let variants = if $local == null { $base } else { $base | insert local $local }
+	mut branches = []
+	if ($r.hosts | is-not-empty) { $branches = ($branches | append [{"in": [{"var": "host"}, $r.hosts]}, "local"]) }
+	if ($r.accounts | is-not-empty) { $branches = ($branches | append [{"in": [{"var": "targetingKey"}, $r.accounts]}, "local"]) }
+	let split = {fractional: [["on", $w], ["off", (100 - $w)]]}
+	let rule = if ($branches | is-empty) { $split } else { {"if": ($branches | append $split)} }
+	$new | upsert variants $variants | upsert defaultVariant "default" | upsert targeting $rule
+}
+
+# The staged live push: each stage below 100 is a version of its own (`stage` 5%), then its settle (FLAGS_STAGE_SETTLE_SEC,
+# 15: flagd reads a write within seconds), the flag's production cases as the players outside the cohort, who read the
+# value before, and the dwell; the last stage is the flip (`flip-live`: everyone, OFREP's word, the cases). Where a stage's
+# cases fail, or anything else does, the version read before the first stage is written again, not the previous stage's.
+# Guardrails that watch the dwell (PRONTO-413) plug in after a stage's cases.
+def staged-live [at: record, app: path, doc: record, st: record, live: list<record>, cmds: record, before: string, stages: list<int>, dwell: duration, meta: record, none: string] {
+	let wrap = (cases-wrap $at)
+	let settle = ($env.FLAGS_STAGE_SETTLE_SEC? | default 15 | into float)
+	# Each write is over the generation the one before returned (the first, over the one read before the push), so a write
+	# another operator makes during a dwell (a rollback, a kill switch) fails ours instead of being overwritten.
+	mut last = $before
+	mut fail = ""
+	for w in ($stages | where {|s| $s < 100 }) {
+		let from = $last
+		let staged = ($doc | upsert flags ($doc.flags | upsert $st.flag (stage-def ($doc.flags | get $st.flag) $st.oldv $w)))
+		let wrote = (try { {gen: (write-flags $at $staged $app --meta ($meta | upsert stage $"($w)%" | upsert cases staged) --from $from)} } catch {|e| {err: ($e.msg | lines | first)} })
+		if ($wrote | get -o err) != null { $fail = $wrote.err; break }
+		$last = $wrote.gen
+		print $"flags: ($st.flag) is on for ($w)% of players, by targetingKey; settling ($settle)s"
+		let held = (try {
+			sleep ($settle * 1sec)
+			for c in $live {
+				print $"flags: ($c.flag) at ($w)%: running its production cases \(($c.production | str join ', ')\)"
+				let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site} --wrap $wrap)
+				if not $r.ok { error make {msg: $"($c.flag)'s production cases failed at ($w)%:\n($r.out)"} }
+				let empty = (vacuous $r.out "")
+				if $empty != "" { error make {msg: $"($c.flag)'s production cases showed nothing at ($w)%: ($empty)"} }
+			}
+			print $"flags: ($st.flag) dwells ($dwell) at ($w)%"
+			sleep $dwell
+			""
+		} catch {|e| $e.msg })
+		if $held != "" { $fail = $held; break }
+	}
+	let last_gen = $last
+	let restore_all = {|why|
+		try { restore $at $app $before $last_gen $st.flag ($why | lines | first) } catch {|r| print -e $"flags: WARNING: could not restore version ($before): ($r.msg); `pronto-flags rollback` does" }
+		error make {msg: $"rolled back to version ($before): ($why)"}
+	}
+	if $fail != "" { do $restore_all $fail }
+	let meta = ($meta | upsert stage all)
+	# The last stage is the flip. flip-live rolls itself back from its own write on; a failure of its first write, or of the
+	# write with no cases to run, leaves live at the last stage, so it is restored here.
+	try {
+		if ($live | is-empty) { write-flags $at $doc $app --meta ($meta | upsert cases $none) --from $last_gen } else { flip-live $at $app $doc $live $cmds $before $meta --from $last_gen }
+	} catch {|e|
+		if ($e.msg | str starts-with "rolled back to version") { error make {msg: $e.msg} }
+		do $restore_all $e.msg
+	}
 }
 
 # The dev flow's board, where the app's repository keeps one (its devflow/devflow.cue; devflow/README.md): the
@@ -850,10 +972,10 @@ def tell-board [at: record, app: path, moved: list<record>] {
 # The live stage: the flags written for everyone, OFREP's word, then the production cases that need no tester, as
 # no one in particular. Whatever fails after the write, an error or a crash of the cases' command, writes the
 # version read before it again.
-def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: record, before: string, meta: record] {
+def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: record, before: string, meta: record, --from: string = ""] {
 	let on = ($live | get flag)
 	let wrap = (cases-wrap $at)
-	let v = (write-flags $at $doc $app --meta ($meta | insert cases running) --from $before)
+	let v = (write-flags $at $doc $app --meta ($meta | insert cases running) --from (if $from == "" { $before } else { $from }))
 	print $"flags: ($on | str join ', ') is on for everyone; waiting for OFREP to say so"
 	try {
 		let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f))} })
@@ -1538,7 +1660,7 @@ def "main armies rollback" [app: path, army: string, version?: int, --local, --e
 
 def main [] { print "usage: live.nu setup|push|released|history|rollback|show|cases|record|drift <app-dir> [version|flag]; live.nu armies push|show|history|rollback <app-dir>" }
 def "main setup" [app: path, --expect: string, --dry-run] { with-env (dry-env $dry_run) { setup $app --expect $expect } }
-def "main push" [app: path, --untested: string, --no-canary: string, --expect: string, --flip: string = "", --drop: string = "", --sync: string = "", --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --no-canary $no_canary --expect $expect --flip (flip-names $flip) --drop (names $drop) --sync (names $sync) } }
+def "main push" [app: path, --untested: string, --no-canary: string, --expect: string, --flip: string = "", --drop: string = "", --sync: string = "", --stages: string = "", --dwell: string = "10min", --keyed: string, --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --no-canary $no_canary --expect $expect --flip (flip-names $flip) --drop (names $drop) --sync (names $sync) --stages (names $stages | each {|s| $s | into int }) --dwell ($dwell | into duration) --keyed $keyed } }
 def "main released" [app: path, --expect: string, --dry-run] { with-env (dry-env $dry_run) { released $app --expect $expect } }
 # --flip's entries: names split at commas, but `name=value` is one entry whose value may hold commas; one that mixes it
 # with other names is refused, since it cannot be told from a value.

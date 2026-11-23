@@ -22,6 +22,8 @@ def ev(r):
     if "in" in r:
         needle, hay = (ev(x) for x in r["in"])
         return needle is not None and needle in hay
+    if "fractional" in r:  # flagd's: no targetingKey is an error, which reads the default variant
+        return None if ctx["targetingKey"] is None else r["fractional"][0][0]
     args = r["if"]
     for i in range(0, len(args) - 1, 2):
         if ev(args[i]):
