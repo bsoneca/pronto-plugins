@@ -367,6 +367,12 @@ export function removalsDue(issues, app, now, days = REMOVE_AFTER_DAYS, on = {})
   return [...due.values()].sort((a, b) => (a.flag < b.flag ? -1 : a.flag > b.flag ? 1 : 0));
 }
 
+/** How long a board call waits before try `attempt + 1` (ms): 2 s doubling, at most 30 s. The caller
+ * adds jitter, so processes that failed together do not ask again together (PRONTO-1707). */
+export function backoff(attempt) {
+  return Math.min(2000 * 2 ** attempt, 30_000);
+}
+
 /** Whether a board call that failed is asked again, and after how long (ms), or null to give up.
  * `failure` is the HTTP status, or "timeout" / "network" when no answer came. A 429 never ran, so
  * any call is asked again; a GET, PATCH, PUT or DELETE is the same call twice, so a timeout, a lost
@@ -375,12 +381,30 @@ export function removalsDue(issues, app, now, days = REMOVE_AFTER_DAYS, on = {})
  * held a verb for ever). */
 export function askAgain(method, failure, attempt, tries = 4) {
   if (attempt + 1 >= tries) return null;
-  const wait = 2000 * (attempt + 1);
+  const wait = backoff(attempt);
   if (failure === 429) return wait;
   const same = ["GET", "HEAD", "PATCH", "PUT", "DELETE"].includes(String(method).toUpperCase());
   if (!same) return null;
   if (failure === "timeout" || failure === "network" || (typeof failure === "number" && failure >= 500)) return wait;
   return null;
+}
+
+/** askAgain under a retry budget: `spent` retries already made by this process, `budget` the most it
+ * may make in all. Once spent, every failure is final, so a Plane that stays down is reported, not
+ * waited on for ever (PRONTO-1707: 35 processes each retrying kept Plane down). */
+export function retryVerdict(method, failure, attempt, spent, budget) {
+  if (spent >= budget) return null;
+  return askAgain(method, failure, attempt);
+}
+
+/** Whether a failure says Plane is down, not that this call was wrong: 502, 503, 504 or no answer in time. */
+export function tripsBreaker(failure) {
+  return failure === 502 || failure === 503 || failure === 504 || failure === "timeout";
+}
+
+/** Whether the shared breaker is open: a failure that trips it wrote `untilMs`, and calls before it fail at once. */
+export function breakerOpen(untilMs, nowMs) {
+  return Number.isFinite(untilMs) && nowMs < untilMs;
 }
 
 /** A pull's claim on an issue, written in the comment that moves it: `claim <nonce>`. */

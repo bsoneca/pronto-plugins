@@ -12,6 +12,12 @@ import type { Board } from "./board/board.ts";
 import { adapterOf, type DevFlow, exportFlow, tokenOf } from "./spec.ts";
 import { inboxSteps } from "./suggestions.ts";
 
+/** What helm records as a release's description: the hash of the values we applied (kept.json, the secrets, stays out). */
+async function valuesNote(values: unknown): Promise<string> {
+  const sum = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(values)));
+  return `values ${[...new Uint8Array(sum)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
+
 const ok = (note = "") => ({ done: true as const, note });
 const todo = (why: string) => ({ todo: why });
 const gate = (why: string) => ({ gate: why });
@@ -172,7 +178,10 @@ export function steps(repo: string, flow: DevFlow): Step[] {
           if (!r.ok) return todo("install it");
           const s = JSON.parse(r.out);
           const chart = s.chart?.metadata?.version ?? (await cmd("helm", ["--kube-context", cluster.context, "-n", ns, "list", "-o", "json"]).then((l) => JSON.parse(l.out).find((x: { name: string }) => x.name === "plane")?.chart?.replace("plane-ce-", "")));
-          return s.info?.status === "deployed" && chart === board.chart ? ok() : todo(`${s.info?.status ?? "not deployed"} ${chart ?? ""}: upgrade to ${board.chart}`);
+          if (s.info?.status !== "deployed" || chart !== board.chart) return todo(`${s.info?.status ?? "not deployed"} ${chart ?? ""}: upgrade to ${board.chart}`);
+          // The chart's version alone never said a changed planeValues was not applied (PRONTO-1707).
+          const want = await valuesNote(await exportFlow<Record<string, unknown>>(repo, "planeValues"));
+          return s.info?.description === want ? ok() : todo("planeValues changed: upgrade to apply them");
         },
         apply: async () => {
           const secret = async (name: string, key: string) => atob(await must("kubectl", kc("-n", ns, "get", "secret", name, "-o", `jsonpath={.data.${key}}`)));
@@ -182,7 +191,7 @@ export function steps(repo: string, flow: DevFlow): Step[] {
           try {
             await Deno.writeTextFile(`${dir}/values.json`, JSON.stringify(values));
             await Deno.writeTextFile(`${dir}/kept.json`, JSON.stringify(kept), { mode: 0o600 });
-            await must("helm", ["--kube-context", cluster.context, "-n", ns, "upgrade", "--install", "plane", "plane-ce", "--repo", "https://helm.plane.so", "--version", board.chart, "-f", `${dir}/values.json`, "-f", `${dir}/kept.json`, "--wait", "--timeout", "20m"]);
+            await must("helm", ["--kube-context", cluster.context, "-n", ns, "upgrade", "--install", "plane", "plane-ce", "--repo", "https://helm.plane.so", "--version", board.chart, "--description", await valuesNote(values), "-f", `${dir}/values.json`, "-f", `${dir}/kept.json`, "--wait", "--timeout", "20m"]);
           } finally {
             await Deno.remove(dir, { recursive: true });
           }
