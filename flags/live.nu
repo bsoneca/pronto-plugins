@@ -236,7 +236,9 @@ def pin-guard [app: path] {
 # Who pushed, and from which commit: kept on each version, which history shows. A directory store
 # needs no gcloud: the account where one is installed, else the login name.
 def provenance [app: path, at: record] {
-	let who = if (is-dir $at) {
+	# PRONTO_FLAGS_WHO names who asks where the process's own login is no one (Studio's builder: `studio:<user id>`).
+	let named = ($env.PRONTO_FLAGS_WHO? | default "" | str trim)
+	let who = if $named != "" { $named } else if (is-dir $at) {
 		let a = if (which gcloud | is-empty) { "" } else { do { ^gcloud config get-value account } | complete | get stdout | str trim }
 		if $a == "" { $env.USER? | default (^whoami | str trim) } else { $a }
 	} else { gc config get-value account | str trim }
@@ -251,17 +253,44 @@ def provenance [app: path, at: record] {
 	{who: $who, commit: ($commit + (if ($dirty | is-empty) { "" } else { "+edits" })), plugin: $plugin}
 }
 
+# Whether a mirror holds a credential (a kubeconfig file): then no command the app supplies may run beside it unjailed.
+def has-kubeconfig [at: record]: nothing -> bool {
+	($at.mirrors? | default [] | any {|m| ($m.kubeconfig? | default null) != null })
+}
+
+# PRONTO_FLAGS_CASES_WRAP, as a flip's case command is prefixed with it; "" where unset. A wrap ending in a shell separator
+# would leave the case command outside it, and a kubeconfig mirror takes no flip without one.
+def cases-wrap [at: record]: nothing -> string {
+	let wrap = ($env.PRONTO_FLAGS_CASES_WRAP? | default "" | str trim)
+	if $wrap == "" and (has-kubeconfig $at) {
+		error make {msg: "flags: a kubeconfig mirror holds a credential, so a flip's case command must run jailed: set PRONTO_FLAGS_CASES_WRAP; nothing was written"}
+	}
+	if $wrap =~ '[;&|]$' { error make {msg: $"flags: PRONTO_FLAGS_CASES_WRAP ends in a shell separator \(($wrap)\), which would run the case command outside it; nothing was written"} }
+	$wrap
+}
+
 # The flags written where else a flagd reads them (flagsLive.mirrors): a release@k8s node's ConfigMap,
-# which its flagd mounts (release.cue's services.flagd.files), applied over ssh as the node's kubectl.
+# which its flagd mounts (release.cue's services.flagd.files), applied over ssh as the node's kubectl, or, where
+# the mirror names a `kubeconfig` file instead of `ssh`, by a kubectl here on that file's identity.
 # Each write of the live object is written there too: a push, its restore, a rollback.
 # A mirror that fails warns and the push goes on (a staging node), unless it is required (production).
 def mirror [at: record, text: string] {
 	for m in ($at.mirrors? | default []) {
-		refuse-write $"the mirror at ($m.ssh)"
 		let key = ($m.key? | default "flags.json")
 		let cm = ({apiVersion: v1, kind: ConfigMap, metadata: {name: $m.configMap, namespace: $m.namespace}, data: {$key: $text}} | to json)
-		let r = ($cm | ^ssh -o BatchMode=yes -o ConnectTimeout=20 $m.ssh $"($m.kubectl? | default 'sudo k3s kubectl') apply -f -" | complete)
-		let where = $"($m.ssh)'s ($m.namespace)/($m.configMap)"
+		let via_kubeconfig = (($m.kubeconfig? | default null) != null)
+		let target = if $via_kubeconfig { $m.kubeconfig } else { $m.ssh }
+		refuse-write $"the mirror at ($target)"
+		# A kubeconfig mirror applies from here, as that file's identity (Studio's builder, with a short-lived token
+		# bound to the app's namespace); an ssh one applies on the node.
+		let r = if $via_kubeconfig {
+			# The binary is the operator's (PRONTO_FLAGS_KUBECTL), never the app's: it is handed the credential.
+			let kubectl = ($env.PRONTO_FLAGS_KUBECTL? | default "kubectl")
+			$cm | ^$kubectl --kubeconfig $m.kubeconfig apply -f - | complete
+		} else {
+			$cm | ^ssh -o BatchMode=yes -o ConnectTimeout=20 $m.ssh $"($m.kubectl? | default 'sudo k3s kubectl') apply -f -" | complete
+		}
+		let where = $"($target)'s ($m.namespace)/($m.configMap)"
 		if $r.exit_code == 0 { print $"flags: mirrored to ($where)" } else if ($m.required? | default false) {
 			error make {msg: $"flags: the mirror at ($where) failed: ($r.stderr | str trim)"}
 		} else { print -e $"flags: WARNING: the mirror at ($where) failed, so it still serves its last flags: ($r.stderr | str trim)" }
@@ -274,6 +303,7 @@ def mirror [at: record, text: string] {
 def database [at: record, app: path, text: string] {
 	let cmd = ($at.database? | default "")
 	if ($cmd | is-empty) { print "flags: no flagsLive.database, so no database holds these flags"; return }
+	if (has-kubeconfig $at) { error make {msg: "flags: flagsLive.database runs the app's command beside a kubeconfig mirror's credential, unjailed: refused; nothing was written"} }
 	refuse-write $"the database through ($cmd)"
 	let host = if ($at.site? | default "" | is-empty) { "" } else { $at.site | url parse | get host }
 	let sql = $"SELECT pronto_flags.put\('(sq ($text | from json | to json -r))'::jsonb, '(sq $host)'\);\n"
@@ -642,15 +672,22 @@ export def cases [app: path, flag?: string] {
 }
 
 # The app's command, run with sh in its folder with the env given; ok and what it printed.
-def run-cases [app: path, cmd: string, vars: record] {
+def run-cases [app: path, cmd: string, vars: record, --wrap: string = ""] {
 	# This tool runs under the plugins tree's saytw, which exports its SAYT_VERSION. The app's own ./saytw
 	# must read its own pin: with ours it starts the wrong sayt, which refuses the app's pin.
-	let r = (do { cd $app; with-env $vars { ^env -u SAYT_VERSION sh -c $cmd } } | complete)
+	# PRONTO_FLAGS_CASES_WRAP prefixes the app's case command (a sandbox: Studio's builder runs it in its jail, with
+	# no credential in reach): `sh -c '<wrap> sh -c "$1"' sh <cmd>`, so the wrap may quote. Only a flip's own cases
+	# are wrapped (--wrap, from `cases-wrap`), never the generate of a record (which a kubeconfig mirror skips).
+	let r = if $wrap == "" {
+		(do { cd $app; with-env $vars { ^env -u SAYT_VERSION sh -c $cmd } } | complete)
+	} else {
+		(do { cd $app; with-env $vars { ^env -u SAYT_VERSION sh -c $"($wrap) sh -c \"\$1\"" sh $cmd } } | complete)
+	}
 	{ok: ($r.exit_code == 0), out: ($r.stdout + $r.stderr | str trim)}
 }
 
 # What OFREP answers for a flag and a targetingKey (none: no context); null where it doesn't answer.
-# Where the flags are mirrored to a node (flagsLive.mirrors), its flagd is asked itself, from the node, at its
+# Where the flags are mirrored to a node over ssh (flagsLive.mirrors), its flagd is asked itself, from the node, at its
 # Service's address (the mirror's `flagd`, default "flagd", port `ofrepPort`, default 8693): the app's door names
 # the account from a verified session alone and drops a body's targetingKey (pronto-plugins#113), so the site's
 # /ofrep/ answers every request as no account (PRONTO-257), and the node's flagd answers before a cache could. Elsewhere, the
@@ -659,7 +696,8 @@ def run-cases [app: path, cmd: string, vars: record] {
 def ofrep-ask [at: record, flag: string, key: any] {
 	let cmd = ($env.FLAGS_OFREP_CMD? | default "")
 	let ctx = if $key == null { {} } else { {targetingKey: $key} }
-	let m = ($at.mirrors? | default [] | get -o 0)
+	# A kubeconfig mirror has no node to ask from (its identity has no pods/portforward): the site's /ofrep/ answers.
+	let m = ($at.mirrors? | default [] | where {|x| ($x.ssh? | default null) != null } | get -o 0)
 	try {
 		if $cmd != "" {
 			let r = (with-env {OFREP_URL: $at.site, FLAG: $flag, TARGETING_KEY: ($key | default "")} { ^sh -c $cmd } | from json)
@@ -814,20 +852,21 @@ def tell-board [at: record, app: path, moved: list<record>] {
 # version read before it again.
 def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: record, before: string, meta: record] {
 	let on = ($live | get flag)
+	let wrap = (cases-wrap $at)
 	let v = (write-flags $at $doc $app --meta ($meta | insert cases running) --from $before)
 	print $"flags: ($on | str join ', ') is on for everyone; waiting for OFREP to say so"
 	try {
 		let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f))} })
 		# The site's /ofrep/ serves the flags marked `client` alone (PRONTO-1518): it cannot say what a server-only flag now
 		# reads. A node's flagd, asked itself, and a stand-in (FLAGS_OFREP_CMD) can.
-		let by_door = (($at.mirrors? | default [] | is-empty) and (($env.FLAGS_OFREP_CMD? | default "") == ""))
+		let by_door = (($at.mirrors? | default [] | where {|x| ($x.ssh? | default null) != null } | is-empty) and (($env.FLAGS_OFREP_CMD? | default "") == ""))
 		let hidden = if $by_door { $want | where {|w| ($doc.flags | get $w.flag | get -o metadata.flagSetId) != "client" } } else { [] }
 		if ($hidden | is-not-empty) { print $"flags: ($hidden | get flag | str join ', ') is not a client flag: the site's /ofrep/ does not serve it, so its new value is not waited for there" }
 		let want = ($want | where {|w| $w not-in $hidden })
 		if not (wait-ofrep $at $want) { error make {msg: $"OFREP did not answer the new value of ($on | str join ', ') within the wait"} }
 		for c in $live {
 			print $"flags: ($c.flag): running its production cases \(($c.production | str join ', ')\)"
-			let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site})
+			let r = (run-cases $app $cmds.live {FLAG: $c.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site} --wrap $wrap)
 			if not $r.ok { error make {msg: $"($c.flag)'s production cases failed:\n($r.out)"} }
 			# The skipped-flag check is for a flag now on for everyone: with accounts only, or turned off, the runner
 			# legitimately skips the steps behind it.
@@ -1229,6 +1268,7 @@ def record-back [at: record, app: path, version: string, cases: string, owned: a
 	if (dry) or ($env.PRONTO_FLAGS_RECORD? | default "") in ["0" "off"] { return }
 	if $owned != null and ($owned | is-empty) { return }
 	let stand = ($env.PRONTO_FLAGS_RECORD_BIN? | default "")
+	if $stand == "" and (has-kubeconfig $at) { print -e "flags: record skipped: it runs the app's generate, which a kubeconfig mirror's credential must not sit beside"; return }
 	let base = {event: "flags.record", app: ($app | path expand | path basename), target: $at.url, version: $version, cases: $cases}
 	let file = (journal-file $app)
 	let note = {|rec: record|
@@ -1438,6 +1478,7 @@ def armies-live [app: path, at: record, have: list<record>, changed: list<record
 	let before = ($changed | each {|w| {army: $w.army, everyone: ($have | where id == $w.army | get -o 0), testers: ($have | where id == $"($w.army)/testers" | get -o 0)} })
 	let names = ($changed | get army)
 	let run = ($c.production | is-not-empty)
+	let wrap = if $run { cases-wrap $at } else { "" }
 	try {
 		for w in $changed {
 			let b = ($before | where army == $w.army | first)
@@ -1448,7 +1489,7 @@ def armies-live [app: path, at: record, have: list<record>, changed: list<record
 		army-journal $app $at all $names (if $run { "running" } else if (has-cases $c) { "none on production" } else { "untested" }) $note
 		if $run {
 			print $"armies: ($names | str join ', ') is in everyone's page; running its production cases \(($c.production | str join ', ')\)"
-			let r = (run-cases $app $cmds.live {FLAG: $at.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site})
+			let r = (run-cases $app $cmds.live {FLAG: $at.flag, ONLY: ($c.production | str join ","), APP_URL: $at.site} --wrap $wrap)
 			if not $r.ok { error make {msg: $"($at.flag)'s production cases failed:\n($r.out)"} }
 			# A push of rows does not move the flag, so only the verdict checks apply.
 			let empty = (vacuous $r.out "")

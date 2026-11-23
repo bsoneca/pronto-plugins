@@ -261,13 +261,28 @@ flagsLive?: {
 	// (push, its restore, rollback) is applied there too, over ssh, as the node's kubectl.
 	// A mirror that fails warns, so a staging node never holds a flip back; a required one (the
 	// node is production) fails the push.
+	//
+	// A mirror names the node by `ssh` (kubectl runs there) or a `kubeconfig` file (kubectl runs
+	// here, as that file's identity: Studio's builder, with a short-lived token bound to the
+	// app's namespace); exactly one. Such a mirror takes no `database`, no record-back and no
+	// flip without PRONTO_FLAGS_CASES_WRAP, since app code must not run beside its credential. With a kubeconfig there is no node to ask, so a flip waits
+	// for the site's /ofrep/ (`url`), which serves the client flags.
 	mirrors: [...{
-		ssh!:       =~"^[a-z_][a-z0-9_-]*@[A-Za-z0-9.-]+$"
-		namespace!: =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
-		configMap!: =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
-		key:        *"flags.json" | =~"^[A-Za-z0-9_.-]+$"
-		kubectl:    *"sudo k3s kubectl" | string
-		required:   *false | bool
+		ssh?:        =~"^[a-z_][a-z0-9_-]*@[A-Za-z0-9.-]+$"
+		kubeconfig?: string & !=""
+		namespace!:  =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+		configMap!:  =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+		key:         *"flags.json" | =~"^[A-Za-z0-9_.-]+$"
+		required:    *false | bool
+		_named: [if ssh != _|_ {"ssh"}, if kubeconfig != _|_ {"kubeconfig"}]
+		_one: len(_named) & 1
+		if ssh != _|_ {
+			kubectl: *"sudo k3s kubectl" | string
+		}
+		// The binary that holds the credential is the operator's (PRONTO_FLAGS_KUBECTL), never the app's.
+		if kubeconfig != _|_ {
+			kubectl: "kubectl"
+		}
 	}]
 }
 

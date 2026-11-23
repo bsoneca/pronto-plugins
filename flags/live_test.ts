@@ -81,6 +81,24 @@ flagsCases: {live: "sh live.sh"}
   await Deno.remove(dir, { recursive: true });
 });
 
+Deno.test("a mirror names the node by ssh or a kubeconfig file, one of them, each with its kubectl", async () => {
+  const dir = await app(SPEC);
+  const base = `namespace: "game", configMap: "game-flags"`;
+  await Deno.writeTextFile(`${dir}/flags_spec.cue`, `package shop\n${SPEC}
+flagsLive: mirrors: [{ssh: "ops@node.example", ${base}}, {kubeconfig: "/run/kc.yaml", ${base}, required: true}]
+`);
+  const m = await cue(dir, "flagsLive.mirrors");
+  eq(m[0], { ssh: "ops@node.example", namespace: "game", configMap: "game-flags", key: "flags.json", required: false, kubectl: "sudo k3s kubectl" }, "an ssh mirror, as before");
+  eq(m[1], { kubeconfig: "/run/kc.yaml", namespace: "game", configMap: "game-flags", key: "flags.json", required: true, kubectl: "kubectl" }, "a kubeconfig mirror runs kubectl here");
+  for (const bad of [`{ssh: "ops@node.example", kubeconfig: "/run/kc.yaml", ${base}}`, `{${base}}`, `{kubeconfig: "", ${base}}`, `{kubeconfig: "/run/kc.yaml", kubectl: "./tools/x", ${base}}`]) {
+    await Deno.writeTextFile(`${dir}/flags_spec.cue`, `package shop\n${SPEC}\nflagsLive: mirrors: [${bad}]\n`);
+    let refused = false;
+    try { await cue(dir, "flagsLive.mirrors"); } catch { refused = true; }
+    eq(refused, true, bad);
+  }
+  await Deno.remove(dir, { recursive: true });
+});
+
 const flagd = Deno.env.get("FLAGD");
 Deno.test({ name: "flagd serves the live source over the baked file, by account and host, and follows its edits", ignore: !flagd, async fn() {
   const dir = await app(SPEC);
