@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/bsoneca/pronto-plugins/assetlinks"
+	"github.com/bsoneca/pronto-plugins/native"
 )
 
 _template: {
@@ -136,30 +137,23 @@ _image: "system-images;android-36;google_apis;arm64-v8a"
 _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/", "app/src/release/kotlin/"]
 
 #Host: H={
-	app: string
+	// What every native host says: the app, its label, its base, its CUE package, the unlock, the scenarios (native/host.cue).
+	native.#Core
 	// The application id the verbs install and start: Android refuses a hyphen
 	// in one, and an app's name admits it.
-	applicationId: *"dev.pronto.\(strings.Replace(app, "-", "_", -1))" | string
+	applicationId: *"dev.pronto.\(strings.Replace(H.app, "-", "_", -1))" | string
 	applicationId: =~"^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
 	activity:      *".MainActivity" | string
-	// What the launcher, the autofill picker and the unlock prompt call it.
-	label: *app | string
 	// terminal: omnishell's interpreter draws the program's screens, for any app.
 	// vault: the app's own screen.js over sealed device tables and autofill.
 	mode: *"terminal" | "vault"
-	// Where a release build finds the app's cluster; a debug build is told at start.
-	base: *"https://\(app).invalid" | string
-	// The app's CUE package (program.cue's), which android_surface.cue joins.
-	package: *"" | string
 	// The SHA-256 fingerprints of the certificates that sign the release (android/android.json's
 	// `signing`): the door admits its passkeys and its links open it. None: a release has no passkeys.
 	signing: [...assetlinks.#Fingerprint] & list.UniqueItems()
 	// Where the release key lives (android/android.json's `release`): either {file, secret}, the SOPS file
 	// (by path from android/) and the Secret in it (PRONTO-155), or {project, secret}, the Secret Manager
 	// project and secret. Named, android/sign-release.sh is written for that form; none: there is no such script.
-	// Whether the terminal's sealed storage opens only after one strong-biometric prompt
-	// (android/android.json's `unlock`, Unlock.kt). none: its key needs no person, nobody is prompted.
-	unlock: *"none" | "biometric"
+	// The unlock is native.#Unlock, from android/android.json's `unlock` (Unlock.kt).
 	// Whether the terminal fills other apps' logins (android/android.json's `autofill`, FillService.kt):
 	// its handler named in the seeded autofill.json answers which. A fill hands out secrets, so it
 	// needs the unlock; the vault mode always fills.
@@ -296,7 +290,7 @@ _kotlin: ["app/src/main/kotlin/", "app/src/test/kotlin/", "app/src/debug/kotlin/
 		".config/mise/conf.d/android.toml": {seed: false, text: H.surface.miseConf}
 		// The scenario files integrate@android runs, by path from the app's root; the app's to fill.
 		if H.mode == "terminal" {
-			"android/android.json": {seed: true, text: json.Indent(json.Marshal({scenarios: []}), "", "  ") + "\n"}
+			"android/android.json": {seed: true, text: H.configSeed}
 		}
 		if H.mode == "terminal" && H.package != "" {
 			"android_surface.cue": {seed: false, text: H._surface}

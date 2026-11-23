@@ -20,6 +20,7 @@ refuses an app that is not.
 - [api](api/README.md): pronto-api's spike: one Deno service serving a runtime descriptor set over gRPC, Connect and REST on one port, behind `api_export`.
 - [doorguard](doorguard/README.md): the door's Dapr guard (PRONTO-1307), a block in the app's docker/Caddyfile that answers 404 for Dapr API paths under every public prefix.
 - [android](android/README.md): a native Android host, no WebView.
+- [native](native/README.md): what every native host shares, in CUE: the host core, the bridge contracts and the host battery.
 - [billing](billing/README.md): paid plans through a shared Stripe broker.
 - [errors](errors/README.md): what the pages throw, reported to a self-hosted GlitchTip (Sentry protocol): the node's server, the page's reporter, the door's route.
 - [firebase](firebase/README.md): release to Firebase Hosting.
