@@ -4,18 +4,18 @@
 import { parseHTML } from "npm:linkedom@0.18.4";
 import { bound, checkView, elementOf as viewElement } from "../../android/template/terminal/bound.js";
 import { compile, elementOf, idOf } from "../../android/template/terminal/compile.js";
-import { length, parseColor } from "../../android/template/terminal/css.js";
+import { inlineImports, length, parseColor } from "../../android/template/terminal/css.js";
 import { atobOf, b64u, btoaOf, credentialOf, errorOf, optionsToJson, unb64u } from "../../android/template/terminal/passkeys.js";
 
-const pageOf = (body, base) =>
-  parseHTML(`<!doctype html><html lang="en"><head>${base ? `<base href="${base}">` : ""}</head><body>${body}</body></html>`);
+const pageOf = (body, base, full) =>
+  parseHTML(`<!doctype html><html lang="en"${full ? " data-display=\"fullscreen\"" : ""}><head>${base ? `<base href="${base}">` : ""}</head><body>${body}</body></html>`);
 
 const asSheets = (css) => (Array.isArray(css) ? css : css ? [css] : []);
 
 /** A page compiled: the card, its root view, the body's view and its `items`, the variables by name and what is unsupported. */
 export function render(body, css, opts) {
   const o = opts ?? {};
-  const { document } = pageOf(body, o.base);
+  const { document } = pageOf(body, o.base, o.fullscreen);
   const { card, unsupported } = compile(document, { sheets: asSheets(css), width: o.width ?? 411, height: o.height, scheme: o.scheme });
   const root = card.states[0].div;
   const top = root.items[0] ?? { items: [] };
@@ -343,3 +343,15 @@ export function held(input, hz, moves) {
   return { controls, inputs, buttons, faults, padAfterStop: screen.querySelector("#hatch-probe-pad") !== null };
 }
 
+
+/** A stylesheet with its @imports inlined from the files given (path under the shell directory: text), as bundle.ts does. */
+export const inlined = (file, files) => inlineImports(files[file], file, (path) => files[path] ?? null);
+
+/** A fullscreen page whose `.boom` element throws when the compiler reads its children: how many layers came out, none a hole, and what was reported. */
+export function layersAfterFault(body, css) {
+  const { document } = pageOf(body, undefined, true);
+  Object.defineProperty(document.querySelector(".boom"), "childNodes", { get() { throw new Error("boom"); } });
+  const { card, unsupported } = compile(document, { sheets: asSheets(css), width: 411 });
+  const items = card.states[0].div.items;
+  return { count: items.length, holes: items.filter((d) => !d || !d.type).length, whats: unsupported.map((u) => u.what) };
+}

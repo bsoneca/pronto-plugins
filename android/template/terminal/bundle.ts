@@ -3,6 +3,7 @@
 // from the app's root: deno run -A --no-lock android/terminal/bundle.ts <omnishell-dir>.
 import { transform, stop } from "npm:esbuild@0.25.12";
 import { localRoots } from "./trust.ts";
+import { inlineImports } from "./css.js";
 
 const [omnishell] = Deno.args;
 if (!omnishell) throw new Error("bundle: name omnishell's directory");
@@ -87,6 +88,37 @@ for (const [name, { src }] of Object.entries(hostDom)) {
 await Deno.remove(hatchMap);
 // SES at omnishell's own pin, so the phone's cage is the page's.
 await Deno.copyFile(`${omnishell}/interpreter/vendor/ses.umd.min.js`, `${dir}/ses.umd.min.js`);
+// A stylesheet that @imports another is shipped with the import inlined where it stood: the compiler
+// reads each sheet whole and does not follow an import. The rewritten copy lands in terminal-css, an asset
+// directory of the debug, release and rehearsal source sets (not main, whose ../../shell holds the original:
+// one path in two directories of a source set is a duplicate asset AGP refuses), which outrank main.
+const readSheet = (path: string): string | null => {
+  try { return Deno.readTextFileSync(`shell/${path}`); } catch { return null; }
+};
+const sheetsOf = (sub: string): string[] => {
+  const out: string[] = [];
+  try {
+    for (const f of Deno.readDirSync(`shell/${sub}`)) {
+      const path = sub ? `${sub}/${f.name}` : f.name;
+      if (f.isDirectory) out.push(...sheetsOf(path));
+      else if (f.isFile && f.name.endsWith(".css")) out.push(path);
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  return out;
+};
+const cssDir = "android/app/build/generated/terminal-css";
+await Deno.remove(cssDir, { recursive: true }).catch(() => {});
+for (const path of sheetsOf("")) {
+  const text = readSheet(path)!;
+  if (!/@import\b/i.test(text)) continue;
+  const inlined = inlineImports(text, path, readSheet);
+  if (inlined === text) continue;
+  await Deno.mkdir(`${cssDir}/${path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "."}`, { recursive: true });
+  await Deno.writeTextFile(`${cssDir}/${path}`, inlined);
+  console.log(`stylesheet ${path}: @import inlined`);
+}
 // The catalogues the interpreter fetches beside the screens, under the same names.
 try {
   for await (const f of Deno.readDir("messages")) if (f.name.endsWith(".json")) await Deno.copyFile(`messages/${f.name}`, `${dir}/messages/${f.name}`);
