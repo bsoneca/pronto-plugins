@@ -1,0 +1,8 @@
+#!/bin/sh
+# Adds or refreshes the ir.md generate step in a pronto app (ir-md/README.md):
+#   bin/pronto-ir-md <app-dir>
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+cd "$here"
+exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write ir-md/install.ts "$app"
