@@ -58,15 +58,19 @@ BEGIN
 END $f$;
 REVOKE ALL ON FUNCTION lessons.advance(int, int, int) FROM PUBLIC;
 
--- A row as the page reads it.
+-- A row as the page reads it, `p_moves` the chapter's script: `played` is the plies on the board up to the row's step, no
+-- ply after it (the page judges nothing and holds no ply it has not reached; what a hint buys is lesson_hint's token).
+-- The signature changed (a script instead of its length), so the old one is dropped.
 DROP FUNCTION IF EXISTS lessons.view(public.lesson_progress, int);
-CREATE FUNCTION lessons.view(r public.lesson_progress, n int) RETURNS jsonb
+DROP FUNCTION IF EXISTS lessons.view(public.lesson_progress, jsonb);
+CREATE FUNCTION lessons.view(r public.lesson_progress, p_moves jsonb) RETURNS jsonb
 LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, pg_temp AS $f$
   SELECT jsonb_build_object('course', r.course, 'chapter', r.chapter, 'part', r.part, 'step', r.step,
     'wrongs', r.wrongs, 'step_wrongs', r.step_wrongs, 'pool_said', r.pool_said, 'hinted', r.hinted,
-    'done', r.done, 'over', r.step >= n)
+    'done', r.done, 'over', r.step >= jsonb_array_length(p_moves),
+    'played', coalesce((SELECT jsonb_agg(m.token ORDER BY m.i) FROM jsonb_array_elements(p_moves) WITH ORDINALITY AS m(token, i) WHERE m.i <= r.step), '[]'::jsonb))
 $f$;
-REVOKE ALL ON FUNCTION lessons.view(public.lesson_progress, int) FROM PUBLIC;
+REVOKE ALL ON FUNCTION lessons.view(public.lesson_progress, jsonb) FROM PUBLIC;
 
 -- One entry through the ledger: a row goes in first, and the app's hook is called only when it did, so an entry is
 -- settled once whatever the hook does with a second call. A hook that raises (short of gold) takes the ledger row
@@ -182,7 +186,7 @@ BEGIN
       RETURNING * INTO r;
   END IF;
   PERFORM lessons.settle(v_who, 'lesson/' || course || '/' || chapter || '/open', 'open', (g ->> 'price')::int);
-  RETURN lessons.view(r, v_n)::json;
+  RETURN lessons.view(r, v_ch -> 'moves')::json;
 END $f$;
 REVOKE ALL ON FUNCTION public.lesson_start(text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.lesson_start(text, text) TO app_user;
@@ -221,7 +225,7 @@ BEGIN
     RAISE EXCEPTION 'lessons: not started' USING ERRCODE = 'check_violation';
   END IF;
   IF v_step <> r.step OR r.step >= v_n THEN
-    RETURN lessons.view(r, v_n)::json;
+    RETURN lessons.view(r, v_moves)::json;
   END IF;
 
   IF token = v_moves ->> v_step THEN
@@ -252,7 +256,7 @@ BEGIN
       WHERE lp.id = v_id
       RETURNING * INTO r;
   END IF;
-  RETURN lessons.view(r, v_n)::json;
+  RETURN lessons.view(r, v_moves)::json;
 END $f$;
 REVOKE ALL ON FUNCTION public.lesson_move(text, text, int, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.lesson_move(text, text, int, text) TO app_user;
@@ -280,11 +284,11 @@ BEGIN
     RAISE EXCEPTION 'lessons: not started' USING ERRCODE = 'check_violation';
   END IF;
   IF v_step <> r.step OR r.step >= v_n THEN
-    RETURN lessons.view(r, v_n)::json;
+    RETURN lessons.view(r, v_moves)::json;
   END IF;
   PERFORM lessons.settle(v_who, 'lesson/' || course || '/' || chapter || '/' || v_step, 'hint', (g -> 'course' -> 'hint' ->> 'price')::int);
   UPDATE public.lesson_progress lp SET hinted = v_step, updated = now() WHERE lp.id = v_id RETURNING * INTO r;
-  RETURN (lessons.view(r, v_n) || jsonb_build_object('token', v_moves ->> v_step))::json;
+  RETURN (lessons.view(r, v_moves) || jsonb_build_object('token', v_moves ->> v_step))::json;
 END $f$;
 REVOKE ALL ON FUNCTION public.lesson_hint(text, text, int) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.lesson_hint(text, text, int) TO app_user;

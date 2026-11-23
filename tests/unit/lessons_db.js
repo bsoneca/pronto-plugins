@@ -6,7 +6,7 @@
 // cue is the one on PATH, or CUE.
 import { PGlite } from 'npm:@electric-sql/pglite@0.3.7';
 import { createLesson } from '../../lessons/app/lessons.js';
-import { adapter } from './lessons_toy.js';
+import { adapter, fakeServer } from './lessons_toy.js';
 
 const here = new URL('.', import.meta.url).pathname;
 const root = `${here}../../`;
@@ -292,28 +292,42 @@ async function unlock(pg, who) {
   }
 }
 
+/** The database as the page's server: `move(step, token)` is lesson_move as `who`, and `last` the row it answered last. */
+function dbServer(pg, who, chapterId) {
+  const s = {
+    last: undefined,
+    async move(step, token) {
+      const r = await call(pg, who, 'move', ['toy', chapterId, step, token]);
+      if (r.refused) throw new Error(r.refused);
+      s.last = r.state;
+      return r.state;
+    },
+  };
+  return s;
+}
+
 /**
- * The same gestures through the page's lesson (lessons.js, on the emitted courses and the toy adapter) and through
- * the database's lesson_move, as `who`, on the chapter `chapter` (`two`, which the player moves from ply 1, after the first
- * part is done for them): after each, the page's and the database's counters. {n, differ} where differ lists the gestures
- * after which they were not equal.
+ * The same gestures through the page's lesson (lessons.js, on the emitted courses and the toy adapter, asking the database's
+ * lesson_move as `who`) on the chapter `chapter` (`two`, which the player moves from ply 1, after the first part is done for
+ * them): after each, the page's counters and board against the row the database answered. {n, differ} where differ lists the
+ * gestures after which they were not equal: the counters, or a board other than the plies the row says were played.
  */
 export async function agree(pg, who, gestures, chapterId = 'one') {
   const { course, part, chapter } = await chapterOf(chapterId);
   if (chapterId === 'two') await unlock(pg, who);
-  const lesson = createLesson({ course, part, chapter, adapter });
   const started = await call(pg, who, 'start', ['toy', chapterId]);
   if (started.refused) throw new Error(started.refused);
+  const server = dbServer(pg, who, chapterId);
+  const lesson = createLesson({ course, part, chapter, adapter, server, state: started.state });
   const differ = [];
   let n = 0;
   for (const [i, g] of gestures.entries()) {
-    const ply = lesson.state().step;
-    if (lesson.play(g).kind === 'done') continue;
-    const dbState = (await call(pg, who, 'move', ['toy', chapterId, ply, g])).state;
+    if ((await lesson.play(g)).kind === 'done') continue;
     n++;
     const a = counters(lesson.state());
-    const b = counters(dbState);
-    if (JSON.stringify(a) !== JSON.stringify(b)) differ.push({ i, gesture: g, page: a, db: b });
+    const b = counters(server.last);
+    const board = server.last.played.join(' ');
+    if (JSON.stringify(a) !== JSON.stringify(b) || lesson.board() !== board) differ.push({ i, gesture: g, page: a, db: b, board: lesson.board(), played: board });
   }
   return { n, differ };
 }
@@ -332,14 +346,15 @@ export async function reloaded(pg, who) {
   await call(pg, who, 'move', ['toy', 'one', 2, 'a2']);
   await call(pg, who, 'move', ['toy', 'one', 4, 'a3']);
   const row = (await call(pg, who, 'start', ['toy', 'one'])).state;
-  const lesson = createLesson({ course, part, chapter, adapter, state: row });
+  const server = dbServer(pg, who, 'one');
+  const lesson = createLesson({ course, part, chapter, adapter, server, state: row });
   const resumed = counters(lesson.state());
-  lesson.play('zz');
-  const db = counters((await call(pg, who, 'move', ['toy', 'one', counters(row).step, 'zz'])).state);
+  await lesson.play('zz');
+  const db = counters(server.last);
   const page = counters(lesson.state());
   // A page that went on while the server stood: its step is behind, and the server's wins.
-  const behind = createLesson({ course, part, chapter, adapter });
-  const reconciled = counters(behind.reconcile(db));
+  const behind = createLesson({ course, part, chapter, adapter, state: { step: 0, wrongs: 0, step_wrongs: 0, pool_said: 0, over: false, played: [] } });
+  const reconciled = counters(behind.reconcile(server.last));
   return { same: JSON.stringify(page) === JSON.stringify(db) && JSON.stringify(resumed) === JSON.stringify(counters(row)) && JSON.stringify(reconciled) === JSON.stringify(db), resumed, page, db, reconciled };
 }
 
@@ -348,9 +363,22 @@ export async function pickedKeys(count) {
   const courses = await page();
   const course = courses.toy;
   const part = course.parts[0];
-  const lesson = createLesson({ course, part, chapter: part.chapters[0], adapter });
-  lesson.play('a1');
-  return Array.from({ length: count }, () => lesson.play('zz').line);
+  const server = fakeServer();
+  const lesson = createLesson({ course, part, chapter: part.chapters[0], adapter, server, state: server.row() });
+  await lesson.play('a1');
+  const keys = [];
+  for (let i = 0; i < count; i++) keys.push((await lesson.play('zz')).line);
+  return keys;
+}
+
+/** What the emitted page holds of the fixture's script: whether any move of any chapter is in its text, and each chapter's plies. */
+export async function pageHolds() {
+  const courses = await page();
+  const text = JSON.stringify(courses);
+  const moves = ['a1', 'b1', 'a2', 'b2', 'a3', "b'1$"];
+  const plies = {};
+  for (const p of courses.toy.parts) for (const c of p.chapters) plies[c.id] = { plies: c.plies, hasMoves: 'moves' in c };
+  return { leaked: moves.filter((m) => text.includes(JSON.stringify(m))), plies };
 }
 
 /** Whether every key of the emitted page has its line in each locale's entries, and the keys of each locale. */

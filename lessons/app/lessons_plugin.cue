@@ -173,7 +173,7 @@ _lessonsSpec: courses: {for cid, c in lessons.courses {(cid): {
 	}]
 }}}
 
-// The page's courses: the schema's shape, each #Line a message key.
+// The page's courses: the schema's shape, each #Line a message key, and no move (PRONTO-1711).
 _lessonsPage: {for cid, c in lessons.courses {(cid): {
 	id:      c.id
 	flag:    c.flag
@@ -190,7 +190,8 @@ _lessonsPage: {for cid, c in lessons.courses {(cid): {
 		complaints: [for i, _ in p.complaints {"lesson_\(cid)_part_\(p.id)_complaint_\(i)"}]
 		chapters: [for ch in p.chapters {
 			id:    ch.id
-			moves: ch.moves
+			// How many plies the script has, never the moves: the database judges, and tells the page the plies played.
+			plies: len(ch.moves)
 			shown: ch.shown
 			claim: ch.claim
 			intro: "lesson_\(cid)_ch_\(ch.id)_intro"

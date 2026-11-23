@@ -4,12 +4,16 @@
 //   adapter = { start(), legal(board, gesture), token(gesture), apply(board, token), render(board) }
 //
 // `start()` is the board before any ply; `legal` says whether a gesture may be tried at all; `token(gesture)` is the
-// move's token (what the chapter's `moves` hold, compared as strings); `apply` returns the board after a token,
-// never changing the one it was given (so a take-back is keeping the old one); `render` draws a board.
+// move's token (an opaque string the server compares); `apply` returns the board after a token, never changing the one
+// it was given (so a take-back is keeping the old one); `render` draws a board.
 //
-// State: { step, wrongs, step_wrongs, done }. `step` is the ply the next move is expected at (an index of
-// chapter.moves); `wrongs` counts every wrong move of the chapter, `step_wrongs` those at this step. The server row
-// holds the same three numbers, so the complaint a wrong move gets survives a reload.
+// The page holds no answer: the chapter it is given has `plies` (how many the script has) and `shown`, never the moves,
+// and the server judges every move (`server.move(step, token)`, a promise of the row as lessons.view makes it). The row's
+// `played` is the plies on the board so far, the player's and the other side's replies, up to its `step`.
+//
+// State: { step, wrongs, step_wrongs, pool_said, done }. `step` is the ply the next move is expected at (an index into
+// the script); `wrongs` counts every wrong move of the chapter, `step_wrongs` those at this step. They are the row's, so
+// the complaint a wrong move gets survives a reload.
 
 const enc = new TextEncoder();
 
@@ -81,76 +85,76 @@ export function pick(course, part, chapter, step, stepWrongs, poolSaid) {
 }
 
 /**
- * A lesson on a chapter. `state`, when given, is a server row's {step, wrongs, step_wrongs, pool_said}: the lesson
- * resumes there (after a reload). `server`, when given, is told of every judged move, `server.move(step, token)`; what
- * it returns is ignored here (the page hands the server's state to `reconcile`).
- * Methods: `state()`, `board()`, `expected()` (the token the player must play now, null when done),
- * `play(gesture)`, `reconcile(serverState)`.
+ * A lesson on a chapter, resumed at `state`, a server row ({step, wrongs, step_wrongs, pool_said, over, played}, as
+ * lesson_start and lesson_move return it). `server.move(step, token)` returns a promise of the row after the move.
+ * Methods: `state()`, `board()`, `busy()`, `play(gesture)` (async), `reconcile(row)`.
  */
 export function createLesson({ course, part, chapter, adapter, server, state }) {
-  const moves = chapter.moves;
-  const mine = (ply) => ply % 2 === part.player;
   let board = adapter.start();
   let s = { step: 0, wrongs: 0, step_wrongs: 0, pool_said: 0, done: false };
+  let inflight = false;
 
-  // The scripted plies: the other side's replies, until it is the player's turn or the script ends.
-  const script = () => {
-    const said = [];
-    while (s.step < moves.length && !mine(s.step)) board = adapter.apply(board, moves[s.step++]), said.push(moves[s.step - 1]);
-    s.done = s.step >= moves.length;
-    return said;
-  };
-  // Put the lesson at the server's state: the board from the script's tokens up to the step (the first `shown` plies
-  // play whoever the server says), then forward to the player's turn, as a fresh lesson does.
-  const adopt = (sv) => {
-    const step = Math.min(Math.max(Number.isInteger(sv.step) ? sv.step : 0, chapter.shown), moves.length);
+  // Put the lesson at the server's row: the board from the plies it says were played, the counters its own.
+  const adopt = (row) => {
     board = adapter.start();
-    for (let i = 0; i < step; i++) board = adapter.apply(board, moves[i]);
-    s = { step, wrongs: sv.wrongs ?? 0, step_wrongs: sv.step_wrongs ?? 0, pool_said: sv.pool_said ?? 0, done: false };
-    script();
+    for (const token of row.played ?? []) board = adapter.apply(board, token);
+    s = { step: row.step ?? 0, wrongs: row.wrongs ?? 0, step_wrongs: row.step_wrongs ?? 0, pool_said: row.pool_said ?? 0, done: row.over === true };
     adapter.render(board);
   };
-  adopt(state ?? s);
+  adopt(state ?? {});
 
   return {
     state: () => ({ ...s }),
     board: () => board,
-    expected: () => (s.done ? null : moves[s.step]),
+    busy: () => inflight,
 
-    /** Judge a gesture: {kind: 'done' | 'illegal'}, {kind: 'right', say, replies, done} or {kind: 'wrong', line, tried, board}. */
-    play(gesture) {
+    /**
+     * Send a gesture to the server and show its answer: {kind: 'busy' | 'done' | 'illegal'} without asking it (a move in
+     * flight makes the next one busy, a finished chapter is done), else {kind: 'right', say, replies, done},
+     * {kind: 'wrong', line, tried, board} or {kind: 'stale'}. Right: the move and the replies from the row's `played`
+     * are applied. Wrong: the board stays (`tried` is the one after the move, only to be shown), the counters are the
+     * server's. Stale: the move was at another step than the server's, nothing is judged and the server's row is adopted.
+     * A failed call throws, the lesson as it was.
+     */
+    async play(gesture) {
+      if (inflight) return { kind: "busy" };
       if (s.done) return { kind: "done" };
       if (!adapter.legal(board, gesture)) return { kind: "illegal" };
       const token = adapter.token(gesture);
       const ply = s.step;
-      server?.move(ply, token);
-      if (token === moves[ply]) {
+      inflight = true;
+      let row;
+      try {
+        row = await server.move(ply, token);
+      } finally {
+        inflight = false;
+      }
+      const played = row.played ?? [];
+      if (row.step > ply && played[ply] === token) {
+        const replies = played.slice(ply + 1, row.step);
         board = adapter.apply(board, token);
-        s.step++;
-        s.step_wrongs = 0;
-        const replies = script();
+        for (const reply of replies) board = adapter.apply(board, reply);
+        s = { step: row.step, wrongs: row.wrongs, step_wrongs: row.step_wrongs, pool_said: row.pool_said, done: row.over === true };
         adapter.render(board);
         return { kind: "right", say: chapter.steps?.[ply]?.say ?? null, replies, done: s.done };
       }
-      s.wrongs++;
-      s.step_wrongs++;
-      const { line, pool } = pick(course, part, chapter, ply, s.step_wrongs, s.pool_said);
-      if (pool) s.pool_said++;
+      if (row.step !== ply) {
+        adopt(row);
+        return { kind: "stale" };
+      }
+      // Wrong: the server counted it, so the line comes from its counters (a pool line was said when step_wrongs went past the ply's own).
+      const own = chapter.steps?.[ply]?.wrong?.length ?? 0;
+      const pool = row.step_wrongs > own;
+      const { line } = pick(course, part, chapter, ply, row.step_wrongs, row.pool_said - (pool ? 1 : 0));
+      s = { ...s, wrongs: row.wrongs, step_wrongs: row.step_wrongs, pool_said: row.pool_said };
       // The take-back: the board after the wrong move is only shown (`tried`); ours is the one before it.
-      const tried = adapter.apply(board, token);
-      return { kind: "wrong", line, tried, board };
+      return { kind: "wrong", line, tried: adapter.apply(board, token), board };
     },
 
-    /**
-     * The server's state wins. The same step: its wrongs, step_wrongs and pool_said are adopted, the board stays. A
-     * different step: the step is bounded to the script and to the plies after `shown`, the board is rebuilt from the
-     * script's own tokens (start, then apply, not the moves the player tried) and played forward to the player's turn;
-     * nothing is judged or counted and no move is sent.
-     */
-    reconcile(sv) {
-      if (sv.step === s.step) {
-        s = { ...s, wrongs: sv.wrongs ?? s.wrongs, step_wrongs: sv.step_wrongs ?? s.step_wrongs, pool_said: sv.pool_said ?? s.pool_said };
-      } else adopt(sv);
+    /** The server's row wins: the same step adopts its counters and keeps the board, another rebuilds the board from its `played`. */
+    reconcile(row) {
+      if (row.step === s.step) s = { ...s, wrongs: row.wrongs ?? s.wrongs, step_wrongs: row.step_wrongs ?? s.step_wrongs, pool_said: row.pool_said ?? s.pool_said, done: row.over === true };
+      else adopt(row);
       return { ...s };
     },
   };
