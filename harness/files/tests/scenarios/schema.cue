@@ -128,12 +128,12 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 	standin?: true
 	// The pronto-flags flags (flags_spec.cue) it exercises: a flip of one runs its scenarios
 	// (`pronto-flags push`). A step's own `flag` counts too.
-	// Each must gate a step of its own (`flag`, or `unless` for the app as it is with the flag off):
+	// Each must gate a step of its own (`flag`, `with`, or `unless` for the app as it is with the flag off):
 	// a flag no step names changes nothing the scenario checks, and the steps that need it on would
 	// fail wherever it is off.
 	flags?: [...string]
 	if flags != _|_ {
-		_gated: {for f in flags {"\(f)": [for s in steps for k in ["flag", "unless"] if s[k] != _|_ if s[k] == f {s}]}}
+		_gated: {for f in flags {"\(f)": [for s in steps for k in ["flag", "unless", "with"] if s[k] != _|_ if s[k] == f {s}]}}
 		_gated: [string]: [_, ...]
 	}
 
@@ -199,6 +199,9 @@ _commonTypes: {
 	// A flag whose absence the step needs: skipped where the door answers that it is on. The
 	// app as it is with the flag off keeps its steps here, and a flag's flip runs them (`flags`).
 	unless: string
+	// A second flag the step needs on beside `flag` (PRONTO-1688): skipped where the door answers that it is off. For a flow
+	// two flags make possible together, so a scenario is not run, nor failed, where either is off.
+	with: string
 	// On an expectation about what another actor changed, which a page that reads from the server
 	// shows only on its next load: the page is reloaded every few seconds until the expectation
 	// holds or the step's timeout passes.

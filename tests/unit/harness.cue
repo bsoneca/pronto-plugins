@@ -375,6 +375,24 @@ cases: "a production step of the flag a flip tests runs and asks nothing": {
 	]
 }
 
+// A step's second flag (`with`, PRONTO-1688): it runs only where both flags are on, and each is asked in turn.
+cases: "a step with a flag and a with flag runs only where both are on": {
+	suite: "harness"
+	steps: [
+		{call: "harness.gate", args: [{flag: "a", with: "b"}, {place: "local"}], expect: {run: true, asked: ["a", "b"]}},
+		{call: "harness.gate", args: [{flag: "a", with: "b"}, {place: "local", off: ["a"]}], expect: {run: false, asked: ["a"]}, why: "the first flag off: the second is never asked"},
+		{call: "harness.gate", args: [{flag: "a", with: "b"}, {place: "local", off: ["b"]}], expect: {run: false, asked: ["a", "b"]}, why: "the second flag off alone skips the step"},
+		{call: "harness.gate", args: [{on: "local", flag: "a", with: "b"}, {place: "production"}], expect: {run: false, asked: []}, why: "its place is asked first"},
+	]
+}
+cases: "a flip's flag decides first, and the with flag still has to be on": {
+	suite: "harness"
+	steps: [
+		{call: "harness.gate", args: [{flag: "a", with: "b"}, {place: "production", flip: "a"}], expect: {run: true, asked: ["b"]}},
+		{call: "harness.gate", args: [{flag: "a", with: "b"}, {place: "production", flip: "a", off: ["b"]}], expect: {run: false, asked: ["b"]}, why: "a flip tests its own flag alone: the other is never forced on"},
+	]
+}
+
 // A production scenario's one non-GET call: a flag's evaluation (an anonymous POST to /ofrep/v1/evaluate/flags/<name> with only its
 // context), which reads and writes nothing; every other write stays barred (bsoneca/pronto#1600: a flip's check of an enabled flag).
 cases: "a production scenario may evaluate a flag by POST and make no other write": {

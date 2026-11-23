@@ -16,7 +16,7 @@ copy by hand from `apps/brawl-chess` (bsoneca/pronto's AGENTS.md, "Tests are dat
 | `tests/scenarios/schema.cue` | what a scenario may say, and the facts the runner reads beside the scenarios |
 | `tests/scenarios/select.ts` | which scenarios the runner runs: their inputs as at their last green run |
 | `tests/scenarios/early.ts` | a promise the runner starts before the step that awaits it, marked handled |
-| `tests/scenarios/gate.ts` | whether a step runs here: its place and kept value are asked before its flags |
+| `tests/scenarios/gate.ts` | whether a step runs here: its place and kept value are asked before its flags (`unless`, `flag`, and `with`, a second flag the step needs on) |
 | `tests/scenarios/flakes.ts` | files a flake on the board; a board that refuses is warned, never the run's failure |
 | `tests/scenarios/verdict.ts` | a run's verdict as data (`SCENARIOS_VERDICT=<file>`): the counts a caller reads instead of the summary line |
 | `tests/scenarios/load.ts` | the scenarios as CUE exports them (`loadScenarios(dir, {signal, timeoutMs})`): the one place that finds, exports and parses them, for the runner and for a caller that plans from the same set |

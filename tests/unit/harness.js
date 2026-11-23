@@ -37,7 +37,8 @@ export { declaredKeys, siblingsMoved } from "../../harness/files/tests/scenarios
 import { stepGate } from "../../harness/files/tests/scenarios/gate.ts";
 export async function gate(st, here) {
   const asked = [];
-  const g = await stepGate(st, { kept: () => undefined, ...here }, (f) => { asked.push(f); return Promise.resolve(true); });
+  // `here.off` lists the flags the door answers off.
+  const g = await stepGate(st, { kept: () => undefined, ...here }, (f) => { asked.push(f); return Promise.resolve(!(here.off ?? []).includes(f)); });
   return { run: g.run, asked };
 }
 
