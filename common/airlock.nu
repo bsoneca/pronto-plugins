@@ -5,9 +5,9 @@
 
 # The airlock beside the broker (--airlock, PRONTO-135): mecha-fork's airlock with its door
 # (mecha-fork#26, its sinkKey, mecha-fork#30, and a door's own timeoutMs and hidden headers,
-# mecha-fork#34: mecha 0.22.0-host.8 by pronto-fork's prerelease-mecha), mecha's daprd,
+# mecha-fork#34, and the content type it names on every sink call, mecha-fork#60, PRONTO-1616: mecha 0.22.0-host.16.2 by pronto-fork's prerelease-mecha), mecha's daprd,
 # and mecha's database image, which stages the ledger's initdb steps.
-const airlock_image = "ghcr.io/bsoneca/mecha-airlock:0.22.0-host.8@sha256:02822aa37edf22081740fc0935fe9f41df93ba9146030c8ca31f0814876acbb0"
+const airlock_image = "ghcr.io/bsoneca/mecha-airlock:0.22.0-host.16.2@sha256:e99216912179b5bdb8b810c9dd20a9ba4640cfadb27d6cf11dc50f7bcac678a1"
 const mesh_image = "bonitao/mecha-mesh:0.22.0@sha256:8d39aa3543560232c52330152ba70a4d2c973b76d0ac97899d677704bc0e09a4"
 const ledger_image = "bonitao/mecha-database:0.22.0@sha256:ed58b6be6cd69658fbb4e6daff1f91b8923b333f364905c4dacdec2974a05d82"
 export const door_port = 9998
