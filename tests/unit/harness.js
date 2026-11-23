@@ -35,6 +35,7 @@ export { declaredKeys, siblingsMoved } from "../../harness/files/tests/scenarios
 
 // A scenario step's gate (harness/files/tests/scenarios/gate.ts) with a flagOn that records what it is asked and answers true.
 import { stepGate } from "../../harness/files/tests/scenarios/gate.ts";
+export { openHref } from "../../harness/files/tests/scenarios/gate.ts";
 export async function gate(st, here) {
   const asked = [];
   // `here.off` lists the flags the door answers off.

@@ -19,7 +19,7 @@ import { devices, request, type APIRequestContext, type BrowserContext, type CDP
 import { launch as launchBrowser } from "./browser.ts";
 import { gate, slow, slowCpu, slowDown } from "./slow.ts";
 import { early } from "./scenarios/early.ts";
-import { sentOf, stepGate, type Gated } from "./scenarios/gate.ts";
+import { openHref, sentOf, stepGate, type Gated } from "./scenarios/gate.ts";
 import { fileFlake as file } from "./scenarios/flakes.ts";
 import { closing, settleRun, writeVerdict } from "./scenarios/verdict.ts";
 import { loadScenarios, type ActorDef, type Scenario, type Step } from "./scenarios/load.ts";
@@ -468,7 +468,9 @@ export class Run {
     // A gesture on a page served first waits for the shell to take it over.
     if (spec.loaded.adopted && gestures.some((k) => k in st)) await this.adopted(p, t);
     // Actions.
-    if ("open" in st) { const to = await this.fill(st.open); await p.goto(/^https?:/.test(to) ? to : new URL(to, URL_).href); return this.loaded(p); }
+    if ("open" in st) {
+      await p.goto(openHref(await this.fill(st.open), URL_, onProduction)); return this.loaded(p);
+    }
     if ("reload" in st) { await p.reload(); return this.loaded(p); }
     if ("revisit" in st) {
       // The tab closed, and the app opened again in a new one: the tab's sessionStorage goes with it.
