@@ -439,25 +439,104 @@ import (
 		// the file with no export of this state's.
 		for nm, a in P.alertPolicies if P.adoptAll || list.Contains(*P.adopt["alertPolicies"] | [], nm) {
 			let k = (#name & {in: "\(P.id)_\(nm)"}).out
-			tofu: resource: google_monitoring_alert_policy: (k): {
-				depends_on: list.Concat([deps, [for c in a.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
-				for_each:     "${{for p in jsondecode(file(\"${path.module}/../\(a.file)\")) : p.name => p}}"
-				project:      P.id
-				display_name: "${each.value.displayName}"
-				combiner:     "OR"
-				severity:     "${each.value.severity == \"page\" ? \"CRITICAL\" : \"WARNING\"}"
-				user_labels:  "${each.value.labels}"
-				notification_channels: [for c in a.channels {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
-				documentation: {content: "${each.value.documentation}", mime_type: "text/markdown"}
-				conditions: [{
+			if a.file != _|_ {
+				tofu: resource: google_monitoring_alert_policy: (k): {
+					depends_on: list.Concat([deps, [for c in a.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
+					for_each:     "${{for p in jsondecode(file(\"${path.module}/../\(a.file)\")) : p.name => p}}"
+					project:      P.id
 					display_name: "${each.value.displayName}"
-					condition_prometheus_query_language: {
-						query:               "${each.value.expr}"
-						duration:            "${each.value.duration}"
-						evaluation_interval: "${try(each.value.interval, \"60s\")}"
+					combiner:     "OR"
+					severity:     "${each.value.severity == \"page\" ? \"CRITICAL\" : \"WARNING\"}"
+					user_labels:  "${each.value.labels}"
+					notification_channels: [for c in a.channels {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
+					documentation: {content: "${each.value.documentation}", mime_type: "text/markdown"}
+					conditions: [{
+						display_name: "${each.value.displayName}"
+						condition_prometheus_query_language: {
+							query:               "${each.value.expr}"
+							duration:            "${each.value.duration}"
+							evaluation_interval: "${try(each.value.interval, \"60s\")}"
+						}
+					}]
+					// A burn that stops resolves the incident; one that never fires again closes in a day.
+					alert_strategy: auto_close: "86400s"
+				}
+			}
+
+			// The same policy, written in the state: one resource each, named for the entry.
+			for pn, pol in a.policies {
+				let pk = (#name & {in: "\(P.id)_\(nm)_\(pn)"}).out
+				tofu: resource: google_monitoring_alert_policy: (pk): {
+					depends_on: list.Concat([deps, [for c in a.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
+					project:      P.id
+					display_name: pol.displayName
+					combiner:     "OR"
+					severity: [if pol.severity == "page" {"CRITICAL"}, "WARNING"][0]
+					user_labels: pol.labels
+					notification_channels: [for c in a.channels {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
+					documentation: {content: pol.documentation, mime_type: "text/markdown"}
+					conditions: [{
+						display_name: pol.displayName
+						condition_prometheus_query_language: {
+							query:               pol.expr
+							duration:            pol.duration
+							evaluation_interval: pol.interval
+						}
+					}]
+					alert_strategy: auto_close: "86400s"
+				}
+			}
+		}
+
+		// An outside check per entry, and a policy on it: it mails the channels when the check
+		// fails from at least failingLocations checker locations for the window. Never imported.
+		for nm, u in P.uptimeChecks if P.adoptAll || list.Contains(*P.adopt["uptimeChecks"] | [], nm) {
+			let k = (#name & {in: "\(P.id)_\(nm)"}).out
+			tofu: resource: google_monitoring_uptime_check_config: (k): {
+				depends_on:       deps
+				project:          P.id
+				display_name:     nm
+				period:           u.period
+				timeout:          u.timeout
+				selected_regions: u.regions
+				http_check: {
+					path:           u.path
+					port:           443
+					use_ssl:        true
+					validate_ssl:   true
+					request_method: "GET"
+					accepted_response_status_codes: [{status_class: "STATUS_CLASS_2XX"}]
+				}
+				monitored_resource: {
+					type: "uptime_url"
+					labels: {project_id: P.id, host: u.host}
+				}
+			}
+			tofu: resource: google_monitoring_alert_policy: "\(k)_uptime": {
+				depends_on: list.Concat([deps, [for c in u.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
+				project:      P.id
+				display_name: "Uptime: \(nm)"
+				combiner:     "OR"
+				severity: [if u.severity == "page" {"CRITICAL"}, "WARNING"][0]
+				notification_channels: [for c in u.channels {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
+				documentation: {content: u.documentation, mime_type: "text/markdown"}
+				conditions: [{
+					display_name: "\(u.host)\(u.path) fails from \(u.failingLocations) or more checker locations"
+					condition_threshold: {
+						filter:          "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND metric.label.check_id=\"${google_monitoring_uptime_check_config.\(k).uptime_check_id}\" AND resource.type=\"uptime_url\""
+						comparison:      "COMPARISON_GT"
+						threshold_value: u.failingLocations - 1
+						duration:        u.window
+						trigger: count: 1
+						aggregations: [{
+							alignment_period:     "60s"
+							per_series_aligner:   "ALIGN_NEXT_OLDER"
+							cross_series_reducer: "REDUCE_COUNT_FALSE"
+							group_by_fields: ["resource.label.host"]
+						}]
 					}
 				}]
-				// A burn that stops resolves the incident; one that never fires again closes in a day.
+				// A whole-node outage stays one incident; one that recovers closes in a day.
 				alert_strategy: auto_close: "86400s"
 			}
 		}
