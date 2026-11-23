@@ -472,7 +472,7 @@ def commit [at: record, app: path, text: string, meta: record, from: string, --d
 		at: (now-utc), event: "flags.write", app: ($app | path expand | path basename), target: $at.url, version: $gen, from: $from
 		stage: ($meta.stage? | default ""), flag: (if $names != "" { $names } else { $meta.flag? | default "" }), who: $p.who, commit: $p.commit, plugin: $p.plugin
 		cases: ($meta.cases? | default ""), note: ($meta.note? | default ""), changes: $changes
-		kept: ($meta.kept? | default ""), dropped: ($meta.dropped? | default "")
+		kept: ($meta.kept? | default ""), dropped: ($meta.dropped? | default ""), reading: ($meta.reading? | default "")
 	} | to json -r
 	# The flags are written by now: a journal that cannot be written warns and never fails the write.
 	let file = (journal-file $app)
@@ -696,7 +696,7 @@ def run-cases [app: path, cmd: string, vars: record, --wrap: string = ""] {
 	} else {
 		(do { cd $app; with-env $vars { ^env -u SAYT_VERSION sh -c $"($wrap) sh -c \"\$1\"" sh $cmd } } | complete)
 	}
-	{ok: ($r.exit_code == 0), out: ($r.stdout + $r.stderr | str trim)}
+	{ok: ($r.exit_code == 0), out: ($r.stdout + $r.stderr | str trim), stdout: ($r.stdout | str trim)}
 }
 
 # What OFREP answers for a flag and a targetingKey (none: no context); null where it doesn't answer.
@@ -766,8 +766,82 @@ def vacuous [out: string, flag: string]: nothing -> string {
 
 # The version a push read, written again as the newest after a failed live stage.
 def restore [at: record, app: path, to: string, now: string, names: string, why: string] {
-	let again = (commit $at $app (current-metadata-text (store-version $at $to) $app) {stage: rolled-back, flag: $names, cases: failed, note: $why} $now)
+	let again = (commit $at $app (current-metadata-text (store-version $at $to) $app) {stage: rolled-back, flag: $names, cases: failed, note: ($why | str substring 0..<500)} $now)
 	print -e $"flags: ($at.url) is version ($to)'s flags again, as version ($again)"
+}
+
+# ---- The watch (PRONTO-413): guardrails sampled over a window after a flip, a breach written back ----
+
+# "30m" as a duration.
+def to-dur [s: string]: nothing -> duration {
+	let n = ($s | str substring 0..<-1 | into int)
+	match ($s | str substring (-1)..) { "s" => ($n * 1sec), "m" => ($n * 1min), _ => ($n * 1hr) }
+}
+
+# The watch a push holds after a flip: null where the app names no guardrail. --watch (`over`) says the window;
+# FLAGS_WATCH_SEC, FLAGS_WATCH_MAX_SEC and FLAGS_WATCH_SAMPLE_SEC stand in for the spec's in tests.
+def guard-of [at: record, over: any]: nothing -> any {
+	let list = ($at.guardrails? | default [])
+	if ($list | is-empty) { return null }
+	if $over != null and not ($over =~ '^[1-9][0-9]*[smh]$') { error make {msg: $"flags: --watch ($over): say a window like 10m, 90s or 1h; nothing was written"} }
+	let secs = {|name, spec| let e = ($env | get -o $name | default ""); if $e != "" { ($e | into float) * 1sec } else { to-dur $spec } }
+	let window = if $over != null { to-dur $over } else { do $secs FLAGS_WATCH_SEC ($at.watch? | default "30m") }
+	let max = (do $secs FLAGS_WATCH_MAX_SEC ($at.watchMax? | default "2h"))
+	{list: $list, watch: $window, max: ([$max $window] | math max), sample: (do $secs FLAGS_WATCH_SAMPLE_SEC ($at.sample? | default "5m")), min: ($at.minSessions? | default 50)}
+}
+
+# A reader's word for the window so far, and the same hours a day before: its last line of output, as JSON.
+# A reader that fails, or prints no value, is an error: a flip nobody can see is no flip to leave on.
+def read-guard [app: path, g: record, flag: string, stage: string, from: datetime, to: datetime, wrap: string]: nothing -> record {
+	let iso = {|d: datetime| $d | date to-timezone utc | format date "%Y-%m-%dT%H:%M:%SZ" }
+	let vars = {FLAG: $flag, STAGE: $stage, GUARDRAIL: $g.name, WINDOW_START: (do $iso $from), WINDOW_END: (do $iso $to), BASELINE_START: (do $iso ($from - 1day)), BASELINE_END: (do $iso ($to - 1day))}
+	let r = (run-cases $app $g.cmd $vars --wrap $wrap)
+	if not $r.ok { error make {msg: $"the reader of ($g.name) failed: ($r.out | lines | last 2 | str join ' / ' | str substring 0..<300)"} }
+	let j = (try { $r.stdout | lines | last | from json } catch { null })
+	if ($j | describe | str starts-with "record") == false or ($j | get -o value | describe) not-in ["int" "float"] { error make {msg: $"the reader of ($g.name) printed no {\"value\": n} last line"} }
+	if $g.kind != "probe" and ($j | get -o baseline | describe) not-in ["int" "float"] { error make {msg: $"the reader of ($g.name) printed no baseline: a reading with nothing to compare to proves nothing \(0 is a baseline\)"} }
+	if $g.kind != "probe" and ($j | get -o sessions | describe) not-in ["int" "float"] { error make {msg: $"the reader of ($g.name) printed no sessions: a window with no count of its traffic proves nothing"} }
+	$j
+}
+
+# One reading against its guardrail: breach (text, or "") and the sessions it rests on (null for a probe).
+def judge [g: record, r: record]: nothing -> record {
+	let v = $r.value
+	let b = ($r.baseline? | default 0)
+	let breach = match $g.kind {
+		"errors" => (if $v > $b * $g.maxRatio and ($v - $b) > $g.floor { $"($g.name): ($v) errors against ($b) the day before \(more than ($g.maxRatio)x and ($g.floor) over\)" } else { "" })
+		"probe" => (if $v > 0 { $"($g.name): ($v) probe journeys failed" } else { "" })
+		_ => (if $b > 0 and $v < $b * $g.minRatio and ($b - $v) > $g.floor { $"($g.name): ($v) against ($b) the day before \(under ($g.minRatio)x and ($g.floor) below\)" } else { "" })
+	}
+	{breach: $breach, sessions: (if $g.kind == "probe" { null } else { $r.sessions }), text: $"($g.name)=($v)/($b)"}
+}
+
+# Before any write: each reader is run once over no time, and a missing or failing one refuses the push.
+def guard-check [app: path, guard: any, wrap: string] {
+	if $guard == null { return }
+	let now = (date now)
+	for g in $guard.list {
+		try { read-guard $app $g "-" "check" $now $now $wrap | ignore } catch {|e| error make {msg: $"flags: ($e.msg); a guardrail whose reader cannot be run is refused, never read as no breach; nothing was written"} }
+	}
+}
+
+# Watches a flip: samples every guardrail each `sample` until `watch` has passed with enough sessions. `breach` on the
+# first breach (its reading the reason); `inconclusive` when `max` passes with too few sessions; else `pass`. A reader that fails
+# is a breach too. The readings come back as one line, for the version and the journal.
+def watch-window [app: path, guard: any, flag: string, stage: string, wrap: string]: nothing -> any {
+	let start = (date now)
+	mut text = ""
+	loop {
+		sleep $guard.sample
+		let now = (date now)
+		let read = ($guard.list | each {|g| try { judge $g (read-guard $app $g $flag $stage $start $now $wrap) } catch {|e| {breach: $e.msg, sessions: null, text: $"($g.name)=unreadable"} } })
+		$text = $"watch ($stage) ($now - $start | format duration sec): ($read.text | str join ' ')"
+		let breaches = ($read | where breach != "" | get breach)
+		if ($breaches | is-not-empty) { return {verdict: breach, text: $"($text); ($breaches | str join '; ')"} }
+		let thin = ($read | where {|x| $x.sessions != null and $x.sessions < $guard.min })
+		if ($now - $start) >= $guard.watch and ($thin | is-empty) { return {verdict: pass, text: $text} }
+		if ($now - $start) >= $guard.max { return {verdict: inconclusive, text: $"($text); fewer than ($guard.min) sessions in ($guard.max): too little to say"} }
+	}
 }
 
 # The production check (PRONTO-439, the owner, 2026-11-12: "When you implement new features, always implement with the
@@ -806,15 +880,21 @@ def production-check [app: path, old: record, doc: record, changed: list<string>
 #      (`vacuous`: no scenario verdict, or the flag's own steps skipped as off at the door). A production scenario that signs in
 #      needs a tester's account, which a flip no longer has: it is listed and not run.
 # A flag turned fully off (default false, no accounts) runs no cases: it returns to the path before it, and its cases test it on.
-export def push [app: path, --untested: string, --no-canary: string, --expect: string, --flip: list<string> = [], --drop: list<string> = [], --sync: list<string> = [], --stages: list<int> = [], --dwell: duration = 10min, --keyed: string] {
+export def push [app: path, --untested: string, --no-canary: string, --expect: string, --flip: list<string> = [], --drop: list<string> = [], --sync: list<string> = [], --stages: list<int> = [], --dwell: duration = 10min, --keyed: string, --watch: string] {
 	pin-guard $app
 	let at = (live $app)
+	if $watch != null and (($at.guardrails? | default []) | is-empty) { error make {msg: "flags: --watch: the app names no flagsLive.guardrails to watch; nothing was written"} }
+	let stuck = (unfinished-watch $at)
+	if $stuck != null { error make {msg: $"flags: version ($stuck.generation) is an unfinished watch \(its process died, or another push's watch is still running): `pronto-flags watch --resume <app-dir>` takes it up, `pronto-flags rollback <app-dir> ($stuck.metadata | get -o before | default '<version before the push>')` goes back; nothing was written"} }
 	if (target-guard $at $expect) {
 		show $app --flip $flip --drop $drop --sync $sync
 		# A staged push is checked as the real one is (its refusals), writing nothing.
 		# The production check is asked of a dry run too.
 		let dm = (merge-live $at $app (cue-of $app flagd.document) $flip $drop $sync)
 		production-check $app $dm.old $dm.doc (changed-flags $dm.old $dm.doc) | ignore
+		# The watch's refusals too: a bad --watch, or a reader that cannot be run.
+		let dg = (guard-of $at $watch)
+		if $dg != null { guard-check $app $dg (cases-wrap $at) }
 		if ($stages | is-not-empty) {
 			let st = (staged-checks $stages $flip $sync (changed-flags $dm.old $dm.doc) $dm.doc $dm.old $keyed)
 			print $"flags: dry run: ($st.flag) would go to ($stages | each {|s| $'($s)%' } | str join ', '), by targetingKey, from ($st.oldv)"
@@ -863,24 +943,28 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	let moved = (changes-between $old $doc | where {|c| $c.flag in ($doc.flags | columns) and $c.flag not-in ($m.dropped | get flag) })
 	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if $no_canary != null { $"no canary: ($no_canary)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" }) (if ($waived | is-not-empty) { $waived | str join "; " })] | compact | str join "; ")
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
+	let guard = if ($all | is-empty) { null } else { guard-of $at $watch }
+	if $guard != null { guard-check $app $guard (cases-wrap $at) }
 	let cases_none = if ($bare | is-not-empty) { "untested" } else { "none on production" }
 	if $staged != null {
 		let verdict = if ($live | is-empty) { $cases_none } else { "passed" }
-		let v = (staged-live $at $app $doc $staged $live $cmds $before $stages $dwell ({flag: $names, note: $notes} | merge $kept) $cases_none)
+		let v = (staged-live $at $app $doc $staged $live $cmds $before $stages $dwell ({flag: $names, note: $notes} | merge $kept) $cases_none $guard)
 		tell-board $at $app $moved
 		record-back $at $app $v $verdict $owned
 		return
 	}
 	if ($live | is-empty) {
 		let cases = $cases_none
-		let v = (write-flags $at $doc $app --meta ({stage: all, flag: $names, cases: $cases, note: $notes} | merge $kept) --from $before)
+		let meta = ({stage: all, flag: $names, cases: $cases, note: $notes} | merge $kept)
+		# A watched flip's first version is already `watching`: no version of it reads finished before its verdict.
+		let v = if $guard == null { write-flags $at $doc $app --meta $meta --from $before } else { watch-flip $at $app $doc $names $before $before $meta $guard (cases-wrap $at) $cases }
 		tell-board $at $app $moved
 		if ($flip | is-not-empty) { record-back $at $app $v $cases $owned }
 		return
 	}
 	# Not `try ... finally`: nu runs what follows it and raises the error only at the end, so a failed flip
 	# told the board its flags were on for everyone (PRONTO-15 Done at 18:02 BRT, 2026-11-08; PRONTO-43).
-	let v = (flip-live $at $app $doc $live $cmds $before ({stage: all, flag: $names, note: $notes} | merge $kept))
+	let v = (flip-live $at $app $doc $live $cmds $before ({stage: all, flag: $names, note: $notes} | merge $kept) --guard $guard)
 	tell-board $at $app $moved
 	if ($flip | is-not-empty) { record-back $at $app $v "passed" $owned }
 }
@@ -929,19 +1013,21 @@ def stage-def [new: record, oldv: any, w: int]: nothing -> record {
 # value before, and the dwell; the last stage is the flip (`flip-live`: everyone, OFREP's word, the cases). Where a stage's
 # cases fail, or anything else does, the version read before the first stage is written again, not the previous stage's.
 # Guardrails that watch the dwell (PRONTO-413) plug in after a stage's cases.
-def staged-live [at: record, app: path, doc: record, st: record, live: list<record>, cmds: record, before: string, stages: list<int>, dwell: duration, meta: record, none: string] {
+def staged-live [at: record, app: path, doc: record, st: record, live: list<record>, cmds: record, before: string, stages: list<int>, dwell: duration, meta: record, none: string, guard: any] {
 	let wrap = (cases-wrap $at)
 	let settle = ($env.FLAGS_STAGE_SETTLE_SEC? | default 15 | into float)
 	# Each write is over the generation the one before returned (the first, over the one read before the push), so a write
 	# another operator makes during a dwell (a rollback, a kill switch) fails ours instead of being overwritten.
 	mut last = $before
+	mut last_doc = $doc
 	mut fail = ""
 	for w in ($stages | where {|s| $s < 100 }) {
 		let from = $last
 		let staged = ($doc | upsert flags ($doc.flags | upsert $st.flag (stage-def ($doc.flags | get $st.flag) $st.oldv $w)))
-		let wrote = (try { {gen: (write-flags $at $staged $app --meta ($meta | upsert stage $"($w)%" | upsert cases staged) --from $from)} } catch {|e| {err: ($e.msg | lines | first)} })
+		let wrote = (try { {gen: (write-flags $at $staged $app --meta ($meta | upsert stage $"($w)%" | upsert cases (if $guard == null { "staged" } else { "watching" }) | upsert before $before) --from $from)} } catch {|e| {err: ($e.msg | lines | first)} })
 		if ($wrote | get -o err) != null { $fail = $wrote.err; break }
 		$last = $wrote.gen
+		$last_doc = $staged
 		print $"flags: ($st.flag) is on for ($w)% of players, by targetingKey; settling ($settle)s"
 		let held = (try {
 			sleep ($settle * 1sec)
@@ -957,20 +1043,34 @@ def staged-live [at: record, app: path, doc: record, st: record, live: list<reco
 			""
 		} catch {|e| $e.msg })
 		if $held != "" { $fail = $held; break }
+		# The guardrails over the stage: a breach restores, too little traffic stops here with the stage left on.
+		if $guard != null {
+			let r = (watch-window $app $guard $st.flag $"($w)%" $wrap)
+			print $"flags: ($r.text)"
+			if $r.verdict == "breach" { $fail = $"guardrail breach: ($r.text)"; break }
+			if $r.verdict == "inconclusive" { $fail = $"watch-inconclusive: ($r.text)"; break }
+		}
 	}
 	let last_gen = $last
 	let restore_all = {|why|
 		try { restore $at $app $before $last_gen $st.flag ($why | lines | first) } catch {|r| print -e $"flags: WARNING: could not restore version ($before): ($r.msg); `pronto-flags rollback` does" }
 		error make {msg: $"rolled back to version ($before): ($why)"}
 	}
+	if ($fail | str starts-with "watch-inconclusive") {
+		write-flags $at $last_doc $app --meta ($meta | upsert stage watch-inconclusive | upsert cases inconclusive | upsert reading ($fail | str replace "watch-inconclusive: " "") | upsert before $before) --from $last | ignore
+		error make {msg: $"($fail); the flag is left at its last stage, for the release engineer to decide: `pronto-flags rollback <app-dir> ($before)` turns it back, or push again with a longer --watch"}
+	}
 	if $fail != "" { do $restore_all $fail }
 	let meta = ($meta | upsert stage all)
 	# The last stage is the flip. flip-live rolls itself back from its own write on; a failure of its first write, or of the
 	# write with no cases to run, leaves live at the last stage, so it is restored here.
 	try {
-		if ($live | is-empty) { write-flags $at $doc $app --meta ($meta | upsert cases $none) --from $last_gen } else { flip-live $at $app $doc $live $cmds $before $meta --from $last_gen }
+		if ($live | is-empty) {
+			let v = (write-flags $at $doc $app --meta ($meta | upsert cases $none) --from $last_gen)
+			if $guard == null { $v } else { watch-flip $at $app $doc $st.flag $before $v ($meta | upsert cases $none) $guard $wrap $none }
+		} else { flip-live $at $app $doc $live $cmds $before $meta --from $last_gen --guard $guard }
 	} catch {|e|
-		if ($e.msg | str starts-with "rolled back to version") { error make {msg: $e.msg} }
+		if ($e.msg | str starts-with "rolled back to version") or ($e.msg | str starts-with "watch-inconclusive") { error make {msg: $e.msg} }
 		do $restore_all $e.msg
 	}
 }
@@ -996,15 +1096,61 @@ def tell-board [at: record, app: path, moved: list<record>] {
 	} catch {|e| print -e $"flags: WARNING: the board was not told: ($e.msg | lines | first)" }
 }
 
+# After a flip's cases (or a flip with none): the version is written `cases: watching` first, so a watch that dies shows in
+# `history` and refuses the next push; then the guardrails are watched. A breach writes the version before the push again, with the
+# reading as its reason (`restore`), and fails the push; too little traffic by `watchMax` writes `watch-inconclusive`, leaves the flag
+# on and fails the push, never green; a pass writes the final version (`final`) with the readings. The generation returned is the last.
+def watch-flip [at: record, app: path, doc: record, names: string, before: string, from: string, meta: record, guard: record, wrap: string, final: string] {
+	let w = (write-flags $at $doc $app --meta ($meta | upsert cases watching | upsert before $before | upsert final $final) --from $from)
+	let r = (watch-window $app $guard $names ($meta.stage? | default all) $wrap)
+	print $"flags: ($r.text)"
+	match $r.verdict {
+		"pass" => { write-flags $at $doc $app --meta ($meta | upsert cases $final | upsert reading $r.text) --from $w }
+		"breach" => {
+			try { restore $at $app $before $w $names $"guardrail breach: ($r.text)" } catch {|e| print -e $"flags: WARNING: could not restore version ($before): ($e.msg); `pronto-flags rollback` does" }
+			error make {msg: $"rolled back to version ($before): guardrail breach: ($r.text)"}
+		}
+		_ => {
+			write-flags $at $doc $app --meta ($meta | upsert stage watch-inconclusive | upsert cases inconclusive | upsert reading $r.text | upsert before $before) --from $w | ignore
+			error make {msg: $"watch-inconclusive: ($r.text); the flag is left on, for the release engineer to decide: `pronto-flags rollback <app-dir> ($before)` turns it back, or push again with a longer --watch"}
+		}
+	}
+}
+
+# The live version, when its watch never finished: written `watching` and never followed by a verdict.
+def unfinished-watch [at: record]: nothing -> any {
+	let cur = (try { store-versions $at | where {|v| $v.timeDeleted == null } | get -o 0 } catch { null })
+	if $cur != null and (($cur.metadata | get -o cases | default "") == "watching") { $cur } else { null }
+}
+
+# Takes up a watch that died: the whole window again over the live version, which a breach writes the version before it back from.
+export def watch-resume [app: path, --expect: string] {
+	pin-guard $app
+	let at = (live $app)
+	if (target-guard $at $expect) { print "flags: dry run: nothing written"; return }
+	let guard = (guard-of $at null)
+	if $guard == null { error make {msg: "flags: the app names no flagsLive.guardrails: nothing to watch"} }
+	let cur = (unfinished-watch $at)
+	if $cur == null { error make {msg: "flags: the live version is no unfinished watch: nothing to resume"} }
+	let m = $cur.metadata
+	if (($m | get -o stage | default "") | str ends-with "%") { error make {msg: $"flags: the unfinished watch is a stage of a staged push \((($m | get -o stage))\): it is not resumed; `pronto-flags rollback <app-dir> (($m | get -o before | default '<version before the push>'))` goes back"} }
+	let prev = ($m | get -o before)
+	if $prev == null { error make {msg: "flags: the unfinished watch names no version before the push to go back to: `pronto-flags rollback` with a version"} }
+	guard-check $app $guard (cases-wrap $at)
+	let doc = (store-version $at $cur.generation | from json)
+	watch-flip $at $app $doc ($m | get -o flag | default "") $prev $cur.generation ({stage: ($m | get -o stage | default all), flag: ($m | get -o flag | default ""), note: "watch resumed"}) $guard (cases-wrap $at) ($m | get -o final | default passed) | ignore
+	print -e "flags: the resumed watch passed; the board was not told and the spec was not recorded back from the original push: tell it and flip the spec by hand"
+}
+
 # The live stage: the flags written for everyone, OFREP's word, then the production cases that need no tester, as
 # no one in particular. Whatever fails after the write, an error or a crash of the cases' command, writes the
 # version read before it again.
-def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: record, before: string, meta: record, --from: string = ""] {
+def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: record, before: string, meta: record, --from: string = "", --guard: any = null] {
 	let on = ($live | get flag)
 	let wrap = (cases-wrap $at)
 	let v = (write-flags $at $doc $app --meta ($meta | insert cases running) --from (if $from == "" { $before } else { $from }))
 	print $"flags: ($on | str join ', ') is on for everyone; waiting for OFREP to say so"
-	try {
+	let ran = (try {
 		let want = ($on | each {|f| {flag: $f, new: (default-of ($doc.flags | get $f))} })
 		# The site's /ofrep/ serves the flags marked `client` alone (PRONTO-1518): it cannot say what a server-only flag now
 		# reads. A node's flagd, asked itself, and a stand-in (FLAGS_OFREP_CMD) can.
@@ -1023,11 +1169,12 @@ def flip-live [at: record, app: path, doc: record, live: list<record>, cmds: rec
 			let empty = (vacuous $r.out (if $on_for_all { $c.flag } else { "" }))
 			if $empty != "" { error make {msg: $"($c.flag)'s production cases showed nothing: ($empty)"} }
 		}
-		write-flags $at $doc $app --meta ($meta | insert cases passed) --from $v
+		$v
 	} catch {|e|
 		try { restore $at $app $before $v ($on | str join "+") ($e.msg | lines | first) } catch {|r| print -e $"flags: WARNING: could not restore version ($before): ($r.msg); `pronto-flags rollback` does" }
 		error make {msg: $"rolled back to version ($before): ($e.msg)"}
-	}
+	})
+	if $guard == null { write-flags $at $doc $app --meta ($meta | insert cases passed) --from $ran } else { watch-flip $at $app $doc ($on | str join "+") $before $ran $meta $guard $wrap passed }
 }
 
 # Every version of the object, newest first: when it was written, when a newer one replaced it, and what
@@ -1687,7 +1834,11 @@ def "main armies rollback" [app: path, army: string, version?: int, --local, --e
 
 def main [] { print "usage: live.nu setup|push|released|history|rollback|show|cases|record|drift <app-dir> [version|flag]; live.nu armies push|show|history|rollback <app-dir>" }
 def "main setup" [app: path, --expect: string, --dry-run] { with-env (dry-env $dry_run) { setup $app --expect $expect } }
-def "main push" [app: path, --untested: string, --no-canary: string, --expect: string, --flip: string = "", --drop: string = "", --sync: string = "", --stages: string = "", --dwell: string = "10min", --keyed: string, --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --no-canary $no_canary --expect $expect --flip (flip-names $flip) --drop (names $drop) --sync (names $sync) --stages (names $stages | each {|s| $s | into int }) --dwell ($dwell | into duration) --keyed $keyed } }
+def "main push" [app: path, --untested: string, --no-canary: string, --expect: string, --flip: string = "", --drop: string = "", --sync: string = "", --stages: string = "", --dwell: string = "10min", --keyed: string, --watch: string, --dry-run] { with-env (dry-env $dry_run) { push $app --untested $untested --no-canary $no_canary --expect $expect --flip (flip-names $flip) --drop (names $drop) --sync (names $sync) --stages (names $stages | each {|s| $s | into int }) --dwell ($dwell | into duration) --keyed $keyed --watch $watch } }
+def "main watch" [app: path, --resume, --expect: string, --dry-run] {
+	if not $resume { error make {msg: "usage: live.nu watch <app-dir> --resume: takes up a watch that died"} }
+	with-env (dry-env $dry_run) { watch-resume $app --expect $expect }
+}
 def "main released" [app: path, --expect: string, --dry-run] { with-env (dry-env $dry_run) { released $app --expect $expect } }
 # --flip's entries: names split at commas, but `name=value` is one entry whose value may hold commas; one that mixes it
 # with other names is refused, since it cannot be told from a value.

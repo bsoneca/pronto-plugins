@@ -116,7 +116,7 @@ without cases unless `--untested`, and `rollback` restores any version without r
 | Practice | pronto-flags today | Gap |
 | --- | --- | --- |
 | A small sticky cohort first | Everyone at once since PRONTO-284 (the tester canary was dropped), or `--stages` for one `--flip` flag | Done by PRONTO-412: `--stages 5,25,100` through flagd `fractional` on `targetingKey` (guardrails over the dwell: PRONTO-413) |
-| Guardrails over a watch window, rollback on breach | Only the production scenarios, for seconds | PRONTO-413: errors, probe journeys and one business metric watched after each stage |
+| Guardrails over a watch window, rollback on breach | Done by PRONTO-413 (`flagsLive.guardrails`, a watch window after each stage and the flip). Was: only the production scenarios, for seconds | The app wires the readers (prod-watch, probe, dashboard SQL) |
 | One flag per push | A habit: push writes whatever the spec says | PRONTO-415: refuse a push where two flags' values move; `show` prints the per-flag diff |
 | Prerequisites | Written in notes (save_progress_ask after keep_guest and google_adopts_guest) | PRONTO-416: `after: [...]` in flags_spec, enforced by push |
 | Before/after marks | The flags journal and version metadata | PRONTO-417: dashboard annotations and each guardrail's reading in the report |
