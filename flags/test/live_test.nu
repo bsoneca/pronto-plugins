@@ -11,6 +11,12 @@ $env.GIT_AUTHOR_EMAIL = "t@example.com"
 $env.GIT_COMMITTER_NAME = "t"
 $env.GIT_COMMITTER_EMAIL = "t@example.com"
 
+# Every flag these fixtures flip has no production scenario (PRONTO-439 asks one, or the owner's `liveWaived`): a pattern
+# constraint in a file of the app's own waives them all, so the cases below keep testing what they test. The production-check
+# cases themselves (the last section) run on an app with no such file.
+def waive-all [app: string, pkg: string] {
+	$"package ($pkg)\nflags: [string]: liveWaived: \"fixture: the cases below flip flags with no production scenario\"\n" | save -f $"($app)/flags_waive.cue"
+}
 const here = path self .
 let real = $env.SAYT_MISE_BIN
 let dir = (mktemp -d)
@@ -23,6 +29,7 @@ mkdir $app
 ' | save $"($app)/.mise.toml"
 ^$real trust -q $"($app)/.mise.toml"
 ^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $app | ignore
+waive-all $app shop
 def spec [accounts: list<string>] {
 	$"package shop
 flags: premium: {default: false, local: true, accounts: ($accounts | to json -r)}
@@ -674,6 +681,7 @@ mkdir $rapp
 ' | save $"($rapp)/.mise.toml"
 ^$real trust -q $"($rapp)/.mise.toml"
 ^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $rapp | ignore
+waive-all $rapp rec
 def rspec [premium: any, extra: string = ""] {
 	$"package rec
 flags: premium: {default: ($premium), local: true}
@@ -995,6 +1003,7 @@ mkdir $drill
 ' | save $"($drill)/.mise.toml"
 ^$real trust -q $"($drill)/.mise.toml"
 ^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $drill | ignore
+waive-all $drill drill
 def dspec [broken: bool] {
 	$"package drill
 flags: drill_break_checkout: {default: ($broken), local: true}
@@ -1445,6 +1454,7 @@ mkdir $"($gapp)/spec"
 ' | save $"($gapp)/.mise.toml"
 ^$real trust -q $"($gapp)/.mise.toml"
 ^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $gapp | ignore
+waive-all $gapp gen
 # The generator: flags_spec.cue says what spec/flags.cue says (its default), as aprende's generate does from its spec.
 let gen_sh = $"($dir)/gen.sh"
 '#!/bin/sh
@@ -1484,6 +1494,96 @@ for bad in ["../rec/flags_spec.cue" "/etc/hosts" "spec/missing.cue" "spec/link.c
 	let refused = if $hard { $rb.exit_code != 0 and ($rb.stderr | str contains "flagsRecord.file") } else { $rb.exit_code == 0 and (rjournal | last).record == "failed" and ((rjournal | last).note | str contains "flagsRecord.file") }
 	check ($refused and (^git --git-dir $rorigin rev-parse refs/heads/fix/flags-record-gen | str trim) == $head_before) $"record source: ($bad) is refused, nothing pushed"
 }
+
+# ---- PRONTO-439: a flip needs a production check, or the owner's waiver ----
+# An app with no flags_waive.cue: a flag that goes on needs a `production` scenario naming it (cases of any other kind are cases, not a
+# live check) or `liveWaived` in the spec; --untested answers for cases alone; turning a flag off is never asked.
+let pc = $"($dir)/pc"
+mkdir $pc
+"package pc\n" | save $"($pc)/program.cue"
+'[tools]
+"github:cue-lang/cue" = "0.16.1"
+' | save $"($pc)/.mise.toml"
+^$real trust -q $"($pc)/.mise.toml"
+^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $pc | ignore
+mkdir $"($pc)/tests/scenarios" $"($pc)/tests/unit"
+'package scenarios
+scenarios: look: {flags: ["seen"], production: true, steps: [{by: "tester", open: "/"}]}
+' | save $"($pc)/tests/scenarios/pc.cue"
+'package unit
+cases: u1: {flags: ["feat", "waived", "plain"], steps: [{call: "x"}]}
+' | save $"($pc)/tests/unit/pc.cue"
+let waiver = "owner, 2026-11-12: no live page shows it"
+def pcspec [waived: bool, plain_waived: bool, acc: bool = false, grants: string = ""] {
+	let w = if $waived { $", liveWaived: \"($waiver)\"" } else { "" }
+	let wa = if $acc { ", accounts: [\"u1\"]" } else { "" }
+	let gr = if $grants != "" { $"flags: grants: {default: \"($grants)\", local: \"($grants)\"}\n" } else { "" }
+	let pw = if $plain_waived { ", liveWaived: \"owner, 2026-11-12: plain\"" } else { "" }
+	$"package pc
+flags: feat: {default: false, local: true}
+flags: waived: {default: ($acc), local: true($w)($wa)}
+flags: seen: {default: false, local: true}
+flags: plain: {default: false, local: true($pw)}
+flags: bare: {default: false, local: true}
+($gr)flagsLive: {dir: \"flagstore\", url: \"https://pc.example\"}
+flagsCases: {live: \"echo '✓ look 1s: pc'\"}
+" | save -f $"($pc)/flags_spec.cue"
+}
+let pcj = $"($dir)/pc-journal.jsonl"
+let pcstore = $"(($pc | path expand))/flagstore"
+def pclive [args: list<string>] { livex $args {PRONTO_FLAGS_JOURNAL: $pcj, FLAGS_OFREP_CMD: "echo '{\"value\": true}'"} }
+def pcgen [] { glob $"($pcstore)/versions/*.meta.json" | length }
+def pcflag [f: string] { open $"($pcstore)/flags.json" | get flags | get $f | get variants.default }
+def pcj-last [] { open --raw $pcj | lines | each {|l| $l | from json } | last }
+
+pcspec true true
+let pcs = (pclive [setup $pc])
+check ($pcs.exit_code == 0) "production check: the drill app is set up, every flag off"
+
+# (a) unit cases only: refused, naming the flag, the rule and the two ways out; nothing written; --untested does not get past it.
+pcspec false false
+let pc0 = (pcgen)
+let pa = (pclive [push $pc --flip feat])
+let pe = ($pa.stderr | flat)
+check ($pa.exit_code != 0 and ($pe | str contains "feat") and ($pe | str contains "production check") and ($pe | str contains "production: true") and ($pe | str contains "liveWaived") and (pcgen) == $pc0 and (pcflag feat) == false) "production check: a flag with unit cases only is refused, naming the flag and both ways out; nothing written"
+# --untested passes the no-cases check for a flag with no cases at all, and the production check still refuses it.
+let pu = (pclive [push $pc --flip bare --untested "x"])
+check ($pu.exit_code != 0 and ($pu.stderr | flat | str contains "bare") and ($pu.stderr | flat | str contains "--untested does not waive") and (pcgen) == $pc0 and (pcflag bare) == false) "production check: --untested passes the no-cases check but not this one; nothing written"
+# A dry run asks the same, and writes nothing.
+let pdr = (pclive [push $pc --flip feat --dry-run])
+check ($pdr.exit_code != 0 and ($pdr.stderr | flat | str contains "production check") and (pcgen) == $pc0) "production check: a dry run refuses what the real run refuses"
+let pdr2 = (pclive [push $pc --flip seen --dry-run])
+check ($pdr2.exit_code == 0 and ($pdr2.stdout | str contains "dry run: nothing written") and (pcgen) == $pc0) "production check: a dry run of a flag with a production scenario goes"
+
+# (b) the same flag with the owner's waiver: pushed, the waiver in the journal note and on the version.
+pcspec true false
+let pb = (pclive [push $pc --flip waived])
+check ($pb.exit_code == 0 and (pcflag waived) == true and (pcj-last).note =~ "live check waived for waived: owner, 2026-11-12: no live page shows it") "production check: a waived flag is pushed, the waiver in the journal note"
+check ((glob $"($pcstore)/versions/*.meta.json" | each {|f| open --raw $f | from json } | where {|m| ($m.metadata.note? | default "") =~ "live check waived for waived" } | is-not-empty) and not ((open --raw $"($pcstore)/flags.json") | str contains "liveWaived")) "production check: the waiver is on the version's note and never in the live document"
+
+# (c) a production scenario naming the flag: pushed, its case run on production.
+let pcc = (pclive [push $pc --flip seen])
+check ($pcc.exit_code == 0 and (pcflag seen) == true and (pcj-last).cases == "passed") "production check: a flag with a production scenario is pushed and its case passes"
+
+# A data flag is no off-to-on flip: a string changed with --untested is not asked; nor a flag already on that gains accounts.
+pcspec false false false "a"
+let pg0 = (pclive [push $pc --flip grants=a --untested "data"])
+pcspec false false false "b"
+let pg = (pclive [push $pc --flip grants=b --untested "data"])
+check ($pg0.exit_code == 0 and $pg.exit_code == 0 and (pcflag grants) == "b") "production check: a string flag, new or changed, is not asked for a live check"
+pcspec false false true "b"
+let pac = (pclive [push $pc --sync waived])
+check ($pac.exit_code == 0 and (pcflag waived) == true) "production check: a flag already on that gains accounts is not asked"
+
+# (d) turning a flag off is never refused, waiver or none: plain goes on under a waiver, then off with the waiver gone from the spec.
+pcspec true true
+let pp = (pclive [push $pc --flip plain])
+check ($pp.exit_code == 0 and (pcflag plain) == true) "production check: a second waived flag is on"
+pcspec false false
+let po = (pclive [push $pc --flip plain=false])
+check ($po.exit_code == 0 and (pcflag plain) == false) "production check: turning a flag off is never refused"
+let pq = (pclive [push $pc --flip waived=false])
+check ($pq.exit_code == 0 and (pcflag waived) == false) "production check: off, with no case and no waiver in the spec"
 
 rm -rf $dir
 print "flags: live commands pass"

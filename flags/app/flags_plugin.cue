@@ -37,6 +37,11 @@ import (
 	// that is not `client` is read by the app's own services (the database, billing over the mesh) and
 	// never by a page: a page asking for it gets 404, and bulk evaluation leaves it out (PRONTO-1518).
 	client: *false | bool
+	// The owner's words and their date waiving the production check for this flag (PRONTO-439): a flip
+	// of a flag with no `production` scenario naming it is refused unless this says why. Only the
+	// owner's own words, copied from the owner, never written by an agent. Spec only: flagd's document,
+	// flags.sql and the live object never carry it; the push puts it in the version's journal note.
+	liveWaived?: string & !=""
 }
 #Flags: [=~"^[a-z][a-z0-9_-]{0,63}$"]: #Flag
 flags: #Flags

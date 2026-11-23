@@ -262,6 +262,11 @@ def main [] {
 	test_the_registry_restarts_after_its_collection_when_it_caches_blobs
 	test_the_prune_outcome_is_recorded_in_the_release_configmap
 	test_a_database_image_without_pg_major_is_an_explicit_error
+	test_adopt_applies_server_side_and_forced
+	test_schema_from_copies_the_live_schema_once_and_reads_only
+	test_schema_from_is_refused_where_it_cannot_be_read
+	test_database_base
+	test_the_clusters_spec_does_not_move_with_the_databases_files
 	print "\nAll node release tests passed."
 }
 
@@ -1716,5 +1721,198 @@ def test_a_database_image_without_pg_major_is_an_explicit_error [] {
 	let r = (in-world $w -c $"use ($engine_dir | path join render.nu); render database-tag '127.0.0.1:1' aprende-database ($digest)")
 	assert ($r.exit_code != 0)
 	assert (has $r.stderr "has no PG_MAJOR in its environment") $r.stderr
+	rm -rf $w.dir
+}
+
+# The psql and pg_dump calls the fake kubectl saw, in order.
+def db-calls [w: record]: nothing -> list<record> {
+	let f = ($w.state | path join db.log)
+	if not ($f | path exists) { return [] }
+	open --raw $f | lines | each {|l| $l | from json }
+}
+
+def test_adopt_applies_server_side_and_forced [] {
+	print "test --adopt applies every object server-side with force, as pronto-release, and a release without it does not..."
+	let w = (sandbox)
+	mkdir ($w.state | path join namespaces)
+	"{}" | save -f ($w.state | path join namespaces aprende)
+	let r = (in-world $w -c (script $w $"(inputs $w) release-app $app_info $node $meta $compose $facts [] (pushed-json) --adopt"))
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	# a Job is run, not adopted (the runtime's own apply), and the release's record is the engine's own ConfigMap
+	let applies = (writes $w | where {|c| ($c | str starts-with "apply ") and not ($c | str contains "<- Job/") and not ($c | str contains "ConfigMap/pronto-release") })
+	assert ($applies | is-not-empty)
+	for a in $applies {
+		assert ($a | str starts-with "apply --server-side --force-conflicts --field-manager=pronto-release -f -") $"an apply without the adopt flags: ($a)"
+	}
+	# the namespace first, then the objects, then the Deployments: three applies, all adopted
+	assert equal ($applies | length) 3 ($applies | str join "\n")
+	# the server's dry run is asked the same kind of apply
+	assert ((calls $w) | any {|c| $c | str starts-with "apply --dry-run=server --server-side --force-conflicts --field-manager=pronto-release -f -" })
+	assert (not ((calls $w) | any {|c| $c | str starts-with "apply --dry-run=server -f -" }))
+	# --check --adopt: nothing is written, the dry run is the adopting one
+	let w2 = (sandbox)
+	let c = (in-world $w2 $release_nu --app $w2.app --check --adopt)
+	assert equal $c.exit_code 0 $"($c.stdout)\n($c.stderr)"
+	assert equal (writes $w2) []
+	assert ((calls $w2) | any {|l| $l | str starts-with "apply --dry-run=server --server-side --force-conflicts" })
+	rm -rf $w.dir
+	rm -rf $w2.dir
+}
+
+def test_schema_from_copies_the_live_schema_once_and_reads_only [] {
+	print "test --schema-from copies the live schema (roles, schema, pgroll rows) into the preview in one transaction before the Jobs, and a second release copies nothing..."
+	let w = (sandbox)
+	mkdir ($w.state | path join namespaces)
+	"{}" | save -f ($w.state | path join namespaces aprende)
+	let run = {|| in-world $w -c (script $w $"(inputs $w --preview rc) release-app $app_info $node $meta $compose $facts [] (pushed-json) --schema-from aprende") }
+	let r = (do $run)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let db = (db-calls $w)
+	# the live namespace is only read: pg_dump, and psql reading roles and the pgroll schema's name, never a transaction of writes
+	let live = ($db | where ns == "aprende")
+	assert ($live | is-not-empty)
+	assert ($live | all {|c| not ($c.cmd | str contains "--single-transaction") })
+	assert ($live | where {|c| $c.cmd | str starts-with "psql " } | all {|c| $c.read_only }) "every psql on the live database is a read-only session"
+	assert ($live | where {|c| $c.cmd | str starts-with "pg_dump " } | all {|c| $c.cmd | str contains "--lock-wait-timeout=10s" }) "a dump never waits long for a lock live holds"
+	assert ($live | any {|c| ($c.cmd | str contains "pg_dump") and ($c.cmd | str contains "--schema-only") and ($c.cmd | str contains "--no-publications") })
+	assert ($live | any {|c| ($c.cmd | str contains "pg_dump") and ($c.cmd | str contains "--data-only") and ($c.cmd | str contains "--schema=pgroll") })
+	# the preview gets one transaction holding the roles, the schema and the pgroll rows
+	let into = ($db | where ns == "aprende-rc" | where {|c| $c.cmd | str contains "--single-transaction" })
+	assert equal ($into | length) 1 ($db | to json)
+	assert ($into.0.cmd | str contains "ON_ERROR_STOP=1")
+	assert ($into.0.stdin | str contains "CREATE ROLE analytics_reader")
+	assert ($into.0.stdin | str contains "CREATE TABLE public.game")
+	assert ($into.0.stdin | str contains "pgroll.migrations")
+	assert ($into.0.stdin | str contains "ALTER DATABASE \"app\" SET pronto.schema_from = 'aprende';") "the transaction marks the database it filled"
+	# nothing was written in the live namespace, and the copy is recorded on the preview's Cluster
+	assert (not ((writes $w) | any {|c| $c | str contains "-n aprende " }))
+	assert ((writes $w) | any {|c| $c == "annotate cluster.postgresql.cnpg.io/aprende-db -n aprende-rc --overwrite pronto.dev/schema-from=aprende" })
+	# in order: the copy is before the first Job, the Jobs migrate on top of it
+	let log = (calls $w)
+	let copied = ($log | enumerate | where {|e| $e.item | str contains "--single-transaction" } | get index | first)
+	let first_job = ($log | enumerate | where {|e| $e.item =~ "Job/aprende-" and not ($e.item | str contains "dry-run") } | get index | first)
+	assert ($copied < $first_job) "the schema is copied before the schema Jobs"
+	# a second release of the same preview: the Cluster says it was copied, nothing is dumped or applied
+	let before = ($db | length)
+	let again = (do $run)
+	assert equal $again.exit_code 0 $"($again.stdout)\n($again.stderr)"
+	assert equal (db-calls $w | length) $before "a copied preview is not copied again"
+	assert (has $again.stdout "already in aprende-rc")
+	rm -rf $w.dir
+}
+
+def test_schema_from_is_refused_where_it_cannot_be_read [] {
+	print "test --schema-from is refused without --preview, with --delete, for the preview's own namespace, a missing or preview namespace, a missing Cluster, a database that already has tables, and a failed dump copies nothing..."
+	let w = (sandbox)
+	mkdir ($w.state | path join namespaces)
+	"{}" | save -f ($w.state | path join namespaces aprende)
+	let no_preview = (in-world $w $release_nu --app $w.app --schema-from aprende)
+	assert ($no_preview.exit_code != 0)
+	assert (has $no_preview.stderr "needs --preview") $no_preview.stderr
+	let with_delete = (in-world $w $release_nu --app $w.app --preview rc --delete --schema-from aprende)
+	assert ($with_delete.exit_code != 0)
+	assert (has $with_delete.stderr "not --delete") $with_delete.stderr
+	assert equal (writes $w) []
+	let check = {|from| in-world $w -c (script $w $"(inputs $w --preview rc) check-schema-source aprende $node ($from)") }
+	let own = (do $check aprende-rc)
+	assert ($own.exit_code != 0)
+	assert (has $own.stderr "the preview's own namespace") $own.stderr
+	let missing = (do $check nowhere)
+	assert ($missing.exit_code != 0)
+	assert (has $missing.stderr "does not exist") $missing.stderr
+	{"pronto.dev/release": "aprende", "pronto.dev/preview": "other"} | to json | save -f ($w.state | path join namespaces aprende-other)
+	let other = (do $check aprende-other)
+	assert ($other.exit_code != 0)
+	assert (has $other.stderr "a preview's namespace") $other.stderr
+	mkdir ($w.state | path join no_cluster)
+	"" | save -f ($w.state | path join no_cluster aprende)
+	let nocluster = (do $check aprende)
+	assert ($nocluster.exit_code != 0)
+	assert (has $nocluster.stderr "no database cluster aprende-db") $nocluster.stderr
+	rm -f ($w.state | path join no_cluster aprende)
+	let fine = (do $check aprende)
+	assert equal $fine.exit_code 0 $fine.stderr
+	# a preview whose database has tables the release did not copy: refused, nothing written to it
+	mkdir ($w.state | path join db_tables)
+	"3" | save -f ($w.state | path join db_tables aprende-rc)
+	let tables = (in-world $w -c (script $w $"(inputs $w --preview rc) copy-schema aprende aprende aprende-rc"))
+	assert ($tables.exit_code != 0)
+	assert (has $tables.stderr "already has 3 tables") $tables.stderr
+	assert (not (db-calls $w | any {|c| $c.cmd | str contains "--single-transaction" }))
+	# a copy that committed, marking the database, and whose annotate failed: recorded again, not copied again, not refused
+	mkdir ($w.state | path join db_marked)
+	"aprende" | save -f ($w.state | path join db_marked aprende-rc)
+	let marked = (in-world $w -c (script $w $"(inputs $w --preview rc) copy-schema aprende aprende aprende-rc"))
+	assert equal $marked.exit_code 0 $"($marked.stdout)\n($marked.stderr)"
+	assert (not (db-calls $w | any {|c| $c.cmd | str contains "--single-transaction" }))
+	assert ((writes $w) | any {|c| $c == "annotate cluster.postgresql.cnpg.io/aprende-db -n aprende-rc --overwrite pronto.dev/schema-from=aprende" })
+	rm -f ($w.state | path join schema_from aprende-rc)
+	rm -f ($w.state | path join calls.jsonl)
+	# live migrations that moved while the schema was read: nothing is copied
+	"0" | save -f ($w.state | path join db_tables aprende-rc)
+	"3 def" | save -f ($w.state | path join pgroll_mark_after)
+	let moved = (in-world $w -c (script $w $"(inputs $w --preview rc) copy-schema aprende aprende aprende-rc"))
+	assert ($moved.exit_code != 0)
+	assert (has $moved.stderr "changed while its schema was being read") $moved.stderr
+	assert (not (db-calls $w | any {|c| $c.cmd | str contains "--single-transaction" }))
+	rm -f ($w.state | path join pgroll_mark_after)
+	rm -f ($w.state | path join pgroll_mark_seen)
+	# a dump that fails copies nothing and records nothing
+	"0" | save -f ($w.state | path join db_tables aprende-rc)
+	"" | save -f ($w.state | path join db_fail)
+	let failed = (in-world $w -c (script $w $"(inputs $w --preview rc) copy-schema aprende aprende aprende-rc"))
+	assert ($failed.exit_code != 0)
+	assert (not (db-calls $w | any {|c| $c.cmd | str contains "--single-transaction" }))
+	assert (not ((calls $w) | any {|c| $c | str contains "pronto.dev/schema-from" }))
+	rm -rf $w.dir
+}
+
+def test_database_base [] {
+	print "test the primary runs the database's base image only where the stage copies files onto a pinned base..."
+	let base = $"bonitao/mecha-database:0.22.0@sha256:('a' | fill --character a --width 64)"
+	let dir = (mktemp -d -t node-dbbase.XXXXXX | str trim)
+	let stage = "FROM libraries_mecha-database-image AS database
+ARG BAYT_DIR
+WORKDIR /monorepo/${BAYT_DIR}
+COPY services/database/migrations/000_extensions.sql services/database/migrations/680_flags.sql \\
+  services/database/migrations/685_army.sql /docker-entrypoint-initdb.d/
+COPY --from=libraries_mecha-database-image /usr/share/mecha/initdb/899_role_passwords.sh /docker-entrypoint-initdb.d/899_role_passwords.sh
+ENTRYPOINT [\"docker-entrypoint.sh\",\"postgres\",\"-c\",\"wal_level=logical\"]
+HEALTHCHECK --interval=1s CMD [\"pg_isready\"]
+"
+	let tail = "\nFROM busybox:musl AS database_ctxs\nRUN touch /x\n"
+	let compose = {|ctx| {services: {database: {build: {context: $dir, dockerfile: "Dockerfile.database", target: "database", additional_contexts: {libraries_mecha-database-image: $ctx}}}}} | to yaml }
+	let with = {|text, ctx| $"($text)($tail)" | save -f ($dir | path join Dockerfile.database); do $compose $ctx | render database-base }
+	# A stage that only copies files onto the base: the base is the primary's, whatever it copies.
+	assert equal (do $with $stage $"docker-image://($base)") {ref: $base, name: "libraries_mecha-database-image"}
+	# Anything that could add an extension the full image has and the base lacks keeps the primary on the full image.
+	assert ((do $with $"($stage)RUN apt-get install -y postgresql-16-pgvector\n" $"docker-image://($base)") | is-empty) "a RUN"
+	assert ((do $with $"($stage)ADD https://example.com/ext.so /usr/lib/\n" $"docker-image://($base)") | is-empty) "an ADD"
+	assert ((do $with $"($stage)COPY --from=database_ctxs /x /x\n" $"docker-image://($base)") | is-empty) "a copy from another stage"
+	assert ((do $with $stage "docker-image://bonitao/mecha-database:0.22.0") | is-empty) "a base not pinned by digest"
+	assert ((do $with $"($stage)COPY ext/vector.so /usr/lib/postgresql/17/lib/\n" $"docker-image://($base)") | is-empty) "a file into postgres's own folders"
+	assert ((do $with $"($stage)ENV LD_LIBRARY_PATH=/opt/lib\n" $"docker-image://($base)") | is-empty) "an ENV"
+	rm -rf $dir
+}
+
+def test_the_clusters_spec_does_not_move_with_the_databases_files [] {
+	print "test the Cluster's rendered spec is the same for any release of the database's files, and still moves with a real database change..."
+	let w = (sandbox)
+	let pushed = {|db: string, base: any| (["database" "crud" "electric" "auth" "caddy" "migrate"] | each {|s| [$s {tag: (if $s == "database" { "17" } else { "release" }), digest: ("sha256:" + ($db | fill -c $db -w 64))}] } | into record) | if ($base | is-empty) { $in } else { $in | insert "database-base" {tag: "17", digest: ("sha256:" + ($base | fill -c $base -w 64))} } }
+	let render = {|p| let r = (in-world $w -c (script $w $"(inputs $w) render objects $app_info.cue_path \(render release-data $app_info.dir $compose $facts ($p | to nuon)\) '' | to json --raw")); assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"; $r.stdout | from json }
+	let cluster = {|objs| $objs | where kind == Cluster | first }
+	let job = {|objs| $objs | where kind == Job and metadata.name == "aprende-initdb" | first | get spec.template.spec.containers.0.image }
+	let one = (do $render (do $pushed "a" "c"))
+	let two = (do $render (do $pushed "b" "c"))
+	# two releases of the app, whose database files differ: the full image's digest moves, the Cluster does not
+	assert equal (do $cluster $one) (do $cluster $two) "the Cluster's spec differs between two releases of the database's files"
+	assert ((do $cluster $one | get spec.imageName) | str contains $"aprende-database-base:17@sha256:('c' | fill -c c -w 64)") (do $cluster $one | get spec.imageName)
+	assert ((do $job $one) != (do $job $two)) "the schema Job must run the full image of its own release"
+	# a moved base is a real database change: the Cluster moves
+	let moved = (do $render (do $pushed "a" "d"))
+	assert ((do $cluster $moved | get spec.imageName) != (do $cluster $one | get spec.imageName)) "a moved base must change the Cluster"
+	# no base (a stage that adds something): the Cluster runs the full image, as upstream renders it
+	let full = (do $render (do $pushed "a" null))
+	assert ((do $cluster $full | get spec.imageName) | str contains $"aprende-database:17@sha256:('a' | fill -c a -w 64)") (do $cluster $full | get spec.imageName)
 	rm -rf $w.dir
 }

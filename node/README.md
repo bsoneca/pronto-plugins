@@ -7,6 +7,15 @@ No kind, no second cluster, no Cloud Build, no Artifact Registry, no gcloud.
 
 ## The node release engine
 
+The Cluster's image does not move with the app's database files (PRONTO-615, as PRONTO-537 for Bonk Chess's gcp
+path): CloudNativePG recreates an instance for any change to `imageName`, and the database image carries the app's
+SQL (and the `.bayt` files its stage copies) for the schema Jobs to replay, so its digest moves with most releases.
+Where the database's Dockerfile stage only copies files onto a base pinned by digest (`database-base` in
+`render.nu`: no RUN, no ADD, no copy from another stage), the build copies that base into the node's registry as
+`<app>-database-base:<postgres major>` (`crane copy`, digest unchanged) and `#Manifests` points the Cluster at it;
+the Jobs keep the full image. A stage that adds anything, or a base not pinned, keeps the Cluster on the full
+image. The first release after an app moves onto the base restarts the primary once.
+
 `node/engine/` is the release of an app whose `release.cue` holds `Node: node.#Release`. It runs on the
 Mac (a runner, release-cron), never on the node; kubectl reaches the node's API over an ssh tunnel it opens
 and closes itself (`tunnel.nu`: a free local port and a kubeconfig of each release's own, so releases running
@@ -19,8 +28,9 @@ The app pins in its mise the tools the engine runs: `kubectl`, `docker` (the CLI
 daemon) with its compose plugin (`aqua:docker/compose`, linked into a docker config of the call's own), `buildx` (`aqua:docker/buildx@0.39.1`, whose binary aqua names `docker-cli-plugin-docker-buildx`; run against the node's buildkit v0.29 it loads aprende's 7,933-path context and builds database, crud, electric and auth with the digests 0.33.0 gave. Not older than 0.39.1 once Go 1.27 builds it: buildx sends a Dockerfile's COPY sources as gRPC header values, one per path, and Go 1.27's net/http refuses more than 500 of them, fixed in 0.39.1, so Homebrew's 0.38.0 and the official 0.39.0 lose the session with `PROTOCOL_ERROR` or `431`; 0.33.0, built with Go 1.25, also works; the engine takes the buildx whose folder is first on the PATH, so the pin wins over Homebrew's), `sops` (when it has a SOPS file) and
 `crane` (a release that builds, or `--check --build`). The preflight fails at once on a missing one,
 and on a pronto runtime that is not in `validated_pins` (runtime.nu, held by contract_test.nu). An existing
-namespace the release did not label (`pronto.dev/release=<app>`) is refused, `--adopt` takes it; `--delete`
-never takes one.
+namespace the release did not label (`pronto.dev/release=<app>`) is refused, `--adopt` takes it (and then applies every object
+server-side with `--force-conflicts`, as field manager `pronto-release`, so the fields another manager set, the old engine's or a
+hand's, are the release's; without `--adopt` the apply is the plain one); `--delete` never takes one.
 
 Write it into an app, byte for byte, with:
 
@@ -58,7 +68,7 @@ buildkitd name it, which `registries.yaml` already mirrors), so every image is `
 
 `node/schema/node.cue` imports nothing of upstream: the app renders upstream's objects itself and hands them to
 `#Manifests`, which patches them (the Namespace's `pronto.dev/release` label, the Cluster's Barman Cloud plugin
-in production), adds to them (a tenant's quota and LimitRange, backups' ObjectStore and ScheduledBackup,
+in production, and its `imageName`: the database's base image where the release pushed one, below), adds to them (a tenant's quota and LimitRange, backups' ObjectStore and ScheduledBackup,
 production only) and refuses them, as the `violations` field and an error in `objects`: a kind no operator
 serves (`#Served`, per operator version), a cluster-scoped object, another namespace, a Job outside `jobOrder`,
 a Gateway for another host, an image that is neither in the registry nor pinned by digest.
@@ -147,10 +157,21 @@ release never creates or changes; the preflight refuses when either is down.
 then dry-runs with the real digests: a builder's way to prove an app builds without releasing it. `--build`
 alone is refused.
 Where the namespace does not exist yet, the objects are asked in `default`. `--serving` prints `serving <sha> verified <sha> maintenance <ok|failed|pending|unknown>` from the namespace's `pronto-release` ConfigMap (the commit built, which is empty for a tree that was not a clean commit; the one cd marked verified with `--verified <sha>`, refused when the node now serves another; the last registry maintenance). `--prune` runs only the registry maintenance and records its outcome, the retry of a release whose own failed (exit 0 done, exit 4 deferred and recorded `pending`, which is not a failure and is retried by the next run; a failure is an error), which an app's cd reads before it releases. `--delete` removes a preview's
-namespace and refuses the release's. `--schema-from` (a preview's copy of a database) is not in this engine yet.
+namespace and refuses the release's.
 
-Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, previews' `--schema-from`, Studio's
-tenant release (P3, P4).
+`--schema-from <namespace>` (with `--preview`) starts the preview's database as the live one's schema without its rows. The
+namespace must exist, not be a preview, and hold `<app>-db` with a primary (its release label is not asked: Bonk's never had one).
+After the preview's primary is up and before the schema Jobs, the engine reads the live primary (roles beyond CloudNativePG's own,
+`pg_dump --schema-only --no-publications --no-subscriptions` with owners and privileges, and the rows of the `pgroll` schema, so
+`migrate` applies only what is new) and applies all of it to the preview in one transaction, then annotates the preview's Cluster
+`pronto.dev/schema-from`. A release that finds the annotation copies nothing; a database that has tables and no annotation is refused
+(delete the preview first). The live namespace is only read.
+
+A release's `origin` (`Node.origin`, `https://<host>` unless set; an `http` one is refused) is what its services' `ORIGIN` says: a
+preview with a host of its own (`hosts.<preview>`, routed by the node's cloudflared, which terminates TLS) has an https origin, which a
+passkey is bound to.
+
+Not done yet, refused with a message: the airlock, `TRUSTED_JWKS`, Studio's tenant release (P3, P4).
 
 ### The door's Dapr API
 

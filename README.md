@@ -19,6 +19,7 @@ refuses an app that is not.
 - [analytics](analytics/README.md): business numbers (users, paying users, games, funnels) and visits, read not alerted.
 - [api](api/README.md): pronto-api's spike: one Deno service serving a runtime descriptor set over gRPC, Connect and REST on one port, behind `api_export`.
 - [doorguard](doorguard/README.md): the door's Dapr guard (PRONTO-1307), a block in the app's docker/Caddyfile that answers 404 for Dapr API paths under every public prefix.
+- [ir-md](ir-md/README.md): the app's ir.html as Markdown (ir.md), written by generate after pronto's writer (PRONTO-740 PP7).
 - [android](android/README.md): a native Android host, no WebView.
 - [native](native/README.md): what every native host shares, in CUE: the host core, the bridge contracts and the host battery.
 - [billing](billing/README.md): paid plans through a shared Stripe broker.
@@ -668,11 +669,17 @@ needed (the owner, 2026-11-11: "drop the requirement of testers for flag flips",
 PRONTO-284). `pronto-flags push <app-dir> --flip <flag>` (a push is a merge over the live flags, PRONTO-680: a flag whose default differs keeps its live entry unless `--flip` or `--sync` names it, and a live flag the spec dropped stays while the served release reads it, as `released.json` records):
 
 1. reads the live object and finds the flags whose default value moves; a flag
-   with no cases is refused, or pushed with `--untested "<why>"`, loudly;
+   with no cases is refused, or pushed with `--untested "<why>"`, loudly; a flag
+   goes from off to on (a bool default false, or new, now true) with no `production`
+   scenario that needs no sign-in is refused too, a dry run included, unless the
+   flag's spec (`flags_spec.cue`, or the source it is generated from) holds the
+   owner's words in `liveWaived` (PRONTO-439; `--untested` does not waive it, a
+   data flag or a flag already on is not asked, and the waiver goes into the
+   version's note);
 2. refuses, with nothing written, a flip whose flag has `production` scenarios
    while the app lacks `flagsLive.url` or `flagsCases.live`;
 3. writes the merge of the spec over the live flags, for everyone, in one version
-   (`stage=all`); with no `production` case to run it stops there
+   (`stage=all`); with no `production` case to run (a waived flag, or one turned off) it stops there
    (`cases=none on production`, or `untested`);
 4. otherwise waits until OFREP at `flagsLive.url` answers the new value (every
    2 s, 90 s at most), runs `flagsCases.live` against production with the flag's

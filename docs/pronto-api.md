@@ -118,7 +118,7 @@ Following the existing plugin shape (billing, flags, analytics):
 | `api_door.cue` | generated | `apiDoor`: the routes; the Caddyfile block, a `handle /api/v1/*` beside the door's `/crud` one, with one rewrite per route onto a view (filters, order and limit built from the path and the declared query parameters), no `Accept-Profile` (each rewrite names `api_v1_<view>` in `public`), and the client's query, `Prefer` and profile headers dropped; and `crudStrips`, the headers the `/crud` block drops. the route step (`api/generate.ts route`) puts it in the door, always; the flag is the views' gate, per request (PRONTO-325) |
 | `api/v1/openapi.json` | generated | OpenAPI 3.1 for the Google routes, with PostgREST's error body (not PostgREST's own `/` document, which describes the views by table name) |
 | `api/v1/contract.json` | generated | Every route, field and type, sorted; the additive-only check compares it with `released.json` |
-| mecha `cluster.cue` option | installer | PostgREST's schemas become `public,api_v1` (`PGRST_DB_SCHEMAS`, a mecha-fork option, PRONTO-376; today `PGRST_DB_SCHEMA` is fixed to `public` for every app), so `/crud` keeps `public` as its default and is unchanged |
+| PostgREST's schemas | none | PostgREST serves `public` alone and the installer sets no `capabilities.apiSchemas` (PRONTO-740 PP5): the door calls the views' twins in `public`, `api_v1_<view>`, so `/crud` is unchanged. The mecha-fork's `PGRST_DB_SCHEMAS` option (PRONTO-376) is not used |
 | `flags_spec.cue` entry | installer | Flag `api_export`: `default: false`, `local: true`; off for an account, every view is empty to it and refuses its writes (`api_private.api_on`), and its keys are refused |
 
 ### The spec

@@ -19,7 +19,7 @@ import { devices, request, type APIRequestContext, type BrowserContext, type CDP
 import { launch as launchBrowser } from "./browser.ts";
 import { gate, slow, slowCpu, slowDown } from "./slow.ts";
 import { early } from "./scenarios/early.ts";
-import { sentOf, stepGate, type Gated } from "./scenarios/gate.ts";
+import { openHref, sentOf, stepGate, type Gated } from "./scenarios/gate.ts";
 import { fileFlake as file } from "./scenarios/flakes.ts";
 import { closing, settleRun, writeVerdict } from "./scenarios/verdict.ts";
 import { loadScenarios, type ActorDef, type Scenario, type Step } from "./scenarios/load.ts";
@@ -250,7 +250,14 @@ export class Run {
   // What a read-only production page may send: reads, and a flag's anonymous evaluation (#OfrepEvaluation). Any other request is aborted
   // and logged; the app's own /auth/ and /crud/ among them fail the scenario, and a beacon (analytics, errors, any other path or origin) is aborted and ignored.
   async guard(route: Route) {
-    const r = route.request(), u = new URL(r.url()), sent = sentOf(r.method(), u.origin === new URL(URL_).origin, u.pathname);
+    const r = route.request(), u = new URL(r.url()), own = u.origin === new URL(URL_).origin;
+    // A page of another origin is never shown to a read-only scenario, however it was reached (a redirect, a link): its text would be in the report.
+    if (r.isNavigationRequest() && r.resourceType() === "document" && !own) {
+      console.log(`  ${this.s.id}: aborted navigation to ${u.origin}${u.pathname}`);
+      this.refused.push(`NAVIGATE ${u.origin}${u.pathname}`);
+      return route.abort("blockedbyclient").catch(() => {});
+    }
+    const sent = sentOf(r.method(), own, u.pathname, u.search, r.postData());
     if (sent === "pass") return route.continue().catch(() => {});
     console.log(`  ${this.s.id}: aborted ${r.method()} ${u.origin}${u.pathname}`);
     if (sent === "refuse") this.refused.push(`${r.method()} ${u.pathname}`);
@@ -468,14 +475,16 @@ export class Run {
     // A gesture on a page served first waits for the shell to take it over.
     if (spec.loaded.adopted && gestures.some((k) => k in st)) await this.adopted(p, t);
     // Actions.
-    if ("open" in st) { const to = await this.fill(st.open); await p.goto(/^https?:/.test(to) ? to : new URL(to, URL_).href); return this.loaded(p); }
+    if ("open" in st) {
+      await p.goto(openHref(await this.fill(st.open), URL_, onProduction || this.readOnly)); return this.loaded(p);
+    }
     if ("reload" in st) { await p.reload(); return this.loaded(p); }
     if ("revisit" in st) {
       // The tab closed, and the app opened again in a new one: the tab's sessionStorage goes with it.
       const to = await this.fill(st.revisit);
       await p.close();
       await this.tab(a);
-      await a.page.goto(/^https?:/.test(to) ? to : new URL(to, URL_).href);
+      await a.page.goto(openHref(to, URL_, onProduction || this.readOnly));
       return this.loaded(a.page);
     }
     if ("rush" in st) {
@@ -494,7 +503,7 @@ export class Run {
       }
       let held = "";
       try {
-        await p.goto(/^https?:/.test(to) ? to : new URL(to, URL_).href, { waitUntil: "commit" });
+        await p.goto(openHref(to, URL_, onProduction || this.readOnly), { waitUntil: "commit" });
         if (st.rush.drawn) await (await sel(st.rush.drawn)).waitFor({ state: "attached", timeout: ms });
         await (await sel(st.rush.click)).click({ timeout: ms });
         held = await p.evaluate(() => (window as unknown as { __fp?: { pressed: string } }).__fp?.pressed ?? "");
@@ -992,6 +1001,7 @@ export class Run {
     }
     clearInterval(this.beat);
     // A page's boot may write after the last step passed: let each page go quiet, then ask again, and again once closed (a page's last words).
+    // A page that holds a long read open (a live shape) never goes quiet: the wait is a grace of at most 10 s for a boot's late write, not a condition, so its timeout is no failure.
     if (this.readOnly) for (const a of this.actors.values()) await a.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
     const off =(this.skipped.size ? `; steps behind ${[...this.skipped].sort().join(", ")} skipped, off here` : "") +
       (this.onHere.size ? `; steps for ${[...this.onHere].sort().join(", ")} off skipped, on here` : "");

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Adds or refreshes the keys service in a pronto app (identity/keys/README.md):
+#   bin/pronto-keys <app-dir>
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+cd "$here"
+exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write identity/keys/install.ts "$app"

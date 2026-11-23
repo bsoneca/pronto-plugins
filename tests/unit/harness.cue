@@ -375,6 +375,19 @@ cases: "a production step of the flag a flip tests runs and asks nothing": {
 	]
 }
 
+// An `open` step's address: a path or a web address of the app, nothing else, and on production only the app's origin.
+cases: "an open step takes a path or a web address, never a file, and on production only the app's origin": {
+	suite: "harness"
+	steps: [
+		{call: "harness.openHref", args: ["/play", "http://localhost:3000/", false], expect: "http://localhost:3000/play"},
+		{call: "harness.openHref", args: ["https://other.example/x", "http://localhost:3000/", false], expect: "https://other.example/x", why: "at hand a link to another origin is a page like any"},
+		{call: "harness.openHref", args: ["/play", "https://app.example/", true], expect: "https://app.example/play"},
+		{call: "harness.openHref", args: ["file:///etc/hosts", "http://localhost:3000/", false], throws: "not an http", why: "never the runner's own files"},
+		{call: "harness.openHref", args: ["https://other.example/x", "https://app.example/", true], throws: "only one a production scenario"},
+		{call: "harness.openHref", args: ["//other.example/x", "https://app.example/", true], throws: "only one a production scenario", why: "a protocol-relative address is another origin too"},
+	]
+}
+
 // A step's second flag (`with`, PRONTO-1688): it runs only where both flags are on, and each is asked in turn.
 cases: "a step with a flag and a with flag runs only where both are on": {
 	suite: "harness"
@@ -431,6 +444,11 @@ cases: "a read-only production page's requests: reads pass, a write to /auth or 
 		{call: "harness.sentOf", args: ["POST", true, "/ofrep/v1/evaluate/flags/army_catalog_live"], expect: "pass", why: "a flag's anonymous evaluation is a read"},
 		{call: "harness.sentOf", args: ["POST", true, "/ofrep/v1/evaluate/flags/f/../x"], expect: "abort"},
 		{call: "harness.sentOf", args: ["POST", false, "/ofrep/v1/evaluate/flags/f"], expect: "abort", why: "only the app's own door"},
+		{call: "harness.evaluated", args: ["", "{\"context\":{\"targetingKey\":\"k\"}}"], expect: "pass", why: "as #OfrepEvaluation: the context alone"},
+		{call: "harness.evaluated", args: ["?x=1", null], expect: "abort", why: "no query"},
+		{call: "harness.evaluated", args: ["", "{\"context\":{},\"extra\":1}"], expect: "abort", why: "nothing in the body but the context"},
+		{call: "harness.evaluated", args: ["", "{\"context\":{\"a\":1}}"], expect: "abort", why: "and in it only the targetingKey"},
+		{call: "harness.evaluated", args: ["", "nope"], expect: "abort", why: "a body that is not JSON"},
 		{call: "harness.sentOf", args: ["POST", true, "/auth/guest"], expect: "refuse", why: "a page that boots a guest is no read"},
 		{call: "harness.sentOf", args: ["PATCH", true, "/crud/player"], expect: "refuse"},
 		{call: "harness.sentOf", args: ["POST", false, "/crud/player"], expect: "abort", why: "another origin's /crud is not the app's"},
