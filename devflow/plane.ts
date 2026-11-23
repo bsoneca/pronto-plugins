@@ -30,25 +30,39 @@ async function downUntil(dir: string): Promise<number | null> {
 }
 
 /** Takes one of the machine's request slots, or throws when none is free by `deadline`. A token file
- * older than the call's own timeout (+ 5 s) belongs to a process that was killed: it is taken over. */
-async function takeToken(dir: string, deadline: number): Promise<string> {
+ * holds its owner's nonce and is older than the call's own timeout (+ 5 s) only when its process was
+ * killed: it is then moved aside (a rename, which one process wins) and the slot taken. */
+async function takeToken(dir: string, deadline: number): Promise<{ path: string; nonce: string }> {
   await Deno.mkdir(dir, { recursive: true });
+  const nonce = crypto.randomUUID();
   for (;;) {
     for (let i = 0; i < concurrency(); i++) {
       const path = `${dir}/call-${i}`;
       try {
-        (await Deno.open(path, { write: true, createNew: true })).close();
-        return path;
+        const f = await Deno.open(path, { write: true, createNew: true });
+        await f.write(new TextEncoder().encode(nonce));
+        f.close();
+        return { path, nonce };
       } catch (e) {
         if (!(e instanceof Deno.errors.AlreadyExists)) throw e;
         try {
-          if (Date.now() - ((await Deno.stat(path)).mtime?.getTime() ?? Date.now()) > timeoutMs() + 5000) await Deno.remove(path);
+          if (Date.now() - ((await Deno.stat(path)).mtime?.getTime() ?? Date.now()) > timeoutMs() + 5000) {
+            await Deno.rename(path, `${path}.stale-${nonce}`);
+            await Deno.remove(`${path}.stale-${nonce}`);
+          }
         } catch { /* released or taken over by another process meanwhile */ }
       }
     }
     if (Date.now() >= deadline) throw new Error(`plane: no request slot free in ${timeoutMs() / 1000} s (${concurrency()} in flight on this machine, ${dir})`);
     await sleep(50 + Math.random() * 100);
   }
+}
+
+/** Gives a slot back, only if the file is still ours: a taken-over token is another call's now. */
+async function giveToken(t: { path: string; nonce: string }) {
+  try {
+    if ((await Deno.readTextFile(t.path)) === t.nonce) await Deno.remove(t.path);
+  } catch { /* already gone */ }
 }
 
 export class Plane implements Board {
@@ -60,13 +74,14 @@ export class Plane implements Board {
     const dir = callsDir();
     for (let attempt = 0; ; attempt++) {
       // The breaker is read before a call is first made, never between its retries (they are already
-      // backing off), and never after a call succeeded.
+      // backing off), and it expires on its own.
       if (attempt === 0) {
         const until = await downUntil(dir);
         if (until !== null && breakerOpen(until, Date.now())) throw new Error(`plane unavailable until ${brt(until)} BRT (${method} ${path})`);
       }
-      const deadline = Date.now() + timeoutMs();
-      const token = await takeToken(dir, deadline);
+      // Waiting for a slot has its own timeout; the fetch gets the whole of PLANE_TIMEOUT_MS once it holds one,
+      // so a busy machine never reads as a slow Plane (and never trips the breaker).
+      const token = await takeToken(dir, Date.now() + timeoutMs());
       // Each call waits PLANE_TIMEOUT_MS at most (30 s): one that never answers held a verb for ever
       // (PRONTO-341). flow.js askAgain says which failures are asked again: a 429 (Plane limits a
       // token's calls a minute, env.api_key_rate_limit), and a timeout, a lost connection or a 5xx of
@@ -80,7 +95,7 @@ export class Plane implements Board {
           method,
           headers: { "X-API-Key": this.token, "Content-Type": "application/json", Accept: "application/json" },
           body: body === undefined ? undefined : JSON.stringify(body),
-          signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+          signal: AbortSignal.timeout(timeoutMs()),
         });
         text = await r.text();
         ok = r.ok;
@@ -91,11 +106,10 @@ export class Plane implements Board {
         failure = e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError") ? "timeout" : "network";
         text = String(e);
       } finally {
-        await Deno.remove(token).catch(() => {});
+        await giveToken(token);
       }
       if (tripsBreaker(failure)) await Deno.writeTextFile(`${dir}/down-until`, String(Date.now() + 30_000)).catch(() => {});
       if (ok) {
-        await Deno.remove(`${dir}/down-until`).catch(() => {});
         if (!text) return null;
         try {
           return JSON.parse(text);
