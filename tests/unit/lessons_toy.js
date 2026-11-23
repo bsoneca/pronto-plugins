@@ -9,35 +9,67 @@ const line = (text) => ({ en: text });
 /** The toy adapter: a board is the applied tokens joined by spaces; a gesture is its own token; every gesture is legal. */
 export const adapter = { start: () => "", legal: () => true, token: (g) => g, apply: (b, t) => (b ? `${b} ${t}` : t), render() {} };
 
-/** A course of one part (player 0) and one chapter: `moves`, `shown`, own wrong lines by ply, a pool of n complaints. */
-export function course(n, moves = ["a1", "b1", "a2", "b2", "a3"], shown = 0, wrong = {}, id = "crs") {
+
+/** A course of one part (player 0) and one chapter: `plies` (the script's length, never its moves), `shown`, own wrong lines by ply, a pool of n complaints. */
+export function course(n, plies = 5, shown = 0, wrong = {}, id = "crs") {
   const steps = {};
   for (const [ply, texts] of Object.entries(wrong)) steps[ply] = { wrong: texts.map(line) };
-  const chapter = { id: "ch", moves, shown, claim: "x", steps };
+  const chapter = { id: "ch", plies, shown, claim: "x", steps };
   const part = { id: "p", player: 0, complaints: Array.from({ length: n }, (_, i) => line(`c${i}`)), chapters: [chapter] };
   return { id, parts: [part] };
 }
 
-/** A lesson on the toy course, resumed at `state` when given. */
-export function lesson(n, moves, shown, wrong, id, state) {
-  const c = course(n, moves, shown, wrong, id);
-  return createLesson({ course: c, part: c.parts[0], chapter: c.parts[0].chapters[0], adapter, state });
+const SCRIPT = ["a1", "b1", "a2", "b2", "a3"];
+
+/**
+ * The database's judgement as lessons.sql makes it, for the script `moves` (the player moves the plies of parity `player`),
+ * `own` wrong lines per ply: `row()` is the row as lessons.view returns it (`played` the plies up to the step), `move(step,
+ * token)` a promise of the row after a move. `at` is a row to stand at instead of the chapter's start. With `gate`, a move
+ * waits for `gate.release()` before it answers.
+ */
+export function fakeServer(moves = SCRIPT, shown = 0, own = {}, at, gate) {
+  const player = 0;
+  const advance = (p) => {
+    while (p < moves.length && p % 2 !== player) p++;
+    return p;
+  };
+  let r = at ?? { step: advance(shown), wrongs: 0, step_wrongs: 0, pool_said: 0 };
+  const row = () => ({ ...r, over: r.step >= moves.length, played: moves.slice(0, r.step) });
+  return {
+    row,
+    async move(step, token) {
+      await gate?.promise;
+      if (step !== r.step || r.step >= moves.length) return row();
+      if (token === moves[step]) r = { ...r, step: advance(step + 1), step_wrongs: 0 };
+      else r = { ...r, wrongs: r.wrongs + 1, step_wrongs: r.step_wrongs + 1, pool_said: r.pool_said + (r.step_wrongs + 1 > (own[step]?.length ?? 0) ? 1 : 0) };
+      return row();
+    },
+  };
+}
+
+/** A lesson on the toy course, and the server it asks (on `moves`, resumed at the row `state` when given). */
+export function lesson(n, moves = SCRIPT, shown = 0, wrong, id, state, gate) {
+  const c = course(n, moves.length, shown, wrong, id);
+  const server = fakeServer(moves, shown, wrong ?? {}, state, gate);
+  const l = createLesson({ course: c, part: c.parts[0], chapter: c.parts[0].chapters[0], adapter, server, state: server.row() });
+  return { l, server };
 }
 
 /** Play gestures in order; the state, the board and the kinds of the results. */
-export function run(n, moves, shown, gestures, wrong) {
-  const l = lesson(n, moves, shown, wrong);
-  const kinds = gestures.map((g) => l.play(g)).map((r) => r.kind);
+export async function run(n, moves, shown, gestures, wrong) {
+  const { l } = lesson(n, moves, shown, wrong);
+  const kinds = [];
+  for (const g of gestures) kinds.push((await l.play(g)).kind);
   return { state: l.state(), board: l.board(), kinds };
 }
 
 /** Wrong moves at the first step, one by one: the lines said, in order, the board shown after the last, and ours after. */
-export function wrongs(n, count, wrong) {
-  const l = lesson(n, undefined, 0, wrong);
+export async function wrongs(n, count, wrong) {
+  const { l } = lesson(n, undefined, 0, wrong);
   const said = [];
   let tried;
   for (let i = 0; i < count; i++) {
-    const r = l.play("zz");
+    const r = await l.play("zz");
     said.push(r.line.en);
     tried = r.tried;
   }
@@ -66,33 +98,74 @@ export function sequenceReport(n, wraps) {
  * The pool's lines said by a real lesson in which wrong moves at plies with their own lines mix with wrong moves at
  * plies without, for the course seed `seed`: each step gets 1 to 4 wrong moves. Only the pool's lines (c0..) count.
  */
-export function mixedReport(n, wraps, seed) {
+export async function mixedReport(n, wraps, seed) {
   const moves = Array.from({ length: 2 * (wraps * n + 2) }, (_, i) => `${i % 2 ? "b" : "a"}${i}`);
   const own = { 0: ["o0", "o0b"], 4: ["o4"], 10: ["o10", "o10b", "o10c"], 14: ["o14"] };
-  const l = lesson(n, moves, 0, own, `crs${seed}`);
+  const { l } = lesson(n, moves, 0, own, `crs${seed}`);
   const said = [];
   for (let k = 0; !l.state().done; k++) {
-    for (let w = 0; w < 1 + ((k + seed) % 4); w++) said.push(l.play("zz").line.en);
-    l.play(l.expected());
+    for (let w = 0; w < 1 + ((k + seed) % 4); w++) said.push((await l.play("zz")).line.en);
+    await l.play(moves[l.state().step]);
   }
   const pool = said.filter((x) => x.startsWith("c"));
   return { ...report(pool.slice(0, wraps * n), n), enough: pool.length >= wraps * n, usedOwn: said.some((x) => x.startsWith("o")) };
 }
 
-/** A stale step: the server's state against a lesson (`shown` plies shown) that played `played` right moves. */
-export function reconcile(played, server, shown = 0) {
-  const l = lesson(8, undefined, shown);
-  played.forEach((g) => l.play(g));
-  const before = l.board();
-  const out = l.reconcile(server);
-  return { out, state: l.state(), board: l.board(), boardBefore: before, expected: l.expected() };
+/** A lesson resumed at the server's row (step, counters; `played` is what the server says), then one wrong move at that step. */
+export async function resume(initial) {
+  const { l } = lesson(8, undefined, 0, undefined, undefined, initial);
+  const before = { state: l.state(), board: l.board() };
+  return { ...before, line: (await l.play("zz")).line.en, after: l.state() };
 }
 
-/** A lesson resumed at a server row's state, as after a reload, then one wrong move. */
-export function resume(initial) {
-  const l = lesson(8, undefined, 0, undefined, undefined, initial);
-  const before = { state: l.state(), board: l.board(), expected: l.expected() };
-  return { ...before, line: l.play("zz").line.en, after: l.state() };
+/** A stale page: the server went on to `step` (another tab played), then this page reconciles to its row, or plays a move. */
+export async function stale(serverMoves, gesture) {
+  const { l, server } = lesson(8);
+  for (const [step, token] of serverMoves) await server.move(step, token);
+  const before = { state: l.state(), board: l.board() };
+  if (gesture === undefined) return { before, out: l.reconcile(server.row()), state: l.state(), board: l.board() };
+  const r = await l.play(gesture);
+  return { before, kind: r.kind, state: l.state(), board: l.board() };
+}
+
+/** A move in flight: the lesson's answers to a second gesture while the first waits, and its state once the first is answered. */
+export async function inflight() {
+  let release;
+  const gate = { promise: new Promise((r) => (release = r)) };
+  const { l } = lesson(8, undefined, 0, undefined, undefined, undefined, gate);
+  const first = l.play("a1");
+  const during = { busy: l.busy(), second: (await l.play("a2")).kind, board: l.board() };
+  release();
+  const answered = await first;
+  return { during, first: answered.kind, replies: answered.replies, after: { busy: l.busy(), state: l.state(), board: l.board() } };
+}
+
+/** A reconcile that lands while a move is out (a row of another tab at step 4): the move's answer is shown as the server's row, not applied on the reconciled board. */
+export async function reconcileDuring() {
+  let release;
+  const gate = { promise: new Promise((r) => (release = r)) };
+  const { l } = lesson(8, undefined, 0, undefined, undefined, undefined, gate);
+  const first = l.play("a1");
+  l.reconcile({ step: 4, wrongs: 0, step_wrongs: 0, pool_said: 0, over: false, played: SCRIPT.slice(0, 4) });
+  const during = { state: l.state(), board: l.board() };
+  release();
+  const answered = await first;
+  return { during, kind: answered.kind, state: l.state(), board: l.board() };
+}
+
+/** A failed call: the error's text, and that the lesson is as it was and not busy. */
+export async function failed() {
+  const c = course(8);
+  const server = { move: () => Promise.reject(new Error("offline")) };
+  const l = createLesson({ course: c, part: c.parts[0], chapter: c.parts[0].chapters[0], adapter, server, state: fakeServer().row() });
+  const before = { state: l.state(), board: l.board() };
+  let error;
+  try {
+    await l.play("a1");
+  } catch (e) {
+    error = e.message;
+  }
+  return { error, busy: l.busy(), same: JSON.stringify(before) === JSON.stringify({ state: l.state(), board: l.board() }) };
 }
 
 export { fnv1a };
