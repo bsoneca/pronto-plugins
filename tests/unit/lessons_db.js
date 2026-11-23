@@ -129,6 +129,40 @@ REVOKE ALL ON FUNCTION lessons_app.reward(uuid, text, int) FROM PUBLIC;
 
 const functions = () => Deno.readTextFileSync(`${root}lessons/app/lessons.sql`);
 
+/**
+ * A live upgrade's window: pronto's schema job has made the progress table with its blanket grant and the owner's policy,
+ * the plugin's pgroll migration has not run (no trigger, no lessons schema), and the raw migrations run: the courses' spec,
+ * then the functions. The pgroll migration runs after only when `late`.
+ */
+export async function windowDb({ late = false } = {}) {
+  const pg = new PGlite();
+  await pg.exec(BASE + table());
+  for (const [who, price] of Object.entries(PLANS)) {
+    await pg.query('INSERT INTO test.plan VALUES ($1, $2)', [ACCOUNTS[who], price]);
+    await pg.query('INSERT INTO test.wallet VALUES ($1, $2)', [ACCOUNTS[who], GOLD[who]]);
+  }
+  await pg.exec("INSERT INTO test.flags (flag) VALUES ('toy')");
+  await pg.exec(HOOKS);
+  await pg.exec(make().out.sql);
+  await pg.exec(functions());
+  if (late) await pg.exec(make().up);
+  return pg;
+}
+
+/** The raw migrations alone again (the courses' spec, then the functions), as a release replays them before pgroll runs. */
+export async function rerun(pg) {
+  await pg.exec(make().out.sql);
+  await pg.exec(functions());
+  return 'ok';
+}
+
+/** The progress table's session-role write privileges and whether its trigger exists: "<n> privileges, trigger <bool>". */
+export async function guarded(pg) {
+  const r = (await pg.query(`SELECT (SELECT count(*)::int FROM information_schema.role_table_grants g WHERE g.table_name = 'lesson_progress' AND g.grantee IN ('app_user', 'anon', 'service') AND g.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')) AS n,
+    EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'lesson_progress_read_only' AND tgrelid = 'public.lesson_progress'::regclass) AS t`)).rows[0];
+  return `${r.n} privileges, trigger ${r.t}`;
+}
+
 /** The plugin's three SQL files in a release's order, over what is there. */
 async function release(pg) {
   await pg.exec(make().up);

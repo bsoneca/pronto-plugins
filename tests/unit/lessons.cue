@@ -34,7 +34,15 @@ import (
 }
 
 _lsDb: [{call: "lessonsdb.db"}, {keep: "pg"}]
-_lsTrigger: "^42501: lesson progress is the lessons functions' to write$"
+_lsWindowWrites: list.Concat([for who in ["FREE", "anon", "service"] for sql in [
+	"INSERT INTO public.lesson_progress (id, owner_id, course, chapter, part, step, done) VALUES ('forged', '0c0c0c0c-0000-4000-8000-00000000000c', 'toy', 'one', 'first', 9, true)",
+	"UPDATE public.lesson_progress SET done = true",
+	"DELETE FROM public.lesson_progress",
+] {[
+	{call: "lessonsdb.as", args: ["$pg", who, sql]},
+	{get: "refused", matches: "^42501: "},
+]}])
+_lsTrigger: "^42501: (lesson progress is the lessons functions' to write|permission denied for table lesson_progress)$" // the trigger, or the revoked grant that lessons.sql adds first
 
 cases: {
 	"shown plies play by themselves, then the scripted reply, and the player moves next": {suite: "lessons", steps: [
@@ -293,6 +301,26 @@ cases: {
 		{call: "lessonsdb.rows", args: ["$pg"], expect: [{account: "FREE", chapter: "one", step: 0}]},
 	]])
 	}
+	"on a live upgrade the raw migrations close the table before pgroll's trigger exists: no session role writes it, and they replay": {suite: "lessons", steps: list.Concat([[
+		{call: "lessonsdb.windowDb"}, {keep: "pg"},
+		{call: "lessonsdb.guarded", args: ["$pg"], expect: "0 privileges, trigger true", why: "the blanket grant is revoked and the trigger is made by the functions' own file"},
+	], _lsWindowWrites, [
+		{call: "lessonsdb.rerun", args: ["$pg"], expect: "ok"},
+		{call: "lessonsdb.rerun", args: ["$pg"], expect: "ok", why: "replayed twice: nothing collides"},
+		{call: "lessonsdb.guarded", args: ["$pg"], expect: "0 privileges, trigger true"},
+	]])
+	}
+	"after the window pgroll's migration runs over the guarded table, the functions work and a replay keeps it closed": {suite: "lessons", steps: [
+		{call: "lessonsdb.windowDb", args: [{late: true}]}, {keep: "pg"},
+		{call: "lessonsdb.call", args: ["$pg", "FREE", "start", ["toy", "one"]]},
+		{get: "state.chapter", expect: "one"},
+		{call: "lessonsdb.rerun", args: ["$pg"], expect: "ok"},
+		{call: "lessonsdb.replay", args: ["$pg"], expect: "replayed"},
+		{call: "lessonsdb.guarded", args: ["$pg"], expect: "0 privileges, trigger true"},
+		{call: "lessonsdb.as", args: ["$pg", "FREE", "UPDATE public.lesson_progress SET step = 5"]},
+		{get: "refused", matches: _lsTrigger},
+		{call: "lessonsdb.rows", args: ["$pg"], expect: [{account: "FREE", chapter: "one", step: 0}]},
+	]}
 	"a session writes no progress row itself, reads its own and no other's": {suite: "lessons", steps: list.Concat([_lsDb, [
 		{call: "lessonsdb.call", args: ["$pg", "FREE", "start", ["toy", "one"]]},
 		{call: "lessonsdb.call", args: ["$pg", "PLUS", "start", ["toy", "one"]]},
