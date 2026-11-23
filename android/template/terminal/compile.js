@@ -802,24 +802,28 @@ function convert(el, pctx, C) {
       // its slot is taken before its children are converted: a fixed element inside it lies over it
       const slot = C.overlays.length;
       C.overlays.push(null);
-      const divs = convertAt(el, { kind: "block", avail: C.width, ta: undefined }, C);
       const placed = [];
-      for (const d of divs) {
-        const mg = Object.assign({}, d.margins);
-        const place = (ax, side, size, lo, hi, align) => {
-          if (ax.both) d[size] = { type: "match_parent" };
-          else if (d[size] && d[size].type === "match_parent") d[size] = { type: "wrap_content" };
-          if (ax.from === "end" && !ax.both) d[align] = side === "x" ? "right" : "bottom";
-          else if (!ax.both) d[align] = side === "x" ? "left" : "top";
-          if (ax.a) mg[lo] = (mg[lo] || 0) + round(ax.a);
-          if (ax.z) mg[hi] = (mg[hi] || 0) + round(ax.z);
-        };
-        place(layer.h, "x", "width", "left", "right", "alignment_horizontal");
-        place(layer.v, "y", "height", "top", "bottom", "alignment_vertical");
-        if (Object.keys(mg).length) d.margins = mg;
-        placed.push(d);
+      // the slot is given up (or filled) even when the conversion throws, so no hole is left in the layers
+      try {
+        const divs = convertAt(el, { kind: "block", avail: C.width, ta: undefined }, C);
+        for (const d of divs) {
+          const mg = Object.assign({}, d.margins);
+          const place = (ax, side, size, lo, hi, align) => {
+            if (ax.both) d[size] = { type: "match_parent" };
+            else if (d[size] && d[size].type === "match_parent") d[size] = { type: "wrap_content" };
+            if (ax.from === "end" && !ax.both) d[align] = side === "x" ? "right" : "bottom";
+            else if (!ax.both) d[align] = side === "x" ? "left" : "top";
+            if (ax.a) mg[lo] = (mg[lo] || 0) + round(ax.a);
+            if (ax.z) mg[hi] = (mg[hi] || 0) + round(ax.z);
+          };
+          place(layer.h, "x", "width", "left", "right", "alignment_horizontal");
+          place(layer.v, "y", "height", "top", "bottom", "alignment_vertical");
+          if (Object.keys(mg).length) d.margins = mg;
+          placed.push(d);
+        }
+      } finally {
+        C.overlays.splice(slot, 1, ...placed);
       }
-      C.overlays.splice(slot, 1, ...placed);
       return [];
     }
   }

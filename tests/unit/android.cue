@@ -296,6 +296,10 @@ cases: {
 		{pick: ["root.items.length", "root.items.1.background.0.color", "root.items.1.items.length", "root.items.2.text"], expect: [3, "#FF000000", 0, "in"], why: "the outer layer is placed before its children's, so its backdrop is under the inner one"},
 	]}
 
+	"a fixed element whose conversion fails leaves no hole among the layers": {suite: "android", steps: [
+		{call: "android.layersAfterFault", args: [#"<p>page</p><div class="boom">x</div><div class="ok">y</div>"#, ".boom, .ok { position: fixed; inset: 0 }"], expect: {count: 2, holes: 0, whats: ["compile error: boom"]}, why: "the page and the second layer; the failed one's slot is given up and the fault is reported"},
+	]}
+
 	"a stylesheet's leading @imports are inlined where they stood, by file, inside the shell directory": {suite: "android", steps: [
 		{call: "android.inlined", args: ["screens/a.css", {
 			"screens/a.css": "@charset \"utf-8\";\n@layer base;\n/* @import \"commented.css\"; */\n@import url(\"shared/strip.css\");\n@import 'b.css';\n.a { color: red }\n@import 'late.css';\n.b::after { content: \"@import 'late.css';\" }\n",
@@ -306,6 +310,7 @@ cases: {
 			"commented.css": "SHOULD NOT APPEAR",
 		}], expect: "@charset \"utf-8\";\n@layer base;\n/* @import \"commented.css\"; */\n.strip { color: blue }\n@import \"../deep.css\";\n.b { color: green }\n.a { color: red }\n@import 'late.css';\n.b::after { content: \"@import 'late.css';\" }\n", why: "each leading import sits where it was, relative to the importing file, after @charset, @layer and comments; one after a rule is invalid CSS, and so is one in a string: left. An import inside an imported sheet follows the imported sheet's own leading run: here after a rule, so left"},
 		{call: "android.inlined", args: ["x.css", {"x.css": "@import \"y.css\"; .x{}", "y.css": "@import \"x.css\"; .y{}"}], expect: "@import \"x.css\"; .y{} .x{}", why: "a cycle is cut at the sheet being inlined: that import stays, and is reported"},
+		{call: "android.inlined", args: ["u.css", {"u.css": "@IMPORT \"b.css\";.u{}", "b.css": ".b{}"}], expect: ".b{}.u{}", why: "at-rule names are not case sensitive"},
 		{call: "android.inlined", args: ["n.css", {"n.css": "@import \"y.css\";.n{}", "y.css": "@import \"z.css\";.y{}", "z.css": ".z{}"}], expect: ".z{}.y{}.n{}", why: "an imported sheet's own leading imports are inlined too"},
 		{call: "android.inlined", args: ["screens/p.css", {"screens/p.css": "@import url(\"shared/s.css\");.p{}", "shared/s.css": ".s{}"}], expect: ".s{}.p{}", why: "a screen's sheet is injected as a style on the web, so its relative import is also tried from the shell directory"},
 		{call: "android.inlined", args: ["s/x.css", {"s/x.css": "@import \"../../../out.css\"; @import \"/etc/p.css\"; @import url(https://e.com/a.css); @import \"gone.css\"; @import \"/shell/s/z.css\"; @import \"y.css\" screen; @import \"s/z.css\";", "s/z.css": ".z{}", "out.css": "OUT"}], expect: "@import \"../../../out.css\"; @import \"/etc/p.css\"; @import url(https://e.com/a.css); @import \"gone.css\"; .z{} @import \"y.css\" screen; @import \"s/z.css\";", why: "outside the shell directory, another origin, a missing file: left, so reported; /shell/ is the root; one with a condition ends the run"},

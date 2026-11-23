@@ -346,3 +346,12 @@ export function held(input, hz, moves) {
 
 /** A stylesheet with its @imports inlined from the files given (path under the shell directory: text), as bundle.ts does. */
 export const inlined = (file, files) => inlineImports(files[file], file, (path) => files[path] ?? null);
+
+/** A fullscreen page whose `.boom` element throws when the compiler reads its children: how many layers came out, none a hole, and what was reported. */
+export function layersAfterFault(body, css) {
+  const { document } = pageOf(body, undefined, true);
+  Object.defineProperty(document.querySelector(".boom"), "childNodes", { get() { throw new Error("boom"); } });
+  const { card, unsupported } = compile(document, { sheets: asSheets(css), width: 411 });
+  const items = card.states[0].div.items;
+  return { count: items.length, holes: items.filter((d) => !d || !d.type).length, whats: unsupported.map((u) => u.what) };
+}

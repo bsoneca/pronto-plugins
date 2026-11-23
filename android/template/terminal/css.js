@@ -70,7 +70,7 @@ export function inlineImports(text, file, read, chain) {
     lead.lastIndex = at;
     const m = lead.exec(text);
     if (!m) break;
-    out += m[0].startsWith("@import") ? replace(...m) : m[0];
+    out += /^@import/i.test(m[0]) ? replace(...m) : m[0];
     at = lead.lastIndex;
   }
   return out + text.slice(at);
