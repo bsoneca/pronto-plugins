@@ -1415,15 +1415,18 @@ scenarios: look: {flags: ["seen"], production: true, steps: [{by: "tester", open
 cases: u1: {flags: ["feat", "waived", "plain"], steps: [{call: "x"}]}
 ' | save $"($pc)/tests/unit/pc.cue"
 let waiver = "owner, 2026-11-12: no live page shows it"
-def pcspec [waived: bool, plain_waived: bool] {
+def pcspec [waived: bool, plain_waived: bool, acc: bool = false, grants: string = ""] {
 	let w = if $waived { $", liveWaived: \"($waiver)\"" } else { "" }
+	let wa = if $acc { ", accounts: [\"u1\"]" } else { "" }
+	let gr = if $grants != "" { $"flags: grants: {default: \"($grants)\", local: \"($grants)\"}\n" } else { "" }
 	let pw = if $plain_waived { ", liveWaived: \"owner, 2026-11-12: plain\"" } else { "" }
 	$"package pc
 flags: feat: {default: false, local: true}
-flags: waived: {default: false, local: true($w)}
+flags: waived: {default: ($acc), local: true($w)($wa)}
 flags: seen: {default: false, local: true}
 flags: plain: {default: false, local: true($pw)}
-flagsLive: {dir: \"flagstore\", url: \"https://pc.example\"}
+flags: bare: {default: false, local: true}
+($gr)flagsLive: {dir: \"flagstore\", url: \"https://pc.example\"}
 flagsCases: {live: \"echo '✓ look 1s: pc'\"}
 " | save -f $"($pc)/flags_spec.cue"
 }
@@ -1444,8 +1447,14 @@ let pc0 = (pcgen)
 let pa = (pclive [push $pc --flip feat])
 let pe = ($pa.stderr | flat)
 check ($pa.exit_code != 0 and ($pe | str contains "feat") and ($pe | str contains "production check") and ($pe | str contains "production: true") and ($pe | str contains "liveWaived") and (pcgen) == $pc0 and (pcflag feat) == false) "production check: a flag with unit cases only is refused, naming the flag and both ways out; nothing written"
-let pu = (pclive [push $pc --flip feat --untested "no cases wanted"])
-check ($pu.exit_code != 0 and ($pu.stderr | flat | str contains "--untested does not waive") and (pcgen) == $pc0 and (pcflag feat) == false) "production check: --untested does not stand in for it"
+# --untested passes the no-cases check for a flag with no cases at all, and the production check still refuses it.
+let pu = (pclive [push $pc --flip bare --untested "x"])
+check ($pu.exit_code != 0 and ($pu.stderr | flat | str contains "bare") and ($pu.stderr | flat | str contains "--untested does not waive") and (pcgen) == $pc0 and (pcflag bare) == false) "production check: --untested passes the no-cases check but not this one; nothing written"
+# A dry run asks the same, and writes nothing.
+let pdr = (pclive [push $pc --flip feat --dry-run])
+check ($pdr.exit_code != 0 and ($pdr.stderr | flat | str contains "production check") and (pcgen) == $pc0) "production check: a dry run refuses what the real run refuses"
+let pdr2 = (pclive [push $pc --flip seen --dry-run])
+check ($pdr2.exit_code == 0 and ($pdr2.stdout | str contains "dry run: nothing written") and (pcgen) == $pc0) "production check: a dry run of a flag with a production scenario goes"
 
 # (b) the same flag with the owner's waiver: pushed, the waiver in the journal note and on the version.
 pcspec true false
@@ -1456,6 +1465,16 @@ check ((glob $"($pcstore)/versions/*.meta.json" | each {|f| open --raw $f | from
 # (c) a production scenario naming the flag: pushed, its case run on production.
 let pcc = (pclive [push $pc --flip seen])
 check ($pcc.exit_code == 0 and (pcflag seen) == true and (pcj-last).cases == "passed") "production check: a flag with a production scenario is pushed and its case passes"
+
+# A data flag is no off-to-on flip: a string changed with --untested is not asked; nor a flag already on that gains accounts.
+pcspec false false false "a"
+let pg0 = (pclive [push $pc --flip grants=a --untested "data"])
+pcspec false false false "b"
+let pg = (pclive [push $pc --flip grants=b --untested "data"])
+check ($pg0.exit_code == 0 and $pg.exit_code == 0 and (pcflag grants) == "b") "production check: a string flag, new or changed, is not asked for a live check"
+pcspec false false true "b"
+let pac = (pclive [push $pc --sync waived])
+check ($pac.exit_code == 0 and (pcflag waived) == true) "production check: a flag already on that gains accounts is not asked"
 
 # (d) turning a flag off is never refused, waiver or none: plain goes on under a waiver, then off with the waiver gone from the spec.
 pcspec true true

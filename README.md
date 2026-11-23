@@ -669,9 +669,11 @@ PRONTO-284). `pronto-flags push <app-dir> --flip <flag>` (a push is a merge over
 
 1. reads the live object and finds the flags whose default value moves; a flag
    with no cases is refused, or pushed with `--untested "<why>"`, loudly; a flag
-   that goes on with no `production` scenario that needs no sign-in is refused
-   too, unless the spec's `liveWaived` holds the owner's words waiving it
-   (PRONTO-439; `--untested` does not waive it, and the waiver goes into the
+   goes from off to on (a bool default false, or new, now true) with no `production`
+   scenario that needs no sign-in is refused too, a dry run included, unless the
+   flag's spec (`flags_spec.cue`, or the source it is generated from) holds the
+   owner's words in `liveWaived` (PRONTO-439; `--untested` does not waive it, a
+   data flag or a flag already on is not asked, and the waiver goes into the
    version's note);
 2. refuses, with nothing written, a flip whose flag has `production` scenarios
    while the app lacks `flagsLive.url` or `flagsCases.live`;
