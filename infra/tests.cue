@@ -586,6 +586,7 @@ _retire: #Plan & {
 			runJobs: "old-app-initdb": phase:      "hold"
 			schedulerJobs: "old-app-clock": phase: "hold"
 			sqlInstances: "old-app-db": {phase: "hold", databaseVersion: "POSTGRES_18", tier: "db-f1-micro"}
+			buckets: {"old-app-blobs": {phase: "hold", location: "US"}, "older-app-blobs": {phase: "drop", location: "US"}}
 		}
 	}
 }
@@ -595,7 +596,16 @@ retireHoldImports: _retireIms & {
 	"google_cloud_run_v2_job.example_project_123_old_app_initdb":   "projects/example-project-123/locations/us-central1/jobs/old-app-initdb"
 	"google_cloud_scheduler_job.example_project_123_old_app_clock": "projects/example-project-123/locations/us-central1/jobs/old-app-clock"
 	"google_sql_database_instance.example_project_123_old_app_db":  "projects/example-project-123/instances/old-app-db"
+	"google_storage_bucket.old_app_blobs":                          "example-project-123/old-app-blobs"
 }
+// A held bucket is emptied by the drop's destroy, and nothing but force_destroy is configured to change.
+retireHoldBucket: [
+	_retire.tofu.resource.google_storage_bucket.old_app_blobs.force_destroy,
+	_retire.tofu.resource.google_storage_bucket.old_app_blobs.location,
+	len(_retire.tofu.resource.google_storage_bucket.old_app_blobs.lifecycle.ignore_changes) > 5,
+] & [true, "US", true]
+retireDroppedBucketLeavesNothing: [for a, _ in _retireIms if strings.Contains(a, "older_app_blobs") {a}] & []
+retireBucketKeptRefused: _ok & {buckets: "old-blobs": {location: "US", uniformAccess: true, publicPrevention: "enforced"}, retire: buckets: "old-blobs": {phase: "hold", location: "US"}} & matchN(0, [#Project])
 retireDropsLeaveNothing: [for a, _ in _retireIms if strings.Contains(a, "older_app") {a}] & []
 retireHoldUnprotects: [
 	_retire.tofu.resource.google_cloud_run_v2_service.example_project_123_old_app.deletion_protection,

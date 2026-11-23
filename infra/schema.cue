@@ -136,10 +136,15 @@ import "list"
 		// A Cloud SQL instance: deleting it deletes its automated backups too, so its data is dumped
 		// somewhere else first. The provider requires its version and tier, which hold never changes.
 		sqlInstances: [Name=string]: #Retiring & {databaseVersion: =~"^POSTGRES_[0-9]+$", tier: string}
+		// A Cloud Storage bucket: destroying it deletes every object in it (held, it is imported with
+		// force_destroy on), so what it holds is gone for good: the owner's call, made before it is dropped.
+		// Its location is the bucket's own (`US`, `us-central1`), which hold never changes.
+		buckets: [Name=string]: #Retiring & {location: string}
 	}
 	for nm, _ in retire.runServices if runServices[nm] != _|_ {"run service \(nm) is both kept and retired": _|_}
 	for nm, _ in retire.runJobs if runJobs[nm] != _|_ {"run job \(nm) is both kept and retired": _|_}
 	for nm, _ in retire.sqlInstances if sqlBackups[nm] != _|_ {"sql instance \(nm) is both kept (sqlBackups) and retired": _|_}
+	for nm, _ in retire.buckets if buckets[nm] != _|_ {"bucket \(nm) is both kept and retired": _|_}
 }
 
 // One resource being retired (#Project.retire): held, then dropped.
