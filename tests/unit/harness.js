@@ -63,6 +63,10 @@ export async function unmarked() {
   } finally { await Deno.remove(blocker); }
 }
 
+// What a read-only production page's request becomes (scenarios/gate.ts's sentOf).
+export { sentOf };
+import { sentOf } from "../../harness/files/tests/scenarios/gate.ts";
+
 // One step of a scenario held to the scenarios' schema (harness/files/tests/scenarios/schema.cue), with a gesture
 // `play: {play: string, refused?: true}` declared as an app declares its own: the schema and the scenario copied to a
 // fresh folder and evaluated by the cue on PATH (CUE, where set). The first line of what cue refused, or null.

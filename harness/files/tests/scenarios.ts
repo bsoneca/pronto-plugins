@@ -15,11 +15,11 @@
 //     app adds to (a browser's first script, a page's load, a sign-up, a payment, a failure's
 //     report). Its default export is a `Hooks`; it imports nothing of this file but its types.
 import { select, sha } from "./scenarios/select.ts";
-import { devices, request, type APIRequestContext, type BrowserContext, type CDPSession, type Locator, type Page } from "npm:playwright@1.61.1";
+import { devices, request, type APIRequestContext, type BrowserContext, type CDPSession, type Locator, type Page, type Route } from "npm:playwright@1.61.1";
 import { launch as launchBrowser } from "./browser.ts";
 import { gate, slow, slowCpu, slowDown } from "./slow.ts";
 import { early } from "./scenarios/early.ts";
-import { stepGate, type Gated } from "./scenarios/gate.ts";
+import { sentOf, stepGate, type Gated } from "./scenarios/gate.ts";
 import { fileFlake as file } from "./scenarios/flakes.ts";
 import { closing, settleRun, writeVerdict } from "./scenarios/verdict.ts";
 import { loadScenarios, type ActorDef, type Scenario, type Step } from "./scenarios/load.ts";
@@ -165,6 +165,12 @@ export class Run {
   onHere = new Set<string>();
   // {run}: one fresh id for the whole run, so its rows are told apart from another run's.
   id = crypto.randomUUID();
+  // A production page that signs in as no one reads only (PRONTO-419): its browser aborts every request that writes, and a
+  // refused call of the app's own /auth/ or /crud/ fails the scenario, since a page that needs a write to show its feature is no read.
+  // Held at hand too, so the gate finds a page that writes before a flip does.
+  get readOnly() { return this.s.production === true && !this.s.steps.some((x) => "signIn" in x); }
+  wrote() { return `the page wrote, which a production scenario that signs in as no one never does: ${[...new Set(this.refused)].join(", ")} was aborted`; }
+  refused: string[] = [];
   // The app's address, and whether it is production: for the app's own steps.
   readonly url = URL_;
   readonly onProduction = onProduction;
@@ -241,6 +247,16 @@ export class Run {
     return this.stuck;
   }
 
+  // What a read-only production page may send: reads, and a flag's anonymous evaluation (#OfrepEvaluation). Any other request is aborted
+  // and logged; the app's own /auth/ and /crud/ among them fail the scenario, and a beacon (analytics, errors, any other path or origin) is aborted and ignored.
+  async guard(route: Route) {
+    const r = route.request(), u = new URL(r.url()), sent = sentOf(r.method(), u.origin === new URL(URL_).origin, u.pathname);
+    if (sent === "pass") return route.continue().catch(() => {});
+    console.log(`  ${this.s.id}: aborted ${r.method()} ${u.origin}${u.pathname}`);
+    if (sent === "refuse") this.refused.push(`${r.method()} ${u.pathname}`);
+    await route.abort("blockedbyclient").catch(() => {});
+  }
+
   async actor(key: string): Promise<Actor> {
     const known = this.actors.get(key);
     if (known) return known;
@@ -251,8 +267,14 @@ export class Run {
     if (!screen) throw new Error(`${key}'s device ${def.device} is none of the app's screens`);
     const shape = screen.device ? devices[screen.device] : { viewport: screen.viewport };
     if (!shape) throw new Error(`Playwright knows no device ${screen.device}`);
-    const ctx = await (await liveBrowser()).newContext({ ignoreHTTPSErrors: true, ...shape, locale: def.locale ?? spec.locale });
+    // A read-only production page starts with nothing (a fresh context carries no cookie or storage) and no service worker, which could serve a shell cached by another visit.
+    const ctx = await (await liveBrowser()).newContext({ ignoreHTTPSErrors: true, ...shape, locale: def.locale ?? spec.locale, ...(this.readOnly ? { serviceWorkers: "block" as const } : {}) });
     await hooks.context?.(ctx, def);
+    // Registered after the app's own routes, which Playwright asks last-registered first, so none of them answers a write before the guard sees it.
+    if (this.readOnly) {
+      await ctx.route("**/*", (route) => this.guard(route));
+      await ctx.routeWebSocket(/.*/, (ws) => { this.refused.push(`WS ${new URL(ws.url()).pathname}`); void ws.close(); });
+    }
     const a: Actor = { key, name: def.name, def, ctx, page: null as unknown as Page, cdp: null as unknown as CDPSession, auth: "", consoles: [], trail: [], asked: [], hot: false, releases: new Map(), data: {} };
     await this.tab(a);
     this.actors.set(key, a);
@@ -933,12 +955,13 @@ export class Run {
       const at = Date.now();
       try {
         await Promise.race([this.step(st), this.stalled]);
+        if (this.refused.length) throw new Error(this.wrote());
         took.push(`  step ${i + 1} at ${((at - t0) / 1000).toFixed(1)}s (${new Date(at).toISOString().slice(11, 23)}) took ${((Date.now() - at) / 1000).toFixed(1)}s: ${JSON.stringify(st).slice(0, 120)}`);
       } catch (e) {
         clearInterval(this.beat);
         const { why, ...what } = st;
         const stuck = await this.wedged();
-        const lines = [`✗ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s) at step ${i + 1}${why ? ` (${why})` : ""}: ${JSON.stringify(what)}`, `  ${(e as Error).message.split("\n")[0]}`,
+        const lines = [`✗ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s) at step ${i + 1}${why ? ` (${why})` : ""}: ${JSON.stringify(what)}`, `  ${(e as Error).message.split("\n")[0]}`, ...(this.refused.length ? [`  ${this.wrote()}`] : []),
           // Why an action never happened, from Playwright's call log: what covered the element, or how it was
           // not yet clickable (a flake that said only "Timeout" hid its cause, PRONTO-122).
           ...[...new Set((e as Error).message.split("\n").filter((l) => /intercepts pointer events|not visible|not stable|not enabled|detached/.test(l)).map((l) => l.trim()))].slice(-3).map((l) => `  ${l}`),
@@ -967,10 +990,13 @@ export class Run {
       }
     }
     clearInterval(this.beat);
-    const off = (this.skipped.size ? `; steps behind ${[...this.skipped].sort().join(", ")} skipped, off here` : "") +
+    // A page's boot may write after the last step passed: let each page go quiet, then ask again, and again once closed (a page's last words).
+    if (this.readOnly) for (const a of this.actors.values()) await a.page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+    const off =(this.skipped.size ? `; steps behind ${[...this.skipped].sort().join(", ")} skipped, off here` : "") +
       (this.onHere.size ? `; steps for ${[...this.onHere].sort().join(", ")} off skipped, on here` : "");
     // Passed only once its contexts closed: a page that stops answering after its last step fails it, named.
     const { open, rejected } = await this.close();
+    if (this.refused.length) return `✗ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): every step passed, but ${this.wrote()}`;
     // A page that crashed or went silent after the last step's answer fails it too: a crash is never a pass.
     if (this.crash || this.silent.size) return `✗ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): every step passed, but ${this.stuck}`;
     if (open.length) return `✗ ${this.s.id} (${Math.round((Date.now() - t0) / 1000)}s): every step passed, but ${open.join(", ")}'s context did not close in 30 s (a page that stopped answering)`;

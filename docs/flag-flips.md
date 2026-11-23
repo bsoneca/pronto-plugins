@@ -132,7 +132,11 @@ Scenarios that run on production must never touch real players, real money, or w
   answering `"value": true`). Since nothing pays, Stripe
   (live) charges nothing.
 - **No sign-in.** A flip runs only the `production` scenarios with no `signIn` step, so no
-  account is used at all; one that signs in (written for the tester's stage) is listed, not run.
+  account is used at all; one that signs in (written for the tester's stage) is listed, not run. It may
+  open a page and only look (`open`, `see`, `hidden`, `attached`, `count`, `text`, `attr`, `attrs`):
+  its browser starts with nothing and no service worker, aborts every request that writes (a flag's
+  anonymous evaluation excepted), and the run fails on a refused `/auth/` or `/crud/` call, so a page
+  that needs a guest to show its feature fails instead of writing one. Beacons are aborted and ignored.
 - **The runner.** The runner refuses any scenario not marked `production` against the host that
   `flagsLive.url` names.
 

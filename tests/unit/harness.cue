@@ -396,6 +396,30 @@ cases: "a production scenario may evaluate a flag by POST and make no other writ
 	]
 }
 
+// PRONTO-419: a production scenario that signs in as no one may open a page and look at it; the runner's browser aborts what it writes.
+cases: "a production scenario that signs in as no one may open a page and only look at it": {
+	suite: "harness"
+	steps: [
+		{call: "harness.productionRefused", args: [[{by: "a", open: "/"}, {by: "a", attached: "#army-pick"}, {by: "a", see: "main"}, {by: "a", hidden: ".gone"}, {by: "a", count: {of: ".army", is: 11}}, {by: "a", text: {of: "h1", has: "x"}}, {by: "a", attr: {of: "a", name: "href", is: "/"}}, {by: "a", attrs: {of: "a", name: "href", are: ["/"]}}]], expect: null, why: "open and the looks"},
+		{call: "harness.productionRefused", args: [[{by: "a", open: "/"}, {by: "a", click: "#army-pick"}]], matches: "_page", why: "a click is a gesture"},
+		{call: "harness.productionRefused", args: [[{by: "a", fill: {in: "input", value: "x"}}]], matches: "_page", why: "so is a fill"},
+		{call: "harness.productionRefused", args: [[{by: "a", signUp: true}]], matches: "_barred", why: "signing up is still barred"},
+	]
+}
+cases: "a read-only production page's requests: reads pass, a write to /auth or /crud refuses the run, other writes are aborted and ignored": {
+	suite: "harness"
+	steps: [
+		{call: "harness.sentOf", args: ["GET", true, "/crud/army_catalog"], expect: "pass"},
+		{call: "harness.sentOf", args: ["POST", true, "/ofrep/v1/evaluate/flags/army_catalog_live"], expect: "pass", why: "a flag's anonymous evaluation is a read"},
+		{call: "harness.sentOf", args: ["POST", true, "/ofrep/v1/evaluate/flags/f/../x"], expect: "abort"},
+		{call: "harness.sentOf", args: ["POST", false, "/ofrep/v1/evaluate/flags/f"], expect: "abort", why: "only the app's own door"},
+		{call: "harness.sentOf", args: ["POST", true, "/auth/guest"], expect: "refuse", why: "a page that boots a guest is no read"},
+		{call: "harness.sentOf", args: ["PATCH", true, "/crud/player"], expect: "refuse"},
+		{call: "harness.sentOf", args: ["POST", false, "/crud/player"], expect: "abort", why: "another origin's /crud is not the app's"},
+		{call: "harness.sentOf", args: ["POST", true, "/beacon/analytics"], expect: "abort", why: "a beacon is aborted, never a failure"},
+	]
+}
+
 // PRONTO-892 (Codex on bsoneca/pronto#1520): the browser's and the contexts' closes keep a finished close, a rejected one and a timeout apart,
 // and the record, the verdict and the summary share one failed set.
 cases: "a close that finished, one Playwright rejected and one that never answers are three different results": {
