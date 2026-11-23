@@ -262,6 +262,8 @@ def main [] {
 	test_the_registry_restarts_after_its_collection_when_it_caches_blobs
 	test_the_prune_outcome_is_recorded_in_the_release_configmap
 	test_a_database_image_without_pg_major_is_an_explicit_error
+	test_database_base
+	test_the_clusters_spec_does_not_move_with_the_databases_files
 	print "\nAll node release tests passed."
 }
 
@@ -1716,5 +1718,55 @@ def test_a_database_image_without_pg_major_is_an_explicit_error [] {
 	let r = (in-world $w -c $"use ($engine_dir | path join render.nu); render database-tag '127.0.0.1:1' aprende-database ($digest)")
 	assert ($r.exit_code != 0)
 	assert (has $r.stderr "has no PG_MAJOR in its environment") $r.stderr
+	rm -rf $w.dir
+}
+
+def test_database_base [] {
+	print "test the primary runs the database's base image only where the stage copies files onto a pinned base..."
+	let base = $"bonitao/mecha-database:0.22.0@sha256:('a' | fill --character a --width 64)"
+	let dir = (mktemp -d -t node-dbbase.XXXXXX | str trim)
+	let stage = "FROM libraries_mecha-database-image AS database
+ARG BAYT_DIR
+WORKDIR /monorepo/${BAYT_DIR}
+COPY services/database/migrations/000_extensions.sql services/database/migrations/680_flags.sql \\
+  services/database/migrations/685_army.sql /docker-entrypoint-initdb.d/
+COPY --from=libraries_mecha-database-image /usr/share/mecha/initdb/899_role_passwords.sh /docker-entrypoint-initdb.d/899_role_passwords.sh
+ENTRYPOINT [\"docker-entrypoint.sh\",\"postgres\",\"-c\",\"wal_level=logical\"]
+HEALTHCHECK --interval=1s CMD [\"pg_isready\"]
+"
+	let tail = "\nFROM busybox:musl AS database_ctxs\nRUN touch /x\n"
+	let compose = {|ctx| {services: {database: {build: {context: $dir, dockerfile: "Dockerfile.database", target: "database", additional_contexts: {libraries_mecha-database-image: $ctx}}}}} | to yaml }
+	let with = {|text, ctx| $"($text)($tail)" | save -f ($dir | path join Dockerfile.database); do $compose $ctx | render database-base }
+	# A stage that only copies files onto the base: the base is the primary's, whatever it copies.
+	assert equal (do $with $stage $"docker-image://($base)") {ref: $base, name: "libraries_mecha-database-image"}
+	# Anything that could add an extension the full image has and the base lacks keeps the primary on the full image.
+	assert ((do $with $"($stage)RUN apt-get install -y postgresql-16-pgvector\n" $"docker-image://($base)") | is-empty) "a RUN"
+	assert ((do $with $"($stage)ADD https://example.com/ext.so /usr/lib/\n" $"docker-image://($base)") | is-empty) "an ADD"
+	assert ((do $with $"($stage)COPY --from=database_ctxs /x /x\n" $"docker-image://($base)") | is-empty) "a copy from another stage"
+	assert ((do $with $stage "docker-image://bonitao/mecha-database:0.22.0") | is-empty) "a base not pinned by digest"
+	assert ((do $with $"($stage)COPY ext/vector.so /usr/lib/postgresql/17/lib/\n" $"docker-image://($base)") | is-empty) "a file into postgres's own folders"
+	assert ((do $with $"($stage)ENV LD_LIBRARY_PATH=/opt/lib\n" $"docker-image://($base)") | is-empty) "an ENV"
+	rm -rf $dir
+}
+
+def test_the_clusters_spec_does_not_move_with_the_databases_files [] {
+	print "test the Cluster's rendered spec is the same for any release of the database's files, and still moves with a real database change..."
+	let w = (sandbox)
+	let pushed = {|db: string, base: any| (["database" "crud" "electric" "auth" "caddy" "migrate"] | each {|s| [$s {tag: (if $s == "database" { "17" } else { "release" }), digest: ("sha256:" + ($db | fill -c $db -w 64))}] } | into record) | if ($base | is-empty) { $in } else { $in | insert "database-base" {tag: "17", digest: ("sha256:" + ($base | fill -c $base -w 64))} } }
+	let render = {|p| let r = (in-world $w -c (script $w $"(inputs $w) render objects $app_info.cue_path \(render release-data $app_info.dir $compose $facts ($p | to nuon)\) '' | to json --raw")); assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"; $r.stdout | from json }
+	let cluster = {|objs| $objs | where kind == Cluster | first }
+	let job = {|objs| $objs | where kind == Job and metadata.name == "aprende-initdb" | first | get spec.template.spec.containers.0.image }
+	let one = (do $render (do $pushed "a" "c"))
+	let two = (do $render (do $pushed "b" "c"))
+	# two releases of the app, whose database files differ: the full image's digest moves, the Cluster does not
+	assert equal (do $cluster $one) (do $cluster $two) "the Cluster's spec differs between two releases of the database's files"
+	assert ((do $cluster $one | get spec.imageName) | str contains $"aprende-database-base:17@sha256:('c' | fill -c c -w 64)") (do $cluster $one | get spec.imageName)
+	assert ((do $job $one) != (do $job $two)) "the schema Job must run the full image of its own release"
+	# a moved base is a real database change: the Cluster moves
+	let moved = (do $render (do $pushed "a" "d"))
+	assert ((do $cluster $moved | get spec.imageName) != (do $cluster $one | get spec.imageName)) "a moved base must change the Cluster"
+	# no base (a stage that adds something): the Cluster runs the full image, as upstream renders it
+	let full = (do $render (do $pushed "a" null))
+	assert ((do $cluster $full | get spec.imageName) | str contains $"aprende-database:17@sha256:('a' | fill -c a -w 64)") (do $cluster $full | get spec.imageName)
 	rm -rf $w.dir
 }
