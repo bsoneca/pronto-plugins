@@ -19,7 +19,7 @@ import { devices, request, type APIRequestContext, type BrowserContext, type CDP
 import { launch as launchBrowser } from "./browser.ts";
 import { gate, slow, slowCpu, slowDown } from "./slow.ts";
 import { early } from "./scenarios/early.ts";
-import { sentOf, stepGate, type Gated } from "./scenarios/gate.ts";
+import { openHref, sentOf, stepGate, type Gated } from "./scenarios/gate.ts";
 import { fileFlake as file } from "./scenarios/flakes.ts";
 import { closing, settleRun, writeVerdict } from "./scenarios/verdict.ts";
 import { loadScenarios, type ActorDef, type Scenario, type Step } from "./scenarios/load.ts";
@@ -468,14 +468,16 @@ export class Run {
     // A gesture on a page served first waits for the shell to take it over.
     if (spec.loaded.adopted && gestures.some((k) => k in st)) await this.adopted(p, t);
     // Actions.
-    if ("open" in st) { const to = await this.fill(st.open); await p.goto(/^https?:/.test(to) ? to : new URL(to, URL_).href); return this.loaded(p); }
+    if ("open" in st) {
+      await p.goto(openHref(await this.fill(st.open), URL_, onProduction)); return this.loaded(p);
+    }
     if ("reload" in st) { await p.reload(); return this.loaded(p); }
     if ("revisit" in st) {
       // The tab closed, and the app opened again in a new one: the tab's sessionStorage goes with it.
       const to = await this.fill(st.revisit);
       await p.close();
       await this.tab(a);
-      await a.page.goto(/^https?:/.test(to) ? to : new URL(to, URL_).href);
+      await a.page.goto(openHref(to, URL_, onProduction));
       return this.loaded(a.page);
     }
     if ("rush" in st) {
@@ -494,7 +496,7 @@ export class Run {
       }
       let held = "";
       try {
-        await p.goto(/^https?:/.test(to) ? to : new URL(to, URL_).href, { waitUntil: "commit" });
+        await p.goto(openHref(to, URL_, onProduction), { waitUntil: "commit" });
         if (st.rush.drawn) await (await sel(st.rush.drawn)).waitFor({ state: "attached", timeout: ms });
         await (await sel(st.rush.click)).click({ timeout: ms });
         held = await p.evaluate(() => (window as unknown as { __fp?: { pressed: string } }).__fp?.pressed ?? "");
