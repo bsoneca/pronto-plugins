@@ -38,3 +38,13 @@ export function sentOf(method: string, own: boolean, pathname: string): Sent {
   if (method === "POST" && own && /^\/ofrep\/v1\/evaluate\/flags\/[A-Za-z0-9_-]+$/.test(pathname)) return "pass";
   return own && /^\/(auth|crud)\//.test(pathname) ? "refuse" : "abort";
 }
+
+// The address an `open` step takes the browser to: a path of the app or a web address, never another scheme, and on
+// production only the app's own origin, so a scenario cannot point the runner's browser at a local file or another site
+// (Codex security P1 on bsoneca/pronto#1722). Every step that navigates by an address takes it through here: `open`, `revisit`, `rush`.
+export function openHref(to: string, base: string, production: boolean): string {
+  const href = new URL(to, base);
+  if (href.protocol !== "http:" && href.protocol !== "https:") throw new Error(`open: ${to} is not an http(s) address`);
+  if (production && href.origin !== new URL(base).origin) throw new Error(`open: ${to} is not on the app's origin, the only one a production scenario may open`);
+  return href.href;
+}

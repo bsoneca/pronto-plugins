@@ -375,6 +375,19 @@ cases: "a production step of the flag a flip tests runs and asks nothing": {
 	]
 }
 
+// An `open` step's address: a path or a web address of the app, nothing else, and on production only the app's origin.
+cases: "an open step takes a path or a web address, never a file, and on production only the app's origin": {
+	suite: "harness"
+	steps: [
+		{call: "harness.openHref", args: ["/play", "http://localhost:3000/", false], expect: "http://localhost:3000/play"},
+		{call: "harness.openHref", args: ["https://other.example/x", "http://localhost:3000/", false], expect: "https://other.example/x", why: "at hand a link to another origin is a page like any"},
+		{call: "harness.openHref", args: ["/play", "https://app.example/", true], expect: "https://app.example/play"},
+		{call: "harness.openHref", args: ["file:///etc/hosts", "http://localhost:3000/", false], throws: "not an http", why: "never the runner's own files"},
+		{call: "harness.openHref", args: ["https://other.example/x", "https://app.example/", true], throws: "only one a production scenario"},
+		{call: "harness.openHref", args: ["//other.example/x", "https://app.example/", true], throws: "only one a production scenario", why: "a protocol-relative address is another origin too"},
+	]
+}
+
 // A step's second flag (`with`, PRONTO-1688): it runs only where both flags are on, and each is asked in turn.
 cases: "a step with a flag and a with flag runs only where both are on": {
 	suite: "harness"
