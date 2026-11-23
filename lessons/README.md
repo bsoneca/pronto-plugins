@@ -1,7 +1,7 @@
 # pronto-lessons
 
 Guided lessons for any app (PRONTO-1454; design in pronto's `docs/designs/PRONTO-1454.md`). L1 is the course
-schema and the step engine; L2 (below) is the database half and the emitter; the installer comes in L3.
+schema and the step engine; L2 (below) is the database half and the emitter; L3 ("Installing") is the installer.
 
 ## Shape (`schema.cue`, package `lessons`)
 
@@ -77,7 +77,57 @@ emitter's outputs), `lessons.sql` (the functions, a raw migration replayed at ev
   a locale is `^[a-z]{2}(-[A-Z]{2})?$`. A catalogue must be laid out as JSON.stringify(_, null, 2) does (an empty `{}` is fine); any other
   layout is an error, never a second copy of an entry. `tests/unit/lessons_db.js`'s `rewrite` is a copy in JS of `lessons.nu`'s `catalogue`
   (nu is not what the unit cases run): change both together.
-- **The migration's name** `_lessonsMigration: "lessons_01"` in `lessons_spec.cue` is a default; L3's installer stamps the app's own, after its latest.
+- **The migration's name** `_lessonsMigration: "lessons_01"` in `lessons_spec.cue` is a default; the installer stamps the app's own (L3).
 
 Cases: `tests/unit/lessons.cue` (suite `lessons`), the database on PGlite (`tests/unit/lessons_db.js`) over
 `tests/unit/fixtures/lessons_course.cue`.
+
+## L3: Installing, and how an app opts in (PRONTO-1456)
+
+```sh
+<this repo>/bin/pronto-lessons <app-dir> [<module-path>] [--migration <name>]   # lessons/lessons.js unless named
+./saytw generate && ./saytw lint
+```
+
+The app must already hold pronto-flags (`flags_plugin.cue`, from `bin/pronto-flags <app-dir>`): a course names a flag and the
+database refuses a chapter whose flag is off for the account, so the installer refuses an app without it, naming
+`bin/pronto-flags`, and writes nothing (every refusal comes before the first write). A re-run changes nothing. The module path
+is a `.js`, `.mjs` or `.ts` inside the app and never another file the installer writes; a file already there that is not
+pronto-lessons' (no header) is never overwritten.
+
+| Path in the app | |
+| --- | --- |
+| `lessons/lessons.js`, or the path named | the page's step engine (`createLesson`), with a header naming the pronto-plugins commit it was generated from (`generated from bsoneca/pronto-plugins@<12 characters>`); regenerated |
+| `lessons_spec.js` beside it | the page's courses; a stub `export const courses = {}` at install (written once), then generate's |
+| `lessons_plugin.cue`, `lessons_schema.cue` | the `LessonProgress` entity, the plugin's pgroll migration, the emitter's outputs and the raw migrations' list; `schema.cue` as the app's, package renamed; regenerated |
+| `pronto/lessons.cue`, `lessons/lessons.nu` | the generate step: `lessons write` writes `lessons/lessons_spec.sql`, `lessons_spec.js` and the lines in `messages/<locale>.json` |
+| `lessons/lessons.sql` | the functions (L2's `lessons.sql`); regenerated |
+| `lessons/lessons_spec.sql` | `lessons.spec()`, written by generate from the courses |
+| `lessons_spec.cue` | written once, then the app's: `lessons: courses: {}`, `_lessonsMigration` and `_lessonsRawNames` |
+
+Nothing goes into `services/database/migrations/`: that folder is pronto generate's output. The two SQL files are **raw
+migrations the app declares**, `code: state: rawMigrations: [{name: <spec>, src: "lessons/lessons_spec.sql"}, {name: <fns>, src:
+"lessons/lessons.sql"}]`, which the release replays and the Dockerfiles copy. `lessons_plugin.cue` sets that field itself when no
+other CUE of the app does; two lists of one field cannot be unified, so an app that already lists its own `rawMigrations` adds
+`_lessonsRawMigrations` to that list (`list.Concat([[...its own], _lessonsRawMigrations])`), and the installer says so until it does.
+
+**The names** are stamped once into `lessons_spec.cue` and reused verbatim by every re-run, whatever the app adds later: the raw
+ones `<n>_lessons_spec.sql` and `<n+1>_lessons.sql`, n one more than the highest `name: "NNN_x.sql"` the app's CUE lists (pronto's
+`950_fixture.sql` aside), at that width (100 and 101 when it lists none); the pgroll migration `<m>_lessons`, m one more than the
+highest of the app's own pgroll names (`_xMigration: "NN_x"`, `migrations: "NN_x"`) at that width, a sequence of its own. When the
+app names no pgroll migration, `--migration <name>` gives it; a number that would need more digits than the width is refused.
+
+### How an app opts in
+
+1. Has pronto-flags, then adds the plugin with `bin/pronto-lessons <app-dir>` (and lists the raw migrations if it has its own list).
+2. Supplies the content: its courses in `lessons_spec.cue` (`lessons: courses: <id>: {...}`, held to `#Course`, each naming its flag), and
+   `./saytw generate`.
+3. Writes the board adapter for its page, `{start, legal, token, apply, render}` (the contract above), and calls
+   `createLesson({course, part, chapter, adapter, server})` with `courses` from `lessons_spec.js`.
+4. Defines the three SQL hooks in a raw migration of its own, named after the plugin's two, in schema `lessons_app`:
+   `price(who uuid) returns int`, `pay(who uuid, entry text, amount int) returns void`, `reward(who uuid, entry text, amount
+   int) returns int`; each `DROP FUNCTION IF EXISTS` then `CREATE FUNCTION`, then `REVOKE ALL ... FROM PUBLIC` again (a CREATE gives
+   PUBLIC its EXECUTE back).
+5. Flips the course's flag with pronto-flags when it is to go live; the plugin changes nothing a player sees before.
+
+Cases: `tests/unit/lessons.cue` (installer cases run `lessons/install.ts` on a temporary app, `tests/unit/lessons_install.js`).

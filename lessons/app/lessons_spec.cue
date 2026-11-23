@@ -9,6 +9,10 @@ lessons: courses: {}
 // before the last it applied, so name it after the app's latest.
 _lessonsMigration: "lessons_01"
 
+// The names of the two raw migrations (lessons_plugin.cue lists them in rawMigrations), stamped by the installer once, after the
+// app's own raw migrations, and never changed by it: a rename would leave the old name replayed beside the new.
+_lessonsRawNames: {spec: "__RAW_SPEC__", fns: "__RAW_FNS__"}
+
 // The LessonProgress table's identity, which pronto's mint stamps here: the rest of it is pronto-lessons'
 // (lessons_plugin.cue).
 code: state: entities: {
