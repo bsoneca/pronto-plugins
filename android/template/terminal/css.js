@@ -36,12 +36,15 @@ export function splitTop(s, sep) {
  * screen's sheet into the page as a style, so on the web its imports are the page's. An import that
  * names another origin, leaves the shell directory, repeats a sheet being inlined (a cycle), carries
  * a media, layer or supports condition, or names a missing file is left in place, which the compiler
- * reports as unsupported.
+ * reports as unsupported. Only the sheet's leading run of imports is read (see `lead`): an @import
+ * after another rule is invalid CSS, ignored by browsers, and stays reported.
  */
 export function inlineImports(text, file, read, chain) {
   const seen = (chain || []).concat(file);
   const dir = file.includes("/") ? file.slice(0, file.lastIndexOf("/") + 1) : "";
-  const re = /\/\*[\s\S]*?\*\/|@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s"']*))\s*\)|"([^"]*)"|'([^']*)')\s*;/gi;
+  // the sheet's leading run, the only place an @import is valid: white space, comments, @charset, @layer
+  // statements and the imports themselves; the first other rule ends it, and what follows is left as written
+  const lead = /\s+|\/\*[\s\S]*?\*\/|@charset\s+"[^"]*"\s*;|@layer\s+[^{};]*;|@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s"']*))\s*\)|"([^"]*)"|'([^']*)')\s*;/iy;
   const inside = (rel) => {
     const parts = [];
     for (const seg of rel.split("/")) {
@@ -49,7 +52,7 @@ export function inlineImports(text, file, read, chain) {
     }
     return parts.join("/") || null;
   };
-  return text.replace(re, (m, a, b, c, d, e) => {
+  const replace = (m, a, b, c, d, e) => {
     const href = [a, b, c, d, e].find((v) => v !== undefined);
     if (!href || /^([a-z][a-z0-9+.-]*:|\/\/)/i.test(href)) return m;
     const clean = href.split(/[?#]/)[0];
@@ -61,7 +64,16 @@ export function inlineImports(text, file, read, chain) {
       if (body !== null && body !== undefined) return inlineImports(body, path, read, seen);
     }
     return m;
-  });
+  };
+  let out = "", at = 0;
+  for (;;) {
+    lead.lastIndex = at;
+    const m = lead.exec(text);
+    if (!m) break;
+    out += m[0].startsWith("@import") ? replace(...m) : m[0];
+    at = lead.lastIndex;
+  }
+  return out + text.slice(at);
 }
 
 /** Splits a text at whitespace that is outside parentheses and strings. */

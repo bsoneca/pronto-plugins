@@ -7,15 +7,15 @@ import { compile, elementOf, idOf } from "../../android/template/terminal/compil
 import { inlineImports, length, parseColor } from "../../android/template/terminal/css.js";
 import { atobOf, b64u, btoaOf, credentialOf, errorOf, optionsToJson, unb64u } from "../../android/template/terminal/passkeys.js";
 
-const pageOf = (body, base) =>
-  parseHTML(`<!doctype html><html lang="en"><head>${base ? `<base href="${base}">` : ""}</head><body>${body}</body></html>`);
+const pageOf = (body, base, full) =>
+  parseHTML(`<!doctype html><html lang="en"${full ? " data-display=\"fullscreen\"" : ""}><head>${base ? `<base href="${base}">` : ""}</head><body>${body}</body></html>`);
 
 const asSheets = (css) => (Array.isArray(css) ? css : css ? [css] : []);
 
 /** A page compiled: the card, its root view, the body's view and its `items`, the variables by name and what is unsupported. */
 export function render(body, css, opts) {
   const o = opts ?? {};
-  const { document } = pageOf(body, o.base);
+  const { document } = pageOf(body, o.base, o.fullscreen);
   const { card, unsupported } = compile(document, { sheets: asSheets(css), width: o.width ?? 411, height: o.height, scheme: o.scheme });
   const root = card.states[0].div;
   const top = root.items[0] ?? { items: [] };

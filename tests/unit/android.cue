@@ -245,46 +245,70 @@ cases: {
 		{keep: "page"},
 		{get: "items.0"},
 		{value: "$", holds: {type: "container", orientation: "vertical", item_spacing: 10}},
-		{pick: ["items.length", "items.0.items.0.width", "items.0.items.0.margins", "items.0.items.1.width", "items.0.items.1.margins", "items.2.items.0.width", "items.2.items.1.width"], expect: [3, {type: "match_parent", weight: 1}, {right: 6}, {type: "match_parent", weight: 2}, null, {type: "match_parent", weight: 1}, {type: "match_parent", weight: 2}], why: "five cells in two columns: three rows; the last holds one cell, the empty track keeps its weight"},
+		{pick: ["items.length", "items.0.items.0.width", "items.0.items.0.margins", "items.0.items.1.width", "items.0.items.1.margins", "items.2.items.0.width", "items.2.items.1.width"], expect: [3, {type: "match_parent", weight: 129.67}, {right: 6}, {type: "match_parent", weight: 259.33}, null, {type: "match_parent", weight: 129.67}, {type: "match_parent", weight: 259.33}], why: "five cells in two columns: three rows; a weight is the track's width in dp, (395 - 6) / 3 a fraction; the last row's empty track keeps its share"},
 		{use: "page"},
 		{call: "android.reported", args: ["$"], expect: []},
 		{call: "android.render", args: [#"<div class="g"><p>a</p><p>b</p></div>"#, ".g { display: grid; grid-template-columns: 120px 1fr }"]},
-		{pick: ["items.0.items.0.items.0.width", "items.0.items.0.items.1.width"], expect: [{type: "fixed", value: 120}, {type: "match_parent", weight: 1}]},
+		{pick: ["items.0.items.0.items.0.width", "items.0.items.0.items.1.width"], expect: [{type: "fixed", value: 120}, {type: "match_parent", weight: 275}]},
 		{call: "android.render", args: [#"<div class="g"><p>a</p><p>b</p><p>c</p></div>"#, ".g { display: grid; grid-template-columns: repeat(2, 1fr) 5rem }"]},
-		{pick: ["items.0.items.0.items.length", "items.0.items.0.items.0.width", "items.0.items.0.items.2.width"], expect: [3, {type: "match_parent", weight: 1}, {type: "fixed", value: 80}]},
+		{pick: ["items.0.items.0.items.length", "items.0.items.0.items.0.width", "items.0.items.0.items.2.width"], expect: [3, {type: "match_parent", weight: 157.5}, {type: "fixed", value: 80}]},
 		{call: "android.render", args: [#"<div class="g"><p>a</p><p>b</p></div>"#, ".g { display: grid; grid-template-columns: auto 1fr }"]},
 		{call: "android.reported", args: ["$"], expect: ["grid-template-columns with tracks of unequal size | div.g"], why: "auto has no peer: still reported"},
 	]}
 
-	"position: fixed with every inset is a layer over the screen; one edge pinned is pinned; the rest is reported": {suite: "android", steps: [
-		{call: "android.render", args: [#"<p>page</p><div class="m"><p>modal</p></div>"#, ".m { position: fixed; inset: 0; background: #000000 }"]},
+	"in a grid of unequal tracks a cell spanning tracks counts the gaps it spans; a bordered cell stays in its row; display: contents is reported": {suite: "android", steps: [
+		{call: "android.render", args: [#"<div class="g"><p style="grid-column: span 2">a</p><p>b</p></div>"#, ".g { display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 10px } .g p { margin: 0 }"]},
+		{pick: ["items.0.items.length", "items.0.items.0.items.0.width", "items.0.items.0.items.0.margins", "items.0.items.0.items.1.width"], expect: [1, {type: "match_parent", weight: 291.25}, {right: 10}, {type: "match_parent", weight: 93.75}], why: "(395 - 20) / 4 = 93.75 a fr: the spanning cell is three of them and the gap it spans, so the edges meet the single cells' below"},
+		{call: "android.render", args: [#"<div class="g"><p class="b">1</p><p class="b">2</p></div>"#, ".g { display: grid; grid-template-columns: 1fr 2fr } .g p { margin: 0 } .b { border: 2px solid; border-color: #ffffff #404040 #404040 #ffffff; padding: 2px; background: #c0c0c0 }"]},
+		{pick: ["items.0.items.length", "items.0.items.0.items.length", "items.0.items.0.items.0.orientation", "items.0.items.0.items.0.width", "items.0.items.0.items.1.width"], expect: [1, 2, "overlap", {type: "match_parent", weight: 131.67}, {type: "match_parent", weight: 263.33}], why: "the bevel's wrapper is the cell, sized as one, and no view is left over"},
+		{call: "android.render", args: [#"<div class="g"><div style="display:contents"><p>a</p><p>b</p></div><p>c</p></div>"#, ".g { display: grid; grid-template-columns: 1fr 2fr }"]},
+		{keep: "page"},
+		{get: "items.0.items.length", expect: 2},
+		{use: "page"},
+		{call: "android.reported", args: ["$"], expect: ["display: contents inside a grid of tracks of unequal size | div"]},
+	]}
+
+	"on a fullscreen page, position: fixed with every inset is a layer over the screen; one edge pinned is pinned; the rest is reported": {suite: "android", steps: [
+		{call: "android.render", args: [#"<p>page</p><div class="m"><p>modal</p></div>"#, ".m { position: fixed; inset: 0; background: #000000 }", {fullscreen: true}]},
 		{keep: "page"},
 		{pick: ["root.orientation", "root.items.length", "root.items.0.id", "root.items.0.items.0.items.0.text", "root.items.1.width", "root.items.1.height", "root.items.1.margins", "root.items.1.items.0.text"], expect: ["overlap", 2, "page", "page", {type: "match_parent"}, {type: "match_parent"}, null, "modal"]},
 		{use: "page"},
 		{call: "android.reported", args: ["$"], expect: []},
-		{call: "android.render", args: [#"<p>page</p><nav class="b">bar</nav><aside class="c">x</aside>"#, ".b { position: fixed; left: 0; right: 0; bottom: 0; height: 48px } .c { position: fixed; top: 8px; right: 12px }"]},
+		{call: "android.render", args: [#"<p>page</p><nav class="b">bar</nav><aside class="c">x</aside>"#, ".b { position: fixed; left: 0; right: 0; bottom: 0; height: 48px } .c { position: fixed; top: 8px; right: 12px }", {fullscreen: true}]},
 		{keep: "page"},
 		{pick: ["root.items.length", "root.items.1.width", "root.items.1.alignment_vertical", "root.items.1.height", "root.items.2.alignment_horizontal", "root.items.2.alignment_vertical", "root.items.2.margins", "root.items.2.width"], expect: [3, {type: "match_parent"}, "bottom", {type: "fixed", value: 48}, "right", "top", {right: 12, top: 8}, {type: "wrap_content"}]},
 		{use: "page"},
 		{call: "android.reported", args: ["$"], expect: []},
-		{call: "android.render", args: [#"<p>page</p><p class="n">no inset</p>"#, ".n { position: fixed; top: 0 }"]},
+		{call: "android.render", args: [#"<p>page</p><p class="n">no inset</p>"#, ".n { position: fixed; top: 0 }", {fullscreen: true}]},
 		{keep: "page"},
 		{pick: ["root.orientation", "root.items.length"], expect: ["vertical", 1]},
 		{use: "page"},
 		{call: "android.reported", args: ["$"], expect: ["position: fixed | p.n"], why: "no horizontal inset: where it would stand is unknown, so not drawn as a layer"},
+		{call: "android.render", args: [#"<p>page</p><div class="m"><p>modal</p></div>"#, ".m { position: fixed; inset: 0 }"]},
+		{keep: "page"},
+		{pick: ["root.orientation", "root.items.length"], expect: ["vertical", 1]},
+		{use: "page"},
+		{call: "android.reported", args: ["$"], expect: ["position: fixed | div.m"], why: "a page that is not fullscreen scrolls: a layer drawn with it would scroll too, so it is not drawn"},
 	]}
 
-	"a stylesheet's @import is inlined where it stood, by file, inside the shell directory": {suite: "android", steps: [
+	"a fixed element inside a fixed one lies over it": {suite: "android", steps: [
+		{call: "android.render", args: [#"<p>page</p><div class="m"><div class="n">in</div></div>"#, ".m { position: fixed; inset: 0; background: #000000 } .n { position: fixed; top: 0; left: 0 }", {fullscreen: true}]},
+		{pick: ["root.items.length", "root.items.1.background.0.color", "root.items.1.items.length", "root.items.2.text"], expect: [3, "#FF000000", 0, "in"], why: "the outer layer is placed before its children's, so its backdrop is under the inner one"},
+	]}
+
+	"a stylesheet's leading @imports are inlined where they stood, by file, inside the shell directory": {suite: "android", steps: [
 		{call: "android.inlined", args: ["screens/a.css", {
-			"screens/a.css": "@import url(\"shared/strip.css\");\n.a { color: red }\n@import 'b.css';\n/* @import \"commented.css\"; */\n",
+			"screens/a.css": "@charset \"utf-8\";\n@layer base;\n/* @import \"commented.css\"; */\n@import url(\"shared/strip.css\");\n@import 'b.css';\n.a { color: red }\n@import 'late.css';\n.b::after { content: \"@import 'late.css';\" }\n",
 			"screens/shared/strip.css": ".strip { color: blue }\n@import \"../deep.css\";",
 			"screens/b.css": ".b { color: green }",
+			"screens/late.css": "LATE",
 			"screens/deep.css": ".deep { color: pink }",
 			"commented.css": "SHOULD NOT APPEAR",
-		}], expect: ".strip { color: blue }\n.deep { color: pink }\n.a { color: red }\n.b { color: green }\n/* @import \"commented.css\"; */\n", why: "each import sits where its @import was, relative to the importing file; a comment is left alone"},
+		}], expect: "@charset \"utf-8\";\n@layer base;\n/* @import \"commented.css\"; */\n.strip { color: blue }\n@import \"../deep.css\";\n.b { color: green }\n.a { color: red }\n@import 'late.css';\n.b::after { content: \"@import 'late.css';\" }\n", why: "each leading import sits where it was, relative to the importing file, after @charset, @layer and comments; one after a rule is invalid CSS, and so is one in a string: left. An import inside an imported sheet follows the imported sheet's own leading run: here after a rule, so left"},
 		{call: "android.inlined", args: ["x.css", {"x.css": "@import \"y.css\"; .x{}", "y.css": "@import \"x.css\"; .y{}"}], expect: "@import \"x.css\"; .y{} .x{}", why: "a cycle is cut at the sheet being inlined: that import stays, and is reported"},
+		{call: "android.inlined", args: ["n.css", {"n.css": "@import \"y.css\";.n{}", "y.css": "@import \"z.css\";.y{}", "z.css": ".z{}"}], expect: ".z{}.y{}.n{}", why: "an imported sheet's own leading imports are inlined too"},
 		{call: "android.inlined", args: ["screens/p.css", {"screens/p.css": "@import url(\"shared/s.css\");.p{}", "shared/s.css": ".s{}"}], expect: ".s{}.p{}", why: "a screen's sheet is injected as a style on the web, so its relative import is also tried from the shell directory"},
-		{call: "android.inlined", args: ["s/x.css", {"s/x.css": "@import \"../../../out.css\"; @import \"/etc/p.css\"; @import url(https://e.com/a.css); @import \"y.css\" screen; @import \"gone.css\"; @import \"/shell/s/z.css\";", "s/z.css": ".z{}", "out.css": "OUT"}], expect: "@import \"../../../out.css\"; @import \"/etc/p.css\"; @import url(https://e.com/a.css); @import \"y.css\" screen; @import \"gone.css\"; .z{}", why: "outside the shell directory, another origin, a condition, a missing file: left, so reported; /shell/ is the root"},
+		{call: "android.inlined", args: ["s/x.css", {"s/x.css": "@import \"../../../out.css\"; @import \"/etc/p.css\"; @import url(https://e.com/a.css); @import \"gone.css\"; @import \"/shell/s/z.css\"; @import \"y.css\" screen; @import \"s/z.css\";", "s/z.css": ".z{}", "out.css": "OUT"}], expect: "@import \"../../../out.css\"; @import \"/etc/p.css\"; @import url(https://e.com/a.css); @import \"gone.css\"; .z{} @import \"y.css\" screen; @import \"s/z.css\";", why: "outside the shell directory, another origin, a missing file: left, so reported; /shell/ is the root; one with a condition ends the run"},
 		{call: "android.render", args: ["<p>a</p>", "@import url(\"shared/strip.css\"); p { color: red }"]},
 		{call: "android.reported", args: ["$"], expect: ["@import | url(\"shared/strip.css\")"], why: "one that was not inlined is still reported"},
 	]}

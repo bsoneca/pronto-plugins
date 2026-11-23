@@ -89,8 +89,9 @@ await Deno.remove(hatchMap);
 // SES at omnishell's own pin, so the phone's cage is the page's.
 await Deno.copyFile(`${omnishell}/interpreter/vendor/ses.umd.min.js`, `${dir}/ses.umd.min.js`);
 // A stylesheet that @imports another is shipped with the import inlined where it stood: the compiler
-// reads each sheet whole and does not follow an import. The rewritten copy lands in this generated
-// directory, the last of the app's asset directories, so it answers at the sheet's own path.
+// reads each sheet whole and does not follow an import. The rewritten copy lands in terminal-css, an asset
+// directory of the debug, release and rehearsal source sets (not main, whose ../../shell holds the original:
+// one path in two directories of a source set is a duplicate asset AGP refuses), which outrank main.
 const readSheet = (path: string): string | null => {
   try { return Deno.readTextFileSync(`shell/${path}`); } catch { return null; }
 };
@@ -107,14 +108,15 @@ const sheetsOf = (sub: string): string[] => {
   }
   return out;
 };
+const cssDir = "android/app/build/generated/terminal-css";
+await Deno.remove(cssDir, { recursive: true }).catch(() => {});
 for (const path of sheetsOf("")) {
-  await Deno.remove(`${dir}/${path}`).catch(() => {});
   const text = readSheet(path)!;
   if (!/@import\b/i.test(text)) continue;
   const inlined = inlineImports(text, path, readSheet);
   if (inlined === text) continue;
-  await Deno.mkdir(`${dir}/${path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "."}`, { recursive: true });
-  await Deno.writeTextFile(`${dir}/${path}`, inlined);
+  await Deno.mkdir(`${cssDir}/${path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "."}`, { recursive: true });
+  await Deno.writeTextFile(`${cssDir}/${path}`, inlined);
   console.log(`stylesheet ${path}: @import inlined`);
 }
 // The catalogues the interpreter fetches beside the screens, under the same names.

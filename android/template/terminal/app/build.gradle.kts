@@ -36,8 +36,14 @@ android {
         getByName("main") {
             assets.srcDirs("src/main/assets", "../../shell", "build/generated/terminal")
         }
+        // A stylesheet that @imports another is shipped with the import inlined (bundle.ts): its copy is an asset of
+        // the build type, which outranks main, whose ../../shell holds the original (a duplicate inside main is refused).
         getByName("debug") {
             res.srcDirs("build/generated/debug-res")
+            assets.srcDirs("build/generated/terminal-css")
+        }
+        getByName("release") {
+            assets.srcDirs("build/generated/terminal-css")
         }
     }
 
@@ -81,6 +87,7 @@ android {
         getByName("rehearsal") {
             kotlin.directories.add("src/debug/kotlin")
             res.srcDirs("build/generated/debug-res")
+            assets.srcDirs("build/generated/terminal-css")
             manifest.srcFile("src/debug/AndroidManifest.xml")
         }
     }

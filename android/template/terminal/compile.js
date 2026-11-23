@@ -90,6 +90,7 @@ function newState(document, opts, styler, rules) {
     // position: fixed elements drawn as a layer over the screen (overlays), and the ones being placed there
     overlays: [],
     pinned: new Set(),
+    fullscreen: !!opts.fullscreen,
   };
 }
 
@@ -771,7 +772,8 @@ function bevel(el, divs, C) {
 // (and stretched, when its size is auto), the insets a and z in dp. Null for one that is not: no
 // inset on an axis leaves it where it would have stood, and an inset it cannot measure is no inset.
 function fixedLayer(st, C) {
-  if (st.p.position !== "fixed") return null;
+  // only a fullscreen page is the screen: elsewhere the page scrolls, and a layer drawn with it would scroll too
+  if (st.p.position !== "fixed" || !C.fullscreen) return null;
   let bad = false;
   const inset = (name, basis) => {
     const v = st.p[name];
@@ -797,7 +799,11 @@ function convert(el, pctx, C) {
     const layer = fixedLayer(C.style(el), C);
     if (layer) {
       C.pinned.add(el);
+      // its slot is taken before its children are converted: a fixed element inside it lies over it
+      const slot = C.overlays.length;
+      C.overlays.push(null);
       const divs = convertAt(el, { kind: "block", avail: C.width, ta: undefined }, C);
+      const placed = [];
       for (const d of divs) {
         const mg = Object.assign({}, d.margins);
         const place = (ax, side, size, lo, hi, align) => {
@@ -811,8 +817,9 @@ function convert(el, pctx, C) {
         place(layer.h, "x", "width", "left", "right", "alignment_horizontal");
         place(layer.v, "y", "height", "top", "bottom", "alignment_vertical");
         if (Object.keys(mg).length) d.margins = mg;
-        C.overlays.push(d);
+        placed.push(d);
       }
+      C.overlays.splice(slot, 1, ...placed);
       return [];
     }
   }
@@ -1027,38 +1034,56 @@ function containerElement(el, st, pctx, C, kind) {
     const cols = weighted ? tracks.length : gridColumns(st, colGap, b.contentW, el, C);
     if (weighted) {
       // Tracks of unequal size: each grid row is a horizontal container, its cells a fixed width or a weight.
+      // A weight is the cell's width in dp (its tracks and the gaps between them): DivKit shares what the row's
+      // fixed cells and margins leave in proportion to the weights, so each cell comes out as the track would.
       const frs = tracks.reduce((a, t) => a + (t.fr || 0), 0);
       const fixed = tracks.reduce((a, t) => a + (t.px || 0), 0);
       const unit = frs > 0 ? Math.max(0, (b.contentW - fixed - colGap * (cols - 1)) / frs) : 0;
-      const least = Math.min(...tracks.map((t) => (t.fr !== undefined ? t.fr * unit : t.px)));
-      childCtx = { kind: "grid", avail: Math.max(0, least), ai: p["align-items"], ji: p["justify-items"], ta: p["text-align"] };
+      const w2 = (n) => Math.max(0.01, Math.round(n * 100) / 100);
+      const widthOf = (span) => {
+        const gaps = colGap * (span.length - 1);
+        if (span.every((t) => t.fr !== undefined)) return { type: "match_parent", weight: w2(span.reduce((a, t) => a + t.fr, 0) * unit + gaps) };
+        if (span.every((t) => t.px !== undefined)) return { type: "fixed", value: round(span.reduce((a, t) => a + t.px, 0) + gaps) };
+        return null;
+      };
+      const spanPx = (from, sp) => tracks.slice(from, from + sp).reduce((a, t) => a + (t.fr !== undefined ? t.fr * unit : t.px), 0) + colGap * (sp - 1);
+      childCtx = { kind: "grid", avail: 0, ai: p["align-items"], ji: p["justify-items"], ta: p["text-align"] };
       div.orientation = "vertical";
       if (rowGap) div.item_spacing = round(rowGap);
-      const cells = childItems(el, st, childCtx, C, true, id);
+      // each child is converted for its own cell (its track span's width), and keeps the views it came out as
+      // (a border's or a bevel's wrapper, the children of a display: contents element)
       const rows = [];
-      let at = 0, row = null;
+      let at = 0, row = null, k = 0;
+      const place = (divs, sp) => {
+        for (const d of divs) {
+          if (!row || at + sp > cols) { row = []; rows.push(row); at = 0; }
+          row.push({ d, from: at, sp });
+          at += sp;
+        }
+      };
       for (const n of el.childNodes) {
+        if (n.nodeType === 3) {
+          const r = buildRun([n], st, C, null, "");
+          if (r.text !== "") place([anonText(r, st, Object.assign({}, childCtx, { avail: b.contentW }), C, id + "_t" + k++)], 1);
+          continue;
+        }
         if (n.nodeType !== 1 || !drawn(n, C)) continue;
-        const d = cells.find((x) => x.id === idOf(n));
-        if (!d) continue;
-        const sp = spanOf(n, C.style(n), cols);
-        if (!row || at + sp > cols) { row = []; rows.push({ from: 0, cells: row }); at = 0; }
-        row.push({ d, from: at, sp });
-        at += sp;
+        const nst = C.style(n);
+        const sp = spanOf(n, nst, cols);
+        const start = !row || at + sp > cols ? 0 : at;
+        const cellCtx = Object.assign({}, childCtx, { avail: Math.max(0, spanPx(start, sp)) });
+        const contents = layoutKind(nst) === "contents";
+        if (contents) C.rep("display: contents inside a grid of tracks of unequal size", desc(n));
+        let divs = [];
+        try { divs = convert(n, cellCtx, C); } catch (e) { C.rep("compile error: " + (e && e.message), desc(n)); }
+        place(divs, contents ? 1 : sp);
       }
-      const trackWidth = (span) => span.every((t) => t.fr !== undefined)
-        ? { type: "match_parent", weight: span.reduce((a, t) => a + t.fr, 0) }
-        : span.every((t) => t.px !== undefined) ? { type: "fixed", value: round(span.reduce((a, t) => a + t.px, 0)) } : null;
-      // what the grid draws that is not a child element (a pseudo-element's text) keeps its place after the rows
-      const placed = new Set(rows.flatMap((r) => r.cells.map((c) => c.d)));
       items = rows.map((r, n) => {
         const line = { type: "container", id: id + "_r" + n, orientation: "horizontal", width: { type: "match_parent" }, height: { type: "wrap_content" }, items: [] };
         let used = 0;
-        for (const c of r.cells) {
-          const span = tracks.slice(c.from, c.from + c.sp);
-          let w = trackWidth(span);
-          if (!w) { C.rep("a grid cell spanning fixed and flexible tracks", desc(el)); w = { type: "match_parent", weight: 1 }; }
-          else if (w.type === "fixed" && c.sp > 1) w.value = round(w.value + colGap * (c.sp - 1));
+        for (const c of r) {
+          let w = widthOf(tracks.slice(c.from, c.from + c.sp));
+          if (!w) { C.rep("a grid cell spanning fixed and flexible tracks", desc(el)); w = { type: "match_parent", weight: w2(spanPx(c.from, c.sp)) }; }
           c.d.width = w;
           if (colGap && c.from + c.sp < cols) c.d.margins = Object.assign({}, c.d.margins, { right: ((c.d.margins || {}).right || 0) + round(colGap) });
           line.items.push(c.d);
@@ -1066,12 +1091,12 @@ function containerElement(el, st, pctx, C, kind) {
         }
         // tracks a short last row leaves empty keep their share
         if (used < cols) {
-          const rest = trackWidth(tracks.slice(used));
+          const rest = widthOf(tracks.slice(used));
           if (rest) line.items.push({ type: "container", id: id + "_r" + n + "_e", width: rest, height: { type: "wrap_content" }, items: [] });
           else C.rep("a grid row that ends on fixed and flexible empty tracks", desc(el));
         }
         return line;
-      }).concat(cells.filter((x) => !placed.has(x)));
+      });
     } else if (cols <= 1) {
       childCtx = { kind: "col", g: true, avail: b.contentW, ai: p["justify-items"], ji: p["justify-items"], ta: p["text-align"] };
       div.orientation = "vertical";
@@ -1365,8 +1390,9 @@ export function compile(document, opts) {
   const env = { width, height, scheme };
   const rules = parse(opts.sheets || [], env);
   const styler = createStyler(rules, env);
-  const C = newState(document, { width, height, scheme }, styler, rules);
   const html = document.documentElement, body = document.body;
+  const fullscreen = !!html && html.getAttribute("data-display") === "fullscreen";
+  const C = newState(document, { width, height, scheme, fullscreen }, styler, rules);
   const root = { type: "container", orientation: "vertical", width: { type: "match_parent" }, height: { type: "match_parent" }, items: [] };
   if (html && body) {
     const hs = C.style(html), bs = C.style(body);
