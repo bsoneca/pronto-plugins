@@ -35,6 +35,7 @@ jobs:
       - name: Vet each host
         run: |
           sayt --script tools.nu cue vet -c ./native
+          sayt --script tools.nu cue vet -c ./lessons
           sayt --script tools.nu cue vet -c ./android
           sayt --script tools.nu cue vet -c -t app=check ./android/export
           sayt --script tools.nu cue vet -c ./firebase
@@ -233,7 +234,7 @@ jobs:
       - name: Parse each nushell script
         run: sayt --script tools.nu nu -c 'let bad = (glob **/*.nu | where {|f| not (nu-check $f) }); if ($bad | is-not-empty) { print $bad; exit 1 }'
       - name: Test the intents (tests/unit/*.cue)
-        run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android probe devflow migrations machine harness native; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
+        run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android probe devflow migrations machine harness native lessons; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
       # pronto-api (api/, tests/unit/api_generate.cue): its views run on PGlite, its door in caddy,
       # the version pronto's doors run (caddy:2.11.7-alpine), checked against its release's digest.
       - name: Test pronto-api (caddy 2.11.7)
