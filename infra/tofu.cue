@@ -616,6 +616,18 @@ import (
 			}
 			_imports: "google_cloud_scheduler_job.\(k)": {id: "projects/\(P.id)/locations/\(r.location)/jobs/\(nm)", project: P.id}
 		}
+		// A bucket is held with force_destroy on and every other setting left as it is, so the drop's destroy empties it.
+		for nm, r in P.retire.buckets if r.phase == "hold" {
+			let k = (#name & {in: nm}).out
+			tofu: resource: google_storage_bucket: (k): {
+				name:          nm
+				project:       P.id
+				location:      r.location
+				force_destroy: true
+				lifecycle: ignore_changes: ["location", "storage_class", "versioning", "uniform_bucket_level_access", "public_access_prevention", "labels", "lifecycle_rule", "cors", "website", "logging", "encryption", "soft_delete_policy", "autoclass", "retention_policy", "custom_placement_config", "enable_object_retention", "requester_pays", "rpo", "hierarchical_namespace", "ip_filter"]
+			}
+			_imports: "google_storage_bucket.\(k)": {id: "\(P.id)/\(nm)", project: P.id}
+		}
 		for inst, r in P.retire.sqlInstances if r.phase == "hold" {
 			let k = (#name & {in: "\(P.id)_\(inst)"}).out
 			tofu: resource: google_sql_database_instance: (k): {
