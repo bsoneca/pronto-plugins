@@ -144,6 +144,15 @@ cases: {
 		{call: "cron.probe", args: [{path: "/", has: ["Brawl", "Chess"]}, 200, "Brawl only"], expect: "/: 200 without \"Chess\""},
 		{call: "cron.probe", args: [{path: "/", has: ["a", "b"]}, 200, ""], expect: "/: 200 without \"a\", \"b\""},
 	]}
+	"the preview's port is asked at both of localhost's addresses before its forward starts": {suite: "cron", steps: [
+		{call: "cron.previewPortAddresses", args: ["http://localhost:18080"], expect: ["http://127.0.0.1:18080", "http://[::1]:18080"], why: "ssh -L binds whichever is free"},
+		{call: "cron.previewPortAddresses", args: ["http://localhost:18081"], expect: ["http://127.0.0.1:18081", "http://[::1]:18081"]},
+	]}
+	"a port something else already answers on fails the preview, naming what answered": {suite: "cron", steps: [
+		{call: "cron.previewPortHeld", args: ["http://localhost:18080", []], expect: null, why: "nothing listens: the forward's own"},
+		{call: "cron.previewPortHeld", args: ["http://localhost:18080", ["http://[::1]:18080: 405"]], expect: "something already answers on http://localhost:18080 before the preview's forward started (http://[::1]:18080: 405): the probes would ask it, not the preview", why: "the 2026-11-23 14:22 BRT run's 405 on every probe"},
+		{call: "cron.previewPortHeld", args: ["http://localhost:18080", ["http://127.0.0.1:18080: no answer in 5 s"]], expect: "something already answers on http://localhost:18080 before the preview's forward started (http://127.0.0.1:18080: no answer in 5 s): the probes would ask it, not the preview", why: "a listener that accepts and never answers holds the port too"},
+	]}
 	"a time a person reads is Brasília's with its offset, whatever the machine's zone": {suite: "cron", steps: [
 		{call: "cron.local", args: [1793748492000], expect: "2026-11-03T20:28:12-03:00"},
 		{call: "cron.local", args: [1793748492999], expect: "2026-11-03T20:28:12-03:00", why: "to the second"},

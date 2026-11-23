@@ -155,6 +155,21 @@ export const probe = (spec, status, body, location = null) => {
 // (a probe of a row only production holds, say). Name and spec, in the probes' order.
 export const previewProbes = (probes) => Object.entries(probes).filter(([, p]) => p.preview !== false);
 
+// The preview is asked only through its own forward: before `reach` starts, the origin's port must answer nothing.
+// `localhost` is 127.0.0.1 and ::1, and ssh -L binds whichever is free (ExitOnForwardFailure exits only when neither
+// is), so a listener on either would answer the probes in the preview's place: Bonk Chess's 14:22 BRT run of
+// 2026-11-23 got 405 on every probe from such a listener, its first answer milliseconds after the forward was spawned.
+// The addresses to ask, each without a path.
+export const previewPortAddresses = (origin) => {
+  const u = new URL(origin);
+  const port = u.port || (u.protocol === "https:" ? "443" : "80");
+  return [`${u.protocol}//127.0.0.1:${port}`, `${u.protocol}//[::1]:${port}`];
+};
+// What the run says when something already answers there (`answers`: each address and what it said), or null when
+// nothing does.
+export const previewPortHeld = (origin, answers) => answers.length === 0 ? null
+  : `something already answers on ${origin} before the preview's forward started (${answers.join(", ")}): the probes would ask it, not the preview`;
+
 // The run's log line: when, the app, the outcome, the commit, then each step's minutes, one decimal,
 // in the order run, and the total. `steps` holds the steps that ran, in seconds.
 export const line = (run) => {
