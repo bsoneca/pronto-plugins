@@ -384,6 +384,7 @@ cases: "an open step takes a path or a web address, never a file, and on product
 		{call: "harness.openHref", args: ["/play", "https://app.example/", true], expect: "https://app.example/play"},
 		{call: "harness.openHref", args: ["file:///etc/hosts", "http://localhost:3000/", false], throws: "not an http", why: "never the runner's own files"},
 		{call: "harness.openHref", args: ["https://other.example/x", "https://app.example/", true], throws: "only one a production scenario"},
+		{call: "harness.openHref", args: ["//other.example/x", "https://app.example/", true], throws: "only one a production scenario", why: "a protocol-relative address is another origin too"},
 	]
 }
 

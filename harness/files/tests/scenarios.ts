@@ -477,7 +477,7 @@ export class Run {
       const to = await this.fill(st.revisit);
       await p.close();
       await this.tab(a);
-      await a.page.goto(/^https?:/.test(to) ? to : new URL(to, URL_).href);
+      await a.page.goto(openHref(to, URL_, onProduction));
       return this.loaded(a.page);
     }
     if ("rush" in st) {
@@ -496,7 +496,7 @@ export class Run {
       }
       let held = "";
       try {
-        await p.goto(/^https?:/.test(to) ? to : new URL(to, URL_).href, { waitUntil: "commit" });
+        await p.goto(openHref(to, URL_, onProduction), { waitUntil: "commit" });
         if (st.rush.drawn) await (await sel(st.rush.drawn)).waitFor({ state: "attached", timeout: ms });
         await (await sel(st.rush.click)).click({ timeout: ms });
         held = await p.evaluate(() => (window as unknown as { __fp?: { pressed: string } }).__fp?.pressed ?? "");
