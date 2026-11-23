@@ -240,7 +240,13 @@ livex [push $app --sync premium] | ignore
 '#!/bin/sh
 echo x >> $1.tick
 n=$(wc -l < $1.tick)
-if [ -f $1.killfrom ] && [ "$n" -ge "$(cat $1.killfrom)" ]; then kill -9 $PPID; fi
+if [ -f $1.killfrom ] && [ "$n" -ge "$(cat $1.killfrom)" ]; then
+  p=$PPID
+  while [ "$p" -gt 1 ]; do
+    case "$(ps -o command= -p $p)" in *live.nu*) kill -9 $p; exit 0;; esac
+    p=$(ps -o ppid= -p $p | tr -d " ")
+  done
+fi
 if [ -f $1.badfrom ] && [ "$n" -ge "$(cat $1.badfrom)" ]; then cat $1-bad.json; else cat $1.json; fi
 ' | save -f $"($app)/reader.sh"
 def wspec [premium: bool, errs_cmd: string = "sh reader.sh errs"] {
