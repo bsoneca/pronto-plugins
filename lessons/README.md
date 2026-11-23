@@ -101,8 +101,8 @@ pronto-lessons' (no header) is never overwritten.
 | `lessons_spec.js` beside it | the page's courses; a stub `export const courses = {}` at install (written once), then generate's |
 | `lessons_plugin.cue`, `lessons_schema.cue` | the `LessonProgress` entity, the plugin's pgroll migration, the emitter's outputs and the raw migrations' list; `schema.cue` as the app's, package renamed; regenerated |
 | `pronto/lessons.cue`, `lessons/lessons.nu` | the generate step: `lessons write` writes `lessons/lessons_spec.sql`, `lessons_spec.js` and the lines in `messages/<locale>.json` |
-| `lessons/lessons.sql` | the functions (L2's `lessons.sql`); regenerated |
-| `lessons/lessons_spec.sql` | `lessons.spec()`, written by generate from the courses |
+| `lessons/lessons.sql` | the functions (L2's `lessons.sql`); regenerated; both SQL files start with `SET lock_timeout = '5s'; SET statement_timeout = '30s';`, which pronto's `lint sql` requires of every replayed file |
+| `lessons/lessons_spec.sql` | `lessons.spec()`, written by generate from the courses; written once at install for no courses (the same text the emitter makes of `courses: {}`), so the first `./saytw generate` finds the raw migration pronto's step reads before the lessons step has run |
 | `lessons_spec.cue` | written once, then the app's: `lessons: courses: {}`, `_lessonsMigration` and `_lessonsRawNames` |
 
 Nothing goes into `services/database/migrations/`: that folder is pronto generate's output. The two SQL files are **raw
@@ -113,7 +113,10 @@ other CUE of the app does; two lists of one field cannot be unified, so an app t
 
 **The names** are stamped once into `lessons_spec.cue` and reused verbatim by every re-run, whatever the app adds later: the raw
 ones `<n>_lessons_spec.sql` and `<n+1>_lessons.sql`, n one more than the highest `name: "NNN_x.sql"` the app's CUE lists (pronto's
-`950_fixture.sql` aside), at that width (100 and 101 when it lists none); the pgroll migration `<m>_lessons`, m one more than the
+`950_fixture.sql` aside), at that width (100 and 101 when it lists none). At three digits the numbers stay **below 800**, since pronto's
+schema reserves every raw name starting with `8` (but `802_signals.sql`): the 8xx and 950 names are ignored, and the next two numbers
+above the highest name below 800 are taken, or, when fewer than two remain there, the two highest free numbers below 800 (Bonk Chess,
+whose highest is 799, gets 793 and 796); fewer than two free numbers is refused, naming them in `lessons_spec.cue` by hand; the pgroll migration `<m>_lessons`, m one more than the
 highest of the app's own pgroll names (`_xMigration: "NN_x"`, `migrations: "NN_x"`) at that width, a sequence of its own. When the
 app names no pgroll migration, `--migration <name>` gives it; a number that would need more digits than the width is refused.
 
