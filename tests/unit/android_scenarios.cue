@@ -117,6 +117,18 @@ cases: {
 		{call: "androidScenarios.normalize", args: [{finger: true}], holds: {kind: "finger", arg: true}},
 		{call: "androidScenarios.normalize", args: [{open: "/", unlock: true}], holds: {kind: "open", arg: "/"}, why: "unlock says how the open goes, it is not a second action"},
 	]}
+	"an open can cancel the unlock, and a log step is a known kind": {suite: "android", steps: [
+		{call: "androidScenarios.normalize", args: [{open: "/", unlock: "touch"}], holds: {kind: "open", arg: "/"}},
+		{call: "androidScenarios.normalize", args: [{open: "/", unlock: "cancel"}], holds: {kind: "open", arg: "/"}, why: "unlock says how the open goes, it is not a second action"},
+		{call: "androidScenarios.normalize", args: [{log: "PRONTO UNLOCK opened", timeout: 20}], holds: {kind: "log", timeout: 20, arg: "PRONTO UNLOCK opened"}},
+	]}
+	"a log step holds when some line has its text, or, absent, when none does": {suite: "android", steps: [
+		{call: "androidScenarios.logHolds", args: ["PRONTO UNLOCK opened", "I/pronto: PRONTO UNLOCK opened\nW/pronto: x"], expect: null},
+		{call: "androidScenarios.logHolds", args: ["PRONTO UNLOCK opened", "W/pronto: PRONTO UNLOCK canceled: x"], matches: "no log line has"},
+		{call: "androidScenarios.logHolds", args: [{absent: "PRONTO UNLOCK opened"}, "W/pronto: PRONTO UNLOCK canceled: x"], expect: null},
+		{call: "androidScenarios.logHolds", args: [{absent: "PRONTO UNLOCK opened"}, "I/pronto: PRONTO UNLOCK opened"], matches: "a log line has"},
+		{call: "androidScenarios.logHolds", args: [{}, ""], throws: "a log step is a string"},
+	]}
 	"the views of uiautomator's dump are its nodes with their id, text, description and drawn box": {suite: "android", steps: [
 		{call: "androidScenarios.nativeNodes", args: ["<?xml version='1.0'?><hierarchy rotation=\"0\"><node index=\"0\" text=\"Asker &amp; &quot;Co&quot; \u00b7 ana\" resource-id=\"a:id/t\" class=\"android.widget.TextView\" content-desc=\"\" clickable=\"true\" bounds=\"[63,181][381,307]\"><node index=\"0\" text=\"\" resource-id=\"\" content-desc=\"Cancel\" clickable=\"false\" bounds=\"[0,0][1080,2400]\" /></node></hierarchy>"], expect: [
 			{id: "a:id/t", text: "Asker & \"Co\" \u00b7 ana", desc: "", clickable: true, box: {x: 63, y: 181, w: 318, h: 126}},
