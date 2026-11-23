@@ -107,7 +107,100 @@ flagd: sql: """
 	  SELECT v IS NOT NULL AND v NOT IN ('null'::jsonb, 'false'::jsonb, '0'::jsonb, '""'::jsonb, '[]'::jsonb)
 	$f$;
 
-	-- The part of flagd's targeting (JSON Logic) the flags plugin writes: if, in and var. Any other
+	-- MurmurHash3 (x86, 32 bits, seed 0), the hash flagd's fractional operator buckets by: Postgres has none.
+	-- A bigint holds each 32-bit word; a product goes through numeric, which a bigint would overflow.
+	CREATE OR REPLACE FUNCTION pronto_flags.murmur3(data bytea) RETURNS bigint LANGUAGE plpgsql IMMUTABLE AS $f$
+	DECLARE h bigint := 0; k bigint; n int := length(data); i int := 0; o int := n - n % 4; t int := n % 4; m bigint := 4294967295;
+	BEGIN
+	  WHILE i < o LOOP
+	    k := get_byte(data, i)::bigint | (get_byte(data, i + 1)::bigint << 8) | (get_byte(data, i + 2)::bigint << 16) | (get_byte(data, i + 3)::bigint << 24);
+	    k := ((k::numeric * 3432918353) % 4294967296)::bigint;
+	    k := ((k << 15) & m) | (k >> 17);
+	    k := ((k::numeric * 461845907) % 4294967296)::bigint;
+	    h := h # k;
+	    h := ((h << 13) & m) | (h >> 19);
+	    h := (h * 5 + 3864292196) & m;
+	    i := i + 4;
+	  END LOOP;
+	  IF t > 0 THEN
+	    k := 0;
+	    IF t >= 3 THEN k := k # (get_byte(data, o + 2)::bigint << 16); END IF;
+	    IF t >= 2 THEN k := k # (get_byte(data, o + 1)::bigint << 8); END IF;
+	    k := k # get_byte(data, o)::bigint;
+	    k := ((k::numeric * 3432918353) % 4294967296)::bigint;
+	    k := ((k << 15) & m) | (k >> 17);
+	    k := ((k::numeric * 461845907) % 4294967296)::bigint;
+	    h := h # k;
+	  END IF;
+	  h := h # n::bigint;
+	  h := h # (h >> 16);
+	  h := ((h::numeric * 2246822507) % 4294967296)::bigint;
+	  h := h # (h >> 13);
+	  h := ((h::numeric * 3266489909) % 4294967296)::bigint;
+	  h := h # (h >> 16);
+	  RETURN h;
+	END $f$;
+
+	-- A text as CBOR (RFC 8949) encodes it, the bytes flagd hashes: its fractional operator hashes the CBOR of
+	-- [flagKey, targetingKey] (flagd v0.18).
+	CREATE OR REPLACE FUNCTION pronto_flags.cbor_text(s text) RETURNS bytea LANGUAGE plpgsql IMMUTABLE AS $f$
+	DECLARE b bytea := convert_to(s, 'UTF8'); n int := length(convert_to(s, 'UTF8'));
+	BEGIN
+	  IF n < 24 THEN RETURN decode(lpad(to_hex(96 + n), 2, '0'), 'hex') || b; END IF;
+	  IF n < 256 THEN RETURN decode('78', 'hex') || decode(lpad(to_hex(n), 2, '0'), 'hex') || b; END IF;
+	  IF n < 65536 THEN RETURN decode('79', 'hex') || decode(lpad(to_hex(n), 4, '0'), 'hex') || b; END IF;
+	  RAISE EXCEPTION 'pronto_flags: a bucketing value of % bytes is too long', n;
+	END $f$;
+
+	-- A fractional element's weight: 1 when it names none, a whole number otherwise (a negative one counts 0), as flagd
+	-- has it; anything else raises here, where flagd falls back to the default variant.
+	CREATE OR REPLACE FUNCTION pronto_flags.fraction_weight(el jsonb) RETURNS bigint LANGUAGE plpgsql IMMUTABLE AS $f$
+	DECLARE w jsonb := CASE WHEN jsonb_array_length(el) > 1 THEN el -> 1 END;
+	BEGIN
+	  IF w IS NULL OR w = 'null'::jsonb THEN RETURN 1; END IF;
+	  IF jsonb_typeof(w) <> 'number' OR (w #>> '{}')::numeric <> trunc((w #>> '{}')::numeric) OR (w #>> '{}')::numeric > 2147483647 THEN
+	    RAISE EXCEPTION 'pronto_flags: a fractional weight is a whole number up to 2147483647: %', w;
+	  END IF;
+	  RETURN greatest((w #>> '{}')::numeric, 0)::bigint;
+	END $f$;
+
+	-- flagd's fractional: [[variant, weight], ...] buckets the player by the hash of the flag's key and the
+	-- targetingKey; with a bucketing string first it hashes that alone (flagd hashes a number or a boolean too; here
+	-- they raise). The bucket is (hash * sum of weights) >> 32, and the variant is the first whose running weight
+	-- passes it. No targetingKey (or a null bucketing value) answers null, the default variant, as flagd's error path
+	-- does; a malformed distribution raises here, where flagd answers the default.
+	CREATE OR REPLACE FUNCTION pronto_flags.fractional(args jsonb, ctx jsonb) RETURNS jsonb LANGUAGE plpgsql IMMUTABLE AS $f$
+	DECLARE n int := jsonb_array_length(args); first int := 0; key jsonb; input bytea; el jsonb; i int; total bigint := 0; bucket bigint; run bigint := 0;
+	BEGIN
+	  IF n < 1 THEN RAISE EXCEPTION 'pronto_flags: a fractional rule needs a distribution: %', args; END IF;
+	  IF jsonb_typeof(args -> 0) = 'array' THEN
+	    key := ctx -> 'targetingKey';
+	    IF key IS NULL OR jsonb_typeof(key) <> 'string' OR key = '""'::jsonb THEN RETURN NULL; END IF;
+	    input := decode('82', 'hex') || pronto_flags.cbor_text(ctx #>> '{$flagd,flagKey}') || pronto_flags.cbor_text(key #>> '{}');
+	  ELSE
+	    key := pronto_flags.rule(args -> 0, ctx);
+	    IF key IS NULL OR key = 'null'::jsonb THEN RETURN NULL; END IF;
+	    IF jsonb_typeof(key) <> 'string' THEN RAISE EXCEPTION 'pronto_flags: a fractional bucketing value is a string here: %', key; END IF;
+	    input := pronto_flags.cbor_text(key #>> '{}');
+	    first := 1;
+	  END IF;
+	  FOR i IN first .. n - 1 LOOP
+	    el := args -> i;
+	    IF jsonb_typeof(el) <> 'array' OR jsonb_array_length(el) = 0 THEN RAISE EXCEPTION 'pronto_flags: a fractional distribution is [variant, weight]: %', el; END IF;
+	    total := total + pronto_flags.fraction_weight(el);
+	    IF total > 2147483647 THEN RAISE EXCEPTION 'pronto_flags: the weights of a fractional rule sum past 2147483647'; END IF;
+	  END LOOP;
+	  IF total = 0 THEN RETURN NULL; END IF;
+	  bucket := (pronto_flags.murmur3(input) * total) >> 32;
+	  FOR i IN first .. n - 1 LOOP
+	    el := args -> i;
+	    run := run + pronto_flags.fraction_weight(el);
+	    IF bucket < run THEN RETURN el -> 0; END IF;
+	  END LOOP;
+	  RETURN NULL;
+	END $f$;
+
+	-- The part of flagd's targeting (JSON Logic) the flags plugin writes: if, in, var and fractional. Any other
 	-- operator raises, and the flag reads its default variant, as flagd's does on a rule it cannot evaluate.
 	CREATE OR REPLACE FUNCTION pronto_flags.rule(r jsonb, ctx jsonb) RETURNS jsonb LANGUAGE plpgsql IMMUTABLE AS $f$
 	DECLARE op text; args jsonb; n int; i int := 0; v jsonb; within jsonb;
@@ -136,6 +229,8 @@ flagd: sql: """
 	    IF jsonb_typeof(within) = 'array' THEN RETURN to_jsonb(within @> jsonb_build_array(v)); END IF;
 	    IF jsonb_typeof(within) = 'string' AND jsonb_typeof(v) = 'string' THEN RETURN to_jsonb(strpos(within #>> '{}', v #>> '{}') > 0); END IF;
 	    RETURN 'false'::jsonb;
+	  ELSIF op = 'fractional' THEN
+	    RETURN pronto_flags.fractional(args, ctx);
 	  END IF;
 	  RAISE EXCEPTION 'pronto_flags: no operator % in this evaluator', op;
 	END $f$;
