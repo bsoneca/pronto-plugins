@@ -23,7 +23,7 @@ import { localRoots } from "./trust.ts";
 
 // `flag` and `unless` say where a step runs (skips); they are not what it does. `unlock` says an `open` meets the
 // biometric prompt of an app that asks for one (android.json's "unlock"): the sensor is touched once it is shown, or,
-// for "cancel", the prompt is dismissed and the terminal is left shut.
+// for "cancel", the prompt is dismissed and the terminal is left shut, and for "touch" the sensor is touched and nothing waits for the terminal.
 const META = ["by", "timeout", "why", "fresh", "flag", "unless", "unlock"];
 export const KINDS = ["open", "see", "hidden", "attached", "count", "text", "value", "attr", "click", "fill", "select", "press", "submit", "keep", "pause", "shot", "closeDialogs", "signUp", "pay", "address", "response", "undisclosed", "fills", "autofillService", "launch", "native", "finger", "log"];
 
@@ -464,7 +464,7 @@ class Phone {
     return out;
   }
 
-  async start(path: string, actor: string, unlock: boolean | "cancel" = false) {
+  async start(path: string, actor: string, unlock: boolean | "cancel" | "touch" = false, boot = 30) {
     // The device's ports to this machine are tied to adb's connection, which a busy emulator drops
     // and remakes: they are made again before every start, so the app always reaches the stack.
     await adb("forward", "tcp:8765", "tcp:8765");
@@ -479,8 +479,13 @@ class Phone {
       await sh("input keyevent KEYCODE_BACK");
       return;
     }
+    if (unlock === "touch") {
+      // The sensor is touched and the outcome is the app's log line: nothing waits for the terminal, which is not what is held.
+      await finger(30);
+      return;
+    }
     if (unlock) await finger(30);
-    await until(`${actor}'s terminal at ${path}`, 30, async () => {
+    await until(`${actor}'s terminal at ${path}`, boot, async () => {
       const ready = await this.find("html[data-terminal-ready]", false);
       return [ready && ready.length > 0 ? ready : null, ready ? "the terminal has not booted" : "the driver does not answer"];
     });
@@ -630,7 +635,7 @@ async function runScenario(name: string, sc: Scenario, phone: Phone, dir: string
         const path = sub(arg as string);
         opened[actor] = path;
         current = actor;
-        await phone.start(path, actor, raw.unlock === "cancel" ? "cancel" : raw.unlock === true);
+        await phone.start(path, actor, raw.unlock === "cancel" || raw.unlock === "touch" ? raw.unlock : raw.unlock === true, raw.timeout === undefined ? 30 : timeout);
         return;
       }
       if (actor !== current) {

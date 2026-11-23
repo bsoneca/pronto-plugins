@@ -6,7 +6,7 @@ package scenarios
 scenarios: {
 	"one prompt opens the vault": {
 		steps: [
-			{open: "/", unlock: true, why: "the prompt shows, the sensor is touched once, the terminal boots"},
+			{open: "/", unlock: "touch", why: "the prompt shows and the sensor is touched once"},
 			{log: "PRONTO UNLOCK opened"},
 			{log: {absent: "PRONTO UNLOCK canceled"}},
 		]

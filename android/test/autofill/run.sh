@@ -19,6 +19,7 @@ cp -R "$here/android/test/autofill/vault/." "$app/"
 "${ADB:-adb}" install -r "$here/android/test/autofill/asker/app/build/outputs/apk/debug/app-debug.apk"
 cd "$app"
 # Each scenario file on its own run (the autofill's, then the biometric unlock's, PRONTO-144).
-for file in scenarios/autofill.cue scenarios/unlock.cue; do
+# SCENARIO_FILES names others (a space-separated list), to run one alone.
+for file in ${SCENARIO_FILES:-scenarios/autofill.cue scenarios/unlock.cue}; do
 	deno run -A --no-lock android/terminal/scenarios.ts dev.pronto.vault android/app/build/outputs/apk/debug/app-debug.apk https://vault.invalid "$file"
 done
