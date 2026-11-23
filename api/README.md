@@ -10,9 +10,9 @@ bin/pronto-api <app-dir>         # adds or refreshes the plugin; the app's api_s
 bin/pronto-api check <app-dir>   # the contract against the last release's, additive only
 ```
 
-It writes `api_plugin.cue` (the schema and the contract; it also sets the cluster's
-`capabilities.apiSchemas`, so PostgREST serves `api_v1` after `public`, and the auth service's
-`apiKeysGate` to the flag's gate unless the app names its own), `pronto/api.cue` (two generate
+It writes `api_plugin.cue` (the schema and the contract; it also sets the auth service's
+`apiKeysGate` to the flag's gate unless the app names its own; it sets no `apiSchemas`: PostgREST
+serves `public` alone, where each view's twin `api_v1_<view>` is), `pronto/api.cue` (two generate
 rules: `api-generate` before pronto's writer, `api-route` after it) and `api/generate.ts`, a copy
 of the generator they run. The app then:
 
