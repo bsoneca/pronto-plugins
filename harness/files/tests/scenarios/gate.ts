@@ -20,3 +20,14 @@ export async function stepGate(st: Gated, here: Here, flagOn: (flag: string) => 
   if (st.flag !== undefined && !(await flagOn(st.flag))) return { run: false, off: st.flag };
   return { run: true };
 }
+
+// What a read-only production page may send (PRONTO-419): `pass` a read, and a flag's anonymous evaluation (schema.cue's
+// #OfrepEvaluation: a POST to the door's own /ofrep/v1/evaluate/flags/<name>); `refuse` a write to the app's own /auth/ or /crud/, aborted
+// and failing the run, since a page that needs one to show its feature is no read; `abort` any other write (a beacon: analytics, errors, a
+// third party), aborted and ignored.
+export type Sent = "pass" | "abort" | "refuse";
+export function sentOf(method: string, own: boolean, pathname: string): Sent {
+  if (["GET", "HEAD", "OPTIONS"].includes(method)) return "pass";
+  if (method === "POST" && own && /^\/ofrep\/v1\/evaluate\/flags\/[A-Za-z0-9_-]+$/.test(pathname)) return "pass";
+  return own && /^\/(auth|crud)\//.test(pathname) ? "refuse" : "abort";
+}

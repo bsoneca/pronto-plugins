@@ -140,8 +140,8 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 	// Safe to run on the deployed app: one actor at most, and nothing that writes what another person
 	// could see or that spends (no step `#barred` names), only GET requests (and a flag's evaluation, #OfrepEvaluation). A flip (pronto-flags push)
 	// runs, once the flag is on for everyone, only those that sign in as no one (PRONTO-284: a flip has
-	// no tester); those open no page (a page boots a guest, which the database keeps) and read only with
-	// anonymous `http` steps, as a crawler. One that signs in (`signIn`, with FLAGS_TESTER_CREDENTIAL's
+	// no tester); those read with anonymous `http` steps, as a crawler, and may open a page only to look
+	// at it (_readKinds), in a browser that aborts every write (a page that boots a guest, which the database keeps, fails the run). One that signs in (`signIn`, with FLAGS_TESTER_CREDENTIAL's
 	// passkey) is listed by a flip and not run. The runner refuses any other scenario against
 	// production (flags_spec.cue's flagsLive.url).
 	production?: true
@@ -156,13 +156,18 @@ scenarios: [string]~(Id,_): #Scenario & {id: Id}
 		_writes: []
 		_signsIn: [for s in steps if s.signIn != _|_ {s}]
 		if len(_signsIn) == 0 {
-			_page: [for s in steps if s.http == _|_ {s}]
+			// A page it may open reads only (PRONTO-419): the runner's browser aborts every request that writes and fails the run
+			// on a refused /auth/ or /crud/ call, so what is barred here is every gesture (click, fill, ...), not a look.
+			_page: [for s in steps if s.http == _|_ if len([for k in _readKinds if s[k] != _|_ {k}]) == 0 {s}]
 			_page: []
 			_signed: [for s in steps if s.http != _|_ if s.http.anon != true {s}]
 			_signed: []
 		}
 	}
 }
+
+// The page steps that only look: a production scenario that signs in as no one may take these.
+_readKinds: ["open", "see", "hidden", "attached", "count", "text", "attr", "attrs"]
 
 // A flag's evaluation (OpenFeature's OFREP): asked as no one, of one flag by name (no query, no other path), with nothing sent
 // but the context it is evaluated in. What a production scenario reads a flag's value with: `expect: json: {value: true}` holds
