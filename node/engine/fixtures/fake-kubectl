@@ -9,13 +9,13 @@
 # registry_down (the node's builder or registry has no available replica), get_fail_<kind> and missing_<kind>
 # (a read of <kind> in every namespace is refused, or its CRD is not on the node), read_fail_namespace and
 # read_fail_cluster (any read of a namespace, or of the database Cluster, fails as an API error) and
-# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch of the database Cluster is refused), inuse (an image the pods name), cm_race_once (the same, once), cm_race (the record is rewritten between a read and a patch), strict_cm (a patch of a missing record is NotFound), lease_delete_fail (deleting a release's Lease is refused), lock_delete_fail (deleting the lock by precondition is refused), lock_taken_over (a lock's resourceVersion moves between a read and a delete), no_repositories (the registry has none yet), find_fail (the registry's upload scan fails), lease_patch_fail_from (the Nth patch of a Lease and every one after fails), lease_patch_fail_once (only the Nth patch of a Lease fails), lease_patch_notfound_from (the Lease is gone from the Nth patch on: NotFound), lease_patch_fail (a patch of a Lease fails), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
+# read_fail_deployment (a Deployment's name whose read fails), patch_fail (a patch of the database Cluster is refused), inuse (an image the pods name), cm_race_once (the same, once), cm_race (the record is rewritten between a read and a patch), strict_cm (a patch of a missing record is NotFound), lease_delete_fail (deleting a release's Lease is refused), lock_delete_fail (deleting the lock by precondition is refused), lock_taken_over (a lock's resourceVersion moves between a read and a delete), no_repositories (the registry has none yet), find_fail (the registry's upload scan fails), lease_patch_fail_from (the Nth patch of a Lease and every one after fails), lease_patch_fail_once (only the Nth patch of a Lease fails), lease_patch_notfound_from (the Lease is gone from the Nth patch on: NotFound), lease_patch_fail (a patch of a Lease fails), db_fail (psql and pg_dump in a database pod fail), db_tables/<ns> (how many tables that namespace's database has: none by default), no_cluster/<ns> (no database Cluster there), schema_from/<ns> (the namespace the schema was copied from: what an annotate of pronto.dev/schema-from leaves), lease_conflict (a replace of a Lease finds it modified). `--ignore-not-found` answers an absent
 # object with nothing and exit 0, as kubectl does.
 import json, os, sys
 
 d = os.environ["FAKE_DIR"]
 args = sys.argv[1:]
-stdin = sys.stdin.read() if ("-f" in args and "-" in args) else ""
+stdin = sys.stdin.read() if (("-f" in args and "-" in args) or (args[:1] == ["exec"] and "-i" in args)) else ""
 os.makedirs(d + "/namespaces", exist_ok=True)
 os.makedirs(d + "/revision", exist_ok=True)
 
@@ -38,7 +38,7 @@ def items(text):
         out.append({"kind": kind.group(1) if kind else "", "metadata": {"name": name.group(1) if name else "", "namespace": ns.group(1) if ns else None}, "_yaml": True, "_raw": doc})
     return out
 
-objs = items(stdin) if "-f" in args and "-" in args else []
+objs = items(stdin) if "-f" in args and "-" in args and args[:1] != ["exec"] else []
 with open(d + "/calls.jsonl", "a") as f:
     f.write(json.dumps({"args": args, "objects": [{"kind": o.get("kind"), "name": o.get("metadata", {}).get("name"), "namespace": o.get("metadata", {}).get("namespace")} for o in objs]}) + "\n")
     if objs:
@@ -365,11 +365,25 @@ if verb == "get":
     if what.startswith("cluster.postgresql.cnpg.io"):
         if exists("read_fail_cluster"):
             fail("Unable to connect to the server: net/http: TLS handshake timeout")
+        # the database Cluster: its image when one was recorded, its primary and database, and the namespace it was copied into
+        # (`schema_from/<ns>`, written by an annotate of pronto.dev/schema-from)
+        cluster = {"metadata": {"annotations": ({"pronto.dev/schema-from": read("schema_from/" + (ns or ""))} if exists("schema_from/" + (ns or "")) else {})}, "spec": {"bootstrap": {"initdb": {"database": "app"}}}, "status": {"currentPrimary": "db-1", "managedRolesStatus": {"byStatus": {"reconciled": ["authenticator"], "pending-reconciliation": []}}}}
         if exists("previous_image"):
-            out({"spec": {"imageName": read("previous_image")}, "status": {"managedRolesStatus": {"byStatus": {"reconciled": ["authenticator"], "pending-reconciliation": []}}}})
-        out({"status": {"managedRolesStatus": {"byStatus": {"reconciled": ["authenticator"], "pending-reconciliation": []}}}})
+            cluster["spec"]["imageName"] = read("previous_image")
+        if exists("no_cluster/" + (ns or "")):
+            if "--ignore-not-found" in args:
+                sys.exit(0)
+            fail("Error from server (NotFound): clusters.postgresql.cnpg.io not found")
+        out(cluster)
     if what == "externalsecret":
         sys.exit(0)
+    sys.exit(0)
+
+if verb == "annotate":
+    for a in args:
+        if a.startswith("pronto.dev/schema-from="):
+            os.makedirs(d + "/schema_from", exist_ok=True)
+            open(d + "/schema_from/" + (ns or ""), "w").write(a.split("=", 1)[1])
     sys.exit(0)
 
 if verb == "rollout":
@@ -387,6 +401,29 @@ if verb == "rollout":
 
 if verb == "exec":
     cmd = " ".join(args[args.index("--") + 1:]) if "--" in args else ""
+    # psql and pg_dump in a database pod: logged with the namespace they ran in and the SQL they were given
+    ro = "env PGOPTIONS=-c default_transaction_read_only=on "
+    read_only = cmd.startswith(ro)
+    cmd = cmd[len(ro):] if read_only else cmd
+    if cmd.startswith("psql ") or cmd.startswith("pg_dump "):
+        with open(d + "/db.log", "a") as g:
+            g.write(json.dumps({"ns": ns, "cmd": cmd, "stdin": stdin, "read_only": read_only}) + "\n")
+        if exists("db_fail"):
+            fail("psql: error: connection to server failed")
+        if cmd.startswith("pg_dump "):
+            print("-- pgroll rows\nCOPY pgroll.migrations FROM stdin;" if "--data-only" in cmd else "CREATE TABLE public.game ();")
+        elif "current_setting('pronto.schema_from'" in stdin:
+            print(read("db_marked/" + (ns or ""), ""))
+        elif "pgroll.migrations m" in stdin:
+            print(read("pgroll_mark_after", "2 abc") if exists("pgroll_mark_seen") else "2 abc")
+            open(d + "/pgroll_mark_seen", "w").write("1")
+        elif "information_schema.tables" in stdin:
+            print(read("db_tables/" + (ns or ""), "0"))
+        elif "pg_namespace" in stdin:
+            print("1")
+        elif "CREATE ROLE" in stdin or "pg_roles" in stdin:
+            print("DO $x$ BEGIN CREATE ROLE analytics_reader NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $x$;")
+        sys.exit(0)
     if "find " in cmd and "-maxdepth 0" in cmd and exists("no_repositories"):
         fail("find: '/var/lib/registry/docker/registry/v2/repositories': No such file or directory")
     if "find " in cmd and exists("find_fail"):

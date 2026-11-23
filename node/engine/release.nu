@@ -71,6 +71,16 @@ def as-list [objects: list]: nothing -> string {
 	{apiVersion: "v1", kind: "List", items: $objects} | to json
 }
 
+# The objects applied. With `adopt` server-side and forced, as pronto-release, so the release takes the fields of an
+# object another manager (the old fork's engine, a hand's apply) set; without it a plain client-side apply.
+def apply-objects [objects: list, --adopt] {
+	if $adopt {
+		as-list $objects | kubectl-ok apply --server-side --force-conflicts --field-manager=pronto-release -f -
+	} else {
+		as-list $objects | kubectl-ok apply -f -
+	}
+}
+
 def of-kind [objects: list, kind: string]: nothing -> list { $objects | where kind == $kind }
 
 # --- 1. preflight ---
@@ -167,7 +177,7 @@ def namespace-split [objects: list]: nothing -> record {
 
 # A server dry run of the objects, which stops the release on a rejection. Where the namespace does not
 # exist yet (a first release), they are asked in `default`: admission reads the objects, not where they go.
-export def dry-run [objects: list, namespace: string] {
+export def dry-run [objects: list, namespace: string, --adopt] {
 	# Absent is a successful, empty answer; a failed read (denied, API down) stops here, it is not "asked in default".
 	let ns_read = (^kubectl get namespace $namespace --ignore-not-found -o name | complete)
 	if $ns_read.exit_code != 0 { error make {msg: $"reading namespace ($namespace) failed, so the server dry run cannot tell where to ask: ($ns_read.stderr | str trim)"} }
@@ -176,7 +186,11 @@ export def dry-run [objects: list, namespace: string] {
 	if not $there { print $"node: (stamp) namespace ($namespace) does not exist yet: the server dry run asks the objects in default" }
 	# A Job a release left holds its template immutably: the new one is asked under a name of its own, created, not applied.
 	let jobs = ($items | where kind == Job | each {|j| $j | upsert metadata.name $"($j.metadata.name)-dryrun" })
-	as-list ($items | where kind != Job) | kubectl-ok apply --dry-run=server -f -
+	if $adopt {
+		as-list ($items | where kind != Job) | kubectl-ok apply --dry-run=server --server-side --force-conflicts --field-manager=pronto-release -f -
+	} else {
+		as-list ($items | where kind != Job) | kubectl-ok apply --dry-run=server -f -
+	}
 	if ($jobs | is-not-empty) { as-list $jobs | kubectl-ok create --dry-run=server -f - }
 }
 
@@ -449,6 +463,84 @@ export def check-ownership [app: string, node: record, --adopt, --delete] {
 	error make {msg: $"namespace ($node.namespace) exists but is not labelled pronto.dev/release=($app)(if ($node.preview | is-not-empty) { $' and pronto.dev/preview=($node.preview)' } else { '' }): it is not this release's to (if $delete { 'delete' } else { 'change; --adopt takes it' })"}
 }
 
+# `--schema-from <namespace>` reads the live database there: a namespace that is not the preview's own and not another
+# preview, holding the app's database cluster with a primary. Read-only. (Bonk's production namespace never carried the
+# release's label, so the label is not asked.) Answers the cluster.
+export def check-schema-source [app: string, node: record, from: string] {
+	if $from == $node.namespace { error make {msg: $"--schema-from ($from) is the preview's own namespace: name the live one"} }
+	let ns = (^kubectl get namespace $from --ignore-not-found -o json | complete)
+	if $ns.exit_code != 0 { error make {msg: $"reading namespace ($from) failed, so the schema to copy is unknown: ($ns.stderr | str trim)"} }
+	if ($ns.stdout | str trim | is-empty) { error make {msg: $"--schema-from names the namespace ($from), which does not exist"} }
+	let preview_of = ($ns.stdout | from json | get metadata.labels? | default {} | get -o "pronto.dev/preview")
+	if $preview_of != null { error make {msg: $"--schema-from names ($from), a preview's namespace: name the live one"} }
+	let cluster = (^kubectl get $"cluster.postgresql.cnpg.io/($app)-db" -n $from --ignore-not-found -o json | complete)
+	if $cluster.exit_code != 0 { error make {msg: $"reading the database cluster ($app)-db in ($from) failed: ($cluster.stderr | str trim)"} }
+	if ($cluster.stdout | str trim | is-empty) { error make {msg: $"--schema-from names ($from), which has no database cluster ($app)-db"} }
+	let primary = ($cluster.stdout | from json | get -o status.currentPrimary | default "")
+	if ($primary | is-empty) { error make {msg: $"the database cluster ($app)-db in ($from) names no primary to read the schema from"} }
+}
+
+# psql or pg_dump in a database pod's postgres container, `$in` on its stdin; its output, or an error naming the call.
+def --wrapped db-exec [namespace: string, pod: string, ...args: string]: any -> string {
+	let input = $in
+	let r = ($input | ^kubectl exec -i -n $namespace $pod -c postgres -- ...$args | complete)
+	if $r.exit_code != 0 { error make {msg: $"($args | first 1 | str join ' ') in ($pod) failed: ($r.stderr | str trim)"} }
+	$r.stdout
+}
+
+# The roles the live database has beyond CloudNativePG's own, as SQL: each created where absent (no password: the
+# managed ones get theirs from the operator) with the attributes that change what a policy or grant does, and their
+# memberships (in predefined roles too). A role CloudNativePG creates at the same moment is the same as one that was there.
+const live_roles_sql = "WITH r AS (SELECT oid, rolname, rolcanlogin, rolinherit, rolbypassrls FROM pg_roles WHERE rolname !~ '^pg_' AND rolname !~ '^cnpg_' AND rolname NOT IN ('postgres', 'streaming_replica')) SELECT format('DO $x$ BEGIN CREATE ROLE %I %s %s %s; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $x$;', rolname, CASE WHEN rolcanlogin THEN 'LOGIN' ELSE 'NOLOGIN' END, CASE WHEN rolinherit THEN 'INHERIT' ELSE 'NOINHERIT' END, CASE WHEN rolbypassrls THEN 'BYPASSRLS' ELSE 'NOBYPASSRLS' END) FROM r UNION ALL SELECT format('GRANT %I TO %I%s;', g.rolname, m.rolname, CASE WHEN a.admin_option THEN ' WITH ADMIN OPTION' ELSE '' END) FROM pg_auth_members a JOIN pg_roles g ON g.oid = a.roleid AND g.rolname !~ '^cnpg_' AND g.rolname <> 'streaming_replica' JOIN r m ON m.oid = a.member"
+
+# What a read of the live database runs as: a session that cannot write, whatever the SQL says.
+const read_only = ["env" "PGOPTIONS=-c default_transaction_read_only=on"]
+
+# The `pgroll` schema's rows as a mark (how many, and what they say): equal before and after the dumps, or the live schema
+# moved between them and the two copies would disagree.
+const pgroll_mark_sql = "SELECT count(*) || ' ' || md5(coalesce(string_agg(m::text, ',' ORDER BY m::text), '')) FROM pgroll.migrations m"
+
+# The preview database starts as the live one's schema without its rows: its roles, a `pg_dump --schema-only` (owners and
+# privileges kept, so row-level security and grants behave as they do live; no publications, which Electric makes for itself)
+# and the rows of the `pgroll` schema (so the release's migrate applies only what is new on a schema that already has the
+# rest). Read-only on the live namespace (a read-only session, a lock wait of ten seconds so a live migration is never held
+# up behind a dump). All of it is read before anything is written, and written in one transaction, so a cut-off copy leaves
+# nothing; the transaction also marks the database (`pronto.schema_from`), and the Cluster is annotated after it. A release
+# that finds either copies nothing: an annotate that failed after the commit is made again, not refused as a foreign database.
+export def copy-schema [app: string, from: string, ns: string] {
+	let cluster = $"cluster.postgresql.cnpg.io/($app)-db"
+	let target = (kubectl-json get $cluster -n $ns)
+	if (($target | get -o metadata.annotations | default {} | get -o "pronto.dev/schema-from") == $from) {
+		print $"node: (stamp) the schema of ($from) is already in ($ns)"
+		return
+	}
+	let source = (kubectl-json get $cluster -n $from)
+	let live_db = ($source | get -o spec.bootstrap.initdb.database | default "app")
+	let live_pod = $source.status.currentPrimary
+	let pod = ($target | get -o status.currentPrimary | default $"($app)-db-1")
+	let db = ($target | get -o spec.bootstrap.initdb.database | default $live_db)
+	let tables = ("SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') AND table_type = 'BASE TABLE'" | db-exec $ns $pod psql -U postgres -d $db -XAtq -f - | str trim | into int)
+	if $tables > 0 {
+		let marked = ("SELECT coalesce(current_setting('pronto.schema_from', true), '')" | db-exec $ns $pod psql -U postgres -d $db -XAtq -f - | str trim)
+		if $marked != $from { error make {msg: $"the database of ($ns) already has ($tables) tables and was not copied from ($from): delete the preview \(--delete\) and release it again"} }
+		print $"node: (stamp) the schema of ($from) was copied into ($ns) by a release that did not record it on the Cluster: recording it"
+		kubectl-ok annotate $cluster -n $ns --overwrite $"pronto.dev/schema-from=($from)"
+		return
+	}
+	print $"node: (stamp) copying the schema of ($from)/($live_pod) into ($ns)/($pod)"
+	let has_pgroll = ("SELECT 1 FROM pg_namespace WHERE nspname = 'pgroll'" | db-exec $from $live_pod ...$read_only psql -U postgres -d $live_db -XAtq -f - | str trim | is-not-empty)
+	let mark = if $has_pgroll { $pgroll_mark_sql | db-exec $from $live_pod ...$read_only psql -U postgres -d $live_db -XAtq -f - | str trim } else { "" }
+	let roles = ($live_roles_sql | db-exec $from $live_pod ...$read_only psql -U postgres -d $live_db -XAtq -f -)
+	let schema = (null | db-exec $from $live_pod pg_dump -U postgres -d $live_db --lock-wait-timeout=10s --schema-only --no-publications --no-subscriptions)
+	let pgroll = if $has_pgroll { null | db-exec $from $live_pod pg_dump -U postgres -d $live_db --lock-wait-timeout=10s --data-only --schema=pgroll } else { "" }
+	if $has_pgroll and ($pgroll_mark_sql | db-exec $from $live_pod ...$read_only psql -U postgres -d $live_db -XAtq -f - | str trim) != $mark {
+		error make {msg: $"the migrations of ($from) changed while its schema was being read: nothing was copied, release again"}
+	}
+	let marking = $"ALTER DATABASE \"($db)\" SET pronto.schema_from = '($from)';"
+	[$roles $schema $pgroll $marking] | str join "\n" | db-exec $ns $pod psql -U postgres -d $db -Xq --single-transaction -v ON_ERROR_STOP=1 -f - | ignore
+	kubectl-ok annotate $cluster -n $ns --overwrite $"pronto.dev/schema-from=($from)"
+}
+
 # Whether the node has pulled from the registry's host before: an image of it among its nodes'. A read
 # cannot prove a pull works (that is the first rollout, which the database's old image survives), so a
 # node that never pulled from it is said, not refused.
@@ -488,7 +580,7 @@ export def check-node-build [node: record, fwd: record] {
 # Everything that is read before anything is built or written: the pin, the tools, the operators, the node's builder and registry, who owns
 # the namespace, the SOPS file, the backups' credentials. Answers the file's Secrets, decrypted, for the
 # release to apply (a preview's without the backups' credentials).
-export def preflight [app_info: record, node: record, fwd: record, --check, --adopt, --build]: nothing -> list {
+export def preflight [app_info: record, node: record, fwd: record, --check, --adopt, --build, --schema-from: string = ""]: nothing -> list {
 	let pin = (runtime version)
 	if $pin not-in $validated_pins {
 		error make {msg: $"the pronto runtime is ($pin); this engine is validated against ($validated_pins | str join ', '), see node/engine/contract_test.nu: move the pin there first"}
@@ -499,6 +591,7 @@ export def preflight [app_info: record, node: record, fwd: record, --check, --ad
 	check-registry-pull $node
 	check-node-build $node $fwd
 	check-ownership $app_info.name $node --adopt=$adopt
+	if ($schema_from | is-not-empty) { check-schema-source $app_info.name $node $schema_from }
 	let backups_on = (($node.backups? | default null) != null and ($node.preview | is-empty))
 	let skip = if ($node.backups? | default null) != null and not $backups_on { [$node.backups.credentials] } else { [] }
 	let secrets = if $secrets_file == null { [] } else { decrypt-secrets $secrets_file $node.namespace --without $skip }
@@ -547,7 +640,7 @@ export def seed-configmaps [app_dir: string, node: record] {
 
 # The release itself, with the node reachable and the kubeconfig pinned, over what `preflight`
 # answered and what was pushed (by service: {tag, digest}; placeholders for a check).
-export def release-app [app_info: record, node: record, meta: record, compose: record, facts: record, secrets: list, pushed: record, --check] {
+export def release-app [app_info: record, node: record, meta: record, compose: record, facts: record, secrets: list, pushed: record, --check, --adopt, --schema-from: string = ""] {
 	let app = $app_info.name
 	let ns = $node.namespace
 	# 3. data and render
@@ -559,7 +652,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	# 4. the namespace, and the server's word on the rest
 	if $check {
 		print $"node: (stamp) check: server dry run of ($objects | length) objects in ($ns)"
-		dry-run $objects $ns
+		dry-run $objects $ns --adopt=$adopt
 		print $"node: (stamp) check passed: nothing was written"
 		return
 	}
@@ -573,8 +666,8 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	if $cluster_read.exit_code != 0 { error make {msg: $"reading the database cluster ($app)-db failed, so its image to put back is unknown: ($cluster_read.stderr | str trim)"} }
 	let previous_image = if ($cluster_read.stdout | str trim | is-empty) { null } else { $cluster_read.stdout | from json | get -o spec.imageName }
 	let before = (rollback revisions ($deployments | get metadata.name) $ns)
-	as-list $parts.namespace | kubectl-ok apply -f -
-	dry-run $parts.rest $ns
+	apply-objects $parts.namespace --adopt=$adopt
+	dry-run $parts.rest $ns --adopt=$adopt
 	# What serves is about to change (the server accepted the render): the record of the public site's verification, which cd
 	# trusts, is invalidated before the first write that can change it, so a release that fails halfway can never leave an old
 	# commit marked verified over new images. A first release has no record.
@@ -589,7 +682,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	# 6. everything but the Deployments and Jobs, after the Deployments' revisions are recorded
 	try {
 		print $"node: (stamp) applying manifests for ($app)"
-		as-list ($objects | where {|o| $o.kind not-in [Deployment Job Namespace] }) | kubectl-ok apply -f -
+		apply-objects ($objects | where {|o| $o.kind not-in [Deployment Job Namespace] }) --adopt=$adopt
 		# 8. the database, on its image
 		let db_image = (of-kind $objects Cluster | first | get spec.imageName)
 		let db_instances = (of-kind $objects Cluster | first | get spec.instances? | default 1)
@@ -602,6 +695,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 			error make {msg: $e.msg}
 		}
 		if $db_instances > 1 { wait-standbys $app $ns $db_image $db_instances $node.waits.standbys }
+		if ($schema_from | is-not-empty) { copy-schema $app $schema_from $ns }
 		# 9. the schema Jobs, in jobOrder
 		for j in $node.jobOrder {
 			let job = ($jobs | where {|o| $o.metadata.name == $"($app)-($j)" })
@@ -616,7 +710,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		if ($runtime_services | values | any {|r| $r.serviceToken }) or (($node.services? | default {} | columns) | is-not-empty) { apply-service-token $app $ns }
 		# 12. the Deployments: crud rolls after the schema Jobs even with an unchanged image
 		let rolled = ($deployments | each {|d| if $d.metadata.name == $"($app)-crud" { runtime fresh-schema-runtime ($d | to json) | from yaml } else { $d } })
-		as-list $rolled | kubectl-ok apply -f -
+		apply-objects $rolled --adopt=$adopt
 		let runtime_names = ($runtime_services | columns)
 		for name in $runtime_names {
 			kubectl-ok rollout status $"deployment/($app)-($name)" -n $ns $"--timeout=($node.waits.rollout * 5)s"
@@ -658,14 +752,17 @@ def main [
 	--prune                    # only the registry maintenance: prune and collect, and record the outcome (a release's retry); releases nothing. Exit 4: deferred (recorded pending), not a failure
 	--verified: string = ""    # the commit cd's public checks passed for: recorded as verified when it is the one the node serves, refused when not (`--serving` then prints it as verified)
 	--adopt                    # take an existing namespace the release did not label (its Namespace object labels it)
-	--schema-from: string = "" # the preview copy of a database (not in this engine yet)
+	--schema-from: string = "" # a preview's database starts as the schema (no rows) of the live namespace's database, read from its primary
 ] {
 	$env.GCP_T0 = (date now)
 	let verifying = ($verified | is-not-empty)
 	if ([$serving $verifying $prune] | where {|f| $f } | length) > 1 or (([$serving $verifying $prune] | any {|f| $f }) and ($check or $build or $delete or $adopt)) { error make {msg: "--serving, --verified and --prune go with no other flag, and one at a time"} }
 	if $check and $delete { error make {msg: "--check and --delete cannot be given together: a check writes nothing, a delete is a write"} }
 	if $build and not $check { error make {msg: "--build only goes with --check: a release always builds"} }
-	if ($schema_from | is-not-empty) { error make {msg: "--schema-from is not in this engine yet: a preview starts with an empty database"} }
+	if ($schema_from | is-not-empty) {
+		if ($preview | is-empty) { error make {msg: "--schema-from copies a database's schema into a preview: it needs --preview"} }
+		if $delete or $serving or $verifying or $prune { error make {msg: "--schema-from goes with a release of a preview, not --delete, --serving, --verified or --prune"} }
+	}
 	let app_info = (runtime resolve-app $app)
 	let node = (render node-config $app_info.cue_path $preview)
 	if $delete {
@@ -761,7 +858,7 @@ def main [
 					print $"node: (stamp) deleting namespace ($node.namespace)"
 					kubectl-ok delete namespace $node.namespace --ignore-not-found --wait=true
 				} else {
-					let secrets = (preflight $app_info $node $fwd --check=$check --adopt=$adopt --build=$build)
+					let secrets = (preflight $app_info $node $fwd --check=$check --adopt=$adopt --build=$build --schema-from $schema_from)
 					let services = (render build-services $compose $meta.render.enabled (render own-images $node))
 					# The registry's lease (a release, and a check that builds: both push): held while this release pushes and until it ends, so
 					# no other release collects the registry's garbage under its pushes (registry.nu).
@@ -779,7 +876,7 @@ def main [
 						}
 						# the lease renewed after the push, and again after the long phases that follow
 						renew-lease $node $lease --before-live
-						release-app $app_info $node $meta $compose $facts $secrets $pushed --check=$check
+						release-app $app_info $node $meta $compose $facts $secrets $pushed --check=$check --adopt=$adopt --schema-from $schema_from
 						renew-lease $node $lease
 						# 16. prune: the release is live, so a failure here does not undo it; it is recorded beside the release
 						# (`--serving` reports it) and ends the command with a distinct status once the tunnel is closed

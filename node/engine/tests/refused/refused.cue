@@ -67,4 +67,5 @@ serviceSecretReserved:  schema.#Release & _base & {services: billing: {port: 868
 serviceFilesDotDot:     schema.#Release & _base & {services: billing: {port: 8688, files: "/etc/../x": "cm"}}
 serviceSeedAbsolute:    schema.#Release & _base & {services: billing: {port: 8688, files: "/etc/f": "cm", seed: cm: "/etc/passwd"}}
 serviceNamedClock:      schema.#Release & _base & {services: "pulse-clock": port: 8688}
+plainOrigin:            schema.#Release & _base & {origin: "http://localhost:18080"} // a passkey is bound to an https origin
 metricsExportUnknown:   schema.#Release & _base & {metricsExport: {project: "my-project", provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "m@p.iam.gserviceaccount.com", key: "x"}}

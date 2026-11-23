@@ -82,6 +82,19 @@ cases: {
 		}
 		_want: {ns: "app-rc", host: "rc.example.com", labels: {"pronto.dev/release": "app", "pronto.dev/preview": "rc"}}
 	}
+	"a preview's origin is https, its own host's (a passkey is bound to it), and a service of its own is told it": {
+		_svc: schema.#Manifests & {
+			release:  schema.#Release & _base & {preview: "rc", hosts: rc: "rc.example.com", services: billing: port: 8688}
+			upstream: (_fixture & {ns: "app-rc", host: "rc.example.com", reg: release.environment.registry}).objects
+			app:      {name: "app", namespace: "app-rc", image: pushed: billing: {tag: "release", digest: "sha256:\(_d)"}}
+		}
+		_got: {
+			origin:  _preview.release.origin
+			noHost:  _previewNoHost.origin
+			service: [for o in _svc.objects if o.kind == "Deployment" && o.metadata.name == "app-billing" for e in o.spec.template.spec.containers[0].env if e.name == "ORIGIN" {e.value}]
+		}
+		_want: {origin: "https://rc.example.com", noHost: "https://app-pr-3.bsoneca.com", service: ["https://rc.example.com"]}
+	}
 	"a preview without a host is served at <namespace>.<domainSuffix>": {
 		_got:  _previewNoHost.host
 		_want: "app-pr-3.bsoneca.com"

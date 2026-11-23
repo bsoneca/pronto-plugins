@@ -298,6 +298,10 @@ import (
 		if hosts[preview] != _|_ {hosts[preview]},
 		"\(namespace).\(environment.domainSuffix)",
 	][0]
+	// The public origin of the release, a preview's included, always https (a passkey is bound to its origin, and a browser
+	// offers one only on https): what the services' ORIGIN says and what release-cron's preview is asked at. The node's
+	// cloudflared terminates TLS and dials the Gateway over plain HTTP, so the Gateway has no TLS listener of its own.
+	origin: *"https://\(host)" | =~"^https://[^/]+$"
 	environment: #Environment & {registry: build.registry.host}
 
 	// Seconds each wait takes: the primary database on its image, a Job, a rollout.
@@ -696,7 +700,7 @@ import (
 	let ns = release.namespace
 	let appLabels = {"app.kubernetes.io/name": release.name, "app.kubernetes.io/instance": release.name, "app.kubernetes.io/managed-by": "cue"}
 	let selects = {component: string, out: {"app.kubernetes.io/name": release.name, "app.kubernetes.io/component": component}}
-	let origin = "https://\(release.host)"
+	let origin = release.origin
 	let netpol = [if app.networkPolicy != _|_ if app.networkPolicy.enabled != _|_ {app.networkPolicy.enabled}, true][0]
 	let podResources = [if app.resources != _|_ {app.resources}, {requests: {cpu: "50m", memory: "64Mi"}, limits: {cpu: "500m", memory: "256Mi"}}][0]
 	let blobsPorts = {rcloneS3: 3900, imgproxy: 8081}
