@@ -10,6 +10,13 @@ complaints (>= 8), chapters}`, `#Chapter{id, moves, shown, claim, intro, outro, 
 token; `steps` is keyed by ply (`"2": {say, wrong}`). Every line is a `#Line`, closed over the course's `locales`: a
 missing or extra translation fails `cue vet`. `example.cue` is a small valid course.
 
+**No line names a move before it is played** (PRONTO-1736: the page holds no answers, so a line that spoke one would hand it over).
+For each ply the player moves, its token (a literal substring, in every locale) is in none of the lines read before it: the intro,
+the part's complaints, the `say` of every step before that ply, and the `wrong` lines of every step up to it. The `say` of the ply
+itself and later, and the outro, are free: the move is on the board. `cue vet` refuses the course otherwise (`_noTokenSpoken`). This
+sees only the tokens as written: an app whose players read moves in another notation (Bonk Chess: SAN) adds its own check of that
+notation as a unit case.
+
 ## Adapter contract (`app/lessons.js`)
 
 The app supplies five functions over an opaque board:

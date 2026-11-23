@@ -197,6 +197,14 @@ const mutations = {
   stepBeyondMoves: (c) => (c.parts[0].chapters[0].steps["6"] = { wrong: [c.parts[0].chapters[0].intro] }),
   stepZeroPadded: (c) => (c.parts[0].chapters[0].steps["00"] = { wrong: [c.parts[0].chapters[0].intro] }),
   stepOnOtherSide: (c) => (c.parts[0].chapters[0].steps["1"] = { wrong: [c.parts[0].chapters[0].intro] }),
+  // PRONTO-1736: no line read before a ply names that ply's token (the example's player moves plies 0, 2 and 4: a1, a2, a3).
+  introNamesFirst: (c) => (c.parts[0].chapters[0].intro.en = "Begin with a1."),
+  introNamesLater: (c) => (c.parts[0].chapters[0].intro["pt-BR"] = "Depois jogue a3."),
+  sayNamesNext: (c) => (c.parts[0].chapters[0].steps["2"].say.es = "Bien, ahora a3."),
+  sayNamesOwnPly: (c) => (c.parts[0].chapters[0].steps["2"].say.en = "That was a2."),
+  wrongNamesOwnPly: (c) => (c.parts[0].chapters[0].steps["2"].wrong[0].en = "Look at a2."),
+  complaintNamesToken: (c) => (c.parts[0].complaints[3].en = "Not that, a3 (4)."),
+  introNamesOtherSideToken: (c) => (c.parts[1].chapters[0].intro.en = "Defend with b2."),
   duplicateChapterAcrossParts: (c) => (c.parts[1].chapters[0].id = "one"),
   duplicateChapterWithinPart: (c) => c.parts[0].chapters.push({ ...c.parts[0].chapters[0] }),
 };

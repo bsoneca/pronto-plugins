@@ -7,6 +7,7 @@ package lessons
 import (
 	"list"
 	"strconv"
+	"strings"
 )
 
 #Course: {
@@ -58,6 +59,21 @@ import (
 			}
 			_stepKeys: {for k, _ in steps {
 				(k): true & (strconv.Atoi(k) >= shown) & (strconv.Atoi(k) < len(moves)) & (strconv.Atoi(k) mod 2 == player)
+			}}
+
+			// No line a player reads before a ply names that ply's move (PRONTO-1736: a token spoken early gives the answer to the
+			// page). Before the player's ply p: the intro, the complaints, every `say` of a step before p (said after that step's
+			// move) and every `wrong` of a step up to p. The `say` of p and later, and the outro, are free: the move is on the board.
+			// The token is the literal string, in every locale. An app whose players read moves in another notation (SAN) adds its
+			// own check for that notation.
+			_playerPlies: [for p in list.Range(shown, len(moves), 1) if p mod 2 == player {p}]
+			_noTokenSpoken: {for l in locales for p in _playerPlies if moves[p] != "" {
+				"\(l)/\(p)": true & (len([for t in list.Concat([
+					[intro[l]],
+					[for c in complaints {c[l]}],
+					[for k, st in steps if strconv.Atoi(k) < p if st.say != _|_ {st.say[l]}],
+					[for k, st in steps if strconv.Atoi(k) <= p if st.wrong != _|_ for w in st.wrong {w[l]}],
+				]) if strings.Contains(t, moves[p]) {t}]) == 0)
 			}}
 		}
 	}

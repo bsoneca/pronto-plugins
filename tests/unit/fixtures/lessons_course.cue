@@ -24,11 +24,11 @@ lessons: courses: toy: {
 			moves: ["a1", "b1", "a2", "b2", "a3"]
 			shown: 0
 			claim: "a3 ends it"
-			intro: {en: "Begin with a1.", "pt-BR": "Comece com a1.", es: "Empieza con a1."}
+			intro: {en: "Begin.", "pt-BR": "Comece.", es: "Empieza."}
 			outro: {en: "Well done.", "pt-BR": "Muito bem.", es: "Muy bien."}
 			steps: "2": {
-				say: {en: "Now a2.", "pt-BR": "Agora a2.", es: "Ahora a2."}
-				wrong: [{en: "Look at a2.", "pt-BR": "Olhe a2.", es: "Mira a2."}]
+				say: {en: "Good, now the next.", "pt-BR": "Bom, agora a proxima.", es: "Bien, ahora la siguiente."}
+				wrong: [{en: "Look again.", "pt-BR": "Olhe de novo.", es: "Mira otra vez."}]
 			}
 		}, {
 			id: "one_b"
