@@ -165,6 +165,26 @@ check (((newest 0).metadata.note | str contains "no canary: the owner's go")) "-
 full-spec false "light"
 livex [push $app --sync premium] | ignore
 
+# PRONTO_FLAGS_WHO names who asked (Studio's builder: studio:<user id>), kept on the versions and in the journal in place of
+# the login; PRONTO_FLAGS_CASES_WRAP prefixes the app's case command, which a wrap that refuses therefore stops.
+full-spec true "light"
+let ranw = (ran | length)
+let wrap_ok = "sh -c 'echo wrapped >> wrap.log; exec \"$0\" \"$@\"'"
+let wh = (livex [push $app --sync premium] {PRONTO_FLAGS_WHO: "studio:u-7", PRONTO_FLAGS_CASES_WRAP: $wrap_ok})
+check ($wh.exit_code == 0 and (newest 1).metadata.pushed-by == "studio:u-7" and (newest 0).metadata.pushed-by == "studio:u-7" and (newest 0).metadata.cases == "passed") "WHO: the versions of a flip keep the name given, not the login"
+check ((open --raw $"($dir)/journal.jsonl" | lines | last | from json | get who) == "studio:u-7") "WHO: the journal names it"
+check ((ran | length) == $ranw + 1 and (open --raw $"($app)/wrap.log" | str trim) == "wrapped") "WRAP: the flag's case command ran through the wrap, with its env"
+full-spec false "light"
+livex [push $app --sync premium] | ignore
+full-spec true "light"
+let ranx = (ran | length)
+let nx = (object | length)
+let wf = (livex [push $app --sync premium] {PRONTO_FLAGS_CASES_WRAP: "sh -c 'exit 3'"})
+check ($wf.exit_code != 0 and ($wf.stderr | str contains "rolled back") and (ran | length) == $ranx and (newest 0).metadata.stage == "rolled-back") "WRAP: a wrap that refuses stops the cases: the flip is rolled back"
+check ((newest 0).metadata.pushed-by == "operator@example.com") "WHO: unset, the login is who pushed"
+full-spec false "light"
+livex [push $app --sync premium] | ignore
+
 # A flag with no production scenario: written for everyone, nothing run. Production cases with no
 # flagsLive.url to run them at: refused, nothing written.
 full-spec true "light"
@@ -742,6 +762,47 @@ open --raw $"($app)/flags_spec.cue" | str replace 'configMap: "shop-flags"}' 'co
 "flags: held: {default: false, local: true}\n" | save -a $"($app)/flags_spec.cue"
 let r = (livex [push $app] {PATH: ([$bin] | append $env.PATH), SSH_FAIL: "1"})
 check ($r.exit_code != 0 and ($r.stderr | str contains "the mirror at ops@node.example's shop/shop-flags failed")) "a required mirror that fails fails the push"
+
+# A mirror with a kubeconfig instead of ssh (Studio's builder): the ConfigMap is applied by a kubectl here, on that file's
+# identity; nothing goes over ssh, and a flip waits for the site's /ofrep/ (the identity has no pods/portforward).
+let spec_ssh = (open --raw $"($app)/flags_spec.cue")
+let kcsent = $"($dir)/kubectl-sent"
+$"#!/bin/sh\necho \"$@\" >> ($kcsent).args\nif [ -n \"$KUBECTL_FAIL\" ]; then echo forbidden >&2; exit 1; fi\ncat > ($kcsent)\n" | save -f $"($bin)/kubectl"
+^chmod +x $"($bin)/kubectl"
+let ssh_before = (open --raw $"($sent).args" | lines | length)
+full-spec false "light"
+"flagsLive: mirrors: [{kubeconfig: \"/run/kc.yaml\", namespace: \"game\", configMap: \"game-flags\"}]\n" | save -a $"($app)/flags_spec.cue"
+"flags: viakc: {default: false, local: true}\n" | save -a $"($app)/flags_spec.cue"
+let kcp = (livex [push $app --untested "kc"] {PATH: ([$bin] | append $env.PATH)})
+let kcm = (open --raw $kcsent | from json)
+check ($kcp.exit_code == 0 and $kcm.kind == "ConfigMap" and $kcm.metadata == {name: "game-flags", namespace: "game"} and ("viakc" in ($kcm.data."flags.json" | from json | get flags | columns))) "kubeconfig mirror: a push applies the ConfigMap, holding the flags pushed"
+check ((open --raw $"($kcsent).args" | str trim | lines | last) == "--kubeconfig /run/kc.yaml apply -f -" and (open --raw $"($sent).args" | lines | length) == $ssh_before) "kubeconfig mirror: applied by kubectl on the file's identity, nothing over ssh"
+"flags: viakc2: {default: false, local: true}\n" | save -a $"($app)/flags_spec.cue"
+let kn = (object | length)
+let kw = (livex [push $app --untested "kc"] {PATH: ([$bin] | append $env.PATH), KUBECTL_FAIL: "1"})
+check ($kw.exit_code == 0 and (object | length) == $kn + 1 and ($kw.stderr | str contains "the mirror at /run/kc.yaml's game/game-flags failed, so it still serves") and ($kw.stderr | str contains "forbidden")) "kubeconfig mirror: a failing one warns, and the push is written"
+open --raw $"($app)/flags_spec.cue" | str replace 'configMap: "game-flags"}' 'configMap: "game-flags", required: true}' | save -f $"($app)/flags_spec.cue"
+"flags: viakc3: {default: false, local: true}\n" | save -a $"($app)/flags_spec.cue"
+let kr = (livex [push $app --untested "kc"] {PATH: ([$bin] | append $env.PATH), KUBECTL_FAIL: "1"})
+check ($kr.exit_code != 0 and ($kr.stderr | str contains "the mirror at /run/kc.yaml's game/game-flags failed: forbidden")) "kubeconfig mirror: a required one that fails fails the push"
+# OFREP by the door: no stand-in, no node to ask, so the site's /ofrep/ is the way, which does not serve a server-only flag.
+open --raw $"($app)/flags_spec.cue" | str replace 'flags: premium: {default: false' 'flags: premium: {default: true' | save -f $"($app)/flags_spec.cue"
+let kwrap = {PRONTO_FLAGS_CASES_WRAP: "env"}
+let kn0 = (object | length)
+let nowrap = (livex [push $app --sync premium] {PATH: ([$bin] | append $env.PATH), FLAGS_OFREP_CMD: ""})
+check ($nowrap.exit_code != 0 and ($nowrap.stderr | str contains "must run jailed") and (object | length) == $kn0) "kubeconfig mirror: a flip with cases and no wrap is refused before a write"
+let sep = (livex [push $app --sync premium] {PATH: ([$bin] | append $env.PATH), FLAGS_OFREP_CMD: "", PRONTO_FLAGS_CASES_WRAP: "env ;"})
+check ($sep.exit_code != 0 and ($sep.stderr | str contains "shell separator") and (object | length) == $kn0) "kubeconfig mirror: a wrap ending in a separator is refused"
+let kf = (livex [push $app --sync premium] ({PATH: ([$bin] | append $env.PATH), FLAGS_OFREP_CMD: ""} | merge $kwrap))
+check ($kf.exit_code == 0 and ($kf.stdout | str contains "premium is not a client flag: the site's /ofrep/ does not serve it") and (open --raw $"($sent).args" | lines | length) == $ssh_before) "kubeconfig mirror: a flip asks the site's /ofrep/, never ssh"
+# One of the two, never both nor none.
+"flagsLive: mirrors: [{ssh: \"ops@node.example\", kubeconfig: \"/run/kc.yaml\", namespace: \"game\", configMap: \"game-flags\"}]\n" | save -a $"($app)/flags_spec.cue"
+let two = (do { cd $app; ^$real exec -- cue export . -e flagsLive.mirrors --out json } | complete)
+check ($two.exit_code != 0) "kubeconfig mirror: ssh and kubeconfig together are refused"
+$spec_ssh | save -f $"($app)/flags_spec.cue"
+full-spec false "light"
+livex [push $app --sync premium --untested "reset"] | ignore
+$spec_ssh | save -f $"($app)/flags_spec.cue"
 
 # A dry run never reaches a write. gcloud refuses anything but a read and notes it (FAKE_GCLOUD_READONLY), a
 # mirror is set, and push, rollback and setup run under --dry-run and under PRONTO_FLAGS_DRY_RUN: no version,
