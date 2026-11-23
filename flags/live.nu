@@ -773,6 +773,7 @@ def restore [at: record, app: path, to: string, now: string, names: string, why:
 # Changes the live flags, for everyone at once, in one version (the owner, 2026-11-11: "drop the requirement of
 # testers for flag flips"; PRONTO-284). A flip builds and launches no stack: the pull request's gate ran the flag's
 # cases at hand, every flag being on there.
+#   0. a flag that goes on needs a `production` scenario naming it, or the owner's `liveWaived` in the spec (PRONTO-439), --untested or not;
 #   1. a flag whose reach changes (default, accounts or targeting) or that is new and not off needs cases (`cases`: scenarios or unit cases that name
 #      it); with none the push is refused, or goes on with --untested "<why>";
 #   2. the flags as the spec says them are written (stage=all);
@@ -824,6 +825,19 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 		error make {msg: $"a push changes ($bare | str join ', '), which has no cases: name the flag in a scenario's `flags` \(tests/scenarios/*.cue\) or a unit case's \(tests/unit/*.cue\); `pronto-flags cases` lists them; or push with --untested \"<why>\""}
 	}
 	let live = ($all | where {|c| $c.production | is-not-empty })
+	# The production check (PRONTO-439, the owner, 2026-11-12: "When you implement new features, always implement with the
+	# production check verification"): a flip needs a `production` scenario that names the flag, or the owner's words
+	# waiving it (`liveWaived`, the spec's). --untested answers for cases only: it never stands in for this, since the
+	# production check is what a flip is for, and a waiver is the owner's to give, not the operator's flag to type.
+	# A flag turned off is never asked (it is in `off`, not `all`), nor one that only gains accounts while its default stays
+	# false (it is on for no one yet); a scenario that signs in is listed, not run, so no check.
+	let spec_flags = (cue-of $app flags | default {})
+	let waivers = ($all | where {|c| ($c.production | is-empty) and ((default-of ($doc.flags | get $c.flag)) != false) } | each {|c| {flag: $c.flag, why: ($spec_flags | get -o $c.flag | default {} | get -o liveWaived | default "")} })
+	let unchecked = ($waivers | where why == "" | get flag)
+	if ($unchecked | is-not-empty) {
+		error make {msg: $"a push turns on ($unchecked | str join ', '), which has no production check: a feature ships with a live, anonymous, read-only check of itself. Either add a scenario with `production: true` naming the flag in `flags` \(tests/scenarios/*.cue; skills/pronto-issue/SKILL.md, step 2; flags/README.md\), or set `liveWaived` on the flag in flags_spec.cue to the owner's words waiving it, copied from the owner and never written by an agent. --untested does not waive it. Nothing written."}
+	}
+	let waived = ($waivers | each {|w| $"live check waived for ($w.flag): ($w.why)" })
 	let cmds = (cue-of $app flagsCases | default {})
 	if ($live | is-not-empty) and (($at.site | default "" | is-empty) or ($cmds.live? | default "" | is-empty)) {
 		error make {msg: $"($live | get flag | str join ', ') has production cases: say flagsLive.url and flagsCases.live, which run them on production after the flip"}
@@ -834,7 +848,7 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	let names = ($changed | str join "+")
 	# The board hears of default moves only: accounts added to a flag are no flip an issue is done by.
 	let moved = (changes-between $old $doc | where {|c| $c.flag in ($doc.flags | columns) and $c.flag not-in ($m.dropped | get flag) })
-	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if $no_canary != null { $"no canary: ($no_canary)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" })] | compact | str join "; ")
+	let notes = ([(if $untested != null { $"untested: ($untested)" }) (if $no_canary != null { $"no canary: ($no_canary)" }) (if ($off | is-not-empty) { $"turned off: ($off | str join ', ')" }) (if ($waived | is-not-empty) { $waived | str join "; " })] | compact | str join "; ")
 	if $untested != null and ($bare | is-not-empty) { print -e $"flags: WARNING: ($bare | str join ', ') pushed with NO CASES: ($untested)" }
 	let cases_none = if ($bare | is-not-empty) { "untested" } else { "none on production" }
 	if $staged != null {

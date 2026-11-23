@@ -16,6 +16,12 @@ flags: premium: {default: false, local: true, client: true}
 
 - **`client`** (default false, PRONTO-1518) says whether pages read the flag. The door's `/ofrep/` route sets flagd's selector `flagSetId=client` on every request, replacing a page's own, and `client: true` puts the flag in that flag set (`metadata.flagSetId`), so a flag that is not `client` is a 404 through the door and absent from bulk evaluation. The app's services reach flagd without a selector and read every flag. Billing's `billing_grants` is `client: false` for good: it names every grantee's account.
 
+- **`liveWaived`** (PRONTO-439) is the owner's words and their date waiving the production check for the flag. A feature ships with a `production: true` scenario that names the flag in `flags` (a live, anonymous, read-only check, run on production after the flip: the owner, 2026-11-12, "When you implement new features, always implement with the production check verification"). `pronto-flags push` refuses, with nothing written, to turn a flag on (a changed flag that is not fully off) when it has no such scenario that needs no sign-in and no `liveWaived`, naming the flag and the two ways out; `--untested` answers for cases alone and never stands in for it. A waiver is copied from the owner, never written by an agent; the push adds it to the version's journal note (`live check waived for <flag>: <words>`). It is spec only: flagd's document, `flags/flags.sql` and the live object never carry it. Turning a flag off is never refused, and the gate does not ask it of flags already on.
+
+```cue
+flags: premium: {default: false, local: true, client: true, liveWaived: "owner, 2026-11-12: no live page shows it"}
+```
+
 ## Use
 
 From a pronto app:

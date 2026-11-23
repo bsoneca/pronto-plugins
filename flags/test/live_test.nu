@@ -11,6 +11,12 @@ $env.GIT_AUTHOR_EMAIL = "t@example.com"
 $env.GIT_COMMITTER_NAME = "t"
 $env.GIT_COMMITTER_EMAIL = "t@example.com"
 
+# Every flag these fixtures flip has no production scenario (PRONTO-439 asks one, or the owner's `liveWaived`): a pattern
+# constraint in a file of the app's own waives them all, so the cases below keep testing what they test. The production-check
+# cases themselves (the last section) run on an app with no such file.
+def waive-all [app: string, pkg: string] {
+	$"package ($pkg)\nflags: [string]: liveWaived: \"fixture: the cases below flip flags with no production scenario\"\n" | save -f $"($app)/flags_waive.cue"
+}
 const here = path self .
 let real = $env.SAYT_MISE_BIN
 let dir = (mktemp -d)
@@ -23,6 +29,7 @@ mkdir $app
 ' | save $"($app)/.mise.toml"
 ^$real trust -q $"($app)/.mise.toml"
 ^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $app | ignore
+waive-all $app shop
 def spec [accounts: list<string>] {
 	$"package shop
 flags: premium: {default: false, local: true, accounts: ($accounts | to json -r)}
@@ -575,6 +582,7 @@ mkdir $rapp
 ' | save $"($rapp)/.mise.toml"
 ^$real trust -q $"($rapp)/.mise.toml"
 ^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $rapp | ignore
+waive-all $rapp rec
 def rspec [premium: any, extra: string = ""] {
 	$"package rec
 flags: premium: {default: ($premium), local: true}
@@ -896,6 +904,7 @@ mkdir $drill
 ' | save $"($drill)/.mise.toml"
 ^$real trust -q $"($drill)/.mise.toml"
 ^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $drill | ignore
+waive-all $drill drill
 def dspec [broken: bool] {
 	$"package drill
 flags: drill_break_checkout: {default: ($broken), local: true}
@@ -1346,6 +1355,7 @@ mkdir $"($gapp)/spec"
 ' | save $"($gapp)/.mise.toml"
 ^$real trust -q $"($gapp)/.mise.toml"
 ^$real exec deno@2.5.0 -- deno run --no-config --allow-read --allow-write $"($here)/../install.ts" $gapp | ignore
+waive-all $gapp gen
 # The generator: flags_spec.cue says what spec/flags.cue says (its default), as aprende's generate does from its spec.
 let gen_sh = $"($dir)/gen.sh"
 '#!/bin/sh

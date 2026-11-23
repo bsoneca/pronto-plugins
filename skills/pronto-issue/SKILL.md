@@ -25,6 +25,15 @@ other.
    tests/unit/*.cue and tests/scenarios/*.cue), its app (its module), and its flag on a line of
    its own, `Flag: <name>`, the flag declared in the app's `flags_spec.cue`. An objective that
    cannot merge within the day is split into issues, each filed, before it is Ready.
+   **A feature issue is Ready only when its acceptance names a production check** (the owner,
+   2026-11-12: "When you implement new features, always implement with the production check
+   verification"): a scenario marked `production: true` (tests/scenarios/schema.cue) that names the
+   flag in `flags`, a live, anonymous, read-only check of the released feature, which
+   `pronto-flags push` runs on production after the flip. Until PRONTO-419 (a browser production
+   step) lands, a thin check is all it can be: anonymous GETs and an OFREP evaluation of the flag, no
+   sign-in, no write. The other way out is the owner's waiver, quoted in the issue and copied into
+   the flag's `liveWaived` in `flags_spec.cue`: it is the owner's words, copied from the owner, and
+   an agent never writes one. Without either, `pronto-flags push` refuses to turn the flag on.
 3. **Start**: `pronto-devflow start . PRONTO-<n>`. It refuses while its lane is full, a P0
    excepted: a `design` issue takes an architect's slot (the pronto-architect skill), an `infra` issue an SRE's, any other an engineer's (devFlow.team). Then
    say which issues hold the lane's slots and stop.
