@@ -19,6 +19,10 @@ _spare: "{|c| $c.type == 'google_secret_manager_secret_version' and ($c.change.b
 _plan:  "use tools.nu [run-mise]; use cue.mod/pkg/github.com/bsoneca/pronto-plugins/infra/plan.nu *"
 _run:   "{|a| run-mise exec -- tofu -chdir=tofu ...$a | complete}"
 _creds: "{|| {GOOGLE_OAUTH_ACCESS_TOKEN: (gcloud-token)}}"
+// A folder's own refusal of a plan (PRONTO-696): when the folder holds an executable-by-sh `infra-check`, it runs, under the
+// folder's tools, after each plan is read and before it is kept (verify@infra) and again before it is applied (release@infra); a
+// non-zero exit refuses the plan and its output is the reason. A folder without one is as it was.
+_check: "{|rc| if ('infra-check' | path exists) { let r = (run-mise exec -- sh infra-check | complete); if $r.exit_code != 0 { error make {msg: $'infra-check refused the plan: ($r.stdout) ($r.stderr)'} } } }"
 
 say: {
 	setup: rulemap: tofu: {
@@ -52,13 +56,13 @@ say: {
 		cmds: [
 			{do: "use tools.nu [run-mise]; run-mise exec -- cue vet -c ."},
 			{do: "use tools.nu [run-mise]; mkdir tofu; run-mise exec -- cue export . -e plan.tofu --out json | save -f tofu/main.tf.json"},
-			{do: "\(_plan); saved-plan make --tofu \(_run) --creds \(_creds) --spare \(_spare) | ignore"},
+			{do: "\(_plan); saved-plan make --tofu \(_run) --creds \(_creds) --check \(_check) --spare \(_spare) | ignore"},
 		]
 	}
 	// Applies the kept plan whose digest verify@infra printed, INFRA_PLAN_SHA256, and nothing else.
 	release: rulemap: infra: {
 		platform: "infra"
 		stop:     true
-		cmds: [{do: "\(_plan); saved-plan apply ($env.INFRA_PLAN_SHA256? | default '') --tofu \(_run) --creds \(_creds) --spare \(_spare)"}]
+		cmds: [{do: "\(_plan); saved-plan apply ($env.INFRA_PLAN_SHA256? | default '') --tofu \(_run) --creds \(_creds) --check \(_check) --spare \(_spare)"}]
 	}
 }
