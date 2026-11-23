@@ -29,7 +29,7 @@
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import process from "node:process";
 import { causes, outcomes } from "./causes.js";
-import { appendWhy, mutates, lockAcquire, lockRelease, previewRecordStop, previewRecorded, previewRecord, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit, fetchWait } from "./cron.js";
+import { appendWhy, mutates, lockAcquire, lockRelease, previewRecordStop, previewRecorded, previewRecord, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit, fetchWait, previewPortAddresses, previewPortHeld } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -859,6 +859,25 @@ async function previewBody(pv: NonNullable<Command["preview"]>, dir: string, can
     const up = await child(pv.up[0], pv.up.slice(1), dir, env, undefined, "preview");
     if (up.code !== 0) bad.push(`the preview (${pv.up.join(" ")}) failed (exit ${up.code})`);
     else if (!stopped()) {
+      // The port is the forward's alone (cron.js previewPortAddresses): what answers there now is someone else's listener, which the
+      // probes would ask in the preview's place. A listener still closing (the kill rehearsal's own forward on the same port) is given
+      // 30 s to go; one that stays fails the preview, naming what it answered. Only a refused connection is a free address.
+      let held: string[] = [];
+      for (let waited = 0; !stopped(); waited += 2) {
+        held = [];
+        for (const a of previewPortAddresses(pv.origin)) {
+          try { const r = await fetch(`${a}/`, { signal: AbortSignal.timeout(5_000) }); await r.body?.cancel(); held.push(`${a}: ${r.status}`); }
+          catch (e) { if ((e as Error).name === "TimeoutError") held.push(`${a}: no answer in 5 s`); }
+        }
+        if (held.length === 0 || waited >= 30) break;
+        await new Promise((r) => setTimeout(r, 2_000));
+      }
+      // Stopped while waiting: the stop is the run's cause, not the port.
+      if (stopped()) held = [];
+      const why = previewPortHeld(pv.origin, held);
+      if (why) bad.push(why);
+    }
+    if (up.code === 0 && !bad.length && !stopped()) {
       // In a process group of its own, so ending it ends the ssh forward and what it started; its stdin stays open (nothing
       // is written to it), which is how the remote side knows to stop: it reads it until the connection closes.
       reach = new Deno.Command("perl", { args: ["-e", "setpgrp(0,0); exec @ARGV or die $!", "--", ...pv.reach], cwd: dir, env, stdin: "piped", stdout: "null", stderr: "null" }).spawn();
