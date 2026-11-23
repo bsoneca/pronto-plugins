@@ -283,6 +283,15 @@ flagsLive?: {
 }
 flagsCases?: #FlagsCases
 
+// The file `pronto-flags record` writes a flip's default into, relative to the app's folder: where
+// `flags: <name>: {` is said, with its `default:` a literal. It is flags_spec.cue unless the app
+// generates that file from a source of its own (aprende's spec/flags.cue), which it names here, since
+// the next `generate` would revert an edit made to the generated one.
+#FlagsRecord: {
+	file: *"flags_spec.cue" | (string & =~"\\.cue$" & !~"^/" & !~"(^|/)\\.\\.(/|$)")
+}
+flagsRecord?: #FlagsRecord
+
 code: capabilities: hatches: flagd: {
 	kind: "container"
 	note: "pronto-flags' flagd: evaluates the app's feature flags (flags_spec.cue) over OFREP, behind the door's /ofrep/"
