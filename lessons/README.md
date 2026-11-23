@@ -10,12 +10,11 @@ complaints (>= 8), chapters}`, `#Chapter{id, moves, shown, claim, intro, outro, 
 token; `steps` is keyed by ply (`"2": {say, wrong}`). Every line is a `#Line`, closed over the course's `locales`: a
 missing or extra translation fails `cue vet`. `example.cue` is a small valid course.
 
-**No line names a move before it is played** (PRONTO-1736: the page holds no answers, so a line that spoke one would hand it over).
-For each ply the player moves, its token (a literal substring, in every locale) is in none of the lines read before it: the intro,
-the part's complaints, the `say` of every step before that ply, and the `wrong` lines of every step up to it. The `say` of the ply
-itself and later, and the outro, are free: the move is on the board. `cue vet` refuses the course otherwise (`_noTokenSpoken`). This
-sees only the tokens as written: an app whose players read moves in another notation (Bonk Chess: SAN) adds its own check of that
-notation as a unit case.
+**No line names a move the player has yet to find** (PRONTO-1736). The page holds no answer, but every line of every chapter ships
+whole in the message catalogues, so a line that named a move would hand it over whenever it is read. `cue vet` therefore refuses a
+course where any line (intro, outro, `say`, `wrong`, the complaints of any part) contains, in any locale and whatever its case, the
+token of a ply the player moves (from `shown` on, any chapter: `_noTokenSpoken`). It sees only the tokens as written: an app whose
+players read moves in another notation (Bonk Chess: SAN) adds its own check of that notation as a unit case.
 
 ## Adapter contract (`app/lessons.js`)
 
@@ -148,8 +147,8 @@ steps or counters nobody played) and decide what to do with them.
 3. Writes the board adapter for its page, `{start, legal, token, apply, render}` (the contract above), and calls
    `createLesson({course, part, chapter, adapter, server, state})` with `courses` from `lessons_spec.js`, `state` the row
    `lesson_start` returned and `server.move(step, token)` a promise of the row `lesson_move` returns. The page holds no move
-   (no `moves`, no `claim`), but the lines of the message catalogues ship whole: a line must not name a move at or after its own
-   ply (cue vet does not check the words).
+   (no `moves`, no `claim`), but the lines of the message catalogues ship whole: no line may name a move the player moves
+   (`cue vet` checks the tokens as written, not other notations: add a unit case for those).
 4. Defines the three SQL hooks in a raw migration of its own, named after the plugin's two, in schema `lessons_app`:
    `price(who uuid) returns int`, `pay(who uuid, entry text, amount int) returns void`, `reward(who uuid, entry text, amount
    int) returns int`; each `DROP FUNCTION IF EXISTS` then `CREATE FUNCTION`, then `REVOKE ALL ... FROM PUBLIC` again (a CREATE gives

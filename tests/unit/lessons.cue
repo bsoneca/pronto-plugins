@@ -151,13 +151,16 @@ cases: {
 		{call: "toy.vets", args: ["stepOnOtherSide"], expect: false},
 		{call: "toy.vets", args: ["duplicateChapterAcrossParts"], expect: false},
 		{call: "toy.vets", args: ["duplicateChapterWithinPart"], expect: false},
-		{call: "toy.vets", args: ["introNamesFirst"], expect: false, why: "the intro is read before ply 0: it names a1"},
-		{call: "toy.vets", args: ["introNamesLater"], expect: false, why: "the intro is read before every ply: it names a3, in one locale"},
-		{call: "toy.vets", args: ["sayNamesNext"], expect: false, why: "the say of step 2 is read before ply 4: it names a3, in one locale"},
-		{call: "toy.vets", args: ["sayNamesOwnPly"], expect: true, why: "the say of step 2 comes after ply 2's move: a2 is on the board"},
-		{call: "toy.vets", args: ["wrongNamesOwnPly"], expect: false, why: "a wrong line of step 2 is read while ply 2 is open: it names a2"},
-		{call: "toy.vets", args: ["complaintNamesToken"], expect: false, why: "a complaint can come at any ply: it names a3"},
-		{call: "toy.vets", args: ["introNamesOtherSideToken"], expect: false, why: "the second part's player moves the odd plies: b2 is hers"},
+		{call: "toy.vets", args: ["introNamesFirst"], expect: false, why: "the intro names a1, the first token to find"},
+		{call: "toy.vets", args: ["introNamesLater"], expect: false, why: "the intro names a3, in one locale"},
+		{call: "toy.vets", args: ["sayNamesNext"], expect: false, why: "a say names a3, in one locale"},
+		{call: "toy.vets", args: ["sayNamesOwnPly"], expect: false, why: "the catalogue ships whole: the say of step 2 is in the page before ply 2 is played"},
+		{call: "toy.vets", args: ["wrongNamesOwnPly"], expect: false, why: "a wrong line names a2"},
+		{call: "toy.vets", args: ["outroNamesToken"], expect: false, why: "the outro is in the page from the start too"},
+		{call: "toy.vets", args: ["complaintNamesToken"], expect: false, why: "a complaint can come at any ply"},
+		{call: "toy.vets", args: ["otherChapterNamesToken"], expect: false, why: "a line of one chapter names b2, a token of another part's chapter"},
+		{call: "toy.vets", args: ["otherCaseNamesToken"], expect: false, why: "case does not hide a token"},
+		{call: "toy.vets", args: ["unrelatedSquare"], expect: true, why: "a square no player ply moves to is no answer"},
 	]}
 
 	// ---- the database half ----

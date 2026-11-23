@@ -21,6 +21,22 @@ import (
 	// One line of speech: one non-empty text per locale of the course, no more and no fewer.
 	#Line: {for l in locales {(l): string & !=""}}
 
+	// No line names a move the player has yet to find (PRONTO-1736). The page holds no answer, but every line of every chapter ships
+	// whole in the message catalogues, so no line of the course, whenever it is read, may contain the token of a ply the
+	// player moves (from `shown` on, in any chapter), in any locale, whatever its case. An app whose players read moves in another
+	// notation (SAN) adds its own check for that notation.
+	_playerTokens: [for pt in parts for ch in pt.chapters for p in list.Range(ch.shown, len(ch.moves), 1) if p mod 2 == pt.player if ch.moves[p] != "" {strings.ToLower(ch.moves[p])}]
+	_lines: {for l in locales {(l): list.Concat([
+		[for pt in parts for c in pt.complaints {strings.ToLower(c[l])}],
+		[for pt in parts for ch in pt.chapters {strings.ToLower(ch.intro[l])}],
+		[for pt in parts for ch in pt.chapters {strings.ToLower(ch.outro[l])}],
+		[for pt in parts for ch in pt.chapters for _, st in ch.steps if st.say != _|_ {strings.ToLower(st.say[l])}],
+		[for pt in parts for ch in pt.chapters for _, st in ch.steps if st.wrong != _|_ for w in st.wrong {strings.ToLower(w[l])}],
+	])}}
+	_noTokenSpoken: {for l in locales for t in _playerTokens {
+		"\(l)/\(t)": true & (len([for x in _lines[l] if strings.Contains(x, t) {x}]) == 0)
+	}}
+
 	// A chapter id is unique within the course, whichever part holds it.
 	_uniqueChapters: [for p in parts for c in p.chapters {c.id}] & list.UniqueItems()
 
@@ -59,21 +75,6 @@ import (
 			}
 			_stepKeys: {for k, _ in steps {
 				(k): true & (strconv.Atoi(k) >= shown) & (strconv.Atoi(k) < len(moves)) & (strconv.Atoi(k) mod 2 == player)
-			}}
-
-			// No line a player reads before a ply names that ply's move (PRONTO-1736: a token spoken early gives the answer to the
-			// page). Before the player's ply p: the intro, the complaints, every `say` of a step before p (said after that step's
-			// move) and every `wrong` of a step up to p. The `say` of p and later, and the outro, are free: the move is on the board.
-			// The token is the literal string, in every locale. An app whose players read moves in another notation (SAN) adds its
-			// own check for that notation.
-			_playerPlies: [for p in list.Range(shown, len(moves), 1) if p mod 2 == player {p}]
-			_noTokenSpoken: {for l in locales for p in _playerPlies if moves[p] != "" {
-				"\(l)/\(p)": true & (len([for t in list.Concat([
-					[intro[l]],
-					[for c in complaints {c[l]}],
-					[for k, st in steps if strconv.Atoi(k) < p if st.say != _|_ {st.say[l]}],
-					[for k, st in steps if strconv.Atoi(k) <= p if st.wrong != _|_ for w in st.wrong {w[l]}],
-				]) if strings.Contains(t, moves[p]) {t}]) == 0)
 			}}
 		}
 	}
