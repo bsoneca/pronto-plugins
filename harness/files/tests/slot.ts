@@ -118,7 +118,7 @@
 //   integrate@k8s, is also admitted only while the machine has STACK_MIN_FREE_PCT (else CUE_MIN_FREE_PCT, 20) % of its memory
 //   free and, once it has run, the memory available (vm_stat) its last peak needed (the resident size of everything it started,
 //   kept in ~/.cache/pronto/slot-mem): the kernel killed Studio's helm when swap was full. The head of the line on a pool
-//   holding no other heavy claim is never vetoed. A heavy run that fails while the machine fell under STACK_STARVED_PCT (5) %
+//   holding no other heavy claim is never vetoed. A heavy run that is killed (SIGKILL, or exit 137) while the machine fell under STACK_STARVED_PCT (5) %
 //   free says "no verdict: memory" and exits 3. A release waits for memory too, and so may miss its gap.
 //
 //   A claim that does not wait (claim(..., false), as a rehearsal's extra lanes) is asked once, in its
@@ -525,10 +525,12 @@ export const availableFrom = (text: string, pageSize: number) => {
   for (const m of text.matchAll(/^Pages (?:free|inactive|speculative):\s+(\d+)\./gm)) pages += Number(m[1]);
   return Math.round(pages * pageSize / 2 ** 30 * 100) / 100;
 };
-// Whether a run that failed died of the machine's memory: its exit is not 0 and the machine's free memory (%, the lowest
-// seen while it ran; null when unread) fell under `floor`. Not the sampler's own failure (125): that one is the job's.
-export const starvedRun = (minPct: number | null, code: number, floor: number) =>
-  code !== 0 && code !== 125 && minPct !== null && minPct < floor;
+// Whether a run that failed died of the machine's memory: the machine's free memory (%, the lowest seen while it ran;
+// null when unread) fell under `floor` AND something was killed: the run's root by SIGKILL, or its exit is 137 (128+9, what a
+// shell reports for a child the kernel killed). A plain failure under low memory stays a failure, so a real bug is never
+// rerun as "no verdict".
+export const starvedRun = (minPct: number | null, code: number, signal: string | null, floor: number) =>
+  minPct !== null && minPct < floor && (signal === "SIGKILL" || code === 137);
 // A holder whose child has been dead for 60 s or more (`deadSince`, ms since the epoch; 0 = not seen dead)
 // is stuck: it holds no memory.
 export const stuck = (deadSince: number, now: number) => deadSince > 0 && now - deadSince > 60_000;
@@ -2494,7 +2496,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
   }
   // A run that failed while the machine was out of memory gave no verdict: said so, with the no-verdict exit, so
   // release-cron names the cause (a process it started was probably killed by the kernel, as Studio's helm was).
-  const starved = heavy && starvedRun(lowestFree, status.code, Number(Deno.env.get("STACK_STARVED_PCT") ?? 5));
+  const starved = heavy && starvedRun(lowestFree, status.code, status.signal, Number(Deno.env.get("STACK_STARVED_PCT") ?? 5));
   if (starved) console.error(`slot: ${what}: no verdict: memory (the machine fell to ${lowestFree}% free while it ran; a process it started was likely killed by the kernel)`);
   // Its peak, for the next run's claim. A run that failed or was killed may have stopped before its
   // peak (a missing file, a bad flag): its peak only raises what was learned. One that ended before
