@@ -89,9 +89,8 @@ export async function sign(secret: string, claims: Record<string, unknown>): Pro
   return `${head}.${body}.${b64u(mac)}`;
 }
 
-/** The claims of a live HS256 token of this secret, else null: the header must say HS256, the MAC must
- * hold and `exp` must be a number in the future. */
-export async function verify(secret: string, token: string): Promise<Record<string, unknown> | null> {
+/** The claims of an HS256 token of this secret, live or not, else null: the header must say HS256 and the MAC must hold. */
+async function signed(secret: string, token: string): Promise<Record<string, unknown> | null> {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   try {
@@ -99,11 +98,18 @@ export async function verify(secret: string, token: string): Promise<Record<stri
     if (head?.alg !== "HS256") return null;
     if (!(await crypto.subtle.verify("HMAC", await hmacKey(secret), unb64u(parts[2]), enc.encode(`${parts[0]}.${parts[1]}`)))) return null;
     const claims = JSON.parse(dec.decode(unb64u(parts[1])));
-    if (typeof claims !== "object" || claims === null || typeof claims.exp !== "number") return null;
-    return claims.exp <= Math.floor(Date.now() / 1000) ? null : claims;
+    return typeof claims === "object" && claims !== null ? claims : null;
   } catch {
     return null;
   }
+}
+
+/** The claims of a live HS256 token of this secret, else null: the header must say HS256, the MAC must
+ * hold and `exp` must be a number in the future. */
+export async function verify(secret: string, token: string): Promise<Record<string, unknown> | null> {
+  const claims = await signed(secret, token);
+  if (claims === null || typeof claims.exp !== "number") return null;
+  return claims.exp <= Math.floor(Date.now() / 1000) ? null : claims;
 }
 
 // --- Responses ---
@@ -229,17 +235,24 @@ export async function keyguard(cfg: Config, req: Request): Promise<Response> {
   return new Response(null, { status: 204 });
 }
 
-/** GET /auth/keyscope, for the door's forward_auth first thing in the `/crud/*`, `/api/v1/*` and `/blob-claim/*`
- * handles: a key's token is held to its scopes there, 403 when `scp` lacks `read` on a GET, HEAD or OPTIONS (the
- * method forward_auth sends as `X-Forwarded-Method`) or `write` on any other, and no method at all is a write. A
- * token with no `kid`, no token and a token that is no session pass (204): the service behind answers those. */
+/** GET /auth/keyscope, for the door's forward_auth first thing in the `/crud/*`, `/api/v1/*`, `/blob-claim/*` and
+ * `/blobs/*` handles: a key's token is held to its scopes there, 403 when `scp` lacks `read` on a GET, HEAD or
+ * OPTIONS (the method forward_auth sends as `X-Forwarded-Method`) or `write` on any other, and no method at all is a
+ * write. No Authorization header, and a token with no `kid`, pass (204): the service behind answers those.
+ * What reads the token behind the door is more lenient than `subjectOf`, so a request that is not exactly
+ * `Bearer <token>` of this secret is refused here (401), never passed unchecked: the scheme in any case and any
+ * white space (PostgREST accepts them), a header sent twice (joined with a comma), and a token past its `exp` by
+ * the clock skew PostgREST allows are all a key's token to it. */
 export async function keyscope(cfg: Config, req: Request): Promise<Response> {
-  const subject = await subjectOf(cfg, req);
-  if (subject === "refused" || !subject.claims || !("kid" in subject.claims)) return new Response(null, { status: 204 });
-  const scp = subject.claims.scp;
+  const auth = req.headers.get("authorization");
+  if (auth === null) return new Response(null, { status: 204 });
+  const token = /^bearer\s+(\S+)\s*$/i.exec(auth)?.[1];
+  const claims = token ? await signed(cfg.secret, token) : null;
+  if (claims === null) return fail(401, "invalid token");
+  if (!("kid" in claims)) return new Response(null, { status: 204 });
   const method = (req.headers.get("x-forwarded-method") ?? "").toUpperCase();
   const need = method === "GET" || method === "HEAD" || method === "OPTIONS" ? "read" : "write";
-  if (!Array.isArray(scp) || !scp.includes(need)) return fail(403, "key scope");
+  if (!Array.isArray(claims.scp) || !claims.scp.includes(need)) return fail(403, "key scope");
   return new Response(null, { status: 204 });
 }
 

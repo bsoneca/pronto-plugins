@@ -1,6 +1,6 @@
 // The door's routes to the keys service (PRONTO-740): blocks spliced into the app's docker/Caddyfile, the first
 // lines of its top-level `handle /auth/*` and the scope guard, the first directive of each of its `handle /crud/*`,
-// `/api/v1/*` and `/blob-claim/*`, an earlier copy of each taken out first (idempotent).
+// `/api/v1/*`, `/blob-claim/*` and `/blobs/*`, an earlier copy of each taken out first (idempotent).
 //   route.ts [route] <app-dir>
 // bin/pronto-keys copies this file into the app, where its generate step runs it after pronto's writer.
 // The marker text is #523's, unchanged: an app generated with that version has its block taken out by it.
@@ -12,7 +12,7 @@ export const END = "  # keys:end";
 export const SCOPE_BEGIN = "    # keys-scope:begin — a key's token is held to its scopes on this path, by the keys service (PRONTO-740)";
 export const SCOPE_END = "    # keys-scope:end";
 /** The handles that carry the app's data, where a key's token is held to its scopes. */
-export const SCOPED = ["/crud/*", "/api/v1/*", "/blob-claim/*"];
+export const SCOPED = ["/crud/*", "/api/v1/*", "/blob-claim/*", "/blobs/*"];
 export const UPSTREAM = "{$PRONTO_UPSTREAM_KEYS:keys:8702}";
 
 // Everything stays inside the app's own `handle /auth/*`, never beside its top-level handles: Caddy sorts those with a
@@ -41,8 +41,8 @@ export const ROUTES = [
 ];
 
 // The scope guard is the same form: a `forward_auth` as the first directive inside the handle, never at the top level
-// (see above). forward_auth runs ahead of the handle's own directives (`uri strip_prefix`, `route`, `reverse_proxy`)
-// whichever order they are written in, and a handle runs only after the door's own guard of the Dapr API
+// (see above). forward_auth runs ahead of the handle's `route` and `reverse_proxy`, and after its `uri` and `rewrite`
+// (directive order; the guard reads only the method), and a handle runs only after the door's own guard of the Dapr API
 // (doorguard's `handle @daprapi`, a handle of its own that Caddy runs first and answers 404), so a path the guard
 // shuts never reaches it. forward_auth sends the original method as `X-Forwarded-Method`: the keys service refuses a
 // key's token without `read` on a GET, HEAD or OPTIONS and without `write` on any other method, and passes any

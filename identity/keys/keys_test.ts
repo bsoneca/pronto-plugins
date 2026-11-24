@@ -259,10 +259,19 @@ Deno.test("the key scope guard holds a key's token to its scopes by the method f
   for (const m of ["POST", "PUT", "PATCH", "DELETE", undefined, "", "BREW"]) assertEquals([m, await scope(readOnly, m), await scope(writeOnly, m), await scope(both, m)], [m, 403, 204, 204]);
   // A key's token with no scp at all, or a malformed one, holds no scope.
   for (const scp of [undefined, "read", [1], []]) assertEquals(await scope(await session(ANA, { kid: crypto.randomUUID(), scp }), "GET"), 403);
-  // Not a key's token: a session, none, garbage, a guest's, one of another secret. The service behind answers those.
-  for (const t of [undefined, "garbage", await session(ANA), await session(ANA, { guest: true }), await session(ANA, { kid: "x", scp: [] }, "another secret")]) {
+  // Not a key's token: a session, none, a guest's. The service behind answers those.
+  for (const t of [undefined, await session(ANA), await session(ANA, { guest: true })]) {
     for (const m of ["GET", "POST", undefined]) assertEquals([m, await scope(t, m)], [m, 204]);
   }
+  // What PostgREST reads as a token and `subjectOf` does not is refused here, never passed: a token that is not this secret's, the
+  // scheme in any case or with more white space, the header sent twice (joined with a comma), a key's token just past its exp.
+  const asHeader = async (authorization: string, method = "POST") => (await call("GET", "/auth/keyscope", undefined, undefined, { authorization, "x-forwarded-method": method })).status;
+  for (const t of ["garbage", await session(ANA, { kid: "x", scp: ["read", "write"] }, "another secret")]) assertEquals(await scope(t, "POST"), 401);
+  assertEquals(await asHeader(`Bearer ${readOnly}`), 403);
+  for (const h of [`bearer ${readOnly}`, `BEARER ${readOnly}`, `Bearer  ${readOnly}`, `Bearer\t${readOnly} `]) assertEquals([h.slice(0, 8), await asHeader(h)], [h.slice(0, 8), 403]);
+  for (const h of [`Bearer ${readOnly}, x`, `x, Bearer ${readOnly}`, `Basic ${readOnly}`, `${readOnly}`, "Bearer", "Bearer ", "Bearer a b"]) assertEquals([h.slice(0, 12), await asHeader(h)], [h.slice(0, 12), 401]);
+  const lapsed = await sign(SECRET, { role: "app_user", iss: STACK_ISSUER, sub: ANA, kid: crypto.randomUUID(), scp: ["read"], exp: Math.floor(Date.now() / 1000) - 10 });
+  assertEquals([await scope(lapsed, "POST"), await scope(lapsed, "GET")], [403, 204]);
   assertEquals((await call("POST", "/auth/keyscope", readOnly)).status, 404);
 });
 

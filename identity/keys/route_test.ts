@@ -24,6 +24,11 @@ const caddy = `(app) {
       reverse_proxy {$PRONTO_UPSTREAM_CRUD:crud:3000}
     }
   }
+  handle /blobs/* {
+    route {
+      reverse_proxy {$PRONTO_UPSTREAM_CRUD:crud:3000}
+    }
+  }
   handle /auth/* {
     reverse_proxy {$PRONTO_UPSTREAM_AUTH:auth:9999}
   }
@@ -375,7 +380,7 @@ Deno.test({
       assertEquals(await ask("GET", "/api/v1/t", readOnly), [200, "crud GET /api/v1/t"]);
       assertEquals(await ask("GET", "/blob-claim/x", both), [200, "crud GET /blob-claim/x"]);
       assertEquals((await ask("HEAD", "/crud/t", readOnly))[0], 200);
-      for (const path of ["/crud/t", "/api/v1/t", "/blob-claim/x"]) {
+      for (const path of ["/crud/t", "/api/v1/t", "/blob-claim/x", "/blobs/x"]) {
         assertEquals((await ask("POST", path, readOnly))[0], 403, `a read-only key's POST ${path}`);
         assertEquals((await ask("DELETE", path, readOnly))[0], 403, `a read-only key's DELETE ${path}`);
         assertEquals((await ask("GET", path, writeOnly))[0], 403, `a write-only key's GET ${path}`);
@@ -384,8 +389,20 @@ Deno.test({
       assertEquals((await ask("POST", "/crud/t", writeOnly))[0], 200);
       assertEquals((await ask("POST", "/api/v1/t", writeOnly))[0], 200);
       assertEquals((await ask("POST", "/blob-claim/x", writeOnly))[0], 200);
+      assertEquals((await ask("PUT", "/blobs/x", writeOnly))[0], 200);
+      assertEquals([(await ask("PUT", "/blobs/x", readOnly))[0], (await ask("GET", "/blobs/x", readOnly))[0]], [403, 200]);
       for (const m of ["GET", "POST"]) for (const path of ["/crud/t", "/api/v1/t"]) assertEquals((await ask(m, path, both))[0], 200);
       for (const token of [session, undefined]) assertEquals((await ask("POST", "/crud/t", token))[0], 200, "a session's write");
+      // What the data service reads as a key's token and the guard might not (PostgREST takes the scheme in any case, extra white space,
+      // a first token before a comma and a token up to its clock skew past exp) is refused at the door, never passed to a write.
+      const lapsed = await sign(secret, { ...claims, kid: crypto.randomUUID(), scp: ["read"], exp: Math.floor(Date.now() / 1000) - 10 });
+      for (const h of [`bearer ${readOnly}`, `BEARER ${readOnly}`, `Bearer  ${readOnly}`, `Bearer ${readOnly}, x`, `Bearer ${lapsed}`]) {
+        for (const path of ["/crud/t", "/api/v1/t", "/blobs/x"]) {
+          const r = await fetch(`http://127.0.0.1:${doorPort}${path}`, { method: "POST", headers: { authorization: h } });
+          assert([401, 403].includes(r.status), `${h.slice(0, 14)} POST ${path}: ${r.status}`);
+          await r.body?.cancel();
+        }
+      }
       // The door's own guard of the Dapr API answers before the scope guard: a key's token gets its 404, not a 403.
       for (const token of [readOnly, writeOnly, undefined]) for (const m of ["GET", "POST"]) assertEquals((await ask(m, "/crud/v1.0/metadata", token))[0], 404, `${m} /crud/v1.0/metadata`);
       // The /auth/* guard of #526 is as it was: a key's token is refused there, and a session reaches the auth service.
