@@ -30,6 +30,17 @@ _tunedPreview: {
 }
 
 cases: {
+	"the initdb Job waits for the database to take a connection before upstream's script, and nothing else of it changes": {
+		_job: [for o in (_tuned & {release: {}}).objects if o.kind == "Job" && o.metadata.name == "app-initdb" {o}][0]
+		_got: {
+			command: _job.spec.template.spec.containers[0].command
+			image:   _job.spec.template.spec.containers[0].image
+		}
+		_want: {
+			command: ["bash", "-c", "for i in $(seq 30); do psql -XtAc 'SELECT 1' >/dev/null 2>&1 && break; sleep 2; done\nset -euo pipefail\necho built"]
+			image: =~"app-database:17@sha256:"
+		}
+	}
 	"scale sets the named Deployments' replicas and leaves the rest as upstream renders them": {
 		_got:  (_tuned & {release: scale: {"app-crud": {replicas: 3, preview: 2}, "app-caddy": {replicas: 2}}}).replicas
 		_want: {"app-crud": 3, "app-caddy": 2, "app-ticker": 1, "app-electric": 1}

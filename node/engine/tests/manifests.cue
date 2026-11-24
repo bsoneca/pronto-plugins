@@ -24,12 +24,12 @@ _production: schema.#Manifests & {
 }
 
 cases: {
-	"production: the namespace is labelled, nothing else of upstream's changes": {
+	"production: the namespace is labelled, nothing else of upstream's changes but the initdb Job's wait (scale_database.cue)": {
 		_nsLabels:  [for o in _production.objects if o.kind == "Namespace" {o.metadata.labels}][0]
 		_got:       _nsLabels
 		_want:      {"pronto.dev/release": "app"}
-		_untouched: [for o in _production.objects if o.kind != "Namespace" {o}]
-		_upstream:  [for o in _production.upstream if o.kind != "Namespace" {o}]
+		_untouched: [for o in _production.objects if o.kind != "Namespace" && o.metadata.name != "app-initdb" {o}]
+		_upstream:  [for o in _production.upstream if o.kind != "Namespace" && o.metadata.name != "app-initdb" {o}]
 		same:       list.MinItems(len(_upstream)) & _untouched
 		same:       _upstream
 	}
