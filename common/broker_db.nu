@@ -8,16 +8,22 @@
 export const postgres = "ghcr.io/cloudnative-pg/postgresql:18.1-standard-trixie@sha256:ec0c0d60f9462b49f4c6f2403fd680ac43a063fc793f5d570a21a3cea8e627b5"
 
 # The database's objects: its generated password, the login Secret (with `url`), the cluster, and its
-# NetworkPolicy (the broker, the operator and the cluster's own instances).
+# NetworkPolicy (the broker, the operator, the metrics' scrape and the cluster's own instances). `backup` is
+# common/db_backup.nu's objects, or null: the cluster then archives its WAL through the barman-cloud plugin to the
+# bucket, and the ObjectStore and the nightly ScheduledBackup follow it.
 export def objects [
 	namespace: string
 	db: string            # The cluster's name, `<broker>-db`
 	part_of: string       # The plugin, as the broker's labels name it: pronto-identity
 	user: string          # The database and its owner
 	broker_labels: record # The broker's pods, which alone of the namespace's reach it
+	backup?: record       # db_backup objects' record, or null for none
 ]: nothing -> list<record> {
 	let db_labels = {"app.kubernetes.io/name": $db, "app.kubernetes.io/part-of": $part_of}
 	let db_meta = {namespace: $namespace, labels: $db_labels}
+	let backup = ($backup | default null)
+	let plugins = (if $backup == null { {} } else { $backup.cluster })
+	let backup_objects = (if $backup == null { [] } else { $backup.objects })
 	[
 		{apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", metadata: ($db_meta | insert name $"($db)-password"), spec: {length: 40, digits: 8, symbols: 0, noUpper: false, allowRepeat: true}}
 		{
@@ -31,14 +37,14 @@ export def objects [
 		}
 		{
 			apiVersion: "postgresql.cnpg.io/v1", kind: "Cluster", metadata: ($db_meta | insert name $db)
-			spec: {
+			spec: ({
 				instances: 1
 				imageName: $postgres
 				storage: {size: "1Gi"}
 				smartShutdownTimeout: 15
 				stopDelay: 120
 				bootstrap: {initdb: {database: $user, owner: $user, secret: {name: $db}}}
-			}
+			} | merge $plugins)
 		}
 		# The database: the broker, the operator, and its own instances.
 		{
@@ -50,9 +56,11 @@ export def objects [
 					{from: [{podSelector: {matchLabels: $broker_labels}}], ports: [{protocol: "TCP", port: 5432}]}
 					{from: [{podSelector: {matchLabels: {"cnpg.io/cluster": $db}}}], ports: [{protocol: "TCP", port: 5432} {protocol: "TCP", port: 8000}]}
 					{from: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "cnpg-system"}}}], ports: [{protocol: "TCP", port: 5432} {protocol: "TCP", port: 8000}]}
+					{from: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "observability"}}}], ports: [{protocol: "TCP", port: 9187}]}
 				]
 			}
 		}
+		...$backup_objects
 	]
 }
 

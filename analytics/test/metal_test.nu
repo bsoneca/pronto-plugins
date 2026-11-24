@@ -78,5 +78,7 @@ let bcluster = ($bdocs | where kind == Cluster | first).spec
 assert equal $bcluster.plugins [{name: barman-cloud.cloudnative-pg.io, isWALArchiver: true, parameters: {barmanObjectName: analytics-db-backup}}]
 assert equal ($bcluster | reject plugins) $cluster.spec "the backup adds only the plugin to the Cluster"
 assert equal (metal backup-objects --bucket s3://bucket/analytics --endpoint https://s3.example.com).cluster {plugins: $bcluster.plugins}
+assert (($dbp | where {|r| ($r.ports | get port) == [9187] } | length) == 1) "the metrics' scrape reaches the database"
+assert error { metal manifests --grafana-domain metrics.example.com --umami-domain umami.example.com --users $users --backup s3://bucket/analytics }
 
 print "metal_test: ok"

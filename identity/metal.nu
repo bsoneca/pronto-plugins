@@ -17,6 +17,7 @@ const here = path self .
 use ../common/sops.nu
 use ../common/airlock.nu [airlock-objects door_port]
 use ../common/broker_db.nu
+use ../common/db_backup.nu
 use ../common/replicas.nu
 const deno = "denoland/deno:distroless-2.5.0@sha256:5c4530d4babe37ded3566803e9498e2b5d643b915cce701d8b7b82f87a86629e"
 const port = 8080
@@ -59,7 +60,10 @@ export def manifests [
 	--door-asked # With --airlock, while it moves (PRONTO-268): each exchange through the door when its tenant asks (its flag signin_door), the broker keeping its secret
 	--door-tenants: string = "" # With --door-asked: the tenants whose flag is asked, PHONE_TENANTS' syntax; every other tenant goes straight to Google, unasked
 	--facebook # The broker offers Facebook (FACEBOOK_APP_ID in --settings): its Secret also holds FACEBOOK_APP_SECRET
+	--backup: string = ""          # The database's backups, s3://bucket/folder (common/db_backup.nu); none when empty
+	--backup-endpoint: string = "" # The bucket's S3 endpoint, https://…
 ]: nothing -> string {
+	if ($backup | is-not-empty) and ($backup_endpoint | is-empty) { error make {msg: "--backup needs --backup-endpoint"} }
 	let labels = {"app.kubernetes.io/name": $name, "app.kubernetes.io/part-of": "pronto-identity"}
 	let lock = $"($name)-airlock"
 	let lock_labels = {"app.kubernetes.io/name": $lock, "app.kubernetes.io/part-of": "pronto-identity"}
@@ -75,7 +79,8 @@ export def manifests [
 	let meta = {namespace: $namespace, labels: $labels}
 	# The broker's database (common/broker_db.nu).
 	let db = $"($name)-db"
-	let database = (broker_db objects $namespace $db "pronto-identity" "identity" $labels)
+	let backup_objects = (if ($backup | is-empty) { null } else { db_backup objects --db $db --bucket $backup --endpoint $backup_endpoint --namespace $namespace --part-of "pronto-identity" })
+	let database = (broker_db objects $namespace $db "pronto-identity" "identity" $labels $backup_objects)
 	if $database_only { return ([{apiVersion: "v1", kind: "Namespace", metadata: {name: $namespace, labels: $labels}}] ++ $database | each { to yaml } | str join "---\n") }
 	# A change to a file is a new pod: the files' digest is the template's.
 	let digest = ($files | each {|f| $sources | at $f.key } | str join "\n" | hash sha256 | str substring 0..15)
@@ -199,8 +204,12 @@ export def main [
 	--airlock # Google's token exchange through the airlock's door beside the broker, which then holds no client secret (PRONTO-268); its Secret also holds GOOGLE_CLIENT_BASIC
 	--door-asked # With --airlock: each exchange through the door when its tenant asks (the app's flag signin_door); the broker keeps its secret until a deploy without it
 	--door-tenants: string = "" # With --door-asked: the tenants whose flag is asked (comma separated, `*` for a port); the others go straight to Google
+	--backup: string = ""          # The database's backups, s3://bucket/folder: required, as --backup-endpoint, unless --no-backup
+	--backup-endpoint: string = "" # The bucket's S3 endpoint, https://…
+	--no-backup                    # Apply the database with no off-node backup: a cluster that had one loses it
 ] {
 	if ([$ssh $kubeconfig $domain $google_client_id] | any { is-empty }) { error make {msg: "--ssh, --kubeconfig, --domain and --google-client-id are all required"} }
+	db_backup require $backup $backup_endpoint $no_backup $"($service)-db"
 	if ($project | is-empty) == ($secrets | is-empty) { error make {msg: "name where the secrets are: --secrets <file>, or --project <Secret Manager's project>"} }
 	# Facebook: the id and the tenants are plain env; the secret is read from the SOPS file, and only from there (Secret Manager holds none).
 	if ($facebook_app_id | is-empty) != ($facebook_tenants | is-empty) { error make {msg: "--facebook-app-id and --facebook-tenants go together"} }
@@ -238,7 +247,7 @@ export def main [
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
 	# A malformed list stops the broker at start, so the rollout below fails rather than serve new subjects.
 	let sector = if ($sectors | is-empty) { [] } else { [{name: "BROKER_SECTORS", value: $sectors}] }
-	let yaml = (manifests --domain $domain --sources (sources) --settings ([{name: "GOOGLE_CLIENT_ID", value: $google_client_id}] ++ $phone ++ $facebook_env ++ $sector) --namespace $namespace --name $service --airlock=$airlock --door-asked=$door_asked --door-tenants=$door_tenants --facebook=$facebook)
+	let yaml = (manifests --domain $domain --sources (sources) --settings ([{name: "GOOGLE_CLIENT_ID", value: $google_client_id}] ++ $phone ++ $facebook_env ++ $sector) --namespace $namespace --name $service --airlock=$airlock --door-asked=$door_asked --door-tenants=$door_tenants --facebook=$facebook --backup $backup --backup-endpoint $backup_endpoint)
 	# The namespace first, so the Secret has somewhere to go before the pod that reads it.
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# The secrets through ssh's stdin alone: never a file, never an argument.
@@ -254,9 +263,12 @@ export def main [
 	}
 	# The broker's database first, and its wait: the broker is replaced only once what it keeps is there to read
 	# (its login's Secret is made in the cluster, then the cluster starts).
-	manifests --database-only --domain $domain --sources (sources) --namespace $namespace --name $service | do $remote $"($kubectl) apply -f -" | print
+	# The backup's keys are there before the archiver starts, and the database is applied with the backup both times.
+	if not $no_backup { db_backup keys-present $remote $kubectl $namespace $"($service)-db-backup-s3" }
+	manifests --database-only --domain $domain --sources (sources) --namespace $namespace --name $service --backup $backup --backup-endpoint $backup_endpoint | do $remote $"($kubectl) apply -f -" | print
 	do $remote $"($kubectl) wait --for=condition=Ready cluster.postgresql.cnpg.io/($service)-db -n ($namespace) --timeout=300s" | print
 	$yaml | do $remote $"($kubectl) apply -f -" | print
+	if not $no_backup { db_backup verify $remote $kubectl $namespace $"($service)-db" }
 	if $airlock {
 		do $remote $"($kubectl) rollout restart deployment/($service)-airlock -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service)-airlock -n ($namespace) --timeout=300s" | print
 	}

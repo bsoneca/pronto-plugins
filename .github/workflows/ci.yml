@@ -290,6 +290,8 @@ jobs:
         run: sayt --script tools.nu nu analytics/test/metal_test.nu
       - name: The billing broker on a metal cluster
         run: sayt --script tools.nu nu billing/test/metal_test.nu
+      - name: GlitchTip on a metal cluster
+        run: sayt --script tools.nu nu errors/test/metal_test.nu
       - name: An app's own airlock on a metal cluster
         run: sayt --script tools.nu nu airlock/test/metal_test.nu
       - name: Test the ads installer
