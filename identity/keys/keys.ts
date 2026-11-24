@@ -229,6 +229,20 @@ export async function keyguard(cfg: Config, req: Request): Promise<Response> {
   return new Response(null, { status: 204 });
 }
 
+/** GET /auth/keyscope, for the door's forward_auth first thing in the `/crud/*`, `/api/v1/*` and `/blob-claim/*`
+ * handles: a key's token is held to its scopes there, 403 when `scp` lacks `read` on a GET, HEAD or OPTIONS (the
+ * method forward_auth sends as `X-Forwarded-Method`) or `write` on any other, and no method at all is a write. A
+ * token with no `kid`, no token and a token that is no session pass (204): the service behind answers those. */
+export async function keyscope(cfg: Config, req: Request): Promise<Response> {
+  const subject = await subjectOf(cfg, req);
+  if (subject === "refused" || !subject.claims || !("kid" in subject.claims)) return new Response(null, { status: 204 });
+  const scp = subject.claims.scp;
+  const method = (req.headers.get("x-forwarded-method") ?? "").toUpperCase();
+  const need = method === "GET" || method === "HEAD" || method === "OPTIONS" ? "read" : "write";
+  if (!Array.isArray(scp) || !scp.includes(need)) return fail(403, "key scope");
+  return new Response(null, { status: 204 });
+}
+
 /** The caller who may hold keys: a signed-in account's own session. A key's token, an upgraded one and
  * a guest are refused, so a key never makes or revokes another. */
 async function holder(cfg: Config, req: Request): Promise<{ id: string } | Response> {
@@ -258,8 +272,8 @@ async function createKey(cfg: Config, db: Db, req: Request): Promise<Response> {
   if (typeof label !== "string" || label.trim() === "" || label.length > KEY_LABEL_MAX) {
     return fail(400, `label required, at most ${KEY_LABEL_MAX} characters`);
   }
-  if (!Array.isArray(scopes) || scopes.length === 0 || !scopes.every((s) => typeof s === "string" && KEY_SCOPE.test(s))) {
-    return fail(400, "scopes required: read, write or machines:<name>");
+  if (!Array.isArray(scopes) || !scopes.every((s) => typeof s === "string" && KEY_SCOPE.test(s)) || !scopes.some((s) => s === "read" || s === "write")) {
+    return fail(400, "scopes required: read and/or write, and machines:<name> besides");
   }
   const key = newKey();
   const hash = await hex(key);
@@ -343,6 +357,7 @@ export function keys(cfg: Config, db: Db): (req: Request) => Promise<Response> {
     try {
       if (req.method === "GET" && path === "/auth/door") return await door(cfg, req);
       if (req.method === "GET" && path === "/auth/keyguard") return await keyguard(cfg, req);
+      if (req.method === "GET" && path === "/auth/keyscope") return await keyscope(cfg, req);
       if (cfg.keysOn) {
         if (req.method === "POST" && path === "/auth/keys") return await createKey(cfg, db, req);
         if (req.method === "GET" && path === "/auth/keys") return await listKeys(cfg, db, req);

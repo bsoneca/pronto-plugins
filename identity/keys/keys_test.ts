@@ -33,10 +33,10 @@ async function stand(cfg: Partial<Config> = {}) {
   const conf = { ...BASE, ...cfg };
   await migrate(db, conf);
   const handle = keys(conf, db);
-  const call = (method: string, path: string, token?: string, body?: unknown) =>
+  const call = (method: string, path: string, token?: string, body?: unknown, headers: Record<string, string> = {}) =>
     handle(new Request("http://keys" + path, {
       method,
-      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), "content-type": "application/json" },
+      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), "content-type": "application/json", ...headers },
       body: body === undefined || method === "GET" ? undefined : JSON.stringify(body),
     }));
   return { pg, db, call, conf };
@@ -135,7 +135,7 @@ Deno.test("a token signed another way, or with no exp, is no session", async () 
 Deno.test("a make is checked: label, scopes and at most five live keys, a revoke frees one", async () => {
   const { call } = await stand();
   const t = await session(ANA);
-  for (const b of [{}, { label: "", scopes: ["read"] }, { label: " ", scopes: ["read"] }, { label: "x".repeat(65), scopes: ["read"] }, { label: "x" }, { label: "x", scopes: [] }, { label: "x", scopes: ["admin"] }, { label: "x", scopes: ["machines:Bad"] }, { label: "x", scopes: [1] }, { label: "x", scopes: "read" }]) {
+  for (const b of [{}, { label: "", scopes: ["read"] }, { label: " ", scopes: ["read"] }, { label: "x".repeat(65), scopes: ["read"] }, { label: "x" }, { label: "x", scopes: [] }, { label: "x", scopes: ["machines:x"] }, { label: "x", scopes: ["machines:x", "machines:y"] }, { label: "x", scopes: ["admin"] }, { label: "x", scopes: ["machines:Bad"] }, { label: "x", scopes: [1] }, { label: "x", scopes: "read" }]) {
     assertEquals((await call("POST", "/auth/keys", t, b)).status, 400, JSON.stringify(b));
   }
   assertEquals((await call("POST", "/auth/keys", t, [1])).status, 400);
@@ -248,6 +248,22 @@ Deno.test("the key guard refuses a key's token and passes every other request", 
   const { token } = await (await call("POST", "/auth/key", undefined, { key: k.key })).json();
   assertEquals((await call("GET", "/auth/keyguard", token)).status, 403);
   for (const t of [undefined, "garbage", await session(ANA), await session(ANA, { guest: true })]) assertEquals((await call("GET", "/auth/keyguard", t)).status, 204);
+});
+
+Deno.test("the key scope guard holds a key's token to its scopes by the method forward_auth forwards, and passes every other request", async () => {
+  const { call } = await stand();
+  const tokenOf = async (scopes: string[]) => (await (await call("POST", "/auth/key", undefined, { key: (await made(call, ANA, scopes)).key })).json()).token as string;
+  const scope = async (token: string | undefined, method?: string) => (await call("GET", "/auth/keyscope", token, undefined, method ? { "x-forwarded-method": method } : {})).status;
+  const readOnly = await tokenOf(["read"]), writeOnly = await tokenOf(["write"]), both = await tokenOf(["read", "write", "machines:bot_1"]);
+  for (const m of ["GET", "HEAD", "OPTIONS", "get"]) assertEquals([m, await scope(readOnly, m), await scope(writeOnly, m), await scope(both, m)], [m, 204, 403, 204]);
+  for (const m of ["POST", "PUT", "PATCH", "DELETE", undefined, "", "BREW"]) assertEquals([m, await scope(readOnly, m), await scope(writeOnly, m), await scope(both, m)], [m, 403, 204, 204]);
+  // A key's token with no scp at all, or a malformed one, holds no scope.
+  for (const scp of [undefined, "read", [1], []]) assertEquals(await scope(await session(ANA, { kid: crypto.randomUUID(), scp }), "GET"), 403);
+  // Not a key's token: a session, none, garbage, a guest's, one of another secret. The service behind answers those.
+  for (const t of [undefined, "garbage", await session(ANA), await session(ANA, { guest: true }), await session(ANA, { kid: "x", scp: [] }, "another secret")]) {
+    for (const m of ["GET", "POST", undefined]) assertEquals([m, await scope(t, m)], [m, 204]);
+  }
+  assertEquals((await call("POST", "/auth/keyscope", readOnly)).status, 404);
 });
 
 Deno.test("a key revoked between its reading and its use gets no token", async () => {

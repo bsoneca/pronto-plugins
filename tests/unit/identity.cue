@@ -4,8 +4,8 @@
 package unit
 
 cases: {
-	"the keys routes name the keys app to the door's Dapr sidecar on both of its routes, and a client's own app id cannot win": {suite: "identity", steps: [
-		{call: "identity.keysRoute", holds: {appId: ["header_up dapr-app-id keys", "header_up dapr-app-id keys"], bounded: 2, nonReplacing: 0}, why: "the guard and the keys paths set the header with header_up, which replaces a client's value"},
+	"the keys routes name the keys app to the door's Dapr sidecar on all three of its forward_auth and proxy lines, and a client's own app id cannot win": {suite: "identity", steps: [
+		{call: "identity.keysRoute", holds: {appId: ["header_up dapr-app-id keys", "header_up dapr-app-id keys", "header_up dapr-app-id keys"], bounded: 3, nonReplacing: 0}, why: "the guard, the keys paths and the scope guard set the header with header_up, which replaces a client's value"},
 	]}
 	"a local broker with no front's image named is refused, and nothing is written": {suite: "identity", steps: [
 		{call: "identity.installed"}, {keep: "out"},

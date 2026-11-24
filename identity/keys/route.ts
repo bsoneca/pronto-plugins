@@ -1,5 +1,6 @@
-// The door's routes to the keys service (PRONTO-740): one block spliced into the app's docker/Caddyfile, the first
-// lines of its top-level `handle /auth/*`, an earlier copy taken out first (idempotent).
+// The door's routes to the keys service (PRONTO-740): blocks spliced into the app's docker/Caddyfile, the first
+// lines of its top-level `handle /auth/*` and the scope guard, the first directive of each of its `handle /crud/*`,
+// `/api/v1/*` and `/blob-claim/*`, an earlier copy of each taken out first (idempotent).
 //   route.ts [route] <app-dir>
 // bin/pronto-keys copies this file into the app, where its generate step runs it after pronto's writer.
 // The marker text is #523's, unchanged: an app generated with that version has its block taken out by it.
@@ -8,6 +9,10 @@ export const ROUTES_END = "    # keys-routes:end";
 // The first version put the guard before the app's first top-level `handle`; it is taken out where an app still has it.
 export const BEGIN = "  # keys:begin — API keys and the door's session check, on the keys service (PRONTO-740)";
 export const END = "  # keys:end";
+export const SCOPE_BEGIN = "    # keys-scope:begin — a key's token is held to its scopes on this path, by the keys service (PRONTO-740)";
+export const SCOPE_END = "    # keys-scope:end";
+/** The handles that carry the app's data, where a key's token is held to its scopes. */
+export const SCOPED = ["/crud/*", "/api/v1/*", "/blob-claim/*"];
 export const UPSTREAM = "{$PRONTO_UPSTREAM_KEYS:keys:8702}";
 
 // Everything stays inside the app's own `handle /auth/*`, never beside its top-level handles: Caddy sorts those with a
@@ -35,16 +40,42 @@ export const ROUTES = [
   "    }",
 ];
 
-/** The Caddyfile with the keys block as the first lines of its `handle /auth/*`; an earlier copy is taken out first. */
+// The scope guard is the same form: a `forward_auth` as the first directive inside the handle, never at the top level
+// (see above). forward_auth runs ahead of the handle's own directives (`uri strip_prefix`, `route`, `reverse_proxy`)
+// whichever order they are written in, and a handle runs only after the door's own guard of the Dapr API
+// (doorguard's `handle @daprapi`, a handle of its own that Caddy runs first and answers 404), so a path the guard
+// shuts never reaches it. forward_auth sends the original method as `X-Forwarded-Method`: the keys service refuses a
+// key's token without `read` on a GET, HEAD or OPTIONS and without `write` on any other method, and passes any
+// request that is not a key's.
+export const SCOPE = [
+  `    forward_auth ${UPSTREAM} {`,
+  "      uri /auth/keyscope",
+  "      header_up dapr-app-id keys",
+  "      import bounded-auth",
+  "    }",
+];
+
+/** The Caddyfile with the keys block as the first lines of its `handle /auth/*` and the scope guard in each of the
+ * data handles it has; an earlier copy of either is taken out first. */
 export function routed(caddyfile: string): string {
   let lines = caddyfile.split("\n");
-  for (const [begin, end] of [[BEGIN, END], [ROUTES_BEGIN, ROUTES_END]]) {
-    const from = lines.indexOf(begin), to = lines.indexOf(end);
-    if (from >= 0 && to > from) lines = [...lines.slice(0, from), ...lines.slice(to + 1)];
+  for (const [begin, end] of [[BEGIN, END], [ROUTES_BEGIN, ROUTES_END], [SCOPE_BEGIN, SCOPE_END]]) {
+    for (let from = lines.indexOf(begin), to = lines.indexOf(end); from >= 0 && to > from; from = lines.indexOf(begin), to = lines.indexOf(end)) {
+      lines = [...lines.slice(0, from), ...lines.slice(to + 1)];
+    }
   }
   const auth = lines.findIndex((l) => /^ {2}handle \/auth\/\* \{$/.test(l));
   if (auth < 0) throw new Error("keys: docker/Caddyfile has no top-level `handle /auth/* {` to place the keys routes in");
-  return [...lines.slice(0, auth + 1), ROUTES_BEGIN, ...ROUTES, ROUTES_END, ...lines.slice(auth + 1)].join("\n");
+  lines = [...lines.slice(0, auth + 1), ROUTES_BEGIN, ...ROUTES, ROUTES_END, ...lines.slice(auth + 1)];
+  let scoped = 0;
+  for (const path of SCOPED) {
+    const at = lines.findIndex((l) => l === `  handle ${path} {`);
+    if (at < 0) continue;
+    lines = [...lines.slice(0, at + 1), SCOPE_BEGIN, ...SCOPE, SCOPE_END, ...lines.slice(at + 1)];
+    scoped++;
+  }
+  if (scoped === 0) throw new Error(`keys: docker/Caddyfile has none of ${SCOPED.map((p) => `\`handle ${p} {\``).join(", ")} to hold a key's scopes in`);
+  return lines.join("\n");
 }
 
 /** Puts the block into the app's docker/Caddyfile, written only when its text changes. */
