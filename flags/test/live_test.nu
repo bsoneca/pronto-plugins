@@ -436,7 +436,7 @@ full-spec false "light"
 "flags: shy: {default: false, local: true}\n" | save -a $"($app)/flags_spec.cue"
 let n6 = (object | length)
 let ran6 = (ran | length)
-live push $app --sync premium | ignore
+live push $app --sync "premium,shy" | ignore
 check ((object | length) == $n6 + 1 and (ran | length) == $ran6 and ((newest 0).data | from json | get flags | columns | any {|c| $c == "shy" })) "a new flag that is off: written with no cases run"
 
 # A flag new to the live object and on, through the flip (PRONTO-43, 2026-11-08 18:02 BRT: trial_banner's
@@ -614,19 +614,53 @@ def entry [v: any, meta: any = null] {
 # dropmeta: live has the metadata and the spec no longer says client. gone: live only, with its own metadata.
 let spec = {flags: {held: (entry true $set), off: (entry true $set), flipped: (entry false $set), dropmeta: (entry false), same: (entry false $set)}}
 let live = {flags: {held: (entry false), dropmeta: (entry true $set), gone: (entry true $set), flipped: (entry false), same: (entry false)}}
-let r = (keep-live $live $spec null ['flipped=true'] [])
+# A push that names no flag (the reconcile) writes the spec's metadata on every flag it writes; one that does (PRONTO-1755) writes
+# its own flag with the spec's and leaves every other entry as live has it, a new flag out.
+let r = (keep-live $live $spec null [] [])
 let f = $r.doc.flags
+let q = (keep-live $live $spec null ['flipped=true'] [])
+let g = $q.doc.flags
 {
 	held: ($f.held.metadata? == $set and $f.held.variants.default == false)
 	off: ($f.off.metadata? == $set and $f.off.variants.default == false)
-	flipped: ($f.flipped.metadata? == $set and $f.flipped.variants.default == true)
+	flipped: ($f.flipped.metadata? == $set and $f.flipped.variants.default == false)
 	dropmeta: (($f.dropmeta | get -o metadata) == null and $f.dropmeta.variants.default == true)
 	gone: ($f.gone.metadata? == $set)
 	same: ($f.same.metadata? == $set)
+	named: ($g.flipped.metadata? == $set and $g.flipped.variants.default == true)
+	named_held: (($g.held | get -o metadata) == null and $g.held.variants.default == false)
+	named_off: ("off" not-in ($g | columns))
+	named_dropmeta: ($g.dropmeta.metadata? == $set and $g.dropmeta.variants.default == true)
+	named_gone: ($g.gone.metadata? == $set)
+	named_same: (($g.same | get -o metadata) == null)
+	named_left: (($q.left | sort-by flag | to json -r) == '[{"flag":"off","kind":"new"},{"flag":"same","kind":"metadata"}]')
 } | to json -r
 '#) | $"use ($here)/../live.nu keep-live\n($in)" | save -f $kl
 let klr = (^$nu.current-exe $kl | complete)
 check ($klr.exit_code == 0 and ($klr.stdout | from json | transpose k v | where v == false | is-empty)) $"keep-live: held, off-form, flipped and set-default entries carry the spec's metadata, a live-only flag its own \(($klr.stdout | str trim) ($klr.stderr | str trim)\)"
+
+# PRONTO-415, PRONTO-1755: the guard before a write refuses a push that moves a flag no --flip, --sync or --drop names (here a crafted document,
+# since keep-live no longer builds one), and lets a plain push write definitions while its reach moves nowhere.
+let pgf = $"($dir)/push_guard.nu"
+(r#'
+let e = {state: ENABLED, variants: {default: false}, defaultVariant: default}
+let on = ($e | upsert variants {default: true})
+let old = {flags: {a: $e, b: $e, c: $e}}
+let both = {flags: {a: ($e | insert metadata {flagSetId: client}), b: $on, c: $e}}
+let only = {flags: {a: $e, b: $on, c: $e}}
+let moved = (try { push-guard $old $both ['b'] [] [] [] null; "" } catch {|x| $x.msg })
+let fine = (try { push-guard $old $only ['b'] [] [] [] null; "" } catch {|x| $x.msg })
+let dropped = (try { push-guard $old {flags: {a: $e, b: $on}} ['b'] [] ['c'] ['c'] null; "" } catch {|x| $x.msg })
+let plain = (try { push-guard $old {flags: {a: ($e | insert metadata {flagSetId: client}), b: $e, c: $e, d: $e}} [] [] [] [] null; "" } catch {|x| $x.msg })
+let stray = (try { push-guard $old {flags: {a: $e, b: $on, c: $e}} [] [] [] [] null; "" } catch {|x| $x.msg })
+let two = (try { push-guard $old {flags: {a: $on, b: $on, c: $e}} [] ['a' 'b'] [] [] null; "" } catch {|x| $x.msg })
+let said = (try { push-guard $old {flags: {a: $on, b: $on, c: $e}} [] ['a' 'b'] [] [] "why"; "" } catch {|x| $x.msg })
+{moved: $moved, fine: $fine, dropped: $dropped, plain: $plain, stray: $stray, two: $two, said: $said} | to json -r
+'#) | $"use ($here)/../live.nu push-guard\n($in)" | save -f $pgf
+let pgr = (^$nu.current-exe $pgf | complete)
+let pgo = (if $pgr.exit_code == 0 { $pgr.stdout | from json } else { {} })
+check ($pgr.exit_code == 0 and ($pgo.moved | str contains "moves a that no --flip or --sync names") and $pgo.fine == "" and $pgo.dropped == "" and $pgo.plain == "" and ($pgo.stray | str contains "moves b that no --flip or --sync names")) $"push guard: a flag no name covers is refused, a named, dropped or definition-only one is not \(($pgr.stderr | str trim)\)"
+check (($pgo.two | str contains "moves 2 flags") and ($pgo.two | str contains "--several") and $pgo.said == "") "push guard: two flags moving need --several"
 
 # PRONTO-1518: a restore or a rollback writes an older version's flags with the metadata the spec says now (values and targeting kept), so a
 # restored document never lacks the mark the door's selector asks for.
@@ -764,7 +798,7 @@ rspec false "flags: second: {default: false, local: true}\nflags: held: {default
 rg add -A
 rg commit -q -m second
 rg push -q origin HEAD:main
-rrun [push $rapp --sync second --untested "rec"] | ignore
+rrun [push $rapp --untested "rec"] | ignore
 check ((open $"($rapp)/flagstore/flags.json" | get flags.held.variants.default) == false) "record: a new flag on in the spec is written off live"
 let r2b = (rrun [push $rapp --flip second --untested "rec"])
 let two = (^git -C $rorigin show "fix/flags-record-rec:apps/rec/flags_spec.cue")
@@ -856,7 +890,7 @@ check ($r_head.exit_code == 0 and ($by_head | str contains "gen: {default: true"
 
 # A stale carried flag leaves no armed pull request behind: its flags no longer live, and the flip has nothing to record,
 # the pull request is closed.
-rrun [push $rapp --sync "gen,two" --untested "rec"] | ignore
+rrun [push $rapp --sync "gen,two" --untested "rec" --several "the test turns two off"] | ignore
 check ((open $"($rapp)/flagstore/flags.json" | get flags.two.variants.default) == false and (open $"($rapp)/flagstore/flags.json" | get flags.gen.variants.default) == false) "record: both carried flags are off live behind the open pull request's back"
 let closes_s = (ghcount "pr close")
 let r_stale = (rrun [push $rapp --flip premium=false --untested "rec"])
@@ -1151,6 +1185,14 @@ rm $"($app)/fail-live"
 let flipped = ((newest 1).data | from json | get flags | columns)
 let restored = ((newest 0).data | from json | get flags | columns)
 check ($kf.exit_code != 0 and ($extras | all {|c| $c in $flipped }) and ($extras | all {|c| $c in $restored }) and (premium (newest 0)).variants.default == false and (newest 0).metadata.stage == "rolled-back") "keep-live: a failed flip's restore keeps the kept flags intact"
+# PRONTO-1755: a failed flip's restore is the version read before it, flag for flag: theme's live entry has no metadata and the spec now
+# marks it client, which the restore once added.
+full-spec true "light"
+"flags: theme: client: true\n" | save -a $"($app)/flags_spec.cue"
+touch $"($app)/fail-live"
+let kg1 = (livex [push $app --sync premium])
+rm $"($app)/fail-live"
+check ($kg1.exit_code != 0 and (newest 0).metadata.stage == "rolled-back" and ((newest 0).data | from json) == ((newest 2).data | from json) and (((newest 2).data | from json).flags.theme | get -o metadata) == null) "a failed flip's restore is the version before it, flag for flag"
 full-spec false "light"
 let nrec = (livex [push $app])
 check ($nrec.exit_code == 0 and ($nrec.stderr | str contains "no release record") and ((newest 0).data | from json | get flags | columns | where {|c| $c not-in ["premium" "theme"] } | length) == ($extras | length)) "keep-live, bucket: no record, every live flag kept, with a warning"
@@ -1306,6 +1348,48 @@ check ($kf.exit_code == 0 and (kflags | get kc).variants.local == false and not 
 kspec {ka: true, kb: false, kc: false}
 klive [push $drill --drop kw --sync ka --untested "plain again"] | ignore
 check ("kw" not-in (kflags | columns) and (kflags | get ka).targeting.if.2 == "default") "keep-live: back to the plain flags"
+
+# PRONTO-1755: a flip writes its own flag and nothing else. ka's live entry has no metadata and the spec marks it client, kn is new and on
+# for accounts: both stay as live has them (kn absent), the push says so, and the journal names kb alone.
+kspec {ka: true, kb: false, kc: false, kn: {default: true, accounts: ["u5"]}}
+"flags: ka: client: true\n" | save -a $"($drill)/flags_spec.cue"
+let before1 = (kflags)
+let nv1755 = (dversions)
+let f1 = (klive [push $drill --flip kb --untested "kb on"])
+let after1 = (kflags)
+check ($f1.exit_code == 0 and (dversions) == $nv1755 + 1 and ($after1 | reject kb) == ($before1 | reject kb) and (kdef kb) == true and "kn" not-in ($after1 | columns) and (($after1 | get ka) | get -o metadata) == null) $"a flip writes its own flag and nothing else \(($f1.stderr | str trim)\)"
+check (($f1.stdout | str contains "ka: metadata") and ($f1.stdout | str contains "kn: new") and (djournal | last).flag == "kb" and (djournal | last).defs == "" and (djournal | last).kept == "") "a flip lists the drift it left, and the journal names its flag alone"
+let dr1 = (klive [drift $drill])
+check (($dr1.stdout | str contains "ka") and ($dr1.stdout | str contains "metadata") and ($dr1.stdout | str contains "kn") and ($dr1.stdout | str contains "new")) "drift lists the metadata and new flags a flip leaves"
+klive [push $drill --flip kb=false] | ignore
+check ((kdef kb) == false and "kn" not-in (kflags | columns)) "a flip off writes its flag and nothing else"
+
+# PRONTO-415: more than one flag in a flip needs --several "<why>", which the version's note and the journal keep.
+let nvs = (dversions)
+let s1 = (klive [push $drill --flip "kb,kc" --untested "two"])
+check ($s1.exit_code != 0 and ($s1.stderr | str contains "--several") and (dversions) == $nvs) "a flip of two flags is refused without --several, nothing written"
+let s1d = (klive [push $drill --flip "kb,kc" --untested "two" --dry-run])
+check ($s1d.exit_code != 0 and ($s1d.stderr | str contains "--several") and (dversions) == $nvs) "a dry run refuses it too"
+let s2 = (klive [push $drill --flip "kb,kc" --several "one rollout" --untested "two"])
+check ($s2.exit_code == 0 and (kdef kb) == true and (kdef kc) == true and (djournal | last).note =~ "several: one rollout") "--several writes both, and says why in the note and the journal"
+klive [push $drill --flip kb=false] | ignore
+klive [push $drill --flip kc=false] | ignore
+
+# PRONTO-1755: the push that names no flag is the reconcile: it writes the metadata and the new flag off, and the journal calls none of it a flip.
+let rc = (klive [push $drill])
+check ($rc.exit_code == 0 and (kflags | get ka | get -o metadata) == {flagSetId: client} and (kdef kn) == false and (djournal | last).flag == "" and (djournal | last).defs == "ka" and ($rc.stderr | str contains "kn is new and on for accounts")) $"a push naming no flag reconciles: metadata and the new flag off, no flip in the journal \(($rc.stderr | str trim)\)"
+# A push that only drops a flag names that flag: metadata drift and a new flag stay out of it.
+kspec {ka: true, kb: false, kc: false, kn: {default: true, accounts: ["u5"]}, kz: false}
+klive [push $drill] | ignore
+kspec {ka: true, kb: false, kc: false, kn: {default: true, accounts: ["u5"]}}
+"flags: ka: client: true\nflags: kr: {default: false, local: true}\n" | save -a $"($drill)/flags_spec.cue"
+let before_d = (kflags)
+let drop1 = (klive [push $drill --drop kz])
+let after_d = (kflags)
+check ($drop1.exit_code == 0 and "kz" not-in ($after_d | columns) and ($after_d | reject -o kz) == ($before_d | reject -o kz) and "kr" not-in ($after_d | columns) and (($after_d | get ka) | get -o metadata) == null) $"a push that only drops a flag writes nothing else \(($drop1.stderr | str trim)\)"
+kspec {ka: true, kb: false, kc: false}
+klive [push $drill --drop kn] | ignore
+check ("kn" not-in (kflags | columns)) "keep-live: back to the plain flags, after the reconcile"
 
 # 1: no record, the spec drops a live flag: it is kept, with a warning, in one version.
 kspec {ka: true, kb: false}
