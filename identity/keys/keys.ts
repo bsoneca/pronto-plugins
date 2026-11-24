@@ -226,12 +226,18 @@ export async function door(cfg: Config, req: Request): Promise<Response> {
   return new Response(null, { status: 204, headers });
 }
 
-/** GET /auth/keyguard, for the door's forward_auth before every other `/auth/*` path: 403 for a key's token,
- * else 204. 0.32's auth takes any session, a key's token among them, and its rename answers a session with
- * no `kid`, so a key could make keys of its own that outlive it; the door refuses a key's token there. */
+/** GET /auth/keyguard, for the door's forward_auth first thing in the `/auth/*` and `/billing/*` handles: 403 for a key's
+ * token, else 204. 0.32's auth takes any session, a key's token among them, and its rename answers a session with no
+ * `kid`, so a key could make keys of its own that outlive it; billing takes a token as the account, so a key could
+ * open the owner's Stripe portal. The door refuses a key's token there. What reads the token behind the door is more
+ * lenient than `subjectOf` (PostgREST takes the scheme in any case, extra white space, the first of two headers joined
+ * with a comma, a token past `exp` by its clock skew), so every token-shaped part of the header is looked at, and a
+ * key's token among them, however it is written, is refused. */
 export async function keyguard(cfg: Config, req: Request): Promise<Response> {
-  const subject = await subjectOf(cfg, req);
-  if (subject !== "refused" && subject.claims && "kid" in subject.claims) return fail(403, "key token");
+  for (const token of req.headers.get("authorization")?.match(/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g) ?? []) {
+    const claims = await signed(cfg.secret, token);
+    if (claims && "kid" in claims) return fail(403, "key token");
+  }
   return new Response(null, { status: 204 });
 }
 

@@ -1,6 +1,7 @@
 // The door's routes to the keys service (PRONTO-740): blocks spliced into the app's docker/Caddyfile, the first
 // lines of its top-level `handle /auth/*` and the scope guard, the first directive of each of its `handle /crud/*`,
-// `/api/v1/*`, `/blob-claim/*` and `/blobs/*`, an earlier copy of each taken out first (idempotent).
+// `/api/v1/*`, `/blob-claim/*` and `/blobs/*`, and the key refusal, the first directive of its `handle /billing/*`, an
+// earlier copy of each taken out first (idempotent).
 //   route.ts [route] <app-dir>
 // bin/pronto-keys copies this file into the app, where its generate step runs it after pronto's writer.
 // The marker text is #523's, unchanged: an app generated with that version has its block taken out by it.
@@ -13,6 +14,10 @@ export const SCOPE_BEGIN = "    # keys-scope:begin — a key's token is held to 
 export const SCOPE_END = "    # keys-scope:end";
 /** The handles that carry the app's data, where a key's token is held to its scopes. */
 export const SCOPED = ["/crud/*", "/api/v1/*", "/blob-claim/*", "/blobs/*"];
+export const GUARD_BEGIN = "    # keys-guard:begin — a key's token is refused on this path, by the keys service (PRONTO-1778)";
+export const GUARD_END = "    # keys-guard:end";
+/** The handles a key's token never reaches: the account's money, which a key's scopes do not speak for. */
+export const GUARDED = ["/billing/*"];
 export const UPSTREAM = "{$PRONTO_UPSTREAM_KEYS:keys:8702}";
 
 // Everything stays inside the app's own `handle /auth/*`, never beside its top-level handles: Caddy sorts those with a
@@ -25,12 +30,15 @@ export const UPSTREAM = "{$PRONTO_UPSTREAM_KEYS:keys:8702}";
 // token and 204 for anything else. A path the nested handle does not match falls through to the auth service.
 // On k8s the upstream is the door's Dapr sidecar, which routes by `dapr-app-id`: both set it with `header_up`, which
 // replaces a client's own value, so a client cannot steer the guard or the keys paths to another app.
-export const ROUTES = [
+export const GUARD = [
   `    forward_auth ${UPSTREAM} {`,
   "      uri /auth/keyguard",
   "      header_up dapr-app-id keys",
   "      import bounded-auth",
   "    }",
+];
+export const ROUTES = [
+  ...GUARD,
   "    @keysroutes path /auth/keys* /auth/key",
   "    handle @keysroutes {",
   `      reverse_proxy ${UPSTREAM} {`,
@@ -55,11 +63,14 @@ export const SCOPE = [
   "    }",
 ];
 
+// The refusal of a key's token is the guard of the `/auth/*` handle, spliced in the same form as the first directive of
+// each handle in GUARDED the app has: billing takes any `app_user` token as the account (its `billing_me` answers
+// `auth_uid()` for a key's token), so a read-only key could open the owner's Stripe portal.
 /** The Caddyfile with the keys block as the first lines of its `handle /auth/*` and the scope guard in each of the
  * data handles it has; an earlier copy of either is taken out first. */
 export function routed(caddyfile: string): string {
   let lines = caddyfile.split("\n");
-  for (const [begin, end] of [[BEGIN, END], [ROUTES_BEGIN, ROUTES_END], [SCOPE_BEGIN, SCOPE_END]]) {
+  for (const [begin, end] of [[BEGIN, END], [ROUTES_BEGIN, ROUTES_END], [SCOPE_BEGIN, SCOPE_END], [GUARD_BEGIN, GUARD_END]]) {
     for (let from = lines.indexOf(begin), to = lines.indexOf(end); from >= 0 && to > from; from = lines.indexOf(begin), to = lines.indexOf(end)) {
       lines = [...lines.slice(0, from), ...lines.slice(to + 1)];
     }
@@ -73,6 +84,10 @@ export function routed(caddyfile: string): string {
     if (at < 0) continue;
     lines = [...lines.slice(0, at + 1), SCOPE_BEGIN, ...SCOPE, SCOPE_END, ...lines.slice(at + 1)];
     scoped++;
+  }
+  for (const path of GUARDED) {
+    const at = lines.findIndex((l) => l === `  handle ${path} {`);
+    if (at >= 0) lines = [...lines.slice(0, at + 1), GUARD_BEGIN, ...GUARD, GUARD_END, ...lines.slice(at + 1)];
   }
   if (scoped === 0) throw new Error(`keys: docker/Caddyfile has none of ${SCOPED.map((p) => `\`handle ${p} {\``).join(", ")} to hold a key's scopes in`);
   return lines.join("\n");
