@@ -268,9 +268,10 @@ async function createKey(cfg: Config, db: Db, req: Request): Promise<Response> {
     await q("select pg_advisory_xact_lock(hashtext($1))", ["api_key:" + who.id]);
     const [n] = await q("select count(*)::int as live from mecha_auth.api_key where owner = $1 and revoked_at is null", [who.id]);
     if ((n.live as number) >= MAX_LIVE_KEYS) return null;
+    // $4 is text, cast after: a `$4::jsonb` parameter is typed jsonb, and postgres.js encodes the string again.
     const [row] = await q(
       `insert into mecha_auth.api_key (id, owner, label, scopes, sha256)
-       values ($1, $2, $3, array(select jsonb_array_elements_text($4::jsonb)), decode($5, 'hex'))
+       values ($1, $2, $3, array(select jsonb_array_elements_text($4::text::jsonb)), decode($5, 'hex'))
        returning id, label, scopes, created_at`,
       [crypto.randomUUID(), who.id, label, JSON.stringify([...new Set(scopes as string[])]), hash],
     );

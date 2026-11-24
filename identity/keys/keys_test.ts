@@ -273,3 +273,25 @@ Deno.test("a body over its bound, declared or not, is read as none; secrets are 
   const r = await call("POST", "/auth/keys", await session(ANA), { label: "x", scopes: ["read"] });
   assertEquals(r.headers.get("cache-control"), "no-store");
 });
+
+// postgres.js types a parameter by what the server describes and encodes a jsonb one with JSON.stringify,
+// a string included; PGlite does not, so this wrapper does it (a `$n::jsonb` fed a stringified array is a
+// jsonb scalar string, 22023, in a real stack).
+Deno.test("a key's scopes are made the way postgres.js sends them: a jsonb parameter is encoded once", async () => {
+  const { pg, conf } = await stand();
+  const encode = async (t: string, p: unknown[] = []) => {
+    const { queryParams } = await pg.describeQuery(t);
+    return p.map((v, i) => [114, 3802].includes(queryParams[i]?.dataTypeID) ? JSON.stringify(v) : v);
+  };
+  const db: Db = {
+    query: async (t, p) => (await pg.query(t, await encode(t, p))).rows as Record<string, unknown>[],
+    tx: (fn) => pg.transaction((tx) => fn(async (t, p) => (await tx.query(t, await encode(t, p))).rows as Record<string, unknown>[])),
+  };
+  const r = await keys(conf, db)(new Request("http://keys/auth/keys", {
+    method: "POST",
+    headers: { authorization: `Bearer ${await session(ANA)}`, "content-type": "application/json" },
+    body: JSON.stringify({ label: "bot", scopes: ["read", "machines:bot_1", "read"] }),
+  }));
+  assertEquals(r.status, 201);
+  assertEquals((await r.json()).scopes, ["read", "machines:bot_1"]);
+});
