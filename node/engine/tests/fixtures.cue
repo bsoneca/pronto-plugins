@@ -26,7 +26,7 @@ _fixture: {
 			apiVersion: "batch/v1"
 			kind:       "Job"
 			metadata:   {name: "app-initdb", namespace: ns}
-			spec: template: spec: containers: [{name: "initdb", image: "\(reg)/app-database:17@sha256:\(_d)"}]
+			spec: template: spec: containers: [{name: "initdb", image: "\(reg)/app-database:17@sha256:\(_d)", command: ["bash", "-c", "set -euo pipefail\necho built"]}]
 		},
 		{
 			apiVersion: "batch/v1"
