@@ -526,9 +526,9 @@ export const availableFrom = (text: string, pageSize: number) => {
   return Math.round(pages * pageSize / 2 ** 30 * 100) / 100;
 };
 // Whether a run that failed died of the machine's memory: its exit is not 0 and the machine's free memory (%, the lowest
-// seen while it ran; null when unread) fell under `floor`.
+// seen while it ran; null when unread) fell under `floor`. Not the sampler's own failure (125): that one is the job's.
 export const starvedRun = (minPct: number | null, code: number, floor: number) =>
-  code !== 0 && minPct !== null && minPct < floor;
+  code !== 0 && code !== 125 && minPct !== null && minPct < floor;
 // A holder whose child has been dead for 60 s or more (`deadSince`, ms since the epoch; 0 = not seen dead)
 // is stuck: it holds no memory.
 export const stuck = (deadSince: number, now: number) => deadSince > 0 && now - deadSince > 60_000;
@@ -1219,7 +1219,7 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       if (weight >= memMinWeight() && !nested) {
         const min = Number(Deno.env.get("STACK_MIN_FREE_PCT") ?? Deno.env.get("CUE_MIN_FREE_PCT") ?? 20);
         const free = await freeMemoryPct(), avail = await availableMemoryGB();
-        const head = !holders.some((h) => h.weight >= memMinWeight()) && coresOlder.length === 0;
+        const head = !holders.some((h) => h.weight >= memMinWeight()) && ahead === 0;
         if (memVetoed(free, min, avail, need, head)) {
           return why(`the machine has ${free}% of its memory free${avail === null ? "" : ` (${round(avail)} GB available${need > 0 ? `, ${round(need)} GB needed` : ""})`}, under ${min}% (STACK_MIN_FREE_PCT)${need > 0 ? " or what this needed last time" : ""}: waiting for it to recover`);
         }
@@ -2494,11 +2494,8 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
   }
   // A run that failed while the machine was out of memory gave no verdict: said so, with the no-verdict exit, so
   // release-cron names the cause (a process it started was probably killed by the kernel, as Studio's helm was).
-  const floor = Number(Deno.env.get("STACK_STARVED_PCT") ?? 5);
-  if (heavy && starvedRun(lowestFree, status.code, floor)) {
-    console.error(`slot: ${what}: no verdict: memory (the machine fell to ${lowestFree}% free while it ran; a process it started was likely killed by the kernel)`);
-    Deno.exit(3);
-  }
+  const starved = heavy && starvedRun(lowestFree, status.code, Number(Deno.env.get("STACK_STARVED_PCT") ?? 5));
+  if (starved) console.error(`slot: ${what}: no verdict: memory (the machine fell to ${lowestFree}% free while it ran; a process it started was likely killed by the kernel)`);
   // Its peak, for the next run's claim. A run that failed or was killed may have stopped before its
   // peak (a missing file, a bad flag): its peak only raises what was learned. One that ended before
   // a sample held next to nothing: learned as such, so it runs outside the lock.
@@ -2526,7 +2523,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
       Deno.exit(status.code || 1);
     }
   }
-  Deno.exit(status.code);
+  Deno.exit(starved ? 3 : status.code);
 }
 
 if (import.meta.main) {
