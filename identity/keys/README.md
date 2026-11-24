@@ -42,10 +42,10 @@ It keeps no secret of its own: the signing secret and `DATABASE_URL` are the sta
 <this repo>/bin/pronto-keys <app-dir>   # then the app's generate, and commit what it writes
 ```
 
-It writes, regenerated each time: `keys_plugin.cue` (the `keys` target on 8702 beside the stack, the door's `PRONTO_UPSTREAM_KEYS`), `pronto/keys.cue` (the generate step `keys-route`, priority 6, after pronto's writer), `keys/` (the service and `route.ts`, which the step runs). The step splices a `# keys:begin` … `# keys:end` block into `docker/Caddyfile`, before the first top-level `handle`:
+It writes, regenerated each time: `keys_plugin.cue` (the `keys` target on 8702 beside the stack, the door's `PRONTO_UPSTREAM_KEYS`), `pronto/keys.cue` (the generate step `keys-route`, priority 6, after pronto's writer), `keys/` (the service and `route.ts`, which the step runs). The step splices two blocks into `docker/Caddyfile`, each taken out and put back on every run:
 
-- `forward_auth @keysauth … { uri /auth/keyguard }` on every `/auth/*` path, ahead of every `handle` (forward_auth runs first): 0.32's auth takes a key's token as a session and its rename answers a new session without `kid`, so without the guard a key could make keys of its own that outlive it.
-- `/auth/keys*` and `/auth/key` to the service, one path to a `handle` (Caddy sorts a `handle`'s single path longest first).
+- `# keys:begin` … `# keys:end`, before the first top-level `handle`: `forward_auth @keysauth … { uri /auth/keyguard }` on every `/auth/*` path, ahead of every `handle` (forward_auth runs first): 0.32's auth takes a key's token as a session and its rename answers a new session without `kid`, so without the guard a key could make keys of its own that outlive it.
+- `# keys-routes:begin` … `# keys-routes:end`, the first lines of the app's own `handle /auth/*`: a `handle` of `/auth/keys*` and `/auth/key` to the service, ahead of that handle's `reverse_proxy` to auth. Never top-level handles of their own: Caddy sorts those by path with a comparison that is not transitive, so one more reorders the app's other handles (Bonk Chess: the reading-more handles, `/armies` in es answered English and `/puzzle/today` 404). The test adapts a door with and without the block (`CADDY`) and requires the order unchanged. An app without a top-level `handle /auth/*` is refused.
 
 The app sets, in its own CUE beside them: `keysGate: "schema.name"` (AUTH_API_KEYS_GATE), `keysHook: "schema.name"` (AUTH_KEY_EXCHANGED_HOOK) and `keysDb` (the database a launch at hand is made in, by default the package's name).
 
