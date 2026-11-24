@@ -246,7 +246,7 @@ export def main [
 	if ($primary | is-empty) { error make {msg: $"the broker's database ($service)-db names no primary"} }
 	open --raw $"($here)/broker/schema.sql" | do $remote $"($kubectl) exec -i -n ($namespace) ($primary) -c postgres -- psql -X -v ON_ERROR_STOP=1 -U postgres -d (broker-role)" | print
 	$yaml | do $remote $"($kubectl) apply -f -" | print
-	if not $no_backup { db_backup verify $remote $kubectl $namespace $"($service)-db" }
+	if not $no_backup { db_backup verify $remote $kubectl $namespace $"($service)-db" $backup }
 	do $remote $"($kubectl) rollout restart deployment/($service)-airlock -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service)-airlock -n ($namespace) --timeout=300s" | print
 	do $remote $"($kubectl) rollout restart deployment/($service) -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service) -n ($namespace) --timeout=120s" | print
 	# Through the gateway as the tunnel reaches it, by host: the broker answers, signing with the key

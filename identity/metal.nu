@@ -268,7 +268,7 @@ export def main [
 	manifests --database-only --domain $domain --sources (sources) --namespace $namespace --name $service --backup $backup --backup-endpoint $backup_endpoint | do $remote $"($kubectl) apply -f -" | print
 	do $remote $"($kubectl) wait --for=condition=Ready cluster.postgresql.cnpg.io/($service)-db -n ($namespace) --timeout=300s" | print
 	$yaml | do $remote $"($kubectl) apply -f -" | print
-	if not $no_backup { db_backup verify $remote $kubectl $namespace $"($service)-db" }
+	if not $no_backup { db_backup verify $remote $kubectl $namespace $"($service)-db" $backup }
 	if $airlock {
 		do $remote $"($kubectl) rollout restart deployment/($service)-airlock -n ($namespace) >/dev/null && ($kubectl) rollout status deployment/($service)-airlock -n ($namespace) --timeout=300s" | print
 	}

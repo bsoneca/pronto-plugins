@@ -430,7 +430,7 @@ export def main [
 	if not $no_backup { db_backup keys-present $remote $kubectl $namespace "analytics-db-backup-s3" }
 	$yaml | do $remote $"($kubectl) apply --server-side --force-conflicts -f -" | print
 	do $remote $"($kubectl) wait --for=condition=Ready cluster.postgresql.cnpg.io/analytics-db -n ($namespace) --timeout=300s && ($kubectl) rollout status deployment/grafana -n ($namespace) --timeout=300s && ($kubectl) rollout status deployment/umami -n ($namespace) --timeout=300s" | print
-	if not $no_backup { db_backup verify $remote $kubectl $namespace "analytics-db" }
+	if not $no_backup { db_backup verify $remote $kubectl $namespace "analytics-db" $backup }
 	# Through the gateway as the tunnel reaches it, by host: each answers.
 	let gateway = (do $remote $"($kubectl) get svc -n envoy-gateway-system pronto-gateway -o jsonpath='{.spec.clusterIP}'" | str trim)
 	for c in [[$grafana_domain "/api/health"] [$umami_domain "/api/heartbeat"]] {

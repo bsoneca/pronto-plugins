@@ -222,9 +222,11 @@ export def main [
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
 	db_backup require $backup $backup_endpoint $no_backup "errors-db"
+	# The namespace first, so the backup's keys have somewhere to be put.
+	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	if not $no_backup { db_backup keys-present $remote $kubectl $namespace "errors-db-backup-s3" }
 	manifests --domain $domain --namespace $namespace --backup $backup --backup-endpoint $backup_endpoint | do $remote $"($kubectl) apply --server-side --force-conflicts -f -" | print
-	if not $no_backup { db_backup verify $remote $kubectl $namespace "errors-db" }
+	if not $no_backup { db_backup verify $remote $kubectl $namespace "errors-db" $backup }
 	do $remote $"($kubectl) wait --for=condition=Ready cluster.postgresql.cnpg.io/errors-db -n ($namespace) --timeout=300s && ($kubectl) rollout status deployment/glitchtip -n ($namespace) --timeout=600s" | print
 	# The owner and the projects, by the Django shell in the running pod, which reads the owner's
 	# sign-in from its mounted Secret.

@@ -15,12 +15,15 @@ export const plugin = "barman-cloud.cloudnative-pg.io"
 export def require [backup: string, endpoint: string, no_backup: bool, db: string] {
 	if $no_backup {
 		if ($backup | is-not-empty) or ($endpoint | is-not-empty) { error make {msg: "--no-backup is for a run with no --backup"} }
-		print $"WARNING: ($db) is applied with no off-node backup: WAL stays on the node, and a cluster that had one loses it"
+		print $"WARNING: ($db) is applied with no backup configured: its WAL stays on the node. An ObjectStore, ScheduledBackup and Secret already in the namespace are left as they are, and so is a plugin another field manager set"
 		return
 	}
 	if ($backup | is-empty) or ($endpoint | is-empty) {
 		error make {msg: $"($db) has no backup: pass --backup s3://bucket/folder and --backup-endpoint https://…, or --no-backup to say it has none"}
 	}
+	# The keys go to whatever these name: an http endpoint would send them in the clear.
+	if not ($backup =~ '^s3://[a-z0-9.-]+/[A-Za-z0-9._-]+$') { error make {msg: $"--backup is s3://bucket/folder, not ($backup)"} }
+	if not ($endpoint =~ '^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$') { error make {msg: $"--backup-endpoint is https://host, not ($endpoint)"} }
 }
 
 # The objects of the backup of `db`, and what its Cluster's spec gains: `{secret, cluster, objects}`.
@@ -72,9 +75,16 @@ export def keys-present [remote: closure, kubectl: string, namespace: string, se
 
 # After the apply: the live Cluster archives through the plugin, and its ScheduledBackup and ObjectStore are there.
 # Fails otherwise, so a run that dropped the backup says so instead of finishing green.
-export def verify [remote: closure, kubectl: string, namespace: string, db: string] {
+export def verify [remote: closure, kubectl: string, namespace: string, db: string, bucket: string = ""] {
 	let plugins = ("" | do $remote $"($kubectl) get cluster.postgresql.cnpg.io/($db) -n ($namespace) -o jsonpath='{.spec.plugins[*].name}'" | str trim)
 	if $plugin not-in ($plugins | split row " ") { error make {msg: $"($db) in ($namespace) has no ($plugin) in spec.plugins after the apply: its WAL is not archived off the node"} }
+	# It names the ObjectStore this run made, and archives to the bucket this run was given.
+	let named = ("" | do $remote $"($kubectl) get cluster.postgresql.cnpg.io/($db) -n ($namespace) -o jsonpath='{.spec.plugins[*].parameters.barmanObjectName}'" | str trim)
+	if $named != $"($db)-backup" { error make {msg: $"($db) in ($namespace) archives through ObjectStore '($named)', not ($db)-backup"} }
+	if ($bucket | is-not-empty) {
+		let path = ("" | do $remote $"($kubectl) get objectstore.barmancloud.cnpg.io/($db)-backup -n ($namespace) -o jsonpath='{.spec.configuration.destinationPath}'" | str trim)
+		if $path != $bucket { error make {msg: $"($db)-backup in ($namespace) archives to '($path)', not ($bucket)"} }
+	}
 	let sched = ("" | do $remote $"($kubectl) get scheduledbackup.postgresql.cnpg.io/($db) -n ($namespace) -o jsonpath='{.spec.cluster.name}'" | str trim)
 	if $sched != $db { error make {msg: $"($db) in ($namespace) has no ScheduledBackup after the apply"} }
 	let store = ("" | do $remote $"($kubectl) get objectstore.barmancloud.cnpg.io/($db)-backup -n ($namespace) -o jsonpath='{.metadata.name}'" | str trim)

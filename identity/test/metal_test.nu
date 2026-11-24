@@ -122,10 +122,14 @@ db_backup require s3://bucket/x https://s3.example.com false identity-broker-db
 db_backup require "" "" true identity-broker-db
 # After the apply the live Cluster is read: the run fails when the plugin, the ScheduledBackup or the ObjectStore is not there.
 let live = {|have: list<string>| {|cmd: string|
-	if ($cmd | str contains "spec.plugins") { if "plugin" in $have { "barman-cloud.cloudnative-pg.io" } else { "" } } else if ($cmd | str contains "scheduledbackup") { if "sched" in $have { "x-db" } else { "" } } else if ($cmd | str contains "objectstore") { if "store" in $have { "x-db-backup" } else { "" } } else { "" }
+	if ($cmd | str contains "barmanObjectName") { if "plugin" in $have { "x-db-backup" } else { "" } } else if ($cmd | str contains "spec.plugins") { if "plugin" in $have { "barman-cloud.cloudnative-pg.io" } else { "" } } else if ($cmd | str contains "scheduledbackup") { if "sched" in $have { "x-db" } else { "" } } else if ($cmd | str contains "destinationPath") { "s3://bucket/x" } else if ($cmd | str contains "objectstore") { if "store" in $have { "x-db-backup" } else { "" } } else { "" }
 } }
 db_backup verify (do $live [plugin sched store]) kubectl ns x-db
+db_backup verify (do $live [plugin sched store]) kubectl ns x-db s3://bucket/x
+assert error { db_backup verify (do $live [plugin sched store]) kubectl ns x-db s3://bucket/other } "verify passed with another bucket"
 for missing in [[sched store] [plugin store] [plugin sched]] { assert error { db_backup verify (do $live $missing) kubectl ns x-db } $"verify passed without ($missing)" }
+assert error { db_backup require s3://bucket/x http://s3.example.com false x-db } "an http endpoint is refused"
+assert error { db_backup require bucket/x https://s3.example.com false x-db } "a backup that is no s3 url is refused"
 let keys = {|have: string| {|cmd: string| $have } }
 db_backup keys-present (do $keys "ACCESS_KEY_ID ACCESS_SECRET_KEY ") kubectl ns x-db-backup-s3
 assert error { db_backup keys-present (do $keys "ACCESS_KEY_ID ") kubectl ns x-db-backup-s3 }

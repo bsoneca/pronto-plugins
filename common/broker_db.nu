@@ -21,7 +21,6 @@ export def objects [
 ]: nothing -> list<record> {
 	let db_labels = {"app.kubernetes.io/name": $db, "app.kubernetes.io/part-of": $part_of}
 	let db_meta = {namespace: $namespace, labels: $db_labels}
-	let backup = ($backup | default null)
 	let plugins = (if $backup == null { {} } else { $backup.cluster })
 	let backup_objects = (if $backup == null { [] } else { $backup.objects })
 	[
@@ -35,6 +34,8 @@ export def objects [
 				dataFrom: [{sourceRef: {generatorRef: {apiVersion: "generators.external-secrets.io/v1alpha1", kind: "Password", name: $"($db)-password"}}}]
 			}
 		}
+		# The object store and the nightly backup before the cluster whose sidecar archives to it.
+		...$backup_objects
 		{
 			apiVersion: "postgresql.cnpg.io/v1", kind: "Cluster", metadata: ($db_meta | insert name $db)
 			spec: ({
@@ -60,7 +61,6 @@ export def objects [
 				]
 			}
 		}
-		...$backup_objects
 	]
 }
 
