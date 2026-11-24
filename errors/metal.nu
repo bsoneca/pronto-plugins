@@ -14,6 +14,8 @@
 # Pages never reach --domain: an app's door routes its own /e/ to GlitchTip's ingest in the cluster,
 # so a page's connect-src stays 'self' (README.md).
 
+use ../common/db_backup.nu
+
 const postgres = "ghcr.io/cloudnative-pg/postgresql:18.1-standard-trixie@sha256:ec0c0d60f9462b49f4c6f2403fd680ac43a063fc793f5d570a21a3cea8e627b5"
 const glitchtip_image = "docker.io/glitchtip/glitchtip:7.0.0@sha256:c245745b4179667da3aebd73fb8d4f1fd918f7d68ba07d1fd73ea688933b6e01"
 # The image's own user (app, 5000), named by number so runAsNonRoot can be checked.
@@ -24,8 +26,12 @@ const org = "pronto"
 export def manifests [
 	--domain: string
 	--namespace: string = "errors"
+	--backup: string = ""          # The database's backups, s3://bucket/folder (common/db_backup.nu); none when empty
+	--backup-endpoint: string = "" # The bucket's S3 endpoint, https://…
 ]: nothing -> string {
+	if ($backup | is-not-empty) and ($backup_endpoint | is-empty) { error make {msg: "--backup needs --backup-endpoint"} }
 	let ns = $namespace
+	let backups = (if ($backup | is-empty) { null } else { db_backup objects --db "errors-db" --bucket $backup --endpoint $backup_endpoint --namespace $namespace --part-of "pronto-errors" })
 	let part = {"app.kubernetes.io/part-of": "pronto-errors"}
 	let meta = {|name: string| {name: $name, namespace: $ns, labels: ($part | merge {"app.kubernetes.io/name": $name})} }
 	let sel = {|name: string| {"app.kubernetes.io/name": $name} }
@@ -56,14 +62,14 @@ export def manifests [
 	] | each {|o| if $o.metadata.name == "glitchtip-db" and $o.kind == "ExternalSecret" { $o | upsert spec.target.template.type "kubernetes.io/basic-auth" } else { $o } }
 	let cluster = {
 		apiVersion: "postgresql.cnpg.io/v1", kind: "Cluster", metadata: (do $meta $db)
-		spec: {
+		spec: ({
 			instances: 1
 			imageName: $postgres
 			storage: {size: "5Gi"}
 			smartShutdownTimeout: 15
 			stopDelay: 120
 			bootstrap: {initdb: {database: "glitchtip", owner: "glitchtip", secret: {name: "glitchtip-db"}}}
-		}
+		} | merge (if $backups == null { {} } else { $backups.cluster }))
 	}
 	let secure = {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
 	let glitchtip = {
@@ -153,11 +159,12 @@ export def manifests [
 					{from: [{podSelector: {matchLabels: (do $sel "glitchtip")}}], ports: [{protocol: "TCP", port: 5432}]}
 					{from: [{podSelector: {matchLabels: {"cnpg.io/cluster": $db}}}], ports: [{protocol: "TCP", port: 5432} {protocol: "TCP", port: 8000}]}
 					{from: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "cnpg-system"}}}], ports: [{protocol: "TCP", port: 5432} {protocol: "TCP", port: 8000}]}
+					{from: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "observability"}}}], ports: [{protocol: "TCP", port: 9187}]}
 				]
 			}
 		}
 	]
-	[{apiVersion: "v1", kind: "Namespace", metadata: {name: $ns, labels: $part}} ...$secrets $cluster $uploads $glitchtip ...$routes ...$policies]
+	[{apiVersion: "v1", kind: "Namespace", metadata: {name: $ns, labels: $part}} ...$secrets ...(if $backups == null { [] } else { $backups.objects }) $cluster $uploads $glitchtip ...$routes ...$policies]
 	| each { to yaml } | str join "---\n"
 }
 
@@ -200,6 +207,9 @@ export def main [
 	--projects: string = ""       # Each app's project, comma-separated: my-app,…
 	--namespace: string = "errors"
 	--spec: string = ""            # An app's errors.metal, as JSON (bin/pronto-errors metal <app-dir>): the values above
+	--backup: string = ""          # The database's backups, s3://bucket/folder: required, as --backup-endpoint, unless --no-backup
+	--backup-endpoint: string = "" # The bucket's S3 endpoint, https://…
+	--no-backup                    # Apply the database with no off-node backup: a cluster that had one loses it
 ] {
 	let s = if ($spec | is-empty) { {} } else { open --raw $spec | from json }
 	# A flag given by hand wins over the app's spec.
@@ -211,7 +221,12 @@ export def main [
 	if ([$ssh $kubeconfig $domain] | any { is-empty }) { error make {msg: "--ssh, --kubeconfig and --domain are required (or name an app whose errors_spec.cue has a server)"} }
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
-	manifests --domain $domain --namespace $namespace | do $remote $"($kubectl) apply --server-side --force-conflicts -f -" | print
+	db_backup require $backup $backup_endpoint $no_backup "errors-db"
+	# The namespace first, so the backup's keys have somewhere to be put.
+	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
+	if not $no_backup { db_backup keys-present $remote $kubectl $namespace "errors-db-backup-s3" }
+	manifests --domain $domain --namespace $namespace --backup $backup --backup-endpoint $backup_endpoint | do $remote $"($kubectl) apply --server-side --force-conflicts -f -" | print
+	if not $no_backup { db_backup verify $remote $kubectl $namespace "errors-db" $backup }
 	do $remote $"($kubectl) wait --for=condition=Ready cluster.postgresql.cnpg.io/errors-db -n ($namespace) --timeout=300s && ($kubectl) rollout status deployment/glitchtip -n ($namespace) --timeout=600s" | print
 	# The owner and the projects, by the Django shell in the running pod, which reads the owner's
 	# sign-in from its mounted Secret.

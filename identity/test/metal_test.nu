@@ -92,6 +92,48 @@ assert equal ($mb.env | where name == GOOGLE_CLIENT_SECRET | length) 1 "the brok
 assert equal ($mb.env | where name == GOOGLE_CLIENT_BASIC | length) 0 "the credential is the airlock's alone"
 assert (try { metal manifests --domain id.example.com --sources (metal sources) --door-asked; false } catch { true }) "--door-asked needs --airlock"
 assert equal ($c.env | where name == GOOGLE_DOOR | length) 0 "no door unless asked"
+# Backups (common/db_backup.nu): with --backup the broker's database archives through the barman-cloud plugin to the
+# bucket, with an ObjectStore, a nightly ScheduledBackup and a scrape of its metrics let in; the Cluster gains the plugin alone.
+let plain_db = ($docs | where kind == Cluster | first)
+assert ($docs | where kind in [ObjectStore ScheduledBackup] | is-empty) "no backup unless asked"
+let bk = (metal manifests --domain id.example.com --sources (metal sources) --settings [{name: "GOOGLE_CLIENT_ID", value: "c"}] --backup s3://bucket/identity-broker --backup-endpoint https://s3.example.com | split row "---\n" | each { from yaml })
+let bk_store = ($bk | where kind == ObjectStore | first)
+assert equal $bk_store.metadata.name identity-broker-db-backup
+assert equal $bk_store.spec.configuration.destinationPath s3://bucket/identity-broker
+assert equal $bk_store.spec.configuration.s3Credentials.accessKeyId {name: identity-broker-db-backup-s3, key: ACCESS_KEY_ID}
+assert equal $bk_store.spec.retentionPolicy 30d
+let bk_sched = ($bk | where kind == ScheduledBackup | first)
+assert equal [$bk_sched.spec.cluster.name $bk_sched.spec.method $bk_sched.spec.schedule] [identity-broker-db plugin "0 0 6 * * *"]
+let bk_db = ($bk | where kind == Cluster | first)
+assert equal $bk_db.spec.plugins [{name: barman-cloud.cloudnative-pg.io, isWALArchiver: true, parameters: {barmanObjectName: identity-broker-db-backup}}]
+assert equal ($bk_db.spec | reject plugins) $plain_db.spec "the backup adds only the plugin to the Cluster"
+let bk_np = ($bk | where kind == NetworkPolicy and metadata.name == identity-broker-db | first)
+assert (($bk_np.spec.ingress | where {|r| ($r.ports | get port) == [9187] } | length) == 1) "the metrics' scrape reaches the database"
+assert error { metal manifests --domain id.example.com --sources (metal sources) --backup s3://bucket/identity-broker }
+# The database-only apply carries the same backup, or it would drop it and the full apply put it back, restarting the instance.
+let only = (metal manifests --database-only --domain id.example.com --sources (metal sources) --backup s3://bucket/identity-broker --backup-endpoint https://s3.example.com | split row "---\n" | each { from yaml })
+assert equal ($only | where kind == Cluster | first).spec.plugins $bk_db.spec.plugins
+# A run applies the database with a backup or says it has none; it never leaves it out unasked.
+use ../../common/db_backup.nu
+assert error { db_backup require "" "" false identity-broker-db }
+assert error { db_backup require s3://bucket/x "" false identity-broker-db }
+assert error { db_backup require s3://bucket/x https://s3.example.com true identity-broker-db }
+db_backup require s3://bucket/x https://s3.example.com false identity-broker-db
+db_backup require "" "" true identity-broker-db
+# After the apply the live Cluster is read: the run fails when the plugin, the ScheduledBackup or the ObjectStore is not there.
+let live = {|have: list<string>| {|cmd: string|
+	if ($cmd | str contains "barmanObjectName") { if "plugin" in $have { "x-db-backup" } else { "" } } else if ($cmd | str contains "spec.plugins") { if "plugin" in $have { "barman-cloud.cloudnative-pg.io" } else { "" } } else if ($cmd | str contains "scheduledbackup") { if "sched" in $have { "x-db" } else { "" } } else if ($cmd | str contains "destinationPath") { "s3://bucket/x" } else if ($cmd | str contains "objectstore") { if "store" in $have { "x-db-backup" } else { "" } } else { "" }
+} }
+db_backup verify (do $live [plugin sched store]) kubectl ns x-db
+db_backup verify (do $live [plugin sched store]) kubectl ns x-db s3://bucket/x
+assert error { db_backup verify (do $live [plugin sched store]) kubectl ns x-db s3://bucket/other } "verify passed with another bucket"
+for missing in [[sched store] [plugin store] [plugin sched]] { assert error { db_backup verify (do $live $missing) kubectl ns x-db } $"verify passed without ($missing)" }
+assert error { db_backup require s3://bucket/x http://s3.example.com false x-db } "an http endpoint is refused"
+assert error { db_backup require bucket/x https://s3.example.com false x-db } "a backup that is no s3 url is refused"
+let keys = {|have: string| {|cmd: string| $have } }
+db_backup keys-present (do $keys "ACCESS_KEY_ID ACCESS_SECRET_KEY ") kubectl ns x-db-backup-s3
+assert error { db_backup keys-present (do $keys "ACCESS_KEY_ID ") kubectl ns x-db-backup-s3 }
+assert error { db_backup keys-present (do $keys "") kubectl ns x-db-backup-s3 }
 print "metal_test: ok"
 
 # --secrets: the SOPS file's manifests, held to the Secret the broker reads (common/sops.nu).

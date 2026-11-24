@@ -96,6 +96,9 @@ bin/pronto-analytics metal --ssh user@203.0.113.7 --project brawl-chess \
   --dashboards bonk-chess/business=<pronto>/apps/brawl-chess/observability/analytics.business.dashboard.json,…
 ```
 
+`metal` itself takes `--backup s3://bucket/folder --backup-endpoint https://…`, required (or an explicit `--no-backup`, which
+warns): the Cluster is applied with the backup, never without it, and the run fails unless the live Cluster then holds the
+plugin, the ScheduledBackup and the ObjectStore (common/db_backup.nu, shared with errors and both brokers).
 `bin/pronto-analytics metal backup --ssh … --kubeconfig … --backup s3://bucket/folder --backup-endpoint https://…`
 backs both databases up, as the node's other databases: CloudNativePG's barman-cloud plugin archives the
 WAL as it fills, a base backup runs nightly at 06:00 UTC, and 30 days are kept. The bucket's keys are the

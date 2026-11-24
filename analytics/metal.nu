@@ -12,6 +12,8 @@
 # file: Grafana's secret key (it decrypts what Grafana kept), its Google sign-in client, and Umami's
 # app secret (its sessions).
 
+use ../common/db_backup.nu
+
 const postgres = "ghcr.io/cloudnative-pg/postgresql:18.1-standard-trixie@sha256:ec0c0d60f9462b49f4c6f2403fd680ac43a063fc793f5d570a21a3cea8e627b5"
 const grafana_image = "grafana/grafana:11.2.0@sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f"
 const umami_image = "ghcr.io/umami-software/umami@sha256:e69d1a7932e9dab0fc523edc7be1f3a53f3c261f57856fc2167ae74a8fc022e8"
@@ -77,43 +79,10 @@ export def role-path [users: record]: nothing -> string {
 	$users | columns | sort | each {|e| $"\(email=='($e)' && '($users | get $e)'\)" } | str join " || "
 }
 
-# The database's backups (`metal backup`): an ObjectStore at `bucket` on the S3 endpoint, its keys the
-# Secret `analytics-db-backup-s3` (ACCESS_KEY_ID, ACCESS_SECRET_KEY) that the operator puts in the
-# namespace, and a base backup nightly at 06:00 UTC (none at once: one taken while the archiver's
-# sidecar restarts the instance fails; `metal backup` takes its own after) with the WAL archived as it fills, kept 30 days:
-# the node's other databases' backups (pronto's database.backup). `cluster` is what the Cluster's
-# spec gains: the barman-cloud plugin as its WAL archiver.
+# The database's backups (`metal`, and `metal backup`): common/db_backup.nu's, for analytics-db, its keys the Secret
+# `analytics-db-backup-s3`. `cluster` is what the Cluster's spec gains: the barman-cloud plugin as its WAL archiver.
 export def backup-objects [--bucket: string, --endpoint: string, --namespace: string = "analytics"]: nothing -> record {
-	let db = "analytics-db"
-	let store = $"($db)-backup"
-	let secret = $"($db)-backup-s3"
-	let meta = {|name: string| {name: $name, namespace: $namespace, labels: {"app.kubernetes.io/part-of": "pronto-analytics", "app.kubernetes.io/name": $name}} }
-	{
-		secret: $secret
-		cluster: {plugins: [{name: "barman-cloud.cloudnative-pg.io", isWALArchiver: true, parameters: {barmanObjectName: $store}}]}
-		objects: [
-			{
-				apiVersion: "barmancloud.cnpg.io/v1", kind: "ObjectStore", metadata: (do $meta $store)
-				spec: {
-					retentionPolicy: "30d"
-					configuration: {
-						destinationPath: $bucket
-						endpointURL: $endpoint
-						s3Credentials: {
-							accessKeyId: {name: $secret, key: "ACCESS_KEY_ID"}
-							secretAccessKey: {name: $secret, key: "ACCESS_SECRET_KEY"}
-						}
-						data: {compression: "gzip"}
-						wal: {compression: "gzip"}
-					}
-				}
-			}
-			{
-				apiVersion: "postgresql.cnpg.io/v1", kind: "ScheduledBackup", metadata: (do $meta $db)
-				spec: {schedule: "0 0 6 * * *", immediate: false, backupOwnerReference: "self", cluster: {name: $db}, method: "plugin", pluginConfiguration: {name: "barman-cloud.cloudnative-pg.io"}}
-			}
-		]
-	}
+	db_backup objects --db "analytics-db" --bucket $bucket --endpoint $endpoint --namespace $namespace --part-of "pronto-analytics"
 }
 
 # Every object the analytics are on a metal cluster, as YAML documents. `dashboards` holds each
@@ -328,6 +297,7 @@ export def manifests [
 					{from: [{podSelector: {matchExpressions: [{key: "app.kubernetes.io/name", operator: "In", values: ["grafana" "umami"]}]}}], ports: [{protocol: "TCP", port: 5432}]}
 					{from: [{podSelector: {matchLabels: {"cnpg.io/cluster": $db}}}], ports: [{protocol: "TCP", port: 5432} {protocol: "TCP", port: 8000}]}
 					{from: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "cnpg-system"}}}], ports: [{protocol: "TCP", port: 5432} {protocol: "TCP", port: 8000}]}
+					{from: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": "observability"}}}], ports: [{protocol: "TCP", port: 9187}]}
 				]
 			}
 		}
@@ -399,15 +369,6 @@ export def "main dashboards" [
 	do $run $"($kubectl) rollout status deployment/grafana -n ($namespace) --timeout=300s" "" | print
 }
 
-# The backups' keys must be in the namespace before the WAL archiver starts, or every WAL fails to archive.
-def backup-keys-present [remote: closure, kubectl: string, namespace: string] {
-	let secret = (backup-objects --bucket "" --endpoint "" --namespace $namespace).secret
-	let keys = ("" | do $remote $"($kubectl) get secret ($secret) -n ($namespace) --ignore-not-found -o go-template='{{range $k, $v := .data}}{{$k}} {{end}}'" | split row " " | where {|k| $k != ""})
-	if not ("ACCESS_KEY_ID" in $keys and "ACCESS_SECRET_KEY" in $keys) {
-		error make {msg: $"($secret) in ($namespace) lacks ACCESS_KEY_ID and ACCESS_SECRET_KEY: put the bucket's keys there first"}
-	}
-}
-
 # The database's backups, on a cluster the analytics already run on: the ObjectStore, the nightly
 # ScheduledBackup and the barman-cloud plugin on the Cluster, applied under a field manager of their own, so
 # `metal` (which never names them) neither drops them nor conflicts with them. The keys' Secret is the
@@ -424,7 +385,7 @@ export def "main backup" [
 	if ([$ssh $kubeconfig $backup $backup_endpoint] | any { is-empty }) { error make {msg: "--ssh, --kubeconfig, --backup and --backup-endpoint are all required"} }
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
-	backup-keys-present $remote $kubectl $namespace
+	db_backup keys-present $remote $kubectl $namespace "analytics-db-backup-s3"
 	let b = (backup-objects --bucket $backup --endpoint $backup_endpoint --namespace $namespace)
 	let cluster = {apiVersion: "postgresql.cnpg.io/v1", kind: "Cluster", metadata: {name: "analytics-db", namespace: $namespace}, spec: $b.cluster}
 	$b.objects | append $cluster | each { to yaml } | str join "---\n" | do $remote $"($kubectl) apply --server-side --field-manager=pronto-analytics-backup -f -" | print
@@ -452,18 +413,24 @@ export def main [
 	--dashboards: string = ""     # app/name=path of each dashboard, comma-separated (a shell passes no nu list)
 	--titles: string = "{}"        # JSON: each app's folder title, {"bonk-chess": "Bonk Chess"}
 	--namespace: string = "analytics"
+	--backup: string = ""          # The backups' bucket and folder, s3://bucket/folder: required, as --backup-endpoint, unless --no-backup
+	--backup-endpoint: string = "" # The bucket's S3 endpoint, https://…
+	--no-backup                    # Apply the database with no off-node backup: a cluster that had one loses it
 ] {
 	if ([$ssh $kubeconfig $grafana_domain $umami_domain $project $users_file] | any { is-empty }) { error make {msg: "--ssh, --kubeconfig, --grafana-domain, --umami-domain, --project and --users-file are all required"} }
+	db_backup require $backup $backup_endpoint $no_backup "analytics-db"
 	let kubectl = $"env KUBECONFIG=($kubeconfig) kubectl"
 	let remote = {|cmd: string| $in | ^ssh -o BatchMode=yes $ssh $cmd }
-	let yaml = (manifests --grafana-domain $grafana_domain --umami-domain $umami_domain --users (open --raw $users_file | from json) --dashboards (dashboards ($dashboards | split row "," | str trim | where {|d| $d != ""}) ($titles | from json)) --namespace $namespace)
+	let yaml = (manifests --grafana-domain $grafana_domain --umami-domain $umami_domain --users (open --raw $users_file | from json) --dashboards (dashboards ($dashboards | split row "," | str trim | where {|d| $d != ""}) ($titles | from json)) --namespace $namespace --backup $backup --backup-endpoint $backup_endpoint)
 	$"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ($namespace)\n" | do $remote $"($kubectl) apply -f -" | print
 	# What Cloud Run's kept, through ssh's stdin alone: never a file, never an argument.
 	let grafana_env = $"GF_SECURITY_SECRET_KEY=(gc-secret grafana-secret-key $project)\nGF_AUTH_GOOGLE_CLIENT_ID=(gc-secret grafana-google-client-id $project)\nGF_AUTH_GOOGLE_CLIENT_SECRET=(gc-secret grafana-google-client-secret $project)\n"
 	$grafana_env | do $remote $"($kubectl) create secret generic grafana -n ($namespace) --from-env-file=/dev/stdin --dry-run=client -o yaml | ($kubectl) apply -f -" | print
 	$"APP_SECRET=(gc-secret umami-app-secret $project)\n" | do $remote $"($kubectl) create secret generic umami -n ($namespace) --from-env-file=/dev/stdin --dry-run=client -o yaml | ($kubectl) apply -f -" | print
+	if not $no_backup { db_backup keys-present $remote $kubectl $namespace "analytics-db-backup-s3" }
 	$yaml | do $remote $"($kubectl) apply --server-side --force-conflicts -f -" | print
 	do $remote $"($kubectl) wait --for=condition=Ready cluster.postgresql.cnpg.io/analytics-db -n ($namespace) --timeout=300s && ($kubectl) rollout status deployment/grafana -n ($namespace) --timeout=300s && ($kubectl) rollout status deployment/umami -n ($namespace) --timeout=300s" | print
+	if not $no_backup { db_backup verify $remote $kubectl $namespace "analytics-db" $backup }
 	# Through the gateway as the tunnel reaches it, by host: each answers.
 	let gateway = (do $remote $"($kubectl) get svc -n envoy-gateway-system pronto-gateway -o jsonpath='{.spec.clusterIP}'" | str trim)
 	for c in [[$grafana_domain "/api/health"] [$umami_domain "/api/heartbeat"]] {

@@ -34,6 +34,11 @@ errors: #Errors & {
 bin/pronto-errors metal ../my-repo/apps/my-app
 ```
 
+`metal` also takes `--backup s3://bucket/folder --backup-endpoint https://…`, required (or an explicit `--no-backup`): the
+database's WAL is archived off the node and a base backup runs nightly, as the node's other databases (common/db_backup.nu).
+Its keys are the Secret `errors-db-backup-s3` (`ACCESS_KEY_ID`, `ACCESS_SECRET_KEY`), put in the namespace first; the run
+refuses without it, and fails unless the live Cluster holds the backup after the apply.
+
 Flags still do it by hand, and win over the app's spec:
 `bin/pronto-errors metal --ssh user@203.0.113.7 --kubeconfig '$HOME/.kube/config' --domain errors.example.com --projects my-app`.
 

@@ -90,6 +90,18 @@ let lockpol = (do $at NetworkPolicy billing-broker-airlock).spec
 assert equal ($lockpol.ingress | first).from [{podSelector: {matchLabels: {"app.kubernetes.io/name": billing-broker, "app.kubernetes.io/part-of": pronto-billing}}}]
 assert equal (($lockpol.ingress | first).ports | first).port 9998
 assert equal ((do $at NetworkPolicy billing-broker).spec.egress | where to? != null | get to | flatten | where podSelector? != null | get podSelector.matchLabels | each { values | first }) [billing-broker-db billing-broker-airlock] "the broker reaches its database and its door, no other pod"
+# Backups (common/db_backup.nu): with --backup the broker's database archives to the bucket, and --database-only carries the same.
+assert ($docs | where kind in [ObjectStore ScheduledBackup] | is-empty) "no backup unless asked"
+let bk = (metal manifests --domain billing.example.com --sources (metal sources) --secrets $secrets --backup s3://bucket/billing-broker --backup-endpoint https://s3.example.com | split row "---\n" | each { from yaml })
+assert equal ($bk | where kind == ObjectStore | first).spec.configuration.destinationPath s3://bucket/billing-broker
+assert equal ($bk | where kind == ObjectStore | first).spec.configuration.s3Credentials.secretAccessKey {name: billing-broker-db-backup-s3, key: ACCESS_SECRET_KEY}
+assert equal ($bk | where kind == ScheduledBackup | first).spec.cluster.name billing-broker-db
+let bk_plugins = ($bk | where kind == Cluster | first).spec.plugins
+assert equal $bk_plugins [{name: barman-cloud.cloudnative-pg.io, isWALArchiver: true, parameters: {barmanObjectName: billing-broker-db-backup}}]
+assert equal ($bk | where kind == Cluster | first).spec.bootstrap ((do $kind Cluster).spec.bootstrap)
+let only = (metal manifests --database-only --domain billing.example.com --sources (metal sources) --backup s3://bucket/billing-broker --backup-endpoint https://s3.example.com | split row "---\n" | each { from yaml })
+assert equal ($only | where kind == Cluster | first).spec.plugins $bk_plugins
+assert error { metal manifests --domain billing.example.com --sources (metal sources) --secrets $secrets --backup s3://bucket/billing-broker }
 print "metal_test: ok"
 
 # --door-asked (PRONTO-218): while each tenant's flag moves it, the broker keeps its keys beside the
