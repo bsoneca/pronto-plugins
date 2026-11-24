@@ -126,6 +126,7 @@ A flip therefore needs a test of its own, and it must be:
       reach of every flag both hold, lists the differences and the open record pull request, and exits 1 when they
       differ.
     - A plain push after an unrecorded flip leaves the flag live as it is (decision 8: a default the spec differs on is kept).
+    - A flip moves the flags it names and no other (PRONTO-1755): the rest of live is written as it is, a guard refuses a push that would move one more, and a flip of several flags says `--several "<why>"` (PRONTO-415). See [A flip moves one flag](../flags/README.md).
 
 ## The production guarantee
 
