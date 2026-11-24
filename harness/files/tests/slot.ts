@@ -528,9 +528,9 @@ export const availableFrom = (text: string, pageSize: number) => {
 // Whether a run that failed died of the machine's memory: the machine's free memory (%, the lowest seen while it ran;
 // null when unread) fell under `floor` AND something was killed: the run's root by SIGKILL, or its exit is 137 (128+9, what a
 // shell reports for a child the kernel killed). A plain failure under low memory stays a failure, so a real bug is never
-// rerun as "no verdict".
+// rerun as "no verdict". Not our own stop (124, 129, 130: a signal to this process or a timeout).
 export const starvedRun = (minPct: number | null, code: number, signal: string | null, floor: number) =>
-  minPct !== null && minPct < floor && (signal === "SIGKILL" || code === 137);
+  minPct !== null && minPct < floor && (signal === "SIGKILL" || code === 137) && ![124, 129, 130].includes(code);
 // A holder whose child has been dead for 60 s or more (`deadSince`, ms since the epoch; 0 = not seen dead)
 // is stuck: it holds no memory.
 export const stuck = (deadSince: number, now: number) => deadSince > 0 && now - deadSince > 60_000;
@@ -2494,7 +2494,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
     await Deno.mkdir(file.replace(/\/[^/]*$/, ""), { recursive: true }).catch(() => {});
     await Deno.writeTextFile(file, `${round(Math.max(treePeak, prior))} ${what}\n`).catch(() => {});
   }
-  // A run that failed while the machine was out of memory gave no verdict: said so, with the no-verdict exit, so
+  // A run killed while the machine was out of memory gave no verdict: said so, with the no-verdict exit, so
   // release-cron names the cause (a process it started was probably killed by the kernel, as Studio's helm was).
   const starved = heavy && starvedRun(lowestFree, status.code, status.signal, Number(Deno.env.get("STACK_STARVED_PCT") ?? 5));
   if (starved) console.error(`slot: ${what}: no verdict: memory (the machine fell to ${lowestFree}% free while it ran; a process it started was likely killed by the kernel)`);
