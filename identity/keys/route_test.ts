@@ -1,6 +1,6 @@
 // The keys routes in the door's Caddyfile, and the installer that gives an app the service.
 import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
-import { BEGIN, BLOCK, END, ROUTES, ROUTES_BEGIN, ROUTES_END, route, routed } from "./route.ts";
+import { BEGIN, END, ROUTES, ROUTES_BEGIN, ROUTES_END, route, routed } from "./route.ts";
 
 const caddy = `(app) {
   encode zstd gzip
@@ -17,72 +17,46 @@ const caddy = `(app) {
 }
 `;
 
-Deno.test("the block goes before the first top-level handle and its comment, after another host's block", () => {
-  const out = routed(caddy).split("\n");
-  const begin = out.indexOf(BEGIN);
-  assert(begin > out.indexOf("  # doorguard:end"), out.join("\n"));
-  assert(out.indexOf(END) < out.indexOf("  # Chromium probes /favicon.ico."));
-  assert(out.indexOf("  handle /favicon.ico {") > out.indexOf(END));
-});
-
-// doorguard's block as it writes it: its own `handle @daprapi` is the first handle of the file.
-const guarded = caddy.replace("  # doorguard:begin — x\n  @daprapi path_regexp daprapi ^/crud\n  # doorguard:end\n", [
-  "  # doorguard:begin — x", "  # PRONTO-1307: the guard", "  @daprapi path_regexp daprapi ^/crud", "  handle @daprapi {", "    respond 404", "  }", "  # doorguard:end", "",
-].join("\n"));
-
-Deno.test("the block goes after the end of a host whose own handle is the first, never inside its markers", () => {
-  const out = routed(guarded).split("\n");
-  assert(out.indexOf(BEGIN) > out.indexOf("  # doorguard:end"), out.join("\n"));
-  assert(out.indexOf("  handle @daprapi {") < out.indexOf("  # doorguard:end"));
-  assertEquals(routed(routed(guarded)), routed(guarded));
-  // That host's own run takes out what is between its markers: none of ours.
-  const without = out.slice(0, out.indexOf("  # doorguard:begin — x")).concat(out.slice(out.indexOf("  # doorguard:end") + 1));
-  assert(without.includes(BEGIN) && without.includes(ROUTES_BEGIN));
-});
-
-Deno.test("it guards every /auth/* path and sends the keys paths to the service from inside the app's /auth/* handle", () => {
-  const text = BLOCK.join("\n");
-  assert(text.includes("@keysauth path /auth/*"));
-  const via = "header_up dapr-app-id keys\n";
-  assert(text.includes(`forward_auth @keysauth {$PRONTO_UPSTREAM_KEYS:keys:8702} {\n    uri /auth/keyguard\n    ${via}    import bounded-auth\n  }`));
-  assert(!text.includes("handle"), "a top-level handle of its own reorders the app's other handles");
-  const keys = ROUTES.join("\n");
-  assert(keys.includes("@keysroutes path /auth/keys* /auth/key\n    handle @keysroutes {\n      reverse_proxy {$PRONTO_UPSTREAM_KEYS:keys:8702} {\n        " + via.trim() + "\n        import bounded-auth\n      }\n    }"));
-  // The routes are the first lines of the app's own handle, so its reverse_proxy to auth answers what they do not match.
+Deno.test("the block is the first lines of the app's own handle /auth/*, and the app's reverse_proxy to auth answers the rest", () => {
   const out = routed(caddy).split("\n");
   const at = out.indexOf("  handle /auth/* {");
   assertEquals(out[at + 1], ROUTES_BEGIN);
-  assertEquals(out.indexOf(ROUTES_END), at + 1 + ROUTES.length + 1);
-  assertEquals(out[at + ROUTES.length + 3], "    reverse_proxy {$PRONTO_UPSTREAM_AUTH:auth:9999}");
-  // The guard comes first: forward_auth runs before every handle.
-  assert(out.indexOf("  forward_auth @keysauth {$PRONTO_UPSTREAM_KEYS:keys:8702} {") < at);
+  assertEquals(out.slice(at + 2, at + 2 + ROUTES.length), ROUTES);
+  assertEquals(out[at + 2 + ROUTES.length], ROUTES_END);
+  assertEquals(out[at + 3 + ROUTES.length], "    reverse_proxy {$PRONTO_UPSTREAM_AUTH:auth:9999}");
+  // Nothing else is added: the other handles and the comments are where they were.
+  assertEquals(out.filter((_, i) => i <= at || i > at + 2 + ROUTES.length), caddy.split("\n"));
+});
+
+Deno.test("it guards /auth/* with forward_auth inside that handle, ahead of the keys paths, and has no handle of its own beside the app's", () => {
+  const text = ROUTES.join("\n");
+  const via = "header_up dapr-app-id keys";
+  assert(text.startsWith(`    forward_auth {$PRONTO_UPSTREAM_KEYS:keys:8702} {\n      uri /auth/keyguard\n      ${via}\n      import bounded-auth\n    }\n`), text);
+  assert(text.includes(`    @keysroutes path /auth/keys* /auth/key\n    handle @keysroutes {\n      reverse_proxy {$PRONTO_UPSTREAM_KEYS:keys:8702} {\n        ${via}\n        import bounded-auth\n      }\n    }`));
+  assert(text.indexOf("forward_auth") < text.indexOf("handle @keysroutes"));
+  // A matcher on forward_auth, or a handle at the door's top level, is sorted in with the app's own and reorders them.
+  assert(!ROUTES.some((l) => /^ {0,3}(forward_auth|handle|@)/.test(l)), text);
 });
 
 Deno.test("both set the Dapr app id with header_up, which replaces a client's own, and none passes it through", () => {
-  const all = [...BLOCK, ...ROUTES];
-  const lines = all.filter((l) => l.includes("dapr-app-id"));
+  const lines = ROUTES.filter((l) => l.includes("dapr-app-id"));
   assertEquals(lines.map((l) => l.trim()), Array(2).fill("header_up dapr-app-id keys"));
-  assertEquals(all.filter((l) => l.includes("import bounded-auth")).length, 2);
+  assertEquals(ROUTES.filter((l) => l.includes("import bounded-auth")).length, 2);
   // `header_up +` adds beside a client's value and `-` deletes: only the bare form replaces it.
-  assert(!all.some((l) => /header_up\s+[+\-?]/.test(l)));
-  assert(!all.some((l) => /copy_headers|header_down|trusted_proxies/.test(l)));
+  assert(!ROUTES.some((l) => /header_up\s+[+\-?]/.test(l)));
+  assert(!ROUTES.some((l) => /copy_headers|header_down|trusted_proxies/.test(l)));
 });
 
-Deno.test("it is idempotent, and replaces an earlier block", () => {
+Deno.test("it is idempotent, and replaces an earlier block, the first version's top-level guard too", () => {
   assertEquals(routed(routed(caddy)), routed(caddy));
-  const old = caddy.replace("  # Chromium", [BEGIN, "  # an older block", END, "  # Chromium"].join("\n"));
-  const out = routed(old);
-  assert(!out.includes("an older block") && out.split("\n").filter((l) => l === BEGIN).length === 1);
+  const first = caddy.replace("  # Chromium", [BEGIN, "  @keysauth path /auth/*", "  forward_auth @keysauth keys:8702 {", "  }", END, "  # Chromium"].join("\n"));
+  assertEquals(routed(first), routed(caddy));
   const older = routed(caddy).replace(ROUTES_BEGIN, `${ROUTES_BEGIN}\n    # an older routes block`);
   assertEquals(routed(older), routed(caddy));
 });
 
 Deno.test("a Caddyfile with no top-level handle /auth/* throws", () => {
   assertThrows(() => routed(caddy.replace("handle /auth/*", "handle /other/*")), Error, "handle /auth/*");
-});
-
-Deno.test("a Caddyfile with no handle throws", () => {
-  assertThrows(() => routed("(app) {\n  encode gzip\n}\n"), Error, "no top-level `handle");
 });
 
 Deno.test("route writes the file once", async () => {
@@ -148,15 +122,35 @@ Deno.test("an app whose program names no package is refused", async () => {
   }
 });
 
-// Bonk Chess's door, cut down to the handles that Caddy 2.11.7 reorders when one more path handle joins them (the
-// keys paths as top-level handles of their own moved /llms-full.txt, /.well-known/* and the rest ahead of the others,
-// and in the full door rmen and rmloc ahead of rmtoday: /armies in es came back English, /puzzle/today 404).
+// Bonk Chess's door (apps/brawl-chess/docker/Caddyfile), cut down to the handles that Caddy 2.11.7 reorders when a route
+// is added to them, imported into the three site blocks it has: the unnamed one, `localhost` and `caddy`. A
+// `forward_auth @matcher` at the door's top level and two top-level path handles each moved /health, /img/* and /auth/*
+// ahead of the others in some of the blocks, and in the full door rmloc ahead of /manifest.* and rmen/rmloc ahead of
+// rmtoday: /armies in es came back English, /puzzle/today and /pt-br/puzzle/today 404.
 const door = `(bounded-auth) {
   transport http {
     dial_timeout 2s
   }
 }
 (app) {
+  handle /signal/* {
+    respond 200
+  }
+  handle /electric/* {
+    respond 200
+  }
+  handle /telemetry {
+    respond 200
+  }
+  handle /perf {
+    respond 200
+  }
+  handle /a/s.js {
+    respond 200
+  }
+  handle /a/e {
+    respond 200
+  }
   handle /.well-known/pronto-billing.json {
     respond 200
   }
@@ -181,10 +175,6 @@ const door = `(bounded-auth) {
   handle /pace/* {
     respond 200
   }
-  @rmtoday path_regexp rmtoday ^/(es/|pt-br/)?puzzle/today/?$
-  handle @rmtoday {
-    respond 200
-  }
   @rmes {
     path_regexp rmes ^/(armies|rules)/?$
     header_regexp lang Accept-Language (?i)^\\s*es\\b
@@ -199,36 +189,24 @@ const door = `(bounded-auth) {
   handle @rmptbr {
     respond 200
   }
-  @rmen path_regexp rmen ^/(armies|rules)/?$
-  handle @rmen {
+  @readingMoreEn path_regexp rmen ^/(armies|rules)/?$
+  handle @readingMoreEn {
     respond 200
   }
-  @rmloc path_regexp rmloc ^/(es|pt-br)/(armies|rules)/?$
-  handle @rmloc {
+  @readingMoreLoc path_regexp rmloc ^/(es|pt-br)/(armies|rules)/?$
+  handle @readingMoreLoc {
+    respond 200
+  }
+  handle /reading-more-sitemap.xml {
     respond 200
   }
   handle /auth/* {
     reverse_proxy {$PRONTO_UPSTREAM_AUTH:auth:9999}
   }
-  handle /blobs/* {
-    respond 200
-  }
   handle /img/* {
     respond 200
   }
   handle /health {
-    respond 200
-  }
-  handle /robots.txt {
-    respond 200
-  }
-  handle /sitemap.xml {
-    respond 200
-  }
-  handle /llms.txt {
-    respond 200
-  }
-  handle /llms-full.txt {
     respond 200
   }
   handle /.well-known/* {
@@ -241,10 +219,27 @@ const door = `(bounded-auth) {
 :8080 {
   import app
 }
+https://localhost:8443 {
+  tls internal
+  import app
+}
+https://caddy:8443 {
+  tls internal
+  import app
+}
 `;
 
-/** The matchers of the app's routes in the order Caddy runs them, without the keys guard (a route of its own). */
-async function order(caddy: string, text: string): Promise<string[]> {
+/** The matchers of every route Caddy runs, in order and nested as it nests them, for each server its site blocks make:
+ * the keys block's own routes (inside the app's /auth/* route) are not walked into. */
+// deno-lint-ignore no-explicit-any
+const sequence = (routes: any[], depth = 0): string[] => (routes ?? []).flatMap((r: any) => {
+  const own = " ".repeat(depth) + JSON.stringify(r.match ?? []);
+  if (JSON.stringify(r.match) === '[{"path":["/auth/*"]}]') return [own];
+  // deno-lint-ignore no-explicit-any
+  return [own, ...(r.handle ?? []).flatMap((h: any) => h.routes ? sequence(h.routes, depth + 1) : [])];
+});
+
+async function order(caddy: string, text: string): Promise<string[][]> {
   const dir = await Deno.makeTempDir();
   try {
     await Deno.writeTextFile(`${dir}/Caddyfile`, text);
@@ -252,11 +247,8 @@ async function order(caddy: string, text: string): Promise<string[]> {
     const out = await new Deno.Command(caddy, { args: ["adapt", "--config", `${dir}/Caddyfile`, "--adapter", "caddyfile"], env, stderr: "null" }).output();
     assert(out.success, `caddy adapt failed on:\n${text}`);
     // deno-lint-ignore no-explicit-any
-    const routes = (rs: any[]): any[] => rs.some((r) => JSON.stringify(r.match ?? "").includes("/health")) ? rs : rs.flatMap((r) => (r.handle ?? []).flatMap((h: any) => (h.routes ? [routes(h.routes)] : [])).filter((x: any[]) => x.length)).at(0) ?? [];
-    // deno-lint-ignore no-explicit-any
     const servers = Object.values<any>(JSON.parse(new TextDecoder().decode(out.stdout)).apps.http.servers);
-    // deno-lint-ignore no-explicit-any
-    return routes(servers[0].routes).filter((r: any) => !JSON.stringify(r).includes("keyguard")).map((r: any) => JSON.stringify(r.match ?? []));
+    return servers.map((s) => sequence(s.routes));
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -264,11 +256,12 @@ async function order(caddy: string, text: string): Promise<string[]> {
 
 const caddyBin = Deno.env.get("CADDY");
 Deno.test({
-  name: "adding the keys routes leaves the order of the app's other routes as Caddy ran it, whatever it reorders",
+  name: "adding the keys routes leaves the sequence of the door's routes as Caddy ran it, in every site block",
   ignore: !caddyBin,
   async fn() {
     const without = await order(caddyBin!, door);
-    assertEquals(without.length, 23);
+    assertEquals(without.length, 2, "the unnamed site and the two https ones make two servers");
+    assert(without.every((s) => s.some((l) => l.includes('"/health"'))));
     assertEquals(await order(caddyBin!, routed(door)), without);
   },
 });
