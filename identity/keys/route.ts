@@ -2,7 +2,8 @@
 // lines of its top-level `handle /auth/*`, an earlier copy taken out first (idempotent).
 //   route.ts [route] <app-dir>
 // bin/pronto-keys copies this file into the app, where its generate step runs it after pronto's writer.
-export const ROUTES_BEGIN = "    # keys-routes:begin — API keys and the door's session check, on the keys service (PRONTO-740)";
+// The marker text is #523's, unchanged: an app generated with that version has its block taken out by it.
+export const ROUTES_BEGIN = "    # keys-routes:begin — /auth/keys* and /auth/key, ahead of the auth service (PRONTO-740)";
 export const ROUTES_END = "    # keys-routes:end";
 // The first version put the guard before the app's first top-level `handle`; it is taken out where an app still has it.
 export const BEGIN = "  # keys:begin — API keys and the door's session check, on the keys service (PRONTO-740)";

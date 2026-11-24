@@ -51,6 +51,12 @@ Deno.test("it is idempotent, and replaces an earlier block, the first version's 
   assertEquals(routed(routed(caddy)), routed(caddy));
   const first = caddy.replace("  # Chromium", [BEGIN, "  @keysauth path /auth/*", "  forward_auth @keysauth keys:8702 {", "  }", END, "  # Chromium"].join("\n"));
   assertEquals(routed(first), routed(caddy));
+  // What the second version (#523) wrote: its own marker and nested handle, and the guard at the top level.
+  const second = caddy.replace("  # Chromium", [BEGIN, "  @keysauth path /auth/*", "  forward_auth @keysauth {$PRONTO_UPSTREAM_KEYS:keys:8702} {", "    uri /auth/keyguard", "  }", END, "  # Chromium"].join("\n")).replace("  handle /auth/* {\n", [
+    "  handle /auth/* {", "    # keys-routes:begin — /auth/keys* and /auth/key, ahead of the auth service (PRONTO-740)", "    @keysroutes path /auth/keys* /auth/key",
+    "    handle @keysroutes {", "      reverse_proxy {$PRONTO_UPSTREAM_KEYS:keys:8702} {", "        header_up dapr-app-id keys", "        import bounded-auth", "      }", "    }", "    # keys-routes:end", "",
+  ].join("\n"));
+  assertEquals(routed(second), routed(caddy));
   const older = routed(caddy).replace(ROUTES_BEGIN, `${ROUTES_BEGIN}\n    # an older routes block`);
   assertEquals(routed(older), routed(caddy));
 });
