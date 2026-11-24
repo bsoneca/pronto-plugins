@@ -7,7 +7,7 @@
 // cap who may start, this file only keeps stacks off each other's ports and the `cue` evaluations off
 // the machine's memory, by what each claims. It measures nothing before it admits: no load, no cores, no
 // memory (a cue's own resident size is read while it runs, to correct its claim; the machine's free
-// memory is read once, as a veto on starting another evaluation).
+// memory is read as a veto on starting another evaluation or a heavy claim).
 //
 //   Ports. Slot n's ports are 33000 + 100·(n-1) onward: the door (CADDY_DOOR_PORT, and
 //   CADDY_TLS_HOST_PORT, which ORIGIN names) first, then each ${<VAR>_PORT:-<n>} variable of
@@ -113,6 +113,13 @@
 //   command over its seconds since it started, once it ran 5 s: a run that failed only raises it);
 //   --wait-out <file> the seconds from its ticket to its admission. A job the memory watchdog
 //   (machine/watchdog.sh) killed under pressure, not for its own size, waits its turn again, once.
+//
+//   Heavy claims and memory (PRONTO-1752). A claim of cores of weight STACK_MEM_MIN_WEIGHT (4) or more, a rehearsal or an
+//   integrate@k8s, is also admitted only while the machine has STACK_MIN_FREE_PCT (else CUE_MIN_FREE_PCT, 20) % of its memory
+//   free and, once it has run, the memory available (vm_stat) its last peak needed (the resident size of everything it started,
+//   kept in ~/.cache/pronto/slot-mem): the kernel killed Studio's helm when swap was full. The head of the line on a pool
+//   holding no other heavy claim is never vetoed. A heavy run that fails while the machine fell under STACK_STARVED_PCT (5) %
+//   free says "no verdict: memory" and exits 3. A release waits for memory too, and so may miss its gap.
 //
 //   A claim that does not wait (claim(..., false), as a rehearsal's extra lanes) is asked once, in its
 //   place in the line, and gives back no slot when it is not admitted then. The wait has no
@@ -390,6 +397,23 @@ const freeMemoryPct = async (): Promise<number | null> => {
   const n = out === null ? NaN : Number(out.trim());
   return Number.isFinite(n) ? n : null;
 };
+// The memory available now (GB: free, inactive and speculative pages of vm_stat) on a Mac; null elsewhere or when unreadable.
+const availableMemoryGB = async (): Promise<number | null> => {
+  if (Deno.build.os !== "darwin") return null;
+  const out = await run("vm_stat", []);
+  const size = Number(out?.match(/page size of (\d+) bytes/)?.[1]);
+  return out !== null && size > 0 ? availableFrom(out, size) : null;
+};
+// The weight from which a claim is heavy and its start waits for the machine's memory (STACK_MEM_MIN_WEIGHT, else 4:
+// a rehearsal 10, integrate@k8s 8; a gate 3 is not).
+const memMinWeight = () => Number(Deno.env.get("STACK_MEM_MIN_WEIGHT") ?? 4);
+// What a heavy run of `what` held at its peak last time (GB, the resident size of everything it started), kept per
+// label and app in ~/.cache/pronto/slot-mem; 0 when never measured.
+const peakFile = async (what: string) => {
+  const sha = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${what}\0${Deno.cwd()}`))), (b) => b.toString(16).padStart(2, "0")).join("").slice(0, 24);
+  return `${Deno.env.get("HOME")}/.cache/pronto/slot-mem/${sha}`;
+};
+const learnedPeak = async (what: string) => Number((await Deno.readTextFile(await peakFile(what)).catch(() => "")).split(" ")[0]) || 0;
 // Whether the release a record or ticket written at `written` names is real: its process `pid` started before
 // the write, and the write is within STACK_RELEASE_HOLD_MAX hours. Asked only of release-marked entries.
 // What ps says of a (pid, write) is asked once per process: a release's ps outcome does not change.
@@ -489,6 +513,22 @@ export const memAdmits = (held: number, ahead: number, mem: number, budget: numb
 // `min`, a claim is refused unless it is the head of the line on a pool holding no cue memory.
 export const vetoed = (freePct: number | null, min: number, headOfEmptyPool: boolean) =>
   freePct !== null && freePct < min && !headOfEmptyPool;
+// The same veto for a heavy claim of cores (weight at least STACK_MEM_MIN_WEIGHT; PRONTO-1752): refused unless it is the head of
+// the line on a pool holding no other heavy claim, when the machine's free memory (%) is under `min`, or when the memory
+// available (GB; null when unknown) is under what the claim needed the last time it ran (`needGB`, 0 when never measured).
+// An unreadable figure vetoes nothing (a Linux runner).
+export const memVetoed = (freePct: number | null, min: number, availGB: number | null, needGB: number, headOfEmptyPool: boolean) =>
+  !headOfEmptyPool && ((freePct !== null && freePct < min) || (availGB !== null && needGB > 0 && availGB < needGB));
+// The memory available (GB) in `vm_stat`'s text: free, inactive and speculative pages, each `pageSize` bytes.
+export const availableFrom = (text: string, pageSize: number) => {
+  let pages = 0;
+  for (const m of text.matchAll(/^Pages (?:free|inactive|speculative):\s+(\d+)\./gm)) pages += Number(m[1]);
+  return Math.round(pages * pageSize / 2 ** 30 * 100) / 100;
+};
+// Whether a run that failed died of the machine's memory: its exit is not 0 and the machine's free memory (%, the lowest
+// seen while it ran; null when unread) fell under `floor`. Not the sampler's own failure (125): that one is the job's.
+export const starvedRun = (minPct: number | null, code: number, floor: number) =>
+  code !== 0 && code !== 125 && minPct !== null && minPct < floor;
 // A holder whose child has been dead for 60 s or more (`deadSince`, ms since the epoch; 0 = not seen dead)
 // is stuck: it holds no memory.
 export const stuck = (deadSince: number, now: number) => deadSince > 0 && now - deadSince > 60_000;
@@ -1017,6 +1057,8 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
   const compose = job ? "" : await Deno.readTextFile(`${app}/.bayt/process-compose.yaml`);
   let told = "";
   const queued = Date.now();
+  // What it needed last time, read once (a heavy claim only).
+  const need = weight >= memMinWeight() ? await learnedPeak(what) : 0;
   const dirOf = line === "cue" ? "cue-queue" : "queue";
   const queue = `${pool}/${dirOf}`;
   const coresQueue = `${pool}/queue`;
@@ -1171,6 +1213,16 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
         }
       } else if (!admitsCores(line === "none", used, weight, ahead, budget, runnerJob(Deno.env.get("GITHUB_ACTIONS")), release, hold, beside)) {
         return why(`weight ${used} of ${budget} held (STACK_BUDGET)${ahead ? `, ${ahead} reserved by those ahead` : ""}, this needs ${weight}`);
+      }
+      // A heavy claim of cores waits for the machine's memory too (PRONTO-1752): a rehearsal and an integrate@k8s were admitted by
+      // weight alone while other gates held the rest of the memory, and the kernel killed a helm. A release claim obeys it as well.
+      if (weight >= memMinWeight() && !nested) {
+        const min = Number(Deno.env.get("STACK_MIN_FREE_PCT") ?? Deno.env.get("CUE_MIN_FREE_PCT") ?? 20);
+        const free = await freeMemoryPct(), avail = await availableMemoryGB();
+        const head = !holders.some((h) => h.weight >= memMinWeight()) && ahead === 0;
+        if (memVetoed(free, min, avail, need, head)) {
+          return why(`the machine has ${free}% of its memory free${avail === null ? "" : ` (${round(avail)} GB available${need > 0 ? `, ${round(need)} GB needed` : ""})`}, under ${min}% (STACK_MIN_FREE_PCT)${need > 0 ? " or what this needed last time" : ""}: waiting for it to recover`);
+        }
       }
       if (!job) {
         const shm = await freeSegments();
@@ -1552,6 +1604,25 @@ export const oneAtATime = (f: () => Promise<void>, onError: (e: unknown) => void
   };
 };
 // What a process holds in memory now (GB), its resident set, and the CPU seconds it has used; 0 once it is gone.
+// The resident size (GB) of a process and everything under it, by parent pid (ps's whole table; 0 once gone).
+const treeResidentGB = async (root: number) => {
+  const r = await new Deno.Command("ps", { args: ["-axo", "pid=,ppid=,rss="], stdout: "piped", stderr: "null" }).output().catch(() => undefined);
+  const kids = new Map<number, number[]>(), rss = new Map<number, number>();
+  for (const line of new TextDecoder().decode(r?.stdout ?? new Uint8Array()).split("\n")) {
+    const [pid, ppid, kb] = line.trim().split(/\s+/).map(Number);
+    if (!(pid > 0)) continue;
+    rss.set(pid, kb || 0);
+    kids.set(ppid, [...(kids.get(ppid) ?? []), pid]);
+  }
+  let kb = 0;
+  const todo = rss.has(root) ? [root] : [];
+  for (const seen = new Set<number>(); todo.length;) {
+    const p = todo.pop()!;
+    if (seen.has(p)) continue;
+    seen.add(p); kb += rss.get(p) ?? 0; todo.push(...(kids.get(p) ?? []));
+  }
+  return kb / 2 ** 20;
+};
 const residentOf = async (pid: number) => {
   const r = await new Deno.Command("ps", { args: ["-o", "rss=,time=", "-p", String(pid)], stdout: "piped", stderr: "null" }).output().catch(() => undefined);
   const [rss, time] = new TextDecoder().decode(r?.stdout ?? new Uint8Array()).trim().split(/\s+/);
@@ -2326,6 +2397,9 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
       Deno.exit(signal === "SIGHUP" ? 129 : 130);
     });
   }
+  // A heavy run's peak resident size over its whole tree and the machine's lowest free memory while it ran (PRONTO-1752).
+  const heavy = weight >= memMinWeight();
+  let treePeak = 0, lowestFree: number | null = null;
   let peak = 0, cpu = 0, wall = 0, waited = 0, status: { success: boolean; code: number; signal: string | null };
   for (let attempt = 1; ; attempt++) {
     slot = await claim(Deno.pid, what, weight, true, true, mem, cores);
@@ -2355,6 +2429,11 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
       const r = await residentOf(childPid);
       if (!running) return;
       peak = Math.max(peak, r.gb); cpu = Math.max(cpu, r.cpu);
+      if (heavy) {
+        treePeak = Math.max(treePeak, await treeResidentGB(childPid));
+        const level = await freeMemoryPct();
+        if (level !== null) lowestFree = lowestFree === null ? level : Math.min(lowestFree, level);
+      }
       const want = Math.round(Math.max(mem, r.gb) * 100) / 100;
       if (mem > 0 && want !== written) {
         try {
@@ -2387,7 +2466,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
         Deno.writeTextFileSync(`${held.dir}/child`, String(pid));
         // From its spawn: the wait for the lock and the cores is not its time.
         spawned = Date.now();
-        sampler = learn || coresLearn || mem > 0 ? (tick(), setInterval(tick, 1000)) : undefined;
+        sampler = learn || coresLearn || mem > 0 || heavy ? (tick(), setInterval(tick, 1000)) : undefined;
       },
     }).finally(() => { owned = false; });
     running = false;
@@ -2406,6 +2485,17 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
     }
     break;
   }
+  // A heavy run's peak, for the next claim of the same label: a run that failed only raises it.
+  if (heavy && treePeak > 0) {
+    const file = await peakFile(what);
+    const prior = status.success ? 0 : await learnedPeak(what);
+    await Deno.mkdir(file.replace(/\/[^/]*$/, ""), { recursive: true }).catch(() => {});
+    await Deno.writeTextFile(file, `${round(Math.max(treePeak, prior))} ${what}\n`).catch(() => {});
+  }
+  // A run that failed while the machine was out of memory gave no verdict: said so, with the no-verdict exit, so
+  // release-cron names the cause (a process it started was probably killed by the kernel, as Studio's helm was).
+  const starved = heavy && starvedRun(lowestFree, status.code, Number(Deno.env.get("STACK_STARVED_PCT") ?? 5));
+  if (starved) console.error(`slot: ${what}: no verdict: memory (the machine fell to ${lowestFree}% free while it ran; a process it started was likely killed by the kernel)`);
   // Its peak, for the next run's claim. A run that failed or was killed may have stopped before its
   // peak (a missing file, a bad flag): its peak only raises what was learned. One that ended before
   // a sample held next to nothing: learned as such, so it runs outside the lock.
@@ -2433,7 +2523,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
       Deno.exit(status.code || 1);
     }
   }
-  Deno.exit(status.code);
+  Deno.exit(starved ? 3 : status.code);
 }
 
 if (import.meta.main) {
