@@ -216,6 +216,19 @@ def restore-shared-dapr [o: record]: nothing -> record {
 	} else { $o }
 }
 
+# The initdb Job's script as upstream renders it: the engine's wait for the database to take a connection (node.cue's
+# #TuneInitdb), undone only where the script begins with it.
+def restore-initdb-wait [o: record]: nothing -> record {
+	let wait = "for i in $(seq 30); do PGCONNECT_TIMEOUT=2 psql -XtAc 'SELECT 1' >/dev/null 2>&1 && break; sleep 2; done\n"
+	$o | update spec.template.spec.containers {|x|
+		$x.spec.template.spec.containers | each {|c|
+			if ($c | get -o command | default [] | length) == 3 and ($c.command.1 == "-c") and ($c.command.2 | str starts-with $wait) {
+				$c | update command [$c.command.0 "-c" ($c.command.2 | str substring ($wait | str length)..)]
+			} else { $c }
+		}
+	}
+}
+
 # The engine's objects, with its declared patches undone and its additions dropped, are upstream's.
 def undeclared []: list -> list {
 	$in
@@ -226,6 +239,8 @@ def undeclared []: list -> list {
 				"Cluster" => ($o | reject -o spec.plugins)
 				# the door's own Dapr configuration is the engine's (declared patch): upstream points it at the shared one
 				"Deployment" if ($o.metadata.name | str ends-with "-caddy") => (restore-shared-dapr $o)
+				# the initdb Job waits for the database (declared patch): upstream's script runs at once
+				"Job" if ($o.metadata.name | str ends-with "-initdb") => (restore-initdb-wait $o)
 				_ => $o
 			}
 		}

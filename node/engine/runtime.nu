@@ -27,7 +27,8 @@ const exports = {
 # the module's. 1.5.0, 1.5.1 and 1.6.0 carry the same two files. A release under another runtime is refused
 # in its preflight, so a pin moves here first.
 # 1.10.0 is the tool module v1.10.1 names, and 1.10.1 the tool an app's mise may pin beside it (the two carry the same files).
-export const validated_pins = ["1.5.0", "1.5.1", "1.6.0", "1.7.0", "1.10.0", "1.10.1"]
+# 1.11.0 is the tool module v1.11.1 names, and 1.11.1 the tool an app's mise may pin beside it (k8s/release.nu and release-schema.nu are the same files as 1.10.1's).
+export const validated_pins = ["1.5.0", "1.5.1", "1.6.0", "1.7.0", "1.10.0", "1.10.1", "1.11.0", "1.11.1"]
 
 # The pronto runtime's directory: PRONTO_RUNTIME (the app's release rule sets it from mise), else mise's.
 export def dir []: nothing -> string {
