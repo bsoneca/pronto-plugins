@@ -29,7 +29,31 @@ _tunedPreview: {
 	cluster:  [for o in _m.objects if o.kind == "Cluster" {o}][0]
 }
 
+_initdbOf: {
+	command: [...string]
+	out: (schema.#TuneInitdb & {in: {
+		apiVersion: "batch/v1"
+		kind:       "Job"
+		metadata: {name: "app-initdb", namespace: "app"}
+		spec: template: spec: containers: [{name: "initdb", image: "i", "command": command}]
+	}}).out.spec.template.spec.containers[0]
+}
+
 cases: {
+	"an initdb command that is not bash -c script is left as upstream renders it, whatever its length": {
+		_got: {
+			none:   (_initdbOf & {command: []}).out.command
+			one:    (_initdbOf & {command: ["/initdb.sh"]}).out.command
+			shell:  (_initdbOf & {command: ["sh", "-x", "y"]}).out.command
+			longer: (_initdbOf & {command: ["sh", "-c", "a", "b"]}).out.command
+		}
+		_want: {
+			none:   []
+			one:    ["/initdb.sh"]
+			shell:  ["sh", "-x", "y"]
+			longer: ["sh", "-c", "a", "b"]
+		}
+	}
 	"the initdb Job waits for the database to take a connection before upstream's script, and nothing else of it changes": {
 		_job: [for o in (_tuned & {release: {}}).objects if o.kind == "Job" && o.metadata.name == "app-initdb" {o}][0]
 		_got: {
@@ -37,7 +61,7 @@ cases: {
 			image:   _job.spec.template.spec.containers[0].image
 		}
 		_want: {
-			command: ["bash", "-c", "for i in $(seq 30); do psql -XtAc 'SELECT 1' >/dev/null 2>&1 && break; sleep 2; done\nset -euo pipefail\necho built"]
+			command: ["bash", "-c", "for i in $(seq 30); do PGCONNECT_TIMEOUT=2 psql -XtAc 'SELECT 1' >/dev/null 2>&1 && break; sleep 2; done\nset -euo pipefail\necho built"]
 			image: =~"app-database:17@sha256:"
 		}
 	}

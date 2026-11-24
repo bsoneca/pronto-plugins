@@ -1149,10 +1149,11 @@ import (
 // The initdb Job's pod is new, and k3s's kube-router refuses a new pod's address for a few seconds (the clock's poke below
 // waits for it the same way): upstream's script ran psql at once, was refused ("Connection refused" from the database
 // Service, whose primary was healthy), and the Job, which never retries, failed the release. Its script is run after a wait,
-// up to a minute, for the database to take a connection; a database that never does fails it as before.
+// up to a minute, for the database to take a connection; a database that never does fails it as before. The migrate Job
+// connects at once too, from its image's own entrypoint: it is not tuned here.
 #TuneInitdb: {
 	in: _
-	let wait = "for i in $(seq 30); do psql -XtAc 'SELECT 1' >/dev/null 2>&1 && break; sleep 2; done\n"
+	let wait = "for i in $(seq 30); do PGCONNECT_TIMEOUT=2 psql -XtAc 'SELECT 1' >/dev/null 2>&1 && break; sleep 2; done\n"
 	out: {
 		for k, v in in if k != "spec" {(k): v}
 		spec: {
@@ -1166,7 +1167,8 @@ import (
 						if c.command != _|_ {
 							// ["bash", "-c", script]: the script is the one to wait before; any other shape is left alone
 							if len(c.command) == 3 if c.command[1] == "-c" {command: [c.command[0], "-c", wait + c.command[2]]}
-							if len(c.command) != 3 || c.command[1] != "-c" {command: c.command}
+							if len(c.command) != 3 {command: c.command}
+							if len(c.command) == 3 if c.command[1] != "-c" {command: c.command}
 						}
 					}]
 				}
