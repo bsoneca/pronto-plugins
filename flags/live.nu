@@ -355,7 +355,7 @@ def defs-between [old: record, new: record]: nothing -> list<string> {
 # spec's default. The value comes from the command line and the spec supplies the flag's shape (local, hosts, accounts):
 # the entry is the spec's with its default set (`set-default`). `sync` names flags whose whole reach is written as the
 # spec says it (default, accounts, targeting: PRONTO-1191), as --flip did before it took a value.
-# A push that names a flag (a `flip` or a `sync`) writes that flag and nothing else (PRONTO-1755: it once wrote the spec's
+# A push that names a flag (a `flip`, a `sync` or a `drop`) writes that flag and nothing else (PRONTO-1755: it once wrote the spec's
 # metadata on every other flag and every new flag off, and the journal called them all flips): it starts from the LIVE
 # flags, the flags it names take the spec's entry, every other live entry stays verbatim (metadata too), a flag new to the
 # live object is left out (flagd serves the release's baked entry, as it does today), a retired one stays unless `drop`
@@ -367,7 +367,7 @@ export def keep-live [old: record, doc: record, reads: any, flip: list<string>, 
 	let spec = $doc.flags
 	let sets = (flip-values $flip $spec $live)
 	let flip = ($sets | get flag | append $sync | uniq)
-	let owned_only = ($flip | is-not-empty)
+	let owned_only = ($flip | is-not-empty) or ($drop | is-not-empty)
 	let named = ($drop | where {|f| $f in ($spec | columns) })
 	if ($named | is-not-empty) { error make {msg: $"flags: --drop ($named | str join ', ') is in the spec: to turn it off say --flip <flag>=false \(a spec flag stays; --drop is for a live flag the spec no longer names\)"} }
 	let nowhere = ($drop | where {|f| $f not-in ($spec | columns) and $f not-in ($live | columns) })
@@ -964,7 +964,7 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 		# A staged push is checked as the real one is (its refusals), writing nothing.
 		# The production check is asked of a dry run too.
 		let dm = (merge-live $at $app (cue-of $app flagd.document) $flip $drop $sync)
-		push-guard $dm.old $dm.doc $flip $sync ($dm.dropped | get flag) $several
+		push-guard $dm.old $dm.doc $flip $sync $drop ($dm.dropped | get flag) $several
 		production-check $app $dm.old $dm.doc (changed-flags $dm.old $dm.doc) | ignore
 		# The watch's refusals too: a bad --watch, or a reader that cannot be run.
 		let dg = (guard-of $at $watch)
@@ -985,7 +985,7 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 	let kept = (merge-meta $m)
 	# The flags this push writes on purpose: the only ones it records back into the spec.
 	let owned = ($flip | each {|e| $e | split row "=" | first } | append $sync | uniq)
-	push-guard $old $doc $flip $sync ($m.dropped | get flag) $several
+	push-guard $old $doc $flip $sync $drop ($m.dropped | get flag) $several
 	let changed = (changed-flags $old $doc)
 	let staged = if ($stages | is-not-empty) { staged-checks $stages $flip $sync $changed $doc $old $keyed } else { null }
 	if ($changed | is-empty) {
@@ -1046,7 +1046,7 @@ export def push [app: path, --untested: string, --no-canary: string, --expect: s
 }
 
 # The flags whose entry differs between the live flags `old` and the document `doc` a push would write: a push that names
-# a flag (`whole`) compares whole entries, metadata included; a plain push, which writes the spec's definitions on purpose,
+# a flag or drops one (`whole`) compares whole entries, metadata included; a plain push, which writes the spec's definitions on purpose,
 # compares reach. A new flag written fully off moves nothing.
 def entries-moved [old: record, doc: record, whole: bool]: nothing -> list<string> {
 	let a = ($old.flags? | default {})
@@ -1060,9 +1060,9 @@ def entries-moved [old: record, doc: record, whole: bool]: nothing -> list<strin
 
 # Before anything is written (PRONTO-1755, PRONTO-415): a push moves only the flags it names (--flip, --sync) or drops
 # (--drop, or the release record), whatever keep-live builds, and a push that moves more than one flag says why (--several).
-export def push-guard [old: record, doc: record, flip: list<string>, sync: list<string>, dropped: list<string>, several: any] {
+export def push-guard [old: record, doc: record, flip: list<string>, sync: list<string>, drop: list<string>, dropped: list<string>, several: any] {
 	let owned = ($flip | each {|e| $e | split row "=" | first } | append $sync | uniq)
-	let stray = (entries-moved $old $doc ($owned | is-not-empty) | where {|f| $f not-in $owned and $f not-in $dropped })
+	let stray = (entries-moved $old $doc (($owned | is-not-empty) or ($drop | is-not-empty)) | where {|f| $f not-in $owned and $f not-in $dropped })
 	if ($stray | is-not-empty) { error make {msg: $"flags: a push moves ($stray | str join ', ') that no --flip or --sync names: nothing written"} }
 	let moving = if ($owned | is-empty) { [] } else { changed-flags $old $doc }
 	if ($moving | length) > 1 and $several == null { error make {msg: $"flags: this push moves ($moving | length) flags \(($moving | str join ', ')\): flip one at a time, or say --several \"<why>\"; nothing was written"} }

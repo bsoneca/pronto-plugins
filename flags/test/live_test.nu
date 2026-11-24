@@ -648,13 +648,13 @@ let on = ($e | upsert variants {default: true})
 let old = {flags: {a: $e, b: $e, c: $e}}
 let both = {flags: {a: ($e | insert metadata {flagSetId: client}), b: $on, c: $e}}
 let only = {flags: {a: $e, b: $on, c: $e}}
-let moved = (try { push-guard $old $both ['b'] [] [] null; "" } catch {|x| $x.msg })
-let fine = (try { push-guard $old $only ['b'] [] [] null; "" } catch {|x| $x.msg })
-let dropped = (try { push-guard $old {flags: {a: $e, b: $on}} ['b'] [] ['c'] null; "" } catch {|x| $x.msg })
-let plain = (try { push-guard $old {flags: {a: ($e | insert metadata {flagSetId: client}), b: $e, c: $e, d: $e}} [] [] [] null; "" } catch {|x| $x.msg })
-let stray = (try { push-guard $old {flags: {a: $e, b: $on, c: $e}} [] [] [] null; "" } catch {|x| $x.msg })
-let two = (try { push-guard $old {flags: {a: $on, b: $on, c: $e}} [] ['a' 'b'] [] null; "" } catch {|x| $x.msg })
-let said = (try { push-guard $old {flags: {a: $on, b: $on, c: $e}} [] ['a' 'b'] [] "why"; "" } catch {|x| $x.msg })
+let moved = (try { push-guard $old $both ['b'] [] [] [] null; "" } catch {|x| $x.msg })
+let fine = (try { push-guard $old $only ['b'] [] [] [] null; "" } catch {|x| $x.msg })
+let dropped = (try { push-guard $old {flags: {a: $e, b: $on}} ['b'] [] ['c'] ['c'] null; "" } catch {|x| $x.msg })
+let plain = (try { push-guard $old {flags: {a: ($e | insert metadata {flagSetId: client}), b: $e, c: $e, d: $e}} [] [] [] [] null; "" } catch {|x| $x.msg })
+let stray = (try { push-guard $old {flags: {a: $e, b: $on, c: $e}} [] [] [] [] null; "" } catch {|x| $x.msg })
+let two = (try { push-guard $old {flags: {a: $on, b: $on, c: $e}} [] ['a' 'b'] [] [] null; "" } catch {|x| $x.msg })
+let said = (try { push-guard $old {flags: {a: $on, b: $on, c: $e}} [] ['a' 'b'] [] [] "why"; "" } catch {|x| $x.msg })
 {moved: $moved, fine: $fine, dropped: $dropped, plain: $plain, stray: $stray, two: $two, said: $said} | to json -r
 '#) | $"use ($here)/../live.nu push-guard\n($in)" | save -f $pgf
 let pgr = (^$nu.current-exe $pgf | complete)
@@ -1378,6 +1378,15 @@ klive [push $drill --flip kc=false] | ignore
 # PRONTO-1755: the push that names no flag is the reconcile: it writes the metadata and the new flag off, and the journal calls none of it a flip.
 let rc = (klive [push $drill])
 check ($rc.exit_code == 0 and (kflags | get ka | get -o metadata) == {flagSetId: client} and (kdef kn) == false and (djournal | last).flag == "" and (djournal | last).defs == "ka" and ($rc.stderr | str contains "kn is new and on for accounts")) $"a push naming no flag reconciles: metadata and the new flag off, no flip in the journal \(($rc.stderr | str trim)\)"
+# A push that only drops a flag names that flag: metadata drift and a new flag stay out of it.
+kspec {ka: true, kb: false, kc: false, kn: {default: true, accounts: ["u5"]}, kz: false}
+klive [push $drill] | ignore
+kspec {ka: true, kb: false, kc: false, kn: {default: true, accounts: ["u5"]}}
+"flags: ka: client: true\nflags: kr: {default: false, local: true}\n" | save -a $"($drill)/flags_spec.cue"
+let before_d = (kflags)
+let drop1 = (klive [push $drill --drop kz])
+let after_d = (kflags)
+check ($drop1.exit_code == 0 and "kz" not-in ($after_d | columns) and ($after_d | reject -o kz) == ($before_d | reject -o kz) and "kr" not-in ($after_d | columns) and (($after_d | get ka) | get -o metadata) == null) $"a push that only drops a flag writes nothing else \(($drop1.stderr | str trim)\)"
 kspec {ka: true, kb: false, kc: false}
 klive [push $drill --drop kn] | ignore
 check ("kn" not-in (kflags | columns)) "keep-live: back to the plain flags, after the reconcile"
