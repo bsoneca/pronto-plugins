@@ -253,6 +253,12 @@ Deno.test("the key guard refuses a key's token however its header writes it, and
   const lapsed = await sign(SECRET, { role: "app_user", iss: STACK_ISSUER, sub: ANA, kid: crypto.randomUUID(), scp: ["read"], exp: Math.floor(Date.now() / 1000) - 10 });
   const asHeader = async (authorization: string) => (await call("GET", "/auth/keyguard", undefined, undefined, { authorization })).status;
   for (const h of [`Bearer ${token}`, `bearer ${token}`, `BEARER ${token}`, `Bearer  ${token}`, `Bearer\t${token} `, `Bearer ${token}, x`, `x, Bearer ${token}`, `Bearer ${lapsed}`, `Basic ${token}`]) assertEquals([h.slice(0, 10), await asHeader(h)], [h.slice(0, 10), 403]);
+  // Bounded: a long header, or many token-shaped parts, is refused unread, and a long header with no third segment costs nothing.
+  assertEquals(await asHeader(`Bearer ${"a".repeat(9000)}`), 403);
+  assertEquals(await asHeader(`Bearer ${Array(5).fill("a.b.c").join(" ")}`), 403);
+  const started = performance.now();
+  assertEquals(await asHeader(`Bearer ${"a".repeat(4000)}.${"b".repeat(4000)}`), 204);
+  assert(performance.now() - started < 500);
   const ana = await session(ANA);
   for (const h of [`Bearer ${ana}`, `bearer ${ana}`, `Bearer ${ana}, x`, "Bearer", "Basic dXNlcjpwYXNz", ""]) assertEquals([h.slice(0, 10), await asHeader(h)], [h.slice(0, 10), 204]);
 });

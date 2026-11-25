@@ -87,6 +87,9 @@ export function routed(caddyfile: string): string {
   }
   for (const path of GUARDED) {
     const at = lines.findIndex((l) => l === `  handle ${path} {`);
+    // pronto-billing rewrites its whole block, handle included, and its generate step runs before this one: where the
+    // block is there and the handle is not the line this looks for, a key's token would reach billing unguarded, so it throws.
+    if (at < 0 && lines.some((l) => l.includes("# pronto-billing:begin"))) throw new Error(`keys: docker/Caddyfile has pronto-billing's block but no \`handle ${path} {\` to refuse a key's token in`);
     if (at >= 0) lines = [...lines.slice(0, at + 1), GUARD_BEGIN, ...GUARD, GUARD_END, ...lines.slice(at + 1)];
   }
   if (scoped === 0) throw new Error(`keys: docker/Caddyfile has none of ${SCOPED.map((p) => `\`handle ${p} {\``).join(", ")} to hold a key's scopes in`);

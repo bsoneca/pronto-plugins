@@ -137,6 +137,13 @@ Deno.test("it is idempotent, and replaces an earlier block, the first version's 
   assertEquals(routed(older), routed(caddy));
 });
 
+Deno.test("a Caddyfile with pronto-billing's block but not its handle line throws, one with no billing block does not", () => {
+  const billed = caddy.replace("  handle /billing/* {", "  # pronto-billing:begin\n  handle /billing/*  {");
+  assertThrows(() => routed(billed), Error, "pronto-billing's block");
+  assertEquals(routed(billed.replace("# pronto-billing:begin", "# other")).includes(GUARD_BEGIN), false);
+  assert(routed(caddy.replace(/ {2}handle \/billing\/\* \{[\s\S]*?\n {2}\}\n/, "")).split("\n").every((l) => l !== GUARD_BEGIN));
+});
+
 Deno.test("a Caddyfile with none of the data handles throws", () => {
   const bare = "(app) {\n  handle /auth/* {\n    respond 200\n  }\n}\n";
   assertThrows(() => routed(bare), Error, "handle /crud/*");

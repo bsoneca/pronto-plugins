@@ -226,15 +226,25 @@ export async function door(cfg: Config, req: Request): Promise<Response> {
   return new Response(null, { status: 204, headers });
 }
 
+const TOKEN_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+const KEYGUARD_HEADER_MAX = 8192;
+const KEYGUARD_PARTS_MAX = 4;
+
 /** GET /auth/keyguard, for the door's forward_auth first thing in the `/auth/*` and `/billing/*` handles: 403 for a key's
  * token, else 204. 0.32's auth takes any session, a key's token among them, and its rename answers a session with no
  * `kid`, so a key could make keys of its own that outlive it; billing takes a token as the account, so a key could
  * open the owner's Stripe portal. The door refuses a key's token there. What reads the token behind the door is more
  * lenient than `subjectOf` (PostgREST takes the scheme in any case, extra white space, the first of two headers joined
- * with a comma, a token past `exp` by its clock skew), so every token-shaped part of the header is looked at, and a
+ * with a comma, a token past `exp` by its clock skew), so every token-shaped part of the header (split on white space and commas) is looked at, and a
  * key's token among them, however it is written, is refused. */
 export async function keyguard(cfg: Config, req: Request): Promise<Response> {
-  for (const token of req.headers.get("authorization")?.match(/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g) ?? []) {
+  const auth = req.headers.get("authorization") ?? "";
+  // The work is bounded, since every data request asks the keys service too: a token is a few hundred bytes and a request has one,
+  // so a header that is longer, or holds more token-shaped parts than a person's two, is not read and is refused.
+  if (auth.length > KEYGUARD_HEADER_MAX) return fail(403, "key token");
+  const parts = auth.split(/[\s,]+/).filter((p) => TOKEN_SHAPE.test(p));
+  if (parts.length > KEYGUARD_PARTS_MAX) return fail(403, "key token");
+  for (const token of parts) {
     const claims = await signed(cfg.secret, token);
     if (claims && "kid" in claims) return fail(403, "key token");
   }
