@@ -1,6 +1,6 @@
 #!/usr/bin/env nu
 # Run with: nu node/engine/release_test.nu   (needs `cue` and the CUE registry, and `PRONTO_RUNTIME` or
-# mise's github:bonisoft3/pronto@1.6.0: the six helpers imported from upstream run for real)
+# mise's github:bonisoft3/pronto@1.15.0: the seven helpers imported from upstream run for real)
 #
 # The release flow (release.nu) over fakes of kubectl, sops, ssh, nc, curl, docker (with buildx) and crane on
 # the PATH: kubectl keeps a cluster's state in files and logs every call and the objects it was given, docker
@@ -19,11 +19,11 @@ use push.nu
 
 # The newest validated module (runtime.nu) the fixture renders with, and the runtime an app that pins it runs
 # (its distribution config's tool version; contract_test.nu holds that).
-const pin = "1.7.0"
-const runtime_pin = "1.6.0"
+const pin = "1.15.1"
+const runtime_pin = "1.15.0"
 const release_nu = (path self release.nu)
 
-# The runtime upstream pronto 1.6.0 is installed as.
+# The runtime upstream pronto 1.15.0 is installed as.
 def runtime-dir []: nothing -> string {
 	if ($env.PRONTO_RUNTIME? | is-not-empty) { $env.PRONTO_RUNTIME } else { ^mise where $"github:bonisoft3/pronto@($runtime_pin)" | str trim }
 }
@@ -1899,7 +1899,7 @@ def test_the_clusters_spec_does_not_move_with_the_databases_files [] {
 	print "test the Cluster's rendered spec is the same for any release of the database's files, and still moves with a real database change..."
 	let w = (sandbox)
 	let pushed = {|db: string, base: any| (["database" "crud" "electric" "auth" "caddy" "migrate"] | each {|s| [$s {tag: (if $s == "database" { "17" } else { "release" }), digest: ("sha256:" + ($db | fill -c $db -w 64))}] } | into record) | if ($base | is-empty) { $in } else { $in | insert "database-base" {tag: "17", digest: ("sha256:" + ($base | fill -c $base -w 64))} } }
-	let render = {|p| let r = (in-world $w -c (script $w $"(inputs $w) render objects $app_info.cue_path \(render release-data $app_info.dir $compose $facts ($p | to nuon)\) '' | to json --raw")); assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"; $r.stdout | from json }
+	let render = {|p| let r = (in-world $w -c (script $w $"(inputs $w) render objects $app_info.cue_path \(render release-data $app_info.dir $compose $facts ($p | to nuon) ''\) '' | to json --raw")); assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"; $r.stdout | from json }
 	let cluster = {|objs| $objs | where kind == Cluster | first }
 	let job = {|objs| $objs | where kind == Job and metadata.name == "aprende-initdb" | first | get spec.template.spec.containers.0.image }
 	let one = (do $render (do $pushed "a" "c"))

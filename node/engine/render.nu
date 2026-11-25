@@ -4,7 +4,7 @@
 # (runtime.nu) and the rendering by CUE: upstream's #BuildManifests, over the engine's patches
 # (schema/node.cue), exported as `nodeManifests` from the app's release.cue.
 
-use runtime.nu [runtime-services auth-provider-environment program-providers-expr]
+use runtime.nu [runtime-services auth-provider-environment program-providers-expr register-clients]
 
 export def nearest-on-path [found: list<string>, dirs: list<string>]: nothing -> string {
 	let dirs = ($dirs | each {|d| $d | path expand })
@@ -108,9 +108,12 @@ export def release-providers [dir: string]: nothing -> any {
 # roles and doors of .pronto/cluster.json, the runtime's services, the images pushed (`pushed`, by
 # service: {tag, digest}), the auth settings, and migrate's environment. A seed that restates
 # (services/database/migrations/901_seed_restate.sql) says so, as upstream's with U-D does.
-export def release-data [dir: string, compose: record, facts: record, pushed: record]: nothing -> record {
+# `origin` is the release's public origin, where the clients of an issuer that registers them are registered (upstream's
+# register-clients); empty, nothing is registered (a check writes nowhere).
+export def release-data [dir: string, compose: record, facts: record, pushed: record, origin: string]: nothing -> record {
 	let runtime = (runtime-services $compose)
-	let oidc = (auth-provider-environment ($compose.services.auth.environment? | default {}) (release-providers $dir))
+	let provided = (auth-provider-environment ($compose.services.auth.environment? | default {}) (release-providers $dir))
+	let oidc = if ($origin | is-empty) { $provided } else { $provided | update oidc (register-clients $provided.oidc $origin $dir) }
 	let migrate = if "migrate" in ($compose.services | columns) {
 		{migrate: {env: ($compose.services.migrate.environment? | default {} | reject -o DATABASE_URL)}}
 	} else { {} }
@@ -118,6 +121,7 @@ export def release-data [dir: string, compose: record, facts: record, pushed: re
 	{App: ({
 		database: {tokenRoles: $facts.tokenRoles, declaredRoles: ($facts.declaredRoles? | default [])}
 		runtime: $runtime
+		replays: ($facts.replays? | default [])
 		doors: ($facts.doors? | default [])
 		image: {pushed: ($pushed | items {|svc, p| [$svc {tag: $p.tag, digest: $p.digest}] } | into record)}
 		auth: ($oidc | reject secretValues)

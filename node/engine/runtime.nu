@@ -1,10 +1,11 @@
 # runtime.nu: what the node release engine takes from the pronto runtime the app pins (upstream
 # bonisoft3/pronto, installed by mise as github:bonisoft3/pronto): its directory, resolve-app, and the
-# six helpers of its k8s release that are pure (a record in, a record out) and that the engine calls
-# rather than copies, so the release data it hands the schema is upstream's own:
+# seven helpers of its k8s release that the engine calls rather than copies, so the release data it hands
+# the schema is upstream's own. Six are pure (a record in, a record out); register-clients is not: it runs
+# upstream's identity/register.ts (deno), which writes to an issuer for a provider whose client id is "origin":
 #
 #   runtime-services, auth-provider-environment, release-tree, roles-reconciled   k8s/release.nu
-#   run-job                                                                        k8s/release.nu
+#   run-job, register-clients                                                      k8s/release.nu
 #   fresh-schema-runtime                                                           release-schema.nu
 #
 # Each runs in a nushell of its own that `use`s it by name, so a pin that renames or drops one fails
@@ -18,6 +19,7 @@ const exports = {
 	release-tree: "k8s/release.nu"
 	roles-reconciled: "k8s/release.nu"
 	run-job: "k8s/release.nu"
+	register-clients: "k8s/release.nu"
 	fresh-schema-runtime: "release-schema.nu"
 }
 
@@ -29,7 +31,9 @@ const exports = {
 # 1.10.0 is the tool module v1.10.1 names, and 1.10.1 the tool an app's mise may pin beside it (the two carry the same files).
 # 1.11.0 is the tool module v1.11.1 names, and 1.11.1 the tool an app's mise may pin beside it (k8s/release.nu and release-schema.nu are the same files as 1.10.1's).
 # 1.14.0 is the tool module v1.14.1 names, and 1.14.1 the tool an app's mise may pin beside it (the contract test holds its release.nu and release-schema.nu against the engine).
-export const validated_pins = ["1.5.0", "1.5.1", "1.6.0", "1.7.0", "1.10.0", "1.10.1", "1.11.0", "1.11.1", "1.14.0", "1.14.1"]
+# 1.15.0 is the tool module v1.15.1 names (module x.y.1 names x.y.0), and 1.15.1 the tool an app's mise may pin beside it. Module v1.15.0
+# names 1.14.0, so it can never pass the contract test's module/runtime file check: apps pin v1.15.1.
+export const validated_pins = ["1.5.0", "1.5.1", "1.6.0", "1.7.0", "1.10.0", "1.10.1", "1.11.0", "1.11.1", "1.14.0", "1.14.1", "1.15.0", "1.15.1"]
 
 # The pronto runtime's directory: PRONTO_RUNTIME (the app's release rule sets it from mise), else mise's.
 export def dir []: nothing -> string {
@@ -100,6 +104,12 @@ export def release-tree [compose: string]: nothing -> string {
 # upstream's roles-reconciled: whether CloudNativePG's managedRolesStatus has the roles the release needs.
 export def roles-reconciled [roles: record]: nothing -> bool {
 	(call roles-reconciled 'roles-reconciled $p | to json' $roles).stdout | from json
+}
+
+# upstream's register-clients: the OIDC settings with the client ids an issuer registered for `origin`, for each provider
+# whose client id is "origin" (any other passes through). Runs deno and writes to the issuer: a check never calls it.
+export def register-clients [settings: record, origin: string, app_dir: string]: nothing -> record {
+	(call register-clients 'register-clients $p.settings $p.origin $p.app_dir | to json' {settings: $settings, origin: $origin, app_dir: $app_dir}).stdout | from json
 }
 
 # upstream's fresh-schema-runtime: crud's Deployment (YAML text) with an annotation that rolls it.
