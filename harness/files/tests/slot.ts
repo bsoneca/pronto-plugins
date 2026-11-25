@@ -2540,6 +2540,14 @@ export const launchArgs = (argv: string[]): string[] =>
 // MISE_* are the stack's own, and the slot's variables (its ports) stay the slot's: only what the slot does not set is added.
 export const hostProfile = (json: string, slotEnv: Record<string, string>): Record<string, string> =>
   Object.fromEntries(Object.entries(JSON.parse(json) as Record<string, string>).filter(([k, v]) => typeof v === "string" && k !== "PATH" && !k.startsWith("MISE_") && !(k in slotEnv)));
+// `process-compose process list -o json`, read as the generated host launch reads it for SAYT_LAUNCH_ONCE=1: "ready" when every process
+// runs and is ready (a running one with no probe counts) or is done (Completed, Disabled, Skipped), "error" when one failed, else "wait".
+export const stackReady = (json: string): "ready" | "error" | "wait" => {
+  const all = JSON.parse(json) as { status?: string; is_ready?: string }[];
+  if (!Array.isArray(all) || all.length === 0) return "wait";
+  if (all.some((p) => p.status === "Error")) return "error";
+  return all.every((p) => (p.status === "Running" && (p.is_ready === "Ready" || p.is_ready === "-")) || ["Completed", "Disabled", "Skipped"].includes(p.status ?? "")) ? "ready" : "wait";
+};
 const hostProfileOf = async (slot: Slot): Promise<Record<string, string>> => {
   const { code, stdout, stderr } = await new Deno.Command("sh", { args: ["-c", "exec mise env --json"], cwd: slot.dir, env: { ...slot.env, MISE_ENV: "host", PATH: misePath() }, stdout: "piped", stderr: "piped" }).output();
   if (code) throw new Error(`the app's host profile (mise env under MISE_ENV=host) failed:\n${new TextDecoder().decode(stderr)}`);
@@ -2632,6 +2640,23 @@ if (import.meta.main) {
     const first = deadlineOf("launch", Date.now(), launchTtl());
     if (first) await Deno.writeTextFile(deadlineFile, String(first));
     say(`the stack coming up at ${slot.env.APP_URL}, its log ${tmp}/process-compose.log; stop it with a signal to ${Deno.pid}${first ? `; it ends at ${brt(first)} unless renewed (deno run -A tests/slot.ts renew ${slot.n})` : ""}`);
+    // SAYT_LAUNCH_ONCE=1, as the generated launch@host honours it: once the stack is ready it is brought down and the launch ends.
+    if (Deno.args[1] === "launch@host" && Deno.env.get("SAYT_LAUNCH_ONCE") === "1") {
+      const until = Date.now() + Number(Deno.env.get("STACK_READY_MS") ?? 600_000);
+      let state: "ready" | "error" | "wait" = "wait";
+      while (state === "wait" && Date.now() < until && !s.exited()) {
+        const r = await new Deno.Command("process-compose", { args: s.pc(["process", "list", "-o", "json"], "ready.log"), cwd: slot.dir, env: s.env, stdout: "piped", stderr: "null" }).output().catch(() => undefined);
+        if (r?.success) { try { state = stackReady(new TextDecoder().decode(r.stdout)); } catch { /* not yet a list */ } }
+        if (state === "wait") await new Promise((res) => setTimeout(res, 2000));
+      }
+      if (state !== "ready") await failed("launch@host failed to become ready");
+      say("ready: SAYT_LAUNCH_ONCE, the stack going down");
+      await stopping?.();
+      await Deno.remove(tmp, { recursive: true }).catch(() => {});
+      slot.release();
+      await Deno.remove(`${slot.dir.replace(/\/app$/, "")}/deadline`).catch(() => {});
+      Deno.exit(0);
+    }
     if (first) {
       const timer = setInterval(async () => {
         const deadline = Number(await Deno.readTextFile(deadlineFile).catch(() => "0"));
