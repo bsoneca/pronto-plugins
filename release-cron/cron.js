@@ -538,6 +538,14 @@ export const introducedBy = (list, has, hadBefore) => hadBefore ? null : list.fi
 // The {scenario, pr} found that the ledger of those told does not hold yet: each is told once.
 export const untold = (found, told) => found.filter((f) => !told.some((t) => t.scenario === f.scenario && t.pr === f.pr));
 
+// What a run tells about its flakes: for each flaked scenario, the merge of `merged` (merges(), oldest first) that last
+// changed its file (`touched`: scenario -> sha -> bool), as {scenario, pr, branch}; none for a scenario no merge changed or
+// whose merge names no PR, and none already in the ledger `told` (untold).
+export const flakeNotices = (flaked, merged, touched, told) => untold(flaked.flatMap((name) => {
+  const c = changedBy(merged, touched[name] ?? {});
+  return c?.pr ? [{ scenario: name, pr: c.pr, branch: c.branch }] : [];
+}), told);
+
 // The scenarios the rehearsal's output names as flaked: `(flaked, passed on its one retry: a, b)` in its
 // per-check line, or `⚠ flaked, passed on its one retry: a, b (scenarios)` in its summary; and release@gcp's cloud
 // tests' `⚠ online flaked, passed on its one retry`, one name per line; none for other text.

@@ -366,6 +366,14 @@ cases: {
 		{call: "cron.introducedBy", args: [[{sha: "a", pr: 1}], {a: true}, true], expect: null, why: "the last release already had it"},
 		{call: "cron.introducedBy", args: [[{sha: "a", pr: 1}], {a: false}, false], expect: null, why: "no merge has it"},
 	]}
+	"a flake of a run that failed is told to its scenario's PR (PRONTO-764)": {suite: "cron", steps: [
+		{call: "cron.flakeNotices", args: [["gold"], [{sha: "a", pr: 1, branch: "x"}, {sha: "b", pr: 2, branch: "y"}], {gold: {a: true, b: true}}, []], expect: [{scenario: "gold", pr: 2, branch: "y"}], why: "a flake in a failed rehearsal gives one notice, to the newest merge that changed the scenario"},
+		{call: "cron.flakeNotices", args: [["gold"], [{sha: "a", pr: 1, branch: "x"}], {gold: {a: true}}, [{scenario: "gold", pr: 1, told: "PR #1 comment"}]], expect: [], why: "a scenario already in the ledger gives none"},
+		{call: "cron.flakeNotices", args: [["gold"], [{sha: "a", pr: 1, branch: "x"}], {gold: {a: false}}, []], expect: [], why: "no merge changed it: no PR found"},
+		{call: "cron.flakeNotices", args: [["gold"], [{sha: "a", pr: 0, branch: ""}], {gold: {a: true}}, []], expect: [], why: "a merge naming no PR"},
+		{call: "cron.flakeNotices", args: [["gold", "online"], [{sha: "a", pr: 1, branch: "x"}], {gold: {a: true}}, []], expect: [{scenario: "gold", pr: 1, branch: "x"}], why: "a scenario with no touched map gives none, not an error"},
+		{call: "cron.flakeNotices", args: [[], [{sha: "a", pr: 1, branch: "x"}], {}, []], expect: []},
+	]}
 	"a new-feature scenario's PR is told once": {suite: "cron", steps: [
 		{call: "cron.untold", args: [[{scenario: "a", pr: 2}, {scenario: "b", pr: 3}], [{scenario: "a", pr: 2, told: "PR #2 comment"}]], expect: [{scenario: "b", pr: 3}]},
 		{call: "cron.untold", args: [[{scenario: "a", pr: 4}], [{scenario: "a", pr: 2}]], expect: [{scenario: "a", pr: 4}], why: "another PR re-adding it is told"},
