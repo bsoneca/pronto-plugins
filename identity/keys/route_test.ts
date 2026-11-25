@@ -1,6 +1,7 @@
 // The keys routes in the door's Caddyfile, and the installer that gives an app the service.
 import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
-import { BEGIN, END, ROUTES, ROUTES_BEGIN, ROUTES_END, route, routed } from "./route.ts";
+import { BEGIN, END, ROUTES, ROUTES_BEGIN, ROUTES_END, route, routed, SCOPE, SCOPE_BEGIN, SCOPE_END, SCOPED } from "./route.ts";
+import { type Config, type Db, keys, sign, STACK_ISSUER } from "./keys.ts";
 
 const caddy = `(app) {
   encode zstd gzip
@@ -11,11 +12,41 @@ const caddy = `(app) {
   handle /favicon.ico {
     respond 204
   }
+  handle /crud/* {
+    uri strip_prefix /crud
+    reverse_proxy {$PRONTO_UPSTREAM_CRUD:crud:3000}
+  }
+  handle /api/v1/* {
+    reverse_proxy {$PRONTO_UPSTREAM_CRUD:crud:3000}
+  }
+  handle /blob-claim/* {
+    route {
+      reverse_proxy {$PRONTO_UPSTREAM_CRUD:crud:3000}
+    }
+  }
+  handle /blobs/* {
+    route {
+      reverse_proxy {$PRONTO_UPSTREAM_CRUD:crud:3000}
+    }
+  }
   handle /auth/* {
     reverse_proxy {$PRONTO_UPSTREAM_AUTH:auth:9999}
   }
 }
 `;
+
+/** The lines without the keys blocks (each from its begin marker to its end), as the app wrote them. */
+const without = (lines: string[], pairs: string[][]): string[] => {
+  const out: string[] = [];
+  let ends: string | null = null;
+  for (const l of lines) {
+    if (ends) { if (l === ends) ends = null; continue; }
+    const pair = pairs.find(([b]) => b === l);
+    if (pair) ends = pair[1]; else out.push(l);
+  }
+  return out;
+};
+const ours = [[ROUTES_BEGIN, ROUTES_END], [SCOPE_BEGIN, SCOPE_END]];
 
 Deno.test("the block is the first lines of the app's own handle /auth/*, and the app's reverse_proxy to auth answers the rest", () => {
   const out = routed(caddy).split("\n");
@@ -25,7 +56,21 @@ Deno.test("the block is the first lines of the app's own handle /auth/*, and the
   assertEquals(out[at + 2 + ROUTES.length], ROUTES_END);
   assertEquals(out[at + 3 + ROUTES.length], "    reverse_proxy {$PRONTO_UPSTREAM_AUTH:auth:9999}");
   // Nothing else is added: the other handles and the comments are where they were.
-  assertEquals(out.filter((_, i) => i <= at || i > at + 2 + ROUTES.length), caddy.split("\n"));
+  assertEquals(without(out, ours), caddy.split("\n"));
+});
+
+Deno.test("the scope guard is the first directive of each data handle, never a top-level directive, and the handles' own lines follow", () => {
+  const out = routed(caddy).split("\n");
+  for (const path of SCOPED) {
+    const at = out.indexOf(`  handle ${path} {`);
+    assert(at >= 0, path);
+    assertEquals(out.slice(at + 1, at + 3 + SCOPE.length), [SCOPE_BEGIN, ...SCOPE, SCOPE_END]);
+  }
+  assertEquals(out[out.indexOf("  handle /crud/* {") + 3 + SCOPE.length], "    uri strip_prefix /crud");
+  assert(SCOPE.join("\n").includes("forward_auth {$PRONTO_UPSTREAM_KEYS:keys:8702} {\n      uri /auth/keyscope\n      header_up dapr-app-id keys\n      import bounded-auth\n    }"));
+  // Every forward_auth the block adds is inside a handle (four spaces in), none at the door's top level.
+  assert(out.filter((l) => l.includes("forward_auth")).every((l) => l.startsWith("    ")));
+  assertEquals(out.filter((l) => l === SCOPE_BEGIN).length, SCOPED.length);
 });
 
 Deno.test("it guards /auth/* with forward_auth inside that handle, ahead of the keys paths, and has no handle of its own beside the app's", () => {
@@ -57,8 +102,22 @@ Deno.test("it is idempotent, and replaces an earlier block, the first version's 
     "    handle @keysroutes {", "      reverse_proxy {$PRONTO_UPSTREAM_KEYS:keys:8702} {", "        header_up dapr-app-id keys", "        import bounded-auth", "      }", "    }", "    # keys-routes:end", "",
   ].join("\n"));
   assertEquals(routed(second), routed(caddy));
+  // An app generated with #526: the /auth/* block alone, no scope guard. It gains one in each data handle and no second /auth/* block.
+  const third = without(routed(caddy).split("\n"), [[SCOPE_BEGIN, SCOPE_END]]).join("\n");
+  assertEquals(third.split("\n").filter((l) => l === ROUTES_BEGIN).length, 1);
+  assertEquals(routed(third), routed(caddy));
+  assertEquals(routed(routed(third)), routed(caddy));
+  // A data handle the app has dropped since loses its guard, and the others keep theirs.
+  const dropped = routed(caddy).replace("  handle /blob-claim/* {\n", "  handle /gone/* {\n");
+  assertEquals(dropped.split("\n").filter((l) => l === SCOPE_BEGIN).length, SCOPED.length);
+  assertEquals(routed(dropped).split("\n").filter((l) => l === SCOPE_BEGIN).length, SCOPED.length - 1);
   const older = routed(caddy).replace(ROUTES_BEGIN, `${ROUTES_BEGIN}\n    # an older routes block`);
   assertEquals(routed(older), routed(caddy));
+});
+
+Deno.test("a Caddyfile with none of the data handles throws", () => {
+  const bare = "(app) {\n  handle /auth/* {\n    respond 200\n  }\n}\n";
+  assertThrows(() => routed(bare), Error, "handle /crud/*");
 });
 
 Deno.test("a Caddyfile with no top-level handle /auth/* throws", () => {
@@ -236,11 +295,11 @@ https://caddy:8443 {
 `;
 
 /** The matchers of every route Caddy runs, in order and nested as it nests them, for each server its site blocks make:
- * the keys block's own routes (inside the app's /auth/* route) are not walked into. */
+ * the keys blocks' own routes (inside the app's /auth/*, /crud/*, /api/v1/* and /blob-claim/* routes) are not walked into. */
 // deno-lint-ignore no-explicit-any
 const sequence = (routes: any[], depth = 0): string[] => (routes ?? []).flatMap((r: any) => {
   const own = " ".repeat(depth) + JSON.stringify(r.match ?? []);
-  if (JSON.stringify(r.match) === '[{"path":["/auth/*"]}]') return [own];
+  if (["/auth/*", ...SCOPED].some((p) => JSON.stringify(r.match) === `[{"path":["${p}"]}]`)) return [own];
   // deno-lint-ignore no-explicit-any
   return [own, ...(r.handle ?? []).flatMap((h: any) => h.routes ? sequence(h.routes, depth + 1) : [])];
 });
@@ -269,5 +328,91 @@ Deno.test({
     assertEquals(without.length, 2, "the unnamed site and the two https ones make two servers");
     assert(without.every((s) => s.some((l) => l.includes('"/health"'))));
     assertEquals(await order(caddyBin!, routed(door)), without);
+  },
+});
+
+// The door as Caddy runs it, with the keys block spliced in, in front of the real keys handler and stand-ins for the
+// data and the auth service: what a key's token may do on /crud, /api/v1 and /blob-claim, by its scopes and the method.
+Deno.test({
+  name: "a read-only key reads through the door and is refused a write, a write-only key is refused a read, and the sessions and the Dapr guard are as before",
+  ignore: !caddyBin,
+  async fn() {
+    const secret = "door-secret";
+    const cfg: Config = { secret, keysOn: true, gate: null, hook: null, appSchema: "public", mechaSchema: "mecha" };
+    const handler = keys(cfg, null as unknown as Db); // the guards read no row
+    const base = 20000 + Math.floor(Math.random() * 20000);
+    const [doorPort, keysPort, crud, auth] = [base, base + 1, base + 2, base + 3];
+    const servers = [
+      Deno.serve({ port: keysPort, onListen() {} }, handler),
+      Deno.serve({ port: crud, onListen() {} }, (req) => new Response(`crud ${req.method} ${new URL(req.url).pathname}`)),
+      Deno.serve({ port: auth, onListen() {} }, (req) => new Response(`auth ${new URL(req.url).pathname}`)),
+    ];
+    const dir = await Deno.makeTempDir();
+    // The small door above with doorguard's handle on the Dapr API of /crud, and a site block of this test's port.
+    const guarded = caddy.replace("  @daprapi path_regexp daprapi ^/crud\n", "  @daprapi path_regexp daprapi (?i)^/crud/v1\\.0(/|$)\n  handle @daprapi {\n    respond 404\n  }\n");
+    const sites = routed(guarded);
+    const text = `{\n  admin off\n  auto_https off\n}\n(bounded-auth) {\n  transport http {\n    dial_timeout 2s\n  }\n}\n${sites}\n:${doorPort} {\n  import app\n}\n`;
+    await Deno.writeTextFile(`${dir}/Caddyfile`, text);
+    const proc = new Deno.Command(caddyBin!, {
+      args: ["run", "--config", `${dir}/Caddyfile`, "--adapter", "caddyfile"],
+      env: { PRONTO_UPSTREAM_KEYS: `127.0.0.1:${keysPort}`, PRONTO_UPSTREAM_CRUD: `127.0.0.1:${crud}`, PRONTO_UPSTREAM_AUTH: `127.0.0.1:${auth}` },
+      stdout: "null", stderr: "null",
+    }).spawn();
+    try {
+      const exp = Math.floor(Date.now() / 1000) + 3600;
+      const claims = { role: "app_user", iss: STACK_ISSUER, sub: "0a000000-0000-4000-8000-000000000001", exp };
+      const key = (scp: string[]) => sign(secret, { ...claims, kid: crypto.randomUUID(), scp });
+      const ask = async (method: string, path: string, token?: string): Promise<[number, string]> => {
+        for (let i = 0; ; i++) {
+          try {
+            const r = await fetch(`http://127.0.0.1:${doorPort}${path}`, { method, headers: token ? { authorization: `Bearer ${token}` } : {} });
+            const body = await r.text();
+            if (r.status !== 502 || i >= 50) return [r.status, body];
+          } catch (e) {
+            if (i >= 50) throw e;
+          }
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      };
+      const [readOnly, writeOnly, both, session] = [await key(["read"]), await key(["write", "machines:bot_1"]), await key(["read", "write"]), await sign(secret, claims)];
+      // A request reaches the data stand-in unchanged: the path is stripped of /crud and the method is the client's.
+      assertEquals(await ask("GET", "/crud/t", readOnly), [200, "crud GET /t"]);
+      assertEquals(await ask("GET", "/api/v1/t", readOnly), [200, "crud GET /api/v1/t"]);
+      assertEquals(await ask("GET", "/blob-claim/x", both), [200, "crud GET /blob-claim/x"]);
+      assertEquals((await ask("HEAD", "/crud/t", readOnly))[0], 200);
+      for (const path of ["/crud/t", "/api/v1/t", "/blob-claim/x", "/blobs/x"]) {
+        assertEquals((await ask("POST", path, readOnly))[0], 403, `a read-only key's POST ${path}`);
+        assertEquals((await ask("DELETE", path, readOnly))[0], 403, `a read-only key's DELETE ${path}`);
+        assertEquals((await ask("GET", path, writeOnly))[0], 403, `a write-only key's GET ${path}`);
+        for (const token of [session, undefined]) assertEquals((await ask("GET", path, token))[0], 200, `GET ${path}`);
+      }
+      assertEquals((await ask("POST", "/crud/t", writeOnly))[0], 200);
+      assertEquals((await ask("POST", "/api/v1/t", writeOnly))[0], 200);
+      assertEquals((await ask("POST", "/blob-claim/x", writeOnly))[0], 200);
+      assertEquals((await ask("PUT", "/blobs/x", writeOnly))[0], 200);
+      assertEquals([(await ask("PUT", "/blobs/x", readOnly))[0], (await ask("GET", "/blobs/x", readOnly))[0]], [403, 200]);
+      for (const m of ["GET", "POST"]) for (const path of ["/crud/t", "/api/v1/t"]) assertEquals((await ask(m, path, both))[0], 200);
+      for (const token of [session, undefined]) assertEquals((await ask("POST", "/crud/t", token))[0], 200, "a session's write");
+      // What the data service reads as a key's token and the guard might not (PostgREST takes the scheme in any case, extra white space,
+      // a first token before a comma and a token up to its clock skew past exp) is refused at the door, never passed to a write.
+      const lapsed = await sign(secret, { ...claims, kid: crypto.randomUUID(), scp: ["read"], exp: Math.floor(Date.now() / 1000) - 10 });
+      for (const h of [`bearer ${readOnly}`, `BEARER ${readOnly}`, `Bearer  ${readOnly}`, `Bearer ${readOnly}, x`, `Bearer ${lapsed}`]) {
+        for (const path of ["/crud/t", "/api/v1/t", "/blobs/x"]) {
+          const r = await fetch(`http://127.0.0.1:${doorPort}${path}`, { method: "POST", headers: { authorization: h } });
+          assert([401, 403].includes(r.status), `${h.slice(0, 14)} POST ${path}: ${r.status}`);
+          await r.body?.cancel();
+        }
+      }
+      // The door's own guard of the Dapr API answers before the scope guard: a key's token gets its 404, not a 403.
+      for (const token of [readOnly, writeOnly, undefined]) for (const m of ["GET", "POST"]) assertEquals((await ask(m, "/crud/v1.0/metadata", token))[0], 404, `${m} /crud/v1.0/metadata`);
+      // The /auth/* guard of #526 is as it was: a key's token is refused there, and a session reaches the auth service.
+      assertEquals((await ask("GET", "/auth/session", readOnly))[0], 403);
+      assertEquals(await ask("GET", "/auth/session", session), [200, "auth /auth/session"]);
+    } finally {
+      proc.kill();
+      await proc.status;
+      for (const s of servers) await s.shutdown();
+      await Deno.remove(dir, { recursive: true });
+    }
   },
 });
