@@ -108,7 +108,10 @@ export def roles-reconciled [roles: record]: nothing -> bool {
 
 # upstream's register-clients: the OIDC settings with the client ids an issuer registered for `origin`, for each provider
 # whose client id is "origin" (any other passes through). Runs deno and writes to the issuer: a check never calls it.
+# Upstream registered no clients before 1.15.0, so a runtime below it has no register-clients and the settings come back as they are.
 export def register-clients [settings: record, origin: string, app_dir: string]: nothing -> record {
+	let v = (version | parse -r '^(?<major>\d+)\.(?<minor>\d+)')
+	if ($v | is-not-empty) and (($v.0.major | into int) * 1000 + ($v.0.minor | into int)) < 1015 { return $settings }
 	(call register-clients 'register-clients $p.settings $p.origin $p.app_dir | to json' {settings: $settings, origin: $origin, app_dir: $app_dir}).stdout | from json
 }
 
