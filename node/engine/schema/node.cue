@@ -599,6 +599,12 @@ import (
 		[if release.database != _|_ if len(release.database.logins) > 0 if app.externalSecrets != _|_ if app.externalSecrets.enabled {
 			"database.logins generate their passwords in the namespace, which the app's externalSecrets store does not do yet"
 		}],
+		// `jail`, `google` and `egress` of a service are Studio's builder's alone (PRONTO-1882): they weaken the pod (a user namespace, an
+		// unmasked /proc, AppArmor and seccomp off), hand it a Google identity and open the network past the mesh, which a tenant's app
+		// must never ask. Here, with the engine's other refusals, so the objects themselves are refused, not only a whole release.
+		[for n, s in release.services if s.jail || s.google != _|_ || len(s.egress) > 0 if release.name != "studio" || n != "builder" {
+			"service \(n) of \(release.name) sets jail, google or egress, which only Studio's builder (app studio, service builder) may (PRONTO-1882)"
+		}],
 		// what an app's services may not be
 		[for i, o in _services for j, p in _services if j > i if o.kind == p.kind && o.metadata.name == p.metadata.name {
 			"services, blobs and metricsExport would emit \(o.kind)/\(o.metadata.name) twice"

@@ -12,6 +12,13 @@ _base: {
 	hosts: production: "app.example.com"
 }
 
+_studio: {
+	name:    "studio"
+	context: "contabo2"
+	api: ssh:          "deploy@node.example"
+	hosts: production: "studio.example.com"
+}
+
 _ns: {apiVersion: "v1", kind: "Namespace", metadata: name: "app"}
 
 unserved: (schema.#Manifests & {
@@ -62,6 +69,17 @@ serviceScratchSize:     schema.#Release & _base & {services: billing: {port: 868
 serviceEgressNoPort:    schema.#Release & _base & {services: billing: {port: 8688, egress: [{cidr: "10.0.0.0/8"}]}}
 serviceEgressBadCIDR:   schema.#Release & _base & {services: billing: {port: 8688, egress: [{cidr: "everywhere", port: 80}]}}
 serviceGoogleProvider:  schema.#Release & _base & {services: billing: {port: 8688, google: {provider: "x", serviceAccount: "b@p.iam.gserviceaccount.com"}}}
+// PRONTO-1882: jail, google and egress are Studio's builder's alone, refused through #Manifests (the objects themselves).
+_google: {provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "b@p.iam.gserviceaccount.com"}
+_egress: [{cidr: "10.0.0.0/8", port: 80}]
+_nsStudio: {apiVersion: "v1", kind: "Namespace", metadata: name: "studio"}
+tenantJail:   (schema.#Manifests & {release: schema.#Release & _base & {services: builder: {port: 8690, jail: true}}, upstream: [_ns]}).objects
+tenantGoogle: (schema.#Manifests & {release: schema.#Release & _base & {services: builder: {port: 8690, google: _google}}, upstream: [_ns]}).objects
+tenantEgress: (schema.#Manifests & {release: schema.#Release & _base & {services: builder: {port: 8690, egress: _egress}}, upstream: [_ns]}).objects
+studioOtherServiceJail:   (schema.#Manifests & {release: schema.#Release & _studio & {services: billing: {port: 8688, jail: true}}, upstream: [_nsStudio]}).objects
+studioOtherServiceGoogle: (schema.#Manifests & {release: schema.#Release & _studio & {services: billing: {port: 8688, google: _google}}, upstream: [_nsStudio]}).objects
+studioOtherServiceEgress: (schema.#Manifests & {release: schema.#Release & _studio & {services: billing: {port: 8688, egress: _egress}}, upstream: [_nsStudio]}).objects
+studioBuilder: (schema.#Manifests & {release: schema.#Release & _studio & {services: builder: {port: 8690, jail: true, google: _google, egress: _egress}}, upstream: [_nsStudio]}).objects
 serviceJailNotBool:     schema.#Release & _base & {services: billing: {port: 8688, jail: "yes"}}
 serviceReservedEnv:     schema.#Release & _base & {services: billing: {port: 8688, env: SERVICE_JWT: "x"}}
 serviceSeedClimbs:      schema.#Release & _base & {services: billing: {port: 8688, files: "/etc/f": "cm", seed: cm: "../x.json"}}
