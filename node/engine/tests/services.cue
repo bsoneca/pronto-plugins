@@ -437,6 +437,65 @@ cases: {
 		_got:  (_withServices & {release: {services: {collector: {port: 8687, metrics: port: 9599}, pulse: {port: 9998, clock: {}}}, blobs: _blobs, metricsExport: _export}}).violations
 		_want: []
 	}
+	// PRONTO-1884: the door's egress admits the Dapr sidecar and not a service's own port, and upstream names a door's sidecar address
+	// only for the ids of its `doors`, so a service of the release's own would be dialled directly and refused.
+	"the door reaches each service of the release through its Dapr sidecar, whether or not the door is retargeted": {
+		// no shared Dapr Configuration upstream: the door is not retargeted
+		_plain: (_withServices & {release: services: {billing: {port: 8688}, flagd: _flagd}}).named["Deployment/app-caddy"].spec.template.spec.containers[0].env
+		// with it: the door is retargeted, and its environment still gets them
+		_dapr: (schema.#Manifests & {
+			release: schema.#Release & _base & {services: {billing: {port: 8688}, flagd: _flagd}}
+			app: {name: "app", namespace: "app", image: pushed: _pushedImages}
+			upstream: [
+				{apiVersion: "v1", kind: "Namespace", metadata: name: "app"},
+				{apiVersion: "dapr.io/v1alpha1", kind: "Configuration", metadata: {name: "app-dapr-config", namespace: "app", labels: {"app.kubernetes.io/name": "app"}}, spec: {tracing: samplingRate: "1", metric: enabled: true}},
+				{
+					apiVersion: "apps/v1"
+					kind:       "Deployment"
+					metadata:   {name: "app-caddy", namespace: "app"}
+					spec: {replicas: 1, template: {metadata: {labels: component: "caddy", annotations: {"dapr.io/enabled": "true", "dapr.io/app-id": "caddy", "dapr.io/config": "app-dapr-config"}}, spec: containers: [{name: "caddy", image: "127.0.0.1:5000/app-caddy:latest@sha256:\(_d)"}]}}
+				},
+			]
+		}).objects
+		_retargeted: [for o in _dapr if o.kind == "Deployment" && o.metadata.name == "app-caddy" {o}][0]
+		_got: {
+			plain:      list.SortStrings([for e in _plain {"\(e.name)=\(e.value)"}])
+			retargeted: list.SortStrings([for e in _retargeted.spec.template.spec.containers[0].env {"\(e.name)=\(e.value)"}])
+			config:     _retargeted.spec.template.metadata.annotations."dapr.io/config"
+		}
+		_want: {
+			plain:      ["PRONTO_UPSTREAM_BILLING=localhost:3500", "PRONTO_UPSTREAM_FLAGD=localhost:3500"]
+			retargeted: ["PRONTO_UPSTREAM_BILLING=localhost:3500", "PRONTO_UPSTREAM_FLAGD=localhost:3500"]
+			config:     "app-caddy-invoke-only"
+		}
+	}
+	"a release with no service leaves the door's environment as upstream has it": {
+		_c: (_withServices & {release: {}}).named["Deployment/app-caddy"].spec.template.spec.containers[0]
+		_got:  _c.env != _|_
+		_want: false
+	}
+	"a variable the door already has for a service is left as it is": {
+		_m: schema.#Manifests & {
+			app:       {name: "app", namespace: "app", image: pushed: _pushedImages}
+			"release": schema.#Release & _base & {hosts: rc: "rc.example.com", services: flagd: _flagd}
+			upstream: [for o in (_fixture & {ns: "app", host: "app.example.com", reg: "127.0.0.1:5000"}).objects {
+				if !(o.kind == "Deployment" && o.metadata.name == "app-caddy") {o}
+				if o.kind == "Deployment" && o.metadata.name == "app-caddy" {
+					for k, v in o if k != "spec" {(k): v}
+					spec: {
+						for k, v in o.spec if k != "template" {(k): v}
+						template: spec: containers: [{
+							for k, v in o.spec.template.spec.containers[0] {(k): v}
+							env: [{name: "PRONTO_UPSTREAM_FLAGD", value: "flagd:8693"}, {name: "OTHER", value: "x"}]
+						}]
+					}
+				}
+			}]
+		}
+		_env: [for o in _m.objects if o.kind == "Deployment" && o.metadata.name == "app-caddy" for e in o.spec.template.spec.containers[0].env {"\(e.name)=\(e.value)"}]
+		_got:  _env
+		_want: ["PRONTO_UPSTREAM_FLAGD=flagd:8693", "OTHER=x"]
+	}
 }
 
 _blobs:  {bucket: "app-blobs-bucket", provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "blobs@proj.iam.gserviceaccount.com", audience: "contabo-k3s"}

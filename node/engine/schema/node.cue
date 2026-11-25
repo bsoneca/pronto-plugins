@@ -409,8 +409,13 @@ import (
 			"\(release.environment.registry)/\(release.name)-database-base:\(app.image.pushed["database-base"].tag)@\(app.image.pushed["database-base"].digest)"
 		},
 	]
+	// The door reaches each of the app's own services (`services`) through its Dapr sidecar, as upstream's render does for its own
+	// (PRONTO_UPSTREAM_<NAME>=localhost:3500): the door's egress admits the sidecar's port and not a service's own, so a door that
+	// dials `flagd:8693` itself is refused. Upstream sets the variable only for the ids of its `doors`, which a release fills from
+	// the app's cluster.json, so a service the app declares here would have none (PRONTO-1884: aprende's /ofrep answered 502).
+	let serviceNames = [for n, _ in release.services {n}]
 	_patched: [for o in upstream {
-		if !(retarget && o.kind == "Deployment" && o.metadata.name == caddyName) {
+		if !(o.kind == "Deployment" && o.metadata.name == caddyName) {
 			[
 				if o.kind == "Cluster" if len(dbBase) > 0 {
 					{
@@ -436,7 +441,10 @@ import (
 			}
 		}
 		if retarget && o.kind == "Deployment" && o.metadata.name == caddyName {
-			(#RetargetDapr & {in: o, config: caddyConfig}).out
+			(#AddUpstreams & {in: (#RetargetDapr & {in: o, config: caddyConfig}).out, names: serviceNames}).out
+		}
+		if !retarget && o.kind == "Deployment" && o.metadata.name == caddyName {
+			(#AddUpstreams & {in: o, names: serviceNames}).out
 		}
 	}]
 
@@ -677,6 +685,44 @@ import (
 									for k, v in in.spec.template.metadata.annotations if k != "dapr.io/config" {(k): v}
 								}
 								"dapr.io/config": config
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// A door Deployment whose `caddy` container has `PRONTO_UPSTREAM_<NAME>=localhost:3500` (the Dapr sidecar) for each of `names`
+// that its environment does not already name: one already there is left as it is. A Deployment with no spec, pod template or
+// containers is passed on as it is, for the API server to refuse.
+#AddUpstreams: {
+	in:    _
+	names: [...string]
+	out: {
+		for k, v in in if k != "spec" {(k): v}
+		if in.spec != _|_ {
+			spec: {
+				for k, v in in.spec if k != "template" {(k): v}
+				if in.spec.template != _|_ {
+					template: {
+						for k, v in in.spec.template if k != "spec" {(k): v}
+						if in.spec.template.spec != _|_ {
+							spec: {
+								for k, v in in.spec.template.spec if k != "containers" {(k): v}
+								if in.spec.template.spec.containers != _|_ {
+									containers: [for c in in.spec.template.spec.containers {
+										if c.name != "caddy" {c}
+										if c.name == "caddy" {
+											let have = [if c.env != _|_ for e in c.env {e.name}]
+											let add = [for n in names for var in ["PRONTO_UPSTREAM_\(strings.ToUpper(strings.Replace(n, "-", "_", -1)))"] if !list.Contains(have, var) {name: var, value: "localhost:3500"}]
+											for k, v in c if k != "env" {(k): v}
+											if len(add) == 0 if c.env != _|_ {env: c.env}
+											if len(add) > 0 {env: list.Concat([[if c.env != _|_ for e in c.env {e}], add])}
+										}
+									}]
+								}
 							}
 						}
 					}
