@@ -104,7 +104,8 @@ export const RULES = {
   },
   "bodyLimits": {
     "request": 4096,
-    "webhook": 262144
+    "webhook": 262144,
+    "appstore": 16384
   },
   "doorLookupTimeoutMs": 300,
   "brokerRole": "billing"

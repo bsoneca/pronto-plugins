@@ -58,7 +58,7 @@ billingClaimStates: ${list(RULES.claimStates)}
     }
   } catch { /* no migrations dir */ }
 }
-for (const f of ["service.ts", "entitlement.ts", "shared.ts", "broker/core.ts", "broker/main.ts", "broker/stripe.ts", "broker/door.ts", "broker/fake.ts", "broker/store.ts", "broker/vendor/postgres.js"]) {
+for (const f of ["service.ts", "entitlement.ts", "shared.ts", "broker/core.ts", "broker/main.ts", "broker/stripe.ts", "broker/door.ts", "broker/fake.ts", "broker/store.ts", "broker/appstore.ts", "broker/vendor/postgres.js"]) {
   await write(`billing/${f}`, await Deno.readTextFile(`${here}${f}`));
 }
 if (!owner && !(await Deno.stat(`${app}/billing_spec.cue`).catch(() => null))) {

@@ -58,7 +58,8 @@ rules: {
 	routeLimits: {perClient: 30, global: 120, bodyMax: 4096, windowMs: 60000}
 	// The most a request body is read for, in bytes: any request the broker reads a body of, and Stripe's webhook.
 	// The live/sandbox dispatcher enforces it (413) before it picks a broker.
-	bodyLimits: {request: 4096, webhook: 262144}
+	// The App Store's routes (appstore.ts) read more: a signed transaction or notification carries its certificate chain.
+	bodyLimits: {request: 4096, webhook: 262144, appstore: 16384}
 	// How long the service waits for flagd's answer on the stripe_door flag before it takes the direct route.
 	doorLookupTimeoutMs: 300
 	// The broker's login role and database name on its own Postgres: metal.nu creates the database with this owner, the
@@ -78,7 +79,7 @@ rules: {
 	claimRetentionMs: int & >0
 	claimLeaseMs: int & >0 & <claimRetentionMs
 	routeLimits: {perClient: int & >0, global: int & >perClient, bodyMax: int & >0, windowMs: int & >0}
-	bodyLimits: {request: int & >0, webhook: int & >request}
+	bodyLimits: {request: int & >0, webhook: int & >request, appstore: int & >request}
 	doorLookupTimeoutMs: int & >0
 	brokerRole: =~"^[a-z_][a-z0-9_]*$"
 	claimTransitions: [...{

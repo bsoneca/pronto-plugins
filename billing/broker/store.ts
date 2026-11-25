@@ -56,8 +56,10 @@ export interface Store {
   take(name: string, key: string, per: number, windowMs: number): Promise<boolean>;
   /** Whether (kind, id) was remembered, and is not yet forgotten. */
   seen(kind: string, id: string): Promise<boolean>;
-  /** Remember (kind, id) for `ttlMs`. */
-  remember(kind: string, id: string, ttlMs: number): Promise<void>;
+  /** Remember (kind, id) for `ttlMs`, with a `value` (text) that `recall` gives back while it is remembered. */
+  remember(kind: string, id: string, ttlMs: number, value?: string): Promise<void>;
+  /** The value (kind, id) was remembered with, or null: none was given, it is not remembered, or it is forgotten. */
+  recall(kind: string, id: string): Promise<string | null>;
   /** Take (kind, id) for `leaseMs`, for one caller of all the replicas: claimed (with the token of this claim),
    * busy (another holds it, its lease not yet ended) or done (finished: `complete`, or `remember`). The state
    * is kept beside the expiry, never read off the time left: expiry only decides when a claim may be taken
@@ -91,7 +93,7 @@ export class MemoryStore implements Store {
   #running = new Set<string>();
   #counters = new Map<string, number>();
   #windows = new Map<string, Window>();
-  #seen = new Map<string, { until: number; state: RowState; token?: string }>();
+  #seen = new Map<string, { until: number; state: RowState; token?: string; value?: string }>();
   #claimed = 0;
   constructor(readonly now: () => number = Date.now) {}
 
@@ -128,7 +130,7 @@ export class MemoryStore implements Store {
   get rows(): number {
     return this.#seen.size;
   }
-  #cursor: Iterator<[string, { until: number; state: RowState; token?: string }]> | null = null;
+  #cursor: Iterator<[string, { until: number; state: RowState; token?: string; value?: string }]> | null = null;
   /** Drops rows whose time ended by the declared `expire`: at most SWEEP looked at a call, continuing where the
    * last call stopped, so no caller pays for a backlog and no row is skipped for ever. */
   #sweep(): void {
@@ -151,11 +153,14 @@ export class MemoryStore implements Store {
   seen(kind: string, id: string): Promise<boolean> {
     return Promise.resolve(this.#live(`${kind}\u0000${id}`) !== undefined);
   }
-  remember(kind: string, id: string, ttlMs: number): Promise<void> {
+  remember(kind: string, id: string, ttlMs: number, value?: string): Promise<void> {
     this.#sweep();
     const key = `${kind}\u0000${id}`;
-    this.#seen.set(key, { until: this.now() + ttlMs, state: step("remember", this.#live(key)?.state ?? "absent", false) as RowState });
+    this.#seen.set(key, { until: this.now() + ttlMs, state: step("remember", this.#live(key)?.state ?? "absent", false) as RowState, value });
     return Promise.resolve();
+  }
+  recall(kind: string, id: string): Promise<string | null> {
+    return Promise.resolve(this.#live(`${kind}\u0000${id}`)?.value ?? null);
   }
   claim(kind: string, id: string, leaseMs: number): Promise<Claim> {
     this.#sweep();
@@ -219,6 +224,8 @@ export const SCHEMA = [
   // A row says whether it is a claim in progress or finished, beside when it expires; a table made before
   // the column holds only finished rows and remembered ones, so they default to done.
   `ALTER TABLE billing_seen ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT '${DONE}'`,
+  // What a remembered row carries (the App Store's held entitlement of an account): text, null for every other row.
+  `ALTER TABLE billing_seen ADD COLUMN IF NOT EXISTS value text`,
   // The states are rules.cue's claimStates; added once, valid for every row a table made before it holds.
   `DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'billing_seen_state' AND conrelid = 'billing_seen'::regclass) THEN
@@ -253,14 +260,15 @@ export const SQL = {
     RETURNING n`,
   sweepWindows: `DELETE FROM billing_window WHERE ctid IN (SELECT ctid FROM billing_window WHERE started <= now() - interval '${WINDOW_KEEP_S} seconds' LIMIT 100)`,
   seen: `SELECT 1 AS seen FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
-  remember: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), '${target("remember", "absent")}')
-    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${target("remember", "claimed")}'
+  remember: `INSERT INTO billing_seen (kind, id, expires, state, value) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), '${target("remember", "absent")}', $4::text)
+    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${target("remember", "claimed")}', value = EXCLUDED.value
     WHERE billing_seen.state IN (${fromStates("remember", "done")}) RETURNING 1 AS remembered`,
   // One statement takes a row nobody holds: absent, or its lease (or memory) ended. The token is the row's
   // expires as text, microseconds and all: a client's Date would round it to milliseconds.
   claim: `INSERT INTO billing_seen (kind, id, expires, state) VALUES ($1, $2, now() + make_interval(secs => $3::double precision / 1000), '${target("claim", "absent")}')
-    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${target("claim", "absent")}' WHERE billing_seen.expires <= now()
+    ON CONFLICT (kind, id) DO UPDATE SET expires = EXCLUDED.expires, state = '${target("claim", "absent")}', value = NULL WHERE billing_seen.expires <= now()
     RETURNING expires::text AS token`,
+  recall: `SELECT value FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
   claimed: `SELECT state = '${DONE}' AS done FROM billing_seen WHERE kind = $1 AND id = $2 AND expires > now()`,
   complete: `UPDATE billing_seen SET expires = now() + make_interval(secs => $4::double precision / 1000), state = '${target("complete", "claimed")}'
     WHERE kind = $1 AND id = $2 AND state = '${CLAIMED}' AND expires > now() AND expires::text = $3::text RETURNING 1 AS completed`,
@@ -311,6 +319,8 @@ export class PostgresStore implements Store {
       // pg_catalog, not information_schema: the latter hides the columns of a table the role has no privilege on.
       const [col] = await this.sql.unsafe(`SELECT 1 AS there FROM pg_attribute WHERE attrelid = 'billing_seen'::regclass AND attname = 'state' AND NOT attisdropped`);
       if (!col) missing.push("column billing_seen.state");
+      const [value] = await this.sql.unsafe(`SELECT 1 AS there FROM pg_attribute WHERE attrelid = 'billing_seen'::regclass AND attname = 'value' AND NOT attisdropped`);
+      if (!value) missing.push("column billing_seen.value");
       const [check] = await this.sql.unsafe(`SELECT 1 AS there FROM pg_constraint WHERE conname = 'billing_seen_state' AND conrelid = 'billing_seen'::regclass`);
       if (!check) missing.push("constraint billing_seen_state");
     }
@@ -346,10 +356,14 @@ export class PostgresStore implements Store {
   async seen(kind: string, id: string): Promise<boolean> {
     return (await this.sql.unsafe(SQL.seen, [kind, id])).length > 0;
   }
-  async remember(kind: string, id: string, ttlMs: number): Promise<void> {
+  async remember(kind: string, id: string, ttlMs: number, value?: string): Promise<void> {
     await this.sql.unsafe(SQL.sweepSeen);
     // One conditional statement; the declaration lets a remember find any state, so it always lands.
-    await this.sql.unsafe(SQL.remember, [kind, id, ttlMs]);
+    await this.sql.unsafe(SQL.remember, [kind, id, ttlMs, value ?? null]);
+  }
+  async recall(kind: string, id: string): Promise<string | null> {
+    const [row] = await this.sql.unsafe(SQL.recall, [kind, id]);
+    return typeof row?.value === "string" ? row.value : null;
   }
   async claim(kind: string, id: string, leaseMs: number): Promise<Claim> {
     // Rows whose time ended are reclaimed here as they are on a remember: a bounded few a call.

@@ -133,7 +133,7 @@ export def main [
 	let work = (mktemp -d)
 	mkdir $"($work)/billing/broker/vendor"
 	cp $"($here)/shared.ts" $"($here)/rules.ts" $"($work)/billing/"
-	cp $"($here)/broker/main.ts" $"($here)/broker/core.ts" $"($here)/broker/stripe.ts" $"($here)/broker/door.ts" $"($here)/broker/fake.ts" $"($here)/broker/store.ts" $"($work)/billing/broker/"
+	cp $"($here)/broker/main.ts" $"($here)/broker/core.ts" $"($here)/broker/stripe.ts" $"($here)/broker/door.ts" $"($here)/broker/fake.ts" $"($here)/broker/store.ts" $"($here)/broker/appstore.ts" $"($work)/billing/broker/"
 	cp $"($here)/broker/vendor/postgres.js" $"($work)/billing/broker/vendor/"
 	$"FROM ($deno)\nWORKDIR /app\nCOPY billing /app/billing\nRUN [\"deno\", \"cache\", \"/app/billing/broker/main.ts\"]\nENV PORT=8080\nCMD [\"run\", \"--allow-net\", \"--allow-env\", \"/app/billing/broker/main.ts\"]\n" | save $"($work)/Dockerfile"
 	let image = $"($region)-docker.pkg.dev/($p)/($repository)/($service)"

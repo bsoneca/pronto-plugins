@@ -23,6 +23,7 @@ import {
 } from "./core.ts";
 import { bodyLimitOf, endpointRefusal, type Routed, type Stripe, StripeError, transportUsed, webhookSigned, withCappedBody } from "./stripe.ts";
 import { MemoryStore, type Store } from "./store.ts";
+import { appOf, AppStoreRefused, type AppStoreConfig, appstoreConfigFrom, checkSandboxApps, appstore, merged, transactionOf, verifySigned } from "./appstore.ts";
 import { RULES } from "../rules.ts";
 
 /** Where a tenant publishes its owner and its plans. */
@@ -111,6 +112,8 @@ export async function broker(p: {
   /** Whether this broker is asked which way each call goes (STRIPE_DOOR_ASKED). Only then does it have a /route: a
    * fixed-route broker has none. */
   doorAsked?: boolean;
+  /** The App Store as a second source of entitlements (appstore.ts): off, and its routes 404, unless given. */
+  appstore?: AppStoreConfig;
 }) {
   const issuer = p.issuer.replace(/\/$/, "");
   // A broker on a developer's machine serves tenants there too.
@@ -224,11 +227,14 @@ export async function broker(p: {
     return price.id;
   }
 
-  // The entitlement of one account to one plan, read from Stripe and signed for its tenant.
+  const apps = p.appstore ? appstore({ config: p.appstore, store, fetcher }) : undefined;
+
+  // The entitlement of one account to one plan, read from Stripe and signed for its tenant. What the App Store
+  // last said the account holds counts beside it, so a Stripe event never lapses a plan Apple still holds.
   async function entitlement(t: string, account: string, plan: string, known?: string) {
     const ver = await nextVer();
     const subs = await subscriptionsOf(await customersOf(t, account, known));
-    const held = entitlementOf(subs, t, account, plan);
+    const held = merged(entitlementOf(subs, t, account, plan), (await apps?.heldBy(t, account, plan)) ?? null);
     const token = await signEs256(signing.key, signing.publicJwk.kid!, entitlementClaims({
       issuer, tenant: t, account, plan, ...held, manage: await manageTokenOf(manageKey, t, account), ver, trial: trialOf(subs, t, account, plan),
     }));
@@ -682,12 +688,114 @@ export async function broker(p: {
     return response!;
   }
 
+
+  // What an iOS app's player bought through StoreKit (appstore.ts): the signed transaction its device sends, and Apple's
+  // own notifications of what happened to it later. Neither is believed: each is checked as Apple's, and the subscription is
+  // read again from Apple's Server API. Answered 200 only once the tenant has taken the entitlement.
+  async function appBody(req: Request): Promise<Record<string, unknown> | Response> {
+    const text = await readCapped(req.body, RULES.bodyLimits.appstore, req.headers.get("content-length"));
+    if (text === null) return json(413, { error: "too large" });
+    try {
+      const v = JSON.parse(text);
+      if (typeof v === "object" && v !== null && !Array.isArray(v)) return v;
+    } catch { /* refused below */ }
+    return json(400, { error: "a JSON object required" });
+  }
+
+  /** Reads Apple again for the account's plan, keeps what it holds, and pushes the entitlement (Stripe's beside it) to the tenant. */
+  async function settleApp(t: string, account: string, plan: string, source: string, app: Parameters<NonNullable<typeof apps>["refresh"]>[0], tx: Parameters<NonNullable<typeof apps>["refresh"]>[1]): Promise<{ active: boolean; through: number } | Response> {
+    await apps!.refresh(app, tx, account, plan);
+    const { held, token } = await entitlement(t, account, plan);
+    const r = await push(t, token);
+    if (r.refused) {
+      console.error(`billing: error: billing_alert=entitlement_refused account=${account} source=appstore ${source} tenant=${t} ${r.why}`);
+      return json(502, { error: "tenant refused the entitlement" });
+    }
+    if (!r.taken) {
+      console.error(`billing: ${t}${EVENTS_PATH} ${r.why} for ${source}`);
+      return json(502, { error: `tenant ${r.why}` });
+    }
+    return held;
+  }
+
+  // Runs `work` under a claim of (kind, id), which every replica shares: finished once, and given back for another try when
+  // the work fails, so a retry is not made to wait out the lease.
+  async function once(kind: string, id: string, work: () => Promise<Response>): Promise<Response> {
+    const claim = await store.claim(kind, id, EVENT_LEASE_MS);
+    if (claim.state === "done") return json(kind === "appstore transaction" ? 409 : 200, kind === "appstore transaction" ? { error: "replayed" } : { duplicate: id });
+    if (claim.state === "busy") return json(409, { error: "in progress" });
+    let kept = false;
+    try {
+      const res = await work();
+      if (res.ok) {
+        if (!(await store.complete(kind, id, claim.token, EVENT_KEPT_MS))) return json(409, { error: "claim lost" });
+        kept = true;
+      }
+      return res;
+    } finally {
+      if (!kept) await store.forget(kind, id, claim.token);
+    }
+  }
+
+  // A signed transaction a player's device sends for an account: refused unless it is Apple's, of a bundle the operator tied to
+  // this tenant, in an environment that counts, of a product that is a plan, bought for this account, neither revoked nor
+  // expired, and not one taken already.
+  async function appTransaction(req: Request, client: string): Promise<Response> {
+    const b = await appBody(req);
+    if (b instanceof Response) return b;
+    const t = tenant(b.tenant);
+    const account = accountOf(b.account);
+    if (!t || !account) return json(400, { error: "tenant and account required" });
+    if (!(await perClient(client)) || !(await perTenant(t))) return json(429, { error: "too many requests; try again in a minute" });
+    const tx = transactionOf(await verifySigned(b.transaction, apps!.config.roots, apps!.now()));
+    const { app, plan } = appOf(apps!.config, tx);
+    if (app.tenant !== t) return json(403, { error: "bundle refused" });
+    if (!plan) return json(400, { error: "product refused" });
+    if (tx.appAccountToken !== account) return json(403, { error: "the transaction is another account's" });
+    if (tx.revocationDate !== null) return json(409, { error: "revoked" });
+    if (tx.expiresDate === null || tx.expiresDate <= apps!.now()) return json(409, { error: "expired" });
+    return await once("appstore transaction", tx.transactionId, async () => {
+      const held = await settleApp(t, account, plan, `transaction ${tx.transactionId}`, app, tx);
+      // A claim Apple does not confirm holds nothing: refused, and given back, so the player may try again.
+      if (held instanceof Response) return held;
+      return held.active ? json(200, { ok: true, plan, active: true, through: held.through }) : json(409, { error: "not active at the App Store" });
+    });
+  }
+
+  // What Apple says happened to a subscription (App Store Server Notifications v2). The notification says which
+  // subscription changed; Apple's Server API says how it stands now.
+  const NOTIFIED = new Set([
+    "SUBSCRIBED", "DID_RENEW", "EXPIRED", "DID_FAIL_TO_RENEW", "GRACE_PERIOD_EXPIRED", "REFUND", "REVOKE", "REFUND_REVERSED",
+    "DID_CHANGE_RENEWAL_STATUS", "OFFER_REDEEMED",
+  ]);
+  async function appNotification(req: Request, client: string): Promise<Response> {
+    const b = await appBody(req);
+    if (b instanceof Response) return b;
+    if (!(await store.take(`appstore client ${mode}`, client, 120, 60_000))) return json(429, { error: "too many requests; try again in a minute" });
+    const note = await verifySigned(b.signedPayload, apps!.config.roots, apps!.now());
+    const data = (typeof note.data === "object" && note.data !== null ? note.data : {}) as Record<string, unknown>;
+    const { app } = appOf(apps!.config, { bundleId: String(data.bundleId ?? ""), environment: String(data.environment ?? "") });
+    const type = String(note.notificationType ?? "");
+    const id = typeof note.notificationUUID === "string" && note.notificationUUID.length > 0 && note.notificationUUID.length <= 64 ? note.notificationUUID : null;
+    if (!id) return json(400, { error: "notificationUUID required" });
+    if (!NOTIFIED.has(type)) return json(200, { ignored: type });
+    const tx = transactionOf(await verifySigned(data.signedTransactionInfo, apps!.config.roots, apps!.now()));
+    if (tx.bundleId !== app.bundleId || tx.environment !== data.environment) return json(403, { error: "bundle refused" });
+    const plan = Object.hasOwn(app.products, tx.productId) ? app.products[tx.productId] : null;
+    const account = tx.appAccountToken;
+    if (!plan || !account) return json(200, { ignored: "not a pronto subscription" });
+    return await once("appstore notification", id, async () => {
+      const held = await settleApp(app.tenant, account, plan, `notification ${id} ${type}`, app, tx);
+      return held instanceof Response ? held : json(200, { delivered: id });
+    });
+  }
+
   return async function handler(req: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
     // An unknown path, a method that path does not take, and /route without the door asked are answered before any
     // body is read.
-    const refusal = endpointRefusal(req.method, path, p.doorAsked === true);
+    const refusal = endpointRefusal(req.method, path, p.doorAsked === true, apps !== undefined);
     if (refusal) return refusal;
     try {
       if (req.method === "GET" && path === "/jwks") return json(200, { keys: [signing.publicJwk] });
@@ -714,6 +822,11 @@ export async function broker(p: {
       }
       if (req.method === "POST" && path === "/resync") return await resync(req);
       if (req.method === "POST" && path === "/stripe") return await webhook(req);
+      if (req.method === "POST" && (path === "/appstore" || path === "/appstore/transaction")) {
+        const addr = info?.remoteAddr as Deno.NetAddr | undefined;
+        const client = req.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() || addr?.hostname || "";
+        return await (path === "/appstore" ? appNotification(req, client) : appTransaction(req, client));
+      }
       if (req.method === "GET" && path === "/health") return json(200, { ok: true });
       return json(404, { error: "not found" });
     } catch (e) {
@@ -721,6 +834,7 @@ export async function broker(p: {
         console.error(`billing: stripe ${e.status} ${e.code}: ${e.message}`);
         return json(502, { error: "stripe refused" });
       }
+      if (e instanceof AppStoreRefused) return json(e.status, { error: e.message });
       console.error(e);
       return json(500, { error: "internal error" });
     }
@@ -739,11 +853,13 @@ export function twoModes(p: {
   sandboxWebhookSecret: string;
   /** As broker's: whether /route exists. */
   doorAsked?: boolean;
+  /** Whether the brokers have the App Store (their `appstore`): its two paths exist. */
+  appstore?: boolean;
 }) {
   return async function handler(request: Request, info?: Deno.ServeHandlerInfo): Promise<Response> {
     // The capped body is read once, here, before a broker is chosen, and the chosen broker is handed the request with
     // that body already read: no second read, and an oversized one is a 413 as soon as the cap is passed.
-    const capped = await withCappedBody(request, p.doorAsked === true);
+    const capped = await withCappedBody(request, p.doorAsked === true, p.appstore === true);
     if (capped instanceof Response) return capped;
     const req = capped;
     const url = new URL(req.url), path = url.pathname;
@@ -791,7 +907,15 @@ if (import.meta.main) {
   if (env("DATABASE_URL") && !env("BILLING_SIGNING_KEY")) {
     throw new Error("BILLING_SIGNING_KEY is required with DATABASE_URL: replicas of one database must sign with one key");
   }
-  const settings = { issuer, secret, signingKey: env("BILLING_SIGNING_KEY"), feePercent: Number(env("BILLING_FEE_PERCENT") ?? 0), store: await storeFrom(env), doorAsked: env("STRIPE_DOOR_ASKED") === "1" };
+  const settings = {
+    issuer, secret, signingKey: env("BILLING_SIGNING_KEY"), feePercent: Number(env("BILLING_FEE_PERCENT") ?? 0), store: await storeFrom(env), doorAsked: env("STRIPE_DOOR_ASKED") === "1",
+    appstore: await appstoreConfigFrom(env),
+  };
+  // A live broker serves a sandbox app only for a tenant it holds in Stripe's sandbox (L1): refused at start, not at the first purchase.
+  if (settings.appstore && !/^https?:\/\/localhost(:\d+)?$/.test(issuer.replace(/\/$/, ""))) {
+    const sandboxed = env("BILLING_SANDBOX_TENANTS");
+    checkSandboxApps(settings.appstore, sandboxed ? new RegExp(sandboxed) : null);
+  }
   const key = env("STRIPE_SECRET_KEY");
   // Off by default: set (by metal.nu --airlock), every Stripe call goes through the airlock's door at
   // this address, which holds the keys, and the broker holds none (PRONTO-135).
@@ -826,7 +950,7 @@ if (import.meta.main) {
       const pattern = new RegExp(sandboxTenants);
       const sandbox = await broker({ ...settings, stripe: client(sandboxKey, `${door}/door/stripe-sandbox`), webhookSecret: sandboxWebhookSecret, mode: "sandbox" });
       console.warn(`billing: tenants matching ${sandboxTenants} sell through the sandbox`);
-      Deno.serve({ port }, asked(twoModes({ live, sandbox, sandboxed: (t) => pattern.test(t), sandboxWebhookSecret, doorAsked })));
+      Deno.serve({ port }, asked(twoModes({ live, sandbox, sandboxed: (t) => pattern.test(t), sandboxWebhookSecret, doorAsked, appstore: settings.appstore !== undefined })));
     } else {
       Deno.serve({ port }, asked(live));
     }
