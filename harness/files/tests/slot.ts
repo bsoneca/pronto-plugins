@@ -131,6 +131,8 @@
 //   deno run -A tests/slot.ts launch         the stack itself, as launch@local, until stopped
 //   deno run -A tests/slot.ts launch --watch the same, warm: an edit lands without a relaunch
 //   deno run -A tests/slot.ts ./saytw launch@local
+//   deno run -A tests/slot.ts ./saytw launch@host   the same stack: an app on an upstream pronto runtime, which has no
+//                                            integrate-local.ts and no `local` rules, has the host verbs only (PRONTO-1768)
 //                                            generate and build in the checkout, then launch
 //   deno run -A tests/slot.ts ./saytw integrate@host
 //                                            generate and build in the checkout, then integrate@host's
@@ -2528,6 +2530,11 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
   Deno.exit(starved ? 3 : status.code);
 }
 
+// The stack form of a launch: `./saytw launch@local` (the forks' runtime, which has integrate-local.ts) or `./saytw launch@host`
+// (an upstream runtime, which has none: PRONTO-1768, where it ran under the claim as any command and failed in its copy). Both
+// are this file's own stack, as `launch`: what `args` of the main below is made from.
+export const launchArgs = (argv: string[]): string[] =>
+  /(^|\/)saytw$/.test(argv[0] ?? "") && (argv[1] === "launch@local" || argv[1] === "launch@host") ? ["launch", ...argv.slice(2)] : argv;
 if (import.meta.main) {
   if (!Deno.args.length) { console.error("usage: deno run -A tests/slot.ts launch [--watch] | <command...> | status | renew [n|pid] | sweep-browsers | own | detach | member | leftovers | --weight <n> --what <label> -- <command...>"); Deno.exit(2); }
   if (["own", "detach", "member", "leftovers"].includes(Deno.args[0])) await ownerVerb(Deno.args[0], Deno.args.slice(1));
@@ -2568,7 +2575,7 @@ if (import.meta.main) {
     if (Deno.args[0] === "renew" && !found) { console.error("no live launch with a deadline" + (asked ? ` for ${asked}` : "")); Deno.exit(1); }
     Deno.exit(0);
   }
-  const args = /(^|\/)saytw$/.test(Deno.args[0]) && Deno.args[1] === "launch@local" ? ["launch", ...Deno.args.slice(2)] : Deno.args;
+  const args = launchArgs(Deno.args);
   // integrate@host: generate and build here, as its own --generate would, then its suites in the slot's
   // copy (`integrating`): a generate there would write the literal ports back.
   const isSaytw = /(^|\/)saytw$/.test(Deno.args[0]);
@@ -2581,7 +2588,7 @@ if (import.meta.main) {
   if (args !== Deno.args || hostGate) {
     const prep = await claim(Deno.pid, `generate and build for ${defaultWhat(args)}`, weights.stack, true, true);
     for (const verb of ["generate", "build"]) {
-      say(`${verb}, in the checkout, as ${hostGate ? "integrate@host" : "launch@local"} does before its stack`);
+      say(`${verb}, in the checkout, as ${hostGate ? "integrate@host" : Deno.args[1] === "launch@host" ? "launch@host" : "launch@local"} does before its stack`);
       const { code } = await new Deno.Command("./saytw", { args: [verb], cwd: app, stdin: "null", stdout: "inherit", stderr: "inherit" }).output();
       if (code) { prep.release(); Deno.exit(code); }
     }
