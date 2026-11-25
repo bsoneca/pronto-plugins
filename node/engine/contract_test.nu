@@ -33,13 +33,13 @@ def runtime-dir []: nothing -> string {
 	$d
 }
 
-# The fixture apps: what an app of each shape builds and runs. Studio's has the runtime services,
-# the render service and the service token.
+# The fixture apps: what an app of each shape builds and runs. Studio's has the render service, flagd and the builder
+# (a jailed pod with a Google identity, its own egress and a workspace).
 def fixture-apps []: nothing -> list<record> {
 	[
 		{name: "aprende", services: [database crud electric caddy auth migrate], build: [database crud electric auth caddy migrate]}
-		{name: "brawl-chess", package: "brawlchess", tuned: {logins: [analytics_reader], parameters: [max_connections], resources: [electric caddy crud], replicas: [crud auth caddy render], own: [billing analyst flagd perf-collector journeys-collector ticker standin notifier exporter], images: [billing analyst flagd perf-collector journeys-collector ticker standin notifier exporter rclone-s3 imgproxy], secrets: [notify-vapid-private-key]}, services: [database crud electric caddy auth migrate render], build: [database crud electric auth caddy migrate render]}
-		{name: "studio", services: [database crud electric caddy auth migrate render ticker imgproxy], build: [ticker imgproxy database crud electric auth caddy migrate render]}
+		{name: "brawl-chess", package: "brawlchess", tuned: {scaled: true, plane: true, clocks: [ticker], logins: [analytics_reader], parameters: [max_connections], resources: [electric caddy crud], replicas: [crud auth caddy render], own: [billing analyst flagd perf-collector journeys-collector ticker standin notifier exporter], images: [billing analyst flagd perf-collector journeys-collector ticker standin notifier exporter rclone-s3 imgproxy], secrets: [notify-vapid-private-key]}, services: [database crud electric caddy auth migrate render], build: [database crud electric auth caddy migrate render]}
+		{name: "studio", tuned: {backed: true, logins: [], parameters: [], resources: [electric], replicas: [], own: [flagd builder], images: [flagd builder], secrets: [studio-play studio-auth-secrets studio-llm-chatgpt studio-backup-s3]}, services: [database crud electric caddy auth migrate render flagd builder], build: [database crud electric auth caddy migrate render]}
 	]
 }
 
@@ -135,7 +135,7 @@ def canon []: any -> any {
 # What upstream or the engine wrote to the cluster, as the order a release makes it in: each object
 # applied, each Job replaced, the cluster annotated, each rollout waited on. The Namespace, applied
 # first by the engine and with the rest by upstream, the engine's record, and the generator and Secret of a database login
-# (the brawl-chess fixture's analytics_reader) are the engine's own;
+# (the brawl-chess fixture's analytics_reader) and a database's backups (the ObjectStore and the nightly ScheduledBackup) are the engine's own;
 # upstream's cleanup of an earlier airlock (the engine refuses the airlock) is upstream's.
 def writes [w: record, logins: list<string> = [], own: list<string> = [], app: string = ""]: nothing -> list<string> {
 	let f = ($w.state | path join calls.jsonl)
@@ -148,7 +148,7 @@ def writes [w: record, logins: list<string> = [], own: list<string> = [], app: s
 			"rollout" => (if $a.1 == "status" { [$"rollout ($a.2)"] } else { [] })
 			_ => []
 		}
-	} | flatten | where {|l| not ($l starts-with "apply Namespace/") and $l != "apply ConfigMap/pronto-release" and not ($l =~ '^apply Configuration/.*-caddy-invoke-only$') and not ($logins | any {|g| let d = ($g | str replace -a "_" "-"); $l =~ $"^apply \(Password|ExternalSecret\)/.*-($d)-\(password|db\)$" }) and not (own-write $l $own $app) }
+	} | flatten | where {|l| not ($l starts-with "apply Namespace/") and $l != "apply ConfigMap/pronto-release" and not ($l =~ '^apply (ObjectStore|ScheduledBackup)/') and not ($l =~ '^apply Configuration/.*-caddy-invoke-only$') and not ($logins | any {|g| let d = ($g | str replace -a "_" "-"); $l =~ $"^apply \(Password|ExternalSecret\)/.*-($d)-\(password|db\)$" }) and not (own-write $l $own $app) }
 }
 
 # A write of the engine's own services: an object or a rollout of one of the app's services, the blob plane or the metrics
@@ -156,7 +156,7 @@ def writes [w: record, logins: list<string> = [], own: list<string> = [], app: s
 def own-write [line: string, own: list<string>, app: string]: nothing -> bool {
 	if ($own | is-empty) { return false }
 	let name = ($line | split row "/" | last | str replace -r $"^($app)-" "")
-	$name in ($own | each {|s| [$s $"($s)-clock" $"($s)-database-egress"] } | flatten | append [blobs rclone-s3 imgproxy metrics-export services-netpol service-token])
+	$name in ($own | each {|s| [$s $"($s)-clock" $"($s)-database-egress" $"($s)-egress"] } | flatten | append [blobs rclone-s3 imgproxy metrics-export services-netpol service-token])
 }
 
 # The paths of a value with what is at each, one line a leaf: two values' difference is the lines of one only.
@@ -286,7 +286,8 @@ def test_objects_change_only_as_declared [fx: record] {
 	print $"test ($fx.name): the engine's objects are upstream's, but for its declared patches and additions..."
 	for variant in [
 		""
-		"Node: {backups: {bucket: \"b\", path: \"p\"}, tenant: {egress: [{ports: [{port: 443}]}]}}\n"
+		# a fixture that states its own database.backup is not given a second one
+		(if ($fx.tuned?.backed? | default false) { "Node: {tenant: {egress: [{ports: [{port: 443}]}]}}\n" } else { "Node: {backups: {bucket: \"b\", path: \"p\"}, tenant: {egress: [{ports: [{port: 443}]}]}}\n" })
 		"Node: {preview: \"rc\"}\n"
 	] {
 		let w = (sandbox $fx)
@@ -303,7 +304,7 @@ def test_objects_change_only_as_declared [fx: record] {
 		let mine = (if $tuned != false { $engine | without-tunings $fx.name $tuned } else { $engine })
 		let theirs = (if $tuned != false { $upstream | without-tunings $fx.name $tuned } else { $upstream })
 		assert equal ($mine | canon | to json) ($theirs | canon | to json) $"variant ($variant | str trim): (differences $mine $theirs)"
-		if $tuned != false {
+		if $tuned != false and ($tuned.scaled? | default false) {
 			# the tunings themselves: the numbers the fixture's release.cue names, in production and in the preview
 			let crud = ($both.engine | where {|o| $o.kind == "Deployment" and $o.metadata.name == $"($fx.name)-crud" } | first)
 			let db = ($both.engine | where kind == Cluster | first)
@@ -319,13 +320,15 @@ def test_objects_change_only_as_declared [fx: record] {
 		let svcs = (if $tuned != false { $tuned.own? | default [] } else { [] })
 		if ($svcs | is-not-empty) {
 			let deployments = ($both.engine | where kind == Deployment)
-			for s in ($svcs | append [rclone-s3 imgproxy metrics-export]) {
+			for s in ($svcs | append (if ($tuned.plane? | default false) { [rclone-s3 imgproxy metrics-export] } else { [] })) {
 				assert (($deployments | where {|o| $o.metadata.name == $"($fx.name)-($s)" } | length) == 1) $"the service ($s) is one Deployment"
 			}
-			let billing = ($deployments | where {|o| $o.metadata.name == $"($fx.name)-billing" } | first)
-			assert equal ($billing.spec.template.metadata.annotations | get "dapr.io/config") $"($fx.name)-dapr-config"
-			assert equal ($both.engine | where kind == CronJob | get metadata.name) [$"($fx.name)-ticker-clock"]
-			assert equal ($deployments | where {|o| $o.metadata.name == $"($fx.name)-ticker" } | first | get spec.strategy.type) "Recreate"
+			let first_service = ($deployments | where {|o| $o.metadata.name == $"($fx.name)-($svcs | first)" } | first)
+			assert equal ($first_service.spec.template.metadata.annotations | get "dapr.io/config") $"($fx.name)-dapr-config"
+			assert equal ($both.engine | where kind == CronJob | get metadata.name) ($tuned.clocks? | default [] | each {|c| $"($fx.name)-($c)-clock" })
+			if "ticker" in $svcs {
+				assert equal ($deployments | where {|o| $o.metadata.name == $"($fx.name)-ticker" } | first | get spec.strategy.type) "Recreate"
+			}
 		}
 		# the door's Dapr configuration: its own, invocation alone allowed; every other Deployment keeps the shared one
 		let own = ($both.engine | where {|o| $o.kind == "Configuration" and ($o.metadata.name | str ends-with "-caddy-invoke-only") })
@@ -336,7 +339,7 @@ def test_objects_change_only_as_declared [fx: record] {
 		assert equal ($caddy.0.spec.template.metadata.annotations | get "dapr.io/config") $own.0.metadata.name
 		let others = ($both.engine | where {|o| $o.kind == "Deployment" and not ($o.metadata.name | str ends-with "-caddy") } | each {|o| $o.spec.template.metadata.annotations | get -o "dapr.io/config" } | uniq)
 		assert (not ($own.0.metadata.name in $others)) "crud, auth and the rest keep the shared configuration"
-		if ($variant | str contains "backups") {
+		if ($variant | str contains "tenant") {
 			let added = ($both.engine | where kind in $own_kinds | get kind | sort)
 			assert equal $added [LimitRange ObjectStore ResourceQuota ScheduledBackup]
 		}
@@ -376,7 +379,7 @@ def test_data_and_order_match_upstreams_main [fx: record, --adopt] {
 	if ($svcs | is-not-empty) {
 		let all = (writes $en ($fx.tuned.logins) [] $fx.name)
 		assert ($"apply Secret/($fx.name)-service-token" in $all) "the service token is applied"
-		for s in ($svcs | append [rclone-s3 imgproxy metrics-export]) {
+		for s in ($svcs | append (if ($fx.tuned.plane? | default false) { [rclone-s3 imgproxy metrics-export] } else { [] })) {
 			assert ($"rollout deployment/($fx.name)-($s)" in $all) $"($s) is rolled out"
 		}
 	}

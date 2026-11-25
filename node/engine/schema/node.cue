@@ -218,6 +218,31 @@ import (
 	// One writer: a Recreate strategy, which the release's default replicas leave at one (mecha's ticker; two would fire a
 	// timer twice). Only `scale` changes its count.
 	singleWriter: *false | bool
+	// A service that runs others' code in a bubblewrap jail of its own (Studio's builder): its pod in a user namespace of
+	// its own (hostUsers: false, its root no one on the node), a /proc the jail can mount afresh (procMount Unmasked), and
+	// AppArmor and seccomp unconfined, since a node that restricts unprivileged user namespaces (Ubuntu's
+	// apparmor_restrict_unprivileged_userns) and the runtime's default seccomp refuse the jail's own namespaces. Each less
+	// fails bwrap.
+	jail: *false | bool
+	// A Google identity of the service's own, with no key, as `blobs` and `metricsExport` have: its pod runs as the service
+	// account `<app>-<name>` (subject system:serviceaccount:<namespace>:<app>-<name>), whose projected token (`audience`) is
+	// at /var/run/secrets/gcp/token, for the service to trade at the workload identity `provider` for `serviceAccount`'s.
+	google?: {
+		provider!:       =~"^projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+$"
+		serviceAccount!: =~"^[a-z0-9-]+@[a-z0-9-]+\\.iam\\.gserviceaccount\\.com$"
+		audience:        string | *"https://iam.googleapis.com/\(provider)"
+	}
+	// Where the service may connect beyond the services' own policy (the mesh, and the internet on 443): each an address
+	// block, what it leaves out, and a TCP port (the node's API server for a service that provisions namespaces, the
+	// internet on 80 for a mirror). A NetworkPolicy of its own, which adds to the services'.
+	egress: *[] | [...{
+		cidr!:  =~"^[0-9.]+/[0-9]+$"
+		except: *[] | [...=~"^[0-9.]+/[0-9]+$"]
+		port!:  int & >0 & <65536
+	}]
+	// Folders of the pod's own, empty at each start, by path, with the most each may hold (a builder's workspace: clones,
+	// toolchains, a game's checks): an emptyDir each.
+	scratch: *{} | {[=~"^/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$" & !~"(^|/)\\.\\.?(/|$)"]: =~"^[0-9]+(Mi|Gi)$"}
 }
 
 // The blob plane mecha's profile pictures live on (the door's /blobs and /img): rclone serving the Cloud Storage `bucket` as
@@ -301,7 +326,7 @@ import (
 	// The public origin of the release, a preview's included, always https (a passkey is bound to its origin, and a browser
 	// offers one only on https): what the services' ORIGIN says and what release-cron's preview is asked at. The node's
 	// cloudflared terminates TLS and dials the Gateway over plain HTTP, so the Gateway has no TLS listener of its own.
-	origin: *"https://\(host)" | =~"^https://[^/]+$"
+	origin:      *"https://\(host)" | =~"^https://[^/]+$"
 	environment: #Environment & {registry: build.registry.host}
 
 	// Seconds each wait takes: the primary database on its image, a Job, a rollout.
@@ -314,7 +339,9 @@ import (
 	}
 	operators: #Operators
 	backups?:  #Backups & {_name: name}
-	if database != _|_ if database.backup != _|_ {backups: database.backup}
+	if database != _|_ if database.backup != _|_ {
+		backups: database.backup
+	}
 
 	// How many pods each Deployment of upstream's render runs, in production and in a preview: `replicas` and
 	// `previewReplicas` for every one, `scale` for the one named (its full name, `<app>-caddy`). A Deployment
@@ -325,8 +352,9 @@ import (
 	scale:            {[=~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"]: {replicas?: int & >=1, preview?: int & >=1}}
 	// Requests and limits by container name (crud, caddy, ...), and `postgres` for the database's.
 	containerResources: {[string]: #ContainerResources}
-	database?:          #Database
-	tenant?:            #Tenant
+	// `backup` is complete as it stands: the Secret of its keys is named for the release
+	database?: #Database & {backup?: _name: name}
+	tenant?:   #Tenant
 	// The app's own Deployments beside upstream's, by name (`<app>-<name>`, in the mesh as `<name>`), and the blob plane and
 	// the metrics export, which are emitted as services of the engine's own. `scale` and `containerResources` take their names.
 	services:       {[=~"^[a-z]([-a-z0-9]{0,22}[a-z0-9])?$" & !~"-clock$"]: #Service}
@@ -371,6 +399,7 @@ import (
 
 	// Only when upstream's shared Configuration exists to copy: the door is retargeted exactly when its own is emitted.
 	let retarget = len([for o in upstream if o.kind == "Configuration" && o.metadata.name == sharedConfig {o}]) > 0
+
 	// The database's base image, where the release pushed one (render.nu's database-base): the primary runs it, and the
 	// schema Jobs keep upstream's full image, which carries the app's SQL. So a change to the SQL, or to anything else the
 	// full image copies, moves the Jobs' image and leaves the Cluster's: CloudNativePG recreates the instance on any change
@@ -607,7 +636,7 @@ import (
 		[if release.metricsExport != _|_ if len([for _, s in release.services if s.metrics != _|_ {s}]) == 0 {
 			"metricsExport needs a service with `metrics` to scrape"
 		}],
-		[for i in _images if !list.Contains(#External, i) if !strings.HasPrefix(i, release.environment.registry + "/") {
+		[for i in _images if !list.Contains(#External, i) if !strings.HasPrefix(i, release.environment.registry+"/") {
 			"image \(i) is not in \(release.environment.registry)"
 		}],
 		[for i in _images if !strings.Contains(i, "@sha256:") {"image \(i) is not pinned by digest"}],
@@ -769,8 +798,17 @@ import (
 					spec: {
 						// A Service's links would give AUTH_PORT=tcp://... to a pod that reads AUTH_PORT as its port.
 						enableServiceLinks: false
+						if s.google != _|_ {serviceAccountName: "\(release.name)-\(n)"}
+						if s.jail {
+							hostUsers: false
+							securityContext: {
+								appArmorProfile: type: "Unconfined"
+								seccompProfile: type:  "Unconfined"
+							}
+						}
 						containers: [{
-							name:            n
+							name: n
+							if s.jail {securityContext: procMount: "Unmasked"}
 							image:           (imageOf & {svc: n}).out
 							imagePullPolicy: release.environment.imagePullPolicy
 							// A pod going away keeps serving while the mesh learns of its successor.
@@ -793,10 +831,22 @@ import (
 							startupProbe:   {tcpSocket: port: s.port, periodSeconds: 2, failureThreshold: 60}
 							readinessProbe: {tcpSocket: port: s.port, periodSeconds: 5}
 							"resources":    podResources
-							if len(s.files) > 0 {volumeMounts: [for dir, cm in s.files {name: "files-\(cm)", mountPath: dir, readOnly: true}]}
+							if len(s.files) > 0 || len(s.scratch) > 0 || s.google != _|_ {
+								volumeMounts: list.Concat([
+									[for dir, cm in s.files {name: "files-\(cm)", mountPath: dir, readOnly: true}],
+									[for dir, _ in s.scratch {name: "scratch-\(strings.SliceRunes(hex.Encode(sha256.Sum256(dir)), 0, 12))", mountPath: dir}],
+									[if s.google != _|_ {{name: "google-token", mountPath: "/var/run/secrets/gcp", readOnly: true}}],
+								])
+							}
 						}]
-						// one volume a ConfigMap, whatever directories read it
-						if len(s.files) > 0 {volumes: [for cm, _ in {for _, c in s.files {(c): true}} {name: "files-\(cm)", configMap: "name": cm}]}
+						if len(s.files) > 0 || len(s.scratch) > 0 || s.google != _|_ {
+							volumes: list.Concat([
+								// one volume a ConfigMap, whatever directories read it
+								[for cm, _ in {for _, c in s.files {(c): true}} {name: "files-\(cm)", configMap: "name": cm}],
+								[for dir, size in s.scratch {name: "scratch-\(strings.SliceRunes(hex.Encode(sha256.Sum256(dir)), 0, 12))", emptyDir: sizeLimit: size}],
+								[if s.google != _|_ {{name: "google-token", projected: sources: [{serviceAccountToken: {path: "token", audience: s.google.audience, expirationSeconds: 3600}}]}}],
+							])
+						}
 					}
 				}
 			}
@@ -808,6 +858,26 @@ import (
 				type:     "ClusterIP"
 				selector: (selects & {component: n}).out
 				ports:    [{name: "http", port: s.port, targetPort: s.port, protocol: "TCP"}, if s.metrics != _|_ if s.metrics.port != s.port {{name: "metrics", port: s.metrics.port, targetPort: s.metrics.port, protocol: "TCP"}}]
+			}
+		}],
+		// The service's own account, whose token the pod trades for its Google identity.
+		[if s.google != _|_ {
+			apiVersion: "v1"
+			kind:       "ServiceAccount"
+			metadata:   {name: "\(release.name)-\(n)", namespace: ns, labels: appLabels & {"app.kubernetes.io/component": n}}
+		}],
+		// The service's own egress past the services' policy: policies add up.
+		[if netpol if len(s.egress) > 0 {
+			apiVersion: "networking.k8s.io/v1"
+			kind:       "NetworkPolicy"
+			metadata:   {name: "\(release.name)-\(n)-egress", namespace: ns, labels: appLabels}
+			spec: {
+				podSelector: matchLabels: (selects & {component: n}).out
+				policyTypes: ["Egress"]
+				egress: [for e in s.egress {
+					to:    [{ipBlock: {cidr: e.cidr, if len(e.except) > 0 {except: e.except}}}]
+					ports: [{port: e.port, protocol: "TCP"}]
+				}]
 			}
 		}],
 		// The clock: each schedule, a pod that POSTs to the service's path with the service role's token.
@@ -1234,7 +1304,7 @@ import (
 	let sizeOf = [if db.storage != _|_ {regexp.FindSubmatch("^([0-9]+)(Mi|Gi|Ti)$", db.storage)}]
 	let slotKeep = [
 		if db.slotWalKeepMB != _|_ {db.slotWalKeepMB},
-		if len(sizeOf) > 0 {div(strconv.Atoi(sizeOf[0][1]) * {Mi: 1, Gi: 1024, Ti: 1048576}[sizeOf[0][2]], 4)},
+		if len(sizeOf) > 0 {div(strconv.Atoi(sizeOf[0][1])*{Mi: 1, Gi: 1024, Ti: 1048576}[sizeOf[0][2]], 4)},
 	]
 	let smart = [if db.smartShutdown != _|_ {db.smartShutdown}, if db.instances > 1 {0}]
 	let own = {
