@@ -4,4 +4,7 @@ package export
 
 import "github.com/bsoneca/pronto-plugins/node/engine"
 
-files: (engine.#Host & {}).files
+// `-t releaseRule=true` (bin/pronto-node --engine --release-rule): also merge the `release@k8s` rule into `.say.json`.
+_releaseRule: *false | bool @tag(releaseRule,type=bool)
+
+files: (engine.#Host & {releaseRule: _releaseRule}).files

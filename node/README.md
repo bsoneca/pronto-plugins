@@ -35,11 +35,13 @@ hand's, are the release's; without `--adopt` the apply is the plain one); `--del
 Write it into an app, byte for byte, with:
 
 ```
-<this repo>/bin/pronto-node --engine <app-dir>...
+<this repo>/bin/pronto-node --engine [--release-rule] <app-dir>...
 ```
 
 which writes `node/{release,render,runtime,build,tunnel,push,registry,rollback,restore}.nu` and `node/schema/node.cue` into
-each app and merges a `release@k8s` rule into its `.say.json` (verify@k8s is the runtime's own: it checks the app's public address) (priority -1, stop: the same mechanism as the
+each app and, with `--release-rule` only (PRONTO-1891: the rule takes over `./saytw release@k8s`, so an app that releases to the node
+another way, as Bonk Chess does through release-cron until P5-H, must not get it from a regeneration), merges a `release@k8s` rule into its
+`.say.json`. Without the flag `.say.json` is not touched, so an app that holds the rule keeps it (verify@k8s is the runtime's own: it checks the app's public address) (priority -1, stop: the same mechanism as the
 gcp engine, so it runs before the runtime's own `k8s` rule and stops it). `build.nu` is `gcp/engine/build.nu`
 (a symlink here; the node engine reads only its `stamp`), two copies to compare. To change the engine: change `node/engine/`
 here, merge it, then in the app's repository move the pin to that merge and run `bin/pronto-node --engine`

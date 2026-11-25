@@ -10,6 +10,11 @@
 // engine's does: sayt unifies .say.json with the runtime's .say.yaml, so a rule of the same name
 // could not replace it. PRONTO_RUNTIME tells the engine where the runtime the app pins is
 // (runtime.nu), for the six helpers of its k8s release it calls.
+//
+// The rule is written only for an app that asks for it (`bin/pronto-node --engine --release-rule`, the
+// `releaseRule` tag of ./export): it takes over `./saytw release@k8s`, which an app that releases to the node by
+// another path (Bonk Chess's release-cron, until P5-H) must not have changed by a regeneration (PRONTO-1891).
+// Without it `.say.json` is not written at all, so an app that holds the rule keeps it (the merge only adds keys).
 @extern(embed)
 
 package engine
@@ -48,17 +53,22 @@ _run: {
 }
 
 #Host: {
+	releaseRule: *false | bool
 	rules: {
-		release: "node-engine": {platform: "k8s", priority: -1, stop: true, cmds: [{do: (_run & {#script: "node/release.nu"}).out}]}
+		if releaseRule {
+			release: "node-engine": {platform: "k8s", priority: -1, stop: true, cmds: [{do: (_run & {#script: "node/release.nu"}).out}]}
+		}
 		// No verify rule: the runtime's own verify@k8s (verify/verify.ts) checks the app's public address (--target,
 		// APP_URL, or the app's meta.domain), which is what a release on the node serves.
 	}
 	files: {
 		for path, body in #Files {(path): {seed: false, text: body}}
-		".say.json": {
-			seed:  false
-			merge: true
-			text:  json.Indent(json.Marshal({say: {for verb, rs in rules {(verb): rulemap: rs}}}), "", "  ") + "\n"
+		if releaseRule {
+			".say.json": {
+				seed:  false
+				merge: true
+				text:  json.Indent(json.Marshal({say: {for verb, rs in rules {(verb): rulemap: rs}}}), "", "  ") + "\n"
+			}
 		}
 	}
 }
