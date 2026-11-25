@@ -1196,7 +1196,10 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       // Another account's live release, read-only (STACK_HOLD_POOL), holds as one of this pool's does.
       const foreign = weight > 0 && !release ? await foreignHold() : undefined;
       if (foreign) releasing.push(foreign);
-      // A release holds the machine while one holds a slot or waits, in either line (PRONTO-894).
+      // A release holds the machine while one holds a slot or waits, in either line (PRONTO-894). Only a waiting release that
+      // could be admitted holds it (PRONTO-1898): one that cannot fit beside the releases that hold (`releaseCanFit`: it may run
+      // alone on nothing held, whatever it weighs) is left out, here and, by `readForeign`, in another account's pool; a release
+      // that holds a slot always holds.
       const releaseHeld = holders.filter((h) => h.release).reduce((n, h) => n + h.weight, 0);
       const waitingRelease = [...coresTickets, ...cueTickets].filter((t) => t.release && t.name.replace(/-w$/, "") !== ticket && releaseCanFit(releaseHeld, t.weight, budget));
       const hold = releaseHolds(holders.filter((h) => h.release).length + (foreign ? 1 : 0), waitingRelease.length ? 1 : 0);
@@ -2380,67 +2383,93 @@ export const stallWindowMs = (v: string | undefined) => {
   if (!Number.isFinite(n) || n < 0) throw new Error(`STACK_STALL_MINUTES must be a number of minutes, 0 or more, got ${JSON.stringify(v)}`);
   return n * 60_000;
 };
-// One `ps -A -o pid=,ppid=,time=,command=` read as rows (a line that is not one is skipped).
-export type PsRow = { pid: number; ppid: number; cmd: string; cpu: number };
+// A process start as ps prints it in the C locale (lstart: "Thu Jan  1 00:01:40 1970"), in ms. Read as UTC whatever the zone: an identity
+// is only ever compared with another read of the same kind, here and in `stopTree`.
+export const lstartMs = (t: string) => Date.parse(`${t.trim()} UTC`) || 0;
+// One `ps -A -o pid=,ppid=,time=,lstart=,command=` read as rows (a line that is not one is skipped).
+export type PsRow = { pid: number; ppid: number; cmd: string; cpu: number; start: number };
 export const parsePs = (text: string): PsRow[] => text.split("\n").flatMap((l) => {
-  const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(l);
-  return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), cpu: cpuSeconds(m[3]), cmd: m[4] }] : [];
+  const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+[\d:]+\s+\d{4})\s+(.*)$/.exec(l);
+  return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), cpu: cpuSeconds(m[3]), start: lstartMs(m[4]), cmd: m[5] }] : [];
 });
-// What a wedge is read from: the CPU of the drivers under `root`, not of the stack they test. The integrate's tree holds
-// process-compose and its postgres, caddy and standins, which tick whatever the drivers do (PRONTO-1896: check-visual's deno and its
-// chrome sat at 0% for 2 h beside a stack that never stopped using CPU). So the CPU is summed over `root` and its descendants
-// but those under a process-compose; `pids` is the whole tree, what is told TERM on a stall.
-export const driverCpu = (rows: readonly PsRow[], root: number): { cpu: number; pids: number[] } => {
-  const tree = new Set([root, ...descendants(rows, [root])]);
-  const tops = rows.filter((r) => tree.has(r.pid) && /(^|\/)process-compose(\s|$)/.test(r.cmd)).map((r) => r.pid);
-  const stack = new Set([...tops, ...descendants(rows, tops)]);
-  return { cpu: rows.filter((r) => tree.has(r.pid) && !stack.has(r.pid)).reduce((n, r) => n + r.cpu, 0), pids: [...tree].sort((a, b) => a - b) };
-};
+// A process and when it started, read together in one sample: what a later signal is checked against.
 export type Identity = { pid: number; start: number };
-// The processes of `pids` with their start times (0 when unreadable), read now: the identity a later signal is checked against.
-const identify = (pids: readonly number[]): Promise<Identity[]> => Promise.all(pids.map(async (pid) => ({ pid, start: await startOf(pid, true) })));
-// Stops processes read earlier by identity: each told TERM only while its pid still has the start time it had, given `termMs`,
-// then each survivor of the same identity told KILL. Returns who survived TERM. A pid reused by another process is never signalled.
+// What a wedge is read from: the CPU of the drivers under `tops`, not of the stack they test. The integrate's tree holds
+// process-compose and its postgres, caddy and standins, which tick whatever the drivers do (PRONTO-1896: check-visual's deno and its
+// chrome sat at 0% for 2 h beside a stack that never stopped using CPU). So the CPU is summed over `tops` and their descendants
+// but those under a process-compose; `members` is the whole tree with the start times of this very read, what is told TERM on a stall.
+export const driverCpu = (rows: readonly PsRow[], tops: readonly number[]): { cpu: number; members: Identity[] } => {
+  const tree = new Set([...tops, ...descendants(rows, tops)]);
+  const pc = rows.filter((r) => tree.has(r.pid) && /(^|\/)process-compose(\s|$)/.test(r.cmd)).map((r) => r.pid);
+  const stack = new Set([...pc, ...descendants(rows, pc)]);
+  const inTree = rows.filter((r) => tree.has(r.pid));
+  return { cpu: inTree.filter((r) => !stack.has(r.pid)).reduce((n, r) => n + r.cpu, 0),
+    members: inTree.map((r) => ({ pid: r.pid, start: r.start })).sort((a, b) => a.pid - b.pid) };
+};
+// The members of an earlier sample that are still the same processes in `rows`: same pid and the same start time.
+export const stillThere = (rows: readonly PsRow[], members: readonly Identity[]) =>
+  members.filter((m) => m.start > 0 && rows.some((r) => r.pid === m.pid && r.start === m.start));
+// The watch ends only when the root is gone, nothing it started is left to stop, and the output relays are closed: a descendant
+// that holds a pipe open keeps the run waiting after its root exits, and is still stopped.
+export const watchDone = (rootGone: boolean, relaysOpen: boolean) => rootGone && !relaysOpen;
+// How a wedged or unreadable run is stopped: through the child handle (its own kill, which needs no ps), plus each member whose start
+// time was read (a member read as 0 has no identity to check, so is never signalled); and it ends 3, no verdict, whatever ps says.
+export const wedgeStop = (members: readonly Identity[]) => ({ child: true, code: 3, members: members.filter((m) => m.start > 0) });
+const lstartOf = async (pid: number) => {
+  const r = await new Deno.Command("ps", { args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, stdout: "piped", stderr: "null" }).output().catch(() => undefined);
+  return r?.success ? lstartMs(new TextDecoder().decode(r.stdout)) : 0;
+};
+// Stops processes by the identity read at sampling time: each told TERM only while its pid still has that start time (checked
+// just before the signal), given `termMs`, then each survivor of the same identity told KILL. Returns who survived TERM.
+// A pid reused by another process is never signalled; no start time is looked up for an old pid except to compare it.
 export const stopTree = async (members: readonly Identity[], termMs = 5000): Promise<Identity[]> => {
-  const same = async (m: Identity) => m.start > 0 && await startOf(m.pid, true) === m.start;
+  const same = async (m: Identity) => m.start > 0 && await lstartOf(m.pid) === m.start;
   const live = async () => { const out: Identity[] = []; for (const m of members) if (await same(m)) out.push(m); return out; };
-  for (const m of await live()) try { Deno.kill(m.pid, "SIGTERM"); } catch { /* gone */ }
+  for (const m of members) if (await same(m)) try { Deno.kill(m.pid, "SIGTERM"); } catch { /* gone */ }
   for (let end = Date.now() + termMs; Date.now() < end && (await live()).length; ) await sleepMs(200);
-  const left = await live();
-  for (const m of left) try { Deno.kill(m.pid, "SIGKILL"); } catch { /* gone */ }
+  const left: Identity[] = [];
+  for (const m of members) if (await same(m)) { left.push(m); try { Deno.kill(m.pid, "SIGKILL"); } catch { /* gone */ } }
   return left;
 };
-// Watches the process `root` every `pollMs`; calls `on` once, with the identified processes of its whole tree (collected, never
-// a pattern) and why, when the window passes without driver CPU (driverCpu), or when the process table cannot be read `maxFails`
-// times in a row (inconclusive: the cause is said, and the caller ends the run as no verdict all the same). A root that is gone ends
-// the watch: it completed. Returns what stops it.
-export const watchStall = (root: number, windowMs: number, on: (members: Identity[], why: string) => void, pollMs = 30_000, maxFails = 5): (() => void) => {
+// Watches the process `root` every `pollMs`; calls `on` once, with the identities of what it started as of the last good sample
+// (kept across failed reads, and across the root's exit: its descendants are followed by identity) and why, when the window passes
+// without driver CPU (driverCpu), or when the process table cannot be read `maxFails` times in a row (inconclusive, with its cause;
+// the caller ends the run 3 all the same, `wedgeStop`). Ends when `watchDone`: the root and what it started gone and no relay open
+// (`relaysOpen`). Returns what stops it.
+export const watchStall = (root: number, windowMs: number, on: (members: Identity[], why: string) => void, relaysOpen: () => boolean = () => false,
+  pollMs = 30_000, maxFails = 5): (() => void) => {
   if (!(windowMs > 0)) return () => {};
   const samples: CpuSample[] = [];
-  let busy = false, fails = 0, last = [root];
+  let busy = false, fails = 0, known: Identity[] = [];
   const timer = setInterval(async () => {
     if (busy) return;
     busy = true;
-    let why = "", gone = false;
+    let why = "", done = false;
     try {
-      const r = await new Deno.Command("ps", { args: ["-A", "-o", "pid=,ppid=,time=,command="], stdout: "piped", stderr: "null" }).output();
+      const r = await new Deno.Command("ps", { args: ["-A", "-o", "pid=,ppid=,time=,lstart=,command="], env: { LC_ALL: "C" }, stdout: "piped", stderr: "null" }).output();
       if (!r.success) throw new Error(`ps ended ${r.code}`);
       const rows = parsePs(new TextDecoder().decode(r.stdout));
+      if (!rows.length) throw new Error("ps listed no process");
       fails = 0;
-      if (!rows.some((x) => x.pid === root)) gone = true;
+      const rootHere = rows.some((x) => x.pid === root);
+      const tops = [...(rootHere ? [root] : []), ...stillThere(rows, known).map((m) => m.pid)];
+      // Nothing known is left but a relay is still open: whoever holds it was never sampled (the root exited between two polls), and
+      // it shows no CPU; the window of flat samples ends in the same stop as any other wedge.
+      const open = !tops.length && relaysOpen();
+      if (!tops.length && !open) { samples.length = 0; done = watchDone(true, false); }
       else {
-        const { cpu, pids } = driverCpu(rows, root);
-        last = pids;
+        const { cpu, members } = tops.length ? driverCpu(rows, tops) : { cpu: 0, members: [] as Identity[] };
+        known = members;
         const now = Date.now();
         samples.push({ t: now, cpu });
         while (samples.length > 2 && samples[1].t <= now - windowMs) samples.shift();
-        if (stalled(samples, windowMs)) why = `wedged: no CPU for ${Math.round(windowMs / 6000) / 10} min`;
+        if (stalled(samples, windowMs)) why = `wedged: no CPU for ${Math.round(windowMs / 6000) / 10} min${open ? " (an output pipe is still held open by what the run started)" : ""}`;
       }
     } catch (e) {
       if (++fails >= maxFails) why = `inconclusive: the process table could not be read ${fails} times in a row (${e instanceof Error ? e.message : e}); no verdict`;
     } finally { busy = false; }
-    if (gone || why) clearInterval(timer);
-    if (why) { say(why); on(await identify(last), why); }
+    if (done || why) clearInterval(timer);
+    if (why) { say(why); on(known, why); }
   }, pollMs);
   Deno.unrefTimer(timer);
   return () => clearInterval(timer);
