@@ -435,13 +435,31 @@ import (
 			}
 		}
 
+		// A custom metric's descriptor per entry, made before the policies that read it.
+		for ty, d in P.metricDescriptors if P.adoptAll || list.Contains(*P.adopt["metricDescriptors"] | [], ty) {
+			let k = (#name & {in: "\(P.id)_\(ty)"}).out
+			tofu: resource: google_monitoring_metric_descriptor: (k): {
+				depends_on:   deps
+				project:      P.id
+				type:         ty
+				display_name: d.displayName
+				description:  d.description
+				metric_kind:  d.kind
+				value_type:   d.valueType
+				unit:         d.unit
+				labels: [for lk in list.SortStrings([for l, _ in d.labels {l}]) {key: lk, value_type: d.labels[lk].valueType, description: d.labels[lk].description}]
+			}
+		}
+
+		let metricDeps = [for ty, _ in P.metricDescriptors if P.adoptAll || list.Contains(*P.adopt["metricDescriptors"] | [], ty) {"google_monitoring_metric_descriptor.\((#name & {in: "\(P.id)_\(ty)"}).out)"}]
+
 		// One policy per entry of the file: OpenTofu reads it at plan time, so the policies follow
 		// the file with no export of this state's.
 		for nm, a in P.alertPolicies if P.adoptAll || list.Contains(*P.adopt["alertPolicies"] | [], nm) {
 			let k = (#name & {in: "\(P.id)_\(nm)"}).out
 			if a.file != _|_ {
 				tofu: resource: google_monitoring_alert_policy: (k): {
-					depends_on: list.Concat([deps, [for c in a.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
+					depends_on: list.Concat([deps, metricDeps, [for c in a.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
 					for_each:     "${{for p in jsondecode(file(\"${path.module}/../\(a.file)\")) : p.name => p}}"
 					project:      P.id
 					display_name: "${each.value.displayName}"
@@ -467,7 +485,7 @@ import (
 			for pn, pol in a.policies {
 				let pk = (#name & {in: "\(P.id)_\(nm)_\(pn)"}).out
 				tofu: resource: google_monitoring_alert_policy: (pk): {
-					depends_on: list.Concat([deps, [for c in a.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
+					depends_on: list.Concat([deps, metricDeps, [for c in a.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
 					project:      P.id
 					display_name: pol.displayName
 					combiner:     "OR"
