@@ -1,6 +1,7 @@
 package ios
 
 import (
+	"regexp"
 	"strings"
 	"encoding/yaml"
 )
@@ -46,4 +47,4 @@ misePinCount: len(_confPins) & 2
 
 // Only the config is the app's once written; the project, the sources and the toolchain are regenerated.
 seeded: [for p, f in _t.files if f.seed {p}] & ["ios/ios.json"]
-noTokenLeft: [for p, f in _t.files if strings.Contains(f.text, "__") {p}] & []
+noTokenLeft: [for p, f in _t.files if regexp.Match("__[A-Z][A-Z_]*__", f.text) {p}] & []

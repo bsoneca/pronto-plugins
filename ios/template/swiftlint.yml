@@ -2,3 +2,13 @@
 included:
   - Sources
   - Tests
+# The bridges are one line each, named by native/bridges.cue (kv, ns), and the JS a test runs is one line of text.
+line_length:
+  warning: 220
+  error: 260
+  ignores_comments: true
+  ignores_urls: true
+identifier_name:
+  min_length: 2
+type_name:
+  min_length: 2

@@ -5,7 +5,7 @@ import { parseHTML } from "npm:linkedom@0.18.4";
 import { bound, checkView, elementOf as viewElement } from "../../android/template/terminal/bound.js";
 import { compile, elementOf, idOf } from "../../android/template/terminal/compile.js";
 import { inlineImports, length, parseColor } from "../../android/template/terminal/css.js";
-import { atobOf, b64u, btoaOf, credentialOf, errorOf, optionsToJson, unb64u } from "../../android/template/terminal/passkeys.js";
+import { atobOf, b64u, btoaOf, credentialOf, errorOf, optionsToJson, unb64u } from "../../native/passkeys.js";
 
 const pageOf = (body, base, full) =>
   parseHTML(`<!doctype html><html lang="en"${full ? " data-display=\"fullscreen\"" : ""}><head>${base ? `<base href="${base}">` : ""}</head><body>${body}</body></html>`);
@@ -225,7 +225,7 @@ export function guestbook(opts) {
   return { ...out, source };
 }
 
-// The passkeys bridge's two forms (android/template/terminal/passkeys.js), as a page would meet them.
+// The passkeys bridge's two forms (native/passkeys.js), as a page would meet them.
 const buf = (bytes) => new Uint8Array(bytes).buffer;
 const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
 
