@@ -1,6 +1,6 @@
 // The keys routes in the door's Caddyfile, and the installer that gives an app the service.
 import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
-import { BEGIN, END, ROUTES, ROUTES_BEGIN, ROUTES_END, route, routed, SCOPE, SCOPE_BEGIN, SCOPE_END, SCOPED } from "./route.ts";
+import { BEGIN, END, GUARD, GUARD_BEGIN, GUARD_END, GUARDED, ROUTES, ROUTES_BEGIN, ROUTES_END, route, routed, SCOPE, SCOPE_BEGIN, SCOPE_END, SCOPED } from "./route.ts";
 import { type Config, type Db, keys, sign, STACK_ISSUER } from "./keys.ts";
 
 const caddy = `(app) {
@@ -29,6 +29,12 @@ const caddy = `(app) {
       reverse_proxy {$PRONTO_UPSTREAM_CRUD:crud:3000}
     }
   }
+  handle /billing/* {
+    request_body {
+      max_size 16KB
+    }
+    reverse_proxy {$PRONTO_UPSTREAM_CRUD:crud:3000}
+  }
   handle /auth/* {
     reverse_proxy {$PRONTO_UPSTREAM_AUTH:auth:9999}
   }
@@ -46,7 +52,7 @@ const without = (lines: string[], pairs: string[][]): string[] => {
   }
   return out;
 };
-const ours = [[ROUTES_BEGIN, ROUTES_END], [SCOPE_BEGIN, SCOPE_END]];
+const ours = [[ROUTES_BEGIN, ROUTES_END], [SCOPE_BEGIN, SCOPE_END], [GUARD_BEGIN, GUARD_END]];
 
 Deno.test("the block is the first lines of the app's own handle /auth/*, and the app's reverse_proxy to auth answers the rest", () => {
   const out = routed(caddy).split("\n");
@@ -71,6 +77,22 @@ Deno.test("the scope guard is the first directive of each data handle, never a t
   // Every forward_auth the block adds is inside a handle (four spaces in), none at the door's top level.
   assert(out.filter((l) => l.includes("forward_auth")).every((l) => l.startsWith("    ")));
   assertEquals(out.filter((l) => l === SCOPE_BEGIN).length, SCOPED.length);
+});
+
+Deno.test("the key refusal is the /auth/* guard again, the first directive of the billing handle, in the same form and nowhere else", () => {
+  const out = routed(caddy).split("\n");
+  assertEquals(GUARD, ROUTES.slice(0, GUARD.length));
+  for (const path of GUARDED) {
+    const at = out.indexOf(`  handle ${path} {`);
+    assert(at >= 0, path);
+    assertEquals(out.slice(at + 1, at + 3 + GUARD.length), [GUARD_BEGIN, ...GUARD, GUARD_END]);
+  }
+  assertEquals(out[out.indexOf("  handle /billing/* {") + 3 + GUARD.length], "    request_body {");
+  assertEquals(out.filter((l) => l === GUARD_BEGIN).length, GUARDED.length);
+  assert(GUARD.join("\n").includes("forward_auth {$PRONTO_UPSTREAM_KEYS:keys:8702} {\n      uri /auth/keyguard\n      header_up dapr-app-id keys\n      import bounded-auth\n    }"));
+  // No data handle gets the refusal (a key reads and writes there by its scopes), and billing gets no scope guard.
+  for (const path of SCOPED) assert(!GUARDED.includes(path));
+  assertEquals(out.slice(out.indexOf("  handle /billing/* {"), out.indexOf("  handle /auth/* {")).filter((l) => l === SCOPE_BEGIN).length, 0);
 });
 
 Deno.test("it guards /auth/* with forward_auth inside that handle, ahead of the keys paths, and has no handle of its own beside the app's", () => {
@@ -102,8 +124,8 @@ Deno.test("it is idempotent, and replaces an earlier block, the first version's 
     "    handle @keysroutes {", "      reverse_proxy {$PRONTO_UPSTREAM_KEYS:keys:8702} {", "        header_up dapr-app-id keys", "        import bounded-auth", "      }", "    }", "    # keys-routes:end", "",
   ].join("\n"));
   assertEquals(routed(second), routed(caddy));
-  // An app generated with #526: the /auth/* block alone, no scope guard. It gains one in each data handle and no second /auth/* block.
-  const third = without(routed(caddy).split("\n"), [[SCOPE_BEGIN, SCOPE_END]]).join("\n");
+  // An app generated with #526: the /auth/* block alone, no scope guard, no billing refusal. It gains one in each data handle and no second /auth/* block.
+  const third = without(routed(caddy).split("\n"), [[SCOPE_BEGIN, SCOPE_END], [GUARD_BEGIN, GUARD_END]]).join("\n");
   assertEquals(third.split("\n").filter((l) => l === ROUTES_BEGIN).length, 1);
   assertEquals(routed(third), routed(caddy));
   assertEquals(routed(routed(third)), routed(caddy));
@@ -113,6 +135,13 @@ Deno.test("it is idempotent, and replaces an earlier block, the first version's 
   assertEquals(routed(dropped).split("\n").filter((l) => l === SCOPE_BEGIN).length, SCOPED.length - 1);
   const older = routed(caddy).replace(ROUTES_BEGIN, `${ROUTES_BEGIN}\n    # an older routes block`);
   assertEquals(routed(older), routed(caddy));
+});
+
+Deno.test("a Caddyfile with pronto-billing's block but not its handle line throws, one with no billing block does not", () => {
+  const billed = caddy.replace("  handle /billing/* {", "  # pronto-billing:begin\n  handle /billing/*  {");
+  assertThrows(() => routed(billed), Error, "pronto-billing's block");
+  assertEquals(routed(billed.replace("# pronto-billing:begin", "# other")).includes(GUARD_BEGIN), false);
+  assert(routed(caddy.replace(/ {2}handle \/billing\/\* \{[\s\S]*?\n {2}\}\n/, "")).split("\n").every((l) => l !== GUARD_BEGIN));
 });
 
 Deno.test("a Caddyfile with none of the data handles throws", () => {
@@ -299,7 +328,7 @@ https://caddy:8443 {
 // deno-lint-ignore no-explicit-any
 const sequence = (routes: any[], depth = 0): string[] => (routes ?? []).flatMap((r: any) => {
   const own = " ".repeat(depth) + JSON.stringify(r.match ?? []);
-  if (["/auth/*", ...SCOPED].some((p) => JSON.stringify(r.match) === `[{"path":["${p}"]}]`)) return [own];
+  if (["/auth/*", ...SCOPED, ...GUARDED].some((p) => JSON.stringify(r.match) === `[{"path":["${p}"]}]`)) return [own];
   // deno-lint-ignore no-explicit-any
   return [own, ...(r.handle ?? []).flatMap((h: any) => h.routes ? sequence(h.routes, depth + 1) : [])];
 });
@@ -405,6 +434,17 @@ Deno.test({
       }
       // The door's own guard of the Dapr API answers before the scope guard: a key's token gets its 404, not a 403.
       for (const token of [readOnly, writeOnly, undefined]) for (const m of ["GET", "POST"]) assertEquals((await ask(m, "/crud/v1.0/metadata", token))[0], 404, `${m} /crud/v1.0/metadata`);
+      // Billing takes a token as the account: a key's token, whatever its scopes, gets 403 on every path of it, a session passes.
+      for (const tok of [readOnly, writeOnly, both, await key(["machines:bot_1"])]) {
+        for (const [m, path] of [["POST", "/billing/portal"], ["GET", "/billing/me"], ["POST", "/billing/checkout"]]) assertEquals((await ask(m, path, tok))[0], 403, `a key's ${m} ${path}`);
+      }
+      assertEquals(await ask("POST", "/billing/portal", session), [200, "crud POST /billing/portal"]);
+      assertEquals((await ask("GET", "/billing/me", undefined))[0], 200);
+      for (const h of [`bearer ${readOnly}`, `BEARER ${writeOnly}`, `Bearer  ${readOnly}`, `Bearer ${readOnly}, x`, `Bearer ${lapsed}`]) {
+        const r = await fetch(`http://127.0.0.1:${doorPort}/billing/portal`, { method: "POST", headers: { authorization: h } });
+        assertEquals(r.status, 403, `${h.slice(0, 14)} POST /billing/portal`);
+        await r.body?.cancel();
+      }
       // The /auth/* guard of #526 is as it was: a key's token is refused there, and a session reaches the auth service.
       assertEquals((await ask("GET", "/auth/session", readOnly))[0], 403);
       assertEquals(await ask("GET", "/auth/session", session), [200, "auth /auth/session"]);

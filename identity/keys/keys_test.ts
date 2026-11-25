@@ -242,12 +242,25 @@ Deno.test("the environment is held to what the fork's auth holds it to", () => {
   }
 });
 
-Deno.test("the key guard refuses a key's token and passes every other request", async () => {
+Deno.test("the key guard refuses a key's token however its header writes it, and passes every other request", async () => {
   const { call } = await stand();
   const k = await made(call);
   const { token } = await (await call("POST", "/auth/key", undefined, { key: k.key })).json();
   assertEquals((await call("GET", "/auth/keyguard", token)).status, 403);
-  for (const t of [undefined, "garbage", await session(ANA), await session(ANA, { guest: true })]) assertEquals((await call("GET", "/auth/keyguard", t)).status, 204);
+  for (const t of [undefined, "garbage", await session(ANA), await session(ANA, { guest: true }), await session(ANA, { kid: "x" }, "another secret")]) assertEquals((await call("GET", "/auth/keyguard", t)).status, 204);
+  // What PostgREST reads as the token (the scheme in any case, white space, the first of two headers joined with a comma, a key's
+  // token just past its exp) is a key's token to the guard too, whatever `subjectOf` makes of the header.
+  const lapsed = await sign(SECRET, { role: "app_user", iss: STACK_ISSUER, sub: ANA, kid: crypto.randomUUID(), scp: ["read"], exp: Math.floor(Date.now() / 1000) - 10 });
+  const asHeader = async (authorization: string) => (await call("GET", "/auth/keyguard", undefined, undefined, { authorization })).status;
+  for (const h of [`Bearer ${token}`, `bearer ${token}`, `BEARER ${token}`, `Bearer  ${token}`, `Bearer\t${token} `, `Bearer ${token}, x`, `x, Bearer ${token}`, `Bearer ${lapsed}`, `Basic ${token}`]) assertEquals([h.slice(0, 10), await asHeader(h)], [h.slice(0, 10), 403]);
+  // Bounded: a long header, or many token-shaped parts, is refused unread, and a long header with no third segment costs nothing.
+  assertEquals(await asHeader(`Bearer ${"a".repeat(9000)}`), 403);
+  assertEquals(await asHeader(`Bearer ${Array(5).fill("a.b.c").join(" ")}`), 403);
+  const started = performance.now();
+  assertEquals(await asHeader(`Bearer ${"a".repeat(4000)}.${"b".repeat(4000)}`), 204);
+  assert(performance.now() - started < 500);
+  const ana = await session(ANA);
+  for (const h of [`Bearer ${ana}`, `bearer ${ana}`, `Bearer ${ana}, x`, "Bearer", "Basic dXNlcjpwYXNz", ""]) assertEquals([h.slice(0, 10), await asHeader(h)], [h.slice(0, 10), 204]);
 });
 
 Deno.test("the key scope guard holds a key's token to its scopes by the method forward_auth forwards, and passes every other request", async () => {
