@@ -714,3 +714,37 @@ export async function gateNested() {
     siblingKept: (() => { const z = { ...Z, nested: true }; return [...slot.blockedOnHolder([W, z], [z], 0, 0, 64, 10)].sort(); })(),
   };
 }
+
+// PRONTO-775: a top-level ticket that waited over CUE_HEAD_WAIT at the head of the cue line is waited for by newer nested claims.
+export async function headBarrier() {
+  const slot = await import("../../harness/files/tests/slot.ts");
+  const now = 10_000_000;
+  const top = (queued, o = {}) => ({ name: `${queued}-7-w`, weighted: true, nested: false, mem: 10, cores: 2, ...o });
+  const old = top(now - 11 * 60_000), fresh = top(now - 9 * 60_000);
+  const head = (line, held = [0, 0]) => slot.agedHead(line, now, 600_000, held[0], held[1], 64, 10);
+  return {
+    aged: head([old])?.name, fresh: head([fresh])?.name ?? null,
+    notAtHead: head([{ ...old, name: `${now - 20 * 60_000}-8`, nested: true }, old])?.name ?? null,
+    doesNotFit: head([old], [60, 0])?.name ?? null,
+    nestedWaits: slot.nestedBarrier(head([old]), true, 0)?.name,
+    topLevelNever: slot.nestedBarrier(head([old]), false, 0)?.name ?? null,
+    underWeightedHolder: slot.nestedBarrier(head([old]), true, 6)?.name ?? null,
+    unweightedUnderHolder: slot.nestedBarrier(head([top(now - 11 * 60_000, { weighted: false })]), true, 6)?.name,
+    noHead: slot.nestedBarrier(undefined, true, 0) ?? null,
+  };
+}
+// PRONTO-775: cores learned are the peak of a 10 s moving average, capped at GOMAXPROCS.
+export async function coresPeak() {
+  const slot = await import("../../harness/files/tests/slot.ts");
+  // 20 s: busy at 7 cores for 10 s, then 1 core: the whole-run average is 4, the peak 7
+  const series = Array.from({ length: 21 }, (_, t) => ({ t, cpu: t <= 10 ? 7 * t : 70 + (t - 10) }));
+  return {
+    peak: slot.peakCores(series), average: series.at(-1).cpu / 20,
+    short: slot.peakCores([{ t: 0, cpu: 0 }, { t: 3, cpu: 9 }]),
+    wholeRun: slot.peakCores([{ t: 0, cpu: 0 }, { t: 6, cpu: 12 }]),
+    learned: slot.coresLearned(slot.peakCores(series), 4, 0, 7),
+    capped: slot.coresLearned(9, 4, 0, 7),
+    failedKeepsBefore: slot.coresLearned(2, 2, 5, 7),
+    noPeakUsesAverage: slot.coresLearned(0, 3.456, 0, 7),
+  };
+}

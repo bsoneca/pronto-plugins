@@ -107,10 +107,12 @@
 //   is not nested is then one ticket in both lines, the cores' and the cue line's, admitted under the
 //   pool's lock only when both admit, so it holds nothing while it waits. A nested one (a holder above
 //   it) weighs none and waits in the cue line behind the nested tickets older than its own only: waiting
-//   behind a top-level ticket that waits for the cores its own holder keeps would wait for ever. Without
+//   behind a top-level ticket that waits for the cores its own holder keeps would wait for ever. A top-level ticket at the head
+//   of the cue line that fits by itself and has waited over CUE_HEAD_WAIT seconds (600) is waited for by the nested claims newer than it, but
+//   not by those under a holder that keeps stack weight when that ticket is a weighted one (PRONTO-775). Without
 //   --weight a --mem job weighs none, as before. --mem-learn <file> writes its peak (GB) there at the
-//   end, for the wrapper's next run; --cores-learn <file> the cores it kept busy (the CPU seconds of the
-//   command over its seconds since it started, once it ran 5 s: a run that failed only raises it);
+//   end, for the wrapper's next run; --cores-learn <file> the cores it kept busy at its busiest (the peak of its
+//   CPU use over 10 s windows, capped at GOMAXPROCS, once it ran 5 s: a run that failed only raises it);
 //   --wait-out <file> the seconds from its ticket to its admission. A job the memory watchdog
 //   (machine/watchdog.sh) killed under pressure, not for its own size, waits its turn again, once.
 //
@@ -213,6 +215,10 @@ export const holdLoadOf = (v: string | undefined, cores: number): number => {
 };
 const holdLoad = holdLoadOf(Deno.env.get("STACK_HOLD_LOAD"), navigator.hardwareConcurrency);
 const cueCores = positive(Deno.env.get("CUE_CORES"), Math.max(1, navigator.hardwareConcurrency - Number(Deno.env.get("STACK_RESERVE") ?? 3)));
+// How long a top-level cue ticket waits at the head of the cue line before nested claims newer than it wait for it (seconds; PRONTO-775).
+const cueHeadWaitMs = positive(Deno.env.get("CUE_HEAD_WAIT"), 600) * 1000;
+// The most cores one cue may use (the wrapper's GOMAXPROCS: CUE_MAX_CORES, 7, at most the stack budget): what --cores-learn is capped at.
+const cueGomax = () => positive(Deno.env.get("GOMAXPROCS"), Math.max(1, Math.min(positive(Deno.env.get("CUE_MAX_CORES"), 7), budget)));
 const say = (s: string) => console.error(`slot: ${s}`);
 
 // queued and admitted: when the claim asked for its slot and when it got it (ms since the epoch).
@@ -672,6 +678,37 @@ export const blockedOnHolder = <T extends { name: string; nested?: boolean; mem:
   }
   return out;
 };
+// A top-level ticket that has waited too long at the head of the cue line (PRONTO-775): the head of the line, not nested, that fits the cue
+// budget by itself (the memory and cores it claims beside what is held, nothing ahead of it) and was queued more than `waitMs` ago. A nested
+// claim newer than it may not pass it (nestedBarrier), so a steady stream of nested claims cannot keep a `generate` waiting for ever.
+export const agedHead = <T extends { name: string; nested?: boolean; mem: number; cores: number }>(inLine: T[], now: number, waitMs: number,
+  memHeld: number, coresHeld: number, memBudget: number, coresBudget: number): T | undefined => {
+  const head = inLine[0];
+  if (!head || head.nested || !(now - Number(head.name.split("-")[0]) > waitMs)) return undefined;
+  return memAdmits(memHeld, 0, head.mem, memBudget) && memAdmits(coresHeld, 0, head.cores, coresBudget) ? head : undefined;
+};
+// The ticket a NESTED claim waits for instead of passing it: the aged head, except when that head is a weighted ticket and a holder above
+// the claim keeps stack weight (`weightAbove`, the largest weight among the live holders above it): the head then waits for weight that holder
+// owns, and the holder waits for this claim, so waiting for the head would wait for ever (the deadlock blockedOnHolder keeps out, PRONTO-892).
+export const nestedBarrier = <T extends { weighted: boolean }>(head: T | undefined, nested: boolean, weightAbove: number): T | undefined =>
+  nested && head && !(head.weighted && weightAbove > 0) ? head : undefined;
+// The cores a run kept busy at its busiest (PRONTO-775): the peak of its CPU use averaged over `windowS` seconds, from samples of
+// (seconds since the run started, CPU seconds used so far). A window shorter than 5 s measures the start, not the run, so a run shorter
+// than that has no peak (0). A run shorter than the window is averaged over its whole length.
+export const peakCores = (samples: { t: number; cpu: number }[], windowS = 10): number => {
+  let peak = 0;
+  for (let i = 0; i < samples.length; i++) {
+    let j = 0;
+    while (j < i && samples[i].t - samples[j + 1].t >= windowS) j++;
+    const span = samples[i].t - samples[j].t;
+    if (span >= 5) peak = Math.max(peak, (samples[i].cpu - samples[j].cpu) / span);
+  }
+  return peak;
+};
+// What a run teaches the next one (--cores-learn): its peak (peakCores, else its average over the run), at least what an earlier run taught
+// when it failed, at most the cap (GOMAXPROCS of a cue the wrapper claims for).
+export const coresLearned = (peak: number, average: number, before: number, cap: number) =>
+  Math.round(Math.min(Math.max(peak > 0 ? peak : average, before), cap) * 100) / 100;
 // A queue directory's entries; a directory not made yet (nobody has queued in the line) is empty, every other
 // failure to read it propagates: an unreadable queue is not an empty one, and work must not be admitted on it.
 export const readQueue = async (dir: string) => {
@@ -1199,6 +1236,10 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       // Not the live load: the line is said again whenever it changes, and the load changes every poll.
       const loadNote = releasing.length && !waitingRelease.length && !foreign ? ` (admitted beside it while load1 < ${holdLoad} and the weight fits: STACK_HOLD_LOAD)` : "";
       const why = (s: string) => ({ why: held_ ? `held: a release (${blocker.what}, pid ${blocker.pid}) ${releasing.length ? "holds the machine" : "waits for it"}${loadNote}: ${where}: ${s}` : `${where}: ${s}`, ahead: older.length, coresAhead: coresOlder.length, used, memHeld, held: held_ });
+      // A nested claim does not pass a top-level ticket that has waited over CUE_HEAD_WAIT at the head of the cue line (PRONTO-775).
+      const barrier = nestedBarrier(agedHead(inLine, Date.now(), cueHeadWaitMs, memHeld, coresHeld, cueMem, cueCores), nested,
+        Math.max(0, ...holders.filter((h) => live.includes(h.pid)).map((h) => h.weight)));
+      if (barrier) return why(`behind ${barrier.what}: a top-level claim that has waited over ${Math.round(cueHeadWaitMs / 1000)} s at the head of the cue line (CUE_HEAD_WAIT)`);
       if (line === "cue") {
         const memAhead = cueOlder.reduce((n, o) => n + o.mem, 0), coresAheadCue = cueOlder.reduce((n, o) => n + o.cores, 0);
         if (!memAdmits(memHeld, memAhead, mem, cueMem)) {
@@ -2404,6 +2445,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
   // A heavy run's peak resident size over its whole tree and the machine's lowest free memory while it ran (PRONTO-1752).
   const heavy = weight >= memMinWeight();
   let treePeak = 0, lowestFree: number | null = null;
+  const series: { t: number; cpu: number }[] = [];
   let peak = 0, cpu = 0, wall = 0, waited = 0, status: { success: boolean; code: number; signal: string | null };
   for (let attempt = 1; ; attempt++) {
     slot = await claim(Deno.pid, what, weight, true, true, mem, cores);
@@ -2433,6 +2475,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
       const r = await residentOf(childPid);
       if (!running) return;
       peak = Math.max(peak, r.gb); cpu = Math.max(cpu, r.cpu);
+      if (coresLearn) series.push({ t: (Date.now() - spawned) / 1000, cpu });
       if (heavy) {
         treePeak = Math.max(treePeak, await treeResidentGB(childPid));
         const level = await freeMemoryPct();
@@ -2461,6 +2504,8 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
     // The command runs as the root of a run this process owns: when it ends, so does everything it started. Its
     // weight is given back only once none of it is running (ownRun waits for that, and KILLs what ignores TERM).
     cpu = 0;
+    series.length = 0;
+    series.push({ t: 0, cpu: 0 });
     owned = true;
     const ran = await ownRun(cmd, {
       what, env: { STACK_JOB: String(Deno.pid) }, control,
@@ -2509,7 +2554,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
     if (learn.includes("/")) await Deno.mkdir(learn.replace(/\/[^/]*$/, ""), { recursive: true }).catch(() => {});
     await Deno.writeTextFile(learn, `${round(Math.max(peak, before))} ${what}\n`).catch(() => {});
   }
-  // The cores it kept busy on average, for the next run's --weight: only from a run of 5 s or more (a
+  // The cores it kept busy at its busiest (a 10 s average's peak, capped at GOMAXPROCS), for the next run's --weight: only from a run of 5 s or more (a
   // shorter one measures its start), and a run that failed only raises it, as the peak is.
   // A wrapper with nowhere to learn passes /dev/null (pronto's cue, its cache unwritable): nothing is learned.
   if (coresLearn && !coresLearn.startsWith("/dev/null") && wall >= 5 && cpu > 0) {
@@ -2521,7 +2566,7 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
       // A bare filename has no folder to make (mkdir of it would make a directory of that name).
       const dir = coresLearn.includes("/") ? coresLearn.replace(/\/[^/]*$/, "") : "";
       if (dir) await Deno.mkdir(dir, { recursive: true });
-      await Deno.writeTextFile(coresLearn, `${Math.round(Math.max(cpu / wall, before) * 100) / 100}\n`);
+      await Deno.writeTextFile(coresLearn, `${coresLearned(peakCores(series), cpu / wall, before, cueGomax())}\n`);
     } catch (e) {
       console.error(`slot: the measured weight was not saved to ${coresLearn}: ${(e as Error).message}`);
       Deno.exit(status.code || 1);

@@ -799,3 +799,49 @@ cases: "the memory sampler never overlaps itself: a tick while one runs starts n
 		{get: "errors", expect: 1, why: "a genuine failure still reaches the owner"},
 	]
 }
+cases: "a nested claim waits for a top-level ticket that has waited over CUE_HEAD_WAIT at the head of the cue line": {
+	suite: "machine"
+	steps: [
+		{call: "machine.headBarrier"},
+		{keep: "r"},
+		{get: "aged", expect: "9340000-7-w"},
+		{use: "r"},
+		{get: "fresh", expect: null, why: "not yet 10 minutes"},
+		{use: "r"},
+		{get: "notAtHead", expect: null, why: "an older nested ticket is the head"},
+		{use: "r"},
+		{get: "doesNotFit", expect: null, why: "it waits for the budget, not the line"},
+		{use: "r"},
+		{get: "nestedWaits", expect: "9340000-7-w"},
+		{use: "r"},
+		{get: "topLevelNever", expect: null},
+		{use: "r"},
+		{get: "underWeightedHolder", expect: null, why: "the ticket waits for weight the nested claim's holder keeps (PRONTO-892)"},
+		{use: "r"},
+		{get: "unweightedUnderHolder", expect: "9340000-7-w"},
+		{use: "r"},
+		{get: "noHead", expect: null},
+	]
+}
+cases: "the cores a run teaches are the peak of its 10 s moving average, capped at GOMAXPROCS": {
+	suite: "machine"
+	steps: [
+		{call: "machine.coresPeak"},
+		{keep: "r"},
+		{get: "peak", expect: 7},
+		{use: "r"},
+		{get: "average", expect: 4, why: "a slowed or tailing run teaches its average, which is below what the next can use"},
+		{use: "r"},
+		{get: "short", expect: 0},
+		{use: "r"},
+		{get: "wholeRun", expect: 2},
+		{use: "r"},
+		{get: "learned", expect: 7},
+		{use: "r"},
+		{get: "capped", expect: 7},
+		{use: "r"},
+		{get: "failedKeepsBefore", expect: 5},
+		{use: "r"},
+		{get: "noPeakUsesAverage", expect: 3.46},
+	]
+}
