@@ -93,7 +93,7 @@ that sets none gets upstream's render as it is, which the contract test holds):
 
 The app's own services, the blob plane and the metrics export are Deployments the engine adds beside upstream's (PRONTO-740 PP3):
 
-- `services: <name>: {port, env, secrets, files, seed, metrics, clock, database, singleWriter}`: a compose service of the app that
+- `services: <name>: {port, env, secrets, files, seed, metrics, clock, database, singleWriter, jail, google, egress, scratch}`: a compose service of the app that
   upstream does not render (billing, a collector, a flag server), built and pushed with the cluster's images, a Deployment
   `<app>-<name>` and a Service `<name>` in the mesh (Dapr app-id `<name>`, the shared Configuration, probes on its port). Its
   environment is the `env` stated, whole (compose's is not read), plus `PORT`, `SERVICE_JWT` (the service role's token, from
@@ -107,7 +107,12 @@ The app's own services, the blob plane and the metrics export are Deployments th
   it; `singleWriter` is a `Recreate` Deployment that the default replicas leave at one. A policy of the services' own admits the
   door and the mesh on their ports, the node's scrapers on the metrics ports, and the internet on 443 (a broker).
   `scale: "<app>-<name>"` and `containerResources: <name>` take their names. A name that upstream's render has (a Deployment or a
-  Service), or two services emitting one object, is refused, and so is a login the app does not declare.
+  Service), or two services emitting one object, is refused, and so is a login the app does not declare. For a pod like Studio's
+  builder: `jail` runs it in a user namespace of its own (`hostUsers: false`) with an unmasked `/proc` and AppArmor and seccomp
+  unconfined, which bubblewrap needs on a node that restricts user namespaces; `google: {provider, serviceAccount, audience}` runs
+  it as the service account `<app>-<name>`, its token projected for the audience at `/var/run/secrets/gcp/token`, to trade at the
+  workload identity with no key; `egress: [{cidr, except, port}]` is a NetworkPolicy `<app>-<name>-egress` beside the services'
+  (TCP, one rule each); `scratch: {<dir>: <size>}` is an `emptyDir` mounted at each directory, capped at its size.
 - `blobs: {bucket, provider, serviceAccount}`: rclone serving the Cloud Storage bucket as S3 and imgproxy over it (the compose
   services `rclone-s3` and `imgproxy`, built), signed in through workload identity with no key (the token of the service account
   `<app>-blobs`, traded at the pool's `provider`).

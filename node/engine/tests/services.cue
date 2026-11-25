@@ -9,7 +9,7 @@ import (
 // What a release's services, blob plane and metrics export are as objects, and what is refused of them (the fixture's
 // upstream objects are upstream's shapes; the app's own are the engine's).
 
-_pushedImages: {for s in ["crud", "billing", "flagd", "pulse", "writer", "collector", "analyst", "exporter", "notifier", "rclone-s3", "imgproxy"] {(s): {tag: "release", digest: "sha256:\(_d)"}}}
+_pushedImages: {for s in ["crud", "billing", "flagd", "builder", "pulse", "writer", "collector", "analyst", "exporter", "notifier", "rclone-s3", "imgproxy"] {(s): {tag: "release", digest: "sha256:\(_d)"}}}
 
 _withServices: {
 	release:  {...}
@@ -294,6 +294,99 @@ cases: {
 			["services.flagd.seed names the ConfigMap app-blobs, which the release writes itself"],
 			["services.exporter.secrets names DSN, which its database login fills"],
 		]
+	}
+	"a jail service runs in a user namespace with an unmasked /proc and AppArmor and seccomp unconfined; one without keeps the defaults": {
+		_j:     (_withServices & {release: services: builder: {port: 8690, jail: true}}).named["Deployment/app-builder"].spec.template.spec
+		_plain: (_withServices & {release: services: billing: port: 8688}).named["Deployment/app-billing"].spec.template.spec
+		_got: {
+			hostUsers: _j.hostUsers
+			pod:       _j.securityContext
+			proc:      _j.containers[0].securityContext
+			plain: {
+				hostUsers: _plain.hostUsers != _|_
+				pod:       _plain.securityContext != _|_
+				container: _plain.containers[0].securityContext != _|_
+			}
+		}
+		_want: {
+			hostUsers: false
+			pod:       {appArmorProfile: type: "Unconfined", seccompProfile: type: "Unconfined"}
+			proc: procMount: "Unmasked"
+			plain: {hostUsers: false, pod: false, container: false}
+		}
+	}
+	"google gives the service an account of its own, <app>-<name>, with a token projected for the audience at the path the credential names": {
+		_r: (_withServices & {release: services: builder: {port: 8690, google: {provider: _blobs.provider, serviceAccount: "builder@proj.iam.gserviceaccount.com", audience: "contabo-k3s"}}}).named
+		_p: _r["Deployment/app-builder"].spec.template.spec
+		_got: {
+			account: _p.serviceAccountName
+			sa:      _r["ServiceAccount/app-builder"].metadata.name
+			mount:   _p.containers[0].volumeMounts
+			volumes: _p.volumes
+		}
+		_want: {
+			account: "app-builder"
+			sa:      "app-builder"
+			mount:   [{name: "google-token", mountPath: "/var/run/secrets/gcp", readOnly: true}]
+			volumes: [{name: "google-token", projected: sources: [{serviceAccountToken: {path: "token", audience: "contabo-k3s", expirationSeconds: 3600}}]}]
+		}
+	}
+	"a google audience is the workload identity's own unless named, and a service without google has no account of its own": {
+		_a:    (_withServices & {release: services: builder: {port: 8690, google: {provider: _blobs.provider, serviceAccount: "builder@proj.iam.gserviceaccount.com"}}}).named["Deployment/app-builder"].spec.template.spec.volumes[0].projected.sources[0].serviceAccountToken.audience
+		_none: (_withServices & {release: services: billing: port: 8688}).named
+		_got: {
+			audience: _a
+			account:  _none["Deployment/app-billing"].spec.template.spec.serviceAccountName != _|_
+			sa:       _none["ServiceAccount/app-billing"] != _|_
+		}
+		_want: {
+			audience: "https://iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/q"
+			account:  false
+			sa:       false
+		}
+	}
+	"scratch is an emptyDir a folder, sized as stated, beside the files and the token": {
+		_p: (_withServices & {release: services: builder: {port: 8690, scratch: "/workspace": "8Gi", files: "/etc/f": "app-flags", google: {provider: _blobs.provider, serviceAccount: "builder@proj.iam.gserviceaccount.com"}}}).named["Deployment/app-builder"].spec.template.spec
+		_got: {
+			mounts:  [for m in _p.containers[0].volumeMounts {m.mountPath}]
+			scratch: [for v in _p.volumes if v.emptyDir != _|_ {v.emptyDir}]
+			volumes: [for v in _p.volumes {v.name}]
+			joined:  [for m in _p.containers[0].volumeMounts if m.mountPath == "/workspace" {m.name}] == [for v in _p.volumes if v.emptyDir != _|_ {v.name}]
+		}
+		_want: {
+			mounts:  ["/etc/f", "/workspace", "/var/run/secrets/gcp"]
+			scratch: [{sizeLimit: "8Gi"}]
+			volumes: ["files-app-flags", =~"^scratch-[0-9a-f]{12}$", "google-token"]
+			joined:  true
+		}
+	}
+	"egress is a policy of the service's own, one rule an address block and a port, over the services'": {
+		_r: (_withServices & {
+			release: services: builder: {port: 8690, egress: [
+				{cidr: "203.0.113.7/32", port: 6443},
+				{cidr: "0.0.0.0/0", except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"], port: 80},
+			]}
+		}).named
+		_np: _r["NetworkPolicy/app-builder-egress"].spec
+		_got: {
+			select: _np.podSelector
+			types:  _np.policyTypes
+			rules:  _np.egress
+		}
+		_want: {
+			select: matchLabels: {"app.kubernetes.io/name": "app", "app.kubernetes.io/component": "builder"}
+			types: ["Egress"]
+			rules: [
+				{to: [{ipBlock: cidr: "203.0.113.7/32"}], ports: [{port: 6443, protocol: "TCP"}]},
+				{to: [{ipBlock: {cidr: "0.0.0.0/0", except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]}}], ports: [{port: 80, protocol: "TCP"}]},
+			]
+		}
+	}
+	"with the policy off a service's egress emits no policy, and with none it has none": {
+		_off:  [for k, _ in (_withServices & {release: services: builder: {port: 8690, egress: [{cidr: "10.0.0.0/8", port: 80}]}, appExtra: networkPolicy: enabled: false}).named if k =~ "^NetworkPolicy/" {k}]
+		_none: (_withServices & {release: services: builder: port: 8690}).named["NetworkPolicy/app-builder-egress"] != _|_
+		_got:  {off: _off, none: _none}
+		_want: {off: [], none: false}
 	}
 	"a metrics export with nothing to scrape is refused": {
 		_got:  (_withServices & {release: {services: billing: port: 8688, metricsExport: _export}}).violations

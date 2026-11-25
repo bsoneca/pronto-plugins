@@ -56,7 +56,13 @@ previewOnProductionHost: schema.#Release & _base & {preview: "rc", hosts: rc: "a
 previewOwnHost:          schema.#Release & _base & {preview: "rc", hosts: rc: "rc.app.example.com"}
 
 // A service is only what #Service says: no field it does not know, no reserved variable, no seed out of the app.
-serviceUnknownField:    schema.#Release & _base & {services: billing: {port: 8688, jail: true}}
+serviceUnknownField:    schema.#Release & _base & {services: billing: {port: 8688, privileged: true}}
+serviceScratchClimbs:   schema.#Release & _base & {services: billing: {port: 8688, scratch: "/a/../b": "1Gi"}}
+serviceScratchSize:     schema.#Release & _base & {services: billing: {port: 8688, scratch: "/workspace": "lots"}}
+serviceEgressNoPort:    schema.#Release & _base & {services: billing: {port: 8688, egress: [{cidr: "10.0.0.0/8"}]}}
+serviceEgressBadCIDR:   schema.#Release & _base & {services: billing: {port: 8688, egress: [{cidr: "everywhere", port: 80}]}}
+serviceGoogleProvider:  schema.#Release & _base & {services: billing: {port: 8688, google: {provider: "x", serviceAccount: "b@p.iam.gserviceaccount.com"}}}
+serviceJailNotBool:     schema.#Release & _base & {services: billing: {port: 8688, jail: "yes"}}
 serviceReservedEnv:     schema.#Release & _base & {services: billing: {port: 8688, env: SERVICE_JWT: "x"}}
 serviceSeedClimbs:      schema.#Release & _base & {services: billing: {port: 8688, files: "/etc/f": "cm", seed: cm: "../x.json"}}
 servicePrivilegedPort:  schema.#Release & _base & {services: billing: port: 80}
