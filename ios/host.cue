@@ -43,6 +43,8 @@ _weight: 2
 	// The bundle id the verbs install and start. A bundle id admits hyphens and no underscore, and an app's name admits both.
 	bundleId: *"dev.pronto.\(strings.Replace(H.app, "_", "-", -1))" | string
 	bundleId: =~"^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$"
+	// Xcode expands $(...) in an Info.plist value, so a label holding one would not be the label.
+	label: !~"\\$\\("
 	// The versions xcodebuild takes as build settings (MARKETING_VERSION=, CURRENT_PROJECT_VERSION=), so a refresh of the host never reverts them.
 	marketingVersion: *"0.1.0" | =~"^[0-9]+(\\.[0-9]+){1,2}$"
 	buildNumber:      *1 | (int & >=1)
@@ -115,11 +117,11 @@ _weight: 2
 		// The work is ios/toolchain.nu's. A build and a test claim tests/slot.ts's budget (_weight); a launch
 		// builds, then boots the simulator, installs the app and starts it.
 		rules: {
-			setup: ios: {platform: "ios", cmds: [{do: "use ios/toolchain.nu; toolchain check"}]}
-			build: ios: {platform: "ios", cmds: [{do: "use ios/toolchain.nu; toolchain build"}]}
-			lint: ios: {platform: "ios", cmds: [{do: "use ios/toolchain.nu; toolchain lint"}]}
-			test: ios: {platform: "ios", cmds: [{do: "use ios/toolchain.nu; toolchain test"}]}
-			launch: ios: {platform: "ios", cmds: [{do: "use ios/toolchain.nu; toolchain launch"}]}
+			setup: ios: {platform: "ios", cmds: [{do: "use tools.nu [run-mise]; source ios/toolchain.nu; check"}]}
+			build: ios: {platform: "ios", cmds: [{do: "use tools.nu [run-mise]; source ios/toolchain.nu; build"}]}
+			lint: ios: {platform: "ios", cmds: [{do: "use tools.nu [run-mise]; source ios/toolchain.nu; lint"}]}
+			test: ios: {platform: "ios", cmds: [{do: "use tools.nu [run-mise]; source ios/toolchain.nu; test"}]}
+			launch: ios: {platform: "ios", cmds: [{do: "use tools.nu [run-mise]; source ios/toolchain.nu; launch"}]}
 		}
 	}
 

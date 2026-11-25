@@ -52,6 +52,11 @@ cases: {
 		{call: "native.exportFails", args: ["./ios/export", "files", ["app=emit", "config=" + json.Marshal({entitlements: {"com.apple.developer.associated-domains": ["webcredentials:a.example"]}})]], expect: false, why: "and a list of texts is accepted"},
 	]}
 
+	"the iOS host refuses a label Xcode would expand": {suite: "native", steps: [
+		{call: "native.exportFails", args: ["./ios/export", "files", ["app=emit", "label=Emit $(PRODUCT_NAME)"]], expect: true, why: "Xcode expands $(...) in an Info.plist value, so the home screen would not show the label"},
+		{call: "native.exportFails", args: ["./ios/export", "files", ["app=emit", "label=Emit (beta)"]], expect: false, why: "and parentheses alone are a label"},
+	]}
+
 	"iOS's generated files are the golden's": {suite: "native", steps: [
 		{call: "native.golden", args: ["terminal", ["app=emit"], "ios"], expect: [], why: "the default host"},
 		{call: "native.golden", args: ["full", ["app=pass_vault", "label=Keep", "base=https://keep.example", "package=demo", "config=" + json.Marshal({scenarios: ["a.cue"], unlock: "biometric", marketingVersion: "1.2.0", buildNumber: 5, entitlements: {"com.apple.developer.associated-domains": ["webcredentials:keep.example"]}})], "ios"], expect: [], why: "unlocked, versioned, entitled, in an app whose name has an underscore"},

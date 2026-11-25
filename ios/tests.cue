@@ -9,6 +9,8 @@ _t: #Host & {app: "emit", label: "Emit"}
 
 // Every rule answers @ios alone, so the web verbs never run it.
 platforms: [for verb in ["setup", "build", "lint", "test", "launch"] for _, r in _t.surface.rules[verb] if r.platform == "ios" {verb}] & ["setup", "build", "lint", "test", "launch"]
+// A rule sources the toolchain after tools.nu is in scope, so run-mise resolves under sayt (a `use` inside a nested file would look beside it).
+rulesSource: [for _, r in _t.surface.rules for _, x in r {x.cmds[0].do}] & ["use tools.nu [run-mise]; source ios/toolchain.nu; check", "use tools.nu [run-mise]; source ios/toolchain.nu; build", "use tools.nu [run-mise]; source ios/toolchain.nu; lint", "use tools.nu [run-mise]; source ios/toolchain.nu; test", "use tools.nu [run-mise]; source ios/toolchain.nu; launch"]
 sayJsonRules: strings.Contains(_t.files[".say.json"].text, "\"platform\": \"ios\"") & true
 
 // The generated project's bundle id, versions, label and entitlements are the spec's: what the files hold is read back from them.
