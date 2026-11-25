@@ -2541,11 +2541,12 @@ export const launchArgs = (argv: string[]): string[] =>
 export const hostProfile = (json: string, slotEnv: Record<string, string>): Record<string, string> =>
   Object.fromEntries(Object.entries(JSON.parse(json) as Record<string, string>).filter(([k, v]) => typeof v === "string" && k !== "PATH" && !k.startsWith("MISE_") && !(k in slotEnv)));
 // `process-compose process list -o json`, read as the generated host launch reads it for SAYT_LAUNCH_ONCE=1: "ready" when every process
-// runs and is ready (a running one with no probe counts) or is done (Completed, Disabled, Skipped), "error" when one failed, else "wait".
+// runs and is ready (a running one with no probe counts) or is done (Completed with exit code 0, Disabled, Skipped), "error" when one
+// failed (process-compose reports a process that exited non-zero as Completed, its dependents Skipped), else "wait".
 export const stackReady = (json: string): "ready" | "error" | "wait" => {
-  const all = JSON.parse(json) as { status?: string; is_ready?: string }[];
+  const all = JSON.parse(json) as { status?: string; is_ready?: string; exit_code?: number }[];
   if (!Array.isArray(all) || all.length === 0) return "wait";
-  if (all.some((p) => p.status === "Error")) return "error";
+  if (all.some((p) => p.status === "Error" || (p.status === "Completed" && p.exit_code !== 0))) return "error";
   return all.every((p) => (p.status === "Running" && (p.is_ready === "Ready" || p.is_ready === "-")) || ["Completed", "Disabled", "Skipped"].includes(p.status ?? "")) ? "ready" : "wait";
 };
 const hostProfileOf = async (slot: Slot): Promise<Record<string, string>> => {
