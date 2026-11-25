@@ -467,3 +467,59 @@ Deno.test("a sandbox app is served only by a broker that holds its tenant in the
     throw new Error(`a sandbox app on a live tenant was accepted (${pattern})`);
   }
 });
+
+// Each link of the chain is verified here with WebCrypto, not by the runtime's X509Certificate (deno 2.5.0, the broker image's, lacks its verify).
+Deno.test("a certificate altered after its issuer signed it, or signed with an algorithm that is not ECDSA with SHA-2, is refused", async () => {
+  const payload = { transactionId: "1" };
+  const now = Date.now() + 10_000;
+  const bytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const text = (u: Uint8Array) => btoa(String.fromCharCode(...u));
+  // A byte of tbsCertificate changed (the last letter of the subject's name): the issuer's signature no longer holds.
+  const tamper = (b64: string, name: string) => {
+    const der = bytes(b64), needle = new TextEncoder().encode(name);
+    const at = der.findIndex((_, i) => needle.every((x, j) => der[i + j] === x));
+    if (at < 0) throw new Error("fixture: name not found");
+    der[at + needle.length - 1] ^= 1;
+    return text(der);
+  };
+  const refuses = async (x5c: string[], why: string) => {
+    try {
+      await verifySigned(await chain.sign(payload, { x5c }), [chain.rootPem], now);
+    } catch (e) {
+      assertEquals((e as Error).message, `signed data refused: ${why}`);
+      return;
+    }
+    throw new Error(`${why}: accepted`);
+  };
+  const [leaf, inter, root] = chain.x5c;
+  assertEquals(await verifySigned(await chain.sign(payload, { x5c: [leaf, inter, root] }), [chain.rootPem], now), payload);
+  await refuses([tamper(leaf, "Test leaf"), inter, root], "certificate chain");
+  await refuses([leaf, tamper(inter, "Test inter"), root], "certificate chain");
+  // A root that is not the pinned one is refused too, whatever it says of itself.
+  await refuses([leaf, inter, tamper(root, "Test Root CA")], "not Apple's root");
+  // A signature algorithm other than ecdsa-with-SHA256/384 (here: the OID of ecdsa-with-SHA512 in place of SHA-256, in both
+  // the certificate's signatureAlgorithm and tbsCertificate's signature): refused, never verified under a hash it did not name.
+  const sha256 = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+  const to512 = (b64: string) => {
+    const der = bytes(b64);
+    for (let i = 0; i + 8 <= der.length; i++) if (sha256.every((x, j) => der[i + j] === x)) der[i + 7] = 0x04;
+    return text(der);
+  };
+  await refuses([to512(leaf), inter, root], "certificate chain");
+  // A chain that is not DER at all.
+  await refuses([leaf, text(new Uint8Array(40)), root], "certificate chain");
+});
+
+Deno.test("Apple's own shape: a P-384 root and intermediate signing with SHA-384 verify, under a P-256 leaf", async () => {
+  const apple = await makeChain({ p384: true });
+  const payload = { transactionId: "1" };
+  assertEquals(await verifySigned(await apple.sign(payload), [apple.rootPem], Date.now() + 10_000), payload);
+  // Not under another chain's root, whatever its curve.
+  try {
+    await verifySigned(await apple.sign(payload), [chain.rootPem], Date.now() + 10_000);
+  } catch (e) {
+    assertEquals((e as Error).message, "signed data refused: not Apple's root");
+    return;
+  }
+  throw new Error("accepted under another root");
+});

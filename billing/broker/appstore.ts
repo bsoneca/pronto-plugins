@@ -17,7 +17,6 @@
 //
 // Inert until configured: APPSTORE_APPS (appstoreConfigFrom) is what turns on the routes and the merge; with it
 // unset the broker answers 404 to /appstore and /appstore/transaction and behaves as before.
-import { X509Certificate } from "node:crypto";
 import { fromBase64url, originOf, readCapped, signEs256 } from "../shared.ts";
 import { accountOf } from "./core.ts";
 import type { Store } from "./store.ts";
@@ -53,7 +52,7 @@ export interface AppStoreConfig {
 
 /** An App Store Connect .p8 (PKCS8 PEM) as a signing key. */
 export const importApiKey = (pem: string): Promise<CryptoKey> =>
-  crypto.subtle.importKey("pkcs8", der(pem), { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  crypto.subtle.importKey("pkcs8", pemDer(pem), { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
 
 /** The configuration from the broker's environment, or undefined when APPSTORE_APPS is not set (the App Store is off).
  * Set, it must be whole and valid: a half-configured broker would take a transaction it cannot check, so it refuses to start. */
@@ -83,7 +82,7 @@ export async function appstoreConfigFrom(env: (k: string) => string | undefined)
   if (new Set(apps.map((a) => a.bundleId)).size !== apps.length) throw new Error("APPSTORE_APPS names a bundle id twice");
   const roots = env("APPSTORE_ROOTS")!.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
   if (roots.length === 0) throw new Error("APPSTORE_ROOTS is Apple's root certificates, PEM");
-  for (const r of roots) new X509Certificate(r);
+  for (const r of roots) certOf(pemDer(r));
   let key: CryptoKey;
   try {
     key = await importApiKey(env("APPSTORE_KEY")!);
@@ -111,7 +110,7 @@ const LEAF_OID = "2a864886f76364060b01";
 const INTERMEDIATE_OID = "2a864886f76364060201";
 const BASIC_CONSTRAINTS_OID = "551d13";
 
-interface Tlv { tag: number; start: number; end: number }
+interface Tlv { tag: number; at: number; start: number; end: number }
 /** One DER element at `at` within `buf`, or a refusal when it runs past `end`. */
 function tlv(buf: Uint8Array, at: number, end = buf.length): Tlv {
   if (at + 2 > end) throw new Error("der");
@@ -125,7 +124,7 @@ function tlv(buf: Uint8Array, at: number, end = buf.length): Tlv {
     start += n;
   }
   if (start + len > end) throw new Error("der");
-  return { tag, start, end: start + len };
+  return { tag, at, start, end: start + len };
 }
 const children = (buf: Uint8Array, e: Tlv): Tlv[] => {
   const out: Tlv[] = [];
@@ -169,7 +168,93 @@ function constraintsOf(raw: Uint8Array): { ca: boolean; pathLen: number | null }
 }
 
 const decoder = new TextDecoder();
-const fresh = (c: X509Certificate, at: number) => Date.parse(c.validFrom) <= at && at <= Date.parse(c.validTo);
+
+// X.509 read here, by the DER walker above, and its signatures checked with WebCrypto: the runtime's own X509Certificate
+// implements none of this on every deno the broker runs on (the image's 2.5.0 lacks verify), and the walker already has
+// to read the extensions.
+interface Cert {
+  raw: Uint8Array<ArrayBuffer>;
+  /** tbsCertificate, header included: what the issuer signed. */
+  tbs: Uint8Array<ArrayBuffer>;
+  /** The signatureAlgorithm's OID (hex), and whether tbsCertificate's own `signature` field says the same. */
+  sigOid: string;
+  sigConsistent: boolean;
+  /** signatureValue: a DER ECDSA signature. */
+  signature: Uint8Array<ArrayBuffer>;
+  /** SubjectPublicKeyInfo, header included. */
+  spki: Uint8Array<ArrayBuffer>;
+  notBefore: number;
+  notAfter: number;
+}
+function pemDer(pem: string): Uint8Array<ArrayBuffer> {
+  return Uint8Array.from(atob(pem.replace(/-----[A-Z ]+-----|\s/g, "")), (c) => c.charCodeAt(0));
+}
+function timeOf(raw: Uint8Array, e: Tlv): number {
+  const t = decoder.decode(raw.subarray(e.start, e.end));
+  const m = (e.tag === 0x17 ? /^(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)Z$/ : /^(\d{4})(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)Z$/).exec(t);
+  if ((e.tag !== 0x17 && e.tag !== 0x18) || !m) throw new Error("der");
+  const y = e.tag === 0x17 ? (Number(m[1]) >= 50 ? 1900 : 2000) + Number(m[1]) : Number(m[1]);
+  return Date.UTC(y, Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]));
+}
+/** A certificate's parts, or a throw when it is not an X.509 DER certificate. */
+function certOf(raw: Uint8Array<ArrayBuffer>): Cert {
+  const top = tlv(raw, 0);
+  if (top.end !== raw.length) throw new Error("der");
+  const [tbs, alg, sig] = children(raw, top);
+  if (!tbs || !alg || sig?.tag !== 0x03 || tbs.tag !== 0x30 || alg.tag !== 0x30) throw new Error("der");
+  const fields = children(raw, tbs);
+  const at = fields[0]?.tag === 0xa0 ? 1 : 0; // the optional version comes first
+  const [, inner, , validity, , spki] = fields.slice(at);
+  if (!inner || !validity || !spki || spki.tag !== 0x30) throw new Error("der");
+  const [notBefore, notAfter] = children(raw, validity);
+  const [oid] = children(raw, alg);
+  if (oid?.tag !== 0x06 || !notBefore || !notAfter || raw[sig.start] !== 0) throw new Error("der");
+  const same = (a: Tlv, b: Tlv) => raw.subarray(a.at, a.end).length === raw.subarray(b.at, b.end).length && raw.subarray(a.at, a.end).every((x, i) => x === raw[b.at + i]);
+  return {
+    raw, tbs: raw.slice(tbs.at, tbs.end), sigOid: hex(raw, oid), sigConsistent: same(alg, inner), signature: raw.slice(sig.start + 1, sig.end),
+    spki: raw.slice(spki.at, spki.end), notBefore: timeOf(raw, notBefore), notAfter: timeOf(raw, notAfter),
+  };
+}
+const fresh = (c: Cert, at: number) => c.notBefore <= at && at <= c.notAfter;
+const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+// ecdsa-with-SHA256 and ecdsa-with-SHA384: the only signatures a certificate of the chain may carry.
+const SIGNATURE_HASH: Record<string, string> = { "2a8648ce3d040302": "SHA-256", "2a8648ce3d040303": "SHA-384" };
+const CURVES = [{ namedCurve: "P-256", n: 32 }, { namedCurve: "P-384", n: 48 }] as const;
+
+/** An ECDSA signature in DER (SEQUENCE of two INTEGERs) as the raw r‖s WebCrypto takes, n bytes each. */
+function rawSignature(der: Uint8Array, n: number): Uint8Array<ArrayBuffer> {
+  const [r, s, ...more] = children(der, tlv(der, 0));
+  if (!r || !s || more.length || r.tag !== 0x02 || s.tag !== 0x02) throw new Error("der");
+  const out = new Uint8Array(2 * n);
+  for (const [i, e] of [r, s].entries()) {
+    let from = e.start;
+    while (from < e.end - 1 && der[from] === 0) from++;
+    if (e.end - from > n) throw new Error("der");
+    out.set(der.subarray(from, e.end), i * n + n - (e.end - from));
+  }
+  return out;
+}
+
+/** Whether `issuer` signed `child`: its public key (P-256 or P-384), child's tbsCertificate, and the hash its signatureAlgorithm names. */
+async function signedBy(child: Cert, issuer: Cert): Promise<boolean> {
+  const hash = Object.hasOwn(SIGNATURE_HASH, child.sigOid) ? SIGNATURE_HASH[child.sigOid] : undefined;
+  if (!hash || !child.sigConsistent) return false;
+  for (const curve of CURVES) {
+    let key: CryptoKey;
+    try {
+      key = await crypto.subtle.importKey("spki", issuer.spki, { name: "ECDSA", namedCurve: curve.namedCurve }, false, ["verify"]);
+    } catch {
+      continue;
+    }
+    try {
+      return await crypto.subtle.verify({ name: "ECDSA", hash }, key, rawSignature(child.signature, curve.n), child.tbs);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
 
 /** The payload of a JWS Apple signed, or a refusal: ES256 only, a chain in `x5c` (leaf first) whose every link is
  * signed by the next and valid now, ending at a root the operator pinned (the chain's own last certificate, or one a
@@ -189,15 +274,15 @@ export async function verifySigned(jws: unknown, roots: readonly string[], now: 
   }
   if (head.alg !== "ES256") throw refuse("algorithm");
   if (!Array.isArray(head.x5c) || head.x5c.length < 2 || head.x5c.length > 4 || !head.x5c.every((c) => typeof c === "string")) throw refuse("certificate chain");
-  let chain: X509Certificate[];
+  let chain: Cert[];
   try {
-    chain = (head.x5c as string[]).map((c) => new X509Certificate(Uint8Array.from(atob(c), (ch) => ch.charCodeAt(0))));
+    chain = (head.x5c as string[]).map((c) => certOf(Uint8Array.from(atob(c), (ch) => ch.charCodeAt(0))));
   } catch {
     throw refuse("certificate chain");
   }
   if (!chain.every((c) => fresh(c, now))) throw refuse("a certificate is not valid now");
   for (let i = 0; i + 1 < chain.length; i++) {
-    if (!chain[i].verify(chain[i + 1].publicKey)) throw refuse("certificate chain");
+    if (!(await signedBy(chain[i], chain[i + 1]))) throw refuse("certificate chain");
   }
   // The leaf is no CA and every certificate above it is one; a pathLenConstraint bounds the CAs below it.
   let constraints: { ca: boolean; pathLen: number | null }[];
@@ -209,12 +294,17 @@ export async function verifySigned(jws: unknown, roots: readonly string[], now: 
   const within = (c: { ca: boolean; pathLen: number | null }, below: number) => c.ca && (c.pathLen === null || c.pathLen >= below);
   if (constraints[0].ca || !constraints.slice(1).every((c, i) => within(c, i))) throw refuse("certificate constraints");
   const top = chain[chain.length - 1];
-  const pinned = roots.map((r) => new X509Certificate(r));
   // A pinned root that signed the chain's last certificate: the CAs below it are the chain's intermediates.
   let anchored = false;
-  try {
-    anchored = pinned.some((r) => fresh(r, now) && (r.raw.equals(top.raw) || (within(constraintsOf(r.raw), chain.length - 1) && top.verify(r.publicKey))));
-  } catch { /* a root that does not parse anchors nothing */ }
+  for (const pem of roots) {
+    try {
+      const r = certOf(pemDer(pem));
+      if (fresh(r, now) && (sameBytes(r.raw, top.raw) || (within(constraintsOf(r.raw), chain.length - 1) && await signedBy(top, r)))) {
+        anchored = true;
+        break;
+      }
+    } catch { /* a root that does not parse anchors nothing */ }
+  }
   if (!anchored) throw refuse("not Apple's root");
   let signing: boolean;
   try {
@@ -225,8 +315,7 @@ export async function verifySigned(jws: unknown, roots: readonly string[], now: 
   if (!signing) throw refuse("not Apple's signing certificates");
   let ok = false;
   try {
-    const spki = new Uint8Array(chain[0].publicKey.export({ format: "der", type: "spki" }));
-    const key = await crypto.subtle.importKey("spki", spki, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    const key = await crypto.subtle.importKey("spki", chain[0].spki, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
     ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, signature, new TextEncoder().encode(`${parts[0]}.${parts[1]}`));
   } catch { /* a key that is not P-256, a signature of the wrong shape: refused below */ }
   if (!ok) throw refuse("signature");
@@ -277,10 +366,6 @@ const API = { Production: "https://api.storekit.itunes.apple.com", Sandbox: "htt
  * (Apple keeps trying to charge a paying player, and asks the app to keep serving) holds it until the grace ends. Billing retry
  * (after the grace, or with none), expired and revoked hold nothing. */
 const ACTIVE = 1, GRACE = 4;
-
-function der(pem: string): Uint8Array<ArrayBuffer> {
-  return Uint8Array.from(atob(pem.replace(/-----[A-Z ]+-----|\s/g, "")), (c) => c.charCodeAt(0));
-}
 
 /** The subscription's transactions as Apple holds them now, each with its status: read from the Server API with the
  * operator's key, every transaction in the answer checked as any other signed data. */

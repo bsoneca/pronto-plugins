@@ -15,6 +15,8 @@ const b64 = (pem: string) => pem.replace(/-----[A-Z ]+-----|\s/g, "");
 
 export interface Chain {
   rootPem: string;
+  /** The chain as a JWS header carries it: leaf, intermediate, root, base64 DER. */
+  x5c: string[];
   /** A JWS over `payload`, signed by the leaf, its x5c the chain. */
   sign(payload: Record<string, unknown>, header?: Record<string, unknown>): Promise<string>;
 }
@@ -25,21 +27,24 @@ export async function makeChain(o: {
   /** A leaf without Apple's extension whose OID bytes sit inside another extension's value (the review's proof of concept). */
   leafOidHidden?: boolean;
   rootPathLen?: number; intermediatePathLen?: number;
+  /** Root and intermediate on P-384 signed with SHA-384, as Apple's are (the leaf stays P-256). */
+  p384?: boolean;
 } = {}): Promise<Chain> {
   const dir = await Deno.makeTempDir({ prefix: "appstore-fixture-" });
   try {
     const days = String(o.days ?? 30);
-    await openssl(dir, "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", "root.key");
-    await openssl(dir, "req", "-x509", "-new", "-key", "root.key", "-subj", "/CN=Test Root CA", "-days", days, "-out", "root.pem", "-addext", `basicConstraints=critical,CA:TRUE${o.rootPathLen === undefined ? "" : `,pathlen:${o.rootPathLen}`}`);
+    const big = o.p384 === true, hash = big ? "-sha384" : "-sha256";
+    await openssl(dir, "ecparam", "-name", big ? "secp384r1" : "prime256v1", "-genkey", "-noout", "-out", "root.key");
+    await openssl(dir, "req", "-x509", hash, "-new", "-key", "root.key", "-subj", "/CN=Test Root CA", "-days", days, "-out", "root.pem", "-addext", `basicConstraints=critical,CA:TRUE${o.rootPathLen === undefined ? "" : `,pathlen:${o.rootPathLen}`}`);
     for (const [name, serial, ca, oid] of [
       ["inter", "2", `${o.intermediateIsCa === false ? "CA:FALSE" : "CA:TRUE"}${o.intermediatePathLen === undefined ? "" : `,pathlen:${o.intermediatePathLen}`}`, o.intermediateExtension === false ? "" : "\n1.2.840.113635.100.6.2.1=ASN1:NULL"],
       ["leaf", "3", o.leafIsCa ? "CA:TRUE" : "CA:FALSE", o.leafOidHidden ? "\n1.3.6.1.4.1.99999.1=DER:060A2A864886F76364060B01" : o.leafExtension === false ? "" : "\n1.2.840.113635.100.6.11.1=ASN1:NULL"],
     ]) {
-      await openssl(dir, "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", `${name}.key`);
+      await openssl(dir, "ecparam", "-name", big && name === "inter" ? "secp384r1" : "prime256v1", "-genkey", "-noout", "-out", `${name}.key`);
       await openssl(dir, "req", "-new", "-key", `${name}.key`, "-subj", `/CN=Test ${name}`, "-out", `${name}.csr`);
       await Deno.writeTextFile(`${dir}/${name}.ext`, `basicConstraints=${ca}${oid}\n`);
       const issuer = name === "inter" ? "root" : "inter";
-      await openssl(dir, "x509", "-req", "-in", `${name}.csr`, "-CA", `${issuer}.pem`, "-CAkey", `${issuer}.key`, "-set_serial", serial, "-days", days, "-extfile", `${name}.ext`, "-out", `${name}.pem`);
+      await openssl(dir, "x509", "-req", hash, "-in", `${name}.csr`, "-CA", `${issuer}.pem`, "-CAkey", `${issuer}.key`, "-set_serial", serial, "-days", days, "-extfile", `${name}.ext`, "-out", `${name}.pem`);
     }
     await openssl(dir, "pkcs8", "-topk8", "-nocrypt", "-in", "leaf.key", "-outform", "DER", "-out", "leaf.p8");
     const [rootPem, inter, leaf, p8] = await Promise.all([
@@ -49,6 +54,7 @@ export async function makeChain(o: {
     const x5c = [b64(leaf), b64(inter), b64(rootPem)];
     return {
       rootPem,
+      x5c,
       async sign(payload, header = {}) {
         const head = base64url(enc.encode(JSON.stringify({ alg: "ES256", x5c, ...header })));
         const body = base64url(enc.encode(JSON.stringify(payload)));
