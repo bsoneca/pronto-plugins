@@ -36,7 +36,8 @@ final class TerminalEngine: @unchecked Sendable {
     /// The screen as a DivKit card, whenever it changed.
     let tree: AsyncStream<String>
     /// The first script error: the screen cannot go on, so the host locks rather than show what a half-run update left.
-    private(set) var failure: String?
+    var failure: String? { queue.sync { firstFailure } }
+    private var firstFailure: String?
 
     init(_ config: Config = Config()) {
         self.config = config
@@ -47,7 +48,7 @@ final class TerminalEngine: @unchecked Sendable {
         queue.sync {
             context.exceptionHandler = { [weak self] _, error in
                 let text = error?.toString() ?? "unknown"
-                self?.failure = self?.failure ?? text
+                self?.firstFailure = self?.firstFailure ?? text
                 config.log("error", "script failed: \(text)")
             }
             bridges()
@@ -63,7 +64,7 @@ final class TerminalEngine: @unchecked Sendable {
                 _ = context.evaluateScript(source + "\n;undefined", withSourceURL: URL(string: "pronto:\(name)"))
             }
             if script("terminal.js") == nil {
-                _ = context.evaluateScript("lockdown({ errorTaming: \"unsafe\" }); undefined")
+                _ = context.evaluateScript("lockdown({ errorTaming: \"unsafe\" }); harden(Intl); undefined")
             } else {
                 _ = context.evaluateScript("__boot(); undefined")
             }
@@ -133,7 +134,7 @@ final class TerminalEngine: @unchecked Sendable {
         bind("__native_uuid", { () -> Any? in UUID().uuidString.lowercased() } as @convention(block) () -> Any?)
         bind("__native_random", { (count: Int) -> Any? in
             var generator = SystemRandomNumberGenerator()
-            return Self.json((0..<max(count, 0)).map { _ in Int(generator.next() as UInt8) })
+            return Self.json((0..<min(max(count, 0), 65536)).map { _ in Int(generator.next() as UInt8) })
         } as @convention(block) (Int) -> Any?)
         bind("__native_locale", { () -> Any? in Locale.current.identifier(.bcp47) } as @convention(block) () -> Any?)
         bind("__native_zone", { () -> Any? in TimeZone.current.identifier } as @convention(block) () -> Any?)
@@ -148,7 +149,7 @@ final class TerminalEngine: @unchecked Sendable {
 
     /// A file the program ships, by its path under the bundle's `shell` or `messages` folder.
     private func asset(_ path: String) -> String? {
-        guard !path.contains(".."), let root = config.bundle.resourceURL else { return nil }
+        guard path.hasPrefix("shell/") || path.hasPrefix("messages/"), !path.contains(".."), let root = config.bundle.resourceURL else { return nil }
         return try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
     }
 

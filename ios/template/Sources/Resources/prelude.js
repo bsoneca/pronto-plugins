@@ -8,13 +8,13 @@ globalThis.console = Object.fromEntries(["log", "info", "warn", "error", "debug"
 
 // JavaScriptCore has no queueMicrotask, and a context no event loop, so a timer is the host's: every wake comes back
 // through __onTimer, one JS turn at a time, on the clock the host gives __native_timer (the engine's `schedule`).
-globalThis.queueMicrotask = (fn) => { Promise.resolve().then(fn); };
+globalThis.queueMicrotask = (fn) => { Promise.resolve().then(fn).catch((e) => console.error("microtask failed", e)); };
 {
   const timers = new Map();
   let next = 1;
   const arm = (fn, ms, args, repeat) => {
     const id = next++;
-    timers.set(id, { fn, args, repeat: repeat ? Math.max(ms, 1) : 0 });
+    timers.set(id, { fn, args, repeat: repeat ? Math.max(ms ?? 0, 1) : 0 });
     __native_timer(id, Math.max(ms ?? 0, 0));
     return id;
   };
@@ -33,14 +33,15 @@ globalThis.queueMicrotask = (fn) => { Promise.resolve().then(fn); };
 // Intl is JavaScriptCore's own, and the bridge the bundle's Intl calls answers from it: the four arguments Android
 // answers from ICU (native/bridges.cue: kind, language tag, options as JSON, value as text).
 {
-  const Native = Intl;
+  // Taken now, before anything can replace them; the engine hardens them once SES has loaded.
+  const { PluralRules, NumberFormat, DateTimeFormat, getCanonicalLocales } = Intl;
   const tagOf = (tag) => (tag === "" ? undefined : tag);
   globalThis.__native_intl = (kind, tag, options, value) => {
     const o = JSON.parse(options);
-    if (kind === "canonical") return Native.getCanonicalLocales(tagOf(tag) ?? "en-US")[0];
-    if (kind === "plural") return new Native.PluralRules(tagOf(tag)).select(Number(value));
-    if (kind === "number") return new Native.NumberFormat(tagOf(tag), o).format(Number(value));
-    if (kind === "date") return new Native.DateTimeFormat(tagOf(tag), o).format(Number(value));
+    if (kind === "canonical") return getCanonicalLocales(tagOf(tag) ?? "en-US")[0];
+    if (kind === "plural") return new PluralRules(tagOf(tag)).select(Number(value));
+    if (kind === "number") return new NumberFormat(tagOf(tag), o).format(Number(value));
+    if (kind === "date") return new DateTimeFormat(tagOf(tag), o).format(Number(value));
     throw new Error(`Intl: ${kind}`);
   };
 }

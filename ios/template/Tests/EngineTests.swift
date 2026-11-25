@@ -75,6 +75,18 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(engine.evaluate("String(count)"), "5", "a cleared timer does not run")
     }
 
+    func testBridgesAreBounded() {
+        let wind = Wind()
+        let engine = started(wind)
+        XCTAssertEqual(engine.evaluate("String(JSON.parse(__native_random(70000)).length)"), "65536")
+        XCTAssertEqual(engine.evaluate("try { __native_asset('prelude.js'); 'read' } catch { 'refused' }"), "refused")
+        _ = engine.evaluate("globalThis.ticks = 0; setInterval(() => { globalThis.ticks += 1; }); undefined")
+        wind.pending.removeFirst().work()
+        XCTAssertEqual(engine.evaluate("String(ticks)"), "1")
+        XCTAssertEqual(wind.pending.map(\.seconds), [0.001], "an interval without a delay repeats")
+        XCTAssertNil(engine.failure)
+    }
+
     func testIntlAnswersFromTheSystem() {
         let engine = started()
         XCTAssertEqual(engine.evaluate("__native_intl('plural', 'en', '{}', '1')"), "one")
