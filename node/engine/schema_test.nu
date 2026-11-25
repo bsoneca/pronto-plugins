@@ -39,11 +39,16 @@ def test_jail_google_and_egress_are_studios_builders_alone [] {
 	for e in [tenantJail tenantGoogle tenantEgress] {
 		let r = (refused $e)
 		assert ($r | str contains "which only Studio's builder (app studio, service builder) may (PRONTO-1882)") $"($e): ($r)"
-		assert ($r | str contains "service builder of app ") $"($e): ($r)"
+		assert ($r | str contains "service builder of app sets") $"($e): ($r)"
 	}
-	assert ((refused studioOtherServiceJail) | str contains "service billing of studio sets jail, google or egress")
+	for e in [studioOtherServiceJail studioOtherServiceGoogle studioOtherServiceEgress] {
+		assert ((refused $e) | str contains "service billing of studio sets jail, google or egress") $e
+	}
+	# Studio's builder is not refused for it: the render here has no pushed images, so its one violation is the unpinned image
+	# (a render with them is tests/services.cue's, which holds that its violations are none)
 	let ok = (cue-in export ./node/engine/tests/refused -e studioBuilder --out json)
-	assert equal $ok.exit_code 0 $ok.stderr
+	assert ($ok.stderr | str contains "is not pinned by digest") $ok.stderr
+	assert (not ($ok.stderr | str contains "PRONTO-1882")) $ok.stderr
 }
 
 def test_the_release_rule_is_written_only_when_asked [] {

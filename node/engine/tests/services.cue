@@ -402,6 +402,33 @@ cases: {
 		_got:  {off: _off, none: _none}
 		_want: {off: [], none: false}
 	}
+	"jail, google and egress are refused on any service of an app but Studio's builder, through the objects themselves": {
+		_g:    {provider: _blobs.provider, serviceAccount: "builder@proj.iam.gserviceaccount.com"}
+		_e:    [{cidr: "10.0.0.0/8", port: 80}]
+		_msg:  "which only Studio's builder (app studio, service builder) may (PRONTO-1882)"
+		_got: {
+			tenantJail:   (_withServices & {release: services: builder: {port: 8690, jail: true}}).violations
+			tenantGoogle: (_withServices & {release: services: builder: {port: 8690, google: _g}}).violations
+			tenantEgress: (_withServices & {release: services: builder: {port: 8690, egress: _e}}).violations
+			studioOther: [
+				(_studioServices & {release: services: billing: {port: 8688, jail: true}}).violations,
+				(_studioServices & {release: services: billing: {port: 8688, google: _g}}).violations,
+				(_studioServices & {release: services: billing: {port: 8688, egress: _e}}).violations,
+			]
+			studioBuilder: (_studioServices & {release: services: builder: {port: 8690, jail: true, google: _g, egress: _e}}).violations
+		}
+		_want: {
+			tenantJail:   ["service builder of app sets jail, google or egress, \(_msg)"]
+			tenantGoogle: ["service builder of app sets jail, google or egress, \(_msg)"]
+			tenantEgress: ["service builder of app sets jail, google or egress, \(_msg)"]
+			studioOther: [
+				["service billing of studio sets jail, google or egress, \(_msg)"],
+				["service billing of studio sets jail, google or egress, \(_msg)"],
+				["service billing of studio sets jail, google or egress, \(_msg)"],
+			]
+			studioBuilder: []
+		}
+	}
 	"a metrics export with nothing to scrape is refused": {
 		_got:  (_withServices & {release: {services: billing: port: 8688, metricsExport: _export}}).violations
 		_want: ["metricsExport needs a service with `metrics` to scrape"]
