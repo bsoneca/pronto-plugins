@@ -260,18 +260,65 @@ export def restart [build: record] {
 	kubectl-out rollout status -n $build.registry.namespace $target --timeout=120s | ignore
 }
 
-# The pushed images the registry does not serve: each `{repo, digest}` is asked for its manifest (GET /v2/<repo>/manifests/<digest>),
-# the way a pod's pull asks. Answers the ones that said 404 (a push that wrote links over blobs the collector deleted, PRONTO-1868),
-# and fails on any other answer (a registry that is down or broken is not a stale cache, and a restart would not mend it).
-export def missing-manifests [registry: string, images: list<record<repo: string, digest: string>>]: nothing -> list<record<repo: string, digest: string>> {
-	$images | each {|i|
-		let r = (^curl -s -o /dev/null -w "%{http_code}" -H $"Accept: ($accept)" $"http://($registry)/v2/($i.repo)/manifests/($i.digest)" | complete)
-		let status = ($r.stdout | str trim)
-		if $status == "200" { null } else if $status == "404" { $i } else {
-			let said = (if $status in ["" "000"] { "nothing" } else { $status })
-			error make {msg: $"the registry answered ($said) for ($i.repo)@($i.digest) after its push: it is not serving the images just pushed"}
+# The registry restarted when it can be, for the release that holds `own` as its lease: only while the blob descriptor cache is
+# on (else a restart brings nothing back), and, under the collector's lock, only while no other release holds a lease (a restart
+# cuts the pushes in flight, so one release's restart never lands on another's bake, and two releases never both restart).
+# Answers "" when it restarted, else why it did not.
+export def restart-alone [build: record, own: string = ""]: nothing -> string {
+	let cache = (blob-cache $build)
+	if $cache in ["none" "disabled"] { return $"its blob descriptor cache is ($cache), so a restart would not bring the images back" }
+	with-lock $build {
+		let others = (leases $build | where {|l| $l.name != $own })
+		if ($others | is-not-empty) {
+			$"other releases are in flight \(($others | get name | str join ', ')\), and a restart would cut their pushes: release again once they end"
+		} else {
+			restart $build
+			""
 		}
-	} | compact
+	}
+}
+
+# One GET of the registry: {status, body}. A curl that fails (a refused or cut-off connection, a body cut short: exit 18, 15 s
+# of silence) is an error, never an absence: a registry that is down or broken is not a stale cache.
+def --wrapped probe [url: string, ...extra: string]: nothing -> record {
+	let r = (^curl -sS --max-time 15 -H $"Accept: ($accept)" -w "\n%{http_code}" ...$extra $url | complete)
+	if $r.exit_code != 0 { error make {msg: $"asking the registry for ($url) failed \(curl exit ($r.exit_code)\): ($r.stderr | str trim)"} }
+	let lines = ($r.stdout | lines)
+	{status: ($lines | last | str trim), body: ($lines | drop 1 | str join (char nl))}
+}
+
+def unexpected [url: string, status: string] {
+	error make {msg: $"the registry answered ($status) for ($url) after its push: it is not serving the images just pushed"}
+}
+
+# What of an image the registry does not serve (404): the manifest, an index's children's, and the config and every layer of each
+# image, read from the manifest's body and each asked for the first byte. A layer the collector deleted is still vouched for by a
+# stale descriptor cache, so buildkit skips it and the manifest answers 200 over a blob that is gone. Any other answer is an error.
+def manifest-gaps [registry: string, repo: string, digest: string]: nothing -> list<record<repo: string, digest: string>> {
+	let url = $"http://($registry)/v2/($repo)/manifests/($digest)"
+	let m = (probe $url)
+	if $m.status == "404" { return [{repo: $repo, digest: $digest}] }
+	if $m.status != "200" { unexpected $url $m.status }
+	let doc = (try { $m.body | from json } catch { error make {msg: $"the registry's manifest ($url) is not JSON"} })
+	let kids = ($doc | get -o manifests | default [] | each {|c| $c.digest })
+	# `for` and not `each`: an error raised inside an `each` closure reaches the release's catch as a generic "Eval block failed" message.
+	mut gone = []
+	for c in $kids { $gone = ($gone | append (manifest-gaps $registry $repo $c)) }
+	if ($kids | is-not-empty) { return $gone }
+	let blobs = ([($doc | get -o config.digest)] | append ($doc | get -o layers | default [] | each {|l| $l.digest }) | compact)
+	for b in $blobs {
+		let burl = $"http://($registry)/v2/($repo)/blobs/($b)"
+		let r = (probe $burl -o /dev/null -r 0-0)
+		if $r.status == "404" { $gone = ($gone | append {repo: $repo, digest: $b}) } else if $r.status not-in ["200" "206"] { unexpected $burl $r.status }
+	}
+	$gone
+}
+
+# The pushed images (`{repo, digest}`) the registry does not serve whole, as `repo@digest` of what is gone (PRONTO-1868).
+export def lost-images [registry: string, images: list<record<repo: string, digest: string>>]: nothing -> list<record<repo: string, digest: string>> {
+	mut gone = []
+	for i in $images { $gone = ($gone | append (manifest-gaps $registry $i.repo $i.digest)) }
+	$gone | uniq
 }
 
 # The collection itself, under the lock and with no other lease.

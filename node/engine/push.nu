@@ -120,7 +120,7 @@ export def verify-door-guard [staged: string] {
 # Builds the services' images on the node's buildkitd and pushes them to its registry, tagged `tag`
 # (`release`, a preview's name, or `check`). Answers {<svc>: {tag, digest}}, the database's tag being
 # its Postgres major (CloudNativePG reads it as one). `fwd` is the tunnel's local ports.
-export def images [app_dir: string, node: record, fwd: record, services: list<string>, tag: string]: nothing -> record {
+export def images [app_dir: string, node: record, fwd: record, services: list<string>, tag: string, lease: string = ""]: nothing -> record {
 	let app = $node.name
 	let host = $node.build.registry.host
 	let dir = ($app_dir | path expand)
@@ -137,9 +137,10 @@ export def images [app_dir: string, node: record, fwd: record, services: list<st
 		let meta = ($work | path join meta.json)
 		let sets = ($services | each {|s| ["--set" $"($s).tags=($host)/($app)-($s):($tag)"] } | flatten)
 		with-builder $work $fwd {|builder|
-			# Bake, then ask the registry for each pushed manifest: a registry whose blob descriptor cache outlived a garbage
-			# collection takes a reproducible build's push as already there and writes only links (PRONTO-1868), and the pods'
-			# pull then fails minutes into the rollout. The first miss restarts the registry (an empty cache) and bakes once more.
+			# Bake, then ask the registry for each pushed manifest, config and layer: a registry whose blob descriptor cache outlived a
+			# garbage collection takes a reproducible build's push as already there and writes only links (PRONTO-1868), and the pods'
+			# pull then fails minutes into the rollout. The first miss restarts the registry (an empty cache; `lease` is this release's own,
+			# and no other may be in flight) and bakes once more.
 			for attempt in 1..2 {
 			with-env {SOURCE_DATE_EPOCH: "0"} {
 				let r = (do { cd $staged; open --raw ($work | path join release.compose.yaml) | ^docker buildx bake -f - --builder $builder --push --provenance=false --progress=plain --metadata-file $meta $"--allow=fs.read=($staged)" --set $"*.platform=($node.environment.platform)" ...$sets ...$services } | complete)
@@ -149,12 +150,13 @@ export def images [app_dir: string, node: record, fwd: record, services: list<st
 				if ($sent | is-not-empty) { print $"node: (stamp) ($sent | str join '; ')" }
 			}
 			let pushed = (open $meta)
-			let lost = (registry missing-manifests $"127.0.0.1:($fwd.registry)" ($services | each {|s| {repo: $"($app)-($s)", digest: ($pushed | get $s | get "containerimage.digest")} }))
+			let lost = (registry lost-images $"127.0.0.1:($fwd.registry)" ($services | each {|s| {repo: $"($app)-($s)", digest: ($pushed | get $s | get "containerimage.digest")} }))
 			if ($lost | is-empty) { break }
 			let names = ($lost | each {|i| $"($i.repo)@($i.digest)" } | str join ", ")
 			if $attempt == 2 { error make {msg: $"registry lost ($names): it still does not serve them after a restart and a second push, so nothing is rolled out"} }
-			print -e $"node: (stamp) registry lost ($names) \(a stale blob cache\): restarting the registry and pushing again"
-			registry restart $node.build
+			print -e $"node: (stamp) registry lost ($names) \(a stale blob cache\): restarting the registry and baking again"
+			let why = (registry restart-alone $node.build $lease)
+			if $why != "" { error make {msg: $"registry lost ($names): ($why)"} }
 			}
 		}
 		let digests = (open $meta)
