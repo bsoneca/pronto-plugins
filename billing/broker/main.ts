@@ -23,7 +23,7 @@ import {
 } from "./core.ts";
 import { bodyLimitOf, endpointRefusal, type Routed, type Stripe, StripeError, transportUsed, webhookSigned, withCappedBody } from "./stripe.ts";
 import { MemoryStore, type Store } from "./store.ts";
-import { appOf, AppStoreRefused, type AppStoreConfig, appstoreConfigFrom, appstore, merged, transactionOf, verifySigned } from "./appstore.ts";
+import { appOf, AppStoreRefused, type AppStoreConfig, appstoreConfigFrom, checkSandboxApps, appstore, merged, transactionOf, verifySigned } from "./appstore.ts";
 import { RULES } from "../rules.ts";
 
 /** Where a tenant publishes its owner and its plans. */
@@ -909,8 +909,13 @@ if (import.meta.main) {
   }
   const settings = {
     issuer, secret, signingKey: env("BILLING_SIGNING_KEY"), feePercent: Number(env("BILLING_FEE_PERCENT") ?? 0), store: await storeFrom(env), doorAsked: env("STRIPE_DOOR_ASKED") === "1",
-    appstore: appstoreConfigFrom(env),
+    appstore: await appstoreConfigFrom(env),
   };
+  // A live broker serves a sandbox app only for a tenant it holds in Stripe's sandbox (L1): refused at start, not at the first purchase.
+  if (settings.appstore && !/^https?:\/\/localhost(:\d+)?$/.test(issuer.replace(/\/$/, ""))) {
+    const sandboxed = env("BILLING_SANDBOX_TENANTS");
+    checkSandboxApps(settings.appstore, sandboxed ? new RegExp(sandboxed) : null);
+  }
   const key = env("STRIPE_SECRET_KEY");
   // Off by default: set (by metal.nu --airlock), every Stripe call goes through the airlock's door at
   // this address, which holds the keys, and the broker holds none (PRONTO-135).

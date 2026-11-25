@@ -6,7 +6,7 @@ import { Refused } from "../shared.ts";
 import { fakeStripe } from "./fake.ts";
 import { bodyLimitOf, endpointRefusal, stripe as stripeClient, withCappedBody } from "./stripe.ts";
 import { broker } from "./main.ts";
-import { type AppStoreConfig, appstoreConfigFrom, heldOf, merged, verifySigned } from "./appstore.ts";
+import { type AppStoreConfig, appstoreConfigFrom, checkSandboxApps, heldOf, importApiKey, merged, verifySigned } from "./appstore.ts";
 import { MemoryStore } from "./store.ts";
 import { apiKeyPem, type Chain, makeChain, notification, transaction } from "./appstore_fixture.ts";
 
@@ -26,12 +26,12 @@ const chain = await makeChain();
 const rogue = await makeChain();
 const key = await apiKeyPem();
 
-interface Held { status: number; tx: Record<string, unknown> }
+interface Held { status: number; tx: Record<string, unknown>; renewal?: Record<string, unknown>; renewalSigner?: Chain }
 
 async function setup(o: { sandbox?: boolean; off?: boolean } = {}) {
   const config: AppStoreConfig = {
     apps: [{ bundleId: BUNDLE, tenant: A, products: { [PREMIUM]: "analysis" }, sandbox: o.sandbox === true }, { bundleId: OTHER_BUNDLE, tenant: B, products: { [PREMIUM]: "analysis" }, sandbox: false }],
-    roots: [chain.rootPem], issuerId: "11111111-2222-3333-4444-555555555555", keyId: "TESTKEY123", key,
+    roots: [chain.rootPem], issuerId: "11111111-2222-3333-4444-555555555555", keyId: "TESTKEY123", key: await importApiKey(key),
   };
   // What Apple's Server API answers for a subscription, by its original transaction id, and what it was asked with.
   const apple = { held: new Map<string, Held[]>(), calls: [] as { host: string; id: string; jwt: Record<string, unknown>; head: Record<string, unknown> }[], down: 0 };
@@ -50,6 +50,7 @@ async function setup(o: { sandbox?: boolean; off?: boolean } = {}) {
       if (apple.down) return new Response("down", { status: apple.down });
       const last = await Promise.all((apple.held.get(id) ?? []).map(async (h) => ({
         status: h.status, originalTransactionId: id, signedTransactionInfo: await chain.sign(h.tx),
+        ...(h.renewal ? { signedRenewalInfo: await (h.renewalSigner ?? chain).sign(h.renewal) } : {}),
       })));
       return Response.json({ environment: host.includes("sandbox") ? "Sandbox" : "Production", bundleId: BUNDLE, data: last.length ? [{ subscriptionGroupIdentifier: "1", lastTransactions: last }] : [] });
     }
@@ -75,7 +76,7 @@ async function setup(o: { sandbox?: boolean; off?: boolean } = {}) {
     post("/appstore/transaction", { tenant: A, account: ANA, transaction: await signer.sign(tx), ...over });
   const note = async (n: Record<string, unknown>, signer: Chain = chain) => post("/appstore", { signedPayload: await signer.sign(n) });
   // Apple holds a subscription: the transaction as its server answers it, and its status.
-  const hold = (id: string, status: number, tx: Record<string, unknown>) => apple.held.set(id, [{ status, tx }]);
+  const hold = (id: string, status: number, tx: Record<string, unknown>, extra: Partial<Held> = {}) => apple.held.set(id, [{ status, tx, ...extra }]);
   return { config, apple, tenants, post, claim, note, hold, handler, fake, keys };
 }
 
@@ -314,30 +315,33 @@ Deno.test("signed data: Apple's chain only, valid now, with Apple's extensions o
   await refuses(forged, [chain.rootPem], now, "signature");
 });
 
-Deno.test("what an operator sets, and what it must set together", () => {
+Deno.test("what an operator sets, and what it must set together", async () => {
   const env = (o: Record<string, string>) => (k: string) => o[k];
-  assertEquals(appstoreConfigFrom(env({})), undefined, "unset: off");
+  assertEquals(await appstoreConfigFrom(env({})), undefined, "unset: off");
   const apps = JSON.stringify([{ bundleId: BUNDLE, tenant: A, products: { [PREMIUM]: "analysis" } }]);
-  const whole = { APPSTORE_APPS: apps, APPSTORE_ROOTS: chain.rootPem, APPSTORE_ISSUER_ID: "i", APPSTORE_KEY_ID: "k", APPSTORE_KEY: "p" };
-  const config = appstoreConfigFrom(env(whole))!;
+  const whole = { APPSTORE_APPS: apps, APPSTORE_ROOTS: chain.rootPem, APPSTORE_ISSUER_ID: "i", APPSTORE_KEY_ID: "k", APPSTORE_KEY: key };
+  const config = (await appstoreConfigFrom(env(whole)))!;
   assertEquals([config.apps, config.roots.length], [[{ bundleId: BUNDLE, tenant: A, products: { [PREMIUM]: "analysis" }, sandbox: false }], 1]);
-  const fails = (o: Record<string, string>, why: RegExp) => {
+  const fails = async (o: Record<string, string>, why: RegExp) => {
     try {
-      appstoreConfigFrom(env(o));
+      await appstoreConfigFrom(env(o));
     } catch (e) {
       if (!why.test((e as Error).message)) throw new Error(`wrong failure: ${(e as Error).message}`);
       return;
     }
     throw new Error(`accepted: ${JSON.stringify(Object.keys(o))}`);
   };
-  fails({ APPSTORE_APPS: apps }, /APPSTORE_ROOTS, APPSTORE_ISSUER_ID, APPSTORE_KEY_ID, APPSTORE_KEY must be too/);
-  fails({ ...whole, APPSTORE_APPS: "nope" }, /JSON list/);
-  fails({ ...whole, APPSTORE_APPS: "[]" }, /at least one app/);
-  fails({ ...whole, APPSTORE_APPS: JSON.stringify([{ bundleId: BUNDLE, tenant: "http://a.example", products: { [PREMIUM]: "analysis" } }]) }, /https origin/);
-  fails({ ...whole, APPSTORE_APPS: JSON.stringify([{ bundleId: BUNDLE, tenant: A, products: { [PREMIUM]: "Not A Plan" } }]) }, /not a product id mapped to a plan id/);
-  fails({ ...whole, APPSTORE_APPS: JSON.stringify([{ bundleId: BUNDLE, tenant: A, products: {} }]) }, /products maps/);
-  fails({ ...whole, APPSTORE_APPS: JSON.stringify([{ bundleId: BUNDLE, tenant: A, products: { [PREMIUM]: "a" } }, { bundleId: BUNDLE, tenant: B, products: { [PREMIUM]: "a" } }]) }, /bundle id twice/);
-  fails({ ...whole, APPSTORE_ROOTS: "no certificate here" }, /root certificates/);
+  await fails({ APPSTORE_APPS: apps }, /APPSTORE_ROOTS, APPSTORE_ISSUER_ID, APPSTORE_KEY_ID, APPSTORE_KEY must be too/);
+  await fails({ ...whole, APPSTORE_APPS: "nope" }, /JSON list/);
+  await fails({ ...whole, APPSTORE_APPS: "[]" }, /at least one app/);
+  await fails({ ...whole, APPSTORE_APPS: JSON.stringify([{ bundleId: BUNDLE, tenant: "http://a.example", products: { [PREMIUM]: "analysis" } }]) }, /https origin/);
+  await fails({ ...whole, APPSTORE_APPS: JSON.stringify([{ bundleId: BUNDLE, tenant: A, products: { [PREMIUM]: "Not A Plan" } }]) }, /not a product id mapped to a plan id/);
+  await fails({ ...whole, APPSTORE_APPS: JSON.stringify([{ bundleId: BUNDLE, tenant: A, products: {} }]) }, /products maps/);
+  await fails({ ...whole, APPSTORE_APPS: JSON.stringify([{ bundleId: BUNDLE, tenant: A, products: { [PREMIUM]: "a" } }, { bundleId: BUNDLE, tenant: B, products: { [PREMIUM]: "a" } }]) }, /bundle id twice/);
+  await fails({ ...whole, APPSTORE_ROOTS: "no certificate here" }, /root certificates/);
+  // A key that is no P-256 .p8 stops the broker at start, not at the first purchase (L4).
+  await fails({ ...whole, APPSTORE_KEY: "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----" }, /APPSTORE_KEY is an App Store Connect \.p8/);
+  await fails({ ...whole, APPSTORE_KEY: "p" }, /APPSTORE_KEY is an App Store Connect \.p8/);
 });
 
 Deno.test("an account holds a plan only through a transaction of it, bought for the account, in an active subscription", () => {
@@ -360,5 +364,106 @@ Deno.test("the App Store's paths exist only where it is configured, and read the
     // Before a broker is chosen (twoModes): an oversized body is a 413 only where the path exists, else a 404 unread.
     const big = () => new Request(`${ISSUER}${path}`, { method: "POST", body: "x".repeat(16385) });
     assertEquals([(await withCappedBody(big(), false) as Response).status, (await withCappedBody(big(), false, true) as Response).status], [404, 413]);
+  }
+});
+
+// A certificate's extensions are read by their extnID: the same bytes inside another extension's value (which a requester
+// may choose) are no Apple extension. The review's proof of concept (oidsubj.ts), as a chain of the test's own.
+Deno.test("Apple's extension is the certificate's own extension, not its bytes found anywhere in it", async () => {
+  const payload = { transactionId: "1" };
+  const now = Date.now() + 10_000;
+  const hidden = await makeChain({ leafOidHidden: true });
+  try {
+    await verifySigned(await hidden.sign(payload), [hidden.rootPem], now);
+    throw new Error("accepted a leaf whose Apple OID bytes sit in another extension's value");
+  } catch (e) {
+    assertEquals((e as Error).message, "signed data refused: not Apple's signing certificates");
+  }
+  // The genuine extension still passes.
+  assertEquals(await verifySigned(await chain.sign(payload), [chain.rootPem], now), payload);
+});
+
+Deno.test("only a CA signs a certificate: a leaf that is a CA, an intermediate that is none, and a path too long are refused", async () => {
+  const payload = { transactionId: "1" };
+  const now = Date.now() + 10_000;
+  const refused = async (c: Chain, why: string) => {
+    try {
+      await verifySigned(await c.sign(payload), [c.rootPem], now);
+    } catch (e) {
+      assertEquals((e as Error).message, `signed data refused: ${why}`);
+      return;
+    }
+    throw new Error(`${why}: accepted`);
+  };
+  await refused(await makeChain({ leafIsCa: true }), "certificate constraints");
+  await refused(await makeChain({ intermediateIsCa: false }), "certificate constraints");
+  // The root allows no CA below it, but the chain has the intermediate; the intermediate allows none below itself, and the leaf is no CA.
+  await refused(await makeChain({ rootPathLen: 0 }), "certificate constraints");
+  const tight = await makeChain({ intermediatePathLen: 0, rootPathLen: 1 });
+  assertEquals(await verifySigned(await tight.sign(payload), [tight.rootPem], now), payload);
+});
+
+Deno.test("a player in Apple's grace period keeps the plan to the grace's end, read from signed renewal info", async () => {
+  const { tenants, claim, note, hold, apple } = await setup();
+  const got = () => tenants.get(A)!.got;
+  const tx = live("2000000000000070", { expiresDate: Date.now() - 1000 });
+  const grace = Date.now() + 10 * DAY;
+  // A claim for a transaction that has ended is refused as expired, as ever; a notification of the failed renewal is taken, in grace.
+  hold("2000000000000070", 4, tx, { renewal: { gracePeriodExpiresDate: grace, environment: "Production" } });
+  let res = await note(notification({ type: "DID_FAIL_TO_RENEW", subtype: "GRACE_PERIOD", uuid: "n-grace", signedTransactionInfo: await chain.sign(tx) }));
+  assertEquals(res.status, 200, await res.clone().text());
+  assertEquals([got().at(-1)!.active, got().at(-1)!.through], [true, Math.floor(grace / 1000)]);
+  // Without renewal info (Apple did not say when it ends), or past it, or its renewal info not Apple's: nothing is held.
+  hold("2000000000000070", 4, tx);
+  await note(notification({ type: "DID_FAIL_TO_RENEW", uuid: "n-g2", signedTransactionInfo: await chain.sign(tx) }));
+  assertEquals(got().at(-1)!.active, false, "no end given");
+  hold("2000000000000070", 4, tx, { renewal: { gracePeriodExpiresDate: Date.now() - 1000 } });
+  await note(notification({ type: "DID_FAIL_TO_RENEW", uuid: "n-g3", signedTransactionInfo: await chain.sign(tx) }));
+  assertEquals(got().at(-1)!.active, false, "the grace ended");
+  const before = got().length;
+  hold("2000000000000070", 4, tx, { renewal: { gracePeriodExpiresDate: grace }, renewalSigner: rogue });
+  res = await note(notification({ type: "DID_FAIL_TO_RENEW", uuid: "n-g4", signedTransactionInfo: await chain.sign(tx) }));
+  assertEquals([res.status, got().length], [502, before], "unsigned renewal info grants nothing and is no push");
+  // Then the grace expires into billing retry (status 3), which holds nothing; a revoked one in grace holds nothing either.
+  hold("2000000000000070", 4, tx, { renewal: { gracePeriodExpiresDate: grace } });
+  await note(notification({ type: "DID_FAIL_TO_RENEW", uuid: "n-g5", signedTransactionInfo: await chain.sign(tx) }));
+  assertEquals(got().at(-1)!.active, true);
+  hold("2000000000000070", 3, tx);
+  await note(notification({ type: "GRACE_PERIOD_EXPIRED", uuid: "n-g6", signedTransactionInfo: await chain.sign(tx) }));
+  assertEquals(got().at(-1)!.active, false);
+  hold("2000000000000070", 4, { ...tx, revocationDate: Date.now() - 1000 }, { renewal: { gracePeriodExpiresDate: grace } });
+  await note(notification({ type: "REVOKE", uuid: "n-g7", signedTransactionInfo: await chain.sign(tx) }));
+  assertEquals(got().at(-1)!.active, false);
+  // A claim in the grace is refused as expired (the player's own device sends a current transaction, which a renewal replaces).
+  res = await claim(tx);
+  assertEquals([res.status, (await res.json()).error], [409, "expired"]);
+  assertEquals(apple.calls.length > 0, true);
+});
+
+Deno.test("grace is held through the plan's merge and in the read of Apple, and only to its end", () => {
+  const app = { bundleId: BUNDLE, tenant: A, products: { [PREMIUM]: "analysis" }, sandbox: false };
+  const at = Date.now();
+  const tx = (over: object) => ({
+    transactionId: "t", originalTransactionId: "o", bundleId: BUNDLE, environment: "Production", productId: PREMIUM, appAccountToken: ANA,
+    expiresDate: at - DAY, revocationDate: null, status: 4, graceUntil: at + 2 * DAY, ...over,
+  }) as Parameters<typeof heldOf>[0][number];
+  assertEquals(heldOf([tx({})], app, ANA, "analysis", at), { active: true, through: Math.floor((at + 2 * DAY) / 1000) });
+  for (const [why, over] of [["no grace end", { graceUntil: null }], ["grace ended", { graceUntil: at - 1 }], ["revoked", { revocationDate: at - 2 }], ["billing retry", { status: 3 }]] as const) {
+    assertEquals([why, heldOf([tx(over)], app, ANA, "analysis", at)], [why, { active: false, through: 0 }]);
+  }
+});
+
+Deno.test("a sandbox app is served only by a broker that holds its tenant in the sandbox", () => {
+  const app = (sandbox: boolean, tenant = A) => ({ apps: [{ bundleId: BUNDLE, tenant, products: { [PREMIUM]: "analysis" }, sandbox }] });
+  checkSandboxApps(app(false), null); // a live app, on any broker
+  checkSandboxApps(app(true), /^https:\/\/a\.example$/); // a sandboxed tenant's
+  for (const pattern of [null, /^https:\/\/b\.example$/]) {
+    try {
+      checkSandboxApps(app(true), pattern);
+    } catch (e) {
+      assertEquals(/sandbox: true, but its tenant https:\/\/a\.example is not one BILLING_SANDBOX_TENANTS holds/.test((e as Error).message), true);
+      continue;
+    }
+    throw new Error(`a sandbox app on a live tenant was accepted (${pattern})`);
   }
 });

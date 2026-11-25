@@ -47,12 +47,17 @@ export interface AppStoreConfig {
   /** The App Store Server API key (App Store Connect > Users and Access > Integrations): issuer, key id, the .p8's PEM. */
   issuerId: string;
   keyId: string;
-  key: string;
+  /** The API key, imported when the configuration is read: a .p8 that is no P-256 key stops the broker at start. */
+  key: CryptoKey;
 }
+
+/** An App Store Connect .p8 (PKCS8 PEM) as a signing key. */
+export const importApiKey = (pem: string): Promise<CryptoKey> =>
+  crypto.subtle.importKey("pkcs8", der(pem), { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
 
 /** The configuration from the broker's environment, or undefined when APPSTORE_APPS is not set (the App Store is off).
  * Set, it must be whole and valid: a half-configured broker would take a transaction it cannot check, so it refuses to start. */
-export function appstoreConfigFrom(env: (k: string) => string | undefined): AppStoreConfig | undefined {
+export async function appstoreConfigFrom(env: (k: string) => string | undefined): Promise<AppStoreConfig | undefined> {
   const raw = env("APPSTORE_APPS");
   if (!raw) return undefined;
   const need = ["APPSTORE_ROOTS", "APPSTORE_ISSUER_ID", "APPSTORE_KEY_ID", "APPSTORE_KEY"].filter((k) => !env(k));
@@ -79,20 +84,88 @@ export function appstoreConfigFrom(env: (k: string) => string | undefined): AppS
   const roots = env("APPSTORE_ROOTS")!.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
   if (roots.length === 0) throw new Error("APPSTORE_ROOTS is Apple's root certificates, PEM");
   for (const r of roots) new X509Certificate(r);
-  return { apps, roots, issuerId: env("APPSTORE_ISSUER_ID")!, keyId: env("APPSTORE_KEY_ID")!, key: env("APPSTORE_KEY")! };
+  let key: CryptoKey;
+  try {
+    key = await importApiKey(env("APPSTORE_KEY")!);
+  } catch {
+    throw new Error("APPSTORE_KEY is an App Store Connect .p8: a PKCS8 PEM of a P-256 key");
+  }
+  return { apps, roots, issuerId: env("APPSTORE_ISSUER_ID")!, keyId: env("APPSTORE_KEY_ID")!, key };
 }
 
-// The extensions Apple puts on the certificates that sign App Store data: on the leaf 1.2.840.113635.100.6.11.1 and
-// on the intermediate 1.2.840.113635.100.6.2.1 (DER of the OID). Any certificate the same intermediate issued for
-// another purpose (an app developer's own, say) lacks the first, and signs no transaction.
-const LEAF_OID = Uint8Array.of(0x06, 0x0a, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x06, 0x0b, 0x01);
-const INTERMEDIATE_OID = Uint8Array.of(0x06, 0x0a, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x06, 0x02, 0x01);
-function holds(raw: Uint8Array, needle: Uint8Array): boolean {
-  outer: for (let i = 0; i + needle.length <= raw.length; i++) {
-    for (let j = 0; j < needle.length; j++) if (raw[i + j] !== needle[j]) continue outer;
-    return true;
+/** A sandbox app (its sandbox purchases count) may be served only by a broker that holds its tenant in Stripe's sandbox too: on a live
+ * one, a rehearsal build's free purchases would grant a live tenant's plan. `sandboxTenants` is BILLING_SANDBOX_TENANTS's pattern. */
+export function checkSandboxApps(config: Pick<AppStoreConfig, "apps">, sandboxTenants: RegExp | null): void {
+  for (const a of config.apps) {
+    if (a.sandbox && !(sandboxTenants && sandboxTenants.test(a.tenant))) {
+      throw new Error(`APPSTORE_APPS ${a.bundleId} has sandbox: true, but its tenant ${a.tenant} is not one BILLING_SANDBOX_TENANTS holds in the sandbox: a live tenant takes no sandbox purchases`);
+    }
   }
-  return false;
+}
+
+// The extensions Apple puts on the certificates that sign App Store data: on the leaf 1.2.840.113635.100.6.11.1 and on the
+// intermediate 1.2.840.113635.100.6.2.1 (the OID's content bytes, hex). Any certificate the same intermediate issued for another
+// purpose (an app developer's own, say) lacks the first, and signs no transaction. Read from the certificate's extensions by their
+// extnID, never by searching its bytes: those bytes can also sit inside another extension's value, which a requester may choose.
+const LEAF_OID = "2a864886f76364060b01";
+const INTERMEDIATE_OID = "2a864886f76364060201";
+const BASIC_CONSTRAINTS_OID = "551d13";
+
+interface Tlv { tag: number; start: number; end: number }
+/** One DER element at `at` within `buf`, or a refusal when it runs past `end`. */
+function tlv(buf: Uint8Array, at: number, end = buf.length): Tlv {
+  if (at + 2 > end) throw new Error("der");
+  const tag = buf[at];
+  let len = buf[at + 1], start = at + 2;
+  if (len & 0x80) {
+    const n = len & 0x7f;
+    if (n < 1 || n > 4 || start + n > end) throw new Error("der");
+    len = 0;
+    for (let i = 0; i < n; i++) len = len * 256 + buf[start + i];
+    start += n;
+  }
+  if (start + len > end) throw new Error("der");
+  return { tag, start, end: start + len };
+}
+const children = (buf: Uint8Array, e: Tlv): Tlv[] => {
+  const out: Tlv[] = [];
+  for (let at = e.start; at < e.end;) {
+    const c = tlv(buf, at, e.end);
+    out.push(c);
+    at = c.end;
+  }
+  return out;
+};
+const hex = (buf: Uint8Array, e: Tlv) => Array.from(buf.subarray(e.start, e.end), (b) => b.toString(16).padStart(2, "0")).join("");
+
+/** A certificate's extensions (tbsCertificate [3]): each extnID as hex, with its value (the OCTET STRING's content). A certificate that
+ * does not parse as X.509 DER throws, and is refused by the caller. */
+function extensionsOf(raw: Uint8Array): { id: string; value: Tlv }[] {
+  const tbs = children(raw, tlv(raw, 0))[0];
+  const block = children(raw, tbs).find((f) => f.tag === 0xa3);
+  if (!block) return [];
+  const list = children(raw, block)[0];
+  const out: { id: string; value: Tlv }[] = [];
+  for (const ext of children(raw, list)) {
+    const [oid, ...rest] = children(raw, ext);
+    const value = rest.at(-1);
+    if (oid?.tag !== 0x06 || value?.tag !== 0x04) throw new Error("der");
+    out.push({ id: hex(raw, oid), value });
+  }
+  return out;
+}
+const hasExtension = (raw: Uint8Array, id: string) => extensionsOf(raw).some((e) => e.id === id);
+
+/** A certificate's basicConstraints: whether it is a CA, and the most CAs that may follow it (pathLenConstraint) where it says. */
+function constraintsOf(raw: Uint8Array): { ca: boolean; pathLen: number | null } {
+  const ext = extensionsOf(raw).find((e) => e.id === BASIC_CONSTRAINTS_OID);
+  if (!ext) return { ca: false, pathLen: null };
+  let ca = false, pathLen: number | null = null;
+  for (const f of children(raw, tlv(raw, ext.value.start, ext.value.end))) {
+    if (f.tag === 0x01) ca = raw[f.start] !== 0;
+    else if (f.tag === 0x02) pathLen = Array.from(raw.subarray(f.start, f.end)).reduce((n, b) => n * 256 + b, 0);
+  }
+  return { ca, pathLen };
 }
 
 const decoder = new TextDecoder();
@@ -126,11 +199,30 @@ export async function verifySigned(jws: unknown, roots: readonly string[], now: 
   for (let i = 0; i + 1 < chain.length; i++) {
     if (!chain[i].verify(chain[i + 1].publicKey)) throw refuse("certificate chain");
   }
+  // The leaf is no CA and every certificate above it is one; a pathLenConstraint bounds the CAs below it.
+  let constraints: { ca: boolean; pathLen: number | null }[];
+  try {
+    constraints = chain.map((c) => constraintsOf(c.raw));
+  } catch {
+    throw refuse("certificate chain");
+  }
+  const within = (c: { ca: boolean; pathLen: number | null }, below: number) => c.ca && (c.pathLen === null || c.pathLen >= below);
+  if (constraints[0].ca || !constraints.slice(1).every((c, i) => within(c, i))) throw refuse("certificate constraints");
   const top = chain[chain.length - 1];
   const pinned = roots.map((r) => new X509Certificate(r));
-  const anchored = pinned.some((r) => (r.raw.equals(top.raw) && fresh(r, now)) || (fresh(r, now) && r.ca && top.verify(r.publicKey)));
+  // A pinned root that signed the chain's last certificate: the CAs below it are the chain's intermediates.
+  let anchored = false;
+  try {
+    anchored = pinned.some((r) => fresh(r, now) && (r.raw.equals(top.raw) || (within(constraintsOf(r.raw), chain.length - 1) && top.verify(r.publicKey))));
+  } catch { /* a root that does not parse anchors nothing */ }
   if (!anchored) throw refuse("not Apple's root");
-  if (!holds(chain[0].raw, LEAF_OID) || !holds(chain[1].raw, INTERMEDIATE_OID) || !chain[1].ca) throw refuse("not Apple's signing certificates");
+  let signing: boolean;
+  try {
+    signing = hasExtension(chain[0].raw, LEAF_OID) && hasExtension(chain[1].raw, INTERMEDIATE_OID);
+  } catch {
+    throw refuse("certificate chain");
+  }
+  if (!signing) throw refuse("not Apple's signing certificates");
   let ok = false;
   try {
     const spki = new Uint8Array(chain[0].publicKey.export({ format: "der", type: "spki" }));
@@ -181,8 +273,10 @@ export function appOf(config: AppStoreConfig, tx: { bundleId: string; environmen
 
 const API = { Production: "https://api.storekit.itunes.apple.com", Sandbox: "https://api.storekit-sandbox.itunes.apple.com" } as const;
 /** App Store Server API's subscription status: 1 is active; 2 expired, 3 in billing retry, 4 in grace period, 5 revoked.
- * Only an active subscription holds a plan, as only an active or trialing Stripe one does (core.ts's entitlementOf). */
-const ACTIVE = 1;
+ * An active subscription holds a plan, as an active or trialing Stripe one does (core.ts's entitlementOf); one in its grace period
+ * (Apple keeps trying to charge a paying player, and asks the app to keep serving) holds it until the grace ends. Billing retry
+ * (after the grace, or with none), expired and revoked hold nothing. */
+const ACTIVE = 1, GRACE = 4;
 
 function der(pem: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(pem.replace(/-----[A-Z ]+-----|\s/g, "")), (c) => c.charCodeAt(0));
@@ -192,10 +286,9 @@ function der(pem: string): Uint8Array<ArrayBuffer> {
  * operator's key, every transaction in the answer checked as any other signed data. */
 export async function statusOf(p: {
   config: AppStoreConfig; app: AppStoreApp; originalTransactionId: string; environment: "Production" | "Sandbox"; fetcher: typeof fetch; now: number;
-}): Promise<(Transaction & { status: number })[]> {
-  const key = await crypto.subtle.importKey("pkcs8", der(p.config.key), { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+}): Promise<(Transaction & { status: number; graceUntil: number | null })[]> {
   const iat = Math.floor(p.now / 1000);
-  const token = await signEs256(key, p.config.keyId, { iss: p.config.issuerId, iat, exp: iat + 300, aud: "appstoreconnect-v1", bid: p.app.bundleId });
+  const token = await signEs256(p.config.key, p.config.keyId, { iss: p.config.issuerId, iat, exp: iat + 300, aud: "appstoreconnect-v1", bid: p.app.bundleId });
   let res: Response;
   try {
     res = await p.fetcher(`${API[p.environment]}/inApps/v1/subscriptions/${encodeURIComponent(p.originalTransactionId)}`, {
@@ -210,38 +303,46 @@ export async function statusOf(p: {
     throw new AppStoreRefused(502, "the App Store is unavailable");
   }
   const text = await readCapped(res.body, 262144, res.headers.get("content-length"));
-  let doc: { data?: { lastTransactions?: { status?: unknown; signedTransactionInfo?: unknown }[] }[] };
+  let doc: { data?: { lastTransactions?: { status?: unknown; signedTransactionInfo?: unknown; signedRenewalInfo?: unknown }[] }[] };
   try {
     doc = JSON.parse(text ?? "");
   } catch {
     throw new AppStoreRefused(502, "the App Store's answer is unreadable");
   }
-  const out: (Transaction & { status: number })[] = [];
+  const out: (Transaction & { status: number; graceUntil: number | null })[] = [];
   for (const group of doc.data ?? []) {
     for (const last of group.lastTransactions ?? []) {
-      let tx: Transaction;
+      let tx: Transaction, graceUntil: number | null = null;
       try {
         tx = transactionOf(await verifySigned(last.signedTransactionInfo, p.config.roots, p.now));
+        // In a grace period (status 4) the renewal info, signed as any other, says when the grace ends.
+        if (last.status === GRACE) {
+          const grace = last.signedRenewalInfo === undefined ? null : (await verifySigned(last.signedRenewalInfo, p.config.roots, p.now)).gracePeriodExpiresDate;
+          graceUntil = Number.isFinite(grace) ? grace as number : null;
+        }
       } catch (e) {
         // Apple's own answer failing its signature is the channel's fault, never the player's.
         console.error(`billing: App Store Server API answer refused: ${e instanceof Error ? e.message : e}`);
         throw new AppStoreRefused(502, "the App Store's answer was refused");
       }
       if (tx.bundleId !== p.app.bundleId || tx.environment !== p.environment || !Number.isInteger(last.status)) continue;
-      out.push({ ...tx, status: last.status as number });
+      out.push({ ...tx, status: last.status as number, graceUntil });
     }
   }
   return out;
 }
 
-/** What the App Store holds for one account and plan, from a read of Apple: active while a transaction of the plan
- * bought for this account is in an active subscription, not revoked and not yet expired, through the latest end. */
-export function heldOf(txs: readonly (Transaction & { status: number })[], app: AppStoreApp, account: string, plan: string, now: number): { active: boolean; through: number } {
+/** What the App Store holds for one account and plan, from a read of Apple: active while a transaction of the plan bought for this
+ * account is in an active subscription, not revoked and not yet expired, or in its grace period (through the grace's end), to the
+ * latest end. */
+export function heldOf(txs: readonly (Transaction & { status: number; graceUntil?: number | null })[], app: AppStoreApp, account: string, plan: string, now: number): { active: boolean; through: number } {
   let through = 0;
   for (const tx of txs) {
     if (tx.appAccountToken !== account || app.products[tx.productId] !== plan) continue;
-    if (tx.status !== ACTIVE || tx.revocationDate !== null || tx.expiresDate === null || tx.expiresDate <= now) continue;
-    through = Math.max(through, Math.floor(tx.expiresDate / 1000));
+    if (tx.revocationDate !== null) continue;
+    const end = tx.status === ACTIVE ? tx.expiresDate : tx.status === GRACE ? tx.graceUntil ?? null : null;
+    if (end === null || end <= now) continue;
+    through = Math.max(through, Math.floor(end / 1000));
   }
   return { active: through > 0, through };
 }

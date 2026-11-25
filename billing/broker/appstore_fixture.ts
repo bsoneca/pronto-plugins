@@ -20,15 +20,20 @@ export interface Chain {
 }
 
 /** A chain: valid for `days` from now, with or without Apple's two extensions. */
-export async function makeChain(o: { days?: number; leafExtension?: boolean; intermediateExtension?: boolean; leafIsCa?: boolean } = {}): Promise<Chain> {
+export async function makeChain(o: {
+  days?: number; leafExtension?: boolean; intermediateExtension?: boolean; leafIsCa?: boolean; intermediateIsCa?: boolean;
+  /** A leaf without Apple's extension whose OID bytes sit inside another extension's value (the review's proof of concept). */
+  leafOidHidden?: boolean;
+  rootPathLen?: number; intermediatePathLen?: number;
+} = {}): Promise<Chain> {
   const dir = await Deno.makeTempDir({ prefix: "appstore-fixture-" });
   try {
     const days = String(o.days ?? 30);
     await openssl(dir, "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", "root.key");
-    await openssl(dir, "req", "-x509", "-new", "-key", "root.key", "-subj", "/CN=Test Root CA", "-days", days, "-out", "root.pem", "-addext", "basicConstraints=critical,CA:TRUE");
+    await openssl(dir, "req", "-x509", "-new", "-key", "root.key", "-subj", "/CN=Test Root CA", "-days", days, "-out", "root.pem", "-addext", `basicConstraints=critical,CA:TRUE${o.rootPathLen === undefined ? "" : `,pathlen:${o.rootPathLen}`}`);
     for (const [name, serial, ca, oid] of [
-      ["inter", "2", "CA:TRUE", o.intermediateExtension === false ? "" : "\n1.2.840.113635.100.6.2.1=ASN1:NULL"],
-      ["leaf", "3", o.leafIsCa ? "CA:TRUE" : "CA:FALSE", o.leafExtension === false ? "" : "\n1.2.840.113635.100.6.11.1=ASN1:NULL"],
+      ["inter", "2", `${o.intermediateIsCa === false ? "CA:FALSE" : "CA:TRUE"}${o.intermediatePathLen === undefined ? "" : `,pathlen:${o.intermediatePathLen}`}`, o.intermediateExtension === false ? "" : "\n1.2.840.113635.100.6.2.1=ASN1:NULL"],
+      ["leaf", "3", o.leafIsCa ? "CA:TRUE" : "CA:FALSE", o.leafOidHidden ? "\n1.3.6.1.4.1.99999.1=DER:060A2A864886F76364060B01" : o.leafExtension === false ? "" : "\n1.2.840.113635.100.6.11.1=ASN1:NULL"],
     ]) {
       await openssl(dir, "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", `${name}.key`);
       await openssl(dir, "req", "-new", "-key", `${name}.key`, "-subj", `/CN=Test ${name}`, "-out", `${name}.csr`);

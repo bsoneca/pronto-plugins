@@ -138,15 +138,19 @@ unset `/appstore` and `/appstore/transaction` are no endpoints (404) and nothing
 - `POST /appstore`: Apple's App Store Server Notifications v2 (`signedPayload`); set it as the app's production and sandbox URL.
 
 Nothing a client says is believed. Signed data is checked as Apple's (ES256, the `x5c` chain valid now and ending at a pinned
-root, Apple's two extensions on the intermediate and the leaf), then must name a bundle the operator tied to the tenant, an
+root, the leaf no CA and every certificate above it one with its pathLenConstraint held, and Apple's two extensions on the intermediate and the leaf, found by their extension id and never by searching the certificate's bytes), then must name a bundle the operator tied to the tenant, an
 environment that counts, a product that is a plan, and the account: the iOS host sets `appAccountToken` to the account's uuid
 at purchase, and a purchase for another account is refused. It is then only a pointer: the subscription is **read again from
 Apple's Server API** (as a Stripe event is read again from Stripe), so a replayed, reordered or forged message only makes the
 broker ask Apple. A transaction already taken is refused (409 `replayed`); a notification (renew, expire, refund, revoke and
 the like) is taken once by its `notificationUUID`. A subscription holds the plan while Apple's status for it is active and the
-transaction is neither revoked nor ended; expired, billing retry, grace period and revoked hold nothing, as a Stripe subscription
-past due holds nothing. What Apple held for the account is kept (`appstore held`, in the store) so a Stripe event for the same
+transaction is neither revoked nor ended, or while it is in its **grace period** (status 4: Apple is still trying to charge a paying
+player), through the `gracePeriodExpiresDate` of its `signedRenewalInfo`, which is verified like any signed data; with no end
+there, a grace holds nothing. Billing retry, expired and revoked hold nothing. What Apple held for the account is kept (`appstore held`, in the store) so a Stripe event for the same
 account does not lapse it, and the entitlement pushed is the later end of the two. Gold (consumables) is not sold through it yet.
+
+Startup refuses what would be unsafe: a half-set configuration, an `APPSTORE_KEY` that is not a P-256 `.p8`, and (on a broker that is not
+on localhost) an app with `sandbox: true` whose tenant `BILLING_SANDBOX_TENANTS` does not hold in Stripe's sandbox.
 
 ## Security model
 
