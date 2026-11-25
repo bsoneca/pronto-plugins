@@ -142,11 +142,19 @@ if [ -f "$d/registry_dead" ]; then printf 000; exit 7; fi
 case "$*" in
   *"/blobs/sha256:"*)
     echo "$*" >> "$d/blob_curl.log"
-    # blob_500 / blob_404: every blob answers so; blob_404_once: 404 until the registry is restarted. A ranged GET answers 206.
-    if [ -f "$d/blob_500" ]; then printf 500; exit 0; fi
-    if [ -f "$d/blob_404" ]; then printf 404; exit 0; fi
-    if [ -f "$d/blob_404_once" ] && [ ! -f "$d/state/registry_restarted" ]; then printf 404; exit 0; fi
-    printf 206; exit 0 ;;
+    # What `-w "\n%{http_code} %{size_download}"` makes: a line with the status and the bytes that came. blob_500 / blob_404 /
+    # blob_200 / blob_timeout (curl exit 28): every blob answers so. blob_cutoff: 206 with no body, curl exit 18, as distribution
+    # <= 3.1.2 answers for a layer its cache lists and the collector deleted; blob_404_once: the same until the registry is restarted.
+    # blob_416: the layer (by its digest) answers 416, the answer for an empty blob. A ranged GET otherwise answers 206 and one byte.
+    cut() { echo "curl: (18) transfer closed with outstanding read data remaining" >&2; printf '\n206 0'; exit 18; }
+    if [ -f "$d/blob_500" ]; then printf '\n500 0'; exit 0; fi
+    if [ -f "$d/blob_404" ]; then printf '\n404 0'; exit 0; fi
+    if [ -f "$d/blob_200" ]; then printf '\n200 100'; exit 0; fi
+    if [ -f "$d/blob_timeout" ]; then echo "curl: (28) Operation timed out" >&2; exit 28; fi
+    if [ -f "$d/blob_cutoff" ]; then cut; fi
+    if [ -f "$d/blob_404_once" ] && [ ! -f "$d/state/registry_restarted" ]; then cut; fi
+    if [ -f "$d/blob_416" ]; then case "$*" in *"blobs/sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"*) printf '\n416 0'; exit 0 ;; esac; fi
+    printf '\n206 1'; exit 0 ;;
   *"/manifests/sha256:"*)
     echo "$*" >> "$d/manifest_curl.log"
     # the body, then a line with the status: what `-w "\n%{http_code}"` makes. manifest_500, manifest_cutoff (curl exit 18),
@@ -157,7 +165,8 @@ case "$*" in
     if [ -f "$d/manifest_404_for" ]; then case "$*" in *"/v2/$(cat "$d/manifest_404_for")/"*) printf '\n404'; exit 0 ;; esac; fi
     if [ -f "$d/manifest_404_once" ] && [ ! -f "$d/state/registry_restarted" ]; then printf '\n404'; exit 0; fi
     if [ -f "$d/manifest_index" ]; then case "$*" in *"manifests/sha256:1111111111111111111111111111111111111111111111111111111111111111") printf '{"manifests":[{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}\n200'; exit 0 ;; esac; fi
-    printf '{"config":{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"layers":[{"digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]}\n200'; exit 0 ;;
+    layer_size=20; [ -f "$d/zero_layer" ] && layer_size=0
+    printf '{"config":{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":10},"layers":[{"digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","size":%s}]}\n200' "$layer_size"; exit 0 ;;
 esac
 printf 200
 '# | str trim --left | save -f ($d | path join bin curl)
@@ -261,6 +270,9 @@ def main [] {
 	test_a_pushed_digest_the_registry_lost_restarts_it_and_pushes_again
 	test_a_digest_still_lost_after_the_restart_fails_before_the_rollout
 	test_a_layer_the_registry_lost_under_a_manifest_that_answers_is_found
+	test_a_blob_still_cut_off_after_the_restart_fails_the_release
+	test_a_blob_that_answers_200_or_416_for_an_empty_one_is_served
+	test_an_open_upload_or_a_held_lock_blocks_the_registry_restart
 	test_an_answer_that_is_not_a_404_fails_the_release_with_no_restart
 	test_another_releases_lease_blocks_the_registry_restart
 	test_only_the_image_that_is_missing_is_named
@@ -1067,7 +1079,7 @@ def test_a_digest_still_lost_after_the_restart_fails_before_the_rollout [] {
 }
 
 def test_a_layer_the_registry_lost_under_a_manifest_that_answers_is_found [] {
-	print "test a layer that 404s under a manifest that answers 200 restarts the registry and bakes again, and a blob is asked its first byte..."
+	print "test a layer that answers 206 with no body (curl 18) under a manifest that answers 200 restarts the registry and bakes again, and a blob is asked its first byte..."
 	let w = (sandbox)
 	"" | save -f ($w.dir | path join blob_404_once)
 	let r = (in-world $w $release_nu --app $w.app)
@@ -1081,14 +1093,69 @@ def test_a_layer_the_registry_lost_under_a_manifest_that_answers_is_found [] {
 	rm -rf $w.dir
 }
 
+def test_a_blob_still_cut_off_after_the_restart_fails_the_release [] {
+	print "test a blob that is still cut off after the restart and the second bake fails the release naming it, with one restart..."
+	let w = (sandbox)
+	"" | save -f ($w.dir | path join blob_cutoff)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "still does not serve them after a restart and a second push") $r.stderr
+	assert (has $r.stderr $"@sha256:('d' | fill -c 'd' -w 64)") $r.stderr
+	assert equal (bakes $w) 2
+	assert equal (restarts $w) 1
+	rm -rf $w.dir
+}
+
+def test_a_blob_that_answers_200_or_416_for_an_empty_one_is_served [] {
+	print "test a blob that answers 200 (a registry that ignores the range) is served, and 416 is the answer of an empty blob only..."
+	let w = (sandbox)
+	"" | save -f ($w.dir | path join blob_200)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert (released $r) $"($r.stdout)\n($r.stderr)"
+	assert equal (restarts $w) 0
+	assert equal (bakes $w) 1
+	rm -rf $w.dir
+	# an empty layer (size 0 in the manifest) answers 416
+	let z = (sandbox)
+	"" | save -f ($z.dir | path join zero_layer)
+	"" | save -f ($z.dir | path join blob_416)
+	let r2 = (in-world $z $release_nu --app $z.app)
+	assert (released $r2) $"($r2.stdout)\n($r2.stderr)"
+	assert equal (restarts $z) 0
+	rm -rf $z.dir
+}
+
+def test_an_open_upload_or_a_held_lock_blocks_the_registry_restart [] {
+	print "test a restart is refused while an upload is open (a push with no lease) or another collector holds the lock..."
+	let w = (sandbox)
+	"/var/lib/registry/docker/registry/v2/repositories/x/_uploads/u" | save -f ($w.state | path join uploads)
+	"" | save -f ($w.dir | path join manifest_404_once)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "an upload is open (a push outside the leases), and a restart would cut it") $r.stderr
+	assert equal (restarts $w) 0
+	assert equal (bakes $w) 1
+	rm -rf $w.dir
+	# another collector holds the lock: the restart waits for nobody and is refused
+	let l = (sandbox)
+	seed-lease $l registry-gc-lock collector-other 5
+	let build = "{registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}}"
+	let c = (in-world $l -c $"use ($engine_dir | path join registry.nu); registry restart-alone ($build) ''")
+	assert equal $c.exit_code 0 $"($c.stdout)($c.stderr)"
+	assert (has $c.stdout "another release is collecting") $c.stdout
+	assert equal (restarts $l) 0
+	assert (($l.state | path join lease registry-gc-lock) | path exists) "the other collector's lock is left alone"
+	rm -rf $l.dir
+}
+
 def test_an_answer_that_is_not_a_404_fails_the_release_with_no_restart [] {
-	print "test a 500, a cut-off body, and a 500 on a blob fail the release at once: nothing is restarted, nothing baked again..."
-	for marker in [manifest_500 manifest_cutoff blob_500] {
+	print "test a 500, a cut-off manifest, a 500 or a timeout on a blob, and a 416 for a blob that is not empty fail the release at once: nothing is restarted, nothing baked again..."
+	for marker in [manifest_500 manifest_cutoff blob_500 blob_timeout blob_416] {
 		let w = (sandbox)
 		"" | save -f ($w.dir | path join $marker)
 		let r = (in-world $w $release_nu --app $w.app)
 		assert ($r.exit_code != 0) $marker
-		let said = if $marker == "manifest_cutoff" { "(curl exit 18)" } else { "answered 500 for" }
+		let said = match $marker { "manifest_cutoff" => "(curl exit 18)", "blob_timeout" => "(curl exit 28)", "blob_416" => "answered 416 for", _ => "answered 500 for" }
 		assert (has $r.stderr $said) $"($marker): ($r.stderr)"
 		assert equal (bakes $w) 1 $marker
 		assert equal (restarts $w) 0 $marker

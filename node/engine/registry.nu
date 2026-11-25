@@ -253,7 +253,9 @@ export def lease-release [build: record, name: string] {
 	kubectl-out delete lease $name -n $build.registry.namespace --ignore-not-found | ignore
 }
 
-# The registry restarted and waited for: its in-memory blob descriptor cache starts empty.
+# The registry restarted and waited for: its in-memory blob descriptor cache starts empty. A rollout that does not finish in 120 s
+# fails the release with the lock released: the registry may still be rolling when the next release takes its lease (a window: that
+# release's first request meets a pod that is not ready, and its own check fails clearly, never a rollout of broken images).
 export def restart [build: record] {
 	let target = $"deploy/($build.registry.deployment)"
 	kubectl-out rollout restart -n $build.registry.namespace $target | ignore
@@ -263,8 +265,10 @@ export def restart [build: record] {
 # The registry restarted when it can be, for the release that holds `own` as its lease: only while the blob descriptor cache is
 # on (else a restart brings nothing back), and, under the collector's lock, only while no other release holds a lease (a restart
 # cuts the pushes in flight, so one release's restart never lands on another's bake, and two releases never both restart).
+# A push that holds no lease (an older fork's release) is seen only as an open upload, so one open refuses the restart too.
 # Answers "" when it restarted, else why it did not.
 export def restart-alone [build: record, own: string = ""]: nothing -> string {
+	let target = $"deploy/($build.registry.deployment)"
 	let cache = (blob-cache $build)
 	if $cache in ["none" "disabled"] { return $"its blob descriptor cache is ($cache), so a restart would not bring the images back" }
 	with-lock $build {
@@ -272,16 +276,27 @@ export def restart-alone [build: record, own: string = ""]: nothing -> string {
 		if ($others | is-not-empty) {
 			$"other releases are in flight \(($others | get name | str join ', ')\), and a restart would cut their pushes: release again once they end"
 		} else {
-			restart $build
-			""
+			let uploads = (open-upload $build.registry.namespace $target)
+			if ($uploads | is-not-empty) {
+				"an upload is open (a push outside the leases), and a restart would cut it: release again once it ends"
+			} else {
+				restart $build
+				""
+			}
 		}
 	}
 }
 
+# The path of an upload that is open in the registry ("" when none): a push in flight, or a dead one.
+def open-upload [ns: string, target: string]: nothing -> string {
+	let repos = "/var/lib/registry/docker/registry/v2/repositories"
+	kubectl-out exec -n $ns $target -- find $repos -mindepth 1 -maxdepth 4 -path "*/_uploads/*" -print -quit | str trim
+}
+
 # One GET of the registry: {status, body}. A curl that fails (a refused or cut-off connection, a body cut short: exit 18, 15 s
 # of silence) is an error, never an absence: a registry that is down or broken is not a stale cache.
-def --wrapped probe [url: string, ...extra: string]: nothing -> record {
-	let r = (^curl -sS --max-time 15 -H $"Accept: ($accept)" -w "\n%{http_code}" ...$extra $url | complete)
+def probe [url: string]: nothing -> record {
+	let r = (^curl -sS --max-time 15 -H $"Accept: ($accept)" -w "\n%{http_code}" $url | complete)
 	if $r.exit_code != 0 { error make {msg: $"asking the registry for ($url) failed \(curl exit ($r.exit_code)\): ($r.stderr | str trim)"} }
 	let lines = ($r.stdout | lines)
 	{status: ($lines | last | str trim), body: ($lines | drop 1 | str join (char nl))}
@@ -291,9 +306,19 @@ def unexpected [url: string, status: string] {
 	error make {msg: $"the registry answered ($status) for ($url) after its push: it is not serving the images just pushed"}
 }
 
-# What of an image the registry does not serve (404): the manifest, an index's children's, and the config and every layer of each
-# image, read from the manifest's body and each asked for the first byte. A layer the collector deleted is still vouched for by a
-# stale descriptor cache, so buildkit skips it and the manifest answers 200 over a blob that is gone. Any other answer is an error.
+# A blob asked its first byte: {exit, status, size, stderr}, size being the bytes that came. The caller reads the exit code: a
+# registry on distribution 3.1.2 or older whose descriptor cache still lists a layer the collector deleted answers 206 with a
+# Content-Length of 1 and no body (the file reader of a missing file is empty), which curl reports as exit 18 with 0 bytes.
+def probe-blob [url: string]: nothing -> record {
+	let r = (^curl -sS --max-time 15 -H $"Accept: ($accept)" -o /dev/null -r 0-0 -w "\n%{http_code} %{size_download}" $url | complete)
+	let last = ($r.stdout | lines | last 1 | each {|l| $l | str trim | split row " " } | get -o 0 | default [])
+	{exit: $r.exit_code, status: ($last | get -o 0 | default ""), size: ($last | get -o 1 | default "0" | into int), stderr: ($r.stderr | str trim)}
+}
+
+# What of an image the registry does not serve (404, or a blob that answers with nothing: see probe-blob): the manifest, an index's
+# children's, and the config and every layer of each image, read from the manifest's body and each asked for the first byte. A layer
+# the collector deleted is still vouched for by a stale descriptor cache, so buildkit skips it and the manifest answers 200 over a
+# blob that is gone. Any other answer, and any other curl failure, is an error. 416 is the answer for an empty blob (size 0).
 def manifest-gaps [registry: string, repo: string, digest: string]: nothing -> list<record<repo: string, digest: string>> {
 	let url = $"http://($registry)/v2/($repo)/manifests/($digest)"
 	let m = (probe $url)
@@ -305,11 +330,18 @@ def manifest-gaps [registry: string, repo: string, digest: string]: nothing -> l
 	mut gone = []
 	for c in $kids { $gone = ($gone | append (manifest-gaps $registry $repo $c)) }
 	if ($kids | is-not-empty) { return $gone }
-	let blobs = ([($doc | get -o config.digest)] | append ($doc | get -o layers | default [] | each {|l| $l.digest }) | compact)
+	let blobs = ([($doc | get -o config)] | append ($doc | get -o layers | default []) | compact | each {|d| {digest: $d.digest, size: ($d | get -o size | default (-1))} })
 	for b in $blobs {
-		let burl = $"http://($registry)/v2/($repo)/blobs/($b)"
-		let r = (probe $burl -o /dev/null -r 0-0)
-		if $r.status == "404" { $gone = ($gone | append {repo: $repo, digest: $b}) } else if $r.status not-in ["200" "206"] { unexpected $burl $r.status }
+		let burl = $"http://($registry)/v2/($repo)/blobs/($b.digest)"
+		let r = (probe-blob $burl)
+		let cut = ($r.exit == 18 and $r.status in ["200" "206"] and $r.size == 0)
+		if $r.exit != 0 and not $cut { error make {msg: $"asking the registry for ($burl) failed \(curl exit ($r.exit)\): ($r.stderr)"} }
+		if $cut or $r.status == "404" {
+			$gone = ($gone | append {repo: $repo, digest: $b.digest})
+		} else if $r.status == "416" and $b.size == 0 {
+		} else if $r.status not-in ["200" "206"] {
+			unexpected $burl $r.status
+		}
 	}
 	$gone
 }
@@ -334,7 +366,7 @@ def collect-locked [build: record, ns: string, target: string]: nothing -> strin
 		}
 		error make {msg: $"looking for the registry's repositories failed: ($has_repos.stderr | str trim)"}
 	}
-	let uploads = (kubectl-out exec -n $ns $target -- find $repos -mindepth 1 -maxdepth 4 -path "*/_uploads/*" -print -quit | str trim)
+	let uploads = (open-upload $ns $target)
 	if ($uploads | is-not-empty) {
 		let why = "an upload is open (a push outside the leases, or a dead one)"
 		print $"node: (stamp) the node's registry: ($why): its garbage collection waits for the next release"
