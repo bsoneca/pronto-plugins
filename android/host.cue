@@ -34,7 +34,7 @@ _template: {
 	"app/src/main/res/values/themes.xml":  _ @embed(file="template/app/src/main/res/values/themes.xml", type=text)
 	"app/src/main/res/xml/autofill_service.xml": _ @embed(file="template/app/src/main/res/xml/autofill_service.xml", type=text)
 	"app/src/main/assets/host.js":         _ @embed(file="template/app/src/main/assets/host.js", type=text)
-	"app/src/main/assets/ses.umd.min.js":  _ @embed(file="template/app/src/main/assets/ses.umd.min.js", type=text)
+	"app/src/main/assets/ses.umd.min.js":  native.sources.ses
 	"app/src/main/assets/screen.js":       _ @embed(file="template/app/src/main/assets/screen.js", type=text)
 	"app/src/main/assets/autofill.json":   _ @embed(file="template/app/src/main/assets/autofill.json", type=text)
 	"app/src/test/kotlin/FillTest.kt":     _ @embed(file="template/app/src/test/kotlin/FillTest.kt", type=text)
@@ -92,7 +92,7 @@ _terminal: {
 	"terminal/css.js":                     _ @embed(file="template/terminal/css.js", type=text)
 	"terminal/display.js":                 _ @embed(file="template/terminal/display.js", type=text)
 	"terminal/main.js":                    _ @embed(file="template/terminal/main.js", type=text)
-	"terminal/passkeys.js":                _ @embed(file="template/terminal/passkeys.js", type=text)
+	"terminal/passkeys.js":                native.sources.passkeys
 	"terminal/scenarios.ts":               _ @embed(file="template/terminal/scenarios.ts", type=text)
 	"terminal/emulator.ts":                _ @embed(file="template/terminal/emulator.ts", type=text)
 	"terminal/trust.ts":                   _ @embed(file="template/terminal/trust.ts", type=text)

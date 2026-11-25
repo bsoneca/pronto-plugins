@@ -43,6 +43,27 @@ export function androidBridges() {
   return { missing: sorted(contract.filter((n) => !have.includes(n))), extra: sorted(have.filter((n) => !contract.includes(n))) };
 }
 
+/** The bridges the contract names against the ones iOS's engine defines (Swift's `bind`, the prelude's globals): what is missing, and what it adds. */
+export function iosBridges() {
+  const contract = Object.keys(exportOf("./native", "bridges"));
+  const have = [
+    ...read("ios/template/Sources/TerminalEngine.swift").matchAll(/bind\("(__native_\w+)"/g),
+    ...read("ios/template/Sources/Resources/prelude.js").matchAll(/globalThis\.(__native_\w+) =/g),
+  ].map((m) => m[1]);
+  return { missing: sorted(contract.filter((n) => !have.includes(n))), extra: sorted(have.filter((n) => !contract.includes(n))) };
+}
+
+/** The files iOS writes from native/ against native/'s text: the paths that differ. */
+export function iosSharedSources() {
+  const files = exportOf("./ios/export", "files", ["app=emit"]);
+  const same = { "ios/Sources/Resources/ses.umd.min.js": "native/ses.umd.min.js", "ios/Tests/Resources/passkeys.js": "native/passkeys.js", "ios/Tests/Resources/battery.js": "native/battery.js" };
+  const battery = exportOf("./native", "battery");
+  return [
+    ...Object.entries(same).filter(([out, src]) => files[out].text !== read(src)).map(([out]) => out),
+    ...(files["ios/Tests/Resources/battery.json"].text === JSON.stringify(battery) ? [] : ["ios/Tests/Resources/battery.json"]),
+  ];
+}
+
 /** The callbacks the contract names against the ones Android's bundle defines. */
 export function androidCallbacks() {
   const contract = Object.keys(exportOf("./native", "callbacks"));

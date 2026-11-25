@@ -3,9 +3,9 @@
 // <battery.json> is `cue export ./native -e battery --out json`. Prints the runner's answers as JSON. It runs in a
 // process of its own because lockdown() freezes the intrinsics of the realm it runs in.
 import { memoryKv, run } from "./battery.js";
-import * as passkeys from "../android/template/terminal/passkeys.js";
+import * as passkeys from "./passkeys.js";
 
-const ses = Deno.readTextFileSync(new URL("../android/template/app/src/main/assets/ses.umd.min.js", import.meta.url));
+const ses = Deno.readTextFileSync(new URL("./ses.umd.min.js", import.meta.url));
 const cases = JSON.parse(Deno.readTextFileSync(Deno.args[0]));
 
 const indirect = eval;

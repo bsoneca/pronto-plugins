@@ -43,6 +43,14 @@ cases: {
 		{call: "native.exportOf", args: ["./ios", "[platforms, xcodeNamed, developerDir, slotted, misePinCount, testsHoldTheId, testsHoldTheVersions, seeded, noTokenLeft]"], expect: [["setup", "build", "lint", "test", "launch"], true, true, true, 2, true, true, ["ios/ios.json"], []], why: "every rule answers @ios alone, Xcode is named once and found by DEVELOPER_DIR, a build claims the slot, mise pins the tools, only the config is seeded and no placeholder is left"},
 	]}
 
+	"iOS defines no bridge outside the contract, and the ones it lacks are the network's and the passkeys'": {suite: "native", steps: [
+		{call: "native.iosBridges", expect: {missing: ["__native_answer", "__native_fetch", "__native_fetch_abort", "__native_passkey", "__native_passkeys"], extra: []}, why: "a bridge iOS adds is outside the contract another host must meet, and the list of the missing shrinks as the network and the passkeys arrive (PRONTO-1443 is the engine, its globals and the storage's interface)"},
+	]}
+
+	"iOS runs the shared host battery and SES, the one source Android reads": {suite: "native", steps: [
+		{call: "native.iosSharedSources", expect: [], why: "the files iOS writes for the engine and its battery are native/'s own text, so the two hosts cannot drift"},
+	]}
+
 	"the iOS host's tools are pinned as this repository pins them": {suite: "native", steps: [
 		{call: "native.iosPinsDrift", expect: [], why: "xcodegen and swiftlint are in this repository's .mise.toml and in the drop-in the host writes, and the two lines must be equal or one of them is stale"},
 	]}

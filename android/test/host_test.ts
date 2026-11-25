@@ -1,7 +1,7 @@
 // host.js under the SES the phone loads, in one realm per test the way the
 // engine evaluates it: the row store's refusals, persistence and folds.
 const assets = new URL("../template/app/src/main/assets/", import.meta.url);
-const read = (name: string) => Deno.readTextFileSync(new URL(name, assets));
+const read = (name: string) => Deno.readTextFileSync(new URL(name, name === "ses.umd.min.js" ? new URL("../../native/", import.meta.url) : assets));
 
 const shell = {
   local: { note: "device", pick: "tab" },

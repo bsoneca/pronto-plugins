@@ -116,8 +116,8 @@ Kotlin 2.4 plugin to read quickjs-kt.
 
 ## Open
 
-- SES on JavaScriptCore for an iOS plugin, and its Credential Provider
-  Extension's separate process.
+- SES on JavaScriptCore holds with `console` and no other repair (PRONTO-1443, the host battery on the simulator); the
+  iOS plugin's Credential Provider Extension's separate process is open.
 - `adb`'s version: mise carries the SDK's cmdline-tools (`android-sdk`), and
   `setup` adds the packages, but sdkmanager serves platform-tools unversioned.
 - The `device` durability over SQLite where the browser has PGlite.

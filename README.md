@@ -145,10 +145,11 @@ in the browser and on a phone from one program; its
 
 ## pronto-ios
 
-Adds the iOS host to a pronto app (step 2 of the native iOS terminal, PRONTO-1442): the toolchain, a Swift
-project generated from [`ios/host.cue`](ios/host.cue) by XcodeGen (never a hand-written `.pbxproj`), and `@ios`
-verbs that run on the simulator. The host shows a native label; the engine, storage and screens come in the steps
-after it, against the same [native kit](docs/native-terminal.md).
+Adds the iOS host to a pronto app (steps 2 and 3 of the native iOS terminal, PRONTO-1442 and PRONTO-1443): the
+toolchain, a Swift project generated from [`ios/host.cue`](ios/host.cue) by XcodeGen (never a hand-written
+`.pbxproj`), and `@ios` verbs that run on the simulator. The host shows a native label and holds the JS engine,
+JavaScriptCore under SES, which `test@ios` runs the shared host battery on; the sealed storage and screens come in
+the steps after it, against the same [native kit](docs/native-terminal.md).
 
 ```sh
 <this repo>/bin/pronto-ios .
@@ -165,7 +166,7 @@ after it, against the same [native kit](docs/native-terminal.md).
 | `.say.json` | `setup`, `build`, `lint`, `test` and `launch` rules, each answering `@ios` alone; sayt merges it with pronto's `.say.yaml` |
 | `.config/mise/conf.d/ios.toml` | XcodeGen and SwiftLint, pinned and for macOS only |
 | `ios/project.yml` | the XcodeGen spec, from the CUE: bundle id `dev.pronto.<name>` (an underscore becomes a hyphen), versions, entitlements, Face ID text for a biometric unlock |
-| `ios/Sources`, `ios/Tests`, `ios/toolchain.nu` | the host, its tests and the verbs' work, regenerated |
+| `ios/Sources`, `ios/Tests`, `ios/toolchain.nu` | the host, its engine (`TerminalEngine.swift`, `Resources/prelude.js`, SES), its tests and the battery's cases, and the verbs' work, regenerated |
 | `ios/ios.json` | written once, then the app's: `scenarios`, `unlock`, `entitlements`, `marketingVersion`, `buildNumber` |
 
 Xcode is not a mise tool. `setup@ios` runs `xcodebuild` from `DEVELOPER_DIR`
