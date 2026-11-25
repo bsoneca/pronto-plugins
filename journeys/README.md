@@ -7,7 +7,7 @@ Monitors a pronto app's critical user journeys against SLOs, from the terminal's
 A journey is an ordered list of the gestures a reader makes on the app's screens. From one spec the host derives:
 
 - the collector that assembles runs (Vector, as a `container` hatch);
-- vmalert rules that burn the error budget (multi-window burn rates, plus a no-data alert per journey);
+- vmalert rules that burn the error budget (multi-window burn rates, plus a no-data alert and a traffic-drop page per journey);
 - a Grafana dashboard.
 
 A host-DOM hatch on every screen ([`telemetry.js`](telemetry.js)) reports each gesture and the outcome the screen's `data-state` shows. It works on the released terminal, which is not changed.

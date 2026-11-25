@@ -44,6 +44,31 @@ quietOffNoAlert: len([for a in _never.alerts if a.alert == "JourneyNoData" {a}])
 quietOffNoRule: len([for g in _never.rules.groups for r in g.rules if r.alert == "JourneyNoData" {r}]) & 0
 quietOffBurns: len([for a in _never.alerts if a.alert == "JourneyAvailabilityBurnFast" {a}]) & 1
 
+// A journey's run rate over 10 minutes below half of the same window a week ago
+// pages, once that window held the floor's runs. A 50% drop fires; a quiet
+// night under the floor does not. The rule holds the exact expression, and
+// the cases below evaluate its comparison on two windows' counts as the
+// operators read it.
+trafficDropPages: _alert["journey-checkout/JourneyTrafficDrop"].labels & {severity: "page", owner: "payments"}
+trafficDropExpr: _alert["journey-checkout/JourneyTrafficDrop"].expr & "(sum(increase(journey_runs_total{journey=\"checkout\"}[10m])) or vector(0)) < 0.5 * sum(increase(journey_runs_total{journey=\"checkout\"}[10m] offset 7d)) and sum(increase(journey_runs_total{journey=\"checkout\"}[10m] offset 7d)) >= 20"
+_fires: {today: number, before: number, floor: number, out: today < 0.5*before && before >= floor}
+// 50 runs a week ago, 24 now: under half, above the floor.
+halfDropFires: (_fires & {today: 24, before: 50, floor: 20}).out & true
+// 50 runs a week ago, 30 now: a 40% drop, not a page.
+smallDropQuiet: (_fires & {today: 30, before: 50, floor: 20}).out & false
+// 8 runs a week ago, none now: a quiet night under the floor, not a page.
+quietNightQuiet: (_fires & {today: 0, before: 8, floor: 20}).out & false
+// No run now where 50 ran a week ago: a total drop pages.
+totalDropFires: (_fires & {today: 0, before: 50, floor: 20}).out & true
+// The floor is a per-journey field with a default, and the rule reads it.
+_floored: #Journeys & {app: "shop", gestures: _j.gestures, spec: first: _j.spec.first & {dropFloor: 5}}
+dropFloorDefault: _j.spec.first.dropFloor & 20
+dropFloorSpec: strings.HasSuffix([for a in _floored.alerts if a.alert == "JourneyTrafficDrop" {a.expr}][0], ">= 5") & true
+// A journey that never says quiet still has the alert; every journey has one.
+dropWithoutQuiet: len([for a in _never.alerts if a.alert == "JourneyTrafficDrop" {a}]) & 1
+// Cloud Monitoring takes it as a page policy that looks back past 25 hours.
+trafficDropPolicy: [for p in _j.alertPolicies if p.name == "shop-checkout-trafficdrop" {p}][0] & {severity: "page", duration: "0s", interval: "300s"}
+
 // The latency SLI reads a bucket the collector exports, as either exporter
 // spells a boundary.
 latencyLe: strings.Contains(_alert["journey-checkout/JourneyLatencyBurnFast"].expr, "le=~\"0[.]25([.]0)?\"") & true

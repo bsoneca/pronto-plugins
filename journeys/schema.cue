@@ -52,6 +52,11 @@ import (
 	// its NoData would mail the operator at once and stay open. Its SLO still
 	// burns on the runs it does get.
 	quiet: *"1h" | false | =~"^[1-9][0-9]*(m|h|d)$"
+	// The fewest runs the same 10 minutes a week ago must hold for
+	// JourneyTrafficDrop to judge today's: below it the week-ago window is a
+	// quiet night, whose half is noise. A journey with many readers at any
+	// hour can raise it; a rare one has too few runs to ever page.
+	dropFloor: *20 | int & >0
 	// Whether a moment that arrives with no open run of this journey is counted
 	// as an `unstarted` run. `false` is for a journey whose later moment is one
 	// readers make all day outside it (a game's move, which a lobby or a room
@@ -228,6 +233,24 @@ _journeysHours: {
 			for:      "15m"
 			expr:     "(sum(increase(journey_runs_total{journey=\"\(n)\"}[\(j.quiet)])) or vector(0)) == 0"
 			summary:  "\(n) has reported no run for \(j.quiet): its SLO is measuring nothing"
+		}],
+		// A partial drop in traffic burns no budget: a page that never loads
+		// reports nothing (2026-11-24, half of Bonk Chess's requests hung for
+		// 26 minutes), and NoData waits out `quiet`. So the run rate over 10
+		// minutes is held against the same 10 minutes a week ago, and falling
+		// below half of it pages, once that window held `dropFloor` runs. No
+		// run today reads 0, not no data, so a total drop pages too.
+		[for n, j in J.spec {
+			let now = "(sum(increase(journey_runs_total{journey=\"\(n)\"}[10m])) or vector(0))"
+			let before = "sum(increase(journey_runs_total{journey=\"\(n)\"}[10m] offset 7d))"
+			alert:    "JourneyTrafficDrop"
+			hours:    168
+			journey:  n
+			owner:    j.owner
+			severity: "page"
+			for:      "2m"
+			expr:     "\(now) < 0.5 * \(before) and \(before) >= \(j.dropFloor)"
+			summary:  "\(n) has run under half as often in the last 10m as a week ago: readers are not getting through"
 		}],
 	])
 
