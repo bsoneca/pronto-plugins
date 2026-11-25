@@ -2414,6 +2414,12 @@ export const stillThere = (rows: readonly PsRow[], members: readonly Identity[])
 export const watchDone = (rootGone: boolean, relaysOpen: boolean) => rootGone && !relaysOpen;
 // How a wedged or unreadable run is stopped: through the child handle (its own kill, which needs no ps), plus each member whose start
 // time was read (a member read as 0 has no identity to check, so is never signalled); and it ends 3, no verdict, whatever ps says.
+// Whether the watched root is still the process that was spawned: not once it has been waited for (`rootDone`: its pid may be another
+// job's now), and not when its pid carries another start time than the one first sampled (`rootStart`, 0 until sampled).
+export const rootAlive = (rows: readonly PsRow[], root: number, rootStart: number, rootDone: boolean) =>
+  !rootDone && rows.some((r) => r.pid === root && (rootStart === 0 || r.start === rootStart));
+// A run's exit code once the watchdog has fired: 3, no verdict, whatever the child said (it may handle TERM and exit 0 or 143).
+export const runCode = (wedged: boolean, code: number) => wedged ? 3 : code;
 export const wedgeStop = (members: readonly Identity[]) => ({ child: true, code: 3, members: members.filter((m) => m.start > 0) });
 const lstartOf = async (pid: number) => {
   const r = await new Deno.Command("ps", { args: ["-o", "lstart=", "-p", String(pid)], env: { LC_ALL: "C" }, stdout: "piped", stderr: "null" }).output().catch(() => undefined);
@@ -2435,12 +2441,12 @@ export const stopTree = async (members: readonly Identity[], termMs = 5000): Pro
 // (kept across failed reads, and across the root's exit: its descendants are followed by identity) and why, when the window passes
 // without driver CPU (driverCpu), or when the process table cannot be read `maxFails` times in a row (inconclusive, with its cause;
 // the caller ends the run 3 all the same, `wedgeStop`). Ends when `watchDone`: the root and what it started gone and no relay open
-// (`relaysOpen`). Returns what stops it.
+// (`relaysOpen`); `rootDone` says the root has been waited for. Returns what stops it.
 export const watchStall = (root: number, windowMs: number, on: (members: Identity[], why: string) => void, relaysOpen: () => boolean = () => false,
-  pollMs = 30_000, maxFails = 5): (() => void) => {
+  rootDone: () => boolean = () => false, pollMs = 30_000, maxFails = 5): (() => void) => {
   if (!(windowMs > 0)) return () => {};
   const samples: CpuSample[] = [];
-  let busy = false, fails = 0, known: Identity[] = [];
+  let busy = false, fails = 0, known: Identity[] = [], rootStart = 0;
   const timer = setInterval(async () => {
     if (busy) return;
     busy = true;
@@ -2451,7 +2457,10 @@ export const watchStall = (root: number, windowMs: number, on: (members: Identit
       const rows = parsePs(new TextDecoder().decode(r.stdout));
       if (!rows.length) throw new Error("ps listed no process");
       fails = 0;
-      const rootHere = rows.some((x) => x.pid === root);
+      // The root is the spawned child for its lifetime only: once it has been waited for, or its pid shows another start time, that
+      // pid is never followed (it may be another job's); what it started is followed by the identities sampled before.
+      if (rootStart === 0 && !rootDone()) rootStart = rows.find((x) => x.pid === root)?.start ?? 0;
+      const rootHere = rootAlive(rows, root, rootStart, rootDone());
       const tops = [...(rootHere ? [root] : []), ...stillThere(rows, known).map((m) => m.pid)];
       // Nothing known is left but a relay is still open: whoever holds it was never sampled (the root exited between two polls), and
       // it shows no CPU; the window of flat samples ends in the same stop as any other wedge.
