@@ -805,7 +805,7 @@ export const startOf = async (pid: number, live: boolean): Promise<number> => {
 };
 // The live release in the pool `dir` of account `want` (never this account, `self`), read-only: its slot and job records and
 // the tickets waiting in its queue/ and cue-queue/ (a release holds while it waits too, PRONTO-894).
-export const readForeign = async (dir: string, want: number, self: number | null, now = Date.now(), hours = 12): Promise<{ what: string; pid: number } | undefined> => {
+export const readForeign = async (dir: string, want: number, self: number | null, now = Date.now(), hours = 12, poolBudget = budget): Promise<{ what: string; pid: number } | undefined> => {
   if (want === self || Deno.build.os === "windows") return undefined;
   try {
     const top = await Deno.lstat(dir);
@@ -841,9 +841,11 @@ export const readForeign = async (dir: string, want: number, self: number | null
           started: await startOf(pid, live), what: rest.filter((x) => !/^(nested=1|release=1|prio=(release|normal)|beside=1|mem=.*|cores=.*)$/.test(x)).join(" ").slice(0, 200) || `weight ${w}` });
       }
     }
-    // A waiting release that could not fit beside the releases that hold holds nothing there either (PRONTO-1898).
-    const heldW = records.filter((r) => !r.ticket && r.alive).reduce((n, r) => n + (Number(r.text.trim().split(" ")[1]) || 0), 0);
-    const fits = records.filter((r) => !r.ticket || releaseCanFit(heldW, Number(r.text.trim().split(" ")[0]) || 0, budget));
+    // A waiting release that could not fit beside the releases that hold holds nothing there either (PRONTO-1898): judged against
+    // the weight of the foreign pool's trusted live releases, and its budget (`poolBudget`: STACK_HOLD_BUDGET, else this account's:
+    // the other pool's is not readable). A live release itself always holds.
+    const heldW = records.filter((r) => !r.ticket && heldByForeign([r], want, now, hours)).reduce((n, r) => n + (Number(r.text.trim().split(" ")[1]) || 0), 0);
+    const fits = records.filter((r) => !r.ticket || releaseCanFit(heldW, Number(r.text.trim().split(" ")[0]) || 0, poolBudget));
     const found = heldByForeign(fits, want, now, hours);
     return found ? { what: found.what, pid: found.pid } : undefined;
   } catch { return undefined; }
@@ -854,7 +856,8 @@ const foreignHold = async (): Promise<{ what: string; pid: number } | undefined>
   const want = holdUid(Deno.env.get("STACK_HOLD_UID"), self);
   if (!dir || want === undefined) return undefined;
   const hours = Number(Deno.env.get("STACK_RELEASE_HOLD_MAX") ?? 12);
-  return readForeign(dir, want, self, Date.now(), Number.isFinite(hours) ? hours : 12);
+  const theirs = Number(Deno.env.get("STACK_HOLD_BUDGET"));
+  return readForeign(dir, want, self, Date.now(), Number.isFinite(hours) ? hours : 12, theirs > 0 ? theirs : budget);
 };
 // A slot's directory is stale, to be freed at the next claim, when its holder is gone and no port of
 // its range answers: not only its door. A database left by a stack whose door was down kept :33005 from
