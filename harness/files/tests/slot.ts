@@ -566,6 +566,10 @@ export const admitsCores = (nested: boolean, used: number, weight: number, ahead
 // holds or waits is not told apart.
 export const besideRelease = (holding: number, waiting: number, load: number | null, max: number, foreign = false) =>
   !foreign && holding > 0 && waiting === 0 && load !== null && load < max;
+// Whether a waiting release claim of `weight` could be admitted beside the releases that hold `releaseHeld` (`admits`: a claim
+// that may run alone, on nothing held, keeps its priority whatever it weighs): only such a
+// claim holds the machine (PRONTO-1898: one that can never fit held every other claim, and so itself, for ever).
+export const releaseCanFit = (releaseHeld: number, weight: number, budget: number) => admits(releaseHeld, weight, 0, budget);
 // Whether a claim that is not admitted waits for a release (its STACK_WAIT_MINUTES deadline reset): any weighted
 // claim but a release's while a release holds or waits, beside a rehearsal or not.
 export const heldByRelease = (hold: boolean, weight: number, release: boolean) => hold && weight > 0 && !release;
@@ -837,7 +841,10 @@ export const readForeign = async (dir: string, want: number, self: number | null
           started: await startOf(pid, live), what: rest.filter((x) => !/^(nested=1|release=1|prio=(release|normal)|beside=1|mem=.*|cores=.*)$/.test(x)).join(" ").slice(0, 200) || `weight ${w}` });
       }
     }
-    const found = heldByForeign(records, want, now, hours);
+    // A waiting release that could not fit beside the releases that hold holds nothing there either (PRONTO-1898).
+    const heldW = records.filter((r) => !r.ticket && r.alive).reduce((n, r) => n + (Number(r.text.trim().split(" ")[1]) || 0), 0);
+    const fits = records.filter((r) => !r.ticket || releaseCanFit(heldW, Number(r.text.trim().split(" ")[0]) || 0, budget));
+    const found = heldByForeign(fits, want, now, hours);
     return found ? { what: found.what, pid: found.pid } : undefined;
   } catch { return undefined; }
 };
@@ -1187,7 +1194,8 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       const foreign = weight > 0 && !release ? await foreignHold() : undefined;
       if (foreign) releasing.push(foreign);
       // A release holds the machine while one holds a slot or waits, in either line (PRONTO-894).
-      const waitingRelease = [...coresTickets, ...cueTickets].filter((t) => t.release && t.name.replace(/-w$/, "") !== ticket);
+      const releaseHeld = holders.filter((h) => h.release).reduce((n, h) => n + h.weight, 0);
+      const waitingRelease = [...coresTickets, ...cueTickets].filter((t) => t.release && t.name.replace(/-w$/, "") !== ticket && releaseCanFit(releaseHeld, t.weight, budget));
       const hold = releaseHolds(holders.filter((h) => h.release).length + (foreign ? 1 : 0), waitingRelease.length ? 1 : 0);
       const blocker = releasing[0] ?? waitingRelease[0];
       // Room beside a running rehearsal: the machine's one-minute load, as release-cron reads it (Deno.loadavg).
@@ -2351,6 +2359,90 @@ export async function ownRun(cmd: string[], opts: OwnOpts = {}): Promise<OwnResu
   }
 }
 
+// ---- a wedged run (PRONTO-1896: a rehearsal sat 2 h in check-visual, no deadline, release-cron waiting for ever)
+// A run is wedged when the CPU time summed over the command and everything it started has not moved for the window
+// (STACK_STALL_MINUTES, 10; 0 turns it off). Not a retry and not a longer timeout: the run is stopped and ends 3 (no verdict).
+export type CpuSample = { t: number; cpu: number };
+export const stalled = (samples: readonly CpuSample[], windowMs: number) => {
+  if (!(windowMs > 0) || samples.length < 2) return false;
+  const last = samples[samples.length - 1];
+  const start = last.t - windowMs;
+  // Fewer samples than the window covers: too early to say.
+  if (samples[0].t > start) return false;
+  const base = samples.filter((s) => s.t <= start).at(-1)!;
+  return [base, ...samples.filter((s) => s.t > start)].every((s) => s.cpu === last.cpu);
+};
+export const stallWindowMs = (v: string | undefined) => {
+  const n = v === undefined || v === "" ? 10 : Number(v);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`STACK_STALL_MINUTES must be a number of minutes, 0 or more, got ${JSON.stringify(v)}`);
+  return n * 60_000;
+};
+// One `ps -A -o pid=,ppid=,time=,command=` read as rows (a line that is not one is skipped).
+export type PsRow = { pid: number; ppid: number; cmd: string; cpu: number };
+export const parsePs = (text: string): PsRow[] => text.split("\n").flatMap((l) => {
+  const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(l);
+  return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), cpu: cpuSeconds(m[3]), cmd: m[4] }] : [];
+});
+// What a wedge is read from: the CPU of the drivers under `root`, not of the stack they test. The integrate's tree holds
+// process-compose and its postgres, caddy and standins, which tick whatever the drivers do (PRONTO-1896: check-visual's deno and its
+// chrome sat at 0% for 2 h beside a stack that never stopped using CPU). So the CPU is summed over `root` and its descendants
+// but those under a process-compose; `pids` is the whole tree, what is told TERM on a stall.
+export const driverCpu = (rows: readonly PsRow[], root: number): { cpu: number; pids: number[] } => {
+  const tree = new Set([root, ...descendants(rows, [root])]);
+  const tops = rows.filter((r) => tree.has(r.pid) && /(^|\/)process-compose(\s|$)/.test(r.cmd)).map((r) => r.pid);
+  const stack = new Set([...tops, ...descendants(rows, tops)]);
+  return { cpu: rows.filter((r) => tree.has(r.pid) && !stack.has(r.pid)).reduce((n, r) => n + r.cpu, 0), pids: [...tree].sort((a, b) => a - b) };
+};
+export type Identity = { pid: number; start: number };
+// The processes of `pids` with their start times (0 when unreadable), read now: the identity a later signal is checked against.
+const identify = (pids: readonly number[]): Promise<Identity[]> => Promise.all(pids.map(async (pid) => ({ pid, start: await startOf(pid, true) })));
+// Stops processes read earlier by identity: each told TERM only while its pid still has the start time it had, given `termMs`,
+// then each survivor of the same identity told KILL. Returns who survived TERM. A pid reused by another process is never signalled.
+export const stopTree = async (members: readonly Identity[], termMs = 5000): Promise<Identity[]> => {
+  const same = async (m: Identity) => m.start > 0 && await startOf(m.pid, true) === m.start;
+  const live = async () => { const out: Identity[] = []; for (const m of members) if (await same(m)) out.push(m); return out; };
+  for (const m of await live()) try { Deno.kill(m.pid, "SIGTERM"); } catch { /* gone */ }
+  for (let end = Date.now() + termMs; Date.now() < end && (await live()).length; ) await sleepMs(200);
+  const left = await live();
+  for (const m of left) try { Deno.kill(m.pid, "SIGKILL"); } catch { /* gone */ }
+  return left;
+};
+// Watches the process `root` every `pollMs`; calls `on` once, with the identified processes of its whole tree (collected, never
+// a pattern) and why, when the window passes without driver CPU (driverCpu), or when the process table cannot be read `maxFails`
+// times in a row (inconclusive: the cause is said, and the caller ends the run as no verdict all the same). A root that is gone ends
+// the watch: it completed. Returns what stops it.
+export const watchStall = (root: number, windowMs: number, on: (members: Identity[], why: string) => void, pollMs = 30_000, maxFails = 5): (() => void) => {
+  if (!(windowMs > 0)) return () => {};
+  const samples: CpuSample[] = [];
+  let busy = false, fails = 0, last = [root];
+  const timer = setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    let why = "", gone = false;
+    try {
+      const r = await new Deno.Command("ps", { args: ["-A", "-o", "pid=,ppid=,time=,command="], stdout: "piped", stderr: "null" }).output();
+      if (!r.success) throw new Error(`ps ended ${r.code}`);
+      const rows = parsePs(new TextDecoder().decode(r.stdout));
+      fails = 0;
+      if (!rows.some((x) => x.pid === root)) gone = true;
+      else {
+        const { cpu, pids } = driverCpu(rows, root);
+        last = pids;
+        const now = Date.now();
+        samples.push({ t: now, cpu });
+        while (samples.length > 2 && samples[1].t <= now - windowMs) samples.shift();
+        if (stalled(samples, windowMs)) why = `wedged: no CPU for ${Math.round(windowMs / 6000) / 10} min`;
+      }
+    } catch (e) {
+      if (++fails >= maxFails) why = `inconclusive: the process table could not be read ${fails} times in a row (${e instanceof Error ? e.message : e}); no verdict`;
+    } finally { busy = false; }
+    if (gone || why) clearInterval(timer);
+    if (why) { say(why); on(await identify(last), why); }
+  }, pollMs);
+  Deno.unrefTimer(timer);
+  return () => clearInterval(timer);
+};
+
 // ---- the owner's verbs: own, detach, member, leftovers
 const splitArgs = (args: string[]) => {
   const at = args.indexOf("--");
@@ -2739,7 +2831,12 @@ if (import.meta.main) {
       : { ...ports, PATH: misePath() };
     const argv = hostGate ? ["sh", "-c", 'exec mise x -- nu -c "$1"', "sh", gateSteps ? slowVisual(script) : script] : [cmd, ...rest];
     owned = true;
-    code = (await ownRun(argv, { what: defaultWhat(args), cwd: slot.dir, env })).code;
+    // An integrate with no CPU for the window is wedged: stopped, and ends 3 (no verdict), never waited on for ever (PRONTO-1896).
+    const control: { stop?: (code: number) => void } = {};
+    let unwatch = () => {};
+    const stallMs = hostGate || gateSteps ? stallWindowMs(Deno.env.get("STACK_STALL_MINUTES")) : 0;
+    code = (await ownRun(argv, { what: defaultWhat(args), cwd: slot.dir, env, control, onSpawn: (pid) => { unwatch = watchStall(pid, stallMs, () => control.stop?.(3)); } })).code;
+    unwatch();
     if (tmp) await Deno.remove(tmp, { recursive: true }).catch(() => {});
     // A pass stamps the tree as it was before the run, if it still is (gcp/local-gate-key.nu).
     if (gateSteps?.mode === "all" && code === 0) {
