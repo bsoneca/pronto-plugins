@@ -29,7 +29,7 @@
 // log (release-cron.log, a line a run), last (when the last spaced run ended), runs.jsonl (the same as JSON) and each run's output (runs/).
 import process from "node:process";
 import { causes, outcomes } from "./causes.js";
-import { appendWhy, mutates, lockAcquire, lockRelease, previewRecordStop, previewRecorded, previewRecord, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, changedBy, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit, fetchWait, previewPortAddresses, previewPortHeld } from "./cron.js";
+import { appendWhy, mutates, lockAcquire, lockRelease, previewRecordStop, previewRecorded, previewRecord, aliveFromKill, rescueReadStep, failureOf, rehearsalSpawn, flagsBookkeeping, nulPaths, lastFields, schedulerEnv, previewProbes, boardEnv, hookArgv, hooksOf, flagsReleasedDue, recordFlagsReleased, channels, systemdUnits, lowPriority, activeLine, base, behind, bisectLine, changed, detail, due, holds, line, local, merges, next, plist, newFeatureNames, flakedNames, flakeNotices, introducedBy, untold, undecidable, unreproduced, probe, report, served, sessionOf, signature, spaced, retry, landed, rescuable, verdict, releaseModes, rehearsalBase, noVerdictExit, noVerdictRun, besideOutcome, besideTimes, inconclusiveExit, whole, fixedBy, stopsBisect, concerns, failedRehearsal, androidRuns, androidSkip, androidFailed, androidWhy, androidSpawn, endWhenInterrupted, signalStep, servingRetryable, flagsExit, fetchWait, previewPortAddresses, previewPortHeld } from "./cron.js";
 import { hotSql, touched } from "../tests/scenarios/select.ts";
 import { readVerdict } from "../tests/scenarios/verdict.ts";
 
@@ -624,6 +624,31 @@ const active = (phase: string) => {
 };
 // Previews not yet torn down (up to the end of their `down`), and whether a signal has come.
 let previews = 0, interrupted = false;
+// The scenarios the rehearsal's or the release's output named as flaked (passed only on their one retry), and whether they were told.
+let flaked: string[] = [];
+let flakedTold = false;
+// A flake is told to the PR that added or last changed the scenario, once per scenario (its own ledger, apart from the new-feature one):
+// the rerun is never a fix. end() calls it, so a run that fails or stops early (the rehearsal, the preview) tells too, and the bisect
+// (undecidable) sees run.flaked. It never throws: whatever is wrong is said, and the run ends.
+const tellFlaked = () => {
+  if (!flaked.length) return;
+  run.flaked = flaked;
+  if (flakedTold || !mutates(dry) || !head) return;
+  flakedTold = true;
+  try {
+    const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], wt);
+    const slug = must("git", ["--git-dir", repo, "remote", "get-url", "origin"]).replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1");
+    const ledger = `${state}/flaked.jsonl`;
+    const merged = merges(must("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H %s", "-200", head]).split("\n"));
+    const touched = Object.fromEntries(flaked.map((name) => [name, Object.fromEntries(merged.map((m: { sha: string }) => [m.sha, sh("git", ["--git-dir", repo, "diff", "--name-only", `${m.sha}^1`, m.sha, "--", `${appRel}/tests/scenarios/${name}.cue`]).out !== ""]))]));
+    for (const f of flakeNotices(flaked, merged, touched, jsonl(ledger))) {
+      const info = prInfo(slug, f.pr);
+      const msg = `release-cron (${app}): the scenario ${f.scenario} (added or last changed by PR #${f.pr}, ${f.branch}) flaked, and passed only on its one rerun. Fix it at its cause: the rerun is never a fix. Log: ${state}/runs/${started}.log`;
+      const told = tellPr(slug, cron.notify, f.pr, info, msg, `release-cron-flaked-${f.scenario.replace(/[^0-9A-Za-z-]/g, "")}.md`, `scenario ${f.scenario} (PR #${f.pr}) flaked in release-cron ${app}`);
+      if (told.includes("comment")) Deno.writeTextFileSync(ledger, JSON.stringify({ ...f, told, at: local(Date.now()) }) + "\n", { append: true });
+    }
+  } catch (e) { say(`flaked scenarios not told: ${(e as Error).message.split("\n")[0]}`); }
+};
 const end = (outcome: string, why = "", code = 0, cause = "") => {
   // After a signal, whatever the run reaches is the stop's doing, not a verdict (cron.js endWhenInterrupted): no gap, no bisect.
   const mapped = endWhenInterrupted(interrupted, outcome);
@@ -631,6 +656,7 @@ const end = (outcome: string, why = "", code = 0, cause = "") => {
   // The machine is given back first, whatever the outcome; only a file this run wrote is removed.
   try { if (JSON.parse(Deno.readTextFileSync(activePath)).pid === Deno.pid) Deno.removeSync(activePath); } catch { /* none, or not ours */ }
   Object.assign(run, { outcome, why: why || undefined, ...(cause ? { cause } : {}), ended: local(Date.now()) });
+  tellFlaked();
   // Inside the steps: the rehearsal's and the release's own records of this commit, since this run began.
   if (run.commit && (cron && (cron.steps.rehearse in steps || cron.steps.beside in steps || cron.steps.release in steps))) {
     const d = detail(jsonl(`${home}/.cache/pronto/rehearsals/${app}.jsonl`), gcp ? jsonl(`${home}/.cache/pronto/releases/${gcp.name}.jsonl`) : [], run.commit, new Date(t0).toISOString());
@@ -993,7 +1019,6 @@ try {
   if (cloud) say(`GCP.rehearsal: the rehearsal runs in the cloud, job ${gcp!.rehearsal!.job}, inside release@gcp`);
   else if (!rehearse) say("no rehearsal: releaseCron.rehearsal.command is null");
   let newFailing: string[] = [];
-  let flaked: string[] = [];
   // The rehearsal to its verdict: its slot waited for, then the command run. `got`: whether the slot was taken (or none was wanted).
   const rehearsalRun = async () => {
     let got = !wantSlot;
@@ -1140,30 +1165,7 @@ try {
   active("release");
   const rel = await child(target ? target.release[0] : "./saytw", target ? target.release.slice(1) : ["release@gcp"], dir, { ...Deno.env.toObject(), STACK_PRIORITY: "release" }, (l) => { newFailing = [...new Set([...newFailing, ...newFeatureNames(l)])]; flaked = [...new Set([...flaked, ...flakedNames(l)])]; });
   step(cron.steps.release);
-  // A scenario that flaked and passed only on a rerun (the rehearsal's, or the cloud tests' in release@gcp) is told to the PR that added or last changed it, once per scenario
-  // (its own ledger, apart from the new-feature one): the rerun is never a fix.
-  if (flaked.length) {
-    run.flaked = flaked;
-    try {
-      const repo = must("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], wt);
-      const slug = must("git", ["--git-dir", repo, "remote", "get-url", "origin"]).replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1");
-      const ledger = `${state}/flaked.jsonl`;
-      const found = flaked.flatMap((name) => {
-        const touched = (sha: string) => sh("git", ["--git-dir", repo, "diff", "--name-only", `${sha}^1`, sha, "--", `${appRel}/tests/scenarios/${name}.cue`]).out !== "";
-        const merged = merges(must("git", ["--git-dir", repo, "log", "--first-parent", "--format=%H %s", "-200", head]).split("\n"));
-        const c = changedBy(merged, Object.fromEntries(merged.map((m: { sha: string }) => [m.sha, touched(m.sha)])));
-        return c?.pr ? [{ scenario: name, pr: c.pr, branch: c.branch }] : [];
-      });
-      for (const f of untold(found, jsonl(ledger))) {
-        const info = prInfo(slug, f.pr);
-        const msg = `release-cron (${app}): the scenario ${f.scenario} (added or last changed by PR #${f.pr}, ${f.branch}) flaked, and passed only on its one rerun. Fix it at its cause: the rerun is never a fix. Log: ${state}/runs/${started}.log`;
-        const told = tellPr(slug, cron.notify, f.pr, info, msg, `release-cron-flaked-${f.scenario.replace(/[^0-9A-Za-z-]/g, "")}.md`, `scenario ${f.scenario} (PR #${f.pr}) flaked in release-cron ${app}`);
-        if (told.includes("comment")) Deno.writeTextFileSync(ledger, JSON.stringify({ ...f, told, at: local(Date.now()) }) + "\n", { append: true });
-      }
-    } catch (e) { say(`flaked scenarios not told: ${(e as Error).message.split("\n")[0]}`); }
-  }
-
-  // (told above even when the release failed: the flakes happened)
+  // A flake of the rehearsal or the release is told by end() (tellFlaked), whatever the run's outcome.
   // An ssh that dropped is not a release that failed (PRONTO-758): what the node serves decides, read for about 15 min
   // while the node may still be finishing, only for a target whose `serving` is written after the release (servingAfterRelease, PRONTO-870). Landed, the run goes on to confirm, which checks readiness; else it failed.
   if (rel.code !== 0 && target && rescuable(rel.code, target.servingAfterRelease)) {
