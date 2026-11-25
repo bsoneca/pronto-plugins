@@ -53,20 +53,38 @@ export function androidCallbacks() {
 
 const digest = (text) => createHash("sha256").update(text).digest("hex");
 
-/** The files the Android host writes for an app, by tags, as path to SHA-256 of the text. */
-function filesDigests(tags) {
-  const files = exportOf("./android/export", "files", tags);
+/** The files a host (android, ios) writes for an app, by tags, as path to SHA-256 of the text. */
+function filesDigests(host, tags) {
+  const files = exportOf(`./${host}/export`, "files", tags);
   return Object.fromEntries(Object.keys(files).sort().map((p) => [p, digest(files[p].text) + (files[p].seed ? " seed" : "") + (files[p].merge ? " merge" : "")]));
 }
 
-/** The paths whose generated text differs from the golden `android/golden/<name>.json` (all of them, new and gone, named). */
-export function golden(name, tags) {
-  const now = filesDigests(tags);
-  const file = `${root}android/golden/${name}.json`;
+/** The paths whose generated text differs from the golden `<host>/golden/<name>.json` (all of them, new and gone, named); the host is android unless a third argument says ios. */
+export function golden(name, tags, host = "android") {
+  const now = filesDigests(host, tags);
+  const file = `${root}${host}/golden/${name}.json`;
   if (Deno.env.get("GOLDEN_UPDATE") === "1") {
-    Deno.mkdirSync(`${root}android/golden`, { recursive: true });
+    Deno.mkdirSync(`${root}${host}/golden`, { recursive: true });
     Deno.writeTextFileSync(file, JSON.stringify(now, null, 2) + "\n");
   }
   const want = JSON.parse(Deno.readTextFileSync(file));
   return sorted(new Set([...Object.keys(now), ...Object.keys(want)])).filter((p) => now[p] !== want[p]);
+}
+
+/** Whether `cue export` of the expression fails, for a spec that must be refused: exportFails("./ios/export", "files", ["app=x", "config=..."]). */
+export function exportFails(pkg, expr, tags) {
+  try {
+    exportOf(pkg, expr, tags);
+    return false;
+  } catch (_) {
+    return true;
+  }
+}
+
+/** The tool pins of the iOS host's drop-in (ios/host.cue's miseConf) that differ from this repository's own (.mise.toml): none, or each tool with both lines. */
+export function iosPinsDrift() {
+  const pins = (text) => Object.fromEntries([...text.matchAll(/^("aqua:[^"]+") = (.*)$/gm)].map((m) => [m[1], m[2]]));
+  const repo = pins(read(".mise.toml"));
+  const app = pins(exportOf("./ios/export", "files", ["app=emit"])[".config/mise/conf.d/ios.toml"].text);
+  return Object.keys(app).filter((tool) => repo[tool] !== app[tool]).map((tool) => `${tool}: repo ${repo[tool]}, app ${app[tool]}`);
 }

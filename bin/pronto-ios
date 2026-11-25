@@ -1,0 +1,21 @@
+#!/bin/sh
+# Adds or refreshes the iOS host in a pronto app:
+#   bin/pronto-ios <app-dir> [app-name] [label] [base-url]
+# The name defaults to the app directory's, as pronto's meta.name does.
+# The label, what the home screen shows, defaults to the name. The base is where a
+# release build finds the app's cluster. The host's versions, unlock and entitlements are the app's
+# ios/ios.json, seeded on the first run. Xcode is the Mac's own (setup@ios checks its version).
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+app=$(cd "$1" && pwd)
+name=${2:-$(basename "$app")}
+label=${3:-$name}
+base=${4:-https://$(printf %s "$name" | tr _ -).invalid}
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" 2>/dev/null | head -n 1)
+config="{}"
+[ -f "$app/ios/ios.json" ] && config=$(tr -d '\n\t' < "$app/ios/ios.json")
+./saytw --script tools.nu cue export ./ios/export -t "app=$name" -t "label=$label" -t "base=$base" -t "package=$package" -t "config=$config" -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"

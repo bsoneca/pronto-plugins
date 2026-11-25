@@ -46,7 +46,9 @@ and the app does not change.
    app's. In pronto, `#emit`
    would write both from `meta.targets`; until sayt's `#Loop` lowers a
    platform on every verb, not only on `release`, it merges the rules where
-   the file is written.
+   the file is written. The iOS host is the second: [`ios/host.cue`](../ios/host.cue)
+   and `bin/pronto-ios` write the same kind of files, a Swift project from XcodeGen over
+   Xcode's own toolchain, and the verbs answer `@ios` on the simulator.
 3. **Capabilities are judged per target.** An app's request is checked
    against every terminal it targets, and screens against each terminal's
    renderer: a markup element with no DivKit peer fails `lint` for an

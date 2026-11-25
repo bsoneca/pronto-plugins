@@ -38,6 +38,8 @@ jobs:
           sayt --script tools.nu cue vet -c ./lessons
           sayt --script tools.nu cue vet -c ./android
           sayt --script tools.nu cue vet -c -t app=check ./android/export
+          sayt --script tools.nu cue vet -c ./ios
+          sayt --script tools.nu cue vet -c -t app=check ./ios/export
           sayt --script tools.nu cue vet -c ./firebase
           sayt --script tools.nu cue vet -c -t app=check -t project=check-project ./firebase/export
           sayt --script tools.nu cue vet -c ./gcp
@@ -117,6 +119,21 @@ jobs:
           jq -e '.say.build.rulemap["android-release"].platform == "android-release"' "$app/.say.json"
           printf '{"scenarios": [], "release": {"file": "secrets.mac.enc.yaml", "project": "demo-proj"}}\n' > "$app/android/android.json"
           ! ./bin/pronto-android "$app" demo
+      - name: Opt an app into the iOS host, then refresh it keeping the app's own config
+        run: |
+          app=$(mktemp -d)/app && mkdir -p "$app" && printf 'package demo\n' > "$app/program.cue"
+          ./bin/pronto-ios "$app" demo
+          jq -e '[.say[].rulemap.ios.platform] == ["ios", "ios", "ios", "ios", "ios"]' "$app/.say.json"
+          grep -q 'XcodeGen' "$app/.config/mise/conf.d/ios.toml"
+          # The verbs' file parses as sayt runs it (a `use` inside it would not find tools.nu): sourced after tools.nu is in scope.
+          jq -e '[.say[].rulemap.ios.cmds[0].do | startswith("use tools.nu [run-mise]; source ios/toolchain.nu; ")] | all' "$app/.say.json"
+          (cd "$app" && sayt --script tools.nu nu -c 'def run-mise [...args] { }; source ios/toolchain.nu; if (1 + 1) == 3 { check; build; lint; test; launch }')
+          grep -q 'PRODUCT_BUNDLE_IDENTIFIER: dev.pronto.demo$' "$app/ios/project.yml"
+          printf '{"scenarios": [], "marketingVersion": "2.0.0", "buildNumber": 9}\n' > "$app/ios/ios.json"
+          ./bin/pronto-ios "$app" demo
+          grep -q 'MARKETING_VERSION: 2.0.0' "$app/ios/project.yml"
+          grep -q 'CURRENT_PROJECT_VERSION: 9' "$app/ios/project.yml"
+          grep -q '"buildNumber": 9' "$app/ios/ios.json"
       - name: Write the harness into an app, and hold this repository's own copies to it
         run: |
           app=$(mktemp -d)/app && mkdir -p "$app/tests" && printf 'package demo\n' > "$app/program.cue"
@@ -231,8 +248,12 @@ jobs:
         run: deno lint --no-config billing doorguard ir-md intents gcp devflow release-cron release-notes prod-watch probe runners migrations tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run --allow-env billing doorguard ir-md
       # A script that does not parse fails only when it is run, and a release script runs rarely
       # (identity/release.nu shipped `env: [...] ++ $phone`, a record field nu cannot parse).
+      # ios/template/*.nu are templates, not scripts: they hold placeholders (`const weight = __WEIGHT__`) and are
+      # sourced by an app's rules after `use tools.nu [run-mise]`, so alone they cannot parse. They are left out
+      # here and parsed where they can be: the step "Opt an app into the iOS host" above parses the file
+      # bin/pronto-ios generates, placeholders filled, sourced as sayt runs it. Every other script is parsed as it stands.
       - name: Parse each nushell script
-        run: sayt --script tools.nu nu -c 'let bad = (glob **/*.nu | where {|f| not (nu-check $f) }); if ($bad | is-not-empty) { print $bad; exit 1 }'
+        run: sayt --script tools.nu nu -c 'let bad = (glob **/*.nu | where {|f| not ($f | str contains "/ios/template/") } | where {|f| not (nu-check $f) }); if ($bad | is-not-empty) { print $bad; exit 1 }'
       - name: Test the intents (tests/unit/*.cue)
         run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android probe devflow migrations machine harness native lessons flags; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
       # pronto-api (api/, tests/unit/api_generate.cue): its views run on PGlite, its door in caddy,

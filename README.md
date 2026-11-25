@@ -143,6 +143,37 @@ the launcher, the unlock prompt and the autofill picker show.
 in the browser and on a phone from one program; its
 [journal](examples/hello-android/journal/index.html) shows both.
 
+## pronto-ios
+
+Adds the iOS host to a pronto app (step 2 of the native iOS terminal, PRONTO-1442): the toolchain, a Swift
+project generated from [`ios/host.cue`](ios/host.cue) by XcodeGen (never a hand-written `.pbxproj`), and `@ios`
+verbs that run on the simulator. The host shows a native label; the engine, storage and screens come in the steps
+after it, against the same [native kit](docs/native-terminal.md).
+
+```sh
+<this repo>/bin/pronto-ios .
+./saytw --script tools.nu mise trust .config/mise/conf.d/ios.toml
+./saytw --script tools.nu mise lock
+./saytw setup@ios
+./saytw launch@ios
+```
+
+`bin/pronto-ios <app-dir> [name] [label] [base]` writes:
+
+| Path in the app | |
+| --- | --- |
+| `.say.json` | `setup`, `build`, `lint`, `test` and `launch` rules, each answering `@ios` alone; sayt merges it with pronto's `.say.yaml` |
+| `.config/mise/conf.d/ios.toml` | XcodeGen and SwiftLint, pinned and for macOS only |
+| `ios/project.yml` | the XcodeGen spec, from the CUE: bundle id `dev.pronto.<name>` (an underscore becomes a hyphen), versions, entitlements, Face ID text for a biometric unlock |
+| `ios/Sources`, `ios/Tests`, `ios/toolchain.nu` | the host, its tests and the verbs' work, regenerated |
+| `ios/ios.json` | written once, then the app's: `scenarios`, `unlock`, `entitlements`, `marketingVersion`, `buildNumber` |
+
+Xcode is not a mise tool. `setup@ios` runs `xcodebuild` from `DEVELOPER_DIR`
+(`/Applications/Xcode.app/Contents/Developer`, so no `xcode-select -s` and no sudo) and fails with the exact Xcode
+version, simulator runtime or device to install when this Mac differs from the host's spec (Xcode 27.2, iOS 27.2,
+iPhone 17). `build@ios` and `test@ios` run `xcodebuild` through `tests/slot.ts` (weight 2), so they wait for the
+machine's budget. iOS builds run on a Mac only, on pronto-mac: there is no cloud CI for them.
+
 ## pronto-firebase
 
 Releases a pronto app to Firebase Hosting: `sayt release@firebase` builds
