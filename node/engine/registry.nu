@@ -253,6 +253,27 @@ export def lease-release [build: record, name: string] {
 	kubectl-out delete lease $name -n $build.registry.namespace --ignore-not-found | ignore
 }
 
+# The registry restarted and waited for: its in-memory blob descriptor cache starts empty.
+export def restart [build: record] {
+	let target = $"deploy/($build.registry.deployment)"
+	kubectl-out rollout restart -n $build.registry.namespace $target | ignore
+	kubectl-out rollout status -n $build.registry.namespace $target --timeout=120s | ignore
+}
+
+# The pushed images the registry does not serve: each `{repo, digest}` is asked for its manifest (GET /v2/<repo>/manifests/<digest>),
+# the way a pod's pull asks. Answers the ones that said 404 (a push that wrote links over blobs the collector deleted, PRONTO-1868),
+# and fails on any other answer (a registry that is down or broken is not a stale cache, and a restart would not mend it).
+export def missing-manifests [registry: string, images: list<record<repo: string, digest: string>>]: nothing -> list<record<repo: string, digest: string>> {
+	$images | each {|i|
+		let r = (^curl -s -o /dev/null -w "%{http_code}" -H $"Accept: ($accept)" $"http://($registry)/v2/($i.repo)/manifests/($i.digest)" | complete)
+		let status = ($r.stdout | str trim)
+		if $status == "200" { null } else if $status == "404" { $i } else {
+			let said = (if $status in ["" "000"] { "nothing" } else { $status })
+			error make {msg: $"the registry answered ($said) for ($i.repo)@($i.digest) after its push: it is not serving the images just pushed"}
+		}
+	} | compact
+}
+
 # The collection itself, under the lock and with no other lease.
 def collect-locked [build: record, ns: string, target: string]: nothing -> string {
 	# `find` itself is checked (no pipe to hide its exit): a scan that fails stops the collection, it does not read as no upload.
@@ -279,8 +300,7 @@ def collect-locked [build: record, ns: string, target: string]: nothing -> strin
 	print $"node: (stamp) the node's registry: ($before) before its garbage collection, ($after) after"
 	let cache = (blob-cache $build)
 	if $cache != "none" and $cache != "disabled" {
-		kubectl-out rollout restart -n $ns $target | ignore
-		kubectl-out rollout status -n $ns $target --timeout=120s | ignore
+		restart $build
 		print $"node: (stamp) the node's registry restarted, so its ($cache) blob cache holds no collected layer"
 	}
 	""

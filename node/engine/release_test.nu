@@ -139,6 +139,13 @@ case "$*" in
     echo "404 page not found" > "$out"; printf 404; exit 0 ;;
 esac
 if [ -f "$d/registry_dead" ]; then printf 000; exit 7; fi
+case "$*" in
+  *"/manifests/sha256:"*)
+    echo "$*" >> "$d/manifest_curl.log"
+    # manifest_404_once: the first manifest asked for is gone, until the registry is restarted; manifest_404: always
+    if [ -f "$d/manifest_404" ]; then printf 404; exit 0; fi
+    if [ -f "$d/manifest_404_once" ] && [ ! -f "$d/state/registry_restarted" ]; then printf 404; exit 0; fi ;;
+esac
 printf 200
 '# | str trim --left | save -f ($d | path join bin curl)
 	# deno registers the OIDC clients (register.ts: it answers the settings it was given, as for a provider whose client id is
@@ -238,6 +245,8 @@ def main [] {
 	test_check_build_pushes_under_check_and_writes_nothing_to_the_cluster
 	test_build_alone_is_refused
 	test_a_failed_bake_leaves_no_builder_and_no_scratch_folder
+	test_a_pushed_digest_the_registry_lost_restarts_it_and_pushes_again
+	test_a_digest_still_lost_after_the_restart_fails_before_the_rollout
 	test_the_buildx_nearest_the_front_of_the_path_wins
 	test_a_broken_session_names_the_buildx_that_broke_it
 	test_preflight_refuses_a_builder_or_a_registry_that_is_not_there
@@ -989,6 +998,34 @@ def test_a_failed_bake_leaves_no_builder_and_no_scratch_folder [] {
 	let work = (open --raw ($w.dir | path join bake_pwd) | str trim | path dirname)
 	assert (not ($work | path exists)) "the scratch folder is gone"
 	assert (not ((open --raw ($w.dir | path join docker_config) | str trim) | path exists)) "the docker config is gone"
+	rm -rf $w.dir
+}
+
+def test_a_pushed_digest_the_registry_lost_restarts_it_and_pushes_again [] {
+	print "test a digest the registry does not serve after the push restarts the registry, bakes once more, and the release goes on..."
+	let w = (sandbox)
+	"" | save -f ($w.dir | path join manifest_404_once)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert (released $r) $"($r.stdout)\n($r.stderr)"
+	assert (has $r.stderr "a stale blob cache") $r.stderr
+	assert equal (docker-calls $w | where {|l| $l | str starts-with "buildx bake" } | length) 2 "pushed again"
+	assert equal (calls $w | where {|c| $c | str starts-with "rollout restart -n pronto-registry deploy/registry" } | length) 1 "restarted once"
+	assert (has $r.stdout "[SUCCESS] Released aprende")
+	rm -rf $w.dir
+}
+
+def test_a_digest_still_lost_after_the_restart_fails_before_the_rollout [] {
+	print "test a digest still missing after the restart and the second push fails the release before anything is applied, and the lease goes..."
+	let w = (sandbox)
+	"" | save -f ($w.dir | path join manifest_404)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "registry lost ") $r.stderr
+	assert (has $r.stderr "still does not serve them after a restart and a second push") $r.stderr
+	assert equal (docker-calls $w | where {|l| $l | str starts-with "buildx bake" } | length) 2
+	assert equal (calls $w | where {|c| $c | str starts-with "rollout restart -n pronto-registry deploy/registry" } | length) 1
+	assert equal (writes $w) ["rollout restart -n pronto-registry deploy/registry"] "only the registry was touched, nothing applied"
+	assert (calls $w | any {|c| $c | str starts-with "delete lease registry-lease-aprende-" }) "the lease was deleted"
 	rm -rf $w.dir
 }
 

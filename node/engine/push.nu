@@ -13,6 +13,7 @@ use build.nu [stamp]
 use render.nu
 export use render.nu [nearest-on-path]
 use runtime.nu
+use registry.nu
 
 # The buildx plugin the app's mise pins: `docker-buildx`, `docker-cli-plugin-docker-buildx` (what aqua names
 # docker/buildx's binary), or `buildx`. The one whose folder comes first on the PATH wins, not the first
@@ -136,12 +137,24 @@ export def images [app_dir: string, node: record, fwd: record, services: list<st
 		let meta = ($work | path join meta.json)
 		let sets = ($services | each {|s| ["--set" $"($s).tags=($host)/($app)-($s):($tag)"] } | flatten)
 		with-builder $work $fwd {|builder|
+			# Bake, then ask the registry for each pushed manifest: a registry whose blob descriptor cache outlived a garbage
+			# collection takes a reproducible build's push as already there and writes only links (PRONTO-1868), and the pods'
+			# pull then fails minutes into the rollout. The first miss restarts the registry (an empty cache) and bakes once more.
+			for attempt in 1..2 {
 			with-env {SOURCE_DATE_EPOCH: "0"} {
 				let r = (do { cd $staged; open --raw ($work | path join release.compose.yaml) | ^docker buildx bake -f - --builder $builder --push --provenance=false --progress=plain --metadata-file $meta $"--allow=fs.read=($staged)" --set $"*.platform=($node.environment.platform)" ...$sets ...$services } | complete)
 				if $r.exit_code != 0 { error make {msg: $"docker buildx bake on the node's buildkitd failed:\n(($r.stdout + $r.stderr) | lines | last 40 | str join (char nl))(failed-step ($r.stdout + $r.stderr))(buildx-hint ($r.stdout + $r.stderr))"} }
 				# what the client sent to the buildkitd, as buildx counted it
 				let sent = (($r.stdout + $r.stderr) | lines | where {|l| $l =~ 'transferring context: [0-9.]+[kMG]?B ' } | each {|l| $l | str replace -r '^#[0-9]+ ' '' } | uniq)
 				if ($sent | is-not-empty) { print $"node: (stamp) ($sent | str join '; ')" }
+			}
+			let pushed = (open $meta)
+			let lost = (registry missing-manifests $"127.0.0.1:($fwd.registry)" ($services | each {|s| {repo: $"($app)-($s)", digest: ($pushed | get $s | get "containerimage.digest")} }))
+			if ($lost | is-empty) { break }
+			let names = ($lost | each {|i| $"($i.repo)@($i.digest)" } | str join ", ")
+			if $attempt == 2 { error make {msg: $"registry lost ($names): it still does not serve them after a restart and a second push, so nothing is rolled out"} }
+			print -e $"node: (stamp) registry lost ($names) \(a stale blob cache\): restarting the registry and pushing again"
+			registry restart $node.build
 			}
 		}
 		let digests = (open $meta)

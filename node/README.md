@@ -208,7 +208,10 @@ block fails the build (`verify-door-guard` in `push.nu`), naming the plugin. The
   none (a release takes its lease and then looks for the lock, so one of them always sees the other; a release waits out a
   collection for 3 min, then fails). A lease or lock older than an hour is a dead release's. A push outside the engine (no
   lease) is still seen only as an open upload. The registry is restarted after each collection, so its in-memory blob
-  descriptor cache never vouches for a collected layer.
+  descriptor cache never vouches for a collected layer. A release also asks the registry for each pushed manifest right after
+  the push (PRONTO-1868: a collection by something else, such as an older fork's release, leaves the cache stale and a reproducible
+  push writes only links); a 404 restarts the registry once and pushes again, and a second miss fails the release before any rollout.
+  The engine does not own the registry's Deployment (it only reads its env), so it cannot set `REGISTRY_STORAGE_CACHE_BLOBDESCRIPTOR`.
 - A release whose registry maintenance fails is live: the failure is recorded in `pronto-release` (`pruned`, `prune_error`),
   and the command ends with status 3 once its tunnel is closed. A prune stops before any deletion when a registry answers
   anything but 200 or 404 for an image the cluster names.
