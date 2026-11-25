@@ -53,18 +53,18 @@ export function androidCallbacks() {
 
 const digest = (text) => createHash("sha256").update(text).digest("hex");
 
-/** The files the Android host writes for an app, by tags, as path to SHA-256 of the text. */
-function filesDigests(tags) {
-  const files = exportOf("./android/export", "files", tags);
+/** The files a host (android, ios) writes for an app, by tags, as path to SHA-256 of the text. */
+function filesDigests(host, tags) {
+  const files = exportOf(`./${host}/export`, "files", tags);
   return Object.fromEntries(Object.keys(files).sort().map((p) => [p, digest(files[p].text) + (files[p].seed ? " seed" : "") + (files[p].merge ? " merge" : "")]));
 }
 
-/** The paths whose generated text differs from the golden `android/golden/<name>.json` (all of them, new and gone, named). */
-export function golden(name, tags) {
-  const now = filesDigests(tags);
-  const file = `${root}android/golden/${name}.json`;
+/** The paths whose generated text differs from the golden `<host>/golden/<name>.json` (all of them, new and gone, named); the host is android unless a third argument says ios. */
+export function golden(name, tags, host = "android") {
+  const now = filesDigests(host, tags);
+  const file = `${root}${host}/golden/${name}.json`;
   if (Deno.env.get("GOLDEN_UPDATE") === "1") {
-    Deno.mkdirSync(`${root}android/golden`, { recursive: true });
+    Deno.mkdirSync(`${root}${host}/golden`, { recursive: true });
     Deno.writeTextFileSync(file, JSON.stringify(now, null, 2) + "\n");
   }
   const want = JSON.parse(Deno.readTextFileSync(file));

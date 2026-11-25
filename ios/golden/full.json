@@ -1,0 +1,11 @@
+{
+  ".config/mise/conf.d/ios.toml": "2a5007fafcb78a5c3adddea59816259460756f61f1f535b71e3b169bedd69441",
+  ".say.json": "960b4b0be9a3fc3d7df773c084f5a8b2aeceeb84cb1da354f422796c02da9595 merge",
+  "ios/.gitignore": "3b49bd0b3b5baf686ce5efd4623f4705232880161f1cf9cbf8d748312c4d35d6",
+  "ios/.swiftlint.yml": "2eedb35b32c8713678402f467b501965b4f9a7be3e412de4ec324f4349af16a1",
+  "ios/Sources/HostApp.swift": "1b5e144d7495e9c215235de400d12de6f02b5381a39dc697bface077e1836d08",
+  "ios/Tests/HostTests.swift": "f96ec66415167196f80d78ed3853150bee1303f869f1c8e04cd499ecfb5bfb6f",
+  "ios/ios.json": "a7351ba72655cde4c780c8b0fd36fa8e9e538c5ebed914d19ebaf3c87dd55c49 seed",
+  "ios/project.yml": "4933f7417abe252c6632c21aeb5f43b0a362317f99d38bf521b9c369ebcbf06c",
+  "ios/toolchain.nu": "41b818f450d5ca2993a254721d3461b3d670e8601c7af1fcfc02e865212304a9"
+}

@@ -33,4 +33,18 @@ cases: {
 		{call: "native.golden", args: ["full", ["app=pass-vault", "label=Keep", "base=https://keep.example", "package=demo", "config=" + json.Marshal({scenarios: ["a.cue"], signing: [_fp], unlock: "biometric", autofill: true, release: {file: "secrets.enc.yaml", secret: "k"}})]], expect: [], why: "signed, unlocked, filling, released from a SOPS file, in a hyphenated app"},
 		{call: "native.golden", args: ["project", ["app=emit", "config=" + json.Marshal({scenarios: [], release: {project: "demo-proj"}})]], expect: [], why: "released from a Secret Manager project"},
 	]}
+
+	"the iOS host's project is what the CUE says": {suite: "native", steps: [
+		{call: "native.exportOf", args: ["./ios", "[bundleId, testsId, versions, label]"], expect: ["dev.pronto.emit", "dev.pronto.emit.tests", ["0.1.0", 1], "Emit"], why: "the generated project.yml is read back: its bundle ids, versions and label are the spec's"},
+		{call: "native.exportOf", args: ["./ios", "[tunedVersions, tunedEntitlements, tunedFaceId]"], expect: [["2.3.4", 7], ["webcredentials:emit.example"], "Unlock emit"], why: "the app's config sets the versions and the entitlements, and a biometric unlock asks for Face ID by name"},
+	]}
+
+	"the iOS host's verbs, toolchain and tests hold the spec": {suite: "native", steps: [
+		{call: "native.exportOf", args: ["./ios", "[platforms, xcodeNamed, developerDir, slotted, misePinsXcodegen, misePinsSwiftlint, testsHoldTheId, testsHoldTheVersions, seeded, noTokenLeft]"], expect: [["setup", "build", "lint", "test", "launch"], true, true, true, true, true, true, true, ["ios/ios.json"], []], why: "every rule answers @ios alone, Xcode is named once and found by DEVELOPER_DIR, a build claims the slot, mise pins the tools, only the config is seeded and no placeholder is left"},
+	]}
+
+	"iOS's generated files are the golden's": {suite: "native", steps: [
+		{call: "native.golden", args: ["terminal", ["app=emit"], "ios"], expect: [], why: "the default host"},
+		{call: "native.golden", args: ["full", ["app=pass_vault", "label=Keep", "base=https://keep.example", "package=demo", "config=" + json.Marshal({scenarios: ["a.cue"], unlock: "biometric", marketingVersion: "1.2.0", buildNumber: 5, entitlements: {"com.apple.developer.associated-domains": ["webcredentials:keep.example"]}})], "ios"], expect: [], why: "unlocked, versioned, entitled, in an app whose name has an underscore"},
+	]}
 }
