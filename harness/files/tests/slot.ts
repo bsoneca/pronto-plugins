@@ -2535,6 +2535,16 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-claim", "--cores-
 // are this file's own stack, as `launch`: what `args` of the main below is made from.
 export const launchArgs = (argv: string[]): string[] =>
   /(^|\/)saytw$/.test(argv[0] ?? "") && (argv[1] === "launch@local" || argv[1] === "launch@host") ? ["launch", ...argv.slice(2)] : argv;
+// What `launch@host` gives its stack beyond `prepare`'s record: the app's own host profile (`mise env` under MISE_ENV=host, as
+// `./saytw launch@host` loads it: an app's secrets live there, and the stack started here is not run under mise). PATH and
+// MISE_* are the stack's own, and the slot's variables (its ports) stay the slot's: only what the slot does not set is added.
+export const hostProfile = (json: string, slotEnv: Record<string, string>): Record<string, string> =>
+  Object.fromEntries(Object.entries(JSON.parse(json) as Record<string, string>).filter(([k, v]) => typeof v === "string" && k !== "PATH" && !k.startsWith("MISE_") && !(k in slotEnv)));
+const hostProfileOf = async (slot: Slot): Promise<Record<string, string>> => {
+  const { code, stdout, stderr } = await new Deno.Command("sh", { args: ["-c", "exec mise env --json"], cwd: slot.dir, env: { ...slot.env, MISE_ENV: "host", PATH: misePath() }, stdout: "piped", stderr: "piped" }).output();
+  if (code) throw new Error(`the app's host profile (mise env under MISE_ENV=host) failed:\n${new TextDecoder().decode(stderr)}`);
+  return hostProfile(new TextDecoder().decode(stdout), slot.env);
+};
 if (import.meta.main) {
   if (!Deno.args.length) { console.error("usage: deno run -A tests/slot.ts launch [--watch] | <command...> | status | renew [n|pid] | sweep-browsers | own | detach | member | leftovers | --weight <n> --what <label> -- <command...>"); Deno.exit(2); }
   if (["own", "detach", "member", "leftovers"].includes(Deno.args[0])) await ownerVerb(Deno.args[0], Deno.args.slice(1));
@@ -2608,7 +2618,7 @@ if (import.meta.main) {
   let code: number;
   if (args[0] === "launch") {
     const tmp = await runDir("slot.");
-    const made = await prepare(slot, tmp);
+    const made = { ...(Deno.args[1] === "launch@host" ? await hostProfileOf(slot) : {}), ...await prepare(slot, tmp) };
     owned = true;
     const s = stack(slot, tmp, made, { stop: async () => { await stopping?.(); } });
     // The served folder is made anew: omnishell's addressing refuses a tree that already holds its
