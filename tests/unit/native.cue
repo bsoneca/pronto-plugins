@@ -40,7 +40,16 @@ cases: {
 	]}
 
 	"the iOS host's verbs, toolchain and tests hold the spec": {suite: "native", steps: [
-		{call: "native.exportOf", args: ["./ios", "[platforms, xcodeNamed, developerDir, slotted, misePinsXcodegen, misePinsSwiftlint, testsHoldTheId, testsHoldTheVersions, seeded, noTokenLeft]"], expect: [["setup", "build", "lint", "test", "launch"], true, true, true, true, true, true, true, ["ios/ios.json"], []], why: "every rule answers @ios alone, Xcode is named once and found by DEVELOPER_DIR, a build claims the slot, mise pins the tools, only the config is seeded and no placeholder is left"},
+		{call: "native.exportOf", args: ["./ios", "[platforms, xcodeNamed, developerDir, slotted, misePinCount, testsHoldTheId, testsHoldTheVersions, seeded, noTokenLeft]"], expect: [["setup", "build", "lint", "test", "launch"], true, true, true, 2, true, true, ["ios/ios.json"], []], why: "every rule answers @ios alone, Xcode is named once and found by DEVELOPER_DIR, a build claims the slot, mise pins the tools, only the config is seeded and no placeholder is left"},
+	]}
+
+	"the iOS host's tools are pinned as this repository pins them": {suite: "native", steps: [
+		{call: "native.iosPinsDrift", expect: [], why: "xcodegen and swiftlint are in this repository's .mise.toml and in the drop-in the host writes, and the two lines must be equal or one of them is stale"},
+	]}
+
+	"the iOS host refuses entitlements that are not a property list's scalars and lists": {suite: "native", steps: [
+		{call: "native.exportFails", args: ["./ios/export", "files", ["app=emit", "config=" + json.Marshal({entitlements: {nested: {a: 1}}})]], expect: true, why: "an entitlement is a text, a flag, a number or a list of texts; a nested object would be written to the plist as something else"},
+		{call: "native.exportFails", args: ["./ios/export", "files", ["app=emit", "config=" + json.Marshal({entitlements: {"com.apple.developer.associated-domains": ["webcredentials:a.example"]}})]], expect: false, why: "and a list of texts is accepted"},
 	]}
 
 	"iOS's generated files are the golden's": {suite: "native", steps: [

@@ -171,7 +171,7 @@ after it, against the same [native kit](docs/native-terminal.md).
 Xcode is not a mise tool. `setup@ios` runs `xcodebuild` from `DEVELOPER_DIR`
 (`/Applications/Xcode.app/Contents/Developer`, so no `xcode-select -s` and no sudo) and fails with the exact Xcode
 version, simulator runtime or device to install when this Mac differs from the host's spec (Xcode 27.2, iOS 27.2,
-iPhone 17). `build@ios` and `test@ios` run `xcodebuild` through `tests/slot.ts` (weight 4), so they wait for the
+iPhone 17). `build@ios` and `test@ios` run `xcodebuild` through `tests/slot.ts` (weight 2), so they wait for the
 machine's budget. iOS builds run on a Mac only, on pronto-mac: there is no cloud CI for them.
 
 ## pronto-firebase

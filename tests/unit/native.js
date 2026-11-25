@@ -70,3 +70,21 @@ export function golden(name, tags, host = "android") {
   const want = JSON.parse(Deno.readTextFileSync(file));
   return sorted(new Set([...Object.keys(now), ...Object.keys(want)])).filter((p) => now[p] !== want[p]);
 }
+
+/** Whether `cue export` of the expression fails, for a spec that must be refused: exportFails("./ios/export", "files", ["app=x", "config=..."]). */
+export function exportFails(pkg, expr, tags) {
+  try {
+    exportOf(pkg, expr, tags);
+    return false;
+  } catch (_) {
+    return true;
+  }
+}
+
+/** The tool pins of the iOS host's drop-in (ios/host.cue's miseConf) that differ from this repository's own (.mise.toml): none, or each tool with both lines. */
+export function iosPinsDrift() {
+  const pins = (text) => Object.fromEntries([...text.matchAll(/^("aqua:[^"]+") = (.*)$/gm)].map((m) => [m[1], m[2]]));
+  const repo = pins(read(".mise.toml"));
+  const app = pins(exportOf("./ios/export", "files", ["app=emit"])[".config/mise/conf.d/ios.toml"].text);
+  return Object.keys(app).filter((tool) => repo[tool] !== app[tool]).map((tool) => `${tool}: repo ${repo[tool]}, app ${app[tool]}`);
+}

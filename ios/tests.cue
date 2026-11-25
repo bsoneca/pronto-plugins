@@ -33,12 +33,14 @@ testsHoldTheVersions: strings.Contains(_tests, "\"0.1.0\"") & strings.Contains(_
 idFromUnderscore: (#Host & {app: "pass_vault"}).bundleId & "dev.pronto.pass-vault"
 
 // Xcode is the Mac's: the toolchain names its version, runtime and device, and mise pins the two tools beside it.
-_toolchain:        _t.files["ios/toolchain.nu"].text
-xcodeNamed:        strings.Contains(_toolchain, "const xcode = \"27.2\"") & true
-developerDir:      strings.Contains(_toolchain, "const developer_dir = \"/Applications/Xcode.app/Contents/Developer\"") & true
-slotted:           strings.Contains(_toolchain, "tests/slot.ts --weight $weight --what") & true
-misePinsXcodegen:  strings.Contains(_t.files[".config/mise/conf.d/ios.toml"].text, "XcodeGen\" = { version = \"2.48.0\"") & true
-misePinsSwiftlint: strings.Contains(_t.files[".config/mise/conf.d/ios.toml"].text, "SwiftLint\" = { version = \"0.65.1\"") & true
+_toolchain:   _t.files["ios/toolchain.nu"].text
+xcodeNamed:   strings.Contains(_toolchain, "const xcode = \"27.2\"") & true
+developerDir: strings.Contains(_toolchain, "const developer_dir = \"/Applications/Xcode.app/Contents/Developer\"") & true
+slotted:      strings.Contains(_toolchain, "tests/slot.ts --weight $weight --what") & true
+// The two tools are pinned in the app's drop-in; the unit case "the iOS host's tools are pinned as this repository pins them"
+// reads this repository's .mise.toml against it.
+_confPins: [for l in strings.Split(_t.files[".config/mise/conf.d/ios.toml"].text, "\n") if strings.HasPrefix(l, "\"aqua:") {l}]
+misePinCount: len(_confPins) & 2
 
 // Only the config is the app's once written; the project, the sources and the toolchain are regenerated.
 seeded: [for p, f in _t.files if f.seed {p}] & ["ios/ios.json"]

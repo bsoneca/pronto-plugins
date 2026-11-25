@@ -33,8 +33,8 @@ _developerDir: "/Applications/Xcode.app/Contents/Developer"
 // Swift 6 is the language mode, and iOS 18 the oldest the host supports.
 _swift:      "6.0"
 _deployment: "18.0"
-// What an xcodebuild keeps busy while it works, in tests/slot.ts's weight: cores, measured on this Mac: the hello host's xcodebuild used 17.8 s of CPU in 11 s of work, about 1.5 cores, so 4 leaves room for the terminal's sources that follow.
-_weight: 4
+// What an xcodebuild keeps busy while it works, in tests/slot.ts's weight: cores, measured on this Mac: the hello host's xcodebuild used 17.8 s of CPU in 11 s of work, about 1.5 cores, so 2. Raise it when the terminal's sources arrive.
+_weight: 2
 
 #Host: H={
 	// What every native host says: the app, its label, its base, its CUE package, the unlock, the scenarios (native/host.cue).
@@ -47,7 +47,7 @@ _weight: 4
 	marketingVersion: *"0.1.0" | =~"^[0-9]+(\\.[0-9]+){1,2}$"
 	buildNumber:      *1 | (int & >=1)
 	// The entitlements of the app (ios/ios.json's `entitlements`), a property list as data: none by default.
-	entitlements: *{} | {[string]: string | bool | number | [...string]}
+	entitlements: *close({}) | {[string]: string | bool | number | [...string]}
 
 	_infoProperties: {
 		CFBundleDisplayName:        H.label
@@ -103,6 +103,8 @@ _weight: 4
 
 	surface: {
 		// Merged by mise beside the app's own config. Both are Mac tools: xcodebuild is Xcode's, which mise cannot install.
+		// These two versions are also pinned in this repository's .mise.toml and mise.lock (for its own use); the unit case
+		// "the iOS host's tools are pinned as this repository pins them" holds the two to each other.
 		miseConf: """
 			[tools]
 			"aqua:yonaskolb/XcodeGen" = { version = "2.48.0", os = ["macos"] }
