@@ -55,6 +55,7 @@ const files = [
 	{key: "door.ts", from: "broker/door.ts", path: "broker/door.ts"}
 	{key: "fake.ts", from: "broker/fake.ts", path: "broker/fake.ts"}
 	{key: "store.ts", from: "broker/store.ts", path: "broker/store.ts"}
+	{key: "appstore.ts", from: "broker/appstore.ts", path: "broker/appstore.ts"}
 	{key: "postgres.js", from: "broker/vendor/postgres.js", path: "broker/vendor/postgres.js"}
 ]
 # Each variable the Secret `<name>` holds, and the Secret Manager secret it is read from (<service>-<suffix>).

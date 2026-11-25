@@ -122,6 +122,32 @@ needs no new event types. The stand-in has the trial too (`do=trial_paid`, `tria
 (`STRIPE_SECRET_KEY=sk_test_... deno run --allow-net --allow-env billing/broker/trial_sandbox.ts`;
 it refuses any other key and cleans up after itself).
 
+## The App Store
+
+An iOS app can sell the same plans through StoreKit, and the broker turns what Apple says into the same entitlement
+a tenant takes from a Stripe subscription (PRONTO-1435). It is off until the operator sets `APPSTORE_APPS`; with it
+unset `/appstore` and `/appstore/transaction` are no endpoints (404) and nothing else changes.
+
+| Setting | What |
+| --- | --- |
+| `APPSTORE_APPS` | JSON list: `{"bundleId", "tenant", "products": {"<product id>": "<plan id>"}, "sandbox": false}`. The operator ties a bundle id to the tenant it answers for; a tenant cannot claim another's. `sandbox: true` counts sandbox purchases (a rehearsal or TestFlight app), never on a live app. |
+| `APPSTORE_ROOTS` | Apple's root certificate(s), PEM: the public "Apple Root CA - G3" from apple.com/certificateauthority. A chain ends only there. |
+| `APPSTORE_ISSUER_ID`, `APPSTORE_KEY_ID`, `APPSTORE_KEY` | An App Store Server API key (App Store Connect, Integrations): its issuer id, key id and the `.p8` PEM, kept as the other broker secrets are (SOPS). |
+
+- `POST /appstore/transaction` `{tenant, account, transaction}`: the signed transaction a player's device sends after a purchase.
+- `POST /appstore`: Apple's App Store Server Notifications v2 (`signedPayload`); set it as the app's production and sandbox URL.
+
+Nothing a client says is believed. Signed data is checked as Apple's (ES256, the `x5c` chain valid now and ending at a pinned
+root, Apple's two extensions on the intermediate and the leaf), then must name a bundle the operator tied to the tenant, an
+environment that counts, a product that is a plan, and the account: the iOS host sets `appAccountToken` to the account's uuid
+at purchase, and a purchase for another account is refused. It is then only a pointer: the subscription is **read again from
+Apple's Server API** (as a Stripe event is read again from Stripe), so a replayed, reordered or forged message only makes the
+broker ask Apple. A transaction already taken is refused (409 `replayed`); a notification (renew, expire, refund, revoke and
+the like) is taken once by its `notificationUUID`. A subscription holds the plan while Apple's status for it is active and the
+transaction is neither revoked nor ended; expired, billing retry, grace period and revoked hold nothing, as a Stripe subscription
+past due holds nothing. What Apple held for the account is kept (`appstore held`, in the store) so a Stripe event for the same
+account does not lapse it, and the entitlement pushed is the later end of the two. Gold (consumables) is not sold through it yet.
+
 ## Security model
 
 - **Secrets stay with the operator.** The Stripe key, the webhook secret, the broker's signing

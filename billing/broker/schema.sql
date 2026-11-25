@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS billing_seen (kind text NOT NULL, id text NOT NULL, e
 -- squawk-ignore require-concurrent-index-creation
 CREATE INDEX IF NOT EXISTS billing_seen_expires ON billing_seen (expires);
 ALTER TABLE billing_seen ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT 'done';
+ALTER TABLE billing_seen ADD COLUMN IF NOT EXISTS value text;
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'billing_seen_state' AND conrelid = 'billing_seen'::regclass) THEN
       ALTER TABLE billing_seen ADD CONSTRAINT billing_seen_state CHECK (state IN ('claimed', 'done'));

@@ -418,7 +418,7 @@ if _billingLocal {
 			from: name: "denoland/deno:alpine-2.5.0"
 			copy: [
 				{srcs: ["billing/shared.ts", "billing/rules.ts"], dst: "/app/billing/"},
-				{srcs: ["billing/broker/core.ts", "billing/broker/main.ts", "billing/broker/stripe.ts", "billing/broker/door.ts", "billing/broker/fake.ts", "billing/broker/store.ts"], dst: "/app/billing/broker/"},
+				{srcs: ["billing/broker/core.ts", "billing/broker/main.ts", "billing/broker/stripe.ts", "billing/broker/door.ts", "billing/broker/fake.ts", "billing/broker/store.ts", "billing/broker/appstore.ts"], dst: "/app/billing/broker/"},
 				{srcs: ["billing/broker/vendor/postgres.js"], dst: "/app/billing/broker/vendor/"},
 			]
 		}

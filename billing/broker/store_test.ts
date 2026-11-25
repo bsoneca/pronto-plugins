@@ -73,6 +73,22 @@ for (const [name, make] of stores) {
     assertEquals(await s.seen("no account", "https://a.example"), false, "expired");
   });
 
+  Deno.test(`${name} store: a remembered value is recalled until it is forgotten or expires, and a claim carries none`, async () => {
+    const s = await make();
+    assertEquals(await s.recall("appstore held", "k"), null);
+    await s.remember("appstore held", "k", 60_000, "{\"through\":1}");
+    assertEquals([await s.recall("appstore held", "k"), await s.recall("other", "k")], ["{\"through\":1}", null], "kinds are apart");
+    await s.remember("appstore held", "k", 60_000, "{\"through\":2}");
+    assertEquals(await s.recall("appstore held", "k"), "{\"through\":2}", "remembered again, the value is replaced");
+    await s.remember("appstore held", "plain", 60_000);
+    assertEquals(await s.recall("appstore held", "plain"), null, "a remember with no value recalls none");
+    await s.forget("appstore held", "k");
+    assertEquals(await s.recall("appstore held", "k"), null, "forgotten");
+    await s.remember("short", "k", 30, "v");
+    await sleep(60);
+    assertEquals(await s.recall("short", "k"), null, "expired");
+  });
+
   Deno.test(`${name} store: a lock runs its callers one after another, and lets go of one that failed`, async () => {
     const s = await make();
     const order: string[] = [];
@@ -223,7 +239,7 @@ Deno.test("postgres store: claim is one statement that takes only a row nobody h
   const c = await new PostgresStore(fake).claim("stripe event", "evt", 120_000);
   assertEquals(c, { state: "claimed", token: "2026-11-21 10:00:00.123456+00" }, "the token is the row's own text, microseconds kept");
   assertEquals(/^DELETE FROM billing_seen WHERE ctid IN \(SELECT ctid FROM billing_seen WHERE expires <= now\(\) AND state IN \('claimed', 'done'\) LIMIT 100\)$/.test(sql[0]), true, "a claim first reclaims a bounded few rows whose time ended");
-  assertEquals(/^INSERT INTO billing_seen .* ON CONFLICT \(kind, id\) DO UPDATE SET expires = EXCLUDED\.expires, state = 'claimed' WHERE billing_seen\.expires <= now\(\) RETURNING expires::text AS token$/.test(sql[1]), true);
+  assertEquals(/^INSERT INTO billing_seen .* ON CONFLICT \(kind, id\) DO UPDATE SET expires = EXCLUDED\.expires, state = 'claimed', value = NULL WHERE billing_seen\.expires <= now\(\) RETURNING expires::text AS token$/.test(sql[1]), true);
 });
 
 Deno.test("postgres store: a table made before the claim state column gets it, and its rows are done", async () => {
@@ -245,7 +261,7 @@ Deno.test("postgres store: the broker makes no tables and says what is missing",
   const old = pglite(new PGlite());
   for (const t of ["billing_counter (name text)", "billing_window (name text, started timestamptz)", "billing_seen (kind text, id text, expires timestamptz)"]) await old.unsafe(`CREATE TABLE ${t}`);
   const partial = await new PostgresStore(old).verify().then(() => "started", (e) => (e as Error).message);
-  assertEquals(/column billing_seen\.state, constraint billing_seen_state/.test(partial), true, partial);
+  assertEquals(/column billing_seen\.state, column billing_seen\.value, constraint billing_seen_state/.test(partial), true, partial);
   await applySchema(old);
   await new PostgresStore(old).verify();
 });

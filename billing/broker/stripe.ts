@@ -118,14 +118,17 @@ const BODY_PATHS = ["/checkout", "/trial/offer", "/trial/checkout", "/portal", "
 const ENDPOINTS: Record<string, string> = {
   "/jwks": "GET", "/health": "GET", "/onboarded": "GET", "/onboard": "POST", "/checkout": "POST", "/trial/offer": "POST",
   "/trial/checkout": "POST", "/portal": "POST", "/probe": "POST", "/route": "POST", "/resync": "POST", "/stripe": "POST",
+  "/appstore": "POST", "/appstore/transaction": "POST",
 };
+/** The paths only a broker with the App Store configured has (appstore.ts): to every other they are no endpoint. */
+const APPSTORE_PATHS = ["/appstore", "/appstore/transaction"];
 
 /** A 404 for a path that is not an endpoint (and for /route unless the door is asked: a fixed-route broker has none), a
  * 405 for a method the path does not take; undefined for a request to serve. Made before any body is read or anything
  * allocated for the request. */
-export function endpointRefusal(method: string, path: string, doorAsked: boolean): Response | undefined {
+export function endpointRefusal(method: string, path: string, doorAsked: boolean, appstore = false): Response | undefined {
   const allowed = Object.hasOwn(ENDPOINTS, path) ? ENDPOINTS[path] : undefined;
-  if (!allowed || (path === "/route" && !doorAsked)) return json(404, { error: "not found" });
+  if (!allowed || (path === "/route" && !doorAsked) || (!appstore && APPSTORE_PATHS.includes(path))) return json(404, { error: "not found" });
   if (method !== allowed) return json(405, { error: "method not allowed" });
   return undefined;
 }
@@ -137,14 +140,15 @@ export function bodyLimitOf(method: string, path: string): number | undefined {
   if (method !== "POST") return undefined;
   if (path === "/stripe") return RULES.bodyLimits.webhook;
   if (path === "/route") return RULES.routeLimits.bodyMax;
+  if (APPSTORE_PATHS.includes(path)) return RULES.bodyLimits.appstore;
   return BODY_PATHS.includes(path) ? RULES.bodyLimits.request : undefined;
 }
 
 /** Reads the capped body of `req` once, and hands back a request that carries the text already read, or a 413 the
  * moment the cap is passed (the rest of a client's stream is not read). A request with no body path is returned as is. */
-export async function withCappedBody(req: Request, doorAsked: boolean): Promise<Request | Response> {
+export async function withCappedBody(req: Request, doorAsked: boolean, appstore = false): Promise<Request | Response> {
   // First of all: no body is read, nor anything allocated, for a path that is no endpoint.
-  const refusal = endpointRefusal(req.method, new URL(req.url).pathname, doorAsked);
+  const refusal = endpointRefusal(req.method, new URL(req.url).pathname, doorAsked, appstore);
   if (refusal) return refusal;
   const limit = bodyLimitOf(req.method, new URL(req.url).pathname);
   if (limit === undefined) return req;
@@ -159,7 +163,8 @@ export async function withCappedBody(req: Request, doorAsked: boolean): Promise<
 export function forAccount<A extends unknown[]>(handler: (req: Request, ...rest: A) => Promise<Response>) {
   return async (req: Request, ...rest: A): Promise<Response> => {
     const who: { account?: string; door?: boolean } = {};
-    if (req.method === "POST" && new URL(req.url).pathname !== "/stripe") {
+    // /stripe and the App Store's paths (which read their own bodies, at their own limit) name no caller here.
+    if (req.method === "POST" && !["/stripe", "/appstore", "/appstore/transaction"].includes(new URL(req.url).pathname)) {
       // The body is read once, up to the CUE limit; past it the answer is a 413 at once.
       const capped = await withCappedBody(req, true);
       if (capped instanceof Response) return capped;
