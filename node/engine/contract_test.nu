@@ -217,6 +217,22 @@ def restore-shared-dapr [o: record]: nothing -> record {
 	} else { $o }
 }
 
+# The door's Deployment as upstream renders it: the engine's `PRONTO_UPSTREAM_<NAME>=localhost:3500` for each service of the release
+# (node.cue's #AddUpstreams) taken out of the caddy container's environment, only where the value is the engine's.
+def restore-door-upstreams [o: record, own: list]: nothing -> record {
+	# upstream names these seven itself, so the engine adds none of them
+	let upstreams = [CRUD AUTH ELECTRIC TICKER RCLONE_S3 IMGPROXY RENDER] | each {|n| $"PRONTO_UPSTREAM_($n)" }
+	let added = ($own | each {|n| $"PRONTO_UPSTREAM_($n | str uppercase | str replace -a '-' '_')" } | where {|n| $n not-in $upstreams })
+	$o | update spec.template.spec.containers {|x|
+		$x.spec.template.spec.containers | each {|c|
+			if $c.name == "caddy" and ($c | get -o env | is-not-empty) {
+				let kept = ($c.env | where {|e| not ($e.name in $added and ($e | get -o value) == "localhost:3500") })
+				if ($kept | is-empty) { $c | reject env } else { $c | update env $kept }
+			} else { $c }
+		}
+	}
+}
+
 # The initdb Job's script as upstream renders it: the engine's wait for the database to take a connection (node.cue's
 # #TuneInitdb), undone only where the script begins with it.
 def restore-initdb-wait [o: record]: nothing -> record {
@@ -231,7 +247,7 @@ def restore-initdb-wait [o: record]: nothing -> record {
 }
 
 # The engine's objects, with its declared patches undone and its additions dropped, are upstream's.
-def undeclared []: list -> list {
+def undeclared [own: list]: list -> list {
 	$in
 		| where {|o| $o.kind not-in $own_kinds and not ($o.kind == "NetworkPolicy" and ($o.metadata.name | str ends-with "-tenant-egress")) and not ($o.kind == "Configuration" and ($o.metadata.name | str ends-with "-caddy-invoke-only")) }
 		| each {|o|
@@ -239,7 +255,7 @@ def undeclared []: list -> list {
 				"Namespace" => ($o | update metadata.labels {|x| $x.metadata.labels | reject -o "pronto.dev/release" "pronto.dev/preview" } | if ($in.metadata.labels | is-empty) { $in | reject metadata.labels } else { $in })
 				"Cluster" => ($o | reject -o spec.plugins)
 				# the door's own Dapr configuration is the engine's (declared patch): upstream points it at the shared one
-				"Deployment" if ($o.metadata.name | str ends-with "-caddy") => (restore-shared-dapr $o)
+				"Deployment" if ($o.metadata.name | str ends-with "-caddy") => (restore-door-upstreams (restore-shared-dapr $o) $own)
 				# the initdb Job waits for the database (declared patch): upstream's script runs at once
 				"Job" if ($o.metadata.name | str ends-with "-initdb") => (restore-initdb-wait $o)
 				_ => $o
@@ -299,7 +315,7 @@ def test_objects_change_only_as_declared [fx: record] {
 		assert equal $r.exit_code 0 $"($variant)\n($r.stderr)"
 		let both = ($r.stdout | from json)
 		let tuned = ($fx.tuned? | default false)
-		let engine = ($both.engine | undeclared)
+		let engine = ($both.engine | undeclared ($fx.tuned?.own? | default []))
 		let upstream = $both.upstream
 		let mine = (if $tuned != false { $engine | without-tunings $fx.name $tuned } else { $engine })
 		let theirs = (if $tuned != false { $upstream | without-tunings $fx.name $tuned } else { $upstream })
