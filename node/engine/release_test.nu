@@ -1,6 +1,6 @@
 #!/usr/bin/env nu
 # Run with: nu node/engine/release_test.nu   (needs `cue` and the CUE registry, and `PRONTO_RUNTIME` or
-# mise's github:bonisoft3/pronto@1.6.0: the six helpers imported from upstream run for real)
+# mise's github:bonisoft3/pronto@1.15.0: the seven helpers imported from upstream run for real)
 #
 # The release flow (release.nu) over fakes of kubectl, sops, ssh, nc, curl, docker (with buildx) and crane on
 # the PATH: kubectl keeps a cluster's state in files and logs every call and the objects it was given, docker
@@ -19,11 +19,11 @@ use push.nu
 
 # The newest validated module (runtime.nu) the fixture renders with, and the runtime an app that pins it runs
 # (its distribution config's tool version; contract_test.nu holds that).
-const pin = "1.7.0"
-const runtime_pin = "1.6.0"
+const pin = "1.15.1"
+const runtime_pin = "1.15.0"
 const release_nu = (path self release.nu)
 
-# The runtime upstream pronto 1.6.0 is installed as.
+# The runtime upstream pronto 1.15.0 is installed as.
 def runtime-dir []: nothing -> string {
 	if ($env.PRONTO_RUNTIME? | is-not-empty) { $env.PRONTO_RUNTIME } else { ^mise where $"github:bonisoft3/pronto@($runtime_pin)" | str trim }
 }
@@ -141,9 +141,12 @@ esac
 if [ -f "$d/registry_dead" ]; then printf 000; exit 7; fi
 printf 200
 '# | str trim --left | save -f ($d | path join bin curl)
+	# deno registers the OIDC clients (register.ts: it answers the settings it was given, as for a provider whose client id is
+	# not "origin") and signs the service token; it is not run for real here, and every call is logged
+	"#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/../deno.log\"\ncase \"$*\" in *register.ts*) cat ;; *) cat >/dev/null; echo fake.service.token ;; esac\n" | save -f ($d | path join bin deno)
 	# tools the preflight wants on the PATH: they are not run here
 	"#!/bin/sh\nexit 0\n" | save -f ($d | path join bin docker-buildx)
-	for t in [kubectl sops nc ssh docker crane curl docker-buildx] { ^chmod +x ($d | path join bin $t) }
+	for t in [kubectl sops nc ssh docker crane curl docker-buildx deno] { ^chmod +x ($d | path join bin $t) }
 	let compose = {services: {
 		database: {}, crud: {}, electric: {}, caddy: {}
 		auth: {environment: {OIDC_PROVIDERS: "google"}}
@@ -267,6 +270,7 @@ def main [] {
 	test_schema_from_is_refused_where_it_cannot_be_read
 	test_database_base
 	test_the_clusters_spec_does_not_move_with_the_databases_files
+	test_oidc_clients_are_registered_by_a_runtime_that_has_it_and_never_by_an_older_one
 	print "\nAll node release tests passed."
 }
 
@@ -1899,7 +1903,7 @@ def test_the_clusters_spec_does_not_move_with_the_databases_files [] {
 	print "test the Cluster's rendered spec is the same for any release of the database's files, and still moves with a real database change..."
 	let w = (sandbox)
 	let pushed = {|db: string, base: any| (["database" "crud" "electric" "auth" "caddy" "migrate"] | each {|s| [$s {tag: (if $s == "database" { "17" } else { "release" }), digest: ("sha256:" + ($db | fill -c $db -w 64))}] } | into record) | if ($base | is-empty) { $in } else { $in | insert "database-base" {tag: "17", digest: ("sha256:" + ($base | fill -c $base -w 64))} } }
-	let render = {|p| let r = (in-world $w -c (script $w $"(inputs $w) render objects $app_info.cue_path \(render release-data $app_info.dir $compose $facts ($p | to nuon)\) '' | to json --raw")); assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"; $r.stdout | from json }
+	let render = {|p| let r = (in-world $w -c (script $w $"(inputs $w) render objects $app_info.cue_path \(render release-data $app_info.dir $compose $facts ($p | to nuon) ''\) '' | to json --raw")); assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"; $r.stdout | from json }
 	let cluster = {|objs| $objs | where kind == Cluster | first }
 	let job = {|objs| $objs | where kind == Job and metadata.name == "aprende-initdb" | first | get spec.template.spec.containers.0.image }
 	let one = (do $render (do $pushed "a" "c"))
@@ -1914,5 +1918,33 @@ def test_the_clusters_spec_does_not_move_with_the_databases_files [] {
 	# no base (a stage that adds something): the Cluster runs the full image, as upstream renders it
 	let full = (do $render (do $pushed "a" null))
 	assert ((do $cluster $full | get spec.imageName) | str contains $"aprende-database:17@sha256:('a' | fill -c a -w 64)") (do $cluster $full | get spec.imageName)
+	rm -rf $w.dir
+}
+
+def test_oidc_clients_are_registered_by_a_runtime_that_has_it_and_never_by_an_older_one [] {
+	print "test register-clients runs under runtime 1.15 and is skipped under 1.14, and an empty origin registers nowhere..."
+	let w = (sandbox)
+	let data = {|runtime: string, origin: string|
+		let r = (with-env {PATH: ([($w.dir | path join bin)] | append $env.PATH), FAKE_DIR: $w.state, PRONTO_RUNTIME: $runtime} {
+			do { cd $w.app; ^$nu.current-exe --no-config-file -c (script $w $"(inputs $w) render release-data $app_info.dir $compose $facts (pushed-json) '($origin)' | to json --raw") } | complete
+		})
+		assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+		$r.stdout | from json
+	}
+	let log = ($w.dir | path join deno.log)
+	let registered = {|| if ($log | path exists) { open --raw $log | lines | where {|l| $l | str contains "register.ts" } } else { [] } }
+	# an empty origin (a check): nothing is registered
+	do $data (runtime-dir) ""
+	assert equal (do $registered) [] "an empty origin must not register"
+	# runtime 1.15: register.ts runs with the origin
+	let on = (do $data (runtime-dir) "https://aprende.example.test")
+	assert equal (do $registered | length) 1 "runtime 1.15 registers once"
+	assert ((do $registered | first) | str contains "https://aprende.example.test") "the origin is passed to register.ts"
+	# a runtime named 1.14.0 has no register-clients: the same data, no call
+	let old = ($w.dir | path join "1.14.0")
+	^ln -s (runtime-dir) $old
+	let off = (do $data $old "https://aprende.example.test")
+	assert equal (do $registered | length) 1 "runtime 1.14 must not register"
+	assert equal $off $on "the data is the same without registration, for a provider that registers nothing"
 	rm -rf $w.dir
 }

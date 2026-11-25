@@ -644,7 +644,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	let app = $app_info.name
 	let ns = $node.namespace
 	# 3. data and render
-	let data = (render release-data $app_info.dir $compose $facts $pushed)
+	let data = (render release-data $app_info.dir $compose $facts $pushed (if $check { '' } else { $node.origin }))
 	let objects = (render objects $app_info.cue_path $data $node.preview)
 	let parts = (namespace-split $objects)
 	let stray = ($objects | where kind == Job | get metadata.name | where {|n| $n not-in ($node.jobOrder | each {|j| $"($app)-($j)" }) })

@@ -5,7 +5,7 @@ import (
 	node "local.test/brawlchess/node/schema"
 )
 
-// A Bonk Chess-shaped app on the engine, at upstream pronto v1.14.1: the renderer (render.enabled) and a
+// A Bonk Chess-shaped app on the engine, at upstream pronto v1.15.1: the renderer (render.enabled) and a
 // release on the Contabo node, with the fields the engine supports: replicas (`scale`), the database's instances, volume,
 // parameters and logins, containers' resources (PP2), and the app's own services (billing, analyst, flagd, collectors,
 // ticker, standin, notifier, an exporter on a database login), the blob plane and the metrics export (PP3). What

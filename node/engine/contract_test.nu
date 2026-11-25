@@ -103,8 +103,9 @@ for a; do case "$a" in *.json) [ -f "$a" ] && cp "$a" "$d/rec/$n/" ;; esac; done
 echo "$*" > "$d/rec/$n/args"
 exec "$REAL_CUE" "$@"
 '# | str trim --left | save -f ($d | path join bin cue)
-	# deno signs the service token; both releases ask it, and it is not run for real here
-	"#!/bin/sh\ncat >/dev/null\necho fake.service.token\n" | save -f ($d | path join bin deno)
+	# deno signs the service token (service-token.ts) and registers the OIDC clients (register.ts, which answers the settings it was
+	# given, as it does for a provider whose client id is not "origin"); both releases ask it, and it is not run for real here
+	"#!/bin/sh\ncase \"$*\" in *register.ts*) cat ;; *) cat >/dev/null; echo fake.service.token ;; esac\n" | save -f ($d | path join bin deno)
 	# the registry answers 200 through the tunnel, which the preflight reads with curl
 	# and the door check's probes (a path of the Dapr API) answer the door's own 404; nc finds the port-forward up
 	"#!/bin/sh\ncase \"$*\" in *\"/v1.0\"*) printf 404 ;; *) echo 200 ;; esac\n" | save -f ($d | path join bin curl)
@@ -310,7 +311,7 @@ def test_objects_change_only_as_declared [fx: record] {
 			assert equal $db.spec.instances 3 "the database's instances"
 			let up_db = ($upstream | where kind == Cluster | first)
 			assert equal ($db.spec.managed.roles | get name) (($up_db.spec.managed.roles | get name) | append $tuned.logins) "upstream's roles come through, the logins are added"
-			assert equal ($db.spec.postgresql.parameters | reject -o ...$tuned.parameters max_slot_wal_keep_size) ($up_db.spec.postgresql.parameters | reject -o ...$tuned.parameters) "upstream's parameters come through but the ones named"
+			assert equal ($db.spec.postgresql.parameters | reject -o ...$tuned.parameters max_slot_wal_keep_size) ($up_db.spec.postgresql.parameters | reject -o ...$tuned.parameters max_slot_wal_keep_size) "upstream's parameters come through but the ones named"
 			assert equal ($db.spec.postgresql.parameters.max_connections) "200" "the app's parameter wins"
 			assert equal ($engine | where kind == Deployment | where {|o| $o.metadata.name == $"($fx.name)-electric" } | first | get spec.replicas) 1 "Electric stays at one"
 		}
@@ -359,7 +360,7 @@ def test_data_and_order_match_upstreams_main [fx: record, --adopt] {
 	let pushed = ($fx.build | append ($fx.tuned?.images? | default []) | each {|s|
 		[$s {tag: (if $s == "database" { "17" } else { "latest" }), digest: $"sha256:(($"($registry)/($fx.name)-($s)") | hash sha256)"}]
 	} | into record)
-	let script = $"use ($engine_dir | path join render.nu); use ($engine_dir | path join runtime.nu); use ($release_nu) [release-app]; let app_info = \(runtime resolve-app '($en.app)'\); let node = \(render node-config $app_info.cue_path ''\); let meta = \(render app-meta $app_info.cue_path ''\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let pushed = ($pushed | to nuon); use ($release_nu) [preflight]; let fwd = {api: 1, buildkit: 2, registry: 3}; preflight $app_info $node $fwd --check | ignore; render release-data $app_info.dir $compose $facts $pushed | save -f ($en.dir | path join data.json); release-app $app_info $node $meta $compose $facts [] $pushed (if $adopt { '--adopt' } else { '' })"
+	let script = $"use ($engine_dir | path join render.nu); use ($engine_dir | path join runtime.nu); use ($release_nu) [release-app]; let app_info = \(runtime resolve-app '($en.app)'\); let node = \(render node-config $app_info.cue_path ''\); let meta = \(render app-meta $app_info.cue_path ''\); let compose = \(render compose-config $app_info.dir\); let facts = \(render facts $app_info.dir\); let pushed = ($pushed | to nuon); use ($release_nu) [preflight]; let fwd = {api: 1, buildkit: 2, registry: 3}; preflight $app_info $node $fwd --check | ignore; render release-data $app_info.dir $compose $facts $pushed 'https://contract.example.test' | save -f ($en.dir | path join data.json); release-app $app_info $node $meta $compose $facts [] $pushed (if $adopt { '--adopt' } else { '' })"
 	let e = (in-world $en -c $script)
 	assert equal $e.exit_code 0 $"($e.stdout | lines | last 20 | str join (char nl))\n($e.stderr)"
 	# 2. data
