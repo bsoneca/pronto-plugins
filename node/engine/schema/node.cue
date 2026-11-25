@@ -358,6 +358,14 @@ import (
 	// The app's own Deployments beside upstream's, by name (`<app>-<name>`, in the mesh as `<name>`), and the blob plane and
 	// the metrics export, which are emitted as services of the engine's own. `scale` and `containerResources` take their names.
 	services:       {[=~"^[a-z]([-a-z0-9]{0,22}[a-z0-9])?$" & !~"-clock$"]: #Service}
+	// `jail`, `google` and `egress` of a service are Studio's builder's alone (PRONTO-1882): they weaken the pod (a user namespace, an
+	// unmasked /proc, AppArmor and seccomp off), hand it a Google identity and open the network past the mesh, which a tenant's app
+	// must never ask. The release is refused where the engine knows the app and the service; the label of the field is the reason.
+	_studioOnly: {
+		for n, s in services if s.jail || s.google != _|_ || len(s.egress) > 0 if name != "studio" || n != "builder" {
+			"service \(n) of \(name) sets jail, google or egress, which only Studio's builder (app studio, service builder) may (PRONTO-1882)": "refused" & "allowed"
+		}
+	}
 	blobs?:         #Blobs
 	metricsExport?: #MetricsExport
 	// The SOPS file applied into the namespace; absent, `secrets.metal.enc.yaml` when it exists.

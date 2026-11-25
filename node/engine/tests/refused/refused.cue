@@ -12,6 +12,13 @@ _base: {
 	hosts: production: "app.example.com"
 }
 
+_studio: {
+	name:    "studio"
+	context: "contabo2"
+	api: ssh:          "deploy@node.example"
+	hosts: production: "studio.example.com"
+}
+
 _ns: {apiVersion: "v1", kind: "Namespace", metadata: name: "app"}
 
 unserved: (schema.#Manifests & {
@@ -62,6 +69,12 @@ serviceScratchSize:     schema.#Release & _base & {services: billing: {port: 868
 serviceEgressNoPort:    schema.#Release & _base & {services: billing: {port: 8688, egress: [{cidr: "10.0.0.0/8"}]}}
 serviceEgressBadCIDR:   schema.#Release & _base & {services: billing: {port: 8688, egress: [{cidr: "everywhere", port: 80}]}}
 serviceGoogleProvider:  schema.#Release & _base & {services: billing: {port: 8688, google: {provider: "x", serviceAccount: "b@p.iam.gserviceaccount.com"}}}
+// PRONTO-1882: jail, google and egress are Studio's builder's alone.
+tenantJail:   schema.#Release & _base & {services: builder: {port: 8690, jail: true}}
+tenantGoogle: schema.#Release & _base & {services: builder: {port: 8690, google: {provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "b@p.iam.gserviceaccount.com"}}}
+tenantEgress: schema.#Release & _base & {services: builder: {port: 8690, egress: [{cidr: "10.0.0.0/8", port: 80}]}}
+studioOtherServiceJail: schema.#Release & _studio & {services: billing: {port: 8688, jail: true}}
+studioBuilder: schema.#Release & _studio & {services: builder: {port: 8690, jail: true, egress: [{cidr: "10.0.0.0/8", port: 80}]}}
 serviceJailNotBool:     schema.#Release & _base & {services: billing: {port: 8688, jail: "yes"}}
 serviceReservedEnv:     schema.#Release & _base & {services: billing: {port: 8688, env: SERVICE_JWT: "x"}}
 serviceSeedClimbs:      schema.#Release & _base & {services: billing: {port: 8688, files: "/etc/f": "cm", seed: cm: "../x.json"}}
