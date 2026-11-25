@@ -139,6 +139,35 @@ case "$*" in
     echo "404 page not found" > "$out"; printf 404; exit 0 ;;
 esac
 if [ -f "$d/registry_dead" ]; then printf 000; exit 7; fi
+case "$*" in
+  *"/blobs/sha256:"*)
+    echo "$*" >> "$d/blob_curl.log"
+    # What `-w "\n%{http_code} %{size_download}"` makes: a line with the status and the bytes that came. blob_500 / blob_404 /
+    # blob_200 / blob_timeout (curl exit 28): every blob answers so. blob_cutoff: 206 with no body, curl exit 18, as distribution
+    # <= 3.1.2 answers for a layer its cache lists and the collector deleted; blob_404_once: the same until the registry is restarted.
+    # blob_416: the layer (by its digest) answers 416, the answer for an empty blob. A ranged GET otherwise answers 206 and one byte.
+    cut() { echo "curl: (18) transfer closed with outstanding read data remaining" >&2; printf '\n206 0'; exit 18; }
+    if [ -f "$d/blob_500" ]; then printf '\n500 0'; exit 0; fi
+    if [ -f "$d/blob_404" ]; then printf '\n404 0'; exit 0; fi
+    if [ -f "$d/blob_200" ]; then printf '\n200 100'; exit 0; fi
+    if [ -f "$d/blob_timeout" ]; then echo "curl: (28) Operation timed out" >&2; exit 28; fi
+    if [ -f "$d/blob_cutoff" ]; then cut; fi
+    if [ -f "$d/blob_404_once" ] && [ ! -f "$d/state/registry_restarted" ]; then cut; fi
+    if [ -f "$d/blob_416" ]; then case "$*" in *"blobs/sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"*) printf '\n416 0'; exit 0 ;; esac; fi
+    printf '\n206 1'; exit 0 ;;
+  *"/manifests/sha256:"*)
+    echo "$*" >> "$d/manifest_curl.log"
+    # the body, then a line with the status: what `-w "\n%{http_code}"` makes. manifest_500, manifest_cutoff (curl exit 18),
+    # manifest_404 (always), manifest_404_for (a repo's name: always, for it only), manifest_404_once (until the registry is restarted)
+    if [ -f "$d/manifest_cutoff" ]; then echo "curl: (18) transfer closed with outstanding read data remaining" >&2; exit 18; fi
+    if [ -f "$d/manifest_500" ]; then printf '\n500'; exit 0; fi
+    if [ -f "$d/manifest_404" ]; then printf '\n404'; exit 0; fi
+    if [ -f "$d/manifest_404_for" ]; then case "$*" in *"/v2/$(cat "$d/manifest_404_for")/"*) printf '\n404'; exit 0 ;; esac; fi
+    if [ -f "$d/manifest_404_once" ] && [ ! -f "$d/state/registry_restarted" ]; then printf '\n404'; exit 0; fi
+    if [ -f "$d/manifest_index" ]; then case "$*" in *"manifests/sha256:1111111111111111111111111111111111111111111111111111111111111111") printf '{"manifests":[{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}\n200'; exit 0 ;; esac; fi
+    layer_size=20; [ -f "$d/zero_layer" ] && layer_size=0
+    printf '{"config":{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":10},"layers":[{"digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","size":%s}]}\n200' "$layer_size"; exit 0 ;;
+esac
 printf 200
 '# | str trim --left | save -f ($d | path join bin curl)
 	# deno registers the OIDC clients (register.ts: it answers the settings it was given, as for a provider whose client id is
@@ -238,6 +267,16 @@ def main [] {
 	test_check_build_pushes_under_check_and_writes_nothing_to_the_cluster
 	test_build_alone_is_refused
 	test_a_failed_bake_leaves_no_builder_and_no_scratch_folder
+	test_a_pushed_digest_the_registry_lost_restarts_it_and_pushes_again
+	test_a_digest_still_lost_after_the_restart_fails_before_the_rollout
+	test_a_layer_the_registry_lost_under_a_manifest_that_answers_is_found
+	test_a_blob_still_cut_off_after_the_restart_fails_the_release
+	test_a_blob_that_answers_200_or_416_for_an_empty_one_is_served
+	test_an_open_upload_or_a_held_lock_blocks_the_registry_restart
+	test_an_answer_that_is_not_a_404_fails_the_release_with_no_restart
+	test_another_releases_lease_blocks_the_registry_restart
+	test_only_the_image_that_is_missing_is_named
+	test_an_index_is_followed_to_its_children_and_their_blobs
 	test_the_buildx_nearest_the_front_of_the_path_wins
 	test_a_broken_session_names_the_buildx_that_broke_it
 	test_preflight_refuses_a_builder_or_a_registry_that_is_not_there
@@ -989,6 +1028,194 @@ def test_a_failed_bake_leaves_no_builder_and_no_scratch_folder [] {
 	let work = (open --raw ($w.dir | path join bake_pwd) | str trim | path dirname)
 	assert (not ($work | path exists)) "the scratch folder is gone"
 	assert (not ((open --raw ($w.dir | path join docker_config) | str trim) | path exists)) "the docker config is gone"
+	rm -rf $w.dir
+}
+
+def bakes [w: record]: nothing -> int {
+	docker-calls $w | where {|l| $l | str starts-with "buildx bake" } | length
+}
+
+# The fake curl's log, one entry per call: the status format `-w "\n%{http_code}"` holds a newline, so a call spans two lines.
+def curl-log [w: record, file: string]: nothing -> list<string> {
+	open --raw ($w.dir | path join $file) | str replace -a "\n" " " | split row "-sS" | each {|e| $e | str trim } | where {|e| $e != "" }
+}
+
+def restarts [w: record]: nothing -> int {
+	calls $w | where {|c| $c | str starts-with "rollout restart -n pronto-registry deploy/registry" } | length
+}
+
+def test_a_pushed_digest_the_registry_lost_restarts_it_and_pushes_again [] {
+	print "test a digest the registry does not serve after the push restarts the registry, bakes once more, and the release goes on; each manifest is asked as a pull asks..."
+	let w = (sandbox)
+	"" | save -f ($w.dir | path join manifest_404_once)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert (released $r) $"($r.stdout)\n($r.stderr)"
+	assert (has $r.stderr "a stale blob cache") $r.stderr
+	assert equal (bakes $w) 2 "baked again"
+	assert equal (restarts $w) 1 "restarted once"
+	assert (has $r.stdout "[SUCCESS] Released aprende")
+	# the manifest's URL and Accept header, and the time it is given
+	let fwd = (forwarded $w)
+	let asked = (curl-log $w manifest_curl.log)
+	assert ($asked | all {|l| $l =~ $"http://127.0.0.1:($fwd.registry)/v2/aprende-[a-z]+/manifests/sha256:[0-9a-f]{64}$" }) ($asked | str join "\n")
+	let accept = "-H Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json"
+	assert ($asked | all {|l| (has $l $accept) and (has $l "--max-time 15") }) ($asked | str join "\n")
+	rm -rf $w.dir
+}
+
+def test_a_digest_still_lost_after_the_restart_fails_before_the_rollout [] {
+	print "test a digest still missing after the restart and the second bake fails the release before anything is applied, and the lease goes..."
+	let w = (sandbox)
+	"" | save -f ($w.dir | path join manifest_404)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "registry lost ") $r.stderr
+	assert (has $r.stderr "still does not serve them after a restart and a second push") $r.stderr
+	assert equal (bakes $w) 2
+	assert equal (restarts $w) 1
+	assert equal (writes $w) ["rollout restart -n pronto-registry deploy/registry"] "only the registry was touched, nothing applied"
+	assert (calls $w | any {|c| $c | str starts-with "delete lease registry-lease-aprende-" }) "the lease was deleted"
+	rm -rf $w.dir
+}
+
+def test_a_layer_the_registry_lost_under_a_manifest_that_answers_is_found [] {
+	print "test a layer that answers 206 with no body (curl 18) under a manifest that answers 200 restarts the registry and bakes again, and a blob is asked its first byte..."
+	let w = (sandbox)
+	"" | save -f ($w.dir | path join blob_404_once)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert (released $r) $"($r.stdout)\n($r.stderr)"
+	assert (has $r.stderr "a stale blob cache") $r.stderr
+	assert (has $r.stderr $"@sha256:('d' | fill -c 'd' -w 64)") "the layer is named"
+	assert equal (bakes $w) 2
+	assert equal (restarts $w) 1
+	let blobs = (curl-log $w blob_curl.log)
+	assert ($blobs | all {|l| (has $l "-r 0-0") and (has $l "--max-time 15") and ($l =~ '/v2/aprende-[a-z]+/blobs/sha256:[0-9a-f]{64}$') }) ($blobs | str join "\n")
+	rm -rf $w.dir
+}
+
+def test_a_blob_still_cut_off_after_the_restart_fails_the_release [] {
+	print "test a blob that is still cut off after the restart and the second bake fails the release naming it, with one restart..."
+	let w = (sandbox)
+	"" | save -f ($w.dir | path join blob_cutoff)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "still does not serve them after a restart and a second push") $r.stderr
+	assert (has $r.stderr $"@sha256:('d' | fill -c 'd' -w 64)") $r.stderr
+	assert equal (bakes $w) 2
+	assert equal (restarts $w) 1
+	rm -rf $w.dir
+}
+
+def test_a_blob_that_answers_200_or_416_for_an_empty_one_is_served [] {
+	print "test a blob that answers 200 (a registry that ignores the range) is served, and 416 is the answer of an empty blob only..."
+	let w = (sandbox)
+	"" | save -f ($w.dir | path join blob_200)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert (released $r) $"($r.stdout)\n($r.stderr)"
+	assert equal (restarts $w) 0
+	assert equal (bakes $w) 1
+	rm -rf $w.dir
+	# an empty layer (size 0 in the manifest) answers 416
+	let z = (sandbox)
+	"" | save -f ($z.dir | path join zero_layer)
+	"" | save -f ($z.dir | path join blob_416)
+	let r2 = (in-world $z $release_nu --app $z.app)
+	assert (released $r2) $"($r2.stdout)\n($r2.stderr)"
+	assert equal (restarts $z) 0
+	rm -rf $z.dir
+}
+
+def test_an_open_upload_or_a_held_lock_blocks_the_registry_restart [] {
+	print "test a restart is refused while an upload is open (a push with no lease) or another collector holds the lock..."
+	let w = (sandbox)
+	"/var/lib/registry/docker/registry/v2/repositories/x/_uploads/u" | save -f ($w.state | path join uploads)
+	"" | save -f ($w.dir | path join manifest_404_once)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "an upload is open (a push outside the leases), and a restart would cut it") $r.stderr
+	assert equal (restarts $w) 0
+	assert equal (bakes $w) 1
+	rm -rf $w.dir
+	# another collector holds the lock: the restart waits for nobody and is refused
+	let l = (sandbox)
+	seed-lease $l registry-gc-lock collector-other 5
+	let build = "{registry: {host: '127.0.0.1:5000', namespace: 'pronto-registry', deployment: 'registry'}}"
+	let c = (in-world $l -c $"use ($engine_dir | path join registry.nu); registry restart-alone ($build) ''")
+	assert equal $c.exit_code 0 $"($c.stdout)($c.stderr)"
+	assert (has $c.stdout "another release is collecting") $c.stdout
+	assert equal (restarts $l) 0
+	assert (($l.state | path join lease registry-gc-lock) | path exists) "the other collector's lock is left alone"
+	rm -rf $l.dir
+}
+
+def test_an_answer_that_is_not_a_404_fails_the_release_with_no_restart [] {
+	print "test a 500, a cut-off manifest, a 500 or a timeout on a blob, and a 416 for a blob that is not empty fail the release at once: nothing is restarted, nothing baked again..."
+	for marker in [manifest_500 manifest_cutoff blob_500 blob_timeout blob_416] {
+		let w = (sandbox)
+		"" | save -f ($w.dir | path join $marker)
+		let r = (in-world $w $release_nu --app $w.app)
+		assert ($r.exit_code != 0) $marker
+		let said = match $marker { "manifest_cutoff" => "(curl exit 18)", "blob_timeout" => "(curl exit 28)", "blob_416" => "answered 416 for", _ => "answered 500 for" }
+		assert (has $r.stderr $said) $"($marker): ($r.stderr)"
+		assert equal (bakes $w) 1 $marker
+		assert equal (restarts $w) 0 $marker
+		assert (calls $w | any {|c| $c | str starts-with "delete lease registry-lease-aprende-" }) $"($marker): the lease was deleted"
+		rm -rf $w.dir
+	}
+}
+
+def test_another_releases_lease_blocks_the_registry_restart [] {
+	print "test a restart is not made while another release holds a lease: the release fails naming it, and bakes once..."
+	let w = (sandbox)
+	seed-lease $w registry-lease-studio-other other-release 5 --labelled
+	"" | save -f ($w.dir | path join manifest_404_once)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "other releases are in flight (registry-lease-studio-other)") $r.stderr
+	assert equal (restarts $w) 0 "no restart under another's push"
+	assert equal (bakes $w) 1
+	assert (not (($w.state | path join lease registry-gc-lock) | path exists)) "the lock is released"
+	assert (($w.state | path join lease registry-lease-studio-other) | path exists) "the other's lease is untouched"
+	rm -rf $w.dir
+}
+
+def test_only_the_image_that_is_missing_is_named [] {
+	print "test one missing image among several is the only one named, and a cache that is off is not restarted for..."
+	let w = (sandbox)
+	"aprende-crud" | save -f ($w.dir | path join manifest_404_for)
+	let r = (in-world $w $release_nu --app $w.app)
+	assert ($r.exit_code != 0)
+	assert (has $r.stderr "aprende-crud@sha256:") $r.stderr
+	assert (not (has $r.stderr "aprende-auth@")) $r.stderr
+	assert (not (has $r.stderr "aprende-caddy@")) $r.stderr
+	assert equal (restarts $w) 1
+	rm -rf $w.dir
+	# the cache disabled: a restart would change nothing, so there is none
+	let off = (sandbox)
+	'[{"name":"REGISTRY_STORAGE_CACHE_BLOBDESCRIPTOR","value":"disabled"}]' | save -f ($off.state | path join registry_env)
+	"" | save -f ($off.dir | path join manifest_404)
+	let r2 = (in-world $off $release_nu --app $off.app)
+	assert ($r2.exit_code != 0)
+	assert (has $r2.stderr "its blob descriptor cache is disabled, so a restart would not bring the images back") $r2.stderr
+	assert equal (restarts $off) 0
+	assert equal (bakes $off) 1
+	rm -rf $off.dir
+}
+
+def test_an_index_is_followed_to_its_children_and_their_blobs [] {
+	print "test an image index is followed to its child manifests, whose config and layers are each asked..."
+	let w = (sandbox)
+	"" | save -f ($w.dir | path join manifest_index)
+	let idx = $"sha256:('1' | fill -c '1' -w 64)"
+	let body = $"use ($engine_dir | path join registry.nu); registry lost-images '127.0.0.1:5000' [{repo: 'aprende-crud', digest: '($idx)'}] | to nuon"
+	let r = (in-world $w -c $body)
+	assert equal $r.exit_code 0 $"($r.stdout)($r.stderr)"
+	assert equal ($r.stdout | str trim) "[]"
+	let asked = (curl-log $w manifest_curl.log)
+	assert equal ($asked | length) 2 "the index, then its child"
+	assert (has $asked.1 $"manifests/sha256:('2' | fill -c '2' -w 64)") $asked.1
+	let blobs = (curl-log $w blob_curl.log)
+	assert equal ($blobs | length) 2 "the child's config and its layer"
 	rm -rf $w.dir
 }
 

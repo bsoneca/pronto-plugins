@@ -393,6 +393,8 @@ if verb == "rollout":
         # the Deployment is back on its earlier revision: its rollout no longer fails
         if read("rollout_fail") == args[2].split("/")[-1]:
             os.remove(d + "/rollout_fail")
+    if args[1] == "restart":
+        open(d + "/registry_restarted", "w").close()
     if args[1] == "status":
         target = args[2]
         if exists("rollout_fail") and read("rollout_fail") == target.split("/")[-1]:

@@ -435,8 +435,8 @@ export def record-prune [node: record, failure: any, pending: string = ""] {
 
 # Builds the images on the node's buildkitd and answers what was pushed by service: {tag, digest}, the
 # database's tag being its Postgres major. The tag is `release`, a preview's name, or `check`.
-def build-images [app_info: record, node: record, fwd: record, services: list<string>, tag: string]: nothing -> record {
-	push images $app_info.dir $node $fwd $services $tag
+def build-images [app_info: record, node: record, fwd: record, services: list<string>, tag: string, lease: string]: nothing -> record {
+	push images $app_info.dir $node $fwd $services $tag $lease
 }
 
 # The tools a release runs, which an app pins in its mise (kubectl, sops, crane, docker, buildx): a missing
@@ -872,7 +872,7 @@ def main [
 							render placeholder-pushed $services $preview_tag
 						} else {
 							print $"node: (stamp) building ($services | str join ', ') for ($app_info.name) on the node's buildkitd"
-							build-images $app_info $node $fwd $services (if $check { "check" } else { $preview_tag })
+							build-images $app_info $node $fwd $services (if $check { "check" } else { $preview_tag }) $lease
 						}
 						# the lease renewed after the push, and again after the long phases that follow
 						renew-lease $node $lease --before-live
