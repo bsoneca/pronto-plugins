@@ -85,6 +85,10 @@ import "list"
 	// and a change to the file is a change of the policies at the next apply.
 	notificationChannels: [Name=string]: #NotificationChannel
 	alertPolicies: [Name=string]:        #AlertPolicies
+	// Custom metrics, by type (custom.googleapis.com/...): the descriptor is made here, so a policy that reads
+	// the series is valid before the first point is written (a PromQL condition on a metric Cloud Monitoring
+	// does not know yet is refused with a 400). Every alert policy of the project waits for them. Made, never imported.
+	metricDescriptors: [Type=string & =~"^custom\\.googleapis\\.com/([A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+$"]: #MetricDescriptor
 	for nm, a in alertPolicies for c in a.channels if notificationChannels[c] == _|_ {
 		"alert policies \(nm) name no channel \(c)": _|_
 	}
@@ -157,7 +161,7 @@ import "list"
 #Fresh: "apis" | "iam" | "members" | "serviceAccounts" | "serviceAccountIam" | "repositories" | "repositoryIam" | "bucketIam" | "runJobs" | "runServices" | "runServiceIam" | "databases" | "sqlUsers" | "apiKeys" | "budgets" | "hostingSites"
 
 // identityPlatform is adopted by naming "config": a project has one.
-#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "sqlUsers" | "sqlBackups" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies" | "uptimeChecks" | "workloadIdentityPools"
+#Adoptable: "apis" | "iam" | "members" | "serviceAccounts" | "repositories" | "repositoryIam" | "buckets" | "secrets" | "runJobs" | "runServices" | "databases" | "sqlUsers" | "sqlBackups" | "apiKeys" | "identityPlatform" | "budgets" | "hostingSites" | "notificationChannels" | "alertPolicies" | "metricDescriptors" | "uptimeChecks" | "workloadIdentityPools"
 
 #Found: "serviceAccounts" | "members"
 
@@ -339,6 +343,22 @@ import "list"
 	file?: string & =~"\\.json$"
 	policies: [Name=string]: #AlertPolicy
 	channels: [...string]
+}
+
+// A custom metric's descriptor. The default is a gauge of integers with no unit, the shape of a
+// count a job writes; each label is a string unless it says otherwise.
+#MetricDescriptor: {
+	displayName: string & !=""
+	description: string & !=""
+	kind:        *"GAUGE" | "DELTA" | "CUMULATIVE"
+	valueType:   *"INT64" | "DOUBLE" | "BOOL" | "DISTRIBUTION"
+	unit:        *"1" | string
+	// A boolean series is only ever a gauge.
+	if valueType == "BOOL" {kind: "GAUGE"}
+	labels: [Key=string & =~"^[a-z][a-zA-Z0-9_]{0,99}$"]: {
+		valueType:   *"STRING" | "BOOL" | "INT64"
+		description: string | *""
+	}
 }
 
 #AlertPolicy: {

@@ -28,6 +28,7 @@ const plans = [
 	[./infra _foundGrant.tofu]
 	[./infra _watch.tofu]
 	[./infra _uptime.tofu]
+	[./infra _metric.tofu]
 	[./infra _wif.tofu]
 	[./infra _retire.tofu]
 	[./infra _always.tofu]

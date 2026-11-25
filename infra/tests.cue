@@ -464,6 +464,46 @@ uptimeNeverImported: [for i in _uptime.tofu.import if strings.HasPrefix(i.to, "g
 // Fewer than three regions, and a channel the project lacks, are refused.
 twoRegionsRefused: _ok & {notificationChannels: o: email: "a@b.co", uptimeChecks: x: {host: "a.co", channels: ["o"], regions: ["USA", "EUROPE"]}} & matchN(0, [#Project])
 uptimeUnknownChannel: _ok & {uptimeChecks: x: {host: "a.co", channels: ["nobody"]}} & matchN(0, [#Project])
+// A custom metric's descriptor is made, and every alert policy waits for it.
+_metric: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adoptAll: true
+		apis: "monitoring.googleapis.com": true
+		notificationChannels: oncall: email: "oncall@example.com"
+		metricDescriptors: "custom.googleapis.com/my/failing_streak": {
+			displayName: "Failing streak"
+			description: "Runs in a row that failed"
+			labels: {host: {}, app: {description: "the app"}}
+		}
+		alertPolicies: "my-app-journeys": {file: "config/alerts.json", channels: ["oncall"]}
+		alertPolicies: heartbeat: {
+			channels: ["oncall"]
+			policies: silent: {displayName: "S", expr: "vector(1)", duration: "60s", documentation: "d", labels: {}}
+		}
+	}
+}
+_m:          _metric.tofu.resource
+_descriptor: _m.google_monitoring_metric_descriptor.example_project_123_custom_googleapis_com_my_failing_streak
+descriptorShape: _descriptor & {project: "example-project-123", type: "custom.googleapis.com/my/failing_streak", metric_kind: "GAUGE", value_type: "INT64", unit: "1"}
+descriptorLabels: _descriptor.labels & [{key: "app", value_type: "STRING", description: "the app"}, {key: "host", value_type: "STRING", description: ""}]
+descriptorAfterApi:          list.Contains(_descriptor.depends_on, "google_project_service.example_project_123_monitoring_googleapis_com") & true
+_dep:                        "google_monitoring_metric_descriptor.example_project_123_custom_googleapis_com_my_failing_streak"
+filePolicyAfterDescriptor:   list.Contains(_m.google_monitoring_alert_policy.example_project_123_my_app_journeys.depends_on, _dep) & true
+inlinePolicyAfterDescriptor: list.Contains(_m.google_monitoring_alert_policy.example_project_123_heartbeat_silent.depends_on, _dep) & true
+descriptorNeverImported: [for i in _metric.tofu.import if strings.HasPrefix(i.to, "google_monitoring_metric") {i}] & []
+// Only a custom metric, by a well-formed type, with a numeric or boolean value, a legal label key and a gauge if boolean, is accepted.
+_md: {displayName: "x", description: "x"}
+emptySegmentRefused: _ok & {metricDescriptors: "custom.googleapis.com/a//b": _md} & matchN(0, [#Project])
+trailingSlashRefused: _ok & {metricDescriptors: "custom.googleapis.com/a/": _md} & matchN(0, [#Project])
+stringValueRefused: _ok & {metricDescriptors: "custom.googleapis.com/a": _md & {valueType: "STRING"}} & matchN(0, [#Project])
+badLabelKeyRefused: _ok & {metricDescriptors: "custom.googleapis.com/a": _md & {labels: "Bad-Key": {}}} & matchN(0, [#Project])
+boolCumulativeRefused: _ok & {metricDescriptors: "custom.googleapis.com/a": _md & {valueType: "BOOL", kind: "CUMULATIVE"}} & matchN(0, [#Project])
+boolGaugeAccepted: _ok & {metricDescriptors: "custom.googleapis.com/a": _md & {valueType: "BOOL"}} & matchN(1, [#Project])
+descriptorKept: _descriptor.lifecycle & {prevent_destroy: true}
+foreignMetricRefused: _ok & {metricDescriptors: "compute.googleapis.com/x": {displayName: "x", description: "x"}} & matchN(0, [#Project])
+
 // A policy group with neither a file nor policies is refused.
 emptyPolicies: _ok & {notificationChannels: o: email: "a@b.co", alertPolicies: x: {channels: ["o"]}} & matchN(0, [#Project])
 
