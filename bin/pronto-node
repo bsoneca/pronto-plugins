@@ -1,15 +1,20 @@
 #!/bin/sh
 # Writes the node release engine (node/engine/, node/README.md) into apps whose release.cue holds
 # Node: node.#Release, each file regenerated:
-#   bin/pronto-node --engine <app-dir>...
+#   bin/pronto-node --engine [--release-rule] <app-dir>...
+# --release-rule also merges the release@k8s rule into each app's .say.json (an app that has it keeps it without the flag).
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
-[ "${1:-}" = --engine ] || { echo "usage: pronto-node --engine <app-dir>..." >&2; exit 2; }
+usage="usage: pronto-node --engine [--release-rule] <app-dir>..."
+[ "${1:-}" = --engine ] || { echo "$usage" >&2; exit 2; }
 shift
-[ $# -ge 1 ] || { echo "usage: pronto-node --engine <app-dir>..." >&2; exit 2; }
+tag=
+if [ "${1:-}" = --release-rule ]; then tag="-t releaseRule=true"; shift; fi
+[ $# -ge 1 ] || { echo "$usage" >&2; exit 2; }
+case "$1" in -*) echo "$usage" >&2; exit 2 ;; esac
 files=$(mktemp)
 trap 'rm -f "$files"' EXIT
-(cd "$here" && ./saytw --script tools.nu cue export ./node/engine/export -e files --out json) > "$files"
+(cd "$here" && ./saytw --script tools.nu cue export $tag ./node/engine/export -e files --out json) > "$files"
 for dir in "$@"; do
 	app=$(cd "$dir" && pwd)
 	[ -f "$app/release.cue" ] || { echo "pronto-node: $app has no release.cue" >&2; exit 2; }

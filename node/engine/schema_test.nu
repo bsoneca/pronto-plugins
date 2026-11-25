@@ -24,12 +24,35 @@ def main [] {
 	test_a_preview_cannot_take_the_production_host
 	test_a_service_is_only_what_it_says
 	test_an_origin_must_be_https
+	test_the_release_rule_is_written_only_when_asked
 	print "\nAll node schema tests passed."
 }
 
 def test_an_origin_must_be_https [] {
 	print "test a release's origin that is not https is refused..."
 	assert ((refused plainOrigin) | str contains "origin")
+}
+
+def test_the_release_rule_is_written_only_when_asked [] {
+	print "test the engine's files carry the release rule in .say.json only with the releaseRule tag, and a regeneration without it leaves an app's .say.json alone..."
+	let plain = (cue-in export ./node/engine/export -e files --out json)
+	assert equal $plain.exit_code 0 $plain.stderr
+	assert (".say.json" not-in ($plain.stdout | from json | columns)) "no .say.json without the flag"
+	assert ("node/release.nu" in ($plain.stdout | from json | columns)) "the engine's files are written all the same"
+	let ruled = (cue-in export -t releaseRule=true ./node/engine/export -e files --out json)
+	assert equal $ruled.exit_code 0 $ruled.stderr
+	let say = (($ruled.stdout | from json | get ".say.json").text | from json)
+	assert equal ($say.say.release.rulemap | columns) ["node-engine"]
+	assert equal $say.say.release.rulemap."node-engine".platform "k8s"
+	# write.nu over an app that holds the rule, from the files without the flag: .say.json is not touched
+	let app = (mktemp -d -t node-rule.XXXXXX | str trim | path expand)
+	let held = '{"say":{"release":{"rulemap":{"node-engine":{"platform":"k8s","priority":-1,"stop":true,"cmds":[{"do":"kept"}]}}}}}\n'
+	$held | save -f ($app | path join .say.json)
+	$plain.stdout | save -f ($app | path join plain.json)
+	let w = (do { cd ($engine_dir | path join ../..); ^$nu.current-exe --no-config-file bin/write.nu ($app | path join plain.json) $app } | complete)
+	assert equal $w.exit_code 0 $w.stderr
+	assert equal (open --raw ($app | path join .say.json)) $held "an app that holds the rule keeps it"
+	rm -rf $app
 }
 
 def refused [expr: string]: nothing -> string {
