@@ -493,7 +493,15 @@ _dep:                        "google_monitoring_metric_descriptor.example_projec
 filePolicyAfterDescriptor:   list.Contains(_m.google_monitoring_alert_policy.example_project_123_my_app_journeys.depends_on, _dep) & true
 inlinePolicyAfterDescriptor: list.Contains(_m.google_monitoring_alert_policy.example_project_123_heartbeat_silent.depends_on, _dep) & true
 descriptorNeverImported: [for i in _metric.tofu.import if strings.HasPrefix(i.to, "google_monitoring_metric") {i}] & []
-// Only a custom metric may be declared, and a gauge's value is not a string.
+// Only a custom metric, by a well-formed type, with a numeric or boolean value, a legal label key and a gauge if boolean, is accepted.
+_md: {displayName: "x", description: "x"}
+emptySegmentRefused: _ok & {metricDescriptors: "custom.googleapis.com/a//b": _md} & matchN(0, [#Project])
+trailingSlashRefused: _ok & {metricDescriptors: "custom.googleapis.com/a/": _md} & matchN(0, [#Project])
+stringValueRefused: _ok & {metricDescriptors: "custom.googleapis.com/a": _md & {valueType: "STRING"}} & matchN(0, [#Project])
+badLabelKeyRefused: _ok & {metricDescriptors: "custom.googleapis.com/a": _md & {labels: "Bad-Key": {}}} & matchN(0, [#Project])
+boolCumulativeRefused: _ok & {metricDescriptors: "custom.googleapis.com/a": _md & {valueType: "BOOL", kind: "CUMULATIVE"}} & matchN(0, [#Project])
+boolGaugeAccepted: _ok & {metricDescriptors: "custom.googleapis.com/a": _md & {valueType: "BOOL"}} & matchN(1, [#Project])
+descriptorKept: _descriptor.lifecycle & {prevent_destroy: true}
 foreignMetricRefused: _ok & {metricDescriptors: "compute.googleapis.com/x": {displayName: "x", description: "x"}} & matchN(0, [#Project])
 
 // A policy group with neither a file nor policies is refused.

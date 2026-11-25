@@ -88,7 +88,7 @@ import "list"
 	// Custom metrics, by type (custom.googleapis.com/...): the descriptor is made here, so a policy that reads
 	// the series is valid before the first point is written (a PromQL condition on a metric Cloud Monitoring
 	// does not know yet is refused with a 400). Every alert policy of the project waits for them. Made, never imported.
-	metricDescriptors: [Type=string & =~"^custom\\.googleapis\\.com/[A-Za-z0-9_/.-]+$"]: #MetricDescriptor
+	metricDescriptors: [Type=string & =~"^custom\\.googleapis\\.com/([A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+$"]: #MetricDescriptor
 	for nm, a in alertPolicies for c in a.channels if notificationChannels[c] == _|_ {
 		"alert policies \(nm) name no channel \(c)": _|_
 	}
@@ -353,7 +353,9 @@ import "list"
 	kind:        *"GAUGE" | "DELTA" | "CUMULATIVE"
 	valueType:   *"INT64" | "DOUBLE" | "BOOL" | "DISTRIBUTION"
 	unit:        *"1" | string
-	labels: [Key=string]: {
+	// A boolean series is only ever a gauge.
+	if valueType == "BOOL" {kind: "GAUGE"}
+	labels: [Key=string & =~"^[a-z][a-zA-Z0-9_]{0,99}$"]: {
 		valueType:   *"STRING" | "BOOL" | "INT64"
 		description: string | *""
 	}

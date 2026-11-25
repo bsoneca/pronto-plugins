@@ -447,6 +447,8 @@ import (
 				metric_kind:  d.kind
 				value_type:   d.valueType
 				unit:         d.unit
+				// Deleting a descriptor wipes its time series.
+				lifecycle: prevent_destroy: true
 				labels: [for lk in list.SortStrings([for l, _ in d.labels {l}]) {key: lk, value_type: d.labels[lk].valueType, description: d.labels[lk].description}]
 			}
 		}
