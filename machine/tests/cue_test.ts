@@ -592,7 +592,8 @@ Deno.test("the cores an evaluation kept busy are learned, from slot.ts when clai
   // Claimed: an evaluation of 6 s that keeps two cores busy learns about 2.
   const claimed = await Deno.makeTempDir();
   await spinner(claimed, 6);
-  assertEquals((await run(claimed, ["export", "./spec"], { CUE_UNKNOWN_GB: "1" })).code, 0);
+  // GOMAXPROCS is what the learned cores are capped at: a small runner's budget would cap them below the two the spinner keeps busy.
+  assertEquals((await run(claimed, ["export", "./spec"], { CUE_UNKNOWN_GB: "1", GOMAXPROCS: "7" })).code, 0);
   const c = await coresOf(claimed);
   assert.ok(c > 0 && Math.abs(c - await selfOf(claimed)) < 0.6, `learned ${c} cores for a cue that kept ${await selfOf(claimed)} busy`);
   // At once (learned small, outside the pool): the same, from time's CPU and wall seconds.
