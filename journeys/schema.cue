@@ -241,8 +241,11 @@ _journeysHours: {
 		// below half of it pages, once that window held `dropFloor` runs. No
 		// run today reads 0, not no data, so a total drop pages too.
 		[for n, j in J.spec {
-			let now = "(sum(increase(journey_runs_total{journey=\"\(n)\"}[10m])) or vector(0))"
-			let before = "sum(increase(journey_runs_total{journey=\"\(n)\"}[10m] offset 7d))"
+			// Good and bad runs only: they close when the run ends, while an
+			// abandoned one closes after `idle`, so during an outage the runs
+			// begun before it would keep the count up for that long.
+			let now = "(sum(increase(journey_runs_total{journey=\"\(n)\",outcome=~\"good|bad\"}[10m])) or vector(0))"
+			let before = "sum(increase(journey_runs_total{journey=\"\(n)\",outcome=~\"good|bad\"}[10m] offset 7d))"
 			alert:    "JourneyTrafficDrop"
 			hours:    168
 			journey:  n

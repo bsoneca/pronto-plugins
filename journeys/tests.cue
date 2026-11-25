@@ -50,7 +50,7 @@ quietOffBurns: len([for a in _never.alerts if a.alert == "JourneyAvailabilityBur
 // the cases below evaluate its comparison on two windows' counts as the
 // operators read it.
 trafficDropPages: _alert["journey-checkout/JourneyTrafficDrop"].labels & {severity: "page", owner: "payments"}
-trafficDropExpr: _alert["journey-checkout/JourneyTrafficDrop"].expr & "(sum(increase(journey_runs_total{journey=\"checkout\"}[10m])) or vector(0)) < 0.5 * sum(increase(journey_runs_total{journey=\"checkout\"}[10m] offset 7d)) and sum(increase(journey_runs_total{journey=\"checkout\"}[10m] offset 7d)) >= 20"
+trafficDropExpr: _alert["journey-checkout/JourneyTrafficDrop"].expr & "(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[10m])) or vector(0)) < 0.5 * sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[10m] offset 7d)) and sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[10m] offset 7d)) >= 20"
 _fires: {today: number, before: number, floor: number, out: today < 0.5*before && before >= floor}
 // 50 runs a week ago, 24 now: under half, above the floor.
 halfDropFires: (_fires & {today: 24, before: 50, floor: 20}).out & true
