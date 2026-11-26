@@ -27,7 +27,13 @@
 //   STACK_BUDGET, else every core but STACK_RESERVE (3): 15 on an 18-core Mac. A claim is admitted
 //   when the weight held, the weight of every live ticket older than its own (they reserve their room)
 //   and its own fit the budget; the oldest ticket is admitted on an empty pool whatever it weighs.
-//   First come first served, so a heavy claim is never starved by lighter ones. There is no release
+//   Backfill (PRONTO-1900): tickets that fit go first come first served; the first one that does not (the head)
+//   is the only one protected, and a lighter claim behind it may pass while the room is idle: for the first
+//   STACK_HEAD_WAIT seconds (600) whenever it fits now, then only when it also fits beside the head once the
+//   release that holds the machine is gone (backfillAhead), counting the wait from when the head's ticket asked.
+//   A head that has waited past it drains the line. A release ticket ahead keeps the line first come first served,
+//   and a runner job (GITHUB_ACTIONS) is admitted with no release holding, so head protection does not bind it.
+//   A heavy claim is never starved: each blocked ticket becomes the head in turn. There is no release
 //   lane and no ci lane (STACK_RELEASE_LANE, STACK_CI_LANE are accepted and ignored): GitHub's runner
 //   pools separate release, gate and ci, not this file. The one priority is a release's hold (below).
 //
@@ -217,6 +223,8 @@ const holdLoad = holdLoadOf(Deno.env.get("STACK_HOLD_LOAD"), navigator.hardwareC
 const cueCores = positive(Deno.env.get("CUE_CORES"), Math.max(1, navigator.hardwareConcurrency - Number(Deno.env.get("STACK_RESERVE") ?? 3)));
 // How long a top-level cue ticket waits at the head of the cue line before nested claims newer than it wait for it (seconds; PRONTO-775).
 const cueHeadWaitMs = positive(Deno.env.get("CUE_HEAD_WAIT"), 600) * 1000;
+// How long the head of the cores' line, the first ticket that does not fit, is protected from lighter claims passing it (seconds; PRONTO-1900).
+const stackHeadWaitMs = positive(Deno.env.get("STACK_HEAD_WAIT"), 600) * 1000;
 // The most cores one cue may use (the wrapper's GOMAXPROCS: CUE_MAX_CORES, 7, at most the stack budget): what --cores-learn is capped at.
 const cueGomax = () => positive(Deno.env.get("GOMAXPROCS"), Math.max(1, Math.min(positive(Deno.env.get("CUE_MAX_CORES"), 7), budget)));
 const say = (s: string) => console.error(`slot: ${s}`);
@@ -725,6 +733,28 @@ export const releaseFresh = (written: number, now: number, hours: number) => now
 // holds, count only the older releases' (the others do not move while it holds).
 export const aheadOf = (older: { weight: number; release: boolean }[], release: boolean, hold: boolean) =>
   older.filter((o) => (release || hold ? o.release : true)).reduce((n, o) => n + o.weight, 0);
+// The weight a weighted claim waits behind, with backfill (PRONTO-1900): `older` are the tickets ahead of it in order (`queued`: when
+// each asked, ms), `used` the weight held, `releaseHeld` the part of it that releases hold. The tickets that fit go first come first
+// served; the first that does not is the head, and a ticket after it passes (adds to `passed`) when it fits now and either the head is
+// young (under `headWaitMs`, and no release) or it also fits beside the head once the releases are gone. The claim then waits behind
+// what fits now and, once the head is aged, the head's room beside what remains after the releases.
+export const backfillOf = <T extends { weight: number; release: boolean; queued: number }>(older: T[], used: number, releaseHeld: number,
+  budget: number, now: number, headWaitMs: number) => {
+  // A release ticket ahead keeps the line first come first served: nothing passes it.
+  if (older.some((o) => o.release)) return { ahead: older.reduce((n, o) => n + o.weight, 0), aged: false, head: undefined as T | undefined };
+  let reserved = 0, passed = 0, before = 0, head: T | undefined;
+  for (const o of older) {
+    if (!head) {
+      if (admits(used, o.weight, reserved, budget)) reserved += o.weight; else { head = o; before = reserved; }
+    } else if (used + reserved + o.weight <= budget && (young(head, now, headWaitMs) || used - releaseHeld + before + passed + o.weight + head.weight <= budget)) {
+      reserved += o.weight; passed += o.weight;
+    }
+  }
+  const aged = head !== undefined && !young(head, now, headWaitMs);
+  return { ahead: aged ? Math.max(reserved, before + passed + head!.weight - releaseHeld) : reserved, aged, head };
+};
+export const backfillAhead = (...a: Parameters<typeof backfillOf<{ weight: number; release: boolean; queued: number }>>) => backfillOf(...a).ahead;
+const young = (head: { release: boolean; queued: number }, now: number, headWaitMs: number) => !head.release && now - head.queued < headWaitMs;
 // Whether a release holds the machine: one holds a slot, or one waits.
 export const releaseHolds = (holding: number, waiting: number) => holding + waiting > 0;
 // What was read of one entry of another account's pool (STACK_HOLD_POOL): a slot-<n> or job-<pid> record (its weight
@@ -1244,7 +1274,11 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       }
       // The cores a dual ticket waits behind: its older tickets in the cores' line.
       const coresOlder = line === "cue" ? (dual ? before(coresTickets, ticket) : []) : older;
-      const ahead = aheadOf(coresOlder, release, hold && !beside);
+      const backfill = release || (hold && !beside) ? undefined
+        : backfillOf(coresOlder.map((t) => ({ weight: t.weight, release: t.release, what: t.what, queued: Number(t.name.split("-")[0]) })),
+          used, holders.filter((h) => h.release).reduce((n, h) => n + h.weight, 0), budget, Date.now(), stackHeadWaitMs);
+      const ahead = backfill ? backfill.ahead : aheadOf(coresOlder, release, hold && !beside);
+      const agedNote = backfill?.aged ? `, behind ${backfill.head!.what}: waited over ${Math.round(stackHeadWaitMs / 1000)} s (STACK_HEAD_WAIT), the line drains for it` : "";
       // `ahead` counts the lock's line, `coresAhead` the cores': a weighted cue ticket at the lock's head still
       // moves while the cores' line drains (PRONTO-837).
       // Not the live load: the line is said again whenever it changes, and the load changes every poll.
@@ -1271,14 +1305,14 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
           return why(`weight ${used} of ${budget} held (STACK_BUDGET)${ahead ? `, ${ahead} reserved by those ahead` : ""}, this needs ${weight}`);
         }
       } else if (!admitsCores(line === "none", used, weight, ahead, budget, runnerJob(Deno.env.get("GITHUB_ACTIONS")), release, hold, beside)) {
-        return why(`weight ${used} of ${budget} held (STACK_BUDGET)${ahead ? `, ${ahead} reserved by those ahead` : ""}, this needs ${weight}`);
+        return why(`weight ${used} of ${budget} held (STACK_BUDGET)${ahead ? `, ${ahead} reserved by those ahead` : ""}${agedNote}, this needs ${weight}`);
       }
       // A heavy claim of cores waits for the machine's memory too (PRONTO-1752): a rehearsal and an integrate@k8s were admitted by
       // weight alone while other gates held the rest of the memory, and the kernel killed a helm. A release claim obeys it as well.
       if (weight >= memMinWeight() && !nested) {
         const min = Number(Deno.env.get("STACK_MIN_FREE_PCT") ?? Deno.env.get("CUE_MIN_FREE_PCT") ?? 20);
         const free = await freeMemoryPct(), avail = await availableMemoryGB();
-        const head = !holders.some((h) => h.weight >= memMinWeight()) && ahead === 0;
+        const head = !holders.some((h) => h.weight >= memMinWeight()) && (release ? !coresOlder.some((o) => o.release) : coresOlder.length === 0);
         if (memVetoed(free, min, avail, need, head)) {
           return why(`the machine has ${free}% of its memory free${avail === null ? "" : ` (${round(avail)} GB available${need > 0 ? `, ${round(need)} GB needed` : ""})`}, under ${min}% (STACK_MIN_FREE_PCT)${need > 0 ? " or what this needed last time" : ""}: waiting for it to recover`);
         }

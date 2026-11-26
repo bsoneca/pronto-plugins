@@ -756,3 +756,73 @@ export async function coresPeak() {
     noPeakUsesAverage: slot.coresLearned(0, 3.456, 0, 7),
   };
 }
+
+// slot.ts's backfill (PRONTO-1900): whether a claim of `w` is admitted behind `older` tickets with `used` held, `releaseHeld` of it by releases
+// (budget 15, head wait 600 s). A ticket is { weight, young } (young: asked 1 s ago, else 700 s ago), a release one { release: true }.
+export async function backfill() {
+  const slot = await import("../../harness/files/tests/slot.ts");
+  const now = 10_000_000, wait = 600_000;
+  const tickets = (older) => older.map((o) => ({ weight: o.weight, release: !!o.release, queued: now - (o.young ? 1000 : 700_000) }));
+  const ahead = (used, releaseHeld, older) => slot.backfillAhead(tickets(older), used, releaseHeld, 15, now, wait);
+  const admitted = (used, releaseHeld, older, w) => slot.admits(used, w, ahead(used, releaseHeld, older), 15);
+  const young = (weight) => ({ weight, young: true }), aged = (weight) => ({ weight });
+  // The memory veto's head flag as the claim computes it: no heavy holder and nothing older in the cores' line.
+  const vetoed = (coresOlder) => slot.memVetoed(5, 20, null, 0, coresOlder === 0);
+  // A release claim's head flag as the claim computes it: only older release tickets are ahead of it.
+  const releaseVetoed = (older) => slot.memVetoed(5, 20, null, 0, !older.some((o) => o.release));
+  const sh = async (script) => new TextDecoder().decode((await new Deno.Command("sh", { args: ["-c", script], stdout: "piped" }).output()).stdout).trim();
+  return {
+    incident: admitted(10, 10, [young(10)], 1),
+    fillsRoomOnly: admitted(10, 10, [young(10), young(2), young(2)], 2),
+    fillsRoomFirst: admitted(10, 10, [young(10), young(2)], 2),
+    shadowAdmits: admitted(11, 8, [aged(6)], 4),
+    shadowRefuses: admitted(13, 4, [aged(6)], 1),
+    youngNoRelease: admitted(12, 0, [young(6)], 1),
+    agedNoRelease: admitted(12, 0, [aged(6)], 1),
+    fitsBeforeHeadYoung: admitted(5, 0, [young(3), young(10), young(2)], 3),
+    fitsBeforeHeadAged: admitted(5, 0, [young(3), aged(10), young(2)], 3),
+    headAheadYoung: ahead(5, 0, [young(3), young(10), young(2)]),
+    headAheadAged: ahead(5, 0, [young(3), aged(10), young(2)]),
+    overBudgetHead: admitted(0, 0, [], 20),
+    overBudgetHeadAged: admitted(0, 0, [aged(20)], 1),
+    emptyLine: ahead(7, 0, []),
+    releaseHeadAged: admitted(10, 10, [{ weight: 10, release: true, young: true }], 6),
+    releaseClaimUnchanged: slot.aheadOf([{ weight: 3, release: false }, { weight: 4, release: true }], true, false),
+    heldUnchanged: slot.admitsCores(false, 10, 1, slot.aheadOf([{ weight: 3, release: false }], false, true), 15, false, false, true, false),
+    vetoNotHead: vetoed(1),
+    vetoHead: vetoed(0),
+    releaseBehindOrdinaryVetoed: releaseVetoed([{ release: false }, { release: false }]),
+    releaseBehindReleaseVetoed: releaseVetoed([{ release: true }]),
+    releaseTicketAhead: ahead(5, 0, [{ weight: 3, release: true, young: true }, young(10), young(1)]),
+    shadowCountsReserve: admitted(8, 0, [young(3), aged(10), young(2)], 3),
+    // The claim end to end (slot.ts as the gate runs it): a pool where a live release holds 10 of 15 and a weight-10 ticket waits,
+    // then the same with no release, the head aged (STACK_HEAD_WAIT=1).
+    ...await (async () => {
+      const tmp = await sh("mktemp -d");
+      const procs = [];
+      try {
+        const sleeper = () => { const p = new Deno.Command("sleep", { args: ["120"] }).spawn(); procs.push(p); return p.pid; };
+        const run = async (env, ms) => {
+          const c = new Deno.Command(Deno.execPath(), { args: ["run", "-A", slotUrl, "--weight", "1", "--what", "backfill probe", "--", "true"],
+            clearEnv: true, env: { PATH: Deno.env.get("PATH") ?? "", HOME: tmp, STACK_POOL: `${tmp}/pool`, STACK_BUDGET: "15", STACK_HOLD_LOAD: "100000", STACK_RESERVE: "0", ...env }, stdout: "null", stderr: "null" }).spawn();
+          const t = setTimeout(() => { try { c.kill("SIGTERM"); } catch { /* done */ } }, ms);
+          const code = (await c.status).code; clearTimeout(t);
+          return code;
+        };
+        const setup = async (release) => {
+          await sh(`rm -rf '${tmp}/pool' && mkdir -p '${tmp}/pool/queue' && chmod 755 '${tmp}/pool' '${tmp}/pool/queue'`);
+          const holder = sleeper(), headPid = sleeper();
+          await new Promise((r) => setTimeout(r, 1500));
+          await sh(`mkdir -p '${tmp}/pool/slot-1' && echo ${holder} > '${tmp}/pool/slot-1/pid' && echo 'x 2026 release holder' > '${tmp}/pool/slot-1/owner'
+echo '${holder} 10${release ? " prio=release" : ""}' > '${tmp}/pool/slot-1/weight' && chmod 755 '${tmp}/pool/slot-1' && chmod 644 '${tmp}/pool/slot-1/'*
+echo '10 prio=normal head gate' > '${tmp}/pool/queue/'$(printf '%015d' $(( $(date +%s) * 1000 - ${release ? 1000 : 5000} )))-${headPid} && chmod 644 '${tmp}/pool/queue/'*`);
+        };
+        await setup(true);
+        const beside = await run({}, 20_000);
+        await setup(false);
+        const drains = await run({ STACK_HEAD_WAIT: "1" }, 6_000);
+        return { e2eBeside: beside, e2eDrains: drains !== 0 };
+      } finally { for (const p of procs) { try { p.kill("SIGKILL"); } catch { /* gone */ } } await sh(`rm -rf '${tmp}'`); }
+    })(),
+  };
+}
