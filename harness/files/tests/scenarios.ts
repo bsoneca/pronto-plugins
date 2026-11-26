@@ -117,7 +117,8 @@ const pageErrors: string[] = [];
 const pageErrorIds = new Set<string>();
 
 // A flag (flags_spec.cue) as the door answers it, asked once and held: a step marked with one runs
-// only where that flag is on. A door whose flags do not answer is a failure, never a reason to skip.
+// only where that flag is on. A flag the door says is off, disabled or not there (ofrepFlag, scenarios/select.ts)
+// is off; a door whose flags do not answer (a 5xx, a body that is no JSON) is a failure, never a reason to skip.
 // As the tester when there is one (FLAGS_TESTER): a flip's canary turns a flag on for the tester alone.
 const flags = new Map<string, Promise<boolean>>();
 // The door names flagd's account from the verified session alone (a Bearer token, its /auth/door), never from a
