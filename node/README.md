@@ -261,7 +261,10 @@ node's registry pod, the registry's lease and the Envoy Gateway data plane.
   publisher's kind, in the tenant's namespace; a Service that is a ClusterIP with no `externalIPs`; in a pod, no `publisher`, `studio-builder`
   or `studio-provisioner` service account, no `hostUsers: false`, host namespace, `hostPath` or privilege, no `procMount` but `Default`, no
   Unconfined seccomp or AppArmor profile, and every container's and initContainer's image under `127.0.0.1:5000/<namespace>/`. The
-  tenants' buildkitd and the registry are pinned again there. `build.include` names only files under the app's real folder (no absolute
+  tenants' buildkitd and the registry are pinned again there. Every issuer its auth names (a `*_ISSUER` or `*_INTERNAL` setting of the auth provider environment or the compose auth service) must be exactly
+  one of `#TenantIssuers` in the engine's schema (`https://id.bonkchess.com`, Studio's sign-in broker), an https name with no credentials, port or
+  IP address: the release registers its clients at the issuer from Studio's builder pod, so one the game chose would be a request the pod makes
+  for it. Refused, naming the key, before anything is built or any issuer is fetched. `build.include` names only files under the app's real folder (no absolute
   path, `..` or link out of it), and a tenant stages regular files only.
 - **What is skipped.** The operators' versions, CRDs and nodes, the namespace's label, the prune and the collection, the registry restart, the
   tunnel and every `exec`. `--preview`, `--delete`, `--schema-from`, `--adopt`, `--serving`, `--verified` and `--prune` are refused with `--tenant`,

@@ -658,6 +658,8 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	let tenant_ns = (if $tenant { $node.namespace } else { "" })
 	let tenant_host = (if $tenant { $node.host } else { "" })
 	# 3. data and render
+	# A tenant's issuers are the engine's list alone, said before release-data registers a client at any of them.
+	if $tenant { check-tenant-issuers $app_info.dir $compose }
 	let data = (render release-data $app_info.dir $compose $facts $pushed (if $check { '' } else { $node.origin }))
 	let objects = (render objects $app_info.cue_path $data $node.preview --tenant $tenant_ns --host $tenant_host)
 	# The game's own release.cue rendered these: what its publisher may write is checked again here, whatever schema it loaded.
@@ -793,6 +795,13 @@ def tenant-preflight [app_info: record, node: record, push_kubeconfig: string, -
 	}
 }
 
+# Every issuer the tenant's auth names (the auth provider environment's OIDC settings and the compose auth service's own) is on the engine's list.
+def check-tenant-issuers [dir: string, compose: record] {
+	let environment = ($compose.services.auth?.environment? | default {})
+	let provided = (runtime auth-provider-environment $environment (render release-providers $dir))
+	tenant check-issuers $provided.oidc $environment (tenant tenant-issuers)
+}
+
 # A tenant's release: the app released into the namespace its provisioner made, at the one host it was given, with the KUBECONFIG it is
 # given (the namespace's publisher: rights in it alone), no ssh tunnel and no operator's step. The images are built on the tenants'
 # sandboxed buildkitd and pushed as the push identity (push.nu tenant-images); the registry's lease, held while it pushes, is the push
@@ -808,6 +817,7 @@ def release-tenant [app_info: record, tenant: string, host: string, push_kubecon
 	tenant check-pins $node
 	let meta = (render app-meta $app_info.cue_path "" --tenant $tenant --host $host)
 	let compose = (render compose-config $app_info.dir)
+	check-tenant-issuers $app_info.dir $compose
 	refuse $app_info $node $meta $compose $meta.render.enabled
 	tenant tenant-refusals $app_info.dir $node
 	let facts = (render facts $app_info.dir)

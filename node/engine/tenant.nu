@@ -24,6 +24,42 @@ export def publisher-kinds []: nothing -> list<string> {
 	$r.stdout | from json
 }
 
+# The issuers a tenant's release may register clients at, read from the engine's own schema (`#TenantIssuers`), never the app's copy.
+export def tenant-issuers []: nothing -> list<string> {
+	let r = (do { cd ($engine_dir | path join schema); ^cue export --out json -e '#TenantIssuers' node.cue } | complete)
+	if $r.exit_code != 0 { error make {msg: $"the engine's schema does not export #TenantIssuers: ($r.stderr | str trim)"} }
+	$r.stdout | from json
+}
+
+# Every issuer a tenant's auth names must be exactly one of `issuers` (the engine's list): the release fetches the issuer's discovery
+# document and POSTs a registration to it from Studio's builder pod, so an issuer the game picked is a request the pod makes for it (SSRF).
+# `settings` is the OIDC settings the auth provider environment made and `environment` the compose auth service's own; a key ending in
+# `_ISSUER` or `_INTERNAL` is an issuer. Refused before any fetch, naming the key: not https, with credentials or a port, a literal IP, or
+# an origin not on the list. No auth service, or no issuer, passes.
+export def check-issuers [settings: record, environment: record, issuers: list<string>] {
+	let named = ([$settings $environment] | each {|r| $r | transpose key value } | flatten
+		| where {|e| ($e.key =~ '(_ISSUER|_INTERNAL)$') and (($e.value | into string) | is-not-empty) }
+		| each {|e| {key: $e.key, value: ($e.value | into string)} } | uniq)
+	let problems = ($named | each {|e|
+		let url = $e.value
+		let authority = ($url | str replace -r '^https://' '' | split row -r '[/?#]' | first)
+		if not ($url | str starts-with "https://") {
+			$"($e.key) is ($url): an issuer is an https origin"
+		} else if ($authority | str contains "@") {
+			$"($e.key) is ($url): an issuer carries no credentials"
+		} else if ($authority | str starts-with "[") {
+			$"($e.key) is ($url): an issuer is a name, never an IP address"
+		} else if ($authority | str contains ":") {
+			$"($e.key) is ($url): an issuer names no port"
+		} else if ($authority =~ '^[0-9.]+$') or ($authority =~ '^0[xX][0-9a-fA-F.]+$') {
+			$"($e.key) is ($url): an issuer is a name, never an IP address"
+		} else if $url not-in $issuers {
+			$"($e.key) is ($url), which is not an issuer a tenant may use \(the engine allows ($issuers | str join ', ')\)"
+		}
+	} | compact)
+	if ($problems | is-not-empty) { error make {msg: $"a tenant's issuers are refused: ($problems | str join '; ')"} }
+}
+
 # The app's copy of the schema (`node/schema/node.cue`, which its release.cue imports) must be the engine's own, byte for byte: a copy the
 # game's author edited would load refusals of its own choosing.
 export def check-engine-copy [app_dir: string] {

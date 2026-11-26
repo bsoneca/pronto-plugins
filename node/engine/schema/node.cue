@@ -146,6 +146,11 @@ import (
 	"external-secrets.io/v1beta1/ExternalSecret", "generators.external-secrets.io/v1alpha1/Password",
 	"dapr.io/v1alpha1/Configuration", "dapr.io/v1alpha1/Resiliency", "gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy"]
 
+// The OIDC issuers a tenant's release may name (every `OIDC_*_ISSUER` and `*_INTERNAL` of its auth settings), each as the exact origin: the
+// release registers its clients at the issuer from Studio's builder pod, which reaches the node's API and its pods, so a tenant's own
+// choice of issuer would make the builder its proxy. Today the one sign-in broker Studio's games use (apps/studio games.cue `signIn`).
+#TenantIssuers: ["https://id.bonkchess.com"]
+
 // The database's replicas and settings, as patches over upstream's CloudNativePG Cluster (`<app>-db`). Each field
 // is a patch: where `database` is not set, upstream's Cluster is applied as it renders.
 #Database: {
