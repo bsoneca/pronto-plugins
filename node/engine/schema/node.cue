@@ -125,7 +125,26 @@ import (
 	}
 	// Egress the namespace may open beyond upstream's own policies: an extra NetworkPolicy.
 	egress: *[] | [...{to?: [...{...}], ports?: [...{...}]}]
+	// A tenant's own release (PRONTO-740 S2, `release.nu --tenant <namespace> --host <host>`, which passes the tags `tenant` and
+	// `tenantHost`): the release runs as the namespace's publisher, a ServiceAccount whose rights are the namespace's alone, in
+	// a namespace its provisioner made (with the quota, the limit range and the policies above, which the publisher never writes).
+	// Naming the namespace is what makes the release a tenant's: then the host is the one address the namespace was given, the
+	// images are under the namespace's own path of the node's registry, and the build is the tenants' sandboxed buildkitd, never
+	// the operator's (which has no sandbox and can overwrite any image in the registry).
+	namespace?: =~"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" & !="default" & !~"^(kube|pronto)-"
+	host?:      =~"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)+$"
+	if namespace != _|_ {
+		host:     string
+		buildkit: *"tcp://buildkitd.pronto-buildkit-tenants.svc:1234" | =~"^tcp://buildkitd\\.pronto-buildkit-tenants\\.svc(\\.cluster\\.local)?:[0-9]{1,5}$"
+	}
 }
+
+// The kinds a tenant's publisher may write, as `apiVersion/kind`: the subset of `operators.served` that Studio's publisher Role
+// covers (apps/studio/spec/tenants.cue `rules`). A kind outside it makes a tenant's release refuse before anything is written.
+#PublisherKinds: ["v1/Service", "v1/ConfigMap", "v1/Secret", "v1/ServiceAccount", "apps/v1/Deployment", "batch/v1/Job",
+	"gateway.networking.k8s.io/v1/Gateway", "gateway.networking.k8s.io/v1/HTTPRoute", "postgresql.cnpg.io/v1/Cluster",
+	"external-secrets.io/v1beta1/ExternalSecret", "generators.external-secrets.io/v1alpha1/Password",
+	"dapr.io/v1alpha1/Configuration", "dapr.io/v1alpha1/Resiliency", "gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy"]
 
 // The database's replicas and settings, as patches over upstream's CloudNativePG Cluster (`<app>-db`). Each field
 // is a patch: where `database` is not set, upstream's Cluster is applied as it renders.
@@ -317,8 +336,15 @@ import (
 	}
 	// A preview named like a host of `hosts` that is production's own is refused (the conflict is the error).
 	_previewHostIsNotProduction: true & [if preview != "" if hosts[preview] != _|_ {hosts[preview] != hosts.production}, true][0]
-	namespace:                   [if preview == "" {name}, "\(name)-\(preview)"][0]
+	// A tenant's release (`tenant.namespace`): the one a namespace's publisher makes, in the namespace its provisioner made.
+	_publisher: [if tenant != _|_ if tenant.namespace != _|_ {true}, false][0]
+	if _publisher {
+		// The node's registry as the publisher's push reaches it: pinned, so a release.cue cannot move where a tenant's images go.
+		build: registry: {host: "127.0.0.1:5000", port: 5000, namespace: "pronto-registry"}
+	}
+	namespace: [if _publisher {tenant.namespace}, if preview == "" {name}, "\(name)-\(preview)"][0]
 	host: [
+		if _publisher {tenant.host},
 		if preview == "" {hosts.production},
 		if hosts[preview] != _|_ {hosts[preview]},
 		"\(namespace).\(environment.domainSuffix)",
@@ -327,7 +353,9 @@ import (
 	// offers one only on https): what the services' ORIGIN says and what release-cron's preview is asked at. The node's
 	// cloudflared terminates TLS and dials the Gateway over plain HTTP, so the Gateway has no TLS listener of its own.
 	origin:      *"https://\(host)" | =~"^https://[^/]+$"
-	environment: #Environment & {registry: build.registry.host}
+	// A tenant's images are under its namespace's own path of the registry (`<registry>/<namespace>/<app>-<service>`), which the
+	// image check below then holds every one of its images to.
+	environment: #Environment & {registry: [if _publisher {"\(build.registry.host)/\(tenant.namespace)"}, build.registry.host][0]}
 
 	// Seconds each wait takes: the primary database on its image, a Job, a rollout.
 	waits: {
@@ -385,7 +413,9 @@ import (
 	upstream: [...{apiVersion: string, kind: string, metadata: {name: string, namespace?: string, ...}, ...}]
 
 	let production = release.preview == ""
-	let withBackups = release.backups != _|_ && production
+	let publisher = release._publisher
+	// A tenant's release writes no backups (the operator's): its refusal is in `violations`.
+	let withBackups = release.backups != _|_ && production && !publisher
 	let backupName = "\(release.name)-backup"
 
 	// What the engine changes in upstream's objects, and nothing else.
@@ -405,7 +435,7 @@ import (
 	// full image copies, moves the Jobs' image and leaves the Cluster's: CloudNativePG recreates the instance on any change
 	// to `imageName` (PRONTO-615, as PRONTO-537 for Bonk Chess).
 	let dbBase = [
-		if app.image != _|_ if app.image.pushed != _|_ if app.image.pushed["database-base"] != _|_ {
+		if !publisher if app.image != _|_ if app.image.pushed != _|_ if app.image.pushed["database-base"] != _|_ {
 			"\(release.environment.registry)/\(release.name)-database-base:\(app.image.pushed["database-base"].tag)@\(app.image.pushed["database-base"].digest)"
 		},
 	]
@@ -414,7 +444,8 @@ import (
 	// dials `flagd:8693` itself is refused. Upstream sets the variable only for the ids of its `doors`, which a release fills from
 	// the app's cluster.json, so a service the app declares here would have none (PRONTO-1884: aprende's /ofrep answered 502).
 	let serviceNames = [for n, _ in release.services {n}]
-	_patched: [for o in upstream {
+	// A tenant's namespace is its provisioner's and so are its policies: upstream's Namespace and NetworkPolicies are not written.
+	_patched: [for o in upstream if !(publisher && (o.kind == "Namespace" || o.kind == "NetworkPolicy")) {
 		if !(o.kind == "Deployment" && o.metadata.name == caddyName) {
 			[
 				if o.kind == "Cluster" if len(dbBase) > 0 {
@@ -480,7 +511,7 @@ import (
 				}
 			}
 		}],
-		[if release.tenant != _|_ {
+		[if release.tenant != _|_ if !publisher {
 			apiVersion: "v1"
 			kind:       "ResourceQuota"
 			metadata:   {name: "\(release.name)-quota", namespace: release.namespace}
@@ -494,7 +525,7 @@ import (
 				"requests.storage":     release.tenant.quota.storage
 			}
 		}],
-		[if release.tenant != _|_ {
+		[if release.tenant != _|_ if !publisher {
 			apiVersion: "v1"
 			kind:       "LimitRange"
 			metadata:   {name: "\(release.name)-quota", namespace: release.namespace}
@@ -505,7 +536,7 @@ import (
 				max:            {cpu: release.tenant.limitRange.maxCPU, memory: release.tenant.limitRange.maxMemory}
 			}]
 		}],
-		[if release.tenant != _|_ if len(release.tenant.egress) > 0 {
+		[if release.tenant != _|_ if !publisher if len(release.tenant.egress) > 0 {
 			apiVersion: "networking.k8s.io/v1"
 			kind:       "NetworkPolicy"
 			metadata:   {name: "\(release.name)-tenant-egress", namespace: release.namespace}
@@ -551,7 +582,7 @@ import (
 	// Then the tunings of the release: replicas, the database's settings, the containers' resources, over everything
 	// above (a Deployment or the Cluster, whoever added it).
 	// The app's own services, the blob plane and the metrics export: Deployments, Services, a clock's CronJob and what they read.
-	_services: (#ServiceObjects & {"release": release, "app": app}).out
+	_services: [for o in (#ServiceObjects & {"release": release, "app": app}).out if !(publisher && o.kind == "NetworkPolicy") {o}]
 
 	_pre:  list.Concat([_patched, _added])
 	_with: list.Concat([_pre, _services])
@@ -607,10 +638,29 @@ import (
 		[if release.database != _|_ if len(release.database.logins) > 0 if app.externalSecrets != _|_ if app.externalSecrets.enabled {
 			"database.logins generate their passwords in the namespace, which the app's externalSecrets store does not do yet"
 		}],
+		// What a tenant's release (a namespace's publisher) may not write or ask (PRONTO-740 S2).
+		[if publisher if !production {"a tenant's release (\(release.namespace)) is never a preview"}],
+		[if publisher if release.backups != _|_ {"a tenant's release writes no backups: database.backup and backups are the operator's"}],
+		[if publisher if len(release.tenant.egress) > 0 {"a tenant's release writes no NetworkPolicy: tenant.egress is its namespace's provisioner's"}],
+		[if publisher for n, s in release.services if s.clock != _|_ {"a tenant's service \(n) sets clock, a CronJob its publisher may not write"}],
+		[if publisher if release.blobs != _|_ {"a tenant's release runs no blob plane: it signs in to Google as the operator's account"}],
+		[if publisher if release.metricsExport != _|_ {"a tenant's release runs no metrics export: it signs in to Google as the operator's account"}],
+		[if publisher if app.externalSecrets != _|_ if app.externalSecrets.enabled {"a tenant's release reads no ClusterSecretStore: the app's externalSecrets must be off"}],
+		[if publisher for o in _all if !list.Contains(#PublisherKinds, "\(o.apiVersion)/\(o.kind)") {
+			"\(o.kind)/\(o.metadata.name) is not a kind a tenant's publisher writes (#PublisherKinds)"
+		}],
+		[if publisher for r in release.retire if r.kind == "NetworkPolicy" || r.kind == "CronJob" {
+			"retire names \(r.kind)/\(r.name), which a tenant's publisher may not delete"
+		}],
+		[if publisher for o in _all if o.kind == "Gateway" for l in o.spec.listeners if l.port != 80 || l.protocol != "HTTP" {
+			"Gateway/\(o.metadata.name) listens on \(l.port)/\(l.protocol); a tenant's gateway listens on 80/HTTP alone"
+		}],
+		[if publisher if release.origin != "https://\(release.host)" {"a tenant's origin is https://\(release.host), not \(release.origin)"}],
 		// `jail`, `google` and `egress` of a service are Studio's builder's alone (PRONTO-1882): they weaken the pod (a user namespace, an
 		// unmasked /proc, AppArmor and seccomp off), hand it a Google identity and open the network past the mesh, which a tenant's app
-		// must never ask. Here, with the engine's other refusals, so the objects themselves are refused, not only a whole release.
-		[for n, s in release.services if s.jail || s.google != _|_ || len(s.egress) > 0 if release.name != "studio" || n != "builder" {
+		// must never ask. Here, with the engine's other refusals, so the objects themselves are refused, not only a whole release. A
+		// tenant's release (a game named studio included) never has them.
+		[for n, s in release.services if s.jail || s.google != _|_ || len(s.egress) > 0 if publisher || release.name != "studio" || n != "builder" {
 			"service \(n) of \(release.name) sets jail, google or egress, which only Studio's builder (app studio, service builder) may (PRONTO-1882)"
 		}],
 		// what an app's services may not be
@@ -650,7 +700,7 @@ import (
 		[if release.metricsExport != _|_ if len([for _, s in release.services if s.metrics != _|_ {s}]) == 0 {
 			"metricsExport needs a service with `metrics` to scrape"
 		}],
-		[for i in _images if !list.Contains(#External, i) if !strings.HasPrefix(i, release.environment.registry+"/") {
+		[for i in _images if publisher || !list.Contains(#External, i) if !strings.HasPrefix(i, release.environment.registry+"/") {
 			"image \(i) is not in \(release.environment.registry)"
 		}],
 		[for i in _images if !strings.Contains(i, "@sha256:") {"image \(i) is not pinned by digest"}],

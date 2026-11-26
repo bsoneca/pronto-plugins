@@ -1,6 +1,10 @@
 package refused
 
-import "github.com/bsoneca/pronto-plugins/node/engine/schema"
+import (
+	"list"
+
+	"github.com/bsoneca/pronto-plugins/node/engine/schema"
+)
 
 // Renders the engine refuses: each `objects` is an error, which node/engine/schema_test.nu holds.
 // Not vetted with the cases (a package of its own): they fail by design.
@@ -93,3 +97,52 @@ serviceSeedAbsolute:    schema.#Release & _base & {services: billing: {port: 868
 serviceNamedClock:      schema.#Release & _base & {services: "pulse-clock": port: 8688}
 plainOrigin:            schema.#Release & _base & {origin: "http://localhost:18080"} // a passkey is bound to an https origin
 metricsExportUnknown:   schema.#Release & _base & {metricsExport: {project: "my-project", provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "m@p.iam.gserviceaccount.com", key: "x"}}
+
+// A tenant's release (PRONTO-740 S2): the one a namespace's publisher makes, in the namespace its provisioner made. What it may not
+// write or ask is refused (the text of each is held by schema_test.nu); a clean one is `tenantClean`.
+_tns:  "studio-owner-game-1a2b3c4d"
+_thost: "game-game.example.com"
+_tbase: {
+	name:    *"app" | string
+	context: "contabo2"
+	api: ssh:          "deploy@node.example"
+	hosts: production: _thost
+	tenant: {namespace: _tns, host: _thost}
+}
+_d: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_tdeploy: {apiVersion: "apps/v1", kind: "Deployment", metadata: {name: "app-crud", namespace: _tns}, spec: template: spec: containers: [{name: "crud", image: "127.0.0.1:5000/\(_tns)/app-crud:release@sha256:\(_d)"}]}
+_tgateway: {apiVersion: "gateway.networking.k8s.io/v1", kind: "Gateway", metadata: {name: "app-gateway", namespace: _tns}, spec: listeners: [{name: "http", port: 80, protocol: "HTTP", hostname: _thost}]}
+_tm: {
+	extra: [...]
+	rel: {...}
+	_m: schema.#Manifests & {
+		release:  schema.#Release & _tbase & rel
+		upstream: list.Concat([[_tdeploy, _tgateway], extra])
+	}
+	objects: _m.objects
+}
+
+tenantClean: (_tm & {extra: [], rel: {}}).objects
+tenantPreview: (_tm & {extra: [], rel: {preview: "rc", hosts: rc: "rc.example.com"}}).objects
+tenantBackups: (_tm & {extra: [], rel: {backups: {bucket: "b", path: "p"}}}).objects
+tenantCeilingEgress: (_tm & {extra: [], rel: {tenant: egress: [{ports: [{port: 443}]}]}}).objects
+tenantStudioBuilderJail: (schema.#Manifests & {
+	release:  schema.#Release & _tbase & {name: "studio", services: builder: {port: 8690, jail: true}}
+	app:      {name: "studio", namespace: _tns}
+	upstream: [{apiVersion: "apps/v1", kind: "Deployment", metadata: {name: "studio-crud", namespace: _tns}, spec: template: spec: containers: [{name: "crud", image: "127.0.0.1:5000/\(_tns)/studio-crud:release@sha256:\(_d)"}]}]
+}).objects
+tenantClock: (_tm & {extra: [], rel: {services: tick: {port: 9990, clock: {}}}}).objects
+tenantBlobs: (_tm & {extra: [], rel: {blobs: {bucket: "bkt-blobs", provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "b@p.iam.gserviceaccount.com"}}}).objects
+tenantRetireNetworkPolicy: (_tm & {extra: [], rel: {retire: [{kind: "NetworkPolicy", name: "old"}]}}).objects
+tenantGatewayHTTPS: (_tm & {extra: [{apiVersion: "gateway.networking.k8s.io/v1", kind: "Gateway", metadata: {name: "other", namespace: _tns}, spec: listeners: [{name: "https", port: 443, protocol: "HTTPS", hostname: _thost}]}], rel: {}}).objects
+tenantUnservedKind: (_tm & {extra: [{apiVersion: "v1", kind: "ResourceQuota", metadata: {name: "q", namespace: _tns}}], rel: {}}).objects
+tenantExternalImage: (_tm & {extra: [{apiVersion: "apps/v1", kind: "Deployment", metadata: {name: "app-x", namespace: _tns}, spec: template: spec: containers: [{name: "x", image: "docker.io/library/nginx:1@sha256:\(_d)"}]}], rel: {}}).objects
+tenantOrigin: (_tm & {extra: [], rel: {origin: "https://other.example.com"}}).objects
+// What the schema itself refuses: the buildkitd that is not the tenants', a registry moved, a namespace that is the system's, a namespace with no host.
+tenantBuildkitOperator:    schema.#Release & _tbase & {tenant: buildkit: "tcp://127.0.0.1:1234"}
+tenantBuildkitOperatorSvc: schema.#Release & _tbase & {tenant: buildkit: "tcp://buildkitd.pronto-buildkit.svc:1234"}
+tenantRegistryMoved:       schema.#Release & _tbase & {build: registry: host: "evil.example:5000"}
+tenantNamespaceKube:       schema.#Release & _tbase & {tenant: namespace: "kube-system"}
+tenantNamespaceRegistry:   schema.#Release & _tbase & {tenant: namespace: "pronto-registry"}
+tenantNamespaceDefault:    schema.#Release & _tbase & {tenant: namespace: "default"}
+tenantHostMissing:         schema.#Release & {name: "app", context: "contabo2", api: ssh: "deploy@node.example", hosts: production: _thost, tenant: namespace: _tns}

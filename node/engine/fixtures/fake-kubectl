@@ -40,7 +40,7 @@ def items(text):
 
 objs = items(stdin) if "-f" in args and "-" in args and args[:1] != ["exec"] else []
 with open(d + "/calls.jsonl", "a") as f:
-    f.write(json.dumps({"args": args, "objects": [{"kind": o.get("kind"), "name": o.get("metadata", {}).get("name"), "namespace": o.get("metadata", {}).get("namespace")} for o in objs]}) + "\n")
+    f.write(json.dumps({"as": os.path.basename(os.environ.get("KUBECONFIG", "")), "args": args, "objects": [{"kind": o.get("kind"), "name": o.get("metadata", {}).get("name"), "namespace": o.get("metadata", {}).get("namespace")} for o in objs]}) + "\n")
     if objs:
         with open(d + "/last_objects.json", "w") as g:
             json.dump(objs, g)
@@ -69,6 +69,18 @@ def read(path, default=""):
 
 verb = args[0] if args else ""
 ns = opt("-n")
+
+# `auth can-i`: yes, but for what auth_deny names (a line of it that the question holds), and `create namespaces`, which only an
+# operator may (auth_operator makes the KUBECONFIG one).
+if verb == "auth" and args[1:2] == ["can-i"]:
+    q = " ".join(args[2:])
+    deny = [l for l in read("auth_deny").split("\n") if l] if exists("auth_deny") else []
+    if q.strip() == "create namespaces":
+        ans = exists("auth_operator")
+    else:
+        ans = not any(l in q for l in deny)
+    print("yes" if ans else "no")
+    sys.exit(0 if ans else 1)
 
 if verb == "config":
     print("apiVersion: v1\nkind: Config\ncurrent-context: contabo2\nclusters:\n- name: contabo2\n  cluster:\n    server: https://127.0.0.1:26444\n    certificate-authority-data: Zg==\ncontexts:\n- name: contabo2\n  context: {cluster: contabo2, user: u}\nusers:\n- name: u\n  user: {token: t}\n")

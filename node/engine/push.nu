@@ -14,6 +14,7 @@ use render.nu
 export use render.nu [nearest-on-path]
 use runtime.nu
 use registry.nu
+use tenant.nu
 
 # The buildx plugin the app's mise pins: `docker-buildx`, `docker-cli-plugin-docker-buildx` (what aqua names
 # docker/buildx's binary), or `buildx`. The one whose folder comes first on the PATH wins, not the first
@@ -65,6 +66,28 @@ export def with-builder [work: string, fwd: record, body: closure]: nothing -> a
 	}
 }
 
+# `with-builder` at a buildkitd's own address (a tenant's build goes to the tenants' sandboxed buildkitd, which no tunnel reaches:
+# the builder pod dials its Service), given `{|builder| ... }`; the builder and its docker config belong to this call.
+export def with-remote-builder [work: string, address: string, body: closure]: nothing -> any {
+	let plugin = (buildx-binary)
+	let config = ($work | path join docker)
+	mkdir ($config | path join cli-plugins)
+	^ln -sf $plugin ($config | path join cli-plugins docker-buildx)
+	let builder = $"node-(random chars --length 6 | str lowercase)"
+	with-env {DOCKER_CONFIG: $config} {
+		let v = (^docker buildx version | complete)
+		if $v.exit_code != 0 { error make {msg: $"docker buildx does not run with ($plugin): ($v.stderr | str trim)"} }
+		print -e $"node: (stamp) buildx ($v.stdout | str trim) at ($plugin)"
+		let c = (^docker buildx create --name $builder --driver remote $address | complete)
+		if $c.exit_code != 0 { error make {msg: $"docker buildx create at the tenants' buildkitd \(($address)\):($c.stderr | str trim)"} }
+		try {
+			do $body $builder
+		} finally {
+			do { ^docker buildx rm $builder } | complete | ignore
+		}
+	}
+}
+
 # The platforms the node's buildkitd builds for, read by starting the builder (it answers or fails here).
 export def platforms [builder: string]: nothing -> list<string> {
 	let r = (^docker buildx inspect $builder --bootstrap | complete)
@@ -83,7 +106,7 @@ export def looks-secret [path: string]: nothing -> bool {
 # The app as git sees it, copied under `dest`: every tracked and untracked-but-not-ignored file, none of
 # `.certs/`, none that is listed but gone, no untracked file that looks like a secret (said, not silent), and
 # the ignored files the app's `build.include` names (generated files its Dockerfiles COPY), which must exist.
-def stage-context [app_dir: string, work: string, dest: string, include: list<string>] {
+export def stage-context [app_dir: string, work: string, dest: string, include: list<string>] {
 	let missing = ($include | where {|f| ($app_dir | path join $f | path type) != "file" })
 	if ($missing | is-not-empty) { error make {msg: $"build.include names ($missing | str join ', '), which is not a file in ($app_dir): the app's generate writes it"} }
 	let secret = ($include | where {|f| looks-secret $f })
@@ -169,6 +192,61 @@ export def images [app_dir: string, node: record, fwd: record, services: list<st
 		# CloudNativePG recreates the instance for then never moves with the app's SQL.
 		let base = if "database" in $services { $compose.stdout | render database-base } else { null }
 		if ($base | is-empty) { $built } else { $built | insert "database-base" (render database-base-copy $base $app $"127.0.0.1:($fwd.registry)") }
+	} finally {
+		rm -rf $work
+	}
+}
+
+# A tenant's build (`release.nu --tenant`): the images built on the tenants' sandboxed buildkitd (`node.tenant.buildkit`), which writes each
+# as an OCI archive and never pushes; then pushed, as the push identity (`push_kubeconfig`, or the pod's own account), through a
+# port-forward to the registry pod, to `<registry>/<namespace>/<app>-<service>:<tag>`. An untrusted Dockerfile never reaches the operator's
+# buildkitd, which has no sandbox and could overwrite any image in the registry. A lost image after the push is an error: a tenant's
+# release cannot restart the registry. Answers {<svc>: {tag, digest}}, the database's tag being its Postgres major.
+export def tenant-images [app_dir: string, node: record, services: list<string>, tag: string, push_kubeconfig: string]: nothing -> record {
+	let app = $node.name
+	let ns = $node.namespace
+	let dir = ($app_dir | path expand)
+	let work = (mktemp -d -t node-build.XXXXXX | str trim | path expand)
+	try {
+		let staged = ($work | path join app)
+		let count = (stage-context $dir $work $staged $node.build.include)
+		verify-door-guard $staged
+		print $"node: (stamp) build context: ($count) files"
+		let compose = (render compose-run $staged --profile "*" config)
+		if $compose.exit_code != 0 { error make {msg: $"docker compose config failed in ($dir): ($compose.stderr | str trim)"} }
+		runtime release-tree $compose.stdout | save -f ($work | path join release.compose.yaml)
+		let out = ($work | path join oci)
+		mkdir $out
+		let sets = ($services | each {|s| ["--set" $"($s).output=type=oci,dest=($out)/($s).tar" "--set" $"($s).tags="] } | flatten)
+		with-remote-builder $work $node.tenant.buildkit {|builder|
+			with-env {SOURCE_DATE_EPOCH: "0"} {
+				let r = (do { cd $staged; open --raw ($work | path join release.compose.yaml) | ^docker buildx bake -f - --builder $builder --provenance=false --progress=plain $"--allow=fs.read=($staged)" $"--allow=fs.write=($out)" --set $"*.platform=($node.environment.platform)" ...$sets ...$services } | complete)
+				if $r.exit_code != 0 { error make {msg: $"docker buildx bake on the tenants' buildkitd failed:\n(($r.stdout + $r.stderr) | lines | last 40 | str join (char nl))(failed-step ($r.stdout + $r.stderr))"} }
+			}
+		}
+		let pushed = (tenant with-registry-forward $push_kubeconfig {|port|
+			let registry = $"127.0.0.1:($port)"
+			let built = ($services | each {|svc|
+				let layout = ($out | path join $svc)
+				mkdir $layout
+				^tar -xf ($out | path join $"($svc).tar") -C $layout
+				let repo = $"($ns)/($app)-($svc)"
+				let r = (^crane push --insecure $layout $"($registry)/($repo):($tag)" | complete)
+				if $r.exit_code != 0 { error make {msg: $"crane push of ($repo) to the node's registry failed: ($r.stderr | str trim)"} }
+				let digest = ($"($r.stdout)($r.stderr)" | lines | each {|l| $l | parse --regex '@(?<d>sha256:[0-9a-f]{64})' | get -o d.0 } | compact | last)
+				{svc: $svc, repo: $repo, digest: $digest}
+			})
+			let lost = (registry lost-images $registry ($built | each {|b| {repo: $b.repo, digest: $b.digest} }))
+			if ($lost | is-not-empty) {
+				let names = ($lost | each {|i| $"($i.repo)@($i.digest)" } | str join ", ")
+				error make {msg: $"registry lost ($names) after the push: a tenant's release cannot restart the registry, so nothing is rolled out; publish again"}
+			}
+			$built | each {|b|
+				let final = if $b.svc == "database" { render database-tag $registry $b.repo $b.digest } else { $tag }
+				[$b.svc {tag: $final, digest: $b.digest}]
+			} | into record
+		})
+		$pushed
 	} finally {
 		rm -rf $work
 	}

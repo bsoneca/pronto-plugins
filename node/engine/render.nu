@@ -57,20 +57,22 @@ export def refusals [compose: record]: nothing -> list<string> {
 
 # The CUE a release.cue gives for the app's name, namespace and image, and its render choice,
 # under the preview (a `-t preview=` tag).
-def tags [preview: string]: nothing -> list<string> {
-	if ($preview | is-empty) { [] } else { [-t $"preview=($preview)"] }
+# A tenant's release (`--tenant`, `--host`) passes its namespace and host as the tags `tenant` and `tenantHost`, which the app's
+# release.cue binds into Node.tenant.
+def tags [preview: string, tenant: string = "", host: string = ""]: nothing -> list<string> {
+	(if ($preview | is-empty) { [] } else { [-t $"preview=($preview)"] }) | append (if ($tenant | is-empty) { [] } else { [-t $"tenant=($tenant)" -t $"tenantHost=($host)"] })
 }
 
-def cue-export [cue_path: string, expr: string, preview: string, ...more: string]: nothing -> any {
-	let r = (do { cd ($cue_path | path dirname); ^cue export --expression $expr --out json ...(tags $preview) ($cue_path | path basename) ...$more } | complete)
+def cue-export [cue_path: string, expr: string, preview: string, tenant: string, host: string, ...more: string]: nothing -> any {
+	let r = (do { cd ($cue_path | path dirname); ^cue export --expression $expr --out json ...(tags $preview $tenant $host) ($cue_path | path basename) ...$more } | complete)
 	if $r.exit_code != 0 { error make {msg: $"($cue_path): ($expr): ($r.stderr | str trim)"} }
 	$r.stdout | from json
 }
 
 # The release's own settings (its Node), and the app's metadata, as release.cue states them.
-export def node-config [cue_path: string, preview: string]: nothing -> record { cue-export $cue_path "Node" $preview }
-export def app-meta [cue_path: string, preview: string]: nothing -> record {
-	cue-export $cue_path "{name: App.name, namespace: App.namespace, type: App.type, image: App.image, render: App.render}" $preview
+export def node-config [cue_path: string, preview: string, --tenant: string = "", --host: string = ""]: nothing -> record { cue-export $cue_path "Node" $preview $tenant $host }
+export def app-meta [cue_path: string, preview: string, --tenant: string = "", --host: string = ""]: nothing -> record {
+	cue-export $cue_path "{name: App.name, namespace: App.namespace, type: App.type, image: App.image, render: App.render}" $preview $tenant $host
 }
 
 # The services whose images the release builds: the runtime's, the base five, migrate and render
@@ -135,10 +137,10 @@ export def oidc-secrets [compose: record, dir: string]: nothing -> record {
 
 # The release's manifests as a list of objects: `cue export -e nodeManifests` over release.cue and
 # the data. An engine constraint that fails (the schema's `violations`) is CUE's error, here.
-export def objects [cue_path: string, data: record, preview: string]: nothing -> list {
+export def objects [cue_path: string, data: record, preview: string, --tenant: string = "", --host: string = ""]: nothing -> list {
 	let f = (mktemp -t node-data.XXXXXX.json | str trim)
 	$data | to json | save -f $f
-	let r = (do { cd ($cue_path | path dirname); ^cue export --expression nodeManifests --out json ...(tags $preview) ($cue_path | path basename) $f } | complete)
+	let r = (do { cd ($cue_path | path dirname); ^cue export --expression nodeManifests --out json ...(tags $preview $tenant $host) ($cue_path | path basename) $f } | complete)
 	rm -f $f
 	if $r.exit_code != 0 { error make {msg: $"Failed to render the node manifests: ($r.stderr | str trim)"} }
 	$r.stdout | from json
