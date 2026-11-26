@@ -14,7 +14,7 @@
 //   - tests/scenarios/app.ts, when it has one: what its own step kinds do, and the few moments the
 //     app adds to (a browser's first script, a page's load, a sign-up, a payment, a failure's
 //     report). Its default export is a `Hooks`; it imports nothing of this file but its types.
-import { select, sha } from "./scenarios/select.ts";
+import { ofrepFlag, select, sha } from "./scenarios/select.ts";
 import { devices, request, type APIRequestContext, type BrowserContext, type CDPSession, type Locator, type Page, type Route } from "npm:playwright@1.61.1";
 import { launch as launchBrowser } from "./browser.ts";
 import { gate, slow, slowCpu, slowDown } from "./slow.ts";
@@ -125,9 +125,8 @@ const flags = new Map<string, Promise<boolean>>();
 // signed out and signed in reads two values.
 async function ofrepAsk(name: string, token?: string): Promise<boolean> {
   const res = await anon.fetch(new URL(`/ofrep/v1/evaluate/flags/${name}`, URL_).href, { method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, data: JSON.stringify({ context: {} }), failOnStatusCode: false });
-  const value = res.ok() ? (await res.json()).value : null;
-  if (typeof value !== "boolean") throw new Error(`the flags did not answer at ${URL_}/ofrep/: ${name} is ${JSON.stringify(value)}`);
-  return value;
+  const body = await res.json().catch(() => null);
+  try { return ofrepFlag(res.status(), body); } catch (e) { throw new Error(`the flags did not answer at ${URL_}/ofrep/: ${name} is ${(e as Error).message}`); }
 }
 function flagOn(name: string): Promise<boolean> {
   let asked = flags.get(name);
