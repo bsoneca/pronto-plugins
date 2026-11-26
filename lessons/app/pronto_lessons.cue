@@ -2,6 +2,8 @@
 package prontoproject
 
 pronto: {
-	// before the hatch (0), which bundles messages/*.json, and pronto's writer (1), which copies lessons_spec.sql into its raw migration
-	say: say: generate: rulemap: lessons: {"priority": -1, "cmds": [{"do": "use ./lessons/lessons.nu; lessons write --sql lessons/lessons_spec.sql --js __MODULE_DIR__/lessons_spec.js --messages messages"}]}
+	// After the app's modules (priority -1: they write the files the app's package embeds, which `lessons write` evaluates), and before the hatch
+	// (0), which bundles messages/*.json, and pronto's writer (1), which copies lessons_spec.sql into its raw migration. Rules of one priority run
+	// by name, so the name sorts before "hatch" and after the other priority-0 writers an app holds (errors-write, flags-sql).
+	say: say: generate: rulemap: "generate-lessons": {"priority": 0, "cmds": [{"do": "use ./lessons/lessons.nu; lessons write --sql lessons/lessons_spec.sql --js __MODULE_DIR__/lessons_spec.js --messages messages"}]}
 }
