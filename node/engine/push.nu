@@ -209,6 +209,12 @@ export def images [app_dir: string, node: record, fwd: record, services: list<st
 	}
 }
 
+# `text` (a compose project) with every path that is `from` or under it spelled under `to`.
+export def rebase-paths [text: string, from: string, to: string]: nothing -> string {
+	let escaped = ($from | str replace -a -r '([^A-Za-z0-9_/-])' '\$1')
+	$text | str replace -a -r ("(?m)" + $escaped + "([/\"'\\s]|$)") ($to + '${1}')
+}
+
 # A tenant's build (`release.nu --tenant`): the images built on the tenants' sandboxed buildkitd (`node.tenant.buildkit`), which writes each
 # as an OCI archive and never pushes; then pushed, as the push identity (`push_kubeconfig`, or the pod's own account), through a
 # port-forward to the registry pod, to `<registry>/<namespace>/<app>-<service>:<tag>`. An untrusted Dockerfile never reaches the operator's
@@ -226,7 +232,9 @@ export def tenant-images [app_dir: string, node: record, services: list<string>,
 		print $"node: (stamp) build context: ($count) files"
 		let compose = (render compose-run $staged --profile "*" config)
 		if $compose.exit_code != 0 { error make {msg: $"docker compose config failed in ($dir): ($compose.stderr | str trim)"} }
-		runtime release-tree $compose.stdout | save -f ($work | path join release.compose.yaml)
+		# The staged copy is what bake may read: a path the project names inside the app's own folder (an absolute build context a flatten wrote)
+		# is the staged copy's, so the grant below covers it and nothing outside the app is added to it.
+		runtime release-tree (rebase-paths $compose.stdout $dir $staged) | save -f ($work | path join release.compose.yaml)
 		let out = ($work | path join oci)
 		mkdir $out
 		let sets = ($services | each {|s| ["--set" $"($s).output=type=oci,dest=($out)/($s).tar" "--set" $"($s).tags="] } | flatten)

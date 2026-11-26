@@ -274,6 +274,12 @@ node's registry pod, the registry's lease and the Envoy Gateway data plane.
   (`data.app`, which only a tenant's release writes): one app per tenant namespace.
 - **The door check** reaches the Envoy Gateway data plane as the push identity. In the builder pod (no `--push-kubeconfig`) it dials the
   Service's ClusterIP, so no right to forward into the gateway's namespace is needed; with a kubeconfig (off the cluster) it forwards to it.
+- **Compose is checked before it is resolved.** `docker compose config` reads env_file, secrets' and configs' files and extends files with the release
+  process's own rights, so `tenant.nu check-compose-sources` reads the compose files (and `.env`) first and refuses an `include`, ssh forwarding, a
+  `COMPOSE_` variable, and any path that is a variable, a URL or outside the app's folder (as it resolves after links). The staged copy is what bake may
+  read, so the project's paths inside the app's folder are rebased onto it (`push.nu rebase-paths`) before the build. An ExternalSecret whose target
+  template is a service account token, or any Secret or ExternalSecret naming a service account in a `kubernetes.io/service-account.*` annotation, is refused.
+  A dry run with no build holds no lease and asks for no push identity.
 - **Rights to add on the node, before Studio publishes through it:** the push identity (`studio-builder`, `studio-rc-builder`) needs `leases`
   (coordination.k8s.io: get, list, create, update, patch, delete) and pods/portforward in `pronto-registry`, and get/list on `services` in
   `envoy-gateway-system` (`services/buildkit-tenants/metal.nu` in bsoneca/pronto; with a kubeconfig also pods/portforward there). The preflight names the Role it misses.
