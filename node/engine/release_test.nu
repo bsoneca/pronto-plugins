@@ -2332,6 +2332,8 @@ def test_a_tenant_namespace_and_push_rights_are_asked_before_anything_is_built [
 		{setup: "operator-record", says: "holds an operator's release"}
 		{setup: "no-lease-right", says: "the push identity may not create leases.coordination.k8s.io in pronto-registry: it needs the Role studio-builder-push"}
 		{setup: "no-forward-right", says: "the push identity may not create pods/portforward in pronto-registry"}
+		{setup: "no-lease-patch", says: "the push identity may not patch leases.coordination.k8s.io in pronto-registry"}
+		{setup: "no-lease-list", says: "the push identity may not list leases.coordination.k8s.io in pronto-registry"}
 	] {
 		let w = (tenant-world)
 		match $row.setup {
@@ -2340,6 +2342,8 @@ def test_a_tenant_namespace_and_push_rights_are_asked_before_anything_is_built [
 			"other-app" => { mkdir ($w.state | path join cm); {metadata: {name: "pronto-release"}, data: {app: "other"}} | to json | save -f ($w.state | path join cm pronto-release) }
 			"operator-record" => { mkdir ($w.state | path join cm); {metadata: {name: "pronto-release"}, data: {sha: "abc"}} | to json | save -f ($w.state | path join cm pronto-release) }
 			"no-lease-right" => { "create leases.coordination.k8s.io" | save -f ($w.state | path join auth_deny) }
+			"no-lease-patch" => { "patch leases.coordination.k8s.io" | save -f ($w.state | path join auth_deny) }
+			"no-lease-list" => { "list leases.coordination.k8s.io" | save -f ($w.state | path join auth_deny) }
 			"no-forward-right" => { "create pods --subresource=portforward -n pronto-registry" | save -f ($w.state | path join auth_deny) }
 		}
 		let r = (tenant-release $w)
@@ -2464,6 +2468,7 @@ def test_a_tenants_compose_files_name_nothing_outside_the_app [] {
 		{why: "a secret's file outside the app", yaml: "secrets:\n  s:\n    file: ../k\nservices: {}\n", says: "secrets.s.file names ../k"}
 		{why: "an include", yaml: "include: [other.yaml]\nservices: {}\n", says: "has include"}
 		{why: "ssh forwarding into a build", yaml: "services:\n  crud:\n    build: {context: ., ssh: [default]}\n", says: "forwards the release's ssh agent"}
+		{why: "an extends that names another file", yaml: "services:\n  crud:\n    image: x\n    extends: {file: base.yaml, service: b}\n", says: "services.crud.extends.file names another file"}
 		{why: "a build context that is a URL", yaml: "services:\n  crud:\n    build: https://example.com/x.git\n", says: "not a path inside the app's own folder"}
 	]
 	for c in $cases {
@@ -2481,6 +2486,24 @@ def test_a_tenants_compose_files_name_nothing_outside_the_app [] {
 	let r = (tenant-release $w)
 	assert ($r.exit_code != 0) "a COMPOSE_ variable in .env was not refused"
 	assert (has $r.stderr ".env names a COMPOSE_ variable") $r.stderr
+	rm -rf $w.dir
+	# a compose file or .env that is a link (compose follows it), and one that is a folder
+	for name in ["compose.yaml" "compose.override.yaml" ".env"] {
+		let w = (tenant-world)
+		let target = ($w.dir | path join outside.yaml)
+		"services: {}\n" | save -f $target
+		rm -f ($w.app | path join $name)
+		^ln -s $target ($w.app | path join $name)
+		let r = (tenant-release $w)
+		assert ($r.exit_code != 0) $"a linked ($name) was not refused"
+		assert (has $r.stderr $"($name) is a symlink, not a regular file") $"($name): ($r.stderr)"
+		rm -rf $w.dir
+	}
+	# values that are null where a path would be (extends within the file, an environment or external secret, a configs content) name no file
+	let w = (tenant-world)
+	"services:\n  b:\n    image: x\n  a:\n    extends: {service: b}\nsecrets:\n  s1: {environment: SOME_VAR}\n  s2: {external: true}\nconfigs:\n  c: {content: hello}\n" | save -f ($w.app | path join compose.yaml)
+	let ok = (^$nu.current-exe --no-config-file -c $"use ($engine_dir | path join tenant.nu); tenant check-compose-sources '($w.app)'" | complete)
+	assert equal $ok.exit_code 0 $"a project that names no file was refused: ($ok.stderr)"
 	rm -rf $w.dir
 }
 

@@ -80,6 +80,7 @@ def as-list [v: any]: nothing -> list {
 # secrets' and configs' files with the release process's own rights, so a tenant's compose file may name only files inside its own folder,
 # spelled as plain paths (no variable, no URL), as they resolve after links.
 def compose-path-problem [root: string, value: any, what: string]: nothing -> any {
+	if $value == null { return null }
 	let p = (if ($value | describe | str starts-with "record") { $value.path? | default "" } else { $value | into string })
 	if ($p | is-empty) { return null }
 	if ($p | str contains '$') { return $"($what) names ($p), a path with a variable in it: a tenant's compose file names plain paths" }
@@ -94,8 +95,10 @@ def compose-path-problem [root: string, value: any, what: string]: nothing -> an
 # Studio flattens its games' compose projects in a jail before the engine runs; this holds for any other caller.
 export def check-compose-sources [app_dir: string] {
 	let root = ($app_dir | path expand)
-	let files = (ls -a $root | where type == file | get name | where {|f| ($f | path basename) =~ '^(docker-)?compose([.-][A-Za-z0-9_.-]*)?\.ya?ml$' })
-	mut problems = []
+	let named = (ls -a $root | where {|e| let n = ($e.name | path basename); $n == ".env" or $n =~ '^(docker-)?compose([.-][A-Za-z0-9_.-]*)?\.ya?ml$' })
+	# compose follows a link (and reads a folder's files as it likes): only a regular file is read here, so anything else with the name is refused
+	mut problems = ($named | where type != file | each {|e| $"($e.name | path basename) is a ($e.type), not a regular file: compose would follow it to what this check does not read" })
+	let files = ($named | where type == file | get name | where {|f| ($f | path basename) != ".env" })
 	let env_file = ($root | path join .env)
 	if ($env_file | path exists) {
 		let names = (open --raw $env_file | lines | where {|l| ($l | str trim) =~ '^(export\s+)?COMPOSE_' })
@@ -124,9 +127,9 @@ export def check-compose-sources [app_dir: string] {
 				}
 			}
 			let extends = ($s.v | get -o extends)
-			if $extends != null and ($extends | describe | str starts-with "record") {
-				let bad = (compose-path-problem $root ($extends | get -o file) $"($at).extends.file")
-				if $bad != null { $problems = ($problems | append $bad) }
+			# extends within the same file is allowed; one that names a file pulls in a file this check does not read, as include does
+			if $extends != null and ($extends | describe | str starts-with "record") and (($extends | get -o file) != null) {
+				$problems = ($problems | append $"($at).extends.file names another file, which this check does not read: extends within the same file is allowed")
 			}
 			let build = ($s.v | get -o build)
 			if $build != null {
@@ -321,6 +324,9 @@ export def check-push-rights [node: record, push_kubeconfig: string] {
 			{verb: "get leases.coordination.k8s.io", args: [get leases.coordination.k8s.io -n $registry], where: $registry}
 			{verb: "update leases.coordination.k8s.io", args: [update leases.coordination.k8s.io -n $registry], where: $registry}
 			{verb: "delete leases.coordination.k8s.io", args: [delete leases.coordination.k8s.io -n $registry], where: $registry}
+			# registry.nu patches the lease it renews and lists them by label
+			{verb: "patch leases.coordination.k8s.io", args: [patch leases.coordination.k8s.io -n $registry], where: $registry}
+			{verb: "list leases.coordination.k8s.io", args: [list leases.coordination.k8s.io -n $registry], where: $registry}
 			# the door check lists the gateway's Services by label, and reads each
 			{verb: "get services", args: [get services -n envoy-gateway-system], where: "envoy-gateway-system"}
 			{verb: "list services", args: [list services -n envoy-gateway-system], where: "envoy-gateway-system"}
