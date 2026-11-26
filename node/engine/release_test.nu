@@ -1,6 +1,6 @@
 #!/usr/bin/env nu
 # Run with: nu node/engine/release_test.nu   (needs `cue` and the CUE registry, and `PRONTO_RUNTIME` or
-# mise's github:bonisoft3/pronto@1.16.0: the seven helpers imported from upstream run for real)
+# mise's github:bonisoft3/pronto@1.17.0: the seven helpers imported from upstream run for real)
 #
 # The release flow (release.nu) over fakes of kubectl, sops, ssh, nc, curl, docker (with buildx) and crane on
 # the PATH: kubectl keeps a cluster's state in files and logs every call and the objects it was given, docker
@@ -19,11 +19,11 @@ use push.nu
 
 # The newest validated module (runtime.nu) the fixture renders with, and the runtime an app that pins it runs
 # (its distribution config's tool version; contract_test.nu holds that).
-const pin = "1.16.1"
-const runtime_pin = "1.16.0"
+const pin = "1.17.1"
+const runtime_pin = "1.17.0"
 const release_nu = (path self release.nu)
 
-# The runtime upstream pronto 1.16.0 is installed as.
+# The runtime upstream pronto 1.17.0 is installed as.
 def runtime-dir []: nothing -> string {
 	if ($env.PRONTO_RUNTIME? | is-not-empty) { $env.PRONTO_RUNTIME } else { ^mise where $"github:bonisoft3/pronto@($runtime_pin)" | str trim }
 }
