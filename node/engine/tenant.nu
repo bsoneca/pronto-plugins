@@ -79,8 +79,8 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 			let image = ($o.spec?.imageName? | default "")
 			if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) runs ($image), not an image under ($prefix)") }
 			# a Service the operator makes for the database must stay inside the cluster: a LoadBalancer or NodePort one would publish it
-			let outward = ($o.spec?.managed?.services?.additional? | default [] | where {|a| ($a.serviceTemplate?.spec?.type? | default "ClusterIP") != "ClusterIP" })
-			if ($outward | is-not-empty) { $why = ($why | append $"($id) has a managed Service that is not a ClusterIP") }
+			let outward = ($o.spec?.managed?.services?.additional? | default [] | where {|a| ($a.serviceTemplate?.spec?.type? | default "ClusterIP") != "ClusterIP" or ($a.serviceTemplate?.spec?.externalIPs? | default [] | is-not-empty) })
+			if ($outward | is-not-empty) { $why = ($why | append $"($id) has a managed Service that is not a ClusterIP, or names externalIPs") }
 		}
 		let spec = (if ($o.kind? | default "") in [Deployment Job] { $o.spec?.template?.spec? } else { null })
 		if $spec != null {
@@ -88,6 +88,9 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 			for account in [($spec.serviceAccountName? | default "") ($spec.serviceAccount? | default "")] {
 				if $account in $forbidden_accounts { $why = ($why | append $"($id) runs as the service account ($account)") }
 			}
+			# no runtime class (a sandbox or a host runtime of the node's) and no priority class (a tenant must not pre-empt the node's own pods)
+			if ($spec.runtimeClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets runtimeClassName ($spec.runtimeClassName)") }
+			if ($spec.priorityClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets priorityClassName ($spec.priorityClassName)") }
 			if ($spec.hostUsers? | default true) == false { $why = ($why | append $"($id) sets hostUsers: false") }
 			for key in [hostNetwork hostPID hostIPC] { if ($spec | get -o $key | default false) == true { $why = ($why | append $"($id) sets ($key)") } }
 			for v in ($spec.volumes? | default []) {
@@ -98,6 +101,9 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 			if ($spec.securityContext?.seccompProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) runs with an Unconfined seccomp profile") }
 			if ($spec.securityContext?.appArmorProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) runs with an Unconfined AppArmor profile") }
 			let notes = ($o.spec?.template?.metadata?.annotations? | default {})
+			# Dapr's sidecar is the platform's: its image, resources and ports are not a tenant's to choose
+			let sidecar = ($notes | columns | where {|k| $k | str starts-with "dapr.io/sidecar-" })
+			if ($sidecar | is-not-empty) { $why = ($why | append $"($id) sets the Dapr sidecar annotation\(s\) ($sidecar | str join ', ')") }
 			if ($notes | transpose k v | any {|a| ($a.k | str starts-with "container.apparmor.security.beta.kubernetes.io/") and (($a.v | into string | str lowercase) == "unconfined") }) { $why = ($why | append $"($id) runs with an unconfined AppArmor profile") }
 			let containers = (($spec.containers? | default []) | append ($spec.initContainers? | default []) | append ($spec.ephemeralContainers? | default []))
 			for c in $containers {
