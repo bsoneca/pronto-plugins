@@ -1711,6 +1711,16 @@ const killedFor = (pid: number) => {
 // gone), a library or symbol that cannot be opened, fail the run, with their cause. Another uid's EPERM is skipped.
 // The ledger, <pool>/runs/<rootpid>-<rootstart>, says which runs are live: a claim inside one does not own.
 const ESRCH = 3, EPERM = 1;
+// A read that timed out or was interrupted says nothing about the pid: read again, a few times, before it counts.
+// macOS: EINTR 4, EAGAIN 35, ETIMEDOUT 60 (2026-11-26: "pid 1644 could not be read (errno 60)" failed a gate after lint
+// passed); Linux: EINTR 4, EAGAIN 11, ETIMEDOUT 110. A read that fails every time still fails, closed. `pause` is given
+// so a case runs without waiting.
+export const TRANSIENT_ERRNO: Readonly<Record<"darwin" | "linux", readonly number[]>> = { darwin: [4, 35, 60], linux: [4, 11, 110] };
+export function readAgain(read: () => PidRow, transient: readonly number[], tries = 3, pause: (ms: number) => void = (ms) => { const end = performance.now() + ms; while (performance.now() < end) { /* wait */ } }): PidRow {
+  let r = read();
+  for (let i = 1; i < tries && r.errno !== undefined && transient.includes(r.errno); i++) { pause(10 * i); r = read(); }
+  return r;
+}
 export type PidRow = { pid: number; errno?: number; uid?: number; start?: number; ppid?: number; responsible?: number; zombie?: boolean;
   // Linux, for a child of the supervisor only: the PRONTO_RUN its environ carries, or that it could not be read.
   marker?: string; unreadable?: boolean };
@@ -2077,7 +2087,8 @@ export function ownSys(): RealSys {
       return { pid, errno: e instanceof Deno.errors.NotFound ? ESRCH : e instanceof Deno.errors.PermissionDenied ? EPERM : -1 };
     }
   };
-  const row = (pid: number) => linux ? linuxRow(pid) : withResponsible(darwinRow(pid));
+  const readRow = (pid: number) => linux ? linuxRow(pid) : withResponsible(darwinRow(pid));
+  const row = (pid: number) => readAgain(() => readRow(pid), TRANSIENT_ERRNO[os]);
   const table = (): PidTable => {
     if (linux) {
       let pids: number[];
@@ -2090,7 +2101,7 @@ export function ownSys(): RealSys {
       const buf = new Int32Array(cap + 256 + (cap >> 1));
       const got = sym.proc_listallpids(ptr(buf), buf.byteLength) as number;
       if (got <= 0) return { os: "darwin", uid, listError: `proc_listallpids returned ${got} (errno ${errno()})`, rows: [] };
-      if (got < buf.length) return { os: "darwin", uid, rows: [...buf.subarray(0, got)].filter((p) => p > 0).map((p) => withResponsible(darwinRow(p))) };
+      if (got < buf.length) return { os: "darwin", uid, rows: [...buf.subarray(0, got)].filter((p) => p > 0).map((p) => readAgain(() => withResponsible(darwinRow(p)), TRANSIENT_ERRNO.darwin)) };
       cap = buf.length * 2;
     }
     return { os: "darwin", uid, listError: "the process list kept growing while it was read", rows: [] };
