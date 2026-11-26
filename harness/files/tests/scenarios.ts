@@ -333,10 +333,11 @@ export class Run {
   }
   // The session a page holds, and the account (or guest) it is.
   async session(a: Actor) {
-    const token = await a.page.evaluate(() => { try { return JSON.parse(sessionStorage.getItem("pronto-token") || "null")?.token ?? null; } catch { return null; } });
+    // omnishell 0.36 keeps the token in localStorage; the fork keeps it in sessionStorage.
+    const token = await a.page.evaluate(() => { for (const s of [localStorage, sessionStorage]) { try { const t = JSON.parse(s.getItem("pronto-token") || "null")?.token; if (t) return t; } catch { /* next */ } } return null; });
     if (!token) throw new Error(`${a.key} has no session yet`);
     const claims = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-    return { token: token as string, id: claims.sub as string, guest: claims.guest === true };
+    return { token: token as string, id: claims.sub as string, guest: claims.guest === true || claims.acr === "0" };
   }
   async fill(text: string): Promise<string> {
     let out = "";
