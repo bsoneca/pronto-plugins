@@ -312,12 +312,12 @@ def wait-forward [pid: int, port: int, log: string, --seconds: int = 30] {
 }
 
 # The probes, each through `http://127.0.0.1:<port>` with the public Host; the first that fails ends the check.
-def run-door-probes [node: record, port: int]: nothing -> int {
+def run-door-probes [node: record, port: int, --address: string = "127.0.0.1"]: nothing -> int {
 	let file = (mktemp -t door.XXXXXX | str trim)
 	mut asked = 0
 	try {
 		for probe in (door-probes) {
-			let url = $"http://127.0.0.1:($port)($probe.path)"
+			let url = $"http://($address):($port)($probe.path)"
 			let args = (if $probe.as_is { ["--path-as-is"] } else { [] })
 			let r = (^curl -s -m 20 ...$args -H $"Host: ($node.host)" -o $file -w "%{http_code}" $url | complete)
 			if $r.exit_code != 0 { error make {msg: $"the door check could not ask ($probe.path) of ($node.host): curl exit ($r.exit_code), so the door cannot be certified"} }
@@ -351,7 +351,7 @@ def run-door-probes [node: record, port: int]: nothing -> int {
 	$asked
 }
 
-export def check-door [node: record, gateway: string] {
+export def check-door [node: record, gateway: string, --direct] {
 	if ($node.preview | is-not-empty) and (($node.hosts | get -o $node.preview | default "") | is-empty) { return }
 	# The Gateway's own data-plane Service where Envoy Gateway makes one per Gateway; on the node the Gateways of every app are
 	# merged into the one Service of the GatewayClass (`pronto-gateway`, owning-gatewayclass=eg), which then serves this host.
@@ -363,6 +363,14 @@ export def check-door [node: record, gateway: string] {
 	if ($services | is-empty) { error make {msg: $"the door check found no Envoy Gateway Service for Gateway ($gateway) in ($node.namespace) \(envoy-gateway-system, ($selector)\), so the door cannot be certified"} }
 	let service = ($services | first)
 	let remote = ($service.spec.ports | first | get port)
+	# In the builder pod (--direct) the Service's ClusterIP is dialled as it is: no port-forward, so no right to forward into the gateway's namespace.
+	if $direct {
+		let ip = ($service.spec.clusterIP? | default "")
+		if not ($ip =~ '^[0-9.]+$') { error make {msg: $"the door check found no ClusterIP on the Envoy Gateway Service ($service.metadata.name): it cannot be dialled from the pod"} }
+		let asked = (run-door-probes $node $remote --address $ip)
+		print $"node: (stamp) the door's Dapr API is closed: ($asked) probes under /crud, /img and /blobs answer no sidecar and no service"
+		return
+	}
 	let local = (tunnel free-ports 1 | first)
 	let log = (mktemp -t door-forward.XXXXXX | str trim)
 	let started = (^sh -c $"kubectl port-forward -n envoy-gateway-system 'service/($service.metadata.name)' '($local):($remote)' >'($log)' 2>&1 & echo $!" | complete)
@@ -652,6 +660,8 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	# 3. data and render
 	let data = (render release-data $app_info.dir $compose $facts $pushed (if $check { '' } else { $node.origin }))
 	let objects = (render objects $app_info.cue_path $data $node.preview --tenant $tenant_ns --host $tenant_host)
+	# The game's own release.cue rendered these: what its publisher may write is checked again here, whatever schema it loaded.
+	if $tenant { tenant check-objects $objects $node (tenant publisher-kinds) }
 	let parts = (namespace-split $objects)
 	let stray = ($objects | where kind == Job | get metadata.name | where {|n| $n not-in ($node.jobOrder | each {|j| $"($app)-($j)" }) })
 	if ($stray | is-not-empty) { error make {msg: $"Jobs ($stray | str join ', ') are not in jobOrder"} }
@@ -735,7 +745,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		if ($gateways | is-empty) { error make {msg: "the render has no Gateway, so the door cannot be checked"} }
 		# The door check reaches the Envoy Gateway data plane: a tenant's publisher may not, the push identity may.
 		if $tenant {
-			tenant with-push $push_kubeconfig { check-door $node ($gateways | first | get metadata.name) }
+			tenant with-push $push_kubeconfig { check-door $node ($gateways | first | get metadata.name) --direct=($push_kubeconfig | is-empty) }
 		} else {
 			check-door $node ($gateways | first | get metadata.name)
 		}
@@ -788,11 +798,14 @@ def tenant-preflight [app_info: record, node: record, push_kubeconfig: string, -
 # sandboxed buildkitd and pushed as the push identity (push.nu tenant-images); the registry's lease, held while it pushes, is the push
 # identity's too, and so is the door check. Nothing is pruned or collected, and nothing is written outside the namespace.
 def release-tenant [app_info: record, tenant: string, host: string, push_kubeconfig: string, --check, --build] {
+	tenant check-tenant-name $tenant
+	tenant check-engine-copy $app_info.dir
 	let node = (try { render node-config $app_info.cue_path "" --tenant $tenant --host $host } catch {|e|
 		if ($e.msg =~ 'no tag for') { error make {msg: "the app's release.cue declares no @tag(tenant) and @tag(tenantHost): a tenant's release.cue binds them into Node.tenant"} }
 		error make {msg: $e.msg}
 	})
 	tenant check-binding $node $tenant $host
+	tenant check-pins $node
 	let meta = (render app-meta $app_info.cue_path "" --tenant $tenant --host $host)
 	let compose = (render compose-config $app_info.dir)
 	refuse $app_info $node $meta $compose $meta.render.enabled

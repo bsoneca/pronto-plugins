@@ -7,6 +7,95 @@
 use tunnel.nu
 use build.nu [stamp]
 
+# The engine's own folder: its schema is the one a tenant's release trusts, never the app's copy of it.
+const engine_dir = path self .
+
+# A tenant's namespace, as Studio's provisioner names it.
+export def check-tenant-name [tenant: string] {
+	if not ($tenant =~ '^studio-[a-z0-9-]{1,55}$') {
+		error make {msg: $"a tenant's namespace is studio-<owner>-<app>-<hash>: ($tenant) is not"}
+	}
+}
+
+# The kinds a tenant's publisher may write, read from the engine's own schema (`#PublisherKinds`, the one list the CUE also uses).
+export def publisher-kinds []: nothing -> list<string> {
+	let r = (do { cd ($engine_dir | path join schema); ^cue export --out json -e '#PublisherKinds' node.cue } | complete)
+	if $r.exit_code != 0 { error make {msg: $"the engine's schema does not export #PublisherKinds: ($r.stderr | str trim)"} }
+	$r.stdout | from json
+}
+
+# The app's copy of the schema (`node/schema/node.cue`, which its release.cue imports) must be the engine's own, byte for byte: a copy the
+# game's author edited would load refusals of its own choosing.
+export def check-engine-copy [app_dir: string] {
+	let own = ($engine_dir | path join schema node.cue)
+	let theirs = ($app_dir | path join node schema node.cue)
+	if not ($theirs | path exists) { error make {msg: $"($theirs) is missing: a tenant's release imports the engine's schema from the app's node/schema"} }
+	if (open --raw $own) != (open --raw $theirs) {
+		error make {msg: $"the app's node/schema/node.cue is not the engine's own copy \(($own)\): a tenant's release trusts no schema its author could have edited"}
+	}
+}
+
+# What the engine's own constants say a tenant's release is: the tenants' sandboxed buildkitd and the node's registry as the push reaches it.
+export def check-pins [node: record] {
+	let buildkit = ($node.tenant?.buildkit? | default "")
+	if not ($buildkit =~ '^tcp://buildkitd\.pronto-buildkit-tenants\.svc(\.cluster\.local)?:1234$') {
+		error make {msg: $"a tenant's build is the tenants' buildkitd \(tcp://buildkitd.pronto-buildkit-tenants.svc:1234\), not ($buildkit)"}
+	}
+	let r = $node.build.registry
+	if $r.host != "127.0.0.1:5000" or $r.port != 5000 or $r.namespace != "pronto-registry" {
+		error make {msg: $"a tenant's registry is the node's \(127.0.0.1:5000, pronto-registry), not ($r.host) \(($r.namespace)\)"}
+	}
+}
+
+# The service accounts a tenant's pods never run as: the publisher's and the builder's own.
+const forbidden_accounts = [publisher studio-builder studio-rc-builder studio-provisioner]
+
+# What the engine's CUE refuses, checked again in nushell over the objects the game's own release.cue rendered (its `nodeManifests` is
+# the author's, so the schema's `violations` are only as good as the schema it loaded): every object is a kind the publisher writes, in
+# the tenant's namespace; a Service is a ClusterIP with no externalIPs; a pod's service account is not the publisher's, its images are
+# the tenant's own path of the registry, and it asks for no user namespace, host namespace, privilege, unmasked /proc or unconfined
+# seccomp or AppArmor. Said before anything is applied or asked of the server.
+export def check-objects [objects: list, node: record, kinds: list<string>] {
+	let ns = $node.namespace
+	let prefix = $"127.0.0.1:5000/($ns)/"
+	let problems = ($objects | each {|o|
+		let id = $"($o.kind? | default '?')/($o.metadata?.name? | default '?')"
+		mut why = []
+		if $"($o.apiVersion? | default '')/($o.kind? | default '')" not-in $kinds { $why = ($why | append $"($id) is not a kind a tenant's publisher writes") }
+		if ($o.metadata?.namespace? | default "") != $ns { $why = ($why | append $"($id) is in namespace ($o.metadata?.namespace? | default 'none'), not ($ns)") }
+		if ($o.kind? | default "") == "Service" {
+			if ($o.spec?.type? | default "ClusterIP") != "ClusterIP" { $why = ($why | append $"($id) is a ($o.spec.type) Service: a tenant's Service is a ClusterIP") }
+			if ($o.spec?.externalIPs? | default [] | is-not-empty) { $why = ($why | append $"($id) names externalIPs") }
+		}
+		if ($o.kind? | default "") == "Cluster" {
+			let image = ($o.spec?.imageName? | default "")
+			if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) runs ($image), not an image under ($prefix)") }
+		}
+		let spec = (if ($o.kind? | default "") in [Deployment Job] { $o.spec?.template?.spec? } else { null })
+		if $spec != null {
+			let account = ($spec.serviceAccountName? | default "")
+			if $account in $forbidden_accounts { $why = ($why | append $"($id) runs as the service account ($account)") }
+			if ($spec.hostUsers? | default true) == false { $why = ($why | append $"($id) sets hostUsers: false") }
+			for key in [hostNetwork hostPID hostIPC] { if ($spec | get -o $key | default false) == true { $why = ($why | append $"($id) sets ($key)") } }
+			if ($spec.volumes? | default [] | any {|v| ($v | get -o hostPath | default null) != null }) { $why = ($why | append $"($id) mounts a hostPath") }
+			if ($spec.securityContext?.seccompProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) runs with an Unconfined seccomp profile") }
+			if ($spec.securityContext?.appArmorProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) runs with an Unconfined AppArmor profile") }
+			let notes = ($o.spec?.template?.metadata?.annotations? | default {})
+			if ($notes | transpose k v | any {|a| ($a.k | str starts-with "container.apparmor.security.beta.kubernetes.io/") and (($a.v | into string | str lowercase) == "unconfined") }) { $why = ($why | append $"($id) runs with an unconfined AppArmor profile") }
+			let containers = (($spec.containers? | default []) | append ($spec.initContainers? | default []) | append ($spec.ephemeralContainers? | default []))
+			for c in $containers {
+				let image = ($c.image? | default "")
+				if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) container ($c.name? | default '?') runs ($image), not an image under ($prefix)") }
+				if ($c.securityContext?.procMount? | default "Default") != "Default" { $why = ($why | append $"($id) container ($c.name? | default '?') sets procMount ($c.securityContext.procMount)") }
+				if ($c.securityContext?.privileged? | default false) == true { $why = ($why | append $"($id) container ($c.name? | default '?') is privileged") }
+				if ($c.securityContext?.seccompProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) container ($c.name? | default '?') runs with an Unconfined seccomp profile") }
+				if ($c.securityContext?.appArmorProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) container ($c.name? | default '?') runs with an Unconfined AppArmor profile") }
+			}
+		}
+		$why
+	} | flatten)
+	if ($problems | is-not-empty) { error make {msg: $"a tenant's render is refused: ($problems | str join '; ')"} }
+}
 # `body` run as the push identity: kubectl with the kubeconfig file given, or, with none, with the pod's own account (the pod's
 # service account, so KUBECONFIG is hidden and the environment must say this is a pod).
 export def with-push [push_kubeconfig: string, body: closure]: nothing -> any {
@@ -67,12 +156,14 @@ export def check-namespace [node: record] {
 export def check-push-rights [node: record, push_kubeconfig: string] {
 	with-push $push_kubeconfig {
 		let registry = $node.build.registry.namespace
-		for ask in [
+		# Off the cluster (a kubeconfig is given) the door check forwards to the gateway's pod; in the builder pod it dials the Service's
+		# ClusterIP, so the pod's account needs no port-forward in the gateway's namespace.
+		let forward = ($push_kubeconfig | is-not-empty)
+		for ask in ([
 			{verb: "create pods/portforward", args: [create pods --subresource=portforward -n $registry], where: $registry}
 			{verb: "create leases.coordination.k8s.io", args: [create leases.coordination.k8s.io -n $registry], where: $registry}
-			{verb: "create pods/portforward", args: [create pods --subresource=portforward -n envoy-gateway-system], where: "envoy-gateway-system"}
 			{verb: "get services", args: [get services -n envoy-gateway-system], where: "envoy-gateway-system"}
-		] {
+		] | append (if $forward { [{verb: "create pods/portforward", args: [create pods --subresource=portforward -n envoy-gateway-system], where: "envoy-gateway-system"}] } else { [] })) {
 			if not (can-i ...$ask.args) { error make {msg: $"the push identity may not ($ask.verb) in ($ask.where): it needs the Role studio-builder-push \(services/buildkit-tenants\)"} }
 		}
 	}

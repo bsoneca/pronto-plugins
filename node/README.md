@@ -254,15 +254,26 @@ node's registry pod, the registry's lease and the Envoy Gateway data plane.
   no NetworkPolicy of upstream's (the provisioner's own isolate it), no quota, LimitRange or egress policy (`tenant.quota` and friends are
   ignored), no backups, no CronJob, no database base image. A service with `jail`, `google`, `egress` or `clock`, a blob plane, a metrics
   export, a Gateway that is not 80/HTTP, an image outside the tenant's path and an origin that is not the host are refused (schema `violations`).
+- **What the game's author cannot bypass.** The game's own `release.cue` defines `nodeManifests`, and `node/schema/node.cue` is a file of its
+  repository, so the CUE refusals are only as good as what it loaded. In nushell the release therefore (before reading the game's CUE) requires the namespace
+  to be `^studio-[a-z0-9-]{1,55}$` and the app's `node/schema/node.cue` to be the engine's own copy byte for byte (`#PublisherKinds` is read from
+  the engine's copy, the one list), and (after the render, before anything is applied or asked of the server) checks every object again: a
+  publisher's kind, in the tenant's namespace; a Service that is a ClusterIP with no `externalIPs`; in a pod, no `publisher`, `studio-builder`
+  or `studio-provisioner` service account, no `hostUsers: false`, host namespace, `hostPath` or privilege, no `procMount` but `Default`, no
+  Unconfined seccomp or AppArmor profile, and every container's and initContainer's image under `127.0.0.1:5000/<namespace>/`. The
+  tenants' buildkitd and the registry are pinned again there. `build.include` names only files under the app's real folder (no absolute
+  path, `..` or link out of it), and a tenant stages regular files only.
 - **What is skipped.** The operators' versions, CRDs and nodes, the namespace's label, the prune and the collection, the registry restart, the
   tunnel and every `exec`. `--preview`, `--delete`, `--schema-from`, `--adopt`, `--serving`, `--verified` and `--prune` are refused with `--tenant`,
   as are a SOPS file (the cluster's key is the operator's), `hooks.afterJobs` and `TRUSTED_JWKS`.
 - **The namespace.** A publisher cannot read a namespace, so it is asked what it may do instead: it must be able to create Deployments in it and
   must not be able to create namespaces (an operator's kubeconfig is refused); the ConfigMap `pronto-release` must be absent or say this app
   (`data.app`, which only a tenant's release writes): one app per tenant namespace.
+- **The door check** reaches the Envoy Gateway data plane as the push identity. In the builder pod (no `--push-kubeconfig`) it dials the
+  Service's ClusterIP, so no right to forward into the gateway's namespace is needed; with a kubeconfig (off the cluster) it forwards to it.
 - **Rights to add on the node, before Studio publishes through it:** the push identity (`studio-builder`, `studio-rc-builder`) needs `leases`
-  (coordination.k8s.io: get, list, create, update, patch, delete) in `pronto-registry`, and, in `envoy-gateway-system`, get/list on `services`
-  and `pods` and create on `pods/portforward` (`services/buildkit-tenants/metal.nu` in bsoneca/pronto). The preflight names the Role it misses.
+  (coordination.k8s.io: get, list, create, update, patch, delete) and pods/portforward in `pronto-registry`, and get/list on `services` in
+  `envoy-gateway-system` (`services/buildkit-tenants/metal.nu` in bsoneca/pronto; with a kubeconfig also pods/portforward there). The preflight names the Role it misses.
 
 ### Tests
 

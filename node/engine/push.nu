@@ -106,7 +106,17 @@ export def looks-secret [path: string]: nothing -> bool {
 # The app as git sees it, copied under `dest`: every tracked and untracked-but-not-ignored file, none of
 # `.certs/`, none that is listed but gone, no untracked file that looks like a secret (said, not silent), and
 # the ignored files the app's `build.include` names (generated files its Dockerfiles COPY), which must exist.
-export def stage-context [app_dir: string, work: string, dest: string, include: list<string>] {
+# Whether `file` (relative to the app) really is under the app's folder: no absolute path, no `..`, and no symlink, in any component, that
+# leads out (its real path is under the real root).
+export def under-root [root: string, file: string]: nothing -> bool {
+	if ($file | str starts-with "/") or ($file | path split | any {|c| $c == ".." }) { return false }
+	($root | path join $file | path expand) | str starts-with $"($root)/"
+}
+
+export def stage-context [app_dir: string, work: string, dest: string, include: list<string>, --tenant] {
+	let root = ($app_dir | path expand)
+	let outside = ($include | where {|f| not (under-root $root $f) })
+	if ($outside | is-not-empty) { error make {msg: $"build.include names ($outside | str join ', '), which is not under the app's own folder \(an absolute path, a `..`, or a link that leads out\): it is never staged"} }
 	let missing = ($include | where {|f| ($app_dir | path join $f | path type) != "file" })
 	if ($missing | is-not-empty) { error make {msg: $"build.include names ($missing | str join ', '), which is not a file in ($app_dir): the app's generate writes it"} }
 	let secret = ($include | where {|f| looks-secret $f })
@@ -118,6 +128,8 @@ export def stage-context [app_dir: string, work: string, dest: string, include: 
 	let files = (do { cd $app_dir; ^git ls-files -z -co --exclude-standard } | split row (char nul) | where {|f| $f != "" }
 		| where {|f| not ($f starts-with ".certs/") and ($f not-in $denied) and ($app_dir | path join $f | path exists) }
 		| append $include | uniq)
+	# A tenant's context is regular files that really are in the app: a link (a tracked one too) never carries what it points at into the build.
+	let files = if $tenant { $files | where {|f| ($root | path join $f | path type) == "file" and (under-root $root $f) } } else { $files }
 	$"($files | str join (char nul))(char nul)" | save -f ($work | path join files)
 	mkdir $dest
 	# macOS's bsdtar reads -T's list after every -C: one -C only.
@@ -209,7 +221,7 @@ export def tenant-images [app_dir: string, node: record, services: list<string>,
 	let work = (mktemp -d -t node-build.XXXXXX | str trim | path expand)
 	try {
 		let staged = ($work | path join app)
-		let count = (stage-context $dir $work $staged $node.build.include)
+		let count = (stage-context $dir $work $staged $node.build.include --tenant)
 		verify-door-guard $staged
 		print $"node: (stamp) build context: ($count) files"
 		let compose = (render compose-run $staged --profile "*" config)

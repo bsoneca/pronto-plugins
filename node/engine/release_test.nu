@@ -328,6 +328,11 @@ def main [] {
 	test_a_tenant_check_writes_nothing
 	test_a_lost_tenant_image_fails_without_a_restart
 	test_the_tenant_door_check_runs_as_the_pusher
+	test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not
+	test_a_tenants_edited_schema_copy_is_refused
+	test_a_tenants_build_include_stays_under_the_app
+	test_a_tenants_namespace_is_a_studio_one
+	test_the_tenant_door_check_in_the_pod_dials_the_service_and_forwards_to_nothing
 	print "\nAll node release tests passed."
 }
 
@@ -2386,4 +2391,123 @@ def test_the_tenant_door_check_runs_as_the_pusher [] {
 	assert (has $l.stderr "the door reaches the Dapr API") $l.stderr
 	assert (has $l.stderr "rolled back") $l.stderr
 	rm -rf $leak.dir
+}
+
+# --- what a tenant's own release.cue cannot get past (the nushell checks over what it rendered) ---
+
+# The game's release.cue with its own `nodeManifests`: the author's list, not the engine's render.
+def own-manifests [w: record, objects: string] {
+	let cue = ($w.app | path join release.cue)
+	let text = (open --raw $cue)
+	let at = ($text | str index-of "nodeManifests:")
+	$"(($text | str substring 0..<$at))nodeManifests: ($objects)\n" | save -f $cue
+}
+
+def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] {
+	print "test a tenant's own nodeManifests with a foreign image, a NodePort Service, the publisher's account, a user namespace, an unmasked /proc, an unconfined profile, another namespace or a kind its Role lacks is refused after the render and before anything is applied..."
+	let ns = $tenant_ns
+	let img = $"127.0.0.1:5000/($ns)/game-crud:release@sha256:(('a' | fill -c 'a' -w 64))"
+	let deploy = {|pod: string, extra: string| $"{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: {($extra) containers: [{name: \"crud\", image: ($pod)}]}}" }
+	let good = $"\"($img)\""
+	let cases = [
+		{why: "an image of another registry", says: "not an image under 127.0.0.1:5000/($ns)/", objects: $"[(do $deploy '"docker.io/library/nginx:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' '')]"}
+		{why: "an image of another tenant's path", says: "not an image under", objects: $"[(do $deploy '"127.0.0.1:5000/studio-other-game-0/game-crud:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' '')]"}
+		{why: "an init container's foreign image", says: "container wait runs", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: {initContainers: [{name: \"wait\", image: \"docker.io/x:1\"}], containers: [{name: \"crud\", image: ($good)}]}}]"}
+		{why: "a NodePort Service", says: "is a NodePort Service", objects: $"[{apiVersion: \"v1\", kind: \"Service\", metadata: {name: \"crud\", namespace: \"($ns)\"}, spec: {type: \"NodePort\", ports: [{port: 80}]}}]"}
+		{why: "a Service with externalIPs", says: "names externalIPs", objects: $"[{apiVersion: \"v1\", kind: \"Service\", metadata: {name: \"crud\", namespace: \"($ns)\"}, spec: {externalIPs: [\"1.2.3.4\"], ports: [{port: 80}]}}]"}
+		{why: "the publisher's service account", says: "runs as the service account publisher", objects: $"[(do $deploy $good 'serviceAccountName: "publisher",')]"}
+		{why: "a user namespace", says: "sets hostUsers: false", objects: $"[(do $deploy $good 'hostUsers: false,')]"}
+		{why: "an unmasked /proc", says: "sets procMount Unmasked", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), securityContext: procMount: \"Unmasked\"}]}]"}
+		{why: "an unconfined seccomp profile", says: "Unconfined seccomp", objects: $"[(do $deploy $good 'securityContext: seccompProfile: type: "Unconfined",')]"}
+		{why: "an unconfined AppArmor profile", says: "Unconfined AppArmor", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), securityContext: appArmorProfile: type: \"Unconfined\"}]}]"}
+		{why: "another namespace", says: "is in namespace kube-system", objects: $"[{apiVersion: \"v1\", kind: \"ConfigMap\", metadata: {name: \"x\", namespace: \"kube-system\"}}]"}
+		{why: "a kind the publisher's Role lacks", says: "is not a kind a tenant's publisher writes", objects: $"[{apiVersion: \"rbac.authorization.k8s.io/v1\", kind: \"RoleBinding\", metadata: {name: \"x\", namespace: \"($ns)\"}}]"}
+	]
+	for c in $cases {
+		let w = (tenant-world)
+		own-manifests $w $c.objects
+		let r = (tenant-release $w)
+		assert ($r.exit_code != 0) $"($c.why): was not refused: ($r.stdout)"
+		assert (has $r.stderr ($c.says | str replace '($ns)' $ns)) $"($c.why): ($r.stderr)"
+		# before anything was applied or asked of the server
+		assert equal (calls $w | where {|x| ($x | str starts-with "apply") or (($x | str starts-with "create -f") and not ($x | str contains "Lease/")) }) [] $"($c.why): the server was asked"
+		assert equal (writes $w) [] $c.why
+		rm -rf $w.dir
+	}
+}
+
+def test_a_tenants_edited_schema_copy_is_refused [] {
+	print "test a tenant's release whose node/schema/node.cue is not the engine's own copy is refused before its release.cue is read..."
+	let w = (tenant-world)
+	let copy = ($w.app | path join node schema node.cue)
+	$"(open --raw $copy)\n// edited by the game's author\n" | save -f $copy
+	let r = (tenant-release $w)
+	assert ($r.exit_code != 0) "an edited schema was not refused"
+	assert (has $r.stderr "is not the engine's own copy") $r.stderr
+	assert equal (writes $w) []
+	rm -rf $w.dir
+}
+
+def test_a_tenants_build_include_stays_under_the_app [] {
+	print "test a build.include that is an absolute path, climbs out, or links out of the app is never staged, and a tenant stages regular files only..."
+	let w = (sandbox --fixture game)
+	let app = ($w.app | path expand)
+	let outside = ($w.dir | path join outside.json)
+	'{"secret": true}' | save -f $outside
+	^ln -sf $outside ($app | path join link.json)
+	mkdir ($app | path join gen)
+	"{}" | save -f ($app | path join gen index.json)
+	let ask = {|include: string, ...flags| in-world $w -c (script $w $"use ($engine_dir | path join push.nu); let work = \(mktemp -d | str trim\); push stage-context '($app)' $work \($work | path join dest\) ($include) ($flags | str join ' ')") }
+	# an absolute path
+	let abs = (do $ask '["/etc/hosts"]')
+	assert ($abs.exit_code != 0) "an absolute include was not refused"
+	assert (has $abs.stderr "which is not under the app's own folder") $abs.stderr
+	# a link to a file outside the app, and a file whose folder is such a link
+	^ln -sfn $w.dir ($app | path join gen2)
+	for inc in ['["link.json"]' '["gen2/outside.json"]'] {
+		let r = (do $ask $inc)
+		assert ($r.exit_code != 0) $"($inc) was not refused"
+		assert (has $r.stderr "which is not under the app's own folder") $r.stderr
+	}
+	# inside the app it stages; with --tenant a link inside the app is left out and a regular file stays
+	let ok = (do $ask '["gen/index.json"]' "--tenant")
+	assert equal $ok.exit_code 0 $"($ok.stdout)\n($ok.stderr)"
+	# via the full release: the schema refuses an absolute include in the author's release.cue before the build
+	let cue = ($app | path join release.cue)
+	$"((open --raw $cue))\nNode: build: include: [\"/etc/hosts\"]\n" | save -f $cue
+	"x" | save -f ($w.dir | path join publisher.kubeconfig)
+	"x" | save -f ($w.dir | path join push.kubeconfig)
+	let full = (with-env {PATH: ([($w.dir | path join bin)] | append $env.PATH), FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), KUBECONFIG: ($w.dir | path join publisher.kubeconfig)} {
+		do { cd $app; ^$nu.current-exe --no-config-file $release_nu --app $app --tenant $tenant_ns --host $tenant_host --push-kubeconfig ($w.dir | path join push.kubeconfig) } | complete
+	})
+	assert ($full.exit_code != 0) "an absolute include in a tenant's release.cue was not refused"
+	assert (not ($w.dir | path join docker.log | path exists) or not (open --raw ($w.dir | path join docker.log) | str contains "buildx bake")) "nothing was built"
+	rm -rf $w.dir
+}
+
+def test_a_tenants_namespace_is_a_studio_one [] {
+	print "test a tenant's namespace that is not studio-<...> is refused before anything else..."
+	let w = (tenant-world)
+	let path = ([($w.dir | path join bin)] | append $env.PATH)
+	let r = (with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), KUBECONFIG: $w.publisher} {
+		do { cd $w.app; ^$nu.current-exe --no-config-file $release_nu --app $w.app --tenant kube-system --host $tenant_host --push-kubeconfig $w.pusher } | complete
+	})
+	assert ($r.exit_code != 0) "a namespace outside studio- was not refused"
+	assert (has $r.stderr "a tenant's namespace is studio-<owner>-<app>-<hash>") $r.stderr
+	assert equal (calls $w) []
+	rm -rf $w.dir
+}
+
+def test_the_tenant_door_check_in_the_pod_dials_the_service_and_forwards_to_nothing [] {
+	print "test a tenant's release run in the builder pod (no --push-kubeconfig) checks the door at the Service's ClusterIP, with no port-forward into the gateway's namespace..."
+	let w = (tenant-world)
+	let path = ([($w.dir | path join bin)] | append $env.PATH)
+	let r = (with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), SOPS_AGE_KEY: "AGE-SECRET-KEY-FAKE", KUBECONFIG: $w.publisher, KUBERNETES_SERVICE_HOST: "10.43.0.1"} {
+		do { cd $w.app; ^$nu.current-exe --no-config-file $release_nu --app $w.app --tenant $tenant_ns --host $tenant_host } | complete
+	})
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let door = (open --raw ($w.dir | path join door_curl.log))
+	assert ($door | str contains "http://10.43.0.9:80/crud/v1.0/metadata") $door
+	assert (not (calls $w | any {|c| $c | str contains "port-forward -n envoy-gateway-system" })) "the door was forwarded to"
+	rm -rf $w.dir
 }
