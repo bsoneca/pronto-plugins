@@ -334,6 +334,9 @@ def main [] {
 	test_a_tenants_namespace_is_a_studio_one
 	test_a_tenants_issuers_are_the_engines_list
 	test_the_tenant_door_check_in_the_pod_dials_the_service_and_forwards_to_nothing
+	test_a_tenants_compose_files_name_nothing_outside_the_app
+	test_a_tenants_staged_build_paths_are_the_staged_copys
+	test_a_tenants_dry_run_with_no_build_needs_the_publisher_kubeconfig_alone
 	print "\nAll node release tests passed."
 }
 
@@ -2329,6 +2332,8 @@ def test_a_tenant_namespace_and_push_rights_are_asked_before_anything_is_built [
 		{setup: "operator-record", says: "holds an operator's release"}
 		{setup: "no-lease-right", says: "the push identity may not create leases.coordination.k8s.io in pronto-registry: it needs the Role studio-builder-push"}
 		{setup: "no-forward-right", says: "the push identity may not create pods/portforward in pronto-registry"}
+		{setup: "no-lease-patch", says: "the push identity may not patch leases.coordination.k8s.io in pronto-registry"}
+		{setup: "no-lease-list", says: "the push identity may not list leases.coordination.k8s.io in pronto-registry"}
 	] {
 		let w = (tenant-world)
 		match $row.setup {
@@ -2337,6 +2342,8 @@ def test_a_tenant_namespace_and_push_rights_are_asked_before_anything_is_built [
 			"other-app" => { mkdir ($w.state | path join cm); {metadata: {name: "pronto-release"}, data: {app: "other"}} | to json | save -f ($w.state | path join cm pronto-release) }
 			"operator-record" => { mkdir ($w.state | path join cm); {metadata: {name: "pronto-release"}, data: {sha: "abc"}} | to json | save -f ($w.state | path join cm pronto-release) }
 			"no-lease-right" => { "create leases.coordination.k8s.io" | save -f ($w.state | path join auth_deny) }
+			"no-lease-patch" => { "patch leases.coordination.k8s.io" | save -f ($w.state | path join auth_deny) }
+			"no-lease-list" => { "list leases.coordination.k8s.io" | save -f ($w.state | path join auth_deny) }
 			"no-forward-right" => { "create pods --subresource=portforward -n pronto-registry" | save -f ($w.state | path join auth_deny) }
 		}
 		let r = (tenant-release $w)
@@ -2422,6 +2429,9 @@ def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] 
 		{why: "an unconfined seccomp profile", says: "Unconfined seccomp", objects: $"[(do $deploy $good 'securityContext: seccompProfile: type: "Unconfined",')]"}
 		{why: "an unconfined AppArmor profile", says: "Unconfined AppArmor", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), securityContext: appArmorProfile: type: \"Unconfined\"}]}]"}
 		{why: "the deprecated serviceAccount field", says: "runs as the service account publisher", objects: $"[(do $deploy $good 'serviceAccount: "publisher",')]"}
+		{why: "an ExternalSecret whose target is a service account token", says: "targets a service account token Secret", objects: $"[{apiVersion: \"external-secrets.io/v1beta1\", kind: \"ExternalSecret\", metadata: {name: \"t\", namespace: \"($ns)\"}, spec: {target: {name: \"t\", template: {type: \"kubernetes.io/service-account-token\"}}}}]"}
+		{why: "an ExternalSecret whose target names a service account in an annotation", says: "names a service account in a kubernetes.io/service-account.* annotation", objects: $"[{apiVersion: \"external-secrets.io/v1beta1\", kind: \"ExternalSecret\", metadata: {name: \"t\", namespace: \"($ns)\"}, spec: {target: {name: \"t\", template: {metadata: annotations: {\"kubernetes.io/service-account.name\": \"publisher\"}}}}}]"}
+		{why: "a Secret that names a service account in an annotation, of any type", says: "names a service account in a kubernetes.io/service-account.* annotation", objects: $"[{apiVersion: \"v1\", kind: \"Secret\", metadata: {name: \"t\", namespace: \"($ns)\", annotations: {\"kubernetes.io/service-account.name\": \"publisher\"}}, type: \"Opaque\"}]"}
 		{why: "a service account token Secret", says: "is a service account token", objects: $"[{apiVersion: \"v1\", kind: \"Secret\", metadata: {name: \"t\", namespace: \"($ns)\"}, type: \"kubernetes.io/service-account-token\"}]"}
 		{why: "added capabilities", says: "adds capabilities", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), securityContext: capabilities: add: [\"NET_ADMIN\"]}]}]"}
 		{why: "a hostPort", says: "sets a hostPort", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), ports: [{containerPort: 80, hostPort: 80}]}]}]"}
@@ -2447,6 +2457,77 @@ def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] 
 		assert equal (writes $w) [] $c.why
 		rm -rf $w.dir
 	}
+}
+
+def test_a_tenants_compose_files_name_nothing_outside_the_app [] {
+	print "test a tenant's compose project that names a file outside the app (env_file, secrets, an include, ssh, a COMPOSE_ variable) is refused before docker compose resolves it..."
+	let cases = [
+		{why: "an env_file outside the app", yaml: "services:\n  crud:\n    image: x\n    env_file: ../../secrets.env\n", says: "services.crud.env_file names ../../secrets.env, which is outside the app's own folder"}
+		{why: "an absolute env_file in a list", yaml: "services:\n  crud:\n    image: x\n    env_file: [{path: /etc/passwd}]\n", says: "which is outside the app's own folder"}
+		{why: "an env_file with a variable", yaml: "services:\n  crud:\n    image: x\n    env_file: ${HOME}/x\n", says: "a path with a variable in it"}
+		{why: "a secret's file outside the app", yaml: "secrets:\n  s:\n    file: ../k\nservices: {}\n", says: "secrets.s.file names ../k"}
+		{why: "an include", yaml: "include: [other.yaml]\nservices: {}\n", says: "has include"}
+		{why: "ssh forwarding into a build", yaml: "services:\n  crud:\n    build: {context: ., ssh: [default]}\n", says: "forwards the release's ssh agent"}
+		{why: "an extends that names another file", yaml: "services:\n  crud:\n    image: x\n    extends: {file: base.yaml, service: b}\n", says: "services.crud.extends.file names another file"}
+		{why: "a build context that is a URL", yaml: "services:\n  crud:\n    build: https://example.com/x.git\n", says: "not a path inside the app's own folder"}
+	]
+	for c in $cases {
+		let w = (tenant-world)
+		$c.yaml | save -f ($w.app | path join compose.yaml)
+		let r = (tenant-release $w)
+		assert ($r.exit_code != 0) $"($c.why): was not refused"
+		assert (has $r.stderr "refused before it is resolved") $"($c.why): ($r.stderr)"
+		assert (has $r.stderr $c.says) $"($c.why): ($r.stderr)"
+		assert equal (writes $w) [] $c.why
+		rm -rf $w.dir
+	}
+	let w = (tenant-world)
+	"COMPOSE_FILE=/etc/other.yaml\n" | save -f ($w.app | path join .env)
+	let r = (tenant-release $w)
+	assert ($r.exit_code != 0) "a COMPOSE_ variable in .env was not refused"
+	assert (has $r.stderr ".env names a COMPOSE_ variable") $r.stderr
+	rm -rf $w.dir
+	# a compose file or .env that is a link (compose follows it), and one that is a folder
+	for name in ["compose.yaml" "compose.override.yaml" ".env"] {
+		let w = (tenant-world)
+		let target = ($w.dir | path join outside.yaml)
+		"services: {}\n" | save -f $target
+		rm -f ($w.app | path join $name)
+		^ln -s $target ($w.app | path join $name)
+		let r = (tenant-release $w)
+		assert ($r.exit_code != 0) $"a linked ($name) was not refused"
+		assert (has $r.stderr $"($name) is a symlink, not a regular file") $"($name): ($r.stderr)"
+		rm -rf $w.dir
+	}
+	# values that are null where a path would be (extends within the file, an environment or external secret, a configs content) name no file
+	let w = (tenant-world)
+	"services:\n  b:\n    image: x\n  a:\n    extends: {service: b}\nsecrets:\n  s1: {environment: SOME_VAR}\n  s2: {external: true}\nconfigs:\n  c: {content: hello}\n" | save -f ($w.app | path join compose.yaml)
+	let ok = (^$nu.current-exe --no-config-file -c $"use ($engine_dir | path join tenant.nu); tenant check-compose-sources '($w.app)'" | complete)
+	assert equal $ok.exit_code 0 $"a project that names no file was refused: ($ok.stderr)"
+	rm -rf $w.dir
+}
+
+def test_a_tenants_staged_build_paths_are_the_staged_copys [] {
+	print "test a project's paths inside the app's own folder are spelled under the staged copy bake may read, and nothing else is..."
+	let text = "services:\n  a:\n    build:\n      context: /tmp/rel/apps/mines\n  b:\n    build:\n      context: /tmp/rel/apps/mines-other\n  c:\n    x: \"/tmp/rel/apps/mines/sub\"\n  d:\n    y: /tmp/elsewhere\n"
+	let r = (^$nu.current-exe --no-config-file -c $"use ($engine_dir | path join push.nu); print \(push rebase-paths '($text)' /tmp/rel/apps/mines /tmp/w/app\)" | complete)
+	assert equal $r.exit_code 0 $r.stderr
+	assert (has $r.stdout "context: /tmp/w/app\n") $r.stdout
+	assert (has $r.stdout "\"/tmp/w/app/sub\"") $r.stdout
+	assert (has $r.stdout "context: /tmp/rel/apps/mines-other") "a folder that only starts with the app's name is not the app's"
+	assert (has $r.stdout "y: /tmp/elsewhere") "a path outside the app is left as it is"
+}
+
+def test_a_tenants_dry_run_with_no_build_needs_the_publisher_kubeconfig_alone [] {
+	print "test a tenant's --check without --build runs with the publisher's kubeconfig alone: no push identity is asked for, there is no lease to renew..."
+	let w = (tenant-world)
+	let path = ([($w.dir | path join bin)] | append $env.PATH)
+	let r = (with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), KUBECONFIG: $w.publisher} {
+		do { cd $w.app; hide-env -i KUBERNETES_SERVICE_HOST; ^$nu.current-exe --no-config-file $release_nu --app $w.app --tenant $tenant_ns --host $tenant_host --check } | complete
+	})
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	assert equal (writes $w) []
+	rm -rf $w.dir
 }
 
 def test_a_tenants_edited_schema_copy_is_refused [] {

@@ -816,6 +816,8 @@ def release-tenant [app_info: record, tenant: string, host: string, push_kubecon
 	tenant check-binding $node $tenant $host
 	tenant check-pins $node
 	let meta = (render app-meta $app_info.cue_path "" --tenant $tenant --host $host)
+	# Before anything resolves the tenant's compose files: `docker compose config` reads what they name with this process's rights.
+	tenant check-compose-sources $app_info.dir
 	let compose = (render compose-config $app_info.dir)
 	check-tenant-issuers $app_info.dir $compose
 	refuse $app_info $node $meta $compose $meta.render.enabled
@@ -827,23 +829,25 @@ def release-tenant [app_info: record, tenant: string, host: string, push_kubecon
 	# The registry's lease, as the push identity: no other release collects the registry's garbage under this release's pushes.
 	let lease = if $building { tenant with-push $push_kubeconfig { registry lease-acquire $node.build $node.name $node.namespace } } else { "" }
 	let body_failure = (try {
-		tenant with-push $push_kubeconfig { renew-lease $node $lease --before-live }
+		# A dry run with no build holds no lease: no push identity is asked for.
+		if $lease != "" { tenant with-push $push_kubeconfig { renew-lease $node $lease --before-live } }
 		let pushed = if $check and not $build {
 			render placeholder-pushed $services "release"
 		} else {
 			print $"node: (stamp) building ($services | str join ', ') for ($app_info.name) on the tenants' buildkitd"
 			push tenant-images $app_info.dir $node $services (if $check { "check" } else { "release" }) $push_kubeconfig
 		}
-		tenant with-push $push_kubeconfig { renew-lease $node $lease --before-live }
+		if $lease != "" { tenant with-push $push_kubeconfig { renew-lease $node $lease --before-live } }
 		release-app $app_info $node $meta $compose $facts [] $pushed --check=$check --tenant --push-kubeconfig $push_kubeconfig
-		tenant with-push $push_kubeconfig { renew-lease $node $lease }
+		if $lease != "" { tenant with-push $push_kubeconfig { renew-lease $node $lease } }
 		null
 	} catch {|e| $e.msg })
 	let lease_failure = if $lease != "" { try { tenant with-push $push_kubeconfig { registry lease-release $node.build $lease }; null } catch {|e| $e.msg } } else { null }
 	if $body_failure != null {
 		error make {msg: (if $lease_failure != null { $"($body_failure); the registry lease ($lease) was not released either: ($lease_failure)" } else { $body_failure })}
 	}
-	if $lease_failure != null { print -e $"node: (stamp) warning: the registry lease ($lease) was not released: ($lease_failure)" }
+	# The rollout is done and the lease is not released: the release says so as a failure (the stale lease holds the registry's collection until it expires).
+	if $lease_failure != null { error make {msg: $"the release completed, but the registry lease ($lease) was not released: ($lease_failure)"} }
 }
 
 # Releases the app in the folder (or `--app`), to production or `--preview <name>`.

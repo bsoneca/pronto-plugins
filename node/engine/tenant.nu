@@ -71,6 +71,91 @@ export def check-engine-copy [app_dir: string] {
 	}
 }
 
+def as-list [v: any]: nothing -> list {
+	# a list of mappings describes as a table
+	if $v == null { [] } else if (($v | describe) =~ '^(list|table)') { $v } else { [$v] }
+}
+
+# Why a path a compose file names may not be read (null when it may): `docker compose config` reads env_file, label_file, extends files and
+# secrets' and configs' files with the release process's own rights, so a tenant's compose file may name only files inside its own folder,
+# spelled as plain paths (no variable, no URL), as they resolve after links.
+def compose-path-problem [root: string, value: any, what: string]: nothing -> any {
+	if $value == null { return null }
+	let p = (if ($value | describe | str starts-with "record") { $value.path? | default "" } else { $value | into string })
+	if ($p | is-empty) { return null }
+	if ($p | str contains '$') { return $"($what) names ($p), a path with a variable in it: a tenant's compose file names plain paths" }
+	if ($p =~ '^[A-Za-z][A-Za-z0-9+.-]*:') { return $"($what) names ($p), which is not a path inside the app's own folder" }
+	let full = ($root | path join $p | path expand)
+	if $full == $root or ($full | str starts-with $"($root)/") { null } else { $"($what) names ($p), which is outside the app's own folder" }
+}
+
+# A tenant's compose files are checked before anything resolves them (the release's own `docker compose config` would read what they name with
+# its own rights, and a value read from a file outside the app could reach a Job's environment): nothing they name may be outside the app's
+# folder, no `include` is allowed, ssh forwarding is refused, and the project's `.env` names no COMPOSE_ variable (which can add compose files).
+# Studio flattens its games' compose projects in a jail before the engine runs; this holds for any other caller.
+export def check-compose-sources [app_dir: string] {
+	let root = ($app_dir | path expand)
+	let named = (ls -a $root | where {|e| let n = ($e.name | path basename); $n == ".env" or $n =~ '^(docker-)?compose([.-][A-Za-z0-9_.-]*)?\.ya?ml$' })
+	# compose follows a link (and reads a folder's files as it likes): only a regular file is read here, so anything else with the name is refused
+	mut problems = ($named | where type != file | each {|e| $"($e.name | path basename) is a ($e.type), not a regular file: compose would follow it to what this check does not read" })
+	let files = ($named | where type == file | get name | where {|f| ($f | path basename) != ".env" })
+	let env_file = ($root | path join .env)
+	if ($env_file | path exists) {
+		let names = (open --raw $env_file | lines | where {|l| ($l | str trim) =~ '^(export\s+)?COMPOSE_' })
+		if ($names | is-not-empty) { $problems = ($problems | append ".env names a COMPOSE_ variable, which can add compose files from anywhere") }
+	}
+	for f in $files {
+		let name = ($f | path basename)
+		let parsed = (try { {ok: true, doc: (open --raw $f | from yaml)} } catch { {ok: false, doc: null} })
+		let doc = $parsed.doc
+		# a file with nothing in it (comments alone) names nothing
+		if $parsed.ok and ($doc == null) { continue }
+		if not $parsed.ok or not ($doc | describe | str starts-with "record") { $problems = ($problems | append $"($name) cannot be read as a YAML mapping"); continue }
+		if ($doc | get -o include) != null { $problems = ($problems | append $"($name) has include, which pulls in files the engine does not read first") }
+		for kind in [secrets configs] {
+			for e in (($doc | get -o $kind | default {}) | transpose k v) {
+				let bad = (compose-path-problem $root ($e.v | get -o file) $"($name) ($kind).($e.k).file")
+				if $bad != null { $problems = ($problems | append $bad) }
+			}
+		}
+		for s in (($doc | get -o services | default {}) | transpose k v) {
+			let at = $"($name) services.($s.k)"
+			for key in [env_file label_file] {
+				for item in (as-list ($s.v | get -o $key)) {
+					let bad = (compose-path-problem $root $item $"($at).($key)")
+					if $bad != null { $problems = ($problems | append $bad) }
+				}
+			}
+			let extends = ($s.v | get -o extends)
+			# extends within the same file is allowed; one that names a file pulls in a file this check does not read, as include does
+			if $extends != null and ($extends | describe | str starts-with "record") and (($extends | get -o file) != null) {
+				$problems = ($problems | append $"($at).extends.file names another file, which this check does not read: extends within the same file is allowed")
+			}
+			let build = ($s.v | get -o build)
+			if $build != null {
+				let rec = if ($build | describe | str starts-with "record") { $build } else { {context: $build} }
+				let ctx = ($rec | get -o context | default ".")
+				let bad = (compose-path-problem $root $ctx $"($at).build.context")
+				if $bad != null { $problems = ($problems | append $bad) }
+				let df = ($rec | get -o dockerfile)
+				if $df != null {
+					let bad = (compose-path-problem $root ($root | path join $ctx $df) $"($at).build.dockerfile")
+					if $bad != null { $problems = ($problems | append $bad) }
+				}
+				let extra = ($rec | get -o additional_contexts | default {})
+				let pairs = if ($extra | describe | str starts-with "record") { $extra | transpose k v | each {|p| $p.v } } else { as-list $extra | each {|l| $l | into string | split row -n 2 "=" | last } }
+				for v in $pairs {
+					if ($v | into string) =~ '^(docker-image|service|target|oci-layout):' { continue }
+					let bad = (compose-path-problem $root $v $"($at).build.additional_contexts")
+					if $bad != null { $problems = ($problems | append $bad) }
+				}
+				if (as-list ($rec | get -o ssh) | is-not-empty) { $problems = ($problems | append $"($at).build.ssh forwards the release's ssh agent into a build") }
+			}
+		}
+	}
+	if ($problems | is-not-empty) { error make {msg: $"a tenant's compose project is refused before it is resolved: ($problems | str join '; ')"} }
+}
+
 # What the engine's own constants say a tenant's release is: the tenants' sandboxed buildkitd and the node's registry as the push reaches it.
 export def check-pins [node: record] {
 	let buildkit = ($node.tenant?.buildkit? | default "")
@@ -106,6 +191,17 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 		# A token a Secret of this type carries is a service account's (the publisher's included): never written by a tenant's release.
 		if ($o.kind? | default "") == "Secret" and ($o.type? | default "") == "kubernetes.io/service-account-token" {
 			$why = ($why | append $"($id) is a service account token")
+		}
+		# …nor one the operators make for it: an ExternalSecret's target template is the Secret the controller writes, whose type and annotations the
+		# admission policy (which reads the ExternalSecret's sources alone) never sees. A Secret that names a service account in an annotation is the
+		# token controller's to fill, of any type.
+		let template = ($o.spec?.target?.template? | default {})
+		let given = ($o.metadata?.annotations? | default {} | columns) | append ($template.metadata?.annotations? | default {} | columns)
+		if ($o.kind? | default "") == "ExternalSecret" and (($template.type? | default "") == "kubernetes.io/service-account-token") {
+			$why = ($why | append $"($id) targets a service account token Secret")
+		}
+		if ($o.kind? | default "") in [Secret ExternalSecret] and ($given | any {|k| $k | str starts-with "kubernetes.io/service-account." }) {
+			$why = ($why | append $"($id) names a service account in a kubernetes.io/service-account.* annotation: the token controller would fill it")
 		}
 		if ($o.kind? | default "") == "Service" {
 			if ($o.spec?.type? | default "ClusterIP") != "ClusterIP" { $why = ($why | append $"($id) is a ($o.spec.type) Service: a tenant's Service is a ClusterIP") }
@@ -224,7 +320,16 @@ export def check-push-rights [node: record, push_kubeconfig: string] {
 		for ask in ([
 			{verb: "create pods/portforward", args: [create pods --subresource=portforward -n $registry], where: $registry}
 			{verb: "create leases.coordination.k8s.io", args: [create leases.coordination.k8s.io -n $registry], where: $registry}
+			# the lease is acquired (create), read and renewed (get, update) and released (delete)
+			{verb: "get leases.coordination.k8s.io", args: [get leases.coordination.k8s.io -n $registry], where: $registry}
+			{verb: "update leases.coordination.k8s.io", args: [update leases.coordination.k8s.io -n $registry], where: $registry}
+			{verb: "delete leases.coordination.k8s.io", args: [delete leases.coordination.k8s.io -n $registry], where: $registry}
+			# registry.nu patches the lease it renews and lists them by label
+			{verb: "patch leases.coordination.k8s.io", args: [patch leases.coordination.k8s.io -n $registry], where: $registry}
+			{verb: "list leases.coordination.k8s.io", args: [list leases.coordination.k8s.io -n $registry], where: $registry}
+			# the door check lists the gateway's Services by label, and reads each
 			{verb: "get services", args: [get services -n envoy-gateway-system], where: "envoy-gateway-system"}
+			{verb: "list services", args: [list services -n envoy-gateway-system], where: "envoy-gateway-system"}
 		] | append (if $forward { [{verb: "create pods/portforward", args: [create pods --subresource=portforward -n envoy-gateway-system], where: "envoy-gateway-system"}] } else { [] })) {
 			if not (can-i ...$ask.args) { error make {msg: $"the push identity may not ($ask.verb) in ($ask.where): it needs the Role studio-builder-push \(services/buildkit-tenants\)"} }
 		}
