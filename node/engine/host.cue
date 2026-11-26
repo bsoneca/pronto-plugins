@@ -28,6 +28,7 @@ _build:    _ @embed(file="build.nu", type=text)
 _tunnel:   _ @embed(file="tunnel.nu", type=text)
 _push:     _ @embed(file="push.nu", type=text)
 _registry: _ @embed(file="registry.nu", type=text)
+_tenant:   _ @embed(file="tenant.nu", type=text)
 _rollback: _ @embed(file="rollback.nu", type=text)
 _restore:  _ @embed(file="restore.nu", type=text)
 _schema:   _ @embed(file="schema/node.cue", type=text)
@@ -41,6 +42,7 @@ _schema:   _ @embed(file="schema/node.cue", type=text)
 	"node/tunnel.nu":       _tunnel
 	"node/push.nu":         _push
 	"node/registry.nu":     _registry
+	"node/tenant.nu":       _tenant
 	"node/rollback.nu":     _rollback
 	"node/restore.nu":      _restore
 	"node/schema/node.cue": _schema

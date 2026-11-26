@@ -83,7 +83,7 @@ _fixture: {
 			apiVersion: "gateway.networking.k8s.io/v1"
 			kind:       "Gateway"
 			metadata:   {name: "\(app)-gateway", namespace: ns}
-			spec: listeners: [{name: "http", protocol: "HTTP", hostname: host}]
+			spec: listeners: [{name: "http", port: 80, protocol: "HTTP", hostname: host}]
 		},
 	]
 }

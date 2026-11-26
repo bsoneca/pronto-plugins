@@ -40,7 +40,7 @@ def items(text):
 
 objs = items(stdin) if "-f" in args and "-" in args and args[:1] != ["exec"] else []
 with open(d + "/calls.jsonl", "a") as f:
-    f.write(json.dumps({"args": args, "objects": [{"kind": o.get("kind"), "name": o.get("metadata", {}).get("name"), "namespace": o.get("metadata", {}).get("namespace")} for o in objs]}) + "\n")
+    f.write(json.dumps({"as": os.path.basename(os.environ.get("KUBECONFIG", "")), "args": args, "objects": [{"kind": o.get("kind"), "name": o.get("metadata", {}).get("name"), "namespace": o.get("metadata", {}).get("namespace")} for o in objs]}) + "\n")
     if objs:
         with open(d + "/last_objects.json", "w") as g:
             json.dump(objs, g)
@@ -69,6 +69,18 @@ def read(path, default=""):
 
 verb = args[0] if args else ""
 ns = opt("-n")
+
+# `auth can-i`: yes, but for what auth_deny names (a line of it that the question holds), and `create namespaces`, which only an
+# operator may (auth_operator makes the KUBECONFIG one).
+if verb == "auth" and args[1:2] == ["can-i"]:
+    q = " ".join(args[2:])
+    deny = [l for l in read("auth_deny").split("\n") if l] if exists("auth_deny") else []
+    if q.strip() == "create namespaces":
+        ans = exists("auth_operator")
+    else:
+        ans = not any(l in q for l in deny)
+    print("yes" if ans else "no")
+    sys.exit(0 if ans else 1)
 
 if verb == "config":
     print("apiVersion: v1\nkind: Config\ncurrent-context: contabo2\nclusters:\n- name: contabo2\n  cluster:\n    server: https://127.0.0.1:26444\n    certificate-authority-data: Zg==\ncontexts:\n- name: contabo2\n  context: {cluster: contabo2, user: u}\nusers:\n- name: u\n  user: {token: t}\n")
@@ -254,10 +266,10 @@ if verb == "get":
         if exists("no_gateway_service"):
             out({"items": []})
         if "owning-gatewayclass=" in sel:
-            out({"items": [{"metadata": {"name": "pronto-gateway"}, "spec": {"ports": [{"port": 80}]}}] if exists("shared_gateway") else []})
+            out({"items": [{"metadata": {"name": "pronto-gateway"}, "spec": {"clusterIP": "10.43.0.9", "ports": [{"port": 80}]}}] if exists("shared_gateway") else []})
         if exists("shared_gateway") or "owning-gateway-name=" not in sel or "owning-gateway-namespace=" not in sel:
             out({"items": []})
-        out({"items": [{"metadata": {"name": "envoy-" + sel.split("owning-gateway-name=")[1].split(",")[0]}, "spec": {"ports": [{"port": 80}]}}]})
+        out({"items": [{"metadata": {"name": "envoy-" + sel.split("owning-gateway-name=")[1].split(",")[0]}, "spec": {"clusterIP": "10.43.0.9", "ports": [{"port": 80}]}}]})
     if "-A" in args:
         # the prune's reads of every namespace's workloads
         if what == "pods" and exists("inuse"):

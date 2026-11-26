@@ -30,16 +30,16 @@ def runtime-dir []: nothing -> string {
 
 # A scratch world: the fake tools, their state, and the fixture app with the engine's schema written
 # into it as the engine writes it into an app.
-def sandbox []: nothing -> record {
+def sandbox [--fixture: string = "aprende"]: nothing -> record {
 	let d = (mktemp -d -t node-test.XXXXXX | str trim)
-	for p in [bin state state/revision aprende] { mkdir ($d | path join $p) }
-	^cp -R ($engine_dir | path join fixtures aprende/.) ($d | path join aprende)
+	for p in [bin state state/revision $fixture] { mkdir ($d | path join $p) }
+	^cp -R ($engine_dir | path join fixtures $"($fixture)/.") ($d | path join $fixture)
 	# the build's context is the app as git sees it
-	do { cd ($d | path join aprende); ^git init -q . } | ignore
-	let mod = ($d | path join aprende cue.mod module.cue)
+	do { cd ($d | path join $fixture); ^git init -q . } | ignore
+	let mod = ($d | path join $fixture cue.mod module.cue)
 	open $mod | str replace -r 'pronto@v1": v: "[^"]+"' $'pronto@v1": v: "v($pin)"' | save -f $mod
-	mkdir ($d | path join aprende node schema)
-	cp ($engine_dir | path join schema node.cue) ($d | path join aprende node schema node.cue)
+	mkdir ($d | path join $fixture node schema)
+	cp ($engine_dir | path join schema node.cue) ($d | path join $fixture node schema node.cue)
 	cp ($engine_dir | path join fixtures fake-kubectl) ($d | path join bin kubectl)
 	r#'
 #!/bin/sh
@@ -84,7 +84,13 @@ case "$*" in
     if [ -f "$d/bake_fail" ]; then { echo "ERROR: failed to solve"; cat "$d/bake_fail"; } >&2; exit 1; fi
     meta=""; targets=""; skip=0
     for a in "$@"; do
-      if [ $skip = 1 ]; then skip=0; [ "$prev" = --metadata-file ] && meta="$a"; continue; fi
+      if [ $skip = 1 ]; then
+        skip=0
+        [ "$prev" = --metadata-file ] && meta="$a"
+        # a tenant's bake writes each target as an OCI archive (--set <t>.output=type=oci,dest=<file>) and pushes nothing
+        case "$prev$a" in --set*.output=type=oci,dest=*) tar -cf "${a#*dest=}" -T /dev/null ;; esac
+        continue
+      fi
       case "$a" in
         buildx|bake) ;;
         -f|--builder|--metadata-file|--set) skip=1; prev="$a" ;;
@@ -92,6 +98,7 @@ case "$*" in
         *) targets="$targets $a" ;;
       esac
     done
+    [ -n "$meta" ] || exit 0
     printf '{' > "$meta"; sep=""
     for t in $targets; do
       printf '%s"%s":{"containerimage.digest":"sha256:%s"}' "$sep" "$t" "$(printf %s "$t" | shasum -a 256 | cut -d' ' -f1)" >> "$meta"; sep=","
@@ -104,6 +111,10 @@ esac
 #!/bin/sh
 d="$(dirname "$0")/.."
 echo "$*" >> "$d/crane.log"
+# `crane push <layout> <ref>`: the pinned reference it answers, the digest the hash of the reference
+case "$1" in
+  push) for a; do ref="$a"; done; printf '%s@sha256:%s\n' "${ref%:*}" "$(printf %s "$ref" | shasum -a 256 | cut -d' ' -f1)"; exit 0 ;;
+esac
 if [ -f "$d/crane_nopg" ]; then echo '{"config":{"Env":["PATH=/bin"]}}'; else echo '{"config":{"Env":["PATH=/bin","PG_MAJOR=17"]}}'; fi
 '# | str trim --left | save -f ($d | path join bin crane)
 	# curl: the registry answers 200 through the tunnel, unless it is down
@@ -182,7 +193,7 @@ printf 200
 		migrate: {environment: {DATABASE_URL: "postgres://x", REQUIRED_TABLES: "a,b"}}
 	}}
 	$compose | to json | save -f ($d | path join compose.json)
-	{dir: $d, app: ($d | path join aprende), state: ($d | path join state)}
+	{dir: $d, app: ($d | path join $fixture), state: ($d | path join state)}
 }
 
 # The environment a run has: the fakes first on the PATH, the fakes' state, upstream's runtime.
@@ -310,6 +321,18 @@ def main [] {
 	test_database_base
 	test_the_clusters_spec_does_not_move_with_the_databases_files
 	test_oidc_clients_are_registered_by_a_runtime_that_has_it_and_never_by_an_older_one
+	test_a_tenant_release_runs_as_its_publisher_alone
+	test_a_tenant_builds_only_on_the_tenants_buildkitd
+	test_a_tenant_release_is_refused_before_anything_is_written
+	test_a_tenant_namespace_and_push_rights_are_asked_before_anything_is_built
+	test_a_tenant_check_writes_nothing
+	test_a_lost_tenant_image_fails_without_a_restart
+	test_the_tenant_door_check_runs_as_the_pusher
+	test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not
+	test_a_tenants_edited_schema_copy_is_refused
+	test_a_tenants_build_include_stays_under_the_app
+	test_a_tenants_namespace_is_a_studio_one
+	test_the_tenant_door_check_in_the_pod_dials_the_service_and_forwards_to_nothing
 	print "\nAll node release tests passed."
 }
 
@@ -2173,5 +2196,330 @@ def test_oidc_clients_are_registered_by_a_runtime_that_has_it_and_never_by_an_ol
 	let off = (do $data $old "https://aprende.example.test")
 	assert equal (do $registered | length) 1 "runtime 1.14 must not register"
 	assert equal $off $on "the data is the same without registration, for a provider that registers nothing"
+	rm -rf $w.dir
+}
+
+# --- a tenant's release (PRONTO-740 S2; tenant.nu) ---
+
+const tenant_ns = "studio-owner-game-1a2b3c4d"
+const tenant_host = "game-game.example.com"
+
+# A world for a tenant's release: the game fixture, and the two kubeconfigs of its two actors (files the fake kubectl names its callers by).
+def tenant-world []: nothing -> record {
+	let w = (sandbox --fixture game)
+	for f in [publisher.kubeconfig push.kubeconfig] { "" | save -f ($w.dir | path join $f) }
+	$w | insert publisher ($w.dir | path join publisher.kubeconfig) | insert pusher ($w.dir | path join push.kubeconfig)
+}
+
+# `release.nu --tenant`, as the namespace's publisher (the KUBECONFIG it is given), with `rest` after the tenant's own flags.
+def --wrapped tenant-release [w: record, ...rest]: nothing -> record {
+	let path = ([($w.dir | path join bin)] | append $env.PATH)
+	with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), SOPS_AGE_KEY: "AGE-SECRET-KEY-FAKE", KUBECONFIG: $w.publisher} {
+		do { cd $w.app; ^$nu.current-exe --no-config-file $release_nu --app $w.app --tenant $tenant_ns --host $tenant_host --push-kubeconfig $w.pusher ...$rest } | complete
+	}
+}
+
+# What the fake kubectl was asked by one caller (a kubeconfig's file name), one line a call as `calls` writes them.
+def calls-by [w: record, who: string]: nothing -> list<string> {
+	let f = ($w.state | path join calls.jsonl)
+	if not ($f | path exists) { return [] }
+	open --raw $f | lines | each {|l| $l | from json } | where as == $who | each {|c| $c.args | str join ' ' }
+}
+
+# Every object the release applied or created, as kind/name/namespace.
+def written-objects [w: record]: nothing -> list<string> {
+	let f = ($w.state | path join all_objects.jsonl)
+	if not ($f | path exists) { return [] }
+	open --raw $f | lines | each {|l| $l | from json } | flatten | each {|o| $"($o.kind)/($o.metadata.name)/($o.metadata.namespace? | default '')" } | uniq
+}
+
+def test_a_tenant_release_runs_as_its_publisher_alone [] {
+	print "test a tenant's release runs as its publisher: no tunnel, no namespace read, no Namespace or policy written, nothing outside its namespace, no exec, no prune..."
+	let w = (tenant-world)
+	let r = (tenant-release $w)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	assert (not ($w.dir | path join ssh.log | path exists)) "no ssh tunnel was opened"
+	let mine = (calls-by $w publisher.kubeconfig)
+	assert ($mine | is-not-empty) "the publisher released"
+	# nothing the publisher asked is cluster-wide or outside its namespace
+	let outside = ($mine | where {|c| not ($c | str starts-with "auth can-i") and not ($c | str contains $"-n ($tenant_ns)") and not ($c | str contains "-f -") })
+	assert equal $outside [] $"a call outside the namespace: ($outside | str join '; ')"
+	for banned in ["get namespace" "get nodes" "get crd" "get gatewayclass" "dapr-system" "cnpg-system" "-A" "exec" "garbage-collect"] {
+		assert (not ($mine | any {|c| $c | str contains $banned })) $"the publisher asked for ($banned)"
+	}
+	let objects = (written-objects $w)
+	assert equal ($objects | where {|o| $o =~ '^(Namespace|NetworkPolicy|ResourceQuota|LimitRange|CronJob|ScheduledBackup|ObjectStore)/' }) [] "kinds a publisher may not write"
+	# but the registry's lease, which the push identity takes in the registry's own namespace
+	assert equal ($objects | where {|o| not ($o | str ends-with $"/($tenant_ns)") and not ($o | str starts-with "Lease/") }) [] "every object but the registry's lease is in the tenant's namespace"
+	# the record names the app, which the next release of the namespace checks
+	let record = (open --raw ($w.state | path join cm pronto-release) | from json)
+	assert equal $record.data.app "game"
+	# the push identity asked only of the registry's and the gateway's namespaces
+	let theirs = (calls-by $w push.kubeconfig)
+	assert ($theirs | is-not-empty) "the push identity pushed and checked the door"
+	let wrong = ($theirs | where {|c| not ($c | str contains "-n pronto-registry") and not ($c | str contains "-n envoy-gateway-system") and not ($c | str starts-with "auth can-i") and not ($c | str starts-with "create -f -") and not ($c | str starts-with "replace -f -") })
+	assert equal $wrong [] $"the push identity asked outside the registry and the gateway: ($wrong | str join '; ')"
+	rm -rf $w.dir
+}
+
+def test_a_tenant_builds_only_on_the_tenants_buildkitd [] {
+	print "test a tenant's images are built on the tenants' buildkitd as OCI archives, never pushed by it, and pushed by the push identity under the tenant's path..."
+	let w = (tenant-world)
+	let r = (tenant-release $w)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let docker = (open --raw ($w.dir | path join docker.log))
+	assert ($docker | str contains "driver remote tcp://buildkitd.pronto-buildkit-tenants.svc:1234") $docker
+	assert (not ($docker | str contains "tcp://127.0.0.1")) "never the operator's buildkitd"
+	let bake = ($docker | lines | where {|l| $l | str starts-with "buildx bake" } | first)
+	assert ($bake | str contains "output=type=oci,dest=") $bake
+	assert (not ($bake | str contains "--push")) "the sandboxed buildkitd pushes nothing"
+	assert ($bake | str contains "fs.write=") "its archives are written where the engine said"
+	let crane = (open --raw ($w.dir | path join crane.log))
+	assert ($crane =~ $"push --insecure \\S+ 127\\.0\\.0\\.1:\\d+/($tenant_ns)/game-crud:release") $crane
+	let images = (open --raw ($w.state | path join all_objects.jsonl) | lines | each {|l| $l | from json } | flatten | where kind == Deployment | each {|d| $d.spec.template.spec.containers | get image } | flatten | uniq)
+	assert ($images | all {|i| $i | str starts-with $"127.0.0.1:5000/($tenant_ns)/game-" }) $"the images: ($images | str join ', ')"
+	rm -rf $w.dir
+}
+
+def test_a_tenant_release_is_refused_before_anything_is_written [] {
+	print "test a tenant's release that names no KUBECONFIG, no host, a preview, a deletion, an adoption, a SOPS file or a hook is refused, with nothing built or written..."
+	let w = (tenant-world)
+	let path = ([($w.dir | path join bin)] | append $env.PATH)
+	let ask = {|...flags| with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), KUBECONFIG: $w.publisher} { do { cd $w.app; ^$nu.current-exe --no-config-file $release_nu --app $w.app ...$flags } | complete } }
+	let cases = [
+		{flags: [--tenant $tenant_ns], says: "--tenant needs --host"}
+		{flags: [--host $tenant_host], says: "--host and --push-kubeconfig are a tenant's"}
+		{flags: [--tenant $tenant_ns --host $tenant_host --preview rc], says: "never a preview, a deletion or a schema copy"}
+		{flags: [--tenant $tenant_ns --host $tenant_host --delete], says: "never a preview, a deletion or a schema copy"}
+		{flags: [--tenant $tenant_ns --host $tenant_host --adopt], says: "--adopt is not a tenant's"}
+		{flags: [--tenant $tenant_ns --host $tenant_host --serving], says: "are the operator's: not with --tenant"}
+	]
+	for c in $cases {
+		let r = (do $ask ...$c.flags)
+		assert ($r.exit_code != 0) $"($c.flags | str join ' ') was not refused"
+		assert (has $r.stderr $c.says) $"($c.flags | str join ' '): ($r.stderr)"
+	}
+	# no KUBECONFIG is given: refused
+	let none = (with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir)} { do { cd $w.app; ^$nu.current-exe --no-config-file $release_nu --app $w.app --tenant $tenant_ns --host $tenant_host } | complete })
+	assert ($none.exit_code != 0) "no KUBECONFIG was not refused"
+	assert (has $none.stderr "runs with the KUBECONFIG it is given") $none.stderr
+	# a SOPS file is the operator's
+	"" | save -f ($w.app | path join secrets.metal.enc.yaml)
+	let sops = (tenant-release $w)
+	assert ($sops.exit_code != 0) "a SOPS file was not refused"
+	assert (has $sops.stderr "decrypts no secrets with the cluster's key") $sops.stderr
+	rm -f ($w.app | path join secrets.metal.enc.yaml)
+	# a hook runs the release.cue's commands with its credentials
+	open ($w.app | path join release.cue) | str replace 'hosts: production:' "hooks: afterJobs: [[\"echo\", \"x\"]]\n\thosts: production:" | save -f ($w.app | path join release.cue)
+	let hook = (tenant-release $w)
+	assert ($hook.exit_code != 0) "a hook was not refused"
+	assert (has $hook.stderr "a tenant's release runs no hooks") $hook.stderr
+	assert equal (writes $w) []
+	assert (not ($w.dir | path join docker.log | path exists) or not (open --raw ($w.dir | path join docker.log) | str contains "buildx bake")) "nothing was built"
+	rm -rf $w.dir
+}
+
+def test_a_tenant_namespace_and_push_rights_are_asked_before_anything_is_built [] {
+	print "test a tenant's release refuses an operator's kubeconfig, a publisher that may not release into the namespace, a namespace another app holds, one an operator holds, and a push identity without its Role..."
+	for row in [
+		{setup: "operator", says: "may create namespaces, so it is an operator's"}
+		{setup: "no-release-right", says: "may not release into"}
+		{setup: "other-app", says: "records the release of other: one app per tenant namespace"}
+		{setup: "operator-record", says: "holds an operator's release"}
+		{setup: "no-lease-right", says: "the push identity may not create leases.coordination.k8s.io in pronto-registry: it needs the Role studio-builder-push"}
+		{setup: "no-forward-right", says: "the push identity may not create pods/portforward in pronto-registry"}
+	] {
+		let w = (tenant-world)
+		match $row.setup {
+			"operator" => { "" | save -f ($w.state | path join auth_operator) }
+			"no-release-right" => { "create deployments.apps" | save -f ($w.state | path join auth_deny) }
+			"other-app" => { mkdir ($w.state | path join cm); {metadata: {name: "pronto-release"}, data: {app: "other"}} | to json | save -f ($w.state | path join cm pronto-release) }
+			"operator-record" => { mkdir ($w.state | path join cm); {metadata: {name: "pronto-release"}, data: {sha: "abc"}} | to json | save -f ($w.state | path join cm pronto-release) }
+			"no-lease-right" => { "create leases.coordination.k8s.io" | save -f ($w.state | path join auth_deny) }
+			"no-forward-right" => { "create pods --subresource=portforward -n pronto-registry" | save -f ($w.state | path join auth_deny) }
+		}
+		let r = (tenant-release $w)
+		assert ($r.exit_code != 0) $"($row.setup) was not refused"
+		assert (has $r.stderr $row.says) $"($row.setup): ($r.stderr)"
+		assert equal (writes $w) [] $row.setup
+		assert (not ($w.dir | path join docker.log | path exists) or not (open --raw ($w.dir | path join docker.log) | str contains "buildx bake")) $"($row.setup): something was built"
+		rm -rf $w.dir
+	}
+}
+
+def test_a_tenant_check_writes_nothing [] {
+	print "test a tenant's --check dry-runs the objects and writes nothing, and --check --build pushes under the tag check and still writes nothing to the namespace..."
+	let w = (tenant-world)
+	let r = (tenant-release $w --check)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	assert equal (writes $w) []
+	assert (not ($w.dir | path join docker.log | path exists) or not (open --raw ($w.dir | path join docker.log) | str contains "buildx bake")) "a check builds nothing"
+	assert (has $r.stdout "check passed")
+	let b = (tenant-release $w --check --build)
+	assert equal $b.exit_code 0 $"($b.stdout)\n($b.stderr)"
+	assert equal (writes $w) []
+	assert ((open --raw ($w.dir | path join crane.log)) =~ $"/($tenant_ns)/game-crud:check") "the images were pushed under the tag check"
+	rm -rf $w.dir
+}
+
+def test_a_lost_tenant_image_fails_without_a_restart [] {
+	print "test an image the registry lost after a tenant's push fails the release, which never restarts the registry..."
+	let w = (tenant-world)
+	"" | save -f ($w.dir | path join manifest_404)
+	let r = (tenant-release $w)
+	assert ($r.exit_code != 0) "a lost image was not refused"
+	assert (has $r.stderr "cannot restart the registry") $r.stderr
+	assert (not (calls $w | any {|c| $c | str contains "rollout restart" })) "the registry was not restarted"
+	assert equal (writes $w) [] "nothing was rolled out"
+	rm -rf $w.dir
+}
+
+def test_the_tenant_door_check_runs_as_the_pusher [] {
+	print "test a tenant's door check runs as the push identity, through a port-forward to the gateway, and a leaking door fails and rolls back the release..."
+	let w = (tenant-world)
+	let r = (tenant-release $w)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let theirs = (calls-by $w push.kubeconfig)
+	assert ($theirs | any {|c| $c | str contains "get service -n envoy-gateway-system" }) "the push identity found the gateway's Service"
+	assert ($theirs | any {|c| $c | str starts-with "port-forward -n envoy-gateway-system" }) "and forwarded to it"
+	assert (not (calls-by $w publisher.kubeconfig | any {|c| $c | str contains "envoy-gateway-system" })) "the publisher never reached the gateway's namespace"
+	rm -rf $w.dir
+	let leak = (tenant-world)
+	"" | save -f ($leak.dir | path join metadata_open)
+	let l = (tenant-release $leak)
+	assert ($l.exit_code != 0) "a door that reaches the Dapr API was not refused"
+	assert (has $l.stderr "the door reaches the Dapr API") $l.stderr
+	assert (has $l.stderr "rolled back") $l.stderr
+	rm -rf $leak.dir
+}
+
+# --- what a tenant's own release.cue cannot get past (the nushell checks over what it rendered) ---
+
+# The game's release.cue with its own `nodeManifests`: the author's list, not the engine's render.
+def own-manifests [w: record, objects: string] {
+	let cue = ($w.app | path join release.cue)
+	let text = (open --raw $cue)
+	let at = ($text | str index-of "nodeManifests:")
+	$"(($text | str substring 0..<$at))nodeManifests: ($objects)\n" | save -f $cue
+}
+
+def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] {
+	print "test a tenant's own nodeManifests with a foreign image, a NodePort Service, the publisher's account, a user namespace, an unmasked /proc, an unconfined profile, another namespace or a kind its Role lacks is refused after the render and before anything is applied..."
+	let ns = $tenant_ns
+	let img = $"127.0.0.1:5000/($ns)/game-crud:release@sha256:(('a' | fill -c 'a' -w 64))"
+	let deploy = {|pod: string, extra: string| $"{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: {($extra) containers: [{name: \"crud\", image: ($pod)}]}}" }
+	let good = $"\"($img)\""
+	let cases = [
+		{why: "an image of another registry", says: "not an image under 127.0.0.1:5000/($ns)/", objects: $"[(do $deploy '"docker.io/library/nginx:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' '')]"}
+		{why: "an image of another tenant's path", says: "not an image under", objects: $"[(do $deploy '"127.0.0.1:5000/studio-other-game-0/game-crud:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' '')]"}
+		{why: "an init container's foreign image", says: "container wait runs", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: {initContainers: [{name: \"wait\", image: \"docker.io/x:1\"}], containers: [{name: \"crud\", image: ($good)}]}}]"}
+		{why: "a NodePort Service", says: "is a NodePort Service", objects: $"[{apiVersion: \"v1\", kind: \"Service\", metadata: {name: \"crud\", namespace: \"($ns)\"}, spec: {type: \"NodePort\", ports: [{port: 80}]}}]"}
+		{why: "a Service with externalIPs", says: "names externalIPs", objects: $"[{apiVersion: \"v1\", kind: \"Service\", metadata: {name: \"crud\", namespace: \"($ns)\"}, spec: {externalIPs: [\"1.2.3.4\"], ports: [{port: 80}]}}]"}
+		{why: "the publisher's service account", says: "runs as the service account publisher", objects: $"[(do $deploy $good 'serviceAccountName: "publisher",')]"}
+		{why: "a user namespace", says: "sets hostUsers: false", objects: $"[(do $deploy $good 'hostUsers: false,')]"}
+		{why: "an unmasked /proc", says: "sets procMount Unmasked", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), securityContext: procMount: \"Unmasked\"}]}]"}
+		{why: "an unconfined seccomp profile", says: "Unconfined seccomp", objects: $"[(do $deploy $good 'securityContext: seccompProfile: type: "Unconfined",')]"}
+		{why: "an unconfined AppArmor profile", says: "Unconfined AppArmor", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), securityContext: appArmorProfile: type: \"Unconfined\"}]}]"}
+		{why: "the deprecated serviceAccount field", says: "runs as the service account publisher", objects: $"[(do $deploy $good 'serviceAccount: "publisher",')]"}
+		{why: "a service account token Secret", says: "is a service account token", objects: $"[{apiVersion: \"v1\", kind: \"Secret\", metadata: {name: \"t\", namespace: \"($ns)\"}, type: \"kubernetes.io/service-account-token\"}]"}
+		{why: "added capabilities", says: "adds capabilities", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), securityContext: capabilities: add: [\"NET_ADMIN\"]}]}]"}
+		{why: "a hostPort", says: "sets a hostPort", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), ports: [{containerPort: 80, hostPort: 80}]}]}]"}
+		{why: "privilege escalation", says: "allows privilege escalation", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), securityContext: allowPrivilegeEscalation: true}]}]"}
+		{why: "a managed Service of the database that names externalIPs", says: "has a managed Service that is not a ClusterIP, or names externalIPs", objects: $"[{apiVersion: \"postgresql.cnpg.io/v1\", kind: \"Cluster\", metadata: {name: \"game-db\", namespace: \"($ns)\"}, spec: {imageName: \"127.0.0.1:5000/($ns)/game-database:17@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", managed: services: additional: [{selectorType: \"rw\", serviceTemplate: {metadata: name: \"x\", spec: {type: \"ClusterIP\", externalIPs: [\"1.2.3.4\"]}}}]}}]"}
+		{why: "a Dapr sidecar annotation", says: "sets the Dapr sidecar annotation", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: {metadata: annotations: {\"dapr.io/sidecar-image\": \"evil/daprd\"}, spec: containers: [{name: \"crud\", image: ($good)}]}}]"}
+		{why: "a runtimeClassName", says: "sets runtimeClassName", objects: $"[(do $deploy $good 'runtimeClassName: "gvisor",')]"}
+		{why: "a priorityClassName", says: "sets priorityClassName", objects: $"[(do $deploy $good 'priorityClassName: "system-node-critical",')]"}
+		{why: "an nfs volume", says: "of type nfs, which a tenant's pod may not", objects: $"[(do $deploy $good 'volumes: [{name: "v", nfs: {server: "1.2.3.4", path: "/"}}],')]"}
+		{why: "a hostPath volume", says: "of type hostPath, which a tenant's pod may not", objects: $"[(do $deploy $good 'volumes: [{name: "v", hostPath: {path: "/"}}],')]"}
+		{why: "a LoadBalancer managed service of the database", says: "has a managed Service that is not a ClusterIP", objects: $"[{apiVersion: \"postgresql.cnpg.io/v1\", kind: \"Cluster\", metadata: {name: \"game-db\", namespace: \"($ns)\"}, spec: {imageName: \"127.0.0.1:5000/($ns)/game-database:17@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", managed: services: additional: [{selectorType: \"rw\", serviceTemplate: {metadata: name: \"x\", spec: type: \"LoadBalancer\"}}]}}]"}
+		{why: "another namespace", says: "is in namespace kube-system", objects: $"[{apiVersion: \"v1\", kind: \"ConfigMap\", metadata: {name: \"x\", namespace: \"kube-system\"}}]"}
+		{why: "a kind the publisher's Role lacks", says: "is not a kind a tenant's publisher writes", objects: $"[{apiVersion: \"rbac.authorization.k8s.io/v1\", kind: \"RoleBinding\", metadata: {name: \"x\", namespace: \"($ns)\"}}]"}
+	]
+	for c in $cases {
+		let w = (tenant-world)
+		own-manifests $w $c.objects
+		let r = (tenant-release $w)
+		assert ($r.exit_code != 0) $"($c.why): was not refused: ($r.stdout)"
+		assert (has $r.stderr ($c.says | str replace '($ns)' $ns)) $"($c.why): ($r.stderr)"
+		# before anything was applied or asked of the server
+		assert equal (calls $w | where {|x| ($x | str starts-with "apply") or (($x | str starts-with "create -f") and not ($x | str contains "Lease/")) }) [] $"($c.why): the server was asked"
+		assert equal (writes $w) [] $c.why
+		rm -rf $w.dir
+	}
+}
+
+def test_a_tenants_edited_schema_copy_is_refused [] {
+	print "test a tenant's release whose node/schema/node.cue is not the engine's own copy is refused before its release.cue is read..."
+	let w = (tenant-world)
+	let copy = ($w.app | path join node schema node.cue)
+	$"(open --raw $copy)\n// edited by the game's author\n" | save -f $copy
+	let r = (tenant-release $w)
+	assert ($r.exit_code != 0) "an edited schema was not refused"
+	assert (has $r.stderr "is not the engine's own copy") $r.stderr
+	assert equal (writes $w) []
+	rm -rf $w.dir
+}
+
+def test_a_tenants_build_include_stays_under_the_app [] {
+	print "test a build.include that is an absolute path, climbs out, or links out of the app is never staged, and a tenant stages regular files only..."
+	let w = (sandbox --fixture game)
+	let app = ($w.app | path expand)
+	let outside = ($w.dir | path join outside.json)
+	'{"secret": true}' | save -f $outside
+	^ln -sf $outside ($app | path join link.json)
+	mkdir ($app | path join gen)
+	"{}" | save -f ($app | path join gen index.json)
+	let ask = {|include: string, ...flags| in-world $w -c (script $w $"use ($engine_dir | path join push.nu); let work = \(mktemp -d | str trim\); push stage-context '($app)' $work \($work | path join dest\) ($include) ($flags | str join ' ')") }
+	# an absolute path
+	let abs = (do $ask '["/etc/hosts"]')
+	assert ($abs.exit_code != 0) "an absolute include was not refused"
+	assert (has $abs.stderr "which is not under the app's own folder") $abs.stderr
+	# a link to a file outside the app, and a file whose folder is such a link
+	^ln -sfn $w.dir ($app | path join gen2)
+	for inc in ['["link.json"]' '["gen2/outside.json"]'] {
+		let r = (do $ask $inc)
+		assert ($r.exit_code != 0) $"($inc) was not refused"
+		assert (has $r.stderr "which is not under the app's own folder") $r.stderr
+	}
+	# inside the app it stages; with --tenant a link inside the app is left out and a regular file stays
+	let ok = (do $ask '["gen/index.json"]' "--tenant")
+	assert equal $ok.exit_code 0 $"($ok.stdout)\n($ok.stderr)"
+	# via the full release: the schema refuses an absolute include in the author's release.cue before the build
+	let cue = ($app | path join release.cue)
+	$"((open --raw $cue))\nNode: build: include: [\"/etc/hosts\"]\n" | save -f $cue
+	"x" | save -f ($w.dir | path join publisher.kubeconfig)
+	"x" | save -f ($w.dir | path join push.kubeconfig)
+	let full = (with-env {PATH: ([($w.dir | path join bin)] | append $env.PATH), FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), KUBECONFIG: ($w.dir | path join publisher.kubeconfig)} {
+		do { cd $app; ^$nu.current-exe --no-config-file $release_nu --app $app --tenant $tenant_ns --host $tenant_host --push-kubeconfig ($w.dir | path join push.kubeconfig) } | complete
+	})
+	assert ($full.exit_code != 0) "an absolute include in a tenant's release.cue was not refused"
+	assert (not ($w.dir | path join docker.log | path exists) or not (open --raw ($w.dir | path join docker.log) | str contains "buildx bake")) "nothing was built"
+	rm -rf $w.dir
+}
+
+def test_a_tenants_namespace_is_a_studio_one [] {
+	print "test a tenant's namespace that is not studio-<...> is refused before anything else..."
+	let w = (tenant-world)
+	let path = ([($w.dir | path join bin)] | append $env.PATH)
+	let r = (with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), KUBECONFIG: $w.publisher} {
+		do { cd $w.app; ^$nu.current-exe --no-config-file $release_nu --app $w.app --tenant kube-system --host $tenant_host --push-kubeconfig $w.pusher } | complete
+	})
+	assert ($r.exit_code != 0) "a namespace outside studio- was not refused"
+	assert (has $r.stderr "a tenant's namespace is studio-<owner>-<app>-<hash>") $r.stderr
+	assert equal (calls $w) []
+	rm -rf $w.dir
+}
+
+def test_the_tenant_door_check_in_the_pod_dials_the_service_and_forwards_to_nothing [] {
+	print "test a tenant's release run in the builder pod (no --push-kubeconfig) checks the door at the Service's ClusterIP, with no port-forward into the gateway's namespace..."
+	let w = (tenant-world)
+	let path = ([($w.dir | path join bin)] | append $env.PATH)
+	let r = (with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), SOPS_AGE_KEY: "AGE-SECRET-KEY-FAKE", KUBECONFIG: $w.publisher, KUBERNETES_SERVICE_HOST: "10.43.0.1"} {
+		do { cd $w.app; ^$nu.current-exe --no-config-file $release_nu --app $w.app --tenant $tenant_ns --host $tenant_host } | complete
+	})
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let door = (open --raw ($w.dir | path join door_curl.log))
+	assert ($door | str contains "http://10.43.0.9:80/crud/v1.0/metadata") $door
+	assert (not (calls $w | any {|c| $c | str contains "port-forward -n envoy-gateway-system" })) "the door was forwarded to"
 	rm -rf $w.dir
 }

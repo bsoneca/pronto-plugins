@@ -26,6 +26,7 @@ def main [] {
 	test_an_origin_must_be_https
 	test_jail_google_and_egress_are_studios_builders_alone
 	test_the_release_rule_is_written_only_when_asked
+	test_a_tenant_release_writes_only_what_its_publisher_may
 	print "\nAll node schema tests passed."
 }
 
@@ -71,6 +72,36 @@ def test_the_release_rule_is_written_only_when_asked [] {
 	assert equal $w.exit_code 0 $w.stderr
 	assert equal (open --raw ($app | path join .say.json)) $held "an app that holds the rule keeps it"
 	rm -rf $app
+}
+
+def test_a_tenant_release_writes_only_what_its_publisher_may [] {
+	print "test a tenant's release (a namespace's publisher) is refused for a preview, backups, a policy, a clock, a blob plane, a kind or a gateway its Role does not cover, an image outside its path and an origin that is not its host, and a clean one passes..."
+	let ok = (cue-in export ./node/engine/tests/refused -e tenantClean --out json)
+	assert equal $ok.exit_code 0 $ok.stderr
+	let kinds = ($ok.stdout | from json | get kind)
+	assert ("Namespace" not-in $kinds) "no Namespace"
+	assert ("NetworkPolicy" not-in $kinds) "no NetworkPolicy"
+	for row in [
+		[tenantPreview "is never a preview"]
+		[tenantBackups "a tenant's release writes no backups"]
+		[tenantCeilingEgress "a tenant's release writes no NetworkPolicy"]
+		[tenantStudioBuilderJail "which only Studio's builder"]
+		[tenantClock "sets clock, a CronJob its publisher may not write"]
+		[tenantBlobs "runs no blob plane"]
+		[tenantRetireNetworkPolicy "which a tenant's publisher may not delete"]
+		[tenantGatewayHTTPS "a tenant's gateway listens on 80/HTTP alone"]
+		[tenantUnservedKind "is not a kind a tenant's publisher writes"]
+		[tenantExternalImage "is not in 127.0.0.1:5000/studio-owner-game-1a2b3c4d"]
+		[tenantOrigin "a tenant's origin is https://game-game.example.com"]
+	] {
+		let r = (refused $row.0)
+		assert ($r | str contains $row.1) $"($row.0): ($r)"
+	}
+	# the schema's own conflicts: the operator's buildkitd and registry, the system's namespaces, a namespace with no host
+	for e in [tenantBuildkitOperator tenantBuildkitOperatorSvc tenantRegistryMoved tenantNamespaceKube tenantNamespaceRegistry tenantNamespaceDefault tenantHostMissing] {
+		let r = (cue-in export ./node/engine/tests/refused -e $e --out json)
+		assert ($r.exit_code != 0) $"($e) was not refused"
+	}
 }
 
 def refused [expr: string]: nothing -> string {

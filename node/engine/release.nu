@@ -7,6 +7,7 @@
 # over an ssh tunnel (tunnel.nu).
 #
 #   nu node/release.nu [--app <dir>] [--preview <name>] [--check [--build]] [--delete]
+#   nu node/release.nu --tenant <namespace> --host <host> [--push-kubeconfig <file>] [--check [--build]]   a tenant's release (tenant.nu)
 #
 # The steps (design section 3), each a function below:
 #   0  the app, the tunnel, a kubeconfig pinned to the node's context
@@ -38,6 +39,7 @@ use rollback.nu
 use build.nu [stamp]
 use push.nu
 use registry.nu
+use tenant.nu
 
 # The operators the preflight reads: where each runs and the image tag that states its version.
 const operator_pods = [
@@ -177,9 +179,10 @@ def namespace-split [objects: list]: nothing -> record {
 
 # A server dry run of the objects, which stops the release on a rejection. Where the namespace does not
 # exist yet (a first release), they are asked in `default`: admission reads the objects, not where they go.
-export def dry-run [objects: list, namespace: string, --adopt] {
-	# Absent is a successful, empty answer; a failed read (denied, API down) stops here, it is not "asked in default".
-	let ns_read = (^kubectl get namespace $namespace --ignore-not-found -o name | complete)
+export def dry-run [objects: list, namespace: string, --adopt, --tenant] {
+	# Absent is a successful, empty answer; a failed read (denied, API down) stops here, it is not "asked in default". A tenant's
+	# publisher cannot read a namespace: its namespace is its provisioner's, and exists.
+	let ns_read = if $tenant { {exit_code: 0, stdout: $namespace, stderr: ""} } else { ^kubectl get namespace $namespace --ignore-not-found -o name | complete }
 	if $ns_read.exit_code != 0 { error make {msg: $"reading namespace ($namespace) failed, so the server dry run cannot tell where to ask: ($ns_read.stderr | str trim)"} }
 	let there = ($ns_read.stdout | str trim | is-not-empty)
 	let items = if $there { $objects } else { $objects | each {|o| if $o.kind == "Namespace" { $o } else { $o | upsert metadata.namespace "default" } } }
@@ -309,12 +312,12 @@ def wait-forward [pid: int, port: int, log: string, --seconds: int = 30] {
 }
 
 # The probes, each through `http://127.0.0.1:<port>` with the public Host; the first that fails ends the check.
-def run-door-probes [node: record, port: int]: nothing -> int {
+def run-door-probes [node: record, port: int, --address: string = "127.0.0.1"]: nothing -> int {
 	let file = (mktemp -t door.XXXXXX | str trim)
 	mut asked = 0
 	try {
 		for probe in (door-probes) {
-			let url = $"http://127.0.0.1:($port)($probe.path)"
+			let url = $"http://($address):($port)($probe.path)"
 			let args = (if $probe.as_is { ["--path-as-is"] } else { [] })
 			let r = (^curl -s -m 20 ...$args -H $"Host: ($node.host)" -o $file -w "%{http_code}" $url | complete)
 			if $r.exit_code != 0 { error make {msg: $"the door check could not ask ($probe.path) of ($node.host): curl exit ($r.exit_code), so the door cannot be certified"} }
@@ -348,7 +351,7 @@ def run-door-probes [node: record, port: int]: nothing -> int {
 	$asked
 }
 
-export def check-door [node: record, gateway: string] {
+export def check-door [node: record, gateway: string, --direct] {
 	if ($node.preview | is-not-empty) and (($node.hosts | get -o $node.preview | default "") | is-empty) { return }
 	# The Gateway's own data-plane Service where Envoy Gateway makes one per Gateway; on the node the Gateways of every app are
 	# merged into the one Service of the GatewayClass (`pronto-gateway`, owning-gatewayclass=eg), which then serves this host.
@@ -360,6 +363,14 @@ export def check-door [node: record, gateway: string] {
 	if ($services | is-empty) { error make {msg: $"the door check found no Envoy Gateway Service for Gateway ($gateway) in ($node.namespace) \(envoy-gateway-system, ($selector)\), so the door cannot be certified"} }
 	let service = ($services | first)
 	let remote = ($service.spec.ports | first | get port)
+	# In the builder pod (--direct) the Service's ClusterIP is dialled as it is: no port-forward, so no right to forward into the gateway's namespace.
+	if $direct {
+		let ip = ($service.spec.clusterIP? | default "")
+		if not ($ip =~ '^[0-9.]+$') { error make {msg: $"the door check found no ClusterIP on the Envoy Gateway Service ($service.metadata.name): it cannot be dialled from the pod"} }
+		let asked = (run-door-probes $node $remote --address $ip)
+		print $"node: (stamp) the door's Dapr API is closed: ($asked) probes under /crud, /img and /blobs answer no sidecar and no service"
+		return
+	}
 	let local = (tunnel free-ports 1 | first)
 	let log = (mktemp -t door-forward.XXXXXX | str trim)
 	let started = (^sh -c $"kubectl port-forward -n envoy-gateway-system 'service/($service.metadata.name)' '($local):($remote)' >'($log)' 2>&1 & echo $!" | complete)
@@ -380,7 +391,7 @@ export def check-door [node: record, gateway: string] {
 
 # The record of what runs: `sha` (what `--serving` prints, empty for a tree that was not a commit), and `verified`, empty
 # until the app's cd has checked the public site for it (`--verified`).
-export def record-release [app_dir: string, node: record, pushed: record] {
+export def record-release [app_dir: string, node: record, pushed: record, --tenant] {
 	let git_root = (do { cd $app_dir; ^git rev-parse --show-toplevel } | complete)
 	# The commit is recorded only for a tree that is that commit: a dirty one (modified or untracked files under the app) was
 	# not built from HEAD, and its record would make cd skip a release of what HEAD is.
@@ -392,7 +403,8 @@ export def record-release [app_dir: string, node: record, pushed: record] {
 	{
 		apiVersion: "v1", kind: "ConfigMap"
 		metadata: {name: "pronto-release", namespace: $node.namespace}
-		data: {sha: $sha, verified: "", pruned: "", prune_error: "", pin: (runtime version), enginePin: $engine, images: ($images | to json --raw), at: (date now | format date "%Y-%m-%dT%H:%M:%S%z")}
+		# a tenant's release says which app it is (`app`): the namespace's one app, which the next release of it checks (tenant.nu check-namespace)
+		data: ({sha: $sha, verified: "", pruned: "", prune_error: "", pin: (runtime version), enginePin: $engine, images: ($images | to json --raw), at: (date now | format date "%Y-%m-%dT%H:%M:%S%z")} | merge (if $tenant { {app: $node.name} } else { {} }))
 	} | to json | kubectl-ok apply -f -
 }
 
@@ -640,19 +652,23 @@ export def seed-configmaps [app_dir: string, node: record] {
 
 # The release itself, with the node reachable and the kubeconfig pinned, over what `preflight`
 # answered and what was pushed (by service: {tag, digest}; placeholders for a check).
-export def release-app [app_info: record, node: record, meta: record, compose: record, facts: record, secrets: list, pushed: record, --check, --adopt, --schema-from: string = ""] {
+export def release-app [app_info: record, node: record, meta: record, compose: record, facts: record, secrets: list, pushed: record, --check, --adopt, --schema-from: string = "", --tenant, --push-kubeconfig: string = ""] {
 	let app = $app_info.name
 	let ns = $node.namespace
+	let tenant_ns = (if $tenant { $node.namespace } else { "" })
+	let tenant_host = (if $tenant { $node.host } else { "" })
 	# 3. data and render
 	let data = (render release-data $app_info.dir $compose $facts $pushed (if $check { '' } else { $node.origin }))
-	let objects = (render objects $app_info.cue_path $data $node.preview)
+	let objects = (render objects $app_info.cue_path $data $node.preview --tenant $tenant_ns --host $tenant_host)
+	# The game's own release.cue rendered these: what its publisher may write is checked again here, whatever schema it loaded.
+	if $tenant { tenant check-objects $objects $node (tenant publisher-kinds) }
 	let parts = (namespace-split $objects)
 	let stray = ($objects | where kind == Job | get metadata.name | where {|n| $n not-in ($node.jobOrder | each {|j| $"($app)-($j)" }) })
 	if ($stray | is-not-empty) { error make {msg: $"Jobs ($stray | str join ', ') are not in jobOrder"} }
 	# 4. the namespace, and the server's word on the rest
 	if $check {
 		print $"node: (stamp) check: server dry run of ($objects | length) objects in ($ns)"
-		dry-run $objects $ns --adopt=$adopt
+		dry-run $objects $ns --adopt=$adopt --tenant=$tenant
 		print $"node: (stamp) check passed: nothing was written"
 		return
 	}
@@ -666,8 +682,9 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	if $cluster_read.exit_code != 0 { error make {msg: $"reading the database cluster ($app)-db failed, so its image to put back is unknown: ($cluster_read.stderr | str trim)"} }
 	let previous_image = if ($cluster_read.stdout | str trim | is-empty) { null } else { $cluster_read.stdout | from json | get -o spec.imageName }
 	let before = (rollback revisions ($deployments | get metadata.name) $ns)
-	apply-objects $parts.namespace --adopt=$adopt
-	dry-run $parts.rest $ns --adopt=$adopt
+	# A tenant's render has no Namespace: its provisioner made it.
+	if ($parts.namespace | is-not-empty) { apply-objects $parts.namespace --adopt=$adopt }
+	dry-run $parts.rest $ns --adopt=$adopt --tenant=$tenant
 	# What serves is about to change (the server accepted the render): the record of the public site's verification, which cd
 	# trusts, is invalidated before the first write that can change it, so a release that fails halfway can never leave an old
 	# commit marked verified over new images. A first release has no record.
@@ -726,7 +743,12 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		# 13b. the public door must not answer the Dapr sidecar's own API
 		let gateways = (of-kind $objects Gateway)
 		if ($gateways | is-empty) { error make {msg: "the render has no Gateway, so the door cannot be checked"} }
-		check-door $node ($gateways | first | get metadata.name)
+		# The door check reaches the Envoy Gateway data plane: a tenant's publisher may not, the push identity may.
+		if $tenant {
+			tenant with-push $push_kubeconfig { check-door $node ($gateways | first | get metadata.name) --direct=($push_kubeconfig | is-empty) }
+		} else {
+			check-door $node ($gateways | first | get metadata.name)
+		}
 	} catch {|e|
 		print -e $"node: (stamp) the release failed: ($e.msg)"
 		let back = (try { rollback undo $before $ns } catch {|r| {undone: [], failed: [{name: "(all)", why: $r.msg}]} })
@@ -737,8 +759,81 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		kubectl-ok delete $r.resource $r.name -n $ns --ignore-not-found
 	}
 	# 15. record
-	record-release $app_info.dir $node $pushed
+	record-release $app_info.dir $node $pushed --tenant=$tenant
 	print $"\n[SUCCESS] Released ($app) to ($node.context): https://($node.host)/"
+}
+
+# --- a tenant's release (PRONTO-740 S2; tenant.nu) ---
+
+# What a tenant's release reads before anything is built or written, as its publisher and its pusher: the pin, the tools, who the
+# KUBECONFIG is and whose the namespace is, the push identity's rights, the tenants' buildkitd (it answers and builds for the
+# platform), the files the services seed, and the Secrets they read (in the namespace already: a tenant's release decrypts none).
+def tenant-preflight [app_info: record, node: record, push_kubeconfig: string, --check, --build] {
+	let pin = (runtime version)
+	if $pin not-in $validated_pins {
+		error make {msg: $"the pronto runtime is ($pin); this engine is validated against ($validated_pins | str join ', '), see node/engine/contract_test.nu: move the pin there first"}
+	}
+	let building = ((not $check) or $build)
+	require-tools (["kubectl"] | append (if $building { ["docker" "crane" "tar"] } else { [] }))
+	tenant check-namespace $node
+	if $building {
+		tenant check-push-rights $node $push_kubeconfig
+		let work = (mktemp -d -t node-preflight.XXXXXX | str trim)
+		try {
+			let have = (push with-remote-builder $work $node.tenant.buildkit {|builder| push platforms $builder })
+			if $node.environment.platform not-in $have { error make {msg: $"the tenants' buildkitd builds for ($have | str join ', '), not ($node.environment.platform)"} }
+		} finally {
+			rm -rf $work
+		}
+	}
+	seed-files $app_info.dir $node | ignore
+	for name in ($node.services? | default {} | values | each {|s| $s.secrets? | default {} | values } | flatten | uniq) {
+		let live = ((^kubectl get secret $name -n $node.namespace | complete).exit_code == 0)
+		if not $live { error make {msg: $"Node.services read the Secret ($name), which is not in ($node.namespace): a tenant's release decrypts none, so its provisioner puts it there"} }
+	}
+}
+
+# A tenant's release: the app released into the namespace its provisioner made, at the one host it was given, with the KUBECONFIG it is
+# given (the namespace's publisher: rights in it alone), no ssh tunnel and no operator's step. The images are built on the tenants'
+# sandboxed buildkitd and pushed as the push identity (push.nu tenant-images); the registry's lease, held while it pushes, is the push
+# identity's too, and so is the door check. Nothing is pruned or collected, and nothing is written outside the namespace.
+def release-tenant [app_info: record, tenant: string, host: string, push_kubeconfig: string, --check, --build] {
+	tenant check-tenant-name $tenant
+	tenant check-engine-copy $app_info.dir
+	let node = (try { render node-config $app_info.cue_path "" --tenant $tenant --host $host } catch {|e|
+		if ($e.msg =~ 'no tag for') { error make {msg: "the app's release.cue declares no @tag(tenant) and @tag(tenantHost): a tenant's release.cue binds them into Node.tenant"} }
+		error make {msg: $e.msg}
+	})
+	tenant check-binding $node $tenant $host
+	tenant check-pins $node
+	let meta = (render app-meta $app_info.cue_path "" --tenant $tenant --host $host)
+	let compose = (render compose-config $app_info.dir)
+	refuse $app_info $node $meta $compose $meta.render.enabled
+	tenant tenant-refusals $app_info.dir $node
+	let facts = (render facts $app_info.dir)
+	tenant-preflight $app_info $node $push_kubeconfig --check=$check --build=$build
+	let services = (render build-services $compose $meta.render.enabled (render own-images $node))
+	let building = ((not $check) or $build)
+	# The registry's lease, as the push identity: no other release collects the registry's garbage under this release's pushes.
+	let lease = if $building { tenant with-push $push_kubeconfig { registry lease-acquire $node.build $node.name $node.namespace } } else { "" }
+	let body_failure = (try {
+		tenant with-push $push_kubeconfig { renew-lease $node $lease --before-live }
+		let pushed = if $check and not $build {
+			render placeholder-pushed $services "release"
+		} else {
+			print $"node: (stamp) building ($services | str join ', ') for ($app_info.name) on the tenants' buildkitd"
+			push tenant-images $app_info.dir $node $services (if $check { "check" } else { "release" }) $push_kubeconfig
+		}
+		tenant with-push $push_kubeconfig { renew-lease $node $lease --before-live }
+		release-app $app_info $node $meta $compose $facts [] $pushed --check=$check --tenant --push-kubeconfig $push_kubeconfig
+		tenant with-push $push_kubeconfig { renew-lease $node $lease }
+		null
+	} catch {|e| $e.msg })
+	let lease_failure = if $lease != "" { try { tenant with-push $push_kubeconfig { registry lease-release $node.build $lease }; null } catch {|e| $e.msg } } else { null }
+	if $body_failure != null {
+		error make {msg: (if $lease_failure != null { $"($body_failure); the registry lease ($lease) was not released either: ($lease_failure)" } else { $body_failure })}
+	}
+	if $lease_failure != null { print -e $"node: (stamp) warning: the registry lease ($lease) was not released: ($lease_failure)" }
 }
 
 # Releases the app in the folder (or `--app`), to production or `--preview <name>`.
@@ -753,8 +848,19 @@ def main [
 	--verified: string = ""    # the commit cd's public checks passed for: recorded as verified when it is the one the node serves, refused when not (`--serving` then prints it as verified)
 	--adopt                    # take an existing namespace the release did not label (its Namespace object labels it)
 	--schema-from: string = "" # a preview's database starts as the schema (no rows) of the live namespace's database, read from its primary
+	--tenant: string = ""      # a tenant's release (tenant.nu): into this namespace, which its provisioner made, as its publisher: the KUBECONFIG given, no ssh tunnel, no operator's step
+	--host: string = ""        # with --tenant: the one address the namespace was given
+	--push-kubeconfig: string = "" # with --tenant: who pushes the images and checks the door (the registry pod's and the gateway's port-forwards), never the publisher; empty, the pod's own account
 ] {
 	$env.GCP_T0 = (date now)
+	if ($tenant | is-not-empty) or ($host | is-not-empty) or ($push_kubeconfig | is-not-empty) {
+		if ($tenant | is-empty) { error make {msg: "--host and --push-kubeconfig are a tenant's: name its namespace with --tenant"} }
+		if ($host | is-empty) { error make {msg: "--tenant needs --host, the one address its namespace was given"} }
+		if ($preview | is-not-empty) or $delete or ($schema_from | is-not-empty) { error make {msg: "a tenant's release is never a preview, a deletion or a schema copy: --tenant goes without --preview, --delete and --schema-from"} }
+		if $adopt { error make {msg: "a tenant's namespace is its provisioner's: --adopt is not a tenant's"} }
+		if $serving or ($verified | is-not-empty) or $prune { error make {msg: "--serving, --verified and --prune are the operator's: not with --tenant"} }
+		if ($env.KUBECONFIG? | default "" | is-empty) or not ($env.KUBECONFIG | path exists) { error make {msg: "a tenant's release runs with the KUBECONFIG it is given: none is set (or the file is missing)"} }
+	}
 	let verifying = ($verified | is-not-empty)
 	if ([$serving $verifying $prune] | where {|f| $f } | length) > 1 or (([$serving $verifying $prune] | any {|f| $f }) and ($check or $build or $delete or $adopt)) { error make {msg: "--serving, --verified and --prune go with no other flag, and one at a time"} }
 	if $check and $delete { error make {msg: "--check and --delete cannot be given together: a check writes nothing, a delete is a write"} }
@@ -764,6 +870,10 @@ def main [
 		if $delete or $serving or $verifying or $prune { error make {msg: "--schema-from goes with a release of a preview, not --delete, --serving, --verified or --prune"} }
 	}
 	let app_info = (runtime resolve-app $app)
+	if ($tenant | is-not-empty) {
+		release-tenant $app_info $tenant $host $push_kubeconfig --check=$check --build=$build
+		return
+	}
 	let node = (render node-config $app_info.cue_path $preview)
 	if $delete {
 		if ($preview | is-empty) or $node.namespace == $node.name { error make {msg: $"--delete removes a preview's namespace; ($node.namespace) is the release's"} }
