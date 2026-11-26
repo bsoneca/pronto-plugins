@@ -212,7 +212,10 @@ echo "${Deno.pid} 3 prio=release" > job-8/weight; chmod 664 job-8/weight`);
 const slotUrl = new URL("../../harness/files/tests/slot.ts", import.meta.url).pathname;
 export async function ownPure() {
   const slot = await import("../../harness/files/tests/slot.ts");
-  const { planReap, reapDead, nestedIn, stopMembers, recordOf } = slot;
+  const { planReap, reapDead, nestedIn, stopMembers, recordOf, readAgain, TRANSIENT_ERRNO } = slot;
+  // A read that answers from `script` in turn (the last answer repeats); the pauses are counted, not waited.
+  const scripted = (script) => { let n = 0; return { read: () => ({ pid: 9, ...script[Math.min(n++, script.length - 1)] }), reads: () => n }; };
+  const again = (script) => { const s = scripted(script); const pauses = []; const r = readAgain(s.read, TRANSIENT_ERRNO.darwin, 3, (ms) => pauses.push(ms)); return { errno: r.errno ?? 0, reads: s.reads(), pauses: pauses.length }; };
   const row = (pid, more = {}) => ({ pid, uid: 501, start: 1000, ppid: 1, responsible: 1, zombie: false, ...more });
   const table = (rows, more = {}) => ({ os: "darwin", uid: 501, rows, ...more });
   const rec = { rootpid: 100, rootstart: 1000, superpid: 50, superstart: 900, uid: 501, what: "t", state: "running" };
@@ -263,6 +266,11 @@ export async function ownPure() {
     esrchFails: failedOnly([{ pid: 106, errno: 3 }]),
     eperm: failedOnly([{ pid: 107, errno: 1 }]),
     otherUidRead: failedOnly([{ pid: 108, errno: 13, uid: 0 }]),
+    timedOutThenReadable: again([{ errno: 60 }, { errno: 60 }, { uid: 501, start: 1 }]),
+    alwaysTimedOut: again([{ errno: 60 }]),
+    readableFirst: again([{ uid: 501, start: 1 }]),
+    notTransient: again([{ errno: 22 }]),
+    linuxTimedOut: (() => { const s = scripted([{ errno: 110 }, { uid: 501 }]); return readAgain(s.read, TRANSIENT_ERRNO.linux, 3, () => {}).errno ?? 0; })(),
     ownUidRead: failedOnly([{ pid: 104, errno: 13, uid: 501 }]),
     listError: planReap(table([], { listError: "proc_listallpids returned -1 (errno 1)" }), rec, 2000).failed,
     age: planReap(table([root, row(101, { responsible: 100, start: 1_000_000 })]), { ...rec, rootstart: 1000 }, 3000)[ "members" ][0].age,
