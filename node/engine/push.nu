@@ -230,7 +230,7 @@ export def tenant-images [app_dir: string, node: record, services: list<string>,
 		let count = (stage-context $dir $work $staged $node.build.include --tenant)
 		verify-door-guard $staged
 		print $"node: (stamp) build context: ($count) files"
-		let compose = (render compose-run $staged --profile "*" config)
+		let compose = (render compose-run-tenant $staged --profile "*" config)
 		if $compose.exit_code != 0 { error make {msg: $"docker compose config failed in ($dir): ($compose.stderr | str trim)"} }
 		# The staged copy is what bake may read: a path the project names inside the app's own folder (an absolute build context a flatten wrote)
 		# is the staged copy's, so the grant below covers it and nothing outside the app is added to it.
@@ -240,7 +240,7 @@ export def tenant-images [app_dir: string, node: record, services: list<string>,
 		let sets = ($services | each {|s| ["--set" $"($s).output=type=oci,dest=($out)/($s).tar" "--set" $"($s).tags="] } | flatten)
 		with-remote-builder $work $node.tenant.buildkit {|builder|
 			with-env {SOURCE_DATE_EPOCH: "0"} {
-				let r = (do { cd $staged; open --raw ($work | path join release.compose.yaml) | ^docker buildx bake -f - --builder $builder --provenance=false --progress=plain $"--allow=fs.read=($staged)" $"--allow=fs.write=($out)" --set $"*.platform=($node.environment.platform)" ...$sets ...$services } | complete)
+				let r = (do { cd $staged; open --raw ($work | path join release.compose.yaml) | ^env -i ...(render tenant-env) (which docker | first | get path) buildx bake -f - --builder $builder --provenance=false --progress=plain $"--allow=fs.read=($staged)" $"--allow=fs.write=($out)" --set $"*.platform=($node.environment.platform)" ...$sets ...$services } | complete)
 				if $r.exit_code != 0 { error make {msg: $"docker buildx bake on the tenants' buildkitd failed:\n(($r.stdout + $r.stderr) | lines | last 40 | str join (char nl))(failed-step ($r.stdout + $r.stderr))"} }
 			}
 		}

@@ -660,10 +660,15 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	# 3. data and render
 	# A tenant's issuers are the engine's list alone, said before release-data registers a client at any of them.
 	if $tenant { check-tenant-issuers $app_info.dir $compose }
-	let data = (render release-data $app_info.dir $compose $facts $pushed (if $check { '' } else { $node.origin }))
+	# A tenant's clients are registered at the operator's host (--host, which the binding checked against the Node), never at an origin the Node names.
+	let origin = if $check { '' } else if $tenant { $"https://($node.host)" } else { $node.origin }
+	let data = (render release-data $app_info.dir $compose $facts $pushed $origin)
 	let objects = (render objects $app_info.cue_path $data $node.preview --tenant $tenant_ns --host $tenant_host)
-	# The game's own release.cue rendered these: what its publisher may write is checked again here, whatever schema it loaded.
+	# The game's own release.cue rendered these: what its publisher may write is checked again here, whatever schema it loaded. A container that
+	# leaves allowPrivilegeEscalation unset is made to say false first, and what it will retire is the engine's to decide, before any write.
+	let objects = if $tenant { tenant harden-objects $objects } else { $objects }
 	if $tenant { tenant check-objects $objects $node (tenant publisher-kinds) }
+	let retire = if $tenant { tenant check-retire $node (tenant retire-kinds) $objects } else { $node.retire }
 	let parts = (namespace-split $objects)
 	let stray = ($objects | where kind == Job | get metadata.name | where {|n| $n not-in ($node.jobOrder | each {|j| $"($app)-($j)" }) })
 	if ($stray | is-not-empty) { error make {msg: $"Jobs ($stray | str join ', ') are not in jobOrder"} }
@@ -757,7 +762,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 		error make {msg: ($e.msg + (if ($back.undone | is-not-empty) { $"; rolled back ($back.undone | str join ', ')" } else { "" }) + (if ($back.failed | is-not-empty) { $"; could not roll back ($back.failed | each {|f| $'($f.name): ($f.why)' } | str join '; ')" } else { "" }))}
 	}
 	# 14. retire what an earlier release left
-	for r in $node.retire {
+	for r in $retire {
 		kubectl-ok delete $r.resource $r.name -n $ns --ignore-not-found
 	}
 	# 15. record
@@ -779,7 +784,7 @@ def tenant-preflight [app_info: record, node: record, push_kubeconfig: string, -
 	require-tools (["kubectl"] | append (if $building { ["docker" "crane" "tar"] } else { [] }))
 	tenant check-namespace $node
 	if $building {
-		tenant check-push-rights $node $push_kubeconfig
+		tenant check-push-rights $node $push_kubeconfig --door=(not $check)
 		let work = (mktemp -d -t node-preflight.XXXXXX | str trim)
 		try {
 			let have = (push with-remote-builder $work $node.tenant.buildkit {|builder| push platforms $builder })
@@ -818,7 +823,7 @@ def release-tenant [app_info: record, tenant: string, host: string, push_kubecon
 	let meta = (render app-meta $app_info.cue_path "" --tenant $tenant --host $host)
 	# Before anything resolves the tenant's compose files: `docker compose config` reads what they name with this process's rights.
 	tenant check-compose-sources $app_info.dir
-	let compose = (render compose-config $app_info.dir)
+	let compose = (render compose-config $app_info.dir --tenant)
 	check-tenant-issuers $app_info.dir $compose
 	refuse $app_info $node $meta $compose $meta.render.enabled
 	tenant tenant-refusals $app_info.dir $node

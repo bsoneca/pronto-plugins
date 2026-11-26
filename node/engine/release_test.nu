@@ -71,14 +71,15 @@ exec sleep 60
 d="$(dirname "$0")/.."
 echo "$*" >> "$d/docker.log"
 case "$*" in
-  *"compose"*"config --format json"*) [ -z "$DOCKER_CONFIG" ] || readlink "$DOCKER_CONFIG/cli-plugins/docker-compose" >> "$d/compose_plugins"; cat "$d/compose.json" ;;
-  *"compose"*"config"*) echo "services: {}" ;;
+  *"compose"*"config --format json"*) env > "$d/compose_env"; [ -z "$DOCKER_CONFIG" ] || readlink "$DOCKER_CONFIG/cli-plugins/docker-compose" >> "$d/compose_plugins"; cat "$d/compose.json" ;;
+  *"compose"*"config"*) env > "$d/staged_compose_env"; echo "services: {}" ;;
   "buildx version") echo "github.com/docker/buildx v0 fake" ;;
   "buildx create "*) echo "$DOCKER_CONFIG" > "$d/docker_config" ;;
   "buildx inspect "*) if [ -f "$d/platform_arm" ]; then echo "Platforms:        linux/arm64"; else echo "Platforms:        linux/amd64, linux/amd64/v2, linux/386"; fi ;;
   "buildx rm "*) ;;
   "buildx bake "*)
     pwd > "$d/bake_pwd"
+    env > "$d/bake_env"
     cat > "$d/bake_compose"
     find . -type f | sort > "$d/bake_tree"
     if [ -f "$d/bake_fail" ]; then { echo "ERROR: failed to solve"; cat "$d/bake_fail"; } >&2; exit 1; fi
@@ -337,6 +338,11 @@ def main [] {
 	test_a_tenants_compose_files_name_nothing_outside_the_app
 	test_a_tenants_staged_build_paths_are_the_staged_copys
 	test_a_tenants_dry_run_with_no_build_needs_the_publisher_kubeconfig_alone
+	test_a_tenants_retirement_is_the_engines_to_decide
+	test_a_tenants_push_rights_are_only_what_its_path_uses
+	test_a_tenants_origin_and_preview_are_the_operators
+	test_a_tenants_containers_say_allow_privilege_escalation_false
+	test_a_tenants_compose_and_bake_see_only_an_allowlisted_environment
 	print "\nAll node release tests passed."
 }
 
@@ -2598,21 +2604,25 @@ def test_a_tenants_issuers_are_the_engines_list [] {
 	let compose_file = ($w.dir | path join compose.json)
 	let base = (open $compose_file)
 	let cases = [
-		{env: {OIDC_GOOGLE_ISSUER: "http://flagd:8693"}, says: "OIDC_GOOGLE_ISSUER is http://flagd:8693: an issuer is an https origin"}
-		{env: {OIDC_GOOGLE_ISSUER: "https://10.43.0.1"}, says: "OIDC_GOOGLE_ISSUER is https://10.43.0.1: an issuer is a name, never an IP address"}
+		{env: {OIDC_GOOGLE_ISSUER: "http://flagd:8693"}, says: "OIDC_GOOGLE_ISSUER is refused: an issuer is an https origin"}
+		{env: {OIDC_GOOGLE_ISSUER: "https://10.43.0.1"}, says: "OIDC_GOOGLE_ISSUER is refused: an issuer is a name, never an IP address"}
 		{env: {OIDC_GOOGLE_ISSUER: "https://[::1]"}, says: "an issuer is a name, never an IP address"}
-		{env: {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com:4000"}, says: "OIDC_GOOGLE_ISSUER is https://id.bonkchess.com:4000: an issuer names no port"}
+		{env: {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com:4000"}, says: "OIDC_GOOGLE_ISSUER is refused: an issuer names no port"}
+		{env: {OIDC_GOOGLE_ISSUER: "https://user:hunter2@id.bonkchess.com"}, says: "OIDC_GOOGLE_ISSUER is refused: an issuer carries no credentials"}
 		{env: {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com@flagd:8693"}, says: "an issuer carries no credentials"}
-		{env: {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com.evil.example"}, says: "OIDC_GOOGLE_ISSUER is https://id.bonkchess.com.evil.example, which is not an issuer a tenant may use"}
-		{env: {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com/evil"}, says: "which is not an issuer a tenant may use"}
-		{env: {BILLING_BROKER_INTERNAL: "https://10.43.0.7"}, says: "BILLING_BROKER_INTERNAL is https://10.43.0.7: an issuer is a name, never an IP address"}
-		{env: {BILLING_BROKER_INTERNAL: "https://pronto-llm.pronto-llm.svc"}, says: "BILLING_BROKER_INTERNAL is https://pronto-llm.pronto-llm.svc, which is not an issuer a tenant may use"}
+		{env: {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com.evil.example"}, says: "OIDC_GOOGLE_ISSUER is refused: it is not an issuer a tenant may use"}
+		{env: {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com/evil?token=abc"}, says: "it is not an issuer a tenant may use"}
+		{env: {BILLING_BROKER_INTERNAL: "https://10.43.0.7"}, says: "BILLING_BROKER_INTERNAL is refused: an issuer is a name, never an IP address"}
+		{env: {BILLING_BROKER_INTERNAL: "https://pronto-llm.pronto-llm.svc"}, says: "BILLING_BROKER_INTERNAL is refused: it is not an issuer a tenant may use"}
 	]
 	for c in $cases {
 		$base | upsert services.auth.environment ($base.services.auth.environment | merge $c.env) | to json | save -f $compose_file
 		let r = (tenant-release $w)
 		assert ($r.exit_code != 0) $"($c.env | to nuon) was not refused"
 		assert (has $r.stderr $c.says) $"($c.env | to nuon): ($r.stderr)"
+		# the error names the setting and the reason, never what the setting held (credentials, a path, a query)
+		for v in ($c.env | values) { assert (not (has $r.stderr $v)) $"the error repeats ($v): ($r.stderr)" }
+		for part in [hunter2 token=abc flagd] { assert (not (has $r.stderr $part)) $"the error repeats ($part): ($r.stderr)" }
 		assert equal (writes $w) []
 		assert (not ($w.dir | path join deno.log | path exists)) "nothing was registered or fetched"
 		assert (not ($w.dir | path join docker.log | path exists) or not (open --raw ($w.dir | path join docker.log) | str contains "buildx bake")) "nothing was built"
@@ -2639,4 +2649,115 @@ def test_the_tenant_door_check_in_the_pod_dials_the_service_and_forwards_to_noth
 	assert ($door | str contains "http://10.43.0.9:80/crud/v1.0/metadata") $door
 	assert (not (calls $w | any {|c| $c | str contains "port-forward -n envoy-gateway-system" })) "the door was forwarded to"
 	rm -rf $w.dir
+}
+
+def test_a_tenants_retirement_is_the_engines_to_decide [] {
+	print "test a tenant's retirement is validated in the engine before any write: only #RetireKinds, the resource kubectl is told is the allowlist's own, never the database, a volume claim, a Secret, the namespace's record or what the release writes..."
+	let w = (tenant-world)
+	let objects = '[{kind: Deployment, metadata: {name: game-crud}}]'
+	let kinds = $"use ($engine_dir | path join tenant.nu); let kinds = \(tenant retire-kinds\); let node = {retire: [RETIRE]}; tenant check-retire $node $kinds ($objects) | to json --raw"
+	let ask = {|retire: string| in-world $w -c ($kinds | str replace 'RETIRE' $retire) }
+	let refused = [
+		{retire: '{kind: Cluster, name: game-db, resource: "cluster.postgresql.cnpg.io"}', says: "retire names Cluster/game-db: a tenant's release may retire only"}
+		{retire: '{kind: PersistentVolumeClaim, name: data, resource: pvc}', says: "retire names PersistentVolumeClaim/data"}
+		{retire: '{kind: Secret, name: game-auth-secrets, resource: secret}', says: "retire names Secret/game-auth-secrets"}
+		{retire: '{kind: ExternalSecret, name: x, resource: externalsecret}', says: "retire names ExternalSecret/x"}
+		{retire: '{kind: Namespace, name: studio-owner-game, resource: ns}', says: "retire names Namespace/"}
+		{retire: '{kind: Service, name: "--all", resource: service}', says: "not a plain resource name"}
+		{retire: '{kind: Service, name: "a,b", resource: service}', says: "not a plain resource name"}
+		{retire: '{kind: CronJob, name: old, resource: cronjob.batch}', says: "which a tenant's publisher may not delete"}
+		{retire: '{kind: ConfigMap, name: pronto-release, resource: configmap}', says: "the namespace's own record"}
+		{retire: '{kind: Deployment, name: game-crud, resource: deployment.apps}', says: "which this release writes"}
+	]
+	for c in $refused {
+		let r = (do $ask $c.retire)
+		assert ($r.exit_code != 0) $"($c.retire) was not refused"
+		assert (has $r.stderr $c.says) $"($c.retire): ($r.stderr)"
+	}
+	# what passes is deleted as the engine's own kind.group, whatever resource the Node says
+	let ok = (do $ask '{kind: Deployment, name: game-old, resource: "cluster.postgresql.cnpg.io"}')
+	assert equal $ok.exit_code 0 $ok.stderr
+	assert equal ($ok.stdout | from json) [{resource: "deployment.apps", name: "game-old"}]
+	# end to end: a Node of its own that retires the database (a release.cue may export one that skips the schema's `retire`) deletes nothing
+	let body = $"let app_info = \(runtime resolve-app '($w.app)'\); let node = \(render node-config $app_info.cue_path '' --tenant ($tenant_ns) --host ($tenant_host) | upsert retire [{kind: Cluster, name: game-db, resource: 'cluster.postgresql.cnpg.io'}]\); let meta = \(render app-meta $app_info.cue_path '' --tenant ($tenant_ns) --host ($tenant_host)\); let compose = \(render compose-config $app_info.dir --tenant\); let facts = \(render facts $app_info.dir\); release-app $app_info $node $meta $compose $facts [] (pushed-json) --tenant"
+	let path = ([($w.dir | path join bin)] | append $env.PATH)
+	let e2e = (with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), SOPS_AGE_KEY: "AGE-SECRET-KEY-FAKE", KUBECONFIG: $w.publisher} { do { cd $w.app; ^$nu.current-exe --no-config-file -c (script $w $body) } | complete })
+	assert ($e2e.exit_code != 0) $"a tenant's Node that retires the database was not refused: ($e2e.stdout)"
+	assert (has $e2e.stderr "retire names Cluster/game-db") $e2e.stderr
+	assert equal (writes $w) [] "refused before any write"
+	rm -rf $w.dir
+}
+
+def test_a_tenants_push_rights_are_only_what_its_path_uses [] {
+	print "test a tenant's check with --build asks for no Service read in the gateway's namespace (there is no door check), and a live release asks for it..."
+	let w = (tenant-world)
+	"get services -n envoy-gateway-system\nlist services -n envoy-gateway-system" | save -f ($w.state | path join auth_deny)
+	let b = (tenant-release $w --check --build)
+	assert equal $b.exit_code 0 $"($b.stdout)\n($b.stderr)"
+	assert (not (calls-by $w push.kubeconfig | any {|c| $c | str contains "envoy-gateway-system" })) "a check asked of the gateway's namespace"
+	let live = (tenant-release $w)
+	assert ($live.exit_code != 0) "a live release without the Service reads was not refused"
+	assert (has $live.stderr "the push identity may not get services in envoy-gateway-system") $live.stderr
+	assert equal (writes $w) []
+	rm -rf $w.dir
+	# the gateway's port-forward is a live release's too
+	let f = (tenant-world)
+	"create pods --subresource=portforward -n envoy-gateway-system" | save -f ($f.state | path join auth_deny)
+	let c = (tenant-release $f --check --build)
+	assert equal $c.exit_code 0 $"($c.stdout)\n($c.stderr)"
+	rm -rf $f.dir
+}
+
+def test_a_tenants_origin_and_preview_are_the_operators [] {
+	print "test a tenant's release whose Node names an origin of its own, or a preview, is refused before a client is registered or anything is written..."
+	for row in [
+		{edit: {|s| $s | str replace 'hosts: production: *"game.bsoneca.com"' "origin: \"https://evil.example\"\n\thosts: production: *\"game.bsoneca.com\"" }, says: "a tenant's origin is https://game-game.example.com, the operator's host, not the Node's https://evil.example"}
+		{edit: {|s| $s | str replace 'preview: _preview' 'preview: "rc"' }, says: "a tenant's release is never a preview: Node.preview must be empty"}
+	] {
+		let w = (tenant-world)
+		let file = ($w.app | path join release.cue)
+		(open --raw $file | do $row.edit $in) | save -f $file
+		let r = (tenant-release $w)
+		assert ($r.exit_code != 0) $"($row.says) was not refused"
+		assert (has $r.stderr $row.says) $r.stderr
+		assert equal (writes $w) []
+		assert (not ($w.dir | path join deno.log | path exists)) "no client was registered"
+		rm -rf $w.dir
+	}
+}
+
+def test_a_tenants_containers_say_allow_privilege_escalation_false [] {
+	print "test a tenant's containers that leave allowPrivilegeEscalation unset are made to say false before they are applied, and one that says true is refused..."
+	let w = (tenant-world)
+	let r = (tenant-release $w)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let containers = (open --raw ($w.state | path join all_objects.jsonl) | lines | each {|l| $l | from json } | flatten | where kind in [Deployment Job] | each {|d| $d.spec.template.spec.containers | append ($d.spec.template.spec.initContainers? | default []) } | flatten)
+	assert ($containers | is-not-empty) "the release applied no container"
+	assert ($containers | all {|c| ($c.securityContext?.allowPrivilegeEscalation? | default null) == false }) $"a container left it unset: ($containers | to nuon)"
+	# the validator: unset is refused, true is refused, false passes; the hardening sets the unset one and leaves a true one to be refused
+	let body = $"use ($engine_dir | path join tenant.nu); let ns = 'ns'; let node = {namespace: $ns}; let mk = {|sc| {apiVersion: apps/v1, kind: Deployment, metadata: {name: d, namespace: $ns}, spec: {template: {spec: {containers: [{name: c, image: '127.0.0.1:5000/ns/x', securityContext: $sc}]}}}} }; let kinds = [apps/v1/Deployment]; let results = [{} {allowPrivilegeEscalation: true} {allowPrivilegeEscalation: false}] | each {|sc| let objs = [\(do $mk $sc\)]; let raw = \(try { tenant check-objects $objs $node $kinds; 'ok' } catch {|e| 'refused' }\); let hard = \(try { tenant check-objects \(tenant harden-objects $objs\) $node $kinds; 'ok' } catch {|e| 'refused' }\); {raw: $raw, hardened: $hard} }; $results | to json --raw"
+	let v = (in-world $w -c $body)
+	assert equal $v.exit_code 0 $v.stderr
+	assert equal ($v.stdout | from json) [{raw: "refused", hardened: "ok"} {raw: "refused", hardened: "refused"} {raw: "ok", hardened: "ok"}]
+	rm -rf $w.dir
+}
+
+def test_a_tenants_compose_and_bake_see_only_an_allowlisted_environment [] {
+	print "test a tenant's compose resolution and bake run with an explicit environment allowlist: a credential in the caller's environment reaches neither, unless the caller lists it..."
+	let w = (tenant-world)
+	let r = (with-env {PRONTO_TEST_CREDENTIAL: "hunter2"} { tenant-release $w })
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	for f in [compose_env staged_compose_env bake_env] {
+		let seen = (open --raw ($w.dir | path join $f))
+		assert (not ($seen | str contains "PRONTO_TEST_CREDENTIAL")) $"($f) saw the caller's credential"
+		assert (not ($seen | str contains "SOPS_AGE_KEY")) $"($f) saw the caller's key"
+		assert (not ($seen | str contains "KUBECONFIG")) $"($f) saw the caller's KUBECONFIG"
+		assert ($seen | str contains "PATH=") $"($f) lost its PATH"
+	}
+	rm -rf $w.dir
+	let listed = (tenant-world)
+	let l = (with-env {PRONTO_TEST_CREDENTIAL: "hunter2", PRONTO_TENANT_ENV_ALLOW: "PRONTO_TEST_CREDENTIAL"} { tenant-release $listed })
+	assert equal $l.exit_code 0 $"($l.stdout)\n($l.stderr)"
+	assert ((open --raw ($listed.dir | path join compose_env)) | str contains "PRONTO_TEST_CREDENTIAL=hunter2") "a variable the caller lists is passed"
+	rm -rf $listed.dir
 }

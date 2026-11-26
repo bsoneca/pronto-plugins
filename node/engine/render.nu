@@ -15,24 +15,54 @@ export def nearest-on-path [found: list<string>, dirs: list<string>]: nothing ->
 # as aqua names it), linked into a docker config of this call's own, so the CLI finds it with no daemon and no plugin of the
 # host's. With none on the PATH, the docker CLI's own plugins answer. Answers `complete`'s record.
 export def --wrapped compose-run [dir: string, ...args: string]: nothing -> record {
+	compose-exec $dir false $args
+}
+
+# The same, for a tenant's compose project: the process sees only `tenant-env`'s variables, so a `${VAR}` its files name interpolates
+# nothing of the caller's (a token, a key) into what the release copies into a Job or an image.
+export def --wrapped compose-run-tenant [dir: string, ...args: string]: nothing -> record {
+	compose-exec $dir true $args
+}
+
+# What a tenant's compose resolution and bake may see of the caller's environment: the few variables a tool needs to run (and the docker
+# config this call made), plus the names the caller lists in PRONTO_TENANT_ENV_ALLOW (comma separated; a proxy, say). As `NAME=value` words
+# for `env -i`.
+export def tenant-env []: nothing -> list<string> {
+	let extra = ($env.PRONTO_TENANT_ENV_ALLOW? | default "" | split row "," | each {|n| $n | str trim } | where {|n| $n | is-not-empty })
+	[PATH HOME TMPDIR LANG LC_ALL USER DOCKER_CONFIG SOURCE_DATE_EPOCH] | append $extra | uniq | each {|k|
+		let v = ($env | get -o $k)
+		if $v == null { null } else { $"($k)=(if ($v | describe | str starts-with 'list') { $v | str join ':' } else { $v | into string })" }
+	} | compact
+}
+
+def compose-exec [dir: string, tenant: bool, args: list<string>]: nothing -> record {
 	let found = ([docker-compose docker-cli-plugin-docker-compose] | each {|n| which --all $n } | flatten | get path | uniq)
-	if ($found | is-empty) {
-		return (do { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd ($dir | path expand); ^docker compose ...$args } | complete)
+	let run = {||
+		let at = ($dir | path expand)
+		if $tenant {
+			# `env -i`: nothing but the allowlist survives into the process
+			let docker = (which docker | first | get path)
+			do { cd $at; ^env -i ...(tenant-env) $docker compose ...$args } | complete
+		} else {
+			do { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd $at; ^docker compose ...$args } | complete
+		}
 	}
+	if ($found | is-empty) { return (do $run) }
 	let config = (mktemp -d -t node-compose.XXXXXX | str trim)
 	mkdir ($config | path join cli-plugins)
 	^ln -sf (nearest-on-path $found $env.PATH) ($config | path join cli-plugins docker-compose)
 	try {
-		with-env {DOCKER_CONFIG: $config} { do { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd ($dir | path expand); ^docker compose ...$args } | complete }
+		with-env {DOCKER_CONFIG: $config} { do $run }
 	} finally {
 		rm -rf $config
 	}
 }
 
 # `docker compose config`'s project for the app, as JSON, read with no seal key in the environment
-# so the airlock's shows the local stack's default, the development key a release refuses.
-export def compose-config [dir: string]: nothing -> record {
-	let r = (compose-run $dir --profile "*" config --format json)
+# so the airlock's shows the local stack's default, the development key a release refuses. A tenant's is read with the
+# environment of `tenant-env` alone.
+export def compose-config [dir: string, --tenant]: nothing -> record {
+	let r = if $tenant { compose-run-tenant $dir --profile "*" config --format json } else { compose-run $dir --profile "*" config --format json }
 	if $r.exit_code != 0 { error make {msg: $"docker compose config failed in ($dir): ($r.stderr | str trim)"} }
 	$r.stdout | from json
 }

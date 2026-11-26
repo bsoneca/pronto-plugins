@@ -31,11 +31,47 @@ export def tenant-issuers []: nothing -> list<string> {
 	$r.stdout | from json
 }
 
+# What a release may retire (kind to the kubectl resource it deletes, as kind.group), read from the engine's own schema (`#RetireKinds`).
+export def retire-kinds []: nothing -> record {
+	let r = (do { cd ($engine_dir | path join schema); ^cue export --out json -e '#RetireKinds' node.cue } | complete)
+	if $r.exit_code != 0 { error make {msg: $"the engine's schema does not export #RetireKinds: ($r.stderr | str trim)"} }
+	$r.stdout | from json
+}
+
+# What a tenant's release deletes after it rolled out, decided here in trusted code and never taken from the Node it exported (a release.cue
+# may export a Node of its own that skips the schema's `retire`): each entry's kind must be one of `kinds` (the engine's allowlist, which holds no
+# Cluster, volume claim, Secret or ExternalSecret), the resource kubectl is told is the allowlist's own for that kind, the name a plain name
+# (never an option, a list or a selector), and neither the release's own record nor an object this release writes. It is always deleted in
+# the tenant's namespace, `-n` of the caller. Refused before any write. Answers `{resource, name}` for each.
+export def check-retire [node: record, kinds: record, objects: list]: nothing -> list {
+	let written = ($objects | each {|o| $"($o.kind)/($o.metadata.name)" })
+	let planned = ($node.retire? | default [])
+	let problems = ($planned | each {|r|
+		let kind = ($r.kind? | default "")
+		let name = ($r.name? | default "")
+		let id = $"($kind)/($name)"
+		if ($kinds | get -o $kind) == null {
+			$"retire names ($id): a tenant's release may retire only ($kinds | columns | str join ', ')"
+		} else if not ($name =~ '^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$') {
+			$"retire names ($id): not a plain resource name"
+		} else if $kind in [NetworkPolicy CronJob] {
+			$"retire names ($id), which a tenant's publisher may not delete"
+		} else if $id in $written {
+			$"retire names ($id), which this release writes"
+		} else if $kind == "ConfigMap" and $name == "pronto-release" {
+			$"retire names ($id), the namespace's own record"
+		}
+	} | compact)
+	if ($problems | is-not-empty) { error make {msg: $"a tenant's retirement is refused: ($problems | str join '; ')"} }
+	$planned | each {|r| {resource: ($kinds | get $r.kind), name: $r.name} }
+}
+
 # Every issuer a tenant's auth names must be exactly one of `issuers` (the engine's list): the release fetches the issuer's discovery
 # document and POSTs a registration to it from Studio's builder pod, so an issuer the game picked is a request the pod makes for it (SSRF).
 # `settings` is the OIDC settings the auth provider environment made and `environment` the compose auth service's own; a key ending in
 # `_ISSUER` or `_INTERNAL` is an issuer. Refused before any fetch, naming the key: not https, with credentials or a port, a literal IP, or
-# an origin not on the list. No auth service, or no issuer, passes.
+# an origin not on the list. The error never carries the value (a URL may hold credentials, a path or a query). No auth service, or no
+# issuer, passes.
 export def check-issuers [settings: record, environment: record, issuers: list<string>] {
 	let named = ([$settings $environment] | each {|r| $r | transpose key value } | flatten
 		| where {|e| ($e.key =~ '(_ISSUER|_INTERNAL)$') and (($e.value | into string) | is-not-empty) }
@@ -44,17 +80,17 @@ export def check-issuers [settings: record, environment: record, issuers: list<s
 		let url = $e.value
 		let authority = ($url | str replace -r '^https://' '' | split row -r '[/?#]' | first)
 		if not ($url | str starts-with "https://") {
-			$"($e.key) is ($url): an issuer is an https origin"
+			$"($e.key) is refused: an issuer is an https origin"
 		} else if ($authority | str contains "@") {
-			$"($e.key) is ($url): an issuer carries no credentials"
+			$"($e.key) is refused: an issuer carries no credentials"
 		} else if ($authority | str starts-with "[") {
-			$"($e.key) is ($url): an issuer is a name, never an IP address"
+			$"($e.key) is refused: an issuer is a name, never an IP address"
 		} else if ($authority | str contains ":") {
-			$"($e.key) is ($url): an issuer names no port"
+			$"($e.key) is refused: an issuer names no port"
 		} else if ($authority =~ '^[0-9.]+$') or ($authority =~ '^0[xX][0-9a-fA-F.]+$') {
-			$"($e.key) is ($url): an issuer is a name, never an IP address"
+			$"($e.key) is refused: an issuer is a name, never an IP address"
 		} else if $url not-in $issuers {
-			$"($e.key) is ($url), which is not an issuer a tenant may use \(the engine allows ($issuers | str join ', ')\)"
+			$"($e.key) is refused: it is not an issuer a tenant may use \(the engine allows ($issuers | str join ', ')\)"
 		}
 	} | compact)
 	if ($problems | is-not-empty) { error make {msg: $"a tenant's issuers are refused: ($problems | str join '; ')"} }
@@ -175,6 +211,26 @@ const forbidden_accounts = [publisher studio-builder studio-rc-builder studio-pr
 # system), nothing that carries a token but the pod's own (projected, which the API server scopes to its service account).
 const volume_types = [configMap secret emptyDir projected persistentVolumeClaim downwardAPI]
 
+# Every container of a tenant's Deployment or Job (init and ephemeral included) that leaves allowPrivilegeEscalation unset is made to say
+# false, in trusted code, before `check-objects` and any apply; one that says true stays true, and `check-objects` refuses it.
+export def harden-objects [objects: list]: nothing -> list {
+	let boxed = {|spec|
+		["containers" "initContainers" "ephemeralContainers"] | reduce --fold $spec {|key, acc|
+			if ($acc | get -o $key) == null { $acc } else {
+				$acc | update $key ($acc | get $key | each {|c|
+					if ($c.securityContext?.allowPrivilegeEscalation? | default null) == null { $c | upsert securityContext ($c.securityContext? | default {} | upsert allowPrivilegeEscalation false) } else { $c }
+				})
+			}
+		}
+	}
+	$objects | each {|o|
+		match ($o.kind? | default "") {
+			"Deployment" | "Job" => { if ($o.spec?.template?.spec? | default null) == null { $o } else { $o | update spec.template.spec (do $boxed $o.spec.template.spec) } }
+			_ => $o
+		}
+	}
+}
+
 # What the engine's CUE refuses, checked again in nushell over the objects the game's own release.cue rendered (its `nodeManifests` is
 # the author's, so the schema's `violations` are only as good as the schema it loaded): every object is a kind the publisher writes, in
 # the tenant's namespace; a Service is a ClusterIP with no externalIPs; a pod's service account is not the publisher's, its images are
@@ -243,7 +299,9 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 				if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) container ($c.name? | default '?') runs ($image), not an image under ($prefix)") }
 				if ($c.securityContext?.procMount? | default "Default") != "Default" { $why = ($why | append $"($id) container ($c.name? | default '?') sets procMount ($c.securityContext.procMount)") }
 				if ($c.securityContext?.privileged? | default false) == true { $why = ($why | append $"($id) container ($c.name? | default '?') is privileged") }
-				if ($c.securityContext?.allowPrivilegeEscalation? | default false) == true { $why = ($why | append $"($id) container ($c.name? | default '?') allows privilege escalation") }
+				# Absent is not false: the API server lets a container escalate unless it says it may not. `harden-objects` says so before this runs.
+				let escalation = ($c.securityContext?.allowPrivilegeEscalation? | default null)
+				if $escalation == true { $why = ($why | append $"($id) container ($c.name? | default '?') allows privilege escalation") } else if $escalation != false { $why = ($why | append $"($id) container ($c.name? | default '?') does not set allowPrivilegeEscalation: false") }
 				if ($c.securityContext?.capabilities?.add? | default [] | is-not-empty) { $why = ($why | append $"($id) container ($c.name? | default '?') adds capabilities") }
 				if ($c.ports? | default [] | any {|p| ($p | get -o hostPort | default null) != null }) { $why = ($why | append $"($id) container ($c.name? | default '?') sets a hostPort") }
 				if ($c.securityContext?.seccompProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) container ($c.name? | default '?') runs with an Unconfined seccomp profile") }
@@ -273,6 +331,9 @@ export def check-binding [node: record, tenant: string, host: string] {
 	if ($bound.namespace? | default "") != $tenant or ($bound.host? | default "") != $host or $node.namespace != $tenant or $node.host != $host {
 		error make {msg: $"the app's release.cue does not bind the tags tenant and tenantHost into Node.tenant \(Node.tenant.namespace is ($bound.namespace? | default 'unset'), --tenant is ($tenant); Node.tenant.host is ($bound.host? | default 'unset'), --host is ($host)\)"}
 	}
+	# The release registers OIDC clients at the origin and skips the door's probes for a preview with no host: both are the operator's host alone.
+	if ($node.preview? | default "" | is-not-empty) { error make {msg: "a tenant's release is never a preview: Node.preview must be empty"} }
+	if ($node.origin? | default "") != $"https://($host)" { error make {msg: $"a tenant's origin is https://($host), the operator's host, not the Node's ($node.origin? | default 'unset')"} }
 }
 
 # What a tenant's release never does, said before anything is built or written: it decrypts no SOPS file with the cluster's key (the
@@ -309,14 +370,15 @@ export def check-namespace [node: record] {
 	if $app != $node.name { error make {msg: $"namespace ($ns) records the release of ($app): one app per tenant namespace"} }
 }
 
-# What the push identity must be allowed, asked before anything is built: the registry pod's port-forward, the registry's lease, and the Envoy
-# Gateway data plane's port-forward and reads (the door check).
-export def check-push-rights [node: record, push_kubeconfig: string] {
+# What the push identity must be allowed, asked before anything is built, and only what the chosen path uses: the registry pod's port-forward
+# and the registry's lease (a path that builds, the only one that asks at all) and, with `--door` (a live release: a check never checks the
+# door), the Envoy Gateway's Service reads and, off the cluster, its data plane's port-forward.
+export def check-push-rights [node: record, push_kubeconfig: string, --door] {
 	with-push $push_kubeconfig {
 		let registry = $node.build.registry.namespace
 		# Off the cluster (a kubeconfig is given) the door check forwards to the gateway's pod; in the builder pod it dials the Service's
 		# ClusterIP, so the pod's account needs no port-forward in the gateway's namespace.
-		let forward = ($push_kubeconfig | is-not-empty)
+		let forward = ($door and ($push_kubeconfig | is-not-empty))
 		for ask in ([
 			{verb: "create pods/portforward", args: [create pods --subresource=portforward -n $registry], where: $registry}
 			{verb: "create leases.coordination.k8s.io", args: [create leases.coordination.k8s.io -n $registry], where: $registry}
@@ -327,10 +389,11 @@ export def check-push-rights [node: record, push_kubeconfig: string] {
 			# registry.nu patches the lease it renews and lists them by label
 			{verb: "patch leases.coordination.k8s.io", args: [patch leases.coordination.k8s.io -n $registry], where: $registry}
 			{verb: "list leases.coordination.k8s.io", args: [list leases.coordination.k8s.io -n $registry], where: $registry}
+		] | append (if $door { [
 			# the door check lists the gateway's Services by label, and reads each
 			{verb: "get services", args: [get services -n envoy-gateway-system], where: "envoy-gateway-system"}
 			{verb: "list services", args: [list services -n envoy-gateway-system], where: "envoy-gateway-system"}
-		] | append (if $forward { [{verb: "create pods/portforward", args: [create pods --subresource=portforward -n envoy-gateway-system], where: "envoy-gateway-system"}] } else { [] })) {
+		] } else { [] }) | append (if $forward { [{verb: "create pods/portforward", args: [create pods --subresource=portforward -n envoy-gateway-system], where: "envoy-gateway-system"}] } else { [] })) {
 			if not (can-i ...$ask.args) { error make {msg: $"the push identity may not ($ask.verb) in ($ask.where): it needs the Role studio-builder-push \(services/buildkit-tenants\)"} }
 		}
 	}
