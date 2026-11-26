@@ -50,6 +50,10 @@ export def check-pins [node: record] {
 # The service accounts a tenant's pods never run as: the publisher's and the builder's own.
 const forbidden_accounts = [publisher studio-builder studio-rc-builder studio-provisioner]
 
+# The volume types a tenant's pod may mount: nothing of the node's (hostPath, and not an nfs, iscsi or csi volume that reaches another
+# system), nothing that carries a token but the pod's own (projected, which the API server scopes to its service account).
+const volume_types = [configMap secret emptyDir projected persistentVolumeClaim downwardAPI]
+
 # What the engine's CUE refuses, checked again in nushell over the objects the game's own release.cue rendered (its `nodeManifests` is
 # the author's, so the schema's `violations` are only as good as the schema it loaded): every object is a kind the publisher writes, in
 # the tenant's namespace; a Service is a ClusterIP with no externalIPs; a pod's service account is not the publisher's, its images are
@@ -63,6 +67,10 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 		mut why = []
 		if $"($o.apiVersion? | default '')/($o.kind? | default '')" not-in $kinds { $why = ($why | append $"($id) is not a kind a tenant's publisher writes") }
 		if ($o.metadata?.namespace? | default "") != $ns { $why = ($why | append $"($id) is in namespace ($o.metadata?.namespace? | default 'none'), not ($ns)") }
+		# A token a Secret of this type carries is a service account's (the publisher's included): never written by a tenant's release.
+		if ($o.kind? | default "") == "Secret" and ($o.type? | default "") == "kubernetes.io/service-account-token" {
+			$why = ($why | append $"($id) is a service account token")
+		}
 		if ($o.kind? | default "") == "Service" {
 			if ($o.spec?.type? | default "ClusterIP") != "ClusterIP" { $why = ($why | append $"($id) is a ($o.spec.type) Service: a tenant's Service is a ClusterIP") }
 			if ($o.spec?.externalIPs? | default [] | is-not-empty) { $why = ($why | append $"($id) names externalIPs") }
@@ -70,14 +78,23 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 		if ($o.kind? | default "") == "Cluster" {
 			let image = ($o.spec?.imageName? | default "")
 			if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) runs ($image), not an image under ($prefix)") }
+			# a Service the operator makes for the database must stay inside the cluster: a LoadBalancer or NodePort one would publish it
+			let outward = ($o.spec?.managed?.services?.additional? | default [] | where {|a| ($a.serviceTemplate?.spec?.type? | default "ClusterIP") != "ClusterIP" })
+			if ($outward | is-not-empty) { $why = ($why | append $"($id) has a managed Service that is not a ClusterIP") }
 		}
 		let spec = (if ($o.kind? | default "") in [Deployment Job] { $o.spec?.template?.spec? } else { null })
 		if $spec != null {
-			let account = ($spec.serviceAccountName? | default "")
-			if $account in $forbidden_accounts { $why = ($why | append $"($id) runs as the service account ($account)") }
+			# `serviceAccount` is the deprecated spelling of `serviceAccountName`, and either may carry the account
+			for account in [($spec.serviceAccountName? | default "") ($spec.serviceAccount? | default "")] {
+				if $account in $forbidden_accounts { $why = ($why | append $"($id) runs as the service account ($account)") }
+			}
 			if ($spec.hostUsers? | default true) == false { $why = ($why | append $"($id) sets hostUsers: false") }
 			for key in [hostNetwork hostPID hostIPC] { if ($spec | get -o $key | default false) == true { $why = ($why | append $"($id) sets ($key)") } }
-			if ($spec.volumes? | default [] | any {|v| ($v | get -o hostPath | default null) != null }) { $why = ($why | append $"($id) mounts a hostPath") }
+			for v in ($spec.volumes? | default []) {
+				let kinds = ($v | columns | where {|c| $c != "name" })
+				let other = ($kinds | where {|k| $k not-in $volume_types })
+				if ($other | is-not-empty) { $why = ($why | append $"($id) mounts the volume ($v.name? | default '?') of type ($other | str join ', '), which a tenant's pod may not") }
+			}
 			if ($spec.securityContext?.seccompProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) runs with an Unconfined seccomp profile") }
 			if ($spec.securityContext?.appArmorProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) runs with an Unconfined AppArmor profile") }
 			let notes = ($o.spec?.template?.metadata?.annotations? | default {})
@@ -88,6 +105,9 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 				if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) container ($c.name? | default '?') runs ($image), not an image under ($prefix)") }
 				if ($c.securityContext?.procMount? | default "Default") != "Default" { $why = ($why | append $"($id) container ($c.name? | default '?') sets procMount ($c.securityContext.procMount)") }
 				if ($c.securityContext?.privileged? | default false) == true { $why = ($why | append $"($id) container ($c.name? | default '?') is privileged") }
+				if ($c.securityContext?.allowPrivilegeEscalation? | default false) == true { $why = ($why | append $"($id) container ($c.name? | default '?') allows privilege escalation") }
+				if ($c.securityContext?.capabilities?.add? | default [] | is-not-empty) { $why = ($why | append $"($id) container ($c.name? | default '?') adds capabilities") }
+				if ($c.ports? | default [] | any {|p| ($p | get -o hostPort | default null) != null }) { $why = ($why | append $"($id) container ($c.name? | default '?') sets a hostPort") }
 				if ($c.securityContext?.seccompProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) container ($c.name? | default '?') runs with an Unconfined seccomp profile") }
 				if ($c.securityContext?.appArmorProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) container ($c.name? | default '?') runs with an Unconfined AppArmor profile") }
 			}
