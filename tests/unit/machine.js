@@ -768,6 +768,8 @@ export async function backfill() {
   const young = (weight) => ({ weight, young: true }), aged = (weight) => ({ weight });
   // The memory veto's head flag as the claim computes it: no heavy holder and nothing older in the cores' line.
   const vetoed = (coresOlder) => slot.memVetoed(5, 20, null, 0, coresOlder === 0);
+  // A release claim's head flag as the claim computes it: only older release tickets are ahead of it.
+  const releaseVetoed = (older) => slot.memVetoed(5, 20, null, 0, !older.some((o) => o.release));
   const sh = async (script) => new TextDecoder().decode((await new Deno.Command("sh", { args: ["-c", script], stdout: "piped" }).output()).stdout).trim();
   return {
     incident: admitted(10, 10, [young(10)], 1),
@@ -789,6 +791,10 @@ export async function backfill() {
     heldUnchanged: slot.admitsCores(false, 10, 1, slot.aheadOf([{ weight: 3, release: false }], false, true), 15, false, false, true, false),
     vetoNotHead: vetoed(1),
     vetoHead: vetoed(0),
+    releaseBehindOrdinaryVetoed: releaseVetoed([{ release: false }, { release: false }]),
+    releaseBehindReleaseVetoed: releaseVetoed([{ release: true }]),
+    releaseTicketAhead: ahead(5, 0, [{ weight: 3, release: true, young: true }, young(10), young(1)]),
+    shadowCountsReserve: admitted(8, 0, [young(3), aged(10), young(2)], 3),
     // The claim end to end (slot.ts as the gate runs it): a pool where a live release holds 10 of 15 and a weight-10 ticket waits,
     // then the same with no release, the head aged (STACK_HEAD_WAIT=1).
     ...await (async () => {
@@ -798,7 +804,7 @@ export async function backfill() {
         const sleeper = () => { const p = new Deno.Command("sleep", { args: ["120"] }).spawn(); procs.push(p); return p.pid; };
         const run = async (env, ms) => {
           const c = new Deno.Command(Deno.execPath(), { args: ["run", "-A", slotUrl, "--weight", "1", "--what", "backfill probe", "--", "true"],
-            env: { ...Deno.env.toObject(), STACK_POOL: `${tmp}/pool`, STACK_BUDGET: "15", STACK_HOLD_LOAD: "100000", STACK_RESERVE: "0", ...env }, stdout: "null", stderr: "null" }).spawn();
+            clearEnv: true, env: { PATH: Deno.env.get("PATH") ?? "", HOME: tmp, STACK_POOL: `${tmp}/pool`, STACK_BUDGET: "15", STACK_HOLD_LOAD: "100000", STACK_RESERVE: "0", ...env }, stdout: "null", stderr: "null" }).spawn();
           const t = setTimeout(() => { try { c.kill("SIGTERM"); } catch { /* done */ } }, ms);
           const code = (await c.status).code; clearTimeout(t);
           return code;

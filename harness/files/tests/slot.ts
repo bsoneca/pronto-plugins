@@ -30,7 +30,9 @@
 //   Backfill (PRONTO-1900): tickets that fit go first come first served; the first one that does not (the head)
 //   is the only one protected, and a lighter claim behind it may pass while the room is idle: for the first
 //   STACK_HEAD_WAIT seconds (600) whenever it fits now, then only when it also fits beside the head once the
-//   release that holds the machine is gone (backfillAhead). A head that has waited past it drains the line.
+//   release that holds the machine is gone (backfillAhead), counting the wait from when the head's ticket asked.
+//   A head that has waited past it drains the line. A release ticket ahead keeps the line first come first served,
+//   and a runner job (GITHUB_ACTIONS) is admitted with no release holding, so head protection does not bind it.
 //   A heavy claim is never starved: each blocked ticket becomes the head in turn. There is no release
 //   lane and no ci lane (STACK_RELEASE_LANE, STACK_CI_LANE are accepted and ignored): GitHub's runner
 //   pools separate release, gate and ci, not this file. The one priority is a release's hold (below).
@@ -738,16 +740,18 @@ export const aheadOf = (older: { weight: number; release: boolean }[], release: 
 // what fits now and, once the head is aged, the head's room beside what remains after the releases.
 export const backfillOf = <T extends { weight: number; release: boolean; queued: number }>(older: T[], used: number, releaseHeld: number,
   budget: number, now: number, headWaitMs: number) => {
-  let reserved = 0, passed = 0, head: T | undefined;
+  // A release ticket ahead keeps the line first come first served: nothing passes it.
+  if (older.some((o) => o.release)) return { ahead: older.reduce((n, o) => n + o.weight, 0), aged: false, head: undefined as T | undefined };
+  let reserved = 0, passed = 0, before = 0, head: T | undefined;
   for (const o of older) {
     if (!head) {
-      if (admits(used, o.weight, reserved, budget)) reserved += o.weight; else head = o;
-    } else if (used + reserved + o.weight <= budget && (young(head, now, headWaitMs) || used - releaseHeld + passed + o.weight + head.weight <= budget)) {
+      if (admits(used, o.weight, reserved, budget)) reserved += o.weight; else { head = o; before = reserved; }
+    } else if (used + reserved + o.weight <= budget && (young(head, now, headWaitMs) || used - releaseHeld + before + passed + o.weight + head.weight <= budget)) {
       reserved += o.weight; passed += o.weight;
     }
   }
   const aged = head !== undefined && !young(head, now, headWaitMs);
-  return { ahead: aged ? Math.max(reserved, passed + head!.weight - releaseHeld) : reserved, aged, head };
+  return { ahead: aged ? Math.max(reserved, before + passed + head!.weight - releaseHeld) : reserved, aged, head };
 };
 export const backfillAhead = (...a: Parameters<typeof backfillOf<{ weight: number; release: boolean; queued: number }>>) => backfillOf(...a).ahead;
 const young = (head: { release: boolean; queued: number }, now: number, headWaitMs: number) => !head.release && now - head.queued < headWaitMs;
@@ -1308,7 +1312,7 @@ export async function claim(pid = Deno.pid, what = defaultWhat(Deno.args), weigh
       if (weight >= memMinWeight() && !nested) {
         const min = Number(Deno.env.get("STACK_MIN_FREE_PCT") ?? Deno.env.get("CUE_MIN_FREE_PCT") ?? 20);
         const free = await freeMemoryPct(), avail = await availableMemoryGB();
-        const head = !holders.some((h) => h.weight >= memMinWeight()) && coresOlder.length === 0;
+        const head = !holders.some((h) => h.weight >= memMinWeight()) && (release ? !coresOlder.some((o) => o.release) : coresOlder.length === 0);
         if (memVetoed(free, min, avail, need, head)) {
           return why(`the machine has ${free}% of its memory free${avail === null ? "" : ` (${round(avail)} GB available${need > 0 ? `, ${round(need)} GB needed` : ""})`}, under ${min}% (STACK_MIN_FREE_PCT)${need > 0 ? " or what this needed last time" : ""}: waiting for it to recover`);
         }
