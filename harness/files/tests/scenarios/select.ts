@@ -130,6 +130,20 @@ export function siblingFiles(root: string): [string, string][] | null {
   }).filter(([f]) => /^\.\.\/[^/.][^/]*\/./.test(f));
 }
 
+// A flag as OFREP answers it (flagd). Off is read from two answers only: a 404 whose JSON body names
+// FLAG_NOT_FOUND (the node lacks the flag), and a 2xx whose reason is DISABLED or whose value is false. A
+// boolean value is the flag's. Everything else (a 5xx, an HTML 404 from a broken /ofrep, a body that is no
+// JSON, any other status) is a door that did not answer, and throws.
+export function ofrepFlag(status: number, body: any): boolean {
+  const json = body !== null && typeof body === "object";
+  if (json && status === 404 && body.errorCode === "FLAG_NOT_FOUND") return false;
+  if (json && status >= 200 && status < 300) {
+    if (body.reason === "DISABLED") return false;
+    if (typeof body.value === "boolean") return body.value;
+  }
+  throw new Error(`${status} ${JSON.stringify(body)}`);
+}
+
 // What a scenario's requests say it touched in the database: the tables and functions its `/crud/…`
 // requests name (a table `/crud/<t>`, a function `/crud/rpc/<fn>`, a shape's `?table=`), lowercased; `wild` when it
 // read shapes and none named a table.
