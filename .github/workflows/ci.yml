@@ -332,14 +332,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/install-sayt
-      # Gradle's dependency cache lives outside the job workspace, so a run fetches only what changed
-      # (Maven Central answered 429 when every run downloaded all of it). Both android jobs share it;
-      # Gradle locks the cache, so they may run at once. It holds downloaded artifacts only: no
-      # credentials, since gradle.properties here names none.
-      - name: Keep Gradle's dependency cache on the runner
-        run: |
-          mkdir -p "$HOME/.cache/pronto/gradle"
-          echo "GRADLE_USER_HOME=$HOME/.cache/pronto/gradle" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/gradle-cache
       - name: Write the current host into hello-android
         run: ./bin/pronto-android examples/hello-android hello-android
       # Only what the Kotlin tests need (the JDK, the Android SDK and Gradle), installed against the
@@ -365,14 +358,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/install-sayt
-      # Gradle's dependency cache lives outside the job workspace, so a run fetches only what changed
-      # (Maven Central answered 429 when every run downloaded all of it). Both android jobs share it;
-      # Gradle locks the cache, so they may run at once. It holds downloaded artifacts only: no
-      # credentials, since gradle.properties here names none.
-      - name: Keep Gradle's dependency cache on the runner
-        run: |
-          mkdir -p "$HOME/.cache/pronto/gradle"
-          echo "GRADLE_USER_HOME=$HOME/.cache/pronto/gradle" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/gradle-cache
       - name: Write the terminal host into a scratch app
         run: |
           app=$RUNNER_TEMP/term
