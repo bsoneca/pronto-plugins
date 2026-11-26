@@ -332,6 +332,7 @@ def main [] {
 	test_a_tenants_edited_schema_copy_is_refused
 	test_a_tenants_build_include_stays_under_the_app
 	test_a_tenants_namespace_is_a_studio_one
+	test_a_tenants_issuers_are_the_engines_list
 	test_the_tenant_door_check_in_the_pod_dials_the_service_and_forwards_to_nothing
 	print "\nAll node release tests passed."
 }
@@ -2507,6 +2508,41 @@ def test_a_tenants_namespace_is_a_studio_one [] {
 	assert ($r.exit_code != 0) "a namespace outside studio- was not refused"
 	assert (has $r.stderr "a tenant's namespace is studio-<owner>-<app>-<hash>") $r.stderr
 	assert equal (calls $w) []
+	rm -rf $w.dir
+}
+
+def test_a_tenants_issuers_are_the_engines_list [] {
+	print "test a tenant's release whose auth names an issuer off the engine's list (http, a pod name, an IP, a port, credentials, a look-alike host, an _INTERNAL at a pod address) is refused naming the key, before anything is built, written or registered; the broker passes..."
+	let w = (tenant-world)
+	let compose_file = ($w.dir | path join compose.json)
+	let base = (open $compose_file)
+	let cases = [
+		{env: {OIDC_GOOGLE_ISSUER: "http://flagd:8693"}, says: "OIDC_GOOGLE_ISSUER is http://flagd:8693: an issuer is an https origin"}
+		{env: {OIDC_GOOGLE_ISSUER: "https://10.43.0.1"}, says: "OIDC_GOOGLE_ISSUER is https://10.43.0.1: an issuer is a name, never an IP address"}
+		{env: {OIDC_GOOGLE_ISSUER: "https://[::1]"}, says: "an issuer is a name, never an IP address"}
+		{env: {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com:4000"}, says: "OIDC_GOOGLE_ISSUER is https://id.bonkchess.com:4000: an issuer names no port"}
+		{env: {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com@flagd:8693"}, says: "an issuer carries no credentials"}
+		{env: {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com.evil.example"}, says: "OIDC_GOOGLE_ISSUER is https://id.bonkchess.com.evil.example, which is not an issuer a tenant may use"}
+		{env: {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com/evil"}, says: "which is not an issuer a tenant may use"}
+		{env: {BILLING_BROKER_INTERNAL: "https://10.43.0.7"}, says: "BILLING_BROKER_INTERNAL is https://10.43.0.7: an issuer is a name, never an IP address"}
+		{env: {BILLING_BROKER_INTERNAL: "https://pronto-llm.pronto-llm.svc"}, says: "BILLING_BROKER_INTERNAL is https://pronto-llm.pronto-llm.svc, which is not an issuer a tenant may use"}
+	]
+	for c in $cases {
+		$base | upsert services.auth.environment ($base.services.auth.environment | merge $c.env) | to json | save -f $compose_file
+		let r = (tenant-release $w)
+		assert ($r.exit_code != 0) $"($c.env | to nuon) was not refused"
+		assert (has $r.stderr $c.says) $"($c.env | to nuon): ($r.stderr)"
+		assert equal (writes $w) []
+		assert (not ($w.dir | path join deno.log | path exists)) "nothing was registered or fetched"
+		assert (not ($w.dir | path join docker.log | path exists) or not (open --raw ($w.dir | path join docker.log) | str contains "buildx bake")) "nothing was built"
+	}
+	# the engine's own list, and the broker on it
+	let listed = (in-world $w -c (script $w $"use ($engine_dir | path join tenant.nu); tenant tenant-issuers | to json --raw"))
+	assert equal $listed.exit_code 0 $listed.stderr
+	assert equal ($listed.stdout | from json) ["https://id.bonkchess.com"]
+	$base | upsert services.auth.environment ($base.services.auth.environment | merge {OIDC_GOOGLE_ISSUER: "https://id.bonkchess.com"}) | to json | save -f $compose_file
+	let ok = (tenant-release $w --check)
+	assert equal $ok.exit_code 0 $"($ok.stdout)\n($ok.stderr)"
 	rm -rf $w.dir
 }
 
