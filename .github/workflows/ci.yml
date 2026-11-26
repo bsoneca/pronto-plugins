@@ -332,6 +332,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/install-sayt
+      - uses: ./.github/actions/gradle-cache
       - name: Write the current host into hello-android
         run: ./bin/pronto-android examples/hello-android hello-android
       # Only what the Kotlin tests need (the JDK, the Android SDK and Gradle), installed against the
@@ -357,6 +358,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/install-sayt
+      - uses: ./.github/actions/gradle-cache
       - name: Write the terminal host into a scratch app
         run: |
           app=$RUNNER_TEMP/term
