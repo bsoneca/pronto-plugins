@@ -2,5 +2,6 @@
 package prontoproject
 
 pronto: {
-	say: say: generate: rulemap: lessons: {"priority": 3, "cmds": [{"do": "use ./lessons/lessons.nu; lessons write --sql lessons/lessons_spec.sql --js __MODULE_DIR__/lessons_spec.js --messages messages"}]}
+	// before the hatch (0), which bundles messages/*.json, and pronto's writer (1), which copies lessons_spec.sql into its raw migration
+	say: say: generate: rulemap: lessons: {"priority": -1, "cmds": [{"do": "use ./lessons/lessons.nu; lessons write --sql lessons/lessons_spec.sql --js __MODULE_DIR__/lessons_spec.js --messages messages"}]}
 }
