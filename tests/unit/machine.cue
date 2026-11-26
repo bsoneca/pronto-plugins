@@ -56,6 +56,54 @@ cases: "the cue wrapper replays an unchanged export it ran at once, outside the 
 		{get: "log", expect: ["export\tmiss", "export\thit", "export\tmiss"], why: "the cache log counts the direct path's exports too: a miss, the hit, the changed input's miss; what skipped the cache logs nothing"},
 	]
 }
+cases: "slot.ts backfills: a lighter claim passes the head of the line when the room is idle, and the head is protected once it has waited (PRONTO-1900)": {
+	suite: "machine"
+	steps: [
+		{call: "machine.backfill"},
+		{keep: "r"},
+		{get: "incident", expect: true, why: "a release holds 10 of 15 and a weight-10 head waits for it: a claim of 1 fits the 5 idle"},
+		{use: "r"},
+		{get: "fillsRoomOnly", expect: false, why: "passers fill the room the head leaves and no more: 10 held + 2 + 2 ahead + 2 is over 15"},
+		{use: "r"},
+		{get: "fillsRoomFirst", expect: true, why: "the first passer still fits"},
+		{use: "r"},
+		{get: "shadowAdmits", expect: true, why: "release 8 + ordinary 3 held, aged head 6, claim 4: 3 + 4 + 6 fit once the release ends"},
+		{use: "r"},
+		{get: "shadowRefuses", expect: false, why: "release 4 + ordinary 9 held, aged head 6, claim 1: 9 + 1 + 6 is over 15"},
+		{use: "r"},
+		{get: "youngNoRelease", expect: true, why: "no release, a young head: the aging window lets a claim that fits pass"},
+		{use: "r"},
+		{get: "agedNoRelease", expect: false, why: "no release, an aged head: the line drains for it"},
+		{use: "r"},
+		{get: "fitsBeforeHeadYoung", expect: true, why: "a ticket ahead of the head that fits keeps first come first served; a young head lets the claim pass"},
+		{use: "r"},
+		{get: "fitsBeforeHeadAged", expect: false, why: "the same behind an aged head waits"},
+		{use: "r"},
+		{get: "headAheadYoung", expect: 5, why: "behind a young head the claim waits for what fits now: the ticket ahead of it and the passer"},
+		{use: "r"},
+		{get: "headAheadAged", expect: 10, why: "behind an aged head it also waits for the head's room"},
+		{use: "r"},
+		{get: "overBudgetHead", expect: true, why: "a claim on an empty pool runs whatever it weighs"},
+		{use: "r"},
+		{get: "overBudgetHeadAged", expect: false, why: "a head heavier than the budget, aged, is waited for: it runs alone on the empty pool (its own claim, above)"},
+		{use: "r"},
+		{get: "emptyLine", expect: 0, why: "with nothing older there is nothing to wait behind"},
+		{use: "r"},
+		{get: "releaseHeadAged", expect: false, why: "a release at the head is protected at once: a claim of 6 beside the 10 held does not pass it"},
+		{use: "r"},
+		{get: "releaseClaimUnchanged", expect: 4, why: "a release claim counts only the older releases"},
+		{use: "r"},
+		{get: "heldUnchanged", expect: false, why: "a claim held by a release (no room beside it) is still held"},
+		{use: "r"},
+		{get: "vetoNotHead", expect: true, why: "a passer is no head of an empty line: the memory veto (PRONTO-1752) still applies to it"},
+		{use: "r"},
+		{get: "vetoHead", expect: false, why: "the true head of the line is never vetoed"},
+		{use: "r"},
+		{get: "e2eBeside", expect: 0, why: "end to end: a live release holds 10 of 15 and a weight-10 ticket waits; slot.ts --weight 1 runs and exits 0"},
+		{use: "r"},
+		{get: "e2eDrains", expect: true, why: "end to end: with no release and the head past STACK_HEAD_WAIT the claim waits (it is still waiting when the timeout stops it, so it does not exit 0)"},
+	]
+}
 cases: "slot.ts holds a claim for a live release in another account's pool, and only for that, and trusts only its own pool (PRONTO-762)": {
 	suite: "machine"
 	steps: [
