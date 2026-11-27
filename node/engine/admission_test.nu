@@ -18,6 +18,7 @@ use std/assert
 def main [--kind: string = ""] {
 	print "Running tenant admission tests...\n"
 	test_no_policy_is_named_as_one_of_studios_own
+	test_every_expression_is_balanced
 	test_every_policy_matches_tenant_namespaces_only
 	test_the_images_are_the_namespaces_own
 	test_the_accounts_are_the_engines_reserved_ones_and_the_databases
@@ -72,6 +73,57 @@ def test_no_policy_is_named_as_one_of_studios_own [] {
 		assert ($o.metadata.name | str starts-with $"($policy_prefix)-engine-") $o.metadata.name
 	}
 	assert equal ($objects | where kind == "ValidatingAdmissionPolicy" | length) 8
+}
+
+# Whether a CEL expression's brackets and quotes are balanced: a string literal ends, and every closer has an opener, none is left open. "" when they are, else what is not.
+def balanced [expr: string]: nothing -> string {
+	mut stack = []
+	mut quote = ""
+	mut skip = false
+	let chars = ($expr | split chars)
+	for i in 0..(($chars | length) - 1) {
+		let c = ($chars | get $i)
+		if $skip { $skip = false; continue }
+		if $quote != "" {
+			if $c == "\\" { $skip = true } else if $c == $quote { $quote = "" }
+			continue
+		}
+		if $c == "'" or $c == '"' { $quote = $c; continue }
+		if $c in ["(" "[" "{"] { $stack = ($stack | append $c); continue }
+		if $c in [")" "]" "}"] {
+			if ($stack | is-empty) { return $"a closer with no opener at ($i)" }
+			let open = ($stack | last)
+			let want = (match $open { "(" => ")", "[" => "]", _ => "}" })
+			if $c != $want { return $"($c) closes a ($open) at ($i)" }
+			$stack = ($stack | drop 1)
+		}
+	}
+	if $quote != "" { return "a string literal is never closed" }
+	if ($stack | is-not-empty) { return $"($stack | length) opener\(s\) never closed" }
+	""
+}
+
+def test_every_expression_is_balanced [] {
+	print "test every generated CEL expression (each validation, variable and match condition of every policy, with the operators and a registry given) has balanced brackets and closed strings, so an invalid one (an extra parenthesis once made two policies refuse to install) cannot pass..."
+	for extra in ["" ', operators: ["system:serviceaccount:cnpg-system:cnpg-manager"], registry: "registry.example:5000"'] {
+		let objects = (schema $"\(#TenantAdmission & {label: \"($label)\", name: \"($policy_prefix)\"($extra)}).objects" | where kind == "ValidatingAdmissionPolicy")
+		mut checked = 0
+		for p in $objects {
+			let exprs = (($p.spec.validations? | default [] | get expression) | append ($p.spec.variables? | default [] | get expression) | append ($p.spec.matchConditions? | default [] | get expression))
+			for e in $exprs {
+				let r = (balanced $e)
+				assert equal $r "" $"($p.metadata.name): ($r): ($e | str substring 0..120)"
+				$checked = $checked + 1
+			}
+		}
+		assert ($checked > 100) $"only ($checked) expressions were checked"
+	}
+	# the checker itself reads what is wrong
+	assert equal (balanced "a.all(b, (c))") ""
+	assert ((balanced "a.all(b, (c)))") | str contains "closer")
+	assert ((balanced "a.all(b, (c)") | str contains "never closed")
+	assert ((balanced "a == 'x") | str contains "string")
+	assert equal (balanced "a == ')'") "" "a bracket inside a string is no bracket"
 }
 
 def test_every_policy_matches_tenant_namespaces_only [] {
