@@ -298,3 +298,24 @@ the CUE registry, and a pronto runtime (`PRONTO_RUNTIME`, or mise's tool the new
 helpers run for real (register-clients, which runs deno and writes to an issuer, is faked there and never called by a `--check`). The contract test, per upstream pin (`pronto_pin`), holds that the engine's release
 data, its objects and its kubectl order equal upstream `main -e gke`'s, except the engine's declared patches
 and extra steps; a new pin is validated by moving `pronto_pin` and fixing the engine before an app moves its own.
+
+## The node host
+
+What any pronto node's host needs, whatever it runs (`node/host/`): this node is a lab for hundreds of apps per VPS,
+so a bound every node needs is written here once, with defaults, and each repository keeps only its own values.
+
+- `schema/host.cue`: `#Host`, with `dockerGC` (the Docker cleanup's age, tag pattern, build-cache and total caps, schedule).
+  A repository unifies `#Host` with its values; CUE refuses a cap at or under the cache, an age under one hour, a pattern with a quote.
+- `docker-gc.sh`: a static script. Each release@k8s bakes its images with the node's dockerd, tags them `localhost:<port>/...` and
+  pushes them to the node's registry; nothing removed them until Docker held 200G and the node went down. The timer's job removes tags
+  last tagged over `minAgeHours` ago (by reference, never forced, so an image a container uses stays; a tag time it cannot read keeps the image),
+  dangling images, and build cache past `buildCacheGB`, and fails when Docker still holds more than `capGB`. `--dry-run` only lists.
+  It reads its settings from `/etc/pronto/docker-gc.env`.
+- `host.nu`: `render <host.json>` gives the files (the script, the env file from the values, the service, the timer); `apply <host.json>
+  [--node user@host] [--check]` writes what drifted (each file whole beside itself, then renamed), reloads systemd and enables the timer, or with
+  `--check` only says and exits 1. Each read, write and systemctl call is an ssh login of its own (BatchMode, a connect timeout), none retried.
+- `export/`: `cue export ./node/host/export -e files --out json`, what `bin/pronto-node --host <dir>` writes into `<dir>/node-host/`, byte for byte.
+  A repository pins this repository's merge in a file of its own (`.github/node-host.pin`), apart from the engine's, so a host change
+  does not regenerate every app's `node/`.
+
+Tests: `./saytw --script tools.nu cue vet -c ./node/host` and `./saytw --script tools.nu nu node/host/host_test.nu` (a fake docker and systemctl, a temp root).
