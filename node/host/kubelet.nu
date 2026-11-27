@@ -229,8 +229,12 @@ export def apply-kubelet [k: record, --check, --node: string = "", --root: strin
 		return {code: 1}
 	}
 	let r = (try { apply-locked $k $config $lock --node $node --root $root --polls $polls --pause $pause } catch {|e|
-		sh $node $"rm -rf '($lock)'" | ignore
-		error make {msg: $e.msg}
+		# Both are said: what stopped the run, and, when the lock could not be released either, that, with its path.
+		# After a failed login no second one is made to release the lock (a failed login is never retried): it expires.
+		if ($e.msg | str starts-with "k3s-kubelet: ssh failed") { error make {msg: $"($e.msg); the lock ($lock) is left to expire"} }
+		let rel = (sh $node $"rm -rf '($lock)'")
+		let also = if $rel.exit_code != 0 { $"; releasing the lock ($lock) also failed \(exit ($rel.exit_code)\): ($rel.stderr | str trim)" } else { "" }
+		error make {msg: $"($e.msg)($also)"}
 	})
 	must (sh $node $"rm -rf '($lock)'") $"releasing the lock ($lock)" | ignore
 	$r
@@ -253,7 +257,19 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 	# What the marker holds: had or none (a file this run or an earlier one installed, and whether there was a previous one), or
 	# rollback-had / rollback-none (a rollback that began: the previous file is being, or has been, put back).
 	let phase = (if $marked { must (sh $node $"cat '($pending)'") "reading the marker" | str trim } else { "" })
+	# Only these four are ours. Anything else (a marker a hand or a half-finished write left) stops the run before it installs or
+	# restarts anything: the operator looks at it.
+	if $marked and not ($phase in ["had" "none" "rollback-had" "rollback-none"]) {
+		print --stderr $"k3s-kubelet: ($pending) holds ($phase | to json --raw), none of had, none, rollback-had, rollback-none: nothing changed; check it by hand"
+		return {code: 1}
+	}
 	mut changed = $marked
+	# What the kubelet reported before anything was written: when it already runs these args, a change to the file's text needs
+	# no restart.
+	mut before = ""
+	# Settled: the marker goes last, after the backup and the scratch files, each synced, so a run that dies in between leaves
+	# either the marker with its backup, or neither.
+	let settle = $"rm -f '($prev)' '($tmp)' '($prev).tmp' '($pending).tmp' && sync && rm -f '($pending)' && sync"
 	let restart = {||
 		beat $node $lock
 		let r = (sh $node "timeout 180 systemctl restart k3s")
@@ -267,7 +283,7 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 	# before the restart, finishes the rollback and verifies the previous config before it installs anything. A marker that says
 	# none of had, none or a rollback stops here, with everything kept.
 	let rollback = {||
-		let back = (sh $node $"case \"$\(cat '($pending)' 2>/dev/null\)\" in had|rollback-had) k=rollback-had ;; none|rollback-none) k=rollback-none ;; *) echo 'the pending marker holds none of had, none, rollback-had, rollback-none' >&2; exit 1 ;; esac; echo $k >'($pending).tmp' && sync && mv -f '($pending).tmp' '($pending)' && sync && case $k in rollback-had) cp -p '($prev)' '($tmp)' && sync && mv -f '($tmp)' '($live)' && sync ;; rollback-none) rm -f '($live)' ;; esac")
+		let back = (sh $node $"case \"$\(cat '($pending)' 2>/dev/null\)\" in had|rollback-had) k=rollback-had ;; none|rollback-none) k=rollback-none ;; *) echo 'the pending marker holds none of had, none, rollback-had, rollback-none' >&2; exit 1 ;; esac; echo $k >'($pending).tmp' && sync && mv -f '($pending).tmp' '($pending)' && sync && case $k in rollback-had) cp -p '($prev)' '($tmp)' && sync && mv -f '($tmp)' '($live)' && sync ;; rollback-none) rm -f '($live)' && sync ;; esac")
 		if $back.exit_code != 0 {
 			print --stderr $"k3s-kubelet: the previous file could not be put back: ($back.stderr | str trim); ($pending) is kept"
 			return {code: 1}
@@ -276,7 +292,7 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 		if $restarted {
 			let r = (read-settled $node $want $polls $pause $lock)
 			if $r.state != "unreadable" {
-				must (sh $node $"rm -f '($pending)' '($prev)' '($tmp)'") $"removing ($pending) and ($prev) after the rollback" | ignore
+				must (sh $node $settle) $"removing ($pending) and ($prev) after the rollback" | ignore
 				print --stderr "k3s-kubelet: put the previous file back and restarted k3s"
 				return {code: 1}
 			}
@@ -315,6 +331,16 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 				if not (preflight $node $k $root) { return {code: 1} }
 				do $restart | ignore
 			}
+		} else {
+			# An earlier apply installed the file and stopped: if it died before its restart, the kubelet still runs the old args
+			# (readable, differing), and restarting it is that apply's next step. A kubelet that is down falls through to the wait and
+			# the rollback below.
+			let r = (read-settled $node $want $polls $pause $lock)
+			if $r.state == "differs" {
+				print "an earlier apply installed the file but the kubelet does not run it: restarting"
+				if not (preflight $node $k $root) { return {code: 1} }
+				do $restart | ignore
+			}
 		}
 	} else {
 		print $"($live) differs"
@@ -327,16 +353,36 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 				print --stderr $"k3s-kubelet: the kubelet's config could not be read: ($r.said); nothing changed"
 				return {code: 1}
 			}
+			$before = $r.state
+		}
+		let sum = ($config | hash sha256)
+		if $before == "match" {
+			# The kubelet already runs these args: only the file's text differs (a comment, an older spelling). It is replaced whole and
+			# atomically, with no marker and no backup (nothing is restarted, so nothing can be rejected), and checked again.
+			let plain = $"rm -f '($tmp)' && tee '($tmp)' >/dev/null && sync && [ \"$\(sha256sum '($tmp)' | cut -d' ' -f1\)\" = ($sum) ] && mv -f '($tmp)' '($live)' && sync || { rm -f '($tmp)'; exit 1; }"
+			let w = (sh $node $plain $config)
+			if $w.exit_code == 255 { error make {msg: $"k3s-kubelet: ssh failed while writing the file, stopping: ($w.stderr | str trim)"} }
+			if $w.exit_code != 0 {
+				print --stderr $"k3s-kubelet: writing the file failed, the live file is as it was: ($w.stderr | str trim)"
+				return {code: 1}
+			}
+			let again = (read-settled $node $want $polls $pause $lock)
+			if $again.state != "match" {
+				print --stderr $"k3s-kubelet: the file is rewritten, but the kubelet no longer reports #Host's args \(($again.state)\): ($again.said)"
+				return {code: 1}
+			}
+			print "the kubelet already runs #Host's args: the file is rewritten, nothing restarted"
+			return {code: 0}
 		}
 		if not (preflight $node $k $root) { return {code: 1} }
 		$changed = true
-		let sum = ($config | hash sha256)
-		# The marker and backup are made first, and only when no earlier run left them (its backup is the good one), and
-		# synced; a run that fails before the rename removes what it made. The new file is synced before the rename.
+		# The backup and the marker are made first, each by a temporary file, synced, then renamed (so either is absent or whole,
+		# never partial), the backup before the marker, and only when no earlier run left them (its backup is the good one); a run
+		# that fails before the rename removes what it made. The new file is synced before the rename.
 		# Before the rename any failure leaves the live file as it was and removes what this run made. Once the rename has
 		# happened the new file is live: a failed sync then (exit 4) keeps the marker and the backup, and the run stops, for the
 		# next one to verify or roll back.
-		let install = $"made=0; undo\(\) { rm -f '($tmp)'; [ \"$made\" != 1 ] || rm -f '($pending)' '($prev)'; }; mkdir -p '($live | path dirname)' && { test -e '($pending)' || { rm -f '($prev)' && made=1 && k=none && { ! test -e '($live)' || { cp -p '($live)' '($prev)' && k=had; }; } && echo $k >'($pending)' && sync; }; } && rm -f '($tmp)' && { tee '($tmp)' >/dev/null && sync && [ \"$\(sha256sum '($tmp)' | cut -d' ' -f1\)\" = ($sum) ]; } || { undo; exit 1; }; mv -f '($tmp)' '($live)' || { undo; exit 1; }; sync || { echo 'the new file is installed but sync failed' >&2; exit 4; }"
+		let install = $"made=0; undo\(\) { rm -f '($tmp)' '($prev).tmp' '($pending).tmp'; [ \"$made\" != 1 ] || rm -f '($pending)' '($prev)'; }; mkdir -p '($live | path dirname)' || exit 1; rm -f '($prev).tmp' '($pending).tmp'; if ! test -e '($pending)'; then rm -f '($prev)' && made=1 || { undo; exit 1; }; if test -e '($live)'; then cp -p '($live)' '($prev).tmp' && sync && mv -f '($prev).tmp' '($prev)' && k=had || { undo; exit 1; }; else k=none; fi; echo $k >'($pending).tmp' && sync && mv -f '($pending).tmp' '($pending)' && sync || { undo; exit 1; }; fi; rm -f '($tmp)' && tee '($tmp)' >/dev/null && sync && [ \"$\(sha256sum '($tmp)' | cut -d' ' -f1\)\" = ($sum) ] || { undo; exit 1; }; mv -f '($tmp)' '($live)' || { undo; exit 1; }; sync || { echo 'the new file is installed but sync failed' >&2; exit 4; }"
 		let w = (sh $node $install $config)
 		if $w.exit_code == 255 { error make {msg: $"k3s-kubelet: ssh failed while writing the file, stopping: ($w.stderr | str trim)"} }
 		if $w.exit_code == 4 {
@@ -357,7 +403,7 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 		$last = (read-configz $node $want)
 		if $last.state == "match" {
 			print "the kubelet runs with #Host's args"
-			if $changed { must (sh $node $"rm -f '($pending)' '($prev)' '($tmp)'") $"removing ($pending) and ($prev) \(the kubelet runs the file, but the marker stays: apply again\)" | ignore }
+			if $changed { must (sh $node $settle) $"removing ($pending) and ($prev) \(the kubelet runs the file, but the marker stays: apply again\)" | ignore }
 			return {code: 0}
 		}
 		sleep $pause

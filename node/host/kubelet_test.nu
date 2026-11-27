@@ -44,6 +44,10 @@ def main [] {
 	test_an_interrupted_rollback_is_finished_before_anything_is_installed
 	test_a_heartbeat_that_fails_stops_the_run
 	test_an_answer_without_the_compared_fields_is_unreadable
+	test_a_marker_is_written_whole_or_not_at_all
+	test_a_change_that_only_rewrites_the_text_restarts_nothing
+	test_a_failed_lock_release_is_said_with_the_error_that_stopped_the_run
+	test_a_marked_run_restarts_a_kubelet_that_never_got_the_restart
 	test_check_changes_nothing
 	test_every_call_has_a_deadline
 	print "\nAll node kubelet tests passed."
@@ -113,7 +117,7 @@ def test_cue_refuses_a_map_missing_a_threshold_and_a_gc_that_does_not_come_first
 # text or null). `mode`: ok (the kubelet runs the live file after a restart), stuck (it keeps running the old file),
 # noapi (kubectl fails), empty (kubectl answers nothing, exit 0), fulldisk (tee fails halfway), stuckfail (stuck, and the second
 # k3s restart fails). Returns what the run did.
-def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: int = -2, --dfi: int = 10, --other: string = "", --dropin: string = "", --unit: string = "", --stale: string = "", --mem: int = 4096, --unreadable, --locked]: nothing -> record {
+def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: int = -2, --dfi: int = 10, --other: string = "", --dropin: string = "", --unit: string = "", --stale: string = "", --mem: int = 4096, --unreadable, --rmlock, --locked]: nothing -> record {
 	let dir = (mktemp --directory --tmpdir node-kubelet-XXXXXX)
 	let root = ($dir | path join root)
 	let live = $root + $live_path
@@ -144,8 +148,9 @@ def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: in
 	do $nshim sha256sum 'exec shasum -a 256 "$@"'
 	do $nshim systemctl 'd=$(dirname "$0")/..; [ -n "$FAKE_REMOTE" ] || { echo "$*" >>"$d/local-systemctl.log"; exit 0; }; echo "$*" >>"$d/systemctl.log"; case "$1" in cat) [ "$MODE" != nounit ] || { echo "no such unit" >&2; exit 1; }; cat "$d/unitcat" 2>/dev/null; exit 0;; esac; n=$(grep -c "^restart" "$d/systemctl.log"); if [ "$MODE" = stuckfail ] && [ "$n" -ge 2 ]; then exit 1; fi; [ -e "$KUBELET_LIVE" ] && cp "$KUBELET_LIVE" "$d/running"; true'
 	do $nshim tee 'if [ "$MODE" = fulldisk ]; then head -c 12 >"$1"; exit 1; fi; if [ "$MODE" = shorttee ]; then head -c 12 >"$1"; exit 0; fi; exec /usr/bin/tee "$@"'
-	do $nshim sync 'd=$(dirname "$0")/..; n=$(cat "$d/synccount" 2>/dev/null || echo 0); echo $((n+1)) >"$d/synccount"; if [ "$MODE" = syncfail ] && [ "$n" -ge 2 ]; then exit 1; fi; exit 0'
-	do $nshim rm 'if [ "$MODE" = rmfail ]; then case "$*" in *pending*) exit 1;; esac; fi; exec /bin/rm "$@"'
+	do $nshim sync 'd=$(dirname "$0")/..; n=$(cat "$d/synccount" 2>/dev/null || echo 0); echo $((n+1)) >"$d/synccount"; if [ "$MODE" = syncfail ] && cmp -s "$KUBELET_LIVE" "$d/desired.yaml"; then exit 1; fi; exit 0'
+	do $nshim rm 'if [ "$MODE" = rmfail ]; then case "$*" in *.pending) exit 1;; esac; fi; if [ "$RMFAIL_LOCK" = 1 ]; then case "$*" in *.lock*) echo "rm: Read-only file system" >&2; exit 1;; esac; fi; exec /bin/rm "$@"'
+	do $nshim mv 'if [ "$MODE" = pendingmvfail ]; then case "$*" in *pending.tmp*) echo "mv: I/O error" >&2; exit 1;; esac; fi; exec /bin/mv "$@"'
 	do $nshim touch 'd=$(dirname "$0")/..; echo "$*" >>"$d/touch.log"; if [ "$MODE" = touchfail ]; then echo "touch: Read-only file system" >&2; exit 1; fi; exec /usr/bin/touch "$@"'
 	do $nshim mkdir 'd=$(dirname "$0")/..; if [ "$MODE" = nomkdir ] && [ "$1" = -p ]; then echo "mkdir: Permission denied" >&2; exit 1; fi; exec /bin/mkdir "$@"'
 	do $nshim timeout 'd=$(dirname "$0")/..; echo "$*" >>"$d/timeout.log"; shift; exec "$@"'
@@ -154,7 +159,7 @@ def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: in
 	"" | save --raw ($dir | path join systemctl.log)
 	let img = if $df_img == -2 { $df } else { $df_img }
 	# An error out of apply-kubelet (the lock is released first) is code 99 with its message.
-	let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')", KUBECTL: ($dir | path join nodebin kubectl), MODE: $mode, KUBELET_LIVE: $live, DF_PCT: $df, DF_IMG_PCT: $img, DFI_PCT: $dfi} {
+	let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')", KUBECTL: ($dir | path join nodebin kubectl), MODE: $mode, KUBELET_LIVE: $live, DF_PCT: $df, DF_IMG_PCT: $img, DFI_PCT: $dfi, RMFAIL_LOCK: (if $rmlock { "1" } else { "0" })} {
 		try { apply-kubelet $k --check=$check --node fake --root $root --polls 2 --pause 0sec } catch {|e| {code: 99, msg: $e.msg} }
 	})
 	let read = {|f| if ($f | path exists) { open --raw $f } else { null } }
@@ -169,6 +174,7 @@ def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: in
 		lock: ($"($live).lock" | path exists)
 		restarts: (open --raw ($dir | path join systemctl.log) | lines | where {|l| $l starts-with "restart"} | length)
 		timeouts: (do $read ($dir | path join timeout.log) | default "")
+		scraps: (ls ($live | path dirname) | get name | where {|f| ($f | str ends-with ".tmp") or ($f | str ends-with ".new") } | length)
 		local_systemctl: (($dir | path join local-systemctl.log) | path exists)
 		ssh_calls: ((do $read ($dir | path join ssh.count) | default "") | lines | where {|l| $l != ""} | length)
 		touches: ((do $read ($dir | path join touch.log) | default "") | lines | where {|l| $l != ""} | length)
@@ -404,6 +410,40 @@ def test_an_answer_without_the_compared_fields_is_unreadable [] {
 	assert equal [$rb.code $rb.live $rb.pending $rb.prev $rb.restarts] [1 "good: file\n" "rollback-had" "good: file\n" 1]
 }
 
+def test_a_marker_is_written_whole_or_not_at_all [] {
+	print "test the marker and the backup go by a temporary file and a rename, so a failure leaves neither partial; a partial or unknown marker stops everything first..."
+	let r = (scenario pendingmvfail {live: "old: file\n"})
+	assert equal [$r.code $r.live $r.pending $r.prev $r.scraps $r.restarts] [1 "old: file\n" null null 0 0]
+	for text in ["ha\n" "rollback-\n" "had x\n"] {
+		let p = (scenario ok {live: "old: file\n", pending: $text, prev: "good: file\n"})
+		assert equal [$p.code $p.live $p.restarts $p.prev] [1 "old: file\n" 0 "good: file\n"] $"marker ($text | to json --raw)"
+		assert equal ($p.pending == null) false "kept"
+		let c = (scenario ok {live: "old: file\n", pending: $text, prev: "good: file\n"} --check)
+		assert equal $c.code 1
+	}
+}
+
+def test_a_change_that_only_rewrites_the_text_restarts_nothing [] {
+	print "test a file whose text differs while the kubelet already runs the args is rewritten whole and checked, with no restart, marker or backup..."
+	let r = (scenario ok {live: "# an older spelling\n", running: (desired)})
+	assert equal [$r.code $r.live $r.restarts $r.pending $r.prev $r.scraps] [0 (desired) 0 null null 0]
+}
+
+def test_a_failed_lock_release_is_said_with_the_error_that_stopped_the_run [] {
+	print "test an error that stops the run and a lock that cannot be released are both reported, with the lock's path..."
+	let r = (scenario touchfail {live: "old: file\n"} --rmlock)
+	assert equal $r.code 99
+	assert str contains $r.msg "lock heartbeat failed"
+	assert str contains $r.msg ".lock also failed"
+	assert str contains $r.msg "Read-only file system"
+}
+
+def test_a_marked_run_restarts_a_kubelet_that_never_got_the_restart [] {
+	print "test a run that finds the file installed and the marker, and a kubelet still on the old args (the earlier run died before the restart), restarts it and settles..."
+	let r = (scenario ok {live: (desired), pending: "had\n", prev: "good: file\n", running: "old: running\n"})
+	assert equal [$r.code $r.live $r.pending $r.prev $r.restarts] [0 (desired) null null 1]
+}
+
 def test_check_changes_nothing [] {
 	print "test --check exits 1 on a difference, an unchecked apply, or a file the kubelet does not run, and writes and restarts nothing..."
 	let differs = (scenario ok {live: "old: file\n"} --check)
@@ -441,11 +481,14 @@ def test_a_failed_login_stops_the_polling_and_nothing_else_is_swallowed [] {
 	let r = (scenario ssh255raw {live: "old: file\n"})
 	assert equal [$r.code $r.live $r.restarts] [99 "old: file\n" 0]
 	assert str contains $r.msg "ssh failed"
+	assert str contains $r.msg "left to expire"
 	assert (($r.ssh_calls) < 12) $"ssh calls ($r.ssh_calls)"
+	assert equal $r.lock true "no second login is made to release the lock after a failed one"
 	let rm = (scenario rmfail {live: "old: file\n"})
 	assert equal $rm.code 99
 	assert str contains $rm.msg "removing"
 	assert equal ($rm.pending == null) false "the marker survives, and the run says so"
+	assert equal $rm.prev null "the backup goes before the marker, never after it"
 }
 
 def test_a_conflict_scan_that_fails_is_not_a_clean_result [] {
