@@ -52,11 +52,13 @@ import (
 	// its NoData would mail the operator at once and stay open. Its SLO still
 	// burns on the runs it does get.
 	quiet: *"1h" | false | =~"^[1-9][0-9]*(m|h|d)$"
-	// The fewest runs the same 10 minutes a week ago must hold for
-	// JourneyTrafficDrop to judge today's: below it the week-ago window is a
-	// quiet night, whose half is noise. A journey with many readers at any
-	// hour can raise it; a rare one has too few runs to ever page.
-	dropFloor: *20 | int & >0
+	// The fewest runs the quietest of the three week-ago windows must hold
+	// (`_journeysDrop`) for JourneyTrafficDrop to judge today's: below it the
+	// baseline is a quiet spell, whose half is noise. 200 in 3 hours keeps
+	// every journey of Bonk Chess but play-a-game (the next busiest takes
+	// about 40 runs a day) from ever paging; a journey with many readers at
+	// any hour can raise it, a rare one has too few runs to page.
+	dropFloor: *200 | int & >0
 	// Whether a moment that arrives with no open run of this journey is counted
 	// as an `unstarted` run. `false` is for a journey whose later moment is one
 	// readers make all day outside it (a game's move, which a lobby or a room
@@ -77,6 +79,23 @@ _journeysBurns: [
 _journeysWindows: {
 	let all = [for b in _journeysBurns for w in [b.short, b.long] {w}]
 	[for i, w in all if !list.Contains(list.Slice(all, 0, i), w) {w}]
+}
+
+// JourneyTrafficDrop's numbers, once. Runs are bursty (play-a-game swings from
+// 0 to 839 in 3 hours, and has whole hours with none in the afternoon), so
+// the rate is read over `window`, long enough to ride a burst out, and held
+// against the same window `weeks` ago, never a single one: a week that ran
+// twice the usual (11-18..24 did, 1,100-1,670 runs a day against 557-726)
+// would page for a fortnight of normal traffic. The baseline is the MINIMUM of
+// those weeks, the conservative pick: a median still paged 19 times in a
+// week of data (3h window, 0.5), the minimum once, and a real drop below half
+// of even the quietest recent week is a drop whichever week is taken.
+// `ratio` is the fraction of the baseline below which it pages: 0.5 pages an
+// 80% drop with room to spare.
+_journeysDrop: {
+	window: "3h"
+	ratio:  0.5
+	weeks: [1, 2, 3]
 }
 
 // "3s" → "3", "250ms" → "0.25": the `le` a latency SLI reads.
@@ -236,24 +255,31 @@ _journeysHours: {
 		}],
 		// A partial drop in traffic burns no budget: a page that never loads
 		// reports nothing (2026-11-24, half of Bonk Chess's requests hung for
-		// 26 minutes), and NoData waits out `quiet`. So the run rate over 10
-		// minutes is held against the same 10 minutes a week ago, and falling
-		// below half of it pages, once that window held `dropFloor` runs. No
-		// run today reads 0, not no data, so a total drop pages too.
+		// 26 minutes), and NoData waits out `quiet`. So the run count over
+		// `_journeysDrop.window` is held against the least of the same window
+		// 1, 2 and 3 weeks ago (why the least, and why that long: see
+		// `_journeysDrop`), and falling below `ratio` of it pages, once that
+		// baseline held `dropFloor` runs. A week with no data drops out of
+		// the least (each is tagged `week` so `or` keeps all three). No run
+		// today reads 0, not no data, so a total drop pages too.
 		[for n, j in J.spec {
 			// Good and bad runs only: they close when the run ends, while an
 			// abandoned one closes after `idle`, so during an outage the runs
 			// begun before it would keep the count up for that long.
-			let now = "(sum(increase(journey_runs_total{journey=\"\(n)\",outcome=~\"good|bad\"}[10m])) or vector(0))"
-			let before = "sum(increase(journey_runs_total{journey=\"\(n)\",outcome=~\"good|bad\"}[10m] offset 7d))"
+			let w = _journeysDrop.window
+			let runs = "journey_runs_total{journey=\"\(n)\",outcome=~\"good|bad\"}"
+			let now = "(sum(increase(\(runs)[\(w)])) or vector(0))"
+			let weeks = strings.Join([for k in _journeysDrop.weeks {"label_replace(sum(increase(\(runs)[\(w)] offset \(k*7)d)), \"week\", \"\(k)\", \"\", \"\")"}], " or ")
+			let before = "min(\(weeks))"
+			let ratio = strconv.FormatFloat(_journeysDrop.ratio, 103, -1, 64)
 			alert:    "JourneyTrafficDrop"
-			hours:    168
+			hours:    list.Max(_journeysDrop.weeks)*7*24 + (_journeysHours & {in: w}).out
 			journey:  n
 			owner:    j.owner
 			severity: "page"
 			for:      "2m"
-			expr:     "\(now) < 0.5 * \(before) and \(before) >= \(j.dropFloor)"
-			summary:  "\(n) has run under half as often in the last 10m as a week ago: readers are not getting through"
+			expr:     "\(now) < \(ratio) * \(before) and \(before) >= \(j.dropFloor)"
+			summary:  "\(n) has run under \(strconv.FormatFloat(_journeysDrop.ratio*100, 103, -1, 64))% as often in the last \(w) as the least of the same \(w) 1, 2 and 3 weeks ago: readers are not getting through"
 		}],
 	])
 
