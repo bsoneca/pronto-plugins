@@ -35,6 +35,8 @@ def main [] {
 	test_other_places_that_set_kubelet_arg_refuse
 	test_a_lock_from_before_a_reboot_is_taken_over_and_an_ssh_failure_is_not_a_held_lock
 	test_values_are_vetted_before_anything_runs
+	test_memory_already_under_the_eviction_margin_refuses
+	test_the_lock_is_touched_at_every_poll_and_restart
 	test_check_changes_nothing
 	test_every_call_has_a_deadline
 	print "\nAll node kubelet tests passed."
@@ -104,7 +106,7 @@ def test_cue_refuses_a_map_missing_a_threshold_and_a_gc_that_does_not_come_first
 # text or null). `mode`: ok (the kubelet runs the live file after a restart), stuck (it keeps running the old file),
 # noapi (kubectl fails), empty (kubectl answers nothing, exit 0), fulldisk (tee fails halfway), stuckfail (stuck, and the second
 # k3s restart fails). Returns what the run did.
-def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: int = -2, --dfi: int = 10, --other: string = "", --dropin: string = "", --unit: string = "", --stale: string = "", --locked]: nothing -> record {
+def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: int = -2, --dfi: int = 10, --other: string = "", --dropin: string = "", --unit: string = "", --stale: string = "", --mem: int = 4096, --locked]: nothing -> record {
 	let dir = (mktemp --directory --tmpdir node-kubelet-XXXXXX)
 	let root = ($dir | path join root)
 	let live = $root + $live_path
@@ -120,6 +122,8 @@ def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: in
 	}
 	if ($start | get -o running) != null { $start.running | save --raw ($dir | path join running) }
 	if $other != "" { $other | save --raw ($root | path join etc rancher k3s config.yaml) }
+	mkdir ($root | path join proc)
+	$"MemTotal: 8000000 kB\nMemAvailable: ($mem * 1024) kB\n" | save --raw ($root | path join proc meminfo)
 	if $locked { mkdir $"($live).lock" }
 	if $stale != "" { mkdir $"($live).lock"; $"($stale) 2026-01-01T00:00:00Z\n" | save --raw $"($live).lock/owner" }
 	if $dropin != "" { $dropin | save --raw ($root | path join etc rancher k3s config.yaml.d 20-other.yaml) }
@@ -130,6 +134,8 @@ def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: in
 	do $shim sha256sum 'exec shasum -a 256 "$@"'
 	do $shim systemctl 'd=$(dirname "$0")/..; echo "$*" >>"$d/systemctl.log"; case "$1" in cat) cat "$d/unitcat" 2>/dev/null; exit 0;; esac; n=$(grep -c "^restart" "$d/systemctl.log"); if [ "$MODE" = stuckfail ] && [ "$n" -ge 2 ]; then exit 1; fi; [ -e "$KUBELET_LIVE" ] && cp "$KUBELET_LIVE" "$d/running"; true'
 	do $shim tee 'if [ "$MODE" = fulldisk ]; then head -c 12 >"$1"; exit 1; fi; if [ "$MODE" = shorttee ]; then head -c 12 >"$1"; exit 0; fi; exec /usr/bin/tee "$@"'
+	do $shim touch 'd=$(dirname "$0")/..; echo "$*" >>"$d/touch.log"; exec /usr/bin/touch "$@"'
+	do $shim mkdir 'd=$(dirname "$0")/..; if [ "$MODE" = nomkdir ] && [ "$1" = -p ]; then echo "mkdir: Permission denied" >&2; exit 1; fi; exec /bin/mkdir "$@"'
 	do $shim timeout 'd=$(dirname "$0")/..; echo "$*" >>"$d/timeout.log"; shift; exec "$@"'
 	do $shim df '[ "$DF_PCT" = -1 ] && exit 0; case "$*" in *-Pi*) p=$DFI_PCT;; *containerd*) p=$DF_IMG_PCT;; *) p=$DF_PCT;; esac; echo "Filesystem 1024-blocks Used Available Capacity Mounted"; echo "/dev/x 100 $p 100 ${p}% /"'
 	do $shim kubectl 'd=$(dirname "$0")/..; echo "$*" >>"$d/kubectl.log"; case "$*" in *--raw*) n=$(cat "$d/kcount" 2>/dev/null || echo 0); if [ "$MODE" = flaky ] && [ "$n" -lt 1 ]; then echo $((n+1)) >"$d/kcount"; exit 1; fi; case "$MODE" in noapi) exit 1;; empty) exit 0;; esac; if [ "$MODE" != stuck ] && [ "$MODE" != stuckfail ] && [ -e "$d/running" ] && cmp -s "$d/running" "$d/desired.yaml"; then cat "$d/configz.new"; else cat "$d/configz.old"; fi;; *) echo node1;; esac'
@@ -151,6 +157,7 @@ def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: in
 		lock: ($"($live).lock" | path exists)
 		restarts: (open --raw ($dir | path join systemctl.log) | lines | where {|l| $l starts-with "restart"} | length)
 		timeouts: (do $read ($dir | path join timeout.log) | default "")
+		touches: ((do $read ($dir | path join touch.log) | default "") | lines | where {|l| $l != ""} | length)
 		ssh_opts: (do $read ($dir | path join ssh.opts) | default "")
 		kubectl: (do $read ($dir | path join kubectl.log) | default "")
 	}
@@ -332,6 +339,24 @@ def test_values_are_vetted_before_anything_runs [] {
 	let bad = ((valid) | update maxPods 5)
 	let msg = (with-env {KUBECTL: "x"} { try { apply-kubelet $bad --node fake --root /nonexistent; "accepted" } catch {|e| $e.msg } })
 	assert str contains $msg "not what #Kubelet allows"
+}
+
+def test_memory_already_under_the_eviction_margin_refuses [] {
+	print "test a node with under twice the memory threshold available is not restarted into eviction..."
+	let low = (scenario ok {live: "old: file\n"} --mem 150)
+	assert equal [$low.code $low.live $low.restarts] [1 "old: file\n" 0]
+	let ok = (scenario ok {live: "old: file\n"} --mem 200)
+	assert equal [$ok.code $ok.restarts] [0 1]
+}
+
+def test_the_lock_is_touched_at_every_poll_and_restart [] {
+	print "test the lock is touched before every read and restart (its heartbeat), and an unusable config directory is told apart from a held lock..."
+	let r = (scenario ok {live: "old: file\n"})
+	# A read before the write, the restart, and a read after it.
+	assert (($r.touches) >= 3) $"touches ($r.touches)"
+	let nodir = (scenario nomkdir {live: "old: file\n"})
+	assert equal $nodir.code 99
+	assert str contains $nodir.msg "cannot create"
 }
 
 def test_check_changes_nothing [] {

@@ -328,7 +328,7 @@ so a bound every node needs is written here once, with defaults, and each reposi
   node-name mismatch would otherwise cost two restarts at every run (worst case an apply restarts k3s twice, for the new file and for a rollback;
   an unreadable kubelet costs none). It takes a lock (a directory holding the node's boot id, touched at every poll and restart; taken over after a
   reboot or when untouched for twice the longest gap), refuses when another file under `/etc/rancher/k3s/config.yaml{,.d}`, the k3s unit or its
-  environment files set `kubelet-arg`, and refuses a restart into a disk or inodes already past the new eviction line.
+  environment files set `kubelet-arg`, and refuses a restart into a disk, inodes or memory (under twice the threshold) already past the new eviction line.
   The thresholds bound the damage when a disk fills; what prevents it is `docker-gc.sh`. k3s's unit has `KillMode=process` (read from the unit
   on the node, not confirmed by a restart): a restart should stop k3s alone and leave the containers running; it is run under `timeout 180`.
   Every ssh has a connect timeout and keepalives, every kubectl a request timeout. Tests: `kubelet_test.nu` (fake ssh, sudo, tee, systemctl,

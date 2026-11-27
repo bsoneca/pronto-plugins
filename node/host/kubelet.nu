@@ -152,8 +152,17 @@ def disk-used [node: string, path: string, --inodes]: nothing -> int {
 
 # A restart into eviction is refused: the disks are already past the line the kubelet would evict at, and it would take
 # pods on its first pass. Past the image GC line only warns (the kubelet collects images, which is what is wanted).
-def preflight [node: string, k: record]: nothing -> bool {
+def preflight [node: string, k: record, root: string]: nothing -> bool {
 	let h = $k.evictionHard
+	# Memory too: a restart on a node already under twice the memory threshold would evict at once (the kubelet's own memory
+	# eviction is part of what this sets). MemAvailable is in kB.
+	let avail_mi = (must (sh $node $"awk '/^MemAvailable:/ {print int\($2 / 1024\)}' '($root)/proc/meminfo'") "reading MemAvailable" | str trim)
+	if $avail_mi == "" { error make {msg: "k3s-kubelet: cannot read MemAvailable"} }
+	let mem_thr = ($h.memory | str replace "Mi" "" | into int)
+	if ($avail_mi | into int) < (2 * $mem_thr) {
+		print --stderr $"k3s-kubelet: the node has ($avail_mi)Mi of memory available, under twice the new memory eviction threshold \(($h.memory)\): free memory first, nothing changed"
+		return false
+	}
 	let n = (disk-used $node $nodefs_dir)
 	let i = (disk-used $node $imagefs_dir)
 	let ni = (disk-used $node $nodefs_dir --inodes)
@@ -197,9 +206,10 @@ export def apply-kubelet [k: record, --check, --node: string = "", --root: strin
 	let gap = (180 + 25 + ($pause / 1sec))
 	let takeover = ([10 (($gap * 2 / 60) | math ceil)] | math max)
 	let boot = "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
-	let acquire = $"mkdir -p '($root)($dir)/config.yaml.d' || exit 3; if ! mkdir '($lock)' 2>/dev/null; then b=$\(cut -d' ' -f1 '($lock)/owner' 2>/dev/null\); cur=($boot); if { [ -n \"$b\" ] && [ \"$b\" != \"$cur\" ]; } || [ -n \"$\(find '($lock)' -maxdepth 0 -mmin +($takeover) 2>/dev/null\)\" ]; then rm -rf '($lock)' && mkdir '($lock)' || exit 1; else exit 1; fi; fi; echo \"($boot) $\(date -u +%FT%TZ\)\" >'($lock)/owner'"
+	let acquire = $"mkdir -p '($root)($dir)/config.yaml.d' || exit 3; if ! mkdir '($lock)' 2>/dev/null; then b=$\(cut -d' ' -f1 '($lock)/owner' 2>/dev/null\); cur=($boot); if { [ -n \"$b\" ] && [ \"$b\" != \"$cur\" ]; } || [ -n \"$\(find '($lock)' -maxdepth 0 -mmin +($takeover) 2>/dev/null\)\" ]; then mv '($lock)' '($lock).old.'$$ 2>/dev/null && mkdir '($lock)' || exit 1; rm -rf '($lock).old.'$$; else exit 1; fi; fi; echo \"($boot) $\(date -u +%FT%TZ\)\" >'($lock)/owner'"
 	let got = (sh $node $acquire)
 	if $got.exit_code == 255 { error make {msg: $"k3s-kubelet: ssh failed, nothing changed: ($got.stderr | str trim)"} }
+	if $got.exit_code == 3 { error make {msg: $"k3s-kubelet: cannot create ($root)($dir)/config.yaml.d on the node, nothing changed: ($got.stderr | str trim)"} }
 	if $got.exit_code != 0 {
 		print --stderr $"k3s-kubelet: another apply holds ($lock) \(taken over after a reboot, or ($takeover) minutes untouched\): nothing changed"
 		return {code: 1}
@@ -250,7 +260,7 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 			}
 			if $r.state == "differs" {
 				print "the kubelet does not run with it yet"
-				if not (preflight $node $k) { return {code: 1} }
+				if not (preflight $node $k $root) { return {code: 1} }
 				do $restart | ignore
 			}
 		}
@@ -266,7 +276,7 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 				return {code: 1}
 			}
 		}
-		if not (preflight $node $k) { return {code: 1} }
+		if not (preflight $node $k $root) { return {code: 1} }
 		$changed = true
 		let sum = ($config | hash sha256)
 		# The marker and backup are made first, and only when no earlier run left them (its backup is the good one), and
