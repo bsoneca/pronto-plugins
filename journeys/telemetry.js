@@ -136,6 +136,9 @@ if (!globalThis.__prontoJourneys) {
 			.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, "<email>")
 			.replace(/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*/g, "$1<token>")
 			.replace(/[A-Za-z0-9_+/=-]{24,}/g, "<token>")
+			// A phone with a parenthesized area code ("(212) 555-0123", "+1 (212) 555-0123"): the ")" splits its digits
+			// into runs too short for the rule below, so it has a rule of its own, first.
+			.replace(/(?:\+\d{1,3}[\s.-]?)?\(\d{2,4}\)[\s.-]?\d[\d\s.-]{4,}\d/g, "<number>")
 			.replace(/\d[\d.\-/ ]{6,}\d/g, "<number>");
 	// A path is scrubbed a segment at a time, each as it reads once decoded (ana%40gmail.com is an address): a
 	// segment that holds something is replaced by its scrubbed form, any other is kept as written, so a long
