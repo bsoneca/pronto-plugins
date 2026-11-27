@@ -73,6 +73,22 @@ import (
 // violation below and the engine's own check (tenant.nu check-retire) both read it.
 #TenantNoRetire: ["NetworkPolicy", "CronJob", "ServiceAccount"]
 
+// What no object of a tenant's release may carry or be, read by the engine's own check of the rendered objects (tenant.nu check-objects):
+// the metadata fields that hand an object's life to another (an ownerReference to the provisioner's publisher account, which Kubernetes then
+// garbage-collects when the owner is not found; a finalizer that holds an object undeletable) -- the engine sets what it needs itself -- and the
+// objects the provisioner and the engine own, which a release neither writes nor seeds: the publisher's account, the namespace's record
+// of the release and the root CA bundle every namespace gets.
+#TenantRefusedMetadata: ["ownerReferences", "finalizers"]
+
+// The namespaces a service's egress may name instead of an address block: the Envoy Gateway's, whose data-plane pods a live release's door
+// check dials from the pod it runs in. Another is a change here, never an app's.
+#EgressNamespaces: ["envoy-gateway-system"]
+#TenantReserved: [
+	{kind: "ServiceAccount", name: "publisher"},
+	{kind: "ConfigMap", name: "pronto-release"},
+	{kind: "ConfigMap", name: "kube-root-ca.crt"},
+]
+
 // Kinds that live outside a namespace: never rendered by the engine, an app's release has no
 // right to them.
 #ClusterScoped: ["ClusterRole", "ClusterRoleBinding", "CustomResourceDefinition", "StorageClass", "PersistentVolume",
@@ -264,10 +280,21 @@ import (
 	// Where the service may connect beyond the services' own policy (the mesh, and the internet on 443): each an address
 	// block, what it leaves out, and a TCP port (the node's API server for a service that provisions namespaces, the
 	// internet on 80 for a mirror). A NetworkPolicy of its own, which adds to the services'.
+	// Or, instead of an address block, the pods of a namespace (the Envoy Gateway's data plane, which a live release's door check dials):
+	// `namespace` and the labels its pods carry, as a namespaceSelector with a podSelector.
 	egress: *[] | [...{
-		cidr!:  =~"^[0-9.]+/[0-9]+$"
-		except: *[] | [...=~"^[0-9.]+/[0-9]+$"]
-		port!:  int & >0 & <65536
+		cidr?:      =~"^[0-9.]+/[0-9]+$"
+		except:     *[] | [...=~"^[0-9.]+/[0-9]+$"]
+		namespace?: or([for n in #EgressNamespaces {n}])
+		podLabels:  *{} | {[string]: string}
+		port!:      int & >0 & <65536
+		// exactly one of an address block and a namespace
+		_one: true & (len([if cidr != _|_ {1}, if namespace != _|_ {1}]) == 1)
+		// a namespace's rule names the pods it admits (never every pod of it), and leaves out nothing; `except` belongs to an address block
+		if namespace != _|_ {
+			_labelled: true & (len(podLabels) > 0)
+			except:    []
+		}
 	}]
 	// Folders of the pod's own, empty at each start, by path, with the most each may hold (a builder's workspace: clones,
 	// toolchains, a game's checks): an emptyDir each.
@@ -987,7 +1014,10 @@ import (
 				podSelector: matchLabels: (selects & {component: n}).out
 				policyTypes: ["Egress"]
 				egress: [for e in s.egress {
-					to:    [{ipBlock: {cidr: e.cidr, if len(e.except) > 0 {except: e.except}}}]
+					to: [
+						if e.cidr != _|_ {{ipBlock: {cidr: e.cidr, if len(e.except) > 0 {except: e.except}}}},
+						if e.namespace != _|_ {{namespaceSelector: matchLabels: "kubernetes.io/metadata.name": e.namespace, podSelector: matchLabels: e.podLabels}},
+					]
 					ports: [{port: e.port, protocol: "TCP"}]
 				}]
 			}

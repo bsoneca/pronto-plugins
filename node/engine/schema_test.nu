@@ -162,7 +162,7 @@ def test_a_preview_cannot_take_the_production_host [] {
 
 def test_a_service_is_only_what_it_says [] {
 	print "test a service or the blob plane with a field the schema does not know, a reserved variable, a seed out of the app, a privileged port, a port of the sidecar's or a reserved name is refused..."
-	for e in [serviceUnknownField serviceScratchClimbs serviceScratchSize serviceEgressNoPort serviceEgressBadCIDR serviceGoogleProvider serviceJailNotBool serviceReservedEnv serviceSeedClimbs servicePrivilegedPort blobsUnknownField serviceDaprPort serviceMetricsDaprPort serviceSecretReserved serviceFilesDotDot serviceSeedAbsolute serviceNamedClock metricsExportUnknown] {
+	for e in [serviceUnknownField serviceScratchClimbs serviceScratchSize serviceEgressNoPort serviceEgressBadCIDR serviceEgressBoth serviceEgressNeither serviceEgressNamespace serviceEgressNoLabels serviceEgressExceptNs serviceGoogleProvider serviceJailNotBool serviceReservedEnv serviceSeedClimbs servicePrivilegedPort blobsUnknownField serviceDaprPort serviceMetricsDaprPort serviceSecretReserved serviceFilesDotDot serviceSeedAbsolute serviceNamedClock metricsExportUnknown] {
 		let r = (cue-in export ./node/engine/tests/refused -e $e --out json)
 		assert ($r.exit_code != 0) $"($e) was not refused"
 	}
