@@ -336,6 +336,7 @@ def main [] {
 	test_a_tenants_issuers_are_the_engines_list
 	test_the_tenant_door_check_in_the_pod_dials_the_service_and_forwards_to_nothing
 	test_a_tenants_compose_files_name_nothing_outside_the_app
+	test_the_recorded_engine_pin_is_a_regular_file_of_forty_hex_digits
 	test_a_tenants_staged_build_paths_are_the_staged_copys
 	test_a_tenants_dry_run_with_no_build_needs_the_publisher_kubeconfig_alone
 	test_a_tenants_retirement_is_the_engines_to_decide
@@ -2518,6 +2519,35 @@ def test_a_tenants_compose_files_name_nothing_outside_the_app [] {
 	let ok = (^$nu.current-exe --no-config-file -c $"use ($engine_dir | path join tenant.nu); tenant check-compose-sources '($w.app)'" | complete)
 	assert equal $ok.exit_code 0 $"a project that names no file was refused: ($ok.stderr)"
 	rm -rf $w.dir
+}
+
+def test_the_recorded_engine_pin_is_a_regular_file_of_forty_hex_digits [] {
+	print "test the namespace's record names the engine pin only from a regular file in a real .github folder holding a commit's 40 hex digits, never what a link or a stray file holds..."
+	let sha = ("0123456789abcdef0123456789abcdef01234567")
+	for row in [{kind: file, want: $sha} {kind: link, want: ""} {kind: dirlink, want: ""} {kind: junk, want: ""}] {
+		let w = (tenant-world)
+		let app = ($w.app | path expand)
+		let outside = ($w.dir | path join outside)
+		mkdir $outside
+		# what a link leads to is a valid pin (40 hex), so only the link checks can refuse it: the hex check alone would let it through
+		$"($sha)\n" | save -f ($outside | path join real.pin)
+		let hexdir = ($outside | path join hexdir)
+		mkdir $hexdir
+		$"($sha)\n" | save -f ($hexdir | path join node-engine.pin)
+		match $row.kind {
+			"file" => { mkdir ($app | path join .github); $"($sha)\n" | save -f ($app | path join .github node-engine.pin) }
+			"link" => { mkdir ($app | path join .github); ^ln -s ($outside | path join real.pin) ($app | path join .github node-engine.pin) }
+			"dirlink" => { ^ln -s $hexdir ($app | path join .github) }
+			"junk" => { mkdir ($app | path join .github); "not a commit\n" | save -f ($app | path join .github node-engine.pin) }
+		}
+		do { cd $app; ^git init -q }
+		let r = (tenant-release $w)
+		assert equal $r.exit_code 0 $"($row.kind): ($r.stdout)\n($r.stderr)"
+		let f = ($w.state | path join all_objects.jsonl)
+		let recorded = (open --raw $f | lines | each {|l| $l | from json } | flatten | where {|o| $o.kind == "ConfigMap" and $o.metadata.name == "pronto-release" } | last | get data.enginePin)
+		assert equal $recorded $row.want $"($row.kind): the recorded engine pin"
+		rm -rf $w.dir
+	}
 }
 
 def test_a_tenants_staged_build_paths_are_the_staged_copys [] {
