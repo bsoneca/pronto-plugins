@@ -263,12 +263,8 @@ export def check-pins [node: record] {
 	}
 }
 
-# The service accounts a tenant's pods never run as: the publisher's and the builder's own.
-const forbidden_accounts = [publisher studio-builder studio-rc-builder studio-provisioner]
-
-# The volume types a tenant's pod may mount: nothing of the node's (hostPath, and not an nfs, iscsi or csi volume that reaches another
-# system), nothing that carries a token but the pod's own (projected, which the API server scopes to its service account).
-const volume_types = [configMap secret emptyDir projected persistentVolumeClaim downwardAPI]
+# The service accounts a tenant's pods never run as (`#TenantForbiddenAccounts`), the volume types they may mount (`#TenantVolumeTypes`) and the annotation prefixes
+# they never carry (`#TenantRefusedAnnotationPrefixes`) are the schema's: the cluster's admission policies (`#TenantAdmission`) read the same lists.
 
 # Every container of a tenant's Deployment or Job (init and ephemeral included) that leaves allowPrivilegeEscalation unset is made to say
 # false, in trusted code, before `check-objects` and any apply; one that says true stays true, and `check-objects` refuses it.
@@ -356,6 +352,9 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 	let prefix = $"127.0.0.1:5000/($ns)/"
 	let refused_metadata = (schema-export '#TenantRefusedMetadata')
 	let reserved = (schema-export '#TenantReserved')
+	let forbidden_accounts = (schema-export '#TenantForbiddenAccounts')
+	let volume_types = (schema-export '#TenantVolumeTypes')
+	let sidecar_prefixes = (schema-export '#TenantRefusedAnnotationPrefixes')
 	# the database operator names a Cluster's service account after the Cluster, and a Cluster is named as its author likes: every Cluster's
 	# name is an account no pod of the release runs as (and the release's own is `<release>-db`, nothing else)
 	let clusters = ($objects | where {|o| ($o.kind? | default "") == "Cluster" } | each {|o| $o.metadata?.name? | default "" } | append $live | uniq)
@@ -398,7 +397,10 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			if ($o.spec?.externalIPs? | default [] | is-not-empty) { $why = ($why | append $"($id) names externalIPs") }
 		}
 		if ($o.kind? | default "") == "Cluster" {
-			if ($node.name? | default "" | is-not-empty) and ($o.metadata?.name? | default "") != $"($node.name)-db" { $why = ($why | append $"($id) is not named ($node.name)-db: a tenant's database is the release's own") }
+			if ($node.name? | default "" | is-not-empty) and ($o.metadata?.name? | default "") != $"($node.name)(schema-export '#TenantAccountSuffix')" { $why = ($why | append $"($id) is not named ($node.name)(schema-export '#TenantAccountSuffix'): a tenant's database is the release's own") }
+			# an annotation under cnpg.io/ makes the operator rewrite the instance pod (podPatch, validation, reconcilePodSpec): never a tenant's Cluster's
+			let cluster_notes = ($o.metadata?.annotations? | default {} | columns | where {|k| (schema-export '#TenantRefusedClusterAnnotationPrefixes') | any {|p| $k | str starts-with $p } })
+			if ($cluster_notes | is-not-empty) { $why = ($why | append $"($id) carries the annotation\(s\) ($cluster_notes | str join ', '), which make the database operator rewrite the instance pod: a tenant's Cluster has none") }
 			let image = ($o.spec?.imageName? | default "")
 			# a tenant's Cluster runs the engine's approved database base, copied to the tenant's own path (its full image stays with the Jobs): exactly that name
 			let wanted = (schema-export '#TenantDatabaseImages' | each {|a| $"($prefix)($node.name)-database-base:($a.major)@($a.digest)" })
@@ -422,7 +424,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			# CloudNativePG's owner defaults to the database's name (and the database to `app`), so the effective owner is checked, always: `database: postgres` with no owner is the superuser's
 			let database = ($cspec.bootstrap?.initdb?.database? | default "app")
 			let owner = (if (($cspec.bootstrap?.initdb?.owner? | default "") | is-empty) { $database } else { $cspec.bootstrap.initdb.owner })
-			if ($database in [postgres template0 template1]) or (do $reserved_role $database) { $why = ($why | append $"($id) names the database ($database), a name a tenant's database never has") }
+			if ($database in (schema-export '#TenantRefusedDatabases')) or (do $reserved_role $database) { $why = ($why | append $"($id) names the database ($database), a name a tenant's database never has") }
 			if (do $reserved_role $owner) { $why = ($why | append $"($id) makes the database's owner ($owner), a role a tenant's database never has: CloudNativePG would set its password from the bootstrap secret, which the tenant's pods read") }
 			if ($cspec.storage? | default {} | columns | any {|k| $k not-in (schema-export '#TenantStorageKeys') }) { $why = ($why | append $"($id) sets storage fields other than size and storageClass") }
 			let max_stop = (schema-export '#TenantMaxStopSeconds')
@@ -467,16 +469,16 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			for account in [($spec.serviceAccountName? | default "") ($spec.serviceAccount? | default "")] {
 				if $account in $forbidden_accounts { $why = ($why | append $"($id) runs as the service account ($account)") }
 				# the database operator names the cluster's account `<cluster>-db` and binds it to what the database needs, which a tenant's workload never is
-				if ($account | str ends-with "-db") or ($account != "" and $account in $clusters) { $why = ($why | append $"($id) runs as the service account ($account), which a database's cluster owns") }
+				if ($account | str ends-with (schema-export '#TenantAccountSuffix')) or ($account != "" and $account in $clusters) { $why = ($why | append $"($id) runs as the service account ($account), which a database's cluster owns") }
 			}
 			# …nor a pod the operator would take for one of the cluster's (it selects its pods, and its policies admit them, by the labels it keeps
 			# under its own prefix)
-			if ($o.spec?.template?.metadata?.labels? | default {} | columns | any {|k| $k | str starts-with "cnpg.io/" }) { $why = ($why | append $"($id) carries a label under cnpg.io/, which marks a database's own pods") }
+			if ($o.spec?.template?.metadata?.labels? | default {} | columns | any {|k| (schema-export '#TenantRefusedLabelPrefixes') | any {|p| $k | str starts-with $p } }) { $why = ($why | append $"($id) carries a label under cnpg.io/, which marks a database's own pods") }
 			# no runtime class (a sandbox or a host runtime of the node's) and no priority class (a tenant must not pre-empt the node's own pods)
 			if ($spec.runtimeClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets runtimeClassName ($spec.runtimeClassName)") }
 			if ($spec.priorityClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets priorityClassName ($spec.priorityClassName)") }
 			if ($spec.hostUsers? | default true) == false { $why = ($why | append $"($id) sets hostUsers: false") }
-			for key in [hostNetwork hostPID hostIPC] { if ($spec | get -o $key | default false) == true { $why = ($why | append $"($id) sets ($key)") } }
+			for key in (schema-export '#TenantRefusedHostFields') { if ($spec | get -o $key | default false) == true { $why = ($why | append $"($id) sets ($key)") } }
 			for v in ($spec.volumes? | default []) {
 				let kinds = ($v | columns | where {|c| $c != "name" })
 				let other = ($kinds | where {|k| $k not-in $volume_types })
@@ -486,7 +488,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			if ($spec.securityContext?.appArmorProfile?.type? | default "") == "Unconfined" { $why = ($why | append $"($id) runs with an Unconfined AppArmor profile") }
 			let notes = ($o.spec?.template?.metadata?.annotations? | default {})
 			# Dapr's sidecar is the platform's: its image, resources and ports are not a tenant's to choose
-			let sidecar = ($notes | columns | where {|k| $k | str starts-with "dapr.io/sidecar-" })
+			let sidecar = ($notes | columns | where {|k| $sidecar_prefixes | any {|p| $k | str starts-with $p } })
 			if ($sidecar | is-not-empty) { $why = ($why | append $"($id) sets the Dapr sidecar annotation\(s\) ($sidecar | str join ', ')") }
 			if ($notes | transpose k v | any {|a| ($a.k | str starts-with "container.apparmor.security.beta.kubernetes.io/") and (($a.v | into string | str lowercase) == "unconfined") }) { $why = ($why | append $"($id) runs with an unconfined AppArmor profile") }
 			let containers = (($spec.containers? | default []) | append ($spec.initContainers? | default []) | append ($spec.ephemeralContainers? | default []))

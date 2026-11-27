@@ -243,11 +243,279 @@ import (
 // The prefixes of role names that are never a tenant's: Postgres reserves `pg_`, and CloudNativePG's own roles are `cnpg_*`. Refused as a managed role's name and as the database's owner.
 #TenantRefusedRolePrefixes: ["pg_", "cnpg_"]
 
+// The database names that are never a tenant's (besides a name that begins with a #TenantRefusedRolePrefixes entry): the superuser's and Postgres's templates.
+#TenantRefusedDatabases: ["postgres", "template0", "template1"]
+
+// The annotation prefixes no tenant Cluster carries: `cnpg.io/podPatch`, `cnpg.io/validation` and `cnpg.io/reconcilePodSpec` make the operator rewrite the instance pod (its image,
+// the superuser's Secret it reads, its service account), which the engine fixes by never letting a tenant's Cluster say so. Read by tenant.nu's check-objects and by the
+// cluster's admission policies (#TenantAdmission).
+#TenantRefusedClusterAnnotationPrefixes: ["cnpg.io/"]
+
+// The pod fields that give a tenant's pod the node's own namespaces.
+#TenantRefusedHostFields: ["hostNetwork", "hostPID", "hostIPC"]
+
 // The longest a stopping instance may wait, in seconds (stopDelay and smartShutdownTimeout): a tenant's pod stops in half an hour at most.
 #TenantMaxStopSeconds: 1800
 
 // The only keys of a tenant Cluster's `storage`: its size and class, never a pvcTemplate or a resize policy of its own.
 #TenantStorageKeys: ["size", "storageClass"]
+
+// The service accounts a tenant's pods never run as: the publisher's and the builder's own, and (#TenantAccountSuffix) the one the database operator makes for each
+// Cluster. Read by the engine's own check (tenant.nu check-objects) and by the cluster's admission policies (#TenantAdmission below).
+#TenantForbiddenAccounts: ["publisher", "studio-builder", "studio-rc-builder", "studio-provisioner"]
+#TenantAccountSuffix:     "-db"
+
+// The volume types a tenant's pod may mount: nothing of the node's (hostPath, and not an nfs, iscsi or csi volume that reaches another system), nothing that
+// carries a token but the pod's own (projected, which the API server scopes to its service account).
+#TenantVolumeTypes: ["configMap", "secret", "emptyDir", "projected", "persistentVolumeClaim", "downwardAPI"]
+
+// Annotations and labels no tenant pod (or the template that makes it) carries: Dapr's sidecar is the platform's (its image, resources and ports), and the cnpg.io/ labels
+// mark a database's own pods, which the operator selects and its policies admit by them.
+#TenantRefusedAnnotationPrefixes: ["dapr.io/sidecar-"]
+#TenantRefusedLabelPrefixes: ["cnpg.io/"]
+
+// The Cluster fields the API server fills in from the CRD's own defaults (as CloudNativePG 1.30 serves them, read from live Clusters): a Cluster an admission policy sees
+// carries them whether the author wrote them or not, so they are no more refused there than a field the engine renders. The engine's own check sees the rendered
+// object, before the server's defaults, and holds it to #TenantClusterSpec alone.
+#TenantClusterDefaults: {
+	keys: ["affinity", "failoverDelay", "logLevel", "maxSyncReplicas", "minSyncReplicas", "monitoring", "probes", "startDelay", "switchoverDelay"]
+	postgresql: ["syncReplicaElectionConstraint"]
+	initdb: ["encoding", "localeCType", "localeCollate"]
+}
+
+// Each kind a tenant's publisher writes (#PublisherKinds), as the API group and resource an admission rule matches: one row per kind, no more and no fewer.
+#PublisherResources: {
+	for k in #PublisherKinds {(k): {group: string, resource: string}}
+	"v1/Service":                                                  {group: "", resource: "services"}
+	"v1/ConfigMap":                                                {group: "", resource: "configmaps"}
+	"v1/Secret":                                                   {group: "", resource: "secrets"}
+	"v1/ServiceAccount":                                           {group: "", resource: "serviceaccounts"}
+	"apps/v1/Deployment":                                          {group: "apps", resource: "deployments"}
+	"batch/v1/Job":                                                {group: "batch", resource: "jobs"}
+	"gateway.networking.k8s.io/v1/Gateway":                        {group: "gateway.networking.k8s.io", resource: "gateways"}
+	"gateway.networking.k8s.io/v1/HTTPRoute":                      {group: "gateway.networking.k8s.io", resource: "httproutes"}
+	"postgresql.cnpg.io/v1/Cluster":                               {group: "postgresql.cnpg.io", resource: "clusters"}
+	"external-secrets.io/v1beta1/ExternalSecret":                  {group: "external-secrets.io", resource: "externalsecrets"}
+	"generators.external-secrets.io/v1alpha1/Password":            {group: "generators.external-secrets.io", resource: "passwords"}
+	"dapr.io/v1alpha1/Configuration":                              {group: "dapr.io", resource: "configurations"}
+	"dapr.io/v1alpha1/Resiliency":                                 {group: "dapr.io", resource: "resiliencies"}
+	"gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy":         {group: "gateway.envoyproxy.io", resource: "backendtrafficpolicies"}
+}
+
+// The cluster's admission policies for a tenant's namespaces (PRONTO-1941, step 2 of PRONTO-1929): what the engine's own check of the rendered objects
+// (tenant.nu check-objects) refuses before a release writes anything, refused again by the API server for a publisher's token applied directly. Every rule reads the
+// definitions above (#TenantClusterSpec, #TenantParameters, #TenantRefusedRoles, #TenantRefusedMetadata, #TenantVolumeTypes, #TenantDatabaseImages ...), so
+// the two cannot drift apart. What differs is the app's: `label` marks a tenant's namespaces (the policies match no other), and who is not judged, where the
+// registry is and what the bindings do are parameters. `objects` are the ValidatingAdmissionPolicies and their bindings, to apply with the node
+// (`cue export ./node/schema -e '(#TenantAdmission & {label: ...}).objects'`).
+//
+// Not judged: `controllers`, the kube-system controllers that make pods (a ReplicaSet's, a StatefulSet's, a Job's) and ReplicaSets (a Deployment's) from a template the
+// policy already judged, and Dapr's injected sidecar with them; and `operators`, the database operator's account, which makes a database's pods, Jobs, Services and Secrets,
+// only because its Cluster is judged (studio-tenant-clusters: a request that changes nothing of a Cluster's spec is not judged again, so an operator's own metadata
+// write on an older Cluster is never refused).
+#TenantAdmission: {
+	label:    string & !=""
+	name:     *"tenant" | (string & !="")
+	registry: *"127.0.0.1:5000" | string
+	controllers: [...string] | *[
+		"system:serviceaccount:kube-system:replicaset-controller",
+		"system:serviceaccount:kube-system:statefulset-controller",
+		"system:serviceaccount:kube-system:job-controller",
+		"system:serviceaccount:kube-system:deployment-controller",
+	]
+	operators: [...string] | *[]
+	// Warn and Audit while a namespace's violations are read, then Deny with Audit: only Deny refuses a request, and `failurePolicy` Fail makes an expression that errors
+	// the binding's too.
+	actions:       [...("Warn" | "Audit" | "Deny")] & [_, ...] | *["Warn", "Audit"]
+	failurePolicy: *"Fail" | "Ignore"
+
+	_prefix: name
+	_fp:     failurePolicy
+	_selector: matchExpressions: [{key: label, operator: "Exists"}]
+	_ops: ["CREATE", "UPDATE"]
+	_isController: "request.userInfo.username in [\(strings.Join([for u in controllers {"'\(u)'"}], ", "))]"
+	_isOperator:   "request.userInfo.username in [\(strings.Join([for u in operators {"'\(u)'"}], ", "))]"
+	_notJudged: [{name: "not-a-controller", expression: "!(\(_isController))"}, {name: "not-the-operator", expression: "!(\(_isOperator))"}]
+	_quoted: {
+		accounts:    strings.Join([for a in #TenantForbiddenAccounts {"'\(a)'"}], ", ")
+		parameters:  strings.Join([for p, _ in #TenantParameters {"'\(p)'"}], ", ")
+		roles:       strings.Join([for r in #TenantRefusedRoles {"'\(r)'"}], ", ")
+		databases:   strings.Join([for d in #TenantRefusedDatabases {"'\(d)'"}], ", ")
+		storage:     strings.Join([for k in #TenantStorageKeys {"'\(k)'"}], ", ")
+		clusterKeys: strings.Join([for k in list.Concat([#TenantClusterSpec.keys, #TenantClusterDefaults.keys]) {"'\(k)'"}], ", ")
+		pgKeys:      strings.Join([for k in list.Concat([#TenantClusterSpec.postgresql, #TenantClusterDefaults.postgresql]) {"'\(k)'"}], ", ")
+		bootKeys:    strings.Join([for k in #TenantClusterSpec.bootstrap {"'\(k)'"}], ", ")
+		initdbKeys:  strings.Join([for k in list.Concat([#TenantClusterSpec.initdb, #TenantClusterDefaults.initdb]) {"'\(k)'"}], ", ")
+		images:      strings.Join([for a in #TenantDatabaseImages {"'\(registry)/' + request.namespace + '/' + variables.base + '-database-base:\(a.major)@\(a.digest)'"}], ", ")
+	}
+	_prefixed: {
+		annotations: strings.Join([for p in #TenantRefusedAnnotationPrefixes {"k.startsWith('\(p)')"}], " || ")
+		labels:      strings.Join([for p in #TenantRefusedLabelPrefixes {"k.startsWith('\(p)')"}], " || ")
+	}
+	// A role name `n` (a CEL expression) is reserved: one of #TenantRefusedRoles, or begins with one of #TenantRefusedRolePrefixes.
+	_reserved: {
+		#n: string
+		out: "(\(#n) in [\(_quoted.roles)] || \(strings.Join([for p in #TenantRefusedRolePrefixes {"\(#n).startsWith('\(p)')"}], " || ")))"
+	}
+	_volumes: strings.Join([for t in #TenantVolumeTypes {"has(v.\(t))"}], " || ")
+
+	// Whether a Postgres setting `v` (a string) holds to the bound of its #TenantParameters rule, said in CEL as `parameter-value` reads it (tenant.nu): an integer, a number, a
+	// size in kB (kB, MB, GB, TB), a time in ms (ms, s, min, h, d), or one of a few words.
+	_bound: {
+		for p, r in #TenantParameters {
+			let v = "variables.params['\(p)'].replace(' ', '')"
+			let base = [if r.base != _|_ {r.base}, 1][0]
+			let mem = "(\(v).endsWith('TB') ? int(\(v).substring(0, size(\(v)) - 2)) * 1073741824 : \(v).endsWith('GB') ? int(\(v).substring(0, size(\(v)) - 2)) * 1048576 : \(v).endsWith('MB') ? int(\(v).substring(0, size(\(v)) - 2)) * 1024 : \(v).endsWith('kB') ? int(\(v).substring(0, size(\(v)) - 2)) : int(\(v)) * \(base))"
+			let ms = "(\(v).endsWith('ms') ? int(\(v).substring(0, size(\(v)) - 2)) : \(v).endsWith('min') ? int(\(v).substring(0, size(\(v)) - 3)) * 60000 : \(v).endsWith('s') ? int(\(v).substring(0, size(\(v)) - 1)) * 1000 : \(v).endsWith('h') ? int(\(v).substring(0, size(\(v)) - 1)) * 3600000 : \(v).endsWith('d') ? int(\(v).substring(0, size(\(v)) - 1)) * 86400000 : int(\(v)))"
+			(p): [
+				if r.kind == "int" {"\(v).matches('^-?[0-9]+$') && int(\(v)) >= \(r.min) && int(\(v)) <= \(r.max)"},
+				if r.kind == "real" {"\(v).matches('^-?[0-9]+([.][0-9]+)?$') && double(\(v)) >= \(r.min) && double(\(v)) <= \(r.max)"},
+				if r.kind == "mem" {"\(v).matches('^[0-9]+(kB|MB|GB|TB)?$') && \(mem) >= \(r.min) && \(mem) <= \(r.max)"},
+				if r.kind == "ms" {"\(v).matches('^-?[0-9]+(ms|s|min|h|d)?$') && \(ms) >= \(r.min) && \(ms) <= \(r.max)"},
+				if r.kind == "enum" {"\(v) in [\(strings.Join([for x in r.values {"'\(x)'"}], ", "))]"},
+			][0]
+		}
+	}
+
+	// The pod rules, for a pod (`spec` is its own) and for what makes pods from a template (`spec` is the template's): two policies, so CEL type-checks each kind.
+	_pod: {
+		#name: string
+		#spec: string
+		#meta: string
+		#metas: [...string]
+		#rules: [...string]
+		#resources: [...{apiGroups: [...string], apiVersions: ["*"], operations: _ops, resources: [...string]}]
+		policy: {
+			metadata: name: "\(_prefix)-engine-\(#name)"
+			spec: {
+				failurePolicy: _fp
+				matchConstraints: {namespaceSelector: _selector, resourceRules: #resources}
+				matchConditions: _notJudged
+				variables: [
+					{name: "spec", expression: #spec},
+					{name: "images", expression: "variables.spec.containers.map(c, c.image) + (has(variables.spec.initContainers) ? variables.spec.initContainers.map(c, c.image) : []) + (has(variables.spec.ephemeralContainers) ? variables.spec.ephemeralContainers.map(c, c.image) : [])"},
+					{name: "accounts", expression: "(has(variables.spec.serviceAccountName) ? [variables.spec.serviceAccountName] : []) + (has(variables.spec.serviceAccount) ? [variables.spec.serviceAccount] : [])"},
+					{name: "sidecarNotes", expression: "has(\(#meta).annotations) ? \(#meta).annotations.filter(k, \(_prefixed.annotations)) : []"},
+					{name: "containerCaps", expression: "variables.spec.containers.map(c, has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.add) ? c.securityContext.capabilities.add : []) + (has(variables.spec.initContainers) ? variables.spec.initContainers.map(c, has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.add) ? c.securityContext.capabilities.add : []) : []) + (has(variables.spec.ephemeralContainers) ? variables.spec.ephemeralContainers.map(c, has(c.securityContext) && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.add) ? c.securityContext.capabilities.add : []) : [])"},
+					{name: "refusedLabels", expression: "has(\(#meta).labels) ? \(#meta).labels.filter(k, \(_prefixed.labels)) : []"},
+				]
+				validations: [
+					{expression: "variables.images.all(i, i.startsWith('\(registry)/' + request.namespace + '/'))", message: "a tenant's containers run images from its own namespace's path in the node's registry alone"},
+					{expression: "variables.accounts.all(a, !(a in [\(_quoted.accounts)]) && !a.endsWith('\(#TenantAccountSuffix)'))", message: "a tenant's pods never run as the publisher's, the builder's or the provisioner's account, nor as a database's own (<cluster>\(#TenantAccountSuffix))"},
+					{expression: "!has(variables.spec.runtimeClassName) && !has(variables.spec.priorityClassName) && (!has(variables.spec.hostUsers) || variables.spec.hostUsers)", message: "a tenant's pods set no runtime class, no priority class and no user namespace"},
+					{expression: "size(variables.sidecarNotes) == 0", message: "a tenant's pods leave Dapr's sidecar (its image, resources and ports) to the platform"},
+					{expression: "size(variables.refusedLabels) == 0", message: "a tenant's pods carry no cnpg.io/ label, which marks a database's own"},
+					{expression: "!has(variables.spec.volumes) || variables.spec.volumes.all(v, \(_volumes))", message: "a tenant's pods mount only \(strings.Join(#TenantVolumeTypes, ", ")) volumes"},
+					{expression: "variables.spec.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false) && (!has(variables.spec.initContainers) || variables.spec.initContainers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false)) && (!has(variables.spec.ephemeralContainers) || variables.spec.ephemeralContainers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false))", message: "a tenant's containers say allowPrivilegeEscalation: false"},
+					{expression: "variables.containerCaps.all(a, size(a) == 0)", message: "a tenant's containers add no capabilities"},
+					{expression: strings.Join([for m in #metas {"(\(strings.Join([for f in #TenantRefusedMetadata {"!has(\(m).\(f))"}], " && ")))"}], " && "), message: "a tenant's pods leave \(strings.Join(#TenantRefusedMetadata, " and ")) to the engine"},
+				]
+			}
+		}
+	}
+	
+	_policies: [
+		(_pod & {
+			#name: "pods", #spec: "object.spec", #meta: "object.metadata", #metas: ["object.metadata"]
+			#resources: [{apiGroups: [""], apiVersions: ["*"], operations: _ops, resources: ["pods", "pods/ephemeralcontainers"]}]
+		}).policy,
+		(_pod & {
+			#name: "templates", #spec: "object.spec.template.spec", #meta: "object.spec.template.metadata", #metas: ["object.metadata", "object.spec.template.metadata"]
+			#resources: [
+				{apiGroups: ["apps"], apiVersions: ["*"], operations: _ops, resources: ["deployments", "replicasets", "statefulsets"]},
+				{apiGroups: ["batch"], apiVersions: ["*"], operations: _ops, resources: ["jobs"]},
+			]
+		}).policy,
+		// What an object of any kind a publisher writes leaves to the engine: the metadata that hands its life to another (an ownerReference to the provisioner's publisher account,
+		// which Kubernetes garbage-collects when the owner is not found; a finalizer that holds it undeletable).
+		{
+			metadata: name: "\(_prefix)-engine-objects"
+			spec: {
+				failurePolicy: _fp
+				matchConstraints: {
+					namespaceSelector: _selector
+					resourceRules: [for _, r in #PublisherResources {apiGroups: [r.group], apiVersions: ["*"], operations: _ops, resources: [r.resource]}]
+				}
+				matchConditions: _notJudged
+				validations: [{
+					expression: strings.Join([for f in #TenantRefusedMetadata {"!has(object.metadata.\(f))"}], " && ")
+					message:    "a tenant's objects leave \(strings.Join(#TenantRefusedMetadata, " and ")) to the engine"
+				}]
+			}
+		},
+		{
+			metadata: name: "\(_prefix)-engine-services"
+			spec: {
+				failurePolicy: _fp
+				matchConstraints: {namespaceSelector: _selector, resourceRules: [{apiGroups: [""], apiVersions: ["*"], operations: _ops, resources: ["services"]}]}
+				matchConditions: _notJudged
+				validations: [
+					{expression: "!has(object.spec.type) || object.spec.type == 'ClusterIP'", message: "a tenant's Service is a ClusterIP: a NodePort, LoadBalancer or ExternalName one reaches past its namespace"},
+					{expression: "!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0", message: "a tenant's Service names no externalIPs (CVE-2020-8554)"},
+				]
+			}
+		},
+		{
+			metadata: name: "\(_prefix)-engine-secrets"
+			spec: {
+				failurePolicy: _fp
+				matchConstraints: {namespaceSelector: _selector, resourceRules: [{apiGroups: [""], apiVersions: ["*"], operations: _ops, resources: ["secrets"]}]}
+				matchConditions: _notJudged
+				validations: [
+					{expression: "!has(object.type) || object.type != 'kubernetes.io/service-account-token'", message: "a tenant writes no service account token"},
+					{expression: "!has(object.metadata.annotations) || size(object.metadata.annotations.filter(k, k.startsWith('kubernetes.io/service-account.'))) == 0", message: "a tenant's Secret names no service account in a kubernetes.io/service-account.* annotation: the token controller would fill it"},
+				]
+			}
+		},
+		// A tenant's Cluster, held to the allowlist the engine holds it to: the whole of what runs in the operator-made instance pod is the engine's, and the cnpg-manager that makes the pod
+		// is exempt elsewhere only because of this. The operator's own writes to a Cluster are not judged, nor is a request that changes neither `spec` nor an annotation.
+		{
+			metadata: name: "\(_prefix)-engine-clusters"
+			spec: {
+				failurePolicy: _fp
+				matchConstraints: {namespaceSelector: _selector, resourceRules: [{apiGroups: ["postgresql.cnpg.io"], apiVersions: ["*"], operations: _ops, resources: ["clusters"]}]}
+				matchConditions: [{name: "not-a-controller", expression: "!(\(_isController))"}, {name: "not-the-operator", expression: "!(\(_isOperator))"}, {name: "spec-or-annotations-change", expression: "request.operation == 'CREATE' || object.spec != oldObject.spec || dyn(has(object.metadata.annotations) ? object.metadata.annotations : {}) != dyn(has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})"}]
+				variables: [
+					{name: "spec", expression: "dyn(object.spec)"},
+					{name: "base", expression: "object.metadata.name.endsWith('\(#TenantAccountSuffix)') ? object.metadata.name.substring(0, size(object.metadata.name) - \(len(#TenantAccountSuffix))) : ''"},
+					{name: "params", expression: "has(variables.spec.postgresql) && has(variables.spec.postgresql.parameters) ? variables.spec.postgresql.parameters : {}"},
+					{name: "database", expression: "has(variables.spec.bootstrap) && has(variables.spec.bootstrap.initdb) && has(variables.spec.bootstrap.initdb.database) ? variables.spec.bootstrap.initdb.database : 'app'"},
+					{name: "owner", expression: "has(variables.spec.bootstrap) && has(variables.spec.bootstrap.initdb) && has(variables.spec.bootstrap.initdb.owner) && variables.spec.bootstrap.initdb.owner != '' ? variables.spec.bootstrap.initdb.owner : variables.database"},
+					{name: "roles", expression: "has(variables.spec.managed) && has(variables.spec.managed.roles) ? variables.spec.managed.roles : []"},
+				]
+				validations: list.Concat([[
+					{expression: "object.metadata.name.endsWith('\(#TenantAccountSuffix)')", message: "a tenant's Cluster is named <app>\(#TenantAccountSuffix): its database is the release's own"},
+					{expression: "!has(object.metadata.annotations) || size(dyn(object.metadata.annotations).filter(k, \(strings.Join([for p in #TenantRefusedClusterAnnotationPrefixes {"k.startsWith('\(p)')"}], " || ")))) == 0", message: "a tenant's Cluster carries no cnpg.io/ annotation: podPatch, validation and reconcilePodSpec make the operator rewrite the instance pod (#TenantRefusedClusterAnnotationPrefixes)"},
+					{expression: "has(variables.spec.imageName) && variables.spec.imageName in [\(_quoted.images)]", message: "a tenant's Cluster runs the engine's approved database base, from its own namespace's path in the node's registry, pinned by its digest"},
+					{expression: "variables.spec.all(k, k in [\(_quoted.clusterKeys)])", message: "a tenant's Cluster sets only the fields the engine renders (#TenantClusterSpec): its image and what runs in its pod are the engine's"},
+					{expression: "!has(variables.spec.inheritedMetadata) && !has(variables.spec.priorityClassName)", message: "a tenant's Cluster sets no inheritedMetadata and no priorityClassName"},
+					{expression: "!has(variables.spec.postgresql) || variables.spec.postgresql.all(k, k in [\(_quoted.pgKeys)])", message: "a tenant's Cluster sets only postgresql.parameters and postgresql.synchronous"},
+					{expression: "!has(variables.spec.bootstrap) || variables.spec.bootstrap.all(k, k in [\(_quoted.bootKeys)])", message: "a tenant's Cluster bootstraps with initdb alone"},
+					{expression: "!has(variables.spec.bootstrap) || !has(variables.spec.bootstrap.initdb) || variables.spec.bootstrap.initdb.all(k, k in [\(_quoted.initdbKeys)])", message: "a tenant's Cluster's initdb sets no SQL of its own"},
+					{expression: "has(variables.spec.enableSuperuserAccess) && variables.spec.enableSuperuserAccess == false", message: "a tenant's Cluster sets enableSuperuserAccess: false: its database has no superuser access"},
+					{expression: "!has(variables.spec.superuserSecret)", message: "a tenant's Cluster sets no superuserSecret"},
+					{expression: "(!has(variables.spec.postgresUID) || variables.spec.postgresUID == \(#TenantClusterSpec.uid)) && (!has(variables.spec.postgresGID) || variables.spec.postgresGID == \(#TenantClusterSpec.uid))", message: "a tenant's Cluster runs the database as the approved base's uid and gid (\(#TenantClusterSpec.uid))"},
+					{expression: "variables.roles.all(r, !(has(r.superuser) && r.superuser == true) && !(has(r.createrole) && r.createrole == true) && (!has(r.inRoles) || r.inRoles.all(x, !\((_reserved & {#n: "x"}).out))))", message: "a tenant's managed roles are no superuser, create no roles and are members of no reserved role (#TenantRefusedRoles, #TenantRefusedRolePrefixes)"},
+					{expression: "variables.roles.all(r, !\((_reserved & {#n: "r.name"}).out))", message: "a tenant's managed role is named no reserved role (#TenantRefusedRoles, #TenantRefusedRolePrefixes)"},
+					{expression: "!\((_reserved & {#n: "variables.owner"}).out)", message: "a tenant's database owner (the database's name when none is named) is no reserved role: CloudNativePG sets its password from the bootstrap secret"},
+					{expression: "!(variables.database in [\(_quoted.databases)]) && !\((_reserved & {#n: "variables.database"}).out)", message: "a tenant's database is named no reserved database or role (#TenantRefusedDatabases)"},
+					{expression: "!has(variables.spec.storage) || variables.spec.storage.all(k, k in [\(_quoted.storage)])", message: "a tenant's Cluster sets only the size and class of its storage (#TenantStorageKeys)"},
+					{expression: "(!has(variables.spec.stopDelay) || (variables.spec.stopDelay >= 0 && variables.spec.stopDelay <= \(#TenantMaxStopSeconds))) && (!has(variables.spec.smartShutdownTimeout) || (variables.spec.smartShutdownTimeout >= 0 && variables.spec.smartShutdownTimeout <= \(#TenantMaxStopSeconds)))", message: "a tenant's Cluster waits at most \(#TenantMaxStopSeconds) seconds to stop (#TenantMaxStopSeconds)"},
+					{expression: "!has(variables.spec.managed) || !has(variables.spec.managed.services) || !has(variables.spec.managed.services.additional) || variables.spec.managed.services.additional.all(a, !has(a.serviceTemplate) || !has(a.serviceTemplate.spec) || ((!has(a.serviceTemplate.spec.type) || a.serviceTemplate.spec.type == 'ClusterIP') && (!has(a.serviceTemplate.spec.externalIPs) || size(a.serviceTemplate.spec.externalIPs) == 0)))", message: "a tenant's Cluster publishes its Services inside the cluster alone"},
+					{expression: "variables.params.all(k, k in [\(_quoted.parameters)])", message: "a tenant's Cluster sets only the Postgres parameters #TenantParameters lists"},
+				], [for p, b in _bound {
+					{expression: "!('\(p)' in variables.params) || (\(b))", message: "a tenant's Cluster holds the Postgres parameter \(p) to its bound"}
+				}]])
+			}
+		},
+	]
+
+	objects: list.Concat([[for p in _policies {
+		{apiVersion: "admissionregistration.k8s.io/v1", kind: "ValidatingAdmissionPolicy", metadata: p.metadata, spec: p.spec}
+	}], [for p in _policies {
+		{apiVersion: "admissionregistration.k8s.io/v1", kind: "ValidatingAdmissionPolicyBinding", metadata: p.metadata, spec: {policyName: p.metadata.name, validationActions: actions}}
+	}]])
+}
 
 // The database's replicas and settings, as patches over upstream's CloudNativePG Cluster (`<app>-db`). Each field
 // is a patch: where `database` is not set, upstream's Cluster is applied as it renders.
