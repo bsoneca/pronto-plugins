@@ -14,9 +14,10 @@ package schema
 // A partial --eviction-hard drops the kubelet's other defaults (memory.available<100Mi, nodefs.inodesFree<5%, ...), so
 // every threshold is written, and none has a default: a node says each, and a map missing one is refused.
 #Kubelet: {
-	// How many pods the node runs. The node's pod range bounds it: a limit past it needs a wider range, which
-	// the node's values hold (k3s gives the node a /24 of the cluster CIDR, 253 addresses).
-	maxPods: *110 | (int & >=10)
+	// How many pods the node runs: said, with no default, since a default would write k3s's 110 over a node that runs
+	// more and strand its pods Pending. The node's pod range bounds it: k3s gives the node a /24 of the cluster CIDR,
+	// 253 addresses; a limit past it needs a wider range.
+	maxPods!: int & >=110 & <=253
 
 	// The thresholds under which the kubelet evicts: percent of the filesystem (or its inodes) free, and memory left.
 	evictionHard!: {
@@ -33,7 +34,7 @@ package schema
 	}
 	// Image garbage collection starts at high percent of the image filesystem used and stops at low, both before eviction.
 	imageGC!: {
-		high!: int & <(100 - evictionHard.nodefs) & <(100 - evictionHard.imagefs)
+		high!: int & <=(95 - evictionHard.nodefs) & <=(95 - evictionHard.imagefs)
 		low!:  int & >0 & <high
 	}
 	// The container log: each file's size, and how many the runtime keeps.

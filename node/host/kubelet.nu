@@ -1,7 +1,7 @@
 #!/usr/bin/env nu
 # The node's kubelet args (README.md, "The node host"), set from a node's #Host kubelet values:
 #
-#   nu node/host/kubelet.nu apply <host.json> [--check] [--node user@host]
+#   KUBECTL='KUBECONFIG=... kubectl' nu node/host/kubelet.nu apply <host.json> [--check] [--node user@host]
 #
 # <host.json> is the node's #Host exported (`cue export -e host --out json`). It writes them to
 # /etc/rancher/k3s/config.yaml.d/max-pods.yaml, the file max-pods already had (a second file with a plain
@@ -11,31 +11,43 @@
 #
 # Never leaves the only node with a file its kubelet did not take:
 # - the file is written whole beside itself (not .yaml, so k3s does not read it), checked by its sha256, then renamed
-#   over the live one: a full disk or a dropped ssh leaves the live file as it was;
+#   over the live one: a full disk, a short write or a dropped ssh leaves the live file as it was;
 # - a pending marker (holding "had" or "none": whether a previous file existed) and a backup of the previous file are
 #   made before the rename and removed only once the kubelet is known good: a check passed, or the previous file is back,
-#   k3s restarted and the kubelet answers. A run that finds the marker (an earlier run stopped before its check) is
-#   the earlier run's to finish, and rolls back from the same backup;
+#   k3s restarted and the kubelet answers. A run that finds the marker (an earlier run stopped before its check, or k3s
+#   is down after a crash) is the earlier run's to finish: it waits for the kubelet and, if it does not take the file,
+#   rolls back from the same backup. The marker's existence is what says so; a value other than had or none stops the
+#   rollback with the marker kept;
 # - only a configz that was read and differs restarts k3s: an unreadable one (the request failed, or answered nothing,
 #   or not a kubelet config) is retried, then the run stops without restarting.
 #
-# Needs ssh to the node, whose sudo asks no password, and kubectl on the node (KUBECTL, expanded there, defaults to
-# the operator's kubeconfig). Every call has a deadline; the ssh is never retried (a failed login gets the Mac banned by
-# the node's CrowdSec). --check changes nothing and exits 1 on drift. --root puts every path under it (for the tests).
+# It refuses, before writing, when another file under /etc/rancher/k3s/config.yaml{,.d} holds kubelet-arg (it would
+# replace or be replaced by ours), when another apply holds the node's lock (a directory beside the file, taken over
+# after 30 minutes), and when the node's disks are already past the new eviction line (a restart into eviction). The
+# thresholds bound the damage when a disk fills; what prevents it is the cleanup of docker-gc.sh.
+#
+# Needs ssh to the node, whose sudo asks no password, and kubectl on the node: KUBECTL, expanded there by the login
+# shell (it names the kubeconfig; this module has no default for a node's own). Every call has a deadline; the ssh is
+# never retried (a failed login gets the Mac banned by the node's CrowdSec). --check changes nothing and exits 1 on
+# drift. --root puts every path under it (for the tests).
 
 use host.nu [sh must]
 
+const dir = "/etc/rancher/k3s"
 const file = "/etc/rancher/k3s/config.yaml.d/max-pods.yaml"
+# The kubelet's own and the runtime's image filesystems, whose use the thresholds are about.
+const nodefs_dir = "/var/lib/kubelet"
+const imagefs_dir = "/var/lib/rancher/k3s/agent/containerd"
 
 # A bad value stops the only node's kubelet, so each arg must be one of these, whole.
 const allowed = [
-	'^max-pods=[1-9][0-9]{1,3}$'
+	'^max-pods=[1-9][0-9]{2,3}$'
 	'^eviction-hard=memory\.available<[1-9][0-9]{1,3}Mi,nodefs\.available<[1-9][0-9]?%,nodefs\.inodesFree<[1-9][0-9]?%,imagefs\.available<[1-9][0-9]?%,imagefs\.inodesFree<[1-9][0-9]?%$'
 	'^eviction-minimum-reclaim=nodefs\.available=[1-9][0-9]?Gi,imagefs\.available=[1-9][0-9]?Gi$'
 	'^image-gc-high-threshold=[1-9][0-9]$'
 	'^image-gc-low-threshold=[1-9][0-9]$'
 	'^container-log-max-size=[1-9][0-9]{0,3}(Ki|Mi)$'
-	'^container-log-max-files=[0-9]+$'
+	'^container-log-max-files=([2-9]|1[0-9]|20)$'
 ]
 
 # The kubelet's args, one key=value each, from the #Host kubelet values.
@@ -83,11 +95,11 @@ export def want-configz [k: record]: nothing -> record {
 }
 
 # The kubelet's config as it reports it: {state: "match" | "differs" | "unreadable", said}. Unreadable is a failed
-# request, an empty answer, or one that is not a kubelet config; none of them is a kubelet that took the args.
+# request, an empty answer, or one that is not a kubelet config; none of them is a kubelet that took the args. It is
+# the target node's own (by its hostname, which is k3s's node name unless it was set otherwise), never the first one listed.
 def read-configz [node: string, want: record]: nothing -> record {
-	let kubectl = ($env.KUBECTL? | default 'KUBECONFIG=$HOME/.cache/contabo2.kubeconfig kubectl')
-	let get = $"($kubectl) get --request-timeout=10s"
-	let r = (sh $node $"($get) --raw /api/v1/nodes/$\(($get) node -o jsonpath='{.items[0].metadata.name}'\)/proxy/configz" --plain)
+	let kubectl = $env.KUBECTL
+	let r = (sh $node $"($kubectl) get --request-timeout=10s --raw /api/v1/nodes/$\(hostname\)/proxy/configz" --plain)
 	if $r.exit_code != 0 { return {state: "unreadable", said: $"the request failed: ($r.stderr | str trim)"} }
 	let parsed = (try { $r.stdout | from json } catch { null })
 	let cfg = (if $parsed == null { null } else { $parsed | get -o kubeletconfig })
@@ -107,49 +119,108 @@ def read-settled [node: string, want: record, polls: int, pause: duration]: noth
 	$r
 }
 
-# Applies the kubelet's args, or with --check only says. Returns {code: 0 | 1}: 1 on drift (--check) or a kubelet that
-# did not take them.
+# The files, other than ours, under the k3s config that set kubelet-arg.
+def other-kubelet-arg [node: string, root: string, live: string]: nothing -> list<string> {
+	let base = $root + $dir
+	let out = (must (sh $node $"grep -ls 'kubelet-arg' '($base)/config.yaml' '($base)/config.yaml.d/'*.yaml '($base)/config.yaml.d/'*.yml 2>/dev/null | grep -vxF '($live)'; true") "looking for other kubelet-arg")
+	$out | lines | where {|l| $l != ""}
+}
+
+# Percent used of the filesystem a path is on.
+def disk-used [node: string, path: string]: nothing -> int {
+	let out = (must (sh $node $"df -P '($path)' 2>/dev/null | awk 'NR==2 {gsub\(\"%\", \"\", $5\); print $5}'") $"reading the use of ($path)" | str trim)
+	if $out == "" { error make {msg: $"k3s-kubelet: cannot read the use of ($path)"} }
+	$out | into int
+}
+
+# A restart into eviction is refused: the disks are already past the line the kubelet would evict at, and it would take
+# pods on its first pass. Past the image GC line only warns (the kubelet collects images, which is what is wanted).
+def preflight [node: string, k: record]: nothing -> bool {
+	let h = $k.evictionHard
+	let n = (disk-used $node $nodefs_dir)
+	let i = (disk-used $node $imagefs_dir)
+	let evict_n = (100 - $h.nodefs)
+	let evict_i = (100 - $h.imagefs)
+	if $n >= $evict_n or $i >= $evict_i {
+		print --stderr $"k3s-kubelet: the disks are already past the new eviction line \(nodefs ($n)% used, imagefs ($i)%; it evicts at ($evict_n)% and ($evict_i)%\): free space first, docker-gc.sh; nothing changed"
+		return false
+	}
+	if $n > $k.imageGC.high or $i > $k.imageGC.high {
+		print --stderr $"k3s-kubelet: warning: the disks are past the image GC line \(($k.imageGC.high)%\) [nodefs ($n)%, imagefs ($i)%]: the kubelet collects images at once"
+	}
+	true
+}
+
+# Applies the kubelet's args, or with --check only says. Returns {code: 0 | 1}: 1 on drift (--check), a refusal, or a
+# kubelet that did not take them. One apply at a time on a node.
 export def apply-kubelet [k: record, --check, --node: string = "", --root: string = "", --polls: int = 60, --pause: duration = 2sec]: nothing -> record {
+	if ($env.KUBECTL? | default "") == "" { error make {msg: "k3s-kubelet: set KUBECTL to the kubectl the node's shell runs, with its kubeconfig (expanded on the node)"} }
 	let config = (kubelet-config $k)
+	if $check { return (apply-locked $k $config --check --node $node --root $root --polls $polls --pause $pause) }
+	let lock = $"($root)($file).lock"
+	let got = (sh $node $"mkdir -p '($root)($dir)/config.yaml.d' && { mkdir '($lock)' 2>/dev/null || { find '($lock)' -maxdepth 0 -mmin +30 | grep -q . && rm -rf '($lock)' && mkdir '($lock)'; }; }")
+	if $got.exit_code != 0 {
+		print --stderr $"k3s-kubelet: another apply holds ($lock) \(taken over after 30 minutes\): nothing changed"
+		return {code: 1}
+	}
+	let r = (try { apply-locked $k $config --node $node --root $root --polls $polls --pause $pause } catch {|e|
+		sh $node $"rmdir '($lock)'" | ignore
+		error make {msg: $e.msg}
+	})
+	sh $node $"rmdir '($lock)'" | ignore
+	$r
+}
+
+def apply-locked [k: record, config: string, --check, --node: string = "", --root: string = "", --polls: int = 60, --pause: duration = 2sec]: nothing -> record {
 	let want = (want-configz $k)
 	let live = $root + $file
 	let prev = $"($live).prev"
 	let pending = $"($live).pending"
 	let tmp = $"($live).new"
+	let others = (other-kubelet-arg $node $root $live)
+	if not ($others | is-empty) {
+		print --stderr $"k3s-kubelet: another file sets kubelet-arg, which would replace or be replaced by ours: ($others | str join ', '): nothing changed"
+		return {code: 1}
+	}
 	let current = (must (sh $node $"if [ -e '($live)' ]; then cat '($live)'; fi") "reading the file")
-	let marker = (must (sh $node $"if [ -e '($pending)' ]; then cat '($pending)'; fi") "reading the marker" | str trim)
-	# A run that wrote the file and stopped before it was checked is finished, and rolled back if need be, by the next.
-	mut changed = ($marker != "")
+	# The marker's existence says an earlier apply was not checked; what it holds only says what the rollback does.
+	let marked = ((must (sh $node $"if [ -e '($pending)' ]; then echo yes; fi") "reading the marker" | str trim) == "yes")
+	mut changed = $marked
 	let restart = {||
-		let r = (sh $node "systemctl restart k3s")
-		if $r.exit_code != 0 { print --stderr $"k3s-kubelet: the restart failed: ($r.stderr | str trim)" }
-		print "k3s restarted"
+		let r = (sh $node "timeout 180 systemctl restart k3s")
+		if $r.exit_code != 0 { print --stderr $"k3s-kubelet: the restart failed \(($r.exit_code)\): ($r.stderr | str trim)" } else { print "k3s restarted" }
 		$r.exit_code == 0
 	}
 
 	if $current == $config {
 		print $"($live) is as #Host says"
 		if $check {
-			if $marker != "" { print $"($pending): an earlier apply was not checked"; return {code: 1} }
+			if $marked { print $"($pending): an earlier apply was not checked"; return {code: 1} }
 			return {code: 0}
 		}
-		let r = (read-settled $node $want $polls $pause)
-		if $r.state == "unreadable" {
-			print --stderr $"k3s-kubelet: the kubelet's config could not be read: ($r.said); nothing restarted"
-			return {code: 1}
-		}
-		if $r.state == "differs" {
-			print "the kubelet does not run with it yet"
-			do $restart | ignore
+		# With the marker the earlier run's check is ours to finish, and a kubelet that is down (k3s crashed after the
+		# rename) must reach the rollback below, so there is no early return then.
+		if not $marked {
+			let r = (read-settled $node $want $polls $pause)
+			if $r.state == "unreadable" {
+				print --stderr $"k3s-kubelet: the kubelet's config could not be read: ($r.said); nothing restarted"
+				return {code: 1}
+			}
+			if $r.state == "differs" {
+				print "the kubelet does not run with it yet"
+				if not (preflight $node $k) { return {code: 1} }
+				do $restart | ignore
+			}
 		}
 	} else {
 		print $"($live) differs"
 		if $check { return {code: 1} }
+		if not (preflight $node $k) { return {code: 1} }
 		$changed = true
 		let sum = ($config | hash sha256)
-		# The marker and backup are made first, and only when no earlier run left them (its backup is the good one); a
-		# run that fails before the rename removes what it made.
-		let install = $"made=0; mkdir -p '($live | path dirname)' && { test -e '($pending)' || { rm -f '($prev)' && made=1 && k=none && { ! test -e '($live)' || { cp -p '($live)' '($prev)' && k=had; }; } && echo $k >'($pending)'; }; } && rm -f '($tmp)' && { tee '($tmp)' >/dev/null && [ \"$\(sha256sum '($tmp)' | cut -d' ' -f1\)\" = ($sum) ] && mv -f '($tmp)' '($live)'; } || { rm -f '($tmp)'; [ \"$made\" != 1 ] || rm -f '($pending)' '($prev)'; exit 1; }"
+		# The marker and backup are made first, and only when no earlier run left them (its backup is the good one), and
+		# synced; a run that fails before the rename removes what it made. The new file is synced before the rename.
+		let install = $"made=0; mkdir -p '($live | path dirname)' && { test -e '($pending)' || { rm -f '($prev)' && made=1 && k=none && { ! test -e '($live)' || { cp -p '($live)' '($prev)' && k=had; }; } && echo $k >'($pending)' && sync; }; } && rm -f '($tmp)' && { tee '($tmp)' >/dev/null && sync && [ \"$\(sha256sum '($tmp)' | cut -d' ' -f1\)\" = ($sum) ] && mv -f '($tmp)' '($live)' && sync; } || { rm -f '($tmp)'; [ \"$made\" != 1 ] || rm -f '($pending)' '($prev)'; exit 1; }"
 		let w = (sh $node $install $config)
 		if $w.exit_code != 0 {
 			print --stderr $"k3s-kubelet: writing the file failed, the live file is as it was: ($w.stderr | str trim)"
@@ -173,8 +244,9 @@ export def apply-kubelet [k: record, --check, --node: string = "", --root: strin
 	if not $changed { return {code: 1} }
 
 	# The only node: a config this run (or an earlier unchecked one) wrote and the kubelet did not take is put back, by a
-	# copy beside it and a rename, with the backup kept until the kubelet is known to answer.
-	let back = (sh $node $"if [ \"$\(cat '($pending)'\)\" = had ]; then cp -p '($prev)' '($tmp)' && mv -f '($tmp)' '($live)'; else rm -f '($live)'; fi")
+	# copy beside it and a rename, with the backup kept until the kubelet is known to answer. The marker says which; one
+	# that says neither stops here, with everything kept.
+	let back = (sh $node $"case \"$\(cat '($pending)' 2>/dev/null\)\" in had) cp -p '($prev)' '($tmp)' && sync && mv -f '($tmp)' '($live)' ;; none) rm -f '($live)' ;; *) echo 'the pending marker holds neither had nor none' >&2; exit 1 ;; esac")
 	if $back.exit_code != 0 {
 		print --stderr $"k3s-kubelet: the previous file could not be put back: ($back.stderr | str trim); ($pending) is kept"
 		return {code: 1}
@@ -200,6 +272,6 @@ def "main apply" [host: path, --check, --node: string = "", --root: string = "",
 }
 
 def main [] {
-	print "usage: kubelet.nu apply <host.json> [--check] [--node user@host]"
+	print "usage: KUBECTL=... kubelet.nu apply <host.json> [--check] [--node user@host]"
 	exit 2
 }

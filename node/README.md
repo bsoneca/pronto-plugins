@@ -320,10 +320,16 @@ so a bound every node needs is written here once, with defaults, and each reposi
   387G disk, which evicting every pod did not free), image GC before eviction, and `containerLogMaxSize`/`containerLogMaxFiles`. It writes
   `/etc/rancher/k3s/config.yaml.d/max-pods.yaml` whole beside itself and renames it, restarts k3s only when that changed, and checks what the
   running kubelet reports (configz). A pending marker and a backup, made before the rename and removed only once the kubelet is known good,
-  let the next run finish or roll back an apply that stopped; an unreadable configz (a failed request, an empty answer) restarts nothing; a
-  rollback restarts k3s and checks the kubelet answers, or keeps the marker. k3s's unit has `KillMode=process` (read from the unit on the
-  node, not confirmed by a restart): a restart should stop k3s alone and leave the containers running. Every ssh has a connect timeout and
-  keepalives, every kubectl a request timeout. Tests: `kubelet_test.nu` (fake ssh, sudo, tee, systemctl and kubectl).
+  let the next run finish or roll back an apply that stopped, also when k3s is down (the marker's existence says so; a value other than
+  `had` or `none` stops the rollback with everything kept); an unreadable configz (a failed request, an empty answer) restarts nothing
+  unless a marker is waiting; a rollback restarts k3s and checks the kubelet answers, or keeps the marker. `maxPods` has no default: a default
+  would write k3s's 110 over a node that runs more. `KUBECTL` (the kubectl the node's shell runs, with its kubeconfig) is set by the caller.
+  It reads the target node's own configz (by hostname), takes a lock (a directory, taken over after 30 minutes), refuses when another
+  file under `/etc/rancher/k3s/config.yaml{,.d}` sets `kubelet-arg`, and refuses a restart into a disk already past the new eviction line.
+  The thresholds bound the damage when a disk fills; what prevents it is `docker-gc.sh`. k3s's unit has `KillMode=process` (read from the unit
+  on the node, not confirmed by a restart): a restart should stop k3s alone and leave the containers running; it is run under `timeout 180`.
+  Every ssh has a connect timeout and keepalives, every kubectl a request timeout. Tests: `kubelet_test.nu` (fake ssh, sudo, tee, systemctl,
+  df and kubectl).
 - `export/`: `cue export ./node/host/export -e files --out json`, what `bin/pronto-node --host <dir>` writes into `<dir>/node-host/`, byte for byte.
   A repository pins this repository's merge in a file of its own (`.github/node-host.pin`), apart from the engine's, so a host change
   does not regenerate every app's `node/`.

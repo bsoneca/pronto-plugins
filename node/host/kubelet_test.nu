@@ -23,6 +23,13 @@ def main [] {
 	test_a_rollback_whose_restart_fails_keeps_the_marker
 	test_a_rerun_after_an_interrupted_apply_rolls_back_from_the_first_backup
 	test_a_rerun_restarts_only_on_a_config_it_read_and_that_differs
+	test_a_rerun_with_the_marker_and_a_dead_kubelet_rolls_back
+	test_the_marker_is_found_by_its_existence_and_read_only_to_roll_back
+	test_without_the_marker_nothing_is_rolled_back
+	test_a_short_write_that_exits_zero_is_caught_by_the_checksum
+	test_a_flaky_first_read_is_retried_before_anything_is_restarted
+	test_one_apply_at_a_time_and_no_second_kubelet_arg
+	test_a_disk_already_past_the_eviction_line_is_not_restarted_into
 	test_check_changes_nothing
 	test_every_call_has_a_deadline
 	print "\nAll node kubelet tests passed."
@@ -67,7 +74,7 @@ def cue-ok [values: string]: nothing -> bool {
 	$r.exit_code == 0
 }
 
-const ok_values = '{evictionHard: {memory: "100Mi", nodefs: 5, nodefsInodes: 5, imagefs: 5, imagefsInodes: 5}, evictionMinimumReclaim: {nodefs: "2Gi", imagefs: "4Gi"}, imageGC: {high: 80, low: 70}'
+const ok_values = '{maxPods: 250, evictionHard: {memory: "100Mi", nodefs: 5, nodefsInodes: 5, imagefs: 5, imagefsInodes: 5}, evictionMinimumReclaim: {nodefs: "2Gi", imagefs: "4Gi"}, imageGC: {high: 80, low: 70}'
 
 def test_cue_refuses_a_map_missing_a_threshold_and_a_gc_that_does_not_come_first [] {
 	print "test #Host refuses a map missing memory or inodes, and image GC or log limits that cannot work..."
@@ -82,13 +89,17 @@ def test_cue_refuses_a_map_missing_a_threshold_and_a_gc_that_does_not_come_first
 	assert (not (cue-ok $"($ok_values), containerLogMaxFiles: 1}")) "one log file"
 	assert (not (cue-ok $"($ok_values), containerLogMaxSize: \"10 Mi\"}")) "a size with a space"
 	assert (not (cue-ok $"($ok_values), maxPods: 5}")) "a pod limit under the floor"
+	assert (not (cue-ok $"($ok_values), maxPods: 254}")) "a pod limit past the node's address range"
+	assert (not (cue-ok '{evictionHard: {memory: "100Mi", nodefs: 5, nodefsInodes: 5, imagefs: 5, imagefsInodes: 5}, evictionMinimumReclaim: {nodefs: "2Gi", imagefs: "4Gi"}, imageGC: {high: 80, low: 70}}')) "no pod limit said: a default would write k3s's 110 over the node's 250"
+	assert (not (cue-ok $"($ok_values | str replace 'high: 80' 'high: 91')}")) "image GC high within 5 points of the eviction line"
+	assert (cue-ok $"($ok_values | str replace 'high: 80' 'high: 90')}") "image GC high at 95 minus the eviction percent"
 }
 
 # Runs apply-kubelet against a fake node. `start`: the node's files before the run ({live, pending, prev, running}, each
 # text or null). `mode`: ok (the kubelet runs the live file after a restart), stuck (it keeps running the old file),
 # noapi (kubectl fails), empty (kubectl answers nothing, exit 0), fulldisk (tee fails halfway), stuckfail (stuck, and the second
 # k3s restart fails). Returns what the run did.
-def scenario [mode: string, start: record, --check]: nothing -> record {
+def scenario [mode: string, start: record, --check, --df: int = 40, --other: string = "", --locked]: nothing -> record {
 	let dir = (mktemp --directory --tmpdir node-kubelet-XXXXXX)
 	let root = ($dir | path join root)
 	let live = $root + $live_path
@@ -103,15 +114,19 @@ def scenario [mode: string, start: record, --check]: nothing -> record {
 		if $text != null { $text | save --raw $f.1 }
 	}
 	if ($start | get -o running) != null { $start.running | save --raw ($dir | path join running) }
+	if $other != "" { $other | save --raw ($root | path join etc rancher k3s config.yaml) }
+	if $locked { mkdir $"($live).lock" }
 	let shim = {|name, body| $"#!/usr/bin/env bash\n($body)\n" | save --raw ($dir | path join bin $name); chmod 755 ($dir | path join bin $name) }
 	do $shim ssh 'd=$(dirname "$0")/..; while [ "$1" = -o ]; do echo "$2" >>"$d/ssh.opts"; shift 2; done; shift; exec bash -c "$1"'
 	do $shim sudo 'exec "$@"'
 	do $shim sha256sum 'exec shasum -a 256 "$@"'
 	do $shim systemctl 'd=$(dirname "$0")/..; echo "$*" >>"$d/systemctl.log"; n=$(wc -l <"$d/systemctl.log"); if [ "$MODE" = stuckfail ] && [ "$n" -ge 2 ]; then exit 1; fi; [ -e "$KUBELET_LIVE" ] && cp "$KUBELET_LIVE" "$d/running"; true'
-	do $shim tee 'if [ "$MODE" = fulldisk ]; then head -c 12 >"$1"; exit 1; fi; exec /usr/bin/tee "$@"'
-	do $shim kubectl 'd=$(dirname "$0")/..; echo "$*" >>"$d/kubectl.log"; case "$*" in *--raw*) case "$MODE" in noapi) exit 1;; empty) exit 0;; esac; if [ "$MODE" != stuck ] && [ "$MODE" != stuckfail ] && [ -e "$d/running" ] && cmp -s "$d/running" "$d/desired.yaml"; then cat "$d/configz.new"; else cat "$d/configz.old"; fi;; *) echo node1;; esac'
+	do $shim tee 'if [ "$MODE" = fulldisk ]; then head -c 12 >"$1"; exit 1; fi; if [ "$MODE" = shorttee ]; then head -c 12 >"$1"; exit 0; fi; exec /usr/bin/tee "$@"'
+	do $shim timeout 'shift; exec "$@"'
+	do $shim df 'echo "Filesystem 1024-blocks Used Available Capacity Mounted"; echo "/dev/x 100 $DF_PCT 100 ${DF_PCT}% /"'
+	do $shim kubectl 'd=$(dirname "$0")/..; echo "$*" >>"$d/kubectl.log"; case "$*" in *--raw*) n=$(cat "$d/kcount" 2>/dev/null || echo 0); if [ "$MODE" = flaky ] && [ "$n" -lt 1 ]; then echo $((n+1)) >"$d/kcount"; exit 1; fi; case "$MODE" in noapi) exit 1;; empty) exit 0;; esac; if [ "$MODE" != stuck ] && [ "$MODE" != stuckfail ] && [ -e "$d/running" ] && cmp -s "$d/running" "$d/desired.yaml"; then cat "$d/configz.new"; else cat "$d/configz.old"; fi;; *) echo node1;; esac'
 	"" | save --raw ($dir | path join systemctl.log)
-	let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')", KUBECTL: ($dir | path join bin kubectl), MODE: $mode, KUBELET_LIVE: $live} {
+	let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')", KUBECTL: ($dir | path join bin kubectl), MODE: $mode, KUBELET_LIVE: $live, DF_PCT: $df} {
 		apply-kubelet $k --check=$check --node fake --root $root --polls 2 --pause 0sec
 	})
 	let read = {|f| if ($f | path exists) { open --raw $f } else { null } }
@@ -122,6 +137,7 @@ def scenario [mode: string, start: record, --check]: nothing -> record {
 		pending: (do $trim (do $read $"($live).pending"))
 		prev: (do $read $"($live).prev")
 		leftover: (($"($live).new" | path exists))
+		lock: ($"($live).lock" | path exists)
 		restarts: (open --raw ($dir | path join systemctl.log) | lines | where {|l| $l != ""} | length)
 		ssh_opts: (do $read ($dir | path join ssh.opts) | default "")
 		kubectl: (do $read ($dir | path join kubectl.log) | default "")
@@ -212,6 +228,63 @@ def test_a_rerun_restarts_only_on_a_config_it_read_and_that_differs [] {
 	}
 }
 
+def test_a_rerun_with_the_marker_and_a_dead_kubelet_rolls_back [] {
+	print "test a rerun that finds the marker with k3s down (configz unreadable) rolls back instead of returning..."
+	let r = (scenario noapi {live: (desired), pending: "had\n", prev: "good: file\n"})
+	assert equal [$r.code $r.live $r.restarts] [1 "good: file\n" 1]
+	# The kubelet still does not answer after the rollback: nothing is settled, the marker and backup stay.
+	assert equal [$r.pending $r.prev] ["had" "good: file\n"]
+	let none = (scenario empty {live: (desired), pending: "none\n"})
+	assert equal [$none.code $none.live $none.restarts $none.pending] [1 null 1 "none"]
+}
+
+def test_the_marker_is_found_by_its_existence_and_read_only_to_roll_back [] {
+	print "test an empty or unknown marker still counts as pending, and a rollback it cannot read stops with everything kept..."
+	for text in ["" "weird\n"] {
+		let r = (scenario stuck {live: (desired), pending: $text, prev: "good: file\n"})
+		assert equal [$r.code $r.live $r.prev $r.restarts] [1 (desired) "good: file\n" 0] $"marker ($text | to json)"
+		assert equal ($r.pending == null) false $"the marker is kept ($text | to json)"
+	}
+}
+
+def test_without_the_marker_nothing_is_rolled_back [] {
+	print "test with the same file and no marker the run only restarts, and never rolls back (the marker is what says an apply was ours)..."
+	let r = (scenario stuck {live: (desired), prev: "good: file\n"})
+	assert equal [$r.code $r.live $r.prev $r.restarts] [1 (desired) "good: file\n" 1]
+}
+
+def test_a_short_write_that_exits_zero_is_caught_by_the_checksum [] {
+	print "test a tee that writes short and exits 0 is caught by the sha256: the live file stays, nothing left behind..."
+	let r = (scenario shorttee {live: "old: file\n"})
+	assert equal [$r.code $r.live $r.leftover $r.pending $r.prev $r.restarts] [1 "old: file\n" false null null 0]
+}
+
+def test_a_flaky_first_read_is_retried_before_anything_is_restarted [] {
+	print "test a first configz read that fails is retried, and only the second read, which differs, restarts k3s..."
+	let r = (scenario flaky {live: (desired), running: "old: running\n"})
+	assert equal [$r.code $r.restarts] [0 1]
+}
+
+def test_one_apply_at_a_time_and_no_second_kubelet_arg [] {
+	print "test a held lock refuses, another file with kubelet-arg refuses, and a finished apply leaves no lock..."
+	let held = (scenario ok {live: "old: file\n"} --locked)
+	assert equal [$held.code $held.live $held.restarts $held.lock] [1 "old: file\n" 0 true]
+	let other = (scenario ok {live: "old: file\n"} --other "kubelet-arg:\n  - \"x=1\"\n")
+	assert equal [$other.code $other.live $other.restarts] [1 "old: file\n" 0]
+	let done = (scenario ok {live: "old: file\n"})
+	assert equal [$done.code $done.lock] [0 false]
+	let failed = (scenario stuck {live: "old: file\n"})
+	assert equal $failed.lock false
+}
+
+def test_a_disk_already_past_the_eviction_line_is_not_restarted_into [] {
+	print "test a disk past the new eviction line refuses before any write, and past only the image GC line goes on..."
+	let full = (scenario ok {live: "old: file\n"} --df 96)
+	assert equal [$full.code $full.live $full.restarts $full.pending] [1 "old: file\n" 0 null]
+	let gc = (scenario ok {live: "old: file\n"} --df 85)
+	assert equal [$gc.code $gc.live $gc.restarts] [0 (desired) 1]
+}
+
 def test_check_changes_nothing [] {
 	print "test --check exits 1 on a difference or an unchecked apply, and writes and restarts nothing..."
 	let differs = (scenario ok {live: "old: file\n"} --check)
@@ -230,4 +303,7 @@ def test_every_call_has_a_deadline [] {
 	assert str contains $r.ssh_opts "ServerAliveCountMax=2"
 	assert str contains $r.ssh_opts "BatchMode=yes"
 	for line in ($r.kubectl | lines | where {|l| $l != ""}) { assert str contains $line "--request-timeout=10s" $line }
+	# The target node's own configz by hostname, never the first node listed.
+	assert (not ($r.kubectl | str contains "get --request-timeout=10s node")) "no node listing"
+	assert str contains $r.kubectl $"/api/v1/nodes/((^hostname | str trim))/proxy/configz"
 }
