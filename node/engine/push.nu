@@ -243,6 +243,21 @@ export def tenant-images [app_dir: string, node: record, services: list<string>,
 		# The staged copy is what bake may read: a path the project names inside the app's own folder (an absolute build context a flatten wrote)
 		# is the staged copy's, so the grant below covers it and nothing outside the app is added to it.
 		let rebased = (rebase-paths $compose.stdout $dir $staged)
+		# The tenants' buildkitd is shared: no build key that reaches past the context, and every Dockerfile's cache mounts are the namespace's own (PRONTO-1945), on the staged copy the
+		# build reads and never on the author's files.
+		$rebased | tenant check-build-keys
+		mut staged_files = []
+		for s in (($rebased | from yaml | get -o services | default {}) | transpose name v) {
+			let build = ($s.v | get -o build)
+			if $build == null or not ($build | describe | str starts-with "record") { continue }
+			let file = ($build | get -o context | default "." | path join ($build | get -o dockerfile | default "Dockerfile") | path expand)
+			if $file in $staged_files { continue }
+			if not ($file | str starts-with $"(($staged | path expand))/") or not ($file | path exists) or (($file | path type) != "file") {
+				error make {msg: $"a tenant's service ($s.name) builds from ($file), which is not a regular file inside the staged app"}
+			}
+			open --raw $file | tenant stage-dockerfile $ns | save -f $file
+			$staged_files = ($staged_files | append $file)
+		}
 		runtime release-tree $rebased | save -f ($work | path join release.compose.yaml)
 		# The Cluster runs the engine's approved database base, never the tenant's: the database stage must only copy SQL onto a base the engine approves (#TenantDatabaseImages).
 		# Said before anything is built; the engine's own ref is what is copied below.

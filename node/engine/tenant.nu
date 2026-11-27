@@ -178,6 +178,8 @@ def compose-path-problem [root: string, value: any, what: string]: nothing -> an
 	let p = (if ($value | describe | str starts-with "record") { $value.path? | default "" } else { $value | into string })
 	if ($p | is-empty) { return null }
 	if ($p | str contains '$') { return $"($what) names ($p), a path with a variable in it: a tenant's compose file names plain paths" }
+	# docker reads a context that starts with git@ or github.com/ as a git remote too (the scp-like and the bare spellings), though neither has a scheme
+	if ($p =~ '^(git@|github\.com/)') { return $"($what) names ($p), a git remote, which is not a path inside the app's own folder" }
 	if ($p =~ '^[A-Za-z][A-Za-z0-9+.-]*:') { return $"($what) names ($p), which is not a path inside the app's own folder" }
 	let full = ($root | path join $p | path expand)
 	if $full == $root or ($full | str starts-with $"($root)/") { null } else { $"($what) names ($p), which is outside the app's own folder" }
@@ -249,6 +251,70 @@ export def check-compose-sources [app_dir: string] {
 		}
 	}
 	if ($problems | is-not-empty) { error make {msg: $"a tenant's compose project is refused before it is resolved: ($problems | str join '; ')"} }
+}
+
+# A Dockerfile a tenant's build reads, made safe for the tenants' one shared buildkitd (PRONTO-1945): its layer cache is content-addressed, so no tenant can place a layer another's build
+# reuses, but a cache mount (`RUN --mount=type=cache`) is shared by id across every build and the id is the Dockerfile's choice (the target path by default), so one tenant could seed
+# what another's build runs, or read what it left. Every cache mount's id is made `<namespace>/<its id, or its target when it names none>`, so no two tenants share one; a flag that
+# names a variable (a build argument would expand to an id outside the rewrite) or is quoted is refused; a `# syntax=` directive is refused, since it picks a build frontend of the
+# Dockerfile's own, which can issue any cache id directly: the buildkitd's built-in frontend only. Answers the rewritten text, or fails with what a tenant's Dockerfile does.
+export def stage-dockerfile [namespace: string]: string -> string {
+	let text = $in
+	if ($text =~ '(?im)^\s*#\s*syntax\s*=') { error make {msg: "a tenant's Dockerfile has a `# syntax=` directive, which picks a build frontend of its own: a tenant's build uses the buildkitd's built-in one"} }
+	if ($text =~ '(?i)--mount(\s|$)') { error make {msg: "a tenant's Dockerfile gives --mount without `=`: a tenant's mount flags are --mount=type=..."} }
+	let flags = ($text | parse --regex '(?<flag>--mount=\S*)' | get flag | uniq | sort-by {|f| $f | str length } --reverse)
+	mut out = $text
+	mut made = []
+	for i in 0..(($flags | length) - 1) {
+		if ($flags | is-empty) { break }
+		let flag = ($flags | get $i)
+		let value = ($flag | str replace '--mount=' '')
+		if ($value | str contains '$') { error make {msg: $"a tenant's Dockerfile has the mount flag ($flag), which names a variable: a build argument would expand to a cache id outside the namespace's"} }
+		if ($value =~ r#'["']'#) { error make {msg: $"a tenant's Dockerfile has the quoted mount flag ($flag): a tenant's mount flags are plain"} }
+		let fields = ($value | split row ',' | each {|f| let kv = ($f | split row -n 2 '='); {k: ($kv | get 0), v: ($kv | get -o 1 | default "")} })
+		let kind = ($fields | where k == "type" | get -o 0.v | default "")
+		let placeholder = $"__TENANT_MOUNT_($i)__"
+		$out = ($out | str replace --all $flag $placeholder)
+		if $kind != "cache" {
+			$made = ($made | append {placeholder: $placeholder, flag: $flag})
+			continue
+		}
+		let target = ($fields | where {|f| $f.k in [target dst destination] } | get -o 0.v | default "")
+		if ($target | is-empty) { error make {msg: $"a tenant's Dockerfile has the cache mount ($flag), which names no target"} }
+		let given = ($fields | where k == "id" | get -o 0.v | default "")
+		let id = if ($given | is-empty) { $target } else { $given }
+		let kept = ($fields | where k != "id" | each {|f| if ($f.v | is-empty) { $f.k } else { $"($f.k)=($f.v)" } })
+		$made = ($made | append {placeholder: $placeholder, flag: $"--mount=($kept | append $"id=($namespace)/($id)" | str join ',')"})
+	}
+	for m in $made { $out = ($out | str replace --all $m.placeholder $m.flag) }
+	$out
+}
+
+# What a tenant's compose project may say about a build, read from the staged compose config (a service's `build`): the keys that reach past the build context or pick where its cache
+# comes from or goes to (`cache_from`, `cache_to`, `ssh`, `secrets`, `network`, `extra_hosts`, `entitlements`, an inline Dockerfile) and a BUILDKIT_SYNTAX build argument are refused, and an
+# additional context is a path inside the app, another service or stage of the project, or a docker-image:// pinned by its sha256 digest (the database stage's base): never an
+# image that can move. Fails with every problem, before anything is built.
+export def check-build-keys []: string -> nothing {
+	let doc = ($in | from yaml)
+	mut problems = []
+	for s in (($doc | get -o services | default {}) | transpose name v) {
+		let build = ($s.v | get -o build)
+		if $build == null or not ($build | describe | str starts-with "record") { continue }
+		let at = $"services.($s.name).build"
+		for key in [cache_from cache_to ssh secrets network extra_hosts entitlements dockerfile_inline privileged] {
+			if ($build | get -o $key) != null { $problems = ($problems | append $"($at).($key) reaches past a tenant's build context or picks where its cache comes from: a tenant's build is the buildkitd's own") }
+		}
+		let args = ($build | get -o args | default {})
+		let names = if ($args | describe | str starts-with "record") { $args | columns } else { $args | each {|a| $a | into string | split row '=' | first } }
+		if ("BUILDKIT_SYNTAX" in $names) { $problems = ($problems | append $"($at).args names BUILDKIT_SYNTAX, which picks a build frontend of its own") }
+		let ctxs = ($build | get -o additional_contexts | default {})
+		let values = if ($ctxs | describe | str starts-with "record") { $ctxs | values } else { $ctxs | each {|l| $l | into string | split row -n 2 '=' | last } }
+		for c in $values {
+			let v = ($c | into string)
+			if ($v | str starts-with "docker-image://") and not ($v =~ '@sha256:[0-9a-f]{64}$') { $problems = ($problems | append $"($at).additional_contexts names ($v), an image a tag can move: a tenant's build pins its images by digest") }
+		}
+	}
+	if ($problems | is-not-empty) { error make {msg: $"a tenant's build is refused before it is made: ($problems | str join '; ')"} }
 }
 
 # What the engine's own constants say a tenant's release is: the tenants' sandboxed buildkitd and the node's registry as the push reaches it.
