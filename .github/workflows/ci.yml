@@ -65,6 +65,8 @@ jobs:
           sayt --script tools.nu cue vet -c -t package=check ./release-cron/export
           sayt --script tools.nu cue vet -c ./prod-watch
           sayt --script tools.nu cue vet -c -t package=check ./prod-watch/export
+          sayt --script tools.nu cue vet -c ./alerts
+          sayt --script tools.nu cue vet -c -t package=check -t app=check -t project=check-project-1 ./alerts/export
           sayt --script tools.nu cue vet -c ./probe
           sayt --script tools.nu cue vet -c -t package=check ./probe/export
           sayt --script tools.nu cue vet -c ./release-notes
@@ -172,6 +174,18 @@ jobs:
           grep -q "the app's own" "$app/probes_spec.cue"
           (cd "$app" && cue export probes_spec.cue probes_plugin.cue -e probeTarget.url) | grep -qx '"https://example.com"'
           ! ./bin/pronto-probe "$app" nope=1
+      - name: Opt an app into pronto-alerts, then refresh it keeping its own spec
+        run: |
+          app=$(mktemp -d)/demo-app && mkdir -p "$app" && printf 'package demo\n' > "$app/program.cue"
+          ./bin/pronto-alerts "$app" project=demo-project-1
+          echo "// the app's own" >> "$app/alerts_spec.cue"
+          ./bin/pronto-alerts "$app"
+          grep -q "the app's own" "$app/alerts_spec.cue"
+          test -f "$app/alerts/subscriber.ts" && test -f "$app/alerts/inbox.js" && test -f "$app/alerts_plugin.cue"
+          jq -e '.app == "demo-app" and .topic == "alerts-demo-app" and .subscription == "alerts-demo-app-inbox" and .project == "demo-project-1" and .ackDeadlineSeconds == 60 and .messageRetentionDuration == "604800s" and .push == ["CRITICAL"]' "$app/observability/alerts.subscriber.json"
+          jq -e 'length == 1 and .[0].name == "alerts-subscriber-lag" and (.[0].expr | contains("alerts-demo-app-inbox"))' "$app/observability/alerts.policies.json"
+          ! grep -rqiE 'token|secret' "$app/observability"
+          ! ./bin/pronto-alerts "$app" nope=1
       - name: Opt an app into release-notes
         run: |
           app=$(mktemp -d)/app && mkdir -p "$app" && printf 'package demo\n' > "$app/program.cue"
@@ -255,7 +269,7 @@ jobs:
       - name: Test the identity broker
         run: deno test --no-config --allow-net --allow-read --allow-env identity/oidc_test.ts identity/broker
       - name: Test the billing broker
-        run: deno lint --no-config billing doorguard ir-md intents gcp devflow release-cron release-notes prod-watch probe runners migrations tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run --allow-env billing doorguard ir-md
+        run: deno lint --no-config billing doorguard ir-md intents gcp devflow release-cron release-notes prod-watch probe alerts runners migrations tests/unit && deno test --no-config --allow-net --allow-read --allow-write --allow-run --allow-env billing doorguard ir-md
       # A script that does not parse fails only when it is run, and a release script runs rarely
       # (identity/release.nu shipped `env: [...] ++ $phone`, a record field nu cannot parse).
       # ios/template/*.nu are templates, not scripts: they hold placeholders (`const weight = __WEIGHT__`) and are
@@ -265,7 +279,7 @@ jobs:
       - name: Parse each nushell script
         run: sayt --script tools.nu nu -c 'let bad = (glob **/*.nu | where {|f| not ($f | str contains "/ios/template/") } | where {|f| not (nu-check $f) }); if ($bad | is-not-empty) { print $bad; exit 1 }'
       - name: Test the intents (tests/unit/*.cue)
-        run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android probe devflow migrations machine harness native lessons flags; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
+        run: for s in stripe billing deploy release runner identity targets cron notes runners fingerprint noise triage android probe devflow migrations machine harness native lessons flags alerts; do deno test --no-config --allow-read --allow-write --allow-env --allow-run --allow-net tests/unit.ts -- "$s" || exit 1; done
       # pronto-api (api/, tests/unit/api_generate.cue): its views run on PGlite, its door in caddy,
       # the version pronto's doors run (caddy:2.11.7-alpine), checked against its release's digest.
       - name: Test pronto-api (caddy 2.11.7)
