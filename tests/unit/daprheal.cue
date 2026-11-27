@@ -162,11 +162,11 @@ cases: "--dry-run makes no state folder and still says what it would roll": {
 cases: "a mark whose attempt is not on the workload (a reboot between the two) has the same patch sent again, cooldown or not, whatever else restarted it": {
 	suite: "daprheal"
 	steps: [
-		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, attempt: {"aprende/Deployment/aprende-flagd": null}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], ids: {"aprende/Deployment/aprende-flagd": "20260101T000000Z-1"}, marked: ["aprende.Deployment.aprende-flagd"]}, why: "the id patched is the mark's own: sending it twice changes nothing"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, markGeneration: {"aprende.Deployment.aprende-flagd": null}, attempt: {"aprende/Deployment/aprende-flagd": null}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], ids: {"aprende/Deployment/aprende-flagd": "20260101T000000Z-1"}, marked: ["aprende.Deployment.aprende-flagd"]}, why: "the id patched is the mark's own: sending it twice changes nothing"},
 		{pick: ["out"], matches: "attempt 20260101T000000Z-1 had not landed and was sent again"},
-		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, attempt: {"aprende/Deployment/aprende-flagd": "someone-elses"}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], ids: {"aprende/Deployment/aprende-flagd": "20260101T000000Z-1"}}, why: "another client's attempt, or restart, on the template is not this attempt: no clock is read"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, markGeneration: {"aprende.Deployment.aprende-flagd": null}, attempt: {"aprende/Deployment/aprende-flagd": "someone-elses"}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], ids: {"aprende/Deployment/aprende-flagd": "20260101T000000Z-1"}}, why: "another client's attempt, or restart, on the template is not this attempt: no clock is read"},
 		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}}], holds: {code: 0, rolled: []}, why: "the attempt is on the workload: it landed, the cooldown is waited out"},
-		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, attempt: {"aprende/Deployment/aprende-flagd": null}, args: ["--dry-run"]}], holds: {code: 0, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "a dry run says it and sends nothing"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, markGeneration: {"aprende.Deployment.aprende-flagd": null}, attempt: {"aprende/Deployment/aprende-flagd": null}, args: ["--dry-run"]}], holds: {code: 0, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "a dry run says it and sends nothing"},
 	]
 }
 
@@ -270,14 +270,14 @@ cases: "a mark's file is flushed before it is renamed and the folder after, and 
 	suite: "daprheal"
 	steps: [
 		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], marked: ["aprende.Deployment.aprende-flagd"]}},
-		{pick: ["syncs.length", "syncs.0", "syncs.1"], matches: "^2,<dir>/state/\\.tmp\\.[0-9]+\\.aprende\\.Deployment\\.aprende-flagd,<dir>/state$"},
+		{pick: ["syncs.length", "syncs.0", "syncs.1"], matches: "^4,<dir>/state/\\.tmp\\.[0-9]+,<dir>/state$"},
 	]
 }
 
 cases: "an attempt sent again refreshes the mark's time, so its cooldown starts when it landed": {
 	suite: "daprheal"
 	steps: [
-		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, attempt: {"aprende/Deployment/aprende-flagd": null}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], markAges: {"aprende.Deployment.aprende-flagd": 0}}, why: "45 minutes old before, now"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, markGeneration: {"aprende.Deployment.aprende-flagd": null}, attempt: {"aprende/Deployment/aprende-flagd": null}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], markAges: {"aprende.Deployment.aprende-flagd": 0}}, why: "45 minutes old before, now"},
 	]
 }
 
@@ -288,5 +288,55 @@ cases: "a mark whose id is not one of ours is never patched, and a sweep that fi
 		{pick: ["err"], matches: "not one of ours"},
 		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, lockHeld: true}], holds: {code: 0, rolled: []}, why: "another sweep runs: this one reads and rolls nothing"},
 		{pick: ["out"], matches: "another sweep holds"},
+	]
+}
+
+cases: "bare pods of a later revision (the template changed since the attempt) are a new incident, though made inside the cooldown and carrying its annotation": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [(_bare & {name: "later", ageSec: 1200})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, generation: {"aprende/Deployment/aprende-flagd": 9}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"]}, why: "the generation is 9, the attempt acknowledged 7: another rollout since. Made 20 minutes ago, inside the attempt's window by the clock: the old rule failed this for ever"},
+		{pick: ["out"], matches: "template changed since its last attempt"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {name: "later", ageSec: 120})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, generation: {"aprende/Deployment/aprende-flagd": 9}}], holds: {code: 0, rolled: []}, why: "the cooldown is the clock's only part: inside it, wait"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, attempt: {"aprende/Deployment/aprende-flagd": null}, generation: {"aprende/Deployment/aprende-flagd": 9}}], holds: {code: 0, rolled: []}, why: "a rollback that took the annotation off an acknowledged attempt is not an undelivered request: it is not sent again"},
+	]
+}
+
+cases: "an attempt that landed but was never acknowledged is acknowledged at the workload's generation, and keeps its time": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, markGeneration: {"aprende.Deployment.aprende-flagd": null}}], holds: {code: 0, rolled: []}},
+		{pick: ["acknowledged"], expect: [["aprende.Deployment.aprende-flagd"]]},
+	]
+}
+
+cases: "a workload that has no bare pod but is still rolling out keeps its mark; a recovered or removed one loses it; an unreadable one keeps it and fails the run": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, rollout: {"aprende/Deployment/aprende-flagd": "pending"}}], holds: {code: 0, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "a Recreate rollout: the old pod is terminating (not counted) and its replacement does not exist yet"},
+		{pick: ["out"], matches: "still rolling out"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {ns: "bonk", name: "bonk-crud-0", owner: "StatefulSet/bonk-crud", containers: ["crud"]})], marks: {"aprende.Deployment.aprende-flagd": 5, "bonk.StatefulSet.bonk-crud": 5}, rollout: {"aprende/Deployment/aprende-flagd": "pending"}}], holds: {marked: ["aprende.Deployment.aprende-flagd", "bonk.StatefulSet.bonk-crud"]}, why: "the per-workload prune is the same: another workload being bare is not recovery"},
+		{call: "daprheal.run", args: [{pods: [], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}}], holds: {code: 0, marked: []}, why: "ready and updated as wanted: recovered"},
+		{call: "daprheal.run", args: [{pods: [], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, rollout: {"aprende/Deployment/aprende-flagd": "gone"}}], holds: {code: 0, marked: []}, why: "the workload is gone: its mark goes"},
+		{call: "daprheal.run", args: [{pods: [], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, rollout: {"aprende/Deployment/aprende-flagd": "unreadable"}}], holds: {code: 1, marked: ["aprende.Deployment.aprende-flagd"]}},
+	]
+}
+
+cases: "a lock error is an error and only contention is a clean skip; a creation time that cannot be read fails the sweep and prunes nothing": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, lockError: true}], holds: {code: 1, rolled: []}},
+		{pick: ["err"], matches: "flock on .* failed"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {name: "odd", created: "yesterday"})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "an age that cannot be read was read as 'old enough to roll'"},
+		{pick: ["err"], matches: "creation time 'yesterday' cannot be read"},
+	]
+}
+
+cases: "a ReplicaSet name that is not a name is never an argument, and the ReplicaSet found must be the one the pod names": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [(_bare & {owner: "ReplicaSet/--all"})], rs: _rs}], holds: {code: 1, rolled: []}},
+		{pick: ["err"], matches: "its ReplicaSet name is not a name"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {ownerUid: "11111111-2222-3333-4444-555555555555"})], rs: _rs}], holds: {code: 1, rolled: []}, why: "a stale reference, or one a pod writer supplied: the ReplicaSet now of that name is another's"},
+		{pick: ["err"], matches: "is not the one the pod names"},
 	]
 }
