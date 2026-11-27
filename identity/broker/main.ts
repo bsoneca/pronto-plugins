@@ -13,7 +13,7 @@ import { base64url, fromBase64url, jwksSource, type KeySource, randomToken, Refu
 import { doorKey, throughDoor } from "./door.ts";
 import { tenantAdmitted } from "./phone.ts";
 import { type Store, MemoryStore, sealedOnce, sharedKeyPair, storeFrom } from "./store.ts";
-import { type AuthRequest, Codes, emailOf, esc, json, idTokenClaims, learnsMore, pairwiseKey, pairwiseSubject, parseAuthorize, sectorOf, sectorsOf, profileOf, providerScope, redeem, openInBrowserBody, signInFlow, startOf, webviewOf } from "./core.ts";
+import { type AuthRequest, Codes, emailOf, esc, json, idTokenClaims, learnsMore, observed, pairwiseKey, pairwiseSubject, parseAuthorize, sectorOf, sectorsOf, profileOf, providerScope, redeem, openInBrowserBody, signInFlow, startOf, webviewOf } from "./core.ts";
 
 // Kept where phone.ts takes them (core.ts), so the phone imports nothing of this module at run time:
 // a cycle with its top-level await would never resolve, and the broker would never start.
@@ -398,7 +398,7 @@ export async function broker(p: {
     providers: [...providers.values()].map((x) => ({ name: x.name, label: x.label })),
   };
 
-  return async function handler(req: Request): Promise<Response> {
+  return observed(async function handler(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
     try {
@@ -417,7 +417,7 @@ export async function broker(p: {
       console.error(e);
       return json(500, { error: "internal error" });
     }
-  };
+  });
 }
 
 if (import.meta.main) {
