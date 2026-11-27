@@ -381,10 +381,20 @@ _journeysHours: {
 					frame = replace(frame, r'https?://[^/\s)]*', "")
 					frame = replace(frame, r'\?[^\s):]*', "")
 					frame = replace(frame, r'\.[0-9a-fA-F]{6,}\.(m?js)', ".${1}")
+					frame = replace(frame, r'#[^\s):]*', "")
+					frame = replace(frame, r'[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+', "<email>")
+					frame = replace(frame, r'eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*', "<token>")
+					frame = replace(frame, r'[A-Za-z0-9_+/=-]{24,}', "<token>")
+					frame = replace(frame, r'\d[\d.\-/ ]{6,}\d', "<number>")
 					frame = slice(frame, 0, 200) ?? ""
 					stack = replace(string(.stack) ?? "", r'https?://[^/\s)]*', "")
 					stack = replace(stack, r'\?[^\s):]*', "")
 					stack = replace(stack, r'\.[0-9a-fA-F]{6,}\.(m?js)', ".${1}")
+					stack = replace(stack, r'#[^\s):]*', "")
+					stack = replace(stack, r'[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+', "<email>")
+					stack = replace(stack, r'eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*', "<token>")
+					stack = replace(stack, r'[A-Za-z0-9_+/=-]{24,}', "<token>")
+					stack = replace(stack, r'\d[\d.\-/ ]{6,}\d', "<number>")
 					stack = slice(stack, 0, 600) ?? ""
 					browser = string(.browser) ?? ""
 					if !includes(["instagram", "facebook", "wv", "other"], browser) { browser = "" }
@@ -618,6 +628,27 @@ _journeysHours: {
 				in: {name: "Error", message: "m", frame: "f (https://x.example/a.js:1:1)", stack: "f (https://x.example/a.1a2b3c4d.js?v=1:3:4)\ng (https://x.example/b.js:5:6)"}
 				check: #"""
 					.stack_trace == "    at f (/a.js:3:4)\n    at g (/b.js:5:6)"
+					"""#
+			},
+			{
+				name: "a browser error's stack loses the emails and tokens its first line repeats from the message"
+				in: {name: "Error", message: "m", stack: "Error: auth failed\nat bob@x.com eyJhbGciOiJIUzI1NiJ9.e30.abc\nf (/a.js:3:4)"}
+				check: #"""
+					!contains(string!(.stack_trace), "bob") && !contains(string!(.stack_trace), "eyJ") && contains(string!(.stack_trace), "<email>") && contains(string!(.stack_trace), "f (/a.js:3:4)")
+					"""#
+			},
+			{
+				name: "a url fragment is taken off a frame and a stack, where a token may sit"
+				in: {name: "Error", message: "m", frame: "f (https://x.example/play#t=eyJhbGciOiJIUzI1NiJ9.e30.abc:3:4)", stack: "f (https://x.example/play#t=eyJhbGciOiJIUzI1NiJ9.e30.abc:3:4)"}
+				check: #"""
+					.stack_trace == "    at f (/play:3:4)" && !contains(string!(.fingerprint), "eyJ") && !contains(string!(.fingerprint), "#")
+					"""#
+			},
+			{
+				name: "a Firefox or Safari frame keeps its function and file"
+				in: {name: "Error", message: "m", frame: "fn@https://x.example/a.js:3:4", stack: "fn@https://x.example/a.js:3:4"}
+				check: #"""
+					.stack_trace == "    at fn@/a.js:3:4"
 					"""#
 			},
 			{
