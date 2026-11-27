@@ -12,6 +12,7 @@
 //   board.ts suggestion <repo> <INBOX-n>                 the text of an item in Refine (and only Refine), as one quoted, untrusted line: the designer's one way to read it
 //   board.ts prs <repo>                                 the open pull requests nobody is driving (`forgotten PRs:`, devflow/prs.ts), each repository of the flow's prs.repos; exit 1 when there are any, for the hourly scheduled check. Needs no board token. `status` prints the same line.
 //   board.ts flags <repo> [--new] [--notes]             the flags merged to main and not on for everyone in production (`pending flags:`, devflow/flags.ts): the apps of the flow's flagsRepo at origin/main, minus the flags the owner holds (flagsHeld), and `; drift:` for a flag live true that the spec says off; exit 1 when there are any, for the hourly scheduled check. --new lists only those not reported before; --notes adds each one's note. `status` prints the same line.
+//   board.ts alerts <repo> [--new] [--dry-run]          the Cloud Monitoring incidents of the flow's alerts.projects (devflow/alerts.ts), one bug filed on the board for each alert policy that is down (outage), flapping or left open (stale), once: the first line is `alerts: N filed, M known, K unavailable`, then one JSON line for each issue filed (and each already known, unless --new): {"key","class","policy","app","cue"}; exit 1 when it filed anything or could not read a project (`alerts: unavailable (...)`, never none). --dry-run files nothing and prints what it would.
 //   board.ts next, close                                 gone with the sprints: they print what replaced them and exit 2
 import { cmd, flagsOf } from "../intents/shell.ts";
 import { esc } from "./board/board.ts";
@@ -19,6 +20,7 @@ import { doneAt, flagOf, flipOf, keyOf, nameOf, roleOf, waitPlan } from "./flow.
 import { move as hookMove } from "./hook.ts";
 import { contextOf, file as fileIssue, pull as pullIssue, type ReadCache, start as startIssue, status } from "./queue.ts";
 import { boardOf, devflowOf, type Role } from "./spec.ts";
+import { alertLines, watchAlerts } from "./alerts.ts";
 import { watchFlags } from "./flags.ts";
 import { watchPrs } from "./prs.ts";
 import { approve, show } from "./suggestions.ts";
@@ -35,7 +37,7 @@ if (verb && Object.hasOwn(GONE, verb)) {
 const repo = repoArg ? await Deno.realPath(repoArg) : "";
 const flow = repo ? await devflowOf(repo) : null;
 if (!verb || !flow) {
-  console.error(flow === null && repo ? `${repo} has no devflow/devflow.cue` : "usage: board.ts status|prs|flags|start|pull|move|file|wait|approve|suggestion <repo> ...");
+  console.error(flow === null && repo ? `${repo} has no devflow/devflow.cue` : "usage: board.ts status|prs|flags|alerts|start|pull|move|file|wait|approve|suggestion <repo> ...");
   Deno.exit(2);
 }
 if (verb === "prs") {
@@ -58,6 +60,27 @@ if (verb === "flags") {
     Deno.exit(w.list.length || w.drift.length || w.unavailable.length ? 1 : 0);
   } catch (e) {
     console.log(`pending flags: unavailable (${(e as Error).message})`);
+    Deno.exit(1);
+  }
+}
+if (verb === "alerts") {
+  const f = flagsOf(rest);
+  if (!flow.alerts) {
+    console.error(`${repo}/devflow/devflow.cue has no alerts block`);
+    Deno.exit(2);
+  }
+  try {
+    const dry = f["dry-run"] === "true";
+    const board = await boardOf(flow);
+    if (!board && !dry) {
+      console.error("no board token: PLANE_TOKEN, or Secret Manager's (bin/pronto connect plane says how)");
+      Deno.exit(2);
+    }
+    const run = await watchAlerts(flow, board, new Date(), { dryRun: dry });
+    for (const l of alertLines(run, f.new === "true")) console.log(l);
+    Deno.exit(run.filed.length || run.unavailable.length ? 1 : 0);
+  } catch (e) {
+    console.log(`alerts: unavailable (${(e as Error).message})`);
     Deno.exit(1);
   }
 }

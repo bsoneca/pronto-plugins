@@ -616,3 +616,101 @@ export function suggestionOf(title, project) {
   const m = /^([a-z0-9][a-z0-9-]{0,39}) suggestion ([A-Z]{2,12}-[1-9][0-9]*), approved by the owner$/.exec(String(title ?? ""));
   return m && m[2].startsWith(`${project}-`) ? { app: m[1], key: m[2] } : null;
 }
+
+// The alerts watch (PRONTO-2182): Cloud Monitoring's incidents say which alert policy is down, flapping or left open,
+// and each of those is a bug in the alert or in what it watches, filed on the board once (devflow/alerts.ts).
+
+const DAY_MS = 24 * 3600000;
+const ALERT_CLASSES = ["outage", "flapping", "stale"];
+const EVENT_MS = 5 * 60000;
+
+/** The board app an alert policy belongs to: its `app` label, else its `owner` label, each through the flow's `apps`
+ * (alerts.apps); null when neither is mapped. */
+export function alertApp(labels, apps = {}) {
+  for (const k of ["app", "owner"]) {
+    const v = labels?.[k];
+    if (typeof v === "string" && Object.hasOwn(apps, v)) return apps[v];
+  }
+  return null;
+}
+
+/** What each alert policy is doing, from its incidents: `incidents` are `{policy, display, labels, state, openTime,
+ * closeTime}` (the policy's resource name, which holds its project, its display name, its user labels, `OPEN` or
+ * `CLOSED`, ISO times), the read of the last 48 hours and what is open now. `rules`: `{flapOpens, flapCloseMin,
+ * staleHours, apps, ignore}`. One row a policy, in the order the policies first appear (a policy whose `app` or `owner`
+ * label is in `rules.ignore`, default none, has no row): `{policy, display, app, class, opens, openSince}`. The class,
+ * first that holds: `stale` (an incident open longer than `staleHours`), `outage` (an incident open now), `flapping`
+ * (more than `flapOpens` events in the last 24 hours, or at least 2 incidents that closed within `flapCloseMin` minutes
+ * of opening), else `ok`. An outage comes before flapping, so a policy that is down now is never filed as a flapping one
+ * (and its flapping issue never hides the outage: an issue is matched by class). Incidents of one policy opened within
+ * 5 minutes of each other are one event (several resources failing together). `opens` is the events in the last 24
+ * hours; `openSince` the oldest open incident's open time, else the first open in the read, null when none is dated.
+ * `app` is the board app (alertApp), null when its labels map to none. */
+export function alertClass(incidents, now, rules) {
+  const t = (at) => Date.parse(at ?? "");
+  const at = new Date(now).getTime();
+  const ignored = (labels) => ["app", "owner"].some((k) => (rules.ignore ?? []).includes(labels?.[k]));
+  const by = new Map();
+  for (const i of incidents) {
+    if (ignored(i.labels)) continue;
+    if (!by.has(i.policy)) by.set(i.policy, []);
+    by.get(i.policy).push(i);
+  }
+  const rows = [];
+  for (const [policy, list] of by) {
+    const open = list.filter((i) => i.state === "OPEN");
+    const opens = list.map((i) => t(i.openTime)).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+    const events = opens.filter((n, k) => n >= at - DAY_MS && (k === 0 || n - opens[k - 1] > EVENT_MS)).length;
+    const quick = list.filter((i) => Number.isFinite(t(i.closeTime)) && Number.isFinite(t(i.openTime)) && t(i.closeTime) - t(i.openTime) <= rules.flapCloseMin * 60000).length;
+    const openAges = open.map((i) => t(i.openTime)).filter((n) => Number.isFinite(n));
+    const oldest = openAges.length ? Math.min(...openAges) : null;
+    let cls = "ok";
+    if (oldest !== null && at - oldest > rules.staleHours * 3600000) cls = "stale";
+    else if (open.length) cls = "outage";
+    else if (events > rules.flapOpens || quick >= 2) cls = "flapping";
+    const since = oldest ?? (opens.length ? opens[0] : null);
+    const first = list[0];
+    rows.push({ policy, display: first.display, app: alertApp(first.labels, rules.apps), class: cls, opens: events, openSince: since === null ? null : new Date(since).toISOString() });
+  }
+  return rows;
+}
+
+/** The project a policy's resource name (`projects/<p>/alertPolicies/<id>`) is in, null when it names none. */
+export const alertProject = (policy) => /^projects\/([^/]+)\//.exec(String(policy))?.[1] ?? null;
+
+/** The title of the issue for an alert: `Alert <class>: <display name> (<project>)`, the project last so that the same
+ * display name in two projects is two issues (none when `project` is null). */
+/** @param {string} cls @param {string} display @param {string | null} [project] */
+export function alertTitle(cls, display, project = null) {
+  return `Alert ${cls}: ${display}${project ? ` (${project})` : ""}`;
+}
+
+/** The class, policy display name and project an issue title names (alertTitle), null when it is no alert's; the project is null when the title has none. */
+export function alertOf(title) {
+  const m = new RegExp(`^Alert (${ALERT_CLASSES.join("|")}): (.+?)(?: \\(([a-z][a-z0-9-]*)\\))?$`).exec(String(title ?? ""));
+  return m ? { class: m[1], display: m[2], project: m[3] ?? null } : null;
+}
+
+/** The issue among `issues` (`{name}`) that is about this row: the same class, display name and project (a title with no project matches any). */
+export function alertIssueOf(issues, row) {
+  const project = alertProject(row.policy);
+  return issues.find((i) => {
+    const a = alertOf(i.name);
+    return a && a.class === row.class && a.display === row.display && (a.project === null || a.project === project);
+  });
+}
+
+/** The rows to file: not `ok`, no open board issue already about the policy in that class (alertIssueOf: an issue of
+ * another class, say a flapping one, never hides an outage; `issues` are the open ones), and `class:policy` not among
+ * `seen` (filed before, whatever became of the issue; a policy's resource name holds its project). */
+export function alertFilings(rows, issues, seen = []) {
+  return rows.filter((r) => r.class !== "ok" && !alertIssueOf(issues, r) && !seen.includes(`${r.class}:${r.policy}`));
+}
+
+/** The source file of an alert policy: the `cue` of the `sources` entry (`{prefix, cue}`) whose prefix its display
+ * name starts with, the longest one; null when none does (an entry with prefix "" matches every name). */
+export function alertSource(display, sources) {
+  let best = null;
+  for (const s of sources ?? []) if (String(display).startsWith(s.prefix) && (best === null || s.prefix.length > best.prefix.length)) best = s;
+  return best ? best.cue : null;
+}

@@ -1,9 +1,10 @@
 // A fake Plane for the suggestion inbox's cases (tests/unit/devflow_inbox.cue, namespace `inbox`) and the
 // Ready queue's (tests/unit/devflow_queue.cue, namespace `queue`): an in-memory Board built from a JSON
 // seed that logs each write, so a case can say what a run wrote and that a second run wrote nothing. The
-// code under test is devflow/suggestions.ts and devflow/queue.ts, on this Board.
+// code under test is devflow/suggestions.ts and devflow/queue.ts, on this Board, and devflow/alerts.ts (tests/unit/devflow_alerts.cue, `queue.alertsRuns`).
 import { approve, inboxSteps, inboxStatus, show, suggestionLines } from '../../devflow/suggestions.ts';
 import { contextOf, file as fileIssue, pull as pullIssue, status as statusOf } from '../../devflow/queue.ts';
+import { alertLines, watchAlerts } from '../../devflow/alerts.ts';
 import * as run from '../../intents/run.ts';
 
 const GROUPS = { Backlog: 'backlog', Todo: 'unstarted', 'In Progress': 'started', Done: 'completed', Cancelled: 'cancelled' };
@@ -277,4 +278,60 @@ export async function statusRuns(seed, runs = 1) {
     out.push({ lines, json: res.json, failures: res.failures, requests: Object.values(f.served).reduce((a, b) => a + b, 0), activity: f.served.stateMoves ?? 0, links: f.served.links ?? 0, writes: f.take() });
   }
   return out;
+}
+
+/** The alerts verb (devflow/alerts.ts) `runs` times on the seed's board over a fake Cloud Monitoring: `pages` are the alerts of each page
+ * of its answer (`nextPageToken` links them). The seed's `status` makes every GET answer that status, `flaky` the first a 503,
+ * `endless` every page link to a next one, `noToken` the token fail, `projects` and `pagesBy`/`statusBy` (by project) several projects, `kept` the state kept before, `budgetMs` the read budget, `failSecondCreate` the board failing at the second issue, `dryRun` and `onlyNew` the verb's flags. Each run: the lines
+ * printed and the board's writes; then the GETs made (`page n`), the issues the board holds that the verb made and the state kept. */
+export async function alertsRuns(seed, allPages, runs = 1) {
+  let pages = allPages;
+  seed = { now: DEFAULT_NOW, ...seed };
+  const f = boardOf(seed);
+  const flow = flowOf({ ...seed, suggestions: false });
+  flow.alerts = {
+    projects: seed.projects ?? ['demo-proj'], flapOpens: 3, flapCloseMin: 30, staleHours: 24, apps: { battlechess: 'aprende', 'bonk-chess': 'aprende' },
+    sources: [{ prefix: 'Bonk Chess: ', cue: 'apps/brawl-chess/journeys_plugin.cue' }, { prefix: 'Synthetic journeys: ', cue: 'tools/machine/synthetic.cue' }, { prefix: '', cue: 'infra/gcp/prodwatch.cue' }],
+    priority: { outage: 'urgent', flapping: 'high', stale: 'medium' },
+  };
+  let kept = [...(seed.kept ?? [])];
+  const requests = [];
+  if (seed.failSecondCreate) {
+    const create = f.board.createIssue;
+    let made = 0;
+    f.board.createIssue = (...a) => (++made > 1 ? Promise.reject(new Error('the board is down')) : create(...a));
+  }
+  let failed = false;
+  const answer = (status, body) => Promise.resolve({ ok: status < 300, status, json: () => Promise.resolve(body) });
+  const fetcher = (url) => {
+    const u = new URL(url);
+    const project = u.pathname.split('/')[3];
+    const token = u.searchParams.get('pageToken');
+    const n = token ? Number(token.slice(1)) : 0;
+    requests.push(`page ${n + 1}`);
+    const status = seed.statusBy?.[project] ?? seed.status;
+    pages = seed.pagesBy?.[project] ?? allPages;
+    if (status) return answer(status, { error: { message: status === 403 ? 'Permission denied' : 'Backend error' } });
+    if (seed.flaky && !failed) { failed = true; return answer(503, { error: { message: 'unavailable' } }); }
+    return answer(200, { alerts: pages[n] ?? [], ...(seed.endless || n + 1 < pages.length ? { nextPageToken: `t${n + 1}` } : {}) });
+  };
+  const out = [];
+  for (let r = 0; r < runs; r++) {
+    const run = await watchAlerts(flow, { board: f.board, project: 'p-acme' }, new Date(seed.now), {
+      dryRun: !!seed.dryRun,
+      io: {
+        fetch: fetcher, sleep: () => Promise.resolve(), lock: (fn) => fn(), budgetMs: seed.budgetMs,
+        token: () => (seed.noToken ? Promise.reject(new Error('no access token: gcloud auth print-access-token failed')) : Promise.resolve('test-token')),
+        state: { read: () => [...kept], write: (keys) => { kept = [...keys]; } },
+      },
+    });
+    out.push({ lines: alertLines(run, !!seed.onlyNew), writes: f.take() });
+  }
+  const stateName = (id) => f.states['p-acme'].find((s) => s.id === id)?.name;
+  return {
+    runs: out,
+    requests,
+    state: kept,
+    filed: f.issues['p-acme'].filter((i) => i.sequence_id >= 100).map((i) => ({ name: i.name, body: i.description_html, priority: i.priority, labels: i.labels, state: stateName(i.state) })),
+  };
 }

@@ -10,16 +10,16 @@ type Run = (c: string, args: string[], cwd?: string, env?: Record<string, string
 type Flags = Record<string, { default: unknown; note?: string }>;
 type Entries = Record<string, { flags?: string[]; steps?: { flag?: string }[] }>;
 
-const cacheDir = () => {
+export const cacheDir = () => {
   const base = Deno.env.get("XDG_CACHE_HOME") ?? (Deno.env.get("HOME") ? `${Deno.env.get("HOME")}/.cache` : "");
   if (!base.startsWith("/")) throw new Error("no HOME or XDG_CACHE_HOME to keep the clone in");
   return `${base}/pronto-devflow`;
 };
 
-/** `fn` holding the clone's lock (a directory made, so two runs never share the tree): waits up to 10 min, and takes over one older than 30. */
-async function locked<T>(repo: string, fn: () => Promise<T>): Promise<T> {
+/** `fn` holding the lock of `repo` (a directory made, so two runs never share the tree; `name` the watch's, flags by default): waits up to 10 min, and takes over one older than 30. */
+export async function locked<T>(repo: string, fn: () => Promise<T>, name = "flags"): Promise<T> {
   Deno.mkdirSync(cacheDir(), { recursive: true });
-  const lock = `${cacheDir()}/flags-${repo.replace("/", "-")}.lock`;
+  const lock = `${cacheDir()}/${name}-${repo.replace("/", "-")}.lock`;
   for (let waited = 0;; waited += 5) {
     try {
       Deno.mkdirSync(lock);
@@ -166,8 +166,10 @@ async function pendingIn(flow: DevFlow, now: Date, run: Run) {
 }
 
 /** The flags `--new` has reported, kept between runs: one small JSON file of `app/flag` names, written whole to a temporary file and renamed. */
-function seenFile(flow: DevFlow) {
-  const file = `${cacheDir()}/pending-flags-${flow.board.workspace}-${flow.board.project.identifier}.json`;
+const seenFile = (flow: DevFlow) => keptKeys(`${cacheDir()}/pending-flags-${flow.board.workspace}-${flow.board.project.identifier}.json`);
+
+/** A list of keys kept in `file` between runs (the watches' state): read as it is or empty, written whole to a temporary file and renamed. */
+export function keptKeys(file: string) {
   return {
     read(): string[] {
       try {
