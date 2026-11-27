@@ -62,7 +62,7 @@ cases: "a workload rolled longer ago than the cooldown with a pod still bare, of
 	suite: "daprheal"
 	steps: [
 		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "an old bare pod: the rollout did not replace it (OnDelete, paused, a stuck ordered StatefulSet, a Pending pod): another roll would not either, and it must not stay green"},
-		{pick: ["err"], matches: "past the cooldown of 30 minutes, a pod of it is still without its sidecar: not rolled again"},
+		{pick: ["err"], matches: "past the cooldown of 30 minutes, a pod it covered or made is still without its sidecar: not rolled again"},
 		{call: "daprheal.run", args: [{pods: [(_bare & {ageSec: 600})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 1, rolled: []}, why: "a pod created after the roll: the injector injects nothing for it"},
 	]
 }
@@ -159,14 +159,33 @@ cases: "--dry-run makes no state folder and still says what it would roll": {
 	]
 }
 
-cases: "a mark whose restart never landed (a reboot between the two) is dropped and the workload rolled once, cooldown or not": {
+cases: "a mark whose attempt is not on the workload (a reboot between the two) has the same patch sent again, cooldown or not, whatever else restarted it": {
 	suite: "daprheal"
 	steps: [
-		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, restartedAt: {"aprende/Deployment/aprende-flagd": 60}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], marked: ["aprende.Deployment.aprende-flagd"]}, why: "restartedAt is an hour old, the mark five minutes: the restart the mark records never happened"},
-		{pick: ["out"], matches: "the roll never landed"},
-		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, restartedAt: {"aprende/Deployment/aprende-flagd": null}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"]}, why: "no restartedAt at all, a mark past the cooldown: rolled once, not 'not rolled again'"},
-		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, restartedAt: {"aprende/Deployment/aprende-flagd": 4}}], holds: {code: 0, rolled: []}, why: "a restart after the mark: it landed, the cooldown is waited out"},
-		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, restartedAt: {"aprende/Deployment/aprende-flagd": 60}, args: ["--dry-run"]}], holds: {code: 0, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "a dry run reads and says, and drops nothing"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, attempt: {"aprende/Deployment/aprende-flagd": null}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], ids: {"aprende/Deployment/aprende-flagd": "20260101T000000Z-1"}, marked: ["aprende.Deployment.aprende-flagd"]}, why: "the id patched is the mark's own: sending it twice changes nothing"},
+		{pick: ["out"], matches: "attempt 20260101T000000Z-1 had not landed and was sent again"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, attempt: {"aprende/Deployment/aprende-flagd": "someone-elses"}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], ids: {"aprende/Deployment/aprende-flagd": "20260101T000000Z-1"}}, why: "another client's attempt, or restart, on the template is not this attempt: no clock is read"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}}], holds: {code: 0, rolled: []}, why: "the attempt is on the workload: it landed, the cooldown is waited out"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, attempt: {"aprende/Deployment/aprende-flagd": null}, args: ["--dry-run"]}], holds: {code: 0, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "a dry run says it and sends nothing"},
+	]
+}
+
+cases: "bare pods that none of the last attempt's covered are a new incident: they are rolled once the cooldown is out, though no sweep saw the healthy interval": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [(_bare & {name: "new-pod", ageSec: 300})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, markPods: {"aprende.Deployment.aprende-flagd": ["gone-pod"]}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"]}, why: "made 5 minutes ago, after the 15 minutes ago the attempt's cooldown ended (the mark is 45 minutes old, the cooldown 30): not the roll's product, and the pod the mark covered is gone"},
+		{pick: ["out"], matches: "a new incident"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {name: "new-pod", ageSec: 120})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, markPods: {"aprende.Deployment.aprende-flagd": ["gone-pod"]}}], holds: {code: 0, rolled: []}, why: "within the cooldown a new incident waits too"},
+		{call: "daprheal.run", args: [{pods: [_bare, (_bare & {name: "new-pod"})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, markPods: {"aprende.Deployment.aprende-flagd": ["aprende-flagd-6898744c57-m6m77"]}}], holds: {code: 1, rolled: []}, why: "a pod it covered is still bare: the same incident, an error, not another roll"},
+	]
+}
+
+cases: "a grep that fails stops the sweep before anything is rolled or any mark is deleted": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, failGrep: true}], holds: {code: 1, rolled: []}, why: "grep's status 2 was read as no match: a live mark deleted, the injector's readiness skipped"},
+		{pick: ["err"], matches: "grep failed"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {ns: "bonk", name: "bonk-crud-0", owner: "StatefulSet/bonk-crud", containers: ["crud"]})], marks: {"aprende.Deployment.aprende-flagd": 5}, failGrep: true}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "the prune does not delete what it could not compare"},
 	]
 }
 
@@ -219,5 +238,55 @@ cases: "a forged line of the inventory cannot point a restart outside the swept 
 		{call: "daprheal.run", args: [{pods: [], extraOut: "aprende|forged|Running||2020-01-01T00:00:00Z|StatefulSet/Bad_Name@11111111-2222-3333-4444-555555555555|app,\n"}], holds: {code: 1, rolled: []}, why: "a name Kubernetes would not write"},
 		{call: "daprheal.run", args: [{pods: [], extraOut: "aprende|forged|Running||2020-01-01T00:00:00Z|StatefulSet/ok@not-a-uid|app,\n"}], holds: {code: 1, rolled: []}, why: "a uid that is not 36 characters of hex and dashes"},
 		{pick: ["err"], matches: "an owner or uid that is not a workload's name and a uid"},
+	]
+}
+
+cases: "the pods a roll itself makes, still bare, are the same incident: an error, not a roll every cooldown for ever": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [(_bare & {name: "replacement", ageSec: 1200})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, markPods: {"aprende.Deployment.aprende-flagd": ["old-pod"]}}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "made 20 minutes ago, 25 minutes after the attempt, inside its cooldown: the injector injects nothing for the replacement either"},
+		{pick: ["err"], matches: "a pod it covered or made is still without its sidecar"},
+	]
+}
+
+cases: "an older mark (no attempt in it) is honoured by its time: waited out inside the cooldown, replaced after it": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, oldMarks: {"aprende.Deployment.aprende-flagd": 5}}], holds: {code: 0, rolled: []}, why: "rolled 5 minutes ago by the version before this one"},
+		{pick: ["out"], matches: "older mark, rolled less than 30 minutes ago: waiting"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, oldMarks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"]}},
+	]
+}
+
+cases: "a mark that cannot be read is no mark that is dropped: the workload is left alone and the run fails": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, markIsDir: ["aprende.Deployment.aprende-flagd"]}], holds: {code: 1, rolled: []}, why: "sed could not read it: that was read as an old mark, dropped, and the workload rolled"},
+		{pick: ["err"], matches: "could not be read: not rolled"},
+	]
+}
+
+cases: "a mark's file is flushed before it is renamed and the folder after, and its temporary name is no workload's": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], marked: ["aprende.Deployment.aprende-flagd"]}},
+		{pick: ["syncs.length", "syncs.0", "syncs.1"], matches: "^2,<dir>/state/\\.tmp\\.[0-9]+\\.aprende\\.Deployment\\.aprende-flagd,<dir>/state$"},
+	]
+}
+
+cases: "an attempt sent again refreshes the mark's time, so its cooldown starts when it landed": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, attempt: {"aprende/Deployment/aprende-flagd": null}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], markAges: {"aprende.Deployment.aprende-flagd": 0}}, why: "45 minutes old before, now"},
+	]
+}
+
+cases: "a mark whose id is not one of ours is never patched, and a sweep that finds the lock held ends clean": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, markAttempt: {"aprende.Deployment.aprende-flagd": "x\"y"}, attempt: {"aprende/Deployment/aprende-flagd": null}}], holds: {code: 1, rolled: []}},
+		{pick: ["err"], matches: "not one of ours"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, lockHeld: true}], holds: {code: 0, rolled: []}, why: "another sweep runs: this one reads and rolls nothing"},
+		{pick: ["out"], matches: "another sweep holds"},
 	]
 }
