@@ -35,8 +35,9 @@ export def vet [host: record] {
 	})
 	rm -f $f
 	if $r.exit_code != 0 { error make {msg: $"node-host: the host's dockerGC is not what #Host allows: ($r.stderr | str trim)"} }
-	# The pattern is run by bash on the node (docker-gc.sh): an invalid ERE is an error there (status 2), which the cleanup loop
-	# would read as "no tag matches" and keep every image. Bash on this machine is the same engine's check.
+	# The pattern is run by bash on the node (docker-gc.sh): an invalid ERE is status 2 there, which the cleanup loop would
+	# read as "no tag matches" and keep every image. It is checked here by the operator's bash, not the node's (the node's
+	# script checks it again before its loop and fails the unit); the two differ only in the regex library's version.
 	let ere = (do { ^bash -c '[[ "" =~ $1 ]]; [ $? -ne 2 ]' _ $host.dockerGC.refPattern } | complete)
 	if $ere.exit_code != 0 { error make {msg: $"node-host: the host's dockerGC refPattern is not a valid bash ERE: ($host.dockerGC.refPattern)"} }
 }

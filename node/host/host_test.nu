@@ -19,6 +19,8 @@ def main [] {
 	test_apply_writes_what_drifted_and_a_second_run_finds_none
 	test_check_changes_nothing_and_says_every_drift
 	test_a_failed_last_run_is_drift
+	test_a_failed_reload_query_is_an_error_not_no_reload
+	test_the_cleanup_stops_on_a_pattern_bash_cannot_compile
 	test_a_login_that_fails_is_an_error_not_an_answer
 	test_the_settings_are_written_before_the_script
 	test_a_world_writable_or_foreign_file_is_drift
@@ -382,7 +384,7 @@ def test_a_login_that_fails_is_an_error_not_an_answer [] {
 d=$(dirname "$0")/..
 while [ "$1" = -o ]; do shift 2; done
 shift
-case "$1" in *is-failed*|*is-enabled*) exit 255 ;; esac
+case "$1" in *is-failed*|*is-enabled*|*NeedDaemonReload*) exit 255 ;; esac
 exec bash -c "$1"
 ' | save --raw ($dir | path join bin ssh)
 	chmod 755 ($dir | path join bin ssh)
@@ -397,6 +399,44 @@ exec "$@"
 		# What it wrote before asking is whole: the files are as #Host says.
 		for f in (render (defaults)) { assert equal (open --raw ($root + $f.path)) $f.text }
 	}
+	rm -rf $dir
+}
+
+def test_a_failed_reload_query_is_an_error_not_no_reload [] {
+	print "test an ssh that fails when asked whether a unit needs a daemon-reload is an error, never read as none needed..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	'#!/bin/bash
+while [ "$1" = -o ]; do shift 2; done
+shift
+case "$1" in *NeedDaemonReload*) echo "ssh: connection lost" >&2; exit 255 ;; esac
+exec bash -c "$1"
+' | save --raw ($dir | path join bin ssh)
+	chmod 755 ($dir | path join bin ssh)
+	'#!/bin/bash
+exec "$@"
+' | save --raw ($dir | path join bin sudo)
+	chmod 755 ($dir | path join bin sudo)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		let msg = (try { apply (defaults) --node fake --root ($dir | path join root); "no error" } catch {|e| $e.msg })
+		assert str contains $msg "needs a daemon-reload"
+	}
+	rm -rf $dir
+}
+
+def test_the_cleanup_stops_on_a_pattern_bash_cannot_compile [] {
+	print "test docker-gc.sh itself fails on an invalid PATTERN, before it looks at a single tag..."
+	let dir = (tmp)
+	"PATTERN='^['\nMIN_AGE_HOURS=6\nBUILD_CACHE_GB=40\nCAP_GB=120\n" | save --raw ($dir | path join gc.env)
+	'#!/bin/bash
+echo "$*" >>"$(dirname "$0")/calls"
+echo "localhost:5000/a:a"
+' | save --raw ($dir | path join docker)
+	chmod 755 ($dir | path join docker)
+	let r = (with-env {PATH: $"($dir):/usr/bin:/bin", DOCKER_GC_ENV: ($dir | path join gc.env)} { ^/bin/bash ($here | path join docker-gc.sh) | complete })
+	assert equal $r.exit_code 1
+	assert str contains $r.stderr "PATTERN is not a valid regular expression"
+	assert (not (($dir | path join calls) | path exists)) "docker was never called"
 	rm -rf $dir
 }
 

@@ -15,6 +15,11 @@ env=${DOCKER_GC_ENV:-/etc/pronto/docker-gc.env}
 . "$env"
 : "${PATTERN:?docker-gc: PATTERN is not set in $env}" "${MIN_AGE_HOURS:?}" "${BUILD_CACHE_GB:?}" "${CAP_GB:?}"
 pattern=$PATTERN
+# A pattern bash cannot compile is status 2, which the loop below would read as "no tag matches" and keep every image: stop.
+rc=0
+# shellcheck disable=SC2319 # $? is the regex match's own status: 2 is an invalid pattern
+if [[ "" =~ $pattern ]]; then :; else rc=$?; fi
+if [ "$rc" = 2 ]; then echo "docker-gc: PATTERN is not a valid regular expression: $pattern" >&2; exit 1; fi
 cutoff=$(($(date +%s) - MIN_AGE_HOURS * 3600))
 stamp='^(20[0-9][0-9])-([0-9][0-9])-([0-9][0-9])[ T]([0-9][0-9]):([0-9][0-9]):([0-9][0-9])(\.[0-9]+)? ?(Z|([+-])([0-9][0-9]):?([0-9][0-9]))( [A-Za-z0-9+-]+)?$'
 
