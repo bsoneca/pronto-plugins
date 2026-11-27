@@ -2308,6 +2308,7 @@ def test_a_tenant_builds_only_on_the_tenants_buildkitd [] {
 	assert (not ($docker | str contains "tcp://127.0.0.1")) "never the operator's buildkitd"
 	let bake = ($docker | lines | where {|l| $l | str starts-with "buildx bake" } | first)
 	assert ($bake | str contains "output=type=oci,dest=") $bake
+	assert ($bake | str contains $"--set *.args.BUILDKIT_CACHE_MOUNT_NS=($tenant_ns)") $"every build gets buildkit's cache mount namespace through bake's --set, which wins over a compose args value: ($bake)"
 	assert (not ($bake | str contains "--push")) "the sandboxed buildkitd pushes nothing"
 	assert ($bake | str contains "fs.write=") "its archives are written where the engine said"
 	let crane = (open --raw ($w.dir | path join crane.log))
@@ -2748,27 +2749,46 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 	let one = ("FROM base\nRUN --mount=type=cache,target=/root/.npm,id=npm,sharing=locked npm ci\n" | tenant stage-dockerfile $ns)
 	assert equal $one $"FROM base\nRUN --mount=type=cache,target=/root/.npm,sharing=locked,id=($ns)/npm npm ci\n"
 	let none = ("RUN --mount=type=cache,target=/root/.cache/go-build go build\n" | tenant stage-dockerfile $ns)
-	assert equal $none $"RUN --mount=type=cache,target=/root/.cache/go-build,id=($ns)//root/.cache/go-build go build\n"
+	assert equal $none $"RUN --mount=type=cache,target=/root/.cache/go-build,id=($ns)/_root_.cache_go-build go build\n"
 	let dst = ("RUN --mount=type=cache,dst=/var/cache/apt apt-get update\n" | tenant stage-dockerfile $ns)
-	assert equal $dst $"RUN --mount=type=cache,dst=/var/cache/apt,id=($ns)//var/cache/apt apt-get update\n"
+	assert equal $dst $"RUN --mount=type=cache,dst=/var/cache/apt,id=($ns)/_var_cache_apt apt-get update\n"
 	let bind = ("RUN --mount=type=bind,source=a,target=/b cat /b\n" | tenant stage-dockerfile $ns)
 	assert equal $bind "RUN --mount=type=bind,source=a,target=/b cat /b\n"
 	# several flags on one RUN, on continuation lines, one a prefix of another
 	let many = ("RUN --mount=type=cache,target=/a \\\n    --mount=type=cache,target=/a,sharing=private \\\n    --mount=type=bind,source=s,target=/s \\\n    make\n" | tenant stage-dockerfile $ns)
-	assert equal $many $"RUN --mount=type=cache,target=/a,id=($ns)//a \\\n    --mount=type=cache,target=/a,sharing=private,id=($ns)//a \\\n    --mount=type=bind,source=s,target=/s \\\n    make\n"
+	assert equal $many $"RUN --mount=type=cache,target=/a,id=($ns)/_a \\\n    --mount=type=cache,target=/a,sharing=private,id=($ns)/_a \\\n    --mount=type=bind,source=s,target=/s \\\n    make\n"
 	# two tenants' same target are two ids
 	let other = ("RUN --mount=type=cache,target=/root/.npm npm ci\n" | tenant stage-dockerfile "studio-other-game-0")
-	assert (($other | str contains "id=studio-other-game-0//root/.npm") and not ($other | str contains $ns))
+	assert (($other | str contains "id=studio-other-game-0/_root_.npm") and not ($other | str contains $ns))
+	# buildkit reads a flag, a key and a type in any case: all of them are rewritten
+	let upper = ("RUN --MOUNT=TYPE=CACHE,TARGET=/a npm ci\n" | tenant stage-dockerfile $ns)
+	assert equal $upper $"RUN --mount=type=cache,target=/a,id=($ns)/_a npm ci\n" "an upper-case flag, key and type"
+	let mixed = ("RUN --mount=type=Cache,target=/a,ID=x,Sharing=locked npm ci\n" | tenant stage-dockerfile $ns)
+	assert equal $mixed $"RUN --mount=type=cache,target=/a,sharing=locked,id=($ns)/x npm ci\n" "a mixed-case type and keys"
+	# the official frontend's directive is dropped, a BOM with it; the built-in frontend builds the rest
+	assert equal ("# syntax=docker/dockerfile:1\nFROM base\n" | tenant stage-dockerfile $ns) "FROM base\n"
+	assert equal ("\u{FEFF}# syntax=docker/dockerfile:1.7@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nFROM base\n" | tenant stage-dockerfile $ns) "FROM base\n"
+	assert equal ("\u{FEFF}FROM base\n" | tenant stage-dockerfile $ns) "FROM base\n" "a BOM is not written back"
 	# a Dockerfile with no cache mount is left as it is
 	assert equal ("FROM base\nRUN echo hi\n" | tenant stage-dockerfile $ns) "FROM base\nRUN echo hi\n"
 	for row in [
 		{why: "a variable in the id", text: "RUN --mount=type=cache,target=/a,id=$ID x\n", says: "names a variable"}
 		{why: "a variable in the target", text: "RUN --mount=type=cache,target=${T} x\n", says: "names a variable"}
-		{why: "a quoted flag", text: "RUN --mount=type=cache,target=\"/a\" x\n", says: "quoted mount flag"}
+		{why: "a quoted flag", text: "RUN --mount=type=cache,target=\"/a\" x\n", says: "with a quote or an escape character"}
 		{why: "a cache mount with no target", text: "RUN --mount=type=cache,id=x y\n", says: "names no target"}
-		{why: "a syntax directive", text: "# syntax=docker/dockerfile:1.7\nFROM base\n", says: "`# syntax=` directive"}
+		{why: "a syntax directive", text: "# syntax=ghcr.io/evil/frontend:1\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a syntax directive with spaces", text: "#  syntax = evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a mount flag with a space", text: "RUN --mount type=cache,target=/a x\n", says: "--mount without"}
+		{why: "a syntax directive after a BOM", text: "\u{FEFF}# syntax=evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
+		{why: "a // syntax directive", text: "//syntax=evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
+		{why: "a // syntax directive with spaces", text: "// syntax = evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
+		{why: "a syntax directive that names another frontend of docker's", text: "# syntax=docker/dockerfile-upstream:master\nFROM base\n", says: "`# syntax=` directive"}
+		{why: "a JSON Dockerfile", text: "{\"syntax\": \"evil/frontend\"}", says: "is JSON"}
+		{why: "a mount with an escape character, whose continuation line appends a second id", text: "RUN --mount=type=cache,target=/a,\\\nid=x y\n", says: "with a quote or an escape character"}
+		{why: "a mount with a backtick", text: "RUN --mount=type=cache,target=/a,`\nid=x y\n", says: "with a quote or an escape character"}
+		{why: "an escape directive", text: "# escape=`\nFROM base\n", says: "`escape=` directive"}
+		{why: "an id with ..", text: "RUN --mount=type=cache,target=/a,id=../other x\n", says: "with `..` or `/` in it"}
+		{why: "an id with a slash", text: "RUN --mount=type=cache,target=/a,id=other/x x\n", says: "with `..` or `/` in it"}
 	] {
 		let r = (try { $row.text | tenant stage-dockerfile $ns; "admitted" } catch {|e| $e.msg })
 		assert (($r | str contains $row.says) and ($r != "admitted")) $"($row.why): ($r)"
@@ -2790,11 +2810,18 @@ def test_a_tenants_build_keys_that_reach_past_its_context_are_refused [] {
 		{why: "an inline Dockerfile", build: {context: ., dockerfile_inline: "FROM x\n# syntax=evil\n"}}
 		{why: "BUILDKIT_SYNTAX as a mapping", build: {context: ., args: {BUILDKIT_SYNTAX: "evil/frontend"}}}
 		{why: "BUILDKIT_SYNTAX as a list", build: {context: ., args: ["BUILDKIT_SYNTAX=evil/frontend"]}}
+		{why: "BUILDKIT_CACHE_MOUNT_NS as a mapping", build: {context: ., args: {BUILDKIT_CACHE_MOUNT_NS: "other"}}}
+		{why: "BUILDKIT_CACHE_MOUNT_NS as a list", build: {context: ., args: ["BUILDKIT_CACHE_MOUNT_NS=other"]}}
+		{why: "an x-bake extension of the build", build: {context: ., "x-bake": {"cache-from": "type=registry,ref=evil/cache"}}}
+		{why: "an upper-case x- extension of the build", build: {context: ., "X-Bake": {tags: ["evil"]}}}
 		{why: "a docker-image context a tag can move", build: {context: ., additional_contexts: {base: "docker-image://postgres:18"}}}
 	] {
 		let r = (try { do $svc $row.build | tenant check-build-keys; "admitted" } catch {|e| $e.msg })
 		assert (($r != "admitted") and ($r | str contains "a tenant's build is refused before it is made")) $"($row.why): ($r)"
 	}
+	let ext = ({services: {crud: {build: {context: .}, "x-bake": {output: "type=registry"}}}} | to yaml)
+	let r = (try { $ext | tenant check-build-keys; "admitted" } catch {|e| $e.msg })
+	assert (($r != "admitted") and ($r | str contains "extension key")) $"a service-level x-bake: ($r)"
 	for row in [
 		{why: "a digest-pinned docker-image context", build: {context: ., additional_contexts: {base: $pinned}}}
 		{why: "a service context", build: {context: ., additional_contexts: {base: "service:other"}}}

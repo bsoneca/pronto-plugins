@@ -275,7 +275,7 @@ export def tenant-images [app_dir: string, node: record, services: list<string>,
 		let sets = ($services | each {|s| ["--set" $"($s).output=type=oci,dest=($out)/($s).tar" "--set" $"($s).tags="] } | flatten)
 		with-remote-builder $work $node.tenant.buildkit {|builder|
 			with-env {SOURCE_DATE_EPOCH: "0"} {
-				let r = (do { cd $staged; open --raw ($work | path join release.compose.yaml) | ^env -i ...(render tenant-env) (which docker | first | get path) buildx bake -f - --builder $builder --provenance=false --progress=plain $"--allow=fs.read=($staged)" $"--allow=fs.write=($out)" --set $"*.platform=($node.environment.platform)" ...$sets -- ...$services } | complete)
+				let r = (do { cd $staged; open --raw ($work | path join release.compose.yaml) | ^env -i ...(render tenant-env) (which docker | first | get path) buildx bake -f - --builder $builder --provenance=false --progress=plain $"--allow=fs.read=($staged)" $"--allow=fs.write=($out)" --set $"*.platform=($node.environment.platform)" --set $"*.args.BUILDKIT_CACHE_MOUNT_NS=($ns)" ...$sets -- ...$services } | complete)
 				if $r.exit_code != 0 { error make {msg: $"docker buildx bake on the tenants' buildkitd failed:\n(($r.stdout + $r.stderr) | lines | last 40 | str join (char nl))(failed-step ($r.stdout + $r.stderr))"} }
 			}
 		}
