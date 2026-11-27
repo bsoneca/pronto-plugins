@@ -183,6 +183,7 @@ def test_a_workload_reads_no_guarded_secret_and_a_statefulset_has_no_claim_templ
 		for x in (schema '#TenantGuardedSecretSuffixes') { assert ($rule | str contains $"endsWith\('($x)'\)") $x }
 		for at in [e.valueFrom.secretKeyRef.name e.secretRef.name v.secret.secretName s.secret.name] { assert ($rule | str contains $at) $"($policy): ($at)" }
 		for list in [containers initContainers ephemeralContainers] { assert ($rule | str contains $"variables.spec.($list)") $"($policy): ($list)" }
+		assert ($rule | str contains "!has(v.projected) || !has(v.projected.sources) || v.projected.sources.all(") $"($policy): a projected volume with no sources is no error"
 	}
 	let claims = (one-rule statefulsets "no volumeClaimTemplates")
 	assert equal $claims "!has(object.spec.volumeClaimTemplates) || size(object.spec.volumeClaimTemplates) == 0"

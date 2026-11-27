@@ -484,7 +484,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 				} | flatten)
 				| append ($pod_spec.volumes? | default [] | each {|v| [($v.secret?.secretName? | default "")] | append ($v.projected?.sources? | default [] | each {|s| $s.secret?.name? | default "" }) } | flatten)
 			)
-			let reads = ($refs | where {|n| $n in $guarded } | uniq)
+			let reads = ($refs | where {|n| $n != "" and ($n in $guarded or ($guarded_suffixes | any {|x| $n | str ends-with $x })) } | uniq)
 			if ($reads | is-not-empty) { $why = ($why | append $"($id) reads the secret\(s\) ($reads | str join ', '), the postgres superuser's password: a tenant's workload never does") }
 		}
 		let spec = (if ($o.kind? | default "") in [Deployment Job] { $o.spec?.template?.spec? } else { null })
