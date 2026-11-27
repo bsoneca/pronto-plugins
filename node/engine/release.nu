@@ -820,6 +820,7 @@ def release-tenant [app_info: record, tenant: string, host: string, push_kubecon
 	})
 	tenant check-binding $node $tenant $host
 	tenant check-pins $node
+	tenant check-names $node
 	let meta = (render app-meta $app_info.cue_path "" --tenant $tenant --host $host)
 	# Before anything resolves the tenant's compose files: `docker compose config` reads what they name with this process's rights.
 	tenant check-compose-sources $app_info.dir
