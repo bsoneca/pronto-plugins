@@ -79,8 +79,8 @@ package schema
 	// The words that run kubectl as root on the node, kept inside single quotes in /etc/pronto/dapr-heal.env, so no quote.
 	kubectl: *"k3s kubectl" | (string & =~"^[A-Za-z0-9_./-]+( [A-Za-z0-9_./-]+)*$")
 	// The operator's namespaces, the only ones swept: a tenant's (Studio's `studio-<owner>-<app>-<hash>`) must not be able to
-	// trigger a roll or turn the check red, and dapr-system and the system namespaces are not apps. Names, not patterns.
-	namespaces: *["aprende", "brawl-chess", "studio", "coach"] | [#OperatorNamespace, ...#OperatorNamespace]
+	// trigger a roll or turn the check red, and dapr-system and the system namespaces are not apps. Names, not patterns; none is assumed (a node says its own, as `#Kubelet.maxPods`).
+	namespaces!: [#OperatorNamespace, ...#OperatorNamespace]
 	// A pod younger than this is not judged.
 	graceSeconds: *120 | (int & >=30)
 	// How long after rolling a workload it is not rolled again.

@@ -157,6 +157,27 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 			$changed = true
 		}
 	}
+	# A host that no longer says daprHeal (or never did) holds none of its files: a repair timer left from when it did would go on rolling
+	# workloads of namespaces nobody lists any more. It is drift; apply stops and disables it, removes the four files and (below) reloads systemd.
+	if ($host.daprHeal? == null) {
+		let left = ([$heal_timer $heal_service $heal_script $heal_env] | where {|f|
+			let path = $root + $f
+			(must (sh $node $"if [ -e '($path)' ]; then echo yes; fi") $"looking for ($path)" | str trim) == "yes"
+		})
+		if ($left | is-not-empty) {
+			for f in $left {
+				$drift = ($drift | append $"($root + $f) is installed but the host has no daprHeal")
+				print $"drift: ($root + $f) is installed but the host has no daprHeal"
+			}
+			if not $check {
+				# 5 and 1 are systemctl's answers for a unit it does not know: the files may be half gone. Anything else is an error.
+				let off = (sh $node $"systemctl disable --now ($heal_unit)")
+				if $off.exit_code == 255 { error make {msg: $"node-host: disabling ($heal_unit): ($off.stderr | str trim)"} }
+				for f in $left { must (sh $node $"rm -f '($root + $f)'") $"removing ($root + $f)" | ignore; print $"removed ($root + $f)" }
+				$changed = true
+			}
+		}
+	}
 	# systemd runs the units it last loaded: files that match on disk are not the units running. A run that stopped between
 	# writing a unit and reloading leaves every file matching, so a pending reload is asked of systemd itself, for the
 	# service and the timer, and is drift (--check) or is done (apply) whatever this run wrote.

@@ -58,7 +58,11 @@ done <<<"$pods"
 # A mark says a workload was rolled for a bare pod. One whose pods all run their sidecar has done its work: a later outage is a new
 # incident, so the marks of every workload with no bare pod are removed (a dry run removes nothing).
 if [ -z "$bare" ]; then
-  [ "$dry" = 1 ] || rm -f "$state"/* 2>/dev/null || true
+  # A mark that cannot be removed would be read as the previous incident by the next outage and block its repair: say so and fail.
+  if [ "$dry" != 1 ] && ! rm -f "$state"/*; then
+    echo "dapr-heal: every pod runs its sidecar, but the marks of earlier incidents could not be removed from $state" >&2
+    exit 1
+  fi
   echo "dapr-heal: every pod that asks for a Dapr sidecar runs one"
   exit 0
 fi
@@ -78,11 +82,16 @@ fi
 # `targets` the ones with a pod old enough to be judged.
 present=""
 targets=""
+incomplete=0
 while IFS='|' read -r ns name owner young; do
   [ -n "$name" ] || continue
   case "$owner" in
     ReplicaSet/*)
-      owner=$(k -n "$ns" get replicaset "${owner#ReplicaSet/}" -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}' || true)
+      # A lookup that failed leaves the inventory incomplete: nothing is pruned below, so a live rollout's mark survives the outage of the API.
+      if ! owner=$(k -n "$ns" get replicaset "${owner#ReplicaSet/}" -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}'); then
+        echo "dapr-heal: $ns/$name: its ReplicaSet could not be read: not pruning marks" >&2
+        failed=1; incomplete=1; continue
+      fi
       case "$owner" in Deployment/?*) ;; *) [ "$young" = 1 ] || { echo "dapr-heal: $ns/$name: its ReplicaSet has no Deployment: not rolled" >&2; failed=1; }; continue ;; esac ;;
     StatefulSet/?* | DaemonSet/?*) ;;
     *) [ "$young" = 1 ] || { echo "dapr-heal: $ns/$name: owned by '${owner:-nothing}': not rolled" >&2; failed=1; }; continue ;;
@@ -91,7 +100,7 @@ while IFS='|' read -r ns name owner young; do
   [ "$young" = 1 ] || targets="$targets$ns|$owner"$'\n'
 done <<<"$bare"
 
-mkdir -p "$state"
+[ "$dry" = 1 ] || mkdir -p "$state"
 while IFS='|' read -r ns owner; do
   [ -n "$ns" ] || continue
   mark="$state/$ns.${owner//\//.}"
@@ -119,11 +128,13 @@ while IFS='|' read -r ns owner; do
   fi
 done < <(sort -u <<<"$targets")
 
-# The marks of the workloads with no bare pod: their incident is over.
-if [ "$dry" != 1 ]; then
+# The marks of the workloads with no bare pod: their incident is over. Only a complete inventory prunes (an owner that could not be
+# read may be a workload with a mark), and a mark that cannot be removed fails the run.
+if [ "$dry" != 1 ] && [ "$incomplete" = 0 ]; then
   for mark in "$state"/*; do
     [ -e "$mark" ] || continue
-    printf '%s\n' "$present" | grep -qxF "${mark##*/}" || rm -f "$mark"
+    printf '%s\n' "$present" | grep -qxF "${mark##*/}" && continue
+    rm -f "$mark" || { echo "dapr-heal: the mark $mark of a workload with no bare pod could not be removed" >&2; failed=1; }
   done
 fi
 exit "$failed"

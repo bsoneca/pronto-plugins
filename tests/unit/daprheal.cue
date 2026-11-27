@@ -119,3 +119,27 @@ cases: "an argument it does not know is refused": {
 		{call: "daprheal.run", args: [{args: ["--now"]}], holds: {code: 2}},
 	]
 }
+
+cases: "a ReplicaSet that cannot be read leaves every mark in place: the inventory is incomplete, nothing is pruned, the run fails": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, failRs: true, marks: {"aprende.Deployment.aprende-flagd": 5, "aprende.Deployment.other": 45}}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd", "aprende.Deployment.other"]}, why: "its mark was the live rollout's cooldown: pruned, the next sweep would restart the Deployment again"},
+		{pick: ["err"], matches: "its ReplicaSet could not be read: not pruning marks"},
+	]
+}
+
+cases: "marks that cannot be removed fail the run, healthy or not, so the host check shows it": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [(_bare & {containers: ["flagd", "daprd"]})], rs: _rs, readonlyState: true, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "a mark left over would be read as the previous incident by the next outage"},
+		{pick: ["err"], matches: "could not be removed"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {ns: "bonk", name: "bonk-crud-0", owner: "StatefulSet/bonk-crud", containers: ["crud"]})], readonlyState: true, marks: {"aprende.Deployment.aprende-flagd": 45, "bonk.StatefulSet.bonk-crud": 5}}], holds: {code: 1, marked: ["aprende.Deployment.aprende-flagd", "bonk.StatefulSet.bonk-crud"]}, why: "the stale mark of another workload cannot be removed while a bare pod is waiting: the run says so"},
+	]
+}
+
+cases: "--dry-run makes no state folder and still says what it would roll": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, args: ["--dry-run"], noStateDir: true}], holds: {code: 0, stateCreated: false, out: "dapr-heal: would roll aprende/Deployment/aprende-flagd\n"}},
+	]
+}

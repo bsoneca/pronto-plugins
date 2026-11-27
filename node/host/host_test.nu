@@ -31,6 +31,7 @@ def main [] {
 	test_a_failed_job_is_run_again_when_files_were_written
 	test_a_stale_new_file_is_replaced_not_reused
 	test_the_dapr_sidecar_repair_is_a_second_timer_of_the_same_host
+	test_a_host_that_drops_daprHeal_loses_its_timer_and_files
 	print "\nAll node host tests passed."
 }
 
@@ -81,7 +82,8 @@ def host-with [values: string]: nothing -> record {
 def test_the_schema_defaults_and_refuses [] {
 	print "test #Host's defaults are what the node ran with, and its bounds refuse a value that could not work..."
 	assert equal (host-with "{}").host (defaults) "a host with no daprHeal holds none: a non-k3s host gets no repair timer"
-	assert equal (host-with "{daprHeal: {}}").host (with-heal)
+	assert equal (host-with "{daprHeal: {namespaces: [\"aprende\", \"brawl-chess\", \"studio\", \"coach\"]}}").host (with-heal)
+	assert (not (host-with "{daprHeal: {}}").ok) "no namespaces said: none is assumed"
 	assert (not (host-with "{daprHeal: {namespaces: [\"studio-ana-game-1a2b3c\"]}}").ok) "a Studio tenant's namespace"
 	assert (not (host-with "{daprHeal: {namespaces: [\"dapr-system\"]}}").ok) "dapr-system"
 	assert (not (host-with "{daprHeal: {namespaces: [\"kube-system\"]}}").ok) "kube-system"
@@ -492,4 +494,33 @@ def test_the_dapr_sidecar_repair_is_a_second_timer_of_the_same_host [] {
 	}
 	let bad = (try { render ((with-heal) | merge {daprHeal: {kubectl: "k3s'kubectl", namespaces: ["aprende"], graceSeconds: 120, cooldownMinutes: 30, onCalendar: "*:0/5"}}); "rendered" } catch {|e| $e.msg })
 	assert str contains $bad "daprHeal is not what #Host allows"
+}
+
+def test_a_host_that_drops_daprHeal_loses_its_timer_and_files [] {
+	print "test removing daprHeal is drift for --check (nothing changed) and apply disables the timer, removes its four files and reloads systemd..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	let heal_files = ["/etc/pronto/dapr-heal.env" "/usr/local/lib/pronto/dapr-heal.sh" "/etc/systemd/system/pronto-dapr-heal.service" "/etc/systemd/system/pronto-dapr-heal.timer"]
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		apply (with-heal) --root $root | ignore
+		for f in $heal_files { assert ($root + $f | path exists) $"($f) installed" }
+		# --check says it, per file, and changes nothing.
+		"" | save --force --raw ($dir | path join systemctl.log)
+		let checked = (apply (defaults) --check --root $root)
+		assert equal ($checked | length) 4
+		assert str contains ($checked | first) "is installed but the host has no daprHeal"
+		for f in $heal_files { assert ($root + $f | path exists) $"($f) still there after --check" }
+		assert (not (open --raw ($dir | path join systemctl.log) | str contains "disable"))
+		# apply disables and stops the timer, removes the files, reloads systemd.
+		let applied = (apply (defaults) --root $root)
+		assert equal ($applied | length) 4
+		for f in $heal_files { assert (not ($root + $f | path exists)) $"($f) removed" }
+		let log = (open --raw ($dir | path join systemctl.log))
+		assert str contains $log "disable --now pronto-dapr-heal.timer"
+		assert str contains $log "daemon-reload"
+		# The cleanup's files are the host's and stay; a second run finds nothing.
+		assert ($root + "/etc/pronto/docker-gc.env" | path exists)
+		assert equal (apply (defaults) --root $root) []
+	}
 }
