@@ -287,20 +287,20 @@ ${how}
 
 /** Whether a user agent names a known crawler or link-preview fetcher. A phone brand that ends in "bot" is no crawler. */
 export const crawlerOf = (ua: string | null | undefined): boolean =>
-  /Applebot|Googlebot|AdsBot|Mediapartners|bingbot|BingPreview|DuckDuckBot|YandexBot|Baiduspider|Bytespider|Slurp|PetalBot|AhrefsBot|SemrushBot|MJ12bot|facebookexternalhit|Facebot|meta-externalagent|Twitterbot|LinkedInBot|Slackbot|Discordbot|TelegramBot|WhatsApp\/|HeadlessChrome|\bbot\b|crawler|spider|\+https?:\/\//i.test(ua ?? "");
+  /Applebot|Googlebot|AdsBot|Mediapartners|bingbot|BingPreview|DuckDuckBot|YandexBot|Baiduspider|Bytespider|Slurp|PetalBot|AhrefsBot|SemrushBot|MJ12bot|facebookexternalhit|Facebot|meta-externalagent|Twitterbot|LinkedInBot|Slackbot|Discordbot|TelegramBot|WhatsApp\/|\bbot\b|crawler|spider|\+https?:\/\//i.test(ua ?? "");
 
 /** The pages a sign-in starts at: the one a tenant's link opens, and Hydra's login step. */
-const SIGN_IN_PAGES = new Set(["/authorize", "/login"]);
+const SIGN_IN_PAGES = ["/authorize", "/login"];
 
-/** The handler, logging each request as one line (method, path, status, bot or human, the tenant's host) and
+/** The handler (`pages`: the paths that start a sign-in, the Hydra front's adding /oauth2/auth), logging each request as one line (method, path, status, bot or human, the tenant's host) and
  * keeping the sign-in pages out of indexes: `X-Robots-Tag: noindex, nofollow`, and a 403 for a known crawler
  * in place of the page. The line holds no query, token, address or user agent; the host is the tenant's origin
  * the request names (client_id), where it names one. */
-export function observed(handler: (req: Request) => Promise<Response>, log: (line: string) => void = (l) => console.log(l)) {
+export function observed(handler: (req: Request) => Promise<Response>, log: (line: string) => void = (l) => console.log(l), pages: string[] = SIGN_IN_PAGES) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const bot = crawlerOf(req.headers.get("user-agent"));
-    const startsSignIn = req.method === "GET" && SIGN_IN_PAGES.has(url.pathname);
+    const startsSignIn = req.method === "GET" && pages.includes(url.pathname);
     let res: Response;
     if (startsSignIn && bot) {
       res = new Response("crawlers are not served the sign-in\n", { status: 403, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });

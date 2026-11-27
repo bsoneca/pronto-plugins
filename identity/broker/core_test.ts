@@ -141,3 +141,55 @@ Deno.test("a moved tenant's sector is read from BROKER_SECTORS, and a malformed 
     assertEquals(threw, true, bad);
   }
 });
+
+Deno.test("the Hydra front's pages are /oauth2/auth and /login: a crawler is refused the first, /authorize is no page of it", async () => {
+  const h = observed(async () => new Response("ok"), () => {}, ["/login", "/oauth2/auth"]);
+  const ua = { "user-agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" };
+  let r = await h(new Request("https://id.example/oauth2/auth?client_id=https%3A%2F%2Fa.example", { headers: ua }));
+  assertEquals([r.status, r.headers.get("x-robots-tag")], [403, "noindex, nofollow"]);
+  r = await h(new Request("https://id.example/oauth2/auth?client_id=https%3A%2F%2Fa.example"));
+  assertEquals([r.status, r.headers.get("x-robots-tag")], [200, "noindex, nofollow"]);
+  r = await h(new Request("https://id.example/authorize", { headers: ua }));
+  assertEquals([r.status, r.headers.get("x-robots-tag")], [200, null]);
+});
+
+import { crawlerOf, observed } from "./core.ts";
+
+Deno.test("a known crawler is told from a person, and a phone brand that ends in bot is no crawler", () => {
+  for (const ua of [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 (Applebot/0.1; +http://www.apple.com/go/applebot)",
+    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "facebookexternalhit/1.1", "WhatsApp/2.23 A", "Slackbot-LinkExpanding 1.0",
+  ]) assertEquals(crawlerOf(ua), true, ua);
+  for (const ua of [
+    "Mozilla/5.0 (Linux; Android 13; Cubot P60) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 Version/17.4 Mobile/15E148 Safari/604.1",
+    // The scenarios and the flip cases drive a headless Chrome: it is a person to the broker.
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/120.0.0.0 Safari/537.36", "", null, undefined,
+  ]) assertEquals(crawlerOf(ua), false, String(ua));
+});
+
+Deno.test("the sign-in pages are noindex, a crawler is refused them, and each request is one line without query or agent", async () => {
+  const lines: string[] = [];
+  let served = 0;
+  const h = observed(async (req) => {
+    served++;
+    return new Response(new URL(req.url).pathname === "/authorize" ? "<html>Continue</html>" : "ok", { status: 200, headers: { "content-type": "text/html" } });
+  }, (l) => lines.push(l));
+  const human = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 Version/17.4 Mobile/15E148 Safari/604.1";
+  const bot = "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 Version/17.4 Safari/605.1.15 (Applebot/0.1; +http://www.apple.com/go/applebot)";
+  const q = "?client_id=https%3A%2F%2Fbonkchess.com&state=SECRET&code_challenge=SECRET";
+  let r = await h(new Request(`https://id.example/authorize${q}`, { headers: { "user-agent": human } }));
+  assertEquals([r.status, r.headers.get("x-robots-tag"), await r.text()], [200, "noindex, nofollow", "<html>Continue</html>"]);
+  r = await h(new Request(`https://id.example/authorize${q}`, { headers: { "user-agent": bot } }));
+  assertEquals([r.status, r.headers.get("x-robots-tag"), (await r.text()).includes("Continue")], [403, "noindex, nofollow", false]);
+  assertEquals(served, 1, "the crawler never reached the handler");
+  r = await h(new Request("https://id.example/login?login_challenge=SECRET", { headers: { "user-agent": bot } }));
+  assertEquals([r.status, r.headers.get("x-robots-tag")], [403, "noindex, nofollow"]);
+  r = await h(new Request("https://id.example/jwks", { headers: { "user-agent": bot } }));
+  assertEquals([r.status, r.headers.get("x-robots-tag")], [200, null]);
+  assertEquals(lines, [
+    "broker: GET /authorize 200 human bonkchess.com", "broker: GET /authorize 403 bot bonkchess.com",
+    "broker: GET /login 403 bot -", "broker: GET /jwks 200 bot -",
+  ]);
+  for (const l of lines) if (/SECRET|Mozilla|Applebot/.test(l)) throw new Error(`line leaks: ${l}`);
+});

@@ -280,7 +280,7 @@ export async function front(p: {
       console.error(e);
       return json(500, { error: "internal error" });
     }
-  });
+  }, (l) => console.log(l), ["/login", "/oauth2/auth"]);
 }
 
 if (import.meta.main) {
