@@ -3,20 +3,27 @@
 # Node: node.#Release, each file regenerated:
 #   bin/pronto-node --engine [--release-rule] <app-dir>...
 # --release-rule also merges the release@k8s rule into each app's .say.json (an app that has it keeps it without the flag).
+# Or the node host files (node/host/, node/README.md, "The node host") into the folder that holds a node's values:
+#   bin/pronto-node --host <dir>...
+# which writes <dir>/node-host/{docker-gc.sh,host.nu,schema/host.cue}, each regenerated.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
-usage="usage: pronto-node --engine [--release-rule] <app-dir>..."
-[ "${1:-}" = --engine ] || { echo "$usage" >&2; exit 2; }
+usage="usage: pronto-node --engine [--release-rule] <app-dir>... | --host <dir>..."
+case "${1:-}" in --engine | --host) mode=$1 ;; *) echo "$usage" >&2; exit 2 ;; esac
 shift
 tag=
-if [ "${1:-}" = --release-rule ]; then tag="-t releaseRule=true"; shift; fi
+if [ "$mode" = --engine ] && [ "${1:-}" = --release-rule ]; then tag="-t releaseRule=true"; shift; fi
 [ $# -ge 1 ] || { echo "$usage" >&2; exit 2; }
 case "$1" in -*) echo "$usage" >&2; exit 2 ;; esac
 files=$(mktemp)
 trap 'rm -f "$files"' EXIT
-(cd "$here" && ./saytw --script tools.nu cue export $tag ./node/engine/export -e files --out json) > "$files"
+if [ "$mode" = --engine ]; then export_pkg=./node/engine/export; else export_pkg=./node/host/export; fi
+# shellcheck disable=SC2086
+(cd "$here" && ./saytw --script tools.nu cue export $tag $export_pkg -e files --out json) > "$files"
 for dir in "$@"; do
 	app=$(cd "$dir" && pwd)
-	[ -f "$app/release.cue" ] || { echo "pronto-node: $app has no release.cue" >&2; exit 2; }
+	if [ "$mode" = --engine ]; then
+		[ -f "$app/release.cue" ] || { echo "pronto-node: $app has no release.cue" >&2; exit 2; }
+	fi
 	(cd "$here" && ./saytw --script tools.nu nu bin/write.nu "$files" "$app")
 done

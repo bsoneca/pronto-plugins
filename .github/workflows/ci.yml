@@ -236,6 +236,13 @@ jobs:
           sayt --script tools.nu cue vet -c ./gcp/engine
           sayt --script tools.nu cue vet -c ./gcp/engine/export
           for t in release build verify secrets; do sayt --script tools.nu nu "gcp/engine/${t}_test.nu" || exit 1; done
+      # The node's host files (node/README.md, "The node host"): the schema and its export, and host.nu and
+      # docker-gc.sh against a fake docker and systemctl, a temp root.
+      - name: Test the node host
+        run: |
+          sayt --script tools.nu cue vet -c ./node/host
+          sayt --script tools.nu cue vet -c ./node/host/export
+          sayt --script tools.nu nu node/host/host_test.nu
       - name: The machine's cue wrapper against a fake cue
         run: |
           sh -n machine/install.sh && sh -n machine/sysv-shm.sh && sh -n bin/pronto-machine

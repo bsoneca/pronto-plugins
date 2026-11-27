@@ -1,0 +1,206 @@
+#!/usr/bin/env nu
+# Run with: nu node/host/host_test.nu
+#
+# host.nu's files for a node's #Host values, applied and checked against a root folder with a stand-in
+# systemctl, and docker-gc.sh run by bash against a stand-in docker. Nothing here touches a node.
+
+use std/assert
+use host.nu [render apply]
+
+const here = path self | path dirname
+
+def main [] {
+	print "Running node host tests...\n"
+	test_the_schema_defaults_and_refuses
+	test_render_holds_the_defaults_and_the_nodes_values
+	test_the_cleanup_picks_only_old_matching_tags_and_keeps_one_it_cannot_read
+	test_the_cleanup_goes_on_past_an_image_it_cannot_remove_and_fails_over_the_cap
+	test_the_cleanup_never_forces_nor_prunes_images_in_use
+	test_apply_writes_what_drifted_and_a_second_run_finds_none
+	test_check_changes_nothing_and_says_every_drift
+	test_a_failed_last_run_is_drift
+	print "\nAll node host tests passed."
+}
+
+def defaults []: nothing -> record {
+	{dockerGC: {minAgeHours: 6, refPattern: "^localhost:[0-9]+/", buildCacheGB: 40, capGB: 120, onCalendar: "hourly"}}
+}
+
+def tmp []: nothing -> string { mktemp --directory --tmpdir node-host-XXXXXX }
+
+# A stand-in docker: `images` are [ref, hours ago | text], `sizes` is `system df`'s column, `rm` of a ref in
+# `stuck` fails. Returns {code, out, calls, would}.
+def run-gc [host: record, images: list, sizes: list<string>, stuck: list<string>, args: list<string>]: nothing -> record {
+	let dir = (tmp)
+	let go_time = {|h| (date now | date to-timezone utc) - ($h * 1hr) | format date "%Y-%m-%d %H:%M:%S.456789 +0000 UTC" }
+	($images | each {|i| $i.0} | str join "\n") + "\n" | save --raw ($dir | path join refs)
+	($images | each {|i| $"($i.0)|(if ($i.1 | describe) == int { do $go_time $i.1 } else { $i.1 })"} | str join "\n") + "\n" | save --raw ($dir | path join times)
+	($sizes | str join "\n") + "\n" | save --raw ($dir | path join sizes)
+	($stuck | str join "\n") + "\n" | save --raw ($dir | path join stuck)
+	"" | save --raw ($dir | path join calls)
+	let env_text = (render $host | where path == "/etc/pronto/docker-gc.env" | first | get text)
+	$env_text | save --raw ($dir | path join gc.env)
+	r##'#!/bin/bash
+d=$(dirname "$0")
+case "$1 $2" in
+  "image ls") cat "$d/refs" ;;
+  "image inspect") awk -F'|' -v r="${!#}" '$1 == r { print $2 }' "$d/times" ;;
+  "system df") cat "$d/sizes" ;;
+  *) echo "$*" >>"$d/calls"; if [ "$1 $2" = "image rm" ] && grep -qxF -- "$3" "$d/stuck"; then exit 1; fi ;;
+esac
+'## | save --raw ($dir | path join docker)
+	chmod 755 ($dir | path join docker)
+	let r = (with-env {PATH: $"($dir):/usr/bin:/bin", DOCKER_GC_ENV: ($dir | path join gc.env)} { ^/bin/bash ($here | path join docker-gc.sh) ...$args | complete })
+	let out = $r.stdout + $r.stderr
+	let calls = (open --raw ($dir | path join calls) | lines | where {|l| $l != ""})
+	rm -rf $dir
+	{code: $r.exit_code, out: $out, calls: $calls, would: ($out | lines | where {|l| $l starts-with "would remove "} | each {|l| $l | str replace "would remove " ""})}
+}
+
+# Whether `cue export` of #Host with `values` unified holds, and what it gives.
+def host-with [values: string]: nothing -> record {
+	let f = (mktemp --tmpdir node-host-XXXXXX.cue)
+	$"package schema\nhost: #Host & ($values)\n" | save --force --raw $f
+	let r = (do { ^cue export ($here | path join schema host.cue) $f -e host --out json } | complete)
+	rm -f $f
+	{ok: ($r.exit_code == 0), host: (if $r.exit_code == 0 { $r.stdout | from json } else { null })}
+}
+
+def test_the_schema_defaults_and_refuses [] {
+	print "test #Host's defaults are what the node ran with, and its bounds refuse a value that could not work..."
+	assert equal (host-with "{}").host (defaults)
+	assert equal (host-with "{dockerGC: {buildCacheGB: 10, capGB: 50}}").host.dockerGC.capGB 50
+	assert (not (host-with "{dockerGC: {capGB: 40}}").ok) "a cap at the cache"
+	assert (not (host-with "{dockerGC: {minAgeHours: 0}}").ok) "no age"
+	assert (not (host-with "{dockerGC: {refPattern: \"localhost\"}}").ok) "a pattern without ^"
+	assert (not (host-with "{dockerGC: {refPattern: \"^a'b\"}}").ok) "a quote in the pattern"
+	assert (not (host-with "{dockerGC: {onCalendar: \"\"}}").ok) "no schedule"
+}
+
+def test_render_holds_the_defaults_and_the_nodes_values [] {
+	print "test the files hold the node's values in an env file docker-gc.sh reads, and the units..."
+	let files = (render (defaults))
+	assert equal ($files | get path) ["/usr/local/lib/pronto/docker-gc.sh" "/etc/pronto/docker-gc.env" "/etc/systemd/system/pronto-docker-gc.service" "/etc/systemd/system/pronto-docker-gc.timer"]
+	let envf = ($files | where path == "/etc/pronto/docker-gc.env" | first | get text)
+	assert str contains $envf "PATTERN='^localhost:[0-9]+/'\nMIN_AGE_HOURS=6\nBUILD_CACHE_GB=40\nCAP_GB=120\n"
+	let svc = ($files | where path =~ "service" | first | get text)
+	assert str contains $svc "\nType=oneshot\nExecStart=/bin/bash /usr/local/lib/pronto/docker-gc.sh\nNice=19\nIOSchedulingClass=idle\n"
+	let timer = ($files | where path =~ "timer" | first | get text)
+	assert str contains $timer "\nOnCalendar=hourly\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n"
+	let other = (render {dockerGC: {minAgeHours: 12, refPattern: "^reg:5000/", buildCacheGB: 10, capGB: 50, onCalendar: "*:0/30"}})
+	assert str contains ($other | where path =~ "env" | first | get text) "PATTERN='^reg:5000/'\nMIN_AGE_HOURS=12\nBUILD_CACHE_GB=10\nCAP_GB=50\n"
+	assert str contains ($other | where path =~ "timer" | first | get text) "OnCalendar=*:0/30\n"
+}
+
+def test_the_cleanup_picks_only_old_matching_tags_and_keeps_one_it_cannot_read [] {
+	print "test the cleanup lists only old localhost tags, and keeps one whose time it cannot read..."
+	let r = (run-gc (defaults) [
+		["localhost:5000/studio-web:a" 7]
+		["localhost:5000/studio-web:b" 5]
+		["localhost:32000/brawl-chess-auth:latest" 200]
+		["localhost:5000/offset:old" "2020-01-02T03:04:05.5-03:00"]
+		["localhost:5000/zero:a" "0001-01-01 00:00:00 +0000 UTC"]
+		["localhost:5000/empty:a" ""]
+		["localhost:5000/junk:a" "yesterday"]
+		["localhost:5000/untagged:<none>" 200]
+		["postgres:18" 200]
+		["ghcr.io/localhost:5000/other:a" 200]
+	] ["1GB"] [] ["--dry-run"])
+	assert equal $r.code 0
+	assert equal $r.calls []
+	assert equal $r.would ["localhost:5000/studio-web:a" "localhost:32000/brawl-chess-auth:latest" "localhost:5000/offset:old"]
+}
+
+def test_the_cleanup_goes_on_past_an_image_it_cannot_remove_and_fails_over_the_cap [] {
+	print "test the cleanup goes on past an image it cannot remove, and fails over the cap..."
+	let r = (run-gc (defaults) [["localhost:5000/used:a" 7] ["localhost:5000/old:a" 7] ["localhost:5000/new:a" 1]] ["80.5GB" "12kB" "0B" "39.4GB"] ["localhost:5000/used:a"] [])
+	assert equal $r.code 0
+	assert equal $r.calls ["image rm localhost:5000/used:a" "image rm localhost:5000/old:a" "image prune -f" "builder prune -af --max-used-space 40GB"]
+	let over = (run-gc (defaults) [] ["80.7GB" "0B" "0B" "39.4GB"] [] [])
+	assert equal $over.code 1
+	assert str contains $over.out "over the cap of 120GB"
+	# A tag time no run can read would keep every image for ever, so the unit fails.
+	let zero = (run-gc (defaults) [["localhost:5000/zero:a" "0001-01-01 00:00:00 +0000 UTC"]] ["1GB"] [] [])
+	assert equal $zero.code 1
+	assert (not ($zero.out | str contains "over the cap"))
+	# The node's own values reach the job: a smaller cache and cap.
+	let own = (run-gc {dockerGC: {minAgeHours: 1, refPattern: "^localhost:[0-9]+/", buildCacheGB: 10, capGB: 50, onCalendar: "hourly"}} [["localhost:5000/a:a" 2]] ["60GB"] [] [])
+	assert equal $own.code 1
+	assert equal $own.calls ["image rm localhost:5000/a:a" "image prune -f" "builder prune -af --max-used-space 10GB"]
+}
+
+def test_the_cleanup_never_forces_nor_prunes_images_in_use [] {
+	print "test the cleanup never forces a removal nor prunes what a container uses..."
+	let text = (open --raw ($here | path join docker-gc.sh))
+	assert (not ($text =~ '(rmi\b|system prune|image rm [^\n]*(-f\b|--force)|(image|volume|container) prune [^\n]*(-a\b|-af|-fa|--all)|volume (rm|prune)|until=)')) "a forced or broad removal"
+}
+
+# A stand-in systemctl over files in $dir: `on` (enabled and active), `failed` (its job's last run).
+def fake-systemctl [dir: string] {
+	mkdir ($dir | path join bin)
+	'#!/bin/bash
+d=$(dirname "$0")/..
+echo "$*" >>"$d/systemctl.log"
+case "$1" in
+  is-failed) [ -e "$d/failed" ] ;;
+  is-enabled | is-active) [ -e "$d/on" ] ;;
+  enable) touch "$d/on" ;;
+  *) ;;
+esac
+' | save --raw ($dir | path join bin systemctl)
+	chmod 755 ($dir | path join bin systemctl)
+	"" | save --raw ($dir | path join systemctl.log)
+}
+
+def test_apply_writes_what_drifted_and_a_second_run_finds_none [] {
+	print "test apply writes the four files, reloads systemd, enables the timer, and a second run finds no drift..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		let first = (apply (defaults) --root $root)
+		assert equal ($first | length) 5
+		for f in (render (defaults)) { assert equal (open --raw ($root + $f.path)) $f.text }
+		assert equal (open --raw ($root + "/usr/local/lib/pronto/docker-gc.sh") | lines | first) "#!/usr/bin/env bash"
+		assert equal (ls ($root + "/etc/pronto") | length) 1 "no .new left"
+		let log = (open --raw ($dir | path join systemctl.log))
+		assert str contains $log "daemon-reload"
+		assert str contains $log "enable --now pronto-docker-gc.timer"
+		let second = (apply (defaults) --root $root)
+		assert equal $second []
+		# A changed value is drift in the env file alone, and the timer is not enabled again.
+		let third = (apply {dockerGC: {minAgeHours: 6, refPattern: "^localhost:[0-9]+/", buildCacheGB: 30, capGB: 120, onCalendar: "hourly"}} --root $root)
+		assert equal $third [$"($root)/etc/pronto/docker-gc.env differs"]
+	}
+	rm -rf $dir
+}
+
+def test_check_changes_nothing_and_says_every_drift [] {
+	print "test --check writes and enables nothing, and says every drift..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		let drift = (apply (defaults) --check --root $root)
+		assert equal ($drift | length) 5
+		assert (not ($root | path exists)) "nothing written"
+		let log = (open --raw ($dir | path join systemctl.log))
+		assert (not ($log | str contains "enable --now")) "nothing enabled"
+		assert (not ($log | str contains "daemon-reload"))
+	}
+	rm -rf $dir
+}
+
+def test_a_failed_last_run_is_drift [] {
+	print "test a job whose last run failed is drift --check reports, and enabling the timer does not clear..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		apply (defaults) --root $root | ignore
+		"" | save --raw ($dir | path join failed)
+		let drift = (apply (defaults) --check --root $root)
+		assert equal $drift ["pronto-docker-gc.service failed its last run"]
+	}
+	rm -rf $dir
+}
