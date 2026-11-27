@@ -299,6 +299,21 @@ helpers run for real (register-clients, which runs deno and writes to an issuer,
 data, its objects and its kubectl order equal upstream `main -e gke`'s, except the engine's declared patches
 and extra steps; a new pin is validated by moving `pronto_pin` and fixing the engine before an app moves its own.
 
+### The cluster's admission policies for tenant namespaces (PRONTO-1941)
+
+`#TenantAdmission` (schema/node.cue) is what `tenant.nu check-objects` refuses, refused again by the API server for a publisher's token applied
+directly: six ValidatingAdmissionPolicies (`<name>-pods`, `-templates`, `-objects`, `-services`, `-secrets`, `-clusters`) and their bindings, matching only namespaces
+that carry `label`. Every rule is built from the definitions check-objects reads (`#TenantClusterSpec`, `#TenantParameters`, `#TenantRefusedRoles`,
+`#TenantRefusedMetadata`, `#TenantVolumeTypes`, `#TenantForbiddenAccounts`, `#TenantDatabaseImages` ...), so the two cannot drift. The app gives its values:
+`label`, `name`, `registry`, `operators` (the database operator's account), `controllers` (the kube-system controllers that make pods, named one by one) and
+`actions`: `["Warn", "Audit"]` while the violations are read, then `["Deny", "Audit"]`. Apply them with the node:
+`cue export ./node/schema -e '(#TenantAdmission & {label: "studio.bsoneca.com/tenant", name: "studio-tenant"}).objects'`.
+
+A Cluster policy reads what the API server stores, so it allows the fields the CRD defaults (`#TenantClusterDefaults`); the engine's own check sees the
+rendered object before them. A request that changes nothing of a Cluster's `spec` is not judged again. Until `actions` has Deny, count the violations with the
+apiserver's `apiserver_validating_admission_policy_check_total{enforcement_action="warn"}`: the node's k3s may write no audit log.
+`node/engine/admission_test.nu` holds a test for each rule; with `--kind <context>` (a kind cluster with CloudNativePG's CRDs) it also asks the API server.
+
 ## The node host
 
 What any pronto node's host needs, whatever it runs (`node/host/`): this node is a lab for hundreds of apps per VPS,
