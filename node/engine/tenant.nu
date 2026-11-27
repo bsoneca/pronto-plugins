@@ -267,6 +267,10 @@ export def check-compose-sources [app_dir: string] {
 export def stage-dockerfile [namespace: string]: string -> string {
 	# the BOM buildkit skips before it reads a directive is no part of the text the rest reads
 	let text = ($in | str replace --regex '^\x{FEFF}' '')
+	# Buildkit and a regular expression disagree on what white space is (a form feed, a no-break space): a Dockerfile is plain, so no control character but tab, line feed and carriage return,
+	# and no non-ASCII white space, is read at all, and every continuation below is a backslash, spaces and tabs, and the line end.
+	if ($text =~ r#'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'#) { error make {msg: "a tenant's Dockerfile has a control character (other than tab, line feed and carriage return): a tenant's Dockerfile is plain text"} }
+	if ($text =~ r#'[\x{00A0}\x{1680}\x{2000}-\x{200B}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}]'#) { error make {msg: "a tenant's Dockerfile has non-ASCII white space (a no-break space and the like), which buildkit and the staging read differently: a tenant's Dockerfile is plain text"} }
 	# the staging swaps text for `__TENANT_COMMENT_<n>__` and `__TENANT_MOUNT_<n>__` placeholders while it works and swaps it back: a Dockerfile that has the word could smuggle text across
 	if ($text | str contains '__TENANT_') { error make {msg: "a tenant's Dockerfile has `__TENANT_`, a word the engine's staging keeps for itself"} }
 	let official = '(?i)^\s*(#|//)\s*syntax\s*=\s*docker/dockerfile(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?\s*$'
@@ -306,7 +310,7 @@ export def stage-dockerfile [namespace: string]: string -> string {
 			continue
 		}
 		$ins = ($ins | append $line)
-		if ($bare =~ '\\\s*$') { continue }
+		if ($bare =~ '\\[ \t]*$') { continue }
 		let done = (stage-instruction ($ins | str join "\n") $namespace)
 		$ins = []
 		$out = ($out | append $done.text)
@@ -382,17 +386,20 @@ def stage-instruction [ins: string, namespace: string]: nothing -> record {
 	if $keyword in [RUN COPY ADD] and ($ins =~ '\\[ \t]*\r?\n') and (($ins | str replace --all --regex '\\[ \t]*\r?\n' '') =~ '<<') {
 		error make {msg: "a tenant's Dockerfile has `<<` in a RUN, COPY or ADD with a continuation line: buildkit joins the lines with no separator and reads a heredoc from the joined words, so a tenant's heredoc is in an instruction of one line"}
 	}
-	let candidates = if $keyword in [RUN COPY ADD] { shell-words $ins | where {|w| $w =~ '^\d*<<' } } else { [] }
-	# buildkit unescapes a heredoc name (`<<#E\OF` is the name `#EOF`): a tenant's heredoc word has no backslash, so the name here is the name there
-	let escaped = ($candidates | where {|w| $w | str contains "\\" })
-	if ($escaped | is-not-empty) { error make {msg: $"a tenant's Dockerfile has the heredoc word ($escaped | first), with a backslash in it: buildkit unescapes a heredoc name and a tenant's is plain"} }
-	let heredocs = ($candidates | each {|w|
-		let m = ($w | parse --regex '^\d*<<(?<dash>-?)(?<name>[^<]*)$' | get -o 0)
-		if $m == null { null } else {
-			let name = ($m.name | str replace --all --regex r#'["']'# '')
-			if ($name | is-empty) { null } else { {word: $name, dash: ($m.dash == "-")} }
-		}
-	} | compact)
+	# A heredoc word is `<<NAME`, `<<-NAME` (with a file descriptor before it or not) and NAME is a plain name, bare or in one pair of quotes: every other word that has `<<` outside quotes
+	# is refused (a quote, `$`, `\`, `#`, a space, a here-string or `<<` inside a word), and so is `<<` anywhere in an ONBUILD, which buildkit reads in a later build.
+	if ($ins =~ '(?i)^\s*ONBUILD\s') and ($ins =~ '<<') {
+		error make {msg: "a tenant's Dockerfile has `<<` in an ONBUILD instruction, which buildkit reads as a heredoc, or not, in a later build: a tenant's ONBUILD has none"}
+	}
+	let words = if $keyword in [RUN COPY ADD] { shell-words $ins } else { [] }
+	let plain = r#'^\d*<<-?(?:[A-Za-z_][A-Za-z0-9_]*|'[A-Za-z_][A-Za-z0-9_]*'|"[A-Za-z_][A-Za-z0-9_]*")$'#
+	let unquoted = {|w| $w | str replace --all --regex r#'"[^"]*"|'[^']*''# '' }
+	let odd = ($words | where {|w| (do $unquoted $w) =~ '<<' and not ($w =~ $plain) })
+	if ($odd | is-not-empty) { error make {msg: $"a tenant's Dockerfile has the word ($odd | first) with `<<` in it, which is not a plain heredoc word: a tenant's heredoc is <<NAME, <<-NAME, <<'NAME' or <<\"NAME\", with a name of letters, digits and underscores"} }
+	let heredocs = ($words | where {|w| $w =~ $plain } | each {|w|
+		let m = ($w | parse --regex '^\d*<<(?<dash>-?)(?<name>.*)$' | first)
+		{word: ($m.name | str replace --all --regex r#'["']'# ''), dash: ($m.dash == "-")}
+	})
 	let m = ($ins | parse --regex '(?s)^(?<head>\s*(?i:ONBUILD\s+)?(?i:RUN))(?<flags>(?:[ \t]+|\\[ \t]*\r?\n(?:[ \t]*(?:#[^\n]*)?\r?\n)*)*(?:--\S+(?:[ \t]+|\\[ \t]*\r?\n(?:[ \t]*(?:#[^\n]*)?\r?\n)*)*)*)(?<rest>.*)$')
 	if ($m | is-empty) { return {text: $ins, heredocs: $heredocs} }
 	let parts = ($m | first)
