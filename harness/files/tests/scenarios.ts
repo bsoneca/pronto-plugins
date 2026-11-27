@@ -702,17 +702,23 @@ export class Run {
       // whose body is dropped is no answer, the old page's still in flight when a reload began (a slow
       // preview shows it, as a tracker's first pageview): the wait goes on for the new page's.
       let seen = { status: 0, body: "", sent: "" };
-      let taken = false, dropped = "";
+      let taken = false, dropped = "", skipped = "";
+      // The pattern the request's body must match (r.sent), compiled once; the last body that did not is kept for the timeout's message.
+      const sentRe = r.sent ? new RegExp(r.sent, "s") : null;
       let answered!: () => void, failed!: (e: Error) => void;
       const got = early(new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`no ${r.method} ${to} was answered within ${ms} ms${dropped ? ` (every answer's body was dropped: ${dropped})` : ""}`)), ms);
+        const timer = setTimeout(() => reject(new Error(`no ${r.method} ${to} was answered within ${ms} ms${dropped ? ` (every answer's body was dropped: ${dropped})` : ""}${skipped ? ` (the last request skipped was sent ${skipped.slice(0, 300)}, which does not match ${r.sent})` : ""}`)), ms);
         answered = () => { clearTimeout(timer); resolve(); };
         failed = (e) => { clearTimeout(timer); reject(e); };
       }));
       const match = (u: URL) => u.href.includes(to);
       // A request whose body is not the one the step names (r.sent) is no answer to it: the first POST
       // to the address (another beacon, an earlier batch) is skipped, and the wait goes on.
-      const wanted = (sent: string) => !r.sent || new RegExp(r.sent, "s").test(sent);
+      const wanted = (sent: string) => {
+        if (!sentRe || sentRe.test(sent)) return true;
+        skipped = sent;
+        return false;
+      };
       const routed = ["click", "submit", "trigger"].some((k) => k in (r.when ?? {}));
       if (routed) await p.route(match, async (route) => {
         if (route.request().method() !== r.method) return route.fallback();
@@ -744,7 +750,7 @@ export class Run {
       const { status, body } = seen;
       if (status !== r.status) throw new Error(`${r.method} ${to} answered ${status}, not ${r.status}: ${body.slice(0, 200)}`);
       if (r.matches && !new RegExp(r.matches).test(body)) throw new Error(`${r.method} ${to} answered ${body.slice(0, 200)}, which does not match ${r.matches}`);
-      if (r.sent && !new RegExp(r.sent, "s").test(seen.sent)) throw new Error(`${r.method} ${to} was sent ${seen.sent.slice(0, 300)}, which does not match ${r.sent}`);
+      if (sentRe && !sentRe.test(seen.sent)) throw new Error(`${r.method} ${to} was sent ${seen.sent.slice(0, 300)}, which does not match ${r.sent}`);
       return;
     }
     // The network.
