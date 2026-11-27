@@ -2529,12 +2529,15 @@ def test_the_recorded_engine_pin_is_a_regular_file_of_forty_hex_digits [] {
 		let app = ($w.app | path expand)
 		let outside = ($w.dir | path join outside)
 		mkdir $outside
-		"the-secret-the-release-must-not-copy\n" | save -f ($outside | path join node-engine.pin)
+		# what a link leads to is a valid pin (40 hex), so only the link checks can refuse it: the hex check alone would let it through
 		$"($sha)\n" | save -f ($outside | path join real.pin)
+		let hexdir = ($outside | path join hexdir)
+		mkdir $hexdir
+		$"($sha)\n" | save -f ($hexdir | path join node-engine.pin)
 		match $row.kind {
 			"file" => { mkdir ($app | path join .github); $"($sha)\n" | save -f ($app | path join .github node-engine.pin) }
-			"link" => { mkdir ($app | path join .github); ^ln -s ($outside | path join node-engine.pin) ($app | path join .github node-engine.pin) }
-			"dirlink" => { ^ln -s $outside ($app | path join .github) }
+			"link" => { mkdir ($app | path join .github); ^ln -s ($outside | path join real.pin) ($app | path join .github node-engine.pin) }
+			"dirlink" => { ^ln -s $hexdir ($app | path join .github) }
 			"junk" => { mkdir ($app | path join .github); "not a commit\n" | save -f ($app | path join .github node-engine.pin) }
 		}
 		do { cd $app; ^git init -q }
