@@ -670,7 +670,7 @@ export def release-app [app_info: record, node: record, meta: record, compose: r
 	# The game's own release.cue rendered these: what its publisher may write is checked again here, whatever schema it loaded. A container that
 	# leaves allowPrivilegeEscalation unset is made to say false first, and what it will retire is the engine's to decide, before any write.
 	let objects = if $tenant { tenant harden-objects $objects } else { $objects }
-	if $tenant { tenant check-objects $objects $node (tenant publisher-kinds) (tenant live-clusters $node.namespace) }
+	if $tenant { tenant check-objects $objects $node (tenant publisher-kinds) (tenant live-clusters $node.namespace) (tenant live-superuser-secrets $node.namespace) }
 	let retire = if $tenant { tenant check-retire $node (tenant retire-kinds) $objects } else { $node.retire }
 	let parts = (namespace-split $objects)
 	let stray = ($objects | where kind == Job | get metadata.name | where {|n| $n not-in ($node.jobOrder | each {|j| $"($app)-($j)" }) })

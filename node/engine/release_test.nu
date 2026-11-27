@@ -2665,6 +2665,18 @@ def test_a_tenants_workload_never_runs_as_the_account_of_a_cluster_already_in_it
 	rm -rf $w.dir
 }
 
+def test_a_tenants_workload_never_reads_the_superuser_secret_a_live_cluster_names [] {
+	print "test a workload that reads the Secret a Cluster already in the namespace names as its superuserSecret (a legacy Cluster keeps that login) is refused, with no Cluster in the release, from a live read..."
+	let w = (tenant-world)
+	"older-store=older-root-secret\n" | save -f ($w.state | path join live_clusters)
+	own-manifests $w $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($tenant_ns)\"}, spec: template: spec: {containers: [{name: \"crud\", image: \"127.0.0.1:5000/($tenant_ns)/game-crud:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", env: [{name: \"PW\", valueFrom: {secretKeyRef: {name: \"older-root-secret\", key: \"password\"}}}]}]}}]"
+	let r = (tenant-release $w)
+	assert ($r.exit_code != 0) "a workload that reads a live Cluster's superuser Secret was not refused"
+	assert (has $r.stderr "reads the secret(s) older-root-secret") $r.stderr
+	assert equal (writes $w) []
+	rm -rf $w.dir
+}
+
 def test_a_tenants_cluster_keeps_the_engines_own_tuning_and_the_bases_uid [] {
 	print "test a tenant's Cluster with the engine's own #Tune fields (multi-instance: primaryUpdateStrategy, primaryUpdateMethod, enablePDB) and the base's uid 999 passes, and a database login that is a member of postgres or a file or program role is a violation..."
 	let ns = $tenant_ns

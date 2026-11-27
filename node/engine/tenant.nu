@@ -340,6 +340,15 @@ export def approved-cluster-image [image: any, node: record]: nothing -> bool {
 	(schema-export '#TenantDatabaseImages' | any {|a| $image == $"($prefix)($node.name)-database-base:($a.major)@($a.digest)" })
 }
 
+# The Secrets the Clusters already in the namespace name as their `superuserSecret` (a legacy Cluster with superuser access on keeps the login whatever this release
+# renders): no workload of this release reads them either.
+export def live-superuser-secrets [namespace: string]: nothing -> list<string> {
+	let r = (^kubectl get clusters.postgresql.cnpg.io -n $namespace -o json --ignore-not-found | complete)
+	if $r.exit_code != 0 { error make {msg: $"reading the Clusters of ($namespace) failed: ($r.stderr | str trim)"} }
+	if ($r.stdout | str trim | is-empty) { return [] }
+	$r.stdout | from json | get -o items | default [] | each {|c| $c.spec?.superuserSecret?.name? | default "" } | where {|n| $n != "" }
+}
+
 export def live-clusters [namespace: string]: nothing -> list<string> {
 	let r = (^kubectl get clusters.postgresql.cnpg.io -n $namespace -o json --ignore-not-found | complete)
 	if $r.exit_code != 0 { error make {msg: $"reading the Clusters of ($namespace) failed: ($r.stderr | str trim)"} }
@@ -347,19 +356,22 @@ export def live-clusters [namespace: string]: nothing -> list<string> {
 	$r.stdout | from json | get -o items | default [] | each {|c| $c.metadata?.name? | default "" } | where {|n| $n != "" }
 }
 
-export def check-objects [objects: list, node: record, kinds: list<string>, live: list<string> = []] {
+export def check-objects [objects: list, node: record, kinds: list<string>, live: list<string> = [], live_secrets: list<string> = []] {
 	let ns = $node.namespace
 	let prefix = $"127.0.0.1:5000/($ns)/"
 	let refused_metadata = (schema-export '#TenantRefusedMetadata')
 	let reserved = (schema-export '#TenantReserved')
 	let forbidden_accounts = (schema-export '#TenantForbiddenAccounts')
+	let account_suffix = (schema-export '#TenantAccountSuffix')
+	let cluster_note_prefixes = (schema-export '#TenantRefusedClusterAnnotationPrefixes')
+	let label_prefixes = (schema-export '#TenantRefusedLabelPrefixes')
 	let volume_types = (schema-export '#TenantVolumeTypes')
 	let sidecar_prefixes = (schema-export '#TenantRefusedAnnotationPrefixes')
 	# the database operator names a Cluster's service account after the Cluster, and a Cluster is named as its author likes: every Cluster's
 	# name is an account no pod of the release runs as (and the release's own is `<release>-db`, nothing else)
 	let clusters = ($objects | where {|o| ($o.kind? | default "") == "Cluster" } | each {|o| $o.metadata?.name? | default "" } | append $live | uniq)
 	# the secrets that hold the postgres superuser's password: each Cluster's superuserSecret and its `<cluster>-superuser` (the bootstrap secret is the owner's, and a reserved owner is refused above)
-	let guarded_secrets = ($objects | where {|o| ($o.kind? | default "") == "Cluster" } | each {|c| [($c.spec?.superuserSecret?.name? | default "")] } | flatten | append ($clusters | each {|c| $"($c)-superuser" }) | where {|n| $n != "" } | uniq)
+	let guarded_secrets = ($objects | where {|o| ($o.kind? | default "") == "Cluster" } | each {|c| [($c.spec?.superuserSecret?.name? | default "")] } | flatten | append ($clusters | each {|c| $"($c)-superuser" }) | append $live_secrets | where {|n| $n != "" } | uniq)
 	let problems = ($objects | each {|o|
 		let id = $"($o.kind? | default '?')/($o.metadata?.name? | default '?')"
 		mut why = []
@@ -397,9 +409,9 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			if ($o.spec?.externalIPs? | default [] | is-not-empty) { $why = ($why | append $"($id) names externalIPs") }
 		}
 		if ($o.kind? | default "") == "Cluster" {
-			if ($node.name? | default "" | is-not-empty) and ($o.metadata?.name? | default "") != $"($node.name)(schema-export '#TenantAccountSuffix')" { $why = ($why | append $"($id) is not named ($node.name)(schema-export '#TenantAccountSuffix'): a tenant's database is the release's own") }
+			if ($node.name? | default "" | is-not-empty) and ($o.metadata?.name? | default "") != $"($node.name)($account_suffix)" { $why = ($why | append $"($id) is not named ($node.name)($account_suffix): a tenant's database is the release's own") }
 			# an annotation under cnpg.io/ makes the operator rewrite the instance pod (podPatch, validation, reconcilePodSpec): never a tenant's Cluster's
-			let cluster_notes = ($o.metadata?.annotations? | default {} | columns | where {|k| (schema-export '#TenantRefusedClusterAnnotationPrefixes') | any {|p| $k | str starts-with $p } })
+			let cluster_notes = ($o.metadata?.annotations? | default {} | columns | where {|k| $cluster_note_prefixes | any {|p| $k | str starts-with $p } })
 			if ($cluster_notes | is-not-empty) { $why = ($why | append $"($id) carries the annotation\(s\) ($cluster_notes | str join ', '), which make the database operator rewrite the instance pod: a tenant's Cluster has none") }
 			let image = ($o.spec?.imageName? | default "")
 			# a tenant's Cluster runs the engine's approved database base, copied to the tenant's own path (its full image stays with the Jobs): exactly that name
@@ -469,11 +481,11 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			for account in [($spec.serviceAccountName? | default "") ($spec.serviceAccount? | default "")] {
 				if $account in $forbidden_accounts { $why = ($why | append $"($id) runs as the service account ($account)") }
 				# the database operator names the cluster's account `<cluster>-db` and binds it to what the database needs, which a tenant's workload never is
-				if ($account | str ends-with (schema-export '#TenantAccountSuffix')) or ($account != "" and $account in $clusters) { $why = ($why | append $"($id) runs as the service account ($account), which a database's cluster owns") }
+				if ($account | str ends-with $account_suffix) or ($account != "" and $account in $clusters) { $why = ($why | append $"($id) runs as the service account ($account), which a database's cluster owns") }
 			}
 			# …nor a pod the operator would take for one of the cluster's (it selects its pods, and its policies admit them, by the labels it keeps
 			# under its own prefix)
-			if ($o.spec?.template?.metadata?.labels? | default {} | columns | any {|k| (schema-export '#TenantRefusedLabelPrefixes') | any {|p| $k | str starts-with $p } }) { $why = ($why | append $"($id) carries a label under cnpg.io/, which marks a database's own pods") }
+			if ($o.spec?.template?.metadata?.labels? | default {} | columns | any {|k| $label_prefixes | any {|p| $k | str starts-with $p } }) { $why = ($why | append $"($id) carries a label under cnpg.io/, which marks a database's own pods") }
 			# no runtime class (a sandbox or a host runtime of the node's) and no priority class (a tenant must not pre-empt the node's own pods)
 			if ($spec.runtimeClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets runtimeClassName ($spec.runtimeClassName)") }
 			if ($spec.priorityClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets priorityClassName ($spec.priorityClassName)") }

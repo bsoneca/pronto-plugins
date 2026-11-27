@@ -92,6 +92,7 @@ def test_the_images_are_the_namespaces_own [] {
 	for policy in [pods templates] {
 		let rule = (one-rule $policy "images from its own namespace's path")
 		assert ($rule | str contains "'127.0.0.1:5000/' + request.namespace + '/'") $rule
+		assert ((one-rule $policy "pinned by their sha256 digest") == "variables.images.all(i, i.matches('@sha256:[0-9a-f]{64}$'))")
 		let images = ((policies | get $policy).spec.variables | where name == images | get expression | first)
 		for list in [containers initContainers ephemeralContainers] { assert ($images | str contains $"variables.spec.($list)") $"($policy): ($list)" }
 	}
@@ -128,6 +129,8 @@ def test_volumes_are_an_allow_list [] {
 		let types = (schema '#TenantVolumeTypes')
 		assert equal ($rule | parse --regex 'has\(v\.(?<t>[a-zA-Z]+)\)' | get t) $types $rule
 		assert (not ($rule | str contains "hostPath")) $rule
+		assert (not ($rule | str contains "persistentVolumeClaim")) "a tenant mounts no claim: the claims of its namespace are the database operator's"
+		assert ("persistentVolumeClaim" not-in $types) "#TenantVolumeTypes"
 		assert ($rule | str starts-with "!has(variables.spec.volumes) || variables.spec.volumes.all(v, has(") $rule
 	}
 }
@@ -193,6 +196,7 @@ def test_the_parameters_are_the_engines_bounds [] {
 		assert equal ($bound | length) 1 $"($p) has one bound"
 		let rule = $allowed | get $p
 		let e = $bound | first
+		if $rule.kind != "enum" { assert ($e | str starts-with $"!\('($p)' in variables.params\) || \(variables.params['($p)'].matches\('^ *") $"($p): the value is read as the engine reads it \(spaces only around the number and its unit\), before any space is removed" }
 		if $rule.kind == "mem" { assert ($e | str contains $"int\(variables.params['($p)'].replace\(' ', ''\)\) * ($rule | get -o base | default 1)") $"($p): a bare number is in the setting's own unit" }
 		match $rule.kind {
 			"enum" => { for v in $rule.values { assert ($e | str contains $"'($v)'") $"($p): ($v)" } }
@@ -269,7 +273,7 @@ def --wrapped kubectl-in [context: string, input: string, ...args: string]: noth
 
 # Each case: what it is, the object, and whether the policies refuse it ("" admitted, else the policy that says so).
 def cases [ns: string]: nothing -> list {
-	let own = $"127.0.0.1:5000/($ns)/app:1"
+	let own = $"127.0.0.1:5000/($ns)/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	let safe = {allowPrivilegeEscalation: false}
 	let pod = {|spec| {apiVersion: v1, kind: Pod, metadata: {name: p, namespace: $ns}, spec: ({containers: [{name: c, image: $own, securityContext: $safe}]} | merge $spec)} }
 	let podmeta = {|meta| {apiVersion: v1, kind: Pod, metadata: ({name: p, namespace: $ns} | merge $meta), spec: {containers: [{name: c, image: $own, securityContext: $safe}]}} }
@@ -282,9 +286,10 @@ def cases [ns: string]: nothing -> list {
 	[
 		[what obj says];
 		["a pod of the namespace's own image" (do $pod {}) ""]
+		["a pod of an image of its own path pinned by a tag alone" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app:1", securityContext: $safe}]}) pods]
 		["a pod of an image outside the registry's path" (do $pod {containers: [{name: c, image: "busybox:1.37", securityContext: $safe}]}) pods]
-		["a pod of another namespace's image" (do $pod {containers: [{name: c, image: "127.0.0.1:5000/studio-other/app:1", securityContext: $safe}]}) pods]
-		["a pod of the image of a namespace named as its own begins" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)-b/app:1", securityContext: $safe}]}) pods]
+		["a pod of another namespace's image" (do $pod {containers: [{name: c, image: "127.0.0.1:5000/studio-other/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", securityContext: $safe}]}) pods]
+		["a pod of the image of a namespace named as its own begins" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)-b/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", securityContext: $safe}]}) pods]
 		["a pod with an init container from outside" (do $pod {initContainers: [{name: i, image: "busybox:1.37", securityContext: $safe}]}) pods]
 		["a pod that runs as the publisher's account" (do $pod {serviceAccountName: publisher}) pods]
 		["a pod that runs as the publisher's account by its deprecated field" (do $pod {serviceAccount: publisher}) pods]
@@ -293,9 +298,9 @@ def cases [ns: string]: nothing -> list {
 		["a pod with a cnpg.io/cluster label" (do $podmeta {labels: {"cnpg.io/cluster": app-db}}) pods]
 		["a pod with a finalizer" (do $podmeta {finalizers: ["example.com/hold"]}) pods]
 		["a pod with an ownerReference" (do $podmeta {ownerReferences: [{apiVersion: v1, kind: ServiceAccount, name: publisher, uid: "00000000-0000-0000-0000-000000000001"}]}) pods]
-		["a pod that leaves allowPrivilegeEscalation unset" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app:1"}]}) pods]
-		["a pod that sets allowPrivilegeEscalation true" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app:1", securityContext: {allowPrivilegeEscalation: true}}]}) pods]
-		["a pod that adds a capability" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app:1", securityContext: {allowPrivilegeEscalation: false, capabilities: {add: [NET_BIND_SERVICE]}}}]}) pods]
+		["a pod that leaves allowPrivilegeEscalation unset" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}) pods]
+		["a pod that sets allowPrivilegeEscalation true" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", securityContext: {allowPrivilegeEscalation: true}}]}) pods]
+		["a pod that adds a capability" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", securityContext: {allowPrivilegeEscalation: false, capabilities: {add: [NET_BIND_SERVICE]}}}]}) pods]
 		["a deployment of the namespace's own image and the safe volumes" (do $deploy {volumes: [{name: e, emptyDir: {}} {name: m, configMap: {name: x}}]}) ""]
 		["a deployment of an image outside the registry's path" (do $deploy {containers: [{name: c, image: "ghcr.io/x/y:1", securityContext: $safe}]}) templates]
 		["a deployment that runs as the publisher's account" (do $deploy {serviceAccountName: publisher}) templates]
@@ -347,6 +352,7 @@ def cases [ns: string]: nothing -> list {
 		["a Cluster with a managed role that creates roles" (do $cluster {managed: {roles: [{name: r, login: true, createrole: true}]}}) clusters]
 		["a Cluster with a managed role in pg_execute_server_program" (do $cluster {managed: {roles: [{name: r, login: true, inRoles: [pg_execute_server_program]}]}}) clusters]
 		["a Cluster whose owner is a pg_ role" (do $cluster {bootstrap: {initdb: {database: app, owner: pg_monitor}}}) clusters]
+		["a Cluster with an integer written with a space inside it" (do $cluster {postgresql: {parameters: {max_connections: "1 0"}}}) clusters]
 		["a Cluster with a cnpg.io/podPatch annotation" ((do $cluster {}) | update metadata {|c| $c.metadata | insert annotations {"cnpg.io/podPatch": "[]"}}) clusters]
 		["a Cluster with a cnpg.io/validation annotation" ((do $cluster {}) | update metadata {|c| $c.metadata | insert annotations {"cnpg.io/validation": "disabled"}}) clusters]
 		["a Cluster with a cnpg.io/reconcilePodSpec annotation" ((do $cluster {}) | update metadata {|c| $c.metadata | insert annotations {"cnpg.io/reconcilePodSpec": "disabled"}}) clusters]
