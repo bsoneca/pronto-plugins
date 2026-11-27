@@ -283,7 +283,11 @@ export def harden-objects [objects: list]: nothing -> list {
 			"Deployment" | "Job" => { if ($o.spec?.template?.spec? | default null) == null { $o } else { $o | update spec.template.spec (do $boxed $o.spec.template.spec) } }
 			# Upstream renders the postgres superuser on (`enableSuperuserAccess: true` and a `superuserSecret`): a tenant's database has none, so the engine says
 			# so before check-objects holds the Cluster to it. What upstream's schema and migration Jobs connect as with that password (PRONTO-2066) is theirs to move.
-			"Cluster" => { $o | update spec (($o.spec? | default {}) | reject -o superuserSecret | upsert enableSuperuserAccess false) }
+			# CloudNativePG defaults an omitted postgresUID and postgresGID to 26, and the approved image's postgres user is 999: said here, so the object the API server sees is the one the check approved.
+			"Cluster" => {
+				let uid = (schema-export '#TenantClusterSpec' | get uid)
+				$o | update spec (($o.spec? | default {}) | reject -o superuserSecret | upsert enableSuperuserAccess false | upsert postgresUID ($o.spec?.postgresUID? | default $uid) | upsert postgresGID ($o.spec?.postgresGID? | default $uid))
+			}
 			_ => $o
 		}
 	}
@@ -480,7 +484,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 				} | flatten)
 				| append ($pod_spec.volumes? | default [] | each {|v| [($v.secret?.secretName? | default "")] | append ($v.projected?.sources? | default [] | each {|s| $s.secret?.name? | default "" }) } | flatten)
 			)
-			let reads = ($refs | where {|n| $n in $guarded } | uniq)
+			let reads = ($refs | where {|n| $n != "" and ($n in $guarded or ($guarded_suffixes | any {|x| $n | str ends-with $x })) } | uniq)
 			if ($reads | is-not-empty) { $why = ($why | append $"($id) reads the secret\(s\) ($reads | str join ', '), the postgres superuser's password: a tenant's workload never does") }
 		}
 		let spec = (if ($o.kind? | default "") in [Deployment Job] { $o.spec?.template?.spec? } else { null })

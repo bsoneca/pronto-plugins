@@ -364,6 +364,17 @@ import (
 		#n: string
 		out: "(\(#n) in [\(_quoted.roles)] || \(strings.Join([for p in #TenantRefusedRolePrefixes {"\(#n).startsWith('\(p)')"}], " || ")))"
 	}
+	// A Secret name `n` (a CEL expression) is one that holds a database's superuser password, by suffix (#TenantGuardedSecretSuffixes): the policy cannot read the namespace's
+	// Clusters, so a legacy Cluster's own superuserSecret under another name is the engine's check alone.
+	_guarded: {
+		#n: string
+		out: "(\(strings.Join([for x in #TenantGuardedSecretSuffixes {"\(#n).endsWith('\(x)')"}], " || ")))"
+	}
+	// No container (init and ephemeral too) reads a guarded Secret by env or envFrom, and no volume mounts one (secret or projected).
+	_containerSecrets: {
+		#l: string
+		out: "\(#l).all(c, (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || !\((_guarded & {#n: "e.valueFrom.secretKeyRef.name"}).out))) && (!has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef) || !\((_guarded & {#n: "e.secretRef.name"}).out))))"
+	}
 	_volumes: strings.Join([for t in #TenantVolumeTypes {"has(v.\(t))"}], " || ")
 
 	// Whether a Postgres setting `v` (a string) holds to the bound of its #TenantParameters rule, said in CEL as `parameter-value` reads it (tenant.nu): an integer, a number, a
@@ -416,6 +427,7 @@ import (
 					{expression: "size(variables.refusedLabels) == 0", message: "a tenant's pods carry no cnpg.io/ label, which marks a database's own"},
 					{expression: "!has(variables.spec.volumes) || variables.spec.volumes.all(v, \(_volumes))", message: "a tenant's pods mount only \(strings.Join(#TenantVolumeTypes, ", ")) volumes"},
 					{expression: "variables.spec.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false) && (!has(variables.spec.initContainers) || variables.spec.initContainers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false)) && (!has(variables.spec.ephemeralContainers) || variables.spec.ephemeralContainers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false))", message: "a tenant's containers say allowPrivilegeEscalation: false"},
+					{expression: "\((_containerSecrets & {#l: "variables.spec.containers"}).out) && (!has(variables.spec.initContainers) || \((_containerSecrets & {#l: "variables.spec.initContainers"}).out)) && (!has(variables.spec.ephemeralContainers) || \((_containerSecrets & {#l: "variables.spec.ephemeralContainers"}).out)) && (!has(variables.spec.volumes) || variables.spec.volumes.all(v, (!has(v.secret) || !\((_guarded & {#n: "v.secret.secretName"}).out)) && (!has(v.projected) || !has(v.projected.sources) || v.projected.sources.all(s, !has(s.secret) || !\((_guarded & {#n: "s.secret.name"}).out))))))", message: "a tenant's pods read no Secret that holds a database's superuser password, by env, envFrom or volume (#TenantGuardedSecretSuffixes)"},
 					{expression: "variables.containerCaps.all(a, size(a) == 0)", message: "a tenant's containers add no capabilities"},
 					{expression: strings.Join([for m in #metas {"(\(strings.Join([for f in #TenantRefusedMetadata {"!has(\(m).\(f))"}], " && ")))"}], " && "), message: "a tenant's pods leave \(strings.Join(#TenantRefusedMetadata, " and ")) to the engine"},
 				]
@@ -462,6 +474,20 @@ import (
 					{expression: "!has(object.spec.type) || object.spec.type == 'ClusterIP'", message: "a tenant's Service is a ClusterIP: a NodePort, LoadBalancer or ExternalName one reaches past its namespace"},
 					{expression: "!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0", message: "a tenant's Service names no externalIPs (CVE-2020-8554)"},
 				]
+			}
+		},
+		// A StatefulSet declares persistent storage apart from its pod template (spec.volumeClaimTemplates), which its controller adds as claim volumes to the pods it makes (exempt): a tenant's
+		// release writes no claim, so no StatefulSet of a tenant has one.
+		{
+			metadata: name: "\(_prefix)-engine-statefulsets"
+			spec: {
+				failurePolicy: _fp
+				matchConstraints: {namespaceSelector: _selector, resourceRules: [{apiGroups: ["apps"], apiVersions: ["*"], operations: _ops, resources: ["statefulsets"]}]}
+				matchConditions: _notJudged
+				validations: [{
+					expression: "!has(object.spec.volumeClaimTemplates) || size(object.spec.volumeClaimTemplates) == 0"
+					message:    "a tenant's StatefulSet has no volumeClaimTemplates: the claims of its namespace are the database operator's"
+				}]
 			}
 		},
 		// An ExternalSecret reads another Secret of its namespace as a template source (target.template.templateFrom[].secret) and writes the result to a target Secret: a source that

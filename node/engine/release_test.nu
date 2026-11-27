@@ -2666,6 +2666,22 @@ def test_a_tenants_workload_never_runs_as_the_account_of_a_cluster_already_in_it
 	rm -rf $w.dir
 }
 
+def test_a_tenants_workload_never_reads_a_secret_the_admission_policy_would_refuse [] {
+	print "test a workload that reads a Secret whose name ends in a guarded suffix (<anything>-superuser, <anything>-db-postgres) is refused by the engine's check as the admission policy refuses it, by env, envFrom, a secret volume or a projected one..."
+	for ref in [
+		{at: "env: [{name: \"PW\", valueFrom: {secretKeyRef: {name: \"stripe-superuser\", key: \"p\"}}}]", name: "stripe-superuser"}
+		{at: "envFrom: [{secretRef: {name: \"other-db-postgres\"}}]", name: "other-db-postgres"}
+	] {
+		let w = (tenant-world)
+		own-manifests $w $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($tenant_ns)\"}, spec: template: spec: {containers: [{name: \"crud\", image: \"127.0.0.1:5000/($tenant_ns)/game-crud:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", ($ref.at)}]}}]"
+		let r = (tenant-release $w)
+		assert ($r.exit_code != 0) $"($ref.name) was not refused"
+		assert (has $r.stderr $"reads the secret\(s\) ($ref.name)") $r.stderr
+		assert equal (writes $w) []
+		rm -rf $w.dir
+	}
+}
+
 def test_a_tenants_workload_never_reads_the_superuser_secret_a_live_cluster_names [] {
 	print "test a workload that reads the Secret a Cluster already in the namespace names as its superuserSecret (a legacy Cluster keeps that login) is refused, with no Cluster in the release, from a live read..."
 	let w = (tenant-world)
@@ -2735,7 +2751,7 @@ def test_a_tenants_cluster_keeps_the_engines_own_tuning_and_the_bases_uid [] {
 	# harden-objects says what upstream's Cluster leaves on: the superuser and its secret
 	let hard = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant harden-objects [{kind: Cluster, spec: {enableSuperuserAccess: true, superuserSecret: {name: x}, instances: 1}}] | to json --raw")
 	assert equal $hard.exit_code 0 $hard.stderr
-	assert equal ($hard.stdout | from json | get 0.spec) {enableSuperuserAccess: false, instances: 1}
+	assert equal ($hard.stdout | from json | get 0.spec) {enableSuperuserAccess: false, instances: 1, postgresUID: 999, postgresGID: 999}
 	rm -rf $w.dir
 }
 
