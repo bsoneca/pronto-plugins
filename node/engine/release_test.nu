@@ -346,6 +346,7 @@ def main [] {
 	test_a_tenants_compose_files_name_nothing_outside_the_app
 	test_a_tenants_release_with_a_syntax_directive_is_refused_before_it_builds
 	test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_built_in_one
+	test_a_tenants_release_builds_only_the_requested_services_and_what_they_build_from
 	test_a_tenants_build_keys_that_reach_past_its_context_are_refused
 	test_a_tenants_database_base_must_be_one_the_engine_approves
 	test_a_tenants_cluster_keeps_the_engines_own_tuning_and_the_bases_uid
@@ -2899,6 +2900,34 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 		let r = (try { $row.text | tenant stage-dockerfile $ns; "admitted" } catch {|e| $e.msg })
 		assert (($r | str contains $row.says) and ($r != "admitted")) $"($row.why): ($r)"
 	}
+}
+
+def test_a_tenants_release_builds_only_the_requested_services_and_what_they_build_from [] {
+	print "test a tenant's release reads, stages and bakes only the requested services and their depends_on, service: and target: contexts: an unrelated service with build secrets does not block it (PRONTO-2206)..."
+	let ci = {build: {context: ., secrets: [token]}, profiles: [ci]}
+	let web = {build: {context: .}}
+	let project = {services: {web: $web, ci: $ci}} | to yaml
+	let kept = ($project | tenant build-closure [web] | from yaml | get services | columns)
+	assert equal $kept [web] "an unrelated CI service is outside the set"
+	$project | tenant build-closure [web] | tenant check-build-keys
+	let ci_asked = (try { $project | tenant build-closure [web ci] | tenant check-build-keys; "admitted" } catch {|e| $e.msg })
+	assert (($ci_asked != "admitted") and ($ci_asked | str contains "secrets")) $"a requested service with a secret is refused: ($ci_asked)"
+	# a dependency of a requested service is part of the set, and is validated
+	for dep in [
+		{why: "depends_on as a list", web: {build: {context: .}, depends_on: [db]}}
+		{why: "depends_on as a mapping", web: {build: {context: .}, depends_on: {db: {condition: service_started}}}}
+		{why: "a service: context as a mapping", web: {build: {context: ., additional_contexts: {base: "service:db"}}}}
+		{why: "a target: context as a list", web: {build: {context: ., additional_contexts: ["base=target:db"]}}}
+	] {
+		let doc = ({services: {web: $dep.web, db: {build: {context: ., secrets: [token]}}, other: $ci}} | to yaml)
+		let closure = ($doc | tenant build-closure [web])
+		assert equal ($closure | from yaml | get services | columns | sort) [db web] $"($dep.why): the set"
+		let r = (try { $closure | tenant check-build-keys; "admitted" } catch {|e| $e.msg })
+		assert (($r != "admitted") and ($r | str contains "secrets")) $"($dep.why): a dependency with a secret is refused: ($r)"
+	}
+	# the closure is transitive
+	let chain = ({services: {web: {build: {context: .}, depends_on: [mid]}, mid: {build: {context: ., additional_contexts: {x: "service:leaf"}}}, leaf: {build: {context: .}}, ci: $ci}} | to yaml)
+	assert equal ($chain | tenant build-closure [web] | from yaml | get services | columns | sort) [leaf mid web] "web, what it waits for and what that builds from"
 }
 
 def test_a_tenants_build_keys_that_reach_past_its_context_are_refused [] {

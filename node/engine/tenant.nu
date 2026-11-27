@@ -464,6 +464,33 @@ def stage-run-flags [flags: string, namespace: string]: nothing -> string {
 # comes from or goes to (`cache_from`, `cache_to`, `ssh`, `secrets`, `network`, `extra_hosts`, `entitlements`, an inline Dockerfile) and a BUILDKIT_SYNTAX build argument are refused, and an
 # additional context is a path inside the app, another service or stage of the project, or a docker-image:// pinned by its sha256 digest (the database stage's base): never an
 # image that can move. Fails with every problem, before anything is built.
+# The services a tenant's release builds, and what they build from: the requested ones, then every service a requested one waits for (`depends_on`)
+# or takes a build context from (`additional_contexts` of `service:` and `target:`), transitively. The compose project (YAML text) comes back with
+# only those services: a service outside the set (a CI profile with build secrets) is never read for build options, staged or handed to bake.
+export def build-closure [roots: list<string>]: string -> string {
+	let doc = ($in | from yaml)
+	let all = ($doc | get -o services | default {})
+	mut wanted = ($roots | uniq)
+	mut todo = $wanted
+	while ($todo | is-not-empty) {
+		let name = ($todo | first)
+		$todo = ($todo | skip 1)
+		let svc = ($all | get -o $name)
+		if $svc == null { continue }
+		let deps = ($svc | get -o depends_on | default [])
+		let waits = if ($deps | describe | str starts-with "record") { $deps | columns } else { $deps | each {|d| $d | into string } }
+		let build = ($svc | get -o build)
+		let ctxs = if ($build | describe | str starts-with "record") { $build | get -o additional_contexts | default {} } else { {} }
+		let values = if ($ctxs | describe | str starts-with "record") { $ctxs | values } else { $ctxs | each {|l| $l | into string | split row -n 2 '=' | last } }
+		let takes = ($values | each {|v| $v | into string | parse --regex '^(?:service|target):(?<n>.+)$' | get -o 0.n } | compact)
+		for n in ($waits | append $takes) {
+			if not ($n in $wanted) { $wanted = ($wanted | append $n); $todo = ($todo | append $n) }
+		}
+	}
+	let kept = ($all | transpose name v | where {|s| $s.name in $wanted } | reduce --fold {} {|s, acc| $acc | insert $s.name $s.v })
+	$doc | update services $kept | to yaml
+}
+
 export def check-build-keys []: string -> nothing {
 	let doc = ($in | from yaml)
 	mut problems = []

@@ -242,7 +242,8 @@ export def tenant-images [app_dir: string, node: record, services: list<string>,
 		if $compose.exit_code != 0 { error make {msg: $"docker compose config failed in ($dir): ($compose.stderr | str trim)"} }
 		# The staged copy is what bake may read: a path the project names inside the app's own folder (an absolute build context a flatten wrote)
 		# is the staged copy's, so the grant below covers it and nothing outside the app is added to it.
-		let rebased = (rebase-paths $compose.stdout $dir $staged)
+		# Only the requested services and what they build from are read, staged and handed to bake (PRONTO-2206): an unrelated service's build options are not this release's.
+		let rebased = (rebase-paths $compose.stdout $dir $staged | tenant build-closure $services)
 		# The tenants' buildkitd is shared: no build key that reaches past the context, and every Dockerfile's cache mounts are the namespace's own (PRONTO-1945), on the staged copy the
 		# build reads and never on the author's files.
 		$rebased | tenant check-build-keys
