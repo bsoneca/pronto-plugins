@@ -2487,6 +2487,12 @@ def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] 
 		{why: "a tuning parameter that is not a number", says: "which is not a int value", objects: (do $cluster_with $approved "postgresql: {parameters: {max_connections: \"200; drop\"}}")}
 		{why: "a wal_level that is not allowed", says: "not one of replica, logical", objects: (do $cluster_with $approved "postgresql: {parameters: {wal_level: \"minimal\"}}")}
 		{why: "the postgres superuser as the database's owner", says: "makes the database's owner postgres", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", owner: \"postgres\", secret: {name: \"game-db-postgres\"}}}")}
+		{why: "a database named postgres with no owner (the owner defaults to the database's name)", says: "makes the database's owner postgres", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"postgres\"}}")}
+		{why: "a database named streaming_replica with no owner", says: "makes the database's owner streaming_replica", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"streaming_replica\"}}")}
+		{why: "a database named postgres with an owner of its own", says: "names the database postgres", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"postgres\", owner: \"game\"}}")}
+		{why: "a database named template1", says: "names the database template1", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"template1\", owner: \"game\"}}")}
+		{why: "a managed role in a pg_ role", says: "a member of pg_monitor", objects: (do $cluster_with $approved "managed: {roles: [{name: \"r\", ensure: \"present\", login: true, inRoles: [\"pg_monitor\"]}]}")}
+		{why: "a managed role in a cnpg_ role", says: "a member of cnpg_x", objects: (do $cluster_with $approved "managed: {roles: [{name: \"r\", ensure: \"present\", login: true, inRoles: [\"cnpg_x\"]}]}")}
 		{why: "streaming_replica as the database's owner", says: "makes the database's owner streaming_replica", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", owner: \"streaming_replica\"}}")}
 		{why: "a cnpg_ role as the database's owner", says: "makes the database's owner cnpg_x", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", owner: \"cnpg_x\"}}")}
 		{why: "a pg_ role as the database's owner", says: "makes the database's owner pg_monitor", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", owner: \"pg_monitor\"}}")}
@@ -2684,7 +2690,7 @@ def test_a_tenants_cluster_keeps_the_engines_own_tuning_and_the_bases_uid [] {
 		assert (has $rr.stderr $row.says) $"($row.why): ($rr.stderr)"
 	}
 	# …and tuning within its bounds passes
-	let tuned = ($body | str replace "instances: 3" "instances: 3, postgresql: {parameters: {max_connections: \"200\", shared_buffers: \"512MB\", effective_cache_size: \"4GB\", max_wal_size: \"2048\", wal_buffers: \"2048\", work_mem: \"16MB\", statement_timeout: \"30s\", wal_level: \"logical\", fsync: \"on\"}}")
+	let tuned = ($body | str replace "instances: 3" "instances: 3, postgresql: {parameters: {max_connections: \"200\", shared_buffers: \"512MB\", effective_cache_size: \"4 GB\", max_wal_size: \"2048\", wal_buffers: \"2048\", work_mem: \"16MB\", statement_timeout: \"30s\", wal_level: \"logical\", fsync: \"on\"}}")
 	let ok = (in-world $w -c $tuned)
 	assert equal $ok.exit_code 0 $"tuning within its bounds was refused: ($ok.stderr)"
 	# harden-objects says what upstream's Cluster leaves on: the superuser and its secret

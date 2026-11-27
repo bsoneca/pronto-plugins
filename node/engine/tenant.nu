@@ -300,13 +300,13 @@ def parameter-value [kind: string, raw: any, base: int = 1]: nothing -> any {
 		"int" => { if $text =~ '^-?[0-9]+$' { $text | into int } else { null } }
 		"real" => { if $text =~ '^-?[0-9]+(\.[0-9]+)?$' { $text | into float } else { null } }
 		"mem" => {
-			let m = ($text | parse --regex '^(?<n>[0-9]+)(?<u>kB|MB|GB|TB)?$')
+			let m = ($text | parse --regex '^(?<n>[0-9]+)\s*(?<u>kB|MB|GB|TB)?$')
 			if ($m | is-empty) { null } else {
 				($m.0.n | into int) * (match $m.0.u { "kB" => 1, "MB" => 1024, "GB" => 1048576, "TB" => 1073741824, _ => $base })
 			}
 		}
 		"ms" => {
-			let m = ($text | parse --regex '^(?<n>-?[0-9]+)(?<u>ms|s|min|h|d)?$')
+			let m = ($text | parse --regex '^(?<n>-?[0-9]+)\s*(?<u>ms|s|min|h|d)?$')
 			if ($m | is-empty) { null } else {
 				($m.0.n | into int) * (match $m.0.u { "s" => 1000, "min" => 60000, "h" => 3600000, "d" => 86400000, _ => 1 })
 			}
@@ -419,8 +419,11 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			let refused_prefixes = (schema-export '#TenantRefusedRolePrefixes')
 			let reserved_role = {|n: string| ($n in $refused_roles) or ($refused_prefixes | any {|p| $n | str starts-with $p }) }
 			# the database's owner is a role CloudNativePG sets the password of from the bootstrap secret on every reconcile: never one that is the postgres superuser or the operator's own
-			let owner = ($cspec.bootstrap?.initdb?.owner? | default "")
-			if $owner != "" and (do $reserved_role $owner) { $why = ($why | append $"($id) makes the database's owner ($owner), a role a tenant's database never has: CloudNativePG would set its password from the bootstrap secret, which the tenant's pods read") }
+			# CloudNativePG's owner defaults to the database's name (and the database to `app`), so the effective owner is checked, always: `database: postgres` with no owner is the superuser's
+			let database = ($cspec.bootstrap?.initdb?.database? | default "app")
+			let owner = (if (($cspec.bootstrap?.initdb?.owner? | default "") | is-empty) { $database } else { $cspec.bootstrap.initdb.owner })
+			if ($database in [postgres template0 template1]) or (do $reserved_role $database) { $why = ($why | append $"($id) names the database ($database), a name a tenant's database never has") }
+			if (do $reserved_role $owner) { $why = ($why | append $"($id) makes the database's owner ($owner), a role a tenant's database never has: CloudNativePG would set its password from the bootstrap secret, which the tenant's pods read") }
 			if ($cspec.storage? | default {} | columns | any {|k| $k not-in (schema-export '#TenantStorageKeys') }) { $why = ($why | append $"($id) sets storage fields other than size and storageClass") }
 			let max_stop = (schema-export '#TenantMaxStopSeconds')
 			for key in [stopDelay smartShutdownTimeout] {
@@ -431,7 +434,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 				if (do $reserved_role ($role.name? | default "")) { $why = ($why | append $"($id) manages the role ($role.name? | default '?'), a name a tenant's database never has") }
 				if ($role.superuser? | default false) == true { $why = ($why | append $"($id) manages the role ($role.name? | default '?') as a superuser") }
 				if ($role.createrole? | default false) == true { $why = ($why | append $"($id) manages the role ($role.name? | default '?') with createrole") }
-				let member = ($role.inRoles? | default [] | where {|r| $r in $refused_roles })
+				let member = ($role.inRoles? | default [] | where {|r| do $reserved_role $r })
 				if ($member | is-not-empty) { $why = ($why | append $"($id) makes the role ($role.name? | default '?') a member of ($member | str join ', '), which a tenant's database never is") }
 			}
 			let pg_extra = ($cspec.postgresql? | default {} | columns | where {|k| $k not-in $allowed.postgresql })
