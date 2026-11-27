@@ -28,6 +28,8 @@ export type Options = {
   // The phone's bearer token, when the ntfy topic wants one.
   ntfyToken?: () => Promise<string | undefined>;
   fetch?: typeof fetch;
+  // How the inbox's folder is flushed (syncDir); a case makes it fail.
+  syncDir?: (dir: string) => void;
   say?: (s: string) => void;
   now?: () => Date;
   timeoutMs?: number;
@@ -58,7 +60,7 @@ export function writeAll(file: { writeSync(p: Uint8Array): number }, buf: Uint8A
 }
 
 // A directory's entries flushed: a file made or renamed in it is kept across a crash only once its directory is.
-function syncDir(dir: string) {
+export function syncDir(dir: string) {
   const d = Deno.openSync(dir, { read: true });
   try {
     d.syncSync();
@@ -69,8 +71,7 @@ function syncDir(dir: string) {
 
 // `data` appended to the file at `path`, flushed to disk. A file that ends in anything but a newline (an earlier append that was cut
 // off) first gets one, so the cut-off fragment is a line of its own, which the readers skip, and never the front of this record.
-export function appendDurably(path: string, data: Uint8Array) {
-  const made = !exists(path);
+export function appendDurably(path: string, data: Uint8Array, flushDir: (dir: string) => void = syncDir) {
   const file = Deno.openSync(path, { create: true, read: true, append: true });
   try {
     const size = file.statSync().size;
@@ -84,7 +85,9 @@ export function appendDurably(path: string, data: Uint8Array) {
   } finally {
     file.close();
   }
-  if (made) syncDir(path.slice(0, path.lastIndexOf("/")) || "/");
+  // The folder is flushed after every successful append, never only after the one that made the file: a first try that made it and
+  // failed before this line leaves a retry that finds it made. A failure here is the caller's, so the batch stays with Pub/Sub.
+  flushDir(path.slice(0, path.lastIndexOf("/")) || "/");
 }
 
 // The previous day's inbox is renamed for its day, and rotated files past seven days are removed. A day's
@@ -174,7 +177,7 @@ export async function pollOnce(o: Options): Promise<{ pulled: number; written: n
     fresh.push(e);
   }
   if (fresh.length) {
-    appendDurably(path, new TextEncoder().encode(fresh.map((e) => lineOf(e!)).join("")));
+    appendDurably(path, new TextEncoder().encode(fresh.map((e) => lineOf(e!)).join("")), o.syncDir);
   }
   await call(ackRequest(o.api, sub, messages.map((m) => m.ackId)), 30_000);
   beat();

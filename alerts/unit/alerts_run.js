@@ -1,7 +1,7 @@
 // pronto-alerts' driver (alerts/subscriber.ts) run once against a fake Pub/Sub pull endpoint and a fake phone, both on
 // localhost, with an inbox folder of its own: what the inbox held when each acknowledge arrived, which calls came in
 // what order, and what the phone was told. No network and no credentials: the token is a function that returns a word.
-import { appendDurably, exists, pollOnce, writeAll } from '../subscriber.ts';
+import { appendDurably, exists, pollOnce, syncDir, writeAll } from '../subscriber.ts';
 
 // A message as :pull returns it: the incident as Cloud Monitoring publishes it, in base64.
 export const message = (id, incident) => ({ messageId: id, data: btoa(JSON.stringify(incident)) });
@@ -11,12 +11,12 @@ export const garbage = (id) => ({ messageId: id, data: btoa('not an incident') }
 export const leaks = (text) => ['RESOURCE-LABEL-MARKER', 'RESOURCE-NAME-MARKER', 'METRIC-LABEL-MARKER', 'FILTER-MARKER', 'DOCUMENTATION-MARKER', 'SUMMARY-MARKER'].filter((m) => text.includes(m));
 
 // `batches` are the pulls' answers in order (each a list of messages); `refuseFirst` answers the first call 401.
-export async function drain({ batches, push = ['CRITICAL'], phone = true, refuseFirst = false, passes, fail, now, old, lockInbox }) {
+export async function drain({ batches, push = ['CRITICAL'], phone = true, refuseFirst = false, passes, fail, now, old, lockInbox, failFirstDirSync }) {
   const dir = Deno.makeTempDirSync({ prefix: 'alerts-' });
   const calls = [], inboxAtAck = [], told = [], tokens = [];
   const inboxPath = `${dir}/my-app.jsonl`;
   const lines = () => { try { return Deno.readTextFileSync(inboxPath).split('\n').filter(Boolean).length; } catch { return 0; } };
-  let pulls = 0, refused = false;
+  let pulls = 0, refused = false, dirSyncs = 0;
   const server = Deno.serve({ port: 0, onListen() {}, signal: undefined }, async (req) => {
     const u = new URL(req.url);
     if (u.pathname.startsWith('/phone/')) { told.push({ path: u.pathname, body: await req.text(), priority: req.headers.get('priority') }); return new Response('ok'); }
@@ -58,6 +58,7 @@ export async function drain({ batches, push = ['CRITICAL'], phone = true, refuse
         dir,
         ntfyToken: () => Promise.resolve(undefined),
         say: () => {},
+        syncDir: (d) => { dirSyncs++; if (failFirstDirSync) calls.push(dirSyncs === 1 ? 'dirsync failed' : 'dirsync'); if (failFirstDirSync && dirSyncs === 1) throw new Error('folder sync failed'); syncDir(d); },
         now: now ? () => new Date(now) : undefined,
         timeoutMs: 3000,
       }));
