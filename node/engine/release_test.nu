@@ -2784,6 +2784,8 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 		{why: "a // syntax directive with spaces", text: "// syntax = evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a syntax directive that names another frontend of docker's", text: "# syntax=docker/dockerfile-upstream:master\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a JSON Dockerfile", text: "{\"syntax\": \"evil/frontend\"}", says: "is JSON"}
+		{why: "a JSON Dockerfile after a shebang line, which buildkit drops before it reads the JSON", text: "#!/x\n{\"syntax\":\"evil/frontend\"}", says: "is JSON"}
+		{why: "a JSON Dockerfile after a BOM and a shebang line", text: "\u{FEFF}#!/x\n  {\"syntax\":\"evil/frontend\"}", says: "is JSON"}
 		{why: "a mount with an escape character, whose continuation line appends a second id", text: "RUN --mount=type=cache,target=/a,\\\nid=x y\n", says: "with a quote or an escape character"}
 		{why: "a mount with a backtick", text: "RUN --mount=type=cache,target=/a,`\nid=x y\n", says: "with a quote or an escape character"}
 		{why: "an escape directive", text: "# escape=`\nFROM base\n", says: "`escape=` directive"}

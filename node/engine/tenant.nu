@@ -264,7 +264,9 @@ export def check-compose-sources [app_dir: string] {
 export def stage-dockerfile [namespace: string]: string -> string {
 	# the BOM buildkit skips before it reads a directive is no part of the text the rest reads
 	let text = ($in | str replace --regex '^\x{FEFF}' '')
-	if ($text | str trim | str starts-with '{') { error make {msg: "a tenant's Dockerfile is JSON, which buildkit reads a frontend directive from: a tenant's Dockerfile is plain"} }
+	# buildkit drops a leading `#!` line before it reads a JSON Dockerfile, so the same line is dropped before this check
+	let body = ($text | str replace --regex '^#![^\n]*\n' '')
+	if ($body | str trim | str starts-with '{') { error make {msg: "a tenant's Dockerfile is JSON, which buildkit reads a frontend directive from: a tenant's Dockerfile is plain"} }
 	if ($text =~ '(?im)^\s*(#|//)\s*escape\s*=') { error make {msg: "a tenant's Dockerfile has an `escape=` directive, which moves the character a continuation line joins with: a tenant's build uses the default"} }
 	# the official frontend's directive is dropped (the built-in one builds it); any other `syntax` directive picks a frontend of the Dockerfile's own, which can issue any cache id
 	let official = '(?im)^[ \t]*(#|//)[ \t]*syntax[ \t]*=[ \t]*docker/dockerfile(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?[ \t]*\r?$\n?'
