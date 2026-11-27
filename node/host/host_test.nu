@@ -32,6 +32,7 @@ def main [] {
 	test_a_stale_new_file_is_replaced_not_reused
 	test_the_dapr_sidecar_repair_is_a_second_timer_of_the_same_host
 	test_a_host_that_drops_daprHeal_loses_its_timer_and_files
+	test_removal_keeps_the_files_unless_systemd_says_the_timer_is_stopped
 	print "\nAll node host tests passed."
 }
 
@@ -179,8 +180,16 @@ d=$(dirname "$0")/..
 echo "$*" >>"$d/systemctl.log"
 case "$1" in
   is-failed) [ -e "$d/failed" ] ;;
-  is-enabled | is-active) [ -e "$d/on" ] ;;
-  enable) touch "$d/on" ;;
+  is-enabled | is-active)
+    case "$*" in
+      *dapr-heal*)
+        if [ -n "$UNREADABLE" ]; then echo "Failed to connect to bus" >&2; exit 1; fi
+        if [ -e "$d/heal.on" ]; then if [ "$1" = is-active ]; then echo active; else echo enabled; fi; exit 0; fi
+        if [ "$1" = is-active ]; then echo inactive; exit 3; else echo disabled; exit 1; fi ;;
+    esac
+    [ -e "$d/on" ] ;;
+  disable) case "$*" in *dapr-heal*) [ -n "$KEEPON" ] || rm -f "$d/heal.on" ;; esac ;;
+  enable) touch "$d/on"; case "$*" in *dapr-heal*) touch "$d/heal.on" ;; esac ;;
   show) if [ -e "$d/needreload" ]; then echo yes; else echo no; fi ;;
   daemon-reload) rm -f "$d/needreload" ;;
   start) if [ -n "$STARTEXIT" ]; then exit "$STARTEXIT"; fi; [ "$STAYFAILED" = 1 ] || rm -f "$d/failed" ;;
@@ -486,7 +495,7 @@ def test_the_dapr_sidecar_repair_is_a_second_timer_of_the_same_host [] {
 	fake-systemctl $dir
 	let root = ($dir | path join root)
 	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
-		assert equal (apply (with-heal) --root $root | length) 9
+		assert equal (apply (with-heal) --root $root | length) 10
 		let log = (open --raw ($dir | path join systemctl.log))
 		assert str contains $log "enable --now pronto-docker-gc.timer"
 		assert str contains $log "is-enabled --quiet pronto-dapr-heal.timer"
@@ -525,5 +534,24 @@ def test_a_host_that_drops_daprHeal_loses_its_timer_and_files [] {
 		# The cleanup's files are the host's and stay; a second run finds nothing.
 		assert ($root + "/etc/pronto/docker-gc.env" | path exists)
 		assert equal (apply (defaults) --root $root) []
+	}
+}
+
+def test_removal_keeps_the_files_unless_systemd_says_the_timer_is_stopped [] {
+	print "test removing daprHeal keeps its files when the timer is still running or its state cannot be read, and the next apply finds the drift again..."
+	let heal_files = ["/etc/pronto/dapr-heal.env" "/usr/local/lib/pronto/dapr-heal.sh" "/etc/systemd/system/pronto-dapr-heal.service" "/etc/systemd/system/pronto-dapr-heal.timer"]
+	for case in [[KEEPON "1" "still"] [UNREADABLE "1" "unreadable"]] {
+		let dir = (tmp)
+		fake-systemctl $dir
+		let root = ($dir | path join root)
+		with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+			apply (with-heal) --root $root | ignore
+			let failed = (try { with-env {($case.0): $case.1} { apply (defaults) --root $root }; "applied" } catch {|e| $e.msg })
+			assert str contains $failed $case.2 $"removal must fail: ($failed)"
+			for f in $heal_files { assert ($root + $f | path exists) $"($f) kept when removal failed ($case.2)" }
+			# A later apply, with systemd answering, finishes it.
+			assert equal (apply (defaults) --root $root | length) 4
+			for f in $heal_files { assert (not ($root + $f | path exists)) $"($f) removed on the retry" }
+		}
 	}
 }

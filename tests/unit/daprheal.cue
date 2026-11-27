@@ -99,14 +99,14 @@ cases: "a Job's pod, a pod of its own and a ReplicaSet with no Deployment are no
 	]
 }
 
-cases: "a roll the API refused fails the run, leaves no mark, and the other workloads are still rolled": {
+cases: "a roll the API refused fails the run, keeps its mark, and the other workloads are still rolled": {
 	suite: "daprheal"
 	steps: [
-		{call: "daprheal.run", args: [{pods: [_bare, (_bare & {ns: "bonk", name: "bonk-crud-0", owner: "StatefulSet/bonk-crud", containers: ["crud"]})], rs: _rs, failRoll: ["aprende/Deployment/aprende-flagd"]}], holds: {code: 1, rolled: ["bonk/StatefulSet/bonk-crud"], marked: ["bonk.StatefulSet.bonk-crud"]}},
+		{call: "daprheal.run", args: [{pods: [_bare, (_bare & {ns: "bonk", name: "bonk-crud-0", owner: "StatefulSet/bonk-crud", containers: ["crud"]})], rs: _rs, failRoll: ["aprende/Deployment/aprende-flagd"]}], holds: {code: 1, rolled: ["bonk/StatefulSet/bonk-crud"], marked: ["aprende.Deployment.aprende-flagd", "bonk.StatefulSet.bonk-crud"]}, why: "no error text is read: the next sweep reads whether the restart landed"},
 	]
 }
 
-cases: "a roll that may have been done (a timeout) keeps its mark: the next sweep waits out the cooldown": {
+cases: "a roll whose answer was a timeout keeps its mark and fails the run, whatever the text": {
 	suite: "daprheal"
 	steps: [
 		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, failRoll: ["aprende/Deployment/aprende-flagd"], rollError: "error: Timeout: request did not complete within requested timeout"}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}},
@@ -156,5 +156,57 @@ cases: "--dry-run makes no state folder and still says what it would roll": {
 	suite: "daprheal"
 	steps: [
 		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, args: ["--dry-run"], noStateDir: true}], holds: {code: 0, stateCreated: false, out: "dapr-heal: would roll aprende/Deployment/aprende-flagd\n"}},
+	]
+}
+
+cases: "a mark whose restart never landed (a reboot between the two) is dropped and the workload rolled once, cooldown or not": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, restartedAt: {"aprende/Deployment/aprende-flagd": 60}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"], marked: ["aprende.Deployment.aprende-flagd"]}, why: "restartedAt is an hour old, the mark five minutes: the restart the mark records never happened"},
+		{pick: ["out"], matches: "the roll never landed"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, restartedAt: {"aprende/Deployment/aprende-flagd": null}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"]}, why: "no restartedAt at all, a mark past the cooldown: rolled once, not 'not rolled again'"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, restartedAt: {"aprende/Deployment/aprende-flagd": 4}}], holds: {code: 0, rolled: []}, why: "a restart after the mark: it landed, the cooldown is waited out"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 5}, restartedAt: {"aprende/Deployment/aprende-flagd": 60}, args: ["--dry-run"]}], holds: {code: 0, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "a dry run reads and says, and drops nothing"},
+	]
+}
+
+cases: "a workload that is not the one the pod's owner reference names is never restarted": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, uidMismatch: ["aprende/Deployment/aprende-flagd"]}], holds: {code: 1, rolled: [], marked: []}, why: "a pod writer's reference to a workload of the same name that was replaced"},
+		{pick: ["err"], matches: "is not the workload the pod's owner reference names"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {ns: "bonk", name: "bonk-crud-0", owner: "StatefulSet/bonk-crud", containers: ["crud"]})], uidMismatch: ["bonk/StatefulSet/bonk-crud"]}], holds: {code: 1, rolled: []}},
+	]
+}
+
+cases: "a workload whose template does not ask for a sidecar is never restarted": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, noDaprTemplate: ["aprende/Deployment/aprende-flagd"]}], holds: {code: 1, rolled: []}},
+		{pick: ["err"], matches: "does not ask for a Dapr sidecar"},
+	]
+}
+
+cases: "a workload that cannot be read is not rolled and fails the run": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, failLive: true}], holds: {code: 1, rolled: []}},
+	]
+}
+
+cases: "a sort that fails is a failed sweep, not an empty one": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, failSort: true}], holds: {code: 1, rolled: []}},
+		{pick: ["err"], matches: "could not be sorted"},
+	]
+}
+
+cases: "the injector is read only when a pod is old enough to roll, and a failed read is its own error": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, injectorError: true}], holds: {code: 1, rolled: []}},
+		{pick: ["err"], matches: "injector .* could not be read"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {ageSec: 30})], rs: _rs, injectorError: true}], holds: {code: 0, rolled: []}, why: "a young pod is not judged: the injector is not asked"},
 	]
 }
