@@ -246,6 +246,11 @@ import (
 // The database names that are never a tenant's (besides a name that begins with a #TenantRefusedRolePrefixes entry): the superuser's and Postgres's templates.
 #TenantRefusedDatabases: ["postgres", "template0", "template1"]
 
+// The suffixes of the Secrets that hold a database's postgres superuser password (`<cluster>-superuser`, `<app>-db-postgres`): no tenant workload reads them, and no
+// ExternalSecret of a tenant takes one as a template source (templateFrom), which would copy the password into a Secret a workload may read. tenant.nu's check-objects holds the
+// exact names (a legacy Cluster's own superuserSecret too); the admission policy, which cannot read the namespace's Clusters, holds the suffixes.
+#TenantGuardedSecretSuffixes: ["-superuser", "-db-postgres"]
+
 // The annotation prefixes no tenant Cluster carries: `cnpg.io/podPatch`, `cnpg.io/validation` and `cnpg.io/reconcilePodSpec` make the operator rewrite the instance pod (its image,
 // the superuser's Secret it reads, its service account), which the engine fixes by never letting a tenant's Cluster say so. Read by tenant.nu's check-objects and by the
 // cluster's admission policies (#TenantAdmission).
@@ -375,7 +380,7 @@ import (
 				if r.kind == "real" {"\(raw).matches('^ *-?[0-9]+([.][0-9]+)? *$') && double(\(v)) >= \(r.min) && double(\(v)) <= \(r.max)"},
 				if r.kind == "mem" {"\(raw).matches('^ *[0-9]+ *(kB|MB|GB|TB)? *$') && \(mem) >= \(r.min) && \(mem) <= \(r.max)"},
 				if r.kind == "ms" {"\(raw).matches('^ *-?[0-9]+ *(ms|s|min|h|d)? *$') && \(ms) >= \(r.min) && \(ms) <= \(r.max)"},
-				if r.kind == "enum" {"\(v) in [\(strings.Join([for x in r.values {"'\(x)'"}], ", "))]"},
+				if r.kind == "enum" {"\(raw) in [\(strings.Join([for x in r.values {"'\(x)'"}], ", "))]"},
 			][0]
 		}
 	}
@@ -457,6 +462,20 @@ import (
 					{expression: "!has(object.spec.type) || object.spec.type == 'ClusterIP'", message: "a tenant's Service is a ClusterIP: a NodePort, LoadBalancer or ExternalName one reaches past its namespace"},
 					{expression: "!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0", message: "a tenant's Service names no externalIPs (CVE-2020-8554)"},
 				]
+			}
+		},
+		// An ExternalSecret reads another Secret of its namespace as a template source (target.template.templateFrom[].secret) and writes the result to a target Secret: a source that
+		// holds a database's superuser password would copy it into a Secret a workload may read.
+		{
+			metadata: name: "\(_prefix)-engine-externalsecrets"
+			spec: {
+				failurePolicy: _fp
+				matchConstraints: {namespaceSelector: _selector, resourceRules: [{apiGroups: ["external-secrets.io"], apiVersions: ["*"], operations: _ops, resources: ["externalsecrets"]}]}
+				matchConditions: _notJudged
+				validations: [{
+					expression: "!has(object.spec.target) || !has(object.spec.target.template) || !has(object.spec.target.template.templateFrom) || object.spec.target.template.templateFrom.all(t, !has(t.secret) || !(\(strings.Join([for x in #TenantGuardedSecretSuffixes {"t.secret.name.endsWith('\(x)')"}], " || "))))"
+					message:    "a tenant's ExternalSecret takes no database superuser Secret as a template source (#TenantGuardedSecretSuffixes)"
+				}]
 			}
 		},
 		{

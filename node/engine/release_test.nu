@@ -2476,6 +2476,7 @@ def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] 
 		{why: "the approved digest under another app's base name", says: "not the approved database base", objects: (do $cluster_with $"127.0.0.1:5000/($ns)/other-database-base:18@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598" "")}
 		{why: "the approved digest under another major", says: "not the approved database base", objects: (do $cluster_with $"127.0.0.1:5000/($ns)/game-database-base:17@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598" "")}
 		{why: "a cnpg.io/podPatch annotation, with which the operator rewrites the instance pod", says: "which make the database operator rewrite the instance pod", objects: $"[{apiVersion: \"postgresql.cnpg.io/v1\", kind: \"Cluster\", metadata: {name: \"game-db\", namespace: \"($ns)\", annotations: {\"cnpg.io/podPatch\": \"[]\"}}, spec: {imageName: \"($approved)\"}}]"}
+		{why: "an ExternalSecret that takes the database's postgres Secret as a template source, copying its password into a Secret a workload may read", says: "as a template source, which hold the postgres superuser's password", objects: $"[{apiVersion: \"external-secrets.io/v1beta1\", kind: \"ExternalSecret\", metadata: {name: \"x\", namespace: \"($ns)\"}, spec: {target: {name: \"t\", template: {templateFrom: [{secret: {name: \"game-db-postgres\"}}]}}}}]"}
 		{why: "a command parameter", says: "sets the Postgres parameter archive_command", objects: (do $cluster_with $approved "postgresql: {parameters: {archive_command: \"curl evil\"}}")}
 		{why: "a restore_command parameter", says: "sets the Postgres parameter restore_command", objects: (do $cluster_with $approved "postgresql: {parameters: {restore_command: \"x\"}}")}
 		{why: "a preload library parameter", says: "sets the Postgres parameter shared_preload_libraries", objects: (do $cluster_with $approved "postgresql: {parameters: {shared_preload_libraries: \"evil\"}}")}
@@ -2675,6 +2676,31 @@ def test_a_tenants_workload_never_reads_the_superuser_secret_a_live_cluster_name
 	assert (has $r.stderr "reads the secret(s) older-root-secret") $r.stderr
 	assert equal (writes $w) []
 	rm -rf $w.dir
+}
+
+def test_a_tenants_database_stage_is_read_only_inside_the_staged_tree [] {
+	print "test a tenant's database stage is read only when its Dockerfile is a regular file inside the staged tree: an absolute context outside it, a Dockerfile path that leaves it and a symlink out of it are not opened..."
+	let root = (mktemp -d -t node-dbstage.XXXXXX | str trim | path expand | path expand)
+	let staged = ($root | path join staged)
+	let outside = ($root | path join outside)
+	mkdir $staged $outside
+	let stage = "FROM base AS database\nCOPY seed.sql /docker-entrypoint-initdb.d/\n"
+	$stage | save -f ($staged | path join Dockerfile)
+	$stage | save -f ($outside | path join Dockerfile)
+	"x" | save -f ($outside | path join secret.txt)
+	^ln -s ($outside | path join Dockerfile) ($staged | path join Linked)
+	let ctx = {base: "docker-image://bonitao/mecha-database:0.36.1@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598"}
+	let compose = {|context: string, dockerfile: string| {services: {database: {build: {context: $context, dockerfile: $dockerfile, target: database, additional_contexts: $ctx}}}} | to yaml }
+	# inside the staged tree: read
+	assert ((do $compose $staged Dockerfile | render database-base --within $staged) != null) "the staged Dockerfile is read"
+	# the same Dockerfile, named from outside the tree
+	assert equal (do $compose $outside Dockerfile | render database-base --within $staged) null "an absolute context outside the staged tree is read"
+	assert equal (do $compose $staged "../outside/Dockerfile" | render database-base --within $staged) null "a Dockerfile path that leaves the staged tree is read"
+	assert equal (do $compose $staged Linked | render database-base --within $staged) null "a symlink out of the staged tree is read"
+	assert equal (do $compose $staged . | render database-base --within $staged) null "a directory is read as the Dockerfile"
+	# the operator's own release (no --within) still reads where its compose says
+	assert ((do $compose $outside Dockerfile | render database-base) != null) "an operator's database stage is no longer read"
+	rm -rf $root
 }
 
 def test_a_tenants_cluster_keeps_the_engines_own_tuning_and_the_bases_uid [] {

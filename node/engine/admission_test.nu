@@ -25,6 +25,8 @@ def main [--kind: string = ""] {
 	test_volumes_are_an_allow_list
 	test_cnpg_labels_escalation_capabilities_and_metadata
 	test_services_and_secrets
+	test_an_externalsecret_takes_no_superuser_secret_as_a_template_source
+	test_an_enum_value_is_compared_as_the_engine_compares_it
 	test_a_cluster_is_held_to_the_engines_allow_list
 	test_the_parameters_are_the_engines_bounds
 	test_the_roles_and_services_of_a_cluster
@@ -68,13 +70,13 @@ def test_no_policy_is_named_as_one_of_studios_own [] {
 		assert ($o.metadata.name not-in $studios) $"($o.kind) ($o.metadata.name) is Studio's"
 		assert ($o.metadata.name | str starts-with $"($policy_prefix)-engine-") $o.metadata.name
 	}
-	assert equal ($objects | where kind == "ValidatingAdmissionPolicy" | length) 6
+	assert equal ($objects | where kind == "ValidatingAdmissionPolicy" | length) 7
 }
 
 def test_every_policy_matches_tenant_namespaces_only [] {
 	print "test every policy matches a namespace with the tenant label and no other..."
 	let all = (policies)
-	assert equal ($all | columns | sort) [clusters objects pods secrets services templates]
+	assert equal ($all | columns | sort) [clusters externalsecrets objects pods secrets services templates]
 	for name in ($all | columns) {
 		let sel = ($all | get $name).spec.matchConstraints.namespaceSelector.matchExpressions
 		assert equal $sel [{key: $label, operator: "Exists"}] $name
@@ -162,6 +164,22 @@ def test_services_and_secrets [] {
 	assert ((one-rule services "externalIPs") | str contains "size(object.spec.externalIPs) == 0")
 	assert ((one-rule secrets "no service account token") | str contains "kubernetes.io/service-account-token")
 	assert ((one-rule secrets "kubernetes.io/service-account.*") | str contains "k.startsWith('kubernetes.io/service-account.')")
+}
+
+def test_an_externalsecret_takes_no_superuser_secret_as_a_template_source [] {
+	print "test an ExternalSecret takes no Secret of #TenantGuardedSecretSuffixes as a template source (an indirect read of a database's superuser password)..."
+	let rule = (one-rule externalsecrets "template source")
+	for x in (schema '#TenantGuardedSecretSuffixes') { assert ($rule | str contains $"t.secret.name.endsWith\('($x)'\)") $x }
+	assert ($rule | str contains "object.spec.target.template.templateFrom") $rule
+	let r = ((policies).externalsecrets.spec.matchConstraints.resourceRules)
+	assert equal $r [{apiGroups: [external-secrets.io], apiVersions: ["*"], operations: [CREATE UPDATE], resources: [externalsecrets]}]
+}
+
+def test_an_enum_value_is_compared_as_the_engine_compares_it [] {
+	print "test a Postgres enum parameter is compared as written, not with its spaces removed ('log ical' is no 'logical'), as tenant.nu compares it..."
+	let e = (one-rule clusters "parameter wal_level to its bound")
+	assert ($e | str contains "variables.params['wal_level'] in ['replica', 'logical']") $e
+	assert (not ($e | str contains "replace")) $e
 }
 
 def test_a_cluster_is_held_to_the_engines_allow_list [] {
@@ -253,7 +271,7 @@ def test_who_is_not_judged_and_what_the_bindings_do [] {
 	let notes = (one-rule clusters "carries no cnpg.io/ annotation")
 	for p in (schema '#TenantRefusedClusterAnnotationPrefixes') { assert ($notes | str contains $"k.startsWith\('($p)'\)") $p }
 	let bindings = (schema '(#TenantAdmission & {label: "x/y"}).objects' | where kind == "ValidatingAdmissionPolicyBinding")
-	assert equal ($bindings | length) 6
+	assert equal ($bindings | length) 7
 	for b in $bindings { assert equal $b.spec.validationActions [Warn Audit] }
 	let deny = (schema '(#TenantAdmission & {label: "x/y", actions: ["Deny", "Audit"]}).objects' | where kind == "ValidatingAdmissionPolicyBinding")
 	for b in $deny { assert equal $b.spec.validationActions [Deny Audit] }
@@ -352,6 +370,7 @@ def cases [ns: string]: nothing -> list {
 		["a Cluster with a managed role that creates roles" (do $cluster {managed: {roles: [{name: r, login: true, createrole: true}]}}) clusters]
 		["a Cluster with a managed role in pg_execute_server_program" (do $cluster {managed: {roles: [{name: r, login: true, inRoles: [pg_execute_server_program]}]}}) clusters]
 		["a Cluster whose owner is a pg_ role" (do $cluster {bootstrap: {initdb: {database: app, owner: pg_monitor}}}) clusters]
+		["a Cluster with wal_level written with a space inside it" (do $cluster {postgresql: {parameters: {wal_level: "log ical"}}}) clusters]
 		["a Cluster with an integer written with a space inside it" (do $cluster {postgresql: {parameters: {max_connections: "1 0"}}}) clusters]
 		["a Cluster with a cnpg.io/podPatch annotation" ((do $cluster {}) | update metadata {|c| $c.metadata | insert annotations {"cnpg.io/podPatch": "[]"}}) clusters]
 		["a Cluster with a cnpg.io/validation annotation" ((do $cluster {}) | update metadata {|c| $c.metadata | insert annotations {"cnpg.io/validation": "disabled"}}) clusters]

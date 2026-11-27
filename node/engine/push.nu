@@ -242,11 +242,12 @@ export def tenant-images [app_dir: string, node: record, services: list<string>,
 		if $compose.exit_code != 0 { error make {msg: $"docker compose config failed in ($dir): ($compose.stderr | str trim)"} }
 		# The staged copy is what bake may read: a path the project names inside the app's own folder (an absolute build context a flatten wrote)
 		# is the staged copy's, so the grant below covers it and nothing outside the app is added to it.
-		runtime release-tree (rebase-paths $compose.stdout $dir $staged) | save -f ($work | path join release.compose.yaml)
+		let rebased = (rebase-paths $compose.stdout $dir $staged)
+		runtime release-tree $rebased | save -f ($work | path join release.compose.yaml)
 		# The Cluster runs the engine's approved database base, never the tenant's: the database stage must only copy SQL onto a base the engine approves (#TenantDatabaseImages).
 		# Said before anything is built; the engine's own ref is what is copied below.
 		let approved_base = if "database" in $services {
-			let base = ($compose.stdout | render database-base)
+			let base = ($rebased | render database-base --within $staged)
 			let ok = (tenant approved-database-base $base (tenant database-images))
 			if $ok == null {
 				let what = if $base == null { "does more than copy SQL onto a base pinned by digest (a RUN, an ADD, an ENV, a copy from another stage or into postgres's own folders)" } else { $"sits on ($base.ref), which the engine does not approve" }

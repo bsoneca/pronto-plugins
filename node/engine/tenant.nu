@@ -363,6 +363,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 	let reserved = (schema-export '#TenantReserved')
 	let forbidden_accounts = (schema-export '#TenantForbiddenAccounts')
 	let account_suffix = (schema-export '#TenantAccountSuffix')
+	let guarded_suffixes = (schema-export '#TenantGuardedSecretSuffixes')
 	let cluster_note_prefixes = (schema-export '#TenantRefusedClusterAnnotationPrefixes')
 	let label_prefixes = (schema-export '#TenantRefusedLabelPrefixes')
 	let volume_types = (schema-export '#TenantVolumeTypes')
@@ -383,6 +384,13 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			for field in $refused_metadata {
 				if ($o | get -o ($at | into cell-path) | default {} | get -o $field) != null { $why = ($why | append $"($id) sets ($at | append $field | str join '.'), which a tenant's release leaves to the engine") }
 			}
+		}
+		# an ExternalSecret that takes a Secret of the namespace as a template source (target.template.templateFrom[].secret) copies it into its target Secret, which a workload may read:
+		# never a Secret that holds a database's superuser password (indirect read of what the workload check below holds back)
+		if ($o.kind? | default "") == "ExternalSecret" {
+			let sources = ($o.spec?.target?.template?.templateFrom? | default [] | each {|t| $t.secret?.name? | default "" } | where {|n| $n != "" })
+			let held = ($sources | where {|n| $n in $guarded_secrets or ($n | str ends-with $"($node.name? | default '')-db-postgres") or ($guarded_suffixes | any {|x| $n | str ends-with $x }) })
+			if ($held | is-not-empty) { $why = ($why | append $"($id) takes the secret\(s\) ($held | str join ', ') as a template source, which hold the postgres superuser's password: a tenant's ExternalSecret never copies them") }
 		}
 		# an ExternalSecret that writes its target from a manifest of its own could set what the template cannot
 		if ($o.kind? | default "") == "ExternalSecret" and ($o.spec?.target?.manifest? | default null) != null { $why = ($why | append $"($id) sets spec.target.manifest, which a tenant's release leaves to the operator's store") }
