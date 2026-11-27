@@ -358,6 +358,17 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			let cspec = ($o.spec? | default {})
 			let extra = ($cspec | columns | where {|k| $k not-in $allowed.keys })
 			if ($extra | is-not-empty) { $why = ($why | append $"($id) sets the Cluster field\(s\) ($extra | str join ', '), which a tenant's database may not: its image and what runs in its pod are the engine's") }
+			let uid = ($cspec | get -o postgresUID | default 999)
+			let gid = ($cspec | get -o postgresGID | default 999)
+			if $uid != $allowed.uid or $gid != $allowed.uid { $why = ($why | append $"($id) runs the database as uid ($uid) and gid ($gid): a tenant's database is the approved base's, uid ($allowed.uid)") }
+			# a managed role is a login of the database (never a superuser, never one that creates roles, never a member of a role that reaches the pod or the cluster)
+			let refused_roles = (schema-export '#TenantRefusedRoles')
+			for role in ($cspec.managed?.roles? | default []) {
+				if ($role.superuser? | default false) == true { $why = ($why | append $"($id) manages the role ($role.name? | default '?') as a superuser") }
+				if ($role.createrole? | default false) == true { $why = ($why | append $"($id) manages the role ($role.name? | default '?') with createrole") }
+				let member = ($role.inRoles? | default [] | where {|r| $r in $refused_roles })
+				if ($member | is-not-empty) { $why = ($why | append $"($id) makes the role ($role.name? | default '?') a member of ($member | str join ', '), which a tenant's database never is") }
+			}
 			let pg_extra = ($cspec.postgresql? | default {} | columns | where {|k| $k not-in $allowed.postgresql })
 			if ($pg_extra | is-not-empty) { $why = ($why | append $"($id) sets postgresql.($pg_extra | str join ', postgresql.'), which a tenant's database may not") }
 			let bs_extra = ($cspec.bootstrap? | default {} | columns | where {|k| $k not-in $allowed.bootstrap })

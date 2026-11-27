@@ -344,6 +344,7 @@ def main [] {
 	test_the_tenant_door_check_in_the_pod_dials_the_service_and_forwards_to_nothing
 	test_a_tenants_compose_files_name_nothing_outside_the_app
 	test_a_tenants_database_base_must_be_one_the_engine_approves
+	test_a_tenants_cluster_keeps_the_engines_own_tuning_and_the_bases_uid
 	test_a_tenants_workload_never_runs_as_the_account_of_a_cluster_already_in_its_namespace
 	test_a_tenants_staged_build_paths_are_the_staged_copys
 	test_a_tenants_dry_run_with_no_build_needs_the_publisher_kubeconfig_alone
@@ -2480,6 +2481,14 @@ def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] 
 		{why: "a postInitSQLRefs", says: "sets bootstrap.initdb.postInitSQLRefs", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", postInitSQLRefs: {secretRefs: [{name: \"x\", key: \"y\"}]}}}")}
 		{why: "a postInitTemplateSQL", says: "sets bootstrap.initdb.postInitTemplateSQL", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", postInitTemplateSQL: [\"select 1\"]}}")}
 		{why: "a import", says: "sets bootstrap.initdb.import", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", import: {type: \"microservice\", databases: [\"d\"], source: {externalCluster: \"x\"}}}}")}
+		{why: "a managed role that is a superuser", says: "manages the role r as a superuser", objects: (do $cluster_with $approved "managed: {roles: [{name: \"r\", ensure: \"present\", login: true, superuser: true}]}")}
+		{why: "a managed role with createrole", says: "manages the role r with createrole", objects: (do $cluster_with $approved "managed: {roles: [{name: \"r\", ensure: \"present\", login: true, createrole: true}]}")}
+		{why: "a managed role in pg_execute_server_program", says: "a member of pg_execute_server_program", objects: (do $cluster_with $approved "managed: {roles: [{name: \"r\", ensure: \"present\", login: true, inRoles: [\"pg_execute_server_program\"]}]}")}
+		{why: "a managed role in pg_read_server_files", says: "a member of pg_read_server_files", objects: (do $cluster_with $approved "managed: {roles: [{name: \"r\", ensure: \"present\", login: true, inRoles: [\"pg_read_server_files\"]}]}")}
+		{why: "a managed role in pg_write_server_files", says: "a member of pg_write_server_files", objects: (do $cluster_with $approved "managed: {roles: [{name: \"r\", ensure: \"present\", login: true, inRoles: [\"pg_write_server_files\"]}]}")}
+		{why: "a managed role in postgres", says: "a member of postgres", objects: (do $cluster_with $approved "managed: {roles: [{name: \"r\", ensure: \"present\", login: true, inRoles: [\"postgres\"]}]}")}
+		{why: "a postgresUID that is not the base's", says: "runs the database as uid 0", objects: (do $cluster_with $approved "postgresUID: 0, postgresGID: 999")}
+		{why: "a postgresGID that is not the base's", says: "gid 0", objects: (do $cluster_with $approved "postgresUID: 999, postgresGID: 0")}
 		{why: "a recovery bootstrap", says: "sets bootstrap.recovery", objects: (do $cluster_with $approved "bootstrap: {recovery: {source: \"x\"}}")}
 		{why: "externalClusters", says: "sets the Cluster field(s) externalClusters", objects: (do $cluster_with $approved "externalClusters: [{name: \"x\"}]")}
 		{why: "a Cluster field the engine does not know", says: "sets the Cluster field(s) somethingNew", objects: (do $cluster_with $approved "somethingNew: true")}
@@ -2612,6 +2621,18 @@ def test_a_tenants_workload_never_runs_as_the_account_of_a_cluster_already_in_it
 	let ok = (tenant-release $w)
 	assert equal $ok.exit_code 0 $"($ok.stdout)\n($ok.stderr)"
 	assert ((calls-by $w publisher.kubeconfig) | any {|c| $c =~ "get clusters.postgresql.cnpg.io -n" }) "the publisher did not list the namespace's Clusters"
+	rm -rf $w.dir
+}
+
+def test_a_tenants_cluster_keeps_the_engines_own_tuning_and_the_bases_uid [] {
+	print "test a tenant's Cluster with the engine's own #Tune fields (multi-instance: primaryUpdateStrategy, primaryUpdateMethod, enablePDB) and the base's uid 999 passes, and a database login that is a member of postgres or a file or program role is a violation..."
+	let ns = $tenant_ns
+	let approved = "127.0.0.1:5000/($ns)/game-database-base:18@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598"
+	let cluster = $"{apiVersion: \"postgresql.cnpg.io/v1\", kind: \"Cluster\", metadata: {name: \"game-db\", namespace: \"($ns)\"}, spec: {imageName: \"127.0.0.1:5000/($ns)/game-database-base:18@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598\", instances: 3, primaryUpdateStrategy: \"unsupervised\", primaryUpdateMethod: \"switchover\", enablePDB: false, postgresUID: 999, postgresGID: 999}}"
+	let w = (tenant-world)
+	let body = $"use ($engine_dir | path join tenant.nu); tenant check-objects [($cluster)] {namespace: ($ns), name: game} [postgresql.cnpg.io/v1/Cluster]"
+	let r = (in-world $w -c $body)
+	assert equal $r.exit_code 0 $"the engine's own Cluster tuning was refused: ($r.stderr)"
 	rm -rf $w.dir
 }
 

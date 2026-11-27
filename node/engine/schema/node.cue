@@ -186,11 +186,19 @@ import (
 // image the tenant chose could reach the operator-created instance pod: imageCatalogRef, postgresql.extensions[].image (image-volume extensions), projectedVolumeTemplate,
 // serviceAccountTemplate, plugins, env, envFrom, bootstrap.initdb's postInit*SQL*, import, recovery and externalClusters are all refused, and so is any key not listed.
 #TenantClusterSpec: {
-	keys: ["instances", "postgresql", "imageName", "postgresUID", "postgresGID", "enableSuperuserAccess", "superuserSecret", "managed", "bootstrap", "storage", "resources", "replicationSlots", "stopDelay", "smartShutdownTimeout"]
+	// The first line is what upstream renders and the second what the engine's own #Tune patches in (multi-instance databases, enablePDB).
+	keys: ["instances", "postgresql", "imageName", "postgresUID", "postgresGID", "enableSuperuserAccess", "superuserSecret", "managed", "bootstrap", "storage", "resources", "replicationSlots", "stopDelay", "smartShutdownTimeout",
+		"primaryUpdateStrategy", "primaryUpdateMethod", "enablePDB"]
+	// The uid and gid of mecha's database image (upstream's own, whose postgres user is 999, not CloudNativePG's 26): the approved base is the one image a tenant's Cluster runs.
+	uid: 999
 	postgresql: ["parameters", "synchronous"]
 	bootstrap: ["initdb"]
 	initdb: ["database", "owner", "localeProvider", "icuLocale", "secret"]
 }
+
+// Roles a tenant's database may never be made a member of, and never given as its own attributes (superuser, createrole): through them SQL reaches the instance pod
+// (COPY ... TO PROGRAM, server-side file reads and writes) or the cluster's own roles. A managed role of a tenant's Cluster and a `database.logins` entry are held to it.
+#TenantRefusedRoles: ["postgres", "pg_execute_server_program", "pg_read_server_files", "pg_write_server_files"]
 
 // The database's replicas and settings, as patches over upstream's CloudNativePG Cluster (`<app>-db`). Each field
 // is a patch: where `database` is not set, upstream's Cluster is applied as it renders.
@@ -696,6 +704,9 @@ import (
 			"database.logins generate their passwords in the namespace, which the app's externalSecrets store does not do yet"
 		}],
 		// What a tenant's release (a namespace's publisher) may not write or ask (PRONTO-740 S2).
+		[if publisher if release.database != _|_ for l, v in release.database.logins for r in v.inRoles if list.Contains(#TenantRefusedRoles, r) {
+			"database.logins.\(l) is a member of \(r), which a tenant's database never is (#TenantRefusedRoles)"
+		}],
 		[if publisher if len(dbBase) == 0 for o in _all if o.kind == "Cluster" {"Cluster/\(o.metadata.name) has no approved database base pushed: a tenant's Cluster runs the engine's approved image (#TenantDatabaseImages), copied to its own registry path"}],
 		[if publisher if !production {"a tenant's release (\(release.namespace)) is never a preview"}],
 		[if publisher if release.backups != _|_ {"a tenant's release writes no backups: database.backup and backups are the operator's"}],
