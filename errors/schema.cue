@@ -46,6 +46,12 @@ import "strings"
 	prefix: *"/e" | =~"^/[a-z0-9_-]+$"
 	// The pronto-flags flag (flags_spec.cue) that turns the reporter on.
 	flag: *"error_tracking" | =~"^[a-z][a-z0-9_-]{0,63}$"
+	// The pronto-flags flag (flags_spec.cue, default false where the app is released, local true) that lets
+	// pronto-journeys' reporter send an error's message, frames, stack and browser tag. Unnamed or off, an
+	// error leaves as its name alone. It has scenarios of its own, beside the reporter's, once named.
+	detailFlag: *"" | =~"^[a-z][a-z0-9_-]{0,63}$"
+	// Where the journeys reporter's batches go on the page's own origin.
+	detailBeacon: *"/telemetry" | =~"^/[a-z0-9_/-]+$"
 
 	// GlitchTip's organization and the project's slug, which a release's source maps are sent to.
 	org:  *"pronto" | =~"^[a-z0-9_-]+$"
@@ -80,7 +86,7 @@ import "strings"
 	// The files the generate step writes: the reporter's settings, beside its module, and what the
 	// upload of the maps reads.
 	out: {
-		"errors.loader.json": {project: E.project, key: E.key, prefix: E.prefix, flag: E.flag}
+		"errors.loader.json": {project: E.project, key: E.key, prefix: E.prefix, flag: E.flag, detailFlag: E.detailFlag}
 		"errors.sourcemaps.json": {upstream: E.upstream, org: E.org, slug: E.slug, files: E.sourcemaps.files, build: E.sourcemaps.build, token: E.sourcemaps.token}
 		if E.project != 0 && E.key != "" {
 			"errors.scenarios.json": {
@@ -94,6 +100,29 @@ import "strings"
 						{http: {path: "\(E.prefix)/api/events", anon: true, expect: {status: 200, has: ["scenario-throw-{run}", "\"type\":\"Error\"", "\"platform\":\"javascript\"", "\"level\":\"error\""], lacks: ["probe={run}", "\"user\"", "\"release\":\"unknown\""]}}, poll: true, why: "what the stand-in kept: the error's type and message, no query of the page's address, no user", flag: E.flag},
 						{by: "eli", never: E._upstreamHost, why: "no address of another host was asked for: the reports go to the page's own origin", flag: E.flag},
 					]
+				}
+				if E.detailFlag != "" {
+					(E.detailFlag): {
+						accepts: E.scenarios.accepts
+						flags: [E.detailFlag]
+						actors: eli: name: "Eli"
+						steps: [
+							{by: "eli", open: "/?probe={run}", flag: E.detailFlag},
+							{by: "eli", response: {to: E.detailBeacon, method: "POST", status: 200, sent: "\"type\":\"error\".*\"browser\":\"(instagram|facebook|wv|other)\"", when: {throw: "scenario-detail-{run}"}}, why: "the uncaught error leaves as a beacon with its browser tag, which it carries only while the flag is on", flag: E.detailFlag},
+						]
+					}
+					"\(E.detailFlag)_tester": {
+						accepts: E.scenarios.accepts
+						flags: [E.detailFlag]
+						production: true
+						actors: tess: name: E.scenarios.tester
+						steps: [
+							{by: "tess", open: "/", flag: E.detailFlag},
+							{by: "tess", signIn: true, flag: E.detailFlag},
+							{by: "tess", closeDialogs: true, flag: E.detailFlag},
+							{by: "tess", response: {to: E.detailBeacon, method: "POST", status: 200, sent: "\"browser\":\"(instagram|facebook|wv|other)\"", when: {throw: "production check of \(E.detailFlag) {run}"}}, timeout: 60, why: "the error's beacon carries its browser tag, so the detail is on for the tester", flag: E.detailFlag},
+						]
+					}
 				}
 				"\(E.flag)_tester": {
 					accepts: E.scenarios.accepts

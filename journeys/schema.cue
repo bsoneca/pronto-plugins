@@ -379,7 +379,7 @@ _journeysHours: {
 					message = slice(message, 0, 200) ?? ""
 					frame = string(.frame) ?? ""
 					frame = replace(frame, r'https?://[^/\s)]*', "")
-					frame = replace(frame, r'[?#][^\s)]*?(:\d+:\d+\)?)(\n|$)', "${1}${2}")
+					frame = replace(frame, r'[?#]\S*?(:\d+:\d+\)?)(\n|$)', "${1}${2}")
 					frame = replace(frame, r'\?[^\s):]*', "")
 					frame = replace(frame, r'\.[0-9a-fA-F]{6,}\.(m?js)', ".${1}")
 					frame = replace(frame, r'#[^\s):]*', "")
@@ -389,7 +389,7 @@ _journeysHours: {
 					frame = replace(frame, r'\d[\d.\-/ ]{6,}\d', "<number>")
 					frame = slice(frame, 0, 200) ?? ""
 					stack = replace(string(.stack) ?? "", r'https?://[^/\s)]*', "")
-					stack = replace(stack, r'[?#][^\s)]*?(:\d+:\d+\)?)(\n|$)', "${1}${2}")
+					stack = replace(stack, r'[?#]\S*?(:\d+:\d+\)?)(\n|$)', "${1}${2}")
 					stack = replace(stack, r'\?[^\s):]*', "")
 					stack = replace(stack, r'\.[0-9a-fA-F]{6,}\.(m?js)', ".${1}")
 					stack = replace(stack, r'#[^\s):]*', "")
@@ -658,6 +658,13 @@ _journeysHours: {
 				in: {name: "Error", message: "m", frame: "f (https://x.example/a.js?state=prefix:private-value:3:4)", stack: "f (https://x.example/a.js?state=prefix:private-value:3:4)\ng (https://x.example/b.js#p:q:5:6)"}
 				check: #"""
 					.stack_trace == "    at f (/a.js:3:4)\n    at g (/b.js:5:6)" && !contains(string!(.fingerprint), "private")
+					"""#
+			},
+			{
+				name: "a frame's query holding a closing parenthesis is taken off whole"
+				in: {name: "Error", message: "m", frame: "f (https://x.example/app.js?state=x)private:3:4)", stack: "f (https://x.example/app.js?state=x)private:3:4)"}
+				check: #"""
+					.stack_trace == "    at f (/app.js:3:4)" && !contains(string!(.fingerprint), "private")
 					"""#
 			},
 			{

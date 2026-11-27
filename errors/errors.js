@@ -105,8 +105,6 @@ const report = (type, value, stacktrace) => {
 
 const settle = (next) => {
 	state = next;
-	// The decision, for the journeys reporter: it sends an error's detail only while this is true.
-	globalThis.__prontoErrorTracking = next === "on";
 	if (next === "on") for (const e of held) send({ ...e, release });
 	held = [];
 };
@@ -141,9 +139,10 @@ const releaseOf = async () => {
 	}
 };
 
-const flagOn = async () => {
+const flagOn = async (flag) => {
+	if (!flag) return false;
 	try {
-		const res = await fetch(`/ofrep/v1/evaluate/flags/${config.flag}`, {
+		const res = await fetch(`/ofrep/v1/evaluate/flags/${flag}`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ context: {} }),
@@ -163,8 +162,11 @@ export default function mount() {
 	started = true;
 	addEventListener("error", onError, true);
 	addEventListener("unhandledrejection", onRejection);
-	Promise.all([flagOn(), releaseOf()]).then(([on, id]) => {
+	Promise.all([flagOn(config.flag), releaseOf(), flagOn(config.detailFlag)]).then(([on, id, detail]) => {
 		release = id;
+		// The journeys reporter sends an error's detail only while this flag (config.detailFlag, its own and
+		// off where the app is released until it is turned on) answers true; pending, off or unnamed, the name alone.
+		globalThis.__prontoErrorDetail = detail;
 		settle(on ? "on" : "off");
 		// Whether it reports is the page's to show: a check waits for it before it throws.
 		document.documentElement.dataset.errors = on ? "on" : "off";
