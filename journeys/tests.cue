@@ -45,32 +45,37 @@ quietOffNoRule: len([for g in _never.rules.groups for r in g.rules if r.alert ==
 quietOffBurns: len([for a in _never.alerts if a.alert == "JourneyAvailabilityBurnFast" {a}]) & 1
 
 // A journey's run count over 3 hours below half of the least of the same window
-// 1, 2 and 3 weeks ago pages, once that least held the floor's runs. A 50% drop
+// 1 and 2 weeks ago pages, once that least held the floor's runs. A 50% drop
 // fires; a quiet night under the floor does not, nor does a burst against a
 // week that ran twice the usual. The rule holds the exact expression, and the
 // cases below evaluate its comparison on the counts as the operators read it.
 trafficDropPages: _alert["journey-checkout/JourneyTrafficDrop"].labels & {severity: "page", owner: "payments"}
-trafficDropExpr: _alert["journey-checkout/JourneyTrafficDrop"].expr & "(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h])) or vector(0)) < 0.5 * min(label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 7d)), \"week\", \"1\", \"\", \"\") or label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 14d)), \"week\", \"2\", \"\", \"\") or label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 21d)), \"week\", \"3\", \"\", \"\")) and min(label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 7d)), \"week\", \"1\", \"\", \"\") or label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 14d)), \"week\", \"2\", \"\", \"\") or label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 21d)), \"week\", \"3\", \"\", \"\")) >= 200"
+trafficDropExpr: _alert["journey-checkout/JourneyTrafficDrop"].expr & "(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h])) or vector(0)) < 0.5 * min(label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 7d)), \"week\", \"1\", \"\", \"\") or label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 14d)), \"week\", \"2\", \"\", \"\")) and min(label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 7d)), \"week\", \"1\", \"\", \"\") or label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 14d)), \"week\", \"2\", \"\", \"\")) >= 200"
 _fire: [string]: {today: number, weeks: [number, ...number], floor: number, out: today < 0.5*list.Min(weeks) && list.Min(weeks) >= floor}
-// 300, 280 and 400 runs in the weeks before, 120 now: under half of the least.
-_fire: halfDropFires: {today: 120, weeks: [300, 280, 400], floor: 200}
+// 300 and 280 runs in the weeks before, 120 now: under half of the least.
+_fire: halfDropFires: {today: 120, weeks: [300, 280], floor: 200}
 halfDropFires: _fire.halfDropFires.out & true
-// 300, 280 and 400 before, 160 now: a 43% drop from the least, not a page.
-_fire: smallDropQuiet: {today: 160, weeks: [300, 280, 400], floor: 200}
+// 300 and 280 before, 160 now: a 43% drop from the least, not a page.
+_fire: smallDropQuiet: {today: 160, weeks: [300, 280], floor: 200}
 smallDropQuiet: _fire.smallDropQuiet.out & false
 // A week that ran twice the usual (600) beside two normal ones (250): the least
 // is the normal week, so a normal 200 now is no drop.
-_fire: inflatedWeekQuiet: {today: 200, weeks: [600, 250, 260], floor: 200}
+_fire: inflatedWeekQuiet: {today: 200, weeks: [600, 250], floor: 200}
 inflatedWeekQuiet: _fire.inflatedWeekQuiet.out & false
 // 8 runs a week ago, none now: a quiet night under the floor, not a page.
-_fire: quietNightQuiet: {today: 0, weeks: [8, 5, 9], floor: 200}
+_fire: quietNightQuiet: {today: 0, weeks: [8, 5], floor: 200}
 quietNightQuiet: _fire.quietNightQuiet.out & false
 // No run now where 300 ran in each of the weeks before: a total drop pages.
-_fire: totalDropFires: {today: 0, weeks: [300, 280, 400], floor: 200}
+_fire: totalDropFires: {today: 0, weeks: [300, 280], floor: 200}
 totalDropFires: _fire.totalDropFires.out & true
 // An 80% drop pages.
-_fire: eightyDropFires: {today: 60, weeks: [300, 280, 400], floor: 200}
+_fire: eightyDropFires: {today: 60, weeks: [300, 280], floor: 200}
 eightyDropFires: _fire.eightyDropFires.out & true
+// A policy's evaluation interval follows its look-back (Cloud Monitoring's tiers):
+// the traffic drop's 339 h every hour, the slow burn's 72 h every 5 minutes, the fast burn's 1 h every minute.
+dropPolicyHourly: _policy["shop-checkout-trafficdrop"].interval & "3600s"
+slowPolicyFiveMinutes: _policy["shop-checkout-availabilityburnslow"].interval & "300s"
+dropLookBack: [for a in _j.alerts if a.alert == "JourneyTrafficDrop" {a.hours}][0] & 339
 // The floor is a per-journey field with a default, and the rule reads it.
 _floored: #Journeys & {app: "shop", gestures: _j.gestures, spec: first: _j.spec.first & {dropFloor: 5}}
 dropFloorDefault: _j.spec.first.dropFloor & 200
@@ -78,7 +83,7 @@ dropFloorSpec: strings.HasSuffix([for a in _floored.alerts if a.alert == "Journe
 // A journey that never says quiet still has the alert; every journey has one.
 dropWithoutQuiet: len([for a in _never.alerts if a.alert == "JourneyTrafficDrop" {a}]) & 1
 // Cloud Monitoring takes it as a page policy that looks back past 25 hours.
-trafficDropPolicy: [for p in _j.alertPolicies if p.name == "shop-checkout-trafficdrop" {p}][0] & {severity: "page", duration: "0s", interval: "300s"}
+trafficDropPolicy: [for p in _j.alertPolicies if p.name == "shop-checkout-trafficdrop" {p}][0] & {severity: "page", duration: "0s", interval: "3600s"}
 
 // The latency SLI reads a bucket the collector exports, as either exporter
 // spells a boundary.
