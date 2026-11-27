@@ -37,7 +37,9 @@ const exports = {
 # as 1.15.x's). Module v1.16.0 names 1.15.0, so apps pin v1.16.1.
 # 1.17.0 is the tool module v1.17.1 names, and 1.17.1 the tool an app's mise may pin beside it (k8s/ is unchanged since 1.16.1: release.nu and release-schema.nu are the same files).
 # Module v1.17.0 names 1.16.0, so apps pin v1.17.1.
-export const validated_pins = ["1.5.0", "1.5.1", "1.6.0", "1.7.0", "1.10.0", "1.10.1", "1.11.0", "1.11.1", "1.14.0", "1.14.1", "1.15.0", "1.15.1", "1.16.0", "1.16.1", "1.17.0", "1.17.1"]
+# 1.18.0 is the tool module v1.18.1 names, and 1.18.1 the tool an app's mise may pin beside it (k8s/, release.nu and release-schema.nu are
+# unchanged since 1.17.1: the contract test holds the module's against the engine). Module v1.18.0 names 1.17.0, so apps pin v1.18.1.
+export const validated_pins = ["1.5.0", "1.5.1", "1.6.0", "1.7.0", "1.10.0", "1.10.1", "1.11.0", "1.11.1", "1.14.0", "1.14.1", "1.15.0", "1.15.1", "1.16.0", "1.16.1", "1.17.0", "1.17.1", "1.18.0", "1.18.1"]
 
 # The pronto runtime's directory: PRONTO_RUNTIME (the app's release rule sets it from mise), else mise's.
 export def dir []: nothing -> string {
