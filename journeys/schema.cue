@@ -52,11 +52,13 @@ import (
 	// its NoData would mail the operator at once and stay open. Its SLO still
 	// burns on the runs it does get.
 	quiet: *"1h" | false | =~"^[1-9][0-9]*(m|h|d)$"
-	// The fewest runs the same 10 minutes a week ago must hold for
-	// JourneyTrafficDrop to judge today's: below it the week-ago window is a
-	// quiet night, whose half is noise. A journey with many readers at any
-	// hour can raise it; a rare one has too few runs to ever page.
-	dropFloor: *20 | int & >0
+	// The fewest runs the quietest of the week-ago windows must hold
+	// (`_journeysDrop`) for JourneyTrafficDrop to judge today's: below it the
+	// baseline is a quiet spell, whose half is noise. 200 in 3 hours keeps
+	// every journey of Bonk Chess but play-a-game (the next busiest takes
+	// about 40 runs a day) from ever paging; a journey with many readers at
+	// any hour can raise it, a rare one has too few runs to page.
+	dropFloor: *200 | int & >0
 	// Whether a moment that arrives with no open run of this journey is counted
 	// as an `unstarted` run. `false` is for a journey whose later moment is one
 	// readers make all day outside it (a game's move, which a lobby or a room
@@ -78,6 +80,43 @@ _journeysWindows: {
 	let all = [for b in _journeysBurns for w in [b.short, b.long] {w}]
 	[for i, w in all if !list.Contains(list.Slice(all, 0, i), w) {w}]
 }
+
+// JourneyTrafficDrop's numbers, once. Runs are bursty (play-a-game swings from
+// 0 to 839 in 3 hours, and has whole hours with none in the afternoon), so
+// the rate is read over `window`, long enough to ride a burst out, and held
+// against the same window `weeks` ago, never a single one: a week that ran
+// twice the usual (11-18..24 did, 1,100-1,670 runs a day against 557-726)
+// would page for a fortnight of normal traffic, so the alert judges only when
+// EVERY one of the `weeks` has data (a count of the tagged weeks equals their
+// number): a journey with one week of history would be held to that week alone,
+// which may be the busy one. The baseline is the MINIMUM of
+// those weeks, the conservative pick: a median of three still paged 19 times in a
+// week of data (3h window, 0.5, checked every 5 minutes), the minimum of two weeks
+// evaluated hourly 3 times (3 incidents in 8 days), and a real drop below half
+// of even the quietest recent week is a drop whichever week is taken.
+// Two weeks, not three: the look-back is 14 days and 3 hours (339 h), inside
+// Cloud Monitoring's 1 hour evaluation tier (`_journeysTiers`); a third week
+// would be 507 h, the 2 hour tier. That is acceptable: traffic-drop is no
+// fast outage signal (uptime, the heartbeat and the availability burns are),
+// so noticing a drop within the hour is enough.
+// `ratio` is the fraction of the baseline below which it pages: 0.5 pages an
+// 80% drop with room to spare.
+_journeysDrop: {
+	window: "3h"
+	ratio:  0.5
+	weeks: [1, 2]
+}
+
+// How often Cloud Monitoring evaluates a PromQL alerting policy, by how far
+// back its query looks (`hours`): up to 25 h every 30 s (60 s kept here), up to
+// 8 d every 5 min, up to 16 d every hour, up to 32 d every 2 hours. A longer
+// look-back has no tier and is refused.
+_journeysTiers: [
+	{upto: 25, seconds: "60s"},
+	{upto: 192, seconds: "300s"},
+	{upto: 384, seconds: "3600s"},
+	{upto: 768, seconds: "7200s"},
+]
 
 // "3s" → "3", "250ms" → "0.25": the `le` a latency SLI reads.
 _journeysLe: {
@@ -236,24 +275,34 @@ _journeysHours: {
 		}],
 		// A partial drop in traffic burns no budget: a page that never loads
 		// reports nothing (2026-11-24, half of Bonk Chess's requests hung for
-		// 26 minutes), and NoData waits out `quiet`. So the run rate over 10
-		// minutes is held against the same 10 minutes a week ago, and falling
-		// below half of it pages, once that window held `dropFloor` runs. No
-		// run today reads 0, not no data, so a total drop pages too.
+		// 26 minutes), and NoData waits out `quiet`. So the run count over
+		// `_journeysDrop.window` is held against the least of the same window
+		// 1 and 2 weeks ago (why the least, and why that long: see
+		// `_journeysDrop`), and falling below `ratio` of it pages, once that
+		// baseline held `dropFloor` runs and every one of the weeks has data
+		// (each is tagged `week` so `or` keeps all; a week with no series is
+		// no week of zero runs, and one with a week missing is not judged at
+		// all, see `_journeysDrop`). No run today reads 0, not no data, so a
+		// total drop pages too.
 		[for n, j in J.spec {
 			// Good and bad runs only: they close when the run ends, while an
 			// abandoned one closes after `idle`, so during an outage the runs
 			// begun before it would keep the count up for that long.
-			let now = "(sum(increase(journey_runs_total{journey=\"\(n)\",outcome=~\"good|bad\"}[10m])) or vector(0))"
-			let before = "sum(increase(journey_runs_total{journey=\"\(n)\",outcome=~\"good|bad\"}[10m] offset 7d))"
+			let w = _journeysDrop.window
+			let runs = "journey_runs_total{journey=\"\(n)\",outcome=~\"good|bad\"}"
+			let now = "(sum(increase(\(runs)[\(w)])) or vector(0))"
+			let weeks = strings.Join([for k in _journeysDrop.weeks {"label_replace(sum(increase(\(runs)[\(w)] offset \(k*7)d)), \"week\", \"\(k)\", \"\", \"\")"}], " or ")
+			let before = "min(\(weeks))"
+			let have = "count(\(weeks)) == \(len(_journeysDrop.weeks))"
+			let ratio = strconv.FormatFloat(_journeysDrop.ratio, 103, -1, 64)
 			alert:    "JourneyTrafficDrop"
-			hours:    168
+			hours:    list.Max(_journeysDrop.weeks)*7*24 + (_journeysHours & {in: w}).out
 			journey:  n
 			owner:    j.owner
 			severity: "page"
 			for:      "2m"
-			expr:     "\(now) < 0.5 * \(before) and \(before) >= \(j.dropFloor)"
-			summary:  "\(n) has run under half as often in the last 10m as a week ago: readers are not getting through"
+			expr:     "\(now) < \(ratio) * \(before) and \(before) >= \(j.dropFloor) and \(have)"
+			summary:  "\(n) has run under \(strconv.FormatFloat(_journeysDrop.ratio*100, 103, -1, 64))% as often in the last \(w) as the least of the same \(w) \(strings.Join([for k in _journeysDrop.weeks {"\(k)"}], " and ")) weeks ago: readers are not getting through"
 		}],
 	])
 
@@ -275,14 +324,14 @@ _journeysHours: {
 	// Monitoring holds no `for` on a query that looks back past 25 hours (the
 	// slow burn's 3 days, a rare journey's quiet), so those fire on the first
 	// evaluation that holds, their long window being slow to move anyway, and
-	// evaluates them every 5 minutes, the least it allows a look back of days.
+	// evaluates them as often as the look back's tier allows (`_journeysTiers`).
 	_seconds: {"2m": "120s", "15m": "900s"}
 	alertPolicies: [for a in alerts {
 		name:          "\(J.app)-\(a.journey)-\(strings.ToLower(strings.TrimPrefix(a.alert, "Journey")))"
 		displayName:   "\(J.title): \(a.journey) \(a.alert)"
 		expr:          a.expr
 		duration:      [if a.hours > 25 {"0s"}, _seconds[a.for]][0]
-		interval:      [if a.hours > 25 {"300s"}, "60s"][0]
+		interval:      [for t in _journeysTiers if a.hours <= t.upto {t.seconds}][0]
 		severity:      a.severity
 		documentation: "\(a.summary) (owner: \(a.owner))"
 		labels: {journey: a.journey, owner: a.owner, severity: a.severity, app: J.app}
