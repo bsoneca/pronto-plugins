@@ -2782,6 +2782,32 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 	assert equal $two $"RUN --mount=type=cache,target=/a/b,id=($ns)//a/b true\nRUN --mount=type=cache,target=/a_b,id=($ns)//a_b true\n"
 	# ONBUILD RUN is a RUN
 	assert equal ("ONBUILD RUN --mount=type=cache,target=/a true\n" | tenant stage-dockerfile $ns) $"ONBUILD RUN --mount=type=cache,target=/a,id=($ns)//a true\n"
+	# the reviewer's probes (pp#589): an instruction keyword in any case, a flag scan buildkit's continuation rules do not stop early, a heredoc only where buildkit opens one
+	let lower = ("run --mount=type=cache,target=/a,id=victim true\n" | tenant stage-dockerfile $ns)
+	assert equal $lower $"run --mount=type=cache,target=/a,id=($ns)/victim true\n" "a lower-case run"
+	assert equal ("Run --mount=type=cache,target=/a,id=victim true\n" | tenant stage-dockerfile $ns) $"Run --mount=type=cache,target=/a,id=($ns)/victim true\n" "a mixed-case Run"
+	assert equal ("onbuild run --mount=type=cache,target=/a true\n" | tenant stage-dockerfile $ns) $"onbuild run --mount=type=cache,target=/a,id=($ns)//a true\n" "a lower-case onbuild run"
+	# a backslash with spaces after it, and a comment or a blank line in a continuation, do not end the flags
+	let spaced = ("RUN --mount=type=cache,target=/a \\  \n --mount=type=cache,target=/b,id=victim true\n" | tenant stage-dockerfile $ns)
+	assert equal $spaced $"RUN --mount=type=cache,target=/a,id=($ns)//a \\  \n --mount=type=cache,target=/b,id=($ns)/victim true\n" "a backslash and spaces"
+	let commented = ("RUN --mount=type=cache,target=/a \\\n# c\n --mount=type=cache,target=/b,id=victim true\n" | tenant stage-dockerfile $ns)
+	assert equal $commented $"RUN --mount=type=cache,target=/a,id=($ns)//a \\\n# c\n --mount=type=cache,target=/b,id=($ns)/victim true\n" "a comment in a continuation"
+	let blanked = ("RUN --mount=type=cache,target=/a \\\n\n --mount=type=cache,target=/b,id=victim true\n" | tenant stage-dockerfile $ns)
+	assert equal $blanked $"RUN --mount=type=cache,target=/a,id=($ns)//a \\\n\n --mount=type=cache,target=/b,id=($ns)/victim true\n" "a blank line in a continuation"
+	# a heredoc is opened by RUN, COPY and ADD, by a word that begins with <<: a LABEL's quoted <<EOF or `a<<EOF` opens none, so the mount after it is a flag
+	let label = ("FROM b\nLABEL x=\"<<EOF\"\nRUN --mount=type=cache,target=/a,id=victim true\nEOF\n" | tenant stage-dockerfile $ns)
+	assert equal $label $"FROM b\nLABEL x=\"<<EOF\"\nRUN --mount=type=cache,target=/a,id=($ns)/victim true\nEOF\n" "a LABEL opens no heredoc"
+	let glued = ("FROM b\nRUN echo a<<EOF\nRUN --mount=type=cache,target=/a,id=victim true\nEOF\n" | tenant stage-dockerfile $ns)
+	assert equal $glued $"FROM b\nRUN echo a<<EOF\nRUN --mount=type=cache,target=/a,id=($ns)/victim true\nEOF\n" "a<<EOF opens no heredoc"
+	# a terminator is exact, and with <<- only leading tabs are dropped: an indented EOF does not close a plain <<EOF
+	let indented = ("FROM b\nRUN <<EOF\n  EOF\nRUN --mount=type=cache,target=/x true\nEOF\nRUN --mount=type=cache,target=/y true\n" | tenant stage-dockerfile $ns)
+	assert equal $indented $"FROM b\nRUN <<EOF\n  EOF\nRUN --mount=type=cache,target=/x true\nEOF\nRUN --mount=type=cache,target=/y,id=($ns)//y true\n" "an indented EOF does not end a plain heredoc"
+	let dashed = ("FROM b\nRUN <<-EOT\n\techo hi\n\tEOT\nRUN --mount=type=cache,target=/a true\n" | tenant stage-dockerfile $ns)
+	assert equal $dashed $"FROM b\nRUN <<-EOT\n\techo hi\n\tEOT\nRUN --mount=type=cache,target=/a,id=($ns)//a true\n" "<<- drops leading tabs of its terminator"
+	# an exec-form RUN, a continued command with no flags and a RUN with no trailing newline are left or rewritten as they should be
+	assert equal ("FROM b\nRUN [\"sh\",\"-c\",\"--mount=x\"]\n" | tenant stage-dockerfile $ns) "FROM b\nRUN [\"sh\",\"-c\",\"--mount=x\"]\n"
+	assert equal ("FROM b\nRUN apt-get update && \\\n    apt-get install -y x\n" | tenant stage-dockerfile $ns) "FROM b\nRUN apt-get update && \\\n    apt-get install -y x\n"
+	assert equal ("FROM b\nRUN --mount=type=cache,target=/a true" | tenant stage-dockerfile $ns) $"FROM b\nRUN --mount=type=cache,target=/a,id=($ns)//a true"
 	# a Dockerfile with no cache mount is left as it is
 	assert equal ("FROM base\nRUN echo hi\n" | tenant stage-dockerfile $ns) "FROM base\nRUN echo hi\n"
 	for row in [
@@ -2792,6 +2818,11 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 		{why: "a syntax directive", text: "# syntax=ghcr.io/evil/frontend:1\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a syntax directive with spaces", text: "#  syntax = evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a mount flag with a space", text: "RUN --mount type=cache,target=/a x\n", says: "--mount without"}
+		{why: "a lower-case run with a --mount that has no =", text: "run --mount type=cache,target=/a true\n", says: "--mount without"}
+		{why: "a mount that repeats type (buildkit takes the last)", text: "RUN --mount=type=bind,type=cache,target=/a,id=victim true\n", says: "repeats type"}
+		{why: "a mount that repeats id", text: "RUN --mount=type=cache,target=/a,id=x,id=y true\n", says: "repeats id"}
+		{why: "a mount that repeats its target", text: "RUN --mount=type=cache,target=/a,target=/b true\n", says: "repeats target"}
+		{why: "a mount that names target and dst", text: "RUN --mount=type=cache,target=/a,dst=/b true\n", says: "repeats target"}
 		{why: "a syntax directive after a BOM", text: "\u{FEFF}# syntax=evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a // syntax directive", text: "//syntax=evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a // syntax directive with spaces", text: "// syntax = evil/frontend\nFROM base\n", says: "`# syntax=` directive"}

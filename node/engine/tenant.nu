@@ -277,7 +277,10 @@ export def stage-dockerfile [namespace: string]: string -> string {
 		# a heredoc body is content, up to its terminator
 		if ($pending | is-not-empty) {
 			$out = ($out | append $line)
-			if ($bare | str trim) == ($pending | first) { $pending = ($pending | skip 1) }
+			# a terminator is the line itself; with `<<-` leading tabs (and only tabs) are dropped first
+			let want = ($pending | first)
+			let seen = if $want.dash { $bare | str trim --left --char "\t" } else { $bare }
+			if $seen == $want.word { $pending = ($pending | skip 1) }
 			continue
 		}
 		if ($ins | is-empty) {
@@ -295,8 +298,8 @@ export def stage-dockerfile [namespace: string]: string -> string {
 			}
 			# a comment between instructions, or a blank line
 			if ($bare =~ '^\s*(#|$)') { $out = ($out | append $line); continue }
-		} else if ($bare =~ '^\s*#') {
-			# a comment line inside a continued instruction is skipped by the parser: it joins the instruction as it is
+		} else if ($bare =~ '^\s*(#|$)') {
+			# a comment or blank line inside a continued instruction is skipped by the parser: it joins the instruction as it is
 			$ins = ($ins | append $line)
 			continue
 		}
@@ -317,8 +320,18 @@ export def stage-dockerfile [namespace: string]: string -> string {
 
 # One logical instruction (its continuation lines joined with "\n"): a RUN (or ONBUILD RUN) has its mount flags made safe; the heredoc terminators it opens are answered, so their bodies are left alone.
 def stage-instruction [ins: string, namespace: string]: nothing -> record {
-	let heredocs = ($ins | parse --regex r#'<<-?\s*["']?(?<w>[A-Za-z_][A-Za-z0-9_]*)["']?'# | get w)
-	let m = ($ins | parse --regex '(?s)^(?<head>\s*(?i:ONBUILD\s+)?RUN)(?<flags>(?:[ \t]+|\\\r?\n)*(?:--\S+(?:[ \t]+|\\\r?\n)*)*)(?<rest>.*)$')
+	# a heredoc is opened by RUN, COPY and ADD (ONBUILD included), by a word that begins with `<<` and has a name (buildkit's `^<<(-?)\s*([^<]*)$`, the name unquoted)
+	let keyword = ($ins | parse --regex '(?is)^\s*(?:ONBUILD\s+)?(?<k>[A-Za-z]+)' | get -o 0.k | default "" | str uppercase)
+	let heredocs = if $keyword in [RUN COPY ADD] {
+		$ins | split row --regex '\s+' | where {|w| $w =~ '^<<' } | each {|w|
+			let m = ($w | parse --regex '^<<(?<dash>-?)(?<name>[^<]*)$' | get -o 0)
+			if $m == null { null } else {
+				let name = ($m.name | str replace --all --regex r#'["']'# '')
+				if ($name | is-empty) { null } else { {word: $name, dash: ($m.dash == "-")} }
+			}
+		} | compact
+	} else { [] }
+	let m = ($ins | parse --regex '(?s)^(?<head>\s*(?i:ONBUILD\s+)?(?i:RUN))(?<flags>(?:[ \t]+|\\[ \t]*\r?\n(?:[ \t]*(?:#[^\n]*)?\r?\n)*)*(?:--\S+(?:[ \t]+|\\[ \t]*\r?\n(?:[ \t]*(?:#[^\n]*)?\r?\n)*)*)*)(?<rest>.*)$')
 	if ($m | is-empty) { return {text: $ins, heredocs: $heredocs} }
 	let parts = ($m | first)
 	{text: $"($parts.head)((stage-run-flags $parts.flags $namespace))($parts.rest)", heredocs: $heredocs}
@@ -337,6 +350,10 @@ def stage-run-flags [flags: string, namespace: string]: nothing -> string {
 		if ($value | str contains '$') { error make {msg: $"a tenant's Dockerfile has the mount flag ($flag), which names a variable: a build argument would expand to a cache id outside the namespace's"} }
 		if ($value =~ r#'["'`\\]'#) { error make {msg: $"a tenant's Dockerfile has the mount flag ($flag), with a quote or an escape character in it: a continuation line could append a second id, so a tenant's mount flags are plain"} }
 		let fields = ($value | split row ',' | each {|f| let kv = ($f | split row -n 2 '='); let k = ($kv | get 0 | str lowercase); let v = ($kv | get -o 1 | default ""); {k: $k, v: (if $k == "type" { $v | str lowercase } else { $v })} })
+		# buildkit takes the last of a repeated key: a mount that repeats type, id or its target (dst and destination are the same key) is refused, so the one the rewrite reads is the one buildkit does
+		for key in [[type] [id] [target dst destination]] {
+			if ($fields | where {|f| $f.k in $key } | length) > 1 { error make {msg: $"a tenant's Dockerfile has the mount flag ($flag), which repeats ($key | first): buildkit reads the last one"} }
+		}
 		let kind = ($fields | where k == "type" | get -o 0.v | default "")
 		let placeholder = $"__TENANT_MOUNT_($i)__"
 		$out = ($out | str replace --all $flag $placeholder)
