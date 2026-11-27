@@ -567,6 +567,28 @@ policiesSentByDefault: (#AlertPolicies & {policies: {}, channels: []}).toSubscri
 subscriberMakesChannel: (#Project & {alertSubscribers: x: {file: "a.json"}}).notificationChannels.x.pubsub.topic & "x"
 unknownTopicRefused: _ok & {notificationChannels: o: pubsub: topic: "nobody"} & matchN(0, [#Project])
 topicNeedsJson: _ok & {alertSubscribers: x: {file: "a.txt"}} & matchN(0, [#Project])
+// Everyone may never pull the alerts, and an opt-out is enforced: a policy that skips a subscriber does not name
+// its channel, and a topic has one channel.
+everyoneRefused: _ok & {alertSubscribers: x: {file: "a.json", subscribers: allUsers: true}} & matchN(0, [#Project])
+authenticatedRefused: _ok & {alertSubscribers: x: {file: "a.json", subscribers: allAuthenticatedUsers: true}} & matchN(0, [#Project])
+_one: _ok & {alertSubscribers: x: {file: "a.json"}, alertSubscribers: y: {file: "b.json"}}
+optOutNamingRefused: _one & {alertPolicies: p: {file: "a.json", channels: ["x"], toSubscribers: false}} & matchN(0, [#Project])
+optOutListNamingRefused: _one & {alertPolicies: p: {file: "a.json", channels: ["x"], toSubscribers: ["x"]}} & matchN(0, [#Project])
+optOutOtherNamed: _one & {alertPolicies: p: {file: "a.json", channels: ["x"], toSubscribers: ["y"]}} & matchN(1, [#Project])
+optOutUptimeRefused: _one & {uptimeChecks: u: {host: "a.co", channels: ["x"], toSubscribers: false}} & matchN(0, [#Project])
+secondChannelRefused: _one & {notificationChannels: other: pubsub: topic: "x"} & matchN(0, [#Project])
+skipNone: (#skip & {to: true, names: ["x", "y"]}).out & []
+skipAll: (#skip & {to: false, names: ["x", "y"]}).out & ["x", "y"]
+skipListed: (#skip & {to: ["y"], names: ["x", "y"]}).out & ["y"]
+chansSkipListed: (#chans & {in: ["o"], subs: ["x", "y"], to: ["y"]}).out & ["o", "x"]
+// The topic and the subscription are kept (their names are ForceNew), and the agent that publishes is made first.
+subscriberTopicKept: _subTopic.lifecycle & {prevent_destroy: true}
+subscriberSubKept: _subSub.lifecycle & {prevent_destroy: true}
+_subAgent: _sub.google_project_service_identity.example_project_123_my_app
+subscriberAgentMade: _subAgent & {provider: "google-beta.example_project_123", service: "monitoring.googleapis.com", project: "example-project-123"}
+subscriberGrantAfterAgent: _sub.google_pubsub_topic_iam_member.example_project_123_my_app_publisher.depends_on & ["google_project_service_identity.example_project_123_my_app"]
+subscriberBetaProvider: [for p in _subscriber.tofu.provider["google-beta"] if p.alias == "example_project_123" {p}] & [_]
+
 // Adopted by the topic and the channel together: one without the other is no subscriber of a policy.
 _subDraft: #Plan & {
 	backend: _plan.backend

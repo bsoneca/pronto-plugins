@@ -88,6 +88,18 @@ import "list"
 	// Subscribers to the project's alerts (#AlertSubscriber), by the name of their channel.
 	alertSubscribers: [Name=string]: #AlertSubscriber
 	// Each makes its channel, named as it is.
+	// A topic has one channel: a second would send the same alert twice.
+	for nm, _ in alertSubscribers if len([for _, c in notificationChannels if c.pubsub != _|_ if c.pubsub.topic == nm {c}]) > 1 {
+		"alert subscriber \(nm) has more than one notification channel": _|_
+	}
+
+	// A policy or check that opts out of a subscriber does not name its channel.
+	for nm, a in alertPolicies for c in a.channels if notificationChannels[c].pubsub != _|_ if list.Contains((#skip & {to: a.toSubscribers, names: [for n, _ in alertSubscribers {n}]}).out, notificationChannels[c].pubsub.topic) {
+		"alert policies \(nm) name channel \(c) of a subscriber they opt out of": _|_
+	}
+	for nm, u in uptimeChecks for c in u.channels if notificationChannels[c].pubsub != _|_ if list.Contains((#skip & {to: u.toSubscribers, names: [for n, _ in alertSubscribers {n}]}).out, notificationChannels[c].pubsub.topic) {
+		"uptime check \(nm) names channel \(c) of a subscriber it opts out of": _|_
+	}
 	for nm, _ in alertSubscribers {notificationChannels: (nm): pubsub: topic: nm}
 
 	// A channel adopted without its topic would publish nowhere.
@@ -355,7 +367,8 @@ import "list"
 // `toSubscribers: false`. Made here, never imported.
 #AlertSubscriber: {
 	file!: string & =~"\\.json$"
-	subscribers: *{} | #Members
+	// Never everyone: a member that may pull the alerts is named.
+	subscribers: *{} | {[#Member & !="allUsers" & !="allAuthenticatedUsers"]: true}
 }
 
 // PromQL alerting policies, from a JSON file of the operator's repository, beside the state
@@ -368,8 +381,8 @@ import "list"
 	file?: string & =~"\\.json$"
 	policies: [Name=string]: #AlertPolicy
 	channels: [...string]
-	// Also sent to the project's alertSubscribers.
-	toSubscribers: *true | bool
+	// Also sent to the project's alertSubscribers: all (true), none (false), or all but the topics listed.
+	toSubscribers: *true | false | [...string]
 }
 
 // A custom metric's descriptor. The default is a gauge of integers with no unit, the shape of a
@@ -413,8 +426,8 @@ import "list"
 	failingLocations: *2 | int & >=1
 	window:           *"300s" | =~"^[0-9]+s$"
 	severity:         *"page" | "warning"
-	// Also sent to the project's alertSubscribers.
-	toSubscribers: *true | bool
+	// Also sent to the project's alertSubscribers: all (true), none (false), or all but the topics listed.
+	toSubscribers: *true | false | [...string]
 	documentation: *"The check of \(host)\(path) fails from several regions: the node, its tunnel or the app is down, or Cloudflare blocks the checkers." | string
 	channels: [...string]
 }

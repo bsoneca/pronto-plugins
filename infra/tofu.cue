@@ -17,7 +17,22 @@ import (
 
 // The channels of an alert policy or an uptime check: the ones it names, then the project's alert
 // subscribers' unless it opts out.
-#chans: {in: [...string], subs: [...string], to: bool, out: list.Concat([in, [if to for n in subs if !list.Contains(in, n) {n}]])}
+#chans: C={in: [...string]
+	subs: [...string]
+	to: *true | false | [...string]
+	out: list.Concat([in, [for n in subs if !list.Contains(in, n) if !list.Contains(skip.out, n) {n}]])
+	skip: #skip & {to: C.to, names: C.subs}
+}
+
+// The subscribers a policy or check opts out of: every one (false), those listed, or none (true).
+#skip: {
+	to: *true | false | [...string]
+	names: [...string]
+	out: [...string]
+	if to == true {out: []}
+	if to == false {out: names}
+	if to != true && to != false {out: [for n in names if list.Contains(to, n) {n}]}
+}
 
 #Plan: Plan={
 	state:   #State
@@ -57,7 +72,7 @@ import (
 	_imports: [Address=string]: {to: Address, id: string, project: string, found: *false | bool}
 
 	// The projects with a Firebase Hosting site, which only the google-beta provider holds.
-	let beta = [for P in state.projects if len([for s, _ in P.hostingSites if P.adoptAll || list.Contains(*P.adopt["hostingSites"] | [], s) {s}]) > 0 {P.id}]
+	let beta = [for P in state.projects if len([for s, _ in P.hostingSites if P.adoptAll || list.Contains(*P.adopt["hostingSites"] | [], s) {s}]) > 0 || len([for s, _ in P.alertSubscribers if P.adoptAll || list.Contains(*P.adopt["topics"] | [], s) {s}]) > 0 {P.id}]
 
 	// The SQL users whose passwords OpenTofu makes: random needs its provider.
 	let randoms = list.Concat([
@@ -435,13 +450,24 @@ import (
 			let k = (#name & {in: "\(P.id)_\(nm)"}).out
 			let f = "jsondecode(file(\"${path.module}/../\(sub.file)\"))"
 			tofu: data: google_project: (k): {project_id: P.id}
+			// The names are ForceNew, and read from a file: a changed name must not drop the topic or its backlog.
 			tofu: resource: google_pubsub_topic: (k): {
 				depends_on: deps
 				project:    P.id
 				name:       "${\(f).topic}"
+				lifecycle: prevent_destroy: true
+			}
+			// Monitoring's notification service agent is made first: on a fresh project it does not exist,
+			// and a grant to it would be refused.
+			tofu: resource: google_project_service_identity: (k): {
+				provider:   "google-beta.\(p)"
+				depends_on: deps
+				project:    P.id
+				service:    "monitoring.googleapis.com"
 			}
 			// Monitoring's own notification account publishes to it, and nobody else.
 			tofu: resource: google_pubsub_topic_iam_member: "\(k)_publisher": {
+				depends_on: ["google_project_service_identity.\(k)"]
 				project: P.id
 				topic:   "${google_pubsub_topic.\(k).name}"
 				role:    "roles/pubsub.publisher"
@@ -455,7 +481,8 @@ import (
 				ack_deadline_seconds:       "${\(f).ackDeadlineSeconds}"
 				message_retention_duration: "${\(f).messageRetentionDuration}"
 				retain_acked_messages:      false
-				expiration_policy: ttl: ""
+				expiration_policy: ttl:     ""
+				lifecycle: prevent_destroy: true
 			}
 			for m in list.SortStrings([for m, _ in sub.subscribers {m}]) {
 				tofu: resource: google_pubsub_subscription_iam_member: "\((#name & {in: "\(k)_\(m)"}).out)": {
