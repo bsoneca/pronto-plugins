@@ -1,7 +1,7 @@
 # node
 
 The release of a pronto app onto the Contabo node's k3s: upstream pronto's manifests (the version the app
-pins, bonisoft3/pronto's CUE module v1.5.1, v1.7.0, v1.10.1, v1.11.1, v1.14.1, v1.15.1, v1.16.1, v1.17.1 and v1.18.1, and the runtime tools of `validated_pins`: an app's mise pins the tool its module's distribution config names, one release behind, so v1.7.0 runs under tool 1.6.0, v1.10.1 under 1.10.0, v1.11.1 under 1.11.0, v1.14.1 under 1.14.0 and v1.15.1 under 1.15.0, v1.16.1 under 1.16.0 and v1.17.1 under 1.17.0; module v1.15.0 names 1.14.0, the previous runtime, so it can never match its own and apps pin v1.15.1), patched and released by an engine that lives in this repository,
+pins, bonisoft3/pronto's CUE module v1.5.1, v1.7.0, v1.10.1, v1.11.1, v1.14.1, v1.15.1, v1.16.1, v1.17.1 and v1.18.1, and the runtime tools of `validated_pins`: an app's mise pins the tool its module's distribution config names, one release behind, so v1.7.0 runs under tool 1.6.0, v1.10.1 under 1.10.0, v1.11.1 under 1.11.0, v1.14.1 under 1.14.0 and v1.15.1 under 1.15.0, v1.16.1 under 1.16.0, v1.17.1 under 1.17.0, and v1.18.1 under 1.18.0; module v1.15.0 names 1.14.0, the previous runtime, so it can never match its own and apps pin v1.15.1), patched and released by an engine that lives in this repository,
 images built on the node's own buildkitd and pushed to the node's own registry, which the node pulls from.
 No kind, no second cluster, no Cloud Build, no Artifact Registry, no gcloud.
 
