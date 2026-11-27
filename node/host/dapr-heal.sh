@@ -22,6 +22,20 @@ state=${DAPR_HEAL_STATE:-/var/lib/pronto/dapr-heal}
 # shellcheck disable=SC2086 # KUBECTL is words: "k3s kubectl"
 k() { $KUBECTL --request-timeout=30s "$@"; }
 
+# One live sweep at a time, on a lock file beside the state folder (a file inside it would be read as a mark): a sweep that starts while another
+# runs ends at once, clean. Where flock is not installed (a laptop) there is none.
+if [ "$dry" != 1 ] && command -v flock >/dev/null 2>&1; then
+  mkdir -p "$(dirname "$state")"
+  exec 9>"$state.lock"
+  flock -n 9 || { echo "dapr-heal: another sweep holds $state.lock: nothing to do"; exit 0; }
+fi
+
+# A mark's time, as seconds since 1970 (GNU stat, else BSD's).
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
+# What was written is on the disk before a name points at it, and the name is, before the sweep says it rolled: coreutils' sync takes files and
+# a folder; elsewhere a plain sync does.
+flush() { sync "$@" 2>/dev/null || sync; }
+
 stamp='^(20[0-9][0-9])-([0-9][0-9])-([0-9][0-9])[ T]([0-9][0-9]):([0-9][0-9]):([0-9][0-9])(\.[0-9]+)? ?(Z|([+-])([0-9][0-9]):?([0-9][0-9]))$'
 # A creation time (RFC 3339) as seconds since 1970; fails on anything else.
 epoch() {
@@ -61,7 +75,7 @@ while IFS='|' read -r ns name phase deleting created owner containers puid; do
   # (its mark, below, stays).
   young=0
   if at=$(epoch "$created") && [ $((now - at)) -lt "$GRACE_SECONDS" ]; then young=1; fi
-  bare="$bare$ns|$name|$owner|$young|$puid"$'\n'
+  bare="$bare$ns|$name|$owner|$young|$puid|${at:-0}"$'\n'
 done <<<"$pods"
 
 # A mark says a workload was rolled for bare pods. One whose pods all run their sidecar has done its work: a later outage is a new
@@ -102,7 +116,7 @@ fi
 present=""
 targets=""
 incomplete=0
-while IFS='|' read -r ns name owner young puid; do
+while IFS='|' read -r ns name owner young puid created_at; do
   [ -n "$name" ] || continue
   case "$owner" in
     ReplicaSet/*)
@@ -120,7 +134,7 @@ while IFS='|' read -r ns name owner young puid; do
   ouid=${owner##*@}
   owner=${owner%@*}
   present="$present$ns.${owner//\//.}"$'\n'
-  [ "$young" = 1 ] || targets="$targets$ns|$owner|$ouid|$puid"$'\n'
+  [ "$young" = 1 ] || targets="$targets$ns|$owner|$ouid|$puid|$created_at"$'\n'
 done <<<"$bare"
 
 # The sorted targets are read into a variable first: a sort that failed must not look like a workload-free sweep.
@@ -169,57 +183,82 @@ while IFS='|' read -r ns owner ouid; do
     failed=1
     continue
   fi
-  # The uids of this workload's bare pods now.
-  if ! uids=$(awk -F'|' -v k="$ns|$owner|$ouid" '$1 "|" $2 "|" $3 == k { print $4 }' <<<"$sorted" | sort -u | tr '\n' ' '); then
+  # This workload's bare pods now: uid and creation time (seconds), one a line.
+  if ! podlist=$(awk -F'|' -v k="$ns|$owner|$ouid" '$1 "|" $2 "|" $3 == k { print $4 " " $5 }' <<<"$sorted" | sort -u); then
     echo "dapr-heal: the bare pods of $ns/$owner could not be listed: not rolled" >&2
     failed=1
     continue
   fi
+  uids=$(while read -r u _; do printf '%s ' "$u"; done <<<"$podlist")
   if [ -e "$mark" ]; then
-    mid=$(sed -n 's/^attempt=//p' "$mark") || mid=""
-    mpods=$(sed -n 's/^pods=//p' "$mark") || mpods=""
-    within=$(find "$mark" -mmin "-$COOLDOWN_MINUTES" 2>/dev/null) || within=""
+    # A mark that cannot be read is no mark that can be dropped: the workload is left alone and the run fails.
+    if ! mid=$(sed -n 's/^attempt=//p' "$mark") || ! mpods=$(sed -n 's/^pods=//p' "$mark") || ! within=$(find "$mark" -mmin "-$COOLDOWN_MINUTES") || ! mmtime=$(mtime "$mark"); then
+      echo "dapr-heal: the mark $mark of $ns/$owner could not be read: not rolled" >&2
+      failed=1
+      continue
+    fi
     if [ -z "$mid" ]; then
-      # A mark with no attempt in it (an older one): nothing says what it did. It is dropped and the workload gets an attempt of its own.
-      echo "dapr-heal: $ns/$owner has a mark with no attempt in it: dropped"
+      # A mark with no attempt in it (an older one): nothing says what it did, but its time is when the workload was last rolled. Within the
+      # cooldown the workload waits; after it, it is dropped and the workload gets an attempt of its own.
+      if [ -n "$within" ]; then
+        echo "dapr-heal: $ns/$owner has an older mark, rolled less than $COOLDOWN_MINUTES minutes ago: waiting"
+        continue
+      fi
+      echo "dapr-heal: $ns/$owner has an older mark with no attempt in it, past the cooldown: dropped"
       if [ "$dry" != 1 ] && ! rm -f "$mark"; then echo "dapr-heal: the mark $mark could not be removed" >&2; failed=1; continue; fi
+    elif ! [[ $mid =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]]; then
+      echo "dapr-heal: the mark $mark of $ns/$owner holds an attempt id that is not one of ours ('$mid'): not rolled" >&2
+      failed=1
+      continue
     elif [ "$lattempt" != "$mid" ]; then
       # The attempt the mark records is not on the workload: a reboot or a lost request came between the mark and the patch. The same patch is
-      # sent again, with the same id, whatever the cooldown says.
+      # sent again, with the same id, whatever the cooldown says, and the mark's time is now.
       if [ "$dry" = 1 ]; then echo "dapr-heal: would send $ns/$owner's attempt $mid again (it is not on the workload)"; continue; fi
       if err=$(patch_id "$ns" "$owner" "$mid"); then
-        echo "dapr-heal: rolled $ns/$owner: attempt $mid had not landed and was sent again"
+        if touch "$mark"; then
+          echo "dapr-heal: rolled $ns/$owner: attempt $mid had not landed and was sent again"
+        else
+          echo "dapr-heal: attempt $mid was sent again to $ns/$owner, but the mark $mark could not be touched" >&2
+          failed=1
+        fi
       else
         echo "dapr-heal: sending attempt $mid to $ns/$owner again failed: $err" >&2
         failed=1
       fi
       continue
     else
-      # It landed. Are the pods it covered still there? If any is, it is the same incident: waited out, then an error. If none is, these bare
-      # pods are a new incident (no sweep saw the healthy interval between), and they get an attempt once the cooldown is out.
+      # It landed. A bare pod now is the same incident when the attempt covered it, or when it was created between the attempt and the end of
+      # its cooldown: that is what the roll itself made, and it is still bare. Only bare pods that are all new, made after that window, are a
+      # new incident (no sweep saw the healthy interval between): they get an attempt once the cooldown is out.
+      window_end=$((mmtime + COOLDOWN_MINUTES * 60))
       persists=0
-      for u in $uids; do case " $mpods " in *" $u "*) persists=1 ;; esac; done
+      while read -r u c; do
+        [ -n "$u" ] || continue
+        case " $mpods " in *" $u "*) persists=1 ;; *) if [ "$c" -le "$window_end" ]; then persists=1; fi ;; esac
+      done <<<"$podlist"
       if [ -n "$within" ]; then
         echo "dapr-heal: $ns/$owner was rolled less than $COOLDOWN_MINUTES minutes ago and a pod of it is still without its sidecar: waiting"
         continue
       fi
       if [ "$persists" = 1 ]; then
-        # Past the cooldown, a pod it covered is still bare: the roll landed and did not fix it (the injector injects nothing for it, or the
-        # rollout is stuck: OnDelete, paused, an ordered StatefulSet, a Pending pod). Another would not either: it is said and the run fails
-        # until someone looks, and the mark stays so the next run says it again.
-        echo "dapr-heal: $ns/$owner was rolled and, past the cooldown of $COOLDOWN_MINUTES minutes, a pod it covered is still without its sidecar: not rolled again" >&2
+        # Past the cooldown, a pod the attempt covered or made is still bare: the roll landed and did not fix it (the injector injects nothing
+        # for it, or the rollout is stuck: OnDelete, paused, an ordered StatefulSet, a Pending pod). Another would not either: it is said and
+        # the run fails until someone looks, and the mark stays so the next run says it again.
+        echo "dapr-heal: $ns/$owner was rolled and, past the cooldown of $COOLDOWN_MINUTES minutes, a pod it covered or made is still without its sidecar: not rolled again" >&2
         failed=1
         continue
       fi
-      echo "dapr-heal: $ns/$owner has new bare pods, none of those its last attempt covered: a new incident"
+      echo "dapr-heal: $ns/$owner has new bare pods, made after its last attempt's cooldown and none covered by it: a new incident"
     fi
   fi
   if [ "$dry" = 1 ]; then echo "dapr-heal: would roll $ns/$owner"; continue; fi
-  # The mark is written before the patch is sent, whole beside itself and renamed: a state folder that cannot be written must not leave a
-  # restart nothing remembers (every sweep would send it again), and a half-written mark must not be read.
+  # The mark is written before the patch is sent, to a name no workload can have (a leading dot), flushed, renamed over the mark and the folder
+  # flushed: a state folder that cannot be written must not leave a restart nothing remembers (every sweep would send it again), and a power
+  # cut must not leave a mark that is empty or half there.
   id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  if ! { printf 'attempt=%s\npods=%s\n' "$id" "$uids" >"$mark.new" && mv -f "$mark.new" "$mark"; }; then
-    rm -f "$mark.new" 2>/dev/null || true
+  tmp="$state/.tmp.$$.$ns.${owner//\//.}"
+  if ! { printf 'attempt=%s\npods=%s\n' "$id" "$uids" >"$tmp" && flush "$tmp" && mv -f "$tmp" "$mark" && flush "$state"; }; then
+    rm -f "$tmp" 2>/dev/null || true
     echo "dapr-heal: $ns/$owner: the mark $mark cannot be written: not rolled" >&2
     failed=1
     continue
