@@ -19,6 +19,17 @@ internet) into a file the lead tails; a CRITICAL one is also sent to the phone (
   the driver reads (project, subscription, severities, phone); the second is the policy that mails
   the operator when the oldest unread alert is more than 10 minutes old.
 
+## Its tests, and its generation
+
+The installer also writes the cases that hold the rules and the driver (`tests/unit/alerts.cue`, and
+`tests/unit/alerts_run.js`, which runs `alerts/subscriber.ts` against a fake Pub/Sub endpoint), and the
+generate rule that writes `observability/alerts.*.json` from the spec (`pronto/alerts.cue`, with
+`pronto/exports.nu`, which evaluates the program once for every plugin). The app wires its own unit runner
+once: the suite `alerts` in `tests/unit/suites.cue`, `import * as alerts from '../../alerts/inbox.js'` and
+`import * as alertsrun from './alerts_run.js'` in `tests/unit/registry.js` (both namespaces), and a `test`
+check that runs `tests/unit.ts -- alerts`. A change to `alerts_spec.cue` is then one `generate` away from
+the files the infra state and the subscriber read.
+
 ## Turn it on for an app
 
 ```sh
@@ -64,7 +75,9 @@ file that is already there is appended to, never replaced. Tail it with `tail -F
 rotation renames the file, and `tail -f` would keep reading the old one.
 
 The push comes after the acknowledge, so a crash between the two loses only the push: the line is in the
-inbox, and the phone is not told.
+inbox, and the phone is not told. A write is whole or an error (a short write goes on from where it stopped), and an inbox
+that ends in a cut-off line gets a newline before the next record, so the fragment is a line of its own and never the front of
+an incident the readers would then lose.
 
 Pub/Sub delivers at least once, so a line may be there twice: the readers keep one per `id:state`
 (`inbox.js`'s `unique` and `parseInbox`). Each app has its own `~/.cache/pronto/alerts/<app>.heartbeat`, rewritten

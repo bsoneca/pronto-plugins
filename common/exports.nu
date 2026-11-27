@@ -20,6 +20,8 @@ const exports = [
 	{name: "adsense", expr: "adsense", rule: "ads"}
 	{name: "umami", expr: "analytics.umami", rule: "analytics"}
 	{name: "errors", expr: "errors", rule: "errors"}
+	{name: "alertsubscriber", expr: "alerts.subscriber", rule: "alerts"}
+	{name: "alertpolicies", expr: "alerts.policies", rule: "alerts"}
 ]
 
 # Every file the evaluation reads: the program's CUE, and what it embeds (bayt.json, DESIGN.md,

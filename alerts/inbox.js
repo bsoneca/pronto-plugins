@@ -10,7 +10,10 @@ const KEPT = ["id", "state", "policy", "display", "severity", "app", "owner", "o
 
 const iso = (s) => {
   const n = Number(s);
-  return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString().replace(/\.\d{3}Z$/, "Z") : null;
+  if (!Number.isFinite(n) || n <= 0) return null;
+  // A time past what a Date holds is no time: one such incident must not end the pull of the others.
+  const d = new Date(n * 1000);
+  return Number.isFinite(d.getTime()) ? d.toISOString().replace(/\.\d{3}Z$/, "Z") : null;
 };
 
 // A message (what :pull returns: {messageId, data: base64 of the incident's JSON}) as an inbox entry,

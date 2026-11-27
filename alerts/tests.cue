@@ -5,7 +5,7 @@ import "strings"
 _t: #Host & {package: "myapp", app: "my-app", project: "my-project-1"}
 
 // An opt-in writes the driver, its rules and the schema, and seeds the app's own alerts_spec.cue.
-written: [for p, f in _t.files if !f.seed {p}] & ["alerts/subscriber.ts", "alerts/inbox.js", "alerts_plugin.cue"]
+written: [for p, f in _t.files if !f.seed {p}] & ["pronto/alerts.cue", "pronto/exports.nu", "tests/unit/alerts.cue", "tests/unit/alerts_run.js", "alerts/subscriber.ts", "alerts/inbox.js", "alerts_plugin.cue"]
 seeded: [for p, f in _t.files if f.seed {p}] & ["alerts_spec.cue"]
 
 // The schema joins the app's package; the seed names the app and its project and never a secret.
@@ -47,3 +47,8 @@ plainHttpRefused: _ok & {ntfy: {url: "http://ntfy.example.com", topic: "t"}} & m
 badSeverityRefused: _ok & {push: ["PAGE"]} & matchN(0, [#Alerts])
 badAppRefused: {app: "my app", project: "my-project-1"} & matchN(0, [#Alerts])
 shortAckRefused: _ok & {ackDeadlineSeconds: 5} & matchN(0, [#Alerts])
+
+// The app's generate writes both exports after pronto's writers, from the exports batch, and the app gets the cases that hold its rules,
+// with the driver imported from where the app keeps it.
+generates:  strings.Contains(_t.files["pronto/alerts.cue"].text, "rulemap: alerts: {\"priority\":0") & strings.Contains(_t.files["pronto/alerts.cue"].text, "exports of $f.name") & true
+casesInApp: strings.Contains(_t.files["tests/unit/alerts_run.js"].text, "from '../../alerts/subscriber.ts'") & !strings.Contains(_t.files["tests/unit/alerts_run.js"].text, "'../subscriber.ts'") & strings.HasPrefix(_t.files["tests/unit/alerts.cue"].text, "// pronto-alerts' rules") & true

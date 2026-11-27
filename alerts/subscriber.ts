@@ -45,6 +45,36 @@ export const exists = (p: string) => {
   }
 };
 
+
+// Every byte of `buf` is written: a write may take only a part of it (a full pipe, a signal), and the count it returns is how far
+// to go on. No progress at all is an error, so a stuck write never loops and is never taken for done.
+export function writeAll(file: { writeSync(p: Uint8Array): number }, buf: Uint8Array) {
+  let done = 0;
+  while (done < buf.length) {
+    const n = file.writeSync(buf.subarray(done));
+    if (!(n > 0)) throw new Error(`short write: ${done} of ${buf.length} bytes, then none`);
+    done += n;
+  }
+}
+
+// `data` appended to the file at `path`, flushed to disk. A file that ends in anything but a newline (an earlier append that was cut
+// off) first gets one, so the cut-off fragment is a line of its own, which the readers skip, and never the front of this record.
+export function appendDurably(path: string, data: Uint8Array) {
+  const file = Deno.openSync(path, { create: true, read: true, append: true });
+  try {
+    const size = file.statSync().size;
+    if (size > 0) {
+      const last = new Uint8Array(1);
+      file.seekSync(size - 1, Deno.SeekMode.Start);
+      if (file.readSync(last) === 1 && last[0] !== 10) writeAll(file, new Uint8Array([10]));
+    }
+    writeAll(file, data);
+    file.syncSync();
+  } finally {
+    file.close();
+  }
+}
+
 // The previous day's inbox is renamed for its day, and rotated files past seven days are removed. A day's
 // file that is already there (the job restarted across midnight, the clock went back) is never replaced:
 // the inbox is appended to it, flushed, and only then removed.
@@ -56,13 +86,7 @@ function rotate(dir: string, app: string, today: string) {
       const to = `${dir}/${rotatedName(app, was)}`;
       if (!exists(to)) Deno.renameSync(path, to);
       else {
-        const file = Deno.openSync(to, { append: true });
-        try {
-          file.writeSync(Deno.readFileSync(path));
-          file.syncSync();
-        } finally {
-          file.close();
-        }
+        appendDurably(to, Deno.readFileSync(path));
         Deno.removeSync(path);
       }
     }
@@ -78,7 +102,8 @@ function rotate(dir: string, app: string, today: string) {
 export async function pollOnce(o: Options): Promise<{ pulled: number; written: number; acked: number; pushed: number; dropped: number }> {
   const f = o.fetch ?? fetch;
   const say = o.say ?? (() => {});
-  const now = (o.now ?? (() => new Date()))();
+  const clock = o.now ?? (() => new Date());
+  const now = clock();
   Deno.mkdirSync(o.dir, { recursive: true });
   rotate(o.dir, o.sub.app, day(now));
 
@@ -101,11 +126,15 @@ export async function pollOnce(o: Options): Promise<{ pulled: number; written: n
   };
 
   const got = await call(pullRequest(o.api, sub), o.timeoutMs ?? 120_000);
-  // The heartbeat is the app's own, written only once Pub/Sub has answered this pull 2xx (a refused or
-  // unreachable pull throws before it): the lead trusts the inbox only while it is fresh.
-  Deno.writeTextFileSync(`${o.dir}/${o.sub.app}.heartbeat`, now.toISOString() + "\n");
+  // The heartbeat is the app's own and says the inbox is being kept: for an empty pull, that Pub/Sub answered 2xx (a refused or
+  // unreachable pull throws before it); for one with messages, that they are on disk and acknowledged, at that time. An inbox that
+  // cannot be written leaves it stale.
+  const beat = () => Deno.writeTextFileSync(`${o.dir}/${o.sub.app}.heartbeat`, clock().toISOString() + "\n");
   const messages: Message[] = got.receivedMessages ?? [];
-  if (!messages.length) return { pulled: 0, written: 0, acked: 0, pushed: 0, dropped: 0 };
+  if (!messages.length) {
+    beat();
+    return { pulled: 0, written: 0, acked: 0, pushed: 0, dropped: 0 };
+  }
 
   const path = `${o.dir}/${o.sub.app}.jsonl`;
   const before = (() => {
@@ -129,15 +158,10 @@ export async function pollOnce(o: Options): Promise<{ pulled: number; written: n
     fresh.push(e);
   }
   if (fresh.length) {
-    const file = Deno.openSync(path, { create: true, append: true });
-    try {
-      file.writeSync(new TextEncoder().encode(fresh.map((e) => lineOf(e!)).join("")));
-      file.syncSync();
-    } finally {
-      file.close();
-    }
+    appendDurably(path, new TextEncoder().encode(fresh.map((e) => lineOf(e!)).join("")));
   }
   await call(ackRequest(o.api, sub, messages.map((m) => m.ackId)), 30_000);
+  beat();
 
   let pushed = 0;
   for (const e of fresh) {
@@ -208,8 +232,14 @@ if (import.meta.main) {
   const apps = (verb === first ? rest : Deno.args).map((a) => Deno.realPathSync(a));
   const agent = `${home}/Library/LaunchAgents/${label}.plist`;
   if (verb === "uninstall") {
-    out("launchctl", ["bootout", `gui/${Deno.uid()}/${label}`]);
-    try { Deno.removeSync(agent); } catch { /* not installed */ }
+    // Not loaded is fine; a job that is loaded and will not boot out is not, and a plist that cannot be removed is not.
+    const target = `gui/${Deno.uid()}/${label}`;
+    if (out("launchctl", ["print", target]).ok && !out("launchctl", ["bootout", target]).ok) throw new Error(`${label} is loaded and launchctl would not boot it out`);
+    try {
+      Deno.removeSync(agent);
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
     console.log(`${label}: removed`);
   } else if (verb === "install") {
     if (!apps.length) throw new Error("name the apps' folders");
