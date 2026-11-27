@@ -178,8 +178,8 @@ import (
 // the tenant's own registry path (`<registry>/<namespace>/<app>-database-base:<major>`), and the full tenant image stays with the schema and migration Jobs. `major` is the
 // base's PG_MAJOR (`crane config` at the time it is added: 18 for mecha-database 0.36.1). One entry for each mecha database the validated runtimes generate: pronto 1.17 and 1.18
 // both name 0.36.1, so a pin move that adds a runtime adds its mecha digest here in the same change, and keeps the previous runtime's (N and N-1).
-#TenantDatabaseImages: [...{ref: string, digest: =~"^sha256:[0-9a-f]{64}$", major: =~"^[0-9]+$"}] & [
-	{ref: "bonitao/mecha-database:0.36.1@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598", digest: "sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598", major: "18"},
+#TenantDatabaseImages: [...{name: string, ref: "\(name)@\(digest)", digest: =~"^sha256:[0-9a-f]{64}$", major: =~"^[0-9]+$"}] & [
+	{name: "bonitao/mecha-database:0.36.1", digest: "sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598", major: "18"},
 ]
 
 // The fields a tenant's Cluster may carry (PRONTO-740, Codex): what upstream renders and the engine patches, and nothing else, since a Cluster field is how tenant code or an
@@ -267,7 +267,9 @@ import (
 
 // The volume types a tenant's pod may mount: nothing of the node's (hostPath, and not an nfs, iscsi or csi volume that reaches another system), nothing that
 // carries a token but the pod's own (projected, which the API server scopes to its service account).
-#TenantVolumeTypes: ["configMap", "secret", "emptyDir", "projected", "persistentVolumeClaim", "downwardAPI"]
+// No persistentVolumeClaim: a tenant's release writes none (#PublisherKinds), so the claims in its namespace are the database operator's, and a workload that mounts an
+// instance's claim reads and writes the live database files whatever the approved image and the SQL roles say (the volume is ReadWriteOnce on a node with one node).
+#TenantVolumeTypes: ["configMap", "secret", "emptyDir", "projected", "downwardAPI"]
 
 // Annotations and labels no tenant pod (or the template that makes it) carries: Dapr's sidecar is the platform's (its image, resources and ports), and the cnpg.io/ labels
 // mark a database's own pods, which the operator selects and its policies admit by them.
@@ -363,15 +365,16 @@ import (
 	// size in kB (kB, MB, GB, TB), a time in ms (ms, s, min, h, d), or one of a few words.
 	_bound: {
 		for p, r in #TenantParameters {
-			let v = "variables.params['\(p)'].replace(' ', '')"
+			let raw = "variables.params['\(p)']"
+			let v = "\(raw).replace(' ', '')"
 			let base = [if r.base != _|_ {r.base}, 1][0]
 			let mem = "(\(v).endsWith('TB') ? int(\(v).substring(0, size(\(v)) - 2)) * 1073741824 : \(v).endsWith('GB') ? int(\(v).substring(0, size(\(v)) - 2)) * 1048576 : \(v).endsWith('MB') ? int(\(v).substring(0, size(\(v)) - 2)) * 1024 : \(v).endsWith('kB') ? int(\(v).substring(0, size(\(v)) - 2)) : int(\(v)) * \(base))"
 			let ms = "(\(v).endsWith('ms') ? int(\(v).substring(0, size(\(v)) - 2)) : \(v).endsWith('min') ? int(\(v).substring(0, size(\(v)) - 3)) * 60000 : \(v).endsWith('s') ? int(\(v).substring(0, size(\(v)) - 1)) * 1000 : \(v).endsWith('h') ? int(\(v).substring(0, size(\(v)) - 1)) * 3600000 : \(v).endsWith('d') ? int(\(v).substring(0, size(\(v)) - 1)) * 86400000 : int(\(v)))"
 			(p): [
-				if r.kind == "int" {"\(v).matches('^-?[0-9]+$') && int(\(v)) >= \(r.min) && int(\(v)) <= \(r.max)"},
-				if r.kind == "real" {"\(v).matches('^-?[0-9]+([.][0-9]+)?$') && double(\(v)) >= \(r.min) && double(\(v)) <= \(r.max)"},
-				if r.kind == "mem" {"\(v).matches('^[0-9]+(kB|MB|GB|TB)?$') && \(mem) >= \(r.min) && \(mem) <= \(r.max)"},
-				if r.kind == "ms" {"\(v).matches('^-?[0-9]+(ms|s|min|h|d)?$') && \(ms) >= \(r.min) && \(ms) <= \(r.max)"},
+				if r.kind == "int" {"\(raw).matches('^ *-?[0-9]+ *$') && int(\(v)) >= \(r.min) && int(\(v)) <= \(r.max)"},
+				if r.kind == "real" {"\(raw).matches('^ *-?[0-9]+([.][0-9]+)? *$') && double(\(v)) >= \(r.min) && double(\(v)) <= \(r.max)"},
+				if r.kind == "mem" {"\(raw).matches('^ *[0-9]+ *(kB|MB|GB|TB)? *$') && \(mem) >= \(r.min) && \(mem) <= \(r.max)"},
+				if r.kind == "ms" {"\(raw).matches('^ *-?[0-9]+ *(ms|s|min|h|d)? *$') && \(ms) >= \(r.min) && \(ms) <= \(r.max)"},
 				if r.kind == "enum" {"\(v) in [\(strings.Join([for x in r.values {"'\(x)'"}], ", "))]"},
 			][0]
 		}
@@ -401,6 +404,7 @@ import (
 				]
 				validations: [
 					{expression: "variables.images.all(i, i.startsWith('\(registry)/' + request.namespace + '/'))", message: "a tenant's containers run images from its own namespace's path in the node's registry alone"},
+					{expression: "variables.images.all(i, i.matches('@sha256:[0-9a-f]{64}$'))", message: "a tenant's containers run images pinned by their sha256 digest"},
 					{expression: "variables.accounts.all(a, !(a in [\(_quoted.accounts)]) && !a.endsWith('\(#TenantAccountSuffix)'))", message: "a tenant's pods never run as the publisher's, the builder's or the provisioner's account, nor as a database's own (<cluster>\(#TenantAccountSuffix))"},
 					{expression: "!has(variables.spec.runtimeClassName) && !has(variables.spec.priorityClassName) && (!has(variables.spec.hostUsers) || variables.spec.hostUsers)", message: "a tenant's pods set no runtime class, no priority class and no user namespace"},
 					{expression: "size(variables.sidecarNotes) == 0", message: "a tenant's pods leave Dapr's sidecar (its image, resources and ports) to the platform"},

@@ -378,7 +378,7 @@ if verb == "get":
         # the Clusters already in the namespace (`live_clusters`, names one a line): what a tenant's preflight lists
         if not exists("live_clusters"):
             sys.exit(0)
-        out({"items": [{"metadata": {"name": n}} for n in read("live_clusters").split()]})
+        out({"items": [dict({"metadata": {"name": n.split("=")[0]}}, **({"spec": {"superuserSecret": {"name": n.split("=")[1]}}} if "=" in n else {})) for n in read("live_clusters").split()]})
     if what.startswith("cluster.postgresql.cnpg.io"):
         if exists("read_fail_cluster"):
             fail("Unable to connect to the server: net/http: TLS handshake timeout")
