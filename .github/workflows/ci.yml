@@ -212,6 +212,8 @@ jobs:
           echo "$DENO_SHA256  $dir/deno.zip" | sha256sum -c -
           unzip -q "$dir/deno.zip" -d "$dir"
           echo "$dir" >> "$GITHUB_PATH"
+      - name: Test the journeys reporter in a page's globals (needs deno)
+        run: sayt --script tools.nu nu journeys/reporter_test.nu
       - name: Test errors (needs deno, for its stand-in)
         run: sayt --script tools.nu nu errors/test.nu
       - name: Test modular design (needs deno, for its lint)

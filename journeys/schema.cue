@@ -384,8 +384,8 @@ _journeysHours: {
 					frame = replace(frame, r'\.[0-9a-fA-F]{6,}\.(m?js)', ".${1}")
 					frame = replace(frame, r'#[^\s):]*', "")
 					frame = replace(frame, r'[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+', "<email>")
-					frame = replace(frame, r'eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*', "<token>")
-					frame = replace(frame, r'[A-Za-z0-9_+/=-]{24,}', "<token>")
+					frame = replace(frame, r'(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*', "${1}<token>")
+					frame = replace(frame, r'[A-Za-z0-9_+=-]{24,}', "<token>")
 					frame = replace(frame, r'\d[\d.\-/ ]{6,}\d', "<number>")
 					frame = slice(frame, 0, 200) ?? ""
 					stack = replace(string(.stack) ?? "", r'https?://[^/\s)]*', "")
@@ -394,8 +394,8 @@ _journeysHours: {
 					stack = replace(stack, r'\.[0-9a-fA-F]{6,}\.(m?js)', ".${1}")
 					stack = replace(stack, r'#[^\s):]*', "")
 					stack = replace(stack, r'[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+', "<email>")
-					stack = replace(stack, r'eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*', "<token>")
-					stack = replace(stack, r'[A-Za-z0-9_+/=-]{24,}', "<token>")
+					stack = replace(stack, r'(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*', "${1}<token>")
+					stack = replace(stack, r'[A-Za-z0-9_+=-]{24,}', "<token>")
 					stack = replace(stack, r'\d[\d.\-/ ]{6,}\d', "<number>")
 					stack = slice(stack, 0, 600) ?? ""
 					browser = string(.browser) ?? ""
@@ -665,6 +665,13 @@ _journeysHours: {
 				in: {name: "Error", message: "m", frame: "f (https://x.example/app.js?state=x)private:3:4)", stack: "f (https://x.example/app.js?state=x)private:3:4)"}
 				check: #"""
 					.stack_trace == "    at f (/app.js:3:4)" && !contains(string!(.fingerprint), "private")
+					"""#
+			},
+			{
+				name: "a long legitimate path and a file named keyJson.js are kept in a frame"
+				in: {name: "Error", message: "m", frame: "f (/shell/hatches/journeys/telemetry.js:3:4)", stack: "f (/shell/hatches/journeys/telemetry.js:3:4)\ng (/assets/keyJson.js:5:6)"}
+				check: #"""
+					.stack_trace == "    at f (/shell/hatches/journeys/telemetry.js:3:4)\n    at g (/assets/keyJson.js:5:6)"
 					"""#
 			},
 			{

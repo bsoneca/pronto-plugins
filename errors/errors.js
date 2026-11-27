@@ -162,11 +162,14 @@ export default function mount() {
 	started = true;
 	addEventListener("error", onError, true);
 	addEventListener("unhandledrejection", onRejection);
-	Promise.all([flagOn(config.flag), releaseOf(), flagOn(config.detailFlag)]).then(([on, id, detail]) => {
-		release = id;
-		// The journeys reporter sends an error's detail only while this flag (config.detailFlag, its own and
-		// off where the app is released until it is turned on) answers true; pending, off or unnamed, the name alone.
+	// The journeys reporter sends an error's detail only while this flag (config.detailFlag, its own and
+	// off where the app is released until it is turned on) answers true; pending, off or unnamed, the name
+	// alone. It is asked on its own: a lookup that stalls never holds GlitchTip's reports.
+	flagOn(config.detailFlag).then((detail) => {
 		globalThis.__prontoErrorDetail = detail;
+	});
+	Promise.all([flagOn(config.flag), releaseOf()]).then(([on, id]) => {
+		release = id;
 		settle(on ? "on" : "off");
 		// Whether it reports is the page's to show: a check waits for it before it throws.
 		document.documentElement.dataset.errors = on ? "on" : "off";
