@@ -257,4 +257,13 @@ cases: {
 		{call: "alertsrun.drain", args: [{batches: [[{id: "m1", incident: (_incident & {id: "0.b1", started: 1e18}).out}, {id: "m2", incident: (_incident & {id: "0.b2"}).out}]]}]},
 		{get: "results.0", holds: {pulled: 2, written: 2, acked: 2}},
 	]}
+	"the inbox's folder is flushed after every append, and a failure of it keeps the batch with Pub/Sub until the retry has flushed it": {suite: "alerts", steps: [
+		{call: "alertsrun.drain", args: [{failFirstDirSync: true, passes: 2, batches: [[{id: "m1", incident: (_incident & {id: "0.d1"}).out}], [{id: "m1", incident: (_incident & {id: "0.d1"}).out}]]}]},
+		{keep: "run"},
+		{get: "calls", expect: ["pull Bearer word1", "dirsync failed", "pull Bearer word1", "dirsync", "ack ack-m1"], why: "no acknowledge after the failed flush; the retry finds the file made and flushes the folder all the same, before the acknowledge"},
+		{use: "run"},
+		{get: "errors.length", expect: 1},
+		{use: "run"},
+		{get: "results.0", holds: {written: 1, acked: 1}},
+	]}
 }
