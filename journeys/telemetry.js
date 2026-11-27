@@ -12,8 +12,10 @@
 // Names follow the markup as journeys_gestures.cue derives them: a data-on-*
 // handler by its module, a form by its id, else its action and entity joined
 // by "-", else "form". Nothing a reader typed and no row leaves the page; an error
-// leaves as its name, a trimmed message, its top stack frame and the screen it
-// happened on, which the collector redacts and writes as a log line (prod-watch).
+// leaves as its name alone and, only while the app's error-detail flag is on
+// (globalThis.__prontoErrorDetail, set by pronto-errors), also a redacted message, its
+// top script frames, a browser tag and the screen it happened on, which the collector
+// redacts again and writes as a log line (prod-watch).
 
 const ENDPOINT = "__ENDPOINT__";
 const READER = ["click", "dblclick", "change", "submit", "keydown", "drop"];
@@ -100,7 +102,7 @@ const leave = () => {
 
 // Once per page, not per screen: what the last page kept goes first, the last
 // batch goes when the page does, and a throw nobody caught is reported by its
-// class alone.
+// name alone, or with its detail while the error-detail flag is on.
 if (!globalThis.__prontoJourneys) {
 	globalThis.__prontoJourneys = true;
 	try {
@@ -118,10 +120,10 @@ if (!globalThis.__prontoJourneys) {
 		if (document.visibilityState === "hidden") flush();
 	});
 	const nameOf = (x) => (x instanceof Error ? x.name : typeof x);
-	// An error's detail is sent only while the error_tracking decision (pronto-errors, which sets
-	// globalThis.__prontoErrorTracking when the flag answers) is on; pending or off, the event is the
-	// name alone, as before, whatever the page throws.
-	const detailOn = () => globalThis.__prontoErrorTracking === true;
+	// An error's detail is sent only while its own flag answers true (pronto-errors asks it, from the app's
+	// detailFlag, and sets globalThis.__prontoErrorDetail); pending, off, or with no errors reporter, the
+	// event is the name alone, every time, exactly as it was.
+	const detailOn = () => globalThis.__prontoErrorDetail === true;
 	// What the collector would redact, done here too so none of it is sent: urls, emails, tokens and long
 	// digit runs, then the whole message dropped if it names a chess position or a move (a saved game's
 	// text must never leave the page).
@@ -136,25 +138,31 @@ if (!globalThis.__prontoJourneys) {
 		return FEN.test(text) || MOVE.test(text) ? "" : t.slice(0, ERROR_TEXT);
 	};
 	const messageOf = (x) => clean(x instanceof Error ? x.message : typeof x === "string" ? x : "");
-	// A frame is a line that ends in a location ("fn (url:1:2)", "fn@url:1:2"): any other line of a stack,
-	// its message's lines above all, is not sent. Its url loses origin, query and fragment.
-	const LOCATED = /:\d+:\d+\)?$/;
+	// A frame is rebuilt from fields a strict shape validated, never copied: Chrome's "at fn (url:1:2)" or
+	// Gecko's and Safari's "fn@url:1:2", where url is a script (.js or .mjs) on http(s) or a path, with its
+	// origin, query and fragment left out (a ")" or ":" in them is no end of it: the line and column are read
+	// from the end). Any other line, an exception's name and message above all, is dropped. The stack's
+	// first lines are the message's, so they are cut off before the lines are read, too.
+	const CHROME = /^at (?:async )?(?:((?:new )?[\w$.<>[\]]+(?: \[as [\w$]+\])?) \()?((?:https?:\/\/[^\s()?#]+|\/[^\s()?#]*)\.m?js)(?:[?#]\S*?)?:(\d+):(\d+)\)?$/;
+	const GECKO = /^([\w$.<>/-]*)@((?:https?:\/\/[^\s?#]+|\/[^\s?#]*)\.m?js)(?:[?#]\S*?)?:(\d+):(\d+)$/;
 	const framesOf = (x) => {
-		const stack = x instanceof Error && typeof x.stack === "string" ? x.stack : "";
-		return stack
-			.split("\n")
-			.map((l) => l.trim())
-			.filter((l) => (/^at\s/.test(l) || /@/.test(l)) && LOCATED.test(l))
-			.slice(0, STACK_FRAMES)
-			.map((l) =>
-				l
-					.replace(/^at\s+/, "")
-					.replace(/https?:\/\/[^/\s)]*/g, "")
-					.replace(/[?#][^\s)]*?(:\d+:\d+\)?)$/, "$1")
-					.slice(0, ERROR_TEXT)
-			);
+		if (!(x instanceof Error) || typeof x.stack !== "string") return [];
+		const head = `${x.name}: ${x.message}`;
+		const body = x.stack.startsWith(head) ? x.stack.slice(head.length) : x.stack;
+		const out = [];
+		for (const line of body.split("\n")) {
+			const l = line.trim();
+			const c = CHROME.exec(l);
+			const g = c ? null : GECKO.exec(l);
+			const m = c ?? g;
+			if (!m) continue;
+			const path = m[2].replace(/^https?:\/\/[^/]*/, "");
+			out.push((c ? `${m[1] ? `${m[1]} (` : ""}${path}:${m[3]}:${m[4]}${m[1] ? ")" : ""}` : `${m[1]}@${path}:${m[3]}:${m[4]}`).slice(0, ERROR_TEXT));
+			if (out.length === STACK_FRAMES) break;
+		}
+		return out;
 	};
-	// The first frame: "fn (url:line:col)" without "at ".
+	// The first frame.
 	const frameOf = (x) => framesOf(x)[0] ?? "";
 	const stackOf = (x) => framesOf(x).join("\n").slice(0, STACK_TEXT);
 	// The browser the page runs in, as a tag from a fixed list, never the user agent itself: an
@@ -163,12 +171,11 @@ if (!globalThis.__prontoJourneys) {
 		const ua = String(navigator.userAgent ?? "");
 		return /Instagram/i.test(ua) ? "instagram" : /FBAN|FBAV/.test(ua) ? "facebook" : /; wv\)|\bwv\b/.test(ua) ? "wv" : "other";
 	};
-	// A page reports a few errors, each once, while the detail is on: a loop in a tab is no flood of beacons.
-	// While it is not, every error leaves as its name alone, as it always did.
+	// While the detail is on a page reports a few errors, each once: a loop in a tab is no flood of beacons.
 	const reported = new Set();
 	const report = (kind, thrown, fallback) => {
 		if (!detailOn()) {
-			emit({ type: "error", kind, name: nameOf(thrown), screen: current });
+			emit({ type: "error", kind, name: nameOf(thrown) });
 			return;
 		}
 		const event = { type: "error", kind, name: nameOf(thrown), message: messageOf(thrown) || clean(fallback), frame: frameOf(thrown), stack: stackOf(thrown), browser: browserOf(), screen: current };

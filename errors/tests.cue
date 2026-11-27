@@ -8,7 +8,7 @@ import (
 // The spec as an app writes it, and what it gives the generate step.
 _e: #Errors & {project: 1, key: "921d1ab3ed184f91867663937ab0002f", upstream: "https://errors.example.com"}
 outFiles: list.SortStrings([for f, _ in _e.out {f}]) & ["errors.loader.json", "errors.scenarios.json", "errors.sourcemaps.json"]
-loaderSettings: _e.out["errors.loader.json"] & {project: 1, key: "921d1ab3ed184f91867663937ab0002f", prefix: "/e", flag: "error_tracking"}
+loaderSettings: _e.out["errors.loader.json"] & {project: 1, key: "921d1ab3ed184f91867663937ab0002f", prefix: "/e", flag: "error_tracking", detailFlag: ""}
 // An app that has written nothing is inert: no project, no key.
 _blank: #Errors
 blankIsInert: _blank.out["errors.loader.json"] & {project: 0, key: ""}
@@ -56,7 +56,7 @@ reporterLoads:   strings.Contains(_reporter, "new Set([\"script\", \"link\", \"i
 reporterOrigin:    strings.Contains(_reporter, "fetch(`${config.prefix}/api/${config.project}/envelope/?sentry_key=${config.key}&sentry_version=7`") & true
 reporterKeepalive: strings.Contains(_reporter, "keepalive: true,\n\t\tcredentials: \"omit\",") & true
 // Only while the flag answers true, asked over OFREP on the page's own origin; what comes first is held.
-reporterFlag:   strings.Contains(_reporter, "fetch(`/ofrep/v1/evaluate/flags/${config.flag}`") & true
+reporterFlag:   strings.Contains(_reporter, "fetch(`/ofrep/v1/evaluate/flags/${flag}`") & true
 reporterOnTrue: strings.Contains(_reporter, "(await res.json())?.value === true") & true
 reporterHolds:  strings.Contains(_reporter, "if (state === \"pending\") held.push(e);") & true
 reporterDrops:  strings.Contains(_reporter, "held = [];") & true
@@ -95,3 +95,14 @@ writeNoOwnExport: !strings.Contains(_h.files["pronto/errors.cue"].text, "cue exp
 
 // Once it knows whether it reports, it says so on the page (<html data-errors="on|off">), which a check waits for.
 reporterMarks: strings.Contains(_reporter, "document.documentElement.dataset.errors = on ? \"on\" : \"off\";") & true
+
+// The detail flag: unnamed, an error leaves as its name alone and no scenario is written for it; named, the
+// loader carries it and the reporter asks it as it asks its own, and the flag has its scenario and its
+// production check beside the reporter's.
+_d: #Errors & {project: 1, key: "921d1ab3ed184f91867663937ab0002f", detailFlag: "error_detail", scenarios: {accepts: ["accept-error-tracking"], tester: "Tester"}}
+detailLoader:    _d.out["errors.loader.json"] & {detailFlag: "error_detail"}
+detailScenario:  _d.out["errors.scenarios.json"].error_detail.flags & ["error_detail"]
+detailProduction: _d.out["errors.scenarios.json"].error_detail_tester.production & true
+detailUnnamed:   list.SortStrings([for k, _ in _e.out["errors.scenarios.json"] {k}]) & ["error_tracking", "error_tracking_tester"]
+detailNamed:     list.SortStrings([for k, _ in _d.out["errors.scenarios.json"] {k}]) & ["error_detail", "error_detail_tester", "error_tracking", "error_tracking_tester"]
+reporterDetail:  strings.Contains(_reporter, "globalThis.__prontoErrorDetail = detail;") & true

@@ -90,6 +90,12 @@ At most one report of each message, and twenty events a page load. It reports on
 pronto-flags flag `error_tracking` is true, asked over OFREP at `/ofrep/` on the same origin; what is
 thrown before the flag answers is held, then sent or dropped.
 
+`detailFlag` (spec field, default none, never `flag`) names a second pronto-flags flag, asked the same way, which lets
+pronto-journeys' reporter send an error's message, top script frames, a browser tag and the screen in its beacon
+(`globalThis.__prontoErrorDetail`); off, pending or unnamed, an error leaves as its name alone. Name it in
+flags_spec.cue as `default: false, local: true`; the plugin writes its scenario and its production check, which look
+for the browser tag in the beacon `detailBeacon` names (default `/telemetry`, the journeys endpoint).
+
 ## Source maps
 
 An error in GlitchTip shows its original file, function and line, not the minified bundle's. Each

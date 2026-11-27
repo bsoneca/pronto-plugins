@@ -100,6 +100,7 @@ def main [] {
 	check "a key is 32 hex digits" (refused "package errors\nx: #Errors & {project: 1, key: \"abc\"}\n")
 	check "a project is not negative" (refused "package errors\nx: #Errors & {project: -1}\n")
 	check "an upstream is https" (refused "package errors\nx: #Errors & {upstream: \"http://errors.example.com\"}\n")
+	check "the detail flag is not the reporter's" (refused "package errors\nx: #Errors & {detailFlag: \"error_tracking\"}\n")
 	check "the prefix is a path" (refused "package errors\nx: #Errors & {prefix: \"e\"}\n")
 	check "a spec of a project and a key is fine" (not (refused "package errors\nx: #Errors & {project: 1, key: \"921d1ab3ed184f91867663937ab0002f\", upstream: \"https://errors.example.com\"}\n"))
 }
