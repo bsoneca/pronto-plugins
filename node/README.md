@@ -1,7 +1,7 @@
 # node
 
 The release of a pronto app onto the Contabo node's k3s: upstream pronto's manifests (the version the app
-pins, bonisoft3/pronto's CUE module v1.5.1, v1.7.0, v1.10.1, v1.11.1, v1.14.1, v1.15.1, v1.16.1 and v1.17.1, and the runtime tools of `validated_pins`: an app's mise pins the tool its module's distribution config names, one release behind, so v1.7.0 runs under tool 1.6.0, v1.10.1 under 1.10.0, v1.11.1 under 1.11.0, v1.14.1 under 1.14.0 and v1.15.1 under 1.15.0, v1.16.1 under 1.16.0 and v1.17.1 under 1.17.0; module v1.15.0 names 1.14.0, the previous runtime, so it can never match its own and apps pin v1.15.1), patched and released by an engine that lives in this repository,
+pins, bonisoft3/pronto's CUE module v1.5.1, v1.7.0, v1.10.1, v1.11.1, v1.14.1, v1.15.1, v1.16.1, v1.17.1 and v1.18.1, and the runtime tools of `validated_pins`: an app's mise pins the tool its module's distribution config names, one release behind, so v1.7.0 runs under tool 1.6.0, v1.10.1 under 1.10.0, v1.11.1 under 1.11.0, v1.14.1 under 1.14.0 and v1.15.1 under 1.15.0, v1.16.1 under 1.16.0 and v1.17.1 under 1.17.0; module v1.15.0 names 1.14.0, the previous runtime, so it can never match its own and apps pin v1.15.1), patched and released by an engine that lives in this repository,
 images built on the node's own buildkitd and pushed to the node's own registry, which the node pulls from.
 No kind, no second cluster, no Cloud Build, no Artifact Registry, no gcloud.
 
@@ -294,7 +294,7 @@ for t in schema release restore contract; do ./saytw --script tools.nu nu node/e
 The CUE cases and `schema_test.nu` need `cue` alone. The release, restore and tunnel tests run against fakes of
 kubectl, sops, ssh, nc, curl, docker (compose and buildx) and crane (`fixtures/fake-kubectl`); they and the contract test render the fixture
 app (`fixtures/aprende`, a copy of what an app's release.cue holds; `fixtures/studio` and `fixtures/brawl-chess` are the shapes of those apps) with upstream's real schema, so they need
-the CUE registry, and a pronto runtime (`PRONTO_RUNTIME`, or mise's tool the newest validated module names, 1.17.0 for v1.17.1; its upstream release_test.nu also needs `cue` and `nu` on the PATH) whose seven
+the CUE registry, and a pronto runtime (`PRONTO_RUNTIME`, or mise's tool the newest validated module names, 1.18.0 for v1.18.1; its upstream release_test.nu also needs `cue` and `nu` on the PATH) whose seven
 helpers run for real (register-clients, which runs deno and writes to an issuer, is faked there and never called by a `--check`). The contract test, per upstream pin (`pronto_pin`), holds that the engine's release
 data, its objects and its kubectl order equal upstream `main -e gke`'s, except the engine's declared patches
 and extra steps; a new pin is validated by moving `pronto_pin` and fixing the engine before an app moves its own.
