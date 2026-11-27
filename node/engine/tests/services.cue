@@ -396,6 +396,18 @@ cases: {
 			]
 		}
 	}
+	"egress may name the pods of a namespace instead of an address block": {
+		_r: (_studioServices & {
+			release: services: builder: {port: 8690, egress: [
+				{namespace: "envoy-gateway-system", podLabels: {"gateway.envoyproxy.io/owning-gatewayclass": "eg"}, port: 10080},
+			]}
+		}).named
+		_got:  _r["NetworkPolicy/studio-builder-egress"].spec.egress
+		_want: [{
+			to: [{namespaceSelector: matchLabels: "kubernetes.io/metadata.name": "envoy-gateway-system", podSelector: matchLabels: "gateway.envoyproxy.io/owning-gatewayclass": "eg"}]
+			ports: [{port: 10080, protocol: "TCP"}]
+		}]
+	}
 	"with the policy off a service's egress emits no policy, and with none it has none": {
 		_off:  [for k, _ in (_studioServices & {release: services: builder: {port: 8690, egress: [{cidr: "10.0.0.0/8", port: 80}]}, appExtra: networkPolicy: enabled: false}).named if k =~ "^NetworkPolicy/" {k}]
 		_none: (_withServices & {release: services: builder: port: 8690}).named["NetworkPolicy/app-builder-egress"] != _|_

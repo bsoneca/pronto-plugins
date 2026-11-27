@@ -339,6 +339,8 @@ def main [] {
 	test_a_tenants_staged_build_paths_are_the_staged_copys
 	test_a_tenants_dry_run_with_no_build_needs_the_publisher_kubeconfig_alone
 	test_a_tenants_retirement_is_the_engines_to_decide
+	test_a_tenants_objects_hand_their_life_to_no_one_and_hold_no_reserved_name
+	test_a_tenants_schema_that_is_not_a_regular_file_is_refused_unread
 	test_a_tenants_env_link_is_refused_and_never_opened
 	test_a_tenants_push_rights_are_only_what_its_path_uses
 	test_a_tenants_origin_and_preview_are_the_operators
@@ -2687,6 +2689,46 @@ def test_a_tenants_retirement_is_the_engines_to_decide [] {
 	assert (has $e2e.stderr "retire names Cluster/game-db") $e2e.stderr
 	assert equal (writes $w) [] "refused before any write"
 	rm -rf $w.dir
+}
+
+def test_a_tenants_objects_hand_their_life_to_no_one_and_hold_no_reserved_name [] {
+	print "test a tenant's objects that set ownerReferences or finalizers, or are the publisher's account, the release's record or the root CA bundle (or seed a ConfigMap of those names), are refused..."
+	let w = (tenant-world)
+	let cases = [
+		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: x, namespace: ns, ownerReferences: [{apiVersion: v1, kind: ServiceAccount, name: publisher, uid: "0"}]}}', says: "ConfigMap/x sets metadata.ownerReferences, which a tenant's release leaves to the engine"}
+		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: x, namespace: ns, finalizers: [example.com/hold]}}', says: "ConfigMap/x sets metadata.finalizers"}
+		{obj: '{apiVersion: v1, kind: ServiceAccount, metadata: {name: publisher, namespace: ns}}', says: "ServiceAccount/publisher is an object the provisioner or the engine owns"}
+		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: pronto-release, namespace: ns}, immutable: true}', says: "ConfigMap/pronto-release is an object the provisioner or the engine owns"}
+		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: kube-root-ca.crt, namespace: ns}}', says: "ConfigMap/kube-root-ca.crt is an object the provisioner or the engine owns"}
+	]
+	for c in $cases {
+		let body = $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.obj)] {namespace: ns} [v1/ConfigMap v1/ServiceAccount]"
+		let r = (in-world $w -c $body)
+		assert ($r.exit_code != 0) $"($c.obj) was not refused"
+		assert (has $r.stderr $c.says) $"($c.obj): ($r.stderr)"
+	}
+	# a plain object of the same kinds passes
+	let ok = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-objects [{apiVersion: v1, kind: ConfigMap, metadata: {name: x, namespace: ns}}] {namespace: ns} [v1/ConfigMap]")
+	assert equal $ok.exit_code 0 $ok.stderr
+	# a service's seed may not make the release's record
+	let seed = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-seeds [{name: pronto-release, path: p, file: f}]")
+	assert ($seed.exit_code != 0) "a seed named pronto-release was not refused"
+	assert (has $seed.stderr "seed the ConfigMap pronto-release, which the provisioner or the engine owns") $seed.stderr
+	rm -rf $w.dir
+}
+
+def test_a_tenants_schema_that_is_not_a_regular_file_is_refused_unread [] {
+	print "test a tenant's node/schema/node.cue that is a FIFO or a link is refused as such, without being opened..."
+	for kind in [fifo link] {
+		let w = (tenant-world)
+		let file = ($w.app | path join node schema node.cue)
+		rm -f $file
+		if $kind == "fifo" { ^mkfifo $file } else { ^ln -s ($engine_dir | path join schema node.cue) $file }
+		let r = (tenant-release $w)
+		assert ($r.exit_code != 0) $"a ($kind) was not refused"
+		assert (has $r.stderr "not a regular file") $"($kind): ($r.stderr)"
+		rm -rf $w.dir
+	}
 }
 
 def test_a_tenants_env_link_is_refused_and_never_opened [] {

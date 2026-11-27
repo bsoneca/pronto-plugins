@@ -793,7 +793,7 @@ def tenant-preflight [app_info: record, node: record, push_kubeconfig: string, -
 			rm -rf $work
 		}
 	}
-	seed-files $app_info.dir $node | ignore
+	tenant check-seeds (seed-files $app_info.dir $node)
 	for name in ($node.services? | default {} | values | each {|s| $s.secrets? | default {} | values } | flatten | uniq) {
 		let live = ((^kubectl get secret $name -n $node.namespace | complete).exit_code == 0)
 		if not $live { error make {msg: $"Node.services read the Secret ($name), which is not in ($node.namespace): a tenant's release decrypts none, so its provisioner puts it there"} }

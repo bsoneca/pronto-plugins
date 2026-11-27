@@ -31,6 +31,20 @@ export def tenant-issuers []: nothing -> list<string> {
 	$r.stdout | from json
 }
 
+# One of the engine's own schema definitions, as data.
+def schema-export [expr: string]: nothing -> any {
+	let r = (do { cd ($engine_dir | path join schema); ^cue export --out json -e $expr node.cue } | complete)
+	if $r.exit_code != 0 { error make {msg: $"the engine's schema does not export ($expr): ($r.stderr | str trim)"} }
+	$r.stdout | from json
+}
+
+# A ConfigMap a service seeds is a ConfigMap the release writes: never one of the objects the provisioner or the engine owns (`#TenantReserved`).
+export def check-seeds [seeds: list] {
+	let reserved = (schema-export '#TenantReserved' | where kind == ConfigMap | get name)
+	let bad = ($seeds | where {|s| $s.name in $reserved } | get name)
+	if ($bad | is-not-empty) { error make {msg: $"Node.services seed the ConfigMap ($bad | str join ', '), which the provisioner or the engine owns"} }
+}
+
 # What a release may retire (kind to the kubectl resource it deletes, as kind.group), read from the engine's own schema (`#RetireKinds`).
 export def retire-kinds []: nothing -> record {
 	let r = (do { cd ($engine_dir | path join schema); ^cue export --out json -e '#RetireKinds' node.cue } | complete)
@@ -104,7 +118,14 @@ export def check-issuers [settings: record, environment: record, issuers: list<s
 export def check-engine-copy [app_dir: string] {
 	let own = ($engine_dir | path join schema node.cue)
 	let theirs = ($app_dir | path join node schema node.cue)
-	if not ($theirs | path exists) { error make {msg: $"($theirs) is missing: a tenant's release imports the engine's schema from the app's node/schema"} }
+	let dir = ($theirs | path dirname)
+	let entry = if ($dir | path type) == "dir" { ls -a $dir | where {|e| ($e.name | path basename) == "node.cue" } } else { [] }
+	if ($entry | is-empty) { error make {msg: $"($theirs) is missing: a tenant's release imports the engine's schema from the app's node/schema"} }
+	# only a regular file of the engine's own size is opened: a link, a FIFO (which would wait for a writer) or a device is refused unread
+	if ($entry.0.type != "file") { error make {msg: $"the app's node/schema/node.cue is a ($entry.0.type), not a regular file: a tenant's release trusts no schema its author could have edited"} }
+	if $entry.0.size != (ls $own | first | get size) {
+		error make {msg: $"the app's node/schema/node.cue is not the engine's own copy \(($own)\): a tenant's release trusts no schema its author could have edited"}
+	}
 	if (open --raw $own) != (open --raw $theirs) {
 		error make {msg: $"the app's node/schema/node.cue is not the engine's own copy \(($own)\): a tenant's release trusts no schema its author could have edited"}
 	}
@@ -243,9 +264,15 @@ export def harden-objects [objects: list]: nothing -> list {
 export def check-objects [objects: list, node: record, kinds: list<string>] {
 	let ns = $node.namespace
 	let prefix = $"127.0.0.1:5000/($ns)/"
+	let refused_metadata = (schema-export '#TenantRefusedMetadata')
+	let reserved = (schema-export '#TenantReserved')
 	let problems = ($objects | each {|o|
 		let id = $"($o.kind? | default '?')/($o.metadata?.name? | default '?')"
 		mut why = []
+		for field in $refused_metadata {
+			if ($o.metadata? | default {} | get -o $field) != null { $why = ($why | append $"($id) sets metadata.($field), which a tenant's release leaves to the engine") }
+		}
+		if ($reserved | any {|r| $r.kind == ($o.kind? | default "") and $r.name == ($o.metadata?.name? | default "") }) { $why = ($why | append $"($id) is an object the provisioner or the engine owns") }
 		if $"($o.apiVersion? | default '')/($o.kind? | default '')" not-in $kinds { $why = ($why | append $"($id) is not a kind a tenant's publisher writes") }
 		if ($o.metadata?.namespace? | default "") != $ns { $why = ($why | append $"($id) is in namespace ($o.metadata?.namespace? | default 'none'), not ($ns)") }
 		# A token a Secret of this type carries is a service account's (the publisher's included): never written by a tenant's release.
