@@ -26,6 +26,7 @@ def main [--kind: string = ""] {
 	test_cnpg_labels_escalation_capabilities_and_metadata
 	test_services_and_secrets
 	test_an_externalsecret_takes_no_superuser_secret_as_a_template_source
+	test_a_workload_reads_no_guarded_secret_and_a_statefulset_has_no_claim_template
 	test_an_enum_value_is_compared_as_the_engine_compares_it
 	test_a_cluster_is_held_to_the_engines_allow_list
 	test_the_parameters_are_the_engines_bounds
@@ -70,13 +71,13 @@ def test_no_policy_is_named_as_one_of_studios_own [] {
 		assert ($o.metadata.name not-in $studios) $"($o.kind) ($o.metadata.name) is Studio's"
 		assert ($o.metadata.name | str starts-with $"($policy_prefix)-engine-") $o.metadata.name
 	}
-	assert equal ($objects | where kind == "ValidatingAdmissionPolicy" | length) 7
+	assert equal ($objects | where kind == "ValidatingAdmissionPolicy" | length) 8
 }
 
 def test_every_policy_matches_tenant_namespaces_only [] {
 	print "test every policy matches a namespace with the tenant label and no other..."
 	let all = (policies)
-	assert equal ($all | columns | sort) [clusters externalsecrets objects pods secrets services templates]
+	assert equal ($all | columns | sort) [clusters externalsecrets objects pods secrets services statefulsets templates]
 	for name in ($all | columns) {
 		let sel = ($all | get $name).spec.matchConstraints.namespaceSelector.matchExpressions
 		assert equal $sel [{key: $label, operator: "Exists"}] $name
@@ -175,6 +176,19 @@ def test_an_externalsecret_takes_no_superuser_secret_as_a_template_source [] {
 	assert equal $r [{apiGroups: [external-secrets.io], apiVersions: ["*"], operations: [CREATE UPDATE], resources: [externalsecrets]}]
 }
 
+def test_a_workload_reads_no_guarded_secret_and_a_statefulset_has_no_claim_template [] {
+	print "test a pod reads no Secret of #TenantGuardedSecretSuffixes by env, envFrom, a secret volume or a projected one (init and ephemeral containers too), and a StatefulSet has no volumeClaimTemplates..."
+	for policy in [pods templates] {
+		let rule = (one-rule $policy "read no Secret that holds a database's superuser password")
+		for x in (schema '#TenantGuardedSecretSuffixes') { assert ($rule | str contains $"endsWith\('($x)'\)") $x }
+		for at in [e.valueFrom.secretKeyRef.name e.secretRef.name v.secret.secretName s.secret.name] { assert ($rule | str contains $at) $"($policy): ($at)" }
+		for list in [containers initContainers ephemeralContainers] { assert ($rule | str contains $"variables.spec.($list)") $"($policy): ($list)" }
+	}
+	let claims = (one-rule statefulsets "no volumeClaimTemplates")
+	assert equal $claims "!has(object.spec.volumeClaimTemplates) || size(object.spec.volumeClaimTemplates) == 0"
+	assert equal ((policies).statefulsets.spec.matchConstraints.resourceRules.0.resources) [statefulsets]
+}
+
 def test_an_enum_value_is_compared_as_the_engine_compares_it [] {
 	print "test a Postgres enum parameter is compared as written, not with its spaces removed ('log ical' is no 'logical'), as tenant.nu compares it..."
 	let e = (one-rule clusters "parameter wal_level to its bound")
@@ -271,7 +285,7 @@ def test_who_is_not_judged_and_what_the_bindings_do [] {
 	let notes = (one-rule clusters "carries no cnpg.io/ annotation")
 	for p in (schema '#TenantRefusedClusterAnnotationPrefixes') { assert ($notes | str contains $"k.startsWith\('($p)'\)") $p }
 	let bindings = (schema '(#TenantAdmission & {label: "x/y"}).objects' | where kind == "ValidatingAdmissionPolicyBinding")
-	assert equal ($bindings | length) 7
+	assert equal ($bindings | length) 8
 	for b in $bindings { assert equal $b.spec.validationActions [Warn Audit] }
 	let deny = (schema '(#TenantAdmission & {label: "x/y", actions: ["Deny", "Audit"]}).objects' | where kind == "ValidatingAdmissionPolicyBinding")
 	for b in $deny { assert equal $b.spec.validationActions [Deny Audit] }
@@ -318,6 +332,8 @@ def cases [ns: string]: nothing -> list {
 		["a pod with an ownerReference" (do $podmeta {ownerReferences: [{apiVersion: v1, kind: ServiceAccount, name: publisher, uid: "00000000-0000-0000-0000-000000000001"}]}) pods]
 		["a pod that leaves allowPrivilegeEscalation unset" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}) pods]
 		["a pod that sets allowPrivilegeEscalation true" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", securityContext: {allowPrivilegeEscalation: true}}]}) pods]
+		["a pod that reads a superuser Secret by env" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", securityContext: $safe, env: [{name: PW, valueFrom: {secretKeyRef: {name: app-db-superuser, key: password}}}]}]}) pods]
+		["a pod that mounts a superuser Secret" (do $pod {volumes: [{name: s, secret: {secretName: app-db-postgres}}]}) pods]
 		["a pod that adds a capability" (do $pod {containers: [{name: c, image: $"127.0.0.1:5000/($ns)/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", securityContext: {allowPrivilegeEscalation: false, capabilities: {add: [NET_BIND_SERVICE]}}}]}) pods]
 		["a deployment of the namespace's own image and the safe volumes" (do $deploy {volumes: [{name: e, emptyDir: {}} {name: m, configMap: {name: x}}]}) ""]
 		["a deployment of an image outside the registry's path" (do $deploy {containers: [{name: c, image: "ghcr.io/x/y:1", securityContext: $safe}]}) templates]
@@ -367,6 +383,7 @@ def cases [ns: string]: nothing -> list {
 		["a Cluster with a parameter that is no number" (do $cluster {postgresql: {parameters: {max_connections: "many"}}}) clusters]
 		["a Cluster with fsync off" (do $cluster {postgresql: {parameters: {fsync: "off"}}}) clusters]
 		["a Cluster with a managed superuser role" (do $cluster {managed: {roles: [{name: r, login: true, superuser: true}]}}) clusters]
+		["a Cluster with a managed role with the replication attribute (Electric's logical replication needs it; pg_hba admits no physical replication for it)" (do $cluster {managed: {roles: [{name: r, login: true, replication: true}]}}) ""]
 		["a Cluster with a managed role that creates roles" (do $cluster {managed: {roles: [{name: r, login: true, createrole: true}]}}) clusters]
 		["a Cluster with a managed role in pg_execute_server_program" (do $cluster {managed: {roles: [{name: r, login: true, inRoles: [pg_execute_server_program]}]}}) clusters]
 		["a Cluster whose owner is a pg_ role" (do $cluster {bootstrap: {initdb: {database: app, owner: pg_monitor}}}) clusters]

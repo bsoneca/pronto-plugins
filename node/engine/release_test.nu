@@ -2735,7 +2735,7 @@ def test_a_tenants_cluster_keeps_the_engines_own_tuning_and_the_bases_uid [] {
 	# harden-objects says what upstream's Cluster leaves on: the superuser and its secret
 	let hard = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant harden-objects [{kind: Cluster, spec: {enableSuperuserAccess: true, superuserSecret: {name: x}, instances: 1}}] | to json --raw")
 	assert equal $hard.exit_code 0 $hard.stderr
-	assert equal ($hard.stdout | from json | get 0.spec) {enableSuperuserAccess: false, instances: 1}
+	assert equal ($hard.stdout | from json | get 0.spec) {enableSuperuserAccess: false, instances: 1, postgresUID: 999, postgresGID: 999}
 	rm -rf $w.dir
 }
 
