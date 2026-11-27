@@ -203,6 +203,7 @@ errorsRedactedBeforeCap: _j.collector.transforms.errors_per_error.inputs & ["err
 errorsOnlyErrors: _j.collector.transforms.errors_in.condition & ".type == \"error\""
 // The reporter sends the name, a trimmed message, the top frame, a few frames, a fixed browser tag and the screen; a page reports a few, once each.
 reporterSendsError: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "const event = { type: \"error\", kind, name: nameOf(thrown), message: messageOf(thrown) || clean(fallback), frame: frameOf(thrown), stack: stackOf(thrown), browser: browserOf(), screen: current };") & true
+reporterScrubsPath: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "const path = scrub(m[2].replace(/^https?:\\/\\/[^/]*/, \"\")).replace(/<url>/g, \"\");") & true
 reporterSendsNameAlone: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "if (!detailOn()) {") & strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "globalThis.__prontoErrorDetail === true") & true
 reporterCapsErrors: strings.Contains(_h.files["shell/hatches/journeys/telemetry.js"].text, "if (reported.has(key) || reported.size >= ERRORS_PER_PAGE) return;") & true
 

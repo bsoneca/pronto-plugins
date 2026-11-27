@@ -105,4 +105,4 @@ detailScenario:  _d.out["errors.scenarios.json"].error_detail.flags & ["error_de
 detailProduction: _d.out["errors.scenarios.json"].error_detail_tester.production & true
 detailUnnamed:   list.SortStrings([for k, _ in _e.out["errors.scenarios.json"] {k}]) & ["error_tracking", "error_tracking_tester"]
 detailNamed:     list.SortStrings([for k, _ in _d.out["errors.scenarios.json"] {k}]) & ["error_detail", "error_detail_tester", "error_tracking", "error_tracking_tester"]
-reporterDetail:  strings.Contains(_reporter, "globalThis.__prontoErrorDetail = detail;") & true
+reporterDetail:  strings.Contains(_reporter, "flagOn(config.detailFlag).then((detail) => {") & strings.Contains(_reporter, "globalThis.__prontoErrorDetail = detail;") & true

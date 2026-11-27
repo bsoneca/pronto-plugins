@@ -129,14 +129,14 @@ if (!globalThis.__prontoJourneys) {
 	// text must never leave the page).
 	const FEN = /(?:[pnbrqkPNBRQK1-8]+\/){3,}[pnbrqkPNBRQK1-8]+/;
 	const MOVE = /\b(?:[a-h][1-8]){2}[qrbn]?\b|\b[KQRBN][a-h]?[1-8]?x?[a-h][1-8]\b|\b[a-h]x?[a-h]?[1-8]\b|\bO-O(?:-O)?\b/;
-	const clean = (text) => {
-		const t = String(text ?? "")
+	const scrub = (text) =>
+		String(text ?? "")
 			.replace(/https?:\/\/\S*/g, "<url>")
 			.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, "<email>")
+			.replace(/eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*/g, "<token>")
 			.replace(/[A-Za-z0-9_+/=-]{24,}/g, "<token>")
 			.replace(/\d[\d.\-/ ]{6,}\d/g, "<number>");
-		return FEN.test(text) || MOVE.test(text) ? "" : t.slice(0, ERROR_TEXT);
-	};
+	const clean = (text) => (FEN.test(text) || MOVE.test(text) ? "" : scrub(text).slice(0, ERROR_TEXT));
 	const messageOf = (x) => clean(x instanceof Error ? x.message : typeof x === "string" ? x : "");
 	// A frame is rebuilt from fields a strict shape validated, never copied: Chrome's "at fn (url:1:2)" or
 	// Gecko's and Safari's "fn@url:1:2", where url is a script (.js or .mjs) on http(s) or a path, with its
@@ -156,7 +156,8 @@ if (!globalThis.__prontoJourneys) {
 			const g = c ? null : GECKO.exec(l);
 			const m = c ?? g;
 			if (!m) continue;
-			const path = m[2].replace(/^https?:\/\/[^/]*/, "");
+			// The path is scrubbed too: a valid script path can hold an address or a token (/users/ana@x.com/app.js).
+			const path = scrub(m[2].replace(/^https?:\/\/[^/]*/, "")).replace(/<url>/g, "");
 			out.push((c ? `${m[1] ? `${m[1]} (` : ""}${path}:${m[3]}:${m[4]}${m[1] ? ")" : ""}` : `${m[1]}@${path}:${m[3]}:${m[4]}`).slice(0, ERROR_TEXT));
 			if (out.length === STACK_FRAMES) break;
 		}
