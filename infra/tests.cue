@@ -57,11 +57,15 @@ existingIsBool: "yes" & matchN(0, [#Backend.existing])
 
 // A bucket anyone may read must say why; one nobody reads needs no reason.
 publicNeedsWhy: matchN(0, [#Bucket & {
-	location: "us-central1", uniformAccess: true, publicPrevention: "inherited"
+	location:         "us-central1"
+	uniformAccess:    true
+	publicPrevention: "inherited"
 	iam: "roles/storage.objectViewer": allUsers: true
 }]) & true
 publicWithWhy: (#Bucket & {
-	location: "us-central1", uniformAccess: true, publicPrevention: "inherited"
+	location:         "us-central1"
+	uniformAccess:    true
+	publicPrevention: "inherited"
 	iam: "roles/storage.objectViewer": allUsers: true
 	public: "a static site"
 }).public & "a static site"
@@ -145,8 +149,14 @@ _svc: #Plan & {
 			"other": {source: "operator", accessors: "user:a@example.com": true}
 		}
 		runServices: "my-app": {
-			location:       "us-central1", image:                                          "us-docker.pkg.dev/example-project-123/pronto/my-app:1", port: 8080
-			serviceAccount: "my-app-run@example-project-123.iam.gserviceaccount.com", cpu: "1", memory:                                                   "512Mi", timeout: "300s", maxInstances: 2
+			location:       "us-central1"
+			image:          "us-docker.pkg.dev/example-project-123/pronto/my-app:1"
+			port:           8080
+			serviceAccount: "my-app-run@example-project-123.iam.gserviceaccount.com"
+			cpu:            "1"
+			memory:         "512Mi"
+			timeout:        "300s"
+			maxInstances:   2
 			secretEnv: {TOKEN: "my-app-token", OTHER: "other"}
 			invokers: "user:a@example.com": true
 		}
@@ -201,8 +211,14 @@ _binding: #Plan & {
 		repositories: pronto: {location: "us-central1", format: "DOCKER", iam: "roles/artifactregistry.reader": "user:a@example.com": true}
 		buckets: "my-app-assets": {location: "us-central1", uniformAccess: true, publicPrevention: "enforced", iam: "roles/storage.objectAdmin": "user:a@example.com": true}
 		runServices: "my-app": {
-			location:       "us-central1", image:                                          "us-docker.pkg.dev/example-project-123/pronto/my-app:1", port: 8080
-			serviceAccount: "my-app-run@example-project-123.iam.gserviceaccount.com", cpu: "1", memory:                                                   "512Mi", timeout: "300s", maxInstances: 2
+			location:       "us-central1"
+			image:          "us-docker.pkg.dev/example-project-123/pronto/my-app:1"
+			port:           8080
+			serviceAccount: "my-app-run@example-project-123.iam.gserviceaccount.com"
+			cpu:            "1"
+			memory:         "512Mi"
+			timeout:        "300s"
+			maxInstances:   2
 			invokers: "user:a@example.com": true
 		}
 		fresh: {
@@ -254,8 +270,14 @@ _named: #Plan & {
 		buckets: "my-app-assets": {location: "us-central1", uniformAccess: true, publicPrevention: "enforced", iam: "roles/storage.objectAdmin": (_acct): true}
 		secrets: "my-app-token": {source: "operator", accessors: (_acct): true, adders: (_acct): true}
 		runServices: "my-app": {
-			location:       "us-central1", image:                                          "us-docker.pkg.dev/example-project-123/pronto/my-app:1", port: 8080
-			serviceAccount: "my-app-run@example-project-123.iam.gserviceaccount.com", cpu: "1", memory:                                                   "512Mi", timeout: "300s", maxInstances: 2
+			location:       "us-central1"
+			image:          "us-docker.pkg.dev/example-project-123/pronto/my-app:1"
+			port:           8080
+			serviceAccount: "my-app-run@example-project-123.iam.gserviceaccount.com"
+			cpu:            "1"
+			memory:         "512Mi"
+			timeout:        "300s"
+			maxInstances:   2
 			invokers: (_acct): true
 		}
 	}
@@ -504,6 +526,65 @@ boolGaugeAccepted: _ok & {metricDescriptors: "custom.googleapis.com/a": _md & {v
 descriptorKept: _descriptor.lifecycle & {prevent_destroy: true}
 foreignMetricRefused: _ok & {metricDescriptors: "compute.googleapis.com/x": {displayName: "x", description: "x"}} & matchN(0, [#Project])
 
+// An alert subscriber: a topic Monitoring publishes to, a pull subscription, the channel, and the
+// channel sent to every policy and check but those that opt out.
+_subscriber: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing:  "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adoptAll: true
+		apis: "monitoring.googleapis.com": true
+		apis: "pubsub.googleapis.com":     true
+		notificationChannels: oncall: email: "oncall@example.com"
+		alertSubscribers: "my-app": {file: "config/subscriber.json", subscribers: {"user:ops@example.com": true}}
+		alertPolicies: "my-app-journeys": {file: "config/alerts.json", channels: ["oncall"]}
+		alertPolicies: "my-app-subscriber": {channels: ["oncall"], toSubscribers: false, policies: lag: {displayName: "L", expr: "vector(1)", duration: "60s", documentation: "d", labels: {}}}
+		uptimeChecks: "example-com": {host: "example.com", channels: ["oncall"]}
+	}
+}
+_sub:                    _subscriber.tofu.resource
+_subTopic:               _sub.google_pubsub_topic.example_project_123_my_app
+_subSub:                 _sub.google_pubsub_subscription.example_project_123_my_app
+_subChannel:             _sub.google_monitoring_notification_channel.example_project_123_my_app
+_subRef:                 "$" + "{google_monitoring_notification_channel.example_project_123_my_app.id}"
+subscriberTopicFromFile: _subTopic.name & "$"+"{jsondecode(file(\"$"+"{path.module}/../config/subscriber.json\")).topic}"
+subscriberPull: _subSub & {ack_deadline_seconds: "$" + "{jsondecode(file(\"$" + "{path.module}/../config/subscriber.json\")).ackDeadlineSeconds}", expiration_policy: ttl: "", retain_acked_messages: false}
+subscriberRetention: _subSub.message_retention_duration & "$"+"{jsondecode(file(\"$"+"{path.module}/../config/subscriber.json\")).messageRetentionDuration}"
+subscriberNoPush: [for k, _ in _subSub if k == "push_config" {k}] & []
+subscriberPublisher: _sub.google_pubsub_topic_iam_member.example_project_123_my_app_publisher & {role: "roles/pubsub.publisher", member: "serviceAccount:service-" + "$" + "{data.google_project.example_project_123_my_app.number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"}
+subscriberPuller: _sub.google_pubsub_subscription_iam_member.example_project_123_my_app_user_ops_example_com & {role: "roles/pubsub.subscriber", member: "user:ops@example.com"}
+subscriberChannel: _subChannel & {type: "pubsub", display_name: "my-app", labels: topic: "$" + "{google_pubsub_topic.example_project_123_my_app.id}"}
+subscriberChannelAfterTopicGrant: list.Contains(_subChannel.depends_on, "google_pubsub_topic_iam_member.example_project_123_my_app_publisher") & true
+subscriberOnFilePolicy: _sub.google_monitoring_alert_policy.example_project_123_my_app_journeys.notification_channels & ["$" + "{google_monitoring_notification_channel.example_project_123_oncall.id}", _subRef]
+subscriberOnUptime: _sub.google_monitoring_alert_policy.example_project_123_example_com_uptime.notification_channels & ["$" + "{google_monitoring_notification_channel.example_project_123_oncall.id}", _subRef]
+subscriberOptOut: _sub.google_monitoring_alert_policy.example_project_123_my_app_subscriber_lag.notification_channels & ["$" + "{google_monitoring_notification_channel.example_project_123_oncall.id}"]
+subscriberNeverImported: [for i in _subscriber.tofu.import if strings.HasPrefix(i.to, "google_pubsub") || strings.HasPrefix(i.to, "google_monitoring") {i}] & []
+// The defaults: no subscriber member, every policy sent.
+subscriberDefaults: _ok & {alertSubscribers: x: {file: "a.json"}} & matchN(1, [#Project])
+subscriberNoMembers: (#Project & {alertSubscribers: x: {file: "a.json"}}).alertSubscribers.x.subscribers & {}
+policiesSentByDefault: (#AlertPolicies & {policies: {}, channels: []}).toSubscribers & true
+// Its channel is made beside it, and a pubsub channel naming a topic that no subscriber makes is refused.
+subscriberMakesChannel: (#Project & {alertSubscribers: x: {file: "a.json"}}).notificationChannels.x.pubsub.topic & "x"
+unknownTopicRefused: _ok & {notificationChannels: o: pubsub: topic: "nobody"} & matchN(0, [#Project])
+topicNeedsJson: _ok & {alertSubscribers: x: {file: "a.txt"}} & matchN(0, [#Project])
+// Adopted by the topic and the channel together: one without the other is no subscriber of a policy.
+_subDraft: #Plan & {
+	backend: _plan.backend
+	state: projects: "example-project-123": {
+		billing: "billingAccounts/AAAAAA-BBBBBB-CCCCCC"
+		adopt: topics: ["my-app"]
+		adopt: alertPolicies: ["j"]
+		adopt: notificationChannels: ["oncall"]
+		notificationChannels: oncall: email: "oncall@example.com"
+		alertSubscribers: "my-app": {file: "config/subscriber.json"}
+		alertPolicies: j: {file: "config/alerts.json", channels: ["oncall"]}
+	}
+}
+_sd: _subDraft.tofu.resource
+channelWithoutTopicRefused: _ok & {adoptAll: false, adopt: notificationChannels: ["o"], notificationChannels: o: pubsub: topic: "t", alertSubscribers: t: {file: "a.json"}} & matchN(0, [#Project])
+draftTopicMade: _sd.google_pubsub_topic.example_project_123_my_app.project & "example-project-123"
+draftNoChannelNoSend: _sd.google_monitoring_alert_policy.example_project_123_j.notification_channels & ["$" + "{google_monitoring_notification_channel.example_project_123_oncall.id}"]
+
 // A policy group with neither a file nor policies is refused.
 emptyPolicies: _ok & {notificationChannels: o: email: "a@b.co", alertPolicies: x: {channels: ["o"]}} & matchN(0, [#Project])
 
@@ -530,8 +611,14 @@ _always: #Plan & {
 		sqlUsers: "db-1": app: {password: "db-password", url: "db-url", database: "app", query: "&options=-c%20role%3Dviewer"}
 		sqlBackups: "db-1": {databaseVersion: "POSTGRES_18", tier: "db-f1-micro", startTime: "07:00"}
 		runServices: always: {
-			location:       "us-central1", image:                                       "registry.example.com/exporter:1", port: 9399
-			serviceAccount: "app-svc@example-project-123.iam.gserviceaccount.com", cpu: "250m", memory:                          "128Mi", timeout: "60s", maxInstances: 1
+			location:       "us-central1"
+			image:          "registry.example.com/exporter:1"
+			port:           9399
+			serviceAccount: "app-svc@example-project-123.iam.gserviceaccount.com"
+			cpu:            "250m"
+			memory:         "128Mi"
+			timeout:        "60s"
+			maxInstances:   1
 			minInstances:   1
 			concurrency:    1
 			cpuIdle:        false

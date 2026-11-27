@@ -15,6 +15,10 @@ import (
 #name: {in: string, out: regexp.ReplaceAll("[^a-zA-Z0-9_]", in, "_")}
 #members: {in: #Members, out: list.SortStrings([for m, _ in in {m}])}
 
+// The channels of an alert policy or an uptime check: the ones it names, then the project's alert
+// subscribers' unless it opts out.
+#chans: {in: [...string], subs: [...string], to: bool, out: list.Concat([in, [if to for n in subs if !list.Contains(in, n) {n}]])}
+
 #Plan: Plan={
 	state:   #State
 	backend: #Backend
@@ -276,7 +280,8 @@ import (
 			let own = {for _, f in svc.secretFiles {(f.secret): true}}
 			let extra = {for _, sc in svc.sidecars for _, f in sc.secretFiles if own[f.secret] == _|_ {(f.secret): f}}
 
-			tofu: resource: google_cloud_run_v2_service: (k): {depends_on: ownDeps
+			tofu: resource: google_cloud_run_v2_service: (k): {
+				depends_on:          ownDeps
 				name:                nm
 				project:             P.id
 				location:            svc.location
@@ -424,14 +429,64 @@ import (
 			if fresh.hostingSites[site] == _|_ {_imports: "google_firebase_hosting_site.\(k)": {id: "projects/\(P.id)/sites/\(site)", project: P.id}}
 		}
 
+		// An alert subscriber per entry: a topic Monitoring publishes to and a pull subscription on it,
+		// both named by the entry's file, which OpenTofu reads at plan time.
+		for nm, sub in P.alertSubscribers if P.adoptAll || list.Contains(*P.adopt["topics"] | [], nm) {
+			let k = (#name & {in: "\(P.id)_\(nm)"}).out
+			let f = "jsondecode(file(\"${path.module}/../\(sub.file)\"))"
+			tofu: data: google_project: (k): {project_id: P.id}
+			tofu: resource: google_pubsub_topic: (k): {
+				depends_on: deps
+				project:    P.id
+				name:       "${\(f).topic}"
+			}
+			// Monitoring's own notification account publishes to it, and nobody else.
+			tofu: resource: google_pubsub_topic_iam_member: "\(k)_publisher": {
+				project: P.id
+				topic:   "${google_pubsub_topic.\(k).name}"
+				role:    "roles/pubsub.publisher"
+				member:  "serviceAccount:service-${data.google_project.\(k).number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
+			}
+			// A pull subscription that never expires: it keeps a week of unread alerts while the subscriber is away.
+			tofu: resource: google_pubsub_subscription: (k): {
+				project:                    P.id
+				name:                       "${\(f).subscription}"
+				topic:                      "${google_pubsub_topic.\(k).id}"
+				ack_deadline_seconds:       "${\(f).ackDeadlineSeconds}"
+				message_retention_duration: "${\(f).messageRetentionDuration}"
+				retain_acked_messages:      false
+				expiration_policy: ttl: ""
+			}
+			for m in list.SortStrings([for m, _ in sub.subscribers {m}]) {
+				tofu: resource: google_pubsub_subscription_iam_member: "\((#name & {in: "\(k)_\(m)"}).out)": {
+					project:      P.id
+					subscription: "${google_pubsub_subscription.\(k).name}"
+					role:         "roles/pubsub.subscriber"
+					member:       m
+				}
+			}
+		}
+
+		// The subscribers a policy or a check is sent to: those whose topic and channel are both adopted.
+		let subNames = [for nm, _ in P.alertSubscribers if P.adoptAll || (list.Contains(*P.adopt["topics"] | [], nm) && list.Contains(*P.adopt["notificationChannels"] | [], nm)) {nm}]
+
 		for nm, c in P.notificationChannels if P.adoptAll || list.Contains(*P.adopt["notificationChannels"] | [], nm) {
 			let k = (#name & {in: "\(P.id)_\(nm)"}).out
 			tofu: resource: google_monitoring_notification_channel: (k): {
-				depends_on:   deps
 				project:      P.id
 				display_name: nm
-				type:         "email"
-				labels: email_address: c.email
+				if c.email != _|_ {
+					depends_on: deps
+					type:       "email"
+					labels: email_address: c.email
+				}
+				if c.pubsub != _|_ {
+					let t = (#name & {in: "\(P.id)_\(c.pubsub.topic)"}).out
+					type: "pubsub"
+					labels: topic: "${google_pubsub_topic.\(t).id}"
+					// Monitoring may publish before the channel is verified, and the topic is there.
+					depends_on: list.Concat([deps, ["google_pubsub_topic.\(t)", "google_pubsub_topic_iam_member.\(t)_publisher"]])
+				}
 			}
 		}
 
@@ -459,16 +514,17 @@ import (
 		// the file with no export of this state's.
 		for nm, a in P.alertPolicies if P.adoptAll || list.Contains(*P.adopt["alertPolicies"] | [], nm) {
 			let k = (#name & {in: "\(P.id)_\(nm)"}).out
+			let chs = (#chans & {in: a.channels, subs: subNames, to: a.toSubscribers}).out
 			if a.file != _|_ {
 				tofu: resource: google_monitoring_alert_policy: (k): {
-					depends_on: list.Concat([deps, metricDeps, [for c in a.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
+					depends_on: list.Concat([deps, metricDeps, [for c in chs {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
 					for_each:     "${{for p in jsondecode(file(\"${path.module}/../\(a.file)\")) : p.name => p}}"
 					project:      P.id
 					display_name: "${each.value.displayName}"
 					combiner:     "OR"
 					severity:     "${each.value.severity == \"page\" ? \"CRITICAL\" : \"WARNING\"}"
 					user_labels:  "${each.value.labels}"
-					notification_channels: [for c in a.channels {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
+					notification_channels: [for c in chs {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
 					documentation: {content: "${each.value.documentation}", mime_type: "text/markdown"}
 					conditions: [{
 						display_name: "${each.value.displayName}"
@@ -487,13 +543,13 @@ import (
 			for pn, pol in a.policies {
 				let pk = (#name & {in: "\(P.id)_\(nm)_\(pn)"}).out
 				tofu: resource: google_monitoring_alert_policy: (pk): {
-					depends_on: list.Concat([deps, metricDeps, [for c in a.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
+					depends_on: list.Concat([deps, metricDeps, [for c in chs {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
 					project:      P.id
 					display_name: pol.displayName
 					combiner:     "OR"
 					severity: [if pol.severity == "page" {"CRITICAL"}, "WARNING"][0]
 					user_labels: pol.labels
-					notification_channels: [for c in a.channels {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
+					notification_channels: [for c in chs {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
 					documentation: {content: pol.documentation, mime_type: "text/markdown"}
 					conditions: [{
 						display_name: pol.displayName
@@ -512,6 +568,7 @@ import (
 		// fails from at least failingLocations checker locations for the window. Never imported.
 		for nm, u in P.uptimeChecks if P.adoptAll || list.Contains(*P.adopt["uptimeChecks"] | [], nm) {
 			let k = (#name & {in: "\(P.id)_\(nm)"}).out
+			let chs = (#chans & {in: u.channels, subs: subNames, to: u.toSubscribers}).out
 			tofu: resource: google_monitoring_uptime_check_config: (k): {
 				depends_on:       deps
 				project:          P.id
@@ -533,12 +590,12 @@ import (
 				}
 			}
 			tofu: resource: google_monitoring_alert_policy: "\(k)_uptime": {
-				depends_on: list.Concat([deps, [for c in u.channels {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
+				depends_on: list.Concat([deps, [for c in chs {"google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out)"}]])
 				project:      P.id
 				display_name: "Uptime: \(nm)"
 				combiner:     "OR"
 				severity: [if u.severity == "page" {"CRITICAL"}, "WARNING"][0]
-				notification_channels: [for c in u.channels {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
+				notification_channels: [for c in chs {"${google_monitoring_notification_channel.\((#name & {in: "\(P.id)_\(c)"}).out).id}"}]
 				documentation: {content: u.documentation, mime_type: "text/markdown"}
 				conditions: [{
 					display_name: "\(u.host)\(u.path) fails from \(u.failingLocations) or more checker locations"

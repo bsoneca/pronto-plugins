@@ -29,6 +29,8 @@ const plans = [
 	[./infra _watch.tofu]
 	[./infra _uptime.tofu]
 	[./infra _metric.tofu]
+	[./infra _subscriber.tofu]
+	[./infra _subDraft.tofu]
 	[./infra _wif.tofu]
 	[./infra _retire.tofu]
 	[./infra _always.tofu]
@@ -50,6 +52,7 @@ def main [] {
 		let dir = $work | path join $name
 		mkdir ($dir | path join config) ($dir | path join tofu)
 		"x" | save ($dir | path join config token.txt)
+		{topic: "alerts-a", subscription: "alerts-a-inbox", channel: "a", ackDeadlineSeconds: 60, messageRetentionDuration: "604800s"} | to json | save ($dir | path join config subscriber.json)
 		[{name: "a", displayName: "A", expr: "vector(1) > 0", duration: "120s", severity: "page", documentation: "a", labels: {app: "a"}}] | to json | save ($dir | path join config alerts.json)
 		let exported = ^mise ...$cue export $p.0 -e $p.1 --out json | complete
 		check $"($p.0) ($p.1) exports whole" ($exported.exit_code == 0) --said $exported.stderr
