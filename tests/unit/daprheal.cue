@@ -58,18 +58,22 @@ cases: "a workload rolled inside the cooldown is waited for, not rolled again, a
 	]
 }
 
-cases: "a pod created after the last roll and still bare past the cooldown is an error, and is not rolled again": {
+cases: "a workload rolled longer ago than the cooldown with a pod still bare, of any age, is an error and is not rolled again": {
 	suite: "daprheal"
 	steps: [
-		{call: "daprheal.run", args: [{pods: [(_bare & {ageSec: 600})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 1, rolled: []}, why: "the injector injects nothing for this workload: a roll every interval would never end"},
-		{pick: ["err"], matches: "pod created after that .* is still without its sidecar"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "an old bare pod: the rollout did not replace it (OnDelete, paused, a stuck ordered StatefulSet, a Pending pod): another roll would not either, and it must not stay green"},
+		{pick: ["err"], matches: "past the cooldown of 30 minutes, a pod of it is still without its sidecar: not rolled again"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {ageSec: 600})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 1, rolled: []}, why: "a pod created after the roll: the injector injects nothing for it"},
 	]
 }
 
-cases: "a bare pod older than the last roll, past the cooldown, is a roll that did not replace it: rolled again": {
+cases: "the mark of a workload with no bare pod is removed, so a later outage is repaired, not failed": {
 	suite: "daprheal"
 	steps: [
-		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"]}},
+		{call: "daprheal.run", args: [{pods: [(_bare & {containers: ["flagd", "daprd"]})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 0, rolled: [], marked: []}, why: "all of its pods run their sidecar: the incident is over"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {ns: "bonk", name: "bonk-crud-0", owner: "StatefulSet/bonk-crud", containers: ["crud"]})], marks: {"aprende.Deployment.aprende-flagd": 45, "bonk.StatefulSet.bonk-crud": 5}}], holds: {code: 0, rolled: [], marked: ["bonk.StatefulSet.bonk-crud"]}, why: "a bare pod elsewhere: only its own workload's mark stays"},
+		{call: "daprheal.run", args: [{pods: [(_bare & {ageSec: 30})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 0, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}, why: "a young bare pod is not judged, but its workload is not healthy: its mark stays, or the roll would repeat every grace"},
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}, args: ["--dry-run"]}], holds: {marked: ["aprende.Deployment.aprende-flagd"]}, why: "a dry run removes nothing"},
 	]
 }
 

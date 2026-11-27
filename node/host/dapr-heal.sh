@@ -48,39 +48,48 @@ while IFS='|' read -r ns name phase deleting created owner containers; do
   case "$phase" in Succeeded | Failed) continue ;; esac
   case ",$containers" in *,daprd,*) continue ;; esac
   # The injector adds the sidecar when the pod is admitted, so a bare pod stays bare; the grace is only for a pod whose
-  # creation time cannot be told from one being created this second.
-  if at=$(epoch "$created") && [ $((now - at)) -lt "$GRACE_SECONDS" ]; then continue; fi
-  bare="$bare$ns|$name|$owner|${at:-0}"$'\n'
+  # creation time cannot be told from one being created this second: it is not judged, but its workload is still not healthy
+  # (its mark, below, stays).
+  young=0
+  if at=$(epoch "$created") && [ $((now - at)) -lt "$GRACE_SECONDS" ]; then young=1; fi
+  bare="$bare$ns|$name|$owner|$young"$'\n'
 done <<<"$pods"
 
-if [ -z "$bare" ]; then echo "dapr-heal: every pod that asks for a Dapr sidecar runs one"; exit 0; fi
+# A mark says a workload was rolled for a bare pod. One whose pods all run their sidecar has done its work: a later outage is a new
+# incident, so the marks of every workload with no bare pod are removed (a dry run removes nothing).
+if [ -z "$bare" ]; then
+  [ "$dry" = 1 ] || rm -f "$state"/* 2>/dev/null || true
+  echo "dapr-heal: every pod that asks for a Dapr sidecar runs one"
+  exit 0
+fi
 
 # Rolling a Deployment while the injector is down would only make new bare pods: say so and fail the run, so a node whose
 # injector stays down shows in `node/host/host.nu apply --check` as a job that failed its last run.
+judged=$(grep -c '|0$' <<<"$bare" || true)
 ready=$(k -n dapr-system get deployment dapr-sidecar-injector -o jsonpath='{.status.readyReplicas}' || true)
-if [ "${ready:-0}" -lt 1 ]; then
+if [ "${judged:-0}" -gt 0 ] && [ "${ready:-0}" -lt 1 ]; then
   echo "dapr-heal: pods without their Dapr sidecar, but the injector (dapr-system/dapr-sidecar-injector) has no ready replica: not rolling:" >&2
-  printf '%s' "$bare" | cut -d'|' -f1,2 | sed 's/^/  /' >&2
+  grep '|0$' <<<"$bare" | cut -d'|' -f1,2 | sed 's/^/  /' >&2
   exit 1
 fi
 
 # The workload that owns each bare pod: a ReplicaSet's owner is its Deployment; a StatefulSet and a DaemonSet own the pod.
-# Anything else (a Job, a pod of its own) is not rolled.
+# Anything else (a Job, a pod of its own) is not rolled. `present` is every workload with a bare pod, a young one too, and
+# `targets` the ones with a pod old enough to be judged.
+present=""
 targets=""
-while IFS='|' read -r ns name owner at; do
+while IFS='|' read -r ns name owner young; do
   [ -n "$name" ] || continue
   case "$owner" in
     ReplicaSet/*)
       owner=$(k -n "$ns" get replicaset "${owner#ReplicaSet/}" -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}' || true)
-      case "$owner" in Deployment/?*) ;; *) echo "dapr-heal: $ns/$name: its ReplicaSet has no Deployment: not rolled" >&2; failed=1; continue ;; esac ;;
+      case "$owner" in Deployment/?*) ;; *) [ "$young" = 1 ] || { echo "dapr-heal: $ns/$name: its ReplicaSet has no Deployment: not rolled" >&2; failed=1; }; continue ;; esac ;;
     StatefulSet/?* | DaemonSet/?*) ;;
-    *) echo "dapr-heal: $ns/$name: owned by '${owner:-nothing}': not rolled" >&2; failed=1; continue ;;
+    *) [ "$young" = 1 ] || { echo "dapr-heal: $ns/$name: owned by '${owner:-nothing}': not rolled" >&2; failed=1; }; continue ;;
   esac
-  targets="$targets$ns|$owner|$at"$'\n'
+  present="$present$ns.${owner//\//.}"$'\n'
+  [ "$young" = 1 ] || targets="$targets$ns|$owner"$'\n'
 done <<<"$bare"
-
-# A mark's time, as seconds since 1970 (GNU stat, else BSD's).
-mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
 
 mkdir -p "$state"
 while IFS='|' read -r ns owner; do
@@ -92,14 +101,13 @@ while IFS='|' read -r ns owner; do
       echo "dapr-heal: $ns/$owner was rolled less than $COOLDOWN_MINUTES minutes ago and a pod of it is still without its sidecar: waiting"
       continue
     fi
-    # Past the cooldown, a pod created after the roll and still bare means the injector injects nothing for this workload: a
-    # roll every interval would never end, so it is said and the run fails until someone looks.
-    newest=$(awk -F'|' -v k="$ns|$owner" '$1 "|" $2 == k && $3 > m { m = $3 } END { print m + 0 }' <<<"$targets")
-    if [ "$newest" -gt "$(mtime "$mark")" ]; then
-      echo "dapr-heal: $ns/$owner was rolled, and a pod created after that (past the cooldown of $COOLDOWN_MINUTES minutes) is still without its sidecar: the injector injects nothing for it; not rolled again" >&2
-      failed=1
-      continue
-    fi
+    # Past the cooldown, a pod of it is still bare (the marks of healthy workloads are removed below, so this one is from this
+    # incident): the roll did not fix it, whatever the pod's age (the injector injects nothing for it, or the rollout is stuck:
+    # OnDelete, paused, an ordered StatefulSet, a Pending pod). Another roll would not either: it is said and the run fails
+    # until someone looks, and the mark stays so the next run says it again.
+    echo "dapr-heal: $ns/$owner was rolled and, past the cooldown of $COOLDOWN_MINUTES minutes, a pod of it is still without its sidecar: not rolled again" >&2
+    failed=1
+    continue
   fi
   if [ "$dry" = 1 ]; then echo "dapr-heal: would roll $ns/$owner"; continue; fi
   if k -n "$ns" rollout restart "$owner" >/dev/null; then
@@ -109,5 +117,13 @@ while IFS='|' read -r ns owner; do
     echo "dapr-heal: rolling $ns/$owner failed" >&2
     failed=1
   fi
-done < <(cut -d'|' -f1,2 <<<"$targets" | sort -u)
+done < <(sort -u <<<"$targets")
+
+# The marks of the workloads with no bare pod: their incident is over.
+if [ "$dry" != 1 ]; then
+  for mark in "$state"/*; do
+    [ -e "$mark" ] || continue
+    printf '%s\n' "$present" | grep -qxF "${mark##*/}" || rm -f "$mark"
+  done
+fi
 exit "$failed"

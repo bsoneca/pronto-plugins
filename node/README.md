@@ -342,8 +342,8 @@ so a bound every node needs is written here once, with defaults, and each reposi
   lists such pods in the operator's `namespaces` only (default aprende, brawl-chess, studio, coach; the schema refuses dapr-system, the system namespaces and Studio's `studio-<owner>-<app>-<hash>` tenants, so a tenant can neither trigger a roll nor turn the check red), not deleting, not finished, older than `graceSeconds`, with no `daprd` among the containers or the init containers (a native sidecar), and once `dapr-system/dapr-sidecar-injector` has a ready replica rolls
   each one's owner (`kubectl rollout restart` of the Deployment its ReplicaSet belongs to, a StatefulSet or a DaemonSet), so the injector adds the
   sidecar. A pod owned by a Job or by nothing is reported, not rolled, and fails the run; a workload is rolled at most once per `cooldownMinutes`
-  (a mark file under `/var/lib/pronto/dapr-heal`), since a roll replaces pods one by one, and a pod created after the roll and still bare past
-  the cooldown (the injector injects nothing for it) is an error and fails the run, never a second roll; with the injector down it rolls nothing and fails the run
+  (a mark file under `/var/lib/pronto/dapr-heal`), since a roll replaces pods one by one, and a pod of it still bare past the cooldown, of any age (the injector injects nothing for it, or the rollout is stuck: OnDelete, paused, an ordered StatefulSet), is an
+  error and fails the run, never a second roll; each run removes the mark of every workload with no bare pod, so a later outage is a new incident; with the injector down it rolls nothing and fails the run
   (rolling would make more bare pods), so `host.nu apply --check` reports the job as failed its last run. `--dry-run` only says. It reads
   `/etc/pronto/dapr-heal.env` (`KUBECTL`, default `k3s kubectl`, `NAMESPACES`, `GRACE_SECONDS`, `COOLDOWN_MINUTES`), from `#Host.daprHeal`, which is opt-in (`daprHeal?`: a host that is not a k3s node gets no timer). Its cases are
   `tests/unit/daprheal.cue` (the real script on a stand-in kubectl).
