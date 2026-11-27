@@ -48,16 +48,28 @@ bin/pronto-alerts job uninstall
 bin/pronto-alerts job run apps/<app>                    # the same in the foreground
 ```
 
+The job runs the apps' alerts from a worktree of its own at `origin/main` (`~/.cache/pronto/alerts/wt`,
+made as release-cron makes its own), never from a checkout a person or a session works in, with a fixed
+PATH, only the permissions the driver uses (Pub/Sub's host and the phone's, the inbox folder, and
+`/usr/bin/security` and gcloud by their absolute paths). The apps must be on `origin/main` before it is
+installed; install again after a merge to move it to the new main.
+
 It long-polls `:pull` (50 messages at most). For each message it writes one line to
 `~/.cache/pronto/alerts/<app>.jsonl` and flushes it to disk, and only then acknowledges it, so a crash
 redelivers and never loses. A line is
 `{id, state, policy, display, severity, app, owner, opened, closed, url}`: never the incident's
 resource, metric or condition query, whose labels may hold anything. A message that is no incident
-is acknowledged and dropped. The inbox rotates daily (`<app>.<day>.jsonl`) and keeps seven days.
+is acknowledged and dropped. The inbox rotates daily (`<app>.<day>.jsonl`) and keeps seven days; a day's
+file that is already there is appended to, never replaced. Tail it with `tail -F` (capital F): the
+rotation renames the file, and `tail -f` would keep reading the old one.
+
+The push comes after the acknowledge, so a crash between the two loses only the push: the line is in the
+inbox, and the phone is not told.
 
 Pub/Sub delivers at least once, so a line may be there twice: the readers keep one per `id:state`
-(`inbox.js`'s `unique` and `parseInbox`). Every pull rewrites `~/.cache/pronto/alerts/heartbeat`; a reader
-trusts the inbox while it is fresh and asks the incidents API otherwise.
+(`inbox.js`'s `unique` and `parseInbox`). Each app has its own `~/.cache/pronto/alerts/<app>.heartbeat`, rewritten
+only after Pub/Sub has answered a pull 2xx (a refused or unreachable pull leaves it as it was); a reader trusts that
+app's inbox while it is fresh and asks the incidents API otherwise.
 
 The phone is told only `<display name>: <state>`, for the severities in `push` (CRITICAL by default).
 Its bearer token, if the topic wants one, is `ALERTS_NTFY_TOKEN` or the login Keychain's

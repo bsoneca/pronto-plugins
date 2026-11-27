@@ -11,7 +11,7 @@ export const garbage = (id) => ({ messageId: id, data: btoa('not an incident') }
 export const leaks = (text) => ['RESOURCE-LABEL-MARKER', 'RESOURCE-NAME-MARKER', 'METRIC-LABEL-MARKER', 'FILTER-MARKER', 'DOCUMENTATION-MARKER', 'SUMMARY-MARKER'].filter((m) => text.includes(m));
 
 // `batches` are the pulls' answers in order (each a list of messages); `refuseFirst` answers the first call 401.
-export async function drain({ batches, push = ['CRITICAL'], phone = true, refuseFirst = false, passes }) {
+export async function drain({ batches, push = ['CRITICAL'], phone = true, refuseFirst = false, passes, fail, now, old }) {
   const dir = Deno.makeTempDirSync({ prefix: 'alerts-' });
   const calls = [], inboxAtAck = [], told = [], tokens = [];
   const inboxPath = `${dir}/my-app.jsonl`;
@@ -20,6 +20,7 @@ export async function drain({ batches, push = ['CRITICAL'], phone = true, refuse
   const server = Deno.serve({ port: 0, onListen() {}, signal: undefined }, async (req) => {
     const u = new URL(req.url);
     if (u.pathname.startsWith('/phone/')) { told.push({ path: u.pathname, body: await req.text(), priority: req.headers.get('priority') }); return new Response('ok'); }
+    if (fail === 403) { calls.push('403'); return new Response('denied', { status: 403 }); }
     if (refuseFirst && !refused) { refused = true; calls.push('401'); return new Response('no', { status: 401 }); }
     const auth = req.headers.get('authorization');
     const body = await req.json();
@@ -32,11 +33,19 @@ export async function drain({ batches, push = ['CRITICAL'], phone = true, refuse
     inboxAtAck.push(lines());
     return Response.json({});
   });
-  const base = `http://localhost:${server.addr.port}`;
+  const base = fail === 'network' ? 'http://localhost:1' : `http://localhost:${server.addr.port}`;
+  const errors = [];
+  if (old) {
+    // An inbox left by an earlier day, and a file for that day already there: rotation must keep both.
+    Deno.writeTextFileSync(`${dir}/my-app.jsonl`, old.current);
+    Deno.utimeSync(`${dir}/my-app.jsonl`, new Date(`${old.day}T12:00:00Z`), new Date(`${old.day}T12:00:00Z`));
+    if (old.rotated !== undefined) Deno.writeTextFileSync(`${dir}/my-app.${old.day}.jsonl`, old.rotated);
+  }
   let word = 0;
   const results = [];
   try {
     for (let i = 0; i < (passes ?? batches.length); i++) {
+      try {
       results.push(await pollOnce({
         api: base,
         sub: { app: 'my-app', project: 'my-project-1', subscription: 'alerts-my-app-inbox', push, ntfy: phone ? { url: `${base}/phone`, topic: 'my-app-alerts' } : undefined },
@@ -44,13 +53,17 @@ export async function drain({ batches, push = ['CRITICAL'], phone = true, refuse
         dir,
         ntfyToken: () => Promise.resolve(undefined),
         say: () => {},
+        now: now ? () => new Date(now) : undefined,
+        timeoutMs: 3000,
       }));
+      } catch (e) { errors.push(e.message); }
     }
   } finally {
     await server.shutdown();
   }
   const text = (() => { try { return Deno.readTextFileSync(inboxPath); } catch { return ''; } })();
-  const heartbeat = (() => { try { return /^\d{4}-\d\d-\d\dT/.test(Deno.readTextFileSync(`${dir}/heartbeat`)); } catch { return false; } })();
+  const heartbeat = (() => { try { return /^\d{4}-\d\d-\d\dT/.test(Deno.readTextFileSync(`${dir}/my-app.heartbeat`)); } catch { return false; } })();
+  const files = Object.fromEntries([...Deno.readDirSync(dir)].map((f) => [f.name, Deno.readTextFileSync(`${dir}/${f.name}`)]));
   Deno.removeSync(dir, { recursive: true });
-  return { results, calls, inboxAtAck, told, tokens, inbox: text.split('\n').filter(Boolean).map((l) => JSON.parse(l)), raw: text, heartbeat };
+  return { errors, files, results, calls, inboxAtAck, told, tokens, inbox: text.split('\n').filter(Boolean).map((l) => JSON.parse(l)), raw: text, heartbeat };
 }

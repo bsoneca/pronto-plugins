@@ -2,7 +2,7 @@
 // (observability/alerts.subscriber.json) and keeps them in a local inbox the lead tails. Its rules are
 // inbox.js's, pure; this file is the network and the disk.
 //   deno run -A alerts/subscriber.ts [run] <app-dir>...     read the subscriptions until stopped
-//   deno run -A alerts/subscriber.ts install <app-dir>...   the launchd job that runs the above
+//   deno run -A alerts/subscriber.ts install <app-dir>...   the launchd job that runs the above, from its own worktree at origin/main
 //   deno run -A alerts/subscriber.ts uninstall
 // The access token is the `pronto` gcloud configuration's, fetched when needed, fetched again when
 // Pub/Sub answers 401, and held in memory only.
@@ -23,7 +23,7 @@ export type Options = {
   sub: Subscription;
   // The access token; `refresh` asks for a new one (the last was refused).
   token: (refresh?: boolean) => Promise<string>;
-  // The inbox folder: <app>.jsonl, rotated <app>.<day>.jsonl, and the heartbeat file.
+  // The inbox folder: <app>.jsonl, rotated <app>.<day>.jsonl, and the app's <app>.heartbeat.
   dir: string;
   // The phone's bearer token, when the ntfy topic wants one.
   ntfyToken?: () => Promise<string | undefined>;
@@ -34,13 +34,29 @@ export type Options = {
 };
 
 const day = (d: Date) => d.toISOString().slice(0, 10);
+const exists = (p: string) => { try { Deno.statSync(p); return true; } catch { return false; } };
 
-// The previous day's inbox is renamed for its day, and rotated files past seven days are removed.
+// The previous day's inbox is renamed for its day, and rotated files past seven days are removed. A day's
+// file that is already there (the job restarted across midnight, the clock went back) is never replaced:
+// the inbox is appended to it, flushed, and only then removed.
 function rotate(dir: string, app: string, today: string) {
   const path = `${dir}/${app}.jsonl`;
   try {
     const was = day(Deno.statSync(path).mtime ?? new Date());
-    if (was !== today) Deno.renameSync(path, `${dir}/${rotatedName(app, was)}`);
+    if (was !== today) {
+      const to = `${dir}/${rotatedName(app, was)}`;
+      if (!exists(to)) Deno.renameSync(path, to);
+      else {
+        const file = Deno.openSync(to, { append: true });
+        try {
+          file.writeSync(Deno.readFileSync(path));
+          file.syncSync();
+        } finally {
+          file.close();
+        }
+        Deno.removeSync(path);
+      }
+    }
   } catch (e) {
     if (!(e instanceof Deno.errors.NotFound)) throw e;
   }
@@ -55,8 +71,6 @@ export async function pollOnce(o: Options): Promise<{ pulled: number; written: n
   const say = o.say ?? (() => {});
   const now = (o.now ?? (() => new Date()))();
   Deno.mkdirSync(o.dir, { recursive: true });
-  // The heartbeat says the subscriber is reading: the lead trusts the inbox while it is fresh.
-  Deno.writeTextFileSync(`${o.dir}/heartbeat`, now.toISOString() + "\n");
   rotate(o.dir, o.sub.app, day(now));
 
   const sub = subscriptionPath(o.sub.project, o.sub.subscription);
@@ -78,6 +92,9 @@ export async function pollOnce(o: Options): Promise<{ pulled: number; written: n
   };
 
   const got = await call(pullRequest(o.api, sub), o.timeoutMs ?? 120_000);
+  // The heartbeat is the app's own, written only once Pub/Sub has answered this pull 2xx (a refused or
+  // unreachable pull throws before it): the lead trusts the inbox only while it is fresh.
+  Deno.writeTextFileSync(`${o.dir}/${o.sub.app}.heartbeat`, now.toISOString() + "\n");
   const messages: Message[] = got.receivedMessages ?? [];
   if (!messages.length) return { pulled: 0, written: 0, acked: 0, pushed: 0, dropped: 0 };
 
@@ -135,7 +152,7 @@ function gcloudToken() {
   let held = "";
   return async (refresh = false) => {
     if (!held || refresh) {
-      const r = await new Deno.Command("gcloud", { args: ["auth", "print-access-token"], env: { CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto" }, stdout: "piped", stderr: "null" }).output();
+      const r = await new Deno.Command(Deno.env.get("ALERTS_GCLOUD") ?? "gcloud", { args: ["auth", "print-access-token"], env: { CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto" }, stdout: "piped", stderr: "null" }).output();
       if (!r.success) throw new Error("gcloud printed no access token for the pronto configuration");
       held = new TextDecoder().decode(r.stdout).trim();
     }
@@ -148,7 +165,7 @@ const ntfyToken = (): Promise<string | undefined> => {
   const env = Deno.env.get("ALERTS_NTFY_TOKEN");
   if (env) return Promise.resolve(env);
   if (Deno.build.os !== "darwin") return Promise.resolve(undefined);
-  const r = out("security", ["find-generic-password", "-s", "pronto-ntfy-token", "-w"]);
+  const r = out("/usr/bin/security", ["find-generic-password", "-s", "pronto-ntfy-token", "-w"]);
   return Promise.resolve(r.ok && r.text ? r.text : undefined);
 };
 
@@ -165,29 +182,66 @@ if (import.meta.main) {
   const verb = ["run", "install", "uninstall"].includes(first) ? first : "run";
   const apps = (verb === first ? rest : Deno.args).map((a) => Deno.realPathSync(a));
   const agent = `${home}/Library/LaunchAgents/${label}.plist`;
-  const uid = Deno.uid();
   if (verb === "uninstall") {
-    out("launchctl", ["bootout", `gui/${uid}/${label}`]);
+    out("launchctl", ["bootout", `gui/${Deno.uid()}/${label}`]);
     try { Deno.removeSync(agent); } catch { /* not installed */ }
     console.log(`${label}: removed`);
   } else if (verb === "install") {
     if (!apps.length) throw new Error("name the apps' folders");
-    for (const a of apps) read(a);
+    const sh = (cmd: string, args: string[], cwd?: string) => {
+      const r = new Deno.Command(cmd, { args, cwd, stdout: "piped", stderr: "piped" }).outputSync();
+      if (!r.success) throw new Error(`${cmd} ${args.join(" ")}${cwd ? ` (in ${cwd})` : ""}: ${new TextDecoder().decode(r.stderr).trim()}`);
+      return new TextDecoder().decode(r.stdout).trim();
+    };
+    // The job runs a worktree of its own at origin/main, as release-cron's run does (release-cron.ts worktree()):
+    // never a checkout a person or a session works in, whose files could be anything. Installing again moves it to main.
+    const top = Deno.realPathSync(sh("git", ["rev-parse", "--show-toplevel"], apps[0]));
+    const rels = apps.map((a) => {
+      if (!a.startsWith(top + "/")) throw new Error(`${a} is not in the repository of ${apps[0]}`);
+      return a.slice(top.length + 1);
+    });
+    const repo = sh("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], apps[0]);
+    const cache = `${home}/.cache/pronto/alerts`;
+    const wt = `${cache}/wt`;
+    Deno.mkdirSync(cache, { recursive: true });
+    sh("git", ["--git-dir", repo, "fetch", "-q", "origin"]);
+    if (!exists(`${wt}/.git`)) sh("git", ["--git-dir", repo, "worktree", "add", "-q", "--detach", wt, "origin/main"]);
+    sh("git", ["checkout", "-q", "--detach", "-f", "origin/main"], wt);
+    sh("git", ["clean", "-ffdq"], wt);
+    const hosts = new Set(["pubsub.googleapis.com"]);
+    for (const r of rels) {
+      for (const f of ["alerts/subscriber.ts", "observability/alerts.subscriber.json"]) {
+        if (!exists(`${wt}/${r}/${f}`)) throw new Error(`${r}/${f} is not on origin/main yet: merge the app's alerts first`);
+      }
+      const ntfy = read(`${wt}/${r}`).ntfy;
+      if (ntfy) hosts.add(new URL(ntfy.url).host);
+    }
+    // gcloud by its absolute path, found now, and the Keychain's by its own: the job's PATH names neither.
+    const gcloud = (Deno.env.get("PATH") ?? "").split(":").map((d) => `${d}/gcloud`).find((p) => p.startsWith("/") && exists(p));
+    if (!gcloud) throw new Error("gcloud is not on the PATH: the job cannot fetch a token");
+    const gcloudAt = Deno.realPathSync(gcloud);
     const logs = `${home}/Library/Logs/pronto`;
     Deno.mkdirSync(logs, { recursive: true });
     Deno.mkdirSync(`${home}/Library/LaunchAgents`, { recursive: true });
-    const path = [...new Set([...(Deno.env.get("PATH") ?? "").split(":"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])].filter(Boolean).join(":");
-    const script = new URL(import.meta.url).pathname;
-    Deno.writeTextFileSync(agent, plist({ label, program: Deno.execPath(), args: ["run", "-A", script, "run", ...apps], log: `${logs}/alerts-inbox.log`, env: { PATH: path, HOME: home, CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto" } }));
-    out("launchctl", ["bootout", `gui/${uid}/${label}`]);
+    // A fixed bare PATH, and only the permissions the driver uses.
+    const flags = [
+      `--allow-net=${[...hosts].join(",")}`,
+      `--allow-read=${wt},${cache}`,
+      `--allow-write=${cache}`,
+      `--allow-run=/usr/bin/security,${gcloudAt}`,
+      "--allow-env=HOME,ALERTS_DIR,ALERTS_NTFY_TOKEN,ALERTS_GCLOUD",
+    ];
+    const args = ["run", ...flags, `${wt}/${rels[0]}/alerts/subscriber.ts`, "run", ...rels.map((r) => `${wt}/${r}`)];
+    Deno.writeTextFileSync(agent, plist({ label, program: Deno.execPath(), args, log: `${logs}/alerts-inbox.log`, env: { PATH: "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME: home, CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto", ALERTS_GCLOUD: gcloudAt } }));
+    out("launchctl", ["bootout", `gui/${Deno.uid()}/${label}`]);
     // bootout returns before the job is gone: bootstrap again until it takes.
     let ok = false;
     for (let i = 0; i < 5 && !ok; i++) {
-      ok = out("launchctl", ["bootstrap", `gui/${uid}`, agent]).ok;
+      ok = out("launchctl", ["bootstrap", `gui/${Deno.uid()}`, agent]).ok;
       if (!ok) await new Promise((r) => setTimeout(r, 1000));
     }
-    if (!out("launchctl", ["print", `gui/${uid}/${label}`]).ok) throw new Error(`${label} is not loaded`);
-    console.log(`${label}: reading ${apps.length} subscription(s), log ${logs}/alerts-inbox.log`);
+    if (!out("launchctl", ["print", `gui/${Deno.uid()}/${label}`]).ok) throw new Error(`${label} is not loaded`);
+    console.log(`${label}: reading ${apps.length} subscription(s) from ${wt} (origin/main ${sh("git", ["rev-parse", "--short", "HEAD"], wt)}), log ${logs}/alerts-inbox.log`);
   } else {
     if (!apps.length) throw new Error("name the apps' folders");
     const dir = Deno.env.get("ALERTS_DIR") ?? `${home}/.cache/pronto/alerts`;

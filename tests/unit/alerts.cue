@@ -172,7 +172,7 @@ cases: {
 		{use: "run"},
 		{get: "results.0", holds: {written: 1}},
 	]}
-	"a pull that returns nothing still writes the heartbeat, and writes no inbox": {suite: "alerts", steps: [
+	"a 2xx pull, empty too, writes the app's own heartbeat and no inbox": {suite: "alerts", steps: [
 		{call: "alertsrun.drain", args: [{batches: [[]]}]},
 		{keep: "run"},
 		{get: "heartbeat", expect: true},
@@ -180,5 +180,23 @@ cases: {
 		{get: "raw", expect: ""},
 		{use: "run"},
 		{get: "results.0", expect: {pulled: 0, written: 0, acked: 0, pushed: 0, dropped: 0}},
+	]}
+	"a pull Pub/Sub refuses, or that never gets there, writes no heartbeat": {suite: "alerts", steps: [
+		{call: "alertsrun.drain", args: [{fail: 403, batches: [[]]}]},
+		{keep: "denied"},
+		{get: "heartbeat", expect: false},
+		{use: "denied"},
+		{get: "errors.0", matches: "403"},
+		{call: "alertsrun.drain", args: [{fail: "network", batches: [[]]}]},
+		{keep: "down"},
+		{get: "heartbeat", expect: false},
+		{use: "down"},
+		{get: "errors.length", expect: 1},
+	]}
+	"a rotated day's file that is already there is appended to, never replaced": {suite: "alerts", steps: [
+		{call: "alertsrun.drain", args: [{now: "2026-11-27T10:00:00Z", old: {day: "2026-11-26", current: "{\"id\":\"B\"}\n", rotated: "{\"id\":\"A\"}\n"}, batches: [[]]}]},
+		{get: "files", holds: {"my-app.2026-11-26.jsonl": "{\"id\":\"A\"}\n{\"id\":\"B\"}\n"}, why: "both days' lines, the earlier first"},
+		{call: "alertsrun.drain", args: [{now: "2026-11-27T10:00:00Z", old: {day: "2026-11-26", current: "{\"id\":\"B\"}\n"}, batches: [[]]}]},
+		{get: "files", holds: {"my-app.2026-11-26.jsonl": "{\"id\":\"B\"}\n"}, why: "with no file for the day, a rename as before"},
 	]}
 }
