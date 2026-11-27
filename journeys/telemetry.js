@@ -118,35 +118,60 @@ if (!globalThis.__prontoJourneys) {
 		if (document.visibilityState === "hidden") flush();
 	});
 	const nameOf = (x) => (x instanceof Error ? x.name : typeof x);
-	const messageOf = (x) => String(x instanceof Error ? x.message : typeof x === "string" ? x : "").slice(0, ERROR_TEXT);
-	// The first frame of the stack that names a place: "fn (url:line:col)" without "at ".
-	const frameOf = (x) => {
-		const stack = x instanceof Error && typeof x.stack === "string" ? x.stack : "";
-		const line = stack.split("\n").map((l) => l.trim()).find((l) => /^at\s/.test(l) || /@\S+:\d+:\d+$/.test(l));
-		return line ? line.replace(/^at\s+/, "").slice(0, ERROR_TEXT) : "";
+	// An error's detail is sent only while the error_tracking decision (pronto-errors, which sets
+	// globalThis.__prontoErrorTracking when the flag answers) is on; pending or off, the event is the
+	// name alone, as before, whatever the page throws.
+	const detailOn = () => globalThis.__prontoErrorTracking === true;
+	// What the collector would redact, done here too so none of it is sent: urls, emails, tokens and long
+	// digit runs, then the whole message dropped if it names a chess position or a move (a saved game's
+	// text must never leave the page).
+	const FEN = /(?:[pnbrqkPNBRQK1-8]+\/){3,}[pnbrqkPNBRQK1-8]+/;
+	const MOVE = /\b(?:[a-h][1-8]){2}[qrbn]?\b|\b[KQRBN][a-h]?[1-8]?x?[a-h][1-8]\b|\b[a-h]x?[a-h]?[1-8]\b|\bO-O(?:-O)?\b/;
+	const clean = (text) => {
+		const t = String(text ?? "")
+			.replace(/https?:\/\/\S*/g, "<url>")
+			.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, "<email>")
+			.replace(/[A-Za-z0-9_+/=-]{24,}/g, "<token>")
+			.replace(/\d[\d.\-/ ]{6,}\d/g, "<number>");
+		return FEN.test(text) || MOVE.test(text) ? "" : t.slice(0, ERROR_TEXT);
 	};
-	// The top few frames, each as frameOf reads it, joined by newlines and cut to a safe length.
-	const stackOf = (x) => {
+	const messageOf = (x) => clean(x instanceof Error ? x.message : typeof x === "string" ? x : "");
+	// A frame is a line that ends in a location ("fn (url:1:2)", "fn@url:1:2"): any other line of a stack,
+	// its message's lines above all, is not sent. Its url loses origin, query and fragment.
+	const LOCATED = /:\d+:\d+\)?$/;
+	const framesOf = (x) => {
 		const stack = x instanceof Error && typeof x.stack === "string" ? x.stack : "";
 		return stack
 			.split("\n")
 			.map((l) => l.trim())
-			.filter((l) => /^at\s/.test(l) || /@\S+:\d+:\d+$/.test(l))
+			.filter((l) => (/^at\s/.test(l) || /@/.test(l)) && LOCATED.test(l))
 			.slice(0, STACK_FRAMES)
-			.map((l) => l.replace(/^at\s+/, "").slice(0, ERROR_TEXT))
-			.join("\n")
-			.slice(0, STACK_TEXT);
+			.map((l) =>
+				l
+					.replace(/^at\s+/, "")
+					.replace(/https?:\/\/[^/\s)]*/g, "")
+					.replace(/[?#][^\s)]*?(:\d+:\d+\)?)$/, "$1")
+					.slice(0, ERROR_TEXT)
+			);
 	};
+	// The first frame: "fn (url:line:col)" without "at ".
+	const frameOf = (x) => framesOf(x)[0] ?? "";
+	const stackOf = (x) => framesOf(x).join("\n").slice(0, STACK_TEXT);
 	// The browser the page runs in, as a tag from a fixed list, never the user agent itself: an
 	// in-app browser (Instagram, Facebook's FBAN/FBAV) or a WebView ("wv"), else "other".
 	const browserOf = () => {
 		const ua = String(navigator.userAgent ?? "");
 		return /Instagram/i.test(ua) ? "instagram" : /FBAN|FBAV/.test(ua) ? "facebook" : /; wv\)|\bwv\b/.test(ua) ? "wv" : "other";
 	};
-	// A page reports a few errors, each once: a loop in a tab is no flood of beacons.
+	// A page reports a few errors, each once, while the detail is on: a loop in a tab is no flood of beacons.
+	// While it is not, every error leaves as its name alone, as it always did.
 	const reported = new Set();
 	const report = (kind, thrown, fallback) => {
-		const event = { type: "error", kind, name: nameOf(thrown), message: messageOf(thrown) || String(fallback ?? "").slice(0, ERROR_TEXT), frame: frameOf(thrown), stack: stackOf(thrown), browser: browserOf(), screen: current };
+		if (!detailOn()) {
+			emit({ type: "error", kind, name: nameOf(thrown), screen: current });
+			return;
+		}
+		const event = { type: "error", kind, name: nameOf(thrown), message: messageOf(thrown) || clean(fallback), frame: frameOf(thrown), stack: stackOf(thrown), browser: browserOf(), screen: current };
 		const key = `${event.name} ${event.message} ${event.frame}`;
 		if (reported.has(key) || reported.size >= ERRORS_PER_PAGE) return;
 		reported.add(key);

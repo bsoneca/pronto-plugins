@@ -105,6 +105,8 @@ const report = (type, value, stacktrace) => {
 
 const settle = (next) => {
 	state = next;
+	// The decision, for the journeys reporter: it sends an error's detail only while this is true.
+	globalThis.__prontoErrorTracking = next === "on";
 	if (next === "on") for (const e of held) send({ ...e, release });
 	held = [];
 };
