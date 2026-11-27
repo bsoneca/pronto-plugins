@@ -343,6 +343,8 @@ def main [] {
 	test_a_tenants_secret_and_seed_names_are_resource_names_never_options
 	test_a_tenants_own_vendored_engine_does_not_copy_the_schema_onto_itself
 	test_a_tenants_schema_that_is_not_a_regular_file_is_refused_unread
+	test_a_tenants_seed_is_a_file_git_tracks
+	test_a_tenants_build_targets_are_names_and_buildx_may_be_dockers_own
 	test_a_tenants_env_link_is_refused_and_never_opened
 	test_a_tenants_push_rights_are_only_what_its_path_uses
 	test_a_tenants_origin_and_preview_are_the_operators
@@ -2429,6 +2431,7 @@ def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] 
 	let cases = [
 		{why: "an image of another registry", says: "not an image under 127.0.0.1:5000/($ns)/", objects: $"[(do $deploy '"docker.io/library/nginx:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' '')]"}
 		{why: "an image of another tenant's path", says: "not an image under", objects: $"[(do $deploy '"127.0.0.1:5000/studio-other-game-0/game-crud:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' '')]"}
+		{why: "a tenant's own image pinned by a tag alone", says: "which is pinned by tag alone: a tenant's image carries its sha256 digest", objects: $"[(do $deploy $'"127.0.0.1:5000/($ns)/game-crud:release"' '')]"}
 		{why: "an init container's foreign image", says: "container wait runs", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: {initContainers: [{name: \"wait\", image: \"docker.io/x:1\"}], containers: [{name: \"crud\", image: ($good)}]}}]"}
 		{why: "a NodePort Service", says: "is a NodePort Service", objects: $"[{apiVersion: \"v1\", kind: \"Service\", metadata: {name: \"crud\", namespace: \"($ns)\"}, spec: {type: \"NodePort\", ports: [{port: 80}]}}]"}
 		{why: "a Service with externalIPs", says: "names externalIPs", objects: $"[{apiVersion: \"v1\", kind: \"Service\", metadata: {name: \"crud\", namespace: \"($ns)\"}, spec: {externalIPs: [\"1.2.3.4\"], ports: [{port: 80}]}}]"}
@@ -2650,9 +2653,16 @@ def test_the_tenant_door_check_in_the_pod_dials_the_service_and_forwards_to_noth
 	print "test a tenant's release run in the builder pod (no --push-kubeconfig) checks the door at the Service's ClusterIP, with no port-forward into the gateway's namespace..."
 	let w = (tenant-world)
 	let path = ([($w.dir | path join bin)] | append $env.PATH)
-	let r = (with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), SOPS_AGE_KEY: "AGE-SECRET-KEY-FAKE", KUBECONFIG: $w.publisher, KUBERNETES_SERVICE_HOST: "10.43.0.1"} {
+	let pod = {|extra: record| with-env ({PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), SOPS_AGE_KEY: "AGE-SECRET-KEY-FAKE", KUBECONFIG: $w.publisher, KUBERNETES_SERVICE_HOST: "10.43.0.1"} | merge $extra) {
 		do { cd $w.app; ^$nu.current-exe --no-config-file $release_nu --app $w.app --tenant $tenant_ns --host $tenant_host } | complete
-	})
+	} }
+	# a builder whose network policy does not reach the gateway (the fork App's) is refused before anything is built or written
+	let none = (do $pod {})
+	assert ($none.exit_code != 0) "a builder without the gateway capability was not refused"
+	assert (has $none.stderr "does not declare that its network policy reaches the Envoy Gateway") $none.stderr
+	assert equal (writes $w) []
+	assert (not ($w.dir | path join docker.log | path exists) or not (open --raw ($w.dir | path join docker.log) | str contains "buildx bake")) "something was built"
+	let r = (do $pod {PRONTO_BUILDER_GATEWAY_EGRESS: "1"})
 	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
 	let door = (open --raw ($w.dir | path join door_curl.log))
 	assert ($door | str contains "http://10.43.0.9:80/crud/v1.0/metadata") $door
@@ -2707,17 +2717,18 @@ def test_a_tenants_objects_hand_their_life_to_no_one_and_hold_no_reserved_name [
 	let cases = [
 		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: x, namespace: ns, ownerReferences: [{apiVersion: v1, kind: ServiceAccount, name: publisher, uid: "0"}]}}', says: "ConfigMap/x sets metadata.ownerReferences, which a tenant's release leaves to the engine"}
 		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: x, namespace: ns, finalizers: [example.com/hold]}}', says: "ConfigMap/x sets metadata.finalizers"}
-		{obj: '{apiVersion: apps/v1, kind: Deployment, metadata: {name: d, namespace: ns}, spec: {template: {metadata: {finalizers: [example.com/hold]}, spec: {containers: [{name: c, image: "127.0.0.1:5000/ns/x", securityContext: {allowPrivilegeEscalation: false}}]}}}}', says: "Deployment/d sets spec.template.metadata.finalizers"}
+		{obj: '{apiVersion: apps/v1, kind: Deployment, metadata: {name: d, namespace: ns}, spec: {template: {metadata: {finalizers: [example.com/hold]}, spec: {containers: [{name: c, image: "127.0.0.1:5000/ns/x@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", securityContext: {allowPrivilegeEscalation: false}}]}}}}', says: "Deployment/d sets spec.template.metadata.finalizers"}
 		{obj: '{apiVersion: batch/v1, kind: CronJob, metadata: {name: j, namespace: ns}, spec: {jobTemplate: {spec: {template: {metadata: {finalizers: [example.com/hold]}}}}}}', says: "CronJob/j sets spec.jobTemplate.spec.template.metadata.finalizers"}
 		{obj: '{apiVersion: external-secrets.io/v1, kind: ExternalSecret, metadata: {name: e, namespace: ns}, spec: {target: {template: {metadata: {finalizers: [example.com/hold]}}}}}', says: "ExternalSecret/e sets spec.target.template.metadata.finalizers"}
 		{obj: '{apiVersion: external-secrets.io/v1, kind: ExternalSecret, metadata: {name: e, namespace: ns}, spec: {target: {manifest: {apiVersion: v1, kind: Secret}}}}', says: "ExternalSecret/e sets spec.target.manifest"}
 		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: "--kubeconfig=/tmp/x", namespace: ns}}', says: "is not named as a Kubernetes resource is"}
+		{obj: '{apiVersion: postgresql.cnpg.io/v1, kind: Cluster, metadata: {name: c, namespace: ns}, spec: {imageName: "127.0.0.1:5000/ns/db:17"}}', says: "Cluster/c runs 127.0.0.1:5000/ns/db:17, which is pinned by tag alone"}
 		{obj: '{apiVersion: v1, kind: ServiceAccount, metadata: {name: publisher, namespace: ns}}', says: "ServiceAccount/publisher is an object the provisioner or the engine owns"}
 		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: pronto-release, namespace: ns}, immutable: true}', says: "ConfigMap/pronto-release is an object the provisioner or the engine owns"}
 		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: kube-root-ca.crt, namespace: ns}}', says: "ConfigMap/kube-root-ca.crt is an object the provisioner or the engine owns"}
 	]
 	for c in $cases {
-		let body = $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.obj)] {namespace: ns} [v1/ConfigMap v1/ServiceAccount apps/v1/Deployment batch/v1/CronJob external-secrets.io/v1/ExternalSecret]"
+		let body = $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.obj)] {namespace: ns} [v1/ConfigMap v1/ServiceAccount apps/v1/Deployment batch/v1/CronJob external-secrets.io/v1/ExternalSecret postgresql.cnpg.io/v1/Cluster]"
 		let r = (in-world $w -c $body)
 		assert ($r.exit_code != 0) $"($c.obj) was not refused"
 		assert (has $r.stderr $c.says) $"($c.obj): ($r.stderr)"
@@ -2787,6 +2798,64 @@ def test_a_tenants_schema_that_is_not_a_regular_file_is_refused_unread [] {
 	}
 }
 
+def test_a_tenants_seed_is_a_file_git_tracks [] {
+	print "test a tenant's seed source that git ignores (a .certs key) or does not track is refused, and a tracked regular file passes..."
+	let w = (tenant-world)
+	let app = $w.app
+	mkdir ($app | path join .certs)
+	mkdir ($app | path join data)
+	"-----BEGIN PRIVATE KEY-----\n" | save -f ($app | path join .certs key.pem)
+	".certs/\n" | save -f ($app | path join .gitignore)
+	"{}\n" | save -f ($app | path join data untracked.json)
+	"{}\n" | save -f ($app | path join data tracked.json)
+	do { cd $app; ^git add .gitignore data/tracked.json; ^git -c user.name=t -c user.email=t@example.test commit -q -m seed } | complete | ignore
+	let check = {|rel: string| in-world $w -c (script $w $"check-tracked-seeds '($app)' [{name: x, path: '($rel)', file: '($app | path join $rel)'}]") }
+	for row in [{rel: ".certs/key.pem", why: "an ignored key"} {rel: "data/untracked.json", why: "an untracked file"}] {
+		let r = (do $check $row.rel)
+		assert ($r.exit_code != 0) $"($row.why) was not refused"
+		assert (has $r.stderr "which is not a file git tracks") $"($row.why): ($r.stderr)"
+	}
+	let ok = (do $check "data/tracked.json")
+	assert equal $ok.exit_code 0 $"($ok.stdout)\n($ok.stderr)"
+	# a tracked file with content written over it is not what the commit holds
+	"{\"changed\": true}\n" | save -f ($app | path join data tracked.json)
+	let changed = (do $check "data/tracked.json")
+	assert ($changed.exit_code != 0) "a modified tracked seed was not refused"
+	assert (has $changed.stderr "which differs from the commit") $changed.stderr
+	do { cd $app; ^git checkout -q -- data/tracked.json } | complete | ignore
+	# a seed reached through a link: seed-files resolves it, so one inside the folder is judged as the file it names (here untracked, refused)
+	# and one that leads out of the folder is refused
+	^ln -s untracked.json ($app | path join data link-in.json)
+	^ln -s /etc/hosts ($app | path join data link-out.json)
+	let through = {|rel: string| in-world $w -c (script $w $"let seeds = \(seed-files '($app)' {services: {a: {seed: {x: '($rel)'}}}}\); check-tracked-seeds '($app)' $seeds") }
+	let inside = (do $through "data/link-in.json")
+	assert ($inside.exit_code != 0) "a link to an untracked file was not refused"
+	assert (has $inside.stderr "which is not a file git tracks") $inside.stderr
+	let outside = (do $through "data/link-out.json")
+	assert ($outside.exit_code != 0) "a link out of the folder was not refused"
+	assert (has $outside.stderr "resolves outside") $outside.stderr
+	rm -rf $w.dir
+}
+
+def test_a_tenants_build_targets_are_names_and_buildx_may_be_dockers_own [] {
+	print "test a tenant's build target that is not a service name never reaches buildx, and Docker's own buildx plugin is used when none is on the PATH..."
+	let w = (tenant-world)
+	let body = $"let app_info = \(runtime resolve-app '($w.app)'\); let node = \(render node-config $app_info.cue_path '' --tenant ($tenant_ns) --host ($tenant_host)\); use ($engine_dir | path join push.nu); push tenant-images $app_info.dir $node ['--help'] release ''"
+	let r = (in-world $w -c (script $w $body))
+	assert ($r.exit_code != 0) "an option-shaped target was not refused"
+	assert (has $r.stderr "build targets are service names") $r.stderr
+	assert (not ($w.dir | path join docker.log | path exists) or not (open --raw ($w.dir | path join docker.log) | str contains "buildx")) "buildx was run"
+	# Docker's own plugin folder, with no buildx on the PATH
+	let plugins = ($w.dir | path join plugins)
+	mkdir $plugins
+	"#!/bin/sh\nexit 0\n" | save -f ($plugins | path join docker-buildx)
+	^chmod +x ($plugins | path join docker-buildx)
+	let found = (with-env {PATH: ["/usr/bin" "/bin"], PRONTO_DOCKER_PLUGIN_DIRS: $plugins} { ^$nu.current-exe --no-config-file -c $"use ($engine_dir | path join push.nu); push buildx-binary" } | complete)
+	assert equal $found.exit_code 0 $found.stderr
+	assert equal ($found.stdout | str trim) ($plugins | path join docker-buildx)
+	rm -rf $w.dir
+}
+
 def test_a_tenants_env_link_is_refused_and_never_opened [] {
 	print "test a tenant's .env that is a link is refused as a link and its target is never read..."
 	let w = (tenant-world)
@@ -2825,6 +2894,24 @@ def test_a_tenants_push_rights_are_only_what_its_path_uses [] {
 	let c = (tenant-release $f --check --build)
 	assert equal $c.exit_code 0 $"($c.stdout)\n($c.stderr)"
 	rm -rf $f.dir
+	# forwarding to a Service finds a pod behind it: a live off-cluster release asks to read the gateway's pods, and a check does not; the
+	# registry's pod is found by listing, which every path that builds asks
+	for row in [
+		{deny: "get pods -n envoy-gateway-system", args: [], says: "the push identity may not get pods in envoy-gateway-system: it needs the Role studio-builder-gateway", passes_check: true}
+		{deny: "list pods -n pronto-registry", args: [--check --build], says: "the push identity may not list pods in pronto-registry: it needs the Role studio-builder-push", passes_check: false}
+	] {
+		let p = (tenant-world)
+		$row.deny | save -f ($p.state | path join auth_deny)
+		let live = (tenant-release $p ...$row.args)
+		assert ($live.exit_code != 0) $"($row.deny) was not refused"
+		assert (has $live.stderr $row.says) $live.stderr
+		assert equal (writes $p) []
+		if $row.passes_check {
+			let ck = (tenant-release $p --check --build)
+			assert equal $ck.exit_code 0 $"a check asked for the gateway's pods: ($ck.stdout)\n($ck.stderr)"
+		}
+		rm -rf $p.dir
+	}
 }
 
 def test_a_tenants_origin_and_preview_are_the_operators [] {
@@ -2854,7 +2941,7 @@ def test_a_tenants_containers_say_allow_privilege_escalation_false [] {
 	assert ($containers | is-not-empty) "the release applied no container"
 	assert ($containers | all {|c| ($c.securityContext?.allowPrivilegeEscalation? | default null) == false }) $"a container left it unset: ($containers | to nuon)"
 	# the validator: unset is refused, true is refused, false passes; the hardening sets the unset one and leaves a true one to be refused
-	let body = $"use ($engine_dir | path join tenant.nu); let ns = 'ns'; let node = {namespace: $ns}; let mk = {|sc| {apiVersion: apps/v1, kind: Deployment, metadata: {name: d, namespace: $ns}, spec: {template: {spec: {containers: [{name: c, image: '127.0.0.1:5000/ns/x', securityContext: $sc}]}}}} }; let kinds = [apps/v1/Deployment]; let results = [{} {allowPrivilegeEscalation: true} {allowPrivilegeEscalation: false}] | each {|sc| let objs = [\(do $mk $sc\)]; let raw = \(try { tenant check-objects $objs $node $kinds; 'ok' } catch {|e| 'refused' }\); let hard = \(try { tenant check-objects \(tenant harden-objects $objs\) $node $kinds; 'ok' } catch {|e| 'refused' }\); {raw: $raw, hardened: $hard} }; $results | to json --raw"
+	let body = $"use ($engine_dir | path join tenant.nu); let ns = 'ns'; let node = {namespace: $ns}; let mk = {|sc| {apiVersion: apps/v1, kind: Deployment, metadata: {name: d, namespace: $ns}, spec: {template: {spec: {containers: [{name: c, image: '127.0.0.1:5000/ns/x@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', securityContext: $sc}]}}}} }; let kinds = [apps/v1/Deployment]; let results = [{} {allowPrivilegeEscalation: true} {allowPrivilegeEscalation: false}] | each {|sc| let objs = [\(do $mk $sc\)]; let raw = \(try { tenant check-objects $objs $node $kinds; 'ok' } catch {|e| 'refused' }\); let hard = \(try { tenant check-objects \(tenant harden-objects $objs\) $node $kinds; 'ok' } catch {|e| 'refused' }\); {raw: $raw, hardened: $hard} }; $results | to json --raw"
 	let v = (in-world $w -c $body)
 	assert equal $v.exit_code 0 $v.stderr
 	assert equal ($v.stdout | from json) [{raw: "refused", hardened: "ok"} {raw: "refused", hardened: "refused"} {raw: "ok", hardened: "ok"}]

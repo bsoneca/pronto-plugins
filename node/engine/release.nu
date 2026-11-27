@@ -793,10 +793,30 @@ def tenant-preflight [app_info: record, node: record, push_kubeconfig: string, -
 			rm -rf $work
 		}
 	}
-	tenant check-seeds (seed-files $app_info.dir $node)
+	let seeds = (seed-files $app_info.dir $node)
+	tenant check-seeds $seeds
+	check-tracked-seeds $app_info.dir $seeds
 	for name in ($node.services? | default {} | values | each {|s| $s.secrets? | default {} | values } | flatten | uniq) {
 		let live = ((^kubectl get secret $name -n $node.namespace | complete).exit_code == 0)
 		if not $live { error make {msg: $"Node.services read the Secret ($name), which is not in ($node.namespace): a tenant's release decrypts none, so its provisioner puts it there"} }
+	}
+}
+
+# A tenant's seed is copied into a ConfigMap by this process from the checkout, where an ignored or untracked file is whatever the machine
+# holds (a `.certs/` private key, a `.env`, a key). So a seed source is a regular file git tracks (`git ls-files --error-unmatch`, run in the
+# checkout with the engine's cleared environment), whatever the ignore rules say; the path checks of `seed-files` stand.
+export def check-tracked-seeds [app_dir: string, seeds: list] {
+	let root = ($app_dir | path expand)
+	let git = (which git | first | get path)
+	for s in $seeds {
+		let rel = ($s.file | path expand | path relative-to $root)
+		if ($s.file | path type) != "file" { error make {msg: $"Node.services seeds the ConfigMap ($s.name) from ($s.path), which is not a regular file"} }
+		# literal pathspecs: the name is a file's, never a glob or a magic pathspec
+		let tracked = (do { cd $root; ^env -i ...(render tenant-env) GIT_LITERAL_PATHSPECS=1 $git ls-files --error-unmatch -- $rel } | complete)
+		if $tracked.exit_code != 0 { error make {msg: $"Node.services seeds the ConfigMap ($s.name) from ($s.path), which is not a file git tracks: a seed is never an ignored or untracked file"} }
+		# …as the commit holds it: content written over a tracked file is not what was reviewed (a failed comparison, with no commit to hold it to, refuses too)
+		let same = (do { cd $root; ^env -i ...(render tenant-env) GIT_LITERAL_PATHSPECS=1 $git diff --quiet HEAD -- $rel } | complete)
+		if $same.exit_code != 0 { error make {msg: $"Node.services seeds the ConfigMap ($s.name) from ($s.path), which differs from the commit: a seed is the file as the release's commit holds it"} }
 	}
 }
 

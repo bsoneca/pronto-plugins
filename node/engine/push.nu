@@ -20,10 +20,14 @@ use tenant.nu
 # docker/buildx's binary), or `buildx`. The one whose folder comes first on the PATH wins, not the first
 # name tried: mise puts the app's pin ahead of the machine's, and a Homebrew `docker-buildx` (built with
 # whatever Go is current, 0.38.0 with Go 1.27) must not shadow the pinned `docker-cli-plugin-docker-buildx`.
-def buildx-binary []: nothing -> string {
+export def buildx-binary []: nothing -> string {
 	let found = ([docker-buildx docker-cli-plugin-docker-buildx buildx] | each {|n| which --all $n } | flatten | get path | uniq)
-	if ($found | is-empty) { error make {msg: "missing on the PATH: docker-buildx: the app's mise pins it (aqua:docker/buildx), see node/README.md"} }
-	nearest-on-path $found $env.PATH
+	if ($found | is-not-empty) { return (nearest-on-path $found $env.PATH) }
+	# none on the PATH: the plugin Docker itself installed (a builder image puts it in /usr/local/lib/docker/cli-plugins), found as `docker` finds it
+	let dirs = ($env.PRONTO_DOCKER_PLUGIN_DIRS? | default "/usr/local/lib/docker/cli-plugins:/usr/lib/docker/cli-plugins:/usr/libexec/docker/cli-plugins:/usr/local/libexec/docker/cli-plugins" | split row ":")
+	let installed = ($dirs | each {|d| $d | path join docker-buildx } | where {|p| ($p | path type) == "file" })
+	if ($installed | is-empty) { error make {msg: "missing on the PATH: docker-buildx, and not in Docker's plugin folders: the app's mise pins it (aqua:docker/buildx), see node/README.md"} }
+	$installed | first
 }
 
 # What the failed step printed: BuildKit's plain progress prefixes every line of a step with its number, and
@@ -223,6 +227,10 @@ export def rebase-paths [text: string, from: string, to: string]: nothing -> str
 export def tenant-images [app_dir: string, node: record, services: list<string>, tag: string, push_kubeconfig: string]: nothing -> record {
 	let app = $node.name
 	let ns = $node.namespace
+	# a service is a build target and a path under the staging folder: a name, never an option or a path (a Node a release.cue exports itself
+	# skips the schema's service-name grammar)
+	let odd = ($services | where {|s| not ($s =~ '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') })
+	if ($odd | is-not-empty) { error make {msg: $"a tenant's build targets are service names: ($odd | length) of them are not \(lowercase letters, digits and '-'\)"} }
 	let dir = ($app_dir | path expand)
 	let work = (mktemp -d -t node-build.XXXXXX | str trim | path expand)
 	try {
@@ -240,7 +248,7 @@ export def tenant-images [app_dir: string, node: record, services: list<string>,
 		let sets = ($services | each {|s| ["--set" $"($s).output=type=oci,dest=($out)/($s).tar" "--set" $"($s).tags="] } | flatten)
 		with-remote-builder $work $node.tenant.buildkit {|builder|
 			with-env {SOURCE_DATE_EPOCH: "0"} {
-				let r = (do { cd $staged; open --raw ($work | path join release.compose.yaml) | ^env -i ...(render tenant-env) (which docker | first | get path) buildx bake -f - --builder $builder --provenance=false --progress=plain $"--allow=fs.read=($staged)" $"--allow=fs.write=($out)" --set $"*.platform=($node.environment.platform)" ...$sets ...$services } | complete)
+				let r = (do { cd $staged; open --raw ($work | path join release.compose.yaml) | ^env -i ...(render tenant-env) (which docker | first | get path) buildx bake -f - --builder $builder --provenance=false --progress=plain $"--allow=fs.read=($staged)" $"--allow=fs.write=($out)" --set $"*.platform=($node.environment.platform)" ...$sets -- ...$services } | complete)
 				if $r.exit_code != 0 { error make {msg: $"docker buildx bake on the tenants' buildkitd failed:\n(($r.stdout + $r.stderr) | lines | last 40 | str join (char nl))(failed-step ($r.stdout + $r.stderr))"} }
 			}
 		}
