@@ -5,7 +5,45 @@ package schema
 
 #Host: {
 	dockerGC: #DockerGC
+	kubelet?: #Kubelet
 }
+
+// The node's kubelet, set by kubelet.nu (README.md, "The node host"): how full the disk may get before pods
+// are evicted, and how much a log may grow. k3s's defaults evict at 10% free and then reclaim 10% more, about 39G
+// of a 387G disk, which evicting every pod did not free (the 2026-11-27 outage), so the amounts are absolute.
+// A partial --eviction-hard drops the kubelet's other defaults (memory.available<100Mi, nodefs.inodesFree<5%, ...), so
+// every threshold is written, and none has a default: a node says each, and a map missing one is refused.
+#Kubelet: {
+	// How many pods the node runs: said, with no default, since a default would write k3s's 110 over a node that runs
+	// more and strand its pods Pending. The node's pod range bounds it: k3s gives the node a /24 of the cluster CIDR,
+	// 253 addresses; a limit past it needs a wider range.
+	maxPods!: int & >=110 & <=253
+
+	// The thresholds under which the kubelet evicts: percent of the filesystem (or its inodes) free, and memory left.
+	evictionHard!: {
+		memory!:        =~"^[1-9][0-9]{1,3}Mi$"
+		nodefs!:        #Percent
+		nodefsInodes!:  #Percent
+		imagefs!:       #Percent
+		imagefsInodes!: #Percent
+	}
+	// What the kubelet frees once it evicts, beside the threshold, absolute.
+	evictionMinimumReclaim!: {
+		nodefs!:  =~"^[1-9][0-9]?Gi$"
+		imagefs!: =~"^[1-9][0-9]?Gi$"
+	}
+	// Image garbage collection starts at high percent of the image filesystem used and stops at low, both before eviction.
+	imageGC!: {
+		high!: int & <=(95 - evictionHard.nodefs) & <=(95 - evictionHard.imagefs)
+		low!:  int & >0 & <high
+	}
+	// The container log: each file's size, and how many the runtime keeps.
+	containerLogMaxSize:  *"10Mi" | =~"^[1-9][0-9]{0,3}(Ki|Mi)$"
+	containerLogMaxFiles: *5 | (int & >=2 & <=20)
+}
+
+// Percent of a filesystem: at most a fifth free, so the kubelet evicts late but before the disk is full.
+#Percent: int & >=1 & <=20
 
 // The node's Docker disk, kept bounded: each release@k8s bakes its images with the node's dockerd
 // (`bake --load`), tags them localhost:<port>/<app>-<service> and pushes them to the node's registry, and
@@ -16,11 +54,12 @@ package schema
 #DockerGC: {
 	minAgeHours: *6 | (int & >=1)
 	// A bash ERE, kept inside single quotes in /etc/pronto/docker-gc.env, so it holds none.
-	refPattern:   *"^localhost:[0-9]+/" | (string & =~"^\\^[^']*$")
+	refPattern:   *"^localhost:[0-9]+/" | (string & =~"^\\^[^'\n]*$")
 	buildCacheGB: *40 | (int & >0)
 	// The default is not kept when it would not exceed the cache: a larger cache needs a larger cap said.
 	capGB: (*120 | int) & >buildCacheGB
 	// A systemd OnCalendar expression.
-	// One line: it is written into a unit file, where a newline would start another setting.
-	onCalendar: *"hourly" | (string & =~"^[^\n]+$")
+	// One line, and no backslash (a trailing one continues the line and breaks the timer): it is written into a unit file,
+	// where a newline would start another setting.
+	onCalendar: *"hourly" | (string & =~"^[^\n\r\\\\]+$")
 }

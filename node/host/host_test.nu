@@ -19,6 +19,8 @@ def main [] {
 	test_apply_writes_what_drifted_and_a_second_run_finds_none
 	test_check_changes_nothing_and_says_every_drift
 	test_a_failed_last_run_is_drift
+	test_a_failed_reload_query_is_an_error_not_no_reload
+	test_the_cleanup_stops_on_a_pattern_bash_cannot_compile
 	test_a_login_that_fails_is_an_error_not_an_answer
 	test_the_settings_are_written_before_the_script
 	test_a_world_writable_or_foreign_file_is_drift
@@ -26,6 +28,8 @@ def main [] {
 	test_an_invalid_reference_pattern_is_refused
 	test_a_failed_job_makes_apply_exit_non_zero
 	test_a_pending_daemon_reload_is_drift_and_is_done_though_every_file_matches
+	test_a_failed_job_is_run_again_when_files_were_written
+	test_a_stale_new_file_is_replaced_not_reused
 	print "\nAll node host tests passed."
 }
 
@@ -82,6 +86,9 @@ def test_the_schema_defaults_and_refuses [] {
 	assert (not (host-with "{dockerGC: {refPattern: \"localhost\"}}").ok) "a pattern without ^"
 	assert (not (host-with "{dockerGC: {refPattern: \"^a'b\"}}").ok) "a quote in the pattern"
 	assert (not (host-with "{dockerGC: {onCalendar: \"\"}}").ok) "no schedule"
+	assert (not (host-with "{dockerGC: {refPattern: \"^a\\nb\"}}").ok) "a newline in the pattern"
+	assert (not (host-with "{dockerGC: {onCalendar: \"hourly\\\\\"}}").ok) "a trailing backslash in the schedule"
+	assert (not (host-with "{dockerGC: {onCalendar: \"hourly\\r\"}}").ok) "a carriage return in the schedule"
 	assert (not (host-with "{dockerGC: {onCalendar: \"hourly\\n[Service]\"}}").ok) "a schedule that starts another setting"
 	# A cache past the default cap needs a cap said: the default is not kept under the cache, or the job would fail every hour.
 	assert (not (host-with "{dockerGC: {buildCacheGB: 130}}").ok) "a cache past the default cap"
@@ -159,10 +166,16 @@ case "$1" in
   enable) touch "$d/on" ;;
   show) if [ -e "$d/needreload" ]; then echo yes; else echo no; fi ;;
   daemon-reload) rm -f "$d/needreload" ;;
+  start) if [ -n "$STARTEXIT" ]; then exit "$STARTEXIT"; fi; [ "$STAYFAILED" = 1 ] || rm -f "$d/failed" ;;
   *) ;;
 esac
 ' | save --raw ($dir | path join bin systemctl)
 	chmod 755 ($dir | path join bin systemctl)
+	'#!/bin/bash
+shift
+exec "$@"
+' | save --raw ($dir | path join bin timeout)
+	chmod 755 ($dir | path join bin timeout)
 	"" | save --raw ($dir | path join systemctl.log)
 }
 
@@ -297,6 +310,71 @@ def test_a_pending_daemon_reload_is_drift_and_is_done_though_every_file_matches 
 	rm -rf $dir
 }
 
+def test_a_failed_job_is_run_again_when_files_were_written [] {
+	print "test a job that failed is run again once its files are set right, and a repair exits 0 and says set; one that fails again exits 1..."
+	for stay in ["0" "1"] {
+		let dir = (tmp)
+		fake-systemctl $dir
+		let root = ($dir | path join root)
+		(defaults) | to json | save --raw ($dir | path join host.json)
+		# The settings drifted (the cause of the failure) and the job's last run failed.
+		with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} { apply (defaults) --root $root | ignore }
+		"# drifted\n" | save --force --raw ($root + "/etc/pronto/docker-gc.env")
+		"" | save --raw ($dir | path join failed)
+		let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')", STAYFAILED: $stay} { ^$nu.current-exe ($here | path join host.nu) apply ($dir | path join host.json) --root $root | complete })
+		assert str contains (open --raw ($dir | path join systemctl.log)) "start pronto-docker-gc.service"
+		if $stay == "0" {
+			assert equal $r.exit_code 0
+			assert str contains $r.stdout "node-host: set as #Host says"
+		} else {
+			assert equal $r.exit_code 1
+			assert str contains $r.stderr "set, but the job's last run still fails"
+		}
+		rm -rf $dir
+	}
+	# The run again is told apart by its exit: 124 (timeout) is still running, anything else is a failed start; both exit 1.
+	for code in ["124" "1"] {
+		let dir = (tmp)
+		fake-systemctl $dir
+		let root = ($dir | path join root)
+		(defaults) | to json | save --raw ($dir | path join host.json)
+		with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} { apply (defaults) --root $root | ignore }
+		"# drifted\n" | save --force --raw ($root + "/etc/pronto/docker-gc.env")
+		"" | save --raw ($dir | path join failed)
+		let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')", STARTEXIT: $code} { ^$nu.current-exe ($here | path join host.nu) apply ($dir | path join host.json) --root $root | complete })
+		assert equal $r.exit_code 1 $"start exit ($code)"
+		if $code == "124" { assert str contains $r.stdout "still running after 600 s" }
+		rm -rf $dir
+	}
+	# Nothing written and a failed job: it is not run again, the exit is 1, and "set" is not said.
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	(defaults) | to json | save --raw ($dir | path join host.json)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} { apply (defaults) --root $root | ignore }
+	"" | save --raw ($dir | path join failed)
+	let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} { ^$nu.current-exe ($here | path join host.nu) apply ($dir | path join host.json) --root $root | complete })
+	assert equal $r.exit_code 1
+	assert str contains $r.stderr "nothing to write, but the job's last run failed"
+	assert (not (open --raw ($dir | path join systemctl.log) | str contains "start pronto-docker-gc.service"))
+	rm -rf $dir
+}
+
+def test_a_stale_new_file_is_replaced_not_reused [] {
+	print "test a .new file left by an earlier run (another owner or mode) is removed before the write..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	mkdir ($root + "/etc/pronto")
+	"stale\n" | save --raw ($root + "/etc/pronto/docker-gc.env.new")
+	chmod 666 ($root + "/etc/pronto/docker-gc.env.new")
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		apply (defaults) --root $root | ignore
+		assert equal (apply (defaults) --check --root $root) [] "the env file is whole, mode 644"
+	}
+	rm -rf $dir
+}
+
 def test_a_login_that_fails_is_an_error_not_an_answer [] {
 	print "test an ssh that fails (255) when asked whether the timer runs is an error, never read as not failed or not enabled..."
 	let dir = (tmp)
@@ -306,7 +384,7 @@ def test_a_login_that_fails_is_an_error_not_an_answer [] {
 d=$(dirname "$0")/..
 while [ "$1" = -o ]; do shift 2; done
 shift
-case "$1" in *is-failed*|*is-enabled*) exit 255 ;; esac
+case "$1" in *is-failed*|*is-enabled*|*NeedDaemonReload*) exit 255 ;; esac
 exec bash -c "$1"
 ' | save --raw ($dir | path join bin ssh)
 	chmod 755 ($dir | path join bin ssh)
@@ -321,6 +399,44 @@ exec "$@"
 		# What it wrote before asking is whole: the files are as #Host says.
 		for f in (render (defaults)) { assert equal (open --raw ($root + $f.path)) $f.text }
 	}
+	rm -rf $dir
+}
+
+def test_a_failed_reload_query_is_an_error_not_no_reload [] {
+	print "test an ssh that fails when asked whether a unit needs a daemon-reload is an error, never read as none needed..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	'#!/bin/bash
+while [ "$1" = -o ]; do shift 2; done
+shift
+case "$1" in *NeedDaemonReload*) echo "ssh: connection lost" >&2; exit 255 ;; esac
+exec bash -c "$1"
+' | save --raw ($dir | path join bin ssh)
+	chmod 755 ($dir | path join bin ssh)
+	'#!/bin/bash
+exec "$@"
+' | save --raw ($dir | path join bin sudo)
+	chmod 755 ($dir | path join bin sudo)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		let msg = (try { apply (defaults) --node fake --root ($dir | path join root); "no error" } catch {|e| $e.msg })
+		assert str contains $msg "needs a daemon-reload"
+	}
+	rm -rf $dir
+}
+
+def test_the_cleanup_stops_on_a_pattern_bash_cannot_compile [] {
+	print "test docker-gc.sh itself fails on an invalid PATTERN, before it looks at a single tag..."
+	let dir = (tmp)
+	"PATTERN='^['\nMIN_AGE_HOURS=6\nBUILD_CACHE_GB=40\nCAP_GB=120\n" | save --raw ($dir | path join gc.env)
+	'#!/bin/bash
+echo "$*" >>"$(dirname "$0")/calls"
+echo "localhost:5000/a:a"
+' | save --raw ($dir | path join docker)
+	chmod 755 ($dir | path join docker)
+	let r = (with-env {PATH: $"($dir):/usr/bin:/bin", DOCKER_GC_ENV: ($dir | path join gc.env)} { ^/bin/bash ($here | path join docker-gc.sh) | complete })
+	assert equal $r.exit_code 1
+	assert str contains $r.stderr "PATTERN is not a valid regular expression"
+	assert (not (($dir | path join calls) | path exists)) "docker was never called"
 	rm -rf $dir
 }
 
