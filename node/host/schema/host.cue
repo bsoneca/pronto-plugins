@@ -9,7 +9,7 @@ package schema
 }
 
 // The node's kubelet, set by kubelet.nu (README.md, "The node host"): how full the disk may get before pods
-// are evicted, and how much a log may grow. k3s's defaults evict at 10% free and then reclaim 10% more, about 39G
+// are evicted, and how much a log may grow. k3s's defaults evict at 5% free (nodefs and imagefs only) and then reclaim 10% more, about 39G
 // of a 387G disk, which evicting every pod did not free (the 2026-11-27 outage), so the amounts are absolute.
 // A partial --eviction-hard drops the kubelet's other defaults (memory.available<100Mi, nodefs.inodesFree<5%, ...), so
 // every threshold is written, and none has a default: a node says each, and a map missing one is refused.
@@ -17,7 +17,7 @@ package schema
 	// How many pods the node runs: said, with no default, since a default would write k3s's 110 over a node that runs
 	// more and strand its pods Pending. The node's pod range bounds it: k3s gives the node a /24 of the cluster CIDR,
 	// 253 addresses; a limit past it needs a wider range.
-	maxPods!: int & >=110 & <=253
+	maxPods!: int & >=110 & <=#PodAddresses
 
 	// The thresholds under which the kubelet evicts: percent of the filesystem (or its inodes) free, and memory left.
 	evictionHard!: {
@@ -41,6 +41,9 @@ package schema
 	containerLogMaxSize:  *"10Mi" | =~"^[1-9][0-9]{0,3}(Ki|Mi)$"
 	containerLogMaxFiles: *5 | (int & >=2 & <=20)
 }
+
+// The addresses a node's pod range holds (k3s gives the node a /24 of the cluster CIDR): the most pods it can run.
+#PodAddresses: 253
 
 // Percent of a filesystem: at most a fifth free, so the kubelet evicts late but before the disk is full.
 #Percent: int & >=1 & <=20

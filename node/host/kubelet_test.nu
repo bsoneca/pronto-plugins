@@ -37,6 +37,10 @@ def main [] {
 	test_values_are_vetted_before_anything_runs
 	test_memory_already_under_the_eviction_margin_refuses
 	test_the_lock_is_touched_at_every_poll_and_restart
+	test_nothing_in_the_scripts_runs_on_the_operators_machine
+	test_a_failed_sync_after_the_rename_keeps_the_marker_and_the_backup
+	test_a_failed_login_stops_the_polling_and_nothing_else_is_swallowed
+	test_a_conflict_scan_that_fails_is_not_a_clean_result
 	test_check_changes_nothing
 	test_every_call_has_a_deadline
 	print "\nAll node kubelet tests passed."
@@ -106,12 +110,13 @@ def test_cue_refuses_a_map_missing_a_threshold_and_a_gc_that_does_not_come_first
 # text or null). `mode`: ok (the kubelet runs the live file after a restart), stuck (it keeps running the old file),
 # noapi (kubectl fails), empty (kubectl answers nothing, exit 0), fulldisk (tee fails halfway), stuckfail (stuck, and the second
 # k3s restart fails). Returns what the run did.
-def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: int = -2, --dfi: int = 10, --other: string = "", --dropin: string = "", --unit: string = "", --stale: string = "", --mem: int = 4096, --locked]: nothing -> record {
+def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: int = -2, --dfi: int = 10, --other: string = "", --dropin: string = "", --unit: string = "", --stale: string = "", --mem: int = 4096, --unreadable, --locked]: nothing -> record {
 	let dir = (mktemp --directory --tmpdir node-kubelet-XXXXXX)
 	let root = ($dir | path join root)
 	let live = $root + $live_path
 	mkdir ($live | path dirname)
 	mkdir ($dir | path join bin)
+	mkdir ($dir | path join nodebin)
 	let k = (valid)
 	(kubelet-config $k) | save --raw ($dir | path join desired.yaml)
 	{kubeletconfig: (want-configz $k)} | to json | save --raw ($dir | path join configz.new)
@@ -127,22 +132,26 @@ def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: in
 	if $locked { mkdir $"($live).lock" }
 	if $stale != "" { mkdir $"($live).lock"; $"($stale) 2026-01-01T00:00:00Z\n" | save --raw $"($live).lock/owner" }
 	if $dropin != "" { $dropin | save --raw ($root | path join etc rancher k3s config.yaml.d 20-other.yaml) }
+	if $unreadable { "kubelet-arg:\n" | save --raw ($root | path join etc rancher k3s config.yaml.d 30-locked.yaml); chmod 000 ($root | path join etc rancher k3s config.yaml.d 30-locked.yaml) }
 	if $unit != "" { $unit | save --raw ($dir | path join unitcat) }
 	let shim = {|name, body| $"#!/usr/bin/env bash\n($body)\n" | save --raw ($dir | path join bin $name); chmod 755 ($dir | path join bin $name) }
-	do $shim ssh 'd=$(dirname "$0")/..; while [ "$1" = -o ]; do echo "$2" >>"$d/ssh.opts"; shift 2; done; shift; if [ "$MODE" = ssh255 ]; then case "$1" in *owner*) echo "ssh: connect timed out" >&2; exit 255;; esac; fi; exec bash -c "$1"'
-	do $shim sudo 'exec "$@"'
-	do $shim sha256sum 'exec shasum -a 256 "$@"'
-	do $shim systemctl 'd=$(dirname "$0")/..; echo "$*" >>"$d/systemctl.log"; case "$1" in cat) cat "$d/unitcat" 2>/dev/null; exit 0;; esac; n=$(grep -c "^restart" "$d/systemctl.log"); if [ "$MODE" = stuckfail ] && [ "$n" -ge 2 ]; then exit 1; fi; [ -e "$KUBELET_LIVE" ] && cp "$KUBELET_LIVE" "$d/running"; true'
-	do $shim tee 'if [ "$MODE" = fulldisk ]; then head -c 12 >"$1"; exit 1; fi; if [ "$MODE" = shorttee ]; then head -c 12 >"$1"; exit 0; fi; exec /usr/bin/tee "$@"'
-	do $shim touch 'd=$(dirname "$0")/..; echo "$*" >>"$d/touch.log"; exec /usr/bin/touch "$@"'
-	do $shim mkdir 'd=$(dirname "$0")/..; if [ "$MODE" = nomkdir ] && [ "$1" = -p ]; then echo "mkdir: Permission denied" >&2; exit 1; fi; exec /bin/mkdir "$@"'
-	do $shim timeout 'd=$(dirname "$0")/..; echo "$*" >>"$d/timeout.log"; shift; exec "$@"'
-	do $shim df '[ "$DF_PCT" = -1 ] && exit 0; case "$*" in *-Pi*) p=$DFI_PCT;; *containerd*) p=$DF_IMG_PCT;; *) p=$DF_PCT;; esac; echo "Filesystem 1024-blocks Used Available Capacity Mounted"; echo "/dev/x 100 $p 100 ${p}% /"'
-	do $shim kubectl 'd=$(dirname "$0")/..; echo "$*" >>"$d/kubectl.log"; case "$*" in *--raw*) n=$(cat "$d/kcount" 2>/dev/null || echo 0); if [ "$MODE" = flaky ] && [ "$n" -lt 1 ]; then echo $((n+1)) >"$d/kcount"; exit 1; fi; case "$MODE" in noapi) exit 1;; empty) exit 0;; esac; if [ "$MODE" != stuck ] && [ "$MODE" != stuckfail ] && [ -e "$d/running" ] && cmp -s "$d/running" "$d/desired.yaml"; then cat "$d/configz.new"; else cat "$d/configz.old"; fi;; *) echo node1;; esac'
+	let nshim = {|name, body| $"#!/usr/bin/env bash\n($body)\n" | save --raw ($dir | path join nodebin $name); chmod 755 ($dir | path join nodebin $name) }
+	do $shim ssh 'd=$(dirname "$0")/..; echo x >>"$d/ssh.count"; while [ "$1" = -o ]; do echo "$2" >>"$d/ssh.opts"; shift 2; done; shift; export FAKE_REMOTE=1; export PATH="$d/nodebin:$PATH"; if [ "$MODE" = ssh255raw ]; then case "$1" in *--raw*) echo "ssh: connect timed out" >&2; exit 255;; esac; fi; if [ "$MODE" = ssh255 ]; then case "$1" in *owner*) echo "ssh: connect timed out" >&2; exit 255;; esac; fi; exec bash -c "$1"'
+	do $nshim sudo 'exec "$@"'
+	do $nshim sha256sum 'exec shasum -a 256 "$@"'
+	do $nshim systemctl 'd=$(dirname "$0")/..; [ -n "$FAKE_REMOTE" ] || { echo "$*" >>"$d/local-systemctl.log"; exit 0; }; echo "$*" >>"$d/systemctl.log"; case "$1" in cat) [ "$MODE" != nounit ] || { echo "no such unit" >&2; exit 1; }; cat "$d/unitcat" 2>/dev/null; exit 0;; esac; n=$(grep -c "^restart" "$d/systemctl.log"); if [ "$MODE" = stuckfail ] && [ "$n" -ge 2 ]; then exit 1; fi; [ -e "$KUBELET_LIVE" ] && cp "$KUBELET_LIVE" "$d/running"; true'
+	do $nshim tee 'if [ "$MODE" = fulldisk ]; then head -c 12 >"$1"; exit 1; fi; if [ "$MODE" = shorttee ]; then head -c 12 >"$1"; exit 0; fi; exec /usr/bin/tee "$@"'
+	do $nshim sync 'd=$(dirname "$0")/..; n=$(cat "$d/synccount" 2>/dev/null || echo 0); echo $((n+1)) >"$d/synccount"; if [ "$MODE" = syncfail ] && [ "$n" -ge 2 ]; then exit 1; fi; exit 0'
+	do $nshim rm 'if [ "$MODE" = rmfail ]; then case "$*" in *pending*) exit 1;; esac; fi; exec /bin/rm "$@"'
+	do $nshim touch 'd=$(dirname "$0")/..; echo "$*" >>"$d/touch.log"; exec /usr/bin/touch "$@"'
+	do $nshim mkdir 'd=$(dirname "$0")/..; if [ "$MODE" = nomkdir ] && [ "$1" = -p ]; then echo "mkdir: Permission denied" >&2; exit 1; fi; exec /bin/mkdir "$@"'
+	do $nshim timeout 'd=$(dirname "$0")/..; echo "$*" >>"$d/timeout.log"; shift; exec "$@"'
+	do $nshim df '[ "$DF_PCT" = -1 ] && exit 0; case "$*" in *-Pi*) p=$DFI_PCT;; *containerd*) p=$DF_IMG_PCT;; *) p=$DF_PCT;; esac; echo "Filesystem 1024-blocks Used Available Capacity Mounted"; echo "/dev/x 100 $p 100 ${p}% /"'
+	do $nshim kubectl 'd=$(dirname "$0")/..; echo "$*" >>"$d/kubectl.log"; case "$*" in *--raw*) n=$(cat "$d/kcount" 2>/dev/null || echo 0); if [ "$MODE" = flaky ] && [ "$n" -lt 1 ]; then echo $((n+1)) >"$d/kcount"; exit 1; fi; case "$MODE" in noapi) exit 1;; empty) exit 0;; esac; if [ "$MODE" != stuck ] && [ "$MODE" != stuckfail ] && [ -e "$d/running" ] && cmp -s "$d/running" "$d/desired.yaml"; then cat "$d/configz.new"; else cat "$d/configz.old"; fi;; *) echo node1;; esac'
 	"" | save --raw ($dir | path join systemctl.log)
 	let img = if $df_img == -2 { $df } else { $df_img }
 	# An error out of apply-kubelet (the lock is released first) is code 99 with its message.
-	let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')", KUBECTL: ($dir | path join bin kubectl), MODE: $mode, KUBELET_LIVE: $live, DF_PCT: $df, DF_IMG_PCT: $img, DFI_PCT: $dfi} {
+	let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')", KUBECTL: ($dir | path join nodebin kubectl), MODE: $mode, KUBELET_LIVE: $live, DF_PCT: $df, DF_IMG_PCT: $img, DFI_PCT: $dfi} {
 		try { apply-kubelet $k --check=$check --node fake --root $root --polls 2 --pause 0sec } catch {|e| {code: 99, msg: $e.msg} }
 	})
 	let read = {|f| if ($f | path exists) { open --raw $f } else { null } }
@@ -157,6 +166,8 @@ def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: in
 		lock: ($"($live).lock" | path exists)
 		restarts: (open --raw ($dir | path join systemctl.log) | lines | where {|l| $l starts-with "restart"} | length)
 		timeouts: (do $read ($dir | path join timeout.log) | default "")
+		local_systemctl: (($dir | path join local-systemctl.log) | path exists)
+		ssh_calls: ((do $read ($dir | path join ssh.count) | default "") | lines | where {|l| $l != ""} | length)
 		touches: ((do $read ($dir | path join touch.log) | default "") | lines | where {|l| $l != ""} | length)
 		ssh_opts: (do $read ($dir | path join ssh.opts) | default "")
 		kubectl: (do $read ($dir | path join kubectl.log) | default "")
@@ -360,13 +371,57 @@ def test_the_lock_is_touched_at_every_poll_and_restart [] {
 }
 
 def test_check_changes_nothing [] {
-	print "test --check exits 1 on a difference or an unchecked apply, and writes and restarts nothing..."
+	print "test --check exits 1 on a difference, an unchecked apply, or a file the kubelet does not run, and writes and restarts nothing..."
 	let differs = (scenario ok {live: "old: file\n"} --check)
 	assert equal [$differs.code $differs.live $differs.restarts $differs.pending] [1 "old: file\n" 0 null]
-	let same = (scenario ok {live: (desired)} --check)
+	let same = (scenario ok {live: (desired), running: (desired)} --check)
 	assert equal [$same.code $same.restarts] [0 0]
+	# The file copied in without a restart: the kubelet still runs the old args, so the check is not clean.
+	let stale = (scenario ok {live: (desired), running: "old: running\n"} --check)
+	assert equal [$stale.code $stale.restarts] [1 0]
+	let unreadable = (scenario noapi {live: (desired)} --check)
+	assert equal [$unreadable.code $unreadable.restarts] [1 0]
 	let unchecked = (scenario ok {live: (desired), pending: "had\n", prev: "x\n"} --check)
 	assert equal [$unchecked.code $unchecked.restarts $unchecked.pending] [1 0 "had"]
+}
+
+def test_nothing_in_the_scripts_runs_on_the_operators_machine [] {
+	print "test no command named in a remote script runs here: systemctl is only ever called on the node..."
+	for check in [false true] {
+		let r = if $check { scenario ok {live: (desired), running: (desired)} --check } else { scenario ok {live: "old: file\n"} }
+		assert equal $r.local_systemctl false $"check ($check)"
+		assert equal $r.code 0
+	}
+}
+
+def test_a_failed_sync_after_the_rename_keeps_the_marker_and_the_backup [] {
+	print "test a sync that fails once the new file is installed keeps the marker and the previous file, and stops for the next run..."
+	let r = (scenario syncfail {live: "old: file\n"})
+	assert equal [$r.code $r.live $r.pending $r.prev $r.restarts] [1 (desired) "had" "old: file\n" 0]
+	let none = (scenario syncfail {})
+	assert equal [$none.code $none.live $none.pending $none.restarts] [1 (desired) "none" 0]
+}
+
+def test_a_failed_login_stops_the_polling_and_nothing_else_is_swallowed [] {
+	print "test an ssh that fails (255) while reading configz stops the run at once, not after 60 more logins, and a failed cleanup is an error..."
+	let r = (scenario ssh255raw {live: "old: file\n"})
+	assert equal [$r.code $r.live $r.restarts] [99 "old: file\n" 0]
+	assert str contains $r.msg "ssh failed"
+	assert (($r.ssh_calls) < 12) $"ssh calls ($r.ssh_calls)"
+	let rm = (scenario rmfail {live: "old: file\n"})
+	assert equal $rm.code 99
+	assert str contains $rm.msg "removing"
+	assert equal ($rm.pending == null) false "the marker survives, and the run says so"
+}
+
+def test_a_conflict_scan_that_fails_is_not_a_clean_result [] {
+	print "test a drop-in that cannot be read, and a unit systemctl cannot print, stop the apply instead of reading as no conflict..."
+	let locked = (scenario ok {live: "old: file\n"} --unreadable)
+	assert equal [$locked.code $locked.live $locked.restarts] [99 "old: file\n" 0]
+	assert str contains $locked.msg "looking for other kubelet-arg"
+	let nounit = (scenario nounit {live: "old: file\n"})
+	assert equal [$nounit.code $nounit.live $nounit.restarts] [99 "old: file\n" 0]
+	assert str contains $nounit.msg "looking for other kubelet-arg"
 }
 
 def test_every_call_has_a_deadline [] {

@@ -109,6 +109,8 @@ export def want-configz [k: record]: nothing -> record {
 def read-configz [node: string, want: record]: nothing -> record {
 	let kubectl = $env.KUBECTL
 	let r = (sh $node $"($kubectl) get --request-timeout=10s --raw /api/v1/nodes/$\(hostname\)/proxy/configz" --plain)
+	# 255 is ssh's own failure, not a kubelet that is still starting: it stops the run instead of opening more logins.
+	if $r.exit_code == 255 { error make {msg: $"k3s-kubelet: ssh failed, stopping: ($r.stderr | str trim)"} }
 	if $r.exit_code != 0 { return {state: "unreadable", said: $"the request failed: ($r.stderr | str trim)"} }
 	let parsed = (try { $r.stdout | from json } catch { null })
 	let cfg = (if $parsed == null { null } else { $parsed | get -o kubeletconfig })
@@ -119,7 +121,10 @@ def read-configz [node: string, want: record]: nothing -> record {
 
 # The lock's mtime is its heartbeat: touched on every poll and before each restart, so a live apply is never taken over.
 def beat [node: string, lock: string] {
-	if $lock != "" { sh $node $"touch '($lock)'" | ignore }
+	if $lock == "" { return }
+	let r = (sh $node $"touch '($lock)'")
+	# 255 is ssh's own failure: it stops the run (a failed login is never retried, a ban cuts the operator off), the lock is left to expire.
+	if $r.exit_code == 255 { error make {msg: $"k3s-kubelet: ssh failed, stopping: ($r.stderr | str trim)"} }
 }
 
 # Reads until it is not unreadable, up to $polls times.
@@ -138,7 +143,10 @@ def read-settled [node: string, want: record, polls: int, pause: duration, lock:
 def other-kubelet-arg [node: string, root: string, live: string]: nothing -> list<string> {
 	let base = $root + $dir
 	let envs = [$"($root)/etc/systemd/system/k3s.service.env" $"($root)/etc/default/k3s" $"($root)/etc/sysconfig/k3s"] | each {|f| $"'($f)'"} | str join " "
-	let out = (must (sh $node $"{ grep -ls 'kubelet-arg' '($base)/config.yaml' '($base)/config.yaml.d/'*.yaml '($base)/config.yaml.d/'*.yml ($envs) 2>/dev/null | grep -vxF '($live)'; systemctl cat k3s 2>/dev/null | grep -q 'kubelet-arg' && echo 'the k3s unit (systemctl cat k3s)'; true; }") "looking for other kubelet-arg")
+	# An absent file is skipped; a file that exists and cannot be read (grep's status 2), or a unit systemctl cannot print, is an
+	# error, never a clean result. The text of this script holds no parenthesised word nu would run on this machine.
+	let scan = $"for f in '($base)/config.yaml' '($base)/config.yaml.d/'*.yaml '($base)/config.yaml.d/'*.yml ($envs); do [ -e \"$f\" ] || continue; [ \"$f\" != '($live)' ] || continue; grep -q 'kubelet-arg' \"$f\"; r=$?; [ $r -le 1 ] || { echo \"cannot read $f\" >&2; exit 2; }; [ $r -ne 0 ] || echo \"$f\"; done; u=$\(systemctl cat k3s 2>&1\) || { echo \"cannot read the k3s unit: $u\" >&2; exit 3; }; printf '%s\\n' \"$u\" | grep -q 'kubelet-arg' && echo 'the k3s unit'; true"
+	let out = (must (sh $node $scan) "looking for other kubelet-arg")
 	$out | lines | where {|l| $l != ""}
 }
 
@@ -218,7 +226,7 @@ export def apply-kubelet [k: record, --check, --node: string = "", --root: strin
 		sh $node $"rm -rf '($lock)'" | ignore
 		error make {msg: $e.msg}
 	})
-	sh $node $"rm -rf '($lock)'" | ignore
+	must (sh $node $"rm -rf '($lock)'") $"releasing the lock ($lock)" | ignore
 	$r
 }
 
@@ -248,6 +256,12 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 		print $"($live) is as #Host says"
 		if $check {
 			if $marked { print $"($pending): an earlier apply was not checked"; return {code: 1} }
+			# The file matching is not the kubelet running it: a file copied in without a restart passes only if configz agrees.
+			let r = (read-settled $node $want $polls $pause "")
+			if $r.state != "match" {
+				print --stderr $"k3s-kubelet: the file is as #Host says, but the kubelet does not report #Host's args \(($r.state)\): ($r.said)"
+				return {code: 1}
+			}
 			return {code: 0}
 		}
 		# With the marker the earlier run's check is ours to finish, and a kubelet that is down (k3s crashed after the
@@ -281,8 +295,16 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 		let sum = ($config | hash sha256)
 		# The marker and backup are made first, and only when no earlier run left them (its backup is the good one), and
 		# synced; a run that fails before the rename removes what it made. The new file is synced before the rename.
-		let install = $"made=0; mkdir -p '($live | path dirname)' && { test -e '($pending)' || { rm -f '($prev)' && made=1 && k=none && { ! test -e '($live)' || { cp -p '($live)' '($prev)' && k=had; }; } && echo $k >'($pending)' && sync; }; } && rm -f '($tmp)' && { tee '($tmp)' >/dev/null && sync && [ \"$\(sha256sum '($tmp)' | cut -d' ' -f1\)\" = ($sum) ] && mv -f '($tmp)' '($live)' && sync; } || { rm -f '($tmp)'; [ \"$made\" != 1 ] || rm -f '($pending)' '($prev)'; exit 1; }"
+		# Before the rename any failure leaves the live file as it was and removes what this run made. Once the rename has
+		# happened the new file is live: a failed sync then (exit 4) keeps the marker and the backup, and the run stops, for the
+		# next one to verify or roll back.
+		let install = $"made=0; undo\(\) { rm -f '($tmp)'; [ \"$made\" != 1 ] || rm -f '($pending)' '($prev)'; }; mkdir -p '($live | path dirname)' && { test -e '($pending)' || { rm -f '($prev)' && made=1 && k=none && { ! test -e '($live)' || { cp -p '($live)' '($prev)' && k=had; }; } && echo $k >'($pending)' && sync; }; } && rm -f '($tmp)' && { tee '($tmp)' >/dev/null && sync && [ \"$\(sha256sum '($tmp)' | cut -d' ' -f1\)\" = ($sum) ]; } || { undo; exit 1; }; mv -f '($tmp)' '($live)' || { undo; exit 1; }; sync || { echo 'the new file is installed but sync failed' >&2; exit 4; }"
 		let w = (sh $node $install $config)
+		if $w.exit_code == 255 { error make {msg: $"k3s-kubelet: ssh failed while writing the file, stopping: ($w.stderr | str trim)"} }
+		if $w.exit_code == 4 {
+			print --stderr $"k3s-kubelet: the new file is installed but could not be synced: ($w.stderr | str trim); ($pending) and ($prev) are kept: apply again to verify it or roll it back"
+			return {code: 1}
+		}
 		if $w.exit_code != 0 {
 			print --stderr $"k3s-kubelet: writing the file failed, the live file is as it was: ($w.stderr | str trim)"
 			return {code: 1}
@@ -297,7 +319,7 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 		$last = (read-configz $node $want)
 		if $last.state == "match" {
 			print "the kubelet runs with #Host's args"
-			if $changed { sh $node $"rm -f '($pending)' '($prev)' '($tmp)'" | ignore }
+			if $changed { must (sh $node $"rm -f '($pending)' '($prev)' '($tmp)'") $"removing ($pending) and ($prev) \(the kubelet runs the file, but the marker stays: apply again\)" | ignore }
 			return {code: 0}
 		}
 		sleep $pause
@@ -317,7 +339,7 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 	if $restarted {
 		let r = (read-settled $node $want $polls $pause $lock)
 		if $r.state != "unreadable" {
-			sh $node $"rm -f '($pending)' '($prev)' '($tmp)'" | ignore
+			must (sh $node $"rm -f '($pending)' '($prev)' '($tmp)'") $"removing ($pending) and ($prev) after the rollback" | ignore
 			print --stderr "k3s-kubelet: put the previous file back and restarted k3s"
 			return {code: 1}
 		}
