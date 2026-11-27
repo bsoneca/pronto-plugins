@@ -202,12 +202,19 @@ export def database-tag [registry: string, repo: string, digest: string]: nothin
 # (schema/node.cue's dbBase), so the app's own SQL, which the image carries for them to replay, cannot recreate the
 # primary. The base has every extension the full image's postgres needs, since the stage adds none: a RUN, an ADD, a copy
 # from any other stage, or a base not pinned by digest gives null, and the Cluster keeps running the full image.
-export def database-base []: string -> any {
+export def database-base [--within: string = ""]: string -> any {
 	let build = ($in | from yaml | get -o services.database.build)
 	if ($build | is-empty) { return null }
 	let target = ($build | get -o target | default "")
 	let file = ($build.context | path join ($build | get -o dockerfile | default "Dockerfile"))
 	if not ($file | path exists) { return null }
+	# A tenant names the context and the Dockerfile: with `--within <staged tree>` the file read is a regular file whose canonical path (symlinks resolved) is inside it,
+	# never an absolute path or a traversal that makes the release worker open another file of the host (a null answer leaves the stage to the full image, which a tenant's
+	# release refuses).
+	if ($within | is-not-empty) {
+		let real = ($file | path expand)
+		if not ($real | str starts-with $"(($within | path expand))/") or (($real | path type) != "file") { return null }
+	}
 	# One instruction a line, each with its continuation lines, comments gone.
 	let steps = (open --raw $file | str replace --all --regex '\\\n' ' ' | lines | each { str trim } | where {|l| $l != "" and not ($l | str starts-with "#") })
 	let stages = ($steps | enumerate | where {|s| $s.item =~ '(?i)^FROM\s' })
