@@ -1,0 +1,49 @@
+#!/bin/sh
+# Adds or refreshes pronto-alerts in a pronto app, or runs its inbox's launchd job (alerts/README.md):
+#   bin/pronto-alerts <app-dir> [project=<gcp-project-id>]
+#                                         install: alerts/ (driver, rules), alerts_plugin.cue (the schema, in the
+#                                         app's package) and alerts_spec.cue seeded once; then observability/alerts.subscriber.json
+#                                         and alerts.policies.json, exported from the spec
+#   bin/pronto-alerts job install <app-dir>...   the launchd job dev.pronto.alerts-inbox that reads every app's subscription
+#   bin/pronto-alerts job uninstall
+#   bin/pronto-alerts job run <app-dir>...       the same in the foreground
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+if [ "${1:-}" = job ]; then
+	verb=${2:?install, uninstall or run}
+	shift 2
+	args=""
+	script="$here/alerts/subscriber.ts"
+	for a in "$@"; do
+		d=$(cd "$a" && pwd)
+		args="$args $d"
+		# The job runs the first app's own copy of the driver, so it follows that app's checkout.
+		if [ "$script" = "$here/alerts/subscriber.ts" ] && [ -f "$d/alerts/subscriber.ts" ]; then script="$d/alerts/subscriber.ts"; fi
+	done
+	cd "$here"
+	# Deno as CI pins it, with the repository's tools on the PATH.
+	# shellcheck disable=SC2086
+	exec ./saytw --script tools.nu mise exec deno@2.5.0 -- deno run -A "$script" "$verb" $args
+fi
+app=$(cd "$1" && pwd)
+shift
+project=""
+for a in "$@"; do
+	case "$a" in
+		project=*) project=${a#project=} ;;
+		*) echo "pronto-alerts: unknown argument $a" >&2; exit 2 ;;
+	esac
+done
+package=$(sed -n 's/^package[[:space:]]\{1,\}\([a-z][a-z0-9_]*\)[[:space:]]*$/\1/p' "$app/program.cue" | head -n 1)
+[ -n "$package" ] || { echo "pronto-alerts: $app/program.cue names no package" >&2; exit 2; }
+name=$(basename "$app")
+files=$(mktemp)
+trap 'rm -f "$files"' EXIT
+cd "$here"
+./saytw --script tools.nu cue export ./alerts/export -t "package=$package" -t "app=$name" -t "project=${project:-my-project-1}" -e files --out json > "$files"
+./saytw --script tools.nu nu bin/write.nu "$files" "$app"
+# What the spec says, as the files the infra plugin and the driver read: written whole each time.
+mkdir -p "$app/observability"
+./saytw --script tools.nu cue export "$app/alerts_spec.cue" "$app/alerts_plugin.cue" -e alerts.subscriber --out json > "$app/observability/alerts.subscriber.json"
+./saytw --script tools.nu cue export "$app/alerts_spec.cue" "$app/alerts_plugin.cue" -e alerts.policies --out json > "$app/observability/alerts.policies.json"
+echo "wrote   observability/alerts.subscriber.json, observability/alerts.policies.json"
