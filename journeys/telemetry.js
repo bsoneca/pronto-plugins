@@ -131,9 +131,10 @@ if (!globalThis.__prontoJourneys) {
 	const MOVE = /\b(?:[a-h][1-8]){2}[qrbn]?\b|\b[KQRBN][a-h]?[1-8]?x?[a-h][1-8]\b|\b[a-h]x?[a-h]?[1-8]\b|\bO-O(?:-O)?\b/;
 	const scrub = (text) =>
 		String(text ?? "")
-			.replace(/https?:\/\/\S*/g, "<url>")
+			.replace(/https?:\/\/\S*/gi, "<url>")
+			.replace(/(\/[\w.~%-]*)[?#]\S*/g, "$1")
 			.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, "<email>")
-			.replace(/(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*/g, "<token>")
+			.replace(/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_.-]*/g, "$1<token>")
 			.replace(/[A-Za-z0-9_+/=-]{24,}/g, "<token>")
 			.replace(/\d[\d.\-/ ]{6,}\d/g, "<number>");
 	// A path is scrubbed a segment at a time, each as it reads once decoded (ana%40gmail.com is an address): a
@@ -166,7 +167,9 @@ if (!globalThis.__prontoJourneys) {
 				// encodeURIComponent throws on a lone surrogate: that segment is the marker too, never a lost beacon.
 				let out;
 				try {
-					out = clean.replace(/[^\w.~<>-]/g, encodeURIComponent);
+					// toWellFormed turns an unpaired surrogate into U+FFFD (older engines lack it: the catch holds); the u flag
+					// keeps an emoji whole, so a valid Unicode name is escaped, not discarded.
+					out = (clean.toWellFormed?.() ?? clean).replace(/[^\w.~<>-]/gu, encodeURIComponent);
 				} catch {
 					return `<undecodable>${ending}`;
 				}

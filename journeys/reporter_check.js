@@ -18,7 +18,12 @@ Object.defineProperty(globalThis, "navigator", {
 globalThis.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 globalThis.addEventListener = (type, fn) => { listeners[type] = fn; };
 globalThis.document = { visibilityState: "hidden", addEventListener: (type, fn) => { documentListeners[type] = fn; } };
-await import(file);
+// Each case is a page of its own: the reporter reports a few errors a page, so it is loaded afresh.
+let pages = 0;
+const load = async () => {
+	delete globalThis.__prontoJourneys;
+	await import(`${file}?page=${pages++}`);
+};
 
 let failed = 0;
 const check = (what, ok) => {
@@ -27,7 +32,8 @@ const check = (what, ok) => {
 };
 
 // An error thrown at the page's listener, as the browser would raise it, and the one error event it sends.
-const thrown = (error, { detail }) => {
+const thrown = async (error, { detail }) => {
+	await load();
 	globalThis.__prontoErrorDetail = detail;
 	beacons.length = 0;
 	listeners.error({ error, message: error.message });
@@ -42,24 +48,24 @@ const withStack = (message, frames, name = "Error") => {
 };
 
 // Off: the name alone, and nothing else, whatever the page threw.
-const off = thrown(withStack("secret ana@example.com", ["f (https://x.example/a.js:3:4)"]), { detail: false });
+const off = await thrown(withStack("secret ana@example.com", ["f (https://x.example/a.js:3:4)"]), { detail: false });
 check("off, an error is its type, kind and name alone", JSON.stringify(Object.keys(off).sort()) === JSON.stringify(["kind", "name", "session", "t", "type"]));
 
 // On: the saved-game message is dropped whole.
-const game = thrown(withStack("Illegal move in saved game: e2e4 in rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", ["f (/a.js:3:4)"]), { detail: true });
+const game = await thrown(withStack("Illegal move in saved game: e2e4 in rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", ["f (/a.js:3:4)"]), { detail: true });
 check("a message holding a position or a move is dropped", game.message === "");
 check("on, the event carries a browser tag from the fixed list", ["instagram", "facebook", "wv", "other"].includes(game.browser));
 
 // The exception header never rides the stack, even ending in a location.
-const header = thrown(withStack("contact user@example.com:12:34", ["f (https://x.example/a.js:3:4)"]), { detail: true });
+const header = await thrown(withStack("contact user@example.com:12:34", ["f (https://x.example/a.js:3:4)"]), { detail: true });
 check("a header that ends in a location is no frame", !JSON.stringify(header).includes("user@") && header.frame === "f (/a.js:3:4)");
 
 // A query or fragment with ")" or ":" in it ends nothing.
-const query = thrown(withStack("x", ["f (https://x.example/app.js?state=x)private:3:4)", "g (https://x.example/b.js#t=a:b:5:6)"]), { detail: true });
+const query = await thrown(withStack("x", ["f (https://x.example/app.js?state=x)private:3:4)", "g (https://x.example/b.js#t=a:b:5:6)"]), { detail: true });
 check("a query or fragment is left out whole", query.stack === "f (/app.js:3:4)\ng (/b.js:5:6)");
 
 // Paths: a long legitimate one is kept, an address or a token in a segment is not, encoded or not.
-const paths = thrown(
+const paths = await thrown(
 	withStack("x", [
 		"a (https://x.example/shell/hatches/journeys/telemetry.js:1:2)",
 		"b (https://x.example/users/ana@example.com/app.js:3:4)",
@@ -77,27 +83,38 @@ check("a token in a path segment is scrubbed", lines[3] === "d (/u/<token>/b.js:
 check("a file named keyJson.js is kept", lines[4] === "e (/assets/keyJson.js:9:10)");
 
 // A malformed escape hides an encoded address in the same segment: the segment goes as a marker.
-const malformed = thrown(withStack("x", ["h (https://x.example/users/ana%40gmail.com%E0%A4%A/app.js:1:2)", "i (https://x.example/ok/app.js:3:4)"]), { detail: true });
+const malformed = await thrown(withStack("x", ["h (https://x.example/users/ana%40gmail.com%E0%A4%A/app.js:1:2)", "i (https://x.example/ok/app.js:3:4)"]), { detail: true });
 check("a segment that fails to decode is a fixed marker, its address nowhere", malformed.stack === "h (/users/<undecodable>/app.js:1:2)\ni (/ok/app.js:3:4)" && !JSON.stringify(malformed).includes("ana") && !JSON.stringify(malformed).includes("gmail"));
 
 // Decoded until it stops changing; a decoded newline cannot split the stack; a name keeps its ending.
-const tricky = thrown(withStack("x", ["j (https://x.example/a/ana%2540gmail.com/app.js:1:2)", "k (https://x.example/b/ana%40gmail.com%0Aat%20x/app.js:3:4)", "l (https://x.example/c/x%E0.js:5:6)", "m (https://x.example/d/ana@example.com.js:7:8)"]), { detail: true });
+const tricky = await thrown(withStack("x", ["j (https://x.example/a/ana%2540gmail.com/app.js:1:2)", "k (https://x.example/b/ana%40gmail.com%0Aat%20x/app.js:3:4)", "l (https://x.example/c/x%E0.js:5:6)", "m (https://x.example/d/ana@example.com.js:7:8)"]), { detail: true });
 const trickyLines = tricky.stack.split("\n");
 check("a double-encoded address is scrubbed", trickyLines[0] === "j (/a/<email>/app.js:1:2)");
 check("a decoded newline cannot split the stack", trickyLines.length === 4 && trickyLines[1].startsWith("k (/b/") && !trickyLines[1].includes("ana") && trickyLines[2] === "l (/c/<undecodable>.js:5:6)");
 check("a scrubbed file name keeps its ending", trickyLines[3] === "m (/d/<email>.js:7:8)");
 
 // A lone surrogate in a scrubbed segment makes its re-escape throw: that must not lose the beacon, the segment is the marker.
-const lone = thrown(withStack("x", ["n (https://x.example/e/ana@example.com\uD800/app.js:1:2)", "o (https://x.example/ok/app.js:3:4)"]), { detail: true });
-check("a lone surrogate in a scrubbed segment does not lose the beacon", lone !== undefined && lone.stack === "n (/e/<undecodable>/app.js:1:2)\no (/ok/app.js:3:4)");
+const lone = await thrown(withStack("x", ["n (https://x.example/e/ana@example.com\uD800/app.js:1:2)", "o (https://x.example/ok/app.js:3:4)"]), { detail: true });
+check("a lone surrogate in a scrubbed segment does not lose the beacon or the address", lone !== undefined && !lone.stack.includes("ana") && lone.stack.split("\n").length === 2 && lone.stack.endsWith("o (/ok/app.js:3:4)"));
+
+// A valid emoji and an address in one segment: the name is escaped whole, not discarded.
+const emoji = await thrown(withStack("x", ["p (https://x.example/f/\u{1F600}ana@example.com/app.js:1:2)"]), { detail: true });
+check("a valid emoji beside an address is kept, escaped", emoji.stack === "p (/f/%F0%9F%98%80<email>/app.js:1:2)");
+
+// URL schemes are case-insensitive; a relative url's query is private too; no lookbehind (older Safari fails to parse one).
+const urls = await thrown(withStack("see HTTPS://example.org/?invite=blue-fox and Http://x.example/a?k=v and /path?token=secret#frag", ["f (/a.js:1:2)"]), { detail: true });
+check("a mixed-case scheme and a relative url lose their query", !/blue-fox|token=|secret|k=v/.test(JSON.stringify(urls)) && urls.message.includes("<url>"));
+check("the reporter source has no lookbehind regex", !/\(\?<[!=]/.test(source));
+const jwt = await thrown(withStack("bad eyJhbGciOiJIUzI1NiJ9.e30.abc in keyJson.js", ["f (/a.js:1:2)"]), { detail: true });
+check("a token is cut and keyJson.js is kept without a lookbehind", jwt.message === "bad <token> in keyJson.js");
 
 // The message: redacted in the page.
-const message = thrown(withStack("failed for ana@example.com at https://x.example/p?q=1", ["f (/a.js:1:2)"]), { detail: true });
+const message = await thrown(withStack("failed for ana@example.com at https://x.example/p?q=1", ["f (/a.js:1:2)"]), { detail: true });
 check("a message loses its address and url", message.message === "failed for <email> at <url>");
 
 // The tag.
 userAgent = "Mozilla/5.0 (iPhone) Instagram 457.0.0.34.70 (iPhone14,5)";
-check("an Instagram user agent is tagged instagram and the agent itself is not sent", thrown(withStack("x", ["f (/a.js:1:2)"]), { detail: true }).browser === "instagram" && !JSON.stringify(beacons).includes("iPhone"));
+check("an Instagram user agent is tagged instagram and the agent itself is not sent", (await thrown(withStack("x", ["f (/a.js:1:2)"]), { detail: true })).browser === "instagram" && !JSON.stringify(beacons).includes("iPhone"));
 
 await Deno.remove(dir, { recursive: true });
 if (failed) Deno.exit(1);

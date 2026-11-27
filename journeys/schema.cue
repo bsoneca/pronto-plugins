@@ -422,12 +422,13 @@ _journeysHours: {
 					if !match(name, r'^[A-Za-z0-9_.$]+$') { name = "Error" }
 					message = string(.message) ?? ""
 					message = replace(message, r'[^\s@]+@[^\s@]+', "<email>")
-					message = replace(message, r'https?://[^\s)]*', "<url>")
+					message = replace(message, r'(?i)https?://[^\s)]*', "<url>")
+					message = replace(message, r'(/[A-Za-z0-9_.~%-]*)[?#]\S*', "${1}")
 					message = replace(message, r'[A-Za-z0-9_+/=-]{24,}', "<token>")
 					message = replace(message, r'\d[\d.\-/ ]{6,}\d', "<number>")
 					message = slice(message, 0, 200) ?? ""
 					frame = string(.frame) ?? ""
-					frame = replace(frame, r'https?://[^/\s)]*', "")
+					frame = replace(frame, r'(?i)https?://[^/\s)]*', "")
 					frame = replace(frame, r'[?#]\S*?(:\d+:\d+\)?)(\n|$)', "${1}${2}")
 					frame = replace(frame, r'\?[^\s):]*', "")
 					frame = replace(frame, r'\.[0-9a-fA-F]{6,}\.(m?js)', ".${1}")
@@ -437,7 +438,7 @@ _journeysHours: {
 					frame = replace(frame, r'[A-Za-z0-9_+=-]{24,}', "<token>")
 					frame = replace(frame, r'\d[\d.\-/ ]{6,}\d', "<number>")
 					frame = slice(frame, 0, 200) ?? ""
-					stack = replace(string(.stack) ?? "", r'https?://[^/\s)]*', "")
+					stack = replace(string(.stack) ?? "", r'(?i)https?://[^/\s)]*', "")
 					stack = replace(stack, r'[?#]\S*?(:\d+:\d+\)?)(\n|$)', "${1}${2}")
 					stack = replace(stack, r'\?[^\s):]*', "")
 					stack = replace(stack, r'\.[0-9a-fA-F]{6,}\.(m?js)', ".${1}")
@@ -721,6 +722,13 @@ _journeysHours: {
 				in: {name: "Error", message: "m", frame: "f (/shell/hatches/journeys/telemetry.js:3:4)", stack: "f (/shell/hatches/journeys/telemetry.js:3:4)\ng (/assets/keyJson.js:5:6)"}
 				check: #"""
 					.stack_trace == "    at f (/shell/hatches/journeys/telemetry.js:3:4)\n    at g (/assets/keyJson.js:5:6)"
+					"""#
+			},
+			{
+				name: "a mixed-case scheme and a relative url lose their query in a message"
+				in: {name: "Error", message: "see HTTPS://example.org/?invite=blue-fox and Http://x.example/a?k=v and /path?token=secret#frag"}
+				check: #"""
+					!contains(string!(.message), "blue-fox") && !contains(string!(.message), "token=") && !contains(string!(.message), "secret") && contains(string!(.message), "<url>")
 					"""#
 			},
 			{
