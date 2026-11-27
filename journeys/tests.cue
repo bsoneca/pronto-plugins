@@ -50,7 +50,7 @@ quietOffBurns: len([for a in _never.alerts if a.alert == "JourneyAvailabilityBur
 // week that ran twice the usual. The rule holds the exact expression, and the
 // cases below evaluate its comparison on the counts as the operators read it.
 trafficDropPages: _alert["journey-checkout/JourneyTrafficDrop"].labels & {severity: "page", owner: "payments"}
-trafficDropExpr: _alert["journey-checkout/JourneyTrafficDrop"].expr & "(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h])) or vector(0)) < 0.5 * min(label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 7d)), \"week\", \"1\", \"\", \"\") or label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 14d)), \"week\", \"2\", \"\", \"\")) and min(label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 7d)), \"week\", \"1\", \"\", \"\") or label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 14d)), \"week\", \"2\", \"\", \"\")) >= 200"
+trafficDropExpr: _alert["journey-checkout/JourneyTrafficDrop"].expr & "(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h])) or vector(0)) < 0.5 * min(label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 7d)), \"week\", \"1\", \"\", \"\") or label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 14d)), \"week\", \"2\", \"\", \"\")) and min(label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 7d)), \"week\", \"1\", \"\", \"\") or label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 14d)), \"week\", \"2\", \"\", \"\")) >= 200 and count(label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 7d)), \"week\", \"1\", \"\", \"\") or label_replace(sum(increase(journey_runs_total{journey=\"checkout\",outcome=~\"good|bad\"}[3h] offset 14d)), \"week\", \"2\", \"\", \"\")) == 2"
 _fire: [string]: {today: number, weeks: [number, ...number], floor: number, out: today < 0.5*list.Min(weeks) && list.Min(weeks) >= floor}
 // 300 and 280 runs in the weeks before, 120 now: under half of the least.
 _fire: halfDropFires: {today: 120, weeks: [300, 280], floor: 200}
@@ -79,7 +79,7 @@ dropLookBack: [for a in _j.alerts if a.alert == "JourneyTrafficDrop" {a.hours}][
 // The floor is a per-journey field with a default, and the rule reads it.
 _floored: #Journeys & {app: "shop", gestures: _j.gestures, spec: first: _j.spec.first & {dropFloor: 5}}
 dropFloorDefault: _j.spec.first.dropFloor & 200
-dropFloorSpec: strings.HasSuffix([for a in _floored.alerts if a.alert == "JourneyTrafficDrop" {a.expr}][0], ">= 5") & true
+dropFloorSpec: strings.Contains([for a in _floored.alerts if a.alert == "JourneyTrafficDrop" {a.expr}][0], ">= 5 and count(") & true
 // A journey that never says quiet still has the alert; every journey has one.
 dropWithoutQuiet: len([for a in _never.alerts if a.alert == "JourneyTrafficDrop" {a}]) & 1
 // Cloud Monitoring takes it as a page policy that looks back past 25 hours.
