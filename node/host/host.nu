@@ -31,6 +31,10 @@ export def vet [host: record] {
 	let r = (do { ^cue vet -c ($here | path join schema host.cue) $f -d '#DockerGC' } | complete)
 	rm -f $f
 	if $r.exit_code != 0 { error make {msg: $"node-host: the host's dockerGC is not what #Host allows: ($r.stderr | str trim)"} }
+	# The pattern is run by bash on the node (docker-gc.sh): an invalid ERE is an error there (status 2), which the cleanup loop
+	# would read as "no tag matches" and keep every image. Bash on this machine is the same engine's check.
+	let ere = (do { ^bash -c '[[ "" =~ $1 ]]; [ $? -ne 2 ]' _ $host.dockerGC.refPattern } | complete)
+	if $ere.exit_code != 0 { error make {msg: $"node-host: the host's dockerGC refPattern is not a valid bash ERE: ($host.dockerGC.refPattern)"} }
 }
 
 # The files the host holds, from its #Host values: [{path, mode, text}], in the order they are written: the settings
@@ -103,7 +107,22 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 			$changed = true
 		}
 	}
-	if $changed { must (sh $node "systemctl daemon-reload") "systemctl daemon-reload" | ignore }
+	# systemd runs the units it last loaded: files that match on disk are not the units running. A run that stopped between
+	# writing a unit and reloading leaves every file matching, so a pending reload is asked of systemd itself, for the
+	# service and the timer, and is drift (--check) or is done (apply) whatever this run wrote.
+	mut reload_pending = false
+	for unit in [($gc_unit | str replace ".timer" ".service") $gc_unit] {
+		let q = (sh $node $"systemctl show -p NeedDaemonReload --value ($unit)")
+		if $q.exit_code != 0 { error make {msg: $"node-host: asking whether ($unit) needs a daemon-reload: ($q.stderr | str trim)"} }
+		if ($q.stdout | str trim) == "yes" {
+			$reload_pending = true
+			if not $changed {
+				$drift = ($drift | append $"($unit) needs a daemon-reload")
+				print $"drift: ($unit) needs a daemon-reload"
+			}
+		}
+	}
+	if not $check and ($changed or $reload_pending) { must (sh $node "systemctl daemon-reload") "systemctl daemon-reload" | ignore; print "systemctl daemon-reload" }
 	# The timer starts at boot and is running now, and its job's last run did not fail (setting the timer
 	# again does not clear that: the operator reads journalctl -u).
 	let service = ($gc_unit | str replace ".timer" ".service")

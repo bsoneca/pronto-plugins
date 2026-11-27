@@ -23,7 +23,9 @@ def main [] {
 	test_the_settings_are_written_before_the_script
 	test_a_world_writable_or_foreign_file_is_drift
 	test_a_hand_edited_host_cannot_carry_a_quote_into_the_files
+	test_an_invalid_reference_pattern_is_refused
 	test_a_failed_job_makes_apply_exit_non_zero
+	test_a_pending_daemon_reload_is_drift_and_is_done_though_every_file_matches
 	print "\nAll node host tests passed."
 }
 
@@ -155,6 +157,8 @@ case "$1" in
   is-failed) [ -e "$d/failed" ] ;;
   is-enabled | is-active) [ -e "$d/on" ] ;;
   enable) touch "$d/on" ;;
+  show) if [ -e "$d/needreload" ]; then echo yes; else echo no; fi ;;
+  daemon-reload) rm -f "$d/needreload" ;;
   *) ;;
 esac
 ' | save --raw ($dir | path join bin systemctl)
@@ -246,6 +250,15 @@ def test_a_hand_edited_host_cannot_carry_a_quote_into_the_files [] {
 	}
 }
 
+def test_an_invalid_reference_pattern_is_refused [] {
+	print "test a refPattern bash cannot compile is refused, not read as matching no tag..."
+	for bad in ["^[" "^(a" "^a{2,1}"] {
+		let msg = (try { render {dockerGC: ((defaults).dockerGC | merge {refPattern: $bad})} | ignore; "accepted" } catch {|e| $e.msg })
+		assert str contains $msg "not a valid bash ERE" $bad
+	}
+	render (defaults) | ignore
+}
+
 def test_a_failed_job_makes_apply_exit_non_zero [] {
 	print "test apply exits 1 when the job's last run failed, which writing files does not clear..."
 	let dir = (tmp)
@@ -258,6 +271,29 @@ def test_a_failed_job_makes_apply_exit_non_zero [] {
 	let r = (do $run)
 	assert equal $r.exit_code 1
 	assert str contains $r.stderr "the job's last run failed"
+	rm -rf $dir
+}
+
+def test_a_pending_daemon_reload_is_drift_and_is_done_though_every_file_matches [] {
+	print "test units written but not reloaded (every file matches) are drift for --check, and apply reloads without writing..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		apply (defaults) --root $root | ignore
+		assert equal (apply (defaults) --check --root $root) [] "reloaded and in step"
+		# A run that wrote the units and stopped before daemon-reload: the files match, systemd runs the old ones.
+		"" | save --raw ($dir | path join needreload)
+		let drift = (apply (defaults) --check --root $root)
+		assert equal $drift ["pronto-docker-gc.service needs a daemon-reload" "pronto-docker-gc.timer needs a daemon-reload"]
+		assert (($dir | path join needreload) | path exists) "--check reloads nothing"
+		let before = (open --raw ($dir | path join systemctl.log) | lines | where {|l| $l == "daemon-reload"} | length)
+		let done = (apply (defaults) --root $root)
+		assert equal ($done | length) 2
+		let after = (open --raw ($dir | path join systemctl.log) | lines | where {|l| $l == "daemon-reload"} | length)
+		assert equal $after ($before + 1)
+		assert equal (apply (defaults) --check --root $root) [] "nothing pending after the reload"
+	}
 	rm -rf $dir
 }
 
