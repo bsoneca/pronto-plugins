@@ -89,6 +89,7 @@ def test_a_tenant_release_writes_only_what_its_publisher_may [] {
 		[tenantClock "sets clock, a CronJob its publisher may not write"]
 		[tenantBlobs "runs no blob plane"]
 		[tenantRetireNetworkPolicy "which a tenant's publisher may not delete"]
+		[tenantRetireServiceAccount "which a tenant's publisher may not delete"]
 		[tenantGatewayHTTPS "a tenant's gateway listens on 80/HTTP alone"]
 		[tenantUnservedKind "is not a kind a tenant's publisher writes"]
 		[tenantExternalImage "is not in 127.0.0.1:5000/studio-owner-game-1a2b3c4d"]

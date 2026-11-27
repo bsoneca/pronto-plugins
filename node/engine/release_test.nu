@@ -339,6 +339,7 @@ def main [] {
 	test_a_tenants_staged_build_paths_are_the_staged_copys
 	test_a_tenants_dry_run_with_no_build_needs_the_publisher_kubeconfig_alone
 	test_a_tenants_retirement_is_the_engines_to_decide
+	test_a_tenants_env_link_is_refused_and_never_opened
 	test_a_tenants_push_rights_are_only_what_its_path_uses
 	test_a_tenants_origin_and_preview_are_the_operators
 	test_a_tenants_containers_say_allow_privilege_escalation_false
@@ -2339,7 +2340,6 @@ def test_a_tenant_namespace_and_push_rights_are_asked_before_anything_is_built [
 		{setup: "no-lease-right", says: "the push identity may not create leases.coordination.k8s.io in pronto-registry: it needs the Role studio-builder-push"}
 		{setup: "no-forward-right", says: "the push identity may not create pods/portforward in pronto-registry"}
 		{setup: "no-lease-patch", says: "the push identity may not patch leases.coordination.k8s.io in pronto-registry"}
-		{setup: "no-lease-list", says: "the push identity may not list leases.coordination.k8s.io in pronto-registry"}
 	] {
 		let w = (tenant-world)
 		match $row.setup {
@@ -2349,7 +2349,6 @@ def test_a_tenant_namespace_and_push_rights_are_asked_before_anything_is_built [
 			"operator-record" => { mkdir ($w.state | path join cm); {metadata: {name: "pronto-release"}, data: {sha: "abc"}} | to json | save -f ($w.state | path join cm pronto-release) }
 			"no-lease-right" => { "create leases.coordination.k8s.io" | save -f ($w.state | path join auth_deny) }
 			"no-lease-patch" => { "patch leases.coordination.k8s.io" | save -f ($w.state | path join auth_deny) }
-			"no-lease-list" => { "list leases.coordination.k8s.io" | save -f ($w.state | path join auth_deny) }
 			"no-forward-right" => { "create pods --subresource=portforward -n pronto-registry" | save -f ($w.state | path join auth_deny) }
 		}
 		let r = (tenant-release $w)
@@ -2665,7 +2664,9 @@ def test_a_tenants_retirement_is_the_engines_to_decide [] {
 		{retire: '{kind: Namespace, name: studio-owner-game, resource: ns}', says: "retire names Namespace/"}
 		{retire: '{kind: Service, name: "--all", resource: service}', says: "not a plain resource name"}
 		{retire: '{kind: Service, name: "a,b", resource: service}', says: "not a plain resource name"}
-		{retire: '{kind: CronJob, name: old, resource: cronjob.batch}', says: "which a tenant's publisher may not delete"}
+		{retire: '{kind: CronJob, name: old, resource: cronjob.batch}', says: "which a tenant's release never retires"}
+		{retire: '{kind: ServiceAccount, name: publisher, resource: serviceaccount}', says: "ServiceAccount/publisher, which a tenant's release never retires"}
+		{retire: '{kind: ServiceAccount, name: other, resource: serviceaccount}', says: "which a tenant's release never retires"}
 		{retire: '{kind: ConfigMap, name: pronto-release, resource: configmap}', says: "the namespace's own record"}
 		{retire: '{kind: Deployment, name: game-crud, resource: deployment.apps}', says: "which this release writes"}
 	]
@@ -2688,6 +2689,18 @@ def test_a_tenants_retirement_is_the_engines_to_decide [] {
 	rm -rf $w.dir
 }
 
+def test_a_tenants_env_link_is_refused_and_never_opened [] {
+	print "test a tenant's .env that is a link is refused as a link and its target is never read..."
+	let w = (tenant-world)
+	"COMPOSE_FILE=/etc/passwd\n" | save -f ($w.dir | path join target.env)
+	^ln -s ($w.dir | path join target.env) ($w.app | path join .env)
+	let r = (in-world $w -c $"use ($engine_dir | path join tenant.nu); tenant check-compose-sources '($w.app)'")
+	assert ($r.exit_code != 0) "a linked .env was not refused"
+	assert (has $r.stderr ".env is a symlink, not a regular file") $r.stderr
+	assert (not (has $r.stderr "COMPOSE_")) $"the link's target was read: ($r.stderr)"
+	rm -rf $w.dir
+}
+
 def test_a_tenants_push_rights_are_only_what_its_path_uses [] {
 	print "test a tenant's check with --build asks for no Service read in the gateway's namespace (there is no door check), and a live release asks for it..."
 	let w = (tenant-world)
@@ -2700,6 +2713,14 @@ def test_a_tenants_push_rights_are_only_what_its_path_uses [] {
 	assert (has $live.stderr "the push identity may not get services in envoy-gateway-system") $live.stderr
 	assert equal (writes $w) []
 	rm -rf $w.dir
+	# the registry's Leases: only create, get, patch and delete are asked (list and update are the collector's), so a Role without them passes
+	let l = (tenant-world)
+	"list leases.coordination.k8s.io\nupdate leases.coordination.k8s.io" | save -f ($l.state | path join auth_deny)
+	let ok = (tenant-release $l)
+	assert equal $ok.exit_code 0 $"($ok.stdout)\n($ok.stderr)"
+	let asked = (calls-by $l push.kubeconfig | where {|c| ($c | str starts-with "auth can-i") and ($c | str contains "leases") })
+	assert equal ($asked | each {|c| $c | split row " " | get 2 } | uniq | sort) [create delete get patch]
+	rm -rf $l.dir
 	# the gateway's port-forward is a live release's too
 	let f = (tenant-world)
 	"create pods --subresource=portforward -n envoy-gateway-system" | save -f ($f.state | path join auth_deny)
