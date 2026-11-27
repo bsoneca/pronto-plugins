@@ -25,6 +25,9 @@ const LATE_MS = 5000;
 const BATCH = 20;
 // An error's text and frame are cut to this; a page reports this many errors in all.
 const ERROR_TEXT = 200;
+// The frames of an error's stack that leave the page, and their total length.
+const STACK_FRAMES = 5;
+const STACK_TEXT = 600;
 const ERRORS_PER_PAGE = 10;
 // The terminal moves between screens without unloading the page, so pagehide
 // may not come for a long while: a batch also goes this long after its first
@@ -122,10 +125,28 @@ if (!globalThis.__prontoJourneys) {
 		const line = stack.split("\n").map((l) => l.trim()).find((l) => /^at\s/.test(l) || /@\S+:\d+:\d+$/.test(l));
 		return line ? line.replace(/^at\s+/, "").slice(0, ERROR_TEXT) : "";
 	};
+	// The top few frames, each as frameOf reads it, joined by newlines and cut to a safe length.
+	const stackOf = (x) => {
+		const stack = x instanceof Error && typeof x.stack === "string" ? x.stack : "";
+		return stack
+			.split("\n")
+			.map((l) => l.trim())
+			.filter((l) => /^at\s/.test(l) || /@\S+:\d+:\d+$/.test(l))
+			.slice(0, STACK_FRAMES)
+			.map((l) => l.replace(/^at\s+/, "").slice(0, ERROR_TEXT))
+			.join("\n")
+			.slice(0, STACK_TEXT);
+	};
+	// The browser the page runs in, as a tag from a fixed list, never the user agent itself: an
+	// in-app browser (Instagram, Facebook's FBAN/FBAV) or a WebView ("wv"), else "other".
+	const browserOf = () => {
+		const ua = String(navigator.userAgent ?? "");
+		return /Instagram/i.test(ua) ? "instagram" : /FBAN|FBAV/.test(ua) ? "facebook" : /; wv\)|\bwv\b/.test(ua) ? "wv" : "other";
+	};
 	// A page reports a few errors, each once: a loop in a tab is no flood of beacons.
 	const reported = new Set();
 	const report = (kind, thrown, fallback) => {
-		const event = { type: "error", kind, name: nameOf(thrown), message: messageOf(thrown) || String(fallback ?? "").slice(0, ERROR_TEXT), frame: frameOf(thrown), screen: current };
+		const event = { type: "error", kind, name: nameOf(thrown), message: messageOf(thrown) || String(fallback ?? "").slice(0, ERROR_TEXT), frame: frameOf(thrown), stack: stackOf(thrown), browser: browserOf(), screen: current };
 		const key = `${event.name} ${event.message} ${event.frame}`;
 		if (reported.has(key) || reported.size >= ERRORS_PER_PAGE) return;
 		reported.add(key);
