@@ -72,7 +72,12 @@ d="$(dirname "$0")/.."
 echo "$*" >> "$d/docker.log"
 case "$*" in
   *"compose"*"config --format json"*) env > "$d/compose_env"; [ -z "$DOCKER_CONFIG" ] || readlink "$DOCKER_CONFIG/cli-plugins/docker-compose" >> "$d/compose_plugins"; cat "$d/compose.json" ;;
-  *"compose"*"config"*) env > "$d/staged_compose_env"; echo "services: {}" ;;
+  *"compose"*"config"*) env > "$d/staged_compose_env"
+    # a staged game with a database stage (fixtures/game/Dockerfile.database) answers the stage a tenant's database build is: copy-only, on the base `base_ref` names
+    if [ -f "$PWD/Dockerfile.database" ]; then
+      ref=$(cat "$d/base_ref" 2>/dev/null || echo "bonitao/mecha-database:0.36.1@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598")
+      printf 'services:\n  database:\n    build:\n      context: %s\n      dockerfile: Dockerfile.database\n      target: database\n      additional_contexts:\n        base: docker-image://%s\n' "$PWD" "$ref"
+    else echo "services: {}"; fi ;;
   "buildx version") echo "github.com/docker/buildx v0 fake" ;;
   "buildx create "*) echo "$DOCKER_CONFIG" > "$d/docker_config" ;;
   "buildx inspect "*) if [ -f "$d/platform_arm" ]; then echo "Platforms:        linux/arm64"; else echo "Platforms:        linux/amd64, linux/amd64/v2, linux/386"; fi ;;
@@ -115,6 +120,8 @@ echo "$*" >> "$d/crane.log"
 # `crane push <layout> <ref>`: the pinned reference it answers, the digest the hash of the reference
 case "$1" in
   push) for a; do ref="$a"; done; printf '%s@sha256:%s\n' "${ref%:*}" "$(printf %s "$ref" | shasum -a 256 | cut -d' ' -f1)"; exit 0 ;;
+  copy) exit 0 ;;
+  digest) cat "$d/crane_digest" 2>/dev/null || echo "sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598"; exit 0 ;;
 esac
 if [ -f "$d/crane_nopg" ]; then echo '{"config":{"Env":["PATH=/bin"]}}'; else echo '{"config":{"Env":["PATH=/bin","PG_MAJOR=17"]}}'; fi
 '# | str trim --left | save -f ($d | path join bin crane)
@@ -336,6 +343,8 @@ def main [] {
 	test_a_tenants_issuers_are_the_engines_list
 	test_the_tenant_door_check_in_the_pod_dials_the_service_and_forwards_to_nothing
 	test_a_tenants_compose_files_name_nothing_outside_the_app
+	test_a_tenants_database_base_must_be_one_the_engine_approves
+	test_a_tenants_workload_never_runs_as_the_account_of_a_cluster_already_in_its_namespace
 	test_a_tenants_staged_build_paths_are_the_staged_copys
 	test_a_tenants_dry_run_with_no_build_needs_the_publisher_kubeconfig_alone
 	test_a_tenants_retirement_is_the_engines_to_decide
@@ -2428,6 +2437,12 @@ def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] 
 	let img = $"127.0.0.1:5000/($ns)/game-crud:release@sha256:(('a' | fill -c 'a' -w 64))"
 	let deploy = {|pod: string, extra: string| $"{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: {($extra) containers: [{name: \"crud\", image: ($pod)}]}}" }
 	let good = $"\"($img)\""
+	# a tenant's Cluster runs exactly the engine's approved base, copied under its own path: the one name that passes
+	let approved = $"127.0.0.1:5000/($ns)/game-database-base:18@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598"
+	let cluster_with = {|image: string, extra: string|
+		let tail = (if ($extra | is-empty) { "" } else { $", ($extra)" })
+		$"[{apiVersion: \"postgresql.cnpg.io/v1\", kind: \"Cluster\", metadata: {name: \"game-db\", namespace: \"($ns)\"}, spec: {imageName: \"($image)\"($tail)}}]"
+	}
 	let cases = [
 		{why: "an image of another registry", says: "not an image under 127.0.0.1:5000/($ns)/", objects: $"[(do $deploy '"docker.io/library/nginx:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' '')]"}
 		{why: "an image of another tenant's path", says: "not an image under", objects: $"[(do $deploy '"127.0.0.1:5000/studio-other-game-0/game-crud:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' '')]"}
@@ -2448,6 +2463,26 @@ def test_a_tenants_own_nodemanifests_cannot_write_what_its_publisher_may_not [] 
 		{why: "added capabilities", says: "adds capabilities", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), securityContext: capabilities: add: [\"NET_ADMIN\"]}]}]"}
 		{why: "a hostPort", says: "sets a hostPort", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), ports: [{containerPort: 80, hostPort: 80}]}]}]"}
 		{why: "privilege escalation", says: "allows privilege escalation", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: spec: containers: [{name: \"crud\", image: ($good), securityContext: allowPrivilegeEscalation: true}]}]"}
+		{why: "a Cluster on a database image the tenant built", says: "not the approved database base", objects: (do $cluster_with $"127.0.0.1:5000/($ns)/game-database:17@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "")}
+		{why: "a Cluster on an unapproved digest under the tenant's own base name", says: "not the approved database base", objects: (do $cluster_with $"127.0.0.1:5000/($ns)/game-database-base:18@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "")}
+		{why: "the approved digest under another app's base name", says: "not the approved database base", objects: (do $cluster_with $"127.0.0.1:5000/($ns)/other-database-base:18@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598" "")}
+		{why: "the approved digest under another major", says: "not the approved database base", objects: (do $cluster_with $"127.0.0.1:5000/($ns)/game-database-base:17@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598" "")}
+		{why: "an imageCatalogRef", says: "sets the Cluster field(s) imageCatalogRef", objects: (do $cluster_with $approved "imageCatalogRef: {name: \"x\", kind: \"ImageCatalog\", major: 18}")}
+		{why: "an image-volume extension", says: "sets postgresql.extensions", objects: (do $cluster_with $approved "postgresql: {extensions: [{name: \"x\", image: {reference: \"evil\"}}]}")}
+		{why: "a projectedVolumeTemplate", says: "sets the Cluster field(s) projectedVolumeTemplate", objects: (do $cluster_with $approved "projectedVolumeTemplate: {sources: []}")}
+		{why: "a serviceAccountTemplate", says: "sets the Cluster field(s) serviceAccountTemplate", objects: (do $cluster_with $approved "serviceAccountTemplate: {metadata: {annotations: {a: \"b\"}}}")}
+		{why: "plugins", says: "sets the Cluster field(s) plugins", objects: (do $cluster_with $approved "plugins: [{name: \"x\"}]")}
+		{why: "env", says: "sets the Cluster field(s) env", objects: (do $cluster_with $approved "env: [{name: \"A\", value: \"b\"}]")}
+		{why: "envFrom", says: "sets the Cluster field(s) envFrom", objects: (do $cluster_with $approved "envFrom: [{secretRef: {name: \"x\"}}]")}
+		{why: "a postInitSQL", says: "sets bootstrap.initdb.postInitSQL", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", postInitSQL: [\"select 1\"]}}")}
+		{why: "a postInitApplicationSQL", says: "sets bootstrap.initdb.postInitApplicationSQL", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", postInitApplicationSQL: [\"select 1\"]}}")}
+		{why: "a postInitApplicationSQLRefs", says: "sets bootstrap.initdb.postInitApplicationSQLRefs", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", postInitApplicationSQLRefs: {configMapRefs: [{name: \"x\", key: \"y\"}]}}}")}
+		{why: "a postInitSQLRefs", says: "sets bootstrap.initdb.postInitSQLRefs", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", postInitSQLRefs: {secretRefs: [{name: \"x\", key: \"y\"}]}}}")}
+		{why: "a postInitTemplateSQL", says: "sets bootstrap.initdb.postInitTemplateSQL", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", postInitTemplateSQL: [\"select 1\"]}}")}
+		{why: "a import", says: "sets bootstrap.initdb.import", objects: (do $cluster_with $approved "bootstrap: {initdb: {database: \"game\", import: {type: \"microservice\", databases: [\"d\"], source: {externalCluster: \"x\"}}}}")}
+		{why: "a recovery bootstrap", says: "sets bootstrap.recovery", objects: (do $cluster_with $approved "bootstrap: {recovery: {source: \"x\"}}")}
+		{why: "externalClusters", says: "sets the Cluster field(s) externalClusters", objects: (do $cluster_with $approved "externalClusters: [{name: \"x\"}]")}
+		{why: "a Cluster field the engine does not know", says: "sets the Cluster field(s) somethingNew", objects: (do $cluster_with $approved "somethingNew: true")}
 		{why: "a managed Service of the database that names externalIPs", says: "has a managed Service that is not a ClusterIP, or names externalIPs", objects: $"[{apiVersion: \"postgresql.cnpg.io/v1\", kind: \"Cluster\", metadata: {name: \"game-db\", namespace: \"($ns)\"}, spec: {imageName: \"127.0.0.1:5000/($ns)/game-database:17@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", managed: services: additional: [{selectorType: \"rw\", serviceTemplate: {metadata: name: \"x\", spec: {type: \"ClusterIP\", externalIPs: [\"1.2.3.4\"]}}}]}}]"}
 		{why: "a Dapr sidecar annotation", says: "sets the Dapr sidecar annotation", objects: $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($ns)\"}, spec: template: {metadata: annotations: {\"dapr.io/sidecar-image\": \"evil/daprd\"}, spec: containers: [{name: \"crud\", image: ($good)}]}}]"}
 		{why: "a runtimeClassName", says: "sets runtimeClassName", objects: $"[(do $deploy $good 'runtimeClassName: "gvisor",')]"}
@@ -2517,6 +2552,66 @@ def test_a_tenants_compose_files_name_nothing_outside_the_app [] {
 	"services:\n  b:\n    image: x\n  a:\n    extends: {service: b}\nsecrets:\n  s1: {environment: SOME_VAR}\n  s2: {external: true}\nconfigs:\n  c: {content: hello}\n" | save -f ($w.app | path join compose.yaml)
 	let ok = (^$nu.current-exe --no-config-file -c $"use ($engine_dir | path join tenant.nu); tenant check-compose-sources '($w.app)'" | complete)
 	assert equal $ok.exit_code 0 $"a project that names no file was refused: ($ok.stderr)"
+	rm -rf $w.dir
+}
+
+def test_a_tenants_database_base_must_be_one_the_engine_approves [] {
+	print "test a tenant's database stage must only copy SQL onto a base the engine approves: the engine's ref is copied under the tenant's path, and any other base, or more than a copy, is refused before anything is built..."
+	# the pure approval
+	let entry = {ref: "r/a:1@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598", digest: "sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598", major: "18"}
+	let ask = {|base: string| (^$nu.current-exe --no-config-file -c $"use ($engine_dir | path join tenant.nu); print \(tenant approved-database-base ($base) [($entry | to nuon)] | to json --raw\)" | complete).stdout | str trim | from json }
+	assert equal (do $ask "{ref: 'tenant/own:2@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598', name: base}") $entry "the approved digest is the entry, whatever string the tenant named it by"
+	assert equal (do $ask "{ref: 'r/a:1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: base}") null "an unapproved digest"
+	assert equal (do $ask "null") null "a stage that does more than copy SQL"
+	let w = (tenant-world)
+	# the approved base is copied by the engine's own ref to the tenant's path, and read back at its digest
+	let r = (tenant-release $w)
+	assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+	let crane = (open --raw ($w.dir | path join crane.log))
+	assert ($crane =~ $"copy --insecure bonitao/mecha-database:0.36.1@sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598 127\\.0\\.0\\.1:\\d+/($tenant_ns)/game-database-base:18") $crane
+	assert ($crane =~ $"digest --insecure 127\\.0\\.0\\.1:\\d+/($tenant_ns)/game-database-base:18") $crane
+	rm -rf $w.dir
+	# a base that is not approved
+	let w = (tenant-world)
+	"bonitao/mecha-database:9.9.9@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" | save -f ($w.dir | path join base_ref)
+	let r = (tenant-release $w)
+	assert ($r.exit_code != 0) "an unapproved base was not refused"
+	assert (has $r.stderr "which the engine does not approve") $r.stderr
+	assert equal (writes $w) []
+	assert (not ($w.dir | path join docker.log | path exists) or not (open --raw ($w.dir | path join docker.log) | str contains "buildx bake")) "something was built"
+	rm -rf $w.dir
+	# a database stage that does more than copy SQL
+	let w = (tenant-world)
+	"RUN apt-get install evil\n" | save --append ($w.app | path join Dockerfile.database)
+	let r = (tenant-release $w)
+	assert ($r.exit_code != 0) "a stage with a RUN was not refused"
+	assert (has $r.stderr "does more than copy SQL") $r.stderr
+	assert equal (writes $w) []
+	rm -rf $w.dir
+	# a copy that does not read back at the approved digest
+	let w = (tenant-world)
+	"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" | save -f ($w.dir | path join crane_digest)
+	let r = (tenant-release $w)
+	assert ($r.exit_code != 0) "a base that reads back at another digest was not refused"
+	assert (has $r.stderr "not the approved") $r.stderr
+	rm -rf $w.dir
+}
+
+def test_a_tenants_workload_never_runs_as_the_account_of_a_cluster_already_in_its_namespace [] {
+	print "test a workload that runs as the service account of a Cluster the namespace already holds (an older database whose name does not end in -db) is refused, from a live read of the namespace's Clusters..."
+	let w = (tenant-world)
+	"older-store\n" | save -f ($w.state | path join live_clusters)
+	own-manifests $w $"[{apiVersion: \"apps/v1\", kind: \"Deployment\", metadata: {name: \"game-crud\", namespace: \"($tenant_ns)\"}, spec: template: spec: {serviceAccountName: \"older-store\", containers: [{name: \"crud\", image: \"127.0.0.1:5000/($tenant_ns)/game-crud:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}}]"
+	let r = (tenant-release $w)
+	assert ($r.exit_code != 0) "a workload as an older Cluster's account was not refused"
+	assert (has $r.stderr "runs as the service account older-store, which a database's cluster owns") $r.stderr
+	assert equal (writes $w) []
+	rm -rf $w.dir
+	# the namespace's Clusters are read with kubectl, as the publisher, before anything is written
+	let w = (tenant-world)
+	let ok = (tenant-release $w)
+	assert equal $ok.exit_code 0 $"($ok.stdout)\n($ok.stderr)"
+	assert ((calls-by $w publisher.kubeconfig) | any {|c| $c =~ "get clusters.postgresql.cnpg.io -n" }) "the publisher did not list the namespace's Clusters"
 	rm -rf $w.dir
 }
 
@@ -2702,7 +2797,9 @@ def test_a_tenants_retirement_is_the_engines_to_decide [] {
 	assert equal $ok.exit_code 0 $ok.stderr
 	assert equal ($ok.stdout | from json) [{resource: "deployment.apps", name: "game-old"}]
 	# end to end: a Node of its own that retires the database (a release.cue may export one that skips the schema's `retire`) deletes nothing
-	let body = $"let app_info = \(runtime resolve-app '($w.app)'\); let node = \(render node-config $app_info.cue_path '' --tenant ($tenant_ns) --host ($tenant_host) | upsert retire [{kind: Cluster, name: game-db, resource: 'cluster.postgresql.cnpg.io'}]\); let meta = \(render app-meta $app_info.cue_path '' --tenant ($tenant_ns) --host ($tenant_host)\); let compose = \(render compose-config $app_info.dir --tenant\); let facts = \(render facts $app_info.dir\); release-app $app_info $node $meta $compose $facts [] (pushed-json) --tenant"
+	# the approved base, as a release pushes it: the one name the Cluster may run
+	let pb = (pushed-json | from nuon | insert "database-base" {tag: "18", digest: "sha256:5d6f9f38a065c1c001656b4e667f875145a3179c92af0bd07f6f414c75788598"} | to nuon)
+	let body = $"let app_info = \(runtime resolve-app '($w.app)'\); let node = \(render node-config $app_info.cue_path '' --tenant ($tenant_ns) --host ($tenant_host) | upsert retire [{kind: Cluster, name: game-db, resource: 'cluster.postgresql.cnpg.io'}]\); let meta = \(render app-meta $app_info.cue_path '' --tenant ($tenant_ns) --host ($tenant_host)\); let compose = \(render compose-config $app_info.dir --tenant\); let facts = \(render facts $app_info.dir\); release-app $app_info $node $meta $compose $facts [] ($pb) --tenant"
 	let path = ([($w.dir | path join bin)] | append $env.PATH)
 	let e2e = (with-env {PATH: $path, FAKE_DIR: $w.state, PRONTO_RUNTIME: (runtime-dir), SOPS_AGE_KEY: "AGE-SECRET-KEY-FAKE", KUBECONFIG: $w.publisher} { do { cd $w.app; ^$nu.current-exe --no-config-file -c (script $w $body) } | complete })
 	assert ($e2e.exit_code != 0) $"a tenant's Node that retires the database was not refused: ($e2e.stdout)"
@@ -2722,7 +2819,7 @@ def test_a_tenants_objects_hand_their_life_to_no_one_and_hold_no_reserved_name [
 		{obj: '{apiVersion: external-secrets.io/v1, kind: ExternalSecret, metadata: {name: e, namespace: ns}, spec: {target: {template: {metadata: {finalizers: [example.com/hold]}}}}}', says: "ExternalSecret/e sets spec.target.template.metadata.finalizers"}
 		{obj: '{apiVersion: external-secrets.io/v1, kind: ExternalSecret, metadata: {name: e, namespace: ns}, spec: {target: {manifest: {apiVersion: v1, kind: Secret}}}}', says: "ExternalSecret/e sets spec.target.manifest"}
 		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: "--kubeconfig=/tmp/x", namespace: ns}}', says: "is not named as a Kubernetes resource is"}
-		{obj: '{apiVersion: postgresql.cnpg.io/v1, kind: Cluster, metadata: {name: c, namespace: ns}, spec: {imageName: "127.0.0.1:5000/ns/db:17"}}', says: "Cluster/c runs 127.0.0.1:5000/ns/db:17, which is pinned by tag alone"}
+		{obj: '{apiVersion: postgresql.cnpg.io/v1, kind: Cluster, metadata: {name: c, namespace: ns}, spec: {imageName: "127.0.0.1:5000/ns/db:17"}}', says: "Cluster/c runs 127.0.0.1:5000/ns/db:17, not the approved database base"}
 		{obj: '{apiVersion: apps/v1, kind: Deployment, metadata: {name: d, namespace: ns}, spec: {template: {spec: {serviceAccountName: game-db, containers: [{name: c, image: "127.0.0.1:5000/ns/x@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", securityContext: {allowPrivilegeEscalation: false}}]}}}}', says: "Deployment/d runs as the service account game-db, which a database's cluster owns"}
 		{obj: '{apiVersion: apps/v1, kind: Deployment, metadata: {name: d, namespace: ns}, spec: {template: {metadata: {labels: {"cnpg.io/cluster": game-db}}, spec: {containers: [{name: c, image: "127.0.0.1:5000/ns/x@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", securityContext: {allowPrivilegeEscalation: false}}]}}}}', says: "Deployment/d carries a label under cnpg.io/, which marks a database's own pods"}
 		{obj: '{apiVersion: postgresql.cnpg.io/v1, kind: Cluster, metadata: {name: store, namespace: ns}, spec: {imageName: "127.0.0.1:5000/ns/db:17@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}', says: "Cluster/store is not named game-db: a tenant's database is the release's own"}

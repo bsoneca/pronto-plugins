@@ -128,6 +128,8 @@ _tm: {
 }
 
 tenantClean: (_tm & {extra: [], rel: {}}).objects
+// A tenant's Cluster with no approved database base pushed (PRONTO-740, Codex): its image is the engine's approved base or nothing.
+tenantClusterNoBase: (_tm & {extra: [{apiVersion: "postgresql.cnpg.io/v1", kind: "Cluster", metadata: {name: "app-db", namespace: _tns}, spec: {imageName: "127.0.0.1:5000/\(_tns)/app-database:17@sha256:\(_d)"}}], rel: {}}).objects
 tenantPreview: (_tm & {extra: [], rel: {preview: "rc", hosts: rc: "rc.example.com"}}).objects
 tenantBackups: (_tm & {extra: [], rel: {backups: {bucket: "b", path: "p"}}}).objects
 tenantCeilingEgress: (_tm & {extra: [], rel: {tenant: egress: [{ports: [{port: 443}]}]}}).objects

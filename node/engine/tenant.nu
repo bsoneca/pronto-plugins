@@ -31,6 +31,17 @@ export def tenant-issuers []: nothing -> list<string> {
 	$r.stdout | from json
 }
 
+# The database images a tenant's Cluster may run (`#TenantDatabaseImages`).
+export def database-images []: nothing -> list { schema-export '#TenantDatabaseImages' }
+
+# The approved database image a tenant's database stage (`render database-base`'s answer: {ref, name}, or null for a stage that does more than copy SQL onto a pinned
+# base) sits on: its entry of `approved` (`#TenantDatabaseImages`) by digest, or null. The ref the engine copies is the entry's, never the tenant's string.
+export def approved-database-base [base: any, approved: list]: nothing -> any {
+	if $base == null { return null }
+	let digest = ($base.ref | split row "@" | last)
+	$approved | where {|a| $a.digest == $digest } | get -o 0
+}
+
 # One of the engine's own schema definitions, as data.
 def schema-export [expr: string]: nothing -> any {
 	let r = (do { cd ($engine_dir | path join schema); ^cue export --out json -e $expr node.cue } | complete)
@@ -284,14 +295,23 @@ export def harden-objects [objects: list]: nothing -> list {
 # the tenant's namespace; a Service is a ClusterIP with no externalIPs; a pod's service account is not the publisher's, its images are
 # the tenant's own path of the registry, and it asks for no user namespace, host namespace, privilege, unmasked /proc or unconfined
 # seccomp or AppArmor. Said before anything is applied or asked of the server.
-export def check-objects [objects: list, node: record, kinds: list<string>] {
+# The names of the Clusters the tenant's namespace already holds, as its publisher reads them: an older database, named as its author liked, whose operator-made
+# service account (`<cluster>-db`, or the name the operator gave it then) no workload of this release may run as.
+export def live-clusters [namespace: string]: nothing -> list<string> {
+	let r = (^kubectl get clusters.postgresql.cnpg.io -n $namespace -o json --ignore-not-found | complete)
+	if $r.exit_code != 0 { error make {msg: $"reading the Clusters of ($namespace) failed: ($r.stderr | str trim)"} }
+	if ($r.stdout | str trim | is-empty) { return [] }
+	$r.stdout | from json | get -o items | default [] | each {|c| $c.metadata?.name? | default "" } | where {|n| $n != "" }
+}
+
+export def check-objects [objects: list, node: record, kinds: list<string>, live: list<string> = []] {
 	let ns = $node.namespace
 	let prefix = $"127.0.0.1:5000/($ns)/"
 	let refused_metadata = (schema-export '#TenantRefusedMetadata')
 	let reserved = (schema-export '#TenantReserved')
 	# the database operator names a Cluster's service account after the Cluster, and a Cluster is named as its author likes: every Cluster's
 	# name is an account no pod of the release runs as (and the release's own is `<release>-db`, nothing else)
-	let clusters = ($objects | where {|o| ($o.kind? | default "") == "Cluster" } | each {|o| $o.metadata?.name? | default "" })
+	let clusters = ($objects | where {|o| ($o.kind? | default "") == "Cluster" } | each {|o| $o.metadata?.name? | default "" } | append $live | uniq)
 	let problems = ($objects | each {|o|
 		let id = $"($o.kind? | default '?')/($o.metadata?.name? | default '?')"
 		mut why = []
@@ -331,7 +351,19 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 		if ($o.kind? | default "") == "Cluster" {
 			if ($node.name? | default "" | is-not-empty) and ($o.metadata?.name? | default "") != $"($node.name)-db" { $why = ($why | append $"($id) is not named ($node.name)-db: a tenant's database is the release's own") }
 			let image = ($o.spec?.imageName? | default "")
-			if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) runs ($image), not an image under ($prefix)") } else if not ($image =~ '@sha256:[0-9a-f]{64}$') { $why = ($why | append $"($id) runs ($image), which is pinned by tag alone: a tenant's image carries its sha256 digest") }
+			# a tenant's Cluster runs the engine's approved database base, copied to the tenant's own path (its full image stays with the Jobs): exactly that name
+			let wanted = (schema-export '#TenantDatabaseImages' | each {|a| $"($prefix)($node.name)-database-base:($a.major)@($a.digest)" })
+			if $image not-in $wanted { $why = ($why | append $"($id) runs ($image), not the approved database base ($wanted | str join ' or ')") }
+			let allowed = (schema-export '#TenantClusterSpec')
+			let cspec = ($o.spec? | default {})
+			let extra = ($cspec | columns | where {|k| $k not-in $allowed.keys })
+			if ($extra | is-not-empty) { $why = ($why | append $"($id) sets the Cluster field\(s\) ($extra | str join ', '), which a tenant's database may not: its image and what runs in its pod are the engine's") }
+			let pg_extra = ($cspec.postgresql? | default {} | columns | where {|k| $k not-in $allowed.postgresql })
+			if ($pg_extra | is-not-empty) { $why = ($why | append $"($id) sets postgresql.($pg_extra | str join ', postgresql.'), which a tenant's database may not") }
+			let bs_extra = ($cspec.bootstrap? | default {} | columns | where {|k| $k not-in $allowed.bootstrap })
+			if ($bs_extra | is-not-empty) { $why = ($why | append $"($id) sets bootstrap.($bs_extra | str join ', bootstrap.'), which a tenant's database may not") }
+			let init_extra = ($cspec.bootstrap?.initdb? | default {} | columns | where {|k| $k not-in $allowed.initdb })
+			if ($init_extra | is-not-empty) { $why = ($why | append $"($id) sets bootstrap.initdb.($init_extra | str join ', bootstrap.initdb.'), which a tenant's database may not") }
 			# a Service the operator makes for the database must stay inside the cluster: a LoadBalancer or NodePort one would publish it
 			let outward = ($o.spec?.managed?.services?.additional? | default [] | where {|a| ($a.serviceTemplate?.spec?.type? | default "ClusterIP") != "ClusterIP" or ($a.serviceTemplate?.spec?.externalIPs? | default [] | is-not-empty) })
 			if ($outward | is-not-empty) { $why = ($why | append $"($id) has a managed Service that is not a ClusterIP, or names externalIPs") }

@@ -83,6 +83,7 @@ def test_a_tenant_release_writes_only_what_its_publisher_may [] {
 	assert ("NetworkPolicy" not-in $kinds) "no NetworkPolicy"
 	for row in [
 		[tenantPreview "is never a preview"]
+		[tenantClusterNoBase "has no approved database base pushed"]
 		[tenantBackups "a tenant's release writes no backups"]
 		[tenantCeilingEgress "a tenant's release writes no NetworkPolicy"]
 		[tenantStudioBuilderJail "which only Studio's builder"]

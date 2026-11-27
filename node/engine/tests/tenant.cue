@@ -29,6 +29,7 @@ _tenantExtra: [
 
 _tenant: schema.#Manifests & {
 	release:  schema.#Release & _tenantBase
+	app: {name: "app", namespace: _tenantNs, image: pushed: "database-base": {tag: "18", digest: "sha256:\(_d)"}}
 	upstream: list.Concat([(_fixture & {ns: _tenantNs, host: _tenantHost, reg: release.environment.registry}).objects, _tenantExtra])
 }
 
@@ -65,6 +66,7 @@ cases: {
 		_t: schema.#Manifests & {
 			release:  schema.#Release & _tenantBase & {tenant: quota: pods: 12}
 			upstream: list.Concat([(_fixture & {ns: _tenantNs, host: _tenantHost, reg: release.environment.registry}).objects, _tenantExtra])
+			app: {name: "app", namespace: _tenantNs, image: pushed: "database-base": {tag: "18", digest: "sha256:\(_d)"}}
 		}
 		_got:  [for o in _t.objects if o.kind == "ResourceQuota" || o.kind == "LimitRange" || o.kind == "NetworkPolicy" {o.kind}]
 		_want: []
@@ -83,7 +85,7 @@ cases: {
 			upstream: list.Concat([(_fixture & {ns: _tenantNs, host: _tenantHost, reg: release.environment.registry}).objects, _tenantExtra, [
 				{apiVersion: "v1", kind: "Service", metadata: {name: "crud", namespace: _tenantNs}},
 			]])
-			app: {name: "app", namespace: _tenantNs, image: pushed: flagd: {tag: "release", digest: "sha256:\(_d)"}}
+			app: {name: "app", namespace: _tenantNs, image: pushed: {flagd: {tag: "release", digest: "sha256:\(_d)"}, "database-base": {tag: "18", digest: "sha256:\(_d)"}}}
 		}
 		_got: {
 			deployment: [for o in _t.objects if o.kind == "Deployment" && o.metadata.name == "app-flagd" {o.metadata.name}]
@@ -91,14 +93,14 @@ cases: {
 		}
 		_want: {deployment: ["app-flagd"], policies: []}
 	}
-	"a tenant has no database base: its Cluster runs the full image, though a base was pushed": {
+	"a tenant's Cluster runs the approved database base it was pushed, under its own registry path": {
 		_t: schema.#Manifests & {
 			release:  schema.#Release & _tenantBase
 			upstream: list.Concat([(_fixture & {ns: _tenantNs, host: _tenantHost, reg: release.environment.registry}).objects, _tenantExtra])
 			app: {name: "app", namespace: _tenantNs, image: pushed: "database-base": {tag: "17", digest: "sha256:\(_d)"}}
 		}
-		_got:  [for o in _t.objects if o.kind == "Cluster" {strings.Contains(o.spec.imageName, "-database-base") }]
-		_want: [false]
+		_got:  [for o in _t.objects if o.kind == "Cluster" {strings.Contains(o.spec.imageName, "\(_tenantNs)/") && strings.Contains(o.spec.imageName, "-database-base") }]
+		_want: [true]
 	}
 	"a tenant's build is the tenants' buildkitd by default": {
 		_got:  _tenant.release.tenant.buildkit
