@@ -22,12 +22,25 @@ const gc_unit = "pronto-docker-gc.timer"
 # One text file's body, ending in one newline.
 def lines [text: string]: nothing -> string { ($text | str trim --right --char "\n") + "\n" }
 
-# The files the host holds, from its #Host values: [{path, mode, text}].
+# The values must be what #Host allows: they are written into a script's settings and a unit file, so a hand-edited
+# json must not carry a quote or a newline into them. Only the section this module sets is vetted (a repository's host
+# holds others of its own); the schema is the one beside this file.
+export def vet [host: record] {
+	let f = (mktemp --tmpdir node-host-vet-XXXXXX.json)
+	$host.dockerGC | to json | save --force --raw $f
+	let r = (do { ^cue vet -c ($here | path join schema host.cue) $f -d '#DockerGC' } | complete)
+	rm -f $f
+	if $r.exit_code != 0 { error make {msg: $"node-host: the host's dockerGC is not what #Host allows: ($r.stderr | str trim)"} }
+}
+
+# The files the host holds, from its #Host values: [{path, mode, text}], in the order they are written: the settings
+# before the script that reads them, so a run that stops between the two leaves a pair the old script (which ignores
+# the settings) and the new one both work with.
 export def render [host: record]: nothing -> list<record> {
+	vet $host
 	let gc = $host.dockerGC
 	let head = "# pronto-plugins node/host (docker cleanup): Docker's disk kept bounded."
 	[
-		{path: $gc_script, mode: "755", text: (lines (open --raw ($here | path join docker-gc.sh)))}
 		{path: $gc_env, mode: "644", text: (lines ([
 			"# pronto-plugins node/host (docker cleanup): what docker-gc.sh reads, from the node's #Host dockerGC."
 			$"PATTERN='($gc.refPattern)'"
@@ -35,6 +48,7 @@ export def render [host: record]: nothing -> list<record> {
 			$"BUILD_CACHE_GB=($gc.buildCacheGB)"
 			$"CAP_GB=($gc.capGB)"
 		] | str join "\n"))}
+		{path: $gc_script, mode: "755", text: (lines (open --raw ($here | path join docker-gc.sh)))}
 		{path: $gc_service, mode: "644", text: (lines ([
 			$head "[Unit]" "Description=Remove the node's old Docker images and build cache" "After=docker.service" ""
 			"[Service]" "Type=oneshot" $"ExecStart=/bin/bash ($gc_script)" "Nice=19" "IOSchedulingClass=idle"
@@ -68,13 +82,18 @@ export def must [r: record, what: string]: nothing -> string {
 export def apply [host: record, --check, --node: string = "", --root: string = ""]: nothing -> list<string> {
 	mut drift = []
 	mut changed = false
+	# Who the files belong to: root on the node (sudo), whoever runs it for --root, as the tests do.
+	let owner = (must (sh $node "echo $(id -un):$(id -gn)") "asking who the files belong to" | str trim)
 	for f in (render $host) {
 		let path = $root + $f.path
-		# Absent reads as empty; a failed ssh or sudo is an error, never "absent".
+		# Absent reads as empty; a failed ssh or sudo is an error, never "absent". The mode and owner are the file's too: a
+		# 0666 settings file, or one a user owns, is drift (the script sources it as root).
 		let now = (must (sh $node $"if [ -e '($path)' ]; then cat '($path)'; fi") $"reading ($path)")
-		if $now == $f.text { continue }
-		$drift = ($drift | append $"($path) differs")
-		print $"drift: ($path) differs"
+		let meta = (must (sh $node $"if [ -e '($path)' ]; then stat -c '%a %U:%G' '($path)' 2>/dev/null || stat -f '%Lp %Su:%Sg' '($path)'; fi") $"reading the mode of ($path)" | str trim)
+		if $now == $f.text and $meta == $"($f.mode) ($owner)" { continue }
+		let what = if $now == $f.text { $"has mode and owner ($meta), not ($f.mode) ($owner)" } else { "differs" }
+		$drift = ($drift | append $"($path) ($what)")
+		print $"drift: ($path) ($what)"
 		if not $check {
 			# Whole beside the file, then renamed over it: a full disk leaves the old file.
 			let dir = ($path | path dirname)
@@ -113,10 +132,17 @@ def "main render" [host: path] {
 	render (open $host) | to json
 }
 
+# Whether the job's last run failed, which writing files does not clear (the operator reads journalctl -u).
+export def failed-service [drift: list<string>]: nothing -> bool {
+	$drift | any {|d| $d | str ends-with "failed its last run" }
+}
+
 def "main apply" [host: path, --check, --node: string = "", --root: string = ""] {
 	let drift = (apply (open $host) --check=$check --node $node --root $root)
 	if ($drift | is-empty) { print "node-host: as #Host says"; return }
 	if $check { exit 1 }
+	# The files are set, but a failed job is not set right by writing them: exit non-zero, so the run is not read as clean.
+	if (failed-service $drift) { print --stderr "node-host: set, but the job's last run failed: read journalctl -u pronto-docker-gc.service"; exit 1 }
 	print "node-host: set as #Host says"
 }
 

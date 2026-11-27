@@ -20,6 +20,10 @@ def main [] {
 	test_check_changes_nothing_and_says_every_drift
 	test_a_failed_last_run_is_drift
 	test_a_login_that_fails_is_an_error_not_an_answer
+	test_the_settings_are_written_before_the_script
+	test_a_world_writable_or_foreign_file_is_drift
+	test_a_hand_edited_host_cannot_carry_a_quote_into_the_files
+	test_a_failed_job_makes_apply_exit_non_zero
 	print "\nAll node host tests passed."
 }
 
@@ -85,7 +89,8 @@ def test_the_schema_defaults_and_refuses [] {
 def test_render_holds_the_defaults_and_the_nodes_values [] {
 	print "test the files hold the node's values in an env file docker-gc.sh reads, and the units..."
 	let files = (render (defaults))
-	assert equal ($files | get path) ["/usr/local/lib/pronto/docker-gc.sh" "/etc/pronto/docker-gc.env" "/etc/systemd/system/pronto-docker-gc.service" "/etc/systemd/system/pronto-docker-gc.timer"]
+	# The settings come before the script that reads them.
+	assert equal ($files | get path) ["/etc/pronto/docker-gc.env" "/usr/local/lib/pronto/docker-gc.sh" "/etc/systemd/system/pronto-docker-gc.service" "/etc/systemd/system/pronto-docker-gc.timer"]
 	let envf = ($files | where path == "/etc/pronto/docker-gc.env" | first | get text)
 	assert str contains $envf "PATTERN='^localhost:[0-9]+/'\nMIN_AGE_HOURS=6\nBUILD_CACHE_GB=40\nCAP_GB=120\n"
 	let svc = ($files | where path =~ "service" | first | get text)
@@ -193,6 +198,66 @@ def test_check_changes_nothing_and_says_every_drift [] {
 		assert (not ($log | str contains "enable --now")) "nothing enabled"
 		assert (not ($log | str contains "daemon-reload"))
 	}
+	rm -rf $dir
+}
+
+def test_the_settings_are_written_before_the_script [] {
+	print "test apply renames the env file into place before docker-gc.sh, and the units after both..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	'#!/bin/bash
+d=$(dirname "$0")/..
+echo "$2" >>"$d/mv.log"
+exec /bin/mv "$@"
+' | save --raw ($dir | path join bin mv)
+	chmod 755 ($dir | path join bin mv)
+	let root = ($dir | path join root)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		apply (defaults) --root $root | ignore
+		let order = (open --raw ($dir | path join mv.log) | lines | where {|l| $l != ""} | each {|l| $l | str replace ".new" "" | str replace $root ""})
+		assert equal $order ["/etc/pronto/docker-gc.env" "/usr/local/lib/pronto/docker-gc.sh" "/etc/systemd/system/pronto-docker-gc.service" "/etc/systemd/system/pronto-docker-gc.timer"]
+	}
+	rm -rf $dir
+}
+
+def test_a_world_writable_or_foreign_file_is_drift [] {
+	print "test a settings file with the right text but mode 0666 is drift, and apply sets it back..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		apply (defaults) --root $root | ignore
+		chmod 666 ($root + "/etc/pronto/docker-gc.env")
+		let drift = (apply (defaults) --check --root $root)
+		assert equal ($drift | length) 1
+		assert str contains ($drift | first) "docker-gc.env has mode and owner"
+		apply (defaults) --root $root | ignore
+		assert equal (apply (defaults) --check --root $root) []
+	}
+	rm -rf $dir
+}
+
+def test_a_hand_edited_host_cannot_carry_a_quote_into_the_files [] {
+	print "test render and apply vet the values against #Host: a quote or a newline never reaches the script's settings or a unit..."
+	for bad in [{refPattern: "^a'; touch /tmp/x; '"} {onCalendar: "hourly\nExecStart=/bin/sh"} {capGB: 10}] {
+		let host = {dockerGC: ((defaults).dockerGC | merge $bad)}
+		let msg = (try { render $host | ignore; "accepted" } catch {|e| $e.msg })
+		assert str contains $msg "is not what #Host allows" $"($bad)"
+	}
+}
+
+def test_a_failed_job_makes_apply_exit_non_zero [] {
+	print "test apply exits 1 when the job's last run failed, which writing files does not clear..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	(defaults) | to json | save --raw ($dir | path join host.json)
+	let run = {|| with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} { ^$nu.current-exe ($here | path join host.nu) apply ($dir | path join host.json) --root $root | complete } }
+	assert equal (do $run).exit_code 0
+	"" | save --raw ($dir | path join failed)
+	let r = (do $run)
+	assert equal $r.exit_code 1
+	assert str contains $r.stderr "the job's last run failed"
 	rm -rf $dir
 }
 
