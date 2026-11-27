@@ -425,6 +425,7 @@ _journeysHours: {
 					message = replace(message, r'(?i)https?://[^\s)]*', "<url>")
 					message = replace(message, r'[?#&][^\s?#&=]*=\S*', "")
 					message = replace(message, r'[A-Za-z0-9_+/=-]{24,}', "<token>")
+					message = replace(message, r'(\+\d{1,3}[\s.\-]?)?\(\d{2,4}\)[\s.\-]?\d[\d\s.\-]{4,}\d', "<number>")
 					message = replace(message, r'\d[\d.\-/ ]{6,}\d', "<number>")
 					message = slice(message, 0, 200) ?? ""
 					frame = string(.frame) ?? ""
@@ -729,6 +730,13 @@ _journeysHours: {
 				in: {name: "Error", message: "see HTTPS://example.org/?invite=blue-fox and Http://x.example/a?k=v and /path?token=secret#frag and page.html?token=s1 and ?token=s2 and #access_token=s3 and /a+b?k=s4 and /caf\u00e9?k=s5"}
 				check: #"""
 					!contains(string!(.message), "blue-fox") && !contains(string!(.message), "token=") && !contains(string!(.message), "secret") && !contains(string!(.message), "s1") && !contains(string!(.message), "s2") && !contains(string!(.message), "s3") && !contains(string!(.message), "s4") && !contains(string!(.message), "s5") && contains(string!(.message), "<url>")
+					"""#
+			},
+			{
+				name: "a formatted phone number is gone from a message, a level or a time is not"
+				in: {name: "Error", message: "call (212) 555-0123 or +1 (212) 555-0123 or 212.555.0123 or 212-555-0123 at level 12 time 14:32:05 move 7"}
+				check: #"""
+					!contains(string!(.message), "212") && !contains(string!(.message), "555") && !contains(string!(.message), "0123") && contains(string!(.message), "level 12") && contains(string!(.message), "14:32:05") && contains(string!(.message), "move 7")
 					"""#
 			},
 			{

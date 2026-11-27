@@ -107,6 +107,14 @@ for (const [input, kept] of [["page.html?token=s1", "page.html"], ["?token=s2", 
 	check(`a relative query is dropped: ${input}`, e.message === `failed ${kept} end` && !/s[1-6]\b/.test(e.message));
 }
 
+// A phone with a parenthesized area code survives a digit-run rule: each format is gone, short numbers stay.
+for (const phone of ["(212) 555-0123", "+1 (212) 555-0123", "212.555.0123", "212-555-0123", "(11) 91234-5678", "+55 (11) 91234 5678"]) {
+	const e = await thrown(withStack(`call ${phone} now`, ["f (/a.js:1:2)"]), { detail: true });
+	check(`a phone is gone: ${phone}`, e.message === "call <number> now");
+}
+const short = await thrown(withStack("level 12 at 14:32:05 move 7 of 40 on 2026-11-27", ["f (/a.js:1:2)"]), { detail: true });
+check("levels, times and moves are kept", short.message.startsWith("level 12 at 14:32:05 move 7 of 40 on"));
+
 // URL schemes are case-insensitive; a relative url's query is private too; no lookbehind (older Safari fails to parse one).
 const urls = await thrown(withStack("see HTTPS://example.org/?invite=blue-fox and Http://x.example/a?k=v and /path?token=secret#frag", ["f (/a.js:1:2)"]), { detail: true });
 check("a mixed-case scheme and a relative url lose their query", !/blue-fox|token=|secret|k=v/.test(JSON.stringify(urls)) && urls.message.includes("<url>"));
