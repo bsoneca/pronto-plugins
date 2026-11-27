@@ -199,4 +199,17 @@ cases: {
 		{call: "alertsrun.drain", args: [{now: "2026-11-27T10:00:00Z", old: {day: "2026-11-26", current: "{\"id\":\"B\"}\n"}, batches: [[]]}]},
 		{get: "files", holds: {"my-app.2026-11-26.jsonl": "{\"id\":\"B\"}\n"}, why: "with no file for the day, a rename as before"},
 	]}
+	"the job's environment is bare, the pronto configuration's, with gcloud's Python as release-cron gives it": {suite: "alerts", steps: [
+		{call: "alerts.jobEnv", args: [{env: {PATH: "/x", CLOUDSDK_ACTIVE_CONFIG_NAME: "owners-other-work"}, os: "darwin", home: "/Users/me", gcloud: "/opt/homebrew/share/google-cloud-sdk/bin/gcloud"}], expect: {
+			PATH: "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME: "/Users/me", CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto", CLOUDSDK_PYTHON: "/opt/homebrew/bin/python3.13", ALERTS_GCLOUD: "/opt/homebrew/share/google-cloud-sdk/bin/gcloud"
+		}, why: "never the caller's PATH or configuration; Homebrew's Python is the macOS default"
+		},
+		{call: "alerts.jobEnv", args: [{env: {CLOUDSDK_PYTHON: "/pin/python3.12"}, os: "darwin", home: "/h", gcloud: "/g"}], holds: {CLOUDSDK_PYTHON: "/pin/python3.12"}, why: "the caller's Python wins"},
+		{call: "alerts.jobEnv", args: [{env: {}, os: "linux", home: "/h", gcloud: "/g"}], expect: {PATH: "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME: "/h", CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto", ALERTS_GCLOUD: "/g"}, why: "elsewhere gcloud finds its own"},
+	]}
+	"an error that says why a command failed keeps the last lines of its stderr, each cut short": {suite: "alerts", steps: [
+		{call: "alerts.tailOf", args: ["a\nb\n\n  c  \nd\ne\nf\ng\n"], expect: "c | d | e | f | g", why: "five lines, blanks and padding gone"},
+		{call: "alerts.tailOf", args: ["ERROR: (gcloud.auth.print-access-token) You do not currently have an active account selected.\n", 5, 20], expect: "ERROR: (gcloud.auth.", why: "a long line is cut"},
+		{call: "alerts.tailOf", args: [""], expect: ""},
+	]}
 }

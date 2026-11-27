@@ -6,7 +6,7 @@
 //   deno run -A alerts/subscriber.ts uninstall
 // The access token is the `pronto` gcloud configuration's, fetched when needed, fetched again when
 // Pub/Sub answers 401, and held in memory only.
-import { ackRequest, entryOf, expired, isDuplicate, lineOf, ntfyRequest, parseInbox, plist, pullRequest, pushes, rotatedName, subscriptionPath } from "./inbox.js";
+import { ackRequest, entryOf, expired, isDuplicate, jobEnv, lineOf, ntfyRequest, parseInbox, plist, pullRequest, pushes, rotatedName, subscriptionPath, tailOf } from "./inbox.js";
 
 export type Subscription = {
   app: string;
@@ -34,7 +34,16 @@ export type Options = {
 };
 
 const day = (d: Date) => d.toISOString().slice(0, 10);
-const exists = (p: string) => { try { Deno.statSync(p); return true; } catch { return false; } };
+// Only a path that is not there is missing: any other error (permissions, I/O) is the caller's to see.
+const exists = (p: string) => {
+  try {
+    Deno.statSync(p);
+    return true;
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return false;
+    throw e;
+  }
+};
 
 // The previous day's inbox is renamed for its day, and rotated files past seven days are removed. A day's
 // file that is already there (the job restarted across midnight, the clock went back) is never replaced:
@@ -99,7 +108,14 @@ export async function pollOnce(o: Options): Promise<{ pulled: number; written: n
   if (!messages.length) return { pulled: 0, written: 0, acked: 0, pushed: 0, dropped: 0 };
 
   const path = `${o.dir}/${o.sub.app}.jsonl`;
-  const before = (() => { try { return parseInbox(Deno.readTextFileSync(path)); } catch { return []; } })();
+  const before = (() => {
+    try {
+      return parseInbox(Deno.readTextFileSync(path));
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) return [];
+      throw e;
+    }
+  })();
   const seen = before.map((e: { id: string; state: string }) => `${e.id}:${e.state}`);
   const fresh: ReturnType<typeof entryOf>[] = [];
   let dropped = 0;
@@ -152,9 +168,10 @@ function gcloudToken() {
   let held = "";
   return async (refresh = false) => {
     if (!held || refresh) {
-      const r = await new Deno.Command(Deno.env.get("ALERTS_GCLOUD") ?? "gcloud", { args: ["auth", "print-access-token"], env: { CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto" }, stdout: "piped", stderr: "null" }).output();
-      if (!r.success) throw new Error("gcloud printed no access token for the pronto configuration");
-      held = new TextDecoder().decode(r.stdout).trim();
+      const r = await new Deno.Command(Deno.env.get("ALERTS_GCLOUD") ?? "gcloud", { args: ["auth", "print-access-token"], env: { CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto" }, stdout: "piped", stderr: "piped" }).output();
+      const token = new TextDecoder().decode(r.stdout).trim();
+      if (!r.success || !token) throw new Error(`gcloud printed no access token for the pronto configuration (exit ${r.code}): ${tailOf(new TextDecoder().decode(r.stderr))}`);
+      held = token;
     }
     return held;
   };
@@ -216,10 +233,21 @@ if (import.meta.main) {
       const ntfy = read(`${wt}/${r}`).ntfy;
       if (ntfy) hosts.add(new URL(ntfy.url).host);
     }
-    // gcloud by its absolute path, found now, and the Keychain's by its own: the job's PATH names neither.
-    const gcloud = (Deno.env.get("PATH") ?? "").split(":").map((d) => `${d}/gcloud`).find((p) => p.startsWith("/") && exists(p));
-    if (!gcloud) throw new Error("gcloud is not on the PATH: the job cannot fetch a token");
-    const gcloudAt = Deno.realPathSync(gcloud);
+    // gcloud by its real absolute path, found now: the job's PATH names none, and a mise shim is the mise binary itself,
+    // which finds the tool by the working directory (`mise which`, not the shim, names the one the shim would run).
+    const found = (Deno.env.get("PATH") ?? "").split(":").map((d) => `${d}/gcloud`).find((p) => p.startsWith("/") && exists(p));
+    if (!found) throw new Error("gcloud is not on the PATH: the job cannot fetch a token");
+    let gcloudAt = Deno.realPathSync(found);
+    if (gcloudAt.split("/").pop() === "mise") gcloudAt = Deno.realPathSync(sh(gcloudAt, ["which", "gcloud"]));
+    if (gcloudAt.split("/").pop() === "mise") throw new Error(`${found} is a mise shim that names no gcloud: install it, or put the real one on the PATH`);
+    const env = jobEnv({ env: Deno.env.toObject(), os: Deno.build.os, home, gcloud: gcloudAt });
+    // One token, fetched with the job's exact environment before the job is installed: a job that cannot fetch one
+    // would only fail in its log, long after. The token is dropped unread; what is said of a failure is gcloud's
+    // last lines of stderr.
+    {
+      const r = new Deno.Command(gcloudAt, { args: ["auth", "print-access-token"], clearEnv: true, env, stdout: "piped", stderr: "piped" }).outputSync();
+      if (!r.success || !new TextDecoder().decode(r.stdout).trim()) throw new Error(`gcloud cannot print an access token with the job's environment (exit ${r.code}): ${tailOf(new TextDecoder().decode(r.stderr))}`);
+    }
     const logs = `${home}/Library/Logs/pronto`;
     Deno.mkdirSync(logs, { recursive: true });
     Deno.mkdirSync(`${home}/Library/LaunchAgents`, { recursive: true });
@@ -228,11 +256,13 @@ if (import.meta.main) {
       `--allow-net=${[...hosts].join(",")}`,
       `--allow-read=${wt},${cache}`,
       `--allow-write=${cache}`,
+      // The inbox folder holds the worktree: the job writes the inbox, never the code it runs.
+      `--deny-write=${wt}`,
       `--allow-run=/usr/bin/security,${gcloudAt}`,
       "--allow-env=HOME,ALERTS_DIR,ALERTS_NTFY_TOKEN,ALERTS_GCLOUD",
     ];
     const args = ["run", ...flags, `${wt}/${rels[0]}/alerts/subscriber.ts`, "run", ...rels.map((r) => `${wt}/${r}`)];
-    Deno.writeTextFileSync(agent, plist({ label, program: Deno.execPath(), args, log: `${logs}/alerts-inbox.log`, env: { PATH: "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME: home, CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto", ALERTS_GCLOUD: gcloudAt } }));
+    Deno.writeTextFileSync(agent, plist({ label, program: Deno.execPath(), args, log: `${logs}/alerts-inbox.log`, env }));
     out("launchctl", ["bootout", `gui/${Deno.uid()}/${label}`]);
     // bootout returns before the job is gone: bootstrap again until it takes.
     let ok = false;
@@ -247,16 +277,25 @@ if (import.meta.main) {
     const dir = Deno.env.get("ALERTS_DIR") ?? `${home}/.cache/pronto/alerts`;
     const token = gcloudToken();
     const say = (s: string) => console.log(`${new Date().toISOString()} alerts: ${s}`);
+    // Each app is read on its own: one whose file is gone or whose pulls fail says so and tries again, and the others go on.
+    const pause = () => new Promise((r) => setTimeout(r, 10_000));
     await Promise.all(apps.map(async (a) => {
-      const sub = read(a);
-      say(`${sub.app}: reading ${subscriptionPath(sub.project, sub.subscription)}`);
       for (;;) {
         try {
-          const r = await pollOnce({ api: "https://pubsub.googleapis.com", sub, token, dir, ntfyToken, say });
-          if (r.pulled) say(`${sub.app}: ${r.written} written, ${r.pushed} to the phone, ${r.dropped} dropped`);
+          const sub = read(a);
+          say(`${sub.app}: reading ${subscriptionPath(sub.project, sub.subscription)}`);
+          for (;;) {
+            try {
+              const r = await pollOnce({ api: "https://pubsub.googleapis.com", sub, token, dir, ntfyToken, say });
+              if (r.pulled) say(`${sub.app}: ${r.written} written, ${r.pushed} to the phone, ${r.dropped} dropped`);
+            } catch (e) {
+              say(`${sub.app}: ${(e as Error).message}`);
+              await pause();
+            }
+          }
         } catch (e) {
-          say(`${sub.app}: ${(e as Error).message}`);
-          await new Promise((r) => setTimeout(r, 10_000));
+          say(`${a}: ${(e as Error).message}`);
+          await pause();
         }
       }
     }));
