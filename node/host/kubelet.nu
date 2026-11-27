@@ -21,10 +21,17 @@
 # - only a configz that was read and differs restarts k3s: an unreadable one (the request failed, or answered nothing,
 #   or not a kubelet config) is retried, then the run stops without restarting.
 #
-# It refuses, before writing, when another file under /etc/rancher/k3s/config.yaml{,.d} holds kubelet-arg (it would
-# replace or be replaced by ours), when another apply holds the node's lock (a directory beside the file, taken over
-# after 30 minutes), and when the node's disks are already past the new eviction line (a restart into eviction). The
-# thresholds bound the damage when a disk fills; what prevents it is the cleanup of docker-gc.sh.
+# It refuses, before writing, when the kubelet's config cannot be read (a wrong KUBECTL, missing rights or a node-name
+# mismatch would otherwise cost two restarts at every run: it is read first, and nothing is restarted unread), when
+# another file under /etc/rancher/k3s/config.yaml{,.d}, the k3s unit (systemctl cat k3s) or its environment files holds
+# kubelet-arg (it would replace or be replaced by ours), when another apply holds the node's lock, and when the node's
+# disks or inodes are already past the new eviction line (a restart into eviction). The lock is a directory beside the
+# file holding the node's boot id; the apply touches it on every poll and before each restart, and it is taken over when
+# the node has rebooted since, or when untouched for twice the longest gap between touches. The thresholds bound the damage
+# when a disk fills; what prevents it is the cleanup of docker-gc.sh. Worst case an apply restarts k3s twice: once for the
+# new file and once for a rollback (an unreadable kubelet costs none).
+#
+# `cue` must be on the PATH: the values are vetted against #Kubelet before anything else runs.
 #
 # Needs ssh to the node, whose sudo asks no password, and kubectl on the node: KUBECTL, expanded there by the login
 # shell (it names the kubeconfig; this module has no default for a node's own). Every call has a deadline; the ssh is
@@ -32,6 +39,8 @@
 # drift. --root puts every path under it (for the tests).
 
 use host.nu [sh must]
+
+const here = path self | path dirname
 
 const dir = "/etc/rancher/k3s"
 const file = "/etc/rancher/k3s/config.yaml.d/max-pods.yaml"
@@ -44,8 +53,8 @@ const allowed = [
 	'^max-pods=[1-9][0-9]{2,3}$'
 	'^eviction-hard=memory\.available<[1-9][0-9]{1,3}Mi,nodefs\.available<[1-9][0-9]?%,nodefs\.inodesFree<[1-9][0-9]?%,imagefs\.available<[1-9][0-9]?%,imagefs\.inodesFree<[1-9][0-9]?%$'
 	'^eviction-minimum-reclaim=nodefs\.available=[1-9][0-9]?Gi,imagefs\.available=[1-9][0-9]?Gi$'
-	'^image-gc-high-threshold=[1-9][0-9]$'
-	'^image-gc-low-threshold=[1-9][0-9]$'
+	'^image-gc-high-threshold=[1-9][0-9]?$'
+	'^image-gc-low-threshold=[1-9][0-9]?$'
 	'^container-log-max-size=[1-9][0-9]{0,3}(Ki|Mi)$'
 	'^container-log-max-files=([2-9]|1[0-9]|20)$'
 ]
@@ -103,15 +112,21 @@ def read-configz [node: string, want: record]: nothing -> record {
 	if $r.exit_code != 0 { return {state: "unreadable", said: $"the request failed: ($r.stderr | str trim)"} }
 	let parsed = (try { $r.stdout | from json } catch { null })
 	let cfg = (if $parsed == null { null } else { $parsed | get -o kubeletconfig })
-	if ($cfg | describe | str starts-with "record") == false { return {state: "unreadable", said: ($r.stdout | str trim | default "no answer")} }
+	if ($cfg | describe --detailed).type != "record" { return {state: "unreadable", said: ($r.stdout | str trim | default "no answer")} }
 	let got = ($want | columns | each {|c| {($c): ($cfg | get -o $c)}} | into record)
 	{state: (if $got == $want { "match" } else { "differs" }), said: ($got | to json --raw)}
 }
 
+# The lock's mtime is its heartbeat: touched on every poll and before each restart, so a live apply is never taken over.
+def beat [node: string, lock: string] {
+	if $lock != "" { sh $node $"touch '($lock)'" | ignore }
+}
+
 # Reads until it is not unreadable, up to $polls times.
-def read-settled [node: string, want: record, polls: int, pause: duration]: nothing -> record {
+def read-settled [node: string, want: record, polls: int, pause: duration, lock: string]: nothing -> record {
 	mut r = {state: "unreadable", said: "no answer"}
 	for _ in 1..$polls {
+		beat $node $lock
 		$r = (read-configz $node $want)
 		if $r.state != "unreadable" { break }
 		sleep $pause
@@ -122,13 +137,15 @@ def read-settled [node: string, want: record, polls: int, pause: duration]: noth
 # The files, other than ours, under the k3s config that set kubelet-arg.
 def other-kubelet-arg [node: string, root: string, live: string]: nothing -> list<string> {
 	let base = $root + $dir
-	let out = (must (sh $node $"grep -ls 'kubelet-arg' '($base)/config.yaml' '($base)/config.yaml.d/'*.yaml '($base)/config.yaml.d/'*.yml 2>/dev/null | grep -vxF '($live)'; true") "looking for other kubelet-arg")
+	let envs = [$"($root)/etc/systemd/system/k3s.service.env" $"($root)/etc/default/k3s" $"($root)/etc/sysconfig/k3s"] | each {|f| $"'($f)'"} | str join " "
+	let out = (must (sh $node $"{ grep -ls 'kubelet-arg' '($base)/config.yaml' '($base)/config.yaml.d/'*.yaml '($base)/config.yaml.d/'*.yml ($envs) 2>/dev/null | grep -vxF '($live)'; systemctl cat k3s 2>/dev/null | grep -q 'kubelet-arg' && echo 'the k3s unit (systemctl cat k3s)'; true; }") "looking for other kubelet-arg")
 	$out | lines | where {|l| $l != ""}
 }
 
 # Percent used of the filesystem a path is on.
-def disk-used [node: string, path: string]: nothing -> int {
-	let out = (must (sh $node $"df -P '($path)' 2>/dev/null | awk 'NR==2 {gsub\(\"%\", \"\", $5\); print $5}'") $"reading the use of ($path)" | str trim)
+def disk-used [node: string, path: string, --inodes]: nothing -> int {
+	let flag = if $inodes { "-Pi" } else { "-P" }
+	let out = (must (sh $node $"df ($flag) '($path)' 2>/dev/null | awk 'NR==2 {gsub\(\"%\", \"\", $5\); print $5}'") $"reading the use of ($path)" | str trim)
 	if $out == "" { error make {msg: $"k3s-kubelet: cannot read the use of ($path)"} }
 	$out | into int
 }
@@ -139,10 +156,14 @@ def preflight [node: string, k: record]: nothing -> bool {
 	let h = $k.evictionHard
 	let n = (disk-used $node $nodefs_dir)
 	let i = (disk-used $node $imagefs_dir)
+	let ni = (disk-used $node $nodefs_dir --inodes)
+	let ii = (disk-used $node $imagefs_dir --inodes)
 	let evict_n = (100 - $h.nodefs)
 	let evict_i = (100 - $h.imagefs)
-	if $n >= $evict_n or $i >= $evict_i {
-		print --stderr $"k3s-kubelet: the disks are already past the new eviction line \(nodefs ($n)% used, imagefs ($i)%; it evicts at ($evict_n)% and ($evict_i)%\): free space first, docker-gc.sh; nothing changed"
+	let evict_ni = (100 - $h.nodefsInodes)
+	let evict_ii = (100 - $h.imagefsInodes)
+	if $n >= $evict_n or $i >= $evict_i or $ni >= $evict_ni or $ii >= $evict_ii {
+		print --stderr $"k3s-kubelet: the disks are already past the new eviction line \(nodefs ($n)% used, imagefs ($i)%, inodes ($ni)% and ($ii)%; it evicts at ($evict_n)%, ($evict_i)%, ($evict_ni)% and ($evict_ii)%\): free space first, docker-gc.sh; nothing changed"
 		return false
 	}
 	if $n > $k.imageGC.high or $i > $k.imageGC.high {
@@ -151,27 +172,47 @@ def preflight [node: string, k: record]: nothing -> bool {
 	true
 }
 
+# The values must be what #Kubelet allows, before anything runs: they become the kubelet's args on the only node.
+def vet-kubelet [k: record] {
+	let f = (mktemp --tmpdir node-kubelet-vet-XXXXXX.json)
+	$k | to json | save --force --raw $f
+	let r = (try { do { ^cue vet -c ($here | path join schema host.cue) $f -d '#Kubelet' } | complete } catch {
+		rm -f $f
+		error make {msg: "k3s-kubelet: cue is required (it vets the values against #Kubelet) and could not be run"}
+	})
+	rm -f $f
+	if $r.exit_code != 0 { error make {msg: $"k3s-kubelet: the host's kubelet values are not what #Kubelet allows: ($r.stderr | str trim)"} }
+}
+
 # Applies the kubelet's args, or with --check only says. Returns {code: 0 | 1}: 1 on drift (--check), a refusal, or a
 # kubelet that did not take them. One apply at a time on a node.
 export def apply-kubelet [k: record, --check, --node: string = "", --root: string = "", --polls: int = 60, --pause: duration = 2sec]: nothing -> record {
 	if ($env.KUBECTL? | default "") == "" { error make {msg: "k3s-kubelet: set KUBECTL to the kubectl the node's shell runs, with its kubeconfig (expanded on the node)"} }
+	vet-kubelet $k
 	let config = (kubelet-config $k)
-	if $check { return (apply-locked $k $config --check --node $node --root $root --polls $polls --pause $pause) }
+	if $check { return (apply-locked $k $config "" --check --node $node --root $root --polls $polls --pause $pause) }
 	let lock = $"($root)($file).lock"
-	let got = (sh $node $"mkdir -p '($root)($dir)/config.yaml.d' && { mkdir '($lock)' 2>/dev/null || { find '($lock)' -maxdepth 0 -mmin +30 | grep -q . && rm -rf '($lock)' && mkdir '($lock)'; }; }")
+	# Taken over when the node rebooted since (its boot id is in the lock), or when untouched for twice the longest gap between
+	# touches: a restart (180 s) and a read (about 25 s) and a pause. Never under 10 minutes.
+	let gap = (180 + 25 + ($pause / 1sec))
+	let takeover = ([10 (($gap * 2 / 60) | math ceil)] | math max)
+	let boot = "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+	let acquire = $"mkdir -p '($root)($dir)/config.yaml.d' || exit 3; if ! mkdir '($lock)' 2>/dev/null; then b=$\(cut -d' ' -f1 '($lock)/owner' 2>/dev/null\); cur=($boot); if { [ -n \"$b\" ] && [ \"$b\" != \"$cur\" ]; } || [ -n \"$\(find '($lock)' -maxdepth 0 -mmin +($takeover) 2>/dev/null\)\" ]; then rm -rf '($lock)' && mkdir '($lock)' || exit 1; else exit 1; fi; fi; echo \"($boot) $\(date -u +%FT%TZ\)\" >'($lock)/owner'"
+	let got = (sh $node $acquire)
+	if $got.exit_code == 255 { error make {msg: $"k3s-kubelet: ssh failed, nothing changed: ($got.stderr | str trim)"} }
 	if $got.exit_code != 0 {
-		print --stderr $"k3s-kubelet: another apply holds ($lock) \(taken over after 30 minutes\): nothing changed"
+		print --stderr $"k3s-kubelet: another apply holds ($lock) \(taken over after a reboot, or ($takeover) minutes untouched\): nothing changed"
 		return {code: 1}
 	}
-	let r = (try { apply-locked $k $config --node $node --root $root --polls $polls --pause $pause } catch {|e|
-		sh $node $"rmdir '($lock)'" | ignore
+	let r = (try { apply-locked $k $config $lock --node $node --root $root --polls $polls --pause $pause } catch {|e|
+		sh $node $"rm -rf '($lock)'" | ignore
 		error make {msg: $e.msg}
 	})
-	sh $node $"rmdir '($lock)'" | ignore
+	sh $node $"rm -rf '($lock)'" | ignore
 	$r
 }
 
-def apply-locked [k: record, config: string, --check, --node: string = "", --root: string = "", --polls: int = 60, --pause: duration = 2sec]: nothing -> record {
+def apply-locked [k: record, config: string, lock: string, --check, --node: string = "", --root: string = "", --polls: int = 60, --pause: duration = 2sec]: nothing -> record {
 	let want = (want-configz $k)
 	let live = $root + $file
 	let prev = $"($live).prev"
@@ -187,6 +228,7 @@ def apply-locked [k: record, config: string, --check, --node: string = "", --roo
 	let marked = ((must (sh $node $"if [ -e '($pending)' ]; then echo yes; fi") "reading the marker" | str trim) == "yes")
 	mut changed = $marked
 	let restart = {||
+		beat $node $lock
 		let r = (sh $node "timeout 180 systemctl restart k3s")
 		if $r.exit_code != 0 { print --stderr $"k3s-kubelet: the restart failed \(($r.exit_code)\): ($r.stderr | str trim)" } else { print "k3s restarted" }
 		$r.exit_code == 0
@@ -201,7 +243,7 @@ def apply-locked [k: record, config: string, --check, --node: string = "", --roo
 		# With the marker the earlier run's check is ours to finish, and a kubelet that is down (k3s crashed after the
 		# rename) must reach the rollback below, so there is no early return then.
 		if not $marked {
-			let r = (read-settled $node $want $polls $pause)
+			let r = (read-settled $node $want $polls $pause $lock)
 			if $r.state == "unreadable" {
 				print --stderr $"k3s-kubelet: the kubelet's config could not be read: ($r.said); nothing restarted"
 				return {code: 1}
@@ -215,6 +257,15 @@ def apply-locked [k: record, config: string, --check, --node: string = "", --roo
 	} else {
 		print $"($live) differs"
 		if $check { return {code: 1} }
+		# The kubelet's config is read before anything is written or restarted: a wrong KUBECTL, missing rights or a node-name
+		# mismatch must cost no restart. (With the marker an earlier run's rollback is due, whatever it reads.)
+		if not $marked {
+			let r = (read-settled $node $want $polls $pause $lock)
+			if $r.state == "unreadable" {
+				print --stderr $"k3s-kubelet: the kubelet's config could not be read: ($r.said); nothing changed"
+				return {code: 1}
+			}
+		}
 		if not (preflight $node $k) { return {code: 1} }
 		$changed = true
 		let sum = ($config | hash sha256)
@@ -232,6 +283,7 @@ def apply-locked [k: record, config: string, --check, --node: string = "", --roo
 	# Also when the file did not change: an earlier restart may have failed. The API answers again within a minute of a restart.
 	mut last = {state: "unreadable", said: "no answer"}
 	for _ in 1..$polls {
+		beat $node $lock
 		$last = (read-configz $node $want)
 		if $last.state == "match" {
 			print "the kubelet runs with #Host's args"
@@ -253,7 +305,7 @@ def apply-locked [k: record, config: string, --check, --node: string = "", --roo
 	}
 	let restarted = (do $restart)
 	if $restarted {
-		let r = (read-settled $node $want $polls $pause)
+		let r = (read-settled $node $want $polls $pause $lock)
 		if $r.state != "unreadable" {
 			sh $node $"rm -f '($pending)' '($prev)' '($tmp)'" | ignore
 			print --stderr "k3s-kubelet: put the previous file back and restarted k3s"

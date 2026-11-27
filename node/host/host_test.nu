@@ -164,7 +164,7 @@ case "$1" in
   enable) touch "$d/on" ;;
   show) if [ -e "$d/needreload" ]; then echo yes; else echo no; fi ;;
   daemon-reload) rm -f "$d/needreload" ;;
-  start) [ "$STAYFAILED" = 1 ] || rm -f "$d/failed" ;;
+  start) if [ -n "$STARTEXIT" ]; then exit "$STARTEXIT"; fi; [ "$STAYFAILED" = 1 ] || rm -f "$d/failed" ;;
   *) ;;
 esac
 ' | save --raw ($dir | path join bin systemctl)
@@ -328,6 +328,20 @@ def test_a_failed_job_is_run_again_when_files_were_written [] {
 			assert equal $r.exit_code 1
 			assert str contains $r.stderr "set, but the job's last run still fails"
 		}
+		rm -rf $dir
+	}
+	# The run again is told apart by its exit: 124 (timeout) is still running, anything else is a failed start; both exit 1.
+	for code in ["124" "1"] {
+		let dir = (tmp)
+		fake-systemctl $dir
+		let root = ($dir | path join root)
+		(defaults) | to json | save --raw ($dir | path join host.json)
+		with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} { apply (defaults) --root $root | ignore }
+		"# drifted\n" | save --force --raw ($root + "/etc/pronto/docker-gc.env")
+		"" | save --raw ($dir | path join failed)
+		let r = (with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')", STARTEXIT: $code} { ^$nu.current-exe ($here | path join host.nu) apply ($dir | path join host.json) --root $root | complete })
+		assert equal $r.exit_code 1 $"start exit ($code)"
+		if $code == "124" { assert str contains $r.stdout "still running after 600 s" }
 		rm -rf $dir
 	}
 	# Nothing written and a failed job: it is not run again, the exit is 1, and "set" is not said.

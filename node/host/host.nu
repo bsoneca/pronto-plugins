@@ -142,14 +142,22 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 			# The files it failed on are set right: run it again (a oneshot, under a timeout) and ask again, so a repair is not
 			# reported as a failure.
 			print $"running ($service) again"
-			sh $node $"timeout 600 systemctl start ($service)" | ignore
-			let again = (sh $node $"systemctl is-failed --quiet ($service)")
-			if $again.exit_code == 255 { error make {msg: $"node-host: asking whether ($service) failed again: ($again.stderr | str trim)"} }
-			if $again.exit_code != 0 {
-				print $"($service) ran again and did not fail"
-				$drift = ($drift | append $"($service) failed its last run and was run again")
+			let started = (sh $node $"timeout 600 systemctl start ($service)")
+			if $started.exit_code == 255 { error make {msg: $"node-host: running ($service) again: ($started.stderr | str trim)"} }
+			if $started.exit_code == 124 {
+				# Still running after 600 s: not repaired, and not failed either; it is drift and the run exits 1.
+				print $"($service) is still running after 600 s"
+				$drift = ($drift | append $"($service) is still running after 600 s: its last run failed")
 			} else {
-				$drift = ($drift | append $"($service) failed its last run")
+				let again = (sh $node $"systemctl is-failed --quiet ($service)")
+				if $again.exit_code == 255 { error make {msg: $"node-host: asking whether ($service) failed again: ($again.stderr | str trim)"} }
+				# 0 from start and not failed any more: repaired. Anything else (start's own failure, or still failed) still fails.
+				if $started.exit_code == 0 and $again.exit_code != 0 {
+					print $"($service) ran again and did not fail"
+					$drift = ($drift | append $"($service) failed its last run and was run again")
+				} else {
+					$drift = ($drift | append $"($service) failed its last run")
+				}
 			}
 		} else {
 			$drift = ($drift | append $"($service) failed its last run")
@@ -175,7 +183,7 @@ def "main render" [host: path] {
 
 # Whether the job's last run failed, which writing files does not clear (the operator reads journalctl -u).
 export def failed-service [drift: list<string>]: nothing -> bool {
-	$drift | any {|d| $d | str ends-with "failed its last run" }
+	$drift | any {|d| ($d | str ends-with "failed its last run") or ($d | str ends-with "its last run failed") }
 }
 
 def "main apply" [host: path, --check, --node: string = "", --root: string = ""] {
@@ -185,7 +193,7 @@ def "main apply" [host: path, --check, --node: string = "", --root: string = ""]
 	# A failed job that still fails (after being run again when files were written) is not set right by writing: exit non-zero,
 	# so the run is not read as clean. "set" is said only when something was written.
 	if (failed-service $drift) {
-		let wrote = ($drift | any {|d| not ($d | str ends-with "failed its last run") })
+		let wrote = ($drift | any {|d| not (($d | str ends-with "failed its last run") or ($d | str ends-with "its last run failed")) })
 		print --stderr (if $wrote { "node-host: set, but the job's last run still fails: read journalctl -u pronto-docker-gc.service" } else { "node-host: nothing to write, but the job's last run failed: read journalctl -u pronto-docker-gc.service" })
 		exit 1
 	}
