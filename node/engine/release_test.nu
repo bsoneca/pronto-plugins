@@ -2308,7 +2308,8 @@ def test_a_tenant_builds_only_on_the_tenants_buildkitd [] {
 	assert (not ($docker | str contains "tcp://127.0.0.1")) "never the operator's buildkitd"
 	let bake = ($docker | lines | where {|l| $l | str starts-with "buildx bake" } | first)
 	assert ($bake | str contains "output=type=oci,dest=") $bake
-	assert ($bake | str contains $"--set *.args.BUILDKIT_CACHE_MOUNT_NS=($tenant_ns)") $"every build gets buildkit's cache mount namespace through bake's --set, which wins over a compose args value: ($bake)"
+	let ns_args = ($bake | split row " " | where {|a| $a | str starts-with "*.args.BUILDKIT_CACHE_MOUNT_NS=" })
+	assert equal $ns_args [$"*.args.BUILDKIT_CACHE_MOUNT_NS=($tenant_ns)"] $"every build gets exactly its own tenant's cache mount namespace through bake's --set, once, which wins over a compose args value: ($bake)"
 	assert (not ($bake | str contains "--push")) "the sandboxed buildkitd pushes nothing"
 	assert ($bake | str contains "fs.write=") "its archives are written where the engine said"
 	let crane = (open --raw ($w.dir | path join crane.log))
@@ -2749,26 +2750,64 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 	let one = ("FROM base\nRUN --mount=type=cache,target=/root/.npm,id=npm,sharing=locked npm ci\n" | tenant stage-dockerfile $ns)
 	assert equal $one $"FROM base\nRUN --mount=type=cache,target=/root/.npm,sharing=locked,id=($ns)/npm npm ci\n"
 	let none = ("RUN --mount=type=cache,target=/root/.cache/go-build go build\n" | tenant stage-dockerfile $ns)
-	assert equal $none $"RUN --mount=type=cache,target=/root/.cache/go-build,id=($ns)/_root_.cache_go-build go build\n"
+	assert equal $none $"RUN --mount=type=cache,target=/root/.cache/go-build,id=($ns)//root/.cache/go-build go build\n"
 	let dst = ("RUN --mount=type=cache,dst=/var/cache/apt apt-get update\n" | tenant stage-dockerfile $ns)
-	assert equal $dst $"RUN --mount=type=cache,dst=/var/cache/apt,id=($ns)/_var_cache_apt apt-get update\n"
+	assert equal $dst $"RUN --mount=type=cache,dst=/var/cache/apt,id=($ns)//var/cache/apt apt-get update\n"
 	let bind = ("RUN --mount=type=bind,source=a,target=/b cat /b\n" | tenant stage-dockerfile $ns)
 	assert equal $bind "RUN --mount=type=bind,source=a,target=/b cat /b\n"
 	# several flags on one RUN, on continuation lines, one a prefix of another
 	let many = ("RUN --mount=type=cache,target=/a \\\n    --mount=type=cache,target=/a,sharing=private \\\n    --mount=type=bind,source=s,target=/s \\\n    make\n" | tenant stage-dockerfile $ns)
-	assert equal $many $"RUN --mount=type=cache,target=/a,id=($ns)/_a \\\n    --mount=type=cache,target=/a,sharing=private,id=($ns)/_a \\\n    --mount=type=bind,source=s,target=/s \\\n    make\n"
+	assert equal $many $"RUN --mount=type=cache,target=/a,id=($ns)//a \\\n    --mount=type=cache,target=/a,sharing=private,id=($ns)//a \\\n    --mount=type=bind,source=s,target=/s \\\n    make\n"
 	# two tenants' same target are two ids
 	let other = ("RUN --mount=type=cache,target=/root/.npm npm ci\n" | tenant stage-dockerfile "studio-other-game-0")
-	assert (($other | str contains "id=studio-other-game-0/_root_.npm") and not ($other | str contains $ns))
+	assert (($other | str contains "id=studio-other-game-0//root/.npm") and not ($other | str contains $ns))
 	# buildkit reads a flag, a key and a type in any case: all of them are rewritten
 	let upper = ("RUN --MOUNT=TYPE=CACHE,TARGET=/a npm ci\n" | tenant stage-dockerfile $ns)
-	assert equal $upper $"RUN --mount=type=cache,target=/a,id=($ns)/_a npm ci\n" "an upper-case flag, key and type"
+	assert equal $upper $"RUN --mount=type=cache,target=/a,id=($ns)//a npm ci\n" "an upper-case flag, key and type"
 	let mixed = ("RUN --mount=type=Cache,target=/a,ID=x,Sharing=locked npm ci\n" | tenant stage-dockerfile $ns)
 	assert equal $mixed $"RUN --mount=type=cache,target=/a,sharing=locked,id=($ns)/x npm ci\n" "a mixed-case type and keys"
 	# the official frontend's directive is dropped, a BOM with it; the built-in frontend builds the rest
 	assert equal ("# syntax=docker/dockerfile:1\nFROM base\n" | tenant stage-dockerfile $ns) "FROM base\n"
 	assert equal ("\u{FEFF}# syntax=docker/dockerfile:1.7@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nFROM base\n" | tenant stage-dockerfile $ns) "FROM base\n"
 	assert equal ("\u{FEFF}FROM base\n" | tenant stage-dockerfile $ns) "FROM base\n" "a BOM is not written back"
+	# literal content is preserved byte for byte: a heredoc body, a comment, a command's arguments and another instruction's text are no mount flags
+	let heredoc = "FROM base\nCOPY <<EOF /doc.md\nRun it with --mount=type=cache,target=/cache\nand a standalone --mount here\n# syntax=evil/frontend\nEOF\nRUN echo --mount=type=cache,target=/x\n# RUN --mount=type=cache,target=/y\nLABEL note=\"--mount=type=cache,target=/z\"\n"
+	assert equal ($heredoc | tenant stage-dockerfile $ns) $heredoc "a heredoc body, a comment, a RUN's arguments and a LABEL are left as they are"
+	let run_heredoc = "RUN --mount=type=cache,target=/a <<EOF\nmake --mount=type=cache,target=/b\nEOF\n"
+	assert equal ($run_heredoc | tenant stage-dockerfile $ns) $"RUN --mount=type=cache,target=/a,id=($ns)//a <<EOF\nmake --mount=type=cache,target=/b\nEOF\n" "a RUN's flags are rewritten, its heredoc body is not"
+	# a `# syntax=` that is no leading directive is a comment to buildkit and is left as it is
+	assert equal ("FROM base\n# syntax=evil/frontend\nRUN true\n" | tenant stage-dockerfile $ns) "FROM base\n# syntax=evil/frontend\nRUN true\n"
+	# two targets are two ids
+	let two = ("RUN --mount=type=cache,target=/a/b true\nRUN --mount=type=cache,target=/a_b true\n" | tenant stage-dockerfile $ns)
+	assert equal $two $"RUN --mount=type=cache,target=/a/b,id=($ns)//a/b true\nRUN --mount=type=cache,target=/a_b,id=($ns)//a_b true\n"
+	# ONBUILD RUN is a RUN
+	assert equal ("ONBUILD RUN --mount=type=cache,target=/a true\n" | tenant stage-dockerfile $ns) $"ONBUILD RUN --mount=type=cache,target=/a,id=($ns)//a true\n"
+	# the reviewer's probes (pp#589): an instruction keyword in any case, a flag scan buildkit's continuation rules do not stop early, a heredoc only where buildkit opens one
+	let lower = ("run --mount=type=cache,target=/a,id=victim true\n" | tenant stage-dockerfile $ns)
+	assert equal $lower $"run --mount=type=cache,target=/a,id=($ns)/victim true\n" "a lower-case run"
+	assert equal ("Run --mount=type=cache,target=/a,id=victim true\n" | tenant stage-dockerfile $ns) $"Run --mount=type=cache,target=/a,id=($ns)/victim true\n" "a mixed-case Run"
+	assert equal ("onbuild run --mount=type=cache,target=/a true\n" | tenant stage-dockerfile $ns) $"onbuild run --mount=type=cache,target=/a,id=($ns)//a true\n" "a lower-case onbuild run"
+	# a backslash with spaces after it, and a comment or a blank line in a continuation, do not end the flags
+	let spaced = ("RUN --mount=type=cache,target=/a \\  \n --mount=type=cache,target=/b,id=victim true\n" | tenant stage-dockerfile $ns)
+	assert equal $spaced $"RUN --mount=type=cache,target=/a,id=($ns)//a \\  \n --mount=type=cache,target=/b,id=($ns)/victim true\n" "a backslash and spaces"
+	let commented = ("RUN --mount=type=cache,target=/a \\\n# c\n --mount=type=cache,target=/b,id=victim true\n" | tenant stage-dockerfile $ns)
+	assert equal $commented $"RUN --mount=type=cache,target=/a,id=($ns)//a \\\n# c\n --mount=type=cache,target=/b,id=($ns)/victim true\n" "a comment in a continuation"
+	let blanked = ("RUN --mount=type=cache,target=/a \\\n\n --mount=type=cache,target=/b,id=victim true\n" | tenant stage-dockerfile $ns)
+	assert equal $blanked $"RUN --mount=type=cache,target=/a,id=($ns)//a \\\n\n --mount=type=cache,target=/b,id=($ns)/victim true\n" "a blank line in a continuation"
+	# a heredoc is opened by RUN, COPY and ADD, by a word that begins with <<: a LABEL's quoted <<EOF or `a<<EOF` opens none, so the mount after it is a flag
+	let label = ("FROM b\nLABEL x=\"<<EOF\"\nRUN --mount=type=cache,target=/a,id=victim true\nEOF\n" | tenant stage-dockerfile $ns)
+	assert equal $label $"FROM b\nLABEL x=\"<<EOF\"\nRUN --mount=type=cache,target=/a,id=($ns)/victim true\nEOF\n" "a LABEL opens no heredoc"
+	let glued = ("FROM b\nRUN echo a<<EOF\nRUN --mount=type=cache,target=/a,id=victim true\nEOF\n" | tenant stage-dockerfile $ns)
+	assert equal $glued $"FROM b\nRUN echo a<<EOF\nRUN --mount=type=cache,target=/a,id=($ns)/victim true\nEOF\n" "a<<EOF opens no heredoc"
+	# a terminator is exact, and with <<- only leading tabs are dropped: an indented EOF does not close a plain <<EOF
+	let indented = ("FROM b\nRUN <<EOF\n  EOF\nRUN --mount=type=cache,target=/x true\nEOF\nRUN --mount=type=cache,target=/y true\n" | tenant stage-dockerfile $ns)
+	assert equal $indented $"FROM b\nRUN <<EOF\n  EOF\nRUN --mount=type=cache,target=/x true\nEOF\nRUN --mount=type=cache,target=/y,id=($ns)//y true\n" "an indented EOF does not end a plain heredoc"
+	let dashed = ("FROM b\nRUN <<-EOT\n\techo hi\n\tEOT\nRUN --mount=type=cache,target=/a true\n" | tenant stage-dockerfile $ns)
+	assert equal $dashed $"FROM b\nRUN <<-EOT\n\techo hi\n\tEOT\nRUN --mount=type=cache,target=/a,id=($ns)//a true\n" "<<- drops leading tabs of its terminator"
+	# an exec-form RUN, a continued command with no flags and a RUN with no trailing newline are left or rewritten as they should be
+	assert equal ("FROM b\nRUN [\"sh\",\"-c\",\"--mount=x\"]\n" | tenant stage-dockerfile $ns) "FROM b\nRUN [\"sh\",\"-c\",\"--mount=x\"]\n"
+	assert equal ("FROM b\nRUN apt-get update && \\\n    apt-get install -y x\n" | tenant stage-dockerfile $ns) "FROM b\nRUN apt-get update && \\\n    apt-get install -y x\n"
+	assert equal ("FROM b\nRUN --mount=type=cache,target=/a true" | tenant stage-dockerfile $ns) $"FROM b\nRUN --mount=type=cache,target=/a,id=($ns)//a true"
 	# a Dockerfile with no cache mount is left as it is
 	assert equal ("FROM base\nRUN echo hi\n" | tenant stage-dockerfile $ns) "FROM base\nRUN echo hi\n"
 	for row in [
@@ -2779,11 +2818,21 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 		{why: "a syntax directive", text: "# syntax=ghcr.io/evil/frontend:1\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a syntax directive with spaces", text: "#  syntax = evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a mount flag with a space", text: "RUN --mount type=cache,target=/a x\n", says: "--mount without"}
+		{why: "a lower-case run with a --mount that has no =", text: "run --mount type=cache,target=/a true\n", says: "--mount without"}
+		{why: "a mount that repeats type (buildkit takes the last)", text: "RUN --mount=type=bind,type=cache,target=/a,id=victim true\n", says: "repeats type"}
+		{why: "a mount that repeats id", text: "RUN --mount=type=cache,target=/a,id=x,id=y true\n", says: "repeats id"}
+		{why: "a mount that repeats its target", text: "RUN --mount=type=cache,target=/a,target=/b true\n", says: "repeats target"}
+		{why: "a mount that names target and dst", text: "RUN --mount=type=cache,target=/a,dst=/b true\n", says: "repeats target"}
 		{why: "a syntax directive after a BOM", text: "\u{FEFF}# syntax=evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a // syntax directive", text: "//syntax=evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a // syntax directive with spaces", text: "// syntax = evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a syntax directive that names another frontend of docker's", text: "# syntax=docker/dockerfile-upstream:master\nFROM base\n", says: "`# syntax=` directive"}
 		{why: "a JSON Dockerfile", text: "{\"syntax\": \"evil/frontend\"}", says: "is JSON"}
+		{why: "an approved directive hiding a JSON frontend: the strip leaves JSON at the head of the file", text: "# syntax=docker/dockerfile:1\n{\"syntax\":\"evil/frontend\"}", says: "is JSON"}
+		{why: "an approved directive after a shebang hiding a JSON frontend", text: "#!/x\n# syntax=docker/dockerfile:1\n{\"syntax\":\"evil/frontend\"}", says: "is JSON"}
+		{why: "an approved directive after a BOM hiding a JSON frontend", text: "\u{FEFF}# syntax=docker/dockerfile:1\n  {\"syntax\":\"evil/frontend\"}", says: "is JSON"}
+		{why: "a syntax directive after comments and blank lines at the head", text: "# a comment\n\n// syntax=evil/frontend\nFROM base\n", says: "`# syntax=` directive"}
+		{why: "a mount with no = in a RUN's flags", text: "RUN --mount type=cache,target=/a true\n", says: "--mount without"}
 		{why: "a JSON Dockerfile after a shebang line, which buildkit drops before it reads the JSON", text: "#!/x\n{\"syntax\":\"evil/frontend\"}", says: "is JSON"}
 		{why: "a JSON Dockerfile after a BOM and a shebang line", text: "\u{FEFF}#!/x\n  {\"syntax\":\"evil/frontend\"}", says: "is JSON"}
 		{why: "a mount with an escape character, whose continuation line appends a second id", text: "RUN --mount=type=cache,target=/a,\\\nid=x y\n", says: "with a quote or an escape character"}
