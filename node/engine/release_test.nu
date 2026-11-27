@@ -2808,6 +2808,20 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 	assert equal ("FROM b\nRUN [\"sh\",\"-c\",\"--mount=x\"]\n" | tenant stage-dockerfile $ns) "FROM b\nRUN [\"sh\",\"-c\",\"--mount=x\"]\n"
 	assert equal ("FROM b\nRUN apt-get update && \\\n    apt-get install -y x\n" | tenant stage-dockerfile $ns) "FROM b\nRUN apt-get update && \\\n    apt-get install -y x\n"
 	assert equal ("FROM b\nRUN --mount=type=cache,target=/a true" | tenant stage-dockerfile $ns) $"FROM b\nRUN --mount=type=cache,target=/a,id=($ns)//a true"
+	# Codex round 2 (pronto#1929): a quoted multiword heredoc name is one word, whose terminator is the whole name; a comment inside a continuation is no flag
+	let quoted = "FROM b\nCOPY <<'END DOC' /doc\nEND\nRUN --mount=type=cache,target=/cache true\nEND DOC\nRUN --mount=type=cache,target=/a true\n"
+	assert equal ($quoted | tenant stage-dockerfile $ns) $"FROM b\nCOPY <<'END DOC' /doc\nEND\nRUN --mount=type=cache,target=/cache true\nEND DOC\nRUN --mount=type=cache,target=/a,id=($ns)//a true\n" "END alone does not end <<'END DOC'; the RUN line in the body is content"
+	let dquoted = "FROM b\nRUN <<\"A B\"\nA\nRUN --mount=type=cache,target=/c true\nA B\nRUN --mount=type=cache,target=/d true\n"
+	assert equal ($dquoted | tenant stage-dockerfile $ns) $"FROM b\nRUN <<\"A B\"\nA\nRUN --mount=type=cache,target=/c true\nA B\nRUN --mount=type=cache,target=/d,id=($ns)//d true\n" "a double-quoted multiword name"
+	let comment_flag = ("FROM b\nRUN --mount=type=cache,target=/a \\\n# --mount is optional\n echo ok\n" | tenant stage-dockerfile $ns)
+	assert equal $comment_flag $"FROM b\nRUN --mount=type=cache,target=/a,id=($ns)//a \\\n# --mount is optional\n echo ok\n" "a standalone --mount in a continuation comment is skipped, as buildkit skips it"
+	let comment_eq = ("RUN --mount=type=cache,target=/a \\\n# --mount=type=cache,target=/b,id=x\n --mount=type=cache,target=/c true\n" | tenant stage-dockerfile $ns)
+	assert equal $comment_eq $"RUN --mount=type=cache,target=/a,id=($ns)//a \\\n# --mount=type=cache,target=/b,id=x\n --mount=type=cache,target=/c,id=($ns)//c true\n" "a mount in a continuation comment is not rewritten"
+	# a directive an earlier strip leaves at the head is read on the final bytes: a BOM that was internal until the official line went
+	for text in ["# syntax=docker/dockerfile:1\n\u{FEFF}# syntax=evil/frontend\nFROM base\n" "// syntax=docker/dockerfile:1\n\u{FEFF}# syntax=evil/frontend\nFROM base\n"] {
+		let r = (try { $text | tenant stage-dockerfile $ns; "admitted" } catch {|e| $e.msg })
+		assert (($r != "admitted") and ($r | str contains "`# syntax=` directive")) $"a BOM-prefixed directive under an approved one: ($r)"
+	}
 	# a Dockerfile with no cache mount is left as it is
 	assert equal ("FROM base\nRUN echo hi\n" | tenant stage-dockerfile $ns) "FROM base\nRUN echo hi\n"
 	for row in [

@@ -312,10 +312,57 @@ export def stage-dockerfile [namespace: string]: string -> string {
 	}
 	if ($ins | is-not-empty) { $out = ($out | append (stage-instruction ($ins | str join "\n") $namespace).text) }
 	let staged = ($out | str join "\n")
-	# the final bytes, read as buildkit reads the head of a Dockerfile: a leading shebang line is dropped before a JSON Dockerfile is detected
+	frontend-check $staged
+	$staged
+}
+
+# What buildkit reads at the head of a Dockerfile to pick a build frontend, applied to exactly the bytes bake is sent: the BOM and a leading shebang line are skipped (so a directive an earlier
+# strip left at the head, or a BOM that was internal until then, is seen), and a JSON Dockerfile, or a `syntax` or an `escape` directive among the leading comments and blank lines, is refused.
+def frontend-check [staged: string] {
 	let body = ($staged | str replace --regex '^\x{FEFF}' '' | str replace --regex '^#![^\n]*\n' '')
 	if ($body | str trim | str starts-with '{') { error make {msg: "a tenant's Dockerfile is JSON, which buildkit reads a frontend directive from: a tenant's Dockerfile is plain"} }
-	$staged
+	for line in ($body | split row "\n") {
+		let bare = ($line | str replace --regex '\r$' '')
+		if not (($bare | str trim | is-empty) or ($bare =~ '^\s*(#|//)')) { break }
+		if ($bare =~ '(?i)^\s*(#|//)\s*escape\s*=') { error make {msg: "a tenant's Dockerfile has an `escape=` directive, which moves the character a continuation line joins with: a tenant's build uses the default"} }
+		if ($bare =~ '(?i)^\s*(#|//)\s*syntax\s*=') { error make {msg: "a tenant's Dockerfile has a `# syntax=` directive, which picks a build frontend of its own: a tenant's build uses the buildkitd's built-in one"} }
+	}
+}
+
+# The words of an instruction as the Dockerfile parser splits them: on white space and on a backslash before a line end, outside quotes; a backslash outside single quotes escapes the next
+# character. The quotes stay in the word (they are what delimits a heredoc's name, `<<'END DOC'`).
+def shell-words [text: string]: nothing -> list<string> {
+	let chars = ($text | split chars)
+	let n = ($chars | length)
+	mut words = []
+	mut cur = ""
+	mut quote = ""
+	mut i = 0
+	while $i < $n {
+		let c = ($chars | get $i)
+		if $quote != "" {
+			$cur = $cur ++ $c
+			if $c == $quote { $quote = "" } else if $c == "\\" and $quote == '"' and ($i + 1) < $n { $cur = $cur ++ ($chars | get ($i + 1)); $i = $i + 1 }
+		} else if $c == "'" or $c == '"' {
+			$quote = $c
+			$cur = $cur ++ $c
+		} else if $c == "\\" and ($i + 1) < $n and (($chars | get ($i + 1)) in ["\n" "\r"]) {
+			# a continuation: white space (and the line end, with a \r before the \n)
+			if ($cur | is-not-empty) { $words = ($words | append $cur); $cur = "" }
+			$i = $i + 1
+			if ($chars | get $i) == "\r" and ($i + 1) < $n and ($chars | get ($i + 1)) == "\n" { $i = $i + 1 }
+		} else if $c == "\\" and ($i + 1) < $n {
+			$cur = $cur ++ $c ++ ($chars | get ($i + 1))
+			$i = $i + 1
+		} else if $c in [" " "\t" "\n" "\r"] {
+			if ($cur | is-not-empty) { $words = ($words | append $cur); $cur = "" }
+		} else {
+			$cur = $cur ++ $c
+		}
+		$i = $i + 1
+	}
+	if ($cur | is-not-empty) { $words = ($words | append $cur) }
+	$words
 }
 
 # One logical instruction (its continuation lines joined with "\n"): a RUN (or ONBUILD RUN) has its mount flags made safe; the heredoc terminators it opens are answered, so their bodies are left alone.
@@ -323,7 +370,7 @@ def stage-instruction [ins: string, namespace: string]: nothing -> record {
 	# a heredoc is opened by RUN, COPY and ADD (ONBUILD included), by a word that begins with `<<` and has a name (buildkit's `^<<(-?)\s*([^<]*)$`, the name unquoted)
 	let keyword = ($ins | parse --regex '(?is)^\s*(?:ONBUILD\s+)?(?<k>[A-Za-z]+)' | get -o 0.k | default "" | str uppercase)
 	let heredocs = if $keyword in [RUN COPY ADD] {
-		$ins | split row --regex '\s+' | where {|w| $w =~ '^<<' } | each {|w|
+		shell-words $ins | where {|w| $w =~ '^<<' } | each {|w|
 			let m = ($w | parse --regex '^<<(?<dash>-?)(?<name>[^<]*)$' | get -o 0)
 			if $m == null { null } else {
 				let name = ($m.name | str replace --all --regex r#'["']'# '')
@@ -339,6 +386,18 @@ def stage-instruction [ins: string, namespace: string]: nothing -> record {
 
 # The flags of one RUN, with every cache mount's id made the namespace's own.
 def stage-run-flags [flags: string, namespace: string]: nothing -> string {
+	# a comment line inside a continuation is skipped by buildkit: it is neither validated nor rewritten, and comes back as it was
+	let lines = ($flags | split row "\n")
+	mut kept = []
+	mut comments = []
+	for i in 0..(($lines | length) - 1) {
+		let l = ($lines | get $i)
+		if $i > 0 and ($l =~ '^[ \t]*#') {
+			$kept = ($kept | append $"__TENANT_COMMENT_($comments | length)__")
+			$comments = ($comments | append $l)
+		} else { $kept = ($kept | append $l) }
+	}
+	let flags = ($kept | str join "\n")
 	if ($flags =~ '(?i)--mount(\s|$)') { error make {msg: "a tenant's Dockerfile gives --mount without `=`: a tenant's mount flags are --mount=type=..."} }
 	let found = ($flags | parse --regex '(?i)(?<flag>--mount=\S*)' | get flag | uniq | sort-by {|f| $f | str length } --reverse)
 	mut out = $flags
@@ -370,6 +429,10 @@ def stage-run-flags [flags: string, namespace: string]: nothing -> string {
 		$made = ($made | append {placeholder: $placeholder, flag: $"--mount=($kept | append $"id=($namespace)/($id)" | str join ',')"})
 	}
 	for m in $made { $out = ($out | str replace --all $m.placeholder $m.flag) }
+	for i in 0..(($comments | length) - 1) {
+		if ($comments | is-empty) { break }
+		$out = ($out | str replace $"__TENANT_COMMENT_($i)__" ($comments | get $i))
+	}
 	$out
 }
 
