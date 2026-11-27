@@ -48,6 +48,9 @@ def main [] {
 	test_a_change_that_only_rewrites_the_text_restarts_nothing
 	test_a_failed_lock_release_is_said_with_the_error_that_stopped_the_run
 	test_a_marked_run_restarts_a_kubelet_that_never_got_the_restart
+	test_an_interrupted_cleanup_never_leaves_a_marker_without_its_backup
+	test_every_remote_operation_keeps_ssh_failure_apart
+	test_a_failed_sync_after_a_rewrite_is_not_reported_as_unchanged
 	test_check_changes_nothing
 	test_every_call_has_a_deadline
 	print "\nAll node kubelet tests passed."
@@ -143,13 +146,13 @@ def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: in
 	if $unit != "" { $unit | save --raw ($dir | path join unitcat) }
 	let shim = {|name, body| $"#!/usr/bin/env bash\n($body)\n" | save --raw ($dir | path join bin $name); chmod 755 ($dir | path join bin $name) }
 	let nshim = {|name, body| $"#!/usr/bin/env bash\n($body)\n" | save --raw ($dir | path join nodebin $name); chmod 755 ($dir | path join nodebin $name) }
-	do $shim ssh 'd=$(dirname "$0")/..; echo x >>"$d/ssh.count"; while [ "$1" = -o ]; do echo "$2" >>"$d/ssh.opts"; shift 2; done; shift; export FAKE_REMOTE=1; export PATH="$d/nodebin:$PATH"; if [ "$MODE" = ssh255raw ]; then case "$1" in *--raw*) echo "ssh: connect timed out" >&2; exit 255;; esac; fi; if [ "$MODE" = ssh255 ]; then case "$1" in *owner*) echo "ssh: connect timed out" >&2; exit 255;; esac; fi; exec bash -c "$1"'
+	do $shim ssh 'd=$(dirname "$0")/..; echo x >>"$d/ssh.count"; while [ "$1" = -o ]; do echo "$2" >>"$d/ssh.opts"; shift 2; done; shift; export FAKE_REMOTE=1; export PATH="$d/nodebin:$PATH"; if [ "$MODE" = ssh255raw ]; then case "$1" in *--raw*) echo "ssh: connect timed out" >&2; exit 255;; esac; fi; if [ "$MODE" = ssh255scan ]; then case "$1" in *"systemctl cat k3s"*) echo "ssh: connection reset" >&2; exit 255;; esac; fi; if [ "$MODE" = ssh255restart ]; then case "$1" in *"systemctl restart"*) echo "ssh: connection reset" >&2; exit 255;; esac; fi; if [ "$MODE" = ssh255 ]; then case "$1" in *owner*) echo "ssh: connect timed out" >&2; exit 255;; esac; fi; exec bash -c "$1"'
 	do $nshim sudo 'exec "$@"'
 	do $nshim sha256sum 'exec shasum -a 256 "$@"'
 	do $nshim systemctl 'd=$(dirname "$0")/..; [ -n "$FAKE_REMOTE" ] || { echo "$*" >>"$d/local-systemctl.log"; exit 0; }; echo "$*" >>"$d/systemctl.log"; case "$1" in cat) [ "$MODE" != nounit ] || { echo "no such unit" >&2; exit 1; }; cat "$d/unitcat" 2>/dev/null; exit 0;; esac; n=$(grep -c "^restart" "$d/systemctl.log"); if [ "$MODE" = stuckfail ] && [ "$n" -ge 2 ]; then exit 1; fi; [ -e "$KUBELET_LIVE" ] && cp "$KUBELET_LIVE" "$d/running"; true'
 	do $nshim tee 'if [ "$MODE" = fulldisk ]; then head -c 12 >"$1"; exit 1; fi; if [ "$MODE" = shorttee ]; then head -c 12 >"$1"; exit 0; fi; exec /usr/bin/tee "$@"'
 	do $nshim sync 'd=$(dirname "$0")/..; n=$(cat "$d/synccount" 2>/dev/null || echo 0); echo $((n+1)) >"$d/synccount"; if [ "$MODE" = syncfail ] && cmp -s "$KUBELET_LIVE" "$d/desired.yaml"; then exit 1; fi; exit 0'
-	do $nshim rm 'if [ "$MODE" = rmfail ]; then case "$*" in *.pending) exit 1;; esac; fi; if [ "$RMFAIL_LOCK" = 1 ]; then case "$*" in *.lock*) echo "rm: Read-only file system" >&2; exit 1;; esac; fi; exec /bin/rm "$@"'
+	do $nshim rm 'if [ "$MODE" = rmfail ]; then case "$*" in *.pending) exit 1;; esac; fi; if [ "$MODE" = prevrmfail ]; then for a in "$@"; do case "$a" in *.prev) echo "rm: I/O error" >&2; exit 1;; esac; done; fi; if [ "$RMFAIL_LOCK" = 1 ]; then case "$*" in *.lock*) echo "rm: Read-only file system" >&2; exit 1;; esac; fi; exec /bin/rm "$@"'
 	do $nshim mv 'if [ "$MODE" = pendingmvfail ]; then case "$*" in *pending.tmp*) echo "mv: I/O error" >&2; exit 1;; esac; fi; exec /bin/mv "$@"'
 	do $nshim touch 'd=$(dirname "$0")/..; echo "$*" >>"$d/touch.log"; if [ "$MODE" = touchfail ]; then echo "touch: Read-only file system" >&2; exit 1; fi; exec /usr/bin/touch "$@"'
 	do $nshim mkdir 'd=$(dirname "$0")/..; if [ "$MODE" = nomkdir ] && [ "$1" = -p ]; then echo "mkdir: Permission denied" >&2; exit 1; fi; exec /bin/mkdir "$@"'
@@ -444,6 +447,38 @@ def test_a_marked_run_restarts_a_kubelet_that_never_got_the_restart [] {
 	assert equal [$r.code $r.live $r.pending $r.prev $r.restarts] [0 (desired) null null 1]
 }
 
+def test_an_interrupted_cleanup_never_leaves_a_marker_without_its_backup [] {
+	print "test a cleanup that dies after the marker is removed leaves a backup nothing waits for, and the next apply goes on..."
+	# A rollback is verified, the marker goes first, and removing the backup fails: no marker, and the backup stays.
+	let r = (scenario prevrmfail {live: (desired), pending: "rollback-had\n", prev: "good: file\n"})
+	assert equal [$r.code $r.pending $r.prev] [99 null "good: file\n"]
+	assert str contains $r.msg "after the rollback"
+	# The state it leaves (the previous file live, a leftover backup, no marker): the next apply installs as on a clean node.
+	let next = (scenario ok {live: "good: file\n", prev: "good: file\n"})
+	assert equal [$next.code $next.live $next.pending $next.prev $next.restarts] [0 (desired) null null 1]
+}
+
+def test_every_remote_operation_keeps_ssh_failure_apart [] {
+	print "test an ssh that fails (255) during the conflict scan or the restart stops the run with no further login, the lock left to expire..."
+	let scan = (scenario ssh255scan {live: "old: file\n"})
+	assert equal [$scan.code $scan.live $scan.restarts $scan.lock] [99 "old: file\n" 0 true]
+	assert str contains $scan.msg "ssh failed"
+	assert str contains $scan.msg "left to expire"
+	assert (($scan.ssh_calls) < 8) $"ssh calls ($scan.ssh_calls)"
+	let restart = (scenario ssh255restart {live: "old: file\n"})
+	assert equal [$restart.code $restart.live $restart.lock] [99 (desired) true]
+	assert str contains $restart.msg "ssh failed while restarting"
+	assert str contains $restart.msg "left to expire"
+	assert (($restart.ssh_calls) < 20) $"ssh calls ($restart.ssh_calls)"
+	assert equal ($restart.pending == null) false "the marker stays for the next run"
+}
+
+def test_a_failed_sync_after_a_rewrite_is_not_reported_as_unchanged [] {
+	print "test a sync that fails after the rewrite's rename says the new file is installed and needs verifying, not that the live file is as it was..."
+	let r = (scenario syncfail {live: "# an older spelling\n", running: (desired)})
+	assert equal [$r.code $r.live $r.restarts $r.pending $r.scraps] [1 (desired) 0 null 0]
+}
+
 def test_check_changes_nothing [] {
 	print "test --check exits 1 on a difference, an unchecked apply, or a file the kubelet does not run, and writes and restarts nothing..."
 	let differs = (scenario ok {live: "old: file\n"} --check)
@@ -488,7 +523,7 @@ def test_a_failed_login_stops_the_polling_and_nothing_else_is_swallowed [] {
 	assert equal $rm.code 99
 	assert str contains $rm.msg "removing"
 	assert equal ($rm.pending == null) false "the marker survives, and the run says so"
-	assert equal $rm.prev null "the backup goes before the marker, never after it"
+	assert equal $rm.prev "old: file\n" "the marker goes first: while it stays, its backup stays"
 }
 
 def test_a_conflict_scan_that_fails_is_not_a_clean_result [] {
