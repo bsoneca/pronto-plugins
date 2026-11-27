@@ -115,6 +115,10 @@ def read-configz [node: string, want: record]: nothing -> record {
 	let parsed = (try { $r.stdout | from json } catch { null })
 	let cfg = (if $parsed == null { null } else { $parsed | get -o kubeletconfig })
 	if ($cfg | describe --detailed).type != "record" { return {state: "unreadable", said: ($r.stdout | str trim | default "no answer")} }
+	# A kubeletconfig without the fields that are compared (an empty one, a partial one) says nothing about the args: unreadable,
+	# never "differs" (which allows a restart) and never an answer that passes the rollback's check.
+	let missing = ($want | columns | where {|c| ($cfg | get -o $c) == null })
+	if not ($missing | is-empty) { return {state: "unreadable", said: $"the answer lacks ($missing | str join ', ')"} }
 	let got = ($want | columns | each {|c| {($c): ($cfg | get -o $c)}} | into record)
 	{state: (if $got == $want { "match" } else { "differs" }), said: ($got | to json --raw)}
 }
@@ -125,6 +129,8 @@ def beat [node: string, lock: string] {
 	let r = (sh $node $"touch '($lock)'")
 	# 255 is ssh's own failure: it stops the run (a failed login is never retried, a ban cuts the operator off), the lock is left to expire.
 	if $r.exit_code == 255 { error make {msg: $"k3s-kubelet: ssh failed, stopping: ($r.stderr | str trim)"} }
+	# Any other failure of the touch is a lock that is not being kept alive (a read-only filesystem, a lock taken away): stop.
+	if $r.exit_code != 0 { error make {msg: $"k3s-kubelet: the lock heartbeat failed \(touch exited ($r.exit_code)\), stopping: ($r.stderr | str trim)"} }
 }
 
 # Reads until it is not unreadable, up to $polls times.
@@ -244,12 +250,44 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 	let current = (must (sh $node $"if [ -e '($live)' ]; then cat '($live)'; fi") "reading the file")
 	# The marker's existence says an earlier apply was not checked; what it holds only says what the rollback does.
 	let marked = ((must (sh $node $"if [ -e '($pending)' ]; then echo yes; fi") "reading the marker" | str trim) == "yes")
+	# What the marker holds: had or none (a file this run or an earlier one installed, and whether there was a previous one), or
+	# rollback-had / rollback-none (a rollback that began: the previous file is being, or has been, put back).
+	let phase = (if $marked { must (sh $node $"cat '($pending)'") "reading the marker" | str trim } else { "" })
 	mut changed = $marked
 	let restart = {||
 		beat $node $lock
 		let r = (sh $node "timeout 180 systemctl restart k3s")
 		if $r.exit_code != 0 { print --stderr $"k3s-kubelet: the restart failed \(($r.exit_code)\): ($r.stderr | str trim)" } else { print "k3s restarted" }
 		$r.exit_code == 0
+	}
+
+	# The only node: a config this run (or an earlier unchecked one) wrote and the kubelet did not take is put back, by a
+	# copy beside it and a rename, with the backup kept until the kubelet is known to answer. The marker first records that the
+	# rollback began (rollback-had or rollback-none, synced), so a run that finds it, because this one died after the restore and
+	# before the restart, finishes the rollback and verifies the previous config before it installs anything. A marker that says
+	# none of had, none or a rollback stops here, with everything kept.
+	let rollback = {||
+		let back = (sh $node $"case \"$\(cat '($pending)' 2>/dev/null\)\" in had|rollback-had) k=rollback-had ;; none|rollback-none) k=rollback-none ;; *) echo 'the pending marker holds none of had, none, rollback-had, rollback-none' >&2; exit 1 ;; esac; echo $k >'($pending).tmp' && sync && mv -f '($pending).tmp' '($pending)' && sync && case $k in rollback-had) cp -p '($prev)' '($tmp)' && sync && mv -f '($tmp)' '($live)' && sync ;; rollback-none) rm -f '($live)' ;; esac")
+		if $back.exit_code != 0 {
+			print --stderr $"k3s-kubelet: the previous file could not be put back: ($back.stderr | str trim); ($pending) is kept"
+			return {code: 1}
+		}
+		let restarted = (do $restart)
+		if $restarted {
+			let r = (read-settled $node $want $polls $pause $lock)
+			if $r.state != "unreadable" {
+				must (sh $node $"rm -f '($pending)' '($prev)' '($tmp)'") $"removing ($pending) and ($prev) after the rollback" | ignore
+				print --stderr "k3s-kubelet: put the previous file back and restarted k3s"
+				return {code: 1}
+			}
+		}
+		print --stderr $"k3s-kubelet: the previous file is back but k3s did not restart or the kubelet does not answer; ($pending) and ($prev) are kept: apply again once k3s is up"
+		{code: 1}
+	}
+	# An interrupted rollback is finished before anything else: no new install, no check of the config that was rejected.
+	if $marked and not $check and ($phase | str starts-with "rollback") {
+		print "an earlier rollback did not finish: finishing it"
+		return (do $rollback)
 	}
 
 	if $current == $config {
@@ -327,25 +365,7 @@ def apply-locked [k: record, config: string, lock: string, --check, --node: stri
 	print --stderr $"k3s-kubelet: the kubelet does not report #Host's args: ($last.said)"
 	if not $changed { return {code: 1} }
 
-	# The only node: a config this run (or an earlier unchecked one) wrote and the kubelet did not take is put back, by a
-	# copy beside it and a rename, with the backup kept until the kubelet is known to answer. The marker says which; one
-	# that says neither stops here, with everything kept.
-	let back = (sh $node $"case \"$\(cat '($pending)' 2>/dev/null\)\" in had) cp -p '($prev)' '($tmp)' && sync && mv -f '($tmp)' '($live)' ;; none) rm -f '($live)' ;; *) echo 'the pending marker holds neither had nor none' >&2; exit 1 ;; esac")
-	if $back.exit_code != 0 {
-		print --stderr $"k3s-kubelet: the previous file could not be put back: ($back.stderr | str trim); ($pending) is kept"
-		return {code: 1}
-	}
-	let restarted = (do $restart)
-	if $restarted {
-		let r = (read-settled $node $want $polls $pause $lock)
-		if $r.state != "unreadable" {
-			must (sh $node $"rm -f '($pending)' '($prev)' '($tmp)'") $"removing ($pending) and ($prev) after the rollback" | ignore
-			print --stderr "k3s-kubelet: put the previous file back and restarted k3s"
-			return {code: 1}
-		}
-	}
-	print --stderr $"k3s-kubelet: the previous file is back but k3s did not restart or the kubelet does not answer; ($pending) and ($prev) are kept: apply again once k3s is up"
-	{code: 1}
+	return (do $rollback)
 }
 
 def "main apply" [host: path, --check, --node: string = "", --root: string = "", --polls: int = 60, --pause: duration = 2sec] {

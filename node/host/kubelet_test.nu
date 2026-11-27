@@ -41,6 +41,9 @@ def main [] {
 	test_a_failed_sync_after_the_rename_keeps_the_marker_and_the_backup
 	test_a_failed_login_stops_the_polling_and_nothing_else_is_swallowed
 	test_a_conflict_scan_that_fails_is_not_a_clean_result
+	test_an_interrupted_rollback_is_finished_before_anything_is_installed
+	test_a_heartbeat_that_fails_stops_the_run
+	test_an_answer_without_the_compared_fields_is_unreadable
 	test_check_changes_nothing
 	test_every_call_has_a_deadline
 	print "\nAll node kubelet tests passed."
@@ -143,11 +146,11 @@ def scenario [mode: string, start: record, --check, --df: int = 40, --df-img: in
 	do $nshim tee 'if [ "$MODE" = fulldisk ]; then head -c 12 >"$1"; exit 1; fi; if [ "$MODE" = shorttee ]; then head -c 12 >"$1"; exit 0; fi; exec /usr/bin/tee "$@"'
 	do $nshim sync 'd=$(dirname "$0")/..; n=$(cat "$d/synccount" 2>/dev/null || echo 0); echo $((n+1)) >"$d/synccount"; if [ "$MODE" = syncfail ] && [ "$n" -ge 2 ]; then exit 1; fi; exit 0'
 	do $nshim rm 'if [ "$MODE" = rmfail ]; then case "$*" in *pending*) exit 1;; esac; fi; exec /bin/rm "$@"'
-	do $nshim touch 'd=$(dirname "$0")/..; echo "$*" >>"$d/touch.log"; exec /usr/bin/touch "$@"'
+	do $nshim touch 'd=$(dirname "$0")/..; echo "$*" >>"$d/touch.log"; if [ "$MODE" = touchfail ]; then echo "touch: Read-only file system" >&2; exit 1; fi; exec /usr/bin/touch "$@"'
 	do $nshim mkdir 'd=$(dirname "$0")/..; if [ "$MODE" = nomkdir ] && [ "$1" = -p ]; then echo "mkdir: Permission denied" >&2; exit 1; fi; exec /bin/mkdir "$@"'
 	do $nshim timeout 'd=$(dirname "$0")/..; echo "$*" >>"$d/timeout.log"; shift; exec "$@"'
 	do $nshim df '[ "$DF_PCT" = -1 ] && exit 0; case "$*" in *-Pi*) p=$DFI_PCT;; *containerd*) p=$DF_IMG_PCT;; *) p=$DF_PCT;; esac; echo "Filesystem 1024-blocks Used Available Capacity Mounted"; echo "/dev/x 100 $p 100 ${p}% /"'
-	do $nshim kubectl 'd=$(dirname "$0")/..; echo "$*" >>"$d/kubectl.log"; case "$*" in *--raw*) n=$(cat "$d/kcount" 2>/dev/null || echo 0); if [ "$MODE" = flaky ] && [ "$n" -lt 1 ]; then echo $((n+1)) >"$d/kcount"; exit 1; fi; case "$MODE" in noapi) exit 1;; empty) exit 0;; esac; if [ "$MODE" != stuck ] && [ "$MODE" != stuckfail ] && [ -e "$d/running" ] && cmp -s "$d/running" "$d/desired.yaml"; then cat "$d/configz.new"; else cat "$d/configz.old"; fi;; *) echo node1;; esac'
+	do $nshim kubectl 'd=$(dirname "$0")/..; echo "$*" >>"$d/kubectl.log"; case "$*" in *--raw*) n=$(cat "$d/kcount" 2>/dev/null || echo 0); if [ "$MODE" = flaky ] && [ "$n" -lt 1 ]; then echo $((n+1)) >"$d/kcount"; exit 1; fi; case "$MODE" in noapi) exit 1;; empty) exit 0;; emptycfg) echo "{\\"kubeletconfig\\":{}}"; exit 0;; esac; if [ "$MODE" != stuck ] && [ "$MODE" != stuckfail ] && [ -e "$d/running" ] && cmp -s "$d/running" "$d/desired.yaml"; then cat "$d/configz.new"; else cat "$d/configz.old"; fi;; *) echo node1;; esac'
 	"" | save --raw ($dir | path join systemctl.log)
 	let img = if $df_img == -2 { $df } else { $df_img }
 	# An error out of apply-kubelet (the lock is released first) is code 99 with its message.
@@ -221,9 +224,9 @@ def test_an_unreadable_config_is_never_a_kubelet_that_took_the_file [] {
 def test_a_rollback_whose_restart_fails_keeps_the_marker [] {
 	print "test a rollback whose k3s restart fails is not settled: exit 1, the previous file back, the marker and backup kept..."
 	let r = (scenario stuckfail {live: "old: file\n"})
-	assert equal [$r.code $r.live $r.pending $r.prev $r.restarts] [1 "old: file\n" "had" "old: file\n" 2]
+	assert equal [$r.code $r.live $r.pending $r.prev $r.restarts] [1 "old: file\n" "rollback-had" "old: file\n" 2]
 	let none = (scenario stuckfail {})
-	assert equal [$none.code $none.live $none.pending $none.restarts] [1 null "none" 2]
+	assert equal [$none.code $none.live $none.pending $none.restarts] [1 null "rollback-none" 2]
 }
 
 def test_a_rerun_after_an_interrupted_apply_rolls_back_from_the_first_backup [] {
@@ -259,9 +262,9 @@ def test_a_rerun_with_the_marker_and_a_dead_kubelet_rolls_back [] {
 	let r = (scenario noapi {live: (desired), pending: "had\n", prev: "good: file\n"})
 	assert equal [$r.code $r.live $r.restarts] [1 "good: file\n" 1]
 	# The kubelet still does not answer after the rollback: nothing is settled, the marker and backup stay.
-	assert equal [$r.pending $r.prev] ["had" "good: file\n"]
+	assert equal [$r.pending $r.prev] ["rollback-had" "good: file\n"]
 	let none = (scenario empty {live: (desired), pending: "none\n"})
-	assert equal [$none.code $none.live $none.restarts $none.pending] [1 null 1 "none"]
+	assert equal [$none.code $none.live $none.restarts $none.pending] [1 null 1 "rollback-none"]
 }
 
 def test_the_marker_is_found_by_its_existence_and_read_only_to_roll_back [] {
@@ -368,6 +371,37 @@ def test_the_lock_is_touched_at_every_poll_and_restart [] {
 	let nodir = (scenario nomkdir {live: "old: file\n"})
 	assert equal $nodir.code 99
 	assert str contains $nodir.msg "cannot create"
+}
+
+def test_an_interrupted_rollback_is_finished_before_anything_is_installed [] {
+	print "test a run that finds a rollback that began (the process died after the restore) finishes it, and never installs the rejected config again..."
+	# The previous file is already back, the restart did not happen: restart, verify, settle; the desired config stays rejected.
+	let back = (scenario ok {live: "good: file\n", pending: "rollback-had\n", prev: "good: file\n"})
+	assert equal [$back.code $back.live $back.pending $back.prev $back.restarts] [1 "good: file\n" null null 1]
+	# The restore itself had not happened yet: the rejected file is still live; it is put back, not kept.
+	let early = (scenario ok {live: (desired), pending: "rollback-had\n", prev: "good: file\n"})
+	assert equal [$early.code $early.live $early.pending $early.restarts] [1 "good: file\n" null 1]
+	# There was no previous file: the rollback removes the live one, and does not write it again.
+	let none = (scenario ok {live: (desired), pending: "rollback-none\n"})
+	assert equal [$none.code $none.live $none.pending $none.restarts] [1 null null 1]
+	# A rollback that cannot be verified keeps its phase for the next run.
+	let dead = (scenario noapi {live: "good: file\n", pending: "rollback-had\n", prev: "good: file\n"})
+	assert equal [$dead.code $dead.live $dead.pending $dead.prev] [1 "good: file\n" "rollback-had" "good: file\n"]
+}
+
+def test_a_heartbeat_that_fails_stops_the_run [] {
+	print "test a lock heartbeat whose touch fails (not only 255) stops the run before it changes anything..."
+	let r = (scenario touchfail {live: "old: file\n"})
+	assert equal [$r.code $r.live $r.restarts] [99 "old: file\n" 0]
+	assert str contains $r.msg "lock heartbeat failed"
+}
+
+def test_an_answer_without_the_compared_fields_is_unreadable [] {
+	print "test a configz whose kubeletconfig is empty reads as unreadable: no restart on it, and it does not pass the rollback's check..."
+	let r = (scenario emptycfg {live: "old: file\n"})
+	assert equal [$r.code $r.live $r.restarts $r.pending] [1 "old: file\n" 0 null]
+	let rb = (scenario emptycfg {live: (desired), pending: "had\n", prev: "good: file\n"})
+	assert equal [$rb.code $rb.live $rb.pending $rb.prev $rb.restarts] [1 "good: file\n" "rollback-had" "good: file\n" 1]
 }
 
 def test_check_changes_nothing [] {
