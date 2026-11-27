@@ -9,9 +9,9 @@ const iso = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z');
 /**
  * Options: `pods`, [{ns, name, owner, containers, init, phase = Running, deleting, ageSec = 3600}]; `injector`, the injector's ready
  * replicas as kubectl prints them ("1", "" for none); `rs`, {"ns/replicaset": "Deployment/name"}; `marks`, {"ns.Deployment.name":
- * minutes since it was rolled}; `failRoll`, workloads whose roll fails; `args`; `cooldown`, `grace`; `namespaces`, the ones swept (aprende and bonk).
+ * minutes since it was rolled}; `failRoll`, workloads whose roll fails; `args`; `cooldown`, `grace`; `namespaces`, the ones swept (aprende and bonk); `failRs`, every ReplicaSet read fails; `readonlyState`, the marks' folder cannot be written; `rollError`, what a failed restart says; `noStateDir`, there is none yet (`stateCreated` says whether the run made it).
  */
-export const run = ({ pods = [], injector = '1', rs = {}, marks = {}, failRoll = [], args = [], cooldown = 30, grace = 120, namespaces = ['aprende', 'bonk'] } = {}) => {
+export const run = ({ pods = [], injector = '1', rs = {}, marks = {}, failRoll = [], args = [], cooldown = 30, grace = 120, namespaces = ['aprende', 'bonk'], rollError = 'the server rejected our request', failRs = false, readonlyState = false, noStateDir = false } = {}) => {
   const dir = Deno.makeTempDirSync();
   try {
     const now = Date.now();
@@ -20,8 +20,10 @@ export const run = ({ pods = [], injector = '1', rs = {}, marks = {}, failRoll =
     Deno.writeTextFileSync(`${dir}/injector`, injector);
     Deno.writeTextFileSync(`${dir}/fail`, failRoll.map((f) => `${f}\n`).join(''));
     Deno.writeTextFileSync(`${dir}/calls`, '');
+    Deno.writeTextFileSync(`${dir}/rollerror`, rollError);
+    if (failRs) Deno.writeTextFileSync(`${dir}/failrs`, '');
     for (const [k, v] of Object.entries(rs)) Deno.writeTextFileSync(`${dir}/rs.${k.replace('/', '.')}`, v);
-    Deno.mkdirSync(`${dir}/state`);
+    if (!noStateDir || Object.keys(marks).length) Deno.mkdirSync(`${dir}/state`);
     for (const [name, minutes] of Object.entries(marks)) {
       Deno.writeTextFileSync(`${dir}/state/${name}`, '');
       const at = new Date(now - minutes * 60000);
@@ -33,13 +35,14 @@ echo "$*" >>"$d/calls"
 case "$*" in
   *"get pods"*) grep "^$(echo "$*" | sed -E 's/.*-n ([^ ]+) get pods.*/\\1/')|" "$d/pods" || true ;;
   *"-n dapr-system get deployment dapr-sidecar-injector"*) printf '%s' "$(cat "$d/injector")" ;;
-  *"get replicaset "*) printf '%s' "$(cat "$d/rs.$(echo "$*" | sed -E 's/.*-n ([^ ]+) get replicaset ([^ ]+) .*/\\1.\\2/')" 2>/dev/null)" ;;
-  *"rollout restart "*) w=$(echo "$*" | sed -E 's/.*-n ([^ ]+) rollout restart (.*)/\\1\\/\\2/'); if grep -qxF "$w" "$d/fail"; then exit 1; fi; echo "$w" >>"$d/rolled" ;;
+  *"get replicaset "*) if [ -e "$d/failrs" ]; then echo "the server is not answering" >&2; exit 1; fi; printf '%s' "$(cat "$d/rs.$(echo "$*" | sed -E 's/.*-n ([^ ]+) get replicaset ([^ ]+) .*/\\1.\\2/')" 2>/dev/null)" ;;
+  *"rollout restart "*) w=$(echo "$*" | sed -E 's/.*-n ([^ ]+) rollout restart (.*)/\\1\\/\\2/'); if grep -qxF "$w" "$d/fail"; then cat "$d/rollerror" >&2; exit 1; fi; echo "$w" >>"$d/rolled" ;;
   *) echo "unexpected: $*" >&2; exit 9 ;;
 esac
 `);
     Deno.chmodSync(`${dir}/kubectl`, 0o755);
     Deno.writeTextFileSync(`${dir}/env`, `KUBECTL='${dir}/kubectl'\nNAMESPACES='${namespaces.join(' ')}'\nGRACE_SECONDS=${grace}\nCOOLDOWN_MINUTES=${cooldown}\n`);
+    if (readonlyState) Deno.chmodSync(`${dir}/state`, 0o555);
     const r = new Deno.Command('bash', {
       args: [script, ...args], stdout: 'piped', stderr: 'piped',
       env: { DAPR_HEAL_ENV: `${dir}/env`, DAPR_HEAL_STATE: `${dir}/state`, PATH: '/usr/bin:/bin' },
@@ -48,8 +51,10 @@ esac
     let rolled = [];
     try { rolled = Deno.readTextFileSync(`${dir}/rolled`).trim().split('\n'); } catch { /* none rolled */ }
     const marked = [];
-    for (const e of Deno.readDirSync(`${dir}/state`)) marked.push(e.name);
-    return { code: r.code, out: dec.decode(r.stdout), err: dec.decode(r.stderr), rolled, marked: marked.sort() };
+    if (readonlyState) Deno.chmodSync(`${dir}/state`, 0o755);
+    let stateCreated = false;
+    try { Deno.statSync(`${dir}/state`); stateCreated = true; for (const e of Deno.readDirSync(`${dir}/state`)) marked.push(e.name); } catch { /* none */ }
+    return { stateCreated, code: r.code, out: dec.decode(r.stdout), err: dec.decode(r.stderr), rolled, marked: marked.sort() };
   } finally {
     Deno.removeSync(dir, { recursive: true });
   }
