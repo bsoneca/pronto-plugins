@@ -33,6 +33,7 @@ def main [] {
 	test_the_dapr_sidecar_repair_is_a_second_timer_of_the_same_host
 	test_a_host_that_drops_daprHeal_loses_its_timer_and_files
 	test_removal_keeps_the_files_unless_systemd_says_the_timer_is_stopped
+	test_removal_decides_a_timer_is_absent_by_its_file
 	print "\nAll node host tests passed."
 }
 
@@ -183,6 +184,7 @@ case "$1" in
   is-enabled | is-active)
     case "$*" in
       *dapr-heal*)
+        if [ -n "$NOTFOUND" ] && [ ! -e "$d/heal.on" ]; then if [ "$1" = is-active ]; then echo inactive; exit 3; else echo not-found; exit 4; fi; fi
         if [ -n "$UNREADABLE" ]; then echo "Failed to connect to bus" >&2; exit 1; fi
         if [ -e "$d/heal.on" ]; then if [ "$1" = is-active ]; then echo active; else echo enabled; fi; exit 0; fi
         if [ "$1" = is-active ]; then echo inactive; exit 3; else echo disabled; exit 1; fi ;;
@@ -553,5 +555,31 @@ def test_removal_keeps_the_files_unless_systemd_says_the_timer_is_stopped [] {
 			assert equal (apply (defaults) --root $root | length) 4
 			for f in $heal_files { assert (not ($root + $f | path exists)) $"($f) removed on the retry" }
 		}
+	}
+}
+
+def test_removal_decides_a_timer_is_absent_by_its_file [] {
+	print "test a timer whose file is already gone is absent whatever systemd calls it (not-found), and one whose file is there is not..."
+	let dir = (tmp)
+	fake-systemctl $dir
+	let root = ($dir | path join root)
+	with-env {PATH: $"($dir | path join bin):($env.PATH | str join ':')"} {
+		apply (with-heal) --root $root | ignore
+		rm -f ($root + "/etc/systemd/system/pronto-dapr-heal.timer")
+		rm -f ($dir | path join heal.on)
+		let applied = (with-env {NOTFOUND: "1"} { apply (defaults) --root $root })
+		assert equal ($applied | length) 3
+		for f in ["/etc/pronto/dapr-heal.env" "/usr/local/lib/pronto/dapr-heal.sh" "/etc/systemd/system/pronto-dapr-heal.service"] { assert (not ($root + $f | path exists)) $"($f) removed" }
+	}
+	# With the timer's file there, systemd saying not-found is not "disabled": the files stay.
+	let dir2 = (tmp)
+	fake-systemctl $dir2
+	let root2 = ($dir2 | path join root)
+	with-env {PATH: $"($dir2 | path join bin):($env.PATH | str join ':')"} {
+		apply (with-heal) --root $root2 | ignore
+		rm -f ($dir2 | path join heal.on)
+		let failed = (try { with-env {NOTFOUND: "1"} { apply (defaults) --root $root2 }; "applied" } catch {|e| $e.msg })
+		assert str contains $failed "is not disabled"
+		assert ($root2 + "/etc/pronto/dapr-heal.env" | path exists) "files kept"
 	}
 }

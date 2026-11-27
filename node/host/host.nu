@@ -197,7 +197,10 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 				let enabled = (sh $node $"systemctl is-enabled ($heal_unit)")
 				if $enabled.exit_code == 255 { error make {msg: $"node-host: asking whether ($heal_unit) is enabled: ($enabled.stderr | str trim)"} }
 				let e = ($enabled.stdout | str trim)
-				let absent = ($e == "" and ($enabled.stderr | str contains "No such file"))
+				# Absent is a fact about the file, not systemd's wording (newer versions say not-found): with the timer's file already gone, no state
+				# or `not-found` is what a unit that is not loaded gives.
+				let timer_there = ((must (sh $node $"if [ -e '($root + $heal_timer)' ]; then echo yes; fi") $"looking for ($root + $heal_timer)" | str trim) == "yes")
+				let absent = (not $timer_there and $e in ["" "not-found"])
 				if not ($absent or $e in ["disabled" "masked" "masked-runtime"]) { error make {msg: $"node-host: ($heal_unit) is not disabled \(($e), ($enabled.stderr | str trim)\): its files are kept"} }
 				for f in $left { must (sh $node $"rm -f '($root + $f)'") $"removing ($root + $f)" | ignore; print $"removed ($root + $f)" }
 				$changed = true

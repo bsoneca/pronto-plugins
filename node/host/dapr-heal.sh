@@ -122,6 +122,12 @@ fi
 [ "$dry" = 1 ] || mkdir -p "$state"
 while IFS='|' read -r ns owner ouid; do
   [ -n "$ns" ] || continue
+  # What the pods' text said is checked again where it is used: a name with a newline in it can forge a line of that inventory, so the namespace
+  # must be one that is swept, and the owner and its uid what Kubernetes writes, before anything is asked of the API.
+  case " $NAMESPACES " in *" $ns "*) ;; *) echo "dapr-heal: '$ns' is not a swept namespace: not rolled" >&2; failed=1; continue ;; esac
+  if ! [[ $owner =~ ^(Deployment|StatefulSet|DaemonSet)/[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || ! [[ $ouid =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    echo "dapr-heal: $ns: an owner or uid that is not a workload's name and a uid: not rolled" >&2; failed=1; continue
+  fi
   mark="$state/$ns.${owner//\//.}"
   # The live workload, not the pod's word for it: its uid is the owner reference's, its template asks for the sidecar, and when it was last
   # restarted (the annotation `rollout restart` writes).

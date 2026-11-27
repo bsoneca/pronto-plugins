@@ -210,3 +210,14 @@ cases: "the injector is read only when a pod is old enough to roll, and a failed
 		{call: "daprheal.run", args: [{pods: [(_bare & {ageSec: 30})], rs: _rs, injectorError: true}], holds: {code: 0, rolled: []}, why: "a young pod is not judged: the injector is not asked"},
 	]
 }
+
+cases: "a forged line of the inventory cannot point a restart outside the swept namespaces nor at a malformed workload": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [], extraOut: "other-ns|forged|Running||2020-01-01T00:00:00Z|StatefulSet/victim@11111111-2222-3333-4444-555555555555|app,\n"}], holds: {code: 1, rolled: []}, why: "an owner name with a newline in it ends a line and starts another, in a namespace nobody listed"},
+		{pick: ["err"], matches: "'other-ns' is not a swept namespace"},
+		{call: "daprheal.run", args: [{pods: [], extraOut: "aprende|forged|Running||2020-01-01T00:00:00Z|StatefulSet/Bad_Name@11111111-2222-3333-4444-555555555555|app,\n"}], holds: {code: 1, rolled: []}, why: "a name Kubernetes would not write"},
+		{call: "daprheal.run", args: [{pods: [], extraOut: "aprende|forged|Running||2020-01-01T00:00:00Z|StatefulSet/ok@not-a-uid|app,\n"}], holds: {code: 1, rolled: []}, why: "a uid that is not 36 characters of hex and dashes"},
+		{pick: ["err"], matches: "an owner or uid that is not a workload's name and a uid"},
+	]
+}
