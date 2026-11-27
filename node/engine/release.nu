@@ -811,8 +811,12 @@ export def check-tracked-seeds [app_dir: string, seeds: list] {
 	for s in $seeds {
 		let rel = ($s.file | path expand | path relative-to $root)
 		if ($s.file | path type) != "file" { error make {msg: $"Node.services seeds the ConfigMap ($s.name) from ($s.path), which is not a regular file"} }
-		let tracked = (do { cd $root; ^env -i ...(render tenant-env) $git ls-files --error-unmatch -- $rel } | complete)
+		# literal pathspecs: the name is a file's, never a glob or a magic pathspec
+		let tracked = (do { cd $root; ^env -i ...(render tenant-env) GIT_LITERAL_PATHSPECS=1 $git ls-files --error-unmatch -- $rel } | complete)
 		if $tracked.exit_code != 0 { error make {msg: $"Node.services seeds the ConfigMap ($s.name) from ($s.path), which is not a file git tracks: a seed is never an ignored or untracked file"} }
+		# …as the commit holds it: content written over a tracked file is not what was reviewed (a failed comparison, with no commit to hold it to, refuses too)
+		let same = (do { cd $root; ^env -i ...(render tenant-env) GIT_LITERAL_PATHSPECS=1 $git diff --quiet HEAD -- $rel } | complete)
+		if $same.exit_code != 0 { error make {msg: $"Node.services seeds the ConfigMap ($s.name) from ($s.path), which differs from the commit: a seed is the file as the release's commit holds it"} }
 	}
 }
 

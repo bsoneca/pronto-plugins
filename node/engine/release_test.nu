@@ -2722,12 +2722,13 @@ def test_a_tenants_objects_hand_their_life_to_no_one_and_hold_no_reserved_name [
 		{obj: '{apiVersion: external-secrets.io/v1, kind: ExternalSecret, metadata: {name: e, namespace: ns}, spec: {target: {template: {metadata: {finalizers: [example.com/hold]}}}}}', says: "ExternalSecret/e sets spec.target.template.metadata.finalizers"}
 		{obj: '{apiVersion: external-secrets.io/v1, kind: ExternalSecret, metadata: {name: e, namespace: ns}, spec: {target: {manifest: {apiVersion: v1, kind: Secret}}}}', says: "ExternalSecret/e sets spec.target.manifest"}
 		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: "--kubeconfig=/tmp/x", namespace: ns}}', says: "is not named as a Kubernetes resource is"}
+		{obj: '{apiVersion: postgresql.cnpg.io/v1, kind: Cluster, metadata: {name: c, namespace: ns}, spec: {imageName: "127.0.0.1:5000/ns/db:17"}}', says: "Cluster/c runs 127.0.0.1:5000/ns/db:17, which is pinned by tag alone"}
 		{obj: '{apiVersion: v1, kind: ServiceAccount, metadata: {name: publisher, namespace: ns}}', says: "ServiceAccount/publisher is an object the provisioner or the engine owns"}
 		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: pronto-release, namespace: ns}, immutable: true}', says: "ConfigMap/pronto-release is an object the provisioner or the engine owns"}
 		{obj: '{apiVersion: v1, kind: ConfigMap, metadata: {name: kube-root-ca.crt, namespace: ns}}', says: "ConfigMap/kube-root-ca.crt is an object the provisioner or the engine owns"}
 	]
 	for c in $cases {
-		let body = $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.obj)] {namespace: ns} [v1/ConfigMap v1/ServiceAccount apps/v1/Deployment batch/v1/CronJob external-secrets.io/v1/ExternalSecret]"
+		let body = $"use ($engine_dir | path join tenant.nu); tenant check-objects [($c.obj)] {namespace: ns} [v1/ConfigMap v1/ServiceAccount apps/v1/Deployment batch/v1/CronJob external-secrets.io/v1/ExternalSecret postgresql.cnpg.io/v1/Cluster]"
 		let r = (in-world $w -c $body)
 		assert ($r.exit_code != 0) $"($c.obj) was not refused"
 		assert (has $r.stderr $c.says) $"($c.obj): ($r.stderr)"
@@ -2807,7 +2808,7 @@ def test_a_tenants_seed_is_a_file_git_tracks [] {
 	".certs/\n" | save -f ($app | path join .gitignore)
 	"{}\n" | save -f ($app | path join data untracked.json)
 	"{}\n" | save -f ($app | path join data tracked.json)
-	do { cd $app; ^git add .gitignore data/tracked.json } | complete | ignore
+	do { cd $app; ^git add .gitignore data/tracked.json; ^git -c user.name=t -c user.email=t@example.test commit -q -m seed } | complete | ignore
 	let check = {|rel: string| in-world $w -c (script $w $"check-tracked-seeds '($app)' [{name: x, path: '($rel)', file: '($app | path join $rel)'}]") }
 	for row in [{rel: ".certs/key.pem", why: "an ignored key"} {rel: "data/untracked.json", why: "an untracked file"}] {
 		let r = (do $check $row.rel)
@@ -2816,6 +2817,23 @@ def test_a_tenants_seed_is_a_file_git_tracks [] {
 	}
 	let ok = (do $check "data/tracked.json")
 	assert equal $ok.exit_code 0 $"($ok.stdout)\n($ok.stderr)"
+	# a tracked file with content written over it is not what the commit holds
+	"{\"changed\": true}\n" | save -f ($app | path join data tracked.json)
+	let changed = (do $check "data/tracked.json")
+	assert ($changed.exit_code != 0) "a modified tracked seed was not refused"
+	assert (has $changed.stderr "which differs from the commit") $changed.stderr
+	do { cd $app; ^git checkout -q -- data/tracked.json } | complete | ignore
+	# a seed reached through a link: seed-files resolves it, so one inside the folder is judged as the file it names (here untracked, refused)
+	# and one that leads out of the folder is refused
+	^ln -s untracked.json ($app | path join data link-in.json)
+	^ln -s /etc/hosts ($app | path join data link-out.json)
+	let through = {|rel: string| in-world $w -c (script $w $"let seeds = \(seed-files '($app)' {services: {a: {seed: {x: '($rel)'}}}}\); check-tracked-seeds '($app)' $seeds") }
+	let inside = (do $through "data/link-in.json")
+	assert ($inside.exit_code != 0) "a link to an untracked file was not refused"
+	assert (has $inside.stderr "which is not a file git tracks") $inside.stderr
+	let outside = (do $through "data/link-out.json")
+	assert ($outside.exit_code != 0) "a link out of the folder was not refused"
+	assert (has $outside.stderr "resolves outside") $outside.stderr
 	rm -rf $w.dir
 }
 
