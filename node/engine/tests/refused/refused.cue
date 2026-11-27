@@ -72,7 +72,12 @@ serviceScratchClimbs:   schema.#Release & _base & {services: billing: {port: 868
 serviceScratchSize:     schema.#Release & _base & {services: billing: {port: 8688, scratch: "/workspace": "lots"}}
 serviceEgressNoPort:    schema.#Release & _base & {services: billing: {port: 8688, egress: [{cidr: "10.0.0.0/8"}]}}
 serviceEgressBadCIDR:   schema.#Release & _base & {services: billing: {port: 8688, egress: [{cidr: "everywhere", port: 80}]}}
-serviceGoogleProvider:  schema.#Release & _base & {services: billing: {port: 8688, google: {provider: "x", serviceAccount: "b@p.iam.gserviceaccount.com"}}}
+serviceEgressBoth:         schema.#Release & _base & {services: billing: {port: 8688, egress: [{cidr: "10.0.0.0/8", namespace: "envoy-gateway-system", podLabels: {a: "b"}, port: 80}]}}
+serviceEgressNeither:      schema.#Release & _base & {services: billing: {port: 8688, egress: [{port: 80}]}}
+serviceEgressNamespace:    schema.#Release & _base & {services: billing: {port: 8688, egress: [{namespace: "kube-system", podLabels: {a: "b"}, port: 80}]}}
+serviceEgressNoLabels:     schema.#Release & _base & {services: billing: {port: 8688, egress: [{namespace: "envoy-gateway-system", port: 80}]}}
+serviceEgressExceptNs:     schema.#Release & _base & {services: billing: {port: 8688, egress: [{namespace: "envoy-gateway-system", podLabels: {a: "b"}, except: ["10.0.0.0/8"], port: 80}]}}
+serviceGoogleProvider:schema.#Release & _base & {services: billing: {port: 8688, google: {provider: "x", serviceAccount: "b@p.iam.gserviceaccount.com"}}}
 // PRONTO-1882: jail, google and egress are Studio's builder's alone, refused through #Manifests (the objects themselves).
 _google: {provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "b@p.iam.gserviceaccount.com"}
 _egress: [{cidr: "10.0.0.0/8", port: 80}]

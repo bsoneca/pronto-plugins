@@ -79,6 +79,10 @@ import (
 // objects the provisioner and the engine own, which a release neither writes nor seeds: the publisher's account, the namespace's record
 // of the release and the root CA bundle every namespace gets.
 #TenantRefusedMetadata: ["ownerReferences", "finalizers"]
+
+// The namespaces a service's egress may name instead of an address block: the Envoy Gateway's, whose data-plane pods a live release's door
+// check dials from the pod it runs in. Another is a change here, never an app's.
+#EgressNamespaces: ["envoy-gateway-system"]
 #TenantReserved: [
 	{kind: "ServiceAccount", name: "publisher"},
 	{kind: "ConfigMap", name: "pronto-release"},
@@ -281,11 +285,16 @@ import (
 	egress: *[] | [...{
 		cidr?:      =~"^[0-9.]+/[0-9]+$"
 		except:     *[] | [...=~"^[0-9.]+/[0-9]+$"]
-		namespace?: =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+		namespace?: or([for n in #EgressNamespaces {n}])
 		podLabels:  *{} | {[string]: string}
 		port!:      int & >0 & <65536
 		// exactly one of an address block and a namespace
 		_one: true & (len([if cidr != _|_ {1}, if namespace != _|_ {1}]) == 1)
+		// a namespace's rule names the pods it admits (never every pod of it), and leaves out nothing; `except` belongs to an address block
+		if namespace != _|_ {
+			_labelled: true & (len(podLabels) > 0)
+			except:    []
+		}
 	}]
 	// Folders of the pod's own, empty at each start, by path, with the most each may hold (a builder's workspace: clones,
 	// toolchains, a game's checks): an emptyDir each.
