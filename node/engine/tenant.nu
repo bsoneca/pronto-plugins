@@ -327,7 +327,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 		}
 		if ($o.kind? | default "") == "Cluster" {
 			let image = ($o.spec?.imageName? | default "")
-			if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) runs ($image), not an image under ($prefix)") }
+			if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) runs ($image), not an image under ($prefix)") } else if not ($image =~ '@sha256:[0-9a-f]{64}$') { $why = ($why | append $"($id) runs ($image), which is pinned by tag alone: a tenant's image carries its sha256 digest") }
 			# a Service the operator makes for the database must stay inside the cluster: a LoadBalancer or NodePort one would publish it
 			let outward = ($o.spec?.managed?.services?.additional? | default [] | where {|a| ($a.serviceTemplate?.spec?.type? | default "ClusterIP") != "ClusterIP" or ($a.serviceTemplate?.spec?.externalIPs? | default [] | is-not-empty) })
 			if ($outward | is-not-empty) { $why = ($why | append $"($id) has a managed Service that is not a ClusterIP, or names externalIPs") }
@@ -358,7 +358,7 @@ export def check-objects [objects: list, node: record, kinds: list<string>] {
 			let containers = (($spec.containers? | default []) | append ($spec.initContainers? | default []) | append ($spec.ephemeralContainers? | default []))
 			for c in $containers {
 				let image = ($c.image? | default "")
-				if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) container ($c.name? | default '?') runs ($image), not an image under ($prefix)") }
+				if not ($image | str starts-with $prefix) { $why = ($why | append $"($id) container ($c.name? | default '?') runs ($image), not an image under ($prefix)") } else if not ($image =~ '@sha256:[0-9a-f]{64}$') { $why = ($why | append $"($id) container ($c.name? | default '?') runs ($image), which is pinned by tag alone: a tenant's image carries its sha256 digest") }
 				if ($c.securityContext?.procMount? | default "Default") != "Default" { $why = ($why | append $"($id) container ($c.name? | default '?') sets procMount ($c.securityContext.procMount)") }
 				if ($c.securityContext?.privileged? | default false) == true { $why = ($why | append $"($id) container ($c.name? | default '?') is privileged") }
 				# Absent is not false: the API server lets a container escalate unless it says it may not. `harden-objects` says so before this runs.
@@ -436,24 +436,40 @@ export def check-namespace [node: record] {
 # and the registry's lease (a path that builds, the only one that asks at all) and, with `--door` (a live release: a check never checks the
 # door), the Envoy Gateway's Service reads and, off the cluster, its data plane's port-forward.
 export def check-push-rights [node: record, push_kubeconfig: string, --door] {
+	# A live release run in the builder pod (no push kubeconfig) checks the door by dialling the gateway's Service from the pod, which the
+	# pod's NetworkPolicy must admit: a builder says so with PRONTO_BUILDER_GATEWAY_EGRESS=1, set only where its policy reaches the gateway's
+	# data plane. Without it the rollout would run and the door check time out after it, so it is refused before anything is built or written.
+	if $door and ($push_kubeconfig | is-empty) and (($env.PRONTO_BUILDER_GATEWAY_EGRESS? | default "") != "1") {
+		error make {msg: "this builder pod does not declare that its network policy reaches the Envoy Gateway (PRONTO_BUILDER_GATEWAY_EGRESS=1), so a live tenant release's door check could not run after the rollout: release from a builder whose policy does, or with --push-kubeconfig"}
+	}
 	with-push $push_kubeconfig {
 		let registry = $node.build.registry.namespace
 		# Off the cluster (a kubeconfig is given) the door check forwards to the gateway's pod; in the builder pod it dials the Service's
 		# ClusterIP, so the pod's account needs no port-forward in the gateway's namespace.
 		let forward = ($door and ($push_kubeconfig | is-not-empty))
+		let push_role = "studio-builder-push"
+		let gateway_role = "studio-builder-gateway"
 		for ask in ([
-			{verb: "create pods/portforward", args: [create pods --subresource=portforward -n $registry], where: $registry}
-			{verb: "create leases.coordination.k8s.io", args: [create leases.coordination.k8s.io -n $registry], where: $registry}
+			# the registry's pod is found by label and forwarded to
+			{verb: "get pods", args: [get pods -n $registry], where: $registry, role: $push_role}
+			{verb: "list pods", args: [list pods -n $registry], where: $registry, role: $push_role}
+			{verb: "create pods/portforward", args: [create pods --subresource=portforward -n $registry], where: $registry, role: $push_role}
+			{verb: "create leases.coordination.k8s.io", args: [create leases.coordination.k8s.io -n $registry], where: $registry, role: $push_role}
 			# the lease is acquired (create), read (get), renewed (patch) and released (delete); listing and replacing leases are the collector's alone
-			{verb: "get leases.coordination.k8s.io", args: [get leases.coordination.k8s.io -n $registry], where: $registry}
-			{verb: "patch leases.coordination.k8s.io", args: [patch leases.coordination.k8s.io -n $registry], where: $registry}
-			{verb: "delete leases.coordination.k8s.io", args: [delete leases.coordination.k8s.io -n $registry], where: $registry}
+			{verb: "get leases.coordination.k8s.io", args: [get leases.coordination.k8s.io -n $registry], where: $registry, role: $push_role}
+			{verb: "patch leases.coordination.k8s.io", args: [patch leases.coordination.k8s.io -n $registry], where: $registry, role: $push_role}
+			{verb: "delete leases.coordination.k8s.io", args: [delete leases.coordination.k8s.io -n $registry], where: $registry, role: $push_role}
 		] | append (if $door { [
 			# the door check lists the gateway's Services by label, and reads each
-			{verb: "get services", args: [get services -n envoy-gateway-system], where: "envoy-gateway-system"}
-			{verb: "list services", args: [list services -n envoy-gateway-system], where: "envoy-gateway-system"}
-		] } else { [] }) | append (if $forward { [{verb: "create pods/portforward", args: [create pods --subresource=portforward -n envoy-gateway-system], where: "envoy-gateway-system"}] } else { [] })) {
-			if not (can-i ...$ask.args) { error make {msg: $"the push identity may not ($ask.verb) in ($ask.where): it needs the Role studio-builder-push \(services/buildkit-tenants\)"} }
+			{verb: "get services", args: [get services -n envoy-gateway-system], where: "envoy-gateway-system", role: $gateway_role}
+			{verb: "list services", args: [list services -n envoy-gateway-system], where: "envoy-gateway-system", role: $gateway_role}
+		] } else { [] }) | append (if $forward { [
+			# forwarding to a Service finds a pod behind it, then forwards to that pod
+			{verb: "get pods", args: [get pods -n envoy-gateway-system], where: "envoy-gateway-system", role: $gateway_role}
+			{verb: "list pods", args: [list pods -n envoy-gateway-system], where: "envoy-gateway-system", role: $gateway_role}
+			{verb: "create pods/portforward", args: [create pods --subresource=portforward -n envoy-gateway-system], where: "envoy-gateway-system", role: $gateway_role}
+		] } else { [] })) {
+			if not (can-i ...$ask.args) { error make {msg: $"the push identity may not ($ask.verb) in ($ask.where): it needs the Role ($ask.role) \(services/buildkit-tenants\)"} }
 		}
 	}
 }
