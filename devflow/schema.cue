@@ -134,6 +134,8 @@ devFlow: #DevFlow
 		// An incident open longer than this is stale.
 		staleHours: *24 | (number & >0)
 		apps: [string]: string
+		// Policies whose `app` or `owner` label is listed are never filed (an app on hold, whose policies await deletion).
+		ignore: *[] | [...string]
 		sources: [...{prefix: string, cue: string}]
 		// The board's priority word of each class.
 		priority: {

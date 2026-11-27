@@ -216,8 +216,8 @@ flagsWatch: {
 alertsWatch: {
 	absent:   (_existing.alerts == _|_) & true
 	_alerts:  (_existing & {alerts: {projects: ["brawl-chess"]}}).alerts
-	defaults: _alerts & {flapOpens: 3, flapCloseMin: 30, staleHours: 24, apps: {}, sources: [], priority: {outage: "urgent", flapping: "high", stale: "medium"}}
-	own: (_existing & {alerts: {projects: ["brawl-chess", "demo-proj"], flapOpens: 5, staleHours: 12, apps: {battlechess: "brawl-chess"}, sources: [{prefix: "", cue: "infra/gcp/prodwatch.cue"}], priority: {outage: "high"}}}).alerts & {flapOpens: 5, staleHours: 12, priority: {outage: "high", flapping: "high", stale: "medium"}, apps: battlechess: "brawl-chess"}
+	defaults: _alerts & {flapOpens: 3, flapCloseMin: 30, staleHours: 24, apps: {}, ignore: [], sources: [], priority: {outage: "urgent", flapping: "high", stale: "medium"}}
+	own: (_existing & {alerts: {projects: ["brawl-chess", "demo-proj"], flapOpens: 5, staleHours: 12, apps: {battlechess: "brawl-chess"}, ignore: ["ume_rental"], sources: [{prefix: "", cue: "infra/gcp/prodwatch.cue"}], priority: {outage: "high"}}}).alerts & {ignore: ["ume_rental"], flapOpens: 5, staleHours: 12, priority: {outage: "high", flapping: "high", stale: "medium"}, apps: battlechess: "brawl-chess"}
 	// A project that is no project id, a threshold that is not above zero, a source whose file is no name: refused.
 	badProject:   ((_existing & {alerts: {projects: ["Brawl Chess"]}}).alerts == _|_) & true
 	shortProject: ((_existing & {alerts: {projects: ["abc"]}}).alerts == _|_) & true

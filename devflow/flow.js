@@ -636,7 +636,7 @@ export function alertApp(labels, apps = {}) {
 /** What each alert policy is doing, from its incidents: `incidents` are `{policy, display, labels, state, openTime,
  * closeTime}` (the policy's name and display name, its user labels, `OPEN` or `CLOSED`, ISO times), the read of the
  * last 48 hours and what is open now. `rules`: `{flapOpens, flapCloseMin, staleHours, apps}`. One row a policy, in
- * the order the policies first appear: `{policy, display, app, class, opens, openSince}`. The class, first that
+ * the order the policies first appear (a policy whose `app` or `owner` label is in `rules.ignore`, default none, has no row): `{policy, display, app, class, opens, openSince}`. The class, first that
  * holds: `flapping` (more than `flapOpens` opens in the last 24 hours, or two closes within `flapCloseMin` minutes
  * of each other), `stale` (an incident open longer than `staleHours`), `outage` (an incident open now), else `ok`.
  * `opens` is the opens in the last 24 hours; `openSince` the oldest open incident's open time, else the first open
@@ -645,7 +645,9 @@ export function alertClass(incidents, now, rules) {
   const t = (at) => Date.parse(at ?? "");
   const at = new Date(now).getTime();
   const by = new Map();
+  const ignored = (labels) => ["app", "owner"].some((k) => (rules.ignore ?? []).includes(labels?.[k]));
   for (const i of incidents) {
+    if (ignored(i.labels)) continue;
     if (!by.has(i.policy)) by.set(i.policy, []);
     by.get(i.policy).push(i);
   }

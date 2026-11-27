@@ -41,7 +41,7 @@ export interface DevFlow {
   flagsRepo: string;
   flagsHeld: { app: string; flag: string; why: string }[];
   /** The alerts watch, when the repository has one (schema.cue). */
-  alerts?: { projects: string[]; flapOpens: number; flapCloseMin: number; staleHours: number; apps: Record<string, string>; sources: { prefix: string; cue: string }[]; priority: { outage: string; flapping: string; stale: string } };
+  alerts?: { projects: string[]; flapOpens: number; flapCloseMin: number; staleHours: number; apps: Record<string, string>; ignore: string[]; sources: { prefix: string; cue: string }[]; priority: { outage: string; flapping: string; stale: string } };
   /** Hours without a commit or a pull request after which an issue holding a slot is stuck. */
   stuckHours: number;
   chore: string;

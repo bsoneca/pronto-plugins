@@ -6,7 +6,7 @@ package unit
 
 import "list"
 
-_alertRules: {flapOpens: 3, flapCloseMin: 30, staleHours: 24, apps: {battlechess: "brawl-chess", "bonk-chess": "brawl-chess"}}
+_alertRules: {ignore: [...string], flapOpens: 3, flapCloseMin: 30, staleHours: 24, apps: {battlechess: "brawl-chess", "bonk-chess": "brawl-chess"}}
 _alertNow: "2026-11-27T20:00:00Z"
 _alertLabels: {app: "battlechess", owner: "bonk-chess", severity: "page"}
 // 32 opens in eight hours, a quarter hour apart, each closed five minutes after.
@@ -35,6 +35,10 @@ cases: {
 		{call: "devflow.alertClass", args: [[{policy: "p/1", display: "a", labels: {}, state: "CLOSED", openTime: "2026-11-20T10:00:00Z", closeTime: "2026-11-20T11:00:00Z"}], _alertNow, _alertRules]}, {pick: ["0.class", "0.opens", "0.openSince"], expect: ["ok", 0, "2026-11-20T10:00:00.000Z"], why: "an open from a week ago, closed, is not counted in the last 24 hours"},
 		{call: "devflow.alertClass", args: [[{policy: "p/1", display: "a", labels: {}, state: "OPEN", openTime: "2026-11-27T19:00:00Z"}], _alertNow, {flapOpens: 3, flapCloseMin: 30, staleHours: 0.5, apps: {}}]}, {pick: ["0.class"], expect: ["stale"], why: "staleHours is the flow's"},
 		{call: "devflow.alertClass", args: [[{policy: "p/1", display: "a", labels: {owner: "bonk-chess"}, state: "OPEN", openTime: "2026-11-27T19:55:00Z"}, {policy: "p/2", display: "b", labels: {app: "x", owner: "bonk-chess"}, state: "OPEN", openTime: "2026-11-27T19:55:00Z"}], _alertNow, _alertRules]}, {pick: ["0.app", "1.app"], expect: ["brawl-chess", "brawl-chess"], why: "no app label: the owner label; an app label that is mapped to none falls to the owner's"},
+	]}
+	"a policy whose app or owner label is ignored files nothing; the others are read as before": {suite: "devflow", steps: [
+		{call: "devflow.alertClass", args: [[{policy: "p/1", display: "Ume: rent-a-phone JourneyTrafficDrop", labels: {app: "ume_rental", owner: "ume"}, state: "OPEN", openTime: "2026-11-18T20:00:00Z"}, {policy: "p/2", display: "Ume: x", labels: {owner: "ume-ops"}, state: "OPEN", openTime: "2026-11-27T19:55:00Z"}, {policy: "p/3", display: "b", labels: {app: "battlechess"}, state: "OPEN", openTime: "2026-11-27T19:55:00Z"}], _alertNow, _alertRules & {ignore: ["ume_rental", "ume-ops"]}]}, {pick: ["length", "0.policy", "0.class"], expect: [1, "p/3", "outage"], why: "p/1 by its app label, p/2 by its owner label"},
+		{call: "devflow.alertClass", args: [[{policy: "p/1", display: "a", labels: {app: "ume_rental"}, state: "OPEN", openTime: "2026-11-27T19:55:00Z"}], _alertNow, _alertRules], expect: [{policy: "p/1", display: "a", app: null, class: "outage", opens: 1, openSince: "2026-11-27T19:55:00.000Z"}], why: "no ignore: filed as before"},
 	]}
 	"an alert's title names its class and policy; only a title of that shape is an alert's": {suite: "devflow", steps: [
 		{call: "devflow.alertTitle", args: ["flapping", "Bonk Chess: play-a-game JourneyTrafficDrop"], expect: "Alert flapping: Bonk Chess: play-a-game JourneyTrafficDrop"},

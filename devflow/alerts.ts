@@ -118,7 +118,7 @@ export async function watchAlerts(flow: DevFlow, b: { board: Board; project: str
         if (!token) throw new Error(tokenError);
         const list = await incidents(project, token, io.fetch, now, io.sleep);
         for (const i of list) labels.set(i.policy, i.labels);
-        rows.push(...alertClass(list, now, { flapOpens: rules.flapOpens, flapCloseMin: rules.flapCloseMin, staleHours: rules.staleHours, apps: rules.apps }));
+        rows.push(...alertClass(list, now, { flapOpens: rules.flapOpens, flapCloseMin: rules.flapCloseMin, staleHours: rules.staleHours, apps: rules.apps, ignore: rules.ignore }));
       } catch (e) {
         unavailable.push({ project, reason: (e as Error).message });
       }
