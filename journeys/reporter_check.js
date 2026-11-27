@@ -76,6 +76,17 @@ check("an encoded address in a path segment is scrubbed", lines[2] === "c (/user
 check("a token in a path segment is scrubbed", lines[3] === "d (/u/<token>/b.js:7:8)");
 check("a file named keyJson.js is kept", lines[4] === "e (/assets/keyJson.js:9:10)");
 
+// A malformed escape hides an encoded address in the same segment: the segment goes as a marker.
+const malformed = thrown(withStack("x", ["h (https://x.example/users/ana%40gmail.com%E0%A4%A/app.js:1:2)", "i (https://x.example/ok/app.js:3:4)"]), { detail: true });
+check("a segment that fails to decode is a fixed marker, its address nowhere", malformed.stack === "h (/users/<undecodable>/app.js:1:2)\ni (/ok/app.js:3:4)" && !JSON.stringify(malformed).includes("ana") && !JSON.stringify(malformed).includes("gmail"));
+
+// Decoded until it stops changing; a decoded newline cannot split the stack; a name keeps its ending.
+const tricky = thrown(withStack("x", ["j (https://x.example/a/ana%2540gmail.com/app.js:1:2)", "k (https://x.example/b/ana%40gmail.com%0Aat%20x/app.js:3:4)", "l (https://x.example/c/x%E0.js:5:6)", "m (https://x.example/d/ana@example.com.js:7:8)"]), { detail: true });
+const trickyLines = tricky.stack.split("\n");
+check("a double-encoded address is scrubbed", trickyLines[0] === "j (/a/<email>/app.js:1:2)");
+check("a decoded newline cannot split the stack", trickyLines.length === 4 && trickyLines[1].startsWith("k (/b/") && !trickyLines[1].includes("ana") && trickyLines[2] === "l (/c/<undecodable>.js:5:6)");
+check("a scrubbed file name keeps its ending", trickyLines[3] === "m (/d/<email>.js:7:8)");
+
 // The message: redacted in the page.
 const message = thrown(withStack("failed for ana@example.com at https://x.example/p?q=1", ["f (/a.js:1:2)"]), { detail: true });
 check("a message loses its address and url", message.message === "failed for <email> at <url>");

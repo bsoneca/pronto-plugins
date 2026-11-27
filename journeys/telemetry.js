@@ -143,14 +143,28 @@ if (!globalThis.__prontoJourneys) {
 		path
 			.split("/")
 			.map((segment) => {
+				// The file's ending stays on whatever replaces its name, so a frame still ends in a script.
+				const ending = segment.match(/\.m?js$/)?.[0] ?? "";
+				// Decoded until it stops changing (ana%2540gmail.com is an address too), at most three times. A
+				// malformed escape ("%E0%A4%A") hides whatever else the segment holds, an encoded address included,
+				// and so does an escape left after three: such a segment is a fixed marker, never as written.
 				let read = segment;
-				try {
-					read = decodeURIComponent(segment);
-				} catch {
-					// not encoded: as written
+				for (let i = 0; i < 3; i++) {
+					let next;
+					try {
+						next = decodeURIComponent(read);
+					} catch {
+						return `<undecodable>${ending}`;
+					}
+					if (next === read) break;
+					read = next;
 				}
+				if (/%[0-9A-Fa-f]{2}/.test(read)) return `<undecodable>${ending}`;
 				const clean = scrub(read);
-				return clean === read ? segment : clean;
+				if (clean === read) return segment;
+				// What goes out is escaped again, so a decoded newline or ")" cannot reshape the frame or the stack.
+				const out = clean.replace(/[^\w.~<>-]/g, encodeURIComponent);
+				return ending && !out.endsWith(ending) ? out + ending : out;
 			})
 			.join("/");
 	const clean = (text) => (FEN.test(text) || MOVE.test(text) ? "" : scrub(text).slice(0, ERROR_TEXT));
