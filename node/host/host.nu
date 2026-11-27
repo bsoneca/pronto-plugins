@@ -26,6 +26,15 @@ const heal_service = "/etc/systemd/system/pronto-dapr-heal.service"
 const heal_timer = "/etc/systemd/system/pronto-dapr-heal.timer"
 const heal_unit = "pronto-dapr-heal.timer"
 
+# The command each supported launcher runs as: fixed, absolute, root's (a value of the host JSON is never a path).
+def heal-kubectl [launcher: string]: nothing -> string {
+	match $launcher {
+		"k3s kubectl" => "/usr/local/bin/k3s kubectl"
+		"kubectl" => "/usr/local/bin/kubectl"
+		_ => { error make {msg: $"node-host: daprHeal.kubectl ($launcher) is not a supported launcher"} }
+	}
+}
+
 # The timers a host holds: the cleanup's always, the Dapr sidecar's when #Host says daprHeal.
 def timers [host: record]: nothing -> list<string> {
 	[$gc_unit] ++ (if ($host.daprHeal? != null) { [$heal_unit] } else { [] })
@@ -94,7 +103,7 @@ export def render [host: record]: nothing -> list<record> {
 	$gc_files ++ [
 		{path: $heal_env, mode: "644", text: (lines ([
 			"# pronto-plugins node/host (Dapr sidecar): what dapr-heal.sh reads, from the node's #Host daprHeal."
-			$"KUBECTL='($heal.kubectl)'"
+			$"KUBECTL='(heal-kubectl $heal.kubectl)'"
 			$"NAMESPACES='($heal.namespaces | str join ' ')'"
 			$"GRACE_SECONDS=($heal.graceSeconds)"
 			$"COOLDOWN_MINUTES=($heal.cooldownMinutes)"

@@ -76,8 +76,9 @@ package schema
 // own, looks only in `namespaces`, and rolls a workload at most once per cooldownMinutes; a pod created after that roll and still
 // bare is an error, never a second roll.
 #DaprHeal: {
-	// The words that run kubectl as root on the node, kept inside single quotes in /etc/pronto/dapr-heal.env, so no quote.
-	kubectl: *"k3s kubectl" | (string & =~"^[A-Za-z0-9_./-]+( [A-Za-z0-9_./-]+)*$")
+	// How the repair runs kubectl as root on the node: one of the supported launchers, which host.nu maps to a fixed command (an absolute
+	// path under /usr/local/bin, root's), never a program the host JSON names.
+	kubectl: *"k3s kubectl" | "kubectl"
 	// The operator's namespaces, the only ones swept: a tenant's (Studio's `studio-<owner>-<app>-<hash>`) must not be able to
 	// trigger a roll or turn the check red, and dapr-system and the system namespaces are not apps. Names, not patterns; none is assumed (a node says its own, as `#Kubelet.maxPods`).
 	namespaces!: [#OperatorNamespace, ...#OperatorNamespace]

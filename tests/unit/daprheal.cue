@@ -99,10 +99,25 @@ cases: "a Job's pod, a pod of its own and a ReplicaSet with no Deployment are no
 	]
 }
 
-cases: "a roll that fails fails the run, leaves no mark, and the other workloads are still rolled": {
+cases: "a roll the API refused fails the run, leaves no mark, and the other workloads are still rolled": {
 	suite: "daprheal"
 	steps: [
 		{call: "daprheal.run", args: [{pods: [_bare, (_bare & {ns: "bonk", name: "bonk-crud-0", owner: "StatefulSet/bonk-crud", containers: ["crud"]})], rs: _rs, failRoll: ["aprende/Deployment/aprende-flagd"]}], holds: {code: 1, rolled: ["bonk/StatefulSet/bonk-crud"], marked: ["bonk.StatefulSet.bonk-crud"]}},
+	]
+}
+
+cases: "a roll that may have been done (a timeout) keeps its mark: the next sweep waits out the cooldown": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, failRoll: ["aprende/Deployment/aprende-flagd"], rollError: "error: Timeout: request did not complete within requested timeout"}], holds: {code: 1, rolled: [], marked: ["aprende.Deployment.aprende-flagd"]}},
+	]
+}
+
+cases: "a mark that cannot be written stops the roll: nothing is restarted that nothing remembers": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, readonlyState: true}], holds: {code: 1, rolled: [], marked: []}},
+		{pick: ["err"], matches: "cannot be written: not rolled"},
 	]
 }
 

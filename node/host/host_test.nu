@@ -93,6 +93,9 @@ def test_the_schema_defaults_and_refuses [] {
 	assert (not (host-with "{daprHeal: {graceSeconds: 5}}").ok) "a grace the injector's own delay could outlast"
 	assert (not (host-with "{daprHeal: {cooldownMinutes: 1}}").ok) "a cooldown shorter than a roll"
 	assert (not (host-with "{daprHeal: {kubectl: \"k3s' kubectl\"}}").ok) "a quote in kubectl"
+	assert (not (host-with "{daprHeal: {kubectl: \"/tmp/evil\"}}").ok) "a program the host JSON names"
+	assert (not (host-with "{daprHeal: {kubectl: \"k3s kubectl; id\"}}").ok) "arguments"
+	assert equal (host-with "{daprHeal: {kubectl: \"kubectl\", namespaces: [\"aprende\"]}}").host.daprHeal.kubectl "kubectl"
 	assert (not (host-with "{daprHeal: {onCalendar: \"\"}}").ok) "no schedule for the repair"
 	assert equal (host-with "{dockerGC: {buildCacheGB: 10, capGB: 50}}").host.dockerGC.capGB 50
 	assert (not (host-with "{dockerGC: {capGB: 40}}").ok) "a cap at the cache"
@@ -476,7 +479,7 @@ def test_the_dapr_sidecar_repair_is_a_second_timer_of_the_same_host [] {
 	print "test a host with daprHeal also holds the repair env, script and timer, checks both timers, and finds a failed repair run..."
 	let files = (render (with-heal))
 	assert equal ($files | get path | last 4) ["/etc/pronto/dapr-heal.env" "/usr/local/lib/pronto/dapr-heal.sh" "/etc/systemd/system/pronto-dapr-heal.service" "/etc/systemd/system/pronto-dapr-heal.timer"]
-	assert equal ($files | where path == "/etc/pronto/dapr-heal.env" | first | get text) "# pronto-plugins node/host (Dapr sidecar): what dapr-heal.sh reads, from the node's #Host daprHeal.\nKUBECTL='k3s kubectl'\nNAMESPACES='aprende brawl-chess studio coach'\nGRACE_SECONDS=120\nCOOLDOWN_MINUTES=30\n"
+	assert equal ($files | where path == "/etc/pronto/dapr-heal.env" | first | get text) "# pronto-plugins node/host (Dapr sidecar): what dapr-heal.sh reads, from the node's #Host daprHeal.\nKUBECTL='/usr/local/bin/k3s kubectl'\nNAMESPACES='aprende brawl-chess studio coach'\nGRACE_SECONDS=120\nCOOLDOWN_MINUTES=30\n"
 	assert str contains ($files | where path == "/etc/systemd/system/pronto-dapr-heal.timer" | first | get text) "OnCalendar=*:0/5\n"
 	assert equal (render (defaults) | length) 4 "a host with no daprHeal holds the cleanup's files alone"
 	let dir = (tmp)

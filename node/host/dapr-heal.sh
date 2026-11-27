@@ -37,7 +37,7 @@ epoch() {
 # each container (init containers too: a native sidecar is one) with a comma after it. Only the listed namespaces are read.
 pods=""
 for n in $NAMESPACES; do
-  pods="$pods$(k -n "$n" get pods -o go-template='{{range .items}}{{$a := .metadata.annotations}}{{if $a}}{{if eq (index $a "dapr.io/enabled") "true"}}{{.metadata.namespace}}|{{.metadata.name}}|{{.status.phase}}|{{if .metadata.deletionTimestamp}}deleting{{end}}|{{.metadata.creationTimestamp}}|{{range .metadata.ownerReferences}}{{.kind}}/{{.name}}{{end}}|{{range .spec.containers}}{{.name}},{{end}}{{range .spec.initContainers}}{{.name}},{{end}}{{"\n"}}{{end}}{{end}}{{end}}')"$'\n'
+  pods="$pods$(k -n "$n" get pods -o go-template='{{range .items}}{{$a := .metadata.annotations}}{{if $a}}{{if eq (index $a "dapr.io/enabled") "true"}}{{.metadata.namespace}}|{{.metadata.name}}|{{.status.phase}}|{{if .metadata.deletionTimestamp}}deleting{{end}}|{{.metadata.creationTimestamp}}|{{range .metadata.ownerReferences}}{{if .controller}}{{.kind}}/{{.name}}{{end}}{{end}}|{{range .spec.containers}}{{.name}},{{end}}{{range .spec.initContainers}}{{.name}},{{end}}{{"\n"}}{{end}}{{end}}{{end}}')"$'\n'
 done
 
 now=$(date +%s)
@@ -88,7 +88,7 @@ while IFS='|' read -r ns name owner young; do
   case "$owner" in
     ReplicaSet/*)
       # A lookup that failed leaves the inventory incomplete: nothing is pruned below, so a live rollout's mark survives the outage of the API.
-      if ! owner=$(k -n "$ns" get replicaset "${owner#ReplicaSet/}" -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}'); then
+      if ! owner=$(k -n "$ns" get replicaset "${owner#ReplicaSet/}" -o jsonpath='{.metadata.ownerReferences[?(@.controller==true)].kind}/{.metadata.ownerReferences[?(@.controller==true)].name}'); then
         echo "dapr-heal: $ns/$name: its ReplicaSet could not be read: not pruning marks" >&2
         failed=1; incomplete=1; continue
       fi
@@ -119,11 +119,19 @@ while IFS='|' read -r ns owner; do
     continue
   fi
   if [ "$dry" = 1 ]; then echo "dapr-heal: would roll $ns/$owner"; continue; fi
-  if k -n "$ns" rollout restart "$owner" >/dev/null; then
-    touch "$mark"
+  # The mark is made before the restart is asked for: a state folder that cannot be written must not leave a restart nothing remembers
+  # (every sweep would send it again).
+  if ! touch "$mark"; then
+    echo "dapr-heal: $ns/$owner: the mark $mark cannot be written: not rolled" >&2
+    failed=1
+    continue
+  fi
+  if err=$(k -n "$ns" rollout restart "$owner" 2>&1 >/dev/null); then
     echo "dapr-heal: rolled $ns/$owner: a pod of it ran without its Dapr sidecar"
   else
-    echo "dapr-heal: rolling $ns/$owner failed" >&2
+    echo "dapr-heal: rolling $ns/$owner failed: $err" >&2
+    # A request that the API refused changed nothing: it may be asked again. One that timed out or dropped may have been done: the mark stays.
+    case "$err" in *[Tt]imed\ out* | *[Dd]eadline* | *Timeout* | *"connection reset"* | *EOF*) ;; *) rm -f "$mark" ;; esac
     failed=1
   fi
 done < <(sort -u <<<"$targets")
