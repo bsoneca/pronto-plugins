@@ -2797,8 +2797,8 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 	# a heredoc is opened by RUN, COPY and ADD, by a word that begins with <<: a LABEL's quoted <<EOF or `a<<EOF` opens none, so the mount after it is a flag
 	let label = ("FROM b\nLABEL x=\"<<EOF\"\nRUN --mount=type=cache,target=/a,id=victim true\nEOF\n" | tenant stage-dockerfile $ns)
 	assert equal $label $"FROM b\nLABEL x=\"<<EOF\"\nRUN --mount=type=cache,target=/a,id=($ns)/victim true\nEOF\n" "a LABEL opens no heredoc"
-	let glued = ("FROM b\nRUN echo a<<EOF\nRUN --mount=type=cache,target=/a,id=victim true\nEOF\n" | tenant stage-dockerfile $ns)
-	assert equal $glued $"FROM b\nRUN echo a<<EOF\nRUN --mount=type=cache,target=/a,id=($ns)/victim true\nEOF\n" "a<<EOF opens no heredoc"
+	let glued = (try { "FROM b\nRUN echo a<<EOF\nRUN --mount=type=cache,target=/a,id=victim true\nEOF\n" | tenant stage-dockerfile $ns; "admitted" } catch {|e| $e.msg })
+	assert (($glued != "admitted") and ($glued | str contains "not a plain heredoc word")) $"a<<EOF is an ambiguous word and is refused: ($glued)"
 	# a terminator is exact, and with <<- only leading tabs are dropped: an indented EOF does not close a plain <<EOF
 	let indented = ("FROM b\nRUN <<EOF\n  EOF\nRUN --mount=type=cache,target=/x true\nEOF\nRUN --mount=type=cache,target=/y true\n" | tenant stage-dockerfile $ns)
 	assert equal $indented $"FROM b\nRUN <<EOF\n  EOF\nRUN --mount=type=cache,target=/x true\nEOF\nRUN --mount=type=cache,target=/y,id=($ns)//y true\n" "an indented EOF does not end a plain heredoc"
@@ -2808,6 +2808,61 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 	assert equal ("FROM b\nRUN [\"sh\",\"-c\",\"--mount=x\"]\n" | tenant stage-dockerfile $ns) "FROM b\nRUN [\"sh\",\"-c\",\"--mount=x\"]\n"
 	assert equal ("FROM b\nRUN apt-get update && \\\n    apt-get install -y x\n" | tenant stage-dockerfile $ns) "FROM b\nRUN apt-get update && \\\n    apt-get install -y x\n"
 	assert equal ("FROM b\nRUN --mount=type=cache,target=/a true" | tenant stage-dockerfile $ns) $"FROM b\nRUN --mount=type=cache,target=/a,id=($ns)//a true"
+	# a quoted multiword heredoc name is not a plain heredoc word: refused (the name allowlist), never guessed
+	for text in ["FROM b\nCOPY <<'END DOC' /doc\nEND\nRUN --mount=type=cache,target=/cache true\nEND DOC\n" "FROM b\nRUN <<\"A B\"\nA\nRUN --mount=type=cache,target=/c true\nA B\n"] {
+		let r = (try { $text | tenant stage-dockerfile $ns; "admitted" } catch {|e| $e.msg })
+		assert (($r != "admitted") and ($r | str contains "not a plain heredoc word")) $"a multiword name: ($r)"
+	}
+	let comment_flag = ("FROM b\nRUN --mount=type=cache,target=/a \\\n# --mount is optional\n echo ok\n" | tenant stage-dockerfile $ns)
+	assert equal $comment_flag $"FROM b\nRUN --mount=type=cache,target=/a,id=($ns)//a \\\n# --mount is optional\n echo ok\n" "a standalone --mount in a continuation comment is skipped, as buildkit skips it"
+	let comment_eq = ("RUN --mount=type=cache,target=/a \\\n# --mount=type=cache,target=/b,id=x\n --mount=type=cache,target=/c true\n" | tenant stage-dockerfile $ns)
+	assert equal $comment_eq $"RUN --mount=type=cache,target=/a,id=($ns)//a \\\n# --mount=type=cache,target=/b,id=x\n --mount=type=cache,target=/c,id=($ns)//c true\n" "a mount in a continuation comment is not rewritten"
+	# a directive an earlier strip leaves at the head is read on the final bytes: a BOM that was internal until the official line went
+	for text in ["# syntax=docker/dockerfile:1\n\u{FEFF}# syntax=evil/frontend\nFROM base\n" "// syntax=docker/dockerfile:1\n\u{FEFF}# syntax=evil/frontend\nFROM base\n"] {
+		let r = (try { $text | tenant stage-dockerfile $ns; "admitted" } catch {|e| $e.msg })
+		assert (($r != "admitted") and ($r | str contains "`# syntax=` directive")) $"a BOM-prefixed directive under an approved one: ($r)"
+	}
+	# Opus review of pp#594: the engine's placeholders are reserved, and a heredoc word is read as buildkit reads it or refused
+	for row in [
+		{why: "the comment placeholder smuggles a mount out of a comment", text: "FROM b\nRUN --mount=type=tmpfs,target=/__TENANT_COMMENT_0__ \\\n#x --mount=type=cache,target=/y,id=victim echo #\n true\n", says: "a word the engine's staging keeps for itself"}
+		{why: "the mount placeholder", text: "FROM b\nRUN --mount=type=bind,target=/__TENANT_MOUNT_0__ --mount=type=cache,target=/a,id=victim true\n", says: "a word the engine's staging keeps for itself"}
+		{why: "a heredoc word split by a continuation (buildkit reads the name #AB)", text: "FROM b\nRUN cat <<#A\\\nB\n#AB\nRUN --mount=type=cache,target=/x,id=../victim true\n#A\n", says: "`<<` in a RUN, COPY or ADD with a continuation line"}
+		{why: "a heredoc name with a backslash (buildkit reads #EOF)", text: "FROM b\nRUN cat <<#E\\OF\n#EOF\nRUN --mount=type=cache,target=/x,id=../victim true\n#E\\OF\n", says: "not a plain heredoc word"}
+		{why: "a word joined to the next line's << (buildkit reads a<<#X, no heredoc)", text: "FROM b\nRUN echo a\\\n<<#X\nRUN --mount=type=cache,target=/x,id=../victim true\n#X\n", says: "`<<` in a RUN, COPY or ADD with a continuation line"}
+		{why: "a file descriptor before <<, which buildkit reads as a heredoc, hiding a second heredoc", text: "FROM b\nRUN cat 3<<#E\nRUN cat <<#Y\n#E\nRUN --mount=type=cache,target=/x,id=../victim true\n#Y\n", says: "not a plain heredoc word"}
+		{why: "a heredoc with a continuation in a COPY", text: "FROM b\nCOPY <<EOF \\\n  /x\nhello\nEOF\n", says: "`<<` in a RUN, COPY or ADD with a continuation line"}
+		{why: "a < and a < joined across a continuation", text: "FROM b\nRUN cat <\\\n<#A\n#A\n", says: "`<<` in a RUN, COPY or ADD with a continuation line"}
+		{why: "a quoted name joined across a continuation", text: "FROM b\nRUN cat <<'A\\\nB'\nAB\nRUN --mount=type=cache,target=/x,id=../v true\n", says: "`<<` in a RUN, COPY or ADD with a continuation line"}
+		{why: "a mixed-quote heredoc name", text: "FROM b\nRUN cat <<'#E\"F'\n#E\"F\nRUN --mount=type=cache,target=/x,id=../victim true\n#EF\n", says: "not a plain heredoc word"}
+		{why: "a dollar sign in a heredoc name", text: "FROM b\nRUN cat <<#E$X\n#E\nRUN --mount=type=cache,target=/x,id=../victim true\n#E$X\n", says: "not a plain heredoc word"}
+		{why: "a heredoc in an ONBUILD", text: "FROM b\nONBUILD RUN cat <<#Y\nRUN --mount=type=cache,target=/x,id=../victim true\n#Y\n", says: "`<<` in an ONBUILD instruction"}
+		{why: "a plain heredoc in an ONBUILD", text: "FROM b\nONBUILD RUN cat <<EOF\nhi\nEOF\n", says: "`<<` in an ONBUILD instruction"}
+		{why: "a continuation ended by a form feed", text: "FROM b\nRUN echo hi \\\u{0C}\nRUN --mount=type=cache,target=/x,id=../victim true\n", says: "control character"}
+		{why: "a continuation ended by a no-break space", text: "FROM b\nRUN echo hi \\\u{A0}\nRUN --mount=type=cache,target=/x,id=../victim true\n", says: "non-ASCII white space"}
+		{why: "a heredoc terminator with two carriage returns", text: "FROM b\nRUN cat <<Y\nY\r\r\nRUN --mount=type=cache,target=/x,id=../victim true\nY\n", says: "carriage return"}
+		{why: "a lone carriage return", text: "FROM b\rRUN true\n", says: "carriage return"}
+		{why: "a vertical tab", text: "FROM b\nRUN echo\u{0B}hi\n", says: "control character"}
+		{why: "an ideographic space", text: "FROM b\nRUN echo\u{3000}hi\n", says: "non-ASCII white space"}
+		{why: "a here-string", text: "FROM b\nRUN cat <<<#Y\nRUN --mount=type=cache,target=/x,id=../victim true\n#Y\n", says: "not a plain heredoc word"}
+		{why: "a frontend directive after a shebang and a BOM", text: "#!x\n\u{FEFF}# syntax=evil/f\nFROM b\n", says: "`# syntax=` directive"}
+		{why: "an approved directive, then a JSON frontend", text: "# syntax=docker/dockerfile:1\n{\"syntax\":\"evil/f\"}\n", says: "is JSON"}
+	] {
+		let r = (try { $row.text | tenant stage-dockerfile $ns; "admitted" } catch {|e| $e.msg })
+		assert (($r != "admitted") and ($r | str contains $row.says)) $"($row.why): ($r)"
+	}
+	let fd = ("FROM b\nRUN cat 3<<E\nRUN cat <<-Y\nE\nRUN --mount=type=cache,target=/x true\n" | tenant stage-dockerfile $ns)
+	assert equal $fd $"FROM b\nRUN cat 3<<E\nRUN cat <<-Y\nE\nRUN --mount=type=cache,target=/x,id=($ns)//x true\n" "an fd-prefixed heredoc has a body, which is content; what follows it is an instruction again"
+	let ordinary = "# syntax=docker/dockerfile:1\nFROM node:22 AS build\nWORKDIR /app\nCOPY package.json ./\nRUN --mount=type=cache,target=/root/.npm \\\n    npm ci\nCOPY <<EOF /etc/x.conf\nhello\nEOF\nRUN <<-EOT\n\techo hi\n\tEOT\nRUN apt-get update && \\\n    # comment\n    apt-get install -y curl\n"
+	assert equal ($ordinary | tenant stage-dockerfile $ns) $"FROM node:22 AS build\nWORKDIR /app\nCOPY package.json ./\nRUN --mount=type=cache,target=/root/.npm,id=($ns)//root/.npm \\\n    npm ci\nCOPY <<EOF /etc/x.conf\nhello\nEOF\nRUN <<-EOT\n\techo hi\n\tEOT\nRUN apt-get update && \\\n    # comment\n    apt-get install -y curl\n" "an ordinary Dockerfile: the official directive dropped, the mount rewritten, the heredocs and the continued commands as they were"
+	# the plain forms still pass: <<EOF, <<-EOT, <<'EOT', <<"EOT", and a quoted << in a command
+	for form in ["<<EOF" "<<-EOF" "<<'EOF'" "<<-'EOT'" "<<\"EOF\"" "2<<E_1"] {
+		let text = $"FROM b\nRUN cat ($form) > /x\nhello\nEOF\nEOT\nE_1\nRUN --mount=type=cache,target=/a true\n"
+		let got = (try { $text | tenant stage-dockerfile $ns } catch {|e| $"REFUSED: ($e.msg)" })
+		assert (not ($got | str starts-with "REFUSED")) $"($form) was refused: ($got)"
+	}
+	let crlf = ("FROM b\r\nRUN cat <<EOF\r\nhi\r\nEOF\r\nRUN --mount=type=cache,target=/a true\r\n" | tenant stage-dockerfile $ns)
+	assert ($crlf | str contains $"id=($ns)//a") "a CRLF Dockerfile is staged"
+	assert equal ("FROM b\nRUN echo \"<<#Y\"\nRUN --mount=type=cache,target=/x true\n" | tenant stage-dockerfile $ns) $"FROM b\nRUN echo \"<<#Y\"\nRUN --mount=type=cache,target=/x,id=($ns)//x true\n" "a quoted << is no heredoc word"
 	# a Dockerfile with no cache mount is left as it is
 	assert equal ("FROM base\nRUN echo hi\n" | tenant stage-dockerfile $ns) "FROM base\nRUN echo hi\n"
 	for row in [

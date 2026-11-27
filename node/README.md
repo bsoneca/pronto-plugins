@@ -321,7 +321,7 @@ path by default, so one tenant could seed what another's build runs. `push.nu te
 the compose keys that reach past the context or pick where a cache comes from (`cache_from`, `cache_to`, `ssh`, `secrets`, `network`, `extra_hosts`, `entitlements`, an inline Dockerfile), a
 `BUILDKIT_SYNTAX` argument, and a docker-image additional context a tag can move; `tenant stage-dockerfile` makes each cache mount's id `<namespace>/<its id, or its target with / as _>` (a flag, key and type in any case) and refuses a
 `# syntax=` directive (the official docker/dockerfile one is dropped, a BOM with it; `//syntax=` and a JSON Dockerfile are refused too), an `escape=` directive, an escape character in a mount flag, an id with `..` or `/`, an `x-*` extension key under a service or its build, (a build frontend of the Dockerfile's own, which can issue any cache id), a mount flag that names a variable or is quoted, and a `--mount` with no `=`. A git remote
-(`git@...`, `github.com/...`) is no path: refused as a build context, as `https://` and `git://` already were. The layer cache stays shared (content-addressed: no tenant can place a layer another's
+(`git@...`, `github.com/...`) is no path: refused as a build context, as `https://` and `git://` already were. Bind, secret and ssh mounts are not rewritten: a secret or ssh mount needs a compose `secrets` or `ssh` the build keys refuse, and a bind mount reads the build context or another stage only. The staging words are reserved (a Dockerfile with `__TENANT_` is refused), and a heredoc is read only in a RUN, COPY or ADD of one line: one with a continuation line and `<<` anywhere in it, is refused, and so is any word with `<<` that is not `<<NAME`, `<<-NAME`, `<<'NAME'` or `<<"NAME"` (NAME: letters, digits, underscores; an `N` file descriptor may lead), and any `<<` in an ONBUILD, and any control character but tab, line feed and carriage return, and any carriage return that does not end a CRLF line end, and any non-ASCII white space (a continuation is a backslash, spaces and tabs, and the line end), since buildkit joins the lines with no separator and reads the joined words (a hand split of them kept diverging from its parser). A file descriptor before `<<` (`3<<EOF`) is a heredoc, as it is there. The layer cache stays shared (content-addressed: no tenant can place a layer another's
 build reuses); one buildkitd per tenant would isolate it too, at a pod's cost per owner, and is not done.
 
 ## The node host
@@ -336,7 +336,19 @@ so a bound every node needs is written here once, with defaults, and each reposi
   last tagged over `minAgeHours` ago (by reference, never forced, so an image a container uses stays; a tag time it cannot read keeps the image),
   dangling images, and build cache past `buildCacheGB`, and fails when Docker still holds more than `capGB`. `--dry-run` only lists.
   It reads its settings from `/etc/pronto/docker-gc.env`.
-- `host.nu`: `render <host.json>` gives the files (the script, the env file from the values, the service, the timer); `apply <host.json>
+- `dapr-heal.sh` (PRONTO-2191): a static script on its own timer (`pronto-dapr-heal.timer`, every five minutes). A pod that asks for a
+  Dapr sidecar (`dapr.io/enabled=true`) and runs no `daprd` container was admitted while the injector was down (the 2026-11-27 disk outage:
+  aprende's flagd, whose Dapr port then refused every call and answered every OFREP evaluation 500) and never gets one by itself. The job
+  lists such pods in the operator's `namespaces` only (default aprende, brawl-chess, studio, coach; the schema refuses dapr-system, the system namespaces and Studio's `studio-<owner>-<app>-<hash>` tenants, so a tenant can neither trigger a roll nor turn the check red), not deleting, not finished, older than `graceSeconds`, with no `daprd` among the containers or the init containers (a native sidecar), and once `dapr-system/dapr-sidecar-injector` has a ready replica rolls
+  each one's owner (`kubectl rollout restart` of the Deployment its ReplicaSet belongs to, a StatefulSet or a DaemonSet), so the injector adds the
+  sidecar. A pod owned by a Job or by nothing is reported, not rolled, and fails the run; a workload is rolled at most once per `cooldownMinutes`
+  (a mark file under `/var/lib/pronto/dapr-heal`), since a roll replaces pods one by one, and a pod of it still bare past the cooldown, of any age (the injector injects nothing for it, or the rollout is stuck: OnDelete, paused, an ordered StatefulSet), is an
+  error and fails the run, never a second roll; each run removes the mark of every workload with no bare pod, so a later outage is a new incident; with the injector down it rolls nothing and fails the run
+  (rolling would make more bare pods), so `host.nu apply --check` reports the job as failed its last run. `--dry-run` only says. It reads
+  `/etc/pronto/dapr-heal.env` (`KUBECTL`, default `k3s kubectl`, `NAMESPACES`, `GRACE_SECONDS`, `COOLDOWN_MINUTES`), from `#Host.daprHeal`, which is opt-in (`daprHeal?`: a host that is not a k3s node gets no timer). Its cases are
+  `tests/unit/daprheal.cue` (the real script on a stand-in kubectl).
+- `host.nu`: `render <host.json>` gives the files (each job's script, env file from the values, service and timer: the cleanup's, and the
+  Dapr repair's when the host says `daprHeal`); `apply <host.json>
   [--node user@host] [--check]` writes what drifted (each file whole beside itself, then renamed), reloads systemd and enables the timer, or with
   `--check` only says and exits 1. Each read, write and systemctl call is an ssh login of its own (BatchMode, a connect timeout), none retried.
 - `kubelet.nu`: `apply <host.json> [--check] [--node user@host]` sets the kubelet's args from `#Host.kubelet`: max pods, the full

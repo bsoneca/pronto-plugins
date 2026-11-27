@@ -7,6 +7,33 @@
 import { request } from "node:http";
 const eq = (a: unknown, b: unknown, m: string) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); };
 const dec = new TextDecoder();
+
+// Ports the kernel hands out, never a guess: a fixed range drawn at random sits inside the one outgoing
+// connections take from, and a port found taken makes flagd exit at once.
+function freePorts(n: number): number[] {
+  const ls = Array.from({ length: n }, () => Deno.listen({ hostname: "127.0.0.1", port: 0 }));
+  const ports = ls.map((l) => (l.addr as Deno.NetAddr).port);
+  for (const l of ls) l.close();
+  return ports;
+}
+// A child process with its stderr kept and its status read once. `died` says why it is gone (so a caller
+// waiting on it fails with the child's own words, not with a connection refused); `stop` is safe on a child
+// that exited already, which `kill` is not.
+function launch(bin: string, args: string[], env: Record<string, string>) {
+  const proc = new Deno.Command(bin, { args, env, stdout: "null", stderr: "piped" }).spawn();
+  let err = "";
+  let exit: Deno.CommandStatus | undefined;
+  const reading = (async () => { for await (const c of proc.stderr) err += dec.decode(c, { stream: true }); })();
+  const status = proc.status.then((s) => exit = s);
+  return {
+    died: () => exit && new Error(`${bin} exited ${exit.code} before the test was done: ${err.slice(-2000)}`),
+    async stop() {
+      if (!exit) { try { proc.kill(); } catch { /* it exited since the check */ } }
+      await status;
+      await reading;
+    },
+  };
+}
 // What an OFREP evaluation answers: one flag's value or error, or the bulk list.
 type Body = { flags?: { key: string }[]; value?: unknown; errorCode?: string };
 
@@ -105,12 +132,9 @@ Deno.test({ name: "flagd serves the live source over the baked file, by account 
   const baked = await cue(dir, "flagd.document");
   await Deno.writeTextFile(`${dir}/baked.json`, JSON.stringify({ ...baked, flags: { ...baked.flags, premium: { ...baked.flags.premium, targeting: undefined } } }));
   await Deno.writeTextFile(`${dir}/live.json`, JSON.stringify(baked));
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = new Deno.Command(flagd!, {
-    args: ["start", "--uri", `file:${dir}/baked.json`, "--port", `${port + 1}`, "--management-port", `${port + 2}`, "--sync-port", `${port + 3}`, "--ofrep-sse-enabled=false", "--context-from-header", "X-Pronto-Host=host"],
-    env: { FLAGD_OFREP_PORT: `${port}`, FLAGD_SOURCES: JSON.stringify([{ uri: `${dir}/live.json`, provider: "file" }]) },
-    stdout: "null", stderr: "null",
-  }).spawn();
+  const [port, p1, p2, p3] = freePorts(4);
+  const proc = launch(flagd!, ["start", "--uri", `file:${dir}/baked.json`, "--port", `${p1}`, "--management-port", `${p2}`, "--sync-port", `${p3}`, "--ofrep-sse-enabled=false", "--context-from-header", "X-Pronto-Host=host"],
+    { FLAGD_OFREP_PORT: `${port}`, FLAGD_SOURCES: JSON.stringify([{ uri: `${dir}/live.json`, provider: "file" }]) });
   const ask = async (host: string, account?: string) => {
     for (let i = 0; ; i++) {
       try {
@@ -119,7 +143,7 @@ Deno.test({ name: "flagd serves the live source over the baked file, by account 
           body: JSON.stringify({ context: account ? { targetingKey: account } : {} }),
         });
         return (await res.json()).value;
-      } catch (e) { if (i > 50) throw e; await new Promise((r) => setTimeout(r, 100)); }
+      } catch (e) { if (proc.died()) throw proc.died(); if (i > 50) throw e; await new Promise((r) => setTimeout(r, 100)); }
     }
   };
   try {
@@ -129,8 +153,7 @@ Deno.test({ name: "flagd serves the live source over the baked file, by account 
     for (let i = 0; i < 50 && after !== true; i++) { await new Promise((r) => setTimeout(r, 200)); after = await ask("shop.example", "acct-x"); }
     eq(after, true, "an edit to the live source, read with no restart");
   } finally {
-    proc.kill();
-    await proc.status;
+    await proc.stop();
     await Deno.remove(dir, { recursive: true });
   }
 } });
@@ -148,22 +171,17 @@ Deno.test({ name: "the door gives flagd the account of the verified session, nev
     .flatMap((l) => { const m = l.match(/^\t\t"(.*)"$/); return m ? [m[1].replaceAll('\\"', '"')] : []; })
     .filter((l) => !l.startsWith("  # pronto-flags"));
   eq(route.some((l) => l.includes("forward_auth")), true, "the route asks the auth service");
-  const base = 20000 + Math.floor(Math.random() * 20000);
-  const [ofrep, door, auth] = [base, base + 4, base + 5];
+  const [ofrep, door, auth, p1, p2, p3] = freePorts(6);
   const authServer = Deno.serve({ port: auth, onListen() {} }, (req) => {
     const m = (req.headers.get("authorization") ?? "").match(/^Bearer tok-([a-z-]+)$/);
     return new Response(null, { status: 204, headers: m ? { "x-pronto-account": m[1] } : {} });
   });
   await Deno.writeTextFile(`${dir}/Caddyfile`, `{\n  admin off\n  auto_https off\n}\n:${door} {\n${route.join("\n")}\n  handle {\n    respond 404\n  }\n}\n`);
-  const flagdProc = new Deno.Command(flagd!, {
-    args: ["start", "--uri", `file:${dir}/flags.json`, "--port", `${base + 1}`, "--management-port", `${base + 2}`, "--sync-port", `${base + 3}`, "--ofrep-sse-enabled=false",
-      "--context-from-header", "X-Pronto-Host=host", "--context-from-header", "X-Pronto-Account=targetingKey"],
-    env: { FLAGD_OFREP_PORT: `${ofrep}` }, stdout: "null", stderr: "null",
-  }).spawn();
-  const caddyProc = new Deno.Command(caddy!, {
-    args: ["run", "--config", `${dir}/Caddyfile`, "--adapter", "caddyfile"],
-    env: { PRONTO_UPSTREAM_FLAGD: `127.0.0.1:${ofrep}`, PRONTO_UPSTREAM_AUTH: `127.0.0.1:${auth}` }, stdout: "null", stderr: "null",
-  }).spawn();
+  const flagdProc = launch(flagd!, ["start", "--uri", `file:${dir}/flags.json`, "--port", `${p1}`, "--management-port", `${p2}`, "--sync-port", `${p3}`, "--ofrep-sse-enabled=false",
+    "--context-from-header", "X-Pronto-Host=host", "--context-from-header", "X-Pronto-Account=targetingKey"],
+    { FLAGD_OFREP_PORT: `${ofrep}` });
+  const caddyProc = launch(caddy!, ["run", "--config", `${dir}/Caddyfile`, "--adapter", "caddyfile"],
+    { PRONTO_UPSTREAM_FLAGD: `127.0.0.1:${ofrep}`, PRONTO_UPSTREAM_AUTH: `127.0.0.1:${auth}` });
   // A request through the door, as a page at host `host` sends it: its body's targetingKey, a header it made up, its token.
   // node's http, since fetch drops a Host header: the door says which host it was reached at from it.
   const ask = async (opts: { host?: string; key?: string; claim?: string; token?: string }): Promise<[number, unknown]> => {
@@ -176,6 +194,7 @@ Deno.test({ name: "the door gives flagd the account of the verified session, nev
         req.on("error", reject);
         req.end(body);
       }).catch(() => [0, ""] as [number, string]);
+      if (status === 0 || status === 502) { const d = flagdProc.died() ?? caddyProc.died(); if (d) throw d; }
       if ((status === 0 || status === 502) && i < 50) { await new Promise((r) => setTimeout(r, 100)); continue; }
       return [status, JSON.parse(text || "{}").value];
     }
@@ -189,6 +208,7 @@ Deno.test({ name: "the door gives flagd the account of the verified session, nev
         req.on("error", reject);
         req.end(body);
       }).catch(() => [0, ""] as [number, string]);
+      if (status === 0 || status === 502) { const d = flagdProc.died() ?? caddyProc.died(); if (d) throw d; }
       if ((status === 0 || status === 502) && i < 50) { await new Promise((r) => setTimeout(r, 100)); continue; }
       return [status, JSON.parse(text || "{}")];
     }
@@ -220,8 +240,7 @@ Deno.test({ name: "the door gives flagd the account of the verified session, nev
     eq(await ask({}), [200, false], "a signed-out page still gets its flags");
     eq(await ask({ host: "localhost" }), [200, true], "the hosts at hand still read local");
   } finally {
-    caddyProc.kill(); flagdProc.kill();
-    await caddyProc.status; await flagdProc.status;
+    await caddyProc.stop(); await flagdProc.stop();
     await authServer.shutdown();
     await Deno.remove(dir, { recursive: true });
   }
@@ -232,12 +251,10 @@ Deno.test({ name: "the door gives flagd the account of the verified session, nev
 Deno.test({ name: "flagd's header context overrides the body's targetingKey unless the header is absent or empty", ignore: !flagd, async fn() {
   const dir = await app(SPEC);
   await Deno.writeTextFile(`${dir}/flags.json`, JSON.stringify(await cue(dir, "flagd.document")));
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = new Deno.Command(flagd!, {
-    args: ["start", "--uri", `file:${dir}/flags.json`, "--port", `${port + 1}`, "--management-port", `${port + 2}`, "--sync-port", `${port + 3}`, "--ofrep-sse-enabled=false",
+  const [port, p1, p2, p3] = freePorts(4);
+  const proc = launch(flagd!, ["start", "--uri", `file:${dir}/flags.json`, "--port", `${p1}`, "--management-port", `${p2}`, "--sync-port", `${p3}`, "--ofrep-sse-enabled=false",
       "--context-from-header", "X-Pronto-Host=host", "--context-from-header", "X-Pronto-Account=targetingKey"],
-    env: { FLAGD_OFREP_PORT: `${port}` }, stdout: "null", stderr: "null",
-  }).spawn();
+    { FLAGD_OFREP_PORT: `${port}` });
   const ask = async (account: string | null, key: string) => {
     for (let i = 0; ; i++) {
       try {
@@ -246,15 +263,14 @@ Deno.test({ name: "flagd's header context overrides the body's targetingKey unle
           body: JSON.stringify({ context: { targetingKey: key } }),
         });
         return (await res.json()).value;
-      } catch (e) { if (i > 50) throw e; await new Promise((r) => setTimeout(r, 100)); }
+      } catch (e) { if (proc.died()) throw proc.died(); if (i > 50) throw e; await new Promise((r) => setTimeout(r, 100)); }
     }
   };
   try {
     eq([await ask("acct-x", "acct-me"), await ask("acct-me", "acct-x"), await ask("no session", "acct-me")], [false, true, false], "the header wins");
     eq([await ask(null, "acct-me"), await ask("", "acct-me")], [true, true], "an absent or empty header leaves the body's: the door always sets one");
   } finally {
-    proc.kill();
-    await proc.status;
+    await proc.stop();
     await Deno.remove(dir, { recursive: true });
   }
 } });
@@ -264,12 +280,10 @@ Deno.test({ name: "flagd's header context overrides the body's targetingKey unle
 Deno.test({ name: "flagd's flag sets: the client selector reads the client flags alone, no selector reads every flag, an empty one the default set", ignore: !flagd, async fn() {
   const dir = await app(SPEC);
   await Deno.writeTextFile(`${dir}/flags.json`, JSON.stringify(await cue(dir, "flagd.document")));
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = new Deno.Command(flagd!, {
-    args: ["start", "--uri", `file:${dir}/flags.json`, "--port", `${port + 1}`, "--management-port", `${port + 2}`, "--sync-port", `${port + 3}`, "--ofrep-sse-enabled=false",
+  const [port, p1, p2, p3] = freePorts(4);
+  const proc = launch(flagd!, ["start", "--uri", `file:${dir}/flags.json`, "--port", `${p1}`, "--management-port", `${p2}`, "--sync-port", `${p3}`, "--ofrep-sse-enabled=false",
       "--context-from-header", "X-Pronto-Host=host", "--context-from-header", "X-Pronto-Account=targetingKey"],
-    env: { FLAGD_OFREP_PORT: `${port}` }, stdout: "null", stderr: "null",
-  }).spawn();
+    { FLAGD_OFREP_PORT: `${port}` });
   const ask = async (path: string, headers: Record<string, string> = {}, body: unknown = { context: {} }): Promise<[number, Body]> => {
     for (let i = 0; ; i++) {
       try {
@@ -277,7 +291,7 @@ Deno.test({ name: "flagd's flag sets: the client selector reads the client flags
           method: "POST", headers: { "content-type": "application/json", "x-pronto-host": "shop.example", ...headers }, body: JSON.stringify(body),
         });
         return [res.status, await res.json()];
-      } catch (e) { if (i > 50) throw e; await new Promise((r) => setTimeout(r, 100)); }
+      } catch (e) { if (proc.died()) throw proc.died(); if (i > 50) throw e; await new Promise((r) => setTimeout(r, 100)); }
     }
   };
   const keys = (b: Body) => (b.flags ?? []).map((f) => f.key).sort();
@@ -301,8 +315,7 @@ Deno.test({ name: "flagd's flag sets: the client selector reads the client flags
     const inBody = await ask("/secret", {}, { selector: "flagSetId=client", context: {} });
     eq([inBody[0], inBody[1].value], [200, "grantees"], "a body selector is ignored");
   } finally {
-    proc.kill();
-    await proc.status;
+    await proc.stop();
     await Deno.remove(dir, { recursive: true });
   }
 } });
