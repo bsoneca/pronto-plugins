@@ -280,3 +280,40 @@ export function openInBrowserBody(p: { host: string; label: string; url: string;
 ${how}
 <p><small>Or go back and sign in another way the app offers here, such as a passkey.</small></p>`;
 }
+
+// Crawlers and the request line (PRONTO-862). A tenant's plain sign-in link is one a crawler follows (Applebot
+// was seen on bonkchess.com's), reaches the broker's page and never clicks it: a start no person made.
+// The line below tells people from bots; the pages are kept out of an index and refused to known crawlers.
+
+/** Whether a user agent names a known crawler or link-preview fetcher. A phone brand that ends in "bot" is no crawler. */
+export const crawlerOf = (ua: string | null | undefined): boolean =>
+  /Applebot|Googlebot|AdsBot|Mediapartners|bingbot|BingPreview|DuckDuckBot|YandexBot|Baiduspider|Bytespider|Slurp|PetalBot|AhrefsBot|SemrushBot|MJ12bot|facebookexternalhit|Facebot|meta-externalagent|Twitterbot|LinkedInBot|Slackbot|Discordbot|TelegramBot|WhatsApp\/|\bbot\b|crawler|spider|\+https?:\/\//i.test(ua ?? "");
+
+/** The pages a sign-in starts at: the one a tenant's link opens, and Hydra's login step. */
+const SIGN_IN_PAGES = ["/authorize", "/login"];
+
+/** The handler (`pages`: the paths that start a sign-in, the Hydra front's adding /oauth2/auth), logging each request as one line (method, path, status, bot or human, the tenant's host) and
+ * keeping the sign-in pages out of indexes: `X-Robots-Tag: noindex, nofollow`, and a 403 for a known crawler
+ * in place of the page. The line holds no query, token, address or user agent; the host is the tenant's origin
+ * the request names (client_id), where it names one. */
+export function observed(handler: (req: Request) => Promise<Response>, log: (line: string) => void = (l) => console.log(l), pages: string[] = SIGN_IN_PAGES) {
+  return async (req: Request): Promise<Response> => {
+    const url = new URL(req.url);
+    const bot = crawlerOf(req.headers.get("user-agent"));
+    const startsSignIn = req.method === "GET" && pages.includes(url.pathname);
+    let res: Response;
+    if (startsSignIn && bot) {
+      res = new Response("crawlers are not served the sign-in\n", { status: 403, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+    } else {
+      res = await handler(req);
+      if (startsSignIn) {
+        res = new Response(res.body, { status: res.status, statusText: res.statusText, headers: res.headers });
+      }
+    }
+    if (startsSignIn) res.headers.set("x-robots-tag", "noindex, nofollow");
+    let host = "-";
+    try { host = new URL(url.searchParams.get("client_id") ?? "").host || "-"; } catch { /* no client named */ }
+    log(`broker: ${req.method} ${url.pathname} ${res.status} ${bot ? "bot" : "human"} ${host}`);
+    return res;
+  };
+}

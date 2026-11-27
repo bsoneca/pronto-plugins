@@ -16,7 +16,7 @@
 // broker's pairwise one, under the same secret, so a person keeps the subject
 // each application already linked.
 import { Refused, randomToken, sha256url, verifyIdToken } from "../oidc.ts";
-import { callbackOf, emailOf, learnsMore, openInBrowserBody, pairwiseKey, pairwiseSubject, profileOf, providerScope, sectorOf, sectorsOf, signInFlow, startOf, tenantOf, webviewOf } from "../broker/core.ts";
+import { callbackOf, emailOf, observed, learnsMore, openInBrowserBody, pairwiseKey, pairwiseSubject, profileOf, providerScope, sectorOf, sectorsOf, signInFlow, startOf, tenantOf, webviewOf } from "../broker/core.ts";
 import { askedFlag, esc, google, hmacKey, json, page, type Provider, seal, unseal } from "../broker/main.ts";
 import { fakeGoogle } from "./fake.ts";
 import { phoneConfig, phoneUpstream } from "../broker/phone.ts";
@@ -258,7 +258,7 @@ export async function front(p: {
     return go(redirect_to as string);
   }
 
-  return async function handler(req: Request): Promise<Response> {
+  return observed(async function handler(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
     try {
@@ -280,7 +280,7 @@ export async function front(p: {
       console.error(e);
       return json(500, { error: "internal error" });
     }
-  };
+  }, (l) => console.log(l), ["/login", "/oauth2/auth"]);
 }
 
 if (import.meta.main) {
