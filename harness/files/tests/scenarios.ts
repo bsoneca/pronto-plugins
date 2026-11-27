@@ -545,9 +545,10 @@ export class Run {
     if ("upload" in st) return (await sel(st.upload.in)).setInputFiles(here("./fixtures/" + st.upload.file).pathname);
     if ("submit" in st) return (await sel(st.submit)).evaluate((f: HTMLFormElement) => f.requestSubmit());
     // An error thrown before the error reporter has asked for its flag is never reported: the throw
-    // waits for the reporter to say it has settled (the hatch marks <html data-errors>, and <html data-error-detail>
-    // when the journeys reporter's detail flag has answered: an error thrown before it is a name alone).
-    if ("throw" in st) { const message = await this.fill(st.throw); await p.waitForSelector("html[data-errors][data-error-detail]", { state: "attached", timeout: 60_000 }); return p.evaluate((m) => { setTimeout(() => { throw new Error(m); }, 0); }, message); }
+    // waits for the reporter to say it has settled (the hatch marks <html data-errors>). A step with `detail` also
+    // waits for the journeys reporter's detail flag to have answered (<html data-error-detail>): an error thrown
+    // before it is a name alone. The plain check never waits on it.
+    if ("throw" in st) { const message = await this.fill(st.throw); await p.waitForSelector((st as { detail?: boolean }).detail ? "html[data-errors][data-error-detail]" : "html[data-errors]", { state: "attached", timeout: 60_000 }); return p.evaluate((m) => { setTimeout(() => { throw new Error(m); }, 0); }, message); }
     if ("closeDialogs" in st) return p.evaluate(() => document.querySelectorAll("dialog[open]").forEach((d) => (d as HTMLDialogElement).close()));
     if ("pay" in st) {
       // The app's checkout (tests/checkout.ts: the stand-in's pay button, or Stripe's sandbox card form).
