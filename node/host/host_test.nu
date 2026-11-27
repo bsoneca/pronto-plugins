@@ -80,7 +80,14 @@ def host-with [values: string]: nothing -> record {
 
 def test_the_schema_defaults_and_refuses [] {
 	print "test #Host's defaults are what the node ran with, and its bounds refuse a value that could not work..."
-	assert equal (host-with "{}").host (with-heal)
+	assert equal (host-with "{}").host (defaults) "a host with no daprHeal holds none: a non-k3s host gets no repair timer"
+	assert equal (host-with "{daprHeal: {}}").host (with-heal)
+	assert (not (host-with "{daprHeal: {namespaces: [\"studio-ana-game-1a2b3c\"]}}").ok) "a Studio tenant's namespace"
+	assert (not (host-with "{daprHeal: {namespaces: [\"dapr-system\"]}}").ok) "dapr-system"
+	assert (not (host-with "{daprHeal: {namespaces: [\"kube-system\"]}}").ok) "kube-system"
+	assert (not (host-with "{daprHeal: {namespaces: []}}").ok) "no namespace to sweep"
+	assert (not (host-with "{daprHeal: {namespaces: [\"a b\"]}}").ok) "a name with a space"
+	assert equal (host-with "{daprHeal: {namespaces: [\"aprende\", \"studio\"]}}").host.daprHeal.namespaces ["aprende" "studio"]
 	assert (not (host-with "{daprHeal: {graceSeconds: 5}}").ok) "a grace the injector's own delay could outlast"
 	assert (not (host-with "{daprHeal: {cooldownMinutes: 1}}").ok) "a cooldown shorter than a roll"
 	assert (not (host-with "{daprHeal: {kubectl: \"k3s' kubectl\"}}").ok) "a quote in kubectl"
@@ -460,14 +467,14 @@ def test_a_failed_last_run_is_drift [] {
 }
 
 def with-heal []: nothing -> record {
-	(defaults) | merge {daprHeal: {kubectl: "k3s kubectl", graceSeconds: 120, cooldownMinutes: 30, onCalendar: "*:0/5"}}
+	(defaults) | merge {daprHeal: {kubectl: "k3s kubectl", namespaces: ["aprende" "brawl-chess" "studio" "coach"], graceSeconds: 120, cooldownMinutes: 30, onCalendar: "*:0/5"}}
 }
 
 def test_the_dapr_sidecar_repair_is_a_second_timer_of_the_same_host [] {
 	print "test a host with daprHeal also holds the repair env, script and timer, checks both timers, and finds a failed repair run..."
 	let files = (render (with-heal))
 	assert equal ($files | get path | last 4) ["/etc/pronto/dapr-heal.env" "/usr/local/lib/pronto/dapr-heal.sh" "/etc/systemd/system/pronto-dapr-heal.service" "/etc/systemd/system/pronto-dapr-heal.timer"]
-	assert equal ($files | where path == "/etc/pronto/dapr-heal.env" | first | get text) "# pronto-plugins node/host (Dapr sidecar): what dapr-heal.sh reads, from the node's #Host daprHeal.\nKUBECTL='k3s kubectl'\nGRACE_SECONDS=120\nCOOLDOWN_MINUTES=30\n"
+	assert equal ($files | where path == "/etc/pronto/dapr-heal.env" | first | get text) "# pronto-plugins node/host (Dapr sidecar): what dapr-heal.sh reads, from the node's #Host daprHeal.\nKUBECTL='k3s kubectl'\nNAMESPACES='aprende brawl-chess studio coach'\nGRACE_SECONDS=120\nCOOLDOWN_MINUTES=30\n"
 	assert str contains ($files | where path == "/etc/systemd/system/pronto-dapr-heal.timer" | first | get text) "OnCalendar=*:0/5\n"
 	assert equal (render (defaults) | length) 4 "a host with no daprHeal holds the cleanup's files alone"
 	let dir = (tmp)
@@ -483,6 +490,6 @@ def test_the_dapr_sidecar_repair_is_a_second_timer_of_the_same_host [] {
 		touch ($dir | path join failed)
 		assert equal (apply (with-heal) --root $root | length) 2 "both jobs read the one failed marker the stand-in keeps"
 	}
-	let bad = (try { render ((with-heal) | merge {daprHeal: {kubectl: "k3s'kubectl", graceSeconds: 120, cooldownMinutes: 30, onCalendar: "*:0/5"}}); "rendered" } catch {|e| $e.msg })
+	let bad = (try { render ((with-heal) | merge {daprHeal: {kubectl: "k3s'kubectl", namespaces: ["aprende"], graceSeconds: 120, cooldownMinutes: 30, onCalendar: "*:0/5"}}); "rendered" } catch {|e| $e.msg })
 	assert str contains $bad "daprHeal is not what #Host allows"
 }

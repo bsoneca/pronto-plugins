@@ -95,6 +95,7 @@ export def render [host: record]: nothing -> list<record> {
 		{path: $heal_env, mode: "644", text: (lines ([
 			"# pronto-plugins node/host (Dapr sidecar): what dapr-heal.sh reads, from the node's #Host daprHeal."
 			$"KUBECTL='($heal.kubectl)'"
+			$"NAMESPACES='($heal.namespaces | str join ' ')'"
 			$"GRACE_SECONDS=($heal.graceSeconds)"
 			$"COOLDOWN_MINUTES=($heal.cooldownMinutes)"
 		] | str join "\n"))}

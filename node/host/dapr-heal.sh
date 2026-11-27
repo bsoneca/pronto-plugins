@@ -13,10 +13,11 @@ case "${1:-}" in
 esac
 env=${DAPR_HEAL_ENV:-/etc/pronto/dapr-heal.env}
 state=${DAPR_HEAL_STATE:-/var/lib/pronto/dapr-heal}
-# KUBECTL (the words that run kubectl on the node), GRACE_SECONDS, COOLDOWN_MINUTES: host.nu writes them from #Host's daprHeal.
+# KUBECTL (the words that run kubectl on the node), NAMESPACES (the operator's, space separated: only these are swept, never a
+# tenant's, dapr-system or kube-system), GRACE_SECONDS, COOLDOWN_MINUTES: host.nu writes them from #Host's daprHeal.
 # shellcheck disable=SC1090
 . "$env"
-: "${KUBECTL:?dapr-heal: KUBECTL is not set in $env}" "${GRACE_SECONDS:?}" "${COOLDOWN_MINUTES:?}"
+: "${KUBECTL:?dapr-heal: KUBECTL is not set in $env}" "${NAMESPACES:?dapr-heal: NAMESPACES is not set in $env}" "${GRACE_SECONDS:?}" "${COOLDOWN_MINUTES:?}"
 
 # shellcheck disable=SC2086 # KUBECTL is words: "k3s kubectl"
 k() { $KUBECTL --request-timeout=30s "$@"; }
@@ -33,8 +34,11 @@ epoch() {
 }
 
 # One line a pod that asks for the sidecar: namespace|name|phase|deleting|created|owner kind/name|containers,
-# each container with a comma after it.
-pods=$(k get pods -A -o go-template='{{range .items}}{{$a := .metadata.annotations}}{{if $a}}{{if eq (index $a "dapr.io/enabled") "true"}}{{.metadata.namespace}}|{{.metadata.name}}|{{.status.phase}}|{{if .metadata.deletionTimestamp}}deleting{{end}}|{{.metadata.creationTimestamp}}|{{range .metadata.ownerReferences}}{{.kind}}/{{.name}}{{end}}|{{range .spec.containers}}{{.name}},{{end}}{{"\n"}}{{end}}{{end}}{{end}}')
+# each container (init containers too: a native sidecar is one) with a comma after it. Only the listed namespaces are read.
+pods=""
+for n in $NAMESPACES; do
+  pods="$pods$(k -n "$n" get pods -o go-template='{{range .items}}{{$a := .metadata.annotations}}{{if $a}}{{if eq (index $a "dapr.io/enabled") "true"}}{{.metadata.namespace}}|{{.metadata.name}}|{{.status.phase}}|{{if .metadata.deletionTimestamp}}deleting{{end}}|{{.metadata.creationTimestamp}}|{{range .metadata.ownerReferences}}{{.kind}}/{{.name}}{{end}}|{{range .spec.containers}}{{.name}},{{end}}{{range .spec.initContainers}}{{.name}},{{end}}{{"\n"}}{{end}}{{end}}{{end}}')"$'\n'
+done
 
 now=$(date +%s)
 bare=""
@@ -46,7 +50,7 @@ while IFS='|' read -r ns name phase deleting created owner containers; do
   # The injector adds the sidecar when the pod is admitted, so a bare pod stays bare; the grace is only for a pod whose
   # creation time cannot be told from one being created this second.
   if at=$(epoch "$created") && [ $((now - at)) -lt "$GRACE_SECONDS" ]; then continue; fi
-  bare="$bare$ns|$name|$owner"$'\n'
+  bare="$bare$ns|$name|$owner|${at:-0}"$'\n'
 done <<<"$pods"
 
 if [ -z "$bare" ]; then echo "dapr-heal: every pod that asks for a Dapr sidecar runs one"; exit 0; fi
@@ -63,7 +67,7 @@ fi
 # The workload that owns each bare pod: a ReplicaSet's owner is its Deployment; a StatefulSet and a DaemonSet own the pod.
 # Anything else (a Job, a pod of its own) is not rolled.
 targets=""
-while IFS='|' read -r ns name owner; do
+while IFS='|' read -r ns name owner at; do
   [ -n "$name" ] || continue
   case "$owner" in
     ReplicaSet/*)
@@ -72,19 +76,30 @@ while IFS='|' read -r ns name owner; do
     StatefulSet/?* | DaemonSet/?*) ;;
     *) echo "dapr-heal: $ns/$name: owned by '${owner:-nothing}': not rolled" >&2; failed=1; continue ;;
   esac
-  line="$ns|$owner"
-  printf '%s\n' "$targets" | grep -qxF "$line" || targets="$targets$line"$'\n'
+  targets="$targets$ns|$owner|$at"$'\n'
 done <<<"$bare"
+
+# A mark's time, as seconds since 1970 (GNU stat, else BSD's).
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
 
 mkdir -p "$state"
 while IFS='|' read -r ns owner; do
   [ -n "$ns" ] || continue
   mark="$state/$ns.${owner//\//.}"
-  # A roll replaces its pods one by one, and the old ones stay until the new are ready: not rolled again within the cooldown,
-  # and a workload the injector injects nothing for is rolled once an interval, not once a run.
-  if [ -n "$(find "$mark" -mmin "-$COOLDOWN_MINUTES" 2>/dev/null)" ]; then
-    echo "dapr-heal: $ns/$owner was rolled less than $COOLDOWN_MINUTES minutes ago and a pod of it is still without its sidecar: waiting"
-    continue
+  if [ -e "$mark" ]; then
+    # A roll replaces its pods one by one, and the old ones stay until the new are ready: not rolled again within the cooldown.
+    if [ -n "$(find "$mark" -mmin "-$COOLDOWN_MINUTES" 2>/dev/null)" ]; then
+      echo "dapr-heal: $ns/$owner was rolled less than $COOLDOWN_MINUTES minutes ago and a pod of it is still without its sidecar: waiting"
+      continue
+    fi
+    # Past the cooldown, a pod created after the roll and still bare means the injector injects nothing for this workload: a
+    # roll every interval would never end, so it is said and the run fails until someone looks.
+    newest=$(awk -F'|' -v k="$ns|$owner" '$1 "|" $2 == k && $3 > m { m = $3 } END { print m + 0 }' <<<"$targets")
+    if [ "$newest" -gt "$(mtime "$mark")" ]; then
+      echo "dapr-heal: $ns/$owner was rolled, and a pod created after that (past the cooldown of $COOLDOWN_MINUTES minutes) is still without its sidecar: the injector injects nothing for it; not rolled again" >&2
+      failed=1
+      continue
+    fi
   fi
   if [ "$dry" = 1 ]; then echo "dapr-heal: would roll $ns/$owner"; continue; fi
   if k -n "$ns" rollout restart "$owner" >/dev/null; then
@@ -94,5 +109,5 @@ while IFS='|' read -r ns owner; do
     echo "dapr-heal: rolling $ns/$owner failed" >&2
     failed=1
   fi
-done <<<"$targets"
+done < <(cut -d'|' -f1,2 <<<"$targets" | sort -u)
 exit "$failed"

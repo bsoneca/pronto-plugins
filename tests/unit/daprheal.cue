@@ -5,7 +5,7 @@ package unit
 // and every OFREP evaluation answered 500. tests/unit/daprheal.js runs the real script on a stand-in kubectl: a pod that asks for
 // a sidecar and has none rolls its owner, once the injector can add it.
 
-_bare: {ns: *"aprende" | string, name: *"aprende-flagd-6898744c57-m6m77" | string, owner: *"ReplicaSet/aprende-flagd-6898744c57" | string, containers: *["flagd"] | [...string], phase?: string, deleting?: bool, ageSec?: int}
+_bare: {ns: *"aprende" | string, name: *"aprende-flagd-6898744c57-m6m77" | string, owner: *"ReplicaSet/aprende-flagd-6898744c57" | string, containers: *["flagd"] | [...string], phase?: string, deleting?: bool, ageSec?: int, init?: [...string]}
 _rs: {"aprende/aprende-flagd-6898744c57": "Deployment/aprende-flagd"}
 
 cases: "a pod that asks for a sidecar and runs none rolls its Deployment": {
@@ -58,10 +58,33 @@ cases: "a workload rolled inside the cooldown is waited for, not rolled again, a
 	]
 }
 
-cases: "a workload rolled longer ago than the cooldown is rolled again": {
+cases: "a pod created after the last roll and still bare past the cooldown is an error, and is not rolled again": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [(_bare & {ageSec: 600})], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 1, rolled: []}, why: "the injector injects nothing for this workload: a roll every interval would never end"},
+		{pick: ["err"], matches: "pod created after that .* is still without its sidecar"},
+	]
+}
+
+cases: "a bare pod older than the last roll, past the cooldown, is a roll that did not replace it: rolled again": {
 	suite: "daprheal"
 	steps: [
 		{call: "daprheal.run", args: [{pods: [_bare], rs: _rs, marks: {"aprende.Deployment.aprende-flagd": 45}}], holds: {code: 0, rolled: ["aprende/Deployment/aprende-flagd"]}},
+	]
+}
+
+cases: "only the operator's namespaces are swept: a tenant's pod is never rolled nor makes the run fail": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [(_bare & {ns: "studio-ana-game-1a2b3c", owner: "Job/x"}), (_bare & {ns: "dapr-system"})], rs: _rs}], holds: {code: 0, rolled: [], out: "dapr-heal: every pod that asks for a Dapr sidecar runs one\n"}},
+		{call: "daprheal.run", args: [{pods: [(_bare & {ns: "studio-ana-game-1a2b3c"})], rs: {"studio-ana-game-1a2b3c/aprende-flagd-6898744c57": "Deployment/x"}, namespaces: ["studio-ana-game-1a2b3c"]}], holds: {rolled: ["studio-ana-game-1a2b3c/Deployment/x"]}, why: "the script rolls what it is told to sweep: the schema is what refuses a tenant's namespace"},
+	]
+}
+
+cases: "a daprd among the init containers (a native sidecar) is a sidecar": {
+	suite: "daprheal"
+	steps: [
+		{call: "daprheal.run", args: [{pods: [(_bare & {init: ["daprd"]})], rs: _rs}], holds: {code: 0, rolled: []}},
 	]
 }
 

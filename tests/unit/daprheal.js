@@ -7,15 +7,15 @@ const script = `${here}../../node/host/dapr-heal.sh`;
 const iso = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z');
 
 /**
- * Options: `pods`, [{ns, name, owner, containers, phase = Running, deleting, ageSec = 3600}]; `injector`, the injector's ready
+ * Options: `pods`, [{ns, name, owner, containers, init, phase = Running, deleting, ageSec = 3600}]; `injector`, the injector's ready
  * replicas as kubectl prints them ("1", "" for none); `rs`, {"ns/replicaset": "Deployment/name"}; `marks`, {"ns.Deployment.name":
- * minutes since it was rolled}; `failRoll`, workloads whose roll fails; `args`; `cooldown`, `grace`.
+ * minutes since it was rolled}; `failRoll`, workloads whose roll fails; `args`; `cooldown`, `grace`; `namespaces`, the ones swept (aprende and bonk).
  */
-export const run = ({ pods = [], injector = '1', rs = {}, marks = {}, failRoll = [], args = [], cooldown = 30, grace = 120 } = {}) => {
+export const run = ({ pods = [], injector = '1', rs = {}, marks = {}, failRoll = [], args = [], cooldown = 30, grace = 120, namespaces = ['aprende', 'bonk'] } = {}) => {
   const dir = Deno.makeTempDirSync();
   try {
     const now = Date.now();
-    const lines = pods.map((p) => [p.ns, p.name, p.phase ?? 'Running', p.deleting ? 'deleting' : '', iso(now - (p.ageSec ?? 3600) * 1000), p.owner ?? '', (p.containers ?? ['app']).map((c) => `${c},`).join('')].join('|'));
+    const lines = pods.map((p) => [p.ns, p.name, p.phase ?? 'Running', p.deleting ? 'deleting' : '', iso(now - (p.ageSec ?? 3600) * 1000), p.owner ?? '', [...(p.containers ?? ['app']), ...(p.init ?? [])].map((c) => `${c},`).join('')].join('|'));
     Deno.writeTextFileSync(`${dir}/pods`, lines.map((l) => `${l}\n`).join(''));
     Deno.writeTextFileSync(`${dir}/injector`, injector);
     Deno.writeTextFileSync(`${dir}/fail`, failRoll.map((f) => `${f}\n`).join(''));
@@ -31,7 +31,7 @@ export const run = ({ pods = [], injector = '1', rs = {}, marks = {}, failRoll =
 d=$(dirname "$0")
 echo "$*" >>"$d/calls"
 case "$*" in
-  *"get pods -A"*) cat "$d/pods" ;;
+  *"get pods"*) grep "^$(echo "$*" | sed -E 's/.*-n ([^ ]+) get pods.*/\\1/')|" "$d/pods" || true ;;
   *"-n dapr-system get deployment dapr-sidecar-injector"*) printf '%s' "$(cat "$d/injector")" ;;
   *"get replicaset "*) printf '%s' "$(cat "$d/rs.$(echo "$*" | sed -E 's/.*-n ([^ ]+) get replicaset ([^ ]+) .*/\\1.\\2/')" 2>/dev/null)" ;;
   *"rollout restart "*) w=$(echo "$*" | sed -E 's/.*-n ([^ ]+) rollout restart (.*)/\\1\\/\\2/'); if grep -qxF "$w" "$d/fail"; then exit 1; fi; echo "$w" >>"$d/rolled" ;;
@@ -39,7 +39,7 @@ case "$*" in
 esac
 `);
     Deno.chmodSync(`${dir}/kubectl`, 0o755);
-    Deno.writeTextFileSync(`${dir}/env`, `KUBECTL='${dir}/kubectl'\nGRACE_SECONDS=${grace}\nCOOLDOWN_MINUTES=${cooldown}\n`);
+    Deno.writeTextFileSync(`${dir}/env`, `KUBECTL='${dir}/kubectl'\nNAMESPACES='${namespaces.join(' ')}'\nGRACE_SECONDS=${grace}\nCOOLDOWN_MINUTES=${cooldown}\n`);
     const r = new Deno.Command('bash', {
       args: [script, ...args], stdout: 'piped', stderr: 'piped',
       env: { DAPR_HEAL_ENV: `${dir}/env`, DAPR_HEAL_STATE: `${dir}/state`, PATH: '/usr/bin:/bin' },

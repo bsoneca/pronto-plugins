@@ -5,7 +5,8 @@ package schema
 
 #Host: {
 	dockerGC: #DockerGC
-	daprHeal: #DaprHeal
+	// Opt-in: a host that is not a k3s node (no kubectl, no Dapr) holds no repair timer.
+	daprHeal?: #DaprHeal
 	kubelet?: #Kubelet
 }
 
@@ -72,10 +73,14 @@ package schema
 // 2026-11-27 disk outage) is admitted with no daprd and stays so, and every call to its app's Dapr port is refused. A timer's job
 // (dapr-heal.sh) finds each pod annotated dapr.io/enabled=true with no daprd container and rolls its Deployment, StatefulSet or
 // DaemonSet once the injector has a ready replica, so the injector adds the sidecar; it does not touch a Job's pod or a pod of its
-// own, and rolls a workload at most once per cooldownMinutes.
+// own, looks only in `namespaces`, and rolls a workload at most once per cooldownMinutes; a pod created after that roll and still
+// bare is an error, never a second roll.
 #DaprHeal: {
 	// The words that run kubectl as root on the node, kept inside single quotes in /etc/pronto/dapr-heal.env, so no quote.
 	kubectl: *"k3s kubectl" | (string & =~"^[A-Za-z0-9_./-]+( [A-Za-z0-9_./-]+)*$")
+	// The operator's namespaces, the only ones swept: a tenant's (Studio's `studio-<owner>-<app>-<hash>`) must not be able to
+	// trigger a roll or turn the check red, and dapr-system and the system namespaces are not apps. Names, not patterns.
+	namespaces: *["aprende", "brawl-chess", "studio", "coach"] | [#OperatorNamespace, ...#OperatorNamespace]
 	// A pod younger than this is not judged.
 	graceSeconds: *120 | (int & >=30)
 	// How long after rolling a workload it is not rolled again.
@@ -83,3 +88,5 @@ package schema
 	// A systemd OnCalendar expression; every five minutes by default. One line and no backslash, as dockerGC's.
 	onCalendar: *"*:0/5" | (string & =~"^[^\n\r\\\\]+$")
 }
+
+#OperatorNamespace: string & =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" & !~"^(default|dapr-system|kube-system|kube-public|kube-node-lease)$" & !~"^studio-"
