@@ -17,6 +17,7 @@ use std/assert
 
 def main [--kind: string = ""] {
 	print "Running tenant admission tests...\n"
+	test_no_policy_is_named_as_one_of_studios_own
 	test_every_policy_matches_tenant_namespaces_only
 	test_the_images_are_the_namespaces_own
 	test_the_accounts_are_the_engines_reserved_ones_and_the_databases
@@ -45,7 +46,7 @@ def schema [expr: string]: nothing -> any {
 # The policies of the schema as a studio's apps would apply them, by name.
 def policies [extra: string = ""]: nothing -> record {
 	let objects = (schema $"\(#TenantAdmission & {label: \"($label)\", name: \"($policy_prefix)\"($extra)}).objects")
-	$objects | where kind == "ValidatingAdmissionPolicy" | reduce --fold {} {|p, acc| $acc | insert ($p.metadata.name | str replace $"($policy_prefix)-" "") $p }
+	$objects | where kind == "ValidatingAdmissionPolicy" | reduce --fold {} {|p, acc| $acc | insert ($p.metadata.name | str replace $"($policy_prefix)-engine-" "") $p }
 }
 
 # The expressions of a policy's validations whose message says `says`.
@@ -57,6 +58,17 @@ def one-rule [policy: string, says: string]: nothing -> string {
 	let r = (rules $policy $says)
 	assert equal ($r | length) 1 $"($policy) has ($r | length) rules saying ($says)"
 	$r | first
+}
+
+def test_no_policy_is_named_as_one_of_studios_own [] {
+	print "test no generated policy or binding is named as one of Studio's own enforced ones (studio-provisioner, studio-tenant-hosts, studio-tenant-secrets): applying them would overwrite those..."
+	let objects = (schema $"\(#TenantAdmission & {label: \"($label)\", name: \"($policy_prefix)\"}).objects")
+	let studios = [studio-provisioner studio-tenant-hosts studio-tenant-secrets]
+	for o in $objects {
+		assert ($o.metadata.name not-in $studios) $"($o.kind) ($o.metadata.name) is Studio's"
+		assert ($o.metadata.name | str starts-with $"($policy_prefix)-engine-") $o.metadata.name
+	}
+	assert equal ($objects | where kind == "ValidatingAdmissionPolicy" | length) 6
 }
 
 def test_every_policy_matches_tenant_namespaces_only [] {
@@ -231,8 +243,11 @@ def test_who_is_not_judged_and_what_the_bindings_do [] {
 		assert ($conditions.1.expression | str contains "system:serviceaccount:cnpg-system:cnpg-manager") $p
 	}
 	let c = ($all.clusters.spec.matchConditions)
-	assert equal ($c | get name) [not-a-controller spec-changes]
-	assert ($c.1.expression | str contains "object.spec != oldObject.spec") $c.1.expression
+	assert equal ($c | get name) [not-a-controller not-the-operator spec-or-annotations-change]
+	assert ($c.2.expression | str contains "object.spec != oldObject.spec") $c.2.expression
+	assert ($c.2.expression | str contains "object.metadata.annotations") "an annotation-only update is judged"
+	let notes = (one-rule clusters "carries no cnpg.io/ annotation")
+	for p in (schema '#TenantRefusedClusterAnnotationPrefixes') { assert ($notes | str contains $"k.startsWith\('($p)'\)") $p }
 	let bindings = (schema '(#TenantAdmission & {label: "x/y"}).objects' | where kind == "ValidatingAdmissionPolicyBinding")
 	assert equal ($bindings | length) 6
 	for b in $bindings { assert equal $b.spec.validationActions [Warn Audit] }
@@ -332,6 +347,9 @@ def cases [ns: string]: nothing -> list {
 		["a Cluster with a managed role that creates roles" (do $cluster {managed: {roles: [{name: r, login: true, createrole: true}]}}) clusters]
 		["a Cluster with a managed role in pg_execute_server_program" (do $cluster {managed: {roles: [{name: r, login: true, inRoles: [pg_execute_server_program]}]}}) clusters]
 		["a Cluster whose owner is a pg_ role" (do $cluster {bootstrap: {initdb: {database: app, owner: pg_monitor}}}) clusters]
+		["a Cluster with a cnpg.io/podPatch annotation" ((do $cluster {}) | update metadata {|c| $c.metadata | insert annotations {"cnpg.io/podPatch": "[]"}}) clusters]
+		["a Cluster with a cnpg.io/validation annotation" ((do $cluster {}) | update metadata {|c| $c.metadata | insert annotations {"cnpg.io/validation": "disabled"}}) clusters]
+		["a Cluster with a cnpg.io/reconcilePodSpec annotation" ((do $cluster {}) | update metadata {|c| $c.metadata | insert annotations {"cnpg.io/reconcilePodSpec": "disabled"}}) clusters]
 		["a Cluster whose database is postgres, and so its owner" (do $cluster {bootstrap: {initdb: {database: postgres}}}) clusters]
 		["a Cluster with shared_buffers written with a space before its unit" (do $cluster {postgresql: {parameters: {shared_buffers: "256 MB"}}}) ""]
 		["a Cluster with a managed role named cnpg_x" (do $cluster {managed: {roles: [{name: cnpg_x, login: true}]}}) clusters]
@@ -347,7 +365,7 @@ def cases [ns: string]: nothing -> list {
 }
 
 def verdict [r: record]: nothing -> string {
-	if $r.exit_code == 0 { "" } else if ($r.stderr =~ "ValidatingAdmissionPolicy '([a-z-]+)'") { $r.stderr | parse --regex "ValidatingAdmissionPolicy '(?<p>[a-z-]+)'" | get p | first | str replace $"($policy_prefix)-" "" } else { $"other: ($r.stderr | str trim)" }
+	if $r.exit_code == 0 { "" } else if ($r.stderr =~ "ValidatingAdmissionPolicy '([a-z-]+)'") { $r.stderr | parse --regex "ValidatingAdmissionPolicy '(?<p>[a-z-]+)'" | get p | first | str replace $"($policy_prefix)-engine-" "" } else { $"other: ($r.stderr | str trim)" }
 }
 
 def test_the_api_server [context: string] {

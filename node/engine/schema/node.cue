@@ -246,6 +246,14 @@ import (
 // The database names that are never a tenant's (besides a name that begins with a #TenantRefusedRolePrefixes entry): the superuser's and Postgres's templates.
 #TenantRefusedDatabases: ["postgres", "template0", "template1"]
 
+// The annotation prefixes no tenant Cluster carries: `cnpg.io/podPatch`, `cnpg.io/validation` and `cnpg.io/reconcilePodSpec` make the operator rewrite the instance pod (its image,
+// the superuser's Secret it reads, its service account), which the engine fixes by never letting a tenant's Cluster say so. Read by tenant.nu's check-objects and by the
+// cluster's admission policies (#TenantAdmission).
+#TenantRefusedClusterAnnotationPrefixes: ["cnpg.io/"]
+
+// The pod fields that give a tenant's pod the node's own namespaces.
+#TenantRefusedHostFields: ["hostNetwork", "hostPID", "hostIPC"]
+
 // The longest a stopping instance may wait, in seconds (stopDelay and smartShutdownTimeout): a tenant's pod stops in half an hour at most.
 #TenantMaxStopSeconds: 1800
 
@@ -378,7 +386,7 @@ import (
 		#rules: [...string]
 		#resources: [...{apiGroups: [...string], apiVersions: ["*"], operations: _ops, resources: [...string]}]
 		policy: {
-			metadata: name: "\(_prefix)-\(#name)"
+			metadata: name: "\(_prefix)-engine-\(#name)"
 			spec: {
 				failurePolicy: _fp
 				matchConstraints: {namespaceSelector: _selector, resourceRules: #resources}
@@ -421,7 +429,7 @@ import (
 		// What an object of any kind a publisher writes leaves to the engine: the metadata that hands its life to another (an ownerReference to the provisioner's publisher account,
 		// which Kubernetes garbage-collects when the owner is not found; a finalizer that holds it undeletable).
 		{
-			metadata: name: "\(_prefix)-objects"
+			metadata: name: "\(_prefix)-engine-objects"
 			spec: {
 				failurePolicy: _fp
 				matchConstraints: {
@@ -436,7 +444,7 @@ import (
 			}
 		},
 		{
-			metadata: name: "\(_prefix)-services"
+			metadata: name: "\(_prefix)-engine-services"
 			spec: {
 				failurePolicy: _fp
 				matchConstraints: {namespaceSelector: _selector, resourceRules: [{apiGroups: [""], apiVersions: ["*"], operations: _ops, resources: ["services"]}]}
@@ -448,7 +456,7 @@ import (
 			}
 		},
 		{
-			metadata: name: "\(_prefix)-secrets"
+			metadata: name: "\(_prefix)-engine-secrets"
 			spec: {
 				failurePolicy: _fp
 				matchConstraints: {namespaceSelector: _selector, resourceRules: [{apiGroups: [""], apiVersions: ["*"], operations: _ops, resources: ["secrets"]}]}
@@ -460,13 +468,13 @@ import (
 			}
 		},
 		// A tenant's Cluster, held to the allowlist the engine holds it to: the whole of what runs in the operator-made instance pod is the engine's, and the cnpg-manager that makes the pod
-		// is exempt elsewhere only because of this. A request that does not change `spec` (the operator's own writes to an older Cluster) is not judged again.
+		// is exempt elsewhere only because of this. The operator's own writes to a Cluster are not judged, nor is a request that changes neither `spec` nor an annotation.
 		{
-			metadata: name: "\(_prefix)-clusters"
+			metadata: name: "\(_prefix)-engine-clusters"
 			spec: {
 				failurePolicy: _fp
 				matchConstraints: {namespaceSelector: _selector, resourceRules: [{apiGroups: ["postgresql.cnpg.io"], apiVersions: ["*"], operations: _ops, resources: ["clusters"]}]}
-				matchConditions: [{name: "not-a-controller", expression: "!(\(_isController))"}, {name: "spec-changes", expression: "request.operation == 'CREATE' || object.spec != oldObject.spec"}]
+				matchConditions: [{name: "not-a-controller", expression: "!(\(_isController))"}, {name: "not-the-operator", expression: "!(\(_isOperator))"}, {name: "spec-or-annotations-change", expression: "request.operation == 'CREATE' || object.spec != oldObject.spec || dyn(has(object.metadata.annotations) ? object.metadata.annotations : {}) != dyn(has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})"}]
 				variables: [
 					{name: "spec", expression: "dyn(object.spec)"},
 					{name: "base", expression: "object.metadata.name.endsWith('\(#TenantAccountSuffix)') ? object.metadata.name.substring(0, size(object.metadata.name) - \(len(#TenantAccountSuffix))) : ''"},
@@ -477,6 +485,7 @@ import (
 				]
 				validations: list.Concat([[
 					{expression: "object.metadata.name.endsWith('\(#TenantAccountSuffix)')", message: "a tenant's Cluster is named <app>\(#TenantAccountSuffix): its database is the release's own"},
+					{expression: "!has(object.metadata.annotations) || size(dyn(object.metadata.annotations).filter(k, \(strings.Join([for p in #TenantRefusedClusterAnnotationPrefixes {"k.startsWith('\(p)')"}], " || ")))) == 0", message: "a tenant's Cluster carries no cnpg.io/ annotation: podPatch, validation and reconcilePodSpec make the operator rewrite the instance pod (#TenantRefusedClusterAnnotationPrefixes)"},
 					{expression: "has(variables.spec.imageName) && variables.spec.imageName in [\(_quoted.images)]", message: "a tenant's Cluster runs the engine's approved database base, from its own namespace's path in the node's registry, pinned by its digest"},
 					{expression: "variables.spec.all(k, k in [\(_quoted.clusterKeys)])", message: "a tenant's Cluster sets only the fields the engine renders (#TenantClusterSpec): its image and what runs in its pod are the engine's"},
 					{expression: "!has(variables.spec.inheritedMetadata) && !has(variables.spec.priorityClassName)", message: "a tenant's Cluster sets no inheritedMetadata and no priorityClassName"},

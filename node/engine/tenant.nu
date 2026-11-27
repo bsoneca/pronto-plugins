@@ -397,7 +397,10 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			if ($o.spec?.externalIPs? | default [] | is-not-empty) { $why = ($why | append $"($id) names externalIPs") }
 		}
 		if ($o.kind? | default "") == "Cluster" {
-			if ($node.name? | default "" | is-not-empty) and ($o.metadata?.name? | default "") != $"($node.name)-db" { $why = ($why | append $"($id) is not named ($node.name)-db: a tenant's database is the release's own") }
+			if ($node.name? | default "" | is-not-empty) and ($o.metadata?.name? | default "") != $"($node.name)(schema-export '#TenantAccountSuffix')" { $why = ($why | append $"($id) is not named ($node.name)(schema-export '#TenantAccountSuffix'): a tenant's database is the release's own") }
+			# an annotation under cnpg.io/ makes the operator rewrite the instance pod (podPatch, validation, reconcilePodSpec): never a tenant's Cluster's
+			let cluster_notes = ($o.metadata?.annotations? | default {} | columns | where {|k| (schema-export '#TenantRefusedClusterAnnotationPrefixes') | any {|p| $k | str starts-with $p } })
+			if ($cluster_notes | is-not-empty) { $why = ($why | append $"($id) carries the annotation\(s\) ($cluster_notes | str join ', '), which make the database operator rewrite the instance pod: a tenant's Cluster has none") }
 			let image = ($o.spec?.imageName? | default "")
 			# a tenant's Cluster runs the engine's approved database base, copied to the tenant's own path (its full image stays with the Jobs): exactly that name
 			let wanted = (schema-export '#TenantDatabaseImages' | each {|a| $"($prefix)($node.name)-database-base:($a.major)@($a.digest)" })
@@ -466,16 +469,16 @@ export def check-objects [objects: list, node: record, kinds: list<string>, live
 			for account in [($spec.serviceAccountName? | default "") ($spec.serviceAccount? | default "")] {
 				if $account in $forbidden_accounts { $why = ($why | append $"($id) runs as the service account ($account)") }
 				# the database operator names the cluster's account `<cluster>-db` and binds it to what the database needs, which a tenant's workload never is
-				if ($account | str ends-with "-db") or ($account != "" and $account in $clusters) { $why = ($why | append $"($id) runs as the service account ($account), which a database's cluster owns") }
+				if ($account | str ends-with (schema-export '#TenantAccountSuffix')) or ($account != "" and $account in $clusters) { $why = ($why | append $"($id) runs as the service account ($account), which a database's cluster owns") }
 			}
 			# …nor a pod the operator would take for one of the cluster's (it selects its pods, and its policies admit them, by the labels it keeps
 			# under its own prefix)
-			if ($o.spec?.template?.metadata?.labels? | default {} | columns | any {|k| $k | str starts-with "cnpg.io/" }) { $why = ($why | append $"($id) carries a label under cnpg.io/, which marks a database's own pods") }
+			if ($o.spec?.template?.metadata?.labels? | default {} | columns | any {|k| (schema-export '#TenantRefusedLabelPrefixes') | any {|p| $k | str starts-with $p } }) { $why = ($why | append $"($id) carries a label under cnpg.io/, which marks a database's own pods") }
 			# no runtime class (a sandbox or a host runtime of the node's) and no priority class (a tenant must not pre-empt the node's own pods)
 			if ($spec.runtimeClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets runtimeClassName ($spec.runtimeClassName)") }
 			if ($spec.priorityClassName? | default "" | is-not-empty) { $why = ($why | append $"($id) sets priorityClassName ($spec.priorityClassName)") }
 			if ($spec.hostUsers? | default true) == false { $why = ($why | append $"($id) sets hostUsers: false") }
-			for key in [hostNetwork hostPID hostIPC] { if ($spec | get -o $key | default false) == true { $why = ($why | append $"($id) sets ($key)") } }
+			for key in (schema-export '#TenantRefusedHostFields') { if ($spec | get -o $key | default false) == true { $why = ($why | append $"($id) sets ($key)") } }
 			for v in ($spec.volumes? | default []) {
 				let kinds = ($v | columns | where {|c| $c != "name" })
 				let other = ($kinds | where {|k| $k not-in $volume_types })
