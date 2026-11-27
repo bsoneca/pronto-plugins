@@ -25,6 +25,7 @@ const heal_env = "/etc/pronto/dapr-heal.env"
 const heal_service = "/etc/systemd/system/pronto-dapr-heal.service"
 const heal_timer = "/etc/systemd/system/pronto-dapr-heal.timer"
 const heal_unit = "pronto-dapr-heal.timer"
+const heal_service_unit = "pronto-dapr-heal.service"
 
 # The command each supported launcher runs as: fixed, absolute, root's (a value of the host JSON is never a path).
 def heal-kubectl [launcher: string]: nothing -> string {
@@ -179,9 +180,28 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 				print $"drift: ($root + $f) is installed but the host has no daprHeal"
 			}
 			if not $check {
-				# 5 and 1 are systemctl's answers for a unit it does not know: the files may be half gone. Anything else is an error.
+				# The timer is disabled and stopped and its service (a sweep that may be running) stopped; the files are removed only once systemd says
+				# so: both inactive, the timer disabled or absent. A failed stop, or a state that cannot be read, is an error with the files kept, so the
+				# next apply finds the drift again.
 				let off = (sh $node $"systemctl disable --now ($heal_unit)")
 				if $off.exit_code == 255 { error make {msg: $"node-host: disabling ($heal_unit): ($off.stderr | str trim)"} }
+				let stop = (sh $node $"systemctl stop ($heal_service_unit)")
+				if $stop.exit_code == 255 { error make {msg: $"node-host: stopping ($heal_service_unit): ($stop.stderr | str trim)"} }
+				for unit in [$heal_unit $heal_service_unit] {
+					let active = (sh $node $"systemctl is-active ($unit)")
+					if $active.exit_code == 255 { error make {msg: $"node-host: asking whether ($unit) is active: ($active.stderr | str trim)"} }
+					let a = ($active.stdout | str trim)
+					if $a in ["active" "activating" "reloading" "deactivating"] { error make {msg: $"node-host: ($unit) is still ($a) after being stopped: its files are kept"} }
+					if $a not-in ["inactive" "failed" "unknown"] { error make {msg: $"node-host: the state of ($unit) is unreadable \(($a), ($active.stderr | str trim)\): its files are kept"} }
+				}
+				let enabled = (sh $node $"systemctl is-enabled ($heal_unit)")
+				if $enabled.exit_code == 255 { error make {msg: $"node-host: asking whether ($heal_unit) is enabled: ($enabled.stderr | str trim)"} }
+				let e = ($enabled.stdout | str trim)
+				# Absent is a fact about the file, not systemd's wording (newer versions say not-found): with the timer's file already gone, no state
+				# or `not-found` is what a unit that is not loaded gives.
+				let timer_there = ((must (sh $node $"if [ -e '($root + $heal_timer)' ]; then echo yes; fi") $"looking for ($root + $heal_timer)" | str trim) == "yes")
+				let absent = (not $timer_there and $e in ["" "not-found"])
+				if not ($absent or $e in ["disabled" "masked" "masked-runtime"]) { error make {msg: $"node-host: ($heal_unit) is not disabled \(($e), ($enabled.stderr | str trim)\): its files are kept"} }
 				for f in $left { must (sh $node $"rm -f '($root + $f)'") $"removing ($root + $f)" | ignore; print $"removed ($root + $f)" }
 				$changed = true
 			}
