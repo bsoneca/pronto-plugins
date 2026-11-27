@@ -243,6 +243,7 @@ jobs:
           sayt --script tools.nu cue vet -c ./node/host
           sayt --script tools.nu cue vet -c ./node/host/export
           sayt --script tools.nu nu node/host/host_test.nu
+          sayt --script tools.nu nu node/host/kubelet_test.nu
       - name: The machine's cue wrapper against a fake cue
         run: |
           sh -n machine/install.sh && sh -n machine/sysv-shm.sh && sh -n bin/pronto-machine

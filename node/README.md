@@ -314,6 +314,16 @@ so a bound every node needs is written here once, with defaults, and each reposi
 - `host.nu`: `render <host.json>` gives the files (the script, the env file from the values, the service, the timer); `apply <host.json>
   [--node user@host] [--check]` writes what drifted (each file whole beside itself, then renamed), reloads systemd and enables the timer, or with
   `--check` only says and exits 1. Each read, write and systemctl call is an ssh login of its own (BatchMode, a connect timeout), none retried.
+- `kubelet.nu`: `apply <host.json> [--check] [--node user@host]` sets the kubelet's args from `#Host.kubelet`: max pods, the full
+  `evictionHard` map (`memory.available`, and `available` and `inodesFree` of nodefs and imagefs: a partial `--eviction-hard` drops the
+  kubelet's other defaults, so CUE refuses a map missing one), an absolute `evictionMinimumReclaim` (k3s's default of 10% is about 39G of a
+  387G disk, which evicting every pod did not free), image GC before eviction, and `containerLogMaxSize`/`containerLogMaxFiles`. It writes
+  `/etc/rancher/k3s/config.yaml.d/max-pods.yaml` whole beside itself and renames it, restarts k3s only when that changed, and checks what the
+  running kubelet reports (configz). A pending marker and a backup, made before the rename and removed only once the kubelet is known good,
+  let the next run finish or roll back an apply that stopped; an unreadable configz (a failed request, an empty answer) restarts nothing; a
+  rollback restarts k3s and checks the kubelet answers, or keeps the marker. k3s's unit has `KillMode=process` (read from the unit on the
+  node, not confirmed by a restart): a restart should stop k3s alone and leave the containers running. Every ssh has a connect timeout and
+  keepalives, every kubectl a request timeout. Tests: `kubelet_test.nu` (fake ssh, sudo, tee, systemctl and kubectl).
 - `export/`: `cue export ./node/host/export -e files --out json`, what `bin/pronto-node --host <dir>` writes into `<dir>/node-host/`, byte for byte.
   A repository pins this repository's merge in a file of its own (`.github/node-host.pin`), apart from the engine's, so a host change
   does not regenerate every app's `node/`.
