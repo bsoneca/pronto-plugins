@@ -282,26 +282,36 @@ export async function statusRuns(seed, runs = 1) {
 
 /** The alerts verb (devflow/alerts.ts) `runs` times on the seed's board over a fake Cloud Monitoring: `pages` are the alerts of each page
  * of its answer (`nextPageToken` links them). The seed's `status` makes every GET answer that status, `flaky` the first a 503,
- * `endless` every page link to a next one, `noToken` the token fail, `dryRun` and `onlyNew` the verb's flags. Each run: the lines
+ * `endless` every page link to a next one, `noToken` the token fail, `projects` and `pagesBy`/`statusBy` (by project) several projects, `kept` the state kept before, `budgetMs` the read budget, `failSecondCreate` the board failing at the second issue, `dryRun` and `onlyNew` the verb's flags. Each run: the lines
  * printed and the board's writes; then the GETs made (`page n`), the issues the board holds that the verb made and the state kept. */
-export async function alertsRuns(seed, pages, runs = 1) {
+export async function alertsRuns(seed, allPages, runs = 1) {
+  let pages = allPages;
   seed = { now: DEFAULT_NOW, ...seed };
   const f = boardOf(seed);
   const flow = flowOf({ ...seed, suggestions: false });
   flow.alerts = {
-    projects: ['demo-proj'], flapOpens: 3, flapCloseMin: 30, staleHours: 24, apps: { battlechess: 'aprende', 'bonk-chess': 'aprende' },
+    projects: seed.projects ?? ['demo-proj'], flapOpens: 3, flapCloseMin: 30, staleHours: 24, apps: { battlechess: 'aprende', 'bonk-chess': 'aprende' },
     sources: [{ prefix: 'Bonk Chess: ', cue: 'apps/brawl-chess/journeys_plugin.cue' }, { prefix: 'Synthetic journeys: ', cue: 'tools/machine/synthetic.cue' }, { prefix: '', cue: 'infra/gcp/prodwatch.cue' }],
     priority: { outage: 'urgent', flapping: 'high', stale: 'medium' },
   };
-  let kept = [];
+  let kept = [...(seed.kept ?? [])];
   const requests = [];
+  if (seed.failSecondCreate) {
+    const create = f.board.createIssue;
+    let made = 0;
+    f.board.createIssue = (...a) => (++made > 1 ? Promise.reject(new Error('the board is down')) : create(...a));
+  }
   let failed = false;
   const answer = (status, body) => Promise.resolve({ ok: status < 300, status, json: () => Promise.resolve(body) });
   const fetcher = (url) => {
-    const token = new URL(url).searchParams.get('pageToken');
+    const u = new URL(url);
+    const project = u.pathname.split('/')[3];
+    const token = u.searchParams.get('pageToken');
     const n = token ? Number(token.slice(1)) : 0;
     requests.push(`page ${n + 1}`);
-    if (seed.status) return answer(seed.status, { error: { message: seed.status === 403 ? 'Permission denied' : 'Backend error' } });
+    const status = seed.statusBy?.[project] ?? seed.status;
+    pages = seed.pagesBy?.[project] ?? allPages;
+    if (status) return answer(status, { error: { message: status === 403 ? 'Permission denied' : 'Backend error' } });
     if (seed.flaky && !failed) { failed = true; return answer(503, { error: { message: 'unavailable' } }); }
     return answer(200, { alerts: pages[n] ?? [], ...(seed.endless || n + 1 < pages.length ? { nextPageToken: `t${n + 1}` } : {}) });
   };
@@ -310,7 +320,7 @@ export async function alertsRuns(seed, pages, runs = 1) {
     const run = await watchAlerts(flow, { board: f.board, project: 'p-acme' }, new Date(seed.now), {
       dryRun: !!seed.dryRun,
       io: {
-        fetch: fetcher, sleep: () => Promise.resolve(), lock: (fn) => fn(),
+        fetch: fetcher, sleep: () => Promise.resolve(), lock: (fn) => fn(), budgetMs: seed.budgetMs,
         token: () => (seed.noToken ? Promise.reject(new Error('no access token: gcloud auth print-access-token failed')) : Promise.resolve('test-token')),
         state: { read: () => [...kept], write: (keys) => { kept = [...keys]; } },
       },

@@ -128,7 +128,8 @@ devFlow: #DevFlow
 	// policy by the start of its display name (the longest prefix; "" matches all), so a bug names what to change.
 	alerts?: {
 		projects: [...string & =~"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"]
-		// More opens than this in 24 hours, or two closes within `flapCloseMin` minutes, is flapping.
+		// More events (incidents opened within 5 minutes of each other are one) than this in 24 hours, or two incidents that
+		// closed within `flapCloseMin` minutes of opening, is flapping, unless the policy is open now (an outage, or stale).
 		flapOpens:    *3 | (int & >0)
 		flapCloseMin: *30 | (number & >0)
 		// An incident open longer than this is stale.
