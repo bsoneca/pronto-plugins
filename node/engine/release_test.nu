@@ -2822,6 +2822,18 @@ def test_a_tenants_cache_mounts_are_its_namespaces_own_and_its_frontend_is_the_b
 		let r = (try { $text | tenant stage-dockerfile $ns; "admitted" } catch {|e| $e.msg })
 		assert (($r != "admitted") and ($r | str contains "`# syntax=` directive")) $"a BOM-prefixed directive under an approved one: ($r)"
 	}
+	# Opus review of pp#594: the engine's placeholders are reserved, and a heredoc word is read as buildkit reads it or refused
+	for row in [
+		{why: "the comment placeholder smuggles a mount out of a comment", text: "FROM b\nRUN --mount=type=tmpfs,target=/__TENANT_COMMENT_0__ \\\n#x --mount=type=cache,target=/y,id=victim echo #\n true\n", says: "a word the engine's staging keeps for itself"}
+		{why: "the mount placeholder", text: "FROM b\nRUN --mount=type=bind,target=/__TENANT_MOUNT_0__ --mount=type=cache,target=/a,id=victim true\n", says: "a word the engine's staging keeps for itself"}
+		{why: "a heredoc word split by a continuation (buildkit reads the name #AB)", text: "FROM b\nRUN cat <<#A\\\nB\n#AB\nRUN --mount=type=cache,target=/x,id=../victim true\n#A\n", says: "splits a heredoc word across a continuation"}
+		{why: "a heredoc name with a backslash (buildkit reads #EOF)", text: "FROM b\nRUN cat <<#E\\OF\n#EOF\nRUN --mount=type=cache,target=/x,id=../victim true\n#E\\OF\n", says: "with a backslash in it"}
+		{why: "a frontend directive after a shebang and a BOM", text: "#!x\n\u{FEFF}# syntax=evil/f\nFROM b\n", says: "`# syntax=` directive"}
+		{why: "an approved directive, then a JSON frontend", text: "# syntax=docker/dockerfile:1\n{\"syntax\":\"evil/f\"}\n", says: "is JSON"}
+	] {
+		let r = (try { $row.text | tenant stage-dockerfile $ns; "admitted" } catch {|e| $e.msg })
+		assert (($r != "admitted") and ($r | str contains $row.says)) $"($row.why): ($r)"
+	}
 	# a Dockerfile with no cache mount is left as it is
 	assert equal ("FROM base\nRUN echo hi\n" | tenant stage-dockerfile $ns) "FROM base\nRUN echo hi\n"
 	for row in [

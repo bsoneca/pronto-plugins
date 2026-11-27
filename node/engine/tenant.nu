@@ -267,6 +267,8 @@ export def check-compose-sources [app_dir: string] {
 export def stage-dockerfile [namespace: string]: string -> string {
 	# the BOM buildkit skips before it reads a directive is no part of the text the rest reads
 	let text = ($in | str replace --regex '^\x{FEFF}' '')
+	# the staging swaps text for `__TENANT_COMMENT_<n>__` and `__TENANT_MOUNT_<n>__` placeholders while it works and swaps it back: a Dockerfile that has the word could smuggle text across
+	if ($text | str contains '__TENANT_') { error make {msg: "a tenant's Dockerfile has `__TENANT_`, a word the engine's staging keeps for itself"} }
 	let official = '(?i)^\s*(#|//)\s*syntax\s*=\s*docker/dockerfile(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?\s*$'
 	mut out = []
 	mut leading = true
@@ -319,10 +321,10 @@ export def stage-dockerfile [namespace: string]: string -> string {
 # What buildkit reads at the head of a Dockerfile to pick a build frontend, applied to exactly the bytes bake is sent: the BOM and a leading shebang line are skipped (so a directive an earlier
 # strip left at the head, or a BOM that was internal until then, is seen), and a JSON Dockerfile, or a `syntax` or an `escape` directive among the leading comments and blank lines, is refused.
 def frontend-check [staged: string] {
-	let body = ($staged | str replace --regex '^\x{FEFF}' '' | str replace --regex '^#![^\n]*\n' '')
+	let body = ($staged | str replace --regex '^\x{FEFF}' '' | str replace --regex '^#![^\n]*\n' '' | str replace --regex '^\x{FEFF}' '')
 	if ($body | str trim | str starts-with '{') { error make {msg: "a tenant's Dockerfile is JSON, which buildkit reads a frontend directive from: a tenant's Dockerfile is plain"} }
 	for line in ($body | split row "\n") {
-		let bare = ($line | str replace --regex '\r$' '')
+		let bare = ($line | str replace --regex '\r$' '' | str replace --all --regex '\x{FEFF}' '')
 		if not (($bare | str trim | is-empty) or ($bare =~ '^\s*(#|//)')) { break }
 		if ($bare =~ '(?i)^\s*(#|//)\s*escape\s*=') { error make {msg: "a tenant's Dockerfile has an `escape=` directive, which moves the character a continuation line joins with: a tenant's build uses the default"} }
 		if ($bare =~ '(?i)^\s*(#|//)\s*syntax\s*=') { error make {msg: "a tenant's Dockerfile has a `# syntax=` directive, which picks a build frontend of its own: a tenant's build uses the buildkitd's built-in one"} }
@@ -347,7 +349,12 @@ def shell-words [text: string]: nothing -> list<string> {
 			$quote = $c
 			$cur = $cur ++ $c
 		} else if $c == "\\" and ($i + 1) < $n and (($chars | get ($i + 1)) in ["\n" "\r"]) {
-			# a continuation: white space (and the line end, with a \r before the \n)
+			# a continuation: white space (and the line end, with a \r before the \n). Buildkit joins the lines with no separator, so a heredoc word that a continuation splits
+			# (`<<#A\` then `B`) would be read as one word there and as two here: it is refused, not guessed.
+			if ($cur == "<" or ($cur | str starts-with "<<")) {
+				let after = ($chars | skip ($i + 1) | skip while {|x| $x in ["\r" "\n"] } | first 1)
+				if ($after | is-not-empty) and not (($after | first) in [" " "\t"]) { error make {msg: "a tenant's Dockerfile splits a heredoc word across a continuation line: a tenant's heredoc word is on one line"} }
+			}
 			if ($cur | is-not-empty) { $words = ($words | append $cur); $cur = "" }
 			$i = $i + 1
 			if ($chars | get $i) == "\r" and ($i + 1) < $n and ($chars | get ($i + 1)) == "\n" { $i = $i + 1 }
@@ -369,15 +376,17 @@ def shell-words [text: string]: nothing -> list<string> {
 def stage-instruction [ins: string, namespace: string]: nothing -> record {
 	# a heredoc is opened by RUN, COPY and ADD (ONBUILD included), by a word that begins with `<<` and has a name (buildkit's `^<<(-?)\s*([^<]*)$`, the name unquoted)
 	let keyword = ($ins | parse --regex '(?is)^\s*(?:ONBUILD\s+)?(?<k>[A-Za-z]+)' | get -o 0.k | default "" | str uppercase)
-	let heredocs = if $keyword in [RUN COPY ADD] {
-		shell-words $ins | where {|w| $w =~ '^<<' } | each {|w|
-			let m = ($w | parse --regex '^<<(?<dash>-?)(?<name>[^<]*)$' | get -o 0)
-			if $m == null { null } else {
-				let name = ($m.name | str replace --all --regex r#'["']'# '')
-				if ($name | is-empty) { null } else { {word: $name, dash: ($m.dash == "-")} }
-			}
-		} | compact
-	} else { [] }
+	let candidates = if $keyword in [RUN COPY ADD] { shell-words $ins | where {|w| $w =~ '^<<' } } else { [] }
+	# buildkit unescapes a heredoc name (`<<#E\OF` is the name `#EOF`): a tenant's heredoc word has no backslash, so the name here is the name there
+	let escaped = ($candidates | where {|w| $w | str contains "\\" })
+	if ($escaped | is-not-empty) { error make {msg: $"a tenant's Dockerfile has the heredoc word ($escaped | first), with a backslash in it: buildkit unescapes a heredoc name and a tenant's is plain"} }
+	let heredocs = ($candidates | each {|w|
+		let m = ($w | parse --regex '^<<(?<dash>-?)(?<name>[^<]*)$' | get -o 0)
+		if $m == null { null } else {
+			let name = ($m.name | str replace --all --regex r#'["']'# '')
+			if ($name | is-empty) { null } else { {word: $name, dash: ($m.dash == "-")} }
+		}
+	} | compact)
 	let m = ($ins | parse --regex '(?s)^(?<head>\s*(?i:ONBUILD\s+)?(?i:RUN))(?<flags>(?:[ \t]+|\\[ \t]*\r?\n(?:[ \t]*(?:#[^\n]*)?\r?\n)*)*(?:--\S+(?:[ \t]+|\\[ \t]*\r?\n(?:[ \t]*(?:#[^\n]*)?\r?\n)*)*)*)(?<rest>.*)$')
 	if ($m | is-empty) { return {text: $ins, heredocs: $heredocs} }
 	let parts = ($m | first)
