@@ -68,6 +68,11 @@ import (
 	BackendTrafficPolicy: "backendtrafficpolicy.gateway.envoyproxy.io"
 }
 
+// What a tenant's release never retires, though an operator's may: a NetworkPolicy and a CronJob (its publisher may not delete them) and a
+// ServiceAccount (the provisioner's publisher is one, and its RoleBinding and Role are not retirable kinds at all). Said once here; the
+// violation below and the engine's own check (tenant.nu check-retire) both read it.
+#TenantNoRetire: ["NetworkPolicy", "CronJob", "ServiceAccount"]
+
 // Kinds that live outside a namespace: never rendered by the engine, an app's release has no
 // right to them.
 #ClusterScoped: ["ClusterRole", "ClusterRoleBinding", "CustomResourceDefinition", "StorageClass", "PersistentVolume",
@@ -654,7 +659,7 @@ import (
 		[if publisher for o in _all if !list.Contains(#PublisherKinds, "\(o.apiVersion)/\(o.kind)") {
 			"\(o.kind)/\(o.metadata.name) is not a kind a tenant's publisher writes (#PublisherKinds)"
 		}],
-		[if publisher for r in release.retire if r.kind == "NetworkPolicy" || r.kind == "CronJob" {
+		[if publisher for r in release.retire if list.Contains(#TenantNoRetire, r.kind) {
 			"retire names \(r.kind)/\(r.name), which a tenant's publisher may not delete"
 		}],
 		[if publisher for o in _all if o.kind == "Gateway" for l in o.spec.listeners if l.port != 80 || l.protocol != "HTTP" {

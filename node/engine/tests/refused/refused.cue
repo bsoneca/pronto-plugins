@@ -134,6 +134,7 @@ tenantStudioBuilderJail: (schema.#Manifests & {
 tenantClock: (_tm & {extra: [], rel: {services: tick: {port: 9990, clock: {}}}}).objects
 tenantBlobs: (_tm & {extra: [], rel: {blobs: {bucket: "bkt-blobs", provider: "projects/1/locations/global/workloadIdentityPools/p/providers/q", serviceAccount: "b@p.iam.gserviceaccount.com"}}}).objects
 tenantRetireNetworkPolicy: (_tm & {extra: [], rel: {retire: [{kind: "NetworkPolicy", name: "old"}]}}).objects
+tenantRetireServiceAccount: (_tm & {extra: [], rel: {retire: [{kind: "ServiceAccount", name: "publisher"}]}}).objects
 tenantGatewayHTTPS: (_tm & {extra: [{apiVersion: "gateway.networking.k8s.io/v1", kind: "Gateway", metadata: {name: "other", namespace: _tns}, spec: listeners: [{name: "https", port: 443, protocol: "HTTPS", hostname: _thost}]}], rel: {}}).objects
 tenantUnservedKind: (_tm & {extra: [{apiVersion: "v1", kind: "ResourceQuota", metadata: {name: "q", namespace: _tns}}], rel: {}}).objects
 tenantExternalImage: (_tm & {extra: [{apiVersion: "apps/v1", kind: "Deployment", metadata: {name: "app-x", namespace: _tns}, spec: template: spec: containers: [{name: "x", image: "docker.io/library/nginx:1@sha256:\(_d)"}]}], rel: {}}).objects

@@ -45,6 +45,9 @@ export def retire-kinds []: nothing -> record {
 # the tenant's namespace, `-n` of the caller. Refused before any write. Answers `{resource, name}` for each.
 export def check-retire [node: record, kinds: record, objects: list]: nothing -> list {
 	let written = ($objects | each {|o| $"($o.kind)/($o.metadata.name)" })
+	let exported = (do { cd ($engine_dir | path join schema); ^cue export --out json -e '#TenantNoRetire' node.cue } | complete)
+	if $exported.exit_code != 0 { error make {msg: $"the engine's schema does not export #TenantNoRetire: ($exported.stderr | str trim)"} }
+	let never = ($exported.stdout | from json)
 	let planned = ($node.retire? | default [])
 	let problems = ($planned | each {|r|
 		let kind = ($r.kind? | default "")
@@ -54,8 +57,8 @@ export def check-retire [node: record, kinds: record, objects: list]: nothing ->
 			$"retire names ($id): a tenant's release may retire only ($kinds | columns | str join ', ')"
 		} else if not ($name =~ '^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$') {
 			$"retire names ($id): not a plain resource name"
-		} else if $kind in [NetworkPolicy CronJob] {
-			$"retire names ($id), which a tenant's publisher may not delete"
+		} else if $kind in $never {
+			$"retire names ($id), which a tenant's release never retires \(the provisioner's publisher account, a NetworkPolicy and a CronJob are not its to delete\)"
 		} else if $id in $written {
 			$"retire names ($id), which this release writes"
 		} else if $kind == "ConfigMap" and $name == "pronto-release" {
@@ -136,7 +139,8 @@ export def check-compose-sources [app_dir: string] {
 	mut problems = ($named | where type != file | each {|e| $"($e.name | path basename) is a ($e.type), not a regular file: compose would follow it to what this check does not read" })
 	let files = ($named | where type == file | get name | where {|f| ($f | path basename) != ".env" })
 	let env_file = ($root | path join .env)
-	if ($env_file | path exists) {
+	# only a regular file is opened: a `.env` that is a link was refused above and is never read
+	if ($named | any {|e| ($e.name | path basename) == ".env" and $e.type == file }) {
 		let names = (open --raw $env_file | lines | where {|l| ($l | str trim) =~ '^(export\s+)?COMPOSE_' })
 		if ($names | is-not-empty) { $problems = ($problems | append ".env names a COMPOSE_ variable, which can add compose files from anywhere") }
 	}
@@ -382,13 +386,10 @@ export def check-push-rights [node: record, push_kubeconfig: string, --door] {
 		for ask in ([
 			{verb: "create pods/portforward", args: [create pods --subresource=portforward -n $registry], where: $registry}
 			{verb: "create leases.coordination.k8s.io", args: [create leases.coordination.k8s.io -n $registry], where: $registry}
-			# the lease is acquired (create), read and renewed (get, update) and released (delete)
+			# the lease is acquired (create), read (get), renewed (patch) and released (delete); listing and replacing leases are the collector's alone
 			{verb: "get leases.coordination.k8s.io", args: [get leases.coordination.k8s.io -n $registry], where: $registry}
-			{verb: "update leases.coordination.k8s.io", args: [update leases.coordination.k8s.io -n $registry], where: $registry}
-			{verb: "delete leases.coordination.k8s.io", args: [delete leases.coordination.k8s.io -n $registry], where: $registry}
-			# registry.nu patches the lease it renews and lists them by label
 			{verb: "patch leases.coordination.k8s.io", args: [patch leases.coordination.k8s.io -n $registry], where: $registry}
-			{verb: "list leases.coordination.k8s.io", args: [list leases.coordination.k8s.io -n $registry], where: $registry}
+			{verb: "delete leases.coordination.k8s.io", args: [delete leases.coordination.k8s.io -n $registry], where: $registry}
 		] | append (if $door { [
 			# the door check lists the gateway's Services by label, and reads each
 			{verb: "get services", args: [get services -n envoy-gateway-system], where: "envoy-gateway-system"}
