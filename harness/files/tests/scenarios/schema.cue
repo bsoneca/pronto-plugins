@@ -256,7 +256,7 @@ _actions: {
 	upload: {upload: {in: #Sel, file: string}} // a file under tests/fixtures
 	submit: {submit: #Sel} // a form, as the browser submits it
 	closeDialogs: {closeDialogs: true}
-	throw: {throw: string} // an error thrown uncaught by a script of the page, as a bug would (error tracking's reporter sees it); the message is the string
+	throw: {throw: string, detail?: true} // an error thrown uncaught by a script of the page, as a bug would (error tracking's reporter sees it); the message is the string; with `detail` it waits for the journeys reporter's detail decision too (<html data-error-detail>), which only a check of that detail needs
 	pay: {pay: true} // at the checkout the page was sent to (tests/checkout.ts): the stand-in's pay button, or Stripe's sandbox card form
 	database: {database: string} // SQL run as the local stack's owner (DATABASE_PG_PORT, the app's `database`), never against a deployed app, an actor's `{ana.id}` and a kept value filled in: a row the open page learns of through its shape
 	pause: {pause: number & >0} // seconds: a person's pace, where the app is waited on by nothing to see

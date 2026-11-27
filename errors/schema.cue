@@ -108,7 +108,7 @@ import "strings"
 						actors: eli: name: "Eli"
 						steps: [
 							{by: "eli", open: "/?probe={run}", flag: E.detailFlag},
-							{by: "eli", response: {to: E.detailBeacon, method: "POST", status: 200, sent: "^(?!.*probe=).*\"type\":\"error\".*\"browser\":\"(instagram|facebook|wv|other)\"", when: {throw: "scenario-detail-{run}"}}, why: "the uncaught error leaves as a beacon with its browser tag, which it carries only while the flag is on, and nothing of the page's query", flag: E.detailFlag},
+							{by: "eli", response: {to: E.detailBeacon, method: "POST", status: 200, sent: "^(?!.*probe=).*\"type\":\"error\".*\"browser\":\"(instagram|facebook|wv|other)\"", when: {throw: "scenario-detail-{run}", detail: true}}, why: "the uncaught error leaves as a beacon with its browser tag, which it carries only while the flag is on, and nothing of the page's query", flag: E.detailFlag},
 						]
 					}
 					"\(E.detailFlag)_tester": {
@@ -120,7 +120,7 @@ import "strings"
 							{by: "tess", open: "/", flag: E.detailFlag},
 							{by: "tess", signIn: true, flag: E.detailFlag},
 							{by: "tess", closeDialogs: true, flag: E.detailFlag},
-							{by: "tess", response: {to: E.detailBeacon, method: "POST", status: 200, sent: "\"browser\":\"(instagram|facebook|wv|other)\"", when: {throw: "production check of \(E.detailFlag) {run}"}}, timeout: 60, why: "the error's beacon carries its browser tag, so the detail is on for the tester", flag: E.detailFlag},
+							{by: "tess", response: {to: E.detailBeacon, method: "POST", status: 200, sent: "\"browser\":\"(instagram|facebook|wv|other)\"", when: {throw: "production check of \(E.detailFlag) {run}", detail: true}}, timeout: 60, why: "the error's beacon carries its browser tag, so the detail is on for the tester", flag: E.detailFlag},
 						]
 					}
 				}

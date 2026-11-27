@@ -163,7 +163,13 @@ if (!globalThis.__prontoJourneys) {
 				const clean = scrub(read);
 				if (clean === read) return segment;
 				// What goes out is escaped again, so a decoded newline or ")" cannot reshape the frame or the stack.
-				const out = clean.replace(/[^\w.~<>-]/g, encodeURIComponent);
+				// encodeURIComponent throws on a lone surrogate: that segment is the marker too, never a lost beacon.
+				let out;
+				try {
+					out = clean.replace(/[^\w.~<>-]/g, encodeURIComponent);
+				} catch {
+					return `<undecodable>${ending}`;
+				}
 				return ending && !out.endsWith(ending) ? out + ending : out;
 			})
 			.join("/");

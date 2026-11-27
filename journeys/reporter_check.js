@@ -87,6 +87,10 @@ check("a double-encoded address is scrubbed", trickyLines[0] === "j (/a/<email>/
 check("a decoded newline cannot split the stack", trickyLines.length === 4 && trickyLines[1].startsWith("k (/b/") && !trickyLines[1].includes("ana") && trickyLines[2] === "l (/c/<undecodable>.js:5:6)");
 check("a scrubbed file name keeps its ending", trickyLines[3] === "m (/d/<email>.js:7:8)");
 
+// A lone surrogate in a scrubbed segment makes its re-escape throw: that must not lose the beacon, the segment is the marker.
+const lone = thrown(withStack("x", ["n (https://x.example/e/ana@example.com\uD800/app.js:1:2)", "o (https://x.example/ok/app.js:3:4)"]), { detail: true });
+check("a lone surrogate in a scrubbed segment does not lose the beacon", lone !== undefined && lone.stack === "n (/e/<undecodable>/app.js:1:2)\no (/ok/app.js:3:4)");
+
 // The message: redacted in the page.
 const message = thrown(withStack("failed for ana@example.com at https://x.example/p?q=1", ["f (/a.js:1:2)"]), { detail: true });
 check("a message loses its address and url", message.message === "failed for <email> at <url>");
