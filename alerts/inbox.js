@@ -114,3 +114,17 @@ export const plist = ({ label, program, args, log, env }) => {
 </plist>
 `;
 };
+
+// The environment the launchd job starts with: a fixed bare PATH, HOME, the `pronto` gcloud configuration (never the
+// caller's, which may be the owner's other work), gcloud's Python as release-cron gives it (the caller's, else
+// Homebrew's on macOS: gcloud 589 crashed on the newest system Python) and gcloud by its absolute path.
+export const jobEnv = ({ env, os = "darwin", home, gcloud }) => ({
+  PATH: "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+  HOME: home,
+  CLOUDSDK_ACTIVE_CONFIG_NAME: "pronto",
+  ...(env.CLOUDSDK_PYTHON ? { CLOUDSDK_PYTHON: env.CLOUDSDK_PYTHON } : os === "darwin" ? { CLOUDSDK_PYTHON: "/opt/homebrew/bin/python3.13" } : {}),
+  ALERTS_GCLOUD: gcloud,
+});
+
+// The last lines of a command's stderr, for an error that must say why it failed: a few lines, each cut short.
+export const tailOf = (text, lines = 5, width = 300) => text.split("\n").map((l) => l.trim()).filter(Boolean).slice(-lines).map((l) => l.slice(0, width)).join(" | ");
