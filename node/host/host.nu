@@ -31,6 +31,10 @@ export def vet [host: record] {
 	let r = (do { ^cue vet -c ($here | path join schema host.cue) $f -d '#DockerGC' } | complete)
 	rm -f $f
 	if $r.exit_code != 0 { error make {msg: $"node-host: the host's dockerGC is not what #Host allows: ($r.stderr | str trim)"} }
+	# The pattern is run by bash on the node (docker-gc.sh): an invalid ERE is an error there (status 2), which the cleanup loop
+	# would read as "no tag matches" and keep every image. Bash on this machine is the same engine's check.
+	let ere = (do { ^bash -c '[[ "" =~ $1 ]]; [ $? -ne 2 ]' _ $host.dockerGC.refPattern } | complete)
+	if $ere.exit_code != 0 { error make {msg: $"node-host: the host's dockerGC refPattern is not a valid bash ERE: ($host.dockerGC.refPattern)"} }
 }
 
 # The files the host holds, from its #Host values: [{path, mode, text}], in the order they are written: the settings

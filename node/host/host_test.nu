@@ -23,6 +23,7 @@ def main [] {
 	test_the_settings_are_written_before_the_script
 	test_a_world_writable_or_foreign_file_is_drift
 	test_a_hand_edited_host_cannot_carry_a_quote_into_the_files
+	test_an_invalid_reference_pattern_is_refused
 	test_a_failed_job_makes_apply_exit_non_zero
 	test_a_pending_daemon_reload_is_drift_and_is_done_though_every_file_matches
 	print "\nAll node host tests passed."
@@ -247,6 +248,15 @@ def test_a_hand_edited_host_cannot_carry_a_quote_into_the_files [] {
 		let msg = (try { render $host | ignore; "accepted" } catch {|e| $e.msg })
 		assert str contains $msg "is not what #Host allows" $"($bad)"
 	}
+}
+
+def test_an_invalid_reference_pattern_is_refused [] {
+	print "test a refPattern bash cannot compile is refused, not read as matching no tag..."
+	for bad in ["^[" "^(a" "^a{2,1}"] {
+		let msg = (try { render {dockerGC: ((defaults).dockerGC | merge {refPattern: $bad})} | ignore; "accepted" } catch {|e| $e.msg })
+		assert str contains $msg "not a valid bash ERE" $bad
+	}
+	render (defaults) | ignore
 }
 
 def test_a_failed_job_makes_apply_exit_non_zero [] {
