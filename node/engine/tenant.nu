@@ -460,13 +460,11 @@ def stage-run-flags [flags: string, namespace: string]: nothing -> string {
 	$out
 }
 
-# What a tenant's compose project may say about a build, read from the staged compose config (a service's `build`): the keys that reach past the build context or pick where its cache
-# comes from or goes to (`cache_from`, `cache_to`, `ssh`, `secrets`, `network`, `extra_hosts`, `entitlements`, an inline Dockerfile) and a BUILDKIT_SYNTAX build argument are refused, and an
-# additional context is a path inside the app, another service or stage of the project, or a docker-image:// pinned by its sha256 digest (the database stage's base): never an
-# image that can move. Fails with every problem, before anything is built.
 # The services a tenant's release builds, and what they build from: the requested ones, then every service a requested one waits for (`depends_on`)
 # or takes a build context from (`additional_contexts` of `service:` and `target:`), transitively. The compose project (YAML text) comes back with
-# only those services: a service outside the set (a CI profile with build secrets) is never read for build options, staged or handed to bake.
+# only those services: a service outside the set (a CI profile with build secrets) is never read for build options, staged or handed to bake. The keys that name another service at
+# run time only (`network_mode`, `ipc` and `pid` as `service:<x>`, `volumes_from`, `links`, `external_links`) are dropped from what is kept: a build never reads them, and none may name a service that was left out.
+# Taken AFTER `runtime release-tree`, which renames the services a build takes a context from (`service:<x>-served` becomes `service:<x>-served-release`).
 export def build-closure [roots: list<string>]: string -> string {
 	let doc = ($in | from yaml)
 	let all = ($doc | get -o services | default {})
@@ -487,10 +485,20 @@ export def build-closure [roots: list<string>]: string -> string {
 			if not ($n in $wanted) { $wanted = ($wanted | append $n); $todo = ($todo | append $n) }
 		}
 	}
-	let kept = ($all | transpose name v | where {|s| $s.name in $wanted } | reduce --fold {} {|s, acc| $acc | insert $s.name $s.v })
+	let runtime_only = {|svc|
+		let plain = ($svc | reject --optional volumes_from links external_links)
+		["network_mode" "ipc" "pid"] | reduce --fold $plain {|key, acc|
+			if (($acc | get -o $key | default "" | into string) | str starts-with "service:") { $acc | reject $key } else { $acc }
+		}
+	}
+	let kept = ($all | transpose name v | where {|s| $s.name in $wanted } | reduce --fold {} {|s, acc| $acc | insert $s.name (do $runtime_only $s.v) })
 	$doc | update services $kept | to yaml
 }
 
+# What a tenant's compose project may say about a build, read from the staged compose config (a service's `build`): the keys that reach past the build context or pick where its cache
+# comes from or goes to (`cache_from`, `cache_to`, `ssh`, `secrets`, `network`, `extra_hosts`, `entitlements`, an inline Dockerfile) and a BUILDKIT_SYNTAX build argument are refused, and an
+# additional context is a path inside the app, another service or stage of the project, or a docker-image:// pinned by its sha256 digest (the database stage's base): never an
+# image that can move. Fails with every problem, before anything is built.
 export def check-build-keys []: string -> nothing {
 	let doc = ($in | from yaml)
 	mut problems = []

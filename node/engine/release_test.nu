@@ -2925,6 +2925,24 @@ def test_a_tenants_release_builds_only_the_requested_services_and_what_they_buil
 		let r = (try { $closure | tenant check-build-keys; "admitted" } catch {|e| $e.msg })
 		assert (($r != "admitted") and ($r | str contains "secrets")) $"($dep.why): a dependency with a secret is refused: ($r)"
 	}
+	# the closure is taken after the release tree, which renames service:<x>-served to service:<x>-served-release: the set has the renamed service, and it is validated
+	let served = ({services: {web: {build: {context: ., additional_contexts: {s: "service:web-served-release"}}}, "web-served-release": {build: {context: ., secrets: [token]}}, "web-served": {build: {context: .}}, ci: $ci}} | to yaml)
+	let served_closure = ($served | tenant build-closure [web])
+	assert equal ($served_closure | from yaml | get services | columns | sort) [web web-served-release] "web and the renamed served service"
+	let served_r = (try { $served_closure | tenant check-build-keys; "admitted" } catch {|e| $e.msg })
+	assert (($served_r != "admitted") and ($served_r | str contains "secrets")) $"a served-release service with a secret is refused: ($served_r)"
+	# a service: context in a list, a target: context in a mapping, a depends_on cycle and a missing requested service
+	let listed = ({services: {web: {build: {context: ., additional_contexts: ["a=service:db"]}}, db: {build: {context: .}}, ci: $ci}} | to yaml)
+	assert equal ($listed | tenant build-closure [web] | from yaml | get services | columns | sort) [db web] "service: in a list"
+	let mapped = ({services: {web: {build: {context: ., additional_contexts: {a: "target:db"}}}, db: {build: {context: .}}, ci: $ci}} | to yaml)
+	assert equal ($mapped | tenant build-closure [web] | from yaml | get services | columns | sort) [db web] "target: in a mapping"
+	let cycle = ({services: {a: {build: {context: .}, depends_on: [b]}, b: {build: {context: .}, depends_on: [a]}, ci: $ci}} | to yaml)
+	assert equal ($cycle | tenant build-closure [a] | from yaml | get services | columns | sort) [a b] "a depends_on cycle ends"
+	let missing = ({services: {web: $web}} | to yaml)
+	assert equal ($missing | tenant build-closure [web nope] | from yaml | get services | columns) [web] "a requested service the project does not have is left to bake to refuse"
+	# the keys that name another service at run time only are dropped, so none names a service left out
+	let runtime = ({services: {web: {build: {context: .}, network_mode: "service:ci", ipc: "service:ci", pid: "service:ci", volumes_from: [ci], links: [ci], external_links: [ci]}, ci: $ci}} | to yaml | tenant build-closure [web] | from yaml | get services.web)
+	assert equal ($runtime | columns) [build] "the run-time-only keys are gone"
 	# the closure is transitive
 	let chain = ({services: {web: {build: {context: .}, depends_on: [mid]}, mid: {build: {context: ., additional_contexts: {x: "service:leaf"}}}, leaf: {build: {context: .}}, ci: $ci}} | to yaml)
 	assert equal ($chain | tenant build-closure [web] | from yaml | get services | columns | sort) [leaf mid web] "web, what it waits for and what that builds from"
