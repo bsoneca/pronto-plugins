@@ -616,3 +616,82 @@ export function suggestionOf(title, project) {
   const m = /^([a-z0-9][a-z0-9-]{0,39}) suggestion ([A-Z]{2,12}-[1-9][0-9]*), approved by the owner$/.exec(String(title ?? ""));
   return m && m[2].startsWith(`${project}-`) ? { app: m[1], key: m[2] } : null;
 }
+
+// The alerts watch (PRONTO-2182): Cloud Monitoring's incidents say which alert policy is down, flapping or left open,
+// and each of those is a bug in the alert or in what it watches, filed on the board once (devflow/alerts.ts).
+
+const DAY_MS = 24 * 3600000;
+const ALERT_CLASSES = ["outage", "flapping", "stale"];
+
+/** The board app an alert policy belongs to: its `app` label, else its `owner` label, each through the flow's `apps`
+ * (alerts.apps); null when neither is mapped. */
+export function alertApp(labels, apps = {}) {
+  for (const k of ["app", "owner"]) {
+    const v = labels?.[k];
+    if (typeof v === "string" && Object.hasOwn(apps, v)) return apps[v];
+  }
+  return null;
+}
+
+/** What each alert policy is doing, from its incidents: `incidents` are `{policy, display, labels, state, openTime,
+ * closeTime}` (the policy's name and display name, its user labels, `OPEN` or `CLOSED`, ISO times), the read of the
+ * last 48 hours and what is open now. `rules`: `{flapOpens, flapCloseMin, staleHours, apps}`. One row a policy, in
+ * the order the policies first appear: `{policy, display, app, class, opens, openSince}`. The class, first that
+ * holds: `flapping` (more than `flapOpens` opens in the last 24 hours, or two closes within `flapCloseMin` minutes
+ * of each other), `stale` (an incident open longer than `staleHours`), `outage` (an incident open now), else `ok`.
+ * `opens` is the opens in the last 24 hours; `openSince` the oldest open incident's open time, else the first open
+ * in the read, null when none is dated. `app` is the board app (alertApp), null when its labels map to none. */
+export function alertClass(incidents, now, rules) {
+  const t = (at) => Date.parse(at ?? "");
+  const at = new Date(now).getTime();
+  const by = new Map();
+  for (const i of incidents) {
+    if (!by.has(i.policy)) by.set(i.policy, []);
+    by.get(i.policy).push(i);
+  }
+  const rows = [];
+  for (const [policy, list] of by) {
+    const open = list.filter((i) => i.state === "OPEN");
+    const opens = list.map((i) => t(i.openTime)).filter((n) => Number.isFinite(n));
+    const recent = opens.filter((n) => n >= at - DAY_MS).length;
+    const closes = list.map((i) => t(i.closeTime)).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+    const quick = closes.some((c, n) => n > 0 && c - closes[n - 1] <= rules.flapCloseMin * 60000);
+    const openAges = open.map((i) => t(i.openTime)).filter((n) => Number.isFinite(n));
+    const oldest = openAges.length ? Math.min(...openAges) : null;
+    let cls = "ok";
+    if (recent > rules.flapOpens || quick) cls = "flapping";
+    else if (oldest !== null && at - oldest > rules.staleHours * 3600000) cls = "stale";
+    else if (open.length) cls = "outage";
+    const since = oldest ?? (opens.length ? Math.min(...opens) : null);
+    const first = list[0];
+    rows.push({ policy, display: first.display, app: alertApp(first.labels, rules.apps), class: cls, opens: recent, openSince: since === null ? null : new Date(since).toISOString() });
+  }
+  return rows;
+}
+
+/** The title of the issue for an alert: `Alert <class>: <display name>`. */
+export function alertTitle(cls, display) {
+  return `Alert ${cls}: ${display}`;
+}
+
+/** The class and policy display name an issue title names (alertTitle), null when it is no alert's. */
+export function alertOf(title) {
+  const m = new RegExp(`^Alert (${ALERT_CLASSES.join("|")}): (.+)$`).exec(String(title ?? ""));
+  return m ? { class: m[1], display: m[2] } : null;
+}
+
+/** The rows to file: not `ok`, no open board issue already about the policy (`issues`: the open ones, `{name}`,
+ * matched by the display name in an alert title, whatever its class), and `class:policy` not among `seen` (filed
+ * before, whatever became of the issue). */
+export function alertFilings(rows, issues, seen = []) {
+  const known = new Set(issues.map((i) => alertOf(i.name)?.display).filter((d) => d !== undefined));
+  return rows.filter((r) => r.class !== "ok" && !known.has(r.display) && !seen.includes(`${r.class}:${r.policy}`));
+}
+
+/** The source file of an alert policy: the `cue` of the `sources` entry (`{prefix, cue}`) whose prefix its display
+ * name starts with, the longest one; null when none does (an entry with prefix "" matches every name). */
+export function alertSource(display, sources) {
+  let best = null;
+  for (const s of sources ?? []) if (String(display).startsWith(s.prefix) && (best === null || s.prefix.length > best.prefix.length)) best = s;
+  return best ? best.cue : null;
+}

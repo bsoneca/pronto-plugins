@@ -121,6 +121,27 @@ devFlow: #DevFlow
 		flag: string & !=""
 		why:  string & !=""
 	}]
+	// The alerts watch (PRONTO-2182): `pronto-devflow alerts` reads each project's Cloud Monitoring incidents and files a bug
+	// for each alert policy that is down (outage), opens and closes over and over (flapping) or has been open for days
+	// (stale). Absent, the repository has no such watch. `apps` maps a policy's `app` (else `owner`) user label to the
+	// board's module; one that maps to none is filed under `plugins`, naming the label. `sources` say which file holds a
+	// policy by the start of its display name (the longest prefix; "" matches all), so a bug names what to change.
+	alerts?: {
+		projects: [...string & =~"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"]
+		// More opens than this in 24 hours, or two closes within `flapCloseMin` minutes, is flapping.
+		flapOpens:    *3 | (int & >0)
+		flapCloseMin: *30 | (number & >0)
+		// An incident open longer than this is stale.
+		staleHours: *24 | (number & >0)
+		apps: [string]: string
+		sources: [...{prefix: string, cue: string}]
+		// The board's priority word of each class.
+		priority: {
+			outage:   *"urgent" | string
+			flapping: *"high" | string
+			stale:    *"medium" | string
+		}
+	}
 	// A pull request with this label needs no issue (dependency bumps, the CI fingerprint).
 	chore: *"chore" | string
 	// The board label of an Implementing flip issue that waits for the release holding its fix: it holds no

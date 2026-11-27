@@ -211,3 +211,17 @@ flagsWatch: {
 	own:     (_existing & {flagsHeld: [{app: "acme", flag: "beta", why: "not yet"}]}).flagsHeld[0].app & "acme"
 	none:    len((_existing & {flagsHeld: []}).flagsHeld) & 0
 }
+
+// The alerts watch: absent unless a repository writes it; its defaults, its projects held to a project id's shape, its priorities.
+alertsWatch: {
+	absent:   (_existing.alerts == _|_) & true
+	_alerts:  (_existing & {alerts: {projects: ["brawl-chess"]}}).alerts
+	defaults: _alerts & {flapOpens: 3, flapCloseMin: 30, staleHours: 24, apps: {}, sources: [], priority: {outage: "urgent", flapping: "high", stale: "medium"}}
+	own: (_existing & {alerts: {projects: ["brawl-chess", "demo-proj"], flapOpens: 5, staleHours: 12, apps: {battlechess: "brawl-chess"}, sources: [{prefix: "", cue: "infra/gcp/prodwatch.cue"}], priority: {outage: "high"}}}).alerts & {flapOpens: 5, staleHours: 12, priority: {outage: "high", flapping: "high", stale: "medium"}, apps: battlechess: "brawl-chess"}
+	// A project that is no project id, a threshold that is not above zero, a source whose file is no name: refused.
+	badProject:   ((_existing & {alerts: {projects: ["Brawl Chess"]}}).alerts == _|_) & true
+	shortProject: ((_existing & {alerts: {projects: ["abc"]}}).alerts == _|_) & true
+	badOpens:     ((_existing & {alerts: {projects: ["brawl-chess"], flapOpens: 0}}).alerts == _|_) & true
+	badHours:     ((_existing & {alerts: {projects: ["brawl-chess"], staleHours: -1}}).alerts == _|_) & true
+	badSource:    ((_existing & {alerts: {projects: ["brawl-chess"], sources: [{prefix: "x", cue: 3}]}}).alerts == _|_) & true
+}
