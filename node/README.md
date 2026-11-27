@@ -336,7 +336,18 @@ so a bound every node needs is written here once, with defaults, and each reposi
   last tagged over `minAgeHours` ago (by reference, never forced, so an image a container uses stays; a tag time it cannot read keeps the image),
   dangling images, and build cache past `buildCacheGB`, and fails when Docker still holds more than `capGB`. `--dry-run` only lists.
   It reads its settings from `/etc/pronto/docker-gc.env`.
-- `host.nu`: `render <host.json>` gives the files (the script, the env file from the values, the service, the timer); `apply <host.json>
+- `dapr-heal.sh` (PRONTO-2191): a static script on its own timer (`pronto-dapr-heal.timer`, every five minutes). A pod that asks for a
+  Dapr sidecar (`dapr.io/enabled=true`) and runs no `daprd` container was admitted while the injector was down (the 2026-11-27 disk outage:
+  aprende's flagd, whose Dapr port then refused every call and answered every OFREP evaluation 500) and never gets one by itself. The job
+  lists such pods (not deleting, not finished, older than `graceSeconds`), and once `dapr-system/dapr-sidecar-injector` has a ready replica rolls
+  each one's owner (`kubectl rollout restart` of the Deployment its ReplicaSet belongs to, a StatefulSet or a DaemonSet), so the injector adds the
+  sidecar. A pod owned by a Job or by nothing is reported, not rolled, and fails the run; a workload is rolled at most once per `cooldownMinutes`
+  (a mark file under `/var/lib/pronto/dapr-heal`), since a roll replaces pods one by one; with the injector down it rolls nothing and fails the run
+  (rolling would make more bare pods), so `host.nu apply --check` reports the job as failed its last run. `--dry-run` only says. It reads
+  `/etc/pronto/dapr-heal.env` (`KUBECTL`, default `k3s kubectl`, `GRACE_SECONDS`, `COOLDOWN_MINUTES`), from `#Host.daprHeal`. Its cases are
+  `tests/unit/daprheal.cue` (the real script on a stand-in kubectl).
+- `host.nu`: `render <host.json>` gives the files (each job's script, env file from the values, service and timer: the cleanup's, and the
+  Dapr repair's when the host has `daprHeal`, which `#Host` defaults); `apply <host.json>
   [--node user@host] [--check]` writes what drifted (each file whole beside itself, then renamed), reloads systemd and enables the timer, or with
   `--check` only says and exits 1. Each read, write and systemctl call is an ssh login of its own (BatchMode, a connect timeout), none retried.
 - `kubelet.nu`: `apply <host.json> [--check] [--node user@host]` sets the kubelet's args from `#Host.kubelet`: max pods, the full

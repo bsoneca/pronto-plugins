@@ -5,6 +5,7 @@ package schema
 
 #Host: {
 	dockerGC: #DockerGC
+	daprHeal: #DaprHeal
 	kubelet?: #Kubelet
 }
 
@@ -65,4 +66,20 @@ package schema
 	// One line, and no backslash (a trailing one continues the line and breaks the timer): it is written into a unit file,
 	// where a newline would start another setting.
 	onCalendar: *"hourly" | (string & =~"^[^\n\r\\\\]+$")
+}
+
+// The Dapr sidecar kept on every pod that asks for one (PRONTO-2191): a pod created while the Dapr injector was down (the
+// 2026-11-27 disk outage) is admitted with no daprd and stays so, and every call to its app's Dapr port is refused. A timer's job
+// (dapr-heal.sh) finds each pod annotated dapr.io/enabled=true with no daprd container and rolls its Deployment, StatefulSet or
+// DaemonSet once the injector has a ready replica, so the injector adds the sidecar; it does not touch a Job's pod or a pod of its
+// own, and rolls a workload at most once per cooldownMinutes.
+#DaprHeal: {
+	// The words that run kubectl as root on the node, kept inside single quotes in /etc/pronto/dapr-heal.env, so no quote.
+	kubectl: *"k3s kubectl" | (string & =~"^[A-Za-z0-9_./-]+( [A-Za-z0-9_./-]+)*$")
+	// A pod younger than this is not judged.
+	graceSeconds: *120 | (int & >=30)
+	// How long after rolling a workload it is not rolled again.
+	cooldownMinutes: *30 | (int & >=5)
+	// A systemd OnCalendar expression; every five minutes by default. One line and no backslash, as dockerGC's.
+	onCalendar: *"*:0/5" | (string & =~"^[^\n\r\\\\]+$")
 }

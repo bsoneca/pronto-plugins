@@ -20,6 +20,17 @@ const gc_service = "/etc/systemd/system/pronto-docker-gc.service"
 const gc_timer = "/etc/systemd/system/pronto-docker-gc.timer"
 const gc_unit = "pronto-docker-gc.timer"
 
+const heal_script = "/usr/local/lib/pronto/dapr-heal.sh"
+const heal_env = "/etc/pronto/dapr-heal.env"
+const heal_service = "/etc/systemd/system/pronto-dapr-heal.service"
+const heal_timer = "/etc/systemd/system/pronto-dapr-heal.timer"
+const heal_unit = "pronto-dapr-heal.timer"
+
+# The timers a host holds: the cleanup's always, the Dapr sidecar's when #Host says daprHeal.
+def timers [host: record]: nothing -> list<string> {
+	[$gc_unit] ++ (if ($host.daprHeal? != null) { [$heal_unit] } else { [] })
+}
+
 # One text file's body, ending in one newline.
 def lines [text: string]: nothing -> string { ($text | str trim --right --char "\n") + "\n" }
 
@@ -35,6 +46,16 @@ export def vet [host: record] {
 	})
 	rm -f $f
 	if $r.exit_code != 0 { error make {msg: $"node-host: the host's dockerGC is not what #Host allows: ($r.stderr | str trim)"} }
+	if ($host.daprHeal? != null) {
+		let h = (mktemp --tmpdir node-host-vet-XXXXXX.json)
+		$host.daprHeal | to json | save --force --raw $h
+		let v = (try { do { ^cue vet -c ($here | path join schema host.cue) $h -d '#DaprHeal' } | complete } catch {
+			rm -f $h
+			error make {msg: "node-host: cue is required (it vets the values against #Host) and could not be run"}
+		})
+		rm -f $h
+		if $v.exit_code != 0 { error make {msg: $"node-host: the host's daprHeal is not what #Host allows: ($v.stderr | str trim)"} }
+	}
 	# The pattern is run by bash on the node (docker-gc.sh): an invalid ERE is status 2 there, which the cleanup loop would
 	# read as "no tag matches" and keep every image. It is checked here by the operator's bash, not the node's (the node's
 	# script checks it again before its loop and fails the unit); the two differ only in the regex library's version.
@@ -49,7 +70,7 @@ export def render [host: record]: nothing -> list<record> {
 	vet $host
 	let gc = $host.dockerGC
 	let head = "# pronto-plugins node/host (docker cleanup): Docker's disk kept bounded."
-	[
+	let gc_files = [
 		{path: $gc_env, mode: "644", text: (lines ([
 			"# pronto-plugins node/host (docker cleanup): what docker-gc.sh reads, from the node's #Host dockerGC."
 			$"PATTERN='($gc.refPattern)'"
@@ -65,6 +86,26 @@ export def render [host: record]: nothing -> list<record> {
 		{path: $gc_timer, mode: "644", text: (lines ([
 			$head "[Unit]" "Description=Run pronto-docker-gc.service" ""
 			"[Timer]" $"OnCalendar=($gc.onCalendar)" "Persistent=true" "" "[Install]" "WantedBy=timers.target"
+		] | str join "\n"))}
+	]
+	if ($host.daprHeal? == null) { return $gc_files }
+	let heal = $host.daprHeal
+	let heal_head = "# pronto-plugins node/host (Dapr sidecar): a pod that asks for one and runs none is rolled."
+	$gc_files ++ [
+		{path: $heal_env, mode: "644", text: (lines ([
+			"# pronto-plugins node/host (Dapr sidecar): what dapr-heal.sh reads, from the node's #Host daprHeal."
+			$"KUBECTL='($heal.kubectl)'"
+			$"GRACE_SECONDS=($heal.graceSeconds)"
+			$"COOLDOWN_MINUTES=($heal.cooldownMinutes)"
+		] | str join "\n"))}
+		{path: $heal_script, mode: "755", text: (lines (open --raw ($here | path join dapr-heal.sh)))}
+		{path: $heal_service, mode: "644", text: (lines ([
+			$heal_head "[Unit]" "Description=Roll the workloads whose pods run no Dapr sidecar" "After=k3s.service" ""
+			"[Service]" "Type=oneshot" $"ExecStart=/bin/bash ($heal_script)" "Nice=19"
+		] | str join "\n"))}
+		{path: $heal_timer, mode: "644", text: (lines ([
+			$heal_head "[Unit]" "Description=Run pronto-dapr-heal.service" ""
+			"[Timer]" $"OnCalendar=($heal.onCalendar)" "Persistent=true" "" "[Install]" "WantedBy=timers.target"
 		] | str join "\n"))}
 	]
 }
@@ -119,7 +160,7 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 	# writing a unit and reloading leaves every file matching, so a pending reload is asked of systemd itself, for the
 	# service and the timer, and is drift (--check) or is done (apply) whatever this run wrote.
 	mut reload_pending = false
-	for unit in [($gc_unit | str replace ".timer" ".service") $gc_unit] {
+	for unit in ((timers $host) | each {|t| [($t | str replace ".timer" ".service") $t] } | flatten) {
 		let q = (sh $node $"systemctl show -p NeedDaemonReload --value ($unit)")
 		if $q.exit_code != 0 { error make {msg: $"node-host: asking whether ($unit) needs a daemon-reload: ($q.stderr | str trim)"} }
 		if ($q.stdout | str trim) == "yes" {
@@ -131,48 +172,50 @@ export def apply [host: record, --check, --node: string = "", --root: string = "
 		}
 	}
 	if not $check and ($changed or $reload_pending) { must (sh $node "systemctl daemon-reload") "systemctl daemon-reload" | ignore; print "systemctl daemon-reload" }
-	# The timer starts at boot and is running now, and its job's last run did not fail (setting the timer
+	# Each timer starts at boot and is running now, and its job's last run did not fail (setting the timer
 	# again does not clear that: the operator reads journalctl -u).
-	let service = ($gc_unit | str replace ".timer" ".service")
-	# 255 is ssh's own failure, not an answer: a login that failed must not read as "not failed" or "not enabled".
-	let failed = (sh $node $"systemctl is-failed --quiet ($service)")
-	if $failed.exit_code == 255 { error make {msg: $"node-host: asking whether ($service) failed: ($failed.stderr | str trim)"} }
-	if $failed.exit_code == 0 {
-		print $"drift: ($service) failed its last run"
-		if $changed {
-			# The files it failed on are set right: run it again (a oneshot, under a timeout) and ask again, so a repair is not
-			# reported as a failure.
-			print $"running ($service) again"
-			let started = (sh $node $"timeout 600 systemctl start ($service)")
-			if $started.exit_code == 255 { error make {msg: $"node-host: running ($service) again: ($started.stderr | str trim)"} }
-			if $started.exit_code == 124 {
-				# Still running after 600 s: not repaired, and not failed either; it is drift and the run exits 1.
-				print $"($service) is still running after 600 s"
-				$drift = ($drift | append $"($service) is still running after 600 s: its last run failed")
-			} else {
-				let again = (sh $node $"systemctl is-failed --quiet ($service)")
-				if $again.exit_code == 255 { error make {msg: $"node-host: asking whether ($service) failed again: ($again.stderr | str trim)"} }
-				# 0 from start and not failed any more: repaired. Anything else (start's own failure, or still failed) still fails.
-				if $started.exit_code == 0 and $again.exit_code != 0 {
-					print $"($service) ran again and did not fail"
-					$drift = ($drift | append $"($service) failed its last run and was run again")
+	for timer in (timers $host) {
+		let service = ($timer | str replace ".timer" ".service")
+		# 255 is ssh's own failure, not an answer: a login that failed must not read as "not failed" or "not enabled".
+		let failed = (sh $node $"systemctl is-failed --quiet ($service)")
+		if $failed.exit_code == 255 { error make {msg: $"node-host: asking whether ($service) failed: ($failed.stderr | str trim)"} }
+		if $failed.exit_code == 0 {
+			print $"drift: ($service) failed its last run"
+			if $changed {
+				# The files it failed on are set right: run it again (a oneshot, under a timeout) and ask again, so a repair is not
+				# reported as a failure.
+				print $"running ($service) again"
+				let started = (sh $node $"timeout 600 systemctl start ($service)")
+				if $started.exit_code == 255 { error make {msg: $"node-host: running ($service) again: ($started.stderr | str trim)"} }
+				if $started.exit_code == 124 {
+					# Still running after 600 s: not repaired, and not failed either; it is drift and the run exits 1.
+					print $"($service) is still running after 600 s"
+					$drift = ($drift | append $"($service) is still running after 600 s: its last run failed")
 				} else {
-					$drift = ($drift | append $"($service) failed its last run")
+					let again = (sh $node $"systemctl is-failed --quiet ($service)")
+					if $again.exit_code == 255 { error make {msg: $"node-host: asking whether ($service) failed again: ($again.stderr | str trim)"} }
+					# 0 from start and not failed any more: repaired. Anything else (start's own failure, or still failed) still fails.
+					if $started.exit_code == 0 and $again.exit_code != 0 {
+						print $"($service) ran again and did not fail"
+						$drift = ($drift | append $"($service) failed its last run and was run again")
+					} else {
+						$drift = ($drift | append $"($service) failed its last run")
+					}
 				}
+			} else {
+				$drift = ($drift | append $"($service) failed its last run")
 			}
-		} else {
-			$drift = ($drift | append $"($service) failed its last run")
 		}
-	}
-	let state = (sh $node $"systemctl is-enabled --quiet ($gc_unit) && systemctl is-active --quiet ($gc_unit)")
-	if $state.exit_code == 255 { error make {msg: $"node-host: asking whether ($gc_unit) runs: ($state.stderr | str trim)"} }
-	let on = ($state.exit_code == 0)
-	if not $on {
-		$drift = ($drift | append $"($gc_unit) is not enabled and active")
-		print $"drift: ($gc_unit) is not enabled and active"
-		if not $check {
-			must (sh $node $"systemctl enable --now ($gc_unit)") $"enabling ($gc_unit)" | ignore
-			print $"enabled ($gc_unit)"
+		let state = (sh $node $"systemctl is-enabled --quiet ($timer) && systemctl is-active --quiet ($timer)")
+		if $state.exit_code == 255 { error make {msg: $"node-host: asking whether ($timer) runs: ($state.stderr | str trim)"} }
+		let on = ($state.exit_code == 0)
+		if not $on {
+			$drift = ($drift | append $"($timer) is not enabled and active")
+			print $"drift: ($timer) is not enabled and active"
+			if not $check {
+				must (sh $node $"systemctl enable --now ($timer)") $"enabling ($timer)" | ignore
+				print $"enabled ($timer)"
+			}
 		}
 	}
 	$drift
@@ -195,7 +238,7 @@ def "main apply" [host: path, --check, --node: string = "", --root: string = ""]
 	# so the run is not read as clean. "set" is said only when something was written.
 	if (failed-service $drift) {
 		let wrote = ($drift | any {|d| not (($d | str ends-with "failed its last run") or ($d | str ends-with "its last run failed")) })
-		print --stderr (if $wrote { "node-host: set, but the job's last run still fails: read journalctl -u pronto-docker-gc.service" } else { "node-host: nothing to write, but the job's last run failed: read journalctl -u pronto-docker-gc.service" })
+		print --stderr (if $wrote { "node-host: set, but the job's last run still fails: read journalctl -u on the failed job (pronto-docker-gc or pronto-dapr-heal)" } else { "node-host: nothing to write, but the job's last run failed: read journalctl -u on the failed job (pronto-docker-gc or pronto-dapr-heal)" })
 		exit 1
 	}
 	print "node-host: set as #Host says"
