@@ -314,6 +314,16 @@ rendered object before them. A request that changes nothing of a Cluster's `spec
 apiserver's `apiserver_validating_admission_policy_check_total{enforcement_action="warn"}`: the node's k3s may write no audit log.
 `node/engine/admission_test.nu` holds a test for each rule; with `--kind <context>` (a kind cluster with CloudNativePG's CRDs) it also asks the API server.
 
+### A tenant's build on the shared buildkitd (PRONTO-1945)
+
+The tenants' buildkitd (`pronto-buildkit-tenants`) is shared, and its cache mounts (`RUN --mount=type=cache`) are shared by id across builds: the id is the Dockerfile's choice, the target
+path by default, so one tenant could seed what another's build runs. `push.nu tenant-images` therefore gives every build `BUILDKIT_CACHE_MOUNT_NS=<namespace>` through bake's `--set` (buildkit's own prefix of every cache mount id, those an ONBUILD trigger brings too; a tenant's own `args` naming it are refused), and makes the staged copy safe as defence in depth, never the author's files: `tenant check-build-keys` refuses
+the compose keys that reach past the context or pick where a cache comes from (`cache_from`, `cache_to`, `ssh`, `secrets`, `network`, `extra_hosts`, `entitlements`, an inline Dockerfile), a
+`BUILDKIT_SYNTAX` argument, and a docker-image additional context a tag can move; `tenant stage-dockerfile` makes each cache mount's id `<namespace>/<its id, or its target with / as _>` (a flag, key and type in any case) and refuses a
+`# syntax=` directive (the official docker/dockerfile one is dropped, a BOM with it; `//syntax=` and a JSON Dockerfile are refused too), an `escape=` directive, an escape character in a mount flag, an id with `..` or `/`, an `x-*` extension key under a service or its build, (a build frontend of the Dockerfile's own, which can issue any cache id), a mount flag that names a variable or is quoted, and a `--mount` with no `=`. A git remote
+(`git@...`, `github.com/...`) is no path: refused as a build context, as `https://` and `git://` already were. The layer cache stays shared (content-addressed: no tenant can place a layer another's
+build reuses); one buildkitd per tenant would isolate it too, at a pod's cost per owner, and is not done.
+
 ## The node host
 
 What any pronto node's host needs, whatever it runs (`node/host/`): this node is a lab for hundreds of apps per VPS,
